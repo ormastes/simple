@@ -824,47 +824,143 @@ impl LlvmBackend {
         Ok(true)
     }
 
-    /// Little-endian `width`-byte value at `ptr`, composed from byte loads with
-    /// shifts so the result does not depend on the target's byte order (LLVM
-    /// folds this into one load on little-endian targets).
+    /// Little-endian `width`-byte value at byte `index` of a hosted `[u8]`,
+    /// for either element layout: byte-packed (gc_flags bit 3) or slot layout
+    /// (8-byte tagged elements, e.g. a `[]` literal in a struct field). Bytes
+    /// are composed with shifts, so the result does not depend on the target's
+    /// byte order (LLVM folds the packed arm into one load on LE targets).
+    /// Bug: jit_hoisted_u8_data_ptr_ignores_slot_layout_2026-10-19.
     #[cfg(feature = "llvm")]
     fn build_le_bytes_compose(
         &self,
         builder: &Builder<'static>,
-        ptr: inkwell::values::PointerValue<'static>,
+        array_ptr: inkwell::values::PointerValue<'static>,
+        data_ptr: inkwell::values::PointerValue<'static>,
+        index: inkwell::values::IntValue<'static>,
         width: u64,
     ) -> Result<inkwell::values::IntValue<'static>, CompileError> {
         let i64_type = self.runtime_int_type();
         let i8_type = self.context_ref().i8_type();
-        let mut acc = i64_type.const_zero();
+        let fail = |what: &str, e: &dyn std::fmt::Display| crate::error::factory::llvm_build_failed(what, e);
         // Never wider than the runtime int (i32 on 32-bit targets), matching
         // the width of the single load this replaces.
         let bytes = width.min(u64::from(i64_type.get_bit_width() / 8));
+        let function = builder
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CompileError::semantic("LLVM le compose has no function".to_string()))?;
+        let packed_block = self.context_ref().append_basic_block(function, "le_compose_packed");
+        let slot_block = self.context_ref().append_basic_block(function, "le_compose_slot");
+        let done_block = self.context_ref().append_basic_block(function, "le_compose_done");
+
+        let flags_ptr = unsafe {
+            builder
+                .build_gep(i8_type, array_ptr, &[i64_type.const_int(1, false)], "le_compose_flags_ptr")
+                .map_err(|e| fail("le compose flags gep", &e))?
+        };
+        let flags = builder
+            .build_load(i8_type, flags_ptr, "le_compose_flags")
+            .map_err(|e| fail("le compose flags load", &e))?
+            .into_int_value();
+        let packed_bit = builder
+            .build_and(flags, i8_type.const_int(8, false), "le_compose_packed_bit")
+            .map_err(|e| fail("le compose packed bit", &e))?;
+        let is_packed = builder
+            .build_int_compare(IntPredicate::NE, packed_bit, i8_type.const_zero(), "le_compose_is_packed")
+            .map_err(|e| fail("le compose packed check", &e))?;
+        builder
+            .build_conditional_branch(is_packed, packed_block, slot_block)
+            .map_err(|e| fail("le compose branch", &e))?;
+
+        builder.position_at_end(packed_block);
+        let mut packed_value = i64_type.const_zero();
         for offset in 0..bytes {
+            let at = builder
+                .build_int_add(index, i64_type.const_int(offset, false), "le_compose_packed_index")
+                .map_err(|e| fail("le compose packed index", &e))?;
             let byte_ptr = unsafe {
                 builder
-                    .build_gep(i8_type, ptr, &[i64_type.const_int(offset, false)], "le_compose_gep")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("le compose gep", &e))?
+                    .build_gep(i8_type, data_ptr, &[at], "le_compose_gep")
+                    .map_err(|e| fail("le compose gep", &e))?
             };
             let byte = builder
                 .build_load(i8_type, byte_ptr, "le_compose_byte")
-                .map_err(|e| crate::error::factory::llvm_build_failed("le compose load", &e))?
+                .map_err(|e| fail("le compose load", &e))?
                 .into_int_value();
             let wide = builder
                 .build_int_z_extend(byte, i64_type, "le_compose_wide")
-                .map_err(|e| crate::error::factory::llvm_build_failed("le compose zext", &e))?;
+                .map_err(|e| fail("le compose zext", &e))?;
             let shifted = if offset == 0 {
                 wide
             } else {
                 builder
                     .build_left_shift(wide, i64_type.const_int(offset * 8, false), "le_compose_shift")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("le compose shift", &e))?
+                    .map_err(|e| fail("le compose shift", &e))?
             };
-            acc = builder
-                .build_or(acc, shifted, "le_compose_or")
-                .map_err(|e| crate::error::factory::llvm_build_failed("le compose or", &e))?;
+            packed_value = builder
+                .build_or(packed_value, shifted, "le_compose_or")
+                .map_err(|e| fail("le compose or", &e))?;
         }
-        Ok(acc)
+        builder
+            .build_unconditional_branch(done_block)
+            .map_err(|e| fail("le compose packed done", &e))?;
+
+        builder.position_at_end(slot_block);
+        let slot_type = self.context_ref().i64_type();
+        let mut slot_value = i64_type.const_zero();
+        for offset in 0..bytes {
+            let at = builder
+                .build_int_add(index, i64_type.const_int(offset, false), "le_compose_slot_index")
+                .map_err(|e| fail("le compose slot index", &e))?;
+            let slot_ptr = unsafe {
+                builder
+                    .build_gep(slot_type, data_ptr, &[at], "le_compose_slot_gep")
+                    .map_err(|e| fail("le compose slot gep", &e))?
+            };
+            let raw = builder
+                .build_load(slot_type, slot_ptr, "le_compose_raw")
+                .map_err(|e| fail("le compose slot load", &e))?
+                .into_int_value();
+            let tag = builder
+                .build_and(raw, slot_type.const_int(7, false), "le_compose_tag")
+                .map_err(|e| fail("le compose tag", &e))?;
+            let is_int = builder
+                .build_int_compare(IntPredicate::EQ, tag, slot_type.const_zero(), "le_compose_is_int")
+                .map_err(|e| fail("le compose int check", &e))?;
+            let payload = builder
+                .build_right_shift(raw, slot_type.const_int(3, false), true, "le_compose_payload")
+                .map_err(|e| fail("le compose payload", &e))?;
+            let picked = builder
+                .build_select(is_int, payload, raw, "le_compose_pick")
+                .map_err(|e| fail("le compose select", &e))?
+                .into_int_value();
+            let byte64 = builder
+                .build_and(picked, slot_type.const_int(0xff, false), "le_compose_slot_byte")
+                .map_err(|e| fail("le compose slot mask", &e))?;
+            let byte = builder
+                .build_int_truncate_or_bit_cast(byte64, i64_type, "le_compose_slot_narrow")
+                .map_err(|e| fail("le compose slot narrow", &e))?;
+            let shifted = if offset == 0 {
+                byte
+            } else {
+                builder
+                    .build_left_shift(byte, i64_type.const_int(offset * 8, false), "le_compose_slot_shift")
+                    .map_err(|e| fail("le compose slot shift", &e))?
+            };
+            slot_value = builder
+                .build_or(slot_value, shifted, "le_compose_slot_or")
+                .map_err(|e| fail("le compose slot or", &e))?;
+        }
+        builder
+            .build_unconditional_branch(done_block)
+            .map_err(|e| fail("le compose slot done", &e))?;
+
+        builder.position_at_end(done_block);
+        let phi = builder
+            .build_phi(i64_type, "le_compose")
+            .map_err(|e| fail("le compose phi", &e))?;
+        phi.add_incoming(&[(&packed_value, packed_block), (&slot_value, slot_block)]);
+        Ok(phi.as_basic_value().into_int_value())
     }
 
     #[cfg(feature = "llvm")]
@@ -916,22 +1012,7 @@ impl LlvmBackend {
             .build_load(ptr_type, data_field_ptr, "typed_bytes_unchecked_data")
             .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes unchecked data load", &e))?
             .into_pointer_value();
-        let ptr = unsafe {
-            builder
-                .build_gep(i8_type, data_ptr, &[index], "typed_bytes_unchecked_elem")
-                .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes unchecked gep", &e))?
-        };
-        let value = if width == 1 {
-            let i8_type = self.context_ref().i8_type();
-            let loaded = builder
-                .build_load(i8_type, ptr, "typed_bytes_unchecked_u8")
-                .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes unchecked u8 load", &e))?;
-            builder
-                .build_int_z_extend(loaded.into_int_value(), i64_type, "typed_bytes_unchecked_u8_wide")
-                .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes unchecked u8 zext", &e))?
-        } else {
-            self.build_le_bytes_compose(builder, ptr, width)?
-        };
+        let value = self.build_le_bytes_compose(builder, array_ptr, data_ptr, index, width)?;
         vreg_map.insert(dest, value.into());
         Ok(true)
     }
@@ -1296,12 +1377,7 @@ impl LlvmBackend {
             .build_load(ptr_type, data_field_ptr, "typed_bytes_le_data")
             .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le data load", &e))?
             .into_pointer_value();
-        let ptr = unsafe {
-            builder
-                .build_gep(i8_type, data_ptr, &[index], "typed_bytes_le_elem")
-                .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le gep", &e))?
-        };
-        let value = self.build_le_bytes_compose(builder, ptr, width)?;
+        let value = self.build_le_bytes_compose(builder, array_ptr, data_ptr, index, width)?;
         builder
             .build_unconditional_branch(done_block)
             .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le done branch", &e))?;

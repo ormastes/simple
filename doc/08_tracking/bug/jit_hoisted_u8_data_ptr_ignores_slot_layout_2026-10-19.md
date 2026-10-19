@@ -106,7 +106,7 @@ interpreter (shift loop) readers were already explicit LE.
 Tests: `src/compiler_rust/compiler/tests/jit_hoisted_u8_read_slot_layout.rs`
 (u64 index sum 815 -> 1515, mid-array tail 4294967295 -> 3012, hoisted MIR shape:
 one layout check + one tagged read + no unchecked read, LE pinned values
-0x04030201 / 0x0807060504030201 on packed and slot arrays for Cranelift and LLVM);
+0x04030201 / 0x0807060504030201 on packed and slot arrays for Cranelift and an LLVM native build);
 runtime `hoisted_u8_read_follows_the_layout_tag`; C
 `rt_bootstrap_c_lane_bucket2_misc_selfcheck.c` tagged-slot cases.
 
@@ -115,8 +115,13 @@ runtime `hoisted_u8_read_follows_the_layout_tag`; C
 - Pure-Simple twin: `src/compiler/60.mir_opt/mir_opt/collection_opt_core.spl:712-714`
   maps the same names; it needs the same review before the self-hosted JIT is default
   (an untagged pointer keeps the old packed-only behaviour there).
-- LLVM `rt_typed_bytes_u8_unchecked` arm reads packed bytes without the flag check
-  (pre-existing; not reached by hoisted loops any more).
+- (Fixed) The LLVM typed-bytes arms (`rt_typed_bytes_u{8,32,64}` unchecked and the
+  checked `typed_bytes_le` arm) read packed bytes without the flag check: the native
+  LLVM LE test returned `le=30` (slot-layout reads 0). `build_le_bytes_compose` now
+  branches on the packed flag and composes bytes with shifts in both arms: `le=33`.
+  Verified with `LLVM_SYS_231_PREFIX=/home/yoon/dev/llvm/install-23.1.2`. The
+  in-process LLVM JIT (`LocalExecutionManager` Llvm) segfaults on any `[u8]` push,
+  independent of this bug, so the LLVM test builds a native executable.
 
 ## Library sites
 

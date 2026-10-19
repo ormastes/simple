@@ -83,17 +83,51 @@ fn le_word_reads_are_pinned_on_cranelift() {
     assert_eq!(run(LE_SRC), 33);
 }
 
+/// Same pinned values through the LLVM backend, as a real native executable
+/// (the in-process LLVM JIT cannot run array code; a plain `push` segfaults
+/// there independently of this change).
 #[cfg(feature = "llvm")]
 #[test]
 fn le_word_reads_are_pinned_on_llvm() {
-    use simple_compiler::codegen::{
-        local_execution::{JitBackend, LocalExecutionManager},
-        ExecutionManager,
-    };
-    let ast = Parser::new(LE_SRC).parse().expect("source must parse");
-    let hir_module = hir::lower(&ast).expect("source must lower to HIR");
-    let mir_module = mir::lower_to_mir(&hir_module).expect("source must lower to MIR");
-    let mut em = LocalExecutionManager::new(JitBackend::Llvm).expect("llvm init");
-    em.compile_module(&mir_module).expect("compile");
-    assert_eq!(em.execute("main", &[]).expect("execute"), 33);
+    use simple_compiler::pipeline::{NativeBuildConfig, NativeProjectBuilder};
+    let names = ["SIMPLE_BOOTSTRAP", "SIMPLE_NO_STUB_FALLBACK"];
+    let previous: Vec<_> = names.iter().map(|n| (*n, std::env::var_os(n))).collect();
+    for n in names {
+        std::env::set_var(n, "1");
+    }
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let temporary = tempfile::tempdir().unwrap();
+    let source = temporary.path().join("src");
+    std::fs::create_dir_all(&source).unwrap();
+    let main_src = LE_SRC.replace(
+        "fn main() -> i64:\n    var packed: [u8] = []\n    check(fill(packed)) * 10 + check(fill(Holder(bytes: []).bytes))\n",
+        "fn main():\n    var packed: [u8] = []\n    print(\"le=\" + (check(fill(packed)) * 10 + check(fill(Holder(bytes: []).bytes))).to_text())\n",
+    );
+    assert_ne!(main_src, LE_SRC, "main rewrite must apply");
+    std::fs::write(source.join("main.spl"), main_src).unwrap();
+    let executable = temporary.path().join("le_probe");
+    let result = NativeProjectBuilder::new(repo, executable.clone())
+        .config(NativeBuildConfig {
+            backend: "llvm".to_string(),
+            runtime_bundle: "core-c-bootstrap".to_string(),
+            entry_closure: true,
+            parallel: false,
+            num_threads: Some(1),
+            cache_dir: Some(temporary.path().join("native-cache")),
+            ..NativeBuildConfig::default()
+        })
+        .source_dir(source.clone())
+        .entry_file(source.join("main.spl"))
+        .build();
+    for (n, v) in previous {
+        match v {
+            Some(v) => std::env::set_var(n, v),
+            None => std::env::remove_var(n),
+        }
+    }
+    let result = result.expect("native LLVM build must succeed");
+    assert_eq!(result.failed, 0);
+    let run = std::process::Command::new(executable).output().unwrap();
+    assert!(run.status.success(), "status={} stderr={}", run.status, String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "le=33");
 }
