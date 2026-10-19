@@ -8,22 +8,23 @@
 //! per iteration (quadratic memory and time — bug
 //! `seed_jit_array_copy_never_freed_2026-10-19`).
 //!
-//! This pass finds the copy sites whose SOURCE is provably uniquely owned and
-//! provably dead after the copy, where handing the buffer over is
+//! This pass finds the `Let` copy sites whose SOURCE is provably uniquely
+//! owned and provably dead after the copy, where handing the buffer over is
 //! indistinguishable from copying it:
+//! `Let { o, value: Local(s) | FieldAccess { Local(s), .. } }` of array type
+//! lowers with no `rt_array_copy`.
 //!
-//! * site A — `Let { o, value: Local(s) | FieldAccess { Local(s), .. } }` of
-//!   array type: no `rt_array_copy`;
-//! * site B — a struct-literal field argument `Local(o)` of a `var` array
-//!   local: no `rt_array_copy` (any other `var` argument now IS copied, see
-//!   `lowering_expr_struct.rs` and `struct_arg_needs_copy`).
+//! Struct literals never copy (base behaviour). A `var` array argument whose
+//! every struct-literal use is proven dead is "handed over" and keeps the
+//! struct uniquely owned; any other array argument shares its buffer, so the
+//! struct is not unique (`struct_arg_gets_private_buffer`).
 //!
 //! Everything it cannot prove keeps the copy. Parameters are never move
 //! sources (the caller still owns them). Ownership requires that every write
-//! to the local yields a fresh or privately-copied buffer and that every read
+//! to the local yields a fresh or privately-owned buffer and that every read
 //! is one that cannot create a second holder (field projection to a scalar,
 //! a non-escaping builtin method receiver, an index base, a copied place
-//! initializer, a copied struct-literal argument, the function result).
+//! initializer, a handed-over struct-literal argument, the function result).
 //! Liveness is a forward scan of the SAME statement list: any later mention,
 //! `break`/`continue` at loop depth 0, or falling off a list that does not
 //! declare the source keeps the copy; a `return` ends it.
@@ -37,43 +38,27 @@ use crate::hir::{HirExpr, HirExprKind, HirFunction, HirStmt, HirType, TypeId, Ty
 pub(crate) struct ArrayMoveSites {
     /// Locals whose single array `Let` from a place may move its source.
     pub let_locals: HashSet<usize>,
-    /// Array locals whose single struct-literal field use may move them.
-    pub struct_field_locals: HashSet<usize>,
-    /// Non-parameter `var` locals: the only struct-literal array arguments
-    /// lowering copies (or moves). See `struct_arg_needs_copy`.
-    pub var_locals: HashSet<usize>,
 }
 
-/// True when lowering gives this struct-literal array argument a buffer no
-/// other live binding holds: a fresh literal, or a `var` local (copied, or
-/// moved when proven dead).
+/// True when a struct-literal array argument hands the struct a buffer no
+/// other live binding holds. Struct literals never copy (base behaviour), so
+/// that is only a fresh literal, or a `var` local in an array slot that is
+/// handed over because every struct-literal use of it is proven dead
+/// (`handed_over`, see `compute_array_move_sites`).
 ///
-/// Projections (`st.data`), parameters, `val` locals, globals and index
-/// places are deliberately NOT copied: the functional-update idiom
-/// `S(data: st.data, pos: st.pos + 1)` is pervasive (one per bit read in
-/// `zstd_bits.spl`), and with no release mechanism a copy there re-creates
-/// the leak this pass removes (measured: 128 KiB zstd decode 280 MB -> 2.0 GB).
-/// Such arguments keep the base behaviour (the struct field shares the
-/// buffer), so they make the struct NOT uniquely owned.
-///
-/// `array_slot` is the caller's "argument type or declared field type is an
-/// array" test; a `var` local only gets a copy in such a slot, so in any other
-/// slot (`Any`, generic `T`) it shares its buffer.
-pub(crate) fn struct_arg_gets_private_buffer(kind: &HirExprKind, array_slot: bool, sites: &ArrayMoveSites) -> bool {
+/// Everything else -- a LIVE `var`, projections (`st.data`), parameters,
+/// `val`s, globals, index places, and any local in an `Any`/generic slot --
+/// shares its buffer with the struct, which therefore is NOT uniquely owned.
+/// Copying those instead was measured and rejected: with no release
+/// mechanism it re-creates the leak this pass removes (128 KiB zstd decode
+/// 280 MB -> 2.0 GB via `S(data: st.data, ...)`; a reused `b` in
+/// `st = S(buf: b, n: i)` 39 MB -> 2.46 GB at n=65536).
+fn struct_arg_gets_private_buffer(kind: &HirExprKind, array_slot: bool, handed_over: &HashSet<usize>) -> bool {
     match kind {
         HirExprKind::Array(_) | HirExprKind::ArrayRepeat { .. } | HirExprKind::VecLiteral(_) => true,
-        HirExprKind::Local(idx) => array_slot && sites.var_locals.contains(idx),
+        HirExprKind::Local(idx) => array_slot && handed_over.contains(idx),
         _ => false,
     }
-}
-
-/// True when lowering must emit `rt_array_copy` for this struct-literal
-/// argument: a `var` local in an array slot that is not a proven-dead move
-/// source. Must stay the copy half of `struct_arg_gets_private_buffer`.
-pub(crate) fn struct_arg_needs_copy(kind: &HirExprKind, array_slot: bool, sites: &ArrayMoveSites) -> bool {
-    array_slot
-        && matches!(kind, HirExprKind::Local(idx)
-            if sites.var_locals.contains(idx) && !sites.struct_field_locals.contains(idx))
 }
 
 /// Builtin array methods that neither store nor return their receiver.
@@ -94,7 +79,7 @@ enum Ctx {
     ProjectionBase,
     /// Array place initializer of a `Let` (copied or moved).
     PlaceInit,
-    /// `var`-local array argument of a struct literal (copied or moved).
+    /// `var`-local array argument of a struct literal (handed over).
     StructArg,
     /// The function's result. The holder dies with the frame, and any later
     /// statement that could observe a moved buffer is unreachable.
@@ -115,8 +100,9 @@ struct Analysis<'a> {
     struct_arg_counts: HashMap<usize, usize>,
     /// Locals mentioned anywhere inside a lambda/generator/future/actor body.
     closure_locals: HashSet<usize>,
-    /// `var_locals` only; the other fields stay empty during the analysis.
-    var_sites: ArrayMoveSites,
+    /// `var` locals assumed handed over at their struct-literal uses this
+    /// round (see the fixpoint in `compute_array_move_sites`).
+    handed_over: HashSet<usize>,
     poisoned: bool,
 }
 
@@ -127,57 +113,56 @@ pub(crate) fn compute_array_move_sites(
     inject_functions: &HashMap<String, Vec<(TypeId, Option<String>, bool)>>,
 ) -> ArrayMoveSites {
     let Some(registry) = registry else {
-        // No registry: lowering cannot type the arguments either; still
-        // report `var` locals so struct literals copy them.
-        return ArrayMoveSites {
-            var_locals: var_locals_of(func),
-            ..Default::default()
+        return ArrayMoveSites::default();
+    };
+    // Fixpoint: assume every `var` local is handed over at its struct-literal
+    // uses, then drop each one with a use that is not proven dead and redo the
+    // analysis -- a dropped local shares its buffer, which can disqualify
+    // more. The candidate set only shrinks, so this terminates.
+    let mut handed_over = var_locals_of(func);
+    loop {
+        let mut a = Analysis {
+            registry,
+            inject_functions,
+            type_value_kinds,
+            nparams: func.params.len(),
+            local_tys: func.params.iter().chain(func.locals.iter()).map(|l| l.ty).collect(),
+            disqualified: HashSet::new(),
+            let_counts: HashMap::new(),
+            struct_arg_counts: HashMap::new(),
+            closure_locals: HashSet::new(),
+            handed_over: handed_over.clone(),
+            poisoned: false,
         };
-    };
-    let mut a = Analysis {
-        registry,
-        inject_functions,
-        type_value_kinds,
-        nparams: func.params.len(),
-        local_tys: func.params.iter().chain(func.locals.iter()).map(|l| l.ty).collect(),
-        disqualified: HashSet::new(),
-        let_counts: HashMap::new(),
-        struct_arg_counts: HashMap::new(),
-        closure_locals: HashSet::new(),
-        var_sites: ArrayMoveSites {
-            var_locals: var_locals_of(func),
-            ..Default::default()
-        },
-        poisoned: false,
-    };
-    // The body's trailing expression statement is the implicit return value.
-    match func.body.split_last() {
-        Some((HirStmt::Expr(tail), rest)) => {
-            a.scan_stmts(rest);
-            a.scan_expr(tail, Ctx::Return);
+        // The body's trailing expression statement is the implicit return value.
+        match func.body.split_last() {
+            Some((HirStmt::Expr(tail), rest)) => {
+                a.scan_stmts(rest);
+                a.scan_expr(tail, Ctx::Return);
+            }
+            _ => a.scan_stmts(&func.body),
         }
-        _ => a.scan_stmts(&func.body),
-    }
-    if a.poisoned {
-        return ArrayMoveSites {
-            var_locals: a.var_sites.var_locals.clone(),
-            ..Default::default()
-        };
-    }
-    let mut sites = ArrayMoveSites {
-        var_locals: a.var_sites.var_locals.clone(),
-        ..Default::default()
-    };
-    let mut proven: HashMap<usize, usize> = HashMap::new();
-    a.find_sites(&func.body, &mut sites, &mut proven);
-    // A struct-literal move is keyed by the local, so EVERY struct-literal
-    // use of it must have been proven dead individually.
-    for (o, n) in proven {
-        if a.struct_arg_counts.get(&o) == Some(&n) {
-            sites.struct_field_locals.insert(o);
+        if a.poisoned {
+            return ArrayMoveSites::default();
+        }
+        let mut sites = ArrayMoveSites::default();
+        let mut proven: HashMap<usize, usize> = HashMap::new();
+        a.find_sites(&func.body, &mut sites, &mut proven);
+        // A hand-over is keyed by the local, so EVERY struct-literal use of it
+        // must have been proven dead individually.
+        let not_moved: Vec<usize> = a
+            .struct_arg_counts
+            .iter()
+            .filter(|(o, n)| proven.get(o) != Some(n))
+            .map(|(o, _)| *o)
+            .collect();
+        if not_moved.is_empty() {
+            return sites;
+        }
+        for o in not_moved {
+            handed_over.remove(&o);
         }
     }
-    sites
 }
 
 fn var_locals_of(func: &HirFunction) -> HashSet<usize> {
@@ -276,7 +261,7 @@ impl<'a> Analysis<'a> {
     }
 
     /// A write keeps `idx` uniquely owned only when it produces a fresh or
-    /// privately copied buffer.
+    /// privately owned buffer.
     fn write_keeps_unique(&self, idx: usize, value: &HirExpr, is_let: bool) -> bool {
         if idx < self.nparams {
             return false;
@@ -291,7 +276,7 @@ impl<'a> Analysis<'a> {
                     && !self.has_inject_ctor(*ty)
                     && fields.iter().enumerate().all(|(i, f)| {
                         self.primitive_slot(*ty, i, f)
-                            || struct_arg_gets_private_buffer(&f.kind, self.array_slot(*ty, i, f), &self.var_sites)
+                            || struct_arg_gets_private_buffer(&f.kind, self.array_slot(*ty, i, f), &self.handed_over)
                     })
             }
             HirExprKind::Array(_) | HirExprKind::ArrayRepeat { .. } | HirExprKind::VecLiteral(_) => local_is_array,
@@ -442,7 +427,7 @@ impl<'a> Analysis<'a> {
                     if !inject_ctor
                         && array_slot
                         && matches!(f.kind, HirExprKind::Local(_))
-                        && struct_arg_gets_private_buffer(&f.kind, array_slot, &self.var_sites)
+                        && struct_arg_gets_private_buffer(&f.kind, array_slot, &self.handed_over)
                     {
                         if let HirExprKind::Local(idx) = &f.kind {
                             *self.struct_arg_counts.entry(*idx).or_insert(0) += 1;
@@ -598,7 +583,8 @@ fn struct_arg_locals(a: &Analysis<'_>, e: &HirExpr, out: &mut Vec<usize>) {
             let inject_ctor = a.has_inject_ctor(*ty);
             for (i, f) in fields.iter().enumerate() {
                 if let HirExprKind::Local(o) = &f.kind {
-                    if !inject_ctor && struct_arg_gets_private_buffer(&f.kind, a.array_slot(*ty, i, f), &a.var_sites) {
+                    if !inject_ctor && struct_arg_gets_private_buffer(&f.kind, a.array_slot(*ty, i, f), &a.handed_over)
+                    {
                         out.push(*o);
                     }
                 } else {

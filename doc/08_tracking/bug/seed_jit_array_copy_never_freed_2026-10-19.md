@@ -2,7 +2,7 @@
 
 - **Date:** 2026-10-19
 - **Lane:** Rust seed, `SIMPLE_EXECUTION_MODE=jit` (Cranelift)
-- **Status:** mitigated (two copy sites now move instead of copying, plus a zstd hot-loop rewrite); the general problem is DEFERRED
+- **Status:** mitigated (the `Let` place copy now moves when its source is provably dead and unique, plus a zstd hot-loop rewrite). The general problem and the pre-existing struct-literal aliasing are DEFERRED.
 
 ## Root cause
 
@@ -37,15 +37,10 @@
      captures, `defer`, generators/async, field stores of arrays, `break`/`continue`
      between the copy and the overwrite, any later mention (including in nested
      blocks), and an overwrite whose right-hand side reads the source.
-2. `lowering_expr_struct.rs` now copies a `var` array local that is passed as a
-   struct-literal field, unless step 1 proved it dead. This fixes the aliasing bug
-   above.
-   - **Scope narrowed on evidence.** Copying every array place there (projections,
-     params, `val`s) re-created the leak through the functional-update idiom
-     `S(data: st.data, ...)`, which `zstd_bits.spl` runs once per bit read. Measured on
-     a 128 KiB zstd decode under JIT: 280 MB became 2.0 GB.
-   - Those arguments therefore keep the base aliasing, and a struct built from one is
-     treated as not uniquely owned.
+2. *(Superseded; see "Review follow-up" below.)* Struct literals briefly copied
+   `var` array arguments. That was reverted because the copy is never freed: it
+   leaked through projections (128 KiB zstd decode 280 MB → 2.0 GB) and through live
+   `var`s reused in loops (39 MB → 2.46 GB).
 3. `src/lib/common/compress/zstd_seq.spl` `_zstd_execute_sequences` now appends
    literals and match copies in place, with the same checks and error messages as
    before.
@@ -81,39 +76,27 @@ host shared.
     the struct literal.
   - Nothing else changed.
 
-## BLOCKER: new leak shape from the struct-literal copy (found in review, 2026-10-19)
+## Review follow-up: struct literals never copy (option A, 2026-10-19)
 
-A `var` array that is still LIVE after a struct literal is now copied, and the JIT
-never frees that copy. Base aliased it instead (no copy, wrong value semantics). Reusing
-the buffer in a loop therefore keeps one growing copy per iteration:
+The struct-literal copy of a `var` array (item 2 under "What changed") was removed
+again. A `var` that is still LIVE after the literal got a copy that is never freed,
+so a buffer reused in a loop (`b.push(x); st = S(buf: b, n: i)`) leaked one growing
+copy per iteration.
 
-```
-var b: [u8] = []
-while i < n:
-    b.push(x)
-    st = S(buf: b, n: i)
-```
+| n=65536 loop | base JIT | with copy (`2731e01c…`) | final (`ce2a6a11…`) |
+|---|---|---|---|
+| RSS | 37 MB | **2.46 GB** | 39 MB |
 
-| n | base JIT | fix JIT (`2731e01c…`) | base interp | fix interp |
-|---|---|---|---|---|
-| 16384 | 38 MB, 0.07 s | 185 MB, 0.06 s | 39 MB, 0.78 s | 40 MB, 0.77 s |
-| 65536 | 39 MB, 0.05 s | **2.46 GB**, 0.17 s | 57 MB, 15.5 s | 58 MB, 17.3 s |
-
-- Value semantics make this pattern O(n²) copies on every engine: the interpreter takes
-  15 s and survives only because it frees.
-- So the copy is semantically right but cannot ship on a lane with no reclamation.
-- Option A: never copy at struct literals. A proven-dead `var` still moves; a live one
-  aliases exactly as base and makes the receiving struct non-unique.
-- Option B: keep the copy and accept this shape until reclamation lands.
-- Decision pending.
-
-Review hardening, also in this lane:
-
-- A type with an `@inject` `new` lowers its literal to a constructor call, which skips
-  the copy. Its literals are now never uniquely owned, and their arguments count as
-  escaping (same behaviour as base).
-- Every non-primitive struct slot must get a private buffer, so an `Any` or generic slot
-  holding an array, or a nested aggregate argument, makes the struct non-unique.
+- Struct literals now lower exactly as base.
+- A `var` whose every struct-literal use is proven dead is "handed over" and keeps the
+  struct uniquely owned.
+- Any other array argument shares its buffer, so the struct is not unique. This is a
+  fixpoint over the hand-over set.
+- `@inject`-constructor types are never unique (the literal lowers to a call).
+- Every non-primitive slot (`Any`, generic, nested aggregate) needs a private buffer.
+- MIR `rt_array_copy` counts on all fixtures now equal base; the repro drops by 1.
+- Final binary `ce2a6a11…fefad041a`. All 30 fixtures × 2 engines plus the alias probe
+  match base output.
 
 ## DEFERRED
 
@@ -122,8 +105,15 @@ Review hardening, also in this lane:
   in `lz4.spl` (`_lz4_append_bytes`, lines 191-233 and 375), `snappy.spl`,
   `lzma2_xz_format.spl`, `lzma2_chunk_decoder.spl`, `gzip.spl`, and `zstd_dict.spl`
   (`append_bytes` per block).
-- **Struct literals from projections, params and `val`s still share the buffer** (base
-  behaviour). The right fix needs reclamation, not more copies.
+- **Pre-existing JIT aliasing bug (kept as base):** a struct literal stores its array
+  argument's handle. After `st = St(output: o); o.push(4)` the JIT reports
+  `st.output.len() == 4`; the interpreter reports 3. The same holds for projections,
+  params and `val`s.
+  - Pinned by `alias_probe_pins_base_aliasing`
+    (`compiler/tests/jit_struct_array_field_leak.rs`).
+  - Fixing it needs reclamation or refcount: a copy at the literal is never freed and
+    leaks (39 MB → 2.46 GB on the loop above; 280 MB → 2.0 GB on a 128 KiB zstd
+    decode).
 - **Port to the self-hosted lane:**
   - Port the move analysis into `src/compiler/50.mir/mir_lowering_stmts.spl`
     (`maybe_copy_array_value`).

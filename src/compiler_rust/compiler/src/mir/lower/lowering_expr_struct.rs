@@ -174,35 +174,6 @@ impl<'a> MirLowerer<'a> {
             }
         }
 
-        // A `var` array local passed as a struct-literal field must be copied
-        // (arrays are values): `St(output: o)` used to store `o`'s handle, so
-        // a later `o.push(x)` also changed `st.output` on the JIT lane while
-        // the interpreter kept them apart. A `var` that `array_move.rs` proved
-        // dead hands its buffer over instead. Other places (projections,
-        // params, `val`s) keep the base aliasing on purpose -- see
-        // `array_move::struct_arg_gets_private_buffer`.
-        for (i, field) in fields.iter().enumerate() {
-            if i >= field_regs.len() {
-                continue;
-            }
-            let is_array = |t: TypeId| self.type_registry.and_then(|tr| tr.get_array_element(t)).is_some();
-            let array_slot = is_array(field.ty) || field_types.get(i).is_some_and(|t| is_array(*t));
-            if !super::array_move::struct_arg_needs_copy(&field.kind, array_slot, &self.array_move_sites) {
-                continue;
-            }
-            let src = field_regs[i];
-            field_regs[i] = self.with_func(|func, current_block| {
-                let dest = func.new_vreg();
-                let block = func.block_mut(current_block).unwrap();
-                block.instructions.push(MirInst::Call {
-                    dest: Some(dest),
-                    target: CallTarget::from_name("rt_array_copy"),
-                    args: vec![src],
-                });
-                dest
-            })?;
-        }
-
         self.with_func(|func, current_block| {
             let dest = func.new_vreg();
             let block = func.block_mut(current_block).unwrap();

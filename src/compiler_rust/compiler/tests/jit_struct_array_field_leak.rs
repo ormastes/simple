@@ -77,11 +77,16 @@ fn main() -> i64:
     assert_eq!(got, 23, "st.output must stay length 2 after pushing to its copy");
 }
 
-/// Engine differential of the alias probe: the interpreter prints
-/// `A st=2 saved=2 o=3`, `B st=3 o=4 saved=2`, `C st=4 saved=2`. Before the
-/// struct-literal copy the JIT answered `B st=4` (`St(output: o)` shared `o`).
+/// PINS A PRE-EXISTING BUG (base behaviour, deliberately kept): the
+/// interpreter prints `A st=2 saved=2 o=3`, `B st=3 o=4 saved=2`,
+/// `C st=4 saved=2`, but on the JIT `St(output: o)` stores the live `o`'s
+/// handle, so the later `o.push` also grows `st.output` (`B st=4`, `C st=5`).
+/// Copying there is never freed and leaked per loop iteration (39 MB ->
+/// 2.46 GB), so the fix needs reclamation -- see DEFERRED in
+/// doc/08_tracking/bug/seed_jit_array_copy_never_freed_2026-10-19.md. When it
+/// lands, flip this to the interpreter answer 223 342 042.
 #[test]
-fn alias_probe_matches_interpreter() {
+fn alias_probe_pins_base_aliasing() {
     let src = "struct St:
     output: [u8]
 
@@ -100,7 +105,7 @@ fn main() -> i64:
 ";
     let jit = compile(src);
     let got = unsafe { jit.call_i64_void("main").expect("main must execute") };
-    assert_eq!(got, 223 * 1000000 + 342 * 1000 + 42);
+    assert_eq!(got, 223 * 1000000 + 442 * 1000 + 52);
 }
 
 /// Hole A1: `S(data: o)` for a type with an `@inject` `new` lowers to a
@@ -142,4 +147,34 @@ fn main() -> i64:
     jit.compile_module(&mir_module).expect("module must JIT-compile");
     let got = unsafe { jit.call_i64_void("main").expect("main must execute") };
     assert_eq!(got, 32);
+}
+
+/// The leak shape a struct-literal copy would create: a live `var` buffer
+/// reused in every rebuild. Base aliases it (no copy), and so must we.
+#[test]
+fn live_var_reused_in_struct_literal_loop_stays_linear() {
+    let src = "struct S:
+    buf: [u8]
+    n: i64
+
+fn main() -> i64:
+    var b: [u8] = []
+    var st = S(buf: [], n: 0)
+    var i = 0
+    while i < 8192:
+        b.push((i & 255) as u8)
+        st = S(buf: b, n: i)
+        i = i + 1
+    st.buf.len() + b.len()
+";
+    let jit = compile(src);
+    let before = rt_heap_aux_live_bytes();
+    let got = unsafe { jit.call_i64_void("main").expect("main must execute") };
+    let grown = rt_heap_aux_live_bytes() - before;
+    assert_eq!(got, 2 * 8192);
+    let bound = 16 * 8192;
+    assert!(
+        grown < bound,
+        "live array bytes grew by {grown} for n=8192 (bound {bound})"
+    );
 }
