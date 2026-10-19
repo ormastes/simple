@@ -394,7 +394,9 @@ sub verify_independent_cgroup {
     # ancestor's cgroup.procs. That root control must not be delegated. Domain
     # cgroups exclude threaded migration. No workload-owned child directories.
     bounded_read('/sys/fs/cgroup/cgroup.procs', 1);
-    for my $directory ('/sys/fs/cgroup', $path, "$path/supervisor", "$path/worker") {
+    # cgroup.type exists only on non-root cgroups. The real mount root was
+    # verified above; its protected cgroup.procs is the migration boundary.
+    for my $directory ($path, "$path/supervisor", "$path/worker") {
         bounded_read("$directory/cgroup.type", 1) eq 'domain'
             or die "independent containment requires domain cgroups";
     }

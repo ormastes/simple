@@ -49,8 +49,9 @@ SIGSEGV; timeout, RSS breach, session escape, partial observation, proof mutatio
 and truthful parent OOM result handling. Injection exists only in temporary
 copies. No compiler/seed/native build is involved.
 
-Privileged parent provisioning, actual kernel OOM and end-to-end nested
-watchdog qualification are UNRUN. Independent review must accept the exact diff
+At initial handoff, privileged parent provisioning, actual kernel OOM and
+end-to-end nested qualification were UNRUN. Later kernel evidence below
+supersedes that initial status. Independent review must accept the exact diff
 and fixture evidence before landing. No new unqualified option is silently
 enabled in existing bootstrap wrappers.
 
@@ -69,3 +70,38 @@ the exact source, test and cycle-1 log. Reviewed executable SHA-256 values:
 - Focused test: `6c3e7188b6f9b64e90bad3943272a97787a7fe7d4c137f6949f4314106d3910b`
 
 The review does not waive the UNRUN kernel/nested qualification above.
+
+## Kernel qualification and root interface correction
+
+Root-owned kernel cycle 1 retained evidence under
+`build/native_probe/bounded-kernel-97_pg_fg`: containment/cleanup PASS; the OOM
+fixture failed to induce OOM (real child zero, OOM delta zero); nested UNRUN.
+Those receipts were preserved. Cycle 2 used an allocation gate after leader-zero
+reaping, private parent swap cap zero and actual bounded OOM-counter waiting.
+Its evidence under `build/native_probe/bounded-kernel-qu8ayir6` records OOM PASS:
+exit 137, real leader wait zero, parent OOM-kill delta two, hard maximum 64 MiB,
+swap maximum zero, both leaves empty and parent removed.
+
+Cycle 2 nested admission refused before payload with ENOENT reading
+`/sys/fs/cgroup/cgroup.type`; this was a production validator bug, not a
+permission failure. [Kernel cgroup-v2 documentation](https://github.com/torvalds/linux/blob/master/Documentation/admin-guide/cgroup-v2.rst)
+defines that interface on non-root cgroups only. The validator now requires
+domain type on the private parent and both leaves, preserving the real root
+mount identity and protected root `cgroup.procs` migration boundary. No other
+missing metadata is waived. The older proof fixture incorrectly invented a
+root `cgroup.type` entry; that entry was removed.
+
+The new targeted `process_tree_rss_cgroup_root_test.shs` ran once and PASSed
+using real root metadata and private subtree stand-ins. It confirms no root
+type read, all private domain checks and the actual mount/migration reads.
+The original 13 passing fixture cases and passing kernel cases were not rerun.
+Corrected watchdog SHA-256:
+`84745e7c54097dd465eb290b0885c6d1dd825071a53ff939602ca1f07510b7e7`.
+Final kernel cycle 3 is reserved for nested qualification only; it remains
+UNRUN until root executes the separately reviewed packet. No fourth cycle is
+authorized by this bounded investigation.
+
+Independent review accepted the exact root-interface fix, focused regression,
+and nested-only cycle-3 packet with no remaining P0/P1 findings. Packet SHA-256:
+`318d6f3d32beb33be9761be3708fb0f660b68aca8c7019555804a0523892e04d`.
+This is static acceptance; actual nested execution is still pending.
