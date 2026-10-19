@@ -1,0 +1,72 @@
+# Internal typed projection of separately validated protocols. The original
+# payload remains the publication/replay identity; this is not a wire adapter.
+use compiler.driver.driver_build.managed_parse_group_contract.*
+use compiler.driver.driver_build.managed_parse_group_result.*
+use compiler.driver.driver_build.managed_parse_group_result_v2.*
+use compiler.driver.driver_build.managed_parse_diagnostic_v2.*
+use compiler.common.diagnostics.diagnostic_v1.{DiagnosticV1}
+use compiler.common.diagnostics.severity.{Severity}
+
+struct GroupedParseArtifactV2:
+    module_id: text
+    source_digest: text
+    status: text
+    blob_path: text
+    blob_digest: text
+
+struct GroupedParseResultV2:
+    action: ManagedParseActionV1
+    modules: [GroupedParseArtifactV2]
+    error: text
+    payload: text
+    diagnostics: [text]
+    reusable: bool
+    protocol_v2: bool
+
+fn grouped_parse_result_decode_v2(snapshot: ManagedParseSnapshotV1, action: ManagedParseActionV1,
+    payload: text, protocol_v2: bool) -> Result<GroupedParseResultV2, text>:
+    var artifacts: [GroupedParseArtifactV2] = []
+    var diagnostics: [text] = []
+    if protocol_v2:
+        val decoded = managed_parse_action_result_decode_v2(snapshot, action, payload)?
+        var index = 0
+        for module in snapshot.modules:
+            if not action.package_members.contains(module.package_id): continue
+            val item = decoded.modules[index]
+            artifacts = artifacts.push(GroupedParseArtifactV2(item.module_id, item.source_digest, item.status, item.blob_path, item.blob_digest))
+            for ordinal in 0..item.diagnostics.len():
+                diagnostics = diagnostics.push(managed_parse_diagnostic_encode_v2(item.diagnostics[ordinal], module, ordinal))
+            index = index + 1
+        return Ok(GroupedParseResultV2(decoded.action, artifacts, decoded.error, payload,
+            diagnostics, managed_parse_action_result_reusable_v2(decoded), true))
+    val decoded = managed_parse_action_result_decode_v1(payload)?
+    val invalid = managed_parse_action_result_validate_v1(snapshot, action, decoded)
+    if invalid != "": return Err(invalid)
+    if managed_parse_action_result_encode_v1(decoded) != payload: return Err("noncanonical legacy result")
+    for item in decoded.modules:
+        artifacts = artifacts.push(GroupedParseArtifactV2(item.module_id, item.source_digest, item.status, item.blob_path, item.blob_digest))
+    if decoded.error != "": diagnostics = [decoded.error]
+    Ok(GroupedParseResultV2(decoded.action, artifacts, decoded.error, payload, diagnostics, decoded.error == "", false))
+
+fn grouped_parse_crash_result_v2(snapshot: ManagedParseSnapshotV1, action: ManagedParseActionV1,
+    reason: text, protocol_v2: bool) -> Result<GroupedParseResultV2, text>:
+    if protocol_v2:
+        var modules: [ManagedParseModuleResultV2] = []
+        for module in snapshot.modules:
+            if not action.package_members.contains(module.package_id): continue
+            var diagnostic = DiagnosticV1(Severity.Error, "E-PARSE-WORKER", reason, Some(module.source_path), None, [], [], [], [], [], None)
+            diagnostic.notes = ["diagnostic-id:" + managed_parse_diagnostic_id_v2(diagnostic, module, 0)]
+            modules = modules.push(ManagedParseModuleResultV2(module.module_id, module.source_digest,
+                "ERROR", "", "", false, false, [diagnostic]))
+        val value = ManagedParseActionResultV2(action, modules, reason)
+        return grouped_parse_result_decode_v2(snapshot, action, managed_parse_action_result_encode_v2(snapshot, value), true)
+    var modules: [ManagedParseModuleResultV1] = []
+    for module in snapshot.modules:
+        if action.package_members.contains(module.package_id):
+            modules = modules.push(ManagedParseModuleResultV1(module.module_id, module.source_digest,
+                "ERROR", "", "", [reason], false))
+    grouped_parse_result_decode_v2(snapshot, action,
+        managed_parse_action_result_encode_v1(ManagedParseActionResultV1(action, modules, reason)), false)
+
+export GroupedParseResultV2, GroupedParseArtifactV2
+export grouped_parse_result_decode_v2, grouped_parse_crash_result_v2
