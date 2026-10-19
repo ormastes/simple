@@ -1757,6 +1757,9 @@ impl MirLowering:
             val optional_q_type_symbol: HirSymbol? = self.symbols.get_symbol_raw(found_type_sym.id)
             if val present_q_type_symbol = optional_q_type_symbol:
                 val q_type_symbol: HirSymbol = present_q_type_symbol
+                # Demand-on-read: a provider layout must be this consumer's
+                # before any tier below reads a row for it.
+                self.provider_layout_demand_v1(q_type_symbol.name)
                 val qualified_key = self.composite_layout_key(q_type_symbol)
                 if qualified_key != q_type_symbol.name and self.struct_field_order.has(qualified_key):
                     val qualified_fields = self.struct_field_order[qualified_key]
@@ -1819,6 +1822,13 @@ impl MirLowering:
                             return named_idx
                         named_idx = named_idx + 1
 
+        # Backstop: under layout demand a provider declaration with this leaf
+        # must have been registered by now (demand-on-read above); silently
+        # reading field 0 of an unregistered layout would be a wrong offset.
+        if val fallback_type_sym = type_sym:
+            if val fallback_symbol = self.symbols.get_symbol_raw(fallback_type_sym.id):
+                if self.provider_layout_missed_v1(fallback_symbol.name):
+                    self.error_fatal("provider layout for '{fallback_symbol.name}' was never registered in this consumer (field '{field_name}')", Some(base.span))
         if (env_get("SIMPLE_MIR_FIELD_TRACE") ?? "") == "1":
             print "[field-idx-fallback0] field={field_name} base_local={base_local.id} in_svs={self.struct_value_syms.contains(base_local.id)}"
         0  # Default fallback when type is unknown

@@ -2004,8 +2004,21 @@ int8_t rt_transient_raw_owner_thread_allows(void) {
     return owner == 0 || owner == (uintptr_t)&rt_core_transient_scope_thread_token;
 }
 
+/* Entries (16 bytes each) an empty table may keep between scopes. */
+#define RT_CORE_TRANSIENT_RAW_RETAIN_CAP ((size_t)1 << 21)
+
 static void rt_core_transient_raw_clear(void) {
-    if (rt_core_transient_raw_alloc_cap != 0) {
+    /* The table only grows, so one huge scope (HIR per-file scopes reach
+     * millions of raw blocks) used to make every later scope end pay a full
+     * scan plus a memset of that high-water capacity: measured 16,777,216
+     * entries (268 MB) per MIR module, ~100 ms of each module's scope end.
+     * Release an oversized table once it is empty; the next scope regrows it
+     * in proportion to its own allocations. */
+    if (rt_core_transient_raw_alloc_cap > RT_CORE_TRANSIENT_RAW_RETAIN_CAP) {
+        free(rt_core_transient_raw_allocs);
+        rt_core_transient_raw_allocs = NULL;
+        rt_core_transient_raw_alloc_cap = 0;
+    } else if (rt_core_transient_raw_alloc_cap != 0) {
         memset(rt_core_transient_raw_allocs, 0,
             rt_core_transient_raw_alloc_cap * sizeof(RtCoreTransientRawAlloc));
     }
