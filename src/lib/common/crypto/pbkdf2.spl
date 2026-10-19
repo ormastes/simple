@@ -102,6 +102,85 @@ fn _pbkdf2_block_sha256(password: [i64], salt: [i64], iterations: i64,
         j = j + 1
     t
 
+# ============================================================================
+# Runtime SHA-256 fast path (PBKDF2-HMAC-SHA-256 only)
+#
+# The runtime exposes one SHA-256 primitive (rt_tls13_sha256); there is no
+# runtime SHA-384/512, so those variants stay pure Simple. HMAC is built on
+# it per RFC 2104: HMAC(K, m) = H((K' ^ opad) || H((K' ^ ipad) || m)), where
+# K' is K zero-padded to the 64-byte block (K is hashed first if longer).
+# ipad/opad are computed once per call, not once per iteration.
+# Any digest that is not exactly 32 bytes (baremetal stub, JIT empty-result
+# bug) makes the fast path return [] and the caller uses the pure path.
+# ============================================================================
+
+extern fn rt_tls13_sha256(data: [u8]) -> [u8]
+
+fn _pbkdf2_rt_sha256(data: [u8]) -> [u8]:
+    var digest: [u8] = []
+    unsafe(capabilities: [ffi]):
+        digest = rt_tls13_sha256(data)
+    digest
+
+fn _pbkdf2_cat_u8(a: [u8], b: [u8]) -> [u8]:
+    var r: [u8] = a
+    var i: i64 = 0
+    val n = b.len() as i64
+    while i < n:
+        r.push(b[i])
+        i = i + 1
+    r
+
+fn _pbkdf2_block_sha256_fast(password: [i64], salt: [i64], iterations: i64,
+                             block_i: i64) -> [i64]:
+    """Same result as _pbkdf2_block_sha256 via runtime SHA-256; [] if unavailable."""
+    var key: [u8] = []
+    var ki: i64 = 0
+    while ki < password.len():
+        key.push((password[ki] & 255) as u8)
+        ki = ki + 1
+    if key.len() > 64:
+        key = _pbkdf2_rt_sha256(key)
+        if key.len() != 32:
+            return []
+    var ipad: [u8] = []
+    var opad: [u8] = []
+    var pi: i64 = 0
+    while pi < 64:
+        val kb: i64 = if pi < key.len(): key[pi] as i64 else: 0
+        ipad.push((kb ^ 0x36) as u8)
+        opad.push((kb ^ 0x5c) as u8)
+        pi = pi + 1
+    var msg: [u8] = []
+    var si: i64 = 0
+    while si < salt.len():
+        msg.push((salt[si] & 255) as u8)
+        si = si + 1
+    val ctr = _pbkdf2_int4(block_i)
+    var ci: i64 = 0
+    while ci < 4:
+        msg.push(ctr[ci] as u8)
+        ci = ci + 1
+    var u = _pbkdf2_rt_sha256(_pbkdf2_cat_u8(opad, _pbkdf2_rt_sha256(_pbkdf2_cat_u8(ipad, msg))))
+    if u.len() != 32:
+        return []
+    var t: [i64] = []
+    var ti: i64 = 0
+    while ti < 32:
+        t.push(u[ti] as i64)
+        ti = ti + 1
+    var j: i64 = 2
+    while j <= iterations:
+        u = _pbkdf2_rt_sha256(_pbkdf2_cat_u8(opad, _pbkdf2_rt_sha256(_pbkdf2_cat_u8(ipad, u))))
+        if u.len() != 32:
+            return []
+        var x: i64 = 0
+        while x < 32:
+            t[x] = t[x] ^ (u[x] as i64)
+            x = x + 1
+        j = j + 1
+    t
+
 fn _pbkdf2_block_sha1(password: [i64], salt: [i64], iterations: i64,
                       block_i: i64) -> [i64]:
     """Compute T_i = U_1 XOR ... XOR U_c for one block using HMAC-SHA-1."""
@@ -176,9 +255,9 @@ fn pbkdf2_sha1_bytes(password: [i64], salt: [i64], iterations: i64,
         bi = bi + 1
     _pbkdf2_slice(dk, 0, dk_len)
 
-fn pbkdf2_sha256_bytes(password: [i64], salt: [i64], iterations: i64,
+fn pbkdf2_sha256_bytes_pure(password: [i64], salt: [i64], iterations: i64,
                        dk_len: i64) -> [i64]:
-    """PBKDF2-HMAC-SHA-256 key derivation (RFC 2898 §5.2).
+    """PBKDF2-HMAC-SHA-256, pure Simple only (reference path for the fast path).
 
     Args:
       password   — secret octet string
@@ -194,6 +273,26 @@ fn pbkdf2_sha256_bytes(password: [i64], salt: [i64], iterations: i64,
     var bi: i64 = 1
     while bi <= num_blocks:
         val t = _pbkdf2_block_sha256(password, salt, iterations, bi)
+        var ki: i64 = 0
+        while ki < t.len():
+            dk.push(t[ki])
+            ki = ki + 1
+        bi = bi + 1
+    _pbkdf2_slice(dk, 0, dk_len)
+
+fn pbkdf2_sha256_bytes(password: [i64], salt: [i64], iterations: i64,
+                       dk_len: i64) -> [i64]:
+    """PBKDF2-HMAC-SHA-256 (RFC 2898 §5.2 / RFC 8018) using the runtime SHA-256
+    when it returns full 32-byte digests, else the pure-Simple path.
+    Output is byte-identical either way."""
+    val h_len: i64 = 32
+    val num_blocks: i64 = (dk_len + h_len - 1) / h_len
+    var dk: [i64] = []
+    var bi: i64 = 1
+    while bi <= num_blocks:
+        var t = _pbkdf2_block_sha256_fast(password, salt, iterations, bi)
+        if t.len() != 32:
+            t = _pbkdf2_block_sha256(password, salt, iterations, bi)
         var ki: i64 = 0
         while ki < t.len():
             dk.push(t[ki])
