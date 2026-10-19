@@ -2,7 +2,7 @@
 # The abstractions are traits: they do not change either primitive's layout.
 use std.common.encoding.host_text_boundary_v1.{HostTextCodecErrorV1, HostTextByteSpanV1, host_text_span_byte_v1, host_validate_text_span_v1, host_text_span_to_utf8_v1, utf8_bytes_to_host_text_v1}
 use std.common.encoding.unicode_scalar.{unicode_scalar_valid, unicode_scalar_from_utf8, unicode_scalar_to_utf8}
-use std.common.text_bytes.{TextByteBufferError, text_byte_buffer, boxed_text_bytes_checked, bytes_to_text}
+use std.common.text_bytes.{TextByteBufferError, text_byte_buffer, boxed_text_bytes_checked, bytes_to_text, utf8_bytes_valid}
 
 type Char = char
 type Text = text
@@ -201,10 +201,7 @@ pub class ExternalText:
 
 impl AbstractText for ExternalText:
     fn to_internal_text() -> Result<Text, CodecError>:
-        val encoding: text = external_codec_id(self._format)?
-        val start: i64 = external_payload_start(self._bytes, self._format)?
-        val span: HostTextByteSpanV1 = HostTextByteSpanV1(prefix: [], bytes: self._bytes, start: start, end: self._bytes.len())
-        external_span_text(span, encoding)
+        external_decode_owned(self._bytes, self._format)
 
 pub fn external_text(bytes: [u8], format: ExternalFormat) -> Result<ExternalText, CodecError>:
     """Own encoded bytes after metadata admission; decoding is explicit and fallible."""
@@ -212,8 +209,37 @@ pub fn external_text(bytes: [u8], format: ExternalFormat) -> Result<ExternalText
     val owned = external_copy_bytes(bytes)?
     Ok(ExternalText(_bytes: owned, _format: format))
 
+pub fn external_text_decode(bytes: [u8], format: ExternalFormat) -> Result<Text, CodecError>:
+    """Same result as `external_text(bytes, format)?.to_internal_text()`.
+
+    Whole-array UTF-8 with Preserve that the runtime reads as valid is decoded
+    in bulk with no owned copy. Every other input takes the owned path: the
+    per-byte copy also normalizes element storage, then the strict decoder runs,
+    so every error keeps its kind and byte offset.
+    """
+    val encoding: text = external_codec_id(format)?
+    if encoding == "utf-8" and format.bom == BomPolicy.Preserve and utf8_bytes_valid(bytes):
+        return Ok(bytes_to_text(bytes))
+    val owned = external_copy_bytes(bytes)?
+    external_decode_owned(owned, format)
+
+fn external_decode_owned(bytes: [u8], format: ExternalFormat) -> Result<Text, CodecError>:
+    val encoding: text = external_codec_id(format)?
+    val start: i64 = external_payload_start(bytes, format)?
+    val span: HostTextByteSpanV1 = HostTextByteSpanV1(prefix: [], bytes: bytes, start: start, end: bytes.len())
+    external_span_text(span, encoding)
+
 pub fn external_text_from_internal(value: Text, format: ExternalFormat) -> Result<ExternalText, CodecError>:
     """Encode immutable internal UTF-8 according to explicit destination metadata."""
+    val payload = external_encode_internal(value, format)?
+    Ok(ExternalText(_bytes: payload, _format: format))
+
+pub fn external_encode_internal(value: Text, format: ExternalFormat) -> Result<[u8], CodecError>:
+    """`external_text_from_internal(value, format)?.encoded_bytes()` without the copy.
+
+    Same checks and bytes. The result is a fresh array the caller owns alone;
+    its storage layout is the encoder's (it may be generic, not packed).
+    """
     val encoding = external_codec_id(format)?
     val utf8 = external_checked_boxed_bytes(value)?
     var payload: [u8] = []
@@ -231,10 +257,10 @@ pub fn external_text_from_internal(value: Text, format: ExternalFormat) -> Resul
         var output = external_byte_buffer(payload.len() + prefix.len())?
         for byte in prefix: output.push(byte)
         for byte in payload: output.push(byte)
-        return Ok(ExternalText(_bytes: output, _format: format))
+        return Ok(output)
     if format.bom == BomPolicy.Forbid:
         val start = external_payload_start(payload, format)?
-    Ok(ExternalText(_bytes: payload, _format: format))
+    Ok(payload)
 
 pub class ExternalChar:
     _bytes: [u8]
