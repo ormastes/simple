@@ -65,8 +65,13 @@ fn imported_defaults_literal_fstring_is_constant_but_interpolation_is_not() {
     assert!(matches!(&fixed.params[0].default,
         Some(simple_parser::Expr::FString { parts, .. })
         if parts.iter().all(|part| matches!(part, simple_parser::ast::FStringPart::Literal(_)))));
-    let module = crate::hir::lower(&ast).unwrap();
-    assert!(call_args(&module, "dynamic_call").is_empty(), "must not capture caller locals");
+    // An interpolated default must never be lowered in the caller (it would
+    // capture caller locals); omitting it is a compile error, never an
+    // unfilled slot that native codegen pads with tagged nil.
+    let err = crate::hir::lower(&ast).expect_err("non-constant omitted default must not lower");
+    assert!(format!("{err}").contains("`dynamic` omits argument 1"), "{err}");
+    let literal_only = Parser::new("fn fixed(x: text = \"plain\") -> text:\n    x\nfn literal_call() -> text:\n    fixed()\n").parse().unwrap();
+    let module = crate::hir::lower(&literal_only).unwrap();
     let args = call_args(&module, "literal_call");
     assert_eq!(args.len(), 1);
     assert!(matches!(&args[0].kind, HirExprKind::String(s) if s == "plain"));
@@ -184,4 +189,48 @@ fn imported_method_defaults_fill_cross_module_method_calls() {
     let explicit = method_call_args(&module, "explicit");
     assert_eq!(explicit.len(), 2);
     assert!(matches!(&explicit[1].kind, HirExprKind::Bool(false)));
+}
+
+/// Cross-module omitted defaults of container / typed-literal shape are filled
+/// at the call site for free functions AND imported class methods; a default
+/// that cannot be materialised there is a compile error. Regression for the
+/// stage3 `MirLowering.lower_module(hir, [], false)` SIGSEGV, whose omitted
+/// `archive_trait_thunks: [MirFunction] = []` was padded with tagged nil.
+#[test]
+fn imported_container_and_typed_defaults_fill_and_non_constant_default_errors() {
+    let dir = create_test_project();
+    let src = dir.path().join("src");
+    fs::write(src.join("owner.spl"), concat!(
+        "class Lowering:\n    base: i64\n",
+        "    me lower(x: i64, providers: [i64] = [], is_entry: bool = true, syms: [i64]? = nil, thunks: [i64] = [], k: i64 = 7) -> i64:\n        x\n",
+        "fn fold(x: i64, items: [i64] = [], k: i64 = 7, flag: bool = true, limit: u64 = 16u64, seen: {text: bool} = {}, pair: (i64, i64) = (1, 2)) -> i64:\n    x\n",
+        "val LIMIT = 3\n",
+        "fn needs_global(x: i64, limit: i64 = LIMIT) -> i64:\n    x\n",
+    )).unwrap();
+    let source = "use owner.{Lowering, fold}\nfn free_call() -> i64:\n    fold(1)\nfn method_call(low: Lowering) -> i64:\n    low.lower(2, [], false)\n";
+    let ast = Parser::new(source).parse().unwrap();
+    let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+    let module = Lowerer::with_module_resolver(resolver, src.join("main.spl")).lower_module(&ast).unwrap();
+    let args = call_args(&module, "free_call");
+    assert_eq!(args.len(), 7, "{args:?}");
+    assert!(matches!(&args[1].kind, HirExprKind::Array(items) if items.is_empty()), "{:?}", args[1]);
+    assert!(matches!(&args[2].kind, HirExprKind::Integer(7)), "{:?}", args[2]);
+    assert!(matches!(&args[3].kind, HirExprKind::Bool(true)), "{:?}", args[3]);
+
+    let function = module.functions.iter().find(|f| f.name == "method_call").unwrap();
+    let call = function.body.iter().find_map(|stmt| match stmt {
+        HirStmt::Expr(expr) | HirStmt::Return(Some(expr)) => Some(expr),
+        _ => None,
+    }).unwrap();
+    let HirExprKind::MethodCall { args, .. } = &call.kind else { panic!("expected method call: {call:?}") };
+    assert_eq!(args.len(), 6, "receiver excluded; every omitted default filled: {args:?}");
+    assert!(matches!(&args[3].kind, HirExprKind::Nil), "{:?}", args[3]);
+    assert!(matches!(&args[4].kind, HirExprKind::Array(items) if items.is_empty()), "{:?}", args[4]);
+    assert!(matches!(&args[5].kind, HirExprKind::Integer(7)), "{:?}", args[5]);
+
+    let bad = Parser::new("use owner.{needs_global}\nfn probe() -> i64:\n    needs_global(1)\n").parse().unwrap();
+    let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+    let err = Lowerer::with_module_resolver(resolver, src.join("main.spl")).lower_module(&bad)
+        .expect_err("callee-module global default cannot be materialised in the caller");
+    assert!(format!("{err}").contains("`needs_global` omits argument 2"), "{err}");
 }
