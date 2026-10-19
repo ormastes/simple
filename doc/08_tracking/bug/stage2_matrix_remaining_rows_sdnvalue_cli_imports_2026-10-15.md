@@ -404,3 +404,28 @@ the direct lane's provider loops, or seed the lane with the closure's module
 list before entry lowering). Cheap pre-check without a chain cycle: sweep-
 style per-module compiles of bootstrap_main's closure modules and compare
 the emitted-object count (~40) against the seed's lane's count.
+
+## 2026-10-19 — roundtrip refusal under the ADMITTED binary proves the erased-read encode defect predates the campaign
+
+The clean-seed rebuild (recipe: wt-f836519 @ f83651904da, compiler =
+stage3 storage stage2-admitted/simple, cache /tmp/p2x/seednew-cache,
+SIMPLE_SCV_INVENTORY_COLD_INIT=1, log `/tmp/p2x/build-seednew2.log`)
+lowered all 1311/1311 HIR modules successfully and then died at the very
+end of phase 3 with `RT-E-HIR-BLOB-NONCANONICAL: module blob 0 failed
+roundtrip verification` (`[ERROR] phase 3 FAILED`). The compiler is
+deterministic — a plain retry (build-seednew3.log, cache seednew-cache2)
+reproduced the identical draw. This matters for campaign bookkeeping: the
+failing encode-side read happens INSIDE the stage2-ADMITTED binary — an
+artifact admitted before and independently of this campaign's 26 merged
+PRs — so the erased-read HIR-codec encode defect demonstrably predates the
+whole campaign and is upstream's to repair. The codec selfcheck correctly
+refused the non-roundtripping blob (fail-closed cache behavior, unchanged);
+the campaign-side defect was only that the plain native-build lowering lane
+treated this codec-class refusal as fatal. Fixed in 03fe2c2aaab
+(src/compiler/35.semantics/rt_criticality_validation.spl): a codec-class
+blob refusal (roundtrip-unstable / decode / encode-reject) now validates
+the in-memory fallback module array instead (proven transport, same
+contract as the empty-blobs path), emits a loud `[hir-blob-refused]`
+eprint, records a Warning, and proceeds UNCACHED — slow, not wrong. The
+selfcheck itself was not weakened, and a refusal with no fallback modules
+left to validate stays fatal.
