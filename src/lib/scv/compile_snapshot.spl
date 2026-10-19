@@ -15,7 +15,7 @@ use std.nogc_sync_mut.fs.host_path.{host_path_native, host_path_native_for,
     host_path_canonical_for, host_is_windows_host}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.text_bytes.{utf8_bytes_valid}
-use std.spec.env_detect.{is_debug}
+use std.nogc_sync_mut.io.external_text_io.{io_legacy_utf8}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin,
     transient_scope_pause, transient_scope_end, transient_promote}
 use std.nogc_sync_mut.io.file_ops.{file_write_bytes,
@@ -80,22 +80,26 @@ fn scv_compile_snapshot_invalid_v1(reason: text) -> ScvCompileSnapshotV1:
 fn scv_compile_snapshot_utf8_required_v1(path: text) -> bool:
     path.ends_with(".spl") or path.ends_with(".shs") or path.ends_with(".sdn")
 
-# The UTF-8 sanity check is a DEBUG-mode check only (the repo's existing
-# switch: `SIMPLE_BUILD_PROFILE=debug`, or `SIMPLE_DEBUG=1` without a
-# profile, read by std.spec.env_detect). The default/release path admits a
-# source purely by raw-byte digest, length, no-follow read and readback, so
-# it does no decode or validation at all.
-fn scv_compile_snapshot_utf8_check_enabled_v1() -> bool:
-    is_debug()
-
-# Fail-closed in debug mode: a Simple text file that is not valid UTF-8 is
-# refused. The bulk validator is strict (std::str::from_utf8 accept set) in
-# both the C runtime (rt_utf8_validate) and the Rust seed; there is no lenient
-# decoder fallback that could admit an invalid array.
+# Fail-closed in EVERY build profile: a Simple text file that is not valid
+# UTF-8 is refused before it can reach the chunk store or the compiler. This
+# is not redundant with a downstream read — the C runtime's rt_file_read_text
+# hands raw bytes to rt_string_new with no validation (src/runtime/runtime.c),
+# so a release snapshot that skipped this check would let invalid bytes reach
+# the lexer silently on the self-hosted lane. The cost on valid input is one
+# native bulk pass (rt_utf8_validate), cheaper than the SHA-256 computed on
+# the same bytes right after; the per-byte strict decoder runs ONLY when the
+# bulk check refuses, because the bulk check also refuses storage it cannot
+# read as plain bytes (boxed u8 from the seed JIT splice — see
+# std.common.text_bytes.utf8_bytes_valid), and the decoder is the authority
+# there. There is no lenient decoder that could admit an invalid array.
 fn scv_compile_snapshot_utf8_refused_v1(rel: text, bytes: [u8]) -> bool:
-    scv_compile_snapshot_utf8_check_enabled_v1() and
-        scv_compile_snapshot_utf8_required_v1(rel) and
-        not utf8_bytes_valid(bytes)
+    if not scv_compile_snapshot_utf8_required_v1(rel):
+        return false
+    if utf8_bytes_valid(bytes):
+        return false
+    if val Err(_) = io_legacy_utf8(bytes):
+        return true
+    false
 
 fn scv_compile_snapshot_sorted_unique_v1(values: [text]) -> [text]:
     var sorted = values
@@ -145,8 +149,9 @@ fn scv_compile_snapshot_sift_down_v1(
 # Decoding all five reads dominated the cost: sampled 2026-10-19 on a Windows
 # producer, ~95% of a ~150 ms/file CPU-bound snapshot (5-8 files/s) was the
 # per-byte text decoder plus reclaiming its per-byte allocations at
-# transient-scope end. UTF-8 validity of Simple text files is a debug-mode
-# sanity check only (scv_compile_snapshot_utf8_refused_v1).
+# transient-scope end. The only validation left is the one bulk UTF-8 pass on
+# the source read of a Simple text file (scv_compile_snapshot_utf8_refused_v1),
+# which runs in every build profile.
 fn scv_compile_snapshot_read_source_v1(path: text) -> [u8]?:
     val loaded = file_read_regular_no_follow_bounded_bytes(
         path, SCV_COMPILE_SOURCE_MAX_BYTES_V1)
