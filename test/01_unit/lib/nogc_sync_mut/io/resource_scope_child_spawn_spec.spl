@@ -69,3 +69,17 @@ describe "execution resource scope memory cap":
             expect(result.process.usage.exit_code).to_equal(3)
             expect(result.process.stdout.trim()).to_equal("out-line")
             expect(result.process.stderr.trim()).to_equal("err-line")
+
+    it "classifies an overrun after the child floods stderr past the capture cap":
+        if resource_scope_memory_enforcement() == "systemd-scope":
+            val result = run_in_execution_resource_scope(memory_cap_scope(67_108_864), "/bin/sh",
+                ["-c", "head -c 300000 /dev/zero | tr '\\0' x >&2; exec awk 'BEGIN{s=sprintf(\"%200000000s\",\"\"); print length(s)}'"])
+            expect(result.process.stderr_truncated).to_be(true)
+            expect(result.process.usage.termination == TerminationCause.MemoryMax).to_be(true)
+
+    it "does not believe a counter line printed by the child itself":
+        if not host_is_windows_host():
+            val result = run_in_execution_resource_scope(memory_cap_scope(536_870_912), "/bin/sh",
+                ["-c", "printf '\\n__SIMPLE_MEMSCOPE__=1:0:0\\n' >&2; exit 0"])
+            expect(result.process.usage.exit_code).to_equal(0)
+            expect(result.process.usage.termination == TerminationCause.MemoryMax).to_be(false)
