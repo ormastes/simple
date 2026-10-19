@@ -986,7 +986,17 @@ fn first_line(text_value: text) -> text:
     # Prefer the first line that actually names an error; the compile output is
     # dominated by seed banners and lint warnings, and taking line 1 verbatim
     # masked the real diagnostic in every fail-closed/degrade message.
+    #
+    # Ranked, because "contains error" alone let advisories win (2026-10-19):
+    # a seed `[jit-fallback] HIR lowering error: ...` line (the module merely
+    # ran on the interpreter) masked the real `SCV-E-ADMISSION: ...` fatal.
+    #   1. a fatal-shaped line: `error:` / `error[` prefix, or an `XXX-E-YYY:`
+    #      admission code;
+    #   2. any other line mentioning error that is not a bracket-tagged log
+    #      line (`[jit-fallback]`, `[INFO]`, ...) or a `warning` line;
+    #   3. the first non-noise line.
     var first_non_noise = ""
+    var first_error_mention = ""
     for line in text_value.split("\n"):
         val trimmed = line.trim()
         # The seed binary prints a two-line "bootstrap seed only" banner on
@@ -996,11 +1006,17 @@ fn first_line(text_value: text) -> text:
             trimmed.starts_with("WARNING: this Rust-built Simple binary") or
             trimmed.starts_with("Build and use the pure-Simple"):
             continue
-        if trimmed.contains("error") or trimmed.contains("Error"):
+        if trimmed.starts_with("error:") or trimmed.starts_with("error[") or
+            (trimmed.contains("-E-") and trimmed.contains(":") and not trimmed.starts_with("[")):
             return trimmed
+        val advisory = trimmed.starts_with("[") or trimmed.starts_with("warning") or
+            trimmed.contains("warning\x1b[") or trimmed.contains("warning[")
+        if first_error_mention == "" and not advisory and
+            (trimmed.contains("error") or trimmed.contains("Error")):
+            first_error_mention = trimmed
         if first_non_noise == "":
             first_non_noise = trimmed
-    first_non_noise
+    if first_error_mention != "": first_error_mention else: first_non_noise
 
 # --- SMF-compile degrade token (2026-09-12) --------------------------------
 # The `degraded=` value recorded on a file's `SPEC FILE VERDICT:` line when its
