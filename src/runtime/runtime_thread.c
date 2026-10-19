@@ -373,21 +373,24 @@ bool spl_thread_join(spl_thread_handle handle) {
  *
  * Cranelift `Any` = (type_tag: i64, value: i64).
  * For closures, value is a heap pointer where [0] = fn_ptr.
- * The closure calling convention is fn_ptr(closure_ptr).
+ * The closure calling convention is entry(closure_ptr, data) for a closure
+ * record and entry(data) for a direct-function record.
  * ================================================================ */
 
-/* Composition owner switch for the isolated-thread handle family.
+/* Runtime owner switch for the isolated-thread handle family.
  *
  * simple_native_all (Rust executor.rs) also exports this family, and rustc
  * merges identical bodies into aliases: rt_thread_id_limited and
  * rt_thread_is_done_limited live in the SAME NoDuplicates COMDAT section as
  * Rust's rt_thread_id / rt_thread_is_done. When an MSVC link let this C copy
- * win those two names, lld-link discarded that section and the aliases with
- * it ("relocation against symbol in discarded section: rt_thread_id_limited").
- * A composition that links simple_native_all therefore selects the Rust owner
- * for the whole handle family (spawn/join/is_done/id/free must agree on one
- * handle layout); these C bodies stay compiled under private names, exactly
- * like SIMPLE_RUNTIME_FILE_VIEW_RUST_OWNER in runtime_file_view.c. */
+ * win those two names under /FORCE:MULTIPLE, lld-link discarded that section
+ * and the aliases with it ("relocation against symbol in discarded section").
+ * --runtime-owner=c (default) instead cedes the Rust definitions, so the
+ * aliases lead their own COMDAT (coff_runtime_owner.spl). --runtime-owner=rust
+ * defines SIMPLE_RUNTIME_THREAD_RUST_OWNER: Rust owns the whole handle family
+ * (spawn/join/is_done/id/free must agree on one handle layout) and these C
+ * bodies stay compiled under private names, exactly like
+ * SIMPLE_RUNTIME_FILE_VIEW_RUST_OWNER in runtime_file_view.c. */
 #if defined(SIMPLE_RUNTIME_THREAD_RUST_OWNER)
 #define rt_thread_spawn_isolated spl_c_thread_spawn_isolated
 #define rt_thread_spawn_isolated_with_args spl_c_thread_spawn_isolated_with_args
@@ -415,6 +418,7 @@ typedef struct {
     int              arity;
     int64_t          result;
     int              done;
+    int              joined;
 #ifdef SPL_THREAD_PTHREAD
     pthread_t        thread;
 #else
@@ -458,8 +462,10 @@ static void* rt_isolated_wrapper(void* raw) {
         } else {
             td->result = td->entry2(arg1, arg2);
         }
+    } else if (td->entry2) {
+        td->result = td->entry2(td->closure_ptr, td->data1);
     } else {
-        td->result = td->entry(td->closure_ptr);
+        td->result = td->entry(td->data1);
     }
     td->done = 1;
     return NULL;
@@ -476,29 +482,67 @@ static DWORD WINAPI rt_isolated_wrapper_win(LPVOID raw) {
         } else {
             td->result = td->entry2(arg1, arg2);
         }
+    } else if (td->entry2) {
+        td->result = td->entry2(td->closure_ptr, td->data1);
     } else {
-        td->result = td->entry(td->closure_ptr);
+        td->result = td->entry(td->data1);
     }
     td->done = 1;
     return 0;
 }
 #endif
 
-int64_t rt_thread_spawn_isolated(int64_t arg0, int64_t arg1) {
-    int64_t closure_ptr = (arg1 != 0) ? arg1 : arg0;
-    rt_closure_fn_t fn_ptr = *(rt_closure_fn_t*)(intptr_t)closure_ptr;
+/* Handle-family contract shared with the Rust owner (executor.rs), so the
+ * C owner (--runtime-owner=c, the default) and the Rust owner are twins:
+ *   spawn(closure, data)  the worker runs closure(data); thread.spl passes
+ *                         (closure, nil). nil is tagged (0x3), so it must
+ *                         never be read as the closure. A legacy
+ *                         (0, closure) caller is still accepted.
+ *   join(h)               waits once and returns the result; a repeat join
+ *                         returns nil. The handle stays valid until free.
+ *   free(h)               releases the handle (detaching an unjoined thread).
+ *   id(h)                 C reports the OS thread id, Rust a spawn counter;
+ *                         both are only distinct per live thread. */
+int64_t rt_thread_spawn_isolated(int64_t closure, int64_t data) {
+    int64_t closure_value = closure;
+    int64_t data_value = data;
+    if (rt_native_closure_payload(closure_value) == 0) {
+        closure_value = data;
+        data_value = (int64_t)RT_NIL;
+    }
+    int64_t payload = rt_native_closure_payload(closure_value);
+    if (!payload) return 0;
+
+    rt_closure_fn_t entry = NULL;
+    rt_closure2_fn_t entry_record = NULL;
+    int64_t closure_ptr = 0;
+    if (rt_native_address_is_code(payload) || ((uint64_t)payload & TAG_MASK) != 0) {
+        entry = (rt_closure_fn_t)(intptr_t)payload;
+    } else {
+        int64_t record_entry = *(int64_t *)(intptr_t)payload;
+        if (record_entry < 4096) return 0;
+        int64_t marker = *(((int64_t *)(intptr_t)payload) + 1);
+        if (marker == RT_NATIVE_DIRECT_FUNCTION_RECORD_MARKER) {
+            entry = (rt_closure_fn_t)(intptr_t)record_entry;
+        } else {
+            entry_record = (rt_closure2_fn_t)(intptr_t)record_entry;
+            closure_ptr = payload;
+        }
+    }
+
     RtThreadData* td = (RtThreadData*)SPL_MALLOC(sizeof(RtThreadData), "rt_thread");
     if (!td) return 0;
-    td->entry       = fn_ptr;
-    td->entry2      = NULL;
+    td->entry       = entry;
+    td->entry2      = entry_record;
     td->entry_record2 = NULL;
     td->closure_ptr = closure_ptr;
-    td->data1       = 0;
+    td->data1       = data_value;
     td->data2       = 0;
     td->raw_worker_args = 0;
     td->arity       = 1;
     td->result      = 0;
     td->done        = 0;
+    td->joined      = 0;
 
 #ifdef SPL_THREAD_PTHREAD
     if (pthread_create(&td->thread, NULL, rt_isolated_wrapper, td) != 0) {
@@ -549,6 +593,7 @@ int64_t rt_thread_spawn_isolated_with_args(int64_t fn_ptr, int64_t data1, int64_
     td->arity       = 2;
     td->result      = 0;
     td->done        = 0;
+    td->joined      = 0;
 
 #ifdef SPL_THREAD_PTHREAD
     if (pthread_create(&td->thread, NULL, rt_isolated_wrapper, td) != 0) {
@@ -568,16 +613,16 @@ int64_t rt_thread_spawn_isolated_with_args(int64_t fn_ptr, int64_t data1, int64_
 int64_t rt_thread_join(int64_t handle) {
     RtThreadData* td = (RtThreadData*)get_handle(handle, HANDLE_THREAD);
     if (!td) return 0;
+    if (td->joined) return (int64_t)RT_NIL;
 #ifdef SPL_THREAD_PTHREAD
     pthread_join(td->thread, NULL);
 #else
     WaitForSingleObject(td->thread, INFINITE);
     CloseHandle(td->thread);
+    td->thread = NULL;
 #endif
-    int64_t result = td->result;
-    SPL_FREE(td);
-    free_handle(handle);
-    return result;
+    td->joined = 1;
+    return td->result;
 }
 
 int64_t rt_thread_is_done(int64_t handle) {
@@ -599,11 +644,13 @@ int64_t rt_thread_id(int64_t handle) {
 void rt_thread_free(int64_t handle) {
     RtThreadData* td = (RtThreadData*)get_handle(handle, HANDLE_THREAD);
     if (!td) return;
+    if (!td->joined) {
 #ifdef SPL_THREAD_PTHREAD
-    pthread_detach(td->thread);
+        pthread_detach(td->thread);
 #else
-    CloseHandle(td->thread);
+        CloseHandle(td->thread);
 #endif
+    }
     SPL_FREE(td);
     free_handle(handle);
 }

@@ -1,0 +1,121 @@
+#!/bin/sh
+# Prepare a runtime directory for a Cranelift-capable (simple_native_all)
+# Windows MSVC link under one rt_* symbol owner.
+#
+#   sh scripts/bootstrap/prepare-runtime-owner.shs --owner c \
+#       --native-all-dir <dir with simple_native_all.lib + LLVM-C.lib> \
+#       --out <new runtime dir> [--composition ordinary|core-c] \
+#       [--tool <runtime_owner_cede.exe> | --producer <simple.exe>]
+#
+# Owner (also SIMPLE_RUNTIME_OWNER; default c):
+#   c       C owns every overlapping rt_* name. The C runtime composition the
+#           link will compile is built here, and runtime_owner_cede (pure
+#           Simple, src/app/runtime_owner_cede) cedes every name it defines
+#           from a copy of simple_native_all.lib. Point the producer's
+#           --runtime-path at --out. A compiler with --runtime-owner does the
+#           same derivation itself at link time; this script exists for
+#           producers that predate the switch.
+#   rust    Rust owns the overlap: --out mirrors the native-all dir and
+#           runtime-owner.env carries CL=/DSIMPLE_RUNTIME_THREAD_RUST_OWNER=1
+#           for producers that predate the switch (clang-cl honours CL).
+#   simple  unsupported: no pure-Simple owner set exists yet (fails closed).
+#
+# --composition must match what the producer compiles: `ordinary` for a
+# producer that predates --runtime-owner (it links native_all with its
+# ordinary C composition), `core-c` for one that has it. The source lists are
+# read from src/compiler/70.backend/backend/runtime_compiler.spl and the
+# defines mirror its MSVC branch. A mismatch fails the link as an undefined
+# symbol, never as a silent second owner.
+set -eu
+
+owner=${SIMPLE_RUNTIME_OWNER:-c}
+native_all_dir=""
+out=""
+composition=ordinary
+tool=""
+producer=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --owner) owner=$2; shift 2 ;;
+        --owner=*) owner=${1#--owner=}; shift ;;
+        --native-all-dir) native_all_dir=$2; shift 2 ;;
+        --out) out=$2; shift 2 ;;
+        --composition) composition=$2; shift 2 ;;
+        --tool) tool=$2; shift 2 ;;
+        --producer) producer=$2; shift 2 ;;
+        *) echo "prepare-runtime-owner: unknown argument '$1'" >&2; exit 2 ;;
+    esac
+done
+
+die() { echo "prepare-runtime-owner: $*" >&2; exit 1; }
+
+owner=$(printf '%s' "$owner" | tr 'A-Z' 'a-z')
+case "$owner" in
+    c|rust) ;;
+    simple) die "unsupported runtime owner 'simple': no pure-Simple owner set exists for the hosted rt_* symbol classes; use c or rust" ;;
+    *) die "unknown runtime owner '$owner' (expected c, rust or simple)" ;;
+esac
+[ -n "$native_all_dir" ] && [ -f "$native_all_dir/simple_native_all.lib" ] ||
+    die "--native-all-dir must hold simple_native_all.lib"
+[ -f "$native_all_dir/LLVM-C.lib" ] || die "$native_all_dir has no LLVM-C.lib"
+[ -n "$out" ] || die "--out is required"
+[ ! -e "$out" ] || die "output already exists: $out"
+
+repo=$(git rev-parse --show-toplevel)
+mkdir -p "$out"
+
+# Everything except the archive is shared unchanged with the producer dir.
+for f in "$native_all_dir"/*; do
+    name=$(basename "$f")
+    [ "$name" = simple_native_all.lib ] && [ "$owner" = c ] && continue
+    ln "$f" "$out/$name" 2>/dev/null || cp "$f" "$out/$name"
+done
+
+if [ "$owner" = rust ]; then
+    printf 'CL=/DSIMPLE_RUNTIME_THREAD_RUST_OWNER=1\n' > "$out/runtime-owner.env"
+    echo "prepare-runtime-owner: rust owner -> $out (export \$(cat $out/runtime-owner.env) for pre-switch producers)"
+    exit 0
+fi
+
+rc_spl="$repo/src/compiler/70.backend/backend/runtime_compiler.spl"
+case "$composition" in
+    ordinary)
+        sources=$(sed -n 's/^    var sources = \[\(.*\)\]$/\1/p' "$rc_spl" | head -1)
+        defines="/DSIMPLE_RUNTIME_MEMORY_OWNER=1" ;;
+    core-c)
+        sources=$(awk '/^pub fn runtime_core_c_sources_v1/ {f=1} f && /^    \["/ {print; exit}' "$rc_spl" |
+            sed 's/^    \[\(.*\)\]$/\1/')
+        defines="/DSIMPLE_ABI_VERSION=1 /DSIMPLE_ABI_VERSION_DEFERRED=0 /DSIMPLE_RUNTIME_TIMESTAMP_OWNER=1 /DSIMPLE_RUNTIME_MEMORY_OWNER=1 /DSIMPLE_CORE_C_STANDALONE=1" ;;
+    *) die "unknown composition '$composition' (expected ordinary or core-c)" ;;
+esac
+sources=$(printf '%s' "$sources" | tr -d '" ' | tr ',' ' ')
+[ -n "$sources" ] || die "could not read the $composition source list from $rc_spl"
+
+cc=${CC:-clang-cl}
+command -v "$cc" >/dev/null 2>&1 || die "C compiler '$cc' not found (source the windows LLVM activation first)"
+rt="$repo/src/runtime"
+objdir="$out/.owner-c-objects"
+mkdir -p "$objdir"
+count=0
+for name in $sources; do
+    # shellcheck disable=SC2086
+    MSYS2_ARG_CONV_EXCL='*' "$cc" /nologo /c /O2 /Gy /MD /std:c11 /I "$rt" /I "$rt/platform" \
+        $defines "/Fo$objdir/$name.obj" "$rt/$name.c" > "$objdir/$name.log" 2>&1 ||
+        die "failed to compile $name.c (see $objdir/$name.log)"
+    count=$((count + 1))
+done
+
+if [ -z "$tool" ]; then
+    [ -n "$producer" ] || die "pass --tool <runtime_owner_cede.exe> or --producer <simple.exe> to build it"
+    tool="$objdir/runtime_owner_cede.exe"
+    (cd "$repo" && SIMPLE_LINKER_FLAVOR=msvc SIMPLE_WINDOWS_ABI=msvc SIMPLE_PROJECT_ROOT="$repo" \
+        "$producer" native-build --backend llvm --runtime-bundle core-c-bootstrap \
+        --cache-dir "$objdir/tool-cache" -o "$tool" src/app/runtime_owner_cede/main.spl) \
+        > "$objdir/tool-build.log" 2>&1 || die "could not build runtime_owner_cede (see $objdir/tool-build.log)"
+fi
+
+"$tool" "$out/simple_native_all.lib" "$native_all_dir/simple_native_all.lib" "$objdir"/*.obj ||
+    die "runtime_owner_cede failed"
+[ -s "$out/simple_native_all.lib" ] || die "runtime_owner_cede wrote no archive"
+rm -rf "$objdir"
+echo "prepare-runtime-owner: c owner ($composition, $count C objects) -> $out"

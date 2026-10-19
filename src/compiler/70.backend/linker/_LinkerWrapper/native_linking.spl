@@ -52,7 +52,7 @@ use std.string_builder.{StringBuilder}
 use compiler.backend.linker.managed_native_args_v1.{managed_native_extra_args_error_v1, managed_native_input_args_error_v1}
 use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1, native_tool_strict_resolve_v1, native_tool_strict_revalidate_v1}
 use std.nogc_sync_mut.io.native_runtime_authority_v1.{native_runtime_strict_archives_v1, native_runtime_strict_revalidate_v1, native_runtime_strict_generated_inputs_v1}
-use compiler.backend.linker._LinkerWrapper.native_all_support.{native_all_msvc_llvm_link_inputs, native_all_input_present}
+use compiler.backend.linker._LinkerWrapper.native_all_support.{native_all_msvc_llvm_link_inputs, native_all_input_present, native_all_input_dir}
 
 use compiler.backend.linker.lld_sffi.{LldResult, lld_elf_link}
 use compiler.backend.linker.mold.{MoldBackend, MoldConfig, find_linker_path, linker_type_for_path, LinkerType, execute_linker, create_temp_dir, cleanup_temp_dir, linker_file_size}
@@ -1903,7 +1903,14 @@ fn native_msvc_llvm_all_inputs(configured: [text], objects: [text], runtime: [te
         runtime_dir: text, config: NativeLinkConfig) -> Result<[text], text>:
     val inputs = objects + configured + runtime
     if not native_all_input_present(inputs): return Ok(inputs)
-    val root = runtime_dir.replace("\\", "/")
+    # The LLVM link passes runtime_path "none" (it owns its runtime objects);
+    # the authority is then the directory holding the native_all archive it
+    # selected -- the producer's, or an owner=c derived one.
+    val configured_root = runtime_dir.replace("\\", "/")
+    val root = if configured_root == "" or configured_root == "none":
+        native_all_input_dir(inputs)
+    else:
+        configured_root
     val target = if config.target_triple != "": config.target_triple else: _windows_link_arch(config) + "-pc-windows-msvc"
     val selected = native_all_msvc_llvm_link_inputs(configured, objects, runtime,
         target, root, file_exists(root + "/LLVM-C.lib"))?

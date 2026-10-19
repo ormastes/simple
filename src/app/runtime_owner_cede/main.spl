@@ -1,0 +1,48 @@
+# runtime_owner_cede: derive an owner=c copy of simple_native_all.lib.
+#
+# Usage: runtime_owner_cede <out.lib> <simple_native_all.lib> <c-object>...
+#
+# Every external name the given C runtime objects define is ceded by the Rust
+# archive (see compiler.backend.linker.coff.coff_runtime_owner). Scripts use
+# this so a producer that predates --runtime-owner can still link owner=c:
+# point its --runtime-path at a directory holding the derived archive.
+# The C objects MUST be the exact composition the link compiles; a ceded name
+# no C object defines fails the link as undefined (fail closed).
+
+use compiler.backend.linker.coff.coff_runtime_owner.{runtime_owner_object_definitions_v1, runtime_owner_cede_archive_file_v1, runtime_owner_write_bytes_v1}
+
+@unsafe(reason: "raw argument-vector ABI", capabilities: [ffi])
+extern fn sys_get_args() -> [text]
+@unsafe(reason: "raw whole-file byte read", capabilities: [ffi])
+extern fn rt_file_read_bytes(path: text) -> [u8]?
+
+fn read_all(path: text) -> [u8]:
+    val bytes = unsafe(capabilities: [ffi]): rt_file_read_bytes(path)
+    bytes ?? []
+
+fn main() -> i64:
+    val args = unsafe(capabilities: [ffi]): sys_get_args()
+    if args.len() < 4:
+        print "usage: runtime_owner_cede <out.lib> <simple_native_all.lib> <c-object>..."
+        return 2
+    val out_path = args[1]
+    var objects: [[u8]] = []
+    var i: i64 = 3
+    while i < args.len():
+        val object = read_all(args[i])
+        if object.len() == 0:
+            print "runtime_owner_cede: cannot read C object {args[i]}"
+            return 1
+        objects.push(object)
+        i = i + 1
+    val owned = runtime_owner_object_definitions_v1(objects)
+    match runtime_owner_cede_archive_file_v1(args[2], owned):
+        case Ok(result):
+            if not runtime_owner_write_bytes_v1(out_path, result.bytes):
+                print "runtime_owner_cede: cannot write {out_path}"
+                return 1
+            print "runtime_owner_cede: c_objects={objects.len()} c_defined={owned.len()} ceded={result.undefined} members={result.members} comdat_demoted={result.demoted}"
+            0
+        case Err(reason):
+            print "runtime_owner_cede: {reason}"
+            1

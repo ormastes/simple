@@ -853,6 +853,10 @@ fi
 # compiler built here aborts on its first Cranelift call. A compiler carrying
 # the real Rust Cranelift bridge is linked outside this script, with the auto
 # bundle and --runtime-path naming a simple_native_all runtime directory.
+# One owner per overlapping rt_* symbol: --runtime-owner / SIMPLE_RUNTIME_OWNER
+# (c default, rust, simple fails closed). A producer that predates the switch
+# takes owner c from a directory prepared by
+# scripts/bootstrap/prepare-runtime-owner.shs.
 case "${SIMPLE_KERNEL_K1_POLICY:-unselected}:${backend}" in
   llvm-cranelift:llvm|llvm-cranelift:llvm-lib|llvm-cranelift:cranelift) ;;
   llvm:llvm|llvm:llvm-lib) ;;
