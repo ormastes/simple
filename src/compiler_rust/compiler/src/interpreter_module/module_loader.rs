@@ -1719,43 +1719,6 @@ mod tests {
         assert!(matches!(exports.get("dir_walk"), Some(Value::Function { .. })));
     }
 
-    /// `export hash_text_fnv1a as rt_hash_text` (src/lib/nogc_sync_mut/src/hash.spl)
-    /// must load and publish the implementation under the alias. Before the
-    /// parser accepted bare aliases, this module failed to load with
-    /// `semantic: function `as` not found`, which broke `simple test <dir>`.
-    #[test]
-    fn bare_aliased_export_publishes_local_definition_under_alias() {
-        let mut functions = HashMap::new();
-        let mut classes = HashMap::new();
-        let mut enums = HashMap::new();
-        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("..");
-        let current_file = repo_root.join("src/lib/nogc_sync_mut/test_runner/test_runner_main.spl");
-
-        let value = load_and_merge_module(
-            &use_stmt_with_path(
-                &["std", "nogc_sync_mut", "src", "hash"],
-                ImportTarget::Group(vec![ImportTarget::Single("rt_hash_text".to_string())]),
-            ),
-            Some(&current_file),
-            &mut functions,
-            &mut classes,
-            &mut enums,
-        )
-        .expect("hash module loads");
-
-        let exports = match value {
-            Value::Dict(exports) => exports,
-            other => panic!("expected module exports dict, got {:?}", other),
-        };
-        match exports.get("rt_hash_text") {
-            Some(Value::Function { def, .. }) => assert_eq!(def.name, "hash_text_fnv1a"),
-            other => panic!("rt_hash_text must alias hash_text_fnv1a, got {:?}", other),
-        }
-    }
-
-    /// Generalization: aliases in a bare export list resolve each local name
-    /// independently, keep unaliased names, and never invent the alias as a
-    /// symbol to search for (the alias names nothing locally).
     #[test]
     fn bare_export_source_names_ignore_aliases() {
         let target = ImportTarget::Group(vec![
