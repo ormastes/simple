@@ -1,3 +1,9 @@
+use std.nogc_sync_mut.io.file_text_session.{FileTextSession, file_default_text_codec, file_session_encode, file_session_decode}
+use std.io.types.{FileMode}
+use std.nogc_sync_mut.io.external_file.{external_file_read_bytes_at}
+
+use std.nogc_sync_mut.io.external_text_io.{io_text_error_message}
+
 # I/O Runtime Module - Direct extern fn wrappers for common I/O operations
 #
 # This module provides reusable I/O functions using direct `extern fn rt_*`
@@ -77,10 +83,6 @@ extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_copy(src: text, dst: text) -> bool
 @unsafe(reason: "raw nullable byte-array read; nil is invalid path, unreadable input, allocation, or runtime failure", capabilities: [ffi])
 extern fn rt_file_read_bytes(path: text) -> [u8]?
-@unsafe(reason: "checked managed-text SFFI returns nil only for a foreign I/O contract failure", capabilities: [ffi])
-extern fn rt_file_read_text_at_checked(path: text, offset: i64, size: i64) -> text?
-@unsafe(reason: "raw append status; false conflates input, permission, I/O, and runtime failure", capabilities: [ffi])
-extern fn rt_file_append_text(path: text, content: text) -> bool
 @unsafe(reason: "raw file digest; non-64-byte text is the unreadable or provider-failure sentinel", capabilities: [ffi])
 extern fn rt_file_hash_sha256(path: text) -> text
 @unsafe(reason: "raw nullable environment lookup; wrapper normalizes absence", capabilities: [ffi])
@@ -192,25 +194,28 @@ pub fn file_read(path: text) -> text:
         case Ok(content): content
         case Err(_): ""
 
-# Exact nullable transport for compiler/runtime owners that already validate
-# read failure and must not pay for Result construction or empty conversion.
-# One direct ABI call; no allocation, normalization, lookup, or retry.
-@always_inline
+# Compatibility APIs declare UTF-8 explicitly and preserve their existing
+# nil/empty/text-error shape. Unknown host encodings require the typed API.
 pub fn file_read_nullable(path: text) -> text?:
-    unsafe(capabilities: [ffi]):
-        rt_file_read_text(host_path_native(path))
+    match file_read_result(path):
+        case Ok(content): content
+        case Err(_): nil
 
 pub fn file_read_result(path: text) -> Result<text, text>:
-    var content: text? = nil
-    unsafe(capabilities: [ffi]):
-        content = rt_file_read_text(host_path_native(path))
-    if content == nil:
-        Err("file read failed: {path}")
-    else:
-        # Nullable extern transport is a bare payload or nil in interpreter
-        # lanes. The nil check above proves this fallback cannot fabricate a
-        # value; it only removes the optional type wrapper.
-        Ok(content ?? "")
+    val codec = match file_default_text_codec():
+        case Ok(value): value
+        case Err(error): return Err(io_text_error_message(error))
+    var session = match FileTextSession.open(path, FileMode.ReadOnly, codec):
+        case Ok(value): value
+        case Err(error): return Err(io_text_error_message(error))
+    val result = session.read()
+    val closed = session.close()
+    match result:
+        case Err(error): Err(io_text_error_message(error))
+        case Ok(value):
+            match closed:
+                case Err(error): Err(io_text_error_message(error))
+                case Ok(_): Ok(value)
 
 # Do NOT forward these through `file_read`. The name `file_read` has a second
 # co-compiled definition (src/lib/nogc_sync_mut/io/file_ops.spl:76) whose body
@@ -237,10 +242,16 @@ pub fn read_file_text_result(path: text) -> Result<text, text>:
     file_read_result(path)
 
 pub fn file_write(path: text, content: text) -> bool:
+    val codec = match file_default_text_codec():
+        case Ok(value): value
+        case Err(_): return false
+    val encoded = match file_session_encode(content, codec, 0):
+        case Ok(bytes): bytes
+        case Err(_): return false
     val native_path = host_path_native(path)
     var wrote = false
     unsafe(capabilities: [ffi]):
-        wrote = rt_file_write_text(native_path, content)
+        wrote = rt_file_write_bytes(native_path, encoded)
     if wrote:
         return true
     # Writing into a nonexistent directory otherwise no-ops silently
@@ -258,7 +269,7 @@ pub fn file_write(path: text, content: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_dir_create_all(host_path_native(parent))
     unsafe(capabilities: [ffi]):
-        rt_file_write_text(native_path, content)
+        rt_file_write_bytes(native_path, encoded)
 
 pub fn write_file(path: text, content: text) -> bool:
     file_write(path, content)
@@ -266,8 +277,13 @@ pub fn write_file(path: text, content: text) -> bool:
 # Exact one-call runtime status for cache/temp-file owners that already create
 # their parent directory and must not gain file_write's retry policy.
 pub fn file_write_exact(path: text, content: text) -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_file_write_text(host_path_native(path), content)
+    val codec = match file_default_text_codec():
+        case Ok(value): value
+        case Err(_): return false
+    val bytes = match file_session_encode(content, codec, 0):
+        case Ok(value): value
+        case Err(_): return false
+    file_write_bytes(path, bytes)
 
 @always_inline
 pub fn file_exists(path: text) -> bool:
@@ -338,11 +354,19 @@ pub fn file_hash_sha256_or_empty(path: text) -> text:
 # every other reader takes the whole file, which is not an option for callers
 # that must inspect the header of a multi-gigabyte artifact (a model shard, an
 # archive index) without paging it in. Returns nil when the path is unreadable
-# or the range lies past the end, so a caller can tell "no such range" from an
-# empty one.
+# or validation fails. A successful short read, including EOF, remains text;
+# size is a cap, not an exact-read requirement. Zero size does not open a file.
 pub fn file_read_text_at_nullable(path: text, offset: i64, size: i64) -> text?:
-    unsafe(capabilities: [ffi]):
-        rt_file_read_text_at_checked(host_path_native(path), offset, size)
+    val codec = match file_default_text_codec():
+        case Ok(value): value
+        case Err(_): return nil
+    if size > codec.input_byte_limit(): return nil
+    val bytes = match external_file_read_bytes_at(path, offset, size):
+        case Ok(value): value
+        case Err(_): return nil
+    match file_session_decode(bytes, codec, offset):
+        case Ok(value): value
+        case Err(_): nil
 
 pub fn file_size(path: text) -> i64:
     val size = unsafe(capabilities: [ffi]):
@@ -615,10 +639,11 @@ pub fn dir_remove_all(path: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_dir_remove_all(host_path_native(path))
 
-@always_inline
 pub fn file_append_text(path: text, content: text) -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_file_append_text(host_path_native(path), content)
+    val codec = match file_default_text_codec():
+        case Ok(value): value
+        case Err(_): return false
+    FileTextSession.write_file(path, content, FileMode.Append, codec).is_ok()
 
 pub fn dir_exists(path: text) -> bool:
     unsafe(capabilities: [ffi]):

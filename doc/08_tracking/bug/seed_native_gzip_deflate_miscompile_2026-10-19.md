@@ -1,9 +1,13 @@
 # Seed native codegen gives wrong gzip/deflate results
 
 **Date:** 2026-10-19
-**Status:** open. `gzip_*`/`deflate_*` are withheld from the compress dynSMF
-bundle (`src/lib/common/compress/dynsmf_entry.spl` and the `compress` manifest
-row in `src/os/smf/dynsmf_session.spl`) until this is fixed.
+**Status:** RESOLVED 2026-10-19. Root cause (C runtime returned raw packed
+u8/u64 slots) fixed in PR #3779; `gzip_*`/`deflate_*` withheld by PR #3773 are
+re-exported from the compress dynSMF bundle (`dynsmf_entry.spl` and the
+`compress` manifest row in `dynsmf_session.spl`). Verified on a seed built from
+release_phase3: native output is byte-identical to the interpreter for empty,
+1 B, 256 B run and 4 KB pseudo-random inputs, round-trips, and `gzip -dc`
+decodes the gzip outputs.
 **Area:** Rust seed native backend; `src/lib/nogc_sync_mut/compression/gzip/`
 
 ## Symptom
