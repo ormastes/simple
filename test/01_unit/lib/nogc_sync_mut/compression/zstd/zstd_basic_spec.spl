@@ -100,6 +100,64 @@ fn make_skippable_frame() -> [u8]:
     out.push(0x00u8)
     out
 
+# Build a frame holding one Compressed_Block with Raw (lit_type 0) or RLE
+# (lit_type 1) literals and zero sequences. size_fmt 0 = 1-byte header (5-bit
+# size), 1 = 2-byte header (12-bit), 3 = 3-byte header (20-bit), RFC 8878
+# §3.1.1.3.1.1. Raw content is (i*7+13)&255; RLE content is 'A'. Every frame
+# built here for the specs below was decoded by host `zstd -d` 1.5.5 and
+# compared equal to the expected content.
+fn make_lit_frame(lit_type: i64, n: i64, size_fmt: i64) -> [u8]:
+    var blk: [u8] = []
+    if size_fmt == 0:
+        blk.push((lit_type | (n << 3)).to_u8())
+    elif size_fmt == 1:
+        blk.push((lit_type | 4 | ((n & 15) << 4)).to_u8())
+        blk.push((n >> 4).to_u8())
+    else:
+        blk.push((lit_type | 12 | ((n & 15) << 4)).to_u8())
+        blk.push(((n >> 4) & 0xFF).to_u8())
+        blk.push((n >> 12).to_u8())
+    if lit_type == 0:
+        var i = 0
+        while i < n:
+            blk.push(((i * 7 + 13) & 0xFF).to_u8())
+            i = i + 1
+    else:
+        blk.push(0x41u8)
+    blk.push(0x00u8)
+    # Magic, FHD 0xA0 (Single_Segment, 4-byte FCS), FCS
+    var out: [u8] = [0x28u8, 0xB5u8, 0x2Fu8, 0xFDu8, 0xA0u8]
+    out.push((n & 0xFF).to_u8())
+    out.push(((n >> 8) & 0xFF).to_u8())
+    out.push(((n >> 16) & 0xFF).to_u8())
+    out.push(((n >> 24) & 0xFF).to_u8())
+    val hdr = 1 | (2 << 1) | (blk.len() << 3)
+    out.push((hdr & 0xFF).to_u8())
+    out.push(((hdr >> 8) & 0xFF).to_u8())
+    out.push(((hdr >> 16) & 0xFF).to_u8())
+    var j = 0
+    while j < blk.len():
+        out.push(blk[j])
+        j = j + 1
+    out
+
+fn expected_lit_content(lit_type: i64, n: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < n:
+        if lit_type == 0:
+            out.push(((i * 7 + 13) & 0xFF).to_u8())
+        else:
+            out.push(0x41u8)
+        i = i + 1
+    out
+
+fn lit_frame_round_trips(lit_type: i64, n: i64, size_fmt: i64) -> bool:
+    val result = zstd_decode(make_lit_frame(lit_type, n, size_fmt))
+    if result.is_err():
+        return false
+    bytes_equal(result.unwrap(), expected_lit_content(lit_type, n))
+
 # ---------------------------------------------------------------------------
 # Specs
 # ---------------------------------------------------------------------------
@@ -202,3 +260,52 @@ describe "zstd decoder":
         expect(result.is_ok()).to_equal(true)
         val output = result.unwrap()
         expect(bytes_equal(output, content)).to_equal(true)
+
+describe "zstd decoder frame header":
+    it "decodes a frame with a 4-byte Frame_Content_Size (FCS flag 2)":
+        # @req: REQ-LIB-ZSTD_ZSTD_BASIC-001
+        step("Verify: FHD 0xA0 carries a 4-byte FCS (RFC 8878 3.1.1.1.4); host zstd -d accepts this frame")
+        val frame: [u8] = [0x28u8, 0xB5u8, 0x2Fu8, 0xFDu8, 0xA0u8, 0x05u8, 0x00u8, 0x00u8, 0x00u8,
+            0x29u8, 0x00u8, 0x00u8, 0x48u8, 0x65u8, 0x6Cu8, 0x6Cu8, 0x6Fu8]
+        val result = zstd_decode(frame)
+        expect(result.is_ok()).to_equal(true)
+        val content: [u8] = [0x48u8, 0x65u8, 0x6Cu8, 0x6Cu8, 0x6Fu8]
+        expect(bytes_equal(result.unwrap(), content)).to_equal(true)
+
+describe "zstd decoder raw/rle literals size formats":
+    it "pins the 2-byte raw literals header bytes host zstd accepts":
+        # @req: REQ-LIB-ZSTD_ZSTD_BASIC-001
+        step("Verify: Size_Format 01 header for 100 raw literals is 0x44 0x06")
+        val frame = make_lit_frame(0, 100, 1)
+        expect(frame[12].to_i64()).to_equal(0x44)
+        expect(frame[13].to_i64()).to_equal(0x06)
+
+    it "decodes raw literals with a 1-byte header (31 bytes)":
+        # @req: REQ-LIB-ZSTD_ZSTD_BASIC-001
+        step("Verify: Size_Format 00 raw literals")
+        expect(lit_frame_round_trips(0, 31, 0)).to_equal(true)
+
+    it "decodes raw literals with a 2-byte header (100 bytes, 12-bit size)":
+        # @req: REQ-LIB-ZSTD_ZSTD_BASIC-001
+        step("Verify: Size_Format 01 raw literals")
+        expect(lit_frame_round_trips(0, 100, 1)).to_equal(true)
+
+    it "decodes raw literals with a 3-byte header (5000 bytes, 20-bit size)":
+        # @req: REQ-LIB-ZSTD_ZSTD_BASIC-001
+        step("Verify: Size_Format 11 raw literals")
+        expect(lit_frame_round_trips(0, 5000, 3)).to_equal(true)
+
+    it "decodes rle literals with a 1-byte header (20 bytes)":
+        # @req: REQ-LIB-ZSTD_ZSTD_BASIC-001
+        step("Verify: Size_Format 00 rle literals")
+        expect(lit_frame_round_trips(1, 20, 0)).to_equal(true)
+
+    it "decodes rle literals with a 2-byte header (100 bytes, 12-bit size)":
+        # @req: REQ-LIB-ZSTD_ZSTD_BASIC-001
+        step("Verify: Size_Format 01 rle literals")
+        expect(lit_frame_round_trips(1, 100, 1)).to_equal(true)
+
+    it "decodes rle literals with a 3-byte header (5000 bytes, 20-bit size)":
+        # @req: REQ-LIB-ZSTD_ZSTD_BASIC-001
+        step("Verify: Size_Format 11 rle literals")
+        expect(lit_frame_round_trips(1, 5000, 3)).to_equal(true)
