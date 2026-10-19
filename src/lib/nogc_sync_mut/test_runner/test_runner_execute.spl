@@ -47,7 +47,7 @@ use std.test_runner.test_executor_parsing.{
     coverage_wrapper_suffix, build_coverage_wrapper,
     extract_coverage_sdn, strip_coverage_blocks,
     COVERAGE_BEGIN, COVERAGE_END,
-    extract_compiler_mcdc_obligation_manifest,
+    extract_compiler_mcdc_obligation_manifest, mcdc_obligation_manifest_absent,
     list_tests_static, extract_static_test_name,
     _tp_get_temp_dir
 }
@@ -1349,6 +1349,14 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         if not mcdc_manifest_valid:
             cleanup_native_generated_files(smf_path, source_path, wrapped_path,
                 cleanup_path, file_path, options.keep_artifacts, if explicit_aot: smf_path + ".cache" else: "", native_quarantine_path)
+            # Only the pure-Simple compiler driver emits the manifest; a compile
+            # that succeeded with no marker at all (e.g. the Rust seed) cannot
+            # instrument, exactly like a failed standalone compile. A present
+            # but malformed manifest is a compiler defect and still fails below.
+            if mcdc_obligation_manifest_absent(compile_output) and not options.coverage:
+                val absent_reason = "MC/DC instrumentation skipped: compiler emitted no MC/DC obligation manifest (only the pure-Simple compiler driver produces it); degraded to plain interpreter execution, which reports this file's REAL pass/fail."
+                return run_test_file_mcdc_interpreter_fallback(file_path, options, start, "mcdc-fallback", absent_reason,
+                    "mcdc-obligation-manifest-absent")
             return TestFileResult(
                 path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
                 duration_ms: (time_now_unix_micros() - start) / 1000,
