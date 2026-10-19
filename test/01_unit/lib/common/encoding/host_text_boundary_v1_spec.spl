@@ -1,0 +1,98 @@
+use std.common.encoding.host_text_boundary_v1.{HostTextCodecErrorV1, host_text_to_utf8_v1, utf8_to_host_text_v1, host_binary_identity_v1}
+use std.spec.{describe, it}
+
+fn check_bytes(actual: Result<[i64], HostTextCodecErrorV1>, expected: [i64]):
+    match actual:
+        Ok(bytes):
+            assert(bytes.len() == expected.len())
+            for index in 0..expected.len():
+                assert(bytes[index] == expected[index])
+        Err(problem): assert(false)
+
+fn check_error(actual: Result<[i64], HostTextCodecErrorV1>):
+    match actual:
+        Ok(bytes): assert(false)
+        Err(problem): assert(problem.reason.len() > 0)
+
+fn check_unknown(actual: Result<[i64], HostTextCodecErrorV1>):
+    match actual:
+        Ok(bytes): assert(false)
+        Err(problem):
+            assert(problem.code == "unsupported_encoding")
+            assert(problem.byte_offset == -1)
+            assert(problem.reason == "unsupported host encoding")
+
+fn check_position(actual: Result<[i64], HostTextCodecErrorV1>, code: text, offset: i64, reason: text):
+    match actual:
+        Ok(bytes): assert(false)
+        Err(problem):
+            assert(problem.code == code)
+            assert(problem.byte_offset == offset)
+            assert(problem.reason == reason)
+
+fn check_pair(utf8: [i64], little: [i64], big: [i64]):
+    check_bytes(host_text_to_utf8_v1(little, "utf-16le"), utf8)
+    check_bytes(host_text_to_utf8_v1(big, "utf-16be"), utf8)
+    check_bytes(utf8_to_host_text_v1(utf8, "utf-16le"), little)
+    check_bytes(utf8_to_host_text_v1(utf8, "utf-16be"), big)
+    check_bytes(host_text_to_utf8_v1(utf8, "utf-8"), utf8)
+    check_bytes(utf8_to_host_text_v1(utf8, "utf-8"), utf8)
+
+describe "explicit strict host text boundaries":
+    it "returns exact typed byte positions without caller prevalidation":
+        check_position(host_text_to_utf8_v1([65, 256, -1], "utf-8"), "invalid_byte", 1, "invalid byte")
+        check_position(host_text_to_utf8_v1([255, 65, -1], "utf-8"), "invalid_byte", 2, "invalid byte")
+        check_position(host_text_to_utf8_v1([65, 128], "utf-8"), "invalid_utf8", 1, "invalid UTF-8 lead")
+        check_position(host_text_to_utf8_v1([65, 224, 65], "utf-8"), "invalid_utf8", 2, "invalid UTF-8 continuation")
+        check_position(host_text_to_utf8_v1([65, 224, 128], "utf-8"), "invalid_utf8", 2, "overlong UTF-8 scalar")
+        check_position(host_text_to_utf8_v1([65, 237, 160, 128], "utf-8"), "invalid_utf8", 2, "UTF-8 surrogate scalar")
+        check_position(host_text_to_utf8_v1([65, 244, 144, 128, 128], "utf-8"), "invalid_utf8", 2, "UTF-8 scalar out of range")
+        check_position(host_text_to_utf8_v1([65, 240, 159, 152], "utf-8"), "truncated_input", 4, "truncated UTF-8")
+        check_position(host_text_to_utf8_v1([65, 0, 0], "utf-16le"), "truncated_input", 3, "truncated UTF-16 unit")
+        check_position(host_text_to_utf8_v1([0, 65, 216, 0, 220], "utf-16be"), "truncated_input", 5, "truncated surrogate pair")
+        check_position(host_text_to_utf8_v1([65, 0, 0, 220], "utf-16le"), "invalid_utf16", 2, "unpaired low surrogate")
+        check_position(host_text_to_utf8_v1([0, 65, 216, 0, 0, 65], "utf-16be"), "invalid_utf16", 2, "unpaired high surrogate")
+        check_position(utf8_to_host_text_v1([65, 194, 65], "utf-16le"), "invalid_utf8", 2, "invalid UTF-8 continuation")
+        check_position(utf8_to_host_text_v1([65, 194], "utf-16be"), "truncated_input", 2, "truncated UTF-8")
+
+    it "preserves scalar limits, embedded NUL, and endian-specific surrogate pairs":
+        check_pair([], [], [])
+        check_pair([65, 194, 128, 224, 160, 128, 240, 159, 152, 128, 0, 66], [65, 0, 128, 0, 0, 8, 61, 216, 0, 222, 0, 0, 66, 0], [0, 65, 0, 128, 8, 0, 216, 61, 222, 0, 0, 0, 0, 66])
+        check_pair([65, 0, 66], [65, 0, 0, 0, 66, 0], [0, 65, 0, 0, 0, 66])
+        check_pair([127, 194, 128], [127, 0, 128, 0], [0, 127, 0, 128])
+        check_pair([223, 191, 224, 160, 128], [255, 7, 0, 8], [7, 255, 8, 0])
+        check_pair([237, 159, 191, 238, 128, 128], [255, 215, 0, 224], [215, 255, 224, 0])
+        check_pair([239, 191, 191], [255, 255], [255, 255])
+        check_pair([240, 144, 128, 128], [0, 216, 0, 220], [216, 0, 220, 0])
+        check_pair([244, 143, 191, 191], [255, 219, 255, 223], [219, 255, 223, 255])
+        check_pair([240, 159, 152, 128], [61, 216, 0, 222], [216, 61, 222, 0])
+
+    it "preserves a declared-endian BOM as content and performs no autodetection":
+        check_pair([239, 187, 191], [255, 254], [254, 255])
+        check_bytes(host_text_to_utf8_v1([255, 254], "utf-16be"), [239, 191, 190])
+
+    it "rejects unknown metadata before invalid or empty payloads in either direction":
+        for encoding in ["", "utf-16", "UTF-8", "latin1", "ascii", "windows-1252", "guess"]:
+            check_unknown(host_text_to_utf8_v1([], encoding))
+            check_unknown(utf8_to_host_text_v1([], encoding))
+            check_unknown(host_text_to_utf8_v1([-1], encoding))
+            check_unknown(utf8_to_host_text_v1([-1], encoding))
+
+    it "rejects malformed UTF8 ingress and egress without replacement":
+        for bytes in [[128], [255], [192, 128], [193, 191], [194], [224, 160], [240, 144, 128], [224, 128, 128], [240, 128, 128, 128], [237, 160, 128], [237, 191, 191], [244, 144, 128, 128], [245, 128, 128, 128], [194, 65], [-1], [256], [65, 240, 159]]:
+            check_error(host_text_to_utf8_v1(bytes, "utf-8"))
+            for destination in ["utf-8", "utf-16le", "utf-16be"]:
+                check_error(utf8_to_host_text_v1(bytes, destination))
+
+    it "rejects truncated units, lone surrogates, bad pairs and nonbytes":
+        for bytes in [[0], [0, 216], [0, 220], [0, 216, 65, 0], [0, 216, 0], [0, 216, 0, 216], [65, 0, 0], [-1, 0], [256, 0]]:
+            check_error(host_text_to_utf8_v1(bytes, "utf-16le"))
+        for bytes in [[0], [216, 0], [220, 0], [216, 0, 0, 65], [216, 0, 0], [216, 0, 216, 0], [0, 65, 0], [0, -1], [0, 256]]:
+            check_error(host_text_to_utf8_v1(bytes, "utf-16be"))
+
+    it "leaves binary payload byte values and length unchanged":
+        val binary = [255, 0, 192, 128, 65]
+        val output = host_binary_identity_v1(binary)
+        assert(output.len() == binary.len())
+        for index in 0..binary.len():
+            assert(output[index] == binary[index])
