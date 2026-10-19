@@ -15611,16 +15611,31 @@ int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
     return rt_secure_temp_dir_core(parent, prefix_ptr, prefix_len);
 }
 
-int64_t rt_secure_temp_dir_set_parent(const uint8_t* parent_ptr, uint64_t parent_len) {
-    if (!rt_text_arg_to_path(parent_ptr, parent_len,
+/* The setters take ONE boxed text RuntimeValue, not a (ptr, len) pair.
+ * A (ptr, len) contract exists only in the compiler's text_arg_indices
+ * tables, so any seed that predates those rows (the tracked seed used for
+ * producer3, 2026-10-18) passed the handle in the first word and an
+ * unrelated register in the second; rt_text_arg_to_path then refused and
+ * snapshot staging failed with no diagnostic. A single tagged handle is the
+ * generic extern crossing every seed and both pure-Simple backends already
+ * emit, so the split API needs no table row at all. See
+ * doc/08_tracking/bug/tracked_seed_cranelift_split_secure_temp_dir_refuses_20261019.md */
+static int rt_secure_temp_dir_slot_from_value(int64_t value, char* slot, size_t slot_size) {
+    int64_t len = rt_string_len(value);
+    if (len <= 0) return 0;
+    return rt_text_arg_to_path(rt_string_data(value), (uint64_t)len, slot, slot_size);
+}
+
+int64_t rt_secure_temp_dir_set_parent(int64_t parent_value) {
+    if (!rt_secure_temp_dir_slot_from_value(parent_value,
                              rt_secure_temp_dir_parent_slot,
                              sizeof(rt_secure_temp_dir_parent_slot))) return 0;
     rt_secure_temp_dir_parent_ready = 1;
     return 1;
 }
 
-int64_t rt_secure_temp_dir_set_prefix(const uint8_t* prefix_ptr, uint64_t prefix_len) {
-    if (!rt_text_arg_to_path(prefix_ptr, prefix_len,
+int64_t rt_secure_temp_dir_set_prefix(int64_t prefix_value) {
+    if (!rt_secure_temp_dir_slot_from_value(prefix_value,
                              rt_secure_temp_dir_prefix_slot,
                              sizeof(rt_secure_temp_dir_prefix_slot))) return 0;
     if (rt_secure_temp_dir_prefix_slot[0] == '\0' ||
