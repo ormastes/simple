@@ -5,7 +5,7 @@ use compiler.driver.driver_build.managed_parse_group_contract.*
 use compiler.driver.driver_build.managed_parse_group_result_v2.*
 use compiler.driver.driver_build.managed_parse_diagnostic_v2.*
 use compiler.driver.driver_build.managed_parse_compatibility.*
-use compiler.frontend.flat_ast_bridge.{flat_pool_transport_capture_arm_v1, flat_pool_transport_capture_take_v1, parse_and_build_module_scoped, build_module_from_flat_pool_blob}
+use compiler.frontend.flat_ast_bridge.{FlatPoolTransportCaptureV1, flat_pool_transport_capture_arm_v1, flat_pool_transport_capture_take_v1, parse_and_build_module_scoped, build_module_from_flat_pool_blob}
 use compiler.frontend.frontend.{frontend_prepare_preprocessed_source_v1}
 use compiler.frontend.frontend_advisory_preprocess_port_v1.{FrontendAdvisoryPreprocessPolicyV1}
 use compiler.frontend.frontend_target_cfg_receipt_v1.{frontend_cfg_decision_digest_v1}
@@ -56,9 +56,12 @@ fn managed_parse_group_diagnostic_v2(module: ManagedParseModuleV1, severity: Sev
     value.notes = ["diagnostic-id:" + managed_parse_diagnostic_id_v2(value, module, ordinal)]
     value
 
-fn managed_parse_group_error_v2(module: ManagedParseModuleV1, code: text, detail: text) -> ManagedParseModuleResultV2:
-    ManagedParseModuleResultV2(module.module_id, module.source_digest, "ERROR", "", "", false, false,
-        [managed_parse_group_diagnostic_v2(module, Severity.Error, code, detail, 0)])
+fn managed_parse_group_error_v2(module: ManagedParseModuleV1, code: text, detail: text, warning: text = "") -> ManagedParseModuleResultV2:
+    var diagnostics: [DiagnosticV1] = []
+    if warning != "":
+        diagnostics = diagnostics.push(managed_parse_group_diagnostic_v2(module, Severity.Warning, "W-CAPTURE-WRITE", warning, 0))
+    diagnostics = diagnostics.push(managed_parse_group_diagnostic_v2(module, Severity.Error, code, detail, diagnostics.len()))
+    ManagedParseModuleResultV2(module.module_id, module.source_digest, "ERROR", "", "", false, false, diagnostics)
 
 fn managed_parse_group_errors_v2(module: ManagedParseModuleV1, warning: text = "") -> ManagedParseModuleResultV2:
     var diagnostics: [DiagnosticV1] = []
@@ -126,8 +129,20 @@ fn managed_parse_group_module_v2(owner: ManagedParseGroupOwnerV2, module: Manage
     if parser_has_errors(): return managed_parse_group_errors_v2(module, warning_detail)
     if domain_blocks.len() > 0: parsed.domain_blocks = domain_blocks
     val _completed = desugar_module(parsed)
-    if capture.blob == "" or text_byte_len(capture.blob) > 134217728:
-        return managed_parse_group_error_v2(module, "E-PARSE-CAPTURE", "parser transport artifact absent or oversized")
+    managed_parse_group_publish_capture_v2(owner, module, capture, authority, 134217728)
+
+fn managed_parse_group_publish_capture_v2(owner: ManagedParseGroupOwnerV2, module: ManagedParseModuleV1,
+    capture: FlatPoolTransportCaptureV1, authority: text, maximum_blob_bytes: i64) -> ManagedParseModuleResultV2:
+    # The production caller uses 128 MiB. A caller may tighten, never widen,
+    # this publication bound; all post-parse failures retain observed warnings.
+    val warning_detail = if capture.warning == "": "" else:
+        "line " + str(capture.warning_line) + ", column " + str(capture.warning_col) + ": " + capture.warning
+    if maximum_blob_bytes < 1 or maximum_blob_bytes > 134217728 or
+            capture.blob == "" or text_byte_len(capture.blob) > maximum_blob_bytes:
+        return managed_parse_group_error_v2(module, "E-PARSE-CAPTURE", "parser transport artifact absent or oversized", warning_detail)
+    val key = managed_parse_module_cache_key_v1(owner.base.snapshot, module)
+    val path = owner.base.root + "/cache/" + key + ".v2.sdn"
+    val authority_path = owner.base.root + "/cache/" + key + ".v2.authority"
     var diagnostics: [DiagnosticV1] = []
     if capture.warning != "":
         diagnostics = [managed_parse_group_diagnostic_v2(module, Severity.Warning, "W-CAPTURE-WRITE", warning_detail, 0)]
@@ -137,9 +152,9 @@ fn managed_parse_group_module_v2(owner: ManagedParseGroupOwnerV2, module: Manage
         false, capture.reusable, diagnostics)
     val encoded = managed_parse_module_result_encode_v2(value, module)
     if encoded == "" or not file_atomic_write(owner.base.root + "/" + relative, capture.blob):
-        return managed_parse_group_error_v2(module, "E-PARSE-CACHE-IO", "cannot persist bounded transport artifact")
+        return managed_parse_group_error_v2(module, "E-PARSE-CACHE-IO", "cannot persist bounded transport artifact", warning_detail)
     if value.reusable and (not file_atomic_write(path, encoded) or not file_atomic_write(authority_path, authority)):
-        return managed_parse_group_error_v2(module, "E-PARSE-CACHE-IO", "cannot persist reusable parse receipt")
+        return managed_parse_group_error_v2(module, "E-PARSE-CACHE-IO", "cannot persist reusable parse receipt", warning_detail)
     value
 
 fn managed_parse_group_action_owned_v2(owner: ManagedParseGroupOwnerV2, action: ManagedParseActionV1) -> ManagedParseGroupActionTransferV2:
@@ -160,3 +175,4 @@ fn managed_parse_group_action_owned_v2(owner: ManagedParseGroupOwnerV2, action: 
 
 export ManagedParseGroupOwnerV2, ManagedParseGroupActionTransferV2
 export managed_parse_group_install_v2, managed_parse_group_action_owned_v2
+export managed_parse_group_publish_capture_v2

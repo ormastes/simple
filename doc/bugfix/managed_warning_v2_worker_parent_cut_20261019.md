@@ -4,6 +4,12 @@ Owner: Astra feature acceptance. Isolated branch `work/managed-warning-v2-202610
 base `bb989decd74`. Source candidate only; runtime, native/compiler, SSpec/docgen,
 process recovery and performance qualification UNRUN. No full-feature PASS.
 
+Cycle-two correction retains already observed warnings on every later capture
+bound or publication failure, not only parser errors. The common failure builder
+assigns Warning ordinal zero and Error at the next ordinal. Real-parser bounded
+publication and actual obstructed-artifact filesystem regressions are authored;
+the publication helper permits only stricter limits than production's 128 MiB.
+
 Depends on the separately owned `managed_parse_compatibility.spl` and
 `managed_parse_run_admission.spl` authority packet, qualification producer/evidence
 and explicit CLI admission. Their function interfaces were agreed directly with

@@ -9,6 +9,8 @@ use compiler.driver.driver_build.managed_parse_group_result_v2.*
 use compiler.driver.driver_build.managed_parse_compatibility.*
 use compiler.frontend.frontend_shared_parse_cas_v1.{frontend_shared_parse_feature_identity_v1}
 use compiler.frontend.core.cfg_platform.{cfg_detect_os, cfg_detect_arch, cfg_detect_cpu}
+use compiler.frontend.flat_ast_bridge.{flat_pool_transport_capture_arm_v1, flat_pool_transport_capture_take_v1, parse_and_build_module_scoped}
+use compiler.core.parser.{parser_has_errors}
 use compiler.common.diagnostics.severity.{Severity}
 use app.bootstrap_builder.grouped_parse_result.{grouped_parse_result_decode_v2}
 use app.bootstrap_builder.grouped_parse_cache_v2.{grouped_parse_retain_cache_v2}
@@ -16,7 +18,7 @@ use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io.env_ops.{env_get, env_set, cwd}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
-use std.nogc_sync_mut.io.dir_ops.{dir_create}
+use std.nogc_sync_mut.io.dir_ops.{dir_create, dir_remove_all}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_exists}
 
 fn warning_v2_source() -> text:
@@ -46,6 +48,47 @@ fn warning_v2_action(snapshot: ManagedParseSnapshotV1, id: text) -> ManagedParse
         snapshot.snapshot_digest, snapshot.cache_identity, ["package"], true)
 
 describe "REQ-IM-016: actual warning-success parser and parent consumers":
+    it "should retain actual observed warnings on capture bounds and artifact publication failures":
+        val previous_policy = env_get("SIMPLE_CAPTURE_WRITE_CHECK")
+        val previous_identity = env_get(MANAGED_PARSE_IDENTITY_ENV_V2)
+        expect(env_set("SIMPLE_CAPTURE_WRITE_CHECK", "warning")).to_be(true)
+        val identity = managed_parse_frontend_identity_v2("publication-failure-fixture", sha256_text("base-cache"),
+            frontend_shared_parse_feature_identity_v1(), "warning").unwrap()
+        expect(env_set(MANAGED_PARSE_IDENTITY_ENV_V2, identity)).to_be(true)
+        val root = warning_v2_root()
+        val snapshot = warning_v2_snapshot(root, identity)
+        val owner = managed_parse_group_install_v2(root, snapshot).unwrap()
+        val module = snapshot.modules[1]
+        step("Feed a real warning parse capture to the production publisher under a tighter byte bound")
+        flat_pool_transport_capture_arm_v1()
+        val _parsed = parse_and_build_module_scoped(warning_v2_source(), module.source_path, false)
+        val parse_failed = parser_has_errors()
+        val capture = flat_pool_transport_capture_take_v1()
+        val oversized = managed_parse_group_publish_capture_v2(owner, module, capture, "", 1)
+        step("Obstruct the actual artifact directory and execute the installed action owner")
+        expect(dir_remove_all(root + "/artifacts")).to_be(true)
+        expect(file_atomic_write(root + "/artifacts", "blocked by regular file")).to_be(true)
+        val action = warning_v2_action(snapshot, "failed-write")
+        val failed = managed_parse_group_action_owned_v2(owner, action).result
+        expect(env_set("SIMPLE_CAPTURE_WRITE_CHECK", previous_policy)).to_be(true)
+        expect(env_set(MANAGED_PARSE_IDENTITY_ENV_V2, previous_identity)).to_be(true)
+        expect(parse_failed).to_be(false)
+        expect(capture.blob.len()).to_be_greater_than(1)
+        expect(capture.warning == "").to_be(false)
+        expect(oversized.status).to_equal("ERROR")
+        expect(oversized.diagnostics.len()).to_equal(2)
+        expect(oversized.diagnostics[0].severity).to_equal(Severity.Warning)
+        expect(oversized.diagnostics[1].code).to_equal("E-PARSE-CAPTURE")
+        expect(failed.modules[1].status).to_equal("ERROR")
+        expect(failed.modules[1].diagnostics.len()).to_equal(2)
+        expect(failed.modules[1].diagnostics[0].severity).to_equal(Severity.Warning)
+        expect(failed.modules[1].diagnostics[1].code).to_equal("E-PARSE-CACHE-IO")
+        expect(failed.modules[1].diagnostics[0].notes).to_equal(oversized.diagnostics[0].notes)
+        expect(failed.modules[1].blob_path).to_equal("")
+        expect(failed.modules[1].reusable).to_be(false)
+        expect(managed_parse_module_result_encode_v2(oversized, module) == "").to_be(false)
+        expect(managed_parse_action_result_encode_v2(snapshot, failed) == "").to_be(false)
+
     it "should preserve warning/error diagnostics, reparse warning results and reuse only clean modules":
         val previous_policy = env_get("SIMPLE_CAPTURE_WRITE_CHECK")
         val previous_identity = env_get(MANAGED_PARSE_IDENTITY_ENV_V2)
