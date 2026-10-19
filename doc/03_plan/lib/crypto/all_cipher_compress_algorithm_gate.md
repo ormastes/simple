@@ -254,7 +254,7 @@ into <=128 KiB / <=64 KiB blocks (were invalid above the limit); AES-GCM
 S-box built once per operation (was rebuilt per byte lookup) plus a NIST
 GCM KAT; RSAES-PKCS1-v1_5 type-2 PS is random nonzero (was fixed 0xFF);
 nvfs LZ4 extents use the real LZ4 block codec with incompressible fallback;
-browser HTTP/1.1 client requests and decodes gzip/deflate (zstd held back: predefined-table frames rejected, ~29 MB import RSS).
+browser HTTP/1.1 client requests and decodes gzip/deflate (zstd held back only by ~29 MB import RSS per interpreted process); the zstd decoder now handles Predefined_Mode and Repeat_Mode sequence tables (#3739).
 
 Remaining, recorded rather than done:
 
