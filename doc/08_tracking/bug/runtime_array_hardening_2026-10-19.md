@@ -1,6 +1,6 @@
 # Array semantics hardening across interpreter, JIT and native
 
-**Status:** 7 FIXED, 2 RECORDED (branch `work/runtime-array-hardening`, base
+**Status:** 7 FIXED, 3 RECORDED (branch `work/runtime-array-hardening`, base
 `origin/release_phase3` @ `ea83abd9595`, which includes PR #3779).
 **Found while fixing:** `native_index_get_packed_raw_slot_2026-10-19.md`
 ("Still open" list) and the review of PR #3779.
@@ -144,6 +144,23 @@ box (`rt_value_u64`, Rust `HeapUInt`).
   method lowering (`mir/lower/lowering_expr_method.rs`), like
   `box_arg_for_any_param` already does for dict keys. Not changed here,
   because it affects every untyped method call.
+
+## 10. Generic-layout `[u64]` holding words >= 2^60 (JIT + native) — RECORDED (identical on base)
+
+- `var w: [u64] = []; w.push(1152921504606846981u64)` is a generic (non-packed)
+  array. The interpreter prints `w[0]=1152921504606846981`. JIT and native
+  print `17293822569102704645` (the same bits plus `0xE000000000000000`, a
+  sign-extended inline box) on both base and this branch. `for y in w` takes
+  the `rt_for_iterable` path there, not the fixed typed loop. Rust
+  `rt_typed_words_u64_at` returns `to_raw()` for a heap box in a generic slot,
+  where C uses `rt_value_as_u64`. The writer side (`rt_typed_words_u64_push`
+  on a generic array) has to be audited together with it.
+- An untyped `data.push(v)` with `v: u64 = 2^64 - 2` reads back garbage in
+  JIT and native (base too). The cause is the same as 9: the argument is not
+  boxed. Rust `rt_array_set`/`rt_array_push` U64 arms decode with `as_int()`,
+  which knows `HeapInt` but not `HeapUInt`. The C twin
+  (`spl_core_packed_element_arg`) also decodes u64 boxes. That is a known
+  write-side divergence.
 
 ## Tests
 
