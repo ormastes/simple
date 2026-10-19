@@ -11,6 +11,10 @@ REQ-IM-007/008/012/016, NFR-IM-004. Runtime/docgen UNRUN.
 3. Encode/decode an exact snapshot/action aggregate. Warning success has empty
    aggregate error but cannot authorize new-work reuse. A successor lease cannot
    consume the old receipt. A clean reusable result can retain reuse eligibility.
+4. Preserve an ordered Warning+Error result with no successful artifact; reject
+   ERROR carrying warnings only. Both diagnostic identities bind their positions.
+5. Build a shape-valid action with 1024 long package identifiers whose V1 wire
+   exceeds 64 KiB. Reject empty embedded action encodings before aggregate output.
 
 Codec payload fixtures are not parser artifacts or live process evidence.
 Actual transport capture has its separate real-parser spec. Parent admission,

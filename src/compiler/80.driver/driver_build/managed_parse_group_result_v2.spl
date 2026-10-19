@@ -40,8 +40,10 @@ fn managed_parse_module_result_validate_v2(value: ManagedParseModuleResultV2, mo
     elif value.status == "ERROR":
         if value.blob_path != "" or value.blob_digest != "" or value.reused or value.reusable or value.diagnostics.len() == 0:
             return "invalid failed result"
+        var has_error = false
         for diagnostic in value.diagnostics:
-            if diagnostic.severity != Severity.Error: return "failed result contains non-error diagnostic"
+            if diagnostic.severity == Severity.Error: has_error = true
+        if not has_error: return "failed result lacks error diagnostic"
     else: return "unknown result status"
     ""
 
@@ -116,7 +118,10 @@ fn managed_parse_module_result_decode_v2(payload: text, module: ManagedParseModu
 fn managed_parse_action_result_validate_v2(snapshot: ManagedParseSnapshotV1, action: ManagedParseActionV1, value: ManagedParseActionResultV2) -> text:
     val invalid = managed_parse_action_validate_v1(snapshot, action)
     if invalid != "": return invalid
-    if managed_parse_action_encode_v1(action) != managed_parse_action_encode_v1(value.action): return "result action differs"
+    val expected_action_wire = managed_parse_action_encode_v1(action)
+    val observed_action_wire = managed_parse_action_encode_v1(value.action)
+    if expected_action_wire == "" or observed_action_wire == "": return "result action exceeds wire bound"
+    if expected_action_wire != observed_action_wire: return "result action differs"
     if not builder_text_valid_v1(value.error) or text_byte_len(value.error) > 8192: return "invalid aggregate error"
     if value.modules.len() == 0 or value.modules.len() > 4096: return "invalid result inventory size"
     var index = 0
@@ -146,7 +151,7 @@ fn managed_parse_action_result_encode_v2(snapshot: ManagedParseSnapshotV1, value
         val encoded = managed_parse_module_result_encode_v2(value.modules[index], module)
         if encoded == "": return ""
         total = total + text_byte_len(encoded)
-        if total > 16700000: return ""
+        if total > 16777216: return ""
         val content = match managed_parse_module_result_to_sdn_v2(value.modules[index], module):
             Ok(item): item
             Err(_reason): return ""

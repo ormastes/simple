@@ -23,6 +23,48 @@ fn result_v2_success(module: ManagedParseModuleV1) -> ManagedParseModuleResultV2
         "artifacts/" + digest + ".flat", digest, false, false, [result_v2_warning(module)])
 
 describe "REQ-IM-012: typed V2 success and nonreuse remain independent":
+    it "should preserve ordered mixed warnings and errors without admitting warning-only failure":
+        val module = result_v2_module()
+        val warning = result_v2_warning(module)
+        var error = DiagnosticV1(Severity.Error, "E-PARSE", "syntax error", Some(module.source_path),
+            None, [], [], [], [], [], None)
+        error.notes = ["diagnostic-id:" + managed_parse_diagnostic_id_v2(error, module, 1)]
+        val mixed = ManagedParseModuleResultV2(module.module_id, module.source_digest,
+            "ERROR", "", "", false, false, [warning, error])
+        val wire = managed_parse_module_result_encode_v2(mixed, module)
+        expect(wire == "").to_be(false)
+        val decoded = managed_parse_module_result_decode_v2(wire, module).unwrap()
+        expect(decoded.diagnostics[0].severity).to_equal(Severity.Warning)
+        expect(decoded.diagnostics[1].severity).to_equal(Severity.Error)
+        var invalid = mixed
+        invalid.diagnostics = [warning]
+        expect(managed_parse_module_result_encode_v2(invalid, module)).to_equal("")
+
+    it "should reject an oversized action before comparing empty encodings":
+        var modules: [ManagedParseModuleV1] = []
+        var members: [text] = []
+        for index in 0..1024:
+            val package = "package-" + str(index) + "x".repeat(64)
+            members = members.push(package)
+            modules = modules.push(ManagedParseModuleV1("module-" + str(index), package,
+                "src/member-" + str(index) + ".spl", sha256_text("source")))
+        var snapshot = ManagedParseSnapshotV1("worker", 1, sha256_text("worker"), "", sha256_text("cache"),
+            "linux", "x86_64", "x86_64", 1048576, modules)
+        snapshot.snapshot_digest = managed_parse_snapshot_digest_v1(snapshot)
+        val action = ManagedParseActionV1("action", "group", "worker", 1, "lease", snapshot.snapshot_digest,
+            snapshot.cache_identity, members, true)
+        expect(managed_parse_action_validate_v1(snapshot, action)).to_equal("")
+        expect(managed_parse_action_encode_v1(action)).to_equal("")
+        var results: [ManagedParseModuleResultV2] = []
+        for module in modules:
+            var value = result_v2_success(module)
+            value.diagnostics = []
+            value.reusable = true
+            results = results.push(value)
+        val result = ManagedParseActionResultV2(action, results, "")
+        expect(managed_parse_action_result_validate_v2(snapshot, action, result)).to_equal("result action exceeds wire bound")
+        expect(managed_parse_action_result_encode_v2(snapshot, result)).to_equal("")
+
     it "should round-trip warning success with actual strict SDN codecs and no V1 downgrade":
         val module = result_v2_module()
         val value = result_v2_success(module)
