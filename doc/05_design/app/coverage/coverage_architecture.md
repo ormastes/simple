@@ -135,6 +135,19 @@ Maps AST nodes to their source locations:
 
 ### Decision Coverage
 
+> **Current (2026-10-19):** probes are `record_decision_site(line, column, sub, result)`
+> and `eval_decision_cond(...)` in `interpreter/coverage_helpers.rs`. A site is
+> (file, anchor line, anchor column, sub): `if`/`while` use their span; `elif` #i
+> the parent `if` span + i; a match guard its arm span (unguarded arms are not
+> decisions); if-expressions and standalone `and`/`or` the enclosing function
+> span + a hash of the expression. Conditions are the atomic operands of
+> `and`/`or` trees, recorded via the runtime condition store; short-circuited
+> operands record nothing. `interpreter/coverage_sites.rs` registers every site
+> at module load. With coverage off each probe is one enabled check. The
+> description below (`<source>`, line offsets, eager both-operand recording)
+> is the pre-2026-10-19 design. See `doc/07_guide/infra/testing/coverage.md`.
+
+
 **Implementation**: Control flow statements in `src/rust/compiler/src/interpreter_control.rs`
 
 1. **If Statements** (`exec_if()` line ~100)
