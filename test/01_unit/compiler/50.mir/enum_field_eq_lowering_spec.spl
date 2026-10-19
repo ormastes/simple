@@ -7,6 +7,15 @@ Stage2 failed building simple_test_runner with
 on `left.evidence_quality == ResourceEvidenceQuality.Unavailable`, where both
 the struct and the enum come from another module. The enum operand was routed
 to the struct `__eq__` dispatch instead of the enum compare (rt_native_eq).
+
+r13 Stage 2 (2026-10-19) reproduced the same error natively with THREE modules
+when the compare sits in a NON-entry module: `lib.model` declares `enum Kind`,
+`app.consumer` declares `struct LocalProv(kind: Kind)` and compares
+`p.kind != Kind.PureSimple`, `app.main` only calls `prov_ok`. The native
+pipeline lowers every module on ONE shared MirLowering after prescanning all
+of them (driver_pipeline_lowering.spl), entry first; the rows below drive that
+exact shape in-process, with and without a HIR codec round-trip of the enum
+module (the shard-cache path dependency HIR takes natively).
 """
 
 # @tag: unit, compiler, mir, enum
@@ -20,11 +29,12 @@ use compiler.hir.hir_lowering.types.{hirlowering_for_module}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
 use compiler.hir.hir_types.*
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode_stable}
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir._MirLowering.module_lowering.*
 
 val provider_source = "pub enum Quality:\n    Exact\n    Unavailable\n\npub struct Usage:\n    quality: Quality\n    n: i64\n"
-val consumer_source = "use lib.dep.\{Quality, Usage\}\n\nfn is_missing(u: Usage) -> bool:\n    u.quality == Quality.Unavailable\n\nfn is_present(u: Usage) -> bool:\n    u.quality != Quality.Unavailable\n\nfn both(a: Usage, b: Usage) -> bool:\n    a.quality == Quality.Exact and b.quality == Quality.Exact\n\nfn same(a: Usage, b: Usage) -> bool:\n    a.quality == b.quality\n"
+val consumer_source = "use lib.dep.\{Quality, Usage\}\n\nfn is_missing(u: Usage) -> bool:\n    u.quality == Quality.Unavailable\n\nfn is_present(u: Usage) -> bool:\n    u.quality != Quality.Unavailable\n\nfn both(a: Usage, b: Usage) -> bool:\n    a.quality == b.quality and b.quality == Quality.Exact\n\nfn same(a: Usage, b: Usage) -> bool:\n    a.quality == b.quality\n"
 
 fn consumer_mir_errors() -> text:
     val log = Logger(level: 0)
@@ -38,9 +48,12 @@ fn consumer_mir_errors() -> text:
     var consumer_lowering = hirlowering_for_module("app.main", surfaces)
     val provider_hir = provider_lowering.lower_module(provider_ast)
     val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var hm: Dict<text, HirModule> = {}
+    hm["lib.dep"] = provider_hir
+    hm["app.main"] = consumer_hir
     var mir_lowering = MirLowering.new(consumer_hir.symbols)
-    mir_lowering.prescan_module_struct_names(provider_hir)
-    mir_lowering.prescan_module_struct_names(consumer_hir)
+    mir_lowering.prescan_module_struct_names(hm, "lib.dep")
+    mir_lowering.prescan_module_struct_names(hm, "app.main")
     val consumer_mir = mir_lowering.lower_module(consumer_hir)
     var out = ""
     for e in mir_lowering.errors:
@@ -52,6 +65,81 @@ describe "enum equality on an imported struct field":
         val errs = consumer_mir_errors()
         print "mir errors: [{errs}]"
         expect(errs.contains("operator overload for struct")).to_equal(false)
+
+# Three modules, compare in the NON-entry module, one shared MirLowering.
+val model_source = "pub enum Kind:\n    PureSimple\n    Other\n\nexport Kind\n"
+val nonentry_source = "use lib.model.\{Kind\}\n\npub struct LocalProv:\n    kind: Kind\n    flag: bool\n\npub fn prov_ok(p: LocalProv) -> bool:\n    if p.kind != Kind.PureSimple or not p.flag:\n        return false\n    true\n\nexport LocalProv, prov_ok\n"
+val entry_source = "use lib.model.\{Kind\}\nuse app.consumer.\{LocalProv, prov_ok\}\n\nfn main() -> i64:\n    if prov_ok(LocalProv(kind: Kind.PureSimple, flag: true)):\n        print \"ok\"\n    0\n"
+
+# `std.`-spelled import of a `lib.`-keyed module: the native closure registers
+# src/lib files under their path-derived `lib.common....` name while import
+# lines say `std.common....` (resolve_module_key swaps the prefix). r13 p3b8
+# failed in exactly this shape: `use std.common.zz_natfront_probe.model.{Kind}`.
+val std_model_source = "pub enum Kind:\n    PureSimple\n    Other\n\nexport Kind\n"
+val std_nonentry_source = "use std.common.zz.model.\{Kind\}\n\npub struct LocalProv:\n    kind: Kind\n    flag: bool\n\npub fn prov_ok(p: LocalProv) -> bool:\n    if p.kind != Kind.PureSimple or not p.flag:\n        return false\n    true\n\nexport LocalProv, prov_ok\n"
+val std_entry_source = "use std.common.zz.model.\{Kind\}\nuse app.consumer.\{LocalProv, prov_ok\}\n\nfn main() -> i64:\n    if prov_ok(LocalProv(kind: Kind.PureSimple, flag: true)):\n        print \"ok\"\n    0\n"
+
+fn shared_lowering_errors(roundtrip_model: bool) -> text:
+    shared_lowering_errors_for(roundtrip_model, "lib.model", "lib/model.spl", model_source, nonentry_source, entry_source)
+
+fn shared_lowering_errors_for(roundtrip_model: bool, model_key: text, model_path: text, model_src: text, consumer_src: text, entry_src: text) -> text:
+    val log = Logger(level: 0)
+    val model_ast = parse_full_frontend(model_src, model_path, model_key, log)
+    val consumer_ast = parse_full_frontend(consumer_src, "app/consumer.spl", "app.consumer", log)
+    val entry_ast = parse_full_frontend(entry_src, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules[model_key] = model_ast
+    modules["app.consumer"] = consumer_ast
+    modules["app.main"] = entry_ast
+    val sources = [
+        SourceFile(path: model_path, content: model_src, module_name: model_key),
+        SourceFile(path: "app/consumer.spl", content: consumer_src, module_name: "app.consumer"),
+        SourceFile(path: "app/main.spl", content: entry_src, module_name: "app.main"),
+    ]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var model_lowering = hirlowering_for_module(model_key, surfaces)
+    var consumer_lowering = hirlowering_for_module("app.consumer", surfaces)
+    var entry_lowering = hirlowering_for_module("app.main", surfaces)
+    var model_hir = model_lowering.lower_module(model_ast)
+    if roundtrip_model:
+        val decoded = hir_module_decode_stable(hir_module_encode(model_hir))
+        if decoded == nil:
+            return "codec: model module did not round-trip\n"
+        model_hir = decoded.unwrap()
+    val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    val entry_hir = entry_lowering.lower_module(entry_ast)
+    var hm: Dict<text, HirModule> = {}
+    hm[model_key] = model_hir
+    hm["app.consumer"] = consumer_hir
+    hm["app.main"] = entry_hir
+    var ml = MirLowering.new(entry_hir.symbols)
+    # Entry first in the prescan too: the native driver walks
+    # ctx.hir_modules.keys() with the entry ahead of its dependencies, so the
+    # NAME-keyed struct rows are first-wins filled from the entry's imported
+    # copy of LocalProv (entry-local symbol ids), not from app.consumer.
+    ml.prescan_module_struct_names(hm, "app.main")
+    ml.prescan_module_struct_names(hm, "app.consumer")
+    ml.prescan_module_struct_names(hm, model_key)
+    # Entry first, then dependencies -- the native feed order.
+    ml.lower_module(entry_hir, [], true)
+    ml.lower_module(consumer_hir, [], false)
+    ml.lower_module(model_hir, [], false)
+    var out = ""
+    for e in ml.errors:
+        out = out + e.message + "\n"
+    out
+
+describe "enum equality in a non-entry module on the shared lowering":
+    it "lowers p.kind != Kind.Variant in the non-entry module (in-process HIR)":
+        val errs = shared_lowering_errors(false)
+        print "mir errors: [{errs}]"
+        expect(errs.contains("operator overload for struct")).to_equal(false)
+
+    it "lowers it when the enum module is lib.-keyed but imported as std. (r13 p3b8 shape)":
+        val errs = shared_lowering_errors_for(false, "lib.common.zz.model", "src/lib/common/zz/model.spl", std_model_source, std_nonentry_source, std_entry_source)
+        print "mir errors (std import): [{errs}]"
+        expect(errs.contains("operator overload for struct")).to_equal(false)
+
 
 # Same-named types in different modules: the field type must be rebound by its
 # module-qualified ownership key (`<module>::<Name>`), never by bare name. An
@@ -75,9 +163,12 @@ fn field_binding_for_owner_key(owner_key_override: text) -> text:
     var consumer_lowering = hirlowering_for_module("app.main", surfaces)
     val dep_hir = dep_lowering.lower_module(dep_ast)
     val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var hm: Dict<text, HirModule> = {}
+    hm["lib.dep"] = dep_hir
+    hm["app.main"] = consumer_hir
     var mir_lowering = MirLowering.new(consumer_hir.symbols)
-    mir_lowering.prescan_module_struct_names(dep_hir)
-    mir_lowering.prescan_module_struct_names(consumer_hir)
+    mir_lowering.prescan_module_struct_names(hm, "lib.dep")
+    mir_lowering.prescan_module_struct_names(hm, "app.main")
     mir_lowering.lower_module(consumer_hir)
     if not mir_lowering.struct_field_hir_type.contains("Job"):
         return "no-layout"
