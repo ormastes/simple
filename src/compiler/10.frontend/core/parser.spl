@@ -15,6 +15,7 @@
 
 use compiler.core.tokens.{tok_kind_name, keyword_lookup}
 use compiler.core.tokens.{TOK_IDENT}
+use compiler.core.tokens.{TOK_INT_LIT}
 use compiler.core.tokens.{TOK_KW_FN, TOK_KW_DYN}
 use compiler.core.tokens.{TOK_LT, TOK_GT, TOK_LT_GENERIC}
 use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN, TOK_LBRACKET, TOK_RBRACKET}
@@ -106,6 +107,16 @@ var par_list_type_import_seen: bool = false
 # `use m.{Box as B}` -> "B"). Only such a name may become an imported
 # generic instance type; wildcard imports keep the ANY fallback.
 var par_imported_type_names: [text] = []
+# Fixed-array side-channel: element tag + literal-int size of the most recent
+# `[T; N]` annotation parsed by parser_parse_type_impl. The flat type-tag lane
+# is dynamic and drops N ("stage4 arrays are dynamic"), but the var-decl
+# declare-without-initializer paths (parse_var_decl_stmt, parse_var_decl) need
+# N to synthesize the seed's zero-filled default (`var g: [u8; 32]` with no
+# `=` is a zero-filled global in the seed — hir/lower/module_lowering/
+# module_pass.rs — and a zero-filled FixedSizeArray local — interpreter/
+# node_exec.rs). 0 / -1 means "the last annotation was not a sized array".
+var par_fixed_array_elem: i64 = 0
+var par_fixed_array_size: i64 = -1
 var par_diagnostics_suppressed: bool = false
 var par_diagnostic_emit_count: i64 = 0
 var par_kind_slot: [i64] = [0]
@@ -322,6 +333,8 @@ fn parser_init_with_path(source: text, path: text):
     par_col_slot[0] = 0
     par_had_error = false
     par_list_type_import_seen = false
+    par_fixed_array_elem = 0
+    par_fixed_array_size = -1
     par_imported_type_names = []
     par_diagnostics_suppressed = false
     # First-error text belongs to this module, including ordinary driver
@@ -694,6 +707,12 @@ fn parser_array_tag_for_elem(elem_type: i64) -> i64:
     arr_generic_tag
 
 fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
+    # Clear the fixed-array side-channel before parsing this annotation so a
+    # var-decl caller never reads a stale `[T; N]` from an earlier annotation
+    # in the file. A nested/recursive call may set it again below; the
+    # outermost sized-array branch writes last and wins.
+    par_fixed_array_elem = 0
+    par_fixed_array_size = -1
     # dyn Trait -- dynamic dispatch type (parsed as named type)
     var kind = par_kind_get()
     # Canonical reference types.  Register the inner tag and mutability so the
@@ -1120,11 +1139,18 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
             parser_advance()
             return parser_absorb_optional_suffix(TYPE_ARRAY_ANY)
         val elem_type = parser_parse_type()
-        # Sized array type: [T; N] — accept and drop the size expression
-        # (stage4 arrays are dynamic; N is a literal or const ident).
+        # Sized array type: [T; N] — the returned type tag is dynamic and
+        # drops N (stage4 arrays are dynamic; N may be a literal or const
+        # ident). Record an integer-literal N in the par_fixed_array_*
+        # side-channel anyway: the var-decl no-initializer paths read it to
+        # synthesize the seed's zero-filled `[zero; N]` default initializer.
         kind = par_kind_get()
         if kind == 163:
             parser_advance()
+            if par_kind_get() == TOK_INT_LIT:
+                par_fixed_array_elem = elem_type
+                par_fixed_array_size = parse_int_text(par_text_get())
+                parser_advance()
             for _si in 0..50:
                 if par_kind_get() == 145 or par_kind_get() == 190:
                     break
@@ -1346,6 +1372,7 @@ fn parser_tok_restore(nums: [i64], saved_text: text):
 
 # Parser state (needed by split modules and external consumers)
 export par_errors, par_warnings, par_struct_names
+export par_fixed_array_elem, par_fixed_array_size
 export parser_init, parser_init_with_path, parser_advance, parser_check, parser_match_tok, parser_expect
 export parser_note_use_import
 export parser_has_errors, parser_get_errors, parser_error_count, parser_set_had_error
@@ -1421,6 +1448,8 @@ pub fn flat_parser_state_dump() -> text:
     parts = parts.push(flat_pool_enc_scalar_i64(par_diagnostic_emit_count))
     parts = parts.push(flat_pool_enc_scalar_bool(par_diagnostics_suppressed))
     parts = parts.push(flat_pool_enc_text(par_errors))
+    parts = parts.push(flat_pool_enc_scalar_i64(par_fixed_array_elem))
+    parts = parts.push(flat_pool_enc_scalar_i64(par_fixed_array_size))
     parts = parts.push(flat_pool_enc_scalar_bool(par_had_error))
     parts = parts.push(flat_pool_enc_text(par_imported_type_names))
     parts = parts.push(flat_pool_enc_i64(par_kind_slot))
@@ -1438,6 +1467,8 @@ pub fn flat_parser_state_restore(r: FlatPoolReader) -> bool:
     par_diagnostic_emit_count = flat_pool_dec_scalar_i64(r)
     par_diagnostics_suppressed = flat_pool_dec_scalar_bool(r)
     par_errors = flat_pool_dec_text(r)
+    par_fixed_array_elem = flat_pool_dec_scalar_i64(r)
+    par_fixed_array_size = flat_pool_dec_scalar_i64(r)
     par_had_error = flat_pool_dec_scalar_bool(r)
     par_imported_type_names = flat_pool_dec_text(r)
     par_kind_slot = flat_pool_dec_i64_into(par_kind_slot, r)
