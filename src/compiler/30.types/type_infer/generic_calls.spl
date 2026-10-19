@@ -1,0 +1,155 @@
+# Direct declaration calls share HM fresh variables, substitution, and bounds.
+use compiler.common.diagnostics.span.Span
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolKind, EffectKind}
+use compiler.hir.hir_definitions.{HirTypeParam, HirTraitBound}
+use compiler.hir.hir_definitions.{HirExpr}
+use compiler.types.type_infer_types.{HmInferContext, TypeInferError, FunctionBoundContext, HmPendingBoundCall}
+use compiler.types.type_infer.context.*
+use compiler.types.type_infer.core.*
+use compiler.types.type_infer.generalization.*
+use compiler.types.type_infer.traits.*
+
+impl HmInferContext:
+    fn direct_function_symbol(callee: HirExpr) -> SymbolId?:
+        # Both HIR variable forms retain resolved SymbolId identity. Never
+        # recover a declaration by spelling: a local may shadow a function.
+        val symbol = match callee.kind:
+            case Var(id): Some(id)
+            case NamedVar(id, _): Some(id)
+            case _: nil
+        if symbol == nil or self.function_bound_context == nil: return nil
+        val context: FunctionBoundContext = self.function_bound_context.unwrap()
+        val id: SymbolId = symbol.unwrap()
+        if context.signatures.has(id.id):
+            if context.signatures[id.id].parameters.len() > 0: return Some(id)
+        nil
+
+    me instantiate_declared_call(symbol: SymbolId, explicit: [HirType], span: Span) -> Result<(HirType, [HirType]), TypeInferError>:
+        val context: FunctionBoundContext = self.function_bound_context.unwrap()
+        val signature = context.signatures[symbol.id]
+        if explicit.len() > signature.parameters.len():
+            return Err(TypeInferError.Other("function type argument count exceeds declaration", span))
+        var by_id: Dict<i64, HirType> = {}
+        var by_name: Dict<text, HirType> = {}
+        var arguments: [HirType] = []
+        var index = 0
+        for parameter in signature.parameters:
+            if by_id.has(parameter.symbol.id) or by_name.has(parameter.name):
+                return Err(TypeInferError.Other("generic declaration has duplicate binder identity", parameter.span))
+            val argument = self.fresh_var(span)
+            if index < explicit.len():
+                match self.unify(argument, explicit[index]):
+                    case Err(error): return Err(error)
+                    case _: ()
+            by_id[parameter.symbol.id] = argument
+            by_name[parameter.name] = argument
+            arguments = arguments.push(argument)
+            index = index + 1
+        Ok((self.instantiate_type(signature.type_, {}, by_id, by_name), arguments))
+
+    fn bound_argument_is_concrete(type_: HirType) -> bool:
+        match type_.kind:
+            case Infer(_, _) | TypeParam(_, _) | Projection(_, _) | Error: false
+            case Named(symbol, arguments):
+                if self.function_bound_context == nil: return false
+                val context: FunctionBoundContext = self.function_bound_context.unwrap()
+                val row = context.symbols.get_symbol_raw(symbol.id)
+                if row == nil: return false
+                val kind = row.unwrap().kind
+                if kind != SymbolKind.Struct and kind != SymbolKind.Class and kind != SymbolKind.Enum: return false
+                for argument in arguments:
+                    if not self.bound_argument_is_concrete(argument): return false
+                true
+            case Tuple(elements) | Union(elements):
+                for element in elements:
+                    if not self.bound_argument_is_concrete(element): return false
+                true
+            case Array(inner, _) | Slice(inner) | Ref(inner, _) | Ptr(inner, _) | Optional(inner) | Isolated(inner) | Tensor(inner, _, _):
+                self.bound_argument_is_concrete(inner)
+            case Dict(left, right) | Result(left, right):
+                self.bound_argument_is_concrete(left) and self.bound_argument_is_concrete(right)
+            case Function(parameters, result, effects):
+                for parameter in parameters:
+                    if not self.bound_argument_is_concrete(parameter): return false
+                for effect in effects:
+                    match effect.kind:
+                        case Throws(thrown):
+                            if not self.bound_argument_is_concrete(thrown): return false
+                        case _: ()
+                self.bound_argument_is_concrete(result)
+            case _: true
+
+    fn caller_assumes_bound(caller: SymbolId?, argument: HirType, bound: HirTraitBound) -> bool:
+        if caller == nil or self.function_bound_context == nil: return false
+        val caller_id: SymbolId = caller.unwrap()
+        if not self.function_bounds.has(caller_id.id): return false
+        val context: FunctionBoundContext = self.function_bound_context.unwrap()
+        var parameter_id = -1
+        match argument.kind:
+            case Named(id, arguments):
+                if arguments.len() == 0: parameter_id = id.id
+            case TypeParam(name, _):
+                if not context.signatures.has(caller_id.id): return false
+                for parameter in context.signatures[caller_id.id].parameters:
+                    if parameter.name == name: parameter_id = parameter.symbol.id
+            case _: return false
+        # Bound evidence is exact declared nominal identity, not a name match.
+        for assumption in self.function_bounds[caller_id.id]:
+            if assumption.type_param.id == parameter_id:
+                match (assumption.trait_.kind, bound.trait_.kind):
+                    case (Named(left, left_args), Named(right, right_args)):
+                        if left.id == right.id and left_args.len() == 0 and right_args.len() == 0: return true
+                    case _: ()
+        false
+
+    me finish_direct_function_bounds():
+        # Method resolution currently queues heuristic obligations. Keep that
+        # legacy queue separate until its owner supplies resolved evidence.
+        val unrelated = self.trait_solver.obligations
+        self.trait_solver.obligations = []
+        val calls = self.pending_bound_calls
+        self.pending_bound_calls = []
+        if self.function_bound_context == nil:
+            self.trait_solver.obligations = unrelated
+            return
+        val context: FunctionBoundContext = self.function_bound_context.unwrap()
+        for call in calls:
+            val signature = context.signatures[call.function.id]
+            var by_id: Dict<i64, HirType> = {}
+            var by_name: Dict<text, HirType> = {}
+            var index = 0
+            for parameter in signature.parameters:
+                var argument = self.resolve(call.arguments[index])
+                match argument.kind:
+                    case Infer(_, _):
+                        if parameter.has_default:
+                            val fallback = self.instantiate_type(parameter.default, {}, by_id, by_name)
+                            match self.unify(argument, fallback):
+                                case Err(error): self.error(error)
+                                case _: argument = self.resolve(argument)
+                    case _: ()
+                by_id[parameter.symbol.id] = argument
+                by_name[parameter.name] = argument
+                index = index + 1
+        # All default constraints precede obligation resolution, including
+        # constraints shared by nested calls. No solve can observe a stale Infer.
+        for call in calls:
+            if not self.function_bounds.has(call.function.id): continue
+            var by_id: Dict<i64, HirType> = {}
+            val parameters = context.signatures[call.function.id].parameters
+            var index = 0
+            for parameter in parameters:
+                by_id[parameter.symbol.id] = self.resolve(call.arguments[index])
+                index = index + 1
+            for bound in self.function_bounds[call.function.id]:
+                if not by_id.has(bound.type_param.id):
+                    self.error(TypeInferError.Other("function bound parameter is absent from declaration", call.span))
+                    continue
+                val argument = self.resolve(by_id[bound.type_param.id])
+                if self.caller_assumes_bound(call.caller, argument, bound): continue
+                if not self.bound_argument_is_concrete(argument):
+                    self.error(TypeInferError.Other("function bound requires a resolved argument or matching caller bound", call.span))
+                    continue
+                self.generate_obligation_for_bound(argument, bound, call.span)
+        val solved = self.solve_trait_obligations()
+        self.trait_solver.obligations = unrelated
