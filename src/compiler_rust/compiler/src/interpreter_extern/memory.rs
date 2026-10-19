@@ -465,6 +465,24 @@ pub fn rt_transient_heap_promote(args: &[Value]) -> Result<Value, CompileError> 
     Ok(Value::Bool(promoted))
 }
 
+pub fn rt_transient_heap_promote_share_begin(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_transient_heap_promote_share_begin requires 0 arguments",
+        ));
+    }
+    Ok(Value::Bool(simple_runtime::value::rt_transient_heap_promote_share_begin()))
+}
+
+pub fn rt_transient_heap_promote_share_end(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_transient_heap_promote_share_end requires 0 arguments",
+        ));
+    }
+    Ok(Value::Bool(simple_runtime::value::rt_transient_heap_promote_share_end()))
+}
+
 pub fn rt_transient_array_scope_end(args: &[Value]) -> Result<Value, CompileError> {
     if !args.is_empty() {
         return Err(CompileError::runtime(

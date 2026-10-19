@@ -326,6 +326,7 @@ pub fn unregister_heap_ptr(ptr: *mut HeapHeader) {
             let (kind, bytes) = unsafe { ((*ptr).object_type as u8, (*ptr).size as u64) };
             note_heap_free(kind, bytes);
             note_attr_free(ptr as usize, bytes);
+            super::collections::transient_promote_share_forget(ptr as usize);
         }
     }
 }
@@ -356,6 +357,7 @@ pub fn unregister_heap_ptr_checked(ptr: *mut HeapHeader) -> bool {
         let (kind, bytes) = unsafe { ((*ptr).object_type as u8, (*ptr).size as u64) };
         note_heap_free(kind, bytes);
         note_attr_free(ptr as usize, bytes);
+        super::collections::transient_promote_share_forget(ptr as usize);
     }
     removed
 }

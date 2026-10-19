@@ -426,6 +426,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_transient_array_scope_pause", memory::rt_transient_array_scope_pause);
     insert_simple!("rt_transient_array_scope_end", memory::rt_transient_array_scope_end);
     insert_simple!("rt_transient_heap_promote", memory::rt_transient_heap_promote);
+    insert_simple!("rt_transient_heap_promote_share_begin", memory::rt_transient_heap_promote_share_begin);
+    insert_simple!("rt_transient_heap_promote_share_end", memory::rt_transient_heap_promote_share_end);
     insert_simple!("min", math::min);
     insert_simple!("__mock_policy_check", mock_policy::mock_policy_check);
     insert_simple!("__mock_policy_disable", mock_policy::mock_policy_disable);
@@ -3753,6 +3755,8 @@ mod tests {
             "rt_transient_array_scope_pause",
             "rt_transient_array_scope_end",
             "rt_transient_heap_promote",
+            "rt_transient_heap_promote_share_begin",
+            "rt_transient_heap_promote_share_end",
         ] {
             assert!(EXTERN_DISPATCH.contains_key(name));
         }
