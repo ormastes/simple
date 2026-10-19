@@ -376,6 +376,27 @@ bool spl_thread_join(spl_thread_handle handle) {
  * The closure calling convention is fn_ptr(closure_ptr).
  * ================================================================ */
 
+/* Composition owner switch for the isolated-thread handle family.
+ *
+ * simple_native_all (Rust executor.rs) also exports this family, and rustc
+ * merges identical bodies into aliases: rt_thread_id_limited and
+ * rt_thread_is_done_limited live in the SAME NoDuplicates COMDAT section as
+ * Rust's rt_thread_id / rt_thread_is_done. When an MSVC link let this C copy
+ * win those two names, lld-link discarded that section and the aliases with
+ * it ("relocation against symbol in discarded section: rt_thread_id_limited").
+ * A composition that links simple_native_all therefore selects the Rust owner
+ * for the whole handle family (spawn/join/is_done/id/free must agree on one
+ * handle layout); these C bodies stay compiled under private names, exactly
+ * like SIMPLE_RUNTIME_FILE_VIEW_RUST_OWNER in runtime_file_view.c. */
+#if defined(SIMPLE_RUNTIME_THREAD_RUST_OWNER)
+#define rt_thread_spawn_isolated spl_c_thread_spawn_isolated
+#define rt_thread_spawn_isolated_with_args spl_c_thread_spawn_isolated_with_args
+#define rt_thread_join spl_c_thread_join
+#define rt_thread_is_done spl_c_thread_is_done
+#define rt_thread_id spl_c_thread_id
+#define rt_thread_free spl_c_thread_free
+#endif
+
 typedef int64_t (*rt_closure_fn_t)(int64_t);
 typedef int64_t (*rt_closure2_fn_t)(int64_t, int64_t);
 typedef int64_t (*rt_closure_record2_fn_t)(int64_t, int64_t, int64_t);
@@ -586,6 +607,15 @@ void rt_thread_free(int64_t handle) {
     SPL_FREE(td);
     free_handle(handle);
 }
+
+#if defined(SIMPLE_RUNTIME_THREAD_RUST_OWNER)
+#undef rt_thread_spawn_isolated
+#undef rt_thread_spawn_isolated_with_args
+#undef rt_thread_join
+#undef rt_thread_is_done
+#undef rt_thread_id
+#undef rt_thread_free
+#endif
 
 void rt_thread_sleep(int64_t millis) {
     rt_pool_mark_worker_blocked();

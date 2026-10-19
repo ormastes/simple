@@ -843,8 +843,16 @@ fi
 # K1 policy `llvm` (src/compositions/kernel_llvm) links no Cranelift port and
 # no JIT lane, so the stage-3 closure never references rt_cranelift_* /
 # spl_cranelift_* (Rust-only symbols the core-c-bootstrap bundle cannot
-# provide). Its only admissible backends are the LLVM ones; `cranelift` needs
-# the combined policy.
+# provide). Its only admissible backends are the LLVM ones.
+# Admitting `llvm-cranelift:cranelift` below is a POLICY check only: it does
+# not make a Cranelift-capable compiler linkable here. Every stage link in
+# this script passes --runtime-bundle core-c-bootstrap, and that bundle never
+# admits simple_native_all (native_all_allowed_for_runtime_bundle), the only
+# owner of the real rt_cranelift_* / spl_cranelift_*; the core-C archive binds
+# them to runtime_cranelift_bridge_stub.c (named trap), so a combined-policy
+# compiler built here aborts on its first Cranelift call. A compiler carrying
+# the real Rust Cranelift bridge is linked outside this script, with the auto
+# bundle and --runtime-path naming a simple_native_all runtime directory.
 case "${SIMPLE_KERNEL_K1_POLICY:-unselected}:${backend}" in
   llvm-cranelift:llvm|llvm-cranelift:llvm-lib|llvm-cranelift:cranelift) ;;
   llvm:llvm|llvm:llvm-lib) ;;
