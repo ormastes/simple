@@ -168,6 +168,12 @@ pub struct Lowerer {
     pub(super) flatten_global_owners: HashMap<String, Vec<Option<String>>>,
     /// Owner-exact symbol of each colliding flattened global -> its owner.
     pub(super) flatten_global_symbol_owners: HashMap<String, Option<String>>,
+    /// Flattened unit only: struct/class name declared by two or more
+    /// distinct owners with differing layouts -> owner of each declaration
+    /// (see `module_lowering/flatten_struct_owner.rs`).
+    pub(super) flatten_struct_owners: super::module_lowering::FlattenStructOwners,
+    /// Per-owner type-name scope cache for `flatten_struct_owners`.
+    pub(super) flatten_struct_scopes: HashMap<Option<String>, super::module_lowering::FlattenStructScope>,
     /// When true, unknown types resolve to ANY instead of erroring.
     /// This allows compilation to proceed even when imports can't be fully resolved.
     pub(super) lenient_types: bool,
@@ -278,6 +284,8 @@ impl Lowerer {
             flatten_owner_import_bindings: HashMap::new(),
             current_function_owner: None,
             flatten_global_owners: HashMap::new(),
+            flatten_struct_owners: HashMap::new(),
+            flatten_struct_scopes: HashMap::new(),
             flatten_global_symbol_owners: HashMap::new(),
             type_aliases_reverse: HashMap::new(),
             function_aliases_reverse: HashMap::new(),
@@ -345,6 +353,8 @@ impl Lowerer {
             flatten_owner_import_bindings: HashMap::new(),
             current_function_owner: None,
             flatten_global_owners: HashMap::new(),
+            flatten_struct_owners: HashMap::new(),
+            flatten_struct_scopes: HashMap::new(),
             flatten_global_symbol_owners: HashMap::new(),
             type_aliases_reverse: HashMap::new(),
             function_aliases_reverse: HashMap::new(),
@@ -435,6 +445,8 @@ impl Lowerer {
             flatten_owner_import_bindings: HashMap::new(),
             current_function_owner: None,
             flatten_global_owners: HashMap::new(),
+            flatten_struct_owners: HashMap::new(),
+            flatten_struct_scopes: HashMap::new(),
             flatten_global_symbol_owners: HashMap::new(),
             type_aliases_reverse: HashMap::new(),
             function_aliases_reverse: HashMap::new(),
@@ -1034,6 +1046,30 @@ impl Lowerer {
             flattened_global_symbol(owners, Some(source_owner), source_name)
         };
         (resolved != name).then_some(resolved)
+    }
+
+    /// Install the type-name scope of `current_function_owner` as the type
+    /// registry overlay (same-named flattened structs/classes resolve to the
+    /// owner's own or imported declaration), returning the previous overlay.
+    /// No-op (empty overlay) for units without a struct-name collision.
+    pub(super) fn enter_flatten_struct_scope(&mut self) -> super::module_lowering::FlattenStructScope {
+        if self.flatten_struct_owners.is_empty() {
+            return self.module.types.replace_scope_aliases(HashMap::new());
+        }
+        let owner = self.current_function_owner.clone();
+        let scope = match self.flatten_struct_scopes.get(&owner) {
+            Some(scope) => scope.clone(),
+            None => {
+                let scope = super::module_lowering::struct_scope_for(
+                    &self.flatten_struct_owners,
+                    &self.flatten_owner_import_bindings,
+                    owner.as_deref(),
+                );
+                self.flatten_struct_scopes.insert(owner, scope.clone());
+                scope
+            }
+        };
+        self.module.types.replace_scope_aliases(scope)
     }
 
     /// Type of module-global `name` as seen from the function being lowered:

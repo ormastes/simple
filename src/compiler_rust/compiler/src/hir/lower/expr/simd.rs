@@ -294,6 +294,9 @@ impl Lowerer {
         // yielding a type-confused box and the SimpleOS boot fault storm.
         let aliased_class_name = self.resolve_type_alias(class_name).map(str::to_string);
         let class_name: &str = aliased_class_name.as_deref().unwrap_or(class_name);
+        // Same-named flattened struct/class: the current owner's declaration.
+        let scoped_class_name = self.module.types.scoped_name(class_name).to_string();
+        let class_name: &str = scoped_class_name.as_str();
 
         let class_ty = self
             .module

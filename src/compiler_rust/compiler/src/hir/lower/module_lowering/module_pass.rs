@@ -1506,6 +1506,29 @@ impl Lowerer {
         Some(module)
     }
 
+    /// Rename colliding flattened struct/class declarations to owner-exact
+    /// symbols and record the census the type-scope overlay consults;
+    /// `None` = no collision.
+    fn qualify_flattened_structs(&mut self, ast_module: &Module) -> LowerResult<Option<Module>> {
+        self.flatten_struct_owners.clear();
+        self.flatten_struct_scopes.clear();
+        let qualified = super::flatten_struct_owner::module_with_owner_qualified_structs(
+            ast_module,
+            &self.flatten_owner_import_bindings,
+        )
+        .map_err(|alias| {
+            LowerError::Unsupported(format!(
+                "type alias `{alias}` names a struct/class declared with different layouts by several \
+                 flattened modules; the alias has no owner to resolve it through"
+            ))
+        })?;
+        let Some((module, owners)) = qualified else {
+            return Ok(None);
+        };
+        self.flatten_struct_owners = owners;
+        Ok(Some(module))
+    }
+
     /// Number of dynamic global initializers lowered into one init function.
     ///
     /// A large flattened program (the browser: ~10k globals) used to get ONE
@@ -1569,7 +1592,9 @@ impl Lowerer {
             // of the global it initializes (flattened same-name globals).
             let initializer_owner = self.flatten_global_symbol_owners.get(&name).cloned().flatten();
             let previous_owner = std::mem::replace(&mut self.current_function_owner, initializer_owner);
+            let previous_type_scope = self.enter_flatten_struct_scope();
             let hir_val = self.lower_expr(value, &mut dyn_ctx);
+            self.module.types.replace_scope_aliases(previous_type_scope);
             self.current_function_owner = previous_owner;
             let hir_val = hir_val?;
             // Codegen decides whether a global's backing data is writable
@@ -1683,6 +1708,10 @@ impl Lowerer {
         // `use m.{f as g}` resolves `g` instead of emitting an unresolved
         // external symbol. Must run before any expression is lowered.
         self.collect_flattened_import_aliases(ast_module);
+        // Same-named structs/classes of different flattened modules get
+        // owner-exact identities (needs the import bindings collected above).
+        let qualified_structs = self.qualify_flattened_structs(ast_module)?;
+        let ast_module: &Module = qualified_structs.as_ref().unwrap_or(ast_module);
         self.collect_fn_param_defaults(ast_module);
         self.collect_own_declared_function_names(ast_module);
 
@@ -2323,6 +2352,10 @@ impl Lowerer {
         // `use m.{f as g}` resolves `g` instead of emitting an unresolved
         // external symbol. Must run before any expression is lowered.
         self.collect_flattened_import_aliases(ast_module);
+        // Same-named structs/classes of different flattened modules get
+        // owner-exact identities (needs the import bindings collected above).
+        let qualified_structs = self.qualify_flattened_structs(ast_module)?;
+        let ast_module: &Module = qualified_structs.as_ref().unwrap_or(ast_module);
         self.collect_fn_param_defaults(ast_module);
         self.collect_own_declared_function_names(ast_module);
 

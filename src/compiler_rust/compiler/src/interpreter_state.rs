@@ -221,6 +221,11 @@ pub(crate) fn decode_import_binding_marker(marker: &str) -> Option<(&str, &str, 
 /// without having to share a side table. The name only has to be stable and
 /// unique *within one compilation*, so embedding the normalized path is enough;
 /// it is hashed to keep the symbol bounded and host-linker legal.
+/// Prefix of every [`flatten_owner_mangled_name`] symbol. Such a symbol is an
+/// owner IDENTITY, not a `module__name` qualifier: codegen must never bind a
+/// bare name to it by suffix (the bare name denotes the default owner).
+pub(crate) const FLATTEN_OWNER_SYMBOL_PREFIX: &str = "__spl_flat_";
+
 pub(crate) fn flatten_owner_mangled_name(owner: &str, name: &str) -> String {
     // FNV-1a over the owner path: deterministic, no external dependency, and
     // stable across the two call sites within a single run.
@@ -237,7 +242,7 @@ pub(crate) fn flatten_owner_mangled_name(owner: &str, name: &str) -> String {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
-    format!("__spl_flat_{stem}_{hash:016x}__{name}")
+    format!("{FLATTEN_OWNER_SYMBOL_PREFIX}{stem}_{hash:016x}__{name}")
 }
 
 pub(crate) fn tag_function_module_owner(function: &mut FunctionDef, owner: &str) {

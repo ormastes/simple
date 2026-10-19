@@ -26,9 +26,15 @@ fn resolve_unique_module_qualified_func<M: Module>(ctx: &InstrContext<'_, M>, na
         // dynamic dispatch (SIGSEGV: test_config `.index_of` bound to
         // devhub__cmd_storage___index_of). Require the candidate's own tail
         // (after its LAST `__`) to equal the probed tail exactly.
+        //
+        // A flatten-owner identity (`__spl_flat_<owner>__Type.method`, one of
+        // two same-named structs of a flattened unit) is not a module
+        // qualifier: the bare `Type.method` is the OTHER owner's body, so it
+        // must never win by suffix over that exact name.
         if candidate
             .strip_suffix(&suffix)
             .is_some_and(|prefix| !prefix.is_empty() && !prefix.ends_with('_'))
+            && !candidate.starts_with(crate::interpreter::FLATTEN_OWNER_SYMBOL_PREFIX)
             && !ids.contains(id)
         {
             ids.push(*id);
@@ -167,8 +173,13 @@ fn qualified_method_owner_matches(owner: &str, candidate: &str, method: &str) ->
     let Some((candidate_owner, candidate_method)) = normalized.rsplit_once('.') else {
         return false;
     };
+    // A flatten-owner identity (`__spl_flat_<owner>__Type`) is a DIFFERENT
+    // type from the bare `Type` of a flattened unit, never a module qualifier.
+    let flatten_identity = |name: &str| name.starts_with(crate::interpreter::FLATTEN_OWNER_SYMBOL_PREFIX);
     candidate_method == method
-        && (candidate_owner == owner || candidate_owner.ends_with(&format!("__{owner}")))
+        && (candidate_owner == owner
+            || (candidate_owner.ends_with(&format!("__{owner}"))
+                && flatten_identity(candidate_owner) == flatten_identity(owner)))
 }
 
 // `pub(crate)` so `mir/lower/lowering_expr_method.rs` can reuse the exact
