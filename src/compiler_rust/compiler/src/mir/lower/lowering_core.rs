@@ -380,6 +380,9 @@ pub struct MirLowerer<'a> {
     pub(super) active_array_append_ptrs: Vec<ArrayAppendPtrs>,
     /// Hoisted array data pointers for read-only loops with active length proofs.
     pub(super) active_array_data_ptrs: Vec<(usize, VReg)>,
+    /// Hoisted `[u8]` read pointers: the data pointer with bit 0 set when the
+    /// array is NOT byte-packed (slot layout), computed once per loop entry.
+    pub(super) active_array_u8_data_ptrs: Vec<(usize, VReg)>,
     /// Array locals allocated only to receive ignored appends.
     pub(super) dead_append_array_locals: HashSet<usize>,
     /// True when the compilation target's `rt_array_push` returns the
@@ -435,6 +438,7 @@ impl<'a> MirLowerer<'a> {
             active_array_append_bounds: Vec::new(),
             active_array_append_ptrs: Vec::new(),
             active_array_data_ptrs: Vec::new(),
+            active_array_u8_data_ptrs: Vec::new(),
             dead_append_array_locals: HashSet::new(),
             array_push_returns_header: false,
         }
@@ -476,6 +480,7 @@ impl<'a> MirLowerer<'a> {
             active_array_append_bounds: Vec::new(),
             active_array_append_ptrs: Vec::new(),
             active_array_data_ptrs: Vec::new(),
+            active_array_u8_data_ptrs: Vec::new(),
             dead_append_array_locals: HashSet::new(),
             array_push_returns_header: false,
             decision_counter: 0,
@@ -620,6 +625,17 @@ impl<'a> MirLowerer<'a> {
         }
         let array_local_index = Self::local_index_for_expr(receiver)?;
         self.active_array_data_ptrs
+            .iter()
+            .rev()
+            .find_map(|(idx, ptr)| (*idx == array_local_index).then_some(*ptr))
+    }
+
+    pub(super) fn active_array_u8_data_ptr(&self, receiver: &HirExpr, index: &HirExpr) -> Option<VReg> {
+        if !self.index_has_active_len_bound(receiver, index) {
+            return None;
+        }
+        let array_local_index = Self::local_index_for_expr(receiver)?;
+        self.active_array_u8_data_ptrs
             .iter()
             .rev()
             .find_map(|(idx, ptr)| (*idx == array_local_index).then_some(*ptr))

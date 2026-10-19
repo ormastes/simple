@@ -929,6 +929,7 @@ pub use value::{
     rt_collection_set,
     rt_typed_bytes_u8_push,
     rt_typed_bytes_u8_data_at,
+    rt_array_is_byte_packed,
     rt_typed_words_u32_at,
     rt_typed_words_u32_data_at,
     rt_typed_words_u32_push,

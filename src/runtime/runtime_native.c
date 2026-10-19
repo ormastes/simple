@@ -11307,8 +11307,15 @@ double rt_random_uniform(double min, double max) {
 
 /* ---- collections.rs: rt_typed_bytes_u8_data_at --------------------------- */
 
+/* data_ptr bit 0 is the layout tag set by the hoisted-loop preheader:
+ * set = slot layout (8-byte tagged elements), clear = byte-packed.
+ * Bug: jit_hoisted_u8_data_ptr_ignores_slot_layout_2026-10-19. */
 int64_t rt_typed_bytes_u8_data_at(int64_t data_ptr, int64_t index) {
-    return (int64_t)(*((const uint8_t*)(intptr_t)data_ptr + index));
+    int64_t base = data_ptr & ~(int64_t)1;
+    if (data_ptr & 1) {
+        return rt_core_as_int(((const int64_t*)(intptr_t)base)[index]) & 0xff;
+    }
+    return (int64_t)(*((const uint8_t*)(intptr_t)base + index));
 }
 
 /* ---- heap.rs: rt_mem_attr_enabled / rt_mem_attr_set_owner ---------------- */

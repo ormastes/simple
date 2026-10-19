@@ -449,20 +449,26 @@ impl<'a> MirLowerer<'a> {
                     | TypeId::U64
             )
         {
+            // Hoisted `[u8]` reads go through the layout-tagged pointer the
+            // loop preheader computed (bit 0 = slot layout), never the raw data
+            // pointer: a slot-layout `[u8]` (8-byte tagged elements, e.g. a `[]`
+            // literal in a struct field) read as packed bytes returned slot-word
+            // bytes. Bug: jit_hoisted_u8_data_ptr_ignores_slot_layout_2026-10-19.
+            let u8_data_ptr = self.active_array_u8_data_ptr(receiver, index);
             return self.with_func(|func, current_block| {
                 let raw_byte = func.new_vreg();
                 let narrowed = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
                 block.instructions.push(MirInst::Call {
                     dest: Some(raw_byte),
-                    target: CallTarget::from_name(if hoisted_data_ptr.is_some() {
+                    target: CallTarget::from_name(if u8_data_ptr.is_some() {
                         "rt_typed_bytes_u8_data_at"
                     } else if has_loop_len_bound {
                         "rt_typed_bytes_u8_unchecked"
                     } else {
                         "rt_typed_bytes_u8_at"
                     }),
-                    args: vec![receiver_reg, index_reg],
+                    args: vec![u8_data_ptr.unwrap_or(receiver_reg), index_reg],
                 });
                 block.instructions.push(MirInst::UnitNarrow {
                     dest: narrowed,

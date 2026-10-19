@@ -773,9 +773,15 @@ fn array_data_layout(capacity: u64) -> std::alloc::Layout {
     .expect("valid array data layout")
 }
 
+/// Byte-packed element buffers are 8-aligned by contract: the hoisted-loop
+/// `[u8]` read tags bit 0 of the data pointer with the slot layout (see
+/// `rt_typed_bytes_u8_data_at`), so bit 0 of a real data pointer must be 0.
+/// Every alloc/realloc/dealloc of a packed buffer goes through this layout.
+const BYTE_ARRAY_DATA_ALIGN: usize = 8;
+
 fn byte_array_data_layout(capacity: u64) -> std::alloc::Layout {
     let cap = capacity.max(1) as usize;
-    std::alloc::Layout::from_size_align(cap, 1).expect("valid byte array data layout")
+    std::alloc::Layout::from_size_align(cap, BYTE_ARRAY_DATA_ALIGN).expect("valid byte array data layout")
 }
 
 /// Aux-byte accounting for an array element-buffer replacement (grow path).
@@ -910,6 +916,7 @@ pub extern "C" fn rt_byte_array_new(capacity: u64) -> RuntimeValue {
             std::alloc::dealloc(ptr as *mut u8, header_layout);
             return RuntimeValue::NIL;
         }
+        debug_assert_eq!(data as usize % BYTE_ARRAY_DATA_ALIGN, 0, "packed byte data must be 8-aligned");
         note_aux_alloc(HeapObjectType::Array as u8, data_layout.size() as u64);
 
         (*ptr).header = HeapHeader::new(HeapObjectType::Array, header_size as u32);
@@ -1215,9 +1222,27 @@ pub extern "C" fn rt_array_set_len_known_text(header_ptr: i64, len: i64) -> bool
     rt_array_set_len_known(header_ptr, len)
 }
 
+/// Twin of `rt_array_is_byte_packed` in `src/runtime/runtime_native.c`:
+/// 1 when the array stores packed bytes, else 0 (also for non-arrays).
+#[no_mangle]
+pub extern "C" fn rt_array_is_byte_packed(array: RuntimeValue) -> i64 {
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
+    unsafe { (*arr).is_byte_packed() as i64 }
+}
+
+/// `data_ptr` bit 0 is the layout tag set by the hoisted-loop preheader:
+/// set = slot layout (8-byte tagged elements), clear = byte-packed.
 #[no_mangle]
 pub extern "C" fn rt_typed_bytes_u8_data_at(data_ptr: i64, index: i64) -> i64 {
-    unsafe { *((data_ptr as *const u8).add(index as usize)) as i64 }
+    let base = data_ptr & !1;
+    if data_ptr & 1 != 0 {
+        let raw = unsafe { *((base as *const RuntimeValue).add(index as usize)) };
+        if raw.is_int() {
+            return raw.as_int() & 0xFF;
+        }
+        return (raw.to_raw() as i64) & 0xFF;
+    }
+    unsafe { *((base as *const u8).add(index as usize)) as i64 }
 }
 
 #[no_mangle]

@@ -151,7 +151,7 @@ pub use collections::{
     rt_string_partition, rt_string_rpartition, rt_string_sorted, rt_take, rt_string_parse_int, rt_string_split,
     rt_string_split_limit, rt_string_starts_with, rt_string_to_float, rt_string_to_int, rt_string_to_int_lenient,
     rt_string_to_lower, rt_string_to_upper, rt_string_trim, rt_string_trim_end, rt_string_trim_start, rt_to_string,
-    rt_tuple_get, rt_tuple_len, rt_tuple_new, rt_tuple_set, rt_typed_bytes_u8_data_at, rt_typed_bytes_u8_push,
+    rt_tuple_get, rt_tuple_len, rt_tuple_new, rt_tuple_set, rt_typed_bytes_u8_data_at, rt_array_is_byte_packed, rt_typed_bytes_u8_push,
     rt_typed_words_u32_at, rt_typed_words_u32_data_at, rt_typed_words_u32_push, rt_typed_words_u32_push_known_at,
     rt_typed_words_u32_push_known_data_at, rt_typed_words_u32_set, rt_typed_words_u32_store_known_data_at,
     rt_typed_words_u32_unchecked, rt_typed_words_u64_at, rt_typed_words_u64_data_at,
