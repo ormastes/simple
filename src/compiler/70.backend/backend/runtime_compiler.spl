@@ -467,9 +467,22 @@ fn find_runtime_source_dir() -> text:
     Returns the path or empty string if not found.
     """
     if native_tool_strict_requested_v1():
-        match native_runtime_strict_source_dir_v1():
-            case Ok(path): return path
-            case Err(_): return ""
+        if env_get("SIMPLE_MANAGED_PHASE4_SOURCE_ROOT") != "":
+            match native_runtime_strict_source_dir_v1():
+                case Ok(path): return path
+                case Err(_): return ""
+        # Source authority NOT configured for this invocation. The stage2/3
+        # phase-C rows run managed tools + runtime-archive admission but pin
+        # the runtime C sources at the HARNESS level (sealed target-c
+        # binding + source_snapshot_sha256 checks in
+        # bootstrap-phase-verification.shs), never exporting
+        # SIMPLE_MANAGED_PHASE4_SOURCE_ROOT -- so the in-process source pin
+        # cannot be satisfied and hard-failing here kills every strict
+        # runtime C compile ('managed runtime authority root invalid' at
+        # native_runtime_authority_v1.spl, first hit by the v35
+        # test_runner_build link row). Fall through to the legacy search;
+        # a CONFIGURED-but-invalid source authority keeps the hard error
+        # above, so a phase4 lane that lost its env still fails loud.
     # Try SIMPLE_PROJECT_ROOT env var first so tests and callers can force
     # deterministic resolution even when cwd also contains src/runtime.
     val project_root = env_get_nullable("SIMPLE_PROJECT_ROOT") ?? ""
@@ -663,7 +676,13 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
         return Err("No C compiler found. Install clang or gcc.")
 
     val rt_dir = if native_tool_strict_requested_v1():
-        native_runtime_strict_source_dir_v1()?
+        if env_get("SIMPLE_MANAGED_PHASE4_SOURCE_ROOT") != "":
+            native_runtime_strict_source_dir_v1()?
+        else:
+            # Source authority not configured (stage2/3 phase-C rows): same
+            # legacy fallback as find_runtime_source_dir, which this branch
+            # bypasses. See the matching note there.
+            find_runtime_source_dir()
     else: find_runtime_source_dir()
     if trace:
         print "[RT-COMPILE] rt_dir={rt_dir}"

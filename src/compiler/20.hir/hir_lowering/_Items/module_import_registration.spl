@@ -1059,11 +1059,28 @@ impl HirLowering:
         eprint("[reexport-chase] calls={self.reexport_chase_calls} memo_hits={self.reexport_chase_memo_hits} memo={self.reexport_root_memo_index.len()}\n")
 
     me try_register_bootstrap_global_symbol(name: text, span: Span) -> bool:
-        """Resolve one uniquely owned flat-global bootstrap declaration."""
+        """Resolve one uniquely owned flat-global declaration.
+
+        SEED-PARITY (2026-10-20): this route used to be gated on
+        ambient_bootstrap_enabled() (SIMPLE_BOOTSTRAP=1), but the seed's flat
+        type/callable registry has NO such gate -- any name declared by
+        exactly one module surface in the import closure resolves from any
+        importing module, however that module was reached (direct, selective,
+        or merely transitive). Verified against src/compiler_rust (a type
+        used through a two-level import chain resolves; an unimported one
+        does not -- this fallback only sees loaded surfaces, matching that).
+        The phase-C cli row deliberately unsets SIMPLE_BOOTSTRAP for tool
+        invocations (dispatch-control hygiene), which silently disabled the
+        closure-wide fallback and surfaced as 33 hir-fatal modules whose
+        names live in transitively-loaded surfaces
+        (NetIfInfo, CapabilitySet, Widget-shaped facades). The gate's original
+        rationale was a bootstrap exemption for implicit declarations; the
+        name-directed unique-owner index below is pure visibility semantics,
+        and its cost is unchanged: it runs only for names that are otherwise
+        unbound, and ambiguity (anything but exactly one owner) still gives
+        up, exactly like the seed's tolerance."""
         if self.try_register_glob_reachable_symbol(name, span):
             return true
-        if not self.ambient_bootstrap_enabled():
-            return false
         if self.symbols.lookup_or_invalid(name).is_valid():
             return true
         # PKGIDX (2026-08-21): this runs per UNBOUND NAME in every function
@@ -1380,9 +1397,11 @@ impl HirLowering:
         Stage 1 run9 died on exactly that residual: `MirType` via
         mir_data's `use compiler.mir.mir_types.*`, `parser_type_kind_named_name`
         via parser_types' `use parser_types_expr.*`, `CodegenTarget` /
-        `GpuIntrinsicKind` through package facades. Until now the only rescue
-        was try_register_bootstrap_global_symbol, which is gated on
-        SIMPLE_BOOTSTRAP=1 -- and the stage-1 lane does not export it.
+        `GpuIntrinsicKind` through package facades. The deeper rescue is
+        try_register_bootstrap_global_symbol: since 2026-10-20 it carries no
+        SIMPLE_BOOTSTRAP gate (seed-parity flat visibility; see its
+        docstring), so this glob-reachable route now only wins the cases the
+        unique-owner index cannot prove.
 
         This is the cheap dual of ungating: it is driven by ONE unbound name,
         visits only the importer's glob targets, and delegates the
