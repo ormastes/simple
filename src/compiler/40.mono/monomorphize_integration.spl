@@ -28,7 +28,7 @@ use compiler.monomorphize.type_subst.*
 use compiler.mono.nominal_type_identity.{mono_owned_type_key, mono_owned_type_keys}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_owner_name.{hir_symbol_owner_module}
-use std.io_runtime.{env_get}
+use std.io_runtime.{env_get, time_now_monotonic_ms}
 use compiler.mono.mono_archive_types_v1.{
     MonoTemplateBodyModeV1, MonoTemplateSignatureV1, MonoTemplateRecipeV1,
     MonoSpecializationRequestV1, mono_template_signature_v1,
@@ -82,6 +82,15 @@ struct NominalBindingContext:
 # ============================================================================
 # Monomorphization Pass
 # ============================================================================
+
+# `mono_diag_enabled` is consulted on every rewritten statement and
+# expression. Read the environment once per pass (`process_modules` calls
+# the refresh) instead of once per node. -1 = not read yet.
+var _mono_diag_enabled_state: i64 = -1
+
+# Sub-phase wall times of the last `process_modules`, for the driver's
+# `phase4:monomorphize:breakdown` marker. One text, overwritten per pass.
+var mono_last_phase_profile_v1: text = ""
 
 # WORKAROUND(mir_provider_optional_type_wrapper_segv_2026-10-14): the old
 # A174 producer passes ArrayLit optional metadata to a concrete HirType ABI
@@ -235,6 +244,16 @@ class MonomorphizationPass:
     archive_requests: [MonoSpecializationRequestV1] = mono_default_archive_requests_v1()
     # Filled only from completed FIFO emission records during archive assembly.
     archive_emitted_templates: Dict<text, text> = {}
+    # Root discovery (opt-in, SIMPLE_MONO_ROOT_DISCOVERY=1 or set directly):
+    # a read-only pre-walk proves a root body holds no mono-relevant node and
+    # passes it through instead of rebuilding it. See
+    # `mono_root_is_relevant_v1` for the soundness argument.
+    root_discovery: bool = false
+    # Method / field names of generic impls and generic types, filled once
+    # after step 1 only when `root_discovery` is on. Bounded by the step-1
+    # tables they are projected from.
+    discovery_method_names: Dict<text, bool> = {}
+    discovery_field_names: Dict<text, bool> = {}
 
 struct MonoStats:
     generic_functions_found: i64
@@ -328,6 +347,14 @@ impl MonomorphizationPass:
         (bootstrap gen2) mode, causing hir_modules to become empty.
         """
         self.declared_global_types = {}
+        mono_diag_refresh_v1()
+        # Archive mode installs nominal tables lazily from inside the walk, so
+        # skipping a root could change WHEN a table is installed. Discovery is
+        # admitted for retained bodies only.
+        if not self.root_discovery:
+            self.root_discovery = mono_root_discovery_env_v1()
+        val discovery = self.root_discovery and self.template_body_mode == MonoTemplateBodyModeV1.Retained
+        val t_start = time_now_monotonic_ms()
         val mod_keys = modules.keys()
 
         # Step 1: Collect generic definitions
@@ -336,9 +363,15 @@ impl MonomorphizationPass:
             self.module_paths[name] = module.path
             self.collect_declared_globals(module, name)
             self.collect_generics(module, name)
+        val t_collected = time_now_monotonic_ms()
 
         if self.stats.generic_functions_found == 0 and self.stats.generic_structs_found == 0 and self.stats.generic_classes_found == 0:
+            mono_last_phase_profile_v1 = "collect_ms={t_collected - t_start} roots_ms=0 drain_ms=0 place_ms=0 roots=0 roots_rewritten=0 discovery={discovery} generics=none"
             return modules
+        if discovery:
+            self.build_root_discovery_index_v1()
+        var roots_total = 0
+        var roots_rewritten = 0
 
         # Step 2: roots -> requests -> specializations -> fixed point.
         # Roots are walked in module-key order, then ascending symbol id, so
@@ -352,13 +385,31 @@ impl MonomorphizationPass:
             self.current_module = name
             var funcs: Dict<SymbolId, HirFunction> = {}
             val function_values: [HirFunction] = module.functions.values()
+            var last_root_skipped = false
+            var last_root_index = -1
             for function_index in sorted_function_indices(function_values):
                 val func: HirFunction = function_values[function_index]
                 val sym_id: SymbolId = func.symbol
                 if is_generic_function(func) or func.is_generic_template:
                     funcs[sym_id] = func
                     continue
+                roots_total = roots_total + 1
+                last_root_index = function_index
+                # Discovery: an inert root's rewrite is the identity and has
+                # no side effect, so passing it through keeps every request,
+                # symbol id and diagnostic in the same order.
+                if discovery and not self.mono_root_is_relevant_v1(func):
+                    funcs[sym_id] = func
+                    last_root_skipped = true
+                    continue
+                last_root_skipped = false
+                roots_rewritten = roots_rewritten + 1
                 funcs[sym_id] = self.rewrite_function(func)
+            # The constant initializers below are rewritten under the `env`
+            # the module's LAST root left behind. Rebuild that env when the
+            # last root was passed through, so they infer exactly as before.
+            if last_root_skipped:
+                self.prime_root_env_v1(function_values[last_root_index])
             # Mono must also rewrite generic call sites in module-global
             # constant/var INITIALIZERS, not only function bodies: a call like
             # `var _lock: Mutex = mutex_new(0)` (dynamic_probe.spl) survived
@@ -390,7 +441,9 @@ impl MonomorphizationPass:
                     fixed_address: const.fixed_address)
             rewritten_consts[name] = consts
             rewritten[name] = funcs
+        val t_roots = time_now_monotonic_ms()
         self.drain_worklist()
+        val t_drained = time_now_monotonic_ms()
 
         # Steps 3/4: place every specialization and prune its owner after the
         # fixed point. Pruning consults pass-wide specialization facts only;
@@ -444,6 +497,8 @@ impl MonomorphizationPass:
             # uses the frozen mod_keys list, never the shrinking table keys.
             rewritten.remove(name)
 
+        val t_placed = time_now_monotonic_ms()
+        mono_last_phase_profile_v1 = "collect_ms={t_collected - t_start} roots_ms={t_roots - t_collected} drain_ms={t_drained - t_roots} place_ms={t_placed - t_drained} roots={roots_total} roots_rewritten={roots_rewritten} queue={self.spec_queue.len()} discovery={discovery}"
         result
 
     # ========================================================================
@@ -3193,6 +3248,355 @@ impl MonomorphizationPass:
         out
 
     # ========================================================================
+    # Root discovery (opt-in): which ROOT bodies need the rewrite at all
+    # ========================================================================
+    #
+    # Soundness. `rewrite_function` on a root rebuilds the body node by node;
+    # it changes a node, or touches pass state outside the per-function
+    # `env` / `current_return_type` / `match_enum_hint` (all restored), ONLY
+    # at these sites:
+    #   - a Call whose callee is a known template (`callee_generic_name`),
+    #     both in `rewrite_call` and in let inference (`infer_expr_type`);
+    #   - a Call whose callee names a generic struct/class
+    #     (`generic_constructor_type`: E-MONO-032 / nominal relocation);
+    #   - a static generic factory (`MethodResolution.StaticMethod` whose
+    #     method symbol is a template);
+    #   - a method call whose name a generic impl declares
+    #     (`generic_method_template`: rewrite or E-MONO-034);
+    #   - a field read whose name a generic type declares
+    #     (instance typing, `stamp_instance_field_use`, E-MONO-040).
+    # This walk descends into every node `rewrite_expr` descends into (it may
+    # descend further; that only makes it more conservative) and answers true
+    # on any such site by NAME, never by inferred type. A root it answers
+    # false for is rebuilt into an identical value with no side effect, so
+    # passing it through leaves the sequence of requests, minted symbol ids,
+    # display names and diagnostics exactly as the full walk produces them.
+    # Read-only and per module, so it can run on module shards.
+
+    me build_root_discovery_index_v1():
+        self.discovery_method_names = {}
+        self.discovery_field_names = {}
+        for key in self.generic_methods.keys():
+            self.discovery_method_names[mono_key_last_member_v1(key)] = true
+        for key in self.generic_method_rejected.keys():
+            self.discovery_method_names[mono_key_last_member_v1(key)] = true
+        for key in self.generic_type_fields.keys():
+            self.discovery_field_names[mono_key_last_member_v1(key)] = true
+
+    me mono_root_is_relevant_v1(func: HirFunction) -> bool:
+        self.mono_relevant_block_v1(func.body)
+
+    me prime_root_env_v1(func: HirFunction):
+        """The `env` `rewrite_function(func)` leaves behind: parameters plus
+        the pre-collected lets (the rewrite itself only restores env). For an
+        inert root `collect_lets_block` has no side effect beyond env."""
+        self.env = {}
+        for p in func.params:
+            val pt: HirParam = p
+            val ps: SymbolId = pt.symbol
+            self.env[ps.id] = pt.type_
+        val previous_return_type = self.current_return_type
+        self.current_return_type = func.return_type
+        self.collect_lets_block(func.body)
+        self.current_return_type = previous_return_type
+
+    me mono_relevant_block_v1(block: HirBlock) -> bool:
+        if block == nil:
+            return false
+        for stmt in block.stmts:
+            val st: HirStmt = stmt
+            if self.mono_relevant_stmt_v1(st):
+                return true
+        if block.has:
+            val bv: HirExpr = block.value
+            return self.mono_relevant_expr_v1(bv)
+        false
+
+    me mono_relevant_block_opt_v1(block: HirBlock?) -> bool:
+        match block:
+            Some(b):
+                val bt: HirBlock = b
+                self.mono_relevant_block_v1(bt)
+            nil:
+                false
+
+    me mono_relevant_expr_opt_v1(expr: HirExpr?) -> bool:
+        match expr:
+            Some(e):
+                val et: HirExpr = e
+                self.mono_relevant_expr_v1(et)
+            nil:
+                false
+
+    me mono_relevant_exprs_v1(exprs: [HirExpr]) -> bool:
+        for e in exprs:
+            val et: HirExpr = e
+            if self.mono_relevant_expr_v1(et):
+                return true
+        false
+
+    me mono_relevant_args_v1(args: [HirCallArg]) -> bool:
+        for a in args:
+            val at: HirCallArg = a
+            if self.mono_relevant_expr_v1(mono_arg_value(at)):
+                return true
+        false
+
+    me mono_relevant_named_v1(fields: [(text, HirExpr)]) -> bool:
+        for f in fields:
+            val (_fname, fexpr) = f
+            val fe: HirExpr = fexpr
+            if self.mono_relevant_expr_v1(fe):
+                return true
+        false
+
+    me mono_relevant_stmt_v1(stmt: HirStmt) -> bool:
+        if stmt == nil:
+            return false
+        match stmt.kind:
+            case HirStmtKind.Let(_, _, init):
+                val init_t: HirExpr = init
+                self.mono_relevant_expr_v1(init_t)
+            case HirStmtKind.Assign(target, _, value):
+                val target_t: HirExpr = target
+                val value_t: HirExpr = value
+                self.mono_relevant_expr_v1(target_t) or self.mono_relevant_expr_v1(value_t)
+            case HirStmtKind.Expr(e):
+                val se_t: HirExpr = e
+                self.mono_relevant_expr_v1(se_t)
+            case HirStmtKind.Block(b):
+                val sb_t: HirBlock = b
+                self.mono_relevant_block_v1(sb_t)
+            case HirStmtKind.AsmAssert(_):
+                false
+
+    me mono_relevant_callee_v1(callee: HirExpr) -> bool:
+        if callee == nil:
+            return false
+        if self.callee_generic_name(callee) != "":
+            return true
+        match callee.kind:
+            case HirExprKind.NamedVar(sym_id, _):
+                self.generic_type_identity(self.current_module, sym_id) != ""
+            case HirExprKind.Var(sym_id):
+                self.generic_type_identity(self.current_module, sym_id) != ""
+            case _:
+                false
+
+    me mono_relevant_static_method_v1(resolution: MethodResolution, span: Span) -> bool:
+        match resolution:
+            case MethodResolution.StaticMethod(_, method_id):
+                val callee = HirExpr(kind: HirExprKind.Var(method_id), has_type_: false, type_: nil, span: span)
+                self.callee_generic_name(callee) != ""
+            case _:
+                false
+
+    me mono_relevant_expr_v1(expr: HirExpr) -> bool:
+        if expr == nil:
+            return false
+        match expr.kind:
+            case HirExprKind.Call(callee, args, _):
+                val ct: HirExpr = callee
+                val at: [HirCallArg] = args
+                self.mono_relevant_callee_v1(ct) or self.mono_relevant_expr_v1(ct) or self.mono_relevant_args_v1(at)
+            case HirExprKind.ArrayLit(elements, _):
+                self.mono_relevant_exprs_v1(elements)
+            case HirExprKind.ArrayRepeat(value, count, _):
+                val v1: HirExpr = value
+                val c1: HirExpr = count
+                self.mono_relevant_expr_v1(v1) or self.mono_relevant_expr_v1(c1)
+            case HirExprKind.TupleLit(elements):
+                self.mono_relevant_exprs_v1(elements)
+            case HirExprKind.DictLit(entries, _, _):
+                for entry in entries:
+                    val (k, v) = entry
+                    val kt: HirExpr = k
+                    val vt: HirExpr = v
+                    if self.mono_relevant_expr_v1(kt) or self.mono_relevant_expr_v1(vt):
+                        return true
+                false
+            case HirExprKind.SetLit(elements, _):
+                self.mono_relevant_exprs_v1(elements)
+            case HirExprKind.Field(base, field, _):
+                val b1: HirExpr = base
+                self.discovery_field_names.has(field) or self.mono_relevant_expr_v1(b1)
+            case HirExprKind.Index(base, index):
+                val b2: HirExpr = base
+                val i2: HirExpr = index
+                self.mono_relevant_expr_v1(b2) or self.mono_relevant_expr_v1(i2)
+            case HirExprKind.TupleIndex(base, _):
+                val b3: HirExpr = base
+                self.mono_relevant_expr_v1(b3)
+            case HirExprKind.OptionalChain(base, field):
+                val b4: HirExpr = base
+                self.discovery_field_names.has(field) or self.mono_relevant_expr_v1(b4)
+            case HirExprKind.NullCoalesce(left, right):
+                val l1: HirExpr = left
+                val r1: HirExpr = right
+                self.mono_relevant_expr_v1(l1) or self.mono_relevant_expr_v1(r1)
+            case HirExprKind.ExistsCheck(base):
+                val b5: HirExpr = base
+                self.mono_relevant_expr_v1(b5)
+            case HirExprKind.Unwrap(base):
+                val b6: HirExpr = base
+                self.mono_relevant_expr_v1(b6)
+            case HirExprKind.Binary(_, left, right):
+                val l2: HirExpr = left
+                val r2: HirExpr = right
+                self.mono_relevant_expr_v1(l2) or self.mono_relevant_expr_v1(r2)
+            case HirExprKind.Unary(_, operand):
+                val o1: HirExpr = operand
+                self.mono_relevant_expr_v1(o1)
+            case HirExprKind.MethodCall(receiver, method, args, resolution):
+                val rc: HirExpr = receiver
+                if self.discovery_method_names.has(method):
+                    return true
+                if self.mono_relevant_static_method_v1(resolution, expr.span):
+                    return true
+                self.mono_relevant_expr_v1(rc) or self.mono_relevant_args_v1(args)
+            case HirExprKind.StaticCall(_, method, args, resolution):
+                if self.discovery_method_names.has(method):
+                    return true
+                if self.mono_relevant_static_method_v1(resolution, expr.span):
+                    return true
+                self.mono_relevant_args_v1(args)
+            case HirExprKind.If(cond, then_, else_):
+                val cd: HirExpr = cond
+                val th: HirBlock = then_
+                self.mono_relevant_expr_v1(cd) or self.mono_relevant_block_v1(th) or self.mono_relevant_block_opt_v1(else_)
+            case HirExprKind.IfChain(arms, else_):
+                for arm in arms:
+                    val ia: HirIfArm = arm
+                    if self.mono_relevant_expr_v1(ia.cond) or self.mono_relevant_block_v1(ia.then_):
+                        return true
+                self.mono_relevant_block_opt_v1(else_)
+            case HirExprKind.MatchCase(scrutinee, arms):
+                val sc: HirExpr = scrutinee
+                if self.mono_relevant_expr_v1(sc):
+                    return true
+                for arm in arms:
+                    val mt: HirMatchArm = arm
+                    if mt.has_guard and self.mono_relevant_expr_v1(mt.guard):
+                        return true
+                    if self.mono_relevant_block_v1(mt.body):
+                        return true
+                false
+            case HirExprKind.Loop(body, _):
+                val lb: HirBlock = body
+                self.mono_relevant_block_v1(lb)
+            case HirExprKind.While(cond, body, _):
+                val wc: HirExpr = cond
+                val wb: HirBlock = body
+                self.mono_relevant_expr_v1(wc) or self.mono_relevant_block_v1(wb)
+            case HirExprKind.For(_, iter, body, _):
+                val fi: HirExpr = iter
+                val fb: HirBlock = body
+                self.mono_relevant_expr_v1(fi) or self.mono_relevant_block_v1(fb)
+            case HirExprKind.With(items, body):
+                for item in items:
+                    val wi: HirWithItem = item
+                    if self.mono_relevant_expr_v1(wi.context_expr):
+                        return true
+                val wbb: HirBlock = body
+                self.mono_relevant_block_v1(wbb)
+            case HirExprKind.Lambda(_, body, _):
+                val lbody: HirExpr = body
+                self.mono_relevant_expr_v1(lbody)
+            case HirExprKind.Block(block):
+                val bk: HirBlock = block
+                self.mono_relevant_block_v1(bk)
+            case HirExprKind.HostGpuLane(_, _, marker, body):
+                val mk: HirExpr = marker
+                val gb: HirBlock = body
+                self.mono_relevant_expr_v1(mk) or self.mono_relevant_block_v1(gb)
+            case HirExprKind.Return(value):
+                self.mono_relevant_expr_opt_v1(value)
+            case HirExprKind.Break(_, value):
+                self.mono_relevant_expr_opt_v1(value)
+            case HirExprKind.Throw(value):
+                val tv: HirExpr = value
+                self.mono_relevant_expr_v1(tv)
+            case HirExprKind.Try(inner):
+                val ti: HirExpr = inner
+                self.mono_relevant_expr_v1(ti)
+            case HirExprKind.Await(inner):
+                val ai: HirExpr = inner
+                self.mono_relevant_expr_v1(ai)
+            case HirExprKind.Yield(value):
+                self.mono_relevant_expr_opt_v1(value)
+            case HirExprKind.StructLit(_, fields):
+                self.mono_relevant_named_v1(fields)
+            case HirExprKind.EnumLit(_, _, payload):
+                match payload:
+                    Some(p):
+                        match p:
+                            case Tuple(values):
+                                self.mono_relevant_exprs_v1(values)
+                            case Struct(fields):
+                                self.mono_relevant_named_v1(fields)
+                    nil:
+                        false
+            case HirExprKind.Cast(inner, _):
+                val ci: HirExpr = inner
+                self.mono_relevant_expr_v1(ci)
+            case HirExprKind.As(inner, _):
+                val ai2: HirExpr = inner
+                self.mono_relevant_expr_v1(ai2)
+            case HirExprKind.ConvertCall(inner, _):
+                val cvi: HirExpr = inner
+                self.mono_relevant_expr_v1(cvi)
+            case HirExprKind.Range(start, end, _, step):
+                self.mono_relevant_expr_opt_v1(start) or self.mono_relevant_expr_opt_v1(end) or self.mono_relevant_expr_opt_v1(step)
+            case HirExprKind.Comprehension(_, inner, clauses):
+                val ce2: HirExpr = inner
+                if self.mono_relevant_expr_v1(ce2):
+                    return true
+                for clause in clauses:
+                    val cl: HirCompClause = clause
+                    match cl.kind:
+                        case HirCompClauseKind.For(_, iter):
+                            val cli: HirExpr = iter
+                            if self.mono_relevant_expr_v1(cli):
+                                return true
+                        case HirCompClauseKind.If(cond):
+                            val clc: HirExpr = cond
+                            if self.mono_relevant_expr_v1(clc):
+                                return true
+                false
+            case HirExprKind.LossBlock(body):
+                val lbb: HirBlock = body
+                self.mono_relevant_block_v1(lbb)
+            case HirExprKind.NogradBlock(body):
+                val nbb: HirBlock = body
+                self.mono_relevant_block_v1(nbb)
+            case HirExprKind.UnsafeBlock(body):
+                val ubb: HirBlock = body
+                self.mono_relevant_block_v1(ubb)
+            case HirExprKind.StringLit(_, interps):
+                val interps_opt: [HirInterpolation]? = interps
+                if val interpolation_items = interps_opt:
+                    for item in interpolation_items:
+                        val it: HirInterpolation = item
+                        if self.mono_relevant_expr_v1(it.expr):
+                            return true
+                false
+            case HirExprKind.TypeTest(value, _):
+                val ttv: HirExpr = value
+                self.mono_relevant_expr_v1(ttv)
+            case HirExprKind.TryCatch(body, clauses, finally_):
+                val tcb: HirBlock = body
+                if self.mono_relevant_block_v1(tcb):
+                    return true
+                for clause in clauses:
+                    val cc: HirCatchClause = clause
+                    if self.mono_relevant_block_v1(cc.body):
+                        return true
+                self.mono_relevant_block_opt_v1(finally_)
+            # Leaves, exactly the `case _: pass` set of `rewrite_expr`.
+            case _:
+                false
+
+    # ========================================================================
     # Statistics
     # ========================================================================
 
@@ -3862,8 +4266,25 @@ fn mono_payload_key_suffix(key: text) -> text:
         return key
     key.substring(i, key.len())
 
+fn mono_diag_refresh_v1():
+    _mono_diag_enabled_state = 0
+    if env_get("SIMPLE_MONO_DIAG") == "1":
+        _mono_diag_enabled_state = 1
+
 fn mono_diag_enabled() -> bool:
-    env_get("SIMPLE_MONO_DIAG") == "1"
+    if _mono_diag_enabled_state < 0:
+        mono_diag_refresh_v1()
+    _mono_diag_enabled_state == 1
+
+fn mono_root_discovery_env_v1() -> bool:
+    env_get("SIMPLE_MONO_ROOT_DISCOVERY") == "1"
+
+fn mono_key_last_member_v1(key: text) -> text:
+    """`"<identity>::<member>"` -> `"<member>"` (identities may hold `::`)."""
+    val i = key.rfind("::")
+    if i < 0:
+        return key
+    key.substring(i + 2, key.len())
 
 fn mono_sym_key(module_name: text, sym_id: i64) -> text:
     "{module_name}#{sym_id}"
