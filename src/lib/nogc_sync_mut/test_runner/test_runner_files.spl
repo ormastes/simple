@@ -259,11 +259,23 @@ fn file_has_ignored_test(file_path: text) -> bool:
     val content = read_file_content(file_path)
     content.contains("tag: \"skip\"") or content.contains("tag: 'skip'") or content.contains("# @pending") or content.contains("tag: \"pending\"") or content.contains("tag: 'pending'")
 
+fn content_has_tag(content: text, tag: text) -> bool:
+    """True when the spec source carries `tag` via `tag: "x"`, `tag("x")`,
+    or a `# @x` / `# @tag:x` header line (exact name, not a prefix)."""
+    if content.contains("tag: \"{tag}\"") or content.contains("tag: '{tag}'"):
+        return true
+    if content.contains("tag(\"{tag}\")"):
+        return true
+    for line in content.split("\n"):
+        val t = line.trim()
+        if t == "# @{tag}" or t == "# @tag:{tag}" or t.starts_with("# @{tag} ") or t.starts_with("# @tag:{tag} "):
+            return true
+    false
+
 fn file_has_tag(file_path: text, tag: text) -> bool:
     if tag == "":
         return true
-    val content = read_file_content(file_path)
-    content.contains("tag: \"{tag}\"") or content.contains("tag: '{tag}'")
+    content_has_tag(read_file_content(file_path), tag)
 
 fn file_has_di_test_tag(file_path: text) -> bool:
     """Check if file has # @di_test tag, allowing DI modifications in system tests."""
@@ -347,7 +359,8 @@ fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bo
             return [base_path]
         return []
 
-    if not use_cache:
+    # The manifest does not record spec tags, so a tag filter must scan content.
+    if not use_cache or options.tag != "":
         return discover_test_files_slow(base_path, options)
 
     # Try loading manifest
@@ -588,7 +601,7 @@ fn discover_test_files_slow(base_path: text, options: TestOptions) -> [text]:
                     continue
             # Filter by --tag
             if options.tag != "":
-                if not (content.contains("tag: \"{options.tag}\"") or content.contains("tag: '{options.tag}'")):
+                if not content_has_tag(content, options.tag):
                     continue
 
         # Slow tests now run by default (session sharing makes them fast)
