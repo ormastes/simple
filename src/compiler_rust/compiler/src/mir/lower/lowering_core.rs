@@ -294,6 +294,10 @@ pub struct MirLowerer<'a> {
     /// Absence must never be read as "value type": copying an identity type
     /// converts the class defect into its struct sibling.
     pub(super) type_value_kinds: HashMap<String, bool>,
+    /// Array copy sites that may move a provably dead, uniquely owned source
+    /// instead of copying it; recomputed per function by
+    /// `array_move::compute_array_move_sites`.
+    pub(super) array_move_sites: super::array_move::ArrayMoveSites,
     /// Reference to trait infos for vtable slot resolution (static polymorphism)
     pub(super) trait_infos: Option<&'a std::collections::HashMap<String, crate::hir::HirTraitInfo>>,
     /// Project-wide trait implementations for cross-module vtable dispatch.
@@ -399,6 +403,7 @@ impl<'a> MirLowerer<'a> {
             local_type_name_hints: HashMap::new(),
             local_trait_dispatch: HashMap::new(),
             type_value_kinds: HashMap::new(),
+            array_move_sites: Default::default(),
             trait_infos: None,
             global_trait_impls: None,
             di_config: None,
@@ -446,6 +451,7 @@ impl<'a> MirLowerer<'a> {
             local_type_name_hints: HashMap::new(),
             local_trait_dispatch: HashMap::new(),
             type_value_kinds: HashMap::new(),
+            array_move_sites: Default::default(),
             trait_infos: None,
             global_trait_impls: None,
             di_config: None,
@@ -2173,6 +2179,13 @@ impl<'a> MirLowerer<'a> {
         // recomputed (not accumulated) or one function's locals would be read
         // as another's.
         self.erased_local_class_types = compute_single_assignment_class_types(func, self.type_registry);
+        self.array_move_sites =
+            super::array_move::compute_array_move_sites(
+                func,
+                self.type_registry,
+                &self.type_value_kinds,
+                &self.inject_functions,
+            );
         self.local_type_name_hints = func
             .params
             .iter()

@@ -413,3 +413,20 @@ in MIR to "fix" a dropped write. Escape: `SIMPLE_CAPTURE_WRITE_CHECK=warning|off
   legitimately skips or multiplies a guarded arm adjusts
   `self.match_guards_expected` with a comment.** Guide:
   `doc/07_guide/compiler/robustness/match-guard-invariant.md`.
+
+## 2026-10-19 — JIT array copies are never freed; `array_move.rs` moves instead
+
+- On the seed JIT lane every `rt_array_copy` lives forever: `Drop` is a no-op, nothing
+  emits `rt_array_free`, and arrays have no refcount. A copy inside a loop therefore
+  leaks O(n²). Example: `var o = st.output; ...; st = St(output: o)` used 697 MB at
+  n=65536; with the move it uses 40 MB.
+- `mir/lower/array_move.rs` turns the `Let` place copy into a move when the source is
+  provably uniquely owned and dead. It fails closed. The negative pins live in
+  `mir/lower/tests/array_move_tests.rs`.
+- Trap: struct literals must NOT copy array arguments on this lane, not even a live
+  `var`. With no reclamation, a reused buffer leaks per iteration (39 MB → 2.46 GB),
+  and projections leak through the functional-update idiom `S(data: st.data, ...)`
+  (128 KiB zstd decode 280 MB → 2.0 GB).
+- So the JIT keeps base aliasing at literals (a known bug, DEFERRED). Any argument that
+  is not handed over makes the struct non-unique, and so do `@inject`-constructor types.
+- Bug record: `doc/08_tracking/bug/seed_jit_array_copy_never_freed_2026-10-19.md`.

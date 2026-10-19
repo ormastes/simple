@@ -4,6 +4,7 @@
 //! including contract checking, dependency injection, GPU intrinsics, and coverage instrumentation.
 
 // Module declarations
+mod array_move;
 mod lowering_contracts;
 mod lowering_core;
 mod lowering_coverage;
