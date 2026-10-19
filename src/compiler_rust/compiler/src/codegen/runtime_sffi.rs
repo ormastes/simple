@@ -1640,6 +1640,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Lost together with that C file in the tree-wipe restore ae55a746719; without
     // this spec resolve_runtime_func drops whole modules to the interpreter.
     RuntimeFuncSpec::new("rt_process_run_owned_bounded_value", &[I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_run_owned_observed_bounded_value", &[I64, I64, I64, I64, I64], &[I64]),
     // Owned-process V3 opaque adapter.  `text` command expands to (ptr, len),
     // so the Simple six-argument start declaration has a seven-word native
     // call signature.  All projections return runtime-owned i64/byte arrays;
