@@ -1,0 +1,47 @@
+"""Unknown variants and unsupported payload representations fail closed."""
+# @req REQ-ENUM-COHERENCE-PAYLOAD
+# @cover src/compiler/50.mir/_MirLoweringExpr/enum_constructor_payload.spl
+
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_definitions.{HirEnum, HirVariant, HirVariantKind, HirExpr, HirExprKind}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolTable}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLoweringExpr.enum_constructor_payload.*
+
+fn extension_boundary_enum() -> HirEnum:
+    val absent = HirExpr(kind: HirExprKind.NilLit, has_type_: false,
+        type_: HirType(kind: HirTypeKind.Unit, span: Span.empty()), span: Span.empty())
+    val payload = HirVariant(symbol: SymbolId(id: 91), name: "Message",
+        kind: HirVariantKind.Tuple([HirType(kind: HirTypeKind.Str, span: Span.empty())]),
+        has_discriminant: false, discriminant: absent, span: Span.empty())
+    val empty = HirVariant(symbol: SymbolId(id: 92), name: "Empty",
+        kind: HirVariantKind.Unit, has_discriminant: false, discriminant: absent,
+        span: Span.empty())
+    HirEnum(symbol: SymbolId(id: 90), name: "Diagnostic", runtime_name: "fixture.Diagnostic",
+        type_params: [], variants: [payload, empty], visibility: Visibility.Public,
+        is_public: true, has_doc_comment: false, doc_comment: "", span: Span.empty(),
+        is_generic_template: false, has_specialization_of: false, specialization_of: "",
+        type_bindings: {}, attributes: [])
+
+describe "enum payload extension boundary":
+    it "rejects an unsupported payload kind without changing a neighboring variant":
+        step("Inject an unrecognized representation into one registered variant")
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.register_enum_variants(extension_boundary_enum())
+        expect(lowering.enum_positional_payload_reason("fixture.Diagnostic", "Message", 1)).to_equal("")
+        lowering.enum_variant_payload_kind["fixture.Diagnostic::Message"] = "future_payload_kind"
+        expect(lowering.enum_positional_payload_reason("fixture.Diagnostic", "Message", 1)).to_equal("invalid declared payload kind")
+        expect(lowering.enum_positional_payload_reason("fixture.Diagnostic", "Empty", 0)).to_equal("")
+        expect(lowering.enum_positional_payload_reason("fixture.Diagnostic", "Missing", 0)).to_equal("unknown variant")
+
+    it "keeps exact payload arity after a known declaration is registered":
+        step("Reject missing and extra payloads without borrowing a neighboring declaration")
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.register_enum_variants(extension_boundary_enum())
+        expect(lowering.enum_positional_payload_reason("fixture.Diagnostic", "Message", 0)).to_equal("payload arity mismatch")
+        expect(lowering.enum_positional_payload_reason("fixture.Diagnostic", "Message", 2)).to_equal("payload arity mismatch")
+        expect(lowering.enum_positional_payload_reason("fixture.Diagnostic", "Empty", 1)).to_equal("payload arity mismatch")
+        expect(lowering.enum_positional_payload_reason("other.Diagnostic", "Missing", 0)).to_equal("unknown variant")
