@@ -1,0 +1,418 @@
+# Concrete UTF-8 primitives and explicitly encoded external values.
+# The abstractions are traits: they do not change either primitive's layout.
+use std.common.encoding.host_text_boundary_v1.{HostTextCodecErrorV1, HostTextByteSpanV1, host_text_span_byte_v1, host_validate_text_span_v1, host_text_span_to_utf8_v1, utf8_bytes_to_host_text_v1}
+use std.common.encoding.unicode_scalar.{unicode_scalar_valid, unicode_scalar_from_utf8, unicode_scalar_to_utf8}
+use std.common.text_bytes.{TextByteBufferError, text_byte_buffer, boxed_text_bytes_checked, bytes_to_text}
+
+type Char = char
+type Text = text
+
+pub enum Encoding:
+    Utf8
+    Utf16
+    Unknown(text)
+
+pub enum ByteOrder:
+    NotApplicable
+    LittleEndian
+    BigEndian
+
+pub enum BomPolicy:
+    Preserve
+    Require
+    Forbid
+
+pub struct ExternalFormat:
+    encoding: Encoding
+    byte_order: ByteOrder
+    bom: BomPolicy
+
+pub enum CodecErrorKind:
+    UnknownEncoding
+    InvalidFormat
+    InvalidByte
+    InvalidUtf8
+    InvalidUtf16
+    TruncatedInput
+    MissingBom
+    ForbiddenBom
+    NotOneScalar
+    StreamFinished
+    CapacityOverflow
+    AllocationFailed
+    InternalInvariant
+
+pub struct CodecError:
+    kind: CodecErrorKind
+    byte_offset: i64
+    reason: text
+
+pub trait AbstractChar:
+    fn to_internal_char() -> Result<Char, CodecError>
+
+pub trait AbstractText:
+    fn to_internal_text() -> Result<Text, CodecError>
+
+impl AbstractChar for char:
+    fn to_internal_char() -> Result<Char, CodecError>:
+        if not unicode_scalar_valid(self as i64):
+            return Err(CodecError(kind: CodecErrorKind.InternalInvariant, byte_offset: -1, reason: "invalid internal character"))
+        Ok(self)
+
+impl AbstractText for text:
+    # BOOTSTRAP-WORKAROUND HIR-RECEIVER-OWNER: immutable parent loses implicit primitive self.
+    # Retire explicit annotation after rebuilt compiler qualifies unannotated receivers.
+    fn to_internal_text(self: text) -> Result<Text, CodecError>:
+        val bytes: [u8] = external_checked_boxed_bytes(self)?
+        val validated: () = external_validate_utf8(bytes)?
+        Ok(self)
+
+pub fn utf8_format() -> ExternalFormat:
+    """Explicit UTF-8 metadata; an initial U+FEFF remains content."""
+    ExternalFormat(encoding: Encoding.Utf8, byte_order: ByteOrder.NotApplicable, bom: BomPolicy.Preserve)
+
+pub fn external_format_from_label(label: text, bom: BomPolicy) -> Result<ExternalFormat, CodecError>:
+    """Resolve protocol labels explicitly; unknown labels never mean UTF-8."""
+    if label == "utf-8":
+        return Ok(ExternalFormat(encoding: Encoding.Utf8, byte_order: ByteOrder.NotApplicable, bom: bom))
+    if label == "utf-16le":
+        return Ok(ExternalFormat(encoding: Encoding.Utf16, byte_order: ByteOrder.LittleEndian, bom: bom))
+    if label == "utf-16be":
+        return Ok(ExternalFormat(encoding: Encoding.Utf16, byte_order: ByteOrder.BigEndian, bom: bom))
+    Err(CodecError(kind: CodecErrorKind.UnknownEncoding, byte_offset: -1, reason: label))
+
+fn external_codec_id(format: ExternalFormat) -> Result<text, CodecError>:
+    match format.encoding:
+        case Encoding.Utf8:
+            if format.byte_order == ByteOrder.NotApplicable: return Ok("utf-8")
+        case Encoding.Utf16:
+            if format.byte_order == ByteOrder.LittleEndian: return Ok("utf-16le")
+            if format.byte_order == ByteOrder.BigEndian: return Ok("utf-16be")
+        case Encoding.Unknown(label):
+            return Err(CodecError(kind: CodecErrorKind.UnknownEncoding, byte_offset: -1, reason: label))
+    Err(CodecError(kind: CodecErrorKind.InvalidFormat, byte_offset: -1, reason: "encoding and byte order disagree"))
+
+pub fn external_codec_error(error: HostTextCodecErrorV1, base: i64) -> CodecError:
+    var kind = CodecErrorKind.InternalInvariant
+    if error.code == "unsupported_encoding": kind = CodecErrorKind.UnknownEncoding
+    elif error.code == "invalid_byte": kind = CodecErrorKind.InvalidByte
+    elif error.code == "invalid_utf8": kind = CodecErrorKind.InvalidUtf8
+    elif error.code == "invalid_utf16": kind = CodecErrorKind.InvalidUtf16
+    elif error.code == "truncated_input": kind = CodecErrorKind.TruncatedInput
+    elif error.code == "invalid_span": kind = CodecErrorKind.InvalidFormat
+    elif error.code == "capacity_overflow": kind = CodecErrorKind.CapacityOverflow
+    elif error.code == "buffer_allocation": kind = CodecErrorKind.AllocationFailed
+    var offset = error.byte_offset
+    if offset >= 0: offset = offset + base
+    CodecError(kind: kind, byte_offset: offset, reason: error.reason)
+
+fn external_byte_buffer(capacity: i64) -> Result<[u8], CodecError>:
+    match text_byte_buffer(capacity):
+        case Ok(bytes): Ok(bytes)
+        case Err(cause):
+            var kind = CodecErrorKind.AllocationFailed
+            if cause == TextByteBufferError.NegativeCapacity: kind = CodecErrorKind.InvalidFormat
+            elif cause == TextByteBufferError.CapacityOverflow: kind = CodecErrorKind.CapacityOverflow
+            Err(CodecError(kind: kind, byte_offset: -1, reason: "external text byte buffer allocation failed"))
+
+fn external_checked_boxed_bytes(value: text) -> Result<[u8], CodecError>:
+    match boxed_text_bytes_checked(value):
+        case Ok(bytes): Ok(bytes)
+        case Err(cause):
+            var kind = CodecErrorKind.AllocationFailed
+            if cause == TextByteBufferError.NegativeCapacity: kind = CodecErrorKind.InvalidFormat
+            elif cause == TextByteBufferError.CapacityOverflow: kind = CodecErrorKind.CapacityOverflow
+            Err(CodecError(kind: kind, byte_offset: -1, reason: "boxed text byte extraction failed"))
+
+fn external_copy_bytes(bytes: [u8]) -> Result<[u8], CodecError>:
+    var owned = external_byte_buffer(bytes.len())?
+    for byte in bytes: owned.push(byte)
+    Ok(owned)
+
+fn external_wide_bytes(bytes: [u8]) -> [i64]:
+    var wide: [i64] = []
+    for byte in bytes: wide.push(byte as i64)
+    wide
+
+fn external_narrow_bytes(bytes: [i64]) -> Result<[u8], CodecError>:
+    var narrow = external_byte_buffer(bytes.len())?
+    for byte in bytes: narrow.push(byte as u8)
+    Ok(narrow)
+
+fn external_bom_bytes(format: ExternalFormat) -> [u8]:
+    if format.encoding == Encoding.Utf8: return [0xEF, 0xBB, 0xBF]
+    if format.byte_order == ByteOrder.LittleEndian: return [0xFF, 0xFE]
+    [0xFE, 0xFF]
+
+fn external_starts_with(bytes: [u8], prefix: [u8]) -> bool:
+    if bytes.len() < prefix.len(): return false
+    for index in 0..prefix.len():
+        if bytes[index] != prefix[index]: return false
+    true
+
+fn external_payload_start(bytes: [u8], format: ExternalFormat) -> Result<i64, CodecError>:
+    if format.bom == BomPolicy.Preserve: return Ok(0)
+    val prefix = external_bom_bytes(format)
+    val present = external_starts_with(bytes, prefix)
+    if format.bom == BomPolicy.Require:
+        if present: return Ok(prefix.len())
+        return Err(CodecError(kind: CodecErrorKind.MissingBom, byte_offset: 0, reason: "required encoding signature absent"))
+    if present:
+        return Err(CodecError(kind: CodecErrorKind.ForbiddenBom, byte_offset: 0, reason: "encoding signature prohibited"))
+    Ok(0)
+
+fn external_validate_utf8(bytes: [u8]) -> Result<(), CodecError>:
+    val span = HostTextByteSpanV1(prefix: [], bytes: bytes, start: 0, end: bytes.len())
+    match host_validate_text_span_v1(span, "utf-8"):
+        case Ok(unit): Ok(())
+        case Err(error): Err(external_codec_error(error, 0))
+
+fn external_decode_bytes(bytes: [u8], format: ExternalFormat) -> Result<[u8], CodecError>:
+    val encoding = external_codec_id(format)?
+    val start = external_payload_start(bytes, format)?
+    val span = HostTextByteSpanV1(prefix: [], bytes: bytes, start: start, end: bytes.len())
+    match host_text_span_to_utf8_v1(span, encoding):
+        case Ok(utf8): Ok(utf8)
+        case Err(error): Err(external_codec_error(error, 0))
+
+fn external_span_text(span: HostTextByteSpanV1, encoding: text) -> Result<Text, CodecError>:
+    # Full UTF-8 input needs validation and one Text materialization, not a
+    # second full byte buffer. Selected/prefixed spans use one codec output.
+    if encoding == "utf-8" and span.prefix.len() == 0 and span.start == 0 and span.end == span.bytes.len():
+        match host_validate_text_span_v1(span, encoding):
+            case Err(error): return Err(external_codec_error(error, 0))
+            case Ok(unit): return Ok(bytes_to_text(span.bytes))
+    match host_text_span_to_utf8_v1(span, encoding):
+        case Ok(utf8): Ok(bytes_to_text(utf8))
+        case Err(error): Err(external_codec_error(error, 0))
+
+pub class ExternalText:
+    _bytes: [u8]
+    _format: ExternalFormat
+
+    pub fn encoded_bytes() -> Result<[u8], CodecError>:
+        external_copy_bytes(self._bytes)
+
+    pub fn encoded_byte_length() -> i64:
+        self._bytes.len()
+
+    pub fn external_format() -> ExternalFormat:
+        self._format
+
+impl AbstractText for ExternalText:
+    fn to_internal_text() -> Result<Text, CodecError>:
+        val encoding: text = external_codec_id(self._format)?
+        val start: i64 = external_payload_start(self._bytes, self._format)?
+        val span: HostTextByteSpanV1 = HostTextByteSpanV1(prefix: [], bytes: self._bytes, start: start, end: self._bytes.len())
+        external_span_text(span, encoding)
+
+pub fn external_text(bytes: [u8], format: ExternalFormat) -> Result<ExternalText, CodecError>:
+    """Own encoded bytes after metadata admission; decoding is explicit and fallible."""
+    val encoding = external_codec_id(format)?
+    val owned = external_copy_bytes(bytes)?
+    Ok(ExternalText(_bytes: owned, _format: format))
+
+pub fn external_text_from_internal(value: Text, format: ExternalFormat) -> Result<ExternalText, CodecError>:
+    """Encode immutable internal UTF-8 according to explicit destination metadata."""
+    val encoding = external_codec_id(format)?
+    val utf8 = external_checked_boxed_bytes(value)?
+    var payload: [u8] = []
+    if encoding == "utf-8":
+        val valid = external_validate_utf8(utf8)?
+        payload = utf8
+    else:
+        match utf8_bytes_to_host_text_v1(utf8, encoding):
+            case Err(error): return Err(external_codec_error(error, 0))
+            case Ok(encoded): payload = encoded
+    if format.bom == BomPolicy.Require:
+        val prefix = external_bom_bytes(format)
+        if payload.len() > 9223372036854775767 - prefix.len():
+            return Err(CodecError(kind: CodecErrorKind.CapacityOverflow, byte_offset: -1, reason: "external text signature capacity overflow"))
+        var output = external_byte_buffer(payload.len() + prefix.len())?
+        for byte in prefix: output.push(byte)
+        for byte in payload: output.push(byte)
+        return Ok(ExternalText(_bytes: output, _format: format))
+    if format.bom == BomPolicy.Forbid:
+        val start = external_payload_start(payload, format)?
+    Ok(ExternalText(_bytes: payload, _format: format))
+
+pub class ExternalChar:
+    _bytes: [u8]
+    _format: ExternalFormat
+
+    pub fn encoded_bytes() -> Result<[u8], CodecError>:
+        external_copy_bytes(self._bytes)
+
+    pub fn encoded_byte_length() -> i64:
+        self._bytes.len()
+
+    pub fn external_format() -> ExternalFormat:
+        self._format
+
+impl AbstractChar for ExternalChar:
+    fn to_internal_char() -> Result<Char, CodecError>:
+        val utf8 = external_decode_bytes(self._bytes, self._format)?
+        if utf8.len() > 4:
+            return Err(CodecError(kind: CodecErrorKind.NotOneScalar, byte_offset: 0, reason: "external character must contain exactly one scalar"))
+        if val scalar = unicode_scalar_from_utf8(external_wide_bytes(utf8)):
+            return Ok(scalar as char)
+        Err(CodecError(kind: CodecErrorKind.NotOneScalar, byte_offset: 0, reason: "external character must contain exactly one scalar"))
+
+pub fn external_char(bytes: [u8], format: ExternalFormat) -> Result<ExternalChar, CodecError>:
+    """Require exactly one encoded scalar, excluding a required transport BOM."""
+    val encoding = external_codec_id(format)?
+    val owned = external_copy_bytes(bytes)?
+    val result = ExternalChar(_bytes: owned, _format: format)
+    val checked = result.to_internal_char()?
+    Ok(result)
+
+pub fn external_char_from_internal(value: Char, format: ExternalFormat) -> Result<ExternalChar, CodecError>:
+    """Transcode one internal character; never reinterpret its physical carrier."""
+    val encoding = external_codec_id(format)?
+    if val utf8 = unicode_scalar_to_utf8(value as i64):
+        val bytes = external_narrow_bytes(utf8)?
+        val encoded = external_text_from_internal(bytes_to_text(bytes), format)?
+        # The output encoder owns these validated bytes; no defensive clone is
+        # needed for this private transfer into a distinct external character.
+        return Ok(ExternalChar(_bytes: encoded._bytes, _format: format))
+    Err(CodecError(kind: CodecErrorKind.InternalInvariant, byte_offset: -1, reason: "invalid internal character"))
+
+# Prefix width only selects an available complete span. The strict codec validates
+# every selected byte; pending bytes become an error on finish, never replacement.
+fn external_complete_prefix(span: HostTextByteSpanV1, format: ExternalFormat) -> i64:
+    var offset = span.start
+    while offset < span.end:
+        var width = 1
+        if format.encoding == Encoding.Utf8:
+            val lead = host_text_span_byte_v1(span, offset) as i64
+            if lead >= 0xC2 and lead <= 0xDF: width = 2
+            elif lead >= 0xE0 and lead <= 0xEF: width = 3
+            elif lead >= 0xF0 and lead <= 0xF4: width = 4
+        else:
+            width = 2
+            if span.end - offset < 2: return offset
+            val first = host_text_span_byte_v1(span, offset) as i64
+            val second = host_text_span_byte_v1(span, offset + 1) as i64
+            var unit = first | (second << 8)
+            if format.byte_order == ByteOrder.BigEndian:
+                unit = (first << 8) | second
+            if unit >= 0xD800 and unit <= 0xDBFF: width = 4
+        if span.end - offset < width: return offset
+        offset = offset + width
+    offset
+
+fn external_pending_bytes(span: HostTextByteSpanV1, start: i64) -> Result<[u8], CodecError>:
+    val count = span.end - start
+    if count < 0 or count > 3:
+        return Err(CodecError(kind: CodecErrorKind.InternalInvariant, byte_offset: -1, reason: "decoder carry exceeds one incomplete scalar"))
+    var pending = external_byte_buffer(count)?
+    for index in start..span.end:
+        pending.push(host_text_span_byte_v1(span, index))
+    Ok(pending)
+
+pub class ExternalTextDecoder:
+    _format: ExternalFormat
+    _carry: [u8]
+    _offset: i64
+    _started: bool
+    _finished: bool
+    _failure: CodecError?
+
+    pub fn pending_byte_count() -> i64:
+        self._carry.len()
+
+    me _reject(error: CodecError) -> Result<Text, CodecError>:
+        self._failure = Some(error)
+        Err(error)
+
+    pub me fn push(chunk: [u8]) -> Result<Text, CodecError>:
+        """Decode complete scalars; retain at most three bytes between calls."""
+        if val error = self._failure: return Err(error)
+        if self._finished:
+            return Err(CodecError(kind: CodecErrorKind.StreamFinished, byte_offset: self._offset, reason: "decoder already finished"))
+        if chunk.len() > 9223372036854775807 - self._carry.len():
+            return self._reject(CodecError(kind: CodecErrorKind.CapacityOverflow, byte_offset: -1, reason: "decoder input length overflow"))
+        val total = self._carry.len() + chunk.len()
+        if self._offset > 9223372036854775807 - total:
+            return self._reject(CodecError(kind: CodecErrorKind.CapacityOverflow, byte_offset: -1, reason: "decoder absolute offset overflow"))
+        # Read the caller's chunk directly; the only retained copy is <=3 bytes.
+        val input = HostTextByteSpanV1(prefix: self._carry, bytes: chunk, start: 0, end: total)
+        var start = 0
+        if not self._started:
+            if self._format.bom != BomPolicy.Preserve:
+                val prefix = external_bom_bytes(self._format)
+                var matching = true
+                var index = 0
+                while index < total and index < prefix.len():
+                    if host_text_span_byte_v1(input, index) != prefix[index]: matching = false
+                    index = index + 1
+                if matching and total < prefix.len():
+                    match external_pending_bytes(input, 0):
+                        case Err(error): return self._reject(error)
+                        case Ok(pending):
+                            self._carry = pending
+                            return Ok("")
+                if self._format.bom == BomPolicy.Require:
+                    if not matching:
+                        return self._reject(CodecError(kind: CodecErrorKind.MissingBom, byte_offset: 0, reason: "required encoding signature absent"))
+                    start = prefix.len()
+                elif matching:
+                    return self._reject(CodecError(kind: CodecErrorKind.ForbiddenBom, byte_offset: 0, reason: "encoding signature prohibited"))
+            self._started = true
+        val payload = HostTextByteSpanV1(prefix: self._carry, bytes: chunk, start: start, end: total)
+        val complete = external_complete_prefix(payload, self._format)
+        val ready = HostTextByteSpanV1(prefix: self._carry, bytes: chunk, start: start, end: complete)
+        val encoding = external_codec_id(self._format)?
+        match external_span_text(ready, encoding):
+            case Err(cause):
+                var offset = cause.byte_offset
+                if offset >= 0: offset = offset + self._offset
+                return self._reject(CodecError(kind: cause.kind, byte_offset: offset, reason: cause.reason))
+            case Ok(output):
+                match external_pending_bytes(input, complete):
+                    case Err(error): return self._reject(error)
+                    case Ok(pending):
+                        self._carry = pending
+                        self._offset = self._offset + complete
+                        Ok(output)
+
+    pub me fn finish() -> Result<Text, CodecError>:
+        """Close the stream; a pending partial scalar is a typed truncation error."""
+        if val error = self._failure: return Err(error)
+        if self._finished:
+            return Err(CodecError(kind: CodecErrorKind.StreamFinished, byte_offset: self._offset, reason: "decoder already finished"))
+        self._finished = true
+        if self._carry.len() == 0 and (self._started or self._format.bom != BomPolicy.Require):
+            return Ok("")
+        var format = self._format
+        if self._started:
+            format = ExternalFormat(encoding: format.encoding, byte_order: format.byte_order, bom: BomPolicy.Preserve)
+        match external_decode_bytes(self._carry, format):
+            case Err(cause):
+                var offset = cause.byte_offset
+                if offset >= 0: offset = offset + self._offset
+                val error = CodecError(kind: cause.kind, byte_offset: offset, reason: cause.reason)
+                self._failure = Some(error)
+                Err(error)
+            case Ok(utf8):
+                self._offset = self._offset + self._carry.len()
+                self._carry = []
+                Ok(bytes_to_text(utf8))
+
+pub fn external_validate_bom(bytes: [u8], format: ExternalFormat) -> Result<(), CodecError>:
+    """Validate metadata and the BOM prefix only; do not decode payload bytes.
+
+    Transport owners use this after the actual stream position is known.
+    A successful result does not prove that the payload is valid text.
+    """
+    val _encoding: text = external_codec_id(format)?
+    val _start: i64 = external_payload_start(bytes, format)?
+    Ok(())
+
+pub fn external_text_decoder(format: ExternalFormat) -> Result<ExternalTextDecoder, CodecError>:
+    """Create an independent strict decoder with bounded pending storage."""
+    val encoding = external_codec_id(format)?
+    val carry = external_byte_buffer(3)?
+    Ok(ExternalTextDecoder(_format: format, _carry: carry, _offset: 0, _started: false, _finished: false, _failure: nil))
+
+export Char, Text, AbstractChar, AbstractText
