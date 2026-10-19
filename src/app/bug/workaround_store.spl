@@ -2,12 +2,13 @@
 use app.bug.workaround_index.{WorkaroundIndex, WorkaroundLink, empty_workaround_index,
     parse_workaround_source, encode_workaround_index, decode_workaround_index,
     replace_workaround_paths, workaround_path_valid, workaround_recovery_valid}
-use std.nogc_async_mut.sosix.workaround_host.{workaround_host_read,
+use std.nogc_async_mut.sosix.workaround_host.{workaround_host_read, workaround_host_read_bytes,
     workaround_host_exists, workaround_host_publish, workaround_host_lock,
     workaround_host_unlock, workaround_host_mkdir, workaround_host_cwd, workaround_host_process}
 use std.nogc_async_mut.database.bug.{BugDatabase}
 use std.nogc_async_mut.database.core.{SdnDatabase, parse_sdn_table, interner_from_sdn}
-use std.nogc_sync_mut.compression.gzip.crc.{crc32_text}
+use std.nogc_sync_mut.compression.gzip.crc.{crc32_text, crc32_update}
+use std.common.text_bytes.{bytes_to_text}
 use std.convert.{try_parse_int}
 
 fn workaround_source_candidate(path: text) -> bool:
@@ -90,15 +91,26 @@ fn workaround_bug_snapshot(root: text) -> Result<BugDatabase, text>:
     if workaround_host_exists(path + ".wal"):
         val wal: text = workaround_host_read(path + ".wal", 16777216)?
         if wal.trim() != "": return Err("checkpoint the canonical bug database WAL before workaround refresh")
-    var content: text = workaround_host_read(path, 33554432)?
-    if content.starts_with("#sdn-crc32:"):
-        val newline = content.index_of("\n")
+    # Cycle-172: read the DB as RAW BYTES and CRC the exact body bytes of
+    # THIS read. The text round trip (read text -> substring -> crc32_text ->
+    # s.bytes()) drew erased reads on candidate-seednew and refused a DB
+    # whose body matches zlib crc32 exactly (verified 278564174; the pure
+    # algorithm passes the 0xCBF43926 KAT). The gate stays fail-closed: the
+    # recorded CRC is compared against the body of the same bytes just
+    # read, so a drawn or truncated read still mismatches the header.
+    val raw_bytes: [u8] = workaround_host_read_bytes(path, 33554432)?
+    val full_text: text = bytes_to_text(raw_bytes)
+    var content = full_text
+    if full_text.starts_with("#sdn-crc32:"):
+        val newline = full_text.index_of("\n")
         if newline < 0: return Err("malformed canonical bug database CRC header")
-        val parsed_crc = try_parse_int(content.substring(11, newline).trim())
+        val parsed_crc = try_parse_int(full_text.substring(11, newline).trim())
         if parsed_crc == nil: return Err("invalid canonical bug database CRC")
-        val body = content.substring(newline + 1)
-        if (parsed_crc ?? -1) != crc32_text(body): return Err("canonical bug database CRC mismatch")
-        content = body
+        var body_crc: i64 = 0xffffffff
+        body_crc = crc32_update(body_crc, raw_bytes[(newline + 1)..raw_bytes.len()])
+        body_crc = body_crc ^ 0xffffffff
+        if (parsed_crc ?? -1) != body_crc: return Err("canonical bug database CRC mismatch")
+        content = full_text.substring(newline + 1)
     # Verify checksum over original bytes before normalizing Windows line ends
     # for the canonical blank-line table parser.
     content = content.replace("\r\n", "\n")
