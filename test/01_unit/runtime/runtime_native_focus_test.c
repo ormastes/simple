@@ -141,7 +141,9 @@ int main(void) {
     assert(rt_array_get(canonical_bytes, 0) == 0);
     assert(rt_array_get(canonical_bytes, 1) == 127);
     assert(rt_array_get(canonical_bytes, 2) == 255);
-    assert(rt_array_last(canonical_bytes) == 255);
+    /* rt_array_get keeps the raw slot; rt_array_last hands the element to
+     * Simple code and must tag it like the Rust twin (a raw 56 read as 7). */
+    assert(rt_array_last(canonical_bytes) == rt_value_int(255));
     assert(rt_array_last(rt_array_new(0)) == 3);
     assert(rt_array_len((SplArray*)(uintptr_t)rt_bytes_from_raw(0, 3)) == 0);
 
