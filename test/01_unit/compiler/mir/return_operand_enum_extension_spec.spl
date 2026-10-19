@@ -3,24 +3,43 @@ Return operand classification preserves current values while naming every
 MirOperandKind variant. The existing critical wildcard coverage specification
 checks that a newly added closed-enum variant produces a missing witness.
 """
+# @req REQ-002
+# @cover src/compiler/50.mir/mir_instruction_graph.spl
 use std.spec.*
 use compiler.mir.mir_instruction_graph.{MirBlock}
 use compiler.mir.mir_instruction_support.{BlockId, MirTerminator, MirOperand, MirOperandKind}
-use compiler.mir.mir_types.{LocalId, MirConstValue, MirType}
+use compiler.mir.mir_types.{LocalId, MirConstValue, MirType, MirTypeKind}
+use compiler.hir.hir_types.{SymbolId}
 
 fn return_block(value: MirOperand?) -> MirBlock:
     MirBlock(id: BlockId(id: 0), label: nil, instructions: [], terminator: MirTerminator.Ret(value))
 
+fn expect_constant_projection(value: MirConstValue, type_: MirType, kind: i64, scalar: text):
+    val block = return_block(Some(MirOperand(kind: MirOperandKind.Const(value, type_))))
+    expect(block.bootstrap_ret_kind()).to_equal(3)
+    expect(block.bootstrap_ret_local_id()).to_equal(-1)
+    expect(block.bootstrap_ret_const_kind()).to_equal(kind)
+    expect(block.bootstrap_ret_const_scalar_text()).to_equal(scalar)
+
 describe "return operand enum classification":
-    it "preserves copy and move local IDs and nonconstant sentinels":
-        for kind in [MirOperandKind.Copy(LocalId(id: 7)), MirOperandKind.Move(LocalId(id: 11))]:
-            val block = return_block(Some(MirOperand(kind: kind)))
-            val expected = if block.bootstrap_ret_kind() == 1: 7 else: 11
-            expect(block.bootstrap_ret_local_id()).to_equal(expected)
-            expect(block.bootstrap_ret_const_kind()).to_equal(0)
-            expect(block.bootstrap_ret_const_scalar_text()).to_equal("0")
+    it "classifies Copy independently of the returned tag":
+        step("Project a Copy operand with a known local ID")
+        val block = return_block(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 7)))))
+        expect(block.bootstrap_ret_kind()).to_equal(1)
+        expect(block.bootstrap_ret_local_id()).to_equal(7)
+        expect(block.bootstrap_ret_const_kind()).to_equal(0)
+        expect(block.bootstrap_ret_const_scalar_text()).to_equal("0")
+
+    it "classifies Move independently of the returned tag":
+        step("Project a Move operand with a different known local ID")
+        val block = return_block(Some(MirOperand(kind: MirOperandKind.Move(LocalId(id: 11)))))
+        expect(block.bootstrap_ret_kind()).to_equal(2)
+        expect(block.bootstrap_ret_local_id()).to_equal(11)
+        expect(block.bootstrap_ret_const_kind()).to_equal(0)
+        expect(block.bootstrap_ret_const_scalar_text()).to_equal("0")
 
     it "preserves absent-return sentinels":
+        step("Project a return with no operand")
         val block = return_block(nil)
         expect(block.bootstrap_ret_kind()).to_equal(0)
         expect(block.bootstrap_ret_local_id()).to_equal(-1)
@@ -28,9 +47,38 @@ describe "return operand enum classification":
         expect(block.bootstrap_ret_const_scalar_text()).to_equal("0")
 
     it "preserves integer constants and the nonlocal sentinel":
-        val op = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(37), MirType.i64()))
-        val block = return_block(Some(op))
-        expect(block.bootstrap_ret_kind()).to_equal(3)
-        expect(block.bootstrap_ret_local_id()).to_equal(-1)
-        expect(block.bootstrap_ret_const_kind()).to_equal(1)
-        expect(block.bootstrap_ret_const_scalar_text()).to_equal("37")
+        step("Preserve signed integer values")
+        expect_constant_projection(MirConstValue.Int(37), MirType.i64(), 1, "37")
+        expect_constant_projection(MirConstValue.Int(-19), MirType.i64(), 1, "-19")
+
+    it "distinguishes floating representations and preserves literal spelling":
+        step("Project both floating constant variants")
+        expect_constant_projection(MirConstValue.Float(2.5), MirType.f64(), 2, "2.5")
+        expect_constant_projection(MirConstValue.FloatLexeme("1.250e-3"), MirType.f64(), 2, "1.250e-3")
+
+    it "preserves both booleans text and explicit zero":
+        step("Distinguish scalar payloads from absent-return sentinels")
+        expect_constant_projection(MirConstValue.Bool(true), MirType.bool(), 3, "1")
+        expect_constant_projection(MirConstValue.Bool(false), MirType.bool(), 3, "0")
+        val text_type = MirType.ptr(MirType(kind: MirTypeKind.U8), false)
+        expect_constant_projection(MirConstValue.Str("enum payload"), text_type, 4, "enum payload")
+        expect_constant_projection(MirConstValue.Str(""), text_type, 4, "")
+        expect_constant_projection(MirConstValue.Zero, MirType.i64(), 5, "0")
+
+    it "keeps aggregate kinds distinct from scalar formatting":
+        step("Project nonempty array tuple and struct constants")
+        expect_constant_projection(MirConstValue.Array([MirConstValue.Int(7)]),
+            MirType(kind: MirTypeKind.Array(MirType.i64(), 1)), 6, "zeroinitializer")
+        expect_constant_projection(MirConstValue.Tuple([MirConstValue.Bool(true)]),
+            MirType(kind: MirTypeKind.Tuple([MirType.bool()])), 7, "zeroinitializer")
+        expect_constant_projection(MirConstValue.Struct({"count": MirConstValue.Int(9)}),
+            MirType(kind: MirTypeKind.Struct(SymbolId(id: 91))), 8, "zeroinitializer")
+
+    it "retains intentional non-return terminator sentinels":
+        step("Project control-flow terminators without treating them as return operands")
+        for terminator in [MirTerminator.Goto(BlockId(id: 4)), MirTerminator.Unreachable, MirTerminator.Abort("stop")]:
+            val block = MirBlock(id: BlockId(id: 0), label: nil, instructions: [], terminator: terminator)
+            expect(block.bootstrap_ret_kind()).to_equal(-1)
+            expect(block.bootstrap_ret_local_id()).to_equal(-1)
+            expect(block.bootstrap_ret_const_kind()).to_equal(0)
+            expect(block.bootstrap_ret_const_scalar_text()).to_equal("0")
