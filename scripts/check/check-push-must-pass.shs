@@ -1009,7 +1009,7 @@ run_conflict_tree_union() {
             set -- "$@" "$_remote_sha"
             if ! git -C "$ROOT" merge-base --is-ancestor "$_remote_sha" "$_local_sha"; then
                 _rebased_base=$(rebased_push_published_base "$_local_sha") ||
-                    die "cannot verify published main as the base of rebased ref $_local_ref"
+                    die "cannot verify a published PR base (main, release_phase3, release/*) for rebased ref $_local_ref"
                 set -- "$@" "$_rebased_base"
             fi
         fi
@@ -1090,31 +1090,62 @@ main_merged_predecessor() {
     printf '%s\n' "$_mm_base"
 }
 
-# A non-fast-forward PR update replaces a branch built on an old main with a
-# branch built on current main. The old branch head excludes none of the main
-# commits merged since then, so old..new can exceed the 64-commit guard bound
-# even when the new branch adds one commit. Only use main as an exclusion after
-# asking the push remote for its actual main SHA and computing the unique
-# common ancestor with the new tip. That ancestor is published even when main
-# advances after the PR was rebased. A stale tracking ref, unrelated history,
-# ambiguous merge base, or unavailable remote remains a refusal. The entire
-# tip-side range from that published base is checked by every range guard.
+# A non-fast-forward PR update replaces a branch built on an old base with a
+# branch built on the current base. The old branch head excludes none of the
+# base commits merged since then, so old..new can exceed the 64-commit guard
+# bound even when the new branch adds one commit. Only use a base as an
+# exclusion after asking the push remote for its actual SHA and computing the
+# unique common ancestor with the new tip. That ancestor is published even when
+# the base advances after the PR was rebased.
+#
+# The PR base is not always main: main and release_phase3 are criss-crossed
+# (two merge bases), so a branch rebased onto release_phase3 has an ambiguous
+# merge base with main and was refused, forcing --no-verify (2026-10-19). The
+# candidates are therefore every published PR-base line — main,
+# release_phase3 and versioned release/<x.y> — fetched in ONE bounded
+# ls-remote. Each candidate must resolve locally and have a unique merge base
+# with the tip; among those, the one leaving the fewest tip-side commits is the
+# branch's actual base. Any unique merge base with a published tip is itself
+# published, so the choice never excludes an unpublished commit. A stale
+# tracking ref, unrelated history, ambiguous merge base on every candidate, or
+# an unavailable remote remains a refusal. The entire tip-side range from the
+# chosen base is checked by every range guard.
 rebased_push_published_base() {
     _rebased_tip=$1
     _rebased_remote=${MUST_CHECK_PUSH_REMOTE:-}
     case "$_rebased_remote" in ''|*[!A-Za-z0-9._/-]*) return 1 ;; esac
     # This network call is outside run_push_gate's per-ref budget. Bound it
     # independently so an unavailable remote cannot hang the pre-push hook.
-    _rebased_line=$("$TIMEOUT_BIN" -k 1s "${REMOTE_QUERY_TIMEOUT_S}s" git -C "$ROOT" ls-remote --exit-code "$_rebased_remote" refs/heads/main 2>/dev/null) || return 1
-    _rebased_sha=${_rebased_line%%[[:space:]]*}
-    _rebased_ref=${_rebased_line#*[[:space:]]}
-    [ "$_rebased_ref" = refs/heads/main ] || return 1
-    git -C "$ROOT" rev-parse --verify --quiet "$_rebased_sha^{commit}" >/dev/null || return 1
-    _rebased_base=$(git -C "$ROOT" merge-base --all "$_rebased_sha" "$_rebased_tip") || return 1
-    [ -n "$_rebased_base" ] || return 1
-    [ "$(printf '%s\n' "$_rebased_base" | wc -l | tr -d ' ')" -eq 1 ] || return 1
-    [ "$_rebased_base" != "$_rebased_tip" ] || return 1
-    printf '%s\n' "$_rebased_base"
+    _rebased_lines=$("$TIMEOUT_BIN" -k 1s "${REMOTE_QUERY_TIMEOUT_S}s" git -C "$ROOT" ls-remote --exit-code "$_rebased_remote" \
+        refs/heads/main refs/heads/release_phase3 'refs/heads/release/*' 2>/dev/null) || return 1
+    _rebased_best=""
+    _rebased_best_count=""
+    while read -r _rebased_sha _rebased_ref; do
+        case "$_rebased_ref" in
+            refs/heads/main|refs/heads/release_phase3) ;;
+            refs/heads/release/*)
+                _rebased_version=${_rebased_ref#refs/heads/release/}
+                case "$_rebased_version" in *.*) ;; *) continue ;; esac
+                case "$_rebased_version" in ''|.*|*.|*..*|*[!0-9.]*) continue ;; esac
+                ;;
+            *) continue ;;
+        esac
+        case "$_rebased_sha" in ''|*[!0-9a-f]*) continue ;; esac
+        git -C "$ROOT" rev-parse --verify --quiet "$_rebased_sha^{commit}" >/dev/null || continue
+        _rebased_base=$(git -C "$ROOT" merge-base --all "$_rebased_sha" "$_rebased_tip") || continue
+        [ -n "$_rebased_base" ] || continue
+        [ "$(printf '%s\n' "$_rebased_base" | wc -l | tr -d ' ')" -eq 1 ] || continue
+        [ "$_rebased_base" != "$_rebased_tip" ] || continue
+        _rebased_count=$(git -C "$ROOT" rev-list --count "$_rebased_base..$_rebased_tip") || continue
+        if [ -z "$_rebased_best_count" ] || [ "$_rebased_count" -lt "$_rebased_best_count" ]; then
+            _rebased_best=$_rebased_base
+            _rebased_best_count=$_rebased_count
+        fi
+    done <<REBASED_LINES
+$_rebased_lines
+REBASED_LINES
+    [ -n "$_rebased_best" ] || return 1
+    printf '%s\n' "$_rebased_best"
 }
 
 # New feature refs normally use published main as their range base. A branch
@@ -1634,6 +1665,51 @@ SLOW_GIT
         [ "$_slow_elapsed" -lt 5 ] || exit 1
     ) || die "slow remote was accepted or not bounded"
 
+    # Release-line rebase fixture (2026-10-19): main and release_phase3 are
+    # criss-crossed, so a branch rebased onto release_phase3 has TWO merge
+    # bases with main. The published base must come from the branch's actual
+    # PR base (release_phase3), not be refused because main is ambiguous.
+    (
+        _rl_repo=$_tmp/release-rebase/work
+        mkdir -p "$_rl_repo"
+        git init -q --bare "$_tmp/release-rebase/remote.git" || exit 1
+        git -C "$_rl_repo" init -q -b main || exit 1
+        git -C "$_rl_repo" config user.email test@example.com
+        git -C "$_rl_repo" config user.name Test
+        git -C "$_rl_repo" remote add origin "$_tmp/release-rebase/remote.git"
+        git -C "$_rl_repo" commit -q --allow-empty -m base || exit 1
+        git -C "$_rl_repo" switch -q -c release_phase3
+        git -C "$_rl_repo" commit -q --allow-empty -m r1 || exit 1
+        _rl_r1=$(git -C "$_rl_repo" rev-parse HEAD)
+        git -C "$_rl_repo" switch -q main
+        git -C "$_rl_repo" commit -q --allow-empty -m m1 || exit 1
+        _rl_m1=$(git -C "$_rl_repo" rev-parse HEAD)
+        git -C "$_rl_repo" merge -q --no-ff --no-edit "$_rl_r1" >/dev/null || exit 1
+        git -C "$_rl_repo" switch -q release_phase3
+        git -C "$_rl_repo" merge -q --no-ff --no-edit "$_rl_m1" >/dev/null || exit 1
+        git -C "$_rl_repo" commit -q --allow-empty -m old || exit 1
+        _rl_old=$(git -C "$_rl_repo" rev-parse HEAD)
+        git -C "$_rl_repo" reset -q --hard HEAD~1
+        git -C "$_rl_repo" commit -q --allow-empty -m r2 || exit 1
+        _rl_expected=$(git -C "$_rl_repo" rev-parse HEAD)
+        git -C "$_rl_repo" push -q origin main release_phase3 || exit 1
+        git -C "$_rl_repo" push -q origin "$_rl_old:refs/heads/work/rl" || exit 1
+        git -C "$_rl_repo" switch -q -c work/rl
+        git -C "$_rl_repo" commit -q --allow-empty -m replacement || exit 1
+        _rl_tip=$(git -C "$_rl_repo" rev-parse HEAD)
+        [ "$(git -C "$_rl_repo" merge-base --all main "$_rl_tip" | wc -l | tr -d ' ')" -eq 2 ] || exit 3
+        ROOT=$_rl_repo
+        MUST_CHECK_PUSH_REMOTE=origin
+        _rl_actual=$(rebased_push_published_base "$_rl_tip") || exit 4
+        [ "$_rl_actual" = "$_rl_expected" ] || exit 5
+        [ "$(git -C "$ROOT" rev-list --count "$_rl_actual..$_rl_tip")" -eq 1 ] || exit 6
+        # Fail closed: with release_phase3 unpublished, main alone is still
+        # ambiguous and must be refused.
+        git -C "$_rl_repo" push -q origin --delete release_phase3 || exit 1
+        if rebased_push_published_base "$_rl_tip" >/dev/null 2>&1; then exit 7; fi
+        exit 0
+    ) || die "release_phase3-based rebased branch: published base not resolved (fixture rc=$?)"
+
     # Stale-branch merge fixture (2026-09-28): a PR branch >64 commits behind
     # main merges main and fast-forwards. old..new carries all of main's
     # merged-in commits; only the merge commit is new and must be counted.
@@ -1732,7 +1808,7 @@ SLOW_GIT
         die "committed-dispatcher-newer-than-running-script: the committed run_three_push_gates_parallel never ran (marker missing or wrong)"
     rm -rf "$_ncd_tmp"
 
-    echo "push-must-check: PASS — 32 ledger/budget/dispatcher/rebase/stale-merge fixtures checked"
+    echo "push-must-check: PASS — 33 ledger/budget/dispatcher/rebase/stale-merge fixtures checked"
     exit 0
 fi
 
@@ -1833,7 +1909,7 @@ while read -r _local_ref _local_sha _remote_ref _remote_sha; do
         _predecessor=$(new_ref_published_base "$_local_ref" "$_local_sha") || die "cannot verify published new-ref base"
     elif ! git -C "$ROOT" merge-base --is-ancestor "$_predecessor" "$_local_sha"; then
         _predecessor=$(rebased_push_published_base "$_local_sha") ||
-            die "cannot verify published main as the base of rebased ref $_local_ref"
+            die "cannot verify a published PR base (main, release_phase3, release/*) for rebased ref $_local_ref"
     elif _mm_pred=$(main_merged_predecessor "$_local_sha" "$_predecessor"); then
         echo "push-must-check: $_local_ref merged published main; range base $_predecessor -> $_mm_pred (already-published main commits excluded)"
         _predecessor=$_mm_pred
