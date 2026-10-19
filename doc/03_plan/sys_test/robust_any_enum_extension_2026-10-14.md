@@ -141,3 +141,40 @@ SSpec/native test workflow from
 `doc/07_guide/infra/testing/native_test_binary_workflow.md`; no new test toolchain
 or runner is introduced. Compiler/native execution, formal and performance
 qualification remain UNRUN. No retry budget is reset by this new worktree.
+
+## 2026-10-19 concrete Result dictionary payload repair
+
+REQ-ENUM-RESULT-DICT: support no-default unwrap/unwrap_err for a declared
+dictionary Result payload, preserving its handle, key/value types and nominal
+ownership; reject unsupported/default-bearing forms, evaluate the receiver
+once, and make wrong/unknown Result tags diverge rather than fabricate a value.
+
+The exact source witness is the name-index update in
+`ModuleSurfaceBuilder.add_indexed_name`: its helper returns
+`Result<Dict<text, i64>, text>` while the unwrap admission switch omitted Dict.
+The production fix is confined to `lower_result_unwrap_core` in
+`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`. It reuses the
+existing raw dictionary ABI and normal type/provenance bookkeeping. The
+no-default panic edge now terminates Abort; supported default paths retain
+their merge semantics. No dictionary traversal, cloning, allocation call,
+cache policy or test toolchain is added.
+
+Six actual-value scenarios in `result_dictionary_unwrap_runtime_spec.spl`
+cover receiver count, both Result payload directions, scalar/text/nominal
+dictionary values, empty dictionaries, and the actual module-index API.
+Four actual-MIR scenarios in `result_dictionary_unwrap_lowering_spec.spl`
+cover independent type/metadata oracles, raw payload copying, exact calls,
+tag/mismatch Abort behavior, rejection diagnostics, and scalar-default
+compatibility. Mirrored authored manuals exist; all ten scenarios are UNRUN.
+
+Tracking: `doc/08_tracking/bug/result_dictionary_unwrap_payload_2026_10_19.md`.
+Historical group 104 gains one exactly typed receiver repair; other receiver
+diagnostics in that module and groups 111/116/117/120 are not automatically
+closed. Group 108 attribution and prior runtime qualifications remain open.
+
+Author: isolated enum agent at base
+`2f7439a9cebafe4fd34bd9743720e01faed2da5b`. Independent source reviewer: Astra
+peer assigned by root. Root owns qualification and normal landing. No compiler
+or test launch is authorized here; six-total retry accounting is preserved.
+Native performance, allocator/RSS behavior, C bootstrap emission and formal
+qualification remain UNRUN; source-level call counts do not establish them.

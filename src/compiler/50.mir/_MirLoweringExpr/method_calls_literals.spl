@@ -714,6 +714,7 @@ impl MirLowering:
         var supported = false
         var result_struct_name = ""
         var result_is_array = false
+        var result_is_dict = false
         var result_is_tuple = false
         match payload_type.kind:
             case HirTypeKind.Tuple(_):
@@ -731,6 +732,14 @@ impl MirLowering:
                     # The payload is already a runtime array handle. Keep its
                     # word intact; element decoding happens on indexing.
                     result_is_array = true
+                    supported = true
+            case HirTypeKind.Dict(_, _):
+                if default_expr == nil:
+                    # The boxed Result already owns a tagged dictionary
+                    # handle. Preserve that word and its declared key/value
+                    # types; do not allocate, clone, or decode it as an int.
+                    result_type = self.lower_type(payload_type)
+                    result_is_dict = true
                     supported = true
             case HirTypeKind.Int(bits, signed):
                 if bits == 64 and signed:
@@ -827,6 +836,7 @@ impl MirLowering:
                 fallback = self.decode_runtime_value(fallback, result_type)
             b_err = self.builder
             b_err.emit_copy(result_local, fallback)
+            b_err.terminate_goto(merge_block)
         else:
             val panic_text = if unwrap_err: "called `.unwrap_err()` on an Ok Result" else: "called `.unwrap()` on an Err Result"
             val panic_msg = b_err.emit_const_str(panic_text)
@@ -835,8 +845,9 @@ impl MirLowering:
                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.unit(), is_variadic: false)))
             ))
             b_err.emit_call(panic_op, [mir_operand_copy(panic_msg)], MirType.unit())
-            b_err.emit_const(result_local, MirConstValue.Zero, result_type)
-        b_err.terminate_goto(merge_block)
+            # Panic is observable, but a returning/stubbed panic must never
+            # allow a mismatched Result tag to yield a fabricated payload.
+            b_err.terminate_abort(panic_text)
         self.builder = b_err
 
         var b_merge = self.builder
@@ -849,6 +860,13 @@ impl MirLowering:
             match payload_type.kind:
                 case HirTypeKind.Array(element, _):
                     self.runtime_elem_value_type[result_local.id] = self.lower_type(element)
+                case _: ()
+        if result_is_dict:
+            self.runtime_dict_locals[result_local.id] = true
+            self.mark_runtime_value_local(result_local.id)
+            match result_type.kind:
+                case MirTypeKind.Dict(_, value_type):
+                    self.runtime_elem_value_type[result_local.id] = value_type
                 case _: ()
         if result_struct_name != "":
             self.struct_value_syms[result_local.id] = result_struct_name

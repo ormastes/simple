@@ -1,0 +1,79 @@
+"""Executable Result dictionary values and the exact module-index consumer."""
+# @req REQ-ENUM-RESULT-DICT
+use std.spec.*
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfaceBuilder}
+use compiler.hir.hir_lowering.module_surface_registry.*
+
+class ResultDictionaryProducer:
+    calls: i64
+
+    me produce() -> Result<Dict<text, i64>, text>:
+        self.calls = self.calls + 1
+        Ok({"left": 17, "right": 29})
+
+fn dictionary_error_result() -> Result<text, Dict<text, i64>>:
+    Err({"code": 43})
+
+fn dictionary_float_result() -> Result<Dict<text, f64>, text>:
+    Ok({"fraction": 2.5})
+
+fn dictionary_text_result() -> Result<Dict<text, text>, text>:
+    Ok({"message": "retained payload"})
+
+fn dictionary_empty_result() -> Result<Dict<text, i64>, text>:
+    val empty: Dict<text, i64> = {}
+    Ok(empty)
+
+struct ResultDictionaryValue:
+    first: i64
+    second: i64
+
+fn dictionary_record_result() -> Result<Dict<text, ResultDictionaryValue>, text>:
+    Ok({"item": ResultDictionaryValue(first: 7, second: 31)})
+
+describe "Result dictionary unwrap values":
+    it "evaluates a producer once and retains integer keys and values":
+        step("Unwrap one produced dictionary without replaying the receiver")
+        var producer = ResultDictionaryProducer(calls: 0)
+        val values = producer.produce().unwrap()
+        expect(producer.calls).to_equal(1)
+        expect(values.len()).to_equal(2)
+        expect(values["left"]).to_equal(17)
+        expect(values["right"]).to_equal(29)
+
+    it "uses the error discriminant for dictionary unwrap_err":
+        step("Retain an Err dictionary through its declared error payload")
+        val values = dictionary_error_result().unwrap_err()
+        expect(values.len()).to_equal(1)
+        expect(values["code"]).to_equal(43)
+
+    it "retains floating and text value decoding instead of integer erasure":
+        step("Read distinct dictionary element representations after unwrap")
+        expect(dictionary_float_result().unwrap()["fraction"]).to_equal(2.5)
+        expect(dictionary_text_result().unwrap()["message"]).to_equal("retained payload")
+
+    it "preserves a valid empty dictionary rather than treating it as an absent payload":
+        step("Distinguish a present empty Dict from Result's opposite variant")
+        val values = dictionary_empty_result().unwrap()
+        expect(values.len()).to_equal(0)
+        expect(values.contains_key("missing")).to_equal(false)
+
+    it "preserves a nominal dictionary value's field owner":
+        step("Project the second field after dictionary Result extraction")
+        val values = dictionary_record_result().unwrap()
+        expect(values["item"].first).to_equal(7)
+        expect(values["item"].second).to_equal(31)
+
+    it "updates the actual surface-name index and retains its conflict contract":
+        step("Exercise ModuleSurfaceBuilder.add_indexed_name's Result Dict unwrap")
+        var builder = ModuleSurfaceBuilder.new()
+        expect(builder.add_indexed_name("feature", 7).is_ok()).to_equal(true)
+        expect(builder.add_indexed_name("feature", 7).is_ok()).to_equal(true)
+        expect(builder.index_by_name["feature"]).to_equal(7)
+        expect(builder.ordered_names.len()).to_equal(1)
+        expect(builder.ordered_indices[0]).to_equal(7)
+        val conflict = builder.add_indexed_name("feature", 8)
+        expect(conflict.is_err()).to_equal(true)
+        expect(conflict.unwrap_err()).to_equal("module surface name maps to conflicting indices: feature")
+        expect(builder.index_by_name["feature"]).to_equal(7)
+        expect(builder.ordered_names.len()).to_equal(1)
