@@ -1,55 +1,62 @@
 # Seed native codegen gives wrong gzip/deflate results
 
 **Date:** 2026-10-19
-**Status:** open
-**Area:** Rust seed native backend (Cranelift); `src/lib/nogc_sync_mut/compression/gzip/`
+**Status:** open. `gzip_*`/`deflate_*` are withheld from the compress dynSMF
+bundle (`src/lib/common/compress/dynsmf_entry.spl` and the `compress` manifest
+row in `src/os/smf/dynsmf_session.spl`) until this is fixed.
+**Area:** Rust seed native backend; `src/lib/nogc_sync_mut/compression/gzip/`
 
 ## Symptom
 
-The same source gives different output under the interpreter (`run`) and as a
-seed-built native binary (`compile --native`):
+On a 300-byte input, `deflate_compress` / `gzip_compress` compiled with
+`compile --native` give 271 / 285 bytes. The interpreter gives 273 / 287
+bytes, and those are valid: zlib decodes them back to the input. zlib decodes
+the native raw-deflate output to the wrong bytes (the first wrong one is at
+offset 8: 7 instead of 56), and rejects the native gzip output (`incorrect
+data check`). Native zstd, lz4, snappy, brotli and xz round trips are
+byte-identical to the interpreter. Fixing `?` (`490df0ed248`) does not change
+any of this.
 
-| Probe | Interpreter | Native (seed bcde7eef and e357ff7f) |
-|---|---|---|
-| `deflate_block_fixed_sync_flush(lz77_compress(data, 1))`, 300-byte input | 273 bytes | 271 bytes, different content |
-| `compression.gzip.compress.gzip_decompress(valid gzip)` | 300 bytes | `nil` |
+## Root cause
 
-`lz77_compress` agrees (252 tokens in both), so the encoder fault is in the
-fixed-Huffman block writer (`deflate.spl:92 _deflate_block_fixed_ex` and its
-helpers). Many of those parameters are untyped (`tokens`, `length`,
-`distance`). The decoder fault is somewhere in the member path
-(`gzip_header_parse_at` / `inflate_member` / footer validation).
-`inflate` by itself decodes a valid stream correctly when compiled natively.
-
-## Not caused by the AotNative gate change
-
-None of these functions were flagged by the standalone-SMF gate before
-`efab9d641eb`, and the seed built before that change (bcde7eef) gives the
-same wrong output. That change does make these functions reachable from the
-compress dynSMF bundle. So a seed-built `compress.smf` compiles, and has all
-its exports, but its gzip/deflate results are wrong. The crypto primitives
-checked so far (aes256-gcm, chacha20-poly1305, x25519, hmac-sha256) match
-the interpreter when compiled natively.
-
-## Repro
+A `u8` read from a `[u8]` through an untyped receiver is stored raw in an
+untyped array literal. A later typed read then decodes it as a tagged int.
 
 ```
-use std.nogc_sync_mut.compression.gzip.lz77.{lz77_compress}
-use std.nogc_sync_mut.compression.gzip.deflate.{deflate_block_fixed_sync_flush}
+fn mk_untyped(data):
+    var tokens = []
+    tokens.push([0, data[0], 0])
+    tokens
 
 fn main():
-    var data: [u8] = []
-    var i = 0
-    while i < 300:
-        data.push(((i * 7) % 251) as u8)
-        i = i + 1
-    val out = deflate_block_fixed_sync_flush(lz77_compress(data, 1))
-    var s = 0
-    for b in out:
-        s = (s * 31 + (b as i64)) % 1000000007
-    print "out={out.len()} sum={s}"
+    val d: [u8] = [56u8, 57u8]
+    val tok = mk_untyped(d)[0]
+    val c: i64 = tok[1]
+    print "c={c}"
 ```
 
-The interpreter prints `out=273 sum=476866860`. The native binary prints
-`out=271 sum=137043012`. Run it from inside the repo: compiling from outside
-the repo fails stdlib root resolution on the older seed.
+The interpreter prints `c=56`. Native prints `c=7`, both before and after
+this lane's changes. A raw byte 56 (`0b111000`) has the TAG_INT bit pattern
+for 7. With a typed `data: [u8]` parameter the value is correct.
+`lz77_compress(data, level)` (untyped) builds literal tokens as
+`[0, data[pos], 0]`, so every literal byte that is a multiple of 8 is encoded
+wrong. Fixing it means making byte-array elements box consistently on the
+untyped `rt_array_get` / array-literal path. That is not a contained change
+(MIR/codegen representation of `[u8]`), so the exports are withheld instead.
+
+The native gzip *member decoder* (`compression/gzip/compress.spl:104`) also
+returns nil on valid input. It goes through the same untyped `data` helpers
+(`gzip_header_parse_at` etc.), so it is most likely the same defect. That
+has not been proven separately.
+
+## Related native gaps seen in the same lane (not fixed)
+
+- `if val x = a:` with `a: [u8]?`: `x.len()` prints `0.0` natively (it should
+  be the length); element reads are correct. This happens before and after
+  this lane's changes.
+- `[v; n]`: when `v` has side effects, native evaluates it `n` times (the
+  unrolled literal) and the interpreter evaluates it once. `[v; -1]` gives an
+  empty array natively and an error in the interpreter.
+- `?` on a bare present non-enum value held as `ANY` reads as nil natively.
+  The interpreter rejects `?` on such a value, so there is no defined result
+  to match.
