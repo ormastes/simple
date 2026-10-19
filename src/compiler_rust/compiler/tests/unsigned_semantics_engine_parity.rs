@@ -152,6 +152,8 @@ fn main() -> i64:
     if rt_ptr_read_u8(literal_ptr, 1) != 8: return 8
     val empty: [u8] = []
     if rt_array_data_ptr(empty) == 0: return 9
+    val result = encode()
+    if result.unwrap().len() != 3: return 10
     return 0
 "#;
 
