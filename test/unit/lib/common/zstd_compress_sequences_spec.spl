@@ -195,3 +195,33 @@ describe "zstd compressor with predefined FSE sequences":
         match zstd_decompress_frame(expected):
             case Ok(out): expect(_same(out, plain)).to_equal(true)
             case Err(_): fail("decoder rejected the pinned frame")
+
+    it "pins a checksummed frame whose content length is not a multiple of 4":
+        # @req REQ-ZSTD-ENC-007
+        step("compress 31 distinct bytes followed by the same 31 bytes, with checksum")
+        var plain: [u8] = []
+        var i = 0
+        while i < 31:
+            plain.push(((i * 7 + 13) & 255) as u8)
+            i = i + 1
+        i = 0
+        while i < 31:
+            plain.push(plain[i])
+            i = i + 1
+        # 51-byte frame for 62 bytes of content; host `zstd -d` 1.5.5 decodes it
+        # to `plain`. Before the XXH64 tail fix the seed JIT rejected it with
+        # ChecksumMismatch (bug jit_hoisted_u8_data_ptr_ignores_slot_layout_2026-10-19).
+        val expected: [u8] = [
+        40u8, 181u8, 47u8, 253u8, 36u8, 62u8, 53u8, 1u8, 0u8, 248u8, 13u8, 20u8,
+        27u8, 34u8, 41u8, 48u8, 55u8, 62u8, 69u8, 76u8, 83u8, 90u8, 97u8, 104u8,
+        111u8, 118u8, 125u8, 132u8, 139u8, 146u8, 153u8, 160u8, 167u8, 174u8, 181u8, 188u8,
+        195u8, 202u8, 209u8, 216u8, 223u8, 1u8, 0u8, 139u8, 70u8, 57u8, 1u8, 127u8,
+        149u8, 68u8, 159u8
+        ]
+        val frame = zstd_compress_frame(plain, _opts(3, true))
+        # @capture(text)
+        step("the encoder output is byte-identical and the checksum verifies on decode")
+        expect(_same(frame, expected)).to_equal(true)
+        match zstd_decompress_frame(expected):
+            case Ok(out): expect(_same(out, plain)).to_equal(true)
+            case Err(_): fail("decoder rejected the pinned checksummed frame")
