@@ -108,6 +108,27 @@ fn extract_bytes(args: &[Value], idx: usize, symbol: &str) -> Result<Vec<u8>, Co
         .ok_or_else(|| CompileError::runtime(format!("{symbol}: argument {idx} must be bytes")))
 }
 
+/// Payload of a descriptor write: the native three-word ABI
+/// `(fd, data_ptr, data_len)` that `sffi/fs.spl` uses (pointer from
+/// `rt_array_bytes_basis_ptr`, retained by the caller until return), or the
+/// legacy two-argument `(fd, bytes)` form.
+fn extract_write_data(args: &[Value], symbol: &str) -> Result<Vec<u8>, CompileError> {
+    if args.len() < 3 {
+        return extract_bytes(args, 1, symbol);
+    }
+    let ptr = extract_i64(args, 1, symbol)?;
+    let len = extract_i64(args, 2, symbol)?;
+    if len < 0 || (len > 0 && ptr == 0) {
+        return Err(CompileError::runtime(format!(
+            "{symbol}: invalid byte span (pointer {ptr}, length {len})"
+        )));
+    }
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    Ok(unsafe { std::slice::from_raw_parts(ptr as usize as *const u8, len as usize) }.to_vec())
+}
+
 fn bytes_to_value(bytes: &[u8]) -> Value {
     Value::byte_array(bytes.to_vec())
 }
@@ -233,7 +254,7 @@ pub fn rt_io_file_read_line(args: &[Value]) -> Result<Value, CompileError> {
 /// Write `data` to `fd`. Returns the byte count written, or `-1` on error.
 pub fn rt_io_file_write(args: &[Value]) -> Result<Value, CompileError> {
     let fd = extract_fd(args, 0, "rt_io_file_write")?;
-    let data = extract_bytes(args, 1, "rt_io_file_write")?;
+    let data = extract_write_data(args, "rt_io_file_write")?;
     let n = unsafe {
         with_fd(fd, -1i64, |file| match file.write(&data) {
             Ok(n) => n as i64,
@@ -246,7 +267,7 @@ pub fn rt_io_file_write(args: &[Value]) -> Result<Value, CompileError> {
 /// Write all of `data` to `fd`. Returns false on a short write or error.
 pub fn rt_io_file_write_all(args: &[Value]) -> Result<Value, CompileError> {
     let fd = extract_fd(args, 0, "rt_io_file_write_all")?;
-    let data = extract_bytes(args, 1, "rt_io_file_write_all")?;
+    let data = extract_write_data(args, "rt_io_file_write_all")?;
     let ok = unsafe { with_fd(fd, false, |file| file.write_all(&data).is_ok()) };
     Ok(Value::Bool(ok))
 }
@@ -495,5 +516,54 @@ mod tests {
         assert!(rt_io_file_seek(&[Value::Int(1), Value::Int(0), Value::Int(9)]).is_err());
         assert!(rt_io_file_set_permissions(&[Value::Int(1), Value::Int(0)]).is_err());
         assert!(rt_io_file_meta_size(&[]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod bytes_basis_write_tests {
+    use super::*;
+    use super::super::memory::{rt_array_bytes_basis_len, rt_array_bytes_basis_ptr};
+
+    #[test]
+    fn bytes_basis_ptr_len_feed_descriptor_write_payload() {
+        let packed = Value::byte_array(b"hello".to_vec());
+        assert_eq!(rt_array_bytes_basis_len(&[packed.clone()]).unwrap(), Value::Int(5));
+        let ptr = match rt_array_bytes_basis_ptr(&[packed.clone()]).unwrap() {
+            Value::Int(p) => p,
+            other => panic!("expected Int pointer, got {other:?}"),
+        };
+        assert_ne!(ptr, 0);
+        let args = [Value::Int(1), Value::Int(ptr), Value::Int(5)];
+        assert_eq!(extract_write_data(&args, "rt_io_file_write").unwrap(), b"hello");
+        // Legacy (fd, bytes) form still accepted; empty span needs no pointer.
+        assert_eq!(extract_write_data(&[Value::Int(1), packed], "w").unwrap(), b"hello");
+        assert!(extract_write_data(&[Value::Int(1), Value::Int(0), Value::Int(0)], "w")
+            .unwrap()
+            .is_empty());
+        assert!(extract_write_data(&[Value::Int(1), Value::Int(0), Value::Int(3)], "w").is_err());
+        assert!(extract_write_data(&[Value::Int(1), Value::Int(ptr), Value::Int(-1)], "w").is_err());
+        // Boxed arrays have no byte basis: len -1, ptr 0 (caller falls back).
+        let boxed = Value::array(vec![Value::Int(1)]);
+        assert_eq!(rt_array_bytes_basis_len(&[boxed.clone()]).unwrap(), Value::Int(-1));
+        assert_eq!(rt_array_bytes_basis_ptr(&[boxed]).unwrap(), Value::Int(0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_write_all_accepts_ptr_len_form() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("interp_ptr_len.txt");
+        let path = path.to_str().unwrap();
+        let fd = match rt_io_file_open(&[Value::text(path.to_string()), Value::Int(1)]).unwrap() {
+            Value::Int(n) => n,
+            other => panic!("expected fd, got {other:?}"),
+        };
+        let packed = Value::byte_array(b"abc".to_vec());
+        let ptr = rt_array_bytes_basis_ptr(&[packed.clone()]).unwrap();
+        let ok = rt_io_file_write_all(&[Value::Int(fd), ptr, Value::Int(3)]).unwrap();
+        assert_eq!(ok, Value::Bool(true));
+        drop(packed);
+        rt_io_file_close(&[Value::Int(fd)]).unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"abc");
     }
 }
