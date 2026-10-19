@@ -219,3 +219,32 @@ Context modes (LSB6/MSB6/UTF8/Signed) have no passing official vector yet.
   Specs run in the interpreter, so check JIT with `bin/simple run <probe>`.
 - `std.nogc_sync_mut.compression.zstd` (`zstd_decode`): Raw/RLE literal Size_Format 01/11
   are 12/20-bit, and FCS flag 2 is 4 bytes; both were wrong before 2026-10-19.
+
+## SHA-384/512 runtime primitive and PBKDF2-HMAC-SHA-384/512 fast path (2026-10-20)
+
+`rt_sha512_digest(data: [u8]) -> [u8]` (64 bytes) and `rt_sha384_digest`
+(48 bytes) are one-shot FIPS 180-4 digests over the same tagged `[u8]` ABI as
+`rt_tls13_sha256`. Lanes: C `runtime_native.c` (`spl_sha2_512_family_digest`,
+static helpers deliberately without the `rt_` prefix so the dual-lane ratchet
+does not see new single-lane symbols), Rust runtime `sffi/hash/sha256.rs`
+(`sha2`), interpreter `interpreter_extern/sha512.rs` (`ring`). Typed wrappers:
+`std.nogc_sync_mut.sffi.host.{sha512_digest, sha384_digest}`; registry group
+`sha256` via `config/api/api_group_overrides.sdn`. The older
+`rt_sha512_hash`/`rt_sha512_byte` pair is a different, single-slot,
+interpreter-only ABI; do not reuse it.
+
+`pbkdf2_sha384/512_bytes_fast` (opt-in) build HMAC with a 128-byte block over the runtime
+digest and fall back per block to the pure block on a
+wrong-length digest. The public `pbkdf2_sha384/512_bytes` stay pure until the redeploy below; switched, `pbkdf2_native_perf_spec` went from over the 900 s budget
+to 12.6 s on the lane-built seed.
+
+Landmine: an extern that the running binary does not register is a hard
+`semantic: unknown extern function` error, not an empty result, and `src/lib`
+is read as source on every run. A `bin/simple` built before this change cannot
+run `pbkdf2_sha384/512_bytes` (bip39, SCRAM-SHA-512); redeploy the binary with
+the change before switching the defaults. There is no extern-availability probe to gate on.
+
+Specs: `test/01_unit/lib/common/crypto/sha512_runtime_primitive_spec.spl`
+(NIST empty/abc/896-bit/1M 'a', runtime vs pure at lengths 111-256),
+`pbkdf2_sha512_fast_spec.spl`; C vectors in
+`src/runtime/test/rt_tls13_sha256_sleep_selfcheck.c`.
