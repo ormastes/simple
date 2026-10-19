@@ -328,8 +328,11 @@ fn parse_program() -> BrowserResult<i64>:
     let body = format!("{mir:#?}");
 
     assert!(
-        body.contains("rt_enum_payload"),
-        "expected imported BrowserResult try to lower via rt_enum_payload:\n{body}"
+        // The unresolved alias reaches lower_try as an unresolved subject, so
+        // the payload read is the checked runtime `rt_unwrap_or_trap` (Ok
+        // payload, bare value unchanged); still never `.unwrap` dispatch.
+        body.contains("rt_unwrap_or_trap"),
+        "expected imported BrowserResult try to lower via rt_unwrap_or_trap:\n{body}"
     );
     assert!(
         !body.contains("func_name: \"unwrap\"") && !body.contains(".unwrap"),

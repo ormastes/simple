@@ -567,3 +567,35 @@ fn arr_with_one() -> RuntimeValue {
     rt_array_push(a, RuntimeValue::from_int(1));
     a
 }
+
+/// `rt_try_is_absent` must be exactly `rt_is_none || rt_enum_check_variant`
+/// for every value shape `?` can see (falsy-present payloads included).
+#[test]
+fn try_is_absent_equals_is_none_or_err_check() {
+    use super::{hash_variant_discriminant, rt_enum_new, rt_is_none, rt_try_is_absent};
+    let err = hash_variant_discriminant("Err") as i64;
+    let payload = RuntimeValue::from_int(0);
+    let values = [
+        RuntimeValue::NIL,
+        RuntimeValue::from_int(0),
+        RuntimeValue::from_int(3),
+        rt_enum_new(super::OPTION_ENUM_ID, hash_variant_discriminant("Some"), payload),
+        rt_enum_new(super::OPTION_ENUM_ID, hash_variant_discriminant("None"), RuntimeValue::NIL),
+        rt_enum_new(super::OPTION_ENUM_ID, 0, payload),
+        rt_enum_new(super::OPTION_ENUM_ID, 1, RuntimeValue::NIL),
+        rt_enum_new(super::RESULT_ENUM_ID, hash_variant_discriminant("Ok"), payload),
+        rt_enum_new(super::RESULT_ENUM_ID, err as u32, payload),
+        rt_enum_new(7, err as u32, payload),
+        rt_enum_new(7, 1, payload),
+    ];
+    for v in values {
+        for expected_id in [0i64, 1, 7] {
+            assert_eq!(
+                rt_try_is_absent(v, expected_id, err),
+                rt_is_none(v) || rt_enum_check_variant(v, expected_id, err),
+                "value {:#x} expected_id {expected_id}",
+                v.0
+            );
+        }
+    }
+}

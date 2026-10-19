@@ -707,6 +707,7 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_is_some"
             | "rt_is_present"
             | "rt_is_none"
+            | "rt_try_is_absent"
             | "rt_enum_check_variant"
             | "rt_value_as_u64"
             | "rt_string_eq"

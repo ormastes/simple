@@ -2981,6 +2981,27 @@ impl Lowerer {
                         Ok(present)
                     };
                 }
+
+                // Every other nullable pointee (`[T]?`, `{K: V}?`, tuple?, ...)
+                // is likewise not a Result/Option enum: its runtime value is the
+                // collection handle itself, nil when absent. Falling through to
+                // the Err-only path below never early-returned on nil and
+                // answered `rt_enum_payload(<array>) == nil` when present, so
+                // `val a = f()?` with `f() -> [u8]?` continued past a nil and
+                // lost a present array under JIT/native while the interpreter
+                // propagated / unwrapped. Same nil-test + normalizer as above;
+                // heap handles keep their concrete type, anything else is `ANY`
+                // (a tagged word, as in the scalar case).
+                if propagate_absence {
+                    let payload_ty = match self.module.types.get(pointee) {
+                        Some(HirType::Array { .. })
+                        | Some(HirType::Dict { .. })
+                        | Some(HirType::Tuple(_))
+                        | Some(HirType::LabeledTuple(_)) => pointee,
+                        _ => TypeId::ANY,
+                    };
+                    return Ok(self.lower_option_try_branch(inner_hir, subject_ty, payload_ty, ctx));
+                }
             }
         }
 
@@ -3062,26 +3083,87 @@ impl Lowerer {
             ty: payload_ty,
         };
 
+        // Present Ok/Some payload. A statically Result/Option subject reads it
+        // with `rt_enum_payload`. An unresolved subject (`ANY`, an imported
+        // Result alias the lowerer did not resolve) may also hold a bare
+        // present value, for which `rt_enum_payload` answers nil and execution
+        // silently continued; `rt_unwrap_or_trap` gives the Ok/Some payload
+        // and the value itself otherwise (None/Err already returned above).
         let unwrap_ok = HirExpr {
             kind: HirExprKind::BuiltinCall {
-                name: "rt_enum_payload".to_string(),
-                args: vec![subject_ref],
+                name: if self.result_like_payload_type(subject_ty).is_some() {
+                    "rt_enum_payload"
+                } else {
+                    "rt_unwrap_or_trap"
+                }
+                .to_string(),
+                args: vec![subject_ref.clone()],
             },
             ty: payload_ty,
+        };
+
+        let err_or_payload = HirExpr {
+            kind: HirExprKind::If {
+                condition: Box::new(is_err),
+                then_branch: Box::new(early_return.clone()),
+                else_branch: Some(Box::new(unwrap_ok.clone())),
+            },
+            ty: payload_ty,
+        };
+
+        // `?` also propagates absence: nil and `Option.None` return early, as
+        // in the interpreter (`interpreter/expr.rs` Expr::Try). Without this an
+        // `Option<T>`-typed None, or a nil reaching an `ANY` subject, matched
+        // no Err discriminant and execution continued with a nil payload.
+        //
+        // `rt_try_is_absent(s, id, Err)` is exactly `rt_is_none(s) ||
+        // rt_enum_check_variant(s, id, Err)` in one enum lookup, so the Err
+        // test is kept (a Result.Err flowing through `ANY` into an Option-typed
+        // slot has enum id 0, which the check treats as a wildcard, and must
+        // still propagate) while the present path makes one call before the
+        // payload read -- the same count as the pre-fix Err-only lowering.
+        let is_absent = HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_try_is_absent".to_string(),
+                args: vec![
+                    subject_ref,
+                    HirExpr {
+                        kind: HirExprKind::Integer(self.enum_runtime_id_for_type(subject_ty)),
+                        ty: TypeId::I64,
+                    },
+                    HirExpr {
+                        kind: HirExprKind::Integer(err_disc),
+                        ty: TypeId::I64,
+                    },
+                ],
+            },
+            ty: TypeId::BOOL,
+        };
+
+        // A plain `Result` subject cannot be None, so it keeps the original
+        // Err-only lowering (byte-identical to the pre-fix code).
+        let is_plain_result = matches!(
+            self.module.types.get(subject_ty),
+            Some(HirType::Enum { name, .. }) if name == "Result"
+        );
+        let body = if propagate_absence && !is_plain_result {
+            HirExpr {
+                kind: HirExprKind::If {
+                    condition: Box::new(is_absent),
+                    then_branch: Box::new(early_return),
+                    else_branch: Some(Box::new(unwrap_ok)),
+                },
+                ty: payload_ty,
+            }
+        } else {
+            err_or_payload
         };
 
         Ok(HirExpr {
             kind: HirExprKind::LetIn {
                 local_idx: subject_idx,
                 value: Box::new(inner_hir),
-                body: Box::new(HirExpr {
-                    kind: HirExprKind::If {
-                        condition: Box::new(is_err),
-                        then_branch: Box::new(early_return),
-                        else_branch: Some(Box::new(unwrap_ok)),
-                    },
-                    ty: payload_ty,
-                }),
+                body: Box::new(body),
             },
             ty: payload_ty,
         })

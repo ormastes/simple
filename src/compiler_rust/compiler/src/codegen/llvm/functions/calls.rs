@@ -110,7 +110,7 @@ fn qualified_runtime_arity(method: &str, rt_name: &str) -> Option<usize> {
         | "rt_index_set"
         | "rt_enum_check_discriminant"
         | "lib__common__string_core__str_repeat" => Some(2),
-        "rt_enum_check_variant" => Some(3),
+        "rt_enum_check_variant" | "rt_try_is_absent" => Some(3),
         _ if matches!(method, "slice" | "substring") => Some(2),
         _ => None,
     }
