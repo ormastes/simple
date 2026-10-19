@@ -1,0 +1,227 @@
+# @req REQ-GENERIC-BOUND-BINDER-MAPPING
+# Existing HM collection/generation and real TraitSolver APIs; execution UNRUN.
+use std.spec.{describe, it, expect, step, fail}
+use compiler.common.config.Logger
+use compiler.common.diagnostics.span.Span
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule, HirSymbol, HirType, HirTypeKind, SymbolKind}
+use compiler.hir.hir_definitions.{HirFunction, HirTypeParam, HirTraitBound}
+use compiler.types.type_infer_types.{HmInferContext, TypeInferError}
+use compiler.types.type_infer.context.*
+use compiler.types.dim_constraints.DimCheckMode
+use compiler.types.type_infer.traits.*
+use compiler.traits.trait_impl.ImplBlock
+use compiler.traits.trait_solver.ObligationCause
+use compiler.traits.trait_validation.TraitError
+
+fn bound_mapping_function(module: HirModule) -> HirFunction:
+    for raw in module.functions.values():
+        val function: HirFunction = raw
+        if function.name == "choose": return function
+    fail("missing actual lowered choose declaration")
+    nil
+
+fn bound_mapping_trait(module: HirModule, name: text = "Marked") -> HirSymbol:
+    for raw in module.traits.values():
+        if raw.name == name:
+            if val symbol = module.symbols.get_symbol_raw(raw.symbol.id):
+                expect(symbol.kind == SymbolKind.Trait).to_be(true)
+                return symbol
+    fail("missing actual lowered trait symbol: {name}")
+    nil
+
+fn bound_mapping_fixture(owner: text = "bounds", sparse: bool = false) -> HirModule:
+    val source = "trait Marked:\n    fn mark(self) -> i64:\n        1\ntrait Other:\n    fn other(self) -> i64:\n        2\nfn choose<T, U, V>(first: T, second: U, third: V) -> U:\n    second\n"
+    val parsed = parse_full_frontend(source, "{owner}.spl", owner, Logger(level: 0))
+    var lowering = HirLowering.with_filename("{owner}.spl")
+    var module = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    expect(module.traits.len()).to_equal(2)
+    var function = bound_mapping_function(module)
+    expect(function.type_params.len()).to_equal(3)
+    val target_index = if sparse: 2 else: 1
+    var parameter: HirTypeParam = function.type_params[target_index]
+    val marked = bound_mapping_trait(module)
+    parameter.bounds = [HirType(kind: HirTypeKind.Named(marked.id, []), span: parameter.span)]
+    if sparse:
+        val other = bound_mapping_trait(module, "Other")
+        parameter.bounds = parameter.bounds.push(HirType(kind: HirTypeKind.Named(other.id, []), span: parameter.span))
+    function.type_params[target_index] = parameter
+    module.functions[function.symbol] = function
+    module
+
+fn bound_mapping_integer() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+
+fn bound_mapping_boolean() -> HirType:
+    HirType(kind: HirTypeKind.Bool, span: Span.empty())
+
+fn bound_mapping_context(module: HirModule) -> HmInferContext:
+    var context = HmInferContext.new()
+    context.collect_function_bounds_from_module(module)
+    expect(context.errors.len()).to_equal(0)
+    val marked = bound_mapping_trait(module)
+    context.trait_solver.add_impl(ImplBlock.create(marked, bound_mapping_integer(), Span.empty()))
+    context
+
+fn bound_mapping_expect_pending(context: HmInferContext, function: HirFunction, index: i64, kind: HirTypeKind, count: i64):
+    expect(context.trait_solver.obligations.len()).to_equal(count)
+    for obligation in context.trait_solver.obligations:
+        expect(obligation.type_.kind == kind).to_be(true)
+        expect(obligation.span.line).to_equal(9)
+        match obligation.cause:
+            case ObligationCause.SolverTraitBound(parameter):
+                expect(parameter.id.id).to_equal(function.type_params[index].symbol.id)
+                expect(parameter.name).to_equal(function.type_params[index].name)
+                expect(parameter.kind == SymbolKind.TypeParam).to_be(true)
+            case _: fail("bound obligation lost its actual parameter symbol")
+
+fn bound_mapping_expect_error(context: HmInferContext, message: text):
+    expect(context.errors.len()).to_equal(1)
+    match context.errors[0]:
+        case TypeInferError.Other(detail, _): expect(detail).to_contain(message)
+        case _: fail("expected precise bound-metadata diagnostic")
+    expect(context.trait_solver.obligations.len()).to_equal(0)
+
+describe "generic bound obligations retain declaration binder position":
+    it "rejects the second argument when only the first argument implements the bound":
+        step("Collect real declaration metadata and require U rather than T to implement Marked")
+        val module = bound_mapping_fixture()
+        val function = bound_mapping_function(module)
+        var context = bound_mapping_context(module)
+        context.generate_obligations_for_function_call(function.symbol, [bound_mapping_integer(), bound_mapping_boolean(), bound_mapping_integer()], Span.new(1, 2, 9, 4))
+        bound_mapping_expect_pending(context, function, 1, HirTypeKind.Bool, 1)
+        expect(context.trait_solver.obligations[0].trait_.id.id).to_equal(bound_mapping_trait(module).id.id)
+        val solved = context.solve_trait_obligations()
+        expect(solved.is_err()).to_be(true)
+        expect(solved.unwrap_err().len()).to_equal(1)
+        match solved.unwrap_err()[0]:
+            case TraitError.Unsatisfied(obligation): expect(obligation.type_.kind == HirTypeKind.Bool).to_be(true)
+            case _: fail("expected the actual solver to reject Bool:Marked")
+        expect(context.errors.len()).to_equal(1)
+        match context.errors[0]:
+            case TypeInferError.TraitNotImplemented(type_, _, _): expect(type_.kind == HirTypeKind.Bool).to_be(true)
+            case _: fail("solver failure must enter HM diagnostics")
+
+    it "accepts a valid second argument even when the first lacks the trait":
+        step("Use the same registered implementation with T=Bool and U=i64")
+        val module = bound_mapping_fixture()
+        val function = bound_mapping_function(module)
+        var context = bound_mapping_context(module)
+        context.generate_obligations_for_function_call(function.symbol, [bound_mapping_boolean(), bound_mapping_integer(), bound_mapping_boolean()], Span.new(1, 2, 9, 4))
+        bound_mapping_expect_pending(context, function, 1, HirTypeKind.Int(64, true), 1)
+        expect(context.solve_trait_obligations().is_ok()).to_be(true)
+        expect(context.errors.len()).to_equal(0)
+
+    it "keeps sparse third-binder bounds in order with actual trait symbols":
+        step("Leave T and U unbounded and attach two independent bounds to V")
+        val module = bound_mapping_fixture("bounds", true)
+        val function = bound_mapping_function(module)
+        var context = bound_mapping_context(module)
+        val other = bound_mapping_trait(module, "Other")
+        context.trait_solver.add_impl(ImplBlock.create(other, bound_mapping_integer(), Span.empty()))
+        context.generate_obligations_for_function_call(function.symbol, [bound_mapping_boolean(), bound_mapping_boolean(), bound_mapping_integer()], Span.new(1, 2, 9, 4))
+        bound_mapping_expect_pending(context, function, 2, HirTypeKind.Int(64, true), 2)
+        expect(context.trait_solver.obligations[0].trait_.id.id).to_equal(bound_mapping_trait(module).id.id)
+        expect(context.trait_solver.obligations[1].trait_.id.id).to_equal(other.id.id)
+        expect(context.solve_trait_obligations().is_ok()).to_be(true)
+
+    it "reports missing declaration metadata instead of guessing argument zero":
+        val module = bound_mapping_fixture()
+        val function = bound_mapping_function(module)
+        val parameter = function.type_params[1]
+        val bound = HirTraitBound(type_param: parameter.symbol, trait_: parameter.bounds[0], span: parameter.span)
+        var context = HmInferContext.new()
+        context.function_bounds[function.symbol.id] = [bound]
+        context.generate_obligations_for_function_call(function.symbol, [bound_mapping_integer(), bound_mapping_integer(), bound_mapping_integer()], Span.empty())
+        bound_mapping_expect_error(context, "missing declaration context")
+        var direct = bound_mapping_context(module)
+        direct.generate_obligation_for_bound_with_args(bound, [bound_mapping_integer()], Span.empty())
+        bound_mapping_expect_error(direct, "missing ordered type parameters")
+
+    it "rejects an incomplete type argument vector before creating obligations":
+        val module = bound_mapping_fixture()
+        val function = bound_mapping_function(module)
+        var context = bound_mapping_context(module)
+        context.generate_obligations_for_function_call(function.symbol, [bound_mapping_integer()], Span.empty())
+        bound_mapping_expect_error(context, "type argument count does not match declaration")
+
+    it "refuses a different module in the same binder context and retains the original owner":
+        step("Do not combine unrelated module-local binder IDs in one metadata map")
+        val original = bound_mapping_fixture("first")
+        val different = bound_mapping_fixture("second")
+        var context = bound_mapping_context(original)
+        context.collect_function_bounds_from_module(different)
+        bound_mapping_expect_error(context, "module owner mismatch")
+        expect(context.function_bound_context.unwrap().module_name).to_equal("first")
+        val function = bound_mapping_function(original)
+        expect(context.function_bound_context.unwrap().parameters[function.symbol.id][1].id).to_equal(function.type_params[1].symbol.id)
+
+    it "refuses a bound whose trait symbol has the wrong declared kind":
+        var module = bound_mapping_fixture()
+        val function = bound_mapping_function(module)
+        val trait_ = bound_mapping_trait(module)
+        var row = module.symbols.get_symbol_raw(trait_.id.id).unwrap()
+        row.kind = SymbolKind.Struct
+        module.symbols.symbols[row.id.id] = row
+        var context = HmInferContext.new()
+        context.collect_function_bounds_from_module(module)
+        context.generate_obligations_for_function_call(function.symbol, [bound_mapping_integer(), bound_mapping_integer(), bound_mapping_integer()], Span.empty())
+        bound_mapping_expect_error(context, "bound does not name a trait symbol")
+
+    it "rejects a type-parameter row explicitly owned by another module":
+        var module = bound_mapping_fixture()
+        val function = bound_mapping_function(module)
+        val parameter = function.type_params[1]
+        var row = module.symbols.get_symbol_raw(parameter.symbol.id).unwrap()
+        row.defining_module = Some("another")
+        module.symbols.symbols[row.id.id] = row
+        var context = HmInferContext.new()
+        context.collect_function_bounds_from_module(module)
+        context.generate_obligations_for_function_call(function.symbol, [bound_mapping_integer(), bound_mapping_integer(), bound_mapping_integer()], Span.empty())
+        bound_mapping_expect_error(context, "type parameter owner mismatch")
+
+    it "replaces removed bounds when the same module is recollected":
+        var module = bound_mapping_fixture()
+        var context = bound_mapping_context(module)
+        var function = bound_mapping_function(module)
+        var parameter = function.type_params[1]
+        parameter.bounds = []
+        function.type_params[1] = parameter
+        module.functions[function.symbol] = function
+        context.collect_function_bounds_from_module(module)
+        context.generate_obligations_for_function_call(function.symbol, [bound_mapping_boolean(), bound_mapping_boolean(), bound_mapping_boolean()], Span.empty())
+        expect(context.errors.len()).to_equal(0)
+        expect(context.trait_solver.obligations.len()).to_equal(0)
+        expect(context.function_bounds.has(function.symbol.id)).to_be(false)
+
+    it "preserves constructor initialization and diagnoses absent or duplicated binder positions":
+        step("Both constructors begin without declaration authority")
+        var context = HmInferContext.new()
+        expect(context.function_bound_context).to_be_nil()
+        val configured = HmInferContext.with_dim_check_mode(DimCheckMode.Assert)
+        expect(configured.function_bound_context).to_be_nil()
+        val module = bound_mapping_fixture()
+        val function = bound_mapping_function(module)
+        val parameter = function.type_params[1]
+        val bound = HirTraitBound(type_param: parameter.symbol, trait_: parameter.bounds[0], span: parameter.span)
+        var missing = bound_mapping_context(module)
+        missing.generate_obligation_for_bound_with_args(bound, [bound_mapping_integer()], Span.empty(), [function.type_params[0].symbol])
+        bound_mapping_expect_error(missing, "type parameter is absent from declaration")
+        var duplicated = bound_mapping_context(module)
+        duplicated.generate_obligation_for_bound_with_args(bound, [bound_mapping_integer(), bound_mapping_integer()], Span.empty(), [parameter.symbol, parameter.symbol])
+        bound_mapping_expect_error(duplicated, "ambiguous type parameter position")
+
+    it "refuses parameterized trait bounds instead of erasing their arguments":
+        step("Pass a nonempty Named trait payload through the actual bound helper")
+        val module = bound_mapping_fixture()
+        val function = bound_mapping_function(module)
+        val parameter = function.type_params[1]
+        val marked = bound_mapping_trait(module)
+        val trait_type = HirType(kind: HirTypeKind.Named(marked.id, [bound_mapping_integer()]), span: parameter.span)
+        val bound = HirTraitBound(type_param: parameter.symbol, trait_: trait_type, span: parameter.span)
+        var context = bound_mapping_context(module)
+        context.generate_obligation_for_bound_with_args(bound, [bound_mapping_integer(), bound_mapping_integer(), bound_mapping_integer()], Span.empty(), [function.type_params[0].symbol, parameter.symbol, function.type_params[2].symbol])
+        bound_mapping_expect_error(context, "parameterized trait bounds require argument-aware solver admission")
