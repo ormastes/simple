@@ -1,0 +1,248 @@
+# Driver side of the native object PRE-LOWERING cache (opt-in:
+# SIMPLE_NATIVE_PRELOWER_CACHE=1). Key composition and soundness rules live in
+# cache/native_prelower_object_key.spl; this file gathers the inputs from the
+# compile context, and reads/writes the pre-key -> object store.
+#
+# Store: <native build cache dir>/prelower-v1/<key>.entry (+ <key>.o). The
+# entry is written LAST, so a torn record is a miss. A hit re-hashes the
+# stored object against the digest the entry recorded.
+#
+# Admission is ALL-OR-NOTHING per build (driver_pipeline_lowering.spl): MIR
+# lowering is skipped only when EVERY module hits. MirLowering carries
+# cross-module state (name-keyed composite/enum inventories registered by each
+# module's own lower_module pass), so lowering a subset after skipping others
+# could change the subset's MIR. A partial hit therefore lowers everything as
+# today and only records keys.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{dir_create, file_copy, file_exists, file_write_exact, file_read_nullable}
+use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
+use std.platform.{get_host_os}
+use std.simd.{has_avx2}
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use compiler.backend.backend_helpers.{get_effective_backend_name}
+use compiler.driver.driver_backend_plugin_selection.{driver_aot_uses_versioned_backend}
+use compiler.driver.driver_build.incremental.{FileFingerprint,
+    native_build_cache_lane, native_build_compiler_identity}
+use compiler.driver.cache.cache_root.{machine_cache_root}
+use compiler.driver.cache.native_build_environment_identity.{
+    native_build_module_environment_fingerprint_v1}
+use compiler.driver.cache.native_module_witness.{NATIVE_CACHE_EMITTER_SCHEME_V1}
+use compiler.driver.cache.native_prelower_object_key.{
+    NATIVE_PRELOWER_CACHE_ENV_V1, NativePrelowerKeyInputsV1,
+    native_prelower_dependency_digest_v1, native_prelower_object_key_v1}
+use compiler.driver.driver_build.native_group_request.{native_group_request_path_v1}
+use compiler.hir.hir_types.{HirModule}
+use driver_types.{CompileContext}
+
+val DRIVER_NATIVE_PRELOWER_ENTRY_HEADER_V1: text = "simple-native-prelower-entry-v1"
+
+fn driver_native_prelower_enabled_v1() -> bool:
+    (sosix_env_get_nullable(NATIVE_PRELOWER_CACHE_ENV_V1) ?? "") == "1"
+
+# Must match driver_native_build_cache_dir (driver_aot_native_output.spl).
+fn driver_native_prelower_store_dir_v1() -> text:
+    val dir = sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? ""
+    val root = if dir == "": machine_cache_root() + "/native-build/v1" else: dir
+    root + "/prelower-v1"
+
+# Build-level admission: every route whose objects carry receipts, ownership
+# or publication state beyond "a linkable object" is refused, as are routes
+# whose producer identity only exists after lowering (backend plugin session,
+# Darwin provider receipt).
+fn driver_native_prelower_build_admissible_v1(
+    ctx: CompileContext, native_entry_closure_mir: bool,
+    staged_active: bool, shard_queue: text
+) -> bool:
+    if not driver_native_prelower_enabled_v1(): return false
+    if not native_entry_closure_mir or staged_active or shard_queue != "": return false
+    if ctx.runtime_std_full_inventory_selection != nil: return false
+    if ctx.demand_mir_admission != nil or ctx.demand_dirty_modules.len() > 0: return false
+    if ctx.demand_scc_publication != nil: return false
+    if ctx.cold_hir_typed_receipts.len() > 0: return false
+    if ctx.options.collection_memory_budget_bytes >= 0: return false
+    if native_group_request_path_v1() != "": return false
+    if (sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_EMIT_OBJECT") ?? "") != "": return false
+    if (sosix_env_get_nullable("SIMPLE_BOOTSTRAP") ?? "") == "1": return false
+    if (sosix_env_get_nullable("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1": return false
+    true
+
+# Producer identity available before lowering. "" = refused.
+fn driver_native_prelower_producer_identity_v1(ctx: CompileContext) -> text:
+    val backend_name = ctx.options.backend
+    if driver_aot_uses_versioned_backend(backend_name): return ""
+    val native_target = ctx.native_target
+    if native_target.ends_with("-apple-darwin") or
+            (native_target == "" and get_host_os() == "macos"):
+        return ""
+    val compiler_identity = native_build_compiler_identity()
+    if compiler_identity == "" or compiler_identity.starts_with("uncacheable"): return ""
+    val environment = native_build_module_environment_fingerprint_v1()
+    if not environment.valid or environment.digest == "": return ""
+    val is_release = ctx.options.release
+    # Same rule as driver_effective_native_opt_level.
+    val opt_level = if ctx.options.opt_level.?:
+        ctx.options.opt_level ?? 0
+    elif is_release:
+        3
+    else:
+        0
+    val native_cpu = sosix_env_get_nullable("SIMPLE_NATIVE_CPU") ?? ""
+    val symbol_mode = if (sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_NO_MANGLE") ?? "") == "1":
+        "no-mangle"
+    else:
+        ""
+    var config_rows: [text] = []
+    for config_key in ctx.config.keys():
+        val config_value = ctx.config[config_key] ?? ""
+        config_rows.push("{config_key.len()}:{config_key}={config_value}")
+    val config_digest = sha256_text(canonical_identity_sort_texts(config_rows).join("\n"))
+    val effective_backend = get_effective_backend_name(backend_name, is_release)
+    # Same host-capability term as the MIR-keyed cache scope
+    # (driver_native_build_cache_scope): a host-native build's objects depend
+    # on the host's AVX2 policy, and this store is not partitioned by that
+    # scope directory, so the key must carry it itself.
+    val host_avx2 = native_target == "" and has_avx2()
+    "compiler={compiler_identity}|target={native_target}|cpu={native_cpu}|avx2={host_avx2}|backend={effective_backend}|opt={opt_level}|release={is_release}|symbols={symbol_mode}|environment={environment.digest}|emitter={NATIVE_CACHE_EMITTER_SCHEME_V1}|config={config_digest}"
+
+# Post-mono specialization names this module emits (functions and nominal
+# types whose name carries the mono `$` separator).
+fn driver_native_prelower_mono_instances_v1(hir: HirModule) -> [text]:
+    var names: [text] = []
+    for fn_key in hir.functions.keys():
+        val fn_name = hir.functions[fn_key].name
+        if fn_name.contains("$"): names.push(fn_name)
+    for struct_key in hir.structs.keys():
+        val struct_name = hir.structs[struct_key].name
+        if struct_name.contains("$"): names.push(struct_name)
+    for class_key in hir.classes.keys():
+        val class_name = hir.classes[class_key].name
+        if class_name.contains("$"): names.push(class_name)
+    for enum_key in hir.enums.keys():
+        val enum_name = hir.enums[enum_key].name
+        if enum_name.contains("$"): names.push(enum_name)
+    names
+
+# Compute pre-keys for the scheduled modules. `names[i]` is the module name
+# the MIR/object cache uses, `source_texts[i]`/`source_paths[i]` its parsed
+# source, `hir_modules[i]` its post-mono HIR. Returns name -> key for every
+# module whose key was admitted; a refused module is simply absent.
+fn driver_native_prelower_module_keys_v1(
+    ctx: CompileContext, names: [text], source_texts: [text],
+    source_paths: [text], hir_modules: [HirModule]
+) -> {text: text}:
+    var keys: {text: text} = {}
+    if names.len() == 0 or names.len() != source_texts.len() or
+            names.len() != source_paths.len() or names.len() != hir_modules.len():
+        return keys
+    val producer = driver_native_prelower_producer_identity_v1(ctx)
+    if producer == "": return keys
+    val lane = native_build_cache_lane()
+    var source_digests: [text] = []
+    var dependency_rows: [text] = []
+    var i = 0
+    while i < names.len():
+        # The parsed text must still be what is on disk; otherwise the parsed
+        # module is not the module a later build would see under this key.
+        val parsed = source_texts[i]
+        val disk = file_read_nullable(source_paths[i]) ?? ""
+        val source_digest = if parsed != "" and disk == parsed: sha256_text(parsed) else: ""
+        source_digests.push(source_digest)
+        # A missing digest yields "name=" which the key builder refuses.
+        val admitted_source = if source_digest == "": "" else: parsed
+        val dependency_digest = native_prelower_dependency_digest_v1(admitted_source)
+        dependency_rows.push("{names[i]}={dependency_digest}")
+        i = i + 1
+    var m = 0
+    while m < names.len():
+        var deps: [text] = []
+        var d = 0
+        while d < dependency_rows.len():
+            if d != m: deps.push(dependency_rows[d])
+            d = d + 1
+        # A single-module build has no dependency rows; key it on itself.
+        if deps.len() == 0: deps.push("{names[m]}=self")
+        val (key, _reason) = native_prelower_object_key_v1(NativePrelowerKeyInputsV1(
+            module_name: names[m],
+            source_digest: source_digests[m],
+            dependency_digests: deps,
+            mono_instances: driver_native_prelower_mono_instances_v1(hir_modules[m]),
+            producer_identity: producer,
+            cache_lane: lane))
+        if key != "": keys[names[m]] = key
+        m = m + 1
+    keys
+
+fn driver_native_prelower_entry_field_v1(entry: text, field: text) -> text:
+    for line in entry.split("\n"):
+        if line.starts_with(field + "="): return line[field.len() + 1:]
+    ""
+
+# Lookup. Returns "" on miss, else "<kind>|<functions>|<statics>|<object>"
+# where kind is `object` (verified bytes) or `objectless`.
+fn driver_native_prelower_lookup_v1(key: text) -> text:
+    if key == "": return ""
+    val store = driver_native_prelower_store_dir_v1()
+    val entry = file_read_nullable(store + "/" + key + ".entry") ?? ""
+    if not entry.starts_with(DRIVER_NATIVE_PRELOWER_ENTRY_HEADER_V1 + "\n"): return ""
+    val kind = driver_native_prelower_entry_field_v1(entry, "kind")
+    val functions = driver_native_prelower_entry_field_v1(entry, "functions")
+    val statics = driver_native_prelower_entry_field_v1(entry, "statics")
+    if functions == "" or statics == "": return ""
+    if kind == "objectless": return "objectless|{functions}|{statics}|"
+    if kind != "object": return ""
+    val object_path = store + "/" + key + ".o"
+    val expected = driver_native_prelower_entry_field_v1(entry, "object_sha256")
+    if expected == "" or not file_exists(object_path): return ""
+    if val fp = FileFingerprint.from_file(object_path):
+        if fp.content_hash == expected:
+            return "object|{functions}|{statics}|{object_path}"
+    ""
+
+fn driver_native_prelower_storage_rows_v1(ctx: CompileContext, name: text) -> i64:
+    var rows: i64 = 0
+    for frozen_name in ctx.frozen_storage_module_names:
+        if frozen_name == name: rows = rows + 1
+    for live_name in ctx.storage_binding_module_names:
+        if live_name == name: rows = rows + 1
+    rows
+
+# Record a produced (or MIR-cache-verified) object, or an objectless module,
+# under the module's pending pre-key. object_path == "" records objectless.
+# Best effort: any failure leaves no entry (a later miss), never a bad hit.
+fn driver_native_prelower_record_v1(
+    ctx: CompileContext, name: text, object_path: text,
+    functions: i64, statics: i64
+) -> bool:
+    if not ctx.native_prelower_pending_keys.has(name): return false
+    val key = ctx.native_prelower_pending_keys[name] ?? ""
+    if key == "": return false
+    # Lowering registers typed storage-view rows per module; skipping such a
+    # module would change the frozen storage registry the build is keyed on.
+    if driver_native_prelower_storage_rows_v1(ctx, name) > 0: return false
+    val store = driver_native_prelower_store_dir_v1()
+    if not dir_create(store, true): return false
+    val entry_path = store + "/" + key + ".entry"
+    if file_exists(entry_path): return true
+    var body = DRIVER_NATIVE_PRELOWER_ENTRY_HEADER_V1 + "\nmodule={name}\nfunctions={functions}\nstatics={statics}\n"
+    if object_path == "":
+        body = body + "kind=objectless\n"
+    else:
+        val source_fp = FileFingerprint.from_file(object_path)
+        if not source_fp.?: return false
+        val stored = store + "/" + key + ".o"
+        if not file_copy(object_path, stored): return false
+        val stored_fp = FileFingerprint.from_file(stored)
+        if not stored_fp.?: return false
+        val digest = stored_fp.unwrap().content_hash
+        if digest == "" or digest != source_fp.unwrap().content_hash: return false
+        body = body + "kind=object\nobject_sha256={digest}\n"
+    file_write_exact(entry_path, body)
+
+export driver_native_prelower_enabled_v1
+export driver_native_prelower_build_admissible_v1
+export driver_native_prelower_producer_identity_v1
+export driver_native_prelower_mono_instances_v1
+export driver_native_prelower_module_keys_v1
+export driver_native_prelower_lookup_v1
+export driver_native_prelower_record_v1

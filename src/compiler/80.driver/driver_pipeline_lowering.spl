@@ -37,6 +37,8 @@ use compiler.driver.driver_phase_gates.{
 use compiler.driver.driver_mir_target.{driver_mir_target_context, driver_collection_target_options}
 use compiler.driver.driver_mir_error_owner.{driver_trace_module_mir_errors}
 use compiler.driver.driver_mir_physical_owners.{driver_mir_physical_source_indices_v1, driver_mir_feed_is_identity_v1}
+use compiler.driver.driver_native_prelower_cache.{driver_native_prelower_build_admissible_v1,
+    driver_native_prelower_module_keys_v1, driver_native_prelower_lookup_v1}
 use compiler.mir._MirLowering.module_lowering.{mir_layout_canonical_module_name}
 use compiler.common.module_path_naming.{module_logical_name_cache_warm}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_module_count, bootstrap_hir_module_name_at}
@@ -1175,6 +1177,63 @@ impl CompilerDriver:
                 for weight_idx in mir_source_indices:
                     mir_walk_weights = mir_walk_weights.push(self.ctx.sources[weight_idx].content.len())
                 mir_walk_order = native_mir_shard_lpt_order_v1(staged_source_names, mir_walk_weights)
+            # Native pre-lowering object cache (opt-in, all-or-nothing; see
+            # driver_native_prelower_cache.spl). Keys are computed from
+            # pre-lowering facts only. When EVERY scheduled module hits, MIR
+            # lowering is skipped and codegen reuses the recorded objects;
+            # otherwise the admitted keys are kept so codegen records them
+            # beside the MIR-keyed entries, and lowering proceeds as before.
+            self.ctx.native_prelower_pending_keys = {}
+            self.ctx.native_prelower_hit_objects = {}
+            if driver_native_prelower_build_admissible_v1(self.ctx,
+                    native_entry_closure_mir, self.native_staged_codegen.active,
+                    mir_shard_queue):
+                var prelower_names: [text] = []
+                var prelower_texts: [text] = []
+                var prelower_paths: [text] = []
+                var prelower_hirs: [HirModule] = []
+                var prelower_inputs_complete = true
+                for prelower_idx in mir_source_indices:
+                    val prelower_src = self.ctx.sources[prelower_idx]
+                    if val prelower_hir = self.ctx.hir_modules[prelower_src.module_name]:
+                        val prelower_name = if mir_physical_ownership_active:
+                            mir_layout_canonical_module_name(prelower_hir.name)
+                        else:
+                            prelower_src.module_name
+                        prelower_names.push(prelower_name)
+                        prelower_texts.push(prelower_src.content)
+                        prelower_paths.push(prelower_src.path)
+                        prelower_hirs.push(prelower_hir)
+                    else:
+                        prelower_inputs_complete = false
+                if prelower_inputs_complete:
+                    val prelower_keys = driver_native_prelower_module_keys_v1(
+                        self.ctx, prelower_names, prelower_texts, prelower_paths,
+                        prelower_hirs)
+                    self.ctx.native_prelower_pending_keys = prelower_keys
+                    var prelower_hits: {text: text} = {}
+                    var prelower_all_hit = prelower_keys.keys().len() == prelower_names.len()
+                    for prelower_hit_name in prelower_names:
+                        if prelower_all_hit:
+                            val prelower_found = driver_native_prelower_lookup_v1(
+                                prelower_keys[prelower_hit_name] ?? "")
+                            if prelower_found == "":
+                                prelower_all_hit = false
+                            else:
+                                prelower_hits[prelower_hit_name] = prelower_found
+                    log_phase("aot:prelower_cache modules={prelower_names.len()} keyed={prelower_keys.keys().len()} hits={prelower_hits.keys().len()} all_hit={prelower_all_hit}")
+                    if prelower_all_hit:
+                        print "[NATIVE] pre-lowering cache: all {prelower_names.len()} modules hit; MIR lowering skipped"
+                        self.ctx.native_prelower_hit_objects = prelower_hits
+                        for prelower_skip_name in prelower_names:
+                            val prelower_skip_mir = MirModule(
+                                name: prelower_skip_name, functions: {}, statics: {},
+                                constants: {}, types: {})
+                            self.ctx.mir_modules[prelower_skip_name] = prelower_skip_mir
+                            if prelower_skip_name == "app.cli.bootstrap_main":
+                                self.ctx.set_bootstrap_entry_mir(prelower_skip_name, prelower_skip_mir)
+                        if not self.publish_runtime_std_mir_emissions_v1(): return false
+                        return self.ctx.error_count_value == 0
             while direct_pos < mir_source_indices.len():
                 # Schedule position; the entry flag below keys on it, not on
                 # the walk counter.
