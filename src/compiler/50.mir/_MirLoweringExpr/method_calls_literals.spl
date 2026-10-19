@@ -504,11 +504,117 @@ impl MirLowering:
                 case _: ()
         nil
 
+    me unresolved_receiver_is_text_v1(receiver: HirExpr, local: LocalId, declared_text_receiver: bool) -> bool:
+        """Positive text proof for an Unresolved builtin text method: the
+        declared receiver type, the lowered local's text flag, or its
+        retained HIR type. Never guesses from the method name."""
+        if declared_text_receiver:
+            return true
+        if self.local_is_str(local):
+            return true
+        if self.local_hir_type_is_str(local):
+            return true
+        if val bound_type = self.enum_match_expr_type(receiver):
+            match bound_type.kind:
+                case HirTypeKind.Str: return true
+                case _: ()
+        false
+
+    me lower_text_data_ptr_v1(text_local: LocalId) -> LocalId:
+        """`text.ptr()`: raw address of the text's byte buffer as i64, via
+        rt_string_data (tagged heap text or raw literal word)."""
+        val data_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_string_data"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                params: [MirType.i64()],
+                return_type: MirType.i64(),
+                is_variadic: false
+            )))
+        ))
+        var data_builder = self.builder
+        val data_result = data_builder.emit_call(data_op, [mir_operand_copy(text_local)], MirType.i64())
+        self.builder = data_builder
+        if val data_local = data_result:
+            return data_local
+        var zero_builder = self.builder
+        val zero = zero_builder.emit_const_int(0)
+        self.builder = zero_builder
+        zero
+
+    me try_lower_tuple_get_v1(receiver: HirExpr, receiver_local: LocalId, index: HirExpr) -> LocalId?:
+        """`t.get(N)` on a tuple with a literal N lowers exactly like `t[N]`.
+        Returns nil (caller keeps its loud unresolved path) unless the
+        receiver is a proven tuple, N is a literal, and the receiver is a
+        pure place expression that the Index lowering may re-read."""
+        if self.tuple_index_literal(index) < 0:
+            return nil
+        var receiver_is_tuple = false
+        if val receiver_mir_type = self.local_mir_type_of(receiver_local):
+            match receiver_mir_type.kind:
+                case MirTypeKind.Tuple(_): receiver_is_tuple = true
+                case _: ()
+        if not receiver_is_tuple:
+            if val receiver_hir_type = self.find_local_hir_type(receiver_local.id):
+                match receiver_hir_type.kind:
+                    case HirTypeKind.Tuple(_): receiver_is_tuple = true
+                    case _: ()
+        if not receiver_is_tuple:
+            return nil
+        match receiver.kind:
+            case HirExprKind.Var(_) | HirExprKind.NamedVar(_, _) | HirExprKind.Field(_, _, _):
+                return Some(self.lower_index_expr(receiver, index, false, HirType(kind: HirTypeKind.Error, span: receiver.span)))
+            case _: ()
+        nil
+
+    me try_lower_unresolved_ufcs_v1(receiver_local: LocalId, owner_name: text, method: text, args: [HirCallArg], wb_kind: i64, wb_base: LocalId, wb_index: LocalId, wb_field_idx: i64) -> LocalId?:
+        """Lower an Unresolved `x.f(args)` as the free call `f(x, args)`.
+
+        Admitted only when the receiver's nominal owner is known and the
+        free function's first declared parameter names that SAME owner, so
+        a builtin or same-named helper over another type is never stolen."""
+        if owner_name == "":
+            return nil
+        val func_id = self.symbols.lookup_function(method) ?? SymbolId(id: -1)
+        if func_id.id < 0:
+            return nil
+        val param_types = self.resolved_call_hir_param_types(func_id)
+        if param_types.len() < args.len() + 1:
+            return nil
+        var first_param_is_owner = false
+        match param_types[0].kind:
+            case Named(first_param_symbol, _):
+                if val first_param_owner = self.symbols.get_symbol_raw(first_param_symbol.id):
+                    match first_param_owner.kind:
+                        case Struct | Class:
+                            first_param_is_owner = mir_class_identity(first_param_owner) == owner_name or first_param_owner.name == owner_name
+                        case _: ()
+            case _: ()
+        if not first_param_is_owner:
+            return nil
+        val arg_operands = self.build_args_from_receiver(receiver_local, args, param_types)
+        val func_operand = self.symbol_to_operand(func_id)
+        val return_type = self.resolved_call_return_type(func_id)
+        val final_args = self.pad_trailing_default_args(func_operand, arg_operands)
+        var b = self.builder
+        val result = b.emit_call(func_operand, final_args, return_type)
+        self.builder = b
+        self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, receiver_local)
+        if val result_local = result:
+            self.remember_call_hir_return(result_local, func_id)
+            return Some(result_local)
+        var b_unit = self.builder
+        val unit_local = b_unit.emit_const_int(0)
+        self.builder = b_unit
+        Some(unit_local)
+
     me method_receiver_is_option(receiver: HirExpr, local: LocalId) -> bool:
-        if self.local_is_runtime_array(local):
-            return false
+        # A declared/retained Optional type wins over the runtime-array flag:
+        # `d.get(k)` with an array value decodes to an array-handle local
+        # that is still the `[T]?` the source declared.
         if self.option_inner_hir_type_for_local(receiver, local) != nil:
             return true
+        if self.local_is_runtime_array(local):
+            return false
         self.nil_locals.contains(local.id)
 
     fn mir_type_is_scalar_numeric(type_: MirType?) -> bool:
@@ -1008,6 +1114,10 @@ impl MirLowering:
 
             if self.is_runtime_value_local(some_val_uw.id):
                 self.mark_runtime_value_local(result_local_uw.id)
+            # An array-valued Option (`d.get(k)` over `[T]` values) unwraps to
+            # that same runtime array handle.
+            if self.runtime_array_locals.contains(receiver_local.id):
+                self.runtime_array_locals[result_local_uw.id] = true
 
             # `.unwrap()` yields the SAME value the receiver carried, so it must
             # carry the receiver's struct identity across too. Without this the
@@ -4138,11 +4248,20 @@ impl MirLowering:
                 if mir_mc_trace_state == 1:
                     eprint("[mir-method-call] unresolved-owner-done method={method}\n")
 
+                # UFCS recovery: `x.f(a)` -> `f(x, a)` for a free function
+                # whose first parameter is declared as the receiver's own
+                # nominal owner. Flat entry HIR leaves these Unresolved
+                # (copy_prop's `self.copypropagation_propagate_operand(op)`).
+                if val ufcs_local = self.try_lower_unresolved_ufcs_v1(unresolved_receiver_local, unresolved_struct_name ?? "", method, args, wb_kind, wb_base, wb_index, wb_field_idx):
+                    return ufcs_local
+
                 # Builtin Array.push has no method symbol. Once custom-owner
                 # recovery above has had first chance, lower it immediately;
                 # unrelated text/conversion probes below can consult stale
                 # optional local-type metadata on the staged path.
-                if method == "push" and args.len() == 1:
+                # `append` is the same builtin on a proven runtime array.
+                val array_append_alias = method == "append" and args.len() == 1 and self.local_is_runtime_array(unresolved_receiver_local)
+                if (method == "push" and args.len() == 1) or array_append_alias:
                     return self.lower_unresolved_array_push(
                         unresolved_receiver_local, args[0].value,
                         wb_kind, wb_base, wb_index, wb_field_idx)
@@ -4196,6 +4315,23 @@ impl MirLowering:
                     self.builder = char_code_builder
                     if val char_code_local = char_code_result:
                         return char_code_local
+
+                # `text.ptr()` (the raw byte-buffer address handed to dlsym'd
+                # C entry points, e.g. std.sffi.llvm_types) has no method
+                # symbol either. Route it to rt_string_data, which already
+                # accepts both the tagged heap text and the raw rodata
+                # literal word. Custom owners resolved above keep priority.
+                if method == "ptr" and args.len() == 0:
+                    if self.unresolved_receiver_is_text_v1(receiver, unresolved_receiver_local, declared_text_receiver):
+                        return self.lower_text_data_ptr_v1(unresolved_receiver_local)
+
+                # `tuple.get(N)` with a literal N is the tuple index `t[N]`;
+                # flat HIR leaves it Unresolved (tuples have no method
+                # symbols). Only side-effect-free receivers are re-lowered by
+                # the shared Index lowering, so nothing is evaluated twice.
+                if method == "get" and args.len() == 1:
+                    if val tuple_get_local = self.try_lower_tuple_get_v1(receiver, unresolved_receiver_local, args[0].value):
+                        return tuple_get_local
 
                 # `byte_at` is BYTE-indexed, unlike `char_code_at` above which
                 # is CHARACTER-indexed -- they deliberately diverge on
@@ -4452,6 +4588,29 @@ impl MirLowering:
                             self.builder = b_pop
                             self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, unresolved_receiver_local)
                             return popped
+                    # `arr.remove(i)`: rt_array_remove shifts the tail down
+                    # through the stable handle and returns the removed
+                    # element's tagged word (nil when out of range).
+                    if method == "remove" and args.len() == 1:
+                        val remove_index_local = self.lower_expr(args[0].value)
+                        val remove_op = MirOperand(kind: MirOperandKind.Const(
+                            MirConstValue.Str("rt_array_remove"),
+                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                                params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                        ))
+                        var b_remove = self.builder
+                        val remove_result = b_remove.emit_call(remove_op, [mir_operand_copy(unresolved_receiver_local), mir_operand_copy(remove_index_local)], MirType.i64())
+                        self.builder = b_remove
+                        self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, unresolved_receiver_local)
+                        if val removed_local = remove_result:
+                            self.mark_runtime_value_local(removed_local.id)
+                            return removed_local
+                    # `arr.copy()` / `arr.clone()`: a fresh shallow array,
+                    # the same counted copy loop `val b = a` materializes.
+                    if (method == "copy" or method == "clone") and args.len() == 0:
+                        val copy_type = self.local_mir_type_of(unresolved_receiver_local) ?? MirType.i64()
+                        if val copied_array = self.maybe_copy_array_value(unresolved_receiver_local, copy_type, true):
+                            return copied_array
                     if method == "map" and args.len() == 1:
                         match args[0].value.kind:
                             case Lambda(map_params, map_body, _):
