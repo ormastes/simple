@@ -1,0 +1,77 @@
+# @req REQ-IM-008 REQ-IM-012 REQ-IM-016 NFR-IM-004 NFR-IM-005 NFR-IM-008
+# Real strict SDN codec tests. These do not qualify warning-mode workers.
+use std.spec.*
+use compiler.driver.driver_build.managed_parse_diagnostic_v2.*
+use compiler.driver.driver_build.managed_parse_group_contract.{ManagedParseModuleV1}
+use compiler.common.diagnostics.diagnostic_v1.{DiagnosticV1}
+use compiler.common.diagnostics.severity.{Severity}
+use compiler.common.diagnostics.span.{Span}
+use std.common.crypto.sha256.{sha256_text}
+
+fn diagnostic_module_v2() -> ManagedParseModuleV1:
+    ManagedParseModuleV1("module", "package", "src/capture.spl", sha256_text("original source"))
+
+fn diagnostic_value_v2(severity: Severity, message: text) -> DiagnosticV1:
+    val module = diagnostic_module_v2()
+    var value = DiagnosticV1(severity, "W-CAPTURE-WRITE", message, Some(module.source_path),
+        None, [], [], [], [], [], None)
+    value.notes = ["diagnostic-id:" + managed_parse_diagnostic_id_v2(value, module)]
+    value
+
+describe "REQ-IM-012: canonical typed managed parser diagnostic SDN":
+    it "should preserve warning and error types and located Unicode text without JSON transport":
+        val module = diagnostic_module_v2()
+        for severity in [Severity.Warning, Severity.Error]:
+            step("Round-trip typed diagnostic through the actual canonical writer and strict bounded reader")
+            val original = diagnostic_value_v2(severity, "line 7: 열 captured write\nquote \" and slash \\")
+            val wire = managed_parse_diagnostic_encode_v2(original, module)
+            expect(wire == "").to_be(false)
+            val decoded = managed_parse_diagnostic_decode_v2(wire, module).unwrap()
+            expect(decoded.severity).to_equal(severity)
+            expect(decoded.message).to_equal(original.message)
+            expect(decoded.notes).to_equal(original.notes)
+            expect(managed_parse_diagnostic_encode_v2(decoded, module)).to_equal(wire)
+
+    it "should bind identity to original source, logical path, severity and message":
+        val module = diagnostic_module_v2()
+        val original = diagnostic_value_v2(Severity.Warning, "line 7: captured write")
+        val wire = managed_parse_diagnostic_encode_v2(original, module)
+        var changed = module
+        changed.source_digest = sha256_text("changed source")
+        expect(managed_parse_diagnostic_decode_v2(wire, changed).is_err()).to_be(true)
+        changed = module
+        changed.source_path = "src/foreign.spl"
+        expect(managed_parse_diagnostic_decode_v2(wire, changed).is_err()).to_be(true)
+        expect(managed_parse_diagnostic_decode_v2(wire.replace("captured write", "other warning"), module).is_err()).to_be(true)
+        expect(managed_parse_diagnostic_decode_v2(wire.replace("warning", "error"), module).is_err()).to_be(true)
+
+    it "should reject noncanonical syntax, trailing data and foreign record versions":
+        val module = diagnostic_module_v2()
+        val wire = managed_parse_diagnostic_encode_v2(diagnostic_value_v2(Severity.Warning, "captured write"), module)
+        for invalid in [wire + "\n", wire + " false", wire.replace("diagnostic-2", "diagnostic-1"),
+                wire.replace(", ", ",  "), "{\"severity\":\"warning\"}"]:
+            expect(managed_parse_diagnostic_decode_v2(invalid, module).is_err()).to_be(true)
+
+    it "should reject unsupported payloads instead of silently dropping diagnostic semantics":
+        val module = diagnostic_module_v2()
+        var value = diagnostic_value_v2(Severity.Warning, "captured write")
+        value.span = Some(Span.at(0, 1, 1))
+        expect(managed_parse_diagnostic_encode_v2(value, module)).to_equal("")
+        value = diagnostic_value_v2(Severity.Warning, "captured write")
+        value.children = [diagnostic_value_v2(Severity.Error, "nested error")]
+        expect(managed_parse_diagnostic_encode_v2(value, module)).to_equal("")
+        value = diagnostic_value_v2(Severity.Note, "note")
+        expect(managed_parse_diagnostic_encode_v2(value, module)).to_equal("")
+        value = diagnostic_value_v2(Severity.Warning, "captured write")
+        value.notes = value.notes.push(value.notes[0])
+        expect(managed_parse_diagnostic_encode_v2(value, module)).to_equal("")
+
+    it "should enforce byte and parser allocation bounds without truncation":
+        val module = diagnostic_module_v2()
+        val edge = diagnostic_value_v2(Severity.Warning, "x".repeat(8192))
+        expect(managed_parse_diagnostic_decode_v2(managed_parse_diagnostic_encode_v2(edge, module), module).unwrap().message.len()).to_equal(8192)
+        expect(managed_parse_diagnostic_encode_v2(diagnostic_value_v2(Severity.Warning, "x".repeat(8193)), module)).to_equal("")
+        expect(managed_parse_diagnostic_encode_v2(diagnostic_value_v2(Severity.Warning, "열".repeat(2731)), module)).to_equal("")
+        expect(managed_parse_diagnostic_decode_v2("x".repeat(32769), module).is_err()).to_be(true)
+        expect(managed_parse_diagnostic_decode_v2("[[[[[1]]]]]", module).is_err()).to_be(true)
+        expect(managed_parse_diagnostic_decode_v2("[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]", module).is_err()).to_be(true)
