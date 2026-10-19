@@ -66,8 +66,10 @@ in-development are expected to FAIL, are SKIPPED in whole-suite runs, and are
 **COUNTED** in the runner summary — so the count belongs in `test_result.md` and
 `test_db.sdn`, and an in-development feature belongs in `pending_feature.md`, not
 `feature.md`. Semantics and the anti-use rules: `doc/07_guide/infra/testing.md`
-§ Tags and Filtering. **Not yet enforced at `origin/main` @ `3ccf808f6f2`
-(2026-08-23)** — the pure-Simple runner parses only `# @di_test` and
-`# @exec_limit` (`src/app/test_runner_new/test_runner_single.spl:193,209`); the
-skip/count wiring is landing in sibling lanes. Re-verify before asserting these
-files carry the count.
+§ Tags and Filtering. **Enforced (verified 2026-10-19):** the directory lane
+classifies each file through `classify_in_development`
+(`src/lib/nogc_sync_mut/spec/in_development.spl`, applied by
+`in_development_adjust` in `src/app/test_runner_new/test_runner_main.spl`),
+prints `in_development_summary_line`, and every `SPEC FILE VERDICT:` line
+carries `in_development=<n>`; `--tag in-development` selects the header form
+(`content_has_tag`, `src/lib/nogc_sync_mut/test_runner/test_runner_files.spl`).

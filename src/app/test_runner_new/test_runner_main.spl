@@ -58,7 +58,7 @@ use std.test_runner.test_runner_modes.{run_spl_doctest_mode}
 # Change-detection cache for incremental test runs
 use app.test_incremental_state_shared.{IncrementalTestState, incremental_test_state_new, incremental_test_state_load}
 # GROUP 6: Self-protection imports
-use std.test_runner.checkpoint.{checkpoint_load, checkpoint_exists, checkpoint_skip_completed, checkpoint_save, checkpoint_delete}
+use std.test_runner.checkpoint.{checkpoint_load, checkpoint_exists, checkpoint_skip_completed, checkpoint_save, checkpoint_delete, checkpoint_resume_banner, make_empty_checkpoint}
 use std.test_runner.system_monitor.{system_exceeds_threshold, ensure_kill_monitor_running, is_linux}
 use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
 use std.test_runner.shutdown.{shutdown_graceful}
@@ -275,12 +275,11 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         updated_options.fail_fast = false
     print ""
 
-    # MEMORY DEBUG: checkpoint disabled (GROUP 6)
-    # Load checkpoint if resuming
-    # var ckpt_loaded = false
+    # Progress carried over from a --resume checkpoint (loaded below).
     var ckpt_passed = 0
     var ckpt_failed = 0
     var ckpt_skipped = 0
+    var ckpt_completed: [text] = []
 
     # Handle --manifest-status: show manifest info and exit
     if updated_options.manifest_status:
@@ -358,18 +357,30 @@ fn run_tests(options: TestOptions) -> TestRunResult:
                 return cover_append_failures(summarize_test_results([]), missing_covers)
             print "Continuing admitted files (--unstable); coverage admission failures remain failed."
 
-    # MEMORY DEBUG: checkpoint filtering disabled (GROUP 6)
     var files = cover_admitted_files(all_files, missing_covers)
-    # if options.resume and checkpoint_exists():
-    #     val ckpt = checkpoint_load()
-    #     ckpt_loaded = true
-    #     ckpt_passed = ckpt.total_passed
-    #     ckpt_failed = ckpt.total_failed
-    #     ckpt_skipped = ckpt.total_skipped
-    #     files = checkpoint_skip_completed(all_files, ckpt)
-    #     print "Resuming from checkpoint (reason: {ckpt.shutdown_reason})"
-    #     print "Previous progress: {ckpt_passed} passed, {ckpt_failed} failed, {ckpt_skipped} skipped"
-    #     print ""
+    # --resume was a silent no-op from 2026-07-25 ("MEMORY DEBUG ... GROUP 6"
+    # isolation) until 2026-10-19: the flag parsed, the checkpoint module was
+    # imported and checkpoint_save ran every 50 files, but the filter below was
+    # commented out, so a resumed run re-executed everything and the summary
+    # dropped the previous progress. The memory reason no longer holds (the
+    # module is live in this same function), so the filter is back, and never
+    # silent: a missing checkpoint is reported.
+    if options.resume:
+        val ckpt_found = checkpoint_exists()
+        val ckpt = if ckpt_found: checkpoint_load() else: make_empty_checkpoint()
+        print checkpoint_resume_banner(ckpt_found, ckpt)
+        print ""
+        if ckpt_found:
+            ckpt_passed = ckpt.total_passed
+            ckpt_failed = ckpt.total_failed
+            ckpt_skipped = ckpt.total_skipped
+            ckpt_completed = ckpt.completed_files
+            files = checkpoint_skip_completed(files, ckpt)
+            if files.len() == 0:
+                print "Resume: every selected file is already in the checkpoint; nothing left to run."
+                print "Final figures are the checkpoint's: {ckpt_passed} passed, {ckpt_failed} failed, {ckpt_skipped} skipped (nothing executed in this invocation)."
+                checkpoint_delete()
+                return TestRunResult(files: [], total_passed: ckpt_passed, total_failed: ckpt_failed, total_skipped: ckpt_skipped, total_pending: 0, total_timed_out: 0, total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
 
     if files.len() == 0:
         if missing_covers.len() > 0:
@@ -489,7 +500,9 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     var total_duration_ms = 0
     var total_setup_ms = session_setup_ms
     var total_cached = 0
-    var completed_files: [text] = []
+    # Seeded from the checkpoint on --resume so a periodic save mid-resume does
+    # not drop the files the previous run already completed.
+    var completed_files: [text] = ckpt_completed
     var tests_run = 0
     var stopped_early = false
 
@@ -584,9 +597,9 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     if total_cached > 0:
         print "Skipped {total_cached} unchanged test(s) (cached)"
 
-    # MEMORY DEBUG: checkpoint cleanup disabled (GROUP 6)
-    # if options.resume and checkpoint_exists():
-    #     checkpoint_delete()
+    # The resumed run reached its end: the checkpoint it consumed is spent.
+    if options.resume and checkpoint_exists():
+        checkpoint_delete()
 
     val sequential_result = TestRunResult(
         files: results,

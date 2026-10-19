@@ -27,7 +27,8 @@ use app.io.process_ops.{process_run_bounded}
 use app.io.mod.{env_get}
 use app.io.cli_ops.{cli_current_exe_path}
 use std.spec.in_development.{source_is_in_development, in_development_explicit_line}
-use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
+use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES, TestRunOutcome, test_run_outcome_exit_code}
+use app.test_runner_new.client_arg_shape.{client_tag_value, client_select_tagged}
 use std.nogc_sync_mut.test_runner.resource_policy.{test_max_procs_value_valid}
 # Single source of truth for the six-class outcome contract
 # (OK/ERROR/CRASHED/TERMINATED/TIMEOUT/NOT_RUN) frozen in
@@ -1176,11 +1177,19 @@ fn _cov_branch_report_for_file(path: text, dec_total: dict<text, i64>,
     "coverage-branch: {path} {pct}% ({hit}/{total} decisions)"
 
 fn main() -> i64:
-    var run = parse_child_run(clean_args())
+    val args = clean_args()
+    var run = parse_child_run(args)
     if not run.valid:
         print "Simple Test Runner child"
         print "error: {run.error}: {run.path}"
         return 1
+    # --tag applies to the explicit path here too: an untagged file used to run
+    # and PASS under `--tag slow --no-session-daemon`.
+    val tag = client_tag_value(args)
+    if tag != "" and client_select_tagged([run.path], tag).len() == 0:
+        print "No tests selected."
+        print "--tag {tag}: the explicit spec path does not carry the tag"
+        return test_run_outcome_exit_code(TestRunOutcome.EmptySelection)
     if run.list_only:
         print run.path
         return 0

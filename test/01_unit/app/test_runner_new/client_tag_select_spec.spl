@@ -1,0 +1,33 @@
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{file_write, file_remove}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use app.test_runner_new.client_arg_shape.{client_select_tagged}
+use std.test_runner.test_runner_files.{discover_test_files_fast}
+use std.test_runner.test_runner_args.{parse_test_args}
+
+# `--tag` applies to an explicit spec path exactly as it does to a directory
+# walk: a path that does not carry the tag is not selected. Before 2026-10-19
+# `simple test plain_spec.spl --tag slow` ran the untagged file and reported
+# PASS in both lanes.
+
+describe "--tag on explicit spec paths":
+    it "client lane: keeps only the paths that carry the tag; none means empty selection":
+        dir_create_all("tmp")
+        val tagged = "tmp/client_tag_select_tagged_fixture.spl"
+        val plain = "tmp/client_tag_select_plain_fixture.spl"
+        file_write(tagged, "# @slow\ndescribe \"t\":\n")
+        file_write(plain, "describe \"p\":\n")
+        val selected = client_select_tagged([tagged, plain], "slow")
+        expect(selected.len()).to_equal(1)
+        expect(selected[0]).to_equal(tagged)
+        expect(client_select_tagged([plain], "slow").len()).to_equal(0)
+        expect(client_select_tagged([plain], "").len()).to_equal(1)
+        file_remove(tagged)
+        file_remove(plain)
+    it "main lane: an explicit path with a non-matching --tag discovers nothing":
+        dir_create_all("tmp")
+        val p = "tmp/tag_select_plain_spec.spl"
+        file_write(p, "use std.spec.*\ndescribe \"p\":\n    it \"x\":\n        expect(1).to_equal(1)\n")
+        expect(discover_test_files_fast(p, parse_test_args(["--tag", "slow"]), false).len()).to_equal(0)
+        expect(discover_test_files_fast(p, parse_test_args([]), false).len()).to_equal(1)
+        file_remove(p)
