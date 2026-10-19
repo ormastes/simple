@@ -3,6 +3,7 @@
 # Minimal, parser-safe substitution API used by monomorphization.
 
 use compiler.hir.hir_types.*
+use compiler.hir.hir_types.{Effect, EffectKind}
 use compiler.hir.hir_definitions.*
 use compiler.monomorphize.types.ConcreteType
 use compiler.common.diagnostics.span.{Span}
@@ -133,7 +134,7 @@ fn substitute_type(ty: HirType, subst: TypeSubstitution) -> HirType:
             var ps: [HirType] = []
             for p in params:
                 ps = ps.push(substitute_type(p, subst))
-            HirType(kind: HirTypeKind.Function(ps, substitute_type(ret, subst), effects), span: ty.span)
+            HirType(kind: HirTypeKind.Function(ps, substitute_type(ret, subst), substitute_effects(effects, subst)), span: ty.span)
         case Projection(base, assoc_name):
             HirType(kind: HirTypeKind.Projection(substitute_type(base, subst), assoc_name), span: ty.span)
         case Tensor(element, dims, device):
@@ -153,6 +154,26 @@ fn substitute_type(ty: HirType, subst: TypeSubstitution) -> HirType:
         case Never: ty
         case Any: ty
         case Error: ty
+
+
+fn substitute_effects(effects: [Effect], subst: TypeSubstitution) -> [Effect]:
+    """Substitute type-bearing effects without changing order or provenance."""
+    if effects == nil: return effects
+    var out: [Effect] = []
+    for raw in effects:
+        val effect: Effect = raw
+        var rewritten = effect
+        match effect.kind:
+            case EffectKind.Throws(type_):
+                rewritten.kind = EffectKind.Throws(substitute_type(type_, subst))
+            case EffectKind.Pure: ()
+            case EffectKind.IO: ()
+            case EffectKind.Async: ()
+            case EffectKind.Mutates: ()
+            case EffectKind.Allocates: ()
+            case EffectKind.Custom(_): ()
+        out = out.push(rewritten)
+    out
 
 
 fn substitute_type_opt(ty: HirType?, subst: TypeSubstitution) -> HirType?:
@@ -640,7 +661,7 @@ fn substitute_param(param: HirParam, subst: TypeSubstitution) -> HirParam:
 fn substitute_function(func: HirFunction, subst: TypeSubstitution, mangled_name: text) -> HirFunction:
     """Substitute function-level type parameters for a specialized function.
 
-    The specialized function carries concrete parameter, return AND BODY
+    The specialized function carries concrete parameter, return, effect and body
     types plus an EMPTY `type_params`, which is what the
     post-monomorphization sweep uses to tell a specialization from a template
     still awaiting one."""
@@ -656,6 +677,7 @@ fn substitute_function(func: HirFunction, subst: TypeSubstitution, mangled_name:
         new_params = new_params.push(substitute_param(p, subst))
     specialized.params = new_params
     specialized.return_type = substitute_type(func.return_type, subst)
+    specialized.effects = substitute_effects(func.effects, subst)
     specialized.body = substitute_block(func.body, subst)
     specialized
 
@@ -678,7 +700,7 @@ fn typesubstitution_canonical(type_params: [HirTypeParam]) -> TypeSubstitution:
 
 fn canonicalize_template(func: HirFunction) -> HirFunction:
     """Return `func` with every symbol-spelled type-parameter reference in its
-    signature and body rewritten to `TypeParam(name)`. Name, symbol,
+    signature, effects and body rewritten to `TypeParam(name)`. Name, symbol,
     `type_params` and template-ness are unchanged."""
     val subst = typesubstitution_canonical(func.type_params)
     var out = func
@@ -687,5 +709,6 @@ fn canonicalize_template(func: HirFunction) -> HirFunction:
         new_params = new_params.push(substitute_param(p, subst))
     out.params = new_params
     out.return_type = substitute_type(func.return_type, subst)
+    out.effects = substitute_effects(func.effects, subst)
     out.body = substitute_block(func.body, subst)
     out

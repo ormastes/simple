@@ -48,6 +48,7 @@ use std.common.aspect_dynload_lifecycle_v1.{
     AspectDynloadLifecycleHandleV1, AspectDynloadExecutionLeaseV1,
     aspect_dynload_lifecycle_create_v1, aspect_dynload_callback_begin_v1,
     aspect_dynload_lifecycle_snapshot_v1, aspect_dynload_unload_v1,
+    aspect_dynload_lifecycle_reclaim_v1,
     aspect_dynload_lease_complete_v1
 }
 use os.smf.dynsmf_owned_v2.{
@@ -58,7 +59,7 @@ use os.smf.dynsmf_owned_v2.{
     dynsmf_owned_release_query_v3, dynsmf_owned_mapping_observe_v2
 }
 use os.smf.smf_dynlib.{
-    DynSmfReleaseAttemptV3,
+    DynSmfReleaseAttemptV3, DynSmfReleaseAttemptObservationV3,
     _smf_dynlib_release_attempt_for_loader_v3,
     _smf_dynlib_release_for_handle_observe_for_loader_v3,
     _smf_dynlib_ack_release_for_loader_v3
@@ -230,6 +231,13 @@ class AspectFinalUnpinResultV3:
     retryable: bool
     native_attempted: bool
     acknowledged: bool
+
+# Internal owner continuation, deliberately absent from public loader exports.
+# The observation is evidence to correlate, never caller-authored release authority.
+struct _ModuleAspectReleaseDispatchV3:
+    handle: AspectFinalUnpinHandleV3
+    observed: DynSmfReleaseAttemptObservationV3
+    native_attempted: bool
 
 class _ModuleAspectBoundRowV3:
     binding_key: text
@@ -672,6 +680,13 @@ impl ModuleLoader:
         if not admission.acquired:
             return _moduleloader_facet_ref(_moduleloader_aspect_result(
                 false, facet_key, "DYNSMF_V3_GATE", "bound facet gate unavailable"), -1)
+        # Refuse before allocating a lifecycle or acquiring either lower pin.
+        if self.aspect_owner.bound_rows_v3.len() >=
+                MODULE_ASPECT_MAX_BOUND_ROWS_V3:
+            _ = _module_aspect_gate_exit_v1(admission)
+            return _moduleloader_facet_ref(_moduleloader_aspect_result(
+                false, facet_key, "DYNSMF_V3_CAPACITY",
+                "bound facet owner capacity exhausted"), -1)
         # Acquire the existing aspect pin first. If dynSMF admission then
         # refuses, release that pin before returning; no unattached query is
         # ever leaked by this path.
@@ -709,15 +724,6 @@ impl ModuleLoader:
         val binding_key = self.aspect_owner.identity.to_string() + "\0" +
             queried.query.opaque_handle.to_string() + "\0" + facet_key + "\0" +
             reference.load.generation.to_string()
-        if self.aspect_owner.bound_rows_v3.len() >=
-                MODULE_ASPECT_MAX_BOUND_ROWS_V3:
-            _ = dynsmf_owned_release_query_v3(queried.query)
-            _ = apk_facet_unpin_v1(reference.owner_handle, facet_key)
-            reference.active = false
-            _ = _module_aspect_gate_exit_v1(admission)
-            return _moduleloader_facet_ref(_moduleloader_aspect_result(
-                false, facet_key, "DYNSMF_V3_CAPACITY",
-                "bound facet owner capacity exhausted"), -1)
         self.aspect_owner.bound_rows_v3 = self.aspect_owner.bound_rows_v3.push(
             _ModuleAspectBoundRowV3(binding_key: binding_key,
                 query: queried.query,
@@ -760,6 +766,7 @@ impl ModuleLoader:
         while index < self.aspect_owner.bound_rows_v3.len():
             val row = self.aspect_owner.bound_rows_v3[index]
             if (row.binding_key == reference.bound_key_v3 and row.active and
+                    not row.dynsmf_released and not row.aspect_released and
                     row.facet_key == reference.load.facet_key and
                     row.generation == reference.load.generation):
                 bound_index = index
@@ -850,6 +857,16 @@ impl ModuleLoader:
                 _ = _module_aspect_gate_exit_v1(admission)
                 return false
             mutable_bound.aspect_released = true
+            self.aspect_owner.bound_rows_v3[bound_index] = mutable_bound
+        # Both lower pins are consumed. Keep their progress on any cleanup
+        # refusal so retry cannot drain either pin twice.
+        if lifecycle.unwrap().state != ASPECT_DYNLOAD_RETIRED_V1:
+            if aspect_dynload_unload_v1(mutable_bound.lifecycle).is_err():
+                _ = _module_aspect_gate_exit_v1(admission)
+                return false
+        if not aspect_dynload_lifecycle_reclaim_v1(mutable_bound.lifecycle):
+            _ = _module_aspect_gate_exit_v1(admission)
+            return false
         mutable_bound.active = false
         self.aspect_owner.bound_rows_v3[bound_index] = mutable_bound
         reference.active = false
@@ -943,44 +960,43 @@ impl ModuleLoader:
             owner_identity: self.aspect_owner.identity,
             opaque_handle: handle_id))
 
-    me _release_final_unpin_v3(handle: AspectFinalUnpinHandleV3,
-            explicit_retry: bool) -> AspectFinalUnpinResultV3:
+    me _dispatch_final_unpin_v3(handle: AspectFinalUnpinHandleV3,
+            explicit_retry: bool) -> Result<_ModuleAspectReleaseDispatchV3, AspectFinalUnpinResultV3>:
         if handle.owner_identity != self.aspect_owner.identity:
-            return AspectFinalUnpinResultV3(ok: false,
+            return Err(AspectFinalUnpinResultV3(ok: false,
                 reason: "V3 final unpin handle owner mismatch",
                 handle: handle, released: false, retryable: false,
-                native_attempted: false, acknowledged: false)
+                native_attempted: false, acknowledged: false))
         if handle.opaque_handle <= 0 or
                 handle.opaque_handle > self.aspect_owner.final_unpin_rows_v3.len():
-            return AspectFinalUnpinResultV3(ok: false,
+            return Err(AspectFinalUnpinResultV3(ok: false,
                 reason: "V3 final unpin handle unknown",
                 handle: handle, released: false, retryable: false,
-                native_attempted: false, acknowledged: false)
+                native_attempted: false, acknowledged: false))
         val admission = aspect_lifecycle_gate_enter_v1(_module_aspect_gate_key_v1(
             self.aspect_owner.identity, "v3-A-B-C-release", handle.opaque_handle.to_string()))
         if not admission.acquired:
-            return AspectFinalUnpinResultV3(ok: false, reason: "V3 final unpin gate unavailable",
+            return Err(AspectFinalUnpinResultV3(ok: false, reason: "V3 final unpin gate unavailable",
                 handle: handle, released: false, retryable: true,
-                native_attempted: false, acknowledged: false)
+                native_attempted: false, acknowledged: false))
         var row = self.aspect_owner.final_unpin_rows_v3[handle.opaque_handle - 1]
-        var logical_gate = admission
         if row.handle_id != handle.opaque_handle:
             _ = _module_aspect_gate_exit_v1(admission)
-            return AspectFinalUnpinResultV3(ok: false,
+            return Err(AspectFinalUnpinResultV3(ok: false,
                 reason: "V3 final unpin private row mismatch",
                 handle: handle, released: false, retryable: false,
-                native_attempted: false, acknowledged: false)
+                native_attempted: false, acknowledged: false))
         if row.released:
             _ = _module_aspect_gate_exit_v1(admission)
-            return AspectFinalUnpinResultV3(ok: true, reason: "V3 final unpin already released",
+            return Err(AspectFinalUnpinResultV3(ok: true, reason: "V3 final unpin already released",
                 handle: handle, released: true, retryable: false,
-                native_attempted: false, acknowledged: row.acknowledged)
+                native_attempted: false, acknowledged: row.acknowledged))
         if explicit_retry and not row.retryable and not row.in_flight and
                 not row.physical_complete:
             _ = _module_aspect_gate_exit_v1(admission)
-            return AspectFinalUnpinResultV3(ok: false, reason: "V3 retry is not ready",
+            return Err(AspectFinalUnpinResultV3(ok: false, reason: "V3 retry is not ready",
                 handle: handle, released: false, retryable: false,
-                native_attempted: false, acknowledged: false)
+                native_attempted: false, acknowledged: false))
 
         # Recover an owner-retained completion when the elected caller could
         # not reacquire the lifecycle gate after native dispatch.
@@ -989,90 +1005,141 @@ impl ModuleLoader:
                 row.native_handle)
             if observed.attempt.opaque_attempt <= 0:
                 _ = _module_aspect_gate_exit_v1(admission)
-                return AspectFinalUnpinResultV3(ok: false,
+                return Err(AspectFinalUnpinResultV3(ok: false,
                     reason: "V3 physical release remains in flight",
                     handle: handle, released: false, retryable: true,
-                    native_attempted: false, acknowledged: false)
+                    native_attempted: false, acknowledged: false))
             row.attempt = observed.attempt
             row.in_flight = false
             row.physical_complete = observed.physical_complete
             row.retryable = observed.retryable
             self.aspect_owner.final_unpin_rows_v3[handle.opaque_handle - 1] = row
 
-        var native_attempted = false
         if not row.physical_complete:
             val lifecycle = aspect_dynload_lifecycle_snapshot_v1(row.lifecycle)
             if lifecycle.is_err() or lifecycle.unwrap().state !=
                     ASPECT_DYNLOAD_RETIRED_V1 or
                     lifecycle.unwrap().outstanding_count != 0:
                 _ = _module_aspect_gate_exit_v1(admission)
-                return AspectFinalUnpinResultV3(ok: false,
+                return Err(AspectFinalUnpinResultV3(ok: false,
                     reason: "V3 execution lifecycle remains live",
                     handle: handle, released: false, retryable: false,
-                    native_attempted: false, acknowledged: false)
+                    native_attempted: false, acknowledged: false))
             if row.retryable and not explicit_retry:
                 _ = _module_aspect_gate_exit_v1(admission)
-                return AspectFinalUnpinResultV3(ok: false,
+                return Err(AspectFinalUnpinResultV3(ok: false,
                     reason: "V3 physical failure requires explicit retry",
                     handle: handle, released: false, retryable: true,
-                    native_attempted: false, acknowledged: false)
+                    native_attempted: false, acknowledged: false))
             if not row.release_started:
                 val started = apk_facet_mark_final_unpin_release_started_v2(
                     row.facet_lease)
                 if not started.ok or not started.release_started:
                     _ = _module_aspect_gate_exit_v1(admission)
-                    return AspectFinalUnpinResultV3(ok: false,
+                    return Err(AspectFinalUnpinResultV3(ok: false,
                         reason: started.error_code,
                         handle: handle, released: false, retryable: false,
-                        native_attempted: false, acknowledged: false)
+                        native_attempted: false, acknowledged: false))
                 row.release_started = true
             row.in_flight = true
             row.retryable = false
             self.aspect_owner.final_unpin_rows_v3[handle.opaque_handle - 1] = row
             if not _module_aspect_gate_exit_v1(admission):
-                return AspectFinalUnpinResultV3(ok: false,
+                return Err(AspectFinalUnpinResultV3(ok: false,
                     reason: "V3 gate exit failed",
                     handle: handle, released: false, retryable: true,
-                    native_attempted: false, acknowledged: false)
+                    native_attempted: false, acknowledged: false))
 
             # Native dispatch is serialized by the physical owner and occurs
             # only after the lifecycle gate is released.
             val observed = _smf_dynlib_release_attempt_for_loader_v3(
                 row.native_handle)
-            native_attempted = true
-            val completion_gate = aspect_lifecycle_gate_enter_v1(
-                _module_aspect_gate_key_v1(self.aspect_owner.identity,
-                    "v3-A-B-C-complete", handle.opaque_handle.to_string()))
-            if not completion_gate.acquired:
-                return AspectFinalUnpinResultV3(ok: false,
-                    reason: "V3 completion gate unavailable",
-                    handle: handle, released: false, retryable: true,
-                    native_attempted: true, acknowledged: false)
-            logical_gate = completion_gate
-            row = self.aspect_owner.final_unpin_rows_v3[
-                handle.opaque_handle - 1]
-            if observed.attempt.opaque_attempt <= 0:
-                row.in_flight = false
-                row.retryable = observed.retryable
-                self.aspect_owner.final_unpin_rows_v3[
-                    handle.opaque_handle - 1] = row
-                _ = _module_aspect_gate_exit_v1(logical_gate)
-                return AspectFinalUnpinResultV3(ok: false,
-                    reason: observed.reason, handle: handle, released: false,
-                    retryable: observed.retryable, native_attempted: true,
-                    acknowledged: false)
-            row.attempt = observed.attempt
+            return Ok(_ModuleAspectReleaseDispatchV3(
+                handle: handle, observed: observed, native_attempted: true))
+        # A recovered physical completion follows the same resume path. Drop
+        # ownership before returning; resume must reload the canonical row.
+        val observed = _smf_dynlib_release_for_handle_observe_for_loader_v3(
+            row.native_handle)
+        if not _module_aspect_gate_exit_v1(admission):
+            return Err(AspectFinalUnpinResultV3(ok: false,
+                reason: "V3 recovered completion gate exit failed",
+                handle: handle, released: false, retryable: true,
+                native_attempted: false, acknowledged: false))
+        Ok(_ModuleAspectReleaseDispatchV3(
+            handle: handle, observed: observed, native_attempted: false))
+
+    me _resume_final_unpin_v3(dispatch: _ModuleAspectReleaseDispatchV3
+        ) -> AspectFinalUnpinResultV3:
+        val handle = dispatch.handle
+        val native_attempted = dispatch.native_attempted
+        if (handle.owner_identity != self.aspect_owner.identity or
+                handle.opaque_handle <= 0 or
+                handle.opaque_handle > self.aspect_owner.final_unpin_rows_v3.len()):
+            return AspectFinalUnpinResultV3(ok: false,
+                reason: "V3 completion handle owner or identity mismatch",
+                handle: handle, released: false, retryable: false,
+                native_attempted: native_attempted, acknowledged: false)
+        val logical_gate = aspect_lifecycle_gate_enter_v1(
+            _module_aspect_gate_key_v1(self.aspect_owner.identity,
+                "v3-A-B-C-complete", handle.opaque_handle.to_string()))
+        if not logical_gate.acquired:
+            return AspectFinalUnpinResultV3(ok: false,
+                reason: "V3 completion gate unavailable",
+                handle: handle, released: false, retryable: true,
+                native_attempted: native_attempted, acknowledged: false)
+        var row = self.aspect_owner.final_unpin_rows_v3[handle.opaque_handle - 1]
+        # Another caller may have recovered the native completion and reclaimed
+        # this lifecycle while dispatch was outside the gate. Terminal state
+        # dominates the earlier observation; never reclaim its slot twice.
+        if row.released:
+            _ = _module_aspect_gate_exit_v1(logical_gate)
+            return AspectFinalUnpinResultV3(ok: true,
+                reason: "V3 final unpin already released",
+                handle: handle, released: true, retryable: false,
+                native_attempted: native_attempted, acknowledged: row.acknowledged)
+        if row.handle_id != handle.opaque_handle or not row.release_started:
+            _ = _module_aspect_gate_exit_v1(logical_gate)
+            return AspectFinalUnpinResultV3(ok: false,
+                reason: "V3 completion has no prepared release authority",
+                handle: handle, released: false, retryable: false,
+                native_attempted: native_attempted, acknowledged: false)
+        # Re-read the physical owner's retained receipt. Caller-provided flags
+        # cannot authorize physical completion or logical owner commits.
+        val observed = _smf_dynlib_release_for_handle_observe_for_loader_v3(
+            row.native_handle)
+        if (observed.attempt.opaque_attempt <= 0 and
+                dispatch.observed.attempt.opaque_attempt <= 0 and
+                dispatch.observed.handle_id == row.native_handle):
+            # Preserve the original negative native-attempt behavior. These
+            # refusal fields cannot authorize a commit or lifecycle reclaim.
             row.in_flight = false
-            row.physical_complete = observed.physical_complete
-            row.retryable = observed.retryable
-            self.aspect_owner.final_unpin_rows_v3[
-                handle.opaque_handle - 1] = row
-            if not row.physical_complete:
-                _ = _module_aspect_gate_exit_v1(logical_gate)
-                return AspectFinalUnpinResultV3(ok: false,
-                    reason: observed.reason, handle: handle, released: false,
-                    retryable: row.retryable, native_attempted: true,
-                    acknowledged: false)
+            row.retryable = dispatch.observed.retryable
+            self.aspect_owner.final_unpin_rows_v3[handle.opaque_handle - 1] = row
+            _ = _module_aspect_gate_exit_v1(logical_gate)
+            return AspectFinalUnpinResultV3(ok: false,
+                reason: dispatch.observed.reason, handle: handle, released: false,
+                retryable: dispatch.observed.retryable,
+                native_attempted: native_attempted, acknowledged: false)
+        if (observed.attempt.opaque_attempt <= 0 or
+                observed.handle_id != row.native_handle or
+                dispatch.observed.handle_id != row.native_handle or
+                dispatch.observed.attempt.opaque_attempt != observed.attempt.opaque_attempt):
+            _ = _module_aspect_gate_exit_v1(logical_gate)
+            return AspectFinalUnpinResultV3(ok: false,
+                reason: "V3 completion receipt is unavailable or mismatched",
+                handle: handle, released: false, retryable: true,
+                native_attempted: native_attempted, acknowledged: false)
+        row.attempt = observed.attempt
+        row.in_flight = false
+        row.physical_complete = observed.physical_complete
+        row.retryable = observed.retryable
+        self.aspect_owner.final_unpin_rows_v3[handle.opaque_handle - 1] = row
+        if not row.physical_complete:
+            _ = _module_aspect_gate_exit_v1(logical_gate)
+            return AspectFinalUnpinResultV3(ok: false,
+                reason: observed.reason, handle: handle, released: false,
+                retryable: observed.retryable,
+                native_attempted: native_attempted, acknowledged: false)
         if not row.dynsmf_committed:
             val committed = _dynsmf_owned_commit_close_for_loader_v3(
                 row.close_reservation, row.attempt)
@@ -1099,7 +1166,13 @@ impl ModuleLoader:
                     native_attempted: native_attempted, acknowledged: false)
             row.aspect_committed = true
         row.acknowledged = _smf_dynlib_ack_release_for_loader_v3(row.attempt)
-        row.released = row.acknowledged
+        # Reuse is allowed only after physical and logical completion plus
+        # receipt acknowledgment. Terminal replay returns above without ever
+        # reclaiming this handle again after its slot has been reused.
+        var lifecycle_reclaimed = false
+        if row.acknowledged:
+            lifecycle_reclaimed = aspect_dynload_lifecycle_reclaim_v1(row.lifecycle)
+        row.released = row.acknowledged and lifecycle_reclaimed
         row.retryable = not row.released
         self.aspect_owner.final_unpin_rows_v3[
             handle.opaque_handle - 1] = row
@@ -1107,12 +1180,20 @@ impl ModuleLoader:
         AspectFinalUnpinResultV3(ok: row.released,
             reason: if row.released:
                 "V3 final unpin released"
+            elif row.acknowledged:
+                "V3 lifecycle reclaim refused"
             else:
                 "V3 native ack refused",
             handle: handle, released: row.released,
             retryable: row.retryable,
             native_attempted: native_attempted,
             acknowledged: row.acknowledged)
+
+    me _release_final_unpin_v3(handle: AspectFinalUnpinHandleV3,
+            explicit_retry: bool) -> AspectFinalUnpinResultV3:
+        match self._dispatch_final_unpin_v3(handle, explicit_retry):
+            case Err(result): result
+            case Ok(dispatch): self._resume_final_unpin_v3(dispatch)
 
     me release_final_unpin_v3(handle: AspectFinalUnpinHandleV3
         ) -> AspectFinalUnpinResultV3:

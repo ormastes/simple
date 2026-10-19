@@ -1,0 +1,124 @@
+# @req REQ-SSPEC-COMPILER
+# Approved generic formal hardening plan G2. AUTHORED / execution UNRUN.
+# Bounded production/model correspondence, not universal HIR refinement.
+use std.spec
+use std.spec.step
+use compiler.common.diagnostics.span.Span
+use compiler.hir.hir_types.*
+use compiler.monomorphize.type_subst.{TypeSubstitution, substitute_type}
+use compiler.mono.model.generic_subst_model.*
+use compiler.mono.model.generic_effect_projection.*
+
+fn effect_hir(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn effect_annotation(kind: EffectKind) -> Effect:
+    Effect(kind: kind, span: Span.empty())
+
+fn effect_term(type_: HirType) -> MType:
+    val projected = gep_type(type_)
+    expect(projected.is_ok()).to_be(true)
+    projected.unwrap()
+
+fn effect_expected(input: HirType, replacement: HirType) -> MType:
+    val model_substitution = ms_bind(ms_empty(), "T", effect_term(replacement))
+    ms_apply(model_substitution, effect_term(input))
+
+fn effect_matches(expected: MType, actual: HirType) -> bool:
+    match gep_type(actual):
+        case Ok(term): mt_struct_eq(expected, term)
+        case Err(_): false
+
+describe "G2 effect-aware production correspondence":
+    it "commutes for all parameters and a nested thrown function":
+        step("Construct the represented production fragment")
+        val t = effect_hir(HirTypeKind.TypeParam("T", []))
+        val integer = effect_hir(HirTypeKind.Int(64, true))
+        val boolean = effect_hir(HirTypeKind.Bool)
+        val nested = effect_hir(HirTypeKind.Function([t, boolean], t,
+            [effect_annotation(EffectKind.Throws(t))]))
+        val input = effect_hir(HirTypeKind.Function([boolean, t, nested], t,
+            [effect_annotation(EffectKind.IO), effect_annotation(EffectKind.Throws(nested))]))
+        val before = effect_term(input)
+        step("Compare actual substitution with structural model application")
+        val actual = substitute_type(input, TypeSubstitution(mapping: {"T": integer}, by_symbol: {}))
+        expect(effect_matches(effect_expected(input, integer), actual)).to_be(true)
+        expect(mt_struct_eq(before, effect_term(input))).to_be(true)
+        expect(effect_matches(effect_expected(input, integer), input)).to_be(false)
+
+    it "rejects the historical behavior that leaves Throws generic":
+        step("Retain the old output as an explicit false oracle")
+        val t = effect_hir(HirTypeKind.TypeParam("T", []))
+        val integer = effect_hir(HirTypeKind.Int(64, true))
+        val annotations = [effect_annotation(EffectKind.Throws(t))]
+        val input = effect_hir(HirTypeKind.Function([t, t], t, annotations))
+        val stale = effect_hir(HirTypeKind.Function([integer, integer], integer, annotations))
+        val actual = substitute_type(input, TypeSubstitution(mapping: {"T": integer}, by_symbol: {}))
+        val expected = effect_expected(input, integer)
+        expect(effect_matches(expected, actual)).to_be(true)
+        expect(effect_matches(expected, stale)).to_be(false)
+
+    it "preserves zero arity and distinguishes a missing later parameter":
+        val unit = effect_hir(HirTypeKind.Unit)
+        val boolean = effect_hir(HirTypeKind.Bool)
+        val empty = effect_hir(HirTypeKind.Function([], unit, []))
+        val many = effect_hir(HirTypeKind.Function([unit, boolean], unit, []))
+        val truncated = effect_hir(HirTypeKind.Function([unit], unit, []))
+        val actual = substitute_type(empty, TypeSubstitution(mapping: {}, by_symbol: {}))
+        expect(effect_matches(effect_term(empty), actual)).to_be(true)
+        expect(mt_struct_eq(effect_term(empty), effect_term(truncated))).to_be(false)
+        expect(mt_struct_eq(effect_term(many), effect_term(truncated))).to_be(false)
+
+    it "distinguishes effect ordering and custom names from built-in kinds":
+        val unit = effect_hir(HirTypeKind.Unit)
+        val io = effect_annotation(EffectKind.IO)
+        val throwing = effect_annotation(EffectKind.Throws(unit))
+        val ordered = effect_hir(HirTypeKind.Function([], unit, [io, throwing]))
+        val reversed = effect_hir(HirTypeKind.Function([], unit, [throwing, io]))
+        val custom = effect_hir(HirTypeKind.Function([], unit,
+            [effect_annotation(EffectKind.Custom("Effect.IO"))]))
+        val builtin = effect_hir(HirTypeKind.Function([], unit, [io]))
+        expect(mt_struct_eq(effect_term(ordered), effect_term(reversed))).to_be(false)
+        expect(mt_struct_eq(effect_term(custom), effect_term(builtin))).to_be(false)
+
+    it "preserves scalar widths signedness and function return types":
+        val signed32 = effect_hir(HirTypeKind.Int(32, true))
+        val signed64 = effect_hir(HirTypeKind.Int(64, true))
+        val unsigned32 = effect_hir(HirTypeKind.Int(32, false))
+        expect(mt_struct_eq(effect_term(signed32), effect_term(signed64))).to_be(false)
+        expect(mt_struct_eq(effect_term(signed32), effect_term(unsigned32))).to_be(false)
+        val one = effect_hir(HirTypeKind.Function([], signed32, []))
+        val other = effect_hir(HirTypeKind.Function([], unsigned32, []))
+        expect(mt_struct_eq(effect_term(one), effect_term(other))).to_be(false)
+
+    it "commutes while leaving an unbound variable and literal custom name intact":
+        val t = effect_hir(HirTypeKind.TypeParam("T", []))
+        val outer = effect_hir(HirTypeKind.TypeParam("Outer", []))
+        val integer = effect_hir(HirTypeKind.Int(64, true))
+        val input = effect_hir(HirTypeKind.Function([outer, t], outer,
+            [effect_annotation(EffectKind.Custom("T")), effect_annotation(EffectKind.Throws(outer))]))
+        val actual = substitute_type(input, TypeSubstitution(mapping: {"T": integer}, by_symbol: {}))
+        val expected = effect_expected(input, integer)
+        expect(effect_matches(expected, actual)).to_be(true)
+        expect(mt_is_closed(expected)).to_be(false)
+
+    it "refuses unowned nominal symbols bounds and unresolved HIR":
+        val integer = effect_hir(HirTypeKind.Int(64, true))
+        val unsupported = [effect_hir(HirTypeKind.Named(SymbolId(id: 1), [])),
+            effect_hir(HirTypeKind.TypeParam("T", [integer])),
+            effect_hir(HirTypeKind.Any), effect_hir(HirTypeKind.Error),
+            effect_hir(HirTypeKind.Array(integer, 3))]
+        for input in unsupported:
+            expect(gep_type(input).is_ok()).to_be(false)
+            expect(effect_matches(mt_unknown(), input)).to_be(false)
+
+    it "refuses unsupported thrown payloads and absent fields instead of erasing them":
+        val unit = effect_hir(HirTypeKind.Unit)
+        val unknown = effect_hir(HirTypeKind.Any)
+        val throwing = effect_hir(HirTypeKind.Function([], unit,
+            [effect_annotation(EffectKind.Throws(unknown))]))
+        expect(gep_type(throwing).is_ok()).to_be(false)
+        expect(gep_type(effect_hir(HirTypeKind.Function(nil, unit, []))).is_ok()).to_be(false)
+        expect(gep_type(effect_hir(HirTypeKind.Function([], unit, nil))).is_ok()).to_be(false)
+        expect(gep_type(effect_hir(HirTypeKind.Function([], nil, []))).is_ok()).to_be(false)
+        expect(gep_type(nil).is_ok()).to_be(false)
