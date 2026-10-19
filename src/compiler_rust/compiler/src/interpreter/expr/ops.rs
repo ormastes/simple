@@ -249,7 +249,6 @@ fn try_dunder_unaryop(
     }
     None
 }
-use super::super::coverage_helpers::record_condition_coverage;
 
 /// Ordering for comparisons where at least one side is an UNSIGNED integer
 /// (`Value::UInt`), returning `None` when neither side is unsigned so the
@@ -351,13 +350,8 @@ pub(super) fn eval_op_expr(
                     let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
                     let left_result = is_condition_present(left, &left_val);
 
-                    // COVERAGE: Record left condition of &&~
-                    record_condition_coverage("<source>", 0, 0, 0, left_result);
-
                     if !left_result {
                         // Short-circuit: left is falsy, don't evaluate right
-                        // COVERAGE: Record that right side wasn't evaluated (false for completeness)
-                        record_condition_coverage("<source>", 0, 0, 1, false);
                         return Ok(Some(Value::Bool(false)));
                     }
                     // Left is truthy, await right and return logical AND
@@ -365,22 +359,14 @@ pub(super) fn eval_op_expr(
                     let awaited_right = await_value(right_val)?;
                     let right_result = is_condition_present(right, &awaited_right);
 
-                    // COVERAGE: Record right condition of &&~
-                    record_condition_coverage("<source>", 0, 0, 1, right_result);
-
                     return Ok(Some(Value::Bool(right_result)));
                 }
                 BinOp::OrSuspend => {
                     let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
                     let left_result = is_condition_present(left, &left_val);
 
-                    // COVERAGE: Record left condition of ||~
-                    record_condition_coverage("<source>", 0, 1, 0, left_result);
-
                     if left_result {
                         // Short-circuit: left is truthy, don't evaluate right
-                        // COVERAGE: Record that right side wasn't evaluated (true for completeness)
-                        record_condition_coverage("<source>", 0, 1, 1, true);
                         return Ok(Some(Value::Bool(true)));
                     }
                     // Left is falsy, await right and return its truthiness
@@ -388,10 +374,20 @@ pub(super) fn eval_op_expr(
                     let awaited_right = await_value(right_val)?;
                     let right_result = is_condition_present(right, &awaited_right);
 
-                    // COVERAGE: Record right condition of ||~
-                    record_condition_coverage("<source>", 0, 1, 1, right_result);
-
                     return Ok(Some(Value::Bool(right_result)));
+                }
+                BinOp::And | BinOp::Or if crate::interpreter::is_coverage_enabled() => {
+                    // A standalone `and`/`or` is its own decision; record its
+                    // operands as conditions. Same short-circuit semantics.
+                    return crate::interpreter::eval_and_or_decision(
+                        expr,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )
+                    .map(Some);
                 }
                 BinOp::And => {
                     let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
@@ -1240,20 +1236,12 @@ pub(super) fn eval_op_expr(
                     let right_result = right_val.truthy();
                     let combined = left_result && right_result;
 
-                    // COVERAGE: Record condition coverage for && operator
-                    record_condition_coverage("<source>", 0, 0, 0, left_result);
-                    record_condition_coverage("<source>", 0, 0, 1, right_result);
-
                     Ok(Value::Bool(combined))
                 }
                 BinOp::Or | BinOp::OrSuspend => {
                     let left_result = left_val.truthy();
                     let right_result = right_val.truthy();
                     let combined = left_result || right_result;
-
-                    // COVERAGE: Record condition coverage for || operator
-                    record_condition_coverage("<source>", 0, 1, 0, left_result);
-                    record_condition_coverage("<source>", 0, 1, 1, right_result);
 
                     Ok(Value::Bool(combined))
                 }

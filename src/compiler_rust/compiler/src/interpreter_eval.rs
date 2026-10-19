@@ -463,6 +463,11 @@ impl ModuleItems<'_> {
 
 fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileError> {
     let items = module_items.as_slice();
+    if crate::interpreter::is_coverage_enabled() {
+        // Coverage denominator: every decision/condition site of the entry
+        // module (and of every import flattened into it), visited or not.
+        crate::interpreter::register_module_sites(items, Some("<entry>"));
+    }
     if std::env::var_os("SIMPLE_TRY_PROBE").is_some() {
         let dump = format!("{:?}", items);
         eprintln!(
