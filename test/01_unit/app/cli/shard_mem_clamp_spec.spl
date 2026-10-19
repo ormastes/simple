@@ -1,5 +1,6 @@
 use std.spec
-use app.cli.shard_mem_clamp.{shard_mem_available_kb, shard_mem_available_kb_from_field, shard_threads_cap_for, shard_threads_tree_cap_for, shard_worker_budget_kb, shard_host_threads_cap, shard_host_worker_budget_kb, shard_host_budget_floor_kb}
+use app.cli.shard_mem_clamp.{shard_mem_available_kb, shard_mem_available_kb_from_field, shard_threads_cap_for, shard_threads_tree_cap_for, shard_worker_budget_kb, shard_host_threads_cap, shard_host_worker_budget_kb, shard_host_budget_floor_kb, shard_cgroup_v2_path_from_proc, shard_cgroup_memory_max_paths, shard_cgroup_memory_max_kb_from_fields, shard_cgroup_memory_max_kb, shard_tree_budget_kb_for, shard_threads_mem_cap}
+use app.io.env_ops.{env_get}
 
 # Mechanism pin for the MemAvailable-derived shard concurrency clamp.
 # Pre-fix the clamp did not exist: the thread count came from host_cpus/2 alone,
@@ -93,3 +94,64 @@ describe "shard memory clamp":
 
     it "takes the per-phase budget default when no env override is set":
         expect(shard_worker_budget_kb("SIMPLE_SHARD_BUDGET_UNSET_XYZ", 1650000)).to_equal(1650000)
+
+    # cgroup v2 memory.max (systemd-run -p MemoryMax=, container limits) is an
+    # enforced tree cap that no wrapper exports as SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB.
+    # Sizing fanout from host MemAvailable inside such a cgroup over-admits
+    # workers and the whole tree is OOM-killed (bug
+    # shard_mem_clamp_ignores_enclosing_cgroup_memory_max_2026-10-19).
+    it "finds the cgroup v2 path of this process and ignores v1-only tables":
+        expect(shard_cgroup_v2_path_from_proc("0::/user.slice/user-1000.slice/run-1.scope\n")).to_equal("/user.slice/user-1000.slice/run-1.scope")
+        expect(shard_cgroup_v2_path_from_proc("12:memory:/docker/abc\n11:cpu:/docker/abc\n")).to_equal("")
+        expect(shard_cgroup_v2_path_from_proc("")).to_equal("")
+        expect(shard_cgroup_v2_path_from_proc("0::/")).to_equal("/")
+
+    it "walks memory.max from the leaf cgroup up to the root":
+        expect(shard_cgroup_memory_max_paths("/a/b.scope")).to_equal([
+            "/sys/fs/cgroup/a/b.scope/memory.max",
+            "/sys/fs/cgroup/a/memory.max",
+            "/sys/fs/cgroup/memory.max"])
+        expect(shard_cgroup_memory_max_paths("/")).to_equal(["/sys/fs/cgroup/memory.max"])
+        expect(shard_cgroup_memory_max_paths("")).to_equal([])
+
+    it "takes the smallest numeric memory.max on the chain in kB and treats max as unlimited":
+        # systemd-run -p MemoryMax=24G on the leaf, parents unlimited: 24 GiB.
+        expect(shard_cgroup_memory_max_kb_from_fields(["25769803776", "max", "max"])).to_equal(25165824)
+        # The tightest ancestor wins, not the leaf.
+        expect(shard_cgroup_memory_max_kb_from_fields(["max", "8589934592", "25769803776"])).to_equal(8388608)
+        expect(shard_cgroup_memory_max_kb_from_fields(["max", "max"])).to_equal(0)
+        expect(shard_cgroup_memory_max_kb_from_fields([])).to_equal(0)
+        # Junk and unreadable levels are ignored, never read as a bound of 0.
+        expect(shard_cgroup_memory_max_kb_from_fields(["", "junk", "-5", "1048576"])).to_equal(1024)
+        expect(shard_cgroup_memory_max_kb_from_fields(["9223372036854775807"])).to_equal(9007199254740991)
+
+    it "reads the live cgroup chain without failing on hosts that have none":
+        expect(shard_cgroup_memory_max_kb() >= 0).to_be_true()
+
+    # Live pin, opt-in from an enforcing wrapper, e.g.
+    #   systemd-run --user --scope -p MemoryMax=8G -p MemorySwapMax=0 \
+    #     env SIMPLE_SPEC_EXPECT_CGROUP_MEMORY_MAX_KB=8388608 \
+    #         SIMPLE_SPEC_EXPECT_CGROUP_THREADS=1 bin/simple test <this spec>
+    # 0.6 * 8 GiB / 3 GB = 1 HIR worker for a request of 8.
+    it "sizes HIR fanout from the enclosing cgroup cap when one is enforced":
+        val expected_kb = (env_get("SIMPLE_SPEC_EXPECT_CGROUP_MEMORY_MAX_KB") ?? "").to_i64() ?? 0
+        if expected_kb > 0:
+            expect(shard_cgroup_memory_max_kb()).to_equal(expected_kb)
+            val expected_threads = (env_get("SIMPLE_SPEC_EXPECT_CGROUP_THREADS") ?? "").to_i64() ?? 0
+            if expected_threads > 0:
+                expect(shard_threads_mem_cap(8, 3000000)).to_equal(expected_threads)
+        else:
+            expect(expected_kb).to_equal(0)
+
+    it "lets an enclosing cgroup cap only tighten the declared tree budget":
+        # No declared budget: the cgroup cap is the tree budget.
+        expect(shard_tree_budget_kb_for(0, 25165824)).to_equal(25165824)
+        # Declared budget inside a smaller cgroup: the cgroup wins.
+        expect(shard_tree_budget_kb_for(45088768, 25165824)).to_equal(25165824)
+        # Declared budget below the cgroup cap stays binding.
+        expect(shard_tree_budget_kb_for(5859375, 25165824)).to_equal(5859375)
+        # No cgroup cap: unchanged, including "undeclared".
+        expect(shard_tree_budget_kb_for(5859375, 0)).to_equal(5859375)
+        expect(shard_tree_budget_kb_for(0, 0)).to_equal(0)
+        # 24 GiB cgroup, 3 GB HIR workers: 0.6 * 24 GiB / 3 GB = 5, not 8.
+        expect(shard_threads_tree_cap_for(8, 3000000, 108000000, shard_tree_budget_kb_for(0, 25165824), true)).to_equal(5)
