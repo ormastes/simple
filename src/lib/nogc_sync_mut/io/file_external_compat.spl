@@ -7,6 +7,7 @@ use std.common.encoding.external_text.{ExternalText, ExternalChar, ExternalForma
 use std.nogc_sync_mut.io.external_text_io.{TextIoError, io_external_text, io_external_from_internal, io_external_bytes, io_internal_text}
 use std.nogc_sync_mut.io_runtime.{file_read_bytes_result, file_write_bytes}
 use std.nogc_sync_mut.fs.host_path.{host_path_native}
+use std.nogc_sync_mut.io.file_bytes.{file_atomic_write_raw, file_create_excl_raw}
 
 pub fn file_read_external_text(path: text, format: ExternalFormat) -> Result<ExternalText, TextIoError>:
     # Validate the declaration before consuming I/O. Payload decoding remains
@@ -41,8 +42,7 @@ fn file_atomic_write_external_text(path: text, value: ExternalText) -> Result<()
         return Err(TextIoError.Unsupported("atomic file provider admits UTF-8 output only"))
     val utf8_payload = io_external_text(io_external_bytes(value)?, utf8_format())?
     val payload = io_internal_text(utf8_payload)?
-    val written = unsafe(capabilities: [ffi]):
-        rt_file_atomic_write(host_path_native(path), payload)
+    val written = file_atomic_write_raw(host_path_native(path), payload)
     if written: Ok(()) else: Err(TextIoError.Io("atomic file write failed: {path}"))
 
 pub fn file_atomic_write_encoded_text(path: text, content: text, format: ExternalFormat) -> Result<(), TextIoError>:
@@ -55,20 +55,13 @@ fn file_create_external_text_exclusive(path: text, value: ExternalText) -> Resul
         return Err(TextIoError.Unsupported("exclusive file provider admits UTF-8 output only"))
     val utf8_payload = io_external_text(io_external_bytes(value)?, utf8_format())?
     val payload = io_internal_text(utf8_payload)?
-    val created = unsafe(capabilities: [ffi]):
-        rt_file_create_excl(host_path_native(path), payload)
+    val created = file_create_excl_raw(host_path_native(path), payload)
     if created: Ok(()) else: Err(TextIoError.Io("exclusive file creation failed: {path}"))
 
 pub fn file_create_encoded_text_exclusive(path: text, content: text, format: ExternalFormat) -> Result<(), TextIoError>:
     val external = io_external_from_internal(content, format)?
     file_create_external_text_exclusive(path, external)
 
-
-@unsafe(reason: "raw atomic file-write status ABI; false is provider failure", capabilities: [ffi])
-extern fn rt_file_atomic_write(path: text, content: text) -> bool
-
-@unsafe(reason: "atomically creates a new regular file and fails if the path already exists", capabilities: [ffi])
-extern fn rt_file_create_excl(path: text, content: text) -> bool
 
 export file_read_external_text, file_read_external_char, file_write_external_text, file_write_encoded_text
 export file_atomic_write_external_text, file_atomic_write_encoded_text

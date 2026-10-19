@@ -1,8 +1,26 @@
-"""Canonical nullable descriptor read. The descriptor remains caller-owned."""
+"""Raw file-primitive leaf: the typed owner of three file runtime ABIs.
+
+- `file_read_borrowed_bytes`: canonical nullable descriptor read. The
+  descriptor remains caller-owned.
+- `file_atomic_write_raw` / `file_create_excl_raw`: status-only wrappers over
+  the atomic-replace and exclusive-create providers. The path is already a
+  native host path and the payload is admitted UTF-8 text; codec admission is
+  the caller's job (io/file_external_compat.spl).
+
+Kept as a leaf (one import, the error types) so codec owners can reach the
+raw providers without importing sffi.io / sffi.fs and their dozens of
+unrelated host externs.
+"""
 use std.io.types.{IoError, IoErrorKind}
 
 @unsafe(reason: "raw nullable file descriptor read; nil is failure, empty is EOF", capabilities: [ffi])
 extern fn rt_io_file_read(fd: i64, size: i64) -> [u8]?
+
+@unsafe(reason: "raw atomic file-write status ABI; false is provider failure", capabilities: [ffi])
+extern fn rt_file_atomic_write(path: text, content: text) -> bool
+
+@unsafe(reason: "atomically creates a new regular file and fails if the path already exists", capabilities: [ffi])
+extern fn rt_file_create_excl(path: text, content: text) -> bool
 
 pub fn file_read_borrowed_bytes(descriptor: i64, size: i64) -> Result<[u8], IoError>:
     if descriptor < 0:
@@ -16,4 +34,12 @@ pub fn file_read_borrowed_bytes(descriptor: i64, size: i64) -> Result<[u8], IoEr
         return Err(IoError(kind: IoErrorKind.Other, message: "read failed", source: nil))
     Ok(data ?? [])
 
-export file_read_borrowed_bytes
+pub fn file_atomic_write_raw(native_path: text, payload: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_file_atomic_write(native_path, payload)
+
+pub fn file_create_excl_raw(native_path: text, payload: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_file_create_excl(native_path, payload)
+
+export file_read_borrowed_bytes, file_atomic_write_raw, file_create_excl_raw
