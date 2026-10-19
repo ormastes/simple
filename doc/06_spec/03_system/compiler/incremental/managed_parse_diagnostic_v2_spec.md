@@ -16,6 +16,9 @@ REQ-IM-008/012/016; NFR-IM-004/005/008. Status: authored, runtime/docgen UNRUN.
 6. Emit identical messages at two ordinals; IDs must differ. Preserve IDs on
    replay, reject module changes, duplicate occurrences and reordered arrays.
    Aggregate validation derives expected ordinals independently from position.
+7. Admit 65 short warnings within the encoded byte budget, reject seven large
+   individually valid records exceeding 48 KiB, and check ordinal -1/4096
+   rejection and 4095 acceptance. The existing 4096 count ceiling is preserved.
 
 These tests cover the foundational codec, not V2 module/action aggregation,
 warning-success artifact transport, parent replay or live worker qualification.

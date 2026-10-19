@@ -17,7 +17,7 @@ and message plus module ID and occurrence ordinal. No JSON parser or ad hoc SDN 
 Canonical SDN is a fixed 13-element typed profile: version, severity, code,
 message, file, absent span, empty labels, identity note array, empty help,
 empty children, empty macro trace, absent fix, occurrence ordinal. Aggregate
-validation independently derives ordinals from array order and caps 64 records
+validation independently derives ordinals from array order and caps 4096 records
 and 48 KiB per module; equal messages remain distinct while replay preserves IDs.
 It is not the existing escaped
 line protocol and is not claimed to implement binary events. Individual field
