@@ -73,6 +73,19 @@ describe "module enum inventory registration":
         expect(lowering.enum_variant_discriminant("Inv", "Alpha")).to_equal(0)
         expect(lowering.enum_variant_discriminant("Inv", "Beta")).to_equal(1)
 
+    it "advances past the first module (terminates; every module's enums register)":
+        # Regression: 7c1899d73a8 dropped the module-index advance, so the
+        # loop spun on modules[0] allocating enums.values() until OOM (hello
+        # build worker ramped ~370 MB/s to the 20 GiB cap). With the bug this
+        # example never returns; the second module's enum proves the advance.
+        val first = inventory_hir("enum First:\n    A\n    B\n", "testdata/fixture_enum_inventory_first.spl")
+        val second = inventory_hir("enum Second:\n    X\n    Y\n    Z\n", "testdata/fixture_enum_inventory_second.spl")
+        val target_context = driver_mir_target_context(driver_core_compile_options_default())
+        var lowering = MirLowering.new_for_target(SymbolTable.new(), target_context)
+        lowering.register_module_enum_inventory_v1([first, second])
+        expect(lowering.enum_variant_names("First")).to_equal(["A", "B"])
+        expect(lowering.enum_variant_names("Second")).to_equal(["X", "Y", "Z"])
+
     it "re-registration is quiet (existing dedup rules, no collision noise)":
         val src = "enum Quiet:\n    One\n    Two\n\nfn take(q: Quiet) -> i64:\n    match q:\n        case One:\n            1\n        case Two:\n            2\n"
         val hir = inventory_hir(src, "testdata/fixture_enum_inventory_quiet.spl")
