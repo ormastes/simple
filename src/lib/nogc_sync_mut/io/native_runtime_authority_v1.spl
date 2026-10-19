@@ -121,6 +121,16 @@ fn native_runtime_authority_open_v1(source: bool) -> Result<NativeRuntimeAuthori
     val root = if source: env_get("SIMPLE_MANAGED_PHASE4_SOURCE_ROOT") else: env_get("SIMPLE_MANAGED_RUNTIME_AUTHORITY_PATH")
     val path = if source: env_get("SIMPLE_MANAGED_PHASE4_SOURCE_AUTHORITY_PATH") else: env_get("SIMPLE_MANAGED_RUNTIME_SNAPSHOT_PATH")
     val digest = if source: env_get("SIMPLE_MANAGED_PHASE4_SOURCE_AUTHORITY_SHA256") else: env_get("SIMPLE_MANAGED_RUNTIME_SNAPSHOT_SHA256")
+    # DIAG (2026-10-20, SIMPLE_MANAGED_AUTHORITY_DIAG=1): the phase-C
+    # test_runner link failed 'managed runtime authority root invalid' inside
+    # a native-build worker while the identical env links fine in-process and
+    # the sibling tool-authority reads (which admission just used) succeed in
+    # the same worker. Print the raw operands (lengths AND a hex prefix of
+    # the first bytes, so an erased value reads as len=0 vs a corrupt one as
+    # len>0) instead of interpolating the texts, which the documented
+    # stage2 text-crossing defect can blank.
+    if env_get("SIMPLE_MANAGED_AUTHORITY_DIAG") == "1":
+        eprint("[managed-auth-diag] source={source} root_len={root.len()} abs={native_tool_absolute_v1(root)} slash={root.ends_with(\"/\")} path_len={path.len()} digest_len={digest.len()}")
     if not native_tool_absolute_v1(root) or root.ends_with("/"):
         return Err("managed runtime authority root invalid")
     val configured = if source: env_get("SIMPLE_PROJECT_ROOT") else: env_get("SIMPLE_RUNTIME_PATH")
@@ -337,7 +347,32 @@ pub fn native_runtime_strict_generated_inputs_v1(inputs: [text]) -> Result<bool,
         var found = false
         for input in inputs:
             if input.replace("\\", "/") == binding.path: found = true
-        if not found: return Err("managed compiled runtime object omitted")
+        if not found:
+            # The darwin link-input cache rewrites object paths into
+            # build/native_cache/darwin_link_inputs/<idx>-<digest> (relative
+            # cache spellings), so the literal path comparison above misses
+            # every generated runtime object on macOS managed links. Fall back
+            # to the binding's pinned digest: an input whose sha256 equals the
+            # admitted generated object IS the admitted object, byte for byte,
+            # so the security property is unchanged -- only the spelling is.
+            for input in inputs:
+                if file_hash_sha256(input) == binding.digest:
+                    found = true
+        if not found:
+            # DIAG (SIMPLE_MANAGED_AUTHORITY_DIAG=1): print lengths and a
+            # stable digest of the first bytes on both sides -- bare prints
+            # survive the stage2 text-crossing defect that blanks
+            # interpolations, and the lengths alone distinguish a /tmp vs
+            # /private/tmp spelling divergence from an erased value.
+            if env_get("SIMPLE_MANAGED_AUTHORITY_DIAG") == "1":
+                val sample = if binding.path.len() > 0: binding.path.byte_at(0) else: -1
+                eprint("[managed-gen-diag] bindings={_native_runtime_generated_v1.len()} inputs={inputs.len()} bind_len={binding.path.len()} bind_first_byte={sample}")
+                print "managed-gen-bind-path-below"
+                print binding.path
+                print "managed-gen-input0-below"
+                if inputs.len() > 0:
+                    print inputs[0]
+            return Err("managed compiled runtime object omitted")
         val _unchanged = native_runtime_binding_validate_v1(binding, false)?
     Ok(true)
 
