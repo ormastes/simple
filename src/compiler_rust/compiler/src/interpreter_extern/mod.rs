@@ -806,7 +806,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("__rt_btreeset_to_array", collections::__rt_btreeset_to_array);
     insert_simple!("__rt_btreeset_union", collections::__rt_btreeset_union);
     insert_simple!("rt_byte_array_new", sffi_array::rt_byte_array_new_fn);
-    insert_simple!("rt_byte_array_new_len", sffi_array::rt_byte_array_new_fn);
+    insert_simple!("rt_byte_array_new_len", sffi_array::rt_byte_array_new_len_fn);
     insert_simple!("rt_byte_char", conversion::rt_byte_char_fn);
     insert_simple!("rt_char_from_code", conversion::rt_char_from_code_fn);
     insert_simple!("rt_tuple_get", conversion::rt_tuple_get_fn);

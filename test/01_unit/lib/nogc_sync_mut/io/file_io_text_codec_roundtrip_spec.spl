@@ -1,0 +1,61 @@
+# @tag: unit, io, bytes, engine-differential
+# File text I/O and process capture route through the bounded text codec
+# (`text_byte_buffer`). Under the seed interpreter `rt_byte_array_new(n)` used
+# to return n zero bytes and `rt_array_data_ptr` returned 0 for an empty byte
+# array, so every codec write returned false and every read returned "".
+# Run under SIMPLE_EXECUTION_MODE=interpreter and the default JIT mode; both
+# must agree with the native runtime contract (capacity only, length zero).
+use std.spec
+use std.io_runtime.{file_write, file_read, file_read_bytes, file_write_bytes, file_delete, process_run_timeout}
+use std.common.text_bytes.{text_byte_buffer, boxed_text_bytes_checked}
+
+fn scratch_path(name: text) -> text:
+    "/tmp/simple_file_io_codec_roundtrip_{name}.tmp"
+
+fn roundtrip(name: text, content: text) -> text:
+    val path = scratch_path(name)
+    expect(file_write(path, content)).to_equal(true)
+    val back = file_read(path)
+    file_delete(path)
+    back
+
+describe "text byte buffer runtime contract":
+    it "allocates capacity with zero logical length":
+        val bytes = text_byte_buffer(8).unwrap()
+        expect(bytes.len()).to_equal(0)
+
+    it "admits zero capacity":
+        expect(text_byte_buffer(0).is_ok()).to_equal(true)
+
+    it "extracts a genuine empty text":
+        expect(boxed_text_bytes_checked("").is_ok()).to_equal(true)
+
+describe "file text round-trip through the codec":
+    it "round-trips ASCII":
+        expect(roundtrip("ascii", "hello world\n")).to_equal("hello world\n")
+
+    it "round-trips UTF-8 multibyte text":
+        expect(roundtrip("utf8", "héllo 日本 🙂\n")).to_equal("héllo 日本 🙂\n")
+
+    it "round-trips an empty file":
+        expect(roundtrip("empty", "")).to_equal("")
+
+describe "binary bytes round-trip":
+    it "preserves NUL and high bytes in order":
+        val path = scratch_path("binary")
+        val data: [u8] = [0u8, 1u8, 0u8, 127u8, 128u8, 255u8, 0u8]
+        expect(file_write_bytes(path, data)).to_equal(true)
+        val back = file_read_bytes(path)
+        file_delete(path)
+        expect(back.len()).to_equal(7)
+        expect(back[0]).to_equal(0u8)
+        expect(back[3]).to_equal(127u8)
+        expect(back[4]).to_equal(128u8)
+        expect(back[5]).to_equal(255u8)
+        expect(back[6]).to_equal(0u8)
+
+describe "process output capture":
+    it "captures stdout of echo":
+        val (out, err, code) = process_run_timeout("/bin/echo", ["hi"], 10000)
+        expect(code).to_equal(0)
+        expect(out).to_equal("hi\n")
