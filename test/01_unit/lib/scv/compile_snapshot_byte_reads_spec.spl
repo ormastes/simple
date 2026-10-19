@@ -1,0 +1,75 @@
+# The snapshot materializer admits sources by raw-byte digest, without a text
+# decode. These pin that the byte path keeps the exact bytes and stays
+# fail-closed on any digest or length mismatch.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.common.text_bytes.{text_to_utf8_bytes}
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryEntryV1}
+use std.scv.compile_snapshot.{scv_compile_snapshot_materialize_source_v1}
+use app.io.mod.{dir_create, file_exists}
+use app.io.file_ops.{path_absolute}
+use std.nogc_sync_mut.io_runtime.{file_hash_sha256}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
+
+extern fn rt_getpid() -> i64
+
+fn snapshot_bytes_root(label: text) -> text:
+    path_absolute("build/test-artifacts/snapshot-bytes-{rt_getpid()}-{label}").replace("\\", "/")
+
+fn snapshot_bytes_entry(path: text, content: text) -> CompileSourceInventoryEntryV1:
+    val digest = sha256_text(content)
+    CompileSourceInventoryEntryV1(path, digest, digest, digest, digest, digest,
+        text_to_utf8_bytes(content).len())
+
+fn snapshot_bytes_fixture(root: text, relative: text, content: text) -> bool:
+    dir_create(root + "/src/bytes", true) and dir_create(root + "/build/scv", true) and
+        dir_create(root + "/staging", true) and
+        file_write_bytes(root + "/" + relative, text_to_utf8_bytes(content))
+
+describe "SCV snapshot materializes sources by raw-byte digest":
+    it "keeps a leading U+FEFF and multibyte bytes exactly, in the snapshot and the chunk":
+        val root = snapshot_bytes_root("bom")
+        val relative = "src/bytes/bom.spl"
+        val content = "﻿# é — 한글\nfn main():\n    print 1\n"
+        expect(snapshot_bytes_fixture(root, relative, content)).to_equal(true)
+        val result = scv_compile_snapshot_materialize_source_v1(
+            root, root + "/build/scv", root + "/staging", snapshot_bytes_entry(relative, content))
+        expect(result.reason).to_equal("ok")
+        val digest = sha256_text(content)
+        expect(result.row).to_equal("{relative}|sha256_{digest}|{text_to_utf8_bytes(content).len()}")
+        expect(file_hash_sha256(root + "/staging/" + relative)).to_equal(digest)
+        val chunk = root + "/build/scv/objects/chunks/sha256_{digest}.blob"
+        expect(file_exists(chunk)).to_equal(true)
+        expect(file_hash_sha256(chunk)).to_equal(digest)
+
+    it "reuses an existing content-addressed chunk for identical bytes":
+        val root = snapshot_bytes_root("reuse")
+        val content = "# shared chunk\n"
+        expect(snapshot_bytes_fixture(root, "src/bytes/a.spl", content)).to_equal(true)
+        expect(file_write_bytes(root + "/src/bytes/b.spl", text_to_utf8_bytes(content))).to_equal(true)
+        val first = scv_compile_snapshot_materialize_source_v1(
+            root, root + "/build/scv", root + "/staging", snapshot_bytes_entry("src/bytes/a.spl", content))
+        val second = scv_compile_snapshot_materialize_source_v1(
+            root, root + "/build/scv", root + "/staging", snapshot_bytes_entry("src/bytes/b.spl", content))
+        expect(first.reason).to_equal("ok")
+        expect(second.reason).to_equal("ok")
+        expect(file_hash_sha256(root + "/staging/src/bytes/b.spl")).to_equal(sha256_text(content))
+
+    it "refuses bytes that differ from the admitted inventory digest":
+        val root = snapshot_bytes_root("drift")
+        val relative = "src/bytes/drift.spl"
+        expect(snapshot_bytes_fixture(root, relative, "# on disk\n")).to_equal(true)
+        val result = scv_compile_snapshot_materialize_source_v1(
+            root, root + "/build/scv", root + "/staging", snapshot_bytes_entry(relative, "# admitted\n"))
+        expect(result.reason).to_equal("snapshot-index-drift:{relative}")
+        expect(result.row).to_equal("")
+        expect(file_exists(root + "/staging/" + relative)).to_equal(false)
+
+    it "refuses a missing source as a read failure":
+        val root = snapshot_bytes_root("missing")
+        expect(dir_create(root + "/src/bytes", true)).to_equal(true)
+        expect(dir_create(root + "/staging", true)).to_equal(true)
+        val relative = "src/bytes/absent.spl"
+        val result = scv_compile_snapshot_materialize_source_v1(
+            root, root + "/build/scv", root + "/staging", snapshot_bytes_entry(relative, "# absent\n"))
+        expect(result.reason).to_equal("snapshot-read-failed:{relative}")
