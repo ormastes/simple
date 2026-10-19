@@ -43,18 +43,18 @@ fn file_session_format_at(format: ExternalFormat, position: i64) -> Result<Exter
     # A BOM is stream metadata only at byte zero. Interior U+FEFF is content.
     Ok(ExternalFormat(encoding: format.encoding, byte_order: format.byte_order, bom: BomPolicy.Preserve))
 
-pub fn file_session_encode(value: text, codec: TextSessionCodec, position: i64) -> Result<[u8], TextIoError>:
+pub fn file_session_encode(item: text, codec: TextSessionCodec, position: i64) -> Result<[u8], TextIoError>:
     val valid: () = codec.validate()?
     val format: ExternalFormat = file_session_format_at(file_session_write_format(codec), position)?
-    file_session_encode_format(value, codec, format)
+    file_session_encode_format(item, codec, format)
 
-fn file_session_encode_format(value: text, codec: TextSessionCodec, format: ExternalFormat) -> Result<[u8], TextIoError>:
+fn file_session_encode_format(item: text, codec: TextSessionCodec, format: ExternalFormat) -> Result<[u8], TextIoError>:
     # Every supported encoding consumes at least half the internal UTF-8
     # byte count. Refuse impossible fits before extracting/converting input.
-    val input_bytes = str_len(value)
+    val input_bytes = str_len(item)
     if input_bytes < 0 or input_bytes > codec.output_byte_limit() * 2:
         return Err(TextIoError.Io("file text output exceeds the session byte limit"))
-    val encoded: [u8] = io_text_encode(value, format)?
+    val encoded: [u8] = io_text_encode(item, format)?
     if encoded.len() > codec.output_byte_limit():
         return Err(TextIoError.Io("file text output exceeds the session byte limit"))
     Ok(encoded)
@@ -86,7 +86,7 @@ fn file_session_read_bounded_fd(descriptor: i64, codec: TextSessionCodec, line: 
     var capacity = if limit < 8192: limit else: 8192
     if line and capacity > 256: capacity = 256
     var bytes: [u8] = match text_byte_buffer(capacity):
-        case Ok(value): value
+        case Ok(item): item
         case Err(_): return Err(TextIoError.Io("file text input allocation failed"))
     while true:
         val remaining = limit - bytes.len()
@@ -97,7 +97,7 @@ fn file_session_read_bounded_fd(descriptor: i64, codec: TextSessionCodec, line: 
         if remaining < requested: requested = remaining + 1
         if line: requested = 1
         val chunk: [u8] = match file_read_borrowed_bytes(descriptor, requested):
-            case Ok(value): value
+            case Ok(item): item
             case Err(error): return Err(TextIoError.Transport(error))
         if chunk.len() == 0:
             if line and bytes.len() == 0:
@@ -109,7 +109,7 @@ fn file_session_read_bounded_fd(descriptor: i64, codec: TextSessionCodec, line: 
         if not line:
             # One bulk append per chunk instead of a per-byte copy.
             bytes = match text_bytes_concat_checked(bytes, chunk):
-                case Ok(value): value
+                case Ok(item): item
                 case Err(_): return Err(TextIoError.Io("file text input allocation failed"))
         else:
             if needed > capacity:
@@ -117,7 +117,7 @@ fn file_session_read_bounded_fd(descriptor: i64, codec: TextSessionCodec, line: 
                 if next_capacity < needed: next_capacity = needed
                 if next_capacity > limit: next_capacity = limit
                 var grown: [u8] = match text_byte_buffer(next_capacity):
-                    case Ok(value): value
+                    case Ok(item): item
                     case Err(_): return Err(TextIoError.Io("file text input allocation failed"))
                 for byte in bytes: grown.push(byte)
                 if grown.len() != bytes.len():
@@ -176,7 +176,7 @@ pub class FileTextSession:
             var session = FileTextSession.open(path, mode, codec)?
             val position = io_file_seek(session._descriptor, 0, 2)
             val format: ExternalFormat = match file_session_format_at(selected, position):
-                case Ok(value): value
+                case Ok(item): item
                 case Err(error):
                     session.close()
                     return Err(error)
@@ -201,12 +201,12 @@ pub class FileTextSession:
     pub me read() -> Result<text, TextIoError>:
         if not self._open: return Err(file_session_transport("file text session is closed"))
         match file_session_read_fd(self._descriptor, self._codec):
-            case Ok(value): Ok(value)
+            case Ok(item): Ok(item)
             case Err(error):
                 self.close()
                 Err(error)
 
-    pub me write(value: text) -> Result<(), TextIoError>:
+    pub me write(item: text) -> Result<(), TextIoError>:
         if not self._open: return Err(file_session_transport("file text session is closed"))
         val whence = if self._mode == FileMode.Append: 2 else: 1
         val native_position = io_file_seek(self._descriptor, 0, whence)
@@ -217,7 +217,7 @@ pub class FileTextSession:
         val position = if native_position < 0: 0 else: native_position
         # O_APPEND chooses its position at the write syscall. Require was
         # refused before open; Preserve needs no guessed file-size probe.
-        val encoded: [u8] = file_session_encode(value, self._codec, position)?
+        val encoded: [u8] = file_session_encode(item, self._codec, position)?
         self._write_prepared(encoded)
 
     pub me read_at(offset: i64, size: i64) -> Result<text, TextIoError>:
@@ -230,7 +230,7 @@ pub class FileTextSession:
         val format: ExternalFormat = file_session_format_at(file_session_read_format(self._codec), offset)?
         # Chunks are appended in bulk; no size-wide buffer is reserved up front.
         var bytes: [u8] = match text_byte_buffer(0):
-            case Ok(value): value
+            case Ok(item): item
             case Err(_): return Err(TextIoError.Io("file text input allocation failed"))
         if io_file_seek(self._descriptor, offset, 0) != offset:
             self.close()
@@ -241,7 +241,7 @@ pub class FileTextSession:
             var requested = if bytes.len() > 8192: bytes.len() else: 8192
             if requested > remaining: requested = remaining
             val chunk: [u8] = match file_read_borrowed_bytes(self._descriptor, requested):
-                case Ok(value): value
+                case Ok(item): item
                 case Err(error):
                     self.close()
                     return Err(TextIoError.Transport(error))
@@ -251,7 +251,7 @@ pub class FileTextSession:
                 return Err(file_session_transport("file text read returned an invalid extent"))
             val expected = bytes.len() + chunk.len()
             bytes = match text_bytes_concat_checked(bytes, chunk):
-                case Ok(value): value
+                case Ok(item): item
                 case Err(_):
                     self.close()
                     return Err(TextIoError.Io("file text input allocation failed"))
@@ -259,16 +259,16 @@ pub class FileTextSession:
                 self.close()
                 return Err(TextIoError.Io("file text input accumulation failed"))
         match io_text_decode(bytes, format):
-            case Ok(value): Ok(value)
+            case Ok(item): Ok(item)
             case Err(error):
                 self.close()
                 Err(error)
 
-    pub me write_at(offset: i64, value: text) -> Result<(), TextIoError>:
+    pub me write_at(offset: i64, item: text) -> Result<(), TextIoError>:
         if not self._open: return Err(file_session_transport("file text session is closed"))
         if self._mode == FileMode.Append:
             return Err(TextIoError.Unsupported("positioned writes are unavailable in append mode"))
-        val bytes: [u8] = file_session_encode(value, self._codec, offset)?
+        val bytes: [u8] = file_session_encode(item, self._codec, offset)?
         if offset > 9223372036854775807 - bytes.len():
             return Err(TextIoError.Io("invalid positional byte range"))
         if io_file_seek(self._descriptor, offset, 0) != offset:
