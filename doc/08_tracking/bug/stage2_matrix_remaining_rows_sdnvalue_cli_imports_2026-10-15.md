@@ -429,3 +429,22 @@ contract as the empty-blobs path), emits a loud `[hir-blob-refused]`
 eprint, records a Warning, and proceeds UNCACHED — slow, not wrong. The
 selfcheck itself was not weakened, and a refusal with no fallback modules
 left to validate stays fatal.
+
+Follow-up (same day, fix commit 03fe2c2aaab): the phase-3 gate is only
+half of the story — the builder embeds its driver, so the fix had to be
+baked into the builder binary. Rebuilt a stage2 candidate from the fixed
+source with the Rust seed (`/tmp/p2x/build-cand-seednew2.log`, 573s; the
+first attempt without `SIMPLE_BOOTSTRAP=1` failed its link because the
+hosted `libsimple_native_all.a` is only resolved for the bootstrap entry),
+then reran the clean-seed recipe with the candidate as the builder
+(`/tmp/p2x/build-seednew6.log`): phase 3 now CLEARS — the refusals appear
+as `[post-hir-validation-warning] RT-E-HIR-BLOB-NONCANONICAL ... (codec-
+class refusal: non-fatal, build proceeds UNCACHED)` — and the build enters
+monomorphize and MIR. It then SIGSEGVs immediately in
+`compiler.mir._MirLowering.module_lowering.MirLowering.lower_module`
+(EXC_BAD_ACCESS at 0xffffffffbfc00800; crash report
+candidate-seednew-2026-10-19-123325.ips) — a NEW crash site: every prior
+candidate today (c167/c168/oldtree) crashed in HIR
+`module_declarations_bootstrap`, this one gets through HIR and dies one
+phase later. That MIR-lower_module fault is the next row; it is downstream
+of and unrelated to the RT-blob gate fix.
