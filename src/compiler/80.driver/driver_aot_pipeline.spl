@@ -26,6 +26,10 @@ use compiler.common.driver_core_types.{
     driver_output_format_is_self_contained
 }
 use std.io_runtime.{env_get_opt, file_read_result, hash_text, is_file}
+use compiler.common.native_output_intent.{NativeOutputIntentV1, native_output_intent_decode_v1}
+use compiler.driver.driver_build.native_group_request.{native_group_request_path_v1}
+use compiler.driver.driver_build.native_staged_codegen.{NativeStagedCodegenStateV1,
+    NATIVE_STAGED_CODEGEN_BATCH_ENV_V1, native_staged_codegen_batch_size_v1}
 
 fn native_build_cache_dir() -> text:
     val dir = env_get_opt("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? ""
@@ -80,10 +84,20 @@ impl CompilerDriver:
         log_build_progress("mir", "modules", 0, self.ctx.hir_modules.len(),
             "lower_to_mir", 4, 6, 0, 0, "running")
         log_phase("aot:lower_to_mir:start")
+        val staged_batch = native_staged_codegen_batch_size_v1()
+        if staged_batch < 0:
+            return CompileResult.CodegenError(
+                "{NATIVE_STAGED_CODEGEN_BATCH_ENV_V1} must be a non-negative decimal module count (0 disables staged native codegen)")
+        self.native_staged_codegen = NativeStagedCodegenStateV1.begin(
+            if self.native_staged_codegen_eligible_v1(): staged_batch else: 0)
         val mir_ok = self.lower_to_mir()
         if not mir_ok:
             for err in self.ctx.errors:
                 log_error("MIR error: {err}")
+            # A staged batch ran the borrow checker before the tail finished
+            # lowering; report it as the unstaged lane would.
+            if self.native_staged_codegen.borrow_failed:
+                return CompileResult.BorrowError(self.ctx.errors)
             # Bug (2026-08-06): builtin `Array.first()` has no MIR method
             # symbol under native codegen (same gap class as `push`/`map`/
             # `filter`/`fold` -- see Bug #149's comment a few files over in
@@ -295,4 +309,96 @@ impl CompilerDriver:
             return CompileResult.Success(output)
         log_phase("aot:native_dispatch:start")
         return self.compile_to_native(output)
+
+    fn native_staged_codegen_eligible_v1() -> bool:
+        """Staging is admitted only where aot_compile is known to end in the
+        per-module compile_to_native lane with nothing re-reading the whole
+        MIR set afterwards. Every other dispatch keeps the unstaged order."""
+        val backend_name = self.ctx.options.backend
+        if backend_name == "c" or backend_name == "cpp" or backend_name == "ccodegen" or
+                backend_name == "cuda" or backend_name == "ptx" or
+                backend_name == "opencl" or backend_name == "opencl-c" or
+                backend_name == "opencl-spirv" or backend_name == "cl" or
+                backend_name == "vulkan" or backend_name == "spirv" or
+                backend_name == "vhdl" or backend_name == "wasm" or backend_name == "wasm32":
+            return false
+        if (env_get_opt("SIMPLE_BOOTSTRAP_DIRECT_IR") ?? "") == "1":
+            return false
+        # Bootstrap-flat skips the MIR pass chain and may dispatch to the
+        # fixed-entry context compiler, which reads the entry MIR itself.
+        if (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1" and
+                (env_get_opt("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
+            return false
+        # SMF / self-contained / both re-iterate ctx.mir_modules after codegen.
+        val format = self.ctx.options.output_format
+        if driver_output_format_is_smf(format) or driver_output_format_is_self_contained(format) or
+                driver_output_format_is_both(format):
+            return false
+        if (env_get_opt("SIMPLE_PACKAGE_INDEX_FULL_INVENTORY") ?? "") == "1" or
+                self.ctx.runtime_std_full_inventory_selection != nil:
+            return false
+        # Demand routes reuse archived MIR and publish SCC ownership per run.
+        if self.ctx.demand_compile_execution != nil or self.ctx.demand_dirty_modules.len() > 0:
+            return false
+        if native_group_request_path_v1() != "":
+            return false
+        match native_output_intent_decode_v1(env_get_opt("SIMPLE_NATIVE_BUILD_EMIT_OBJECT") ?? ""):
+            case Ok(intent): intent != NativeOutputIntentV1.EntryObject
+            case Err(_): false
+
+    me native_staged_codegen_flush_v1(lowering_failed: bool) -> bool:
+        """Run the MIR modules currently held in ctx.mir_modules (one full
+        batch) through the same per-module chain aot_compile applies --
+        mir_verify, borrow_check, optimize_mir, weave_aop, debug_trace --
+        emit their objects into the native cache via compile_to_native in
+        flushing mode, then release their MIR. Gates keep the unstaged
+        order: nothing is verified after a lowering failure, nothing is
+        borrow-checked after a verify failure, and no object is emitted once
+        any error is recorded (the batch is still released; the build fails).
+        Returns false only for a whole-build failure (cache/session setup)."""
+        var batch_names: [text] = []
+        for held_name in self.ctx.mir_modules.keys():
+            batch_names = batch_names.push(held_name)
+        if lowering_failed:
+            self.native_staged_codegen.lowering_failed = true
+        val batch_index = self.native_staged_codegen.batches_flushed + 1
+        log_phase("aot:staged_codegen:batch:start index={batch_index} modules={batch_names.len()}")
+        if not self.native_staged_codegen.lowering_failed:
+            if not self.verify_lowered_mir_v1():
+                self.native_staged_codegen.verify_failed = true
+        if not self.native_staged_codegen.lowering_failed and
+                not self.native_staged_codegen.verify_failed:
+            if not self.borrow_check():
+                self.native_staged_codegen.borrow_failed = true
+        if self.ctx.error_count_value == 0 and not self.native_staged_codegen.lowering_failed:
+            val _async_state_machines = self.process_async()
+            if (env_get_opt("SIMPLE_BOOTSTRAP_SKIP_MIR_OPT") ?? "") != "1":
+                self.optimize_mir_level(self.ctx.options.opt_level ?? 0)
+            self.weave_aop()
+            self.apply_debug_trace()
+        if self.ctx.error_count_value == 0 and not self.native_staged_codegen.lowering_failed:
+            if self.ctx.freeze_storage_registry_for_schedule(
+                    self.native_staged_codegen.scheduled_names) == "invalid":
+                self.ctx.add_error("staged native codegen: typed storage registry is malformed before batch {batch_index}")
+                return false
+            val output = self.ctx.options.output_file ?? _driver_default_output(self.ctx.options.input_files)
+            self.native_staged_codegen.flushing = true
+            val batch_result = self.compile_to_native(output)
+            self.native_staged_codegen.flushing = false
+            if not batch_result.is_success():
+                val batch_error = match batch_result:
+                    case CompileResult.CodegenError(message): message
+                    case _: "staged native codegen batch {batch_index} failed"
+                self.ctx.add_error(batch_error)
+                return false
+        for released_name in batch_names:
+            self.ctx.evict_mir_module(released_name)
+        self.native_staged_codegen.batches_flushed = batch_index
+        log_build_progress("native_staged", "modules",
+            self.native_staged_codegen.modules_flushed,
+            self.native_staged_codegen.scheduled_names.len(),
+            "batch-{batch_index}", 5, 6, 0,
+            self.native_staged_codegen.cache_hit_count, "running")
+        log_phase("aot:staged_codegen:batch:done index={batch_index} released={batch_names.len()}")
+        true
 use compiler.common.diagnostics.span.{Span}

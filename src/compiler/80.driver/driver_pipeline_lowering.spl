@@ -20,6 +20,7 @@ use compiler.hir.hir_codec.{hir_module_functions_at_v1, hir_fn_scalars_at_v1}
 use compiler.mono.verify.post_mono_verify.{post_mono_archive_admission_v1}
 use driver_types.{CompileContext}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_build.native_staged_codegen.{native_staged_codegen_flush_due_v1}
 use compiler.driver.driver_ice_boundary.{
     ice_boundary_module_start, ice_message_arena_aborted,
     ice_boundary_module_done, ice_boundary_fail, ice_boundary_keep_going
@@ -1101,6 +1102,25 @@ impl CompilerDriver:
             # module's own lower_module pass -- after the entry has already
             # lowered. See register_module_composite_inventory_v1.
             direct_lowering.register_module_composite_inventory_v1(enum_inventory_modules)
+            # Staged native codegen (driver_build/native_staged_codegen.spl):
+            # record the whole schedule's module names (the frozen storage
+            # registry must know modules lowered after it freezes), then flush
+            # every full batch through codegen and release its MIR instead of
+            # retaining the entire closure's MIR until compile_to_native.
+            var staged_pending = 0
+            if self.native_staged_codegen.active:
+                var staged_schedule: [text] = []
+                for held_name in self.ctx.mir_modules.keys():
+                    staged_schedule = staged_schedule.push(held_name)
+                for staged_idx in mir_source_indices:
+                    val staged_lookup = self.ctx.sources[staged_idx].module_name
+                    var staged_name = staged_lookup
+                    if mir_physical_ownership_active and self.ctx.hir_modules.has(staged_lookup):
+                        staged_name = mir_layout_canonical_module_name(self.ctx.hir_modules[staged_lookup].name)
+                    staged_schedule = staged_schedule.push(staged_name)
+                self.native_staged_codegen.scheduled_names = staged_schedule
+                staged_pending = self.ctx.mir_modules.keys().len()
+                log_phase("aot:staged_codegen:schedule modules={staged_schedule.len()} batch={self.native_staged_codegen.batch_size}")
             while direct_pos < mir_source_indices.len():
                 val direct_idx = mir_source_indices[direct_pos]
                 val src_direct = self.ctx.sources[direct_idx]
@@ -1201,6 +1221,13 @@ impl CompilerDriver:
                     log_build_progress("mir", "modules", direct_pos,
                         mir_source_indices.len(), name_direct,
                         4, 6, mir_failed_modules, 0, "running")
+                staged_pending = staged_pending + 1
+                if self.native_staged_codegen.active and native_staged_codegen_flush_due_v1(
+                        staged_pending, self.native_staged_codegen.batch_size,
+                        direct_pos, mir_source_indices.len()):
+                    if not self.native_staged_codegen_flush_v1(mir_failed_modules > 0):
+                        return false
+                    staged_pending = 0
             log_phase("aot:mir_diagnostics:errors:start")
             _driver_collect_mir_errors(self.ctx, direct_lowering.errors)
             log_phase("aot:mir_diagnostics:errors:done")

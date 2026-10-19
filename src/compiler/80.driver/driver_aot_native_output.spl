@@ -2234,6 +2234,38 @@ impl CompilerDriver:
         # when its path is ambiguous.
         var module_unit_id: i64 = 0
 
+        # Staged native codegen (driver_build/native_staged_codegen.spl):
+        # earlier batches already emitted their objects and released their
+        # MIR. Resume their accumulated link inputs, outcomes and counters so
+        # this call's verdict and link cover the WHOLE schedule, not only the
+        # MIR still held. A flushing (non-final) call stops after the cache
+        # save below and hands the accumulators back.
+        val staged_active = self.native_staged_codegen.active
+        val staged_flushing = staged_active and self.native_staged_codegen.flushing
+        val staged_prior_modules = if staged_active:
+            self.native_staged_codegen.modules_flushed
+        else:
+            0
+        if staged_active:
+            if native_group.? or emit_entry_object_requested:
+                return CompileResult.CodegenError(
+                    "staged native codegen does not support grouped or entry-object publication")
+            object_files = self.native_staged_codegen.object_files
+            collection_bindings = self.native_staged_codegen.collection_bindings
+            module_outcomes = self.native_staged_codegen.module_outcomes
+            module_unit_id = self.native_staged_codegen.module_unit_id
+            lane_functions = self.native_staged_codegen.lane_functions
+            lane_statics = self.native_staged_codegen.lane_statics
+            lane_objectless = self.native_staged_codegen.lane_objectless
+            cache_hit_count = self.native_staged_codegen.cache_hit_count
+            cache_miss_count = self.native_staged_codegen.cache_miss_count
+            witness_shadow_match_count = self.native_staged_codegen.witness_shadow_match_count
+            witness_shadow_mismatch_count = self.native_staged_codegen.witness_shadow_mismatch_count
+            witness_shadow_mismatch_lines = self.native_staged_codegen.witness_shadow_mismatch_lines
+            phase2_native_items_handled = self.native_staged_codegen.phase2_native_items_handled
+            phase2_native_reuse_hits = self.native_staged_codegen.phase2_native_reuse_hits
+            phase2_native_rejections = self.native_staged_codegen.phase2_native_rejections
+
         # Phase 1: Check cache, collect cached objects, identify uncached modules
         var uncached_names: [text] = []
         var entry_object_ready_path = ""
@@ -2437,7 +2469,9 @@ impl CompilerDriver:
             "native-module-witness-shadow-v1.receipt"),
             witness_shadow_receipt_lines.join("\n") + "\n")
 
-        if object_files.len() == 0 and uncached_names.len() == 0:
+        # A staged batch may be all export facades; the whole-build version of
+        # this guard runs on the final call over the accumulated objects.
+        if not staged_flushing and object_files.len() == 0 and uncached_names.len() == 0:
             return CompileResult.CodegenError("native-build produced no code-bearing MIR modules")
 
         # Phase 2: Compile uncached modules through ParallelBuilder
@@ -2761,6 +2795,28 @@ impl CompilerDriver:
         # did build stay reusable on the retry (a failing build must not also
         # throw away the good work it did).
         build_cache.save()
+        if staged_flushing:
+            # Non-final staged batch: hand back everything the final verdict
+            # and link need. No verdict, ledger, manifest or link here -- a
+            # failed module stays recorded in module_outcomes and blocks the
+            # final link exactly as an unstaged failure would.
+            self.native_staged_codegen.object_files = object_files
+            self.native_staged_codegen.collection_bindings = collection_bindings
+            self.native_staged_codegen.module_outcomes = module_outcomes
+            self.native_staged_codegen.module_unit_id = module_unit_id
+            self.native_staged_codegen.lane_functions = lane_functions
+            self.native_staged_codegen.lane_statics = lane_statics
+            self.native_staged_codegen.lane_objectless = lane_objectless
+            self.native_staged_codegen.cache_hit_count = cache_hit_count
+            self.native_staged_codegen.cache_miss_count = cache_miss_count
+            self.native_staged_codegen.witness_shadow_match_count = witness_shadow_match_count
+            self.native_staged_codegen.witness_shadow_mismatch_count = witness_shadow_mismatch_count
+            self.native_staged_codegen.witness_shadow_mismatch_lines = witness_shadow_mismatch_lines
+            self.native_staged_codegen.phase2_native_items_handled = phase2_native_items_handled
+            self.native_staged_codegen.phase2_native_reuse_hits = phase2_native_reuse_hits
+            self.native_staged_codegen.phase2_native_rejections = phase2_native_rejections
+            self.native_staged_codegen.modules_flushed = staged_prior_modules + all_module_names.len()
+            return CompileResult.Success(nil)
         if phase2_compatibility_manifest.?:
             for item in phase2_compatibility_manifest.unwrap().items:
                 if item.kind == PHASE_COMPATIBILITY_NATIVE_V1 and
@@ -2962,8 +3018,8 @@ impl CompilerDriver:
             lane: "native-build",
             requires_code: not emit_object_requested and
                 not emit_archive_requested and not emit_shared_requested,
-            modules_seen: all_module_names.len(),
-            modules_lowered: total_modules,
+            modules_seen: staged_prior_modules + all_module_names.len(),
+            modules_lowered: staged_prior_modules + total_modules,
             modules_objectless: lane_objectless,
             functions_emitted: lane_functions,
             statics_emitted: lane_statics,
