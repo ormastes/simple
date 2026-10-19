@@ -39,6 +39,7 @@ use compiler.driver.driver_mir_error_owner.{driver_trace_module_mir_errors}
 use compiler.driver.driver_mir_physical_owners.{driver_mir_physical_source_indices_v1, driver_mir_feed_is_identity_v1}
 use compiler.mir._MirLowering.module_lowering.{mir_layout_canonical_module_name}
 use compiler.common.module_path_naming.{module_logical_name_cache_warm}
+use compiler.hir.hir_lowering.items.{bootstrap_hir_module_count, bootstrap_hir_module_name_at}
 use compiler.driver.driver_source_loading.{_driver_physical_source_key}
 use compiler.common.mir_target_context.{MirTargetContext}
 use std.common.convert.{try_parse_int}
@@ -221,15 +222,26 @@ fn _mir_error_is_fatal(message: text) -> bool:
 # (00.common/module_path_naming.spl), and MIR lowers every module inside a
 # transient scope. Warm the names MIR re-derives per module -- each module's
 # own name and every symbol's defining module -- here, at state 0. Keys are
-# persistent HIR strings; other misses stay correct, merely uncached.
+# persistent HIR strings; other misses stay correct, merely uncached. The flat
+# bootstrap rows carry the registry spelling, which differs from `module.name`
+# under SIMPLE_BOOTSTRAP=1 and is looked up per module over all modules.
+# Symbol ids are dense below next_symbol_id; iterating them avoids
+# materialising a keys() array on the immortal heap.
 fn driver_warm_mir_logical_names_v1(modules: Dict<text, HirModule>):
     for module_key in modules.keys():
         val module: HirModule = modules[module_key]
+        module_logical_name_cache_warm(module_key)
         module_logical_name_cache_warm(module.name)
-        for raw_id in module.symbols.symbols.keys():
+        var raw_id: i64 = 0
+        while raw_id < module.symbols.next_symbol_id:
             val owner = module.symbols.symbol_defining_module_scalar_raw(raw_id)
             if owner != "":
                 module_logical_name_cache_warm(owner)
+            raw_id = raw_id + 1
+    var flat_index: i64 = 0
+    while flat_index < bootstrap_hir_module_count():
+        module_logical_name_cache_warm(bootstrap_hir_module_name_at(flat_index))
+        flat_index = flat_index + 1
 
 fn driver_trait_devirtualization_allowed_v1(
     whole_closure_lowered: bool, archive_producing: bool,
