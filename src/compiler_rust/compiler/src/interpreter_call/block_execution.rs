@@ -445,6 +445,7 @@ pub(super) fn exec_block_closure_into(
                     visit_pattern_binding_names(&let_stmt.pattern, &mut |name| local_env.mark_local(name.to_owned()));
                     // Use bind_pattern_value to handle all pattern types including tuples
                     let is_mutable = let_stmt.mutability.is_mutable();
+                    let val = crate::interpreter::coerce_to_declared_type(val, declared_let_type(let_stmt));
                     bind_pattern_value(&let_stmt.pattern, val, is_mutable, &mut local_env);
                 }
                 last_value = Value::Nil;
@@ -1535,6 +1536,7 @@ fn exec_block_closure_mut_inner(
                     // Mark the names local first; see the `exec_block_closure_into` twin.
                     visit_pattern_binding_names(&let_stmt.pattern, &mut |name| local_env.mark_local(name.to_owned()));
                     let is_mutable = let_stmt.mutability.is_mutable();
+                    let val = crate::interpreter::coerce_to_declared_type(val, declared_let_type(let_stmt));
                     bind_pattern_value(&let_stmt.pattern, val, is_mutable, local_env);
                 }
                 last_value = Value::Nil;
@@ -2450,5 +2452,15 @@ mod tests {
     fn true_bare_assert_passes_block_closure() {
         let result = run_probe("fn probe():\n    assert 1 == 1\n    42\n").expect("true assert must pass");
         assert_eq!(result.as_int().expect("int"), 42);
+    }
+}
+
+/// The declared type of a `val`/`var`: its annotation, or the type in a typed
+/// pattern (`val x: T = ...`).
+fn declared_let_type(let_stmt: &simple_parser::ast::LetStmt) -> Option<&simple_parser::ast::Type> {
+    match (&let_stmt.ty, &let_stmt.pattern) {
+        (Some(ty), _) => Some(ty),
+        (None, simple_parser::ast::Pattern::Typed { ty, .. }) => Some(ty),
+        _ => None,
     }
 }

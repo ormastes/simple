@@ -234,6 +234,10 @@ pub(crate) fn compile_binop<M: Module>(
     // sshr vs ushr and sextend vs uextend on shift operations — the RHS is a
     // non-negative shift count and always widens uextend.
     let lhs_signed = vreg_is_signed(ctx, left_vreg);
+    // Division and remainder are unsigned when EITHER operand is statically
+    // unsigned, the same rule the ordering comparisons below use: in
+    // `100 / x_u64` the literal is typed i64 but the quotient is a u64.
+    let unsigned_divide = lhs_signed == Some(false) || vreg_is_signed(ctx, right_vreg) == Some(false);
 
     // A cross-block f64 operand is carried through an i64-typed Cranelift
     // Variable (cross-block VRegs are declared i64; `def_var` bitcasts f64->i64
@@ -302,7 +306,7 @@ pub(crate) fn compile_binop<M: Module>(
         BinOp::Div => {
             if is_float {
                 builder.ins().fdiv(lhs, rhs)
-            } else if lhs_signed == Some(false) {
+            } else if unsigned_divide {
                 builder.ins().udiv(lhs, rhs)
             } else {
                 // INT64_MIN / -1 overflows the signed quotient. x86 `idiv`
@@ -330,7 +334,7 @@ pub(crate) fn compile_binop<M: Module>(
                 let prod = builder.ins().fmul(floored, rhs);
                 builder.ins().fsub(lhs, prod)
             } else {
-                if lhs_signed == Some(false) {
+                if unsigned_divide {
                     builder.ins().urem(lhs, rhs)
                 } else {
                     // Same #DE as Div above: `INT64_MIN % -1` faults on x86

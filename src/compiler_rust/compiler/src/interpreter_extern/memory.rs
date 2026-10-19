@@ -1882,15 +1882,26 @@ pub fn rt_ptr_write_bytes(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
-/// Data pointer of a packed byte array, or 0 when there is none.
+/// Data pointer of a packed byte array.
 ///
 /// Callable from Simple as: `rt_array_data_ptr(arr: [u8]) -> i64`
-/// Only `ByteArray`/`FrozenByteArray` have contiguous byte storage; a boxed
-/// `Array` has no byte data pointer, so this returns 0 and callers MUST fall
-/// back to a per-byte path rather than treating 0 as an address.
-/// An EMPTY packed byte array still answers non-zero, like the C and Rust
-/// runtimes (whose data block always exists): `text_byte_buffer` reads 0 as
-/// allocation failure. `Vec::as_ptr` is non-null even with no elements.
+///
+/// Return contract:
+/// - `ByteArray`/`FrozenByteArray` (packed `[u8]`, which every `[u8]`-typed
+///   binding now uses — see `coerce_to_declared_type`): the real data pointer,
+///   valid while the caller retains the array and does not grow it. An EMPTY
+///   packed array still answers non-zero, like the C and Rust runtimes (whose
+///   data block always exists): `text_byte_buffer` reads 0 as allocation
+///   failure. `Vec::as_ptr` is non-null even with no elements.
+/// - Any boxed `Array` (an untyped `[]` that was never bound as `[u8]`, a
+///   bare literal argument, or a non-`u8` array passed through a generic
+///   declaration): 0, meaning INVALID — "no contiguous byte storage in this
+///   engine". It is not an address, and it is not "empty". Callers MUST treat
+///   it as a failure or take a per-byte path (`text_byte_extraction_checked`
+///   reports `AllocationFailed`; `smf_mmap_native` copies byte-wise). Every
+///   `[u8]`-typed binding is packed, so a live `[u8]` held in a typed
+///   `val`/`var` never reaches this case.
+/// Bug: doc/08_tracking/bug/seed_u64_signed_compare_and_u8_data_ptr_2026-10-19.md
 pub fn rt_array_data_ptr(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
         return Err(CompileError::runtime("rt_array_data_ptr requires 1 argument (array)"));
