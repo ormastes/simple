@@ -34,9 +34,8 @@ use std.daemon_sdk.types.{DaemonConfig, DaemonRequest, DaemonResponse, daemon_re
 # NOTE: module scope, not function scope. A function-body-scoped
 # `use <path>.{name}` is a silent no-op for symbol resolution.
 # See doc/08_tracking/bug/block_scoped_use_no_op_symbol_resolution_2026-08-18.md
-use compiler.driver.driver_api_compile_single.{compile_to_smf_with_options}
+use compiler.driver.driver_api_compile_single.{compile_to_smf_with_options, smf_expected_compile_options_hash}
 use compiler.driver.cache.cache_validator.{source_to_cache_path}
-use compiler.driver.cache.compile_options_hash.{compile_options_hash_compute}
 use compiler.driver.watcher.watcher_client.{watcher_validate_generated_smf}
 use compiler.driver.watcher.smf_manifest.{SmfManifestEntry}
 use compiler.driver.watcher.smf_manifest.{update_smf_manifest_entry, load_smf_manifest_default, smf_manifest_find}
@@ -150,6 +149,12 @@ impl WatcherDaemon:
 
     me generate_smf(req: WatcherRequest) -> CacheCheckResult:
         val smf_path = source_to_cache_path(req.source_path, self.config.smf_dir, ".smf")
+        val expected_result = smf_expected_compile_options_hash(req.backend, req.opt_level,
+            req.release, req.debug_info, req.gc_off, req.profile, req.allowed_families, req.native_target)
+        if expected_result.is_err():
+            self.state.errors_count = self.state.errors_count + 1
+            return cache_check_result_error(expected_result.unwrap_err())
+        val expected = expected_result.unwrap()
         val result = compile_to_smf_with_options(
             req.source_path,
             smf_path,
@@ -169,9 +174,6 @@ impl WatcherDaemon:
                     return cache_check_result_error("SMF generation failed for {req.source_path}: {err}")
                 case Ok(_):
                     pass
-        val expected = compile_options_hash_compute(req.backend, req.opt_level,
-            req.release, req.debug_info, req.gc_off, req.profile, req.allowed_families,
-            [], [], [], "moderate", -1, req.native_target)
         val checked = watcher_validate_generated_smf(req.source_path, smf_path, expected)
         if checked.is_err():
             self.state.errors_count = self.state.errors_count + 1

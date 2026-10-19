@@ -9,14 +9,15 @@ use compiler.driver.watcher.watcher_types.{WatcherRequestKind, watcher_request_n
     watcher_config_default, watcher_request_for_config, watcher_request_to_daemon, daemon_request_to_watcher}
 use compiler.driver.watcher.smf_manifest.{smf_manifest_new, smf_manifest_entry_new,
     smf_manifest_update, smf_manifest_to_sdn, smf_manifest_from_sdn_checked, smf_manifest_find}
-use compiler.driver.driver_api_compile_single.{smf_compile_options}
+use compiler.driver.driver_api_compile_single.{smf_compile_options, smf_expected_compile_options_hash}
 use compiler.driver.driver_types.{compute_options_hash}
-use compiler.driver.cache.compile_options_hash.{compile_options_hash_validate}
+use compiler.driver.cache.compile_options_hash.{compile_options_hash_validate, compile_options_hash_compute}
 use compiler.driver.cache.cache_types.{CACHE_FRESH, CACHE_STALE}
+use compiler.driver.watcher.watcher_client.{request_smf}
 use std.daemon_sdk.types.{daemon_request_new}
 use std.daemon_sdk.protocol.{parse_request_file}
 use compiler.driver.watcher.watcher_protocol.{write_request}
-use std.io_runtime.{file_delete, getpid}
+use std.io_runtime.{file_delete, file_exists, getpid}
 use app.watch.watcher_daemon.{watcher_request_from_manifest_entry}
 
 fn target_request_options(target: text):
@@ -113,3 +114,30 @@ describe "REQ-GENERIC-CONFIG-TARGET-002 target transport":
         var request = watcher_request_new("fixture.spl", WatcherRequestKind.Smf)
         request.native_target = "aarch64\nfield.backend=llvm"
         expect(write_request(request, "/tmp/simple_target_reject_{getpid()}")).to_equal("")
+
+    it "should derive optimized request hashes from actual normalized driver options":
+        step("Compare false and true release requests at opt two and preserve opt zero identity")
+        for level in [0, 2]:
+            for requested_release in [false, true]:
+                val opts = smf_compile_options("entry.spl", "entry.smf", "cranelift", level,
+                    requested_release, false, false, "dev", [], "aarch64-unknown-linux-gnu").unwrap()
+                val expected = smf_expected_compile_options_hash("cranelift", level,
+                    requested_release, false, false, "dev", [], "aarch64-unknown-linux-gnu").unwrap()
+                expect(expected.hash).to_equal(compute_options_hash(opts).hash)
+                expect(opts.release).to_equal(requested_release or level > 0)
+        val legacy = smf_expected_compile_options_hash("cranelift", 0, false, false, false, "dev", []).unwrap()
+        val raw_legacy = compile_options_hash_compute("cranelift", 0, false, false, false, "dev", [])
+        expect(legacy.hash).to_equal(raw_legacy.hash)
+
+    it "should accept normalized request identity before reporting an absent watcher":
+        step("Exercise actual submission identity validation for optimized false and true release requests")
+        var config = watcher_config_default()
+        config.lock_path = "/tmp/simple_target_no_watcher_{getpid()}.lock"
+        expect(file_exists(config.lock_path)).to_equal(false)
+        for requested_release in [false, true]:
+            val opts = smf_compile_options("entry.spl", "entry.smf", "cranelift", 2,
+                requested_release, false, false, "dev", [], "aarch64-unknown-linux-gnu").unwrap()
+            val result = request_smf("entry.spl", compute_options_hash(opts).hash, "cranelift", 2,
+                requested_release, false, false, "dev", [], config, "aarch64-unknown-linux-gnu")
+            expect(result.is_err()).to_equal(true)
+            expect(result.unwrap_err()).to_equal("watcher not running")
