@@ -159,3 +159,24 @@ modulus (ciphertext == padded block, no RSA-2048 modexp). Spec:
   decode at 261 MB under JIT, and 13.7 s → 4.5 s under the interpreter.
 - The same pattern is still open in `lz4.spl`, `snappy.spl`, `lzma2_*`, `gzip.spl` and
   `zstd_dict.spl`. See `doc/08_tracking/bug/seed_jit_array_copy_never_freed_2026-10-19.md`.
+
+## Brotli decoder (2026-10-19)
+
+`src/lib/nogc_sync_mut/compression/brotli/decoder.spl` is an RFC 7932 decoder without the static dictionary
+(single mutable `BrotliDec`, canonical-count prefix decode, tables built per
+call, amortised push output). `std.common.compress.brotli.try_brotli_decompress`
+returns `Result` (`brotli_decompress` still maps errors to `[]`).
+Official vectors: `test/fixtures/compress/brotli/` (google/brotli
+tests/testdata, MIT; README lists blob shas), spec
+`test/01_unit/lib/common/brotli_official_vectors_spec.spl`: empty, x, xyzzy,
+quickfox, 10x10y, 64x, ukkonooa decode exactly; monkey and cp852-utf8 need the
+static dictionary (absent) and report UnsupportedFeature.
+Traps found: the old decoder AND encoder shared non-RFC conventions (HSKIP=3 for
+simple codes instead of 1, NTREESD after the literal/command trees, ICP cell
+numbering, insert/copy sub-code bit order, copy-code 18/19 extras, WBITS map).
+Any hand-built brotli stream in a spec must follow RFC 7932 order, not the old
+encoder's. The old `decoder_block/huffman/tables.spl` modules were dead after the
+rewrite and are deleted. A stream that references the static dictionary fails with
+`UnsupportedFeature` (monkey vector), never wrong output.
+Context modes (LSB6/MSB6/UTF8/Signed) have no passing official vector yet.
+

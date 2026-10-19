@@ -157,6 +157,17 @@ fn _slice(data: [u8], offset: i64, len: i64) -> [u8]:
 # We always pick the SAME copy-length code (CLC=0 -> base 2, no extra bits).
 # We always pick the SAME ICP "kind" = 4 (ins 0..7, cop 0..7, distance follows)
 # when ILC <= 7, kind = 6 when ILC in 8..15, kind = 8 when ILC in 16..23.
+# Map this encoder's local ICP kind (4..10: ins/copy class with an explicit
+# distance) to the RFC 7932 section 5 insert-and-copy cell index.
+fn _enc_icp_cell(kind: i64) -> i64:
+    if kind == 4: return 2
+    if kind == 5: return 3
+    if kind == 6: return 4
+    if kind == 7: return 5
+    if kind == 8: return 7
+    if kind == 9: return 9
+    return 10
+
 fn _try_encode_literal_only(data: [u8]) -> Option<[u8]>:
     val n = data.len()
     if n == 0:
@@ -180,10 +191,10 @@ fn _try_encode_literal_only(data: [u8]) -> Option<[u8]>:
         val b = data[i].to_i64()
         if freq[b] == 0:
             distinct.push(b)
+            if distinct.len() > 4:
+                return None
         freq[b] = freq[b] + 1
         i = i + 1
-    if distinct.len() > 4:
-        return None
     # Sort distinct ascending (small array, simple sort).
     var a = 0
     while a < distinct.len():
@@ -222,7 +233,7 @@ fn _try_encode_literal_only(data: [u8]) -> Option<[u8]>:
         icp_kind = 8              # ins 16..23, cop 0..7, has_dist
     val ilc_low = ilc & 0x07
     val clc_low = clc & 0x07
-    val icp_symbol = (icp_kind * 64) + (clc_low * 8) + ilc_low
+    val icp_symbol = (_enc_icp_cell(icp_kind) * 64) + (ilc_low * 8) + clc_low
 
     # Distance code = 0 (placeholder, never executed).
     val dist_symbol = 0
@@ -246,7 +257,8 @@ fn _try_encode_literal_only(data: [u8]) -> Option<[u8]>:
     w = brotli_bits_write(w, 0, 2)
     w = brotli_bits_write(w, 0, 4)
     w = brotli_bits_write(w, 0, 2)
-    # NTREESL=1
+    # NTREESL=1, NTREESD=1 (RFC 7932 section 9.2 order: both counts precede all trees)
+    w = brotli_bits_write_varlen_uint8(w, 0)
     w = brotli_bits_write_varlen_uint8(w, 0)
     # Literal simple-prefix tree (8-bit alphabet)
     w = brotli_bits_write_simple_prefix(w, 8, distinct)
@@ -254,8 +266,6 @@ fn _try_encode_literal_only(data: [u8]) -> Option<[u8]>:
     var icp_syms: [i64] = []
     icp_syms.push(icp_symbol)
     w = brotli_bits_write_simple_prefix(w, 10, icp_syms)
-    # NTREESD=1
-    w = brotli_bits_write_varlen_uint8(w, 0)
     # Distance simple-prefix tree (6-bit alphabet, NSYM=1)
     var dist_syms: [i64] = []
     dist_syms.push(dist_symbol)
@@ -382,9 +392,10 @@ fn _build_lit_codes(nsym: i64) -> [i64]:
         v.push(3)
         return v
     var v: [i64] = []
+    # 2-bit canonical codes sent MSB-first: 00, 01, 10, 11 -> LSB-first values 0, 2, 1, 3.
     v.push(0)
-    v.push(1)
     v.push(2)
+    v.push(1)
     v.push(3)
     v
 
@@ -453,7 +464,7 @@ fn _pick_copy_length_code(cop_len: i64) -> Option<_CopEnc>:
     ]
     val extras: [i64] = [
         0, 0, 0, 0, 0, 0, 0, 0,
-        1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 5, 6
+        1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 7
     ]
     var c = 0
     while c < 20:
@@ -489,10 +500,10 @@ fn _try_encode_lz77(data: [u8]) -> Option<[u8]>:
         val b = data[i].to_i64()
         if freq[b] == 0:
             distinct.push(b)
+            if distinct.len() > 4:
+                return None
         freq[b] = freq[b] + 1
         i = i + 1
-    if distinct.len() > 4:
-        return None
     # Sort distinct ascending.
     var a = 0
     while a < distinct.len():
@@ -593,7 +604,7 @@ fn _try_encode_lz77(data: [u8]) -> Option<[u8]>:
             icp_kind = 10
     val ilc_low = ilc & 0x07
     val clc_low = clc & 0x07
-    val icp_symbol = (icp_kind * 64) + (clc_low * 8) + ilc_low
+    val icp_symbol = (_enc_icp_cell(icp_kind) * 64) + (ilc_low * 8) + clc_low
 
     # Encode distance.
     val dist_opt = _encode_distance_regular(dist)
@@ -659,7 +670,8 @@ fn _try_encode_lz77(data: [u8]) -> Option<[u8]>:
     w = brotli_bits_write(w, 0, 2)
     w = brotli_bits_write(w, 0, 4)
     w = brotli_bits_write(w, 0, 2)
-    # NTREESL=1
+    # NTREESL=1, NTREESD=1 (RFC 7932 section 9.2 order: both counts precede all trees)
+    w = brotli_bits_write_varlen_uint8(w, 0)
     w = brotli_bits_write_varlen_uint8(w, 0)
     # Literal simple-prefix tree
     w = brotli_bits_write_simple_prefix(w, 8, lit_alphabet)
@@ -667,8 +679,6 @@ fn _try_encode_lz77(data: [u8]) -> Option<[u8]>:
     var icp_syms: [i64] = []
     icp_syms.push(icp_symbol)
     w = brotli_bits_write_simple_prefix(w, 10, icp_syms)
-    # NTREESD=1
-    w = brotli_bits_write_varlen_uint8(w, 0)
     # Distance simple-prefix tree (NSYM=1)
     var dist_syms: [i64] = []
     dist_syms.push(dist_symbol)
