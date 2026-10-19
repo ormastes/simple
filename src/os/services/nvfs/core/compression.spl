@@ -17,6 +17,17 @@
 #   Same strictly-smaller-or-raw fallback and the same legacy size
 #   disambiguation as LZ4: a real frame extent is shorter than decompressed_len,
 #   a legacy tagged-copy one is exactly decompressed_len + 4.
+#
+# Forward-incompatibility (one way only): new readers decode old extents, but an
+# OLD reader (tagged-copy stub, before the real Zstd encoder) given a NEW real
+# frame extent checks only the u32 length prefix, then returns the frame bytes
+# verbatim with ok=true: silent corruption, not an error. Nothing on disk tells
+# the two encodings apart for an old reader. The pmap entry has only the
+# compress_algo tag (same tags 2/3 for both forms). Superblock.version and
+# feature_bits exist, but no reader checks them, so setting them would not
+# protect an old reader. NVFS is in-memory only (N1, no persisted volumes), so
+# no such mixed volume exists yet. Before NVFS persists data, gate this with a
+# superblock feature bit that readers must check.
 
 use std.fs_driver.error.{FsError}
 use std.common.compress.lz4.{lz4_compress_block, lz4_decompress_block_bounded}
@@ -252,6 +263,8 @@ fn compress_extent(plaintext: [u8], class_tag: i32) -> CompressResult:
     var cdata: [u8] = []
     if algo_tag == 1:
         cdata = _lz4_compress(plaintext)
+    # Real Zstd frames for tags 2/3: old tagged-copy readers misread these as
+    # verbatim data (see the forward-incompatibility note at the top of this file).
     if algo_tag == 2:
         cdata = _zstd_compress(plaintext, 3)
     if algo_tag == 3:

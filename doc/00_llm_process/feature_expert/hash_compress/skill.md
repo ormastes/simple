@@ -200,6 +200,21 @@ Context modes (LSB6/MSB6/UTF8/Signed) have no passing official vector yet.
   `zstd -d` ("Data corruption detected" / checksum).
 - nvfs `compression.spl`: algo 2/3 = `[u32 len | zstd frame]` (levels 3/19), raw fallback
   when not strictly smaller, legacy tagged-copy (len+4) still decodes.
+  Forward-incompatible: an OLD (tagged-copy) reader given a new real-frame extent checks
+  only the length prefix and returns the frame bytes with ok=true (silent corruption).
+  No on-disk field tells the two apart (pmap has only the algo tag; superblock
+  version/feature_bits are never checked). NVFS is in-memory only today; gate with a
+  superblock feature bit before it persists volumes.
 - Specs: `zstd_compress_sequences_spec.spl`, `nvfs_compression_spec.spl`. The old
   "raw-block path" pins in `zstd_single_sequence_compress_spec.spl` / `zstd_frame_variants_spec.spl`
   were updated to the compressed-block frames (the 12-byte `abc` x4 frame is host-verified).
+
+## zstd under the seed JIT, and the legacy decoder (2026-10-19)
+- A len-bounded `while i < len: data[i]` loop over `[u8]` is lowered by the seed JIT to a
+  hoisted raw-byte load that misreads slot-layout arrays (`[]` in a struct field builds one;
+  `var x: [u8] = []` builds the packed one). It broke XXH64 tails, so zstd frames with
+  len % 4 != 0 failed with ChecksumMismatch under JIT only. `xxhash64` now reads its tail
+  via `rt_typed_bytes_u8_at`. Bug: doc/08_tracking/bug/jit_hoisted_u8_data_ptr_ignores_slot_layout_2026-10-19.md.
+  Specs run in the interpreter, so check JIT with `bin/simple run <probe>`.
+- `std.nogc_sync_mut.compression.zstd` (`zstd_decode`): Raw/RLE literal Size_Format 01/11
+  are 12/20-bit, and FCS flag 2 is 4 bytes; both were wrong before 2026-10-19.
