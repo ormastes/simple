@@ -19,7 +19,8 @@
 # the function/static counts for the lane receipt.
 #
 # A worker claims at most ceil(scheduled / count) modules, so a worker's MIR
-# is bounded by its share however many workers run concurrently.
+# is bounded by its share however many workers run concurrently. Workers walk
+# the schedule largest-first (native_mir_shard_lpt_order_v1).
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable}
 use std.io_runtime.{file_exists, file_read, file_write, file_rename, getpid}
@@ -60,6 +61,51 @@ pub fn native_mir_shard_claim_cap_v1(spec: text, scheduled: i64) -> i64:
     if count <= 0:
         return scheduled
     (scheduled + count - 1) / count
+
+# Longest-processing-time-first claim order (Rust codegen-unit scheduling):
+# a worker claims, then lowers, the biggest unclaimed module first, so the
+# slowest modules start first instead of finishing last. `weights` is a cheap
+# size proxy index-aligned with `names` (the caller passes source byte
+# length). Ties break by canonical module name, then schedule position, so
+# every worker walks the identical order and claims never depend on which
+# worker computed it. Returns schedule positions; a length mismatch returns
+# the identity order.
+fn native_mir_shard_lpt_before_v1(names: [text], weights: [i64], a: i64, b: i64) -> bool:
+    if weights[a] != weights[b]:
+        return weights[a] > weights[b]
+    if names[a] != names[b]:
+        return names[a] < names[b]
+    a < b
+
+pub fn native_mir_shard_lpt_order_v1(names: [text], weights: [i64]) -> [i64]:
+    var order: [i64] = []
+    var pos = 0
+    while pos < names.len():
+        order = order.push(pos)
+        pos = pos + 1
+    if names.len() != weights.len():
+        return order
+    # Bottom-up merge sort: stable, O(n log n) over a whole-program schedule.
+    var width = 1
+    while width < order.len():
+        var merged: [i64] = []
+        var lo = 0
+        while lo < order.len():
+            val mid = if lo + width < order.len(): lo + width else: order.len()
+            val hi = if lo + 2 * width < order.len(): lo + 2 * width else: order.len()
+            var i = lo
+            var j = mid
+            while i < mid or j < hi:
+                if j >= hi or (i < mid and native_mir_shard_lpt_before_v1(names, weights, order[i], order[j])):
+                    merged = merged.push(order[i])
+                    i = i + 1
+                else:
+                    merged = merged.push(order[j])
+                    j = j + 1
+            lo = hi
+        order = merged
+        width = width * 2
+    order
 
 fn native_mir_shard_record_base_v1(queue: text, module_name: text) -> text:
     "{queue}/{sha256_text(module_name)}"

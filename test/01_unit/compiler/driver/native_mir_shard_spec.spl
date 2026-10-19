@@ -16,7 +16,8 @@ is the gate that keeps a partial or foreign shard result out of the link.
 
 ## Expected Outcome
 
-Claim caps cover the whole schedule; a ledger whose every inventory row is a
+Claim caps cover the whole schedule; workers walk it largest-first in one
+deterministic order; a ledger whose every inventory row is a
 PASS for this source identity is admitted with its objects; a missing PASS or
 a foreign identity is refused.
 """
@@ -26,7 +27,7 @@ use std.nogc_sync_mut.io_runtime.{env_set, dir_create_all, dir_remove_all, file_
 use compiler.driver.driver_build.native_mir_shard.{
     native_mir_shard_count_of_v1, native_mir_shard_claim_cap_v1,
     native_mir_shard_claim_v1, native_mir_shard_publish_pass_v1,
-    native_mir_shard_link_inputs_v1}
+    native_mir_shard_link_inputs_v1, native_mir_shard_lpt_order_v1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory}
 
 fn fresh_ledger(tag: text) -> text:
@@ -48,6 +49,29 @@ describe "MIR shard claim caps":
         step("gives a malformed spec the whole schedule, never zero")
         assert_equal(native_mir_shard_count_of_v1("8/8"), 0)
         assert_equal(native_mir_shard_claim_cap_v1("bogus", 40), 40)
+
+describe "MIR shard largest-first claim order":
+    it "walks the biggest modules first with a canonical-name tie-break":
+        # @req REQ-SSPEC-COMPILER
+        step("walks the biggest modules first with a canonical-name tie-break")
+        val names = ["mod.small", "mod.big", "mod.tie_b", "mod.tie_a", "mod.mid"]
+        val weights = [10, 900, 50, 50, 400]
+        val order = native_mir_shard_lpt_order_v1(names, weights)
+        assert_equal(order.len(), 5)
+        assert_equal(order[0], 1)
+        assert_equal(order[1], 4)
+        assert_equal(order[2], 3)
+        assert_equal(order[3], 2)
+        assert_equal(order[4], 0)
+
+    it "is the identity for a length mismatch and for an empty schedule":
+        # @req REQ-SSPEC-COMPILER
+        step("is the identity for a length mismatch and for an empty schedule")
+        val order = native_mir_shard_lpt_order_v1(["mod.a", "mod.b"], [5])
+        assert_equal(order.len(), 2)
+        assert_equal(order[0], 0)
+        assert_equal(order[1], 1)
+        assert_equal(native_mir_shard_lpt_order_v1([], []).len(), 0)
 
 describe "MIR shard link admission":
     it "admits a complete PASS ledger with its objects":
