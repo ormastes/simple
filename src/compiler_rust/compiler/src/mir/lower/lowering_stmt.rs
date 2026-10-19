@@ -398,6 +398,12 @@ impl<'a> MirLowerer<'a> {
                                     .or_else(|| tr.get_array_element(value_ty))
                             })
                             .is_some();
+                    // A provably dead, uniquely owned source hands its buffer
+                    // over instead (`array_move.rs`): the JIT lane never frees
+                    // the copy, so `var o = st.output; ...; st = St(output: o)`
+                    // retained one stale copy per round-trip.
+                    let is_array_place_alias =
+                        is_array_place_alias && !self.array_move_sites.let_locals.contains(&local_idx);
                     let vreg = if is_array_place_alias {
                         self.with_func(|func, current_block| {
                             let dest = func.new_vreg();

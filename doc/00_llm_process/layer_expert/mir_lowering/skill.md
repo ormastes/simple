@@ -413,3 +413,21 @@ in MIR to "fix" a dropped write. Escape: `SIMPLE_CAPTURE_WRITE_CHECK=warning|off
   legitimately skips or multiplies a guarded arm adjusts
   `self.match_guards_expected` with a comment.** Guide:
   `doc/07_guide/compiler/robustness/match-guard-invariant.md`.
+
+## 2026-10-19 — JIT array copies are never freed; `array_move.rs` moves instead
+
+- On the seed JIT lane every `rt_array_copy` lives forever: `Drop` is a no-op, nothing
+  emits `rt_array_free`, and arrays have no refcount. A copy inside a loop therefore
+  leaks O(n²). Example: `var o = st.output; ...; st = St(output: o)` used 697 MB at
+  n=65536; with the move it uses 40 MB.
+- `mir/lower/array_move.rs` turns the `Let` place copy, and the struct-literal copy of
+  a `var` array, into a move when the source is provably uniquely owned and dead. It
+  fails closed. The negative pins live in `mir/lower/tests/array_move_tests.rs`.
+- Trap 1: struct literals copy ONLY `var` array locals. Copying projections
+  (`S(data: st.data, ...)`, the functional-update idiom) made a 128 KiB zstd decode go
+  from 280 MB to 2.0 GB.
+- Trap 2: the predicate is shared and must stay that way.
+  `array_move::struct_arg_gets_private_buffer` and `struct_arg_needs_copy` are used by
+  BOTH the ownership analysis and `lowering_expr_struct.rs`. Edit one side only and you
+  get a use-after-move.
+- Bug record: `doc/08_tracking/bug/seed_jit_array_copy_never_freed_2026-10-19.md`.
