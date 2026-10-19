@@ -1,0 +1,76 @@
+# @req REQ-IM-007 REQ-IM-008 REQ-IM-012 REQ-IM-016 NFR-IM-004
+use std.spec.*
+use compiler.driver.driver_build.managed_parse_group_contract.*
+use compiler.driver.driver_build.managed_parse_group_result.{managed_parse_module_result_decode_v1}
+use compiler.driver.driver_build.managed_parse_group_result_v2.*
+use compiler.driver.driver_build.managed_parse_diagnostic_v2.*
+use compiler.common.diagnostics.diagnostic_v1.{DiagnosticV1}
+use compiler.common.diagnostics.severity.{Severity}
+use std.common.crypto.sha256.{sha256_text}
+
+fn result_v2_module() -> ManagedParseModuleV1:
+    ManagedParseModuleV1("module", "package", "src/member.spl", sha256_text("source"))
+
+fn result_v2_warning(module: ManagedParseModuleV1) -> DiagnosticV1:
+    var value = DiagnosticV1(Severity.Warning, "W-CAPTURE-WRITE", "line 6: captured write",
+        Some(module.source_path), None, [], [], [], [], [], None)
+    value.notes = ["diagnostic-id:" + managed_parse_diagnostic_id_v2(value, module, 0)]
+    value
+
+fn result_v2_success(module: ManagedParseModuleV1) -> ManagedParseModuleResultV2:
+    val digest = sha256_text("fixture flat payload")
+    ManagedParseModuleResultV2(module.module_id, module.source_digest, "OK",
+        "artifacts/" + digest + ".flat", digest, false, false, [result_v2_warning(module)])
+
+describe "REQ-IM-012: typed V2 success and nonreuse remain independent":
+    it "should round-trip warning success with actual strict SDN codecs and no V1 downgrade":
+        val module = result_v2_module()
+        val value = result_v2_success(module)
+        val wire = managed_parse_module_result_encode_v2(value, module)
+        expect(wire == "").to_be(false)
+        val decoded = managed_parse_module_result_decode_v2(wire, module).unwrap()
+        expect(decoded.status).to_equal("OK")
+        expect(decoded.reusable).to_be(false)
+        expect(decoded.diagnostics[0].severity).to_equal(Severity.Warning)
+        expect(decoded.diagnostics[0].notes).to_equal(value.diagnostics[0].notes)
+        expect(managed_parse_module_result_decode_v1(wire).is_err()).to_be(true)
+        expect(managed_parse_module_result_decode_v2("SIMPLE-MANAGED-PARSE-MODULE-RESULT-1\n", module).is_err()).to_be(true)
+
+    it "should reject warning reuse, artifact-free success and wrong diagnostic severity":
+        val module = result_v2_module()
+        var value = result_v2_success(module)
+        value.reusable = true
+        expect(managed_parse_module_result_encode_v2(value, module)).to_equal("")
+        value = result_v2_success(module)
+        value.reused = true
+        expect(managed_parse_module_result_encode_v2(value, module)).to_equal("")
+        value = result_v2_success(module)
+        value.blob_path = ""
+        expect(managed_parse_module_result_encode_v2(value, module)).to_equal("")
+        value = result_v2_success(module)
+        value.status = "ERROR"
+        expect(managed_parse_module_result_encode_v2(value, module)).to_equal("")
+
+    it "should bind aggregate source order and original action lease while vetoing new-work reuse":
+        val module = result_v2_module()
+        var snapshot = ManagedParseSnapshotV1("worker", 1, sha256_text("worker"), "", sha256_text("cache"),
+            "linux", "x86_64", "x86_64", 4096, [module])
+        snapshot.snapshot_digest = managed_parse_snapshot_digest_v1(snapshot)
+        val action = ManagedParseActionV1("action", "group", "worker", 1, "lease", snapshot.snapshot_digest,
+            snapshot.cache_identity, ["package"], true)
+        val result = ManagedParseActionResultV2(action, [result_v2_success(module)], "")
+        val wire = managed_parse_action_result_encode_v2(snapshot, result)
+        expect(wire == "").to_be(false)
+        val decoded = managed_parse_action_result_decode_v2(snapshot, action, wire).unwrap()
+        expect(decoded.error).to_equal("")
+        expect(managed_parse_action_result_reusable_v2(decoded)).to_be(false)
+        var successor = action
+        successor.lease_id = "successor"
+        expect(managed_parse_action_result_decode_v2(snapshot, successor, wire).is_err()).to_be(true)
+        var clean = result_v2_success(module)
+        clean.diagnostics = []
+        clean.reusable = true
+        val clean_result = ManagedParseActionResultV2(action, [clean], "")
+        expect(managed_parse_action_result_reusable_v2(clean_result)).to_be(true)
+        expect(managed_parse_action_result_decode_v2(snapshot, action,
+            managed_parse_action_result_encode_v2(snapshot, clean_result)).is_ok()).to_be(true)

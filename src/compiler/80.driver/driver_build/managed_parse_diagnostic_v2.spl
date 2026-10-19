@@ -52,8 +52,9 @@ fn managed_parse_diagnostic_validate_v2(value: DiagnosticV1, module: ManagedPars
         return "diagnostic identity differs"
     ""
 
-fn managed_parse_diagnostic_encode_v2(value: DiagnosticV1, module: ManagedParseModuleV1, ordinal: i64) -> text:
-    if managed_parse_diagnostic_validate_v2(value, module, ordinal) != "": return ""
+fn managed_parse_diagnostic_to_sdn_v2(value: DiagnosticV1, module: ManagedParseModuleV1, ordinal: i64) -> Result<SdnValue, text>:
+    val invalid = managed_parse_diagnostic_validate_v2(value, module, ordinal)
+    if invalid != "": return Err(invalid)
     # The profile excludes recursive/nested payloads before constructing SDN.
     # Enforce the encoded byte limit explicitly after the bounded shared writer.
     val empty: [SdnValue] = []
@@ -63,7 +64,13 @@ fn managed_parse_diagnostic_encode_v2(value: DiagnosticV1, module: ManagedParseM
         SdnValue.String(value.message), SdnValue.String(module.source_path),
         SdnValue.Null, SdnValue.Array(empty), SdnValue.Array(notes),
         SdnValue.Array(empty), SdnValue.Array(empty), SdnValue.Array(empty), SdnValue.Null, SdnValue.Int(ordinal)]
-    val encoded = sdn_encode_canonical(SdnValue.Array(fields))
+    Ok(SdnValue.Array(fields))
+
+fn managed_parse_diagnostic_encode_v2(value: DiagnosticV1, module: ManagedParseModuleV1, ordinal: i64) -> text:
+    val encoded_value = match managed_parse_diagnostic_to_sdn_v2(value, module, ordinal):
+        Ok(content): content
+        Err(_reason): return ""
+    val encoded = sdn_encode_canonical(encoded_value)
     if text_byte_len(encoded) > 32768: return ""
     encoded
 
@@ -80,7 +87,13 @@ fn managed_parse_diagnostic_decode_v2(payload: text, module: ManagedParseModuleV
     val document = match sdn_parse_strict_v1(payload, limits):
         Ok(value): value
         Err(_issue): return Err("invalid bounded diagnostic SDN")
-    val fields = match document.value:
+    val value = managed_parse_diagnostic_from_sdn_v2(document.value, module, ordinal)?
+    if managed_parse_diagnostic_encode_v2(value, module, ordinal) != payload:
+        return Err("noncanonical diagnostic SDN")
+    Ok(value)
+
+fn managed_parse_diagnostic_from_sdn_v2(encoded: SdnValue, module: ManagedParseModuleV1, ordinal: i64) -> Result<DiagnosticV1, text>:
+    val fields = match encoded:
         SdnValue.Array(values): values
         _: return Err("diagnostic record must be an array")
     if fields.len() != 13: return Err("diagnostic field count differs")
@@ -115,8 +128,6 @@ fn managed_parse_diagnostic_decode_v2(payload: text, module: ManagedParseModuleV
         [], [note], [], [], [], None)
     val invalid = managed_parse_diagnostic_validate_v2(value, module, ordinal)
     if invalid != "": return Err(invalid)
-    if managed_parse_diagnostic_encode_v2(value, module, ordinal) != payload:
-        return Err("noncanonical diagnostic SDN")
     Ok(value)
 
 fn managed_parse_diagnostics_validate_v2(values: [DiagnosticV1], module: ManagedParseModuleV1) -> text:
@@ -135,3 +146,4 @@ fn managed_parse_diagnostics_validate_v2(values: [DiagnosticV1], module: Managed
 
 export managed_parse_diagnostic_id_v2, managed_parse_diagnostic_validate_v2, managed_parse_diagnostics_validate_v2
 export managed_parse_diagnostic_encode_v2, managed_parse_diagnostic_decode_v2
+export managed_parse_diagnostic_to_sdn_v2, managed_parse_diagnostic_from_sdn_v2

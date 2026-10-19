@@ -1,0 +1,196 @@
+# Additive context-bound V2 result owner. V1 encodings remain separate.
+use compiler.driver.driver_build.managed_parse_group_contract.*
+use compiler.driver.driver_build.managed_parse_diagnostic_v2.*
+use compiler.common.diagnostics.diagnostic_v1.{DiagnosticV1}
+use compiler.common.diagnostics.severity.{Severity}
+use std.common.build_manager.contracts.{builder_digest_valid_v1, builder_text_valid_v1}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.sdn.strict_v1.{sdn_parse_strict_v1}
+use std.common.sdn.strict_types_v1.{SdnStrictLimitsV1}
+use std.common.encoding.utf8.{text_byte_len}
+
+struct ManagedParseModuleResultV2:
+    module_id: text
+    source_digest: text
+    status: text
+    blob_path: text
+    blob_digest: text
+    reused: bool
+    reusable: bool
+    diagnostics: [DiagnosticV1]
+
+struct ManagedParseActionResultV2:
+    action: ManagedParseActionV1
+    modules: [ManagedParseModuleResultV2]
+    error: text
+
+fn managed_parse_module_result_validate_v2(value: ManagedParseModuleResultV2, module: ManagedParseModuleV1) -> text:
+    if value.module_id != module.module_id or value.source_digest != module.source_digest:
+        return "result source differs"
+    val invalid = managed_parse_diagnostics_validate_v2(value.diagnostics, module)
+    if invalid != "": return invalid
+    if value.status == "OK":
+        if not builder_digest_valid_v1(value.blob_digest) or value.blob_path != "artifacts/" + value.blob_digest + ".flat":
+            return "invalid successful artifact"
+        for diagnostic in value.diagnostics:
+            if diagnostic.severity != Severity.Warning: return "successful result contains non-warning diagnostic"
+        if value.diagnostics.len() > 0 and (value.reusable or value.reused): return "warning result cannot be reused"
+        if value.reused and not value.reusable: return "nonreusable result marked reused"
+    elif value.status == "ERROR":
+        if value.blob_path != "" or value.blob_digest != "" or value.reused or value.reusable or value.diagnostics.len() == 0:
+            return "invalid failed result"
+        for diagnostic in value.diagnostics:
+            if diagnostic.severity != Severity.Error: return "failed result contains non-error diagnostic"
+    else: return "unknown result status"
+    ""
+
+fn managed_parse_result_text_v2(value: SdnValue) -> Result<text, text>:
+    match value:
+        SdnValue.String(content): Ok(content)
+        _: Err("result field must be text")
+
+fn managed_parse_result_bool_v2(value: SdnValue) -> Result<bool, text>:
+    match value:
+        SdnValue.Bool(content): Ok(content)
+        _: Err("result field must be boolean")
+
+fn managed_parse_module_result_to_sdn_v2(value: ManagedParseModuleResultV2, module: ManagedParseModuleV1) -> Result<SdnValue, text>:
+    val invalid = managed_parse_module_result_validate_v2(value, module)
+    if invalid != "": return Err(invalid)
+    var diagnostics: [SdnValue] = []
+    for ordinal in 0..value.diagnostics.len():
+        diagnostics = diagnostics.push(managed_parse_diagnostic_to_sdn_v2(value.diagnostics[ordinal], module, ordinal)?)
+    val fields: [SdnValue] = [SdnValue.String("managed-parse-module-result-2"),
+        SdnValue.String(value.module_id), SdnValue.String(value.source_digest),
+        SdnValue.String(value.status), SdnValue.String(value.blob_path), SdnValue.String(value.blob_digest),
+        SdnValue.Bool(value.reused), SdnValue.Bool(value.reusable), SdnValue.Array(diagnostics)]
+    Ok(SdnValue.Array(fields))
+
+fn managed_parse_module_result_encode_v2(value: ManagedParseModuleResultV2, module: ManagedParseModuleV1) -> text:
+    val encoded = match managed_parse_module_result_to_sdn_v2(value, module):
+        Ok(content): sdn_encode_canonical(content)
+        Err(_reason): return ""
+    if text_byte_len(encoded) > 65536: return ""
+    encoded
+
+fn managed_parse_module_result_from_sdn_v2(encoded: SdnValue, module: ManagedParseModuleV1) -> Result<ManagedParseModuleResultV2, text>:
+    val fields = match encoded:
+        SdnValue.Array(values): values
+        _: return Err("module result must be an array")
+    if fields.len() != 9: return Err("module result field count differs")
+    if managed_parse_result_text_v2(fields[0])? != "managed-parse-module-result-2": return Err("module result version differs")
+    val id = managed_parse_result_text_v2(fields[1])?
+    val source = managed_parse_result_text_v2(fields[2])?
+    val status = managed_parse_result_text_v2(fields[3])?
+    val path = managed_parse_result_text_v2(fields[4])?
+    val digest = managed_parse_result_text_v2(fields[5])?
+    val reused = managed_parse_result_bool_v2(fields[6])?
+    val reusable = managed_parse_result_bool_v2(fields[7])?
+    val records = match fields[8]:
+        SdnValue.Array(values): values
+        _: return Err("diagnostics must be an array")
+    if records.len() > 4096: return Err("too many module diagnostics")
+    var diagnostics: [DiagnosticV1] = []
+    for ordinal in 0..records.len():
+        diagnostics = diagnostics.push(managed_parse_diagnostic_from_sdn_v2(records[ordinal], module, ordinal)?)
+    val value = ManagedParseModuleResultV2(id, source, status, path, digest, reused, reusable, diagnostics)
+    val invalid = managed_parse_module_result_validate_v2(value, module)
+    if invalid != "": return Err(invalid)
+    if managed_parse_module_result_encode_v2(value, module) == "": return Err("module result exceeds bound")
+    Ok(value)
+
+fn managed_parse_result_parse_v2(payload: text, maximum: i64) -> Result<SdnValue, text>:
+    if text_byte_len(payload) > maximum: return Err("result exceeds byte bound")
+    val limits = SdnStrictLimitsV1(max_source_bytes: maximum, max_depth: 7,
+        max_nodes: 200000, max_rows: 0, max_cells: 0, max_columns: 0)
+    match sdn_parse_strict_v1(payload, limits):
+        Ok(document): Ok(document.value)
+        Err(_issue): Err("invalid bounded result SDN")
+
+fn managed_parse_module_result_decode_v2(payload: text, module: ManagedParseModuleV1) -> Result<ManagedParseModuleResultV2, text>:
+    val value = managed_parse_module_result_from_sdn_v2(managed_parse_result_parse_v2(payload, 65536)?, module)?
+    if managed_parse_module_result_encode_v2(value, module) != payload: return Err("noncanonical module result")
+    Ok(value)
+
+fn managed_parse_action_result_validate_v2(snapshot: ManagedParseSnapshotV1, action: ManagedParseActionV1, value: ManagedParseActionResultV2) -> text:
+    val invalid = managed_parse_action_validate_v1(snapshot, action)
+    if invalid != "": return invalid
+    if managed_parse_action_encode_v1(action) != managed_parse_action_encode_v1(value.action): return "result action differs"
+    if not builder_text_valid_v1(value.error) or text_byte_len(value.error) > 8192: return "invalid aggregate error"
+    if value.modules.len() == 0 or value.modules.len() > 4096: return "invalid result inventory size"
+    var index = 0
+    var failed = false
+    var diagnostics = 0
+    for module in snapshot.modules:
+        if not action.package_members.contains(module.package_id): continue
+        if index >= value.modules.len(): return "missing result module"
+        val item = value.modules[index]
+        val reason = managed_parse_module_result_validate_v2(item, module)
+        if reason != "": return reason
+        if item.status == "ERROR": failed = true
+        diagnostics = diagnostics + item.diagnostics.len()
+        if diagnostics > 4096: return "too many action diagnostics"
+        index = index + 1
+    if index != value.modules.len(): return "extra result module"
+    if failed != (value.error != ""): return "aggregate failure mismatch"
+    ""
+
+fn managed_parse_action_result_encode_v2(snapshot: ManagedParseSnapshotV1, value: ManagedParseActionResultV2) -> text:
+    if managed_parse_action_result_validate_v2(snapshot, value.action, value) != "": return ""
+    var modules: [SdnValue] = []
+    var index = 0
+    var total: i64 = 0
+    for module in snapshot.modules:
+        if not value.action.package_members.contains(module.package_id): continue
+        val encoded = managed_parse_module_result_encode_v2(value.modules[index], module)
+        if encoded == "": return ""
+        total = total + text_byte_len(encoded)
+        if total > 16700000: return ""
+        val content = match managed_parse_module_result_to_sdn_v2(value.modules[index], module):
+            Ok(item): item
+            Err(_reason): return ""
+        modules = modules.push(content)
+        index = index + 1
+    val fields: [SdnValue] = [SdnValue.String("managed-parse-action-result-2"),
+        SdnValue.String(managed_parse_action_encode_v1(value.action)), SdnValue.String(value.error), SdnValue.Array(modules)]
+    val encoded = sdn_encode_canonical(SdnValue.Array(fields))
+    if text_byte_len(encoded) > 16777216: return ""
+    encoded
+
+fn managed_parse_action_result_decode_v2(snapshot: ManagedParseSnapshotV1, action: ManagedParseActionV1, payload: text) -> Result<ManagedParseActionResultV2, text>:
+    val fields = match managed_parse_result_parse_v2(payload, 16777216)?:
+        SdnValue.Array(values): values
+        _: return Err("action result must be an array")
+    if fields.len() != 4: return Err("action result field count differs")
+    if managed_parse_result_text_v2(fields[0])? != "managed-parse-action-result-2": return Err("action result version differs")
+    val observed_action = managed_parse_action_decode_v1(managed_parse_result_text_v2(fields[1])?)?
+    val error = managed_parse_result_text_v2(fields[2])?
+    val records = match fields[3]:
+        SdnValue.Array(values): values
+        _: return Err("module results must be an array")
+    if records.len() == 0 or records.len() > 4096: return Err("invalid result module count")
+    var modules: [ManagedParseModuleResultV2] = []
+    var index = 0
+    for module in snapshot.modules:
+        if not action.package_members.contains(module.package_id): continue
+        if index >= records.len(): return Err("missing result module")
+        modules = modules.push(managed_parse_module_result_from_sdn_v2(records[index], module)?)
+        index = index + 1
+    if index != records.len(): return Err("extra result module")
+    val value = ManagedParseActionResultV2(observed_action, modules, error)
+    val invalid = managed_parse_action_result_validate_v2(snapshot, action, value)
+    if invalid != "": return Err(invalid)
+    if managed_parse_action_result_encode_v2(snapshot, value) != payload: return Err("noncanonical action result")
+    Ok(value)
+
+fn managed_parse_action_result_reusable_v2(value: ManagedParseActionResultV2) -> bool:
+    if value.error != "" or value.modules.len() == 0: return false
+    for module in value.modules:
+        if module.status != "OK" or not module.reusable: return false
+    true
+
+export ManagedParseModuleResultV2, ManagedParseActionResultV2
+export managed_parse_module_result_validate_v2, managed_parse_module_result_encode_v2, managed_parse_module_result_decode_v2
+export managed_parse_action_result_validate_v2, managed_parse_action_result_encode_v2, managed_parse_action_result_decode_v2
+export managed_parse_action_result_reusable_v2
