@@ -155,7 +155,7 @@ static int rt_hsa_bundle_same_source(RtHsaBundleV1* t) {
 
 int64_t rt_hosted_safe_artifact_bundle_begin_v1(int64_t root_token,
     const uint8_t* source, uint64_t source_len, const uint8_t* bundle, uint64_t bundle_len,
-    const uint8_t* payload, uint64_t payload_len, const uint8_t* scr1, uint64_t scr1_len,
+    const uint8_t* payload, uint64_t payload_len, const uint8_t* scr1_ptr, uint64_t scr1_len,
     int64_t max_bytes) {
     char payload_leaf[256], receipt_leaf[256];
     char source_check[RT_HSA_PATH_BYTES], bundle_check[RT_HSA_PATH_BYTES];
@@ -163,7 +163,7 @@ int64_t rt_hosted_safe_artifact_bundle_begin_v1(int64_t root_token,
         !rt_hsa_path(source, source_len, 0, source_check) ||
         !rt_hsa_path(bundle, bundle_len, 0, bundle_check) ||
         !rt_hsa_bundle_leaf(payload, payload_len, payload_leaf) ||
-        !rt_hsa_bundle_leaf(scr1, scr1_len, receipt_leaf) ||
+        !rt_hsa_bundle_leaf(scr1_ptr, scr1_len, receipt_leaf) ||
         strcmp(payload_leaf, receipt_leaf) == 0) return -1;
     /* rt_hsa_path validated the raw bytes above; rt_ab_path owns the
      * NUL-terminated copies used below (the bundle copy is split in place). */
@@ -354,9 +354,9 @@ done:
     return result;
 }
 #else
-int64_t rt_hosted_safe_artifact_bundle_begin_v1(int64_t root, const uint8_t* source, uint64_t source_len, const uint8_t* bundle, uint64_t bundle_len, const uint8_t* payload, uint64_t payload_len, const uint8_t* scr1, uint64_t scr1_len, int64_t max_bytes) {
+int64_t rt_hosted_safe_artifact_bundle_begin_v1(int64_t root, const uint8_t* source, uint64_t source_len, const uint8_t* bundle, uint64_t bundle_len, const uint8_t* payload, uint64_t payload_len, const uint8_t* scr1_ptr, uint64_t scr1_len, int64_t max_bytes) {
     (void)root; (void)source; (void)source_len; (void)bundle; (void)bundle_len;
-    (void)payload; (void)payload_len; (void)scr1; (void)scr1_len; (void)max_bytes;
+    (void)payload; (void)payload_len; (void)scr1_ptr; (void)scr1_len; (void)max_bytes;
     return RT_HSA_BUNDLE_UNSUPPORTED_V1;
 }
 int64_t rt_hosted_safe_artifact_bundle_read_stage_v1(int64_t token, int64_t max_bytes) {
