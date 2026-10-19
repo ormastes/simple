@@ -1199,6 +1199,38 @@ pub extern "C" fn rt_array_len_safe(array: RuntimeValue) -> i64 {
     unsafe { (*arr).len as i64 }
 }
 
+/// Second lane of the hosted C `rt_arm_array_len_u32` (runtime_native.c): the
+/// arm64 freestanding byte helper `os/kernel/loader/byte_utils.spl` selects under
+/// `@cfg(arm64)`, which a hosted aarch64 CLI also compiles. Length clamped to
+/// u32, invalid array answers 0; i64 return per codegen's RuntimeFuncSpec.
+#[no_mangle]
+pub extern "C" fn rt_arm_array_len_u32(array: RuntimeValue) -> i64 {
+    let len = rt_array_len(array);
+    if len < 0 {
+        0
+    } else {
+        (len as u32) as i64
+    }
+}
+
+/// Second lane of the hosted C `rt_arm_array_get_byte_u32`: unsigned index,
+/// out-of-bounds or non-byte element answers 0, never faults.
+#[no_mangle]
+pub extern "C" fn rt_arm_array_get_byte_u32(array: RuntimeValue, index: i64) -> i64 {
+    if index < 0 || index >= rt_array_len(array) {
+        return 0;
+    }
+    let value = rt_array_get(array, index);
+    if !value.is_int() {
+        return 0;
+    }
+    let byte = value.as_int();
+    if !(0..=255).contains(&byte) {
+        return 0;
+    }
+    byte
+}
+
 /// Get an element from an array
 #[no_mangle]
 pub extern "C" fn rt_array_get(array: RuntimeValue, index: i64) -> RuntimeValue {
