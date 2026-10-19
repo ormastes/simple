@@ -110,8 +110,17 @@ impl MirLowering:
             case HirTypeKind.Bool: Some(MirType.bool())
             case HirTypeKind.Float(64): Some(MirType.f64())
             case HirTypeKind.Tuple(_): self.result_try_tuple_payload_type(type_)
+            # A text slot is one native word holding the runtime string
+            # pointer (mir_type_is_str: the backend materializes both text MIR
+            # spellings as a single char*). Declare it the way lower_tuple_lit
+            # records a text element, Opaque("str"), never the fat-pointer
+            # aggregate, so the projected local takes the text path.
+            case HirTypeKind.Str: Some(MirType(kind: MirTypeKind.Opaque("str")))
             case HirTypeKind.Named(_, _):
-                if self.result_try_tuple_nominal_owner(type_, false) == "": return nil
+                # Proven enum owners, then proven record owners: both are one
+                # heap-handle word in the native slot, and both owners are
+                # validated against the current declaration table.
+                if self.result_try_tuple_nominal_owner(type_, false) == "" and self.result_try_tuple_nominal_owner(type_, true) == "": return nil
                 Some(self.lower_type(type_))
             case HirTypeKind.Array(element, size):
                 # Only the unsized runtime-array contract is admitted here.
@@ -158,7 +167,11 @@ impl MirLowering:
                         self.remember_local_hir_type(destination.id, expected, 0, 0)
                         match expected.kind:
                             case HirTypeKind.Named(_, _):
-                                self.struct_value_syms[destination.id] = self.result_try_tuple_nominal_owner(expected, false)
+                                var slot_owner = self.result_try_tuple_nominal_owner(expected, false)
+                                if slot_owner == "":
+                                    slot_owner = self.result_try_tuple_nominal_owner(expected, true)
+                                if slot_owner != "":
+                                    self.struct_value_syms[destination.id] = slot_owner
                             case HirTypeKind.Array(element, _):
                                 self.runtime_array_locals[destination.id] = true
                                 self.mark_runtime_value_local(destination.id)
