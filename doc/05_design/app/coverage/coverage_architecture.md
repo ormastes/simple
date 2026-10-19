@@ -310,10 +310,10 @@ Coverage records:
 
 ### Implementation Details
 
-- **Recording**: `record_condition_coverage()` in coverage_helpers.rs
-- **Location**: Evaluated in `interpreter/expr/ops.rs` when processing Binary operators
-- **ID Generation**: Uses hash of (base_id * 31 + condition_index) for uniqueness
-- **Short-Circuit**: Both operands recorded even when right side not evaluated
+- **Recording**: `eval_decision_cond()` in coverage_helpers.rs walks the `and`/`or` tree with a `CondProbe`, recording each evaluated leaf via the runtime condition store
+- **Location**: decision sites (if/elif/while/guard/if-expression) call it directly; a standalone `and`/`or` reaches it from `interpreter/expr/ops.rs` through `eval_and_or_decision`
+- **ID Generation**: condition id = pre-order leaf index within its decision; the decision id is a hash of (file, anchor line, anchor column, sub)
+- **Short-Circuit**: an operand that is not evaluated records nothing
 
 ### Supported Operators
 
