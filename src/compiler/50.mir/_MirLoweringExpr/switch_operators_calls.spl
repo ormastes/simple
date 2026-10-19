@@ -3288,7 +3288,7 @@ impl MirLowering:
             ei = ei + 1
         self.lower_enum_match_flat(scrutinee, flat_arms, expected_type)
 
-    me lower_enum_match_flat(scrutinee: HirExpr, arms: [HirMatchArm], expected_type: HirType?) -> LocalId:
+    me lower_enum_match_flat(scrutinee: HirExpr, source_arms: [HirMatchArm], expected_type: HirType?) -> LocalId:
         """Lower `match e: case Variant(x): ...` for enum patterns. Dispatches on
         _sffi_enum_discriminant(e) compared to each variant's index; binds a single
         i64 payload via rt_enum_payload(e). Mirrors emit_if_chain_dispatch."""
@@ -3376,7 +3376,57 @@ impl MirLowering:
                     case Named(scrut_sym, _):
                         scrut_enum_symbol_id = scrut_sym.id
                     case _: ()
+        # A subject owner taken from the lowered local's retained Named type
+        # (no expression type) comes from struct_field_hir_type, which is
+        # keyed by bare struct name; a same-name re-registration only warns,
+        # so a merged table can hand back another struct's field enum. Accept
+        # that owner only when it declares EVERY bare arm variant; otherwise
+        # fail loudly instead of letting it (or the global scan) claim arms.
+        if scrut_enum_key != "" and self.enum_match_expr_type(scrutinee) == nil:
+            val shape_lookup = scrut_enum_key
+            var shape_i = 0
+            while shape_i < source_arms.len():
+                val shape_arm: HirMatchArm = source_arms[shape_i]
+                match shape_arm.pattern.kind:
+                    case Enum(shape_etype, shape_variant, _):
+                        if self.enum_match_type_owner_key(shape_etype) == "" and self.enum_variant_discriminant(shape_lookup, shape_variant) < 0:
+                            self.error_fatal("enum match: retained subject owner '{shape_lookup}' does not declare bare arm variant '{shape_variant}'; the subject's recorded type is not trustworthy here -- annotate the subject or qualify the variant", Some(shape_arm.pattern.span))
+                            scrut_enum_key = ""
+                            scrut_enum_name = ""
+                            scrut_enum_symbol_id = -1
+                    case _: ()
+                shape_i = shape_i + 1
         val scrut_enum_lookup = if scrut_enum_key != "": scrut_enum_key else: scrut_enum_name
+        # HIR binds a bare unit-variant name over an untyped subject as a
+        # catch-all Binding (lower_match_pattern), which would make every later
+        # arm unreachable. Once the subject owner is known, a Binding whose
+        # name is a unit variant of that owner is that variant's pattern.
+        var arms: [HirMatchArm] = source_arms
+        if scrut_enum_lookup != "":
+            var owned_arms: [HirMatchArm] = []
+            var own_i = 0
+            while own_i < source_arms.len():
+                val own_arm: HirMatchArm = source_arms[own_i]
+                var own_pat = own_arm.pattern
+                match own_arm.pattern.kind:
+                    case Binding(own_sym, _):
+                        val own_name = self.symbols.symbol_name_scalar_raw(own_sym.id)
+                        if own_name != "" and self.enum_variant_discriminant(scrut_enum_lookup, own_name) >= 0 and self.enum_variant_is_unit(scrut_enum_lookup, own_name):
+                            own_pat = HirPattern(
+                                kind: HirPatternKind.Enum(HirType(kind: HirTypeKind.Error, span: own_arm.pattern.span), own_name, nil),
+                                type_: nil,
+                                span: own_arm.pattern.span
+                            )
+                    case _: ()
+                owned_arms = owned_arms.push(HirMatchArm(
+                    pattern: own_pat,
+                    has_guard: own_arm.has_guard,
+                    guard: own_arm.guard,
+                    body: own_arm.body,
+                    span: own_arm.span
+                ))
+                own_i = own_i + 1
+            arms = owned_arms
         var ai = 0
         while ai < arms.len():
             # Stage-2 stores array elements through ANY. The explicit type is
