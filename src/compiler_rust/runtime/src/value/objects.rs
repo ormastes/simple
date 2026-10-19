@@ -577,9 +577,13 @@ pub extern "C" fn rt_is_none(value: RuntimeValue) -> bool {
     if value.is_nil() {
         return true;
     }
-    let none_disc = hash_variant_discriminant("None");
+    // `?` calls this on every nullable subject: hash "None" once, not per call
+    // (DefaultHasher::new() is fixed-key, so the value is a constant).
+    static NONE_DISC: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum).is_some_and(|p| unsafe {
-        (*p).enum_id == OPTION_ENUM_ID && ((*p).discriminant == 1 || (*p).discriminant == none_disc)
+        (*p).enum_id == OPTION_ENUM_ID
+            && ((*p).discriminant == 1
+                || (*p).discriminant == *NONE_DISC.get_or_init(|| hash_variant_discriminant("None")))
     })
 }
 
