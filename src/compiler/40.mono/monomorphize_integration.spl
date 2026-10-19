@@ -582,6 +582,74 @@ impl MonomorphizationPass:
         else:
             self.module_symbols[module_name] = module.symbols
         self.collect_generic_impl_methods(module, module_name)
+        self.collect_class_static_templates_v1(module, module_name)
+
+    me collect_class_static_templates_v1(module: HirModule, module_name: text):
+        # Class-owned parameters do not occur in a static function's own
+        # type_params. Register its recipe without turning it into an instance
+        # method or changing the declaration's generic argument scope.
+        for class_symbol in module.classes.keys():
+            if module.classes[class_symbol] == nil: continue
+            val owner: HirClass = module.classes[class_symbol]
+            if owner.type_params.len() == 0: continue
+            val identity = mono_type_identity(module.symbols, owner.symbol, module_name)
+            if identity == "": continue
+            var owner_names: [text] = []
+            for owner_param in owner.type_params:
+                val owner_tp: HirTypeParam = owner_param
+                owner_names = owner_names.push(owner_tp.name)
+            for method_name in owner.methods.keys():
+                val method_symbol: SymbolId = owner.methods[method_name]
+                if module.functions[method_symbol] == nil: continue
+                val method: HirFunction = module.functions[method_symbol]
+                # Mixed owner/method generic scopes retain their existing
+                # route until their separate argument binding is qualified.
+                if not method.is_static or method.type_params.len() != 0: continue
+                # A signature that never names an owner parameter (e.g.
+                # PureTensor.zeros -> PureTensor<f64>, ScalableVec.min_lanes)
+                # offers no binding evidence; templating it would make every
+                # call unspecializable (E-MONO-032/033). Keep the erased route.
+                var mentions_owner = hir_type_mentions_any_param(method.return_type, owner_names)
+                for method_param in method.params:
+                    val signature_param: HirParam = method_param
+                    if hir_type_mentions_any_param(signature_param.type_, owner_names):
+                        mentions_owner = true
+                if not mentions_owner: continue
+                val key = "static::{identity}::{method_name}"
+                val name = "{identity}::static::{method_name}"
+                if self.has_template_v1(name) or self.generic_methods.has(key):
+                    self.generic_method_rejected[key] = "duplicate static owner template"
+                    continue
+                val recipe = MonoTemplateRecipeV1(module_name: module_name,
+                    original_symbol: method.symbol, template_name: name,
+                    canonical_type_params: owner.type_params,
+                    bound_type_params: owner.type_params, inherent_method: true)
+                self.archive_template_signatures[name] = mono_template_recipe_signature_v1(method, recipe)
+                if self.template_body_mode == MonoTemplateBodyModeV1.Retained:
+                    self.generic_functions[name] = method
+                self.template_recipes[name] = recipe
+                self.template_module[name] = module_name
+                self.generic_methods[key] = name
+                self.stats.generic_functions_found = self.stats.generic_functions_found + 1
+
+    me class_static_template_v1(owner: SymbolId, method: text) -> text:
+        val identity = self.symbol_identity_v1(self.current_module, owner)
+        if identity == "": return ""
+        val key = "static::{identity}::{method}"
+        if self.generic_method_rejected.has(key): return ""
+        if not self.generic_methods.has(key): return ""
+        self.generic_methods[key]
+
+    me class_static_owner_args_v1(type_: HirType?, owner: SymbolId) -> [HirType]:
+        if type_ == nil: return []
+        val receiver_type: HirType = type_
+        match receiver_type.kind:
+            case HirTypeKind.Named(receiver_owner, arguments):
+                val identity = self.symbol_identity_v1(self.current_module, owner)
+                if identity != "" and identity == self.symbol_identity_v1(self.current_module, receiver_owner):
+                    return arguments
+            case _: ()
+        []
 
     # Cycles 85-89: this body was inlined in collect_generics, whose draw
     # corrupts the dict-index rebind (85/86: inline index), the by-value
@@ -2624,10 +2692,13 @@ impl MonomorphizationPass:
         call site are used verbatim; otherwise they are inferred from the
         argument types. A generic call that can be neither is left as-is and
         recorded as a loud diagnostic (the post-mono verifier also counts it)."""
+        self.rewrite_template_call_v1(self.callee_generic_name(callee), callee,
+            args, type_args, expected_result, call_span)
+
+    me rewrite_template_call_v1(gname: text, callee: HirExpr, args: [HirCallArg], type_args: [HirType], expected_result: HirType?, call_span: Span?) -> HirExprKind:
         val new_args = self.rewrite_call_args(args)
         var new_callee = self.rewrite_expr(callee)
         var new_type_args: [HirType] = type_args
-        val gname = self.callee_generic_name(callee)
         if gname == "":
             return HirExprKind.Call(new_callee, new_args, new_type_args)
         self.stats.call_sites_found = self.stats.call_sites_found + 1
@@ -2911,9 +2982,14 @@ impl MonomorphizationPass:
             case HirExprKind.MethodCall(receiver, method, args, resolution):
                 val rc: HirExpr = receiver
                 match resolution:
-                    case MethodResolution.StaticMethod(_, method_id):
+                    case MethodResolution.StaticMethod(owner_id, method_id):
                         val callee = HirExpr(kind: HirExprKind.Var(method_id), has_type_: false, type_: nil, span: expr.span)
-                        if self.callee_generic_name(callee) != "":
+                        val class_template = self.class_static_template_v1(owner_id, method)
+                        if class_template != "":
+                            val owner_args = self.class_static_owner_args_v1(if rc.has_type_: rc.type_ else: nil, owner_id)
+                            out.kind = self.rewrite_template_call_v1(class_template, callee, args,
+                                owner_args, if expr.has_type_: expr.type_ else: nil, expr.span)
+                        elif self.callee_generic_name(callee) != "":
                             out.kind = self.rewrite_call(callee, args, [], if expr.has_type_: expr.type_ else: nil, expr.span)
                         else:
                             out.kind = HirExprKind.MethodCall(self.rewrite_expr(rc), method, self.rewrite_call_args(args), resolution)
@@ -2925,9 +3001,14 @@ impl MonomorphizationPass:
                             out.kind = HirExprKind.MethodCall(self.rewrite_expr(rc), method, self.rewrite_call_args(args), resolution)
             case HirExprKind.StaticCall(ty, method, args, resolution):
                 match resolution:
-                    case MethodResolution.StaticMethod(_, method_id):
+                    case MethodResolution.StaticMethod(owner_id, method_id):
                         val callee = HirExpr(kind: HirExprKind.Var(method_id), has_type_: false, type_: nil, span: expr.span)
-                        if self.callee_generic_name(callee) != "":
+                        val class_template = self.class_static_template_v1(owner_id, method)
+                        if class_template != "":
+                            val owner_args = self.class_static_owner_args_v1(ty, owner_id)
+                            out.kind = self.rewrite_template_call_v1(class_template, callee, args,
+                                owner_args, if expr.has_type_: expr.type_ else: nil, expr.span)
+                        elif self.callee_generic_name(callee) != "":
                             out.kind = self.rewrite_call(callee, args, [], if expr.has_type_: expr.type_ else: nil, expr.span)
                         else:
                             out.kind = HirExprKind.StaticCall(ty, method, self.rewrite_call_args(args), resolution)
@@ -3436,6 +3517,41 @@ fn hir_type_is_concrete(ty: HirType) -> bool:
         case Projection(base, _): hir_type_is_concrete(base)
         case Tensor(elem, _, _): hir_type_is_concrete(elem)
         case _: true
+
+fn hir_type_mentions_any_param(ty: HirType, names: [text]) -> bool:
+    """True when a `TypeParam` whose name is in `names` occurs anywhere in `ty`."""
+    if ty == nil:
+        return false
+    match ty.kind:
+        case TypeParam(name, _):
+            for candidate in names:
+                if candidate == name:
+                    return true
+            false
+        case Array(elem, _): hir_type_mentions_any_param(elem, names)
+        case Slice(elem): hir_type_mentions_any_param(elem, names)
+        case Optional(inner): hir_type_mentions_any_param(inner, names)
+        case Isolated(inner): hir_type_mentions_any_param(inner, names)
+        case Ref(inner, _): hir_type_mentions_any_param(inner, names)
+        case Ptr(inner, _): hir_type_mentions_any_param(inner, names)
+        case Dict(k, v): hir_type_mentions_any_param(k, names) or hir_type_mentions_any_param(v, names)
+        case Result(ok, err): hir_type_mentions_any_param(ok, names) or hir_type_mentions_any_param(err, names)
+        case Tuple(elems): hir_types_mention_any_param(elems, names)
+        case Union(members): hir_types_mention_any_param(members, names)
+        case Named(_, args): hir_types_mention_any_param(args, names)
+        case Function(params, ret, _): hir_types_mention_any_param(params, names) or hir_type_mentions_any_param(ret, names)
+        case Projection(base, _): hir_type_mentions_any_param(base, names)
+        case Tensor(elem, _, _): hir_type_mentions_any_param(elem, names)
+        case _: false
+
+fn hir_types_mention_any_param(types: [HirType], names: [text]) -> bool:
+    if types == nil:
+        return false
+    for t in types:
+        val tt: HirType = t
+        if hir_type_mentions_any_param(tt, names):
+            return true
+    false
 
 fn hir_type_has_nominal(ty: HirType) -> bool:
     """True when `ty` names a declared type (`Named`, `DynTrait`) anywhere --

@@ -1,0 +1,239 @@
+# @req REQ-SSPEC-COMPILER
+# Real source -> parser bridge -> HIR -> mono. Native qualification is separate.
+use compiler.common.config.Logger
+use compiler.common.driver_core_types.SourceFile
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mono.monomorphize_integration.{run_monomorphization, mono_type_identity, MonomorphizationPass}
+use compiler.mono.mono_archive_types_v1.{MonoTemplateBodyModeV1, mono_apply_template_recipe_v1,
+    mono_template_signature_v1, mono_specialized_signature_v1, mono_template_signature_digest_v1}
+use compiler.monomorphize.engine.{specialize_function_with_types}
+
+fn native_require(condition: bool, label: text):
+    if not condition:
+        panic("class-static-native failure: " + label)
+
+# The class owns T; neither static method declares a method type parameter.
+# The result types make lost owner binding observable without native execution.
+val CLASS_FACTORY = "class Future<T>:\n    static fn from_value(value: T) -> T:\n        value\n    static fn pending() -> T?:\n        nil\n"
+
+fn class_static_lower_one(source: text) -> HirModule:
+    val parsed = parse_full_frontend(source, "testdata/class_static.spl", "factory", Logger(level: 0))
+    var lowering = HirLowering.with_filename("testdata/class_static.spl")
+    val module = lowering.lower_module(parsed)
+    native_require((lowering.errors.len()) == (0), "assert-1")
+    module
+
+fn class_static_direct_target(module: HirModule, caller: text, expected_args: i64) -> i64:
+    var called: i64 = -1
+    var found = false
+    for key in module.functions.keys():
+        val function: HirFunction = module.functions[key]
+        if function.name != caller: continue
+        found = true
+        val body: HirBlock = function.body
+        val tail: HirExpr = body.value
+        match tail.kind:
+            case HirExprKind.Call(callee, args, type_args):
+                native_require((args.len()) == (expected_args), "assert-2")
+                native_require((type_args.len()) == (0), "assert-3")
+                val concrete_callee: HirExpr = callee
+                native_require((concrete_callee.has_type_) == (true), "assert-4")
+                match concrete_callee.kind:
+                    case HirExprKind.NamedVar(symbol, _): called = symbol.id
+                    case _: panic("class static call lacks a concrete callable symbol")
+            case _: panic("class static call was not rewritten")
+    native_require((found) == (true), "assert-5")
+    native_require((called) > (-1), "assert-6")
+    called
+
+fn native_case_1():
+    val source = CLASS_FACTORY + "\nfn ready() -> bool:\n    Future.from_value(true)\n\nfn waiting() -> bool?:\n    Future<bool>.pending()\n"
+    val hir = class_static_lower_one(source)
+    var modules: Dict<text, HirModule> = {}
+    modules["factory"] = hir
+    val (output, stats) = run_monomorphization(modules)
+    native_require((stats.specializations_created) == (2), "assert-7")
+    native_require((stats.unresolved_generic_calls) == (0), "assert-8")
+    val module: HirModule = output["factory"]
+    val ready_target = class_static_direct_target(module, "ready", 1)
+    val pending_target = class_static_direct_target(module, "waiting", 0)
+    var concrete = 0
+    for key in module.functions.keys():
+        val function: HirFunction = module.functions[key]
+        if function.symbol.id == ready_target:
+            concrete = concrete + 1
+            native_require((function.type_params.len()) == (0), "assert-9")
+            native_require((function.is_generic_template) == (false), "assert-10")
+            native_require((function.params.len()) == (1), "assert-11")
+            match function.params[0].type_.kind:
+                case HirTypeKind.Bool: ()
+                case _: panic("from_value parameter retained owner T")
+            match function.return_type.kind:
+                case HirTypeKind.Bool: ()
+                case _: panic("from_value result retained owner T")
+        if function.symbol.id == pending_target:
+            concrete = concrete + 1
+            native_require((function.type_params.len()) == (0), "assert-12")
+            native_require((function.is_generic_template) == (false), "assert-13")
+            native_require((function.params.len()) == (0), "assert-14")
+            match function.return_type.kind:
+                case HirTypeKind.Optional(inner):
+                    match inner.kind:
+                        case HirTypeKind.Bool: ()
+                        case _: panic("pending payload retained owner T")
+                case _: panic("pending lost its optional return")
+    native_require((concrete) == (2), "assert-15")
+
+fn native_case_2():
+    val hir = class_static_lower_one(CLASS_FACTORY + "\nfn main():\n    Future<i64>.from_value(true)\n")
+    var modules: Dict<text, HirModule> = {}
+    modules["factory"] = hir
+    val (output, stats) = run_monomorphization(modules)
+    native_require((stats.specializations_created) == (0), "assert-16")
+    native_require((stats.unresolved_generic_calls) == (1), "assert-17")
+
+fn native_case_3():
+    val hir = class_static_lower_one(CLASS_FACTORY + "\nfn main():\n    Future.pending()\n")
+    var modules: Dict<text, HirModule> = {}
+    modules["factory"] = hir
+    val (output, stats) = run_monomorphization(modules)
+    native_require((stats.specializations_created) == (0), "assert-18")
+    native_require((stats.unresolved_generic_calls) == (1), "assert-19")
+
+fn native_case_4():
+    val hir = class_static_lower_one(CLASS_FACTORY)
+    for mode in [MonoTemplateBodyModeV1.Retained, MonoTemplateBodyModeV1.ArchiveRequests]:
+        var mono = MonomorphizationPass.create()
+        mono.template_body_mode = mode
+        mono.current_module = "factory"
+        mono.collect_generics(hir, "factory")
+        var registered = 0
+        for key in hir.classes.keys():
+            val owner: HirClass = hir.classes[key]
+            if owner.name != "Future": continue
+            for method in ["from_value", "pending"]:
+                val name = mono.class_static_template_v1(owner.symbol, method)
+                native_require((name != "") == (true), "assert-20")
+                val signature = mono.template_signature_v1(name)
+                native_require((signature.type_params.len()) == (1), "assert-21")
+                native_require((signature.param_types.len()) == (if method == "pending": 0 else: 1), "assert-22")
+                registered = registered + 1
+        native_require((registered) == (2), "assert-23")
+
+fn native_case_5():
+    val consumer = "use factory.{Future}\nuse payload.{Payload}\n\nfn roundtrip(value: Payload) -> Payload:\n    Future<Payload>.from_value(value)\n"
+    val sources = [
+        SourceFile(path: "testdata/factory.spl", content: CLASS_FACTORY, module_name: "factory"),
+        SourceFile(path: "testdata/payload.spl", content: "struct Payload:\n    value: i64\n", module_name: "payload"),
+        SourceFile(path: "testdata/consumer.spl", content: consumer, module_name: "consumer")]
+    var parsed: Dict<text, Module> = {}
+    for source in sources:
+        parsed[source.module_name] = parse_full_frontend(source.content, source.path, source.module_name, Logger(level: 0))
+    val surface_result = module_surfaces_from_modules(parsed, sources)
+    native_require((surface_result.is_ok()) == (true), "assert-24")
+    val surfaces = surface_result.unwrap()
+    var modules: Dict<text, HirModule> = {}
+    for source in sources:
+        var lowering = hirlowering_for_module(source.module_name, surfaces)
+        modules[source.module_name] = lowering.lower_module(parsed[source.module_name])
+        native_require((lowering.errors.len()) == (0), "assert-25")
+    val (output, stats) = run_monomorphization(modules)
+    native_require((stats.specializations_created) == (1), "assert-26")
+    native_require((stats.unresolved_generic_calls) == (0), "assert-27")
+    val caller: HirModule = output["consumer"]
+    val target = class_static_direct_target(caller, "roundtrip", 1)
+    val provider: HirModule = output["factory"]
+    var matched = false
+    for key in provider.functions.keys():
+        val function: HirFunction = provider.functions[key]
+        if function.symbol.id != target: continue
+        matched = true
+        native_require((function.params.len()) == (1), "assert-28")
+        native_require((function.type_params.len()) == (0), "assert-29")
+        match function.return_type.kind:
+            case HirTypeKind.Named(symbol, _):
+                native_require((mono_type_identity(provider.symbols, symbol, "factory")) == ("payload.Payload"), "assert-30")
+            case _: panic("imported payload result lost its nominal owner")
+    native_require((matched) == (true), "assert-31")
+# Exercise the same executable recipe materialization used by retained and
+# archive consumers. Full archive I/O/custody publication remains separate.
+fn native_archive_recipe_materialization():
+    val hir = class_static_lower_one(CLASS_FACTORY)
+    for mode in [MonoTemplateBodyModeV1.Retained, MonoTemplateBodyModeV1.ArchiveRequests]:
+        var mono = MonomorphizationPass.create()
+        mono.template_body_mode = mode
+        mono.current_module = "factory"
+        mono.collect_generics(hir, "factory")
+        var checked = 0
+        for key in hir.classes.keys():
+            val owner: HirClass = hir.classes[key]
+            if owner.name != "Future": continue
+            for method in ["from_value", "pending"]:
+                val name = mono.class_static_template_v1(owner.symbol, method)
+                native_require(name != "", "archive-template-present")
+                native_require(mono.template_recipes.has(name), "archive-recipe-present")
+                val recipe = mono.template_recipes[name]
+                native_require(hir.functions.has(recipe.original_symbol), "archive-original-present")
+                val original: HirFunction = hir.functions[recipe.original_symbol]
+                val canonical = mono_apply_template_recipe_v1(original, recipe)
+                val concrete_args = [HirType(kind: HirTypeKind.Bool, span: original.span)]
+                val specialized = specialize_function_with_types(canonical, concrete_args)
+                native_require(specialized.params.len() == original.params.len(), "archive-no-self-added")
+                native_require(specialized.params.len() == (if method == "pending": 0 else: 1), "archive-arity")
+                native_require(not specialized.is_generic_template, "archive-concrete-body")
+                native_require(specialized.type_params.len() == 0, "archive-no-type-parameters")
+                val expected = mono_specialized_signature_v1(mono.template_signature_v1(name), concrete_args, specialized.name)
+                val expected_digest = mono_template_signature_digest_v1(expected)
+                native_require(expected_digest != "", "archive-signature-encoded")
+                native_require(mono_template_signature_digest_v1(mono_template_signature_v1(specialized)) == expected_digest,
+                    "archive-body-and-fact-signature-match")
+                checked = checked + 1
+        native_require(checked == 2, "archive-two-bodies")
+
+fn native_method_owned_control():
+    val source = "class Factory:\n    static fn injected<T>(value: T) -> T:\n        value\n\nfn invoke() -> i64:\n    Factory.injected(7)\n"
+    var modules: Dict<text, HirModule> = {}
+    modules["factory"] = class_static_lower_one(source)
+    val (output, stats) = run_monomorphization(modules)
+    native_require(stats.specializations_created == 1, "method-owned-specialization")
+    native_require(stats.unresolved_generic_calls == 0, "method-owned-resolved")
+    val module: HirModule = output["factory"]
+    val target = class_static_direct_target(module, "invoke", 1)
+    var matched = false
+    for key in module.functions.keys():
+        val function: HirFunction = module.functions[key]
+        if function.symbol.id != target: continue
+        matched = true
+        native_require(function.type_params.len() == 0, "method-owned-concrete")
+        native_require(function.params.len() == 1, "method-owned-no-self")
+    native_require(matched, "method-owned-exact-target")
+
+fn native_ordinary_static_control():
+    val source = "class Factory:\n    static fn plain(value: i64) -> i64:\n        value\n\nfn invoke() -> i64:\n    Factory.plain(7)\n"
+    val hir = class_static_lower_one(source)
+    native_require(hir.functions.len() == 2, "ordinary-input-count")
+    var modules: Dict<text, HirModule> = {}
+    modules["factory"] = hir
+    val (output, stats) = run_monomorphization(modules)
+    native_require(stats.specializations_created == 0, "ordinary-no-specialization")
+    native_require(stats.unresolved_generic_calls == 0, "ordinary-no-unresolved")
+    val module: HirModule = output["factory"]
+    native_require(module.functions.len() == 2, "ordinary-functions-retained")
+
+fn main() -> i64:
+    native_case_1()
+    native_case_2()
+    native_case_3()
+    native_case_4()
+    native_case_5()
+    native_archive_recipe_materialization()
+    native_method_owned_control()
+    native_ordinary_static_control()
+    print "class-static-compiler-native-pass"
+    0
