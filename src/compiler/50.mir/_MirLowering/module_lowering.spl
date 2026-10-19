@@ -9,6 +9,7 @@ use compiler.hir.hir_codec.{hir_fn_scalars_at_v1, hir_fn_scalars_at_key_v1,
 use compiler.mir._MirLowering.bootstrap_globals.*
 use compiler.mir._MirLowering.provider_metadata.*
 use compiler.mir._MirLowering.declaration_providers_v1.*
+use compiler.mir._MirLowering.exact_extern_provenance.*
 use compiler.mir._MirLowering.provider_globals.*
 use compiler.mir._MirLowering.global_initializer_guard.*
 use compiler.mir._MirLowering.function_lowering.*
@@ -1641,6 +1642,8 @@ impl MirLowering:
         val classes: Dict<SymbolId, HirClass> = prescan_module_value.classes
         val module_name: text = prescan_module_value.name
         val module_symbols: SymbolTable = prescan_module_value.symbols
+        bootstrap_default_provider_register(mir_layout_canonical_module_name(module_name),
+            module_symbols, prescan_module_value.constants.values())
         """Cross-module struct/class-name prepass (field-index SEGV).
 
         Entry-closure lowering iterates modules on ONE shared MirLowering,
@@ -1919,12 +1922,13 @@ impl MirLowering:
         # pre-lowering source for its declared defaults. See
         # bootstrap_fn_param_defaults_register in mir_data.spl and
         # doc/08_tracking/bug/native_trailing_default_param_reads_uninitialized_2026-08-09.md.
-        bootstrap_fn_param_defaults_register(fn_name, fn_params)
+        val default_owner = mir_layout_canonical_module_name(module_name)
+        bootstrap_fn_param_defaults_register(fn_name, fn_params, default_owner)
         if prescan_call_name != fn_name:
-            bootstrap_fn_param_defaults_register(prescan_call_name, fn_params)
+            bootstrap_fn_param_defaults_register(prescan_call_name, fn_params, default_owner)
             val prescan_defaults_sanitized = prescan_call_name.replace("-", "_")
             if prescan_defaults_sanitized != prescan_call_name:
-                bootstrap_fn_param_defaults_register(prescan_defaults_sanitized, fn_params)
+                bootstrap_fn_param_defaults_register(prescan_defaults_sanitized, fn_params, default_owner)
         # `symbol_to_operand` (method_calls_literals.spl:3207) ALWAYS
         # rewrites the symbol's raw "Owner::method" spelling to
         # "Owner.method" before it ever reaches `direct_call_extern_name`,
@@ -1935,7 +1939,7 @@ impl MirLowering:
         if prescan_call_name.contains("::"):
             val prescan_defaults_dotted = prescan_call_name.replace("::", ".")
             if prescan_defaults_dotted != prescan_call_name:
-                bootstrap_fn_param_defaults_register(prescan_defaults_dotted, fn_params)
+                bootstrap_fn_param_defaults_register(prescan_defaults_dotted, fn_params, default_owner)
         if not fn_is_method:
             bootstrap_fn_ret_hir_type_register(fn_name, fn_return_type)
         # Cross-module METHOD return types (native_build_cross_module_
@@ -2276,6 +2280,7 @@ impl MirLowering:
         for raw_declaration in function_keys_37_values:
             val declaration: HirFunction = raw_declaration
             self.record_exact_extern_declaration_v1(declaration)
+        self.record_imported_exact_extern_modules_v1(module.name, providers)
         self.lowering_entry_module = is_entry_module
         var function_names: [text] = []
         val function_keys_36_values: [HirFunction] = module.functions.values()

@@ -1,0 +1,218 @@
+# @req REQ-COMPILER-GENERIC-SPECIALIZATION-OWNER
+# Actual retained production process_modules/rewrite_call regression tests.
+# Typed HIR isolates owner naming from the independent source parser pipeline.
+# Native repaired-compiler qualification is pending; seed diagnostic PASS is
+# recorded in build/native_probe/mono-owner-20261012/QUALIFICATION.md.
+use std.spec.step
+
+use std.spec
+use std.spec.step
+use compiler.hir.hir.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.mono.monomorphize_integration.{run_monomorphization_with_diagnostics, MonomorphizationPass}
+
+
+fn mk_span() -> Span:
+    Span.empty()
+
+fn mk_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: mk_span())
+
+fn mk_expr(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: false, type_: nil, span: mk_span())
+
+fn mk_block(stmts: [HirStmt]) -> HirBlock:
+    HirBlock(stmts: stmts, has: false, value: mk_expr(HirExprKind.NilLit), span: mk_span())
+
+fn mk_fn(id: i64, name: text, type_params: [HirTypeParam], params: [HirParam], ret: HirType, body: HirBlock) -> HirFunction:
+    HirFunction(
+        symbol: SymbolId(id: id),
+        name: name,
+        type_params: type_params,
+        params: params,
+        return_type: ret,
+        body: body,
+        effects: [],
+        visibility: Visibility.Public,
+        is_async: false,
+        is_static: false,
+        is_public: true,
+        is_method: false,
+        is_mutable: false,
+        is_const: false,
+        is_extern: false,
+        func_attr: FunctionAttr.default(),
+        has_export_attr: false,
+        export_attr: nil,
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_suspension: false,
+        has_vhdl_metadata: false,
+        vhdl_metadata: nil,
+        has_doc_comment: false,
+        doc_comment: "",
+        span: mk_span(),
+        is_gpu_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: ""
+    )
+
+fn make_modules(owner: text, caller: text, display: text, concrete: HirType, linkage: text = "") -> Dict<text, HirModule>:
+    val t_param = HirTypeParam(
+        symbol: SymbolId(id: 90),
+        name: "T",
+        bounds: [],
+        has_default: false,
+        default: nil,
+        span: mk_span()
+    )
+    val t_type = mk_type(HirTypeKind.TypeParam("T", []))
+    val v_param = HirParam(
+        symbol: SymbolId(id: 91),
+        name: "v",
+        type_: t_type,
+        has_default: false,
+        default: nil,
+        span: mk_span(),
+        is_mutable: false
+    )
+    var identity = mk_fn(
+        1, "identity", [t_param], [v_param], t_type,
+        mk_block([HirStmt(kind: HirStmtKind.Expr(mk_expr(HirExprKind.Var(SymbolId(id: 91)))), span: mk_span())])
+    )
+
+    if linkage == "extern": identity.is_extern = true
+    if linkage == "export": identity.has_export_attr = true
+    var attributes = identity.func_attr
+    if linkage == "global": attributes.is_global = true
+    if linkage == "entry": attributes.is_entry = true
+    identity.func_attr = attributes
+
+    val call = mk_expr(HirExprKind.Call(
+        mk_expr(HirExprKind.NamedVar(SymbolId(id: 1), display)),
+        [HirCallArg(has_name: false, name: "", value: HirExpr(kind: HirExprKind.Var(SymbolId(id: 99)), has_type_: true, type_: concrete, span: mk_span()), span: mk_span())],
+        [concrete]
+    ))
+    val main_fn = mk_fn(
+        2, "main", [], [HirParam(symbol: SymbolId(id: 99), name: "value", type_: concrete, has_default: false, default: nil, span: mk_span(), is_mutable: false)], mk_type(HirTypeKind.Unit),
+        mk_block([HirStmt(kind: HirStmtKind.Expr(call), span: mk_span())])
+    )
+
+    var functions: Dict<SymbolId, HirFunction> = {}
+    functions[identity.symbol] = identity
+    functions[main_fn.symbol] = main_fn
+    val module = HirModule(
+        name: "mono_rewrite_test",
+        path: "synthetic/mono_rewrite_test.spl",
+        imports: [],
+        exports: [],
+        domain_blocks: [],
+        symbols: SymbolTable.new(),
+        functions: functions,
+        gpu_function_targets: {},
+        gpu_function_backend_orders: {},
+        classes: {},
+        structs: {},
+        enums: {},
+        bitfields: {},
+        traits: {},
+        impls: [],
+        constants: {},
+        static_asserts: [],
+        aop_advices: [],
+        di_bindings: [],
+        arch_rules: [],
+        mock_decls: [],
+        types: []
+    )
+    var modules: Dict<text, HirModule> = {}
+    var provider = module
+    provider.name = owner
+    provider.functions = {}
+    provider.functions[identity.symbol] = identity
+    if owner == caller:
+        provider.functions[main_fn.symbol] = main_fn
+    else:
+        var consumer = module
+        consumer.name = caller
+        consumer.functions = {}
+        consumer.functions[main_fn.symbol] = main_fn
+        modules[caller] = consumer
+    modules[owner] = provider
+    modules
+
+
+fn named_call(module: HirModule) -> text:
+    for symbol in module.functions.keys():
+        val func: HirFunction = module.functions[symbol]
+        if func.name == "main":
+            val stmt: HirStmt = func.body.stmts[0]
+            match stmt.kind:
+                case HirStmtKind.Expr(expression):
+                    match expression.kind:
+                        case HirExprKind.Call(callee, _, types):
+                            expect(types.len()).to_equal(0)
+                            match callee.kind:
+                                case HirExprKind.NamedVar(_, name): return name
+                                case _: return "not-named"
+                        case _: return "not-call"
+                case _: return "not-expression"
+    "no-main"
+
+fn verify_owner(owner: text, caller: text, display: text, concrete: HirType, suffix: text, expected: text):
+    val modules = make_modules(owner, caller, display, concrete)
+    val (result, stats, diags) = run_monomorphization_with_diagnostics(modules)
+    expect(diags.len()).to_equal(0)
+    expect(stats.specializations_created).to_equal(1)
+    var found = 0
+    for symbol in result[owner].functions.keys():
+        val func: HirFunction = result[owner].functions[symbol]
+        if func.name == suffix:
+            expect(func.type_params.len()).to_equal(0)
+            found = found + 1
+    expect(found).to_equal(1)
+    expect(named_call(result[caller])).to_equal(expected)
+
+describe "generic specialization target names use the emitted owner":
+    it "qualifies a bare imported text specialization":
+        verify_owner("owner", "main", "identity", mk_type(HirTypeKind.Str), "identity$str", "owner.identity$str")
+
+    it "qualifies an imported array specialization":
+        verify_owner("owner", "main", "identity", mk_type(HirTypeKind.Array(mk_type(HirTypeKind.Int(64, true)), nil)), "identity$arr_i64", "owner.identity$arr_i64")
+
+    it "keeps canonical nested owner qualification":
+        verify_owner("pkg.nested", "main", "pkg.nested.identity", mk_type(HirTypeKind.Str), "identity$str", "pkg.nested.identity$str")
+
+    it "expands a suffix import spelling to the definition owner":
+        verify_owner("pkg.nested", "main", "nested.identity", mk_type(HirTypeKind.Str), "identity$str", "pkg.nested.identity$str")
+
+    it "preserves bare same-owner calls":
+        verify_owner("owner", "owner", "identity", mk_type(HirTypeKind.Str), "identity$str", "identity$str")
+
+describe "generic targets preserve canonical provider linkage":
+    it "normalizes source-path ownership into the emitted logical module":
+        verify_owner("src/lib/nested/provider.spl", "main", "identity", mk_type(HirTypeKind.Str), "identity$str", "lib.nested.provider.identity$str")
+
+    it "preserves bare extern specialization linkage":
+        val modules = make_modules("owner", "main", "identity", mk_type(HirTypeKind.Str), "extern")
+        val (result, stats, diags) = run_monomorphization_with_diagnostics(modules)
+        expect(diags.len()).to_equal(0)
+        expect(named_call(result["main"])).to_equal("identity$str")
+
+    it "preserves bare exported specialization linkage":
+        val modules = make_modules("owner", "main", "identity", mk_type(HirTypeKind.Str), "export")
+        val (result, stats, diags) = run_monomorphization_with_diagnostics(modules)
+        expect(diags.len()).to_equal(0)
+        expect(named_call(result["main"])).to_equal("identity$str")
+
+    it "preserves bare global specialization linkage":
+        val modules = make_modules("owner", "main", "identity", mk_type(HirTypeKind.Str), "global")
+        val (result, stats, diags) = run_monomorphization_with_diagnostics(modules)
+        expect(diags.len()).to_equal(0)
+        expect(named_call(result["main"])).to_equal("identity$str")
+
+    it "preserves bare entry specialization linkage":
+        val modules = make_modules("owner", "main", "identity", mk_type(HirTypeKind.Str), "entry")
+        val (result, stats, diags) = run_monomorphization_with_diagnostics(modules)
+        expect(diags.len()).to_equal(0)
+        expect(named_call(result["main"])).to_equal("identity$str")

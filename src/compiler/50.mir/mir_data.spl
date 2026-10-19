@@ -13,8 +13,8 @@
 # - mir_instructions.spl: Blocks, instructions, terminators, operands (~460 lines)
 # - mir_data.spl: MirBuilder API + re-exports (this file)
 
-use compiler.hir.hir_types.{SymbolId, HirType, hir_type_metadata_symbol_free}
-use compiler.hir.hir_definitions.{HirParam}
+use compiler.hir.hir_types.{SymbolId, SymbolTable, HirType, hir_type_metadata_symbol_free}
+use compiler.hir.hir_definitions.{HirParam, HirConst}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{vhdl_hardware_metadata_default}
 use compiler.common._Attributes.decl_attrs.{DriverManifestAttr, DriverManifestAttrKind}
@@ -1199,6 +1199,22 @@ fn bootstrap_fn_param_hir_types_lookup(name: text) -> [HirType]?:
 # and never answered. Same-shape duplicates are harmless and keep the first.
 var _bootstrap_fn_param_defaults: Dict<text, [HirParam]> = {}
 var _bootstrap_fn_param_defaults_ambig: Dict<text, bool> = {}
+var _bootstrap_fn_param_default_owners: Dict<text, text> = {}
+var _bootstrap_default_provider_symbols: Dict<text, SymbolTable> = {}
+var _bootstrap_default_provider_globals: Dict<text, [HirConst]> = {}
+
+fn bootstrap_default_provider_register(owner: text, symbols: SymbolTable, globals: [HirConst]):
+    _bootstrap_default_provider_symbols[owner] = symbols
+    _bootstrap_default_provider_globals[owner] = globals
+
+fn bootstrap_default_provider_symbols(owner: text) -> SymbolTable?:
+    _bootstrap_default_provider_symbols.get(owner)
+
+fn bootstrap_default_provider_globals(owner: text) -> [HirConst]?:
+    _bootstrap_default_provider_globals.get(owner)
+
+fn bootstrap_fn_param_default_owner(name: text) -> text:
+    _bootstrap_fn_param_default_owners.get(name) ?? ""
 
 fn _fn_param_defaults_shape(params: [HirParam]) -> text:
     var shape = ""
@@ -1206,9 +1222,15 @@ fn _fn_param_defaults_shape(params: [HirParam]) -> text:
         shape = shape + (if p.has_default: "D" else: "-")
     shape
 
-fn bootstrap_fn_param_defaults_register(name: text, params: [HirParam]):
+fn bootstrap_fn_param_defaults_register(name: text, params: [HirParam], owner: text = ""):
     if name == "" or _bootstrap_fn_param_defaults_ambig.contains_key(name):
         return
+    # Equal arity/default flags do not prove equal declarations. In particular,
+    # two providers may both declare f(x = LIMIT) with different LIMIT storage.
+    if _bootstrap_fn_param_default_owners.has(name) and _bootstrap_fn_param_default_owners[name] != owner:
+        _bootstrap_fn_param_defaults_ambig[name] = true
+        return
+    _bootstrap_fn_param_default_owners[name] = owner
     var any_default = false
     for p in params:
         if p.has_default:
@@ -1259,6 +1281,9 @@ fn bootstrap_fn_param_defaults_lookup(name: text) -> [HirParam]?:
 fn bootstrap_fn_param_defaults_detach_for_archive_v1():
     _bootstrap_fn_param_defaults = {}
     _bootstrap_fn_param_defaults_ambig = {}
+    _bootstrap_fn_param_default_owners = {}
+    _bootstrap_default_provider_symbols = {}
+    _bootstrap_default_provider_globals = {}
 
 # Same declaration shape as the sibling bootstrap module
 # _MirLowering/module_lowering.spl:63 -- avoids an import cycle (mir_data is
@@ -1300,11 +1325,15 @@ fn bootstrap_fn_registries_promote() -> bool:
     val param_hir_rejected_ok = _promote_bootstrap_registry(_bootstrap_fn_param_hir_rejected)
     val param_defaults_ok = _promote_bootstrap_registry(_bootstrap_fn_param_defaults)
     val param_defaults_ambig_ok = _promote_bootstrap_registry(_bootstrap_fn_param_defaults_ambig)
+    val default_owners_ok = _promote_bootstrap_registry(_bootstrap_fn_param_default_owners)
+    val default_symbols_ok = _promote_bootstrap_registry(_bootstrap_default_provider_symbols)
+    val default_globals_ok = _promote_bootstrap_registry(_bootstrap_default_provider_globals)
     ret_types_ok and ret_hir_types_ok and ret_hir_ambig_ok and ret_shapes_ok and
         ret_shape_ambig_ok and ret_err_shapes_ok and ret_ok_shapes_ok and ret_ok_shape_ambig_ok and
         ret_opt_shapes_ok and ret_opt_shape_ambig_ok and
         ret_array_element_shapes_ok and ret_array_element_shape_ambig_ok and ret_array_element_identities_ok and
-        param_hir_types_ok and param_hir_rejected_ok and param_defaults_ok and param_defaults_ambig_ok
+        param_hir_types_ok and param_hir_rejected_ok and param_defaults_ok and param_defaults_ambig_ok and
+        default_owners_ok and default_symbols_ok and default_globals_ok
 
 export use compiler.mir.mir_instruction_support.{BlockId}
 export use compiler.mir.mir_instruction_graph.{MirFunction, MirModule}
@@ -1314,6 +1343,8 @@ export bootstrap_fn_ret_hir_type_register, bootstrap_fn_ret_hir_type_lookup
 export bootstrap_fn_ret_shape_register, bootstrap_fn_ret_shape_lookup
 export bootstrap_fn_param_hir_types_register, bootstrap_fn_param_hir_types_lookup
 export bootstrap_fn_param_defaults_register, bootstrap_fn_param_defaults_lookup
+export bootstrap_fn_param_default_owner, bootstrap_default_provider_register
+export bootstrap_default_provider_symbols, bootstrap_default_provider_globals
 export bootstrap_fn_param_defaults_detach_for_archive_v1
 export bootstrap_fn_registries_promote
 

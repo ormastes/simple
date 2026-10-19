@@ -1,0 +1,128 @@
+# Execute the changed resident default binder through real frontend/HIR/MIR.
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirModule, SymbolId, SymbolTable}
+use compiler.hir.hir_definitions.{HirConst, HirExprKind}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir_data.{bootstrap_fn_param_defaults_detach_for_archive_v1,
+    bootstrap_fn_registries_promote, bootstrap_default_provider_symbols,
+    bootstrap_default_provider_globals}
+use compiler.mir._MirLowering.transient_owner_sffi.{transient_array_scope_begin_v1,
+    transient_array_scope_pause_v1, transient_array_scope_end_v1}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_instruction_graph.{MirFunction}
+use compiler.mir.mir_types.{MirStatic}
+
+fn require_default_owner(condition: bool, message: text):
+    if not condition:
+        panic("imported-default-owner: " + message)
+
+fn check_default_owner(shadow: bool, imported_alias: bool):
+    # Reset only the real compatibility registry between two independent
+    # in-process compilations, not a publication/cache receipt or authority.
+    bootstrap_fn_param_defaults_detach_for_archive_v1()
+    val provider = (if imported_alias: "use storage.{LIMIT as LOCAL_LIMIT}\n" else: "pub val LIMIT: i64 = 37\n") +
+        "fn f(value: i64 = " + (if imported_alias: "LOCAL_LIMIT" else: "LIMIT") +
+        ") -> i64:\n    value\nexport f\n"
+    val consumer = "use provider.{f}\n" +
+        (if shadow: "val LIMIT: i64 = 99\n" else: "") +
+        "fn omitted() -> i64:\n    f()\nfn explicit() -> i64:\n    f(41)\n"
+    var sources = [
+        SourceFile(path: "testdata/provider.spl", content: provider, module_name: "provider"),
+        SourceFile(path: "testdata/consumer.spl", content: consumer, module_name: "consumer")]
+    if imported_alias:
+        sources.push(SourceFile(path: "testdata/storage.spl",
+            content: "pub val LIMIT: i64 = 37\nexport LIMIT\n", module_name: "storage"))
+    var parsed: Dict<text, ParserModule> = {}
+    for source in sources:
+        parsed[source.module_name] = parse_full_frontend(source.content,
+            source.path, source.module_name, Logger(level: 0))
+    val surface_result = module_surfaces_from_modules(parsed, sources)
+    require_default_owner(surface_result.is_ok(), "module surfaces rejected")
+    val surfaces = surface_result.unwrap()
+    var modules: Dict<text, HirModule> = {}
+    for source in sources:
+        var frontend = hirlowering_for_module(source.module_name, surfaces)
+        modules[source.module_name] = frontend.lower_module(parsed[source.module_name])
+        require_default_owner(frontend.errors.len() == 0, "HIR rejected actual source")
+    val caller: HirModule = modules["consumer"]
+    var lowering = MirLowering.new(caller.symbols)
+    for source in sources:
+        lowering.prescan_module_struct_names(modules, source.module_name)
+    # Consumer first reproduces the production order: the provider's MIR
+    # storage has not been lowered yet, although its real HIR is available.
+    val mir = lowering.lower_module(caller, modules.values())
+    require_default_owner(lowering.errors.len() == 0, "resident MIR rejected imported default")
+    var provider_storage = SymbolId(id: -1)
+    var storage_count = 0
+    for raw_static in mir.statics.values():
+        val static_: MirStatic = raw_static
+        if static_.name == (if imported_alias: "storage__LIMIT" else: "provider__LIMIT"):
+            require_default_owner(static_.is_external, "consumer must reference provider storage")
+            provider_storage = static_.symbol
+            storage_count = storage_count + 1
+    require_default_owner(storage_count == 1, "missing or duplicated provider constant storage")
+    var omitted_calls = 0
+    var explicit_calls = 0
+    var provider_reads = 0
+    for raw_function in mir.functions.values():
+        val function: MirFunction = raw_function
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, _, args):
+                        if function.name.contains("omitted"):
+                            require_default_owner(args.len() == 1, "omitted argument was not supplied")
+                            omitted_calls = omitted_calls + 1
+                        if function.name.contains("explicit"):
+                            require_default_owner(args.len() == 1, "explicit argument was padded again")
+                            explicit_calls = explicit_calls + 1
+                    case MirInstKind.LoadGlobal(_, symbol):
+                        if function.name.contains("omitted"):
+                            require_default_owner(symbol.id == provider_storage.id, "default captured consumer storage")
+                            provider_reads = provider_reads + 1
+                    case _: ()
+    require_default_owner(omitted_calls == 1, "missing omitted call")
+    require_default_owner(explicit_calls == 1, "missing explicit control call")
+    require_default_owner(provider_reads == 1, "omitted default did not load provider constant")
+
+fn check_default_registry_retention():
+    bootstrap_fn_param_defaults_detach_for_archive_v1()
+    require_default_owner(transient_array_scope_begin_v1(), "retention scope begin")
+    val parsed = parse_full_frontend("pub val LIMIT: i64 = 37\nfn f(x: i64 = LIMIT) -> i64:\n    x\n",
+        "testdata/retained.spl", "retained", Logger(level: 0))
+    var frontend = HirLowering.with_filename("testdata/retained.spl")
+    val provider = frontend.lower_module(parsed)
+    require_default_owner(frontend.errors.len() == 0, "retention HIR")
+    var lowering = MirLowering.new(provider.symbols)
+    val modules: Dict<text, HirModule> = {"retained": provider}
+    lowering.prescan_module_struct_names(modules, "retained")
+    require_default_owner(transient_array_scope_pause_v1(), "retention scope pause")
+    require_default_owner(bootstrap_fn_registries_promote(), "retention promotion")
+    require_default_owner(transient_array_scope_end_v1(), "retention scope end")
+    # Only registry-retrieved roots are read after scope reclamation. These
+    # checks traverse Dict -> raw SymbolTable/array -> HirConst -> enum payload.
+    val symbols: SymbolTable = bootstrap_default_provider_symbols("retained").unwrap()
+    val globals: [HirConst] = bootstrap_default_provider_globals("retained").unwrap()
+    require_default_owner(globals.len() == 1, "retained global count")
+    val global: HirConst = globals[0]
+    require_default_owner(global.name == "LIMIT", "retained global text")
+    require_default_owner(symbols.symbols[global.symbol.id].name == "LIMIT", "retained nested symbol table")
+    match global.value.kind:
+        case HirExprKind.IntLit(value, _): require_default_owner(value == 37, "retained enum payload")
+        case _: panic("retained default provider initializer lost")
+
+fn main() -> i64:
+    check_default_registry_retention()
+    check_default_owner(false, false)
+    check_default_owner(true, false)
+    check_default_owner(false, true)
+    check_default_owner(true, true)
+    print "imported-default-compiler-owner-pass"
+    0

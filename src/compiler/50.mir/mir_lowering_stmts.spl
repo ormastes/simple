@@ -2805,8 +2805,11 @@ impl MirLowering:
         interpreter has always used: value position keeps the payload,
         condition position keeps the `rt_is_some` predicate.
 
-        Everything that is not a bare `.?` falls through to the normal
-        `lower_expr` dispatcher untouched. That fall-through is deliberate:
+        Values are evaluated once through the normal `lower_expr` dispatcher.
+        Optional conditions then test presence; Any conditions decode the
+        tagged runtime value through the existing `rt_value_truthy` ABI.
+        Other concrete types keep their existing condition representation.
+        Keeping the normal expression dispatcher is deliberate:
         the seed's first cut hand-built the and/or/not nodes here instead of
         routing through the dispatcher, which perturbed the JIT's extern set
         and demoted a whole module to the interpreter (a ~1000x perf cliff).
@@ -2855,10 +2858,22 @@ impl MirLowering:
                 # docstring already establishes for the `.?` case.
                 val cond_local: LocalId = self.lower_expr(cond)
                 var cond_is_optional = false
+                var cond_is_any = false
+                var cond_has_local_hir = false
                 if val cond_hir_type = self.find_local_hir_type(cond_local.id):
+                    cond_has_local_hir = true
                     match cond_hir_type.kind:
                         case HirTypeKind.Optional(_):
                             cond_is_optional = true
+                        case HirTypeKind.Any:
+                            # Assignment can replace HIR metadata without
+                            # changing an existing local's MIR storage type.
+                            # A native Bool slot is not a tagged Any word.
+                            if val owned_cond_mir_type = self.local_mir_type_of(cond_local):
+                                match owned_cond_mir_type.kind:
+                                    case MirTypeKind.I64:
+                                        cond_is_any = true
+                                    case _: ()
                         case _:
                             ()
                 # Bug jit_if_nil_takes_true_branch_2026-08-04. The probe above
@@ -2902,6 +2917,16 @@ impl MirLowering:
                     match cond.type_.kind:
                         case HirTypeKind.Optional(_):
                             cond_is_optional = true
+                        case HirTypeKind.Any:
+                            # Expression annotations can outlive normalization
+                            # to a native Bool. Only recover an absent local
+                            # owner when the lowered slot still has Any's ABI.
+                            if not cond_has_local_hir:
+                                if val cond_mir_type = self.local_mir_type_of(cond_local):
+                                    match cond_mir_type.kind:
+                                        case MirTypeKind.I64:
+                                            cond_is_any = true
+                                        case _: ()
                         case _:
                             ()
                 if cond_is_optional:
@@ -2915,6 +2940,24 @@ impl MirLowering:
                     val is_some_res_bare = b_bare_opt.emit_call(is_some_func_bare, [mir_operand_copy(cond_local)], MirType.bool())
                     self.builder = b_bare_opt
                     is_some_res_bare ?? LocalId(id: 0)
+                elif cond_is_any:
+                    # Any parameters retain their tagged-word representation
+                    # after MIR erases their storage type to i64. The local
+                    # HIR owner above matters: an untyped parameter's VarRef
+                    # may have no expression annotation. A raw nonzero test
+                    # would accept boxed false (and nil) as true. Do not infer
+                    # this ABI from i64, Infer, or generic runtime storage:
+                    # concrete scalar and Optional conditions differ.
+                    var b_any_cond = self.builder
+                    val truthy_func = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_value_truthy"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                            params: [MirType.i64()], return_type: MirType.bool(), is_variadic: false
+                        )))
+                    ))
+                    val truthy_res = b_any_cond.emit_call(truthy_func, [mir_operand_copy(cond_local)], MirType.bool())
+                    self.builder = b_any_cond
+                    truthy_res ?? LocalId(id: 0)
                 else:
                     cond_local
         result

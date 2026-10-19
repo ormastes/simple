@@ -2,6 +2,7 @@
 use compiler.mir._MirLoweringExpr.expr_dispatch.*
 use compiler.mir._MirLoweringExpr.function_field_call.*
 use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+use compiler.mir._MirLoweringExpr.enum_constructor_payload.*
 use compiler.mir._MirLoweringExpr.text_static_builtins.*
 use compiler.mir._MirLoweringExpr.result_predicates.*
 use compiler.mir._MirLoweringExpr.result_tuple_payload.*
@@ -2141,48 +2142,54 @@ impl MirLowering:
         if mir_mc_trace_state == 1:
             eprint("[mir-method-call] option-dispatch method={method}\n")
 
-        # Reclassify `Shape.Circle(7)` — parsed as a MethodCall — into enum
-        # construction when the receiver names a registered enum and `method` is
-        # one of its variants. Real static methods (method NOT a variant) fall
-        # through. Name-keyed to dodge the interpreter symbol_id_value(-1) quirk.
+        # Only unresolved calls on type-valued enum receivers can be
+        # constructors. Preserve declared associated methods and instances.
+        var enum_constructor_allowed = resolution_is_unresolved
         var recv_enum_name = static_receiver_name
-        # When HIR did not retain a scalar owner, recover an enum constructor
-        # only if the variant leaf is unique across the compilation. This is
-        # conservative and avoids re-matching the nested receiver payload.
-        val method_may_name_variant = method.len() > 0 and method[0:1] >= "A" and method[0:1] <= "Z"
-        # O(1) lookup through the maintained inverse index. This was a nested
-        # scan over `enum_variant_index.keys()`, run for EVERY uppercase-named
-        # method call with an unknown owner and allocating a fresh key array on
-        # each one. On the 609-module self-host closure that is the phase-5 MIR
-        # allocation runaway seen while lowering
-        # `compile_riscv_gen2_zca_migrating_predecode_product`, whose body is a
-        # dense run of `CompileResult.CodegenError(..)` calls: the log stalled
-        # byte-for-byte on one pinned core while RSS climbed GiB per ten
-        # seconds. Acceptance is unchanged -- exactly one registered owner.
-        if recv_enum_name == "" and method_may_name_variant and self.enum_variant_owners.has(method):
-            val method_variant_owners = self.enum_variant_owners[method]
-            if method_variant_owners.len() == 1:
-                recv_enum_name = method_variant_owners[0]
-        # Cycle-53 fix: static_receiver_name can be a QUALIFIED declaration
-        # identity ("lib.common.sdn.value.SdnValue", produced by
-        # mir_class_identity in the static-owner recovery above), while
-        # enum_variant_index is keyed by BARE names -- so the containment
-        # test below rejected a receiver whose enum WAS registered (cycle-52
-        # symptom: SdnValue.Bool(...) "unresolved method call" with a healthy
-        # registry). Normalize through the runtime_name -> bare index before
-        # the test; the inverse-index fallback only knew bare owners.
-        if recv_enum_name != "" and not self.enum_variant_index.contains(recv_enum_name) and
-                self.enum_variant_index_q.has(recv_enum_name):
-            val bare_recv_enum_name = self.enum_bare_of(recv_enum_name)
-            if self.enum_variant_index.contains(bare_recv_enum_name):
-                recv_enum_name = bare_recv_enum_name
-        if (mir_expr_env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1" and method == "Bool":
-            eprint("[enum-reg] ctor-reclass module={self.current_module_id} method={method} static_receiver_name='{static_receiver_name}' recv_enum_name='{recv_enum_name}' owners_has={self.enum_variant_owners.has(method)} contains={self.enum_variant_index.contains(recv_enum_name)} q_has={self.enum_variant_index_q.has(recv_enum_name)} bare_registry={self.enum_variant_index.len()}")
-        if recv_enum_name != "" and self.enum_variant_index.contains(recv_enum_name):
+        if resolved_static_receiver_symbol >= 0:
+            recv_enum_name = self.enum_constructor_symbol_owner(SymbolId(id: resolved_static_receiver_symbol))
+            if recv_enum_name == "": enum_constructor_allowed = false
+        else:
+            var receiver_declaration_id: i64 = -1
+            var receiver_legacy_name = ""
+            match receiver.kind:
+                case HirExprKind.Var(symbol): receiver_declaration_id = symbol.id
+                case HirExprKind.NamedVar(symbol, name):
+                    receiver_declaration_id = symbol.id
+                    receiver_legacy_name = name
+                case _: enum_constructor_allowed = false
+            var has_receiver_declaration = false
+            if receiver_declaration_id >= 0:
+                if val receiver_declaration = self.symbols.get_symbol_raw(receiver_declaration_id):
+                    has_receiver_declaration = true
+                    match receiver_declaration.kind:
+                        case SymbolKind.Enum:
+                            recv_enum_name = self.enum_constructor_symbol_owner(SymbolId(id: receiver_declaration_id))
+                            if recv_enum_name == "": enum_constructor_allowed = false
+                        case _: enum_constructor_allowed = false
+            if not has_receiver_declaration:
+                # Legacy name-only recovery is a lexical enum reference, not
+                # permission to classify an arbitrary expression by variant.
+                if receiver_legacy_name == "" or (recv_enum_name != "" and receiver_legacy_name != recv_enum_name) or
+                        not self.enum_variant_index.has(receiver_legacy_name) or
+                        (self.enum_bare_ambiguous.get(receiver_legacy_name) ?? false):
+                    enum_constructor_allowed = false
+                else:
+                    # Equal bare variant lists do not prove equal declaration
+                    # owners or payload types. Require one actual owner.
+                    recv_enum_name = self.enum_constructor_metadata_owner(receiver_legacy_name)
+                    if recv_enum_name == "": enum_constructor_allowed = false
+        if enum_constructor_allowed and recv_enum_name != "":
+            var variant_names: [text] = []
+            # Declaration identity must survive both admission and payload
+            # lowering. The bare map is last-wins when siblings share a name.
+            if self.enum_variant_index_q.has(recv_enum_name):
+                variant_names = self.enum_variant_index_q[recv_enum_name]
+            elif self.enum_variant_index.contains(recv_enum_name):
+                variant_names = self.enum_variant_index[recv_enum_name]
             var is_variant = false
-            for vn in self.enum_variant_index[recv_enum_name]:
-                if vn == method:
-                    is_variant = true
+            for variant_name in variant_names:
+                if variant_name == method: is_variant = true
             if is_variant:
                 return self.lower_enum_construct_named(recv_enum_name, method, args)
         if mir_mc_trace_state == 1:

@@ -3,15 +3,54 @@
 use compiler.hir.hir_lowering.module_surface_declarations.{ModuleSurfaceParserOwner}
 use compiler.hir.hir_lowering.module_surface.{module_surface_canonical_path}
 use compiler.frontend.parser_types.{ParserModule}
+use compiler.frontend.parser_types_expr.{parser_type_kind_named_name, parser_type_kind_named_args}
 use compiler.common.driver_core_types.{SourceFile}
 use std.common.crypto.sha256.{sha256_text}
+
+pub fn driver_native_parser_impls_are_enum_templates_v1(owner: ModuleSurfaceParserOwner) -> bool:
+    # This is only a declaration-side candidate. Full HIR bodies still lower
+    # and remain in the canonical cache/archive. Native admission separately
+    # requires EMPTY FINAL MIR, after monomorphization and error checks.
+    # A requested specialization therefore needs its ordinary real object.
+    for impl_ in owner.value.impls:
+        if impl_.has_trait_ or impl_.assoc_types.len() != 0 or impl_.where_clause.len() != 0:
+            return false
+        if impl_.type_params.len() == 0:
+            return false
+        val name = parser_type_kind_named_name(impl_.type_.kind)
+        if name == "" or not owner.value.enums.has(name):
+            return false
+        val definition = owner.value.enums[name]
+        val args = parser_type_kind_named_args(impl_.type_.kind)
+        if definition.type_params.len() == 0 or args.len() != 0 or
+                definition.type_params.len() != impl_.type_params.len():
+            return false
+        # parse_impl_decl + the flat bridge represent a positional generic
+        # target as argless Named(Poll), with T in impl.type_params. Concrete,
+        # nested and permuted targets retain an opaque applied argument and
+        # are rejected above. Do not infer binding from the target spelling.
+        var seen: [text] = []
+        for parameter in impl_.type_params:
+            if parameter.name == "" or seen.contains(parameter.name) or
+                    parameter.has_default or parameter.bounds.len() != 0:
+                return false
+            seen.push(parameter.name)
+        for method_name in impl_.methods.keys():
+            val method = impl_.methods[method_name]
+            # Keep static, foreign, attributed and mixed-generic methods on
+            # the existing conservative path; this narrow rule covers the
+            # ordinary instance methods of a generic enum such as Poll<T>.
+            if method.is_static or method.is_extern or method.is_async or method.is_kernel or
+                    method.attributes.len() != 0 or method.type_params.len() != 0:
+                return false
+    true
 
 pub fn driver_native_parser_is_declaration_only(owner: ModuleSurfaceParserOwner) -> bool:
     # Extern-only declaration modules (e.g. std.nogc_sync_mut.env.types: only
     # `extern fn rt_env_*` + export) legitimately lower to a MIR module with
     # zero functions — the externs resolve at link time. Treat them like the
     # bodyless facades below instead of failing "MIR module has no functions".
-    # A module with any NON-extern parsed function still hard-fails there:
+    # A module with any NON-extern free function still hard-fails there:
     # HIR had bodies, so an empty MIR is a real lowering bug and must stay
     # loud (bug bootstrap_stage2_empty_mir_bodies_2026-07-05).
     var only_extern_functions = true
@@ -30,7 +69,7 @@ pub fn driver_native_parser_is_declaration_only(owner: ModuleSurfaceParserOwner)
     # output for a real definition is never silently accepted.
     (owner.value.domain_blocks.len() == 0 and
         only_extern_functions and owner.value.classes.len() == 0 and owner.value.actors.len() == 0 and
-        owner.value.impls.len() == 0 and
+        driver_native_parser_impls_are_enum_templates_v1(owner) and
         owner.value.constants.len() == 0 and owner.value.static_asserts.len() == 0 and
         owner.value.aop_advices.len() == 0 and owner.value.di_bindings.len() == 0 and
         owner.value.arch_rules.len() == 0 and owner.value.mock_decls.len() == 0)

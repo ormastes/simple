@@ -169,10 +169,14 @@ pub fn bootstrap_lower_to_mir_context(ctx: CompileContext) -> (CompileContext, b
         return (next_ctx, not next_ctx.has_errors())
     bootstrap_clear_entry_hir_module()
     bootstrap_function_value_names_reset()
+    # Imported extern declarations are proved against these concrete typed
+    # provider modules (bound present, never unwrapped).
+    var exact_extern_providers: [HirModule] = []
     for hir_module in ctx.hir_modules.values():
         # Dict values() reads stay optional: bind concrete before the
         # concrete HirModule params (never unwrap — Poll.unwrap hazard above).
         if val present_hir_module = hir_module:
+            exact_extern_providers.push(present_hir_module)
             bootstrap_register_function_value_module(present_hir_module)
             # Pre-register Str return types for EVERY closure module before
             # the entry lowers — see bootstrap_register_fn_ret_types_module
@@ -193,7 +197,7 @@ pub fn bootstrap_lower_to_mir_context(ctx: CompileContext) -> (CompileContext, b
             if val present_entry_hir = mapped_entry_hir:
                 bootstrap_set_entry_hir_module(present_entry_hir)
                 bootstrap_register_fn_ret_types_module(present_entry_hir)
-    var bootstrap_mir = bootstrap_lower_hir_globals_to_mir_module_for_target(target_context)
+    var bootstrap_mir = bootstrap_lower_hir_globals_to_mir_module_for_target(target_context, exact_extern_providers)
     # --entry-closure builds parse+HIR-lower EVERY module reachable from the
     # entry (see SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE handling in driver.spl and
     # flat_is_bootstrap_entry_path), but the line above only feeds the single
@@ -214,7 +218,7 @@ pub fn bootstrap_lower_to_mir_context(ctx: CompileContext) -> (CompileContext, b
                 if extra_name != entry_module_name:
                     if bootstrap_trace_enabled():
                         print "[driver-mir] bootstrap closure extra module={extra_name}"
-                    val _added = bootstrap_lower_extra_hir_module_to_mir_for_target(extra_hir, target_context)
+                    val _added = bootstrap_lower_extra_hir_module_to_mir_for_target(extra_hir, target_context, exact_extern_providers)
     next_ctx.mir_modules[entry_module_name] = bootstrap_mir
     next_ctx.set_bootstrap_entry_mir(entry_module_name, bootstrap_mir)
     if bootstrap_trace_enabled():
