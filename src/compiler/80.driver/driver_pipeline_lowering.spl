@@ -22,7 +22,7 @@ use driver_types.{CompileContext}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_build.native_staged_codegen.{native_staged_codegen_flush_due_v1}
 use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_spec_v1,
-    native_mir_shard_claim_cap_v1, native_mir_shard_claim_v1}
+    native_mir_shard_claim_cap_v1, native_mir_shard_claim_v1, native_mir_shard_lpt_order_v1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory}
 use compiler.driver.driver_ice_boundary.{
     ice_boundary_module_start, ice_message_arena_aborted,
@@ -1137,8 +1137,21 @@ impl CompilerDriver:
                         mir_shard_queue, mir_shard_key, staged_source_names):
                     self.ctx.add_error("MIR shard ledger inventory refused for this worker")
                     return false
+            # Shard workers walk the schedule largest-first (source byte
+            # length, canonical-name tie-break) so the slowest modules start
+            # first; every worker computes the same order. Unsharded builds
+            # keep schedule order.
+            var mir_walk_order: [i64] = []
+            if mir_shard_queue != "" and staged_source_names.len() == mir_source_indices.len():
+                var mir_walk_weights: [i64] = []
+                for weight_idx in mir_source_indices:
+                    mir_walk_weights = mir_walk_weights.push(self.ctx.sources[weight_idx].content.len())
+                mir_walk_order = native_mir_shard_lpt_order_v1(staged_source_names, mir_walk_weights)
             while direct_pos < mir_source_indices.len():
-                val direct_idx = mir_source_indices[direct_pos]
+                # Schedule position; the entry flag below keys on it, not on
+                # the walk counter.
+                val mir_schedule_pos = if mir_walk_order.len() == mir_source_indices.len(): mir_walk_order[direct_pos] else: direct_pos
+                val direct_idx = mir_source_indices[mir_schedule_pos]
                 val src_direct = self.ctx.sources[direct_idx]
                 val source_lookup_name = src_direct.module_name
                 val module_context_errors_before = self.ctx.error_count_value
@@ -1149,8 +1162,8 @@ impl CompilerDriver:
                     source_lookup_name
                 if mir_shard_queue != "":
                     # Another worker owns it, or this worker's share is full:
-                    # not lowered here. direct_pos still advances, so the entry
-                    # flag (direct_pos == 0) keeps its schedule meaning.
+                    # not lowered here. direct_pos still advances; the entry
+                    # flag (mir_schedule_pos == 0) keeps its schedule meaning.
                     var mir_shard_owned = false
                     if self.native_staged_codegen.shard_claimed_names.len() < mir_shard_cap:
                         val mir_shard_claim = native_mir_shard_claim_v1(
@@ -1192,7 +1205,7 @@ impl CompilerDriver:
                         # Bind concrete for the concrete HirModule param; the ICE
                         # gate guarantees presence (dead Err arm mirrors it).
                         val scoped_entry = if val scoped_hir = direct_hir:
-                            direct_lowering.lower_module_transient_scoped(scoped_hir, self.ctx.mir_feed_modules, direct_pos == 0)
+                            direct_lowering.lower_module_transient_scoped(scoped_hir, self.ctx.mir_feed_modules, mir_schedule_pos == 0)
                         else:
                             Err("MIR lowering missing HIR module for {name_direct}")
                         driver_trace_module_mir_errors(name_direct, src_direct.path,
