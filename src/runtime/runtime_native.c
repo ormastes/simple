@@ -16556,16 +16556,56 @@ int64_t rt_io_tcp_read_line(int64_t fd) {
     return rt_string_new((const uint8_t*)buf, (uint64_t)pos);
 }
 
+/* A peer closing its read side must be a transport error, never a process
+ * signal. Keep one send per call so partial progress and errno stay caller-owned. */
+static ssize_t rt_io_tcp_send_no_sigpipe(int fd, const void* data, size_t len) {
+#if defined(MSG_NOSIGNAL)
+    return send(fd, data, len, MSG_NOSIGNAL);
+#elif defined(SO_NOSIGPIPE)
+    int enabled = 1;
+    int saved = errno;
+    if (setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled)) != 0)
+        return -1;
+    errno = saved;
+    return send(fd, data, len, 0);
+#else
+    /* POSIX fallback for sockets without either suppression capability. Like
+     * the process/TLS owners, mask this thread only; preserve preexisting signals. */
+    sigset_t blocked, previous, pending;
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGPIPE);
+    int error = pthread_sigmask(SIG_BLOCK, &blocked, &previous);
+    if (error != 0) { errno = error; return -1; }
+    if (sigpending(&pending) != 0) {
+        int saved = errno;
+        (void)pthread_sigmask(SIG_SETMASK, &previous, NULL);
+        errno = saved;
+        return -1;
+    }
+    int was_pending = sigismember(&pending, SIGPIPE) == 1;
+    ssize_t result = send(fd, data, len, 0);
+    int saved = errno;
+    if (result < 0 && saved == EPIPE && !was_pending &&
+        sigpending(&pending) == 0 && sigismember(&pending, SIGPIPE) == 1) {
+        int signal_number = 0;
+        (void)sigwait(&blocked, &signal_number);
+    }
+    (void)pthread_sigmask(SIG_SETMASK, &previous, NULL);
+    errno = saved;
+    return result;
+#endif
+}
+
 int64_t rt_io_tcp_write(int64_t fd, int64_t data_val) {
     RtCoreArray* ca = rt_core_array_ptr((SplArray*)(uintptr_t)data_val);
     if (!ca || !ca->data || ca->len <= 0) return 0;
-    return (int64_t)write((int)fd, ca->data, (size_t)ca->len);
+    return (int64_t)rt_io_tcp_send_no_sigpipe((int)fd, ca->data, (size_t)ca->len);
 }
 
 int64_t rt_io_tcp_write_text(int64_t fd, int64_t text_val) {
     RtCoreString* s = rt_core_as_string(text_val);
     if (!s || s->len == 0) return 0;
-    return (int64_t)write((int)fd, s->data, (size_t)s->len);
+    return (int64_t)rt_io_tcp_send_no_sigpipe((int)fd, s->data, (size_t)s->len);
 }
 
 int64_t rt_io_tcp_write_bytes(int64_t fd, int64_t data_val) {
