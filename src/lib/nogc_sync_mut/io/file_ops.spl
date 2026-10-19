@@ -1,3 +1,9 @@
+use std.nogc_sync_mut.io.file_text_session.{file_default_text_codec, file_session_encode, file_session_decode}
+use std.nogc_sync_mut.io.file_external_compat.{file_atomic_write_encoded_text, file_create_encoded_text_exclusive}
+use std.nogc_sync_mut.io.external_file.{external_file_read_bytes_at}
+use std.nogc_sync_mut.io.external_text_io.{io_legacy_utf8, io_text_error_message}
+use std.common.encoding.external_text.{utf8_format}
+
 # File Operations - Pure Simple I/O
 # Extracted from mod.spl for modularity
 
@@ -8,8 +14,8 @@ use std.nogc_sync_mut.fs.host_path.{host_path_native}
 use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
 @unsafe(reason: "raw file byte-write ABI; the provider borrows the caller-owned byte array", capabilities: [ffi])
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
-@unsafe(reason: "raw mmap text ABI; provider text ownership and nil-on-failure behavior are not admitted", capabilities: [ffi])
-extern fn rt_file_mmap_read_text(path: text) -> text
+@unsafe(reason: "legacy UTF-8 replacement provider owns create mode and empty-write semantics", capabilities: [ffi])
+extern fn rt_file_write_text_at(path: text, offset: i64, data: text) -> i64
 @unsafe(reason: "raw nullable mmap byte-array ABI; nil means mapping or read failure", capabilities: [ffi])
 extern fn rt_file_mmap_read_bytes(path: text) -> [i64]?
 @unsafe(reason: "raw SHA-256 text ABI; provider may use nil for unreadable input and is not admitted", capabilities: [ffi])
@@ -18,10 +24,6 @@ extern fn rt_file_hash_sha256(path: text) -> text
 extern fn rt_file_lock(path: text, timeout_secs: i64) -> i64
 @unsafe(reason: "consumes a raw OS file-lock descriptor", capabilities: [ffi])
 extern fn rt_file_unlock(handle: i64) -> bool
-@unsafe(reason: "checked managed-text SFFI returns nil only for a foreign I/O contract failure", capabilities: [ffi])
-extern fn rt_file_read_text_at_checked(path: text, offset: i64, size: i64) -> text?
-@unsafe(reason: "raw positional file-write ABI; negative status is the provider failure sentinel", capabilities: [ffi])
-extern fn rt_file_write_text_at(path: text, offset: i64, data: text) -> i64
 @unsafe(reason: "raw memory-map ABI; the returned address is an unvalidated provider handle", capabilities: [ffi, raw_ptr])
 extern fn rt_mmap(path: text, size: i64, offset: i64, readonly: i64) -> i64
 @unsafe(reason: "raw memory-unmap ABI; address and extent must describe a live mapping", capabilities: [ffi, raw_ptr])
@@ -35,8 +37,6 @@ use std.io_runtime.{process_run}
 extern fn rt_file_exists(path: text) -> bool
 @unsafe(reason: "raw no-follow regular-file predicate; false conflates path kind, access, and provider failure", capabilities: [ffi])
 extern fn rt_file_is_regular_no_follow(path: text) -> bool
-@unsafe(reason: "opens one no-follow file descriptor, verifies regular-file metadata, and returns at most the caller-owned bound", capabilities: [ffi])
-extern fn rt_file_read_regular_no_follow_bounded(path: text, max_bytes: i64) -> text?
 # Byte-array sibling for binary payloads (images/archives): identical
 # admission arms; the content is not UTF-8 decoded.
 @unsafe(reason: "opens one no-follow file descriptor, verifies regular-file metadata, and returns at most the caller-owned bound as raw bytes", capabilities: [ffi])
@@ -45,14 +45,10 @@ extern fn rt_file_read_regular_no_follow_last_failure() -> i64
 @unsafe(reason: "requests durable synchronization of an opened file", capabilities: [ffi])
 extern fn rt_file_fsync(path: text) -> bool
 # extern fn rt_file_write(path: text, content: text) -> bool  # Disabled - not in runtime extern registry
-@unsafe(reason: "raw atomic file-write status ABI; false is provider failure", capabilities: [ffi])
-extern fn rt_file_atomic_write(path: text, content: text) -> bool
 @unsafe(reason: "creates an OS-owned private staging directory", capabilities: [ffi])
 extern fn rt_secure_temp_dir(parent: text, prefix: text) -> text
 @unsafe(reason: "atomically transfers ownership of a staged file path", capabilities: [ffi])
 extern fn rt_file_publish_noreplace(staged_path: text, destination: text) -> i64
-@unsafe(reason: "atomically creates a new regular file and fails if the path already exists", capabilities: [ffi])
-extern fn rt_file_create_excl(path: text, content: text) -> bool
 @unsafe(reason: "raw file-size ABI; negative status is the provider failure sentinel", capabilities: [ffi])
 extern fn rt_file_size(path: text) -> i64
 @unsafe(reason: "raw file-stat ABI; zero and negative values are provider-defined failure states", capabilities: [ffi])
@@ -103,34 +99,10 @@ fn file_is_regular_no_follow(path: text) -> bool:
         rt_file_is_regular_no_follow(host_path_native(path))
 
 fn file_read_regular_no_follow_bounded(path: text, max_bytes: i64) -> Result<text, text>:
-    if max_bytes < 0:
-        return Err("bounded file read requires a non-negative limit")
-    var content: text? = nil
-    unsafe(capabilities: [ffi]):
-        content = rt_file_read_regular_no_follow_bounded(host_path_native(path), max_bytes)
-    # `== nil` + `??`, NOT `.?` + `.unwrap()`. Nullable extern text transport
-    # is a bare payload word (0 = nil, else heap string) on the Stage-2 AOT
-    # lane; the force-unwrap Option-enum lowering miscompiles that transport --
-    # `.?` reads a nonzero garbage "tag" and reports present while the
-    # unwrapped payload decodes to len -1, so a real backend failure surfaced
-    # only as the opaque "backend object-path status 1" (doc/08_tracking/bug/
-    # bootstrap_stage2_backend_object_path_status_2026-09-08.md,
-    # "force-unwrap Option-wrapper family"). `== nil` compares the word and
-    # `??` reads the payload through the shape verified on that same binary
-    # (io_runtime.file_read_result and the driver's capsule-receipt read).
-    if content == nil:
-        return Err("regular no-follow bounded file read failed ({_read_no_follow_failure_name()}): {path}")
-    # `.len() < 0` is the nil marker. The extern can answer "present" with a
-    # payload that is itself nil -- so a failed read must not be handed back as
-    # `Ok(<nil>)`. Callers would see a successful read of an empty string and
-    # report the file as empty rather than unreadable, which is exactly how the
-    # Stage 2 backend diagnostic ("wrote 29 bytes but reads back -1") stayed
-    # invisible across many bootstrap cycles. Same nil-vs-empty family as the
-    # secure temp dir and provider diagnostic guards.
-    val value = content ?? ""
-    if value.len() < 0:
-        return Err("regular no-follow bounded file read returned nil ({_read_no_follow_failure_name()}): {path}")
-    Ok(value)
+    # The byte provider preserves no-follow, regular-file and size admission.
+    # Decode only after that authoritative binary operation succeeds.
+    val bytes = file_read_regular_no_follow_bounded_bytes(path, max_bytes)?
+    io_legacy_utf8(bytes)
 
 fn file_read_regular_no_follow_bounded_bytes(path: text, max_bytes: i64) -> Result<[u8], text>:
     if max_bytes < 0:
@@ -195,6 +167,14 @@ fn file_read(path: text) -> text:
 
 # reason positional io file_ops API
 fn file_write(path: text, content: text) -> bool:
+    # Preserve unlink/create, 0644-with-umask, partial-count, and empty-write
+    # semantics of this legacy UTF-8 provider. Admission precedes unlink.
+    val codec = match file_default_text_codec():
+        case Ok(value): value
+        case Err(_): return false
+    match file_session_encode(content, codec, 0):
+        case Err(_): return false
+        case Ok(_): ()
     file_delete(path)
     unsafe(capabilities: [ffi]):
         rt_file_write_text_at(host_path_native(path), 0, content) >= 0
@@ -206,8 +186,9 @@ fn file_write_bytes(path: text, data: [u8]) -> bool:
 
 # reason positional io file_ops API
 fn file_atomic_write(path: text, content: text) -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_file_atomic_write(host_path_native(path), content)
+    match file_atomic_write_encoded_text(path, content, utf8_format()):
+        case Ok(_): true
+        case Err(_): false
 
 fn secure_temp_dir_raw(parent: text, prefix: text) -> text:
     unsafe(capabilities: [ffi]):
@@ -243,9 +224,10 @@ fn file_publish_noreplace(staged_path: text, destination: text) -> Result<bool, 
     Err("publish without replacement failed")
 
 fn file_create_exclusive(path: text, content: text) -> bool:
-    """Create `path` atomically without replacing an existing filesystem entry."""
-    unsafe(capabilities: [ffi]):
-        rt_file_create_excl(host_path_native(path), content)
+    match file_create_encoded_text_exclusive(path, content, utf8_format()):
+        case Ok(_): true
+        case Err(_): false
+
 
 fn _timestamp_str() -> text:
     val micros = _time_now_unix_micros()
@@ -253,11 +235,13 @@ fn _timestamp_str() -> text:
 
 # reason positional io file_ops API
 fn file_append(path: text, content: text) -> bool:
+    # Preserve the legacy size+positioned-write contract, including empty
+    # content succeeding without creating a file or requiring a parent.
+    # The explicitly typed append API remains the O_APPEND byte interface.
     val current_size = unsafe(capabilities: [ffi]):
         rt_file_size(host_path_native(path))
     val offset = if current_size > 0: current_size else: 0
-    unsafe(capabilities: [ffi]):
-        rt_file_write_text_at(host_path_native(path), offset, content) >= 0
+    file_write_text_at(path, offset, content) >= 0
 
 fn file_stat(path: text) -> i64:
     # Get file modification time in seconds since epoch (direct SFFI).
@@ -316,8 +300,9 @@ use std.io_runtime.{file_read_bytes, file_read_bytes_i64}
 export file_read_bytes, file_read_bytes_i64
 
 fn file_mmap_read_text(path: text) -> text:
-    unsafe(capabilities: [ffi]):
-        rt_file_mmap_read_text(host_path_native(path))
+    # Legacy UTF-8 contract uses the authoritative byte ingress. The existing
+    # byte provider is read-backed too; no raw text mmap bypass remains here.
+    read_file_text(path)
 
 # `rt_file_mmap_read_bytes` delegates to rt_file_read_bytes, which yields nil
 # on any fs::read error (missing/unreadable path). TOTAL with the documented
@@ -348,18 +333,29 @@ fn file_mmap_read_bytes(path: text) -> Result<[i64], text>:
 
 # reason positional io file_ops API
 fn file_read_text_at(path: text, offset: i64, size: i64) -> Result<text, text>:
-    # Read text from file at specific offset without changing file position.
-    var value: text? = nil
-    unsafe(capabilities: [ffi]):
-        value = rt_file_read_text_at_checked(host_path_native(path), offset, size)
-    if value.?:
-        Ok(value.unwrap())
-    else:
-        Err("offset file read failed for '{path}' at {offset} ({size} bytes)")
+    val codec = match file_default_text_codec():
+        case Ok(value): value
+        case Err(error): return Err(io_text_error_message(error))
+    if size > codec.input_byte_limit():
+        return Err("file text input exceeds the session byte limit")
+    val bytes = match external_file_read_bytes_at(path, offset, size):
+        case Ok(value): value
+        case Err(error): return Err(io_text_error_message(error))
+    match file_session_decode(bytes, codec, offset):
+        case Ok(value): Ok(value)
+        case Err(error): Err(io_text_error_message(error))
 
-# reason positional io file_ops API
 fn file_write_text_at(path: text, offset: i64, data: text) -> i64:
-    # Write text to file at specific offset without changing file position.
+    # The old provider opens O_WRONLY|O_CREAT with mode 0644 (subject to
+    # umask), preserves existing contents outside the write, and returns 0
+    # before open for empty payloads. Retain that exact compatibility contract
+    # after strict UTF-8 admission; do not substitute O_RDWR or mode 0666.
+    val codec = match file_default_text_codec():
+        case Ok(value): value
+        case Err(_): return -1
+    match file_session_encode(data, codec, offset):
+        case Err(_): return -1
+        case Ok(_): ()
     unsafe(capabilities: [ffi]):
         rt_file_write_text_at(host_path_native(path), offset, data)
 

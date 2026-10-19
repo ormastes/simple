@@ -1,0 +1,340 @@
+"""Real file sessions: automatic internal text, immutable codecs and bounded I/O.
+
+REQ-FILE-SESSION-001 ordinary facade; 002 encoding/BOM; 003 isolation;
+004 failures and lifecycle; 005 bounds and compatibility. Authored, UNRUN.
+"""
+use std.spec.*
+use std.io.types.{FileMode, IoErrorKind}
+use std.common.encoding.external_text.{Encoding, ByteOrder, BomPolicy, CodecErrorKind}
+use std.common.text_bytes.{text_to_bytes, bytes_to_text}
+use std.nogc_sync_mut.io.text_session.{TextSessionCodec, text_session_codec, utf8_text_session_codec}
+use std.nogc_sync_mut.io.file.{File, FileTextSession, FileHandle}
+use std.nogc_sync_mut.io.external_text_io.{TextIoError}
+use std.nogc_sync_mut.io_runtime.{file_write_bytes, file_read_bytes_result, file_read_result, file_delete, getpid, time_now_unix_micros}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_append, file_read_text_at, file_write_text_at}
+use std.env.platform.{get_temp_dir}
+
+fn file_session_scratch() -> text:
+    get_temp_dir() + "/file-session-{getpid()}-{time_now_unix_micros()}.bin"
+
+fn file_session_utf16(order: ByteOrder, bom: BomPolicy, input_limit: i64, output_limit: i64) -> TextSessionCodec:
+    text_session_codec(Encoding.Utf16, order, bom, Encoding.Utf16, order, bom, input_limit, output_limit).unwrap()
+
+fn file_session_codec_error(result: Result<text, TextIoError>, kind: CodecErrorKind, offset: i64):
+    match result:
+        case Ok(_): fail("malformed file text was accepted")
+        case Err(error):
+            match error:
+                case TextIoError.Codec(codec):
+                    expect(codec.kind).to_equal(kind)
+                    expect(codec.byte_offset).to_equal(offset)
+                case _: fail("codec failure lost its typed error")
+
+describe "File text sessions on actual descriptors":
+    it "keeps ordinary File and runtime reads in internal UTF-8 without caller conversions":
+        # @req: REQ-FILE-SESSION-001
+        step("Write ordinary internal text with an embedded NUL and non-BMP scalar")
+        val path = file_session_scratch()
+        val content = bytes_to_text([65u8, 0u8, 240u8, 159u8, 152u8, 128u8])
+        expect(File.write(path, content).is_ok()).to_equal(true)
+        expect(File.read(path).unwrap()).to_equal(content)
+        expect(file_read_result(path).unwrap()).to_equal(content)
+        expect(file_read_bytes_result(path).unwrap()).to_equal([65u8, 0u8, 240u8, 159u8, 152u8, 128u8])
+        expect(File.append(path, "B").is_ok()).to_equal(true)
+        expect(File.read(path).unwrap()).to_equal(content + "B")
+        expect(file_delete(path)).to_equal(true)
+
+    it "stores UTF-16BE with one required BOM across repeated writes and automatically decodes it":
+        # @req: REQ-FILE-SESSION-002
+        val path = file_session_scratch()
+        val codec = file_session_utf16(ByteOrder.BigEndian, BomPolicy.Require, 32, 32)
+        step("Bind the encoding once when opening the file session")
+        var writer = File.open_text(path, FileMode.WriteOnly, codec).unwrap()
+        expect(writer.write(bytes_to_text([65u8, 0u8])).is_ok()).to_equal(true)
+        expect(writer.write("😀").is_ok()).to_equal(true)
+        expect(writer.close().is_ok()).to_equal(true)
+        step("Inspect output bytes and read internal text through the same profile")
+        expect(file_read_bytes_result(path).unwrap()).to_equal([254u8, 255u8, 0u8, 65u8, 0u8, 0u8, 216u8, 61u8, 222u8, 0u8])
+        var reader = FileTextSession.open(path, FileMode.ReadOnly, codec).unwrap()
+        expect(text_to_bytes(reader.read().unwrap())).to_equal([65u8, 0u8, 240u8, 159u8, 152u8, 128u8])
+        expect(reader.read().unwrap()).to_equal("")
+        expect(reader.close().is_ok()).to_equal(true)
+        expect(reader.close().is_ok()).to_equal(true)
+        expect(file_delete(path)).to_equal(true)
+
+    it "isolates two simultaneously open sessions with opposite byte order":
+        # @req: REQ-FILE-SESSION-003
+        val little_path = file_session_scratch()
+        val big_path = little_path + ".be"
+        val little = file_session_utf16(ByteOrder.LittleEndian, BomPolicy.Preserve, 32, 32)
+        val big = file_session_utf16(ByteOrder.BigEndian, BomPolicy.Preserve, 32, 32)
+        step("Interleave writes without changing either session's codec")
+        var le = File.open_text(little_path, FileMode.WriteOnly, little).unwrap()
+        var be = File.open_text(big_path, FileMode.WriteOnly, big).unwrap()
+        expect(le.write("A").is_ok()).to_equal(true)
+        expect(be.write("B").is_ok()).to_equal(true)
+        expect(le.write("😀").is_ok()).to_equal(true)
+        expect(be.write("C").is_ok()).to_equal(true)
+        expect(le.close().is_ok()).to_equal(true)
+        expect(be.close().is_ok()).to_equal(true)
+        expect(file_read_bytes_result(little_path).unwrap()).to_equal([65u8, 0u8, 61u8, 216u8, 0u8, 222u8])
+        expect(file_read_bytes_result(big_path).unwrap()).to_equal([0u8, 66u8, 0u8, 67u8])
+        var left = File.open_text(little_path, FileMode.ReadOnly, little).unwrap()
+        var right = File.open_text(big_path, FileMode.ReadOnly, big).unwrap()
+        expect(right.read().unwrap()).to_equal("BC")
+        expect(left.read().unwrap()).to_equal("A😀")
+        expect(left.close().is_ok()).to_equal(true)
+        expect(right.close().is_ok()).to_equal(true)
+        expect(file_delete(little_path)).to_equal(true)
+        expect(file_delete(big_path)).to_equal(true)
+
+    it "uses distinct input and output encodings from one stored session codec":
+        # @req: REQ-FILE-SESSION-002
+        val path = file_session_scratch()
+        expect(file_write_bytes(path, [65u8, 0u8])).to_equal(true)
+        val codec = text_session_codec(Encoding.Utf16, ByteOrder.LittleEndian, BomPolicy.Preserve, Encoding.Utf8, ByteOrder.NotApplicable, BomPolicy.Preserve, 32, 32).unwrap()
+        var session = File.open_text(path, FileMode.ReadWrite, codec).unwrap()
+        expect(session.read().unwrap()).to_equal("A")
+        expect(session.write("B").is_ok()).to_equal(true)
+        expect(session.close().is_ok()).to_equal(true)
+        expect(file_read_bytes_result(path).unwrap()).to_equal([65u8, 0u8, 66u8])
+        expect(file_delete(path)).to_equal(true)
+
+    it "rejects invalid UTF-8 before exposing internal text and closes the failed session":
+        # @req: REQ-FILE-SESSION-004
+        val path = file_session_scratch()
+        expect(file_write_bytes(path, [192u8, 128u8])).to_equal(true)
+        val codec = utf8_text_session_codec(16, 16).unwrap()
+        var reader = File.open_text(path, FileMode.ReadOnly, codec).unwrap()
+        file_session_codec_error(reader.read(), CodecErrorKind.InvalidUtf8, 0)
+        expect(reader.is_open()).to_equal(false)
+        expect(reader.read().is_err()).to_equal(true)
+        expect(reader.write("A").is_err()).to_equal(true)
+        expect(File.read(path).is_err()).to_equal(true)
+        expect(file_read_result(path).is_err()).to_equal(true)
+        expect(file_read_bytes_result(path).unwrap()).to_equal([192u8, 128u8])
+        expect(file_delete(path)).to_equal(true)
+
+    it "rejects a truncated UTF-16 surrogate pair at EOF with its byte offset":
+        # @req: REQ-FILE-SESSION-004
+        val path = file_session_scratch()
+        expect(file_write_bytes(path, [65u8, 0u8, 61u8, 216u8, 66u8])).to_equal(true)
+        var session = File.open_text(path, FileMode.ReadOnly, file_session_utf16(ByteOrder.LittleEndian, BomPolicy.Preserve, 16, 16)).unwrap()
+        file_session_codec_error(session.read(), CodecErrorKind.TruncatedInput, 5)
+        expect(session.is_open()).to_equal(false)
+        expect(file_delete(path)).to_equal(true)
+
+    it "honors declared byte order and forbidden BOM without autodetection":
+        # @req: REQ-FILE-SESSION-002
+        # @req: REQ-FILE-SESSION-004
+        val path = file_session_scratch()
+        expect(file_write_bytes(path, [255u8, 254u8, 65u8, 0u8])).to_equal(true)
+        var wrong = File.open_text(path, FileMode.ReadOnly, file_session_utf16(ByteOrder.BigEndian, BomPolicy.Require, 16, 16)).unwrap()
+        file_session_codec_error(wrong.read(), CodecErrorKind.MissingBom, 0)
+        var forbidden = File.open_text(path, FileMode.ReadOnly, file_session_utf16(ByteOrder.LittleEndian, BomPolicy.Forbid, 16, 16)).unwrap()
+        file_session_codec_error(forbidden.read(), CodecErrorKind.ForbiddenBom, 0)
+        expect(file_delete(path)).to_equal(true)
+
+    it "distinguishes exact input budget from overflow and makes overflow terminal":
+        # @req: REQ-FILE-SESSION-005
+        val path = file_session_scratch()
+        val codec = utf8_text_session_codec(3, 3).unwrap()
+        expect(file_write_bytes(path, [65u8, 66u8, 67u8])).to_equal(true)
+        var exact = File.open_text(path, FileMode.ReadOnly, codec).unwrap()
+        expect(exact.read().unwrap()).to_equal("ABC")
+        expect(exact.close().is_ok()).to_equal(true)
+        expect(file_write_bytes(path, [65u8, 66u8, 67u8, 68u8])).to_equal(true)
+        var overflow = File.open_text(path, FileMode.ReadOnly, codec).unwrap()
+        expect(overflow.read().is_err()).to_equal(true)
+        expect(overflow.is_open()).to_equal(false)
+        expect(overflow.read().is_err()).to_equal(true)
+        expect(file_delete(path)).to_equal(true)
+
+    it "rejects oversized output before writing and leaves the session usable":
+        # @req: REQ-FILE-SESSION-005
+        val path = file_session_scratch()
+        expect(file_write_bytes(path, [79u8, 76u8, 68u8])).to_equal(true)
+        var session = File.open_text(path, FileMode.ReadWrite, file_session_utf16(ByteOrder.BigEndian, BomPolicy.Require, 16, 4)).unwrap()
+        expect(session.write("😀").is_err()).to_equal(true)
+        expect(session.is_open()).to_equal(true)
+        expect(file_read_bytes_result(path).unwrap()).to_equal([79u8, 76u8, 68u8])
+        expect(session.write("A").is_ok()).to_equal(true)
+        expect(session.close().is_ok()).to_equal(true)
+        expect(file_read_bytes_result(path).unwrap()).to_equal([254u8, 255u8, 0u8, 65u8])
+        expect(file_delete(path)).to_equal(true)
+
+    it "validates convenience output before truncation and preserves legacy empty append":
+        # @req: REQ-FILE-SESSION-001
+        # @req: REQ-FILE-SESSION-005
+        val path = file_session_scratch()
+        expect(File.write(path, "OLD").is_ok()).to_equal(true)
+        val invalid = bytes_to_text([192u8, 128u8])
+        expect(File.write(path, invalid).is_err()).to_equal(true)
+        expect(file_write(path, invalid)).to_equal(false)
+        expect(File.read(path).unwrap()).to_equal("OLD")
+        expect(file_append(path + ".missing/child", "")).to_equal(true)
+        expect(File.exists(path + ".missing/child")).to_equal(false)
+        expect(file_delete(path)).to_equal(true)
+
+    it "uses byte-framed positional reads and emits no interior BOM on positioned writes":
+        # @req: REQ-FILE-SESSION-002
+        val path = file_session_scratch()
+        expect(file_write_bytes(path, [255u8, 254u8, 65u8, 0u8, 66u8, 0u8])).to_equal(true)
+        val codec = file_session_utf16(ByteOrder.LittleEndian, BomPolicy.Require, 32, 32)
+        var session = File.open_text(path, FileMode.ReadWrite, codec).unwrap()
+        expect(session.read_at(2, 2).unwrap()).to_equal("A")
+        expect(session.write_at(4, "C").is_ok()).to_equal(true)
+        expect(session.read_at(0, 6).unwrap()).to_equal("AC")
+        expect(session.read_at(1, 2).is_err()).to_equal(true)
+        expect(session.is_open()).to_equal(true)
+        expect(session.close().is_ok()).to_equal(true)
+        expect(file_read_bytes_result(path).unwrap()).to_equal([255u8, 254u8, 65u8, 0u8, 67u8, 0u8])
+        expect(file_delete(path)).to_equal(true)
+
+    it "refuses unsupported required-BOM append before opening or creating a file":
+        # @req: REQ-FILE-SESSION-004
+        val path = file_session_scratch()
+        val codec = file_session_utf16(ByteOrder.LittleEndian, BomPolicy.Require, 16, 16)
+        match File.open_text(path, FileMode.Append, codec):
+            case Ok(_): fail("required BOM append opened without first-writer authority")
+            case Err(error):
+                match error:
+                    case TextIoError.Unsupported(_): ()
+                    case _: fail("unsupported append lost its typed refusal")
+        expect(File.exists(path)).to_equal(false)
+
+    it "retains borrowed byte ownership and ordinary positional UTF-8 behavior":
+        # @req: REQ-FILE-SESSION-005
+        val path = file_session_scratch()
+        expect(file_write_bytes(path, [65u8, 66u8, 67u8])).to_equal(true)
+        var handle = FileHandle.read_file(path).unwrap()
+        expect(handle.read(1).unwrap()).to_equal([65u8])
+        expect(handle.read_text().unwrap()).to_equal("BC")
+        expect(handle.is_open()).to_equal(true)
+        expect(handle.close().is_ok()).to_equal(true)
+        expect(file_read_text_at(path, 1, 1).unwrap()).to_equal("B")
+        expect(file_write_text_at(path, 1, "X")).to_equal(1)
+        expect(file_read_bytes_result(path).unwrap()).to_equal([65u8, 88u8, 67u8])
+        expect(file_delete(path)).to_equal(true)
+
+    it "handles a surrogate pair split across the bounded provider read chunks":
+        # @req: REQ-FILE-SESSION-002
+        # @req: REQ-FILE-SESSION-005
+        val path = file_session_scratch()
+        var wire: [u8] = []
+        var expected = ""
+        for index in 0..4095:
+            wire.push(65u8)
+            wire.push(0u8)
+            expected = expected + "A"
+        wire.push(61u8)
+        wire.push(216u8)
+        wire.push(0u8)
+        wire.push(222u8)
+        expect(wire.len()).to_equal(8194)
+        expect(file_write_bytes(path, wire)).to_equal(true)
+        var session = File.open_text(path, FileMode.ReadOnly, file_session_utf16(ByteOrder.LittleEndian, BomPolicy.Preserve, 8194, 8194)).unwrap()
+        expect(session.read().unwrap()).to_equal(expected + "😀")
+        expect(session.close().is_ok()).to_equal(true)
+        expect(file_delete(path)).to_equal(true)
+
+    it "makes the ordinary owning FileHandle terminal after a failed text read":
+        # @req: REQ-FILE-SESSION-004
+        val path = file_session_scratch()
+        expect(file_write_bytes(path, [192u8, 128u8, 65u8])).to_equal(true)
+        var handle = FileHandle.read_file(path).unwrap()
+        step("A codec error closes the owner before another parser can read a suffix")
+        match handle.read_text():
+            case Ok(_): fail("invalid UTF-8 became internal text")
+            case Err(error): expect(error.kind).to_equal(IoErrorKind.InvalidData)
+        expect(handle.is_open()).to_equal(false)
+        expect(handle.read(1).is_err()).to_equal(true)
+        expect(handle.read_text().is_err()).to_equal(true)
+        expect(handle.close().is_ok()).to_equal(true)
+        expect(file_delete(path)).to_equal(true)
+
+    it "rejects one-shot UTF-16 append at an odd byte position without writing":
+        # @req: REQ-FILE-SESSION-005
+        val path = file_session_scratch()
+        expect(file_write_bytes(path, [65u8])).to_equal(true)
+        val codec = file_session_utf16(ByteOrder.LittleEndian, BomPolicy.Preserve, 16, 16)
+        step("Admit output before open, then reject the actual unaligned append position")
+        expect(FileTextSession.write_file(path, "B", FileMode.Append, codec).is_err()).to_equal(true)
+        expect(file_read_bytes_result(path).unwrap()).to_equal([65u8])
+        expect(file_delete(path)).to_equal(true)
+
+    it "treats appended U+FEFF as content with Forbid on a nonempty file":
+        # @req: REQ-FILE-SESSION-002
+        val path = file_session_scratch()
+        expect(file_write_bytes(path, [65u8, 0u8])).to_equal(true)
+        val codec = file_session_utf16(ByteOrder.LittleEndian, BomPolicy.Forbid, 16, 16)
+        val content = bytes_to_text([239u8, 187u8, 191u8, 66u8])
+        step("Forbid applies at byte zero; a later U+FEFF remains ordinary content")
+        expect(FileTextSession.write_file(path, content, FileMode.Append, codec).is_ok()).to_equal(true)
+        expect(file_read_bytes_result(path).unwrap()).to_equal([65u8, 0u8, 255u8, 254u8, 66u8, 0u8])
+        var session = File.open_text(path, FileMode.ReadOnly, codec).unwrap()
+        expect(text_to_bytes(session.read().unwrap())).to_equal([65u8, 239u8, 187u8, 191u8, 66u8])
+        expect(session.close().is_ok()).to_equal(true)
+        step("The same content is forbidden when the actual append position is zero")
+        expect(file_write_bytes(path, [])).to_equal(true)
+        match FileTextSession.write_file(path, content, FileMode.Append, codec):
+            case Ok(_): fail("leading signature was accepted in Forbid mode")
+            case Err(error):
+                match error:
+                    case TextIoError.Codec(codec_error):
+                        expect(codec_error.kind).to_equal(CodecErrorKind.ForbiddenBom)
+                        expect(codec_error.byte_offset).to_equal(0)
+                    case _: fail("BOM policy lost its typed error")
+        expect(file_read_bytes_result(path).unwrap()).to_equal([])
+        expect(file_delete(path)).to_equal(true)
+
+    it "shares terminal close state across class aliases without closing a later session":
+        # @req: REQ-FILE-SESSION-004
+        val path = file_session_scratch()
+        val codec = utf8_text_session_codec(32, 32).unwrap()
+        var original = File.open_text(path, FileMode.WriteOnly, codec).unwrap()
+        var alias = original
+        expect(original.close().is_ok()).to_equal(true)
+        expect(alias.is_open()).to_equal(false)
+        expect(alias.write("stale").is_err()).to_equal(true)
+        var replacement = File.open_text(path, FileMode.WriteOnly, codec).unwrap()
+        expect(alias.close().is_ok()).to_equal(true)
+        expect(replacement.write("live").is_ok()).to_equal(true)
+        expect(replacement.close().is_ok()).to_equal(true)
+        expect(File.read(path).unwrap()).to_equal("live")
+        expect(file_delete(path)).to_equal(true)
+
+    it "closes owning write failures and positioned read failures on real descriptors":
+        # @req: REQ-FILE-SESSION-004
+        val path = file_session_scratch()
+        expect(File.write(path, "A").is_ok()).to_equal(true)
+        val codec = utf8_text_session_codec(16, 16).unwrap()
+        var readonly = File.open_text(path, FileMode.ReadOnly, codec).unwrap()
+        expect(readonly.write("B").is_err()).to_equal(true)
+        expect(readonly.is_open()).to_equal(false)
+        expect(File.read(path).unwrap()).to_equal("A")
+        var handle = FileHandle.read_file(path).unwrap()
+        expect(handle.write_text("B").is_err()).to_equal(true)
+        expect(handle.is_open()).to_equal(false)
+        var writeonly = File.open_text(path, FileMode.WriteOnly, codec).unwrap()
+        expect(writeonly.read_at(0, 1).is_err()).to_equal(true)
+        expect(writeonly.is_open()).to_equal(false)
+        expect(file_delete(path)).to_equal(true)
+
+    it "strictly decodes ordinary lines and makes malformed line consumption terminal":
+        # @req: REQ-FILE-SESSION-001
+        # @req: REQ-FILE-SESSION-004
+        val path = file_session_scratch()
+        expect(file_write_bytes(path, [65u8, 0u8, 240u8, 159u8, 152u8, 128u8, 10u8, 66u8])).to_equal(true)
+        var reader = FileHandle.read_file(path).unwrap()
+        expect(text_to_bytes(reader.read_line().unwrap())).to_equal([65u8, 0u8, 240u8, 159u8, 152u8, 128u8, 10u8])
+        expect(reader.read(1).unwrap()).to_equal([66u8])
+        expect(reader.close().is_ok()).to_equal(true)
+        expect(file_write_bytes(path, [255u8, 10u8, 65u8])).to_equal(true)
+        var malformed = FileHandle.read_file(path).unwrap()
+        match malformed.read_line():
+            case Ok(_): fail("malformed UTF-8 line became internal text")
+            case Err(error): expect(error.kind).to_equal(IoErrorKind.InvalidData)
+        expect(malformed.is_open()).to_equal(false)
+        expect(malformed.read(1).is_err()).to_equal(true)
+        expect(file_delete(path)).to_equal(true)
