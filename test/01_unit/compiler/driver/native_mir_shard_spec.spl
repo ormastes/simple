@@ -27,7 +27,8 @@ use std.nogc_sync_mut.io_runtime.{env_set, dir_create_all, dir_remove_all, file_
 use compiler.driver.driver_build.native_mir_shard.{
     native_mir_shard_count_of_v1, native_mir_shard_claim_cap_v1,
     native_mir_shard_claim_v1, native_mir_shard_publish_pass_v1,
-    native_mir_shard_link_inputs_v1, native_mir_shard_lpt_order_v1}
+    native_mir_shard_link_inputs_v1, native_mir_shard_lpt_order_v1,
+    native_mir_shard_outcome_v1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory}
 
 fn fresh_ledger(tag: text) -> text:
@@ -116,3 +117,20 @@ describe "MIR shard link admission":
         assert_true(native_mir_shard_publish_pass_v1(queue, "mod.a", "", 0, 0))
         assert_false(native_mir_shard_link_inputs_v1(queue, "other-id").is_ok())
         val _cleanup = dir_remove_all(queue)
+
+describe "MIR shard coordinator outcome":
+    it "links an aggregate PASS and stops on a real module failure":
+        # @req REQ-SSPEC-COMPILER
+        step("links an aggregate PASS and stops on a real module failure")
+        assert_equal(native_mir_shard_outcome_v1(true, 0, 0), "link")
+        assert_equal(native_mir_shard_outcome_v1(true, 1, 2), "fail")
+
+    it "falls back to in-process MIR when no module verdict exists":
+        # @req REQ-SSPEC-COMPILER
+        step("falls back to in-process MIR when no module verdict exists")
+        # Phase 3 2026-10-19: every worker BLOCKED with claimed=0 and the
+        # inventory unreadable (rows=-1) -- no module failed, so the build
+        # must continue unsharded instead of aborting.
+        assert_equal(native_mir_shard_outcome_v1(true, 1, 0), "fallback")
+        assert_equal(native_mir_shard_outcome_v1(true, 1, -1), "fallback")
+        assert_equal(native_mir_shard_outcome_v1(false, 1, 0), "fallback")

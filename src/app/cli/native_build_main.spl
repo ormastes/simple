@@ -43,6 +43,7 @@ use compiler.driver.compile_failure_policy.{compile_fail_fast_requested}
 use app.cli.native_build_streaming_request_owner.{native_build_streaming_surfaces}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_can_replace, hir_shard_aggregate_exit, hir_shard_recovery_seal, hir_shard_recovery_progress, hir_shard_recovery_failure_count, hir_shard_recovery_finished, hir_shard_recovery_block, hir_shard_recovery_blocked}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_close_inventory}
+use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_outcome_v1}
 use compiler.driver.driver_ice_boundary.{
     ice_boundary_begin_run, ice_boundary_claim_run, ice_boundary_release_run,
     ice_boundary_dead_worker_modules, ice_boundary_attribute_dead_worker_with_stderr,
@@ -992,15 +993,16 @@ fn native_build_mir_shard_count(parallel: i64) -> i64:
     val configured = (env_get("SIMPLE_MIR_SHARD_COUNT") ?? "").to_i64() ?? 0
     if configured > 0: configured else: parallel
 
-# Returns the ledger directory on aggregate PASS, "" on failure.
-fn run_mir_shards(args: [text], parallel: i64, simple_bin: text, timeout_ms: i64) -> text:
+# Returns (outcome, ledger): outcome is native_mir_shard_outcome_v1's
+# "link" (ledger = the sealed directory), "fail" or "fallback" (ledger "").
+fn run_mir_shards(args: [text], parallel: i64, simple_bin: text, timeout_ms: i64) -> (text, text):
     var base = ["run", "src/app/cli/native_build_worker.spl"]
     for arg in args:
         base = base.push(arg)
     val queue_dir = shard_ledger_queue_dir(args, "mir-queue", "mir-shard")
     if queue_dir == "":
-        eprint "[mir-shard] BLOCKED: cannot establish invocation ledger"
-        return ""
+        eprint "[mir-shard] cannot establish invocation ledger"
+        return (native_mir_shard_outcome_v1(false, 1, 0), "")
     val count = native_build_mir_shard_count(parallel)
     print "[mir-shard] shards={count} parallel={parallel} ledger={queue_dir}"
     val old_export_dir = env_get("SIMPLE_MIR_SHARD_EXPORT_DIR") ?? ""
@@ -1009,7 +1011,9 @@ fn run_mir_shards(args: [text], parallel: i64, simple_bin: text, timeout_ms: i64
         "SIMPLE_MIR_SHARD_OWNER", base, queue_dir, args, count, parallel,
         simple_bin, timeout_ms)
     env_set("SIMPLE_MIR_SHARD_EXPORT_DIR", old_export_dir)
-    if code != 0: "" else: queue_dir
+    val failed_modules = if code != 0: hir_shard_recovery_failure_count(queue_dir) else: 0
+    val outcome = native_mir_shard_outcome_v1(true, code, failed_modules)
+    if outcome == "link": (outcome, queue_dir) else: (outcome, "")
 
 # Opt-in SIMPLE_MIR_SHARD_EXPORT_SUMMARIES=1: one process runs through mono and
 # writes per-module declaration summaries
@@ -1310,13 +1314,18 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
     val old_mir_link = env_get("SIMPLE_MIR_SHARD_LINK") ?? ""
     val mir_shard_parallel = native_build_mir_shard_parallel(args)
     if mir_shard_parallel > 0:
-        val mir_ledger = run_mir_shards(forwarded_args, mir_shard_parallel, simple_bin, native_build_timeout_ms(args))
-        if mir_ledger == "":
+        val (mir_outcome, mir_ledger) = run_mir_shards(forwarded_args, mir_shard_parallel, simple_bin, native_build_timeout_ms(args))
+        if mir_outcome == "link":
+            env_set("SIMPLE_MIR_SHARD_LINK", mir_ledger)
+        elif mir_outcome == "fallback":
+            # No module verdict: the workers never got a usable HIR
+            # inventory/cache. The final worker lowers MIR in process.
+            eprint "[mir-shard] WARNING: shard pass recorded no module verdict (HIR inventory/cache unavailable to MIR workers); falling back to in-process unsharded MIR"
+        else:
             env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
             env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
             eprint "error: MIR shard aggregate failure; link and artifact publication blocked"
             return 1
-        env_set("SIMPLE_MIR_SHARD_LINK", mir_ledger)
     # Publish the candidate path only for the real worker. Parse-shard_main
     # computes its closure before setting SIMPLE_PARSE_SHARD, so inheriting this
     # env into warm-up children would let a partial child author the candidate.
