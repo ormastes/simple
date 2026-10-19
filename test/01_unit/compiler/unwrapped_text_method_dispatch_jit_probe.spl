@@ -17,6 +17,11 @@ and their RAW bool / i64 results were never boxed -- `true` printed `nil`,
 broke `is_strict_storage_descendant` (storage_roots/path_policy.spl) and with
 it every MCP caret_* tool.
 
+Two sibling checks ride along: an untyped (ANY) receiver takes the `is_any`
+result-type table, which also lacked `starts_with`/`ends_with`/`find`/`rfind`
+(same symptoms); and `x == Some(y)` must stay false for an ABSENT `x` even when
+`y` is nil, so the payload comparison is guarded by `rt_is_none`.
+
 Run once per engine and score the `PROBE VERDICT:` line:
 
     SIMPLE_EXECUTION_MODE=interpret <simple> run <this file>
@@ -58,6 +63,25 @@ fn flat_i64(n: i64) -> i64?:
 
 fn branch(flag: bool) -> text:
     if flag:
+        return "taken"
+    "skipped"
+
+# Untyped parameters are ANY receivers in HIR: the result type comes from the
+# `is_any` method table (hir/lower/expr/mod.rs), not the text table.
+fn any_starts_with(x, p):
+    x.starts_with(p)
+
+fn any_ends_with(x, p):
+    x.ends_with(p)
+
+fn any_find(x, p):
+    x.find(p)
+
+fn any_rfind(x, p):
+    x.rfind(p)
+
+fn any_branch(x, p) -> text:
+    if x.starts_with(p):
         return "taken"
     "skipped"
 
@@ -118,6 +142,21 @@ fn main() -> void:
     val flag = true
     check_text("raw bool == Some", "{flag == Some(true)}", "true")
     check_text("text == Some", "{v == Some(v)}", "true")
+    # An absent subject is unequal to every Some, even Some(nil): unwrapping
+    # both sides without a presence test compared nil with nil (true).
+    check_text("nil == Some(nil)", "{none_text() == Some(nil)}", "false")
+    check_text("nil != Some(nil)", "{none_text() != Some(nil)}", "true")
+    check_text("Some(nil) == nil subject", "{Some(nil) == none_text()}", "false")
+    check_text("raw bool false == Some(false)", "{(n < 0) == Some(false)}", "true")
+
+    # --- text methods on an ANY receiver (untyped parameter) ------------------
+    check_text("any starts_with true", "{any_starts_with(v, "ab")}", "true")
+    check_text("any starts_with false", "{any_starts_with(v, "zz")}", "false")
+    check_text("any ends_with true", "{any_ends_with(v, "bc")}", "true")
+    check_text("any find", "{any_find("/h/s/tmp", "s")}", "3")
+    check_text("any rfind", "{any_rfind("/h/s/tmp", "/")}", "4")
+    check_text("any starts_with in if", any_branch(v, "a"), "taken")
+    check_text("any starts_with in if false", any_branch(v, "zz"), "skipped")
 
     # --- `?` propagation on a `text?` feeds a text receiver --------------------
     check_text("try then starts_with", try_prefix("/h/x") ?? "none", "yes")

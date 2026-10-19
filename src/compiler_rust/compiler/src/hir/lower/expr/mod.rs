@@ -2158,6 +2158,19 @@ impl Lowerer {
                 // an untyped receiver keeps its own (dynamic) result.
                 "any" | "all" if hir_args.len() == 1 && self.is_callable_arg(&hir_args[0]) => Some(TypeId::BOOL),
                 "index_of" => Some(TypeId::I64),
+                // Text searches on an untyped receiver, same raw-result class.
+                // `starts_with`/`ends_with`/`rfind` exist only on text and the
+                // erased codegen path (codegen/instr/calls.rs) calls
+                // `rt_string_*`, which return a raw bool / raw i64. `find` is
+                // `rt_find`: a raw i64 position, EXCEPT for an array receiver
+                // with a closure argument (then the tagged element), so it is
+                // typed I64 only for a non-callable argument. Left ANY, an
+                // untyped `x.starts_with(p)` printed `nil` / `0`, `if` took the
+                // wrong branch and `x.rfind(p)` printed `<value:0x4>` under the
+                // JIT. Bug row: interp_option_unwrapped_text_starts_with_nil_2026_10_19.
+                "starts_with" | "ends_with" => Some(TypeId::BOOL),
+                "rfind" | "last_index_of" => Some(TypeId::I64),
+                "find" if hir_args.len() == 1 && !self.is_callable_arg(&hir_args[0]) => Some(TypeId::I64),
                 // "length" synonym — see the string-methods comment above.
                 "len" | "length" | "size" => Some(TypeId::I64),
                 "keys" => Some(match dict_kv {

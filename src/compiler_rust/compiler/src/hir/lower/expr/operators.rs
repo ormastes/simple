@@ -95,10 +95,16 @@ impl Lowerer {
         // report SymlinkEscape for every real root, failing every MCP caret_*
         // tool. Normalize both operands with `rt_unwrap_or_self` (payload for
         // the reserved Option enum id, identity otherwise) and compare as ANY,
-        // so both sides take the same tagged rt_native_eq path. A nil left
-        // side stays nil and stays unequal to any `Some`. A RAW scalar operand
-        // (`n == Some(5)` with `n: i64`) is boxed first so the comparison sees
-        // two tagged words.
+        // so both sides take the same tagged rt_native_eq path. A RAW scalar
+        // operand (`n == Some(5)` with `n: i64`) is boxed first so the
+        // comparison sees two tagged words.
+        //
+        // An ABSENT subject (nil, or a boxed `None`) is never equal to any
+        // `Some(...)`, whatever the payload: unwrapping both sides alone made
+        // `none_text() == Some(nil)` compare nil with nil and answer true
+        // (interpreter: false), so the subject is tested with `rt_is_none`
+        // first. Both operands are bound to temps in source order, so each is
+        // evaluated exactly once and `Some(f()) == g()` keeps f-before-g.
         if matches!(op, ast::BinOp::Eq | ast::BinOp::NotEq)
             && Self::is_some_constructor(&left_hir) != Self::is_some_constructor(&right_hir)
         {
@@ -109,13 +115,56 @@ impl Lowerer {
                 },
                 ty: TypeId::ANY,
             };
+            let subject_is_left = Self::is_some_constructor(&right_hir);
             let left_tagged = self.box_scalar_into_tagged_result(TypeId::ANY, *left_hir);
             let right_tagged = self.box_scalar_into_tagged_result(TypeId::ANY, *right_hir);
-            return Ok(HirExpr {
+            let left_idx = ctx.locals.len();
+            ctx.add_local("$some_eq_left".to_string(), TypeId::ANY, ast::Mutability::Immutable);
+            let right_idx = ctx.locals.len();
+            ctx.add_local("$some_eq_right".to_string(), TypeId::ANY, ast::Mutability::Immutable);
+            let local = |idx: usize| HirExpr {
+                kind: HirExprKind::Local(idx),
+                ty: TypeId::ANY,
+            };
+            let subject_idx = if subject_is_left { left_idx } else { right_idx };
+            let is_none = HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: "rt_is_none".to_string(),
+                    args: vec![local(subject_idx)],
+                },
+                ty: TypeId::BOOL,
+            };
+            let compare = HirExpr {
                 kind: HirExprKind::Binary {
                     op: (*op).into(),
-                    left: Box::new(normalize(left_tagged)),
-                    right: Box::new(normalize(right_tagged)),
+                    left: Box::new(normalize(local(left_idx))),
+                    right: Box::new(normalize(local(right_idx))),
+                },
+                ty: TypeId::BOOL,
+            };
+            let body = HirExpr {
+                kind: HirExprKind::If {
+                    condition: Box::new(is_none),
+                    then_branch: Box::new(HirExpr {
+                        kind: HirExprKind::Bool(matches!(op, ast::BinOp::NotEq)),
+                        ty: TypeId::BOOL,
+                    }),
+                    else_branch: Some(Box::new(compare)),
+                },
+                ty: TypeId::BOOL,
+            };
+            return Ok(HirExpr {
+                kind: HirExprKind::LetIn {
+                    local_idx: left_idx,
+                    value: Box::new(left_tagged),
+                    body: Box::new(HirExpr {
+                        kind: HirExprKind::LetIn {
+                            local_idx: right_idx,
+                            value: Box::new(right_tagged),
+                            body: Box::new(body),
+                        },
+                        ty: TypeId::BOOL,
+                    }),
                 },
                 ty: TypeId::BOOL,
             });
