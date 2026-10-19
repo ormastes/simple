@@ -395,11 +395,13 @@ fn hir_cache_store(key: text, module: HirModule, warnings: [text], parser_classi
     stored and ended
 
 fn hir_cache_store_in_owned_scope(key: text, module: HirModule, warnings: [text], parser_classification: text = "") -> bool:
+    _hir_cache_note_store_attempt()
     if parser_classification != "" and
             not hir_cache_parser_record_valid_v1(parser_classification): return false
     val blob = hir_module_encode(module)
     if blob == "":
         _hir_cache_refuse("codec")
+        _hir_cache_note_first_refusal("codec", module.path)
         return false
     # Publication is an evidence gate, independent of the diagnostic env flag:
     # refuse loss or unstable ordering before creating even a temporary file.
@@ -421,6 +423,7 @@ fn hir_cache_store_in_owned_scope(key: text, module: HirModule, warnings: [text]
         # Same fail-closed gate without the named diagnostic when the knob is
         # not due: an unstable frame is never published, silently counted.
         _hir_cache_refuse("unstable")
+        _hir_cache_note_first_refusal("unstable", module.path)
         return false
     val dir = hir_cache_dir()
     val _made = rt_dir_create_all(dir)
@@ -474,6 +477,39 @@ fn hir_cache_last_refusal_is_io_v1() -> bool:
 fn _hir_cache_refuse(reason: text):
     _hir_cache_refused = _hir_cache_refused + 1
     _hir_cache_last_reason = reason
+
+# Store-rate visibility. The summary prints only at the END of a build, and a
+# Stage 3 run that is killed in HIR never reaches it, so `codec` and
+# `unstable` refusals (7 of every 8 under sampled self-check) were invisible:
+# 771 lowered modules left 25 entries with 6 log lines. Each refusal class
+# names its first module once, and every HIR_CACHE_STORE_RATE_EVERY-th
+# attempt prints the running rate; attempts - stored - refused - io_failed
+# is any remaining silent skip.
+val HIR_CACHE_STORE_RATE_EVERY: i64 = 64
+var _hir_cache_store_attempts: i64 = 0
+var _hir_cache_codec_refusal_noted: bool = false
+var _hir_cache_unstable_refusal_noted: bool = false
+
+# Prints BEFORE counting the new attempt, so every printed attempt has
+# finished and attempts - stored - refused - io_failed is exact.
+fn _hir_cache_note_store_attempt():
+    if _hir_cache_store_attempts > 0 and
+            _hir_cache_store_attempts % HIR_CACHE_STORE_RATE_EVERY == 0:
+        val attempts = _hir_cache_store_attempts
+        val stored = _hir_cache_stores
+        val refused = _hir_cache_refused
+        val failures = _hir_cache_store_failures
+        eprint("[hir-cache-store] rate attempts={attempts} stored={stored} refused={refused} io_failed={failures}")
+    _hir_cache_store_attempts = _hir_cache_store_attempts + 1
+
+fn _hir_cache_note_first_refusal(reason: text, path: text):
+    if reason == "codec":
+        if _hir_cache_codec_refusal_noted: return
+        _hir_cache_codec_refusal_noted = true
+    elif reason == "unstable":
+        if _hir_cache_unstable_refusal_noted: return
+        _hir_cache_unstable_refusal_noted = true
+    eprint("[hir-cache-store] refused reason={reason} module={path}; entry not stored (further {reason} refusals are only counted)")
 
 # Write-time round-trip self-check knob -> mode "all" | "sampled" | "off".
 # SIMPLE_HIR_CACHE_SELFCHECK=1 checks every store, =0 never; the host-config
