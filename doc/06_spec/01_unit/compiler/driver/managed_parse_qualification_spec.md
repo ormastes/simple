@@ -7,3 +7,14 @@ The new `SIMPLE-MANAGED-PARSE-QUALIFICATION-2` and `SIMPLE-MANAGED-PARSE-WORKER-
 This is structural admission of evidence supplied by an independently trusted issuer, not cryptographic proof of execution: possession of the issuer executable's hash is not a signature. The caller must obtain expected issuer and receipt digests from its trusted qualification owner. Marker strings alone are never production authority. Existing `parser_qualifier_main.spl` remains responsible for fresh build, actual parent/worker parsing, failure collection, cache reuse and parity, and repeated source/tool/provider checks. This module neither launches that work nor issues a process receipt. Its source-closure artifact is checked byte-for-byte against the issuer's pinned digest; it does not rescan/requalify live source trees.
 
 Worker owner agreement preserves separation: `managed_parse_group` supplies actual parser results/artifacts and does not import or mint this qualification record. No runtime execution, native link, qualified worker or all-feature completion is established by this source-only patch.
+
+V2 warning-authority additions (AUTHORED_UNRUN, REQ-IM-008/012/016): construct
+mechanically pinned receipt files with a canonical V2 frontend identity and its
+exact policy marker, then submit a real nested run contract to production
+admission with independent expected pins. Confirm successful file/identity
+binding, then mutate capture policy, each feature switch, expected CPU and worker
+digest and require rejection. Keep every file hash valid while removing,
+duplicating or changing the policy evidence marker; each altered framing must
+reject. A malformed reserved V2 identity cannot use legacy V1 evidence. These
+scenarios prove intended mechanical checks only when executed; they do not
+assert that fixture bytes represent a qualified executable.

@@ -11,6 +11,7 @@ use std.common.crypto.sha256.{sha256_text}
 use app.bootstrap_builder.parser_qualification_capture.{parser_qualification_sources_v1,
     parser_qualification_pins_v1, parser_qualification_canonical_v1}
 use app.bootstrap_builder.parser_qualification_evidence.{parser_qualification_execute_v1}
+use app.bootstrap_builder.parser_qualification_evidence_v2.{parser_qualification_execute_v2}
 use compiler.driver.driver_build.managed_parse_qualification.{ManagedParseQualificationV2,
     managed_parse_worker_build_encode_v1, managed_parse_qualification_encode_v2,
     managed_parse_qualification_admit_v1}
@@ -20,7 +21,9 @@ fn parser_qualifier_read_task_v1(path: text) -> Result<BuildTaskV1, text>:
     builder_decode_task_v1(payload)
 
 fn parser_qualifier_issue_v1(task: BuildTaskV1, workspace: text, root: text,
-    runtime: text, issuer: text, target: text, parent: text, parent_digest: text) -> Result<text, text>:
+    runtime: text, issuer: text, target: text, parent: text, parent_digest: text, capture_policy: text) -> Result<text, text>:
+    if capture_policy != "" and capture_policy != "error" and capture_policy != "warning" and capture_policy != "off":
+        return Err("unsupported explicit qualification capture policy")
     if task.outputs.len() != 1 or task.timeout_ms < 1 or task.timeout_ms > 3600000:
         return Err("qualification requires one fresh worker output and bounded build")
     if parser_qualification_canonical_v1(cwd()) != parser_qualification_canonical_v1(workspace):
@@ -91,8 +94,10 @@ fn parser_qualifier_issue_v1(task: BuildTaskV1, workspace: text, root: text,
     val image_digest = file_hash_sha256_or_empty(image)
     if not file_is_regular_no_follow(image) or image_digest.len() != 64: return Err("native worker output missing")
     print "TRACE qualifier executed parser evidence begin"
-    val executed = parser_qualification_execute_v1(root + "/executed", workspace, image, image_digest,
-        parent, parent_digest, target)?
+    val executed = if capture_policy == "":
+        parser_qualification_execute_v1(root + "/executed", workspace, image, image_digest, parent, parent_digest, target)?
+    else:
+        parser_qualification_execute_v2(root + "/executed", workspace, image, image_digest, parent, parent_digest, target, capture_policy)?
     # Retain the exact canonical request in the hash-bound evidence artifact;
     # this binds argv and declared non-SCV configuration/provider input digests.
     val evidence = executed.evidence + "\n" + builder_encode_task_v1(task)
@@ -141,8 +146,13 @@ fn main() -> i64:
         if not file_atomic_write(args[4], capture): return 5
         print sha256_text(capture)
         return 0
-    if args[1] != "qualify" or args.len() != 10: return 2
-    val result = parser_qualifier_issue_v1(task, args[3], args[4], args[5], args[6], args[7], args[8], args[9])
+    var policy = ""
+    if args[1] == "qualify-v2" and args.len() == 11:
+        policy = args[10]
+        if policy != "error" and policy != "warning" and policy != "off": return 2
+    elif args[1] != "qualify" or args.len() != 10:
+        return 2
+    val result = parser_qualifier_issue_v1(task, args[3], args[4], args[5], args[6], args[7], args[8], args[9], policy)
     match result:
         case Ok(path):
             print "PASS canonical parser qualification: {path}"

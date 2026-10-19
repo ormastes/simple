@@ -1,0 +1,171 @@
+# Executed evidence only: no issued identity is returned until the pinned
+# parent artifact and both real V2 worker actions have been checked.
+use app.io.env_ops.{env_vars}
+use app.bootstrap_builder.parser_qualification_evidence.{ParserQualificationEvidenceV1}
+use app.bootstrap_builder.parser_qualification_parent_run.{parser_qualification_parent_run_v2, parser_qualification_parent_cleanup_v1}
+use compiler.driver.driver_build.managed_parse_group_contract.{ManagedParseModuleV1, ManagedParseSnapshotV1,
+    ManagedParseActionV1, managed_parse_snapshot_digest_v1, managed_parse_snapshot_encode_v1,
+    managed_parse_action_encode_v1, managed_parse_action_basename_v1, managed_parse_module_cache_key_v1}
+use compiler.driver.driver_build.managed_parse_group_result_v2.{ManagedParseActionResultV2,
+    managed_parse_action_result_decode_v2, managed_parse_action_result_validate_v2}
+use compiler.driver.driver_build.managed_parse_compatibility.{managed_parse_frontend_identity_v2,
+    managed_parse_cache_identity_v2, MANAGED_PARSE_IDENTITY_ENV_V2}
+use compiler.common.frontend_feature_identity_v1.{frontend_shared_parse_feature_identity_for_v1}
+use compiler.frontend.core.cfg_platform.{cfg_detect_os, cfg_detect_arch, cfg_detect_cpu}
+use compiler.common.diagnostics.severity.{Severity}
+use std.nogc_sync_mut.io.windows_process_owner.{WindowsProcessRequestV1, WindowsProcessInputV1,
+    windows_process_start_with_memory_v1, windows_process_poll_v1, windows_process_collect_v1}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_exists, file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io.dir_ops.{dir_create}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms, sleep_ms}
+use std.nogc_sync_mut.io_runtime.{file_hash_sha256_or_empty, dir_exists}
+use std.common.crypto.sha256.{sha256_text}
+
+fn parser_qualification_settings_v2(policy: text) -> Result<[text], text>:
+    if policy != "error" and policy != "warning" and policy != "off": return Err("explicit capture policy required")
+    # Exact currently supported parent profile. --entry-closure also selects 1
+    # inside the actual parent; no alternate feature profile is certified here.
+    Ok(["SIMPLE_NATIVE_ARENA_DECLS=", "SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1",
+        "SIMPLE_DEBUG_MATCH_PAT=", "SIMPLE_CAPTURE_WRITE_CHECK=" + policy])
+
+fn parser_qualification_result_v2(snapshot: ManagedParseSnapshotV1, action: ManagedParseActionV1,
+    result: ManagedParseActionResultV2, root: text, expected: text, policy: text, repeat: bool) -> text:
+    val invalid = managed_parse_action_result_validate_v2(snapshot, action, result)
+    if invalid != "": return invalid
+    if result.modules.len() != 4: return "V2 qualification module count differs"
+    if result.modules[0].status != "ERROR" or result.modules[3].status != "ERROR" or
+            result.modules[0].diagnostics.len() == 0 or result.modules[3].diagnostics.len() == 0:
+        return "V2 worker failed real error collection"
+    val clean = result.modules[2]
+    if clean.status != "OK" or clean.diagnostics.len() != 0 or not clean.reusable or clean.reused != repeat or
+            clean.blob_digest != expected or file_hash_sha256_or_empty(root + "/" + clean.blob_path) != expected:
+        return "V2 clean parent parity or durable reuse differs"
+    val captured = result.modules[1]
+    if policy == "error":
+        if captured.status != "ERROR" or captured.diagnostics.len() == 0: return "captured write did not fail under error policy"
+    else:
+        if captured.status != "OK" or captured.blob_path == "" or
+                file_hash_sha256_or_empty(root + "/" + captured.blob_path) != captured.blob_digest:
+            return "captured-write successful artifact unavailable"
+        if policy == "warning":
+            if captured.reused or captured.reusable or captured.diagnostics.len() == 0:
+                return "warning artifact was reused or lost diagnostics"
+            val key = managed_parse_module_cache_key_v1(snapshot, snapshot.modules[1])
+            if file_exists(root + "/cache/" + key + ".v2.sdn") or file_exists(root + "/cache/" + key + ".v2.authority"):
+                return "warning artifact acquired a reusable cache receipt"
+            for diagnostic in captured.diagnostics:
+                if diagnostic.severity != Severity.Warning or diagnostic.code != "W-CAPTURE-WRITE" or
+                        not diagnostic.message.starts_with("line 5, column "):
+                    return "warning severity or observed location differs"
+        elif captured.diagnostics.len() != 0:
+            return "off policy invented diagnostics"
+    ""
+
+fn parser_qualification_mailbox_v2(root: text, snapshot: ManagedParseSnapshotV1,
+    action: ManagedParseActionV1) -> Result<ManagedParseActionResultV2, text>:
+    val name = managed_parse_action_basename_v1(action)
+    if not file_atomic_write(root + "/requests/" + name, managed_parse_action_encode_v1(action)) or
+            not file_atomic_write(root + "/next.sdn", name): return Err("cannot publish V2 evidence action")
+    val path = root + "/receipts/" + name
+    val deadline = current_time_ms() + 30000
+    while not file_exists(path):
+        if current_time_ms() > deadline: return Err("V2 evidence action deadline exceeded")
+        sleep_ms(20)
+    val payload = file_read_regular_no_follow_bounded(path, 16777216)?
+    managed_parse_action_result_decode_v2(snapshot, action, payload)
+
+fn parser_qualification_worker_actions_v2(root: text, snapshot: ManagedParseSnapshotV1,
+    expected: text, policy: text) -> text:
+    var repeat = false
+    var warning_ids: [text] = []
+    for id in ["v2-first", "v2-second"]:
+        val action = ManagedParseActionV1(id, "qualification-group", snapshot.worker_id, snapshot.generation,
+            "qualification-lease-" + id, snapshot.snapshot_digest, snapshot.cache_identity, ["package"], true)
+        val result = match parser_qualification_mailbox_v2(root, snapshot, action):
+            Ok(value): value
+            Err(reason): return reason
+        val invalid = parser_qualification_result_v2(snapshot, action, result, root, expected, policy, repeat)
+        if invalid != "": return invalid
+        if policy == "warning":
+            var observed: [text] = []
+            for diagnostic in result.modules[1].diagnostics:
+                observed = observed.push(diagnostic.notes[0])
+            if repeat and observed != warning_ids: return "warning identity drifted between new actions"
+            warning_ids = observed
+        repeat = true
+    ""
+
+fn parser_qualification_execute_v2(root: text, workspace: text, worker: text, digest: text,
+    producer: text, producer_digest: text, target: text, policy: text) -> Result<ParserQualificationEvidenceV1, text>:
+    val settings = parser_qualification_settings_v2(policy)?
+    if dir_exists(root + "/worker") or file_exists(root + "/worker"):
+        return Err("V2 worker evidence directory must be absent")
+    val good = "fn answer() -> i64:\n    42\n"
+    val bad = "fn broken() -> i64:\n    val = 1\n"
+    # Existing collection-desugaring regression fixture; warning observed at
+    # the original write before total + x is transformed by the frontend.
+    val captured = "fn main() -> i64:\n    var total = 0\n    val x = 2\n    val hook = fn() -> i64:\n        total = total + x\n        total\n    hook()\n"
+    val parent = parser_qualification_parent_run_v2(workspace, root, producer, producer_digest, target, good, settings)?
+    val identity = managed_parse_frontend_identity_v2(parent.frontend_identity, parent.base_cache_compatibility,
+        frontend_shared_parse_feature_identity_for_v1("", "1", ""), policy)?
+    val cache = managed_parse_cache_identity_v2(identity, digest, cfg_detect_os(), cfg_detect_arch(), cfg_detect_cpu())?
+    var snapshot = ManagedParseSnapshotV1("qualification-slot", 1, digest, "", cache,
+        cfg_detect_os(), cfg_detect_arch(), cfg_detect_cpu(), 1048576,
+        [ManagedParseModuleV1("bad1", "package", "qualification-parent/bad1.spl", sha256_text(bad)),
+         ManagedParseModuleV1("captured", "package", "qualification-parent/captured.spl", sha256_text(captured)),
+         ManagedParseModuleV1("good", "package", "qualification-parent/good.spl", sha256_text(good)),
+         ManagedParseModuleV1("bad2", "package", "qualification-parent/bad2.spl", sha256_text(bad))])
+    snapshot.snapshot_digest = managed_parse_snapshot_digest_v1(snapshot)
+    val worker_root = root + "/worker"
+    if not dir_create(worker_root + "/sources/qualification-parent", true) or
+            not dir_create(worker_root + "/requests", true): return Err("cannot create V2 evidence source directories")
+    val sources = [bad, captured, good, bad]
+    var inputs: [WindowsProcessInputV1] = []
+    for index in 0..snapshot.modules.len():
+        val module = snapshot.modules[index]
+        val path = worker_root + "/sources/" + module.source_path
+        if not file_atomic_write(path, sources[index]): return Err("cannot write V2 evidence source")
+        inputs = inputs.push(WindowsProcessInputV1(path, module.source_digest))
+    val installed = managed_parse_snapshot_encode_v1(snapshot)
+    if not file_atomic_write(worker_root + "/install.sdn", installed): return Err("cannot retain V2 evidence snapshot")
+    inputs = inputs.push(WindowsProcessInputV1(worker_root + "/install.sdn", sha256_text(installed)))
+    val changed = ["SIMPLE_NATIVE_ARENA_DECLS", "SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "SIMPLE_DEBUG_MATCH_PAT",
+        "SIMPLE_CAPTURE_WRITE_CHECK", MANAGED_PARSE_IDENTITY_ENV_V2]
+    var environment: [text] = []
+    for pair in env_vars():
+        if not changed.contains(pair.0.to_upper()): environment = environment.push(pair.0 + "=" + pair.1)
+    environment = environment + settings + [MANAGED_PARSE_IDENTITY_ENV_V2 + "=" + identity]
+    val request = WindowsProcessRequestV1(worker, digest, ["--group-root-v2", worker_root], environment,
+        worker_root, inputs, root + "/worker.stdout.log", root + "/worker.stderr.log", 90000)
+    val lease = windows_process_start_with_memory_v1(request, 536870912)?
+    val failure = parser_qualification_worker_actions_v2(worker_root, snapshot, parent.blob_digest, policy)
+    if failure != "":
+        val cleanup = parser_qualification_parent_cleanup_v1(lease)
+        return Err(failure + "; cleanup=" + cleanup)
+    if not file_atomic_write(worker_root + "/shutdown.sdn",
+            snapshot.worker_id + "\n{snapshot.generation}\n" + snapshot.snapshot_digest + "\n"):
+        val cleanup = parser_qualification_parent_cleanup_v1(lease)
+        return Err("cannot request V2 worker shutdown; cleanup=" + cleanup)
+    val deadline = current_time_ms() + 10000
+    while true:
+        val observed = match windows_process_poll_v1(lease):
+            Ok(value): value
+            Err(reason):
+                val cleanup = parser_qualification_parent_cleanup_v1(lease)
+                return Err(reason + "; cleanup=" + cleanup)
+        if observed.terminal: break
+        if current_time_ms() > deadline:
+            val cleanup = parser_qualification_parent_cleanup_v1(lease)
+            return Err("V2 worker shutdown exceeded deadline; cleanup=" + cleanup)
+        sleep_ms(20)
+    val terminal = match windows_process_collect_v1(lease):
+        Ok(value): value
+        Err(reason):
+            val cleanup = parser_qualification_parent_cleanup_v1(lease)
+            return Err(reason + "; cleanup=" + cleanup)
+    if terminal.exit_code != 0 or terminal.timed_out or not terminal.tree_empty or not terminal.leader_reaped:
+        return Err("V2 worker terminal ownership evidence differs")
+    Ok(ParserQualificationEvidenceV1(identity,
+        "MANAGED_PARSE_REAL_FAILURE_COLLECTION_PASS\nMANAGED_PARSE_DURABLE_REUSE_PASS\nMANAGED_PARSE_PARENT_WORKER_PARITY_PASS\nMANAGED_PARSE_V2_POLICY_EVIDENCE_PASS:" + policy + "\n"))
+
+export parser_qualification_execute_v2, parser_qualification_settings_v2

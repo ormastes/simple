@@ -2,6 +2,16 @@
 # Mechanical file-binding tests; fixture bytes are not executable qualification.
 use std.spec
 use compiler.driver.driver_build.managed_parse_qualification.*
+use compiler.driver.driver_build.managed_parse_compatibility.*
+use compiler.driver.driver_build.managed_parse_run_admission.{managed_parse_run_admit_v2}
+use compiler.driver.driver_build.managed_parse_run_contract.{ManagedParseRunV1, managed_parse_run_validate_v1}
+use compiler.driver.driver_build.managed_parse_group_contract.{ManagedParseSnapshotV1, ManagedParseModuleV1, managed_parse_snapshot_digest_v1}
+use compiler.common.frontend_feature_identity_v1.{frontend_shared_parse_feature_identity_for_v1}
+use compiler.driver.cache.package_scc_scheduler.{PackageCompileScheduleV1, PackageSccGroupV1, PackageSccWaveV1, package_scc_identity_v1}
+use compiler.driver.action_graph.persisted_graph.{PersistedBuildGraphV1, persisted_graph_digest_v1}
+use compiler.driver.action_graph.build_action_v1.{BuildActionV1, BuildActionPoolV1}
+use lib.compiler_artifact_service.profile.{ArtifactServiceProfileV1}
+use std.common.build_manager.grouped_execution_contract.{GroupedActionBindingV1}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.build_manager.contracts.{BuildTaskV1, BuildInputV1}
 use std.common.build_manager.codec.{builder_encode_task_v1}
@@ -12,7 +22,7 @@ struct QualificationFixture:
     path: text
     receipt_digest: text
 
-fn qualification_fixture() -> QualificationFixture:
+fn qualification_fixture(frontend: text = "test-frontend", marker: text = "") -> QualificationFixture:
     val root = cwd() + "/build/test/qualification-" + getpid().to_text() + "-" + time_now_unix_micros().to_text()
     expect(dir_create_all(root)).to_equal(true)
     expect(dir_create_all(root + "/runtime")).to_equal(true)
@@ -28,9 +38,9 @@ fn qualification_fixture() -> QualificationFixture:
         cache_key: sha256_text("cache"), timeout_ms: 1000, memory_limit_bytes: 1048576, links: [])
     val task_wire = builder_encode_task_v1(task)
     expect(task_wire.len()).to_be_greater_than(0)
-    val evidence = "MANAGED_PARSE_REAL_FAILURE_COLLECTION_PASS\nMANAGED_PARSE_DURABLE_REUSE_PASS\nMANAGED_PARSE_PARENT_WORKER_PARITY_PASS\n\n" + task_wire
+    val evidence = "MANAGED_PARSE_REAL_FAILURE_COLLECTION_PASS\nMANAGED_PARSE_DURABLE_REUSE_PASS\nMANAGED_PARSE_PARENT_WORKER_PARITY_PASS\n" + marker + "\n" + task_wire
     expect(file_write_exact(root + "/evidence", evidence)).to_equal(true)
-    val draft = ManagedParseQualificationV2(root + "/worker", sha256_text("worker bytes"), "test-frontend", "aarch64-unknown-linux-gnu",
+    val draft = ManagedParseQualificationV2(root + "/worker", sha256_text("worker bytes"), frontend, "aarch64-unknown-linux-gnu",
         root + "/producer", sha256_text("producer bytes"), root + "/runtime/provider", sha256_text("runtime bytes"),
         root + "/closure", sha256_text("captured closure bytes"), root + "/build", "",
         root + "/evidence", sha256_text(evidence), root + "/issuer", sha256_text("issuer bytes"))
@@ -101,3 +111,76 @@ describe "managed parser qualification file binding":
         expect(managed_parse_qualification_decode_v2(wire + "extra\n").is_err()).to_equal(true)
         expect(managed_parse_qualification_decode_v2(wire.replace("test-frontend", "%XX")).is_err()).to_equal(true)
         expect(managed_parse_qualification_decode_v2(wire.substring(0, wire.len() - 1)).is_err()).to_equal(true)
+
+fn qualification_identity_v2() -> text:
+    managed_parse_frontend_identity_v2("independently pinned parent frontend", sha256_text("actual prior scope"),
+        frontend_shared_parse_feature_identity_for_v1("", "1", ""), "warning").unwrap()
+
+fn qualification_run_v2(fixture: QualificationFixture) -> ManagedParseRunV1:
+    val q = fixture.value
+    val cache = managed_parse_cache_identity_v2(q.frontend_identity, q.worker_digest, "linux", "aarch64", "generic").unwrap()
+    var snapshot = ManagedParseSnapshotV1("worker", 1, q.worker_digest, "", cache, "linux", "aarch64", "generic", 1048576,
+        [ManagedParseModuleV1("module", "package", "input.spl", sha256_text("source"))])
+    snapshot.snapshot_digest = managed_parse_snapshot_digest_v1(snapshot)
+    val variant = sha256_text("variant")
+    val group = PackageSccGroupV1(package_scc_identity_v1(["package"], variant), ["package"], [])
+    val schedule = PackageCompileScheduleV1(true, "ok", variant, ["package"], [group], [PackageSccWaveV1(0, [group])])
+    val action = BuildActionV1("parse", "managed-reference-parse-v1:" + q.worker_digest,
+        [snapshot.modules[0].source_digest], [], ["parse.flat-receipt"], BuildActionPoolV1.parse,
+        100, snapshot.snapshot_digest, 1024, cache)
+    var graph = PersistedBuildGraphV1("pending", "", snapshot.snapshot_digest, [action])
+    graph.generation = persisted_graph_digest_v1(graph)
+    val profile = ArtifactServiceProfileV1("parser", cache, ["parse"], 0, false, "cas", 1, 4096, 4096)
+    ManagedParseRunV1("run", schedule, graph, profile,
+        [GroupedActionBindingV1(group.identity, "parse", "parse", snapshot.snapshot_digest, cache, false)],
+        ["worker"], [snapshot], "/work/source", "/work/state", q.worker_path, q.worker_digest,
+        [MANAGED_PARSE_IDENTITY_ENV_V2 + "=" + q.frontend_identity, "SIMPLE_CAPTURE_WRITE_CHECK=warning",
+         "SIMPLE_NATIVE_ARENA_DECLS=", "SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1", "SIMPLE_DEBUG_MATCH_PAT="],
+        1, true, 20, 30000, 10000, "/tools/broker", sha256_text("broker"), 120000)
+
+fn qualification_run_admit_v2(run: ManagedParseRunV1, fixture: QualificationFixture, expected_identity: text) -> text:
+    val q = fixture.value
+    managed_parse_run_admit_v2(run, fixture.path, fixture.receipt_digest, q.issuer_digest,
+        q.worker_path, q.worker_digest, expected_identity, q.target, "linux", "aarch64", "generic")
+
+describe "V2 qualification policy and production admission":
+    it "binds actual qualification files and derived run identity without claiming executable evidence":
+        step("Create mechanically pinned files for the exact V2 policy identity")
+        val expected = qualification_identity_v2()
+        val fixture = qualification_fixture(expected, "MANAGED_PARSE_V2_POLICY_EVIDENCE_PASS:warning\n")
+        val run = qualification_run_v2(fixture)
+        expect(managed_parse_run_validate_v1(run)).to_equal("")
+        expect(qualification_run_admit_v2(run, fixture, expected)).to_equal("")
+        expect(qualification_run_admit_v2(run, fixture, "legacy-frontend") == "").to_equal(false)
+
+    it "rejects V1 evidence, missing, duplicated and wrong-policy V2 evidence markers":
+        step("Keep receipt hashes valid while changing the executed-evidence framing")
+        for marker in ["", "MANAGED_PARSE_V2_POLICY_EVIDENCE_PASS:error\n",
+                "MANAGED_PARSE_V2_POLICY_EVIDENCE_PASS:warning\nMANAGED_PARSE_V2_POLICY_EVIDENCE_PASS:warning\n"]:
+            val fixture = qualification_fixture(qualification_identity_v2(), marker)
+            expect(qualification_admit(fixture) == "").to_equal(false)
+        val malformed = qualification_fixture("[managed-parse-frontend-v2]", "")
+        expect(qualification_admit(malformed)).to_equal("malformed reserved V2 qualification identity")
+
+    it "rejects independently pinned target, feature, environment and worker drift":
+        val expected = qualification_identity_v2()
+        val fixture = qualification_fixture(expected, "MANAGED_PARSE_V2_POLICY_EVIDENCE_PASS:warning\n")
+        val original = qualification_run_v2(fixture)
+        step("Mutate submitted launch settings without changing independent authority")
+        for setting in ["SIMPLE_CAPTURE_WRITE_CHECK=off", "SIMPLE_NATIVE_ARENA_DECLS=1",
+                "SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=0", "SIMPLE_DEBUG_MATCH_PAT=1"]:
+            var run = original
+            var environment: [text] = []
+            val key = setting.substring(0, setting.find("="))
+            for assignment in run.environment:
+                if assignment.substring(0, assignment.find("=")) == key:
+                    environment = environment.push(setting)
+                else:
+                    environment = environment.push(assignment)
+            run.environment = environment
+            expect(qualification_run_admit_v2(run, fixture, expected) == "").to_equal(false)
+        val q = fixture.value
+        expect(managed_parse_run_admit_v2(original, fixture.path, fixture.receipt_digest, q.issuer_digest,
+            q.worker_path, q.worker_digest, expected, q.target, "linux", "aarch64", "other-cpu") == "").to_equal(false)
+        expect(managed_parse_run_admit_v2(original, fixture.path, fixture.receipt_digest, q.issuer_digest,
+            q.worker_path, sha256_text("wrong worker"), expected, q.target, "linux", "aarch64", "generic") == "").to_equal(false)
