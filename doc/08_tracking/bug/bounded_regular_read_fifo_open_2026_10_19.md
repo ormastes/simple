@@ -4,7 +4,7 @@ Status: source repair authored; compile and runtime qualification **UNRUN**.
 Severity: P1 (unbounded wait before the regular-file admission check).
 Scope/base: `work/phase3-canonical-cas-publication-20261019`, `fe1bb38b5d2`.
 
-Related caller defect: [Canonical CAS publication winner verification](canonical_cas_publication_unverified_winner_2026_10_19.md).
+Related caller defect: canonical CAS publication winner verification, recorded in the separate unlanded source packet `fe1bb38b5d2826d00a2167b82dbaf78e0c9042eb`. This provider-only landing does not include that CAS implementation or its eleven UNRUN scenarios.
 Its winner-read path exposes this separate raw-provider FIFO defect; the parent
 CAS implementation and CAS11 artifacts remain unchanged by this repair.
 

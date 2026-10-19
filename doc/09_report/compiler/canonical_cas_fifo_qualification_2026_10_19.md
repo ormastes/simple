@@ -105,3 +105,7 @@ Related canonical defect and authored scenarios:
 
 No rejected executable, source439 generation, shared/live cache, or frozen main
 build was touched to produce this source packet.
+
+## Provider-only landing scope
+
+This landing contains the four provider flag repairs, C harness and retained ABI evidence only. The CAS implementation, CAS11 specification and companion manual listed above belong to the separate source packet `fe1bb38b5d2826d00a2167b82dbaf78e0c9042eb`; they are provenance references, not files supplied by this PR. Their execution remains UNRUN. The 21 passing C cases are evidence for immutable source `aa5cb90ddbbd98f0acf304af4bba16c81b6c2184`, not a rerun of a later integration head.
