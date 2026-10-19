@@ -149,3 +149,13 @@ modulus (ciphertext == padded block, no RSA-2048 modexp). Spec:
   Vectors are OpenSSL-produced (not published NIST/Wycheproof); RSA-2048 spec
   takes ~130 s in the interpreter, so test EM separately for fast checks.
 - Specs run JIT->interpreter demoted (`jit-bail:no-main-fn`) on the seed.
+
+## zstd sequence execution appends in place (2026-10-19)
+
+- Do not write `out = append_bytes(out, ...)` per sequence. The callee re-binds its
+  parameter (`var out = buf`), which is one full copy per call, and the seed JIT never
+  frees it. Measured: a 64 KiB decode ran out of memory at a 6 GB cap.
+- `_zstd_execute_sequences` now pushes literals and match bytes in place: 128 KiB
+  decode at 261 MB under JIT, and 13.7 s → 4.5 s under the interpreter.
+- The same pattern is still open in `lz4.spl`, `snappy.spl`, `lzma2_*`, `gzip.spl` and
+  `zstd_dict.spl`. See `doc/08_tracking/bug/seed_jit_array_copy_never_freed_2026-10-19.md`.
