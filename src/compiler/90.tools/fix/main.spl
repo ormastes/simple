@@ -12,6 +12,7 @@ use std.async.future.{Future}
 use std.tooling.easy_fix.types.{EasyFix, Replacement, FixReport, FixConfidence, FixApplicator}
 use std.tooling.easy_fix.types.{easyfix_replacements, easyfix_id, easyfix_description}
 use compiler.tools.fix.rules.registry.{check_all_rules}
+use compiler.tools.fix.source_edits.{validated_fix_sources}
 use compiler.tools.fix.rules.impl_.lint_primitive_api.{check_primitive_api}
 use compiler.tools.fix.rules.impl_.lint_script_language.{check_simple_script_required}
 
@@ -39,7 +40,7 @@ fn input_line() -> String:
 
 class FixToolApplicator:
     static fn apply(fixes: [EasyFix], sources: Dict<String, String>) -> Result<Dict<String, String>, String>:
-        FixApplicator.apply(fixes, sources)
+        validated_fix_sources(fixes, sources)
 
     static fn apply_to_disk(fixes: [EasyFix], sources: Dict<String, String>, dry_run: Bool) -> Result<FixReport, String>:
         apply_fixes_to_disk(fixes, sources, dry_run)
@@ -77,7 +78,16 @@ pub fn apply_fixes_to_disk(fixes: [EasyFix], sources: Dict<String, String>, dry_
             var report = FixReport(applied: 0, skipped: 0, modified_files: [], details: [])
             report.applied = fixes.len()
 
+            # Admit every current file before the first write. The source map
+            # is the analyzed revision, not a fresh replacement for its authority.
             for file in new_contents.keys():
+                if not file_exists(file) or file_read(file) != sources[file]:
+                    return Err("{file}:1:1: source changed since analysis; no fixes applied; rerun lint")
+            for file in new_contents.keys():
+                # Recheck immediately before each atomic write. This is a stale
+                # snapshot guard, not a filesystem compare-and-swap transaction.
+                if not file_exists(file) or file_read(file) != sources[file]:
+                    return Err("{file}:1:1: source changed before fix write; stopped; rerun lint")
                 if not dry_run and not file_atomic_write(file, new_contents[file]):
                     return Err("Atomic fix write failed: {file}")
                 report.modified_files.push(file)
