@@ -15184,10 +15184,24 @@ static void rt_secure_temp_dir_diag(const char* stage, const char* detail) {
 }
 #endif
 
-int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
-                           const uint8_t* prefix_ptr, uint64_t prefix_len) {
-    char parent[RT_TEXT_PATH_MAX], prefix[128], path[RT_TEXT_PATH_MAX];
-    if (!rt_text_arg_to_path(parent_ptr, parent_len, parent, sizeof(parent)) || !rt_text_arg_to_path(prefix_ptr, prefix_len, prefix, sizeof(prefix)) || prefix[0] == '\0' || strchr(prefix, '/') || strchr(prefix, '\\')) return rt_string_new(NULL, 0);
+/* Cycle-170 split-crossing entry points. The two-argument text-ABI crossing
+ * of rt_secure_temp_dir draws erased in candidate-seednew's compiled
+ * marshalling (measured 2026-10-19: the C admission sees (NULL, len) and
+ * refuses; single-argument crossings such as rt_dir_create draw clean in the
+ * same binary; both callee implementations are byte-logical twins, and
+ * source-level rebinds/array transports of the arguments did not cure it).
+ * SCV snapshot staging therefore crosses in TWO single-argument calls. The
+ * parent travels in a thread-local slot so concurrent stagings on different
+ * threads cannot interleave (SCV admission is single-threaded per process
+ * and the AOT diagnostic lane stages per worker process; the slot makes the
+ * pair safe under any caller). set_parent/make is a single logical
+ * operation: make always consumes the slot, success or failure. */
+static _Thread_local char rt_secure_temp_dir_parent_slot[RT_TEXT_PATH_MAX];
+static _Thread_local int rt_secure_temp_dir_parent_ready = 0;
+
+static int64_t rt_secure_temp_dir_core(const char* parent, const uint8_t* prefix_ptr, uint64_t prefix_len) {
+    char prefix[128], path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(prefix_ptr, prefix_len, prefix, sizeof(prefix)) || prefix[0] == '\0' || strchr(prefix, '/') || strchr(prefix, '\\')) return rt_string_new(NULL, 0);
 #if defined(__simpleos__)
     /* SOSIX has no secure random temporary-directory primitive yet. */
     return rt_string_new(NULL, 0);
@@ -15223,6 +15237,29 @@ int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
     if (chmod(path, 0700) != 0) { rmdir(path); return rt_string_new(NULL, 0); }
 #endif
     return rt_string_new((const uint8_t*)path, (uint64_t)strlen(path));
+}
+
+int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
+                           const uint8_t* prefix_ptr, uint64_t prefix_len) {
+    char parent[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(parent_ptr, parent_len, parent, sizeof(parent))) return rt_string_new(NULL, 0);
+    return rt_secure_temp_dir_core(parent, prefix_ptr, prefix_len);
+}
+
+int64_t rt_secure_temp_dir_set_parent(const uint8_t* parent_ptr, uint64_t parent_len) {
+    if (!rt_text_arg_to_path(parent_ptr, parent_len,
+                             rt_secure_temp_dir_parent_slot,
+                             sizeof(rt_secure_temp_dir_parent_slot))) return 0;
+    rt_secure_temp_dir_parent_ready = 1;
+    return 1;
+}
+
+int64_t rt_secure_temp_dir_make(const uint8_t* prefix_ptr, uint64_t prefix_len) {
+    if (!rt_secure_temp_dir_parent_ready) return rt_string_new(NULL, 0);
+    char parent[RT_TEXT_PATH_MAX];
+    snprintf(parent, sizeof(parent), "%s", rt_secure_temp_dir_parent_slot);
+    rt_secure_temp_dir_parent_ready = 0;
+    return rt_secure_temp_dir_core(parent, prefix_ptr, prefix_len);
 }
 
 #if defined(_WIN32)

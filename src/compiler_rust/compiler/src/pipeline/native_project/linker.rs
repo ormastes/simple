@@ -2457,6 +2457,16 @@ int main(int argc, char** argv) {
                 if let Some(core_runtime) = host_gpu_core_runtime.as_ref() {
                     provider_paths.push(core_runtime.as_path());
                 }
+                // Cycle-170: the bootstrap mutex core-C capsule carries fresh
+                // C-runtime exports (the rt_secure_temp_dir split pair) that
+                // are absent from the authority archives. Without this scan
+                // the stub generator never sees them in `defined`, fabricates
+                // weak return-3 stubs, and the real definitions never bind
+                // (measured: set_parent returned 3 with the argument
+                // crossing intact).
+                if let Some(mutex_runtime) = bootstrap_mutex_runtime.as_ref() {
+                    provider_paths.push(mutex_runtime.as_path());
+                }
                 provider_paths.extend(extra_link_objects.iter().map(PathBuf::as_path));
                 let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o, &provider_paths, imports)?;
                 cmd.arg(&stubs_o);

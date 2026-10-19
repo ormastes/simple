@@ -49,6 +49,13 @@ extern fn rt_file_fsync(path: text) -> bool
 extern fn rt_file_atomic_write(path: text, content: text) -> bool
 @unsafe(reason: "creates an OS-owned private staging directory", capabilities: [ffi])
 extern fn rt_secure_temp_dir(parent: text, prefix: text) -> text
+# Cycle-170 split crossing: the two-argument rt_secure_temp_dir text-ABI call
+# draws erased in candidate-seednew's compiled marshalling, so the staging
+# parent travels through a thread-local slot in its own single-argument call.
+@unsafe(reason: "stores the staging parent in a thread-local slot for the paired make call", capabilities: [ffi])
+extern fn rt_secure_temp_dir_set_parent(parent: text) -> i64
+@unsafe(reason: "creates the OS-owned private staging directory from the slotted parent", capabilities: [ffi])
+extern fn rt_secure_temp_dir_make(prefix: text) -> text
 @unsafe(reason: "atomically transfers ownership of a staged file path", capabilities: [ffi])
 extern fn rt_file_publish_noreplace(staged_path: text, destination: text) -> i64
 @unsafe(reason: "atomically creates a new regular file and fails if the path already exists", capabilities: [ffi])
@@ -210,23 +217,29 @@ fn file_atomic_write(path: text, content: text) -> bool:
         rt_file_atomic_write(host_path_native(path), content)
 
 fn secure_temp_dir_raw(parent: text, prefix: text) -> text:
-    # Cycle-170 (candidate-seednew 2026-10-19): the compiled argument reads at
-    # this TWO-argument SFFI crossing draw erased -- rt_secure_temp_dir's C
-    # admission then sees (NULL, len) and refuses, so every SCV snapshot
-    # CREATE failed with snapshot-staging-create-failed and even the AOT
-    # lane's diagnostic staging reported "diagnostic staging unavailable".
-    # Single-argument crossings (dir_create) on adjacent lines draw clean, and
-    # both linked implementations of the callee are byte-logical twins, so the
-    # draw is in this call site's marshalling. Annotated local binds alone did
-    # NOT cure it (the marshalling re-reads the locals); the proven transport
-    # for erased words is the array element read (cycle-76), so the crossing
-    # words travel through single-element arrays.
+    # Cycle-170 (candidate-seednew 2026-10-19): the compiled marshalling of
+    # the two-argument rt_secure_temp_dir text-ABI crossing draws erased --
+    # the C admission then sees (NULL, len) and refuses, so every SCV
+    # snapshot CREATE failed with snapshot-staging-create-failed and the
+    # AOT lane's diagnostic staging reported "diagnostic staging
+    # unavailable". Single-argument crossings (rt_dir_create) draw clean in
+    # the same binary; annotated binds and array transport of the arguments
+    # did not cure it (the draw is in the marshalling itself). Cross in two
+    # single-argument calls via the runtime's thread-local parent slot; the
+    # pair is one logical operation (make always consumes the slot), and the
+    # refusal path still returns "" so every caller's fail-closed gate holds.
     val parent_in: text = parent
     val prefix_in: text = prefix
-    val parents: [text] = [parent_in]
-    val prefixes: [text] = [prefix_in]
     unsafe(capabilities: [ffi]):
-        rt_secure_temp_dir(parents[0], prefixes[0])
+        # Typed return binds: the untyped val reads of these extern returns
+        # drew erased on candidate-seednew (set_parent measured returning 3
+        # with the argument crossing intact); the annotated rebind restores
+        # the value (the cycle-71 ANY-transport pattern).
+        val parent_set: i64 = rt_secure_temp_dir_set_parent(parent_in)
+        if parent_set != 1:
+            return ""
+        val made: text = rt_secure_temp_dir_make(prefix_in)
+        made
 
 fn file_publish_noreplace_raw(staged_path: text, destination: text) -> i64:
     unsafe(capabilities: [ffi]):
