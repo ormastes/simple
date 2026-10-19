@@ -2652,9 +2652,12 @@ fn partial_link_gc_sections_allowed(cc: &str, fuse_ld: Option<&str>) -> bool {
     }
 }
 
-/// Relocations in allocated sections that a partial link left pointing at
-/// the discarded-section tombstone (absolute symbol 0, addend -1). Each is a
-/// reference that the final link would resolve to address -1.
+/// Relocations in allocated sections that a partial link left pointing at no
+/// symbol at all (symbol index 0) -- the discarded-section tombstone. A
+/// compiler never emits such a relocation (other than R_*_NONE). mold writes
+/// addend -1 on aarch64 (the final link resolves the reference to -1) and
+/// addend 0 on x86_64 (it resolves into the null page), so the addend is not
+/// part of the test.
 pub(crate) fn partial_link_tombstone_relocations(path: &Path) -> Result<Vec<String>, String> {
     use object::{Object, ObjectSection, RelocationFlags, RelocationTarget, SectionFlags};
     let bytes = std::fs::read(path).map_err(|err| format!("failed to read {}: {err}", path.display()))?;
@@ -2672,10 +2675,7 @@ pub(crate) fn partial_link_tombstone_relocations(path: &Path) -> Result<Vec<Stri
         for (offset, relocation) in section.relocations() {
             // r_type 0 is R_<arch>_NONE on every ELF machine.
             let is_none = matches!(relocation.flags(), RelocationFlags::Elf { r_type: 0 });
-            if !is_none
-                && relocation.target() == RelocationTarget::Absolute
-                && relocation.addend() == -1
-            {
+            if !is_none && relocation.target() == RelocationTarget::Absolute {
                 found.push(format!("{name}+{offset:#x}"));
             }
         }
@@ -2689,7 +2689,7 @@ fn reject_partial_link_tombstones(path: &Path, what: &str) -> Result<(), String>
         return Ok(());
     }
     Err(format!(
-        "{what} closure link left {} relocation(s) resolved to the discarded-section tombstone (-1): {}",
+        "{what} closure link left {} relocation(s) pointing into a discarded section (symbol 0): {}",
         found.len(),
         found.iter().take(16).cloned().collect::<Vec<_>>().join(", ")
     ))
@@ -2772,6 +2772,25 @@ mod partial_link_tombstone_tests {
                 (text, defined)
             };
             assert_eq!(shape(&bad), shape(&kept), "mold -r kept different sections/symbols with --gc-sections");
+
+            // The x86_64 shape differs (symbol 0, addend 0 instead of -1); the
+            // scan must not depend on the addend.
+            let x86_object = directory.join("a_x86_64.o");
+            let x86_closure = directory.join("mold_gc_closure_x86_64.o");
+            let cross = std::process::Command::new(&cc)
+                .args(["--target=x86_64-unknown-linux-gnu", "-O2", "-fPIC", "-c", "-ffunction-sections", "-fdata-sections"])
+                .arg(directory.join("a.c")).arg("-o").arg(&x86_object).status().unwrap();
+            if cross.success() {
+                let status = std::process::Command::new(&cc)
+                    .args(["--target=x86_64-unknown-linux-gnu", "-fuse-ld=mold", "-nostdlib", "-Wl,-r", "-no-pie",
+                        "-Wl,--gc-sections", "-Wl,--undefined=rt_fix_root"])
+                    .arg(&x86_object).arg("-o").arg(&x86_closure).status().unwrap();
+                assert!(status.success());
+                let found = partial_link_tombstone_relocations(&x86_closure).unwrap();
+                assert!(found.iter().any(|site| site.starts_with(".text.rt_fix_root")), "{found:?}");
+            } else {
+                eprintln!("SKIP x86_64 mold replay: {cc} cannot target x86_64");
+            }
         } else {
             eprintln!("SKIP mold replay: mold is not on PATH");
         }
