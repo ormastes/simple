@@ -62,7 +62,11 @@ a private fault-injected copy, including cap, escape, timeout, partial reads,
 proof mutation, child nonzero/signal and OOM result handling. These fixtures do
 not themselves qualify privileged provisioning or real kernel OOM behavior.
 Separate root-owned cycles have since passed containment/cleanup and the real
-leader-zero/member-OOM case. Nested qualification remains pending; see the
+leader-zero/member-OOM case. The final nested cycle also passed: both watchdogs
+preserved child exit 7, enforced RSS and verified cleanup while reporting
+`diagnostic-incomplete` and incomplete measurement timing. All three kernel
+criteria cumulatively passed within the three-cycle cap; earlier failures
+remain retained. See the
 [dated evidence and root-interface correction](../../doc/08_tracking/bug/watchdog_observation_latency_cancels_bounded_build_2026_10_19.md).
 
 ## Linux observation diagnostics
