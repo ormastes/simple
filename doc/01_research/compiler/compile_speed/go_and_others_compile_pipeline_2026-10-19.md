@@ -34,8 +34,12 @@ started together and the next wave waited for the slowest. With `SIMPLE_MIR_SHAR
 (the documented way to shrink each worker's MIR share) every wave idled on its straggler. It is now a
 **slot pool**: a free slot is refilled at once (200 ms poll per live worker via `process_wait(pid, 200)`,
 deadline tracked per worker with `time_now_monotonic_ms`). Reap/seal/replace/fail-fast/block handling
-is unchanged; replacements still run in the next generation. When `count == parallel` (the default)
-behaviour is identical. HIR sharding shares the function and is unaffected (count == parallel).
+is unchanged; replacements still run in the next generation. When `count == parallel` (the default,
+and HIR sharding, which shares the function) scheduling is the same, with two deliberate differences on
+BOTH lanes: `timeout_ms` now runs from each worker's own spawn (the old sequential waits let the k-th
+worker of a wave run up to k x timeout_ms), and reap/log order is exit order rather than index order.
+Known gaps filed separately: `doc/08_tracking/bug/shard_timeout_kill_unreapable_and_windows_orphans_2026-10-19.md`
+(timeout kill path) and `doc/08_tracking/bug/shard_pool_refill_latency_sequential_poll_2026-10-19.md`.
 Verified only by a stubbed interpreter probe on the Rust seed (10 shards / 3 slots: max 3 live, 10
 reaped; injected SEGV → CRASH + one replacement). No native build was run. The timeout path is unexercised.
 
