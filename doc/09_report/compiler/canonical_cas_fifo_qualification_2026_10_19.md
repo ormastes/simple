@@ -1,6 +1,8 @@
 # Canonical CAS publication and FIFO refusal qualification
 
-Status: **ACCEPT_STATIC — runtime qualification remains HOLD/UNRUN**.
+Status: **ACCEPT_STATIC; C-provider ABI qualification PASS (21 cases).**
+Simple CAS11, Rust-provider execution and full runtime qualification remain
+**HOLD/UNRUN**.
 
 The canonical CAS publication fix is frozen at `fe1bb38b5d2` on base
 `f2021f4e833acfc0334ca9f93e17a8f60950283b`. Its four source/spec/documentation
@@ -47,9 +49,12 @@ or vendor changes are included.
 | Initial CAS source review | Conditional regular-file acceptance; FIFO P1 identified |
 | Four-provider flag correction | Authored; source diff/scope checks PASS; independent ACCEPT_STATIC |
 | Combined independent source review | ACCEPT_STATIC; no remaining P0/P1 in the reviewed source scope |
-| Actual-provider bounded FIFO kernel regression | Authored; execution UNRUN |
+| Native C-provider bounded FIFO ABI regression | PASS, 14/14 cases, exit 0 |
+| Compatibility C-provider bounded FIFO ABI regression | PASS, 7/7 cases, exit 0 |
+| Rust-provider execution | UNRUN; source parity reviewed only |
 | Qualified compiler/lib/MCP/LSP and native smoke | UNRUN |
-| Measured memory/latency and branch coverage | UNRUN |
+| C ABI harness resources | Native 0.14 s / 1,624 KiB max RSS; compatibility 0.07 s / 1,636 KiB |
+| CAS publication latency/memory and branch coverage | UNRUN |
 
 The FIFO regression must invoke the actual provider ABI with a real privately
 created FIFO that has no writer. A timeout must terminate and reap a stuck
@@ -63,18 +68,32 @@ SIGALRM and independent parent monotonic deadlines with kill/reap. Its seven
 private-root cases cover positive/zero-bound FIFOs, exact UTF-8/NUL bytes, empty
 content, oversize, symlink and directory refusals. The native provider runs both
 text and byte lanes (14 cases); the compatibility provider uses `TEXT_ONLY`
-(7 cases). Neither count is an executed result. Rust provider changes have
-source parity evidence only; the C harness does not qualify Rust execution.
+(7 cases). Root executed both lanes successfully against the immutable reviewed
+source commit. Rust provider changes have source parity evidence only; the C
+harness does not qualify Rust execution.
 
 Independent reviewer `/root/astra_warning_authority_review` accepted the combined
 source packet after checking the exact four-provider diff SHA-256
 `b133d929cc7d0f531046b39599fca4255697d6b9285947b65a0781713e7faeb6` and actual-provider
 selfcheck SHA-256 `aed2b1d12eb8187ee0aec63b7b503ff4b6fde8f701d71577afbec6fb855edb6f`.
 The reviewer confirmed the original CAS source hash remained unchanged. The
-FIFO P1 is resolved at source; this does not claim an executed kernel result.
+FIFO P1 is resolved at source and the two C-provider ABI lanes now have executed
+kernel evidence. The Simple `cas_put` scenarios remain unexecuted.
 
-Until qualified runtime evidence is admitted, do not claim the combined CAS path
-is safe or ready for release. External header/receipt/provenance checks remain required even after
+Root qualification used two bounded cycles. Cycle 1 compiled the real native
+provider and harness successfully, then stopped when the compiler-selected
+`mold` linker requested an 8 GiB reservation under the unchanged 1 GiB limit.
+No runtime test ran in that failed cycle. Cycle 2 explicitly selected GNU
+`ld.bfd`, reused the exact successful objects, and ran native 14/14 and
+compatibility 7/7 with all hash/link-attribution checks passing. Original failure
+logs were preserved; green compilation and tests were not replayed.
+
+Full evidence is retained at `/tmp/simple-fifo-abi-aa5cb90.gIMNVC`; the durable
+execution summary and receipt hashes are in
+[the execution report](canonical_cas_fifo_abi_execution_2026_10_19.md).
+
+Until the remaining qualified runtime evidence is admitted, do not claim the
+combined CAS path is ready for release. External header/receipt/provenance checks remain required even after
 both fixes; publication of candidate bytes does not establish provenance.
 
 Related canonical defect and authored scenarios:
