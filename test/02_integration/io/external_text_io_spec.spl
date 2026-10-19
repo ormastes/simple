@@ -1,0 +1,62 @@
+# Pure conversion/error facade prerequisites: no resource is opened or adopted.
+use std.spec
+use std.common.encoding.external_text.{Encoding, ByteOrder, BomPolicy, ExternalFormat, CodecErrorKind, utf8_format}
+use std.common.text_bytes.{bytes_to_text, text_to_utf8_bytes}
+use std.io.types.{IoError, IoErrorKind}
+use std.nogc_sync_mut.io.external_text_io.{TextIoError, io_external_text, io_external_bytes, io_external_from_internal, io_internal_text, io_text_error_message, io_legacy_utf8}
+
+describe "typed external text conversion facade":
+    it "preserves strict metadata and payload errors as nested Codec errors":
+        val unknown = ExternalFormat(encoding: Encoding.Unknown("unknown-codec"), byte_order: ByteOrder.NotApplicable, bom: BomPolicy.Preserve)
+        match io_external_text([255u8], unknown):
+            case Err(TextIoError.Codec(error)):
+                expect(error.kind).to_equal(CodecErrorKind.UnknownEncoding)
+                expect(error.byte_offset).to_equal(-1)
+                expect(error.reason).to_equal("unknown-codec")
+            case _: assert(false)
+        val malformed = io_external_text([65u8, 255u8], utf8_format()).unwrap()
+        match io_internal_text(malformed):
+            case Err(TextIoError.Codec(error)):
+                expect(error.kind).to_equal(CodecErrorKind.InvalidUtf8)
+                expect(error.byte_offset).to_equal(1)
+            case _: assert(false)
+
+    it "roundtrips UTF-16 with a required BOM and embedded NUL through owned bytes":
+        val format = ExternalFormat(encoding: Encoding.Utf16, byte_order: ByteOrder.LittleEndian, bom: BomPolicy.Require)
+        val internal = bytes_to_text([65u8, 0u8])
+        val encoded = io_external_from_internal(internal, format).unwrap()
+        var copied = io_external_bytes(encoded).unwrap()
+        expect(copied).to_equal([255, 254, 65, 0, 0, 0])
+        copied[2] = 66
+        expect(io_external_bytes(encoded).unwrap()).to_equal([255, 254, 65, 0, 0, 0])
+        expect(text_to_utf8_bytes(io_internal_text(encoded).unwrap())).to_equal([65, 0])
+
+    it "rejects unchecked malformed internal text on output and legacy input":
+        val malformed = bytes_to_text([255u8])
+        match io_external_from_internal(malformed, utf8_format()):
+            case Err(TextIoError.Codec(error)):
+                expect(error.kind).to_equal(CodecErrorKind.InvalidUtf8)
+                expect(error.byte_offset).to_equal(0)
+            case _: assert(false)
+        match io_legacy_utf8([65u8, 255u8]):
+            case Err(message): expect(message).to_contain("external text at byte 1:")
+            case Ok(value): assert(false)
+        expect(text_to_utf8_bytes(io_legacy_utf8([65u8, 0u8]).unwrap())).to_equal([65, 0])
+
+    it "renders existing error variants without changing nested transport details":
+        val cause = IoError(kind: IoErrorKind.ConnectionReset, message: "reset", source: nil)
+        val transport = IoError(kind: IoErrorKind.BrokenPipe, message: "peer closed", source: Some(cause))
+        val wrapped = TextIoError.Transport(transport)
+        expect(io_text_error_message(wrapped)).to_equal("peer closed")
+        match wrapped:
+            case TextIoError.Transport(error):
+                expect(error.kind).to_equal(IoErrorKind.BrokenPipe)
+                match error.source:
+                    case Some(original):
+                        expect(original.kind).to_equal(IoErrorKind.ConnectionReset)
+                        expect(original.message).to_equal("reset")
+                    case nil: assert(false)
+            case _: assert(false)
+        expect(io_text_error_message(TextIoError.Io("limit"))).to_equal("limit")
+        expect(io_text_error_message(TextIoError.Unsupported("provider"))).to_equal("provider")
+        expect(io_text_error_message(TextIoError.Native(-9, "bad descriptor"))).to_equal("bad descriptor: native status -9")
