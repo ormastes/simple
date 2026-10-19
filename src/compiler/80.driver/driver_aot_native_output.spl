@@ -106,6 +106,7 @@ use driver_types.{CompileResult, CompileContext, FrozenStorageModuleSnapshotV1,
     frozen_native_capsule_batch_find_v1, native_capsule_mir_identity_v1, driver_native_parsed_module_has_no_runtime_body_v1,
     driver_native_parsed_objectless_proof_v1, driver_native_parsed_objectless_proof_valid_v1}
 use compiler.common.driver_core_types.{SourceFile}
+use compiler.driver.driver_native_prelower_cache.{driver_native_prelower_record_v1}
 use compiler.common.driver_core_modes.{driver_mir_eviction_enabled}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_phase_gates.{bootstrap_entry_module_name, driver_source_matches_entry}
@@ -2284,6 +2285,25 @@ impl CompilerDriver:
             if lane_receipt_on:
                 lane_functions = lane_functions + ctx.mir_modules[name].functions.keys().len()
                 lane_statics = lane_statics + ctx.mir_modules[name].statics.keys().len()
+            # Pre-lowering cache hit (driver_native_prelower_cache.spl): this
+            # module's MIR was never lowered; its recorded object (bytes
+            # re-verified at lookup) or objectless verdict stands in for it.
+            if ctx.native_prelower_hit_objects.has(name):
+                val prelower_parts = (ctx.native_prelower_hit_objects[name] ?? "").split("|")
+                if prelower_parts.len() < 4:
+                    return CompileResult.CodegenError("native pre-lowering cache entry malformed: {name}")
+                lane_functions = lane_functions + (prelower_parts[1].to_i64() ?? 0)
+                lane_statics = lane_statics + (prelower_parts[2].to_i64() ?? 0)
+                if prelower_parts[0] == "objectless":
+                    lane_objectless = lane_objectless + 1
+                    continue
+                val prelower_object = prelower_parts[3]
+                print "[NATIVE] pre-lowering cache hit: {name}"
+                cache_hit_count = cache_hit_count + 1
+                module_unit_id = module_unit_id + 1
+                module_outcomes.record(BuildUnitOutcome.ok(module_unit_id, name, 0, 0))
+                object_files = object_files.push(prelower_object)
+                continue
             # ParserImport/export facades contribute symbols through their imported
             # implementation modules and have no object code of their own.
             val frozen_objectless = ctx.native_parsed_objectless_proofs.has(name) and
@@ -2297,6 +2317,9 @@ impl CompilerDriver:
                 if objectless_reason != "":
                     return CompileResult.CodegenError(objectless_reason)
                 lane_objectless = lane_objectless + 1
+                val _prelower_objectless = driver_native_prelower_record_v1(ctx, name, "",
+                    ctx.mir_modules[name].functions.keys().len(),
+                    ctx.mir_modules[name].statics.keys().len())
                 continue
             val cache_source = driver_native_module_cache_source(ctx, name)
             var used_cache = false
@@ -2435,6 +2458,9 @@ impl CompilerDriver:
                             collection_bindings = collection_bindings.push(cached_collection_binding)
                         if native_group.? and scoped_outputs.len() == 1:
                             group_object_paths[name] = scoped_outputs[0]
+                        val _prelower_reused = driver_native_prelower_record_v1(ctx, name,
+                            scoped_outputs[0], ctx.mir_modules[name].functions.keys().len(),
+                            ctx.mir_modules[name].statics.keys().len())
                         if low_memory:
                             ctx.evict_mir_module(name)
                         used_cache = true
@@ -2762,6 +2788,9 @@ impl CompilerDriver:
                             if val src_fp = FileFingerprint.from_file(capsule.cache_source):
                                 build_cache.update_entry(capsule.cache_source, src_fp,
                                     [], [obj_path], capsule.module_witness)
+                    val _prelower_recorded = driver_native_prelower_record_v1(ctx, name,
+                        obj_path, ctx.mir_modules[name].functions.keys().len(),
+                        ctx.mir_modules[name].statics.keys().len())
                     module_unit_id = module_unit_id + 1
                     module_outcomes.record(
                         BuildUnitOutcome.ok(module_unit_id, name, 0, 0))
