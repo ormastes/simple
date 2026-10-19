@@ -390,9 +390,6 @@ run_three_push_gates_parallel() {
             >"$_pw/rtapi.out" 2>&1 &
     fi
     _pid_rt=$!
-    "$TIMEOUT_BIN" -k 2 "$_left_s" sh "$ROOT/scripts/check/check-text-encoding-push.shs" "$_p_range" \
-        >"$_pw/textenc.out" 2>&1 &
-    _pid_te=$!
 
     wait "$_pid_ts"; _rc_ts=$?
     _ms_ts=$(( $(push_now_ms) - _t0 ))
@@ -400,12 +397,10 @@ run_three_push_gates_parallel() {
     _ms_cm=$(( $(push_now_ms) - _t0 ))
     wait "$_pid_rt"; _rc_rt=$?
     _ms_rt=$(( $(push_now_ms) - _t0 ))
-    wait "$_pid_te"; _rc_te=$?
-    _ms_te=$(( $(push_now_ms) - _t0 ))
 
     _batch_ms=$(( $(push_now_ms) - _t0 ))
     MUST_CHECK_BUDGET_SPENT_MS=$(( MUST_CHECK_BUDGET_SPENT_MS + _batch_ms ))
-    MUST_CHECK_BLOCKING_RUN=$(( MUST_CHECK_BLOCKING_RUN + 4 ))
+    MUST_CHECK_BLOCKING_RUN=$(( MUST_CHECK_BLOCKING_RUN + 3 ))
 
     cat "$_pw/tree-size.out" 2>/dev/null
     echo "push-must-check: gate push-tree-size exit=$_rc_ts ${_ms_ts}ms (blocking budget ${MUST_CHECK_BUDGET_SPENT_MS}/${MUST_CHECK_BUDGET_MS}ms, parallel batch)" >&2
@@ -413,12 +408,10 @@ run_three_push_gates_parallel() {
     echo "push-must-check: gate push-conflict-markers exit=$_rc_cm ${_ms_cm}ms (blocking budget ${MUST_CHECK_BUDGET_SPENT_MS}/${MUST_CHECK_BUDGET_MS}ms, parallel batch)" >&2
     cat "$_pw/rtapi.out" 2>/dev/null
     echo "push-must-check: gate push-runtime-api-regression exit=$_rc_rt ${_ms_rt}ms (blocking budget ${MUST_CHECK_BUDGET_SPENT_MS}/${MUST_CHECK_BUDGET_MS}ms, parallel batch)" >&2
-    cat "$_pw/textenc.out" 2>/dev/null
-    echo "push-must-check: gate push-text-encoding exit=$_rc_te ${_ms_te}ms (blocking budget ${MUST_CHECK_BUDGET_SPENT_MS}/${MUST_CHECK_BUDGET_MS}ms, parallel batch)" >&2
     rm -rf "$_pw"
 
     _fail=0
-    for _pair in "push-tree-size:$_rc_ts" "push-conflict-markers:$_rc_cm" "push-runtime-api-regression:$_rc_rt" "push-text-encoding:$_rc_te"; do
+    for _pair in "push-tree-size:$_rc_ts" "push-conflict-markers:$_rc_cm" "push-runtime-api-regression:$_rc_rt"; do
         _gid=${_pair%%:*}; _grc=${_pair#*:}
         case "$_grc" in
             0) : ;;
@@ -528,21 +521,17 @@ run_manifest_push_gates() {
     if [ "${SIMPLE_PUSH_SEQUENTIAL_GATES:-0}" != 1 ] && [ "${MUST_CHECK_CONFLICT_UNION_DONE:-0}" = 1 ] && \
        command -v run_three_push_gates_parallel >/dev/null 2>&1; then
         _rows_n=$(wc -l < "$_push_rows" | tr -d ' ')
-        if [ "$_rows_n" -eq 5 ]; then
+        if [ "$_rows_n" -eq 4 ]; then
             _fp_r1=$(sed -n '1p' "$_push_rows")
             _fp_r2=$(sed -n '2p' "$_push_rows")
             _fp_r3=$(sed -n '3p' "$_push_rows")
             _fp_r4=$(sed -n '4p' "$_push_rows")
-            _tab_fp=$(printf "	")
             _fp_want1=$(printf 'push-conflict-tree\ttrue\trange\tsh scripts/check/check-no-conflict-tree-push.shs {range}')
             _fp_want2=$(printf 'push-tree-size\ttrue\trange\tsh scripts/check/check-tree-size-push.shs --push-tip {range}')
             _fp_want3=$(printf 'push-conflict-markers\ttrue\trange\tsh scripts/check/check-no-conflict-markers-push.shs {range}')
             _fp_want4=$(printf 'push-runtime-api-regression\ttrue\trange\tsh scripts/check/check-runtime-api-regression-push.shs --scan-only {range}')
-            _fp_want5="push-text-encoding${_tab_fp}true${_tab_fp}range${_tab_fp}sh scripts/check/check-text-encoding-push.shs {range}"
-            _fp_r5=$(sed -n 5p "$_push_rows")
             if [ "$_fp_r1" = "$_fp_want1" ] && [ "$_fp_r2" = "$_fp_want2" ] && \
-               [ "$_fp_r3" = "$_fp_want3" ] && [ "$_fp_r4" = "$_fp_want4" ] && \
-               [ "$_fp_r5" = "$_fp_want5" ]; then
+               [ "$_fp_r3" = "$_fp_want3" ] && [ "$_fp_r4" = "$_fp_want4" ]; then
                 run_three_push_gates_parallel "$_range"
                 _fastpath_rc=$?
                 rm -f "$_push_rows"
