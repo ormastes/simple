@@ -1872,6 +1872,28 @@ pub fn rt_array_data_ptr(args: &[Value]) -> Result<Value, CompileError> {
     }))
 }
 
+/// Bytes-basis length (interpreter twin of runtime_native.c): the logical byte
+/// count of packed `[u8]` storage, or -1 when the backing is a boxed array.
+pub fn rt_array_bytes_basis_len(args: &[Value]) -> Result<Value, CompileError> {
+    let arg = args
+        .first()
+        .ok_or_else(|| CompileError::runtime("rt_array_bytes_basis_len requires 1 argument (array)"))?;
+    Ok(Value::Int(match arg {
+        Value::ByteArray(v) | Value::FrozenByteArray(v) => v.len() as i64,
+        _ => -1,
+    }))
+}
+
+/// Bytes-basis address (interpreter twin of runtime_native.c): the data
+/// pointer of non-empty packed `[u8]` storage, or 0. The pointer stays valid
+/// while the caller retains the array value, as the native contract requires.
+pub fn rt_array_bytes_basis_ptr(args: &[Value]) -> Result<Value, CompileError> {
+    if args.is_empty() {
+        return Err(CompileError::runtime("rt_array_bytes_basis_ptr requires 1 argument (array)"));
+    }
+    rt_array_data_ptr(args)
+}
+
 /// Hosted `unsafe_addr_of(ref: any) -> u64` — baremetal SimpleOS code (e.g.
 /// `src/os/kernel/fd_io.spl::_vfs_ipc_request`) declares this extern with no
 /// interpreter binding, so any hosted spec that reaches it died with
