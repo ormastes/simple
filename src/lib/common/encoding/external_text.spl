@@ -2,7 +2,7 @@
 # The abstractions are traits: they do not change either primitive's layout.
 use std.common.encoding.host_text_boundary_v1.{HostTextCodecErrorV1, HostTextByteSpanV1, host_text_span_byte_v1, host_validate_text_span_v1, host_text_span_to_utf8_v1, utf8_bytes_to_host_text_v1}
 use std.common.encoding.unicode_scalar.{unicode_scalar_valid, unicode_scalar_from_utf8, unicode_scalar_to_utf8}
-use std.common.text_bytes.{TextByteBufferError, text_byte_buffer, boxed_text_bytes_checked, bytes_to_text}
+use std.common.text_bytes.{TextByteBufferError, text_byte_buffer, boxed_text_bytes_checked, bytes_to_text, utf8_bytes_valid}
 
 type Char = char
 type Text = text
@@ -12,7 +12,7 @@ pub enum Encoding:
     Utf16
     Unknown(text)
 
-pub enum ByteOrder:
+pub enum TextByteOrder:
     NotApplicable
     LittleEndian
     BigEndian
@@ -24,7 +24,7 @@ pub enum BomPolicy:
 
 pub struct ExternalFormat:
     encoding: Encoding
-    byte_order: ByteOrder
+    byte_order: TextByteOrder
     bom: BomPolicy
 
 pub enum CodecErrorKind:
@@ -69,25 +69,25 @@ impl AbstractText for text:
 
 pub fn utf8_format() -> ExternalFormat:
     """Explicit UTF-8 metadata; an initial U+FEFF remains content."""
-    ExternalFormat(encoding: Encoding.Utf8, byte_order: ByteOrder.NotApplicable, bom: BomPolicy.Preserve)
+    ExternalFormat(encoding: Encoding.Utf8, byte_order: TextByteOrder.NotApplicable, bom: BomPolicy.Preserve)
 
 pub fn external_format_from_label(label: text, bom: BomPolicy) -> Result<ExternalFormat, CodecError>:
     """Resolve protocol labels explicitly; unknown labels never mean UTF-8."""
     if label == "utf-8":
-        return Ok(ExternalFormat(encoding: Encoding.Utf8, byte_order: ByteOrder.NotApplicable, bom: bom))
+        return Ok(ExternalFormat(encoding: Encoding.Utf8, byte_order: TextByteOrder.NotApplicable, bom: bom))
     if label == "utf-16le":
-        return Ok(ExternalFormat(encoding: Encoding.Utf16, byte_order: ByteOrder.LittleEndian, bom: bom))
+        return Ok(ExternalFormat(encoding: Encoding.Utf16, byte_order: TextByteOrder.LittleEndian, bom: bom))
     if label == "utf-16be":
-        return Ok(ExternalFormat(encoding: Encoding.Utf16, byte_order: ByteOrder.BigEndian, bom: bom))
+        return Ok(ExternalFormat(encoding: Encoding.Utf16, byte_order: TextByteOrder.BigEndian, bom: bom))
     Err(CodecError(kind: CodecErrorKind.UnknownEncoding, byte_offset: -1, reason: label))
 
 fn external_codec_id(format: ExternalFormat) -> Result<text, CodecError>:
     match format.encoding:
         case Encoding.Utf8:
-            if format.byte_order == ByteOrder.NotApplicable: return Ok("utf-8")
+            if format.byte_order == TextByteOrder.NotApplicable: return Ok("utf-8")
         case Encoding.Utf16:
-            if format.byte_order == ByteOrder.LittleEndian: return Ok("utf-16le")
-            if format.byte_order == ByteOrder.BigEndian: return Ok("utf-16be")
+            if format.byte_order == TextByteOrder.LittleEndian: return Ok("utf-16le")
+            if format.byte_order == TextByteOrder.BigEndian: return Ok("utf-16be")
         case Encoding.Unknown(label):
             return Err(CodecError(kind: CodecErrorKind.UnknownEncoding, byte_offset: -1, reason: label))
     Err(CodecError(kind: CodecErrorKind.InvalidFormat, byte_offset: -1, reason: "encoding and byte order disagree"))
@@ -141,7 +141,7 @@ fn external_narrow_bytes(bytes: [i64]) -> Result<[u8], CodecError>:
 
 fn external_bom_bytes(format: ExternalFormat) -> [u8]:
     if format.encoding == Encoding.Utf8: return [0xEF, 0xBB, 0xBF]
-    if format.byte_order == ByteOrder.LittleEndian: return [0xFF, 0xFE]
+    if format.byte_order == TextByteOrder.LittleEndian: return [0xFF, 0xFE]
     [0xFE, 0xFF]
 
 fn external_starts_with(bytes: [u8], prefix: [u8]) -> bool:
@@ -201,10 +201,7 @@ pub class ExternalText:
 
 impl AbstractText for ExternalText:
     fn to_internal_text() -> Result<Text, CodecError>:
-        val encoding: text = external_codec_id(self._format)?
-        val start: i64 = external_payload_start(self._bytes, self._format)?
-        val span: HostTextByteSpanV1 = HostTextByteSpanV1(prefix: [], bytes: self._bytes, start: start, end: self._bytes.len())
-        external_span_text(span, encoding)
+        external_decode_owned(self._bytes, self._format)
 
 pub fn external_text(bytes: [u8], format: ExternalFormat) -> Result<ExternalText, CodecError>:
     """Own encoded bytes after metadata admission; decoding is explicit and fallible."""
@@ -212,8 +209,37 @@ pub fn external_text(bytes: [u8], format: ExternalFormat) -> Result<ExternalText
     val owned = external_copy_bytes(bytes)?
     Ok(ExternalText(_bytes: owned, _format: format))
 
+pub fn external_text_decode(bytes: [u8], format: ExternalFormat) -> Result<Text, CodecError>:
+    """Same result as `external_text(bytes, format)?.to_internal_text()`.
+
+    Whole-array UTF-8 with Preserve that the runtime reads as valid is decoded
+    in bulk with no owned copy. Every other input takes the owned path: the
+    per-byte copy also normalizes element storage, then the strict decoder runs,
+    so every error keeps its kind and byte offset.
+    """
+    val encoding: text = external_codec_id(format)?
+    if encoding == "utf-8" and format.bom == BomPolicy.Preserve and utf8_bytes_valid(bytes):
+        return Ok(bytes_to_text(bytes))
+    val owned = external_copy_bytes(bytes)?
+    external_decode_owned(owned, format)
+
+fn external_decode_owned(bytes: [u8], format: ExternalFormat) -> Result<Text, CodecError>:
+    val encoding: text = external_codec_id(format)?
+    val start: i64 = external_payload_start(bytes, format)?
+    val span: HostTextByteSpanV1 = HostTextByteSpanV1(prefix: [], bytes: bytes, start: start, end: bytes.len())
+    external_span_text(span, encoding)
+
 pub fn external_text_from_internal(value: Text, format: ExternalFormat) -> Result<ExternalText, CodecError>:
     """Encode immutable internal UTF-8 according to explicit destination metadata."""
+    val payload = external_encode_internal(value, format)?
+    Ok(ExternalText(_bytes: payload, _format: format))
+
+pub fn external_encode_internal(value: Text, format: ExternalFormat) -> Result<[u8], CodecError>:
+    """`external_text_from_internal(value, format)?.encoded_bytes()` without the copy.
+
+    Same checks and bytes. The result is a fresh array the caller owns alone;
+    its storage layout is the encoder's (it may be generic, not packed).
+    """
     val encoding = external_codec_id(format)?
     val utf8 = external_checked_boxed_bytes(value)?
     var payload: [u8] = []
@@ -231,10 +257,10 @@ pub fn external_text_from_internal(value: Text, format: ExternalFormat) -> Resul
         var output = external_byte_buffer(payload.len() + prefix.len())?
         for byte in prefix: output.push(byte)
         for byte in payload: output.push(byte)
-        return Ok(ExternalText(_bytes: output, _format: format))
+        return Ok(output)
     if format.bom == BomPolicy.Forbid:
         val start = external_payload_start(payload, format)?
-    Ok(ExternalText(_bytes: payload, _format: format))
+    Ok(payload)
 
 pub class ExternalChar:
     _bytes: [u8]
@@ -294,7 +320,7 @@ fn external_complete_prefix(span: HostTextByteSpanV1, format: ExternalFormat) ->
             val first = host_text_span_byte_v1(span, offset) as i64
             val second = host_text_span_byte_v1(span, offset + 1) as i64
             var code_unit = first | (second << 8)
-            if format.byte_order == ByteOrder.BigEndian:
+            if format.byte_order == TextByteOrder.BigEndian:
                 code_unit = (first << 8) | second
             if code_unit >= 0xD800 and code_unit <= 0xDBFF: width = 4
         if span.end - offset < width: return offset

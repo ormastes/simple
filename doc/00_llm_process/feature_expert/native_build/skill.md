@@ -14,6 +14,7 @@ Compilation of Simple source code to native binaries: the `bin/simple native-bui
 - **Observability:** Environment knobs for progress + diagnostics:
   - `SIMPLE_COMPILER_TRACE=1` — detailed phase transitions
   - `SIMPLE_COMPILER_PHASE_PROFILE=1` — per-phase timings
+  - `SIMPLE_HIR_ABI_INTERFACE_TRACE=1` — per-module `[abi-interface]` typed-ABI digest lines (off by default; encoding every module's ABI costs ~190 s per ~600 modules, so it is no longer implied by `SIMPLE_COMPILER_PHASE_PROFILE`)
   - `--log off` controls **guest-kernel logging, NOT build verbosity**
   - Per-line flush now landed (see `doc/08_tracking/bug/simpleos_harness_silent_native_build_2026-07-26.md`)
 

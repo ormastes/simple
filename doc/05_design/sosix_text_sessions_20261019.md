@@ -4,7 +4,7 @@ Status: source port; all executable cases **UNRUN**. This implements the configu
 
 ## API and ownership
 
-`std.nogc_sync_mut.io.text_session.TextSessionCodec` is a nominal class with eight private metadata fields and no mutating methods. `text_session_codec` selects input/output Encoding, ByteOrder and BomPolicy independently, followed by input/output byte limits, and returns `Result<TextSessionCodec, TextIoError>`. Unknown labels are never inferred as UTF-8.
+`std.nogc_sync_mut.io.text_session.TextSessionCodec` is a nominal class with eight private metadata fields and no mutating methods. `text_session_codec` selects input/output Encoding, TextByteOrder and BomPolicy independently, followed by input/output byte limits, and returns `Result<TextSessionCodec, TextIoError>`. Unknown labels are never inferred as UTF-8.
 
 The public readers are read_encoding/read_byte_order/read_bom, write_encoding/write_byte_order/write_bom, input_byte_limit/output_byte_limit. Each returns typed metadata; no public session signature returns ExternalFormat or an external text wrapper. Future resource owners construct their formats privately. `utf8_text_session_codec` explicitly selects UTF8/NotApplicable/Preserve both ways. The constant TEXT_SESSION_BYTE_LIMIT is 16777216 (16 MiB). Limits are inclusive 1..16777216. This configuration does not itself perform resource reads/writes or enforce their actual byte counts.
 
