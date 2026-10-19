@@ -4,13 +4,13 @@ use std.sffi.cli_args.{cli_get_args}
 use app.io.process_ops.{process_run, process_run_bounded}
 use std.nogc_sync_mut.io.env_ops.{env_get, host_os}
 use app.io.cli_ops.{cli_current_exe_path}
-use app.test_runner_new.client_arg_shape.{client_flag_consumes_value}
+use app.test_runner_new.client_arg_shape.{client_flag_consumes_value, client_select_tagged}
 use app.test_runner_new.timeout_budget.{client_default_timeout_secs, resolve_timeout_secs, timeout_value_is_well_formed}
 use app.test_runner_new.daemon_backlog.{daemon_backlog_bypass, count_pending_requests, daemon_claim_wait_expired, daemon_platform_bypass}
 use app.test_runner_new.no_examples_gate.{no_examples_is_silent_green, no_examples_exit_code}
-use std.test_runner.test_runner_args.{parse_test_args}
+use std.test_runner.test_runner_args.{parse_test_args, test_args_validation_error}
 use std.test_runner.test_config.{load_test_config}
-use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
+use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES, TestRunOutcome, test_run_outcome_exit_code}
 use std.test_runner.test_runner_modes.{run_spl_doctest_mode}
 use app.test_runner_new.sdn_worker_args.{parse_private_sdn_worker_args}
 use app.test_runner_new.sdn_wrapper.{run_test_sdn_wrapper}
@@ -665,18 +665,35 @@ fn main() -> i64:
     val cleaned = mode_args.forwarded_args
     if has_spl_doctest_flag(cleaned):
         return run_scoped_spl_doctest(cleaned)
+    # Same usage validator and exit code (2) as the directory lane. This lane
+    # used to drop every flag but --timeout, so `--format junit` ran the spec
+    # and printed a text PASS: a flag that is not honoured is rejected here.
+    val usage_error = test_args_validation_error(cleaned)
+    if usage_error != "":
+        eprint "ERROR: {usage_error}"
+        return 2
+    val client_options = parse_test_args(cleaned)
+    if client_options.resume:
+        eprint "ERROR: --resume resumes a directory run's checkpoint; it is not supported with explicit spec paths"
+        return 2
+    if client_options.format == "doc":
+        print "note: --format doc: spipe doc generation runs in the directory lane only; this single-spec run prints text"
     val run = parse_client_run(cleaned)
     if not run.valid:
         eprint "ERROR: {run.error}: {run.path}"
         return 1
-    val requested = run.paths
     val requested_count = count_positional_args(cleaned)
     # Fail closed: a positional path that never became a run target is a
     # dropped spec, and a dropped spec must never report success.
-    if requested.len() != requested_count:
+    if run.paths.len() != requested_count:
         print "Simple Test Runner client"
-        print "ERROR: dropped spec path(s) while parsing arguments: {requested_count} requested, {requested.len()} parsed"
+        print "ERROR: dropped spec path(s) while parsing arguments: {requested_count} requested, {run.paths.len()} parsed"
         return 1
+    val requested = client_select_tagged(run.paths, client_options.tag)
+    if requested.len() == 0:
+        print "No tests selected."
+        print "--tag {client_options.tag}: none of the {run.paths.len()} explicit spec path(s) carries the tag"
+        return test_run_outcome_exit_code(TestRunOutcome.EmptySelection)
     val candidate_binary = simple_binary()
     if candidate_binary == "":
         print "ERROR: test-runner: canonical invoking candidate identity is unavailable or SIMPLE_BINARY does not match it"
