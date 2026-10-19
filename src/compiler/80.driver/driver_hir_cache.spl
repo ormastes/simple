@@ -251,9 +251,19 @@ fn hir_cache_load_in_owned_scope(key: text, parser_binding: text = "") -> HirMod
     if entry.reason != "":
         _hir_cache_reject(entry.reason)
         return nil
-    # Cache admission is stricter than a bare decode: a structurally valid but
-    # lossy or non-deterministic frame is a counted miss, never a partial hit.
-    val decoded = hir_module_decode_stable(entry.blob)
+    # A hit decodes ONCE. The stability gate (decode + full re-encode + compare)
+    # already ran on the STORE side for every published entry
+    # (hir_cache_store_in_owned_scope refuses an unstable frame), and the
+    # checksum above pins the bytes, so re-encoding here re-proved a property
+    # the entry could not have lost. Measured 2026-10-19 (Phase 4 full CLI,
+    # 2702 hits, 940 MB of entries): ~196 ms per hit, ~9 min serial, with the
+    # main build's `[hir-cache] hits=2702 misses=0` reading as a stall.
+    # SIMPLE_HIR_CACHE_SELFCHECK=1 / SIMPLE_HIR_CODEC_ROUNDTRIP=1 ("all")
+    # keep the load-side roundtrip as an explicit diagnostic.
+    val decoded = if hir_cache_load_reencodes_v1(hir_cache_selfcheck_mode()):
+        hir_module_decode_stable(entry.blob)
+    else:
+        hir_module_decode(entry.blob)
     if decoded == nil:
         _hir_cache_reject("decode")
         return nil
@@ -537,6 +547,20 @@ fn hir_cache_selfcheck_mode() -> text:
 
 fn hir_cache_selfcheck_enabled() -> bool:
     hir_cache_selfcheck_mode() != "off"
+
+# Pure: whether a cache LOAD re-encodes the decoded module and compares it to
+# the stored blob. Only the explicit "all" mode does; "off" and the bootstrap
+# default "sampled" trust the store-side gate plus the checksum.
+fn hir_cache_load_reencodes_v1(selfcheck_mode: text) -> bool:
+    selfcheck_mode == "all"
+
+# Pure: the main build's adoption receipt. `adopted` is the number of modules
+# whose HIR came from the shard pre-pass (cache hits), `lowered` the number
+# it had to lower itself (misses). Printed under the `[hir-cache]` tag right
+# BEFORE hir_cache_summary(), which must stay the last `[hir-cache]` line
+# (native_build_warm_receipt reads the last tagged line's fields).
+fn hir_cache_adoption_receipt_v1(adopted: i64, lowered: i64) -> text:
+    "[hir-cache] adopted={adopted} lowered={lowered}"
 
 var _hir_cache_selfcheck_seen: i64 = 0
 var _hir_cache_selfchecked: i64 = 0
@@ -854,6 +878,7 @@ export HirCacheEntry, hir_cache_entry_parse, hir_cache_entry_encode, hir_cache_e
 export hir_cache_body_checksum, hir_cache_header
 export hir_cache_selfcheck_enabled, hir_cache_selfcheck_mode, hir_cache_selfcheck_blob, hir_cache_first_difference
 export hir_cache_selfchecked, hir_cache_selfcheck_failed, HIR_CACHE_SELFCHECK_SAMPLE
+export hir_cache_load_reencodes_v1, hir_cache_adoption_receipt_v1
 export hir_shard_spec, hir_shard_active, hir_shard_claimed, hir_shard_owns
 export hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary
 export hir_shard_begin, hir_shard_finish, hir_shard_complete, hir_shard_guard_block

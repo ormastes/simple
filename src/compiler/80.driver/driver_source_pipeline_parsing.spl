@@ -694,7 +694,17 @@ impl CompilerDriver:
         var builder = ModuleSurfaceBuilder.new()
         var source_index = 0
         var release_seq: i64 = 0
+        val parse_shard = driver_parse_shard_active()
         while source_index < frozen_source_count:
+            # A parse shard exists only to warm the front-end cache for the
+            # files it owns (static hash slice, or a claim from the shared
+            # queue). Until 2026-10-19 this loop never asked, so every shard
+            # parsed the WHOLE closure racing its siblings: Phase 4 (2702
+            # modules, 8 shards) reported `claimed=0` on all 8 and ~11k body
+            # parses, ~2.75 per module.
+            if parse_shard and not _driver_parse_shard_owns(source_paths[source_index]):
+                source_index = source_index + 1
+                continue
             val canonical_path = canonical_paths[source_index]
             if builder.has_canonical_path(canonical_path):
                 val alias_result = builder.add_alias_canonical_identity(
@@ -743,6 +753,23 @@ impl CompilerDriver:
                 release_seq = release_seq + 1
                 log_module_surface_released(source_paths[source_index], release_seq)
             source_index = source_index + 1
+
+        # One receipt per process, same shape as the non-streaming loop's.
+        # Every process on this route (parse shard, HIR shard, main build)
+        # re-parses or restores the whole frozen closure, and until
+        # 2026-10-19 none of them said whether it hit or missed: a
+        # `phase2:surface:file:parse-start` line fires before the cache is
+        # consulted, so counting those lines over-reports cold parses.
+        if frontend_parse_cache_enabled():
+            print "[frontend-cache] hits={frontend_parse_cache_hits()} misses={frontend_parse_cache_misses()} parses={flat_parse_module_body_calls()}"
+        if parse_shard:
+            # The shard's job ends with the cache warm. The surface registry
+            # below is the real build's, and a shard child must never carry on
+            # into HIR/MIR/codegen (it did: each child lowered the whole
+            # closure in process, N times over).
+            print "[parse-shard] done shard={_sffi_env_get(\"SIMPLE_PARSE_SHARD\") ?? \"\"} parses={flat_parse_module_body_calls()} claimed={driver_parse_shard_claimed()}"
+            _sffi_stdout_flush()
+            _sffi_exit(0)
 
         # Rebuild the phase-3 record inventory from the retained SoA strings.
         # The original boxed SourceFile records may have been reclaimed even
@@ -821,13 +848,6 @@ impl CompilerDriver:
         self.ctx.native_module_input_fact_snapshots_v1 = native_module_input_fact_snapshots_v1(
             retained_surfaces, native_source_facts)
         self.ctx.modules = {}
-        if driver_parse_shard_active():
-            # The streaming parse has no front-end parse cache to warm, and a
-            # shard child must never carry on into HIR/MIR/codegen (it did:
-            # each child lowered the whole closure in process, N times over).
-            print "[parse-shard] done shard={_sffi_env_get(\"SIMPLE_PARSE_SHARD\") ?? \"\"} parses={flat_parse_module_body_calls()} claimed={driver_parse_shard_claimed()}"
-            _sffi_stdout_flush()
-            _sffi_exit(0)
         # Read the authoritative scalar field directly.  Avoid both a receiver
         # method call and a phase-local boolean: the current native backend has
         # independently mis-lowered each form in this large mutable method.
