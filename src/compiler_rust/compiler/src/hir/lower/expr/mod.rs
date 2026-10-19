@@ -2146,7 +2146,14 @@ impl Lowerer {
                 // return a raw 0/1 and `index_of` (rt_index_of, array or text)
                 // a raw i64 position, so they need the BOOL / BoxInt
                 // conversion. Left ANY, `<value:0x1>` / nil reached `print`.
-                "any" | "all" => Some(TypeId::BOOL),
+                // `any`/`all` only in the builtin shape (one lambda predicate):
+                // a user class method named `any()` / `all(3)` reached through
+                // an untyped receiver keeps its own (dynamic) result.
+                "any" | "all"
+                    if hir_args.len() == 1 && matches!(hir_args[0].kind, HirExprKind::Lambda { .. }) =>
+                {
+                    Some(TypeId::BOOL)
+                }
                 "index_of" => Some(TypeId::I64),
                 // "length" synonym — see the string-methods comment above.
                 "len" | "length" | "size" => Some(TypeId::I64),

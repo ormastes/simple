@@ -226,3 +226,19 @@ fn packed_array_hardening_fixture_agrees_across_engines() {
     assert_eq!(run_jit(&source), interp, "JIT output must match the interpreter");
     assert_eq!(run_native(&source, dir.path()), interp, "native output must match the interpreter");
 }
+
+/// A user method named `any`/`all` on an untyped receiver keeps its own result
+/// in every engine: HIR types untyped `any`/`all` as BOOL only for the builtin
+/// one-lambda shape.
+#[test]
+fn user_method_named_any_all_keeps_its_result_across_engines() {
+    let source = project_root()
+        .parent()
+        .expect("repo root")
+        .join("test/fixtures/engine_differential/user_method_named_any_all.spl");
+    let dir = tempdir().expect("tempdir");
+    let interp = run_interpreter(&source);
+    assert!(interp.contains("user any=70 all=all3 direct=70"), "interpreter output {interp:?}");
+    assert_eq!(run_jit(&source), interp, "JIT output must match the interpreter");
+    assert_eq!(run_native(&source, dir.path()), interp, "native output must match the interpreter");
+}
