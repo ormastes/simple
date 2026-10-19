@@ -1,0 +1,162 @@
+# @req REQ-IM-006 REQ-IM-007 REQ-IM-008 REQ-IM-012 REQ-IM-016
+# Direct real parser and parent protocol consumers; not live qualification.
+use std.spec.*
+use compiler.driver.managed_parse_group_v2.*
+use compiler.driver.managed_parse_group.{managed_parse_group_install_v1}
+use compiler.driver.driver_managed_parse_group_main.{managed_parse_group_worker_main_v2}
+use compiler.driver.driver_build.managed_parse_group_contract.*
+use compiler.driver.driver_build.managed_parse_group_result_v2.*
+use compiler.driver.driver_build.managed_parse_compatibility.*
+use compiler.frontend.frontend_shared_parse_cas_v1.{frontend_shared_parse_feature_identity_v1}
+use compiler.frontend.core.cfg_platform.{cfg_detect_os, cfg_detect_arch, cfg_detect_cpu}
+use compiler.frontend.flat_ast_bridge.{flat_pool_transport_capture_arm_v1, flat_pool_transport_capture_take_v1, parse_and_build_module_scoped}
+use compiler.core.parser.{parser_has_errors}
+use compiler.common.diagnostics.severity.{Severity}
+use app.bootstrap_builder.grouped_parse_result.{grouped_parse_result_decode_v2}
+use app.bootstrap_builder.grouped_parse_cache_v2.{grouped_parse_retain_cache_v2}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.env_ops.{env_get, env_set, cwd}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+use std.nogc_sync_mut.io.dir_ops.{dir_create, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_exists}
+
+fn warning_v2_source() -> text:
+    "fn main() -> i64:\n    var total = 0\n    val x = 2\n    val hook = fn() -> i64:\n        total = total + x\n        total\n    hook()\n"
+
+fn warning_v2_root() -> text:
+    cwd().replace("\\", "/") + "/build/warning-v2-spec-" + str(getpid()) + "-" + str(current_time_ms())
+
+fn warning_v2_snapshot(root: text, identity: text) -> ManagedParseSnapshotV1:
+    expect(dir_create(root + "/sources/src", true)).to_be(true)
+    val sources = ["fn broken():\n    val = 1\n", warning_v2_source(), "fn answer() -> i64:\n    42\n",
+        warning_v2_source() + "\nfn broken():\n    val = 1\n"]
+    var modules: [ManagedParseModuleV1] = []
+    for index in 0..sources.len():
+        val path = "src/member-" + str(index) + ".spl"
+        expect(file_atomic_write(root + "/sources/" + path, sources[index])).to_be(true)
+        modules = modules.push(ManagedParseModuleV1("member-" + str(index), "package", path, sha256_text(sources[index])))
+    val worker = sha256_text("direct-owner-fixture-not-qualified-worker")
+    val cache = managed_parse_cache_identity_v2(identity, worker, cfg_detect_os(), cfg_detect_arch(), cfg_detect_cpu()).unwrap()
+    var snapshot = ManagedParseSnapshotV1("worker", 1, worker, "", cache,
+        cfg_detect_os(), cfg_detect_arch(), cfg_detect_cpu(), 1048576, modules)
+    snapshot.snapshot_digest = managed_parse_snapshot_digest_v1(snapshot)
+    snapshot
+
+fn warning_v2_action(snapshot: ManagedParseSnapshotV1, id: text) -> ManagedParseActionV1:
+    ManagedParseActionV1(id, "group", snapshot.worker_id, snapshot.generation, "lease-" + id,
+        snapshot.snapshot_digest, snapshot.cache_identity, ["package"], true)
+
+describe "REQ-IM-016: actual warning-success parser and parent consumers":
+    it "should retain actual observed warnings on capture bounds and artifact publication failures":
+        val previous_policy = env_get("SIMPLE_CAPTURE_WRITE_CHECK")
+        val previous_identity = env_get(MANAGED_PARSE_IDENTITY_ENV_V2)
+        expect(env_set("SIMPLE_CAPTURE_WRITE_CHECK", "warning")).to_be(true)
+        val identity = managed_parse_frontend_identity_v2("publication-failure-fixture", sha256_text("base-cache"),
+            frontend_shared_parse_feature_identity_v1(), "warning").unwrap()
+        expect(env_set(MANAGED_PARSE_IDENTITY_ENV_V2, identity)).to_be(true)
+        val root = warning_v2_root()
+        val snapshot = warning_v2_snapshot(root, identity)
+        val owner = managed_parse_group_install_v2(root, snapshot).unwrap()
+        val module = snapshot.modules[1]
+        step("Feed a real warning parse capture to the production publisher under a tighter byte bound")
+        flat_pool_transport_capture_arm_v1()
+        val _parsed = parse_and_build_module_scoped(warning_v2_source(), module.source_path, false)
+        val parse_failed = parser_has_errors()
+        val capture = flat_pool_transport_capture_take_v1()
+        val oversized = managed_parse_group_publish_capture_v2(owner, module, capture, "", 1)
+        step("Obstruct the actual artifact directory and execute the installed action owner")
+        expect(dir_remove_all(root + "/artifacts")).to_be(true)
+        expect(file_atomic_write(root + "/artifacts", "blocked by regular file")).to_be(true)
+        val action = warning_v2_action(snapshot, "failed-write")
+        val failed = managed_parse_group_action_owned_v2(owner, action).result
+        expect(env_set("SIMPLE_CAPTURE_WRITE_CHECK", previous_policy)).to_be(true)
+        expect(env_set(MANAGED_PARSE_IDENTITY_ENV_V2, previous_identity)).to_be(true)
+        expect(parse_failed).to_be(false)
+        expect(capture.blob.len()).to_be_greater_than(1)
+        expect(capture.warning == "").to_be(false)
+        expect(oversized.status).to_equal("ERROR")
+        expect(oversized.diagnostics.len()).to_equal(2)
+        expect(oversized.diagnostics[0].severity).to_equal(Severity.Warning)
+        expect(oversized.diagnostics[1].code).to_equal("E-PARSE-CAPTURE")
+        expect(failed.modules[1].status).to_equal("ERROR")
+        expect(failed.modules[1].diagnostics.len()).to_equal(2)
+        expect(failed.modules[1].diagnostics[0].severity).to_equal(Severity.Warning)
+        expect(failed.modules[1].diagnostics[1].code).to_equal("E-PARSE-CACHE-IO")
+        expect(failed.modules[1].diagnostics[0].notes).to_equal(oversized.diagnostics[0].notes)
+        expect(failed.modules[1].blob_path).to_equal("")
+        expect(failed.modules[1].reusable).to_be(false)
+        expect(managed_parse_module_result_encode_v2(oversized, module) == "").to_be(false)
+        expect(managed_parse_action_result_encode_v2(snapshot, failed) == "").to_be(false)
+
+    it "should preserve warning/error diagnostics, reparse warning results and reuse only clean modules":
+        val previous_policy = env_get("SIMPLE_CAPTURE_WRITE_CHECK")
+        val previous_identity = env_get(MANAGED_PARSE_IDENTITY_ENV_V2)
+        expect(env_set("SIMPLE_CAPTURE_WRITE_CHECK", "warning")).to_be(true)
+        val identity = managed_parse_frontend_identity_v2("direct-owner-fixture", sha256_text("base-cache"),
+            frontend_shared_parse_feature_identity_v1(), "warning").unwrap()
+        expect(env_set(MANAGED_PARSE_IDENTITY_ENV_V2, identity)).to_be(true)
+        val root = warning_v2_root()
+        val snapshot = warning_v2_snapshot(root, identity)
+        val owner = managed_parse_group_install_v2(root, snapshot).unwrap()
+        val action = warning_v2_action(snapshot, "first")
+        step("Parse malformed, warning-success, clean and same-module warning-plus-error sources")
+        val first = managed_parse_group_action_owned_v2(owner, action).result
+        val repeated = managed_parse_group_action_owned_v2(managed_parse_group_install_v2(root, snapshot).unwrap(),
+            warning_v2_action(snapshot, "new-action")).result
+        val wire = managed_parse_action_result_encode_v2(snapshot, first)
+        val projection = grouped_parse_result_decode_v2(snapshot, action, wire, true).unwrap()
+        val foreign = grouped_parse_result_decode_v2(snapshot, warning_v2_action(snapshot, "foreign"), wire, true)
+        val legacy_rejected = managed_parse_group_install_v1(root, snapshot).is_err()
+        var wrong = snapshot
+        wrong.cache_identity = sha256_text("foreign-cache")
+        wrong.snapshot_digest = managed_parse_snapshot_digest_v1(wrong)
+        val wrong_rejected = managed_parse_group_install_v2(root, wrong).is_err()
+        val destination = root + "-copy"
+        step("Copy actual reusable cache receipts through the parent wire-only consumer")
+        val copied = grouped_parse_retain_cache_v2(root, destination, snapshot)
+        step("Edit only another module and retain the unchanged clean module across the new snapshot")
+        val repaired = "fn repaired() -> i64:\n    7\n"
+        expect(file_atomic_write(root + "/sources/" + snapshot.modules[0].source_path, repaired)).to_be(true)
+        var edited = snapshot
+        edited.generation = 2
+        edited.modules[0].source_digest = sha256_text(repaired)
+        edited.snapshot_digest = managed_parse_snapshot_digest_v1(edited)
+        val edited_owner = managed_parse_group_install_v2(root, edited).unwrap()
+        val edited_result = managed_parse_group_action_owned_v2(edited_owner, warning_v2_action(edited, "edited")).result
+        expect(file_atomic_write(root + "/install.sdn", managed_parse_snapshot_encode_v1(edited))).to_be(true)
+        expect(file_atomic_write(root + "/shutdown.sdn", edited.worker_id + "\n" + str(edited.generation) + "\n" + edited.snapshot_digest + "\n")).to_be(true)
+        val entry_result = managed_parse_group_worker_main_v2(root)
+        expect(env_set("SIMPLE_CAPTURE_WRITE_CHECK", "error")).to_be(true)
+        val changed_policy = managed_parse_group_action_owned_v2(edited_owner, warning_v2_action(edited, "policy-changed")).result
+        expect(env_set("SIMPLE_CAPTURE_WRITE_CHECK", previous_policy)).to_be(true)
+        expect(env_set(MANAGED_PARSE_IDENTITY_ENV_V2, previous_identity)).to_be(true)
+        expect(first.modules[0].status).to_equal("ERROR")
+        expect(first.modules[1].status).to_equal("OK")
+        expect(first.modules[1].diagnostics[0].severity).to_equal(Severity.Warning)
+        expect(first.modules[1].reusable).to_be(false)
+        expect(first.modules[2].status).to_equal("OK")
+        expect(first.modules[3].status).to_equal("ERROR")
+        expect(first.modules[3].diagnostics[0].severity).to_equal(Severity.Warning)
+        expect(first.modules[3].diagnostics[1].severity).to_equal(Severity.Error)
+        expect(repeated.modules[1].reused).to_be(false)
+        expect(repeated.modules[1].diagnostics[0].notes).to_equal(first.modules[1].diagnostics[0].notes)
+        expect(repeated.modules[2].reused).to_be(true)
+        expect(edited_result.modules[0].status).to_equal("OK")
+        expect(edited_result.modules[2].reused).to_be(true)
+        expect(edited_result.modules[1].reused).to_be(false)
+        expect(entry_result.unwrap()).to_equal(0)
+        expect(changed_policy.modules[1].status).to_equal("ERROR")
+        expect(changed_policy.modules[1].diagnostics[0].code).to_equal("E-PARSE-POLICY")
+        expect(projection.payload).to_equal(wire)
+        expect(projection.diagnostics.len()).to_be_greater_than(2)
+        expect(projection.reusable).to_be(false)
+        expect(foreign.is_err()).to_be(true)
+        expect(legacy_rejected).to_be(true)
+        expect(wrong_rejected).to_be(true)
+        expect(copied).to_be(true)
+        val warning_key = managed_parse_module_cache_key_v1(snapshot, snapshot.modules[1])
+        val clean_key = managed_parse_module_cache_key_v1(snapshot, snapshot.modules[2])
+        expect(file_exists(root + "/cache/" + warning_key + ".v2.sdn")).to_be(false)
+        expect(file_exists(destination + "/cache/" + warning_key + ".v2.sdn")).to_be(false)
+        expect(file_exists(destination + "/cache/" + clean_key + ".v2.sdn")).to_be(true)

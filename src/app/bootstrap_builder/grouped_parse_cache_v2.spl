@@ -1,0 +1,40 @@
+# Called only after the existing parent has authenticated prior-generation reap.
+# This wire-only copier never imports parser/frontend implementation owners.
+use compiler.driver.driver_build.managed_parse_group_contract.{ManagedParseSnapshotV1, managed_parse_module_cache_key_v1}
+use compiler.driver.driver_build.managed_parse_group_result_v2.{managed_parse_module_result_decode_v2}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_atomic_write}
+use std.nogc_sync_mut.io.dir_ops.{dir_create}
+
+fn grouped_parse_retain_cache_v2(previous: text, destination: text, snapshot: ManagedParseSnapshotV1) -> bool:
+    if not dir_create(destination + "/cache", true) or not dir_create(destination + "/artifacts", true): return false
+    for module in snapshot.modules:
+        val key = managed_parse_module_cache_key_v1(snapshot, module)
+        val relative = "/cache/" + key + ".v2.sdn"
+        val payload = match file_read_regular_no_follow_bounded(previous + relative, 65536):
+            Ok(value): value
+            Err(_reason): continue
+        val retained = match managed_parse_module_result_decode_v2(payload, module):
+            Ok(value): value
+            Err(_reason): continue
+        # A successful nonreusable artifact is not a cache entry. Neither
+        # action readiness nor a valid payload digest overrides this veto.
+        if retained.status != "OK" or not retained.reusable or retained.diagnostics.len() != 0: continue
+        val authority_relative = "/cache/" + key + ".v2.authority"
+        val authority = match file_read_regular_no_follow_bounded(previous + authority_relative, 64):
+            Ok(value): value
+            Err(_reason): continue
+        if not builder_digest_valid_v1(authority): continue
+        val blob = match file_read_regular_no_follow_bounded(previous + "/" + retained.blob_path, 134217728):
+            Ok(value): value
+            Err(_reason): continue
+        if sha256_text(blob) != retained.blob_digest: continue
+        # Worker independently compares the complete actual prepared-source,
+        # decision and admitted compatibility authority before any hit.
+        if not file_atomic_write(destination + "/" + retained.blob_path, blob) or
+                not file_atomic_write(destination + relative, payload) or
+                not file_atomic_write(destination + authority_relative, authority): return false
+    true
+
+export grouped_parse_retain_cache_v2

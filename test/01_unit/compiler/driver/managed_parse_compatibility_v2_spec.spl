@@ -1,0 +1,91 @@
+# @req REQ-IM-008 REQ-IM-012 REQ-IM-016 NFR-IM-004
+# Source-authored contract tests; execution and native qualification UNRUN.
+use std.spec
+use compiler.driver.driver_build.managed_parse_compatibility.*
+use compiler.common.frontend_feature_identity_v1.{frontend_shared_parse_feature_identity_for_v1}
+use app.bootstrap_builder.parser_qualification_parent_cache.{parser_qualification_parent_cache_v1}
+use app.bootstrap_builder.grouped_run_cli_v2.{grouped_run_cli_pins_v2}
+use compiler.frontend.frontend_parse_cache.{FRONTEND_CACHE_ENTRY_VERSION}
+use compiler.frontend.core.flat_pool_codec.{FLAT_POOL_CODEC_VERSION}
+use std.common.crypto.sha256.{sha256_text}
+
+fn authority_identity(policy: text) -> text:
+    managed_parse_frontend_identity_v2("frontend-exe=" + sha256_text("parent") + ";sources=0123456789abcdefn1",
+        sha256_text("full previous scope"), frontend_shared_parse_feature_identity_for_v1("", "1", ""), policy).unwrap()
+
+fn authority_cli_args() -> [text]:
+    ["builder", "grouped-run-v2", "--manifest", "/work/run.sdn", "--receipt", "/work/qualification.sdn",
+        "--receipt-digest", sha256_text("receipt"), "--issuer-digest", sha256_text("issuer"), "--worker", "/work/worker",
+        "--worker-digest", sha256_text("worker"), "--frontend-identity", authority_identity("warning"),
+        "--target", "x86_64-pc-windows-msvc", "--target-os", "windows", "--target-arch", "x86_64", "--target-cpu", "generic"]
+
+describe "V2 parser identity and closed admission input":
+    it "round trips a bounded single-line identity with exact owned versions":
+        step("Construct policy identity from independent frontend, scope and feature inputs")
+        val wire = authority_identity("warning")
+        expect(wire.contains("\n")).to_equal(false)
+        expect(wire.contains("\r")).to_equal(false)
+        val decoded = managed_parse_frontend_identity_decode_v2(wire).unwrap()
+        expect(decoded.capture_policy).to_equal("warning")
+        expect(decoded.base_cache_compatibility).to_equal(sha256_text("full previous scope"))
+        expect(managed_parse_frontend_identity_v2(decoded.base_frontend_identity, decoded.base_cache_compatibility,
+            decoded.feature_identity, decoded.capture_policy).unwrap()).to_equal(wire)
+        for corrupt in [wire + " ", wire + "\n", wire.replace("managed-parse-frontend-v2", "managed-parse-frontend-v1"),
+                wire.replace("managed-parse-result-sdn-2", "managed-parse-result-sdn-1"),
+                wire.replace("managed-parse-diagnostic-2", "managed-parse-diagnostic-1"), "[]"]:
+            expect(managed_parse_frontend_identity_decode_v2(corrupt).is_ok()).to_equal(false)
+
+    it "binds each prior compatibility input, worker and exact target dimension":
+        step("Change one cache identity input at a time")
+        val original = authority_identity("warning")
+        val decoded = managed_parse_frontend_identity_decode_v2(original).unwrap()
+        val baseline = managed_parse_cache_identity_v2(original, sha256_text("worker"), "windows", "x86_64", "generic").unwrap()
+        for input in ["base", "scope", "feature", "policy", "worker", "os", "arch", "cpu"]:
+            val identity = managed_parse_frontend_identity_v2(
+                if input == "base": "different pinned frontend" else: decoded.base_frontend_identity,
+                if input == "scope": sha256_text("different scope") else: decoded.base_cache_compatibility,
+                if input == "feature": sha256_text("different features") else: decoded.feature_identity,
+                if input == "policy": "error" else: decoded.capture_policy).unwrap()
+            val key = managed_parse_cache_identity_v2(identity,
+                if input == "worker": sha256_text("other worker") else: sha256_text("worker"),
+                if input == "os": "linux" else: "windows", if input == "arch": "aarch64" else: "x86_64",
+                if input == "cpu": "native" else: "generic").unwrap()
+            expect(key == baseline).to_equal(false)
+
+    it "rejects absent, duplicate and differently cased duplicate environment identity":
+        val assignment = MANAGED_PARSE_IDENTITY_ENV_V2 + "=" + authority_identity("warning")
+        expect(managed_parse_environment_identity_v2([assignment]).unwrap()).to_equal(authority_identity("warning"))
+        expect(managed_parse_environment_identity_v2([]).is_ok()).to_equal(false)
+        expect(managed_parse_environment_identity_v2([assignment, assignment]).is_ok()).to_equal(false)
+        expect(managed_parse_environment_identity_v2([assignment, MANAGED_PARSE_IDENTITY_ENV_V2.to_lower() + "=" + authority_identity("warning")]).is_ok()).to_equal(false)
+
+    it "preserves the full validated actual parent cache scope":
+        step("Decode real FPC envelope structure and hash its exact scope substring")
+        val digest = sha256_text("parent")
+        val scope = "lane=qualification;backend=smf;cpu=native;features=;opt=0;compiler=frontend-exe=" + digest +
+            ";sources=0123456789abcdefn1;provider=compiler-bound-builtin:smf;optimizer=compiler-bound-optimizer"
+        val payload = FRONTEND_CACHE_ENTRY_VERSION + " " + FLAT_POOL_CODEC_VERSION + " " + scope + "\nflat fixture bytes"
+        val parsed = parser_qualification_parent_cache_v1(payload, digest).unwrap()
+        expect(parsed.base_cache_compatibility).to_equal(sha256_text(scope))
+        expect(parsed.frontend_identity).to_equal("frontend-exe=" + digest + ";sources=0123456789abcdefn1")
+        val changed = parser_qualification_parent_cache_v1(payload.replace("lane=qualification", "lane=other"), digest).unwrap()
+        expect(changed.base_cache_compatibility == parsed.base_cache_compatibility).to_equal(false)
+        expect(parser_qualification_parent_cache_v1(payload.replace("opt=0", "opt=2"), digest).is_ok()).to_equal(false)
+
+    it "requires every independent CLI pin without defaults or unknown options":
+        step("Parse the production V2 CLI's complete closed option set")
+        val args = authority_cli_args()
+        val pins = grouped_run_cli_pins_v2(args).unwrap()
+        expect(pins.len()).to_equal(11)
+        expect(pins[6]).to_equal(authority_identity("warning"))
+        for index in 0..11:
+            var changed = authority_cli_args()
+            changed[2 + index * 2] = "--unknown"
+            expect(grouped_run_cli_pins_v2(changed).is_ok()).to_equal(false)
+            changed = authority_cli_args()
+            changed[3 + index * 2] = ""
+            expect(grouped_run_cli_pins_v2(changed).is_ok()).to_equal(false)
+        var duplicate = authority_cli_args()
+        duplicate[4] = "--manifest"
+        expect(grouped_run_cli_pins_v2(duplicate).is_ok()).to_equal(false)
+        expect(grouped_run_cli_pins_v2(args + ["--target", "other"]).is_ok()).to_equal(false)

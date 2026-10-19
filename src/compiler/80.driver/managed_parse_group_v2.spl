@@ -1,0 +1,178 @@
+# V2 worker owner. Parent admission establishes provenance; local installation
+# checks the pinned identity against actual parser settings and cache authority.
+use compiler.driver.managed_parse_group.{ManagedParseGroupOwnerV1, managed_parse_group_install_source_v1, managed_parse_group_source_v1, managed_parse_group_target_v1}
+use compiler.driver.driver_build.managed_parse_group_contract.*
+use compiler.driver.driver_build.managed_parse_group_result_v2.*
+use compiler.driver.driver_build.managed_parse_diagnostic_v2.*
+use compiler.driver.driver_build.managed_parse_compatibility.*
+use compiler.frontend.flat_ast_bridge.{FlatPoolTransportCaptureV1, flat_pool_transport_capture_arm_v1, flat_pool_transport_capture_take_v1, parse_and_build_module_scoped, build_module_from_flat_pool_blob}
+use compiler.frontend.frontend.{frontend_prepare_preprocessed_source_v1}
+use compiler.frontend.frontend_advisory_preprocess_port_v1.{FrontendAdvisoryPreprocessPolicyV1}
+use compiler.frontend.frontend_target_cfg_receipt_v1.{frontend_cfg_decision_digest_v1}
+use compiler.frontend.frontend_shared_parse_cas_v1.{frontend_shared_parse_feature_identity_v1}
+use compiler.frontend.desugar.desugar_async.{desugar_module}
+use compiler.core.parser_preprocessor.{_pp_preprocess_conditionals_target_receipted_v1}
+use compiler.core.parser.{parser_has_errors, parser_get_errors, parser_first_error_get}
+use compiler.common.diagnostics.diagnostic_v1.{DiagnosticV1}
+use compiler.common.diagnostics.severity.{Severity}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.utf8.{text_byte_len}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_atomic_write, file_exists}
+
+struct ManagedParseGroupOwnerV2:
+    base: ManagedParseGroupOwnerV1
+    frontend_identity: text
+
+struct ManagedParseGroupActionTransferV2:
+    owner: ManagedParseGroupOwnerV2
+    result: ManagedParseActionResultV2
+
+fn managed_parse_group_policy_v2(snapshot: ManagedParseSnapshotV1, identity: text) -> text:
+    val admitted = match managed_parse_frontend_identity_decode_v2(identity):
+        Ok(value): value
+        Err(reason): return reason
+    if env_get(MANAGED_PARSE_IDENTITY_ENV_V2) != identity: return "worker frontend identity changed"
+    if admitted.feature_identity != frontend_shared_parse_feature_identity_v1() or
+            admitted.capture_policy != env_get("SIMPLE_CAPTURE_WRITE_CHECK"):
+        return "actual parser policy differs from admitted identity"
+    val cache = match managed_parse_cache_identity_v2(identity, snapshot.worker_digest,
+            snapshot.target_os, snapshot.target_arch, snapshot.target_cpu):
+        Ok(value): value
+        Err(reason): return reason
+    if cache != snapshot.cache_identity: return "parser compatibility differs from snapshot"
+    if not managed_parse_group_target_v1(snapshot): return "parser target differs from snapshot"
+    ""
+
+fn managed_parse_group_install_v2(root: text, snapshot: ManagedParseSnapshotV1) -> Result<ManagedParseGroupOwnerV2, text>:
+    val identity = env_get(MANAGED_PARSE_IDENTITY_ENV_V2)
+    val invalid = managed_parse_group_policy_v2(snapshot, identity)
+    if invalid != "": return Err(invalid)
+    Ok(ManagedParseGroupOwnerV2(managed_parse_group_install_source_v1(root, snapshot)?, identity))
+
+fn managed_parse_group_diagnostic_v2(module: ManagedParseModuleV1, severity: Severity,
+    code: text, detail: text, ordinal: i64) -> DiagnosticV1:
+    var value = DiagnosticV1(severity, code, detail, Some(module.source_path), None, [], [], [], [], [], None)
+    value.notes = ["diagnostic-id:" + managed_parse_diagnostic_id_v2(value, module, ordinal)]
+    value
+
+fn managed_parse_group_error_v2(module: ManagedParseModuleV1, code: text, detail: text, warning: text = "") -> ManagedParseModuleResultV2:
+    var diagnostics: [DiagnosticV1] = []
+    if warning != "":
+        diagnostics = diagnostics.push(managed_parse_group_diagnostic_v2(module, Severity.Warning, "W-CAPTURE-WRITE", warning, 0))
+    diagnostics = diagnostics.push(managed_parse_group_diagnostic_v2(module, Severity.Error, code, detail, diagnostics.len()))
+    ManagedParseModuleResultV2(module.module_id, module.source_digest, "ERROR", "", "", false, false, diagnostics)
+
+fn managed_parse_group_errors_v2(module: ManagedParseModuleV1, warning: text = "") -> ManagedParseModuleResultV2:
+    var diagnostics: [DiagnosticV1] = []
+    if warning != "":
+        diagnostics = diagnostics.push(managed_parse_group_diagnostic_v2(module, Severity.Warning, "W-CAPTURE-WRITE", warning, 0))
+    var errors = 0
+    for detail in parser_get_errors():
+        diagnostics = diagnostics.push(managed_parse_group_diagnostic_v2(module, Severity.Error, "E-PARSE", detail, diagnostics.len()))
+        errors = errors + 1
+    if errors == 0:
+        val detail = parser_first_error_get()
+        diagnostics = diagnostics.push(managed_parse_group_diagnostic_v2(module, Severity.Error, "E-PARSE",
+            if detail == "": "parser failed without diagnostic" else: detail, diagnostics.len()))
+    ManagedParseModuleResultV2(module.module_id, module.source_digest, "ERROR", "", "", false, false, diagnostics)
+
+fn managed_parse_group_module_v2(owner: ManagedParseGroupOwnerV2, module: ManagedParseModuleV1) -> ManagedParseModuleResultV2:
+    val source = match managed_parse_group_source_v1(owner.base.root, owner.base.snapshot, module):
+        Ok(value): value
+        Err(reason): return managed_parse_group_error_v2(module, "E-PARSE-SOURCE", reason)
+    val selected = match _pp_preprocess_conditionals_target_receipted_v1(source,
+            owner.base.snapshot.target_os, owner.base.snapshot.target_arch):
+        Ok(value): value
+        Err(reason): return managed_parse_group_error_v2(module, "E-PARSE-POLICY", reason)
+    val prepared = match frontend_prepare_preprocessed_source_v1(selected.source,
+            FrontendAdvisoryPreprocessPolicyV1.Reference, 0u64, 0u64, 0u64):
+        Ok(value): value
+        Err(_reason): return managed_parse_group_error_v2(module, "E-PARSE-POLICY", "reference frontend preparation unavailable")
+    val parse_source = prepared[0]
+    val domain_blocks = prepared[1]
+    val key = managed_parse_module_cache_key_v1(owner.base.snapshot, module)
+    val path = owner.base.root + "/cache/" + key + ".v2.sdn"
+    val authority_path = owner.base.root + "/cache/" + key + ".v2.authority"
+    val authority = sha256_text(managed_parse_fields_v1(["managed-parse-authority-2", owner.frontend_identity,
+        key, sha256_text(parse_source), frontend_cfg_decision_digest_v1(selected.decisions)]))
+    if file_exists(path) and file_exists(authority_path):
+        val previous_authority = match file_read_regular_no_follow_bounded(authority_path, 64):
+            Ok(value): value
+            Err(reason): return managed_parse_group_error_v2(module, "E-PARSE-CACHE-IO", reason)
+        if previous_authority == authority:
+            val wire = match file_read_regular_no_follow_bounded(path, 65536):
+                Ok(value): value
+                Err(reason): return managed_parse_group_error_v2(module, "E-PARSE-CACHE-IO", reason)
+            match managed_parse_module_result_decode_v2(wire, module):
+                Ok(retained):
+                    if retained.status == "OK" and retained.reusable and retained.diagnostics.len() == 0:
+                        val blob = match file_read_regular_no_follow_bounded(owner.base.root + "/" + retained.blob_path, 134217728):
+                            Ok(value): value
+                            Err(reason): return managed_parse_group_error_v2(module, "E-PARSE-CACHE-IO", reason)
+                        if sha256_text(blob) == retained.blob_digest:
+                            match build_module_from_flat_pool_blob(blob, parse_source, module.source_path):
+                                Some(restored):
+                                    if parser_has_errors(): return managed_parse_group_errors_v2(module)
+                                    var completed = restored
+                                    if domain_blocks.len() > 0: completed.domain_blocks = domain_blocks
+                                    val _desugared = desugar_module(completed)
+                                    return ManagedParseModuleResultV2(module.module_id, module.source_digest,
+                                        "OK", retained.blob_path, retained.blob_digest, true, true, [])
+                                _: ()
+                Err(_reason): ()
+    flat_pool_transport_capture_arm_v1()
+    var parsed = parse_and_build_module_scoped(parse_source, module.source_path, false)
+    val capture = flat_pool_transport_capture_take_v1()
+    val warning_detail = if capture.warning == "": "" else:
+        "line " + str(capture.warning_line) + ", column " + str(capture.warning_col) + ": " + capture.warning
+    if parser_has_errors(): return managed_parse_group_errors_v2(module, warning_detail)
+    if domain_blocks.len() > 0: parsed.domain_blocks = domain_blocks
+    val _completed = desugar_module(parsed)
+    managed_parse_group_publish_capture_v2(owner, module, capture, authority, 134217728)
+
+fn managed_parse_group_publish_capture_v2(owner: ManagedParseGroupOwnerV2, module: ManagedParseModuleV1,
+    capture: FlatPoolTransportCaptureV1, authority: text, maximum_blob_bytes: i64) -> ManagedParseModuleResultV2:
+    # The production caller uses 128 MiB. A caller may tighten, never widen,
+    # this publication bound; all post-parse failures retain observed warnings.
+    val warning_detail = if capture.warning == "": "" else:
+        "line " + str(capture.warning_line) + ", column " + str(capture.warning_col) + ": " + capture.warning
+    if maximum_blob_bytes < 1 or maximum_blob_bytes > 134217728 or
+            capture.blob == "" or text_byte_len(capture.blob) > maximum_blob_bytes:
+        return managed_parse_group_error_v2(module, "E-PARSE-CAPTURE", "parser transport artifact absent or oversized", warning_detail)
+    val key = managed_parse_module_cache_key_v1(owner.base.snapshot, module)
+    val path = owner.base.root + "/cache/" + key + ".v2.sdn"
+    val authority_path = owner.base.root + "/cache/" + key + ".v2.authority"
+    var diagnostics: [DiagnosticV1] = []
+    if capture.warning != "":
+        diagnostics = [managed_parse_group_diagnostic_v2(module, Severity.Warning, "W-CAPTURE-WRITE", warning_detail, 0)]
+    val digest = sha256_text(capture.blob)
+    val relative = "artifacts/" + digest + ".flat"
+    val value = ManagedParseModuleResultV2(module.module_id, module.source_digest, "OK", relative, digest,
+        false, capture.reusable, diagnostics)
+    val encoded = managed_parse_module_result_encode_v2(value, module)
+    if encoded == "" or not file_atomic_write(owner.base.root + "/" + relative, capture.blob):
+        return managed_parse_group_error_v2(module, "E-PARSE-CACHE-IO", "cannot persist bounded transport artifact", warning_detail)
+    if value.reusable and (not file_atomic_write(path, encoded) or not file_atomic_write(authority_path, authority)):
+        return managed_parse_group_error_v2(module, "E-PARSE-CACHE-IO", "cannot persist reusable parse receipt", warning_detail)
+    value
+
+fn managed_parse_group_action_owned_v2(owner: ManagedParseGroupOwnerV2, action: ManagedParseActionV1) -> ManagedParseGroupActionTransferV2:
+    val invalid = managed_parse_action_validate_v1(owner.base.snapshot, action)
+    if invalid != "": return ManagedParseGroupActionTransferV2(owner, ManagedParseActionResultV2(action, [], invalid))
+    val policy = managed_parse_group_policy_v2(owner.base.snapshot, owner.frontend_identity)
+    var modules: [ManagedParseModuleResultV2] = []
+    var failed = false
+    for module in owner.base.snapshot.modules:
+        if not action.package_members.contains(module.package_id): continue
+        val result = if policy != "": managed_parse_group_error_v2(module, "E-PARSE-POLICY", policy)
+            elif failed and not action.keep_going: managed_parse_group_error_v2(module, "E-PARSE-SKIPPED", "prior module failed")
+            else: managed_parse_group_module_v2(owner, module)
+        modules = modules.push(result)
+        if result.status == "ERROR": failed = true
+    ManagedParseGroupActionTransferV2(owner, ManagedParseActionResultV2(action, modules,
+        if failed: "one or more parser modules failed" else: ""))
+
+export ManagedParseGroupOwnerV2, ManagedParseGroupActionTransferV2
+export managed_parse_group_install_v2, managed_parse_group_action_owned_v2
+export managed_parse_group_publish_capture_v2

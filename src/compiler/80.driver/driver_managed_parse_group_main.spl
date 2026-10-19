@@ -1,6 +1,8 @@
 # Compiled group worker entry. The broker owns process lifetime; this entry
 # consumes one serialized mailbox and never launches another process.
-use compiler.driver.managed_parse_group.{managed_parse_group_install_v1, managed_parse_group_action_owned_v1}
+use compiler.driver.managed_parse_group.{ManagedParseGroupOwnerV1, managed_parse_group_install_v1, managed_parse_group_action_owned_v1}
+use compiler.driver.managed_parse_group_v2.{ManagedParseGroupOwnerV2, managed_parse_group_install_v2, managed_parse_group_action_owned_v2}
+use compiler.driver.driver_build.managed_parse_group_result_v2.{managed_parse_action_result_encode_v2, managed_parse_action_result_validate_v2}
 use compiler.driver.driver_build.managed_parse_group_contract.{managed_parse_snapshot_decode_v1, managed_parse_action_decode_v1, managed_parse_action_validate_v1, managed_parse_action_basename_v1}
 use compiler.driver.driver_build.managed_parse_group_result.{managed_parse_action_result_encode_v1, managed_parse_action_result_validate_v1}
 use std.nogc_sync_mut.io_runtime.{get_args}
@@ -9,13 +11,29 @@ use std.nogc_sync_mut.io.time_ops.{current_time_ms, sleep_ms}
 use std.common.build_manager.codec.{builder_wire_line_v1}
 
 fn managed_parse_group_worker_main_v1(root: text) -> Result<i64, text>:
+    managed_parse_group_worker_main_protocol_v1(root, false)
+
+fn managed_parse_group_worker_main_v2(root: text) -> Result<i64, text>:
+    managed_parse_group_worker_main_protocol_v1(root, true)
+
+fn managed_parse_group_worker_main_protocol_v1(root: text, v2: bool) -> Result<i64, text>:
     val payload = file_read_regular_no_follow_bounded(root + "/install.sdn", 16777216)?
     val snapshot = managed_parse_snapshot_decode_v1(payload)?
-    var owner = managed_parse_group_install_v1(root, snapshot)?
+    var owner: ManagedParseGroupOwnerV1? = None
+    var owner_v2: ManagedParseGroupOwnerV2? = None
+    var source_bytes: i64 = 0
+    if v2:
+        val installed_owner = managed_parse_group_install_v2(root, snapshot)?
+        owner_v2 = Some(installed_owner)
+        source_bytes = installed_owner.base.source_bytes
+    else:
+        val installed_owner = managed_parse_group_install_v1(root, snapshot)?
+        owner = Some(installed_owner)
+        source_bytes = installed_owner.source_bytes
     # The runner reads installed.sdn through BuilderWireReaderV1; scalar text
     # records below are emitted by its canonical escaped-line helper.
     val installed = managed_parse_group_installed_v1(snapshot.worker_id, snapshot.generation,
-        snapshot.snapshot_digest, snapshot.modules.len(), owner.source_bytes)
+        snapshot.snapshot_digest, snapshot.modules.len(), source_bytes)
     if not file_atomic_write(root + "/installed.sdn", installed): return Err("cannot publish parser installation")
     val deadline = current_time_ms() + 604800000
     var last = ""
@@ -36,13 +54,27 @@ fn managed_parse_group_worker_main_v1(root: text) -> Result<i64, text>:
                 if managed_parse_action_basename_v1(action) != name: return Err("action mailbox digest mismatch")
                 val invalid = managed_parse_action_validate_v1(snapshot, action)
                 if invalid != "": return Err(invalid)
-                val transfer = managed_parse_group_action_owned_v1(owner, action)
-                val result_invalid = managed_parse_action_result_validate_v1(snapshot, action, transfer.result)
-                if result_invalid != "": return Err(result_invalid)
-                val encoded = managed_parse_action_result_encode_v1(transfer.result)
+                var encoded = ""
+                if v2:
+                    val current = match owner_v2:
+                        Some(value): value
+                        _: return Err("V2 parser owner missing")
+                    val transfer = managed_parse_group_action_owned_v2(current, action)
+                    val result_invalid = managed_parse_action_result_validate_v2(snapshot, action, transfer.result)
+                    if result_invalid != "": return Err(result_invalid)
+                    encoded = managed_parse_action_result_encode_v2(snapshot, transfer.result)
+                    owner_v2 = Some(transfer.owner)
+                else:
+                    val current = match owner:
+                        Some(value): value
+                        _: return Err("V1 parser owner missing")
+                    val transfer = managed_parse_group_action_owned_v1(current, action)
+                    val result_invalid = managed_parse_action_result_validate_v1(snapshot, action, transfer.result)
+                    if result_invalid != "": return Err(result_invalid)
+                    encoded = managed_parse_action_result_encode_v1(transfer.result)
+                    owner = Some(transfer.owner)
                 if encoded == "" or not file_atomic_write(root + "/receipts/" + name, encoded):
                     return Err("cannot publish parser action result")
-                owner = transfer.owner
                 last = name
         sleep_ms(20)
     Err("parser worker exceeded bounded lifetime")
@@ -54,13 +86,19 @@ fn managed_parse_group_installed_v1(worker: text, generation: i64, snapshot: tex
 fn main() -> i64:
     val args = get_args()
     var root = ""
+    var v2 = false
+    var selected = false
     for index in 0..args.len():
-        if args[index] == "--group-root" and index + 1 < args.len(): root = args[index + 1]
+        if (args[index] == "--group-root" or args[index] == "--group-root-v2") and index + 1 < args.len():
+            if selected: return 2
+            selected = true
+            root = args[index + 1]
+            v2 = args[index] == "--group-root-v2"
     if root == "": return 2
-    match managed_parse_group_worker_main_v1(root):
+    match managed_parse_group_worker_main_protocol_v1(root, v2):
         Ok(code): code
         Err(reason):
             print "managed parser worker failed: " + reason
             1
 
-export managed_parse_group_worker_main_v1
+export managed_parse_group_worker_main_v1, managed_parse_group_worker_main_v2

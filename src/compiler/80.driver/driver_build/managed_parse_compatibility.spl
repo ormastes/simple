@@ -1,0 +1,88 @@
+# Pure compatibility contract; admission supplies provenance independently.
+use compiler.common.frontend_wire_versions_v1.{FLAT_POOL_CODEC_VERSION}
+use std.common.build_manager.contracts.{builder_digest_valid_v1, builder_text_valid_v1, builder_identifier_valid_v1}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.sdn.strict_v1.{sdn_parse_strict_v1}
+use std.common.sdn.strict_types_v1.{SdnStrictLimitsV1}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.utf8.{text_byte_len}
+
+val MANAGED_PARSE_IDENTITY_ENV_V2: text = "SIMPLE_MANAGED_PARSE_FRONTEND_IDENTITY_V2"
+val MANAGED_PARSE_RESULT_WIRE_VERSION_V2: text = "managed-parse-result-sdn-2"
+val MANAGED_PARSE_RESULT_SDN_VERSION_V2: text = "managed-parse-result-sdn-2"
+val MANAGED_PARSE_DIAGNOSTIC_PROFILE_V2: text = "managed-parse-diagnostic-2"
+
+struct ManagedParseFrontendIdentityV2:
+    base_frontend_identity: text
+    base_cache_compatibility: text
+    feature_identity: text
+    capture_policy: text
+
+fn managed_parse_frontend_identity_v2(base_frontend_identity: text, base_cache_compatibility: text,
+    feature_identity: text, capture_policy: text) -> Result<text, text>:
+    if base_frontend_identity == "" or text_byte_len(base_frontend_identity) > 4096 or
+            not builder_text_valid_v1(base_frontend_identity): return Err("invalid base frontend identity")
+    if not builder_digest_valid_v1(base_cache_compatibility) or not builder_digest_valid_v1(feature_identity):
+        return Err("invalid frontend compatibility digest")
+    if capture_policy != "error" and capture_policy != "warning" and capture_policy != "off":
+        return Err("invalid exact capture policy")
+    val fields: [SdnValue] = [SdnValue.String("managed-parse-frontend-v2"),
+        SdnValue.String(base_frontend_identity), SdnValue.String(base_cache_compatibility),
+        SdnValue.String(feature_identity), SdnValue.String(capture_policy), SdnValue.String(FLAT_POOL_CODEC_VERSION),
+        SdnValue.String(MANAGED_PARSE_RESULT_WIRE_VERSION_V2), SdnValue.String(MANAGED_PARSE_RESULT_SDN_VERSION_V2),
+        SdnValue.String(MANAGED_PARSE_DIAGNOSTIC_PROFILE_V2)]
+    val encoded = sdn_encode_canonical(SdnValue.Array(fields))
+    if text_byte_len(encoded) > 8192 or encoded.contains("\n") or encoded.contains("\r"):
+        return Err("frontend identity transport exceeds bound")
+    Ok(encoded)
+
+fn managed_parse_frontend_identity_decode_v2(payload: text) -> Result<ManagedParseFrontendIdentityV2, text>:
+    if text_byte_len(payload) > 8192 or payload.contains("\n") or payload.contains("\r"):
+        return Err("frontend identity transport exceeds bound")
+    val limits = SdnStrictLimitsV1(max_source_bytes: 8192, max_depth: 2,
+        max_nodes: 10, max_rows: 0, max_cells: 0, max_columns: 0)
+    val document = match sdn_parse_strict_v1(payload, limits):
+        Ok(value): value
+        Err(_issue): return Err("invalid bounded frontend identity SDN")
+    val fields = match document.value:
+        SdnValue.Array(values): values
+        _: return Err("frontend identity must be an array")
+    if fields.len() != 9: return Err("frontend identity field count differs")
+    var strings: [text] = []
+    for field in fields:
+        match field:
+            SdnValue.String(value): strings = strings.push(value)
+            _: return Err("frontend identity field must be text")
+    val canonical = managed_parse_frontend_identity_v2(strings[1], strings[2], strings[3], strings[4])?
+    if payload != canonical: return Err("frontend identity is noncanonical or has foreign versions")
+    Ok(ManagedParseFrontendIdentityV2(strings[1], strings[2], strings[3], strings[4]))
+
+fn managed_parse_cache_identity_v2(frontend_identity: text, worker_digest: text,
+    target_os: text, target_arch: text, target_cpu: text) -> Result<text, text>:
+    val _identity = managed_parse_frontend_identity_decode_v2(frontend_identity)?
+    if not builder_digest_valid_v1(worker_digest): return Err("invalid worker digest")
+    for target in [target_os, target_arch, target_cpu]:
+        if not builder_identifier_valid_v1(target): return Err("invalid exact target component")
+    val fields: [SdnValue] = [SdnValue.String("managed-parse-cache-v2"), SdnValue.String(frontend_identity),
+        SdnValue.String(worker_digest), SdnValue.String(target_os), SdnValue.String(target_arch), SdnValue.String(target_cpu)]
+    Ok(sha256_text(sdn_encode_canonical(SdnValue.Array(fields))))
+
+fn managed_parse_environment_identity_v2(environment: [text]) -> Result<text, text>:
+    if environment.len() > 1024: return Err("environment too large")
+    var identity = ""
+    var found = false
+    for assignment in environment:
+        val split = assignment.find("=")
+        if split <= 0: return Err("invalid environment assignment")
+        if assignment.substring(0, split).to_upper() == MANAGED_PARSE_IDENTITY_ENV_V2:
+            if found: return Err("duplicate frontend identity environment")
+            found = true
+            identity = assignment.substring(split + 1)
+    if not found: return Err("frontend identity environment absent")
+    val _decoded = managed_parse_frontend_identity_decode_v2(identity)?
+    Ok(identity)
+
+export ManagedParseFrontendIdentityV2, managed_parse_frontend_identity_v2, managed_parse_frontend_identity_decode_v2
+export managed_parse_cache_identity_v2, managed_parse_environment_identity_v2, MANAGED_PARSE_IDENTITY_ENV_V2
+export MANAGED_PARSE_RESULT_WIRE_VERSION_V2, MANAGED_PARSE_RESULT_SDN_VERSION_V2, MANAGED_PARSE_DIAGNOSTIC_PROFILE_V2

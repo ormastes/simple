@@ -1,0 +1,66 @@
+# Mandatory production gate. Expected pins are independent caller authority;
+# never derive them from the submitted run, receipt, or ambient environment.
+use compiler.driver.driver_build.managed_parse_run_contract.{ManagedParseRunV1, managed_parse_run_validate_v1}
+use compiler.driver.driver_build.managed_parse_qualification.{managed_parse_qualification_admit_v1}
+use compiler.driver.driver_build.managed_parse_compatibility.{managed_parse_frontend_identity_decode_v2,
+    managed_parse_environment_identity_v2, managed_parse_cache_identity_v2}
+use compiler.common.frontend_feature_identity_v1.{frontend_shared_parse_feature_identity_for_v1}
+
+fn managed_parse_run_admit_v2(run: ManagedParseRunV1, receipt_path: text, receipt_digest: text,
+    expected_issuer_digest: text, expected_worker_path: text, expected_worker_digest: text,
+    expected_frontend_identity: text, expected_target: text, expected_target_os: text,
+    expected_target_arch: text, expected_target_cpu: text) -> text:
+    val invalid = managed_parse_run_validate_v1(run)
+    if invalid != "": return invalid
+    if run.worker_program != expected_worker_path or run.worker_digest != expected_worker_digest:
+        return "run differs from independent worker pins"
+    val identity = match managed_parse_frontend_identity_decode_v2(expected_frontend_identity):
+        Ok(value): value
+        Err(reason): return reason
+    val transported = match managed_parse_environment_identity_v2(run.environment):
+        Ok(value): value
+        Err(reason): return reason
+    if transported != expected_frontend_identity: return "run frontend identity differs from independent pin"
+    val cache = match managed_parse_cache_identity_v2(expected_frontend_identity, expected_worker_digest,
+            expected_target_os, expected_target_arch, expected_target_cpu):
+        Ok(value): value
+        Err(reason): return reason
+    if run.profile.compatibility_id != cache: return "profile compatibility differs from derived identity"
+    for snapshot in run.snapshots:
+        if snapshot.target_os != expected_target_os or snapshot.target_arch != expected_target_arch or
+                snapshot.target_cpu != expected_target_cpu or snapshot.cache_identity != cache:
+            return "snapshot target or cache differs from independent pins"
+    for binding in run.bindings:
+        if binding.cache_identity != cache: return "binding cache differs from derived identity"
+    for action in run.graph.actions:
+        if action.restat_identity != cache: return "action cache differs from derived identity"
+    # Require explicit capture settings. Unknown/unset defaulting is not an
+    # independently selected production policy for the V2 protocol.
+    var policy = ""
+    var feature_names: [text] = []
+    var arena = ""
+    var entry_closure = ""
+    var debug_match = ""
+    for assignment in run.environment:
+        val split = assignment.find("=")
+        val name = assignment.substring(0, split).to_upper()
+        val setting = assignment.substring(split + 1)
+        if name == "SIMPLE_CAPTURE_WRITE_CHECK":
+            policy = assignment.substring(split + 1)
+        if name == "SIMPLE_NATIVE_ARENA_DECLS":
+            arena = setting
+            feature_names = feature_names.push(name)
+        if name == "SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE":
+            entry_closure = setting
+            feature_names = feature_names.push(name)
+        if name == "SIMPLE_DEBUG_MATCH_PAT":
+            debug_match = setting
+            feature_names = feature_names.push(name)
+    if policy != identity.capture_policy: return "run capture policy differs from independent pin"
+    if feature_names.len() != 3 or
+            frontend_shared_parse_feature_identity_for_v1(arena, entry_closure, debug_match) != identity.feature_identity:
+        return "run feature settings differ from independent pin"
+    managed_parse_qualification_admit_v1(receipt_path, receipt_digest, expected_issuer_digest,
+        expected_worker_path, expected_worker_digest, expected_frontend_identity, expected_target)
+
+export managed_parse_run_admit_v2
