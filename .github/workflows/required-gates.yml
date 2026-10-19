@@ -41,14 +41,18 @@ jobs:
       contents: read
     steps:
       # This repo also has a persistent Linux runner labelled ubuntu-latest.
-      # Earlier M5 advisory jobs sealed evidence directories in its checkout;
-      # checkout cannot remove their files until the parent dirs are writable.
-      - name: Restore checkout access to sealed advisory evidence
+      # Earlier jobs on it (M5 advisory evidence, bootstrap stage3
+      # stage2-runtime-authority/deps, build/phase_snapshots) leave read-only
+      # entries in the checkout; checkout cannot remove them (EACCES) until
+      # their parent dirs are owner-writable again. Unlinking only needs the
+      # parent dir u+wx, so only runner-owned dirs lacking it are touched
+      # (pre-order `\;` so a dir without u+x is fixed before find reads it);
+      # .git is skipped (its 0444 loose objects are git's own).
+      - name: Restore checkout access to read-only leftovers
         shell: sh
         run: |
-          evidence_root="$GITHUB_WORKSPACE/.simple/storage/evidence/release"
-          if [ -d "$evidence_root" ]; then
-            find "$evidence_root" -type d -exec chmod u+rwx {} +
+          if [ -d "$GITHUB_WORKSPACE" ]; then
+            find "$GITHUB_WORKSPACE" -xdev -name .git -prune -o -type d -user "$(id -u)" ! -perm -u+wx -exec chmod u+wx {} \; || true
           fi
 
       - uses: actions/checkout@v4
