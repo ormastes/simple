@@ -6,7 +6,7 @@ use std.common.crypto.sha256.{sha256_text, sha256_u8_fast_hex}
 use std.common.text_bytes.{text_to_utf8_bytes}
 use std.scv.compile_source_inventory_core.{CompileSourceInventoryEntryV1}
 use std.scv.compile_snapshot.{scv_compile_snapshot_materialize_source_v1}
-use app.io.mod.{dir_create, file_exists}
+use app.io.mod.{dir_create, file_exists, process_run}
 use app.io.file_ops.{path_absolute}
 use std.nogc_sync_mut.io_runtime.{file_hash_sha256, env_get, env_set, env_remove_process}
 use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
@@ -64,6 +64,25 @@ describe "SCV snapshot materializes sources by raw-byte digest":
         val chunk = root + "/build/scv/objects/chunks/sha256_{digest}.blob"
         expect(file_exists(chunk)).to_equal(true)
         expect(file_hash_sha256(chunk)).to_equal(digest)
+
+    it "materializes a tracked symlink through its in-root target":
+        """Regression (2026-10-20): test/cert/tool_qual/meta/deterministic/01_arithmetic.spl
+        is a git symlink (mode 120000) to ../../positive/01_arithmetic.spl; the
+        no-follow read refused it and every `simple test` on the self-hosted CLI
+        stopped with SCV-E-ADMISSION snapshot-read-failed. The owner check admits
+        the realpath target, so the materializer reads that target."""
+        val root = snapshot_bytes_root("symlink")
+        val content = "fn main():\n    print 2\n"
+        expect(snapshot_bytes_fixture(root, "src/bytes/target.spl", content)).to_equal(true)
+        val (_ln_out, _ln_err, ln_code) = process_run("ln", ["-s", "target.spl", root + "/src/bytes/link.spl"])
+        expect(ln_code).to_equal(0)
+        val relative = "src/bytes/link.spl"
+        val result = scv_compile_snapshot_materialize_source_v1(
+            root, root + "/build/scv", root + "/staging", snapshot_bytes_entry(relative, content))
+        expect(result.reason).to_equal("ok")
+        val digest = sha256_text(content)
+        expect(result.row).to_equal("{relative}|sha256_{digest}|{text_to_utf8_bytes(content).len()}")
+        expect(file_hash_sha256(root + "/staging/" + relative)).to_equal(digest)
 
     it "reuses an existing content-addressed chunk for identical bytes":
         val root = snapshot_bytes_root("reuse")
