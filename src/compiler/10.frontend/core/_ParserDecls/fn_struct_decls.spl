@@ -355,6 +355,7 @@ fn parse_type_param_constraint_list() -> [text]:
                     break
                 parser_advance()
                 if par_kind_get() != 6:
+                    parser_error("expected trait bound after +")
                     break
                 types.push(par_text_get())
                 parser_advance()
@@ -380,11 +381,12 @@ fn parse_type_param_constraint_list() -> [text]:
     parser_expect(145)
     types
 
-fn parse_type_params() -> [text]:
+fn parse_type_params_with_trait_bounds() -> ([text], [[text]]):
     # Parses canonical <T> and deprecated [T] declaration parameters.
     # Returns list of type parameter names (e.g., ["T", "U"])
     # Side effect: populates last_type_param_constraints and last_type_param_modes
     var type_params: [text] = []
+    var trait_rows: [[text]] = []
 
     # Check for < token (either TOK_LT or TOK_LT_GENERIC)
     val has_lt: bool = par_kind_get() == 82
@@ -393,7 +395,7 @@ fn parse_type_params() -> [text]:
     val has_angle: bool = has_lt or has_lt_gen
     val has_generic: bool = has_angle or has_square
     if not has_generic:
-        return type_params
+        return (type_params, trait_rows)
 
     parser_advance()
 
@@ -413,6 +415,7 @@ fn parse_type_params() -> [text]:
 
         val param_name = par_text_get()
         type_params.push(param_name)
+        var trait_bounds: [text] = []
         parser_advance()
 
         # Check for inline constraint: `T limits [...]` or `T: [...]`
@@ -421,7 +424,13 @@ fn parse_type_params() -> [text]:
         val is_colon_constraint: bool = par_kind_get() == 161
         if is_limits or is_candidates or is_colon_constraint:
             parser_advance()
+            # Bracket lists are hardware candidate/limit sets, not trait conjunctions.
+            val is_trait_bound = is_colon_constraint and par_kind_get() != 144
             val constraint_types = parse_type_param_constraint_list()
+            if is_trait_bound:
+                trait_bounds = constraint_types
+                if trait_bounds.len() == 0:
+                    parser_error("expected inline trait bound")
             if constraint_types.len() > 0:
                 # Check for * (candidate mode marker)
                 var has_star = false
@@ -435,6 +444,8 @@ fn parse_type_params() -> [text]:
                 file_generic_constraints[param_name] = filtered
                 file_generic_constraint_modes[param_name] = mode_str
 
+        trait_rows.push(trait_bounds)
+
     # Keep accepting the legacy square form until the source migration is
     # complete.  The Rust seed accepts it with a deprecation warning, so the
     # pure-Simple checker must not reject otherwise valid bootstrap inputs.
@@ -443,7 +454,11 @@ fn parse_type_params() -> [text]:
     else:
         parser_expect(83)
 
-    type_params
+    (type_params, trait_rows)
+
+fn parse_type_params() -> [text]:
+    val parsed = parse_type_params_with_trait_bounds()
+    parsed.0
 
 fn bitfield_backing_bits_from_name(type_name: text) -> i64:
     val primitive_bits = primitive_backing_bits_from_name(type_name)
@@ -641,7 +656,9 @@ fn parse_fn_decl(is_async: i64) -> i64:
     val previous_collection_owner = parser_collection_site_owner_push(fn_name)
 
     # Parse optional type parameters: fn name<T, U>(...)
-    val type_params = parse_type_params()
+    val parsed_type_params = parse_type_params_with_trait_bounds()
+    val type_params = parsed_type_params.0
+    val inline_trait_bounds = parsed_type_params.1
 
     var param_names: [text] = []
     var param_types: [i64] = []
@@ -706,7 +723,12 @@ fn parse_fn_decl(is_async: i64) -> i64:
         if par_kind_get() == TOK_NEWLINE:
             parser_try_skip_signature_layout_before_colon()
 
-    val where_bounds = parser_skip_where_clause(type_params)
+    var where_bounds = parser_skip_where_clause(type_params)
+    for i in 0..type_params.len():
+        var merged = inline_trait_bounds[i]
+        for bound in where_bounds[i]:
+            merged.push(bound)
+        where_bounds[i] = merged
 
     # Canonical declarations may be bodyless (forward/extern-style surface),
     # or may use the legacy colonless indented block spelling. Do not consume

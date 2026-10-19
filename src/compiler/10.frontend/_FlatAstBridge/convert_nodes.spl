@@ -9,7 +9,9 @@ use compiler.frontend.trace_policy.{frontend_compiler_trace_enabled}
 # ParserModule shape expected by HIR lowering. This is used as the bootstrap-safe
 # frontend path when the newer parser surface is unavailable.
 
-use compiler.core.parser.{parser_error}
+use compiler.core.parser.{parser_error, parser_error_at, parser_parse_type, parser_advance, par_kind_get}
+use compiler.frontend.core.lexer.{lex_init_with_path}
+use compiler.core.tokens.{TOK_EOF}
 use compiler.core.parser_decls.{parse_module_body}
 use compiler.frontend.core.string_interpolation_expand.{
     parse_interpolation_fragment, interpolation_literalize_region
@@ -2244,18 +2246,7 @@ fn convert_decl_fn(idx: i64) -> ParserFunction:
     # functions on the native --entry path return 0 instead of the argument).
     # Thread the real names through as `[ParserTypeParam]` so HIR lowering can see
     # (and reject) generic functions instead of erasing them.
-    val tp_names = decl_get_type_params(idx)
-    var fn_type_params: [ParserTypeParam] = []
-    var tpi = 0
-    while tpi < tp_names.len():
-        fn_type_params.push(ParserTypeParam(
-            name: tp_names[tpi],
-            bounds: [],
-            has_default: false,
-            default: Type(kind: TypeKind.Infer, span: span),
-            span: span
-        ))
-        tpi = tpi + 1
+    val fn_type_params = convert_decl_function_type_params(idx, span)
     # decl_get_ret_type returns a type tag (>0 when a `-> T` return type was
     # declared). This was previously fetched into `ret` and then discarded --
     # the function was always constructed with has_return_type=false and an
@@ -2423,6 +2414,35 @@ fn convert_decl_method_fn(idx: i64, target_name: text) -> ParserFunction:
         base.contract,
         base.span
     )
+
+fn convert_decl_function_type_params(idx: i64, span: Span) -> [ParserTypeParam]:
+    val tp_names = decl_get_type_params(idx)
+    val bound_rows = decl_get_type_param_constraints(idx)
+    var fn_type_params: [ParserTypeParam] = []
+    var tpi = 0
+    while tpi < tp_names.len():
+        var bounds: [Type] = []
+        if tpi < bound_rows.len():
+            for bound in bound_rows[tpi]:
+                # The enclosing parse is finished (as for interpolation fragments).
+                # Reuse its type grammar and arena; never flatten Named arguments.
+                lex_init_with_path(bound, "")
+                parser_advance()
+                val bound_tag = parser_parse_type()
+                if par_kind_get() != TOK_EOF:
+                    parser_error_at(span.line, span.col, "invalid generic trait bound: " + bound)
+                var converted_bound = convert_flat_type(bound_tag)
+                converted_bound.span = span
+                bounds.push(converted_bound)
+        fn_type_params.push(ParserTypeParam(
+            name: tp_names[tpi],
+            bounds: bounds,
+            has_default: false,
+            default: Type(kind: TypeKind.Infer, span: span),
+            span: span
+        ))
+        tpi = tpi + 1
+    fn_type_params
 
 fn convert_decl_extern_fn(idx: i64) -> ParserFunction:
     val name = decl_get_name(idx)
