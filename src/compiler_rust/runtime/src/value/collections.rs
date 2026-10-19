@@ -25,11 +25,35 @@ use simple_simd::HostCpuConfigError;
 
 thread_local! {
     static TRANSIENT_HEAP_SCOPE: RefCell<Option<TransientHeapScope>> = const { RefCell::new(None) };
+    /// Open promotion share window (see `rt_transient_heap_promote_share_begin`).
+    /// Kept outside `TRANSIENT_HEAP_SCOPE` so a heap free can erase from it
+    /// without re-borrowing the scope.
+    static TRANSIENT_PROMOTE_SHARE: RefCell<Option<TransientPromoteShare>> = const { RefCell::new(None) };
 }
 
 struct TransientHeapScope {
     paused: bool,
     objects: Vec<RuntimeValue>,
+}
+
+/// Nodes whose promotion fully committed earlier in the open share window:
+/// heap objects by header address, raw blocks by canonical pointer.
+#[derive(Default)]
+struct TransientPromoteShare {
+    heap: super::heap::HeapPtrSet<usize>,
+    raw: super::heap::HeapPtrSet<usize>,
+}
+
+/// Erase a freed heap object from the open share window so a recycled address
+/// is never mistaken for a committed node. Called by `unregister_heap_ptr`.
+pub(crate) fn transient_promote_share_forget(addr: usize) {
+    TRANSIENT_PROMOTE_SHARE.with(|slot| {
+        if let Ok(mut slot) = slot.try_borrow_mut() {
+            if let Some(share) = slot.as_mut() {
+                share.heap.remove(&addr);
+            }
+        }
+    });
 }
 
 /// True when the calling thread holds a transient heap scope that is paused,
@@ -2543,11 +2567,18 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
         let mut pending = vec![value];
         let mut reachable_heap = super::heap::HeapPtrSet::<u64>::default();
         let mut reachable_raw = super::heap::HeapPtrSet::<usize>::default();
+        // The root is always walked; only reached children may be skipped as
+        // committed earlier in an open share window.
+        let mut is_root = true;
         while let Some(current) = pending.pop() {
+            let may_skip = !std::mem::replace(&mut is_root, false);
             let mut words = std::ptr::null();
             let mut canonical_ptr = 0usize;
             let word_count = unsafe { rt_transient_raw_words(current.0 as i64, &mut words, &mut canonical_ptr) };
             if word_count >= 0 {
+                if may_skip && transient_promote_share_committed(false, canonical_ptr) {
+                    continue;
+                }
                 if !reachable_raw.insert(canonical_ptr) {
                     continue;
                 }
@@ -2560,6 +2591,9 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
                 }
                 continue;
             }
+            if may_skip && current.is_heap() && transient_promote_share_committed(true, current.as_heap_ptr() as usize) {
+                continue;
+            }
             if !reachable_heap.insert(current.0) {
                 continue;
             }
@@ -2567,18 +2601,67 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
                 pending.extend(children);
             }
         }
-        for ptr in reachable_raw {
-            if unsafe { rt_transient_raw_promote(ptr) } == 0 {
+        for ptr in reachable_raw.iter() {
+            if unsafe { rt_transient_raw_promote(*ptr) } == 0 {
                 return false;
             }
         }
         scope.objects.retain(|object| !reachable_heap.contains(&object.0));
+        // Fully committed: record it for later calls in an open share window.
+        TRANSIENT_PROMOTE_SHARE.with(|share| {
+            if let Some(share) = share.borrow_mut().as_mut() {
+                share.heap.extend(
+                    reachable_heap
+                        .iter()
+                        .map(|bits| RuntimeValue(*bits))
+                        .filter(|value| value.is_heap())
+                        .map(|value| value.as_heap_ptr() as usize),
+                );
+                share.raw.extend(reachable_raw.iter().copied());
+            }
+        });
         true
     })
 }
 
+fn transient_promote_share_committed(heap: bool, addr: usize) -> bool {
+    TRANSIENT_PROMOTE_SHARE.with(|share| {
+        share.borrow().as_ref().is_some_and(|share| {
+            if heap {
+                share.heap.contains(&addr)
+            } else {
+                share.raw.contains(&addr)
+            }
+        })
+    })
+}
+
+/// Open a promotion share window over this thread's paused scope. Twin of the
+/// C runtime's `rt_transient_heap_promote_share_begin` (runtime_native.c),
+/// which documents the contract: inside the window the caller only promotes
+/// and releases temporary root carriers (there is no write barrier), so a node
+/// committed by an earlier call is not re-walked and the promoted set is
+/// identical to unshared promotion. Returns false (no window) without a paused
+/// scope.
+#[no_mangle]
+pub extern "C" fn rt_transient_heap_promote_share_begin() -> bool {
+    if !transient_heap_scope_paused() {
+        return false;
+    }
+    TRANSIENT_PROMOTE_SHARE.with(|share| *share.borrow_mut() = Some(TransientPromoteShare::default()));
+    true
+}
+
+/// Close the promotion share window; true when one was open.
+#[no_mangle]
+pub extern "C" fn rt_transient_heap_promote_share_end() -> bool {
+    TRANSIENT_PROMOTE_SHARE.with(|share| share.borrow_mut().take().is_some())
+}
+
 #[no_mangle]
 pub extern "C" fn rt_transient_array_scope_end() -> bool {
+    // A promotion share window never outlives its scope.
+    TRANSIENT_PROMOTE_SHARE.with(|share| share.borrow_mut().take());
     let scope = TRANSIENT_HEAP_SCOPE.with(|slot| slot.borrow_mut().take());
     let Some(scope) = scope else {
         return false;
@@ -7474,6 +7557,59 @@ mod string_free_contract_tests {
             before + 5,
             "only five promoted graph nodes survive"
         );
+    }
+
+    /// Twin of src/runtime/test/rt_transient_promote_share_selfcheck.c: a
+    /// share window must promote exactly the set unshared promotion does.
+    #[test]
+    fn promote_share_window_retains_the_same_overlapping_root_set() {
+        fn run(shared: bool) -> Vec<bool> {
+            let persistent_carrier = rt_array_new(1); // pre-scope: never transient
+            assert!(rt_transient_array_scope_begin());
+            let shared_text = mkstr("share window shared text");
+            let only_a = mkstr("share window only-a text");
+            let only_b = mkstr("share window only-b text");
+            let carried = mkstr("share window persistent carrier child");
+            let late = mkstr("share window late carrier child");
+            let discarded = mkstr("share window discarded text");
+            let common = rt_array_new(1);
+            assert!(rt_array_push(common, shared_text));
+            let root_a = rt_array_new(2);
+            assert!(rt_array_push(root_a, common));
+            assert!(rt_array_push(root_a, only_a));
+            let root_b = rt_array_new(3);
+            assert!(rt_array_push(root_b, common));
+            assert!(rt_array_push(root_b, only_b));
+            assert!(rt_array_push(root_b, root_a));
+            // No write barrier: a persistent carrier can hold a transient child.
+            assert!(rt_array_push(persistent_carrier, carried));
+            assert!(rt_transient_array_scope_pause());
+            if shared {
+                assert!(super::rt_transient_heap_promote_share_begin());
+            }
+            for root in [root_a, root_b, common, persistent_carrier, persistent_carrier, late] {
+                let carrier = rt_array_new(1);
+                assert!(rt_array_push(carrier, root));
+                assert!(rt_transient_heap_promote(carrier));
+                super::rt_array_free(carrier);
+            }
+            if shared {
+                assert!(super::rt_transient_heap_promote_share_end());
+            }
+            assert!(rt_transient_array_scope_end());
+            [shared_text, only_a, only_b, carried, late, discarded]
+                .iter()
+                .map(|text| rt_string_len(*text) >= 0)
+                .collect()
+        }
+
+        let _g = GUARD.lock().unwrap();
+        assert!(!super::rt_transient_heap_promote_share_begin(), "no window without a paused scope");
+        assert!(!super::rt_transient_heap_promote_share_end(), "no window was open");
+        let plain = run(false);
+        let shared = run(true);
+        assert_eq!(plain, shared, "share window changes no object's lifetime");
+        assert_eq!(shared, vec![true, true, true, true, true, false]);
     }
 
     #[test]

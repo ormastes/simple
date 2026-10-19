@@ -1529,6 +1529,8 @@ static int rt_core_is_registered_immortal_ptr(void* ptr);
 static int rt_core_unregister_immortal_ptr(void* ptr);
 static void rt_core_reclaim_transient_immortal(uint32_t scope_id);
 static void rt_core_reclaim_transient_raw(void);
+static void core_transient_share_forget(uintptr_t ptr);
+static void core_transient_share_reset(void);
 static atomic_flag rt_core_heap_lifecycle_lock = ATOMIC_FLAG_INIT;
 
 static void rt_core_heap_lifecycle_acquire(void) {
@@ -1793,6 +1795,7 @@ int8_t rt_transient_array_scope_end(void) {
             atomic_load_explicit(&rt_core_transient_scope_owner, memory_order_acquire) !=
                 (uintptr_t)&rt_core_transient_scope_thread_token) return 0;
     const uint32_t scope_id = rt_core_transient_array_scope_id;
+    core_transient_share_reset(); /* a promotion share window never outlives its scope */
     rt_core_transient_array_scope_active = 0;
     rt_core_transient_array_scope_paused = 0;
 
@@ -1966,6 +1969,7 @@ static RtCoreTransientRawAlloc* rt_core_transient_raw_lookup(uintptr_t ptr) {
 static void rt_core_transient_raw_erase(void* ptr) {
     RtCoreTransientRawAlloc* entry = rt_core_transient_raw_lookup((uintptr_t)ptr);
     if (!entry) return;
+    core_transient_share_forget((uintptr_t)ptr);
     entry->ptr = RT_CORE_TRANSIENT_RAW_TOMBSTONE;
     entry->bytes = 0;
     rt_core_transient_raw_alloc_len--;
@@ -2168,6 +2172,7 @@ static int rt_core_unregister_immortal_ptr(void* ptr) {
     rt_core_immortal_registry_release();
     if (erased) {
         atomic_fetch_sub_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+        core_transient_share_forget((uintptr_t)ptr);
     }
     rt_core_heap_lifecycle_release();
     return erased;
@@ -2649,6 +2654,9 @@ typedef struct RtCoreTransientPlan {
 } RtCoreTransientPlan;
 
 #define RT_CORE_TRANSIENT_MAX_NODES ((size_t)1 << 22)
+/* Only the promotion-share set below ever erases; a per-call plan never does.
+ * A tombstone keeps lookup probe chains intact and is dropped on rehash. */
+#define RT_CORE_TRANSIENT_SEEN_TOMBSTONE ((uintptr_t)1)
 
 static int rt_core_transient_seen_insert(RtCoreTransientPlan* plan, uintptr_t ptr) {
     if ((plan->seen_len + 1) * 10 >= plan->seen_cap * 7) {
@@ -2657,16 +2665,19 @@ static int rt_core_transient_seen_insert(RtCoreTransientPlan* plan, uintptr_t pt
         uintptr_t* fresh = (uintptr_t*)calloc(next_cap, sizeof(uintptr_t));
         if (!fresh) return -1;
         size_t mask = next_cap - 1;
+        size_t live = 0;
         for (size_t i = 0; i < plan->seen_cap; i++) {
             uintptr_t entry = plan->seen[i];
-            if (!entry) continue;
+            if (entry <= RT_CORE_TRANSIENT_SEEN_TOMBSTONE) continue;
             size_t j = rt_core_immortal_hash_ptr(entry) & mask;
             while (fresh[j]) j = (j + 1) & mask;
             fresh[j] = entry;
+            live++;
         }
         free(plan->seen);
         plan->seen = fresh;
         plan->seen_cap = next_cap;
+        plan->seen_len = live; /* erased (tombstoned) slots are dropped here */
     }
     size_t mask = plan->seen_cap - 1;
     size_t i = rt_core_immortal_hash_ptr(ptr) & mask;
@@ -2773,6 +2784,120 @@ static int rt_core_transient_add(RtCoreTransientPlan* plan, int64_t value) {
     return rt_core_transient_plan_push(plan, node.ptr, node.kind, node.bytes) ? 1 : -1;
 }
 
+/* ---------------------------------------------------------------------------
+ * Promotion share window (perf: O(roots x graph) -> O(graph) per module).
+ *
+ * Callers such as MIR's promote_transient_owner promote ~190 overlapping roots
+ * back to back, and each call used to re-walk the whole graph reachable from
+ * its root. Inside an explicit share window, a node whose promotion already
+ * COMMITTED in an earlier call of the same window is not re-walked.
+ *
+ * Why the window is explicit, and why no automatic "stop at already-promoted"
+ * exists: this runtime has no write barrier. A persistent or already-promoted
+ * array, dict, closure or raw struct can be mutated at any time (inline stores
+ * into raw struct words are not even runtime calls) to reference an object of
+ * the current transient scope -- MIR lowering does exactly that to lowering
+ * fields that predate the scope -- and today's full re-walk is what finds such
+ * children. So "already promoted" alone can never stop a walk. The window
+ * contract is: between share_begin and share_end the caller performs only
+ * promote calls and releases of the temporary root carriers built for them --
+ * no graph mutation. Under that contract a committed node's reachable set is
+ * unchanged and every transient object in it was already promoted, so skipping
+ * it promotes exactly the same set.
+ *
+ * Defenses beyond the contract:
+ *  - the ROOT of each call is always walked, never skipped;
+ *  - only nodes of a call that fully committed enter the set (a failed or
+ *    partially-committed call adds nothing, so later calls re-walk as today);
+ *  - any registered heap object or raw allocation freed inside the window is
+ *    erased from the set, so a recycled address is never mistaken for a
+ *    committed node;
+ *  - scope end closes the window; begin requires this thread's paused scope.
+ * -------------------------------------------------------------------------- */
+static _Thread_local int core_transient_share_active = 0;
+static _Thread_local RtCoreTransientPlan core_transient_share = {0};
+
+static int core_transient_share_contains(uintptr_t ptr) {
+    const RtCoreTransientPlan* share = &core_transient_share;
+    if (!core_transient_share_active || share->seen_cap == 0) return 0;
+    size_t mask = share->seen_cap - 1;
+    size_t i = rt_core_immortal_hash_ptr(ptr) & mask;
+    for (size_t probes = 0; probes < share->seen_cap; probes++) {
+        uintptr_t entry = share->seen[i];
+        if (entry == 0) return 0;
+        if (entry == ptr) return 1;
+        i = (i + 1) & mask;
+    }
+    return 0;
+}
+
+static void core_transient_share_forget(uintptr_t ptr) {
+    RtCoreTransientPlan* share = &core_transient_share;
+    if (!core_transient_share_active || share->seen_cap == 0 || ptr == 0) return;
+    size_t mask = share->seen_cap - 1;
+    size_t i = rt_core_immortal_hash_ptr(ptr) & mask;
+    for (size_t probes = 0; probes < share->seen_cap; probes++) {
+        uintptr_t entry = share->seen[i];
+        if (entry == 0) return;
+        if (entry == ptr) {
+            share->seen[i] = RT_CORE_TRANSIENT_SEEN_TOMBSTONE;
+            return;
+        }
+        i = (i + 1) & mask;
+    }
+}
+
+static void core_transient_share_reset(void) {
+    free(core_transient_share.seen);
+    free(core_transient_share.nodes);
+    core_transient_share = (RtCoreTransientPlan){0};
+    core_transient_share_active = 0;
+}
+
+/* Child edge: a node committed earlier in the share window is not re-walked. */
+static int core_transient_add_child(RtCoreTransientPlan* plan, int64_t value) {
+    RtCoreTransientNode node;
+    int classified = rt_core_transient_classify(value, &node);
+    if (classified < 0) return -1;
+    if (classified == 0) return 1;
+    if (core_transient_share_contains((uintptr_t)node.ptr)) return 1;
+    int seen = rt_core_transient_seen_insert(plan, (uintptr_t)node.ptr);
+    if (seen < 0) return -1;
+    if (!seen) return 1;
+    return rt_core_transient_plan_push(plan, node.ptr, node.kind, node.bytes) ? 1 : -1;
+}
+
+/* Record a fully committed plan. On allocation failure the window closes, so
+ * later calls re-walk exactly as without sharing. */
+static void core_transient_share_record(const RtCoreTransientPlan* plan) {
+    if (!core_transient_share_active) return;
+    for (size_t i = 0; i < plan->len; i++) {
+        if (rt_core_transient_seen_insert(
+                &core_transient_share, (uintptr_t)plan->nodes[i].ptr) < 0) {
+            core_transient_share_reset();
+            return;
+        }
+    }
+}
+
+/* 1 = window opened; 0 = no paused scope owned by this thread (promotion then
+ * behaves exactly as without a window). */
+int8_t rt_transient_heap_promote_share_begin(void) {
+    if (!rt_core_transient_array_scope_active || !rt_core_transient_array_scope_paused ||
+            atomic_load_explicit(&rt_core_transient_scope_owner, memory_order_acquire) !=
+                (uintptr_t)&rt_core_transient_scope_thread_token) return 0;
+    core_transient_share_reset();
+    core_transient_share_active = 1;
+    return 1;
+}
+
+/* 1 = a window was open and is now closed; 0 = none was open. */
+int8_t rt_transient_heap_promote_share_end(void) {
+    int8_t was_active = core_transient_share_active ? 1 : 0;
+    core_transient_share_reset();
+    return was_active;
+}
+
 int8_t rt_transient_heap_promote(int64_t value) {
     if (!rt_core_transient_array_scope_active || !rt_core_transient_array_scope_paused) return 0;
     rt_core_heap_lifecycle_acquire();
@@ -2807,29 +2932,29 @@ int8_t rt_transient_heap_promote(int64_t value) {
             RtCoreArray* array = (RtCoreArray*)node.ptr;
             if (array->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) continue;
             for (int64_t j = 0; j < array->len && ok; j++) {
-                ok = rt_core_transient_add(&plan, ((int64_t*)array->data)[j]) == 1;
+                ok = core_transient_add_child(&plan, ((int64_t*)array->data)[j]) == 1;
             }
         } else if (node.kind == RT_CORE_TRANSIENT_DICT) {
             RtCoreDict* dict = (RtCoreDict*)node.ptr;
             for (int64_t j = 0; j < dict->cap && ok; j++) {
                 RtCoreDictEntry* entry = &dict->entries[j];
                 if (entry->occupied != 1) continue;
-                ok = rt_core_transient_add(&plan, entry->key) == 1 &&
-                    rt_core_transient_add(&plan, entry->value) == 1;
+                ok = core_transient_add_child(&plan, entry->key) == 1 &&
+                    core_transient_add_child(&plan, entry->value) == 1;
             }
         } else if (node.kind == RT_CORE_TRANSIENT_ENUM) {
-            ok = rt_core_transient_add(&plan, ((RtCoreEnum*)node.ptr)->payload) == 1;
+            ok = core_transient_add_child(&plan, ((RtCoreEnum*)node.ptr)->payload) == 1;
         } else if (node.kind == RT_CORE_TRANSIENT_CLOSURE) {
             RtCoreClosure* closure = (RtCoreClosure*)node.ptr;
             for (int64_t j = 0; j < closure->capture_count && ok; j++) {
-                ok = rt_core_transient_add(&plan, closure->captures[j]) == 1;
+                ok = core_transient_add_child(&plan, closure->captures[j]) == 1;
             }
         } else if (node.kind == RT_CORE_TRANSIENT_RAW) {
             for (size_t offset = 0; offset + sizeof(int64_t) <= node.bytes && ok;
                     offset += sizeof(int64_t)) {
                 int64_t child;
                 memcpy(&child, (const uint8_t*)node.ptr + offset, sizeof(child));
-                ok = rt_core_transient_add(&plan, child) == 1;
+                ok = core_transient_add_child(&plan, child) == 1;
             }
         }
     }
@@ -2860,6 +2985,7 @@ int8_t rt_transient_heap_promote(int64_t value) {
             }
             if (object_scope && *object_scope == scope_id) *object_scope = 0;
         }
+        if (ok) core_transient_share_record(&plan);
     }
     free(plan.nodes);
     free(plan.seen);

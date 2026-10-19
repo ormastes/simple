@@ -119,6 +119,8 @@ var transient_scope_next_id: i64 = 1
 var transient_scope_id: i64 = 0
 var transient_scope_active: i64 = 0
 var transient_scope_paused: i64 = 0
+# Open promotion share window (see rt_transient_heap_promote_share_begin).
+var transient_promote_share_open: i64 = 0
 
 # Objects registered while the scope was active AND unpaused.
 # Linear table, stride 24: ptr @0, kind @8, scope_id @16.
@@ -271,6 +273,7 @@ pub fn rt_transient_array_scope_end() -> i8:
     if transient_scope_active < 1:
         return 0
     val scope = transient_scope_id
+    transient_promote_share_open = 0
     transient_scope_active = 0
     transient_scope_paused = 0
     transient_reclaim_objects(scope)
@@ -424,6 +427,25 @@ fn transient_node_bytes(ptr: i64, kind: i64, raw_bytes: i64) -> i64:
     if kind == 7:
         return raw_bytes
     return 0
+
+# Promotion share window (spec: runtime_native.c
+# rt_transient_heap_promote_share_begin/_end). In C the window lets a promote
+# skip nodes an earlier promote in the same window already committed — a pure
+# PERFORMANCE choice: the promoted set is identical with or without it. Per
+# this file's header, performance choices are not ported, so this lane keeps
+# only the window state and its ABI answers (begin: 1 iff a scope is active
+# and paused; end: 1 iff a window was open; scope end closes it) and every
+# promote still walks its whole graph.
+pub fn rt_transient_heap_promote_share_begin() -> i8:
+    if transient_scope_active < 1 or transient_scope_paused < 1:
+        return 0
+    transient_promote_share_open = 1
+    return 1
+
+pub fn rt_transient_heap_promote_share_end() -> i8:
+    val was_open = transient_promote_share_open
+    transient_promote_share_open = 0
+    return if was_open > 0: 1 else: 0
 
 pub fn rt_transient_heap_promote(value: i64) -> i8:
     # Graph-operation success, never a transient-membership probe. Explicit

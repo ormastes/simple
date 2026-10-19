@@ -478,6 +478,14 @@ int8_t rt_transient_array_scope_end(void);
  * and persistent/aliased text children. Persistent leaf-root acceptance is
  * provider-specific; callers retaining scalar texts use an explicit array. */
 int8_t rt_transient_heap_promote(int64_t value);
+/* Promotion share window over one paused scope: promote calls between begin
+ * and end do not re-walk nodes an earlier call in the window committed. The
+ * caller must not mutate the graph inside the window (no write barrier
+ * exists); it may only promote and release temporary root carriers. begin
+ * returns 0 (no window) without this thread's paused scope; end returns
+ * whether a window was open. Promotion results are identical either way. */
+int8_t rt_transient_heap_promote_share_begin(void);
+int8_t rt_transient_heap_promote_share_end(void);
 /* Raw-allocation owner bridge. runtime_native.c owns the one transient graph
  * registry; an alternate rt_alloc provider must register through this API. */
 int8_t rt_transient_raw_owner_register(void* ptr, uint64_t bytes);
