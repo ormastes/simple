@@ -38,17 +38,24 @@ are in the parity test.
 |---|---|---|---|
 | packed `ByteArray` (`rt_bytes_alloc`, slices of it) | real ptr | real ptr | real ptr |
 | `var x: [u8] = []` + push / `out = out.push(..)` | **0** (boxed `Array`) | real ptr (binding is packed) | real ptr |
-| `val x: [u8] = [1u8, 2u8]` | **0** | real ptr | real ptr |
+| `val x: [u8] = [1u8, 2u8]` / `[1, 2, 255]` | **0** | real ptr | real ptr |
+| packed builder in a field, `h.bytes.push(b)` | n/a | real ptr, pushed in place | real ptr |
 | empty `[u8]` binding | **0** | non-zero (packed, empty) | non-zero |
-| untyped boxed array of `u8` (struct-field `[]` + push, a bare literal argument) | **0** | **error** naming the cause | slot pointer (see open gap) |
-| non-`u8` boxed array (`[i64]`, `[text]` via a generic decl) | 0 | 0 = "no packed byte storage" | slot pointer |
+| any boxed array (untyped struct-field `[]` + push, a bare literal argument, `[i64]` via a generic decl) | 0 | 0 = INVALID, documented | slot pointer (see open gap) |
 
 The interpreter stored every `[u8]` built from `[]` as boxed `Value::Array`,
-which has no contiguous bytes. `[u8]`-typed bindings now become packed
-`Value::ByteArray` (element reads already yield `u8`, so reads are unchanged).
-A non-empty boxed array that is provably `u8` now fails loudly instead of
-answering 0; 0 is documented as "empty-and-boxed or not a byte array" only.
-`theme_notification_protocol_spec` 3/4 -> 4/4.
+which has no contiguous bytes. `[u8]`-typed bindings (let/const/static) now
+become packed `Value::ByteArray` when every element is an integer in 0..=255,
+so a live `[u8]` held in a typed binding always has a real pointer. 0 is
+documented as INVALID ("boxed: no contiguous byte storage in this engine"),
+never as an address or as "empty": an empty packed array answers non-zero.
+An error for boxed u8 arrays was tried and reverted on review, because callers
+(`text_byte_extraction_checked`, `smf_mmap_native`) use 0 as their documented
+fallback signal. Two follow-on fixes kept packed `[u8]` usable: chained
+methods (`r.unwrap().len()`) and in-place `field.push(b)` (otherwise O(n) per
+push: 32K pushes went 0.21s -> 5.25s before the fix, 0.23s after).
+`theme_notification_protocol_spec` 3/4 -> 4/4; `boxed_text_extraction_spec`
+1/3 -> 2/3.
 
 ## OPEN
 
@@ -70,3 +77,14 @@ answering 0; 0 is documented as "empty-and-boxed or not a byte array" only.
    `PTE_*` names resolve to `os.kernel.types.bitfield`'s same-named bit
    INDICES (`PTE_HUGE_PAGE = 7`). See
    `interp_vmm_copy_pte_constants_resolve_to_bitfield_indices_2026-10-20.md`.
+4. **Interpreter sites not yet coercing a declared type** (review, 2026-10-20):
+   struct/class field init with a declared `u64` field, reassignment `x = e`
+   to a declared-`u64` var, spread parameters (`arg_binding.rs`), and `[u8]`
+   params/returns (scalar params already coerce). Each still yields a plain
+   `Int`/boxed array.
+5. **JIT mixed-signedness binops.** `build_vreg_types::binop_result_type` is
+   LHS-only, so `100 / x_u64` is typed `i64` downstream. HIR admits
+   `i64 op u32` without a cast (`operators.rs` takes the LEFT type), so the
+   either-side `udiv` rule (shared with ordering compares) treats
+   `negative_i64 / u32_var` as unsigned. A census found no such site; the
+   right fix is an HIR-level cast, not a backend guess.

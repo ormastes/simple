@@ -35,10 +35,10 @@ use simple_runtime::debug;
 ///   declared width (masked), so comparisons, division, remainder, and right
 ///   shifts on it are unsigned. A `u64` value >= 2^63 otherwise stays a
 ///   negative `Int` and compares SIGNED.
-/// - `[u8]`: an empty boxed array, or one whose elements are all `u8` values,
-///   becomes packed `Value::ByteArray` storage. Element reads are unchanged
-///   (they already yield `u8`), and the binding gets the contiguous byte
-///   storage `rt_array_data_ptr` needs.
+/// - `[u8]`: an empty boxed array, or one whose elements are all integers in
+///   0..=255, becomes packed `Value::ByteArray` storage, so the binding has
+///   the contiguous bytes `rt_array_data_ptr` needs. Element reads yield `u8`,
+///   which is the declared element type.
 ///
 /// Every interpreter binding site with a declared type uses this: local and
 /// module-level `val`/`var`, `const`, `static`, and declared function returns
@@ -89,7 +89,10 @@ fn pack_u8_array(value: Value) -> Value {
     let mut bytes = Vec::with_capacity(data.len());
     for element in data.iter() {
         match element {
-            Value::UInt { value: byte, width: 8 } => bytes.push(*byte as u8),
+            // Same domain as the packed-array repack after a mutation
+            // (`repack_byte_result`): any integer that fits a byte.
+            Value::UInt { value: byte, .. } if *byte <= 0xFF => bytes.push(*byte as u8),
+            Value::Int(byte) if (0..=0xFF).contains(byte) => bytes.push(*byte as u8),
             _ => return value,
         }
     }

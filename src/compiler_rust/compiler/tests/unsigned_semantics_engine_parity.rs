@@ -165,30 +165,35 @@ fn u8_data_ptr_is_live_on_interpreter_and_jit() {
     assert_eq!(native, 0, "JIT failed at case {native}");
 }
 
-/// A non-empty boxed `[u8]` (untyped struct-field `[]` + push) has no
-/// contiguous storage in the interpreter: it must fail loudly, not answer 0.
+/// A boxed array (untyped struct-field `[]` + push) has no contiguous storage
+/// in the interpreter: `rt_array_data_ptr` answers the documented INVALID 0,
+/// which callers treat as a failure. A `[u8]` field builder pushed through a
+/// place (`b.bytes.push(..)`) stays packed and readable.
 #[test]
-fn boxed_u8_array_data_ptr_fails_loudly_in_interpreter() {
-    interpreter::clear_module_cache();
-    interpreter::clear_interpreter_state();
+fn boxed_array_is_invalid_and_field_builder_stays_packed_in_interpreter() {
     let source = r#"
 extern fn rt_array_data_ptr(array: [u8]) -> i64
+extern fn rt_ptr_read_u8(ptr: i64, offset: i64) -> i64
 
 struct Holder:
     bytes: [u8]
 
-fn main() -> i64:
+fn main() -> i32:
     var slot = Holder(bytes: []).bytes
     slot.push(5u8)
-    if rt_array_data_ptr(slot) == 0: return 1
+    if rt_array_data_ptr(slot) != 0: return 1
+    val start: [u8] = []
+    var h = Holder(bytes: start)
+    h.bytes.push(7u8)
+    h.bytes.push(8)
+    val ptr = rt_array_data_ptr(h.bytes)
+    if ptr == 0: return 2
+    if rt_ptr_read_u8(ptr, 1) != 8: return 3
+    h.bytes.push(300)
+    if h.bytes.len() != 3 or h.bytes[2] != 300: return 4
+    val ints: [u8] = [1, 2, 255]
+    if rt_ptr_read_u8(rt_array_data_ptr(ints), 2) != 255: return 5
     return 0
-
-main = main()
 "#;
-    let module = Parser::new(source).parse().expect("source must parse");
-    let error = interpreter::evaluate_module(&module.items).expect_err("boxed [u8] data_ptr must not answer");
-    assert!(
-        format!("{error:?}").contains("non-contiguous"),
-        "unexpected error: {error:?}"
-    );
+    assert_eq!(run_interpreter(source), 0);
 }
