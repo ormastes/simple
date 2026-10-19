@@ -210,8 +210,23 @@ fn file_atomic_write(path: text, content: text) -> bool:
         rt_file_atomic_write(host_path_native(path), content)
 
 fn secure_temp_dir_raw(parent: text, prefix: text) -> text:
+    # Cycle-170 (candidate-seednew 2026-10-19): the compiled argument reads at
+    # this TWO-argument SFFI crossing draw erased -- rt_secure_temp_dir's C
+    # admission then sees (NULL, len) and refuses, so every SCV snapshot
+    # CREATE failed with snapshot-staging-create-failed and even the AOT
+    # lane's diagnostic staging reported "diagnostic staging unavailable".
+    # Single-argument crossings (dir_create) on adjacent lines draw clean, and
+    # both linked implementations of the callee are byte-logical twins, so the
+    # draw is in this call site's marshalling. Annotated local binds alone did
+    # NOT cure it (the marshalling re-reads the locals); the proven transport
+    # for erased words is the array element read (cycle-76), so the crossing
+    # words travel through single-element arrays.
+    val parent_in: text = parent
+    val prefix_in: text = prefix
+    val parents: [text] = [parent_in]
+    val prefixes: [text] = [prefix_in]
     unsafe(capabilities: [ffi]):
-        rt_secure_temp_dir(host_path_native(parent), prefix)
+        rt_secure_temp_dir(parents[0], prefixes[0])
 
 fn file_publish_noreplace_raw(staged_path: text, destination: text) -> i64:
     unsafe(capabilities: [ffi]):
