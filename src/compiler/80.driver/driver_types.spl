@@ -930,6 +930,26 @@ class CompileContext:
         self.storage_registry_frozen = true
         self.storage_registry_frozen_identity
 
+    # Staged native codegen freezes the registry at its FIRST batch, before
+    # later batches are lowered, so `mir_modules.keys()` names only that batch.
+    # Admit the whole lowering schedule as known modules. This adds no
+    # evidence row and does not change the frozen identity; once frozen, no
+    # module can register evidence ("storage-registry-frozen"), so a module
+    # lowered later has exactly the empty snapshot it would have had unstaged.
+    me freeze_storage_registry_for_schedule(scheduled_names: [text]) -> text:
+        val identity = self.freeze_storage_registry()
+        if identity == "invalid": return identity
+        var known_seen: {text: bool} = {}
+        var known_names = self.frozen_storage_known_module_names
+        for known_name in known_names:
+            known_seen[known_name] = true
+        for scheduled_name in scheduled_names:
+            if not known_seen.contains_key(scheduled_name):
+                known_seen[scheduled_name] = true
+                known_names.push(scheduled_name)
+        self.frozen_storage_known_module_names = known_names
+        identity
+
     fn frozen_storage_module_snapshot(module_name: text) -> FrozenStorageModuleSnapshotV1:
         if not self.storage_registry_frozen:
             return FrozenStorageModuleSnapshotV1(ok: false, module_name: module_name,

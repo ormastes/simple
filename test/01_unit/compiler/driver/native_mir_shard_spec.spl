@@ -1,0 +1,94 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/80.driver/driver_build/native_mir_shard.spl 0%
+"""
+# MIR shard ledger admits only a complete, matching PASS inventory
+
+**Category:** Compiler / driver
+**Bug:** doc/08_tracking/bug/phase3_mir_retained_memory_2026_10_17.md
+
+## Purpose and Audience
+
+Process-level MIR sharding bounds phase-3 memory by giving each worker
+process at most ceil(schedule / count) modules and exiting it after codegen.
+The final worker links only from the shared ledger, so the ledger admission
+is the gate that keeps a partial or foreign shard result out of the link.
+
+## Expected Outcome
+
+Claim caps cover the whole schedule; a ledger whose every inventory row is a
+PASS for this source identity is admitted with its objects; a missing PASS or
+a foreign identity is refused.
+"""
+use std.spec.step
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use std.nogc_sync_mut.io_runtime.{env_set, dir_create_all, dir_remove_all, file_write, getpid}
+use compiler.driver.driver_build.native_mir_shard.{
+    native_mir_shard_count_of_v1, native_mir_shard_claim_cap_v1,
+    native_mir_shard_claim_v1, native_mir_shard_publish_pass_v1,
+    native_mir_shard_link_inputs_v1}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory}
+
+fn fresh_ledger(tag: text) -> text:
+    val dir = "build/test_tmp/native_mir_shard_{tag}_{getpid()}"
+    val _removed = dir_remove_all(dir)
+    val _created = dir_create_all(dir)
+    dir
+
+describe "MIR shard claim caps":
+    it "splits the schedule so every module has an owner":
+        # @req REQ-SSPEC-COMPILER
+        step("splits the schedule so every module has an owner")
+        assert_equal(native_mir_shard_count_of_v1("2/8"), 8)
+        assert_equal(native_mir_shard_claim_cap_v1("0/8", 1302), 163)
+        assert_true(native_mir_shard_claim_cap_v1("0/8", 1302) * 8 >= 1302)
+
+    it "gives a malformed spec the whole schedule, never zero":
+        # @req REQ-SSPEC-COMPILER
+        step("gives a malformed spec the whole schedule, never zero")
+        assert_equal(native_mir_shard_count_of_v1("8/8"), 0)
+        assert_equal(native_mir_shard_claim_cap_v1("bogus", 40), 40)
+
+describe "MIR shard link admission":
+    it "admits a complete PASS ledger with its objects":
+        # @req REQ-SSPEC-COMPILER
+        step("admits a complete PASS ledger with its objects")
+        val queue = fresh_ledger("pass")
+        val _owner = env_set("SIMPLE_MIR_SHARD_OWNER", "0/1@0")
+        val object_path = "{queue}/a.o"
+        assert_true(file_write(object_path, "obj"))
+        assert_true(hir_shard_recovery_inventory(queue, "src-id", ["mod.a", "mod.b"]))
+        assert_equal(native_mir_shard_claim_v1(queue, "mod.a", "src-id"), 1)
+        assert_equal(native_mir_shard_claim_v1(queue, "mod.b", "src-id"), 1)
+        assert_true(native_mir_shard_publish_pass_v1(queue, "mod.a", object_path, 3, 1))
+        assert_true(native_mir_shard_publish_pass_v1(queue, "mod.b", "", 0, 0))
+        val admitted = native_mir_shard_link_inputs_v1(queue, "src-id")
+        assert_true(admitted.is_ok())
+        val inputs = admitted.unwrap()
+        assert_equal(inputs.modules.len(), 2)
+        assert_equal(inputs.object_files.len(), 1)
+        assert_equal(inputs.objectless, 1)
+        assert_equal(inputs.functions, 3)
+        val _cleanup = dir_remove_all(queue)
+
+    it "refuses a ledger with a module that did not PASS":
+        # @req REQ-SSPEC-COMPILER
+        step("refuses a ledger with a module that did not PASS")
+        val queue = fresh_ledger("partial")
+        val _owner = env_set("SIMPLE_MIR_SHARD_OWNER", "0/1@0")
+        assert_true(hir_shard_recovery_inventory(queue, "src-id", ["mod.a", "mod.b"]))
+        assert_equal(native_mir_shard_claim_v1(queue, "mod.a", "src-id"), 1)
+        assert_true(native_mir_shard_publish_pass_v1(queue, "mod.a", "", 0, 0))
+        assert_false(native_mir_shard_link_inputs_v1(queue, "src-id").is_ok())
+        val _cleanup = dir_remove_all(queue)
+
+    it "refuses a ledger built from different sources":
+        # @req REQ-SSPEC-COMPILER
+        step("refuses a ledger built from different sources")
+        val queue = fresh_ledger("foreign")
+        val _owner = env_set("SIMPLE_MIR_SHARD_OWNER", "0/1@0")
+        assert_true(hir_shard_recovery_inventory(queue, "src-id", ["mod.a"]))
+        assert_equal(native_mir_shard_claim_v1(queue, "mod.a", "src-id"), 1)
+        assert_true(native_mir_shard_publish_pass_v1(queue, "mod.a", "", 0, 0))
+        assert_false(native_mir_shard_link_inputs_v1(queue, "other-id").is_ok())
+        val _cleanup = dir_remove_all(queue)

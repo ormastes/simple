@@ -1,0 +1,122 @@
+# Staged native codegen: bound the MIR the native lane retains.
+#
+# Without staging, `lower_to_mir` publishes the MirModule of EVERY scheduled
+# module into ctx.mir_modules before any backend work starts, so peak memory
+# grows with the whole entry closure (phase 3: >83 GiB at MIR module
+# 1187/1302, zero objects emitted --
+# doc/08_tracking/bug/phase3_mir_retained_memory_2026_10_17.md).
+#
+# Every post-lowering consumer on the native executable lane is per-module:
+# mir_verify, borrow_check, optimize_mir, weave_aop (its rules come from HIR
+# advices, not MIR), apply_debug_trace, the cache witness (own MIR + HIR-level
+# surfaces), the frozen capsule (own MIR + storage snapshot) and object
+# emission. The link consumes object paths only. So the lowering loop flushes
+# a full batch through those stages, records what the final link/verdict
+# needs in this summary, and releases the batch's MirModules. The final
+# `compile_to_native` call handles the tail batch and merges this summary.
+#
+# What must persist across batches (and therefore lives here, not in MIR):
+# object paths, per-module outcomes (so ONE build still names every bad
+# module and a failure still blocks the link), collection bindings, lane
+# receipt counts, cache hit/miss counts, witness-shadow evidence, the Phase-2
+# reuse ledger, and the whole schedule's module names (the frozen storage
+# registry must know modules that are lowered after it freezes).
+use compiler.driver.driver_build.build_outcome.{BuildOutcomeSet}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable}
+
+pub const NATIVE_STAGED_CODEGEN_BATCH_ENV_V1: text = "SIMPLE_NATIVE_STAGED_CODEGEN_BATCH"
+# Default OFF. Evicting a promoted MirModule only drops a reference: the
+# native runtime has no collector, so in-process staging reorders work but
+# does not lower peak RSS (driver_types.spl evict_mir_module comment, probe
+# P0: 0 of 2001 allocations reclaimed). Process-level MIR sharding
+# (SIMPLE_MIR_SHARDING) is the memory fix; this knob stays as an explicit
+# opt-in for diagnosis.
+pub const NATIVE_STAGED_CODEGEN_DEFAULT_BATCH_V1: i64 = 0
+
+pub class NativeStagedCodegenStateV1:
+    active: bool
+    batch_size: i64
+    # True only while a non-final batch is inside compile_to_native.
+    flushing: bool
+    scheduled_names: [text]
+    batches_flushed: i64
+    modules_flushed: i64
+    lowering_failed: bool
+    verify_failed: bool
+    borrow_failed: bool
+    object_files: [text]
+    collection_bindings: [text]
+    module_outcomes: BuildOutcomeSet
+    module_unit_id: i64
+    lane_functions: i64
+    lane_statics: i64
+    lane_objectless: i64
+    cache_hit_count: i64
+    cache_miss_count: i64
+    witness_shadow_match_count: i64
+    witness_shadow_mismatch_count: i64
+    witness_shadow_mismatch_lines: [text]
+    phase2_native_items_handled: {text: bool}
+    phase2_native_reuse_hits: i64
+    phase2_native_rejections: i64
+    # MIR shard worker (driver_build/native_mir_shard.spl): the ledger queue,
+    # the modules this worker claimed, and each emitted module's object path.
+    shard_queue: text
+    shard_claimed_names: [text]
+    module_objects: {text: text}
+
+impl NativeStagedCodegenStateV1:
+    static fn inactive() -> NativeStagedCodegenStateV1:
+        NativeStagedCodegenStateV1.begin(0)
+
+    static fn begin(batch_size: i64) -> NativeStagedCodegenStateV1:
+        NativeStagedCodegenStateV1(active: batch_size > 0,
+            batch_size: batch_size, flushing: false, scheduled_names: [],
+            batches_flushed: 0, modules_flushed: 0,
+            lowering_failed: false, verify_failed: false, borrow_failed: false,
+            object_files: [], collection_bindings: [],
+            module_outcomes: BuildOutcomeSet.empty(), module_unit_id: 0,
+            lane_functions: 0, lane_statics: 0, lane_objectless: 0,
+            cache_hit_count: 0, cache_miss_count: 0,
+            witness_shadow_match_count: 0, witness_shadow_mismatch_count: 0,
+            witness_shadow_mismatch_lines: [],
+            phase2_native_items_handled: {}, phase2_native_reuse_hits: 0,
+            phase2_native_rejections: 0, shard_queue: "",
+            shard_claimed_names: [], module_objects: {})
+
+# Strict decimal parse. Empty means "unset" (default batch); anything that is
+# not a plain non-negative decimal is -1 so the caller fails closed instead of
+# guessing a batch size.
+pub fn native_staged_codegen_batch_parse_v1(raw: text) -> i64:
+    if raw == "":
+        return NATIVE_STAGED_CODEGEN_DEFAULT_BATCH_V1
+    if raw.len() > 9:
+        return -1
+    val digits = "0123456789"
+    var value = 0
+    var index = 0
+    while index < raw.len():
+        val ch = raw.substring(index, index + 1)
+        var digit = -1
+        var probe = 0
+        while probe < 10:
+            if digits.substring(probe, probe + 1) == ch:
+                digit = probe
+            probe = probe + 1
+        if digit < 0:
+            return -1
+        value = value * 10 + digit
+        index = index + 1
+    value
+
+# Batch size for this process: 0 disables staging, -1 is a malformed knob.
+pub fn native_staged_codegen_batch_size_v1() -> i64:
+    native_staged_codegen_batch_parse_v1(
+        env_get_nullable(NATIVE_STAGED_CODEGEN_BATCH_ENV_V1) ?? "")
+
+# A batch is flushed only when it is full AND more modules remain to be
+# lowered, so the tail batch is always non-empty and goes through the
+# ordinary aot_compile pass chain + final compile_to_native (verdict, link).
+pub fn native_staged_codegen_flush_due_v1(pending: i64, batch_size: i64,
+        lowered: i64, scheduled: i64) -> bool:
+    batch_size > 0 and pending >= batch_size and lowered < scheduled
