@@ -2,7 +2,7 @@
 # decode. These pin that the byte path keeps the exact bytes and stays
 # fail-closed on any digest or length mismatch.
 use std.spec.*
-use std.common.crypto.sha256.{sha256_text}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_fast_hex}
 use std.common.text_bytes.{text_to_utf8_bytes}
 use std.scv.compile_source_inventory_core.{CompileSourceInventoryEntryV1}
 use std.scv.compile_snapshot.{scv_compile_snapshot_materialize_source_v1}
@@ -73,3 +73,17 @@ describe "SCV snapshot materializes sources by raw-byte digest":
         val result = scv_compile_snapshot_materialize_source_v1(
             root, root + "/build/scv", root + "/staging", snapshot_bytes_entry(relative, "# absent\n"))
         expect(result.reason).to_equal("snapshot-read-failed:{relative}")
+
+    it "refuses a non-UTF-8 source as a read failure even when its digest matches":
+        val root = snapshot_bytes_root("invalid-utf8")
+        val relative = "src/bytes/invalid.spl"
+        val raw: [u8] = [35u8, 32u8, 255u8, 10u8]
+        expect(snapshot_bytes_fixture(root, relative, "")).to_equal(true)
+        expect(file_write_bytes(root + "/" + relative, raw)).to_equal(true)
+        val digest = sha256_u8_fast_hex(raw)
+        val entry = CompileSourceInventoryEntryV1(relative, digest, digest, digest, digest, digest, 4)
+        val result = scv_compile_snapshot_materialize_source_v1(
+            root, root + "/build/scv", root + "/staging", entry)
+        expect(result.reason).to_equal("snapshot-read-failed:{relative}")
+        expect(result.row).to_equal("")
+        expect(file_exists(root + "/staging/" + relative)).to_equal(false)
