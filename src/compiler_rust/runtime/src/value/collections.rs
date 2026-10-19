@@ -557,6 +557,55 @@ impl RuntimeArray {
         std::slice::from_raw_parts(self.data, self.len as usize)
     }
 
+    /// Element `i` (caller guarantees `i < len`) as a tagged RuntimeValue,
+    /// exactly as `rt_array_get` hands it out. A BYTES (`[u8]`) or U64_PACKED
+    /// (`[u64]`) array holds RAW 1-/8-byte elements, which `as_slice()` would
+    /// read as 8-byte tagged slots (past a byte buffer); they are read at
+    /// their own width (byte-order independent) and tagged with `from_int`.
+    ///
+    /// # Safety
+    /// The caller must ensure the RuntimeArray was properly allocated and
+    /// `i < len`.
+    #[inline]
+    pub unsafe fn element_at(&self, i: usize) -> RuntimeValue {
+        if self.is_byte_packed() {
+            return RuntimeValue::from_int(*(self.data as *const u8).add(i) as i64);
+        }
+        if self.is_u64_packed() {
+            return RuntimeValue::from_int(*(self.data as *const u64).add(i) as i64);
+        }
+        *self.data.add(i)
+    }
+
+    /// Lazy per-index iterator over `element_at`: nothing is materialised, and
+    /// an early `return`/`break` stops reading.
+    ///
+    /// # Safety
+    /// The caller must ensure the RuntimeArray was properly allocated and
+    /// stays alive and unmodified while iterating.
+    pub unsafe fn elements(&self) -> ArrayElements<'_> {
+        let len = if self.data.is_null() { 0 } else { self.len as usize };
+        ArrayElements { array: self, front: 0, back: len }
+    }
+
+    /// The raw elements of a packed array, widened to u64, for allocation-free
+    /// scans; None for a generic (tagged-slot) array.
+    ///
+    /// # Safety
+    /// The caller must ensure the RuntimeArray was properly allocated.
+    unsafe fn packed_words(&self) -> Option<PackedWords<'_>> {
+        let len = self.len as usize;
+        if self.is_byte_packed() {
+            let bytes = if self.data.is_null() || len == 0 { &[][..] } else { std::slice::from_raw_parts(self.data as *const u8, len) };
+            return Some(PackedWords::Bytes(bytes));
+        }
+        if self.is_u64_packed() {
+            let words = if self.data.is_null() || len == 0 { &[][..] } else { std::slice::from_raw_parts(self.data as *const u64, len) };
+            return Some(PackedWords::Words(words));
+        }
+        None
+    }
+
     /// Get the elements as a mutable slice
     ///
     /// # Safety
@@ -649,6 +698,105 @@ pub(crate) fn packed_byte_array_bytes(value: RuntimeValue) -> Option<Vec<u8>> {
     }
     let len = usize::try_from(array.len).ok()?;
     Some(unsafe { std::slice::from_raw_parts(array.data.cast::<u8>(), len) }.to_vec())
+}
+
+/// See `RuntimeArray::elements`.
+pub struct ArrayElements<'a> {
+    array: &'a RuntimeArray,
+    front: usize,
+    back: usize,
+}
+
+impl Iterator for ArrayElements<'_> {
+    type Item = RuntimeValue;
+    #[inline]
+    fn next(&mut self) -> Option<RuntimeValue> {
+        if self.front >= self.back {
+            return None;
+        }
+        let value = unsafe { self.array.element_at(self.front) };
+        self.front += 1;
+        Some(value)
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = self.back - self.front;
+        (n, Some(n))
+    }
+}
+
+impl DoubleEndedIterator for ArrayElements<'_> {
+    #[inline]
+    fn next_back(&mut self) -> Option<RuntimeValue> {
+        if self.front >= self.back {
+            return None;
+        }
+        self.back -= 1;
+        Some(unsafe { self.array.element_at(self.back) })
+    }
+}
+
+impl ExactSizeIterator for ArrayElements<'_> {}
+
+/// Raw elements of a packed array (see `RuntimeArray::packed_words`).
+enum PackedWords<'a> {
+    Bytes(&'a [u8]),
+    Words(&'a [u64]),
+}
+
+impl PackedWords<'_> {
+    /// First (or, with `rev`, last) position of the raw element `want`.
+    fn position(&self, want: u64, rev: bool) -> Option<usize> {
+        match (self, rev) {
+            (PackedWords::Bytes(b), false) => b.iter().position(|&x| x as u64 == want),
+            (PackedWords::Bytes(b), true) => b.iter().rposition(|&x| x as u64 == want),
+            (PackedWords::Words(w), false) => w.iter().position(|&x| x == want),
+            (PackedWords::Words(w), true) => w.iter().rposition(|&x| x == want),
+        }
+    }
+    fn count(&self, want: u64) -> usize {
+        match self {
+            PackedWords::Bytes(b) => b.iter().filter(|&&x| x as u64 == want).count(),
+            PackedWords::Words(w) => w.iter().filter(|&&x| x == want).count(),
+        }
+    }
+    /// Wrapping i64 total of the elements.
+    fn sum(&self) -> i64 {
+        match self {
+            PackedWords::Bytes(b) => b.iter().fold(0i64, |acc, &x| acc.wrapping_add(x as i64)),
+            PackedWords::Words(w) => w.iter().fold(0i64, |acc, &x| acc.wrapping_add(x as i64)),
+        }
+    }
+    fn all_nonzero(&self) -> bool {
+        match self {
+            PackedWords::Bytes(b) => b.iter().all(|&x| x != 0),
+            PackedWords::Words(w) => w.iter().all(|&x| x != 0),
+        }
+    }
+    fn any_nonzero(&self) -> bool {
+        match self {
+            PackedWords::Bytes(b) => b.iter().any(|&x| x != 0),
+            PackedWords::Words(w) => w.iter().any(|&x| x != 0),
+        }
+    }
+    /// The raw element a needle names, decoded once: a packed word is handed
+    /// out as `from_int(word as i64)`, so an inline int, a wide `HeapInt` or a
+    /// `HeapUInt` all name the word with the same bits (twin of the C
+    /// `rt_array_index_of` packed arm). None: the needle cannot be an element.
+    fn needle(&self, value: RuntimeValue) -> Option<u64> {
+        let bits = if let Some(u) = value.as_heap_u64() {
+            u
+        } else if value.is_int() {
+            value.as_int() as u64
+        } else if let Some(i) = value.as_heap_i64() {
+            i as u64
+        } else {
+            return None;
+        };
+        match self {
+            PackedWords::Bytes(_) if bits > 0xFF => None,
+            _ => Some(bits),
+        }
+    }
 }
 
 /// Bytes of a `[u8]` under the exact contract of the per-element loop
@@ -5362,6 +5510,22 @@ pub extern "C" fn rt_slice(collection: RuntimeValue, start: i64, end: i64, step:
 pub extern "C" fn rt_array_reverse(array: RuntimeValue) -> bool {
     let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
+        // A packed array's buffer holds `len` raw 1-byte / 8-byte elements;
+        // `as_mut_slice()` over a `[u8]` swapped 8-byte slots far past the
+        // buffer (heap corruption: the JIT crashed or printed foreign bytes).
+        let len = (*arr).len as usize;
+        if (*arr).is_byte_packed() {
+            if len > 0 && !(*arr).data.is_null() {
+                std::slice::from_raw_parts_mut((*arr).data as *mut u8, len).reverse();
+            }
+            return true;
+        }
+        if (*arr).is_u64_packed() {
+            if len > 0 && !(*arr).data.is_null() {
+                std::slice::from_raw_parts_mut((*arr).data as *mut u64, len).reverse();
+            }
+            return true;
+        }
         let slice = (*arr).as_mut_slice();
         slice.reverse();
         true
@@ -5376,6 +5540,14 @@ pub extern "C" fn rt_array_reverse(array: RuntimeValue) -> bool {
 pub extern "C" fn rt_array_reversed(array: RuntimeValue) -> RuntimeValue {
     let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
     unsafe {
+        if (*arr).is_byte_packed() || (*arr).is_u64_packed() {
+            // Keep the packed layout (as the C twin does): copy, then reverse.
+            let result = rt_array_copy(array);
+            if !result.is_nil() {
+                rt_array_reverse(result);
+            }
+            return result;
+        }
         let len = (*arr).len;
         let result = rt_array_new(len);
         if result.is_nil() {
@@ -5441,6 +5613,15 @@ pub extern "C" fn rt_array_sort(array: RuntimeValue) -> bool {
 pub extern "C" fn rt_array_sorted(array: RuntimeValue) -> RuntimeValue {
     let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
     unsafe {
+        if (*arr).is_byte_packed() || (*arr).is_u64_packed() {
+            // Keep the packed layout: `as_slice()` read a `[u8]` as 8-byte
+            // slots (past its buffer) and pushed them as tagged values.
+            let result = rt_array_copy(array);
+            if !result.is_nil() {
+                rt_array_sort(result);
+            }
+            return result;
+        }
         let len = (*arr).len;
         let result = rt_array_new(len);
         if result.is_nil() {
@@ -5536,9 +5717,9 @@ pub extern "C" fn rt_array_filter(array: RuntimeValue, closure: RuntimeValue) ->
 
     let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(func_ptr) };
     unsafe {
-        for item in (*arr).as_slice() {
-            if func(closure, *item).truthy() {
-                rt_array_push(result, *item);
+        for item in (*arr).elements() {
+            if func(closure, item).truthy() {
+                rt_array_push(result, item);
             }
         }
     }
@@ -5556,9 +5737,9 @@ pub extern "C" fn rt_array_find(array: RuntimeValue, closure: RuntimeValue) -> R
 
     let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(func_ptr) };
     unsafe {
-        for item in (*arr).as_slice() {
-            if func(closure, *item).truthy() {
-                return *item;
+        for item in (*arr).elements() {
+            if func(closure, item).truthy() {
+                return item;
             }
         }
     }
@@ -5751,6 +5932,10 @@ pub extern "C" fn rt_array_index_of(array: RuntimeValue, value: RuntimeValue) ->
 
     let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, -1);
     unsafe {
+        if let Some(words) = (*arr).packed_words() {
+            let Some(want) = words.needle(value) else { return -1 };
+            return words.position(want, false).map_or(-1, |i| i as i64);
+        }
         let slice = (*arr).as_slice();
         for (i, item) in slice.iter().enumerate() {
             if rt_value_eq(*item, value) != 0 {
@@ -5794,6 +5979,10 @@ pub extern "C" fn rt_array_last_index_of(array: RuntimeValue, value: RuntimeValu
 
     let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, -1);
     unsafe {
+        if let Some(words) = (*arr).packed_words() {
+            let Some(want) = words.needle(value) else { return -1 };
+            return words.position(want, true).map_or(-1, |i| i as i64);
+        }
         let slice = (*arr).as_slice();
         for (i, item) in slice.iter().enumerate().rev() {
             if rt_value_eq(*item, value) != 0 {
@@ -5980,6 +6169,14 @@ pub extern "C" fn rt_array_copy(array: RuntimeValue) -> RuntimeValue {
 pub extern "C" fn rt_array_sum(array: RuntimeValue) -> RuntimeValue {
     let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
     unsafe {
+        if let Some(words) = (*arr).packed_words() {
+            // Raw elements, summed with wrapping i64 arithmetic and without
+            // boxing any of them. This is a fix, not a re-spelling: the
+            // tagged view of a [u64] silently dropped words >= 2^60 (they
+            // are heap-boxed, so `is_int()` is false) and used a
+            // non-wrapping `+=`.
+            return RuntimeValue::from_int(words.sum());
+        }
         let slice = (*arr).as_slice();
         if slice.is_empty() {
             return RuntimeValue::from_int(0);
@@ -6006,12 +6203,36 @@ pub extern "C" fn rt_array_sum(array: RuntimeValue) -> RuntimeValue {
     }
 }
 
+/// Integer value of a tagged immediate or a heap-boxed wide int.
+fn array_int_value(v: RuntimeValue) -> Option<i64> {
+    if v.is_int() {
+        Some(v.as_int())
+    } else {
+        v.as_heap_i64()
+    }
+}
+
 /// Find the minimum element in an array
 /// Returns NIL for empty arrays
 #[no_mangle]
 pub extern "C" fn rt_array_min(array: RuntimeValue) -> RuntimeValue {
     let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
     unsafe {
+        // Packed `[u8]` / `[u64]` hold raw unsigned elements: compare those
+        // directly (`as_slice()` read a `[u8]` past its buffer, and a word of
+        // 2^63 or more is negative once tagged).
+        let len = (*arr).len as usize;
+        if (*arr).is_byte_packed() || (*arr).is_u64_packed() {
+            if len == 0 || (*arr).data.is_null() {
+                return RuntimeValue::NIL;
+            }
+            let best = if (*arr).is_byte_packed() {
+                std::slice::from_raw_parts((*arr).data as *const u8, len).iter().copied().min().map(u64::from)
+            } else {
+                std::slice::from_raw_parts((*arr).data as *const u64, len).iter().copied().min()
+            };
+            return best.map_or(RuntimeValue::NIL, |w| RuntimeValue::from_int(w as i64));
+        }
         let slice = (*arr).as_slice();
         if slice.is_empty() {
             return RuntimeValue::NIL;
@@ -6019,8 +6240,9 @@ pub extern "C" fn rt_array_min(array: RuntimeValue) -> RuntimeValue {
 
         let mut min_val = slice[0];
         for item in &slice[1..] {
-            let cmp = if min_val.is_int() && item.is_int() {
-                item.as_int() < min_val.as_int()
+            // Wide integers (>= 2^60) are heap-boxed; they are still ints.
+            let cmp = if let (Some(a), Some(b)) = (array_int_value(*item), array_int_value(min_val)) {
+                a < b
             } else if min_val.is_float() && item.is_float() {
                 item.as_float() < min_val.as_float()
             } else if min_val.is_int() && item.is_float() {
@@ -6044,6 +6266,21 @@ pub extern "C" fn rt_array_min(array: RuntimeValue) -> RuntimeValue {
 pub extern "C" fn rt_array_max(array: RuntimeValue) -> RuntimeValue {
     let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
     unsafe {
+        // Packed `[u8]` / `[u64]` hold raw unsigned elements: compare those
+        // directly (`as_slice()` read a `[u8]` past its buffer, and a word of
+        // 2^63 or more is negative once tagged).
+        let len = (*arr).len as usize;
+        if (*arr).is_byte_packed() || (*arr).is_u64_packed() {
+            if len == 0 || (*arr).data.is_null() {
+                return RuntimeValue::NIL;
+            }
+            let best = if (*arr).is_byte_packed() {
+                std::slice::from_raw_parts((*arr).data as *const u8, len).iter().copied().max().map(u64::from)
+            } else {
+                std::slice::from_raw_parts((*arr).data as *const u64, len).iter().copied().max()
+            };
+            return best.map_or(RuntimeValue::NIL, |w| RuntimeValue::from_int(w as i64));
+        }
         let slice = (*arr).as_slice();
         if slice.is_empty() {
             return RuntimeValue::NIL;
@@ -6051,8 +6288,9 @@ pub extern "C" fn rt_array_max(array: RuntimeValue) -> RuntimeValue {
 
         let mut max_val = slice[0];
         for item in &slice[1..] {
-            let cmp = if max_val.is_int() && item.is_int() {
-                item.as_int() > max_val.as_int()
+            // Wide integers (>= 2^60) are heap-boxed; they are still ints.
+            let cmp = if let (Some(a), Some(b)) = (array_int_value(*item), array_int_value(max_val)) {
+                a > b
             } else if max_val.is_float() && item.is_float() {
                 item.as_float() > max_val.as_float()
             } else if max_val.is_int() && item.is_float() {
@@ -6077,6 +6315,10 @@ pub extern "C" fn rt_array_count(array: RuntimeValue, value: RuntimeValue) -> i6
 
     let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, -1);
     unsafe {
+        if let Some(words) = (*arr).packed_words() {
+            let Some(want) = words.needle(value) else { return 0 };
+            return words.count(want) as i64;
+        }
         let slice = (*arr).as_slice();
         let mut count = 0i64;
         for item in slice {
@@ -6105,8 +6347,6 @@ pub extern "C" fn rt_array_zip(a: RuntimeValue, b: RuntimeValue) -> RuntimeValue
             return result;
         }
 
-        let slice_a = (*arr_a).as_slice();
-        let slice_b = (*arr_b).as_slice();
 
         for i in 0..result_len as usize {
             // Create a tuple for each pair
@@ -6114,8 +6354,8 @@ pub extern "C" fn rt_array_zip(a: RuntimeValue, b: RuntimeValue) -> RuntimeValue
             if tuple.is_nil() {
                 return RuntimeValue::NIL;
             }
-            rt_tuple_set(tuple, 0, slice_a[i]);
-            rt_tuple_set(tuple, 1, slice_b[i]);
+            rt_tuple_set(tuple, 0, (*arr_a).element_at(i));
+            rt_tuple_set(tuple, 1, (*arr_b).element_at(i));
             rt_array_push(result, tuple);
         }
         result
@@ -6134,14 +6374,13 @@ pub extern "C" fn rt_array_enumerate(array: RuntimeValue) -> RuntimeValue {
             return result;
         }
 
-        let slice = (*arr).as_slice();
-        for (i, item) in slice.iter().enumerate() {
+        for (i, item) in (*arr).elements().enumerate() {
             let tuple = rt_tuple_new(2);
             if tuple.is_nil() {
                 return RuntimeValue::NIL;
             }
             rt_tuple_set(tuple, 0, RuntimeValue::from_int(i as i64));
-            rt_tuple_set(tuple, 1, *item);
+            rt_tuple_set(tuple, 1, item);
             rt_array_push(result, tuple);
         }
         result
@@ -6155,12 +6394,11 @@ pub extern "C" fn rt_array_flatten(array: RuntimeValue) -> RuntimeValue {
     let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
 
     unsafe {
-        let slice = (*arr).as_slice();
 
         // First pass: count total elements
         let mut total_len = 0u64;
-        for item in slice {
-            if let Some(inner) = get_typed_ptr::<RuntimeArray>(*item, HeapObjectType::Array) {
+        for item in (*arr).elements() {
+            if let Some(inner) = get_typed_ptr::<RuntimeArray>(item, HeapObjectType::Array) {
                 total_len += (*inner).len;
                 continue;
             }
@@ -6173,14 +6411,14 @@ pub extern "C" fn rt_array_flatten(array: RuntimeValue) -> RuntimeValue {
         }
 
         // Second pass: copy elements
-        for item in slice {
-            if let Some(inner) = get_typed_ptr::<RuntimeArray>(*item, HeapObjectType::Array) {
-                for inner_item in (*inner).as_slice() {
-                    rt_array_push(result, *inner_item);
+        for item in (*arr).elements() {
+            if let Some(inner) = get_typed_ptr::<RuntimeArray>(item, HeapObjectType::Array) {
+                for inner_item in (*inner).elements() {
+                    rt_array_push(result, inner_item);
                 }
                 continue;
             }
-            rt_array_push(result, *item);
+            rt_array_push(result, item);
         }
         result
     }
@@ -6195,7 +6433,6 @@ pub extern "C" fn rt_array_unique(array: RuntimeValue) -> RuntimeValue {
     let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
 
     unsafe {
-        let slice = (*arr).as_slice();
         let result = rt_array_new((*arr).len);
         if result.is_nil() {
             return result;
@@ -6203,17 +6440,17 @@ pub extern "C" fn rt_array_unique(array: RuntimeValue) -> RuntimeValue {
 
         let result_arr = get_typed_ptr::<RuntimeArray>(result, HeapObjectType::Array).unwrap();
 
-        for item in slice {
+        for item in (*arr).elements() {
             // Check if item already exists in result
             let mut found = false;
             for existing in (*result_arr).as_slice() {
-                if rt_value_eq(*existing, *item) != 0 {
+                if rt_value_eq(*existing, item) != 0 {
                     found = true;
                     break;
                 }
             }
             if !found {
-                rt_array_push(result, *item);
+                rt_array_push(result, item);
             }
         }
         result
@@ -6234,9 +6471,8 @@ pub extern "C" fn rt_array_take(array: RuntimeValue, n: i64) -> RuntimeValue {
             return result;
         }
 
-        let slice = (*arr).as_slice();
-        for item in slice.iter().take(take_count as usize) {
-            rt_array_push(result, *item);
+        for item in (*arr).elements().take(take_count as usize) {
+            rt_array_push(result, item);
         }
         result
     }
@@ -6257,9 +6493,8 @@ pub extern "C" fn rt_array_drop(array: RuntimeValue, n: i64) -> RuntimeValue {
             return result;
         }
 
-        let slice = (*arr).as_slice();
-        for item in slice.iter().take(len as usize).skip(skip_count) {
-            rt_array_push(result, *item);
+        for item in (*arr).elements().take(len as usize).skip(skip_count) {
+            rt_array_push(result, item);
         }
         result
     }
@@ -6273,10 +6508,10 @@ pub extern "C" fn rt_array_join(array: RuntimeValue, separator: RuntimeValue) ->
     let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
 
     unsafe {
-        let slice = (*arr).as_slice();
-        if slice.is_empty() {
+        let mut items = (*arr).elements();
+        let Some(first) = items.next() else {
             return rt_string_new(std::ptr::null(), 0);
-        }
+        };
 
         // Get separator string
         let sep_len = rt_string_len(separator);
@@ -6287,13 +6522,13 @@ pub extern "C" fn rt_array_join(array: RuntimeValue, separator: RuntimeValue) ->
         };
 
         // Build result by concatenating
-        let mut result = rt_value_to_string(slice[0]);
+        let mut result = rt_value_to_string(first);
 
-        for item in &slice[1..] {
+        for item in items {
             if sep_len > 0 {
                 result = rt_string_concat(result, separator);
             }
-            let item_str = rt_value_to_string(*item);
+            let item_str = rt_value_to_string(item);
             result = rt_string_concat(result, item_str);
         }
 
@@ -6308,6 +6543,9 @@ pub extern "C" fn rt_array_all_truthy(array: RuntimeValue) -> i64 {
     let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
 
     unsafe {
+        if let Some(words) = (*arr).packed_words() {
+            return words.all_nonzero() as i64;
+        }
         let slice = (*arr).as_slice();
         for item in slice {
             // Check if falsy: nil, false, 0, 0.0
@@ -6381,6 +6619,9 @@ pub extern "C" fn rt_array_any_truthy(array: RuntimeValue) -> i64 {
     let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
 
     unsafe {
+        if let Some(words) = (*arr).packed_words() {
+            return words.any_nonzero() as i64;
+        }
         let slice = (*arr).as_slice();
         for item in slice {
             // Check if truthy: not (nil, false, 0, 0.0)
@@ -6436,6 +6677,13 @@ pub extern "C" fn rt_array_any(array: RuntimeValue, closure: RuntimeValue) -> i6
 pub extern "C" fn rt_array_fill(array: RuntimeValue, value: RuntimeValue) -> bool {
     let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
+        if (*arr).is_byte_packed() || (*arr).is_u64_packed() {
+            // Raw-element layouts: store through the layout-aware setter.
+            for i in 0..(*arr).len as i64 {
+                rt_array_set(array, i, value);
+            }
+            return true;
+        }
         let slice = (*arr).as_mut_slice();
         for item in slice {
             *item = value;
@@ -6779,6 +7027,10 @@ pub extern "C" fn rt_contains(collection: RuntimeValue, value: RuntimeValue) -> 
                 return 0;
             };
             unsafe {
+                if let Some(words) = (*arr).packed_words() {
+                    let Some(want) = words.needle(value) else { return 0 };
+                    return words.position(want, false).is_some() as u8;
+                }
                 let slice = (*arr).as_slice();
                 for item in slice {
                     if rt_value_eq(*item, value) != 0 {

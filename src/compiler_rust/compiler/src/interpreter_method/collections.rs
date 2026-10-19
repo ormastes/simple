@@ -644,7 +644,10 @@ pub fn handle_array_methods(
                 (Value::Int(a), Value::Int(b)) => a.cmp(b),
                 (Value::Float(a), Value::Float(b)) => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
                 (Value::Str(a), Value::Str(b)) => a.cmp(b),
-                _ => std::cmp::Ordering::Equal,
+                // `[u8]`/`[u64]` elements are `Value::UInt`: order them (and
+                // mixed signed/unsigned pairs) numerically. They used to fall
+                // to Equal, so `max` kept the last element, `sorted` the input.
+                _ => super::numeric_ordering(a, b).unwrap_or(std::cmp::Ordering::Equal),
             });
             Value::array(new_arr)
         }
@@ -654,7 +657,7 @@ pub fn handle_array_methods(
                 (Value::Int(a), Value::Int(b)) => b.cmp(a),
                 (Value::Float(a), Value::Float(b)) => b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal),
                 (Value::Str(a), Value::Str(b)) => b.cmp(a),
-                _ => std::cmp::Ordering::Equal,
+                _ => super::numeric_ordering(b, a).unwrap_or(std::cmp::Ordering::Equal),
             });
             Value::array(new_arr)
         }
@@ -799,7 +802,10 @@ pub fn handle_array_methods(
                 (Value::Int(a), Value::Int(b)) => a.cmp(b),
                 (Value::Float(a), Value::Float(b)) => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
                 (Value::Str(a), Value::Str(b)) => a.cmp(b),
-                _ => std::cmp::Ordering::Equal,
+                // `[u8]`/`[u64]` elements are `Value::UInt`: order them (and
+                // mixed signed/unsigned pairs) numerically. They used to fall
+                // to Equal, so `max` kept the last element, `sorted` the input.
+                _ => super::numeric_ordering(a, b).unwrap_or(std::cmp::Ordering::Equal),
             });
             min_val.cloned().unwrap_or(Value::Nil)
         }
@@ -808,7 +814,10 @@ pub fn handle_array_methods(
                 (Value::Int(a), Value::Int(b)) => a.cmp(b),
                 (Value::Float(a), Value::Float(b)) => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
                 (Value::Str(a), Value::Str(b)) => a.cmp(b),
-                _ => std::cmp::Ordering::Equal,
+                // `[u8]`/`[u64]` elements are `Value::UInt`: order them (and
+                // mixed signed/unsigned pairs) numerically. They used to fall
+                // to Equal, so `max` kept the last element, `sorted` the input.
+                _ => super::numeric_ordering(a, b).unwrap_or(std::cmp::Ordering::Equal),
             });
             max_val.cloned().unwrap_or(Value::Nil)
         }
@@ -1012,7 +1021,10 @@ pub fn handle_array_methods(
                 (Value::Int(a), Value::Int(b)) => a.cmp(b),
                 (Value::Float(a), Value::Float(b)) => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
                 (Value::Str(a), Value::Str(b)) => a.cmp(b),
-                _ => std::cmp::Ordering::Equal,
+                // `[u8]`/`[u64]` elements are `Value::UInt`: order them (and
+                // mixed signed/unsigned pairs) numerically. They used to fall
+                // to Equal, so `max` kept the last element, `sorted` the input.
+                _ => super::numeric_ordering(a, b).unwrap_or(std::cmp::Ordering::Equal),
             });
             Value::array(new_arr)
         }

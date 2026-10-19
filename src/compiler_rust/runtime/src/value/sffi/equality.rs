@@ -135,6 +135,13 @@ fn value_hash_inner(v: RuntimeValue, depth: u32) -> u64 {
             fnv1a_bits(value ^ 0x5549_4e54_5f55_3634)
         };
     }
+    if heap_type == Some(HeapObjectType::Int) {
+        // Wide ints (outside the inline range) hash by VALUE like the UInt arm
+        // above, so two boxes of one value -- or a u64 box of it -- share a
+        // bucket. They used to hash their address, so an equal key missed.
+        let value = unsafe { (*typed::<HeapInt>(v)).value };
+        return fnv1a_bits((value as u64) ^ 0x5549_4e54_5f55_3634);
+    }
     if v.tag() != tags::TAG_HEAP {
         return fnv1a_bits(v.to_raw());
     }
@@ -223,16 +230,20 @@ fn value_eq_inner(a: RuntimeValue, b: RuntimeValue, visited: &mut Vec<(usize, us
     if a_float || b_float {
         return a_float && b_float && a.as_float() == b.as_float();
     }
+    // A u64 box equals a signed integer -- inline OR a heap-boxed wide int --
+    // that is non-negative with the same value (the C twin rt_native_eq agrees).
+    let a_signed = a.is_int() || ta == Some(HeapObjectType::Int);
+    let b_signed = b.is_int() || tb == Some(HeapObjectType::Int);
     if ta == Some(HeapObjectType::UInt) {
         let left = unsafe { (*typed::<HeapUInt>(a)).value };
         return if tb == Some(HeapObjectType::UInt) {
             left == unsafe { (*typed::<HeapUInt>(b)).value }
         } else {
-            b.is_int() && b.as_int() >= 0 && left == b.as_int() as u64
+            b_signed && b.as_int() >= 0 && left == b.as_int() as u64
         };
     }
     if tb == Some(HeapObjectType::UInt) {
-        return a.is_int() && a.as_int() >= 0 && a.as_int() as u64 == unsafe { (*typed::<HeapUInt>(b)).value };
+        return a_signed && a.as_int() >= 0 && a.as_int() as u64 == unsafe { (*typed::<HeapUInt>(b)).value };
     }
 
     match (a.tag(), b.tag()) {

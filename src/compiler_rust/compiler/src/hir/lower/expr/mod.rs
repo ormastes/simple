@@ -1156,6 +1156,12 @@ impl Lowerer {
     /// (with a non-ANY, non-VOID return) agrees on that type. Trait-typed
     /// receivers are ANY in HIR, so this is the only authoritative source for
     /// their result type.
+    /// True when `arg` is a lambda or has a function/closure type.
+    fn is_callable_arg(&self, arg: &HirExpr) -> bool {
+        matches!(arg.kind, HirExprKind::Lambda { .. })
+            || matches!(self.module.types.get(arg.ty), Some(HirType::Function { .. }))
+    }
+
     fn agreed_trait_method_return_type(&self, method: &str) -> Option<TypeId> {
         let mut trait_return: Option<TypeId> = None;
         for (lookup_name, trait_info) in &self.module.trait_infos {
@@ -1973,7 +1979,11 @@ impl Lowerer {
                         Some(TypeId::ANY)
                     }
                 }
-                "contains" | "is_empty" => Some(TypeId::BOOL),
+                // `any`/`all` return the runtime's RAW 0/1 (rt_array_any /
+                // rt_array_all, both lanes), so they must be typed BOOL like
+                // `contains`; untyped, the raw word reached `print` as a
+                // RuntimeValue (`all` printed `0`, `any` printed `nil`).
+                "contains" | "is_empty" | "any" | "all" => Some(TypeId::BOOL),
                 // `[T].index_of(v)` returns a raw i64 position (-1 when absent),
                 // exactly like the string table's `index_of` above. This table
                 // omitting it is the SAME class of gap as `"length"`/`"bytes"`:
@@ -2138,6 +2148,16 @@ impl Lowerer {
                 "get" | "remove" | "get_or" => Some(dict_kv.map(|(_, v)| v).unwrap_or(TypeId::ANY)),
                 "insert" | "set" | "put" | "clear" => Some(TypeId::VOID),
                 "contains_key" | "has" | "contains" => Some(TypeId::BOOL),
+                // Same raw-result class on an untyped receiver: `any`/`all`
+                // return a raw 0/1 and `index_of` (rt_index_of, array or text)
+                // a raw i64 position, so they need the BOOL / BoxInt
+                // conversion. Left ANY, `<value:0x1>` / nil reached `print`.
+                // `any`/`all` only in the builtin shape (one callable
+                // predicate: a lambda, a named function or a closure value):
+                // a user class method named `any()` / `all(3)` reached through
+                // an untyped receiver keeps its own (dynamic) result.
+                "any" | "all" if hir_args.len() == 1 && self.is_callable_arg(&hir_args[0]) => Some(TypeId::BOOL),
+                "index_of" => Some(TypeId::I64),
                 // "length" synonym — see the string-methods comment above.
                 "len" | "length" | "size" => Some(TypeId::I64),
                 "keys" => Some(match dict_kv {
