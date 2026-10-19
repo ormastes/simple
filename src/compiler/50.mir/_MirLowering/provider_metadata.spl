@@ -699,17 +699,38 @@ fn mir_trait_dispatch_identity(symbol: HirSymbol, fallback_module: text) -> text
     "{owner}.{symbol.name}"
 
 impl MirLowering:
-    me register_trait_receiver_impls(module: HirModule, providers: [HirModule]):
+    me register_trait_receiver_impls(module: HirModule, providers: [HirModule],
+            provider_links_by_index: [Dict<i64, text>], provider_links_ready: [bool]):
         """Record every `impl Trait for Type` visible to this lowering.
 
         Stage2 objects carry no runtime type identity (no vtable word), so a
         trait-typed receiver can only be dispatched when the build closure
         holds exactly one implementing type. Providers are the driver's whole
-        closure (driver_pipeline_lowering.spl), so the count is closure-wide."""
+        closure (driver_pipeline_lowering.spl), so the count is closure-wide.
+
+        Reuses the provider link tables lower_module already built for this
+        consumer: `provider_links_by_index[i]` is the `mir_provider_function_name` table
+        of `providers[i]`, valid only where `provider_links_ready[i]`. Both
+        tables are a pure function of the PROVIDER module (its name, symbol
+        table and function list), which consumer relocation never mutates, so
+        a ready entry is value-identical to the table this method used to
+        rebuild for every provider on every consumer module. A missing entry
+        (no table passed, or the trait-provider fallback list) is rebuilt
+        exactly as before. The tables are consumer-call scratch owned by the
+        caller's lower_module frame; nothing here retains them."""
         self.register_trait_impls_of(module.name, module.symbols, module.impls, {}, true)
+        val use_cached = providers.len() > 0
         val trait_providers = if providers.len() > 0: providers else: self.trait_impl_provider_modules
-        for provider_module in trait_providers:
+        var provider_i = 0
+        while provider_i < trait_providers.len():
+            val provider_module: HirModule = trait_providers[provider_i]
+            val cached_i = provider_i
+            provider_i = provider_i + 1
             if provider_module.name != module.name and provider_module.impls.len() > 0:
+                if use_cached and cached_i < provider_links_ready.len() and cached_i < provider_links_by_index.len() and provider_links_ready[cached_i]:
+                    val cached_links: Dict<i64, text> = provider_links_by_index[cached_i]
+                    self.register_trait_impls_of(provider_module.name, provider_module.symbols, provider_module.impls, cached_links, false)
+                    continue
                 var provider_links: Dict<i64, text> = {}
                 for provider_func in provider_module.functions.values():
                     provider_links[provider_func.symbol.id] = mir_provider_function_name(provider_module.name, provider_module.symbols, provider_func)

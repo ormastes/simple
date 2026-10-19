@@ -2380,8 +2380,17 @@ impl MirLowering:
         for raw_local_class_value in local_class_values:
             val local_class_value: HirClass = raw_local_class_value
             consumer_composite_names[local_class_value.name] = true
+        # Per-provider link tables built below are reused by
+        # register_trait_receiver_impls for the same consumer instead of being
+        # rebuilt from every provider's whole function list a second time.
+        # Index-aligned with `providers`; consumer-call scratch only (never
+        # stored on self), so it dies with this module's transient scope.
+        var provider_links_by_index: [Dict<i64, text>] = []
+        var provider_links_ready: [bool] = []
         for raw_provider_module in providers:
             val provider_module: HirModule = raw_provider_module
+            var provider_links_built = false
+            var provider_links: Dict<i64, text> = {}
             if provider_module.name != module.name:
                 val provider_struct_keys: [SymbolId] = provider_module.structs.keys()
                 for dk_35 in provider_struct_keys:
@@ -2396,7 +2405,10 @@ impl MirLowering:
             # So do impl-only providers: `impl Imported:` extension modules
             # (app.test_daemon.qemu_broker_snapshot) declare no type at all.
             if provider_module.name != module.name and (provider_module.classes.len() > 0 or provider_module.enums.len() > 0 or provider_module.structs.len() > 0 or provider_module.impls.len() > 0):
-                var provider_links: Dict<i64, text> = {}
+                # One keyed read per provider function, shared by the link
+                # table and the method pass below (both used to walk
+                # functions.keys() separately on every consumer module).
+                var provider_funcs: [HirFunction] = []
                 val provider_function_keys_34: [SymbolId] = provider_module.functions.keys()
                 for dk_34 in provider_function_keys_34:
                     # workaround(p2_add cycles 91-105): per-read draw corruption — bind once, guard the local.
@@ -2404,6 +2416,8 @@ impl MirLowering:
                     if provider_func == nil:
                         continue
                     provider_links[provider_func.symbol.id] = mir_provider_function_name(provider_module.name, provider_module.symbols, provider_func)
+                    provider_funcs.push(provider_func)
+                provider_links_built = true
                 val provider_class_keys: [SymbolId] = provider_module.classes.keys()
                 for dk_33 in provider_class_keys:
                     # workaround(p2_add cycles 91-105): per-read draw corruption — bind once, guard the local.
@@ -2419,13 +2433,14 @@ impl MirLowering:
                 # registration the enum's own module pass runs.
                 for provider_enum in provider_module.enums.values():
                     self.register_enum_variants(provider_enum)
-                val provider_function_keys_32: [SymbolId] = provider_module.functions.keys()
-                for dk_32 in provider_function_keys_32:
-                    # workaround(p2_add cycles 91-105): per-read draw corruption — bind once, guard the local.
-                    val provider_func: HirFunction = provider_module.functions[dk_32]
-                    if provider_func == nil:
-                        continue
-                    self.register_provider_method(provider_func, provider_module.symbols, provider_links)
+                var provider_func_i = 0
+                while provider_func_i < provider_funcs.len():
+                    # Annotated rebind of the already nil-guarded element.
+                    val provider_method_func: HirFunction = provider_funcs[provider_func_i]
+                    self.register_provider_method(provider_method_func, provider_module.symbols, provider_links)
+                    provider_func_i = provider_func_i + 1
+            provider_links_by_index.push(provider_links)
+            provider_links_ready.push(provider_links_built)
         # Before the ambient-bootstrap early return below: the stage3
         # bootstrap-fixed lane lowers through that branch too.
         if self.declaration_repository != nil:
@@ -2434,7 +2449,8 @@ impl MirLowering:
             self.register_declaration_provider_layouts_v1(module)
             self.register_declaration_trait_receiver_impls_v1(module)
         else:
-            self.register_trait_receiver_impls(module, providers)
+            self.register_trait_receiver_impls(module, providers,
+                provider_links_by_index, provider_links_ready)
         self.global_symbol_ids = {}
         self.imported_global_initializers = {}
         # These mirrors contain module-local SymbolIds just like the owner

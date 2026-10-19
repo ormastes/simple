@@ -79,7 +79,7 @@ fn lower_source(src: text, closure_complete: bool) -> Lowered:
     val mir = ml.lower_module(hir)
     collect(ml, mir)
 
-fn lower_cross_module(include_impl_module: bool, via_trait_provider_modules: bool) -> Lowered:
+fn lower_cross_module(include_impl_module: bool, via_trait_provider_modules: bool, consumer_first: bool) -> Lowered:
     val a = parse_and_build_module(XM_A_SRC, "pkg/xm_a.spl")
     val b = parse_and_build_module(XM_B_SRC, "pkg/xm_b.spl")
     val c = parse_and_build_module(XM_C_SRC, "pkg/xm_c.spl")
@@ -100,7 +100,12 @@ fn lower_cross_module(include_impl_module: bool, via_trait_provider_modules: boo
     hl.module_filename = "pkg/xm_c.spl"
     val c_hir = hl.lower_module(c)
     expect(hl.errors.len()).to_equal(0)
-    val providers = if include_impl_module: [a_hir, b_hir, c_hir] else: [a_hir, c_hir]
+    # consumer_first: the consumer itself and a type-less trait module precede
+    # the implementor, so lower_module's per-provider link tables (reused by
+    # the trait-receiver pass) must stay index-aligned across skipped slots.
+    var providers = if include_impl_module: [a_hir, b_hir, c_hir] else: [a_hir, c_hir]
+    if consumer_first:
+        providers = [c_hir, a_hir, b_hir]
     var ml = MirLowering.new(c_hir.symbols)
     ml.trait_impl_closure_complete = true
     for provider in providers:
@@ -160,19 +165,25 @@ describe "stage2 MIR trait-typed receiver dispatch":
         expect(count_matching(lowered.callees, "Mem.list")).to_equal(0)
 
     it "devirtualizes across modules: trait in A, implementor in B, consumer in C":
-        val lowered = lower_cross_module(true, false)
+        val lowered = lower_cross_module(true, false, false)
         expect(lowered.errors.len()).to_equal(0)
         expect(count_matching(lowered.callees, "Mem.list")).to_equal(1)
         expect(count_matching(lowered.callees, "rt_panic")).to_equal(0)
 
     it "traps at runtime when the implementing module is outside the closure":
-        val lowered = lower_cross_module(false, false)
+        val lowered = lower_cross_module(false, false, false)
         expect(lowered.errors.len()).to_equal(0)
         expect(count_matching(lowered.callees, "Mem.list")).to_equal(0)
         expect(count_matching(lowered.callees, "rt_panic")).to_equal(1)
 
+    it "reuses per-provider link tables index-aligned when the consumer and a type-less module come first":
+        val lowered = lower_cross_module(true, false, true)
+        expect(lowered.errors.len()).to_equal(0)
+        expect(count_matching(lowered.callees, "Mem.list")).to_equal(1)
+        expect(count_matching(lowered.callees, "rt_panic")).to_equal(0)
+
     it "devirtualizes on the stage3 bootstrap-fixed shape (closure via trait_impl_provider_modules)":
-        val lowered = lower_cross_module(true, true)
+        val lowered = lower_cross_module(true, true, false)
         expect(lowered.errors.len()).to_equal(0)
         expect(count_matching(lowered.callees, "Mem.list")).to_equal(1)
         expect(count_matching(lowered.callees, "rt_panic")).to_equal(0)
