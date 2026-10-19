@@ -1,0 +1,81 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Capturing lambdas with if-expressions and enum constructors lift to closures
+
+Native build of llm_caret/cs_main failed on 8 `.then(\\result: ...)` lambdas in
+src/lib/nogc_async_mut/io/buffer.spl with `E-MIR-EXPR-Lambda ... (closure
+conversion has not run)`. `lower_lambda_value_for_type` refused the lift:
+
+1. the capture-scan traversals (`lambda_body_captures`,
+   `lambda_capture_scan_supported`, `collect_free_var_syms`) had no arm for
+   `If`/`IfChain`/`EnumLit`, so a capturing body containing
+   `val take = if size < n: size else: n` failed closed;
+2. the free-variable collector reported the prelude constructor `Ok` (a
+   `Function` symbol reached as `Var`) as a captured runtime binding, which has
+   no live local, so `Ok(chunk)` also refused the lift.
+"""
+# @tag: unit, compiler, mir, lambda
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn mir_errors(src: text) -> text:
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(src, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: src, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hl = hirlowering_for_module("app.main", surfaces)
+    val hir = hl.lower_module(ast)
+    var hm: Dict<text, HirModule> = {}
+    hm["app.main"] = hir
+    var ml = MirLowering.new(hir.symbols)
+    ml.prescan_module_struct_names(hm, "app.main")
+    ml.lower_module(hir)
+    var out = ""
+    for e in ml.errors:
+        out = out + e.message + "\n"
+    out
+
+val prelude = "enum Kind:\n    A\n    B\n    V(i64)\n\nclass Box:\n    v: i64\n    static fn of(v: i64) -> Box:\n        Box(v: v)\n    fn then(f: fn(i64) -> Box) -> Box:\n        f(self.v)\n\nclass Rd:\n    buf: i64\n    pos: i64\n"
+
+describe "capturing lambda lift coverage":
+    it "lifts a capturing block body with a val (discriminator)":
+        val e = mir_errors(prelude + "    me go(size: i64) -> Box:\n        Box.of(1).then(\\r:\n            val n = r + size\n            Box.of(n)\n        )\n")
+        expect(e).to_equal("")
+    it "lifts a capturing body with an if-expression":
+        val e = mir_errors(prelude + "    me go(size: i64) -> Box:\n        Box.of(1).then(\\r:\n            val take = if size < r: size else: r\n            Box.of(take)\n        )\n")
+        expect(e).to_equal("")
+    it "lifts a capturing body that assigns a self field (discriminator)":
+        val e = mir_errors(prelude + "    me go(size: i64) -> Box:\n        Box.of(1).then(\\r:\n            self.pos = r\n            Box.of(size)\n        )\n")
+        expect(e).to_equal("")
+    it "lifts a capturing body matching a Result built with Ok":
+        val e = mir_errors(prelude + "    me go(size: i64) -> Box:\n        Box.of(1).then(\\r:\n            val res: Result<i64, text> = Ok(r)\n            match res:\n                case Ok(d):\n                    Box.of(d + size)\n                case Err(m):\n                    Box.of(0)\n        )\n")
+        expect(e).to_equal("")
+    it "lifts a capturing body constructing Ok(...)":
+        val e = mir_errors(prelude + "    me go(size: i64) -> Box:\n        Box.of(1).then(\\r:\n            val res: Result<i64, text> = Ok(r + size)\n            Box.of(size)\n        )\n")
+        expect(e).to_equal("")
+    # The non-capture rule is by symbol kind, not by the name `Ok`: every
+    # prelude constructor and every user enum variant (unit and payload) is a
+    # declaration, never a runtime binding the closure could capture.
+    it "lifts a capturing body constructing Some/Err/None":
+        val e = mir_errors(prelude + "    me go(size: i64) -> Box:\n        Box.of(1).then(\\r:\n            val a: i64? = Some(r + size)\n            val b: Result<i64, text> = Err(\"e\")\n            val c: i64? = None\n            Box.of(size)\n        )\n")
+        expect(e).to_equal("")
+    it "lifts a capturing body naming a user unit variant":
+        val e = mir_errors(prelude + "    me go(size: i64) -> Box:\n        Box.of(1).then(\\r:\n            val k = Kind.A\n            if k == Kind.B:\n                Box.of(0)\n            else:\n                Box.of(r + size)\n        )\n")
+        expect(e).to_equal("")
+    it "lifts a capturing body constructing a user payload variant":
+        val e = mir_errors(prelude + "    me go(size: i64) -> Box:\n        Box.of(1).then(\\r:\n            val k = Kind.V(r + size)\n            Box.of(size)\n        )\n")
+        expect(e).to_equal("")
+    it "lifts a capturing body with a literal match (discriminator)":
+        val e = mir_errors(prelude + "    me go(size: i64) -> Box:\n        Box.of(1).then(\\r:\n            match r:\n                case 1:\n                    Box.of(size)\n                case _:\n                    Box.of(0)\n        )\n")
+        expect(e).to_equal("")

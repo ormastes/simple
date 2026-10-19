@@ -209,6 +209,20 @@ fn option_payload_is_boxed(option_type: HirType) -> bool:
                 case _: false
         case _: false
 
+fn lambda_enum_payload_values(payload: HirEnumPayload?) -> [HirExpr]:
+    """Payload sub-expressions of an `EnumLit` (`Ok(x)`, `V(a: b)`), for the
+    lambda capture traversals."""
+    var out: [HirExpr] = []
+    if val present = payload:
+        match present:
+            case HirEnumPayload.Tuple(values):
+                for value in values:
+                    out.push(value)
+            case HirEnumPayload.Struct(fields):
+                for field in fields:
+                    out.push(field.1)
+    out
+
 fn enum_variant_disc(names: [text], variant: text) -> i64:
     """Discriminant = index of `variant` in the enum's declared variant order."""
     var i = 0
@@ -5602,14 +5616,15 @@ impl MirLowering:
                 # A record constructor names a declaration, not a runtime
                 # binding captured from the enclosing activation. Retain the
                 # exact symbol owner; never classify by a bare name.
-                val is_record_declaration = self.symbols.record_owner_identity_scalar_raw(sid) != ""
+                # Likewise a function or variant constructor (`Ok(x)`).
+                val is_record_declaration = self.symbols.record_owner_identity_scalar_raw(sid) != "" or self.symbols.symbol_is_callable_declaration_scalar_raw(sid)
                 if sid >= 0 and not is_record_declaration and not int_list_contains(param_syms, sid) and not int_list_contains(acc, sid):
                     acc.push(sid)
                 else:
                     acc
             case NamedVar(symbol, name):
                 val sid = mir_expr_symbol_id_value(symbol)
-                val is_record_declaration = self.symbols.record_owner_identity_scalar_raw(sid) != ""
+                val is_record_declaration = self.symbols.record_owner_identity_scalar_raw(sid) != "" or self.symbols.symbol_is_callable_declaration_scalar_raw(sid)
                 if sid >= 0 and not is_record_declaration and not int_list_contains(param_syms, sid) and not self.is_known_top_level_function(name, symbol) and not int_list_contains(acc, sid):
                     acc.push(sid)
                 else:
@@ -5671,6 +5686,25 @@ impl MirLowering:
                     self.collect_free_var_syms(loop_body.value, loop_bound, body_acc)
                 else:
                     body_acc
+            case If(condition, then_block, else_block):
+                var if_acc = self.collect_free_var_syms(condition, param_syms, acc)
+                if_acc = self.lambda_block_free_syms(then_block, param_syms, if_acc)
+                if val present_else = else_block:
+                    if_acc = self.lambda_block_free_syms(present_else, param_syms, if_acc)
+                if_acc
+            case IfChain(if_arms, else_block):
+                var chain_acc = acc
+                for if_arm in if_arms:
+                    chain_acc = self.collect_free_var_syms(if_arm.cond, param_syms, chain_acc)
+                    chain_acc = self.lambda_block_free_syms(if_arm.then_, param_syms, chain_acc)
+                if val present_else = else_block:
+                    chain_acc = self.lambda_block_free_syms(present_else, param_syms, chain_acc)
+                chain_acc
+            case EnumLit(_, _, payload):
+                var payload_acc = acc
+                for payload_value in lambda_enum_payload_values(payload):
+                    payload_acc = self.collect_free_var_syms(payload_value, param_syms, payload_acc)
+                payload_acc
             case Lambda(nested_params, nested_body, _):
                 var combined = param_syms
                 var nlpi = 0
@@ -5997,6 +6031,23 @@ impl MirLowering:
                     self.lambda_body_captures(loop_body.value, loop_bound)
                 else:
                     false
+            case If(condition, then_block, else_block):
+                if self.lambda_body_captures(condition, param_syms): return true
+                if self.lambda_block_captures(then_block, param_syms): return true
+                if val present_else = else_block:
+                    return self.lambda_block_captures(present_else, param_syms)
+                false
+            case IfChain(if_arms, else_block):
+                for if_arm in if_arms:
+                    if self.lambda_body_captures(if_arm.cond, param_syms): return true
+                    if self.lambda_block_captures(if_arm.then_, param_syms): return true
+                if val present_else = else_block:
+                    return self.lambda_block_captures(present_else, param_syms)
+                false
+            case EnumLit(_, _, payload):
+                for payload_value in lambda_enum_payload_values(payload):
+                    if self.lambda_body_captures(payload_value, param_syms): return true
+                false
             case Lambda(nested_params, nested_body, _):
                 # A lambda literal nested inside another lambda's body (e.g. an
                 # inline lambda arg passed to a call made from within the outer
@@ -6118,9 +6169,44 @@ impl MirLowering:
                 self.hir_block_stmts_scan_supported(block.stmts) and (not block.has or self.lambda_capture_scan_supported(block.value))
             case While(condition, loop_body, _):
                 self.lambda_capture_scan_supported(condition) and self.hir_block_stmts_scan_supported(loop_body.stmts) and (not loop_body.has or self.lambda_capture_scan_supported(loop_body.value))
+            case If(condition, then_block, else_block):
+                if not self.lambda_capture_scan_supported(condition): return false
+                if not self.lambda_block_scan_supported(then_block): return false
+                if val present_else = else_block:
+                    return self.lambda_block_scan_supported(present_else)
+                true
+            case IfChain(if_arms, else_block):
+                for if_arm in if_arms:
+                    if not self.lambda_capture_scan_supported(if_arm.cond): return false
+                    if not self.lambda_block_scan_supported(if_arm.then_): return false
+                if val present_else = else_block:
+                    return self.lambda_block_scan_supported(present_else)
+                true
+            case EnumLit(_, _, payload):
+                for payload_value in lambda_enum_payload_values(payload):
+                    if not self.lambda_capture_scan_supported(payload_value): return false
+                true
             case Lambda(_, nested_body, _):
                 self.lambda_capture_scan_supported(nested_body)
             case _: false
+
+    # Block helpers shared by the If/IfChain arms of the three lambda
+    # traversals: a block's own `val`/`var` names are bound only inside it.
+    me lambda_block_captures(block: HirBlock, param_syms: [i64]) -> bool:
+        val bound = self.hir_block_bound_syms(block.stmts, param_syms)
+        if self.hir_block_stmts_capture(block.stmts, bound): return true
+        block.has and self.lambda_body_captures(block.value, bound)
+
+    me lambda_block_scan_supported(block: HirBlock) -> bool:
+        self.hir_block_stmts_scan_supported(block.stmts) and (not block.has or self.lambda_capture_scan_supported(block.value))
+
+    me lambda_block_free_syms(block: HirBlock, param_syms: [i64], acc: [i64]) -> [i64]:
+        val bound = self.hir_block_bound_syms(block.stmts, param_syms)
+        val acc1 = self.hir_block_stmts_free_syms(block.stmts, bound, acc)
+        if block.has:
+            self.collect_free_var_syms(block.value, bound, acc1)
+        else:
+            acc1
 
     me hir_block_stmts_scan_supported(stmts: [HirStmt]) -> bool:
         """Mirrors `lambda_capture_scan_supported`'s coverage for the
