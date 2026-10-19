@@ -14,10 +14,11 @@ use app.io.file_ops.{path_absolute}
 use std.nogc_sync_mut.fs.host_path.{host_path_native, host_path_native_for,
     host_path_canonical_for, host_is_windows_host}
 use std.common.crypto.sha256.{sha256_text}
-use std.common.text_bytes.{text_to_utf8_bytes}
+use std.common.text_bytes.{bytes_to_text}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin,
     transient_scope_pause, transient_scope_end, transient_promote}
 use std.nogc_sync_mut.io.file_ops.{file_write_bytes,
+    file_read_regular_no_follow_bounded_bytes,
     secure_temp_dir_raw, file_publish_noreplace_raw}
 use std.nogc_sync_mut.io_runtime.{
     dir_list, dir_remove, file_rename,
@@ -114,8 +115,14 @@ fn scv_compile_snapshot_sift_down_v1(
         values[largest] = temporary
         root = largest
 
-fn scv_compile_snapshot_read_source_v1(path: text) -> text?:
-    val loaded = file_read_regular_no_follow_bounded(
+# Snapshot sources are content-addressed BYTES: every admission below compares
+# the SHA-256 of the raw bytes with the inventory's digest, so a text decode
+# adds nothing to the contract. It did dominate the cost: sampled 2026-10-19 on
+# a Windows producer, ~95% of a ~150 ms/file CPU-bound snapshot (5-8 files/s)
+# was the per-byte text decoder plus reclaiming its per-byte allocations at
+# transient-scope end, paid on each of the five reads per file.
+fn scv_compile_snapshot_read_source_v1(path: text) -> [u8]?:
+    val loaded = file_read_regular_no_follow_bounded_bytes(
         path, SCV_COMPILE_SOURCE_MAX_BYTES_V1)
     if val Err(_) = loaded:
         return nil
@@ -123,7 +130,7 @@ fn scv_compile_snapshot_read_source_v1(path: text) -> text?:
 
 fn scv_compile_snapshot_source_digest_v1(path: text) -> text:
     val content = scv_compile_snapshot_read_source_v1(path)
-    if content == nil: "" else: scv_content_id_for_u8(text_to_utf8_bytes(content!))
+    if content == nil: "" else: scv_content_id_for_u8(content!)
 
 fn scv_compile_snapshot_logical_member_v1(
     root: text, source_roots: [text], source_identity: text
@@ -368,12 +375,11 @@ fn scv_compile_snapshot_materialize_source_unscoped_v1(
     val content = scv_compile_snapshot_read_source_v1(path)
     if content == nil:
         return ScvCompileMaterializedSourceV1("snapshot-read-failed:{rel}", "", false)
-    # Keep the byte-packed conversion required by native SHA and binary writes.
-    val bytes = text_to_utf8_bytes(content!)
+    val bytes: [u8] = content!
     val digest = scv_content_id_for_u8(bytes)
     if digest != "sha256_{entry.content_digest}" or bytes.len() != entry.byte_count:
         return ScvCompileMaterializedSourceV1("snapshot-index-drift:{rel}", "", false)
-    if not scv_compile_snapshot_write_chunk_v1(cache_root, staging, digest, content!):
+    if not scv_compile_snapshot_write_chunk_v1(cache_root, staging, digest, bytes_to_text(bytes)):
         return ScvCompileMaterializedSourceV1("snapshot-chunk-publish-failed:{rel}", "", false)
     val destination = "{staging}/{rel}"
     # Both staging and rel are owned canonical paths. The runtime's recursive
@@ -392,8 +398,7 @@ fn scv_compile_snapshot_materialize_source_unscoped_v1(
     if current == nil:
         drifted = true
     else:
-        val current_text = current!
-        if scv_content_id_for_u8(text_to_utf8_bytes(current_text)) != digest:
+        if scv_content_id_for_u8(current!) != digest:
             drifted = true
     ScvCompileMaterializedSourceV1("ok", "{rel}|{digest}|{bytes.len()}", drifted)
 
