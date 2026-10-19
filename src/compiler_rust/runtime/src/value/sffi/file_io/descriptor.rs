@@ -31,34 +31,52 @@ pub unsafe extern "C" fn rt_file_open(
         Err(_) => return -1,
     };
 
-    use std::fs::OpenOptions;
+    // Windows returns a CRT descriptor, like the C twin in runtime_native.c,
+    // not a HANDLE truncated to i32: rt_fd_stat_snapshot_v1 resolves the
+    // descriptor with _get_osfhandle, which refused the HANDLE (EBADF) and
+    // failed every managed native-build with "admitted tool metadata
+    // unavailable".
+    #[cfg(windows)]
+    {
+        const O_RDONLY: i32 = 0x0000;
+        const O_WRONLY: i32 = 0x0001;
+        const O_RDWR: i32 = 0x0002;
+        const O_NOINHERIT: i32 = 0x0080;
+        const O_BINARY: i32 = 0x8000;
+        let access = match mode {
+            0 => O_RDONLY,
+            1 => O_RDWR,
+            2 => O_WRONLY,
+            _ => return -1,
+        };
+        if path_str.contains('\0') {
+            return -1;
+        }
+        let wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
+        return _wopen(wide.as_ptr(), O_BINARY | O_NOINHERIT | access);
+    }
 
-    let result = match mode {
-        0 => OpenOptions::new().read(true).open(path_str),
-        1 => OpenOptions::new().read(true).write(true).open(path_str),
-        2 => OpenOptions::new().write(true).open(path_str),
-        _ => return -1,
-    };
+    #[cfg(unix)]
+    {
+        use std::fs::OpenOptions;
 
-    match result {
-        Ok(file) => {
-            #[cfg(unix)]
-            {
+        let result = match mode {
+            0 => OpenOptions::new().read(true).open(path_str),
+            1 => OpenOptions::new().read(true).write(true).open(path_str),
+            2 => OpenOptions::new().write(true).open(path_str),
+            _ => return -1,
+        };
+
+        match result {
+            Ok(file) => {
                 use std::os::unix::io::AsRawFd;
                 let fd = file.as_raw_fd();
                 // Leak the file to keep it open
                 std::mem::forget(file);
                 fd
             }
-            #[cfg(windows)]
-            {
-                use std::os::windows::io::AsRawHandle;
-                let handle = file.as_raw_handle();
-                std::mem::forget(file);
-                handle as i32
-            }
+            Err(_) => -1,
         }
-        Err(_) => -1,
     }
 }
 
@@ -92,7 +110,11 @@ pub extern "C" fn rt_file_get_size(fd: i32) -> i64 {
         use std::os::windows::io::FromRawHandle;
 
         unsafe {
-            let file = std::fs::File::from_raw_handle(fd as *mut _);
+            let handle = _get_osfhandle(fd);
+            if handle == -1 {
+                return -1;
+            }
+            let file = std::fs::File::from_raw_handle(handle as *mut _);
             let size = file
                 .metadata()
                 .ok()
@@ -127,12 +149,7 @@ pub extern "C" fn rt_file_close(fd: i32) -> i8 {
 
     #[cfg(windows)]
     {
-        use std::os::windows::io::FromRawHandle;
-
-        unsafe {
-            let _file = std::fs::File::from_raw_handle(fd as *mut _);
-        }
-        1
+        i8::from(unsafe { _close(fd) } == 0)
     }
 }
 
@@ -167,6 +184,23 @@ mod tests {
 
             // Close the file
             rt_file_close(fd);
+        }
+    }
+
+    #[test]
+    fn test_file_open_descriptor_is_accepted_by_fd_stat() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("tool.bin");
+        fs::write(&file_path, "tool bytes").unwrap();
+        let (ptr, len) = str_to_ptr(file_path.to_str().unwrap());
+        unsafe {
+            let fd = rt_file_open(ptr, len, 0);
+            assert!(fd >= 0);
+            let mut words = [0u64; 10];
+            let rc = crate::fd_stat_v1::rt_fd_stat_snapshot_v1(fd as i64, words.as_mut_ptr() as i64, 80);
+            assert_eq!(rc, 0, "fd-stat must accept an rt_file_open descriptor");
+            assert_eq!(words[3], 10);
+            assert_eq!(rt_file_close(fd), 1);
         }
     }
 
@@ -327,6 +361,7 @@ fn open_fd_path_bytes(path: crate::value::RuntimeValue) -> Option<Vec<u8>> {
 extern "C" {
     fn _wopen(path: *const u16, oflag: i32, ...) -> i32;
     fn _close(fd: i32) -> i32;
+    fn _get_osfhandle(fd: i32) -> isize;
 }
 
 /// Open a CRT/POSIX file descriptor for the SMF loader's mmap path.
