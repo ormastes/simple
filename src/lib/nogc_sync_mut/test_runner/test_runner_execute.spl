@@ -924,6 +924,10 @@ fn run_test_file_mcdc_interpreter_fallback(file_path: text, options: TestOptions
     val end = time_now_unix_micros()
     val duration_ms = (end - start) / 1000
     print "[{fallback_tag}] {file_path}: {reason}"
+    # A budget kill arrives as a bare signal exit (143) with no TIMEOUT marker,
+    # so make_result_from_output would call it an unexplained signal death.
+    if scoped_child.result.limit_exceeded:
+        return scoped_limit_exceeded_result(file_path, scoped_child, options, duration_ms, reason, degrade_token)
     val base_result = make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
     val evidenced = _attach_scope_evidence(base_result, scoped_child.usage, scoped_child.budget_status, file_path, options, 0, duration_ms)
     TestFileResult(
@@ -941,6 +945,18 @@ fn run_test_file_mcdc_interpreter_fallback(file_path: text, options: TestOptions
         mcdc_skip_reason: reason,
         degraded_reason: degrade_token
     )
+
+# Outcome for a scoped child its resource scope killed (wall/memory/cpu/procs),
+# classified by the scope's limit_type -- the same classes the primary
+# interpreter path reports -- while keeping the fallback's skip/degrade tags.
+pub fn scoped_limit_exceeded_result(file_path: text, scoped_child: ScopedChildRun, options: TestOptions, duration_ms: i64, mcdc_skip_reason: text, degraded_reason: text) -> TestFileResult:
+    val result = scoped_child.result
+    TestFileResult(path: file_path, passed: 0, failed: if limit_is_unverified(result.limit_type): 0 else: 1, skipped: 0, pending: 0,
+        duration_ms: duration_ms, setup_ms: 0, error: limit_exceeded_message(result, options), timed_out: result.limit_type.contains("timeout"), cached: false,
+        execution_ms: duration_ms, resource_usage: scoped_child.usage,
+        resource_class: if file_path.contains("/03_system/"): "system" elif file_path.contains("/02_integration/"): "integration" else: "unit",
+        cohort_id: test_execution_cohort_id(file_path, options), budget_status: scoped_child.budget_status, anomaly_status: "incomplete",
+        mcdc_skip_reason: mcdc_skip_reason, degraded_reason: degraded_reason)
 
 # --- coverage fail-closed gate (2026-08-31) -------------------------------
 # A coverage run whose instrumented wrapper will not compile has NOT executed
@@ -1499,7 +1515,7 @@ export use std.test_runner.test_executor_parsing.{find_simple_binary, find_simpl
 # Exports from this file
 export run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_safe, preprocess_spipe_file
 export mcdc_manifest_transport_args
-export smf_compile_degrade_token
+export smf_compile_degrade_token, scoped_limit_exceeded_result
 export native_test_request_error, native_test_compile_threads, native_test_compile_args
 export native_test_compile_args_with_threads, native_test_invocation_receipt
 export cleanup_native_generated_files
