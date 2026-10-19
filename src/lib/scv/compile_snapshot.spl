@@ -14,7 +14,8 @@ use app.io.file_ops.{path_absolute}
 use std.nogc_sync_mut.fs.host_path.{host_path_native, host_path_native_for,
     host_path_canonical_for, host_is_windows_host}
 use std.common.crypto.sha256.{sha256_text}
-use std.common.text_bytes.{bytes_to_text}
+use std.common.text_bytes.{utf8_bytes_valid}
+use std.nogc_sync_mut.io.external_text_io.{io_legacy_utf8}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin,
     transient_scope_pause, transient_scope_end, transient_promote}
 use std.nogc_sync_mut.io.file_ops.{file_write_bytes,
@@ -115,12 +116,15 @@ fn scv_compile_snapshot_sift_down_v1(
         values[largest] = temporary
         root = largest
 
-# Snapshot sources are content-addressed BYTES: every admission below compares
-# the SHA-256 of the raw bytes with the inventory's digest, so a text decode
-# adds nothing to the contract. It did dominate the cost: sampled 2026-10-19 on
-# a Windows producer, ~95% of a ~150 ms/file CPU-bound snapshot (5-8 files/s)
-# was the per-byte text decoder plus reclaiming its per-byte allocations at
-# transient-scope end, paid on each of the five reads per file.
+# Snapshot sources are content-addressed BYTES. The materializer validates the
+# source read as UTF-8 exactly once (the inventory reader does not), refusing
+# a non-UTF-8 source as snapshot-read-failed like the old text read did; every
+# later read (staged chunk, existing chunk, destination readback, drift
+# recheck) is admitted by an exact raw-byte SHA-256 match against that
+# validated digest, so it needs no decode. Decoding all five reads dominated
+# the cost: sampled 2026-10-19 on a Windows producer, ~95% of a ~150 ms/file
+# CPU-bound snapshot (5-8 files/s) was the per-byte text decoder plus
+# reclaiming its per-byte allocations at transient-scope end.
 fn scv_compile_snapshot_read_source_v1(path: text) -> [u8]?:
     val loaded = file_read_regular_no_follow_bounded_bytes(
         path, SCV_COMPILE_SOURCE_MAX_BYTES_V1)
@@ -332,7 +336,7 @@ fn scv_compile_snapshot_publish_staged_chunk_v1(
     false
 
 fn scv_compile_snapshot_write_chunk_v1(
-    cache_root: text, staging: text, digest: text, content: text
+    cache_root: text, staging: text, digest: text, content: [u8]
 ) -> bool:
     val chunk_dir = "{cache_root}/objects/chunks"
     dir_create(chunk_dir, true)
@@ -343,7 +347,13 @@ fn scv_compile_snapshot_write_chunk_v1(
     # file. A failed exclusive write is cleaned by its enclosing stage owner;
     # it must never expose a final path or delete an unowned collision.
     val staged_path = "{staging}/.scv-chunk-{digest}"
-    if not file_create_excl(staged_path, content):
+    # No byte-payload exclusive create exists: claim the name exclusively,
+    # then fill the owned file. The digest check before publish stays the
+    # authority; a short or failed write never reaches the final path.
+    if not file_create_excl(staged_path, ""):
+        return false
+    if not file_write_bytes(staged_path, content):
+        file_delete(staged_path)
         return false
     scv_compile_snapshot_publish_staged_chunk_v1(staged_path, final_path, digest)
 
@@ -376,10 +386,16 @@ fn scv_compile_snapshot_materialize_source_unscoped_v1(
     if content == nil:
         return ScvCompileMaterializedSourceV1("snapshot-read-failed:{rel}", "", false)
     val bytes: [u8] = content!
+    # Same refusal class as the former text read. The bulk check answers
+    # valid input; only a rejected array takes the strict decoder, which is
+    # the authority (it also covers storage the bulk check cannot read).
+    if not utf8_bytes_valid(bytes):
+        if val Err(_) = io_legacy_utf8(bytes):
+            return ScvCompileMaterializedSourceV1("snapshot-read-failed:{rel}", "", false)
     val digest = scv_content_id_for_u8(bytes)
     if digest != "sha256_{entry.content_digest}" or bytes.len() != entry.byte_count:
         return ScvCompileMaterializedSourceV1("snapshot-index-drift:{rel}", "", false)
-    if not scv_compile_snapshot_write_chunk_v1(cache_root, staging, digest, bytes_to_text(bytes)):
+    if not scv_compile_snapshot_write_chunk_v1(cache_root, staging, digest, bytes):
         return ScvCompileMaterializedSourceV1("snapshot-chunk-publish-failed:{rel}", "", false)
     val destination = "{staging}/{rel}"
     # Both staging and rel are owned canonical paths. The runtime's recursive
