@@ -5292,8 +5292,11 @@ int8_t rt_is_none(int64_t value) {
      * Options use enum id 1 with ordinal Some=0 / None=1, so raw zero remains
      * a valid present payload and other enum types are never classified nil. */
     if (value == rt_core_nil()) return 1;
-    if (rt_enum_id(value) != RT_OPTION_ENUM_ID) return 0;
-    int64_t discriminant = rt_enum_discriminant(value);
+    /* One registry lookup, not two (rt_enum_id + rt_enum_discriminant each
+     * resolved the enum again): `?` on an Option calls this per evaluation. */
+    RtCoreEnum* e = rt_core_as_enum(value);
+    if (!e || (int64_t)e->enum_id != RT_OPTION_ENUM_ID) return 0;
+    int64_t discriminant = (int64_t)e->discriminant;
     return discriminant == 1 || discriminant == RT_DISC_NONE;
 }
 int8_t rt_is_some(int64_t value) {
@@ -9625,6 +9628,19 @@ int8_t rt_enum_check_variant(int64_t value, int64_t expected_enum_id, int64_t ex
     RtCoreEnum* e = rt_core_as_enum(value);
     if (!e || (int64_t)e->discriminant != expected_discriminant) return 0;
     /* ID zero is the legacy untyped enum lane (including Result). */
+    return expected_enum_id == 0 || e->enum_id == 0 || (int64_t)e->enum_id == expected_enum_id;
+}
+
+/* `?` absence test in ONE enum lookup: exactly
+ * rt_is_none(value) || rt_enum_check_variant(value, expected_enum_id, err_discriminant).
+ * Twin of rt_try_is_absent in the Rust runtime (value/objects.rs). */
+int8_t rt_try_is_absent(int64_t value, int64_t expected_enum_id, int64_t err_discriminant) {
+    if (value == rt_core_nil()) return 1;
+    RtCoreEnum* e = rt_core_as_enum(value);
+    if (!e) return 0;
+    int64_t discriminant = (int64_t)e->discriminant;
+    if ((int64_t)e->enum_id == RT_OPTION_ENUM_ID && (discriminant == 1 || discriminant == RT_DISC_NONE)) return 1;
+    if (discriminant != err_discriminant) return 0;
     return expected_enum_id == 0 || e->enum_id == 0 || (int64_t)e->enum_id == expected_enum_id;
 }
 

@@ -1313,6 +1313,7 @@ the old fabricating behaviour.",
                 "rt_enum_new"
                     | "rt_enum_check_discriminant"
                     | "rt_enum_check_variant"
+                    | "rt_try_is_absent"
                     | "rt_enum_id"
                     | "rt_enum_discriminant"
                     | "rt_enum_payload"

@@ -816,6 +816,7 @@ int64_t  rt_closure_get_capture(int64_t closure, int64_t index);
 int64_t  rt_closure_func_ptr(int64_t closure);
 int8_t   rt_enum_check_discriminant(int64_t value, int64_t expected);
 int8_t   rt_enum_check_variant(int64_t value, int64_t expected_enum_id, int64_t expected_discriminant);
+int8_t   rt_try_is_absent(int64_t value, int64_t expected_enum_id, int64_t err_discriminant);
 int64_t  rt_hash_text(int64_t value);
 int64_t  rt_index_get(int64_t collection, int64_t idx);
 int8_t   rt_index_set(int64_t collection, int64_t idx, int64_t value);
