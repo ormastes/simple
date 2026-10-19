@@ -30,7 +30,7 @@ use app.bug.workaround_store.{refresh_workarounds}
 use std.nogc_sync_mut.io.stderr_ops.{stderr_write}
 
 use std.io_runtime.{get_args}
-use std.io_runtime.{file_exists, file_delete}
+use std.io_runtime.{file_exists, file_delete, file_read}
 use std.io_runtime.{file_write}
 use std.io_runtime.{getpid}
 use std.io_runtime.{time_now_monotonic_ms}
@@ -820,20 +820,31 @@ fn run_hir_shards(args: [text], count: i64, simple_bin: text, timeout_ms: i64) -
         return 1
     run_ledger_shards("hir-shard", "--hir-shard", "SIMPLE_HIR_SHARD_QUEUE",
         "SIMPLE_HIR_SHARD_OWNER", base, queue_dir, args, count, count,
-        simple_bin, timeout_ms)
+        simple_bin, timeout_ms).code
 
 # Shared worker-pool driver for the HIR and MIR shard ledgers
 # (driver_hir_recovery.spl). Spawns `count` owners at most `parallel` at a
 # time (a free slot is refilled at once), reaps and seals each, replaces a
 # crashed owner that made progress (unless fail-fast), closes the inventory,
-# and returns the aggregate exit. timeout_ms (0 = none) runs from each
+# and returns the aggregate exit with the evidence behind it (LedgerShardRunV1).
+# timeout_ms (0 = none) runs from each
 # worker's own spawn; the old sequential waits let the k-th worker of a wave
 # run up to k x timeout_ms. Reap (and log) order is exit order, not index.
 const SHARD_POOL_POLL_MS: i64 = 200
 
+# One pool run's verdict. total_claims sums every owner's claim count; -1 when
+# any count was unreadable. all_stopped is false when a worker could not be
+# reaped. blocked_reason is the ledger's BLOCKED record ("" when not blocked).
+struct LedgerShardRunV1:
+    code: i64
+    failed_modules: i64
+    total_claims: i64
+    blocked_reason: text
+    all_stopped: bool
+
 fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
         base: [text], queue_dir: text, args: [text], count: i64, parallel: i64,
-        simple_bin: text, timeout_ms: i64) -> i64:
+        simple_bin: text, timeout_ms: i64) -> LedgerShardRunV1:
     val old_queue = env_get(queue_env) ?? ""
     val old_owner = env_get(owner_env) ?? ""
     env_set(queue_env, queue_dir)
@@ -848,6 +859,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     var failed_workers: i64 = 0
     var done: i64 = 0
     var all_stopped = true
+    var total_claims: i64 = 0
     while pending.len() > 0 and not hir_shard_recovery_blocked(queue_dir):
         var replacements: [i64] = []
         # Slot pool, not waves: a worker starts as soon as any of the
@@ -922,6 +934,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                     all_stopped = false
                     val _blocked = hir_shard_recovery_block(queue_dir, "worker could not be reaped")
             val progress = hir_shard_recovery_progress(queue_dir, owner)
+            total_claims = if progress < 0 or total_claims < 0: -1 else: total_claims + progress
             val finished = hir_shard_recovery_finished(queue_dir, owner)
             val state = if hir_shard_recovery_blocked(queue_dir): "BLOCKED" elif code < 0: "CRASH" elif finished: "FAILED" else: "BLOCKED"
             val sealed = if owner_stopped: hir_shard_recovery_seal(queue_dir, owner, state) else: -1
@@ -959,8 +972,12 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
         eprint "[{label}] inventory incomplete rows={unfinished} policy_fail_fast={fail_fast}"
     val failed_modules = hir_shard_recovery_failure_count(queue_dir)
     print "[{label}] completed_workers={done} failed_workers={failed_workers} failed_modules={failed_modules} unfinished={unfinished} ledger={queue_dir}"
-    if hir_shard_recovery_blocked(queue_dir): return 1
-    hir_shard_aggregate_exit(failed_workers, failed_modules)
+    val blocked = hir_shard_recovery_blocked(queue_dir)
+    val blocked_reason = if blocked: file_read("{queue_dir}/BLOCKED") else: ""
+    val code = if blocked: 1 else: hir_shard_aggregate_exit(failed_workers, failed_modules)
+    LedgerShardRunV1(code: code, failed_modules: failed_modules,
+        total_claims: total_claims, blocked_reason: blocked_reason,
+        all_stopped: all_stopped)
 
 # ===== MIR sharding =========================================================
 #
@@ -1002,17 +1019,20 @@ fn run_mir_shards(args: [text], parallel: i64, simple_bin: text, timeout_ms: i64
     val queue_dir = shard_ledger_queue_dir(args, "mir-queue", "mir-shard")
     if queue_dir == "":
         eprint "[mir-shard] cannot establish invocation ledger"
-        return (native_mir_shard_outcome_v1(false, 1, 0), "")
+        # No worker ran: nothing claimed, nothing left running.
+        return (native_mir_shard_outcome_v1(1, 0, 0, true), "")
     val count = native_build_mir_shard_count(parallel)
     print "[mir-shard] shards={count} parallel={parallel} ledger={queue_dir}"
     val old_export_dir = env_get("SIMPLE_MIR_SHARD_EXPORT_DIR") ?? ""
     env_set("SIMPLE_MIR_SHARD_EXPORT_DIR", run_mir_shard_export_summaries(base, queue_dir, simple_bin, timeout_ms))
-    val code = run_ledger_shards("mir-shard", "--mir-shard", "SIMPLE_MIR_SHARD_QUEUE",
+    val run = run_ledger_shards("mir-shard", "--mir-shard", "SIMPLE_MIR_SHARD_QUEUE",
         "SIMPLE_MIR_SHARD_OWNER", base, queue_dir, args, count, parallel,
         simple_bin, timeout_ms)
     env_set("SIMPLE_MIR_SHARD_EXPORT_DIR", old_export_dir)
-    val failed_modules = if code != 0: hir_shard_recovery_failure_count(queue_dir) else: 0
-    val outcome = native_mir_shard_outcome_v1(true, code, failed_modules)
+    val outcome = native_mir_shard_outcome_v1(run.code, run.failed_modules,
+        run.total_claims, run.all_stopped)
+    if outcome != "link":
+        eprint "[mir-shard] outcome={outcome} exit={run.code} failed_modules={run.failed_modules} claims={run.total_claims} all_stopped={run.all_stopped} blocked={run.blocked_reason}"
     if outcome == "link": (outcome, queue_dir) else: (outcome, "")
 
 # Opt-in SIMPLE_MIR_SHARD_EXPORT_SUMMARIES=1: one process runs through mono and
@@ -1320,7 +1340,7 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
         elif mir_outcome == "fallback":
             # No module verdict: the workers never got a usable HIR
             # inventory/cache. The final worker lowers MIR in process.
-            eprint "[mir-shard] WARNING: shard pass recorded no module verdict (HIR inventory/cache unavailable to MIR workers); falling back to in-process unsharded MIR"
+            eprint "[mir-shard] WARNING: shard pass recorded no module verdict (every MIR worker stopped before claiming a module: HIR inventory/cache unavailable); falling back to in-process unsharded MIR"
         else:
             env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
             env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
