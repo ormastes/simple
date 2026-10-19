@@ -3,6 +3,9 @@ use std.common.encoding.external_text.{Encoding, TextByteOrder, BomPolicy, Exter
 use std.common.text_bytes.{text_to_utf8_bytes, utf8_bytes_valid, text_bytes_concat_checked}
 use std.common.string_core.{str_len}
 use std.nogc_sync_mut.io.external_text_io.{io_legacy_utf8}
+use std.io.types.{FileMode}
+use std.nogc_sync_mut.io.file.{File}
+use std.nogc_sync_mut.io.text_session.{utf8_text_session_codec}
 use std.io_runtime.{file_write, file_write_bytes, file_read, file_read_result, file_read_bytes, dir_create_all}
 
 # The whole-array UTF-8 accept path and the single-owner decode/encode entry
@@ -52,6 +55,11 @@ describe "strict UTF-8 bulk validation":
         expect_rejected([0xF4u8, 0x90u8, 0x80u8, 0x80u8], plain, CodecErrorKind.InvalidUtf8, 1)
         expect_rejected([65u8, 0xE2u8, 0x82u8], plain, CodecErrorKind.TruncatedInput, 3)
         expect_rejected([0x80u8], plain, CodecErrorKind.InvalidUtf8, 0)
+        expect_rejected([0xF5u8, 0x80u8, 0x80u8, 0x80u8], plain, CodecErrorKind.InvalidUtf8, 0)
+        expect_rejected([65u8, 0xFDu8, 0x80u8], plain, CodecErrorKind.InvalidUtf8, 1)
+        expect_rejected([0xC1u8, 0xBFu8], plain, CodecErrorKind.InvalidUtf8, 0)
+        expect_rejected([0xF0u8, 0x80u8, 0x80u8, 0x80u8], plain, CodecErrorKind.InvalidUtf8, 1)
+        expect_rejected([0xF0u8, 0x8Fu8, 0xBFu8, 0xBFu8], plain, CodecErrorKind.InvalidUtf8, 1)
 
     it "keeps UTF-16 surrogate rejections on the per-unit path":
         expect_rejected([0x00u8, 0xDCu8], utf16(TextByteOrder.LittleEndian, BomPolicy.Preserve), CodecErrorKind.InvalidUtf16, 0)
@@ -112,3 +120,23 @@ describe "strict UTF-8 bulk validation":
         match io_legacy_utf8([65u8, 0xC3u8, 0x28u8]):
             case Ok(_): fail("invalid legacy bytes decoded")
             case Err(message): expect(message).to_equal("external text at byte 2: invalid UTF-8 continuation")
+
+    it "reads a multi-chunk UTF-8 file through a text session read and read_at":
+        val dir = "build/utf8_bulk_validation"
+        expect(dir_create_all(dir)).to_be(true)
+        # 13-byte unit: 2 + 3 + 4 + 3 + 1 bytes, so unit multiples are scalar boundaries.
+        val unit = "é€😀abc\n"
+        var content = ""
+        for i in 0..3200:
+            content = content + unit
+        expect(str_len(content)).to_equal(41600)
+        val path = dir + "/session.txt"
+        expect(file_write(path, content)).to_be(true)
+        val codec = utf8_text_session_codec(1048576, 1048576).unwrap()
+        var session = File.open_text(path, FileMode.ReadOnly, codec).unwrap()
+        expect(session.read().unwrap()).to_equal(content)
+        var region = ""
+        for i in 0..2000:
+            region = region + unit
+        expect(session.read_at(1300, 26000).unwrap()).to_equal(region)
+        expect(session.close().is_ok()).to_be(true)
