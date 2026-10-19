@@ -275,6 +275,8 @@ my $session_root_confirmed = 0;
 my ($session_admission, $parent_admission_sha) = ('', '');
 my %unexpected_sid;
 my $sample_started_at;
+my (%observation_current, %observation_report);
+my ($observation_phase, $observation_phase_started, $observation_cpu_started);
 # The cadence is a scheduling target, not a deadline for a host-wide process
 # observation. Keep slow but valid samples bounded separately from that target.
 # Up to 60s for bootstrap owners: a CPU-bound Linux Stage 2 producer completed
@@ -994,9 +996,62 @@ sub record_sample_duration {
     }
 }
 
+sub observation_phase {
+    my ($next, $completed) = @_;
+    return unless defined $observation_phase;
+    my $now = monotonic_time();
+    $observation_current{"${observation_phase}_ms"} += ($now - $observation_phase_started) * 1000;
+    $observation_current{phases_completed} .= "$observation_phase," if $completed // 1;
+    $observation_phase_started = $now;
+    $observation_phase = $next;
+}
+
+sub observation_receipt {
+    return "observation_diagnostics=unavailable\n" unless %observation_report;
+    return "observation_diagnostics=linux-proc-v1\n" . join('', map {
+        "observation_$_=$observation_report{$_}\n"
+    } sort keys %observation_report);
+}
+
+sub observation_cpu_time {
+    my ($user, $system) = times;
+    return undef unless defined($user) && defined($system) && $user >= 0 && $system >= 0;
+    return $user + $system;
+}
+
 sub snapshot {
     my ($metadata_only) = @_;
     $sample_started_at = monotonic_time();
+    return snapshot_body($metadata_only) unless $observer_backend eq 'linux-proc';
+    %observation_current = (proc_ms => 0, membership_ms => 0, helper_ms => 0,
+        sessions_ms => 0, budget_check_ms => 0, phases_completed => '',
+        process_count => 0, process_count_complete => 0, selected_count => 'unavailable',
+        retained_group_count => scalar(keys %groups));
+    $observation_phase = 'proc';
+    $observation_phase_started = $sample_started_at;
+    $observation_cpu_started = observation_cpu_time();
+    my $all = eval { snapshot_body($metadata_only) };
+    my $failure = $@;
+    my $last_phase = $observation_phase;
+    observation_phase('complete', $all ? 1 : 0);
+    my $cpu = observation_cpu_time();
+    $observation_current{cpu_ms} = defined($cpu) && defined($observation_cpu_started) &&
+        $cpu >= $observation_cpu_started ? ($cpu - $observation_cpu_started) * 1000 : 'unavailable';
+    $observation_current{elapsed_ms} = ($observation_phase_started - $sample_started_at) * 1000;
+    $observation_current{complete} = $all ? 1 : 0;
+    $observation_current{last_phase} = $last_phase;
+    # Freeze the first failure before cleanup invokes further snapshots.
+    if ((!%observation_report || $observation_report{complete}) &&
+        (!$all || $observation_current{elapsed_ms} > ($observation_report{elapsed_ms} // -1))) {
+        %observation_report = %observation_current;
+    }
+    undef $observation_phase;
+    die $failure unless $all;
+    return $all;
+}
+
+sub snapshot_body {
+    my ($metadata_only) = @_;
     return reaper_snapshot() if $freebsd;
     if ($^O eq 'darwin') {
         my $all = eval { native_snapshot($metadata_only) };
@@ -1027,8 +1082,10 @@ sub snapshot {
             my $record = parse_proc_stat_record($pid, $line, $proc_page_kib);
             next unless defined($record);  # fully dead task after stat was opened
             $all{$pid} = $record;
+            ++$observation_current{process_count};
         }
         closedir($proc);
+        $observation_current{process_count_complete} = 1;
         %all or die "empty /proc listing";
         return finish_snapshot(\%all);
     }
@@ -1059,16 +1116,20 @@ sub snapshot {
 sub finish_snapshot {
     my ($all) = @_;
     ++$samples;
+    observation_phase('membership');
     if ($leader && defined($session_helper) && !$helper_failed &&
         ($session_root_confirmed || (exists($all->{$leader}) && $all->{$leader}{group} == $leader))) {
         my @live = members($all);
+        $observation_current{selected_count} = scalar(@live) if defined $observation_phase;
         my $remaining = $observation_budget_ms / 1000 - (monotonic_time() - $sample_started_at);
         # /proc already carries each PID's session (stat field 6): spawning the
         # getsid helper per sample is what cost ~1s per sample under TCG.
         # The helper's integrity is still verified every sample: swapping the
         # session-exec binary mid-run must fail closed on either backend.
         my $sids = $observer_backend eq 'linux-proc' ?
-            do { verify_session_helper();
+            do { observation_phase('helper');
+                 verify_session_helper();
+                 observation_phase('sessions');
                  +{ map { ++$session_checks; ($_ => $all->{$_}{session}) } @live } } :
             observe_sessions($remaining, @live);
         $session_root_confirmed = 1 if ($sids->{$leader} || 0) == $session_id;
@@ -1076,6 +1137,7 @@ sub finish_snapshot {
             $unexpected_sid{$id} = $sids->{$id} if $sids->{$id} && $sids->{$id} != $session_id;
         }
     }
+    observation_phase('budget_check');
     my $duration_ms = (monotonic_time() - $sample_started_at) * 1000;
     record_sample_duration($duration_ms, "process observation exceeded observation budget");
     return $all;
@@ -1229,6 +1291,7 @@ sub receipt {
         "sample_duration_max_ms=$sample_duration_max_ms\nsample_overruns=$sample_overruns\n" .
         "sample_budget_exceeded=$sample_budget_exceeded\nmeasurement_budget_complete=" .
         ($sample_budget_exceeded ? 0 : 1) . "\n" .
+        observation_receipt() .
         "observer_backend=$observer_backend\nobserver_path=" . ($observer_path // '') . "\n" .
         "observer_sha256=" . ($observer_sha // '') . "\n" .
         "observer_source_sha256=" . ($observer_source_sha // '') . "\n" .
