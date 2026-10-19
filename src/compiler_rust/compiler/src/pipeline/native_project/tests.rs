@@ -8464,13 +8464,12 @@ fn test_compile_failure_preserves_completed_objects_for_retry() {
                 .count();
             assert_eq!(completed, 1, "successful object was discarded with failed batch");
 
-            // The object cache key folds the cross-module layout fingerprint
-            // (mod.rs: "a CORRECTNESS input to the cache key", not a dependency
-            // model). A retry that FIXES failing.spl adds `failing_probe` to the
-            // world, so good.o legitimately misses -- reuse is not promised
-            // there. What the policy does promise: the preserved object is
-            // reused when the world it was compiled against is reproduced
-            // (failing.spl gone), and a no-change rebuild reuses every object.
+            // The object cache key folds each module's cross-module interface
+            // SLICE (mod.rs `InterfaceSliceIndex`): good.o depends only on the
+            // rows its own source names, so whether failing.spl is fixed or
+            // removed cannot touch it. What the policy promises: the preserved
+            // object is reused when its own inputs are reproduced, and a
+            // no-change rebuild reuses every object.
             fs::remove_file(&failing).unwrap();
             let result = NativeProjectBuilder::new(temp.path().to_path_buf(), archive.clone())
                 .config(config())
@@ -9249,12 +9248,14 @@ fn test_global_build_fingerprint_manifest_roundtrip_and_reason() {
         Some("compiler producer changed")
     );
 
+    // `layout` is recorded for diagnostics but is neither a full-rebuild reason
+    // nor part of the object key: interface changes are keyed per module
+    // (`InterfaceSliceIndex`), so a layout-only difference must not claim a
+    // full rebuild and must not perturb `combined()`.
     let mut layout_changed = base;
     layout_changed.layout = 0x9999_9999_9999_9999;
-    assert_eq!(
-        layout_changed.changed_reason(&base),
-        Some("cross-module type layout / signatures changed")
-    );
+    assert_eq!(layout_changed.changed_reason(&base), None);
+    assert_eq!(layout_changed.combined(), base.combined());
 
     let mut ls_changed = base;
     ls_changed.linker_script = 0xABCD_ABCD_ABCD_ABCD;
@@ -9263,9 +9264,10 @@ fn test_global_build_fingerprint_manifest_roundtrip_and_reason() {
 
 /// STALENESS REGRESSION GUARD (the critical test): with the safe-incremental
 /// path on, a leaf body change reuses untouched modules (incrementality works),
-/// but a CROSS-MODULE struct-layout change in module A invalidates the entire
-/// per-module cache so module B — whose object bytes depend on A's field
-/// offsets via `populate_global_struct_defs` — is never stale-reused.
+/// but a CROSS-MODULE struct-layout change in module A rebuilds module B —
+/// whose object bytes depend on A's field offsets via
+/// `populate_global_struct_defs` — so B is never stale-reused.
+/// (Granularity beyond two modules is pinned in `object_cache_slice_tests`.)
 ///
 /// Red/green: with the legacy content-only key (`incremental_hardening=false`)
 /// the struct-change build would leave module B cached (`cached >= 1`) and ship a
@@ -9344,14 +9346,15 @@ fn test_incremental_hardening_invalidates_on_cross_module_struct_change() {
     );
 
     // Build 3: CROSS-MODULE struct-layout change in A (insert a field before
-    // `tag`, shifting B's read offset). The global build fingerprint changes, so
-    // the entire per-module cache is invalidated and B is rebuilt -- never a
-    // stale reuse. This is the assertion the legacy content-only key fails.
+    // `tag`, shifting B's read offset). B's interface slice covers
+    // `SharedLayout` and the field name `tag`, so B is rebuilt -- never a stale
+    // reuse. With only A and B in the closure that is a full miss. This is the
+    // assertion the legacy content-only key fails.
     write_a(true);
     let r3 = build();
     assert_eq!(
         r3.cached, 0,
-        "a cross-module struct-layout change must invalidate the whole cache (no stale reuse); got cached={}",
+        "a cross-module struct-layout change must rebuild the dependent (no stale reuse); got cached={}",
         r3.cached
     );
 }
