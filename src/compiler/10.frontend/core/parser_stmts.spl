@@ -87,6 +87,7 @@ use compiler.core.ast.{stmt_tag, stmt_expr}
 use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID, flat_span_new}
 use compiler.core.types.{TYPE_ARRAY_ANY, TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL}
 use compiler.core.types.{is_array_generic_tag}
+use compiler.core.types.{TYPE_RESULT, is_result_tag}
 use compiler.core.types.{TYPE_NIL}
 use compiler.core.types.{TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32}
 use compiler.core.types.{TYPE_NAMED_BASE}
@@ -95,6 +96,7 @@ use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_wa
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.core.parser.{parser_parse_type, parser_parse_type_with_union}
 use compiler.core.parser.{par_fixed_array_elem, par_fixed_array_size}
+use compiler.core.parser.{parser_legacy_let_decl_ahead, parser_consume_legacy_let_prefix}
 use compiler.core.parser.{rt_is_debug_mode_enabled}
 use compiler.core.parser.{parser_diagnostics_suppressed_get}
 use compiler.frontend.trace_policy.{frontend_trace_suppressed, frontend_compiler_trace_enabled}
@@ -738,6 +740,32 @@ fn try_parse_collection_algorithm_stmt() -> i64:
     stmt_i64_set(decl, "EXPR", call)
     decl
 
+# `@name` / `@name(...)` attribute directly ahead of a nested declaration
+# inside a function body (e.g. `@unsafe(reason: ..., capabilities: [...])`
+# before an `extern fn` in ipc_handlers.spl). Metadata-only: consumed and
+# dropped — a nested declaration is not a module item, so the
+# UNSAFE_ANNOTATIONS consumer never sees it (the same documented gap as
+# block-level @unsafe in enum_module_body.spl). The declaration after the
+# attribute is parsed by the ordinary statement dispatch.
+fn parse_attributed_nested_decl_stmt() -> i64:
+    parser_advance()
+    if par_kind_get() == TOK_IDENT:
+        parser_advance()
+    if par_kind_get() == TOK_LPAREN:
+        parser_advance()
+        var depth = 1
+        while depth > 0:
+            val ak = par_kind_get()
+            if ak == TOK_EOF:
+                break
+            if ak == TOK_LPAREN:
+                depth = depth + 1
+            elif ak == TOK_RPAREN:
+                depth = depth - 1
+            parser_advance()
+    parser_skip_newlines_and_semicolons()
+    parse_statement()
+
 fn parse_statement() -> i64:
     var kind = par_kind_get()
     val contract_stmt = try_parse_contract_stmt()
@@ -748,6 +776,24 @@ fn parse_statement() -> i64:
         val attributed = try_parse_collection_algorithm_stmt()
         if attributed >= 0:
             return attributed
+        # Attribute ahead of a nested declaration inside a body — seed
+        # parity: the seed's statement router accepts attributed items
+        # anywhere (e.g. `@unsafe(reason: ..., capabilities: [...]) extern
+        # fn mmio_read8(...)` inside me _dispatch_ipc,
+        # src/os/services/netstack/_NetstackService/ipc_handlers.spl).
+        # Consumed as a metadata-only skip: a nested declaration is not a
+        # module item, so there is no UNSAFE_ANNOTATIONS consumer for it
+        # (the same documented gap as block-level @unsafe in
+        # enum_module_body.spl). Only entered when an attribute name
+        # follows `@`; anything else keeps the historical expression path.
+        val at_snap = lex_snapshot_save()
+        val (at_nums, at_txt) = parser_tok_save()
+        parser_advance()
+        val has_attr_name = par_kind_get() == TOK_IDENT
+        lex_snapshot_rollback(at_snap)
+        parser_tok_restore(at_nums, at_txt)
+        if has_attr_name:
+            return parse_attributed_nested_decl_stmt()
     if kind == 21:
         return parse_val_decl_stmt()
 
@@ -756,6 +802,12 @@ fn parse_statement() -> i64:
         return parse_lazy_val_decl_stmt()
 
     if kind == 22:
+        return parse_var_decl_stmt()
+
+    # Legacy `let [mut] x ...` statement form (seed parity: parse_let). `let`
+    # lexes as a plain identifier, so the declaration reading is gated on the
+    # contextual parser_legacy_let_decl_ahead() probe.
+    if kind == TOK_IDENT and par_text_get() == "let" and parser_legacy_let_decl_ahead():
         return parse_var_decl_stmt()
 
     # use statement inside function body: consume tokens, return pass (no-op)
@@ -1371,7 +1423,18 @@ fn parse_lazy_val_decl_stmt() -> i64:
     stmt_lazy_val_decl(name, type_tag, init, 0)
 
 fn parse_var_decl_stmt() -> i64:
+    # Legacy `let [mut]` prefix: same mutable binding as `var` (seed parity,
+    # stmt_parsing/var_decl.rs parse_let). `let` is not a keyword token here,
+    # so it is recognised contextually and consumed before the ordinary
+    # `var` body runs; the parse_statement dispatch arm gates on
+    # parser_legacy_let_decl_ahead() so identifier usages (`let = 5`,
+    # `let.push(x)`) still take the expression path.
+    var legacy_let = false
+    if par_kind_get() == TOK_IDENT and par_text_get() == "let" and parser_legacy_let_decl_ahead():
+        legacy_let = true
     parser_advance()
+    if legacy_let:
+        parser_consume_legacy_let_prefix()
 
     # Tuple destructuring: var (a, b, c) = expr
     if par_kind_get() == 140:
@@ -1474,6 +1537,17 @@ fn var_no_init_default_expr(type_tag: i64, type_looks_named: bool, fixed_array_e
     if type_tag >= TYPE_NAMED_BASE:
         return expr_nil_lit(0)
     if type_tag == TYPE_VOID and type_looks_named:
+        return expr_nil_lit(0)
+    # Result<T, E> (bare TYPE_RESULT or a registered Result<T,E> instance
+    # tag): seed parity -- parse_let_impl accepts an initializer-less
+    # binding of ANY annotated type and lowers it to a zero-initialized
+    # local slot (HirStmt::Let { value: None }); the declare-then-assign
+    # idiom (`var r: Result<T, E>` then branch assignments, e.g.
+    # src/os/kernel/fd_io.spl:559 and src/os/tools/pkg/pkg_repository.spl:158)
+    # never reads the slot before assignment. A nil literal is the
+    # self-hosted equivalent of the zero slot and is exactly what an
+    # explicit `= nil` initializer produces (verified e2e against the seed).
+    if type_tag == TYPE_RESULT or is_result_tag(type_tag):
         return expr_nil_lit(0)
     val fixed_arr = fixed_array_no_init_default_expr(type_tag, fixed_array_elem, fixed_array_size)
     if fixed_arr != 0:

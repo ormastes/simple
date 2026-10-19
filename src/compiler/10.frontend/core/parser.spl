@@ -30,6 +30,7 @@ use compiler.core.tokens.{TOK_AT, TOK_MINUS}
 use compiler.frontend.core.lexer.{lex_init, lex_init_with_path, lex_next, lex_next_snapshot, lex_mark_current_token_as_generic_close}
 use compiler.frontend.core.lexer.{lex_token_kind, lex_token_text, lex_token_line, lex_token_col}
 use compiler.frontend.core.lexer.{lex_cur_suffix_get}
+use compiler.frontend.core.lexer.{lex_snapshot_save, lex_snapshot_rollback}
 use compiler.frontend.core.lexer.{lex_token_start_get, lex_token_end_get}
 use compiler.core.ast.{module_set_path, module_get_path}
 use compiler.core.ast.{ast_reset}
@@ -706,6 +707,40 @@ fn parser_array_tag_for_elem(elem_type: i64) -> i64:
         return TYPE_ARRAY_I64
     arr_generic_tag
 
+# Legacy `let [mut]` declaration prefix, seed parity:
+# src/compiler_rust/parser/src/stmt_parsing/var_decl.rs parse_let /
+# parse_mut_let -- `let` is the legacy mutable-binding spelling, the `mut`
+# after it is redundant and absorbed, and the binding lowers exactly like
+# `var`. `let` is NOT a keyword token in this lexer (unlike the seed), so
+# the prefix is recognised contextually: an identifier spelled `let` whose
+# next token can open a binding. `parser_legacy_let_decl_ahead` excludes the
+# identifier usages (`let = 5`, `let.push(x)`), matching how the seed's
+# statement router guards `mut`/`shared`/`ghost` behind a peek for `let`.
+fn parser_peek_is_binding_name(steps: i64) -> bool:
+    val snap = lex_snapshot_save()
+    val (nums, txt) = parser_tok_save()
+    var i = 0
+    while i < steps:
+        parser_advance()
+        i = i + 1
+    val k = par_kind_get()
+    lex_snapshot_rollback(snap)
+    parser_tok_restore(nums, txt)
+    k == TOK_IDENT or k == 169
+
+fn parser_legacy_let_decl_ahead() -> bool:
+    par_kind_get() == TOK_IDENT and par_text_get() == "let" and
+        parser_peek_is_binding_name(1)
+
+# Consume a confirmed legacy `let` prefix: the stream is positioned at the
+# token AFTER `let`; absorb a redundant `mut` only when a real binding name
+# follows it, so `let mut = 5` still binds a variable named `mut` (the seed's
+# parse_pattern does the same).
+fn parser_consume_legacy_let_prefix():
+    if par_kind_get() == TOK_IDENT and par_text_get() == "mut" and
+            parser_peek_is_binding_name(1):
+        parser_advance()
+
 fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
     # Clear the fixed-array side-channel before parsing this annotation so a
     # var-decl caller never reads a stale `[T; N]` from an earlier annotation
@@ -1373,6 +1408,7 @@ fn parser_tok_restore(nums: [i64], saved_text: text):
 # Parser state (needed by split modules and external consumers)
 export par_errors, par_warnings, par_struct_names
 export par_fixed_array_elem, par_fixed_array_size
+export parser_legacy_let_decl_ahead, parser_consume_legacy_let_prefix
 export parser_init, parser_init_with_path, parser_advance, parser_check, parser_match_tok, parser_expect
 export parser_note_use_import
 export parser_has_errors, parser_get_errors, parser_error_count, parser_set_had_error
