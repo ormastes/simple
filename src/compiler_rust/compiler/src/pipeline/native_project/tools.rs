@@ -2402,6 +2402,10 @@ pub(super) fn bootstrap_mutex_runtime_requested_symbols() -> Vec<String> {
         "rt_mem_snapshot_open",
         "rt_mem_snapshot_record",
         "rt_mem_snapshot_close",
+        // The MIR progress line (driver_log_helpers.spl, db00168b079) reads
+        // VmRSS through this core-C export; without it the Stage 2 link failed
+        // with `undefined symbol: rt_process_rss_kib` (aarch64, 2026-10-20).
+        "rt_process_rss_kib",
         "rt_file_create_excl",
         "rt_file_sync",
         "rt_simple_abi_version",
@@ -2492,6 +2496,13 @@ mod bootstrap_capsule_ownership_tests {
         let (supplement, external) = bootstrap_capsule_symbol_ownership(&requested, &defined).unwrap();
         assert_eq!(supplement, ["spl_mutex_create", "rt_sosix_directory_pair_check_v1"]);
         for name in owned { assert!(external.iter().any(|export| export == name)); }
+    }
+
+    #[test]
+    fn bootstrap_capsule_requests_the_mir_progress_rss_export() {
+        assert!(super::bootstrap_mutex_runtime_requested_symbols()
+            .iter()
+            .any(|name| name == "rt_process_rss_kib"));
     }
 
     #[test]
