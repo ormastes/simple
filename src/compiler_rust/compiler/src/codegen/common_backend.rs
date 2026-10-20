@@ -460,34 +460,12 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                         // falls back to rt_method_not_found on a vtable miss.
                         names.insert("rt_method_not_found".to_string());
                         let method_suffix = func_name.rsplit('.').next().unwrap_or(func_name.as_str());
-                        const MATH_METHODS: &[&str] = &[
-                            "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "exp", "ln", "log2",
-                            "log10", "cbrt", "pow", "powf", "max", "min", "atan2", "hypot",
-                        ];
-                        if MATH_METHODS.contains(&method_suffix) {
-                            for n in [
-                                "rt_math_sin",
-                                "rt_math_cos",
-                                "rt_math_tan",
-                                "rt_math_asin",
-                                "rt_math_acos",
-                                "rt_math_atan",
-                                "rt_math_sinh",
-                                "rt_math_cosh",
-                                "rt_math_tanh",
-                                "rt_math_exp",
-                                "rt_math_log",
-                                "rt_math_log2",
-                                "rt_math_log10",
-                                "rt_math_cbrt",
-                                "rt_math_pow",
-                                "rt_math_max",
-                                "rt_math_min",
-                                "rt_math_atan2",
-                                "rt_math_hypot",
-                            ] {
-                                names.insert(n.to_string());
-                            }
+                        // Same table the method lowering consults, so a method it
+                        // routes to `rt_math_*` is always predeclared here.
+                        if let Some(n) = super::scalar_float_methods::rt_math_unary(method_suffix)
+                            .or_else(|| super::scalar_float_methods::rt_math_binary(method_suffix))
+                        {
+                            names.insert(n.to_string());
                         }
                     }
                     MirInst::FStringFormat { .. } => {
