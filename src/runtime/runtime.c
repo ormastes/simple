@@ -44,7 +44,7 @@ int64_t rt_simple_abi_version_deferred(void) {
     return SIMPLE_ABI_VERSION_DEFERRED ? 1 : 0;
 }
 #include "runtime_startup_args.h"
-/* SPL_RUNTIME_NATIVE_TWIN marks the 37 hosted definitions in this file and in
+/* SPL_RUNTIME_NATIVE_TWIN marks the 40 hosted definitions in this file and in
  * platform/unix_common.h (included only from here) that runtime_native.c -- or
  * runtime_process.c, for rt_process_wait -- also defines strongly. The ordinary
  * hosted composition compiles both, and the ELF lanes accept that through

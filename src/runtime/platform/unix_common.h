@@ -809,7 +809,7 @@ int64_t rt_unix_socket_connect(const char* path) {
 }
 
 /* Write data to an open fd. Returns bytes written or -1. */
-int64_t rt_fd_write(int64_t fd, const char* data, int64_t len) {
+SPL_RUNTIME_NATIVE_TWIN int64_t rt_fd_write(int64_t fd, const char* data, int64_t len) {
     if (fd < 0 || !data || len <= 0) return -1;
     ssize_t n = write((int)fd, data, (size_t)len);
     return (int64_t)n;
@@ -818,7 +818,7 @@ int64_t rt_fd_write(int64_t fd, const char* data, int64_t len) {
 /* Read up to max bytes from fd, stopping when stop_byte is seen or max reached.
  * Returns a null-terminated heap string (caller must treat as borrowed — runtime GC owns it).
  * Returns "" on error or EOF with no data. */
-const char* rt_fd_read_until(int64_t fd, uint8_t stop_byte, int64_t max) {
+SPL_RUNTIME_NATIVE_TWIN const char* rt_fd_read_until(int64_t fd, uint8_t stop_byte, int64_t max) {
     if (fd < 0 || max <= 0) return "";
 
     char* buf = (char*)malloc((size_t)max + 1);
@@ -836,7 +836,7 @@ const char* rt_fd_read_until(int64_t fd, uint8_t stop_byte, int64_t max) {
 }
 
 /* Close an fd. Returns true on success. */
-bool rt_fd_close(int64_t fd) {
+SPL_RUNTIME_NATIVE_TWIN bool rt_fd_close(int64_t fd) {
     if (fd < 0) return false;
     return close((int)fd) == 0;
 }
