@@ -3,7 +3,8 @@
 # Regression: parse_extern_fn_stmt_inline built the extern decl but never
 # called module_add_decl, so every call to an extern declared only inside a
 # function body failed HIR lowering with "unresolved name".
-# Bug: doc/08_tracking/bug/p4p2_inline_extern_fn_never_registered_2026-10-20.md
+# Bugs: doc/08_tracking/bug/pure_simple_nested_extern_registration_2026_10_12.md
+#       (lane duplicate: p4p2_inline_extern_fn_never_registered_2026-10-20)
 #
 # @cover src/compiler/10.frontend/core/parser_stmts.spl
 
@@ -59,3 +60,29 @@ describe "function-body extern fn registration":
             "    unsafe_addr_of(data)\n"
         val module = parse_and_build_module(src, "inline_extern_toplevel_probe.spl")
         expect(order_count(module, "unsafe_addr_of")).to_equal(1)
+
+    it "never replaces a same-named module fn with a body-local extern":
+        val src = "fn rt_probe(x: i64) -> i64:\n" +
+            "    x + 1\n" +
+            "\n" +
+            "fn caller(x: i64) -> i64:\n" +
+            "    extern fn rt_probe(x: i64) -> i64\n" +
+            "    rt_probe(x)\n"
+        val module = parse_and_build_module(src, "inline_extern_fn_twin_probe.spl")
+        expect(module.functions.contains("rt_probe")).to_equal(true)
+        val probe: ParserFunction = module.functions["rt_probe"]
+        expect(probe.is_extern).to_equal(false)
+        expect(order_count(module, "rt_probe")).to_equal(1)
+
+    it "keeps the first signature when bodies declare conflicting externs":
+        val src = "fn first(a: i64) -> i64:\n" +
+            "    extern fn rt_conflict(a: i64) -> i64\n" +
+            "    rt_conflict(a)\n" +
+            "\n" +
+            "fn second(a: i64) -> i64:\n" +
+            "    extern fn rt_conflict(a: i64, b: i64) -> i64\n" +
+            "    rt_conflict(a, a)\n"
+        val module = parse_and_build_module(src, "inline_extern_conflict_probe.spl")
+        expect(order_count(module, "rt_conflict")).to_equal(1)
+        val ext: ParserFunction = module.functions["rt_conflict"]
+        expect(ext.params.len()).to_equal(1)

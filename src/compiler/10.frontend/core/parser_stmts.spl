@@ -430,14 +430,16 @@ fn parse_block() -> [i64]:
 fn parse_use_stmt_inline() -> i64:
     stmt_use_import(parse_use_decl(), 0)
 
-# True when the module being parsed already carries an extern decl (tag 2)
-# named `name` — a top-level one, or one hoisted from an earlier body.
-fn _module_has_extern_decl(name: text) -> bool:
+# True when the module being parsed already declares a function named `name`:
+# a `fn` (tag 1) or an extern (tag 2), top-level or hoisted from an earlier
+# body. A body-local extern must never replace a real module function (e.g.
+# the @cfg(not(baremetal)) host twins in src/os/kernel/loader/segment_mapper.spl).
+fn _module_has_function_decl(name: text) -> bool:
     val count = module_decl_count_get()
     var i = 0
     while i < count:
         val d = module_decl_at(i)
-        if d >= 0 and decl_get_tag(d) == 2 and decl_get_name(d) == name:
+        if d >= 0 and (decl_get_tag(d) == 1 or decl_get_tag(d) == 2) and decl_get_name(d) == name:
             return true
         i = i + 1
     false
@@ -445,7 +447,11 @@ fn _module_has_extern_decl(name: text) -> bool:
 # extern fn declaration inside a function body: register the signature as a
 # module declaration (same as a top-level extern) and emit a no-op statement.
 # The same extern is commonly re-declared in several bodies of one module, so
-# only the first declaration of a name is added; later ones are no-ops.
+# only the first declaration of a name is added (first signature wins); later
+# ones, and any that name an existing module `fn`, are no-ops. This registers
+# at module scope, not the lexical scope of the enclosing body
+# (pure_simple_nested_extern_registration_2026_10_12 asks for lexical scope).
+# A top-level extern of the same name that FOLLOWS the body is not deduped.
 # Inlined here (like parse_use_stmt_inline) to avoid a circular dep with
 # the decl-parsing modules, which import parse_block from this file.
 fn parse_extern_fn_stmt_inline() -> i64:
@@ -475,7 +481,7 @@ fn parse_extern_fn_stmt_inline() -> i64:
         parser_advance()
         ef_ret = parser_parse_type()
     val ef_tparams: [text] = []
-    if not _module_has_extern_decl(ef_name):
+    if not _module_has_function_decl(ef_name):
         module_add_decl(decl_extern_fn(ef_name, ef_pnames, ef_ptypes, ef_ret, ef_tparams, 0))
     stmt_expr_stmt(expr_pass(0), 0)
 
