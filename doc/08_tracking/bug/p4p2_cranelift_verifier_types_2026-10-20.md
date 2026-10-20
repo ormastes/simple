@@ -39,6 +39,19 @@ parse the stdlib.
 
 `src/lib/nogc_sync_mut/compression/gzip/crc.spl` gets explicit parameter and
 return types (`@workaround bug=p4p2_cranelift_verifier_types_2026-10-20`).
-This clears cluster C for the current producer. Clusters A and B need no
-source-level workaround: there is no cross-module f64 call or `as char`
-spelling that avoids them.
+This clears cluster C for the current producer. Clusters A and B have no
+practical source-level workaround: no spelling of a cross-module f64 call or
+of `as char` avoids them.
+
+## Repro evidence (producer7-cl, `--threads 4`, entry `src/app/zz_clver/main.spl`, not committed)
+
+- Before: r1 (crc + unicode_scalar) gave `ERROR=2`. r2 (all 6 lib units plus
+  crc probes) failed 9 units, and each failure matched one cluster above.
+  r4/r5 narrowed special to `gamma_fn` (A2) and main to cross-module f64
+  calls (A1). A typed-param copy of `crc32_finalize` (`-> i64`) built.
+- After the crc workaround: r6 builds (`exit=0`), and the gzip.crc unit
+  compiles under Cranelift.
+- Separate, NOT a verifier issue: the crc repro binary SEGVs before its first
+  `print` under BOTH Cranelift (r7) and LLVM (l2), while a hello-world
+  Cranelift build runs. This is a runtime crash in the crc32 import path. It
+  is not investigated here.
