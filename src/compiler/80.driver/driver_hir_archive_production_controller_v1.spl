@@ -9,6 +9,8 @@ use compiler.driver.driver_hir_pipeline_lowering.*
 use compiler.driver.cache.driver_hir_archive_journal_v1.*
 use compiler.driver.cache.driver_hir_archive_weave_boundary_v1.*
 use compiler.driver.cache.hir_mono_final_repository_v1.*
+use compiler.driver.cache.driver_hir_archive_current_boundary_v1.{driver_hir_archive_current_boundary_revoke_driver_v1}
+use compiler.driver.cache.driver_hir_archive_semantic_prerequisite_v1.{driver_hir_archive_semantic_prerequisite_revoke_driver_v1}
 use compiler.hir.hir_lowering.types.{hirlowering_for_module}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_modules_reset}
@@ -240,7 +242,26 @@ pub fn driver_hir_archive_production_finish_v1(driver: CompilerDriver) -> bool:
         _hir_production_holds_v1[driver.identity_id] = DriverHirArchiveProductionHoldV1(generation: previous.generation, phase: -2)
     revoked
 
+# Driver teardown (no destructors): remove every per-compilation entry keyed by
+# this driver identity, including finish's phase -2 tombstone. Identity ids are
+# never reused, so without this each compiled driver leaks its holds and pins in
+# long-lived processes (daemon, LSP, MCP). A later compile() re-begins from scratch.
+pub fn driver_hir_archive_production_release_v1(driver: CompilerDriver) -> bool:
+    if transient_array_scope_state_v1() != 0: return false
+    val body = driver_hir_source_body_revoke_driver_v1(driver)
+    val final_pins = mono_archive_final_repository_revoke_driver_v1(driver)
+    val current = driver_hir_archive_current_boundary_revoke_driver_v1(driver)
+    val semantic = driver_hir_archive_semantic_prerequisite_revoke_driver_v1(driver)
+    if _hir_production_ready_v1 and _hir_production_holds_v1.has(driver.identity_id):
+        _hir_production_holds_v1.remove(driver.identity_id)
+    body and final_pins and current and semantic
+
+pub fn driver_hir_archive_production_hold_count_v1() -> i64:
+    if not _hir_production_ready_v1: return 0
+    _hir_production_holds_v1.len()
+
 export driver_hir_archive_production_begin_v1, driver_hir_archive_production_phase3_v1
 export driver_hir_archive_production_phase4_v1, driver_hir_archive_production_repository_in_owned_scope_v1
 export driver_hir_archive_production_finish_v1
 export driver_hir_archive_production_try_repository_in_owned_scope_v1
+export driver_hir_archive_production_release_v1, driver_hir_archive_production_hold_count_v1
