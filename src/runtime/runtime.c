@@ -62,6 +62,15 @@ int64_t rt_simple_abi_version_deferred(void) {
 #if defined(__linux__)
 #include <sys/syscall.h>
 #endif
+#if defined(__APPLE__) || defined(__FreeBSD__)
+#include <sys/resource.h>
+#include <sys/sysctl.h>
+#endif
+#if defined(__APPLE__)
+#include <libproc.h>
+#elif defined(__FreeBSD__)
+#include <sys/user.h>
+#endif
 #include <signal.h>
 #include <stdatomic.h>
 
@@ -2461,6 +2470,29 @@ static int64_t rt_process_status_kib(const char* key) {
     if (strcmp(key, "VmRSS:") == 0) return (int64_t)(counters.WorkingSetSize / 1024);
     if (strcmp(key, "VmHWM:") == 0) return (int64_t)(counters.PeakWorkingSetSize / 1024);
     return -1;
+#elif defined(__APPLE__) || defined(__FreeBSD__)
+    /* No /proc/self/status: resident from the kernel, peak from getrusage. */
+    if (strcmp(key, "VmHWM:") == 0) {
+        struct rusage ru;
+        if (getrusage(RUSAGE_SELF, &ru) != 0) return -1;
+#if defined(__APPLE__)
+        return (int64_t)ru.ru_maxrss / 1024; /* bytes on Darwin */
+#else
+        return (int64_t)ru.ru_maxrss;        /* KiB on FreeBSD */
+#endif
+    }
+    if (strcmp(key, "VmRSS:") != 0) return -1;
+#if defined(__APPLE__)
+    struct proc_taskinfo ti;
+    if (proc_pidinfo(getpid(), PROC_PIDTASKINFO, 0, &ti, (int)sizeof(ti)) != (int)sizeof(ti)) return -1;
+    return (int64_t)(ti.pti_resident_size / 1024);
+#else
+    struct kinfo_proc kp;
+    size_t len = sizeof(kp);
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, (int)getpid() };
+    if (sysctl(mib, 4, &kp, &len, NULL, 0) != 0 || len != sizeof(kp)) return -1;
+    return (int64_t)kp.ki_rssize * (int64_t)getpagesize() / 1024;
+#endif
 #else
     FILE* f = fopen("/proc/self/status", "r");
     if (!f) return -1;
