@@ -27,3 +27,11 @@ A positional variant payload list must parse `{K: V}` as a dict TYPE; only a
 `V(name: T)` / `V { ... }` form declares named fields. Prevention test: an
 enum with a `{text: i64}` positional payload registers one `Dict(Str, Int)` slot.
 Fixture: C:/dev/simple-bootstrap-storage/fix-p6enum (y_dict_field).
+
+## Specs (2026-10-20)
+- Reproducer (in-development): `test/01_unit/compiler/20.hir/bootstrap_regressions/positional_payload_brace_dict_spec.spl`.
+- Prevention (passing spellings): `test/01_unit/compiler/20.hir/bootstrap_regressions/positional_payload_spelling_spec.spl`.
+- Same class, found while probing neighbours with producer8 (`compile --format=smf`): a positional
+  tuple payload `T((i64, text))` fails to parse (`expected enum variant name, got )`) and a
+  function-typed payload `F(fn(i64) -> i64)` fails to parse (`expected enum variant name, got ->`).
+  `Dict<text, i64>`, `[i64]`, `i64?` and the named form build. Both gaps are in the reproducer spec.
