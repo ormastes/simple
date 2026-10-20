@@ -881,7 +881,8 @@ impl NativeProjectBuilder {
     fn read_defined_symbol_set(obj: &Path) -> Result<HashSet<String>, String> {
         Ok(Self::read_global_symbol_types(obj)?
             .into_iter()
-            .filter(|(kind, _)| kind != "U")
+            // `w`/`v` are weak UNDEFINED references, not definitions.
+            .filter(|(kind, _)| !matches!(kind.as_str(), "U" | "w" | "v"))
             .map(|(_, name)| name)
             .collect())
     }
@@ -3539,6 +3540,38 @@ mod linker_tests {
         assert!(undefined.contains("required_missing"));
         assert!(undefined.contains("weak_missing"));
         assert!(!undefined.contains("__module_init_fixture"));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[test]
+    fn defined_symbol_set_excludes_weak_undefined_references() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("weakref.c");
+        let object = dir.path().join("weakref.o");
+        std::fs::write(
+            &source,
+            "extern int weak_missing(void) __attribute__((weak));\n\
+             extern int weak_data_missing __attribute__((weak));\n\
+             int weak_defined(void) __attribute__((weak));\n\
+             int weak_defined(void) { return 1; }\n\
+             int strong_defined(void) { return weak_missing ? weak_missing() : weak_data_missing; }\n",
+        )
+        .unwrap();
+        assert!(std::process::Command::new("cc")
+            .arg("-c")
+            .arg(&source)
+            .arg("-o")
+            .arg(&object)
+            .status()
+            .unwrap()
+            .success());
+        let defined = NativeProjectBuilder::read_defined_symbol_set(&object).unwrap();
+        assert!(defined.contains("strong_defined"));
+        assert!(defined.contains("weak_defined"));
+        // A weak undefined reference (nm `w`/`v`) is not a definition: counting
+        // it made Stage4 request `__pthread_unwind_next` from the C capsule.
+        assert!(!defined.contains("weak_missing"));
+        assert!(!defined.contains("weak_data_missing"));
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]

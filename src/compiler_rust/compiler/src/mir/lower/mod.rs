@@ -80,12 +80,31 @@ pub fn lower_to_mir_with_global_trait_impls(
     trait_impls: &std::collections::HashMap<String, Vec<String>>,
     array_push_returns_header: bool,
 ) -> MirLowerResult<MirModule> {
+    // FAM freestanding runtimes do not define the `[i64]` word lane.
+    lower_to_mir_with_global_trait_impls_and_word_lane(
+        hir,
+        trait_impls,
+        array_push_returns_header,
+        !array_push_returns_header,
+    )
+}
+
+/// Same as [`lower_to_mir_with_global_trait_impls`], with an explicit switch for
+/// the `[i64]` `rt_typed_words_i64_*` lane. Pass `false` for freestanding
+/// targets whose C runtime does not define those symbols.
+pub fn lower_to_mir_with_global_trait_impls_and_word_lane(
+    hir: &HirModule,
+    trait_impls: &std::collections::HashMap<String, Vec<String>>,
+    array_push_returns_header: bool,
+    signed_word_lane: bool,
+) -> MirLowerResult<MirModule> {
     MirLowerer::new()
         .with_refined_types(&hir.refined_types)
         .with_type_registry(&hir.types)
         .with_trait_infos(&hir.trait_infos)
         .with_global_trait_impls(trait_impls)
         .with_array_push_returns_header(array_push_returns_header)
+        .with_signed_word_lane(signed_word_lane)
         .lower_module(hir)
 }
 

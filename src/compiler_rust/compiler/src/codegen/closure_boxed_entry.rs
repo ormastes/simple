@@ -137,6 +137,33 @@ impl<M: Module> CodegenBackend<M> {
             }
             self.emit_boxed_import_entry(&name, params, ret)?;
         }
+        // Module-level `val G: fn(..) = F`: `generate_module_init` stores a
+        // zero-capture closure over `F$boxed` in `G`, so every function named
+        // by a global initializer needs its thunk too. The name is already
+        // resolved (mangle.rs); the global's own type carries the arity.
+        let mut init_functions: Vec<(&String, &String)> = mir.global_init_functions.iter().collect();
+        init_functions.sort();
+        for (global_name, func_name) in init_functions {
+            if mir.extern_fn_names.contains(func_name.as_str()) {
+                continue; // extern entry points keep the raw direct record
+            }
+            if let Some(func) = functions.iter().find(|f| &f.name == func_name && !f.blocks.is_empty()) {
+                self.emit_boxed_entry_for(func, false)?;
+                continue;
+            }
+            let fn_ty = mir
+                .globals
+                .iter()
+                .find(|(name, _, _)| name == global_name)
+                .and_then(|(_, ty, _)| mir.type_registry.get(*ty));
+            if let Some(crate::hir::HirType::Function { params, ret }) = fn_ty {
+                if trace {
+                    eprintln!("[rust-jit] fn-value boxed entry for global init {global_name} = {func_name}");
+                }
+                self.emit_boxed_import_entry_resolved(func_name, Some(func_name.clone()), params.clone(), *ret)?;
+            }
+            // No thunk: `generate_module_init` refuses the initializer.
+        }
         Ok(())
     }
 
@@ -175,11 +202,23 @@ impl<M: Module> CodegenBackend<M> {
     /// symbol's ADDRESS with the real signature rather than that declaration.
     /// No symbol at all is a build error -- never a NULL function value.
     fn emit_boxed_import_entry(&mut self, name: &str, user_params: Vec<TypeId>, ret_ty: TypeId) -> BackendResult<()> {
+        let resolved = self.use_map.get(name).or_else(|| self.import_map.get(name)).cloned();
+        self.emit_boxed_import_entry_resolved(name, resolved, user_params, ret_ty)
+    }
+
+    /// `emit_boxed_import_entry` with the import's symbol already resolved
+    /// (`None`: unresolvable). The thunk is keyed by `name`.
+    fn emit_boxed_import_entry_resolved(
+        &mut self,
+        name: &str,
+        resolved: Option<String>,
+        user_params: Vec<TypeId>,
+        ret_ty: TypeId,
+    ) -> BackendResult<()> {
         let raw_name = boxed_entry_name(name);
         if self.func_ids.contains_key(&raw_name) {
             return Ok(());
         }
-        let resolved = self.use_map.get(name).or_else(|| self.import_map.get(name)).cloned();
         if let Some(resolved) = &resolved {
             let sanitized = self.sanitize_symbol(resolved);
             if self.data_exports.contains(resolved) || self.data_exports.contains(&sanitized) {
@@ -194,8 +233,13 @@ impl<M: Module> CodegenBackend<M> {
             target_sig.params.push(AbiParam::new(types::I64));
         }
         target_sig.returns.push(AbiParam::new(types::I64));
-        let target_id = match self.func_ids.get(name) {
-            Some(&id) => id,
+        let known = self
+            .func_ids
+            .get(name)
+            .or_else(|| self.func_ids.get(&self.sanitize_symbol(name)))
+            .copied();
+        let target_id = match known {
+            Some(id) => id,
             None => {
                 let Some(resolved) = resolved else {
                     return Err(BackendError::ModuleError(format!(
@@ -204,10 +248,15 @@ impl<M: Module> CodegenBackend<M> {
                     )));
                 };
                 let symbol = self.sanitize_symbol(&resolved);
-                let id = self
-                    .module
-                    .declare_function(&symbol, Linkage::Import, &target_sig)
-                    .map_err(|e| BackendError::ModuleError(format!("declare import {symbol}: {e}")))?;
+                // Already declared under another key (any signature): reuse
+                // it; the thunk calls through the address with `target_sig`.
+                let id = match self.module.get_name(&symbol) {
+                    Some(cranelift_module::FuncOrDataId::Func(id)) => id,
+                    _ => self
+                        .module
+                        .declare_function(&symbol, Linkage::Import, &target_sig)
+                        .map_err(|e| BackendError::ModuleError(format!("declare import {symbol}: {e}")))?,
+                };
                 self.func_ids.insert(name.to_string(), id);
                 id
             }

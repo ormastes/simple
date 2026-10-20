@@ -1,0 +1,110 @@
+"""
+# Wide i64 stored into an `[i64]` array — memory + value probe
+
+Run once per engine and score the `PROBE VERDICT:` LINE:
+
+    SIMPLE_EXECUTION_MODE=interpret <simple> run <this file>
+    SIMPLE_EXECUTION_MODE=jit       <simple> run <this file>
+
+Bug: doc/08_tracking/bug/jit_array_store_wide_i64_leak_2026-10-20.md. The JIT
+used to heap-box every i64 outside the 61-bit inline range on an array store,
+~48 bytes per store, never freed. The probe overwrites and appends one million
+wide values and checks the values (signed order included) so a packed layout
+cannot pass by being wrong. It imports nothing on purpose: an extern the JIT
+cannot resolve demotes the whole program to the interpreter and would make the
+JIT arm vacuous. The spec measures peak RSS from outside, with /usr/bin/time.
+"""
+
+val BASE: i64 = 8070450532247928832
+val COUNT: i64 = 1000000
+
+fn read_any(a: [any], i: i64) -> any:
+    a[i]
+
+fn write_any(a: [any], i: i64, v: any):
+    a[i] = v
+
+fn main():
+    var failures = 0
+
+    # Overwrite: 1M wide stores into an 80-slot array.
+    var w: [i64] = [0; 80]
+    var x: i64 = BASE
+    var n: i64 = 0
+    while n < COUNT:
+        x = x + 1
+        w[n & 63] = x
+        n = n + 1
+    # index 3 was last written at n = 999939 (x = BASE + 999940)
+    if w[3] != BASE + 999940:
+        failures = failures + 1
+        print "PROBE FAIL overwrite w[3]={w[3]}"
+    if w[63] != BASE + COUNT:
+        failures = failures + 1
+        print "PROBE FAIL overwrite w[63]={w[63]}"
+    if w[70] != 0:
+        failures = failures + 1
+        print "PROBE FAIL untouched slot w[70]={w[70]}"
+
+    # Append: 1M wide negative values.
+    var a: [i64] = []
+    var y: i64 = 0 - BASE
+    var m: i64 = 0
+    while m < COUNT:
+        y = y - 1
+        a.push(y)
+        m = m + 1
+    if a.len() != COUNT:
+        failures = failures + 1
+        print "PROBE FAIL append len={a.len()}"
+    if a[0] != 0 - BASE - 1:
+        failures = failures + 1
+        print "PROBE FAIL append a[0]={a[0]}"
+    if a[COUNT - 1] != 0 - BASE - COUNT:
+        failures = failures + 1
+        print "PROBE FAIL append a[last]={a[COUNT - 1]}"
+
+    # Boundaries and generic consumers of a packed array stay signed-correct.
+    var s: [i64] = [0; 6]
+    s[0] = BASE
+    s[1] = 0 - BASE
+    s[2] = 0 - 1
+    s[3] = 5
+    s[4] = 1152921504606846976
+    s[5] = 0 - 1152921504606846977
+    if s[4] != 1152921504606846976 or s[5] != 0 - 1152921504606846977:
+        failures = failures + 1
+        print "PROBE FAIL 2^60 boundary s[4]={s[4]} s[5]={s[5]}"
+    s.sort()
+    if s[0] != 0 - BASE or s[1] != 0 - 1152921504606846977 or s[2] != 0 - 1 or s[3] != 5 or s[5] != BASE:
+        failures = failures + 1
+        print "PROBE FAIL sort {s[0]} {s[1]} {s[2]} {s[3]} {s[4]} {s[5]}"
+    if s.len() != 6:
+        failures = failures + 1
+        print "PROBE FAIL len after sort {s.len()}"
+    s[2] = BASE - 1
+    if s[2] != BASE - 1 or s[0] != 0 - BASE:
+        failures = failures + 1
+        print "PROBE FAIL store after generic access"
+
+    # A packed array reached through an erased `[any]` receiver (generic inline
+    # get/set) must keep reading and writing the right values.
+    var g: [i64] = [0; 4]
+    g[0] = BASE
+    g[1] = 0 - BASE
+    g[2] = 12
+    if read_any(g, 0) != BASE or read_any(g, 1) != 0 - BASE or read_any(g, 2) != 12:
+        failures = failures + 1
+        print "PROBE FAIL generic read {read_any(g, 0)} {read_any(g, 1)} {read_any(g, 2)}"
+    write_any(g, 3, BASE - 5)
+    write_any(g, 2, 77)
+    if g[3] != BASE - 5 or g[2] != 77 or g[0] != BASE or g[1] != 0 - BASE:
+        failures = failures + 1
+        print "PROBE FAIL generic write {g[0]} {g[1]} {g[2]} {g[3]}"
+
+    if failures == 0:
+        print "PROBE VERDICT: PASS"
+    else:
+        print "PROBE VERDICT: FAIL"
+
+main()

@@ -632,18 +632,35 @@ int64_t rt_webgpu_create_surface__core_c_backfill(int32_t width, int32_t height)
 }
 bool rt_webgpu_shutdown__core_c_backfill(void) { return false; }
 bool rt_webgpu_destroy_surface__core_c_backfill(int64_t handle) { (void)handle; return false; }
+bool core_c_backfill_webgpu_upload_pixels(int64_t handle, const void* pixels, size_t pixel_count,
+                                              int32_t w, int32_t h) {
+    (void)handle; (void)pixels; (void)pixel_count; (void)w; (void)h;
+    return false;
+}
+bool core_c_backfill_webgpu_present(int64_t handle) { (void)handle; return false; }
+bool core_c_backfill_webgpu_compute_draw(int64_t handle, int32_t op_kind, int32_t x, int32_t y,
+                                             int32_t w, int32_t h, uint32_t color) {
+    (void)handle; (void)op_kind; (void)x; (void)y; (void)w; (void)h; (void)color;
+    return false;
+}
 #if defined(_M_IX86)
 #pragma comment(linker, "/alternatename:_rt_webgpu_is_available=_rt_webgpu_is_available__core_c_backfill")
 #pragma comment(linker, "/alternatename:_rt_webgpu_init=_rt_webgpu_init__core_c_backfill")
 #pragma comment(linker, "/alternatename:_rt_webgpu_create_surface=_rt_webgpu_create_surface__core_c_backfill")
 #pragma comment(linker, "/alternatename:_rt_webgpu_shutdown=_rt_webgpu_shutdown__core_c_backfill")
 #pragma comment(linker, "/alternatename:_rt_webgpu_destroy_surface=_rt_webgpu_destroy_surface__core_c_backfill")
+#pragma comment(linker, "/alternatename:_rt_webgpu_upload_pixels=_core_c_backfill_webgpu_upload_pixels")
+#pragma comment(linker, "/alternatename:_rt_webgpu_present=_core_c_backfill_webgpu_present")
+#pragma comment(linker, "/alternatename:_rt_webgpu_compute_draw=_core_c_backfill_webgpu_compute_draw")
 #else
 #pragma comment(linker, "/alternatename:rt_webgpu_is_available=rt_webgpu_is_available__core_c_backfill")
 #pragma comment(linker, "/alternatename:rt_webgpu_init=rt_webgpu_init__core_c_backfill")
 #pragma comment(linker, "/alternatename:rt_webgpu_create_surface=rt_webgpu_create_surface__core_c_backfill")
 #pragma comment(linker, "/alternatename:rt_webgpu_shutdown=rt_webgpu_shutdown__core_c_backfill")
 #pragma comment(linker, "/alternatename:rt_webgpu_destroy_surface=rt_webgpu_destroy_surface__core_c_backfill")
+#pragma comment(linker, "/alternatename:rt_webgpu_upload_pixels=core_c_backfill_webgpu_upload_pixels")
+#pragma comment(linker, "/alternatename:rt_webgpu_present=core_c_backfill_webgpu_present")
+#pragma comment(linker, "/alternatename:rt_webgpu_compute_draw=core_c_backfill_webgpu_compute_draw")
 #endif
 #else
 bool rt_webgpu_is_available(void) { return false; }
@@ -654,6 +671,16 @@ int64_t rt_webgpu_create_surface(int32_t width, int32_t height) {
 }
 bool rt_webgpu_shutdown(void) { return false; }
 bool rt_webgpu_destroy_surface(int64_t handle) { (void)handle; return false; }
+bool rt_webgpu_upload_pixels(int64_t handle, const void* pixels, size_t pixel_count, int32_t w, int32_t h) {
+    (void)handle; (void)pixels; (void)pixel_count; (void)w; (void)h;
+    return false;
+}
+bool rt_webgpu_present(int64_t handle) { (void)handle; return false; }
+bool rt_webgpu_compute_draw(int64_t handle, int32_t op_kind, int32_t x, int32_t y, int32_t w, int32_t h,
+                            uint32_t color) {
+    (void)handle; (void)op_kind; (void)x; (void)y; (void)w; (void)h; (void)color;
+    return false;
+}
 #endif
 
 /* Real POSIX fd helpers (mirror interpreter_extern/qmp_socket.rs semantics). */
@@ -9967,6 +9994,39 @@ int8_t rt_typed_words_u64_set(SplArray* a, int64_t idx, int64_t val) {
     if (idx < 0 || idx >= array->len) return 0;
     ((int64_t*)array->data)[idx] =
         (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_core_value_u64_compact(val);
+    return 1;
+}
+
+/* Signed `[i64]` lane. Twin of the Rust runtime's rt_typed_words_i64_*; this
+ * lane keeps the tagged layout (rt_value_int boxes a wide value) -- the Rust
+ * runtime additionally packs a tagged array in place on the first wide store
+ * (gc_flags LAZY_WORDS) to stop leaking one heap box per store. A U64_PACKED
+ * array holds raw words and is read/written as such. */
+int64_t rt_typed_words_i64_at(SplArray* a, int64_t idx) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return 0;
+    if (idx < 0) idx = array->len + idx;
+    if (idx < 0 || idx >= array->len) return 0;
+    int64_t value = ((int64_t*)array->data)[idx];
+    return (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? value : rt_value_unbox_int(value);
+}
+
+int8_t rt_typed_words_i64_push(SplArray* a, int64_t val) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return 0;
+    if (!rt_core_array_reserve(a, array->len + 1)) return 0;
+    ((int64_t*)array->data)[array->len++] =
+        (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_value_int(val);
+    return 1;
+}
+
+int8_t rt_typed_words_i64_set(SplArray* a, int64_t idx, int64_t val) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return 0;
+    if (idx < 0) idx = array->len + idx;
+    if (idx < 0 || idx >= array->len) return 0;
+    ((int64_t*)array->data)[idx] =
+        (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_value_int(val);
     return 1;
 }
 

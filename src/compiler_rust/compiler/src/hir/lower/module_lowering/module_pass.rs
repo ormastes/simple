@@ -445,6 +445,18 @@ fn is_domain_block_kind(kind: &str) -> bool {
 }
 
 impl Lowerer {
+    /// Function type of a module-level initializer that names a free function
+    /// (`val G = f`), declared in this unit or imported; `None` otherwise.
+    fn function_value_init_type(&self, value: &Expr) -> Option<TypeId> {
+        let Expr::Identifier(name) = value else {
+            return None;
+        };
+        self.declared_function_value_types
+            .get(name)
+            .or_else(|| self.imported_function_value_types.get(name))
+            .copied()
+    }
+
     /// Helper: Register type and function declarations from an AST node
     fn register_declarations_from_node(&mut self, item: &Node) -> LowerResult<()> {
         match item {
@@ -468,6 +480,18 @@ impl Lowerer {
                 let symbol = self.flatten_emitted_symbol(owner.as_deref(), &f.name);
                 self.globals.insert(symbol.clone(), ret_ty);
                 self.local_globals.insert(symbol.clone());
+                if owner.is_none() && f.generic_params.is_empty() {
+                    let params: Vec<TypeId> = f
+                        .params
+                        .iter()
+                        .map(|p| match &p.ty {
+                            Some(t) => self.resolve_type(t).unwrap_or(TypeId::ANY),
+                            None => TypeId::ANY,
+                        })
+                        .collect();
+                    let fn_ty = self.module.types.register(HirType::Function { params, ret: ret_ty });
+                    self.declared_function_value_types.insert(f.name.clone(), fn_ty);
+                }
                 // Track pure functions for CTR-030-032
                 if f.is_pure() {
                     self.pure_functions.insert(symbol.clone());
@@ -882,6 +906,12 @@ impl Lowerer {
                         } else {
                             TypeId::ANY
                         }
+                    } else if let Some(fn_ty) = l.value.as_ref().and_then(|v| self.function_value_init_type(v)) {
+                        // `val G = f`: G holds a function VALUE. Typed ANY, a
+                        // call `G(x)` lowered as a direct call to a function
+                        // named `G` (a data symbol) and the initializer was
+                        // never recorded in `global_init_functions`.
+                        fn_ty
                     } else if let Some(inferred) = l
                         .value
                         .as_ref()

@@ -71,6 +71,7 @@ pub mod executor;
 pub mod fiber_identity;
 pub mod gemm_runtime;
 pub mod gpu_provider_twins;
+pub mod webgpu_backfill_twins;
 pub mod gui_html_session_twins;
 pub mod host_gpu_lane;
 pub mod memory;
@@ -1011,6 +1012,9 @@ pub use value::{
     rt_bytes_u8_set,
     rt_typed_words_u32_set,
     rt_typed_words_u64_set,
+    rt_typed_words_i64_at,
+    rt_typed_words_i64_push,
+    rt_typed_words_i64_set,
     rt_for_iterable,
     rt_index_get,
     rt_index_set,
