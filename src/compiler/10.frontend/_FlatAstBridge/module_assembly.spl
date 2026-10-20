@@ -47,7 +47,7 @@ use compiler.frontend.desugar.collection_desugar.{desugar_collections}
 use compiler.frontend.core.string_interpolation_expand.{expand_interpolated_placeholder_call_args}
 use compiler.common.diagnostics.span.{Span}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals, lex_tokenize_all}
-use compiler.frontend.resource_registry.{resource_registry_declare}
+use compiler.frontend.resource_registry.{resource_registry_declare, nogc_strict_module_note}
 use compiler.frontend.layer_eq_registry.{layer_eq_registry_declare}
 use compiler.frontend.effect_registry.{effect_registry_declare}
 use compiler.frontend.rt_criticality_registry.{rt_criticality_declare}
@@ -357,6 +357,8 @@ fn flat_ast_to_module(path: text) -> ParserModule:
     # the same-layer/downward call-direction check that CONSUMES this fact is
     # a separate, not-yet-landed effort (call-edge tracking).
     var module_tagged_layer = ""
+    # `@no_gc(strict)` marker (opt-in no-GC ownership-sigil mode, memory.md).
+    var module_nogc_strict = false
     val span = make_span()
 
     var di = 0
@@ -947,6 +949,12 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                                             pass
                                     di = di + 1
                                     continue
+                                elif helper_name == "__module_nogc_strict":
+                                    # `@no_gc(strict)` module marker: record and
+                                    # drop it (zero HIR/MIR/codegen output).
+                                    module_nogc_strict = true
+                                    di = di + 1
+                                    continue
                                 elif helper_name == "__module_layer_tag" and args.len() >= 1:
                                     # M1 `@layer(NAME)` module tag (doc/03_plan/
                                     # compiler/forwarding/
@@ -1131,6 +1139,9 @@ fn flat_ast_to_module(path: text) -> ParserModule:
     for layer_edge in layer_registry.use_edges:
         layer_dag_edges_lines.push("E:" + layer_edge.from_name + ">" + layer_edge.to_name)
     val layer_dag_edges_text = layer_dag_edges_lines.join("\n")
+    # Written on every build (true OR false) so a re-parse without the
+    # attribute clears a stale strict fact for the same module name.
+    nogc_strict_module_note(path, module_nogc_strict)
 
     # M1: `@layer(NAME)` module tag must refer to a layer actually declared
     # (via M0's `layer NAME` decl) somewhere in scope. Checked after the DAG

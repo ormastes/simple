@@ -29,14 +29,18 @@
 var resource_registry_names: [text] = []
 var resource_registry_name_index: Dict<text, bool> = {}
 var resource_registry_meta: Dict<text, text> = {}
+# Opt-in no-GC strict modules; see the section at the end of this file.
+var nogc_strict_modules: Dict<text, bool> = {}
 
 extern fn rt_transient_heap_promote<T>(value: T) -> bool
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
 
 # Last-module resource metadata remains queryable after the rich parser returns.
 pub fn resource_registry_promote_transient_owner() -> bool:
     rt_transient_heap_promote(resource_registry_names) and
         rt_transient_heap_promote(resource_registry_name_index) and
-        rt_transient_heap_promote(resource_registry_meta)
+        rt_transient_heap_promote(resource_registry_meta) and
+        rt_transient_heap_promote(nogc_strict_modules)
 
 fn resource_registry_reset():
     resource_registry_names = []
@@ -148,3 +152,30 @@ fn resource_ownership_kind(name: text) -> text:
     if recorded != "":
         return recorded
     "unique"
+
+# ===== Opt-in no-GC strict modules =====
+#
+# `@no_gc(strict)` (doc/05_design/language/misc/memory.md) switches one module
+# into the ownership-sigil mode: `&T` unique, `*T` shared, `-T` weak, bare
+# class `T` = `&T`. Keyed by the ParserModule name the flat bridge builds
+# (`parser_module_new(name: path)`), which is the same module HIR lowering
+# receives. Unlike the resource facts above this set is process-wide and is
+# NOT reset per parse: module_assembly writes true or false on every build,
+# so a re-parse without the attribute clears it. `SIMPLE_NOGC_STRICT=1`
+# turns the mode on for every module. A plain `@no_gc` does not.
+
+
+fn nogc_strict_module_note(module_name: text, strict: bool):
+    if module_name == "":
+        return
+    nogc_strict_modules[module_name] = strict
+
+fn nogc_strict_env_enabled() -> bool:
+    (env_get_opt("SIMPLE_NOGC_STRICT") ?? "") == "1"
+
+fn nogc_strict_module_is(module_name: text) -> bool:
+    if nogc_strict_env_enabled():
+        return true
+    if not nogc_strict_modules.contains_key(module_name):
+        return false
+    nogc_strict_modules[module_name]

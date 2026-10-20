@@ -85,6 +85,10 @@ class HirLowering:
     # E-MIR-MATCH-GUARD level ("" = not resolved yet).
     match_guards_desugared: i64
     match_guard_level: text
+    # Opt-in no-GC ownership-sigil mode for the module being lowered
+    # (`@no_gc(strict)` / SIMPLE_NOGC_STRICT=1, memory.md). Off: `&T`/`*T`/`-T`
+    # lower to the legacy Ref / Ptr / Infer so default-mode HIR is unchanged.
+    nogc_strict: bool
     # Source-written `Any` policy, set by the driver:
     #   script (interpreter)          -> allowed
     #   compiled, below robust        -> allowed
@@ -657,6 +661,7 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         allow_ambient_bootstrap_policy: true,
         match_guards_desugared: 0,
         match_guard_level: "",
+        nogc_strict: false,
         forbid_written_any: false,
         written_any_unsafe_depth: 0,
         module_resolver: nil,
@@ -1046,6 +1051,9 @@ impl HirLowering:
         val d_proj: i64 = hir_type_kind_disc(TypeKind.Projection(lt, ""))
         val d_isolated: i64 = hir_type_kind_disc(TypeKind.Isolated(lt))
         val d_pointer: i64 = hir_type_kind_disc(TypeKind.Pointer(lt, false))
+        val d_unique: i64 = hir_type_kind_disc(TypeKind.Unique(lt))
+        val d_shared: i64 = hir_type_kind_disc(TypeKind.Shared(lt))
+        val d_weak: i64 = hir_type_kind_disc(TypeKind.Weak(lt))
 
         var kind: HirTypeKind = HirTypeKind.Infer(0, 0)
         if kind_disc_v == d_tuple:
@@ -1136,6 +1144,17 @@ impl HirLowering:
                 case _:
                     pass
             kind = HirTypeKind.Ptr(self.lower_type(pinner), pmutable)
+        elif kind_disc_v == d_unique or kind_disc_v == d_shared or kind_disc_v == d_weak:
+            # memory.md ownership sigils. Strict mode keeps them distinct;
+            # default mode reproduces the pre-lane HIR exactly: `&T` was
+            # Ref(T, false), `*T` was Ptr(T, false), `-T` fell to Infer.
+            val owned_inner = self.lower_type(parser_type_kind_ownership_inner(lt_kind, lt))
+            if kind_disc_v == d_unique:
+                kind = if self.nogc_strict: HirTypeKind.Unique(owned_inner) else: HirTypeKind.Ref(owned_inner, false)
+            elif kind_disc_v == d_shared:
+                kind = if self.nogc_strict: HirTypeKind.Shared(owned_inner) else: HirTypeKind.Ptr(owned_inner, false)
+            else:
+                kind = if self.nogc_strict: HirTypeKind.Weak(owned_inner) else: HirTypeKind.Infer(0, 0)
         else:
             # Infer / Atomic and any unrecognized disc.
             kind = HirTypeKind.Infer(0, 0)

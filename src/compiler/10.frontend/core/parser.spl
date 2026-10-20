@@ -26,7 +26,7 @@ use compiler.core.tokens.{TOK_QUESTION, TOK_DOUBLE_QUESTION}
 use compiler.core.tokens.{TOK_NEWLINE, TOK_INDENT, TOK_DEDENT, TOK_EOF}
 use compiler.core.tokens.{TOK_SEMICOLON}
 use compiler.core.tokens.{TOK_AMPERSAND, TOK_STAR, TOK_KW_NIL}
-use compiler.core.tokens.{TOK_AT, TOK_MINUS}
+use compiler.core.tokens.{TOK_AT, TOK_MINUS, TOK_PLUS}
 use compiler.frontend.core.lexer.{lex_init, lex_init_with_path, lex_next, lex_next_snapshot, lex_mark_current_token_as_generic_close}
 use compiler.frontend.core.lexer.{lex_token_kind, lex_token_text, lex_token_line, lex_token_col}
 use compiler.frontend.core.lexer.{lex_cur_suffix_get}
@@ -63,7 +63,7 @@ use compiler.core.types.{result_type_register}
 use compiler.core.types.{isolated_type_register}
 use compiler.core.types.{exclusive_type_register}
 use compiler.core.types.{reference_type_register}
-use compiler.core.types.{pointer_type_register}
+use compiler.core.types.{pointer_type_register_flag, POINTER_FLAG_SHARED, POINTER_FLAG_RAW_CONST, POINTER_FLAG_RAW_MUT}
 use compiler.core.types.{atomic_type_register}
 use compiler.core.types.{weak_type_register}
 use compiler.core.types.{function_type_register, TYPE_FUNCTION_BASE, TYPE_FUNCTION_LIMIT}
@@ -728,6 +728,34 @@ fn parser_peek_is_binding_name(steps: i64) -> bool:
     parser_tok_restore(nums, txt)
     k == TOK_IDENT or k == 169
 
+# `new(&)` / `new(*)` / `new(-)` / `new(+)` (memory.md's canonical constructor
+# spelling). Called with the stream on the token after `(`. Returns the
+# new-expression kind code (see primary_expr.spl NEW_KIND_*) and consumes the
+# sigil and `)` when they are present, else returns -1 and leaves the stream
+# untouched so `new(alloc_expr)` still parses as an allocator.
+fn parser_new_paren_sigil_kind() -> i64:
+    val k = par_kind_get()
+    var kind = -1
+    if k == TOK_AMPERSAND:
+        kind = 1
+    elif k == TOK_STAR:
+        kind = 2
+    elif k == TOK_MINUS:
+        kind = 3
+    elif k == TOK_PLUS:
+        kind = 4
+    if kind < 0:
+        return -1
+    val snap = lex_snapshot_save()
+    val (nums, txt) = parser_tok_save()
+    parser_advance()
+    if par_kind_get() == 141:
+        parser_advance()
+        return kind
+    lex_snapshot_rollback(snap)
+    parser_tok_restore(nums, txt)
+    -1
+
 fn parser_legacy_let_decl_ahead() -> bool:
     par_kind_get() == TOK_IDENT and par_text_get() == "let" and
         parser_peek_is_binding_name(1)
@@ -765,19 +793,20 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
             parser_error("too many distinct reference type annotations")
             return reference_inner
         return reference_tag
-    # Raw/shared pointer types.  The flat type lane carries the inner tag and
-    # the only distinction supported by pure HIR (`Ptr(inner, mutable)`).
-    # `*T` and `*const T` are immutable; `*mut T` is mutable.
+    # Shared and raw pointer types (doc/05_design/language/misc/memory.md):
+    # `*T` is the shared (Rc) owner; `*const T` / `*mut T` are raw pointers.
+    # The registry flag keeps all three apart (POINTER_FLAG_* in types.spl).
     if kind == TOK_STAR:
         parser_advance()
-        var pointer_mutable = false
+        var pointer_flag = POINTER_FLAG_SHARED
         if par_text_get() == "const":
             parser_advance()
+            pointer_flag = POINTER_FLAG_RAW_CONST
         elif par_text_get() == "mut":
             parser_advance()
-            pointer_mutable = true
+            pointer_flag = POINTER_FLAG_RAW_MUT
         val pointer_inner = parser_parse_type_impl(allow_spaced_generics)
-        val pointer_tag = pointer_type_register(pointer_inner, pointer_mutable)
+        val pointer_tag = pointer_type_register_flag(pointer_inner, pointer_flag)
         if pointer_tag < 0:
             parser_error("too many distinct pointer type annotations")
             return pointer_inner
@@ -1414,7 +1443,7 @@ fn parser_tok_restore(nums: [i64], saved_text: text):
 # Parser state (needed by split modules and external consumers)
 export par_errors, par_warnings, par_struct_names
 export par_fixed_array_elem, par_fixed_array_size
-export parser_legacy_let_decl_ahead, parser_consume_legacy_let_prefix
+export parser_legacy_let_decl_ahead, parser_consume_legacy_let_prefix, parser_new_paren_sigil_kind
 export parser_init, parser_init_with_path, parser_advance, parser_check, parser_match_tok, parser_expect
 export parser_note_use_import
 export parser_has_errors, parser_get_errors, parser_error_count, parser_set_had_error
