@@ -1,0 +1,74 @@
+# codex-system-test
+# @manual: show
+# @req: REQ-MC-007, C2
+# Exercise the compiler-owned entrypoint, separately from plugin-owned specs.
+use std.spec
+use std.spec.step
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_instructions.{MirModule}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirTypeDef, MirTypeDefKind, MirFieldDef, MirVariantDef}
+use compiler.backend.backend.lean_backend.{LeanBackend, VerificationLevel, LeanBuilder}
+
+fn owner_module(payload_id: i64) -> MirModule:
+    val scalar = MirTypeDef(symbol: SymbolId(id: 3), name: "Scalar",
+        kind: MirTypeDefKind.Struct([MirFieldDef(name: "value", type_: MirType(kind: MirTypeKind.Char), offset: 0, has_bits_attr: false, bits_width: 0)]),
+        is_export_c: false, export_name: "")
+    val state = MirTypeDef(symbol: SymbolId(id: 4), name: "State",
+        kind: MirTypeDefKind.Enum([MirVariantDef(name: "Ready", discriminant: 5,
+            payload: Some(MirType(kind: MirTypeKind.Struct(SymbolId(id: payload_id)))))]),
+        is_export_c: false, export_name: "")
+    var types: Dict<SymbolId, MirTypeDef> = {}
+    types[scalar.symbol] = scalar
+    types[state.symbol] = state
+    MirModule(name: "OwnerFixture", functions: {}, statics: {}, constants: {}, types: types)
+
+describe "compiler-owned Lean declaration entrypoint":
+    it "emits actual structure and enum declarations through both module APIs":
+        step("Export registered structures and enums")
+        val module = owner_module(3)
+        val backend = LeanBackend.create(VerificationLevel.Contracts)
+        val full = backend.export_module(module).unwrap().lean_code
+        val generated = backend.export_generated_module(module).unwrap().lean_code
+        val expected = "| «Ready» : _root_.Simple.OwnerFixture.__MirTypes.«Scalar» → __MirTypes.«State»"
+        expect(full).to_contain("structure __MirTypes.«Scalar» where\n  «value» : _root_.Char")
+        expect(full).to_contain(expected)
+        expect(generated).to_contain(expected)
+        expect(full.contains("axiom ")).to_equal(false)
+        expect(full.contains("sorry")).to_equal(false)
+
+    it "propagates unresolved payload errors through both module APIs":
+        step("Reject incomplete or unsupported MIR")
+        val module = owner_module(99)
+        val backend = LeanBackend.create(VerificationLevel.Contracts)
+        match backend.export_module(module):
+            case Err(error): expect(error.message).to_contain("unresolved nominal symbol 99")
+            case Ok(_): assert(false)
+        expect(backend.export_generated_module(module).is_err()).to_equal(true)
+
+    it "rejects invalid module namespaces before returning source":
+        var module = owner_module(3)
+        module.name = "where"
+        match LeanBackend.create(VerificationLevel.Contracts).export_module(module):
+            case Err(error): expect(error.message).to_contain("reserved module namespace")
+            case Ok(_): assert(false)
+
+    it "rejects generated constructor members through both compiler-owner APIs":
+        step("Reject incomplete or unsupported MIR")
+        for reserved_name in ["ctorIdx", "ctorElimType", "ctorElim"]:
+            var module = owner_module(3)
+            module.types[SymbolId(id: 4)] = MirTypeDef(symbol: SymbolId(id: 4), name: "TwoVariants",
+                kind: MirTypeDefKind.Enum([
+                    MirVariantDef(name: reserved_name, discriminant: 0, payload: nil),
+                    MirVariantDef(name: "Other", discriminant: 1, payload: nil)]),
+                is_export_c: false, export_name: "")
+            val backend = LeanBackend.create(VerificationLevel.Contracts)
+            match backend.export_module(module):
+                case Err(error): expect(error.message).to_contain("reserved or duplicate variant `TwoVariants.{reserved_name}`")
+                case Ok(_): assert(false)
+            match backend.export_generated_module(module):
+                case Err(error): expect(error.message).to_contain("reserved or duplicate variant `TwoVariants.{reserved_name}`")
+                case Ok(_): assert(false)
+            var builder = LeanBuilder.create()
+            builder.emit("retained")
+            expect(backend.export_types(builder, module).is_err()).to_equal(true)
+            expect(builder.build()).to_equal("retained")

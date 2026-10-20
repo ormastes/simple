@@ -24,6 +24,8 @@ use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirBinOp, HirUnaryOp, Hi
 use compiler.hir.hir_types.{HirTypeKind}
 use compiler.mir.verification_contract_bridge.{verification_pure_state_semantics_v1, verification_state_predicate_bindings_from_module_v1}
 use compiler.mir.verification_region_effects.{verification_region_effect_manifest_v1}
+use plugins.backend_lean.lean_type_declarations.{LeanTypeContext, lean_plan_type_declarations, lean_context_type_to_lean}
+use plugins.backend_lean.lean_nominal_body.{translate_mir_nominal_body}
 
 # ============================================================================
 # Verification Level
@@ -139,7 +141,9 @@ class LeanBuilder:
         val param_str = params.map("({_.0} : {_.1})").join(" ")
         self.emit("def {name} {param_str} : {ret_type} :=")
         self.indent()
-        self.emit(body)
+        # Preserve relative nesting while indenting every physical body line.
+        for line in body.split("\n"):
+            self.emit(line)
         self.dedent()
 
     me emit_def_with_termination(
@@ -705,7 +709,7 @@ class LeanBackend:
         builder.begin_namespace("{self.module_prefix}.{module.name}")
 
         # Export type definitions
-        self.export_types(builder, module)
+        val type_context = self.export_types(builder, module)?
 
         # Export functions in deterministic (name-sorted) order.
         val state_predicates = lean_module_state_predicate_names(module)?
@@ -714,7 +718,7 @@ class LeanBackend:
             fns = fns.push(module.functions[symbol])
         for mir_fn in sort_mir_functions_by_name(fns):
             val body = MirBody.from_function(mir_fn)
-            self.export_function(builder, mir_fn, body, state_predicates)?
+            self.export_function(builder, mir_fn, body, state_predicates, Some(type_context))?
 
         # Generate proof obligations
         if self.generate_proofs:
@@ -739,14 +743,14 @@ class LeanBackend:
         builder.add_import("Mathlib.Data.Array.Basic")
         builder.add_import("Init.Data.BitVec")
         builder.begin_namespace("{self.module_prefix}.{module.name}")
-        self.export_types(builder, module)
+        val type_context = self.export_types(builder, module)?
         val state_predicates = lean_module_state_predicate_names(module)?
         var fns: [MirFunction] = []
         for symbol in module.functions.keys():
             fns = fns.push(module.functions[symbol])
         for mir_fn in sort_mir_functions_by_name(fns):
             val body = MirBody.from_function(mir_fn)
-            self.export_function(builder, mir_fn, body, state_predicates)?
+            self.export_function(builder, mir_fn, body, state_predicates, Some(type_context))?
         builder.end_namespace("{self.module_prefix}.{module.name}")
         Ok(LeanExportResult(
             module_name: "{module.name}.Generated",
@@ -759,18 +763,26 @@ class LeanBackend:
         """Create the stable manual constraints shell for generated Lean."""
         "import {self.module_prefix}.{module.name}.Generated\n\nnamespace {self.module_prefix}.{module.name}\n\n-- Add hand-written constraints and proofs here. Regeneration must not overwrite this file.\n\nend {self.module_prefix}.{module.name}\n"
 
-    fn export_types(builder: LeanBuilder, module: MirModule):
-        """Export type definitions."""
-        builder.emit_comment("Type Definitions")
-        builder.emit_blank()
-
-        # Would iterate through module type definitions
+    fn export_types(builder: LeanBuilder, module: MirModule) -> Result<LeanTypeContext, CompileError>:
+        """Emit admitted semantic declarations and retain exact MIR metadata."""
+        val plan = lean_plan_type_declarations(module, "{self.module_prefix}.{module.name}")?
+        if plan.declarations.len() > 0:
+            builder.emit_comment("MIR semantic types; retained metadata is not a native-layout proof")
+        for declaration in plan.declarations:
+            builder.emit_blank()
+            if declaration.is_enum:
+                builder.emit_inductive(declaration.name, declaration.variants)
+            else:
+                builder.emit_structure(declaration.name, declaration.fields)
+            for line in declaration.metadata: builder.emit(line)
+        Ok(plan.context)
 
     fn export_function(
         builder: LeanBuilder,
         mir_fn: MirFunction,
         body: MirBody,
-        approved_state_predicates: [StateInvariantPredicateV1] = []
+        approved_state_predicates: [StateInvariantPredicateV1] = [],
+        type_context: LeanTypeContext? = nil
     ) -> Result<(), CompileError>:
         """Export a function definition.
 
@@ -791,7 +803,11 @@ class LeanBackend:
                 match local.kind:
                     case Arg(index):
                         if index == i:
-                            val lean_ty = mir_type_to_lean(local.type_)?
+                            var lean_ty = ""
+                            if val context = type_context:
+                                lean_ty = lean_context_type_to_lean(local.type_, context)?
+                            else:
+                                lean_ty = mir_type_to_lean(local.type_)?
                             val lean_name = "_l{local.id.id}"
                             if val source_name = local.name:
                                 if source_name != "": param_aliases.push((source_name, lean_name))
@@ -803,7 +819,11 @@ class LeanBackend:
                 return Err(compileerror_backend_error(BackendKind.Lean,
                     "lean-backend: function `{name}` is malformed MIR: argument {i} of {body.arg_count} has no argument local; cannot type the Lean parameter"))
 
-        val ret_type = mir_type_to_lean(body.return_ty)?
+        var ret_type = ""
+        if val context = type_context:
+            ret_type = lean_context_type_to_lean(body.return_ty, context)?
+        else:
+            ret_type = mir_type_to_lean(body.return_ty)?
         var contract = FunctionContract.empty(name)
         val state_semantics = verification_pure_state_semantics_v1(mir_fn)
         val region_manifest = verification_region_effect_manifest_v1(mir_fn)
@@ -854,7 +874,11 @@ class LeanBackend:
                 contract.to_lean_global_frame_spec(
                     builder, params, stateful.state_type, stateful.written_regions)
             else:
-                val lean_body = translate_mir_body(body)?
+                var lean_body = ""
+                if val context = type_context:
+                    lean_body = translate_mir_nominal_body(mir_fn, context)?
+                else:
+                    lean_body = translate_mir_body(body)?
                 if contract.decreases_measure != "":
                     builder.emit_def_with_termination(
                         name, params, ret_type, lean_body, contract.decreases_measure,
