@@ -817,13 +817,10 @@ pub(crate) fn compile_file_to_object(
     pipeline.rewrite_hir_simd_loops(&mut hir);
 
     // MIR
-    // Freestanding and WASM runtimes do not define the `[i64]` word lane.
-    let signed_word_lane = !target.is_baremetal() && !target.is_wasm();
-    let mut mir = crate::mir::lower_to_mir_with_global_trait_impls_and_word_lane(
+    let mut mir = crate::mir::lower_to_mir_with_global_trait_impls(
         &hir,
         imports.trait_impls.as_ref(),
         target.array_push_returns_header(),
-        signed_word_lane,
     )
     .map_err(|e| format!("{}: mir: {e}", file_path.display()))?;
     qualify_native_struct_layouts(

@@ -322,8 +322,6 @@ spl_thread_handle spl_thread_create(void* (*entry_point)(void*), void* arg) {
         return 0;
     }
 
-    SPL_NOTE_USER_THREADS();
-
     if (pthread_create(thread, NULL, entry_point, arg) != 0) {
         SPL_FREE(thread);
         return 0;
@@ -607,7 +605,6 @@ int64_t rt_thread_spawn_isolated(int64_t closure, int64_t data) {
     td->refs        = 2;
 
 #ifdef SPL_THREAD_PTHREAD
-    SPL_NOTE_USER_THREADS();
     if (pthread_create(&td->thread, NULL, rt_isolated_wrapper, td) != 0) {
         SPL_FREE(td);
         return 0;
@@ -660,7 +657,6 @@ int64_t rt_thread_spawn_isolated_with_args(int64_t fn_ptr, int64_t data1, int64_
     td->refs        = 2;
 
 #ifdef SPL_THREAD_PTHREAD
-    SPL_NOTE_USER_THREADS();
     if (pthread_create(&td->thread, NULL, rt_isolated_wrapper, td) != 0) {
         SPL_FREE(td);
         return 0;
@@ -1016,7 +1012,6 @@ static int rt_pool_spawn_worker(int worker_id) {
     arg->worker_id = worker_id;
 #ifdef SPL_THREAD_PTHREAD
     pthread_t thread;
-    SPL_NOTE_USER_THREADS();
     if (pthread_create(&thread, NULL, rt_pool_worker_main, arg) == 0) {
         pthread_detach(thread);
         return 1;
@@ -2362,8 +2357,6 @@ spl_thread_handle spl_thread_pool_spawn_worker(int64_t pool_id) {
     if (!thread) {
         return 0;
     }
-
-    SPL_NOTE_USER_THREADS();
 
     int result = pthread_create(thread, NULL, worker_thread_wrapper,
                                 (void*)(intptr_t)pool_id);

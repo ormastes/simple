@@ -271,7 +271,6 @@ impl FutureExecutor {
 
     /// Spawn worker threads for the thread pool
     fn spawn_workers(&self) {
-        crate::value::note_user_threads_started();
         let count = self.worker_count.load(Ordering::SeqCst);
         let mut workers = self.workers.lock().unwrap();
 
@@ -759,7 +758,6 @@ unsafe fn native_callable(closure_arg: u64) -> Option<NativeCallable> {
 /// A thread handle that can be used to join the thread
 #[no_mangle]
 pub extern "C" fn rt_thread_spawn_isolated(closure_ptr: u64, data: RuntimeValue) -> u64 {
-    crate::value::note_user_threads_started();
     let Some(callable) = (unsafe { native_callable(closure_ptr) }) else {
         return 0;
     };
@@ -808,7 +806,6 @@ pub extern "C" fn rt_thread_spawn_isolated_with_args(
     data1: RuntimeValue,
     data2: RuntimeValue,
 ) -> u64 {
-    crate::value::note_user_threads_started();
     let Some(callable) = (unsafe { native_callable(closure_ptr) }) else {
         return 0;
     };
@@ -1045,7 +1042,6 @@ pub extern "C" fn rt_thread_spawn_limited(
     fd_limit: i64,
     thread_limit: i64,
 ) -> u64 {
-    crate::value::note_user_threads_started();
     let Some(callable) = (unsafe { native_callable(closure_ptr) }) else {
         return 0;
     };
@@ -1138,7 +1134,6 @@ pub extern "C" fn rt_thread_spawn_limited_with_args(
     fd_limit: i64,
     thread_limit: i64,
 ) -> u64 {
-    crate::value::note_user_threads_started();
     let Some(callable) = (unsafe { native_callable(closure_ptr) }) else {
         return 0;
     };

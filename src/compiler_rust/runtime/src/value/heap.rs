@@ -108,17 +108,6 @@ pub mod gc_flags {
     pub const BYTE_PACKED: u8 = 0b1000;
     /// RuntimeArray stores raw u64 words in data instead of tagged RuntimeValue slots.
     pub const U64_PACKED: u8 = 0b1_0000;
-    /// Set together with `U64_PACKED` when a tagged array was packed in place
-    /// by a typed signed-word store (`rt_typed_words_i64_*`). The words keep the
-    /// SIGNED i64 semantics the tagged layout had, so generic consumers that do
-    /// not understand the packed layout unpack the array back first
-    /// (`unpack_lazy_words`) instead of reading raw words as tagged values.
-    pub const LAZY_WORDS: u8 = 0b10_0000;
-    /// Set when a `LAZY_WORDS` array was unpacked by a consumer that does not
-    /// understand the packed layout. Such an array is never packed again, so a
-    /// store / generic-consumer loop cannot re-box the whole array every
-    /// iteration (it degrades to the pre-lane behaviour: one box per wide store).
-    pub const NO_REPACK: u8 = 0b100_0000;
 }
 
 impl HeapHeader {
@@ -258,21 +247,6 @@ fn note_heap_free(kind: u8, bytes: u64) {
     if let Some(slot) = HEAP_KIND_LIVE_BYTES.get(kind as usize) {
         slot.fetch_sub(bytes, Ordering::Relaxed);
     }
-}
-
-/// Header addresses of every live array carrying `LAZY_WORDS`. Taken under the
-/// registry lock (registered == live), used when user threads start.
-pub(crate) fn live_lazy_word_arrays() -> Vec<usize> {
-    // A poisoned lock still guards a consistent set: packed arrays must be found.
-    let registry = heap_allocation_registry().lock().unwrap_or_else(|e| e.into_inner());
-    registry
-        .iter()
-        .copied()
-        .filter(|addr| unsafe {
-            let header = *addr as *const HeapHeader;
-            (*header).object_type == HeapObjectType::Array && (*header).gc_flags & gc_flags::LAZY_WORDS != 0
-        })
-        .collect()
 }
 
 fn heap_allocation_registry() -> &'static Mutex<HeapPtrSet<usize>> {
@@ -503,21 +477,6 @@ pub fn validate_heap_obj(val: RuntimeValue, expected: HeapObjectType) -> Option<
 /// Returns None if the value is not a valid heap object of the expected type.
 #[inline]
 pub fn get_typed_ptr<T>(val: RuntimeValue, expected: HeapObjectType) -> Option<*const T> {
-    let ptr = validate_heap_obj(val, expected)?;
-    if expected == HeapObjectType::Array {
-        // A tagged array that a typed signed-word store packed in place is
-        // unpacked here, so callers that only understand tagged slots never
-        // see raw words. Callers that handle the packed layout use
-        // `get_typed_ptr_packed`.
-        unsafe { super::collections::unpack_lazy_words(ptr as *mut super::collections::RuntimeArray) };
-    }
-    Some(ptr as *const T)
-}
-
-/// `get_typed_ptr` for callers that handle the packed array layouts themselves
-/// (no `LAZY_WORDS` unpacking).
-#[inline]
-pub fn get_typed_ptr_packed<T>(val: RuntimeValue, expected: HeapObjectType) -> Option<*const T> {
     validate_heap_obj(val, expected).map(|ptr| ptr as *const T)
 }
 
@@ -581,17 +540,6 @@ pub(crate) fn registered_heap_type(val: RuntimeValue) -> Option<HeapObjectType> 
 /// Returns None if the value is not a valid heap object of the expected type.
 #[inline]
 pub fn get_typed_ptr_mut<T>(val: RuntimeValue, expected: HeapObjectType) -> Option<*mut T> {
-    let ptr = validate_heap_obj(val, expected)?;
-    if expected == HeapObjectType::Array {
-        unsafe { super::collections::unpack_lazy_words(ptr as *mut super::collections::RuntimeArray) };
-    }
-    Some(ptr as *mut T)
-}
-
-/// `get_typed_ptr_mut` for callers that handle the packed array layouts
-/// themselves (no `LAZY_WORDS` unpacking).
-#[inline]
-pub fn get_typed_ptr_mut_packed<T>(val: RuntimeValue, expected: HeapObjectType) -> Option<*mut T> {
     validate_heap_obj(val, expected).map(|ptr| ptr as *mut T)
 }
 
