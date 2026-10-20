@@ -43,7 +43,7 @@ use compiler.core.types.{is_option_generic_tag, option_generic_tag_to_id, option
 use compiler.core.types.{is_isolated_tag, isolated_tag_to_id, isolated_type_get_inner}
 use compiler.core.types.{is_exclusive_tag, exclusive_tag_to_id, exclusive_type_get_inner}
 use compiler.core.types.{is_reference_tag, reference_tag_to_id, reference_type_get_inner, reference_type_is_mutable}
-use compiler.core.types.{is_pointer_tag, pointer_tag_to_id, pointer_type_get_inner, pointer_type_is_mutable}
+use compiler.core.types.{is_pointer_tag, pointer_tag_to_id, pointer_type_get_inner, pointer_type_is_mutable, pointer_type_is_shared}
 use compiler.core.types.{is_atomic_tag, atomic_tag_to_id, atomic_type_get_inner}
 use compiler.core.types.{is_weak_tag, weak_tag_to_id, weak_type_get_inner}
 use compiler.core.types.{is_function_tag, function_tag_to_id, function_type_known, function_type_get_params, function_type_get_ret}
@@ -456,7 +456,11 @@ fn convert_flat_type(type_expr_idx: i64) -> Type:
         val reference_id = reference_tag_to_id(type_expr_idx)
         val reference_inner_tag = reference_type_get_inner(reference_id)
         val reference_mutable = reference_type_is_mutable(reference_id)
-        return Type(kind: TypeKind.Reference(convert_flat_type(reference_inner_tag), reference_mutable), span: make_span())
+        # memory.md: `&T` is the unique owner; `&mut T` is the short exclusive
+        # borrow (the same type as the `mut T` capability spelling above).
+        if not reference_mutable:
+            return Type(kind: TypeKind.Unique(convert_flat_type(reference_inner_tag)), span: make_span())
+        return Type(kind: TypeKind.Reference(convert_flat_type(reference_inner_tag), true), span: make_span())
     if is_pointer_tag(type_expr_idx):
         val pointer_id = pointer_tag_to_id(type_expr_idx)
         val pointer_inner_tag = pointer_type_get_inner(pointer_id)
@@ -468,8 +472,14 @@ fn convert_flat_type(type_expr_idx: i64) -> Type:
         # `@T`/`-T` parser branches in `core/parser.spl` for why bridge time
         # is the earliest point `resource_is_declared` can read true.
         val pointer_resource_name = parser_type_kind_named_name(pointer_inner_type.kind)
+        val pointer_shared = pointer_type_is_shared(pointer_id)
+        # Unchanged from before: any `*` form on a resource records "shared"
+        # (WP-G's MIR check also treats a raw Ptr(R) as shared).
         if pointer_resource_name != "" and resource_is_declared(pointer_resource_name):
             resource_registry_note_ownership(pointer_resource_name, "shared")
+        # memory.md: `*T` is the shared (Rc) owner; `*const T` / `*mut T` stay raw.
+        if pointer_shared:
+            return Type(kind: TypeKind.Shared(pointer_inner_type), span: make_span())
         return Type(kind: TypeKind.Pointer(pointer_inner_type, pointer_mutable), span: make_span())
     # Resource-ownership sigil `@T` -- atomic ref-counted sharing (WP-B).
     # Gated on the resource's own `thread_safe: true` metadata (design §3/§7
@@ -1438,6 +1448,15 @@ fn convert_flat_expr(idx: i64) -> Expr:
             span: span
         )
         return Expr(kind: ExprKind.Call(spawn_callee, [spawn_arg]), span: span)
+    if tag == EXPR_NEW:
+        # `new X` / `new(&) X` / `new& X` ... (primary_expr.spl). Before this
+        # arm the node had none and silently became NilLit. Payload: the
+        # seed-aligned kind code and the constructed expression.
+        val new_inner_idx = expr_get_right(idx)
+        if new_inner_idx < 0:
+            flat_bridge_report_unhandled_node("expr", tag)
+            return Expr(kind: ExprKind.NilLit, span: span)
+        return Expr(kind: ExprKind.New(expr_get_int(idx), convert_flat_expr(new_inner_idx)), span: span)
     if tag == EXPR_AWAIT:
         # Same family as EXPR_SPAWN above: `await <expr>` (tag 37) is built by
         # primary_expr.spl:436-439 from real source and had no arm here either,

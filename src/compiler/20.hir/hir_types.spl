@@ -720,6 +720,26 @@ enum HirTypeKind:
     Tensor(element: HirType, dims: [DimExpr], device: DeviceType?)
     Layer(input: [DimExpr], output: [DimExpr])
 
+    # No-GC ownership sigils (doc/05_design/language/misc/memory.md). Appended
+    # to preserve discriminants. Produced ONLY for modules in the opt-in
+    # strict mode (`@no_gc(strict)` / SIMPLE_NOGC_STRICT=1); default-mode
+    # lowering keeps the legacy Ref / Ptr / Infer, so the bootstrap closure
+    # sees no new kind.
+    Unique(inner: HirType)           # &T  unique owner
+    Shared(inner: HirType)           # *T  shared (Rc) owner
+    Weak(inner: HirType)             # -T  weak observer
+
+fn hir_type_kind_ownership_name(kind: HirTypeKind) -> text:
+    """Ownership/pointer reading of a HIR type, for diagnostics and specs."""
+    match kind:
+        case Unique(_): "unique"
+        case Shared(_): "shared"
+        case Weak(_): "weak"
+        case Ref(_, mutable): if mutable: "ref_mut" else: "ref"
+        case Ptr(_, mutable): if mutable: "ptr_mut" else: "ptr"
+        case Infer(_, _): "infer"
+        case _: ""
+
 fn hir_type_metadata_symbol_free(type_: HirType) -> bool:
     # A global name-keyed cache may transport primitive/composite shapes, but
     # cannot transport a Named/DynTrait ID or inference variable without its
@@ -730,6 +750,8 @@ fn hir_type_metadata_symbol_free(type_: HirType) -> bool:
             for item in items:
                 if not hir_type_metadata_symbol_free(item): return false
         case Array(inner, _) | Slice(inner) | Ref(inner, _) | Ptr(inner, _) | Optional(inner) | Isolated(inner):
+            return hir_type_metadata_symbol_free(inner)
+        case Unique(inner) | Shared(inner) | Weak(inner):
             return hir_type_metadata_symbol_free(inner)
         case Dict(left, right) | Result(left, right):
             return hir_type_metadata_symbol_free(left) and hir_type_metadata_symbol_free(right)

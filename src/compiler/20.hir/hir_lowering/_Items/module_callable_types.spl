@@ -427,6 +427,20 @@ impl HirLowering:
                     self.imported_surface_type(referent, imported_module_name),
                     parser_type_kind_reference_is_mutable(type_.kind)),
                 span: type_.span)
+        # memory.md ownership sigils: the pointee belongs to the declaring
+        # module too. `&T`/`*T`/`-T` mean the same thing in every module
+        # (memory.md); the IMPORTING module's mode decides only whether HIR
+        # keeps them distinct, so a strict importer checks an imported
+        # signature with the same kinds it uses for its own code. Default
+        # mode is the legacy Ref / Ptr / Infer (see lower_type).
+        if parser_type_kind_is_unique(type_.kind) or parser_type_kind_is_shared(type_.kind) or parser_type_kind_is_weak(type_.kind):
+            val owned = self.imported_surface_type(parser_type_kind_ownership_inner(type_.kind, type_), imported_module_name)
+            val owner_strict = self.nogc_strict
+            if parser_type_kind_is_unique(type_.kind):
+                return HirType(kind: if owner_strict: HirTypeKind.Unique(owned) else: HirTypeKind.Ref(owned, false), span: type_.span)
+            if parser_type_kind_is_shared(type_.kind):
+                return HirType(kind: if owner_strict: HirTypeKind.Shared(owned) else: HirTypeKind.Ptr(owned, false), span: type_.span)
+            return HirType(kind: if owner_strict: HirTypeKind.Weak(owned) else: HirTypeKind.Infer(0, 0), span: type_.span)
         if parser_type_kind_is_pointer(type_.kind):
             val pointee = parser_type_kind_pointer_inner(type_.kind, type_)
             return HirType(
@@ -1063,6 +1077,9 @@ impl HirLowering:
             case ExprKind.Await(expr):
                 val await_expr: Expr = expr
                 self.scan_ast_expr_for_returns(await_expr, params)
+            case ExprKind.New(_, constructed):
+                val new_expr: Expr = constructed
+                self.scan_ast_expr_for_returns(new_expr, params)
             case ExprKind.Yield(value):
                 var yield_scan = return_scan_empty()
                 val value_opt: Expr? = value

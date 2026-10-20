@@ -37,6 +37,8 @@ fn type_uses_param(ty: Type, param: text) -> bool:
             type_uses_param(ret, param)
         case TypeKind.Optional(inner) | TypeKind.Atomic(inner) | TypeKind.Isolated(inner) | TypeKind.Weak(inner):
             type_uses_param(inner, param)
+        case TypeKind.Unique(inner) | TypeKind.Shared(inner):
+            type_uses_param(inner, param)
         case TypeKind.Reference(_, _):
             type_uses_param(parser_type_kind_reference_inner(ty.kind, Type(kind: TypeKind.Error, span: ty.span)), param)
         case TypeKind.Pointer(_, _):
@@ -116,8 +118,13 @@ fn ast_type_to_concrete(ty: Type, bindings: {text: ConcreteType}) -> ConcreteTyp
         case TypeKind.Optional(inner):
             ConcreteType.Optional(ast_type_to_concrete(inner, bindings))
         case TypeKind.Isolated(inner): mono_pointer_concrete(ConcretePointerKind.Unique, inner, bindings)
-        case TypeKind.Atomic(inner): mono_pointer_concrete(ConcretePointerKind.Shared, inner, bindings)
+        case TypeKind.Atomic(inner): mono_pointer_concrete(ConcretePointerKind.Atomic, inner, bindings)
         case TypeKind.Weak(inner): mono_pointer_concrete(ConcretePointerKind.Weak, inner, bindings)
+        # memory.md `&T` unique owner: Unique with the Shared capability, so it
+        # stays distinct from `iso T` (Unique + Isolated) on the way back.
+        case TypeKind.Unique(inner):
+            ConcreteType.Pointer(ConcretePointerKind.Unique, ReferenceCapability.Shared, ast_type_to_concrete(inner, bindings))
+        case TypeKind.Shared(inner): mono_pointer_concrete(ConcretePointerKind.Shared, inner, bindings)
         case TypeKind.Reference(_, _):
             val kind = if parser_type_kind_reference_is_mutable(ty.kind): ConcretePointerKind.BorrowMut else: ConcretePointerKind.Borrow
             mono_pointer_concrete(kind, parser_type_kind_reference_inner(ty.kind, Type(kind: TypeKind.Error, span: ty.span)), bindings)
@@ -192,14 +199,18 @@ fn concrete_to_ast_type(concrete: ConcreteType) -> Type:
             val inner_ty = concrete_to_ast_type(inner)
             if mono_ast_is_error(inner_ty): return inner_ty
             mono_ast_type(TypeKind.Optional(inner_ty))
-        case ConcreteType.Pointer(kind, _, inner):
+        case ConcreteType.Pointer(kind, cap, inner):
             val inner_ty = concrete_to_ast_type(inner)
             # Atomic/Weak are not recursively consumed by current HIR lowering.
             # Lift child Error before any wrapper can hide unsupported Handle.
             if mono_ast_is_error(inner_ty): return inner_ty
             val ast_kind = match kind:
-                case ConcretePointerKind.Unique: TypeKind.Isolated(inner_ty)
-                case ConcretePointerKind.Shared: TypeKind.Atomic(inner_ty)
+                case ConcretePointerKind.Unique:
+                    match cap:
+                        case ReferenceCapability.Isolated: TypeKind.Isolated(inner_ty)
+                        case _: TypeKind.Unique(inner_ty)
+                case ConcretePointerKind.Shared: TypeKind.Shared(inner_ty)
+                case ConcretePointerKind.Atomic: TypeKind.Atomic(inner_ty)
                 case ConcretePointerKind.Weak: TypeKind.Weak(inner_ty)
                 case ConcretePointerKind.Borrow: TypeKind.Reference(inner_ty, false)
                 case ConcretePointerKind.BorrowMut: TypeKind.Reference(inner_ty, true)
@@ -231,6 +242,7 @@ fn ast_pointer_kind_to_concrete(kind: PointerKind) -> ConcretePointerKind:
         case PointerKind.BorrowMut: ConcretePointerKind.BorrowMut
         case PointerKind.RawConst: ConcretePointerKind.RawConst
         case PointerKind.RawMut: ConcretePointerKind.RawMut
+        case PointerKind.Atomic: ConcretePointerKind.Atomic
 
 fn concrete_pointer_kind_to_ast(kind: ConcretePointerKind) -> PointerKind:
     match kind:
@@ -242,3 +254,4 @@ fn concrete_pointer_kind_to_ast(kind: ConcretePointerKind) -> PointerKind:
         case ConcretePointerKind.BorrowMut: PointerKind.BorrowMut
         case ConcretePointerKind.RawConst: PointerKind.RawConst
         case ConcretePointerKind.RawMut: PointerKind.RawMut
+        case ConcretePointerKind.Atomic: PointerKind.Atomic

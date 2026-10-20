@@ -60,6 +60,7 @@ use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_wa
 use compiler.core.parser.{parser_guarded_int_text}
 use compiler.frontend.core._ParserPrimary.unsigned_integer_literals.{parser_unsigned_integer_suffix, parse_unsigned_int_literal_text}
 use compiler.core.parser.{parser_has_errors}
+use compiler.core.parser.{parser_new_paren_sigil_kind}
 use compiler.core.parser.{parser_parse_type}
 
 # Forward declarations for mutual recursion
@@ -591,21 +592,41 @@ fn parse_primary_expr() -> i64:
             return expr_ident("new", 0)
         if new_next_kind == TOK_EOF or new_next_kind == TOK_RBRACE or new_next_kind == TOK_RBRACKET or new_next_kind == TOK_SEMICOLON:
             return expr_ident("new", 0)
-        # alloc_kind: 0 = default, 1 = pool, 2 = explicit allocator
+        # alloc_kind, aligned with the Rust seed's PointerKind for `new`
+        # (doc/05_design/language/misc/memory.md):
+        #   0 = bare `new X` (kind follows the memory mode),
+        #   1 = unique  `new(&) X` / `new& X` / `new() X` (type pool),
+        #   2 = shared  `new(*) X` / `new* X`,
+        #   3 = weak    `new(-) X` / `new- X`,
+        #   4 = handle  `new(+) X` / `new+ X` / `new(allocator) X`.
         var alloc_kind = 0
         var alloc_expr_id = -1
-        # Check for allocator spec: new() or new(allocator)
         if par_kind_get() == 140:
             parser_advance()
-            if par_kind_get() == 141:
-                # new() — type pool
+            val paren_sigil = parser_new_paren_sigil_kind()
+            if paren_sigil >= 0:
+                alloc_kind = paren_sigil
+            elif par_kind_get() == 141:
+                # new() — type pool, a unique owner
                 parser_advance()
                 alloc_kind = 1
             else:
-                # new(allocator_expr) — explicit allocator
+                # new(allocator_expr) — explicit allocator (handle)
                 alloc_expr_id = parse_expr()
                 parser_expect(141)
-                alloc_kind = 2
+                alloc_kind = 4
+        elif new_next_kind == TOK_AMPERSAND:
+            parser_advance()
+            alloc_kind = 1
+        elif new_next_kind == TOK_STAR:
+            parser_advance()
+            alloc_kind = 2
+        elif new_next_kind == TOK_MINUS:
+            parser_advance()
+            alloc_kind = 3
+        elif new_next_kind == TOK_PLUS:
+            parser_advance()
+            alloc_kind = 4
         val inner = parse_expr()
         return expr_new_alloc(alloc_kind, alloc_expr_id, inner, 0)
 
