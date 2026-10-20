@@ -21,6 +21,7 @@ use compiler.mono.verify.post_mono_verify.{post_mono_archive_admission_v1}
 use driver_types.{CompileContext}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_build.native_staged_codegen.{native_staged_codegen_flush_due_v1}
+use compiler.driver.driver_build.go_to_end.{go_to_end_enabled_v1, GO_TO_END_UNATTRIBUTED_V1}
 use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_spec_v1,
     native_mir_shard_claim_cap_v1, native_mir_shard_claim_v1, native_mir_shard_lpt_order_v1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory}
@@ -277,7 +278,7 @@ fn _driver_mir_ice_continue(ctx: CompileContext, name: text, path: text, message
     --fail-fast). Without a run directory this is release behaviour: the
     message is added unchanged and the loop stops."""
     ctx.add_error(ice_boundary_fail(name, path, "mir_lower", "", message))
-    if arena_aborted or not ice_boundary_keep_going():
+    if arena_aborted or not (ice_boundary_keep_going() or go_to_end_enabled_v1()):
         return false
     ctx.mark_module_poisoned(name)
     not ctx.poison_budget_exhausted()
@@ -349,6 +350,31 @@ impl CompilerDriver:
     # MIR Lowering
     # --------------------------------------------------------------------------
 
+    me go_to_end_record_mir_failure_v1(name: text, lowering_errors: [MirError],
+            lowering_start: i64, ctx_start: i64):
+        """go-to-end (driver_build/go_to_end.spl): record one module whose MIR
+        lowering failed, with the fatal errors IT produced, and keep it out of
+        ctx.mir_modules so codegen only sees modules that lowered."""
+        var recorded = 0
+        var index = lowering_start
+        while index >= 0 and index < lowering_errors.len():
+            val err: MirError = lowering_errors[index]
+            if driver_mir_error_is_fatal_v1(err):
+                self.go_to_end.record("mir", name, _format_mir_error(err))
+                recorded = recorded + 1
+            index = index + 1
+        var ctx_index = ctx_start
+        while ctx_index >= 0 and ctx_index < self.ctx.error_count_value:
+            val message = self.ctx.error_message_at(ctx_index)
+            if message != "":
+                self.go_to_end.record("mir", name, message)
+                recorded = recorded + 1
+            ctx_index = ctx_index + 1
+        if recorded == 0:
+            self.go_to_end.record("mir", name, "MIR lowering failed")
+        self.go_to_end.exclude(name)
+        log_phase("aot:lower_to_mir:go_to_end_failed module={name} errors={recorded}")
+
     me lower_to_mir() -> bool:
         val lowered = self.lower_to_mir_with_target_context(
             driver_mir_target_context(self.ctx.options), false, true)
@@ -356,9 +382,33 @@ impl CompilerDriver:
         # handed to a backend; verifying the partial module set would only
         # stack a second error on top (e.g. a malformed level spec).
         if not lowered:
-            return false
+            # go-to-end: every scheduled module was attempted and the failures
+            # are recorded per module -- continue with the ones that lowered.
+            # An early stop (whole-build failure) never qualifies.
+            if not (go_to_end_enabled_v1() and self.go_to_end.mir_scan_complete and
+                    self.go_to_end.count_stage("mir") > 0 and
+                    self.ctx.mir_modules.len() > 0):
+                return false
+            self.go_to_end_absorb_errors_v1("mir")
+            if not self.publish_runtime_std_mir_emissions_v1(): return false
+            val go_to_end_mir_failed = self.go_to_end.stage_modules("mir").len()
+            val go_to_end_mir_kept = self.ctx.mir_modules.len()
+            print "[go-to-end] MIR: {go_to_end_mir_failed} module(s) failed; continuing with {go_to_end_mir_kept} lowered module(s)"
         log_phase("aot:verify_lowered_mir:start")
         self.verify_lowered_mir_v1()
+
+    me go_to_end_absorb_errors_v1(stage: text):
+        """go-to-end: move the context's errors into the ledger (any not
+        already recorded against a module become `(unattributed)`) and clear
+        them, so the later stages run over the surviving modules."""
+        var index = 0
+        while index < self.ctx.error_count_value:
+            val message = self.ctx.error_message_at(index)
+            if message != "" and not self.go_to_end.has_message(message):
+                self.go_to_end.record(stage, GO_TO_END_UNATTRIBUTED_V1, message)
+            index = index + 1
+        self.ctx.errors = []
+        self.ctx.error_count_value = 0
 
     me lower_to_mir_for_explicit_target(target_context: MirTargetContext) -> bool:
         val lowered = self.lower_to_mir_with_target_context(target_context, true, false)
@@ -742,6 +792,12 @@ impl CompilerDriver:
                 admitted_physical_paths = admitted_physical_paths.push(_driver_physical_source_key(retained_path))
             var physical_owners: [text] = []
             for logical_name in self.ctx.source_module_names_owner:
+                # go-to-end: a module dropped at HIR keeps its inventory slot
+                # (its logical name stands in for the owner); the lowering
+                # loop skips it and the manifest names it.
+                if go_to_end_enabled_v1() and self.go_to_end.is_excluded(logical_name):
+                    physical_owners = physical_owners.push(logical_name)
+                    continue
                 if not self.ctx.hir_modules.contains_key(logical_name):
                     self.ctx.add_error("MIR physical ownership missing HIR for {logical_name}")
                     return false
@@ -779,6 +835,8 @@ impl CompilerDriver:
                 self.ctx.mir_feed_modules = []
                 for physical_index in physical_indices:
                     val logical_name = self.ctx.source_module_names_owner[physical_index]
+                    if go_to_end_enabled_v1() and self.go_to_end.is_excluded(logical_name):
+                        continue
                     # Cycle-125: guard-first double access (the erased-read
                     # class).
                     if not self.ctx.hir_modules.has(logical_name):
@@ -1245,6 +1303,8 @@ impl CompilerDriver:
                                 self.ctx.set_bootstrap_entry_mir(prelower_skip_name, prelower_skip_mir)
                         if not self.publish_runtime_std_mir_emissions_v1(): return false
                         return self.ctx.error_count_value == 0
+            val go_to_end_active = go_to_end_enabled_v1()
+            self.go_to_end.mir_scan_complete = false
             val mir_progress_started_ms = time_now_monotonic_ms()
             while direct_pos < mir_source_indices.len():
                 # Schedule position; the entry flag below keys on it, not on
@@ -1255,6 +1315,13 @@ impl CompilerDriver:
                 val source_lookup_name = src_direct.module_name
                 val module_context_errors_before = self.ctx.error_count_value
                 var module_new_fatal = false
+                # go-to-end: a module excluded at HIR (failed, or importing a
+                # failure) has no HIR; skip it before anything reads its HIR.
+                if go_to_end_active and self.go_to_end.is_excluded(source_lookup_name):
+                    log_phase("aot:lower_to_mir:go_to_end_skip module={source_lookup_name}")
+                    direct_pos = direct_pos + 1
+                    continue
+                val module_lowering_errors_before = direct_lowering.errors.len()
                 val name_direct = if mir_physical_ownership_active:
                     mir_layout_canonical_module_name(self.ctx.hir_modules[source_lookup_name].name)
                 else:
@@ -1356,12 +1423,20 @@ impl CompilerDriver:
                     )
                 if mir_physical_ownership_active:
                     mir_direct.name = name_direct
-                self.ctx.mir_modules[name_direct] = mir_direct
-                if name_direct == "app.cli.bootstrap_main":
-                    self.ctx.set_bootstrap_entry_mir(name_direct, mir_direct)
+                val module_mir_failed = module_new_fatal or self.ctx.error_count_value > module_context_errors_before
+                if go_to_end_active and module_mir_failed:
+                    # go-to-end: record the module with its own errors and never
+                    # publish its (broken) MIR, so codegen sees only good modules.
+                    self.go_to_end_record_mir_failure_v1(name_direct,
+                        direct_lowering.errors, module_lowering_errors_before,
+                        module_context_errors_before)
+                else:
+                    self.ctx.mir_modules[name_direct] = mir_direct
+                    if name_direct == "app.cli.bootstrap_main":
+                        self.ctx.set_bootstrap_entry_mir(name_direct, mir_direct)
                 direct_pos = direct_pos + 1
                 mir_failed_modules = build_phase_record_failed_module_v1(mir_failed_modules,
-                    module_new_fatal or self.ctx.error_count_value > module_context_errors_before)
+                    module_mir_failed)
                 if direct_pos % 64 == 0 or direct_pos == mir_source_indices.len():
                     log_build_progress("mir", "modules", direct_pos,
                         mir_source_indices.len(), name_direct,
@@ -1373,9 +1448,11 @@ impl CompilerDriver:
                 if self.native_staged_codegen.active and native_staged_codegen_flush_due_v1(
                         staged_pending, self.native_staged_codegen.batch_size,
                         direct_pos, mir_source_indices.len()):
-                    if not self.native_staged_codegen_flush_v1(mir_failed_modules > 0):
+                    if not self.native_staged_codegen_flush_v1(mir_failed_modules > 0 and not go_to_end_active):
                         return false
                     staged_pending = 0
+            # go-to-end: the whole schedule was attempted (no early return).
+            self.go_to_end.mir_scan_complete = true
             log_phase("aot:mir_diagnostics:errors:start")
             _driver_collect_mir_errors(self.ctx, direct_lowering.errors)
             log_phase("aot:mir_diagnostics:errors:done")

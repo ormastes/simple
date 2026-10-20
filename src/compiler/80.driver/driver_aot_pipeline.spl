@@ -41,6 +41,9 @@ use compiler.driver.driver_mir_shard_export_v1.{driver_mir_shard_export_write_v1
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_seal,
     hir_shard_recovery_complete, hir_shard_recovery_block}
 use compiler.driver.driver_build.build_outcome.{BuildUnitOutcome}
+use compiler.driver.driver_build.go_to_end.{go_to_end_enabled_v1, go_to_end_write_manifest_v1,
+    go_to_end_blocked_modules_v1,
+    GO_TO_END_UNATTRIBUTED_V1}
 use std.io_runtime.{exit}
 use std.nogc_sync_mut.io.pipe.{stdout_flush}
 
@@ -144,6 +147,11 @@ impl CompilerDriver:
                 log_error(ice_summary)
             val msg = if ice_summary != "": ice_summary elif self.ctx.has_errors(): self.ctx.error_message_at(0) else: "MIR lowering failed"
             log_build_progress_failure("mir", "modules", "lower_to_mir", 4, 6)
+            if go_to_end_enabled_v1():
+                # Could not continue past MIR (early stop, verify failure, or
+                # nothing lowered): still name every failure, never link.
+                self.go_to_end_absorb_errors_v1("mir")
+                return self.go_to_end_finish_v1(0, [])
             return CompileResult.CodegenError(msg)
         log_phase("aot:lower_to_mir:done")
         log_build_progress("mir", "modules", self.ctx.mir_modules.len(),
@@ -166,6 +174,9 @@ impl CompilerDriver:
                     log_error("Borrow error: {err}")
                 log_build_progress("borrow_check", "modules", -1,
                     self.ctx.mir_modules.len(), "start", 4, 6, 1, 0, "failed")
+                if go_to_end_enabled_v1():
+                    self.go_to_end_absorb_errors_v1("borrow")
+                    return self.go_to_end_finish_v1(0, [])
                 return CompileResult.BorrowError(self.ctx.errors)
             log_phase("aot:borrow_check:done")
             log_build_progress("borrow_check", "modules",
@@ -254,6 +265,12 @@ impl CompilerDriver:
         log_phase("aot:output:start")
         val output = self.ctx.options.output_file ?? _driver_default_output(self.ctx.options.input_files)
         log_phase("aot:output:done")
+        # go-to-end with failures recorded: only the per-module native lane can
+        # emit the good objects without linking; every other dispatch would
+        # turn a partial module set into an output, so it stops here.
+        if go_to_end_enabled_v1() and self.go_to_end.len() > 0 and
+                not self.native_staged_codegen_eligible_v1():
+            return self.go_to_end_finish_v1(0, [])
 
         log_phase("aot:backend_name:start")
         val backend_name = self.ctx.options.backend
@@ -331,6 +348,83 @@ impl CompilerDriver:
             return CompileResult.Success(output)
         log_phase("aot:native_dispatch:start")
         return self.compile_to_native(output)
+
+    me go_to_end_finish_v1(object_count: i64, built_modules: [text]) -> CompileResult:
+        """go-to-end terminal: write `<output>.go-to-end.sdn` naming every
+        failed module per stage, skip the link, and fail the build. Never a
+        success, never a partial binary."""
+        if self.go_to_end.len() == 0:
+            self.go_to_end.record("build", GO_TO_END_UNATTRIBUTED_V1,
+                "build failed without recorded diagnostics")
+        val output = self.ctx.options.output_file ?? _driver_default_output(self.ctx.options.input_files)
+        val verdict = go_to_end_write_manifest_v1(output, self.go_to_end, object_count, built_modules)
+        print "[go-to-end] {verdict}"
+        stdout_flush()
+        CompileResult.CodegenError(verdict)
+
+    me go_to_end_recover_hir_v1() -> bool:
+        """go-to-end after a failed HIR phase. The HIR routes already DROP a
+        poisoned module from ctx.hir_modules; this records each one (with the
+        diagnostics that name its source path), excludes every surviving
+        module that imports a failed one -- transitively -- and clears the
+        phase errors so monomorphization and MIR run over the rest. False when
+        the failure names no module (nothing to attribute: the caller stops)."""
+        val poisoned_count = self.ctx.poisoned_module_count()
+        if poisoned_count <= 0:
+            return false
+        var failed: [text] = []
+        var poisoned_idx = 0
+        while poisoned_idx < poisoned_count and poisoned_idx < self.ctx.poisoned_modules.len():
+            val name = self.ctx.poisoned_modules[poisoned_idx]
+            var seen = false
+            for prior in failed:
+                if prior == name:
+                    seen = true
+            if not seen:
+                failed = failed.push(name)
+            poisoned_idx = poisoned_idx + 1
+        if failed.len() == 0:
+            return false
+        for failed_name in failed:
+            var failed_path = ""
+            for source in self.ctx.sources:
+                if source.module_name == failed_name:
+                    failed_path = source.path
+            var attributed = 0
+            var error_idx = 0
+            while error_idx < self.ctx.error_count_value:
+                val message = self.ctx.error_message_at(error_idx)
+                if failed_path != "" and message.contains(failed_path):
+                    self.go_to_end.record("hir", failed_name, message)
+                    attributed = attributed + 1
+                error_idx = error_idx + 1
+            if attributed == 0:
+                self.go_to_end.record("hir", failed_name,
+                    "HIR lowering/type-check failed (diagnostics not attributable by path; see the unattributed rows)")
+            self.go_to_end.exclude(failed_name)
+            self.ctx.hir_modules.remove(failed_name)
+        var candidates: [text] = []
+        var edge_from: [text] = []
+        var edge_to: [text] = []
+        for hir_name in self.ctx.hir_modules.keys():
+            if val hir_module = self.ctx.hir_modules[hir_name]:
+                candidates = candidates.push(hir_name)
+                for hir_import in hir_module.imports:
+                    edge_from = edge_from.push(hir_name)
+                    edge_to = edge_to.push(hir_import.module_path)
+        val blocked = go_to_end_blocked_modules_v1(candidates, edge_from, edge_to, failed)
+        for blocked_name in blocked:
+            self.go_to_end.record("hir_dependency", blocked_name,
+                "not lowered: imports (transitively) a module whose HIR failed")
+            self.go_to_end.exclude(blocked_name)
+            self.ctx.hir_modules.remove(blocked_name)
+        self.go_to_end_absorb_errors_v1("hir")
+        self.ctx.poisoned_modules = []
+        self.ctx.poisoned_module_count_value = 0
+        val kept = self.ctx.hir_modules.len()
+        print "[go-to-end] HIR: {failed.len()} module(s) failed, {blocked.len()} dependent(s) excluded; continuing with {kept} module(s)"
+        stdout_flush()
+        kept > 0
 
     fn native_staged_codegen_eligible_v1() -> bool:
         """Staging is admitted only where aot_compile is known to end in the
