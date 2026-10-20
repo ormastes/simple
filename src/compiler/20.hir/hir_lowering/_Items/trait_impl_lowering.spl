@@ -180,7 +180,39 @@ impl HirLowering:
         self.lowered_traits[trait_.name] = hir_trait
         hir_trait
 
+    me with_trait_candidate_conforms(impl_: Impl) -> bool:
+        """A `class X with Trait:` candidate (exactly one `with` name, see
+        fn_struct_decls.spl) is a trait impl when the name is a trait known
+        here -- local or imported, never a mixin -- and X defines every
+        required (body-less) method. The seed's rule from #3981
+        (record_class_with_trait_impls); otherwise the old inherent-impl
+        behaviour stands, so a partial class never gets a vtable it cannot
+        fill. doc/08_tracking/bug/trait_receiver_cross_unit_bare_call_stubbed_2026-10-20.md"""
+        if not impl_.with_trait_candidate: return false
+        val trait_name = parser_type_kind_named_name(impl_.trait_.kind)
+        if trait_name == "": return false
+        var required: [text] = []
+        if self.lowered_traits.contains_key(trait_name):
+            val lowered: HirTrait = self.lowered_traits[trait_name]
+            for method in lowered.methods:
+                required = required.push(method.name)
+        elif self.imported_traits.contains_key(trait_name):
+            val imported: ParserTrait = self.imported_traits[trait_name]
+            # Reached through an import alias (`use m.{T as U}`): refuse, as
+            # the seed does -- the cross-unit owner scan sees only `T`.
+            if imported.name != trait_name: return false
+            for method in imported.methods:
+                if method.body.stmts.is_empty():
+                    required = required.push(method.name)
+        else:
+            return false
+        for name in required:
+            if not impl_.methods.contains_key(name): return false
+        true
+
     me lower_impl(impl_: Impl) -> HirImpl:
+        # `class X with Trait:` is a trait impl only once confirmed here.
+        val has_trait = impl_.has_trait_ or self.with_trait_candidate_conforms(impl_)
         self.symbols.push_scope(ScopeKind.Impl)
 
         # Lower generic type parameters
@@ -218,7 +250,7 @@ impl HirLowering:
         # Declare with the type annotation on the same line as the `nil`
         # literal rather than a ternary with a bare `nil` else-branch.
         var trait_: HirType? = nil
-        if impl_.has_trait_:
+        if has_trait:
             trait_ = self.lower_type(impl_.trait_)
 
         # #158 generics sweep: an impl block for a generic struct/class (e.g.
@@ -290,7 +322,7 @@ impl HirLowering:
         # Without this, HirImpl.methods only contains textually-present methods,
         # so positional dispatch against the trait's full method list aliases the
         # wrong body (or SIGSEGVs). See task #55.
-        if impl_.has_trait_:
+        if has_trait:
             # `Impl.trait_` is declared `Type` (non-optional); its one real
             # construction site (`_FlatAstBridge/module_assembly.spl`)
             # always supplies a concrete `Type` (falling back to
@@ -391,7 +423,7 @@ impl HirLowering:
             type_: type_,
             # This is an explicit desugared pair, not an optional field whose
             # presence flag the constructor can infer from its payload.
-            has_trait_: impl_.has_trait_,
+            has_trait_: has_trait,
             trait_: trait_,
             type_params: type_params,
             where_clause: where_clause,

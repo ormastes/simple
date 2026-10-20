@@ -47,7 +47,7 @@ use compiler.core.ast.{decl_set_is_value_type, decl_set_type_params, decl_set_ty
 use compiler.core.ast.{decl_set_param_defaults}
 use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding}
 use compiler.core.ast.{decl_use_import, decl_export_names, decl_enum_def, decl_set_lazy}
-use compiler.core.ast.{decl_impl_block, decl_set_trait}
+use compiler.core.ast.{decl_impl_block, decl_set_trait, decl_set_impl_with_trait}
 use compiler.core.ast.{decl_set_comptime}
 use compiler.core.ast.{decl_set_visibility_text}
 use compiler.core.ast.{decl_is_gpu_kernel, decl_is_simd, decl_is_packed, decl_derives}
@@ -963,13 +963,19 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
                 break
             parser_advance()
         parser_expect(141)
-    # Handle one or more mixins: class X with Read, Write, Close:
+    # Handle one or more mixins/traits: class X with Read, Write, Close:
+    # The names are kept (they used to be discarded): exactly ONE name is a
+    # trait-implementation candidate that HIR confirms or drops once the
+    # trait declaration is known (see decl_set_impl_with_trait below).
+    var with_names: [text] = []
     if par_kind_get() == 6:
         if par_text_get() == "with":
             parser_advance()
+            with_names.push(par_text_get())
             parser_expect(6)
             while par_kind_get() == 160:
                 parser_advance()
+                with_names.push(par_text_get())
                 parser_expect(6)
     # The same where grammar applies to generic structs/classes. Keep the
     # body colon intact for parser_expect below; semantic bound enforcement
@@ -1314,6 +1320,12 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
         # even when the enclosing struct/class is generic.
         if type_params.len() > 0:
             decl_set_type_params(impl_d, type_params)
+        # `class X with Trait:` (one name): a candidate, not yet an impl --
+        # the parser cannot tell a trait from a mixin or check the required
+        # methods. Several names keep the old behaviour: an object has one
+        # vtable header, so `with Read, Close` cannot be one trait impl.
+        if is_class and with_names.len() == 1:
+            decl_set_impl_with_trait(impl_d, with_names[0])
         module_add_decl(impl_d)
 
     parser_collection_site_owner_restore(previous_collection_owner)
