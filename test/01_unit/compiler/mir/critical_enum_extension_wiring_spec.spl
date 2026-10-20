@@ -1,0 +1,301 @@
+# REQ-002: critical static coverage must see variants hidden by defaults.
+# AUTHORED / UNRUN. Run in an isolated spec process: scenarios temporarily set
+# the existing safety profile and restore its exact nullable value before assertions.
+# Inline each frontend/HIR/MIR pipeline to preserve actual mutation ownership.
+use std.spec
+use std.spec.step
+use std.io_runtime.{env_get_nullable, env_set_process}
+use std.nogc_sync_mut.env.variables.{env_unset}
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_lowering_types.{MirLowering, MirError}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir_instruction_graph.{MirModule, MirFunction}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_instruction_support.{MirTerminator, MirOperandKind}
+use compiler.mir.mir_types.{MirConstValue}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.driver.driver_pipeline_lowering.{driver_mir_error_is_fatal_v1}
+
+fn critical_wire_restore_profile(previous: text?) -> bool:
+    if val value = previous:
+        env_set_process("SIMPLE_SAFETY_PROFILE", value)
+    else:
+        env_unset("SIMPLE_SAFETY_PROFILE")
+
+fn critical_wire_fatal_messages(errors: [MirError]) -> [text]:
+    var messages: [text] = []
+    for error in errors:
+        if error.fatal:
+            messages.push(error.message)
+    messages
+
+fn critical_wire_contains(messages: [text], needle: text) -> bool:
+    for message in messages:
+        if message.contains(needle): return true
+    false
+
+fn critical_wire_call_count(module: MirModule, callee: text) -> i64:
+    var count: i64 = 0
+    for function in module.functions.values():
+        if function.name == "probe" or function.name.ends_with(".probe"):
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.Call(_, operand, _):
+                            match operand.kind:
+                                case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                    if name == callee or name.ends_with("." + callee):
+                                        count = count + 1
+                                case _: ()
+                        case _: ()
+    count
+
+fn critical_wire_abort_count(module: MirModule) -> i64:
+    var count: i64 = 0
+    for function in module.functions.values():
+        if function.name == "probe" or function.name.ends_with(".probe"):
+            for block in function.blocks:
+                match block.terminator:
+                    case MirTerminator.Abort(_): count = count + 1
+                    case _: ()
+    count
+
+# A structural oracle for this fixture's existing unconditional default path.
+# Follow actual block/local identities; reject conditional dispatch, cycles,
+# missing blocks, unknown writes, or a return not derived from the literal 9.
+fn critical_wire_default_returns_nine(function: MirFunction) -> bool:
+    var nine: Dict<i64, bool> = {}
+    var current = function.entry_block.id
+    var visited: Dict<i64, bool> = {}
+    var remaining = function.blocks.len()
+    while remaining > 0:
+        if visited.contains(current): return false
+        visited[current] = true
+        var found = false
+        var next = -1
+        for block in function.blocks:
+            if block.id.id == current:
+                found = true
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.Const(dest, value, _):
+                            nine[dest.id] = match value:
+                                case MirConstValue.Int(number): number == 9
+                                case _: false
+                        case MirInstKind.Copy(dest, source) | MirInstKind.Move(dest, source):
+                            nine[dest.id] = nine[source.id] ?? false
+                        case MirInstKind.Call(dest, _, _):
+                            if val local = dest:
+                                nine[local.id] = false
+                        case _: return false
+                match block.terminator:
+                    case MirTerminator.Goto(target): next = target.id
+                    case MirTerminator.Ret(value):
+                        if val operand = value:
+                            match operand.kind:
+                                case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                                    return nine[local.id] ?? false
+                                case MirOperandKind.Const(MirConstValue.Int(number), _):
+                                    return number == 9
+                                case _: return false
+                        return false
+                    case _: return false
+        if not found or next < 0: return false
+        current = next
+        remaining = remaining - 1
+    false
+
+fn critical_wire_default_probe_count(module: MirModule) -> i64:
+    var count = 0
+    for function in module.functions.values():
+        if function.name == "probe" or function.name.ends_with(".probe"):
+            if not critical_wire_default_returns_nine(function): return -1
+            count = count + 1
+    count
+
+describe "REQ-002 critical enum extension production wiring":
+    it "rejects only the newly hidden variant through actual critical and alias lowering":
+        for profile in ["critical", "mission-critical"]:
+            for injected in [false, true]:
+                val extension = if injected: "    Borrow(i64)\n" else: ""
+                val src = "enum WireKind:\n    Copy(i64)\n    Move(i64)\n    Const(i64)\n" + extension + "fn probe(value: WireKind) -> i64:\n    match value:\n        case WireKind.Copy(n): n\n        case WireKind.Move(n): n\n        case WireKind.Const(n): n\n        case _: -1\n"
+                val previous = env_get_nullable("SIMPLE_SAFETY_PROFILE")
+                val selected = env_set_process("SIMPLE_SAFETY_PROFILE", profile)
+                val parsed = parse_full_frontend(src, "testdata/critical_enum_wire.spl", "critical_enum_wire", Logger(level: 0))
+                var hir_lowering = HirLowering.with_filename("testdata/critical_enum_wire.spl")
+                val hir = hir_lowering.lower_module(parsed)
+                val target = driver_mir_target_context(driver_core_compile_options_default())
+                var lowering = MirLowering.new_for_target(hir.symbols, target)
+                val mir = lowering.lower_module(hir)
+                val restored = critical_wire_restore_profile(previous)
+                expect(selected and restored).to_equal(true)
+                expect(env_get_nullable("SIMPLE_SAFETY_PROFILE")).to_equal(previous)
+                expect(hir_lowering.errors.len()).to_equal(0)
+                val fatal = critical_wire_fatal_messages(lowering.errors)
+                expect(critical_wire_contains(fatal, "E-COMPLETE-001")).to_equal(injected)
+                expect(critical_wire_contains(fatal, "Borrow")).to_equal(injected)
+                if not injected: expect(fatal.len()).to_equal(0)
+                expect(critical_wire_abort_count(mir)).to_equal(0)
+
+    it "checks wildcard-only and capture-only dispatch without reevaluating the subject":
+        for catchall in ["_", "captured"]:
+            val profile = "critical"
+            val src = "enum Tone:\n    Red\n    Blue\nfn make() -> Tone:\n    Tone.Red\nfn probe() -> i64:\n    match make():\n        case " + catchall + ": 9\n"
+            val previous = env_get_nullable("SIMPLE_SAFETY_PROFILE")
+            val selected = env_set_process("SIMPLE_SAFETY_PROFILE", profile)
+            val parsed = parse_full_frontend(src, "testdata/critical_enum_wire.spl", "critical_enum_wire", Logger(level: 0))
+            var hir_lowering = HirLowering.with_filename("testdata/critical_enum_wire.spl")
+            val hir = hir_lowering.lower_module(parsed)
+            val target = driver_mir_target_context(driver_core_compile_options_default())
+            var lowering = MirLowering.new_for_target(hir.symbols, target)
+            val mir = lowering.lower_module(hir)
+            val restored = critical_wire_restore_profile(previous)
+            expect(selected and restored).to_equal(true)
+            expect(env_get_nullable("SIMPLE_SAFETY_PROFILE")).to_equal(previous)
+            expect(hir_lowering.errors.len()).to_equal(0)
+            val fatal = critical_wire_fatal_messages(lowering.errors)
+            expect(critical_wire_contains(fatal, "E-COMPLETE-001")).to_equal(true)
+            expect(critical_wire_contains(fatal, "Red")).to_equal(true)
+            expect(critical_wire_contains(fatal, "Blue")).to_equal(true)
+            expect(critical_wire_call_count(mir, "make")).to_equal(1)
+            expect(critical_wire_call_count(mir, "rt_enum_discriminant")).to_equal(0)
+            expect(critical_wire_call_count(mir, "rt_enum_payload")).to_equal(0)
+            expect(critical_wire_default_probe_count(mir)).to_equal(1)
+
+    it "preserves ordinary profile wildcard and capture routing":
+        for profile in ["moderate", "strict", "robust"]:
+            for catchall in ["_", "captured"]:
+                val src = "enum Tone:\n    Red\n    Blue\nfn make() -> Tone:\n    Tone.Red\nfn probe() -> i64:\n    match make():\n        case " + catchall + ": 9\n"
+                val previous = env_get_nullable("SIMPLE_SAFETY_PROFILE")
+                val selected = env_set_process("SIMPLE_SAFETY_PROFILE", profile)
+                val parsed = parse_full_frontend(src, "testdata/critical_enum_wire.spl", "critical_enum_wire", Logger(level: 0))
+                var hir_lowering = HirLowering.with_filename("testdata/critical_enum_wire.spl")
+                val hir = hir_lowering.lower_module(parsed)
+                val target = driver_mir_target_context(driver_core_compile_options_default())
+                var lowering = MirLowering.new_for_target(hir.symbols, target)
+                val mir = lowering.lower_module(hir)
+                val restored = critical_wire_restore_profile(previous)
+                expect(selected and restored).to_equal(true)
+                expect(env_get_nullable("SIMPLE_SAFETY_PROFILE")).to_equal(previous)
+                expect(hir_lowering.errors.len()).to_equal(0)
+                val fatal = critical_wire_fatal_messages(lowering.errors)
+                expect(fatal.len()).to_equal(0)
+                expect(critical_wire_call_count(mir, "make")).to_equal(1)
+                expect(critical_wire_call_count(mir, "rt_enum_discriminant")).to_equal(0)
+                expect(critical_wire_call_count(mir, "rt_enum_payload")).to_equal(0)
+                expect(critical_wire_default_probe_count(mir)).to_equal(1)
+                expect(critical_wire_abort_count(mir)).to_equal(0)
+
+    it "preserves noncritical partial enum defaults when a variant is added":
+        for profile in ["moderate", "strict", "robust"]:
+            val src = "enum WireKind:\n    Copy(i64)\n    Move(i64)\n    Const(i64)\n    Borrow(i64)\nfn probe(value: WireKind) -> i64:\n    match value:\n        case WireKind.Copy(n): n\n        case WireKind.Move(n): n\n        case WireKind.Const(n): n\n        case _: -1\n"
+            val previous = env_get_nullable("SIMPLE_SAFETY_PROFILE")
+            val selected = env_set_process("SIMPLE_SAFETY_PROFILE", profile)
+            val parsed = parse_full_frontend(src, "testdata/critical_enum_wire.spl", "critical_enum_wire", Logger(level: 0))
+            var hir_lowering = HirLowering.with_filename("testdata/critical_enum_wire.spl")
+            val hir = hir_lowering.lower_module(parsed)
+            val target = driver_mir_target_context(driver_core_compile_options_default())
+            var lowering = MirLowering.new_for_target(hir.symbols, target)
+            val mir = lowering.lower_module(hir)
+            val restored = critical_wire_restore_profile(previous)
+            expect(selected and restored).to_equal(true)
+            expect(env_get_nullable("SIMPLE_SAFETY_PROFILE")).to_equal(previous)
+            expect(hir_lowering.errors.len()).to_equal(0)
+            val fatal = critical_wire_fatal_messages(lowering.errors)
+            expect(fatal.len()).to_equal(0)
+            expect(critical_wire_abort_count(mir)).to_equal(0)
+
+    it "does not count a guarded named arm as static coverage":
+        val profile = "critical"
+        val src = "enum Guarded:\n    Known(i64)\n    Other\nfn probe(value: Guarded) -> i64:\n    match value:\n        case Guarded.Known(n) if n > 0: n\n        case Guarded.Other: 0\n        case _: -1\n"
+        val previous = env_get_nullable("SIMPLE_SAFETY_PROFILE")
+        val selected = env_set_process("SIMPLE_SAFETY_PROFILE", profile)
+        val parsed = parse_full_frontend(src, "testdata/critical_enum_wire.spl", "critical_enum_wire", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/critical_enum_wire.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        val target = driver_mir_target_context(driver_core_compile_options_default())
+        var lowering = MirLowering.new_for_target(hir.symbols, target)
+        val mir = lowering.lower_module(hir)
+        val restored = critical_wire_restore_profile(previous)
+        expect(selected and restored).to_equal(true)
+        expect(env_get_nullable("SIMPLE_SAFETY_PROFILE")).to_equal(previous)
+        expect(hir_lowering.errors.len()).to_equal(0)
+        val fatal = critical_wire_fatal_messages(lowering.errors)
+        expect(critical_wire_contains(fatal, "E-COMPLETE-001")).to_equal(true)
+        expect(critical_wire_contains(fatal, "Known")).to_equal(true)
+        expect(critical_wire_abort_count(mir)).to_equal(0)
+
+    it "retains wrong-owner refusal when unrelated enums share variant names":
+        val profile = "critical"
+        val src = "enum First:\n    Shared\n    Added\nenum Second:\n    Shared\n    Added\nfn probe(value: First) -> i64:\n    match value:\n        case Second.Shared: 1\n        case _: 0\n"
+        val previous = env_get_nullable("SIMPLE_SAFETY_PROFILE")
+        val selected = env_set_process("SIMPLE_SAFETY_PROFILE", profile)
+        val parsed = parse_full_frontend(src, "testdata/critical_enum_wire.spl", "critical_enum_wire", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/critical_enum_wire.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        val target = driver_mir_target_context(driver_core_compile_options_default())
+        var lowering = MirLowering.new_for_target(hir.symbols, target)
+        val mir = lowering.lower_module(hir)
+        val restored = critical_wire_restore_profile(previous)
+        expect(selected and restored).to_equal(true)
+        expect(env_get_nullable("SIMPLE_SAFETY_PROFILE")).to_equal(previous)
+        expect(hir_lowering.errors.len()).to_equal(0)
+        var owner_mismatches = 0
+        for error in lowering.errors:
+            if error.message.contains("does not match subject owner"):
+                owner_mismatches = owner_mismatches + 1
+                expect(error.message).to_start_with("enum match: pattern owner '")
+                expect(error.message).to_contain("Second")
+                expect(error.message).to_contain("' does not match subject owner '")
+                expect(error.message).to_contain("First")
+                expect(error.message).to_end_with("'")
+                # This existing site is stored as an advisory. The genuine
+                # driver classifier supplies its legacy rejection authority.
+                expect(error.fatal).to_equal(false)
+                expect(driver_mir_error_is_fatal_v1(error)).to_equal(true)
+        expect(owner_mismatches).to_equal(1)
+
+    it "retains no-default fatal diagnostics and the panic Abort edge":
+        val profile = "critical"
+        val src = "enum Partial:\n    Existing\n    Added\nfn probe(value: Partial) -> i64:\n    match value:\n        case Partial.Existing: 1\n"
+        val previous = env_get_nullable("SIMPLE_SAFETY_PROFILE")
+        val selected = env_set_process("SIMPLE_SAFETY_PROFILE", profile)
+        val parsed = parse_full_frontend(src, "testdata/critical_enum_wire.spl", "critical_enum_wire", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/critical_enum_wire.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        val target = driver_mir_target_context(driver_core_compile_options_default())
+        var lowering = MirLowering.new_for_target(hir.symbols, target)
+        val mir = lowering.lower_module(hir)
+        val restored = critical_wire_restore_profile(previous)
+        expect(selected and restored).to_equal(true)
+        expect(env_get_nullable("SIMPLE_SAFETY_PROFILE")).to_equal(previous)
+        expect(hir_lowering.errors.len()).to_equal(0)
+        val fatal = critical_wire_fatal_messages(lowering.errors)
+        expect(critical_wire_contains(fatal, "critical-profile match coverage")).to_equal(true)
+        expect(critical_wire_contains(fatal, "Added")).to_equal(true)
+        expect(critical_wire_abort_count(mir)).to_equal(1)
+        expect(critical_wire_call_count(mir, "rt_panic")).to_equal(1)
+
+    it "leaves non-enum default routing unchanged under critical":
+        val profile = "critical"
+        val src = "fn probe(value: i64) -> i64:\n    match value:\n        case 0: 4\n        case _: 9\n"
+        val previous = env_get_nullable("SIMPLE_SAFETY_PROFILE")
+        val selected = env_set_process("SIMPLE_SAFETY_PROFILE", profile)
+        val parsed = parse_full_frontend(src, "testdata/critical_enum_wire.spl", "critical_enum_wire", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/critical_enum_wire.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        val target = driver_mir_target_context(driver_core_compile_options_default())
+        var lowering = MirLowering.new_for_target(hir.symbols, target)
+        val mir = lowering.lower_module(hir)
+        val restored = critical_wire_restore_profile(previous)
+        expect(selected and restored).to_equal(true)
+        expect(env_get_nullable("SIMPLE_SAFETY_PROFILE")).to_equal(previous)
+        expect(hir_lowering.errors.len()).to_equal(0)
+        val fatal = critical_wire_fatal_messages(lowering.errors)
+        expect(fatal.len()).to_equal(0)
+        expect(critical_wire_abort_count(mir)).to_equal(0)
+        expect(critical_wire_call_count(mir, "rt_enum_discriminant")).to_equal(0)

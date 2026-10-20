@@ -39,7 +39,8 @@ use compiler.mir.mir_instructions.{MirPlace}
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 use compiler.mir.text_extern_abi.{text_arg_indices, text_extern_semantic_arity, boxed_text_arg_indices}
-use compiler.semantics.match_exhaustiveness.{build_match_coverage, match_coverage_requires_hard_error}
+use compiler.semantics.match_exhaustiveness.{build_match_coverage,
+    match_coverage_profile_is_critical, match_coverage_critical_missing_ids}
 use compiler.mir._MirLowering.bootstrap_globals.{bootstrap_mir_logical_module_name}
 use compiler.mir._MirLowering.module_lowering.{mir_layout_canonical_module_name}
 use compiler.mir._MirLowering.provider_metadata.{mir_class_identity}
@@ -3113,6 +3114,71 @@ impl MirLowering:
             case _: ()
         ""
 
+    me check_critical_enum_static_coverage(
+        enum_symbol_id: i64, enum_name: text, owner_key: text,
+        covering_discs: [i64], has_default: bool, span: Span,
+        strictness_name: text
+    ):
+        # Diagnostic-only: no expression lowering, builder mutation, runtime
+        # discriminant/payload calls, or change to default/guard execution.
+        if enum_symbol_id < 0 or not match_coverage_profile_is_critical(strictness_name):
+            return
+        var all_names: [text] = []
+        var all_ids: [i64] = []
+        if self.enum_variant_index_q.has(owner_key):
+            if not self.enum_variant_discriminants_q.has(owner_key):
+                self.error_fatal("critical-profile match coverage: missing discriminants for '" + owner_key + "'", Some(span))
+                return
+            all_names = self.enum_variant_index_q[owner_key]
+            all_ids = self.enum_variant_discriminants_q[owner_key]
+        elif owner_key == enum_name and not self.enum_bare_name_collisions.has(enum_name):
+            # Only an uncontested owner whose runtime name IS its bare name
+            # may use bare metadata. Never substitute another module's enum.
+            if not self.enum_variant_index.has(enum_name):
+                return
+            if not self.enum_variant_discriminants.has(enum_name):
+                self.error_fatal("critical-profile match coverage: missing discriminants for '" + enum_name + "'", Some(span))
+                return
+            all_names = self.enum_variant_index[enum_name]
+            all_ids = self.enum_variant_discriminants[enum_name]
+        else:
+            # No resolved declaration metadata: existing owner diagnostics
+            # remain authoritative, rather than manufacturing a coverage set.
+            return
+        if all_names.len() != all_ids.len():
+            self.error_fatal("critical-profile match coverage: inconsistent variant metadata for '" + owner_key + "'", Some(span))
+            return
+        var covered_ids: [i64] = []
+        for disc in covering_discs:
+            if disc >= 0:
+                covered_ids.push(disc)
+        val coverage = build_match_coverage(enum_symbol_id, enum_symbol_id,
+            enum_name, all_ids, all_names, covered_ids, has_default)
+        val missing_ids = match_coverage_critical_missing_ids(coverage, strictness_name)
+        if missing_ids.len() == 0:
+            return
+        if has_default:
+            # Render the new wildcard diagnostic in declaration order with a
+            # membership index: no missing-variant-by-registry nested scan.
+            var missing_set: Dict<i64, bool> = {}
+            for missing_id in missing_ids:
+                missing_set[missing_id] = true
+            var missing_names: [text] = []
+            var index = 0
+            while index < all_ids.len():
+                if missing_set.has(all_ids[index]):
+                    missing_names.push(all_names[index])
+                index = index + 1
+            self.error_fatal("E-COMPLETE-001: non-exhaustive static match over '" +
+                owner_key + "'. Missing: " + missing_names.join(", ") +
+                ". A default arm does not cover static variants under critical.", Some(span))
+        else:
+            # Keep the existing no-default diagnostic shape and name projection.
+            val missing_names = coverage.names_for_ids(missing_ids)
+            self.error_fatal("critical-profile match coverage: non-exhaustive match on '" +
+                enum_name + "' (no default/wildcard arm). Missing: " +
+                missing_names.join(", ") + ".", Some(span))
+
     me enum_payload_metadata_is_unit(payload_key: text) -> bool:
         val kind = self.enum_variant_payload_kind[payload_key]
         if kind == "unit": return true
@@ -4474,12 +4540,16 @@ impl MirLowering:
         # in-tree today, so `error_fatal` here would fail the build at 286
         # sites. See doc/08_tracking/bug/match_enum_fallthrough_silent_2026-08-01.md
         # for the enumeration and the promotion plan.
-        if not has_default:
-            # Only UNGUARDED arms cover their variant: `case A if c:` does not
-            # fire when c is false, so A stays missing for the coverage
-            # warning, build_match_coverage and the fall-through traps below.
-            var covering_variants: [text] = []
-            var covering_discs: [i64] = []
+        val coverage_profile = _sffi_env_get("SIMPLE_SAFETY_PROFILE") ?? ""
+        # Borrow existing arrays until coverage is needed; ordinary default
+        # matches do not allocate new coverage buffers.
+        var covering_variants: [text] = enum_variants
+        var covering_discs: [i64] = enum_discs
+        if not has_default or match_coverage_profile_is_critical(coverage_profile):
+            # One existing arm traversal serves both the critical static gate
+            # and the legacy no-default warning/trap. Guards cover no variant.
+            covering_variants = []
+            covering_discs = []
             var cov_i = 0
             while cov_i < enum_variants.len():
                 val cov_arm: HirMatchArm = arms[enum_arm_srcidx[cov_i]]
@@ -4487,6 +4557,11 @@ impl MirLowering:
                     covering_variants = covering_variants.push(enum_variants[cov_i])
                     covering_discs = covering_discs.push(enum_discs[cov_i])
                 cov_i = cov_i + 1
+            if has_default:
+                val coverage_owner = if enum_key != "": enum_key else: enum_name
+                self.check_critical_enum_static_coverage(enum_symbol_id, enum_name,
+                    coverage_owner, covering_discs, true, scrutinee.span, coverage_profile)
+        if not has_default:
             var missing_v: [text] = []
             if self.enum_variant_index.has(enum_name):
                 for known_v in self.enum_variant_index[enum_name]:
@@ -4543,42 +4618,11 @@ impl MirLowering:
             # without it -- explicitly deferred future work, not part of the
             # severity-wiring landed alongside this TODO.
 
-            # WP-6 (aerospace hardening, 2026-08-07): critical-profile hard
-            # error via ResolvedMatchCoverage (compiler.hir.match_coverage),
-            # id-keyed by enum_symbol_id + per-variant discriminant -- NOT
-            # the bare-name comparison above, so it does not inherit that
-            # comparison's soundness gap. Scoped deliberately to
-            # `enum_symbol_id >= 0`: that is only set when an arm's pattern
-            # carried an explicit `EnumName.Variant` qualifier (Named(esym,_)
-            # on `etype`, captured above), i.e. exactly the case this
-            # function's own bare-name-collision reasoning does NOT apply to.
-            # The ambiguous bare-pattern path (`owner_count == 1` sole-owner
-            # resolution above) has no id available here and is left
-            # warn-only, same as every other profile -- promoting it would
-            # require a name->symbol-id reverse lookup this pass does not
-            # have, a separate follow-up, not part of this escalation.
-            if enum_symbol_id >= 0:
-                val lookup_key2 = if enum_key != "": enum_key else: enum_name
-                var all_ids: [i64] = []
-                var all_names: [text] = []
-                if self.enum_variant_index.has(enum_name):
-                    for known_v2 in self.enum_variant_index[enum_name]:
-                        val vid = self.enum_variant_discriminant(lookup_key2, known_v2)
-                        all_ids = all_ids.push(vid)
-                        all_names = all_names.push(known_v2)
-                var covered_ids: [i64] = []
-                for cd in covering_discs:
-                    if cd >= 0:
-                        covered_ids = covered_ids.push(cd)
-                val coverage = build_match_coverage(
-                    enum_symbol_id, enum_symbol_id, enum_name,
-                    all_ids, all_names, covered_ids, has_default,
-                )
-                if match_coverage_requires_hard_error(coverage, _sffi_env_get("SIMPLE_SAFETY_PROFILE") ?? ""):
-                    val missing_names = coverage.missing_variant_names()
-                    var cmsg = "critical-profile match coverage: non-exhaustive match on '" + enum_name
-                    cmsg = cmsg + "' (no default/wildcard arm). Missing: " + missing_names.join(", ") + "."
-                    self.error_fatal(cmsg, Some(scrutinee.span))
+            # Same resolved owner and one coverage projection as the default
+            # path; the existing no-default diagnostic shape is preserved.
+            val coverage_owner = if enum_key != "": enum_key else: enum_name
+            self.check_critical_enum_static_coverage(enum_symbol_id, enum_name,
+                coverage_owner, covering_discs, false, scrutinee.span, coverage_profile)
 
             # Runtime fall-through TRAP for a TOTAL match (2026-08-24).
             #

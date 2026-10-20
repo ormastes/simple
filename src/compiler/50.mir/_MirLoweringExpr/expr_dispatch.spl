@@ -1,4 +1,6 @@
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
+use std.io_runtime.{env_get_nullable}
+use compiler.semantics.match_exhaustiveness.{match_coverage_profile_is_critical}
 use compiler.mir._MirLoweringExpr.result_tuple_payload.*
 # Part of src/compiler/50.mir/mir_lowering_expr.spl: expression dispatch, match-case, gpu lane, bitfield helpers
 use compiler.mir._MirLoweringExpr.switch_operators_calls.*
@@ -7049,16 +7051,34 @@ impl MirLowering:
         # Route enum-pattern matches (case Variant(x):) to the enum path, which
         # dispatches on rt_enum_discriminant + binds payloads via rt_enum_payload.
         var has_enum_arm = false
+        var only_catchall_arms = norm_arms.len() > 0
         var scan_i = 0
         while scan_i < norm_arms.len():
             match norm_arms[scan_i].pattern.kind:
                 case Enum(_, _, _):
                     has_enum_arm = true
-                case _:
+                    only_catchall_arms = false
+                case Wildcard | Binding(_, _):
                     ()
+                case _:
+                    only_catchall_arms = false
             scan_i = scan_i + 1
         if has_enum_arm:
             return self.lower_enum_match(scrutinee, norm_arms, expected_type)
+
+        # Wildcard/capture-only matches bypass lower_enum_match. Validate their
+        # static coverage from already-resolved subject metadata, without
+        # evaluating the subject or changing its ordinary runtime dispatch.
+        if only_catchall_arms and match_subject_owner != "":
+            val static_profile = env_get_nullable("SIMPLE_SAFETY_PROFILE") ?? ""
+            if match_coverage_profile_is_critical(static_profile):
+                if val static_subject = match_subject_type:
+                    match static_subject.kind:
+                        case HirTypeKind.Named(static_symbol, _):
+                            self.check_critical_enum_static_coverage(
+                                static_symbol.id, self.enum_bare_of(match_subject_owner),
+                                match_subject_owner, [], true, scrutinee.span, static_profile)
+                        case _: ()
 
         # Phase 1+2a gate: every arm must be (Wildcard | Binding |
         # Literal(IntLit) | Or(of IntLit)) with no guard. If anything else
