@@ -1886,7 +1886,7 @@ static int64_t rt_core_closure_pin_retains = 0;
 static int64_t rt_core_closure_pin_releases = 0;
 
 /* Lifecycle lock held. */
-static RtCoreClosurePin* rt_core_closure_pin_find_locked(const void* closure) {
+static RtCoreClosurePin* spl_closure_pin_find_locked(const void* closure) {
     for (size_t i = 0; i < rt_core_closure_pin_len; i++) {
         if (rt_core_closure_pins[i].closure == closure) return &rt_core_closure_pins[i];
     }
@@ -2284,7 +2284,7 @@ static void rt_core_reclaim_transient_immortal(uint32_t scope_id) {
         if (!reclaim_string && (!object_scope || *object_scope != scope_id)) continue;
         if (kind == RT_VALUE_HEAP_CLOSURE) {
             /* Pinned by a pending consumer: the last rt_closure_release frees it. */
-            RtCoreClosurePin* pin = rt_core_closure_pin_find_locked(ptr);
+            RtCoreClosurePin* pin = spl_closure_pin_find_locked(ptr);
             if (pin) {
                 pin->orphaned = 1;
                 continue;
@@ -10331,7 +10331,7 @@ int64_t rt_closure_retain(int64_t closure_value) {
     RtCoreClosure* closure = rt_core_as_closure(closure_value);
     if (!closure) return 0;
     rt_core_heap_lifecycle_acquire();
-    RtCoreClosurePin* pin = rt_core_closure_pin_find_locked(closure);
+    RtCoreClosurePin* pin = spl_closure_pin_find_locked(closure);
     if (pin) {
         pin->pins++;
     } else {
@@ -10360,7 +10360,7 @@ int64_t rt_closure_release(int64_t closure_value) {
     if ((((uint64_t)closure_value) & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return 0;
     RtCoreClosure* closure = (RtCoreClosure*)(uintptr_t)(((uint64_t)closure_value) & ~RT_VALUE_TAG_MASK);
     rt_core_heap_lifecycle_acquire();
-    RtCoreClosurePin* pin = rt_core_closure_pin_find_locked(closure);
+    RtCoreClosurePin* pin = spl_closure_pin_find_locked(closure);
     if (!pin) {
         rt_core_heap_lifecycle_release();
         return 0;
