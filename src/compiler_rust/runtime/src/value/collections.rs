@@ -1228,7 +1228,7 @@ fn rt_array_new_uninit(capacity: u64) -> RuntimeValue {
 /// Packed-word array that inherits the signed-word semantics of `lazy_src`
 /// (`gc_flags::LAZY_WORDS`), so a copy/slice/concat of a packed `[i64]` is
 /// still ordered as signed by the generic consumers.
-fn rt_array_new_uninit_u64_like(capacity: u64, lazy_src: bool) -> RuntimeValue {
+fn array_new_uninit_u64_like(capacity: u64, lazy_src: bool) -> RuntimeValue {
     let array = rt_array_new_uninit_u64(capacity);
     if lazy_src && !array.is_nil() {
         if let Some(ptr) = get_typed_ptr_mut_packed::<RuntimeArray>(array, HeapObjectType::Array) {
@@ -5782,7 +5782,7 @@ pub extern "C" fn rt_slice(collection: RuntimeValue, start: i64, end: i64, step:
                     let result = if bytes {
                         rt_byte_array_new(result_len.max(1))
                     } else {
-                        rt_array_new_uninit_u64_like(result_len.max(1), (*arr).is_lazy_words())
+                        array_new_uninit_u64_like(result_len.max(1), (*arr).is_lazy_words())
                     };
                     if result.is_nil() {
                         return result;
@@ -6408,7 +6408,7 @@ pub extern "C" fn rt_array_concat(a: RuntimeValue, b: RuntimeValue) -> RuntimeVa
         }
         if a_words && b_words {
             let total = len_a + len_b;
-            let result = rt_array_new_uninit_u64_like(total.max(1), (*arr_a).is_lazy_words() || (*arr_b).is_lazy_words());
+            let result = array_new_uninit_u64_like(total.max(1), (*arr_a).is_lazy_words() || (*arr_b).is_lazy_words());
             if result.is_nil() {
                 return result;
             }
@@ -6475,7 +6475,7 @@ pub extern "C" fn rt_array_copy(array: RuntimeValue) -> RuntimeValue {
         // are 8 bytes wide for both the packed-u64 and the generic layout, and
         // one byte wide for the byte-packed layout.
         if (*arr).is_u64_packed() {
-            let result = rt_array_new_uninit_u64_like(len.max(1), (*arr).is_lazy_words());
+            let result = array_new_uninit_u64_like(len.max(1), (*arr).is_lazy_words());
             if result.is_nil() {
                 return result;
             }
