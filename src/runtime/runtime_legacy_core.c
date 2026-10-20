@@ -723,10 +723,13 @@ static int64_t rt_mem_snapshot_status_kib(const char* key) {
         struct rusage ru;
         if (getrusage(RUSAGE_SELF, &ru) != 0) return -1;
 #if defined(__APPLE__)
-        return (int64_t)ru.ru_maxrss / 1024; /* bytes on Darwin */
+        int64_t peak = (int64_t)ru.ru_maxrss / 1024; /* bytes on Darwin */
 #else
-        return (int64_t)ru.ru_maxrss;        /* KiB on FreeBSD */
+        int64_t peak = (int64_t)ru.ru_maxrss;        /* KiB on FreeBSD */
 #endif
+        /* ru_maxrss is tick-sampled on FreeBSD and can trail the live RSS. */
+        int64_t rss = rt_mem_snapshot_status_kib("VmRSS:");
+        return peak > rss ? peak : rss;
     }
     if (strcmp(key, "VmRSS:") != 0) return -1;
 #if defined(__APPLE__)
