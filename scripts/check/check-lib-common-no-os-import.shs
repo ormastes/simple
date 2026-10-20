@@ -1,0 +1,130 @@
+#!/bin/sh
+# check-lib-common-no-os-import.shs
+#
+# Layering ratchet: src/lib/common is the pure layer and must not import
+# `os.*` (MDSOC layering, .claude/rules/structure.md). A NEW `use os.<mod>`
+# line in src/lib/common/**/*.spl fails; so does a STALE baseline entry (an
+# import that was removed but is still frozen), because a baseline that no
+# longer describes the tree is how a ratchet silently stops ratcheting.
+# Frozen population: scripts/check/lib_common_no_os_import_baseline.txt,
+# one `<path>|<module>` per line (no line numbers, so edits above an import
+# do not churn it).
+#
+# Matching: only lines that START (after blanks) with `use os.` count, so
+# `#` comments and prose never match. The existing wm-lane check
+# (check-wm-lane-boundary.shs, WML001) covers only the compositor path.
+#
+# usage: sh scripts/check/check-lib-common-no-os-import.shs [--rev REF] [--root DIR] [--baseline FILE] [--selftest]
+#   --rev REF  scan the COMMITTED tree at REF (and its baseline) via git
+# verdict (last line of stdout):
+#   PASS  - <n> import(s) checked, 0 new, 0 stale baseline entr(ies)
+#   FAIL  - <n> import(s) checked, <k> new: <...>[; <m> stale: <...>]   [exit 1]
+#   ERROR - nothing was checked (<reason>)                              [exit 2]
+set -u
+
+SELF=$0
+ROOT_DIR=$(cd "$(dirname "$0")/../.." && pwd)
+PAT='^[[:space:]]*use[[:space:]]+os\.'
+
+# scan_fs ROOT -> sorted "path|module" lines; returns 2 if tree absent
+scan_fs() {
+    [ -d "$1/src/lib/common" ] || return 2
+    (cd "$1" && grep -rEn --include='*.spl' "$PAT" src/lib/common 2>/dev/null) | extract
+}
+_raw=$(mktemp)
+scan_rev() {
+    _sha=$(git -C "$1" rev-parse --verify -q "$2^{commit}") || return 2
+    [ -n "$(git -C "$1" ls-tree -r --name-only "$_sha" -- src/lib/common | head -1)" ] || return 2
+    git -C "$1" grep -En "$PAT" "$_sha" -- 'src/lib/common/*.spl' > "$_raw" 2>/dev/null
+    [ $? -le 1 ] || return 2
+    cut -d: -f2- "$_raw" | extract
+}
+# input: path:line:text ; output: path|module (module = first dotted token after `use`)
+extract() {
+    sed -E 's/^([^:]+):[0-9]+:[[:space:]]*use[[:space:]]+(os(\.[A-Za-z0-9_]+)+).*/\1|\2/' | sort -u
+}
+
+# compare CURRENT BASELINE -> prints verdict, returns 0/1/2
+compare() {
+    _cur=$1; _base=$2
+    _n=$(grep -c . "$_cur")
+    _b=$(grep -c . "$_base")
+    if [ "$_n" -eq 0 ] && [ "$_b" -eq 0 ]; then
+        echo "ERROR - nothing was checked (0 imports in scan and baseline; a clean tree needs an empty-scan decision, not a pass)"
+        return 2
+    fi
+    _new=$(comm -13 "$_base" "$_cur" | tr '\n' ' ')
+    _stale=$(comm -23 "$_base" "$_cur" | tr '\n' ' ')
+    if [ -z "$_new" ] && [ -z "$_stale" ]; then
+        echo "PASS - $_n import(s) checked, 0 new, 0 stale baseline entr(ies)"
+        return 0
+    fi
+    _msg="FAIL - $_n import(s) checked"
+    [ -n "$_new" ] && _msg="$_msg, new: $_new"
+    [ -n "$_stale" ] && _msg="$_msg; stale: $_stale"
+    echo "$_msg"
+    return 1
+}
+
+selftest() {
+    _t=$(mktemp -d) || { echo "ERROR - nothing was checked (mktemp)"; return 2; }
+    trap 'rm -rf "$_t"' EXIT
+    mkdir -p "$_t/src/lib/common/a"
+    printf '# use os.fake.comment\nuse std.text\nuse os.crypto.rsa.{x}\n' > "$_t/src/lib/common/a/f.spl"
+    printf 'src/lib/common/a/f.spl|os.crypto.rsa\n' > "$_t/base"
+    scan_fs "$_t" > "$_t/cur"
+    _fail=0
+    _expect() { # name want_rc
+        compare "$_t/cur" "$_t/base" >"$_t/out" 2>&1; _rc=$?
+        if [ "$_rc" -ne "$2" ]; then echo "selftest FAIL: $1 (rc=$_rc want $2): $(cat "$_t/out")"; _fail=1; fi
+    }
+    _expect clean 0
+    printf 'use os.compositor.x\n' >> "$_t/src/lib/common/a/f.spl"
+    scan_fs "$_t" > "$_t/cur"; _expect new-import-fails 1
+    : > "$_t/src/lib/common/a/f.spl"
+    printf 'src/lib/common/a/f.spl|os.crypto.rsa\n' > "$_t/base"
+    scan_fs "$_t" > "$_t/cur"; _expect stale-baseline-fails 1
+    : > "$_t/base"; scan_fs "$_t" > "$_t/cur"; _expect empty-scan-errors 2
+    git -C "$_t" init -q 2>/dev/null && git -C "$_t" add src && git -C "$_t" -c user.name=t -c user.email=t@t commit -qm x && git -C "$_t" branch -q work/x
+    printf 'src/lib/common/a/f.spl|os.crypto.rsa\n' > "$_t/base"; : > "$_t/src/lib/common/a/f.spl"
+    printf 'use os.crypto.rsa.{x}\n' > "$_t/src/lib/common/a/f.spl"; git -C "$_t" add src; git -C "$_t" -c user.name=t -c user.email=t@t commit -qm y; git -C "$_t" branch -q work/y
+    scan_rev "$_t" work/y > "$_t/cur"; _expect rev-slash-branch-clean 0
+    [ "$_fail" -eq 0 ] || return 1
+    return 0
+}
+
+ONLY_SELF=0; REV=""; ROOT=$ROOT_DIR; BASE=""; DO_SELF=1
+while [ $# -gt 0 ]; do
+    case $1 in
+        --rev) [ $# -ge 2 ] || { echo "ERROR - nothing was checked (--rev needs a value)"; exit 2; }; REV=$2; shift 2 ;;
+        --root) ROOT=$2; shift 2 ;;
+        --baseline) BASE=$2; shift 2 ;;
+        --selftest) ONLY_SELF=1; shift ;;
+        *) echo "ERROR - nothing was checked (unknown arg $1)"; exit 2 ;;
+    esac
+done
+
+if [ "$DO_SELF" = 1 ]; then
+    (selftest) || { echo "ERROR - nothing was checked (selftest failed)"; exit 2; }
+fi
+
+_t=$(mktemp -d) || { echo "ERROR - nothing was checked (mktemp)"; exit 2; }
+trap 'rm -rf "$_t"' EXIT
+[ "$ONLY_SELF" = 1 ] && { echo "PASS - selftest ok"; exit 0; }
+BREL=scripts/check/lib_common_no_os_import_baseline.txt
+if [ -n "$REV" ]; then
+    scan_rev "$ROOT" "$REV" > "$_t/cur"; _rc=$?
+    [ "$_rc" -eq 0 ] || { echo "ERROR - nothing was checked (cannot scan src/lib/common at $REV)"; exit 2; }
+    if [ -n "$BASE" ]; then cp "$BASE" "$_t/base" 2>/dev/null || { echo "ERROR - nothing was checked (baseline unreadable)"; exit 2; }
+    else git -C "$ROOT" show "$REV:$BREL" 2>/dev/null | grep -v '^#' | sort -u > "$_t/base" || true
+        [ -s "$_t/base" ] || { echo "ERROR - nothing was checked (baseline missing at $REV)"; exit 2; }
+    fi
+else
+    scan_fs "$ROOT" > "$_t/cur"; _rc=$?
+    [ "$_rc" -eq 0 ] || { echo "ERROR - nothing was checked (no src/lib/common under $ROOT)"; exit 2; }
+    [ -n "$BASE" ] || BASE=$ROOT/$BREL
+    [ -r "$BASE" ] || { echo "ERROR - nothing was checked (baseline missing: $BASE)"; exit 2; }
+    grep -v '^#' "$BASE" | sort -u > "$_t/base"
+fi
+compare "$_t/cur" "$_t/base"
+exit $?
