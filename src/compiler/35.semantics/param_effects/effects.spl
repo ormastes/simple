@@ -1,0 +1,113 @@
+# Parameter-effect metadata (plan §3.3, nogc_ownership_recovery_plan_2026-10-19).
+#
+# Every parameter of every function gets ONE inferred effect:
+#
+#   read-short       borrowed briefly, only read                    (default)
+#   mutate-short     borrowed briefly, mutated through
+#   consume          ownership is transferred into the callee: it is stored,
+#                    returned, captured by an escaping closure, or held across
+#                    a suspension on at least one path. The caller MOVES the
+#                    argument; the callee drops it on paths that do not keep it.
+#   share-explicit   the parameter type is an explicit shared owner
+#   ambiguous        the body gives no single contract (rejected; see infer.spl)
+#   foreign-unknown  an `extern fn` with a class/pointer parameter: foreign
+#                    retention cannot be inferred away
+#
+# Effects never widen a borrow. "consume" is an ownership TRANSFER, not a
+# longer borrow; there are no lifetimes and no implicit sharing.
+#
+# The metadata is a side table keyed by function symbol id (no new HirFunction
+# or HirParam fields, so the HIR codec and positional constructions are
+# untouched). It is published as a versioned summary text for importers.
+
+use compiler.common.cache.canonical_identity.{canon_str, canon_nat, canon_field, canon_seq}
+use std.common.crypto.sha256.{sha256_text}
+
+pub fn param_effect_summary_domain_v1() -> text:
+    "simple/param-effects/v1"
+
+pub fn param_effect_rank(effect: text) -> i64:
+    """Join order used by the fixpoint: a later effect subsumes an earlier."""
+    if effect == "read-short": return 0
+    if effect == "mutate-short": return 1
+    if effect == "share-explicit": return 2
+    if effect == "consume": return 3
+    if effect == "foreign-unknown": return 4
+    if effect == "ambiguous": return 5
+    0
+
+pub fn param_effect_join(a: text, b: text) -> text:
+    if param_effect_rank(b) > param_effect_rank(a): return b
+    a
+
+pub struct ParamEffectEntry:
+    name: text
+    effect: text
+    reason: text
+
+pub struct FunctionParamEffects:
+    function: text
+    symbol_id: i64
+    params: [ParamEffectEntry]
+
+pub struct ParamEffectDiag:
+    code: text
+    function: text
+    param: text
+    message: text
+    line: i64
+
+pub struct ParamEffectReport:
+    functions: [FunctionParamEffects]
+    diags: [ParamEffectDiag]
+
+pub fn param_effect_report_effect(report: ParamEffectReport, function: text, param: text) -> text:
+    """Effect of `function`'s parameter `param`, or "" when unknown."""
+    for f in report.functions:
+        if f.function == function:
+            for p in f.params:
+                if p.name == param: return p.effect
+    ""
+
+pub fn param_effect_summary_encode_v1(report: ParamEffectReport) -> text:
+    """Canonical, order-independent summary text published to importers.
+    One line per function: `name<TAB>effect,effect,...` (params in order),
+    sorted by name, under the versioned domain header."""
+    var lines: [text] = []
+    for f in report.functions:
+        var effs: [text] = []
+        for p in f.params:
+            effs.push(p.effect)
+        val joined = effs.join(",")
+        lines.push("{f.function}\t{joined}")
+    lines.sort()
+    var out = param_effect_summary_domain_v1() + "\n"
+    for l in lines:
+        out = out + l + "\n"
+    out
+
+pub fn param_effect_summary_decode_v1(summary: text) -> {text: [text]}:
+    """Inverse of encode: function name -> per-position effects. A summary
+    with any other domain header decodes to an empty table (fail closed:
+    unknown metadata is never trusted)."""
+    var table: {text: [text]} = {}
+    val lines = summary.split("\n")
+    if lines.len() == 0 or lines[0] != param_effect_summary_domain_v1():
+        return table
+    var i = 1
+    while i < lines.len():
+        val l = lines[i]
+        val tab = l.index_of("\t")
+        if tab > 0:
+            val effs_text = l.substring(tab + 1, l.len())
+            var effs: [text] = []
+            if effs_text != "":
+                effs = effs_text.split(",")
+            table[l.substring(0, tab)] = effs
+        i = i + 1
+    table
+
+pub fn param_effect_summary_digest_v1(summary: text) -> text:
+    """Digest an importer's cache key can fold in, so a body-only edit that
+    changes an inferred effect invalidates dependents (plan §3.8)."""
+    sha256_text(canon_field(param_effect_summary_domain_v1(), canon_seq([canon_str(summary), canon_nat(summary.len())])))

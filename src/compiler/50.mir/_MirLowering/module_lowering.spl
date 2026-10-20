@@ -2098,15 +2098,16 @@ impl MirLowering:
         HirEnum (no symbol table), the seeds guard on has() so re-runs are
         quiet, and the module's own tail registration overwrites
         unconditionally if it ever runs."""
-        # Cycle-171: `modules[i]` (Dict<text, HirModule> index read) draws
-        # erased on candidate-seednew -- measured as 65k 'enum construction:
-        # unregistered declaration' MIR errors whose lookup keys were clean
-        # but the registry missed whole modules. Iterate keys() and extract
-        # with an annotated rebind (the proven cycle-76 transport), the same
-        # pattern driver_rt_criticality uses for Dict<text, HirModule>.
-        for raw_inventory_module in modules.keys():
-            val inventory_module_key: text = raw_inventory_module
-            val inventory_module: HirModule = modules[inventory_module_key]
+        # Cycle-171: a bare `modules[i]` element read drew erased on
+        # candidate-seednew. `modules` is an ARRAY, not a Dict: `.keys()` on
+        # it is `rt_dict_keys` natively (empty array / nil for a non-dict) and
+        # "method `keys` not found on type `array`" in the interpreter, so the
+        # cycle-171 keys() rewrite registered NO closure enum and every
+        # construction failed "missing runtime identity" (stage3 2026-10-20).
+        # Iterate the elements with an annotated rebind -- the same
+        # bind-once transport lower_module uses for its provider array.
+        for raw_inventory_module in modules:
+            val inventory_module: HirModule = raw_inventory_module
             val inventory_enums = inventory_module.enums.values()
             var inventory_enum_i = 0
             while inventory_enum_i < inventory_enums.len():

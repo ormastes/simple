@@ -4,30 +4,26 @@
 # references; parameters and receivers alias the caller's object) but would be
 # rejected, or would silently change meaning, under the no-GC default of the
 # ownership recovery plan: one unique owner per class instance, ownership
-# transfer on assignment/store/insertion, and parameters/receivers that are
-# STRICTLY SHORT inferred borrows (never returned, stored, captured by an
-# escaping closure/task, or held across a suspension).
+# transfer on assignment/store/insertion, and parameter effects INFERRED from
+# the body (plan §3.3): storing, returning, task-capturing or suspending a
+# parameter makes it `consume`, which is legal and is checked for ambiguity by
+# the HIR pass `compiler.semantics.param_effects` (NOGC-AMB-*, NOGC-OWN-002),
+# not here. This text lint keeps the shapes the HIR pass does not see.
 #
 #   NOGC-OWN-001  use after an implicit ownership transfer of a class local
 #                 (`val b = a`, `self.f = a`, `xs.push(a)`, `d[k] = a`, then
 #                 `a` is used again on the same path)                WARNING
-#   NOGC-BOR-001  a borrowed parameter / receiver (or a class-typed field of
-#                 one) is returned                                    WARNING
-#   NOGC-BOR-002  a borrowed parameter / receiver is stored into a field,
-#                 index slot, container, or aggregate constructor    WARNING
-#   NOGC-BOR-003  a borrowed parameter / receiver is captured by an escaping
-#                 closure (returned, stored, or handed to a spawn API) WARNING
-#   NOGC-BOR-004  a borrowed parameter / receiver is used after an `await`
-#                 or `yield` in the same function                    WARNING
+#   NOGC-BOR-001  a class-typed field of the receiver is returned: a getter
+#                 would have to consume its whole receiver (same rule as the
+#                 HIR pass's NOGC-AMB-006)                          WARNING
 #   NOGC-ALIAS-001 a local is bound to a class-typed field/element of another
 #                 owner and then mutated through that local (a persistent
 #                 second reference to one owner)                     WARNING
 #
 # Fix direction (plan §3, §10): an explicit move with no later use, an explicit
-# `.clone()` where an independent copy is intended, an explicit owner (`iso T`)
-# for a parameter that is consumed, mutation through the owning path (a new
-# short borrow), or a handle/ID for a long-lived relationship. NEVER a longer
-# borrow, a lifetime parameter, implicit RC, or nil.
+# `.clone()` where an independent copy is intended, mutation through the owning
+# path (a new short borrow), or a handle/ID for a long-lived relationship.
+# NEVER a longer borrow, a lifetime parameter, implicit RC, or nil.
 #
 # Precision over recall. A value is "class-typed" only when the lint can SEE
 # it: a `C(...)`/`C.new(...)` constructor, a `: C` annotation, or a parameter
@@ -36,7 +32,6 @@
 # which names that are ALSO declared as struct/enum/trait/union/type anywhere
 # are removed).
 # Structs, arrays, dicts, text and scalars are values and are never flagged.
-# `iso T` parameters are explicit owners and are never treated as borrows.
 # Unhandled shapes (moves inside loops, moves through unknown call results)
 # are skipped, not guessed.
 #
@@ -73,9 +68,7 @@ class NogcFile:
     codes: [text]
     indents: [i64]
     classes: [text]
-    aggregates: [text]
     extra_cls: {text: bool}
-    extra_agg: {text: bool}
     f_owner: [text]
     f_name: [text]
     f_class: [text]
@@ -129,7 +122,7 @@ fn _field_decl(code: text) -> [text]:
     if ty == "": return []
     [name, ty]
 
-fn _build_file(source: text, extra_cls: {text: bool}, extra_agg: {text: bool}) -> NogcFile:
+fn _build_file(source: text, extra_cls: {text: bool}) -> NogcFile:
     val snap = code_line_snapshot(source)
     var nums: [i64] = []
     var codes: [text] = []
@@ -144,18 +137,14 @@ fn _build_file(source: text, extra_cls: {text: bool}, extra_agg: {text: bool}) -
             indents.push(nogc_indent_of(cl.raw))
     snap.release()
 
-    # In-file declarations; repo-wide names come through the extra_* sets.
+    # In-file declarations; repo-wide names come through `extra_cls`.
     var classes: [text] = []
-    var aggregates: [text] = []
     var i = 0
     while i < codes.len():
         if indents[i] == 0:
             val cn = _type_decl_name(codes[i], "class ")
             if cn != "" and not _contains(classes, cn):
                 classes.push(cn)
-            val sn = _type_decl_name(codes[i], "struct ")
-            if sn != "" and not _contains(aggregates, sn):
-                aggregates.push(sn)
         i = i + 1
 
     # Owner of each line (the enclosing top-level class/struct/impl block).
@@ -215,17 +204,13 @@ fn _build_file(source: text, extra_cls: {text: bool}, extra_agg: {text: bool}) -
         i = i + 1
 
     NogcFile(nums: nums, codes: codes, indents: indents, classes: classes,
-        aggregates: aggregates, extra_cls: extra_cls, extra_agg: extra_agg, f_owner: f_owner, f_name: f_name,
+        extra_cls: extra_cls, f_owner: f_owner, f_name: f_name,
         f_class: f_class, f_elem: f_elem, m_owner: m_owner, m_name: m_name,
         owners: owners, owner_inds: owner_inds)
 
 fn _is_class(f: NogcFile, name: text) -> bool:
     if name == "": return false
     f.extra_cls.has(name) or _contains(f.classes, name)
-
-fn _is_agg(f: NogcFile, name: text) -> bool:
-    if name == "": return false
-    f.extra_agg.has(name) or _contains(f.aggregates, name)
 
 fn _field_class(f: NogcFile, owner: text, field: text) -> text:
     var i = 0
@@ -521,90 +506,6 @@ fn _moved_names(code: text) -> [text]:
     out
 
 # ============================================================================
-# Borrow escapes (NOGC-BOR-001..004)
-# ============================================================================
-
-fn _stores_name(f: NogcFile, code: text, b: text) -> bool:
-    val ap = nogc_assign_parts(code)
-    if ap.len() == 2 and ap[1] == b and (ap[0].index_of(".") >= 0 or ap[0].index_of("[") >= 0):
-        return true
-    for a in nogc_call_single_arg(code, "push"):
-        if a == b: return true
-    for a in nogc_call_single_arg(code, "append"):
-        if a == b: return true
-    for payload in nogc_call_single_arg(code, "insert"):
-        val parts = nogc_split_top_commas(payload)
-        if parts.len() >= 2 and parts[parts.len() - 1] == b: return true
-    # Aggregate constructor `C(..., b, ...)` / `C(..., f: b, ...)`.
-    var rest = code
-    while true:
-        val at = rest.index_of("(")
-        if at < 0: return false
-        var s = at
-        while s > 0 and _ident_ch(rest.substring(s - 1, s)):
-            s = s - 1
-        val callee = rest.substring(s, at)
-        val before_dot = s > 0 and rest.substring(s - 1, s) == "."
-        if callee != "" and not before_dot and (_is_class(f, callee) or _is_agg(f, callee)):
-            val inner = _paren_payload(rest.substring(at, rest.len()))
-            for arg in nogc_split_top_commas(inner):
-                if arg == b: return true
-                val colon = arg.index_of(":")
-                if colon > 0 and nogc_is_ident(arg.substring(0, colon).trim()) and arg.substring(colon + 1, arg.len()).trim() == b:
-                    return true
-        rest = rest.substring(at + 1, rest.len())
-    false
-
-fn _ident_ch(ch: text) -> bool:
-    if ch == "_": return true
-    if ch >= "a" and ch <= "z": return true
-    if ch >= "A" and ch <= "Z": return true
-    if ch >= "0" and ch <= "9": return true
-    false
-
-fn _paren_payload(s: text) -> text:
-    """`(a, b(c), d) rest` -> `a, b(c), d`."""
-    var depth = 0
-    var i = 0
-    while i < s.len():
-        val ch = s.substring(i, i + 1)
-        if ch == "(": depth = depth + 1
-        if ch == ")":
-            depth = depth - 1
-            if depth == 0: return s.substring(1, i)
-        i = i + 1
-    ""
-
-fn _lambda_at(code: text) -> i64:
-    """Index of a `\\x:` / `\\:` lambda introducer, or -1."""
-    var rest = code
-    var base = 0
-    while true:
-        val at = rest.index_of("\\")
-        if at < 0: return -1
-        val nxt = if at + 1 < rest.len(): rest.substring(at + 1, at + 2) else: ""
-        if nxt == ":" or nxt == " " or _ident_ch(nxt):
-            if not (nxt >= "0" and nxt <= "9"):
-                return base + at
-        base = base + at + 1
-        rest = rest.substring(at + 1, rest.len())
-    -1
-
-fn _escaping_lambda(code: text, lam: i64) -> bool:
-    val head = code.substring(0, lam)
-    for api in ["spawn", "thread_spawn", "spawn_task", "task_spawn", "actor_spawn", "go"]:
-        if nogc_has_word(head, api): return true
-    if head.starts_with("return "): return true
-    if head.ends_with(".push(") or head.ends_with(".append("): return true
-    val ap = nogc_assign_parts(code)
-    if ap.len() == 2 and ap[1].starts_with("\\") and (ap[0].index_of(".") >= 0 or ap[0].index_of("[") >= 0):
-        return true
-    false
-
-fn _is_suspension(code: text) -> bool:
-    nogc_has_word(code, "await") or nogc_has_word(code, "yield")
-
-# ============================================================================
 # Driver
 # ============================================================================
 
@@ -620,17 +521,8 @@ class NogcSink:
 fn _hint_move() -> text:
     "Under the no-GC unique-owner default this assignment MOVES the owner. Drop the later use, use `.clone()` only if an independent copy is intended, or keep a handle/ID for a long-lived relationship. Never extend a borrow."
 
-fn _hint_return() -> text:
-    "Parameters and receivers are strictly short borrows; returning one escapes its boundary. Take the parameter as an explicit owner (`iso T`) and return it, return a `.clone()` when an independent copy is intended, or return a handle/ID."
-
-fn _hint_store() -> text:
-    "Storing a short borrow retains it past the call. Take the parameter as an explicit owner (`iso T`) so the caller moves it in, store a `.clone()` when an independent copy is intended, or store a handle/ID."
-
-fn _hint_capture() -> text:
-    "An escaping closure or task outlives the call that lent the borrow. Move an owned value into it, or capture a handle/ID resolved briefly inside the closure."
-
-fn _hint_suspend() -> text:
-    "A short borrow cannot be held across a suspension. Copy out the values needed before the suspension, take an owned transfer or lease token, or re-resolve a handle after resuming."
+fn _hint_field_move() -> text:
+    "Returning a class-typed field moves it out of a parameter the caller still owns. Return a `.clone()` when an independent copy is intended, a handle/ID, or let callers reach it through the owning path (a fresh short borrow). Never a returned borrow."
 
 fn _hint_alias() -> text:
     "The local is a second persistent reference to a value another place owns. Mutate through the owning path (`owner.f.x = ...`, a fresh short borrow), or use a handle/ID. Do not keep both."
@@ -666,16 +558,10 @@ fn _check_fn(f: NogcFile, fun: NogcFn, sink: NogcSink):
     var borrowed: [text] = []
     if fun.receiver != "":
         borrowed.push("self")
-    var pi = 0
-    while pi < fun.p_names.len():
-        if fun.p_class[pi] != "":
-            borrowed.push(fun.p_names[pi])
-        pi = pi + 1
 
     var locals = NogcLocals(names: [], classes: [], decl_at: [])
     var body_ind = -1
     var tail = -1
-    var susp = -1
     var j = fun.body_start
     while j < fun.body_end:
         if f.indents[j] == 999:
@@ -718,42 +604,15 @@ fn _check_fn(f: NogcFile, fun: NogcFn, sink: NogcSink):
             locals.classes.push(lc)
             locals.decl_at.push(j)
 
-        if susp < 0 and _is_suspension(code):
-            susp = j
-
-        val lam = _lambda_at(code)
-        val lam_escapes = lam >= 0 and _escaping_lambda(code, lam)
         var bi = 0
         while bi < borrowed.len():
             val b = borrowed[bi]
-            if b != "" and nogc_has_word(code, b):
-                # ---- NOGC-BOR-001: return of a borrow (or its class field)
-                if code == "return {b}":
-                    sink.add("NOGC-BOR-001", "borrowed `{b}` is returned (in `{fun.name}`)", _hint_return(), line)
-                elif code.starts_with("return {b}.") and _place_class(f, fun, locals, code.substring(7, code.len())) != "":
-                    sink.add("NOGC-BOR-001",
-                        "class-typed field `{code.substring(7, code.len())}` of borrowed `{b}` is returned (in `{fun.name}`)",
-                        _hint_return(), line)
-                # ---- NOGC-BOR-002: store of a borrow
-                if _stores_name(f, code, b):
-                    sink.add("NOGC-BOR-002", "borrowed `{b}` is stored past the call (in `{fun.name}`)", _hint_store(), line)
-                # ---- NOGC-BOR-004: used after a suspension point
-                if susp >= 0 and susp < j:
-                    sink.add("NOGC-BOR-004",
-                        "borrowed `{b}` is used after the suspension at line {f.nums[susp]} (in `{fun.name}`)",
-                        _hint_suspend(), line)
-            # ---- NOGC-BOR-003: capture by an escaping closure/task
-            if b != "" and lam_escapes:
-                var captured = nogc_has_word(code.substring(lam, code.len()), b)
-                if not captured and code.ends_with(":"):
-                    var k = j + 1
-                    while k < fun.body_end and (f.indents[k] == 999 or f.indents[k] > f.indents[j]):
-                        if nogc_has_word(f.codes[k], b): captured = true
-                        k = k + 1
-                if captured:
-                    sink.add("NOGC-BOR-003",
-                        "borrowed `{b}` is captured by an escaping closure/task (in `{fun.name}`)",
-                        _hint_capture(), line)
+            # ---- NOGC-BOR-001: a class field moved out of the receiver (a
+            #      parameter's field moved out is inferred consume)
+            if code.starts_with("return {b}.") and _place_class(f, fun, locals, code.substring(7, code.len())) != "":
+                sink.add("NOGC-BOR-001",
+                    "class-typed field `{code.substring(7, code.len())}` of parameter `{b}` is returned (in `{fun.name}`)",
+                    _hint_field_move(), line)
             bi = bi + 1
         j = j + 1
 
@@ -761,25 +620,21 @@ fn _check_fn(f: NogcFile, fun: NogcFn, sink: NogcSink):
     if fun.has_return and tail >= 0:
         val tc = f.codes[tail]
         for b in borrowed:
-            if b != "" and tc == b:
+            if tc.starts_with("{b}.") and _place_class(f, fun, locals, tc) != "":
                 sink.add("NOGC-BOR-001",
-                    "borrowed `{b}` is returned as the tail expression (in `{fun.name}`)",
-                    _hint_return(), f.nums[tail])
-            elif b != "" and tc.starts_with("{b}.") and _place_class(f, fun, locals, tc) != "":
-                sink.add("NOGC-BOR-001",
-                    "class-typed field `{tc}` of borrowed `{b}` is returned as the tail expression (in `{fun.name}`)",
-                    _hint_return(), f.nums[tail])
+                    "class-typed field `{tc}` of parameter `{b}` is returned as the tail expression (in `{fun.name}`)",
+                    _hint_field_move(), f.nums[tail])
 
-pub fn check_nogc_ownership_indexed(source: text, file_path: text, extra_cls: {text: bool}, extra_agg: {text: bool}) -> [NogcOwnFinding]:
-    """Run every NOGC-* rule. `extra_cls`/`extra_agg` are repo-wide class and
-    struct name sets (the blast-radius driver builds them once); in-file
-    declarations are always added."""
+pub fn check_nogc_ownership_indexed(source: text, file_path: text, extra_cls: {text: bool}) -> [NogcOwnFinding]:
+    """Run every NOGC-* rule. `extra_cls` is a repo-wide class-name set (the
+    blast-radius driver builds it once); in-file declarations are always
+    added."""
     val sink = NogcSink(path: file_path, findings: [])
     # Cheap exit before the per-line projection: with no repo index and no
     # `class` keyword in the file nothing can be class-typed.
     if extra_cls.len() == 0 and source.index_of("class ") < 0:
         return sink.findings
-    val f = _build_file(source, extra_cls, extra_agg)
+    val f = _build_file(source, extra_cls)
     if f.classes.len() == 0 and extra_cls.len() == 0:
         return sink.findings
     var h = 0
@@ -789,14 +644,11 @@ pub fn check_nogc_ownership_indexed(source: text, file_path: text, extra_cls: {t
         h = h + 1
     sink.findings
 
-pub fn check_nogc_ownership_with(source: text, file_path: text, extra_classes: [text], extra_aggregates: [text]) -> [NogcOwnFinding]:
+pub fn check_nogc_ownership_with(source: text, file_path: text, extra_classes: [text]) -> [NogcOwnFinding]:
     var cls: {text: bool} = {}
     for c in extra_classes:
         cls[c] = true
-    var agg: {text: bool} = {}
-    for a in extra_aggregates:
-        agg[a] = true
-    check_nogc_ownership_indexed(source, file_path, cls, agg)
+    check_nogc_ownership_indexed(source, file_path, cls)
 
 pub fn check_nogc_ownership(source: text, file_path: text) -> [NogcOwnFinding]:
-    check_nogc_ownership_indexed(source, file_path, {}, {})
+    check_nogc_ownership_indexed(source, file_path, {})

@@ -528,7 +528,9 @@ fn bsd_status_kib(key: &str) -> i64 {
                 return -1;
             }
             // Darwin reports bytes, FreeBSD KiB.
-            return if cfg!(target_os = "macos") { ru.ru_maxrss as i64 / 1024 } else { ru.ru_maxrss as i64 };
+            let peak = if cfg!(target_os = "macos") { ru.ru_maxrss as i64 / 1024 } else { ru.ru_maxrss as i64 };
+            // ru_maxrss is tick-sampled on FreeBSD and can trail the live RSS.
+            return peak.max(bsd_status_kib("VmRSS:"));
         }
         if key != "VmRSS:" {
             return -1;

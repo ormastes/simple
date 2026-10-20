@@ -15,7 +15,24 @@ use compiler.backend.linker.elf_inspect.{ElfHeader, ElfSectionHeader}
 use compiler.backend.linker.elf_parser.{ElfObject, ElfStringTable}
 use compiler.backend.linker.elf.merge_strings.{elf_merge_sections}
 use std.io_runtime.{file_read_bytes}
-use std.common.crypto.sha1.{sha1_bytes}
+use std.common.crypto.sha256.{sha256_u8_fast_hex}
+
+fn build_id_expected(preimage: [i64]) -> [i64]:
+    """Independent build-id oracle: the first 20 bytes of SHA-256 over the
+    image with the payload zeroed (the engine's documented build-id)."""
+    var raw: [u8] = []
+    for byte in preimage: raw.push((byte & 0xff) as u8)
+    val hex = sha256_u8_fast_hex(raw)
+    val digits = "0123456789abcdef"
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < 20:
+        val high = digits.index_of(hex.substring(i * 2, i * 2 + 1)) ?? 0
+        val low = digits.index_of(hex.substring(i * 2 + 1, i * 2 + 2)) ?? 0
+        out.push(high * 16 + low)
+        i = i + 1
+    out
+
 
 val FIX: text = "test/fixtures/linker/elf"
 val PT_LOAD: i64 = 1
@@ -174,7 +191,7 @@ describe "elf_exec_writer - two-object static aarch64 exec":
         while i < 20:
             zeroed[note_off + 16 + i] = 0
             i = i + 1
-        val digest = sha1_bytes(zeroed)
+        val digest = build_id_expected(zeroed)
         i = 0
         while i < 20:
             expect(b[note_off + 16 + i]).to_equal(digest.get(i))
