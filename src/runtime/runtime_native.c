@@ -15395,14 +15395,26 @@ int64_t* rt_process_run_timeout_tuple(int64_t cmd, SplArray* args, int64_t timeo
  * shifted: cmd_len received the args array pointer and the call failed before
  * CreateProcess, so on Windows (no /bin/sh, no cgroup -> this path) every
  * `simple test` child came back exit -1 with empty output ("child produced no
- * exit status"). The owner already returns the native 3-word tuple, so only
- * the cmd parameter is adapted. */
+ * exit status"). Since 2026-10-20 the owner returns a REGISTERED tuple (the
+ * seed's cranelift lowering destructures with rt_tuple_get), while this
+ * facade's only caller -- the pure-Simple LLVM backend -- still loads the raw
+ * rt_alloc'd 3-word block like rt_process_result_to_tuple above. Re-pack it
+ * here so both backends keep their own destructure contract. */
 int64_t* rt_process_run_owned_observed_bounded_text(int64_t cmd, SplArray* args, int64_t timeout_ms,
                                                     int64_t max_output_bytes) {
     const char* cmd_c = rt_interp_cstr(cmd);
     uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
-    return rt_process_run_owned_observed_bounded_value(cmd_c ? cmd_c : "", cmd_len, args,
-                                                       timeout_ms, max_output_bytes);
+    int64_t* handle = rt_process_run_owned_observed_bounded_value(cmd_c ? cmd_c : "", cmd_len, args,
+                                                                  timeout_ms, max_output_bytes);
+    if (!handle) return NULL;
+    int64_t tuple_value = (int64_t)(uintptr_t)handle;
+    int64_t* block = (int64_t*)rt_alloc(3 * (int64_t)sizeof(int64_t));
+    if (!block) return NULL;
+    block[0] = rt_tuple_get(tuple_value, 0);
+    block[1] = rt_tuple_get(tuple_value, 1);
+    block[2] = rt_tuple_get(tuple_value, 2);
+    rt_array_free((SplArray*)(uintptr_t)tuple_value);
+    return block;
 }
 
 int64_t* rt_process_run_bounded_tuple(int64_t cmd, SplArray* args, int64_t timeout_ms,

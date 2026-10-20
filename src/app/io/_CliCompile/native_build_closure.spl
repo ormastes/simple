@@ -107,6 +107,22 @@ var _nb_scv_snapshot_revision_v1: text = ""
 var _nb_scv_snapshot_commit_v1: text = ""
 var _nb_scv_snapshot_tree_v1: text = ""
 var _nb_scv_snapshot_inventory_v1: text = ""
+# Set when the last freeze refused because the entry lies under no admitted
+# source root (an ad-hoc user script, e.g. /tmp/hello.spl). See
+# _native_build_entry_closure for the non-strict working-tree fallback.
+var _nb_scv_entry_outside_root_v1: bool = false
+# True when the last closure was computed from the working tree (either
+# fallback); its source roots are then handed off unmapped (driver: Ok([])).
+var _nb_scv_unfrozen_closure_v1: bool = false
+
+# Bootstrap lanes keep the frozen-entry contract strict. Mirrors the driver
+# cold-entry fallback in src/compiler/80.driver/driver_source_pipeline_loading.spl,
+# whose in-process admitted-task check has no CLI-side equivalent. An inherited
+# SIMPLE_SCV_SNAPSHOT_ROOT is NOT a strictness signal: the CLI publishes one for
+# every native-build before the closure runs.
+fn _nb_scv_strict_entry_v1() -> bool:
+    (env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" or
+        (env_get("SIMPLE_SCV_STRICT_COLD_ENTRY") ?? "") == "1"
 
 pub fn native_build_closure_snapshot_root_v1() -> text:
     # Read only after _native_build_entry_closure has admitted its snapshot.
@@ -115,6 +131,8 @@ pub fn native_build_closure_snapshot_root_v1() -> text:
 pub fn native_build_closure_source_roots_v1(entry: text, source_dirs: [text]) -> Result<[text], text>:
     # Admission is established by _nb_scv_freeze_v1, not by path existence.
     # Reuse its mapping for supported argv spellings and effective defaults.
+    if _nb_scv_unfrozen_closure_v1:
+        return Ok([])
     if _nb_scv_snapshot_root_v1 == "":
         return Err("SOURCE_ROOT_SNAPSHOT_MISSING")
     val effective = native_build_snapshot_source_roots_v1(
@@ -185,6 +203,10 @@ fn _nb_scv_freeze_v1(entry: text, source_dirs: [text]) -> (bool, text, [text]):
     val entry_relative = _nb_scv_relative_path_v1(entry)
     val effective_roots = native_build_snapshot_source_roots_v1(
         entry_relative, source_dirs)
+    # A root-level checkout entry keeps its explicit-roots refusal; only an
+    # entry under no root at all may take the user-entry fallback.
+    _nb_scv_entry_outside_root_v1 = effective_roots.len() == 0 and
+        not (entry_relative != "" and not entry_relative.contains("/"))
     if effective_roots.len() == 0:
         if entry_relative != "" and not entry_relative.contains("/"):
             _cli_eprint("SCV-E-ENTRY: root-level entry requires explicit finite --source roots; repository-wide admission is unsupported")
@@ -394,7 +416,13 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
     # one-line notice when it takes effect.
     val frozen = _nb_scv_freeze_v1(entry, source_dirs)
     val freeze_fallback_enabled = (env_get("SIMPLE_SCV_FREEZE_FALLBACK") ?? "") == "1"
-    if not frozen.0 and not freeze_fallback_enabled:
+    # A user entry outside every admitted root (`native-build /tmp/hello.spl`)
+    # has nothing to freeze against: the snapshot covers inventory families
+    # only. Outside bootstrap/admitted lanes it compiles from the working tree,
+    # like the explicit fallback, instead of refusing every ad-hoc script.
+    val user_entry_unfrozen = not frozen.0 and _nb_scv_entry_outside_root_v1 and
+        not _nb_scv_strict_entry_v1()
+    if not frozen.0 and not freeze_fallback_enabled and not user_entry_unfrozen:
         _cli_eprint(
             "error: native-build: SCV freeze has no admitted source " +
             "inventory to freeze the entry closure against (see the " +
@@ -404,13 +432,20 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
             "filesystem scan instead (weaker consistency guarantee), or " +
             "populate an admitted source inventory first (see " +
             "src/lib/scv/compile_source_inventory.spl).")
+        _nb_scv_unfrozen_closure_v1 = false
         return []
-    if not frozen.0:
+    if not frozen.0 and user_entry_unfrozen and not freeze_fallback_enabled:
+        _cli_eprint(
+            "SCV-W-USER-ENTRY: entry is outside the admitted source roots; " +
+            "compiling it from the working tree (set SIMPLE_SCV_STRICT_COLD_ENTRY=1 " +
+            "to refuse instead)")
+    elif not frozen.0:
         _cli_eprint(
             "SCV-W-FREEZE-FALLBACK: SIMPLE_SCV_FREEZE_FALLBACK=1 is set; " +
             "scanning the working tree directly instead of a frozen SCV " +
             "snapshot (weaker consistency guarantee: a concurrent edit is " +
             "not guaranteed to be seen atomically)")
+    _nb_scv_unfrozen_closure_v1 = not frozen.0
     val frozen_entry = if frozen.0: frozen.1 else: entry
     val frozen_source_dirs = if frozen.0: frozen.2 else: source_dirs
     val trace_closure = (env_get("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE") ?? "") == "1"
