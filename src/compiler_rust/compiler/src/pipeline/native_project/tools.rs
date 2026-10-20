@@ -3974,6 +3974,41 @@ fn is_windows_system_name(name: &str) -> bool {
             | "UnmapViewOfFile"
             | "VirtualProtect"
             | "lstrlenW"
+            // The MSVC link config has no system symbol scan, so any Win32 or
+            // UCRT import missing from this list was fabricated as a return-3
+            // stub that shadowed the real kernel32/bcrypt/psapi/d3d11/ucrt
+            // definition. The windows-x86_64 release stage1 then SEGV'd on
+            // native-build (release.yml run 39348340950, 33 stubs).
+            | "AcquireSRWLockExclusive"
+            | "AcquireSRWLockShared"
+            | "ReleaseSRWLockExclusive"
+            | "ReleaseSRWLockShared"
+            | "BCryptCloseAlgorithmProvider"
+            | "BCryptCreateHash"
+            | "BCryptDestroyHash"
+            | "BCryptFinishHash"
+            | "BCryptHashData"
+            | "BCryptOpenAlgorithmProvider"
+            | "D3D11CreateDevice"
+            | "GlobalMemoryStatusEx"
+            | "InitializeProcThreadAttributeList"
+            | "UpdateProcThreadAttribute"
+            | "K32GetProcessMemoryInfo"
+            | "QueryInformationJobObject"
+            | "ResumeThread"
+            | "Sleep"
+            | "TerminateJobObject"
+            | "TerminateProcess"
+            | "_fstat64i32"
+            | "_localtime64_s"
+            | "_time64"
+            | "ferror"
+            | "signal"
+            | "wcscat"
+            | "wcschr"
+            | "wcslen"
+            | "wcsncmp"
+            | "wcsrchr"
     )
 }
 

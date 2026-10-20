@@ -7127,6 +7127,31 @@ fn test_mingw_crt_symbols_follow_output_target_not_build_host() {
 }
 
 #[test]
+fn test_msvc_win32_and_ucrt_imports_are_never_stub_candidates() {
+    let target = simple_common::target::Target::parse("x86_64-pc-windows-msvc").unwrap();
+    for symbol in [
+        "AcquireSRWLockExclusive",
+        "BCryptOpenAlgorithmProvider",
+        "D3D11CreateDevice",
+        "InitializeProcThreadAttributeList",
+        "K32GetProcessMemoryInfo",
+        "Sleep",
+        "TerminateProcess",
+        "_fstat64i32",
+        "_time64",
+        "ferror",
+        "signal",
+        "wcslen",
+    ] {
+        assert!(
+            super::tools::is_system_symbol_for_target(symbol, target),
+            "{symbol} must resolve from kernel32/bcrypt/psapi/d3d11/ucrt, never generated stubs"
+        );
+    }
+    assert!(!super::tools::is_system_symbol_for_target("app__main", target));
+}
+
+#[test]
 fn test_inline_asm_symbols_are_never_weak_stub_candidates() {
     assert!(super::stubs::is_inline_asm_symbol("__simple_asm_Hf5014a9fdb029e11"));
     assert!(super::stubs::is_inline_asm_symbol("___simple_asm_Hf5014a9fdb029e11"));
