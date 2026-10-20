@@ -929,6 +929,29 @@ bootstrap_stage3_memory_emit_sample() {
     } >>"$bootstrap_stage3_memory_emit_file"
 }
 
+# SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB is the launch floor (free host memory
+# required before Stage 3 starts) and the default for two settings that used
+# to be the same number: the unit cgroup MemoryHigh and the live free-memory
+# reserve. Tying them together made every value wrong for a large closure:
+# a reserve the host can keep was a MemoryHigh that throttled the compiler
+# (aarch64 2026-10-20: MemoryHigh 16G starved the RSS watchdog at 16.6G).
+# Unset, each still equals HEADROOM, so behaviour is unchanged.
+bootstrap_stage3_memory_split_headroom() {
+    : "${SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB:=$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB}"
+    : "${SIMPLE_BOOTSTRAP_STAGE3_RUNTIME_RESERVE_MIB:=$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB}"
+    for bootstrap_stage3_memory_split_value in "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" \
+            "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" \
+            "$SIMPLE_BOOTSTRAP_STAGE3_RUNTIME_RESERVE_MIB"; do
+        case "$bootstrap_stage3_memory_split_value" in
+            ''|*[!0-9]*|0*) return 1 ;;
+        esac
+    done
+    # A reserve above the launch floor would admit a run and then stop it on
+    # its first live sample.
+    [ "$SIMPLE_BOOTSTRAP_STAGE3_RUNTIME_RESERVE_MIB" -le "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" ] || return 1
+    export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB SIMPLE_BOOTSTRAP_STAGE3_RUNTIME_RESERVE_MIB
+}
+
 bootstrap_stage3_memory_admission_preflight() {
     [ "$#" -eq 1 ] || return 2
     bootstrap_stage3_memory_evidence=$1
