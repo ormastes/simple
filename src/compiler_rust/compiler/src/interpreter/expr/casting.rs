@@ -144,6 +144,15 @@ fn cast_to_numeric(val: Value, target: NumericType) -> Result<Value, CompileErro
             let code_point = s.chars().next().unwrap() as i64;
             Ok(finalize_numeric_cast(cast_int_to_numeric(code_point, target), target))
         }
+        // `instance as i64` is the class instance's identity word (its address
+        // when compiled natively). The driver keys per-compilation state on it.
+        // Only a `class` value has an identity; a struct `Object` is a copy.
+        Value::ClassInstance(ref instance) if matches!(target, NumericType::I64 | NumericType::U64) => {
+            Ok(finalize_numeric_cast(
+                cast_int_to_numeric(std::sync::Arc::as_ptr(instance) as usize as i64, target),
+                target,
+            ))
+        }
         // Enum variant to numeric (ordinal position)
         Value::Enum {
             ref enum_name,
@@ -262,5 +271,24 @@ mod tests {
         };
         let cast = cast_value(original, &target).expect("packed byte array assertion");
         assert_eq!(cast.byte_array_view(), Some(&[1, 2, 3][..]));
+    }
+
+    #[test]
+    fn class_instance_casts_to_stable_identity_word() {
+        use crate::value::ClassInstance;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        let a = Value::ClassInstance(Arc::new(ClassInstance::new("A".into(), HashMap::new())));
+        let b = Value::ClassInstance(Arc::new(ClassInstance::new("A".into(), HashMap::new())));
+        let i64_ty = Type::Simple("i64".to_string());
+        let wa = cast_value(a.clone(), &i64_ty).expect("class as i64");
+        assert_eq!(wa, cast_value(a, &i64_ty).unwrap(), "same instance, same word");
+        assert_ne!(wa, cast_value(b, &i64_ty).unwrap(), "distinct instances differ");
+        assert!(!matches!(wa, Value::Int(0)));
+        let obj = Value::Object { class: "S".into(), fields: Arc::new(HashMap::new()) };
+        assert!(cast_value(obj, &i64_ty).is_err(), "struct values have no identity");
+        let f32_ty = Type::Simple("f32".to_string());
+        let c = Value::ClassInstance(Arc::new(ClassInstance::new("A".into(), HashMap::new())));
+        assert!(cast_value(c, &f32_ty).is_err());
     }
 }
