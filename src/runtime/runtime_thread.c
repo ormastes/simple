@@ -457,11 +457,11 @@ static int64_t rt_native_closure_payload(int64_t raw) {
 typedef struct {
     uintptr_t addr;
     int       found;
-} RtExecSegmentProbe;
+} SplExecSegmentProbe;
 
-static int rt_exec_segment_probe(struct dl_phdr_info* info, size_t size, void* raw) {
+static int spl_exec_segment_probe(struct dl_phdr_info* info, size_t size, void* raw) {
     (void)size;
-    RtExecSegmentProbe* probe = (RtExecSegmentProbe*)raw;
+    SplExecSegmentProbe* probe = (SplExecSegmentProbe*)raw;
     for (size_t i = 0; i < (size_t)info->dlpi_phnum; i++) {
         const ElfW(Phdr)* ph = &info->dlpi_phdr[i];
         if (ph->p_type != PT_LOAD || (ph->p_flags & PF_X) == 0) continue;
@@ -485,10 +485,10 @@ static int rt_native_address_is_code(int64_t raw_addr) {
     (void)raw_addr;
     return 0;
 #elif defined(SPL_THREAD_HAVE_PHDR_ITERATE)
-    RtExecSegmentProbe probe;
+    SplExecSegmentProbe probe;
     probe.addr = (uintptr_t)((uint64_t)raw_addr & ~RT_NATIVE_PTR_TAG_BITS);
     probe.found = 0;
-    dl_iterate_phdr(rt_exec_segment_probe, &probe);
+    dl_iterate_phdr(spl_exec_segment_probe, &probe);
     return probe.found;
 #else
     Dl_info info;
