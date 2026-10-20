@@ -1,6 +1,6 @@
 # Stage 3 bootstrap-fixed closure loop SIGSEGVs in lower_module (omitted default args)
 
-- Status: FIX COMMITTED (source); native validation pending a Stage 2 rebuild
+- Status: FIXED by 83ff46b0bc4 (PR #3919)
 - Date: 2026-10-19
 - Platform: aarch64-unknown-linux-gnu
 - Blocks: Stage 3 MIR lowering, right after
