@@ -632,18 +632,35 @@ int64_t rt_webgpu_create_surface__core_c_backfill(int32_t width, int32_t height)
 }
 bool rt_webgpu_shutdown__core_c_backfill(void) { return false; }
 bool rt_webgpu_destroy_surface__core_c_backfill(int64_t handle) { (void)handle; return false; }
+bool core_c_backfill_webgpu_upload_pixels(int64_t handle, const void* pixels, size_t pixel_count,
+                                              int32_t w, int32_t h) {
+    (void)handle; (void)pixels; (void)pixel_count; (void)w; (void)h;
+    return false;
+}
+bool core_c_backfill_webgpu_present(int64_t handle) { (void)handle; return false; }
+bool core_c_backfill_webgpu_compute_draw(int64_t handle, int32_t op_kind, int32_t x, int32_t y,
+                                             int32_t w, int32_t h, uint32_t color) {
+    (void)handle; (void)op_kind; (void)x; (void)y; (void)w; (void)h; (void)color;
+    return false;
+}
 #if defined(_M_IX86)
 #pragma comment(linker, "/alternatename:_rt_webgpu_is_available=_rt_webgpu_is_available__core_c_backfill")
 #pragma comment(linker, "/alternatename:_rt_webgpu_init=_rt_webgpu_init__core_c_backfill")
 #pragma comment(linker, "/alternatename:_rt_webgpu_create_surface=_rt_webgpu_create_surface__core_c_backfill")
 #pragma comment(linker, "/alternatename:_rt_webgpu_shutdown=_rt_webgpu_shutdown__core_c_backfill")
 #pragma comment(linker, "/alternatename:_rt_webgpu_destroy_surface=_rt_webgpu_destroy_surface__core_c_backfill")
+#pragma comment(linker, "/alternatename:_rt_webgpu_upload_pixels=_core_c_backfill_webgpu_upload_pixels")
+#pragma comment(linker, "/alternatename:_rt_webgpu_present=_core_c_backfill_webgpu_present")
+#pragma comment(linker, "/alternatename:_rt_webgpu_compute_draw=_core_c_backfill_webgpu_compute_draw")
 #else
 #pragma comment(linker, "/alternatename:rt_webgpu_is_available=rt_webgpu_is_available__core_c_backfill")
 #pragma comment(linker, "/alternatename:rt_webgpu_init=rt_webgpu_init__core_c_backfill")
 #pragma comment(linker, "/alternatename:rt_webgpu_create_surface=rt_webgpu_create_surface__core_c_backfill")
 #pragma comment(linker, "/alternatename:rt_webgpu_shutdown=rt_webgpu_shutdown__core_c_backfill")
 #pragma comment(linker, "/alternatename:rt_webgpu_destroy_surface=rt_webgpu_destroy_surface__core_c_backfill")
+#pragma comment(linker, "/alternatename:rt_webgpu_upload_pixels=core_c_backfill_webgpu_upload_pixels")
+#pragma comment(linker, "/alternatename:rt_webgpu_present=core_c_backfill_webgpu_present")
+#pragma comment(linker, "/alternatename:rt_webgpu_compute_draw=core_c_backfill_webgpu_compute_draw")
 #endif
 #else
 bool rt_webgpu_is_available(void) { return false; }
@@ -654,6 +671,16 @@ int64_t rt_webgpu_create_surface(int32_t width, int32_t height) {
 }
 bool rt_webgpu_shutdown(void) { return false; }
 bool rt_webgpu_destroy_surface(int64_t handle) { (void)handle; return false; }
+bool rt_webgpu_upload_pixels(int64_t handle, const void* pixels, size_t pixel_count, int32_t w, int32_t h) {
+    (void)handle; (void)pixels; (void)pixel_count; (void)w; (void)h;
+    return false;
+}
+bool rt_webgpu_present(int64_t handle) { (void)handle; return false; }
+bool rt_webgpu_compute_draw(int64_t handle, int32_t op_kind, int32_t x, int32_t y, int32_t w, int32_t h,
+                            uint32_t color) {
+    (void)handle; (void)op_kind; (void)x; (void)y; (void)w; (void)h; (void)color;
+    return false;
+}
 #endif
 
 /* Real POSIX fd helpers (mirror interpreter_extern/qmp_socket.rs semantics). */
