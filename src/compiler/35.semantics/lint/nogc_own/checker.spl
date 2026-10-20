@@ -33,7 +33,8 @@
 # it: a `C(...)`/`C.new(...)` constructor, a `: C` annotation, or a parameter
 # typed `C`, where `C` is a class declared in the file or passed in through
 # `extra_classes` (the blast-radius driver passes a repo-wide class index from
-# which names that are ALSO declared as struct/enum somewhere are removed).
+# which names that are ALSO declared as struct/enum/trait/union/type anywhere
+# are removed).
 # Structs, arrays, dicts, text and scalars are values and are never flagged.
 # `iso T` parameters are explicit owners and are never treated as borrows.
 # Unhandled shapes (moves inside loops, moves through unknown call results)
@@ -407,6 +408,12 @@ fn _place_class(f: NogcFile, fun: NogcFn, locals: NogcLocals, expr: text) -> tex
 # Path-sensitive forward scan (NOGC-OWN-001)
 # ============================================================================
 
+fn _is_else(code: text) -> bool:
+    code == "else:" or code.starts_with("else:") or code.starts_with("elif ")
+
+fn _is_loop_header(code: text) -> bool:
+    code.starts_with("for ") or code.starts_with("while ") or code == "loop:" or code.starts_with("loop:")
+
 fn _starts_terminator(code: text) -> bool:
     if code == "return" or code.starts_with("return "): return true
     if code == "break" or code == "continue": return true
@@ -429,9 +436,9 @@ fn _use_after(f: NogcFile, fun: NogcFn, t: i64, name: text, decl_at: i64) -> i64
         if f.indents[k] != 999 and f.indents[k] < cur:
             val c = f.codes[k]
             var kind = "other"
-            if c.starts_with("if ") or c.starts_with("elif ") or c.starts_with("else"):
+            if c.starts_with("if ") or _is_else(c):
                 kind = "branch"
-            elif c.starts_with("for ") or c.starts_with("while ") or c.starts_with("loop"):
+            elif _is_loop_header(c):
                 kind = "loop"
             elif c.starts_with("case "):
                 kind = "arm"
@@ -466,7 +473,7 @@ fn _use_after(f: NogcFile, fun: NogcFn, t: i64, name: text, decl_at: i64) -> i64
         var keep_kind: [text] = []
         while depth_i < h_ind.len():
             if h_ind[depth_i] == ind and not skip:
-                if h_kind[depth_i] == "branch" and (code.starts_with("elif ") or code.starts_with("else")):
+                if h_kind[depth_i] == "branch" and _is_else(code):
                     skip = true
                 elif h_kind[depth_i] == "arm":
                     skip = true
@@ -483,8 +490,13 @@ fn _use_after(f: NogcFile, fun: NogcFn, t: i64, name: text, decl_at: i64) -> i64
             continue
         if ind < level: level = ind
         if nogc_has_word(code, name):
+            # Reassignment or a shadowing redeclaration that does not read
+            # the moved name makes the name a fresh owner: not a use.
             val ap = nogc_assign_parts(code)
             if ap.len() == 2 and ap[0] == name and not nogc_has_word(ap[1], name):
+                return -1
+            val rd = nogc_decl_parts(code)
+            if rd.len() == 3 and rd[0] == name and not nogc_has_word(rd[2], name):
                 return -1
             return j
         if ind <= level and _starts_terminator(code):
@@ -762,8 +774,12 @@ pub fn check_nogc_ownership_indexed(source: text, file_path: text, extra_cls: {t
     """Run every NOGC-* rule. `extra_cls`/`extra_agg` are repo-wide class and
     struct name sets (the blast-radius driver builds them once); in-file
     declarations are always added."""
-    val f = _build_file(source, extra_cls, extra_agg)
     val sink = NogcSink(path: file_path, findings: [])
+    # Cheap exit before the per-line projection: with no repo index and no
+    # `class` keyword in the file nothing can be class-typed.
+    if extra_cls.len() == 0 and source.index_of("class ") < 0:
+        return sink.findings
+    val f = _build_file(source, extra_cls, extra_agg)
     if f.classes.len() == 0 and extra_cls.len() == 0:
         return sink.findings
     var h = 0

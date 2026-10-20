@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-20
 **Base:** `origin/release_phase3` at `2de687836d7`
-**Plan:** `nogc_ownership_recovery_plan_2026-10-19.md` (same directory), §1–§3, §10, §12, §15
+**Plan:** `nogc_ownership_recovery_plan_2026-10-19.md` (lands in this directory via branch `work/nogc-ownership-plan-doc`), §1–§3, §10, §12, §15
 **Status:** source-reviewed and fixture-verified (plan §2.4). Nothing here enables a new
 default. The lint is WARNING-only.
 
@@ -95,6 +95,7 @@ One shard was killed by the host CPU-spin guard at file 11,201 of 12,497, and it
 The bootstrap closure is the 781-file import closure of `src/app/cli/bootstrap_main.spl`.
 It was computed by resolving `use` statements, which is approximate, and 9 relative imports were unresolved.
 The table lists buckets with at least 20 findings.
+The driver and closure resolver were uncommitted scratch scripts. Reproduce the run by calling `check_nogc_ownership_indexed` over the same lists.
 
 | Bucket | OWN-001 | BOR-001 | BOR-002 | BOR-003 | BOR-004 | ALIAS-001 | Total |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -130,7 +131,7 @@ The remaining 13 sites:
 |---|---|---|---|
 | `20.hir/hir_lowering/module_surface_registry.spl:260` | BOR-002 | `self.surfaces.push(surface)` stores a param | consume contract for the param |
 | `20.hir/hir_lowering/types.spl:819,825` | BOR-002 | `lowering.module_surfaces = module_surfaces` | consume contract for the param |
-| `25.traits/trait_solver.spl:504` | BOR-001 | getter returns `self.assoc_resolver` | short-borrow accessor / call-site use |
+| `25.traits/trait_solver.spl:504` | BOR-001 | getter returns `self.assoc_resolver` | callers access through the owning path (`solver.assoc_resolver.x`, a fresh short borrow), or a handle/ID. Never a returned borrow. |
 | `50.mir/hwir/mir_to_hwir.spl:52` | BOR-002 | `HwirLowerResult(module: module, ...)` | consume contract for the param |
 | `80.driver/driver_source_pipeline_parsing.spl:844,1186` | OWN-001 | one owner stored in two fields (documented native `Option<class>` workaround) | one owner plus a handle/ID |
 | `src/lib/log.spl:322` | OWN-001 | ring backend pushed to a global registry **and** returned | registry owns it; return the index handle (`self_ptr` already is one) |
