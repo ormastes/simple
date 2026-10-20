@@ -101,6 +101,12 @@ jobs:
     # cross/freebsd legs build bootstrap-only seeds that refuse release by
     # design. Keep those rows visible without letting them hold the release.
     continue-on-error: ${{ matrix.cross_compile == true || contains(matrix.platform, 'freebsd') || startsWith(matrix.os, 'macos') }}
+    # Windows x86_64 C toolchain authority (same pin as windows-build.yml):
+    # src/compiler_rust/lib/build.rs refuses cl.exe for the MSVC target.
+    env:
+      LLVM_VERSION: 23.1.1
+      LLVM_ARCHIVE_SHA256: c8a12d754b5050c5668b56a5425c806792d46c70f7244b1216046164aa4b6462
+      LLVM_ROOT: ${{ github.workspace }}\.toolchains\llvm-23.1.1
 
     steps:
       - name: Checkout code
@@ -464,6 +470,97 @@ jobs:
             echo "⚠ LLVM lib stage2 failed — using stage1 binary"
           fi
 
+      - name: Cache LLVM 23.1.1 (Windows x86_64)
+        if: matrix.platform == 'windows-x86_64'
+        id: llvm-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.LLVM_ROOT }}
+          key: llvm-${{ runner.os }}-${{ runner.arch }}-${{ env.LLVM_VERSION }}-${{ env.LLVM_ARCHIVE_SHA256 }}
+
+      - name: Install LLVM 23.1.1 (Windows x86_64)
+        if: matrix.platform == 'windows-x86_64' && steps.llvm-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archiveName = 'clang+llvm-23.1.1-x86_64-pc-windows-msvc.tar.zst'
+          $archive = Join-Path $env:RUNNER_TEMP $archiveName
+          $staging = Join-Path $env:RUNNER_TEMP 'simple-llvm-23.1.1-extract'
+          $uri = 'https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.1/clang%2Bllvm-23.1.1-x86_64-pc-windows-msvc.tar.zst'
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -Uri $uri -OutFile $archive
+          $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $env:LLVM_ARCHIVE_SHA256) {
+            throw "LLVM archive SHA-256 mismatch: $actualHash"
+          }
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          & 7z x $archive "-o$staging" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to decompress LLVM archive: exit $LASTEXITCODE"
+          }
+          $tar = Join-Path $staging 'clang+llvm-23.1.1-x86_64-pc-windows-msvc.tar'
+          & 7z x $tar "-o$staging" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to extract LLVM archive: exit $LASTEXITCODE"
+          }
+          $sourceRoot = Join-Path $staging 'clang+llvm-23.1.1-x86_64-pc-windows-msvc'
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $env:LLVM_ROOT) | Out-Null
+          Move-Item -LiteralPath $sourceRoot -Destination $env:LLVM_ROOT
+
+      - name: Verify LLVM 23.1.1 authority (Windows x86_64)
+        if: matrix.platform == 'windows-x86_64'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $checks = @(
+            @{ Tool = 'clang.exe'; Pattern = 'clang version 23\.1\.1(?:\s|$)' },
+            @{ Tool = 'clang-cl.exe'; Pattern = 'clang version 23\.1\.1(?:\s|$)' },
+            @{ Tool = 'llvm-ar.exe'; Pattern = 'LLVM version 23\.1\.1(?:\s|$)' },
+            @{ Tool = 'lld-link.exe'; Pattern = 'LLD 23\.1\.1(?:\s|$)' }
+          )
+          foreach ($check in $checks) {
+            $tool = Join-Path $env:LLVM_ROOT "bin\$($check.Tool)"
+            if (!(Test-Path -LiteralPath $tool -PathType Leaf)) {
+              throw "missing LLVM 23.1.1 tool: $tool"
+            }
+            $versionLines = @(& $tool --version 2>&1)
+            if ($LASTEXITCODE -ne 0) {
+              throw "$($check.Tool) --version failed: exit $LASTEXITCODE"
+            }
+            $version = $versionLines -join "`n"
+            if ($version -notmatch $check.Pattern) {
+              $summary = ($versionLines | Select-Object -First 3) -join ' | '
+              throw "$($check.Tool) is not LLVM 23.1.1: $summary"
+            }
+            $toolHash = (Get-FileHash -LiteralPath $tool -Algorithm SHA256).Hash.ToLowerInvariant()
+            $summary = ($versionLines | Select-Object -First 3) -join ' | '
+            Write-Host "LLVM_TOOL_ATTESTATION tool=$($check.Tool) sha256=$toolHash version=$summary"
+          }
+          (Join-Path $env:LLVM_ROOT 'bin') | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "SIMPLE_LLVM_PATH=$env:LLVM_ROOT\bin\LLVM-C.dll" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Setup MSVC (Windows x86_64)
+        if: matrix.platform == 'windows-x86_64'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # Hide Git's /usr/bin/link so it doesn't shadow MSVC's link.exe.
+      - name: Fix MSVC linker PATH (Windows x86_64)
+        if: matrix.platform == 'windows-x86_64'
+        shell: bash
+        run: |
+          if [ -f /usr/bin/link ]; then
+            mv /usr/bin/link /usr/bin/link.bak
+          fi
+
+      - name: Bind MSVC Clang compiler (Windows x86_64)
+        if: matrix.platform == 'windows-x86_64'
+        shell: pwsh
+        run: |
+          "CC=$env:LLVM_ROOT\bin\clang-cl.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CXX=$env:LLVM_ROOT\bin\clang-cl.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CC_x86_64_pc_windows_msvc=$env:LLVM_ROOT\bin\clang-cl.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CXX_x86_64_pc_windows_msvc=$env:LLVM_ROOT\bin\clang-cl.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Build native Windows binary via bootstrap-only Rust seed
         if: runner.os == 'Windows'
         shell: bash
@@ -766,6 +863,45 @@ jobs:
             echo "ℹ Skipping native MCP package binaries for ${PLATFORM}"
           fi
 
+          # Native test runner, built by this row's own pure-Simple candidate
+          # (flags mirror bootstrap-provisional-phase3-phase4.shs build_binary).
+          # SIMPLE_BIN/SIMPLE_BINARY must name the invoking producer, or the
+          # bootstrap native-build route rejects it ("producer mismatch").
+          if [ "$PLATFORM" = linux-x86_64 ] || [ "$PLATFORM" = windows-x86_64 ]; then
+            if [[ "$PLATFORM" == windows-* ]]; then
+              RUNNER_BIN="simple_test_runner.exe"
+              PRODUCER="$(cygpath -m "$BINARY_TO_PACKAGE")"
+              RUNNER_THREADS=2
+            else
+              RUNNER_BIN="simple_test_runner"
+              PRODUCER="$BINARY_TO_PACKAGE"
+              RUNNER_THREADS=4
+            fi
+            RUNNER_OUT="build/bootstrap/test-runner/${RUNNER_BIN}"
+            mkdir -p build/bootstrap/test-runner
+            echo "Building native ${RUNNER_BIN} for bootstrap package"
+            if ! RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=0 \
+              SIMPLE_BIN="$PRODUCER" SIMPLE_BINARY="$PRODUCER" \
+              "$BINARY_TO_PACKAGE" native-build \
+              --source src/compositions/kernel_llvm_cranelift --source src/compiler --source src/app \
+              --source src/lib --source src/os --source src/plugins --source src/package_ownership \
+              --source src/compositions \
+              --entry-closure --entry src/app/test_runner_new/main.spl \
+              --threads "$RUNNER_THREADS" --mode dynload \
+              --output "$RUNNER_OUT" 2>&1; then
+              echo "✗ ${RUNNER_BIN} native build failed" >&2
+              exit 1
+            fi
+            if [ ! -f "$RUNNER_OUT" ]; then
+              echo "✗ ${RUNNER_BIN} native build produced no binary" >&2
+              exit 1
+            fi
+            cp "$RUNNER_OUT" "${PKG_DIR}/bin/${RUNNER_BIN}"
+            chmod +x "${PKG_DIR}/bin/${RUNNER_BIN}"
+            ls -lh "${PKG_DIR}/bin/${RUNNER_BIN}"
+            echo "✓ Copied test runner → bin/${RUNNER_BIN}"
+          fi
+
           sh scripts/check-executable-size-budgets.shs --skip-missing \
             "${BINARY_TO_PACKAGE:-}" \
             "${PKG_DIR}/bin/simple" \
@@ -824,6 +960,31 @@ jobs:
             simple-bootstrap-*.spk
             simple-bootstrap-*.spk.sha256
           retention-days: 90
+
+      - name: Smoke packaged simple and test runner
+        if: matrix.platform == 'linux-x86_64' || matrix.platform == 'windows-x86_64'
+        shell: bash
+        run: |
+          PKG=$(ls simple-bootstrap-*.spk | head -1)
+          rm -rf smoke-pkg
+          mkdir smoke-pkg
+          tar xzf "$PKG" -C smoke-pkg
+          BIN_DIR=$(cd smoke-pkg/simple-bootstrap-*/bin && pwd)
+          if [[ "${{ matrix.platform }}" == windows-* ]]; then
+            SIMPLE="$BIN_DIR/simple.exe"
+            SIMPLE_REAL="$(cygpath -m "$BIN_DIR/simple.exe")"
+            RUNNER="$BIN_DIR/simple_test_runner.exe"
+          else
+            SIMPLE="$BIN_DIR/simple"
+            SIMPLE_REAL="$BIN_DIR/simple-runtime"
+            RUNNER="$BIN_DIR/simple_test_runner"
+          fi
+          ls -l "$BIN_DIR"
+          "$SIMPLE" --version
+          SIMPLE_LIB="$PWD/src" SIMPLE_BINARY="$SIMPLE_REAL" SIMPLE_TEST_BINARY="$SIMPLE_REAL" \
+            "$RUNNER" test/01_unit/compiler/interpreter/block_scoped_use_resolves_spec.spl \
+            --mode=interpreter --unstable --assert-ran --no-cache --no-db \
+            --no-session-daemon --sequential
 
   build-installers:
     name: Build Installation Packages
