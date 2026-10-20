@@ -74,13 +74,15 @@ Measured (same base commit dacf1e81637, aarch64, JIT, loaded host):
 | tight `[i64]` loop, 12.3M read+write | 0.14-0.16 s user | 0.11 s user, 38 MB (was 38.6) |
 | probe `jit_wide_i64_array_store_jit_probe.spl` (1M overwrite + 1M append) | FAIL, 139.5 MB | PASS, 59.6 MB |
 
+Thread safety: the runtime has no ownership or refcount information, so in-place pack/unpack is only allowed before user threads exist. Every spawn entry point (`rt_thread_spawn_*`, `rt_actor_spawn`, `rt_async_spawn*`, `rt_par_launch`, the future worker pool, `spawn_actor`) calls `note_user_threads_started()`, which unpacks every live packed array and permanently disables packing; after that the lane stores tagged (one box per wide store, the old behaviour). Test: `starting_user_threads_unpacks_every_packed_array_and_stops_packing`.
+
 Named gaps (not fixed here):
 - Arrays whose static element type is erased (`[any]`, generic `[T]`, dict values)
   still box wide values per store; releasing on overwrite is unsafe without
   ownership (aliases are the norm). Needs a collector or refcounts.
 - Freestanding (baremetal) and WASM targets keep the old path; the C runtime
   twin (`runtime_native.c`) implements the lane without in-place packing.
-- A generic read of a packed wide element (`rt_array_get`, erased receivers) re-boxes it (scope-tracked); packed arrays are not safe to share across threads while a non-packed-aware consumer may unpack them. An array unpacked once is never re-packed (bounds the worst case at the old one-box-per-store).
-- Sorting a TAGGED array holding wide boxes is still wrong (packed arrays sort
+- A generic read of a packed wide element (`rt_array_get`, erased receivers) re-boxes it (scope-tracked); An array unpacked once is never re-packed (bounds the worst case at the old one-box-per-store).
+- Sorting a TAGGED array holding wide boxes is still wrong (filed: `doc/08_tracking/bug/sort_tagged_array_with_wide_int_boxes_unsorted_2026-10-20.md`) (packed arrays sort
   correctly, signed).
 - `[u64]` element reads still shift arithmetically in the interpreter (separate).

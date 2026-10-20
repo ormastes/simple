@@ -3050,6 +3050,16 @@ mod typed_i64_lane_tests {
 
     const WIDE: i64 = 8_070_450_532_247_928_832;
 
+    /// The user-threads switch is process-global; serialise the tests that
+    /// depend on packing so the one that flips it cannot race the others.
+    static LANE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lane() -> std::sync::MutexGuard<'static, ()> {
+        let guard = LANE.lock().unwrap_or_else(|e| e.into_inner());
+        crate::value::collections::reset_user_threads_started_for_test();
+        guard
+    }
+
     fn packed(array: RuntimeValue) -> bool {
         let ptr = get_typed_ptr_packed::<RuntimeArray>(array, HeapObjectType::Array).expect("array");
         unsafe { (*ptr).is_u64_packed() && (*ptr).is_lazy_words() }
@@ -3061,6 +3071,7 @@ mod typed_i64_lane_tests {
 
     #[test]
     fn narrow_stores_keep_the_tagged_layout() {
+        let _lane = lane();
         let a = repeat_zero(4);
         for (i, v) in [7_i64, -5, (1 << 60) - 1, -(1 << 60)].into_iter().enumerate() {
             assert!(rt_typed_words_i64_set(a, i as i64, v));
@@ -3072,6 +3083,7 @@ mod typed_i64_lane_tests {
 
     #[test]
     fn first_wide_store_packs_in_place_and_keeps_every_value() {
+        let _lane = lane();
         let a = repeat_zero(6);
         assert!(rt_typed_words_i64_set(a, 0, -3));
         assert!(rt_typed_words_i64_set(a, 1, 1 << 60));
@@ -3091,6 +3103,7 @@ mod typed_i64_lane_tests {
 
     #[test]
     fn overwrite_loop_allocates_no_heap_box_per_store() {
+        let _lane = lane();
         let a = repeat_zero(64);
         assert!(rt_typed_words_i64_set(a, 0, WIDE));
         let boxes = || crate::value::heap::rt_heap_live_count_by_kind(HeapObjectType::Int as i64);
@@ -3110,6 +3123,7 @@ mod typed_i64_lane_tests {
 
     #[test]
     fn wide_push_packs_and_grows() {
+        let _lane = lane();
         let a = rt_array_new(0);
         for n in 0..1000_i64 {
             assert!(rt_typed_words_i64_push(a, -WIDE - n));
@@ -3124,6 +3138,7 @@ mod typed_i64_lane_tests {
 
     #[test]
     fn signed_order_survives_sort_min_max_and_copies() {
+        let _lane = lane();
         let a = repeat_zero(5);
         for (i, v) in [WIDE, -WIDE, -1, 5, 1 << 60].into_iter().enumerate() {
             assert!(rt_typed_words_i64_set(a, i as i64, v));
@@ -3155,6 +3170,7 @@ mod typed_i64_lane_tests {
 
     #[test]
     fn array_with_non_integer_slot_is_never_packed() {
+        let _lane = lane();
         let a = rt_array_new(2);
         assert!(rt_array_push(a, RuntimeValue::from_int(1)));
         assert!(rt_array_push(a, RuntimeValue::from_float(1.5)));
@@ -3181,6 +3197,7 @@ mod typed_i64_lane_tests {
 
     #[test]
     fn packed_and_tagged_arrays_with_the_same_values_are_equal_and_hash_alike() {
+        let _lane = lane();
         let values = [WIDE, -3, 1 << 60, i64::MIN, 12];
         let packed_a = packed_of(&values);
         let tagged = tagged_copy_of(&values);
@@ -3199,6 +3216,7 @@ mod typed_i64_lane_tests {
 
     #[test]
     fn write_span_from_packed_i64_into_tagged_keeps_negative_words() {
+        let _lane = lane();
         let src = packed_of(&[-3, WIDE, -WIDE, 5]);
         let dst = tagged_copy_of(&[0, 0, 0, 0]);
         assert_eq!(super::super::rt_array_write_span(dst, src, 0, 0, 4), 4);
@@ -3209,6 +3227,7 @@ mod typed_i64_lane_tests {
 
     #[test]
     fn min_max_clear_free_and_length_keep_a_packed_array_packed() {
+        let _lane = lane();
         let a = packed_of(&[WIDE, -WIDE, 5]);
         assert_eq!(rt_array_len(a), 3);
         assert_eq!(rt_array_max(a).as_int(), WIDE);
@@ -3225,6 +3244,7 @@ mod typed_i64_lane_tests {
 
     #[test]
     fn an_array_unpacked_by_a_generic_consumer_is_not_packed_again() {
+        let _lane = lane();
         let a = packed_of(&[WIDE, 2, 3]);
         assert!(packed(a));
         // A consumer that is not packed-aware goes through get_typed_ptr and
@@ -3237,5 +3257,27 @@ mod typed_i64_lane_tests {
         assert!(!packed(a), "a store loop must not re-box the whole array every iteration");
         assert_eq!(rt_typed_words_i64_at(a, 1), -WIDE);
         assert_eq!(rt_typed_words_i64_at(a, 0), WIDE);
+    }
+
+    #[test]
+    fn starting_user_threads_unpacks_every_packed_array_and_stops_packing() {
+        let _lane = lane();
+        let a = packed_of(&[WIDE, -WIDE, 5]);
+        assert!(packed(a));
+        crate::value::note_user_threads_started();
+        assert!(!packed(a), "no array may keep a packed layout once threads can share it");
+        assert_eq!(
+            (0..3).map(|i| rt_typed_words_i64_at(a, i)).collect::<Vec<_>>(),
+            vec![WIDE, -WIDE, 5]
+        );
+        // from here a wide store stays on the tagged layout and is still right
+        let b = repeat_zero(4);
+        assert!(rt_typed_words_i64_set(b, 2, WIDE));
+        assert!(!packed(b));
+        assert_eq!(rt_typed_words_i64_at(b, 2), WIDE);
+        assert!(rt_typed_words_i64_push(b, -WIDE));
+        assert!(!packed(b));
+        assert_eq!(rt_typed_words_i64_at(b, 4), -WIDE);
+        crate::value::collections::reset_user_threads_started_for_test();
     }
 }

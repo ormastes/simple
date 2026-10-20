@@ -136,6 +136,30 @@ fn slot_word(slot: RuntimeValue) -> i64 {
     slot.to_raw() as i64
 }
 
+/// Set once any user-visible concurrency starts (thread / actor / async / parallel
+/// launch). In-place pack and unpack change an array's representation, which is
+/// only safe while no other thread can touch the array: the runtime keeps no
+/// ownership or reference-count information to tell a private array from a
+/// shared one. So packing happens only before user threads exist, and the first
+/// spawn unpacks every packed array; afterwards the lane degrades to the plain
+/// tagged store (one heap box per wide store) and no array changes layout.
+static USER_THREADS_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Call from every entry point that starts user-visible concurrency, BEFORE the
+/// new thread can run.
+pub fn note_user_threads_started() {
+    if !USER_THREADS_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        for addr in super::heap::live_lazy_word_arrays() {
+            unsafe { unpack_lazy_words(addr as *mut RuntimeArray) };
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn reset_user_threads_started_for_test() {
+    USER_THREADS_STARTED.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// Pack a tagged array of integers in place: every slot becomes its raw i64
 /// word, `U64_PACKED | LAZY_WORDS` is set, and the data buffer (8 bytes per
 /// slot either way) is reused. Returns false, leaving the array untouched,
@@ -145,7 +169,11 @@ fn slot_word(slot: RuntimeValue) -> i64 {
 /// # Safety
 /// `arr` must point to a live `RuntimeArray`.
 unsafe fn pack_tagged_words_in_place(arr: *mut RuntimeArray) -> bool {
-    if (*arr).is_byte_packed() || (*arr).is_u64_packed() || (*arr).header.gc_flags & gc_flags::NO_REPACK != 0 {
+    if (*arr).is_byte_packed()
+        || (*arr).is_u64_packed()
+        || (*arr).header.gc_flags & gc_flags::NO_REPACK != 0
+        || USER_THREADS_STARTED.load(std::sync::atomic::Ordering::SeqCst)
+    {
         return false;
     }
     let len = (*arr).len as usize;

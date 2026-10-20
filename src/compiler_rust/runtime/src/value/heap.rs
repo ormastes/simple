@@ -260,6 +260,22 @@ fn note_heap_free(kind: u8, bytes: u64) {
     }
 }
 
+/// Header addresses of every live array carrying `LAZY_WORDS`. Taken under the
+/// registry lock (registered == live), used when user threads start.
+pub(crate) fn live_lazy_word_arrays() -> Vec<usize> {
+    let Ok(registry) = heap_allocation_registry().lock() else {
+        return Vec::new();
+    };
+    registry
+        .iter()
+        .copied()
+        .filter(|addr| unsafe {
+            let header = *addr as *const HeapHeader;
+            (*header).object_type == HeapObjectType::Array && (*header).gc_flags & gc_flags::LAZY_WORDS != 0
+        })
+        .collect()
+}
+
 fn heap_allocation_registry() -> &'static Mutex<HeapPtrSet<usize>> {
     HEAP_ALLOCATION_REGISTRY.get_or_init(|| Mutex::new(HeapPtrSet::default()))
 }
