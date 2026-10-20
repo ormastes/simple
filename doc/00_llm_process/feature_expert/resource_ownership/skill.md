@@ -98,11 +98,13 @@ exclusive borrow; `new(&)`/`new(*)` canonical with `new&`/`new*` sugar.
   the legacy Ref(T,false) / Ptr(T,false) / Infer, so the bootstrap closure is
   unchanged. Trap: `*R` in a strict module is HirTypeKind.Shared, not Ptr, so
   WP-G's `mir_hir_type_is_shared_resource` matches both.
-- Strict modules are recorded per ParserModule name in
-  `resource_registry.nogc_strict_modules` (NOT reset per parse, written
-  true/false on every bridge build). Imported surfaces look it up by the
-  imported module name, which may differ from the parse path; until that is
-  unified an import's sigil types lower in legacy shape.
+- Strictness is `ParserModule.nogc_strict`, set by the flat bridge from the
+  `@no_gc(strict)` marker and preserved by async desugaring. Imported surfaces
+  follow the IMPORTING module's mode (the sigils mean the same thing
+  everywhere; the mode only decides whether HIR keeps them distinct). A
+  process-wide name-keyed registry was tried and rejected: import names are
+  dotted while the bridge only knows the parse path, and it was never reset.
+  `SIMPLE_NOGC_STRICT=1` is seed-only (it is not in any self-hosted cache key).
 - Trap: the flat bridge used to turn every `new ...` expression into NilLit;
   it now builds ExprKind.New and HIR lowers it to the constructed value.
 - Spec: `test/01_unit/compiler/frontend/nogc_sigil_selfhost_spec.spl`.
