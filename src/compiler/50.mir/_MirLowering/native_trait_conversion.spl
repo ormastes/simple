@@ -11,6 +11,8 @@ use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use std.common.crypto.sha256.{sha256_text}
 
 impl MirLowering:
     me coerce_native_trait_assignment(local: LocalId, kind: HirExprKind,
@@ -114,13 +116,31 @@ impl MirLowering:
         if rejection != "":
             self.error_fatal("incompatible native trait object signature: {owner} for {concrete_owner}: {rejection}", Some(value.span))
             return local
+        # The concrete type is known only here, so this is where its
+        # trait-to-trait cast thunk is emitted (see native_trait_cast_thunk).
+        val cast_name = self.native_trait_cast_thunk(concrete_owner)
+        var builder = self.builder
+        val data = builder.emit_bitcast(mir_operand_copy(local), native_trait_data_pointer_type())
+        self.builder = builder
+        val object = self.emit_native_trait_object_for(implementation, layout, data, cast_name)
+        val isolation_state = self.local_hir_type_isolation_state(local.id)
+        val resource_state = self.local_hir_type_resource_state(local.id)
+        self.remember_local_hir_type(object.id, expected, isolation_state, resource_state)
+        object
+
+    me emit_native_trait_object_for(implementation: NativeTraitImplementation,
+            layout: NativeTraitLayout, data: LocalId, cast_name: text) -> LocalId:
+        """Build `(data, table)` on self.builder. Table slots: copy thunk,
+        reference semantics, the layout's method thunks in canonical order,
+        then the concrete type's cast thunk. The cast slot is LAST so every
+        method slot keeps its `index + 2` position (emit_native_trait_slot_call)."""
         val copy_name = self.native_trait_copy_thunk(implementation)
         val copy_signature = MirSignature(params: [native_trait_data_pointer_type()],
             return_type: native_trait_data_pointer_type(), is_variadic: false, params_known: true)
         var table_types: [MirType] = [MirType(kind: MirTypeKind.FuncPtr(copy_signature)), MirType.bool()]
         var table_values: [MirOperand] = [MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(copy_name), table_types[0])),
             MirOperand(kind: MirOperandKind.Const(MirConstValue.Bool(implementation.reference_semantics), MirType.bool()))]
-        index = 0
+        var index = 0
         while index < layout.methods.len():
             val signature = self.native_trait_slot_signature(layout.methods[index])
             val name = self.native_trait_method_thunk(implementation, layout.methods[index], index)
@@ -128,17 +148,129 @@ impl MirLowering:
             table_types.push(type_)
             table_values.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name), type_)))
             index = index + 1
+        val cast_type = MirType(kind: MirTypeKind.FuncPtr(native_trait_cast_signature()))
+        table_types.push(cast_type)
+        table_values.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(cast_name), cast_type)))
         var builder = self.builder
         val table = builder.emit_aggregate(AggregateKind.Tuple, table_values,
             MirType(kind: MirTypeKind.Tuple(table_types)))
-        val data = builder.emit_bitcast(mir_operand_copy(local), native_trait_data_pointer_type())
         val object = builder.emit_aggregate(AggregateKind.Tuple,
             [mir_operand_copy(data), mir_operand_copy(table)], native_trait_object_type())
         self.builder = builder
-        val isolation_state = self.local_hir_type_isolation_state(local.id)
-        val resource_state = self.local_hir_type_resource_state(local.id)
-        self.remember_local_hir_type(object.id, expected, isolation_state, resource_state)
         object
+
+    me native_trait_cast_thunk(concrete_owner: text) -> text:
+        """`(data, target_trait_id) -> object word | nil word (3)` for one
+        concrete type: a compare chain over every trait implementation of
+        `concrete_owner` visible to this module, building the target trait's
+        object around the same data pointer. Implementations the converting
+        module cannot see (declared in a module it does not import) answer
+        nil, exactly like a type that does not implement the target."""
+        val name = "__simple_trait_cast_" + sha256_text(self.current_module_id + "\n" + concrete_owner)
+        for existing in self.native_trait_thunks:
+            if existing.name == name: return name
+        val signature = native_trait_cast_signature()
+        val symbol = self.symbols.define(name, SymbolKind.Function, nil,
+            Span.empty(), Visibility.Private, false, nil)
+        val outer_builder = self.builder
+        var builder = MirBuilder.new()
+        builder.begin_function(symbol, name, signature, Span.empty())
+        var data = LocalId(id: -1)
+        var target_id = LocalId(id: -1)
+        for local in builder.locals:
+            match local.kind:
+                case LocalKind.Arg(0): data = local.id
+                case LocalKind.Arg(1): target_id = local.id
+                case _: ()
+        var seen_ids: Dict<i64, text> = {}
+        var index = 0
+        while index < self.native_trait_implementations.len():
+            val implementation = self.native_trait_implementations[index]
+            index = index + 1
+            if implementation.concrete_owner != concrete_owner: continue
+            val layout_index = self.native_trait_layout_index(implementation.trait_owner)
+            if layout_index < 0: continue
+            val layout = self.native_trait_layouts[layout_index]
+            if not layout.object_safe: continue
+            if self.native_trait_implementation_rejection(layout, implementation) != "": continue
+            val id = native_trait_cast_id(implementation.trait_owner)
+            if val prior = seen_ids.get(id):
+                if prior != implementation.trait_owner:
+                    self.builder = outer_builder
+                    self.error_fatal("native trait cast id collision: {prior} and {implementation.trait_owner}", nil)
+                    return name
+                continue
+            seen_ids[id] = implementation.trait_owner
+            val wanted = builder.emit_const_int(id)
+            val matches = builder.emit_binop(MirBinOp.Eq, mir_operand_copy(target_id), mir_operand_copy(wanted), MirType.bool())
+            val hit = builder.new_block(Some("trait_cast_hit"))
+            val next = builder.new_block(Some("trait_cast_next"))
+            builder.terminate_if(mir_operand_copy(matches), hit, next)
+            builder.switch_to_block(hit)
+            self.builder = builder
+            val object = self.emit_native_trait_object_for(implementation, layout, data, name)
+            builder = self.builder
+            val word = builder.emit_bitcast(mir_operand_copy(object), MirType.i64())
+            builder.set_terminator(MirTerminator.Ret(Some(mir_operand_copy(word))))
+            builder.switch_to_block(next)
+        val miss = builder.emit_const_int(3)
+        builder.set_terminator(MirTerminator.Ret(Some(mir_operand_copy(miss))))
+        self.native_trait_thunks.push(builder.end_function())
+        self.builder = outer_builder
+        name
+
+    me lower_native_trait_as(local: LocalId, operand: HirExpr, target: HirType, span: Span) -> LocalId:
+        """`e as T` for a native trait `T`. A trait-typed `e` is a checked
+        downcast through the source vtable's cast thunk and yields `T?`
+        (nil when the dynamic type does not implement `T`, as in the
+        interpreter). A concrete `e` converts statically and fails the build
+        when the type has no implementation of `T`."""
+        val target_owner = self.native_trait_owner_for_type(target)
+        var source_type: HirType? = self.find_local_hir_type(local.id)
+        if source_type == nil and operand.has_type_ and operand.type_ != nil:
+            source_type = operand.type_
+        var source_owner = ""
+        if val source = source_type:
+            source_owner = self.native_trait_owner_for_type(source)
+        if source_owner == "":
+            return self.coerce_native_trait_object(local, operand, target)
+        val optional_target = HirType(kind: HirTypeKind.Optional(target), span: span)
+        if source_owner == target_owner:
+            return self.ensure_option_handle(local, optional_target)
+        val source_index = self.native_trait_layout_index(source_owner)
+        val target_index = self.native_trait_layout_index(target_owner)
+        if source_index < 0 or target_index < 0:
+            self.error_fatal("native trait cast lacks canonical declaration: {source_owner} as {target_owner}", Some(span))
+            return local
+        if not self.native_trait_layouts[target_index].object_safe:
+            self.error_fatal("native trait cast target is not object-safe: {target_owner}", Some(span))
+            return local
+        # A thunk only checks ids among its own type's traits; refuse a
+        # target whose id another visible trait shares, or the thunk could
+        # hand back that trait's vtable.
+        val target_id = native_trait_cast_id(target_owner)
+        for other in self.native_trait_layouts:
+            if other.owner != target_owner and native_trait_cast_id(other.owner) == target_id:
+                self.error_fatal("native trait cast id collision: {other.owner} and {target_owner}", Some(span))
+                return local
+        val cast_slot = self.native_trait_layouts[source_index].methods.len() + 2
+        val signature = native_trait_cast_signature()
+        var builder = self.builder
+        val data = builder.emit_get_field(mir_operand_copy(local), 0, native_trait_data_pointer_type())
+        val table = builder.emit_get_field(mir_operand_copy(local), 1, native_trait_data_pointer_type())
+        val thunk = builder.emit_get_field(mir_operand_copy(table), cast_slot, MirType(kind: MirTypeKind.FuncPtr(signature)))
+        val wanted = builder.emit_const_int(target_id)
+        val word_result = builder.emit_call_indirect(mir_operand_copy(thunk),
+            [mir_operand_copy(data), mir_operand_copy(wanted)], signature, signature.return_type)
+        if word_result == nil:
+            self.builder = builder
+            self.error_fatal("native trait cast thunk lacks its required result", Some(span))
+            return local
+        val word = word_result ?? LocalId(id: -1)
+        val object = builder.emit_bitcast(mir_operand_copy(word), native_trait_object_type())
+        self.builder = builder
+        self.remember_local_hir_type(object.id, target, 0, 0)
+        self.ensure_option_handle(object, optional_target)
 
     me copy_native_trait_value(local: LocalId, type_: HirType) -> LocalId:
         if self.native_trait_owner_for_type(type_) != "":
