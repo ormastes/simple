@@ -6,7 +6,8 @@ use std.common.hash.djb2.{djb2_hash_text}
 use std.nogc_sync_mut.rt_hal.parallel_executor.{RtHalProviderRegistry}
 use std.nogc_sync_mut.rt_hal.exact_boundary.{RtHalDigest256, RtHalExactRequest, RtHalCanonicalReceipt, RtHalExactArenaPort, rt_hal_compare_observed_pure_exact}
 use std.nogc_sync_mut.runtime.thread_local.{rt_thread_local_new, rt_thread_local_get, rt_thread_local_set}
-use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock, mutex_lock_gate, mutex_unlock}
+# @workaround bug=p4p2_cross_module_generic_free_fn_not_instantiated_2026-10-20 reason=generic mutex_new/mutex_unlock stay unspecialized cross-module under the phase-2 producer; use the i64 gates
+use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new_gate, mutex_lock, mutex_lock_gate, mutex_unlock_gate}
 use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
 use std.nogc_sync_mut.concurrent.thread.{thread_yield}
 
@@ -42,7 +43,7 @@ var rhas_trace: [bool] = []
 var registry: RtHalProviderRegistry? = nil
 var arena: RtHalExactArenaPort? = nil
 var owner_tls = rt_thread_local_new()
-var owner_install_lock: Mutex = mutex_new(0)
+var owner_install_lock: Mutex = mutex_new_gate(0)
 var global_failure: AtomicI64 = atomic_i64_new(0)
 var close_epoch: AtomicI64 = atomic_i64_new(0)
 var active_pins: [AtomicI64] = []
@@ -152,12 +153,12 @@ pub fn rt_hal_boundary_worker_spawn_hook() -> bool:
         global_failure.store(1, MemoryOrdering.Release)
         return false
     if close_epoch.load(MemoryOrdering.Acquire) != 0:
-        mutex_unlock(owner_install_lock, 0)
+        mutex_unlock_gate(owner_install_lock, 0)
         active_workers.fetch_sub(1, MemoryOrdering.Release)
         global_failure.store(1, MemoryOrdering.Release)
         return false
     val problem = rt_hal_boundary_register_owner(current_owner())
-    mutex_unlock(owner_install_lock, 0)
+    mutex_unlock_gate(owner_install_lock, 0)
     if problem != "":
         active_workers.fetch_sub(1, MemoryOrdering.Release)
         global_failure.store(1, MemoryOrdering.Release)
