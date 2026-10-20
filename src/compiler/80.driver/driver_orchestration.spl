@@ -63,7 +63,9 @@ use compiler.driver.driver_hir_archive_production_controller_v1.{
     driver_hir_archive_production_begin_v1,
     driver_hir_archive_production_phase3_v1,
     driver_hir_archive_production_phase4_v1,
-    driver_hir_archive_production_finish_v1}
+    driver_hir_archive_production_finish_v1,
+    driver_hir_archive_production_release_v1}
+use compiler.driver.cache.hir_mir_archive_consumer_v1.{mir_archive_declaration_publication_revoke_v1}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 pub use compiler.driver.driver_phase_gates.{driver_streaming_surface_enabled}
@@ -182,6 +184,10 @@ impl CompilerDriver:
             requested_mode = self.ctx.options.cli_mode_text
         val result = self.compile_with_reverse_reference_owner_v1()
         val archive_finished = driver_hir_archive_production_finish_v1(self)
+        # Teardown of every identity-keyed entry this compilation created; ids are
+        # never reused, so long-lived processes would otherwise grow per driver.
+        mir_archive_declaration_publication_revoke_v1(self)
+        val archive_released = driver_hir_archive_production_release_v1(self)
         if requested_mode == "aot" and not result.is_success():
             val output = self.ctx.options.output_file ?? driver_noop_default_output_v1(self.ctx.options.input_files)
             val cleared = collection_native_clear_v1(output)
@@ -189,7 +195,7 @@ impl CompilerDriver:
                 reverse_reference_owner_end_v1()
                 return CompileResult.CodegenError("native compilation failed and collection receipt cleanup failed: {cleared}")
         reverse_reference_owner_end_v1()
-        if not archive_finished and result.is_success():
+        if not (archive_finished and archive_released) and result.is_success():
             return CompileResult.RuntimeError("bounded HIR production cleanup refused")
         result
 
