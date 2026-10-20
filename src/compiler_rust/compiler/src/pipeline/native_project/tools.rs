@@ -3549,10 +3549,13 @@ pub(crate) enum VerifyOutcome {
 /// Find an objdump (or llvm-objdump) tool for archive verification.
 fn find_objdump_tool() -> Option<String> {
     for prefix in &[
-        "/opt/homebrew/opt/llvm@18/bin",
+        // Unversioned brew llvm first: release.yml exports its lib/ in
+        // DYLD_LIBRARY_PATH, so llvm@18's llvm-objdump would bind the newer
+        // libLLVM.dylib and abort in dyld (run 39383952486, darwin-x86_64).
         "/opt/homebrew/opt/llvm/bin",
-        "/usr/local/opt/llvm@18/bin",
         "/usr/local/opt/llvm/bin",
+        "/opt/homebrew/opt/llvm@18/bin",
+        "/usr/local/opt/llvm@18/bin",
     ] {
         let path = format!("{prefix}/llvm-objdump");
         if std::path::Path::new(&path).exists() {
