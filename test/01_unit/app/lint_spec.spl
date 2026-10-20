@@ -23,6 +23,7 @@ use compiler.tools.fix.rules.impl_.lint_annotation.{check_unknown_attribute, che
 use compiler.core.parser.{parse_module_silent}
 use compiler.core.ast.{module_get_decls}
 use compiler.semantics.lint.collection_patterns.{check_collection_patterns}
+use std.spec.step
 
 # NOTE: describe, it, expect are built-in - no imports needed
 
@@ -434,3 +435,122 @@ describe "COLL006 string-concat-in-loop rule":
             "        i = i + 1\n" +
             "    acc\n"
         expect(count_collection_lint(source, "COLL006")).to_equal(0)  # oracle: integer operands are not text concat
+
+# --- Merged from the legacy mirror copy (unit:app/lint_spec.spl), test dedup phase B: tests this copy lacked.
+
+describe "Linter - accessor and inherited name checks (merged from legacy copy)":
+    it "computes bounded byte edit distance including adjacent transposition":
+        # @req REQ-APP-LINTER-CODE-QUALITY-CHECKS-001
+        # @capture(statistics): bounded damerau-levenshtein distance table
+        step("Verify: computes bounded byte edit distance including adjacent transposition")
+        expect(name_lint_bounded_damerau_levenshtein("abcd", "abcd", 1)).to_equal(0)  # oracle: identical strings
+        expect(name_lint_bounded_damerau_levenshtein("abcd", "abcde", 1)).to_equal(1)  # oracle: one insertion
+        expect(name_lint_bounded_damerau_levenshtein("abcde", "abcd", 1)).to_equal(1)  # oracle: one deletion
+        expect(name_lint_bounded_damerau_levenshtein("abcd", "abxd", 1)).to_equal(1)  # oracle: one substitution
+        expect(name_lint_bounded_damerau_levenshtein("abcd", "abdc", 1)).to_equal(1)  # oracle: adjacent transposition counts as one
+        expect(name_lint_bounded_damerau_levenshtein("abcdefghij", "abcdxfghyj", 2)).to_equal(2)  # oracle: two substitutions
+        expect(name_lint_bounded_damerau_levenshtein("abcdefgh", "ijklmnop", 2)).to_equal(3)  # oracle: beyond the band saturates at limit+1
+        expect(name_lint_bounded_damerau_levenshtein("café", "cafe", 1)).to_equal(2)  # oracle: two-byte é is two byte edits at band 1
+        expect(name_lint_bounded_damerau_levenshtein("café", "cafe", 2)).to_equal(2)  # oracle: band does not change the byte distance
+        expect(name_lint_bounded_damerau_levenshtein("", "", 1)).to_equal(0)  # oracle: two empty strings
+        expect(name_lint_bounded_damerau_levenshtein("", "a", 1)).to_equal(1)  # oracle: insertion into empty
+        expect(name_lint_bounded_damerau_levenshtein("a", "", 1)).to_equal(1)  # oracle: deletion to empty
+        expect(name_lint_bounded_damerau_levenshtein(
+            "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijkl",
+            "zyxwvutsrqponmlkjihgfedcbazyxwvutsrqponmlkjihgfedcbazyxwvutsrqpo",
+            2)).to_equal(3)  # oracle: beyond the band saturates at limit+1
+        expect(name_lint_bounded_damerau_levenshtein(
+            "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijkl",
+            "abc", 2)).to_equal(3)  # oracle: length gap beyond the band saturates
+
+    it "keeps the NAME001 distance kernel allocation bounded by its band":
+        # @req REQ-APP-LINTER-CODE-QUALITY-CHECKS-001
+        # @capture(statistics): kernel allocation invariants from the lint source
+        step("Verify: keeps the NAME001 distance kernel allocation bounded by its band")
+        val source = rt_file_read_text(
+            "src/compiler/90.tools/lint/_LintMain/name_lints.spl") ?? ""
+        expect(source).to_contain("val width = limit * 2 + 1")  # oracle: band is 2*limit+1 cells wide
+        expect(source).to_contain("while cell_count < width * 3")  # oracle: three bands, not n*m rows
+        expect(source).to_contain("a.byte_at(i - 1) == b.byte_at(j - 1)")  # oracle: byte-at comparison, no slicing
+        expect(source).to_contain("curr_row = reusable_row")  # oracle: rows are reused, not reallocated
+        val substring_free = source.contains("a.substring(i - 1, i)")
+        expect(substring_free).to_equal(false)  # oracle: no per-cell substring allocation
+        val unbounded_row = source.contains("var curr: [Int]")
+        expect(unbounded_row).to_equal(false)  # oracle: no unboxed per-row Int array
+
+    it "selects the first close inherited name in ancestry order":
+        # @req REQ-APP-LINTER-CODE-QUALITY-CHECKS-001
+        # @capture(statistics): ancestry-order warning list tail
+        step("Verify: selects the first close inherited name in ancestry order")
+        val source =
+            "class Base:\n" +
+            "    fn render_frama(self):\n" +
+            "        pass\n" +
+            "class Mid extends Base:\n" +
+            "    fn render_framb(self):\n" +
+            "        pass\n" +
+            "class Child extends Mid:\n" +
+            "    fn render_framc(self):\n" +
+            "        pass\n"
+        val warnings = lint_accessor_and_parent_names("sample.spl", source)
+        expect(warnings.len()).to_equal(2)  # oracle: framb~frama and framc~framb are the two close pairs
+        expect(warnings[1].message).to_contain("render_framb")  # oracle: the later pair names Mid's render_framb
+
+    it "preserves accessor group and diagnostic ordering":
+        # @req REQ-APP-LINTER-CODE-QUALITY-CHECKS-001
+        # @capture(statistics): diagnostic line ordering for the accessor group
+        step("Verify: preserves accessor group and diagnostic ordering")
+        val source =
+            "class Meter:\n" +
+            "    fn get_a(self):\n" +
+            "        self.a\n" +
+            "    fn get_b(self):\n" +
+            "        self.b\n" +
+            "    fn set_a(self, value):\n" +
+            "        self.a = value\n"
+        val warnings = lint_accessor_and_parent_names("sample.spl", source)
+        expect(warnings.len()).to_equal(3)  # oracle: two getters plus one setter group
+        expect(warnings[0].line).to_equal(2)  # oracle: get_a line
+        expect(warnings[1].line).to_equal(6)  # oracle: set_a closes the get_a group
+        expect(warnings[2].line).to_equal(4)  # oracle: get_b reported last
+
+    it "keeps first class resolution and transitive inherited name order":
+        # @req REQ-COMP-LINT-NAME001-001
+        # @capture(statistics): transitive-chain warning identity
+        step("Verify: keeps first class resolution and transitive inherited name order")
+        val source =
+            "class Base:\n" +
+            "    fn render_frame(self):\n" +
+            "        pass\n" +
+            "class Base:\n" +
+            "    fn unrelated(self):\n" +
+            "        pass\n" +
+            "class Mid extends Base:\n" +
+            "    fn paint_frame(self):\n" +
+            "        pass\n" +
+            "class Child extends Mid:\n" +
+            "    fn render_farme(self):\n" +
+            "        pass\n"
+        val warnings = lint_accessor_and_parent_names("sample.spl", source)
+        expect(warnings.len()).to_equal(1)  # oracle: first Base wins; farme matches only its render_frame
+        expect(warnings[0].code).to_equal("NAME001")  # oracle: inherited-name rule code
+        expect(warnings[0].message).to_contain("render_frame")  # oracle: matched against the first Base
+
+    it "does not resume an outer textual class after a nested class":
+        # @req REQ-COMP-LINT-NAME001-001
+        # @capture(statistics): nested-class scan line ordering
+        step("Verify: does not resume an outer textual class after a nested class")
+        val source =
+            "class Outer:\n" +
+            "    fn get_before(self):\n" +
+            "        self.before\n" +
+            "    class Inner:\n" +
+            "        fn get_inner(self):\n" +
+            "            self.inner\n" +
+            "    fn get_after(self):\n" +
+            "        self.after\n"
+        val warnings = lint_accessor_and_parent_names("sample.spl", source)
+        expect(warnings.len()).to_equal(2)  # oracle: get_before and get_after only; inner is separate
+        expect(warnings[0].line).to_equal(2)  # oracle: get_before line
+        expect(warnings[1].line).to_equal(5)  # oracle: get_inner line, then scan returns to outer
+
