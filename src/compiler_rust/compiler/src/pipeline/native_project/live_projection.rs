@@ -71,13 +71,14 @@ enum Definition {
     /// Absolute or common: defined, but owns no section to mark.
     Sectionless {
         weak: bool,
+        common: bool,
     },
 }
 
 impl Definition {
     fn is_weak(self) -> bool {
         match self {
-            Definition::Section { weak, .. } | Definition::Sectionless { weak } => weak,
+            Definition::Section { weak, .. } | Definition::Sectionless { weak, .. } => weak,
         }
     }
 }
@@ -104,8 +105,14 @@ impl Graph {
 
     fn define(&mut self, id: u32, def: Definition) {
         match self.definitions.get(&id) {
-            // A strong definition is never replaced; a weak one yields to the
-            // first strong definition, matching ELF resolution order.
+            // A weak definition yields to the first strong one, and a common
+            // symbol yields to a real section definition (as in LLD); any
+            // other existing definition wins, matching ELF resolution order.
+            Some(Definition::Sectionless { common: true, .. })
+                if matches!(def, Definition::Section { weak: false, .. }) =>
+            {
+                self.definitions.insert(id, def);
+            }
             Some(existing) if !existing.is_weak() || def.is_weak() => {}
             _ => {
                 self.definitions.insert(id, def);
@@ -197,8 +204,11 @@ impl Graph {
                             },
                         );
                     }
-                    SymbolSection::Absolute | SymbolSection::Common => {
-                        self.define(id, Definition::Sectionless { weak });
+                    SymbolSection::Absolute => {
+                        self.define(id, Definition::Sectionless { weak, common: false });
+                    }
+                    SymbolSection::Common => {
+                        self.define(id, Definition::Sectionless { weak, common: true });
                     }
                     // Undefined, or defined in a discarded/non-ALLOC section:
                     // contributes no definition.
@@ -455,6 +465,34 @@ mod tests {
         let objects = vec![write(&dir, "a.o", a)];
         let live = live_undefined_symbols(&objects, &["main"]).unwrap();
         assert_eq!(live, vec!["rt_ctor"]);
+    }
+
+    #[test]
+    fn real_definition_replaces_an_earlier_common_symbol() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = new_object();
+        let (main_sec, _) = func_section(&mut a, "main");
+        a.add_symbol(Symbol {
+            name: b"shared_state".to_vec(),
+            value: 8,
+            size: 8,
+            kind: SymbolKind::Data,
+            scope: SymbolScope::Linkage,
+            weak: false,
+            section: SymbolSection::Common,
+            flags: SymbolFlags::None,
+        });
+        let state_ref = a.symbol_id(b"shared_state").unwrap();
+        call(&mut a, main_sec, state_ref);
+
+        let mut b = new_object();
+        let (state_sec, _) = func_section(&mut b, "shared_state");
+        let rt_init = undefined(&mut b, "rt_state_init");
+        call(&mut b, state_sec, rt_init);
+
+        let objects = vec![write(&dir, "a.o", a), write(&dir, "b.o", b)];
+        let live = live_undefined_symbols(&objects, &["main"]).unwrap();
+        assert_eq!(live, vec!["rt_state_init"]);
     }
 
     #[test]

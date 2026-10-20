@@ -15,6 +15,8 @@ mod compiler;
 mod discovery;
 pub(crate) mod inline_asm_emit;
 mod linker;
+// Only the Linux Stage 4 link calls it; the tests run on every host.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod live_projection;
 mod linker_env;
 /// Re-exported so `tests/simple_linker_preference.rs` can pin the
