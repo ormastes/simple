@@ -5919,6 +5919,77 @@ impl MirLowering:
                         combined = combined.push(nsid)
                     nlpi = nlpi + 1
                 self.collect_free_var_syms(nested_body, combined, acc)
+            case ArrayLit(elements, _):
+                self.lambda_exprs_free_syms(elements, param_syms, acc)
+            case TupleLit(elements):
+                self.lambda_exprs_free_syms(elements, param_syms, acc)
+            case SetLit(elements, _):
+                self.lambda_exprs_free_syms(elements, param_syms, acc)
+            case ArrayRepeat(value, count, _):
+                val repeat_acc = self.collect_free_var_syms(value, param_syms, acc)
+                self.collect_free_var_syms(count, param_syms, repeat_acc)
+            case DictLit(entries, _, _):
+                var dict_acc = acc
+                for entry in entries:
+                    dict_acc = self.collect_free_var_syms(entry.0, param_syms, dict_acc)
+                    dict_acc = self.collect_free_var_syms(entry.1, param_syms, dict_acc)
+                dict_acc
+            case OptionalChain(base, _):
+                self.collect_free_var_syms(base, param_syms, acc)
+            case ExistsCheck(base):
+                self.collect_free_var_syms(base, param_syms, acc)
+            case Unwrap(base):
+                self.collect_free_var_syms(base, param_syms, acc)
+            case NullCoalesce(left, right):
+                val coalesce_acc = self.collect_free_var_syms(left, param_syms, acc)
+                self.collect_free_var_syms(right, param_syms, coalesce_acc)
+            case StaticCall(_, _, call_args, _):
+                var static_acc = acc
+                for call_arg in call_args:
+                    static_acc = self.collect_free_var_syms(call_arg.value, param_syms, static_acc)
+                static_acc
+            case StructLit(_, fields):
+                var struct_acc = acc
+                for field_entry in fields:
+                    struct_acc = self.collect_free_var_syms(field_entry.1, param_syms, struct_acc)
+                struct_acc
+            case Range(start, range_end, _, step):
+                var range_acc = acc
+                if val present_start = start:
+                    range_acc = self.collect_free_var_syms(present_start, param_syms, range_acc)
+                if val present_end = range_end:
+                    range_acc = self.collect_free_var_syms(present_end, param_syms, range_acc)
+                if val present_step = step:
+                    range_acc = self.collect_free_var_syms(present_step, param_syms, range_acc)
+                range_acc
+            case Try(inner):
+                self.collect_free_var_syms(inner, param_syms, acc)
+            case Return(value):
+                if val present_value = value:
+                    self.collect_free_var_syms(present_value, param_syms, acc)
+                else:
+                    acc
+            case Break(_, value):
+                if val present_value = value:
+                    self.collect_free_var_syms(present_value, param_syms, acc)
+                else:
+                    acc
+            case Continue(_):
+                acc
+            case Loop(loop_body, _):
+                self.lambda_block_free_syms(loop_body, param_syms, acc)
+            case For(loop_var, iter, loop_body, _):
+                # The iterable is evaluated outside the loop variable's scope.
+                val iter_acc = self.collect_free_var_syms(iter, param_syms, acc)
+                self.lambda_block_free_syms(loop_body, lambda_match_bound_union_v1(param_syms, [mir_expr_symbol_id_value(loop_var)]), iter_acc)
+            case With(items, with_body):
+                var with_acc = acc
+                var with_bound = param_syms
+                for item in items:
+                    with_acc = self.collect_free_var_syms(item.context_expr, with_bound, with_acc)
+                    if item.has_target:
+                        with_bound = lambda_match_bound_union_v1(with_bound, [mir_expr_symbol_id_value(item.target)])
+                self.lambda_block_free_syms(with_body, with_bound, with_acc)
             case StringLit(_, interps):
                 if val its = interps:
                     self.string_interps_free_syms(its, param_syms, acc)
@@ -6253,6 +6324,65 @@ impl MirLowering:
                 for payload_value in lambda_enum_payload_values(payload):
                     if self.lambda_body_captures(payload_value, param_syms): return true
                 false
+            case ArrayLit(elements, _):
+                self.lambda_exprs_capture(elements, param_syms)
+            case TupleLit(elements):
+                self.lambda_exprs_capture(elements, param_syms)
+            case SetLit(elements, _):
+                self.lambda_exprs_capture(elements, param_syms)
+            case ArrayRepeat(value, count, _):
+                self.lambda_body_captures(value, param_syms) or self.lambda_body_captures(count, param_syms)
+            case DictLit(entries, _, _):
+                for entry in entries:
+                    if self.lambda_body_captures(entry.0, param_syms): return true
+                    if self.lambda_body_captures(entry.1, param_syms): return true
+                false
+            case OptionalChain(base, _):
+                self.lambda_body_captures(base, param_syms)
+            case ExistsCheck(base):
+                self.lambda_body_captures(base, param_syms)
+            case Unwrap(base):
+                self.lambda_body_captures(base, param_syms)
+            case NullCoalesce(left, right):
+                self.lambda_body_captures(left, param_syms) or self.lambda_body_captures(right, param_syms)
+            case StaticCall(_, _, call_args, _):
+                self.call_args_capture(call_args, param_syms)
+            case StructLit(_, fields):
+                for field_entry in fields:
+                    if self.lambda_body_captures(field_entry.1, param_syms): return true
+                false
+            case Range(start, range_end, _, step):
+                if val present_start = start:
+                    if self.lambda_body_captures(present_start, param_syms): return true
+                if val present_end = range_end:
+                    if self.lambda_body_captures(present_end, param_syms): return true
+                if val present_step = step:
+                    if self.lambda_body_captures(present_step, param_syms): return true
+                false
+            case Try(inner):
+                self.lambda_body_captures(inner, param_syms)
+            case Return(value):
+                if val present_value = value:
+                    return self.lambda_body_captures(present_value, param_syms)
+                false
+            case Break(_, value):
+                if val present_value = value:
+                    return self.lambda_body_captures(present_value, param_syms)
+                false
+            case Continue(_):
+                false
+            case Loop(loop_body, _):
+                self.lambda_block_captures(loop_body, param_syms)
+            case For(loop_var, iter, loop_body, _):
+                if self.lambda_body_captures(iter, param_syms): return true
+                self.lambda_block_captures(loop_body, lambda_match_bound_union_v1(param_syms, [mir_expr_symbol_id_value(loop_var)]))
+            case With(items, with_body):
+                var with_bound = param_syms
+                for item in items:
+                    if self.lambda_body_captures(item.context_expr, with_bound): return true
+                    if item.has_target:
+                        with_bound = lambda_match_bound_union_v1(with_bound, [mir_expr_symbol_id_value(item.target)])
+                self.lambda_block_captures(with_body, with_bound)
             case Lambda(nested_params, nested_body, _):
                 # A lambda literal nested inside another lambda's body (e.g. an
                 # inline lambda arg passed to a call made from within the outer
@@ -6373,7 +6503,7 @@ impl MirLowering:
             case Block(block):
                 self.hir_block_stmts_scan_supported(block.stmts) and (not block.has or self.lambda_capture_scan_supported(block.value))
             case While(condition, loop_body, _):
-                self.lambda_capture_scan_supported(condition) and self.hir_block_stmts_scan_supported(loop_body.stmts) and (not loop_body.has or self.lambda_capture_scan_supported(loop_body.value))
+                self.lambda_capture_scan_supported(condition) and self.lambda_loop_body_scan_supported(loop_body)
             case If(condition, then_block, else_block):
                 if not self.lambda_capture_scan_supported(condition): return false
                 if not self.lambda_block_scan_supported(then_block): return false
@@ -6391,9 +6521,80 @@ impl MirLowering:
                 for payload_value in lambda_enum_payload_values(payload):
                     if not self.lambda_capture_scan_supported(payload_value): return false
                 true
+            case ArrayLit(elements, _): self.lambda_exprs_scan_supported(elements)
+            case TupleLit(elements): self.lambda_exprs_scan_supported(elements)
+            case SetLit(elements, _): self.lambda_exprs_scan_supported(elements)
+            case ArrayRepeat(value, count, _):
+                self.lambda_capture_scan_supported(value) and self.lambda_capture_scan_supported(count)
+            case DictLit(entries, _, _):
+                for entry in entries:
+                    if not self.lambda_capture_scan_supported(entry.0): return false
+                    if not self.lambda_capture_scan_supported(entry.1): return false
+                true
+            case OptionalChain(base, _): self.lambda_capture_scan_supported(base)
+            case ExistsCheck(base): self.lambda_capture_scan_supported(base)
+            case Unwrap(base): self.lambda_capture_scan_supported(base)
+            case NullCoalesce(left, right):
+                self.lambda_capture_scan_supported(left) and self.lambda_capture_scan_supported(right)
+            case StaticCall(_, _, call_args, _): self.call_args_capture_scan_supported(call_args)
+            case StructLit(_, fields):
+                for field_entry in fields:
+                    if not self.lambda_capture_scan_supported(field_entry.1): return false
+                true
+            case Range(start, range_end, _, step):
+                if val present_start = start:
+                    if not self.lambda_capture_scan_supported(present_start): return false
+                if val present_end = range_end:
+                    if not self.lambda_capture_scan_supported(present_end): return false
+                if val present_step = step:
+                    if not self.lambda_capture_scan_supported(present_step): return false
+                true
+            case Try(inner): self.lambda_capture_scan_supported(inner)
+            case Return(value):
+                if val present_value = value:
+                    return self.lambda_capture_scan_supported(present_value)
+                true
+            case Break(_, value):
+                # Lifted bodies lower with an empty loop stack, where a stray
+                # `break` would silently compile to a no-op: refuse it.
+                if self.lambda_scan_loop_depth == 0: return false
+                if val present_value = value:
+                    return self.lambda_capture_scan_supported(present_value)
+                true
+            case Continue(_): self.lambda_scan_loop_depth > 0
+            case Loop(loop_body, _): self.lambda_loop_body_scan_supported(loop_body)
+            case For(_, iter, loop_body, _):
+                self.lambda_capture_scan_supported(iter) and self.lambda_loop_body_scan_supported(loop_body)
+            case With(items, with_body):
+                for item in items:
+                    if not self.lambda_capture_scan_supported(item.context_expr): return false
+                self.lambda_block_scan_supported(with_body)
             case Lambda(_, nested_body, _):
-                self.lambda_capture_scan_supported(nested_body)
+                # A nested lambda lifts separately: its loops are its own.
+                val saved_loop_depth = self.lambda_scan_loop_depth
+                self.lambda_scan_loop_depth = 0
+                val nested_ok = self.lambda_capture_scan_supported(nested_body)
+                self.lambda_scan_loop_depth = saved_loop_depth
+                nested_ok
             case _: false
+
+    # Expression-list helpers shared by the collection arms of the three
+    # lambda traversals.
+    me lambda_exprs_capture(exprs: [HirExpr], param_syms: [i64]) -> bool:
+        for expression in exprs:
+            if self.lambda_body_captures(expression, param_syms): return true
+        false
+
+    me lambda_exprs_scan_supported(exprs: [HirExpr]) -> bool:
+        for expression in exprs:
+            if not self.lambda_capture_scan_supported(expression): return false
+        true
+
+    me lambda_exprs_free_syms(exprs: [HirExpr], param_syms: [i64], acc: [i64]) -> [i64]:
+        var collected = acc
+        for expression in exprs:
+            collected = self.collect_free_var_syms(expression, param_syms, collected)
+        collected
 
     # Block helpers shared by the If/IfChain arms of the three lambda
     # traversals: a block's own `val`/`var` names are bound only inside it.
@@ -6401,6 +6602,12 @@ impl MirLowering:
         val bound = self.hir_block_bound_syms(block.stmts, param_syms)
         if self.hir_block_stmts_capture(block.stmts, bound): return true
         block.has and self.lambda_body_captures(block.value, bound)
+
+    me lambda_loop_body_scan_supported(block: HirBlock) -> bool:
+        self.lambda_scan_loop_depth = self.lambda_scan_loop_depth + 1
+        val ok = self.lambda_block_scan_supported(block)
+        self.lambda_scan_loop_depth = self.lambda_scan_loop_depth - 1
+        ok
 
     me lambda_block_scan_supported(block: HirBlock) -> bool:
         self.hir_block_stmts_scan_supported(block.stmts) and (not block.has or self.lambda_capture_scan_supported(block.value))
