@@ -718,6 +718,22 @@ impl<'a> MirLowerer<'a> {
                             && self.type_registry.and_then(|tr| tr.get(receiver.ty)).is_some_and(
                                 |ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::U64),
                             );
+                        let is_i64_array_set = value.ty == TypeId::I64
+                            && self.signed_word_lane
+                            && matches!(
+                                index.ty,
+                                TypeId::I8
+                                    | TypeId::I16
+                                    | TypeId::I32
+                                    | TypeId::I64
+                                    | TypeId::U8
+                                    | TypeId::U16
+                                    | TypeId::U32
+                                    | TypeId::U64
+                            )
+                            && self.type_registry.and_then(|tr| tr.get(receiver.ty)).is_some_and(
+                                |ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::I64),
+                            );
                         let is_text_array_set = value.ty == TypeId::STRING
                             && matches!(
                                 index.ty,
@@ -756,6 +772,19 @@ impl<'a> MirLowerer<'a> {
                                 block.instructions.push(MirInst::Call {
                                     dest: None,
                                     target: crate::mir::CallTarget::from_name("rt_typed_words_u64_set"),
+                                    args: vec![receiver_reg, index_reg, val_reg],
+                                });
+                            })?;
+                        } else if is_i64_array_set {
+                            // Layout-aware signed store: a value outside the
+                            // inline 61-bit range packs the array in place
+                            // instead of heap-boxing (and leaking) one box per
+                            // store.
+                            self.with_func(|func, current_block| {
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::Call {
+                                    dest: None,
+                                    target: crate::mir::CallTarget::from_name("rt_typed_words_i64_set"),
                                     args: vec![receiver_reg, index_reg, val_reg],
                                 });
                             })?;
@@ -1190,6 +1219,13 @@ impl<'a> MirLowerer<'a> {
                                 )
                             {
                                 Some("rt_typed_words_u64_push")
+                            } else if args[0].ty == TypeId::I64
+                                && self.signed_word_lane
+                                && self.type_registry.and_then(|tr| tr.get(receiver.ty)).is_some_and(
+                                    |ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::I64),
+                                )
+                            {
+                                Some("rt_typed_words_i64_push")
                             } else {
                                 None
                             };
@@ -1205,10 +1241,21 @@ impl<'a> MirLowerer<'a> {
                             } else {
                                 value_reg
                             };
-                            let append_ptrs = self.active_array_append_ptrs(receiver);
-                            let append_index = append_ptrs
-                                .map(|ptrs| ptrs.index_local_index)
-                                .or_else(|| self.active_array_append_index(receiver));
+                            // The signed push has no known-slot variants: it always
+                            // takes (array, value), so skip the append-index proof.
+                            let is_i64_push = target == "rt_typed_words_i64_push";
+                            let append_ptrs = if is_i64_push {
+                                None
+                            } else {
+                                self.active_array_append_ptrs(receiver)
+                            };
+                            let append_index = if is_i64_push {
+                                None
+                            } else {
+                                append_ptrs
+                                    .map(|ptrs| ptrs.index_local_index)
+                                    .or_else(|| self.active_array_append_index(receiver))
+                            };
                             let index_reg = if let Some(index_local_index) = append_index {
                                 Some(self.with_func(|func, current_block| {
                                     let addr = func.new_vreg();
@@ -2059,6 +2106,14 @@ impl<'a> MirLowerer<'a> {
                 // `rt_array_get` and the C `rt_array_get` both hand back the RAW
                 // word, so UnboxInt's `>> 3` turned 56 into 7.
                 let typed_u64_read = iterable_is_array && element_ty == crate::hir::TypeId::U64;
+                // A `[i64]` element is read through the layout-aware signed
+                // accessor too: an array that a wide store packed in place
+                // holds raw words, and `rt_array_get` + UnboxInt would box a
+                // wide word on every read. FAM freestanding targets keep the
+                // generic read (their arrays have a different layout).
+                let typed_i64_read =
+                    iterable_is_array && element_ty == crate::hir::TypeId::I64 && self.signed_word_lane;
+                let typed_word_read = typed_u64_read || typed_i64_read;
                 // FR-DRIVER-0002b: narrow after UnboxInt for [u8]/[u16]/[u32]/[i8]/[i16]/[i32]
                 // element types so the loop variable's value gets the correct narrow TypeId.
                 let narrow_to_signed: Option<(u8, bool)> = match element_ty {
@@ -2078,7 +2133,7 @@ impl<'a> MirLowerer<'a> {
                     let current_idx = func.new_vreg();
                     let boxed_idx = func.new_vreg();
                     let raw_element = func.new_vreg();
-                    let element = if (needs_int_unbox || needs_float_unbox) && !typed_u64_read {
+                    let element = if (needs_int_unbox || needs_float_unbox) && !typed_word_read {
                         func.new_vreg()
                     } else {
                         raw_element
@@ -2112,7 +2167,9 @@ impl<'a> MirLowerer<'a> {
                         let _ = boxed_idx;
                         block.instructions.push(MirInst::Call {
                             dest: Some(raw_element),
-                            target: crate::mir::CallTarget::from_name(if typed_u64_read {
+                            target: crate::mir::CallTarget::from_name(if typed_i64_read {
+                                "rt_typed_words_i64_at"
+                            } else if typed_u64_read {
                                 "rt_typed_words_u64_at"
                             } else {
                                 "rt_array_get"
@@ -2135,7 +2192,7 @@ impl<'a> MirLowerer<'a> {
                     }
 
                     // Unbox element if it's a native type (rt_index_get returns RuntimeValue)
-                    if needs_int_unbox && !typed_u64_read {
+                    if needs_int_unbox && !typed_word_read {
                         block.instructions.push(MirInst::UnboxInt {
                             dest: unboxed_intermediate,
                             value: raw_element,

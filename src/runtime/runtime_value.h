@@ -22,6 +22,17 @@ typedef uint64_t RuntimeValue;
 #define RT_FALSE ((SPECIAL_FALSE << 3) | TAG_SPECIAL)
 #define RT_ERROR ((SPECIAL_ERROR << 3) | TAG_SPECIAL)
 
+/* Starting any user-visible thread must tell the Rust seed runtime, which packs
+ * `[i64]` arrays in place only while no other thread can see them. Weak, so
+ * standalone C builds (no seed runtime, no packing) link without it. */
+#if defined(__GNUC__) && !defined(_WIN32)
+extern void simple_note_user_threads_started(void) __attribute__((weak));
+#define SPL_NOTE_USER_THREADS() \
+    do { if (simple_note_user_threads_started) simple_note_user_threads_started(); } while (0)
+#else
+#define SPL_NOTE_USER_THREADS() ((void)0)
+#endif
+
 /* Native function/closure words reach the thread and pool runtimes in three
  * shapes: a raw user-space address, a TAG_HEAP record pointer, or an
  * int-tagged code address (addr << 3) from generated code that passes a

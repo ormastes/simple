@@ -119,7 +119,16 @@ fn labeled_tuple_numeric_access_dispatches_to_tuple_get() {
 
 #[test]
 fn array_index_dispatch() {
+    // `[i64]` reads go through the layout-aware signed accessor; any other
+    // element type keeps rt_array_get.
     let mir = compile_to_mir("fn test():\n    val arr = [10, 20]\n    val x = arr[0]\n").unwrap();
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_typed_words_i64_at"))
+    }));
+    assert!(!has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_index_get"))
+    }));
+    let mir = compile_to_mir("fn test():\n    val arr: [f64] = [10.0, 20.0]\n    val x = arr[0]\n").unwrap();
     assert!(has_inst(&mir, |i| {
         matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_array_get"))
     }));
@@ -277,7 +286,9 @@ fn u64_capacity_array_call_lowers_to_packed_constructor() {
 
 #[test]
 fn index_int_unboxing() {
-    let mir = compile_to_mir("fn test() -> i64:\n    val arr = [10, 20, 42]\n    return arr[2]\n").unwrap();
+    // `[i64]` reads need no unbox (the signed lane returns the raw word); a
+    // narrower integer element still decodes the tagged slot.
+    let mir = compile_to_mir("fn test() -> i32:\n    val arr: [i32] = [10, 20, 42]\n    return arr[2]\n").unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::UnboxInt { .. })));
 }
 
