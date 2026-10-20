@@ -10,6 +10,7 @@
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
+#include "../runtime_value.h"
 #ifdef _WIN32
 #include <windows.h>
 #define SLEEP_MS(ms) Sleep(ms)
@@ -58,6 +59,14 @@ int main(void) {
     record[1] = 0;
     direct[0] = (int64_t)(intptr_t)&direct_entry;
     direct[1] = DIRECT_MARKER;
+
+    /* A real address of this process is never the int-tagged (addr << 3)
+     * word, including above 2^47 on aarch64 PIE and with a top-byte tag. */
+    assert(!rt_native_word_exceeds_user_va((uint64_t)(uintptr_t)record));
+#if defined(__aarch64__)
+    assert(!rt_native_word_exceeds_user_va((UINT64_C(0x5a) << 56) | (uint64_t)(uintptr_t)record));
+    assert(rt_native_word_exceeds_user_va(UINT64_C(0x0000aaaaaaab0000) << 3));
+#endif
 
     /* thread.spl shape: (closure, nil). nil must not be taken as the closure. */
     int64_t h1 = rt_thread_spawn_isolated((int64_t)(intptr_t)record, NIL);

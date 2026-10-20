@@ -9,7 +9,8 @@ was proven but never reached `enum_payload_local_compatible`:
 
 - `o.unwrap()`, `o!`, `t.0`, `t[0]`, `val (a, b) = t` carry the payload's
   lower_type() Struct, whose id is a canonical MIR id, not a SymbolTable id.
-- `nil` into a nominal slot (`HirStmtKind.Let(sym, nil, init)`).
+- `nil` into a declared optional slot only; nil into a non-optional
+  class/struct/enum slot is a MIR error that names the declaration to fix.
 - `Some(3)`, `Some(arr)`, `Some(t[0])`, `Some(o.unwrap())`: the Some witness
   only covered scalar/Named payload sources.
 - `E.V(self.dict_field)`: a Dict field projection never retained its type.
@@ -73,10 +74,17 @@ describe "typed enum payload slots accept proven value shapes":
         expect(lower_consumer_errors("fn b(r: (Node, i64)) -> Wrap:\n    Wrap.One(r[0])\n")).to_equal("")
         expect(lower_consumer_errors("fn c(r: (Node, i64)) -> Wrap:\n    val (x, y) = r\n    Wrap.One(x)\n")).to_equal("")
 
-    it "nil is the absent sentinel of a nominal slot, never of a scalar slot":
-        expect(lower_consumer_errors("fn a() -> Wrap:\n    Wrap.One(nil)\n")).to_equal("")
+    it "nil into a non-optional record payload is rejected with a MIR error naming the fix":
+        # Wrap.One(node: Node): Node is not nullable, so a later match or
+        # field read on that nil would miscompile natively.
+        val errors = lower_consumer_errors("fn a() -> Wrap:\n    Wrap.One(nil)\n")
+        expect(errors.contains("Wrap.One': payload type mismatch at 0: nil into non-optional payload slot (declared 'Node'); declare it 'Node?'")).to_equal(true)
         # Strictness kept for non-nominal slots: nil is not text.
         expect(lower_consumer_errors("fn b() -> Lit:\n    Lit.S(nil, nil)\n").contains("payload type mismatch at 0")).to_equal(true)
+
+    it "nil into an optional record payload is accepted":
+        # OS.V(n: Node?) declares absence as valid.
+        expect(lower_consumer_errors("fn a() -> OS:\n    OS.V(nil)\n")).to_equal("")
 
     it "Some witnesses literal, container and projected payloads":
         expect(lower_consumer_errors("fn a() -> OI:\n    OI.V(Some(3))\n")).to_equal("")

@@ -19,6 +19,10 @@
 #if !defined(_WIN32) && !defined(_WIN64)
     #include <dlfcn.h>
 #endif
+#if defined(__linux__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
+    #include <link.h>
+    #define SPL_THREAD_HAVE_PHDR_ITERATE 1
+#endif
 
 /* ================================================================
  * Platform Detection
@@ -404,7 +408,6 @@ typedef int64_t (*rt_closure_fn_t)(int64_t);
 typedef int64_t (*rt_closure2_fn_t)(int64_t, int64_t);
 typedef int64_t (*rt_closure_record2_fn_t)(int64_t, int64_t, int64_t);
 
-#define RT_X86_64_MAX_CANONICAL_USER_PTR 0x00007fffffffffffULL
 #define RT_NATIVE_DIRECT_FUNCTION_RECORD_MARKER 0x5344495245435446LL
 
 typedef struct {
@@ -438,18 +441,55 @@ static int rt_thread_data_release(RtThreadData* td) {
 #endif
 }
 
+static int rt_native_address_is_code(int64_t raw_addr);
+
+/* Twin of executor.rs native_closure_payload. */
 static int64_t rt_native_closure_payload(int64_t raw) {
     uint64_t value = (uint64_t)raw;
     if (value < 4096ULL) return 0;
-    if (value > RT_X86_64_MAX_CANONICAL_USER_PTR) return (int64_t)(value >> 3);
-    if ((value & TAG_MASK) == TAG_HEAP) return (int64_t)(value & ~TAG_MASK);
+    if (rt_native_word_exceeds_user_va(value)) return (int64_t)(value >> 3);
+    /* TAG_HEAP record pointer; an odd raw code address stays as is. */
+    if ((value & TAG_MASK) == TAG_HEAP && !rt_native_address_is_code(raw)) return (int64_t)(value & ~TAG_MASK);
     return raw;
 }
 
+#if defined(SPL_THREAD_HAVE_PHDR_ITERATE)
+typedef struct {
+    uintptr_t addr;
+    int       found;
+} SplExecSegmentProbe;
+
+static int spl_exec_segment_probe(struct dl_phdr_info* info, size_t size, void* raw) {
+    (void)size;
+    SplExecSegmentProbe* probe = (SplExecSegmentProbe*)raw;
+    for (size_t i = 0; i < (size_t)info->dlpi_phnum; i++) {
+        const ElfW(Phdr)* ph = &info->dlpi_phdr[i];
+        if (ph->p_type != PT_LOAD || (ph->p_flags & PF_X) == 0) continue;
+        uintptr_t lo = (uintptr_t)info->dlpi_addr + (uintptr_t)ph->p_vaddr;
+        if (probe->addr >= lo && probe->addr - lo < (uintptr_t)ph->p_memsz) {
+            probe->found = 1;
+            return 1;
+        }
+    }
+    return 0;
+}
+#endif
+
+/* True only when raw_addr lies inside an executable PT_LOAD segment of a
+ * loaded object. dladdr() alone is not evidence: it also resolves DATA
+ * addresses (a static closure record in .data/.bss), and treating such a
+ * record as code jumps into it. A TBI/MTE top-byte tag is stripped before
+ * the range test. */
 static int rt_native_address_is_code(int64_t raw_addr) {
 #if defined(_WIN32) || defined(_WIN64)
     (void)raw_addr;
     return 0;
+#elif defined(SPL_THREAD_HAVE_PHDR_ITERATE)
+    SplExecSegmentProbe probe;
+    probe.addr = (uintptr_t)((uint64_t)raw_addr & ~RT_NATIVE_PTR_TAG_BITS);
+    probe.found = 0;
+    dl_iterate_phdr(spl_exec_segment_probe, &probe);
+    return probe.found;
 #else
     Dl_info info;
     memset(&info, 0, sizeof(info));
@@ -518,17 +558,18 @@ static DWORD WINAPI rt_isolated_wrapper_win(LPVOID raw) {
  *   id(h)                 C reports the OS thread id (0 after join on
  *                         Windows), Rust a spawn counter.
  * Known divergences: Rust deep-copies `data` (clone_for_isolated_thread) and
- * honours raw_worker_args; C shares `data` and passes it unchanged. On
- * Windows rt_native_address_is_code is a no-op in both lanes, so a raw code
- * pointer is read as a closure record. */
+ * honours raw_worker_args; C shares `data` and passes it unchanged. Both
+ * lanes decode the closure word alike (user-VA ceiling, TAG_HEAP strip,
+ * executable-segment test). On Windows rt_native_address_is_code is a no-op
+ * in both lanes, so a raw code pointer is read as a closure record; on macOS
+ * it falls back to dladdr, which also resolves data addresses. */
 int64_t rt_thread_spawn_isolated(int64_t closure, int64_t data) {
-    int64_t closure_value = closure;
     int64_t data_value = data;
-    if (rt_native_closure_payload(closure_value) == 0) {
-        closure_value = data;
+    int64_t payload = rt_native_closure_payload(closure);
+    if (payload == 0) {
+        payload = rt_native_closure_payload(data);
         data_value = (int64_t)RT_NIL;
     }
-    int64_t payload = rt_native_closure_payload(closure_value);
     if (!payload) return 0;
 
     rt_closure_fn_t entry = NULL;
