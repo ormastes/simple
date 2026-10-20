@@ -1,6 +1,6 @@
 # Enum `==` in a NON-entry module lowers to struct `__eq__` dispatch natively (2026-10-19)
 
-## Status: OPEN — root cause narrowed, not found; shard cache ruled out
+## Status: RESOLVED by r16b (no longer reproduces natively); most likely fix 669c103e90a (unproven)
 
 ## Symptom
 
@@ -84,3 +84,37 @@ original 2-module incident only.
 
 Probes: scratchpad `natfront/probes_saved/{lib_model,p3b8,p3b7,p3b6}`; runs
 `natfront/p3b8_{A2,B,T}`.
+
+## Resolution (2026-10-20)
+
+Same worktree (`1919f812dfe`), same flags (`--threads 1`, MemoryMax=4G):
+
+| compiler | p3b8 (probe enum in src/lib) | `test/fixtures/native_enum_eq_nonentry` | p3b6 (rt_hal) |
+|---|---|---|---|
+| r13 Stage 2 `e6cb4bfd5533a790` (source `200225109265`) | **red** (`operator overload for struct lib.common.zz_natfront_probe.model.Kind`) | **red** (`... lib.common.rt_hal.model.RtHalProviderKind`) | red (doc above) |
+| r16b Stage 2 `645e62a815d076d7` (source `ed5406ed760`) | green, `ok true` / `other false` | green, `ok true` / `other false` | green, `err=[]` |
+| r16b, `SIMPLE_MIR_EAGER_PROVIDER_LAYOUTS=1` | green | — | — |
+
+The eager-layout row rules out the demand-layout change (`cc601e8f3d3`).
+The most likely fix in the 147 MIR/HIR/driver commits between the two
+sources is `669c103e90a` ("rebind declared field type for field-chain method
+receivers"): before it, `declared_field_hir_type` returned the bare-name
+prescan row's field `HirType` raw, i.e. a `Named(id)` from the DEFINING (or
+the entry copy's) symbol table read in the importer's table — the exact
+id-space confusion recorded above. That attribution is NOT proven: a
+per-commit native bisect needs a Stage 2 per commit.
+
+**The in-process harness does not reproduce it, even on the r13 source.**
+Measured on a `200225109265` worktree: swapped entry imports, padded consumer,
+and an injected entry-side materialized `LocalProv` copy whose `Kind` id
+differs from the consumer's — all green. A test-local enum module is also
+green natively on r13; the failure needs the enum in `src/lib` imported as
+`std.` (the snapshot-path vs `lib.` owner spelling).
+
+**Guards:**
+- Native (discriminating): `test/fixtures/native_enum_eq_nonentry/` —
+  red on r13, green on r16b. Uses the real `std.common.rt_hal.model`
+  enum so no probe module is added to `src/lib`.
+- In-process: `enum_field_eq_lowering_spec.spl` gains the materialized-copy
+  row (6/6 green). It hardens the lowering against that HIR shape but, as
+  measured above, does not go red on r13.
