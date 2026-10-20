@@ -103,6 +103,25 @@ fn _llvm_append_link_input_if_present(inputs: [text], path: text) -> [text]:
         return inputs
     inputs.push(path)
 
+fn _llvm_path_leaf(path: text) -> text:
+    val parts = path.split("/")
+    parts[parts.len() - 1]
+
+fn _llvm_darwin_link_input_snapshot_dir(snapshot_root: text, index: i64, digest: text) -> text:
+    snapshot_root + "/" + index.to_text() + "-" + digest + ".d"
+
+pub fn llvm_darwin_link_input_snapshot_path(
+    snapshot_root: text, index: i64, digest: text, input: text
+) -> text:
+    """Digest-keyed snapshot path that keeps the input's basename as the leaf.
+
+    Link-line gates such as native_all_input_present (native_all_support.spl)
+    key on the basename; a bare `<idx>-<digest>` leaf silently dropped every
+    Darwin support library/framework libsimple_native_all.a needs
+    (CoreFoundation, Security, -lz, -lc++). The `.d` directory keeps the digest
+    keying and cannot collide with a flat snapshot left in an older cache."""
+    _llvm_darwin_link_input_snapshot_dir(snapshot_root, index, digest) + "/" + _llvm_path_leaf(input)
+
 fn _llvm_darwin_snapshot_link_inputs(
     inputs: [text], cache_root: text
 ) -> Result<[text], text>:
@@ -115,7 +134,10 @@ fn _llvm_darwin_snapshot_link_inputs(
         if not file_exists(input): return Err("darwin-link-input-missing:" + input)
         val digest = file_hash_sha256(input)
         if digest.len() != 64: return Err("darwin-link-input-digest-failed:" + input)
-        val snapshot = snapshot_root + "/" + index.to_text() + "-" + digest
+        val snapshot = llvm_darwin_link_input_snapshot_path(snapshot_root, index, digest, input)
+        val snapshot_dir = _llvm_darwin_link_input_snapshot_dir(snapshot_root, index, digest)
+        if not dir_create_all(snapshot_dir):
+            return Err("darwin-link-input-snapshot-directory-failed:" + snapshot_dir)
         if file_exists(snapshot):
             if file_hash_sha256(snapshot) != digest:
                 return Err("darwin-link-input-snapshot-corrupt:" + snapshot)
