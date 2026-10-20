@@ -50,8 +50,20 @@ is not on the path from bootstrap_main: it is only reached from inside src/os.
 
 ## Fix
 
-For an undotted name that the checkout resolver resolves from the
-importer's directory, the source-root resolver reports Missing so the walker
-uses the checkout resolver, the same answer as the root-less walk. Spec:
+For an undotted name that the checkout resolver resolves to a file inside
+the importer's directory, the source-root resolver reports Missing so the
+walker uses the checkout resolver, the same answer as the root-less walk.
+Other bare names keep the root-first order. Spec:
 test/01_unit/compiler/driver/source_root_doubled_package_import_spec.spl
-(`mod -> src/os/mod.spl` before, `borrow_check/mod.spl` after).
+(`mod -> src/os/mod.spl` before, `borrow_check/mod.spl` after; `types` from
+http_client binds its sibling, not src/compiler/30.types; `io` from
+90.tools/perf keeps src/app/io).
+
+Verified with the edge-logging relink (wider first version of this rule):
+worker walks 1353 modules, coordinator 1352, 0 edges into src/os.
+The remaining one-module difference is a separate, pre-existing
+divergence: `common.string_builder` (src/app vs src/lib) and
+`compiler.mir_opt.optimization_passes` / `optimizer_manifest`
+(src/compiler/60.mir_opt vs src/lib/compiler/mir_opt) bind to different
+files in the two walks; see
+`native_closure_walks_bind_dotted_imports_differently_2026_10_20.md`.
