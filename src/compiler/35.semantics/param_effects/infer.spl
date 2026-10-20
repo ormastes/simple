@@ -1,0 +1,785 @@
+# Parameter-effect inference over HIR (plan §3.3; contract in effects.spl).
+#
+# One pass per function, path-sensitive over the HIR block structure, with a
+# bounded in-module fixpoint so a parameter forwarded into a consuming callee
+# is itself consume. Imported callees contribute through decoded summaries.
+#
+# Diagnostics (WARNING; nothing here changes code generation):
+#   NOGC-AMB-001  a parameter is used, or consumed again, after a consume on
+#                 the same path (unconditional or conditional)
+#   NOGC-AMB-002  a parameter is consumed inside a loop body (repeated move)
+#   NOGC-AMB-003  a parameter is captured by a callback passed to a callee
+#                 with no non-escape contract
+#   NOGC-AMB-004  an `extern fn` takes a class/pointer parameter: foreign
+#                 retention is unknown
+#   NOGC-AMB-005  an explicit reference parameter (`&T`) is consumed
+#   NOGC-OWN-002  a class-typed local is used after its ownership was
+#                 transferred (stored, returned, or moved into a consuming
+#                 parameter) on the same path
+#   NOGC-OWN-003  a method that consumes its receiver is called as a
+#                 statement: the result (the receiver's new owner) is
+#                 discarded, so the object is dropped instead of mutated
+#
+# Known limits (stated, not hidden): `val y = x` makes y an alias of the same
+# owner rather than a move; class detection needs the type to be a module
+# class, an imported symbol of kind Class, or a name in the caller-supplied
+# class index; method calls resolve by symbol when resolved, else by unique
+# method name in the module.
+
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_types.*
+use compiler.semantics.param_effects.effects.{
+    ParamEffectEntry, FunctionParamEffects, ParamEffectDiag, ParamEffectReport,
+    param_effect_join}
+use compiler.semantics.param_effects.context.{
+    PeFlow, PeCtx, _flow0, _has_id, _is_owner, _root_is_owner, _shared_type_name, _named_symbol_name, _type_class, _uses_opt, _uses_list, _uses_args, _uses_block, _uses_block_opt, _uses_stmt, _uses, _effects_by_sym, _effects_by_name, _sym_by_name, _field_is,
+    _type_class_id, _function_locals}
+
+# ============================================================================
+# Consuming contexts inside one expression
+# ============================================================================
+
+fn _is_insertion(m: text) -> bool:
+    m == "push" or m == "append" or m == "insert" or m == "push_back" or m == "push_front" or m == "put" or m == "set" or m == "add"
+
+fn _is_mutating_builtin(m: text) -> bool:
+    _is_insertion(m) or m == "pop" or m == "remove" or m == "clear" or m == "sort" or m == "merge" or m == "extend" or m == "reverse" or m == "truncate" or m == "swap" or m == "pop_front" or m == "pop_back"
+
+fn _is_nonescape_callback(m: text) -> bool:
+    """Builtin higher-order methods whose callback runs synchronously and is
+    not retained: a capture there stays inside the short boundary."""
+    val names = ["map", "filter", "any", "all", "each", "for_each", "find", "find_index", "position", "sort_by", "sort_with", "reduce", "fold", "count", "flat_map", "take_while", "skip_while", "filter_map", "min_by", "max_by", "group_by", "partition", "sum_by", "map_err", "and_then", "or_else", "unwrap_or_else", "retain"]
+    for n in names:
+        if n == m: return true
+    false
+
+fn _is_spawn(name: text) -> bool:
+    name == "spawn" or name == "thread_spawn" or name == "spawn_task" or name == "task_spawn" or name == "actor_spawn" or name == "go"
+
+fn _lambda_captures_owner(ctx: PeCtx, e: HirExpr) -> bool:
+    match e.kind:
+        case Lambda(_, _, _): return _uses(ctx, e)
+        case _: return false
+
+fn _method_sym(ctx: PeCtx, method: text, res: MethodResolution) -> i64:
+    """In-module method symbol for a call, or -1."""
+    match res:
+        case InstanceMethod(_, mid): return mid.id
+        case TraitMethod(_, mid): return mid.id
+        case _: pass
+    _sym_by_name(ctx.method_sym_by_name, method)
+
+fn _summary_for_method(ctx: PeCtx, method: text, res: MethodResolution) -> [text]:
+    val sid = _method_sym(ctx, method, res)
+    if sid >= 0:
+        val local = _effects_by_sym(ctx.by_sym, sid)
+        if local.len() > 0: return local
+    _effects_by_name(ctx.by_name, method)
+
+fn _receiver_offset(ctx: PeCtx, method: text, res: MethodResolution, summary: [text], nargs: i64) -> i64:
+    """Index of the first argument in a method summary: 1 when the summary
+    belongs to an in-module method (slot 0 is `self`); for an imported
+    by-name summary, 1 only when it has one more slot than the call has
+    arguments."""
+    val sid = _method_sym(ctx, method, res)
+    if sid >= 0 and ctx.method_ids.contains_key(sid): return 1
+    if summary.len() == nargs + 1: return 1
+    0
+
+fn _callee_name(ctx: PeCtx, callee: HirExpr) -> text:
+    match callee.kind:
+        case NamedVar(_, name): return name
+        case Var(sym): return _named_symbol_name(ctx.module, sym.id)
+        case _: return ""
+
+fn _summary_for_call(ctx: PeCtx, callee: HirExpr) -> [text]:
+    var sid = -1
+    match callee.kind:
+        case Var(sym): sid = sym.id
+        case NamedVar(sym, _): sid = sym.id
+        case _: pass
+    if sid >= 0:
+        val local = _effects_by_sym(ctx.by_sym, sid)
+        if local.len() > 0: return local
+    val nm = _callee_name(ctx, callee)
+    if nm == "": return []
+    _effects_by_name(ctx.by_name, nm)
+
+fn _symbol_is_type(ctx: PeCtx, id: i64, want_class: bool) -> bool:
+    if ctx.class_ids.contains_key(id): return true
+    if not want_class and ctx.struct_ids.contains_key(id): return true
+    if ctx.module.symbols.symbols.contains_key(id):
+        val s: HirSymbol = ctx.module.symbols.symbols[id]
+        match s.kind:
+            case Class: return true
+            case Struct: return not want_class
+            case EnumVariant: return not want_class
+            case _: pass
+    false
+
+fn _is_aggregate_ctor(ctx: PeCtx, callee: HirExpr) -> bool:
+    """`C(...)` where C names a class or struct: the arguments are stored."""
+    match callee.kind:
+        case Var(sym): return _symbol_is_type(ctx, sym.id, false)
+        case NamedVar(sym, name):
+            if _symbol_is_type(ctx, sym.id, false): return true
+            if name == "Some" or name == "Ok" or name == "Err": return true
+            return ctx.class_names.contains_key(name)
+        case _: return false
+
+fn _is_class_ctor(ctx: PeCtx, callee: HirExpr) -> bool:
+    match callee.kind:
+        case Var(sym): return _symbol_is_type(ctx, sym.id, true)
+        case NamedVar(sym, name):
+            if _symbol_is_type(ctx, sym.id, true): return true
+            return ctx.class_names.contains_key(name)
+        case _: return false
+
+fn _effect_at(summary: [text], i: i64) -> text:
+    if i >= 0 and i < summary.len(): return summary[i]
+    ""
+
+fn _block_tail_flows(ctx: PeCtx, b: HirBlock, out: bool, line: i64) -> bool:
+    if not b.has: return false
+    if out: return _flows_out(ctx, b.value, line)
+    _flows_alias(ctx, b.value)
+
+fn _block_opt_tail_flows(ctx: PeCtx, b: HirBlock?, out: bool, line: i64) -> bool:
+    match b:
+        case Some(x): return _block_tail_flows(ctx, x, out, line)
+        case nil: return false
+
+fn _flows_through(ctx: PeCtx, e: HirExpr, out: bool, line: i64) -> bool:
+    """The owner reaches the value of `e` through a cast, unwrap, `??`, an
+    if/match/block tail, or a lambda that captures it."""
+    match e.kind:
+        case Var(_): return _is_owner(ctx, e)
+        case NamedVar(_, _): return _is_owner(ctx, e)
+        case Cast(x, _): return _flows_through(ctx, x, out, line)
+        case As(x, _): return _flows_through(ctx, x, out, line)
+        case ConvertCall(x, _): return _flows_through(ctx, x, out, line)
+        case Unwrap(x): return _flows_through(ctx, x, out, line)
+        case Try(x): return _flows_through(ctx, x, out, line)
+        case NullCoalesce(l, r):
+            val a = _flows_through(ctx, l, out, line)
+            val b = _flows_through(ctx, r, out, line)
+            return a or b
+        case If(_, t, el):
+            val a = _block_tail_flows(ctx, t, out, line)
+            val b = _block_opt_tail_flows(ctx, el, out, line)
+            return a or b
+        case IfChain(arms, el):
+            var hit = false
+            for arm in arms:
+                if _block_tail_flows(ctx, arm.then_, out, line): hit = true
+            if _block_opt_tail_flows(ctx, el, out, line): hit = true
+            return hit
+        case MatchCase(_, arms):
+            var hit = false
+            for arm in arms:
+                if _block_tail_flows(ctx, arm.body, out, line): hit = true
+            return hit
+        case Block(b): return _block_tail_flows(ctx, b, out, line)
+        case Lambda(_, _, _): return _uses(ctx, e)
+        case Field(base, fname, _):
+            if out and _is_owner(ctx, base) and _field_is(ctx.class_field_types, "{ctx.owner_class_id}.{fname}"):
+                if ctx.owner_is_receiver:
+                    ctx.ambiguous("NOGC-AMB-006", "a class field `{fname}` is moved out of the receiver; a getter that consumes its whole receiver is not a contract (return a clone or a handle)", line)
+                return true
+            return false
+        case _: return false
+
+fn _flows_out(ctx: PeCtx, e: HirExpr, line: i64) -> bool:
+    """Does the value of `e` carry the owner (or a class field of it) out?"""
+    _flows_through(ctx, e, true, line)
+
+fn _flows_alias(ctx: PeCtx, e: HirExpr) -> bool:
+    """Does binding `e` to a local make that local another name for the
+    owner? Field reads are not aliases."""
+    _flows_through(ctx, e, false, 0)
+
+fn _consume_list(ctx: PeCtx, es: [HirExpr], what: text, line: i64) -> bool:
+    var hit = false
+    for x in es:
+        if _flows_out(ctx, x, line):
+            ctx.consumed(what, line)
+            hit = true
+        elif _consumes(ctx, x, line):
+            hit = true
+    hit
+
+fn _consume_args(ctx: PeCtx, args: [HirCallArg], summary: [text], offset: i64, callee: text, nonescape: bool, spawn: bool, line: i64) -> bool:
+    var hit = false
+    var i = 0
+    while i < args.len():
+        val v = args[i].value
+        if _lambda_captures_owner(ctx, v):
+            if spawn:
+                ctx.consumed("captured by a task spawned with `{callee}`", line)
+                hit = true
+            elif not nonescape:
+                ctx.ambiguous("NOGC-AMB-003", "captured by a callback passed to `{callee}`, which has no non-escape contract", line)
+        elif _flows_out(ctx, v, line):
+            if _effect_at(summary, i + offset) == "consume":
+                ctx.consumed("moved into consuming parameter of `{callee}`", line)
+                hit = true
+        elif _consumes(ctx, v, line):
+            hit = true
+        i = i + 1
+    hit
+
+fn _consumes(ctx: PeCtx, e: HirExpr, line: i64) -> bool:
+    """Does `e` transfer the owner somewhere (aggregate, container, consuming
+    parameter, escaping task)? Records mutation and suspension as it walks."""
+    match e.kind:
+        case StructLit(_, fields):
+            var hit = false
+            for (_, v) in fields:
+                if _flows_out(ctx, v, line):
+                    ctx.consumed("stored in an aggregate field", line)
+                    hit = true
+                elif _consumes(ctx, v, line):
+                    hit = true
+            return hit
+        case EnumLit(_, _, payload):
+            match payload:
+                case Some(pl):
+                    match pl:
+                        case Tuple(values): return _consume_list(ctx, values, "stored in an enum payload", line)
+                        case Struct(fields):
+                            var hit = false
+                            for (_, v) in fields:
+                                if _flows_out(ctx, v, line):
+                                    ctx.consumed("stored in an enum payload", line)
+                                    hit = true
+                                elif _consumes(ctx, v, line):
+                                    hit = true
+                            return hit
+                case nil: return false
+        case ArrayLit(els, _): return _consume_list(ctx, els, "stored in a collection literal", line)
+        case TupleLit(els): return _consume_list(ctx, els, "stored in a tuple", line)
+        case SetLit(els, _): return _consume_list(ctx, els, "stored in a collection literal", line)
+        case DictLit(entries, _, _):
+            var hit = false
+            for (k, v) in entries:
+                if _consumes(ctx, k, line): hit = true
+                if _flows_out(ctx, v, line):
+                    ctx.consumed("stored in a dict literal", line)
+                    hit = true
+                elif _consumes(ctx, v, line):
+                    hit = true
+            return hit
+        case MethodCall(recv, method, args, res):
+            val summary = _summary_for_method(ctx, method, res)
+            val offset = _receiver_offset(ctx, method, res, summary, args.len())
+            var hit = false
+            if _root_is_owner(ctx, recv):
+                if _is_owner(ctx, recv) and offset == 1 and _effect_at(summary, 0) == "consume":
+                    ctx.consumed("receiver consumed by `{method}`", line)
+                    hit = true
+                elif _is_mutating_builtin(method) or (offset == 1 and _effect_at(summary, 0) == "mutate-short"):
+                    ctx.mutated = true
+            elif _consumes(ctx, recv, line):
+                hit = true
+            if _is_insertion(method):
+                for a in args:
+                    if _flows_out(ctx, a.value, line):
+                        ctx.consumed("inserted into a container with `{method}`", line)
+                        hit = true
+            if _consume_args(ctx, args, summary, offset, method, _is_nonescape_callback(method), _is_spawn(method), line):
+                hit = true
+            return hit
+        case Call(callee, args, _):
+            val name = _callee_name(ctx, callee)
+            if _is_aggregate_ctor(ctx, callee):
+                var hit = false
+                for a in args:
+                    if _flows_out(ctx, a.value, line):
+                        ctx.consumed("stored in a `{name}` constructed here", line)
+                        hit = true
+                    elif _consumes(ctx, a.value, line):
+                        hit = true
+                return hit
+            return _consume_args(ctx, args, _summary_for_call(ctx, callee), 0, name, false, _is_spawn(name), line)
+        case StaticCall(_, method, args, res):
+            return _consume_args(ctx, args, _summary_for_method(ctx, method, res), 0, method, false, _is_spawn(method), line)
+        case Await(x):
+            ctx.suspended = true
+            return _consumes(ctx, x, line)
+        case Yield(v):
+            ctx.suspended = true
+            match v:
+                case Some(x):
+                    if _flows_out(ctx, x, line):
+                        ctx.consumed("yielded", line)
+                        return true
+                    return _consumes(ctx, x, line)
+                case nil: return false
+        case Field(base, _, _): return _consumes(ctx, base, line)
+        case Index(base, idx): return _consumes(ctx, base, line) or _consumes(ctx, idx, line)
+        case Binary(_, l, r):
+            val a = _consumes(ctx, l, line)
+            val b = _consumes(ctx, r, line)
+            return a or b
+        case Unary(_, o): return _consumes(ctx, o, line)
+        case NullCoalesce(l, r):
+            val a = _consumes(ctx, l, line)
+            val b = _consumes(ctx, r, line)
+            return a or b
+        case Unwrap(x): return _consumes(ctx, x, line)
+        case Try(x): return _consumes(ctx, x, line)
+        case Cast(x, _): return _consumes(ctx, x, line)
+        case As(x, _): return _consumes(ctx, x, line)
+        case ConvertCall(x, _): return _consumes(ctx, x, line)
+        case StringLit(_, interps):
+            match interps:
+                case Some(xs):
+                    var hit = false
+                    for it in xs:
+                        if _consumes(ctx, it.expr, line): hit = true
+                    return hit
+                case nil: return false
+        case _: return false
+
+# ============================================================================
+# Path-sensitive flow
+# ============================================================================
+
+fn _merge(flows: [PeFlow]) -> PeFlow:
+    """Join of mutually exclusive arms."""
+    var any = false
+    var seen_cont = false
+    var all_two = true
+    var all_zero = true
+    for f in flows:
+        if f.any: any = true
+        if not f.term:
+            seen_cont = true
+            if f.cont != 2: all_two = false
+            if f.cont != 0: all_zero = false
+    if not seen_cont:
+        return PeFlow(cont: 0, any: any, term: true)
+    var cont = 1
+    if all_two: cont = 2
+    if all_zero: cont = 0
+    PeFlow(cont: cont, any: any, term: false)
+
+fn _line_of(e: HirExpr) -> i64:
+    e.span.line
+
+fn _flow_block(ctx: PeCtx, b: HirBlock, tail: bool) -> PeFlow:
+    var cur = _flow0()
+    var susp_before = ctx.suspended
+    for s in b.stmts:
+        if cur.term: return cur
+        val step = _flow_stmt(ctx, s)
+        cur = _seq(ctx, cur, step, _uses_stmt(ctx, s), s.span.line, susp_before)
+        susp_before = ctx.suspended
+    if b.has and not cur.term:
+        val step = _flow_expr(ctx, b.value, tail)
+        cur = _seq(ctx, cur, step, _uses(ctx, b.value), b.value.span.line, susp_before)
+    cur
+
+fn _seq(ctx: PeCtx, cur: PeFlow, step: PeFlow, step_uses: bool, line: i64, suspended_before: bool) -> PeFlow:
+    if cur.cont >= 1 and step_uses:
+        if cur.cont == 2:
+            ctx.ambiguous("NOGC-AMB-001", "used or consumed again after it was consumed", line)
+        else:
+            ctx.ambiguous("NOGC-AMB-001", "used or consumed again after a conditional consume", line)
+    if suspended_before and step_uses:
+        ctx.consumed("held across a suspension point", line)
+    var cont = cur.cont
+    if step.cont > cont: cont = step.cont
+    if step.term:
+        return PeFlow(cont: cont, any: cur.any or step.any, term: true)
+    PeFlow(cont: cont, any: cur.any or step.any, term: false)
+
+fn _one_statement(ctx: PeCtx, before: i64, line: i64):
+    """Two transfers of the same owner inside one statement are a double move
+    (`Pair(a: p, b: p)`, `f(p, p)` with two consuming slots)."""
+    if ctx.consume_events - before > 1:
+        ctx.ambiguous("NOGC-AMB-001", "consumed twice within one statement", line)
+
+fn _is_local_target(ctx: PeCtx, target: HirExpr) -> i64:
+    """Symbol id when `target` names a local of this function, else -1."""
+    match target.kind:
+        case Var(tsym):
+            if ctx.local_ids.contains_key(tsym.id): return tsym.id
+        case NamedVar(tsym, _):
+            if ctx.local_ids.contains_key(tsym.id): return tsym.id
+        case _: pass
+    -1
+
+fn _flow_stmt(ctx: PeCtx, s: HirStmt) -> PeFlow:
+    val line = s.span.line
+    match s.kind:
+        case Expr(e): return _flow_expr(ctx, e, false)
+        case Let(sym, _, init):
+            if _flows_alias(ctx, init):
+                ctx.ids.push(sym.id)
+                return _flow0()
+            val before = ctx.consume_events
+            val hit = _consumes(ctx, init, line)
+            _one_statement(ctx, before, line)
+            if hit: return PeFlow(cont: 2, any: true, term: false)
+            return _flow0()
+        case Assign(target, _, value):
+            val local = _is_local_target(ctx, target)
+            if local >= 0 and _flows_alias(ctx, value):
+                ctx.ids.push(local)
+                return _flow0()
+            if local < 0 and _flows_out(ctx, value, line):
+                # A field, slot, module global or captured outer variable:
+                # an escape, never an alias.
+                ctx.consumed("stored into a field, slot or non-local", line)
+                return PeFlow(cont: 2, any: true, term: false)
+            if _root_is_owner(ctx, target) and not _is_owner(ctx, target):
+                ctx.mutated = true
+            val before = ctx.consume_events
+            val hit = _consumes(ctx, value, line)
+            _one_statement(ctx, before, line)
+            if hit: return PeFlow(cont: 2, any: true, term: false)
+            return _flow0()
+        case Block(b): return _flow_block(ctx, b, false)
+        case _: return _flow0()
+
+fn _flow_block_opt(ctx: PeCtx, b: HirBlock?, tail: bool) -> PeFlow:
+    match b:
+        case Some(x): return _flow_block(ctx, x, tail)
+        case nil: return _flow0()
+
+fn _flow_loop_body(ctx: PeCtx, body: HirBlock, line: i64) -> PeFlow:
+    val f = _flow_block(ctx, body, false)
+    if f.cont >= 1:
+        ctx.ambiguous("NOGC-AMB-002", "consumed inside a loop body (moved on every iteration)", line)
+    PeFlow(cont: 0, any: f.any, term: false)
+
+fn _is_structural(e: HirExpr) -> bool:
+    """Control-flow expressions whose tails are analysed arm by arm."""
+    match e.kind:
+        case If(_, _, _): return true
+        case IfChain(_, _): return true
+        case MatchCase(_, _): return true
+        case Block(_): return true
+        case UnsafeBlock(_): return true
+        case _: return false
+
+fn _flow_expr(ctx: PeCtx, e: HirExpr, tail: bool) -> PeFlow:
+    val line = _line_of(e)
+    if tail and not _is_structural(e) and _flows_out(ctx, e, line):
+        ctx.consumed("returned", line)
+        return PeFlow(cont: 2, any: true, term: false)
+    match e.kind:
+        case Return(v):
+            match v:
+                case Some(x):
+                    if _flows_out(ctx, x, line):
+                        ctx.consumed("returned", line)
+                        return PeFlow(cont: 0, any: true, term: true)
+                    val before = ctx.consume_events
+                    val hit = _consumes(ctx, x, line)
+                    _one_statement(ctx, before, line)
+                    return PeFlow(cont: 0, any: hit, term: true)
+                case nil: return PeFlow(cont: 0, any: false, term: true)
+        case Throw(v):
+            val hit = _consumes(ctx, v, line)
+            return PeFlow(cont: 0, any: hit, term: true)
+        case Break(_, _): return PeFlow(cont: 0, any: false, term: true)
+        case Continue(_): return PeFlow(cont: 0, any: false, term: true)
+        case If(c, t, el):
+            val pre = _consumes(ctx, c, line)
+            val a = _flow_block(ctx, t, tail)
+            val b = _flow_block_opt(ctx, el, tail)
+            val m = _merge([a, b])
+            if pre: return PeFlow(cont: 2, any: true, term: m.term)
+            return m
+        case IfChain(arms, el):
+            var flows: [PeFlow] = []
+            for arm in arms:
+                val _c = _consumes(ctx, arm.cond, line)
+                flows.push(_flow_block(ctx, arm.then_, tail))
+            flows.push(_flow_block_opt(ctx, el, tail))
+            return _merge(flows)
+        case MatchCase(scrut, arms):
+            val pre = _consumes(ctx, scrut, line)
+            var flows: [PeFlow] = []
+            for arm in arms:
+                flows.push(_flow_block(ctx, arm.body, tail))
+            if flows.len() == 0: return _flow0()
+            val m = _merge(flows)
+            if pre: return PeFlow(cont: 2, any: true, term: m.term)
+            return m
+        case Loop(body, _): return _flow_loop_body(ctx, body, line)
+        case While(c, body, _):
+            val _c = _consumes(ctx, c, line)
+            return _flow_loop_body(ctx, body, line)
+        case For(_, it, body, _):
+            val _c = _consumes(ctx, it, line)
+            return _flow_loop_body(ctx, body, line)
+        case Block(b): return _flow_block(ctx, b, tail)
+        case UnsafeBlock(b): return _flow_block(ctx, b, tail)
+        case _:
+            val before = ctx.consume_events
+            val hit = _consumes(ctx, e, line)
+            _one_statement(ctx, before, line)
+            if hit: return PeFlow(cont: 2, any: true, term: false)
+            return _flow0()
+
+# ============================================================================
+# Driver
+# ============================================================================
+
+fn _param_effect(ctx: PeCtx, f: HirFunction, p: HirParam) -> ParamEffectEntry:
+    val tc = _type_class(ctx, p.type_)
+    if f.is_extern:
+        if tc == "class" or tc == "ptr":
+            return ParamEffectEntry(name: p.name, effect: "foreign-unknown", reason: "extern class/pointer parameter")
+        return ParamEffectEntry(name: p.name, effect: "read-short", reason: "")
+    if tc == "shared":
+        return ParamEffectEntry(name: p.name, effect: "share-explicit", reason: "explicit shared owner type")
+    if tc == "iso":
+        return ParamEffectEntry(name: p.name, effect: "consume", reason: "declared `iso` owner")
+    if tc != "class" and tc != "ref":
+        if p.is_mutable:
+            return ParamEffectEntry(name: p.name, effect: "mutate-short", reason: "declared `mut`")
+        return ParamEffectEntry(name: p.name, effect: "read-short", reason: "")
+    ctx.reset([p.symbol.id])
+    ctx.owner_class_id = _type_class_id(p.type_)
+    ctx.owner_is_receiver = p.name == "self"
+    val flow = _flow_block(ctx, f.body, true)
+    if ctx.amb_code != "":
+        return ParamEffectEntry(name: p.name, effect: "ambiguous", reason: "{ctx.amb_code}: {ctx.amb_reason}")
+    if flow.any or ctx.consume_reason != "":
+        if tc == "ref":
+            ctx.ambiguous("NOGC-AMB-005", "explicit reference parameter is consumed ({ctx.consume_reason})", ctx.line)
+            return ParamEffectEntry(name: p.name, effect: "ambiguous", reason: "NOGC-AMB-005: explicit reference parameter is consumed")
+        return ParamEffectEntry(name: p.name, effect: "consume", reason: ctx.consume_reason)
+    if ctx.mutated or p.is_mutable:
+        return ParamEffectEntry(name: p.name, effect: "mutate-short", reason: "")
+    ParamEffectEntry(name: p.name, effect: "read-short", reason: "")
+
+fn _fn_label(f: HirFunction) -> text:
+    f.name
+
+fn _new_ctx(module: HirModule, class_names: {text: bool}, imported: {text: [text]}) -> PeCtx:
+    var class_ids: {i64: bool} = {}
+    for c in module.classes.values():
+        class_ids[c.symbol.id] = true
+    var struct_ids: {i64: bool} = {}
+    for st in module.structs.values():
+        struct_ids[st.symbol.id] = true
+    var method_counts: {text: i64} = {}
+    var method_sym: {text: i64} = {}
+    for f in module.functions.values():
+        if f.is_method:
+            var n = 0
+            if method_counts.contains_key(f.name): n = method_counts[f.name]
+            method_counts[f.name] = n + 1
+            method_sym[f.name] = f.symbol.id
+    var unique_methods: {text: i64} = {}
+    var method_ids: {i64: bool} = {}
+    for f in module.functions.values():
+        if f.is_method:
+            method_ids[f.symbol.id] = true
+            if method_counts[f.name] == 1:
+                unique_methods[f.name] = method_sym[f.name]
+    val ctx = PeCtx(module: module, class_ids: class_ids, struct_ids: struct_ids, class_names: class_names,
+        by_sym: {}, by_name: imported, method_sym_by_name: unique_methods,
+        method_ids: method_ids, class_field_types: {}, local_ids: {},
+        owner_class_id: -1, owner_is_receiver: false, consume_events: 0,
+        ids: [], mutated: false, suspended: false, amb_code: "",
+        amb_reason: "", consume_reason: "", line: 0)
+    # Class-typed fields of module classes, keyed "<class symbol id>.<field>".
+    var fields: {text: HirType} = {}
+    for c in module.classes.values():
+        for fd in c.fields:
+            if _type_class(ctx, fd.type_) == "class":
+                fields["{c.symbol.id}.{fd.name}"] = fd.type_
+    ctx.class_field_types = fields
+    ctx
+
+fn _effects_of(entries: [ParamEffectEntry]) -> [text]:
+    var out: [text] = []
+    for e in entries:
+        out.push(e.effect)
+    out
+
+fn _same(a: [text], b: [text]) -> bool:
+    if a.len() != b.len(): return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]: return false
+        i = i + 1
+    true
+
+pub fn infer_param_effects(module: HirModule, class_names: {text: bool}, imported: {text: [text]}) -> ParamEffectReport:
+    """Infer every function's parameter effects, iterate to a fixpoint over
+    in-module calls (bounded: effects only climb a finite lattice), then
+    report ambiguities and caller-side use-after-transfer of class locals."""
+    val ctx = _new_ctx(module, class_names, imported)
+    var round = 0
+    var changed = true
+    while changed and round < 8:
+        changed = false
+        for f in module.functions.values():
+            ctx.local_ids = _function_locals(f)
+            var entries: [ParamEffectEntry] = []
+            for p in f.params:
+                entries.push(_param_effect(ctx, f, p))
+            val effs = _effects_of(entries)
+            val prev = _effects_by_sym(ctx.by_sym, f.symbol.id)
+            var joined: [text] = []
+            var i = 0
+            while i < effs.len():
+                var e = effs[i]
+                if i < prev.len(): e = param_effect_join(prev[i], e)
+                joined.push(e)
+                i = i + 1
+            if not _same(prev, joined):
+                var table = ctx.by_sym
+                table[f.symbol.id] = joined
+                ctx.by_sym = table
+                changed = true
+        round = round + 1
+
+    var functions: [FunctionParamEffects] = []
+    var diags: [ParamEffectDiag] = []
+    if changed:
+        diags.push(ParamEffectDiag(code: "NOGC-PE-INCOMPLETE", function: "", param: "",
+            message: "parameter-effect fixpoint did not converge in {round} rounds; results for this module are partial", line: 0))
+    for f in module.functions.values():
+        ctx.local_ids = _function_locals(f)
+        var entries: [ParamEffectEntry] = []
+        for p in f.params:
+            val entry = _param_effect(ctx, f, p)
+            entries.push(entry)
+            if entry.effect == "ambiguous" or entry.effect == "foreign-unknown":
+                var code = ctx.amb_code
+                if entry.effect == "foreign-unknown": code = "NOGC-AMB-004"
+                var line = ctx.line
+                if line == 0 or entry.effect == "foreign-unknown": line = f.span.line
+                diags.push(ParamEffectDiag(code: code, function: _fn_label(f), param: p.name,
+                    message: "parameter `{p.name}` of `{f.name}` has no single ownership contract: {entry.reason}", line: line))
+        functions.push(FunctionParamEffects(function: _fn_label(f), symbol_id: f.symbol.id, params: entries))
+        if not f.is_extern:
+            for d in _local_transfer_diags(ctx, f):
+                diags.push(d)
+            val discarded = PeDiagSink(items: [])
+            _scan_discarded_block(ctx, f, f.body, discarded)
+            for d in discarded.items:
+                diags.push(d)
+    ParamEffectReport(functions: functions, diags: diags)
+
+# ============================================================================
+# Caller side: class locals used after a transfer (NOGC-OWN-002)
+# ============================================================================
+
+fn _local_class(ctx: PeCtx, ty: HirType, init: HirExpr) -> bool:
+    if _type_class(ctx, ty) == "class": return true
+    match init.kind:
+        case StructLit(t, _): return _type_class(ctx, t) == "class"
+        case Call(callee, _, _): return _is_class_ctor(ctx, callee)
+        case _: return false
+
+class PeDiagSink:
+    items: [ParamEffectDiag]
+
+    me add(d: ParamEffectDiag):
+        self.items.push(d)
+
+fn _local_transfer_diags(ctx: PeCtx, f: HirFunction) -> [ParamEffectDiag]:
+    val out = PeDiagSink(items: [])
+    _scan_block_locals(ctx, f, f.body, true, out)
+    out.items
+
+fn _scan_block_locals(ctx: PeCtx, f: HirFunction, b: HirBlock, is_body: bool, out: PeDiagSink):
+    var i = 0
+    while i < b.stmts.len():
+        val s = b.stmts[i]
+        match s.kind:
+            case Let(sym, ty, init):
+                if _local_class(ctx, ty, init):
+                    ctx.reset([sym.id])
+                    ctx.owner_class_id = -1
+                    ctx.owner_is_receiver = false
+                    var rest: [HirStmt] = []
+                    var k = i + 1
+                    while k < b.stmts.len():
+                        rest.push(b.stmts[k])
+                        k = k + 1
+                    val tail_block = HirBlock(stmts: rest, has: b.has, value: b.value, span: b.span, unsafe_caps: b.unsafe_caps)
+                    val _flow = _flow_block(ctx, tail_block, is_body)
+                    if ctx.amb_code == "NOGC-AMB-001" or ctx.amb_code == "NOGC-AMB-002":
+                        out.add(ParamEffectDiag(code: "NOGC-OWN-002", function: f.name,
+                            param: _named_symbol_name(ctx.module, sym.id),
+                            message: "class local is {ctx.amb_reason} (ownership was transferred: {ctx.consume_reason})",
+                            line: ctx.line))
+            case Expr(e): _scan_expr_locals(ctx, f, e, out)
+            case Block(inner): _scan_block_locals(ctx, f, inner, false, out)
+            case _: pass
+        i = i + 1
+    if b.has:
+        _scan_expr_locals(ctx, f, b.value, out)
+
+fn _scan_expr_locals(ctx: PeCtx, f: HirFunction, e: HirExpr, out: PeDiagSink):
+    match e.kind:
+        case If(_, t, el):
+            _scan_block_locals(ctx, f, t, false, out)
+            match el:
+                case Some(x): _scan_block_locals(ctx, f, x, false, out)
+                case nil: pass
+        case IfChain(arms, el):
+            for a in arms:
+                _scan_block_locals(ctx, f, a.then_, false, out)
+            match el:
+                case Some(x): _scan_block_locals(ctx, f, x, false, out)
+                case nil: pass
+        case MatchCase(_, arms):
+            for a in arms:
+                _scan_block_locals(ctx, f, a.body, false, out)
+        case Loop(body, _): _scan_block_locals(ctx, f, body, false, out)
+        case While(_, body, _): _scan_block_locals(ctx, f, body, false, out)
+        case For(_, _, body, _): _scan_block_locals(ctx, f, body, false, out)
+        case Block(b): _scan_block_locals(ctx, f, b, false, out)
+        case UnsafeBlock(b): _scan_block_locals(ctx, f, b, false, out)
+        case _: pass
+
+# ============================================================================
+# Caller side: discarded result of a receiver-consuming call (NOGC-OWN-003)
+# ============================================================================
+
+fn _scan_discarded_block(ctx: PeCtx, f: HirFunction, b: HirBlock, out: PeDiagSink):
+    for s in b.stmts:
+        match s.kind:
+            case Expr(e): _scan_discarded_expr(ctx, f, e, true, out)
+            case Block(inner): _scan_discarded_block(ctx, f, inner, out)
+            case _: pass
+
+fn _scan_discarded_expr(ctx: PeCtx, f: HirFunction, e: HirExpr, is_stmt: bool, out: PeDiagSink):
+    match e.kind:
+        case MethodCall(_, method, args, res):
+            if is_stmt:
+                val summary = _summary_for_method(ctx, method, res)
+                if summary.len() == args.len() + 1 and _effect_at(summary, 0) == "consume":
+                    out.add(ParamEffectDiag(code: "NOGC-OWN-003", function: f.name, param: "self",
+                        message: "`{method}` consumes its receiver and returns the new owner, but the result is discarded; rebind it (`x = x.{method}(...)`) or chain the call", line: e.span.line))
+        case If(_, t, el):
+            _scan_discarded_block(ctx, f, t, out)
+            match el:
+                case Some(x): _scan_discarded_block(ctx, f, x, out)
+                case nil: pass
+        case IfChain(arms, el):
+            for a in arms:
+                _scan_discarded_block(ctx, f, a.then_, out)
+            match el:
+                case Some(x): _scan_discarded_block(ctx, f, x, out)
+                case nil: pass
+        case MatchCase(_, arms):
+            for a in arms:
+                _scan_discarded_block(ctx, f, a.body, out)
+        case Loop(body, _): _scan_discarded_block(ctx, f, body, out)
+        case While(_, body, _): _scan_discarded_block(ctx, f, body, out)
+        case For(_, _, body, _): _scan_discarded_block(ctx, f, body, out)
+        case Block(b): _scan_discarded_block(ctx, f, b, out)
+        case UnsafeBlock(b): _scan_discarded_block(ctx, f, b, out)
+        case _: pass
