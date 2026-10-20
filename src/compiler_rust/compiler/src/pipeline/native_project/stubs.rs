@@ -1175,9 +1175,19 @@ or set {}=1 to bypass at your own risk.",
             simple_symbols.insert(mangled.clone());
         }
     }
+    // A bare trait-method name (`implementation_identity`) reaches the link when
+    // a method call on an erased/trait receiver was lowered by NAME. No object
+    // defines a bare method symbol, so unless a real definition is aliasable the
+    // fabricated body would return nil for every call. Treat it like any other
+    // internal Simple symbol with no implementation: refuse by default.
+    // doc/08_tracking/bug/trait_receiver_cross_unit_bare_call_stubbed_2026-10-20.md
+    let is_unresolved_trait_method = |sym: &str| {
+        let bare = if target.os == TargetOS::MacOS { sym.strip_prefix('_').unwrap_or(sym) } else { sym };
+        imports.trait_method_names.contains(bare) && resolve_defined_suffix_alias(sym, &defined).is_none()
+    };
     let internal_missing: Vec<String> = needs_stub
         .iter()
-        .filter(|sym| simple_symbols.contains(*sym))
+        .filter(|sym| simple_symbols.contains(*sym) || is_unresolved_trait_method(sym))
         .cloned()
         .collect();
 
@@ -1211,7 +1221,9 @@ or set {}=1 to bypass at your own risk.",
 fabricated as weak stubs returning the tagged-nil sentinel 3: {}{}\n\
   An `extern fn` (or other Simple declaration) with no definition in any linked \
 object, runtime library, or system library cannot be linked into a correct \
-binary. Implement the symbol, or set SIMPLE_ALLOW_INTERNAL_STUBS=1 to restore \
+binary. A bare trait-method name means a method call on an untyped or \
+trait-typed receiver was lowered by name with no implementation in the link. \
+Implement the symbol, or set SIMPLE_ALLOW_INTERNAL_STUBS=1 to restore \
 the old fabricating behaviour.",
                 internal_missing.len(),
                 preview,

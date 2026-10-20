@@ -154,3 +154,64 @@ fn native_vhdl_driver_imports_resolve_to_existing_plugin_owners() {
     }
     assert_eq!(resolved_plugin_imports, 7, "all driver plugin imports must be checked");
 }
+
+fn virtual_and_bare_calls(mir: &mir::MirModule, function: &str, method: &str) -> (usize, usize) {
+    let function = mir.functions.iter().find(|f| f.name == function).unwrap();
+    let instructions: Vec<_> = function.blocks.iter().flat_map(|block| &block.instructions).collect();
+    let virtual_calls = instructions
+        .iter()
+        .filter(|instruction| matches!(instruction, mir::MirInst::MethodCallVirtual { .. }))
+        .count();
+    let bare_calls = instructions
+        .iter()
+        .filter(|instruction| matches!(instruction, mir::MirInst::MethodCallStatic { func_name, .. } if func_name == method))
+        .count();
+    (virtual_calls, bare_calls)
+}
+
+// doc/08_tracking/bug/trait_receiver_cross_unit_bare_call_stubbed_2026-10-20.md
+// The payload of an `Option<Trait>` keeps its declared trait: with no
+// implementation in this unit the call used to become the bare-name
+// `implementation_identity` (nil stub / first same-named method at link).
+#[test]
+fn optional_trait_payload_binding_lowers_to_virtual_call() {
+    let source = "trait Ident:\n    fn identity() -> text\n    fn implementation_identity() -> text\n\n\
+fn by_some(reducer: Ident?) -> text:\n    if val Some(strategy) = reducer:\n        return strategy.implementation_identity()\n    \"none\"\n\n\
+fn by_plain(reducer: Ident?) -> text:\n    if val strategy = reducer:\n        return strategy.implementation_identity()\n    \"none\"\n\n\
+fn by_match(reducer: Ident?) -> text:\n    match reducer:\n        case Some(strategy):\n            return strategy.implementation_identity()\n        case None:\n            return \"none\"\n    \"none\"\n\n\
+fn by_local() -> text:\n    val reducer: Ident? = None\n    if val Some(strategy) = reducer:\n        return strategy.implementation_identity()\n    \"none\"\n";
+    let ast = simple_parser::Parser::new(source).parse().expect("parse");
+    let hir = hir::lower(&ast).expect("HIR lowering");
+    let mir = mir::lower_to_mir(&hir).expect("MIR lowering");
+    for function in ["by_some", "by_plain", "by_match", "by_local"] {
+        let (virtual_calls, bare_calls) = virtual_and_bare_calls(&mir, function, "implementation_identity");
+        assert_eq!(bare_calls, 0, "{function}: payload call lowered by bare name");
+        assert_eq!(virtual_calls, 1, "{function}: payload call is not a vtable dispatch");
+    }
+}
+
+// `class Name with Trait:` is a trait implementation: it must produce a HirImpl
+// (and so a vtable) exactly like `impl Trait for Name`. A class missing an
+// abstract method keeps the previous behaviour instead of failing to lower.
+#[test]
+fn class_with_trait_clause_records_trait_impl() {
+    let source = "trait Ident:\n    fn identity() -> text\n    fn label() -> text:\n        \"default\"\n\n\
+class Alpha with Ident:\n    tag: text\n    fn identity() -> text: self.tag\n\n\
+class Partial with Ident:\n    tag: text\n\n\
+trait Other:\n    fn other() -> i64\n\n\
+class Both with Ident, Other:\n    tag: text\n    fn identity() -> text: self.tag\n    fn other() -> i64: 1\n";
+    let ast = simple_parser::Parser::new(source).parse().expect("parse");
+    let hir = hir::lower(&ast).expect("HIR lowering");
+    let alpha = hir
+        .impls
+        .iter()
+        .find(|imp| imp.type_name == "Alpha" && imp.trait_name.as_deref() == Some("Ident"))
+        .expect("class-with trait clause recorded no impl");
+    assert_eq!(alpha.methods.get("identity").map(String::as_str), Some("Alpha.identity"));
+    assert_eq!(alpha.methods.get("label").map(String::as_str), Some("Alpha.label"), "default method not inherited");
+    assert!(!hir.impls.iter().any(|imp| imp.type_name == "Partial"), "incomplete class must not get an impl");
+    // One vtable header per object: two traits would share it with clashing slots.
+    assert!(!hir.impls.iter().any(|imp| imp.type_name == "Both"), "multi-trait class must not get an impl");
+    let mir = mir::lower_to_mir(&hir).expect("MIR lowering");
+    assert!(mir.vtable_impls.iter().any(|(_, owner, _, slots, _)| owner == "Alpha" && slots.len() == 2));
+}

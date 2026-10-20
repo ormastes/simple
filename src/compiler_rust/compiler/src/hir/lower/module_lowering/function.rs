@@ -1168,13 +1168,14 @@ impl Lowerer {
             } else {
                 param.mutability
             };
-            ctx.add_local_with_inject_and_type_hint(
+            let param_index = ctx.add_local_with_inject_and_type_hint(
                 param.name.clone(),
                 ty,
                 param.ty.as_ref().and_then(type_name_hint),
                 param_mutability,
                 param.inject,
             );
+            self.record_optional_trait_payload(param.ty.as_ref(), param_index, &mut ctx);
         }
 
         let params: Vec<LocalVar> = ctx.locals.clone();
