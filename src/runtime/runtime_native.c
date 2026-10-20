@@ -18395,6 +18395,34 @@ int8_t rt_array_extend_i64(int64_t dst, int64_t src, int64_t count) {
             da->len += n;
             return 1;
         }
+        /* [u64] arrays hold RAW int64 words in host byte order; generic arrays
+         * hold tagged words. rt_array_get/rt_array_push move a slot word
+         * verbatim, so the generic loop below put raw words into tagged slots
+         * (and tagged words into raw ones) whenever exactly one side was a
+         * [u64]. Same layout on both sides: copy the words as they are --
+         * each is read and written as a whole int64 in host order, so byte
+         * order never changes meaning. Mixed layout: re-encode each element
+         * through the slot-value pair (raw -> tagged, tagged -> raw). */
+        {
+            int d_u64 = da && (da->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) != 0;
+            int s_u64 = sa && (sa->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) != 0;
+            if (d_u64 || s_u64) {
+                if (n <= 0) return 1;
+                if (!rt_core_array_reserve(d, da->len + n)) return 0;
+                da = rt_core_array_ptr(d);
+                sa = rt_core_array_ptr(s); /* s may be d: reserve can move data */
+                if (d_u64 && s_u64) {
+                    memmove((int64_t*)da->data + da->len, sa->data, (size_t)n * sizeof(int64_t));
+                    da->len += n;
+                    return 1;
+                }
+                for (i = 0; i < n; i++) {
+                    spl_core_store_element(da, da->len, spl_core_slot_value(sa, i));
+                    da->len++;
+                }
+                return 1;
+            }
+        }
     }
     for (i = 0; i < n; i++) {
         if (!rt_array_push(d, rt_array_get(s, i))) return 0;

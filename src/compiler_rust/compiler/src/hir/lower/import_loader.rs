@@ -370,6 +370,9 @@ impl Lowerer {
                 if self.imported_function_names.contains(&original_name) {
                     self.imported_function_names.insert(alias_name.clone());
                 }
+                if let Some(fn_ty) = self.imported_function_value_types.get(&original_name).copied() {
+                    self.imported_function_value_types.insert(alias_name.clone(), fn_ty);
+                }
                 if self.extern_fn_names.contains(&original_name) {
                     self.extern_fn_names.insert(alias_name.clone());
                 }
@@ -523,6 +526,19 @@ impl Lowerer {
                         self.globals.insert(func_def.name.clone(), ret_ty);
                         self.method_return_types.insert(func_def.name.clone(), ret_ty);
                         self.imported_function_names.insert(func_def.name.clone());
+                        // A parameter whose type does not resolve in this unit
+                        // (generic, or a type the import does not bring in) is
+                        // carried as ANY: the value still has the right arity.
+                        let params: Vec<TypeId> = func_def
+                            .params
+                            .iter()
+                            .map(|p| match &p.ty {
+                                Some(t) => self.resolve_type(t).unwrap_or(TypeId::ANY),
+                                None => TypeId::ANY,
+                            })
+                            .collect();
+                        let fn_ty = self.module.types.register(HirType::Function { params, ret: ret_ty });
+                        self.imported_function_value_types.insert(func_def.name.clone(), fn_ty);
                         if func_def.is_pure() {
                             self.pure_functions.insert(func_def.name.clone());
                         }
