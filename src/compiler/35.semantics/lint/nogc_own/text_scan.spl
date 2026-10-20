@@ -1,0 +1,256 @@
+# Line/token helpers for the no-GC ownership lint (NOGC-OWN/BOR/ALIAS).
+#
+# Pure text functions, no AST dependency, so the lint runs in interpreter-mode
+# specs and costs one linear pass per file. Every scan prefers the native
+# `index_of`/`starts_with`/`trim` primitives over per-character walks; the
+# per-character walk runs only on lines that actually contain a string quote.
+
+pub fn nogc_is_ident_char(ch: text) -> bool:
+    if ch == "_": return true
+    if ch >= "a" and ch <= "z": return true
+    if ch >= "A" and ch <= "Z": return true
+    if ch >= "0" and ch <= "9": return true
+    false
+
+pub fn nogc_is_ident(s: text) -> bool:
+    if s == "": return false
+    val first = s.substring(0, 1)
+    if first >= "0" and first <= "9": return false
+    var i = 0
+    while i < s.len():
+        if not nogc_is_ident_char(s.substring(i, i + 1)):
+            return false
+        i = i + 1
+    true
+
+pub fn nogc_take_ident(s: text, start: i64) -> text:
+    var i = start
+    val n = s.len()
+    while i < n and nogc_is_ident_char(s.substring(i, i + 1)):
+        i = i + 1
+    if i == start: return ""
+    s.substring(start, i)
+
+pub fn nogc_indent_of(raw: text) -> i64:
+    """Leading-space count; whitespace-only lines get a sentinel (999)."""
+    var i = 0
+    val n = raw.len()
+    while i < n:
+        val ch = raw.substring(i, i + 1)
+        if ch != " " and ch != "\t":
+            return i
+        i = i + 1
+    999
+
+pub fn nogc_code_of(raw: text) -> text:
+    """Trimmed code with the trailing comment cut and string-literal bodies
+    blanked to `_` -- EXCEPT `{...}` interpolation holes, which are code and
+    keep their identifiers, so a use inside `"{a}"` is still a use."""
+    if raw.index_of("\"") < 0 and raw.index_of("#") < 0:
+        return raw.trim()
+    var out = ""
+    var in_str = false
+    var hole = 0
+    var i = 0
+    val n = raw.len()
+    while i < n:
+        val ch = raw.substring(i, i + 1)
+        if in_str and hole == 0:
+            if ch == "\\":
+                out = out + "__"
+                i = i + 2
+                continue
+            if ch == "\"":
+                in_str = false
+                out = out + ch
+            elif ch == "{":
+                hole = 1
+                out = out + ch
+            else:
+                out = out + "_"
+        elif in_str:
+            if ch == "{": hole = hole + 1
+            if ch == "}": hole = hole - 1
+            out = out + ch
+        else:
+            if ch == "\"":
+                in_str = true
+                out = out + ch
+            elif ch == "#":
+                return out.trim()
+            else:
+                out = out + ch
+        i = i + 1
+    out.trim()
+
+pub fn nogc_word_at(code: text, name: text) -> i64:
+    """Index of the first standalone occurrence of identifier `name` in
+    `code`, or -1. Standalone = not part of a longer identifier and not a
+    member name (`x.name`). `name.field` and `name(...)` DO count."""
+    if name == "": return -1
+    var base = 0
+    var rest = code
+    while true:
+        val at = rest.index_of(name)
+        if at < 0: return -1
+        val abs = base + at
+        val end = abs + name.len()
+        var ok = true
+        if abs > 0:
+            val prev = code.substring(abs - 1, abs)
+            if nogc_is_ident_char(prev) or prev == ".":
+                ok = false
+        if ok and end < code.len():
+            if nogc_is_ident_char(code.substring(end, end + 1)):
+                ok = false
+        if ok: return abs
+        base = abs + 1
+        rest = code.substring(base, code.len())
+    -1
+
+pub fn nogc_has_word(code: text, name: text) -> bool:
+    nogc_word_at(code, name) >= 0
+
+pub fn nogc_type_base(ty: text) -> text:
+    """Base class name of a type annotation: strips `mut `, `&`, `&mut `,
+    trailing `?`, generic args, and one array layer `[T]`. Returns "" for an
+    `iso` type -- an isolated value is an explicit owner, never a borrow."""
+    var t = ty.trim()
+    val eq = t.index_of("=")
+    if eq >= 0:
+        t = t.substring(0, eq).trim()
+    if t.starts_with("iso "): return ""
+    if t.starts_with("~"): return ""
+    if t.starts_with("mut "): t = t.substring(4, t.len()).trim()
+    if t.starts_with("&mut "): t = t.substring(5, t.len()).trim()
+    if t.starts_with("&"): t = t.substring(1, t.len()).trim()
+    if t.ends_with("?"): t = t.substring(0, t.len() - 1).trim()
+    nogc_take_ident(t, 0)
+
+pub fn nogc_array_elem_base(ty: text) -> text:
+    """`[C]` / `[C]?` -> C; anything else -> ""."""
+    var t = ty.trim()
+    val eq = t.index_of("=")
+    if eq >= 0:
+        t = t.substring(0, eq).trim()
+    if t.ends_with("?"): t = t.substring(0, t.len() - 1).trim()
+    if not t.starts_with("["): return ""
+    if not t.ends_with("]"): return ""
+    val inner = t.substring(1, t.len() - 1).trim()
+    if inner.index_of(":") >= 0: return ""
+    nogc_type_base(inner)
+
+pub fn nogc_split_top_commas(s: text) -> [text]:
+    """Split on commas that are not nested inside () [] <> {}.
+
+    A bare comparison `<`/`>` inside an argument also counts as nesting, so
+    `C(a < b, p)` may merge arguments; that only loses recall (a missed
+    store), never adds a finding."""
+    var parts: [text] = []
+    var depth = 0
+    var start = 0
+    var i = 0
+    val n = s.len()
+    while i < n:
+        val ch = s.substring(i, i + 1)
+        if ch == "(" or ch == "[" or ch == "<" or ch == "{":
+            depth = depth + 1
+        elif ch == ")" or ch == "]" or ch == ">" or ch == "}":
+            if not (ch == ">" and i > 0 and s.substring(i - 1, i) == "-"):
+                depth = depth - 1
+        elif ch == "," and depth == 0:
+            parts.push(s.substring(start, i).trim())
+            start = i + 1
+        i = i + 1
+    val last = s.substring(start, n).trim()
+    if last != "":
+        parts.push(last)
+    parts
+
+pub fn nogc_paren_balance(s: text) -> i64:
+    var bal = 0
+    var i = 0
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if ch == "(": bal = bal + 1
+        if ch == ")": bal = bal - 1
+        i = i + 1
+    bal
+
+pub fn nogc_strip_decl_mods(trimmed: text) -> text:
+    """Drop leading `pub `, `static `, `async `, `inline ` modifiers."""
+    var rest = trimmed
+    var changed = true
+    while changed:
+        changed = false
+        if rest.starts_with("pub "):
+            rest = rest.substring(4, rest.len())
+            changed = true
+        elif rest.starts_with("static "):
+            rest = rest.substring(7, rest.len())
+            changed = true
+        elif rest.starts_with("async "):
+            rest = rest.substring(6, rest.len())
+            changed = true
+        elif rest.starts_with("inline "):
+            rest = rest.substring(7, rest.len())
+            changed = true
+    rest
+
+pub fn nogc_is_fn_header(trimmed: text) -> bool:
+    val rest = nogc_strip_decl_mods(trimmed)
+    if rest.starts_with("fn ") or rest.starts_with("me "):
+        return nogc_is_ident_char(rest.substring(3, 4))
+    false
+
+pub fn nogc_decl_parts(code: text) -> [text]:
+    """`val|var NAME(: T)? = RHS` -> [NAME, T, RHS]; otherwise []."""
+    var rest = ""
+    if code.starts_with("val "):
+        rest = code.substring(4, code.len()).trim()
+    elif code.starts_with("var "):
+        rest = code.substring(4, code.len()).trim()
+    else:
+        return []
+    val name = nogc_take_ident(rest, 0)
+    if name == "": return []
+    var after = rest.substring(name.len(), rest.len()).trim()
+    var ty = ""
+    if after.starts_with(":"):
+        val eq = after.index_of(" = ")
+        if eq < 0:
+            return [name, after.substring(1, after.len()).trim(), ""]
+        ty = after.substring(1, eq).trim()
+        after = after.substring(eq + 1, after.len()).trim()
+    if not after.starts_with("="): return []
+    if after.starts_with("=="): return []
+    [name, ty, after.substring(1, after.len()).trim()]
+
+pub fn nogc_assign_parts(code: text) -> [text]:
+    """`LHS = RHS` (plain `=`, not `==`/`!=`/`<=`/`>=`/compound) -> [LHS, RHS];
+    otherwise []. Declarations are not assignments."""
+    if code.starts_with("val ") or code.starts_with("var "): return []
+    val at = code.index_of(" = ")
+    if at <= 0: return []
+    val lhs = code.substring(0, at).trim()
+    if lhs == "": return []
+    val last = lhs.substring(lhs.len() - 1, lhs.len())
+    if last == "+" or last == "-" or last == "*" or last == "/" or last == "%" or last == "!" or last == "<" or last == ">" or last == "|" or last == "&" or last == "?":
+        return []
+    if lhs.index_of("(") >= 0 and not lhs.ends_with("]"): return []
+    [lhs, code.substring(at + 3, code.len()).trim()]
+
+pub fn nogc_call_single_arg(code: text, method: text) -> [text]:
+    """Every `.METHOD(ARG)` single-argument payload on the line, trimmed."""
+    var out: [text] = []
+    val key = ".{method}("
+    var rest = code
+    while true:
+        val at = rest.index_of(key)
+        if at < 0: return out
+        val after = rest.substring(at + key.len(), rest.len())
+        val close = after.index_of(")")
+        if close < 0: return out
+        out.push(after.substring(0, close).trim())
+        rest = after.substring(close, after.len())
+    out

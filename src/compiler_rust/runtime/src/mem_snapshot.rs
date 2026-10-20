@@ -500,6 +500,9 @@ fn run_id_token() -> String {
 }
 
 fn status_kib(key: &str) -> i64 {
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+    return bsd_status_kib(key);
+    #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
     std::fs::read_to_string("/proc/self/status")
         .ok()
         .and_then(|text| {
@@ -512,6 +515,65 @@ fn status_kib(key: &str) -> i64 {
             })
         })
         .unwrap_or(-1)
+}
+
+/// No /proc/self/status: resident from the kernel, peak from getrusage
+/// (same sources as the C runtime's `rt_process_status_kib`).
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+fn bsd_status_kib(key: &str) -> i64 {
+    unsafe {
+        if key == "VmHWM:" {
+            let mut ru: libc::rusage = std::mem::zeroed();
+            if libc::getrusage(libc::RUSAGE_SELF, &mut ru) != 0 {
+                return -1;
+            }
+            // Darwin reports bytes, FreeBSD KiB.
+            return if cfg!(target_os = "macos") { ru.ru_maxrss as i64 / 1024 } else { ru.ru_maxrss as i64 };
+        }
+        if key != "VmRSS:" {
+            return -1;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let mut ti: libc::proc_taskinfo = std::mem::zeroed();
+            let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+            let got = libc::proc_pidinfo(libc::getpid(), libc::PROC_PIDTASKINFO, 0,
+                &mut ti as *mut libc::proc_taskinfo as *mut libc::c_void, size);
+            if got != size {
+                return -1;
+            }
+            (ti.pti_resident_size / 1024) as i64
+        }
+        #[cfg(target_os = "freebsd")]
+        {
+            let mut kp: libc::kinfo_proc = std::mem::zeroed();
+            let mut len = std::mem::size_of::<libc::kinfo_proc>();
+            let mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, libc::getpid()];
+            if libc::sysctl(mib.as_ptr(), 4, &mut kp as *mut libc::kinfo_proc as *mut libc::c_void,
+                &mut len, std::ptr::null(), 0) != 0 || len != std::mem::size_of::<libc::kinfo_proc>() {
+                return -1;
+            }
+            kp.ki_rssize as i64 * libc::sysconf(libc::_SC_PAGESIZE) as i64 / 1024
+        }
+    }
+}
+
+/// Rust twin of the C runtime's `rt_process_rss_kib`: -1 when unavailable.
+#[no_mangle]
+pub extern "C" fn rt_process_rss_kib() -> i64 {
+    #[cfg(windows)]
+    return windows_process_memory_kib().0;
+    #[cfg(not(windows))]
+    status_kib("VmRSS:")
+}
+
+/// Rust twin of the C runtime's `rt_process_hwm_kib`: -1 when unavailable.
+#[no_mangle]
+pub extern "C" fn rt_process_hwm_kib() -> i64 {
+    #[cfg(windows)]
+    return windows_process_memory_kib().1;
+    #[cfg(not(windows))]
+    status_kib("VmHWM:")
 }
 
 #[cfg(not(windows))]
@@ -661,6 +723,14 @@ pub extern "C" fn rt_mem_snapshot_close(fd: i64) -> i8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd", windows))]
+    #[test]
+    fn process_rss_and_peak_are_observed() {
+        let (rss, hwm) = (rt_process_rss_kib(), rt_process_hwm_kib());
+        assert!(rss > 0, "rss_kib={rss}");
+        assert!(hwm >= rss, "hwm_kib={hwm} rss_kib={rss}");
+    }
 
     #[cfg(windows)]
     unsafe fn open_windows(path: &std::path::Path) -> i64 {
