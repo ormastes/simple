@@ -9,8 +9,10 @@ was proven but never reached `enum_payload_local_compatible`:
 
 - `o.unwrap()`, `o!`, `t.0`, `t[0]`, `val (a, b) = t` carry the payload's
   lower_type() Struct, whose id is a canonical MIR id, not a SymbolTable id.
-- `nil` into a declared optional slot only; nil into a non-optional
-  class/struct/enum slot is a MIR error that names the declaration to fix.
+- `nil` is allowed only inside `unsafe:`. Safe code spells absence `None`;
+  nil into a declared optional slot outside unsafe is a MIR error that says
+  "use None". nil into a non-optional class/struct/enum slot is a MIR error
+  that names the declaration to fix, inside unsafe too.
 - `Some(3)`, `Some(arr)`, `Some(t[0])`, `Some(o.unwrap())`: the Some witness
   only covered scalar/Named payload sources.
 - `E.V(self.dict_field)`: a Dict field projection never retained its type.
@@ -35,7 +37,7 @@ use compiler.mir._MirLowering.module_lowering.*
 
 val data_source = "pub struct Node:\n    v: i64\n\npub enum Wrap:\n    One(node: Node)\n\npub enum OS:\n    V(n: Node?)\n\npub enum OI:\n    V(x: i64?)\n\npub enum Lit:\n    S(v: text, parts: [Node]?)\n\npub enum MemoRoot:\n    IndexMap(Dict<text, i64>)\n\npub class Mh:\n    memo: {text: i64}\n\npub struct MaybeH:\n    maybe: Node?\n\npub enum K1:\n    Fn(x: i64)\n    Lit(v: i64)\n\npub enum K2:\n    Fn(y: i64)\n    Other\n\npub struct Ty1:\n    kind: K1\n\npub class Solver:\n    n: i64\n    fn resolve(t: Ty1) -> Ty1:\n        t\n\npub class Boxy:\n    n: i64\n    fn unwrap() -> Node:\n        Node(v: self.n)\n"
 
-fn lower_consumer_errors(body: text) -> text:
+fn lower_consumer(body: text) -> (text, MirModule):
     val consumer_source = "use lib.data.*\n\n" + body
     val log = Logger(level: 0)
     val data_ast = parse_full_frontend(data_source, "lib/data.spl", "lib.data", log)
@@ -54,13 +56,33 @@ fn lower_consumer_errors(body: text) -> text:
     prescan_mods["consumer_hir"] = consumer_hir
     mir_lowering.prescan_module_struct_names(prescan_mods, "data_hir")
     mir_lowering.prescan_module_struct_names(prescan_mods, "consumer_hir")
-    val _mir = mir_lowering.lower_module(consumer_hir, [data_hir, consumer_hir])
+    val mir = mir_lowering.lower_module(consumer_hir, [data_hir, consumer_hir])
     var out = ""
     for e in consumer_lowering.errors:
         out = out + "hir: " + e.message + "\n"
     for e in mir_lowering.errors:
         out = out + "mir: " + e.message + "\n"
-    out
+    (out, mir)
+
+fn lower_consumer_errors(body: text) -> text:
+    val (errors, _mir) = lower_consumer(body)
+    errors
+
+fn nil_word_const_count(body: text) -> i64:
+    # Const Int(3) is the nil word (expr_dispatch.spl `case NilLit`).
+    val (_errors, mir) = lower_consumer(body)
+    var count = 0
+    for func in mir.functions.values():
+        for block in func.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case MirInstKind.Const(_, value, _):
+                        match value:
+                            case MirConstValue.Int(v):
+                                if v == 3: count = count + 1
+                            case _: ()
+                    case _: ()
+    count
 
 describe "typed enum payload slots accept proven value shapes":
     it "Option unwrap forms carry the payload record":
@@ -82,9 +104,30 @@ describe "typed enum payload slots accept proven value shapes":
         # Strictness kept for non-nominal slots: nil is not text.
         expect(lower_consumer_errors("fn b() -> Lit:\n    Lit.S(nil, nil)\n").contains("payload type mismatch at 0")).to_equal(true)
 
-    it "nil into an optional record payload is accepted":
-        # OS.V(n: Node?) declares absence as valid.
-        expect(lower_consumer_errors("fn a() -> OS:\n    OS.V(nil)\n")).to_equal("")
+    it "nil into an optional record payload is rejected in safe code; None is the accepted form":
+        # nil is allowed only inside `unsafe:`. OS.V(n: Node?) declares
+        # absence as valid, and safe code spells absence `None`.
+        val errors = lower_consumer_errors("fn a() -> OS:\n    OS.V(nil)\n")
+        expect(errors.contains("OS.V': payload type mismatch at 0: nil outside unsafe into optional payload slot (declared 'Node?'); use None")).to_equal(true)
+        expect(lower_consumer_errors("fn b() -> OS:\n    OS.V(None)\n")).to_equal("")
+        expect(lower_consumer_errors("fn c() -> OI:\n    OI.V(None)\n")).to_equal("")
+
+    it "None in an optional payload slot lowers to the nil word, like nil did":
+        # Natively a builtin None is an rt_enum_new Option object, which
+        # rt_native_eq does not equate with nil; the payload slot keeps the
+        # nil word so converted sites keep their native shape.
+        val with_none = nil_word_const_count("fn a() -> OS:\n    OS.V(None)\n")
+        val with_nil = nil_word_const_count("fn a() -> OS:\n    unsafe:\n        OS.V(nil)\n")
+        val with_value = nil_word_const_count("fn a(x: Node?) -> OS:\n    OS.V(x)\n")
+        expect(with_none).to_equal(with_nil)
+        expect(with_none > with_value).to_equal(true)
+
+    it "nil into an optional payload is accepted inside unsafe":
+        expect(lower_consumer_errors("fn a() -> OS:\n    unsafe:\n        OS.V(nil)\n")).to_equal("")
+
+    it "unsafe does not admit nil into a non-optional payload":
+        val errors = lower_consumer_errors("fn a() -> Wrap:\n    unsafe:\n        Wrap.One(nil)\n")
+        expect(errors.contains("Wrap.One': payload type mismatch at 0: nil into non-optional payload slot")).to_equal(true)
 
     it "Some witnesses literal, container and projected payloads":
         expect(lower_consumer_errors("fn a() -> OI:\n    OI.V(Some(3))\n")).to_equal("")

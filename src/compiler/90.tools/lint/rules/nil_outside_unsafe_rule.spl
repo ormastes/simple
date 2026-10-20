@@ -1,0 +1,180 @@
+# NIL-UNSAFE-001: `nil` is allowed only inside `unsafe`.
+#
+# Safe code spells absence `None` (Option). This flags a `nil` literal outside
+# an `unsafe:` / `danger:` block (also the `unsafe(reason: ..., ...):` header
+# form and the one-line `unsafe: expr` form). Comments, strings, docstrings and
+# names that contain `nil` are skipped.
+#
+# Presence tests (`x == nil`, `x != nil`, `case nil:`) are NOT flagged: natively
+# `None` is an Option object and `nil` the word 3, and `rt_native_eq(None, nil)`
+# is 0, so rewriting `x != nil` as `x != None` changes the result. Those want
+# `.?` / `if val` / `case None`, which is a separate migration.
+#
+# Block scope only, the same scope MIR enforces for payload slots: an `@unsafe`
+# function attribute is parser metadata and does not reach HIR/MIR.
+#
+# Default level is allow (`nil_outside_unsafe` in config_and_model.spl) until
+# the tree-wide sweep lands; enable with --warn-all or a [lints] entry.
+use compiler.tools.lint.lint_rule_api.{LintParamsV1, LintUnit, StaticLintCategory, StaticLintFinding, StaticLintLevel, StaticLintRule, lint_rule_provider_iface, static_lint_rule}
+
+fn nil_lint_indent_of(line: text) -> i64:
+    var n = 0
+    while n < line.len():
+        val ch = line.substring(n, n + 1)
+        if ch != " " and ch != "\t": break
+        n = n + 1
+    n
+
+fn nil_lint_is_word_char(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+
+fn nil_lint_blank_triple_spans(line: text) -> text:
+    # Blank the body of every complete `"""..."""` span on one line.
+    var out = ""
+    var inside = false
+    var i = 0
+    while i < line.len():
+        if i + 3 <= line.len() and line.substring(i, i + 3) == "\"\"\"":
+            inside = not inside
+            out = out + "   "
+            i = i + 3
+            continue
+        out = out + (if inside: " " else: line.substring(i, i + 1))
+        i = i + 1
+    out
+
+fn nil_lint_code_of(line: text) -> text:
+    # Blank out string bodies and drop a trailing comment, keeping columns.
+    var out = ""
+    var quote = ""
+    var i = 0
+    while i < line.len():
+        val ch = line.substring(i, i + 1)
+        if quote != "":
+            if ch == "\\":
+                out = out + "  "
+                i = i + 2
+                continue
+            if ch == quote:
+                quote = ""
+                out = out + ch
+            else:
+                out = out + " "
+        elif ch == "\"" or ch == "'":
+            quote = ch
+            out = out + ch
+        elif ch == "#":
+            return out
+        else:
+            out = out + ch
+        i = i + 1
+    out
+
+fn nil_lint_ends_with_keyword(trimmed: text, keyword: text) -> bool:
+    # `unsafe:` / `val p = unsafe:` / `return danger:`; not `my_unsafe:`.
+    if not trimmed.ends_with(keyword): return false
+    val at = trimmed.len() - keyword.len()
+    at == 0 or not nil_lint_is_word_char(trimmed.substring(at - 1, at))
+
+fn nil_lint_opens_unsafe_block(code: text) -> bool:
+    val trimmed = code.trim()
+    if nil_lint_ends_with_keyword(trimmed, "unsafe:") or nil_lint_ends_with_keyword(trimmed, "danger:"): return true
+    # `unsafe(reason: "...", capabilities: [...]):` header.
+    trimmed.ends_with("):") and (trimmed.starts_with("unsafe(") or trimmed.starts_with("danger(") or trimmed.contains(" unsafe(") or trimmed.contains(" danger("))
+
+fn nil_lint_keyword_at(code: text, keyword: text) -> i64:
+    # Column of a word-bounded `keyword`, or -1.
+    var start = 0
+    while start < code.len():
+        val at = code.index_of(keyword, start)
+        if at < 0: return -1
+        if at == 0 or not nil_lint_is_word_char(code.substring(at - 1, at)): return at
+        start = at + keyword.len()
+    -1
+
+fn nil_lint_inline_unsafe_column(code: text) -> i64:
+    # One-line `unsafe: expr`: nil after this column is inside unsafe.
+    val u = nil_lint_keyword_at(code, "unsafe:")
+    val d = nil_lint_keyword_at(code, "danger:")
+    if u < 0: return d
+    if d < 0: return u
+    if u < d: u else: d
+
+fn nil_lint_is_presence_test(code: text, at: i64) -> bool:
+    val before = code.substring(0, at).trim()
+    val after = code.substring(at + 3, code.len()).trim()
+    if before.ends_with("==") or before.ends_with("!="): return true
+    if after.starts_with("==") or after.starts_with("!="): return true
+    before.ends_with("case") or before.ends_with("|")
+
+fn nil_lint_triple_quote_count(line: text) -> i64:
+    var count = 0
+    var i = 0
+    while i + 3 <= line.len():
+        if line.substring(i, i + 3) == "\"\"\"":
+            count = count + 1
+            i = i + 3
+        else:
+            i = i + 1
+    count
+
+fn nil_lint_columns(code: text) -> [i64]:
+    var cols: [i64] = []
+    var start = 0
+    while start + 3 <= code.len():
+        val at = code.index_of("nil", start)
+        if at < 0: break
+        val before_ok = at == 0 or (not nil_lint_is_word_char(code.substring(at - 1, at)) and code.substring(at - 1, at) != ".")
+        val after_ok = at + 3 >= code.len() or not nil_lint_is_word_char(code.substring(at + 3, at + 4))
+        if before_ok and after_ok and not nil_lint_is_presence_test(code, at): cols.push(at)
+        start = at + 3
+    cols
+
+pub fn check_nil_outside_unsafe(content: text) -> [StaticLintFinding]:
+    var findings: [StaticLintFinding] = []
+    var in_doc = false
+    var unsafe_indent = -1
+    var line_num = 0
+    for line in content.split("\n"):
+        line_num = line_num + 1
+        val has_quote = line.contains("\"")
+        # Fast path: no nil, no unsafe header, no string. Only block exit matters.
+        if not in_doc and not has_quote and not line.contains("nil") and not line.contains("unsafe") and not line.contains("danger"):
+            val raw_trimmed = line.trim()
+            if unsafe_indent >= 0 and raw_trimmed != "" and not raw_trimmed.starts_with("#") and nil_lint_indent_of(line) <= unsafe_indent:
+                unsafe_indent = -1
+            continue
+        val quotes = if has_quote: nil_lint_triple_quote_count(line) else: 0
+        if in_doc:
+            if quotes % 2 == 1: in_doc = false
+            continue
+        if quotes % 2 == 1:
+            in_doc = true
+            continue
+        val unquoted = if quotes > 0: nil_lint_blank_triple_spans(line) else: line
+        val code = nil_lint_code_of(unquoted)
+        if code.trim() == "": continue
+        val indent = nil_lint_indent_of(code)
+        if unsafe_indent >= 0 and indent <= unsafe_indent:
+            unsafe_indent = -1
+        if unsafe_indent < 0 and nil_lint_opens_unsafe_block(code):
+            unsafe_indent = indent
+            continue
+        if unsafe_indent >= 0: continue
+        if not code.contains("nil"): continue
+        val inline_unsafe = nil_lint_inline_unsafe_column(code)
+        for col in nil_lint_columns(code):
+            if inline_unsafe >= 0 and col > inline_unsafe: continue
+            findings.push(StaticLintFinding(
+                "NIL-UNSAFE-001", StaticLintLevel.Warn, StaticLintCategory.Safety,
+                "`nil` outside `unsafe`: safe code spells absence `None`",
+                "use `None` (Option); keep `nil` only inside an `unsafe:` block",
+                line_num, col + 1))
+    findings
+
+fn check_rule(params: LintParamsV1, unit: LintUnit) -> [StaticLintFinding]:
+    val _ = params
+    check_nil_outside_unsafe(unit.content)
+
+pub fn nil_outside_unsafe_lint_rule() -> StaticLintRule:
+    static_lint_rule("nil_outside_unsafe", lint_rule_provider_iface("nil_outside_unsafe"), check_rule)

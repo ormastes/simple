@@ -450,3 +450,27 @@ private buffer (generic/Any/nested struct slots disqualify). Known, NOT fixed:
 `St(output: o); o.push(4)` is visible through `st.output` (pinned by
 `test/01_unit/compiler/50.mir/array_move_lowering_spec.spl`). Trap: under the
 seed interpreter `Dict<i64,_>.keys()` yields text keys — keep key lists.
+
+## 2026-10-20 — nil only inside `unsafe` in enum payload slots
+
+- `enum_payload_local_compatible` accepts a `nil` literal in a declared `T?`
+  payload slot only when `self.unsafe_depth > 0` (an `unsafe:` / `danger:`
+  block). Outside it the error says `nil outside unsafe ... use None`. A nil
+  into a non-optional slot is rejected inside unsafe too. `@unsafe` on a fn
+  never reaches MIR, so only blocks count.
+- `None` and `nil` differ natively: `None` is `rt_enum_new(OPTION, 1, 0)`,
+  nil is the word 3; `rt_native_eq(None, nil)` is 0. The seed equates them.
+  Builtin `None` in an enum payload slot lowers to the nil word
+  (`emit_enum_payload_nil_word`): typed `T?` slots, and untyped constructions
+  of a non-generic owner (`lower_untyped_enum_payload_expression`). Generic
+  owners (Option/Result/user generics) keep the Option object. A local named
+  `None` is not the builtin. Struct fields and variables have no such
+  lowering yet.
+- A bare `T` value into a `T?` payload slot is REJECTED. Declaring a slot `T?`
+  therefore forces `Some(t)` at producers, the box that SIGSEGVs natively
+  (`statements.spl:580`). Open sites:
+  `doc/08_tracking/bug/enum_payload_nil_into_nonoptional_hir_slots_2026-10-20.md`.
+- Lint `NIL-UNSAFE-001` (`90.tools/lint/rules/nil_outside_unsafe_rule.spl`)
+  flags nil outside unsafe blocks; default level allow (`nil_outside_unsafe`),
+  enable with --warn-all. It skips `== nil`, `!= nil` and `case nil`, since
+  rewriting those as `None` changes the native result.
