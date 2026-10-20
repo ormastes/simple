@@ -16,7 +16,10 @@ static int64_t* owned_tuple3_value(int64_t stdout_value, int64_t stderr_value, S
     int64_t handle = rt_tuple_new(3);
     if (!rt_tuple_set(handle, 0, stdout_value) ||
         !rt_tuple_set(handle, 1, stderr_value) ||
-        !rt_tuple_set(handle, 2, (int64_t)(uintptr_t)fields)) return NULL;
+        !rt_tuple_set(handle, 2, (int64_t)(uintptr_t)fields)) {
+        rt_array_free((SplArray*)(uintptr_t)handle); /* no-op on a nil handle */
+        return NULL;
+    }
     return (int64_t*)(uintptr_t)handle;
 }
 
