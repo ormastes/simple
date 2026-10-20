@@ -9,8 +9,8 @@ across them.
 
 | Concern | Source owner(s) | Existing evidence surface |
 |---|---|---|
-| Input/modifiers | `src/lib/common/ui/input_event.spl`, `src/os/gui/input_event.spl` | `test/unit/common/ui/input_event_conformance_spec.spl` |
-| GUI/widget activation | `src/app/ui*`, widget/event pipeline | `test/unit/app/ui/widget_button_checkbox_dropdown_spec.spl`, `test/system/gui/event_processing_spec.spl` |
+| Input/modifiers | `src/lib/common/ui/input_event.spl`, `src/os/gui/input_event.spl` | `test/01_unit/common/ui/input_event_conformance_spec.spl` |
+| GUI/widget activation | `src/app/ui*`, widget/event pipeline | `test/01_unit/app/ui/widget_button_checkbox_dropdown_spec.spl`, `test/system/gui/event_processing_spec.spl` |
 | WM drag/scroll | `src/os/compositor/host_gui_event_router.spl`, `wm_action_applier`, layout owners | `test/unit/os/compositor/wm_action_applier_spec.spl`, `test/system/gui/wm_input_qemu_smoke_spec.spl` |
 | Web hit/layout | browser-engine/layout owners | `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_hit_test_events_spec.spl`, DOM-event and CSS suites |
 | Draw IR/2D | common Draw IR, `engine2d_wm_frame_executor`, `src/app/ui_showcase/` | `test/03_system/ui_showcase/showcase_hosts_spec.spl`, game2d and Draw IR integration specs |

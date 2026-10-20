@@ -90,7 +90,7 @@ Evidence:
   index/query coverage, SQL index/query coverage, and exact character-budget
   token estimate coverage.
 - `test/01_unit/app/tooling/ponytail_audit_spec.spl` and
-  `test/unit/app/tooling/ponytail_audit_spec.spl` both pass 6/6 cleanly
+  `test/01_unit/app/tooling/ponytail_audit_spec.spl` both pass 6/6 cleanly
   after narrowing fixture imports away from broad `app.io.mod`.
 - `test/unit/app/mcp_unit/mcp_inventory_alignment_spec.spl` passed with 17/17.
 - `test/unit/app/inventory_drift_spec.spl` passed with 9/9.
@@ -143,7 +143,7 @@ Files:
 - `src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl`
 - `src/lib/nogc_async_mut/mcp/lazy_protocol_schemas.spl`
 - `test/01_unit/app/tooling/ponytail_audit_spec.spl`
-- `test/unit/app/tooling/ponytail_audit_spec.spl`
+- `test/01_unit/app/tooling/ponytail_audit_spec.spl`
 - `test/01_unit/app/mcp_unit/mcp_analysis_tools_spec.spl`
 - `test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl`
 
@@ -159,7 +159,7 @@ Evidence:
 
 - `simple check` passed for changed ponytail and MCP source/spec files.
 - `test/01_unit/app/tooling/ponytail_audit_spec.spl` passed with 6/6.
-- `test/unit/app/tooling/ponytail_audit_spec.spl` passed with 6/6.
+- `test/01_unit/app/tooling/ponytail_audit_spec.spl` passed with 6/6.
 - `test/01_unit/app/mcp_unit/mcp_analysis_tools_spec.spl` passed with 32/32.
 - `test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl` passed with 22/22.
 
@@ -295,7 +295,7 @@ Files:
 - `src/app/llm_dashboard/collectors/tooling_artifact_collector.spl`
 - `src/app/llm_dashboard/collectors/__init__.spl`
 - `test/01_unit/app/llm_dashboard/collectors/tooling_artifact_collector_spec.spl`
-- `test/unit/app/llm_dashboard/collectors/tooling_artifact_collector_spec.spl`
+- `test/01_unit/app/llm_dashboard/collectors/tooling_artifact_collector_spec.spl`
 - `doc/06_spec/01_unit/app/llm_dashboard/collectors/tooling_artifact_collector_spec.md`
 - `src/app/web_dashboard/server.spl`
 - `test/03_system/feature/app/web_dashboard/web_dashboard_diagnostics_panel_spec.spl`
@@ -319,7 +319,7 @@ Evidence:
 - `simple check` passed for the collector, exports, and mirrored specs.
 - `test/01_unit/app/llm_dashboard/collectors/tooling_artifact_collector_spec.spl`
   passed with 4/4 scenarios.
-- `test/unit/app/llm_dashboard/collectors/tooling_artifact_collector_spec.spl`
+- `test/01_unit/app/llm_dashboard/collectors/tooling_artifact_collector_spec.spl`
   passed with 4/4 scenarios.
 - `test/03_system/feature/app/web_dashboard/web_dashboard_diagnostics_panel_spec.spl`
   passed with 6/6 scenarios, including configured/missing tooling panel

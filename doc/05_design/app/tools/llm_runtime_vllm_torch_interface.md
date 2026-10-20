@@ -254,7 +254,7 @@ Runtime-adjacent decision record:
 
 - `src/app/llm_runtime/live_environment.spl`
 - `test/01_unit/app/llm_runtime/vllm_live_environment_spec.spl`
-- `test/unit/app/llm_runtime/vllm_live_environment_spec.spl`
+- `test/01_unit/app/llm_runtime/vllm_live_environment_spec.spl`
 - `doc/06_spec/01_unit/app/llm_runtime/vllm_live_environment_spec.md`
 
 The live-environment evidence classifier records whether a host has observed

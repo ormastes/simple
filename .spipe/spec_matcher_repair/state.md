@@ -79,11 +79,11 @@ Verdicts are `examples/failures` per describe block, in block order.
 | test/01_unit/sffi/sffi_public_api_spec.spl | 1 | 2/0 ; 2/2 ; 2/2 ; 2/0 | 2/0 ; **2/0** ; 2/2 ; 2/2 ; 2/0 | +2, 5th block recovered |
 | test/unit/sffi/sffi_public_api_spec.spl | 1 | same | same | +2 |
 | test/01_unit/os/kernel/loader/elf64_spec.spl | 2 | 4/2 | 4/2 | 0 — blocked, see F1 |
-| test/unit/os/kernel/loader/elf64_spec.spl | 2 | 4/2 | 4/2 | 0 — F1 |
+| test/01_unit/os/kernel/loader/elf64_spec.spl | 2 | 4/2 | 4/2 | 0 — F1 |
 | test/unit/os/kernel/smp/smp_spec.spl | 1 | 4/4 ; 4/4 | 4/4 ; 4/4 | 0 — blocked, see F3 |
 | test/integration/os/port/llvm/per_target_build_spec.spl | 31 | 21/21 | 21/21 | 0 — blocked, see F2 |
 | test/integration/os/port/llvm/cross_build_plan_spec.spl | 15 | 14/14 | 14/14 | 0 — F2 |
-| test/integration/os/port/rust/smoke_rustc_spec.spl | 3 | 4/3 | 4/3 | 0 — F2 |
+| test/02_integration/os/port/rust/smoke_rustc_spec.spl | 3 | 4/3 | 4/3 | 0 — F2 |
 | test/02_integration/os/port/rust/smoke_rustc_spec.spl | 3 | 4/3 | 4/3 | 0 — F2 |
 | test/integration/os/port/llvm/smoke_clang_spec.spl | 5 | 5/0 | 5/0 | 0 (env-skipped) |
 | test/03_system/os/port/disk_boot_spec.spl | 4 | 5/0 | 5/0 | 0 (env-skipped) |
@@ -91,7 +91,7 @@ Verdicts are `examples/failures` per describe block, in block order.
 | test/03_system/os/port/e2e_qemu_smoke_spec.spl | 1 | 6/0 | 6/0 | 0 |
 | test/03_system/os/port/e2e_qemu_smoke_spec.spl | 1 | 6/0 | 6/0 | 0 |
 | test/01_unit/app/ui/display_detect_spec.spl | 1 | load error | load error | 0 — pre-existing, see F4 |
-| test/unit/app/ui/display_detect_spec.spl | 1 | load error | load error | 0 — F4 |
+| test/01_unit/app/ui/display_detect_spec.spl | 1 | load error | load error | 0 — F4 |
 
 **Not converted (deliberate):**
 

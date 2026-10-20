@@ -50,11 +50,11 @@ It does not include vLLM/Torch runtime implementation; that remains gated by
   - `test/01_unit/app/llm_dashboard/assistant_bridge_spec.spl`
   - `test/01_unit/app/llm_dashboard/assistant_bridge_spec.spl`
   - `test/01_unit/app/llm_dashboard/assistant_live_view_spec.spl`
-  - `test/unit/app/llm_dashboard/assistant_live_view_spec.spl`
+  - `test/01_unit/app/llm_dashboard/assistant_live_view_spec.spl`
   - `test/01_unit/app/llm_dashboard/assistant_import_spec.spl`
   - `test/01_unit/app/llm_dashboard/assistant_import_spec.spl`
   - `test/01_unit/app/llm_dashboard/assistant_digest_spec.spl`
-  - `test/unit/app/llm_dashboard/assistant_digest_spec.spl`
+  - `test/01_unit/app/llm_dashboard/assistant_digest_spec.spl`
   - `test/01_unit/app/llm_dashboard/jsonl_watcher_spec.spl`
   - `test/01_unit/app/llm_dashboard/jsonl_watcher_spec.spl`
 
@@ -72,7 +72,7 @@ It does not include vLLM/Torch runtime implementation; that remains gated by
    - `test/01_unit/app/mcp/assistant/session_store_spec.spl` and mirrored
      `test/01_unit/app/mcp/assistant/session_store_spec.spl` pass.
    - `test/01_unit/app/mcp/assistant/session_views_spec.spl` and mirrored
-     `test/unit/app/mcp/assistant/session_views_spec.spl` pass after fixing
+     `test/01_unit/app/mcp/assistant/session_views_spec.spl` pass after fixing
      timeline count inflation and numeric brief rendering.
    - Parsed JSON events with `"kind":"signal"` are normalized to persisted
      `"signal_event"` while preserving `signal`/wake reason fields; store and
@@ -95,7 +95,7 @@ It does not include vLLM/Torch runtime implementation; that remains gated by
      `signal_event` and visible through `collect_assistant_timeline`.
    - Evidence:
      - `test/01_unit/app/mcp_unit/assistant_surface_spec.spl` passes with 3/3.
-     - `test/unit/app/mcp_unit/assistant_surface_spec.spl` passes with 3/3.
+     - `test/01_unit/app/mcp_unit/assistant_surface_spec.spl` passes with 3/3.
      - `test/01_unit/app/mcp_unit/assistant_task_linking_spec.spl` passes.
      - `test/01_unit/app/mcp_unit/assistant_task_linking_spec.spl` passes.
      - `test/01_unit/app/mcp_unit/assistant_dashboard_e2e_spec.spl` and
@@ -116,7 +116,7 @@ It does not include vLLM/Torch runtime implementation; that remains gated by
      and keeps the dashboard shell linked to `/agents`.
    - Evidence:
      - `test/01_unit/app/llm_dashboard/assistant_live_view_spec.spl` passes.
-     - `test/unit/app/llm_dashboard/assistant_live_view_spec.spl` passes.
+     - `test/01_unit/app/llm_dashboard/assistant_live_view_spec.spl` passes.
      - `test/03_system/feature/app/web_dashboard/llm_agent_dashboard_spec.spl`
        passes with authenticated `/agents` readback, blank-session redirect,
        absence-safe output, and shell link coverage.
@@ -153,7 +153,7 @@ It does not include vLLM/Torch runtime implementation; that remains gated by
      - `test/01_unit/app/llm_dashboard/assistant_live_view_spec.spl` covers
        failed session/crash metadata, missing selected-session evidence, and
        stale bridge evidence.
-     - `test/unit/app/llm_dashboard/assistant_live_view_spec.spl` mirrors the
+     - `test/01_unit/app/llm_dashboard/assistant_live_view_spec.spl` mirrors the
        same coverage.
 6. Retention/backpressure:
    - `src/app/dashboard/assistant_retention.spl` adds dashboard-facing
@@ -163,7 +163,7 @@ It does not include vLLM/Torch runtime implementation; that remains gated by
      absence-safe `normal`/`backpressure` notice for operators.
    - Evidence:
      - `test/01_unit/app/llm_dashboard/assistant_retention_spec.spl` passes.
-     - `test/unit/app/llm_dashboard/assistant_retention_spec.spl` passes.
+     - `test/01_unit/app/llm_dashboard/assistant_retention_spec.spl` passes.
    - `src/app/mcp/assistant/session_store_part2.spl` now adds
      `assistant_store_prune_session_retention(...)`, a durable store-level
      retention pass that rewrites timeline and notification JSONL files to
@@ -192,7 +192,7 @@ It does not include vLLM/Torch runtime implementation; that remains gated by
      absence-safe for missing selected sessions.
    - Evidence:
      - `test/01_unit/app/llm_dashboard/assistant_digest_spec.spl` passes.
-     - `test/unit/app/llm_dashboard/assistant_digest_spec.spl` passes.
+     - `test/01_unit/app/llm_dashboard/assistant_digest_spec.spl` passes.
    - MCP store digest generation and durable multi-checkpoint pruning are
      covered by the session-store digest checkpoint scenario.
 8. Transcript JSONL watcher:
@@ -241,7 +241,7 @@ It does not include vLLM/Torch runtime implementation; that remains gated by
      - `test/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.spl`
        mirrors the same coverage.
      - `test/01_unit/app/llm_dashboard/ios_mode_spec.spl` and mirrored
-       `test/unit/app/llm_dashboard/ios_mode_spec.spl` pass after preserving the
+       `test/01_unit/app/llm_dashboard/ios_mode_spec.spl` pass after preserving the
        existing dashboard server constructor surface.
      - `test/03_system/feature/app/web_dashboard/vllm_control_route_spec.spl`
        passes and proves authenticated `/api/vllm/control` JSONL readback,
