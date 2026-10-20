@@ -13,14 +13,6 @@ fn _ehgc_u32(raw: [u8], off: i64) -> i64:
     (raw[off] as i64) | ((raw[off + 1] as i64) << 8) |
         ((raw[off + 2] as i64) << 16) | ((raw[off + 3] as i64) << 24)
 
-fn _ehgc_put_u32(raw: [u8], off: i64, value: i64) -> [u8]:
-    var out = raw
-    out[off] = (value & 0xff) as u8
-    out[off + 1] = ((value >> 8) & 0xff) as u8
-    out[off + 2] = ((value >> 16) & 0xff) as u8
-    out[off + 3] = ((value >> 24) & 0xff) as u8
-    out
-
 fn _ehgc_target_live(obj: ElfObject, reloc: ElfRelocation, oi: i64,
         live: [[bool]], res: SymResolution) -> bool:
     val sym_idx = elf_reloc_sym(reloc)
@@ -39,12 +31,24 @@ fn _ehgc_target_live(obj: ElfObject, reloc: ElfRelocation, oi: i64,
         target_sec < live[target_obj].len() and live[target_obj][target_sec]
 
 fn _ehgc_record_index(offsets: [i64], value: i64) -> i64:
-    var i: i64 = 0
-    while i < offsets.len():
-        if offsets[i] == value:
-            return i
-        i = i + 1
+    """Index of the record starting exactly at `value` (offsets ascend)."""
+    val at = _ehgc_record_containing(offsets, value)
+    if at >= 0 and offsets[at] == value: return at
     -1
+
+fn _ehgc_record_containing(offsets: [i64], value: i64) -> i64:
+    """Last record whose start is <= `value`, or -1 (binary search)."""
+    var lo: i64 = 0
+    var hi: i64 = offsets.len() - 1
+    var found: i64 = -1
+    while lo <= hi:
+        val mid = (lo + hi) / 2
+        if offsets[mid] <= value:
+            found = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    found
 
 fn _ehgc_transform_object(obj: ElfObject, oi: i64, live: [[bool]],
         res: SymResolution) -> ElfObject:
@@ -77,17 +81,20 @@ fn _ehgc_transform_object(obj: ElfObject, oi: i64, live: [[bool]],
         keep = keep.push(false)
         off = off + 4 + length
 
+    # One pass over the relocations: an FDE is live when its PC-begin field
+    # (record + 8) is relocated against a live section.
+    for reloc in obj.relocations:
+        if reloc.target_section_idx == eh_si:
+            val at = _ehgc_record_index(offsets, reloc.r_offset - 8)
+            if at >= 0 and cie_offsets[at] >= 0 and not keep[at] and
+                    _ehgc_target_live(obj, reloc, oi, live, res):
+                keep[at] = true
     var ri: i64 = 0
     while ri < offsets.len():
-        if cie_offsets[ri] >= 0:
-            for reloc in obj.relocations:
-                if reloc.target_section_idx == eh_si and reloc.r_offset == offsets[ri] + 8 and
-                        _ehgc_target_live(obj, reloc, oi, live, res):
-                    keep[ri] = true
-            if keep[ri]:
-                val ci = _ehgc_record_index(offsets, cie_offsets[ri])
-                if ci >= 0:
-                    keep[ci] = true
+        if keep[ri] and cie_offsets[ri] >= 0:
+            val ci = _ehgc_record_index(offsets, cie_offsets[ri])
+            if ci >= 0:
+                keep[ci] = true
         ri = ri + 1
 
     var new_offsets: [i64] = []
@@ -96,10 +103,7 @@ fn _ehgc_transform_object(obj: ElfObject, oi: i64, live: [[bool]],
     while ri < offsets.len():
         new_offsets = new_offsets.push(compact.len())
         if keep[ri]:
-            var bi: i64 = 0
-            while bi < sizes[ri]:
-                compact = compact.push(obj.raw[start + offsets[ri] + bi])
-                bi = bi + 1
+            compact.extend(obj.raw[start + offsets[ri]:start + offsets[ri] + sizes[ri]])
         ri = ri + 1
     compact = compact.push(0u8)
     compact = compact.push(0u8)
@@ -112,7 +116,11 @@ fn _ehgc_transform_object(obj: ElfObject, oi: i64, live: [[bool]],
             val ci = _ehgc_record_index(offsets, cie_offsets[ri])
             if ci >= 0:
                 val field = new_offsets[ri] + 4
-                compact = _ehgc_put_u32(compact, field, field - new_offsets[ci])
+                val pointer = field - new_offsets[ci]
+                compact[field] = (pointer & 0xff) as u8
+                compact[field + 1] = ((pointer >> 8) & 0xff) as u8
+                compact[field + 2] = ((pointer >> 16) & 0xff) as u8
+                compact[field + 3] = ((pointer >> 24) & 0xff) as u8
         ri = ri + 1
 
     var relocs: [ElfRelocation] = []
@@ -120,20 +128,15 @@ fn _ehgc_transform_object(obj: ElfObject, oi: i64, live: [[bool]],
         if reloc.target_section_idx != eh_si:
             relocs = relocs.push(reloc)
             continue
-        ri = 0
-        while ri < offsets.len():
-            if reloc.r_offset >= offsets[ri] and reloc.r_offset < offsets[ri] + sizes[ri]:
-                if keep[ri]:
-                    relocs = relocs.push(ElfRelocation(r_offset: new_offsets[ri] + reloc.r_offset - offsets[ri],
-                        r_info: reloc.r_info, r_addend: reloc.r_addend,
-                        section_idx: reloc.section_idx, target_section_idx: reloc.target_section_idx))
-                break
-            ri = ri + 1
+        ri = _ehgc_record_containing(offsets, reloc.r_offset)
+        if ri >= 0 and reloc.r_offset < offsets[ri] + sizes[ri] and keep[ri]:
+            relocs = relocs.push(ElfRelocation(r_offset: new_offsets[ri] + reloc.r_offset - offsets[ri],
+                r_info: reloc.r_info, r_addend: reloc.r_addend,
+                section_idx: reloc.section_idx, target_section_idx: reloc.target_section_idx))
 
     var raw = obj.raw
     val new_start = raw.len()
-    for byte in compact:
-        raw = raw.push(byte)
+    raw.extend(compact)
     var sections: [ElfSectionHeader] = []
     si = 0
     while si < obj.sections.len():
