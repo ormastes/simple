@@ -28,7 +28,7 @@ use compiler.driver.driver_source_loading.{
     _driver_resolve_source_root_entry_import_from_v1,
     driver_closure_file_from_selection_v1, driver_closure_native_owner_v1,
     driver_closure_import_specs_v1, driver_closure_synthetic_spec_v1,
-    driver_closure_parity_error_v1,
+    driver_closure_parity_error_v1, driver_closure_parity_exempt_v1,
     _driver_collect_entry_import_source,
     _driver_collect_explicit_compiler_source,
     _driver_collect_frozen_compiler_source_v1,
@@ -985,6 +985,9 @@ impl CompilerDriver:
             # seeds, excluding those reached only through synthetic ABI edges.
             var closure_parity_exempt = _driver_text_bucket_set_new(64)
             var closure_walk_added: [text] = []
+            # Spellings bound through an alias row, keyed to the importer
+            # directory whose (possibly sibling) binding registered them.
+            var closure_alias_dir: Dict<text, text> = {}
             var closure_idx = 0
             # A 64-file cadence is adequate for ordinary progress, but hides
             # the exact source that starts a tail stall.  Keep the normal
@@ -1063,7 +1066,10 @@ impl CompilerDriver:
                     closure_seen_mods[closure_seen_key] = true
                     val selected_source = _driver_resolve_source_root_entry_import_from_v1(
                         closure_mp_input, closure_source_roots, closure_dir)
-                    val loaded_path = closure_loaded_paths.get(closure_mp) ?? ""
+                    # An alias registered from ANOTHER directory is an
+                    # importer-relative binding, not this importer's owner.
+                    val alias_dir = closure_alias_dir.get(closure_mp) ?? ""
+                    val loaded_path = if alias_dir != "" and alias_dir != closure_dir: "" else: closure_loaded_paths.get(closure_mp) ?? ""
                     val owner_selection = match selected_source:
                         case SourceRootResolutionV1.Found(path):
                             SourceRootResolutionV1.Found(_driver_physical_source_key(path))
@@ -1107,7 +1113,7 @@ impl CompilerDriver:
                         continue
                     closure_file = driver_closure_native_owner_v1(closure_file, closure_mp, closure_dir)
                     val closure_edge_exempt = driver_closure_synthetic_spec_v1(closure_mp_input) or
-                        closure_parity_exempt.contains_key(_driver_physical_source_key(closure_src.path))
+                        driver_closure_parity_exempt_v1(closure_parity_exempt, closure_src.path)
                     # Dedup by physical file, never by spelling: a spelling
                     # already loaded from ANOTHER file still contributes this one.
                     var closure_name_collision = false
@@ -1154,6 +1160,9 @@ impl CompilerDriver:
                                 closure_parity_exempt[closure_physical_key] = true
                             else:
                                 closure_walk_added.push(cs.path)
+                        elif not closure_edge_exempt and closure_parity_exempt.contains_key(closure_physical_key):
+                            # An authored import also reaches it: the coordinator counts it.
+                            closure_parity_exempt[closure_physical_key] = false
                     if not closure_has_exact and not closure_name_collision:
                         # The path-derived module name differs from the import
                         # path (e.g. an entry-directory-relative import). Alias
@@ -1165,11 +1174,14 @@ impl CompilerDriver:
                             all_sources.append(SourceFile(path: closure_file, content: closure_content, module_name: closure_mp))
                             closure_loaded_mods[closure_mp] = true
                             closure_loaded_paths[closure_mp] = closure_file
+                            closure_alias_dir[closure_mp] = closure_dir
                 closure_idx = closure_idx + 1
             log_phase(
                 "phase1:load_sources:closure:done scanned={closure_idx} logical={all_sources.len()} added={closure_walk_added.len()}")
-            val closure_parity_reason = driver_closure_parity_error_v1(
-                closure_scan_sources, closure_parity_exempt, closure_walk_added)
+            # A group worker walks only its group's seeds: no coordinator parity.
+            val closure_parity_reason = if native_group_inputs.len() > 0: "" else:
+                driver_closure_parity_error_v1(
+                    closure_scan_sources, closure_parity_exempt, closure_walk_added)
             if closure_parity_reason != "":
                 self.ctx.add_error(closure_parity_reason)
                 log_phase(closure_parity_reason)
