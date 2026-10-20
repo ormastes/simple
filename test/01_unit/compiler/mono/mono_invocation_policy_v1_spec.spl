@@ -1,0 +1,154 @@
+# REQ-FV2-C1-SM: actual isolated canonical pass; source-authored, UNRUN.
+use std.spec.{describe, it, expect, fail}
+use std.spec.step
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_function_record_identity_v1.mono_complete_function_digest_v1
+use compiler.mono.monomorphize_integration.{MonomorphizationPass, mono_validate_completed_signatures_v1, mono_validate_function_signature_v1}
+use compiler.mono.mono_invocation_policy_v1.{MonoInvocationLimitsV1, MonoInvocationBudgetV1, mono_verification_limits_v1}
+
+fn mono_policy_fixture_v1(source: text) -> HirModule:
+    val parsed = parse_full_frontend(source, "mono_policy.spl", "mono_policy", Logger(level: 0))
+    var lowering = HirLowering.with_filename("mono_policy.spl")
+    val module = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    module
+
+describe "isolated canonical invocation policy":
+    it "rejects limits exceeding the fixed verification ceiling":
+        step("reject invalid caller bounds before constructing a pass")
+        val limits = MonoInvocationLimitsV1(max_specializations: 4097, max_work_units: 65536, max_hir_depth: 128)
+        match MonomorphizationPass.create_isolated_v1(limits):
+            case Ok(_): fail("accepted excessive specialization limit")
+            case Err(message): expect(message).to_contain("E-MONO-LIMIT")
+
+    it "retains a shared ledger failure and balances nested traversal":
+        step("exercise exact and exhausted shared work counters")
+        val limits = MonoInvocationLimitsV1(max_specializations: 1, max_work_units: 2, max_hir_depth: 2)
+        match MonoInvocationBudgetV1.create(limits):
+            case Err(message): fail(message)
+            case Ok(budget):
+                expect(budget.enter_v1()).to_equal(true)
+                expect(budget.enter_v1()).to_equal(true)
+                expect(budget.remaining_work).to_equal(0)
+                expect(budget.charge_v1(1)).to_equal(false)
+                budget.leave_v1()
+                budget.leave_v1()
+                expect(budget.hir_depth).to_equal(0)
+                expect(budget.charge_v1(0)).to_equal(false)
+                expect(budget.failure).to_contain("E-MONO-WORK")
+
+    it "creates one specialization for two actual requests":
+        step("drive the production worklist with repeated source calls")
+        val module = mono_policy_fixture_v1("fn identity<T>(value: T) -> T:\n    value\n\nfn caller() -> i64:\n    identity<i64>(identity<i64>(7))\n")
+        match MonomorphizationPass.create_isolated_v1(mono_verification_limits_v1()):
+            case Err(message): fail(message)
+            case Ok(isolated):
+                match isolated.process_modules_checked_v1({"mono_policy": module}):
+                    case Err(message): fail(message)
+                    case Ok(output):
+                        expect(output.stats.specializations_created).to_equal(1)
+                        expect(output.stats.unresolved_generic_calls).to_equal(0)
+                        expect(output.modules["mono_policy"].functions.len()).to_equal(2)
+                        expect(output.work_remaining).to_be_less_than(65536)
+
+    it "refuses a second specialization before publishing output":
+        step("exhaust the request cap through two concrete canonical types")
+        val module = mono_policy_fixture_v1("fn identity<T>(value: T) -> T:\n    value\n\nfn caller() -> i64:\n    val other = identity<bool>(true)\n    identity<i64>(7)\n")
+        val limits = MonoInvocationLimitsV1(max_specializations: 1, max_work_units: 65536, max_hir_depth: 128)
+        match MonomorphizationPass.create_isolated_v1(limits):
+            case Err(message): fail(message)
+            case Ok(isolated):
+                match isolated.process_modules_checked_v1({"mono_policy": module}):
+                    case Ok(_): fail("published output beyond specialization cap")
+                    case Err(message): expect(message).to_contain("E-MONO-SPECIALIZATIONS")
+
+    it "refuses reuse of an already consumed isolated pass":
+        step("do not reuse prior invocation output or specialization caches")
+        val module = mono_policy_fixture_v1("fn caller() -> i64:\n    7\n")
+        match MonomorphizationPass.create_isolated_v1(mono_verification_limits_v1()):
+            case Err(message): fail(message)
+            case Ok(isolated):
+                match isolated.process_modules_checked_v1({"mono_policy": module}):
+                    case Err(message): fail(message)
+                    case Ok(_): ()
+                match isolated.process_modules_checked_v1({"mono_policy": module}):
+                    case Ok(_): fail("reused an isolated invocation")
+                    case Err(message): expect(message).to_contain("E-MONO-INVOCATION")
+
+    it "validates actual completed declaration source paths and refuses a conflicting owner":
+        step("retain distinct logical module and source path through the isolated pass and real signature validator")
+        val input = mono_policy_fixture_v1("fn caller() -> i64:\n    7\n")
+        expect(input.name == input.path).to_equal(false)
+        val isolated = MonomorphizationPass.create_isolated_v1(mono_verification_limits_v1()).unwrap()
+        val completed = isolated.process_modules_checked_v1({input.name: input}).unwrap()
+        var module = completed.modules[input.name]
+        expect(mono_validate_completed_signatures_v1(module,
+            MonoInvocationBudgetV1.create(mono_verification_limits_v1()).unwrap()).is_ok()).to_equal(true)
+        val key = module.functions.keys()[0]
+        val function = module.functions[key]
+        var row = module.symbols.symbols[function.symbol.id]
+        expect(row.defining_module).to_equal(module.path)
+        row.defining_module = "conflicting_foreign_owner.spl"
+        module.symbols.symbols[function.symbol.id] = row
+        match mono_validate_completed_signatures_v1(module,
+                MonoInvocationBudgetV1.create(mono_verification_limits_v1()).unwrap()):
+            case Ok(_): fail("foreign owner accepted for an actual completed local declaration")
+            case Err(message): expect(message).to_contain("E-MONO-SIGNATURE")
+        row.defining_module = nil
+        module.symbols.symbols[function.symbol.id] = row
+        expect(mono_validate_completed_signatures_v1(module,
+            MonoInvocationBudgetV1.create(mono_verification_limits_v1()).unwrap()).is_ok()).to_equal(true)
+        match mono_validate_function_signature_v1(module.name, module.symbols, function,
+                MonoInvocationBudgetV1.create(mono_verification_limits_v1()).unwrap(),
+                require_owned_row: true):
+            case Ok(_): fail("specialization placement accepted an ownerless row")
+            case Err(message): expect(message).to_contain("specialized function owner absent")
+
+    it "stops a real expression collection before pushing the first failed child":
+        step("exhaust one shared work unit while rewriting three actual lowered literal expressions")
+        val module = mono_policy_fixture_v1("fn caller() -> i64:\n    7\n")
+        val function = module.functions[module.functions.keys()[0]]
+        expect(function.body.has).to_equal(true)
+        val value = function.body.value
+        val limits = MonoInvocationLimitsV1(max_specializations: 1, max_work_units: 1, max_hir_depth: 128)
+        val budget = MonoInvocationBudgetV1.create(limits).unwrap()
+        var isolated = MonomorphizationPass.create_isolated_v1(limits, budget).unwrap()
+        val rewritten = isolated.rewrite_exprs([value, value, value])
+        expect(rewritten.len()).to_equal(1)
+        expect(budget.failure).to_contain("E-MONO-WORK")
+        expect(budget.remaining_work).to_equal(0)
+        expect(budget.hir_depth).to_equal(0)
+        expect(isolated.rewrite_exprs([value, value]).len()).to_equal(0)
+        var ordinary = MonomorphizationPass.create()
+        expect(ordinary.rewrite_exprs([value, value, value]).len()).to_equal(3)
+        val exact_limits = MonoInvocationLimitsV1(max_specializations: 1, max_work_units: 3, max_hir_depth: 128)
+        val exact_budget = MonoInvocationBudgetV1.create(exact_limits).unwrap()
+        var exact = MonomorphizationPass.create_isolated_v1(exact_limits, exact_budget).unwrap()
+        expect(exact.rewrite_exprs([value, value, value]).len()).to_equal(3)
+        expect(exact_budget.failure).to_equal("")
+        expect(exact_budget.remaining_work).to_equal(0)
+        expect(exact_budget.hir_depth).to_equal(0)
+
+    it "stops retained-default parameter rebuilding when its first child exhausts the ledger":
+        step("invoke actual rewrite_function with two lowered default parameters and insufficient first-default work")
+        val module = mono_policy_fixture_v1("fn choose(first: i64 = 7, second: i64 = 9) -> i64:\n    first\n")
+        val function = module.functions[module.functions.keys()[0]]
+        expect(function.params.len()).to_equal(2)
+        expect(function.params[0].has_default).to_equal(true)
+        val before = mono_complete_function_digest_v1(function)
+        val limits = MonoInvocationLimitsV1(max_specializations: 1, max_work_units: 2, max_hir_depth: 128)
+        val budget = MonoInvocationBudgetV1.create(limits).unwrap()
+        var isolated = MonomorphizationPass.create_isolated_v1(limits, budget).unwrap()
+        val result = isolated.rewrite_function(function)
+        expect(budget.failure).to_contain("E-MONO-WORK")
+        expect(budget.hir_depth).to_equal(0)
+        expect(budget.remaining_work).to_equal(0)
+        expect(result.params.len()).to_equal(2)
+        expect(mono_complete_function_digest_v1(result)).to_equal(before)
+        expect(mono_complete_function_digest_v1(function)).to_equal(before)
+        expect(isolated.env.len()).to_equal(0)
+        expect(isolated.stats.specializations_created).to_equal(0)

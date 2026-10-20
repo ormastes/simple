@@ -5,6 +5,7 @@ use compiler.hir.hir_codec_support.{HirCodecWriter}
 use compiler.hir.generated.hir_codec.{hc_enc_hir_type, hc_enc_hir_type_param, hc_enc_effect}
 use compiler.monomorphize.type_subst.{canonicalize_template, substitute_type, substitute_effects, typesubstitution_from_params, typesubstitution_canonical}
 use std.common.crypto.sha256.{sha256_text}
+use compiler.mono.mono_invocation_policy_v1.MonoInvocationBudgetV1
 
 enum MonoTemplateBodyModeV1:
     Retained
@@ -89,13 +90,17 @@ fn mono_archive_put_type_v1(writer: HirCodecWriter, type_: HirType):
     writer.put_bool(type_ != nil)
     if type_ != nil: hc_enc_hir_type(writer, type_)
 
-fn mono_apply_template_recipe_v1(original: HirFunction, recipe: MonoTemplateRecipeV1) -> HirFunction:
+fn mono_apply_template_recipe_v1(original: HirFunction, recipe: MonoTemplateRecipeV1,
+    include_retained_defaults: bool = false, budget: MonoInvocationBudgetV1? = nil) -> HirFunction:
+    if val ledger = budget:
+        if not ledger.charge_v1(1): return nil
     var template = original
     template.type_params = recipe.canonical_type_params
     if recipe.inherent_method:
         template.name = recipe.template_name
         template.is_method = false
-    var canonical = canonicalize_template(template)
+    var canonical = canonicalize_template(template, include_retained_defaults, budget)
+    if canonical == nil: return nil
     canonical.type_params = recipe.bound_type_params
     canonical
 

@@ -12,6 +12,9 @@ use compiler.frontend.parser_types.{ParserModule}
 use compiler.core.parser.{parser_has_errors, parser_get_errors}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
+use compiler.mono.mono_invocation_policy_v1.{MonoInvocationLimitsV1, mono_verification_limits_v1,
+    mono_invocation_limits_valid_v1}
+use compiler.tools.verify.source_calls_monomorphization_v1.{source_calls_monomorphize_v1}
 use compiler.mir.verification_call_lowering_v1.{ResolvedCallLoweringV1,
     lower_module_with_resolved_calls_for_target_v1}
 
@@ -19,6 +22,10 @@ pub struct SourceResolvedCallsV1:
     source_digest: text
     cfg_receipt: FrontendCfgDecisionReceiptV1
     lowered: ResolvedCallLoweringV1
+    mono_input_hir_digest: text
+    mono_output_hir_digest: text
+    mono_specializations: i64
+    mono_work_remaining: i64
 
 fn source_calls_target_v1(target: text) -> Result<MirTargetContext, text>:
     for character in target.chars():
@@ -44,7 +51,13 @@ pub fn source_calls_transform_error_v1(parsed: ParserModule) -> text:
 
 pub fn source_calls_from_source_v1(source: text, path: text, target: text
 ) -> Result<SourceResolvedCallsV1, text>:
+    source_calls_from_source_bounded_v1(source, path, target, mono_verification_limits_v1())
+
+pub fn source_calls_from_source_bounded_v1(source: text, path: text, target: text,
+    limits: MonoInvocationLimitsV1) -> Result<SourceResolvedCallsV1, text>:
     val context = source_calls_target_v1(target)?
+    if not mono_invocation_limits_valid_v1(limits):
+        return Err("SOURCE-CALLS-E-MONO: E-MONO-LIMIT: invalid invocation limits")
     if path.trim() == "":
         return Err("SOURCE-CALLS-E-FILE: a nonempty source path is required")
     val digest = sha256_text(source)
@@ -60,9 +73,13 @@ pub fn source_calls_from_source_v1(source: text, path: text, target: text
     val hir = lowering.lower_module(parsed.0)
     if lowering.errors.len() > 0:
         return Err("SOURCE-CALLS-E-HIR: " + lowering.diagnostic_messages.join("; "))
-    val lowered = lower_module_with_resolved_calls_for_target_v1(hir, context)?
+    val specialized = source_calls_monomorphize_v1(hir, limits)?
+    val lowered = lower_module_with_resolved_calls_for_target_v1(specialized.module, context)?
     Ok(SourceResolvedCallsV1(source_digest: digest, cfg_receipt: parsed.1,
-        lowered: lowered))
+        lowered: lowered, mono_input_hir_digest: specialized.input_hir_digest,
+        mono_output_hir_digest: specialized.output_hir_digest,
+        mono_specializations: specialized.stats.specializations_created,
+        mono_work_remaining: specialized.work_remaining))
 
 pub fn source_calls_inventory_v1(result: SourceResolvedCallsV1) -> text:
     val cfg = result.cfg_receipt
@@ -70,7 +87,7 @@ pub fn source_calls_inventory_v1(result: SourceResolvedCallsV1) -> text:
     # Only fixed keys, hashes, validated target fields, and counts are printed;
     # source paths and source text cannot inject inventory rows.
     [
-        "schema=SourceResolvedCalls-v1",
+        "schema=SourceResolvedCalls-v2",
         "formal_status=NOT_CHECKED",
         "source_hash=" + result.source_digest,
         "target=" + cfg.target_triple,
@@ -79,7 +96,10 @@ pub fn source_calls_inventory_v1(result: SourceResolvedCallsV1) -> text:
         "mir_hash=" + calls.module_hash,
         "resolver_receipt_hash=" + calls.resolver_receipt_hash,
         "manifest_hash=" + calls.hash(),
-        "binding_count=" + calls.bindings.len().to_string()
+        "binding_count=" + calls.bindings.len().to_string(),
+        "mono_input_hir_hash=" + result.mono_input_hir_digest,
+        "mono_output_hir_hash=" + result.mono_output_hir_digest,
+        "mono_specializations=" + result.mono_specializations.to_string()
     ].join("\n")
 
 pub fn source_calls_command_v1(args: [text]) -> Result<text, text>:
