@@ -6,7 +6,7 @@
 **Evidence snapshot:** `c8b4a86ab6876ecb825b4ea42b2c01d388b23a95`  
 **Status:** Proposed implementation plan consolidating the conversation. No source changes, database migration, compiler execution, or new proof completion is claimed by this document.
 
-> **2026-10-20 correction (sigils).** An earlier draft of this plan read `&T`/`&mut T` as short borrows and `*T` as a raw pointer. The language design doc `doc/05_design/language/misc/memory.md` ("memory.md") is authoritative and says otherwise: `&T` is the owning **unique** pointer (Single owner, "Move-only (no implicit copy)"), `*T` is the **reference-counted shared** pointer, `-T` is **weak**, and the owner types are built with `new&` / `new*`. Sections 1.1, 3 and 10 are rewritten accordingly (see 3.0). The plan's principles are unchanged: unique default, explicit sharing, short non-escaping borrows, never widened, nil only in unsafe. Where memory.md is silent (borrow spelling, `&mut`, ownership conversions) this plan states a **proposal**, marked as such, for the user to confirm.
+> **2026-10-20 correction (sigils).** An earlier draft of this plan read `&T`/`&mut T` as short borrows and `*T` as a raw pointer. The language design doc `doc/05_design/language/misc/memory.md` ("memory.md") is authoritative and says otherwise: `&T` is the owning **unique** pointer (Single owner, "Move-only (no implicit copy)"), `*T` is the **reference-counted shared** pointer, `-T` is **weak**, and the owner types are built with `new*` for shared and, per the user, `new&` for unique (memory.md itself writes `new(&)`; see 3.0). Sections 1.1, 3 and 10 are rewritten accordingly (see 3.0). The plan's principles are unchanged: unique default, explicit sharing, short non-escaping borrows, never widened, nil only in unsafe. Where memory.md is silent (borrow spelling, `&mut`, ownership conversions) this plan states a **proposal**, marked as such, for the user to confirm.
 
 > **Primary decision:** Restore and consistently enforce Simple's intended **no-GC, unique-owning-pointer default with strictly short, inferred borrowing**. Do not solve implementation defects by extending borrowing to longer ranges, adding general lifetime parameters, silently introducing reference counting, or enabling tracing garbage collection.
 >
@@ -132,7 +132,7 @@ Quoted from memory.md ("Pointer Types" and "Manual Domain"):
 | `*T` | "Shared (Rc) ... Ref-counted"; "Read-only in safe code"; "COW for updates (returns new `*T`)" | The explicit shared owner. Never created implicitly. Not a raw pointer. |
 | `-T` | "Weak ... Non-owning"; "Must upgrade before use"; "Returns `Option<*T>`" | Cycle breaker for `*T` (section 4). |
 | `new&` / `new*` | memory.md writes `new(&) Data(42)` and `new* Data(42)` | The user confirmed the spelling `new&` / `new*`; memory.md's `new(&)` example is a spelling to reconcile (open question). |
-| no sigil | "No-GC mode: `T` resolves to `&T`" | The no-GC default is the unique owner. |
+| no sigil | "No-GC mode: `T` resolves to `&T` (unique borrowed reference)" | The no-GC default is the unique owner. memory.md's phrase "borrowed" is ambiguous (its Rule 3 also applies borrow language to `&T`); this plan reads `&T` as the owner and treats the wording as an open question. |
 
 **Borrows.** memory.md has no borrow sigil. Its Rule 3 says "No Escaping Borrows" (a returned unique local is an error; `move local` is the fix) and Rule 4 says `mut` means "Exclusive access", `Data` parameters mean "Shared access". So in this plan a short borrow is a **parameter effect**, not a pointer type: `read-short` is the default for a plain `T` parameter and `mutate-short` is the `mut T` parameter capability memory.md already defines. A call such as `f(owner)` lends the unique owner for the call and returns it. This keeps the plan's rule that a borrow is never stored, returned, captured by an escaping closure, held across `await`/`yield`, or widened. A separate design, `doc/05_design/language/type_checking/borrowing_and_type_inference.md`, spells scoped borrows as `with x:` / `with mu x:`; that is not memory.md and is cited only as an existing option.
 
@@ -146,6 +146,7 @@ Quoted from memory.md ("Pointer Types" and "Manual Domain"):
 | `*T` shared | `&T` unique | **Forbidden**, including implicit conversion. Only `clone_unique` of the payload (an explicit copy) or a checked `try_unwrap` that succeeds at count 1 and returns `Option` (proposal). |
 | `*T` | `-T` | `weak_of(shared)`, explicit (memory.md). |
 | `-T` | `*T` | `upgrade()` returning `Option<*T>` (memory.md). |
+| `&T` | `&T` copy | `unique.clone()`, explicit (memory.md Rule 2). |
 | GC value | `&T` / `*T` | `clone_unique` / `clone_shared` (memory.md). |
 | `&T` | GC value | `into_gc(move owner)` (memory.md). |
 

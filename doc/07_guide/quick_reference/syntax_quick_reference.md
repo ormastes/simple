@@ -78,7 +78,7 @@ var count: i64 = 0
 
 ## Ownership Capabilities (`iso`/`mut`)
 
-**Pointer sigils (source: `doc/05_design/language/misc/memory.md`).** `&T` is the owning UNIQUE pointer (single owner, move-only; the no-GC default for a bare `T`), `*T` is the ref-counted SHARED pointer, `-T` is weak; construct with `new&` / `new*`. Unique to shared is explicit (consuming move); shared to unique is forbidden. memory.md defines no borrow sigil and does not define `&mut` (proposal: use `mut T` parameters for short exclusive borrows). Like `iso`/`mut` below, none of this is enforced through `bin/simple` today.
+**Pointer sigils (source: `doc/05_design/language/misc/memory.md`).** `&T` is the owning UNIQUE pointer (single owner, move-only; the no-GC default for a bare `T`), `*T` is the ref-counted SHARED pointer, `-T` is weak; construct with `new*` (shared) and `new&` (unique, as the user states; memory.md writes `new(&)`). Proposal, not in memory.md: unique to shared is explicit (consuming move); shared to unique is forbidden. memory.md defines no borrow sigil and does not define `&mut` (proposal: use `mut T` parameters for short exclusive borrows). Like `iso`/`mut` below, none of this is enforced through `bin/simple` today.
 
 ```simple
 val x: iso i64 = 5   # isolated / move-only capability
