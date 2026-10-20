@@ -57,3 +57,52 @@ segments. Two gaps are still open:
 - **Long term:** the shifted (`addr << 3`) closure word comes from seed
   codegen. If codegen always emits the direct-function record, which carries
   an explicit marker, the ceiling heuristic can be deleted.
+
+## Update 2026-10-20: nil only in unsafe (work/nil-only-unsafe)
+
+Language rule: `nil` may be used only inside `unsafe`. Safe code spells
+absence `None`. MIR now also rejects nil in a declared optional (`T?`) payload
+slot outside an `unsafe:` / `danger:` block:
+
+```
+enum construction 'E.V': payload type mismatch at N: nil outside unsafe into
+optional payload slot (declared 'T?'); use None
+```
+
+`None` is accepted there. Inside `unsafe:` nil is accepted into a `T?` slot
+only; nil into a non-optional slot stays rejected inside unsafe too. Only
+block-level unsafe counts: `@unsafe` on a fn is parser metadata
+(`UNSAFE_ANNOTATIONS`) and never reaches HIR/MIR.
+
+Representation: natively, `None` lowers to `rt_enum_new(OPTION, 1, 0)`, a heap
+object, while `nil` is the word 3. `rt_is_none` treats both as absent, but
+`rt_native_eq(None, nil)` returns 0. The seed interpreter treats them as
+equal. So builtin `None` in an enum payload slot now lowers to the same nil
+word: in declared `T?` slots, and in untyped constructions of a non-generic
+owner. Generic owners keep the Option object. That keeps the 219 converted
+sites identical on the native lane. Converting nil to
+None in struct fields or plain variables is NOT representation-preserving yet.
+
+### Still open: the non-optional sites
+
+The Fix above (`type_: HirType?`, `key_type: HirType?`) does not work as
+written: MIR rejects a bare `T` value in a `T?` payload slot (measured:
+`OS.V(x)` with `x: Node` -> "payload type mismatch at 0"). Every annotated
+`HirStmtKind.Let(sym, t, init)` would then need `Some(t)`, and that box is the
+measured native SIGSEGV recorded at `statements.spl:580-600`.
+
+Sites, all already rejected by #3931 and untouched by this change:
+
+| Slot | Sites |
+|---|---|
+| `HirStmtKind.Let.type_: HirType` | `20.hir/hir_lowering/statements.spl:343,376,449,488,528,839`, `_Expressions/match_desugaring.spl:34,460,947` (`module_lowering.spl:3764` passes a nil-valued variable, not a `nil` literal, so MIR does not see it) |
+| `HirStmtKind.Assign.op: HirAssignOp` (missed above) | `statements.spl:98,479` |
+| `HirExprKind.DictLit.key_type: HirType` | `_Expressions/expression_core.spl:818` |
+| `IntroducedSymbol.Variable` (src/app, not compiler closure) | `src/app/dap/protocol.spl:174` |
+
+Candidate fix that needs neither nil nor a box (owner decision): an
+`HirTypeKind.Infer` sentinel for an unannotated `Let.type_` / unannotated
+`DictLit.key_type` (the flat AST already uses a present Infer type for "no
+annotation", `statements.spl:574`), and a plain-assign variant for
+`HirAssignOp`. Every reader that tests `type_ != nil` / `?? fallback` must
+switch to the sentinel test in the same change.

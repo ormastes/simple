@@ -1,0 +1,113 @@
+# Purpose and audience: compiler engineers who own enum declaration parsing and
+# HIR enum lowering.
+# @req REQ-SSPEC-COMPILER
+"""
+# Positional enum payload spellings that keep their type today
+
+Prevention sibling of `positional_payload_brace_dict_spec.spl`
+(bug positional_brace_dict_payload_parsed_as_struct_field_2026-10-20). That
+bug read `IndexMap({text: i64})` as a named field. The same variant payload
+parser handles several other non-bare spellings; these work today and must
+keep working while the brace/tuple/function spellings are fixed:
+
+- `Dict<text, i64>` (the workaround spelling used by `HirPhaseMemoRoot`),
+- `[i64]`,
+- `i64?`,
+- and the named form `N(label: text)`, which declares one named slot.
+
+Each example asserts the slot count and the slot type, so a regression
+that turns a positional slot into a named one, or drops its type, fails.
+The phase-2 producer (producer8, 2026-10-20) builds a module constructing
+every one of these variants without a MIR payload mismatch.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:hir
+# @tag:enum_payload
+
+use std.spec.{describe, it, expect, step, fail}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.core.parser.{parser_has_errors}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind}
+use compiler.hir.hir_definitions.{HirEnum, HirVariant, HirVariantKind}
+
+fn spelling_kind_name(t: HirType) -> text:
+    # Binding patterns only (see seed_built_producer_literal_payload_pattern_never_matches_2026_10_20).
+    match t.kind:
+        case HirTypeKind.Int(bits, signed):
+            if signed:
+                return "i{bits}"
+            "u{bits}"
+        case HirTypeKind.Str: "text"
+        case HirTypeKind.Dict(k, v): "dict<" + spelling_kind_name(k) + "," + spelling_kind_name(v) + ">"
+        case HirTypeKind.Array(element, _): "array<" + spelling_kind_name(element) + ">"
+        case HirTypeKind.Optional(inner): "optional<" + spelling_kind_name(inner) + ">"
+        case _: "other"
+
+val spelling_src = "enum P:\n" +
+    "    D(Dict<text, i64>)\n" +
+    "    A([i64])\n" +
+    "    O(i64?)\n" +
+    "    N(label: text)\n" +
+    "    U\n"
+
+fn spelling_variant(variant: text) -> HirVariant:
+    val parsed = parse_full_frontend(spelling_src, "spelling_payload.spl", "spelling_payload", Logger(level: 0))
+    expect(parser_has_errors()).to_equal(false)
+    var lowering = HirLowering.with_filename("spelling_payload.spl")
+    val hir: HirModule = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    for en in hir.enums.values():
+        for v in en.variants:
+            if v.name == variant:
+                return v
+    fail("missing lowered variant " + variant)
+    nil
+
+fn spelling_positional(variant: text) -> [text]:
+    var out: [text] = []
+    match spelling_variant(variant).kind:
+        case HirVariantKind.Tuple(types):
+            for t in types:
+                out.push(spelling_kind_name(t))
+        case HirVariantKind.Struct(fields):
+            for f in fields:
+                out.push("named:" + f.name)
+        case _: out.push("unit")
+    out
+
+describe "positional enum payload spellings":
+    it "keeps Dict<text, i64> as one positional dict slot":
+        step("The HirPhaseMemoRoot workaround spelling")
+        expect(spelling_positional("D")).to_equal(["dict<text,i64>"])
+
+    it "keeps [i64] as one positional array slot":
+        expect(spelling_positional("A")).to_equal(["array<i64>"])
+
+    it "keeps i64? as one positional optional slot":
+        expect(spelling_positional("O")).to_equal(["optional<i64>"])
+
+    it "keeps the named form as exactly one slot carrying its type":
+        step("Contrast: only `V(name: T)` declares a named slot")
+        val v = spelling_variant("N")
+        var slots = 0
+        var slot_type = ""
+        match v.kind:
+            case HirVariantKind.Tuple(types):
+                slots = types.len()
+                if slots == 1:
+                    slot_type = spelling_kind_name(types[0])
+            case HirVariantKind.Struct(fields):
+                slots = fields.len()
+                if slots == 1:
+                    slot_type = spelling_kind_name(fields[0].type_)
+            case _: slots = 0
+        expect(slots).to_equal(1)
+        expect(slot_type).to_equal("text")
+
+    it "keeps a unit variant without slots":
+        expect(spelling_positional("U")).to_equal(["unit"])

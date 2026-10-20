@@ -21,3 +21,10 @@
   class if it stays unused.
 - Related: the class-header form itself should either be rejected by the parser/HIR or lowered
   to a real impl; today it is silently accepted.
+
+## Specs (2026-10-20)
+- Reproducer + prevention (in-development): `test/01_unit/compiler/20.hir/bootstrap_regressions/class_header_trait_impl_spec.spl`.
+- Reproduced with producer8 (`compile --format=smf`): `class X(T):` + `impl X:` + `use_t(X(v: 1))` ->
+  `missing native trait implementation: ...::T for ...::X`. Also: `class X(NoSuchTrait):` compiles with
+  no diagnostic at all, so the header form is accepted silently for unknown traits too. Control
+  `impl T for X:` compiles clean.
