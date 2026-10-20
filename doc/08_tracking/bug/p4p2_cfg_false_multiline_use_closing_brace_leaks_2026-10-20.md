@@ -1,7 +1,7 @@
 # False @cfg on a multi-line `use m.{` leaks its column-0 closing brace into the parse
 
 - **Date:** 2026-10-20
-- **Status:** open — tagged source workaround active; root fix on branch `work/p4p2-cfg-multiline-use-closer`
+- **Status:** open — tagged source workaround active (the deployed phase-2 producer predates the fix). Root fix MERGED in PR #3932 (`e82781c9304`); retire the workaround once a producer built from it is deployed.
 - **Found by:** p4-phase2 lane (Phase-4 tools built by the Phase-2 compiler, producer7 `87b9c74ff39`)
 - **Source tree:** origin/release_phase3 `97aa8eb9e1f`
 - **Producer identities:** `producer7-20261020/strict/simple-producer7-strict.exe`

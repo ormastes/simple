@@ -1,7 +1,7 @@
 # False-@cfg skip swallows the NEXT declaration when its header is multi-line
 
 - **Date:** 2026-10-20
-- **Status:** open. A tagged source workaround is active. The root fix is in PR #3932, branch `work/p4p2-cfg-multiline-use-closer`, as a second commit.
+- **Status:** open — tagged source workaround active (the deployed phase-2 producer predates the fix). Root fix MERGED in PR #3932 (`e82781c9304`); retire the workaround once a producer built from it is deployed.
 - **Found by:** p4-phase2 lane (producer7 `87b9c74ff39`, source origin/release_phase3 `97aa8eb9e1f`)
 
 ## Failure
