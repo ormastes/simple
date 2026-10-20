@@ -1426,6 +1426,164 @@ impl MirLowering:
                     ()
         -1
 
+    fn binop_struct_name_is_enum(name: text) -> bool:
+        """A struct_value_syms owner that names an enum declaration (enum
+        values share the Struct MIR kind) and no struct/class layout."""
+        if name == "":
+            return false
+        if self.struct_field_order.has(self.declared_struct_layout_key(name)):
+            return false
+        self.enum_variant_index_q.has(name) or self.enum_variant_index.contains(name)
+
+    me emit_runtime_word_eq(left: LocalId, right: LocalId) -> LocalId:
+        """rt_native_eq(left, right) == 1 as a Bool local: the runtime's
+        tag-aware structural equality (strings by content, arrays/enums
+        element-/payload-wise), identity for any other word."""
+        val eq_func = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_native_eq"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        var b = self.builder
+        val raw = b.emit_call(eq_func, [mir_operand_copy(left), mir_operand_copy(right)], MirType.i64()) ?? LocalId(id: 0)
+        val result = b.emit_binop(MirBinOp.Eq, mir_operand_copy(raw), mir_operand_const_int(1), MirType.bool())
+        self.builder = b
+        result
+
+    me emit_text_word_eq(left: LocalId, right: LocalId) -> LocalId:
+        """Text content equality (raw or tagged operands), as a Bool local."""
+        val eq_func = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_text_eq_any"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        var b = self.builder
+        val raw = b.emit_call(eq_func, [mir_operand_copy(left), mir_operand_copy(right)], MirType.i64()) ?? LocalId(id: 0)
+        val result = b.emit_binop(MirBinOp.Eq, mir_operand_copy(raw), mir_operand_const_int(1), MirType.bool())
+        self.builder = b
+        result
+
+    me struct_structural_eq_supported(struct_name: text) -> bool:
+        """Whether lower_struct_structural_eq can compare every field of
+        `struct_name` (recursively): a known layout and no erased native
+        trait-object field."""
+        val layout_key = self.declared_struct_layout_key(struct_name)
+        if not self.struct_field_order.has(layout_key):
+            return false
+        val declared_field_types = self.struct_field_hir_type.get(layout_key) ?? []
+        for declared in declared_field_types:
+            if self.native_trait_value_type(declared):
+                return false
+        true
+
+    me lower_struct_structural_eq(left: LocalId, right: LocalId, struct_name: text, chain: [text]) -> LocalId:
+        """`==` for a struct/class value with no user `__eq__`.
+
+        Language semantics are structural: the interpreter compares
+        `Value::Object` by class and fields (compiler_rust value_pointers.rs
+        `impl PartialEq for Value`) and the seed's native runtime does the
+        same for RuntimeObject (runtime equality.rs `object_eq`). Native
+        self-hosted structs are raw aggregate pointers the runtime cannot
+        inspect, so compare field by field here: a nested value struct
+        recurses, text uses rt_text_eq_any, plain scalars compare raw, and
+        every other field (enum, Option, array, dict, tuple, type parameter)
+        uses rt_native_eq, the same runtime equality enum `==` uses. A null or
+        nil operand compares by word identity. A layout already on `chain`
+        (a recursive class) is compared by identity. Returns a Bool local."""
+        val layout_key = self.declared_struct_layout_key(struct_name)
+        val nil_word = self.lower_expr(HirExpr(kind: HirExprKind.NilLit,
+            has_type_: false, type_: nil, span: Span.empty()))
+        var gb = self.builder
+        val result_slot = gb.emit_entry_alloc(MirType.bool())
+        val left_word = gb.emit_bitcast(mir_operand_copy(left), MirType.i64())
+        val right_word = gb.emit_bitcast(mir_operand_copy(right), MirType.i64())
+        val same_word = gb.emit_binop(MirBinOp.Eq, mir_operand_copy(left_word), mir_operand_copy(right_word), MirType.bool())
+        gb.emit_store(mir_operand_copy(result_slot), mir_operand_copy(same_word))
+        val zero_word = gb.new_temp(MirType.i64())
+        gb.emit_const(zero_word, MirConstValue.Zero, MirType.i64())
+        val left_non_null = gb.emit_binop(MirBinOp.Ne, mir_operand_copy(left_word), mir_operand_copy(zero_word), MirType.bool())
+        val left_non_nil = gb.emit_binop(MirBinOp.Ne, mir_operand_copy(left_word), mir_operand_copy(nil_word), MirType.bool())
+        val right_non_null = gb.emit_binop(MirBinOp.Ne, mir_operand_copy(right_word), mir_operand_copy(zero_word), MirType.bool())
+        val right_non_nil = gb.emit_binop(MirBinOp.Ne, mir_operand_copy(right_word), mir_operand_copy(nil_word), MirType.bool())
+        val left_present = gb.emit_binop(MirBinOp.BitAnd, mir_operand_copy(left_non_null), mir_operand_copy(left_non_nil), MirType.bool())
+        val right_present = gb.emit_binop(MirBinOp.BitAnd, mir_operand_copy(right_non_null), mir_operand_copy(right_non_nil), MirType.bool())
+        val both_present = gb.emit_binop(MirBinOp.BitAnd, mir_operand_copy(left_present), mir_operand_copy(right_present), MirType.bool())
+        val compare_block = gb.new_block(Some("structeq_fields"))
+        val merge_block = gb.new_block(Some("structeq_merge"))
+        gb.terminate_if(mir_operand_copy(both_present), compare_block, merge_block)
+        gb.switch_to_block(compare_block)
+        self.builder = gb
+
+        val field_names = self.struct_field_order.get(layout_key) ?? []
+        val nested_names = self.struct_field_type_name.get(layout_key) ?? []
+        val declared_field_types = self.struct_field_hir_type.get(layout_key) ?? []
+        val repr_names = self.struct_field_repr_name.get(layout_key) ?? []
+        var ab = self.builder
+        var all_equal = ab.new_temp(MirType.bool())
+        ab.emit_const(all_equal, MirConstValue.Bool(true), MirType.bool())
+        self.builder = ab
+        var fi = 0
+        while fi < field_names.len():
+            var nested_name = ""
+            if fi < nested_names.len():
+                nested_name = nested_names[fi]
+            var nested_symbol = SymbolId(id: -1)
+            var compare_nested = false
+            if nested_name != "" and not chain.contains(nested_name) and self.struct_field_order.contains(nested_name):
+                val nested_lookup = self.symbols.lookup_or_invalid(nested_name)
+                if nested_lookup.is_valid():
+                    nested_symbol = self.canonical_mir_type_symbol(nested_lookup)
+                    compare_nested = self.struct_structural_eq_supported(nested_name)
+            # 0 = runtime word, 1 = text, 2 = raw scalar, 3 = nested record
+            var field_mode = 0
+            var field_type = MirType.i64()
+            if compare_nested:
+                field_mode = 3
+                field_type = MirType(kind: MirTypeKind.Struct(nested_symbol))
+            elif fi < declared_field_types.len():
+                val declared = declared_field_types[fi]
+                match declared.kind:
+                    case HirTypeKind.Str:
+                        field_mode = 1
+                        field_type = MirType(kind: MirTypeKind.Opaque("str"))
+                    case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char:
+                        field_mode = 2
+                        field_type = self.lower_type(declared)
+                    case _: ()
+            elif fi < repr_names.len() and repr_names[fi] == "str":
+                field_mode = 1
+                field_type = MirType(kind: MirTypeKind.Opaque("str"))
+            var fb = self.builder
+            val left_field = fb.emit_get_field(mir_operand_copy(left), fi, field_type)
+            val right_field = fb.emit_get_field(mir_operand_copy(right), fi, field_type)
+            self.builder = fb
+            var field_equal = LocalId(id: 0)
+            if field_mode == 3:
+                var nested_chain: [text] = []
+                for seen in chain:
+                    nested_chain.push(seen)
+                nested_chain.push(nested_name)
+                self.struct_value_syms[left_field.id] = nested_name
+                self.struct_value_syms[right_field.id] = nested_name
+                field_equal = self.lower_struct_structural_eq(left_field, right_field, nested_name, nested_chain)
+            elif field_mode == 1:
+                field_equal = self.emit_text_word_eq(left_field, right_field)
+            elif field_mode == 2:
+                var sb = self.builder
+                field_equal = sb.emit_binop(MirBinOp.Eq, mir_operand_copy(left_field), mir_operand_copy(right_field), MirType.bool())
+                self.builder = sb
+            else:
+                field_equal = self.emit_runtime_word_eq(left_field, right_field)
+            var cb = self.builder
+            all_equal = cb.emit_binop(MirBinOp.BitAnd, mir_operand_copy(all_equal), mir_operand_copy(field_equal), MirType.bool())
+            self.builder = cb
+            fi = fi + 1
+        var mb = self.builder
+        mb.emit_store(mir_operand_copy(result_slot), mir_operand_copy(all_equal))
+        mb.terminate_goto(merge_block)
+        mb.switch_to_block(merge_block)
+        val result = mb.emit_load(mir_operand_copy(result_slot), MirType.bool())
+        self.builder = mb
+        result
+
     # local_is_float lives in mir_lowering_stmts.spl (single declaration: a
     # second identical copy here made every unresolved-receiver call to it
     # "ambiguous on MirLowering").
@@ -3961,6 +4119,34 @@ impl MirLowering:
                         val right_enum_type = self.local_enum_type_id(right_local)
                         bin_is_enum_eq = left_enum_type >= 0 and left_enum_type == right_enum_type
                         if not bin_is_enum_eq:
+                            # One side is a proven enum (or a Struct-kind
+                            # local owned by an enum declaration) and the
+                            # other's owner was not retained (`want[i]`,
+                            # `d[k]`, a literal-array element): enum
+                            # equality is the runtime's structural
+                            # rt_native_eq (id + discriminant + payload),
+                            # which is also exact against any other word.
+                            # A user `__eq__` keeps its dispatch below; an
+                            # integer literal operand keeps the raw word
+                            # compare below (corrupt-zero probes).
+                            val left_enum_name = self.struct_value_syms.get(left_local.id) ?? ""
+                            val right_enum_name = self.struct_value_syms.get(right_local.id) ?? ""
+                            val left_is_enum = left_enum_type >= 0 or self.binop_struct_name_is_enum(left_enum_name)
+                            val right_is_enum = right_enum_type >= 0 or self.binop_struct_name_is_enum(right_enum_name)
+                            val enum_owner_name = if left_is_enum: left_enum_name else: right_enum_name
+                            val enum_has_user_eq = enum_owner_name != "" and self.struct_method_key_present_v1("{enum_owner_name}::__eq__")
+                            var other_is_int_lit = false
+                            if left_is_enum:
+                                match right.kind:
+                                    case IntLit(_, _): other_is_int_lit = true
+                                    case _: ()
+                            else:
+                                match left.kind:
+                                    case IntLit(_, _): other_is_int_lit = true
+                                    case _: ()
+                            if (left_is_enum or right_is_enum) and not enum_has_user_eq and not other_is_int_lit:
+                                bin_is_enum_eq = true
+                        if not bin_is_enum_eq:
                             # `Some(true) == true` (an Option<bool> compared
                             # against a bare bool/nil literal): the Option
                             # side is a boxed rt_enum_new handle registered in
@@ -4143,6 +4329,44 @@ impl MirLowering:
                             b_op2.emit_const(binop_temp, MirConstValue.Int(0), MirType.i64())
                             self.builder = b_op2
                             return binop_temp
+                    var binop_is_equality = false
+                    match op:
+                        case Eq | NotEq: binop_is_equality = true
+                        case _: ()
+                    if not binop_dispatched and binop_is_equality:
+                        # `record == 0` (a corrupt/zero-word probe, e.g.
+                        # `type_.kind == 0`, `local == 0`): a real record or
+                        # enum value never equals an integer in the
+                        # interpreter, and its native word is never 0 unless
+                        # it IS the zero word, so compare words.
+                        var binop_other_is_int_lit = false
+                        val binop_other_expr = if binop_left_struct != "": right else: left
+                        match binop_other_expr.kind:
+                            case IntLit(_, _): binop_other_is_int_lit = true
+                            case _: ()
+                        var binop_eq_local = LocalId(id: -1)
+                        if binop_other_is_int_lit:
+                            var b_word = self.builder
+                            val left_word = b_word.emit_bitcast(mir_operand_copy(left_local), MirType.i64())
+                            val right_word = b_word.emit_bitcast(mir_operand_copy(right_local), MirType.i64())
+                            binop_eq_local = b_word.emit_binop(MirBinOp.Eq, mir_operand_copy(left_word), mir_operand_copy(right_word), MirType.bool())
+                            self.builder = b_word
+                        elif self.struct_structural_eq_supported(binop_struct_name):
+                            # HIR typing admitted the comparison, so both
+                            # operands are this record type (the peer owner
+                            # may simply not be retained: `xs[i]`, `d[k]`).
+                            binop_eq_local = self.lower_struct_structural_eq(left_local, right_local, binop_struct_name, [binop_struct_name])
+                        if binop_eq_local.id >= 0:
+                            match op:
+                                case NotEq:
+                                    var b_not = self.builder
+                                    val false_local = b_not.new_temp(MirType.bool())
+                                    b_not.emit_const(false_local, MirConstValue.Bool(false), MirType.bool())
+                                    val negated = b_not.emit_binop(MirBinOp.Eq, mir_operand_copy(binop_eq_local), mir_operand_copy(false_local), MirType.bool())
+                                    self.builder = b_not
+                                    return negated
+                                case _:
+                                    return binop_eq_local
                     if not binop_dispatched:
                         # No matching (or an ambiguous) dunder method for
                         # this op -- the generic emit_binop below is
