@@ -25,7 +25,7 @@ empty provider list (`lower_module(hir, [], false)`, later
 `lower_bootstrap_closure_module(hir)`), so no cross-module method, record
 layout or imported global could resolve. The direct lane passes the
 whole-closure HIR feed `ctx.mir_feed_modules`
-(driver_pipeline_lowering.spl:666-669), built before the bootstrap-fixed
+(driver_pipeline_lowering.spl:702-705), built before the bootstrap-fixed
 branch runs.
 
 ## Fix
@@ -52,4 +52,7 @@ last closure module's symbols.
   12.8 s per closure module, flat over 90 modules (4.7 modules/min);
   `s4_promote_*` (#3925) is 167 ms of that, the rest is per-module provider
   registration. heap_live grows linearly, 7.5-9.0 MB per module
-  (3.78 GB at module 10, 4.44 GB at module 90); RSS 27.4 GB.
+  (3.78 GB at module 10, 4.92 GB at module 150); RSS grows about 28 MB
+  per module (25.0 GB at module 50, 27.8 GB at module 150), which projects
+  to about 60 GB and 4.6 h for the 1,318-module closure. Tracked as
+  `stage3_bootstrap_closure_provider_registration_cost_2026_10_20.md`.
