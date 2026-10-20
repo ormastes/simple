@@ -22,6 +22,28 @@ typedef uint64_t RuntimeValue;
 #define RT_FALSE ((SPECIAL_FALSE << 3) | TAG_SPECIAL)
 #define RT_ERROR ((SPECIAL_ERROR << 3) | TAG_SPECIAL)
 
+/* Native function/closure words reach the thread and pool runtimes in three
+ * shapes: a raw user-space address, a TAG_HEAP record pointer, or an
+ * int-tagged code address (addr << 3) from generated code that passes a
+ * function value through a generic extern slot. The int-tagged shape is the
+ * only one that can lie above the target's user virtual-address ceiling.
+ *   x86_64 / other 64-bit: 47-bit user VA (0x0000_7fff_ffff_ffff).
+ *   aarch64: 48-bit user VA (0x0000_ffff_ffff_ffff); bits 56-63 may carry a
+ *   Top-Byte-Ignore / MTE tag on a real pointer, so they are not compared.
+ * Shared by runtime_thread.c, runtime_pool.c and mirrored in the Rust
+ * executor (native_word_exceeds_user_va) so both owners classify alike. */
+#if defined(__aarch64__) || defined(_M_ARM64)
+#define RT_NATIVE_USER_VA_MAX   UINT64_C(0x0000ffffffffffff)
+#define RT_NATIVE_PTR_TAG_BITS  UINT64_C(0xff00000000000000)
+#else
+#define RT_NATIVE_USER_VA_MAX   UINT64_C(0x00007fffffffffff)
+#define RT_NATIVE_PTR_TAG_BITS  UINT64_C(0)
+#endif
+
+static inline int rt_native_word_exceeds_user_va(uint64_t word) {
+    return (word & ~RT_NATIVE_PTR_TAG_BITS) > RT_NATIVE_USER_VA_MAX;
+}
+
 static inline uint64_t rv_tag(RuntimeValue v) { return v & TAG_MASK; }
 static inline uint64_t rv_payload(RuntimeValue v) { return v >> 3; }
 static inline RuntimeValue rv_from_tag_payload(uint64_t tag, uint64_t payload) {
