@@ -388,8 +388,18 @@ pub(crate) fn evaluate_method_call(
 
     // Handle module (Dict) method calls - look up function in module and use its captured_env
     if let Value::Dict(module_dict) = &recv_val {
-        if let Some(func_val) = module_dict.get(method) {
-            if let Value::Function { def, captured_env, .. } = func_val {
+        // At most one registry probe for this receiver, and only once an own
+        // lookup misses (plain dicts answer `None`).
+        let layers_cell: std::cell::OnceCell<Option<crate::value::TableView>> = std::cell::OnceCell::new();
+        let layers = || layers_cell.get_or_init(|| crate::interpreter::module_dict_layers(module_dict));
+        let lookup = |name: &str| -> Option<Value> {
+            module_dict
+                .get(name)
+                .cloned()
+                .or_else(|| layers().as_ref().and_then(|view| view.get(name).cloned()))
+        };
+        if let Some(func_val) = lookup(method) {
+            if let Value::Function { def, captured_env, .. } = &func_val {
                 let mut captured_env_clone = Env::clone(captured_env);
                 return exec_function_with_captured_env(
                     def,
@@ -402,7 +412,7 @@ pub(crate) fn evaluate_method_call(
                     impl_methods,
                 );
             }
-            if let Value::Constructor { class_name } = func_val {
+            if let Value::Constructor { class_name } = &func_val {
                 return instantiate_class(class_name, args, env, functions, classes, enums, impl_methods);
             }
         }
@@ -415,11 +425,11 @@ pub(crate) fn evaluate_method_call(
         // Ambiguity (two classes in the module both exposing the static) is
         // deliberately left to the normal error below.
         {
-            let mut hit: Option<&Value> = None;
+            let mut hit: Option<Value> = None;
             let mut ambiguous = false;
-            for entry in module_dict.values() {
+            let mut visit = |entry: &Value| {
                 if let Value::Constructor { class_name } = entry {
-                    if let Some(static_fn) = module_dict.get(&format!("{class_name}__{method}")) {
+                    if let Some(static_fn) = lookup(&format!("{class_name}__{method}")) {
                         if matches!(static_fn, Value::Function { .. }) {
                             if hit.is_some() {
                                 ambiguous = true;
@@ -428,9 +438,13 @@ pub(crate) fn evaluate_method_call(
                         }
                     }
                 }
+            };
+            match layers() {
+                Some(view) => view.for_each_visible(|_, entry| visit(entry)),
+                None => module_dict.values().for_each(&mut visit),
             }
             if !ambiguous {
-                if let Some(Value::Function { def, captured_env, .. }) = hit {
+                if let Some(Value::Function { def, captured_env, .. }) = &hit {
                     let mut captured_env_clone = Env::clone(captured_env);
                     return exec_function_with_captured_env(
                         def,
@@ -1117,6 +1131,10 @@ pub(crate) fn evaluate_method_call(
             }
         }
         Value::Dict(map) => {
+            // A collection method on a layered module dict sees the flat
+            // surface the module used to carry (see `ModuleTable`).
+            let flat = crate::interpreter::module_dict_flat(map);
+            let map = flat.as_ref().unwrap_or(map);
             if let Some(result) =
                 collections::handle_dict_methods(map, method, args, env, functions, classes, enums, impl_methods)?
             {

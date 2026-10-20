@@ -1,6 +1,6 @@
 # Seed interpreter: every `use` re-exports the imported module's whole surface (O(closure) tables per module)
 
-Status: OPEN — root cause located, fix needs a semantics decision (see "Decision needed").
+Status: FIXED (work/interp-reexport-sharing) — tables are shared by reference; name resolution unchanged (see "Fix").
 Found by: 2026-10-19 full sweep memory cluster (212 specs `memory allocation failed`).
 Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (seed `b5482745b46`), worktree `release_phase3` @ `10ecc006b67`.
 
@@ -79,3 +79,65 @@ counts reserved but untouched VA). Memory is capped through a per-child
 reported as `TERMINATED: Memory limit exceeded` instead of a SIGABRT crash. The
 specs above now run to their real verdict under the default 16 GiB cap. Their
 RSS is unchanged until this bug is fixed.
+
+## Fix (2026-10-20, work/interp-reexport-sharing)
+
+Option A, no semantics change: the importer records the imported module's
+table and resolves through it lazily instead of copying it. The permissive
+rules stay exactly as they were (`use m.{x}` still binds m's whole surface,
+including what m only imported); the "Decision needed" above is not taken.
+
+- `ModuleTable` (value.rs): a module's export `Value::Dict` holds only its own
+  entries; whole imports are `layers` (`Arc<ModuleTable>`), looked up own
+  first, then latest layer first. Pushing a layer evicts the own entries it
+  rebinds, which reproduces last-insert-wins. Lookups use a process-wide
+  name -> defining-tables index plus a per-table reachability set, so no
+  per-(table, name) state is kept.
+- `LayeredEnv` replaces the frozen module env (`MODULE_ENV_BY_OWNER`, every
+  exported function's `captured_env` base); filtered layers read
+  `ModuleTable::filtered_own`.
+- `ModuleBindings` gains binding layers (snapshot of the source module's
+  table at import time), so `import_bindings` no longer copies.
+- `ProvidedSet` reads the shared export table.
+- Every place that reads a module value by name goes through
+  `module_dict_get` / `module_dict_for_each_visible` / `module_dict_len`
+  (module_cache.rs registry keyed by dict address); dict collection methods
+  on a module value see the flat surface via `module_dict_flat`.
+- Lookup memos are owner-thread only (no lock on the hit path).
+
+Not routed through the registry: `==` between module values and printing a
+module value see the module's own entries only. Writes into a module value
+(`m.x = v`, `m[k] = v`) first materialize the flat surface, so the written
+copy keeps every name.
+
+Measured, same worktree, `run` in an 8 GiB scope (peak RSS, user CPU):
+
+| spec | before RSS | after RSS | before user | after user |
+|---|---|---|---|---|
+| compiler/driver/admitted_epoch | 5.48 GB | 1.72 GB | 32.2 s | 12.2 s |
+| compiler/loader/aspect_catalog_invalidation | 5.81 GB | 1.83 GB | 35.9 s | 12.3 s |
+| compiler/cache/driver_hir_shard_transaction | 5.09 GB | 2.10 GB | 25.4 s | 10.7 s |
+| app/bootstrap_builder/grouped_native_worker | 5.75 GB | 1.77 GB | 31.9 s | 10.6 s |
+
+Spec output is byte-identical before/after (modulo temp-dir names). A 40-module
+`use prev.*` chain: export entries 4100 -> 239, env entries 4379 -> 518,
+import bindings 3940 -> 79. Lookup-heavy loop (300k iterations of
+cross-module unqualified + qualified calls, min of 7, host load ~28):
+2.59-3.02 s before, 2.68 s after. Plain-dict loop (1.5M iterations of
+`d[k] = v`, `d.len()`, `d.get(k)`, `k in d`): min 3.09 s -> 3.16 s, median
+3.45 s -> 3.24 s (within noise). Plain dicts reach the module-dict registry
+only through a lock-free address filter.
+
+126 interpreter / module-import specs: identical verdicts before and after
+(`me_call_dict_field_write_cost_spec` is timing-flaky under load on both
+binaries). Rust `simple-compiler --lib`: 4468 pass; the same 11
+native_project/vulkan failures exist on the base commit.
+
+Tests: `test/01_unit/compiler/interpreter/use_reexport_sharing_equivalence_spec.spl`
+(fixture graph `test/fixtures/interp_reexport_sharing/`, expected values
+recorded from the copying seed) and the Rust unit test
+`chained_glob_imports_retain_tables_linear_in_own_exports`.
+
+The pure-Simple interpreter (`src/compiler/10.frontend/core/interpreter/`)
+does not have this pattern: `extract_module_exports` reads only a module's own
+declarations and imports bind per caller.

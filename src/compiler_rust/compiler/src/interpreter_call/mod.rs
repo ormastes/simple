@@ -269,11 +269,11 @@ fn import_bound_candidate(
         eprintln!(
             "[dupdispatch] probe name={name} current={current} has_table={} entry={:?}",
             b.is_some(),
-            b.as_ref().and_then(|t| t.get(name).cloned())
+            b.as_ref().and_then(|t| t.get(name).map(std::borrow::Cow::into_owned))
         );
     }
     let (mut source_owner, mut source_name) =
-        crate::interpreter::owner_bindings(&current).and_then(|bindings| bindings.get(name).cloned())?;
+        crate::interpreter::owner_bindings(&current).and_then(|bindings| bindings.get(name).map(std::borrow::Cow::into_owned))?;
     // Walk re-export facades to the module that actually DECLARES the
     // function, mirroring the bounded chain walk HIR lowering performs in
     // `collect_flattened_import_aliases`. At each hop, a candidate declared
@@ -298,7 +298,7 @@ fn import_bound_candidate(
         let hop = crate::interpreter::owner_bindings(&source_owner).and_then(|bindings| {
             bindings
                 .get(&source_name)
-                .cloned()
+                .map(std::borrow::Cow::into_owned)
                 .filter(|next| *next.0 != *source_owner || next.1 != source_name)
                 .or_else(|| bindings.get("*").map(|glob| (Arc::clone(&glob.0), source_name.clone())))
         });
@@ -946,7 +946,7 @@ pub(crate) fn evaluate_call(
             // First, check if the receiver is a module dict in env
             if let Some(Value::Dict(module_dict)) = env.get(module_name).cloned() {
                 // Look up function in the module's exports
-                if let Some(func_val) = module_dict.get(field).cloned() {
+                if let Some(func_val) = crate::interpreter::module_dict_get(&module_dict, field) {
                     if let Value::Function { def, captured_env, .. } = func_val {
                         let mut captured_env_clone = Env::clone(&captured_env);
                         return core::exec_function_with_captured_env(

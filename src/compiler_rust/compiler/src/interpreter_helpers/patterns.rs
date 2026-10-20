@@ -709,7 +709,7 @@ pub(crate) fn try_place_mutation_in_place(
                         impl_methods,
                     )?;
                     match arg0 {
-                        Value::Dict(map) => (None, None, Some(map)),
+                        Value::Dict(map) => (None, None, Some(crate::interpreter::module_dict_flat(&map).unwrap_or(map))),
                         _ => {
                             let ctx = ErrorContext::new()
                                 .with_code(codes::TYPE_MISMATCH)

@@ -48,7 +48,7 @@ fn module_global_target(name: &str, env: &Env) -> Option<ModuleGlobalTarget> {
     crate::interpreter::owner_bindings(&owner).and_then(|bindings| {
         bindings
             .get(name)
-            .cloned()
+            .map(std::borrow::Cow::into_owned)
             .map(|(owner, name)| ModuleGlobalTarget::Owned { owner, name })
     })
 }
@@ -178,7 +178,10 @@ fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
             Ok(entries)
         }
         Value::Dict(map) => {
-            // Iterate over dict returns (key, value) tuples
+            // Iterate over dict returns (key, value) tuples; a layered module
+            // value iterates its whole visible surface.
+            let flat = crate::interpreter::module_dict_flat(map);
+            let map = flat.as_ref().unwrap_or(map);
             let entries: Vec<Value> = crate::value::dict_entries_sorted(map)
                 .into_iter()
                 .map(|(k, v)| Value::Tuple(vec![Value::text(k.clone()), v.clone()]))
@@ -1264,13 +1267,13 @@ pub(super) fn exec_block_closure_into(
                             for item_target in items {
                                 match item_target {
                                     ImportTarget::Single(name) => {
-                                        if let Some(v) = exports.get(name) {
-                                            bind_one(name, v);
+                                        if let Some(v) = crate::interpreter::module_dict_get(exports, name) {
+                                            bind_one(name, &v);
                                         }
                                     }
                                     ImportTarget::Aliased { name, alias } => {
-                                        if let Some(v) = exports.get(name) {
-                                            bind_one(alias, v);
+                                        if let Some(v) = crate::interpreter::module_dict_get(exports, name) {
+                                            bind_one(alias, &v);
                                         }
                                     }
                                     // Nested groups are not supported at module
@@ -1280,17 +1283,17 @@ pub(super) fn exec_block_closure_into(
                             }
                         }
                         ImportTarget::Glob => {
-                            for (name, value) in exports.iter() {
+                            crate::interpreter::module_dict_for_each_visible(exports, |name, value| {
                                 // Never glob-import `main`: it would be picked up
                                 // by the entry-point fallback and run instead of
                                 // the script's own main. Same guard as module
                                 // scope. A NAMED import of `main` is an explicit
                                 // opt-in and is not filtered.
                                 if matches!(value, Value::Function { .. }) && name == "main" {
-                                    continue;
+                                    return;
                                 }
                                 bind_one(name, value);
-                            }
+                            });
                         }
                         ImportTarget::Single(_) | ImportTarget::Aliased { .. } => {}
                     }

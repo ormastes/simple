@@ -72,7 +72,7 @@ pub(crate) use interpreter_state::{
     CURRENT_EXEC_MODULE, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX, FLATTEN_IMPORT_BINDING_MARKER_PREFIX,
     FLATTEN_MODULE_OWNER_ATTR_PREFIX, tag_function_module_owner, report_globals_census, owned_globals_snapshot,
     owned_global, owned_global_present, owner_has_globals, steal_owned_global, set_owned_global, seed_owner_globals,
-    reset_owned_globals_from_initial, owner_bindings, record_owner_binding,
+    reset_owned_globals_from_initial, owner_bindings, record_owner_binding, record_owner_binding_layer,
 };
 
 // Core types and utilities
@@ -189,6 +189,10 @@ pub(crate) use module_cache::take_shared_ast;
 pub use module_cache::{parsed_source_cache_compile_max, parsed_source_cache_set_limit};
 pub use module_cache::clear_module_cache_selective;
 pub(crate) use module_cache::normalize_path_key;
+pub(crate) use module_cache::{
+    filter_functions_from_value, module_dict_contains, module_dict_flat, module_dict_for_each_visible, module_dict_get,
+    module_dict_len, module_dict_make_mut, layered_view as module_dict_layers,
+};
 
 // Module loading and resolution
 #[path = "../interpreter_module/mod.rs"]
