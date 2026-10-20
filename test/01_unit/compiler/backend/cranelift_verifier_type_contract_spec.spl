@@ -11,7 +11,7 @@ use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
 use compiler.mir.mir.*
 use compiler.mir.mir_lowering.{MirLowering}
-use compiler.backend.cranelift_codegen_adapter.{cl_cast_narrow_int_type, cl_cast_int_width_bytes, cl_fallback_abi_type}
+use compiler.backend.cranelift_codegen_adapter.{cl_cast_narrow_int_type, cl_cast_int_width_bytes, cl_fallback_abi_type, cl_call_abi_mismatch}
 
 @inline
 fn lower_verifier_fixture(source: text) -> MirModule:
@@ -53,8 +53,8 @@ describe "Cranelift verifier type contracts":
         expect(cl_cast_narrow_int_type(MirType.i64())).to_equal(0)
         expect(cl_cast_narrow_int_type(MirType(kind: MirTypeKind.Bool))).to_equal(0)
 
-    it "keeps float register classes on undeclared imported calls":
-        step("f64/f32 operands and results are not declared as i64")
+    it "classifies caller-side register classes for the import ABI check":
+        step("f64/f32 caller values are float class, everything else i64")
         expect(cl_fallback_abi_type(MirType.f64())).to_equal(6)
         expect(cl_fallback_abi_type(MirType(kind: MirTypeKind.F32))).to_equal(5)
         expect(cl_fallback_abi_type(MirType.i64())).to_equal(4)
@@ -76,4 +76,67 @@ describe "Cranelift verifier type contracts":
             if function.name.ends_with("fin"):
                 expect(function.signature.return_type.kind == MirTypeKind.Unit).to_equal(false)
                 checked = checked + 1
+        expect(checked).to_equal(1)
+
+fn cv_fnptr(params: [MirType], ret: MirType, known: bool) -> MirType:
+    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: ret, is_variadic: false,
+        declared_params: params, declared_params_known: known)))
+
+describe "Cranelift imported-call signature comes from the callee declaration":
+    it "accepts callers whose register classes match the declared signature":
+        step("f64 -> f64 and i64 -> i64 imports are sound")
+        expect(cl_call_abi_mismatch(cv_fnptr([MirType.f64()], MirType.f64(), true), [MirType.f64()], MirType.f64(), true)).to_equal("")
+        expect(cl_call_abi_mismatch(cv_fnptr([MirType.i64()], MirType.i64(), true), [MirType(kind: MirTypeKind.I32)], MirType.i64(), true)).to_equal("")
+
+    it "rejects a float argument to an int-declared callee instead of declaring the import from the caller":
+        step("take(2.0) against a declared (i64) callee is a compile error")
+        val msg = cl_call_abi_mismatch(cv_fnptr([MirType.i64()], MirType.i64(), true), [MirType.f64()], MirType.i64(), true)
+        expect(msg).to_contain("arg 0 is f64 but the callee declares i64")
+
+    it "rejects an int argument to a float-declared callee":
+        step("half(3) against a declared (f64) callee is a compile error")
+        val msg = cl_call_abi_mismatch(cv_fnptr([MirType.f64()], MirType.f64(), true), [MirType.i64()], MirType.f64(), true)
+        expect(msg).to_contain("arg 0 is i64 but the callee declares f64")
+
+    it "rejects a result read in the wrong register class":
+        step("an f64-returning callee read into an i64 destination")
+        val msg = cl_call_abi_mismatch(cv_fnptr([MirType.f64()], MirType.f64(), true), [MirType.f64()], MirType.i64(), true)
+        expect(msg).to_contain("result is read as i64 but the callee declares f64")
+        step("an unused result is not checked")
+        expect(cl_call_abi_mismatch(cv_fnptr([MirType.f64()], MirType.f64(), true), [MirType.f64()], MirType.i64(), false)).to_equal("")
+
+    it "fails closed on floats when the callee signature is unknown":
+        step("unknown signature with an f64 argument is rejected, never inferred")
+        val unknown = cv_fnptr([], MirType.i64(), false)
+        expect(cl_call_abi_mismatch(unknown, [MirType.f64()], MirType.i64(), true)).to_contain("callee signature unknown")
+        step("unknown signature with all-int values keeps the historical i64 import")
+        expect(cl_call_abi_mismatch(unknown, [MirType.i64()], MirType.i64(), true)).to_equal("")
+        step("a declared arity that differs from the call is unknown")
+        expect(cl_call_abi_mismatch(cv_fnptr([MirType.f64(), MirType.f64()], MirType.f64(), true), [MirType.f64()], MirType.f64(), true)).to_contain("callee signature unknown")
+        step("a zero-argument call to a callee declaring parameters is unknown too")
+        expect(cl_call_abi_mismatch(cv_fnptr([MirType.i64()], MirType.f64(), true), [], MirType.f64(), true)).to_contain("callee signature unknown")
+
+    it "records the callee's declared parameter types on a direct call operand":
+        step("Lower a caller of an f64 helper; its call operand carries declared_params")
+        val mir = lower_verifier_fixture("fn half(x: f64) -> f64:\n    return x / 2.0\n\nfn go() -> f64:\n    return half(3.0)\n")
+        var checked = 0
+        for function in mir.functions.values():
+            if function.name.ends_with("go"):
+                for block in function.blocks:
+                    for inst in block.instructions:
+                        match inst.kind:
+                            case MirInstKind.Call(_, func_op, _):
+                                match func_op.kind:
+                                    case MirOperandKind.Const(_, op_type):
+                                        match op_type.kind:
+                                            case MirTypeKind.FuncPtr(sig):
+                                                expect(sig.declared_params_known).to_equal(true)
+                                                expect(sig.declared_params.len()).to_equal(1)
+                                                expect(sig.declared_params[0].kind == MirTypeKind.F64).to_equal(true)
+                                                step("legacy params stay empty so the LLVM declare is unchanged")
+                                                expect(sig.params.len()).to_equal(0)
+                                                checked = checked + 1
+                                            case _: ()
+                                    case _: ()
+                            case _: ()
         expect(checked).to_equal(1)
