@@ -2240,6 +2240,10 @@ impl MirLowering:
         val scoped_archive_thunks: [MirFunction] = []
         if not transient_array_scope_begin_v1():
             if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 0))
+            # Loud, unconditional: an unscoped module retains its whole
+            # lowering arena (~36 MB/module on the stage3 closure), which is
+            # indistinguishable from a promotion leak in RSS alone.
+            eprint("[mir-scope] WARNING transient scope refused (an outer scope is live); lowering UNSCOPED, arena retained: module={module.name}")
             return Ok(self.lower_module(module, providers, is_entry_module, scoped_archive_symbols,
                 scoped_archive_globals, scoped_archive_thunks))
         scope_decisions = scope_decisions | 1
@@ -2286,10 +2290,15 @@ impl MirLowering:
         # signatures, collection-literal scratch) an immortal orphan the moment
         # the next module reset them, so retained memory grew with
         # modules x closure. Ambient bootstrap keeps them: the flat bootstrap
-        # emission reads the global mirrors after the closure loop.
+        # emission reads the global mirrors after the closure loop -- but only
+        # the ENTRY's: every lower_module prologue resets all ten before any
+        # read and nothing outside 50.mir reads them, so a non-entry module's
+        # copy is dead once its scope ends. Retiring them there is what keeps
+        # the stage3 bootstrap-fixed closure (ambient, provider feed) from
+        # orphaning one whole-closure copy per module.
         # Values still referenced by the completed MIR or by another retained
         # root stay reachable and are promoted through that root.
-        if not self.ambient_bootstrap_enabled():
+        if not self.ambient_bootstrap_enabled() or not is_entry_module:
             self.trait_impl_owners = {}
             self.trait_impl_methods = {}
             self.global_symbol_ids = {}
@@ -2311,6 +2320,14 @@ impl MirLowering:
         self.provider_method_modules = []
         self.provider_method_materialized = {}
         self.provider_layout_demand_end_v1()
+        # Same for the trait-implementor feed: the driver's whole-closure HIR
+        # array, persistent and never written by lowering. As an owner root
+        # the promote walk (no write barrier, so it walks persistent graphs
+        # too) re-traversed every closure HirModule once per module. Detach
+        # it for the promotion and restore the borrowed reference after the
+        # scope ends.
+        val borrowed_trait_providers: [HirModule] = self.trait_impl_provider_modules
+        self.trait_impl_provider_modules = []
         # From here every exit path must close the scope. `end` frees the
         # arena, so any path that ends WITHOUT a successful promotion must
         # also refuse to hand `lowered` back.
@@ -2361,6 +2378,7 @@ impl MirLowering:
             if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 8))
             return Err("transient MIR scope end failed for {module.name}")
         scope_decisions = scope_decisions | 128
+        self.trait_impl_provider_modules = borrowed_trait_providers
         mir_section_profile_mark("s4b_scope_end_only", module.name)
         if not reverse_reference_module_publish_v1(reverse_token):
             val _aborted = reverse_reference_module_abort_v1(reverse_token)
@@ -2567,11 +2585,15 @@ impl MirLowering:
         # Provider struct/class layout rows follow the same session/demand
         # split (provider_layout_demand_v1): registered when this consumer can
         # name the declaration, not for the whole closure up front. The
-        # ambient bootstrap and declaration-repository lanes keep the eager
-        # pass, as do provider_layouts_eager and
-        # SIMPLE_MIR_EAGER_PROVIDER_LAYOUTS=1 (A/B checks).
+        # ambient bootstrap ENTRY and the declaration-repository lanes keep
+        # the eager pass, as do provider_layouts_eager and
+        # SIMPLE_MIR_EAGER_PROVIDER_LAYOUTS=1 (A/B checks). Ambient non-entry
+        # modules (the stage3 bootstrap-fixed closure) demand: eagerly every
+        # consumer relocated every closure struct/class into the cumulative
+        # struct_field_* rows, orphaning the previous consumer's copy -- the
+        # retention the provider feed reintroduced.
         val layout_demand = lazy_provider_methods and not self.provider_layouts_eager and
-            not self.ambient_bootstrap_enabled() and
+            (not self.ambient_bootstrap_enabled() or not is_entry_module) and
             self.declaration_repository == nil and
             (mir_lower_env_get("SIMPLE_MIR_EAGER_PROVIDER_LAYOUTS") ?? "") != "1"
         # Index-aligned with `providers` and reused by

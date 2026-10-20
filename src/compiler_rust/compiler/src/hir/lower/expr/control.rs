@@ -202,6 +202,7 @@ impl Lowerer {
         // payload extraction both read it without re-evaluating the expression.
         let subject_idx = ctx.locals.len();
         ctx.add_local("$if_let_subject".to_string(), subject_ty, Mutability::Immutable);
+        self.carry_optional_trait_subject(condition_expr, subject_idx, ctx);
         let store_stmt = HirStmt::Let {
             local_index: subject_idx,
             ty: subject_ty,
@@ -483,6 +484,7 @@ impl Lowerer {
         // Create a temporary local to hold the subject value
         let subject_idx = ctx.locals.len();
         ctx.add_local("$match_subject".to_string(), subject_ty, Mutability::Immutable);
+        self.carry_optional_trait_subject(subject, subject_idx, ctx);
 
         // Build the chain of If-Else expressions from the arms
         let if_chain = self.lower_match_arms(subject_idx, subject_ty, arms, ctx)?;

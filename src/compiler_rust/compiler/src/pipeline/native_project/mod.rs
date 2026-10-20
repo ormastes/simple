@@ -553,6 +553,10 @@ pub(crate) struct ModuleImports {
     pub re_exports: std::sync::Arc<std::collections::HashMap<String, std::collections::HashMap<String, String>>>,
     /// Project-wide trait implementations used to validate virtual dispatch.
     pub trait_impls: std::sync::Arc<std::collections::HashMap<String, Vec<String>>>,
+    /// Every method name declared by any trait in the closure. A bare call to
+    /// one of these that no linked object defines is an unresolved trait
+    /// dispatch, never a nil stub.
+    pub trait_method_names: std::sync::Arc<std::collections::HashSet<String>>,
     /// Collision-free `module_prefix__Type` owners that carry a vtable header.
     pub vtable_type_owners: std::sync::Arc<std::collections::HashSet<String>>,
     /// Qualified owner → externally linkable primary vtable symbol.
@@ -1193,6 +1197,7 @@ impl NativeProjectBuilder {
                 all_mangled: std::sync::Arc::new(result.all_mangled),
                 re_exports: std::sync::Arc::new(result.re_exports),
                 trait_impls: std::sync::Arc::new(result.trait_impls),
+                trait_method_names: std::sync::Arc::new(result.trait_method_names),
                 vtable_type_owners: std::sync::Arc::new(result.vtable_type_owners),
                 vtable_symbols: std::sync::Arc::new(result.vtable_symbols),
                 struct_defs: std::sync::Arc::new(result.struct_defs),
@@ -1215,6 +1220,7 @@ impl NativeProjectBuilder {
                 all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
                 re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
                 trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
+                trait_method_names: std::sync::Arc::new(std::collections::HashSet::new()),
                 vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
                 vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
                 struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),

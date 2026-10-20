@@ -21,6 +21,8 @@ pub(crate) struct ImportMapResult {
     /// to distinguish real cross-module vtable dispatch from unsupported
     /// duck-typed calls.
     pub trait_impls: std::collections::HashMap<String, Vec<String>>,
+    /// Every method name declared by any trait (abstract or default).
+    pub trait_method_names: std::collections::HashSet<String>,
     /// Collision-free native owners whose object layout includes a vtable
     /// header. Keys use the same `module_prefix__Type` identity as native
     /// symbols and are therefore safe across duplicate bare type names.
@@ -366,6 +368,12 @@ pub(crate) fn build_import_map(
     let mut vtable_symbols: HashMap<String, String> = HashMap::new();
     let mut pending_vtable_impls: Vec<(String, String, String)> = Vec::new();
     let mut trait_def_names: HashSet<String> = HashSet::new();
+    // `class Name with Trait:` candidates, resolved once every trait and mixin
+    // declaration in the project has been scanned (see the resolution below).
+    let mut pending_class_with: Vec<(String, String, String, HashSet<String>)> = Vec::new();
+    let mut trait_abstract_methods: HashMap<String, Vec<HashSet<String>>> = HashMap::new();
+    let mut mixin_def_names: HashSet<String> = HashSet::new();
+    let mut trait_method_names: HashSet<String> = HashSet::new();
     // Bare function name -> declared return type. This includes primitive
     // returns: losing `u64` here turns native comparisons into mixed ANY/scalar
     // operations whose tagged ABI differs from raw machine integers.
@@ -474,6 +482,10 @@ pub(crate) fn build_import_map(
                                 &c.name,
                                 fields,
                             );
+                        }
+                        let own_methods: HashSet<String> = c.methods.iter().map(|m| m.name.clone()).collect();
+                        for mixin_ref in &c.mixins {
+                            pending_class_with.push((prefix.clone(), c.name.clone(), mixin_ref.name.clone(), own_methods.clone()));
                         }
                         for m in &c.methods {
                             if !m.body.statements.is_empty() {
@@ -675,8 +687,15 @@ pub(crate) fn build_import_map(
                             }
                         }
                     }
+                    simple_parser::ast::Node::Mixin(m) => {
+                        mixin_def_names.insert(m.name.clone());
+                    }
                     simple_parser::ast::Node::Trait(t) => {
                         trait_def_names.insert(t.name.clone());
+                        trait_method_names.extend(t.methods.iter().map(|m| m.name.clone()));
+                        trait_abstract_methods.entry(t.name.clone()).or_default().push(
+                            t.methods.iter().filter(|m| m.is_abstract).map(|m| m.name.clone()).collect(),
+                        );
                         for m in &t.methods {
                             if has_concrete_body(&m.body) {
                                 let raw = format!("{}.{}", t.name, m.name);
@@ -1002,6 +1021,47 @@ pub(crate) fn build_import_map(
         }
     }
 
+    // `class Name with Trait:` is a trait implementation when the name is a
+    // trait (not a mixin). HIR records it (`record_class_with_trait_impls`) only
+    // when the class defines every abstract method of the selected trait, so
+    // this side must be the MORE permissive one: if same-named traits exist,
+    // require only the methods abstract in ALL of them. A class HIR declines is
+    // then marked here and fails the link on its undefined vtable symbol --
+    // never the reverse (a vtable-less object behind a virtual call).
+    // One vtable header per object: only a class whose `with` clause names
+    // exactly one non-mixin entry, and that has no explicit `impl Trait for`,
+    // qualifies (same rule as HIR).
+    let mut with_entry_counts: HashMap<(String, String), usize> = HashMap::new();
+    for (class_prefix, class_name, name, _) in &pending_class_with {
+        if !mixin_def_names.contains(name) {
+            *with_entry_counts.entry((class_prefix.clone(), class_name.clone())).or_default() += 1;
+        }
+    }
+    let explicitly_implemented: HashSet<String> = trait_impls.values().flatten().cloned().collect();
+    for (class_prefix, class_name, trait_name, own_methods) in pending_class_with {
+        if mixin_def_names.contains(&trait_name)
+            || with_entry_counts.get(&(class_prefix.clone(), class_name.clone())) != Some(&1)
+            || explicitly_implemented.contains(&class_name)
+        {
+            continue;
+        }
+        let Some(abstract_sets) = trait_abstract_methods.get(&trait_name) else { continue };
+        let satisfies_common_required = abstract_sets
+            .first()
+            .into_iter()
+            .flatten()
+            .filter(|method| abstract_sets.iter().all(|set| set.contains(*method)))
+            .all(|method| own_methods.contains(method));
+        if !satisfies_common_required {
+            continue;
+        }
+        let implementations = trait_impls.entry(trait_name.clone()).or_default();
+        if !implementations.iter().any(|candidate| candidate == &class_name) {
+            implementations.push(class_name.clone());
+        }
+        pending_vtable_impls.push((class_prefix, class_name, trait_name));
+    }
+
     // Resolve trait-impl target ownership after every class/struct definition
     // has been scanned. Split `impl Trait for Type` files are common, so the
     // impl file's module prefix is not necessarily the concrete type owner.
@@ -1106,6 +1166,7 @@ pub(crate) fn build_import_map(
         all_mangled: raw_to_mangled,
         re_exports,
         trait_impls,
+        trait_method_names,
         vtable_type_owners,
         vtable_symbols,
         struct_defs,
