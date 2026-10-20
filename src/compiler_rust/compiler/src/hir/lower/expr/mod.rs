@@ -699,7 +699,7 @@ impl Lowerer {
 
         match self.globals.get(&target).copied() {
             Some(ty) if matches!(self.module.types.get(ty), Some(HirType::Function { .. })) => Some(ty),
-            _ => None,
+            _ => self.imported_function_value_types.get(&target).copied(),
         }
     }
 

@@ -532,19 +532,17 @@ pub fn compile_instruction<M: Module>(
                 let count = builder.ins().iconst(types::I32, 0);
                 let closure = helpers::call_runtime_2(ctx, builder, "rt_closure_new", addr, count);
                 ctx.vreg_values.insert(*dest, closure);
-            } else if let Some(&func_id) = ctx.func_ids.get(global_name) {
-                // Function reference used as a value (e.g., from MIR GlobalLoad of an
-                // imported function). Materialize it as the same heap closure shape
-                // used by ClosureCreate so values survive parameter passing and array
-                // storage before a later IndirectCall.
-                let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
-                let closure_size = builder.ins().iconst(types::I64, 16);
-                let closure_ptr = helpers::call_runtime_1(ctx, builder, "rt_alloc", closure_size);
-                let fn_addr = builder.ins().func_addr(types::I64, func_ref);
-                let direct_marker = builder.ins().iconst(types::I64, 0x5344_4952_4543_5446);
-                builder.ins().store(MemFlags::new(), fn_addr, closure_ptr, 0);
-                builder.ins().store(MemFlags::new(), direct_marker, closure_ptr, 8);
-                ctx.vreg_values.insert(*dest, closure_ptr);
+            } else if ctx.func_ids.contains_key(global_name) {
+                // A function used as a VALUE with no `$boxed` entry: its value
+                // type carried no signature (closure_boxed_entry.rs
+                // `imported_fn_value_targets`). The old fallback stored the bare
+                // address in an `rt_alloc` record that `rt_closure_func_ptr`
+                // rejects, so the first call through the value jumped to 0.
+                return Err(format!(
+                    "GlobalLoad: function '{}' is used as a value but has no boxed entry \
+                     (its value type is not a function type); refusing to build a NULL function value",
+                    global_name
+                ));
             } else if let Some(resolved) = ctx
                 .use_map
                 .get(global_name.as_str())
@@ -570,47 +568,23 @@ pub fn compile_instruction<M: Module>(
                             ctx.vreg_values.insert(*dest, val);
                         }
                     }
+                } else if let Some(cranelift_module::FuncOrDataId::Data(data_id)) = ctx.module.get_name(&symbol) {
+                    // Already declared as imported DATA in this unit.
+                    let global_ref = ctx.module.declare_data_in_func(data_id, builder.func);
+                    let global_addr = builder.ins().global_value(types::I64, global_ref);
+                    let val = builder
+                        .ins()
+                        .load(type_id_to_cranelift(*ty), MemFlags::new(), global_addr, 0);
+                    ctx.vreg_values.insert(*dest, val);
                 } else {
-                    // Cross-module function reference used as a value.
-                    // Data exports are handled above so imported top-level vals do
-                    // not get lowered to function addresses.
-                    let call_conv = ctx.module.isa().default_call_conv();
-                    let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
-                    sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-                    sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-                    if let Ok(fid) = ctx
-                        .module
-                        .declare_function(&symbol, cranelift_module::Linkage::Import, &sig)
-                    {
-                        ctx.func_ids.entry(global_name.clone()).or_insert(fid);
-                        let func_ref = ctx.module.declare_func_in_func(fid, builder.func);
-                        let closure_size = builder.ins().iconst(types::I64, 16);
-                        let closure_ptr = helpers::call_runtime_1(ctx, builder, "rt_alloc", closure_size);
-                        let fn_addr = builder.ins().func_addr(types::I64, func_ref);
-                        let direct_marker = builder.ins().iconst(types::I64, 0x5344_4952_4543_5446);
-                        builder.ins().store(MemFlags::new(), fn_addr, closure_ptr, 0);
-                        builder.ins().store(MemFlags::new(), direct_marker, closure_ptr, 8);
-                        ctx.vreg_values.insert(*dest, closure_ptr);
-                    } else {
-                        match ctx
-                            .module
-                            .declare_data(&symbol, cranelift_module::Linkage::Import, true, false)
-                        {
-                            Ok(data_id) => {
-                                let global_ref = ctx.module.declare_data_in_func(data_id, builder.func);
-                                let global_addr = builder.ins().global_value(types::I64, global_ref);
-                                let val =
-                                    builder
-                                        .ins()
-                                        .load(type_id_to_cranelift(*ty), MemFlags::new(), global_addr, 0);
-                                ctx.vreg_values.insert(*dest, val);
-                            }
-                            Err(_) => {
-                                let val = builder.ins().iconst(types::I64, 0);
-                                ctx.vreg_values.insert(*dest, val);
-                            }
-                        }
-                    }
+                    // Cross-module function reference used as a value with no
+                    // `$boxed` entry (see the branch above): refuse it rather
+                    // than fabricate a closure record that calls address 0.
+                    return Err(format!(
+                        "GlobalLoad: imported function '{}' ({}) is used as a value but has no boxed entry \
+                         (its value type is not a function type); refusing to build a NULL function value",
+                        global_name, symbol
+                    ));
                 }
             } else {
                 // Truly unresolved: not a declared global, not a const-data name,

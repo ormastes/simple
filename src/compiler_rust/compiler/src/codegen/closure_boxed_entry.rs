@@ -110,6 +110,12 @@ impl<M: Module> CodegenBackend<M> {
     /// `GlobalLoad` site then wraps `F$boxed` in a zero-capture
     /// `rt_closure_new` object, giving a bare function reference the SAME
     /// representation as a lambda value. Must run AFTER `declare_functions`.
+    ///
+    /// A function defined in ANOTHER unit gets the same thunk here, built from
+    /// the `HirType::Function` its value carries and calling the import through
+    /// a relocation to its symbol. Before this the load fell to a bare
+    /// `rt_alloc` "direct record" that `rt_closure_func_ptr` rejects, so every
+    /// call through the value jumped to address 0.
     pub fn emit_boxed_fn_value_entries(
         &mut self,
         mir: &crate::mir::MirModule,
@@ -124,6 +130,12 @@ impl<M: Module> CodegenBackend<M> {
                 continue;
             };
             self.emit_boxed_entry_for(func, false)?;
+        }
+        for (name, params, ret) in imported_fn_value_targets(mir) {
+            if trace {
+                eprintln!("[rust-jit] fn-value boxed entry for imported {name}");
+            }
+            self.emit_boxed_import_entry(&name, params, ret)?;
         }
         Ok(())
     }
@@ -151,8 +163,74 @@ impl<M: Module> CodegenBackend<M> {
         let target_sig = build_mir_signature(lambda, self.module.isa().default_call_conv());
         let skip = usize::from(has_ctx);
         let user_params: Vec<TypeId> = lambda.params.iter().skip(skip).map(|p| p.ty).collect();
-        let ret_ty = lambda.return_type;
+        self.emit_boxed_thunk(raw_name, target_id, target_sig, user_params, lambda.return_type, has_ctx, false)
+    }
 
+    /// `F$boxed` for a function this unit only imports. The target's ABI is
+    /// the uniform user-function one (`build_mir_signature`: every parameter
+    /// and the result an `i64`), so the arity from the value's
+    /// `HirType::Function` is all the signature needs. The import may already
+    /// be declared with a placeholder signature (`declare_globals` uses
+    /// `(i64) -> i64` for every use-map function), so the thunk calls the
+    /// symbol's ADDRESS with the real signature rather than that declaration.
+    /// No symbol at all is a build error -- never a NULL function value.
+    fn emit_boxed_import_entry(&mut self, name: &str, user_params: Vec<TypeId>, ret_ty: TypeId) -> BackendResult<()> {
+        let raw_name = boxed_entry_name(name);
+        if self.func_ids.contains_key(&raw_name) {
+            return Ok(());
+        }
+        let resolved = self.use_map.get(name).or_else(|| self.import_map.get(name)).cloned();
+        if let Some(resolved) = &resolved {
+            let sanitized = self.sanitize_symbol(resolved);
+            if self.data_exports.contains(resolved) || self.data_exports.contains(&sanitized) {
+                // A function-typed DATA export (`val f = g` in the other unit):
+                // GlobalLoad reads the stored closure value; no thunk.
+                return Ok(());
+            }
+        }
+        let call_conv = self.module.isa().default_call_conv();
+        let mut target_sig = Signature::new(call_conv);
+        for _ in &user_params {
+            target_sig.params.push(AbiParam::new(types::I64));
+        }
+        target_sig.returns.push(AbiParam::new(types::I64));
+        let target_id = match self.func_ids.get(name) {
+            Some(&id) => id,
+            None => {
+                let Some(resolved) = resolved else {
+                    return Err(BackendError::ModuleError(format!(
+                        "function `{name}` is used as a value but is neither defined in this unit nor \
+                         resolvable as an import"
+                    )));
+                };
+                let symbol = self.sanitize_symbol(&resolved);
+                let id = self
+                    .module
+                    .declare_function(&symbol, Linkage::Import, &target_sig)
+                    .map_err(|e| BackendError::ModuleError(format!("declare import {symbol}: {e}")))?;
+                self.func_ids.insert(name.to_string(), id);
+                id
+            }
+        };
+        self.emit_boxed_thunk(raw_name, target_id, target_sig, user_params, ret_ty, false, true)
+    }
+
+    /// Define `raw_name` (`(closure, tagged...) -> tagged`) forwarding to
+    /// `target_id` with `target_sig`. `via_addr`: call the target through its
+    /// address (one relocation to the symbol) with `target_sig`, instead of
+    /// through the module-level declaration's own signature.
+    #[allow(clippy::too_many_arguments)] // reason: one thunk shape, two target kinds
+    fn emit_boxed_thunk(
+        &mut self,
+        raw_name: String,
+        target_id: cranelift_module::FuncId,
+        target_sig: Signature,
+        user_params: Vec<TypeId>,
+        ret_ty: TypeId,
+        has_ctx: bool,
+        via_addr: bool,
+    ) -> BackendResult<()> {
+        let skip = usize::from(has_ctx);
         let mut sig = Signature::new(self.module.isa().default_call_conv());
         sig.params.push(AbiParam::new(types::I64)); // closure handle
         for _ in &user_params {
@@ -201,7 +279,13 @@ impl<M: Module> CodegenBackend<M> {
                 call_args.push(unbox_arg(&mut b, &helpers, tagged, *ty, want));
             }
 
-            let call = b.ins().call(target_ref, &call_args);
+            let call = if via_addr {
+                let addr = b.ins().func_addr(types::I64, target_ref);
+                let sig_ref = b.import_signature(target_sig.clone());
+                b.ins().call_indirect(sig_ref, addr, &call_args)
+            } else {
+                b.ins().call(target_ref, &call_args)
+            };
             let results = b.inst_results(call).to_vec();
             let boxed = if results.is_empty() {
                 // VOID lambda: answer tagged NIL (raw word 3).
@@ -415,6 +499,41 @@ pub fn named_fn_value_targets(mir: &crate::mir::MirModule) -> Vec<String> {
                     if !global_names.contains(name) && defined.contains(name) && !out.iter().any(|n| n == name) {
                         out.push(name.to_string());
                     }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Functions with NO body in this unit that some body loads as a value, with
+/// the parameter and result types of the value's `HirType::Function`. A load
+/// whose type is not a function type carries no arity and is left to the
+/// `GlobalLoad` emitter, which refuses it rather than fabricating a pointer.
+pub fn imported_fn_value_targets(mir: &crate::mir::MirModule) -> Vec<(String, Vec<TypeId>, TypeId)> {
+    let defined: std::collections::HashSet<&str> = mir
+        .functions
+        .iter()
+        .filter(|f| !f.blocks.is_empty())
+        .map(|f| f.name.as_str())
+        .collect();
+    let mut out: Vec<(String, Vec<TypeId>, TypeId)> = Vec::new();
+    for func in &mir.functions {
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                let crate::mir::MirInst::GlobalLoad { global_name, ty, .. } = inst else {
+                    continue;
+                };
+                let name = global_name.as_str();
+                if defined.contains(name)
+                    || mir.local_globals.contains(name)
+                    || mir.extern_fn_names.contains(name)
+                    || out.iter().any(|(n, _, _)| n == name)
+                {
+                    continue;
+                }
+                if let Some(crate::hir::HirType::Function { params, ret }) = mir.type_registry.get(*ty) {
+                    out.push((name.to_string(), params.clone(), *ret));
                 }
             }
         }

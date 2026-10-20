@@ -187,6 +187,12 @@ pub struct Lowerer {
     pub(super) extern_fn_names: HashSet<String>,
     /// Function names imported via `use` statements (should not become globals in MIR)
     pub(super) imported_function_names: HashSet<String>,
+    /// `HirType::Function` of each imported free function, for the function
+    /// used as a VALUE. `globals` keeps the RETURN type under the same name
+    /// (callers read it that way), so a value reference typed from `globals`
+    /// claimed `add_one: i64` -- MIR then `BoxInt`ed the code pointer and the
+    /// cranelift backend had no signature to build its `$boxed` entry from.
+    pub(super) imported_function_value_types: HashMap<String, TypeId>,
     /// Canonical `module_prefix__Type` layouts from all compilation units.
     pub(super) global_struct_defs: Option<GlobalStructDefs>,
     /// Bare names that have exactly one canonical nominal owner.  This is a
@@ -304,6 +310,7 @@ impl Lowerer {
             lenient_globals: LenientGlobalCollector::new(),
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
+            imported_function_value_types: HashMap::new(),
             global_struct_defs: None,
             unique_global_struct_owners: None,
             struct_module_owners: None,
@@ -373,6 +380,7 @@ impl Lowerer {
             lenient_globals: LenientGlobalCollector::new(),
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
+            imported_function_value_types: HashMap::new(),
             global_struct_defs: None,
             unique_global_struct_owners: None,
             struct_module_owners: None,
@@ -465,6 +473,7 @@ impl Lowerer {
             lenient_globals: LenientGlobalCollector::new(),
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
+            imported_function_value_types: HashMap::new(),
             global_struct_defs: None,
             unique_global_struct_owners: None,
             struct_module_owners: None,
