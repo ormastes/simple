@@ -90,3 +90,46 @@ fn enum_wire_restore_nil<T>(prototype: T, arity: i64, nil_slots: [i64]) -> Resul
         Ok(restored)
 
 export enum_wire_nil_slot, enum_wire_restore_nil
+
+# Raw, non-authorizing observation of two internally constructed typed values.
+# No externally supplied handle reaches a runtime getter through this API.
+struct ResultI64RawProjectionV1:
+    enum_runtime_id: i64
+    discriminant: i64
+    payload_bits: i64
+
+struct ResultI64RawPairV1:
+    normal: ResultI64RawProjectionV1
+    error: ResultI64RawProjectionV1
+
+fn enum_wire_result_i64_capture_v1(
+    expected_enum_id: i64, expected_ok_tag: i64, expected_err_tag: i64,
+    normal_bits: i64, error_bits: i64
+) -> Result<ResultI64RawPairV1, text>:
+    # These are expectations, not authentication. The compiler adapter obtains
+    # them from canonical registration independently of the observed values.
+    if expected_enum_id < 0 or expected_enum_id > 4294967295 or
+            expected_ok_tag != 0 or expected_err_tag != 1:
+        return Err("FV2-E-RESULT-RAW-SCHEMA: canonical Ok/Err metadata required")
+    val normal: Result<i64, i64> = Ok(normal_bits)
+    val error: Result<i64, i64> = Err(error_bits)
+    unsafe(capabilities: [ffi]):
+        val normal_owner = rt_enum_id(normal)
+        val error_owner = rt_enum_id(error)
+        if normal_owner != expected_enum_id or error_owner != expected_enum_id:
+            return Err("FV2-E-RESULT-RAW-OWNER: typed Result owner mismatch")
+        val normal_tag = rt_enum_discriminant(normal)
+        val error_tag = rt_enum_discriminant(error)
+        if normal_tag != expected_ok_tag or error_tag != expected_err_tag:
+            return Err("FV2-E-RESULT-RAW-TAG: typed Result variant mismatch")
+        # Both owners and tags are checked before either payload is read.
+        # Typed values remain live in this scope; no pointer escapes or is freed.
+        val normal_payload = rt_enum_payload(normal)
+        val error_payload = rt_enum_payload(error)
+        Ok(ResultI64RawPairV1(
+            normal: ResultI64RawProjectionV1(enum_runtime_id: normal_owner,
+                discriminant: normal_tag, payload_bits: normal_payload),
+            error: ResultI64RawProjectionV1(enum_runtime_id: error_owner,
+                discriminant: error_tag, payload_bits: error_payload)))
+
+export ResultI64RawProjectionV1, ResultI64RawPairV1, enum_wire_result_i64_capture_v1
