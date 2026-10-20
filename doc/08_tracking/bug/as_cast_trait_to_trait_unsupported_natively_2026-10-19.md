@@ -98,6 +98,20 @@ MIR lowering error: unresolved method call: close_n at .../cast1/main.spl:27:16
 does not import is not in its cast thunk and answers `nil`. Casting modules
 need not import the implementor (fixture `cross_module`).
 
+**Other limits (Opus review, 2026-10-20):**
+- On a TRAIT-typed source the result is `T?` while HIR types the `Cast` as
+  `T`; only `if val c = e as T:` (or another Optional consumer) is correct.
+  `(e as T).m()` or `val c: T = e as T` would receive an Option handle.
+  Follow-up: type trait-to-trait `as` as `T?` in HIR, or reject non-Optional
+  consumers.
+- An implementation rejected by `native_trait_implementation_rejection`
+  (e.g. relying on default methods) is skipped by the cast thunk and casts
+  to `nil`.
+- Each conversion site emits copy/method thunks for every object-safe trait
+  of the concrete type (code size / compile time, deduplicated per module).
+- Cast-id collisions are refused at the cast site against every visible
+  trait layout, and inside the thunk among the concrete type's traits.
+
 **Interpreter note:** the Rust seed's `as Trait` is a no-op, not a checked
 downcast (`ReadOnly as Closer` is non-nil and `c.close_n()` returns 3). The
 native semantics follow the checked-downcast meaning the original

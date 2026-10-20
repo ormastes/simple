@@ -245,13 +245,21 @@ impl MirLowering:
         if not self.native_trait_layouts[target_index].object_safe:
             self.error_fatal("native trait cast target is not object-safe: {target_owner}", Some(span))
             return local
+        # A thunk only checks ids among its own type's traits; refuse a
+        # target whose id another visible trait shares, or the thunk could
+        # hand back that trait's vtable.
+        val target_id = native_trait_cast_id(target_owner)
+        for other in self.native_trait_layouts:
+            if other.owner != target_owner and native_trait_cast_id(other.owner) == target_id:
+                self.error_fatal("native trait cast id collision: {other.owner} and {target_owner}", Some(span))
+                return local
         val cast_slot = self.native_trait_layouts[source_index].methods.len() + 2
         val signature = native_trait_cast_signature()
         var builder = self.builder
         val data = builder.emit_get_field(mir_operand_copy(local), 0, native_trait_data_pointer_type())
         val table = builder.emit_get_field(mir_operand_copy(local), 1, native_trait_data_pointer_type())
         val thunk = builder.emit_get_field(mir_operand_copy(table), cast_slot, MirType(kind: MirTypeKind.FuncPtr(signature)))
-        val wanted = builder.emit_const_int(native_trait_cast_id(target_owner))
+        val wanted = builder.emit_const_int(target_id)
         val word_result = builder.emit_call_indirect(mir_operand_copy(thunk),
             [mir_operand_copy(data), mir_operand_copy(wanted)], signature, signature.return_type)
         if word_result == nil:
