@@ -35,6 +35,8 @@ mod tests;
 mod entry_closure_global_init_tests;
 #[cfg(test)]
 mod coalesce_array_tests;
+#[cfg(test)]
+mod object_cache_slice_tests;
 
 pub use config::*;
 pub use compiler::*;
@@ -1129,6 +1131,9 @@ impl NativeProjectBuilder {
         // the closure's global type layout / signatures from the same result.
         let incr_hardening = incremental_hardening_requested(self.config.incremental_hardening);
         let mut layout_fp: u64 = 0;
+        // Per-module dependency slices over the same import-map result; `None`
+        // (digest 0) when the cache is off or no cross-module state is injected.
+        let mut slice_index: Option<InterfaceSliceIndex> = None;
         let result = build_import_map(&file_sources, &self.source_dirs, &self.source_root);
         if rust_trace {
             eprintln!(
@@ -1145,6 +1150,7 @@ impl NativeProjectBuilder {
             // digest is a CORRECTNESS input to the cache key, not an opt-in extra.
             if use_incremental {
                 layout_fp = cross_module_layout_fingerprint(&result);
+                slice_index = Some(InterfaceSliceIndex::build(&result));
                 if std::env::var("SIMPLE_DEBUG_LAYOUT_FP").is_ok() {
                     eprintln!(
                         "[layout-fp] fp={:016x} map={} all_mangled={} struct_defs={} enum_defs={} fn_arities={} fn_return_types={} data_exports={} trait_impls={}",
@@ -1225,10 +1231,12 @@ impl NativeProjectBuilder {
 
         // Global build fingerprint: folded into every per-module object cache key
         // whenever the object cache is live. Any change to opt-level, the
-        // entry-closure flag, the target, the linker script, or the closure's
-        // cross-module type layout / signatures invalidates the ENTIRE per-module
-        // cache. Correctness strictly beats speed: this coarse over-invalidation
-        // can only ever cause more rebuilds, never a stale (wrong-binary) reuse.
+        // entry-closure flag, the target, the linker script or instrumentation
+        // invalidates the ENTIRE per-module cache — each of those changes every
+        // module's bytes. The closure's cross-module interfaces are NOT in it:
+        // they enter each key as that module's own slice (`InterfaceSliceIndex`,
+        // below), so an interface change rebuilds the modules that can observe
+        // it and nothing else. `layout` stays in the manifest as a diagnostic.
         //
         // This is deliberately NOT gated on `incr_hardening`. The dependency-blind
         // content-only key reuses a module object after a dependency it was
@@ -1303,11 +1311,17 @@ impl NativeProjectBuilder {
                         &module_prefix,
                         self.config.opt_level,
                     );
-                    // Fold in the global build fingerprint so any cross-module
-                    // structural change (a dependency this object was compiled
-                    // against) misses the cache instead of silently reusing an
-                    // object built against the OLD declarations.
-                    let hash = hash_one(&(base_hash, global_fp_combined));
+                    // Fold in the whole-build fingerprint and THIS module's
+                    // interface slice: every cross-module row the module's
+                    // source names (and the rows those rows' payloads name).
+                    // A dependency this object was compiled against changing
+                    // misses the cache; a change the module cannot observe
+                    // hits it. See `InterfaceSliceIndex`.
+                    let slice_digest = slice_index
+                        .as_ref()
+                        .map(|index| index.digest_for_source(source))
+                        .unwrap_or(0);
+                    let hash = hash_one(&(base_hash, global_fp_combined, slice_digest));
                     let cached_o = objects_dir.join(format!("{:016x}.o", hash));
                     if let Some(cached_bytes) = read_usable_cached_object(&cached_o) {
                         // Cache hit: use the bytes already read for validation
@@ -1319,8 +1333,8 @@ impl NativeProjectBuilder {
                         }
                     }
                     // Persist every cache-eligible object as soon as its compile
-                    // succeeds. The key already includes the full cross-module
-                    // fingerprint, so mangled modules are just as safe to make
+                    // succeeds. The key already includes the module's cross-module
+                    // dependency slice, so mangled modules are just as safe to make
                     // durable here as no-mangle modules. Entry objects and
                     // inline-asm sidecars remain excluded above.
                     immediate_cache = Some(cached_o);
@@ -1887,10 +1901,10 @@ fn write_cache_scope_marker(dir: &Path) {
 ///
 /// NOTE: this is only the per-module BASE key. It intentionally does not know
 /// about the module's dependencies; callers MUST fold in
-/// `GlobalBuildFingerprint::combined()` (which carries the cross-module layout /
-/// signature digest from `cross_module_layout_fingerprint`) before using the
-/// result as a cache filename. Using this value alone reuses an object after a
-/// dependency changed and ships a wrong binary.
+/// `GlobalBuildFingerprint::combined()` (whole-build inputs) AND the module's
+/// `InterfaceSliceIndex::digest_for_source` (the cross-module rows it can
+/// observe) before using the result as a cache filename. Using this value alone
+/// reuses an object after a dependency changed and ships a wrong binary.
 pub(crate) fn object_cache_key(
     content: &str,
     is_entry: bool,
@@ -1958,10 +1972,13 @@ fn fold_unordered(acc: u64, item: u64) -> u64 {
 /// module B's source hash unchanged and B silently reuses an object built
 /// against A's OLD layout — a stale, wrong binary.
 ///
-/// This digest folds in all such inputs. Any change to it invalidates the whole
-/// per-module cache (coarse but strictly conservative: it can only ever cause
-/// MORE rebuilds, never a wrong reuse). It is intentionally order-independent so
-/// nondeterministic map iteration order does not spuriously bust the cache.
+/// This digest folds in all such inputs. It is DIAGNOSTIC only: recorded in the
+/// per-build manifest (`layout=`) and `[layout-fp]` so a wide rebuild can be
+/// attributed to an interface change. It is no longer part of any object key —
+/// folding it in made every interface change, and every change to the closure's
+/// file set, rebuild every module. Per-module keys use `InterfaceSliceIndex`.
+/// It is intentionally order-independent so nondeterministic map iteration
+/// order does not make two identical builds disagree.
 pub(crate) fn cross_module_layout_fingerprint(result: &imports::ImportMapResult) -> u64 {
     let mut fp: u64 = 0;
     for (k, v) in result.map.iter() {
@@ -2017,8 +2034,511 @@ pub(crate) fn cross_module_layout_fingerprint(result: &imports::ImportMapResult)
     fp
 }
 
+/// Identifier tokens of a module's source text: maximal `[A-Za-z0-9_]+` runs
+/// that do not start with a digit. Comments and string literals are NOT
+/// stripped — every extra token can only widen the dependency slice, never
+/// narrow it, so the cheap over-approximation is the safe one.
+pub(crate) fn source_identifier_tokens(source: &str) -> std::collections::HashSet<String> {
+    let mut tokens = std::collections::HashSet::new();
+    for run in source.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+        if run.is_empty() || run.as_bytes()[0].is_ascii_digit() {
+            continue;
+        }
+        tokens.insert(run.to_string());
+    }
+    tokens
+}
+
+/// The identifier(s) a cross-module table entry is LOOKED UP BY. Mangled
+/// symbols are `module__prefix__Name` or `module__prefix__Type_dot_method`
+/// (`sanitize_mangled` turns `.` into `_dot_`); raw keys are `Name` or
+/// `Type.method`. The module-prefix segments are deliberately dropped: a module
+/// addresses an entry by its name, never by the owner's path, and keeping
+/// common path words (`app`, `lib`, `compiler`) in the slice would drag most of
+/// the closure into every module's key.
+///
+/// The owner prefix is not parsed: names may themselves contain `__`
+/// (`__init__`, `__test__`) or non-identifier characters (`empty?`), so a
+/// "tail after the last `__`" rule indexes `Foo_dot___init__` under nothing and
+/// that row would never enter any slice. Instead every suffix that follows a
+/// `__` (plus the whole key) is a candidate, split at `.`/`_dot_`, and each
+/// candidate contributes its identifier tokens. A suffix that still contains a
+/// path (`mcp__main__helper`) stays ONE token that no source spells, so path
+/// words do not leak in; only the real name segments match. Extra candidates
+/// can only widen a slice.
+pub(crate) fn key_name_parts(key: &str) -> Vec<String> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut push_candidate = |candidate: &str| {
+        let dotted = candidate.replace("_dot_", ".");
+        for text in [candidate, dotted.as_str()] {
+            for piece in text.split('.') {
+                let mut tokens: Vec<String> = source_identifier_tokens(piece).into_iter().collect();
+                tokens.sort();
+                for token in tokens {
+                    if !parts.contains(&token) {
+                        parts.push(token);
+                    }
+                }
+            }
+        }
+        // `Type.method` is also reached through the joined spellings
+        // `resolve_name_variants` tries (`type_method`, `typemethod`); the
+        // source side emits the same forms (`source_dotted_pair_tokens`).
+        let segments: Vec<&str> = dotted.split('.').filter(|s| !s.is_empty()).collect();
+        if segments.len() >= 2 {
+            let owner = segments[segments.len() - 2];
+            let member = segments[segments.len() - 1];
+            for joined in [format!("{}_{}", owner.to_lowercase(), member), fuzzy_norm(&format!("{owner}{member}"))] {
+                if !joined.is_empty() && !parts.contains(&joined) {
+                    parts.push(joined);
+                }
+            }
+        }
+    };
+    push_candidate(key);
+    let bytes = key.as_bytes();
+    for i in 0..bytes.len().saturating_sub(1) {
+        if bytes[i] == b'_' && bytes[i + 1] == b'_' {
+            // `_` is ASCII, so `i + 2` is a char boundary.
+            push_candidate(&key[i + 2..]);
+        }
+    }
+    parts
+}
+
+/// `format!("{value:?}")` with every `Span { .. }` group removed. Parser types
+/// and default-parameter expressions carry source spans, so the raw Debug text
+/// of a declaration changes when a BODY edit above it shifts a line; hashing
+/// that would turn body-only edits into interface changes.
+pub(crate) fn span_free_debug<T: std::fmt::Debug>(value: &T) -> String {
+    let raw = format!("{value:?}");
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw.as_str();
+    while let Some(start) = rest.find("Span {") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start..];
+        let mut depth = 0usize;
+        let mut end = after.len();
+        for (idx, ch) in after.char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = idx + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Identifiers a module uses as MEMBERS: `[A-Za-z0-9_]+` runs immediately
+/// preceded by `.` (`p.y`, `Mode.Fast`, `x.len()`). Field-name rows of the
+/// slice match only these: a struct's field name reaches a module's codegen
+/// solely through a `.field` access (receiver-blind `resolve_global_field_info`
+/// and the `ambiguous_field_names` set), never through a local or parameter
+/// that happens to share the name.
+pub(crate) fn source_member_tokens(source: &str) -> std::collections::HashSet<String> {
+    // Same identifier alphabet as `source_identifier_tokens`, so a member
+    // token is always also an `all` token (the `member_only` filter compares
+    // the two). Whitespace between `.` and the name (`x.\n    y`) still counts.
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut tokens = std::collections::HashSet::new();
+    let mut after_dot = false;
+    let mut current = String::new();
+    let mut current_is_member = false;
+    for ch in source.chars().chain(std::iter::once(' ')) {
+        if is_ident(ch) {
+            if current.is_empty() {
+                current_is_member = after_dot;
+            }
+            current.push(ch);
+            continue;
+        }
+        if !current.is_empty() {
+            if current_is_member && !current.as_bytes()[0].is_ascii_digit() {
+                tokens.insert(std::mem::take(&mut current));
+            } else {
+                current.clear();
+            }
+            after_dot = false;
+        }
+        if ch == '.' {
+            after_dot = true;
+        } else if !ch.is_whitespace() {
+            after_dot = false;
+        }
+    }
+    tokens
+}
+
+/// Source-derived token sets of one module, the input to a slice digest.
+pub(crate) struct ModuleTokens {
+    pub all: std::collections::HashSet<String>,
+    pub members: std::collections::HashSet<String>,
+}
+
+impl ModuleTokens {
+    pub(crate) fn of_source(source: &str) -> Self {
+        let mut all = expand_fuzzy_tokens(source_identifier_tokens(source));
+        all.extend(source_dotted_pair_tokens(source));
+        // `with` lowers to `__enter__` / `__exit__` calls the source never spells.
+        if all.contains("with") {
+            all.insert("__enter__".to_string());
+            all.insert("__exit__".to_string());
+        }
+        ModuleTokens {
+            all,
+            members: {
+                let mut members = source_member_tokens(source);
+                members.extend(source_label_tokens(source));
+                expand_fuzzy_tokens(members)
+            },
+        }
+    }
+}
+
+/// Identifiers followed by a single `:` INSIDE parentheses (`Pt(x: 1)`,
+/// `case Pt(x:)`): named arguments and pattern fields name a struct field
+/// without a `.`. Treated as member tokens so field-name rows match them.
+/// Parameter declarations (`fn f(k: i64)`) match too, which only widens the
+/// slice; top-level `val p: Pt` / field declarations do not.
+pub(crate) fn source_label_tokens(source: &str) -> std::collections::HashSet<String> {
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let chars: Vec<char> = source.chars().collect();
+    let mut out = std::collections::HashSet::new();
+    let mut depth: usize = 0;
+    let mut i = 0;
+    while i < chars.len() {
+        if is_ident(chars[i]) {
+            let start = i;
+            while i < chars.len() && is_ident(chars[i]) {
+                i += 1;
+            }
+            if depth == 0 {
+                continue;
+            }
+            let mut j = i;
+            while j < chars.len() && (chars[j] == ' ' || chars[j] == '\t') {
+                j += 1;
+            }
+            let single_colon = j < chars.len() && chars[j] == ':' && chars.get(j + 1) != Some(&':');
+            if single_colon && !chars[start].is_ascii_digit() {
+                out.insert(chars[start..i].iter().collect());
+            }
+        } else {
+            match chars[i] {
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
+/// `name.to_lowercase()` with every `_` removed: the form the import map's
+/// fuzzy fallbacks compare (`imports.rs` `resolve_name_variants`
+/// `lower_no_sep`, and the enum-variant matcher's
+/// `to_lowercase().replace("_", "")`).
+pub(crate) fn fuzzy_norm(name: &str) -> String {
+    name.to_lowercase().replace('_', "")
+}
+
+/// Add the spellings the import map's FUZZY resolution derives from a source
+/// name: every tail after a `_` (`resolve_by_suffix` and the enum-variant
+/// matcher cut `foo_bar` at each `_` and look up `bar`) and the
+/// lowercase / underscore-free form. Without these, adding a function `bar`
+/// elsewhere could rebind an unresolved `foo_bar` while no slice changed.
+pub(crate) fn expand_fuzzy_tokens(tokens: std::collections::HashSet<String>) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::with_capacity(tokens.len() * 2);
+    for token in tokens {
+        for (i, _) in token.match_indices('_') {
+            let tail = &token[i + 1..];
+            if !tail.is_empty() && !tail.as_bytes()[0].is_ascii_digit() {
+                out.insert(tail.to_string());
+            }
+        }
+        let norm = fuzzy_norm(&token);
+        if !norm.is_empty() {
+            out.insert(norm);
+        }
+        out.insert(token);
+    }
+    out
+}
+
+/// For every `Type.member` adjacency in the source, the joined forms
+/// `resolve_name_variants` looks up: `type_member` (type lowercased) and the
+/// fully normalized `typemember`.
+pub(crate) fn source_dotted_pair_tokens(source: &str) -> std::collections::HashSet<String> {
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut out = std::collections::HashSet::new();
+    let chars: Vec<char> = source.chars().collect();
+    let mut i = 0;
+    let mut prev: Option<String> = None;
+    while i < chars.len() {
+        if is_ident(chars[i]) {
+            let start = i;
+            while i < chars.len() && is_ident(chars[i]) {
+                i += 1;
+            }
+            let run: String = chars[start..i].iter().collect();
+            if let Some(owner) = prev.take() {
+                out.insert(format!("{}_{}", owner.to_lowercase(), run));
+                out.insert(fuzzy_norm(&format!("{owner}{run}")));
+            }
+            if i < chars.len() && chars[i] == '.' {
+                prev = Some(run);
+                i += 1;
+            }
+        } else {
+            prev = None;
+            i += 1;
+        }
+    }
+    out
+}
+
+/// One cross-module table row, indexed under every identifier it is addressed
+/// by. `extra_tokens` are the identifiers inside its payload (field types,
+/// enum payload types, return types, default expressions): when a module
+/// depends on this row it transitively depends on the rows THOSE name, e.g. a
+/// struct field of struct type whose own layout the module never names.
+/// `member_only` rows (indexed under a FIELD name) match member tokens only.
+struct InterfaceSliceEntry {
+    digest: u64,
+    extra_tokens: Vec<String>,
+    member_only: bool,
+}
+
+/// Per-build index over `ImportMapResult`, from which each module's
+/// dependency digest is sliced by the identifiers that module mentions.
+///
+/// Why slicing by NAME is the sound granule here (and slicing by `use`-imported
+/// module is not): the lowerer resolves calls through the global import map
+/// with no `use` at all (`compiler.rs` "Pass 0.5c"), `resolve_global_field_info`
+/// scans EVERY struct in the closure for a field name, codegen answers method
+/// calls on erased receivers from a suffix index over `all_mangled`, and the
+/// `ambiguous_field_names` set is computed over all struct defs. Each of those
+/// is keyed by an identifier that necessarily appears in the module's source
+/// text, so "every row addressed by a token of this module, plus the rows those
+/// rows' payloads name" is a superset of what the module's object can observe.
+///
+/// `struct_module_owners` (declaration path -> owner prefix) is intentionally
+/// not indexed: its only consumer re-keys into `struct_defs` as
+/// `{owner}__{Type}`, and that row — including the owner prefix — is already
+/// in the slice under `Type`. Adding a module to the closure must not touch
+/// modules that never name anything in it.
+pub(crate) struct InterfaceSliceIndex {
+    by_name: std::collections::HashMap<String, Vec<InterfaceSliceEntry>>,
+    /// Seeds added to EVERY module's token set: the names of every enum in
+    /// the closure. `Lowerer::register_global_enums` (compiler.rs, W15-H)
+    /// registers the whole project enum table into each module's type
+    /// registry and globals whether or not the module names it, and codegen
+    /// then declares each one as an import (measured: adding `enum Mode` in
+    /// an unrelated module adds an `UND extra__Mode` symbol to every other
+    /// module's object). Seeding the names pulls each enum row and its
+    /// payload closure into every slice, so an enum add / remove / payload
+    /// change rebuilds every module; body edits and non-enum interface
+    /// changes stay granular. Drop this only once that registration is
+    /// limited to the enums a module names.
+    universal_tokens: Vec<String>,
+}
+
+impl InterfaceSliceIndex {
+    pub(crate) fn build(result: &imports::ImportMapResult) -> Self {
+        let mut index = InterfaceSliceIndex {
+            by_name: std::collections::HashMap::new(),
+            universal_tokens: Vec::new(),
+        };
+        let sorted = |items: &[String]| {
+            let mut v = items.to_vec();
+            v.sort();
+            v
+        };
+        for (k, v) in result.map.iter() {
+            index.add(&key_name_parts(k), hash_one(&("map", k, v)), Vec::new(), false);
+        }
+        for k in result.ambiguous.iter() {
+            index.add(&key_name_parts(k), hash_one(&("amb", k)), Vec::new(), false);
+        }
+        for (k, v) in result.all_mangled.iter() {
+            index.add(&key_name_parts(k), hash_one(&("all", k, sorted(v))), Vec::new(), false);
+        }
+        for (prefix, inner) in result.re_exports.iter() {
+            for (ik, iv) in inner.iter() {
+                index.add(&key_name_parts(ik), hash_one(&("reexp", prefix, ik, iv)), Vec::new(), false);
+            }
+        }
+        for (trait_name, impls) in result.trait_impls.iter() {
+            let mut names = key_name_parts(trait_name);
+            for impl_name in impls {
+                names.extend(key_name_parts(impl_name));
+            }
+            // Dependency injection (`mir/lower/lowering_di.rs`) emits calls to
+            // `{Impl}.new` for implementers the source never names, so a module
+            // that reaches this row depends on every implementer's own rows.
+            let mut implementers: Vec<String> = impls.iter().flat_map(|i| key_name_parts(i)).collect();
+            implementers.sort();
+            implementers.dedup();
+            index.add(&names, hash_one(&("trait", trait_name, sorted(impls))), implementers, false);
+        }
+        for owner in result.vtable_type_owners.iter() {
+            index.add(&key_name_parts(owner), hash_one(&("vto", owner)), Vec::new(), false);
+        }
+        for (owner, symbol) in result.vtable_symbols.iter() {
+            index.add(&key_name_parts(owner), hash_one(&("vts", owner, symbol)), Vec::new(), false);
+        }
+        for (k, fields) in result.struct_defs.iter() {
+            let payload = span_free_debug(fields);
+            let digest = hash_one(&("struct", k, &payload));
+            let extra = payload_tokens(&payload);
+            index.add(&key_name_parts(k), digest, extra.clone(), false);
+            let field_names: Vec<String> = fields.iter().map(|(f, _)| f.clone()).collect();
+            index.add(&field_names, digest, extra, true);
+        }
+        for (bare, owner) in result.unique_struct_owners.iter() {
+            index.add(std::slice::from_ref(bare), hash_one(&("uso", bare, owner)), Vec::new(), false);
+        }
+        for (bare, variants) in result.duplicate_struct_defs.iter() {
+            let payload = span_free_debug(variants);
+            let digest = hash_one(&("dup", bare, &payload));
+            let extra = payload_tokens(&payload);
+            index.add(std::slice::from_ref(bare), digest, extra.clone(), false);
+            let field_names: Vec<String> = variants.iter().flatten().map(|(f, _)| f.clone()).collect();
+            index.add(&field_names, digest, extra, true);
+        }
+        for k in result.enum_defs.keys() {
+            index.universal_tokens.extend(key_name_parts(k));
+        }
+        index.universal_tokens.sort();
+        index.universal_tokens.dedup();
+        for (k, variants) in result.enum_defs.iter() {
+            let payload = span_free_debug(variants);
+            let mut names = key_name_parts(k);
+            names.extend(variants.iter().map(|(v, _)| v.clone()));
+            index.add(&names, hash_one(&("enum", k, &payload)), payload_tokens(&payload), false);
+        }
+        for (owner, runtime_name) in result.enum_runtime_names.iter() {
+            index.add(&key_name_parts(owner), hash_one(&("ern", owner, runtime_name)), Vec::new(), false);
+        }
+        for m in result.data_exports.iter() {
+            index.add(&key_name_parts(m), hash_one(&("data", m)), Vec::new(), false);
+        }
+        for (m, arity) in result.fn_arities.iter() {
+            index.add(&key_name_parts(m), hash_one(&("arity", m, arity)), Vec::new(), false);
+        }
+        for (k, ty) in result.fn_return_types.iter() {
+            let payload = span_free_debug(ty);
+            index.add(&key_name_parts(k), hash_one(&("ret", k, &payload)), payload_tokens(&payload), false);
+        }
+        for (m, defaults) in result.method_param_defaults.iter() {
+            let payload = span_free_debug(defaults);
+            index.add(&key_name_parts(m), hash_one(&("mdef", m, &payload)), payload_tokens(&payload), false);
+        }
+        for (m, defaults) in result.interface_param_defaults.iter() {
+            let payload = span_free_debug(defaults);
+            index.add(&key_name_parts(m), hash_one(&("pdef", m, &payload)), payload_tokens(&payload), false);
+        }
+        // `codegen/instr/closures_structs.rs` routes a static method call to
+        // the inline ctype lowering when ANY import-map entry mentioning
+        // `ctype` merely ends with the method name -- a substring match no
+        // token can express. Those rows enter every slice.
+        for (k, v) in result.map.iter() {
+            if k.contains("ctype") || v.contains("ctype") {
+                index.universal_tokens.extend(key_name_parts(k));
+            }
+        }
+        index.universal_tokens.sort();
+        index.universal_tokens.dedup();
+        index
+    }
+
+    fn add(&mut self, names: &[String], digest: u64, extra_tokens: Vec<String>, member_only: bool) {
+        let mut seen = std::collections::HashSet::new();
+        let mut keyed: Vec<String> = names.to_vec();
+        keyed.extend(names.iter().map(|n| fuzzy_norm(n)).filter(|n| !n.is_empty()));
+        for name in &keyed {
+            if !seen.insert(name.as_str()) {
+                continue;
+            }
+            self.by_name.entry(name.clone()).or_default().push(InterfaceSliceEntry {
+                digest,
+                extra_tokens: extra_tokens.clone(),
+                member_only,
+            });
+        }
+    }
+
+    /// Digest of every indexed row addressed by the module's tokens, closed
+    /// over the identifiers inside matched payloads. Order-independent: the
+    /// matched (name, row) digests are sorted before hashing, so HashMap
+    /// iteration order cannot perturb the result. Absence is observable too — a
+    /// row that appears or disappears under a module's token changes the digest.
+    pub(crate) fn digest_for_tokens(&self, tokens: &ModuleTokens) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut seen: std::collections::HashSet<String> = tokens.all.clone();
+        seen.extend(self.universal_tokens.iter().cloned());
+        let mut queue: Vec<String> = seen.iter().cloned().collect();
+        let mut matched: Vec<u64> = Vec::new();
+        while let Some(token) = queue.pop() {
+            let Some(entries) = self.by_name.get(&token) else {
+                continue;
+            };
+            let is_member = tokens.members.contains(&token);
+            for entry in entries {
+                if entry.member_only && !is_member {
+                    continue;
+                }
+                matched.push(hash_one(&(&token, entry.digest)));
+                for extra in &entry.extra_tokens {
+                    if seen.insert(extra.clone()) {
+                        queue.push(extra.clone());
+                    }
+                }
+            }
+        }
+        matched.sort_unstable();
+        matched.dedup();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        matched.len().hash(&mut hasher);
+        for digest in matched {
+            digest.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    /// Dependency digest for one module given its source text.
+    pub(crate) fn digest_for_source(&self, source: &str) -> u64 {
+        self.digest_for_tokens(&ModuleTokens::of_source(source))
+    }
+}
+
+/// Identifiers inside a span-free Debug payload (type names, field names,
+/// variant names, expression atoms), used as the transitive seeds of a slice.
+fn payload_tokens(payload: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = source_identifier_tokens(payload).into_iter().collect();
+    tokens.sort();
+    tokens
+}
+
 /// The component hashes of the global build fingerprint. Stored in the
 /// per-build manifest so a full-rebuild reason can name WHICH input changed.
+///
+/// `layout` is the whole-closure interface digest. It is recorded for the
+/// manifest / `[layout-fp]` diagnostics only and is NOT part of `combined()`:
+/// folding it into every object key made any interface change anywhere — or
+/// any change to the closure's file set — invalidate every module
+/// (`compiled=1367 reused=0` on a two-file edit). Each module's object now
+/// keys on its own interface slice (`InterfaceSliceIndex`) instead.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct GlobalBuildFingerprint {
     pub producer: u64,
@@ -2031,7 +2551,10 @@ pub(crate) struct GlobalBuildFingerprint {
 }
 
 impl GlobalBuildFingerprint {
-    /// Collapse the components into a single digest folded into each object key.
+    /// Collapse the whole-build components into a single digest folded into
+    /// each object key. Every component here is one that changes the bytes of
+    /// EVERY module's object; `layout` is deliberately excluded (see the struct
+    /// doc) because it is per-module in nature.
     pub(crate) fn combined(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -2040,13 +2563,14 @@ impl GlobalBuildFingerprint {
         self.entry_closure.hash(&mut hasher);
         self.target.hash(&mut hasher);
         self.linker_script.hash(&mut hasher);
-        self.layout.hash(&mut hasher);
         self.instrumentation.hash(&mut hasher);
         hasher.finish()
     }
 
     /// Human-readable name of the first component that differs from `prev`
-    /// (used to explain a full rebuild). Returns None when unchanged.
+    /// (used to explain a full rebuild). Returns None when unchanged. A
+    /// `layout` difference is not a full-rebuild reason: it means SOME
+    /// interface changed, and only the modules whose slice covers it rebuild.
     pub(crate) fn changed_reason(&self, prev: &GlobalBuildFingerprint) -> Option<&'static str> {
         if self.producer != prev.producer {
             Some("compiler producer changed")
@@ -2058,8 +2582,6 @@ impl GlobalBuildFingerprint {
             Some("target changed")
         } else if self.linker_script != prev.linker_script {
             Some("linker script changed")
-        } else if self.layout != prev.layout {
-            Some("cross-module type layout / signatures changed")
         } else if self.instrumentation != prev.instrumentation {
             Some("codegen instrumentation changed")
         } else {

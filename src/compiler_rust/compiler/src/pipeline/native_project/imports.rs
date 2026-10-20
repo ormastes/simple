@@ -76,6 +76,13 @@ pub(crate) struct ImportMapResult {
     pub fn_return_types: std::collections::HashMap<String, simple_parser::Type>,
     /// Defaults for uniquely resolved Owner.method symbols, excluding self.
     pub method_param_defaults: std::collections::HashMap<String, Vec<Option<simple_parser::ast::Expr>>>,
+    /// Every declared parameter default in the closure, keyed by the
+    /// owner-mangled symbol (`prefix__fn`, `prefix__Type_dot_method`), for
+    /// free functions AND for methods whose bare name is not unique. Not read
+    /// by codegen: the HIR import loader inlines these defaults at call sites
+    /// straight from the imported file, so the object cache key
+    /// (`InterfaceSliceIndex`) needs them to see a default-only change.
+    pub interface_param_defaults: std::collections::HashMap<String, Vec<Option<simple_parser::ast::Expr>>>,
 }
 
 fn record_method_defaults(
@@ -364,6 +371,7 @@ pub(crate) fn build_import_map(
     // operations whose tagged ABI differs from raw machine integers.
     let mut fn_return_types: HashMap<String, simple_parser::Type> = HashMap::new();
     let mut mangled_method_defaults: std::collections::HashMap<String, Vec<Option<simple_parser::ast::Expr>>> = HashMap::new();
+    let mut interface_param_defaults: std::collections::HashMap<String, Vec<Option<simple_parser::ast::Expr>>> = HashMap::new();
 
     // Parse each physical module once, in parallel. Both collection passes
     // below walk `parsed` in `file_sources` order, so every first-wins /
@@ -408,6 +416,12 @@ pub(crate) fn build_import_map(
             for item in &ast.items {
                 match item {
                     simple_parser::ast::Node::Function(f) => {
+                        if f.params.iter().any(|p| p.default.is_some()) {
+                            interface_param_defaults.insert(
+                                format!("{}__{}", prefix, f.name),
+                                f.params.iter().map(|p| p.default.clone()).collect(),
+                            );
+                        }
                         if !f.body.statements.is_empty() {
                             let mangled = format!("{}__{}", prefix, f.name);
                             fn_arities.insert(mangled.clone(), f.params.len());
@@ -1083,8 +1097,10 @@ pub(crate) fn build_import_map(
         if !raw.contains('.') || owners.len() != 1 { return None; }
         mangled_method_defaults.get(&owners[0]).map(|defaults| (raw.clone(), defaults.clone()))
     }).collect();
+    interface_param_defaults.extend(mangled_method_defaults.iter().map(|(k, v)| (k.clone(), v.clone())));
     ImportMapResult {
         method_param_defaults,
+        interface_param_defaults,
         map,
         ambiguous,
         all_mangled: raw_to_mangled,
