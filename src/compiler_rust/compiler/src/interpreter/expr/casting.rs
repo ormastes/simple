@@ -144,9 +144,14 @@ fn cast_to_numeric(val: Value, target: NumericType) -> Result<Value, CompileErro
             let code_point = s.chars().next().unwrap() as i64;
             Ok(finalize_numeric_cast(cast_int_to_numeric(code_point, target), target))
         }
-        // `instance as i64` is the class instance's identity word (its address
-        // when compiled natively). The driver keys per-compilation state on it.
-        // Only a `class` value has an identity; a struct `Object` is a copy.
+        // `obj as i64` is the object's identity word (its address when compiled
+        // natively); the driver keys per-compilation state on it. The interpreter
+        // carries `class` values as `Object`, whose field map is shared by every
+        // clone until a write copies it, so the word is stable for as long as the
+        // value is not mutated through a copy.
+        Value::Object { ref fields, .. } if matches!(target, NumericType::I64 | NumericType::U64) => Ok(
+            finalize_numeric_cast(cast_int_to_numeric(std::sync::Arc::as_ptr(fields) as usize as i64, target), target),
+        ),
         Value::ClassInstance(ref instance) if matches!(target, NumericType::I64 | NumericType::U64) => {
             Ok(finalize_numeric_cast(
                 cast_int_to_numeric(std::sync::Arc::as_ptr(instance) as usize as i64, target),
@@ -285,8 +290,10 @@ mod tests {
         assert_eq!(wa, cast_value(a, &i64_ty).unwrap(), "same instance, same word");
         assert_ne!(wa, cast_value(b, &i64_ty).unwrap(), "distinct instances differ");
         assert!(!matches!(wa, Value::Int(0)));
-        let obj = Value::Object { class: "S".into(), fields: Arc::new(HashMap::new()) };
-        assert!(cast_value(obj, &i64_ty).is_err(), "struct values have no identity");
+        let shared = Arc::new(HashMap::new());
+        let o1 = Value::Object { class: "S".into(), fields: Arc::clone(&shared) };
+        let o2 = Value::Object { class: "S".into(), fields: shared };
+        assert_eq!(cast_value(o1, &i64_ty).unwrap(), cast_value(o2, &i64_ty).unwrap(), "clones share the word");
         let f32_ty = Type::Simple("f32".to_string());
         let c = Value::ClassInstance(Arc::new(ClassInstance::new("A".into(), HashMap::new())));
         assert!(cast_value(c, &f32_ty).is_err());
