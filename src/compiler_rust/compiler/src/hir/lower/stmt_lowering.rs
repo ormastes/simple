@@ -155,6 +155,51 @@ impl Lowerer {
         self.trait_declaration_for_current_owner(name)
     }
 
+    /// `x: Trait?` — remember the payload's declared trait on the slot side
+    /// map (never on `x` itself, whose own methods are Option methods).
+    pub(super) fn record_optional_trait_payload(
+        &self, declared: Option<&ast::Type>, local_index: usize, ctx: &mut FunctionContext,
+    ) {
+        let Some(ast::Type::Optional(inner)) = declared else { return; };
+        if let Some(dispatch) = self.declared_trait_dispatch(inner) {
+            ctx.optional_trait_payloads.insert(local_index, dispatch);
+        }
+    }
+
+    /// The if-let / match subject temp inherits the payload trait of the
+    /// `Option<Trait>` local it was read from.
+    pub(super) fn carry_optional_trait_subject(&self, subject: &Expr, subject_idx: usize, ctx: &mut FunctionContext) {
+        let Expr::Identifier(name) = subject else { return; };
+        let Some(dispatch) = ctx.lookup(name).and_then(|index| ctx.optional_trait_payloads.get(&index)).cloned() else {
+            return;
+        };
+        ctx.optional_trait_payloads.insert(subject_idx, dispatch);
+    }
+
+    /// Give the PAYLOAD binding of an `Option<Trait>` subject its declared
+    /// trait owner so `binding.method()` lowers to vtable dispatch instead of
+    /// a bare-name call. `if val x = opt` binds the payload (`allow_identifier`);
+    /// in a match arm a bare identifier binds the Option itself, so only
+    /// `Some(x)` qualifies there.
+    pub(crate) fn bind_optional_trait_payload(
+        &self, pattern: &Pattern, subject_idx: usize, allow_identifier: bool, ctx: &mut FunctionContext,
+    ) {
+        let Some(dispatch) = ctx.optional_trait_payloads.get(&subject_idx).cloned() else { return; };
+        let name = match pattern {
+            Pattern::Identifier(name) | Pattern::MutIdentifier(name) if allow_identifier => name,
+            Pattern::Enum { variant, payload: Some(payload), .. } if variant == "Some" && payload.len() == 1 => {
+                match &payload[0] {
+                    Pattern::Identifier(name) | Pattern::MutIdentifier(name) => name,
+                    _ => return,
+                }
+            }
+            _ => return,
+        };
+        if let Some(local) = ctx.lookup(name).and_then(|index| ctx.locals.get_mut(index)) {
+            local.trait_dispatch_owner = Some(dispatch);
+        }
+    }
+
     pub(super) fn trait_declaration_for_current_owner(&self, authored_name: &str) -> Option<HirTraitDispatch> {
         self.trait_declaration_in_file(authored_name, self.current_file.as_deref())
     }
@@ -328,6 +373,7 @@ impl Lowerer {
                 let subject_ty = subject.ty;
                 let subject_idx = ctx.locals.len();
                 ctx.add_local("$if_let_subject_elif".to_string(), subject_ty, Mutability::Immutable);
+                self.carry_optional_trait_subject(condition_expr, subject_idx, ctx);
                 let store = HirStmt::Let {
                     local_index: subject_idx,
                     ty: subject_ty,
@@ -579,6 +625,7 @@ impl Lowerer {
                 );
                 let local_index = ctx.add_local(name, ty, let_stmt.mutability);
                 ctx.locals[local_index].trait_dispatch_owner = trait_dispatch_owner;
+                self.record_optional_trait_payload(let_stmt.ty.as_ref().or(pattern_type), local_index, ctx);
                 if let Some(result_payload_types) = result_projection_type {
                     ctx.result_projection_types.insert(local_index, result_payload_types);
                 }
@@ -792,6 +839,7 @@ impl Lowerer {
                     // 2. Create temp local for subject value
                     let subject_idx = ctx.locals.len();
                     ctx.add_local("$if_let_subject".to_string(), subject_ty, Mutability::Immutable);
+                    self.carry_optional_trait_subject(condition_expr, subject_idx, ctx);
 
                     let store_stmt = HirStmt::Let {
                         local_index: subject_idx,
@@ -938,6 +986,7 @@ impl Lowerer {
 
                     let subject_idx = ctx.locals.len();
                     ctx.add_local("$while_let_subject".to_string(), subject_ty, Mutability::Immutable);
+                    self.carry_optional_trait_subject(condition_expr, subject_idx, ctx);
                     let store_stmt = HirStmt::Let {
                         local_index: subject_idx,
                         ty: subject_ty,
@@ -1627,6 +1676,7 @@ impl Lowerer {
         // Create a temporary local to hold the subject value
         let subject_idx = ctx.locals.len();
         ctx.add_local("$match_subject".to_string(), subject_ty, Mutability::Immutable);
+        self.carry_optional_trait_subject(&match_stmt.subject, subject_idx, ctx);
 
         // Store the subject value
         let store_stmt = HirStmt::Let {
@@ -1714,6 +1764,7 @@ impl Lowerer {
         bindings: &[(String, TypeId)],
         ctx: &mut FunctionContext,
     ) -> Vec<HirStmt> {
+        self.bind_optional_trait_payload(pattern, subject_idx, true, ctx);
         if let Pattern::Identifier(name) | Pattern::MutIdentifier(name) = pattern {
             let mut binding_stmts = Vec::new();
             if bindings.iter().any(|(binding, _)| binding == name) {
@@ -1771,6 +1822,7 @@ impl Lowerer {
         bindings: &[(String, TypeId)],
         ctx: &mut FunctionContext,
     ) -> Vec<HirStmt> {
+        self.bind_optional_trait_payload(arm_pattern, subject_idx, false, ctx);
         // An or-pattern whose alternatives destructure a payload must bind per
         // alternative. Binding from the FIRST alternative only (the previous
         // behaviour) emitted that alternative's extraction shape for every

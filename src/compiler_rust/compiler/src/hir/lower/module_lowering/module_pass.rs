@@ -2060,6 +2060,7 @@ impl Lowerer {
                             }
                         }
                     }
+                    self.record_class_with_trait_impls(c, &ast_module.items)?;
                 }
                 Node::Struct(s) => {
                     // Lower struct methods with type invariant injection
@@ -2794,6 +2795,75 @@ fn select_impl_trait_by_overlap<'a>(
 
 /// The trait named by `struct Name(Trait):`, carried by the parser as a
 /// synthetic `implements(Trait)` attribute (parser/src/types_def/mod.rs).
+impl Lowerer {
+    /// `class Name with Trait:` names a TRAIT in its `with` clause (the parser
+    /// stores every `with` entry in `mixins`). Before this, only a real `mixin`
+    /// declaration was honoured, so a trait listed there was dropped: no
+    /// HirImpl, no vtable, the trait looked impl-less, and every call through a
+    /// trait-typed receiver became a bare-name call that native codegen bound
+    /// to the FIRST same-named method in the link (or a nil stub). Record the
+    /// implementation exactly as `impl Trait for Name` would.
+    /// doc/08_tracking/bug/trait_receiver_cross_unit_bare_call_stubbed_2026-10-20.md
+    ///
+    /// A class that does not define every abstract trait method keeps the old
+    /// (duck-typed) behaviour instead of becoming a new lowering error.
+    fn record_class_with_trait_impls(&mut self, c: &ast::ClassDef, items: &[Node]) -> LowerResult<()> {
+        for mixin_ref in &c.mixins {
+            let trait_name = &mixin_ref.name;
+            if items.iter().any(|item| matches!(item, Node::Mixin(m) if &m.name == trait_name)) {
+                continue;
+            }
+            let owner = declaration_owner(&c.attributes, &c.methods);
+            let local_trait = select_implicit_struct_trait(
+                items, trait_name, owner.as_deref(), &self.flatten_owner_import_bindings,
+            );
+            let imported_trait = if local_trait.is_none()
+                && owner.is_none()
+                && !items.iter().any(|item| matches!(item, Node::Trait(t) if &t.name == trait_name))
+            {
+                self.trait_declaration_for_current_owner(trait_name)
+            } else {
+                None
+            };
+            let Some(trait_def) = local_trait.cloned().or_else(|| imported_trait.as_ref().map(|t| t.declaration.clone()))
+            else {
+                continue;
+            };
+            let own: std::collections::HashSet<&str> = c.methods.iter().map(|m| m.name.as_str()).collect();
+            if trait_def.methods.iter().any(|m| m.is_abstract && !own.contains(m.name.as_str())) {
+                continue;
+            }
+            let mut methods_map: HashMap<String, String> = c.methods.iter()
+                .map(|m| (m.name.clone(), format!("{}.{}", c.name, m.name)))
+                .collect();
+            for default_method in &trait_def.methods {
+                if default_method.is_abstract || own.contains(default_method.name.as_str()) {
+                    continue;
+                }
+                let previous_file = self.current_file.clone();
+                if let Some(declaration) = &imported_trait {
+                    self.current_file = Some(declaration.source_file.clone());
+                }
+                let lowered = self.lower_function(default_method, Some(&c.name));
+                self.current_file = previous_file;
+                self.module.functions.push(lowered?);
+                methods_map.insert(default_method.name.clone(), format!("{}.{}", c.name, default_method.name));
+            }
+            let type_id = self
+                .resolve_type(&simple_parser::ast::Type::Simple(c.name.clone()))
+                .unwrap_or(TypeId::ANY);
+            self.module.impls.push(crate::hir::HirImpl {
+                type_id,
+                trait_id: None,
+                trait_name: Some(trait_name.clone()),
+                type_name: c.name.clone(),
+                methods: methods_map,
+            });
+        }
+        Ok(())
+    }
+}
+
 fn struct_implements_trait(s: &simple_parser::ast::StructDef) -> Option<String> {
     s.attributes.iter().find(|a| a.name == "implements").and_then(|a| {
         a.args.as_ref()?.first().and_then(|e| match e {
