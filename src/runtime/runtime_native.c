@@ -18375,6 +18375,27 @@ int8_t rt_array_extend_i64(int64_t dst, int64_t src, int64_t count) {
     if (d == NULL || s == NULL) return 0;
     n = rt_array_len(s);
     if (count >= 0 && count < n) n = count;
+    {
+        /* Packed byte arrays: copy raw bytes, like the Rust runtime
+         * (collections.rs rt_array_extend_i64). rt_array_get answers a raw
+         * byte while rt_array_push decodes its argument as a tagged value, so
+         * the generic loop divided every byte that looked like a tagged int
+         * (multiples of 8) by 8 -- 0x10 became 0x02 in linked .eh_frame. */
+        RtCoreArray* da = rt_core_array_ptr(d);
+        RtCoreArray* sa = rt_core_array_ptr(s);
+        int d_bytes = da && (da->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
+        int s_bytes = sa && (sa->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
+        if (d_bytes || s_bytes) {
+            if (!d_bytes || !s_bytes) return 0;
+            if (n <= 0) return 1;
+            if (!rt_core_array_reserve(d, da->len + n)) return 0;
+            da = rt_core_array_ptr(d);
+            sa = rt_core_array_ptr(s); /* s may be d: reserve can move data */
+            memmove((uint8_t*)da->data + da->len, sa->data, (size_t)n);
+            da->len += n;
+            return 1;
+        }
+    }
     for (i = 0; i < n; i++) {
         if (!rt_array_push(d, rt_array_get(s, i))) return 0;
     }
