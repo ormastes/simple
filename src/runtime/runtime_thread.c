@@ -430,7 +430,7 @@ typedef struct {
 #endif
 } RtThreadData;
 
-static int rt_thread_data_release(RtThreadData* td) {
+static int thread_data_release(RtThreadData* td) {
 #ifdef SPL_THREAD_PTHREAD
     return __atomic_sub_fetch(&td->refs, 1, __ATOMIC_ACQ_REL) == 0;
 #else
@@ -480,7 +480,7 @@ static void* rt_isolated_wrapper(void* raw) {
         td->result = td->entry(td->data1);
     }
     td->done = 1;
-    if (rt_thread_data_release(td)) SPL_FREE(td);
+    if (thread_data_release(td)) SPL_FREE(td);
     return NULL;
 }
 
@@ -501,7 +501,7 @@ static DWORD WINAPI rt_isolated_wrapper_win(LPVOID raw) {
         td->result = td->entry(td->data1);
     }
     td->done = 1;
-    if (rt_thread_data_release(td)) SPL_FREE(td);
+    if (thread_data_release(td)) SPL_FREE(td);
     return 0;
 }
 #endif
@@ -673,7 +673,7 @@ void rt_thread_free(int64_t handle) {
 #endif
     }
     /* An unjoined worker may still be running: it frees td on exit. */
-    if (rt_thread_data_release(td)) SPL_FREE(td);
+    if (thread_data_release(td)) SPL_FREE(td);
 }
 
 #if defined(SIMPLE_RUNTIME_THREAD_RUST_OWNER)
