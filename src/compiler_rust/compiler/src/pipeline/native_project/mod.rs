@@ -15,6 +15,7 @@ mod compiler;
 mod discovery;
 pub(crate) mod inline_asm_emit;
 mod linker;
+mod live_projection;
 mod linker_env;
 /// Re-exported so `tests/simple_linker_preference.rs` can pin the
 /// `SIMPLE_LINKER` alias contract. The crate's `--lib` test target does not

@@ -1049,14 +1049,54 @@ impl NativeProjectBuilder {
         }
         inputs.extend_from_slice(object_paths);
         inputs.push(alias_stub.to_path_buf());
+        let mut requested: Vec<String> = Self::stage4_live_undefined_symbols(temp_dir, &inputs)?
+            .into_iter()
+            .filter(|symbol| {
+                symbol.starts_with("rt_")
+                    || symbol.starts_with("spl_")
+                    || matches!(
+                        symbol.as_str(),
+                        "panic"
+                            | "stderr_write"
+                            | "stderr_flush"
+                            // Legacy Text.from_char_code import emitted by
+                            // the native backend; core-C owns its exact ABI.
+                            | "text_dot_from_char_code"
+                            | "__simple_runtime_init"
+                            | "__simple_runtime_shutdown"
+                            | "__simple_call_module_inits"
+                    )
+            })
+            .collect();
+        requested.sort();
+        if requested.is_empty() {
+            return Err("Stage4 live entry projection produced no runtime requests".to_string());
+        }
+        Ok(requested)
+    }
+
+    /// Undefined globals left once everything unreachable from `main` /
+    /// `spl_main` is collected. Computed in-process: `-r --gc-sections` is
+    /// honoured only by LLD (mold and ld.bfd accept it and keep every
+    /// section), so a linker-driven projection made the result depend on the
+    /// host's default `ld`. See `live_projection.rs`.
+    #[cfg(target_os = "linux")]
+    fn stage4_live_undefined_symbols(_temp_dir: &Path, inputs: &[PathBuf]) -> Result<HashSet<String>, String> {
+        Ok(super::live_projection::live_undefined_symbols(inputs, &["main", "spl_main"])?
+            .into_iter()
+            .collect())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn stage4_live_undefined_symbols(temp_dir: &Path, inputs: &[PathBuf]) -> Result<HashSet<String>, String> {
         let projection_dir = temp_dir.join("stage4_live");
         std::fs::create_dir_all(&projection_dir)
             .map_err(|err| format!("create Stage4 live projection directory: {err}"))?;
-        let response = Self::write_linker_object_response_file(&projection_dir, &inputs)?;
+        let response = Self::write_linker_object_response_file(&projection_dir, inputs)?;
         let live = temp_dir.join("stage4_live_entry.o");
         let cc = target_c_compiler(effective_target());
         let mut command = std::process::Command::new(&cc);
-        // `-Wl,-r` below is a real linker invocation, so it must honour the
+        // The trial link below is a real linker invocation, so it must honour the
         // same SIMPLE_LINKER preference as the final link — otherwise a run
         // that asked for lld still spawns the default linker here. The caller
         // (`link_objects`) already resolved and validated the value, so this
@@ -1064,14 +1104,6 @@ impl NativeProjectBuilder {
         if let Some(name) = requested_linker_driver_name()? {
             command.arg(format!("-fuse-ld={name}"));
         }
-        #[cfg(target_os = "linux")]
-        command
-            .arg("-nostdlib")
-            .arg("-Wl,-r")
-            .arg("-no-pie")
-            .arg("-Wl,--gc-sections")
-            .arg("-Wl,-u,main")
-            .arg("-Wl,-u,spl_main");
         // ld64 rejects `-r` together with `-dead_strip`, and a non-stripped
         // relocatable projection keeps runtime references from unreachable
         // closure code (kernel port I/O, virtio, baremetal intrinsics) that no
@@ -1096,30 +1128,7 @@ impl NativeProjectBuilder {
                 String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
-        let mut requested: Vec<String> = Self::read_undefined_symbol_set(&live)?
-            .into_iter()
-            .filter(|symbol| {
-                symbol.starts_with("rt_")
-                    || symbol.starts_with("spl_")
-                    || matches!(
-                        symbol.as_str(),
-                        "panic"
-                            | "stderr_write"
-                            | "stderr_flush"
-                            // Legacy Text.from_char_code import emitted by
-                            // the native backend; core-C owns its exact ABI.
-                            | "text_dot_from_char_code"
-                            | "__simple_runtime_init"
-                            | "__simple_runtime_shutdown"
-                            | "__simple_call_module_inits"
-                    )
-            })
-            .collect();
-        requested.sort();
-        if requested.is_empty() {
-            return Err("Stage4 live entry projection produced no runtime requests".to_string());
-        }
-        Ok(requested)
+        Self::read_undefined_symbol_set(&live)
     }
 
     fn cached_global_symbols<'a>(
