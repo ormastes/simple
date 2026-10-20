@@ -1,0 +1,236 @@
+# C2: pure nominal values in one exact MIR block. No native-layout certificate.
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_instructions.{MirFunction, MirBody, MirInst, MirInstKind, MirOperand, MirOperandKind, MirTerminator, AggregateKind}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirTypeDef, MirTypeDefKind, LocalId, LocalKind}
+use compiler.mir.mir_json.{serialize_mir_type}
+use compiler.backend.backend.backend_types.{BackendKind, CompileError, compileerror_backend_error}
+use plugins.backend_lean.lean_type_declarations.{LeanTypeContext, lean_context_type_to_lean, lean_type_quote_name}
+use plugins.backend_lean.lean_mir_translate.{translate_mir_body, translate_const_value_exact, translate_binop, translate_unaryop}
+
+fn nominal_body_error(reason: text) -> CompileError:
+    compileerror_backend_error(BackendKind.Lean, "lean-nominal-body: " + reason)
+
+fn nominal_fixed_integer(type_: MirType) -> bool:
+    match type_.kind:
+        case I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64: true
+        case _: false
+
+fn nominal_equality_scalar(type_: MirType) -> bool:
+    if nominal_fixed_integer(type_): return true
+    match type_.kind:
+        case Bool | Char | Unit: true
+        case _: false
+
+fn nominal_body_requested(body: MirBody) -> bool:
+    for block in body.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case Aggregate(_, kind, _):
+                    match kind:
+                        case Struct(_) | Enum(_, _): return true
+                        case _: pass
+                case GetField(_, _, _): return true
+                case _: pass
+    false
+
+class LeanNominalBodyEmitter:
+    context: LeanTypeContext
+    types: Dict<i64, MirType>
+    assigned: Dict<i64, bool>
+    live: Dict<i64, bool>
+
+    fn local_type(local: LocalId) -> Result<MirType, CompileError>:
+        if not self.types.has(local.id):
+            return Err(nominal_body_error("missing local {local.id}"))
+        Ok(self.types[local.id])
+
+    fn same_type(actual: MirType, expected: MirType) -> Result<(), CompileError>:
+        val _actual_name = lean_context_type_to_lean(actual, self.context)?
+        val _expected_name = lean_context_type_to_lean(expected, self.context)?
+        if serialize_mir_type(actual) != serialize_mir_type(expected):
+            return Err(nominal_body_error("exact MIR type mismatch"))
+        Ok(())
+
+    fn operand_type(operand: MirOperand) -> Result<MirType, CompileError>:
+        match operand.kind:
+            case Copy(local) | Move(local): self.local_type(local)
+            case Const(_, type_): Ok(type_)
+
+    me operand(operand: MirOperand, expected: MirType) -> Result<text, CompileError>:
+        val actual = self.operand_type(operand)?
+        self.same_type(actual, expected)?
+        match operand.kind:
+            case Copy(local) | Move(local):
+                if not self.live.has(local.id) or not self.live[local.id]:
+                    return Err(nominal_body_error("use before definition or after move: {local.id}"))
+                match operand.kind:
+                    case Move(_): self.live[local.id] = false
+                    case _: pass
+                Ok("_l{local.id}")
+            case Const(value, type_): translate_const_value_exact(value, type_)
+
+    me bind(dest: LocalId, expected: MirType, term: text) -> Result<text, CompileError>:
+        self.same_type(self.local_type(dest)?, expected)?
+        if self.assigned.has(dest.id):
+            return Err(nominal_body_error("local redefinition requires mutable state semantics: {dest.id}"))
+        val target = lean_context_type_to_lean(expected, self.context)?
+        self.assigned[dest.id] = true
+        self.live[dest.id] = true
+        Ok("let _l{dest.id} : {target} := {term}")
+
+    fn definition(symbol: SymbolId, is_enum: bool) -> Result<MirTypeDef, CompileError>:
+        if not self.context.definitions.has(symbol.id):
+            return Err(nominal_body_error("missing admitted declaration {symbol.id}"))
+        val expected = MirType(kind: if is_enum: MirTypeKind.Enum(symbol) else: MirTypeKind.Struct(symbol))
+        val _name = lean_context_type_to_lean(expected, self.context)?
+        val definition = self.context.definitions[symbol.id]
+        if definition.symbol.id != symbol.id:
+            return Err(nominal_body_error("declaration symbol identity differs"))
+        Ok(definition)
+
+    me instruction(instruction: MirInst) -> Result<text, CompileError>:
+        match instruction.kind:
+            case Const(dest, value, type_):
+                val term = translate_const_value_exact(value, type_)?
+                self.bind(dest, type_, term)
+            case Copy(dest, source):
+                val type_ = self.local_type(source)?
+                val term = self.operand(MirOperand(kind: MirOperandKind.Copy(source)), type_)?
+                self.bind(dest, type_, term)
+            case Move(dest, source):
+                val type_ = self.local_type(source)?
+                val term = self.operand(MirOperand(kind: MirOperandKind.Move(source)), type_)?
+                self.bind(dest, type_, term)
+            case BinOp(dest, op, left, right):
+                # Reuse the exact existing operator policy, including its refusals.
+                val operator = translate_binop(op)?
+                val input_type = self.operand_type(left)?
+                var output_type = input_type
+                match op:
+                    case Eq | Ne:
+                        if not nominal_equality_scalar(input_type):
+                            return Err(nominal_body_error("equality requires an admitted scalar representation"))
+                        output_type = MirType(kind: MirTypeKind.Bool)
+                    case Add | Sub | Mul | BitAnd | BitOr | BitXor:
+                        if not nominal_fixed_integer(input_type):
+                            return Err(nominal_body_error("arithmetic and bitwise operations require a fixed-width integer"))
+                    case _: return Err(nominal_body_error("unsupported scalar operator in nominal body"))
+                val left_term = self.operand(left, input_type)?
+                val right_term = self.operand(right, input_type)?
+                self.bind(dest, output_type, "(" + left_term + ") " + operator + " (" + right_term + ")")
+            case UnaryOp(dest, op, operand):
+                val operator = translate_unaryop(op)?
+                val type_ = self.operand_type(operand)?
+                match op:
+                    case Not:
+                        self.same_type(type_, MirType(kind: MirTypeKind.Bool))?
+                    case Neg | BitNot:
+                        if not nominal_fixed_integer(type_):
+                            return Err(nominal_body_error("negation and bitwise complement require a fixed-width integer"))
+                    case _: return Err(nominal_body_error("unsupported scalar unary operator in nominal body"))
+                val term = self.operand(operand, type_)?
+                self.bind(dest, type_, operator + "(" + term + ")")
+            case Aggregate(dest, kind, operands):
+                match kind:
+                    case Struct(symbol):
+                        val definition = self.definition(symbol, false)?
+                        match definition.kind:
+                            case Struct(fields):
+                                if operands.len() != fields.len():
+                                    return Err(nominal_body_error("struct field arity mismatch"))
+                                var terms: [text] = []
+                                for index in 0..fields.len():
+                                    terms.push("(" + self.operand(operands[index], fields[index].type_)? + ")")
+                                val constructor = self.context.names[symbol.id] + ".mk"
+                                val term = if terms.len() == 0: constructor else: constructor + " " + terms.join(" ")
+                                self.bind(dest, MirType(kind: MirTypeKind.Struct(symbol)), term)
+                            case _: Err(nominal_body_error("struct declaration kind differs"))
+                    case Enum(symbol, discriminant):
+                        val definition = self.definition(symbol, true)?
+                        match definition.kind:
+                            case Enum(variants):
+                                var selected = -1
+                                for index in 0..variants.len():
+                                    if variants[index].discriminant == discriminant: selected = index
+                                if selected < 0:
+                                    return Err(nominal_body_error("unknown enum discriminant {discriminant}"))
+                                val variant = variants[selected]
+                                var term = self.context.names[symbol.id] + "." + lean_type_quote_name(variant.name)
+                                if val payload = variant.payload:
+                                    if operands.len() != 1:
+                                        return Err(nominal_body_error("enum payload arity mismatch"))
+                                    term = term + " (" + self.operand(operands[0], payload)? + ")"
+                                else:
+                                    if operands.len() != 0:
+                                        return Err(nominal_body_error("nullary enum has operands"))
+                                self.bind(dest, MirType(kind: MirTypeKind.Enum(symbol)), term)
+                            case _: Err(nominal_body_error("enum declaration kind differs"))
+                    case _: Err(nominal_body_error("non-nominal aggregate in nominal body is unsupported"))
+            case GetField(dest, base, index):
+                val base_type = self.operand_type(base)?
+                match base_type.kind:
+                    case Struct(symbol):
+                        val definition = self.definition(symbol, false)?
+                        match definition.kind:
+                            case Struct(fields):
+                                if index < 0 or index >= fields.len():
+                                    return Err(nominal_body_error("struct field index out of range: {index}"))
+                                val term = self.operand(base, base_type)?
+                                val projection = self.context.names[symbol.id] + "." + lean_type_quote_name(fields[index].name)
+                                self.bind(dest, fields[index].type_, projection + " (" + term + ")")
+                            case _: Err(nominal_body_error("projection declaration kind differs"))
+                    case _: Err(nominal_body_error("field projection requires an admitted struct value"))
+            case _: Err(nominal_body_error("unsupported instruction in pure nominal body: {instruction.kind}"))
+
+fn translate_mir_nominal_body(function: MirFunction, context: LeanTypeContext) -> Result<text, CompileError>:
+    """Emit typed nominal construction/projection using this module's declarations.
+
+    Existing non-aggregate bodies retain their existing translator. A nominal
+    body must be one entry block, single-assignment, with an exact typed return.
+    Unsupported operations return an error; no partial source is returned.
+    """
+    val body = MirBody.from_function(function)
+    if not nominal_body_requested(body): return translate_mir_body(body)
+    if body.blocks.len() != 1 or body.blocks[0].id.id != function.entry_block.id:
+        return Err(nominal_body_error("requires one exact entry block"))
+    if not function.signature.params_known or function.signature.is_variadic:
+        return Err(nominal_body_error("requires a known nonvariadic signature"))
+    var types: Dict<i64, MirType> = {}
+    var assigned: Dict<i64, bool> = {}
+    var live: Dict<i64, bool> = {}
+    var arguments: Dict<i64, bool> = {}
+    var accepted_arg_count: i64 = 0
+    for local in body.locals:
+        if local.id.id < 0 or types.has(local.id.id):
+            return Err(nominal_body_error("negative or duplicate local identity"))
+        val _type_name = lean_context_type_to_lean(local.type_, context)?
+        types[local.id.id] = local.type_
+        match local.kind:
+            case Arg(index):
+                if index < 0 or index >= function.signature.params.len() or arguments.has(index):
+                    return Err(nominal_body_error("invalid or duplicate argument index"))
+                if serialize_mir_type(local.type_) != serialize_mir_type(function.signature.params[index]):
+                    return Err(nominal_body_error("argument local disagrees with signature"))
+                arguments[index] = true
+                accepted_arg_count = accepted_arg_count + 1
+                assigned[local.id.id] = true
+                live[local.id.id] = true
+            case _: pass
+    # Count accepted unique argument rows without the native Dict.len fallback.
+    if accepted_arg_count != function.signature.params.len():
+        return Err(nominal_body_error("missing argument local"))
+    var emitter = LeanNominalBodyEmitter(context: context, types: types, assigned: assigned, live: live)
+    var lines: [text] = []
+    for instruction in body.blocks[0].instructions:
+        lines.push(emitter.instruction(instruction)?)
+    match body.blocks[0].terminator:
+        case Ret(value):
+            if val operand = value:
+                lines.push(emitter.operand(operand, body.return_ty)?)
+            else:
+                emitter.same_type(body.return_ty, MirType(kind: MirTypeKind.Unit))?
+                lines.push("()")
+        case _: return Err(nominal_body_error("requires an exact return terminator"))
+    Ok(lines.join("\n"))
+
+export translate_mir_nominal_body

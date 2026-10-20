@@ -1,0 +1,242 @@
+# Semantic MIR declarations, not a native-layout or proof-closure certificate.
+# This owner-local plan is shared by the two retained Lean backend entrypoints.
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_instructions.{MirModule}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirTypeDef, MirTypeDefKind}
+use compiler.mir.mir_json.{serialize_mir_type}
+use compiler.backend.backend.backend_types.{BackendKind, CompileError, compileerror_backend_error}
+use plugins.backend_lean.lean_mir_translate.{mir_type_to_lean}
+
+struct LeanTypeContext:
+    names: Dict<i64, text>
+    enum_kinds: Dict<i64, bool>
+    definitions: Dict<i64, MirTypeDef>
+
+struct LeanTypeDeclaration:
+    symbol: i64
+    name: text
+    is_enum: bool
+    fields: [(text, text)]
+    variants: [(text, [text])]
+    dependencies: [i64]
+    metadata: [text]
+
+struct LeanTypeExportPlan:
+    context: LeanTypeContext
+    declarations: [LeanTypeDeclaration]
+
+fn lean_type_error(message: text) -> CompileError:
+    compileerror_backend_error(BackendKind.Lean, "lean-type-export: " + message)
+
+fn lean_type_name_valid(name: text) -> bool:
+    if name == "": return false
+    for part in name.split("."):
+        if part == "" or part == "_" or part == "_root_": return false
+        for index in 0..part.len():
+            val code = part.char_code_at(index)
+            val letter = (code >= 65 and code <= 90) or (code >= 97 and code <= 122) or code == 95
+            val digit = code >= 48 and code <= 57
+            if not letter and (not digit or index == 0): return false
+    true
+
+fn lean_type_quote_name(name: text) -> text:
+    var parts: [text] = []
+    for part in name.split("."): parts.push("«{part}»")
+    parts.join(".")
+
+fn lean_type_string(value: text) -> text:
+    val slash = value.replace("\\", "\\\\")
+    val quote = slash.replace("\"", "\\\"")
+    val newline = quote.replace("\n", "\\n")
+    val carriage = newline.replace("\r", "\\r")
+    val escaped = carriage.replace("\t", "\\t")
+    "\"{escaped}\""
+
+fn lean_type_member_valid(name: text) -> bool:
+    if not lean_type_name_valid(name) or name.contains("."): return false
+    # Lean generates these declarations in the type's own namespace.
+    # Lean 4.30 also generates ctorIdx and multi-constructor eliminators.
+    not ["mk", "rec", "recOn", "casesOn", "noConfusion", "noConfusionType", "below", "brecOn", "binductionOn", "ctorIdx", "ctorElimType", "ctorElim"].contains(name)
+
+fn lean_context_type_to_lean(ty: MirType, context: LeanTypeContext) -> Result<text, CompileError>:
+    """Resolve nominal references only against this admitted module's symbols."""
+    match ty.kind:
+        case Struct(symbol) | Enum(symbol):
+            if not context.names.has(symbol.id):
+                return Err(lean_type_error("unresolved nominal symbol {symbol.id}"))
+            val expects_enum = match ty.kind:
+                case Enum(_): true
+                case _: false
+            if context.enum_kinds[symbol.id] != expects_enum:
+                return Err(lean_type_error("nominal kind mismatch for symbol {symbol.id}"))
+            Ok(context.names[symbol.id])
+        case Array(element, size):
+            if size < 0: return Err(lean_type_error("negative array length {size}"))
+            val nested = lean_context_type_to_lean(element, context)?
+            Ok("_root_.Vector ({nested}) {size}")
+        case Slice(element):
+            val nested = lean_context_type_to_lean(element, context)?
+            Ok("_root_.Array ({nested})")
+        case Tuple(elements):
+            var parts: [text] = []
+            for element in elements: parts.push(lean_context_type_to_lean(element, context)?)
+            if parts.len() == 0: return Ok("_root_.Unit")
+            Ok("({parts.join(\" × \")})")
+        case Result(ok_type, error_type):
+            val ok_name = lean_context_type_to_lean(ok_type, context)?
+            val error_name = lean_context_type_to_lean(error_type, context)?
+            Ok("_root_.Except ({error_name}) ({ok_name})")
+        case _:
+            # Preserve the existing exact-width mapper and its refusal policy.
+            # Root qualification prevents a user type named Bool/Char shadowing it.
+            val primitive = mir_type_to_lean(ty)?
+            Ok("_root_.{primitive}")
+
+fn lean_type_dependencies(ty: MirType) -> [i64]:
+    match ty.kind:
+        case Struct(symbol) | Enum(symbol): [symbol.id]
+        case Array(element, _) | Slice(element): lean_type_dependencies(element)
+        case Tuple(elements):
+            var dependencies: [i64] = []
+            for element in elements:
+                for dependency in lean_type_dependencies(element):
+                    if not dependencies.contains(dependency): dependencies.push(dependency)
+            dependencies
+        case Result(ok_type, error_type):
+            var dependencies = lean_type_dependencies(ok_type)
+            for dependency in lean_type_dependencies(error_type):
+                if not dependencies.contains(dependency): dependencies.push(dependency)
+            dependencies
+        case _: []
+
+fn lean_plan_one_type(definition: MirTypeDef, context: LeanTypeContext) -> Result<LeanTypeDeclaration, CompileError>:
+    var fields: [(text, text)] = []
+    var variants: [(text, [text])] = []
+    var dependencies: [i64] = []
+    var members: [text] = []
+    var metadata: [text] = []
+    for index in 0..definition.export_name.len():
+        val code = definition.export_name.char_code_at(index)
+        if (code < 32 and code != 9 and code != 10 and code != 13) or code == 127:
+            return Err(lean_type_error("unsupported control character in export metadata"))
+    val identity = "__MirTypeMetadata.t{definition.symbol.id}"
+    val source_name = lean_type_string(definition.name)
+    val export_name = lean_type_string(definition.export_name)
+    val exported = if definition.is_export_c: "true" else: "false"
+    metadata.push("def {identity} : Int × String × Bool × String := ({definition.symbol.id}, {source_name}, {exported}, {export_name})")
+    var is_enum = false
+    match definition.kind:
+        case Struct(source_fields):
+            var layout: [text] = []
+            for field in source_fields:
+                if not lean_type_member_valid(field.name) or members.contains(field.name):
+                    return Err(lean_type_error("invalid, reserved or duplicate field `{definition.name}.{field.name}`"))
+                if field.offset < 0:
+                    return Err(lean_type_error("negative field offset in `{definition.name}.{field.name}`"))
+                if field.has_bits_attr or field.bits_width != 0:
+                    return Err(lean_type_error("bit-field representation requires a refinement for `{definition.name}.{field.name}`"))
+                members.push(field.name)
+                val mapped = lean_context_type_to_lean(field.type_, context)?
+                fields.push((lean_type_quote_name(field.name), mapped))
+                for dependency in lean_type_dependencies(field.type_):
+                    if not dependencies.contains(dependency): dependencies.push(dependency)
+                val field_name = lean_type_string(field.name)
+                val field_type = lean_type_string(serialize_mir_type(field.type_))
+                layout.push("({field_name}, {field_type}, {field.offset})")
+            metadata.push("def {identity}_fields : List (String × String × Int) := [{layout.join(\", \")}]")
+        case Enum(source_variants):
+            is_enum = true
+            var tags: [i64] = []
+            var layout: [text] = []
+            for variant in source_variants:
+                if not lean_type_member_valid(variant.name) or members.contains(variant.name):
+                    return Err(lean_type_error("invalid, reserved or duplicate variant `{definition.name}.{variant.name}`"))
+                if tags.contains(variant.discriminant):
+                    return Err(lean_type_error("duplicate enum discriminant in `{definition.name}`"))
+                members.push(variant.name)
+                tags.push(variant.discriminant)
+                var payloads: [text] = []
+                var payload_identity = "none"
+                if val payload = variant.payload:
+                    payloads.push(lean_context_type_to_lean(payload, context)?)
+                    payload_identity = "some " + lean_type_string(serialize_mir_type(payload))
+                    for dependency in lean_type_dependencies(payload):
+                        if not dependencies.contains(dependency): dependencies.push(dependency)
+                variants.push((lean_type_quote_name(variant.name), payloads))
+                val variant_name = lean_type_string(variant.name)
+                layout.push("({variant_name}, {variant.discriminant}, {payload_identity})")
+            metadata.push("def {identity}_variants : List (String × Int × Option String) := [{layout.join(\", \")}]")
+        case Union(_):
+            return Err(lean_type_error("union declaration `{definition.name}` has no admitted representation"))
+    Ok(LeanTypeDeclaration(symbol: definition.symbol.id,
+        name: "__MirTypes." + lean_type_quote_name(definition.name), is_enum: is_enum,
+        fields: fields, variants: variants, dependencies: dependencies, metadata: metadata))
+
+fn lean_plan_type_declarations(module: MirModule, namespace: text) -> Result<LeanTypeExportPlan, CompileError>:
+    """Validate the complete table before emission; reject unsupported cycles."""
+    if not lean_type_name_valid(namespace):
+        return Err(lean_type_error("invalid module namespace `{namespace}`"))
+    # Namespace strings are emitted by the existing backend without quotation.
+    for part in namespace.split("."):
+        if ["namespace", "end", "where", "structure", "inductive", "def", "theorem", "axiom", "class", "instance", "match", "with", "if", "then", "else", "let", "in", "do", "by", "fun", "Type", "Prop", "Sort", "open", "export", "import", "private", "protected", "noncomputable", "unsafe", "mutual", "deriving", "example", "abbrev", "variable", "section", "set_option"].contains(part):
+            return Err(lean_type_error("reserved module namespace component `{part}`"))
+    for key in module.functions.keys():
+        val name = module.functions[key].name
+        if name == "__MirTypes" or name.starts_with("__MirTypes.") or name == "__MirTypeMetadata" or name.starts_with("__MirTypeMetadata."):
+            return Err(lean_type_error("function collides with the declaration namespace `{name}`"))
+    var ids: [i64] = []
+    for key in module.types.keys(): ids.push(key.id)
+    ids.sort()
+    var names: Dict<i64, text> = {}
+    var kinds: Dict<i64, bool> = {}
+    var definitions: Dict<i64, MirTypeDef> = {}
+    var by_name: Dict<text, i64> = {}
+    var ordered_names: [text] = []
+    for id in ids:
+        val definition = module.types[SymbolId(id: id)]
+        if id < 0 or definition.symbol.id != id:
+            return Err(lean_type_error("type table key disagrees with declaration symbol {id}"))
+        if not lean_type_name_valid(definition.name) or by_name.has(definition.name):
+            return Err(lean_type_error("invalid or duplicate type name `{definition.name}`"))
+        # Nested type scopes can collide with Lean-generated fields/eliminators.
+        for previous in ordered_names:
+            if definition.name.starts_with(previous + ".") or previous.starts_with(definition.name + "."):
+                return Err(lean_type_error("overlapping nominal namespaces `{previous}` and `{definition.name}`"))
+        val is_enum = match definition.kind:
+            case Struct(_): false
+            case Enum(_): true
+            case Union(_): return Err(lean_type_error("union declaration `{definition.name}` has no admitted representation"))
+        names[id] = "_root_.{namespace}.__MirTypes." + lean_type_quote_name(definition.name)
+        kinds[id] = is_enum
+        definitions[id] = definition
+        by_name[definition.name] = id
+        ordered_names.push(definition.name)
+    ordered_names.sort()
+    val context = LeanTypeContext(names: names, enum_kinds: kinds, definitions: definitions)
+    var plans: [LeanTypeDeclaration] = []
+    for name in ordered_names:
+        plans.push(lean_plan_one_type(module.types[SymbolId(id: by_name[name])], context)?)
+    # Deterministic topological selection: choose the first name-sorted ready
+    # declaration. No partial source escapes if an edge is cyclic.
+    var emitted: Dict<i64, bool> = {}
+    var ordered: [LeanTypeDeclaration] = []
+    while ordered.len() < plans.len():
+        var selected = -1
+        for index in 0..plans.len():
+            val plan = plans[index]
+            if emitted.has(plan.symbol): continue
+            var ready = true
+            for dependency in plan.dependencies:
+                if not emitted.has(dependency): ready = false
+            if ready:
+                selected = index
+                break
+        if selected < 0:
+            return Err(lean_type_error("recursive nominal declarations require an explicit mutually inductive representation"))
+        val plan = plans[selected]
+        ordered.push(plan)
+        emitted[plan.symbol] = true
+    Ok(LeanTypeExportPlan(context: context, declarations: ordered))
+
+export LeanTypeContext, LeanTypeDeclaration, LeanTypeExportPlan
+export lean_plan_type_declarations, lean_context_type_to_lean, lean_type_quote_name
