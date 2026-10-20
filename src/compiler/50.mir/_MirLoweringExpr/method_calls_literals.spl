@@ -1190,6 +1190,17 @@ impl MirLowering:
                     case HirTypeKind.Function(_, _, _):
                         self.remember_local_hir_type(result_local_uw.id, callable_uw, 0, 0)
                     case _: ()
+            # Retain the declared nominal payload type too: without it an enum
+            # payload (`val b = opt.unwrap(); b == Kind.X`) had no enum owner,
+            # so `==` took the struct-operator path ("operator overload for
+            # struct Kind"), and typed enum payload slots rejected the value.
+            if inner_type_uw != nil:
+                val retained_inner_uw = inner_type_uw ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
+                match retained_inner_uw.kind:
+                    case HirTypeKind.Named(_, retained_args_uw):
+                        if retained_args_uw.len() == 0:
+                            self.remember_local_hir_type(result_local_uw.id, retained_inner_uw, 0, 0)
+                    case _: ()
 
             var b_merge_uw = self.builder
             b_merge_uw.switch_to_block(merge_block_uw)
@@ -6238,9 +6249,21 @@ impl MirLowering:
         literals)."""
         var operands: [MirOperand] = []
         var types: [MirType] = []
+        # Retained element HIR types, kept only when EVERY element has one, so
+        # a desugared tuple match (`match (a.kind, b.kind)` -> `tmp[i]`) can
+        # recover each slot's declared enum owner.
+        var hir_elements: [HirType] = []
+        var hir_elements_complete = true
         for elem in elements:
             val local = self.lower_expr(elem)
             operands = operands.push(mir_operand_copy(local))
+            if hir_elements_complete:
+                if val elem_hir = self.find_local_hir_type(local.id):
+                    match elem_hir.kind:
+                        case HirTypeKind.Infer(_, _) | HirTypeKind.Error: hir_elements_complete = false
+                        case _: hir_elements = hir_elements.push(elem_hir)
+                else:
+                    hir_elements_complete = false
             var elem_ty = MirType.i64()
             if val local_ty = self.local_mir_type_of(local):
                 elem_ty = local_ty
@@ -6262,7 +6285,10 @@ impl MirLowering:
             types = types.push(elem_ty)
 
         val tuple_type = MirType(kind: MirTypeKind.Tuple(types))
-        self.builder.emit_aggregate(AggregateKind.Tuple, operands, tuple_type)
+        val tuple_local = self.builder.emit_aggregate(AggregateKind.Tuple, operands, tuple_type)
+        if hir_elements_complete and elements.len() > 0:
+            self.remember_local_hir_type(tuple_local.id, HirType(kind: HirTypeKind.Tuple(hir_elements), span: elements[0].span), 0, 0)
+        tuple_local
 
     me lower_set_lit(elements: [HirExpr]) -> LocalId:
         """Lower set literal to Set.from() call.

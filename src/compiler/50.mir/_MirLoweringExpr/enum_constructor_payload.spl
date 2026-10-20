@@ -5,7 +5,7 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
-use compiler.mir._MirLoweringExpr.enum_payload_type_identity.{enum_payload_types_alias_equal, enum_payload_named_alias_equal}
+use compiler.mir._MirLoweringExpr.enum_payload_type_identity.{enum_payload_types_alias_equal, enum_payload_named_alias_equal, enum_payload_nominal_kind}
 use compiler.mir.mir_data.*
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir._MirLowering.module_lowering.*
@@ -236,6 +236,17 @@ impl MirLowering:
                 match expression.kind:
                     case HirExprKind.NilLit: return true
                     case _: ()
+            case HirTypeKind.Named(nil_owner, _):
+                # A nominal record/enum slot is a nullable handle word: the
+                # compiler's own sources pass `nil` as an explicit "absent"
+                # sentinel (`HirStmtKind.Let(sym, nil, init)`, readers test
+                # `type_ != nil`). Scalars/text/containers stay strict.
+                match expression.kind:
+                    case HirExprKind.NilLit:
+                        # 1 Class, 2 Struct, 3 Enum (enum_payload_nominal_kind).
+                        val nil_kind = enum_payload_nominal_kind(nil_owner, self.symbols)
+                        if nil_kind == 1 or nil_kind == 2 or nil_kind == 3: return true
+                    case _: ()
             case _: ()
         var remembered_concrete_negative = false
         if val actual = self.find_local_hir_type(local.id):
@@ -275,6 +286,11 @@ impl MirLowering:
                 match actual_mir.kind:
                     case MirTypeKind.Struct(actual_owner):
                         if actual_owner.id == owner.id: return true
+                        # `o.unwrap()`, `t.0`, `val (a, b) = t` carry the
+                        # payload's lower_type() Struct, whose id is a
+                        # canonical MIR id, not a SymbolTable id. Bind it
+                        # through the exact (module, name) owner registry.
+                        if enum_payload_hir_mir_alias_compatible(expected, actual_mir, self.symbols, self.canonical_type_symbols): return true
                     case _: ()
                 if val actual_owner = self.struct_value_syms.get(local.id):
                     if val declaration = self.symbols.get_symbol_raw(owner.id):
@@ -290,6 +306,20 @@ impl MirLowering:
                 # HIR-side fallback, cross-representation.
                 enum_payload_hir_mir_alias_compatible(expected, actual_mir, self.symbols, self.canonical_type_symbols)
             case _: return false
+
+    me enum_payload_mismatch_trace(expected: HirType, expression: HirExpr, local: LocalId):
+        # SIMPLE_ENUM_PAYLOAD_TRACE=1: name the evidence a rejected payload
+        # slot saw (remembered HIR, source HIR, MIR) so a "payload type
+        # mismatch" can be attributed without a debugger.
+        if (mir_lower_env_get("SIMPLE_ENUM_PAYLOAD_TRACE") ?? "") != "1": return
+        var remembered = "none"
+        if val actual = self.find_local_hir_type(local.id):
+            remembered = "'{hir_type_shape_key(actual, true)}'"
+        var source = "none"
+        if val actual_source = self.enum_match_expr_type(expression):
+            source = "'{hir_type_shape_key(actual_source, true)}'"
+        val mir = if self.local_mir_type_of(local).?: "present" else: "none"
+        eprint("[enum-payload] module={self.current_module_id} expected='{hir_type_shape_key(expected, true)}' line={expression.span.line} remembered={remembered} source={source} mir={mir} runtime_dict={self.runtime_dict_locals.contains(local.id)}\n")
 
     me adapt_declared_enum_payload(expected: HirType, local: LocalId) -> LocalId:
         # Do not merely accept numeric widths: normalize them before moving
