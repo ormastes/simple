@@ -18,12 +18,12 @@ use compiler.driver.driver_hir_cache.{hir_cache_header, hir_cache_load_in_owned_
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
-use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, Effect, EffectKind}
 use compiler.hir.hir_definitions.{HirFunction, HirParam, HirExpr, HirExprKind, HirCallArg, HirStmt, HirStmtKind}
 use compiler.hir.hir_codec.{hir_module_encode}
 use compiler.mono.monomorphize_integration.{MonomorphizationPass, mono_sym_key, mono_type_identity}
 use compiler.mono.mono_archive_types_v1.{MonoTemplateSignatureV1, mono_template_signature_v1}
-use compiler.mono.mono_archive_state_v1.{mono_archive_state_create_v1, mono_archive_state_digest_v1}
+use compiler.mono.mono_archive_state_v1.{mono_archive_state_create_v1, mono_archive_state_digest_v1, mono_archive_delta_digest_v1}
 use compiler.mono.mono_archive_registration_v1.*
 use compiler.common.config.{Logger}
 use compiler.common.driver_source_file.{source_file_coverage_identity}
@@ -358,6 +358,46 @@ fn main() -> i64:
     val first_receipt = first.unwrap()
     if first_receipt.delta.warnings.len() != 1 or not first_receipt.delta.warnings[0].contains("E-MONO-040") or first_receipt.delta.reported_once.len() != 1: return 5
     checks = checks + 1
+    # Effect-only receipt mutation must fail through the real consumer before
+    # publication. Keep the original receipt usable as the positive control.
+    val state_before_effect_drift = mono_archive_state_digest_v1(admission.state)
+    var effect_drift = first_receipt
+    var drift_delta = effect_drift.delta
+    val drift_name = drift_delta.requests[0].mangled_name
+    var drift_signature = drift_delta.signatures[drift_name]
+    drift_signature.effects = [Effect(kind: EffectKind.IO, span: Span.empty())]
+    drift_delta.signatures[drift_name] = drift_signature
+    effect_drift.delta = drift_delta
+    if mono_archive_apply_v1(admission, effect_drift).is_ok(): return 203
+    if mono_archive_state_digest_v1(admission.state) != state_before_effect_drift: return 204
+    if first_receipt.delta.signatures[drift_name].effects.len() != 0: return 205
+    # Malformed internal metadata must not become a valid parent identity.
+    # These are fault-injected copies of real admitted facts/receipts, never
+    # synthetic success authority. Simple source fallibility remains Result/?.
+    unsafe:
+        var malformed_signature = first_receipt.delta.signatures[drift_name]
+        malformed_signature.effects = [Effect(kind: nil, span: Span.empty())]
+        var malformed_receipt = first_receipt
+        var malformed_delta = malformed_receipt.delta
+        malformed_delta.signatures[drift_name] = malformed_signature
+        malformed_receipt.delta = malformed_delta
+        if mono_archive_delta_digest_v1(malformed_delta) != "": return 206
+        if mono_archive_apply_v1(admission, malformed_receipt).is_ok(): return 207
+        var bad_facts = admission.state.facts
+        val template_name = first_receipt.delta.requests[0].template_name
+        var bad_template = bad_facts.templates[template_name]
+        bad_template.effects = [Effect(kind: nil, span: Span.empty())]
+        bad_facts.templates[template_name] = bad_template
+        val bad_state = mono_archive_state_create_v1(bad_facts)
+        if mono_archive_state_digest_v1(bad_state) != "": return 208
+        val bad_admission = MonoArchiveAdmissionV1(repository: admission.repository, state: bad_state)
+        if mono_archive_apply_v1(bad_admission, first_receipt).is_ok(): return 209
+        if bad_state.epoch != 0 or bad_state.queue.len() != 0: return 210
+        var bad_specialized = mono_archive_state_create_v1(admission.state.facts)
+        bad_specialized.spec_signatures[drift_name] = malformed_signature
+        if mono_archive_state_digest_v1(bad_specialized) != "": return 211
+    if mono_archive_state_digest_v1(admission.state) != state_before_effect_drift: return 212
+    if first_receipt.delta.signatures[drift_name].effects.len() != 0: return 213
     if mono_archive_apply_v1(admission, first_receipt).is_err() or admission.state.queue.len() != 2: return 6
     checks = checks + 1
     if not mono_archive_apply_v1(admission, first_receipt).is_err() or admission.state.epoch != 1: return 7
@@ -383,7 +423,7 @@ fn main() -> i64:
         emitted = emitted + 1
     if emitted != 4 or admission.state.emitted.len() != 4 or not mono_archive_drain_one_v1(admission).is_err(): return 17
     checks = checks + 1
-    if first_receipt.delta.requests[0].module_name != provider.name or first_receipt.stage != "mono-function-rewrite-v1": return 18
+    if first_receipt.delta.requests[0].module_name != provider.name or first_receipt.stage != "mono-function-rewrite-v2": return 18
     checks = checks + 1
     val inner = fixture_function(provider, "inner")
     val signature = signature_after_scope(inner)

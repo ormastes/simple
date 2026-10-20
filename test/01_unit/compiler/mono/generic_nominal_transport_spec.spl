@@ -305,3 +305,84 @@ describe "combined nominal registration protocol":
         legacy.put_text("caller")
         legacy.put_text("projection-bytes")
         expect(actual == sha256_text("mono-registration-row-v2\n" + legacy.finish())).to_be(false)
+
+
+fn transport_effect_pass(mode: MonoTemplateBodyModeV1, missing: bool) -> MonomorphizationPass:
+    val setup = transport_pass()
+    var template = transport_template()
+    val thrown = transport_type(HirTypeKind.Named(SymbolId(id: if missing: 99 else: 0), []))
+    template.effects = [Effect(kind: EffectKind.IO, span: Span.empty()),
+        Effect(kind: EffectKind.Throws(thrown), span: Span.new(5, 6, 7, 8))]
+    var functions: Dict<SymbolId, HirFunction> = {}
+    functions[template.symbol] = template
+    var pass_ = MonomorphizationPass.create()
+    pass_.template_body_mode = mode
+    pass_.module_paths["provider"] = "synthetic/provider.spl"
+    pass_.module_paths["caller"] = "synthetic/caller.spl"
+    pass_.collect_generics(transport_module("provider", setup.module_symbols["provider"], functions), "provider")
+    pass_.collect_generics(transport_module("caller", setup.module_symbols["caller"], {}), "caller")
+    pass_.current_module = "caller"
+    pass_
+
+describe "nominal Throws ownership on specialized caller signatures":
+    it "relocates a provider Throws declaration even when parameters and return are scalar":
+        for mode in [MonoTemplateBodyModeV1.Retained, MonoTemplateBodyModeV1.ArchiveRequests]:
+            var pass_ = transport_effect_pass(mode, false)
+            val integer = transport_type(HirTypeKind.Int(64, true))
+            expect(pass_.request_specialization("identity", [integer])).to_be_greater_than(-1)
+            val name = pass_.mangled_name("identity", [integer])
+            val signature = pass_.specialization_signature_in_caller(name, Span.empty())
+            expect(signature != nil).to_equal(true)
+            match signature.unwrap().kind:
+                case HirTypeKind.Function(_, _, effects):
+                    expect(effects.len()).to_equal(2)
+                    expect(effects[1].span.line).to_equal(7)
+                    match effects[1].kind:
+                        case EffectKind.Throws(type_):
+                            match type_.kind:
+                                case HirTypeKind.Named(id, _):
+                                    expect(id.id).to_be_greater_than(0)
+                                    val owner = pass_.module_symbols["caller"].get_symbol_raw(id.id)
+                                    expect(owner.defining_module ?? "").to_equal("decoy")
+                                    expect(owner.name).to_equal("Packet")
+                                case _: fail("expected relocated nominal Throws")
+                        case _: fail("expected Throws effect")
+                case _: fail("expected specialized function signature")
+            val original = pass_.module_symbols["caller"].get_symbol_raw(0)
+            expect(original.defining_module ?? "").to_equal("third")
+            expect(pass_.diagnostics.len()).to_equal(0)
+
+    it "refuses an absent Throws declaration before caller symbol allocation":
+        for mode in [MonoTemplateBodyModeV1.Retained, MonoTemplateBodyModeV1.ArchiveRequests]:
+            var pass_ = transport_effect_pass(mode, true)
+            val integer = transport_type(HirTypeKind.Int(64, true))
+            expect(pass_.request_specialization("identity", [integer])).to_be_greater_than(-1)
+            val name = pass_.mangled_name("identity", [integer])
+            val signature = pass_.specialization_signature_in_caller(name, Span.empty())
+            expect(signature == nil).to_equal(true)
+            expect(pass_.diagnostics.len()).to_be_greater_than(0)
+            expect(pass_.diagnostics[pass_.diagnostics.len() - 1]).to_contain("nominal source symbol 99 is absent")
+            expect(pass_.module_symbols["caller"].next_symbol_id).to_equal(1)
+
+
+    it "routes a malformed Throws kind through validating transport instead of the scalar fast path":
+        for mode in [MonoTemplateBodyModeV1.Retained, MonoTemplateBodyModeV1.ArchiveRequests]:
+            var pass_ = transport_effect_pass(mode, false)
+            val integer = transport_type(HirTypeKind.Int(64, true))
+            expect(pass_.request_specialization("identity", [integer])).to_be_greater_than(-1)
+            val name = pass_.mangled_name("identity", [integer])
+            unsafe:
+                val malformed = HirType(kind: nil, span: Span.empty())
+                val effects = [Effect(kind: EffectKind.Throws(malformed), span: Span.empty())]
+                if mode == MonoTemplateBodyModeV1.ArchiveRequests:
+                    var signature = pass_.archive_specialized_signatures[name]
+                    signature.effects = effects
+                    pass_.archive_specialized_signatures[name] = signature
+                else:
+                    var function: HirFunction = pass_.specialized_functions[name]
+                    function.effects = effects
+                    pass_.specialized_functions[name] = function
+            expect(pass_.specialization_signature_in_caller(name, Span.empty()) == nil).to_equal(true)
+            expect(pass_.diagnostics.len()).to_be_greater_than(0)
+            expect(pass_.diagnostics[pass_.diagnostics.len() - 1]).to_contain("absent type/kind")
+            expect(pass_.module_symbols["caller"].next_symbol_id).to_equal(1)
