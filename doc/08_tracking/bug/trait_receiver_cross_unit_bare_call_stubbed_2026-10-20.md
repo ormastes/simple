@@ -32,6 +32,12 @@ Root cause, two compounding gaps:
    method keeps the old behaviour; imports.rs is deliberately the more
    permissive side so a disagreement fails the link (undefined vtable symbol)
    instead of producing a header-less object behind a virtual call.
+   Only a class whose `with` clause names exactly ONE non-mixin entry, that
+   has no explicit `impl Trait for` block, and that does not reach the trait
+   through an import alias qualifies: an object has one vtable header and
+   `MethodCallVirtual` carries only a slot number, so `with Read, Close` would
+   call `read` for `close()` (Opus review). Multi-trait classes keep the old
+   bare-name behaviour.
 2. The payload of an `Option<Trait>` lost its declared trait:
    `type_name_hint`/`declared_trait_dispatch` have no `Type::Optional` arm and
    if-let / match payload bindings were plain locals. Fix: slot-keyed
@@ -69,3 +75,8 @@ fixture reaches it.
   Trait-typed FIELD receivers lose their trait the same way Option payloads
   did; fix that first, then make the Cranelift fallback an error.
   Fixture: `test/native/cross_unit_trait_dispatch/missing`.
+- Multi-trait conformance (`class X with Read, Close`, or two `impl` blocks)
+  needs per-(type, trait) vtables or a trait identity on `MethodCallVirtual`.
+- A `mixin Foo` in one unit and a `trait Foo` used through `with` in another:
+  HIR checks mixins locally, imports.rs project-wide. No such collision exists
+  in the tree today.

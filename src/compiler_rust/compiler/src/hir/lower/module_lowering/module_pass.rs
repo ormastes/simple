@@ -2808,11 +2808,23 @@ impl Lowerer {
     /// A class that does not define every abstract trait method keeps the old
     /// (duck-typed) behaviour instead of becoming a new lowering error.
     fn record_class_with_trait_impls(&mut self, c: &ast::ClassDef, items: &[Node]) -> LowerResult<()> {
-        for mixin_ref in &c.mixins {
+        // An object carries ONE vtable header and `MethodCallVirtual` carries
+        // only a slot number, so a class conforming to two traits would index
+        // the first trait's vtable with the second trait's slots. Publish an
+        // impl only for a class whose `with` clause names exactly one
+        // non-mixin entry and that has no explicit `impl Trait for` block;
+        // imports.rs applies the same rule.
+        let candidates: Vec<_> = c.mixins.iter()
+            .filter(|mixin_ref| !items.iter().any(|item| matches!(item, Node::Mixin(m) if m.name == mixin_ref.name)))
+            .collect();
+        let has_explicit_trait_impl = items.iter().any(|item| matches!(item, Node::Impl(imp)
+            if imp.trait_name.is_some()
+                && matches!(&imp.target_type, ast::Type::Simple(n) | ast::Type::Generic { name: n, .. } if *n == c.name)));
+        if candidates.len() != 1 || has_explicit_trait_impl {
+            return Ok(());
+        }
+        for mixin_ref in candidates {
             let trait_name = &mixin_ref.name;
-            if items.iter().any(|item| matches!(item, Node::Mixin(m) if &m.name == trait_name)) {
-                continue;
-            }
             let owner = declaration_owner(&c.attributes, &c.methods);
             let local_trait = select_implicit_struct_trait(
                 items, trait_name, owner.as_deref(), &self.flatten_owner_import_bindings,
@@ -2829,6 +2841,12 @@ impl Lowerer {
             else {
                 continue;
             };
+            // An aliased import (`use m.{Ident as Id}`) is invisible to the
+            // project-wide imports.rs scan, which keys traits by declared
+            // name; recording it here would leave the object header-less.
+            if trait_def.name != *trait_name {
+                continue;
+            }
             let own: std::collections::HashSet<&str> = c.methods.iter().map(|m| m.name.as_str()).collect();
             if trait_def.methods.iter().any(|m| m.is_abstract && !own.contains(m.name.as_str())) {
                 continue;

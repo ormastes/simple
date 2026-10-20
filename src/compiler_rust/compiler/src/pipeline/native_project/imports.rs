@@ -1028,8 +1028,21 @@ pub(crate) fn build_import_map(
     // require only the methods abstract in ALL of them. A class HIR declines is
     // then marked here and fails the link on its undefined vtable symbol --
     // never the reverse (a vtable-less object behind a virtual call).
+    // One vtable header per object: only a class whose `with` clause names
+    // exactly one non-mixin entry, and that has no explicit `impl Trait for`,
+    // qualifies (same rule as HIR).
+    let mut with_entry_counts: HashMap<(String, String), usize> = HashMap::new();
+    for (class_prefix, class_name, name, _) in &pending_class_with {
+        if !mixin_def_names.contains(name) {
+            *with_entry_counts.entry((class_prefix.clone(), class_name.clone())).or_default() += 1;
+        }
+    }
+    let explicitly_implemented: HashSet<String> = trait_impls.values().flatten().cloned().collect();
     for (class_prefix, class_name, trait_name, own_methods) in pending_class_with {
-        if mixin_def_names.contains(&trait_name) {
+        if mixin_def_names.contains(&trait_name)
+            || with_entry_counts.get(&(class_prefix.clone(), class_name.clone())) != Some(&1)
+            || explicitly_implemented.contains(&class_name)
+        {
             continue;
         }
         let Some(abstract_sets) = trait_abstract_methods.get(&trait_name) else { continue };

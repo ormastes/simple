@@ -197,7 +197,9 @@ fn by_local() -> text:\n    val reducer: Ident? = None\n    if val Some(strategy
 fn class_with_trait_clause_records_trait_impl() {
     let source = "trait Ident:\n    fn identity() -> text\n    fn label() -> text:\n        \"default\"\n\n\
 class Alpha with Ident:\n    tag: text\n    fn identity() -> text: self.tag\n\n\
-class Partial with Ident:\n    tag: text\n";
+class Partial with Ident:\n    tag: text\n\n\
+trait Other:\n    fn other() -> i64\n\n\
+class Both with Ident, Other:\n    tag: text\n    fn identity() -> text: self.tag\n    fn other() -> i64: 1\n";
     let ast = simple_parser::Parser::new(source).parse().expect("parse");
     let hir = hir::lower(&ast).expect("HIR lowering");
     let alpha = hir
@@ -208,6 +210,8 @@ class Partial with Ident:\n    tag: text\n";
     assert_eq!(alpha.methods.get("identity").map(String::as_str), Some("Alpha.identity"));
     assert_eq!(alpha.methods.get("label").map(String::as_str), Some("Alpha.label"), "default method not inherited");
     assert!(!hir.impls.iter().any(|imp| imp.type_name == "Partial"), "incomplete class must not get an impl");
+    // One vtable header per object: two traits would share it with clashing slots.
+    assert!(!hir.impls.iter().any(|imp| imp.type_name == "Both"), "multi-trait class must not get an impl");
     let mir = mir::lower_to_mir(&hir).expect("MIR lowering");
     assert!(mir.vtable_impls.iter().any(|(_, owner, _, slots, _)| owner == "Alpha" && slots.len() == 2));
 }
