@@ -2402,6 +2402,10 @@ pub(super) fn bootstrap_mutex_runtime_requested_symbols() -> Vec<String> {
         "rt_mem_snapshot_open",
         "rt_mem_snapshot_record",
         "rt_mem_snapshot_close",
+        // The MIR progress line (driver_log_helpers.spl, db00168b079) reads
+        // VmRSS through this core-C export; without it the Stage 2 link failed
+        // with `undefined symbol: rt_process_rss_kib` (aarch64, 2026-10-20).
+        "rt_process_rss_kib",
         "rt_file_create_excl",
         "rt_file_sync",
         "rt_simple_abi_version",
@@ -2495,6 +2499,13 @@ mod bootstrap_capsule_ownership_tests {
     }
 
     #[test]
+    fn bootstrap_capsule_requests_the_mir_progress_rss_export() {
+        assert!(super::bootstrap_mutex_runtime_requested_symbols()
+            .iter()
+            .any(|name| name == "rt_process_rss_kib"));
+    }
+
+    #[test]
     fn core_only_missing_native_exports_remain_requested() {
         let requested = vec!["rt_simple_abi_version".to_string(), "rt_file_sync".to_string()];
         let (supplement, external) = bootstrap_capsule_symbol_ownership(&requested, &BTreeMap::new()).unwrap();
@@ -2550,6 +2561,13 @@ mod bootstrap_capsule_ownership_tests {
             core_source.push_str(&format!("long {name}(void) {{ return 1; }}\n"));
         }
         core_source.push_str("long rt_sosix_directory_pair_check_v1(void) { return 5 + rt_file_sync(); }\n");
+        // Every other requested export must exist exactly once in the core
+        // archive too (rt_secure_temp_dir_*, rt_process_rss_kib, ...).
+        for name in super::bootstrap_mutex_runtime_requested_symbols() {
+            if !core_source.contains(&format!("long {name}(void)")) {
+                core_source.push_str(&format!("long {name}(void) {{ return 1; }}\n"));
+            }
+        }
         native_source.push_str("long rt_native_authority_anchor(void) { return 3; }\n");
         let core = compile_archive("core", &core_source);
         let native = compile_archive("native", &native_source);
