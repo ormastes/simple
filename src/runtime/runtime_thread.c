@@ -786,7 +786,7 @@ extern int64_t rt_closure_func_ptr(int64_t closure_value);
 extern int64_t rt_value_int(int64_t value);
 extern int64_t rt_value_unbox_int(int64_t value);
 
-static int64_t rt_pool_v1_boxed_task_dispatch(int64_t raw_task) {
+static int64_t spl_pool_v1_boxed_task_dispatch(int64_t raw_task) {
     RtPoolTask* task = (RtPoolTask*)(intptr_t)raw_task;
     if (!task || !task->boxed_entry) return 0;
     return rt_value_unbox_int(task->boxed_entry(task->boxed_closure, rt_value_int(task->scalar_input)));
@@ -1558,7 +1558,7 @@ static RtPoolTask* rt_pool_v1_scalar_task_create(int64_t function_value, int64_t
     } else {
         task->boxed_entry = (int64_t (*)(int64_t, int64_t))(intptr_t)boxed;
         task->boxed_closure = function_value;
-        task->entry = rt_pool_v1_boxed_task_dispatch;
+        task->entry = spl_pool_v1_boxed_task_dispatch;
     }
     task->closure_ptr = (int64_t)(intptr_t)task;
 #ifdef SPL_THREAD_PTHREAD
