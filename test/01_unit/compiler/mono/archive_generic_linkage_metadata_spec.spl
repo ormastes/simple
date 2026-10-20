@@ -1,18 +1,21 @@
 # @req REQ-SSPEC-COMPILER
 # Authored source-bound regression; execution admission is recorded separately.
 use std.spec
+use std.spec.step
 use compiler.common.config.Logger
 use compiler.common.diagnostics.span.Span
 use compiler.frontend.frontend.parse_full_frontend
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.items.*
-use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, Effect, EffectKind}
 use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
 use compiler.mono.monomorphize_integration.{mono_sym_key, mono_type_identity}
 use compiler.hir.hir_definitions.HirFunction
 use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode_stable}
 use compiler.mono.monomorphize_integration.MonomorphizationPass
-use compiler.mono.mono_archive_types_v1.{MonoTemplateBodyModeV1, mono_template_signature_digest_v1}
+use compiler.mono.mono_archive_registration_types_v1.{MonoArchiveRegistrationRowV1}
+use compiler.mono.mono_archive_registration_v1.{mono_archive_registration_row_digest_v1}
+use compiler.mono.mono_archive_types_v1.{MonoTemplateBodyModeV1, mono_template_signature_digest_v1, mono_template_signature_v1}
 
 fn linkage_fixture(flag: text) -> HirModule:
     val source = "fn identity<T>(value: T) -> T:\n    value\nfn invoke() -> i64:\n    identity<i64>(41)\n"
@@ -221,3 +224,131 @@ describe "generic ABI linkage metadata survives archive projection":
             expect(linkage_rewrite_method(linkage_method_fixture(false), mode, "consumer")).to_equal("provider.Box__read$i64")
             expect(linkage_rewrite_method(linkage_method_fixture(true), mode, "consumer")).to_equal("Box__read$i64")
             expect(linkage_rewrite_method(linkage_method_fixture(false), mode, "provider")).to_equal("Box__read$i64")
+
+
+fn linkage_effect_fixture(method: bool) -> HirModule:
+    var module = if method: linkage_method_fixture(false) else: linkage_fixture("")
+    for key in module.functions.keys():
+        var function: HirFunction = module.functions[key]
+        if (method and function.is_method) or (not method and function.name == "identity"):
+            function.effects = [Effect(kind: EffectKind.IO, span: Span.new(1, 2, 3, 4)),
+                Effect(kind: EffectKind.Throws(HirType(kind: HirTypeKind.TypeParam("T", []), span: Span.empty())), span: Span.new(5, 6, 7, 8)),
+                Effect(kind: EffectKind.Custom("audit"), span: Span.new(9, 10, 11, 12))]
+            module.functions[key] = function
+    module
+
+fn linkage_expect_effects(effects: [Effect]):
+    expect(effects.len()).to_equal(3)
+    match effects[0].kind:
+        case EffectKind.IO: ()
+        case _: fail("expected ordered IO effect")
+    match effects[1].kind:
+        case EffectKind.Throws(type_):
+            match type_.kind:
+                case HirTypeKind.Int(bits, signed):
+                    expect(bits).to_equal(64)
+                    expect(signed).to_equal(true)
+                case _: fail("expected specialized Throws<i64>")
+        case _: fail("expected ordered Throws effect")
+    match effects[2].kind:
+        case EffectKind.Custom(name): expect(name).to_equal("audit")
+        case _: fail("expected ordered custom effect")
+    expect(effects[0].span.line).to_equal(3)
+    expect(effects[1].span.line).to_equal(7)
+    expect(effects[2].span.line).to_equal(11)
+
+fn linkage_rewrite_effects(module: HirModule, mode: MonoTemplateBodyModeV1):
+    var pass_ = MonomorphizationPass.create()
+    pass_.template_body_mode = mode
+    pass_.collect_generics(module, "provider")
+    pass_.current_module = "provider"
+    pass_.module_symbols["provider"] = module.symbols
+    var seen = false
+    for key in module.functions.keys():
+        val function: HirFunction = module.functions[key]
+        if function.name != "invoke": continue
+        val rewritten = pass_.rewrite_function(function)
+        expect(rewritten.body.has).to_equal(true)
+        match rewritten.body.value.kind:
+            case HirExprKind.Call(callee, _, arguments):
+                expect(arguments.len()).to_equal(0)
+                match callee.type_.kind:
+                    case HirTypeKind.Function(_, _, effects): linkage_expect_effects(effects)
+                    case _: fail("expected actual specialized callee function stamp")
+            case _: fail("expected rewritten actual call")
+        seen = true
+    expect(seen).to_equal(true)
+    expect(pass_.diagnostics.len()).to_equal(0)
+    if mode == MonoTemplateBodyModeV1.ArchiveRequests:
+        expect(pass_.specialized_functions.len()).to_equal(0)
+        expect(pass_.archive_requests.len()).to_equal(1)
+        val request = pass_.archive_requests[0]
+        linkage_expect_effects(pass_.archive_specialized_signatures[request.mangled_name].effects)
+
+describe "archive declaration effects reach real rewritten calls":
+    it "preserves ordered effects and specialized Throws in both direct-call body modes":
+        step("Rewrite actual parsed generic calls using retained and archive-request producers")
+        for mode in [MonoTemplateBodyModeV1.Retained, MonoTemplateBodyModeV1.ArchiveRequests]:
+            linkage_rewrite_effects(linkage_effect_fixture(false), mode)
+
+    it "preserves effects through inherent-method recipe canonicalization and rewrite":
+        step("Use the actual generic class method collector and specialization call stamp")
+        for mode in [MonoTemplateBodyModeV1.Retained, MonoTemplateBodyModeV1.ArchiveRequests]:
+            linkage_rewrite_effects(linkage_effect_fixture(true), mode)
+
+    it "retains declaration effects through the actual HIR archive codec":
+        step("Roundtrip canonical module bytes before the actual archive-request projection")
+        val source = linkage_effect_fixture(false)
+        val encoded = hir_module_encode(source)
+        val decoded = hir_module_decode_stable(encoded)
+        expect(decoded != nil).to_equal(true)
+        linkage_rewrite_effects(decoded.unwrap(), MonoTemplateBodyModeV1.ArchiveRequests)
+
+
+    it "binds ordered effect facts and provenance in actual registration identity":
+        step("Alter only effects in a real projected declaration and retain all other signature facts")
+        val module = linkage_effect_fixture(false)
+        var seen = false
+        for key in module.functions.keys():
+            val function: HirFunction = module.functions[key]
+            if function.name != "identity": continue
+            val original = mono_template_signature_v1(function)
+            val original_row = MonoArchiveRegistrationRowV1.TemplateSignature("identity", original)
+            val original_digest = mono_archive_registration_row_digest_v1(original_row)
+            expect(original_digest.len()).to_equal(64)
+            var reordered = original
+            reordered.effects = [original.effects[2], original.effects[1], original.effects[0]]
+            val reordered_digest = mono_archive_registration_row_digest_v1(
+                MonoArchiveRegistrationRowV1.TemplateSignature("identity", reordered))
+            expect(reordered_digest == original_digest).to_equal(false)
+            var changed_span = original
+            var effect: Effect = original.effects[0]
+            effect.span = Span.new(20, 21, 22, 23)
+            changed_span.effects = [effect, original.effects[1], original.effects[2]]
+            expect(mono_archive_registration_row_digest_v1(
+                MonoArchiveRegistrationRowV1.TemplateSignature("identity", changed_span)) == original_digest).to_equal(false)
+            expect(mono_archive_registration_row_digest_v1(original_row)).to_equal(original_digest)
+            seen = true
+        expect(seen).to_equal(true)
+
+
+    it "refuses malformed effect facts before assigning a signature digest":
+        step("Exercise direct API malformed nodes independently of canonical module admission")
+        val module = linkage_effect_fixture(false)
+        var seen = false
+        for key in module.functions.keys():
+            val function: HirFunction = module.functions[key]
+            if function.name != "identity": continue
+            var signature = mono_template_signature_v1(function)
+            unsafe:
+                signature.effects = [nil]
+                expect(mono_template_signature_digest_v1(signature)).to_equal("")
+                signature.effects = [Effect(kind: nil, span: Span.empty())]
+                expect(mono_template_signature_digest_v1(signature)).to_equal("")
+                signature.effects = [Effect(kind: EffectKind.Throws(nil), span: Span.empty())]
+                expect(mono_template_signature_digest_v1(signature)).to_equal("")
+                val malformed = HirType(kind: nil, span: Span.empty())
+                signature.effects = [Effect(kind: EffectKind.Throws(malformed), span: Span.empty())]
+                expect(mono_template_signature_digest_v1(signature)).to_equal("")
+            seen = true
+        expect(seen).to_equal(true)

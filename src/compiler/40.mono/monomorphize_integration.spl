@@ -1022,7 +1022,7 @@ impl MonomorphizationPass:
 
     me specialization_signature_in_caller(spec_name: text, span: Span) -> HirType?:
         val specialized = self.specialization_signature_v1(spec_name)
-        val signature = HirType(kind: HirTypeKind.Function(specialized.param_types, specialized.return_type, []), span: span)
+        val signature = HirType(kind: HirTypeKind.Function(specialized.param_types, specialized.return_type, specialized.effects), span: span)
         if val transported = self.relocate_mono_types([signature], self.spec_module[spec_name], self.current_module, "signature of `{spec_name}`"):
             val caller_signature: HirType = transported[0]
             match caller_signature.kind:
@@ -3976,10 +3976,23 @@ fn hir_type_has_nominal(ty: HirType) -> bool:
         case Result(ok, err): hir_type_has_nominal(ok) or hir_type_has_nominal(err)
         case Tuple(elems): any_nominal(elems)
         case Union(members): any_nominal(members)
-        case Function(params, ret, _): any_nominal(params) or hir_type_has_nominal(ret)
+        case Function(params, ret, effects): any_nominal(params) or hir_type_has_nominal(ret) or mono_effects_have_nominal_v1(effects)
         case Projection(base, _): hir_type_has_nominal(base)
         case Tensor(elem, _, _): hir_type_has_nominal(elem)
         case _: false
+
+# Throws is the type-bearing declaration effect. Malformed effect nodes also
+# require the validating transport path instead of the scalar fast path.
+fn mono_effects_have_nominal_v1(effects: [Effect]) -> bool:
+    if effects == nil: return false
+    for raw in effects:
+        val effect: Effect = raw
+        if effect == nil or effect.kind == nil: return true
+        match effect.kind:
+            case EffectKind.Throws(type_):
+                if type_ == nil or type_.kind == nil or hir_type_has_nominal(type_): return true
+            case _: ()
+    false
 
 fn any_nominal(types: [HirType]) -> bool:
     if types == nil:

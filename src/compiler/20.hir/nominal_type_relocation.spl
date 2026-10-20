@@ -83,7 +83,23 @@ class HirNominalTypeRelocator:
             if not self.validate_type(type_): return false
         true
 
+    me validate_effects(effects: [Effect]) -> bool:
+        if effects == nil: return true
+        for raw in effects:
+            val effect: Effect = raw
+            if effect == nil or effect.kind == nil:
+                self.error = "nominal transport has an absent effect node/kind"
+                return false
+            match effect.kind:
+                case EffectKind.Throws(type_):
+                    if not self.validate_type(type_): return false
+                case _: ()
+        true
+
     me validate_type(type_: HirType) -> bool:
+        if type_ == nil or type_.kind == nil:
+            self.error = "nominal transport has an absent type/kind"
+            return false
         match type_.kind:
             case HirTypeKind.Named(id, args): self.validate_symbol(id) and self.validate_types(args)
             case HirTypeKind.DynTrait(id): self.validate_symbol(id)
@@ -91,7 +107,7 @@ class HirNominalTypeRelocator:
             case HirTypeKind.Array(inner, _) | HirTypeKind.Slice(inner) | HirTypeKind.Ref(inner, _) | HirTypeKind.Ptr(inner, _) | HirTypeKind.Optional(inner) | HirTypeKind.Isolated(inner) | HirTypeKind.Projection(inner, _) | HirTypeKind.Tensor(inner, _, _): self.validate_type(inner)
             case HirTypeKind.Dict(a, b) | HirTypeKind.Result(a, b): self.validate_type(a) and self.validate_type(b)
             case HirTypeKind.TypeParam(_, bounds): self.validate_types(bounds)
-            case HirTypeKind.Function(params, ret, _): self.validate_types(params) and self.validate_type(ret)
+            case HirTypeKind.Function(params, ret, effects): self.validate_types(params) and self.validate_type(ret) and self.validate_effects(effects)
             case _: true
 
     me relocate_symbol(id: SymbolId) -> SymbolId:
@@ -128,6 +144,19 @@ class HirNominalTypeRelocator:
             result = result.push(self.relocate_type(type_))
         result
 
+    me relocate_effects(effects: [Effect]) -> [Effect]:
+        if effects == nil: return effects
+        var relocated: [Effect] = []
+        for raw in effects:
+            val effect: Effect = raw
+            var rewritten = effect
+            match effect.kind:
+                case EffectKind.Throws(type_):
+                    rewritten.kind = EffectKind.Throws(self.relocate_type(type_))
+                case _: ()
+            relocated = relocated.push(rewritten)
+        relocated
+
     me relocate_type(type_: HirType) -> HirType:
         val kind = match type_.kind:
             case HirTypeKind.Named(id, args): HirTypeKind.Named(self.relocate_symbol(id), self.relocate_types(args))
@@ -145,7 +174,7 @@ class HirNominalTypeRelocator:
             case HirTypeKind.Dict(a, b): HirTypeKind.Dict(self.relocate_type(a), self.relocate_type(b))
             case HirTypeKind.Result(a, b): HirTypeKind.Result(self.relocate_type(a), self.relocate_type(b))
             case HirTypeKind.TypeParam(name, bounds): HirTypeKind.TypeParam(name, self.relocate_types(bounds))
-            case HirTypeKind.Function(params, ret, effects): HirTypeKind.Function(self.relocate_types(params), self.relocate_type(ret), effects)
+            case HirTypeKind.Function(params, ret, effects): HirTypeKind.Function(self.relocate_types(params), self.relocate_type(ret), self.relocate_effects(effects))
             case _: type_.kind
         HirType(kind: kind, span: type_.span)
 
