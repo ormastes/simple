@@ -79,12 +79,12 @@ behaviour, and they fail on the base without this change:
 So the wiring case proves registration and order. It does not prove that table
 dispatch works on the seed.
 
-**nil outside `unsafe`.** There is no nil lint to reuse yet. The nilunsafe lane
-(`work/nil-only-unsafe`, `75c294d70a2`) enforces only one MIR site
-(`50.mir/_MirLoweringExpr/enum_constructor_payload.spl:239`), and only for enum
-constructor payloads. This lane does not duplicate it. The heuristic count below
-(`nil` tokens outside `unsafe:` blocks and `@unsafe` functions, ignoring comments and strings)
-sizes that lane's work and is not a lint result.
+**nil outside `unsafe`** is the existing rule `nil_outside_unsafe` (code
+`NIL-UNSAFE-001`, `src/compiler/90.tools/lint/rules/nil_outside_unsafe_rule.spl`),
+which landed from the nilunsafe lane in #3946. This lane reuses that rule and does
+not duplicate it. The heuristic count below (`nil` tokens outside `unsafe:` blocks
+and `@unsafe` functions, ignoring comments and strings) was taken before that rule
+landed. It sizes the nil migration and is not that rule's output.
 
 ## 5. Blast radius
 
