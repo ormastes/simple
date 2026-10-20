@@ -8,6 +8,11 @@
 #ifndef SPL_UNIX_COMMON_H
 #define SPL_UNIX_COMMON_H
 
+/* Defined by runtime.c (the only includer); see the comment there. */
+#ifndef SPL_RUNTIME_NATIVE_TWIN
+#define SPL_RUNTIME_NATIVE_TWIN
+#endif
+
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -59,7 +64,7 @@ static int unlink_cb(const char *fpath, const struct stat *sb,
 /* C-string worker. The public rt_dir_* entry point lives in runtime.c and
  * converts the compiler's (ptr, len) `text` pair before calling this; a Simple
  * `text` is not NUL-terminated. See rt_text_arg_to_path in runtime.c. */
-bool rt_dir_create_cpath(const char* path, bool recursive) {
+SPL_RUNTIME_NATIVE_TWIN bool rt_dir_create_cpath(const char* path, bool recursive) {
     if (!path) return false;
     
     if (!recursive) {
@@ -178,7 +183,7 @@ bool rt_dir_remove_all_cpath(const char* path) {
  * File Locking
  * ---------------------------------------------------------------- */
 
-int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout_secs) {
+SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout_secs) {
     /* Raw (ptr, len) `text` ABI per runtime.h: rt_file_lock IS in
      * text_arg_indices, so the caller splits `text` into two words. */
     if (!path_ptr || path_len == 0 || path_len >= 4096) return -1;
@@ -219,7 +224,7 @@ int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout
     return -1;
 }
 
-bool rt_file_unlock(int64_t handle) {
+SPL_RUNTIME_NATIVE_TWIN bool rt_file_unlock(int64_t handle) {
     if (handle < 0) return false;
     flock((int)handle, LOCK_UN);
     close((int)handle);
@@ -232,7 +237,7 @@ bool rt_file_unlock(int64_t handle) {
 
 /* SFFI_LEGACY_UNSAFE: mixed static/heap ownership; checked managed-text callers
  * must not bind this compatibility export. */
-const char* rt_file_read_text_at(const char* path, int64_t offset, int64_t size) {
+SPL_RUNTIME_NATIVE_TWIN const char* rt_file_read_text_at(const char* path, int64_t offset, int64_t size) {
     if (!path || size <= 0 || offset < 0) return "";
 
     int fd = open(path, O_RDONLY);
@@ -283,7 +288,7 @@ static inline int64_t rt_file_text_at_int(int64_t value) {
     return value;
 }
 
-int64_t rt_file_write_text_at(int64_t path_value, int64_t offset_value, int64_t data_value) {
+SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_write_text_at(int64_t path_value, int64_t offset_value, int64_t data_value) {
     int64_t path_len = 0;
     int64_t data_len = 0;
     const char* path = rt_file_text_at_string_data(path_value, &path_len);
@@ -309,7 +314,7 @@ int64_t rt_file_write_text_at(int64_t path_value, int64_t offset_value, int64_t 
  * Memory-Mapped File I/O
  * ---------------------------------------------------------------- */
 
-int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readonly) {
+SPL_RUNTIME_NATIVE_TWIN int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readonly) {
     /* Tagged-value `text` contract per runtime.h: rt_mmap is ABSENT from
      * text_arg_indices, so the caller passes ONE tagged value, not a C
      * string. The old `const char*` shape never matched a generated caller. */
@@ -343,12 +348,12 @@ int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readon
     return (int64_t)(intptr_t)addr;
 }
 
-bool rt_munmap(int64_t addr, int64_t size) {
+SPL_RUNTIME_NATIVE_TWIN bool rt_munmap(int64_t addr, int64_t size) {
     if (!addr || size <= 0) return false;
     return munmap((void*)(intptr_t)addr, (size_t)size) == 0;
 }
 
-bool rt_madvise(int64_t addr, int64_t size, int64_t advice) {
+SPL_RUNTIME_NATIVE_TWIN bool rt_madvise(int64_t addr, int64_t size, int64_t advice) {
     if (!addr || size <= 0) return false;
 
     /* Convert advice codes: 0=NORMAL, 1=RANDOM, 2=SEQUENTIAL, 3=WILLNEED, 4=DONTNEED */
@@ -365,7 +370,7 @@ bool rt_madvise(int64_t addr, int64_t size, int64_t advice) {
     return madvise((void*)(intptr_t)addr, (size_t)size, posix_advice) == 0;
 }
 
-bool rt_msync(int64_t addr, int64_t size) {
+SPL_RUNTIME_NATIVE_TWIN bool rt_msync(int64_t addr, int64_t size) {
     if (!addr || size <= 0) return false;
     return msync((void*)(intptr_t)addr, (size_t)size, MS_SYNC) == 0;
 }
@@ -465,7 +470,7 @@ static bool rt_monotonic_time(struct timespec* ts) {
 #endif
 }
 
-int64_t rt_time_now_nanos(void) {
+SPL_RUNTIME_NATIVE_TWIN int64_t rt_time_now_nanos(void) {
     struct timespec ts;
     if (!rt_monotonic_time(&ts)) {
         return -1;
@@ -476,7 +481,7 @@ int64_t rt_time_now_nanos(void) {
     return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
 }
 
-int64_t rt_time_now_micros(void) {
+SPL_RUNTIME_NATIVE_TWIN int64_t rt_time_now_micros(void) {
     struct timespec ts;
     if (!rt_monotonic_time(&ts)) {
         return -1;
@@ -549,7 +554,7 @@ int64_t rt_thread_available_parallelism(void) {
     return count > 0 ? (int64_t)count : 1;
 }
 
-int64_t rt_time_now_unix_micros(void) {
+SPL_RUNTIME_NATIVE_TWIN int64_t rt_time_now_unix_micros(void) {
     struct timeval tv;
     if (gettimeofday(&tv, NULL) == 0) {
         if (tv.tv_sec < 0 || (int64_t)tv.tv_sec > INT64_MAX / 1000000LL) return -1;
@@ -650,7 +655,7 @@ int64_t rt_process_spawn_guarded(const char* cmd, const char** args, int64_t arg
     }
 }
 
-int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
+SPL_RUNTIME_NATIVE_TWIN int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
     if (pid <= 0) return -1;
 
     int status;
