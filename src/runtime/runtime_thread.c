@@ -419,12 +419,24 @@ typedef struct {
     int64_t          result;
     int              done;
     int              joined;
+    /* Two owners: the worker and the public handle. Whichever releases
+     * last frees td, so free() before the worker finishes is safe. */
 #ifdef SPL_THREAD_PTHREAD
+    int              refs;
     pthread_t        thread;
 #else
+    volatile LONG    refs;
     HANDLE           thread;
 #endif
 } RtThreadData;
+
+static int rt_thread_data_release(RtThreadData* td) {
+#ifdef SPL_THREAD_PTHREAD
+    return __atomic_sub_fetch(&td->refs, 1, __ATOMIC_ACQ_REL) == 0;
+#else
+    return InterlockedDecrement(&td->refs) == 0;
+#endif
+}
 
 static int64_t rt_native_closure_payload(int64_t raw) {
     uint64_t value = (uint64_t)raw;
@@ -468,6 +480,7 @@ static void* rt_isolated_wrapper(void* raw) {
         td->result = td->entry(td->data1);
     }
     td->done = 1;
+    if (rt_thread_data_release(td)) SPL_FREE(td);
     return NULL;
 }
 
@@ -488,6 +501,7 @@ static DWORD WINAPI rt_isolated_wrapper_win(LPVOID raw) {
         td->result = td->entry(td->data1);
     }
     td->done = 1;
+    if (rt_thread_data_release(td)) SPL_FREE(td);
     return 0;
 }
 #endif
@@ -501,8 +515,12 @@ static DWORD WINAPI rt_isolated_wrapper_win(LPVOID raw) {
  *   join(h)               waits once and returns the result; a repeat join
  *                         returns nil. The handle stays valid until free.
  *   free(h)               releases the handle (detaching an unjoined thread).
- *   id(h)                 C reports the OS thread id, Rust a spawn counter;
- *                         both are only distinct per live thread. */
+ *   id(h)                 C reports the OS thread id (0 after join on
+ *                         Windows), Rust a spawn counter.
+ * Known divergences: Rust deep-copies `data` (clone_for_isolated_thread) and
+ * honours raw_worker_args; C shares `data` and passes it unchanged. On
+ * Windows rt_native_address_is_code is a no-op in both lanes, so a raw code
+ * pointer is read as a closure record. */
 int64_t rt_thread_spawn_isolated(int64_t closure, int64_t data) {
     int64_t closure_value = closure;
     int64_t data_value = data;
@@ -543,6 +561,7 @@ int64_t rt_thread_spawn_isolated(int64_t closure, int64_t data) {
     td->result      = 0;
     td->done        = 0;
     td->joined      = 0;
+    td->refs        = 2;
 
 #ifdef SPL_THREAD_PTHREAD
     if (pthread_create(&td->thread, NULL, rt_isolated_wrapper, td) != 0) {
@@ -594,6 +613,7 @@ int64_t rt_thread_spawn_isolated_with_args(int64_t fn_ptr, int64_t data1, int64_
     td->result      = 0;
     td->done        = 0;
     td->joined      = 0;
+    td->refs        = 2;
 
 #ifdef SPL_THREAD_PTHREAD
     if (pthread_create(&td->thread, NULL, rt_isolated_wrapper, td) != 0) {
@@ -644,6 +664,7 @@ int64_t rt_thread_id(int64_t handle) {
 void rt_thread_free(int64_t handle) {
     RtThreadData* td = (RtThreadData*)get_handle(handle, HANDLE_THREAD);
     if (!td) return;
+    free_handle(handle);
     if (!td->joined) {
 #ifdef SPL_THREAD_PTHREAD
         pthread_detach(td->thread);
@@ -651,8 +672,8 @@ void rt_thread_free(int64_t handle) {
         CloseHandle(td->thread);
 #endif
     }
-    SPL_FREE(td);
-    free_handle(handle);
+    /* An unjoined worker may still be running: it frees td on exit. */
+    if (rt_thread_data_release(td)) SPL_FREE(td);
 }
 
 #if defined(SIMPLE_RUNTIME_THREAD_RUST_OWNER)

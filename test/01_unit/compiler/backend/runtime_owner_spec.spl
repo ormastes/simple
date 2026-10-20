@@ -1,5 +1,54 @@
 use std.spec.*
-use compiler.backend.linker.coff.coff_runtime_owner.{runtime_owner_select_v1, runtime_owner_object_definitions_v1}
+use compiler.backend.linker.coff.coff_runtime_owner.{runtime_owner_select_v1, runtime_owner_object_definitions_v1, runtime_owner_cede_archive_file_v1, runtime_owner_write_bytes_v1}
+use compiler.backend.llvm_native_link_runtime_owner.{llvm_runtime_owner_compile_owner_v1}
+use std.nogc_sync_mut.io_runtime.{dir_create_all}
+
+# Hand-built AMD64 COFF member in an ar archive (374 bytes):
+#   section 1 .text  COMDAT: rt_x (ceded) + alias_y at the same offset (kept)
+#   section 2 .pdata COMDAT associative to section 1
+#   section 3 .text  COMDAT: rt_z only (ceded -> left symbol-less -> demoted)
+# Ops are "width:decimal", "n:<8-byte name>" or "s:<raw text>".
+fn owner_fixture_ops() -> [text]:
+    val text_chars = "1610616864"
+    val pdata_chars = "1076891712"
+    var ops: [text] = ["s:!<arch>\n", "s:fix.obj/        ", "s:0           ", "s:0     ", "s:0     ", "s:644     ", "s:306       ", "s:`\n"]
+    for op in ["2:34404", "2:3", "4:0", "4:140", "4:9", "2:0", "2:0"]: ops.push(op)
+    for section in [["n:.text", text_chars], ["n:.pdata", pdata_chars], ["n:.text", text_chars]]:
+        ops.push(section[0])
+        for op in ["4:0", "4:0", "4:0", "4:0", "4:0", "4:0", "2:0", "2:0"]: ops.push(op)
+        ops.push("4:" + section[1])
+    # section definition symbols, each with a section-definition aux record
+    for definition in [["n:.text", "2:1", "2:0", "1:2"], ["n:.pdata", "2:2", "2:1", "1:5"], ["n:.text", "2:3", "2:0", "1:2"]]:
+        for op in [definition[0], "4:0", definition[1], "2:0", "1:3", "1:1"]: ops.push(op)
+        for op in ["4:0", "2:0", "2:0", "4:0", definition[2], definition[3], "1:0", "2:0"]: ops.push(op)
+    for external in [["n:rt_x", "2:1"], ["n:alias_y", "2:1"], ["n:rt_z", "2:3"]]:
+        for op in [external[0], "4:0", external[1], "2:32", "1:2", "1:0"]: ops.push(op)
+    ops.push("4:4")
+    ops
+
+fn owner_fixture_bytes() -> [u8]:
+    var bytes: [u8] = []
+    for op in owner_fixture_ops():
+        if op.starts_with("s:") or op.starts_with("n:"):
+            val raw = op.substring(2)
+            var i: i64 = 0
+            while i < raw.len():
+                bytes.push(raw.char_code_at(i) as u8)
+                i = i + 1
+            if op.starts_with("n:"):
+                while i < 8:
+                    bytes.push(0 as u8)
+                    i = i + 1
+        else:
+            val parts = op.split(":")
+            val width = parts[0].to_int() ?? 0
+            val value = parts[1].to_int() ?? 0
+            var k: i64 = 0
+            while k < width:
+                bytes.push(((value >> (k * 8)) & 0xff) as u8)
+                k = k + 1
+    bytes
+
 use compiler.backend.llvm_native_link_runtime_owner.{llvm_runtime_owner_compile_bundle_v1}
 use compiler.backend.linker._LinkerWrapper.native_all_support.{native_all_input_dir}
 
@@ -23,6 +72,43 @@ describe "Runtime symbol owner switch":
     it "takes the MSVC native-all authority from the archive's own directory":
         expect(native_all_input_dir(["a.obj", "C:/r/x/simple_native_all.lib"])).to_equal("C:/r/x")
         expect(native_all_input_dir(["a.obj"])).to_equal("")
+
+    it "keeps the rust thread owner for native-all links ceding does not cover":
+        expect(llvm_runtime_owner_compile_owner_v1("c", "r/libsimple_native_all.a", false)).to_equal("rust")
+        expect(llvm_runtime_owner_compile_owner_v1("c", "r/simple_native_all.lib", true)).to_equal("c")
+        expect(llvm_runtime_owner_compile_owner_v1("c", "", false)).to_equal("c")
+        expect(llvm_runtime_owner_compile_owner_v1("rust", "r/simple_native_all.lib", true)).to_equal("rust")
+
+    it "cedes owned definitions in a hand-built COFF member, size-preserving and idempotent":
+        val fixture = owner_fixture_bytes()
+        expect(fixture.len()).to_equal(374)
+        dir_create_all("build/test_tmp/runtime_owner")
+        val path = "build/test_tmp/runtime_owner/fixture.lib"
+        expect(runtime_owner_write_bytes_v1(path, fixture)).to_equal(true)
+        val owned: {text: bool} = {"rt_x": true, "rt_z": true, "absent": true}
+        val first = runtime_owner_cede_archive_file_v1(path, owned).unwrap()
+        expect(first.parsed).to_equal(1)
+        expect(first.members).to_equal(1)
+        expect(first.undefined).to_equal(2)
+        expect(first.demoted).to_equal(1)
+        val out = first.bytes
+        expect(out.len()).to_equal(374)
+        # rt_x (symbol 6) and rt_z (symbol 8): Value/SectionNumber 0, class kept.
+        for record in [316, 352]:
+            expect(out[record + 8] as i64 + out[record + 12] as i64 + out[record + 13] as i64).to_equal(0)
+            expect(out[record + 16] as i64).to_equal(2)
+        # alias_y (symbol 7) keeps section 1.
+        expect(out[334 + 12] as i64).to_equal(1)
+        # LNK_COMDAT (byte +37, bit 4): section 3 demoted; 1 (still led by
+        # alias_y) and 2 (associative) untouched.
+        expect(out[205] as i64).to_equal(0)
+        expect(out[125] as i64).to_equal(16)
+        expect(out[165] as i64).to_equal(16)
+        val again_path = "build/test_tmp/runtime_owner/fixture.ceded.lib"
+        expect(runtime_owner_write_bytes_v1(again_path, out)).to_equal(true)
+        val second = runtime_owner_cede_archive_file_v1(again_path, owned).unwrap()
+        expect(second.parsed).to_equal(1)
+        expect(second.undefined).to_equal(0)
 
     it "reads no definitions from non-COFF input":
         val defined = runtime_owner_object_definitions_v1([[0 as u8, 1 as u8, 2 as u8]])

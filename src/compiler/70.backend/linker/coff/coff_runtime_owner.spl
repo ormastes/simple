@@ -22,6 +22,14 @@
 #     stays as dead code; nothing references it.
 # The rewrite never changes a size or an offset, so the ar container, member
 # headers and the import members (windows-sys raw-dylib) are untouched.
+# Precondition: the archive's "/" linker index is NOT rewritten and still
+# lists ceded names. That is sound only because the owner (C) objects are
+# linked as loose eager objects, so a ceded name is always already defined
+# when the archive is searched. A C owner packed in an archive searched after
+# this one would fetch a member that no longer defines the name.
+
+# Direct rt_* externs on purpose: the std wrappers hit producer defects 1-2 in
+# doc/08_tracking/bug/windows_producer_byte_array_aot_defects_2026-10-20.md.
 
 @unsafe(reason: "raw whole-file byte read of a runtime archive", capabilities: [ffi])
 extern fn rt_file_read_bytes(path: text) -> [u8]?
@@ -41,6 +49,7 @@ pub struct RuntimeOwnerCedeResultV1:
     undefined: i64
     members: i64
     demoted: i64
+    parsed: i64
 
 struct CoffOwnerLayoutV1:
     ok: bool
@@ -132,6 +141,13 @@ fn _owner_name(data: [u8], base: i64, layout: CoffOwnerLayoutV1, record: i64) ->
         i = i + 1
     name
 
+fn _owner_weak_default_defined(data: [u8], base: i64, layout: CoffOwnerLayoutV1, record: i64) -> bool:
+    """A weak external's aux record names its default; defined => a definition."""
+    val default_index = _owner_u32(data, record + layout.symbol_size)
+    if default_index < 0 or default_index >= layout.symbol_count: return false
+    val default_record = base + layout.symbol_table + default_index * layout.symbol_size
+    _owner_section_number(data, default_record, layout.bigobj) > 0
+
 fn _owner_object_definitions(data: [u8], base: i64, size: i64, into: {text: bool}) -> {text: bool}:
     var result = into
     val layout = _owner_layout(data, base, size)
@@ -142,10 +158,14 @@ fn _owner_object_definitions(data: [u8], base: i64, size: i64, into: {text: bool
         val class_offset = if layout.bigobj: 18 else: 16
         val storage = data[record + class_offset] as i64
         val aux = data[record + class_offset + 1] as i64
-        # A C weak external (`__attribute__((weak))` fallback) is still the C
-        # owner's definition: ceding the Rust copy lets its default bind.
+        # A C weak external whose default is DEFINED here (the
+        # `__attribute__((weak))` fallback) is still the C owner's definition:
+        # ceding the Rust copy lets its default bind. A weak REFERENCE (default
+        # undefined or absolute) is not a definition.
         val strong = storage == COFF_OWNER_CLASS_EXTERNAL and _owner_section_number(data, record, layout.bigobj) > 0
-        if strong or storage == COFF_OWNER_CLASS_WEAK_EXTERNAL:
+        val weak_definition = storage == COFF_OWNER_CLASS_WEAK_EXTERNAL and aux > 0 and
+            _owner_weak_default_defined(data, base, layout, record)
+        if strong or weak_definition:
             result[_owner_name(data, base, layout, record)] = true
         i = i + 1 + aux
     result
@@ -191,12 +211,14 @@ pub fn runtime_owner_cede_archive_file_v1(archive_path: text, owned: {text: bool
     var undefined: i64 = 0
     var members: i64 = 0
     var demoted: i64 = 0
+    var parsed: i64 = 0
     while offset + 60 <= bytes.len():
         val size = _owner_decimal(bytes, offset + 48, 10)
         val base = offset + 60
         if base + size > bytes.len(): return Err("runtime owner: archive member overruns the archive")
         val layout = _owner_layout(bytes, base, size)
         if layout.ok and not _owner_is_metadata_member(bytes, offset):
+            parsed = parsed + 1
             val class_offset = if layout.bigobj: 18 else: 16
             var member_undefined: i64 = 0
             var i: i64 = 0
@@ -250,7 +272,7 @@ pub fn runtime_owner_cede_archive_file_v1(archive_path: text, owned: {text: bool
                         demoted = demoted + 1
                     k = k + 1
         offset = base + size + (size % 2)
-    Ok(RuntimeOwnerCedeResultV1(bytes: bytes, undefined: undefined, members: members, demoted: demoted))
+    Ok(RuntimeOwnerCedeResultV1(bytes: bytes, undefined: undefined, members: members, demoted: demoted, parsed: parsed))
 
 pub fn runtime_owner_write_bytes_v1(path: text, bytes: [u8]) -> bool:
     """Write a ceded archive. RuntimeValue ABI on purpose: the (text, [u8])
