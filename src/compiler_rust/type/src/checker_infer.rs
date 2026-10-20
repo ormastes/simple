@@ -188,6 +188,10 @@ impl TypeChecker {
                 explicit_sigil,
             } => {
                 use simple_parser::ast::PointerKind;
+                if !self.nogc_strict {
+                    // Default mode: `new X` was never inferred before this lane.
+                    return Ok(self.fresh_var());
+                }
                 let inner_ty = self.infer_expr(inner)?;
                 // memory.md: under no-GC a bare `new X` (like a bare `T`) is unique.
                 let kind = if self.nogc_strict && !*explicit_sigil { &PointerKind::Unique } else { kind };

@@ -47,6 +47,18 @@ fn conversion_hint(from: SigilKind, to: SigilKind) -> &'static str {
 }
 
 impl TypeChecker {
+    /// Whether a type is, or structurally contains, an ownership sigil.
+    pub(crate) fn contains_sigil(&self, ty: &Type) -> bool {
+        match self.resolve(ty) {
+            Type::Unique(_) | Type::Shared(_) | Type::Weak(_) => true,
+            Type::Optional(i) | Type::Array(i) => self.contains_sigil(&i),
+            Type::Dict { key, value } => self.contains_sigil(&key) || self.contains_sigil(&value),
+            Type::Tuple(ts) => ts.iter().any(|t| self.contains_sigil(t)),
+            Type::Generic { args, .. } => args.iter().any(|t| self.contains_sigil(t)),
+            _ => false,
+        }
+    }
+
     /// Strict-mode check that a value of type `found` may flow into a slot
     /// declared as `expected` (`what` names the slot for the diagnostic).
     pub(crate) fn check_ownership_flow(&self, found: &Type, expected: &Type, what: &str) -> Result<(), TypeError> {
@@ -55,8 +67,30 @@ impl TypeChecker {
         }
         let found = self.resolve(found);
         let expected = self.resolve(expected);
-        if let (Type::Optional(f), Type::Optional(e)) = (&found, &expected) {
-            return self.check_ownership_flow(f, e, what);
+        // Pointer kinds nested in containers must match as well.
+        match (&found, &expected) {
+            (Type::Optional(f), Type::Optional(e)) | (Type::Array(f), Type::Array(e)) => {
+                return self.check_ownership_flow(f, e, what);
+            }
+            (Type::Dict { key: fk, value: fv }, Type::Dict { key: ek, value: ev }) => {
+                self.check_ownership_flow(fk, ek, what)?;
+                return self.check_ownership_flow(fv, ev, what);
+            }
+            (Type::Tuple(fs), Type::Tuple(es)) if fs.len() == es.len() => {
+                for (f, e) in fs.iter().zip(es.iter()) {
+                    self.check_ownership_flow(f, e, what)?;
+                }
+                return Ok(());
+            }
+            (Type::Generic { name: fname, args: fa }, Type::Generic { name: ename, args: ea })
+                if fname == ename && fa.len() == ea.len() =>
+            {
+                for (f, e) in fa.iter().zip(ea.iter()) {
+                    self.check_ownership_flow(f, e, what)?;
+                }
+                return Ok(());
+            }
+            _ => {}
         }
         match (sigil_kind(&found), sigil_kind(&expected)) {
             (Some(a), Some(b)) if a == b => Ok(()),
@@ -78,7 +112,6 @@ impl TypeChecker {
                 Type::Var(_) | Type::TypeParam(_) => Ok(()),
                 // nil-outside-unsafe is a later stage (NIL-UNSAFE-001).
                 Type::Nil => Ok(()),
-                Type::Named(ref name) if b == SigilKind::Unique && self.class_names.contains(name) => Ok(()),
                 Type::Optional(_) => Err(TypeError::Ownership(format!(
                     "{what}: an Option is not {}; match on it first",
                     sigil_spelling(b)

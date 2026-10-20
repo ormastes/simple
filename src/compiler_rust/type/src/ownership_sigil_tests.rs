@@ -211,6 +211,61 @@ mod ownership_sigil_unit_tests {
         assert!(ok.is_ok(), "matching kinds: {ok:?}");
     }
 
+    // ---- review findings (Opus, stage 1a) ---------------------------------
+
+    #[test]
+    fn assignment_keeps_declared_kind() {
+        let r = strict(&format!(
+            "{NODE}var u: &Node = new(&) Node(v: 1)\nval s: *Node = new(*) Node(v: 2)\nu = s\n"
+        ));
+        assert!(is_ownership(&r), "assigning *T into a &T variable: {r:?}");
+    }
+
+    #[test]
+    fn implicit_return_checked() {
+        let r = strict(&format!("{NODE}fn f(s: *Node) -> &Node:\n    s\n"));
+        assert!(is_ownership(&r), "trailing-expression return of *T from a &T fn: {r:?}");
+    }
+
+    #[test]
+    fn deref_does_not_launder_shared_into_unique() {
+        let r = strict(&format!("{NODE}val s: *Node = new(*) Node(v: 1)\nval u: &Node = *s\n"));
+        assert!(is_ownership(&r), "`*s` must not become a fresh unique owner: {r:?}");
+    }
+
+    #[test]
+    fn nested_containers_checked() {
+        let r = strict(&format!(
+            "{NODE}fn f(xs: [*Node]) -> i64:\n    val ys: [&Node] = xs\n    return 0\n"
+        ));
+        assert!(is_ownership(&r), "[*Node] into [&Node]: {r:?}");
+        let ok = strict(&format!(
+            "{NODE}fn f(xs: [*Node]) -> i64:\n    val ys: [*Node] = xs\n    return 0\n"
+        ));
+        assert!(ok.is_ok(), "same element kind: {ok:?}");
+    }
+
+    #[test]
+    fn default_mode_types_are_exactly_legacy() {
+        // Default mode erases the sigils exactly as before this lane.
+        let mut c = TypeChecker::new();
+        let t = c.ast_type_to_type(&simple_parser::ast::Type::Pointer {
+            kind: simple_parser::ast::PointerKind::Shared,
+            inner: Box::new(simple_parser::ast::Type::Simple("Node".into())),
+        });
+        assert_eq!(t, named("Node"));
+        // `new X` is not inferred in default mode (it used to fall to a fresh
+        // variable), so an error inside it cannot newly propagate.
+        let r = lenient("val a = new Node(undefined_thing)\n");
+        assert!(r.is_ok(), "default-mode `new` must not newly propagate errors: {r:?}");
+    }
+
+    #[test]
+    fn gate_skips_leading_imports() {
+        let src = format!("use std.text\n@no_gc(strict)\n{NODE}val a: *Node = new(&) Node(v: 1)\n");
+        assert!(is_ownership(&crate::check(&parse(&src))), "imports before the attribute");
+    }
+
     // ---- opt-in gate -----------------------------------------------------
 
     #[test]

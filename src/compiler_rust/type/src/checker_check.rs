@@ -511,6 +511,15 @@ impl TypeChecker {
                 let ty = self.infer_expr(&assign.value)?;
                 // Python-like: assignment can create new variables
                 if let Expr::Identifier(name) = &assign.target {
+                    if self.nogc_strict {
+                        if let Some(declared) = self.env.get(name).cloned() {
+                            self.check_ownership_flow(&ty, &declared, "assignment")?;
+                            // A strict binding keeps its declared kind.
+                            if self.contains_sigil(&declared) {
+                                return Ok(());
+                            }
+                        }
+                    }
                     self.env.insert(name.clone(), ty);
                 }
                 Ok(())
@@ -535,8 +544,16 @@ impl TypeChecker {
                 } else {
                     None
                 };
-                let old_ret = std::mem::replace(&mut self.current_ret, declared_ret);
-                let body_result = self.check_block_with_macro_rules(&func.body);
+                let old_ret = std::mem::replace(&mut self.current_ret, declared_ret.clone());
+                let mut body_result = self.check_block_with_macro_rules(&func.body);
+                if body_result.is_ok() {
+                    if let (Some(expected), Some(Node::Expression(tail))) = (&declared_ret, func.body.statements.last()) {
+                        // Trailing-expression (implicit) return.
+                        body_result = self
+                            .infer_expr(tail)
+                            .and_then(|found| self.check_ownership_flow(&found, expected, "return value"));
+                    }
+                }
                 self.current_ret = old_ret;
                 body_result?;
                 self.env = old_env;

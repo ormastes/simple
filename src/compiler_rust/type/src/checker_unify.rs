@@ -305,6 +305,14 @@ impl TypeChecker {
             AstType::Optional(inner) => Type::Optional(Box::new(self.ast_type_to_type(inner))),
             AstType::Pointer { inner, kind } => {
                 let inner_type = self.ast_type_to_type(inner);
+                if !self.nogc_strict {
+                    // Default mode: exactly the pre-lane erasure.
+                    return match kind {
+                        PointerKind::Borrow => Type::Borrow(Box::new(inner_type)),
+                        PointerKind::BorrowMut => Type::BorrowMut(Box::new(inner_type)),
+                        _ => inner_type,
+                    };
+                }
                 // A sigil names the pointer kind itself, so strip the implicit
                 // bare-class `&T` wrapping from the pointee (`*Node`, not `*&Node`).
                 let inner_type = match inner_type {
