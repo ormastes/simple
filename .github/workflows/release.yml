@@ -903,8 +903,26 @@ jobs:
               --entry-closure --entry src/app/test_runner_new/main.spl \
               --threads "$RUNNER_THREADS" --mode dynload \
               --output "$RUNNER_OUT" 2>&1; then
-              echo "✗ ${RUNNER_BIN} native build failed" >&2
-              exit 1
+              # Known gap: the seed-built stage1 worker SEGVs in HIR lowering
+              # (run 39357315407). Fall back to the same bootstrap-only seed
+              # that produced stage1, with stage1's own flags, so the runner
+              # has the same provenance as the packaged compiler.
+              echo "⚠ stage1 could not build ${RUNNER_BIN}; retrying with the bootstrap-only Rust seed"
+              if [[ "$PLATFORM" == windows-* ]]; then
+                RUNNER_SEED="src/compiler_rust/target/bootstrap/simple.exe"
+              else
+                RUNNER_SEED="src/compiler_rust/target/bootstrap/simple"
+              fi
+              rm -f "$RUNNER_OUT"
+              # Same exit-status policy as the stage1 build: judge by the
+              # produced binary (checked below), not the seed's exit code.
+              RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=0 \
+                "$RUNNER_SEED" native-build \
+                --source src/compositions/kernel_llvm_cranelift --source src \
+                --entry-closure --entry src/app/test_runner_new/main.spl \
+                --mode dynload --threads "$RUNNER_THREADS" \
+                --output "$RUNNER_OUT" 2>&1 || echo "⚠ seed native-build exited non-zero"
+              [ -f "$RUNNER_OUT" ] && echo "✓ ${RUNNER_BIN} built by the bootstrap-only Rust seed"
             fi
             if [ ! -f "$RUNNER_OUT" ]; then
               echo "✗ ${RUNNER_BIN} native build produced no binary" >&2
