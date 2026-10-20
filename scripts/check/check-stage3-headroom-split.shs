@@ -32,14 +32,33 @@ checked=$((checked + 1))
         [ "$SIMPLE_BOOTSTRAP_STAGE3_RUNTIME_RESERVE_MIB" = 16384 ]
 ) || fail "separately set values were not kept"
 checked=$((checked + 1))
-for bad in abc 0 -1; do
-    (
-        SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB=49152
-        SIMPLE_BOOTSTRAP_STAGE3_RUNTIME_RESERVE_MIB=$bad
-        ! bootstrap_stage3_memory_split_headroom
-    ) || fail "invalid reserve '$bad' was accepted"
-    checked=$((checked + 1))
+(
+    SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB=49152
+    SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB=
+    SIMPLE_BOOTSTRAP_STAGE3_RUNTIME_RESERVE_MIB=
+    bootstrap_stage3_memory_split_headroom &&
+        [ "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" = 49152 ] &&
+        [ "$SIMPLE_BOOTSTRAP_STAGE3_RUNTIME_RESERVE_MIB" = 49152 ]
+) || fail "empty MemoryHigh/reserve did not default to HEADROOM"
+checked=$((checked + 1))
+for var in HEADROOM MEMORY_HIGH RUNTIME_RESERVE; do
+    for bad in abc 0 -1 08192; do
+        (
+            SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB=49152
+            SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB=49152
+            SIMPLE_BOOTSTRAP_STAGE3_RUNTIME_RESERVE_MIB=16384
+            eval "SIMPLE_BOOTSTRAP_STAGE3_${var}_MIB=\$bad"
+            ! bootstrap_stage3_memory_split_headroom
+        ) || fail "invalid $var '$bad' was accepted"
+        checked=$((checked + 1))
+    done
 done
+(
+    SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB=16384
+    SIMPLE_BOOTSTRAP_STAGE3_RUNTIME_RESERVE_MIB=32768
+    ! bootstrap_stage3_memory_split_headroom
+) || fail "a reserve above the launch floor was accepted"
+checked=$((checked + 1))
 resume="$repo_root/scripts/bootstrap/resume-stage3-from-admitted.sh"
 grep -Fq 'MemoryHigh=${SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB}M' "$resume" ||
     fail "Stage 3 unit MemoryHigh does not use the MemoryHigh setting"
@@ -47,5 +66,15 @@ grep -Fq 'stage3_guard_reserve_kib=$((SIMPLE_BOOTSTRAP_STAGE3_RUNTIME_RESERVE_MI
     fail "Stage 3 live reserve does not use the reserve setting"
 grep -Fq 'MemoryHigh=${SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB}M' "$resume" &&
     fail "Stage 3 unit MemoryHigh still reads HEADROOM"
-checked=$((checked + 3))
+# cgroupfs validate/join pass MemoryHigh as --high; the worker's arg 7 is
+# memory_high_mib, which it checks against the cgroup.
+[ "$(grep -c -- '--high "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB"' "$resume")" -eq 2 ] ||
+    fail "a cgroupfs --high does not use the MemoryHigh setting"
+grep -q -- '--high "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB"' "$resume" &&
+    fail "a cgroupfs --high still reads HEADROOM"
+[ "$(grep -c '^    "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" \\$' "$resume")" -eq 4 ] ||
+    fail "a worker memory_high_mib argument does not use the MemoryHigh setting"
+grep -q '^    "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" \\$' "$resume" &&
+    fail "a worker memory_high_mib argument still reads HEADROOM"
+checked=$((checked + 7))
 echo "PASS — $checked headroom-split check(s)"

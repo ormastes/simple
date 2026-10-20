@@ -735,6 +735,10 @@ case "$SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB" in
   ''|*[!0-9]*|0) bootstrap_stage3_error "invalid Stage 3 process max MiB" ;;
 esac
 stage3_process_max_kib=$((SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB * 1024))
+# MemoryHigh above MemoryMax never throttles (earlier configurations relied
+# on that, so warn rather than refuse).
+[ "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" -le "$SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB" ] ||
+  echo "warning: Stage 3 MemoryHigh ${SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB} MiB exceeds MemoryMax ${SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB} MiB; it will not throttle" >&2
 bootstrap_stage3_memory_admission_preflight "$memory_admission" ||
   bootstrap_stage3_error "Stage 3 memory headroom admission refused; see $memory_admission"
 bootstrap_stage3_memory_require_exclusive_heavy "$memory_admission" "$stage3_process_max_kib" ||
