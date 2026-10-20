@@ -11,7 +11,7 @@ use std.mdsocpp.seal.{mdsocpp_seal_v1}
 use std.io_runtime.{file_read_bytes_result}
 use compiler.backend.linker.reloc_engine.{RelocArch, reloc_apply, reloc_patch_bytes}
 use compiler.backend.linker.elf.elf_exec_writer.{ElfOutSec, ElfExecPlan, elf_exec_plan,
-    elf_write_image, SHT_NOBITS_E, PT_LOAD}
+    elf_write_image_bytes, SHT_NOBITS_E, PT_LOAD}
 
 pub const ELF_OPERATION_RELOCATE: u32 = 1
 pub const ELF_OPERATION_LAYOUT: u32 = 2
@@ -22,11 +22,11 @@ pub struct ElfOperationProviderV1:
     descriptor: CapsuleDescriptorV1
     relocate: Option<fn(RelocArch, [i64], i64, i64, i64, i64, i64) -> Result<[i64], text>> = nil
     layout: Option<fn([ElfOutSec], i64, i64) -> Result<ElfExecPlan, text>> = nil
-    write_image: Option<fn(i64, i64, i64, ElfExecPlan, [[i64]]) -> Result<[i64], text>> = nil
+    write_image: Option<fn(i64, i64, i64, ElfExecPlan, [[u8]]) -> Result<[u8], text>> = nil
     read_bytes: Option<fn(text) -> Result<[u8], text>> = nil
 
 pub struct ElfComposedImageV1:
-    image: [i64]
+    image: [u8]
     composition: MdsocppGenerationReceiptV1
 
 pub fn elf_operation_facet_id_v1(kind: u32) -> KpfId128:
@@ -61,9 +61,20 @@ fn _elf_builtin_relocate(arch: RelocArch, bytes: [i64], offset: i64,
     if not checked.success: return Err(checked.error)
     Ok(reloc_patch_bytes(arch, bytes, offset, kind, symbol, addend, place))
 
+fn _elf_builtin_layout(secs: [ElfOutSec], base: i64, page: i64) -> Result<ElfExecPlan, text>:
+    # Local thunk for the imported elf_exec_plan; see _elf_builtin_read_bytes.
+    elf_exec_plan(secs, base, page)
+
+fn _elf_builtin_read_bytes(path: text) -> Result<[u8], text>:
+    # A local function, not the imported `file_read_bytes_result` itself: an
+    # imported function used as a value gets no `$boxed` thunk in native
+    # builds and calls through NULL (doc/08_tracking/bug/
+    # native_imported_fn_value_null_call_2026-10-20.md).
+    file_read_bytes_result(path)
+
 fn _elf_builtin_write(kind: i64, machine: i64, entry: i64,
-        plan: ElfExecPlan, contents: [[i64]]) -> Result<[i64], text>:
-    Ok(elf_write_image(kind, machine, entry, plan, contents))
+        plan: ElfExecPlan, contents: [[u8]]) -> Result<[u8], text>:
+    Ok(elf_write_image_bytes(kind, machine, entry, plan, contents))
 
 pub fn elf_builtin_operation_providers_v1() -> [ElfOperationProviderV1]:
     [ElfOperationProviderV1(descriptor: elf_operation_descriptor_v1(elf_operation_capsule_id_v1(2),
@@ -71,7 +82,7 @@ pub fn elf_builtin_operation_providers_v1() -> [ElfOperationProviderV1]:
         relocate: Some(_elf_builtin_relocate)),
      ElfOperationProviderV1(descriptor: elf_operation_descriptor_v1(elf_operation_capsule_id_v1(3),
         [MdsocppFacetOfferV1(facet_id: elf_operation_facet_id_v1(ELF_OPERATION_LAYOUT))]),
-        layout: Some(elf_exec_plan)),
+        layout: Some(_elf_builtin_layout)),
      ElfOperationProviderV1(descriptor: elf_operation_descriptor_v1(elf_operation_capsule_id_v1(4),
         [MdsocppFacetOfferV1(facet_id: elf_operation_facet_id_v1(ELF_OPERATION_WRITE_IMAGE))]),
         write_image: Some(_elf_builtin_write))]
@@ -125,17 +136,17 @@ fn _elf_plan_shape(secs: [ElfOutSec], plan: ElfExecPlan) -> Result<bool, text>:
     if headers != 1: return Err("ELF layout requires one header load")
     Ok(true)
 
-fn _elf_word(bytes: [i64], offset: i64, width: i64) -> Result<i64, text>:
+fn _elf_word(bytes: [u8], offset: i64, width: i64) -> Result<i64, text>:
     if offset < 0 or offset > bytes.len() or width > bytes.len() - offset:
         return Err("ELF writer header field is truncated")
     var value = 0
     for index in 0..width:
-        val byte = bytes[offset + index]
+        val byte = bytes[offset + index] as i64
         if byte < 0 or byte > 255 or (index == 7 and byte > 127): return Err("ELF writer field exceeds signed address range")
         value = value | (byte << (index * 8))
     Ok(value)
 
-fn _elf_writer_shape(image: [i64], kind: i64, machine: i64, entry: i64,
+fn _elf_writer_shape(image: [u8], kind: i64, machine: i64, entry: i64,
         plan: ElfExecPlan) -> Result<bool, text>:
     if image.len() < 64: return Err("ELF writer header is truncated")
     if image[0] != 127 or image[1] != 69 or image[2] != 76 or image[3] != 70 or
@@ -190,7 +201,7 @@ fn _elf_writer_shape(image: [i64], kind: i64, machine: i64, entry: i64,
 pub class ElfSealedOperationsV1:
     relocate_operation: fn(RelocArch, [i64], i64, i64, i64, i64, i64) -> Result<[i64], text>
     layout_operation: fn([ElfOutSec], i64, i64) -> Result<ElfExecPlan, text>
-    writer_operation: fn(i64, i64, i64, ElfExecPlan, [[i64]]) -> Result<[i64], text>
+    writer_operation: fn(i64, i64, i64, ElfExecPlan, [[u8]]) -> Result<[u8], text>
     receipt: MdsocppGenerationReceiptV1
     read_operation: Option<fn(text) -> Result<[u8], text>> = nil
 
@@ -216,7 +227,7 @@ pub class ElfSealedOperationsV1:
         Ok(plan)
 
     pub fn write_image(kind: i64, machine: i64, entry: i64, plan: ElfExecPlan,
-            contents: [[i64]]) -> Result<[i64], text>:
+            contents: [[u8]]) -> Result<[u8], text>:
         if contents.len() != plan.secs.len(): return Err("ELF writer contents count mismatch")
         for index in 0..contents.len():
             if plan.secs[index].sh_type != SHT_NOBITS_E and contents[index].len() != plan.secs[index].size:
@@ -296,7 +307,7 @@ pub fn elf_builtin_file_operation_providers_v1() -> [ElfOperationProviderV1]:
     providers.push(ElfOperationProviderV1(
         descriptor: elf_operation_descriptor_v1(elf_operation_capsule_id_v1(5),
             [MdsocppFacetOfferV1(facet_id: elf_operation_facet_id_v1(ELF_OPERATION_READ_BYTES))]),
-        read_bytes: Some(file_read_bytes_result)))
+        read_bytes: Some(_elf_builtin_read_bytes)))
     providers
 
 pub fn elf_builtin_file_operations_v1() -> Result<ElfSealedOperationsV1, text>:

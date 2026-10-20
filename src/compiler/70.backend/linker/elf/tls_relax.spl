@@ -43,21 +43,39 @@ fn _a64_write_u32(raw: [u8], at: i64, value: i64) -> [u8]:
     out[at + 3] = ((value >> 24) & 0xff) as u8
     out
 
-fn _a64_find_pair_reloc(obj: ElfObject, reloc: ElfRelocation,
-        offset_delta: i64, rtype: i64, same_symbol: bool) -> i64:
+fn _a64_reloc_key(target_section: i64, offset: i64, rtype: i64) -> text:
+    "{target_section}:{offset}:{rtype}"
+
+fn _a64_reloc_index(obj: ElfObject) -> {text: [i64]}:
+    """(target section, offset, type) -> relocation indices in input order.
+    Built once per TLS-bearing object so pair lookups are not linear scans."""
+    var index: {text: [i64]} = {}
     var i: i64 = 0
     while i < obj.relocations.len():
-        val next = obj.relocations[i]
-        if next.target_section_idx == reloc.target_section_idx and
-                next.r_offset == reloc.r_offset + offset_delta and
-                elf_reloc_type(next) == rtype and
-                (not same_symbol or elf_reloc_sym(next) == elf_reloc_sym(reloc)):
-            return i
+        val r = obj.relocations[i]
+        val key = _a64_reloc_key(r.target_section_idx, r.r_offset, elf_reloc_type(r))
+        if index.has(key):
+            var list = index[key]
+            list.push(i)
+            index[key] = list
+        else:
+            index[key] = [i]
         i = i + 1
+    index
+
+fn _a64_find_pair_reloc(obj: ElfObject, index: {text: [i64]}, reloc: ElfRelocation,
+        offset_delta: i64, rtype: i64, same_symbol: bool) -> i64:
+    """First relocation of `rtype` at `reloc + offset_delta` in the same
+    section (and with the same symbol when `same_symbol`)."""
+    val key = _a64_reloc_key(reloc.target_section_idx, reloc.r_offset + offset_delta, rtype)
+    if not index.has(key): return -1
+    for i in index[key]:
+        if not same_symbol or elf_reloc_sym(obj.relocations[i]) == elf_reloc_sym(reloc):
+            return i
     -1
 
-fn _a64_tls_call_pair(obj: ElfObject, reloc: ElfRelocation) -> i64:
-    val call = _a64_find_pair_reloc(obj, reloc, 8, R_AARCH64_CALL26_TLS, false)
+fn _a64_tls_call_pair(obj: ElfObject, index: {text: [i64]}, reloc: ElfRelocation) -> i64:
+    val call = _a64_find_pair_reloc(obj, index, reloc, 8, R_AARCH64_CALL26_TLS, false)
     if call < 0:
         return -1
     val sym = elf_reloc_sym(obj.relocations[call])
@@ -65,51 +83,45 @@ fn _a64_tls_call_pair(obj: ElfObject, reloc: ElfRelocation) -> i64:
         return -1
     call
 
-fn _a64_tls_pair(obj: ElfObject, reloc: ElfRelocation, add_type: i64) -> bool:
-    _a64_find_pair_reloc(obj, reloc, 4, add_type, true) >= 0 and
-        _a64_tls_call_pair(obj, reloc) >= 0
+fn _a64_tls_pair(obj: ElfObject, index: {text: [i64]}, reloc: ElfRelocation, add_type: i64) -> bool:
+    _a64_find_pair_reloc(obj, index, reloc, 4, add_type, true) >= 0 and
+        _a64_tls_call_pair(obj, index, reloc) >= 0
 
-fn _a64_tlsdesc_sequence(obj: ElfObject, reloc: ElfRelocation) -> bool:
-    _a64_find_pair_reloc(obj, reloc, 4, R_AARCH64_TLSDESC_LD64_LO12_TLS, true) >= 0 and
-        _a64_find_pair_reloc(obj, reloc, 8, R_AARCH64_TLSDESC_ADD_LO12_TLS, true) >= 0 and
-        _a64_find_pair_reloc(obj, reloc, 12, R_AARCH64_TLSDESC_CALL_TLS, true) >= 0
+fn _a64_tlsdesc_sequence(obj: ElfObject, index: {text: [i64]}, reloc: ElfRelocation) -> bool:
+    _a64_find_pair_reloc(obj, index, reloc, 4, R_AARCH64_TLSDESC_LD64_LO12_TLS, true) >= 0 and
+        _a64_find_pair_reloc(obj, index, reloc, 8, R_AARCH64_TLSDESC_ADD_LO12_TLS, true) >= 0 and
+        _a64_find_pair_reloc(obj, index, reloc, 12, R_AARCH64_TLSDESC_CALL_TLS, true) >= 0
 
-fn _a64_is_tlsdesc_member(obj: ElfObject, index: i64) -> bool:
+fn _a64_tls_low_type(rtype: i64) -> i64:
+    """Low-group relocation type paired with a GD/LD head, or -1."""
+    if rtype == R_AARCH64_TLSGD_ADR_PAGE21_TLS: return R_AARCH64_TLSGD_ADD_LO12_NC_TLS
+    if rtype == R_AARCH64_TLSLD_ADR_PAGE21_TLS: return R_AARCH64_TLSLD_ADD_LO12_NC_TLS
+    if rtype == R_AARCH64_TLSGD_MOVW_G1_TLS: return R_AARCH64_TLSGD_MOVW_G0_NC_TLS
+    if rtype == R_AARCH64_TLSLD_MOVW_G1_TLS: return R_AARCH64_TLSLD_MOVW_G0_NC_TLS
+    -1
+
+fn _a64_tls_members(obj: ElfObject, index: {text: [i64]}) -> {i64: bool}:
+    """Indices consumed by a canonical GD/LD pair or TLSDESC sequence; their
+    rewrite is emitted with the head, so they are dropped. One pass over the
+    heads instead of a full scan per relocation."""
+    var members: {i64: bool} = {}
     for r in obj.relocations:
-        if elf_reloc_type(r) == R_AARCH64_TLSDESC_ADR_PAGE21_TLS and
-                _a64_tlsdesc_sequence(obj, r):
-            if _a64_find_pair_reloc(obj, r, 4, R_AARCH64_TLSDESC_LD64_LO12_TLS, true) == index or
-                    _a64_find_pair_reloc(obj, r, 8, R_AARCH64_TLSDESC_ADD_LO12_TLS, true) == index or
-                    _a64_find_pair_reloc(obj, r, 12, R_AARCH64_TLSDESC_CALL_TLS, true) == index:
-                return true
-    false
-
-fn _a64_is_tls_pair_member(obj: ElfObject, index: i64) -> bool:
-    var i: i64 = 0
-    while i < obj.relocations.len():
-        val r = obj.relocations[i]
         val rtype = elf_reloc_type(r)
-        if rtype == R_AARCH64_TLSGD_ADR_PAGE21_TLS and
-                _a64_tls_pair(obj, r, R_AARCH64_TLSGD_ADD_LO12_NC_TLS):
-            if _a64_find_pair_reloc(obj, r, 4, R_AARCH64_TLSGD_ADD_LO12_NC_TLS, true) == index or
-                    _a64_tls_call_pair(obj, r) == index:
-                return true
-        if rtype == R_AARCH64_TLSLD_ADR_PAGE21_TLS and
-                _a64_tls_pair(obj, r, R_AARCH64_TLSLD_ADD_LO12_NC_TLS):
-            if _a64_find_pair_reloc(obj, r, 4, R_AARCH64_TLSLD_ADD_LO12_NC_TLS, true) == index or
-                    _a64_tls_call_pair(obj, r) == index:
-                return true
-        if rtype == R_AARCH64_TLSGD_MOVW_G1_TLS and
-                _a64_tls_pair(obj, r, R_AARCH64_TLSGD_MOVW_G0_NC_TLS):
-            if _a64_find_pair_reloc(obj, r, 4, R_AARCH64_TLSGD_MOVW_G0_NC_TLS, true) == index or
-                    _a64_tls_call_pair(obj, r) == index:
-                return true
-        if rtype == R_AARCH64_TLSLD_MOVW_G1_TLS and
-                _a64_tls_pair(obj, r, R_AARCH64_TLSLD_MOVW_G0_NC_TLS):
-            if _a64_find_pair_reloc(obj, r, 4, R_AARCH64_TLSLD_MOVW_G0_NC_TLS, true) == index or
-                    _a64_tls_call_pair(obj, r) == index:
-                return true
-        i = i + 1
+        if rtype == R_AARCH64_TLSDESC_ADR_PAGE21_TLS and _a64_tlsdesc_sequence(obj, index, r):
+            members[_a64_find_pair_reloc(obj, index, r, 4, R_AARCH64_TLSDESC_LD64_LO12_TLS, true)] = true
+            members[_a64_find_pair_reloc(obj, index, r, 8, R_AARCH64_TLSDESC_ADD_LO12_TLS, true)] = true
+            members[_a64_find_pair_reloc(obj, index, r, 12, R_AARCH64_TLSDESC_CALL_TLS, true)] = true
+        val low = _a64_tls_low_type(rtype)
+        if low >= 0 and _a64_tls_pair(obj, index, r, low):
+            members[_a64_find_pair_reloc(obj, index, r, 4, low, true)] = true
+            members[_a64_tls_call_pair(obj, index, r)] = true
+    members
+
+fn _a64_has_tls_relocs(obj: ElfObject) -> bool:
+    for r in obj.relocations:
+        val rtype = elf_reloc_type(r)
+        if rtype == R_AARCH64_TLSDESC_ADR_PAGE21_TLS or _a64_tls_low_type(rtype) >= 0:
+            return true
     false
 
 fn _tls_gd_pair(obj: ElfObject, reloc: ElfRelocation) -> i64:
@@ -252,6 +264,10 @@ fn _tls_relax_object(obj: ElfObject) -> Result<ElfObject, text>:
         relocations: relocs, strtab: obj.strtab, shstrtab: obj.shstrtab, raw: raw))
 
 fn _tls_relax_object_a64(obj: ElfObject) -> Result<ElfObject, text>:
+    # Objects without GD/LD/TLSDESC heads have nothing to relax (the common case).
+    if not _a64_has_tls_relocs(obj): return Ok(obj)
+    val index = _a64_reloc_index(obj)
+    val members = _a64_tls_members(obj, index)
     var raw = obj.raw
     var relocs: [ElfRelocation] = []
     var i: i64 = 0
@@ -259,7 +275,7 @@ fn _tls_relax_object_a64(obj: ElfObject) -> Result<ElfObject, text>:
         val r = obj.relocations[i]
         val rtype = elf_reloc_type(r)
         if rtype == R_AARCH64_TLSDESC_ADR_PAGE21_TLS:
-            if not _a64_tlsdesc_sequence(obj, r):
+            if not _a64_tlsdesc_sequence(obj, index, r):
                 return Err("UnsupportedFeature: R_AARCH64_TLSDESC_ADR_PAGE21 is not followed by canonical LD64, ADD, and TLSDESC_CALL relocations")
             val sym = elf_reloc_sym(r)
             if sym <= 0 or sym >= obj.symbols.len() or obj.symbols[sym].st_shndx == 0:
@@ -307,7 +323,7 @@ fn _tls_relax_object_a64(obj: ElfObject) -> Result<ElfObject, text>:
                 R_AARCH64_TLSLD_MOVW_G0_NC_TLS
             val model = if is_gd: "TLSGD" else: "TLSLD"
             val form = if is_movw: "MOVW_G1" else: "ADR_PAGE21"
-            if not _a64_tls_pair(obj, r, secondary_type):
+            if not _a64_tls_pair(obj, index, r, secondary_type):
                 return Err("UnsupportedFeature: R_AARCH64_{model}_{form} is not followed by its canonical low group and __tls_get_addr call relocations")
             val target_sym = elf_reloc_sym(r)
             if is_gd and
@@ -347,7 +363,7 @@ fn _tls_relax_object_a64(obj: ElfObject) -> Result<ElfObject, text>:
             else:
                 raw = _a64_write_u32(raw, at + 4, 0x91004000) # add x0, x0, #16 (variant-I TCB)
                 raw = _a64_write_u32(raw, at + 8, 0xd503201f) # nop
-        else if not _a64_is_tls_pair_member(obj, i) and not _a64_is_tlsdesc_member(obj, i):
+        else if not members.has(i):
             relocs = relocs.push(r)
         i = i + 1
     Ok(ElfObject(header: obj.header, sections: obj.sections, symbols: obj.symbols,

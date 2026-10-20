@@ -45,3 +45,48 @@ resolution.
   (`entry absent from frozen inventory`) before linking, for a tracked example entry.
 - The scratch driver used for these runs called `link_to_native(objects, out, cfg)` from
   `bin/simple run`.
+
+## Update 2026-10-20: input widening fixed; the remaining cost is the interpreter
+
+Fixed by keeping the hosted path packed `[u8]` from file read to published image.
+Bytes now move only by slice and in-place `extend`. Several quadratic copies under
+value semantics were also removed:
+
+- whole-section copy per relocation (now a widened 16-byte window, written back in place)
+- definition map copied per object in archive closure and `sym_resolve_objects`
+- live table and worklist copied per mark in section GC
+- full relocation scan per live section in section GC
+- linear pair scans per relocation in AArch64 TLS relax
+- per-record relocation scans in `.eh_frame` GC
+- insertion-sorted `.eh_frame_hdr`
+- per-character strtab names
+- pure-Simple SHA-1 build-id
+
+The build-id is now the first 20 bytes of SHA-256 over the image with the payload
+zeroed. It is deterministic: same input bytes give the same id. It is computed by
+the runtime digest, and its shape is the 20-byte `NT_GNU_BUILD_ID` note.
+
+Measured on the seed interpreter, kept cranelift full-CLI set (2793 objects, 2.3M
+relocations, 3.2M symbols):
+
+| phase | before | after |
+|---|---|---|
+| read inputs | OOM at 16.7 GB after 224 s | 2.2 s |
+| parse objects | not reached | 568 s, 9.4 GB RSS |
+| archive closure | not reached | 727 s |
+
+Those are AST-interpreter costs: about 1 us per operation and about 1.7 KB per parsed
+symbol or relocation record. Imported modules never JIT under `bin/simple run`. The
+JIT compiles only the entry file and drops the whole program to the interpreter on the
+first unresolved import. A full link therefore needs a natively built driver
+(`test/05_perf/compiler/linker/internal_link_spec_driver.spl`) or the deployed
+compiler's own `native-build`.
+
+Seed-interpreter traps found along the way (not fixed here):
+
+- `[u8].extend([i64])` is a silent no-op under the JIT.
+- An out-of-range `[u8]` read returns 0 under the JIT.
+- A class instance passed as a parameter is copied under the interpreter, so `me`
+  mutations through the parameter are lost.
+- Arithmetic on `[u8]` elements wraps at 8 bits unless cast `as i64`.
+- `[[], []]` element arrays reject `extend`.

@@ -11,10 +11,17 @@
 #
 # Mixing numbered and unnumbered is an error.
 #
-# Nested scoping: call/method-call arguments are independent transform
-# boundaries. `_.items.any(_ > 3)` transforms to:
-#   outer: `\__p0: __p0.items.any(INNER)`
-#   inner: `\__p0: __p0 > 3`
+# Nested scoping (Rust seed parity, parser/src/expressions/postfix.rs):
+# an argument of a higher-order callee (`map`, `filter`, `any`, ... see
+# placeholder_callee_name_is_higher_order) is transformed as ONE lambda, and
+# that lambda also captures placeholders inside nested ORDINARY calls, which
+# are left raw while they are parsed inside such an argument:
+#   `xs.map(self.f(_.1))`  -> `xs.map(\__p0: self.f(__p0.1))`
+# A nested higher-order call is its own boundary (already a lambda):
+#   `_.items.any(_ > 3)` -> outer `\__p0: __p0.items.any(INNER)`,
+#                           inner `\__p0: __p0 > 3`
+# Outside any higher-order argument, each call argument keeps its own
+# transform (`xs.find(_ > 3)` -> `xs.find(\__p0: __p0 > 3)`).
 #
 # Operates on the compiler's arena-based AST (expr_tag[], expr_left[], etc.).
 # Applied to each call argument after parsing.
@@ -32,6 +39,8 @@ use compiler.core.ast_expr.{
 }
 use compiler.frontend.core._AstExpr.accessors.{expr_interpolated_string, expr_interpolated_string_with_text}
 use compiler.core.ast.{expr_count, expr_get_arg_names, expr_call_args_set, arm_pattern}
+use compiler.core.ast.{expr_call_named, expr_method_call_named}
+use compiler.frontend.core.ast_expr.{expr_get_call_type_args, expr_set_call_type_args}
 
 # ===== Placeholder Counter (module-level for mutation in recursive walk) =====
 
@@ -40,6 +49,19 @@ var _ph_counter: i64 = 0
 fn placeholder_retain_span(original: i64, rebuilt: i64) -> i64:
     expr_set_span(rebuilt, expr_get_span(original))
     rebuilt
+
+fn placeholder_rebuild_call(original: i64, new_left: i64, new_args: [i64]) -> i64:
+    """Rebuild a call/method call keeping argument names and explicit call
+    type arguments (`f<T>(...)`); the former rebuild dropped both."""
+    val names = expr_get_arg_names(original)
+    val rebuilt = if expr_tag[original] == EXPR_CALL:
+        expr_call_named(new_left, new_args, names, 0)
+    else:
+        expr_method_call_named(new_left, expr_s_val[original], new_args, names, 0)
+    val type_args = expr_get_call_type_args(original)
+    if type_args.len() > 0:
+        expr_set_call_type_args(rebuilt, type_args)
+    placeholder_retain_span(original, rebuilt)
 
 # Post-interpolation rewriting runs after the complete module has been parsed,
 # so it must retain the parser's distinction between real call arguments and
@@ -88,6 +110,50 @@ fn set_placeholder_transform_suppressed(value: bool) -> bool:
     val prev = _ph_suppress_transform
     _ph_suppress_transform = value
     prev
+
+# ===== Higher-order call-argument scoping =====
+#
+# Number of enclosing higher-order-callee arguments currently being parsed.
+# Inside one, an ordinary nested call keeps its placeholder arguments raw so
+# the enclosing higher-order argument's single lambda captures them (seed
+# `call_arg_depth` + `transform_placeholder_args_for_call`).
+var _ph_ho_arg_depth: i64 = 0
+
+fn placeholder_callee_name_is_higher_order(name: text) -> bool:
+    """Seed parity: parser/src/expressions/postfix.rs
+    name_is_higher_order_callback_callee."""
+    if (name == "map" or name == "mapped" or name == "filter" or name == "reject" or
+            name == "any" or name == "all" or name == "each" or name == "for_each" or
+            name == "flat_map" or name == "compact_map" or name == "map_err" or
+            name == "and_then" or name == "then" or name == "reduce" or name == "fold"):
+        return true
+    name.ends_with("_map") or name.ends_with("_filter") or name.ends_with("_any") or name.ends_with("_all") or name.ends_with("_each")
+
+fn placeholder_callee_expr_is_higher_order(callee: i64) -> bool:
+    """`f(...)` / `obj.f(...)` callee expression form of the name check."""
+    if callee < 0 or callee >= expr_tag.len():
+        return false
+    val tag = expr_tag[callee]
+    if tag == EXPR_IDENT or tag == EXPR_FIELD_ACCESS:
+        return placeholder_callee_name_is_higher_order(expr_s_val[callee])
+    false
+
+fn placeholder_enter_call_arg(callee_is_higher_order: bool) -> i64:
+    """Enter one call argument's parse. Returns the depth to restore."""
+    val prev = _ph_ho_arg_depth
+    if callee_is_higher_order:
+        _ph_ho_arg_depth = prev + 1
+    prev
+
+fn placeholder_exit_call_arg(prev: i64):
+    _ph_ho_arg_depth = prev
+
+fn transform_placeholder_call_arg(eid: i64, callee_is_higher_order: bool) -> i64:
+    """Transform one parsed call argument under the higher-order scoping rule."""
+    if not callee_is_higher_order and _ph_ho_arg_depth > 0:
+        # An enclosing higher-order argument's lambda will capture these.
+        return eid
+    transform_placeholder_lambda(eid)
 
 # ===== Helper: Check if identifier is a numbered placeholder =====
 
@@ -167,12 +233,16 @@ fn detect_placeholder_mode(eid: i64):
         detect_placeholder_mode(expr_left[eid])
         return
 
-    if tag == EXPR_CALL:
+    if tag == EXPR_CALL or tag == EXPR_METHOD_CALL:
+        # Nested call arguments are scanned too: an argument that is still
+        # raw here belongs to this transform (an already-transformed one is
+        # an EXPR_LAMBDA, which is never scanned).
         detect_placeholder_mode(expr_left[eid])
-        return
-
-    if tag == EXPR_METHOD_CALL:
-        detect_placeholder_mode(expr_left[eid])
+        val call_args = expr_args[eid]
+        var ci = 0
+        while ci < call_args.len():
+            detect_placeholder_mode(call_args[ci])
+            ci = ci + 1
         return
 
     if tag == EXPR_FIELD_ACCESS:
@@ -467,13 +537,17 @@ fn count_placeholders(eid: i64) -> i64:
     if tag == EXPR_UNARY:
         return count_placeholders(expr_left[eid])
 
-    if tag == EXPR_CALL:
-        # Count in callee only, NOT in nested call arguments (scoping boundary)
-        return count_placeholders(expr_left[eid])
-
-    if tag == EXPR_METHOD_CALL:
-        # Count in receiver only, NOT in nested call arguments (scoping boundary)
-        return count_placeholders(expr_left[eid])
+    if tag == EXPR_CALL or tag == EXPR_METHOD_CALL:
+        # Raw nested call arguments belong to this transform (see the
+        # higher-order scoping note at the top); transformed ones are lambdas
+        # and count 0.
+        var call_total = count_placeholders(expr_left[eid])
+        val call_args = expr_args[eid]
+        var ci = 0
+        while ci < call_args.len():
+            call_total = call_total + count_placeholders(call_args[ci])
+            ci = ci + 1
+        return call_total
 
     if tag == EXPR_FIELD_ACCESS:
         return count_placeholders(expr_left[eid])
@@ -603,27 +677,18 @@ fn replace_placeholders(eid: i64) -> i64:
         val new_operand = replace_placeholders(expr_left[eid])
         return placeholder_retain_span(eid, expr_unary(expr_i_val[eid], new_operand, 0))
 
-    if tag == EXPR_CALL:
-        # Replace in callee, but transform nested args independently
-        val new_callee = replace_placeholders(expr_left[eid])
+    if tag == EXPR_CALL or tag == EXPR_METHOD_CALL:
+        # Raw nested arguments share this lambda's parameters (counted by
+        # count_placeholders); already-transformed ones are lambdas and are
+        # returned unchanged. Names and explicit type args are preserved.
+        val new_left = replace_placeholders(expr_left[eid])
         val old_args = expr_args[eid]
         var new_args: [i64] = []
         var i = 0
         while i < old_args.len():
-            new_args.push(transform_placeholder_lambda(old_args[i]))
+            new_args.push(replace_placeholders(old_args[i]))
             i = i + 1
-        return placeholder_retain_span(eid, expr_call(new_callee, new_args, 0))
-
-    if tag == EXPR_METHOD_CALL:
-        # Replace in receiver, but transform nested args independently
-        val new_receiver = replace_placeholders(expr_left[eid])
-        val old_args = expr_args[eid]
-        var new_args: [i64] = []
-        var i = 0
-        while i < old_args.len():
-            new_args.push(transform_placeholder_lambda(old_args[i]))
-            i = i + 1
-        return placeholder_retain_span(eid, expr_method_call(new_receiver, expr_s_val[eid], new_args, 0))
+        return placeholder_rebuild_call(eid, new_left, new_args)
 
     if tag == EXPR_FIELD_ACCESS:
         val new_base = replace_placeholders(expr_left[eid])
@@ -768,27 +833,18 @@ fn replace_placeholders_fixed_slot(eid: i64, slot: i64) -> i64:
         val new_operand = replace_placeholders_fixed_slot(expr_left[eid], slot)
         return placeholder_retain_span(eid, expr_unary(expr_i_val[eid], new_operand, 0))
 
-    if tag == EXPR_CALL:
-        # Replace in callee, but transform nested args independently
-        val new_callee = replace_placeholders_fixed_slot(expr_left[eid], slot)
+    if tag == EXPR_CALL or tag == EXPR_METHOD_CALL:
+        # Interpolation regions are parsed with the transform suppressed, so
+        # `{self.f(_.1)}` reaches here with a raw `_`: it is the template's
+        # bound value, not a new lambda.
+        val new_left = replace_placeholders_fixed_slot(expr_left[eid], slot)
         val old_args = expr_args[eid]
         var new_args: [i64] = []
         var i = 0
         while i < old_args.len():
-            new_args.push(transform_placeholder_lambda(old_args[i]))
+            new_args.push(replace_placeholders_fixed_slot(old_args[i], slot))
             i = i + 1
-        return placeholder_retain_span(eid, expr_call(new_callee, new_args, 0))
-
-    if tag == EXPR_METHOD_CALL:
-        # Replace in receiver, but transform nested args independently
-        val new_receiver = replace_placeholders_fixed_slot(expr_left[eid], slot)
-        val old_args = expr_args[eid]
-        var new_args: [i64] = []
-        var i = 0
-        while i < old_args.len():
-            new_args.push(transform_placeholder_lambda(old_args[i]))
-            i = i + 1
-        return placeholder_retain_span(eid, expr_method_call(new_receiver, expr_s_val[eid], new_args, 0))
+        return placeholder_rebuild_call(eid, new_left, new_args)
 
     if tag == EXPR_FIELD_ACCESS:
         val new_base = replace_placeholders_fixed_slot(expr_left[eid], slot)

@@ -115,3 +115,17 @@ only takes effect in a compiler built from this source, and that build is phase 
 itself (more than 2 h and 60 GB). The producer4 object cache is gone, so relinking
 is not possible either. Qualify on the next phase-3 run by comparing the `[mir]`
 lines against the breadcrumb timeline above.
+
+## Stage 3 bootstrap-fixed closure (2026-10-20, after #3938)
+
+Passing the provider feed to the ambient-bootstrap closure lane re-enabled the
+provider loop on a lane where both repairs above were switched off:
+`ambient_bootstrap_enabled()` skipped the class 2(a) retirement and forced the
+eager class 2(b) layout pass. The closure driver's `trait_impl_provider_modules`
+(the whole closure HIR) was also an owner root, so every module's promotion
+re-walked it. Repair: retire 2(a) for ambient non-entry modules, demand layouts
+for them (`SIMPLE_MIR_EAGER_PROVIDER_LAYOUTS=1` restores eager), detach the feed
+during promotion, and warn on a refused scope. Pinned by
+`test/01_unit/compiler/50.mir/bootstrap_closure_provider_retention_spec.spl`.
+Per-module RSS is unmeasured until a Stage 2 is rebuilt from this source: a 12G
+probe with the r16b Stage 2 cannot reach MIR (it ended at `phase4:monomorphize`).

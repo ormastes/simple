@@ -721,6 +721,10 @@ evidence_run_id="stage3-${platform}-$$"
 # working set and reject native-build/QEMU overlap before starting the runner.
 : "${SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB:=49152}"
 export SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB
+# HEADROOM stays the launch floor; MemoryHigh and the live reserve default to
+# it and can be set separately (memory-admission.shs).
+bootstrap_stage3_memory_split_headroom ||
+  bootstrap_stage3_error "invalid Stage 3 headroom, MemoryHigh or reserve MiB"
 # This is deliberately distinct from required free host headroom.  It is a
 # race-resistant per-process virtual-memory ceiling: even if a peer starts
 # after the final process scan, this compiler cannot consume the whole user
@@ -731,6 +735,10 @@ case "$SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB" in
   ''|*[!0-9]*|0) bootstrap_stage3_error "invalid Stage 3 process max MiB" ;;
 esac
 stage3_process_max_kib=$((SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB * 1024))
+# MemoryHigh above MemoryMax never throttles (earlier configurations relied
+# on that, so warn rather than refuse).
+[ "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" -le "$SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB" ] ||
+  echo "warning: Stage 3 MemoryHigh ${SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB} MiB exceeds MemoryMax ${SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB} MiB; it will not throttle" >&2
 bootstrap_stage3_memory_admission_preflight "$memory_admission" ||
   bootstrap_stage3_error "Stage 3 memory headroom admission refused; see $memory_admission"
 bootstrap_stage3_memory_require_exclusive_heavy "$memory_admission" "$stage3_process_max_kib" ||
@@ -774,7 +782,7 @@ case "$platform" in
           "$stage3_cgroupfs_python_sha" ] || return 125
         "$stage3_cgroupfs_python" -I "$stage3_cgroupfs_helper" "$1" \
           --group "$stage3_guard_unit" \
-          --high "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" \
+          --high "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" \
           --maximum "$SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB"
       }
       bootstrap_stage3_cgroupfs_call validate >>"$memory_admission" ||
@@ -816,6 +824,8 @@ case "$platform" in
 esac
 {
   echo "required_host_headroom_mib=$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB"
+  echo "memory_high_mib=$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB"
+  echo "runtime_reserve_mib=$SIMPLE_BOOTSTRAP_STAGE3_RUNTIME_RESERVE_MIB"
   echo "process_virtual_memory_max_mib=$SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB"
   echo "runtime_headroom_watch=$stage3_guard_watch"
 } >>"$memory_admission"
@@ -937,7 +947,7 @@ if [ "$stage3_guard_watch" = linux-proc-memavailable ] &&
     bootstrap_stage3_error 'cgroupfs authority changed before launch'
   "$stage3_cgroupfs_python" -I "$stage3_cgroupfs_helper" join \
     --group "$stage3_guard_unit" \
-    --high "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" \
+    --high "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" \
     --maximum "$SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB" -- \
     "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
     "$path" "$admitted" "$platform" "$stage2_backend" "$stage3_threads" \
@@ -945,12 +955,12 @@ if [ "$stage3_guard_watch" = linux-proc-memavailable ] &&
     "$progress" "$phase_profile" "$memory_snapshot" "$evidence_run_id" \
     "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
-    "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" \
+    "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" \
     "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" &
 elif [ "$stage3_guard_watch" = linux-proc-memavailable ]; then
   systemd-run --user --quiet --wait --collect --unit="$stage3_guard_unit" \
     --property=KillMode=control-group \
-    --property="MemoryHigh=${SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB}M" \
+    --property="MemoryHigh=${SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB}M" \
     --property="MemoryMax=${SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB}M" \
     "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
     "$path" "$admitted" "$platform" "$stage2_backend" "$stage3_threads" \
@@ -958,7 +968,7 @@ elif [ "$stage3_guard_watch" = linux-proc-memavailable ]; then
     "$progress" "$phase_profile" "$memory_snapshot" "$evidence_run_id" \
     "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
-    "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" \
+    "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" \
     "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" &
 elif case "$platform" in *-apple-darwin*) true ;; *) false ;; esac; then
   # Darwin has no cgroup and rejects RLIMIT_AS, so the worker skips `ulimit -v`.
@@ -986,7 +996,7 @@ elif case "$platform" in *-apple-darwin*) true ;; *) false ;; esac; then
     "$progress" "$phase_profile" "$memory_snapshot" "$evidence_run_id" \
     "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
-    "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" \
+    "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" \
     "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" &
 else
   "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
@@ -995,12 +1005,12 @@ else
     "$progress" "$phase_profile" "$memory_snapshot" "$evidence_run_id" \
     "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
-    "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" \
+    "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" \
     "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" &
 fi
 stage3_guard_pid=$!
 stage3_guard_tripped=0
-stage3_guard_reserve_kib=$((SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB * 1024))
+stage3_guard_reserve_kib=$((SIMPLE_BOOTSTRAP_STAGE3_RUNTIME_RESERVE_MIB * 1024))
 while [ "$stage3_guard_watch" = linux-proc-memavailable ] && kill -0 "$stage3_guard_pid" 2>/dev/null; do
   stage3_guard_available_kib=$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo 2>/dev/null || true)
   case "$stage3_guard_available_kib" in

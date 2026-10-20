@@ -75,6 +75,7 @@ use compiler.backend.linker.elf.elf_static_link.{elf_link_with_operations, ElfLi
 use compiler.backend.linker.elf.elf_operation_bindings.{ElfSealedOperationsV1, elf_builtin_file_operations_v1}
 use compiler.backend.linker.native_image_publish.{native_image_publish}
 use compiler.backend.linker.elf.freebsd_hosted.{freebsd_hosted_inputs, freebsd_brand_image}
+use compiler.backend.linker.elf.link_trace.{elf_link_trace}
 use compiler.backend.linker.elf.elf_boot_link.{elf_boot_link_archives_policy}
 use compiler.backend.linker.boot_layout.boot_layout_plan.{boot_layout_from_text, boot_layout_add_defsym}
 use compiler.backend.linker.reloc_engine.{RelocArch}
@@ -1404,12 +1405,6 @@ class _InternalElfByteInputs:
         self.cache[path] = bytes
         Ok(bytes)
 
-    me read_i64(path: text) -> Result<[i64], text>:
-        val bytes = self.read(path)?
-        var widened: [i64] = []
-        for byte in bytes: widened.push(byte as i64)
-        Ok(widened)
-
     me library_path(path: text) -> Result<_InternalElfLoadedLibrary, text>:
         val bytes = self.read(path)?
         var kind = 0
@@ -1526,20 +1521,22 @@ fn internal_link_native_with_operations(os: text, arch: text, config: NativeLink
         else:
             for directory in ["/lib/aarch64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/lib", "/usr/lib"]:
                 if not system_paths.contains(directory): system_paths.push(directory)
-    var objects: [[i64]] = []
-    for path in before: objects.push(source.read_i64(path)?)
-    for path in object_files:
-        objects = objects.push(source.read_i64(path)?)
-    for path in after: objects.push(source.read_i64(path)?)
-    var archives: [[i64]] = []
-    for path in system_archives: archives.push(source.read_i64(path)?)
+    elf_link_trace("inputs: read start")
+    # Inputs stay packed `[u8]` all the way into the engine. Widening them per
+    # byte to `[i64]` cost 8x the input size and OOM-killed full-CLI links.
+    var objects: [[u8]] = []
+    for path in before: objects.push(source.read(path)?)
+    for path in object_files: objects.push(source.read(path)?)
+    for path in after: objects.push(source.read(path)?)
+    var archives: [[u8]] = []
+    for path in system_archives: archives.push(source.read(path)?)
     var runtime_dir = config.runtime_path
     if runtime_dir == "": runtime_dir = find_runtime_lib_dir()
     for path in native_runtime_archive_inputs(runtime_dir, config.runtime_bundle):
         val loaded = source.library_path(path)?
         if loaded.kind != 1:
             return Err("internal engine: runtime library '{path}' is not an ar archive")
-        archives = archives.push(source.read_i64(loaded.path)?)
+        archives.push(loaded.bytes)
     var library_paths: [text] = []
     for directory in config.library_paths: library_paths.push(directory)
     for directory in system_paths:
@@ -1553,13 +1550,14 @@ fn internal_link_native_with_operations(os: text, arch: text, config: NativeLink
         val loaded = source.library(library, library_paths)?
         val path = loaded.path
         if loaded.kind == 1:
-            archives = archives.push(source.read_i64(path)?)
+            archives.push(loaded.bytes)
         elif loaded.kind == 2:
             shared = shared.push(loaded.bytes)
             shared_names = shared_names.push(
                 internal_elf_library_needed_name(library, path))
         else:
             return Err("internal engine: ELF library '{path}' is neither an ar archive nor an ET_DYN object")
+    elf_link_trace("inputs: read done")
     var target_arch = RelocArch.X86_64
     if norm_arch == "aarch64":
         target_arch = RelocArch.AArch64
@@ -1582,10 +1580,8 @@ fn internal_link_native_with_operations(os: text, arch: text, config: NativeLink
         return Err("internal engine: {linked.unwrap_err()}")
     var image = linked.unwrap().image
     if os == "freebsd": image = freebsd_brand_image(image)?
-    var bytes: [u8] = []
-    for b in image:
-        bytes = bytes.push(b as u8)
-    if not native_image_publish(output, bytes, true):
+    elf_link_trace("publish start")
+    if not native_image_publish(output, image, true):
         return Err("internal engine: could not publish executable {output}")
     Ok(output)
 

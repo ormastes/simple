@@ -79,6 +79,23 @@ SIMPLE_RUNTIME_PATH="path/to/seed/target" bin/simple native-build ...
 Hosted link backfills `rt_*` externs from `libsimple_native_all.a` only if the env var
 points to correct seed target.
 
+## Trait receivers and unresolved method calls (2026-10-20)
+- `class X with Trait:` is a trait implementation (HirImpl + vtable +
+  `trait_impls`), recorded only when the class defines every abstract method;
+  `imports.rs` is the more permissive side so a mismatch fails the link.
+  Methods in a separate `impl X:` block are not counted (both sides agree).
+- An `Option<Trait>` payload binding (`Some(x)`, `if val x = opt`) keeps the
+  declared trait (`FunctionContext.optional_trait_payloads`) and lowers to
+  `MethodCallVirtual`.
+- A bare trait-method link symbol with no definition is refused by
+  `generate_stub_object` (escape `SIMPLE_ALLOW_INTERNAL_STUBS=1`).
+  Fixture: `test/native/cross_unit_trait_dispatch`.
+- Open (see the bug doc): Cranelift AOT still emits `rt_function_not_found`
+  (nil, exit 0) for an unresolved bare call on an `Any` receiver; trait-typed
+  FIELD receivers reach it too, so it cannot be refused yet. An `Any`
+  receiver whose bare method several classes define binds the first
+  `import_map` entry.
+
 ## Freestanding linkage: the fabricated-stub gate (2026-08-04)
 On `--target x86_64-unknown-none` the link refuses to invent symbols it cannot find:
 ```

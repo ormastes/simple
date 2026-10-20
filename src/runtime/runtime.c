@@ -44,6 +44,22 @@ int64_t rt_simple_abi_version_deferred(void) {
     return SIMPLE_ABI_VERSION_DEFERRED ? 1 : 0;
 }
 #include "runtime_startup_args.h"
+/* SPL_RUNTIME_NATIVE_TWIN marks the 37 hosted definitions in this file and in
+ * platform/unix_common.h (included only from here) that runtime_native.c -- or
+ * runtime_process.c, for rt_process_wait -- also defines strongly. The ordinary
+ * hosted composition compiles both, and the ELF lanes accept that through
+ * --allow-multiple-definition. Apple ld has no such option, so a Darwin link
+ * that takes both objects (the host-gpu native-all tools: mcp, lsp_mcp,
+ * test_runner) failed with "ld: 2088 duplicate symbols" (2026-10-20). On Mach-O
+ * these copies are weak and the runtime_native.c/runtime_process.c owner wins,
+ * which is the composition the seed's core-C runtime and Stage 4 already use
+ * (neither compiles runtime.c). Off Apple the macro is empty, so Linux, FreeBSD
+ * and Windows objects are byte-identical to before. */
+#if defined(__APPLE__)
+#  define SPL_RUNTIME_NATIVE_TWIN __attribute__((weak))
+#else
+#  define SPL_RUNTIME_NATIVE_TWIN
+#endif
 #include "platform/platform.h"
 #include "runtime_memtrack.h"
 #if defined(_WIN32)
@@ -210,7 +226,7 @@ static void rt_file_exists_probe_record(uint_fast64_t lease, int exists) {
     }
 }
 
-int64_t rt_file_exists_probe_begin(void) {
+SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_exists_probe_begin(void) {
     uint_fast64_t idle = 0;
     if (!atomic_compare_exchange_strong_explicit(
             &rt_file_exists_probe_state, &idle, RT_FILE_EXISTS_PROBE_TRANSITION,
@@ -234,7 +250,7 @@ int64_t rt_file_exists_probe_begin(void) {
     return (int64_t)generation;
 }
 
-int64_t rt_file_exists_probe_end(int64_t token) {
+SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_exists_probe_end(int64_t token) {
     if (token <= 0 || (uint_fast64_t)token > RT_FILE_EXISTS_PROBE_GENERATION_MAX ||
         atomic_load_explicit(&rt_file_exists_probe_generation, memory_order_acquire) !=
             (uint_fast64_t)token) return -2;
@@ -1227,7 +1243,7 @@ static int rt_text_arg_to_path(const uint8_t* ptr, uint64_t len, char* buf, size
     return 1;
 }
 
-int rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
+SPL_RUNTIME_NATIVE_TWIN int rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
     char path_buf[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path_buf, sizeof(path_buf))) return 0;
     const char* path = path_buf;
@@ -1259,7 +1275,7 @@ int rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
  * Symlinks are followed (stat, not lstat): the caller wants to know whether
  * the path ultimately resolves to a character device, not whether the leaf
  * entry itself is one. */
-int rt_file_is_char_device(const uint8_t* path_ptr, uint64_t path_len) {
+SPL_RUNTIME_NATIVE_TWIN int rt_file_is_char_device(const uint8_t* path_ptr, uint64_t path_len) {
 #if defined(_WIN32)
     (void)path_ptr; (void)path_len;
     return 0;
@@ -1675,22 +1691,22 @@ int8_t rt_enum_check_variant(int64_t value, int64_t expected_enum_id, int64_t ex
 /* Standalone core-C requires the native BDD state and actual assertions.
  * The legacy hosted compatibility callbacks intentionally do nothing. */
 #if !defined(_WIN32) || !defined(SIMPLE_CORE_C_STANDALONE)
-void rt_bdd_describe_start_rv(int64_t name_rv) {
+SPL_RUNTIME_NATIVE_TWIN void rt_bdd_describe_start_rv(int64_t name_rv) {
     (void)name_rv;
 }
 
-void rt_bdd_describe_end(void) {
+SPL_RUNTIME_NATIVE_TWIN void rt_bdd_describe_end(void) {
 }
 
-void rt_bdd_it_start_rv(int64_t name_rv) {
+SPL_RUNTIME_NATIVE_TWIN void rt_bdd_it_start_rv(int64_t name_rv) {
     (void)name_rv;
 }
 
-void rt_bdd_it_end(int64_t passed) {
+SPL_RUNTIME_NATIVE_TWIN void rt_bdd_it_end(int64_t passed) {
     (void)passed;
 }
 
-void rt_bdd_expect_eq_rv(int64_t actual, int64_t expected) {
+SPL_RUNTIME_NATIVE_TWIN void rt_bdd_expect_eq_rv(int64_t actual, int64_t expected) {
     (void)actual;
     (void)expected;
 }
@@ -1847,7 +1863,7 @@ void spl_prefetch_wait(void) {}
  * as a value with no string tag -- observed as `len=0`, indistinguishable from
  * an empty file or a missing one. The runtime's own handle validator prints
  * "probable compiler/FFI ABI mismatch" on it. */
-int64_t rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
+SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     /* RT_NIL: TAG_SPECIAL(0b011) with payload 0 == 3; matches
      * RuntimeValue::NIL in src/compiler_rust/runtime/src/value/core.rs:152,
@@ -1921,13 +1937,13 @@ int64_t rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
  * to be re-argued. */
 static _Thread_local int64_t rt_rnf_last_failure = 77;
 
-int64_t rt_file_read_regular_no_follow_last_failure(void) {
+SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_read_regular_no_follow_last_failure(void) {
     return rt_rnf_last_failure;
 }
 
 #define RT_RNF_FAIL(code) (rt_rnf_last_failure = (code), rt_nil)
 
-int64_t rt_file_read_regular_no_follow_bounded(
+SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_read_regular_no_follow_bounded(
         const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes) {
     const int64_t rt_nil = 3;
     char path[RT_TEXT_PATH_MAX];
@@ -1993,7 +2009,7 @@ int64_t rt_file_read_regular_no_follow_bounded(
 }
 /* (ptr, len): see rt_text_arg_to_path above -- a Simple `text` is not
  * NUL-terminated and the compiler passes it as a pair. */
-int         rt_file_exists(const uint8_t* path_ptr, uint64_t path_len) {
+SPL_RUNTIME_NATIVE_TWIN int         rt_file_exists(const uint8_t* path_ptr, uint64_t path_len) {
     uint_fast64_t lease = rt_file_exists_probe_lease_admit();
     char path[RT_TEXT_PATH_MAX];
     int exists = 0;
@@ -2003,14 +2019,14 @@ int         rt_file_exists(const uint8_t* path_ptr, uint64_t path_len) {
     rt_file_exists_probe_record(lease, exists);
     return exists;
 }
-int         rt_dir_exists(const uint8_t* path_ptr, uint64_t path_len) {
+SPL_RUNTIME_NATIVE_TWIN int         rt_dir_exists(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
     return rt_is_dir(path) ? 1 : 0;
 }
 /* Inspect the directory entry itself. In particular, a Windows junction or
  * directory symlink must not pass an ancestor check by resolving its target. */
-int rt_dir_is_real_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
+SPL_RUNTIME_NATIVE_TWIN int rt_dir_is_real_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path)) || !path[0]) return 0;
 #if defined(_WIN32)
@@ -2047,7 +2063,7 @@ int         rt_file_append(const char* path, const char* content) {
 /* Two `text` arguments -> FOUR machine words (src_ptr, src_len, dst_ptr,
  * dst_len); runtime_sffi.rs:1868 declares &[I64, I64, I64, I64]. The old
  * two-parameter form read BOTH paths past their ends. */
-int         rt_file_copy(const uint8_t* src_ptr, uint64_t src_len,
+SPL_RUNTIME_NATIVE_TWIN int         rt_file_copy(const uint8_t* src_ptr, uint64_t src_len,
                          const uint8_t* dst_ptr, uint64_t dst_len) {
     char src[RT_TEXT_PATH_MAX];
     char dst[RT_TEXT_PATH_MAX];
@@ -2076,12 +2092,12 @@ int         rt_file_copy(const uint8_t* src_ptr, uint64_t src_len,
     fclose(out);
     return 1;
 }
-int rt_file_delete(const uint8_t* path_ptr, uint64_t path_len) {
+SPL_RUNTIME_NATIVE_TWIN int rt_file_delete(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
     return spl_file_delete(path);
 }
-int64_t     rt_file_size(const uint8_t* path_ptr, uint64_t path_len) {
+SPL_RUNTIME_NATIVE_TWIN int64_t     rt_file_size(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return -1;
     return spl_file_size(path);
@@ -2211,7 +2227,7 @@ static char* rt_m3_owned_path(const char* path, int64_t path_len) {
     return owned;
 }
 
-int rt_file_copy_create_excl_no_follow(
+SPL_RUNTIME_NATIVE_TWIN int rt_file_copy_create_excl_no_follow(
         const char* source, int64_t source_len,
         const char* destination, int64_t destination_len) {
 #if defined(_WIN32) || !defined(O_NOFOLLOW)
@@ -2261,7 +2277,7 @@ int rt_file_copy_create_excl_no_follow(
 #endif
 }
 
-int rt_file_link_create_excl_no_follow(
+SPL_RUNTIME_NATIVE_TWIN int rt_file_link_create_excl_no_follow(
         const char* source, int64_t source_len,
         const char* destination, int64_t destination_len) {
 #if defined(_WIN32) || !defined(O_NOFOLLOW)
@@ -2482,10 +2498,13 @@ static int64_t rt_process_status_kib(const char* key) {
         struct rusage ru;
         if (getrusage(RUSAGE_SELF, &ru) != 0) return -1;
 #if defined(__APPLE__)
-        return (int64_t)ru.ru_maxrss / 1024; /* bytes on Darwin */
+        int64_t peak = (int64_t)ru.ru_maxrss / 1024; /* bytes on Darwin */
 #else
-        return (int64_t)ru.ru_maxrss;        /* KiB on FreeBSD */
+        int64_t peak = (int64_t)ru.ru_maxrss;        /* KiB on FreeBSD */
 #endif
+        /* ru_maxrss is tick-sampled on FreeBSD and can trail the live RSS. */
+        int64_t rss = rt_process_status_kib("VmRSS:");
+        return peak > rss ? peak : rss;
     }
     if (strcmp(key, "VmRSS:") != 0) return -1;
 #if defined(__APPLE__)
@@ -2810,7 +2829,7 @@ int64_t rt_dir_walk(const uint8_t* path_ptr, uint64_t path_len) {
  * pulled into THIS translation unit by the #include of platform/platform.h at
  * the top of this file, which is why the extern ABI gate -- which parses only
  * src/runtime/*.c -- never saw these two definitions at all. */
-bool rt_dir_create(const uint8_t* path_ptr, uint64_t path_len, bool recursive) {
+SPL_RUNTIME_NATIVE_TWIN bool rt_dir_create(const uint8_t* path_ptr, uint64_t path_len, bool recursive) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return false;
     return rt_dir_create_cpath(path, recursive);
@@ -2834,7 +2853,7 @@ bool rt_dir_remove_all(const uint8_t* path_ptr, uint64_t path_len) {
  * wrote through. SIGSEGV in all three C link orders, for an existing directory
  * and for a missing one alike. The worker is now rt_dir_list_cpath and this is
  * the entry point the compiler actually calls. */
-int64_t rt_dir_list(const uint8_t* path_ptr, uint64_t path_len) {
+SPL_RUNTIME_NATIVE_TWIN int64_t rt_dir_list(const uint8_t* path_ptr, uint64_t path_len) {
     int64_t result = (int64_t)(uintptr_t)rt_array_new(0);
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return result;
@@ -4160,7 +4179,7 @@ typedef struct {
 } rt_byte_buf;
 
 /* rt_text_to_bytes: create byte array handle from text string */
-int64_t rt_text_to_bytes(const char* text) {
+SPL_RUNTIME_NATIVE_TWIN int64_t rt_text_to_bytes(const char* text) {
     if (!text) text = "";
     size_t len = strlen(text);
     rt_byte_buf* bb = (rt_byte_buf*)SPL_MALLOC(sizeof(rt_byte_buf), "bytes");
@@ -4187,7 +4206,7 @@ int64_t rt_text_to_bytes(const char* text) {
  * which has no RuntimeFuncSpec (the compiler never calls it) and no C-internal
  * caller of rt_bytes_to_text exists, so nothing was relying on the old
  * interpretation. */
-int64_t rt_bytes_to_text(int64_t bytes_value) {
+SPL_RUNTIME_NATIVE_TWIN int64_t rt_bytes_to_text(int64_t bytes_value) {
     int64_t len = rt_array_len_safe(bytes_value);
     if (bytes_value == 0 || len <= 0) return rt_string_new(NULL, 0);
     const uint8_t* data =

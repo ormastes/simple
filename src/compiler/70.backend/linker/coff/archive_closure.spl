@@ -28,35 +28,24 @@ struct CoffArchiveClosure:
     imports: [CoffImportObject]
     passes: i64
 
-fn _coff_archive_i64(bytes: [u8]) -> [i64]:
-    var result: [i64] = []
-    for b in bytes: result = result.push(b as i64)
-    result
-
-fn _coff_archive_u8(bytes: [i64]) -> [u8]:
-    var result: [u8] = []
-    for b in bytes: result = result.push(b as u8)
-    result
-
-fn _coff_archive_is_object(bytes: [i64]) -> bool:
+fn _coff_archive_is_object(bytes: [u8]) -> bool:
     if bytes.len() < 20: return false
-    val machine = bytes[0] | (bytes[1] << 8)
+    val machine = (bytes[0] as i64) | ((bytes[1] as i64) << 8)
     if machine == COFF_MACHINE_AMD64 or machine == COFF_MACHINE_ARM64: return true
-    coff_is_bigobj(_coff_archive_u8(bytes))
+    coff_is_bigobj(bytes)
 
 fn coff_archive_members(archives: [[u8]]) -> Result<[CoffArchiveMember], text>:
     """Decode ordinary AMD64/ARM64 COFF members; skip metadata/import rows."""
     var result: [CoffArchiveMember] = []
     var archive_index: i64 = 0
     while archive_index < archives.len():
-        val reader = ar_parse(_coff_archive_i64(archives[archive_index]))
+        val reader = ar_parse(archives[archive_index])
         if reader.is_err(): return Err("COFF archive {archive_index}: {reader.unwrap_err()}")
         val parsed_reader = reader.unwrap()
         for member in parsed_reader.members:
             if member.name == "" or member.name.starts_with("/"): continue
-            val data = ar_member_data(parsed_reader, member)
-            if not _coff_archive_is_object(data): continue
-            val bytes = _coff_archive_u8(data)
+            val bytes = ar_member_data(parsed_reader, member)
+            if not _coff_archive_is_object(bytes): continue
             val parsed = coff_parse_object(bytes)
             if parsed.is_err():
                 return Err("COFF archive {archive_index} member '{member.name}': {parsed.unwrap_err()}")
@@ -70,12 +59,12 @@ fn coff_archive_imports(archives: [[u8]]) -> Result<[CoffImportObject], text>:
     var result: [CoffImportObject] = []
     var archive_index: i64 = 0
     while archive_index < archives.len():
-        val reader = ar_parse(_coff_archive_i64(archives[archive_index]))
+        val reader = ar_parse(archives[archive_index])
         if reader.is_err(): return Err("COFF archive {archive_index}: {reader.unwrap_err()}")
         val parsed_reader = reader.unwrap()
         for member in parsed_reader.members:
             if member.name == "" or member.name.starts_with("/"): continue
-            val bytes = _coff_archive_u8(ar_member_data(parsed_reader, member))
+            val bytes = ar_member_data(parsed_reader, member)
             if not coff_is_short_import(bytes): continue
             val parsed = coff_parse_short_import(bytes)
             if parsed.is_err():

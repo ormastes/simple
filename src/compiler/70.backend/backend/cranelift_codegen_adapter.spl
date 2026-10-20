@@ -789,7 +789,12 @@ fn cl_translate_instruction(
             store_local_result(ctx, dest, result, slot_map, func)
 
         case Call(dest, func_op, args):
-            val result = cl_translate_call(ctx, func_op, args, value_map, slot_map, cl_module, func_handles, func)
+            var call_ret_type = MirType.i64()
+            var call_has_dest = false
+            if val call_dest_l = dest:
+                call_ret_type = local_type(call_dest_l.id, func)
+                call_has_dest = true
+            val result = cl_translate_call(ctx, func_op, args, value_map, slot_map, cl_module, func_handles, func, call_ret_type, call_has_dest)
             if dest.?:
                 # Inline extraction: calling a helper with a LocalId? ARGUMENT is
                 # miscompiled on the stage4 lane (callee never runs, garbage
@@ -1042,7 +1047,12 @@ fn cl_translate_terminator(
             cranelift_trap(ctx, 1)
 
         case CallTerminator(dest, func_op, args, normal, unwind, _, _):
-            val result = cl_translate_call(ctx, func_op, args, value_map, slot_map, 0, {}, func)
+            var term_ret_type = MirType.i64()
+            var term_has_dest = false
+            if val term_dest_l = dest:
+                term_ret_type = local_type(term_dest_l.id, func)
+                term_has_dest = true
+            val result = cl_translate_call(ctx, func_op, args, value_map, slot_map, 0, {}, func, term_ret_type, term_has_dest)
             if dest.?:
                 # Inline extraction: calling a helper with a LocalId? ARGUMENT is
                 # miscompiled on the stage4 lane (callee never runs, garbage
@@ -1362,13 +1372,11 @@ fn cl_translate_cast(ctx: i64, cl_module: i64, src_val: i64, operand: MirOperand
         val parsed = translate_runtime_import_call_i64(ctx, cl_module, "rt_string_to_int_lenient", [boxed])
         # Bool-aware width: Bool targets are i64 in this backend (mir_type_to_cl),
         # so an ireduce to the same-width i64 would fail verification.
-        val dst_size = match target.kind:
-            case Bool: 8
-            case _: target.size_bytes()
-        if dst_size < 8:
+        val narrow_cl = cl_cast_narrow_int_type(target)
+        if narrow_cl != 0:
             # Narrow for wrap semantics, then extend straight back to I64:
             # no sub-64 SSA value may escape on this uniformly-i64 lane.
-            val narrowed = cranelift_ireduce(ctx, to_cl, parsed)
+            val narrowed = cranelift_ireduce(ctx, narrow_cl, parsed)
             val zero_extend_back = match target.kind:
                 case U8 | U16 | U32 | Bool | Char: true
                 case _: false
@@ -1399,13 +1407,10 @@ fn cl_translate_cast(ctx: i64, cl_module: i64, src_val: i64, operand: MirOperand
         # (see mir_type_to_cl), so a Bool<->i64 cast is a same-width no-op —
         # the 1-byte MIR storage width would emit an invalid same-width
         # uextend/sextend/ireduce.
-        val src_size = match src_type.kind:
-            case Bool: 8
-            case _: operand_size(operand, func)
-        val dst_size = match target.kind:
-            case Bool: 8
-            case _: target.size_bytes()
-        if dst_size > src_size:
+        val src_size = cl_cast_int_width_bytes(src_type)
+        val dst_size = cl_cast_int_width_bytes(target)
+        val narrow_cl = cl_cast_narrow_int_type(target)
+        if dst_size > src_size or narrow_cl == 0:
             # Widening is a no-op on this uniformly-i64 lane: every int SSA
             # value is already a canonically-extended I64 (I64-uniform loads,
             # I64 consts, runtime-widened cmp results), so uextend/sextend
@@ -1415,7 +1420,7 @@ fn cl_translate_cast(ctx: i64, cl_module: i64, src_val: i64, operand: MirOperand
             # Narrow for wrap semantics, then extend straight back to I64:
             # no sub-64 SSA value may escape on this uniformly-i64 lane
             # (probe_enum6: a typed narrow fed i16 into an i64-signature call).
-            val reduced = cranelift_ireduce(ctx, to_cl, src_val)
+            val reduced = cranelift_ireduce(ctx, narrow_cl, src_val)
             val zero_extend_back = match target.kind:
                 case U8 | U16 | U32 | Bool | Char: true
                 case _: false
@@ -1435,7 +1440,9 @@ fn cl_translate_call(
     slot_map: Dict<i64, i64>,
     cl_module: i64,
     func_handles: Dict<text, i64>,
-    func: MirFunction
+    func: MirFunction,
+    ret_type: MirType,
+    has_ret_dest: bool
 ) -> i64:
     # Build argument values
     var arg_vals: [i64] = []
@@ -1507,11 +1514,18 @@ fn cl_translate_call(
                         val func_ref = cranelift_import_function(ctx, handle)
                         return cranelift_call(ctx, func_ref, arg_vals)
                     else:
-                        # External function - declare as import
-                        val sig = cranelift_new_signature(CL_CC_PLATFORM)
-                        for arg in args:
-                            cranelift_sig_add_param(sig, CL_TYPE_I64)
-                        cranelift_sig_set_return(sig, CL_TYPE_I64)
+                        # External function - declare the import from the
+                        # CALLEE's declared signature (the FuncPtr type MIR
+                        # carries from the callee's symbol: imported summary or
+                        # extern declaration), never from the caller's operand
+                        # types. A caller/callee register-class disagreement, or
+                        # a float crossing a callee whose signature is unknown,
+                        # is a compile error (cl_import_call_abi_error).
+                        val abi_error = cl_import_call_abi_error(type_, args, ret_type, has_ret_dest, func)
+                        if abi_error != "":
+                            eprint("[cranelift] E-BACKEND-CRANELIFT-CALL-ABI: call to {name} in {func.name}: {abi_error}")
+                            panic("compile error: E-BACKEND-CRANELIFT-CALL-ABI: call to {name} in {func.name}: {abi_error}")
+                        val sig = cl_import_call_signature(type_, args.len())
                         val handle = cranelift_declare_function(cl_module, name, sig, CL_LINKAGE_IMPORT)
                         val func_ref = cranelift_import_function(ctx, handle)
                         return cranelift_call(ctx, func_ref, arg_vals)
@@ -1624,6 +1638,146 @@ fn type_is_slot_scalar(ty: MirType) -> bool:
             return true
         case _:
             return false
+
+fn cl_cast_narrow_int_type(ty: MirType) -> i64:
+    """Cranelift type a Cast must `ireduce` to for a sub-64 integer target,
+    or 0 when the target is already 64 bits wide in this lane.
+
+    Not `mir_type_to_cl(target)`: that maps Char (and every other kind it
+    does not list) to I64, so `x as char` emitted `ireduce.i64` of an i64 --
+    a same-width reduce the verifier rejects ("arg 0 (vN) with type i64
+    failed to satisfy type set"; unicode_scalar_to_char, external_text).
+    Char is a Unicode scalar and is 32 bits wide, as in the LLVM backend
+    (`MirTypeKind.Char: "i32"`), not MirType.size_bytes()'s 2."""
+    match ty.kind:
+        case I8 | U8: return CL_TYPE_I8
+        case I16 | U16: return CL_TYPE_I16
+        case I32 | U32 | Char: return CL_TYPE_I32
+        case _: return 0
+
+fn cl_cast_int_width_bytes(ty: MirType) -> i64:
+    """Integer value width for Cast width decisions in this uniformly-i64
+    lane: Bool is materialized as i64 (see mir_type_to_cl) and Char is a
+    32-bit Unicode scalar (see cl_cast_narrow_int_type)."""
+    match ty.kind:
+        case Bool: return 8
+        case Char: return 4
+        case _: return ty.size_bytes()
+
+fn cl_fallback_abi_type(ty: MirType) -> i64:
+    """Register class of a CALLER-side value at an imported call: F32/F64
+    stay float, everything else is the uniform i64 lane. Used only to CHECK
+    the caller against the callee's declared signature -- never to build the
+    import signature (that made `take(2.0)` declare `take(f64)` while `take`
+    is defined `(i64)`, passing 2.0 in a float register the callee never
+    reads: a silent miscompile)."""
+    match ty.kind:
+        case F32: return CL_TYPE_F32
+        case F64: return CL_TYPE_F64
+        case _: return CL_TYPE_I64
+
+fn cl_abi_class(cl_type: i64) -> i64:
+    """Collapse a Cranelift ABI type to its register class (I64, F32, F64)."""
+    if cl_type == CL_TYPE_F32 or cl_type == CL_TYPE_F64:
+        return cl_type
+    CL_TYPE_I64
+
+fn cl_abi_class_name(cl_class: i64) -> text:
+    if cl_class == CL_TYPE_F32: return "f32"
+    if cl_class == CL_TYPE_F64: return "f64"
+    "i64"
+
+fn cl_declared_callee_signature_known(callee_type: MirType, arg_count: i64) -> bool:
+    """True when the call operand carries the callee's declared signature.
+
+    MIR records the callee's declared parameter types in
+    `declared_params` (callee symbol's HIR function type or the cross-module
+    prescan registry); fixed `extern fn` declarations carry them in
+    `params` (exact_extern_signatures). Anything else -- an empty legacy
+    list with arguments, or an arity that differs from the call -- is
+    UNKNOWN. A zero-argument call to a zero-parameter (or unrecorded)
+    callee is decidable: its return type is either declared or the i64
+    default, the old all-i64 import."""
+    return cl_declared_callee_params(callee_type).len() == arg_count
+
+fn cl_declared_callee_params(callee_type: MirType) -> [MirType]:
+    match callee_type.kind:
+        case FuncPtr(sig):
+            if sig.declared_params_known:
+                return sig.declared_params
+            if sig.params.len() > 0 or sig.params_known:
+                return sig.params
+            return []
+        case _: return []
+
+fn cl_declared_callee_return(callee_type: MirType) -> MirType:
+    match callee_type.kind:
+        case FuncPtr(sig): return sig.return_type
+        case _: return MirType.i64()
+
+fn cl_import_call_abi_error(callee_type: MirType, args: [MirOperand], ret_type: MirType, has_ret_dest: bool, func: MirFunction) -> text:
+    var arg_types: [MirType] = []
+    for arg in args:
+        arg_types = arg_types.push(operand_type(arg, func))
+    cl_call_abi_mismatch(callee_type, arg_types, ret_type, has_ret_dest)
+
+fn cl_call_abi_mismatch(callee_type: MirType, arg_types: [MirType], ret_type: MirType, has_ret_dest: bool) -> text:
+    """Empty when an imported call is ABI-sound; otherwise why it is not.
+
+    Known callee signature: every argument's register class must equal the
+    declared parameter's, and a used result's class the declared return's.
+    There is no implicit coercion here -- an int passed to an f64 parameter
+    or an f64 passed to an i64/untyped parameter is rejected, because the
+    two sides read different registers. Unknown signature: any float
+    argument or float result is rejected rather than guessed (the import
+    would be all-i64, i.e. the wrong register class)."""
+    if not cl_declared_callee_signature_known(callee_type, arg_types.len()):
+        var unknown_index = 0
+        for unknown_arg_type in arg_types:
+            val unknown_cls = cl_fallback_abi_type(unknown_arg_type)
+            if unknown_cls != CL_TYPE_I64:
+                return "callee signature unknown; arg {unknown_index} is {cl_abi_class_name(unknown_cls)} and cannot be passed through the all-i64 import"
+            unknown_index = unknown_index + 1
+        if has_ret_dest and cl_fallback_abi_type(ret_type) != CL_TYPE_I64:
+            return "callee signature unknown; result is {cl_abi_class_name(cl_fallback_abi_type(ret_type))} and cannot be read from the all-i64 import"
+        return ""
+    val params = cl_declared_callee_params(callee_type)
+    var index = 0
+    for arg_type in arg_types:
+        val caller_cls = cl_fallback_abi_type(arg_type)
+        val callee_cls = cl_abi_class(sig_type_to_cl(params[index]))
+        if caller_cls != callee_cls:
+            return "arg {index} is {cl_abi_class_name(caller_cls)} but the callee declares {cl_abi_class_name(callee_cls)}; convert it explicitly at the call site"
+        index = index + 1
+    val declared_ret = cl_declared_callee_return(callee_type)
+    if has_ret_dest and declared_ret.kind != MirTypeKind.Unit:
+        val caller_ret_cls = cl_fallback_abi_type(ret_type)
+        val callee_ret_cls = cl_abi_class(sig_type_to_cl(declared_ret))
+        if caller_ret_cls != callee_ret_cls:
+            return "result is read as {cl_abi_class_name(caller_ret_cls)} but the callee declares {cl_abi_class_name(callee_ret_cls)}"
+    ""
+
+fn cl_import_call_signature(callee_type: MirType, arg_count: i64) -> i64:
+    """Import signature from the callee's DECLARED types (sig_type_to_cl,
+    the same mapping its definition uses in build_signature). Unknown
+    signature, and a Unit return, keep the historical all-i64 shape;
+    cl_import_call_abi_error has already rejected any float crossing it."""
+    val sig = cranelift_new_signature(CL_CC_PLATFORM)
+    if not cl_declared_callee_signature_known(callee_type, arg_count):
+        var unknown_i = 0
+        while unknown_i < arg_count:
+            cranelift_sig_add_param(sig, CL_TYPE_I64)
+            unknown_i = unknown_i + 1
+        cranelift_sig_set_return(sig, CL_TYPE_I64)
+        return sig
+    for param in cl_declared_callee_params(callee_type):
+        cranelift_sig_add_param(sig, sig_type_to_cl(param))
+    val declared_ret = cl_declared_callee_return(callee_type)
+    if declared_ret.kind == MirTypeKind.Unit:
+        cranelift_sig_set_return(sig, CL_TYPE_I64)
+    else:
+        cranelift_sig_set_return(sig, sig_type_to_cl(declared_ret))
+    sig
 
 fn const_int_cl_type(ty: MirType) -> i64:
     """Int consts emit as I64 regardless of declared width: the lane is

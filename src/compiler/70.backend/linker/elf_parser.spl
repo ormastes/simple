@@ -13,7 +13,7 @@ use compiler.backend.linker.elf_inspect.{
     ET_NONE, ET_REL, ET_EXEC, ET_DYN,
     EM_X86_64, EM_ARM, EM_AARCH64, EM_RISCV
 }
-use std.string_core.{char_from_code}
+use std.common.text_bytes.{bytes_to_text}
 
 # ============================================================================
 # Additional ELF Constants
@@ -110,12 +110,8 @@ fn elf_parse_string_table(bytes: [u8], section: ElfSectionHeader) -> ElfStringTa
         val empty_data: [u8] = []
         return ElfStringTable(data: empty_data, offset: sh_offset)
 
-    var data: [u8] = []
-    var i: i64 = sh_offset
-    while i < end:
-        data = data.push(bytes[i])
-        i = i + 1
-
+    # One native slice: per-byte copying here dominated large links.
+    val data: [u8] = bytes[sh_offset:end]
     ElfStringTable(data: data, offset: sh_offset)
 
 fn elf_strtab_get(strtab: ElfStringTable, index: i64) -> text:
@@ -126,17 +122,20 @@ fn elf_strtab_get(strtab: ElfStringTable, index: i64) -> text:
     if index < 0 or index >= strtab.data.len():
         return ""
 
-    var result: text = ""
-    var i: i64 = index
+    # Find the NUL with native searches over growing windows, then convert
+    # the name bytes once. Building names one character at a time dominated
+    # links with millions of symbols.
     val len = strtab.data.len()
-    while i < len:
-        val b = strtab.data[i]
-        if b == 0:
-            return result
-        result = result + char_from_code(b as i64)
-        i = i + 1
-
-    result
+    var window: i64 = 64
+    while true:
+        val stop = if index + window < len: index + window else: len
+        val nul = strtab.data[index:stop].index_of(0u8)
+        if nul >= 0:
+            return bytes_to_text(strtab.data[index:index + nul])
+        if stop == len:
+            return bytes_to_text(strtab.data[index:len])
+        window = window * 4
+    ""
 
 # ============================================================================
 # Symbol Helpers
