@@ -3623,6 +3623,22 @@ impl MirLowering:
         """`T(x)` (HirExprKind.ConvertCall): numeric cast, or a parse for text."""
         self.lower_cast_or_convert(operand, target, span, true)
 
+    me lower_exists_check_base(base: HirExpr) -> LocalId:
+        """Operand of `.?` (also what `if val x = e` desugars to). The one
+        position where a trait-to-trait `e as T` may yield its `T?`."""
+        val probe_type = HirType(kind: HirTypeKind.Unit, span: base.span)
+        val probe = HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: probe_type, span: base.span)
+        if _sffi_enum_discriminant<i64>(base.kind) == _sffi_enum_discriminant<i64>(HirExprKind.Cast(probe, probe_type)):
+            # Explicit payload decode, as the Cast arm of lower_expr_impl does.
+            val cast_payload = _sffi_enum_payload<HirExprKind>(base.kind)
+            val cast_operand: HirExpr = _sffi_tuple_get<HirExpr>(cast_payload, 0)
+            val cast_target: HirType = _sffi_tuple_get<HirType>(cast_payload, 1)
+            if cast_operand != nil and cast_target != nil:
+                if self.native_trait_owner_for_type(cast_target) != "":
+                    val operand_local = self.lower_expr(cast_operand)
+                    return self.lower_native_trait_as(operand_local, cast_operand, cast_target, base.span, true)
+        self.lower_expr(base)
+
     me lower_cast_or_convert(operand: HirExpr, target: HirType, span: Span, conversion_call: bool) -> LocalId:
         """Lower casts, extracting a runtime enum's resolved discriminant."""
         val operand_local = self.lower_expr(operand)
@@ -3630,7 +3646,7 @@ impl MirLowering:
         # scalar cast of it drops the trait type and the next method call
         # cannot dispatch (as_cast_trait_to_trait_unsupported_natively).
         if not conversion_call and self.native_trait_owner_for_type(target) != "":
-            return self.lower_native_trait_as(operand_local, operand, target, span)
+            return self.lower_native_trait_as(operand_local, operand, target, span, false)
         val mir_target = self.lower_type(target)
         var target_is_integer = false
         match target.kind:
@@ -5968,7 +5984,7 @@ impl MirLowering:
                 # `x ?? default` too, not something newly introduced here.
                 # `lower_if` (mir_lowering_stmts.spl) sidesteps it exactly
                 # this way, so mirror that proven pattern.
-                val base_local = self.lower_expr(base)
+                val base_local = self.lower_exists_check_base(base)
                 # `.?` on a STATICALLY non-optional primitive scalar is always
                 # present (0 and false included), so its value is the scalar
                 # itself. The parser desugars `if val x = v:` into `x = v.?`
