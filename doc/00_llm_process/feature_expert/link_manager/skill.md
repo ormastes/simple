@@ -133,6 +133,12 @@ questions (incl. missing L7/L8 CPU oracles, nondeterministic elapsed_us).
   `rt_smf_reader_open`/`rt_smf_write` is runtime-owned and needs bootstrap;
   not essential for Phase 1.
 
+- `SIMPLE_LINKER=internal` links a 1-object hello end to end (2026-10-20,
+  after fixing the `mdsocpp_seal_v1` compact-loop hang and a missing `?` on
+  `elf_append_symtab`). At full-CLI scale it OOMs while loading inputs
+  (per-byte `[i64]` widening) — bug doc
+  `internal_elf_linker_widened_inputs_oom_at_full_cli_scale_2026-10-20`.
+
 ## Feature Links
 
 - Plan: `doc/03_plan/platform/structural_compute/link_manager_plan.md`
