@@ -704,6 +704,17 @@ impl Lowerer {
     }
 
     fn call_return_type(&self, callee: &Expr, fallback: TypeId) -> TypeId {
+        // An imported callee typed from `imported_function_value_types` keeps
+        // the bare-name return resolution it had before that map existed
+        // (`named_callable_return_type` follows the selected owner when two
+        // imports of the name disagree).
+        if let Expr::Identifier(name) = callee {
+            if self.imported_function_value_types.get(name) == Some(&fallback) {
+                if let Some(ret) = self.named_callable_return_type(name) {
+                    return ret;
+                }
+            }
+        }
         if let Some(HirType::Function { ret, .. }) = self.module.types.get(fallback) {
             return *ret;
         }

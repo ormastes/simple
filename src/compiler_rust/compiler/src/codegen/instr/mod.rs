@@ -532,17 +532,22 @@ pub fn compile_instruction<M: Module>(
                 let count = builder.ins().iconst(types::I32, 0);
                 let closure = helpers::call_runtime_2(ctx, builder, "rt_closure_new", addr, count);
                 ctx.vreg_values.insert(*dest, closure);
-            } else if ctx.func_ids.contains_key(global_name) {
-                // A function used as a VALUE with no `$boxed` entry: its value
-                // type carried no signature (closure_boxed_entry.rs
-                // `imported_fn_value_targets`). The old fallback stored the bare
-                // address in an `rt_alloc` record that `rt_closure_func_ptr`
-                // rejects, so the first call through the value jumped to 0.
-                return Err(format!(
-                    "GlobalLoad: function '{}' is used as a value but has no boxed entry \
-                     (its value type is not a function type); refusing to build a NULL function value",
-                    global_name
-                ));
+            } else if let Some(&func_id) = ctx.func_ids.get(global_name) {
+                // A declared function with no `$boxed` entry: an `extern fn`
+                // (or an import whose value type carried no signature). Keep
+                // the raw-convention direct record: runtime consumers that take
+                // an extern entry point (`runtime_thread.c` /
+                // `executor.rs` DirectFunction) accept exactly this shape.
+                // User functions -- local, or imported with a function type --
+                // never reach here; they take the `$boxed` branch above.
+                let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+                let closure_size = builder.ins().iconst(types::I64, 16);
+                let closure_ptr = helpers::call_runtime_1(ctx, builder, "rt_alloc", closure_size);
+                let fn_addr = builder.ins().func_addr(types::I64, func_ref);
+                let direct_marker = builder.ins().iconst(types::I64, 0x5344_4952_4543_5446);
+                builder.ins().store(MemFlags::new(), fn_addr, closure_ptr, 0);
+                builder.ins().store(MemFlags::new(), direct_marker, closure_ptr, 8);
+                ctx.vreg_values.insert(*dest, closure_ptr);
             } else if let Some(resolved) = ctx
                 .use_map
                 .get(global_name.as_str())
@@ -578,8 +583,9 @@ pub fn compile_instruction<M: Module>(
                     ctx.vreg_values.insert(*dest, val);
                 } else {
                     // Cross-module function reference used as a value with no
-                    // `$boxed` entry (see the branch above): refuse it rather
-                    // than fabricate a closure record that calls address 0.
+                    // `$boxed` entry (its value type carried no signature):
+                    // refuse it rather than fabricate a record that
+                    // `rt_closure_func_ptr` rejects, which calls address 0.
                     return Err(format!(
                         "GlobalLoad: imported function '{}' ({}) is used as a value but has no boxed entry \
                          (its value type is not a function type); refusing to build a NULL function value",
