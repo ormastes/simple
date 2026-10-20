@@ -781,11 +781,21 @@ pub fn nogc_strict_requested(items: &[Node]) -> bool {
     if std::env::var("SIMPLE_NOGC_STRICT").map(|v| v == "1").unwrap_or(false) {
         return true;
     }
-    items.iter().any(|node| match node {
+    // `@no_gc(strict)` is a file-level attribute: it is honoured on a `mod`
+    // declaration, or on whatever item the parser attached it to when it is
+    // the first line of the file (the first item). A `@no_gc(strict)` on a
+    // later function does not flip the whole module.
+    let on_mod_decl = items.iter().any(|node| match node {
         Node::ModDecl(decl) => decl.attributes.iter().any(attribute_is_nogc_strict),
-        Node::Function(f) => f.attributes.iter().any(attribute_is_nogc_strict),
         _ => false,
-    })
+    });
+    let first_item_attrs: &[simple_parser::ast::Attribute] = match items.first() {
+        Some(Node::Function(f)) => &f.attributes,
+        Some(Node::Class(c)) => &c.attributes,
+        Some(Node::Struct(s)) => &s.attributes,
+        _ => &[],
+    };
+    on_mod_decl || first_item_attrs.iter().any(attribute_is_nogc_strict)
 }
 
 /// `@no_gc(strict)`: the `no_gc` attribute with a positional `strict` argument.

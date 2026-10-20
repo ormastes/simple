@@ -319,7 +319,7 @@ impl Lowerer {
             Expr::Yield(value) => self.lower_yield(value.as_deref(), ctx),
             Expr::ContractResult => self.lower_contract_result(ctx),
             Expr::ContractOld(inner) => self.lower_contract_old(inner, ctx),
-            Expr::New { kind, expr } => self.lower_new(kind, expr, ctx),
+            Expr::New { kind, expr, .. } => self.lower_new(kind, expr, ctx),
             Expr::MethodCall {
                 receiver, method, args, ..
             } => self.lower_method_call(receiver, method, args, ctx),

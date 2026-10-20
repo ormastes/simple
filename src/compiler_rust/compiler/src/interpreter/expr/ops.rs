@@ -335,7 +335,7 @@ pub(super) fn eval_op_expr(
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
     match expr {
-        Expr::New { kind: _, expr } => {
+        Expr::New { expr, .. } => {
             // Phase 1 stub: evaluate inner expression, ignore allocator spec
             // Future phases will use the pointer kind for actual allocation
             let inner = evaluate_expr(expr, env, functions, classes, enums, impl_methods)?;

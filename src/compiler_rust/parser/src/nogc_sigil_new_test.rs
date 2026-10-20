@@ -44,6 +44,19 @@ mod nogc_sigil_new {
     }
 
     #[test]
+    fn bare_new_records_that_no_sigil_was_written() {
+        let explicit = |src: &str| match parse_let_value(src) {
+            Expr::New { explicit_sigil, .. } => explicit_sigil,
+            other => panic!("expected Expr::New for `{src}`, got {other:?}"),
+        };
+        assert!(!explicit("val a = new Node(1)"));
+        assert!(explicit("val a = new* Node(1)"));
+        assert!(explicit("val a = new(*) Node(1)"));
+        assert!(explicit("val a = new(&) Node(1)"));
+        assert_eq!(new_kind("val a = new Node(1)"), PointerKind::Shared);
+    }
+
+    #[test]
     fn allocator_forms_unchanged() {
         assert_eq!(new_kind("val p = new() Node(1)"), PointerKind::Unique);
         assert_eq!(new_kind("val h = new(pool) Node(1)"), PointerKind::Handle);

@@ -171,15 +171,26 @@ impl TypeChecker {
                     }
                 }
             }
-            Expr::Call { callee, args } if matches!(callee.as_ref(), Expr::Identifier(n) if n == "share") => {
+            // Builtins unless the module defines its own `share`/`weak_of`.
+            Expr::Call { callee, args }
+                if matches!(callee.as_ref(), Expr::Identifier(n) if n == "share" && !self.env.contains_key("share")) =>
+            {
                 self.infer_share_call(args)
             }
-            Expr::Call { callee, args } if matches!(callee.as_ref(), Expr::Identifier(n) if n == "weak_of") => {
+            Expr::Call { callee, args }
+                if matches!(callee.as_ref(), Expr::Identifier(n) if n == "weak_of" && !self.env.contains_key("weak_of")) =>
+            {
                 self.infer_weak_of_call(args)
             }
-            Expr::New { kind, expr: inner } => {
+            Expr::New {
+                kind,
+                expr: inner,
+                explicit_sigil,
+            } => {
                 use simple_parser::ast::PointerKind;
                 let inner_ty = self.infer_expr(inner)?;
+                // memory.md: under no-GC a bare `new X` (like a bare `T`) is unique.
+                let kind = if self.nogc_strict && !*explicit_sigil { &PointerKind::Unique } else { kind };
                 match kind {
                     PointerKind::Unique => Ok(Type::Unique(Box::new(inner_ty))),
                     PointerKind::Shared => Ok(Type::Shared(Box::new(inner_ty))),

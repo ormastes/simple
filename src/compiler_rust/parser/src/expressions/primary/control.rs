@@ -258,6 +258,10 @@ impl<'a> Parser<'a> {
         //   new expr           — default allocator (Shared)
         //   new() expr         — type pool (Unique)
         //   new(alloc) expr    — explicit allocator (Handle, alloc expr ignored in Phase 1)
+        let bare = !matches!(
+            self.current.kind,
+            TokenKind::LParen | TokenKind::Ampersand | TokenKind::Star | TokenKind::Minus | TokenKind::Plus
+        );
         let kind = match &self.current.kind {
             TokenKind::LParen => {
                 self.advance();
@@ -304,10 +308,12 @@ impl<'a> Parser<'a> {
             }
             _ => PointerKind::Shared, // default: new expr
         };
+        let explicit_sigil = !(kind == PointerKind::Shared && bare);
         let expr = self.parse_postfix()?;
         Ok(Expr::New {
             kind,
             expr: Box::new(expr),
+            explicit_sigil,
         })
     }
 

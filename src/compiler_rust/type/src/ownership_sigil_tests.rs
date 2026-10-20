@@ -164,9 +164,35 @@ mod ownership_sigil_unit_tests {
     }
 
     #[test]
+    fn bare_new_is_unique_in_strict_mode() {
+        let ok = strict(&format!("{NODE}val a: &Node = new Node(v: 1)\n"));
+        assert!(ok.is_ok(), "bare `new` constructs a unique owner under no-GC: {ok:?}");
+        let bad = strict(&format!("{NODE}val a: *Node = new Node(v: 1)\n"));
+        assert!(is_ownership(&bad), "bare `new` is not shared under no-GC: {bad:?}");
+    }
+
+    #[test]
     fn bare_value_types_are_not_wrapped() {
         let ok = strict("val a: i64 = 1\nval t: text = \"x\"\n");
         assert!(ok.is_ok(), "primitives stay values: {ok:?}");
+    }
+
+    // ---- &mut T == mut T ------------------------------------------------
+
+    #[test]
+    fn amp_mut_and_mut_capability_are_one_type_in_strict_mode() {
+        let mut c = TypeChecker::new();
+        c.nogc_strict = true;
+        let a = c.ast_type_to_type(&simple_parser::ast::Type::Pointer {
+            kind: simple_parser::ast::PointerKind::BorrowMut,
+            inner: Box::new(simple_parser::ast::Type::Simple("Node".into())),
+        });
+        let b = c.ast_type_to_type(&simple_parser::ast::Type::Capability {
+            capability: simple_parser::ast::ReferenceCapability::Exclusive,
+            inner: Box::new(simple_parser::ast::Type::Simple("Node".into())),
+        });
+        assert_eq!(a, b);
+        assert!(c.unify(&a, &Type::Unique(Box::new(named("Node")))).is_err());
     }
 
     // ---- function boundaries -------------------------------------------
@@ -206,5 +232,9 @@ mod ownership_sigil_unit_tests {
         assert!(is_ownership(&r), "@no_gc(strict) must enable the checks: {r:?}");
         let plain = format!("@no_gc\nmod m\n{NODE}val a: *Node = new(&) Node(v: 1)\n");
         assert!(!is_ownership(&crate::check(&parse(&plain))), "plain @no_gc stays legacy");
+        let first = format!("@no_gc(strict)\n{NODE}val a: *Node = new(&) Node(v: 1)\n");
+        assert!(is_ownership(&crate::check(&parse(&first))), "file-top @no_gc(strict) on the first item");
+        let later = format!("{NODE}@no_gc(strict)\nfn f() -> i64:\n    return 0\nval a: *Node = new(&) Node(v: 1)\n");
+        assert!(!is_ownership(&crate::check(&parse(&later))), "a later item's attribute is not file-level");
     }
 }

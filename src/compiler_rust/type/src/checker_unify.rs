@@ -358,10 +358,19 @@ impl TypeChecker {
                 // Unit with repr is treated as a named type (the unit name)
                 Type::Named(name.clone())
             }
-            AstType::Capability { inner, .. } => {
-                // For now, just unwrap the capability and convert the inner type
-                // Full capability tracking will be added in Phase 2
-                self.ast_type_to_type(inner)
+            AstType::Capability { capability, inner } => {
+                // memory.md Rule 4: `mut T` is the short exclusive borrow; under
+                // the opt-in no-GC mode it is the same type as `&mut T`. Default
+                // mode keeps the legacy unwrap.
+                let inner_ty = self.ast_type_to_type(inner);
+                if self.nogc_strict && *capability == simple_parser::ast::ReferenceCapability::Exclusive {
+                    let pointee = match inner_ty {
+                        Type::Unique(p) => *p,
+                        other => other,
+                    };
+                    return Type::BorrowMut(Box::new(pointee));
+                }
+                inner_ty
             }
             AstType::SelfType => {
                 // Self return type - treat as Self (will be resolved during type checking)
