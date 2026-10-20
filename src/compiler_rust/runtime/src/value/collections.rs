@@ -148,6 +148,13 @@ static USER_THREADS_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::
 /// Call from every entry point that starts user-visible concurrency, BEFORE the
 /// new thread can run.
 pub fn note_user_threads_started() {
+    // Unit tests run in parallel inside one process, and several of them start
+    // executors/actors/pools. Only threads that opted in (the serialised `[i64]`
+    // lane tests) may flip or sweep the process-global switch.
+    #[cfg(test)]
+    if !HONOR_SPAWN_NOTE.with(|honor| honor.get()) {
+        return;
+    }
     if !USER_THREADS_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
         for addr in super::heap::live_lazy_word_arrays() {
             unsafe { unpack_lazy_words(addr as *mut RuntimeArray) };
@@ -167,6 +174,17 @@ pub extern "C" fn simple_note_user_threads_started() {
 static KEEP_SIMPLE_NOTE_USER_THREADS_STARTED: extern "C" fn() = simple_note_user_threads_started;
 
 #[cfg(test)]
+thread_local! {
+    static HONOR_SPAWN_NOTE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Let the calling test thread's spawn notifications reach the global switch.
+#[cfg(test)]
+pub(crate) fn honor_spawn_note_for_test() {
+    HONOR_SPAWN_NOTE.with(|honor| honor.set(true));
+}
+
+#[cfg(test)]
 pub(crate) fn reset_user_threads_started_for_test() {
     USER_THREADS_STARTED.store(false, std::sync::atomic::Ordering::SeqCst);
 }
@@ -184,6 +202,10 @@ unsafe fn pack_tagged_words_in_place(arr: *mut RuntimeArray) -> bool {
         || (*arr).is_u64_packed()
         || (*arr).header.gc_flags & gc_flags::NO_REPACK != 0
         || USER_THREADS_STARTED.load(std::sync::atomic::Ordering::SeqCst)
+        // The C thread/pool runtime cannot reach the thread-start switch on
+        // Windows (`SPL_NOTE_USER_THREADS` is a no-op there), so packing there
+        // could race a CreateThread worker: never pack.
+        || cfg!(windows)
     {
         return false;
     }
@@ -223,6 +245,30 @@ pub(crate) unsafe fn unpack_lazy_words(arr: *mut RuntimeArray) {
     }
     (*arr).header.gc_flags &= !(gc_flags::U64_PACKED | gc_flags::LAZY_WORDS);
     (*arr).header.gc_flags |= gc_flags::NO_REPACK;
+}
+
+/// A generic (type-erased) writer is about to store `value` into `arr`. A
+/// word-lane array only holds integer words, so a nil/float/text/object value
+/// first returns the array to the tagged layout (and bars repacking).
+///
+/// # Safety
+/// `arr` must point to a live `RuntimeArray`.
+#[inline]
+unsafe fn unpack_for_foreign_value(arr: *mut RuntimeArray, value: RuntimeValue) {
+    if (*arr).header.gc_flags & gc_flags::LAZY_WORDS != 0 && !slot_is_int_like(value) {
+        unpack_lazy_words(arr);
+    }
+}
+
+/// The word a u64-packed array stores for `value`: integers (inline or
+/// heap-boxed wide) decode to their word; anything else keeps `as_int`.
+#[inline]
+unsafe fn packed_store_word(_arr: *mut RuntimeArray, value: RuntimeValue) -> u64 {
+    if slot_is_int_like(value) {
+        slot_word(value) as u64
+    } else {
+        value.as_int() as u64
+    }
 }
 
 /// Normalize a Python-style index (handles negative indices)
@@ -1491,6 +1537,7 @@ pub extern "C" fn rt_at(receiver: RuntimeValue, index: i64) -> RuntimeValue {
 pub extern "C" fn rt_array_set(array: RuntimeValue, index: i64, value: RuntimeValue) -> bool {
     let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
+        unpack_for_foreign_value(arr, value);
         let len = (*arr).len as i64;
         let idx = normalize_index(index, len);
         if idx < 0 || idx >= len {
@@ -1501,7 +1548,7 @@ pub extern "C" fn rt_array_set(array: RuntimeValue, index: i64, value: RuntimeVa
             return true;
         }
         if (*arr).is_u64_packed() {
-            *((*arr).data as *mut u64).add(idx as usize) = value.as_int() as u64;
+            *((*arr).data as *mut u64).add(idx as usize) = packed_store_word(arr, value);
             return true;
         }
         (*arr).as_mut_slice()[idx as usize] = value;
@@ -2161,6 +2208,7 @@ pub extern "C" fn rt_typed_words_u64_store_known_data_at(
 pub extern "C" fn rt_array_push_grow(array: RuntimeValue, value: RuntimeValue) -> bool {
     let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
+        unpack_for_foreign_value(arr, value);
         if (*arr).is_byte_packed() {
             if (*arr).len >= (*arr).capacity {
                 let old_cap = (*arr).capacity;
@@ -2210,7 +2258,7 @@ pub extern "C" fn rt_array_push_grow(array: RuntimeValue, value: RuntimeValue) -
                 (*arr).data = new_data;
                 (*arr).capacity = new_cap;
             }
-            *((*arr).data as *mut u64).add((*arr).len as usize) = value.as_int() as u64;
+            *((*arr).data as *mut u64).add((*arr).len as usize) = packed_store_word(arr, value);
             (*arr).len += 1;
             return true;
         }
@@ -2340,6 +2388,7 @@ pub extern "C" fn rt_array_extend_i64(dst: RuntimeValue, src: RuntimeValue, coun
 pub extern "C" fn rt_array_push_no_grow(array: RuntimeValue, value: RuntimeValue) -> bool {
     let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
+        unpack_for_foreign_value(arr, value);
         if (*arr).len >= (*arr).capacity || (*arr).data.is_null() {
             return false;
         }
@@ -2349,7 +2398,7 @@ pub extern "C" fn rt_array_push_no_grow(array: RuntimeValue, value: RuntimeValue
             return true;
         }
         if (*arr).is_u64_packed() {
-            *((*arr).data as *mut u64).add((*arr).len as usize) = value.as_int() as u64;
+            *((*arr).data as *mut u64).add((*arr).len as usize) = packed_store_word(arr, value);
             (*arr).len += 1;
             return true;
         }

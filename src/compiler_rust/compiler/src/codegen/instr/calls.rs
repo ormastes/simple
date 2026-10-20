@@ -1230,9 +1230,8 @@ fn compile_inline_array_set<M: Module>(
     builder.switch_to_block(store_block);
     let data_ptr = array_items_base(builder, ptr_bits, ctx.fam_arrays);
     // Word-packed arrays (flag 0x10) hold raw words: storing the tagged value
-    // here would corrupt them. The word is decoded from the tagged value; a
-    // heap-boxed wide value needs `rt_value_unbox_int` (the entry UnboxInt
-    // already uses), so no new symbol and no `rt_array_set` call.
+    // here would corrupt them. Inline ints store their decoded word directly;
+    // everything else takes the cold `rt_array_set` call (see wide_block).
     let words_block = if ctx.fam_arrays { None } else { Some(builder.create_block()) };
     if let Some(byte_block) = byte_block {
         let flags = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 1);
@@ -1274,9 +1273,12 @@ fn compile_inline_array_set<M: Module>(
         builder.seal_block(inline_block);
         builder.set_cold_block(wide_block);
         builder.switch_to_block(wide_block);
-        let wide_word = call_runtime_1(ctx, builder, "rt_value_unbox_int", value);
-        builder.ins().store(MemFlags::new(), wide_word, slot_ptr, 0);
-        builder.ins().jump(done_block, &[one]);
+        // Not an inline int: a wide (heap-boxed) integer, or a value the word
+        // layout cannot hold (nil/float/text). `rt_array_set` stores the former
+        // as a raw word and returns the array to the tagged layout for the latter.
+        let set_ok = call_runtime_3(ctx, builder, "rt_array_set", array, index, value);
+        let set_ok64 = builder.ins().uextend(types::I64, set_ok);
+        builder.ins().jump(done_block, &[set_ok64]);
         builder.seal_block(wide_block);
     }
 
@@ -2037,6 +2039,103 @@ fn compile_inline_typed_words_at<M: Module>(
     let word = maybe_packed_u64_load_word(builder, ptr_bits, raw, width);
     builder.ins().jump(done_block, &[word]);
     builder.seal_block(load_block);
+
+    builder.switch_to_block(done_block);
+    let result = builder.block_params(done_block)[0];
+    builder.seal_block(done_block);
+    ctx.vreg_values.insert(*dest, result);
+    Ok(true)
+}
+
+/// Inline `rt_typed_words_i64_at` (`[i64]` signed read). Hot paths, no call and
+/// no registry lock: a heap-tagged array, in bounds, then either the packed raw
+/// word (flag 0x10) or the tagged inline int (`>> 3`). Only a heap-boxed wide
+/// integer in a tagged slot takes the cold runtime call.
+fn compile_inline_typed_words_i64_at<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: &Option<VReg>,
+    args: &[VReg],
+) -> InstrResult<bool> {
+    if args.len() != 2 {
+        return Ok(false);
+    }
+    let Some(dest) = dest else {
+        return Ok(true);
+    };
+
+    let array = coerce_vreg_to_i64(ctx, builder, args[0]);
+    let index = coerce_vreg_to_i64(ctx, builder, args[1]);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let tag_mask = builder.ins().iconst(types::I64, 7);
+    let ptr_mask = builder.ins().iconst(types::I64, !7i64);
+    let index_is_unsigned = vreg_is_signed(ctx, args[1]) == Some(false);
+
+    let bounds_block = builder.create_block();
+    let load_block = builder.create_block();
+    let packed_block = builder.create_block();
+    let tagged_block = builder.create_block();
+    let inline_block = builder.create_block();
+    let cold_block = builder.create_block();
+    let done_block = builder.create_block();
+    builder.append_block_param(done_block, types::I64);
+
+    // Not a heap pointer: same answer as the runtime accessor (0).
+    let tag = builder.ins().band(array, tag_mask);
+    let is_heap = builder.ins().icmp_imm(IntCC::Equal, tag, 1);
+    builder.ins().brif(is_heap, bounds_block, &[], done_block, &[zero]);
+
+    builder.switch_to_block(bounds_block);
+    let ptr_bits = builder.ins().band(array, ptr_mask);
+    let len = array_len_i64(builder, ptr_bits, ctx.fam_arrays);
+    let normalized_index = if index_is_unsigned {
+        index
+    } else {
+        let index_is_negative = builder.ins().icmp(IntCC::SignedLessThan, index, zero);
+        let negative_index = builder.ins().iadd(len, index);
+        builder.ins().select(index_is_negative, negative_index, index)
+    };
+    let in_bounds = if index_is_unsigned {
+        builder.ins().icmp(IntCC::UnsignedLessThan, normalized_index, len)
+    } else {
+        let ge_zero = builder
+            .ins()
+            .icmp(IntCC::SignedGreaterThanOrEqual, normalized_index, zero);
+        let lt_len = builder.ins().icmp(IntCC::SignedLessThan, normalized_index, len);
+        builder.ins().band(ge_zero, lt_len)
+    };
+    builder.ins().brif(in_bounds, load_block, &[], done_block, &[zero]);
+    builder.seal_block(bounds_block);
+
+    builder.switch_to_block(load_block);
+    let data_ptr = array_items_base(builder, ptr_bits, ctx.fam_arrays);
+    let slot_offset = builder.ins().imul_imm(normalized_index, 8);
+    let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
+    let raw = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
+    let is_packed = u64_packed_condition(builder, ptr_bits);
+    builder.ins().brif(is_packed, packed_block, &[], tagged_block, &[]);
+    builder.seal_block(load_block);
+
+    builder.switch_to_block(packed_block);
+    builder.ins().jump(done_block, &[raw]);
+    builder.seal_block(packed_block);
+
+    builder.switch_to_block(tagged_block);
+    let slot_tag = builder.ins().band(raw, tag_mask);
+    let is_inline_int = builder.ins().icmp_imm(IntCC::Equal, slot_tag, 0);
+    builder.ins().brif(is_inline_int, inline_block, &[], cold_block, &[]);
+    builder.seal_block(tagged_block);
+
+    builder.switch_to_block(inline_block);
+    let payload = builder.ins().sshr_imm(raw, 3);
+    builder.ins().jump(done_block, &[payload]);
+    builder.seal_block(inline_block);
+
+    builder.set_cold_block(cold_block);
+    builder.switch_to_block(cold_block);
+    let wide = call_runtime_2(ctx, builder, "rt_typed_words_i64_at", array, index);
+    builder.ins().jump(done_block, &[wide]);
+    builder.seal_block(cold_block);
 
     builder.switch_to_block(done_block);
     let result = builder.block_params(done_block)[0];
@@ -3810,6 +3909,9 @@ pub fn compile_call<M: Module>(
         return Ok(());
     }
     if sffi_name == "rt_typed_words_u32_at" && compile_inline_typed_words_at(ctx, builder, dest, args, 4)? {
+        return Ok(());
+    }
+    if sffi_name == "rt_typed_words_i64_at" && compile_inline_typed_words_i64_at(ctx, builder, dest, args)? {
         return Ok(());
     }
     if sffi_name == "rt_typed_words_u64_at" && compile_inline_typed_words_at(ctx, builder, dest, args, 8)? {

@@ -24,7 +24,9 @@ typedef uint64_t RuntimeValue;
 
 /* Starting any user-visible thread must tell the Rust seed runtime, which packs
  * `[i64]` arrays in place only while no other thread can see them. Weak, so
- * standalone C builds (no seed runtime, no packing) link without it. */
+ * standalone C builds (no seed runtime, no packing) link without it. On
+ * Windows the hook is a no-op, so the Rust runtime never packs there
+ * (`pack_tagged_words_in_place` checks `cfg!(windows)`). */
 #if defined(__GNUC__) && !defined(_WIN32)
 extern void simple_note_user_threads_started(void) __attribute__((weak));
 #define SPL_NOTE_USER_THREADS() \

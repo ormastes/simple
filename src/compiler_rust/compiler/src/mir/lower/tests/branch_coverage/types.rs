@@ -118,6 +118,22 @@ fn labeled_tuple_numeric_access_dispatches_to_tuple_get() {
 }
 
 #[test]
+fn i64_word_lane_off_emits_no_word_lane_symbols() {
+    // Freestanding/WASM runtimes do not define rt_typed_words_i64_*.
+    let mut parser = simple_parser::Parser::new("fn test():\n    var arr = [10, 20]\n    arr[0] = 5\n    val x = arr[1]\n");
+    let ast = parser.parse().expect("parse failed");
+    let hir_module = crate::hir::lower(&ast).expect("hir lower failed");
+    let off = crate::mir::lower_to_mir_with_word_lane(&hir_module, false).unwrap();
+    let on = crate::mir::lower_to_mir_with_word_lane(&hir_module, true).unwrap();
+    let word_lane = |i: &MirInst| {
+        matches!(i, MirInst::Call { target, .. }
+            if target == &CallTarget::from_name("rt_typed_words_i64_at") || target == &CallTarget::from_name("rt_typed_words_i64_set"))
+    };
+    assert!(has_inst(&on, word_lane), "default lowering uses the lane");
+    assert!(!has_inst(&off, word_lane), "word lane disabled must not reference it");
+}
+
+#[test]
 fn array_index_dispatch() {
     // `[i64]` reads go through the layout-aware signed accessor; any other
     // element type keeps rt_array_get.

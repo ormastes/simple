@@ -3042,6 +3042,7 @@ mod packed_array_hardening {
 /// `[i64]` lane: a wide store packs the tagged array in place (no heap box per
 /// store); every consumer that does not understand the packed layout sees the
 /// same values through an automatic unpack.
+#[cfg(not(windows))] // the lane never packs on Windows
 mod typed_i64_lane_tests {
     use super::*;
     use crate::value::collections::RuntimeArray;
@@ -3056,6 +3057,7 @@ mod typed_i64_lane_tests {
 
     fn lane() -> std::sync::MutexGuard<'static, ()> {
         let guard = LANE.lock().unwrap_or_else(|e| e.into_inner());
+        crate::value::collections::honor_spawn_note_for_test();
         crate::value::collections::reset_user_threads_started_for_test();
         guard
     }
@@ -3299,6 +3301,49 @@ mod typed_i64_lane_tests {
             }
             assert!(!packed(a), "entry {entry} must unpack and disable packing");
         }
+        crate::value::collections::reset_user_threads_started_for_test();
+    }
+
+    #[test]
+    fn spawn_notes_from_unrelated_threads_do_not_unpack_or_disable_the_lane() {
+        let _lane = lane();
+        let a = packed_of(&[WIDE, 1]);
+        assert!(packed(a));
+        // what an executor/actor test on another thread does
+        std::thread::spawn(crate::value::collections::note_user_threads_started)
+            .join()
+            .unwrap();
+        assert!(packed(a), "a non-opted-in thread must not flip the process-global switch");
+        crate::value::collections::reset_user_threads_started_for_test();
+    }
+
+    #[test]
+    fn wide_integer_stores_through_generic_writers_stay_packed() {
+        let _lane = lane();
+        let a = packed_of(&[WIDE, 1]);
+        let wide = RuntimeValue::from_int_unscoped(i64::MIN);
+        assert!(super::super::rt_array_set(a, 1, wide));
+        assert!(super::super::rt_array_push_grow(a, RuntimeValue::from_int_unscoped(i64::MAX)));
+        assert!(packed(a));
+        assert_eq!(rt_typed_words_i64_at(a, 1), i64::MIN);
+        assert_eq!(rt_typed_words_i64_at(a, 2), i64::MAX);
+        crate::value::collections::reset_user_threads_started_for_test();
+    }
+
+    #[test]
+    fn generic_writers_keep_non_integer_values_in_a_packed_array() {
+        let _lane = lane();
+        let a = packed_of(&[WIDE, 1, 2]);
+        assert!(packed(a));
+        assert!(super::super::rt_array_set(a, 1, RuntimeValue::NIL));
+        assert!(super::super::rt_array_get(a, 1).is_nil(), "set nil");
+        assert!(super::super::rt_array_set(a, 2, RuntimeValue::from_float(1.5)));
+        assert_eq!(super::super::rt_array_get(a, 2).as_float(), 1.5, "set float");
+        assert!(super::super::rt_array_push_grow(a, RuntimeValue::from_float(2.5)));
+        assert_eq!(super::super::rt_array_get(a, 3).as_float(), 2.5, "push_grow float");
+        assert!(super::super::rt_array_push(a, RuntimeValue::NIL));
+        assert!(super::super::rt_array_get(a, 4).is_nil(), "push nil");
+        assert_eq!(rt_typed_words_i64_at(a, 0), WIDE);
         crate::value::collections::reset_user_threads_started_for_test();
     }
 }
