@@ -11,7 +11,7 @@ Edit:
 Tests:
 
 - `test/01_unit/app/tooling/context_generate_spec.spl`
-- `test/unit/app/tooling/context_generate_spec.spl`
+- `test/01_unit/app/tooling/context_generate_spec.spl`
 - existing `test/02_integration/app/context_log_modes_spec.spl`
 
 ## Helpers
