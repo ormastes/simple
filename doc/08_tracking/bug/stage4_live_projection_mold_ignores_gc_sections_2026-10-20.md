@@ -1,7 +1,7 @@
 # Stage 4 live-request projection is linker-dependent: mold ignores `--gc-sections` under `-r`
 
 - **Date:** 2026-10-20
-- **Status:** open; worked around with `SIMPLE_LINKER=lld` on the Phase 4 full-CLI link
+- **Status:** fixed 2026-10-20 (`work/phase4-link-mold-simple`): the Linux projection is computed in-process; no linker runs
 - **Where:** `src/compiler_rust/compiler/src/pipeline/native_project/linker.rs` `stage4_live_runtime_requests` (~:901-975)
 - **Seen on:** seed `51d63d3f…` (cranelift), authorized Stage 4 entry `src/app/cli/main.spl`, tree `a41a729c5fd`, host linker default resolving to `mold` (`~/.local/bin/mold`)
 
@@ -44,3 +44,30 @@ The projection must not depend on the host's default linker: force `-fuse-ld=lld
 `-r` projection when `ld.lld` is available, or fail closed when the projection's undefined
 set is not smaller than the objects' union of undefined symbols (no GC happened), naming the
 linker. A mold-only host should get a clear error, not 113 false "no archive owner" rows.
+
+## Resolution (2026-10-20)
+
+GNU ld.bfd 2.x behaves like mold here: measured on the same 2793-input projection set,
+`-r --gc-sections` leaves 775 `rt_`/`spl_` undefined under lld and 1564 under both mold and
+bfd. Forcing lld would only have moved the dependency, so the Linux projection no longer runs
+a linker at all. `src/compiler_rust/compiler/src/pipeline/native_project/live_projection.rs`
+walks the objects' section/relocation graph the way LLD's mark phase does. Roots are
+`main`/`spl_main` plus the always-kept sections. `.eh_frame` and non-ALLOC sections never
+mark anything. Strong definitions beat weak ones and the first COMDAT group wins. The pass
+fails closed on any object it cannot parse. The macOS `-dead_strip` trial link is unchanged.
+
+Evidence, using the kept Phase 4 objects (`native-objects-1G3YX9`, 2793 inputs) and the
+ignored test `live_projection::tests::matches_lld_projection_of_real_object_set`:
+
+- The in-process set equals lld's full `nm -u` set of the `-r --gc-sections` output:
+  782 symbols, 0 extra and 0 missing. Of those, 775 are `rt_`/`spl_`.
+- It runs in ~1.0-2.4 s in a debug build. lld's `-r` projection takes 1.54 s.
+
+With the projection fixed, the final link of those objects under mold succeeds:
+
+- `readelf -d` NEEDED is libm, libgcc_s and libc (no sqlite).
+- `--version` and `-c 'print(1+1)'` print `2`.
+- `nm -D -u` shows 0 `rt_`/`spl_` symbols, and no dynamic relocation names one.
+- Plain `nm -u` lists 577 `rt_`/`spl_` UND entries. These are `.symtab`-only: mold keeps
+  undefined symbols from GC'd sections in the static symbol table, and lld drops them.
+  Acceptance under mold therefore has to check `nm -D -u`.
