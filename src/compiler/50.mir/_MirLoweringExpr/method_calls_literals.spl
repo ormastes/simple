@@ -686,6 +686,25 @@ impl MirLowering:
             case nil:
                 false
 
+    me local_is_proven_numeric_scalar(local: LocalId) -> bool:
+        """True when `local` is provably a raw numeric scalar, never an erased
+        runtime word. Integers need an explicit HIR Int type: erased `Any`
+        values also occupy an I64 MIR local. A float MIR local can never hold
+        a tagged text/runtime word, so F32/F64 alone is proof."""
+        if self.is_runtime_value_local(local.id):
+            return false
+        if val known = self.find_local_hir_type(local.id):
+            match known.kind:
+                case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char:
+                    return true
+                case _: ()
+        if val mir_ty = self.local_mir_type_of(local):
+            match mir_ty.kind:
+                case MirTypeKind.F32 | MirTypeKind.F64:
+                    return true
+                case _: ()
+        false
+
     me option_map_value_hir_type(local: LocalId, span: Span) -> HirType?:
         """Recover the primitive type needed to decode an Option.map result."""
         if val known = self.find_local_hir_type(local.id):
@@ -2250,6 +2269,15 @@ impl MirLowering:
                     val erased_struct_owner = self.struct_value_syms.get(prelowered_method_receiver.id)
                     if erased_struct_owner != nil and erased_struct_owner != "":
                         erased_recv_ty_ok = false
+                # A proven numeric scalar is not an erased word: `x.to_i64()`
+                # on an `f64` param (entry-closure lowering leaves receiver.type_
+                # nil) was admitted here and lowered as TEXT to_i64 --
+                # rt_string_new/rt_string_len/rt_string_to_int_lenient fed the
+                # raw double. LLVM silently returned 0 (2.0.to_i64() == 0);
+                # Cranelift rejected it ("arg 0 (vN) has type f64, expected
+                # i64"). The numeric conversion arm below owns these receivers.
+                if erased_recv_ty_ok and self.local_is_proven_numeric_scalar(prelowered_method_receiver):
+                    erased_recv_ty_ok = false
                 if erased_recv_ty_ok:
                     erased_receiver_text_builtin = true
         val text_builtin_resolution_erased_allowed = erased_receiver_text_builtin

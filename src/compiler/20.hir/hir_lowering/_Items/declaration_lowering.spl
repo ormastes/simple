@@ -452,6 +452,19 @@ impl HirLowering:
                             case _: untyped_value_return = true
                     case _:
                         pass
+            # Untyped PARAMETERS make declared_callable_type bail before
+            # infer_untyped_return_type runs, so `fn f(crc): return crc ^ 1`
+            # kept the Unit default while its body still returned a value:
+            # MIR carried Ret(value) out of a void signature (Cranelift:
+            # "arguments of return must match function signature"; LLVM:
+            # the value was dropped). Such a function is dynamically typed
+            # already, so its value return is dynamic too -- the same Any
+            # result the bootstrap route uses ("Unit would discard it").
+            if (not untyped_value_return) and fn_has_untyped_value_param(fn_.params):
+                val dynamic_return_scan = self.scan_ast_block_for_returns(fn_.body, fn_.params)
+                if dynamic_return_scan.found_value_return:
+                    return_type = HirType(kind: HirTypeKind.Any, span: fn_.span)
+                    untyped_value_return = true
 
         # Lower body. A function WITHOUT an explicit return type returns Unit, so
         # its body is not in value position — use `lower_hir_block_unit`, which
@@ -922,3 +935,13 @@ impl HirLowering:
             doc_comment: bitfield_doc_comment,
             span: bitfield_span
         )
+
+fn fn_has_untyped_value_param(params: [Param]) -> bool:
+    """True when a non-receiver parameter has no type annotation."""
+    for raw_param in params:
+        val param_: Param = raw_param
+        if param_.name == "self" or param_.name == "me":
+            continue
+        if not param_.has_type_:
+            return true
+    false
