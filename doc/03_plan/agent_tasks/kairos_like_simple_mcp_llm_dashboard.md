@@ -46,17 +46,17 @@ It does not include vLLM/Torch runtime implementation; that remains gated by
   - `src/app/llm_dashboard/data/jsonl_watcher.spl`
 - Evidence:
   - `test/01_unit/app/llm_dashboard/assistant_collectors_spec.spl`
-  - `test/unit/app/llm_dashboard/assistant_collectors_spec.spl`
+  - `test/01_unit/app/llm_dashboard/assistant_collectors_spec.spl`
   - `test/01_unit/app/llm_dashboard/assistant_bridge_spec.spl`
-  - `test/unit/app/llm_dashboard/assistant_bridge_spec.spl`
+  - `test/01_unit/app/llm_dashboard/assistant_bridge_spec.spl`
   - `test/01_unit/app/llm_dashboard/assistant_live_view_spec.spl`
   - `test/unit/app/llm_dashboard/assistant_live_view_spec.spl`
   - `test/01_unit/app/llm_dashboard/assistant_import_spec.spl`
-  - `test/unit/app/llm_dashboard/assistant_import_spec.spl`
+  - `test/01_unit/app/llm_dashboard/assistant_import_spec.spl`
   - `test/01_unit/app/llm_dashboard/assistant_digest_spec.spl`
   - `test/unit/app/llm_dashboard/assistant_digest_spec.spl`
   - `test/01_unit/app/llm_dashboard/jsonl_watcher_spec.spl`
-  - `test/unit/app/llm_dashboard/jsonl_watcher_spec.spl`
+  - `test/01_unit/app/llm_dashboard/jsonl_watcher_spec.spl`
 
 ## Remaining Work
 
@@ -70,7 +70,7 @@ It does not include vLLM/Torch runtime implementation; that remains gated by
    - State updates increment persisted event metadata before writing the
      session summary back to disk.
    - `test/01_unit/app/mcp/assistant/session_store_spec.spl` and mirrored
-     `test/unit/app/mcp/assistant/session_store_spec.spl` pass.
+     `test/01_unit/app/mcp/assistant/session_store_spec.spl` pass.
    - `test/01_unit/app/mcp/assistant/session_views_spec.spl` and mirrored
      `test/unit/app/mcp/assistant/session_views_spec.spl` pass after fixing
      timeline count inflation and numeric brief rendering.
@@ -97,9 +97,9 @@ It does not include vLLM/Torch runtime implementation; that remains gated by
      - `test/01_unit/app/mcp_unit/assistant_surface_spec.spl` passes with 3/3.
      - `test/unit/app/mcp_unit/assistant_surface_spec.spl` passes with 3/3.
      - `test/01_unit/app/mcp_unit/assistant_task_linking_spec.spl` passes.
-     - `test/unit/app/mcp_unit/assistant_task_linking_spec.spl` passes.
+     - `test/01_unit/app/mcp_unit/assistant_task_linking_spec.spl` passes.
      - `test/01_unit/app/mcp_unit/assistant_dashboard_e2e_spec.spl` and
-       mirrored `test/unit/app/mcp_unit/assistant_dashboard_e2e_spec.spl` pass
+       mirrored `test/01_unit/app/mcp_unit/assistant_dashboard_e2e_spec.spl` pass
        with 1/1, including persisted MCP signal readback in the dashboard
        timeline and without internal process-exit diagnostics after narrowing
        fixture file operations to `std.io_runtime`.
@@ -143,7 +143,7 @@ It does not include vLLM/Torch runtime implementation; that remains gated by
      replay snapshot.
    - Evidence:
      - `test/01_unit/app/llm_dashboard/assistant_import_spec.spl` passes.
-     - `test/unit/app/llm_dashboard/assistant_import_spec.spl` passes.
+     - `test/01_unit/app/llm_dashboard/assistant_import_spec.spl` passes.
 5. Failure evidence:
    - `src/app/dashboard/assistant_live_view.spl` renders explicit failure
      state, detail, and count fields for assistant crashes, missing selected
@@ -173,7 +173,7 @@ It does not include vLLM/Torch runtime implementation; that remains gated by
      - `test/01_unit/app/mcp/assistant/session_store_spec.spl` proves persisted
        JSONL tails are actually pruned on disk and the digest checkpoint id is
        preserved.
-     - `test/unit/app/mcp/assistant/session_store_spec.spl` mirrors the same
+     - `test/01_unit/app/mcp/assistant/session_store_spec.spl` mirrors the same
        durable retention coverage.
    - Store digest policy now writes digest checkpoints to per-session JSONL,
      updates the selected session checkpoint id, and prunes old digest
@@ -181,7 +181,7 @@ It does not include vLLM/Torch runtime implementation; that remains gated by
    - Evidence:
      - `test/01_unit/app/mcp/assistant/session_store_spec.spl` proves durable
        digest generation, current-checkpoint update, and old-checkpoint pruning.
-     - `test/unit/app/mcp/assistant/session_store_spec.spl` mirrors the same
+     - `test/01_unit/app/mcp/assistant/session_store_spec.spl` mirrors the same
        digest checkpoint coverage.
 7. Digest/brief replay readback:
    - `src/app/dashboard/assistant_digest.spl` projects digest-style dashboard
@@ -206,7 +206,7 @@ It does not include vLLM/Torch runtime implementation; that remains gated by
      `app.io.mod` compatibility imports.
    - Evidence:
      - `test/01_unit/app/llm_dashboard/jsonl_watcher_spec.spl` passes.
-     - `test/unit/app/llm_dashboard/jsonl_watcher_spec.spl` passes.
+     - `test/01_unit/app/llm_dashboard/jsonl_watcher_spec.spl` passes.
 9. vLLM runtime evidence panel:
    - `src/app/llm_dashboard/collectors/diagnostics_jsonl_collector.spl`
      recognizes `llm_runtime_vllm_*` JSONL evidence from the runtime lane and
@@ -217,7 +217,7 @@ It does not include vLLM/Torch runtime implementation; that remains gated by
    - Evidence:
      - `test/01_unit/app/llm_dashboard/collectors/diagnostics_jsonl_collector_spec.spl`
        passes with vLLM evidence count/status/reason coverage.
-     - `test/unit/app/llm_dashboard/collectors/diagnostics_jsonl_collector_spec.spl`
+     - `test/01_unit/app/llm_dashboard/collectors/diagnostics_jsonl_collector_spec.spl`
        mirrors the same coverage.
 10. vLLM dashboard control panel:
    - `src/app/llm_dashboard/collectors/vllm_control_panel.spl` adds a
@@ -238,7 +238,7 @@ It does not include vLLM/Torch runtime implementation; that remains gated by
    - Evidence:
      - `test/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.spl`
        passes.
-     - `test/unit/app/llm_dashboard/collectors/vllm_control_panel_spec.spl`
+     - `test/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.spl`
        mirrors the same coverage.
      - `test/01_unit/app/llm_dashboard/ios_mode_spec.spl` and mirrored
        `test/unit/app/llm_dashboard/ios_mode_spec.spl` pass after preserving the

@@ -58,7 +58,7 @@ Still **needs-follow-up**. Actionable next steps, in order:
    `--feature-check` six-state ladder landed its live states via L7, but the
    backend-tested state and board evidence were never executed
    (`.claude/rules/board-runnable.md` applies).
-7. Minor: `test/unit/lib/editor/extension_discovery_contract_spec.spl` still
+7. Minor: `test/01_unit/lib/editor/extension_discovery_contract_spec.spl` still
    uses source-text assertions (DoD #17). Intentional as a contract lint, but
    say so in the doc.
 

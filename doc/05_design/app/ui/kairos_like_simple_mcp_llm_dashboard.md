@@ -230,7 +230,7 @@ Web-login operator failures should surface concrete guidance for:
 
 Implemented diagnostics readback coverage:
 
-- `test/unit/app/llm_dashboard/collectors/diagnostics_jsonl_collector_spec.spl`
+- `test/01_unit/app/llm_dashboard/collectors/diagnostics_jsonl_collector_spec.spl`
 - `test/01_unit/app/llm_dashboard/collectors/diagnostics_jsonl_collector_spec.spl`
 - `test/03_system/feature/app/web_dashboard/web_dashboard_diagnostics_panel_spec.spl`
 
@@ -239,19 +239,19 @@ Implemented dashboard replay/live projection coverage:
 - `test/01_unit/app/llm_dashboard/agent_dashboard_hardening_spec.spl`
 - `test/unit/app/llm_dashboard/agent_dashboard_hardening_spec.spl`
 - `test/01_unit/app/llm_dashboard/assistant_collectors_spec.spl`
-- `test/unit/app/llm_dashboard/assistant_collectors_spec.spl`
+- `test/01_unit/app/llm_dashboard/assistant_collectors_spec.spl`
 - `test/01_unit/app/llm_dashboard/assistant_bridge_spec.spl`
-- `test/unit/app/llm_dashboard/assistant_bridge_spec.spl`
+- `test/01_unit/app/llm_dashboard/assistant_bridge_spec.spl`
 - `test/01_unit/app/llm_dashboard/assistant_live_view_spec.spl`
 - `test/unit/app/llm_dashboard/assistant_live_view_spec.spl`
 - `test/01_unit/app/llm_dashboard/assistant_import_spec.spl`
-- `test/unit/app/llm_dashboard/assistant_import_spec.spl`
+- `test/01_unit/app/llm_dashboard/assistant_import_spec.spl`
 - `test/01_unit/app/llm_dashboard/assistant_digest_spec.spl`
 - `test/unit/app/llm_dashboard/assistant_digest_spec.spl`
 - `test/01_unit/app/llm_dashboard/assistant_retention_spec.spl`
 - `test/unit/app/llm_dashboard/assistant_retention_spec.spl`
 - `test/01_unit/app/llm_dashboard/jsonl_watcher_spec.spl`
-- `test/unit/app/llm_dashboard/jsonl_watcher_spec.spl`
+- `test/01_unit/app/llm_dashboard/jsonl_watcher_spec.spl`
 
 The dashboard collector reads the MCP assistant file store as replay data and
 selects the latest local session by `updated_at_ms`, using the session ID as a
@@ -306,9 +306,9 @@ Implemented MCP assistant control/readback coverage:
 - `test/01_unit/app/mcp_unit/assistant_surface_spec.spl`
 - `test/unit/app/mcp_unit/assistant_surface_spec.spl`
 - `test/01_unit/app/mcp_unit/assistant_task_linking_spec.spl`
-- `test/unit/app/mcp_unit/assistant_task_linking_spec.spl`
+- `test/01_unit/app/mcp_unit/assistant_task_linking_spec.spl`
 - `test/01_unit/app/mcp_unit/assistant_dashboard_e2e_spec.spl`
-- `test/unit/app/mcp_unit/assistant_dashboard_e2e_spec.spl`
+- `test/01_unit/app/mcp_unit/assistant_dashboard_e2e_spec.spl`
 
 The MCP control surface exposes start/spawn/pause/resume/brief/list/timeline/
 signal/task/notification tools as in-process handlers. Handler readback uses
