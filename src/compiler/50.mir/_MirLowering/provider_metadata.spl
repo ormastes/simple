@@ -840,11 +840,12 @@ impl MirLowering:
                     if target.id >= 0:
                         self.trait_impl_methods["{trait_key}::{owner_key}::{method_name}"] = target
 
-    me trait_receiver_identity(receiver: HirExpr) -> text:
+    me trait_receiver_identity(receiver: HirExpr, method: text = "") -> text:
         """Canonical trait identity when the receiver's STATIC type is a
         trait (a trait-object value), else "". Sources, in order: the
         expression's inferred type, a typed local/param binding, and a field
-        access's resolved field symbol."""
+        access's resolved field symbol. A receiver typed `Trait?` counts only
+        when that trait declares `method` (see the Optional arm below)."""
         var candidates: [HirType] = []
         if receiver.has_type_:
             candidates = candidates.push(receiver.type_)
@@ -873,6 +874,21 @@ impl MirLowering:
             match candidate_kind:
                 case Named(named_sym, _): trait_id = named_sym.id
                 case DynTrait(dyn_sym): trait_id = dyn_sym.id
+                # The payload of an `Option<Trait>` (`Some(s)`, `if val s = r`)
+                # can carry the subject's Optional type. It is a trait
+                # receiver only for a method the trait DECLARES, so Option's
+                # own operations (`r.is_some()`) never become trait calls.
+                # doc/08_tracking/bug/trait_receiver_cross_unit_bare_call_stubbed_2026-10-20.md
+                case Optional(payload_type):
+                    val payload_kind: HirTypeKind = payload_type.kind
+                    var payload_id: i64 = -1
+                    match payload_kind:
+                        case Named(payload_sym, _): payload_id = payload_sym.id
+                        case DynTrait(payload_dyn): payload_id = payload_dyn.id
+                        case _: ()
+                    if payload_id >= 0 and method != "":
+                        if self.symbols.lookup_trait_method(SymbolId(id: payload_id), method) != nil:
+                            trait_id = payload_id
                 case _: ()
             if trait_id >= 0 and self.symbols.symbols.has(trait_id):
                 # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).

@@ -710,6 +710,9 @@ fn flat_ast_to_module(path: text) -> ParserModule:
             # un-overridden trait default methods for the concrete type.
             val impl_trait_name = decl_get_impl_trait(idx)
             val impl_has_trait = impl_trait_name != ""
+            # `class X with Trait:` candidate (decl_set_impl_with_trait).
+            val impl_with_trait_name = decl_get_impl_with_trait(idx)
+            val impl_with_candidate = impl_with_trait_name != ""
             val impl_target_tag = decl_get_ret_type(idx)
             val impl_target_type = if impl_target_tag >= 0:
                 convert_flat_type(impl_target_tag)
@@ -724,12 +727,15 @@ fn flat_ast_to_module(path: text) -> ParserModule:
             val impl_span = make_span()
             val impl_trait_type = if impl_has_trait:
                 Type(kind: TypeKind.Named(impl_trait_name, []), span: impl_span)
+            elif impl_with_candidate:
+                Type(kind: TypeKind.Named(impl_with_trait_name, []), span: impl_span)
             else:
                 Type(kind: TypeKind.Infer, span: impl_span)
             impls.push(Impl(
                 type_: impl_target_type,
                 has_trait_: impl_has_trait,
                 trait_: impl_trait_type,
+                with_trait_candidate: impl_with_candidate,
                 type_params: i_type_params,
                 where_clause: [],
                 methods: methods,
@@ -1200,6 +1206,23 @@ fn flat_ast_to_module(path: text) -> ParserModule:
             module: "app.io.env_access_host",
             items: [], is_lazy: false, span: make_span()
         ))
+    # `class X with T:` plus an explicit `impl T for X:` -- the explicit block
+    # is the implementation, so the candidate stays an inherent impl (the
+    # seed's #3981 rule); otherwise two trait impls of (T, X) would each
+    # inject T's defaults and race in MIR's trait_impl_methods.
+    var explicit_trait_impls: [text] = []
+    for impl_row in impls:
+        if impl_row.has_trait_:
+            explicit_trait_impls.push(parser_type_kind_named_name(impl_row.type_.kind) + "|" + parser_type_kind_named_name(impl_row.trait_.kind))
+    var candidate_index = 0
+    while candidate_index < impls.len():
+        var candidate_row = impls[candidate_index]
+        if candidate_row.with_trait_candidate:
+            val candidate_key = parser_type_kind_named_name(candidate_row.type_.kind) + "|" + parser_type_kind_named_name(candidate_row.trait_.kind)
+            if explicit_trait_impls.contains(candidate_key):
+                candidate_row.with_trait_candidate = false
+                impls[candidate_index] = candidate_row
+        candidate_index = candidate_index + 1
     var built_module = parser_module_new(
         name: path,
         imports: imports,
