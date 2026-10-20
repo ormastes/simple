@@ -2567,6 +2567,11 @@ fn free_transient_heap(value: RuntimeValue) {
             | HeapObjectType::Int,
         ) => unsafe {
             let ptr = value.as_heap_ptr();
+            if value.heap_type() == Some(HeapObjectType::Closure)
+                && super::objects::closure_pin_defer_free(ptr as usize)
+            {
+                return; // pinned by a pending consumer; its last release frees it
+            }
             let size = (*ptr).size as usize;
             if let Ok(layout) = std::alloc::Layout::from_size_align(size, 8) {
                 if unregister_heap_ptr_checked(ptr) {
