@@ -24,7 +24,7 @@ Files:
 - `src/app/context/main.spl`
 - `src/compiler_rust/driver/src/main.rs`
 - `test/01_unit/app/tooling/context_generate_spec.spl`
-- `test/unit/app/tooling/context_generate_spec.spl`
+- `test/01_unit/app/tooling/context_generate_spec.spl`
 - generated manuals under `doc/06_spec/`
 
 Tasks:
@@ -85,7 +85,7 @@ Evidence:
 - `test/01_unit/app/mcp_unit/mcp_analysis_tools_spec.spl` passed with 32/32.
 - `test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl` passed with 22/22.
 - `test/01_unit/app/tooling/context_generate_spec.spl` and
-  `test/unit/app/tooling/context_generate_spec.spl` both pass 13/13 cleanly
+  `test/01_unit/app/tooling/context_generate_spec.spl` both pass 13/13 cleanly
   after narrowing fixture imports away from broad `app.io.mod`, adding local
   index/query coverage, SQL index/query coverage, and exact character-budget
   token estimate coverage.
@@ -178,7 +178,7 @@ Files:
 - `src/app/io/mod.spl`
 - `src/app/io/__init__.spl`
 - `test/01_unit/app/tooling/context_generate_spec.spl`
-- `test/unit/app/tooling/context_generate_spec.spl`
+- `test/01_unit/app/tooling/context_generate_spec.spl`
 
 Tasks:
 
@@ -194,7 +194,7 @@ Evidence:
 - `simple check` passed for context helper, CLI/export files, and mirrored
   context specs.
 - `test/01_unit/app/tooling/context_generate_spec.spl` passed with 13/13.
-- `test/unit/app/tooling/context_generate_spec.spl` passed with 13/13.
+- `test/01_unit/app/tooling/context_generate_spec.spl` passed with 13/13.
 
 ## Lane 6: Embedded SQL Context Backend
 
@@ -215,7 +215,7 @@ Files:
 - `src/compiler_rust/compiler/src/interpreter_extern/sffi_db.rs`
 - `src/compiler_rust/compiler/src/interpreter_extern/mod.rs`
 - `test/01_unit/app/tooling/context_generate_spec.spl`
-- `test/unit/app/tooling/context_generate_spec.spl`
+- `test/01_unit/app/tooling/context_generate_spec.spl`
 
 Tasks:
 
@@ -260,13 +260,13 @@ Evidence:
   test/01_unit/app/tooling/context_generate_spec.spl --mode=interpreter` passed
   with 13/13 after adding exact character-budget token estimate coverage.
 - `release/x86_64-unknown-linux-gnu/simple test
-  test/unit/app/tooling/context_generate_spec.spl --mode=interpreter` passed
+  test/01_unit/app/tooling/context_generate_spec.spl --mode=interpreter` passed
   with 13/13 after adding exact character-budget token estimate coverage.
 - `release/x86_64-unknown-linux-gnu/simple test
   test/01_unit/app/tooling/context_generate_spec.spl --mode=interpreter` passed
   with 14/14 after adding source-less embedded SQL DB query coverage.
 - `release/x86_64-unknown-linux-gnu/simple test
-  test/unit/app/tooling/context_generate_spec.spl --mode=interpreter` passed
+  test/01_unit/app/tooling/context_generate_spec.spl --mode=interpreter` passed
   with 14/14 after adding source-less embedded SQL DB query coverage.
 - `release/x86_64-unknown-linux-gnu/simple test
   test/01_unit/app/mcp_unit/mcp_analysis_tools_spec.spl --mode=interpreter`

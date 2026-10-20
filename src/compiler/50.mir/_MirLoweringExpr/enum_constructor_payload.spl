@@ -188,11 +188,52 @@ impl MirLowering:
             return "payload arity mismatch"
         ""
 
+    fn enum_payload_is_builtin_none(expression: HirExpr) -> bool:
+        # The builtin bare `None` (HIR emits NamedVar for it), with the same
+        # shadow guard as the generic Option path in expr_dispatch.spl: a
+        # local named `None` is not the builtin.
+        match expression.kind:
+            case HirExprKind.NamedVar(none_symbol, none_name):
+                if none_name != "None": return false
+                if not self.enum_variant_index.contains("Option"): return false
+                return self.find_local(none_symbol.id).id < 0
+            case _: false
+
+    me emit_enum_payload_nil_word() -> LocalId:
+        # Natively builtin `None` is an rt_enum_new Option object and `nil`
+        # the word 3; rt_is_none accepts both, but rt_native_eq does not
+        # equate them. In an enum payload slot `None` lowers to the word
+        # `nil` produced there before safe code had to spell it `None`, so
+        # readers see no change. Same const and nil_locals mark as
+        # `case NilLit` in expr_dispatch.spl.
+        var b_none = self.builder
+        val none_word = b_none.new_temp(MirType.i64())
+        b_none.emit_const(none_word, MirConstValue.Int(3), MirType.i64())
+        self.builder = b_none
+        self.nil_locals[none_word.id] = true
+        none_word
+
+    me lower_untyped_enum_payload_expression(owner_or_key: text, expression: HirExpr) -> LocalId:
+        # owner_or_key is an owner or an "Owner::Variant" construct key.
+        val key_separator = owner_or_key.last_index_of("::")
+        val owner_key = if key_separator < 0: owner_or_key else: owner_or_key.substring(0, key_separator)
+        # A construction without declared slot metadata. A non-generic
+        # owner's `None` still lowers to the nil word, as `nil` did; generic
+        # owners (Option/Result/user generics) keep the Option object.
+        val bare_owner = self.enum_bare_of(owner_key)
+        val generic_owner = bare_owner == "Option" or bare_owner == "Result" or (self.generic_enum_constructor_owners.get(owner_key) ?? false) or (self.generic_enum_constructor_owners.get(bare_owner) ?? false)
+        if not generic_owner and self.enum_payload_is_builtin_none(expression):
+            return self.emit_enum_payload_nil_word()
+        self.lower_expr(expression)
+
     me lower_declared_enum_payload_expression(expected: HirType, expression: HirExpr) -> LocalId:
         # Context is passed down this literal tree only. Every child is lowered
         # once and checked before the container acquires its declared metadata.
         val errors_before = self.errors.len()
         match expected.kind:
+            case HirTypeKind.Optional(_):
+                if self.enum_payload_is_builtin_none(expression):
+                    return self.emit_enum_payload_nil_word()
             case HirTypeKind.Array(element, size):
                 match expression.kind:
                     case HirExprKind.ArrayLit(elements, _):
@@ -229,13 +270,16 @@ impl MirLowering:
         self.lower_expr(expression)
 
     me enum_payload_local_compatible(expected: HirType, expression: HirExpr, local: LocalId) -> bool:
-        # A literal nil takes its optional type from the declared payload slot.
-        # Its lowered I64 carrier alone is not evidence: integer 3 is not nil.
+        # Safe code spells absence `None`; `nil` is allowed only inside
+        # `unsafe:` (MIR sees block-level unsafe only: `@unsafe` on a fn is
+        # parser metadata). Both take their optional type from the declared
+        # slot. Their lowered I64 carrier alone is not evidence: 3 is not nil.
         match expected.kind:
             case HirTypeKind.Optional(_):
                 match expression.kind:
-                    case HirExprKind.NilLit: return true
+                    case HirExprKind.NilLit: return self.unsafe_depth > 0
                     case _: ()
+                if self.enum_payload_is_builtin_none(expression): return true
             case HirTypeKind.Named(nil_owner, _):
                 # nil is proven only for a declared optional slot. A
                 # non-optional class/struct/enum slot is NOT a nullable
@@ -309,20 +353,28 @@ impl MirLowering:
             case _: return false
 
     fn enum_payload_mismatch_message(construct_key: text, index: i64, expected: HirType, expression: HirExpr) -> text:
-        # Keep the "payload type mismatch at N" stem stable for tooling; a nil
-        # into a non-optional slot additionally says which declaration to fix.
+        # Keep the "payload type mismatch at N" stem stable for tooling. A nil
+        # additionally says what to change: outside unsafe, an optional slot
+        # takes `None`; a non-optional slot names the declaration to fix.
         val stem = "enum construction '{construct_key}': payload type mismatch at {index}"
         match expression.kind:
             case HirExprKind.NilLit:
-                var declared = hir_type_shape_key(expected, true)
                 match expected.kind:
-                    case HirTypeKind.Named(owner, _):
-                        if val declaration = self.symbols.get_symbol_raw(owner.id):
-                            if declaration.name != "": declared = declaration.name
+                    case HirTypeKind.Optional(inner):
+                        return "{stem}: nil outside unsafe into optional payload slot (declared '{self.enum_payload_declared_name(inner)}?'); use None"
                     case _: ()
+                val declared = self.enum_payload_declared_name(expected)
                 return "{stem}: nil into non-optional payload slot (declared '{declared}'); declare it '{declared}?' if absence is valid"
             case _: ()
         stem
+
+    fn enum_payload_declared_name(declared_type: HirType) -> text:
+        match declared_type.kind:
+            case HirTypeKind.Named(owner, _):
+                if val declaration = self.symbols.get_symbol_raw(owner.id):
+                    if declaration.name != "": return declaration.name
+            case _: ()
+        hir_type_shape_key(declared_type, true)
 
     me enum_payload_mismatch_trace(expected: HirType, expression: HirExpr, local: LocalId):
         # SIMPLE_ENUM_PAYLOAD_TRACE=1: name the evidence a rejected payload

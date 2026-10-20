@@ -318,7 +318,7 @@ Runtime-adjacent decision record:
 - `src/app/llm_runtime/dashboard_live_control.spl`
 - `src/app/llm_runtime/dashboard_live_control_executor.spl`
 - `test/01_unit/app/llm_runtime/vllm_dashboard_live_control_spec.spl`
-- `test/unit/app/llm_runtime/vllm_dashboard_live_control_spec.spl`
+- `test/01_unit/app/llm_runtime/vllm_dashboard_live_control_spec.spl`
 - `doc/06_spec/test/01_unit/app/llm_runtime/vllm_dashboard_live_control_spec.md`
 - `doc/06_spec/test/unit/app/llm_runtime/vllm_dashboard_live_control_spec.md`
 
@@ -350,7 +350,7 @@ Runtime-adjacent decision record:
 
 - `src/app/llm_runtime/control_cli.spl`
 - `test/01_unit/app/llm_runtime/vllm_control_cli_spec.spl`
-- `test/unit/app/llm_runtime/vllm_control_cli_spec.spl`
+- `test/01_unit/app/llm_runtime/vllm_control_cli_spec.spl`
 - `doc/06_spec/test/01_unit/app/llm_runtime/vllm_control_cli_spec.md`
 - `doc/06_spec/test/unit/app/llm_runtime/vllm_control_cli_spec.md`
 
@@ -418,7 +418,7 @@ vLLM command logic.
 
 - `src/app/llm_runtime/control_cli.spl`
 - `test/01_unit/app/llm_runtime/vllm_control_cli_spec.spl`
-- `test/unit/app/llm_runtime/vllm_control_cli_spec.spl`
+- `test/01_unit/app/llm_runtime/vllm_control_cli_spec.spl`
 - `doc/06_spec/test/01_unit/app/llm_runtime/vllm_control_cli_spec.md`
 - `doc/06_spec/test/unit/app/llm_runtime/vllm_control_cli_spec.md`
 
