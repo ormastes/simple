@@ -13,8 +13,9 @@ int64_t __simple_pow(int64_t base, int64_t exp) {
     int64_t result = 1;
     while (exp > 0) {
         if (exp & 1) result *= base;
-        base *= base;
         exp >>= 1;
+        /* The terminal square is unused and can overflow even when base^exp fits. */
+        if (exp > 0) base *= base;
     }
     return result;
 }
