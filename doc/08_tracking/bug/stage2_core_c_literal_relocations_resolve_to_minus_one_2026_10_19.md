@@ -42,7 +42,7 @@ discarded while its text is kept.
 
 ## Verification (2026-10-20, aarch64)
 
-Full Stage 2 from release_phase3 f9527544c50 plus ed5406ed760 (bootstrap
+Full Stage 2 from release_phase3 f9527544c50 plus the rt_process_rss_kib capsule fix on this branch (bootstrap
 `bootstrap-r16b`): the seed's tombstone backstop reported
 `PASS — 1 binary(ies) checked, 0 tombstone reference(s)`, the Stage 2
 bootstrap compiler sanity build passed, and Stage 2 was admitted

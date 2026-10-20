@@ -2561,6 +2561,13 @@ mod bootstrap_capsule_ownership_tests {
             core_source.push_str(&format!("long {name}(void) {{ return 1; }}\n"));
         }
         core_source.push_str("long rt_sosix_directory_pair_check_v1(void) { return 5 + rt_file_sync(); }\n");
+        // Every other requested export must exist exactly once in the core
+        // archive too (rt_secure_temp_dir_*, rt_process_rss_kib, ...).
+        for name in super::bootstrap_mutex_runtime_requested_symbols() {
+            if !core_source.contains(&format!("long {name}(void)")) {
+                core_source.push_str(&format!("long {name}(void) {{ return 1; }}\n"));
+            }
+        }
         native_source.push_str("long rt_native_authority_anchor(void) { return 3; }\n");
         let core = compile_archive("core", &core_source);
         let native = compile_archive("native", &native_source);
