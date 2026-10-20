@@ -91,9 +91,9 @@ Implementation owners to inspect (no new parallel owners):
 
 Existing tests are evidence surfaces, not assumed passes:
 
-- `test/unit/common/ui/input_event_conformance_spec.spl`
-- `test/unit/app/ui/widget_button_checkbox_dropdown_spec.spl`
-- `test/unit/app/ui/widget_scroll_textarea_spec.spl`
+- `test/01_unit/common/ui/input_event_conformance_spec.spl`
+- `test/01_unit/app/ui/widget_button_checkbox_dropdown_spec.spl`
+- `test/01_unit/app/ui/widget_scroll_textarea_spec.spl`
 - `test/unit/os/compositor/layout_manager_spec.spl`
 - `test/unit/os/compositor/wm_action_applier_spec.spl`
 - `test/03_system/ui_showcase/showcase_hosts_spec.spl`
