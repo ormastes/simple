@@ -1,5 +1,6 @@
 use compiler.common.native_output_intent.{NativeOutputIntentV1, native_output_intent_decode_v1}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_build.go_to_end.{go_to_end_enabled_v1}
 use compiler.common.diagnostics.span.{Span}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.driver.driver_backend_plugin_selection.{driver_cuda_plugin_request_error_v1}
@@ -401,6 +402,20 @@ impl CompilerDriver:
             analyze_ok_effective = self.lower_and_check_retained_owner_impl()
         # Both HIR routes commit through self.ctx; a false verdict stays false.
         log_trace("AFTER phase 3")
+        if not analyze_ok_effective and compile_mode_text == "aot" and go_to_end_enabled_v1():
+            # go-to-end (driver_build/go_to_end.spl): drop the failed modules
+            # and every module importing one, then go on with the rest.
+            val go_to_end_shown = if self.ctx.error_count() < 20: self.ctx.error_count() else: 20
+            var go_to_end_show_idx = 0
+            while go_to_end_show_idx < go_to_end_shown:
+                log_error("  {self.ctx.error_message_at(go_to_end_show_idx)}")
+                go_to_end_show_idx = go_to_end_show_idx + 1
+            if self.go_to_end_recover_hir_v1():
+                analyze_ok_effective = true
+            else:
+                log_error("phase 3 FAILED (go-to-end: failure not attributable to modules)")
+                self.go_to_end_absorb_errors_v1("hir")
+                return self.go_to_end_finish_v1(0, [])
         if not analyze_ok_effective:
             log_error("phase 3 FAILED")
             if env_get("SIMPLE_BOOTSTRAP_DEBUG") == "1":
@@ -505,6 +520,9 @@ impl CompilerDriver:
             log_error("phase 4 FAILED")
             log_build_progress("monomorphize", "modules", -1, -1,
                 "failed", 3, 6, 1, 0, "failed")
+            if compile_mode_text == "aot" and go_to_end_enabled_v1():
+                self.go_to_end_absorb_errors_v1("mono")
+                return self.go_to_end_finish_v1(0, [])
             return CompileResult.TypeError(self.ctx.errors)
         log_debug("phase 4 done")
         log_phase("phase4:monomorphize:done")

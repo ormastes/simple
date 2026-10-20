@@ -69,6 +69,7 @@ use compiler.driver.smf.runtime_std_package_membership_v1.{
     runtime_std_package_membership_encode_v1}
 use compiler.driver.cache.runtime_std_membership_policy_v1.{
     RuntimeStdMembershipPolicyOutputV1}
+use compiler.driver.driver_build.go_to_end.{go_to_end_enabled_v1}
 use compiler.driver.driver_build.native_full_inventory_sources.{
     NativeFullInventorySourcesV1}
 use std.scv.compile_source_inventory_core.{
@@ -2164,7 +2165,9 @@ impl CompilerDriver:
         # empty/partial .smf. See driver_mir_eviction_enabled for the full
         # reasoning (bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20,
         # hazard 3).
-        val low_memory = driver_mir_eviction_enabled(ctx.options.low_memory, ctx.options.output_format)
+        # go-to-end also releases each module's MIR once its object is written.
+        val low_memory = driver_mir_eviction_enabled(
+            ctx.options.low_memory or go_to_end_enabled_v1(), ctx.options.output_format)
         val all_module_names = ctx.mir_modules.keys()
         var module_names = all_module_names
         var native_group: NativeGroupManifestV1? = nil
@@ -3029,6 +3032,18 @@ impl CompilerDriver:
         if ice_summary != "":
             print "error: {ice_summary}"
             _sffi_stdout_flush()
+        # go-to-end (driver_build/go_to_end.spl): the good objects are already
+        # in the cache (build_cache.save() above). With ANY failure recorded at
+        # any stage, name them all in the manifest and stop before the link.
+        if go_to_end_enabled_v1() and (outcome_verdict != "" or self.go_to_end.len() > 0):
+            var go_to_end_built: [text] = []
+            for go_to_end_outcome in module_outcomes.records:
+                if go_to_end_outcome.is_ok():
+                    go_to_end_built = go_to_end_built.push(go_to_end_outcome.source_path)
+                else:
+                    self.go_to_end.record("codegen", go_to_end_outcome.source_path,
+                        go_to_end_outcome.label() + ": " + go_to_end_outcome.diagnostics)
+            return self.go_to_end_finish_v1(object_files.len(), go_to_end_built)
         if outcome_verdict != "":
             return CompileResult.CodegenError(outcome_verdict)
 
