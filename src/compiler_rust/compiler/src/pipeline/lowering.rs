@@ -211,6 +211,11 @@ fn handle_lenient_type_check_error(e: impl std::fmt::Debug) -> Result<(), Compil
     if message.contains("Undefined(\"undefined identifier:") {
         return Err(CompileError::Semantic(message));
     }
+    // No-GC ownership-sigil violations are only produced under the opt-in
+    // `@no_gc(strict)` / SIMPLE_NOGC_STRICT=1 mode, and are always fatal there.
+    if message.starts_with("Ownership(") {
+        return Err(CompileError::Semantic(message));
+    }
     eprintln!("warning: type check: {} (continuing)", message);
     Ok(())
 }

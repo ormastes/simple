@@ -108,6 +108,30 @@ impl TypeChecker {
                 })
             }
 
+            // No-GC ownership sigils: same kind unifies on the pointee; a
+            // different kind never does (unique<->shared, weak<->shared are
+            // explicit conversions: share(move x), weak_of(s), w.upgrade()).
+            (Type::Unique(i1), Type::Unique(i2))
+            | (Type::Shared(i1), Type::Shared(i2))
+            | (Type::Weak(i1), Type::Weak(i2)) => self.unify(i1, i2),
+            (Type::Unique(_) | Type::Shared(_) | Type::Weak(_), Type::Unique(_) | Type::Shared(_) | Type::Weak(_))
+                if self.nogc_strict =>
+            {
+                Err(TypeError::Mismatch {
+                    expected: t1.clone(),
+                    found: t2.clone(),
+                })
+            }
+            // Legacy (non-strict) compatibility: before this lane the sigils
+            // were erased, so a pointer still unifies with its pointee there.
+            (Type::Unique(inner) | Type::Shared(inner) | Type::Weak(inner), other)
+            | (other, Type::Unique(inner) | Type::Shared(inner) | Type::Weak(inner))
+                if !self.nogc_strict && !matches!(other, Type::Var(_)) =>
+            {
+                let (inner, other) = (inner.clone(), other.clone());
+                self.unify(&inner, &other)
+            }
+
             // Borrow types unify if inner types unify
             (Type::Borrow(i1), Type::Borrow(i2)) => self.unify(i1, i2),
             (Type::BorrowMut(i1), Type::BorrowMut(i2)) => self.unify(i1, i2),
@@ -243,6 +267,10 @@ impl TypeChecker {
                     "bool" | "Bool" => Type::Bool,
                     "str" | "String" | "Str" => Type::Str,
                     "nil" | "Nil" | "None" => Type::Nil,
+                    // memory.md: under no-GC a bare class `T` resolves to `&T`.
+                    _ if self.nogc_strict && self.class_names.contains(name) => {
+                        Type::Unique(Box::new(Type::Named(name.clone())))
+                    }
                     _ => Type::Named(name.clone()),
                 }
             }
@@ -277,10 +305,34 @@ impl TypeChecker {
             AstType::Optional(inner) => Type::Optional(Box::new(self.ast_type_to_type(inner))),
             AstType::Pointer { inner, kind } => {
                 let inner_type = self.ast_type_to_type(inner);
+                // A sigil names the pointer kind itself, so strip the implicit
+                // bare-class `&T` wrapping from the pointee (`*Node`, not `*&Node`).
+                let inner_type = match inner_type {
+                    Type::Unique(pointee) => *pointee,
+                    other => other,
+                };
+                // `*Node?` is an optional shared pointer, not a pointer to an option.
+                if let (Type::Optional(pointee), PointerKind::Unique | PointerKind::Shared | PointerKind::Weak) =
+                    (&inner_type, kind)
+                {
+                    let pointee = match pointee.as_ref() {
+                        Type::Unique(p) => p.as_ref().clone(),
+                        other => other.clone(),
+                    };
+                    let wrapped = match kind {
+                        PointerKind::Unique => Type::Unique(Box::new(pointee)),
+                        PointerKind::Shared => Type::Shared(Box::new(pointee)),
+                        _ => Type::Weak(Box::new(pointee)),
+                    };
+                    return Type::Optional(Box::new(wrapped));
+                }
                 match kind {
                     PointerKind::Borrow => Type::Borrow(Box::new(inner_type)),
                     PointerKind::BorrowMut => Type::BorrowMut(Box::new(inner_type)),
-                    // For other pointer types, treat as their inner type for now
+                    PointerKind::Unique => Type::Unique(Box::new(inner_type)),
+                    PointerKind::Shared => Type::Shared(Box::new(inner_type)),
+                    PointerKind::Weak => Type::Weak(Box::new(inner_type)),
+                    // Handle (+T) and raw (*const/*mut) pointers stay erased.
                     _ => inner_type,
                 }
             }
@@ -386,6 +438,10 @@ impl TypeChecker {
             }
             // Type parameters
             (Type::TypeParam(n1), Type::TypeParam(n2)) => n1 == n2,
+            // No-GC ownership sigils: same kind only.
+            (Type::Unique(inner1), Type::Unique(inner2))
+            | (Type::Shared(inner1), Type::Shared(inner2))
+            | (Type::Weak(inner1), Type::Weak(inner2)) => self.types_compatible(inner1, inner2),
             // Borrow types
             (Type::Borrow(inner1), Type::Borrow(inner2)) => self.types_compatible(inner1, inner2),
             (Type::BorrowMut(inner1), Type::BorrowMut(inner2)) => self.types_compatible(inner1, inner2),

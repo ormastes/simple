@@ -261,10 +261,23 @@ impl<'a> Parser<'a> {
         let kind = match &self.current.kind {
             TokenKind::LParen => {
                 self.advance();
+                let paren_sigil = match self.current.kind {
+                    TokenKind::Ampersand => Some(PointerKind::Unique),
+                    TokenKind::Star => Some(PointerKind::Shared),
+                    TokenKind::Minus => Some(PointerKind::Weak),
+                    TokenKind::Plus => Some(PointerKind::Handle),
+                    _ => None,
+                };
                 if matches!(self.current.kind, TokenKind::RParen) {
                     // new() — type pool form
                     self.advance();
                     PointerKind::Unique
+                } else if let (Some(kind), TokenKind::RParen) = (paren_sigil, &self.peek_next().kind) {
+                    // new(&) / new(*) / new(-) / new(+) — canonical memory.md
+                    // spelling; `new& X` etc. below are sugar for the same kind.
+                    self.advance();
+                    self.advance();
+                    kind
                 } else {
                     // new(alloc_expr) — explicit allocator form
                     // Parse and discard the allocator expression (Phase 1 stub)

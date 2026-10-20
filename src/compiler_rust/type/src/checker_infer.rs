@@ -122,6 +122,7 @@ impl TypeChecker {
                         // Dereferencing a borrow gives the inner type
                         match operand_ty {
                             Type::Borrow(inner) | Type::BorrowMut(inner) => Ok(*inner),
+                            Type::Unique(inner) | Type::Shared(inner) => Ok(*inner),
                             _ => Ok(operand_ty), // For other types, just pass through
                         }
                     }
@@ -170,12 +171,31 @@ impl TypeChecker {
                     }
                 }
             }
+            Expr::Call { callee, args } if matches!(callee.as_ref(), Expr::Identifier(n) if n == "share") => {
+                self.infer_share_call(args)
+            }
+            Expr::Call { callee, args } if matches!(callee.as_ref(), Expr::Identifier(n) if n == "weak_of") => {
+                self.infer_weak_of_call(args)
+            }
+            Expr::New { kind, expr: inner } => {
+                use simple_parser::ast::PointerKind;
+                let inner_ty = self.infer_expr(inner)?;
+                match kind {
+                    PointerKind::Unique => Ok(Type::Unique(Box::new(inner_ty))),
+                    PointerKind::Shared => Ok(Type::Shared(Box::new(inner_ty))),
+                    PointerKind::Weak if self.nogc_strict => Err(TypeError::Ownership(
+                        "new(-) would construct a value nothing owns; make a *T and use weak_of(s)".into(),
+                    )),
+                    _ => Ok(inner_ty),
+                }
+            }
             Expr::Call { callee, args } => {
                 let callee_ty = self.infer_expr(callee)?;
                 let mut arg_types = Vec::new();
                 for arg in args {
                     arg_types.push(self.infer_expr(&arg.value)?);
                 }
+                self.check_call_ownership(callee, args, &arg_types)?;
                 // If callee has a function type, use its return type
                 let result_ty = self.fresh_var();
                 match self.resolve(&callee_ty) {
@@ -252,9 +272,10 @@ impl TypeChecker {
                 self.check_match_arms(arms)?;
                 Ok(result_ty)
             }
-            Expr::FieldAccess { receiver, .. } => {
+            Expr::FieldAccess { receiver, field } => {
                 let inferred_recv = self.infer_expr(receiver)?;
                 let recv_ty = self.resolve(&inferred_recv);
+                let recv_ty = self.ownership_receiver(recv_ty, field, false)?;
                 match recv_ty {
                     Type::LabeledTuple(fields) => {
                         if let Expr::FieldAccess { field, .. } = expr {
@@ -283,6 +304,12 @@ impl TypeChecker {
                 }
 
                 let recv_ty = self.resolve(&inferred_recv);
+                let recv_ty = self.ownership_receiver(recv_ty, method, true)?;
+                if let Type::Weak(pointee) = &recv_ty {
+                    if method == "upgrade" {
+                        return Ok(Type::Optional(Box::new(Type::Shared(pointee.clone()))));
+                    }
+                }
                 if let Type::Bitfield(name) = recv_ty {
                     if method == "new" {
                         return Ok(Type::Bitfield(name));
