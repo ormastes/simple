@@ -1097,7 +1097,10 @@ sub record_sample_duration {
                 if $sample_budget_exceeded == 1;
             return;
         }
-        die $failure unless $opt{'rss-cap-mode'} eq 'monitor';
+        die "$failure: one sample took ${duration_ms} ms, budget ${observation_budget_ms} ms. "
+            . "The /proc walk was descheduled (a cgroup memory.high reclaim throttle or CPU starvation); "
+            . "raise the unit MemoryHigh (SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB) or SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS\n"
+            unless $opt{'rss-cap-mode'} eq 'monitor';
         warn "rss-guard: $failure; monitor measurement incomplete, workload continues\n"
             if $sample_budget_exceeded == 1;
     }
