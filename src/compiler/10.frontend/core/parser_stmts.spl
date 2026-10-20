@@ -73,7 +73,7 @@ use compiler.core.ast.{STMT_CONTRACT_IN, STMT_CONTRACT_INVARIANT, STMT_CONTRACT_
 use compiler.core.ast.{STMT_CONTRACT_OUT_ERR, STMT_CONTRACT_DECREASES, STMT_CONTRACT_PROOF_USES, stmt_contract_clause}
 use compiler.core.ast.{STMT_RECEIVE, stmt_receive_stmt, STMT_BIND, stmt_bind_stmt}
 use compiler.core.ast.{stmt_defer_stmt, stmt_errdefer_stmt, stmt_defer_block_stmt, stmt_errdefer_block_stmt}
-use compiler.core.ast.{decl_extern_fn}
+use compiler.core.ast.{decl_extern_fn, decl_get_tag, decl_get_name, module_add_decl, module_decl_at, module_decl_count_get}
 use compiler.core.ast.{STMT_GPU_LAUNCH, stmt_gpu_launch}
 use compiler.core.ast.{STMT_CONTRACT_IN, STMT_CONTRACT_INVARIANT, STMT_CONTRACT_OUT}
 use compiler.core.ast.{STMT_CONTRACT_OUT_ERR, STMT_CONTRACT_DECREASES, STMT_CONTRACT_PROOF_USES}
@@ -430,8 +430,28 @@ fn parse_block() -> [i64]:
 fn parse_use_stmt_inline() -> i64:
     stmt_use_import(parse_use_decl(), 0)
 
-# extern fn declaration inside a function body: register the signature
-# globally (same as a top-level extern) and emit a no-op statement.
+# True when the module being parsed already declares a function named `name`:
+# a `fn` (tag 1) or an extern (tag 2), top-level or hoisted from an earlier
+# body. A body-local extern must never replace a real module function (e.g.
+# the @cfg(not(baremetal)) host twins in src/os/kernel/loader/segment_mapper.spl).
+fn _module_has_function_decl(name: text) -> bool:
+    val count = module_decl_count_get()
+    var i = 0
+    while i < count:
+        val d = module_decl_at(i)
+        if d >= 0 and (decl_get_tag(d) == 1 or decl_get_tag(d) == 2) and decl_get_name(d) == name:
+            return true
+        i = i + 1
+    false
+
+# extern fn declaration inside a function body: register the signature as a
+# module declaration (same as a top-level extern) and emit a no-op statement.
+# The same extern is commonly re-declared in several bodies of one module, so
+# only the first declaration of a name is added (first signature wins); later
+# ones, and any that name an existing module `fn`, are no-ops. This registers
+# at module scope, not the lexical scope of the enclosing body
+# (pure_simple_nested_extern_registration_2026_10_12 asks for lexical scope).
+# A top-level extern of the same name that FOLLOWS the body is not deduped.
 # Inlined here (like parse_use_stmt_inline) to avoid a circular dep with
 # the decl-parsing modules, which import parse_block from this file.
 fn parse_extern_fn_stmt_inline() -> i64:
@@ -461,7 +481,8 @@ fn parse_extern_fn_stmt_inline() -> i64:
         parser_advance()
         ef_ret = parser_parse_type()
     val ef_tparams: [text] = []
-    decl_extern_fn(ef_name, ef_pnames, ef_ptypes, ef_ret, ef_tparams, 0)
+    if not _module_has_function_decl(ef_name):
+        module_add_decl(decl_extern_fn(ef_name, ef_pnames, ef_ptypes, ef_ret, ef_tparams, 0))
     stmt_expr_stmt(expr_pass(0), 0)
 
 fn parse_contract_clause_expr_stmt() -> i64:
