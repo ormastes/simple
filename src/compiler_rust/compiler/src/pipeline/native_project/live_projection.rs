@@ -90,6 +90,7 @@ struct Graph {
     definitions: HashMap<u32, Definition>,
     objects: Vec<ObjectNode>,
     comdats_seen: HashSet<String>,
+    object_paths: Vec<String>,
 }
 
 impl Graph {
@@ -135,6 +136,7 @@ impl Graph {
             .section_headers(endian, bytes)
             .map_err(|e| format!("live projection: section headers of {}: {e}", path.display()))?;
         let obj_index = self.objects.len();
+        self.object_paths.push(path.display().to_string());
 
         let mut discarded: HashSet<usize> = HashSet::new();
         for comdat in file.comdats() {
@@ -331,6 +333,92 @@ impl Graph {
         undefined.dedup();
         undefined
     }
+
+    /// Debug aid: one shortest (BFS) reference chain per live undefined
+    /// global, as `object:section` hops from a root. `-> sym` marks the
+    /// global symbol each hop was reached through.
+    fn undefined_live_paths(&self, roots: &[&str]) -> Vec<(String, Vec<String>)> {
+        use std::collections::VecDeque;
+        type Node = (usize, usize);
+        let mut parent: HashMap<Node, Option<(Node, Option<u32>)>> = HashMap::new();
+        let mut queue: VecDeque<Node> = VecDeque::new();
+        let mut first_ref: HashMap<u32, (Node, Option<u32>)> = HashMap::new();
+        for (obj, node) in self.objects.iter().enumerate() {
+            for (sec, section) in node.sections.iter().enumerate() {
+                if section.as_ref().map_or(false, |s| s.retained) {
+                    parent.insert((obj, sec), None);
+                    queue.push_back((obj, sec));
+                }
+            }
+        }
+        for root in roots {
+            if let Some(&id) = self.names.get(*root) {
+                if let Some(Definition::Section { obj, sec, .. }) = self.definitions.get(&id) {
+                    if !parent.contains_key(&(*obj, *sec)) {
+                        parent.insert((*obj, *sec), None);
+                        queue.push_back((*obj, *sec));
+                    }
+                }
+            }
+        }
+        while let Some((obj, sec)) = queue.pop_front() {
+            let Some(section) = self.objects[obj].sections.get(sec).and_then(Option::as_ref) else {
+                continue;
+            };
+            let from = (obj, sec);
+            let mut next: Vec<(Node, Option<u32>)> = Vec::new();
+            if let Some(children) = self.objects[obj].link_order_children.get(&sec) {
+                next.extend(children.iter().map(|&c| ((obj, c), None)));
+            }
+            for edge in &section.edges {
+                match *edge {
+                    Edge::Local(t) => next.push(((obj, t), None)),
+                    Edge::Global(id) => match self.definitions.get(&id) {
+                        Some(Definition::Section { obj: o, sec: s, .. }) => next.push(((*o, *s), Some(id))),
+                        Some(Definition::Sectionless { .. }) => {}
+                        None => {
+                            first_ref.entry(id).or_insert((from, Some(id)));
+                        }
+                    },
+                }
+            }
+            for (node, via) in next {
+                if self.objects[node.0].sections.get(node.1).and_then(Option::as_ref).is_some()
+                    && !parent.contains_key(&node)
+                {
+                    parent.insert(node, Some((from, via)));
+                    queue.push_back(node);
+                }
+            }
+        }
+        let label = |n: Node| {
+            let section = self.objects[n.0].sections[n.1].as_ref().map_or("?", |s| s.name.as_str());
+            let path = &self.object_paths[n.0];
+            let file = path.rsplit('/').next().unwrap_or(path);
+            format!("{file}:{section}")
+        };
+        let mut out = Vec::new();
+        for (id, (node, _)) in first_ref {
+            let mut chain = vec![format!("=> {}", self.name_list[id as usize])];
+            let mut cur = node;
+            loop {
+                chain.push(label(cur));
+                match parent.get(&cur) {
+                    Some(Some((prev, via))) => {
+                        if let Some(v) = via {
+                            chain.push(format!("  via {}", self.name_list[*v as usize]));
+                        }
+                        cur = *prev;
+                    }
+                    _ => break,
+                }
+            }
+            chain.reverse();
+            out.push((self.name_list[id as usize].clone(), chain));
+        }
+        out.sort();
+        out
+    }
 }
 
 fn is_retained_section_name(name: &str) -> bool {
@@ -352,6 +440,17 @@ pub(super) fn live_undefined_symbols(objects: &[PathBuf], roots: &[&str]) -> Res
     for path in objects {
         let bytes = std::fs::read(path).map_err(|e| format!("live projection: read {}: {e}", path.display()))?;
         graph.add_object(path, &bytes)?;
+    }
+    if let Ok(dest) = std::env::var("SIMPLE_LIVE_PROJECTION_PATHS") {
+        // Debug: write one shortest reference chain per live undefined global.
+        let mut text = String::new();
+        for (name, chain) in graph.undefined_live_paths(roots) {
+            text.push_str(&format!("### {name}\n"));
+            for hop in chain {
+                text.push_str(&format!("{hop}\n"));
+            }
+        }
+        std::fs::write(&dest, text).map_err(|e| format!("live projection: write {dest}: {e}"))?;
     }
     Ok(graph.undefined_live_symbols(roots))
 }
