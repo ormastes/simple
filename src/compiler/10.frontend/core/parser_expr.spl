@@ -72,7 +72,7 @@ use compiler.core.parser.{parser_tok_save, parser_tok_restore}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_skip_newlines}
 use compiler.core.parser.{parser_has_errors}
 use compiler.core.parser.{parser_parse_type, parser_parse_cast_type}
-use compiler.frontend.desugar.placeholder_lambda.{transform_placeholder_lambda}
+use compiler.frontend.desugar.placeholder_lambda.{transform_placeholder_lambda, transform_placeholder_call_arg, placeholder_enter_call_arg, placeholder_exit_call_arg, placeholder_callee_name_is_higher_order, placeholder_callee_expr_is_higher_order}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 fn parser_expr_trace_enabled() -> bool:
@@ -681,9 +681,17 @@ fn parse_binary_from(base: i64) -> i64:
             left = expr_call(transform_placeholder_lambda(pipe_right), [left], 0)
     left
 
-fn parse_call_arg() -> (i64, text):
+fn parse_call_arg(callee_is_higher_order: bool) -> (i64, text):
+    # Placeholder scoping follows the Rust seed (parser/src/expressions/
+    # postfix.rs transform_placeholder_args_for_call): an argument of a
+    # higher-order callee (`map`, `filter`, ...) becomes ONE lambda that also
+    # captures placeholders of nested ordinary calls, so
+    # `xs.map(self.f(_.1))` is `xs.map(\p: self.f(p.1))`, not
+    # `xs.map(self.f(\p: p.1))`.
+    val ph_prev_depth = placeholder_enter_call_arg(callee_is_higher_order)
     val (raw, name) = parse_call_arg_raw()
-    val transformed = transform_placeholder_lambda(raw)
+    placeholder_exit_call_arg(ph_prev_depth)
+    val transformed = transform_placeholder_call_arg(raw, callee_is_higher_order)
     # Anonymous expression-bodied functions enable forced indentation before
     # their colon so the same parser can support block bodies inside calls.
     # Their body parser can therefore leave an already-scanned NEWLINE before
@@ -1150,7 +1158,7 @@ fn parse_postfix_on(base_expr: i64) -> i64:
                 var call_arg_names: [text] = []
                 var ppo_after_lparen = par_kind_get()
                 if ppo_after_lparen != 141:
-                    val first_arg = parse_call_arg()
+                    val first_arg = parse_call_arg(placeholder_callee_name_is_higher_order(field_name))
                     call_args.push(first_arg.0)
                     call_arg_names.push(first_arg.1)
                     ppo_after_lparen = par_kind_get()
@@ -1161,7 +1169,7 @@ fn parse_postfix_on(base_expr: i64) -> i64:
                         ppo_after_lparen = par_kind_get()
                         if ppo_after_lparen == 141:
                             break
-                        val next_arg = parse_call_arg()
+                        val next_arg = parse_call_arg(placeholder_callee_name_is_higher_order(field_name))
                         call_args.push(next_arg.0)
                         call_arg_names.push(next_arg.1)
                         ppo_after_lparen = par_kind_get()
@@ -1218,7 +1226,7 @@ fn parse_postfix_on(base_expr: i64) -> i64:
             var call_arg_names: [text] = []
             var ppo_after_lparen = par_kind_get()
             if ppo_after_lparen != 141:
-                val first_arg = parse_call_arg()
+                val first_arg = parse_call_arg(placeholder_callee_expr_is_higher_order(base))
                 call_args.push(first_arg.0)
                 call_arg_names.push(first_arg.1)
                 ppo_after_lparen = par_kind_get()
@@ -1229,7 +1237,7 @@ fn parse_postfix_on(base_expr: i64) -> i64:
                     ppo_after_lparen = par_kind_get()
                     if ppo_after_lparen == 141:
                         break
-                    val next_arg = parse_call_arg()
+                    val next_arg = parse_call_arg(placeholder_callee_expr_is_higher_order(base))
                     call_args.push(next_arg.0)
                     call_arg_names.push(next_arg.1)
                     ppo_after_lparen = par_kind_get()
@@ -1387,7 +1395,7 @@ fn parse_postfix() -> i64:
                 var call_arg_names: [text] = []
                 var pp_after_lparen = par_kind_get()
                 if pp_after_lparen != 141:
-                    val first_arg = parse_call_arg()
+                    val first_arg = parse_call_arg(placeholder_callee_name_is_higher_order(field_name))
                     call_args.push(first_arg.0)
                     call_arg_names.push(first_arg.1)
                     pp_after_lparen = par_kind_get()
@@ -1398,7 +1406,7 @@ fn parse_postfix() -> i64:
                         pp_after_lparen = par_kind_get()
                         if pp_after_lparen == 141:
                             break
-                        val next_arg = parse_call_arg()
+                        val next_arg = parse_call_arg(placeholder_callee_name_is_higher_order(field_name))
                         call_args.push(next_arg.0)
                         call_arg_names.push(next_arg.1)
                         pp_after_lparen = par_kind_get()
@@ -1461,7 +1469,7 @@ fn parse_postfix() -> i64:
             var call_arg_names: [text] = []
             var pp_after_lparen = par_kind_get()
             if pp_after_lparen != 141:
-                val first_arg = parse_call_arg()
+                val first_arg = parse_call_arg(placeholder_callee_expr_is_higher_order(base))
                 call_args.push(first_arg.0)
                 call_arg_names.push(first_arg.1)
                 pp_after_lparen = par_kind_get()
@@ -1472,7 +1480,7 @@ fn parse_postfix() -> i64:
                     pp_after_lparen = par_kind_get()
                     if pp_after_lparen == 141:
                         break
-                    val next_arg = parse_call_arg()
+                    val next_arg = parse_call_arg(placeholder_callee_expr_is_higher_order(base))
                     call_args.push(next_arg.0)
                     call_arg_names.push(next_arg.1)
                     pp_after_lparen = par_kind_get()
