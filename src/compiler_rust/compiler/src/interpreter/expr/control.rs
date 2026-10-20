@@ -37,7 +37,11 @@ pub(super) fn eval_control_expr(
                     crate::interpreter::MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|c| c
                         .borrow()
                         .iter()
-                        .map(|(o, m)| (o.to_string(), m.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>()))
+                        .map(|(o, m)| {
+                            let mut names = Vec::new();
+                            m.for_each_resolved(|k, _| names.push(k.clone()));
+                            (o.to_string(), names)
+                        })
                         .collect::<Vec<_>>()),
                     capture_all,
                     env.global_bindings()

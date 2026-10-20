@@ -12,14 +12,16 @@ use tracing::{trace, warn};
 use simple_parser::ast::{Attribute, ClassDef, Expr, FunctionDef, ImportTarget, Node, Pattern, Visibility};
 
 use crate::error::CompileError;
-use crate::value::{Env, Value};
+use crate::value::{Env, ExportTable, LayeredEnv, ModuleTable, TableView, Value};
 use crate::interpreter::{
     tag_function_module_owner, FUNCTION_MODULE_OWNER, FUNCTION_OVERLOADS, MODULE_GLOBAL_BINDINGS_BY_OWNER,
     MODULE_GLOBALS_BY_OWNER, MODULE_GLOBALS_INITIAL_BY_OWNER,
 };
 
 use crate::interpreter::interpreter_module::export_handler::load_export_source;
-use crate::interpreter::module_cache::{filter_functions_from_value, module_exports_owner, module_owner_key};
+use crate::interpreter::module_cache::{
+    filter_functions_from_value, module_dict_contains, module_exports_owner, module_owner_key, module_table_for,
+};
 
 type Enums = HashMap<String, Arc<simple_parser::ast::EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<simple_parser::ast::FunctionDef>>>;
@@ -63,7 +65,7 @@ fn record_owned_global(module_path: Option<&Path>, name: &str, value: &Value) {
 
 fn imported_binding(source_owner: &Arc<str>, source_name: &str) -> (Arc<str>, String) {
     crate::interpreter::owner_bindings(source_owner)
-        .and_then(|bindings| bindings.get(source_name).cloned())
+        .and_then(|bindings| bindings.get(source_name).map(std::borrow::Cow::into_owned))
         .unwrap_or_else(|| (Arc::clone(source_owner), source_name.to_owned()))
 }
 
@@ -81,6 +83,16 @@ fn record_import_binding(
     // common case for the lazy re-imports the lint/parse hot path performs
     // per declaration — so the shared table is not copied for it.
     crate::interpreter::record_owner_binding(importer, local_name.to_owned(), binding);
+}
+
+/// Whole-surface counterpart of [`record_import_binding`]: bind every key of
+/// `names` as `record_import_binding(module_path, key, source_owner, key)`
+/// would, by one reference instead of one entry per key.
+fn record_import_layer(module_path: Option<&Path>, source_owner: Option<&Arc<str>>, names: &Arc<ModuleTable>) {
+    let (Some(importer), Some(source_owner)) = (module_owner(module_path), source_owner) else {
+        return;
+    };
+    crate::interpreter::record_owner_binding_layer(importer, Arc::clone(source_owner), Arc::clone(names));
 }
 
 fn has_driver_manifest_attr(attrs: &[Attribute]) -> bool {
@@ -143,7 +155,7 @@ pub(super) fn register_definitions(
     global_classes: &mut HashMap<String, Arc<ClassDef>>,
     local_enums: &mut Enums,
     global_enums: &mut Enums,
-    exports: &mut HashMap<String, Value>,
+    exports: &mut ExportTable,
     env: &mut Env,
 ) {
     // Module identity for this batch of registrations, recorded in
@@ -461,7 +473,7 @@ pub(super) fn process_imports_and_assignments(
     global_functions: &mut HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
     global_classes: &mut HashMap<String, Arc<ClassDef>>,
     global_enums: &mut Enums,
-    exports: &mut HashMap<String, Value>,
+    exports: &mut ExportTable,
     bare_exports: &mut Vec<Vec<(String, String)>>,
 ) -> Result<(), CompileError> {
     for item in items.iter() {
@@ -578,7 +590,7 @@ fn process_use_stmt(
     global_functions: &mut HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
     global_classes: &mut HashMap<String, Arc<ClassDef>>,
     global_enums: &mut Enums,
-    exports: &mut HashMap<String, Value>,
+    exports: &mut ExportTable,
 ) -> Result<(), CompileError> {
     // Skip type-only imports at runtime - they're only for compile-time type checking
     if use_stmt.is_type_only {
@@ -616,7 +628,10 @@ fn process_use_stmt(
             let source_owner = module_exports_owner(&value);
             // Unpack module exports into current namespace
             if let Value::Dict(module_exports) = &value {
-                for (name, export_value) in module_exports.iter() {
+                // The imported surface as one shared table (the registered
+                // layered table of a finished module, or exactly this dict).
+                let view = module_table_for(module_exports);
+                view.for_each_visible(|name, export_value| {
                     if let Value::Function { def, .. } = export_value {
                         // Don't add "main" from an imported module's exports to
                         // global_functions -- this is the runtime `use`-statement
@@ -661,14 +676,20 @@ fn process_use_stmt(
                             }
                         });
                     }
-                    record_import_binding(module_path, name, source_owner.as_ref(), name);
-                    env.insert(name.clone(), export_value.clone());
-                    exports.insert(name.clone(), export_value.clone());
-                }
+                });
+                // The export table, the env and the binding table take the
+                // imported table BY REFERENCE (one layer, not one entry per
+                // export): copying it made each of them as wide as the
+                // module's transitive import closure. Same visible result --
+                // see `ExportTable::push_layer` / `CowEnv::push_import_layer`.
+                // doc/08_tracking/bug/interpreter_use_unpack_reexports_transitive_closure_2026-10-20.md
+                exports.push_layer(Arc::clone(&view.table));
+                record_import_layer(module_path, source_owner.as_ref(), &view.table);
+                env.push_import_layer(view.clone());
                 if let ImportTarget::Group(items) = &use_stmt.target {
                     for item in items {
                         if let ImportTarget::Aliased { name, alias } = item {
-                            if let Some(export_value) = module_exports.get(name) {
+                            if let Some(export_value) = view.get(name) {
                                 record_import_binding(module_path, alias, source_owner.as_ref(), name);
                                 env.insert(alias.clone(), export_value.clone());
                                 exports.insert(alias.clone(), export_value.clone());
@@ -683,7 +704,7 @@ fn process_use_stmt(
                 ImportTarget::Glob => {
                     // For glob imports, only insert the module dict if there's no export with the same name
                     if let Value::Dict(exports) = &value {
-                        if !exports.contains_key(&binding_name) {
+                        if !module_dict_contains(exports, &binding_name) {
                             env.insert(binding_name.clone(), value);
                         }
                     }
@@ -711,7 +732,7 @@ fn process_export_stmt(
     global_functions: &mut HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
     global_classes: &mut HashMap<String, Arc<ClassDef>>,
     global_enums: &mut Enums,
-    exports: &mut HashMap<String, Value>,
+    exports: &mut ExportTable,
     bare_exports: &mut Vec<Vec<(String, String)>>,
 ) -> Result<(), CompileError> {
     // Check if this is a bare export (export X, Y) or re-export (export X from Y)
@@ -732,9 +753,10 @@ fn process_export_stmt(
         bare_exports.push(names_to_export);
     } else {
         // Re-export: export X, Y from module
-        if let Ok((source_exports, source_owner)) =
+        if let Ok((source_dict, source_owner)) =
             load_export_source(export_stmt, module_path, global_functions, global_classes, global_enums)
         {
+            let source_exports = module_table_for(&source_dict);
             match &export_stmt.target {
                 ImportTarget::Single(name) => {
                     if let Some(value) = source_exports.get(name) {
@@ -751,12 +773,10 @@ fn process_export_stmt(
                     }
                 }
                 ImportTarget::Glob => {
-                    // Export everything from the source module
-                    for (name, value) in source_exports {
-                        record_import_binding(module_path, &name, source_owner.as_ref(), &name);
-                        exports.insert(name.clone(), value.clone());
-                        env.insert(name, value);
-                    }
+                    // Export everything from the source module, by reference.
+                    exports.push_layer(Arc::clone(&source_exports.table));
+                    record_import_layer(module_path, source_owner.as_ref(), &source_exports.table);
+                    env.push_import_layer(source_exports.clone());
                 }
                 ImportTarget::Group(items) => {
                     // Export specific items
@@ -791,13 +811,36 @@ fn process_export_stmt(
 /// transitive imports work: if module B imports C's functions, B's exported functions
 /// can still call C's functions when invoked from module A. (BUG-002 fix)
 /// Only the inner captured_env is stripped to prevent exponential memory growth.
-pub(super) fn create_filtered_env(env: &Env) -> Env {
-    env.iter()
-        .map(|(k, v)| {
-            let filtered_value = filter_functions_from_value(v);
-            (k.clone(), filtered_value)
-        })
-        .collect()
+///
+/// Imported tables stay layers: filtering is per entry, so the filtered view
+/// of an imported table is `filter_functions_from_value` of the whole table
+/// (memoised once per source dict), shared rather than re-collected here.
+pub(super) fn create_filtered_env(env: &Env) -> LayeredEnv {
+    let Some((overlay, base)) = env.module_parts() else {
+        return LayeredEnv::from_map(
+            env.iter()
+                .map(|(k, v)| (k.clone(), filter_functions_from_value(v)))
+                .collect(),
+        );
+    };
+    let mut own: HashMap<String, Value> = overlay
+        .map(|(k, v)| (k.clone(), filter_functions_from_value(v)))
+        .collect();
+    let mut layers: Vec<TableView> = Vec::new();
+    if let Some(base) = base {
+        for (k, v) in base.own() {
+            own.entry(k.clone()).or_insert_with(|| filter_functions_from_value(v));
+        }
+        for layer in base.layers() {
+            // Filtering is per entry, so the filtered view of a layer is the
+            // layer's table read through `filtered_own` (built once per table).
+            layers.push(TableView {
+                table: Arc::clone(&layer.table),
+                filtered: true,
+            });
+        }
+    }
+    LayeredEnv::from_parts(own, layers)
 }
 
 /// Export functions with filtered environment captured.
@@ -805,8 +848,8 @@ pub(super) fn create_filtered_env(env: &Env) -> Env {
 /// for caching (avoids creating duplicate Arc wrappers).
 pub(super) fn export_functions(
     local_functions: &HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
-    frozen_env: &Arc<HashMap<String, Value>>,
-    exports: &mut HashMap<String, Value>,
+    frozen_env: &Arc<LayeredEnv>,
+    exports: &mut ExportTable,
     env: &mut Env,
 ) -> HashMap<String, Arc<simple_parser::ast::FunctionDef>> {
     // First pass: Add all module functions to env with empty captured_env
@@ -831,7 +874,7 @@ pub(super) fn export_functions(
     // Only export functions marked as 'pub' - others need explicit export statements
     trace!(
         functions = local_functions.len(),
-        env_size = frozen_env.len(),
+        env_size = frozen_env.retained_len(),
         "Second pass: exporting public functions"
     );
     // Shared-base CowEnv: the frozen map exists exactly once; every exported
@@ -866,7 +909,7 @@ pub(super) fn export_functions(
 pub(super) fn process_bare_exports(
     bare_exports: &[Vec<(String, String)>],
     env: &Env,
-    exports: &mut HashMap<String, Value>,
+    exports: &mut ExportTable,
     module_path: Option<&Path>,
 ) {
     let suppress_undefined_export_warning = module_path.is_some_and(|path| {
@@ -907,5 +950,5 @@ pub(super) fn process_bare_exports(
             }
         }
     }
-    trace!(total_exports = exports.len(), "Finished processing bare exports");
+    trace!(total_exports = exports.retained_len(), "Finished processing bare exports");
 }
