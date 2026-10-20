@@ -15,16 +15,15 @@ use compiler.backend.linker.elf.elf_static_link.{ElfLinkRequest, elf_link,
     elf_link_stripped, elf_link_configured, elf_link_structural,
     elf_link_with_operations, ELF_LINK_STATIC_EXEC}
 use compiler.backend.linker.elf.elf_exec_writer.{ElfOutSec, ElfExecPlan,
-    elf_exec_plan, elf_write_image}
+    elf_exec_plan, elf_write_image_bytes}
+use compiler.backend.linker.elf.byte_buffers.{elf_i64_from_u8}
 use compiler.backend.linker.elf_parser.{elf_parse_object, elf_section_name}
 use compiler.backend.linker.reloc_engine.{RelocArch, reloc_apply, reloc_patch_bytes}
 
-fn item4_elf_ops_fixture(name: text) -> [i64]:
+fn item4_elf_ops_fixture(name: text) -> [u8]:
     val raw = file_read_bytes("test/fixtures/linker/elf/" + name)
     expect(raw.len()).to_be_greater_than(64)
-    var bytes: [i64] = []
-    for byte in raw: bytes.push(byte as i64)
-    bytes
+    raw
 
 fn item4_elf_ops_request() -> ElfLinkRequest:
     ElfLinkRequest(objects: [item4_elf_ops_fixture("abs_narrow_x64.o"),
@@ -32,15 +31,15 @@ fn item4_elf_ops_request() -> ElfLinkRequest:
         entry: "_start", target: RelocArch.X86_64, mode: ELF_LINK_STATIC_EXEC,
         interp: "", gc_sections: false)
 
-fn item4_elf_ops_read(bytes: [i64], offset: i64, width: i64) -> i64:
+fn item4_elf_ops_read(bytes: [u8], offset: i64, width: i64) -> i64:
     val valid = offset >= 0 and offset <= bytes.len() and width >= 1 and width <= 8 and width <= bytes.len() - offset
     expect(valid).to_equal(true)
     if not valid: return -1
     var value: i64 = 0
-    for index in 0..width: value = value | (bytes[offset + index] << (index * 8))
+    for index in 0..width: value = value | (((bytes[offset + index] as i64) & 255) << (index * 8))
     value
 
-fn item4_elf_ops_check(image: [i64], word: i64, byte: i64):
+fn item4_elf_ops_check(image: [u8], word: i64, byte: i64):
     expect(item4_elf_ops_read(image, 0, 4)).to_equal(0x464c457f)
     expect(item4_elf_ops_read(image, 4, 1)).to_equal(2)
     expect(item4_elf_ops_read(image, 16, 2)).to_equal(2)
@@ -70,10 +69,10 @@ fn item4_elf_ops_layout(secs: [ElfOutSec], base: i64, page: i64) -> Result<ElfEx
     elf_exec_plan(secs, base + 4096, page)
 
 fn item4_elf_ops_writer(kind: i64, machine: i64, entry: i64,
-        plan: ElfExecPlan, contents: [[i64]]) -> Result<[i64], text>:
-    var image = elf_write_image(kind, machine, entry, plan, contents)
+        plan: ElfExecPlan, contents: [[u8]]) -> Result<[u8], text>:
+    var image = elf_write_image_bytes(kind, machine, entry, plan, contents)
     if image.len() < 64: return Err("item4 writer unexpectedly short")
-    image[7] = 9
+    image[7] = 9u8
     Ok(image)
 
 fn item4_elf_ops_relocate_error(arch: RelocArch, bytes: [i64], offset: i64,
@@ -84,7 +83,7 @@ fn item4_elf_ops_layout_error(secs: [ElfOutSec], base: i64, page: i64) -> Result
     Err("item4 selected layout rejected")
 
 fn item4_elf_ops_writer_error(kind: i64, machine: i64, entry: i64,
-        plan: ElfExecPlan, contents: [[i64]]) -> Result<[i64], text>:
+        plan: ElfExecPlan, contents: [[u8]]) -> Result<[u8], text>:
     Err("item4 selected writer rejected")
 
 fn item4_elf_ops_relocate_short(arch: RelocArch, bytes: [i64], offset: i64,
@@ -97,12 +96,12 @@ fn item4_elf_ops_layout_short(secs: [ElfOutSec], base: i64, page: i64) -> Result
         segments: result.segments, file_end: result.file_end))
 
 fn item4_elf_ops_writer_short(kind: i64, machine: i64, entry: i64,
-        plan: ElfExecPlan, contents: [[i64]]) -> Result<[i64], text>:
+        plan: ElfExecPlan, contents: [[u8]]) -> Result<[u8], text>:
     Ok([127, 69, 76, 70])
 
 fn item4_elf_ops_writer_wrong_load(kind: i64, machine: i64, entry: i64,
-        plan: ElfExecPlan, contents: [[i64]]) -> Result<[i64], text>:
-    var image = elf_write_image(kind, machine, entry, plan, contents)
+        plan: ElfExecPlan, contents: [[u8]]) -> Result<[u8], text>:
+    var image = elf_write_image_bytes(kind, machine, entry, plan, contents)
     val phoff = item4_elf_ops_read(image, 32, 8)
     val count = item4_elf_ops_read(image, 56, 2)
     val valid = phoff >= 64 and phoff <= image.len() and count > 0 and count < 64 and count * 56 <= image.len() - phoff
@@ -112,7 +111,7 @@ fn item4_elf_ops_writer_wrong_load(kind: i64, machine: i64, entry: i64,
         val at = phoff + index * 56
         if item4_elf_ops_read(image, at, 4) == 1:
             val address = item4_elf_ops_read(image, at + 16, 8) + 4096
-            for byte in 0..8: image[at + 16 + byte] = (address >> (byte * 8)) & 255
+            for byte in 0..8: image[at + 16 + byte] = ((address >> (byte * 8)) & 255) as u8
             return Ok(image)
     expect(false).to_equal(true)
     Err("item4 malformed fixture has no load segment")
@@ -129,7 +128,7 @@ describe "Static ELF operational composition dispatch":
         expect(legacy.is_ok()).to_equal(true)
         expect(linked.is_ok()).to_equal(true)
         if legacy.is_err() or linked.is_err(): return
-        expect(linked.unwrap().image).to_equal(legacy.unwrap())
+        expect(elf_i64_from_u8(linked.unwrap().image)).to_equal(legacy.unwrap())
         val structural = elf_link_structural(request)
         expect(structural.is_ok()).to_equal(true)
         if structural.is_err(): return

@@ -1,0 +1,52 @@
+# Packed byte-buffer helpers for the hosted ELF link path.
+#
+# Section contents and the output image are `[u8]`. Bytes move only through
+# slices and in-place `extend` on a buffer the caller owns uniquely (a buffer
+# passed into a function and extended there is copied first); Simple loops iterate relocations and
+# symbols, never bytes. Per-byte loops over `[i64]` cost about 1 us per byte
+# under the interpreter and 8x the memory, which made full-CLI links OOM.
+
+fn elf_u8_zeros(count: i64) -> [u8]:
+    """`count` zero bytes, built by doubling (log2(count) native copies)."""
+    var out: [u8] = []
+    if count <= 0: return out
+    out.push(0u8)
+    while out.len() * 2 <= count:
+        val again: [u8] = out
+        out.extend(again)
+    if out.len() < count:
+        out.extend(out[0:count - out.len()])
+    out
+
+fn elf_u8_from_i64(values: [i64]) -> [u8]:
+    """Narrow a small `[i64]` byte list (synthetic sections, headers)."""
+    var out: [u8] = []
+    for value in values: out.push((value & 0xff) as u8)
+    out
+
+fn elf_i64_from_u8(bytes: [u8]) -> [i64]:
+    """Widen bytes for callers that still expect an `[i64]` image."""
+    var out: [i64] = []
+    for byte in bytes: out.push(byte as i64)
+    out
+
+fn elf_u8_window_i64(bytes: [u8], start: i64, end: i64) -> [i64]:
+    """Widen the small field window `bytes[start:end]` for the relocation engine."""
+    var out: [i64] = []
+    var i = start
+    while i < end:
+        out.push(bytes[i] as i64)
+        i = i + 1
+    out
+
+fn elf_u8_read_le(bytes: [u8], offset: i64, width: i64) -> i64:
+    """Little-endian unsigned read of `width` bytes (width <= 8)."""
+    var value: i64 = 0
+    var i = width - 1
+    while i >= 0:
+        value = (value << 8) | ((bytes[offset + i] as i64) & 0xff)
+        i = i - 1
+    value
+
+export elf_u8_zeros, elf_u8_from_i64, elf_i64_from_u8
+export elf_u8_window_i64, elf_u8_read_le
