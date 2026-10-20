@@ -21,3 +21,14 @@
   `20.hir/hir_verification.spl:8-12`, `50.mir/_MirLowering/function_lowering.spl:929`,
   `50.mir/_MirLoweringExpr/switch_operators_calls.spl:6425`,
   `60.mir_opt/_OptimizationPasses/engine.spl:757,764`, `70.backend/codegen_enhanced.spl:325`.
+
+## Specs (2026-10-20)
+- Reproducer + prevention: `test/01_unit/compiler/20.hir/bootstrap_regressions/literal_payload_pattern_parity_spec.spl`
+  (calls the literal-arm helper `hir_verification_decreases_type_valid`, and checks literal vs binding
+  parity on HirTypeKind and on a user enum). Expected green in a correctly built lane; red in a
+  seed-built one.
+- Reproduction evidence: `Result<(i64, i64), text>` + `?` fixture -> producer6 (pre-#3914):
+  `unsupported Result tuple payload element type`; producer8: passes HIR+MIR. A user-code fixture with
+  bool/int/text literal payload arms, native-built and RUN with producer8 (llvm) and producer7-cl
+  (cranelift): `mismatches=0 literal_hits=4` on both. Fixtures:
+  `C:/dev/simple-bootstrap-storage/hir-specs-fx/src/app/hx/{k_literal_payload,l_result_tuple}.spl`.

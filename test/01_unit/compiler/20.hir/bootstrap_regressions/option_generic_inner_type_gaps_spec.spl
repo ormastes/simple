@@ -1,0 +1,137 @@
+# Purpose and audience: compiler engineers who own the flat type parser
+# (10.frontend/core/parser.spl), the flat-AST bridge and HIR type lowering.
+# @req REQ-SSPEC-COMPILER
+# @tag:in-development
+# Tracks: doc/08_tracking/bug/option_generic_inner_collapses_below_named_base_2026-10-20.md
+"""
+# `Option<T>` loses its inner type for every non-named, non-callable T
+
+Prevention spec for the class behind PR #3914. That fix admitted callable
+inner tags to the `Option<T>` registration in `parser_parse_type_impl`, but
+the gate is still `inner_type >= TYPE_NAMED_BASE or inner_is_callable`. Every
+other structured tag lives below `TYPE_NAMED_BASE` (10000): Dict 1000,
+Result 2000, Tuple 3000, array 4000, references 7000, pointers 8000. Those
+`Option<T>` spellings still fall through to bare `TYPE_OPTION`, which HIR
+lowers to `Optional(Any)`. The postfix spelling `(fn(..) -> R)?` takes the
+named-type postfix branch and loses the callable the same way.
+
+Observed with the phase-2 producer (producer8, 2026-10-20, `compile`):
+
+- `Option<[i64]>` field or parameter, `if val xs = o: for x in xs` ->
+  `for-in over non-array iterables is not supported by native codegen yet
+  (#143) (collection mir type: Tuple ...)`; `.unwrap()` then `for` -> the same
+  with `collection mir type: I64`. `[i64]?` works.
+- `(fn(text) -> i64)?` field, `if val f = h.cb: f("x")` ->
+  `dynamic callable requires proven arity before indirect emission`.
+  `Option<fn(text) -> i64>` works.
+- `Option<Dict<text, i64>>` and `Option<(i64, i64)>` build only because the
+  later `.len()` / `.0` happen to be dynamic on `Any`.
+
+It is in-development: it fails until every `Option<T>` spelling keeps `T`.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:hir
+# @tag:types
+
+use std.spec.{describe, it, expect, step, fail}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.core.parser.{parser_has_errors}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind}
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn gap_kind_name(t: HirType) -> text:
+    # Binding patterns only (see seed_built_producer_literal_payload_pattern_never_matches_2026_10_20).
+    match t.kind:
+        case HirTypeKind.Int(bits, signed):
+            if signed:
+                return "i{bits}"
+            "u{bits}"
+        case HirTypeKind.Str: "text"
+        case HirTypeKind.Any: "any"
+        case HirTypeKind.Named(_, _): "named"
+        case HirTypeKind.Array(element, _): "array<" + gap_kind_name(element) + ">"
+        case HirTypeKind.Dict(k, v): "dict<" + gap_kind_name(k) + "," + gap_kind_name(v) + ">"
+        case HirTypeKind.Result(ok, err): "result<" + gap_kind_name(ok) + "," + gap_kind_name(err) + ">"
+        case HirTypeKind.Tuple(elements):
+            var parts: [text] = []
+            for e in elements:
+                parts.push(gap_kind_name(e))
+            "tuple<" + parts.join(",") + ">"
+        case HirTypeKind.Optional(inner): "optional<" + gap_kind_name(inner) + ">"
+        case HirTypeKind.Function(params, ret, _):
+            var parts: [text] = []
+            for p in params:
+                parts.push(gap_kind_name(p))
+            "fn(" + parts.join(",") + ")->" + gap_kind_name(ret)
+        case _: "other"
+
+fn gap_field_type(source: text, field: text) -> text:
+    val parsed = parse_full_frontend(source, "opt_gap.spl", "opt_gap", Logger(level: 0))
+    expect(parser_has_errors()).to_equal(false)
+    var lowering = HirLowering.with_filename("opt_gap.spl")
+    val hir: HirModule = lowering.lower_module(parsed)
+    for s in hir.structs.values():
+        for f in s.fields:
+            if f.name == field:
+                return gap_kind_name(f.type_)
+    fail("missing lowered field " + field)
+    ""
+
+fn gap_mir_messages(source: text) -> text:
+    val file = "testdata/opt_gap_mir.spl"
+    val parsed = parse_full_frontend(source, file, "opt_gap_mir", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    lowering.lower_module(hir)
+    var out = ""
+    for e in hir_lowering.errors:
+        out = out + "hir: " + e.message + "\n"
+    for e in lowering.errors:
+        out = out + "mir: " + e.message + "\n"
+    out
+
+describe "Option<T> inner types below TYPE_NAMED_BASE":
+    it "keeps Option<[i64]> as Optional(Array(i64))":
+        expect(gap_field_type("struct H:\n    xs: Option<[i64]>\n", "xs")).to_equal("optional<array<i64>>")
+
+    it "keeps Option<Dict<text, i64>> as Optional(Dict)":
+        expect(gap_field_type("struct H:\n    d: Option<Dict<text, i64>>\n", "d")).to_equal("optional<dict<text,i64>>")
+
+    it "keeps Option<(i64, i64)> as Optional(Tuple)":
+        expect(gap_field_type("struct H:\n    t: Option<(i64, i64)>\n", "t")).to_equal("optional<tuple<i64,i64>>")
+
+    it "keeps Option<Result<i64, text>> as Optional(Result)":
+        expect(gap_field_type("struct H:\n    r: Option<Result<i64, text>>\n", "r")).to_equal("optional<result<i64,text>>")
+
+    it "keeps the postfix (fn(text) -> i64)? as Optional(Function)":
+        expect(gap_field_type("struct H:\n    cb: (fn(text) -> i64)?\n", "cb")).to_equal("optional<fn(text)->i64>")
+
+describe "Option<T> inner types are usable after MIR lowering":
+    it "iterates an if-val bound Option<[i64]> parameter as an array":
+        step("Observed: #143 with collection mir type Tuple")
+        val src = "fn total(o: Option<[i64]>) -> i64:\n    var n = 0\n    if val xs = o:\n        for x in xs:\n            n = n + x\n    n\n"
+        val messages = gap_mir_messages(src)
+        expect(messages.contains("#143")).to_equal(false)
+        expect(messages).to_equal("")
+
+    it "iterates an unwrapped Option<[i64]> field as an array":
+        step("Observed: #143 with collection mir type I64")
+        val src = "struct H:\n    xs: Option<[i64]>\n\nfn total(h: H) -> i64:\n    var n = 0\n    val xs = h.xs.unwrap()\n    for x in xs:\n        n = n + x\n    n\n"
+        val messages = gap_mir_messages(src)
+        expect(messages.contains("#143")).to_equal(false)
+        expect(messages).to_equal("")
+
+    it "calls an if-val bound (fn(text) -> i64)? payload with a proven arity":
+        step("Observed: dynamic callable requires proven arity before indirect emission")
+        val src = "struct H:\n    cb: (fn(text) -> i64)?\n\nfn call(h: H) -> i64:\n    if val f = h.cb:\n        return f(\"x\")\n    0\n"
+        val messages = gap_mir_messages(src)
+        expect(messages.contains("proven arity")).to_equal(false)
+        expect(messages).to_equal("")
