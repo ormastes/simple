@@ -324,6 +324,7 @@ fn execute_kernel_parallel(kernel: KernelFn, global_size: [i64; 3], local_size: 
 /// 0 on success
 #[no_mangle]
 pub extern "C" fn rt_par_launch_1d(kernel_ptr: u64, global_size: i64, local_size: i64) -> i32 {
+    crate::value::note_user_threads_started();
     let kernel: KernelFn = unsafe { std::mem::transmute(kernel_ptr as usize) };
     let local = if local_size <= 0 { 256 } else { local_size };
     execute_kernel_parallel(kernel, [global_size, 1, 1], [local, 1, 1]);

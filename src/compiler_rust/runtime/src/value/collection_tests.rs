@@ -3280,4 +3280,25 @@ mod typed_i64_lane_tests {
         assert_eq!(rt_typed_words_i64_at(b, 4), -WIDE);
         crate::value::collections::reset_user_threads_started_for_test();
     }
+
+    #[test]
+    fn spawn_entry_points_switch_packing_off() {
+        let _lane = lane();
+        for entry in 0..2 {
+            crate::value::collections::reset_user_threads_started_for_test();
+            let a = packed_of(&[WIDE, -WIDE]);
+            assert!(packed(a));
+            // a null closure is rejected, but only after the hook has run
+            match entry {
+                0 => {
+                    crate::executor::rt_thread_spawn_isolated(0, RuntimeValue::NIL);
+                }
+                _ => {
+                    crate::value::collections::simple_note_user_threads_started(); // C pool / pthread path
+                }
+            }
+            assert!(!packed(a), "entry {entry} must unpack and disable packing");
+        }
+        crate::value::collections::reset_user_threads_started_for_test();
+    }
 }

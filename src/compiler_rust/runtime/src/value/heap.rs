@@ -263,9 +263,8 @@ fn note_heap_free(kind: u8, bytes: u64) {
 /// Header addresses of every live array carrying `LAZY_WORDS`. Taken under the
 /// registry lock (registered == live), used when user threads start.
 pub(crate) fn live_lazy_word_arrays() -> Vec<usize> {
-    let Ok(registry) = heap_allocation_registry().lock() else {
-        return Vec::new();
-    };
+    // A poisoned lock still guards a consistent set: packed arrays must be found.
+    let registry = heap_allocation_registry().lock().unwrap_or_else(|e| e.into_inner());
     registry
         .iter()
         .copied()

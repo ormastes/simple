@@ -155,6 +155,17 @@ pub fn note_user_threads_started() {
     }
 }
 
+/// Entry for the C thread/pool runtime (weak reference there): it starts pthreads
+/// that run Simple code, so it must reach the same switch as the Rust spawn
+/// entry points. Not an `rt_*` symbol on purpose (no second implementation lane).
+#[no_mangle]
+pub extern "C" fn simple_note_user_threads_started() {
+    note_user_threads_started();
+}
+
+#[used]
+static KEEP_SIMPLE_NOTE_USER_THREADS_STARTED: extern "C" fn() = simple_note_user_threads_started;
+
 #[cfg(test)]
 pub(crate) fn reset_user_threads_started_for_test() {
     USER_THREADS_STARTED.store(false, std::sync::atomic::Ordering::SeqCst);

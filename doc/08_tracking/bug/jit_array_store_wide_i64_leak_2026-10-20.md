@@ -74,7 +74,7 @@ Measured (same base commit dacf1e81637, aarch64, JIT, loaded host):
 | tight `[i64]` loop, 12.3M read+write | 0.14-0.16 s user | 0.11 s user, 38 MB (was 38.6) |
 | probe `jit_wide_i64_array_store_jit_probe.spl` (1M overwrite + 1M append) | FAIL, 139.5 MB | PASS, 59.6 MB |
 
-Thread safety: the runtime has no ownership or refcount information, so in-place pack/unpack is only allowed before user threads exist. Every spawn entry point (`rt_thread_spawn_*`, `rt_actor_spawn`, `rt_async_spawn*`, `rt_par_launch`, the future worker pool, `spawn_actor`) calls `note_user_threads_started()`, which unpacks every live packed array and permanently disables packing; after that the lane stores tagged (one box per wide store, the old behaviour). Test: `starting_user_threads_unpacks_every_packed_array_and_stops_packing`.
+Thread safety: the runtime has no ownership or refcount information, so in-place pack/unpack is only allowed before user threads exist. Every spawn entry point (`rt_thread_spawn_*`, `rt_actor_spawn`, `rt_async_spawn*`, `rt_par_launch`, the future worker pool, `spawn_actor`) calls `note_user_threads_started()`, which unpacks every live packed array and permanently disables packing; after that the lane stores tagged (one box per wide store, the old behaviour). The C pthread/pool runtime reaches the same switch through the weak `simple_note_user_threads_started`. Any use of threads, actors, async or parallel launch anywhere in the process turns packing off for the rest of the run (one box per wide store again). Tests: `spawn_entry_points_switch_packing_off`, `starting_user_threads_unpacks_every_packed_array_and_stops_packing`.
 
 Named gaps (not fixed here):
 - Arrays whose static element type is erased (`[any]`, generic `[T]`, dict values)
