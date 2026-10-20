@@ -474,3 +474,29 @@ seed interpreter `Dict<i64,_>.keys()` yields text keys — keep key lists.
   flags nil outside unsafe blocks; default level allow (`nil_outside_unsafe`),
   enable with --warn-all. It skips `== nil`, `!= nil` and `case nil`, since
   rewriting those as `None` changes the native result.
+
+## 2026-10-20 — `[i64]` word lane (`rt_typed_words_i64_*`), seed MIR + runtime
+
+A statically typed `[i64]` index read / index store / statement `push` / `for` read
+lowers to `rt_typed_words_i64_at/_set/_push` (`MirLowerer::signed_word_lane`, on by
+default, off for baremetal and WASM targets in `native_project/compiler.rs` because
+their C runtimes do not define the lane). Before this every wide store did
+`BoxInt` -> `rt_value_int` -> a `HeapInt` that nothing frees (~48 B/store).
+The runtime packs a tagged array IN PLACE on the first value outside the 61-bit
+inline range (`gc_flags::LAZY_WORDS | U64_PACKED`, same 8-byte buffer); narrow
+programs never change layout. Rules to keep when editing:
+- `get_typed_ptr`/`get_typed_ptr_mut` (and so `as_typed_ptr!`) UNPACK a lazy array;
+  only functions that branch on the packed layout use `get_typed_ptr_packed` /
+  `as_typed_ptr_packed!`. A new array consumer that reads `as_slice()` needs
+  nothing; one that handles packed words must opt out explicitly.
+- The generic inline `rt_array_get/set` in `codegen/instr/calls.rs` send flag
+  `0x10` arrays to the out-of-line runtime call (cold block) instead of reading a
+  raw word as a tagged slot.
+- copy/concat/slice inherit `LAZY_WORDS` so a packed `[i64]` stays signed-ordered.
+- Trap measured here: inlining the typed read/store (3 extra blocks per access)
+  doubled JIT compile time and +90 MB RSS on a crypto-import program, because
+  every `[i64]` access in the closure grew; the out-of-line call is as fast as
+  the old inline get + unbox call. Do not re-inline without re-measuring startup.
+- Known, NOT fixed: sorting a TAGGED array that holds wide (heap-boxed) ints is
+  wrong (`primitive_sort`/array_sort provider ignore the boxes); packed arrays sort
+  correctly. Bug record: `doc/08_tracking/bug/jit_array_store_wide_i64_leak_2026-10-20.md`.

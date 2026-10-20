@@ -173,10 +173,14 @@ fn value_hash_inner(v: RuntimeValue, depth: u32) -> u64 {
                     } else if (*ap).is_u64_packed() {
                         let word = *((*ap).data as *const u64).add(index);
                         let signed = word as i64;
-                        if RuntimeValue::from_int(signed).as_int() == signed {
+                        // Same hash as the tagged element would have, so a packed
+                        // array and an equal tagged one share a bucket: inline
+                        // ints hash their tagged word, wide ones (HeapInt /
+                        // HeapUInt) hash `value ^ tag`. No box is allocated.
+                        if RuntimeValue::fits_inline_int(signed) {
                             value_hash_inner(RuntimeValue::from_int(signed), depth + 1)
                         } else {
-                            fnv1a_bits(word)
+                            fnv1a_bits(word ^ 0x5549_4e54_5f55_3634)
                         }
                     } else {
                         value_hash_inner(*(*ap).data.add(index), depth + 1)
@@ -441,6 +445,7 @@ fn generic_int_eq(value: RuntimeValue, expected: i64) -> bool {
     // `rt_array_get` returns for a u64-packed element -- so negative values are
     // legitimate and must not be excluded here.
     (value.is_int() && value.as_int() == expected)
+        || value.as_heap_i64() == Some(expected)
         || value.as_heap_u64().is_some_and(|actual| actual == expected as u64)
 }
 
