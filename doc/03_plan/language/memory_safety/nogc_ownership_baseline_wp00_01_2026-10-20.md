@@ -120,7 +120,7 @@ The table lists buckets with at least 20 findings.
 
 The bootstrap closure had 14 findings before Step 3, then 13 after the first reorder fix.
 **Recall caveat.** BOR-003 and BOR-004 report 3 sites each against about 860 `await`
-lines and about 760 `spawn(` calls. The detector sees only `\\` lambdas and six
+lines and about 760 `spawn(` calls. The detector sees only `\` lambdas and six
 spawn names, and suspension only where a class-typed parameter or receiver is
 visible. Low counts mean "not visible to this lint". They do not mean "clean".
 
