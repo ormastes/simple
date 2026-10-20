@@ -15,3 +15,17 @@
 | build (bare) | 1 | parity gap | prints `No entry point specified for native-build backend` + usage, exit 1; the seed prints bootstrap help, exit 0 (CLAUDE.md documents the seed behaviour). |
 
 The linked CLI executes Simple code correctly where admission lets it (`-c 'print(1+1)'` → 2, lint, fmt); every remaining non-zero row is in the SCV admission layer, the test runner's process scope, or the formatter. None is a *link* defect (0 undefined `rt_*`/`spl_*`); whether the runner's resource-scope failure is a runtime-backing defect is undetermined.
+
+## Follow-up 2026-10-20 (try 18: `894a027adc1`, patched seed `61d6452f8de9` = the `436f5818df5` seed source + the owned-capsule registration, cranelift, `SIMPLE_LINKER=lld`)
+
+| case | exit | class | why |
+|---|---|---|---|
+| version / lint_clean / fmt_check | 0 | ok | unchanged |
+| hello_run | 1 → 0 | **fixed** | driver cold entry: an entry with no frozen copy compiles from the working tree unless `SIMPLE_BOOTSTRAP=1`, an admitted task, or `SIMPLE_SCV_STRICT_COLD_ENTRY=1` (those still answer `frozen cold entry rejected`); no cold HIR receipt is captured for it. |
+| native_build_hello (+exec) | 1 → 0 | **fixed** | `native_build_closure.spl`: an entry under no admitted root takes the working-tree closure (`SCV-W-USER-ENTRY`) outside bootstrap/strict mode, and its source roots hand off unmapped (`Ok([])`, the driver's unfrozen contract). The artifact prints `hello phase4`. Strict mode still refuses with `SCV-E-ENTRY`. |
+| build (bare) | 1 → 0 | **fixed** | prints build help, exit 0, like the seed. |
+| test_* | 1 | **infrastructure fixed; next layer open** | Root cause of `Resource limit exceeded (infrastructure)`: the seed's cranelift lowering did not register `rt_process_run_owned_observed_bounded_value`, so `_process_run_observed_raw` passed 4 words to the 5-word C owner (`cmd_ptr, cmd_len, args, timeout, max`), the owner refused at argument validation before any fork (strace: no clone/execve after the systemd probe), and the facade reported `runtime_error=-1`. This supersedes the "silently-nil extern" theory above. Fixed in `codegen/instr/calls.rs` + `runtime_sffi.rs` (both owned bounded capsules now expand `cmd` to ptr+len); the owner's `*_value` result is a registered tuple, and the LLVM-only `_text` facade re-packs the raw block. The spec child now runs and exits 1: the self-hosted interpreter backend (`70.backend/backend/interpreter.spl process_module`) indexes only the entry `HirModule`'s functions, so any imported function (`describe` from `std.spec`, `ResourceBudget` in a probe) answers `function '<name>' not found`. Open, no fix in this change. |
+
+Also found: a seed built from `release_phase3` (`0b5c4ee8a1a`) rejects three omitted non-constant cross-module defaults (`simple_web_layout_render_html_{software_pixels,gpu_frame,software_pixels_at_scroll}`, `_smf_dynlib_release_mappings_locked_v3`). They now use a literal default or an explicit argument with the same value. Without `SIMPLE_LINKER=lld`, the Stage 4 live partial link keeps unreachable OS loader objects, and the link fails with `Stage4 requested symbols have no archive owner: rt_arm_elf64_*`. That is a harness requirement, not a regression.
+
+The first `run` after a new commit answered `SCV-E-ADMISSION: snapshot-materialize-failed:src/lib/gc_async_mut/buffer/create.spl` once; two reruns on the same binary and tree passed. The cold acquire of a new revision is flaky. Open, not investigated.

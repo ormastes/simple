@@ -2635,9 +2635,9 @@ fn linker_banner_is_mold(banner: &str) -> bool {
 /// `reject_partial_link_tombstones` still refuses a closure that lost its
 /// literals, so a failed probe cannot ship the defect.
 ///
-/// The Stage4 live projection in `linker.rs` (`stage4_live_entry.o`) is a
-/// third `-r --gc-sections` site; it is only read for its symbol sets and is
-/// never linked into an artifact, so it is left unchanged.
+/// The Stage4 live projection no longer runs a linker on Linux: it is
+/// computed in-process by `live_projection.rs`, because mold (and ld.bfd)
+/// also skip `--gc-sections` under `-r` there and doubled its result.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn partial_link_gc_sections_allowed(cc: &str, fuse_ld: Option<&str>) -> bool {
     let mut probe = std::process::Command::new(cc);
@@ -3974,6 +3974,41 @@ fn is_windows_system_name(name: &str) -> bool {
             | "UnmapViewOfFile"
             | "VirtualProtect"
             | "lstrlenW"
+            // The MSVC link config has no system symbol scan, so any Win32 or
+            // UCRT import missing from this list was fabricated as a return-3
+            // stub that shadowed the real kernel32/bcrypt/psapi/d3d11/ucrt
+            // definition. The windows-x86_64 release stage1 then SEGV'd on
+            // native-build (release.yml run 39348340950, 33 stubs).
+            | "AcquireSRWLockExclusive"
+            | "AcquireSRWLockShared"
+            | "ReleaseSRWLockExclusive"
+            | "ReleaseSRWLockShared"
+            | "BCryptCloseAlgorithmProvider"
+            | "BCryptCreateHash"
+            | "BCryptDestroyHash"
+            | "BCryptFinishHash"
+            | "BCryptHashData"
+            | "BCryptOpenAlgorithmProvider"
+            | "D3D11CreateDevice"
+            | "GlobalMemoryStatusEx"
+            | "InitializeProcThreadAttributeList"
+            | "UpdateProcThreadAttribute"
+            | "K32GetProcessMemoryInfo"
+            | "QueryInformationJobObject"
+            | "ResumeThread"
+            | "Sleep"
+            | "TerminateJobObject"
+            | "TerminateProcess"
+            | "_fstat64i32"
+            | "_localtime64_s"
+            | "_time64"
+            | "ferror"
+            | "signal"
+            | "wcscat"
+            | "wcschr"
+            | "wcslen"
+            | "wcsncmp"
+            | "wcsrchr"
     )
 }
 

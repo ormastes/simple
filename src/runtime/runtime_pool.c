@@ -24,7 +24,6 @@ typedef int64_t (*rt_pool_closure_fn_t)(int64_t);
 typedef int64_t (*rt_pool_scalar_fn_t)(int64_t);
 
 #define RT_POOL_DIRECT_FUNCTION_MARKER INT64_C(0x5344495245435446)
-#define RT_POOL_X86_64_MAX_CANONICAL_USER_PTR UINT64_C(0x00007fffffffffff)
 
 typedef struct RtPoolState RtPoolState;
 
@@ -63,7 +62,9 @@ static int64_t rt_pool_scalar_task_dispatch(int64_t raw_task) {
 static int64_t rt_pool_native_function_payload(int64_t raw) {
     uint64_t value = (uint64_t)raw;
     if (value < 4096ULL) return 0;
-    if (value > RT_POOL_X86_64_MAX_CANONICAL_USER_PTR) return (int64_t)(value >> 3);
+    if (rt_native_word_exceeds_user_va(value)) return (int64_t)(value >> 3);
+    /* Unlike runtime_thread.c, no code-address test: the pool accepts only
+     * a direct-function record (a data pointer), never a raw code address. */
     if ((value & TAG_MASK) == TAG_HEAP) return (int64_t)(value & ~TAG_MASK);
     return raw;
 }

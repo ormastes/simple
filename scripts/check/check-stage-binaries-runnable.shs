@@ -371,7 +371,8 @@ scan_tree() {
     _n=0
     for _p in $_paths; do
         _n=$((_n + 1))
-        _wd="$TMPROOT/probe.$_n"
+        # @workaround bug=native_build_entry_main_undefined_when_source_path_has_dot_2026_10_20 reason=dotted-source-dir-drops-__simple_main
+        _wd="$TMPROOT/probe_$_n"
         mkdir -p "$_wd" || { SCAN_ERR="could not create $_wd"; return 0; }
         _exe=''
 
@@ -470,6 +471,18 @@ scan_tree() {
 #                subdir -- a named skip, not an offender, not a pass
 #  9 must-ERROR: only foreign-triple scoped artifacts -> 0 executed, ERROR
 # ---------------------------------------------------------------------------
+# write_host_native_blob <path> -- a truncated header in THIS host's native
+# format. The ELF form carries e_machine (offset 18): a 7-byte "\177ELF" stub
+# classifies as elf-other, never host-native, so fixtures 10 and 11 failed on
+# every Linux host (aarch64 measured 2026-10-20).
+write_host_native_blob() {
+    case "$(host_native_format)" in
+        macho)       printf '\317\372\355\376\014\000\000\001' >"$1" ;;
+        elf-aarch64) printf '\177ELF\002\001\001\000\000\000\000\000\000\000\000\000\002\000\267\000' >"$1" ;;
+        *)           printf '\177ELF\002\001\001\000\000\000\000\000\000\000\000\000\002\000\076\000' >"$1" ;;
+    esac
+}
+
 make_fake_repo() { # <dir> <script-body>
     _d="$1"; _body="$2"
     mkdir -p "$_d/bootstrap/stage9"
@@ -575,11 +588,7 @@ kill -SEGV $$
     _d="$TMPROOT/fx_native_bare"
     make_fake_repo "$_d" "$_good"
     mkdir -p "$_d/bootstrap/stage8"
-    if [ "$(host_native_format)" = 'macho' ]; then
-        printf '\317\372\355\376\014\000\000\001' >"$_d/bootstrap/stage8/simple"
-    else
-        printf '\177ELF\002\001\001' >"$_d/bootstrap/stage8/simple"
-    fi
+    write_host_native_blob "$_d/bootstrap/stage8/simple"
     chmod +x "$_d/bootstrap/stage8/simple"
     ( cd "$_d" && git add -A >/dev/null 2>&1 )
     scan_tree "$_d"
@@ -604,11 +613,7 @@ kill -SEGV $$
     mkdir -p "$_d/bootstrap/stage8/$(host_triple)"
     # The SAME host-native binary blob fixture 10 uses -- not a script, or the
     # script exemption would carry the fixture and it would constrain nothing.
-    if [ "$(host_native_format)" = 'macho' ]; then
-        printf '\317\372\355\376\014\000\000\001' >"$_d/bootstrap/stage8/$(host_triple)/simple"
-    else
-        printf '\177ELF\002\001\001' >"$_d/bootstrap/stage8/$(host_triple)/simple"
-    fi
+    write_host_native_blob "$_d/bootstrap/stage8/$(host_triple)/simple"
     chmod +x "$_d/bootstrap/stage8/$(host_triple)/simple"
     ( cd "$_d" && git add -A >/dev/null 2>&1 )
     scan_tree "$_d"
@@ -715,7 +720,8 @@ done
 
 command -v git >/dev/null 2>&1 || verdict_error "git not found"
 
-TMPROOT=$(mktemp -d "${TMPDIR:-/tmp}/$SELF_NAME.XXXXXX") || \
+# @workaround bug=native_build_entry_main_undefined_when_source_path_has_dot_2026_10_20 reason=dotted-source-dir-drops-__simple_main
+TMPROOT=$(mktemp -d "${TMPDIR:-/tmp}/${SELF_NAME}_XXXXXX") || \
     verdict_error "could not create a temporary directory"
 
 detect_timeout

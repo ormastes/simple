@@ -319,6 +319,15 @@ mod tests {
     }
 
     #[test]
+    fn owned_bounded_capsules_expand_command_text_to_ptr_len() {
+        for name in ["rt_process_run_owned_bounded_value", "rt_process_run_owned_observed_bounded_value"] {
+            assert_eq!(super::process_c_runtime_arg_indices(name), Some((&[0][..], &[1][..])), "{name}");
+            let spec = crate::codegen::runtime_sffi::spec_for(name).expect("owned capsule runtime spec");
+            assert_eq!(spec.params.len(), 5, "{name}: cmd ptr+len, args, timeout, max_output");
+        }
+    }
+
+    #[test]
     fn owned_pinned_process_path_expands_to_ptr_len() {
         assert_eq!(text_arg_indices("rt_process_pin_executable_owned_value"), Some(&[0][..]));
         assert_eq!(
@@ -3196,6 +3205,14 @@ pub(crate) fn process_c_runtime_arg_indices(func_name: &str) -> Option<(&'static
         | "rt_process_execute"
         | "rt_process_run_timeout"
         | "rt_process_run_bounded"
+        // Owned bounded capsules (runtime_process_owned.c) take the same
+        // (cmd_ptr, cmd_len, SplArray* args, ...) shape. Unlisted, the observed
+        // variant was called with the Simple-level 4 words, every argument
+        // after cmd shifted, the owner refused at arg validation before any
+        // fork, and every self-hosted `simple test` child reported
+        // `Resource limit exceeded (infrastructure)` (2026-10-20).
+        | "rt_process_run_owned_bounded_value"
+        | "rt_process_run_owned_observed_bounded_value"
         | "rt_process_owned_v3_start_value" => Some((&[0], &[1])),
         _ => None,
     }

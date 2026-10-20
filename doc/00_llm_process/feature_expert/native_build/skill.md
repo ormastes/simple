@@ -124,6 +124,18 @@ link hosted. Precedent for doing it in both: `rt_text_cmp_any`.
   store-side stability gate plus the checksum carry the admission.
 - Record: `doc/08_tracking/bug/phase4_hir_adoption_reported_cached0_and_parse_shards_unpartitioned_2026-10-19.md`.
 
+## Stage 4 live projection is in-process on Linux (2026-10-20)
+
+`stage4_live_runtime_requests` (`native_project/linker.rs`) no longer runs
+`cc -Wl,-r -Wl,--gc-sections`. Only LLD collects sections under `-r`.
+mold 2.42 and ld.bfd accept the flags and keep everything (775 -> 1564
+`rt_`/`spl_` on the Phase 4 CLI), which caused false "no archive owner"
+errors. `native_project/live_projection.rs` walks the section/relocation
+graph instead. On the kept 2793-input set it equals lld's undefined set
+exactly (782). Trap: a mold-linked binary still lists dead-code UND entries
+in `.symtab`, so check `nm -D -u`, not `nm -u`. Bug:
+`doc/08_tracking/bug/stage4_live_projection_mold_ignores_gc_sections_2026-10-20.md`.
+
 ## Update Rule
 After native-build defects, closure-discovery changes, or cache logic shifts, refresh
 this skill with new open-bug links and concrete gotchas.

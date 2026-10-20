@@ -237,15 +237,16 @@ impl MirLowering:
                     case HirExprKind.NilLit: return true
                     case _: ()
             case HirTypeKind.Named(nil_owner, _):
-                # A nominal record/enum slot is a nullable handle word: the
-                # compiler's own sources pass `nil` as an explicit "absent"
-                # sentinel (`HirStmtKind.Let(sym, nil, init)`, readers test
-                # `type_ != nil`). Scalars/text/containers stay strict.
+                # nil is proven only for a declared optional slot. A
+                # non-optional class/struct/enum slot is NOT a nullable
+                # handle: a later match or field read on that nil
+                # miscompiles natively. Reject it; the caller names the fix
+                # (enum_payload_mismatch_message).
                 match expression.kind:
                     case HirExprKind.NilLit:
                         # 1 Class, 2 Struct, 3 Enum (enum_payload_nominal_kind).
                         val nil_kind = enum_payload_nominal_kind(nil_owner, self.symbols)
-                        if nil_kind == 1 or nil_kind == 2 or nil_kind == 3: return true
+                        if nil_kind == 1 or nil_kind == 2 or nil_kind == 3: return false
                     case _: ()
             case _: ()
         var remembered_concrete_negative = false
@@ -306,6 +307,22 @@ impl MirLowering:
                 # HIR-side fallback, cross-representation.
                 enum_payload_hir_mir_alias_compatible(expected, actual_mir, self.symbols, self.canonical_type_symbols)
             case _: return false
+
+    fn enum_payload_mismatch_message(construct_key: text, index: i64, expected: HirType, expression: HirExpr) -> text:
+        # Keep the "payload type mismatch at N" stem stable for tooling; a nil
+        # into a non-optional slot additionally says which declaration to fix.
+        val stem = "enum construction '{construct_key}': payload type mismatch at {index}"
+        match expression.kind:
+            case HirExprKind.NilLit:
+                var declared = hir_type_shape_key(expected, true)
+                match expected.kind:
+                    case HirTypeKind.Named(owner, _):
+                        if val declaration = self.symbols.get_symbol_raw(owner.id):
+                            if declaration.name != "": declared = declaration.name
+                    case _: ()
+                return "{stem}: nil into non-optional payload slot (declared '{declared}'); declare it '{declared}?' if absence is valid"
+            case _: ()
+        stem
 
     me enum_payload_mismatch_trace(expected: HirType, expression: HirExpr, local: LocalId):
         # SIMPLE_ENUM_PAYLOAD_TRACE=1: name the evidence a rejected payload

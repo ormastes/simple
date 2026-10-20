@@ -69,29 +69,29 @@ Verdicts are `examples/failures` per describe block, in block order.
 | file | sites | BEFORE | AFTER | delta |
 |---|---|---|---|---|
 | test/01_unit/lib/crypto/ml_kem_768_kat_spec.spl | 21 | 5/3 ; 4/0 ; 2/2 | **5/0** ; 4/0 ; 2/2 | +3 real passes |
-| test/unit/lib/crypto/ml_kem_768_kat_spec.spl | 21 | (same file content) | same as above | +3 |
+| test/01_unit/lib/crypto/ml_kem_768_kat_spec.spl | 21 | (same file content) | same as above | +3 |
 | test/01_unit/lib/viz/frame_builder_spec.spl | 5 | 7/5 | **7/0** | +5 |
-| test/unit/lib/viz/frame_builder_spec.spl | 5 | 7/5 | **7/0** | +5 |
+| test/01_unit/lib/viz/frame_builder_spec.spl | 5 | 7/5 | **7/0** | +5 |
 | test/01_unit/lib/viz/frame_scheduler_spec.spl | 4 | 7/3 | **7/0** | +3 |
-| test/unit/lib/viz/frame_scheduler_spec.spl | 4 | 7/3 | **7/0** | +3 |
+| test/01_unit/lib/viz/frame_scheduler_spec.spl | 4 | 7/3 | **7/0** | +3 |
 | test/unit/lib/ecs/ecs_spec.spl | 13 | 4/3 ; 3/2 (3rd block never reported) | **4/0 ; 3/0 ; 2/0** | +5, 3rd block recovered |
 | test/unit/os/kernel/loader/smf_spec.spl | 5 | 3/0 ; 3/2 ; 7/2 | 3/0 ; 3/2 ; **7/0** | +2 |
 | test/01_unit/sffi/sffi_public_api_spec.spl | 1 | 2/0 ; 2/2 ; 2/2 ; 2/0 | 2/0 ; **2/0** ; 2/2 ; 2/2 ; 2/0 | +2, 5th block recovered |
 | test/unit/sffi/sffi_public_api_spec.spl | 1 | same | same | +2 |
 | test/01_unit/os/kernel/loader/elf64_spec.spl | 2 | 4/2 | 4/2 | 0 — blocked, see F1 |
-| test/unit/os/kernel/loader/elf64_spec.spl | 2 | 4/2 | 4/2 | 0 — F1 |
+| test/01_unit/os/kernel/loader/elf64_spec.spl | 2 | 4/2 | 4/2 | 0 — F1 |
 | test/unit/os/kernel/smp/smp_spec.spl | 1 | 4/4 ; 4/4 | 4/4 ; 4/4 | 0 — blocked, see F3 |
 | test/integration/os/port/llvm/per_target_build_spec.spl | 31 | 21/21 | 21/21 | 0 — blocked, see F2 |
 | test/integration/os/port/llvm/cross_build_plan_spec.spl | 15 | 14/14 | 14/14 | 0 — F2 |
-| test/integration/os/port/rust/smoke_rustc_spec.spl | 3 | 4/3 | 4/3 | 0 — F2 |
+| test/02_integration/os/port/rust/smoke_rustc_spec.spl | 3 | 4/3 | 4/3 | 0 — F2 |
 | test/02_integration/os/port/rust/smoke_rustc_spec.spl | 3 | 4/3 | 4/3 | 0 — F2 |
 | test/integration/os/port/llvm/smoke_clang_spec.spl | 5 | 5/0 | 5/0 | 0 (env-skipped) |
-| test/system/os/port/disk_boot_spec.spl | 4 | 5/0 | 5/0 | 0 (env-skipped) |
 | test/03_system/os/port/disk_boot_spec.spl | 4 | 5/0 | 5/0 | 0 (env-skipped) |
-| test/system/os/port/e2e_qemu_smoke_spec.spl | 1 | 6/0 | 6/0 | 0 |
+| test/03_system/os/port/disk_boot_spec.spl | 4 | 5/0 | 5/0 | 0 (env-skipped) |
+| test/03_system/os/port/e2e_qemu_smoke_spec.spl | 1 | 6/0 | 6/0 | 0 |
 | test/03_system/os/port/e2e_qemu_smoke_spec.spl | 1 | 6/0 | 6/0 | 0 |
 | test/01_unit/app/ui/display_detect_spec.spl | 1 | load error | load error | 0 — pre-existing, see F4 |
-| test/unit/app/ui/display_detect_spec.spl | 1 | load error | load error | 0 — F4 |
+| test/01_unit/app/ui/display_detect_spec.spl | 1 | load error | load error | 0 — F4 |
 
 **Not converted (deliberate):**
 
@@ -204,7 +204,7 @@ deliberately not attempted.
 At 22:44:40 every one of the 24 converted spec files was rewritten back to its
 original byte size by another session (the known "sync sweeps agent scratch
 state" / "stale WC reverts pushed fixes" failure mode). It was caught only
-because a post-hoc re-run of `test/unit/lib/crypto/ml_kem_768_kat_spec.spl`
+because a post-hoc re-run of `test/01_unit/lib/crypto/ml_kem_768_kat_spec.spl`
 still reported the *old* `5 examples, 3 failures` — the residual-site grep had
 already reported clean before the revert, so the grep alone would have hidden it.
 
