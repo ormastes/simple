@@ -111,15 +111,18 @@ var _nb_scv_snapshot_inventory_v1: text = ""
 # source root (an ad-hoc user script, e.g. /tmp/hello.spl). See
 # _native_build_entry_closure for the non-strict working-tree fallback.
 var _nb_scv_entry_outside_root_v1: bool = false
+# True when the last closure was computed from the working tree (either
+# fallback); its source roots are then handed off unmapped (driver: Ok([])).
+var _nb_scv_unfrozen_closure_v1: bool = false
 
-# Bootstrap and inherited-snapshot (admitted) lanes keep the frozen-entry
-# contract strict. Mirrors the driver cold-entry fallback (which also checks
-# its in-process admitted task; an inherited SNAPSHOT_ROOT is this side's twin) in
-# src/compiler/80.driver/driver_source_pipeline_loading.spl.
+# Bootstrap lanes keep the frozen-entry contract strict. Mirrors the driver
+# cold-entry fallback in src/compiler/80.driver/driver_source_pipeline_loading.spl,
+# whose in-process admitted-task check has no CLI-side equivalent. An inherited
+# SIMPLE_SCV_SNAPSHOT_ROOT is NOT a strictness signal: the CLI publishes one for
+# every native-build before the closure runs.
 fn _nb_scv_strict_entry_v1() -> bool:
     (env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" or
-        (env_get("SIMPLE_SCV_STRICT_COLD_ENTRY") ?? "") == "1" or
-        (env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? "") != ""
+        (env_get("SIMPLE_SCV_STRICT_COLD_ENTRY") ?? "") == "1"
 
 pub fn native_build_closure_snapshot_root_v1() -> text:
     # Read only after _native_build_entry_closure has admitted its snapshot.
@@ -128,6 +131,8 @@ pub fn native_build_closure_snapshot_root_v1() -> text:
 pub fn native_build_closure_source_roots_v1(entry: text, source_dirs: [text]) -> Result<[text], text>:
     # Admission is established by _nb_scv_freeze_v1, not by path existence.
     # Reuse its mapping for supported argv spellings and effective defaults.
+    if _nb_scv_unfrozen_closure_v1:
+        return Ok([])
     if _nb_scv_snapshot_root_v1 == "":
         return Err("SOURCE_ROOT_SNAPSHOT_MISSING")
     val effective = native_build_snapshot_source_roots_v1(
@@ -436,6 +441,7 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
             "scanning the working tree directly instead of a frozen SCV " +
             "snapshot (weaker consistency guarantee: a concurrent edit is " +
             "not guaranteed to be seen atomically)")
+    _nb_scv_unfrozen_closure_v1 = not frozen.0
     val frozen_entry = if frozen.0: frozen.1 else: entry
     val frozen_source_dirs = if frozen.0: frozen.2 else: source_dirs
     val trace_closure = (env_get("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE") ?? "") == "1"
