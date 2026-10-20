@@ -71,6 +71,14 @@ A value is class-typed only when the lint can see it:
 The index drops names that are also declared as a struct/enum/trait/union/type anywhere.
 The in-editor rule sees only in-file classes, so its counts are a subset of the table below.
 
+The seed (`bin/simple`) behaves oddly through the lint table. In the wiring case,
+`run_static_lint_rule_table` first returned no findings, and returned them only once
+the rule module was also imported directly. Two existing specs show the same
+behaviour, and they fail on the base without this change:
+`lint_rule_table_spec` (1 failure) and `windows_c_compiler_selection_spec` (4 failures).
+So the wiring case proves registration and order. It does not prove that table
+dispatch works on the seed.
+
 **nil outside `unsafe`.** There is no nil lint to reuse yet. The nilunsafe lane
 (`work/nil-only-unsafe`, `75c294d70a2`) enforces only one MIR site
 (`50.mir/_MirLoweringExpr/enum_constructor_payload.spl:239`), and only for enum
@@ -111,6 +119,11 @@ The table lists buckets with at least 20 findings.
 | `src/app/mcp` | 1 | 9 | 7 | 0 | 0 | 5 | 22 |
 
 The bootstrap closure had 14 findings before Step 3, then 13 after the first reorder fix.
+**Recall caveat.** BOR-003 and BOR-004 report 3 sites each against about 860 `await`
+lines and about 760 `spawn(` calls. The detector sees only `\\` lambdas and six
+spawn names, and suspension only where a class-typed parameter or receiver is
+visible. Low counts mean "not visible to this lint". They do not mean "clean".
+
 The remaining 13 sites:
 
 | Site | Code | Shape | Fix direction |
@@ -127,6 +140,18 @@ The remaining 13 sites:
 **nil outside `unsafe` (heuristic, not a lint):** 5,339 tokens in 335 bootstrap-closure files.
 54,861 tokens across the whole tree.
 
+
+**Open decision before converting the 8 consume-shaped sites (BOR-002/001 on parameters).**
+The only explicit-owner spelling today is `iso T`.
+- MIR `emit_move` fires whenever `local_hir_type_isolation_state == 1`, and that check
+  is independent of `--no-borrow-check`.
+- So annotating a bootstrap-closure parameter `iso` changes the generated MIR on
+  Stage 2/3. The `emit_move` docstring (`50.mir/mir_data.spl:501`) still says `iso` is erased.
+- Whether that is neutral has not been proven, for drop elaboration or for the
+  seed's runtime `Value::Unique` check.
+
+Reaching a closure count of 0 is therefore gated on a language decision: an explicit
+consume marker, or inferred parameter effects (plan §3.3). More source edits will not get there.
 
 ## 6. Gates before any default flips (plan §15.4 Stage B)
 
