@@ -1,0 +1,141 @@
+# Purpose and audience: compiler engineers who own cross-module symbol identity
+# in HIR and MIR lowering.
+# @req REQ-SSPEC-COMPILER
+"""
+# Imported types keep consumer-table identity, whatever the import order
+
+Prevention spec for the class behind PR #3904 (own-enum pass reused a
+foreign module's payload types) and PR #3908 (declared field type of an
+imported class carried the DEFINING module's `Named` SymbolId). Both were a
+SymbolId minted in one module's SymbolTable and read through another's. The
+ids only line up by accident when both modules registered the same names in
+the same order, so the defect hid whenever `use Ctx` came before `use Drv`
+and showed when the order was swapped (measured on producer4: same body
+passes with Ctx first, fails with Drv first).
+
+Reproducers for the two instances already exist:
+`test/01_unit/compiler/50.mir/module_enum_inventory_spec.spl` (#3904) and
+`test/01_unit/compiler/50.mir/imported_class_field_receiver_method_spec.spl`
+(#3908, one import order). This spec states the class:
+
+- every imported type a consumer names (parameter, return, local) lowers to
+  a `Named` id that the CONSUMER's table resolves to that type's name;
+- the same holds with the import lines in either order;
+- MIR lowering of a method call through an imported class's field has the
+  same (empty) error list in both orders.
+
+The phase-2 producer (producer8, 2026-10-20) compiles both orders of the
+three-module fixture through MIR without diagnostics.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:hir
+# @tag:imports
+
+use std.spec.{describe, it, expect, step}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val ident_ctx_src = "pub class Ctx:\n    errors: [text]\n\nimpl Ctx:\n    me add_error(message: text):\n        self.errors.push(message)\n"
+
+val ident_drv_src = "use lib.ctx.\{Ctx\}\n\npub class Drv:\n    ctx: Ctx\n"
+
+val ident_body = "\nfn via_param(d: Drv, c: Ctx) -> Ctx:\n    d.ctx.add_error(\"param_field\")\n    c\n\nfn local_drv(d: Drv) -> i64:\n    val keep: Drv = d\n    1\n"
+
+fn ident_consumer(drv_first: bool) -> text:
+    if drv_first:
+        return "use lib.drv.\{Drv\}\nuse lib.ctx.\{Ctx\}\n" + ident_body
+    "use lib.ctx.\{Ctx\}\nuse lib.drv.\{Drv\}\n" + ident_body
+
+struct IdentLowered:
+    hir_errors: text
+    mir_errors: text
+    param_names: [text]
+    return_name: text
+
+fn ident_named(module: HirModule, t: HirType) -> text:
+    match t.kind:
+        case HirTypeKind.Named(sym, _):
+            val found = module.symbols.get_symbol(sym)
+            if found == nil:
+                return "<no symbol {sym.id}>"
+            found.unwrap().name
+        case _: "<not named>"
+
+fn ident_lower(drv_first: bool) -> IdentLowered:
+    val log = Logger(level: 0)
+    val consumer_src = ident_consumer(drv_first)
+    val ctx_ast = parse_full_frontend(ident_ctx_src, "lib/ctx.spl", "lib.ctx", log)
+    val drv_ast = parse_full_frontend(ident_drv_src, "lib/drv.spl", "lib.drv", log)
+    val main_ast = parse_full_frontend(consumer_src, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.ctx"] = ctx_ast
+    modules["lib.drv"] = drv_ast
+    modules["app.main"] = main_ast
+    val sources = [SourceFile(path: "lib/ctx.spl", content: ident_ctx_src, module_name: "lib.ctx"), SourceFile(path: "lib/drv.spl", content: ident_drv_src, module_name: "lib.drv"), SourceFile(path: "app/main.spl", content: consumer_src, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var ctx_lowering = hirlowering_for_module("lib.ctx", surfaces)
+    var drv_lowering = hirlowering_for_module("lib.drv", surfaces)
+    var main_lowering = hirlowering_for_module("app.main", surfaces)
+    val ctx_hir = ctx_lowering.lower_module(ctx_ast)
+    val drv_hir = drv_lowering.lower_module(drv_ast)
+    val main_hir = main_lowering.lower_module(main_ast)
+    var hir_errors = ""
+    for e in ctx_lowering.errors:
+        hir_errors = hir_errors + "lib.ctx: " + e.message + "\n"
+    for e in drv_lowering.errors:
+        hir_errors = hir_errors + "lib.drv: " + e.message + "\n"
+    for e in main_lowering.errors:
+        hir_errors = hir_errors + "app.main: " + e.message + "\n"
+    var param_names: [text] = []
+    var return_name = ""
+    for f in main_hir.functions.values():
+        if f.name == "via_param":
+            for p in f.params:
+                param_names.push(ident_named(main_hir, p.type_))
+            return_name = ident_named(main_hir, f.return_type)
+    var hir_modules: Dict<text, HirModule> = {}
+    hir_modules["lib.ctx"] = ctx_hir
+    hir_modules["lib.drv"] = drv_hir
+    hir_modules["app.main"] = main_hir
+    var mir_lowering = MirLowering.new(main_hir.symbols)
+    for module_key in hir_modules.keys():
+        mir_lowering.prescan_module_struct_names(hir_modules, module_key)
+    mir_lowering.lower_module(main_hir, [ctx_hir, drv_hir, main_hir])
+    var mir_errors = ""
+    for e in mir_lowering.errors:
+        mir_errors = mir_errors + e.message + "\n"
+    IdentLowered(hir_errors: hir_errors, mir_errors: mir_errors, param_names: param_names, return_name: return_name)
+
+describe "imported type identity in the consumer's symbol table":
+    it "resolves imported parameter and return types by name with Drv imported first":
+        step("The order that exposed #3908")
+        val lowered = ident_lower(true)
+        expect(lowered.hir_errors).to_equal("")
+        expect(lowered.param_names).to_equal(["Drv", "Ctx"])
+        expect(lowered.return_name).to_equal("Ctx")
+
+    it "resolves imported parameter and return types by name with Ctx imported first":
+        step("The order that happened to align ids and hid the defect")
+        val lowered = ident_lower(false)
+        expect(lowered.hir_errors).to_equal("")
+        expect(lowered.param_names).to_equal(["Drv", "Ctx"])
+        expect(lowered.return_name).to_equal("Ctx")
+
+    it "lowers a field-chain method call identically in both import orders":
+        step("MIR must not depend on which module registered a name first")
+        val drv_first = ident_lower(true)
+        val ctx_first = ident_lower(false)
+        expect(drv_first.mir_errors.contains("unresolved method call")).to_equal(false)
+        expect(ctx_first.mir_errors.contains("unresolved method call")).to_equal(false)
+        expect(drv_first.mir_errors).to_equal(ctx_first.mir_errors)

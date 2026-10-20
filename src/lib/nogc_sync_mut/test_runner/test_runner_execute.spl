@@ -24,6 +24,7 @@ use std.test_runner.test_runner_coverage.{record_coverage_sdn, record_compiler_d
 use std.test_runner.test_runner_metrics.{test_resource_class, test_execution_cohort_id, test_child_memory_bytes}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_write, file_delete}
 use std.nogc_sync_mut.io.env_ops.{env_set, env_get}
+use std.nogc_sync_mut.env.variables.{env_unset}
 use nogc_sync_mut.io.crypto_sffi.{random_hex as test_runner_random_hex}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.text.{escape_json}
@@ -1052,6 +1053,31 @@ pub fn smf_compile_degrade_token(compile_output: text) -> text:
 # than the whole budget on its own.
 val _DEGRADE_TOKEN_MAX: i64 = 160
 
+# --coverage builds the instrumented wrapper with `native-build
+# --refresh-source-authority`, whose SCV admission fails closed with
+# `compile-event-journal-missing` in a checkout that has never published a
+# source-inventory journal (bug
+# test_coverage_wrapper_native_build_refused_by_scv_admission_2026_10_19), so
+# every spec aborted and the report tracked 0 files. The compiler names the
+# sanctioned first-build path itself ("rerun with
+# SIMPLE_SCV_INVENTORY_COLD_INIT=1"). Take it for the FIRST wrapper build of
+# this run only, and only when no journal pointer exists: every later build is
+# warm, and admission stays strict (a present-but-invalid journal is still
+# refused with its named reason). A caller that set the variable keeps
+# control of it.
+var _coverage_scv_cold_init_attempted = false
+
+fn coverage_scv_cold_init_needed() -> bool:
+    if _coverage_scv_cold_init_attempted:
+        return false
+    if (env_get("SIMPLE_SCV_INVENTORY_COLD_INIT") ?? "") != "":
+        return false
+    val scv_root = cwd() + "/build/scv"
+    if file_exists(scv_root + "/source-inventory/CURRENT") or file_exists(scv_root + "/compile-events/CURRENT"):
+        return false
+    _coverage_scv_cold_init_attempted = true
+    true
+
 fn verdict_degrade_token_field(diagnostic: text) -> text:
     # A compile diagnostic reads
     #   error: compile failed (<temp path>): semantic: <temp path>: <cause>
@@ -1187,7 +1213,13 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     if explicit_aot and options.verbose:
         print native_test_invocation_receipt(options.native_backend, producer_digest, file_path,
             smf_path, binary, compile_args)
+    val cold_init_once = options.coverage and not explicit_aot and coverage_scv_cold_init_needed()
+    if cold_init_once:
+        print "coverage: no SCV compile-event journal in this checkout; this first instrumented build runs the one-time inventory cold init (SIMPLE_SCV_INVENTORY_COLD_INIT=1 for this child only)"
+        env_set("SIMPLE_SCV_INVENTORY_COLD_INIT", "1")
     val compile_scoped = _run_scoped_child(test_resource_class(file_path), binary, compile_args, timeout_ms, 0, 0, 0, if options.no_limits: 0 else: options.max_procs, not options.no_limits, options.coverage or explicit_aot)
+    if cold_init_once:
+        env_unset("SIMPLE_SCV_INVENTORY_COLD_INIT")
     val compile_ms = (time_now_unix_micros() - compile_started) / 1000
     val compile_result = compile_scoped.result
     val compile_stdout = compile_result.stdout

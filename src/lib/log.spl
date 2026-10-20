@@ -304,6 +304,9 @@ class _RingBackendRecord:
         _RingBackendRecord(subsys: subsys, level: level, p0: p0)
 
 class RingBackend:
+    # `entries` is authoritative only on the registry's instance. A handle
+    # returned by ring_backend_new keeps an empty `entries`; read records
+    # through the ring_backend_* accessors.
     capacity: i64
     entries:  [_RingBackendRecord]
     ops:      LogBackendOps
@@ -312,15 +315,20 @@ class RingBackend:
 # RingBackend object (LogBackendOps stores only an i64).
 var _g_ring_registry: [RingBackend] = []
 
-fn ring_backend_new(capacity: i64) -> RingBackend:
-    val self_ptr = _g_ring_registry.len() + 1
-    val rb = RingBackend(
+fn _ring_backend_fresh(capacity: i64, self_ptr: i64) -> RingBackend:
+    RingBackend(
         capacity: capacity,
         entries: [],
         ops: LogBackendOps.new(self_ptr, 1, "ring")
     )
-    _g_ring_registry.push(rb)
-    rb
+
+fn ring_backend_new(capacity: i64) -> RingBackend:
+    """The registry is the ring's only owner. The returned value is a separate
+    handle whose `ops.self_ptr` names the registry slot; every reader resolves
+    it through `_ring_backend_index`, never through the handle's `entries`."""
+    val self_ptr = _g_ring_registry.len() + 1
+    _g_ring_registry.push(_ring_backend_fresh(capacity, self_ptr))
+    _ring_backend_fresh(capacity, self_ptr)
 
 fn _ring_backend_index(self_ptr: i64) -> i64:
     val idx = self_ptr - 1
