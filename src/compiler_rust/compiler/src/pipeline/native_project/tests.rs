@@ -7142,6 +7142,14 @@ fn test_msvc_win32_and_ucrt_imports_are_never_stub_candidates() {
         "ferror",
         "signal",
         "wcslen",
+        "__chkstk",
+        "_fltused",
+        "_stat64i32",
+        "_errno",
+        "_get_osfhandle",
+        "_wfopen",
+        "ldexp",
+        "TransmitFile",
     ] {
         assert!(
             super::tools::is_system_symbol_for_target(symbol, target),
