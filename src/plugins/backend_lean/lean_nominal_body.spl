@@ -1,8 +1,8 @@
-# C2: pure nominal linear flow, terminal branch or one diamond join.
+# C2/C5: pure nominal/composite values and admitted acyclic control flow.
 # No native-layout certificate.
 use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir_instructions.{MirFunction, MirBody, MirInst, MirInstKind, MirOperand, MirOperandKind, MirTerminator, AggregateKind}
-use compiler.mir.mir_types.{MirType, MirTypeKind, MirTypeDef, MirTypeDefKind, MirLocal, LocalId, LocalKind}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirTypeDef, MirTypeDefKind, MirLocal, LocalId, LocalKind, MirConstValue}
 use compiler.mir.mir_json.{serialize_mir_type}
 use compiler.backend.backend.backend_types.{BackendKind, CompileError, compileerror_backend_error}
 use plugins.backend_lean.lean_type_declarations.{LeanTypeContext, lean_context_type_to_lean, lean_type_quote_name}
@@ -23,8 +23,7 @@ fn nominal_equality_scalar(type_: MirType) -> bool:
         case _: false
 
 fn nominal_type_requested(type_: MirType) -> bool:
-    # Follow only retained families admitted by the existing nominal type mapper.
-    # A scalar-only Result does not select this route merely by being a Result.
+    # Preserve every prior nominal selection, including nominal call refusals.
     match type_.kind:
         case Struct(_) | Enum(_): true
         case Array(element, _) | Slice(element): nominal_type_requested(element)
@@ -36,24 +35,67 @@ fn nominal_type_requested(type_: MirType) -> bool:
             nominal_type_requested(ok_type) or nominal_type_requested(error_type)
         case _: false
 
+fn composite_type_requested(type_: MirType) -> bool:
+    match type_.kind:
+        case Array(_, _) | Tuple(_): true
+        case Slice(element): composite_type_requested(element)
+        case Result(ok_type, error_type):
+            composite_type_requested(ok_type) or composite_type_requested(error_type)
+        case _: false
+
+fn composite_constant_requested(value: MirConstValue, type_: MirType) -> bool:
+    match value:
+        case Array(_) | Tuple(_): true
+        case _: composite_type_requested(type_)
+
+fn composite_operand_requested(operand: MirOperand) -> bool:
+    match operand.kind:
+        case Const(value, type_): composite_constant_requested(value, type_)
+        case _: false
+
 fn nominal_body_requested(function: MirFunction, body: MirBody) -> bool:
-    # Retained nominal evidence, not an incidental constructor, selects exact
-    # owner/type/argument validation for instruction-free nominal selections too.
+    # A retained composite type alone must not redirect an already supported
+    # call-only wrapper. Actual value operations always select strict typing.
     if nominal_type_requested(function.signature.return_type): return true
+    var composite_types = composite_type_requested(function.signature.return_type)
     for parameter in function.signature.params:
         if nominal_type_requested(parameter): return true
+        if composite_type_requested(parameter): composite_types = true
     for local in body.locals:
         if nominal_type_requested(local.type_): return true
+        if composite_type_requested(local.type_): composite_types = true
+    var has_call = false
     for block in body.blocks:
         for instruction in block.instructions:
             match instruction.kind:
-                case Aggregate(_, kind, _):
-                    match kind:
-                        case Struct(_) | Enum(_, _): return true
-                        case _: pass
-                case GetField(_, _, _): return true
+                case Aggregate(_, _, _) | GetField(_, _, _): return true
+                case Const(_, value, type_):
+                    if composite_constant_requested(value, type_): return true
+                case BinOp(_, _, left, right) | CheckedBinOp(_, _, left, right):
+                    if composite_operand_requested(left) or composite_operand_requested(right): return true
+                case UnaryOp(_, _, value) | Cast(_, value, _):
+                    if composite_operand_requested(value): return true
+                case Call(_, callee, args):
+                    has_call = true
+                    if composite_operand_requested(callee): return true
+                    for argument in args:
+                        if composite_operand_requested(argument): return true
                 case _: pass
-    false
+        # Literal composites may occur directly on a terminator, without any
+        # Const instruction or local whose type would select this owner.
+        match block.terminator:
+            case Ret(value):
+                if val operand = value:
+                    if composite_operand_requested(operand): return true
+            case If(value, _, _) | Switch(value, _, _):
+                if composite_operand_requested(value): return true
+            case CallTerminator(_, callee, args, _, _, _, _):
+                has_call = true
+                if composite_operand_requested(callee): return true
+                for argument in args:
+                    if composite_operand_requested(argument): return true
+            case _: pass
+    composite_types and not has_call
 
 struct LeanNominalFlowPlan:
     prefix: [i64]
@@ -172,6 +214,7 @@ class LeanNominalBodyEmitter:
     types: Dict<i64, MirType>
     assigned: Dict<i64, bool>
     live: Dict<i64, bool>
+    constant_nodes_left: i64 = 65536
 
     fn fork_for_branch(locals: [MirLocal]) -> Result<LeanNominalBodyEmitter, CompileError>:
         # Dict handles are mutable. Allocate both maps afresh, never copy handles.
@@ -191,7 +234,8 @@ class LeanNominalBodyEmitter:
                     return Err(nominal_body_error("cannot retain branch liveness state"))
         # No emitter method mutates the shared types/context maps.
         Ok(LeanNominalBodyEmitter(context: self.context, types: self.types,
-            assigned: branch_assigned, live: branch_live))
+            assigned: branch_assigned, live: branch_live,
+            constant_nodes_left: self.constant_nodes_left))
 
     me instruction_lines(body: MirBody, order: [i64]) -> Result<[text], CompileError>:
         var lines: [text] = []
@@ -221,6 +265,9 @@ class LeanNominalBodyEmitter:
         var then_emitter = self.fork_for_branch(body.locals)?
         var else_emitter = self.fork_for_branch(body.locals)?
         var then_lines = then_emitter.instruction_lines(body, flow.then_path)?
+        # Compilation visits both arms; charge their work cumulatively before
+        # the next arm expands. Definition/liveness maps remain independent.
+        else_emitter.constant_nodes_left = then_emitter.constant_nodes_left
         var else_lines = else_emitter.instruction_lines(body, flow.else_path)?
         var merged_assigned: Dict<i64, bool> = {}
         var merged_live: Dict<i64, bool> = {}
@@ -267,6 +314,7 @@ class LeanNominalBodyEmitter:
         # succeed. The suffix is checked once against these fresh maps.
         self.assigned = merged_assigned
         self.live = merged_live
+        self.constant_nodes_left = else_emitter.constant_nodes_left
         val suffix = self.returning_path(body, flow.join_path)?
         for line in suffix.split("\n"): lines.push(line)
         Ok(lines)
@@ -299,7 +347,54 @@ class LeanNominalBodyEmitter:
                     case Move(_): self.live[local.id] = false
                     case _: pass
                 Ok("_l{local.id}")
-            case Const(value, type_): translate_const_value_exact(value, type_)
+            case Const(value, type_): self.composite_constant(value, type_, 1)
+
+    fn tuple_value(terms: [text]) -> text:
+        if terms.len() == 0: return "()"
+        "(" + terms.join(", ") + ")"
+
+    fn vector_value(terms: [text], element: MirType, size: i64) -> Result<text, CompileError>:
+        val element_name = lean_context_type_to_lean(element, self.context)?
+        val literal = "#[" + terms.join(", ") + "]"
+        Ok("(_root_.Vector.mk (" + literal + " : _root_.Array (" + element_name +
+            ")) (by rfl) : _root_.Vector (" + element_name + ") " + size.to_text() + ")")
+
+    me composite_constant(value: MirConstValue, type_: MirType, depth: i64) -> Result<text, CompileError>:
+        # Debit before recursive work or term-vector allocation. The root and
+        # every leaf each consume one node, including ordinary scalar constants.
+        if depth > 128:
+            return Err(nominal_body_error("constant nesting limit"))
+        if self.constant_nodes_left <= 0:
+            return Err(nominal_body_error("constant node budget"))
+        self.constant_nodes_left = self.constant_nodes_left - 1
+        match value:
+            case Array(elements):
+                match type_.kind:
+                    case Array(element, size):
+                        if size < 0 or elements.len() != size:
+                            return Err(nominal_body_error("array length mismatch"))
+                        if elements.len() > self.constant_nodes_left:
+                            return Err(nominal_body_error("constant node budget"))
+                        var terms: [text] = []
+                        for item in elements:
+                            terms.push(self.composite_constant(item, element, depth + 1)?)
+                        self.vector_value(terms, element, size)
+                    case _: Err(nominal_body_error("array constant requires Array type"))
+            case Tuple(elements):
+                match type_.kind:
+                    case Tuple(types):
+                        if elements.len() != types.len():
+                            return Err(nominal_body_error("tuple arity mismatch"))
+                        if elements.len() > self.constant_nodes_left:
+                            return Err(nominal_body_error("constant node budget"))
+                        var terms: [text] = []
+                        for index in 0..elements.len():
+                            terms.push(self.composite_constant(elements[index], types[index], depth + 1)?)
+                        Ok(self.tuple_value(terms))
+                    case _: Err(nominal_body_error("tuple constant requires Tuple type"))
+            case FloatLexeme(_):
+                Err(nominal_body_error("unsupported constant kind FloatLexeme"))
+            case _: translate_const_value_exact(value, type_)
 
     me bind(dest: LocalId, expected: MirType, term: text) -> Result<text, CompileError>:
         self.same_type(self.local_type(dest)?, expected)?
@@ -323,7 +418,7 @@ class LeanNominalBodyEmitter:
     me instruction(instruction: MirInst) -> Result<text, CompileError>:
         match instruction.kind:
             case Const(dest, value, type_):
-                val term = translate_const_value_exact(value, type_)?
+                val term = self.composite_constant(value, type_, 1)?
                 self.bind(dest, type_, term)
             case Copy(dest, source):
                 val type_ = self.local_type(source)?
@@ -364,6 +459,30 @@ class LeanNominalBodyEmitter:
                 self.bind(dest, type_, operator + "(" + term + ")")
             case Aggregate(dest, kind, operands):
                 match kind:
+                    case Array(element):
+                        val destination_type = self.local_type(dest)?
+                        match destination_type.kind:
+                            case Array(expected_element, size):
+                                self.same_type(element, expected_element)?
+                                if size < 0 or operands.len() != size:
+                                    return Err(nominal_body_error("array length mismatch"))
+                                var terms: [text] = []
+                                for operand in operands:
+                                    terms.push(self.operand(operand, expected_element)?)
+                                val term = self.vector_value(terms, expected_element, size)?
+                                self.bind(dest, destination_type, term)
+                            case _: Err(nominal_body_error("array aggregate requires Array destination"))
+                    case Tuple:
+                        val destination_type = self.local_type(dest)?
+                        match destination_type.kind:
+                            case Tuple(elements):
+                                if operands.len() != elements.len():
+                                    return Err(nominal_body_error("tuple arity mismatch"))
+                                var terms: [text] = []
+                                for index in 0..operands.len():
+                                    terms.push(self.operand(operands[index], elements[index])?)
+                                self.bind(dest, destination_type, self.tuple_value(terms))
+                            case _: Err(nominal_body_error("tuple aggregate requires Tuple destination"))
                     case Struct(symbol):
                         val definition = self.definition(symbol, false)?
                         match definition.kind:
@@ -401,6 +520,18 @@ class LeanNominalBodyEmitter:
             case GetField(dest, base, index):
                 val base_type = self.operand_type(base)?
                 match base_type.kind:
+                    case Tuple(elements):
+                        if index < 0 or index >= elements.len():
+                            return Err(nominal_body_error("tuple field index out of range"))
+                        var term = self.operand(base, base_type)?
+                        if elements.len() == 1:
+                            term = "(" + term + ")"
+                        else:
+                            for skipped in 0..index:
+                                term = "_root_.Prod.snd (" + term + ")"
+                            if index < elements.len() - 1:
+                                term = "_root_.Prod.fst (" + term + ")"
+                        self.bind(dest, elements[index], term)
                     case Struct(symbol):
                         val definition = self.definition(symbol, false)?
                         match definition.kind:
@@ -411,13 +542,13 @@ class LeanNominalBodyEmitter:
                                 val projection = self.context.names[symbol.id] + "." + lean_type_quote_name(fields[index].name)
                                 self.bind(dest, fields[index].type_, projection + " (" + term + ")")
                             case _: Err(nominal_body_error("projection declaration kind differs"))
-                    case _: Err(nominal_body_error("field projection requires an admitted struct value"))
+                    case _: Err(nominal_body_error("field projection requires an admitted struct or tuple value"))
             case _: Err(nominal_body_error("unsupported instruction in pure nominal body: {instruction.kind}"))
 
 fn translate_mir_nominal_body(function: MirFunction, context: LeanTypeContext) -> Result<text, CompileError>:
     """Emit typed nominal construction/projection using this module's declarations.
 
-    Bodies with no retained nominal type or nominal operation retain their
+    Bodies with no retained nominal/composite type or operation retain their
     existing translator. A nominal body must be an acyclic Goto chain or one
     If with two returning chains, optionally sharing one linear return suffix.
     Each path is single-assignment with an exact typed return.
@@ -468,6 +599,7 @@ fn translate_mir_nominal_body(function: MirFunction, context: LeanTypeContext) -
                 var then_emitter = emitter.fork_for_branch(body.locals)?
                 var else_emitter = emitter.fork_for_branch(body.locals)?
                 val then_code = then_emitter.returning_path(body, flow.then_path)?
+                else_emitter.constant_nodes_left = then_emitter.constant_nodes_left
                 val else_code = else_emitter.returning_path(body, flow.else_path)?
                 lines.push("if " + condition_term + " then")
                 for line in then_code.split("\n"): lines.push("  " + line)
