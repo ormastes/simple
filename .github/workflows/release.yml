@@ -574,6 +574,13 @@ jobs:
           "CXX=$env:LLVM_ROOT\bin\clang-cl.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CC_x86_64_pc_windows_msvc=$env:LLVM_ROOT\bin\clang-cl.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CXX_x86_64_pc_windows_msvc=$env:LLVM_ROOT\bin\clang-cl.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # Git Bash exports MSYSTEM=MINGW64, which makes the Rust seed's
+          # Target::linker_flavor() pick GNU: the core-C runtime was then
+          # compiled with --target=x86_64-w64-windows-gnu (MinGW headers:
+          # strtok_r, swprintf, stat64i32, ignored __declspec(thread)) and
+          # linked into an MSVC image, and stage1 SEGV'd on native-build
+          # (run 39357315407). Pin the MSVC flavor for this row only.
+          "SIMPLE_LINKER_FLAVOR=msvc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Build native Windows binary via bootstrap-only Rust seed
         if: runner.os == 'Windows'
@@ -894,7 +901,7 @@ jobs:
             RUNNER_OUT="build/bootstrap/test-runner/${RUNNER_BIN}"
             mkdir -p build/bootstrap/test-runner
             echo "Building native ${RUNNER_BIN} for bootstrap package"
-            if ! RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=0 \
+            if RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=0 \
               SIMPLE_BIN="$PRODUCER" SIMPLE_BINARY="$PRODUCER" \
               "$BINARY_TO_PACKAGE" native-build \
               --source src/compositions/kernel_llvm_cranelift --source src/compiler --source src/app \
@@ -903,11 +910,17 @@ jobs:
               --entry-closure --entry src/app/test_runner_new/main.spl \
               --threads "$RUNNER_THREADS" --mode dynload \
               --output "$RUNNER_OUT" 2>&1; then
-              # Known gap: the seed-built stage1 worker SEGVs in HIR lowering
-              # (run 39357315407). Fall back to the same bootstrap-only seed
-              # that produced stage1, with stage1's own flags, so the runner
-              # has the same provenance as the packaged compiler.
-              echo "⚠ stage1 could not build ${RUNNER_BIN}; retrying with the bootstrap-only Rust seed"
+              RUNNER_PRODUCER="stage1"
+            else
+              RUNNER_PRODUCER=""
+            fi
+            if [ -z "$RUNNER_PRODUCER" ] || [ ! -f "$RUNNER_OUT" ]; then
+              # @workaround bug=release_stage1_native_build_worker_sigsegv_2026_10_20 reason=stage1-native-build-worker-sigsegv
+              # Stage1 native-build crashes before producing a binary
+              # (doc/08_tracking/bug/release_stage1_native_build_worker_sigsegv_2026-10-20.md).
+              # Fall back to the same bootstrap-only seed and flags that
+              # produced stage1, and record which producer built the runner.
+              echo "::warning::WORKAROUND release_stage1_native_build_worker_sigsegv_2026_10_20: stage1 could not build ${RUNNER_BIN}; retrying with the bootstrap-only Rust seed"
               if [[ "$PLATFORM" == windows-* ]]; then
                 RUNNER_SEED="src/compiler_rust/target/bootstrap/simple.exe"
               else
@@ -922,7 +935,7 @@ jobs:
                 --entry-closure --entry src/app/test_runner_new/main.spl \
                 --mode dynload --threads "$RUNNER_THREADS" \
                 --output "$RUNNER_OUT" 2>&1 || echo "⚠ seed native-build exited non-zero"
-              [ -f "$RUNNER_OUT" ] && echo "✓ ${RUNNER_BIN} built by the bootstrap-only Rust seed"
+              RUNNER_PRODUCER="bootstrap-only-rust-seed (workaround bug=release_stage1_native_build_worker_sigsegv_2026_10_20)"
             fi
             if [ ! -f "$RUNNER_OUT" ]; then
               echo "✗ ${RUNNER_BIN} native build produced no binary" >&2
@@ -930,7 +943,10 @@ jobs:
             fi
             cp "$RUNNER_OUT" "${PKG_DIR}/bin/${RUNNER_BIN}"
             chmod +x "${PKG_DIR}/bin/${RUNNER_BIN}"
+            printf 'binary=bin/%s\nproducer=%s\nsource=src/app/test_runner_new/main.spl\ncommit=%s\n' \
+              "$RUNNER_BIN" "$RUNNER_PRODUCER" "$GITHUB_SHA" > "${PKG_DIR}/bin/simple_test_runner.provenance"
             ls -lh "${PKG_DIR}/bin/${RUNNER_BIN}"
+            echo "::notice::${RUNNER_BIN} built by: ${RUNNER_PRODUCER}"
             echo "✓ Copied test runner → bin/${RUNNER_BIN}"
           fi
 
@@ -1012,6 +1028,7 @@ jobs:
             RUNNER="$BIN_DIR/simple_test_runner"
           fi
           ls -l "$BIN_DIR"
+          cat "$BIN_DIR/simple_test_runner.provenance"
           "$SIMPLE" --version
           SIMPLE_LIB="$PWD/src" SIMPLE_BINARY="$SIMPLE_REAL" SIMPLE_TEST_BINARY="$SIMPLE_REAL" \
             "$RUNNER" test/01_unit/compiler/interpreter/block_scoped_use_resolves_spec.spl \
