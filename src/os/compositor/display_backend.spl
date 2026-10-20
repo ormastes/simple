@@ -1,4 +1,5 @@
 use os.drivers.virtio.virtio_gpu.{VirtioGpuDriver}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver, framebuffer_argb_to_color}
 
 trait CompositorGlassCapable:
     me blend_rect(x: i32, y: i32, w: i32, h: i32, color: u32, alpha: u8)
@@ -84,3 +85,64 @@ class GpuCompositorBackend:
                     self.driver.fill_rect(dst_x.to_u32(), dst_y.to_u32(), 1u32, 1u32, pixels[src_idx])
                 col = col + 1
             row = row + 1
+
+# CompositorBackend over a FramebufferDriver (direct MMIO or host-backed).
+# fb_backend.FramebufferBackend renders its widget tree through this adapter.
+class FbCompositorBackend:
+    fb: FramebufferDriver
+
+    static fn new(fb: FramebufferDriver) -> FbCompositorBackend:
+        FbCompositorBackend(fb: fb)
+
+impl CompositorBackend for FbCompositorBackend:
+    fn width() -> i32:
+        self.fb.framebuffer_width().to_i32()
+
+    fn height() -> i32:
+        self.fb.framebuffer_height().to_i32()
+
+    me clear(color: u32):
+        self.fb.framebuffer_clear_argb(color)
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        val x0 = if x < 0: 0 else: x
+        val y0 = if y < 0: 0 else: y
+        val x1 = if x + w > self.width(): self.width() else: x + w
+        val y1 = if y + h > self.height(): self.height() else: y + h
+        if x1 > x0 and y1 > y0:
+            self.fb.framebuffer_fill_rect_argb(x0.to_u32(), y0.to_u32(), (x1 - x0).to_u32(), (y1 - y0).to_u32(), color)
+
+    me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        var cx = x
+        for ch in text_str:
+            self.draw_char_8x16(cx, y, ch.char_code_at(0).to_u8(), fg, bg)
+            cx = cx + 8
+
+    me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
+        if x >= 0 and y >= 0:
+            self.fb.draw_char_8x16(x.to_u32(), y.to_u32(), ch, framebuffer_argb_to_color(fg), framebuffer_argb_to_color(bg))
+
+    me put_pixel(x: i32, y: i32, color: u32):
+        if x >= 0 and y >= 0 and x < self.width() and y < self.height():
+            self.fb.framebuffer_put_pixel_argb(x.to_u32(), y.to_u32(), color)
+
+    me blit_pixels(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        var row: i32 = 0
+        while row < h:
+            var col: i32 = 0
+            while col < w:
+                val idx = row * w + col
+                if idx >= 0 and idx < pixels.len():
+                    self.put_pixel(x + col, y + row, pixels[idx])
+                col = col + 1
+            row = row + 1
+
+    me present():
+        self.fb.framebuffer_present()
+
+    me present_rect(x: i32, y: i32, w: i32, h: i32):
+        if x >= 0 and y >= 0 and w > 0 and h > 0:
+            self.fb.present_rect(x.to_u32(), y.to_u32(), w.to_u32(), h.to_u32())
+
+    fn as_glass_capable() -> CompositorGlassCapable?:
+        nil
