@@ -37,6 +37,15 @@ static int64_t record_entry(int64_t env, int64_t data) {
     return 42;
 }
 
+static volatile int64_t g_slow_finished = 0;
+
+/* Direct-function worker that outlives the handle freed before it ends. */
+static int64_t slow_entry(int64_t data) {
+    SLEEP_MS(50);
+    g_slow_finished = data;
+    return data;
+}
+
 /* Direct-function record: [0] = entry(data), [1] = DIRECT_MARKER. */
 static int64_t direct_entry(int64_t data) {
     return data + 8;
@@ -80,6 +89,20 @@ int main(void) {
     while (rt_thread_is_done(h4) == 0) SLEEP_MS(1);
     assert(rt_thread_id(h4) != 0);
     rt_thread_free(h4);
+
+    /* free before the worker finishes (thread.spl free(): "thread continues
+     * running, result is discarded"): the worker owns the thread data until
+     * it exits, so its result/done writes must not hit freed memory. */
+    static int64_t slow[2];
+    slow[0] = (int64_t)(intptr_t)&slow_entry;
+    slow[1] = DIRECT_MARKER;
+    int64_t h5 = rt_thread_spawn_isolated((int64_t)(intptr_t)slow, 9 << 3);
+    assert(h5 != 0);
+    rt_thread_free(h5);
+    assert(rt_thread_join(h5) == 0);
+    for (int i = 0; i < 2000 && g_slow_finished == 0; i++) SLEEP_MS(1);
+    assert(g_slow_finished == (9 << 3));
+    SLEEP_MS(20);
 
     puts("rt_thread_owner_contract_selfcheck: ok");
     return 0;

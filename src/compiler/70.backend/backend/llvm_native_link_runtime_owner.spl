@@ -12,7 +12,7 @@
 
 use compiler.backend.linker.coff.coff_runtime_owner.{runtime_owner_select_v1, runtime_owner_object_definitions_v1, runtime_owner_cede_archive_file_v1, runtime_owner_write_bytes_v1}
 use std.common.crypto.sha256.{sha256_text}
-use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_exists, file_hash_sha256, file_read_bytes, dir_create_all}
+use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_exists, file_hash_sha256, file_read_bytes, file_size_raw, dir_create_all}
 use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1}
 
 pub fn llvm_runtime_owner_v1() -> Result<text, text>:
@@ -25,6 +25,17 @@ pub fn llvm_runtime_owner_compile_bundle_v1(owner: text, runtime_bundle: text,
     runtime_native.c already defines, which a strict link cannot accept."""
     if owner == "c" and native_all != "" and coff: return "core-c"
     runtime_bundle
+
+pub fn llvm_runtime_owner_compile_owner_v1(owner: text, native_all: text,
+        coff_native_all: bool) -> text:
+    """Owner the C runtime objects are compiled for.
+
+    Ceding runs only on a host-MSVC COFF link. A native-all link it does not
+    cover (windows-gnu) keeps the Rust thread-handle owner under the default
+    `c`: otherwise the C family collides with Rust's merged-alias COMDAT
+    (eff83aaa8b4). ELF links never apply the rust define."""
+    if owner == "c" and native_all != "" and not coff_native_all: return "rust"
+    owner
 
 fn _runtime_owner_dir_of(path: text) -> text:
     val normalized: text = path.replace("\\", "/")
@@ -54,7 +65,9 @@ pub fn llvm_runtime_owner_c_archive_v1(native_all: text, c_objects: [text],
     val dir = cache_root + "/runtime_owner_c/" + key
     val derived = dir + "/simple_native_all.lib"
     val sealed = dir + "/LLVM-C.lib"
-    if file_exists(derived) and file_exists(sealed):
+    # The rewrite is size-preserving: a truncated (crashed) write never hits.
+    if file_exists(derived) and file_exists(sealed) and
+            file_size_raw(derived) == file_size_raw(native_all):
         return Ok(derived)
     var objects: [[u8]] = []
     for object in c_objects:
@@ -65,6 +78,8 @@ pub fn llvm_runtime_owner_c_archive_v1(native_all: text, c_objects: [text],
     val ceded = match runtime_owner_cede_archive_file_v1(native_all, owned):
         case Ok(result): result
         case Err(reason): return Err(reason)
+    if ceded.parsed == 0:
+        return Err("runtime owner c: no COFF object member of {native_all} could be parsed; refusing to link it unceded")
     if ceded.undefined == 0:
         return Ok(native_all)
     if native_tool_strict_requested_v1():
@@ -80,5 +95,5 @@ pub fn llvm_runtime_owner_c_archive_v1(native_all: text, c_objects: [text],
     print "[runtime-owner] c: ceded {ceded.undefined} Rust definitions in {ceded.members} members ({ceded.demoted} COMDATs demoted) -> {derived}"
     Ok(derived)
 
-export llvm_runtime_owner_v1, llvm_runtime_owner_compile_bundle_v1
+export llvm_runtime_owner_v1, llvm_runtime_owner_compile_bundle_v1, llvm_runtime_owner_compile_owner_v1
 export llvm_runtime_owner_c_archive_v1
