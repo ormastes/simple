@@ -92,6 +92,17 @@ refused), and `global_fn_value_{cranelift,llvm}` (build error above; the typed
 `imported_fn_value_native`, `fn_ref_value_jit` and `optional_array_coalesce_native`
 still pass.
 
+Still open (Opus review):
+- The pool does not retain a submitted closure. A capturing lambda created inside a
+  transient scope and joined after that scope ends is a use-after-free. Zero-capture
+  function values are safe because their thunk never reads the closure.
+- The Rust-runtime pool twin (`runtime_pool.c` in `simple-runtime`) has no native
+  test. The fixtures link only `core-c-bootstrap`.
+- `declared_function_value_types` resolves parameter types during the declaration
+  pass, so a parameter whose struct is declared later becomes ANY. Cranelift is
+  unaffected (its thunk uses the compiled function). LLVM takes argument handling
+  from the value type.
+
 ## 2. C runtime `rt_array_extend_i64` on `[u8]` and `[u64]` (fixed)
 
 `src/runtime/runtime_native.c` copied element by element as

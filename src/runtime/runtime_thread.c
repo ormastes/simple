@@ -780,7 +780,8 @@ static int64_t rt_pool_v1_scalar_task_dispatch(int64_t raw_task) {
  * registered runtime closure whose func_ptr is the boxed entry
  * `(closure, tagged...) -> tagged` (cranelift fn values and lambdas). The
  * pool adapts the closure at this boundary: tag the input, untag the
- * result. Anything else is refused at submit, never called. */
+ * result. Anything else is refused at submit, never called. The closure is
+ * not retained; it must outlive the task (join before releasing it). */
 extern int64_t rt_closure_func_ptr(int64_t closure_value);
 extern int64_t rt_value_int(int64_t value);
 extern int64_t rt_value_unbox_int(int64_t value);

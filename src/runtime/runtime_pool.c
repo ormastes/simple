@@ -73,9 +73,11 @@ static int64_t rt_pool_boxed_task_dispatch(int64_t raw_task) {
     return rt_value_unbox_int(task->boxed_entry(task->boxed_closure, rt_value_int(task->scalar_input)));
 }
 
-/* Native Simple function values can arrive as a tagged heap record. The task
- * boundary accepts only the compiler's direct-function record and copies its
- * entry before returning, so no caller-owned closure record escapes submit. */
+/* Native Simple function values can arrive as a tagged heap record. A
+ * direct-function record's entry is copied at submit. A registered closure is
+ * NOT retained: the task keeps the caller's closure handle, so the closure
+ * must outlive the task (join before releasing it). Zero-capture function
+ * values never read their closure. */
 static int64_t rt_pool_native_function_payload(int64_t raw) {
     uint64_t value = (uint64_t)raw;
     if (value < 4096ULL) return 0;
