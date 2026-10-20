@@ -64,12 +64,34 @@ impl Lowerer {
                         ty: TypeId::ANY,
                     });
                     let args_hir = self.lower_call_args(args, ctx)?;
+                    // `Some(f)` with a FUNCTION payload: answer `Option<fn>`,
+                    // not ANY. An ANY payload binds `case Some(h)` as ANY, and
+                    // an indirect call through an ANY callee mixes the raw
+                    // and tagged conventions (LLVM: wrong result even for a
+                    // local `f`). Other payloads keep ANY.
+                    let ty = match (name.as_str(), args_hir.first()) {
+                        ("Some", Some(payload))
+                            if matches!(self.module.types.get(payload.ty), Some(HirType::Function { .. })) =>
+                        {
+                            self.module.types.register(HirType::Enum {
+                                name: "Option".to_string(),
+                                variants: vec![
+                                    ("Some".to_string(), Some(vec![payload.ty])),
+                                    ("None".to_string(), None),
+                                ],
+                                generic_params: vec!["T".to_string()],
+                                is_generic_template: false,
+                                type_bindings: std::collections::HashMap::from([("T".to_string(), payload.ty)]),
+                            })
+                        }
+                        _ => TypeId::ANY,
+                    };
                     return Ok(HirExpr {
                         kind: HirExprKind::Call {
                             func: func_hir,
                             args: args_hir,
                         },
-                        ty: TypeId::ANY,
+                        ty,
                     });
                 }
                 _ => {}

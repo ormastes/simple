@@ -193,6 +193,10 @@ pub struct Lowerer {
     /// claimed `add_one: i64` -- MIR then `BoxInt`ed the code pointer and the
     /// cranelift backend had no signature to build its `$boxed` entry from.
     pub(super) imported_function_value_types: HashMap<String, TypeId>,
+    /// `HirType::Function` of each free function DECLARED in this unit, recorded
+    /// at registration so a module-level `val G = f` (lowered before any body)
+    /// is typed as a function value rather than ANY.
+    pub(super) declared_function_value_types: HashMap<String, TypeId>,
     /// Canonical `module_prefix__Type` layouts from all compilation units.
     pub(super) global_struct_defs: Option<GlobalStructDefs>,
     /// Bare names that have exactly one canonical nominal owner.  This is a
@@ -311,6 +315,7 @@ impl Lowerer {
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
             imported_function_value_types: HashMap::new(),
+            declared_function_value_types: HashMap::new(),
             global_struct_defs: None,
             unique_global_struct_owners: None,
             struct_module_owners: None,
@@ -381,6 +386,7 @@ impl Lowerer {
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
             imported_function_value_types: HashMap::new(),
+            declared_function_value_types: HashMap::new(),
             global_struct_defs: None,
             unique_global_struct_owners: None,
             struct_module_owners: None,
@@ -474,6 +480,7 @@ impl Lowerer {
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
             imported_function_value_types: HashMap::new(),
+            declared_function_value_types: HashMap::new(),
             global_struct_defs: None,
             unique_global_struct_owners: None,
             struct_module_owners: None,

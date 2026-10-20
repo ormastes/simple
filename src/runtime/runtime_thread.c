@@ -749,6 +749,8 @@ typedef struct RtPoolTask {
     int64_t closure_ptr;
     int64_t (*scalar_entry)(int64_t);
     int64_t scalar_input;
+    int64_t (*boxed_entry)(int64_t, int64_t);
+    int64_t boxed_closure;
     int64_t result;
     int done;
     int joined;
@@ -771,6 +773,23 @@ static int64_t rt_pool_v1_scalar_task_dispatch(int64_t raw_task) {
     RtPoolTask* task = (RtPoolTask*)(intptr_t)raw_task;
     if (!task || !task->scalar_entry) return 0;
     return task->scalar_entry(task->scalar_input);
+}
+
+/* A compiled function value is either the direct-function record
+ * [entry, MARKER] (raw i64 convention: an extern fn, an LLVM fn value) or a
+ * registered runtime closure whose func_ptr is the boxed entry
+ * `(closure, tagged...) -> tagged` (cranelift fn values and lambdas). The
+ * pool adapts the closure at this boundary: tag the input, untag the
+ * result. Anything else is refused at submit, never called. The closure is
+ * not retained; it must outlive the task (join before releasing it). */
+extern int64_t rt_closure_func_ptr(int64_t closure_value);
+extern int64_t rt_value_int(int64_t value);
+extern int64_t rt_value_unbox_int(int64_t value);
+
+static int64_t spl_pool_v1_boxed_task_dispatch(int64_t raw_task) {
+    RtPoolTask* task = (RtPoolTask*)(intptr_t)raw_task;
+    if (!task || !task->boxed_entry) return 0;
+    return rt_value_unbox_int(task->boxed_entry(task->boxed_closure, rt_value_int(task->scalar_input)));
 }
 
 typedef struct RtPoolStateV1 {
@@ -1523,13 +1542,24 @@ static RtPoolTask* rt_pool_v1_scalar_task_create(int64_t function_value, int64_t
     int64_t payload = rt_native_closure_payload(function_value);
     if (payload == 0) return NULL;
     const int64_t* descriptor = (const int64_t*)(intptr_t)payload;
-    if (descriptor[0] == 0 || descriptor[1] != RT_POOL_V1_DIRECT_FUNCTION_MARKER) return NULL;
+    int is_direct = descriptor[0] != 0 && descriptor[1] == RT_POOL_V1_DIRECT_FUNCTION_MARKER;
+    /* Probed only after the direct-record test: a closure's word 1 is its
+     * func_ptr, never the marker, and rt_closure_func_ptr answers 0 for any
+     * value that is not a registered closure. */
+    int64_t boxed = is_direct ? 0 : rt_closure_func_ptr(function_value);
+    if (!is_direct && boxed == 0) return NULL;
     RtPoolTask* task = (RtPoolTask*)SPL_MALLOC(sizeof(RtPoolTask), "rt_pool_v1_task");
     if (!task) return NULL;
     memset(task, 0, sizeof(*task));
-    task->scalar_entry = (int64_t (*)(int64_t))(intptr_t)descriptor[0];
     task->scalar_input = input;
-    task->entry = rt_pool_v1_scalar_task_dispatch;
+    if (is_direct) {
+        task->scalar_entry = (int64_t (*)(int64_t))(intptr_t)descriptor[0];
+        task->entry = rt_pool_v1_scalar_task_dispatch;
+    } else {
+        task->boxed_entry = (int64_t (*)(int64_t, int64_t))(intptr_t)boxed;
+        task->boxed_closure = function_value;
+        task->entry = spl_pool_v1_boxed_task_dispatch;
+    }
     task->closure_ptr = (int64_t)(intptr_t)task;
 #ifdef SPL_THREAD_PTHREAD
     pthread_mutex_init(&task->lock, NULL);
