@@ -158,8 +158,10 @@ pub use collections::{
     rt_typed_words_u32_unchecked, rt_typed_words_u64_at, rt_typed_words_u64_data_at,
     rt_typed_words_u64_data_at_checked, rt_typed_words_u64_push, rt_typed_words_u64_push_known_at,
     rt_typed_words_u64_push_known_data_at, rt_typed_words_u64_raw_data_at, rt_typed_words_u64_set,
-    rt_typed_words_u64_store_known_data_at, rt_typed_words_u64_unchecked,
+    rt_typed_words_u64_store_known_data_at, rt_typed_words_u64_unchecked, rt_typed_words_i64_at,
+    rt_typed_words_i64_push, rt_typed_words_i64_set,
 };
+pub use collections::note_user_threads_started;
 pub(crate) use collections::{byte_array_bytes, byte_array_write, word_array_le_bytes};
 pub use collections::{
     rt_any_add, rt_tagged_add, rt_array_all, rt_array_any, rt_array_each, rt_array_filter, rt_array_find, rt_array_map,

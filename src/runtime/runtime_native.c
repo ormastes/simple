@@ -9970,6 +9970,39 @@ int8_t rt_typed_words_u64_set(SplArray* a, int64_t idx, int64_t val) {
     return 1;
 }
 
+/* Signed `[i64]` lane. Twin of the Rust runtime's rt_typed_words_i64_*; this
+ * lane keeps the tagged layout (rt_value_int boxes a wide value) -- the Rust
+ * runtime additionally packs a tagged array in place on the first wide store
+ * (gc_flags LAZY_WORDS) to stop leaking one heap box per store. A U64_PACKED
+ * array holds raw words and is read/written as such. */
+int64_t rt_typed_words_i64_at(SplArray* a, int64_t idx) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return 0;
+    if (idx < 0) idx = array->len + idx;
+    if (idx < 0 || idx >= array->len) return 0;
+    int64_t value = ((int64_t*)array->data)[idx];
+    return (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? value : rt_value_unbox_int(value);
+}
+
+int8_t rt_typed_words_i64_push(SplArray* a, int64_t val) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return 0;
+    if (!rt_core_array_reserve(a, array->len + 1)) return 0;
+    ((int64_t*)array->data)[array->len++] =
+        (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_value_int(val);
+    return 1;
+}
+
+int8_t rt_typed_words_i64_set(SplArray* a, int64_t idx, int64_t val) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return 0;
+    if (idx < 0) idx = array->len + idx;
+    if (idx < 0 || idx >= array->len) return 0;
+    ((int64_t*)array->data)[idx] =
+        (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_value_int(val);
+    return 1;
+}
+
 int64_t rt_typed_words_u64_raw_data_at(int64_t data_ptr, int64_t idx) {
     if (data_ptr == 0 || idx < 0) return 0;
     return ((int64_t*)(uintptr_t)data_ptr)[idx];

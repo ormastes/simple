@@ -123,11 +123,20 @@ fn coverage_local_addr() {
 
 #[test]
 fn coverage_for_each_index_get() {
-    // A statically-typed array iterable reads elements with rt_array_get
+    // A statically-typed array iterable reads elements with a typed accessor
     // directly (the call rt_index_get's Array arm makes), not the generic
-    // IndexGet dispatcher, which re-validated the handle per element.
+    // IndexGet dispatcher, which re-validated the handle per element. `[i64]`
+    // uses the layout-aware signed lane; other element types use rt_array_get.
     let mir = compile_to_mir(
         "fn test() -> i64:\n    val arr = [1, 2, 3]\n    var sum: i64 = 0\n    for x in arr:\n        sum = sum + x\n    return sum\n",
+    )
+    .unwrap();
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_typed_words_i64_at"))
+    }));
+    assert!(!has_inst(&mir, |i| matches!(i, MirInst::IndexGet { .. })));
+    let mir = compile_to_mir(
+        "fn test() -> f64:\n    val arr: [f64] = [1.0, 2.0]\n    var sum: f64 = 0.0\n    for x in arr:\n        sum = sum + x\n    return sum\n",
     )
     .unwrap();
     assert!(has_inst(&mir, |i| {

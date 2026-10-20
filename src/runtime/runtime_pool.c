@@ -509,6 +509,7 @@ static int rt_pool_spawn_worker(int worker_id) {
     arg->worker_id = worker_id;
 #ifdef RT_POOL_PTHREAD
     pthread_t thread;
+    SPL_NOTE_USER_THREADS();
     if (pthread_create(&thread, NULL, rt_pool_worker_main, arg) == 0) {
         pthread_detach(thread);
         return 1;
