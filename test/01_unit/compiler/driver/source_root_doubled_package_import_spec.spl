@@ -15,19 +15,19 @@ See doc/08_tracking/bug/source_root_resolver_facade_fallback_2026-10-11.md.
 
 use std.spec
 use compiler.driver.driver_source_loading.{_driver_resolve_source_root_entry_import_from_v1, _driver_resolve_entry_import}
-use compiler.common.source_root_resolution.{SourceRootResolutionV1, source_root_resolution_with_fallback_v1}
+use compiler.common.source_root_resolution.{SourceRootResolutionV1}
 
-fn resolved_path(result: SourceRootResolutionV1) -> text:
-    match result:
+# Same order as the native closure walker (driver_source_pipeline_loading.spl):
+# a selected source root wins; Missing falls back to the checkout resolver.
+fn resolve_like_closure(module_path: text, roots: [text], dir: text) -> text:
+    match _driver_resolve_source_root_entry_import_from_v1(module_path, roots, dir):
         case SourceRootResolutionV1.Found(path): path
-        case SourceRootResolutionV1.Missing: "MISSING"
+        case SourceRootResolutionV1.Missing: _driver_resolve_entry_import(module_path, dir)
         case SourceRootResolutionV1.Ambiguous(_): "AMBIGUOUS"
 
 fn phase3_resolve(module_path: text) -> text:
     val roots = ["src/compositions/kernel_llvm_cranelift", "src/compiler", "src/app", "src/lib"]
-    val selected = _driver_resolve_source_root_entry_import_from_v1(module_path, roots, "src/app/cli")
-    resolved_path(source_root_resolution_with_fallback_v1(
-        selected, module_path, "src/app/cli", _driver_resolve_entry_import))
+    resolve_like_closure(module_path, roots, "src/app/cli")
 
 describe "source roots and doubled package directories":
     it "resolves compiler.backend.codegen_types to its file, not the backend facade":
@@ -74,3 +74,16 @@ describe "source roots and doubled package directories":
         print "backend.env -> {path}"
         expect(path.ends_with("__init__.spl")).to_equal(false)
         expect(path.ends_with("mod.spl")).to_equal(false)
+
+    # Phase-4 default snapshot roots include src/os. A facade's bare sibling
+    # export (`export BorrowChecker from mod` in borrow_check/__init__.spl) must
+    # name the importer's sibling mod.spl, not src/os/mod.spl: binding it to the
+    # os package pulled ~930 modules (all of src/os) into the Stage 3 closure.
+    # doc/08_tracking/bug/bootstrap_main_closure_pulls_src_os_hir_failures_2026_10_20.md
+    it "resolves a bare sibling import beside its importer before the source roots":
+        val roots = ["src/app", "src/lib", "src/compiler", "src/os", "src/plugins"]
+        val dir = "src/compiler/55.borrow/borrow_check"
+        for leaf in ["mod", "nll", "lifetime"]:
+            val path = resolve_like_closure(leaf, roots, dir)
+            print "{leaf} -> {path}"
+            expect(path).to_equal(dir + "/" + leaf + ".spl")
