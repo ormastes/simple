@@ -5,8 +5,8 @@ Canonical ID: `release_stage1_native_build_worker_sigsegv_2026_10_20`
 Status: OPEN. A workaround is active in `.github/workflows/release.yml`
 (build-bootstrap "Create distribution package", the test-runner block marked
 `@workaround bug=release_stage1_native_build_worker_sigsegv_2026_10_20`).
-Bug database registration is pending reconciliation; this dated record is
-authoritative until it is registered.
+Registered in `doc/08_tracking/bug/bug_db.sdn` (bugs_active + bugs); this dated record is
+the authority for diagnosis and acceptance.
 
 ## Failure
 
