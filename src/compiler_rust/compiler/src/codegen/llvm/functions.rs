@@ -233,7 +233,7 @@ fn build_vreg_types(
                             Some("to_f32") => { types_map.insert(*dest, TypeId::F32); }
                             _ => {}
                         }
-                        if dotted.rsplit('.').next().is_some_and(super::super::scalar_float_methods::is_native_unary) {
+                        if dotted.rsplit('.').next().is_some_and(|m| super::super::scalar_float_methods::is_native_unary(m) || super::super::scalar_float_methods::rt_math_unary(m).is_some() || super::super::scalar_float_methods::rt_math_binary(m).is_some()) {
                             if let Some(ty @ (TypeId::F32 | TypeId::F64)) = types_map.get(receiver).copied() {
                                 types_map.insert(*dest, ty);
                             }
@@ -3593,8 +3593,11 @@ impl LlvmBackend {
                         // Cranelift declares it as an extern import of the bare
                         // name (`calls.rs`, `Linkage::Import`); do the same instead
                         // of rejecting a call Cranelift accepts.
-                        let bare_extern_name = (!func_name.contains('.')
-                            && vreg_types.get(receiver).copied().and_then(primitive_type_symbol_name).is_none())
+                        let bare_extern_name = (!dotted_name.contains('.')
+                            && vreg_types
+                                .get(receiver)
+                                .copied()
+                                .is_some_and(|t| primitive_type_symbol_name(t).is_none()))
                         .then_some(func_name);
                         match bare_func
                             .or_else(|| bare_resolved.map(|n| module.add_function(n, fallback_fn_type, None)))
