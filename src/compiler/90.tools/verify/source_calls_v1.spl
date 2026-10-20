@@ -1,0 +1,96 @@
+# Source-call inventory only. No transformed-source, proof, replay, or release
+# receipt is issued by this command.
+use app.io.mod.{file_is_regular_no_follow, read_file_text_result}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.config.{Logger}
+use compiler.common.mir_target_context.{MirTargetContext, mir_target_context_from,
+    mir_target_context_normalize_arch, mir_target_context_normalize_os}
+use compiler.frontend.frontend.{parse_full_frontend_target_receipted_v1}
+use compiler.frontend.frontend_target_cfg_receipt_v1.{FrontendCfgDecisionReceiptV1,
+    frontend_cfg_target_from_triple_v1}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.core.parser.{parser_has_errors, parser_get_errors}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.verification_call_lowering_v1.{ResolvedCallLoweringV1,
+    lower_module_with_resolved_calls_for_target_v1}
+
+pub struct SourceResolvedCallsV1:
+    source_digest: text
+    cfg_receipt: FrontendCfgDecisionReceiptV1
+    lowered: ResolvedCallLoweringV1
+
+fn source_calls_target_v1(target: text) -> Result<MirTargetContext, text>:
+    for character in target.chars():
+        if not "abcdefghijklmnopqrstuvwxyz0123456789_-".contains(character):
+            return Err("SOURCE-CALLS-E-TARGET: expected a canonical target triple")
+    val selected = match frontend_cfg_target_from_triple_v1(target):
+        case Ok(value): value
+        case Err(message): return Err("SOURCE-CALLS-E-TARGET: " + message)
+    # Empty host arguments prohibit implicit host selection. The frontend and
+    # MIR owners must agree; unsupported OS normalization is not guessed here.
+    val context = mir_target_context_from(target, "", "", "llvm", 0)
+    if (context.arch != mir_target_context_normalize_arch(selected.1) or
+            context.os != mir_target_context_normalize_os(selected.0)):
+        return Err("SOURCE-CALLS-E-TARGET: frontend and MIR target disagree")
+    Ok(context)
+
+pub fn source_calls_transform_error_v1(parsed: ParserModule) -> text:
+    if parsed.imports.len() > 0:
+        return "SOURCE-CALLS-E-IMPORT: source inventory requires a self-contained module; driver graph unavailable"
+    if parsed.aop_advices.len() > 0 or parsed.di_bindings.len() > 0:
+        return "SOURCE-CALLS-E-TRANSFORM: AOP/DI transformations are unavailable in source-call inventory"
+    ""
+
+pub fn source_calls_from_source_v1(source: text, path: text, target: text
+) -> Result<SourceResolvedCallsV1, text>:
+    val context = source_calls_target_v1(target)?
+    if path.trim() == "":
+        return Err("SOURCE-CALLS-E-FILE: a nonempty source path is required")
+    val digest = sha256_text(source)
+    val parsed = match parse_full_frontend_target_receipted_v1(source,
+            path, path, Logger(level: 0), path, digest, target):
+        case Ok(value): value
+        case Err(message): return Err("SOURCE-CALLS-E-PARSE: " + message)
+    if parser_has_errors():
+        return Err("SOURCE-CALLS-E-PARSE: " + parser_get_errors().join("; "))
+    val boundary = source_calls_transform_error_v1(parsed.0)
+    if boundary != "": return Err(boundary)
+    var lowering = HirLowering.with_filename(path)
+    val hir = lowering.lower_module(parsed.0)
+    if lowering.errors.len() > 0:
+        return Err("SOURCE-CALLS-E-HIR: " + lowering.diagnostic_messages.join("; "))
+    val lowered = lower_module_with_resolved_calls_for_target_v1(hir, context)?
+    Ok(SourceResolvedCallsV1(source_digest: digest, cfg_receipt: parsed.1,
+        lowered: lowered))
+
+pub fn source_calls_inventory_v1(result: SourceResolvedCallsV1) -> text:
+    val cfg = result.cfg_receipt
+    val calls = result.lowered.calls
+    # Only fixed keys, hashes, validated target fields, and counts are printed;
+    # source paths and source text cannot inject inventory rows.
+    [
+        "schema=SourceResolvedCalls-v1",
+        "formal_status=NOT_CHECKED",
+        "source_hash=" + result.source_digest,
+        "target=" + cfg.target_triple,
+        "cfg_preprocessed_hash=" + cfg.preprocessed_digest,
+        "cfg_decision_hash=" + cfg.decision_digest,
+        "mir_hash=" + calls.module_hash,
+        "resolver_receipt_hash=" + calls.resolver_receipt_hash,
+        "manifest_hash=" + calls.hash(),
+        "binding_count=" + calls.bindings.len().to_string()
+    ].join("\n")
+
+pub fn source_calls_command_v1(args: [text]) -> Result<text, text>:
+    if args.len() != 2:
+        return Err("SOURCE-CALLS-E-USAGE: source-calls requires FILE.spl TARGET_TRIPLE")
+    val _context = source_calls_target_v1(args[1])?
+    val path = args[0]
+    if path.trim() == "" or not file_is_regular_no_follow(path):
+        return Err("SOURCE-CALLS-E-FILE: source path must be an existing regular file")
+    val source = match read_file_text_result(path):
+        case Ok(value): value
+        case Err(_): return Err("SOURCE-CALLS-E-FILE: source could not be read")
+    val result = source_calls_from_source_v1(source, path, args[1])?
+    Ok(source_calls_inventory_v1(result))

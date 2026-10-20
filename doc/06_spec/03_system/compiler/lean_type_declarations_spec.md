@@ -16,11 +16,11 @@ Mutate U8 to I8 and a field offset, then assert exact changed metadata and chang
 
 ## Reject incomplete or unsupported MIR
 
-Call actual APIs with missing symbols, wrong nominal kind, self/mutual cycles, wrong table keys, duplicate names/members/tags, malformed or reserved namespaces, overlapping type namespaces, unions, bitfields, negative offsets/array lengths, floating-point and raw-pointer fields. Assert named errors. Verify invalid full-table planning leaves an existing builder untouched. Both compiler-owner module APIs must reject unresolved payloads.
+Call actual APIs with missing symbols, wrong nominal kind, wrong table keys, duplicate names/members/tags, malformed or reserved namespaces, overlapping type namespaces, unions, bitfields, negative offsets/array lengths, floating-point and raw-pointer fields. Assert named errors. Verify invalid full-table planning leaves an existing builder untouched. Both compiler-owner module APIs must reject unresolved payloads. The previous self/mutual cycle-refusal scenario now asserts grouped inductive output; the [recursive declaration manual](lean_recursive_declarations_spec.md) covers its expanded contract on both owners.
 
 ## Evidence limits
 
-No assertion inspects source files or substitutes a second implementation. All tests need qualified execution. The emitted Lean itself must additionally elaborate under admitted Lean/Mathlib. Recursive forms, further type families, aggregate operations, native-layout equivalence and FV2 closure remain open. Minimal-mode historical function axioms are not acceptance evidence.
+No assertion inspects source files or substitutes a second implementation. All tests need qualified execution. The emitted Lean itself must additionally elaborate under admitted Lean/Mathlib. Recursive fixed arrays, further type families, general aggregate operations, native-layout equivalence and FV2 closure remain open. The recursive source packet does not establish execution or kernel acceptance. Minimal-mode historical function axioms are not acceptance evidence.
 
 ## Revision 2: generated constructor collisions
 
