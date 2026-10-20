@@ -48,6 +48,8 @@ typedef int pid_t;
 #include <unistd.h>
 #endif
 #if defined(__APPLE__) || defined(__FreeBSD__)
+#include <sys/types.h>
+#include <sys/param.h>
 #include <sys/resource.h>
 #include <sys/sysctl.h>
 #endif
@@ -736,7 +738,7 @@ static int64_t rt_mem_snapshot_status_kib(const char* key) {
     size_t len = sizeof(kp);
     int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, (int)getpid() };
     if (sysctl(mib, 4, &kp, &len, NULL, 0) != 0 || len != sizeof(kp)) return -1;
-    return (int64_t)kp.ki_rssize * (int64_t)getpagesize() / 1024;
+    return (int64_t)kp.ki_rssize * (int64_t)sysconf(_SC_PAGESIZE) / 1024;
 #endif
 #else
     FILE* f = fopen("/proc/self/status", "r"); if (!f) return -1;

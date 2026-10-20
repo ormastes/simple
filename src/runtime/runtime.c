@@ -8,11 +8,15 @@
  * Test:  cc -o /tmp/runtime_test bootstrap/runtime_test.c bootstrap/runtime.c -std=c11 && /tmp/runtime_test
  */
 
+/* FreeBSD's default environment already exposes POSIX 2008 + XSI; defining
+ * these there zeroes __BSD_VISIBLE and hides u_int/sysctl/kinfo_proc. */
+#if !defined(__FreeBSD__)
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
 #ifndef _XOPEN_SOURCE
 #define _XOPEN_SOURCE 700
+#endif
 #endif
 /* On Darwin, _POSIX_C_SOURCE/_XOPEN_SOURCE alone lock the SDK headers into
  * strict-POSIX mode at the FIRST system include (runtime.h -> <stdint.h>),
@@ -63,6 +67,8 @@ int64_t rt_simple_abi_version_deferred(void) {
 #include <sys/syscall.h>
 #endif
 #if defined(__APPLE__) || defined(__FreeBSD__)
+#include <sys/types.h>
+#include <sys/param.h>
 #include <sys/resource.h>
 #include <sys/sysctl.h>
 #endif
@@ -2491,7 +2497,7 @@ static int64_t rt_process_status_kib(const char* key) {
     size_t len = sizeof(kp);
     int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, (int)getpid() };
     if (sysctl(mib, 4, &kp, &len, NULL, 0) != 0 || len != sizeof(kp)) return -1;
-    return (int64_t)kp.ki_rssize * (int64_t)getpagesize() / 1024;
+    return (int64_t)kp.ki_rssize * (int64_t)sysconf(_SC_PAGESIZE) / 1024;
 #endif
 #else
     FILE* f = fopen("/proc/self/status", "r");
