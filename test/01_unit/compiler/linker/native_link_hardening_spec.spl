@@ -26,7 +26,7 @@ use compiler.backend.linker.linker_wrapper.{
 }
 use compiler.backend.build_native_types.{BuildLinkConfig, BuildOutputFormat, native_link_config_from_build}
 use compiler.backend.llvm_native_link.{NativeLinkOptions}
-use compiler.backend.llvm_native_link_orchestrator.{llvm_hosted_allow_duplicate_definitions, llvm_hosted_runtime_compile_bundle}
+use compiler.backend.llvm_native_link_orchestrator.{llvm_hosted_allow_duplicate_definitions, llvm_hosted_runtime_compile_bundle, llvm_darwin_link_input_snapshot_path}
 use compiler.backend.runtime_compiler.{hosted_c_compiler_plan}
 use compiler.backend.linker.mold.{find_requested_linker, find_size_linker_path, requested_linker_override}
 use compiler.backend.linker.msvc.{MsvcConfig, msvc_strip_unix_rpath_args}
@@ -718,6 +718,20 @@ describe "Native linker hardening":
         expect(native_all_input_present(["/tmp/libsimple_native_all.dll.a"])).to_be(false)
         expect(native_all_input_present(["/tmp/libsimple_native_all.a.tmp"])).to_be(false)
         expect(native_all_input_present(["/tmp/my_libsimple_native_all.a"])).to_be(false)
+
+    it "keeps the native-all leaf through the Darwin link-input snapshot":
+        val digest = "80ea94d16c5f3b8e4722d269c16fc11d05c64033f7cc678ce69d902ade3469b0"
+        val snapshot = llvm_darwin_link_input_snapshot_path(
+            "/cache/darwin_link_inputs", 169, digest, "/authority/libsimple_native_all.a")
+        expect(snapshot).to_equal("/cache/darwin_link_inputs/169-" + digest + ".d/libsimple_native_all.a")
+        expect(native_all_input_present([snapshot])).to_be(true)
+        val macos = native_all_gnu_support_args([snapshot], "macos", "/brew")
+        expect(macos).to_contain("CoreFoundation")
+        expect(macos).to_contain("Security")
+        expect(macos).to_contain("-lc++")
+        expect(macos).to_contain("-lz")
+        # The pre-fix flat leaf erased the archive identity and every support arg.
+        expect(native_all_input_present(["/cache/darwin_link_inputs/169-" + digest])).to_be(false)
 
     it "keeps native-all support out of core-only links":
         step("Keep SDK dependencies gated by the actual archive basename")
