@@ -233,7 +233,7 @@ fn build_vreg_types(
                             Some("to_f32") => { types_map.insert(*dest, TypeId::F32); }
                             _ => {}
                         }
-                        if matches!(dotted.rsplit('.').next(), Some("floor" | "ceil" | "round")) {
+                        if dotted.rsplit('.').next().is_some_and(super::super::scalar_float_methods::is_native_unary) {
                             if let Some(ty @ (TypeId::F32 | TypeId::F64)) = types_map.get(receiver).copied() {
                                 types_map.insert(*dest, ty);
                             }
@@ -2869,7 +2869,7 @@ impl LlvmBackend {
                 // user methods. The runtime math externs have a floating-point
                 // ABI, so they cannot use the i64 method-shim path below.
                 if args.is_empty()
-                    && matches!(method, "floor" | "ceil" | "round")
+                    && super::super::scalar_float_methods::is_native_unary(method)
                     && matches!(
                         vreg_types.get(receiver).copied(),
                         Some(crate::hir::TypeId::F32 | crate::hir::TypeId::F64)
@@ -2884,9 +2884,11 @@ impl LlvmBackend {
                     let recv = self.get_vreg(receiver, vreg_map)?;
                     let recv = self
                         .coerce_value_to_type(recv, Some(float_type.into()), builder)?;
+                    let stem = super::super::scalar_float_methods::native_intrinsic_stem(method)
+                        .expect("is_native_unary guarantees a stem");
                     let intrinsic = format!(
                         "llvm.{}.{}",
-                        method,
+                        stem,
                         if is_f32 { "f32" } else { "f64" }
                     );
                     let fn_type = float_type.fn_type(&[float_type.into()], false);
@@ -2944,31 +2946,53 @@ impl LlvmBackend {
                     return Ok(());
                 }
 
-                // Scalar float methods use LLVM's target intrinsics. Preserve
-                // the incoming float width; integer receivers have no such
-                // method and continue through normal method resolution.
-                if matches!(method, "floor" | "ceil" | "round") && args.is_empty()
-                    && matches!(vreg_types.get(receiver).copied(), Some(crate::hir::TypeId::F32 | crate::hir::TypeId::F64))
-                {
-                    let is_f32 = matches!(vreg_types.get(receiver).copied(), Some(crate::hir::TypeId::F32));
-                    let float_ty = if is_f32 { self.context_ref().f32_type() } else { self.context_ref().f64_type() };
-                    let suffix = if is_f32 { "f32" } else { "f64" };
-                    // Rust's f64::round and the interpreter round half away
-                    // from zero. LLVM nearbyint rounds ties to even.
-                    let intrinsic_name = format!("llvm.{method}.{suffix}");
-                    let recv = self.get_vreg(receiver, vreg_map)?;
-                    let recv = self.coerce_value_to_type(recv, Some(float_ty.into()), builder)?;
-                    let intrinsic_ty = float_ty.fn_type(&[float_ty.into()], false);
-                    let intrinsic = module.get_function(&intrinsic_name)
-                        .unwrap_or_else(|| module.add_function(&intrinsic_name, intrinsic_ty, None));
-                    let call = builder.build_call(intrinsic, &[recv.into()], "float_method")
-                        .map_err(|e| crate::error::factory::llvm_build_failed("scalar float method", &e))?;
-                    if let Some(d) = dest {
-                        if let Some(value) = call.try_as_basic_value().basic() {
-                            vreg_map.insert(*d, value);
+                // Float math without a native intrinsic (`sin`, `pow`, `max`, ...)
+                // goes to the same `rt_math_*` f64-ABI symbols Cranelift uses.
+                if matches!(vreg_types.get(receiver).copied(), Some(crate::hir::TypeId::F32 | crate::hir::TypeId::F64)) {
+                    let unary = super::super::scalar_float_methods::rt_math_unary(method).filter(|_| args.is_empty());
+                    let binary = super::super::scalar_float_methods::rt_math_binary(method).filter(|_| args.len() == 1);
+                    if unary.is_some() || binary.is_some() {
+                        let is_f32 = vreg_types.get(receiver) == Some(&crate::hir::TypeId::F32);
+                        let f64_ty = self.context_ref().f64_type();
+                        let mut operands = vec![self.get_vreg(receiver, vreg_map)?];
+                        if binary.is_some() {
+                            operands.push(self.get_vreg(&args[0], vreg_map)?);
                         }
+                        let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+                        for v in operands {
+                            let v = if v.is_int_value() {
+                                builder
+                                    .build_signed_int_to_float(v.into_int_value(), f64_ty, "math_arg_sitofp")
+                                    .map_err(|e| crate::error::factory::llvm_build_failed("sitofp", &e))?
+                                    .into()
+                            } else {
+                                self.coerce_value_to_type(v, Some(f64_ty.into()), builder)?
+                            };
+                            call_args.push(v.into());
+                        }
+                        let rt_name = unary.or(binary).expect("checked above");
+                        let param_tys: Vec<inkwell::types::BasicMetadataTypeEnum> = call_args.iter().map(|_| f64_ty.into()).collect();
+                        let rt_func = module
+                            .get_function(rt_name)
+                            .unwrap_or_else(|| module.add_function(rt_name, f64_ty.fn_type(&param_tys, false), None));
+                        let call = builder
+                            .build_call(rt_func, &call_args, "scalar_float_math")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("scalar float math", &e))?;
+                        if let Some(d) = dest {
+                            if let Some(value) = call.try_as_basic_value().basic() {
+                                let value = if is_f32 {
+                                    builder
+                                        .build_float_trunc(value.into_float_value(), self.context_ref().f32_type(), "math_demote")
+                                        .map_err(|e| crate::error::factory::llvm_build_failed("fptrunc", &e))?
+                                        .into()
+                                } else {
+                                    value
+                                };
+                                vreg_map.insert(*d, value);
+                            }
+                        }
+                        return Ok(());
                     }
-                    return Ok(());
                 }
 
                 if matches!(method, "min" | "max") && args.len() == 1 {
@@ -3562,7 +3586,19 @@ impl LlvmBackend {
                         let bare_func = bare_resolved.and_then(|n| {
                             module.get_function(n).or_else(|| module.get_function(&n.replace("_dot_", ".")))
                         });
-                        match bare_func.or_else(|| bare_resolved.map(|n| module.add_function(n, fallback_fn_type, None)))
+                        // A bare, unqualified method name on a non-primitive receiver
+                        // (a trait-typed value whose implementor lives in another
+                        // unit, e.g. `strategy.implementation_identity()` in
+                        // pure_database.spl) names no invented builtin qualifier.
+                        // Cranelift declares it as an extern import of the bare
+                        // name (`calls.rs`, `Linkage::Import`); do the same instead
+                        // of rejecting a call Cranelift accepts.
+                        let bare_extern_name = (!func_name.contains('.')
+                            && vreg_types.get(receiver).copied().and_then(primitive_type_symbol_name).is_none())
+                        .then_some(func_name);
+                        match bare_func
+                            .or_else(|| bare_resolved.map(|n| module.add_function(n, fallback_fn_type, None)))
+                            .or_else(|| bare_extern_name.map(|n| module.add_function(n, fallback_fn_type, None)))
                         {
                             Some(f) => f,
                             None => {

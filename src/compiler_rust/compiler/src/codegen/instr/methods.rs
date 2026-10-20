@@ -302,31 +302,8 @@ pub(crate) fn compile_builtin_method<M: Module>(
     // declared with the real `f64 -> f64` ABI in `codegen/runtime_sffi.rs`.
     // See doc/08_tracking/bug/float_and_int_math_methods_missing_on_numeric_receivers_2026-08-10.md.
     {
-        let unary_rt_name = match method {
-            "sin" => Some("rt_math_sin"),
-            "cos" => Some("rt_math_cos"),
-            "tan" => Some("rt_math_tan"),
-            "asin" => Some("rt_math_asin"),
-            "acos" => Some("rt_math_acos"),
-            "atan" => Some("rt_math_atan"),
-            "sinh" => Some("rt_math_sinh"),
-            "cosh" => Some("rt_math_cosh"),
-            "tanh" => Some("rt_math_tanh"),
-            "exp" => Some("rt_math_exp"),
-            "ln" => Some("rt_math_log"),
-            "log2" => Some("rt_math_log2"),
-            "log10" => Some("rt_math_log10"),
-            "cbrt" => Some("rt_math_cbrt"),
-            _ => None,
-        };
-        let binary_rt_name = match method {
-            "pow" | "powf" => Some("rt_math_pow"),
-            "max" => Some("rt_math_max"),
-            "min" => Some("rt_math_min"),
-            "atan2" => Some("rt_math_atan2"),
-            "hypot" => Some("rt_math_hypot"),
-            _ => None,
-        };
+        let unary_rt_name = crate::codegen::scalar_float_methods::rt_math_unary(method);
+        let binary_rt_name = crate::codegen::scalar_float_methods::rt_math_binary(method);
         let src_ty = builder.func.dfg.value_type(receiver_val);
         let is_float = src_ty == types::F32 || src_ty == types::F64;
         if is_float {
