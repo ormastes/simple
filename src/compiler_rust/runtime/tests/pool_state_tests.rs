@@ -168,6 +168,14 @@ extern "C" fn add_capture_after_gate(closure: crate::value::RuntimeValue, tagged
 #[test]
 fn submitted_closure_outlives_the_submitters_scope() {
     use std::sync::atomic::Ordering;
+    // Open the gate on every exit, so a failed assertion never leaves a worker spinning.
+    struct OpenGate;
+    impl Drop for OpenGate {
+        fn drop(&mut self) {
+            CLOSURE_GATE.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let _open_gate = OpenGate;
     let (retains0, releases0, _) = crate::value::closure_pin_stats();
     unsafe {
         let state = rt_pool_state_create_v1(1);
