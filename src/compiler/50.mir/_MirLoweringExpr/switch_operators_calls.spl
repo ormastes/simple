@@ -5986,7 +5986,7 @@ impl MirLowering:
                 var with_acc = acc
                 var with_bound = param_syms
                 for item in items:
-                    with_acc = self.collect_free_var_syms(item.context_expr, param_syms, with_acc)
+                    with_acc = self.collect_free_var_syms(item.context_expr, with_bound, with_acc)
                     if item.has_target:
                         with_bound = lambda_match_bound_union_v1(with_bound, [mir_expr_symbol_id_value(item.target)])
                 self.lambda_block_free_syms(with_body, with_bound, with_acc)
@@ -6379,7 +6379,7 @@ impl MirLowering:
             case With(items, with_body):
                 var with_bound = param_syms
                 for item in items:
-                    if self.lambda_body_captures(item.context_expr, param_syms): return true
+                    if self.lambda_body_captures(item.context_expr, with_bound): return true
                     if item.has_target:
                         with_bound = lambda_match_bound_union_v1(with_bound, [mir_expr_symbol_id_value(item.target)])
                 self.lambda_block_captures(with_body, with_bound)
@@ -6503,7 +6503,7 @@ impl MirLowering:
             case Block(block):
                 self.hir_block_stmts_scan_supported(block.stmts) and (not block.has or self.lambda_capture_scan_supported(block.value))
             case While(condition, loop_body, _):
-                self.lambda_capture_scan_supported(condition) and self.hir_block_stmts_scan_supported(loop_body.stmts) and (not loop_body.has or self.lambda_capture_scan_supported(loop_body.value))
+                self.lambda_capture_scan_supported(condition) and self.lambda_loop_body_scan_supported(loop_body)
             case If(condition, then_block, else_block):
                 if not self.lambda_capture_scan_supported(condition): return false
                 if not self.lambda_block_scan_supported(then_block): return false
@@ -6555,19 +6555,27 @@ impl MirLowering:
                     return self.lambda_capture_scan_supported(present_value)
                 true
             case Break(_, value):
+                # Lifted bodies lower with an empty loop stack, where a stray
+                # `break` would silently compile to a no-op: refuse it.
+                if self.lambda_scan_loop_depth == 0: return false
                 if val present_value = value:
                     return self.lambda_capture_scan_supported(present_value)
                 true
-            case Continue(_): true
-            case Loop(loop_body, _): self.lambda_block_scan_supported(loop_body)
+            case Continue(_): self.lambda_scan_loop_depth > 0
+            case Loop(loop_body, _): self.lambda_loop_body_scan_supported(loop_body)
             case For(_, iter, loop_body, _):
-                self.lambda_capture_scan_supported(iter) and self.lambda_block_scan_supported(loop_body)
+                self.lambda_capture_scan_supported(iter) and self.lambda_loop_body_scan_supported(loop_body)
             case With(items, with_body):
                 for item in items:
                     if not self.lambda_capture_scan_supported(item.context_expr): return false
                 self.lambda_block_scan_supported(with_body)
             case Lambda(_, nested_body, _):
-                self.lambda_capture_scan_supported(nested_body)
+                # A nested lambda lifts separately: its loops are its own.
+                val saved_loop_depth = self.lambda_scan_loop_depth
+                self.lambda_scan_loop_depth = 0
+                val nested_ok = self.lambda_capture_scan_supported(nested_body)
+                self.lambda_scan_loop_depth = saved_loop_depth
+                nested_ok
             case _: false
 
     # Expression-list helpers shared by the collection arms of the three
@@ -6594,6 +6602,12 @@ impl MirLowering:
         val bound = self.hir_block_bound_syms(block.stmts, param_syms)
         if self.hir_block_stmts_capture(block.stmts, bound): return true
         block.has and self.lambda_body_captures(block.value, bound)
+
+    me lambda_loop_body_scan_supported(block: HirBlock) -> bool:
+        self.lambda_scan_loop_depth = self.lambda_scan_loop_depth + 1
+        val ok = self.lambda_block_scan_supported(block)
+        self.lambda_scan_loop_depth = self.lambda_scan_loop_depth - 1
+        ok
 
     me lambda_block_scan_supported(block: HirBlock) -> bool:
         self.hir_block_stmts_scan_supported(block.stmts) and (not block.has or self.lambda_capture_scan_supported(block.value))
