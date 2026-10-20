@@ -200,7 +200,7 @@ Capabilities are compile-time only and have **zero runtime overhead**:
 
 ### 1. Capabilities as Type Qualifiers
 - Not separate types, but permissions on existing types
-- Enables gradual adoption (default = Shared)
+- Enables gradual adoption (default `T` = Shared **capability** in GC mode; see the 2026-10-20 note below)
 - Compatible with existing type system
 
 ### 2. Actor Mode as Default
@@ -349,3 +349,9 @@ The memory model implementation successfully adds compile-time memory safety to 
 - **Error quality**: 5x improvement in actionability
 
 The implementation is production-ready and can be extended with additional features (race detection, lifetimes, regions) as needed.
+
+---
+
+## 2026-10-20 note: no-GC default and pointer sigils
+
+"Shared" above is the reference **capability** of a bare `T` (read-only, aliasable). It is not the no-GC pointer default. `doc/05_design/language/misc/memory.md` is authoritative: in No-GC mode a bare `T` resolves to `&T`, the owning UNIQUE pointer ("Single owner", "Move-only"); `*T` is the explicit ref-counted SHARED pointer; `-T` is weak. So the no-GC default is unique, and sharing is explicit (`new*`, or a consuming move into `*T`). Proposal (memory.md is silent): unique to shared is explicit; shared to unique is forbidden (see `doc/03_plan/language/memory_safety/nogc_ownership_recovery_plan_2026-10-19.md` section 3.0). `GcMode.default_pointer_kind()` returning "Unique" for NoGc matches memory.md; `default_capability()` returning "Isolated" for NoGc is not stated by memory.md (open question).
