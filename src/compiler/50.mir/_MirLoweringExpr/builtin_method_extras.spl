@@ -24,6 +24,7 @@ use compiler.hir.hir_types.{SymbolKind}
 use compiler.mir._MirLowering.provider_metadata.{mir_class_identity}
 use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
+use compiler.mir._MirLoweringExpr.enum_payload_type_identity.{enum_payload_nominal_kind}
 
 fn builtin_extra_rt_operand(name: text, params: [MirType], return_type: MirType) -> MirOperand:
     MirOperand(kind: MirOperandKind.Const(
@@ -694,6 +695,26 @@ impl MirLowering:
             self.remember_local_hir_type(local.id, HirType(kind: HirTypeKind.Int(64, true), span: init.span), 0, 0)
         else:
             self.remember_local_hir_type(local.id, HirType(kind: HirTypeKind.Float(64), span: init.span), 0, 0)
+
+    me remember_untyped_let_nominal_init(init: HirExpr, local: LocalId):
+        """Untyped `val x = <expr>` whose initialiser has a recoverable
+        declared nominal type (`xs[i]` on `[Node]`, `self.m()` -> `E?`,
+        `d[k]`): record it on the binding, so a later `match x:` owns its bare
+        variants and `E.V(x)` sees the payload type (p3p8 hir_children,
+        mono_archive_registration, engine). Only a non-generic class, struct
+        or enum, or an Optional of one, is recorded. Nothing is lowered."""
+        if self.find_local_hir_type(local.id) != nil:
+            return
+        if val init_type = self.enum_match_expr_type(init):
+            val nominal: HirType = match init_type.kind:
+                case HirTypeKind.Optional(optional_inner): optional_inner
+                case _: init_type
+            match nominal.kind:
+                case HirTypeKind.Named(nominal_owner, nominal_args):
+                    val nominal_kind = enum_payload_nominal_kind(nominal_owner, self.symbols)
+                    if nominal_args.len() == 0 and (nominal_kind == 1 or nominal_kind == 2 or nominal_kind == 3):
+                        self.remember_local_hir_type(local.id, init_type, 0, 0)
+                case _: ()
 
     me builtin_numeric_receiver_kind(receiver: HirExpr, recv: LocalId) -> i64:
         """Numeric kind of a method receiver, or 0 when it is not POSITIVELY a

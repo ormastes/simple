@@ -308,6 +308,11 @@ impl MirLowering:
             match actual.kind:
                 case HirTypeKind.Infer(_, _) | HirTypeKind.Error: ()
                 case _: return enum_payload_types_alias_compatible(expected, actual, self.symbols)
+        # `R.V(key, worker.field_types[key])`: a declared container read
+        # (binding or field chain) proves its element type. Positive only.
+        if val read_type = self.declared_container_read_type(expression):
+            if enum_payload_types_alias_compatible(expected, read_type, self.symbols):
+                return true
         if remembered_concrete_negative:
             return false
         val maybe_actual_mir = self.local_mir_type_of(local)
@@ -350,6 +355,20 @@ impl MirLowering:
                 # element comparison is sufficient — same rule as the
                 # HIR-side fallback, cross-representation.
                 enum_payload_hir_mir_alias_compatible(expected, actual_mir, self.symbols, self.canonical_type_symbols)
+            case HirTypeKind.Optional(optional_inner):
+                # A present `T` word in a `T?` slot is the plain-nullable form
+                # (the raw handle; `None` is the nil word), exactly what a
+                # `T?` parameter receives. Only heap-handle payloads qualify:
+                # a raw scalar word may equal the nil sentinel 3.
+                if enum_payload_hir_mir_alias_compatible(expected, actual_mir, self.symbols, self.canonical_type_symbols): return true
+                match optional_inner.kind:
+                    case HirTypeKind.Str: return self.local_is_str(local)
+                    case HirTypeKind.Named(optional_owner, _):
+                        val optional_kind = enum_payload_nominal_kind(optional_owner, self.symbols)
+                        if optional_kind == 1 or optional_kind == 2 or optional_kind == 3:
+                            return self.enum_payload_local_compatible(optional_inner, expression, local)
+                        return false
+                    case _: return false
             case _: return false
 
     fn enum_payload_mismatch_message(construct_key: text, index: i64, expected: HirType, expression: HirExpr) -> text:
