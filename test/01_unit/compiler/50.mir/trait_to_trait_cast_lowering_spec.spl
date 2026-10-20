@@ -110,3 +110,47 @@ describe "trait cast dispatch shape":
         print "close_via indirect calls: {shape}"
         # other = the bound object's copy thunk + its close_n slot.
         expect(shape).to_equal("cast=1 other=2")
+
+# A trait-to-trait cast yields `T?` natively while HIR types the Cast as `T`.
+# Only an Optional consumer (`if val x = e as T` / `(e as T).?`) may see it;
+# every other position is a compile error, never a silently mistyped Option.
+val cast_prelude = "trait Reader:\n    fn read_n() -> i64\n\ntrait Closer:\n    fn close_n() -> i64\n\nclass Both:\n    v: i64\n\nimpl Reader for Both:\n    fn read_n() -> i64:\n        self.v\n\nimpl Closer for Both:\n    fn close_n() -> i64:\n        self.v + 100\n\nfn take(c: Closer) -> i64:\n    c.close_n()\n\n"
+val main_tail = "\nfn main() -> i64:\n    val b: Reader = Both(v: 7)\n    print \"\{f(b)\}\"\n    0\n"
+
+fn errors_for_body(body: text) -> text:
+    val source = cast_prelude + body + main_tail
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: source, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lowering = hirlowering_for_module("app.main", surfaces)
+    val hir = lowering.lower_module(ast)
+    var hm: Dict<text, HirModule> = {}
+    hm["app.main"] = hir
+    var ml = MirLowering.new(hir.symbols)
+    ml.prescan_module_struct_names(hm, "app.main")
+    ml.lower_module(hir, [], true)
+    errors_of(ml)
+
+describe "trait-to-trait cast outside an Optional consumer":
+    it "rejects `val c = r as Closer`":
+        val errs = errors_for_body("fn f(r: Reader) -> i64:\n    val c = r as Closer\n    c.close_n()\n")
+        print "val-binding errors: [{errs}]"
+        expect(errs.contains("E-MIR-TRAIT-CAST-CONTEXT")).to_equal(true)
+
+    it "rejects passing `r as Closer` as an argument":
+        val errs = errors_for_body("fn f(r: Reader) -> i64:\n    take(r as Closer)\n")
+        print "argument errors: [{errs}]"
+        expect(errs.contains("E-MIR-TRAIT-CAST-CONTEXT")).to_equal(true)
+
+    it "rejects a method call on `(r as Closer)`":
+        val errs = errors_for_body("fn f(r: Reader) -> i64:\n    (r as Closer).close_n()\n")
+        print "receiver errors: [{errs}]"
+        expect(errs.contains("E-MIR-TRAIT-CAST-CONTEXT")).to_equal(true)
+
+    it "accepts the explicit `(r as Closer).?` existence check":
+        val errs = errors_for_body("fn f(r: Reader) -> i64:\n    val c = (r as Closer).?\n    if c != nil:\n        return 1\n    0\n")
+        print "exists-check errors: [{errs}]"
+        expect(errs).to_equal("")
