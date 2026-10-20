@@ -9152,6 +9152,7 @@ fn empty_import_map_result() -> imports::ImportMapResult {
         fn_arities: std::collections::HashMap::new(),
         fn_return_types: std::collections::HashMap::new(),
         method_param_defaults: std::collections::HashMap::new(),
+        interface_param_defaults: std::collections::HashMap::new(),
     }
 }
 

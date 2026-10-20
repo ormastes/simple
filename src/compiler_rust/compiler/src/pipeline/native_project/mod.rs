@@ -2081,6 +2081,19 @@ pub(crate) fn key_name_parts(key: &str) -> Vec<String> {
                 }
             }
         }
+        // `Type.method` is also reached through the joined spellings
+        // `resolve_name_variants` tries (`type_method`, `typemethod`); the
+        // source side emits the same forms (`source_dotted_pair_tokens`).
+        let segments: Vec<&str> = dotted.split('.').filter(|s| !s.is_empty()).collect();
+        if segments.len() >= 2 {
+            let owner = segments[segments.len() - 2];
+            let member = segments[segments.len() - 1];
+            for joined in [format!("{}_{}", owner.to_lowercase(), member), fuzzy_norm(&format!("{owner}{member}"))] {
+                if !joined.is_empty() && !parts.contains(&joined) {
+                    parts.push(joined);
+                }
+            }
+        }
     };
     push_candidate(key);
     let bytes = key.as_bytes();
@@ -2173,11 +2186,125 @@ pub(crate) struct ModuleTokens {
 
 impl ModuleTokens {
     pub(crate) fn of_source(source: &str) -> Self {
+        let mut all = expand_fuzzy_tokens(source_identifier_tokens(source));
+        all.extend(source_dotted_pair_tokens(source));
+        // `with` lowers to `__enter__` / `__exit__` calls the source never spells.
+        if all.contains("with") {
+            all.insert("__enter__".to_string());
+            all.insert("__exit__".to_string());
+        }
         ModuleTokens {
-            all: source_identifier_tokens(source),
-            members: source_member_tokens(source),
+            all,
+            members: {
+                let mut members = source_member_tokens(source);
+                members.extend(source_label_tokens(source));
+                expand_fuzzy_tokens(members)
+            },
         }
     }
+}
+
+/// Identifiers followed by a single `:` INSIDE parentheses (`Pt(x: 1)`,
+/// `case Pt(x:)`): named arguments and pattern fields name a struct field
+/// without a `.`. Treated as member tokens so field-name rows match them.
+/// Parameter declarations (`fn f(k: i64)`) match too, which only widens the
+/// slice; top-level `val p: Pt` / field declarations do not.
+pub(crate) fn source_label_tokens(source: &str) -> std::collections::HashSet<String> {
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let chars: Vec<char> = source.chars().collect();
+    let mut out = std::collections::HashSet::new();
+    let mut depth: usize = 0;
+    let mut i = 0;
+    while i < chars.len() {
+        if is_ident(chars[i]) {
+            let start = i;
+            while i < chars.len() && is_ident(chars[i]) {
+                i += 1;
+            }
+            if depth == 0 {
+                continue;
+            }
+            let mut j = i;
+            while j < chars.len() && (chars[j] == ' ' || chars[j] == '\t') {
+                j += 1;
+            }
+            let single_colon = j < chars.len() && chars[j] == ':' && chars.get(j + 1) != Some(&':');
+            if single_colon && !chars[start].is_ascii_digit() {
+                out.insert(chars[start..i].iter().collect());
+            }
+        } else {
+            match chars[i] {
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
+/// `name.to_lowercase()` with every `_` removed: the form the import map's
+/// fuzzy fallbacks compare (`imports.rs` `resolve_name_variants`
+/// `lower_no_sep`, and the enum-variant matcher's
+/// `to_lowercase().replace("_", "")`).
+pub(crate) fn fuzzy_norm(name: &str) -> String {
+    name.to_lowercase().replace('_', "")
+}
+
+/// Add the spellings the import map's FUZZY resolution derives from a source
+/// name: every tail after a `_` (`resolve_by_suffix` and the enum-variant
+/// matcher cut `foo_bar` at each `_` and look up `bar`) and the
+/// lowercase / underscore-free form. Without these, adding a function `bar`
+/// elsewhere could rebind an unresolved `foo_bar` while no slice changed.
+pub(crate) fn expand_fuzzy_tokens(tokens: std::collections::HashSet<String>) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::with_capacity(tokens.len() * 2);
+    for token in tokens {
+        for (i, _) in token.match_indices('_') {
+            let tail = &token[i + 1..];
+            if !tail.is_empty() && !tail.as_bytes()[0].is_ascii_digit() {
+                out.insert(tail.to_string());
+            }
+        }
+        let norm = fuzzy_norm(&token);
+        if !norm.is_empty() {
+            out.insert(norm);
+        }
+        out.insert(token);
+    }
+    out
+}
+
+/// For every `Type.member` adjacency in the source, the joined forms
+/// `resolve_name_variants` looks up: `type_member` (type lowercased) and the
+/// fully normalized `typemember`.
+pub(crate) fn source_dotted_pair_tokens(source: &str) -> std::collections::HashSet<String> {
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut out = std::collections::HashSet::new();
+    let chars: Vec<char> = source.chars().collect();
+    let mut i = 0;
+    let mut prev: Option<String> = None;
+    while i < chars.len() {
+        if is_ident(chars[i]) {
+            let start = i;
+            while i < chars.len() && is_ident(chars[i]) {
+                i += 1;
+            }
+            let run: String = chars[start..i].iter().collect();
+            if let Some(owner) = prev.take() {
+                out.insert(format!("{}_{}", owner.to_lowercase(), run));
+                out.insert(fuzzy_norm(&format!("{owner}{run}")));
+            }
+            if i < chars.len() && chars[i] == '.' {
+                prev = Some(run);
+                i += 1;
+            }
+        } else {
+            prev = None;
+            i += 1;
+        }
+    }
+    out
 }
 
 /// One cross-module table row, indexed under every identifier it is addressed
@@ -2256,7 +2383,13 @@ impl InterfaceSliceIndex {
             for impl_name in impls {
                 names.extend(key_name_parts(impl_name));
             }
-            index.add(&names, hash_one(&("trait", trait_name, sorted(impls))), Vec::new(), false);
+            // Dependency injection (`mir/lower/lowering_di.rs`) emits calls to
+            // `{Impl}.new` for implementers the source never names, so a module
+            // that reaches this row depends on every implementer's own rows.
+            let mut implementers: Vec<String> = impls.iter().flat_map(|i| key_name_parts(i)).collect();
+            implementers.sort();
+            implementers.dedup();
+            index.add(&names, hash_one(&("trait", trait_name, sorted(impls))), implementers, false);
         }
         for owner in result.vtable_type_owners.iter() {
             index.add(&key_name_parts(owner), hash_one(&("vto", owner)), Vec::new(), false);
@@ -2311,12 +2444,29 @@ impl InterfaceSliceIndex {
             let payload = span_free_debug(defaults);
             index.add(&key_name_parts(m), hash_one(&("mdef", m, &payload)), payload_tokens(&payload), false);
         }
+        for (m, defaults) in result.interface_param_defaults.iter() {
+            let payload = span_free_debug(defaults);
+            index.add(&key_name_parts(m), hash_one(&("pdef", m, &payload)), payload_tokens(&payload), false);
+        }
+        // `codegen/instr/closures_structs.rs` routes a static method call to
+        // the inline ctype lowering when ANY import-map entry mentioning
+        // `ctype` merely ends with the method name -- a substring match no
+        // token can express. Those rows enter every slice.
+        for (k, v) in result.map.iter() {
+            if k.contains("ctype") || v.contains("ctype") {
+                index.universal_tokens.extend(key_name_parts(k));
+            }
+        }
+        index.universal_tokens.sort();
+        index.universal_tokens.dedup();
         index
     }
 
     fn add(&mut self, names: &[String], digest: u64, extra_tokens: Vec<String>, member_only: bool) {
         let mut seen = std::collections::HashSet::new();
-        for name in names {
+        let mut keyed: Vec<String> = names.to_vec();
+        keyed.extend(names.iter().map(|n| fuzzy_norm(n)).filter(|n| !n.is_empty()));
+        for name in &keyed {
             if !seen.insert(name.as_str()) {
                 continue;
             }

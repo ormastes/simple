@@ -514,3 +514,88 @@ fn reused_objects_are_byte_identical_to_a_cold_build_of_the_same_world() {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Opus review (Fable unavailable) FIX items: rows reached by FUZZY lookups,
+// dependency injection and HIR-inlined defaults must enter the slice.
+// ---------------------------------------------------------------------------
+
+fn digest_of(files: &[(&str, &str)], module_source: &str) -> u64 {
+    super::InterfaceSliceIndex::build(&import_map_of(files)).digest_for_source(module_source)
+}
+
+/// `resolve_by_suffix` cuts an unresolved `foo_bar` at `_` and binds a unique
+/// `bar`; adding `bar` anywhere must therefore reach the caller's slice.
+#[test]
+fn slice_digest_tracks_rows_reached_by_suffix_fallback() {
+    let caller = "fn use_it() -> i64:\n    return helper_bar()\n";
+    let without = digest_of(&[("caller", caller), ("other", OTHER)], caller);
+    let with_bar = digest_of(&[("caller", caller), ("other", OTHER), ("lib", "fn bar() -> i64:\n    return 1\n")], caller);
+    assert_ne!(without, with_bar, "a new `bar` can rebind `helper_bar`");
+}
+
+/// `resolve_name_variants` maps `point_norm` to `Point.norm` (and back).
+#[test]
+fn slice_digest_tracks_joined_type_method_spellings() {
+    let caller = "fn use_it(p: i64) -> i64:\n    return point_norm(p)\n";
+    let base = "struct Point:\n    x: i64\n\nimpl Point:\n    fn norm(self) -> i64:\n        return 1\n";
+    let changed = base.replace("fn norm(self) -> i64", "fn norm(self) -> f64");
+    assert_ne!(
+        digest_of(&[("caller", caller), ("geo", base)], caller),
+        digest_of(&[("caller", caller), ("geo", &changed)], caller),
+        "`point_norm` reaches `Point.norm`"
+    );
+}
+
+/// A trait row pulls in every implementer's rows: DI emits `{Impl}.new` for
+/// implementers the injecting module never names.
+#[test]
+fn slice_digest_follows_trait_implementers() {
+    let caller = "fn use_it(s: Store) -> i64:\n    return 1\n";
+    let base = "trait Store:\n    fn get(self) -> i64\n\nstruct MemStore:\n    v: i64\n\nimpl Store for MemStore:\n    fn get(self) -> i64:\n        return self.v\n\nimpl MemStore:\n    static fn new() -> MemStore:\n        return MemStore(v: 0)\n";
+    let changed = base.replace("static fn new() -> MemStore", "static fn new(k: i64 = 0) -> MemStore");
+    assert_ne!(
+        digest_of(&[("caller", caller), ("store", base)], caller),
+        digest_of(&[("caller", caller), ("store", &changed)], caller),
+        "an implementer's constructor change reaches modules that name the trait"
+    );
+}
+
+/// The HIR import loader inlines a free function's default at each call site,
+/// so a default-VALUE-only change is an interface change for callers.
+#[test]
+fn slice_digest_tracks_free_function_default_values() {
+    let caller = "use prov.{provide}\n\nfn use_it() -> i64:\n    return provide()\n";
+    let base = "fn provide(k: i64 = 0) -> i64:\n    return k\n";
+    let changed = base.replace("= 0", "= 1");
+    assert_ne!(
+        digest_of(&[("caller", caller), ("prov", base)], caller),
+        digest_of(&[("caller", caller), ("prov", &changed)], caller),
+        "default-only change must enter the caller's slice"
+    );
+}
+
+/// Named arguments and pattern fields name a field without a `.`.
+#[test]
+fn label_tokens_count_as_member_tokens() {
+    let tokens = super::ModuleTokens::of_source("val q = Pt(x: 1, y: 2)\nval m = f(a::b)\nval p: Pt = q\n");
+    assert!(tokens.members.contains("x") && tokens.members.contains("y"));
+    assert!(!tokens.members.contains("a"), "`::` is a path, not a label");
+    assert!(!tokens.members.contains("p"), "a top-level `val p: T` binds a local, not a field");
+}
+
+/// End to end: a default-value-only change rebuilds the caller and the
+/// relinked binary carries the NEW default.
+#[cfg(target_os = "linux")]
+#[test]
+fn default_value_change_recompiles_the_caller_and_relinks_correctly() {
+    let prov = PROV_BASE.replace("fn provide() -> i64:\n    return 11\n", "fn provide(k: i64 = 11) -> i64:\n    return k\n");
+    let fixture = Fixture::new(&[("prov", prov.as_str()), ("cons", CONS), ("other", OTHER)]);
+    fixture.build("d1");
+    assert_eq!(run_consume(&fixture, "d1"), "consume=13");
+    fixture.write("prov", &prov.replace("= 11", "= 12"));
+    let before = fixture.object_files("d1");
+    fixture.build("d1");
+    assert_eq!(recompiled_modules(&fixture, "d1", &before), set(&["cons", "prov"]));
+    assert_eq!(run_consume(&fixture, "d1"), "consume=14", "caller must see the new default");
+}
