@@ -963,6 +963,8 @@ pub use value::{
     rt_closure_func_ptr,
     rt_closure_get_capture,
     rt_closure_new,
+    rt_closure_release,
+    rt_closure_retain,
     rt_closure_set_capture,
     // Dict operations
     rt_dict_entries,

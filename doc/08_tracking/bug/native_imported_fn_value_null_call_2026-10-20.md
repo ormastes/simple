@@ -92,12 +92,47 @@ refused), and `global_fn_value_{cranelift,llvm}` (build error above; the typed
 `imported_fn_value_native`, `fn_ref_value_jit` and `optional_array_coalesce_native`
 still pass.
 
-Still open (Opus review):
-- The pool does not retain a submitted closure. A capturing lambda created inside a
-  transient scope and joined after that scope ends is a use-after-free. Zero-capture
-  function values are safe because their thunk never reads the closure.
-- The Rust-runtime pool twin (`runtime_pool.c` in `simple-runtime`) has no native
-  test. The fixtures link only `core-c-bootstrap`.
+### 3a. Pool closure retention (fixed)
+
+#4009 let the pool accept closures but did not retain them. A closure dies when its
+transient scope ends. A task that ran after the submitter's scope ended read a freed
+closure: `rt_closure_get_capture` answered nil and the task returned a wrong value
+(measured 8 instead of 12 on both lanes; the registry check turns the use-after-free
+into a silent wrong value rather than a crash).
+
+Fix: `rt_closure_retain` / `rt_closure_release`, in both runtimes (`runtime_native.c`,
+and `objects.rs` for the Rust runtime). A pin table defers the free. A scope end that
+meets a pinned closure marks it orphaned instead of freeing it. The release that
+drops the last pin of an orphaned closure frees it. A release with no pin returns 0
+and is never a double free. Both pools (`runtime_thread.c` and `runtime_pool.c`)
+retain at submit. They release after the run, or when the task is freed unrun
+(refused, or handle allocation failed). Workers never stop and a state can only be
+destroyed with no outstanding task, so there is no queued-task shutdown path.
+
+`runtime_pool.c` also published state completion after `done` was broadcast, so a
+joiner could release the task first: `completed` read 99999 of 100000, and the
+completion touched a freed task. It now publishes under the task lock, as
+`runtime_thread.c` already did.
+
+Tests:
+- `src/runtime/test/rt_pool_closure_retain_selfcheck.c` (ASan; wired into
+  `build-core-c-bootstrap-runtime-capsule.shs`).
+- `pool_state_tests::submitted_closure_outlives_the_submitters_scope` (Rust lane).
+
+Both submit a closure, end its scope while the task waits, then run it. They check the
+result is 12, that retains and releases are 2 and 2 (an accepted submit and a refused
+one), that the closure is freed after the last release, and that an extra release
+returns 0.
+
+Cost: a retain+release pair is about 33 ns (C, `-O2`, clang 23.1.0). A submit+join
+round trip measured 15-33 µs on a loaded host (load about 20), with base and fix
+overlapping. The pin table is scanned linearly, and its size is the number of closures
+currently pinned.
+
+Still open:
+- Captured heap objects are not pinned. A capture allocated in the same transient
+  scope is still freed at scope end. Inline (int) captures and immortal objects are
+  safe.
 - `declared_function_value_types` resolves parameter types during the declaration
   pass, so a parameter whose struct is declared later becomes ANY. Cranelift is
   unaffected (its thunk uses the compiled function). LLVM takes argument handling

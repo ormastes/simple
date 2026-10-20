@@ -244,6 +244,109 @@ pub extern "C" fn rt_closure_free(closure: RuntimeValue) {
 }
 
 // ============================================================================
+// Closure pins (twin of runtime_native.c RtCoreClosurePin)
+// ============================================================================
+
+/// A consumer that runs a closure LATER (the PoolState v1 task queue in
+/// runtime_pool.c) pins it with `rt_closure_retain` and drops the pin exactly
+/// once with `rt_closure_release`. A closure dies only when its transient scope
+/// ends; the scope end marks a pinned closure orphaned instead of freeing it
+/// (`closure_pin_defer_free`), and the release that drops the last pin of an
+/// orphaned closure frees it. Captured heap objects are not pinned.
+struct ClosurePin {
+    addr: usize,
+    pins: i64,
+    orphaned: bool,
+}
+
+struct ClosurePins {
+    entries: Vec<ClosurePin>,
+    retains: i64,
+    releases: i64,
+}
+
+static CLOSURE_PINS: std::sync::Mutex<ClosurePins> = std::sync::Mutex::new(ClosurePins {
+    entries: Vec::new(),
+    retains: 0,
+    releases: 0,
+});
+
+fn closure_pins() -> std::sync::MutexGuard<'static, ClosurePins> {
+    CLOSURE_PINS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Scope end: true when `addr` is a pinned closure, which is then orphaned
+/// and must NOT be freed by the caller.
+pub(crate) fn closure_pin_defer_free(addr: usize) -> bool {
+    let mut table = closure_pins();
+    match table.entries.iter_mut().find(|e| e.addr == addr) {
+        Some(entry) => {
+            entry.orphaned = true;
+            true
+        }
+        None => false,
+    }
+}
+
+/// Pin a closure for a deferred consumer. 1 = pinned; 0 = not a closure.
+#[no_mangle]
+pub extern "C" fn rt_closure_retain(closure: RuntimeValue) -> i64 {
+    let Some(ptr) = get_typed_ptr::<RuntimeClosure>(closure, HeapObjectType::Closure) else {
+        return 0;
+    };
+    let addr = ptr as usize;
+    let mut table = closure_pins();
+    match table.entries.iter_mut().find(|e| e.addr == addr) {
+        Some(entry) => entry.pins += 1,
+        None => table.entries.push(ClosurePin { addr, pins: 1, orphaned: false }),
+    }
+    table.retains += 1;
+    1
+}
+
+/// Drop one pin taken by `rt_closure_retain`; the last pin of a closure whose
+/// scope already ended frees it. 1 = a pin was dropped; 0 = no pin held
+/// (never a double free).
+#[no_mangle]
+pub extern "C" fn rt_closure_release(closure: RuntimeValue) -> i64 {
+    if !closure.is_heap() {
+        return 0;
+    }
+    let ptr = closure.as_heap_ptr();
+    let addr = ptr as usize;
+    let free_now = {
+        let mut table = closure_pins();
+        let Some(index) = table.entries.iter().position(|e| e.addr == addr) else {
+            return 0;
+        };
+        table.releases += 1;
+        table.entries[index].pins -= 1;
+        if table.entries[index].pins == 0 {
+            table.entries.swap_remove(index).orphaned
+        } else {
+            false
+        }
+    };
+    if free_now {
+        unsafe {
+            let size = (*ptr).size as usize;
+            if let Ok(layout) = std::alloc::Layout::from_size_align(size, 8) {
+                if super::heap::unregister_heap_ptr_checked(ptr) {
+                    std::alloc::dealloc(ptr as *mut u8, layout);
+                }
+            }
+        }
+    }
+    1
+}
+
+/// Test hook (not runtime ABI): (retains, releases, live pinned closures).
+pub fn closure_pin_stats() -> (i64, i64, i64) {
+    let table = closure_pins();
+    (table.retains, table.releases, table.entries.len() as i64)
+}
+
+// ============================================================================
 // Enum SFFI functions
 // ============================================================================
 

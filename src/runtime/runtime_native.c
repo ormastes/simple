@@ -1866,6 +1866,33 @@ static RtCoreClosure* rt_core_as_closure(int64_t value) {
     return closure->kind == RT_VALUE_HEAP_CLOSURE ? closure : NULL;
 }
 
+/* Closure pins: a runtime consumer that runs a closure LATER (the PoolState
+ * v1 task queue) retains it at hand-off with rt_closure_retain and releases it
+ * exactly once with rt_closure_release. A closure dies only at the end of its
+ * transient scope, so a pin defers that: the scope-end reclaim marks a pinned
+ * closure orphaned instead of freeing it, and the release that drops the last
+ * pin of an orphaned closure frees it. An unpinned or immortal closure is
+ * unaffected. The table is guarded by the heap lifecycle lock, which the
+ * scope-end reclaim already holds. Captured heap objects are NOT pinned. */
+typedef struct RtCoreClosurePin {
+    RtCoreClosure* closure;
+    int64_t pins;
+    int orphaned;
+} RtCoreClosurePin;
+static RtCoreClosurePin* rt_core_closure_pins = NULL;
+static size_t rt_core_closure_pin_len = 0;
+static size_t rt_core_closure_pin_cap = 0;
+static int64_t rt_core_closure_pin_retains = 0;
+static int64_t rt_core_closure_pin_releases = 0;
+
+/* Lifecycle lock held. */
+static RtCoreClosurePin* spl_closure_pin_find_locked(const void* closure) {
+    for (size_t i = 0; i < rt_core_closure_pin_len; i++) {
+        if (rt_core_closure_pins[i].closure == closure) return &rt_core_closure_pins[i];
+    }
+    return NULL;
+}
+
 /* ----------------------------------------------------------------------------
  * Immortal heap-pointer registry (O(1) discrimination).
  *
@@ -2255,6 +2282,14 @@ static void rt_core_reclaim_transient_immortal(uint32_t scope_id) {
                 break;
         }
         if (!reclaim_string && (!object_scope || *object_scope != scope_id)) continue;
+        if (kind == RT_VALUE_HEAP_CLOSURE) {
+            /* Pinned by a pending consumer: the last rt_closure_release frees it. */
+            RtCoreClosurePin* pin = spl_closure_pin_find_locked(ptr);
+            if (pin) {
+                pin->orphaned = 1;
+                continue;
+            }
+        }
         rt_core_immortal_registry_acquire();
         int erased = rt_core_immortal_registry_erase_raw((uintptr_t)ptr);
         rt_core_immortal_registry_release();
@@ -10287,6 +10322,75 @@ int64_t rt_closure_get_capture(int64_t closure_value, int64_t index) {
 int64_t rt_closure_func_ptr(int64_t closure_value) {
     RtCoreClosure* closure = rt_core_as_closure(closure_value);
     return closure ? closure->func_ptr : 0;
+}
+
+/* Pin a closure for a deferred consumer (see RtCoreClosurePin). Returns 1 when
+ * pinned, 0 when `closure_value` is not a registered closure or the table
+ * cannot grow -- the caller must then refuse the hand-off. */
+int64_t rt_closure_retain(int64_t closure_value) {
+    RtCoreClosure* closure = rt_core_as_closure(closure_value);
+    if (!closure) return 0;
+    rt_core_heap_lifecycle_acquire();
+    RtCoreClosurePin* pin = spl_closure_pin_find_locked(closure);
+    if (pin) {
+        pin->pins++;
+    } else {
+        if (rt_core_closure_pin_len == rt_core_closure_pin_cap) {
+            size_t cap = rt_core_closure_pin_cap ? rt_core_closure_pin_cap * 2 : 16;
+            RtCoreClosurePin* grown =
+                (RtCoreClosurePin*)realloc(rt_core_closure_pins, cap * sizeof(RtCoreClosurePin));
+            if (!grown) {
+                rt_core_heap_lifecycle_release();
+                return 0;
+            }
+            rt_core_closure_pins = grown;
+            rt_core_closure_pin_cap = cap;
+        }
+        rt_core_closure_pins[rt_core_closure_pin_len++] = (RtCoreClosurePin){closure, 1, 0};
+    }
+    rt_core_closure_pin_retains++;
+    rt_core_heap_lifecycle_release();
+    return 1;
+}
+
+/* Drop one pin taken by rt_closure_retain. The last pin of a closure whose
+ * scope already ended frees it here. Returns 1 when a pin was dropped, 0 for
+ * a value holding no pin (never a double free). */
+int64_t rt_closure_release(int64_t closure_value) {
+    if ((((uint64_t)closure_value) & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return 0;
+    RtCoreClosure* closure = (RtCoreClosure*)(uintptr_t)(((uint64_t)closure_value) & ~RT_VALUE_TAG_MASK);
+    rt_core_heap_lifecycle_acquire();
+    RtCoreClosurePin* pin = spl_closure_pin_find_locked(closure);
+    if (!pin) {
+        rt_core_heap_lifecycle_release();
+        return 0;
+    }
+    rt_core_closure_pin_releases++;
+    int free_now = 0;
+    if (--pin->pins == 0) {
+        free_now = pin->orphaned;
+        *pin = rt_core_closure_pins[--rt_core_closure_pin_len];
+    }
+    if (free_now) {
+        rt_core_immortal_registry_acquire();
+        int erased = rt_core_immortal_registry_erase_raw((uintptr_t)closure);
+        rt_core_immortal_registry_release();
+        if (erased) {
+            atomic_fetch_sub_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+            free(closure);
+        }
+    }
+    rt_core_heap_lifecycle_release();
+    return 1;
+}
+
+/* Test hook (not runtime ABI): pin traffic and live pinned closures. */
+void spl_closure_pin_stats(int64_t* retains, int64_t* releases, int64_t* live) {
+    rt_core_heap_lifecycle_acquire();
+    if (retains) *retains = rt_core_closure_pin_retains;
+    if (releases) *releases = rt_core_closure_pin_releases;
+    if (live) *live = (int64_t)rt_core_closure_pin_len;
+    rt_core_heap_lifecycle_release();
 }
 
 /* Array collection ops that invoke a closure per element.

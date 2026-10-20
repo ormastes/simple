@@ -674,6 +674,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_closure_set_capture",
     "rt_closure_get_capture",
     "rt_closure_func_ptr",
+    "rt_closure_retain",
+    "rt_closure_release",
     // Enum operations
     "rt_enum_check_discriminant",
     "rt_enum_check_variant",

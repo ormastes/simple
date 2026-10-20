@@ -146,3 +146,62 @@ fn independent_pool_states_do_not_share_admission_credit() {
         assert_eq!(rt_pool_state_destroy_v1(b), 1);
     }
 }
+
+// A closure submitted to the pool must stay alive until its task has run, even
+// when the submitter's transient scope (its only owner) ends first. The boxed
+// entry blocks on GATE before reading its capture, so the read happens after
+// the scope end. Before the pool retained closures, the capture read a freed
+// closure (nil) and the task answered a wrong value.
+static CLOSURE_GATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static CLOSURE_ENTERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn add_capture_after_gate(closure: crate::value::RuntimeValue, tagged: crate::value::RuntimeValue) -> crate::value::RuntimeValue {
+    use std::sync::atomic::Ordering;
+    CLOSURE_ENTERED.store(true, Ordering::SeqCst);
+    while !CLOSURE_GATE.load(Ordering::SeqCst) {
+        std::thread::yield_now();
+    }
+    let capture = crate::value::rt_closure_get_capture(closure, 0);
+    crate::value::rt_value_int(crate::value::rt_value_unbox_int(tagged) + crate::value::rt_value_unbox_int(capture))
+}
+
+#[test]
+fn submitted_closure_outlives_the_submitters_scope() {
+    use std::sync::atomic::Ordering;
+    // Open the gate on every exit, so a failed assertion never leaves a worker spinning.
+    struct OpenGate;
+    impl Drop for OpenGate {
+        fn drop(&mut self) {
+            CLOSURE_GATE.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let _open_gate = OpenGate;
+    let (retains0, releases0, _) = crate::value::closure_pin_stats();
+    unsafe {
+        let state = rt_pool_state_create_v1(1);
+        assert_ne!(state, 0);
+        assert!(crate::value::rt_transient_array_scope_begin());
+        let closure = crate::value::rt_closure_new(add_capture_after_gate as usize as *const u8, 1);
+        assert!(crate::value::rt_closure_set_capture(closure, 0, crate::value::rt_value_int(7)));
+        let task = rt_pool_state_try_submit_i64_v1(state, closure.0 as i64, 5);
+        assert!(task > 0);
+        // Capacity 1 is full: the refused submit must not keep its retain.
+        assert_eq!(rt_pool_state_try_submit_i64_v1(state, closure.0 as i64, 9), -1);
+        // Run the scope end while the task is still pending or blocked at the gate.
+        while !CLOSURE_ENTERED.load(Ordering::SeqCst) && rt_pool_task_status_i64_v1(task) == 0 {
+            std::thread::yield_now();
+        }
+        assert!(crate::value::rt_transient_array_scope_end());
+        CLOSURE_GATE.store(true, Ordering::SeqCst);
+        assert_eq!(rt_pool_task_join_i64_v1(task), 12);
+        assert_eq!(rt_pool_task_release_i64_v1(task), 1);
+        let (retains, releases, _) = crate::value::closure_pin_stats();
+        assert_eq!(retains - retains0, 2, "accepted + refused submit");
+        assert_eq!(releases - releases0, 2, "every retain released exactly once");
+        // The scope ended while pinned, so the last release freed it.
+        assert!(crate::value::rt_closure_func_ptr(closure).is_null());
+        assert_eq!(crate::value::rt_closure_release(closure), 0, "no pin left: never a double free");
+        assert_eq!(rt_pool_state_close_v1(state), 1);
+        assert_eq!(rt_pool_state_destroy_v1(state), 1);
+    }
+}

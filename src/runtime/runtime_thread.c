@@ -777,15 +777,25 @@ static int64_t rt_pool_v1_scalar_task_dispatch(int64_t raw_task) {
  * `(closure, tagged...) -> tagged` (cranelift fn values and lambdas). The
  * pool adapts the closure at this boundary: tag the input, untag the
  * result. Anything else is refused at submit, never called. The closure is
- * not retained; it must outlive the task (join before releasing it). */
+ * pinned at submit (rt_closure_retain) and released once the task has run or
+ * is disposed unrun, so the submitter's scope may end before the task runs.
+ * Captured heap objects are not pinned. */
 extern int64_t rt_closure_func_ptr(int64_t closure_value);
+extern int64_t rt_closure_retain(int64_t closure_value);
+extern int64_t rt_closure_release(int64_t closure_value);
 extern int64_t rt_value_int(int64_t value);
 extern int64_t rt_value_unbox_int(int64_t value);
 
 static int64_t spl_pool_v1_boxed_task_dispatch(int64_t raw_task) {
     RtPoolTask* task = (RtPoolTask*)(intptr_t)raw_task;
     if (!task || !task->boxed_entry) return 0;
-    return rt_value_unbox_int(task->boxed_entry(task->boxed_closure, rt_value_int(task->scalar_input)));
+    int64_t closure = task->boxed_closure;
+    int64_t result = rt_value_unbox_int(task->boxed_entry(closure, rt_value_int(task->scalar_input)));
+    /* The pin taken at submit ends with the run (exactly once: dispose skips a
+     * task whose closure was already released here). */
+    task->boxed_closure = 0;
+    rt_closure_release(closure);
+    return result;
 }
 
 typedef struct RtPoolStateV1 {
@@ -1524,6 +1534,8 @@ int64_t rt_pool_join(int64_t handle) {
 
 static void rt_pool_v1_task_dispose(RtPoolTask* task) {
     if (!task) return;
+    /* Never ran (refused, or handle allocation failed): drop the submit pin. */
+    if (task->boxed_closure) rt_closure_release(task->boxed_closure);
 #ifdef SPL_THREAD_PTHREAD
     pthread_cond_destroy(&task->done_cond);
     pthread_mutex_destroy(&task->lock);
@@ -1543,8 +1555,14 @@ static RtPoolTask* rt_pool_v1_scalar_task_create(int64_t function_value, int64_t
      * value that is not a registered closure. */
     int64_t boxed = is_direct ? 0 : rt_closure_func_ptr(function_value);
     if (!is_direct && boxed == 0) return NULL;
+    /* The task runs later, possibly after the submitter's scope ended: pin
+     * the closure until the task has run (or is disposed unrun). */
+    if (!is_direct && !rt_closure_retain(function_value)) return NULL;
     RtPoolTask* task = (RtPoolTask*)SPL_MALLOC(sizeof(RtPoolTask), "rt_pool_v1_task");
-    if (!task) return NULL;
+    if (!task) {
+        if (!is_direct) rt_closure_release(function_value);
+        return NULL;
+    }
     memset(task, 0, sizeof(*task));
     task->scalar_input = input;
     if (is_direct) {

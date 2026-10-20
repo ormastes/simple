@@ -62,15 +62,30 @@ static int64_t rt_pool_scalar_task_dispatch(int64_t raw_task) {
  * record [entry, MARKER] (raw i64 convention) or a registered runtime closure
  * whose func_ptr is the boxed entry `(closure, tagged...) -> tagged`
  * (cranelift fn values and lambdas). The closure is adapted here: tag the
- * input, untag the result. Anything else is refused at submit. */
+ * input, untag the result. Anything else is refused at submit. The closure is
+ * pinned at submit (rt_closure_retain) and released once the task has run or
+ * is freed unrun. Captured heap objects are not pinned. */
 extern int64_t rt_closure_func_ptr(int64_t closure_value);
+extern int64_t rt_closure_retain(int64_t closure_value);
+extern int64_t rt_closure_release(int64_t closure_value);
 extern int64_t rt_value_int(int64_t value);
 extern int64_t rt_value_unbox_int(int64_t value);
 
 static int64_t spl_pool_boxed_task_dispatch(int64_t raw_task) {
     RtPoolTask* task = (RtPoolTask*)(intptr_t)raw_task;
     if (task == NULL || task->boxed_entry == NULL) return 0;
-    return rt_value_unbox_int(task->boxed_entry(task->boxed_closure, rt_value_int(task->scalar_input)));
+    int64_t closure = task->boxed_closure;
+    int64_t result = rt_value_unbox_int(task->boxed_entry(closure, rt_value_int(task->scalar_input)));
+    task->boxed_closure = 0; /* the submit pin ends with the run, exactly once */
+    rt_closure_release(closure);
+    return result;
+}
+
+/* Every task free goes through here: a task freed unrun drops its submit pin. */
+static void spl_pool_task_free(RtPoolTask* task) {
+    if (task == NULL) return;
+    if (task->boxed_closure) rt_closure_release(task->boxed_closure);
+    free(task);
 }
 
 /* Native Simple function values can arrive as a tagged heap record. A
@@ -485,9 +500,12 @@ static void rt_pool_complete_task(RtPoolTask* task, int64_t result) {
     pthread_mutex_lock(&task->lock);
     task->result = result;
     task->done = 1;
+    /* Publish state completion while the task lock still pins the task (twin
+     * of runtime_thread.c): once done is observable a joiner may release and
+     * free the task, and completed must already count it. */
+    rt_pool_state_task_completed(task);
     pthread_cond_broadcast(&task->done_cond);
     pthread_mutex_unlock(&task->lock);
-    rt_pool_state_task_completed(task);
 #else
     EnterCriticalSection(&g_pool_lock);
     if (g_pool_busy_workers > 0) g_pool_busy_workers--;
@@ -496,9 +514,9 @@ static void rt_pool_complete_task(RtPoolTask* task, int64_t result) {
     EnterCriticalSection(&task->lock);
     task->result = result;
     task->done = 1;
+    rt_pool_state_task_completed(task);
     WakeAllConditionVariable(&task->done_cond);
     LeaveCriticalSection(&task->lock);
-    rt_pool_state_task_completed(task);
 #endif
 }
 
@@ -821,8 +839,12 @@ static RtPoolTask* rt_pool_scalar_task_create(int64_t function_value, int64_t in
      * for any value that is not a registered closure. */
     int64_t boxed = is_direct ? 0 : rt_closure_func_ptr(function_value);
     if (!is_direct && boxed == 0) return NULL;
+    if (!is_direct && !rt_closure_retain(function_value)) return NULL;
     RtPoolTask* task = (RtPoolTask*)calloc(1, sizeof(RtPoolTask));
-    if (task == NULL) return NULL;
+    if (task == NULL) {
+        if (!is_direct) rt_closure_release(function_value);
+        return NULL;
+    }
     task->scalar_input = input_i64;
     if (is_direct) {
         task->scalar_entry = (rt_pool_scalar_fn_t)(intptr_t)descriptor[0];
@@ -909,7 +931,7 @@ int64_t rt_pool_join(int64_t handle) {
     if (task->state != NULL) return result;
     DeleteCriticalSection(&task->lock);
 #endif
-    free(task);
+    spl_pool_task_free(task);
     return result;
 }
 
@@ -951,7 +973,7 @@ int64_t rt_pool_state_try_submit_i64_v1(int64_t state_handle, int64_t arg0, int6
         pthread_mutex_unlock(&state->lock);
         pthread_cond_destroy(&task->done_cond);
         pthread_mutex_destroy(&task->lock);
-        free(task);
+        spl_pool_task_free(task);
         rt_pool_state_handle_put(state_handle);
         return -2;
     }
@@ -959,7 +981,7 @@ int64_t rt_pool_state_try_submit_i64_v1(int64_t state_handle, int64_t arg0, int6
         pthread_mutex_unlock(&state->lock);
         pthread_cond_destroy(&task->done_cond);
         pthread_mutex_destroy(&task->lock);
-        free(task);
+        spl_pool_task_free(task);
         rt_pool_state_handle_put(state_handle);
         return -1;
     }
@@ -972,14 +994,14 @@ int64_t rt_pool_state_try_submit_i64_v1(int64_t state_handle, int64_t arg0, int6
     if (state->closed || state->destroying) {
         LeaveCriticalSection(&state->lock);
         DeleteCriticalSection(&task->lock);
-        free(task);
+        spl_pool_task_free(task);
         rt_pool_state_handle_put(state_handle);
         return -2;
     }
     if (state->outstanding >= state->capacity) {
         LeaveCriticalSection(&state->lock);
         DeleteCriticalSection(&task->lock);
-        free(task);
+        spl_pool_task_free(task);
         rt_pool_state_handle_put(state_handle);
         return -1;
     }
@@ -1004,7 +1026,7 @@ int64_t rt_pool_state_try_submit_i64_v1(int64_t state_handle, int64_t arg0, int6
         LeaveCriticalSection(&state->lock);
         DeleteCriticalSection(&task->lock);
 #endif
-        free(task);
+        spl_pool_task_free(task);
         rt_pool_state_handle_put(state_handle);
         return -3;
     }
@@ -1025,7 +1047,7 @@ int64_t rt_pool_state_try_submit_i64_v1(int64_t state_handle, int64_t arg0, int6
         LeaveCriticalSection(&state->lock);
         DeleteCriticalSection(&task->lock);
 #endif
-        free(task);
+        spl_pool_task_free(task);
         rt_pool_state_handle_put(state_handle);
         return -3;
     }
@@ -1109,7 +1131,7 @@ int64_t rt_pool_task_release_i64_v1(int64_t task_handle) {
 #else
     DeleteCriticalSection(&task->lock);
 #endif
-    free(task);
+    spl_pool_task_free(task);
     return 1;
 }
 

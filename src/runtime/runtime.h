@@ -829,6 +829,8 @@ int64_t  rt_closure_new(int64_t func_ptr, int64_t capture_count);
 int64_t  rt_closure_set_capture(int64_t closure, int64_t index, int64_t value);
 int64_t  rt_closure_get_capture(int64_t closure, int64_t index);
 int64_t  rt_closure_func_ptr(int64_t closure);
+int64_t  rt_closure_retain(int64_t closure);
+int64_t  rt_closure_release(int64_t closure);
 int8_t   rt_enum_check_discriminant(int64_t value, int64_t expected);
 int8_t   rt_enum_check_variant(int64_t value, int64_t expected_enum_id, int64_t expected_discriminant);
 int8_t   rt_try_is_absent(int64_t value, int64_t expected_enum_id, int64_t err_discriminant);
