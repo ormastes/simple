@@ -12,7 +12,7 @@ use compiler.mir._MirLowering.provider_metadata.{mir_class_identity, mir_nominal
 use compiler.mir.nominal_owner_diagnostics.{mir_nominal_profile_take_receipt}
 use compiler.mir._MirLowering.module_lowering.{mir_layout_canonical_module_name}
 use compiler.mir._MirLoweringExpr.text_index_ranges.*
-use compiler.mir._MirLoweringExpr.enum_payload_type_identity.{mir_hir_type_is_symbol_free}
+use compiler.mir._MirLoweringExpr.enum_payload_type_identity.{mir_hir_type_is_symbol_free, enum_payload_nominal_kind}
 # MIR Lowering - Expression Lowering
 #
 # Expression lowering from HIR to MIR:
@@ -1367,6 +1367,26 @@ impl MirLowering:
                 case MirTypeKind.Struct(_): true
                 case _: false
         false
+
+    me null_coalesce_nominal_join_type(left: HirExpr, left_local: LocalId) -> HirType?:
+        """Declared class/struct/enum payload of `left` in `left ?? right`:
+        the Option's inner type, or a declared container read (`d[k]`,
+        `d.get(k)`). Nothing is lowered here; unknown stays nil."""
+        var payload: HirType? = self.option_inner_hir_type_for_local(left, left_local)
+        if payload == nil:
+            payload = self.declared_container_read_type(left)
+        if val present_payload = payload:
+            var nominal = present_payload
+            match present_payload.kind:
+                case HirTypeKind.Optional(inner): nominal = inner
+                case _: ()
+            match nominal.kind:
+                case HirTypeKind.Named(owner, _):
+                    val nominal_kind = enum_payload_nominal_kind(owner, self.symbols)
+                    if nominal_kind == 1 or nominal_kind == 2 or nominal_kind == 3:
+                        return Some(nominal)
+                case _: ()
+        nil
 
     me nil_compare_operand_is_plain_scalar(e: HirExpr, local: LocalId) -> bool:
         """True when `e` (one side of `== nil` / `!= nil`) is a STATICALLY
@@ -5709,6 +5729,13 @@ impl MirLowering:
                 if coalesce_record_fallback_valid:
                     if val record_type = coalesce_record_type:
                         self.remember_local_hir_type(result_local.id, record_type, 0, 0)
+                if coalesce_record_type == nil and coalesce_array_type == nil and not right_terminated:
+                    # `opt ?? E.Zero` / `d[k] ?? MirType.i64()`: the merged value
+                    # has the left side's declared nominal payload type. Without
+                    # it a `match` on the result saw an untyped subject (bare
+                    # variant "ambiguous") and an enum payload slot rejected it.
+                    if val join_type = self.null_coalesce_nominal_join_type(left, left_local):
+                        self.remember_local_hir_type(result_local.id, join_type, 0, 0)
                 if result_struct_name != "":
                     self.struct_value_syms[result_local.id] = result_struct_name
 
@@ -5885,11 +5912,27 @@ impl MirLowering:
                             self.exists_collection_locals[result_local.id] = true
                             val optional_collection = HirType(kind: HirTypeKind.Optional(exists_payload_type), span: base.span)
                             self.remember_local_hir_type(result_local.id, optional_collection, 0, 0)
-                        case HirTypeKind.Named(_, _) | HirTypeKind.DynTrait(_):
+                        case HirTypeKind.Named(exists_named_owner, _):
                             # The if-val binder carries a raw payload-or-nil
                             # word. Preserve its exact declared trait owner so
                             # calls in the present branch select its vtable,
                             # without guessing from method names or impl count.
+                            if self.native_trait_owner_for_type(exists_payload_type) != "":
+                                self.remember_local_hir_type(result_local.id, exists_payload_type, 2, 0)
+                            else:
+                                # A declared class/struct/enum payload keeps its
+                                # owner too: `if val c = opt: match c: case Int(v)`
+                                # and `E.V(c)` otherwise saw an untyped binder, so
+                                # a bare variant shared by two enums was reported
+                                # ambiguous and the payload slot rejected it (p3p8
+                                # engine/method_calls_literals/module_lowering).
+                                # The word is the raw handle on the present edge;
+                                # Named is not a plain scalar, so the binder's
+                                # `!= nil` test is never folded.
+                                val exists_named_kind = enum_payload_nominal_kind(exists_named_owner, self.symbols)
+                                if exists_named_kind >= 1 and exists_named_kind <= 3:
+                                    self.remember_local_hir_type(result_local.id, exists_payload_type, 0, 0)
+                        case HirTypeKind.DynTrait(_):
                             if self.native_trait_owner_for_type(exists_payload_type) != "":
                                 self.remember_local_hir_type(result_local.id, exists_payload_type, 2, 0)
                         case _: ()

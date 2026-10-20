@@ -20,6 +20,7 @@ use compiler.mir._MirLowering.provider_metadata.{mir_provider_callable_identity}
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
+use compiler.mir._MirLoweringExpr.enum_payload_type_identity.{enum_payload_nominal_kind}
 use compiler.common.diagnostics.span.{Span}
 use compiler.mir.mir_lowering_types.{MirLowering, MirError, marker_map_without, text_map_without}
 use compiler.frontend.resource_registry.{resource_is_declared}
@@ -1457,6 +1458,7 @@ impl MirLowering:
                                         # Untyped `var best = 0`: record the
                                         # proven numeric type of the initialiser.
                                         self.builtin_remember_numeric_init(let_init, local)
+                                        self.remember_untyped_let_nominal_init(let_init, local)
                                 # Bug (array-of-structs field misread), CONFLICT-FLAG
                                 # (mir_lowering_stmts.spl is fenced, touched per the
                                 # fence rule's "CONFLICT-FLAG if must touch"
@@ -1779,6 +1781,7 @@ impl MirLowering:
                                             # Untyped `var best = 0`: record the
                                             # proven numeric type of the initialiser.
                                             self.builtin_remember_numeric_init(untyped_init_expr, local)
+                                            self.remember_untyped_let_nominal_init(untyped_init_expr, local)
                                 # Bug (array-of-structs field misread), CONFLICT-FLAG
                                 # (mir_lowering_stmts.spl is fenced): mirror the same
                                 # array_element_struct_syms propagation as the other
@@ -3143,6 +3146,7 @@ impl MirLowering:
         while arm_i < arm_locals.len():
             val arm_local: LocalId = arm_locals[arm_i]
             if self.nil_locals.contains(arm_local.id):
+                self.remember_merged_optional_arm_type(dest, arm_locals)
                 return
             val arm_struct = if self.struct_value_syms.contains(arm_local.id): self.struct_value_syms[arm_local.id] else: ""
             if arm_i == 0:
@@ -3161,6 +3165,45 @@ impl MirLowering:
             self.struct_value_syms[dest.id] = shared_struct
         if all_typed and self.find_local_hir_type(dest.id) == nil:
             self.copy_local_hir_type_metadata(arm_locals[0].id, dest.id)
+
+    me remember_merged_optional_arm_type(dest: LocalId, arm_locals: [LocalId]):
+        """`val r = match o: case Some(e): Some(f(e)); case nil: nil` and
+        `if c: x else: nil`: the merged slot is `T?` (p3p8 resolve.spl
+        Return/Break/Yield/If/Range payloads). Adopt it only when every non-nil
+        arm carries the same HIR type: already `T?` (a Some witness), or a
+        plain `T` that is text or a non-generic class/struct/enum -- the
+        plain-nullable heap word. A scalar `T` stays unknown: its raw word
+        could equal the nil sentinel 3."""
+        if self.find_local_hir_type(dest.id) != nil:
+            return
+        var first_index = -1
+        var arm_i = 0
+        while arm_i < arm_locals.len():
+            val arm_local: LocalId = arm_locals[arm_i]
+            if not self.nil_locals.contains(arm_local.id):
+                if val arm_type = self.find_local_hir_type(arm_local.id):
+                    if first_index < 0:
+                        first_index = arm_i
+                    else:
+                        if val first_type = self.find_local_hir_type(arm_locals[first_index].id):
+                            if not hir_types_equal(first_type, arm_type):
+                                return
+                else:
+                    return
+            arm_i = arm_i + 1
+        if first_index < 0:
+            return
+        if val shared = self.find_local_hir_type(arm_locals[first_index].id):
+            match shared.kind:
+                case HirTypeKind.Optional(_):
+                    self.copy_local_hir_type_metadata(arm_locals[first_index].id, dest.id)
+                case HirTypeKind.Str:
+                    self.remember_local_hir_type(dest.id, HirType(kind: HirTypeKind.Optional(shared), span: shared.span), 0, 0)
+                case HirTypeKind.Named(shared_owner, shared_args):
+                    val shared_kind = enum_payload_nominal_kind(shared_owner, self.symbols)
+                    if shared_args.len() == 0 and (shared_kind == 1 or shared_kind == 2 or shared_kind == 3):
+                        self.remember_local_hir_type(dest.id, HirType(kind: HirTypeKind.Optional(shared), span: shared.span), 0, 0)
+                case _: ()
 
     fn present_collection_binding(cond: HirExpr) -> (i64, LocalId):
         """Recognize the existing desugared present test, using declared payload
