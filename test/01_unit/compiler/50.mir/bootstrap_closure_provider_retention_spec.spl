@@ -1,0 +1,125 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+"""
+# MIR: stage3 bootstrap-closure modules keep only their MirModule
+
+The stage3 bootstrap-fixed lane lowers ~1351 closure modules on ONE
+`MirLowering` under SIMPLE_BOOTSTRAP=1 (ambient bootstrap) and hands every
+module the whole closure as providers. Ambient bootstrap used to skip both the
+retirement of the ten per-consumer tables and provider layout demand, so each
+module promoted -- and the next module orphaned -- a whole-closure copy of the
+trait-impl rows, global mirrors and relocated provider layouts (46.6 GB after
+1123 modules, 2026-10-20). The driver's trait-implementor feed (the whole
+closure HIR) was also an owner root, so every module's promotion re-walked it.
+
+These examples pin the scaling contract: what a closure module leaves on the
+shared lowering does not grow with unrelated providers, the borrowed provider
+feed survives the scope untouched, and imports still lower.
+"""
+
+use std.spec
+use std.io_runtime.{env_get, env_set}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir.mir.*
+
+val used_src = "pub trait Shape:\n    fn area() -> i64\n\npub struct Square:\n    side: i64\n\nimpl Shape for Square:\n    fn area() -> i64:\n        self.side * self.side\n\npub val SCALE: i64 = 3\n\npub fn make_square(n: i64) -> Square:\n    Square(side: n)\n"
+val consumer_src = "use lib.used.\{Square, SCALE, make_square\}\n\nfn run(n: i64) -> i64:\n    val sq = make_square(n)\n    sq.side * SCALE\n"
+
+fn unrelated_src(i: i64) -> text:
+    "pub struct Unrelated{i}:\n    a{i}: i64\n    b{i}: text\n\npub class UnrelatedBox{i}:\n    v{i}: i64\n"
+
+fn unrelated_name(i: i64) -> text:
+    "lib.unrelated{i}"
+
+struct ClosureRun:
+    errors: i64
+    functions: i64
+    layout_rows: i64
+    unrelated_rows: i64
+    trait_owner_rows: i64
+    global_rows: i64
+    feed_after: i64
+    feed_len: i64
+
+fn lower_closure(unrelated_count: i64) -> ClosureRun:
+    val log = Logger(level: 0)
+    var modules: Dict<text, ParserModule> = {}
+    var sources: [SourceFile] = []
+    modules["lib.used"] = parse_full_frontend(used_src, "lib/used.spl", "lib.used", log)
+    sources.push(SourceFile(path: "lib/used.spl", content: used_src, module_name: "lib.used"))
+    var i = 0
+    while i < unrelated_count:
+        val src = unrelated_src(i)
+        modules[unrelated_name(i)] = parse_full_frontend(src, "lib/unrelated{i}.spl", unrelated_name(i), log)
+        sources.push(SourceFile(path: "lib/unrelated{i}.spl", content: src, module_name: unrelated_name(i)))
+        i = i + 1
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var providers: [HirModule] = []
+    var used_lowering = hirlowering_for_module("lib/used.spl", surfaces)
+    providers.push(used_lowering.lower_module(modules["lib.used"]))
+    i = 0
+    while i < unrelated_count:
+        var unrelated_lowering = hirlowering_for_module("lib/unrelated{i}.spl", surfaces)
+        providers.push(unrelated_lowering.lower_module(modules[unrelated_name(i)]))
+        i = i + 1
+    var first_hir_lowering = hirlowering_for_module("app/first.spl", surfaces)
+    val first = first_hir_lowering.lower_module(parse_full_frontend(consumer_src, "app/first.spl", "app.first", log))
+    var second_hir_lowering = hirlowering_for_module("app/second.spl", surfaces)
+    val second = second_hir_lowering.lower_module(parse_full_frontend(consumer_src, "app/second.spl", "app.second", log))
+
+    val old_bootstrap = env_get("SIMPLE_BOOTSTRAP")
+    env_set("SIMPLE_BOOTSTRAP", "1")
+    val target = driver_mir_target_context(driver_core_compile_options_default())
+    var lowering = MirLowering.new_for_target(first.symbols, target)
+    lowering.trait_impl_provider_modules = providers
+    var functions = 0
+    val first_mir = lowering.lower_bootstrap_closure_module(first, providers)
+    if first_mir.is_ok():
+        functions = functions + first_mir.unwrap().functions.len()
+    val second_mir = lowering.lower_bootstrap_closure_module(second, providers)
+    if second_mir.is_ok():
+        functions = functions + second_mir.unwrap().functions.len()
+    env_set("SIMPLE_BOOTSTRAP", old_bootstrap)
+
+    var unrelated_rows = 0
+    for raw_key in lowering.struct_field_order.keys():
+        val key: text = raw_key
+        if key.contains("Unrelated"):
+            unrelated_rows = unrelated_rows + 1
+    val failed = (if first_mir.is_err(): 1 else: 0) + (if second_mir.is_err(): 1 else: 0)
+    ClosureRun(errors: lowering.errors.len() + failed, functions: functions,
+        layout_rows: lowering.struct_field_order.len(), unrelated_rows: unrelated_rows,
+        trait_owner_rows: lowering.trait_impl_owners.len(),
+        global_rows: lowering.global_symbol_ids.len() + lowering.imported_global_initializers.len(),
+        feed_after: lowering.trait_impl_provider_modules.len(), feed_len: providers.len())
+
+describe "stage3 bootstrap-closure provider retention":
+    it "lowers closure modules with imported struct, global and trait providers":
+        val run = lower_closure(1)
+        expect(run.errors).to_equal(0)
+        expect(run.functions).to_be_greater_than(1)
+
+    it "retires per-consumer trait-impl rows and global mirrors after each closure module":
+        val run = lower_closure(2)
+        expect(run.trait_owner_rows).to_equal(0)
+        expect(run.global_rows).to_equal(0)
+
+    it "registers no layout rows for providers the consumer never names":
+        val run = lower_closure(4)
+        expect(run.unrelated_rows).to_equal(0)
+
+    it "keeps retained layout rows flat as unrelated providers grow":
+        val small = lower_closure(1)
+        val large = lower_closure(6)
+        expect(large.layout_rows).to_equal(small.layout_rows)
+
+    it "restores the borrowed trait-implementor feed after the scope":
+        val run = lower_closure(3)
+        expect(run.feed_after).to_equal(run.feed_len)
