@@ -146,7 +146,7 @@ fn value_as_u8(value: &Value) -> Option<u8> {
 fn step_mut<'a>(slot: &'a mut Value, projection: &Projection) -> Option<&'a mut Value> {
     match (slot, projection) {
         (Value::Object { fields, .. }, Projection::Field(name)) => Arc::make_mut(fields).get_mut(name),
-        (Value::Dict(entries), Projection::Field(name)) => Arc::make_mut(entries).get_mut(name),
+        (Value::Dict(entries), Projection::Field(name)) => crate::interpreter::module_dict_make_mut(entries).get_mut(name),
         (Value::Array(items), Projection::Index(index)) => {
             let idx = normalize_index(items.len(), index)?;
             Arc::make_mut(items).get_mut(idx)
@@ -167,7 +167,7 @@ fn step_mut<'a>(slot: &'a mut Value, projection: &Projection) -> Option<&'a mut 
                 return None;
             }
             let key_string = key.to_key_string();
-            Arc::make_mut(entries).get_mut(&key_string)
+            crate::interpreter::module_dict_make_mut(entries).get_mut(&key_string)
         }
         _ => None,
     }
@@ -194,7 +194,7 @@ fn store_last(container: &mut Value, projection: &Projection, value: Value) -> b
             true
         }
         (Value::Dict(entries), Projection::Field(name)) => {
-            Arc::make_mut(entries).insert(name.clone(), value);
+            crate::interpreter::module_dict_make_mut(entries).insert(name.clone(), value);
             true
         }
         (Value::Array(items), Projection::Index(index)) => match normalize_index(items.len(), index) {
@@ -236,7 +236,7 @@ fn store_last(container: &mut Value, projection: &Projection, value: Value) -> b
             if !key.dict_key_is_scalar() {
                 return false;
             }
-            Arc::make_mut(entries).insert(key.to_key_string(), value);
+            crate::interpreter::module_dict_make_mut(entries).insert(key.to_key_string(), value);
             true
         }
         _ => false,

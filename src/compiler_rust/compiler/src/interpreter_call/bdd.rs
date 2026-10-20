@@ -62,6 +62,33 @@ pub(crate) fn finish_bdd_matcher(result: Value) -> Result<Value, CompileError> {
     Ok(result)
 }
 
+/// End of a bare `expect <subject>` expression statement (no matcher chained).
+/// Inside an `it` a standing provisional failure is judged at example end;
+/// outside any `it` there is no example end, so a falsy subject that no matcher
+/// consumed is fatal here instead of a silent exit 0. A chained
+/// `expect(x).to_*()` is a method call, never reaches this, and has already
+/// cleared the provisional flag.
+pub(crate) fn finish_bare_expect_statement() -> Result<(), CompileError> {
+    if BDD_INSIDE_IT.with(|cell| *cell.borrow()) || !BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow()) {
+        return Ok(());
+    }
+    // Ownership: only the `expect` this very statement just evaluated may fail
+    // it. A provisional flag left standing by an earlier statement (a matcher
+    // that never clears it, a failed example) belongs to a lower sequence number.
+    let owned = BDD_PROVISIONAL_SEQ.with(|p| *p.borrow()) == BDD_EXPECT_SEQ.with(|e| *e.borrow());
+    BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = false);
+    if !owned {
+        BDD_PROVISIONAL_MSG.with(|cell| *cell.borrow_mut() = None);
+        return Ok(());
+    }
+    let msg = BDD_PROVISIONAL_MSG
+        .with(|cell| cell.borrow_mut().take())
+        .unwrap_or_else(|| "expectation failed".to_string());
+    Err(CompileError::semantic(format!(
+        "{msg} (expectation outside an `it` block has no spec harness to record it)"
+    )))
+}
+
 thread_local! {
     // Current indentation level for nested describe/context blocks
     pub(crate) static BDD_INDENT: RefCell<usize> = const { RefCell::new(0) };

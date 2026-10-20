@@ -473,8 +473,13 @@ pub(super) fn apply_macro_hygiene_expr(expr: &Expr, ctx: &mut MacroHygieneContex
         Expr::Spawn(expr) => Expr::Spawn(Box::new(apply_macro_hygiene_expr(expr, ctx))),
         Expr::Await(expr) => Expr::Await(Box::new(apply_macro_hygiene_expr(expr, ctx))),
         Expr::Yield(expr) => Expr::Yield(expr.as_ref().map(|expr| Box::new(apply_macro_hygiene_expr(expr, ctx)))),
-        Expr::New { kind, expr } => Expr::New {
+        Expr::New {
+            kind,
+            expr,
+            explicit_sigil,
+        } => Expr::New {
             kind: *kind,
+            explicit_sigil: *explicit_sigil,
             expr: Box::new(apply_macro_hygiene_expr(expr, ctx)),
         },
         Expr::Cast { expr, target_type } => Expr::Cast {

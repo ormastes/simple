@@ -1680,9 +1680,7 @@ pub fn handle_dict_methods(
             for arg in args {
                 let key = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
                 current = match &current {
-                    Value::Dict(m) => m
-                        .get(&key.to_key_string())
-                        .cloned()
+                    Value::Dict(m) => crate::interpreter::module_dict_get(m, &key.to_key_string())
                         .map(|stored| Value::unwrap_dict_entry(&key, stored))
                         .unwrap_or(Value::Nil),
                     Value::Array(a) => {

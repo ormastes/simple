@@ -100,10 +100,15 @@ need not import the implementor (fixture `cross_module`).
 
 **Other limits (Opus review, 2026-10-20):**
 - On a TRAIT-typed source the result is `T?` while HIR types the `Cast` as
-  `T`; only `if val c = e as T:` (or another Optional consumer) is correct.
-  `(e as T).m()` or `val c: T = e as T` would receive an Option handle.
-  Follow-up: type trait-to-trait `as` as `T?` in HIR, or reject non-Optional
-  consumers.
+  `T`. Closed 2026-10-20 (follow-up PR): the `T?` form is lowered ONLY as the
+  operand of `.?` (`if val c = e as T:` desugars to `c = (e as T).?`); every
+  other position (`val c = e as T`, an argument, a method receiver) is the
+  compile error `E-MIR-TRAIT-CAST-CONTEXT`. Same-trait `e as T` stays plain
+  `T`. Typing it `T?` in HIR remains the general fix.
+  Native-vs-interpreter gap: other genuine Optional consumers (`??`, `?.`,
+  `match` on Some/nil, `return` from a `-> T?` fn, `val c: T? = e as T`,
+  `(e as T) != nil`) are ALSO rejected natively for now -- a native
+  limitation, not language semantics; HIR `T?` typing would admit them.
 - An implementation rejected by `native_trait_implementation_rejection`
   (e.g. relying on default methods) is skipped by the cast thunk and casts
   to `nil`.

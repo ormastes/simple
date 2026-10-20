@@ -715,13 +715,13 @@ pub(crate) fn exec_node(
                         for item_target in items {
                             match item_target {
                                 ImportTarget::Single(name) => {
-                                    if let Some(v) = exports.get(name) {
-                                        bindings.push((name.clone(), v.clone()));
+                                    if let Some(v) = crate::interpreter::module_dict_get(exports, name) {
+                                        bindings.push((name.clone(), v));
                                     }
                                 }
                                 ImportTarget::Aliased { name, alias } => {
-                                    if let Some(v) = exports.get(name) {
-                                        bindings.push((alias.clone(), v.clone()));
+                                    if let Some(v) = crate::interpreter::module_dict_get(exports, name) {
+                                        bindings.push((alias.clone(), v));
                                     }
                                 }
                                 // Nested groups are unsupported at module scope
@@ -732,17 +732,17 @@ pub(crate) fn exec_node(
                         }
                     }
                     ImportTarget::Glob => {
-                        for (name, value) in exports.iter() {
+                        crate::interpreter::module_dict_for_each_visible(exports, |name, value| {
                             // Never glob-import `main`: it would be picked up by
                             // the entry-point fallback and run instead of the
                             // script's own main. Same guard as module scope. A
                             // NAMED import of `main` is an explicit opt-in and
                             // is deliberately not filtered.
                             if matches!(value, Value::Function { .. }) && name == "main" {
-                                continue;
+                                return;
                             }
                             bindings.push((name.clone(), value.clone()));
-                        }
+                        });
                     }
                     ImportTarget::Single(_) | ImportTarget::Aliased { .. } => {}
                 }
@@ -791,7 +791,7 @@ fn try_assign_module_global_index(
             Value::Dict(dict) => {
                 let key = index_val.to_key_string();
                 let stored = Value::wrap_dict_entry(index_val, value);
-                Arc::make_mut(dict).insert(key, stored);
+                crate::interpreter::module_dict_make_mut(dict).insert(key, stored);
                 Ok(None)
             }
             Value::Tuple(tuple) => {
@@ -1526,7 +1526,7 @@ pub(crate) fn exec_assignment(
                     Value::Dict(mut dict) => {
                         let key = index_val.to_key_string();
                         let stored = Value::wrap_dict_entry(&index_val, value);
-                        Arc::make_mut(&mut dict).insert(key, stored);
+                        crate::interpreter::module_dict_make_mut(&mut dict).insert(key, stored);
                         Value::Dict(dict)
                     }
                     Value::Tuple(mut tup) => {
@@ -1775,7 +1775,7 @@ pub(crate) fn exec_assignment(
                                     }
                                     Value::Dict(dict) => {
                                         let stored = Value::wrap_dict_entry(&index_val, value.clone());
-                                        Arc::make_mut(dict).insert(pre_key.clone(), stored);
+                                        crate::interpreter::module_dict_make_mut(dict).insert(pre_key.clone(), stored);
                                         Ok(())
                                     }
                                     Value::Tuple(tup) => {
@@ -1883,7 +1883,7 @@ pub(crate) fn exec_assignment(
                                     Value::Dict(mut dict) => {
                                         let key = index_val.to_key_string();
                                         let stored = Value::wrap_dict_entry(&index_val, value);
-                                        Arc::make_mut(&mut dict).insert(key, stored);
+                                        crate::interpreter::module_dict_make_mut(&mut dict).insert(key, stored);
                                         Value::Dict(dict)
                                     }
                                     Value::Tuple(mut tup) => {
@@ -2033,7 +2033,7 @@ pub(crate) fn exec_assignment(
                             Value::Dict(dict) => {
                                 let key = index_val.to_key_string();
                                 let stored = Value::wrap_dict_entry(&index_val, value);
-                                Arc::make_mut(dict).insert(key, stored);
+                                crate::interpreter::module_dict_make_mut(dict).insert(key, stored);
                             }
                             other => {
                                 let ctx = ErrorContext::new()

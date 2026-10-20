@@ -709,7 +709,7 @@ pub(crate) fn try_place_mutation_in_place(
                         impl_methods,
                     )?;
                     match arg0 {
-                        Value::Dict(map) => (None, None, Some(map)),
+                        Value::Dict(map) => (None, None, Some(crate::interpreter::module_dict_flat(&map).unwrap_or(map))),
                         _ => {
                             let ctx = ErrorContext::new()
                                 .with_code(codes::TYPE_MISMATCH)
@@ -824,6 +824,14 @@ pub(crate) fn handle_method_call_with_self_update(
     impl_methods: &ImplMethods,
 ) -> Result<(Value, Option<(String, Value)>), CompileError> {
     let out = handle_method_call_with_self_update_inner(value_expr, env, functions, classes, enums, impl_methods)?;
+    // A bare `expect <subject>` statement (no matcher chained, so it is a plain
+    // Call, not a MethodCall): outside any `it` there is no example end to judge
+    // its provisional failure, so a falsy subject is fatal here.
+    if let Expr::Call { callee, .. } = value_expr {
+        if matches!(callee.as_ref(), Expr::Identifier(n) if n == "expect") {
+            crate::interpreter::interpreter_call::finish_bare_expect_statement()?;
+        }
+    }
     // A mutating method call on a MODULE-GLOBAL receiver (`g.push(x)`) only ever
     // produced a `(name, new_value)` update for the caller to write into `env`.
     // But identifier READS of a non-local name prefer MODULE_GLOBALS over `env`

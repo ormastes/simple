@@ -219,12 +219,17 @@ impl MirLowering:
         self.builder = outer_builder
         name
 
-    me lower_native_trait_as(local: LocalId, operand: HirExpr, target: HirType, span: Span) -> LocalId:
+    me lower_native_trait_as(local: LocalId, operand: HirExpr, target: HirType, span: Span, optional_context: bool) -> LocalId:
         """`e as T` for a native trait `T`. A trait-typed `e` is a checked
         downcast through the source vtable's cast thunk and yields `T?`
         (nil when the dynamic type does not implement `T`, as in the
         interpreter). A concrete `e` converts statically and fails the build
-        when the type has no implementation of `T`."""
+        when the type has no implementation of `T`.
+
+        HIR types the Cast as `T`, so the `T?` result is only sound under an
+        Optional consumer (`optional_context`: the `.?` that `if val x = e as
+        T` desugars to). Anywhere else the trait-to-trait form is a compile
+        error, never an Option handle silently read as a trait object."""
         val target_owner = self.native_trait_owner_for_type(target)
         var source_type: HirType? = self.find_local_hir_type(local.id)
         if source_type == nil and operand.has_type_ and operand.type_ != nil:
@@ -234,9 +239,13 @@ impl MirLowering:
             source_owner = self.native_trait_owner_for_type(source)
         if source_owner == "":
             return self.coerce_native_trait_object(local, operand, target)
-        val optional_target = HirType(kind: HirTypeKind.Optional(target), span: span)
         if source_owner == target_owner:
-            return self.ensure_option_handle(local, optional_target)
+            if not optional_context: return local
+            return self.ensure_option_handle(local, HirType(kind: HirTypeKind.Optional(target), span: span))
+        if not optional_context:
+            self.error_fatal("E-MIR-TRAIT-CAST-CONTEXT: `e as {target_owner}` on a {source_owner} value is a checked downcast yielding `{target_owner}?`; use it only as `if val x = e as {target_owner}:` or `(e as {target_owner}).?`", Some(span))
+            return local
+        val optional_target = HirType(kind: HirTypeKind.Optional(target), span: span)
         val source_index = self.native_trait_layout_index(source_owner)
         val target_index = self.native_trait_layout_index(target_owner)
         if source_index < 0 or target_index < 0:

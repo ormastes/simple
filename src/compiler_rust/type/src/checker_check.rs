@@ -132,6 +132,7 @@ impl TypeChecker {
     }
 
     pub fn check_items(&mut self, items: &[Node]) -> Result<(), TypeError> {
+        self.collect_ownership_decls(items);
         // Register built-in functions
         let range_ty = self.fresh_var();
         self.env.insert("range".to_string(), range_ty);
@@ -459,12 +460,24 @@ impl TypeChecker {
                                 }
                             }
                         }
+                        self.check_ownership_flow(&inferred_ty, &expected_ty, "binding")?;
                         // Unify inferred type with expected type
                         let _ = self.unify(&inferred_ty, &expected_ty);
                     }
 
                     // Bind all identifiers in the pattern
                     self.bind_pattern(&let_stmt.pattern);
+                    // Strict no-GC: the binding carries its pointer kind (declared,
+                    // else inferred) so later uses are checked against it.
+                    if self.nogc_strict {
+                        if let Some(name) = self.pattern_root_name(&let_stmt.pattern).map(str::to_string) {
+                            let bound = match type_annotation {
+                                Some(ast_ty) => self.ast_type_to_type(ast_ty),
+                                None => inferred_ty.clone(),
+                            };
+                            self.env.insert(name, bound);
+                        }
+                    }
                 } else {
                     // Uninitialized declaration (`var name: [T; N]` with no
                     // initializer): still bind the pattern so later uses do
@@ -498,6 +511,15 @@ impl TypeChecker {
                 let ty = self.infer_expr(&assign.value)?;
                 // Python-like: assignment can create new variables
                 if let Expr::Identifier(name) = &assign.target {
+                    if self.nogc_strict {
+                        if let Some(declared) = self.env.get(name).cloned() {
+                            self.check_ownership_flow(&ty, &declared, "assignment")?;
+                            // A strict binding keeps its declared kind.
+                            if self.contains_sigil(&declared) {
+                                return Ok(());
+                            }
+                        }
+                    }
                     self.env.insert(name.clone(), ty);
                 }
                 Ok(())
@@ -517,7 +539,23 @@ impl TypeChecker {
                     };
                     self.env.insert(param.name.clone(), ty);
                 }
-                self.check_block_with_macro_rules(&func.body)?;
+                let declared_ret = if self.nogc_strict {
+                    func.return_type.as_ref().map(|t| self.ast_type_to_type(t))
+                } else {
+                    None
+                };
+                let old_ret = std::mem::replace(&mut self.current_ret, declared_ret.clone());
+                let mut body_result = self.check_block_with_macro_rules(&func.body);
+                if body_result.is_ok() {
+                    if let (Some(expected), Some(Node::Expression(tail))) = (&declared_ret, func.body.statements.last()) {
+                        // Trailing-expression (implicit) return.
+                        body_result = self
+                            .infer_expr(tail)
+                            .and_then(|found| self.check_ownership_flow(&found, expected, "return value"));
+                    }
+                }
+                self.current_ret = old_ret;
+                body_result?;
                 self.env = old_env;
                 // Re-add function name after restoring env (it was added before saving old_env)
                 self.env.insert(func.name.clone(), func_ty);
@@ -525,7 +563,10 @@ impl TypeChecker {
             }
             Node::Return(ret) => {
                 if let Some(expr) = &ret.value {
-                    let _ = self.infer_expr(expr)?;
+                    let found = self.infer_expr(expr)?;
+                    if let Some(expected) = self.current_ret.clone() {
+                        self.check_ownership_flow(&found, &expected, "return value")?;
+                    }
                 }
                 Ok(())
             }

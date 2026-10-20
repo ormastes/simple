@@ -670,9 +670,7 @@ pub(super) fn eval_collection_expr(
                 Value::Dict(map) => {
                     let key = idx_val.to_key_string();
                     // Return nil for missing keys instead of erroring
-                    Ok(map
-                        .get(&key)
-                        .cloned()
+                    Ok(crate::interpreter::module_dict_get(&map, &key)
                         .map(|stored| Value::unwrap_dict_entry(&idx_val, stored))
                         .unwrap_or(Value::Nil))
                 }

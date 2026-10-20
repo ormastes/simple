@@ -15,7 +15,7 @@ use crate::interpreter::{
 };
 
 use crate::bounded_cache::{limit_from_env, BoundedCache, CacheStats};
-use crate::value::{Env, Value};
+use crate::value::{Env, ModuleTable, TableView, Value};
 use simple_parser::ast::{ClassDef, EnumDef, FunctionDef};
 
 // ---------------------------------------------------------------------------
@@ -448,7 +448,7 @@ pub fn report_cache_sizes(tag: &str) {
         MODULE_ENUMS_CACHE.with(|c| (c.borrow().len(), c.borrow().values().map(|m| m.len()).sum::<usize>()));
     let partial = PARTIAL_MODULE_EXPORTS_CACHE.with(|c| c.borrow().len());
     let (env_m, env_e) =
-        MODULE_ENV_BY_OWNER.with(|c| (c.borrow().len(), c.borrow().values().map(|e| e.len()).sum::<usize>()));
+        MODULE_ENV_BY_OWNER.with(|c| (c.borrow().len(), c.borrow().values().map(|e| e.retained_len()).sum::<usize>()));
     let (ovl_k, ovl_e) =
         FUNCTION_OVERLOADS.with(|c| (c.borrow().len(), c.borrow().values().map(|v| v.len()).sum::<usize>()));
     let parsed = parsed_source_cache_len();
@@ -568,6 +568,7 @@ pub fn clear_module_cache() {
     PATH_KEY_CACHE.with(|cache| cache.borrow_mut().clear());
     LAST_MODULE_OWNER_KEY.with(|last| *last.borrow_mut() = None);
     FILTERED_DICT_CACHE.with(|cache| cache.borrow_mut().clear());
+    sweep_module_dict_tables();
     clear_probe_source_cache();
     clear_parsed_source_cache();
     crate::pipeline::module_loader::clear_module_source_text_cache();
@@ -635,6 +636,7 @@ pub fn clear_module_cache_selective() {
     PARTIAL_MODULE_EXPORTS_CACHE.with(|cache| cache.borrow_mut().clear());
     // Drop memoised filtered dicts whose source no one else holds any more.
     FILTERED_DICT_CACHE.with(|cache| cache.borrow_mut().retain(|_, (src, _)| Arc::strong_count(src) > 1));
+    sweep_module_dict_tables();
     // Source-derived probe/AST memos must not survive a selective boundary:
     // test and IDE callers may edit, delete, or recreate files between runs.
     clear_probe_source_cache();
@@ -854,6 +856,159 @@ pub fn get_cached_module_exports(path: &Path) -> Option<Value> {
         }
         result
     })
+}
+
+// ---------------------------------------------------------------------------
+// Layered module export dicts.
+//
+// A module's `Value::Dict` holds only the entries the module itself put in
+// its export table; whatever it imported whole lives in the `ModuleTable`
+// registered here under the dict's address. Every name lookup THROUGH a
+// module value goes via `module_dict_get` / `module_dict_for_each_visible`,
+// which see exactly the flat table the module used to carry.
+// doc/08_tracking/bug/interpreter_use_unpack_reexports_transitive_closure_2026-10-20.md
+//
+// The registry holds a clone of the dict `Arc` beside the view, so an address
+// can never be recycled while its entry is live (the `FILTERED_DICT_CACHE`
+// rule). Process-wide, not thread-local: a module value can cross threads.
+// ---------------------------------------------------------------------------
+
+type ModuleDictRegistry = HashMap<usize, (Arc<HashMap<String, Value>>, TableView)>;
+
+fn module_dict_tables() -> &'static parking_lot::RwLock<ModuleDictRegistry> {
+    static TABLES: OnceLock<parking_lot::RwLock<ModuleDictRegistry>> = OnceLock::new();
+    TABLES.get_or_init(|| parking_lot::RwLock::new(HashMap::new()))
+}
+
+/// Lock-free negative filter in front of the registry: one bit per hashed
+/// dict address, set on registration and never cleared. Every dict field
+/// miss, method call and write asks "is this a module dict?"; for a plain
+/// dict this answers no with one relaxed load instead of a lock. A set bit
+/// only means "check the registry" (false positives are resolved there).
+const REGISTRY_FILTER_WORDS: usize = 1024;
+static REGISTRY_FILTER: [std::sync::atomic::AtomicU64; REGISTRY_FILTER_WORDS] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; REGISTRY_FILTER_WORDS];
+
+fn registry_filter_bit(addr: usize) -> (usize, u64) {
+    // Allocation addresses are 16-byte aligned; mix before indexing.
+    let h = (addr >> 4).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32;
+    let bit = h % (REGISTRY_FILTER_WORDS * 64);
+    (bit / 64, 1u64 << (bit % 64))
+}
+
+fn maybe_registered(addr: usize) -> bool {
+    let (word, mask) = registry_filter_bit(addr);
+    REGISTRY_FILTER[word].load(std::sync::atomic::Ordering::Acquire) & mask != 0
+}
+
+fn register_module_dict(dict: &Arc<HashMap<String, Value>>, view: TableView) {
+    let (word, mask) = registry_filter_bit(Arc::as_ptr(dict) as usize);
+    REGISTRY_FILTER[word].fetch_or(mask, std::sync::atomic::Ordering::Release);
+    module_dict_tables()
+        .write()
+        .insert(Arc::as_ptr(dict) as usize, (Arc::clone(dict), view));
+}
+
+/// Drop registry entries no `Value` can reach any more: the dict is held only
+/// by the registry and by its own table (`own` / `filtered_own`).
+fn sweep_module_dict_tables() {
+    module_dict_tables()
+        .write()
+        .retain(|_, (dict, _)| Arc::strong_count(dict) > 2);
+}
+
+/// The registered view of `dict`, if it is a finished module's export dict
+/// (or the filtered copy of one).
+pub fn module_dict_view(dict: &Arc<HashMap<String, Value>>) -> Option<TableView> {
+    if !maybe_registered(Arc::as_ptr(dict) as usize) {
+        return None;
+    }
+    module_dict_tables()
+        .read()
+        .get(&(Arc::as_ptr(dict) as usize))
+        .and_then(|(held, view)| Arc::ptr_eq(held, dict).then(|| view.clone()))
+}
+
+/// The registered view of `dict` when it resolves anything beyond `dict`
+/// itself; `None` for plain dicts and modules that imported nothing whole.
+pub fn layered_view(dict: &Arc<HashMap<String, Value>>) -> Option<TableView> {
+    module_dict_view(dict).filter(|view| !view.table.layers().is_empty())
+}
+
+/// `dict`'s view for layering into an importer: the registered table, or a
+/// leaf table that is exactly `dict` (partial / cycle / empty dicts).
+pub fn module_table_for(dict: &Arc<HashMap<String, Value>>) -> TableView {
+    match module_dict_view(dict) {
+        Some(view) if !view.filtered => view,
+        _ => TableView::raw(Arc::new(ModuleTable::leaf(Arc::clone(dict)))),
+    }
+}
+
+/// `dict[key]` as the module's flat export table would have answered it.
+pub fn module_dict_get(dict: &Arc<HashMap<String, Value>>, key: &str) -> Option<Value> {
+    if let Some(value) = dict.get(key) {
+        return Some(value.clone());
+    }
+    layered_view(dict).and_then(|view| view.get(key).cloned())
+}
+
+pub fn module_dict_contains(dict: &Arc<HashMap<String, Value>>, key: &str) -> bool {
+    dict.contains_key(key) || layered_view(dict).is_some_and(|view| view.contains_key(key))
+}
+
+/// `Arc::make_mut` for a dict that may be a layered module value: a write
+/// first materializes the flat surface, so the written copy still carries
+/// every name the module value resolved.
+pub fn module_dict_make_mut(dict: &mut Arc<HashMap<String, Value>>) -> &mut HashMap<String, Value> {
+    if let Some(flat) = module_dict_flat(dict) {
+        *dict = flat;
+    }
+    Arc::make_mut(dict)
+}
+
+/// Every visible (name, value) of `dict`, each name once.
+pub fn module_dict_for_each_visible(dict: &Arc<HashMap<String, Value>>, mut f: impl FnMut(&String, &Value)) {
+    match layered_view(dict) {
+        Some(view) => view.for_each_visible(|name, value| f(name, value)),
+        None => {
+            for (name, value) in dict.iter() {
+                f(name, value);
+            }
+        }
+    }
+}
+
+/// The flat map a layered module dict stands for (a fresh copy), or `None`
+/// when `dict` is already flat. For collection operations applied to a
+/// module value (`len`, `keys`, iteration, ...).
+pub fn module_dict_flat(dict: &Arc<HashMap<String, Value>>) -> Option<Arc<HashMap<String, Value>>> {
+    let view = layered_view(dict)?;
+    let mut flat = HashMap::new();
+    view.for_each_visible(|name, value| {
+        flat.insert(name.clone(), value.clone());
+    });
+    Some(Arc::new(flat))
+}
+
+/// Number of visible names of `dict`.
+pub fn module_dict_len(dict: &Arc<HashMap<String, Value>>) -> usize {
+    match layered_view(dict) {
+        Some(view) => {
+            let mut n = 0;
+            view.for_each_visible(|_, _| n += 1);
+            n
+        }
+        None => dict.len(),
+    }
+}
+
+/// Register a finished module's export table and cache its dict.
+pub fn cache_module_export_table(path: &Path, table: Arc<ModuleTable>) {
+    // Registered even without layers: importers then share this one table
+    // (one id, one set of index entries) instead of minting a leaf per import.
+    let dict = Arc::clone(table.own());
+    register_module_dict(&dict, TableView::raw(table));
+    cache_module_exports(path, Value::Dict(dict));
 }
 
 /// Cache module exports for a path
@@ -1104,6 +1259,22 @@ pub fn filter_functions_from_value(value: &Value) -> Value {
             }
         }
         Value::Dict(dict) => {
+            // A layered module export dict: its filtered view is the table's
+            // filtered view, so the filtered dict keeps resolving the layers.
+            if let Some(view) = layered_view(dict) {
+                if view.filtered {
+                    return Value::Dict(Arc::clone(dict));
+                }
+                let filtered = Arc::clone(view.table.filtered_own(filter_functions_from_value));
+                register_module_dict(
+                    &filtered,
+                    TableView {
+                        table: view.table,
+                        filtered: true,
+                    },
+                );
+                return Value::Dict(filtered);
+            }
             // Recursively process dict values (imported modules) — preserve functions inside.
             //
             // Memoised per SOURCE dict: an imported module's export dict is the

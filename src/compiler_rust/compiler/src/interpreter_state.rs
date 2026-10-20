@@ -110,6 +110,20 @@ pub(crate) fn record_owner_binding(importer: Arc<str>, local_name: String, bindi
     });
 }
 
+/// Bind every key of `names` in `importer` the way `source_owner` binds it,
+/// by reference (`ModuleBindings::push_layer`) -- the whole-surface import
+/// that used to be one `record_owner_binding` per exported name. The source's
+/// table is snapshotted NOW, so later lazy lookups answer exactly what the
+/// per-name copy would have recorded at this point.
+pub(crate) fn record_owner_binding_layer(importer: Arc<str>, source_owner: Arc<str>, names: Arc<crate::value::ModuleTable>) {
+    let source = owner_bindings(&source_owner);
+    MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|cell| {
+        let mut by_owner = cell.borrow_mut();
+        let bindings = by_owner.entry(importer).or_default();
+        Arc::make_mut(bindings).push_layer(source_owner, names, source);
+    });
+}
+
 /// Debug census of the module-global stores, printed by the mem-trace report
 /// (`mem_trace.rs`). Restored after a concurrent-session reconcile clobbered
 /// the original definition while its call site survived on main.
@@ -404,7 +418,7 @@ thread_local! {
     /// Initial owner-qualified globals retained with the module cache.
     pub(crate) static MODULE_GLOBALS_INITIAL_BY_OWNER: RefCell<HashMap<Arc<str>, HashMap<String, Value>>> = RefCell::new(HashMap::new());
     /// Immutable filtered module environments keyed by owner.
-    pub(crate) static MODULE_ENV_BY_OWNER: RefCell<HashMap<Arc<str>, Arc<HashMap<String, Value>>>> = RefCell::new(HashMap::new());
+    pub(crate) static MODULE_ENV_BY_OWNER: RefCell<HashMap<Arc<str>, Arc<crate::value::LayeredEnv>>> = RefCell::new(HashMap::new());
     /// Imported global bindings keyed by importer, then local name.
     /// Values retain the defining owner and defining name for collision-free refresh.
     pub(crate) static MODULE_GLOBAL_BINDINGS_BY_OWNER: RefCell<HashMap<Arc<str>, Arc<ModuleBindings>>> = RefCell::new(HashMap::new());

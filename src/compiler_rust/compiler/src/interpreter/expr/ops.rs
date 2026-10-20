@@ -335,7 +335,7 @@ pub(super) fn eval_op_expr(
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
     match expr {
-        Expr::New { kind: _, expr } => {
+        Expr::New { expr, .. } => {
             // Phase 1 stub: evaluate inner expression, ignore allocator spec
             // Future phases will use the pointer kind for actual allocation
             let inner = evaluate_expr(expr, env, functions, classes, enums, impl_methods)?;
@@ -1321,7 +1321,7 @@ pub(super) fn eval_op_expr(
                         Value::Tuple(tup) => Ok(Value::Bool(tup.contains(&left_val) ^ negate)),
                         Value::Dict(dict) => {
                             let key = left_val.to_key_string();
-                            Ok(Value::Bool(dict.contains_key(&key) ^ negate))
+                            Ok(Value::Bool(crate::interpreter::module_dict_contains(&dict, &key) ^ negate))
                         }
                         Value::Str(s) => {
                             let needle = left_val.to_key_string();

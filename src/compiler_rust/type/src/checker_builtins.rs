@@ -20,6 +20,10 @@ impl TypeChecker {
             compositions: HashMap::new(),
             interface_bindings: HashMap::new(),
             fstring_keys: HashMap::new(),
+            nogc_strict: false,
+            class_names: HashSet::new(),
+            fn_sigs: HashMap::new(),
+            current_ret: None,
         };
         // Add built-in functions to environment
         tc.add_builtins();
@@ -362,6 +366,9 @@ impl TypeChecker {
             Type::Optional(inner) => Type::Optional(Box::new(Self::instantiate_type(inner, var_map))),
             Type::Borrow(inner) => Type::Borrow(Box::new(Self::instantiate_type(inner, var_map))),
             Type::BorrowMut(inner) => Type::BorrowMut(Box::new(Self::instantiate_type(inner, var_map))),
+            Type::Unique(inner) => Type::Unique(Box::new(Self::instantiate_type(inner, var_map))),
+            Type::Shared(inner) => Type::Shared(Box::new(Self::instantiate_type(inner, var_map))),
+            Type::Weak(inner) => Type::Weak(Box::new(Self::instantiate_type(inner, var_map))),
             Type::Simd { lanes, element } => Type::Simd {
                 lanes: *lanes,
                 element: Box::new(Self::instantiate_type(element, var_map)),
@@ -415,7 +422,7 @@ impl TypeChecker {
             }
             Type::Optional(inner) => Self::collect_free_vars(inner, vars),
             Type::Borrow(inner) => Self::collect_free_vars(inner, vars),
-            Type::BorrowMut(inner) => Self::collect_free_vars(inner, vars),
+            Type::BorrowMut(inner) | Type::Unique(inner) | Type::Shared(inner) | Type::Weak(inner) => Self::collect_free_vars(inner, vars),
             Type::Simd { element, .. } => Self::collect_free_vars(element, vars),
             _ => {}
         }

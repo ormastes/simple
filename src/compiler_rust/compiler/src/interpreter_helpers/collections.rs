@@ -525,7 +525,11 @@ pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
         // the type corruption in dict_struct_key_iteration_single_entry_2026-06-13.
         // Sorted-by-key canonical order, matching `keys()`/`values()`/`entries()`
         // -- `for (k, v) in dict` must visit entries in the same order those do.
-        Value::Dict(map) => Ok(crate::value::dict_entries_sorted(map)
+        Value::Dict(map) => {
+            // A layered module value iterates its whole visible surface.
+            let flat = crate::interpreter::module_dict_flat(map);
+            let map = flat.as_ref().unwrap_or(map);
+            Ok(crate::value::dict_entries_sorted(map)
             .into_iter()
             .map(|(k, v)| {
                 Value::Tuple(vec![
@@ -533,7 +537,8 @@ pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
                     Value::dict_entry_value_for_iteration(v),
                 ])
             })
-            .collect()),
+            .collect())
+        }
         Value::FrozenDict(map) => Ok(crate::value::dict_entries_sorted(map)
             .into_iter()
             .map(|(k, v)| {
