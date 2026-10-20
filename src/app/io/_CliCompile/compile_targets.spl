@@ -357,7 +357,7 @@ fn cli_native_build_option_error(args: [text], require_entry: bool = false) -> t
                 return log_error
             i = i + 2
             continue
-        if arg == "--backend" or arg == "--runtime-bundle" or arg == "--runtime-path" or arg == "--linker-script" or arg == "--entry" or arg == "--source" or arg == "-o" or arg == "--output" or arg == "--mode" or arg == "--build-mode" or arg == "--cache-dir" or arg == "--target" or arg == "--cpu" or arg == "--opt-level" or arg == "--collection-profile" or arg == "--collection-workload" or arg == "--collection-target" or arg == "--collection-policy" or arg == "--collection-memory-budget" or cli_native_build_policy_value_flag(arg):
+        if arg == "--backend" or arg == "--runtime-bundle" or arg == "--runtime-owner" or arg == "--runtime-path" or arg == "--linker-script" or arg == "--entry" or arg == "--source" or arg == "-o" or arg == "--output" or arg == "--mode" or arg == "--build-mode" or arg == "--cache-dir" or arg == "--target" or arg == "--cpu" or arg == "--opt-level" or arg == "--collection-profile" or arg == "--collection-workload" or arg == "--collection-target" or arg == "--collection-policy" or arg == "--collection-memory-budget" or cli_native_build_policy_value_flag(arg):
             val error = cli_native_build_value_error(args, i, arg, false)
             if error != "":
                 return error
@@ -376,6 +376,9 @@ fn cli_native_build_option_error(args: [text], require_entry: bool = false) -> t
             continue
         if arg.starts_with("--backend="):
             val error = cli_native_build_inline_value_error(arg, "--backend=", "--backend", false)
+            if error != "": return error
+        elif arg.starts_with("--runtime-owner="):
+            val error = cli_native_build_inline_value_error(arg, "--runtime-owner=", "--runtime-owner", false)
             if error != "": return error
         elif arg.starts_with("--runtime-bundle="):
             val error = cli_native_build_inline_value_error(arg, "--runtime-bundle=", "--runtime-bundle", false)
@@ -759,6 +762,7 @@ fn _cli_native_build(
             print "  --emit-shared        Emit a native shared library with no entry shim"
             print "  --no-mangle          Preserve declared function symbol names"
             print "  --runtime-bundle <mode> Runtime lane: auto, simple-core, core-c-bootstrap"
+            print "  --runtime-owner <o>  rt_* symbol owner: c (default), rust, simple (unsupported; fails closed)"
             print "  --cpu <policy>       CPU policy: default, native, or x86-64-v1..v4"
             print "  --entry-closure      Compile only modules reachable from --entry"
             print "  --threads <n>        Native build workers"
@@ -779,6 +783,13 @@ fn _cli_native_build(
             i = i + 1
             backend = args[i]
             backend_explicit = true
+        elif arg == "--runtime-owner" and i + 1 < args.len():
+            # One rt_* owner per link: c (default) | rust | simple. The linker
+            # (llvm_native_link_runtime_owner.spl) validates and fails closed.
+            env_set("SIMPLE_RUNTIME_OWNER", args[i + 1])
+            i = i + 1
+        elif arg.starts_with("--runtime-owner="):
+            env_set("SIMPLE_RUNTIME_OWNER", arg.substring(16))
         elif arg == "--runtime-bundle" and i + 1 < args.len():
             var bundle = args[i + 1]
             if cli_runtime_bundle_is_rust_or_hosted(bundle):
@@ -1094,6 +1105,12 @@ fn _cli_native_build(
                 env_set("SIMPLE_COMPILE_FAIL_FAST", "1")
             elif a == "--keep-going":
                 env_set("SIMPLE_COMPILE_FAIL_FAST", "0")
+            elif a == "--runtime-owner":
+                if j + 1 < args.len():
+                    j = j + 1
+                    env_set("SIMPLE_RUNTIME_OWNER", args[j])
+            elif a.starts_with("--runtime-owner="):
+                env_set("SIMPLE_RUNTIME_OWNER", a.substring(16))
             elif a == "--timeout" or a == "--runtime-bundle" or a == "--linker-script":
                 # The public wrapper consumes these values; consume them here
                 # too so compatibility options cannot reinterpret one as entry.

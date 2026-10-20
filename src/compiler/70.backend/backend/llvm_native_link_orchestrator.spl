@@ -46,6 +46,7 @@ pub fn llvm_native_link_orchestrator_publish_runtime_provider_v1(
 use compiler.backend.llvm_native_link_stage4_archives.{llvm_stage4_compiler_backfill_failure, llvm_stage4_build_compiler_backfill_capsule, llvm_stage4_build_runtime_native_archive, llvm_stage4_build_runtime_legacy_compat_archive, llvm_stage4_build_contracts_provider_archive, llvm_stage4_build_process_provider_archive, llvm_stage4_build_dynload_provider_archive, llvm_stage4_build_sqlite_demand_archive, llvm_stage4_build_font_provider_archive, llvm_stage4_build_memtrack_provider_archive, llvm_stage4_build_time_provider_archive, llvm_stage4_build_fork_provider_archive}
 use compiler.backend.llvm_native_link_hosted_support.{NativeLinkOptions, compile_entry_point_c, native_all_allowed_for_runtime_bundle}
 use compiler.backend.llvm_native_link_hosted_support.{llvm_apply_explicit_link_options}
+use compiler.backend.llvm_native_link_runtime_owner.{llvm_runtime_owner_v1, llvm_runtime_owner_compile_bundle_v1, llvm_runtime_owner_c_archive_v1}
 use compiler.backend.simpleos_native_symbols.{is_simpleos_x86_64_link, is_simpleos_arm64_link, is_simpleos_riscv64_link, is_simpleos_riscv32_link}
 use compiler.backend.simpleos_native_linkers.{link_simpleos_x86_64, link_simpleos_arm64, link_simpleos_riscv64, link_simpleos_riscv32}
 use compiler.common.cache.darwin_runtime_provider_manifest.{darwin_runtime_provider_manifest_v1}
@@ -86,6 +87,15 @@ fn _llvm_bootstrap_native_all_path(stage4_requested: bool, runtime_path: text,
     if file_exists(archive):
         return archive
     ""
+
+fn _llvm_runtime_owner_native_all(coff_native_all: bool, runtime_owner: text,
+        native_all: text, runtime_objects: [text]) -> Result<text, text>:
+    """The native_all archive this link takes under the selected owner."""
+    if not coff_native_all or runtime_owner != "c":
+        return Ok(native_all)
+    val owner_cache = env_get("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? ""
+    val owner_root = if owner_cache == "": "build/native_cache" else: owner_cache
+    llvm_runtime_owner_c_archive_v1(native_all, runtime_objects, owner_root)
 
 fn _llvm_append_link_input_if_present(inputs: [text], path: text) -> [text]:
     """Append one optional provider through return-value ownership."""
@@ -213,6 +223,9 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         hosted_plan.requires_cross, hosted_os, _is_mingw())
     if native_tool_strict_requested_v1() and bootstrap_native_all != "":
         val _admitted = native_runtime_strict_archives_v1(runtime_path, [bootstrap_native_all])?
+    # One owner per rt_* symbol (--runtime-owner / SIMPLE_RUNTIME_OWNER).
+    val runtime_owner = llvm_runtime_owner_v1()?
+    val coff_native_all = bootstrap_native_all != "" and hosted_os == "windows" and not _is_mingw()
 
     # Step 1: Always compile the FRESH C runtime to object files, even when the
     # native_all archive is linked (including under SIMPLE_BOOTSTRAP=1). ld
@@ -241,8 +254,10 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         print "[LLVM-LINK] step 1: compile_runtime_objects..."
     # native_all already owns spl_dl* in Rust; otherwise the pure hosted
     # runtime supplies the C owner for both LLVM and Cranelift.
-    val runtime_compile_bundle = llvm_hosted_runtime_compile_bundle(runtime_bundle, bootstrap_native_all, hosted_os, hosted_target, stage4_requested)
-    val rt_result = compile_runtime_objects(verbose, options.opt_level, bootstrap_native_all == "", hosted_cc, stage4_requested, runtime_compile_bundle)
+    val runtime_compile_bundle = llvm_runtime_owner_compile_bundle_v1(runtime_owner,
+        llvm_hosted_runtime_compile_bundle(runtime_bundle, bootstrap_native_all, hosted_os, hosted_target, stage4_requested),
+        bootstrap_native_all, coff_native_all)
+    val rt_result = compile_runtime_objects(verbose, options.opt_level, bootstrap_native_all == "", hosted_cc, stage4_requested, runtime_compile_bundle, runtime_owner)
     if trace:
         print "[LLVM-LINK] compile_runtime_objects returned"
     val runtime_objects: [text] = match rt_result:
@@ -252,6 +267,15 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
             return Err("Runtime compilation failed: {err}")
     if trace:
         print "[LLVM-LINK] got {runtime_objects.len()} runtime objects"
+    # owner=c: the Rust archive cedes every name these C objects define.
+    # Bound straight-line (no nested-branch writeback), like runtime_objects.
+    val linked_native_all: text = match _llvm_runtime_owner_native_all(
+            coff_native_all, runtime_owner, bootstrap_native_all, runtime_objects):
+        case Ok(path):
+            path
+        case Err(err):
+            cleanup_runtime_objects(runtime_objects)
+            return Err(err)
 
     # No bootstrap-only C ABI support object is ever synthesized: the fresh C
     # runtime above owns spl_init_args/__simple_runtime_init/
@@ -529,9 +553,9 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         # normal member extraction. Keep the optional append outside a nested
         # branch: self-hosted branch writeback previously dropped this input.
         all_objects = _llvm_append_link_input_if_present(
-            all_objects, bootstrap_native_all)
+            all_objects, linked_native_all)
         runtime_provider_inputs = _llvm_append_link_input_if_present(
-            runtime_provider_inputs, bootstrap_native_all)
+            runtime_provider_inputs, linked_native_all)
         all_objects = all_objects.push(entry_obj_path)
     # External providers are intentionally not temporary runtime objects: do
     # not pass them to cleanup_runtime_objects or delete them after linking.

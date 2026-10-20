@@ -1,0 +1,29 @@
+use std.spec.*
+use compiler.backend.linker.coff.coff_runtime_owner.{runtime_owner_select_v1, runtime_owner_object_definitions_v1}
+use compiler.backend.llvm_native_link_runtime_owner.{llvm_runtime_owner_compile_bundle_v1}
+use compiler.backend.linker._LinkerWrapper.native_all_support.{native_all_input_dir}
+
+describe "Runtime symbol owner switch":
+    it "defaults to c and lets the flag win over SIMPLE_RUNTIME_OWNER":
+        expect(runtime_owner_select_v1("", "").unwrap()).to_equal("c")
+        expect(runtime_owner_select_v1("", "rust").unwrap()).to_equal("rust")
+        expect(runtime_owner_select_v1("C", "rust").unwrap()).to_equal("c")
+
+    it "fails closed for simple and for unknown owners":
+        expect(runtime_owner_select_v1("simple", "").is_err()).to_equal(true)
+        expect(runtime_owner_select_v1("simple", "").unwrap_err()).to_contain("unsupported runtime owner 'simple'")
+        expect(runtime_owner_select_v1("go", "").unwrap_err()).to_contain("unknown runtime owner 'go'")
+
+    it "compiles core-C only for owner c on a COFF native-all link":
+        expect(llvm_runtime_owner_compile_bundle_v1("c", "auto", "r/simple_native_all.lib", true)).to_equal("core-c")
+        expect(llvm_runtime_owner_compile_bundle_v1("rust", "auto", "r/simple_native_all.lib", true)).to_equal("auto")
+        expect(llvm_runtime_owner_compile_bundle_v1("c", "auto", "r/libsimple_native_all.a", false)).to_equal("auto")
+        expect(llvm_runtime_owner_compile_bundle_v1("c", "auto", "", true)).to_equal("auto")
+
+    it "takes the MSVC native-all authority from the archive's own directory":
+        expect(native_all_input_dir(["a.obj", "C:/r/x/simple_native_all.lib"])).to_equal("C:/r/x")
+        expect(native_all_input_dir(["a.obj"])).to_equal("")
+
+    it "reads no definitions from non-COFF input":
+        val defined = runtime_owner_object_definitions_v1([[0 as u8, 1 as u8, 2 as u8]])
+        expect(defined.len()).to_equal(0)
