@@ -110,7 +110,7 @@ Evidence:
 - `test/01_unit/app/llm_runtime/vllm_live_environment_spec.spl` covers explicit
   `skipped` and `ready` live environment evidence for local vLLM/GPU
   availability combinations plus GPU label redaction.
-- `test/unit/app/llm_runtime/vllm_live_environment_spec.spl` mirrors the same
+- `test/01_unit/app/llm_runtime/vllm_live_environment_spec.spl` mirrors the same
   live environment evidence coverage.
 - Resource-aware serve-readiness specs now cover skipped preflight and
   orchestrator short-circuit behavior before spawn/fetch when local vLLM/GPU

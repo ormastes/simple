@@ -43,7 +43,7 @@ missing `__init__`.
 |------|--------|-------|
 | `test/integration/os/port/llvm/per_target_build_spec.spl` | 21 examples, 21 failures | 21 examples, **1** failure |
 | `test/integration/os/port/llvm/cross_build_plan_spec.spl` | 14 examples, 14 failures | 14 examples, **0** failures |
-| `test/integration/os/port/rust/smoke_rustc_spec.spl` | 4 examples, 3 failures | 4 examples, **2** failures |
+| `test/02_integration/os/port/rust/smoke_rustc_spec.spl` | 4 examples, 3 failures | 4 examples, **2** failures |
 | `test/integration/os/port/llvm/smoke_clang_spec.spl` | 5 examples, 0 failures | 5 examples, 0 failures (assertions now real) |
 | `test/03_system/os/port/disk_boot_spec.spl` | 5 examples, 0 failures | 5 examples, 0 failures (assertions now real) |
 
