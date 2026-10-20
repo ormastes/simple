@@ -514,6 +514,24 @@ fn status_kib(key: &str) -> i64 {
         .unwrap_or(-1)
 }
 
+/// Rust twin of the C runtime's `rt_process_rss_kib`: -1 when unavailable.
+#[no_mangle]
+pub extern "C" fn rt_process_rss_kib() -> i64 {
+    #[cfg(windows)]
+    return windows_process_memory_kib().0;
+    #[cfg(not(windows))]
+    status_kib("VmRSS:")
+}
+
+/// Rust twin of the C runtime's `rt_process_hwm_kib`: -1 when unavailable.
+#[no_mangle]
+pub extern "C" fn rt_process_hwm_kib() -> i64 {
+    #[cfg(windows)]
+    return windows_process_memory_kib().1;
+    #[cfg(not(windows))]
+    status_kib("VmHWM:")
+}
+
 #[cfg(not(windows))]
 fn monotonic_ms() -> u128 {
     static START: OnceLock<Instant> = OnceLock::new();
