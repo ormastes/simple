@@ -1,0 +1,161 @@
+# @manual: show
+# @req: EE-01, REQ-MC-007, C2
+# All scenarios UNRUN. In-memory worker APIs and real-file command worker;
+# external app dispatcher/delegation has a separate system specification.
+use std.spec.{describe, it, expect, fail}
+use std.spec.step
+use compiler.tools.verify.source_model_v1.{source_model_from_source_v1,
+    source_model_command_v1}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_create_exclusive,
+    file_is_regular_no_follow}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.io_runtime.{dir_exists}
+use std.common.crypto.sha256.{sha256_text}
+
+fn source_model_enum_source() -> text:
+    "enum Flag:\n    Off\n    On\nfn select(value: Flag) -> i32:\n    match value:\n        case Flag.Off: 11\n        case Flag.On: 22\n"
+
+fn source_model_temporary_command(source: text, target: text) -> Result<text, text>:
+    val scope = secure_temp_dir(".", "ee-model-worker-")?
+    val path = scope + "/enum input.spl"
+    if not file_create_exclusive(path, source) or not file_is_regular_no_follow(path):
+        val removed = dir_remove_all(scope)
+        return Err("EE-TEST-FILE: exclusive regular-file setup failed; cleanup=" + removed.to_string())
+    val result = source_model_command_v1([path, target])
+    # Remove the owned scope before assertions can fail on the returned model.
+    val removed = dir_remove_all(scope)
+    if not removed or dir_exists(scope):
+        return Err("EE-TEST-CLEANUP: worker temporary scope remains")
+    result
+
+fn source_model_expect_error(source: text, path: text, target: text, fragment: text):
+    match source_model_from_source_v1(source, path, target):
+        case Ok(_): fail("refused source unexpectedly published a model")
+        case Err(message):
+            expect(message).to_contain(fragment)
+            expect(message.contains("formal_status=NOT_CHECKED")).to_equal(false)
+            expect(message.contains("BitVec.ofInt")).to_equal(false)
+
+describe "source model worker APIs":
+    it "exports an actual enum match with unchecked status":
+        step("Parse source and export the producer-bound enum model through the full backend")
+        match source_model_from_source_v1(source_model_enum_source(),
+                "source_model.spl", "x86_64-unknown-linux-gnu"):
+            case Ok(model):
+                expect(model).to_start_with("-- formal_status=NOT_CHECKED\n")
+                expect(model).to_contain("«Flag».«Off»")
+                expect(model).to_contain("«Flag».«On»")
+                expect(model).to_contain("(BitVec.ofInt 32 11)")
+                expect(model).to_contain("(BitVec.ofInt 32 22)")
+                expect(model.contains("rt_enum_discriminant")).to_equal(false)
+                expect(model.contains("rt_enum_payload")).to_equal(false)
+                expect(model.contains("formal_status=PASS")).to_equal(false)
+            case Err(message): fail(message)
+
+    it "preserves explicit target-selected source behavior":
+        step("Select different source declarations through the canonical target frontend")
+        val source = "@cfg(\"target_arch\", \"x86_64\")\nfn selected() -> i32:\n    31\n@cfg(\"target_arch\", \"aarch64\")\nfn selected() -> i32:\n    47\n"
+        match source_model_from_source_v1(source, "source_model.spl", "x86_64-unknown-linux-gnu"):
+            case Ok(model):
+                expect(model).to_contain("(BitVec.ofInt 32 31)")
+                expect(model.contains("(BitVec.ofInt 32 47)")).to_equal(false)
+            case Err(message): fail(message)
+        match source_model_from_source_v1(source, "source_model.spl", "aarch64-unknown-linux-gnu"):
+            case Ok(model):
+                expect(model).to_contain("(BitVec.ofInt 32 47)")
+                expect(model.contains("(BitVec.ofInt 32 31)")).to_equal(false)
+            case Err(message): fail(message)
+
+    it "exports a directory-qualified source path without a raw Lean namespace":
+        step("Retain source identity while exporting a valid module namespace")
+        match source_model_from_source_v1(source_model_enum_source(),
+                "/tmp/source_model/enum-input.spl", "x86_64-unknown-linux-gnu"):
+            case Ok(model):
+                expect(model).to_start_with("-- formal_status=NOT_CHECKED\n")
+                expect(model).to_contain("«Flag».«Off»")
+                expect(model.contains("namespace Simple./tmp/")).to_equal(false)
+                expect(model.contains("end Simple./tmp/")).to_equal(false)
+            case Err(message): fail(message)
+
+    it "rejects missing implicit and malformed targets before parsing":
+        step("Do not infer a host target")
+        for target in ["", "host", "native", "nonsense", "x86_64-linux-windows"]:
+            source_model_expect_error("not valid source", "source_model.spl",
+                target, "SOURCE-CALLS-E-TARGET")
+
+    it "rejects an empty source identity":
+        step("Require a source path before frontend work")
+        source_model_expect_error(source_model_enum_source(), "",
+            "x86_64-unknown-linux-gnu", "SOURCE-MODEL-E-FILE")
+
+    it "rejects malformed parser input":
+        step("Refuse a recovered incomplete declaration")
+        source_model_expect_error("fn broken( -> i32:\n    1\n", "source_model.spl",
+            "x86_64-unknown-linux-gnu", "SOURCE-MODEL-E-PARSE")
+
+    it "rejects unresolved source calls":
+        step("Propagate HIR failure without publishing Lean source")
+        source_model_expect_error("fn broken() -> i32:\n    missing_target()\n",
+            "source_model.spl", "x86_64-unknown-linux-gnu", "SOURCE-MODEL-E-HIR")
+
+    it "rejects imports requiring the unavailable driver graph":
+        step("Do not fabricate dependency resolution")
+        source_model_expect_error("use external.helper\n" + source_model_enum_source(),
+            "source_model.spl", "x86_64-unknown-linux-gnu", "SOURCE-CALLS-E-IMPORT")
+
+    it "rejects advice requiring unexecuted weaving":
+        step("Reuse the source transformation boundary")
+        source_model_expect_error("on pc{{ execution(* select(..)) }} use advice before\n" +
+            source_model_enum_source(), "source_model.spl",
+            "x86_64-unknown-linux-gnu", "SOURCE-CALLS-E-TRANSFORM")
+
+    it "publishes no partial model when a later function is unsupported":
+        step("Export a valid enum function followed by an unsupported floating-point signature")
+        source_model_expect_error(source_model_enum_source() +
+            "\nfn z_unsupported(value: f64) -> f64:\n    value\n",
+            "source_model.spl", "x86_64-unknown-linux-gnu", "SOURCE-MODEL-E-EXPORT")
+
+    it "rejects wrong command arity before file access":
+        step("Require exactly a source path and target triple")
+        for args in [[], ["missing.spl"], ["missing.spl", "x86_64-linux-gnu", "extra"]]:
+            match source_model_command_v1(args):
+                case Ok(_): fail("invalid command arity produced a model")
+                case Err(message): expect(message).to_contain("SOURCE-MODEL-E-USAGE")
+
+    it "rejects a missing file":
+        step("Fail file admission without a model")
+        match source_model_command_v1(["/missing/source_model_v1_no_file.spl", "x86_64-linux-gnu"]):
+            case Ok(_): fail("missing file produced a model")
+            case Err(message): expect(message).to_contain("SOURCE-MODEL-E-FILE")
+
+    it "rejects a directory as source":
+        step("Require an existing regular file")
+        match source_model_command_v1(["src", "x86_64-linux-gnu"]):
+            case Ok(_): fail("directory produced a model")
+            case Err(message): expect(message).to_contain("SOURCE-MODEL-E-FILE")
+
+    it "exports a checked unique regular file through the command worker":
+        step("Create an exclusive source file, call the real command worker, and remove the scope")
+        val source = source_model_enum_source()
+        match source_model_temporary_command(source, "x86_64-unknown-linux-gnu"):
+            case Ok(model):
+                expect(model).to_start_with("-- formal_status=NOT_CHECKED\n")
+                expect(model).to_contain("-- source_hash=" + sha256_text(source) + "\n")
+                expect(model).to_contain("-- target=x86_64-unknown-linux-gnu\n")
+                expect(model).to_contain("«Flag».«Off»")
+                expect(model).to_contain("«Flag».«On»")
+                expect(model).to_contain("(BitVec.ofInt 32 11)")
+                expect(model).to_contain("(BitVec.ofInt 32 22)")
+                expect(model.contains("formal_status=PASS")).to_equal(false)
+            case Err(message): fail(message)
+
+    it "returns no partial model from a real file with a later unsupported function":
+        step("Run complete-module export through file admission and clean up even on refusal")
+        val source = source_model_enum_source() +
+            "\nfn z_unsupported(value: f64) -> f64:\n    value\n"
+        match source_model_temporary_command(source, "x86_64-unknown-linux-gnu"):
+            case Ok(_): fail("unsupported file unexpectedly published a model")
+            case Err(message):
+                expect(message).to_contain("SOURCE-MODEL-E-EXPORT")
+                expect(message.contains("formal_status=NOT_CHECKED")).to_equal(false)
+                expect(message.contains("BitVec.ofInt")).to_equal(false)
