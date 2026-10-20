@@ -247,7 +247,7 @@ pub(crate) fn compile_builtin_method<M: Module>(
     }
     // FR-COMPILER-012: scalar float intrinsics — sqrt, abs, floor, ceil, round
     // These are first-class Cranelift instructions for IEEE 754 floats.
-    if (crate::codegen::scalar_float_methods::is_native_unary(method) && method != "trunc") {
+    if (crate::codegen::scalar_float_methods::is_native_unary(method) && !matches!(method, "trunc" | "round")) {
         let src_ty = builder.func.dfg.value_type(receiver_val);
         let is_float = src_ty == types::F32 || src_ty == types::F64;
         if is_float {
@@ -256,7 +256,6 @@ pub(crate) fn compile_builtin_method<M: Module>(
                 "abs" => builder.ins().fabs(receiver_val),
                 "floor" => builder.ins().floor(receiver_val),
                 "ceil" => builder.ins().ceil(receiver_val),
-                "round" => builder.ins().nearest(receiver_val),
                 _ => unreachable!(),
             };
             if let Some(d) = dest {

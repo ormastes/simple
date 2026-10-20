@@ -38,6 +38,10 @@ pub(crate) fn rt_math_unary(method: &str) -> Option<&'static str> {
         "log2" => Some("rt_math_log2"),
         "log10" => Some("rt_math_log10"),
         "cbrt" => Some("rt_math_cbrt"),
+        // Language semantics: ties round away from zero (interpreter, `rt_math_round`).
+        // Cranelift has no such instruction (`nearest` ties to even), so it calls this;
+        // LLVM uses the `llvm.round` intrinsic, which has the same semantics.
+        "round" => Some("rt_math_round"),
         _ => None,
     }
 }
