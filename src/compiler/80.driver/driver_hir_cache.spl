@@ -53,6 +53,7 @@ use compiler.hir.hir_types.{HirModule}
 use compiler.hir.hir_codec.{hir_module_encode, hir_module_encode_reason, hir_module_decode, hir_module_decode_stable, hir_codec_header}
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, flat_pool_escape}
 use compiler.common.cache_contract.hir_cache_envelope_reader_v1.{hir_cache_envelope_parse, hir_cache_parser_record_valid_v1}
+use compiler.common.module_path_naming.{module_source_relative_path}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_scope}
 use std.common.crypto.sha256.{sha256_text, sha256_runtime_fallback_used}
@@ -120,7 +121,9 @@ fn hir_cache_closure_digest(surfaces: ModuleSurfacesByName) -> text:
     var i = 0
     while i < surfaces.surfaces.len():
         val s = surfaces.surfaces[i]
-        parts = parts.push(s.canonical_path + "|" + "{s.content_hash}" + "|" + "{s.content_length}" + "|" + s.module_name + "|" + s.logical_name + "\n")
+        # Repo-relative: the sharded route reads an absolute SCV snapshot, the
+        # direct route the checkout; the same closure must digest equally.
+        parts = parts.push(module_source_relative_path(s.canonical_path) + "|" + "{s.content_hash}" + "|" + "{s.content_length}" + "|" + s.module_name + "|" + s.logical_name + "\n")
         i = i + 1
     sha256_text(parts.join(""))
 
@@ -140,12 +143,14 @@ fn hir_cache_key(source_path: text, closure_digest: text, is_entry: bool) -> tex
     if source_digest.len() != 64:
         return ""
     val entry_flag = if is_entry: "entry" else: "module"
-    # Cached HIR retains the physical source path. Equal bytes at different
-    # paths are different owners even within the same frozen closure. Hash the
-    # path separately so arbitrary path bytes cannot cross field boundaries.
+    # Equal bytes at different repo paths are different owners even within the
+    # same frozen closure. Hash the path separately so arbitrary path bytes
+    # cannot cross field boundaries. The path is repo-relative so the sharded
+    # route (absolute SCV snapshot) and the direct route (checkout) share
+    # entries; hir_cache_load_parsed_v1 rebinds HirModule.path on a hit.
     # Logical aliases share the one physical surface lowering; their registry
     # identities already participate in the closure digest above.
-    val source_path_digest = sha256_text(source_path.replace("\\", "/"))
+    val source_path_digest = sha256_text(module_source_relative_path(source_path))
     sha256_text("hir-source-key-v2\n" + source_path_digest + "\n" + source_digest + "\n" + closure_digest + "\n" + entry_flag + "\n" + _hir_cache_env_switches() + hir_codec_header() + "\n")
 
 fn hir_cache_path(key: text, parser_selected: bool = false) -> text:
@@ -199,13 +204,18 @@ fn hir_cache_has(key: text, parser_binding: text = "") -> bool:
 var _hir_cache_last_parser_objectless: bool = false
 fn hir_cache_last_parser_objectless() -> bool: _hir_cache_last_parser_objectless
 
-fn hir_cache_load_parsed_v1(key: text, parser_binding: text) -> HirModule?:
+fn hir_cache_load_parsed_v1(key: text, parser_binding: text, source_path: text = "") -> HirModule?:
     if parser_binding.len() != 64: return nil
-    hir_cache_load(key, parser_binding)
+    val loaded = hir_cache_load(key, parser_binding)
+    if source_path == "" or loaded == nil: return loaded
+    # The entry may come from the other route's spelling of this file.
+    var module = loaded.unwrap()
+    module.path = source_path
+    Some(module)
 
 fn hir_cache_parser_binding_v1(key: text, module_name: text, path: text, source_identity: text) -> text:
     if key.len() != 64 or module_name == "" or path == "" or source_identity.len() != 64: return ""
-    sha256_text("parser-classification-v1\n" + key + "\n" + module_name + "\n" + sha256_text(path) + "\n" + source_identity + "\n" + hir_cache_header())
+    sha256_text("parser-classification-v1\n" + key + "\n" + module_name + "\n" + sha256_text(module_source_relative_path(path)) + "\n" + source_identity + "\n" + hir_cache_header())
 
 fn hir_cache_load(key: text, parser_binding: text = "") -> HirModule?:
     # Initialize the persistent frontend identity before entering scratch.
