@@ -35,14 +35,6 @@ fn _a64_read_u32(raw: [u8], at: i64) -> i64:
     (raw[at] as i64) | ((raw[at + 1] as i64) << 8) |
         ((raw[at + 2] as i64) << 16) | ((raw[at + 3] as i64) << 24)
 
-fn _a64_write_u32(raw: [u8], at: i64, value: i64) -> [u8]:
-    var out = raw
-    out[at] = (value & 0xff) as u8
-    out[at + 1] = ((value >> 8) & 0xff) as u8
-    out[at + 2] = ((value >> 16) & 0xff) as u8
-    out[at + 3] = ((value >> 24) & 0xff) as u8
-    out
-
 fn _a64_reloc_key(target_section: i64, offset: i64, rtype: i64) -> text:
     "{target_section}:{offset}:{rtype}"
 
@@ -268,6 +260,11 @@ fn _tls_relax_object_a64(obj: ElfObject) -> Result<ElfObject, text>:
     if not _a64_has_tls_relocs(obj): return Ok(obj)
     val index = _a64_reloc_index(obj)
     val members = _a64_tls_members(obj, index)
+    # workaround: doc/08_tracking/bug/native_array_copy_leaks_2026-10-20.md
+    # Instruction rewrites are collected and applied once at the end: writing
+    # through a helper copied the whole object image per word.
+    var patch_at: [i64] = []
+    var patch_word: [i64] = []
     var raw = obj.raw
     var relocs: [ElfRelocation] = []
     var i: i64 = 0
@@ -293,10 +290,14 @@ fn _tls_relax_object_a64(obj: ElfObject) -> Result<ElfObject, text>:
                 return Err("UnsupportedFeature: non-canonical AArch64 TLSDESC instruction sequence")
             # The descriptor call returns a TP offset; the caller adds
             # tpidr_el0 itself, so materialize only the offset (as lld does).
-            raw = _a64_write_u32(raw, at, 0xd2a00000) # movz x0, #:tprel_g1:
-            raw = _a64_write_u32(raw, at + 4, 0xf2800000) # movk x0, #:tprel_g0_nc:
-            raw = _a64_write_u32(raw, at + 8, 0xd503201f) # nop
-            raw = _a64_write_u32(raw, at + 12, 0xd503201f) # nop
+            patch_at.push(at)
+            patch_word.push(0xd2a00000) # movz x0, #:tprel_g1:
+            patch_at.push(at + 4)
+            patch_word.push(0xf2800000) # movk x0, #:tprel_g0_nc:
+            patch_at.push(at + 8)
+            patch_word.push(0xd503201f) # nop
+            patch_at.push(at + 12)
+            patch_word.push(0xd503201f) # nop
             relocs = relocs.push(ElfRelocation(r_offset: r.r_offset,
                 r_info: (sym << 32) | R_AARCH64_TLSLE_MOVW_TPREL_G1_TLS,
                 r_addend: r.r_addend, section_idx: r.section_idx,
@@ -347,10 +348,13 @@ fn _tls_relax_object_a64(obj: ElfObject) -> Result<ElfObject, text>:
                     second & 0xffc003ff == 0x91000000
             if not canonical_address or call & 0xfc000000 != 0x94000000:
                 return Err("UnsupportedFeature: non-canonical AArch64 {model} instruction sequence")
-            raw = _a64_write_u32(raw, at, 0xd53bd040) # mrs x0, tpidr_el0
+            patch_at.push(at)
+            patch_word.push(0xd53bd040) # mrs x0, tpidr_el0
             if is_gd:
-                raw = _a64_write_u32(raw, at + 4, 0x91400000) # add x0, x0, #0, lsl #12
-                raw = _a64_write_u32(raw, at + 8, 0x91000000) # add x0, x0, #0
+                patch_at.push(at + 4)
+                patch_word.push(0x91400000) # add x0, x0, #0, lsl #12
+                patch_at.push(at + 8)
+                patch_word.push(0x91000000) # add x0, x0, #0
                 val sym = target_sym
                 relocs = relocs.push(ElfRelocation(r_offset: r.r_offset + 4,
                     r_info: (sym << 32) | R_AARCH64_TLSLE_ADD_TPREL_HI12_TLS,
@@ -361,11 +365,22 @@ fn _tls_relax_object_a64(obj: ElfObject) -> Result<ElfObject, text>:
                     r_addend: r.r_addend, section_idx: r.section_idx,
                     target_section_idx: r.target_section_idx))
             else:
-                raw = _a64_write_u32(raw, at + 4, 0x91004000) # add x0, x0, #16 (variant-I TCB)
-                raw = _a64_write_u32(raw, at + 8, 0xd503201f) # nop
+                patch_at.push(at + 4)
+                patch_word.push(0x91004000) # add x0, x0, #16 (variant-I TCB)
+                patch_at.push(at + 8)
+                patch_word.push(0xd503201f) # nop
         else if not members.has(i):
             relocs = relocs.push(r)
         i = i + 1
+    var pi: i64 = 0
+    while pi < patch_at.len():
+        val at = patch_at[pi]
+        val word = patch_word[pi]
+        raw[at] = (word & 0xff) as u8
+        raw[at + 1] = ((word >> 8) & 0xff) as u8
+        raw[at + 2] = ((word >> 16) & 0xff) as u8
+        raw[at + 3] = ((word >> 24) & 0xff) as u8
+        pi = pi + 1
     Ok(ElfObject(header: obj.header, sections: obj.sections, symbols: obj.symbols,
         relocations: relocs, strtab: obj.strtab, shstrtab: obj.shstrtab, raw: raw))
 

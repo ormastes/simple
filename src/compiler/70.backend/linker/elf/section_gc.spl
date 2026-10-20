@@ -18,15 +18,19 @@ struct ElfSectionGc:
 class _GcState:
     """Mark state updated in place. Threading live/worklist values through
     helpers copied the worklist and the mark table on every mark."""
-    var live: [[bool]]
+    # workaround: doc/08_tracking/bug/native_array_copy_leaks_2026-10-20.md (flat table; fields avoid
+    # the names `flat`/`base`, which fail to parse in native builds)
+    var marks: [bool]       # all objects' sections, object-major (flat: a nested
+    var bases: [i64]        # row write copied the row per mark in native builds)
+    var counts: [i64]
     var work_obj: [i64]
     var work_sec: [i64]
     var commons: {text: bool}
 
     me mark(oi: i64, si: i64):
-        if oi < 0 or oi >= self.live.len() or si <= 0 or si >= self.live[oi].len() or self.live[oi][si]:
+        if oi < 0 or oi >= self.bases.len() or si <= 0 or si >= self.counts[oi] or self.marks[self.bases[oi] + si]:
             return
-        self.live[oi][si] = true
+        self.marks[self.bases[oi] + si] = true
         self.work_obj.push(oi)
         self.work_sec.push(si)
 
@@ -59,7 +63,7 @@ class _GcState:
             if elf_section_name(obj, si) == ".eh_frame":
                 eh_si = si
             si = si + 1
-        if eh_si < 0 or not self.live[oi][eh_si]:
+        if eh_si < 0 or not self.marks[self.bases[oi] + eh_si]:
             return
         val sec = obj.sections[eh_si]
         var offsets: [i64] = []
@@ -90,7 +94,7 @@ class _GcState:
                 continue
             val fi = _gc_eh_record(offsets, ends, reloc.r_offset)
             if fi >= 0 and cie_offsets[fi] >= 0 and reloc.r_offset == offsets[fi] + 8 and
-                    _gc_reloc_target_live(obj, oi, reloc, res, self.live):
+                    self.target_live(obj, oi, reloc, res):
                 keep[fi] = true
                 if record_at.has(cie_offsets[fi]):
                     keep[record_at[cie_offsets[fi]]] = true
@@ -104,22 +108,30 @@ class _GcState:
                 continue  # pc_begin: the function itself is not kept by its FDE
             self.mark_reloc_target(obj, oi, reloc, res)
 
-fn _gc_reloc_target_live(obj: ElfObject, oi: i64, reloc: ElfRelocation, res: SymResolution,
-        live: [[bool]]) -> bool:
-    val sym_idx = elf_reloc_sym(reloc)
-    if sym_idx <= 0 or sym_idx >= obj.symbols.len():
-        return false
-    val sym = obj.symbols[sym_idx]
-    var target_obj = oi
-    var target_sec = sym.st_shndx
-    if elf_symbol_binding(sym) != STB_LOCAL and sym.name != "" and res.defined.has(sym.name):
-        val e = res.defined[sym.name]
-        target_obj = e.obj_idx
-        target_sec = e.section_idx
-    if target_sec == SHN_UNDEF or target_sec == SHN_COMMON_GC:
-        return false
-    target_obj >= 0 and target_obj < live.len() and target_sec > 0 and
-        target_sec < live[target_obj].len() and live[target_obj][target_sec]
+    me target_live(obj: ElfObject, oi: i64, reloc: ElfRelocation, res: SymResolution) -> bool:
+        val sym_idx = elf_reloc_sym(reloc)
+        if sym_idx <= 0 or sym_idx >= obj.symbols.len():
+            return false
+        val sym = obj.symbols[sym_idx]
+        var target_obj = oi
+        var target_sec = sym.st_shndx
+        if elf_symbol_binding(sym) != STB_LOCAL and sym.name != "" and res.defined.has(sym.name):
+            val e = res.defined[sym.name]
+            target_obj = e.obj_idx
+            target_sec = e.section_idx
+        if target_sec == SHN_UNDEF or target_sec == SHN_COMMON_GC:
+            return false
+        target_obj >= 0 and target_obj < self.bases.len() and target_sec > 0 and
+            target_sec < self.counts[target_obj] and self.marks[self.bases[target_obj] + target_sec]
+
+
+    me rows() -> [[bool]]:
+        var live: [[bool]] = []
+        var oi: i64 = 0
+        while oi < self.bases.len():
+            live.push(self.marks[self.bases[oi]:self.bases[oi] + self.counts[oi]])
+            oi = oi + 1
+        live
 
 fn _gc_u32(raw: [u8], off: i64) -> i64:
     (raw[off] as i64) | ((raw[off + 1] as i64) << 8) |
@@ -187,13 +199,15 @@ fn _gc_reloc_ranges(obj: ElfObject) -> [i64]:
 
 fn elf_section_gc(objects: [ElfObject], res: SymResolution, entry: text,
         retained: [text], root_patterns: [text]) -> ElfSectionGc:
-    var live: [[bool]] = []
+    var marks: [bool] = []
+    var bases: [i64] = []
+    var counts: [i64] = []
     for obj in objects:
-        var row: [bool] = []
+        bases.push(marks.len())
+        counts.push(obj.sections.len())
         for _ in obj.sections:
-            row.push(false)
-        live.push(row)
-    var state = _GcState(live: live, work_obj: [], work_sec: [], commons: {})
+            marks.push(false)
+    var state = _GcState(marks: marks, bases: bases, counts: counts, work_obj: [], work_sec: [], commons: {})
 
     state.mark_name(res, entry)
     for name in retained:
@@ -235,14 +249,15 @@ fn elf_section_gc(objects: [ElfObject], res: SymResolution, entry: text,
             if elf_section_name(obj, si) == ".eh_frame":
                 wi = wi + 1
                 continue
-            val range = ranges[oi]
-            if range[0] == -2:
+            # workaround: doc/08_tracking/bug/native_array_copy_leaks_2026-10-20.md
+            # Index ranges[oi] directly: binding the row to a val copies it.
+            if ranges[oi][0] == -2:
                 for reloc in obj.relocations:
                     if reloc.target_section_idx == si:
                         state.mark_reloc_target(obj, oi, reloc, res)
-            elif range[si * 2] >= 0:
-                var ri = range[si * 2]
-                val stop = range[si * 2 + 1]
+            elif ranges[oi][si * 2] >= 0:
+                var ri = ranges[oi][si * 2]
+                val stop = ranges[oi][si * 2 + 1]
                 while ri < stop:
                     state.mark_reloc_target(obj, oi, obj.relocations[ri], res)
                     ri = ri + 1
@@ -255,7 +270,7 @@ fn elf_section_gc(objects: [ElfObject], res: SymResolution, entry: text,
             state.mark_eh_frame(objects[oi], oi, res)
             oi = oi + 1
         scanning = state.work_obj.len() > before
-    ElfSectionGc(live: state.live, common_live: state.commons)
+    ElfSectionGc(live: state.rows(), common_live: state.commons)
 
 fn elf_section_keep_all(objects: [ElfObject], res: SymResolution) -> ElfSectionGc:
     """No-GC policy: retain every allocatable input section and COMMON."""

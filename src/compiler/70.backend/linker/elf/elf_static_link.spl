@@ -57,7 +57,7 @@ use compiler.backend.linker.elf.section_gc.{
 use compiler.backend.linker.elf.eh_frame_gc.{elf_gc_eh_frames}
 use compiler.backend.linker.elf.tls_relax.{elf_relax_tls, elf_tls_tpoff}
 use compiler.backend.linker.elf.link_trace.{elf_link_trace}
-use compiler.backend.linker.elf.byte_buffers.{elf_u8_zeros, elf_u8_from_i64, elf_i64_from_u8, elf_u8_window_i64, elf_u8_read_le}
+use compiler.backend.linker.elf.byte_buffers.{elf_u8_zeros, elf_u8_from_i64, elf_i64_from_u8, elf_u8_read_le}
 use compiler.backend.linker.elf.riscv_link_support.{elf_riscv_flags, elf_riscv_hi_index}
 use compiler.backend.linker.elf.riscv_align.{elf_riscv_align_objects}
 use compiler.backend.linker.elf.riscv_attributes.{elf_riscv_attributes}
@@ -383,17 +383,14 @@ fn elf_place_copies(inputs: ElfStaticInputs, sc: ElfScan) -> ElfCopyPlacement:
 fn elf_static_contents(inputs: ElfStaticInputs) -> [[u8]]:
     """Concatenate input section bytes per input-backed output section.
 
-    One pass over the input sections. Each buffer is taken out of `out`,
-    extended in place with a native slice, and put back, so no byte is copied
-    per element and no buffer is copied per append."""
-    var out: [[u8]] = []
-    var k: i64 = 0
-    while k < inputs.outs.len():
-        var buf: [u8] = []
-        if inputs.outs[k].name == ".rodata":
-            buf = elf_u8_from_i64(inputs.merge.data)
-        out.push(buf)
-        k = k + 1
+    Workaround: doc/08_tracking/bug/native_array_copy_leaks_2026-10-20.md.
+    Each output buffer is a local extended in place with native slices. One
+    pass records the placed (object, section) pairs; each output then walks
+    that flat list. Taking a buffer out of a nested array and putting it
+    back copied it per append in native builds."""
+    var place_out: [i64] = []
+    var place_obj: [i64] = []
+    var place_sec: [i64] = []
     var oi: i64 = 0
     while oi < inputs.objects.len():
         val obj = inputs.objects[oi]
@@ -402,26 +399,31 @@ fn elf_static_contents(inputs: ElfStaticInputs) -> [[u8]]:
             val target = inputs.sec_out[oi][si]
             if target >= 0 and inputs.outs[target].sh_type != SHT_NOBITS_E and
                     not elf_merge_section(obj, si):
-                val sec = obj.sections[si]
-                var buf: [u8] = out[target]
-                val released: [u8] = []
-                out[target] = released
-                val gap = inputs.sec_off[oi][si] - buf.len()
-                if gap > 0: buf.extend(elf_u8_zeros(gap))
-                # sections[si].sh_addr is the FILE offset (elf_parser convention)
-                buf.extend(obj.raw[sec.sh_addr:sec.sh_addr + sec.sh_size])
-                out[target] = buf
+                place_out.push(target)
+                place_obj.push(oi)
+                place_sec.push(si)
             si = si + 1
         oi = oi + 1
-    k = 0
+    var out: [[u8]] = []
+    var k: i64 = 0
     while k < inputs.outs.len():
+        var buf: [u8] = []
+        if inputs.outs[k].name == ".rodata":
+            buf = elf_u8_from_i64(inputs.merge.data)
         if inputs.outs[k].sh_type != SHT_NOBITS_E:
-            var buf: [u8] = out[k]
-            val released: [u8] = []
-            out[k] = released
+            var pi: i64 = 0
+            while pi < place_out.len():
+                if place_out[pi] == k:
+                    val obj = inputs.objects[place_obj[pi]]
+                    val sec = obj.sections[place_sec[pi]]
+                    val gap = inputs.sec_off[place_obj[pi]][place_sec[pi]] - buf.len()
+                    if gap > 0: buf.extend(elf_u8_zeros(gap))
+                    # sections[si].sh_addr is the FILE offset (elf_parser convention)
+                    buf.extend(obj.raw[sec.sh_addr:sec.sh_addr + sec.sh_size])
+                pi = pi + 1
             val gap = inputs.outs[k].size - buf.len()
             if gap > 0: buf.extend(elf_u8_zeros(gap))
-            out[k] = buf
+        out.push(buf)
         k = k + 1
     out
 
@@ -986,19 +988,25 @@ struct ElfSymtabOut:
     strtab: [i64]
     first_global: i64
 
-struct ElfSymRows:
-    """Parallel Elf64_Sym columns, in output order."""
-    names: [text]
-    info: [i64]
-    other: [i64]
-    shndx: [i64]
-    value: [i64]
-    size: [i64]
+# workaround: doc/08_tracking/bug/native_array_copy_leaks_2026-10-20.md
+class ElfSymRows:
+    """Parallel Elf64_Sym columns, in output order, appended in place (a
+    struct rebuilt per row copied every column once per symbol)."""
+    var names: [text]
+    var info: [i64]
+    var other: [i64]
+    var shndx: [i64]
+    var value: [i64]
+    var size: [i64]
 
-# reason: positional Elf64_Sym columns
-fn elf_sym_row(rows: ElfSymRows, name: text, info: i64, other: i64, shndx: i64, value: i64, size: i64) -> ElfSymRows:
-    ElfSymRows(names: rows.names.push(name), info: rows.info.push(info), other: rows.other.push(other),
-        shndx: rows.shndx.push(shndx), value: rows.value.push(value), size: rows.size.push(size))
+    # reason: positional Elf64_Sym columns
+    me add(name: text, info: i64, other: i64, shndx: i64, value: i64, size: i64):
+        self.names.push(name)
+        self.info.push(info)
+        self.other.push(other)
+        self.shndx.push(shndx)
+        self.value.push(value)
+        self.size.push(size)
 
 fn elf_out_shndx(ctx: ElfLinkCtx, lay: ElfLayout, oi: i64, si: i64) -> i64:
     """Output section header index holding input section (oi, si), or -1."""
@@ -1047,6 +1055,9 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout) -> Result<ElfSymtabOut, tex
     var all_weak: {text: bool} = {}
     var ref_type: {text: i64} = {}
     var demoted: {text: bool} = {}
+    # name -> index of the definer's last non-local defined symbol of that
+    # name (what the per-global scan of the definer's symbols used to find).
+    var def_sym_at: {text: i64} = {}
     var oi: i64 = 0
     while oi < objs.len():
         val obj = objs[oi]
@@ -1055,16 +1066,19 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout) -> Result<ElfSymtabOut, tex
             val sym = obj.symbols[si]
             val bind = elf_symbol_binding(sym)
             val typ = elf_symbol_type(sym)
+            if bind != STB_LOCAL and sym.name != "" and sym.st_shndx != SHN_UNDEF and
+                    ctx.res.defined.has(sym.name) and ctx.res.defined[sym.name].obj_idx == oi:
+                def_sym_at[sym.name] = si
             if bind == STB_LOCAL:
                 if typ != STT_SECTION and sym.name != "":
                     if sym.st_shndx == SHN_ABS:
-                        rows = elf_sym_row(rows, sym.name, typ, sym.st_other, SHN_ABS, sym.st_value, sym.st_size)
+                        rows.add(sym.name, typ, sym.st_other, SHN_ABS, sym.st_value, sym.st_size)
                     else if sym.st_shndx == SHN_COMMON:
                         return Err("local symbol {sym.name}: SHN_COMMON is invalid")
                     else if sym.st_shndx != SHN_UNDEF and sym.st_shndx < SHN_LORESERVE:
                         val sh = elf_out_shndx(ctx, lay, oi, sym.st_shndx)
                         if sh > 0:
-                            rows = elf_sym_row(rows, sym.name, typ, sym.st_other, sh,
+                            rows.add(sym.name, typ, sym.st_other, sh,
                                 elf_symtab_address(lay.plan, typ,
                                     elf_in_vaddr(ctx, lay, oi, sym.st_shndx, sym.st_value)?)?, sym.st_size)
             else if sym.name != "":
@@ -1090,7 +1104,7 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout) -> Result<ElfSymtabOut, tex
                         var sz = sym.st_size
                         if sym.st_shndx == SHN_COMMON:
                             sz = ctx.res.defined[sym.name].size
-                        rows = elf_sym_row(rows, sym.name, typ, sym.st_other, shn,
+                        rows.add(sym.name, typ, sym.st_other, shn,
                             elf_symtab_address(lay.plan, typ, v)?, sz)
             si = si + 1
         oi = oi + 1
@@ -1098,12 +1112,12 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout) -> Result<ElfSymtabOut, tex
         if elf_is_synth(n) and not ctx.res.defined.has(n):
             val sh = elf_synth_shndx(lay.plan, n)
             if sh > 0:
-                rows = elf_sym_row(rows, n, 0, 2, sh, elf_synth_addr(lay.plan, lay.base, n)?, 0)
+                rows.add(n, 0, 2, sh, elf_synth_addr(lay.plan, lay.base, n)?, 0)
                 demoted[n] = true
     # ld.lld defines _DYNAMIC (hidden) whenever there is a .dynamic, referenced or not
     val dyn = elf_exec_find(lay.plan, ".dynamic")
     if dyn >= 0 and not demoted.has("_DYNAMIC") and not ctx.res.defined.has("_DYNAMIC"):
-        rows = elf_sym_row(rows, "_DYNAMIC", 0, 2, dyn + 1, lay.plan.vaddrs[dyn], 0)
+        rows.add("_DYNAMIC", 0, 2, dyn + 1, lay.plan.vaddrs[dyn], 0)
     val first_global = rows.names.len()
     for n in order:
         if demoted.has(n) or elf_is_synth(n):
@@ -1111,14 +1125,12 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout) -> Result<ElfSymtabOut, tex
         if ctx.copy_offsets.has(n):
             val sh = lay.in_to_plan[ctx.copy_out] + 1
             val v = lay.plan.vaddrs[lay.in_to_plan[ctx.copy_out]] + ctx.copy_offsets[n]
-            rows = elf_sym_row(rows, n, (STB_GLOBAL << 4) | ref_type[n], 0, sh, v,
+            rows.add(n, (STB_GLOBAL << 4) | ref_type[n], 0, sh, v,
                 elf_lib_export_size(ctx.libs, n))
         else if ctx.res.defined.has(n):
             val e = ctx.res.defined[n]
             var def_sym = objs[e.obj_idx].symbols[0]
-            for s in objs[e.obj_idx].symbols:
-                if s.name == n and s.st_shndx != SHN_UNDEF and elf_symbol_binding(s) != STB_LOCAL:
-                    def_sym = s
+            if def_sym_at.has(n): def_sym = objs[e.obj_idx].symbols[def_sym_at[n]]
             var sh = SHN_ABS
             if e.section_idx == SHN_COMMON:
                 sh = lay.in_to_plan[ctx.common_out] + 1
@@ -1129,7 +1141,7 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout) -> Result<ElfSymtabOut, tex
                 var sz = def_sym.st_size
                 if e.section_idx == SHN_COMMON:
                     sz = e.size
-                rows = elf_sym_row(rows, n, info, def_sym.st_other, sh,
+                rows.add(n, info, def_sym.st_other, sh,
                     elf_symtab_address(lay.plan, info, elf_entry_addr(ctx, lay, e)?)?, sz)
         else:
             var sym_bind = STB_GLOBAL
@@ -1140,7 +1152,7 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout) -> Result<ElfSymtabOut, tex
                 typ = 2  # STT_GNU_IFUNC is referenced as a plain STT_FUNC
             if typ < 0:
                 typ = ref_type[n]
-            rows = elf_sym_row(rows, n, (sym_bind << 4) | typ, 0, SHN_UNDEF, 0, 0)
+            rows.add(n, (sym_bind << 4) | typ, 0, SHN_UNDEF, 0, 0)
     val strtab = elf_build_dynstr(rows.names)
     var b: [i64] = []
     var i: i64 = 0
@@ -1148,17 +1160,9 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout) -> Result<ElfSymtabOut, tex
         var name_off: i64 = 0
         if rows.names[i] != "":
             name_off = strtab.offsets[rows.names[i]]
-        b = elf_sym_entry(b, name_off, rows.info[i], rows.other[i], rows.shndx[i], rows.value[i], rows.size[i])
+        b.extend(elf_sym_entry(name_off, rows.info[i], rows.other[i], rows.shndx[i], rows.value[i], rows.size[i]))
         i = i + 1
     Ok(ElfSymtabOut(symtab: b, strtab: strtab.data, first_global: first_global))
-
-fn elf_put_le_u8(b: [u8], o: i64, n: i64, v: i64) -> [u8]:
-    var out = b
-    var i: i64 = 0
-    while i < n:
-        out[o + i] = ((v >> (i * 8)) & 0xff) as u8
-        i = i + 1
-    out
 
 fn elf_append_symtab(image: [u8], st: ElfSymtabOut) -> Result<[u8], text>:
     """Append non-allocated .symtab + .strtab to a written image.
@@ -1198,9 +1202,13 @@ fn elf_append_symtab(image: [u8], st: ElfSymtabOut) -> Result<[u8], text>:
     val new_shoff = align_up(b.len(), 8)
     if new_shoff > b.len(): b.extend(elf_u8_zeros(new_shoff - b.len()))
     b.extend(image[shoff:shoff + shnum * 64])
+    # workaround: doc/08_tracking/bug/native_array_copy_leaks_2026-10-20.md (inline header patches)
     val nssh = new_shoff + shstrndx * 64
-    b = elf_put_le_u8(b, nssh + 24, 8, shstr_off)
-    b = elf_put_le_u8(b, nssh + 32, 8, old_size + 16)
+    var pb: i64 = 0
+    while pb < 8:
+        b[nssh + 24 + pb] = ((shstr_off >> (pb * 8)) & 0xff) as u8
+        b[nssh + 32 + pb] = (((old_size + 16) >> (pb * 8)) & 0xff) as u8
+        pb = pb + 1
     var headers: [i64] = []
     # .symtab: sh_link = .strtab (index shnum + 1), sh_info = first global
     headers = write_u32_le(headers, old_size)
@@ -1225,8 +1233,13 @@ fn elf_append_symtab(image: [u8], st: ElfSymtabOut) -> Result<[u8], text>:
     headers = write_u64_le(headers, 1)
     headers = write_u64_le(headers, 0)
     b.extend(elf_u8_from_i64(headers))
-    b = elf_put_le_u8(b, 0x28, 8, new_shoff)
-    Ok(elf_put_le_u8(b, 0x3c, 2, shnum + 2))
+    pb = 0
+    while pb < 8:
+        b[0x28 + pb] = ((new_shoff >> (pb * 8)) & 0xff) as u8
+        pb = pb + 1
+    b[0x3c] = ((shnum + 2) & 0xff) as u8
+    b[0x3d] = (((shnum + 2) >> 8) & 0xff) as u8
+    Ok(b)
 
 # ============================================================================
 # Entry points
@@ -1572,7 +1585,11 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
                 if reference.out_off < 0 or reference.out_off >= section_len:
                     return Err("RISC-V ULEB128 field is outside its input section")
                 val uleb_end = if reference.out_off + 10 < section_len: reference.out_off + 10 else: section_len
-                val field = elf_u8_window_i64(contents[reference.out_sec], reference.out_off, uleb_end)
+                var field: [i64] = []
+                var fb = reference.out_off
+                while fb < uleb_end:
+                    field.push(contents[reference.out_sec][fb] as i64)
+                    fb = fb + 1
                 riscv_uleb_widths[ri] = riscv_uleb_width(field, 0, field.len())?
             ri = ri + 1
     var j: i64 = 0
@@ -1608,8 +1625,12 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
             val uleb_width = riscv_uleb_widths[j]
             if r.out_off < 0 or uleb_width > contents[k].len() - r.out_off:
                 return Err("RISC-V ULEB128 patch exceeds its allocated field")
-            val uleb = riscv_uleb_patch(elf_u8_window_i64(contents[k], r.out_off, r.out_off + uleb_width),
-                0, uleb_width, difference)?
+            var uleb_field: [i64] = []
+            var ufb = r.out_off
+            while ufb < r.out_off + uleb_width:
+                uleb_field.push(contents[k][ufb] as i64)
+                ufb = ufb + 1
+            val uleb = riscv_uleb_patch(uleb_field, 0, uleb_width, difference)?
             var ub: i64 = 0
             while ub < uleb_width:
                 contents[k][r.out_off + ub] = uleb[ub]
@@ -1713,7 +1734,14 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
         var field_end = r.out_off + 12
         if field_end > section_len: field_end = section_len
         if field_end < field_start: field_end = field_start
-        val window = elf_u8_window_i64(contents[k], field_start, field_end)
+        # workaround: doc/08_tracking/bug/native_array_copy_leaks_2026-10-20.md
+        # Read the window by direct element access: passing contents[k] to a
+        # helper copies the whole section per relocation in native builds.
+        var window: [i64] = []
+        var wb = field_start
+        while wb < field_end:
+            window.push(contents[k][wb] as i64)
+            wb = wb + 1
         val applied = operations.relocate(target, window, r.out_off - field_start, rtype, s, a, p)
         if applied.is_err():
             return Err("object {r.oi}: relocation type {r.rtype} against '{r.name}' at {p}: {applied.unwrap_err()}")
@@ -1734,44 +1762,44 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
         val r = refs[sc.got_ref[gi]]
         val slot = got_v + gi * 8
         if r.rclass == RC_TLS_IE and r.kind == SYMREF_IMPORT:
-            got = write_u64_le(got, 0)
-            rela_sym = elf_rela_entry(rela_sym, slot, sc.import_idx[r.name], elf_dyn_tpoff64(target), 0)
+            got.extend(write_u64_le([], 0))
+            rela_sym.extend(elf_rela_entry(slot, sc.import_idx[r.name], elf_dyn_tpoff64(target), 0))
         else if r.rclass == RC_TLS_IE:
-            got = write_u64_le(got, elf_tls_tprel(plan, target,
-                elf_ref_addr(ctx, lay, r)? + r.addend)?)
+            got.extend(write_u64_le([], elf_tls_tprel(plan, target,
+                elf_ref_addr(ctx, lay, r)? + r.addend)?))
         else if r.kind == SYMREF_IMPORT and sc.copy_idx.has(r.name):
-            got = write_u64_le(got, elf_ref_addr(ctx, lay, r)?)
+            got.extend(write_u64_le([], elf_ref_addr(ctx, lay, r)?))
         else if r.kind == SYMREF_IMPORT:
-            got = write_u64_le(got, 0)
-            rela_sym = elf_rela_entry(rela_sym, slot, sc.import_idx[r.name], elf_dyn_glob_dat(target), 0)
+            got.extend(write_u64_le([], 0))
+            rela_sym.extend(elf_rela_entry(slot, sc.import_idx[r.name], elf_dyn_glob_dat(target), 0))
         else:
             val v = elf_ref_addr(ctx, lay, r)?
-            got = write_u64_le(got, v)
+            got.extend(write_u64_le([], v))
             if pie and r.kind == SYMREF_DEFINED:
-                rela_rel = elf_rela_entry(rela_rel, slot, 0, elf_dyn_relative(target), v)
+                rela_rel.extend(elf_rela_entry(slot, 0, elf_dyn_relative(target), v))
         gi = gi + 1
     for jr in sc.relative:
         val r = refs[jr]
         val v = elf_ref_addr(ctx, lay, r)?
-        rela_rel = elf_rela_entry(rela_rel, plan.vaddrs[in_to_plan[r.out_sec]] + r.out_off, 0, elf_dyn_relative(target), v + r.addend)
+        rela_rel.extend(elf_rela_entry(plan.vaddrs[in_to_plan[r.out_sec]] + r.out_off, 0, elf_dyn_relative(target), v + r.addend))
     for js in sc.sym_abs:
         val r = refs[js]
-        rela_sym = elf_rela_entry(rela_sym, plan.vaddrs[in_to_plan[r.out_sec]] + r.out_off, sc.import_idx[r.name], elf_dyn_abs64(target), r.addend)
+        rela_sym.extend(elf_rela_entry(plan.vaddrs[in_to_plan[r.out_sec]] + r.out_off, sc.import_idx[r.name], elf_dyn_abs64(target), r.addend))
     for jt in sc.tls_dynamic:
         val r = refs[jt]
-        rela_sym = elf_rela_entry(rela_sym,
+        rela_sym.extend(elf_rela_entry(
             plan.vaddrs[in_to_plan[r.out_sec]] + r.out_off,
-            sc.import_idx[r.name], r.rtype, r.addend)
+            sc.import_idx[r.name], r.rtype, r.addend))
     for name in sc.copy_names:
         val addr = plan.vaddrs[in_to_plan[ctx.copy_out]] + ctx.copy_offsets[name]
-        rela_sym = elf_rela_entry(rela_sym, addr, sc.import_idx[name], elf_dyn_copy(target), 0)
+        rela_sym.extend(elf_rela_entry(addr, sc.import_idx[name], elf_dyn_copy(target), 0))
+    # workaround: doc/08_tracking/bug/native_array_copy_leaks_2026-10-20.md (tables extend in place)
     var rela_dyn = rela_rel
-    for x in rela_sym:
-        rela_dyn = rela_dyn.push(x)
+    rela_dyn.extend(rela_sym)
     var rela_plt: [i64] = []
     var pi: i64 = 0
     while pi < nplt:
-        rela_plt = elf_rela_entry(rela_plt, gotplt_v + (GOTPLT_RESERVED + pi) * 8, sc.import_idx[sc.plt_names[pi]], elf_dyn_jump_slot(target), 0)
+        rela_plt.extend(elf_rela_entry(gotplt_v + (GOTPLT_RESERVED + pi) * 8, sc.import_idx[sc.plt_names[pi]], elf_dyn_jump_slot(target), 0))
         pi = pi + 1
 
     var init_v: i64 = 0

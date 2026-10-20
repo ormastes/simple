@@ -90,3 +90,33 @@ Seed-interpreter traps found along the way (not fixed here):
   mutations through the parameter are lost.
 - Arithmetic on `[u8]` elements wraps at 8 bits unless cast `as i64`.
 - `[[], []]` element arrays reject `extend`.
+
+## Update 2026-10-20 (later): full cranelift CLI links with the internal linker
+
+The linker driver (`test/05_perf/compiler/linker/internal_link_spec_driver.spl`) was built natively with seed `37b0735c`, with the
+workarounds in `native_array_copy_leaks_2026-10-20.md`. It linked the kept cranelift full-CLI set
+(wyZqCb) under `MemoryMax=24G`:
+
+- **Time:** 79 s wall.
+- **Peak RSS:** 21.3 GB. Per-phase peak RSS is printed by `SIMPLE_ELF_LINK_TRACE=1` as `hwm_kib`.
+- **Phase times:**
+
+  | phase | time |
+  |---|---|
+  | parse | 4.8 s |
+  | archive closure | 2.5 s |
+  | resolve | 7.2 s |
+  | refs | 12.6 s |
+  | relocation | 30.5 s |
+  | symtab | 7.0 s |
+
+- **Output:** 58 MB, against lld's 64.5 MB.
+
+**Acceptance, same as the ld.lld link:**
+- `nm -D -u` has no `rt_`/`spl_` symbols. The only difference from lld is the weak `__gmon_start__` and `_ITM_*` refs that crtbegin.o brings in.
+- NEEDED is libc, libm and libgcc_s.
+- `--version` and `-c 'print(1+1)'` (prints 2) match lld.
+- `run hello.spl` gives the same output.
+- A fixture spec run gives the same verdict as the lld binary.
+
+For comparison, mold takes 1.4-2.0 s at 45 MB and lld 0.9 s at 680 MB.
