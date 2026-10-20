@@ -33,14 +33,20 @@ impl ProcessSymbolProvider {
 
 impl RuntimeSymbolProvider for ProcessSymbolProvider {
     fn get_symbol(&self, name: &str) -> Option<*const u8> {
-        let normalized = name.strip_prefix('_').unwrap_or(name);
-        if let Some(&ptr) = self.cache.borrow().get(normalized) {
-            return Some(ptr);
+        // Exact name first: real libc symbols such as `__errno_location`
+        // begin with `_`. The ABI-underscore-stripped spelling (Mach-O
+        // `_name` for `name`) is only a fallback.
+        let stripped = name.strip_prefix('_');
+        for candidate in std::iter::once(name).chain(stripped) {
+            if let Some(&ptr) = self.cache.borrow().get(candidate) {
+                return Some(ptr);
+            }
+            if let Some(ptr) = lookup_symbol(self.handle, candidate) {
+                self.cache.borrow_mut().insert(candidate.to_string(), ptr);
+                return Some(ptr);
+            }
         }
-
-        let ptr = lookup_symbol(self.handle, normalized)?;
-        self.cache.borrow_mut().insert(normalized.to_string(), ptr);
-        Some(ptr)
+        None
     }
 
     fn symbols(&self) -> &[&'static str] {
@@ -103,5 +109,38 @@ fn lookup_symbol(handle: ProcessHandle, name: &str) -> Option<*const u8> {
     match sym {
         Some(f) => Some(f as *const () as *const u8),
         None => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A libc symbol whose real name begins with `_` must resolve by its exact
+    // name. Stripping the Mach-O ABI underscore first turned
+    // `__errno_location` into `_errno_location`, which glibc does not export,
+    // so the JIT spliced the call into the interpreter and the run died with
+    // "extern `__errno_location` ... backed by no implementation"
+    // (test_coverage_wrapper_native_build_refused_by_scv_admission_2026_10_19).
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[test]
+    fn exact_leading_underscore_libc_name_resolves() {
+        let provider = ProcessSymbolProvider::new().expect("process handle");
+        assert!(provider.get_symbol("__errno_location").is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn abi_underscore_spelling_still_resolves() {
+        let provider = ProcessSymbolProvider::new().expect("process handle");
+        assert!(provider.get_symbol("malloc").is_some());
+        assert!(provider.get_symbol("_malloc").is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unknown_symbol_is_none() {
+        let provider = ProcessSymbolProvider::new().expect("process handle");
+        assert!(provider.get_symbol("simple_no_such_symbol_zzqq").is_none());
     }
 }
