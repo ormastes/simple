@@ -18,11 +18,13 @@ use app.io._CliCompile.native_build_snapshot_roots.{native_build_snapshot_source
 use std.nogc_sync_mut.io.file_ops.{file_exists}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.driver.driver_source_loading.{
-    _driver_resolve_entry_import, _driver_text_bucket_set_new,
+    _driver_text_bucket_set_new,
     _driver_cached_entry_source_scan, driver_closure_scan_phase_trace,
-    _driver_entry_import_dirname, _driver_try_numbered_entry_import_rel_checked_v1
+    _driver_entry_import_dirname, _driver_physical_source_key,
+    driver_resolve_closure_import_v1, driver_closure_native_owner_v1,
+    driver_closure_import_specs_v1, driver_closure_importer_module_v1
 }
-use compiler.common.source_root_resolution.{SourceRootResolutionV1, source_root_std_family_order_v1}
+use compiler.common.source_root_resolution.{SourceRootResolutionV1}
 use std.scv.compile_snapshot.{
     scv_compile_snapshot_open_v1
 }
@@ -38,38 +40,6 @@ fn _nb_path_absolute_raw(path: text) -> text:
 
 fn _cli_eprint(message: text):
     eprint(message)
-
-fn _nb_dirname(path: text) -> text:
-    val parts = path.split("/")
-    if parts.len() <= 1:
-        return ""
-    parts.slice(0, parts.len() - 1).join("/")
-
-fn _nb_resolve_relative(mp: text, importer_file: text) -> text:
-    # `.sibling` / `..parent_pkg.mod` resolve against the importing FILE's
-    # directory, mirroring the driver's _driver_resolve_relative_entry_import.
-    # The dotted-segment resolver below cannot express these (leading dots
-    # split to empty segments), which silently dropped sibling modules from
-    # the --entry-closure worker input set ("unresolved name" storms in HIR).
-    var dots = 0
-    while dots < mp.len() and mp.substring(dots, dots + 1) == ".":
-        dots = dots + 1
-    if dots >= mp.len():
-        return ""
-    var base_dir = _nb_dirname(importer_file)
-    var up = 1
-    while up < dots and base_dir != "":
-        base_dir = _nb_dirname(base_dir)
-        up = up + 1
-    val rel = mp.substring(dots).replace(".", "/")
-    val base = if base_dir == "": rel else: "{base_dir}/{rel}"
-    if _nb_file_exists_raw("{base}.spl"):
-        return "{base}.spl"
-    if _nb_file_exists_raw("{base}/mod.spl"):
-        return "{base}/mod.spl"
-    if _nb_file_exists_raw("{base}/__init__.spl"):
-        return "{base}/__init__.spl"
-    ""
 
 fn _nb_basename(path: text) -> text:
     val parts = path.split("/")
@@ -93,13 +63,6 @@ fn _nb_source_dirs_cover_workspace(source_dirs: [text]) -> bool:
         if name == "lib": lib = true
         if name == "compiler": compiler = true
     app and lib and compiler
-
-fn _nb_source_root_named(source_dirs: [text], name: text) -> text:
-    for source_dir in source_dirs:
-        val normalized = _nb_trim_trailing_slashes(source_dir)
-        if _nb_basename(normalized) == name:
-            return normalized
-    ""
 
 var _nb_scv_snapshot_key_v1: text = ""
 var _nb_scv_snapshot_root_v1: text = ""
@@ -300,88 +263,6 @@ fn _nb_normalize_source_dirs(source_dirs: [text]) -> [text]:
         result = result.push(candidate)
     result
 
-fn _nb_resolve_under_root(root: text, segs: [text]) -> SourceRootResolutionV1:
-    if segs.len() == 0:
-        return SourceRootResolutionV1.Missing
-    val rel = _nb_join_segments(segs)
-    val p1 = "{root}/{rel}.spl"
-    if _nb_file_exists_raw(p1):
-        return SourceRootResolutionV1.Found(p1)
-    val p2 = "{root}/{rel}/mod.spl"
-    if _nb_file_exists_raw(p2):
-        return SourceRootResolutionV1.Found(p2)
-    val p3 = "{root}/{rel}/__init__.spl"
-    if _nb_file_exists_raw(p3):
-        return SourceRootResolutionV1.Found(p3)
-    # Share the driver's numbered-directory owner. The former exact-only
-    # split omitted editor/00.common declarations from the frozen closure.
-    _driver_try_numbered_entry_import_rel_checked_v1(root, rel)
-
-fn _nb_resolve_segs(segs: [text], source_dirs: [text]) -> SourceRootResolutionV1:
-    # Resolve a module segment list to an .spl file under a --source root.
-    # Mirrors the Rust discovery FS-fallback: strip a leading segment matching
-    # the root's dir name. Ambiguity terminates root traversal.
-    for root in source_dirs:
-        val dir_name = _nb_basename(root)
-        val public_lib_alias = dir_name == "lib" and segs.len() > 0 and segs[0] == "std"
-        if segs.len() > 0 and (segs[0] == dir_name or public_lib_alias):
-            var stripped: [text] = []
-            var si = 1
-            while si < segs.len():
-                stripped = stripped.push(segs[si])
-                si = si + 1
-            val stripped_path = _nb_resolve_under_root(root, stripped)
-            match stripped_path:
-                case SourceRootResolutionV1.Missing: ()
-                case _: return stripped_path
-        val direct_path = _nb_resolve_under_root(root, segs)
-        match direct_path:
-            case SourceRootResolutionV1.Missing: ()
-            case _: return direct_path
-    # A Windows checkout may contain the app/t32_cli symlink as a plain file.
-    # Only use the physical owner under an explicitly admitted tooling root.
-    # Ordinary source roots above retain precedence, including snapshot roots.
-    if segs.len() >= 2 and segs[0] == "app" and segs[1] == "t32_cli":
-        val tooling_root = _nb_source_root_named(source_dirs, "10_tooling")
-        if tooling_root != "":
-            var physical: [text] = ["trace32_tools", "t32_cli"]
-            var ti = 2
-            while ti < segs.len():
-                physical = physical.push(segs[ti])
-                ti = ti + 1
-            val tooling_path = _nb_resolve_under_root(tooling_root, physical)
-            match tooling_path:
-                case SourceRootResolutionV1.Missing: ()
-                case _: return tooling_path
-    # Unprefixed tier-qualified paths (`nogc_sync_mut.io_runtime` from the
-    # std.io_runtime shim's `export use`; `common.ui.access_types`) live
-    # under src/lib but carry no std./lib. prefix — no root above matches.
-    val lib_root = _nb_source_root_named(source_dirs, "lib")
-    if lib_root != "":
-        val lib_direct = _nb_resolve_under_root(lib_root, segs)
-        match lib_direct:
-            case SourceRootResolutionV1.Missing: ()
-            case _: return lib_direct
-    # `std.X` flattens the concurrency-tier directories: std.mcp_sdk.server.
-    # method_detect is physically src/lib/<tier>/mcp_sdk/server/method_detect
-    # .spl. Mirror the seed interpreter's family-fallback order.
-    if segs.len() > 1 and segs[0] == "std":
-        var tier_tail: [text] = []
-        var tier_ti = 1
-        while tier_ti < segs.len():
-            tier_tail = tier_tail.push(segs[tier_ti])
-            tier_ti = tier_ti + 1
-        if lib_root != "":
-            for tier in source_root_std_family_order_v1():
-                val tier_path = _nb_resolve_under_root(lib_root + "/" + tier, tier_tail)
-                match tier_path:
-                    case SourceRootResolutionV1.Missing: ()
-                    case _: return tier_path
-    SourceRootResolutionV1.Missing
-
-fn _nb_join_segments(segs: [text]) -> text:
-    segs.join("/")
-
 pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
     # BFS the entry's import closure so --entry-closure compiles only reachable
     # modules (one `main`), not every file in the --source dirs. Over-approximates
@@ -457,7 +338,7 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
     val trace_timing = (env_get("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE_TIMING") ?? "") == "1"
     var queue: [text] = [frozen_entry]
     var discovered = _driver_text_bucket_set_new(512)
-    discovered[frozen_entry] = true
+    discovered[_driver_physical_source_key(frozen_entry)] = true
     var result: [text] = []
     var resolve_cache: Dict<text, text> = {}
     val closure_source_dirs = _nb_normalize_source_dirs(frozen_source_dirs)
@@ -476,67 +357,42 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
             if trace_closure and f == frozen_entry:
                 _cli_eprint("[native-build] closure entry missing {f}")
             continue
-        val (content, imports, siblings, _) = _driver_cached_entry_source_scan(f)
+        val (content, _, _, _) = _driver_cached_entry_source_scan(f)
         driver_closure_scan_phase_trace("closure_node:scanned", f)
         if trace_closure and f == frozen_entry:
             _cli_eprint("[native-build] closure entry read len={content.len()}")
         if trace_closure and result.len() % 25 == 0:
             _cli_eprint("[native-build] closure visited {result.len()} queued={queue.len()} file={f}")
-        # The shared scanner skips comments, docstrings, and lazy imports
-        # without materializing every ordinary source line. Sibling `mod` and
-        # `export member.*` declarations use a separate guarded compatibility
-        # scan because they resolve relative to the declaring file.
-        var module_paths = imports
-        for sibling in siblings:
-            module_paths = module_paths.push(sibling)
+        # Import specs, resolution, and native-owner preference are the
+        # driver worker walk's own functions (driver_resolve_closure_import_v1):
+        # the two walks must bind every spelling to the same physical file.
+        val module_paths = driver_closure_import_specs_v1(f)
+        val importer_dir = _driver_entry_import_dirname(f)
+        val importer_module = driver_closure_importer_module_v1(f)
         for mp in module_paths:
-            if mp.starts_with("."):
-                val rel_rp = _nb_resolve_relative(mp, f)
-                if rel_rp != "" and not discovered.contains_key(rel_rp):
-                    queue.append(rel_rp)
-                    discovered[rel_rp] = true
-                continue
-            val segs = mp.split(".")
-            val seg_key = _nb_join_segments(segs)
+            # Bare spellings bind importer-relative, so cache per directory.
+            val cache_key = importer_dir + "|" + mp
             var rp = ""
-            if resolve_cache.has(seg_key):
-                rp = resolve_cache[seg_key]
+            if resolve_cache.has(cache_key):
+                rp = resolve_cache[cache_key]
             else:
-                val selected = _nb_resolve_segs(segs, closure_source_dirs)
+                val selected = driver_resolve_closure_import_v1(mp, closure_source_dirs, importer_dir)
                 match selected:
-                    case SourceRootResolutionV1.Found(path): rp = path
+                    case SourceRootResolutionV1.Found(path):
+                        val spelling = if mp.starts_with(".") and not mp.starts_with(".."): importer_module + mp else: mp
+                        rp = driver_closure_native_owner_v1(path, spelling, importer_dir)
                     case SourceRootResolutionV1.Missing: ()
                     case SourceRootResolutionV1.Ambiguous(directory):
                         _cli_eprint("SOURCE_ROOT_AMBIGUOUS: import '{mp}' has competing numbered directories under '{directory}'")
                         return []
-                resolve_cache[seg_key] = rp
+                resolve_cache[cache_key] = rp
             if trace_closure and f == frozen_entry:
                 _cli_eprint("[native-build] closure import {mp} -> {rp}")
-            if rp != "" and not discovered.contains_key(rp):
-                queue.append(rp)
-                discovered[rp] = true
-            if rp == "" and segs.len() > 1:
-                var drop: [text] = []
-                var di = 0
-                while di < segs.len() - 1:
-                    drop = drop.push(segs[di])
-                    di = di + 1
-                val drop_key = _nb_join_segments(drop)
-                var drop_rp = ""
-                if resolve_cache.has(drop_key):
-                    drop_rp = resolve_cache[drop_key]
-                else:
-                    val selected = _nb_resolve_segs(drop, closure_source_dirs)
-                    match selected:
-                        case SourceRootResolutionV1.Found(path): drop_rp = path
-                        case SourceRootResolutionV1.Missing: ()
-                        case SourceRootResolutionV1.Ambiguous(directory):
-                            _cli_eprint("SOURCE_ROOT_AMBIGUOUS: import '{mp}' has competing numbered directories under '{directory}'")
-                            return []
-                    resolve_cache[drop_key] = drop_rp
-                if drop_rp != "" and not discovered.contains_key(drop_rp):
-                    queue.append(drop_rp)
-                    discovered[drop_rp] = true
+            if rp != "":
+                val rp_key = _driver_physical_source_key(rp)
+                if not discovered.contains_key(rp_key):
+                    queue.append(rp)
+                    discovered[rp_key] = true
         if trace_timing:
             val elapsed_us = time_now_unix_micros() - timing_file_start_us
             _cli_eprint("[native-build] closure timing n={result.len()} queued={queue.len()} elapsed_us={elapsed_us} imports={module_paths.len()} content_len={content.len()} file={f}")

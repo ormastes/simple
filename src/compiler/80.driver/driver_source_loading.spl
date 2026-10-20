@@ -1349,6 +1349,10 @@ pub fn _driver_resolve_source_root_entry_import_from_v1(module_path: text, sourc
     while probe != "":
         val segments = probe.split(".")
         val nested = _driver_nested_compiler_owner_rel_v1(probe)
+        # Checkout answer for this spelling, computed only when an unprefixed
+        # root hit needs it (see _driver_direct_root_hit_defers_v1).
+        var checkout_probe = ""
+        var checkout_probed = false
         for source_root in source_roots:
             if source_root.ends_with(".spl"): continue
             var root = source_root
@@ -1377,7 +1381,11 @@ pub fn _driver_resolve_source_root_entry_import_from_v1(module_path: text, sourc
             val selected = _driver_try_numbered_entry_import_rel_checked_v1(root, probe.replace(".", "/"))
             match selected:
                 case SourceRootResolutionV1.Found(path):
-                    if _driver_source_root_hit_allowed_v1(path, probe == module_path): return selected
+                    if not checkout_probed:
+                        checkout_probe = _driver_resolve_entry_import_exact(probe, entry_dir)
+                        checkout_probed = true
+                    if _driver_direct_root_hit_defers_v1(path, root, checkout_probe): ()
+                    elif _driver_source_root_hit_allowed_v1(path, probe == module_path): return selected
                 case SourceRootResolutionV1.Ambiguous(_): return selected
                 case SourceRootResolutionV1.Missing: ()
             if nested != "":
@@ -1397,7 +1405,9 @@ pub fn _driver_resolve_source_root_entry_import_from_v1(module_path: text, sourc
         # never a package facade (_driver_source_root_hit_allowed_v1);
         # once the checkout resolves the current spelling, report Missing so
         # the fallback selects that file.
-        if _driver_resolve_entry_import_exact(probe, entry_dir) != "":
+        if not checkout_probed:
+            checkout_probe = _driver_resolve_entry_import_exact(probe, entry_dir)
+        if checkout_probe != "":
             return SourceRootResolutionV1.Missing
         # Dotted application packages are physical siblings (ui.render/),
         # not nested ui/render/. Resolve the complete owner before parent-item
@@ -1466,6 +1476,136 @@ fn _driver_source_root_hit_allowed_v1(path: text, exact_spelling: bool) -> bool:
     # the whole facade into the closure under the wrong name.
     if exact_spelling: return true
     not (path.ends_with("/mod.spl") or path.ends_with("/__init__.spl"))
+
+fn _driver_direct_root_hit_defers_v1(hit: text, root: text, checkout: text) -> bool:
+    # A namespace root (`<...>/src/<name>`: app, lib, compiler, os, plugins)
+    # answers its own spelling through the stripped probe. Its UNPREFIXED hit
+    # is a cross-namespace guess and must not outrank the checkout resolver,
+    # which owns the language precedence (checkout, src/, the importer's own
+    # directory, then numbered/library rewrites). Without this, bare
+    # `use types` from a directory owning types.spl bound src/compiler/30.types,
+    # `common.string_builder` from src/lib/common bound
+    # src/app/common/string_builder.spl, and `compiler.mir_opt.X` bound a
+    # src/lib stub. Composition/overlay roots are not namespace roots: an
+    # unprefixed hit there is exactly what they exist for.
+    if checkout == "": return false
+    val parts = _driver_canonical_source_path(root).split("/")
+    if parts.len() < 2 or parts[parts.len() - 2] != "src": return false
+    _driver_physical_source_key(hit) != _driver_physical_source_key(checkout)
+
+pub fn driver_closure_file_from_selection_v1(
+    selected: SourceRootResolutionV1, module_path: text, importer_dir: text
+) -> SourceRootResolutionV1:
+    # Declared source roots answer first; Missing falls back to the checkout
+    # resolver (relative imports included). Shared by every closure walk.
+    match selected:
+        case SourceRootResolutionV1.Missing:
+            val checkout = _driver_resolve_entry_import(module_path, importer_dir)
+            if checkout == "": SourceRootResolutionV1.Missing
+            else: SourceRootResolutionV1.Found(checkout)
+        case _: selected
+
+pub fn driver_resolve_closure_import_v1(
+    module_path: text, source_roots: [text], importer_dir: text
+) -> SourceRootResolutionV1:
+    """THE closure-import resolver. The CLI coordinator walk
+    (_native_build_entry_closure) and the driver worker walk
+    (driver_source_pipeline_loading) must bind every spelling identically, or
+    they compile different module sets (2280-module Stage 3 closure,
+    doc/08_tracking/bug/bootstrap_main_closure_pulls_src_os_hir_failures_2026_10_20.md)."""
+    driver_closure_file_from_selection_v1(
+        _driver_resolve_source_root_entry_import_from_v1(
+            module_path, source_roots, importer_dir),
+        module_path, importer_dir)
+
+fn _driver_file_natively_owns_v1(path: text, module_name: text) -> bool:
+    for source in _driver_collect_explicit_compiler_source(path):
+        if source.module_name == module_name: return true
+    false
+
+pub fn driver_closure_native_owner_v1(file: text, module_name: text, importer_dir: text) -> text:
+    # A source-root hit whose native names omit the import spelling (a src/lib
+    # stub facade shadowing a compiler-tree owner) yields to a checkout file
+    # that natively owns the spelling. Genuine aliases keep the selected file.
+    if file == "" or _driver_file_natively_owns_v1(file, module_name): return file
+    # A file sitting at the spelling's own path under a root (a composition
+    # overlay such as compositions/cuda_disabled/plugins/...) is the owner.
+    val spelled = module_name.replace(".", "/")
+    if file.ends_with("/" + spelled + ".spl") or file.ends_with("/" + spelled + "/__init__.spl") or
+            file.ends_with("/" + spelled + "/mod.spl"):
+        return file
+    val native = _driver_resolve_entry_import(module_name, importer_dir)
+    if native != "" and native != file and _driver_file_natively_owns_v1(native, module_name):
+        return native
+    file
+
+pub fn driver_closure_importer_module_v1(path: text) -> text:
+    # Package a `.sibling` spelling expands under: the importer's canonical
+    # (first) closure name, without a trailing `.__init__`.
+    val sources = _driver_collect_explicit_compiler_source(path)
+    val name = if sources.len() > 0: sources[0].module_name else: _driver_module_name_from_path(path)
+    if name.ends_with(".__init__"): name[0:name.len() - 9] else: name
+
+pub fn driver_closure_import_specs_v1(path: text) -> [text]:
+    # Import spellings one closure node contributes: scanned imports, then
+    # `.sibling` declarations whose file exists (generated facades keep
+    # comments for moved owners; a missing hint is not an import).
+    val (_, imports, siblings, _) = _driver_cached_entry_source_scan(path)
+    var specs = imports
+    val dir = _driver_entry_import_dirname(path)
+    for sibling in siblings:
+        if sibling.starts_with(".") and not sibling.starts_with(".."):
+            val sibling_file = dir + "/" + sibling.substring(1).replace(".", "/") + ".spl"
+            var exists = false
+            unsafe(capabilities: [ffi]):
+                exists = _driver_resolver_path_exists_v1(sibling_file)
+            if exists:
+                specs = specs.push(sibling)
+    specs
+
+pub fn driver_closure_set_digest_v1(paths: [text]) -> text:
+    # Order-free identity of a closure: sorted unique physical paths.
+    var keys: [text] = []
+    var seen: Dict<text, bool> = {}
+    for path in paths:
+        val key = _driver_physical_source_key(path)
+        if not seen.contains_key(key):
+            seen[key] = true
+            keys = keys.push(key)
+    sha256_text(keys.sort().join("\n"))
+
+pub fn driver_closure_synthetic_spec_v1(spec: text) -> bool:
+    # Hidden ABI owners the driver walk adds without an authored import
+    # (rt_hal boundary, MC/DC probes). The CLI walk cannot see them.
+    spec == "std.nogc_sync_mut.rt_hal.boundary" or
+        spec == "std.nogc_sync_mut.rt_hal.process_task_arena" or
+        spec == "app.io.env_access_host" or
+        spec == "std.nogc_sync_mut.mcdc.dynamic_probe" or
+        spec == "std.nogc_sync_mut.mcdc.static_probe"
+
+pub fn driver_closure_parity_check_enabled_v1() -> bool:
+    (sosix_env_get_nullable("SIMPLE_CLOSURE_PARITY_CHECK") ?? "") == "1" or
+        (sosix_env_get_nullable("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
+
+pub fn driver_closure_parity_error_v1(
+    scanned: [SourceFile], exempt: Dict<text, bool>, added: [text]
+) -> text:
+    """Debug/analysis assertion: the worker closure equals the coordinator's.
+    The CLI publishes SIMPLE_NATIVE_CLOSURE_COORDINATOR_DIGEST; a worker that
+    binds any spelling differently grows its closure and fails loudly here."""
+    if not driver_closure_parity_check_enabled_v1(): return ""
+    val expected = sosix_env_get_nullable("SIMPLE_NATIVE_CLOSURE_COORDINATOR_DIGEST") ?? ""
+    if expected == "": return ""
+    var paths: [text] = []
+    for source in scanned:
+        if not exempt.contains_key(_driver_physical_source_key(source.path)):
+            paths = paths.push(source.path)
+    val actual = driver_closure_set_digest_v1(paths)
+    if actual == expected: return ""
+    var sample: [text] = []
+    for path in added:
+        if sample.len() < 8: sample = sample.push(path)
+    "CLOSURE_PARITY_MISMATCH: coordinator={expected} worker={actual} worker_files={paths.len()} added={added.len()} first_added=[" + sample.join(", ") + "]"
 
 pub fn _driver_resolve_entry_import(module_path: text, entry_dir: text) -> text:
     """File path backing a Simple import path, or "" when none exists.

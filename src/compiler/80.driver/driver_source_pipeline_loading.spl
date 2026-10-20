@@ -3,7 +3,7 @@
 # The main driver retains parsing, HIR, and later compilation phases.
 
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable, sosix_cwd}
-use std.io_runtime.{file_read_nullable, file_exists, process_run}
+use std.io_runtime.{file_read_nullable, process_run}
 use std.common.text_bytes.{bytes_to_text}
 use compiler.driver.driver_admitted_epoch.{driver_admitted_epoch_active_v1,
     driver_admitted_epoch_task_active_v1, driver_admitted_epoch_entry_v1,
@@ -26,6 +26,9 @@ use compiler.driver.driver_source_loading.{
     _driver_entry_import_dirname,
     _driver_resolve_entry_import,
     _driver_resolve_source_root_entry_import_from_v1,
+    driver_closure_file_from_selection_v1, driver_closure_native_owner_v1,
+    driver_closure_import_specs_v1, driver_closure_synthetic_spec_v1,
+    driver_closure_parity_error_v1,
     _driver_collect_entry_import_source,
     _driver_collect_explicit_compiler_source,
     _driver_collect_frozen_compiler_source_v1,
@@ -978,6 +981,10 @@ impl CompilerDriver:
             var closure_queued_paths = _driver_text_bucket_set_new(512)
             for queued_source in closure_scan_sources:
                 closure_queued_paths[_driver_physical_source_key(queued_source.path)] = true
+            # Coordinator/worker parity (debug): files this walk adds beyond its
+            # seeds, excluding those reached only through synthetic ABI edges.
+            var closure_parity_exempt = _driver_text_bucket_set_new(64)
+            var closure_walk_added: [text] = []
             var closure_idx = 0
             # A 64-file cadence is adequate for ordinary progress, but hides
             # the exact source that starts a tail stall.  Keep the normal
@@ -1003,22 +1010,12 @@ impl CompilerDriver:
                         closure_scan_sources.len(), closure_src.path,
                         0, 6, 0, 0, "running")
                 val closure_dir = _driver_entry_import_dirname(closure_src.path)
-                val (_, cached_closure_imports, cached_closure_siblings, _) = _driver_cached_entry_source_scan(closure_src.path)
-                var closure_imports = cached_closure_imports
+                # Same import specs as the CLI coordinator walk.
+                var closure_imports = driver_closure_import_specs_v1(closure_src.path)
                 val closure_module = if closure_src.module_name.ends_with(".__init__"):
                     closure_src.module_name[0:closure_src.module_name.len() - 9]
                 else:
                     closure_src.module_name
-                for sibling in cached_closure_siblings:
-                    if sibling.starts_with(".") and not sibling.starts_with(".."):
-                        # Generated facades may retain historical comments for
-                        # owners moved elsewhere. The native closure walker
-                        # skips missing relative files; match that behavior
-                        # before turning a hint into a required module import.
-                        val sibling_file = closure_dir + "/" +
-                            sibling.substring(1).replace(".", "/") + ".spl"
-                        if file_exists(sibling_file):
-                            closure_imports.push(sibling)
                 # Hidden compiler ABI dependencies are admitted from a typed
                 # parser result. The substring is only an allocation-saving
                 # prefilter; it never decides whether a declaration is HAL.
@@ -1057,9 +1054,13 @@ impl CompilerDriver:
                         closure_module + closure_mp_input
                     else:
                         closure_mp_input
-                    if closure_seen_mods.contains_key(closure_mp):
+                    # A bare spelling binds importer-relative (`use types` is
+                    # the importer's sibling when one exists), so the same
+                    # spelling from another directory must be resolved again.
+                    val closure_seen_key = closure_dir + "|" + closure_mp
+                    if closure_seen_mods.contains_key(closure_seen_key):
                         continue
-                    closure_seen_mods[closure_mp] = true
+                    closure_seen_mods[closure_seen_key] = true
                     val selected_source = _driver_resolve_source_root_entry_import_from_v1(
                         closure_mp_input, closure_source_roots, closure_dir)
                     val loaded_path = closure_loaded_paths.get(closure_mp) ?? ""
@@ -1075,16 +1076,13 @@ impl CompilerDriver:
                         log_phase(owner_error)
                         driver_entry_scan_cache_release()
                         return (self.ctx, false)
-                    if closure_loaded_mods.contains_key(closure_mp):
-                        log_phase(
-                            "phase1:load_sources:closure:already-loaded module={closure_mp} used_in={closure_src.path}")
-                        continue
-                    val closure_selected_source = _driver_resolve_source_root_entry_import_from_v1(
-                        closure_mp_input, closure_source_roots, closure_dir)
+                    # driver_resolve_closure_import_v1, split so the owner check
+                    # above reuses the source-root answer.
+                    val closure_selected_source = driver_closure_file_from_selection_v1(
+                        selected_source, closure_mp_input, closure_dir)
                     var closure_file = match closure_selected_source:
                         case SourceRootResolutionV1.Found(path): path
-                        case SourceRootResolutionV1.Missing:
-                            _driver_resolve_entry_import(closure_mp_input, closure_dir)
+                        case SourceRootResolutionV1.Missing: ""
                         case SourceRootResolutionV1.Ambiguous(directory):
                             val reason = "SOURCE_ROOT_AMBIGUOUS: import '{closure_mp}' has competing numbered directories under '{directory}'"
                             self.ctx.add_error(reason)
@@ -1107,6 +1105,21 @@ impl CompilerDriver:
                         log_phase(
                             "phase1:load_sources:closure:unresolved module={closure_mp} used_in={closure_src.path} dir={closure_dir}")
                         continue
+                    closure_file = driver_closure_native_owner_v1(closure_file, closure_mp, closure_dir)
+                    val closure_edge_exempt = driver_closure_synthetic_spec_v1(closure_mp_input) or
+                        closure_parity_exempt.contains_key(_driver_physical_source_key(closure_src.path))
+                    # Dedup by physical file, never by spelling: a spelling
+                    # already loaded from ANOTHER file still contributes this one.
+                    var closure_name_collision = false
+                    if closure_loaded_mods.contains_key(closure_mp):
+                        val loaded_owner = closure_loaded_paths.get(closure_mp) ?? ""
+                        if loaded_owner == "" or _driver_physical_source_key(loaded_owner) == _driver_physical_source_key(closure_file):
+                            log_phase(
+                                "phase1:load_sources:closure:already-loaded module={closure_mp} used_in={closure_src.path}")
+                            continue
+                        closure_name_collision = true
+                        log_phase(
+                            "phase1:load_sources:closure:spelling-collision module={closure_mp} used_in={closure_src.path} loaded={loaded_owner} file={closure_file}")
                     var closure_loaded = if explicit_entry_closure or native_group_inputs.len() > 0:
                         _driver_collect_explicit_compiler_source(closure_file)
                     else:
@@ -1124,40 +1137,6 @@ impl CompilerDriver:
                     for cs in closure_loaded:
                         if cs.module_name == closure_mp:
                             closure_has_exact = true
-                    if not closure_has_exact:
-                        # Source-root resolution picked a file whose NATIVE names
-                        # do not include the import spelling. The observed case
-                        # is a src/lib stub facade shadowing a compiler-tree
-                        # implementation: the declared source roots walk finds
-                        # src/lib/compiler/mir_opt/<name>.spl (whose native names
-                        # are all lib.*) for the import spelling
-                        # compiler.mir_opt.<name>, and the synthesized alias row
-                        # below would tag the ZERO-declaration facade with the
-                        # compiler name -- cross-mapping the registry's
-                        # name->index routing (cycle-38/39 frontier: surfaces
-                        # idx 871/2183/2415, hard 'has no exported item' for
-                        # every consumer). Before synthesizing that tag, give
-                        # the canonical resolver a chance to find a file that
-                        # natively owns the spelling -- e.g. the numbered-layout
-                        # table now reaches src/compiler/60.mir_opt/<name>.spl --
-                        # and prefer it. Genuine relative imports with no native
-                        # owner still fall through to the alias row unchanged.
-                        val native_file = _driver_resolve_entry_import(closure_mp, closure_dir)
-                        if native_file != "" and native_file != closure_file:
-                            val native_loaded = if explicit_entry_closure or native_group_inputs.len() > 0:
-                                _driver_collect_explicit_compiler_source(native_file)
-                            else:
-                                _driver_collect_entry_import_source(native_file)
-                            var native_has_exact = false
-                            for ns in native_loaded:
-                                if ns.module_name == closure_mp:
-                                    native_has_exact = true
-                            if native_has_exact:
-                                log_phase(
-                                    "phase1:load_sources:closure:native-owner-preferred module={closure_mp} shadow={closure_file} owner={native_file}")
-                                closure_file = native_file
-                                closure_loaded = native_loaded
-                                closure_has_exact = true
                     var closure_content = ""
                     for cs in closure_loaded:
                         closure_content = cs.content
@@ -1171,7 +1150,11 @@ impl CompilerDriver:
                         if not closure_queued_paths.contains_key(closure_physical_key):
                             closure_queued_paths[closure_physical_key] = true
                             closure_scan_sources.append(cs)
-                    if not closure_has_exact:
+                            if closure_edge_exempt:
+                                closure_parity_exempt[closure_physical_key] = true
+                            else:
+                                closure_walk_added.push(cs.path)
+                    if not closure_has_exact and not closure_name_collision:
                         # The path-derived module name differs from the import
                         # path (e.g. an entry-directory-relative import). Alias
                         # the file under the import path so
@@ -1184,7 +1167,14 @@ impl CompilerDriver:
                             closure_loaded_paths[closure_mp] = closure_file
                 closure_idx = closure_idx + 1
             log_phase(
-                "phase1:load_sources:closure:done scanned={closure_idx} logical={all_sources.len()}")
+                "phase1:load_sources:closure:done scanned={closure_idx} logical={all_sources.len()} added={closure_walk_added.len()}")
+            val closure_parity_reason = driver_closure_parity_error_v1(
+                closure_scan_sources, closure_parity_exempt, closure_walk_added)
+            if closure_parity_reason != "":
+                self.ctx.add_error(closure_parity_reason)
+                log_phase(closure_parity_reason)
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
             log_build_progress("source_closure", "files", closure_idx,
                 closure_idx, "complete", 1, 6, 0, 0, "running")
             # Every entry walk is now a closure, including the compiler-owned
