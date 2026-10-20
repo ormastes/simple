@@ -386,7 +386,6 @@ pub(super) fn build_vreg_types(
                                 Some(TypeId::F64)
                             }
                             "rt_array_get_text" => Some(TypeId::STRING),
-                            "rt_typed_words_i64_at" => Some(TypeId::I64),
                             "rt_typed_bytes_u8_at" | "rt_typed_bytes_u8_data_at" | "rt_bytes_u8_at" => Some(TypeId::U8),
                             "rt_typed_words_u32_at" | "rt_typed_words_u32_unchecked" | "rt_typed_words_u32_data_at" => {
                                 Some(TypeId::U32)

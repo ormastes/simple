@@ -22,5 +22,6 @@ provider compare tagged words and ignore `HeapInt` boxes (values outside the
 61-bit inline range). Arrays packed by the `[i64]` word lane sort correctly
 (signed raw words); an array that cannot pack (non-integer slot, threads already
 started, or unpacked once) still hits this. Fix: decode `as_heap_i64` in the
-comparator. Probe: `test/01_unit/compiler/jit_wide_i64_array_store_jit_probe.spl`
-(its sort check is red on base, green via the packed path).
+comparator. Probe: removed with the #3989 revert (use the inline reproducer above).
+
+Note (2026-10-20): restored by the #3989 revert. The paragraph above that says packed arrays sort correctly describes the reverted word lane; the bug itself is independent of it.

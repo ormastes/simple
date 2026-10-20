@@ -1024,53 +1024,16 @@ fn compile_inline_array_get<M: Module>(
     // read on OOB. FAM: items base is header+16 (no indirection, no byte-packing).
     builder.switch_to_block(load_block);
     let data_ptr = array_items_base(builder, ptr_bits, ctx.fam_arrays);
-    // Word-packed arrays (flag 0x10: a `[i64]` packed in place by a wide store,
-    // or a `[u64]`) hold RAW words, which the tagged-slot load below would hand
-    // out untagged. They are tagged here instead; a word outside the inline
-    // range needs a heap box, which only `rt_value_int` can make (the same
-    // runtime entry BoxInt already uses, so no new symbol and no
-    // `rt_array_get` call is introduced).
-    let words_block = if ctx.fam_arrays { None } else { Some(builder.create_block()) };
     if let Some(byte_block) = byte_block {
         let flags = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 1);
         let flags64 = builder.ins().uextend(types::I64, flags);
-        if let Some(words_block) = words_block {
-            let dispatch_block = builder.create_block();
-            let any_packed = builder.ins().band_imm(flags64, 0x18);
-            let is_any_packed = builder.ins().icmp_imm(IntCC::NotEqual, any_packed, 0);
-            builder.ins().brif(is_any_packed, dispatch_block, &[], word_block, &[]);
-            builder.switch_to_block(dispatch_block);
-            let byte_packed = builder.ins().band_imm(flags64, 0x08);
-            let is_byte_packed = builder.ins().icmp_imm(IntCC::NotEqual, byte_packed, 0);
-            builder.ins().brif(is_byte_packed, byte_block, &[], words_block, &[]);
-            builder.seal_block(dispatch_block);
-        } else {
-            let byte_packed = builder.ins().band_imm(flags64, 0x08);
-            let is_byte_packed = builder.ins().icmp_imm(IntCC::NotEqual, byte_packed, 0);
-            builder.ins().brif(is_byte_packed, byte_block, &[], word_block, &[]);
-        }
+        let byte_packed = builder.ins().band_imm(flags64, 0x08);
+        let is_byte_packed = builder.ins().icmp_imm(IntCC::NotEqual, byte_packed, 0);
+        builder.ins().brif(is_byte_packed, byte_block, &[], word_block, &[]);
     } else {
         builder.ins().jump(word_block, &[]);
     }
     builder.seal_block(load_block);
-
-    if let Some(words_block) = words_block {
-        builder.switch_to_block(words_block);
-        let slot_offset = builder.ins().ishl_imm(normalized_index, 3);
-        let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
-        let raw_word = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
-        let tagged = builder.ins().ishl_imm(raw_word, 3);
-        let round_trip = builder.ins().sshr_imm(tagged, 3);
-        let fits = builder.ins().icmp(IntCC::Equal, round_trip, raw_word);
-        let wide_block = builder.create_block();
-        builder.ins().brif(fits, done_block, &[tagged], wide_block, &[]);
-        builder.seal_block(words_block);
-        builder.set_cold_block(wide_block);
-        builder.switch_to_block(wide_block);
-        let boxed = call_runtime_1(ctx, builder, "rt_value_int", raw_word);
-        builder.ins().jump(done_block, &[boxed]);
-        builder.seal_block(wide_block);
-    }
 
     if let Some(byte_block) = byte_block {
         builder.switch_to_block(byte_block);
@@ -1229,56 +1192,16 @@ fn compile_inline_array_set<M: Module>(
 
     builder.switch_to_block(store_block);
     let data_ptr = array_items_base(builder, ptr_bits, ctx.fam_arrays);
-    // Word-packed arrays (flag 0x10) hold raw words: storing the tagged value
-    // here would corrupt them. The word is decoded from the tagged value; a
-    // heap-boxed wide value needs `rt_value_unbox_int` (the entry UnboxInt
-    // already uses), so no new symbol and no `rt_array_set` call.
-    let words_block = if ctx.fam_arrays { None } else { Some(builder.create_block()) };
     if let Some(byte_block) = byte_block {
         let flags = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 1);
         let flags64 = builder.ins().uextend(types::I64, flags);
-        if let Some(words_block) = words_block {
-            let dispatch_block = builder.create_block();
-            let any_packed = builder.ins().band_imm(flags64, 0x18);
-            let is_any_packed = builder.ins().icmp_imm(IntCC::NotEqual, any_packed, 0);
-            builder.ins().brif(is_any_packed, dispatch_block, &[], word_block, &[]);
-            builder.switch_to_block(dispatch_block);
-            let byte_packed = builder.ins().band_imm(flags64, 0x08);
-            let is_byte_packed = builder.ins().icmp_imm(IntCC::NotEqual, byte_packed, 0);
-            builder.ins().brif(is_byte_packed, byte_block, &[], words_block, &[]);
-            builder.seal_block(dispatch_block);
-        } else {
-            let byte_packed = builder.ins().band_imm(flags64, 0x08);
-            let is_byte_packed = builder.ins().icmp_imm(IntCC::NotEqual, byte_packed, 0);
-            builder.ins().brif(is_byte_packed, byte_block, &[], word_block, &[]);
-        }
+        let byte_packed = builder.ins().band_imm(flags64, 0x08);
+        let is_byte_packed = builder.ins().icmp_imm(IntCC::NotEqual, byte_packed, 0);
+        builder.ins().brif(is_byte_packed, byte_block, &[], word_block, &[]);
     } else {
         builder.ins().jump(word_block, &[]);
     }
     builder.seal_block(store_block);
-
-    if let Some(words_block) = words_block {
-        builder.switch_to_block(words_block);
-        let slot_offset = builder.ins().ishl_imm(normalized_index, 3);
-        let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
-        let value_tag = builder.ins().band(value, tag_mask);
-        let is_inline_int = builder.ins().icmp_imm(IntCC::Equal, value_tag, 0);
-        let inline_block = builder.create_block();
-        let wide_block = builder.create_block();
-        builder.ins().brif(is_inline_int, inline_block, &[], wide_block, &[]);
-        builder.seal_block(words_block);
-        builder.switch_to_block(inline_block);
-        let inline_word = builder.ins().sshr_imm(value, 3);
-        builder.ins().store(MemFlags::new(), inline_word, slot_ptr, 0);
-        builder.ins().jump(done_block, &[one]);
-        builder.seal_block(inline_block);
-        builder.set_cold_block(wide_block);
-        builder.switch_to_block(wide_block);
-        let wide_word = call_runtime_1(ctx, builder, "rt_value_unbox_int", value);
-        builder.ins().store(MemFlags::new(), wide_word, slot_ptr, 0);
-        builder.ins().jump(done_block, &[one]);
-        builder.seal_block(wide_block);
-    }
 
     if let Some(byte_block) = byte_block {
         builder.switch_to_block(byte_block);
