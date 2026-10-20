@@ -18,6 +18,7 @@ use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pau
 
 var _mono_archive_execution_expected_ready_v1: bool = false
 var _mono_archive_execution_expected_states_v1: Dict<i64, text> = {}
+var _mono_archive_execution_identity_counter_v1: i64 = 0
 
 class MonoArchiveExecutionV1:
     admission: MonoArchiveAdmissionV1
@@ -38,6 +39,8 @@ class MonoArchiveExecutionV1:
     call_sites_found: i64
     specializations_created: i64
     unresolved_generic_calls: i64
+    # Process-unique, never-reused key for the expected-state pin (0 = unassigned).
+    identity_id: i64 = 0
 
 fn mono_archive_root_schedule_digest_v1(roots: [MonoArchiveRootOrderV1]) -> text:
     mono_archive_registration_schedule_digest_v1(roots)
@@ -153,7 +156,8 @@ fn mono_archive_execution_create_repository_v1(owner: MonoArchiveRegistrationOwn
     val owned = if paused and valid: transient_promote<text>(schedule) and transient_promote<text>(state_digest) else: false
     mono_archive_execution_close_v1(paused, valid, owned)
     if not valid: return Err("mono execution admitted schedule or initial state refused")
-    val execution = MonoArchiveExecutionV1(admission: MonoArchiveAdmissionV1(
+    _mono_archive_execution_identity_counter_v1 = _mono_archive_execution_identity_counter_v1 + 1
+    val execution = MonoArchiveExecutionV1(identity_id: _mono_archive_execution_identity_counter_v1, admission: MonoArchiveAdmissionV1(
         repository: repository, state: owner.state),
         roots: owner.roots, schedule_digest: schedule, root_module_cursor: 0,
         root_function_cursor: 0, expected_epoch: 0, root_records: {},
@@ -162,14 +166,14 @@ fn mono_archive_execution_create_repository_v1(owner: MonoArchiveRegistrationOwn
         generic_functions: owner.generic_functions, generic_structs: owner.generic_structs,
         generic_classes: owner.generic_classes, call_sites_found: 0,
         specializations_created: 0, unresolved_generic_calls: 0)
-    _mono_archive_execution_expected_states_v1[execution as i64] = state_digest
+    _mono_archive_execution_expected_states_v1[execution.identity_id] = state_digest
     Ok(execution)
 
 fn mono_archive_execution_preflight_in_owned_scope_v1(owner: MonoArchiveExecutionV1) -> bool:
     if transient_array_scope_state_v1() != 1 or not hir_cache_enabled() or hir_cache_last_warnings().len() != 0: return false
     val authority = mono_archive_repository_digest_v1(owner.admission.repository)
     if not _mono_archive_execution_expected_ready_v1: return false
-    val expected_state = _mono_archive_execution_expected_states_v1[owner as i64] ?? ""
+    val expected_state = _mono_archive_execution_expected_states_v1[owner.identity_id] ?? ""
     val valid = expected_state != "" and expected_state == mono_archive_state_digest_v1(owner.admission.state) and authority != "" and authority == owner.admission.repository.authority and
         authority == owner.admission.state.facts.body_authority and
         owner.admission.state.epoch == owner.expected_epoch and
@@ -214,7 +218,7 @@ fn mono_archive_execution_accumulate_v1(owner: MonoArchiveExecutionV1,
     val owned = if paused and valid: transient_promote<text>(state_digest) else: false
     mono_archive_execution_close_v1(paused, valid, owned)
     if not valid: panic("mono applied state pin refused")
-    _mono_archive_execution_expected_states_v1[owner as i64] = state_digest
+    _mono_archive_execution_expected_states_v1[owner.identity_id] = state_digest
 
 fn mono_archive_execute_next_root_v1(owner: MonoArchiveExecutionV1) -> Result<MonoArchivePublicationV1, text>:
     if not mono_archive_execution_preflight_v1(owner): return Err("mono root owner changed")
