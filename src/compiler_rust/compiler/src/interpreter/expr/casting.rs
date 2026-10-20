@@ -144,20 +144,6 @@ fn cast_to_numeric(val: Value, target: NumericType) -> Result<Value, CompileErro
             let code_point = s.chars().next().unwrap() as i64;
             Ok(finalize_numeric_cast(cast_int_to_numeric(code_point, target), target))
         }
-        // `obj as i64` is the object's identity word (its address when compiled
-        // natively); the driver keys per-compilation state on it. The interpreter
-        // carries `class` values as `Object`, whose field map is shared by every
-        // clone until a write copies it, so the word is stable for as long as the
-        // value is not mutated through a copy.
-        Value::Object { ref fields, .. } if matches!(target, NumericType::I64 | NumericType::U64) => Ok(
-            finalize_numeric_cast(cast_int_to_numeric(std::sync::Arc::as_ptr(fields) as usize as i64, target), target),
-        ),
-        Value::ClassInstance(ref instance) if matches!(target, NumericType::I64 | NumericType::U64) => {
-            Ok(finalize_numeric_cast(
-                cast_int_to_numeric(std::sync::Arc::as_ptr(instance) as usize as i64, target),
-                target,
-            ))
-        }
         // Enum variant to numeric (ordinal position)
         Value::Enum {
             ref enum_name,
@@ -276,26 +262,5 @@ mod tests {
         };
         let cast = cast_value(original, &target).expect("packed byte array assertion");
         assert_eq!(cast.byte_array_view(), Some(&[1, 2, 3][..]));
-    }
-
-    #[test]
-    fn class_instance_casts_to_stable_identity_word() {
-        use crate::value::ClassInstance;
-        use std::collections::HashMap;
-        use std::sync::Arc;
-        let a = Value::ClassInstance(Arc::new(ClassInstance::new("A".into(), HashMap::new())));
-        let b = Value::ClassInstance(Arc::new(ClassInstance::new("A".into(), HashMap::new())));
-        let i64_ty = Type::Simple("i64".to_string());
-        let wa = cast_value(a.clone(), &i64_ty).expect("class as i64");
-        assert_eq!(wa, cast_value(a, &i64_ty).unwrap(), "same instance, same word");
-        assert_ne!(wa, cast_value(b, &i64_ty).unwrap(), "distinct instances differ");
-        assert!(!matches!(wa, Value::Int(0)));
-        let shared = Arc::new(HashMap::new());
-        let o1 = Value::Object { class: "S".into(), fields: Arc::clone(&shared) };
-        let o2 = Value::Object { class: "S".into(), fields: shared };
-        assert_eq!(cast_value(o1, &i64_ty).unwrap(), cast_value(o2, &i64_ty).unwrap(), "clones share the word");
-        let f32_ty = Type::Simple("f32".to_string());
-        let c = Value::ClassInstance(Arc::new(ClassInstance::new("A".into(), HashMap::new())));
-        assert!(cast_value(c, &f32_ty).is_err());
     }
 }

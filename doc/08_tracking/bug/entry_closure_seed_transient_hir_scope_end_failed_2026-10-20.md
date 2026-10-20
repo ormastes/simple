@@ -2,12 +2,18 @@
 
 Found 2026-10-20 while fixing `cannot cast object to i64` (same lane).
 
-Fixed here: `driver as i64` (HIR production controller and cache owners) failed in
-the seed interpreter. `cast_to_numeric` now returns the object's identity word
-for `Object`/`ClassInstance` -> `i64`/`u64`. Caveat: the interpreter carries
-`class` values as `Object` whose field map is copy-on-write, so the word is
-stable only until the value is mutated through a copy. A stable
-`CompilerDriver` id field would remove the dependence on addresses.
+Root cause of `cannot cast object to i64`: `driver as i64` (production controller
+`driver_hir_archive_production_controller_v1.spl:48,65,195,223,238-240`, plus
+`driver_hir_pipeline_lowering.spl`, `cache/*_v1.spl` pin owners, ~30 sites) casts a
+`class` to its address word. The seed interpreter has no such cast
+(`interpreter/expr/casting.rs` `cast_to_numeric`). NOT fixed: an experiment mapping
+`Object -> Arc::as_ptr(fields)` got past the cast (hello then reached phase3 HIR)
+but Opus review showed it is wrong: the word is the field map address, and every
+field write does `Arc::make_mut`, which moves it, so the driver's
+`_hir_production_holds_v1[word]` lookups would miss after
+`driver.x = nil`. Proper fix: a stable identity (a `CompilerDriver.identity_id`
+from a global counter replacing `driver as i64`, or an interpreter object id kept
+across make_mut), and arguably gate address casts to `unsafe`.
 
 Next layer, NOT fixed: hello world with the coverage-wrapper flags
 (`--backend llvm --refresh-source-authority --entry-closure --runtime-bundle
