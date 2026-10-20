@@ -1,7 +1,37 @@
-# Narrow hosted SOSIX text-output boundary.
-# The selected hosted C provider accepts text here; generic value printing
-# remains a separate runtime operation.
-export use std.nogc_sync_mut.sffi.diag.{
-    print_raw as sosix_print_raw,
-    stdout_flush as sosix_stdout_flush
-}
+"""SOSIX ordinary UTF-8 console output through the existing byte-write owner.
+
+Descriptors 1/2 are borrowed, never closed. Checked APIs return typed errors;
+legacy void adapters fail explicitly. No NUL-terminated print route is used.
+"""
+use std.nogc_sync_mut.io.external_text_io.{TextIoError, io_text_error_message, io_text_encode}
+use std.common.encoding.external_text.{utf8_format}
+use std.nogc_sync_mut.sffi.fs.{io_file_write_all}
+use std.nogc_async_mut.sosix.text_boundary.{sosix_text_check_size, sosix_require_posix_text_provider}
+export use std.nogc_sync_mut.sffi.diag.{stdout_flush as sosix_stdout_flush}
+
+fn sosix_console_write_checked(descriptor: i64, value: text) -> Result<(), TextIoError>:
+    sosix_text_check_size(value)?
+    val bytes = io_text_encode(value, utf8_format())?
+    sosix_require_posix_text_provider()?
+    if not io_file_write_all(descriptor, bytes):
+        return Err(TextIoError.Io("SOSIX console write failed; output may be partial"))
+    Ok(())
+
+fn sosix_print_raw_checked(value: text) -> Result<(), TextIoError>:
+    sosix_console_write_checked(1, value)
+
+fn sosix_print_raw(value: text):
+    match sosix_print_raw_checked(value):
+        case Ok(_): ()
+        case Err(error): panic(io_text_error_message(error))
+
+fn sosix_eprint_checked(value: text) -> Result<(), TextIoError>:
+    sosix_console_write_checked(2, value)?
+    sosix_console_write_checked(2, "\n")
+
+fn sosix_eprint(value: text):
+    match sosix_eprint_checked(value):
+        case Ok(_): ()
+        case Err(error): panic(io_text_error_message(error))
+
+export sosix_print_raw_checked, sosix_print_raw, sosix_eprint_checked, sosix_eprint
