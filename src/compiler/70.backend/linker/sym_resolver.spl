@@ -151,9 +151,51 @@ class SymResolveState:
 
 # reason: positional linker sym_resolver API
 fn sym_add_object(res: SymResolution, obj: ElfObject, obj_idx: i64) -> SymResolution:
-    var state = SymResolveState(defined: res.defined, errors: res.errors, local_tables: res.local_tables)
-    state.add_object(obj, obj_idx)
-    state.resolution(res.undefined)
+    var defined = res.defined
+    var errors = res.errors
+    var locals: [SymEntry] = []
+    var local_tables = res.local_tables
+
+    for sym in obj.symbols:
+        if sym.name == "":
+            continue
+
+        val entry = sym_entry_from_elf(sym, obj_idx)
+
+        if entry.binding == SymBinding.Local:
+            locals = locals.push(entry)
+            continue
+
+        if not entry.is_defined:
+            continue
+
+        if defined.has(sym.name):
+            val existing = defined[sym.name]
+            if is_common(existing) and is_common(entry):
+                defined[sym.name] = merge_common(existing, entry)
+            else if is_common(existing):
+                # A regular strong definition overrides a tentative definition.
+                if is_strong(entry):
+                    defined[sym.name] = entry
+            else if is_common(entry):
+                # A tentative definition overrides a weak regular definition.
+                if is_weak(existing):
+                    defined[sym.name] = entry
+            else if is_strong(existing) and is_strong(entry):
+                errors = errors.push("duplicate symbol: {sym.name} (object {existing.obj_idx} and {obj_idx})")
+            else if is_strong(entry) and is_weak(existing):
+                defined[sym.name] = entry
+        else:
+            defined[sym.name] = entry
+
+    local_tables = local_tables.push(locals)
+
+    SymResolution(
+        defined: defined,
+        undefined: res.undefined,
+        errors: errors,
+        local_tables: local_tables
+    )
 
 fn sym_collect_undefined(res: SymResolution, objects: [ElfObject]) -> SymResolution:
     var undef: [text] = []
