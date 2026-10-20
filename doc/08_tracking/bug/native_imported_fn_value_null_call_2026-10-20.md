@@ -48,14 +48,49 @@ The local thunks `_elf_builtin_read_bytes` and `_elf_builtin_layout` are removed
 `elf_operation_bindings.spl` stores `file_read_bytes_result` and `elf_exec_plan`
 directly again.
 
-Still open (not import-specific, found while testing):
-- LLVM, untyped `val m = Some(f)` then `case Some(h): h(1)`: the subject is typed ANY,
-  so `h` is ANY and the indirect call's result is compared tagged-vs-raw (exit 16 with
-  a LOCAL `f`). Annotated `Option<fn(..)>` works. Cranelift is correct because its
-  boxed convention answers a tagged value.
-- Cranelift module-level `val f = some_fn` (`global_init_functions`) still stores a
-  direct record (`common_backend.rs` `generate_module_init`), which
-  `rt_closure_func_ptr` rejects.
+Found while testing (not import-specific); fixed in section 3.
+
+## 3. Follow-ups: untyped `Some(f)`, module-level fn values, pool (fixed)
+
+Fixtures: `test/fixtures/native/fn_value_followups/` (`option_untyped.spl`,
+`global_fn.spl`, `pool_fn.spl`), run on both backends by
+`src/compiler_rust/compiler/tests/fn_value_followups_native.rs`.
+
+1. **LLVM, untyped `val m = Some(f)`.** HIR typed every `Some(x)` as ANY, so
+   `case Some(h)` bound `h` as ANY and the indirect call through it mixed the raw and
+   tagged conventions: a wrong result, even for a LOCAL `f`. An annotated
+   `Option<fn(..)>` worked. Fix (`hir/lower/expr/calls.rs`): `Some(x)` with a
+   function-typed payload answers `Option<fn(..)>`, the same type the annotation gives.
+   Other payloads keep ANY.
+2. **Cranelift, module-level `val G: fn(..) = F`.** `generate_module_init` stored the
+   raw direct record, which `rt_closure_func_ptr` rejects, so a call through `G` went to
+   address 0. Fix: `emit_boxed_fn_value_entries` also emits `F$boxed` for every
+   function named by a global initializer (a local body, or an import whose arity
+   comes from the global's own function type), and the initializer stores
+   `rt_closure_new(F$boxed, 0)`, the same value a `GlobalLoad` builds. Only an extern
+   entry point keeps the direct record. A user function with no thunk fails the
+   build instead of storing a value that calls address 0.
+   The UNTYPED `val G = f` was worse on both backends: the module pass typed `G` as
+   ANY, so it was never recorded as a function initializer, and `G(5)` lowered as a
+   direct call to a function named `G` (build error: "cross-module call 'LOCAL_FN'
+   resolved to data/type export"). Fix (`module_pass.rs`): each declared free function
+   records its `HirType::Function` (`declared_function_value_types`), and `val G = f`
+   naming a declared or imported function takes that type. LLVM's module initializer
+   also declares an import named only by such an initializer (all-`i64` signature,
+   arity from the global's type) instead of failing with "unknown function".
+3. **Pool.** `rt_pool_state_try_submit_i64_v1` accepted only the direct record, so
+   cranelift function values (closures) were refused with -3. Fix (adapt at the
+   boundary, `runtime_thread.c` and its twin `runtime_pool.c`): the direct record is
+   tested first; otherwise `rt_closure_func_ptr` must answer a registered closure, and
+   the task calls its boxed entry with `rt_value_int(input)` and decodes the result
+   with `rt_value_unbox_int`. Any other value is still refused at submit.
+
+Evidence (seed `--profile bootstrap --features llvm`): before, 4 of 6 failed:
+`option_untyped_fn_value_llvm` (exit 1), `pool_fn_value_cranelift` (exit 2, submit
+refused), and `global_fn_value_{cranelift,llvm}` (build error above; the typed
+`val G: fn(..) = f` form SIGSEGVs under the seed JIT). After: 6/6, and
+`imported_fn_value_native`, `fn_ref_value_jit` and `optional_array_coalesce_native`
+still pass.
 
 ## 2. C runtime `rt_array_extend_i64` on `[u8]` and `[u64]` (fixed)
 
