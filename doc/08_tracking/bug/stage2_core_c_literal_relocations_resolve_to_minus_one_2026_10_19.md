@@ -1,6 +1,6 @@
 # Stage 2 binary: C-runtime string literals resolve to address -1 (SEGV in rt_secure_temp_dir_make)
 
-- Status: OPEN
+- Status: FIXED (5d37d6a72ab, 35ea7ece422; verified on aarch64 2026-10-20)
 - Date: 2026-10-19
 - Platform: aarch64-unknown-linux-gnu, seed native link with mold
 - Blocks: Stage 2 compiler sanity (`frontend_status=139`, `p2_add-build
@@ -39,3 +39,12 @@ dereferences one.
 Which link input supplies these functions (the cycle-170 "bootstrap mutex
 core-C capsule" is the likely one) and why its string-literal section is
 discarded while its text is kept.
+
+## Verification (2026-10-20, aarch64)
+
+Full Stage 2 from release_phase3 f9527544c50 plus ed5406ed760 (bootstrap
+`bootstrap-r16b`): the seed's tombstone backstop reported
+`PASS — 1 binary(ies) checked, 0 tombstone reference(s)`, the Stage 2
+bootstrap compiler sanity build passed, and Stage 2 was admitted
+(sha256 645e62a815d0...). The r9/r10 binaries on the earlier base crashed in
+that same sanity step.
