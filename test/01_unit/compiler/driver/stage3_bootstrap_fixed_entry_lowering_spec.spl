@@ -65,7 +65,8 @@ describe "stage3 fixed-entry MIR lowering":
         val hir_a = hir_lowering_a.lower_module(parsed_a)
         val target_context = driver_mir_target_context(driver_core_compile_options_default())
         var entry_lowering = MirLowering.new_for_target(hir_a.symbols, target_context)
-        val entry_mir = entry_lowering.lower_bootstrap_entry_module(hir_a)
+        val entry_providers: [HirModule] = []
+        val entry_mir = entry_lowering.lower_bootstrap_entry_module(hir_a, entry_providers)
 
         val parsed_b = parse_full_frontend(ENTRY_SRC, "testdata/fixed_entry_a.spl", "fixed_entry_a", Logger(level: 0))
         var hir_lowering_b = HirLowering.with_filename("testdata/fixed_entry_a.spl")
@@ -83,18 +84,18 @@ describe "stage3 fixed-entry MIR lowering":
         step("driver fixed branch calls lower_bootstrap_entry_module")
         val branch = fixed_branch_source()
         expect(branch.len()).to_be_greater_than(0)
-        expect(branch).to_contain("bootstrap_lowering.lower_bootstrap_entry_module(bootstrap_hir)")
+        expect(branch).to_contain("bootstrap_lowering.lower_bootstrap_entry_module(bootstrap_hir, self.ctx.mir_feed_modules)")
         expect(branch).to_not_contain(".lower_module(")
 
     it "forwards every lower_module argument explicitly from the entry":
         # @req REQ-SSPEC-COMPILER
         step("lower_bootstrap_entry_module passes providers and is_entry_module explicitly")
         val source = rt_file_read_text("src/compiler/50.mir/_MirLowering/module_lowering.spl") ?? ""
-        val start = source.find("me lower_bootstrap_entry_module(module: HirModule) -> MirModule:")
+        val start = source.find("me lower_bootstrap_entry_module(module: HirModule, providers: [HirModule]) -> MirModule:")
         expect(start).to_be_greater_than(0)
         val body = source[start:start + 1600]
         # All six lower_module parameters are forwarded explicitly, including
         # the three defaulted archive parameters (closure-loop SIGSEGV class,
         # doc/08_tracking/bug/stage3_bootstrap_closure_lower_module_default_args_segv_2026_10_19.md).
-        expect(body).to_contain("self.lower_module(module, no_providers, true, no_archive_symbols,")
+        expect(body).to_contain("self.lower_module(module, providers, true, no_archive_symbols,")
         expect(body).to_contain("no_archive_globals, no_archive_thunks)")
