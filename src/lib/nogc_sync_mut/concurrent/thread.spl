@@ -117,7 +117,11 @@ class ThreadHandle:
         if self.joined:
             return nil
         self.joined = true
-        rt_thread_join(self.handle)
+        # rt_thread_join keeps the handle alive on both owners (C and Rust
+        # executor.rs); release it here so a join never leaks a handle slot.
+        val result = rt_thread_join(self.handle)
+        rt_thread_free(self.handle)
+        result
 
     # Non-blocking check if thread has completed.
     # Returns true if thread finished, false if still running.
@@ -136,6 +140,10 @@ class ThreadHandle:
     # Call this if you don't need the thread's return value.
     # @tag:api
     fn free():
+        # join() already released the handle; freeing it again could release
+        # a slot the runtime has since reused for another thread.
+        if self.joined:
+            return
         rt_thread_free(self.handle)
 
 # --- API ---
@@ -162,7 +170,9 @@ fn thread_spawn_with_i64_args_id(data1: i64, data2: i64, closure: fn(i64, i64) -
     rt_thread_spawn_isolated_with_args(closure, data1, data2)
 
 fn thread_join_by_id(handle: i64) -> i64?:
-    rt_thread_join(handle)
+    val result = rt_thread_join(handle)
+    rt_thread_free(handle)
+    result
 
 # Returns number of CPU cores available for parallel execution.
 # Useful for sizing thread pools and work distribution.
