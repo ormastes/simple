@@ -13,7 +13,7 @@ use super::byte_kernels::{
 use super::core::RuntimeValue;
 use super::dict::RuntimeDict;
 use super::heap::{
-    gc_flags, get_typed_ptr, get_typed_ptr_mut, note_aux_alloc, note_aux_free, register_heap_ptr, unregister_heap_ptr,
+    gc_flags, get_typed_ptr, get_typed_ptr_mut, get_typed_ptr_mut_packed, get_typed_ptr_packed, note_aux_alloc, note_aux_free, register_heap_ptr, unregister_heap_ptr,
     unregister_heap_ptr_checked, HeapHeader, HeapObjectType,
 };
 use super::objects::{
@@ -91,6 +91,184 @@ macro_rules! as_typed_ptr {
             None => return $ret,
         }
     }};
+}
+
+/// Same as `as_typed_ptr!` but leaves an in-place packed array packed
+/// (`gc_flags::LAZY_WORDS`). Only for functions that branch on
+/// `is_byte_packed()` / `is_u64_packed()` themselves.
+macro_rules! as_typed_ptr_packed {
+    ($val:expr, $expected:expr, $ty:ty, $ret:expr) => {{
+        match get_typed_ptr_packed::<$ty>($val, $expected) {
+            Some(ptr) => ptr,
+            None => return $ret,
+        }
+    }};
+    (mut $val:expr, $expected:expr, $ty:ty, $ret:expr) => {{
+        match get_typed_ptr_mut_packed::<$ty>($val, $expected) {
+            Some(ptr) => ptr,
+            None => return $ret,
+        }
+    }};
+}
+
+// ============================================================================
+// Lazy word packing for `[i64]` arrays
+// ============================================================================
+
+/// True when `slot` is a tagged integer or a heap-boxed wide integer.
+#[inline]
+fn slot_is_int_like(slot: RuntimeValue) -> bool {
+    slot.is_int() || slot.as_heap_i64().is_some() || slot.as_heap_u64().is_some()
+}
+
+/// Decode one slot of a tagged array to its i64 word.
+#[inline]
+fn slot_word(slot: RuntimeValue) -> i64 {
+    if slot.is_int() {
+        return slot.as_int();
+    }
+    if let Some(wide) = slot.as_heap_i64() {
+        return wide;
+    }
+    if let Some(wide) = slot.as_heap_u64() {
+        return wide as i64;
+    }
+    slot.to_raw() as i64
+}
+
+/// Set once any user-visible concurrency starts (thread / actor / async / parallel
+/// launch). In-place pack and unpack change an array's representation, which is
+/// only safe while no other thread can touch the array: the runtime keeps no
+/// ownership or reference-count information to tell a private array from a
+/// shared one. So packing happens only before user threads exist, and the first
+/// spawn unpacks every packed array; afterwards the lane degrades to the plain
+/// tagged store (one heap box per wide store) and no array changes layout.
+static USER_THREADS_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Call from every entry point that starts user-visible concurrency, BEFORE the
+/// new thread can run.
+pub fn note_user_threads_started() {
+    // Unit tests run in parallel inside one process, and several of them start
+    // executors/actors/pools. Only threads that opted in (the serialised `[i64]`
+    // lane tests) may flip or sweep the process-global switch.
+    #[cfg(test)]
+    if !HONOR_SPAWN_NOTE.with(|honor| honor.get()) {
+        return;
+    }
+    if !USER_THREADS_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        for addr in super::heap::live_lazy_word_arrays() {
+            unsafe { unpack_lazy_words(addr as *mut RuntimeArray) };
+        }
+    }
+}
+
+/// Entry for the C thread/pool runtime (weak reference there): it starts pthreads
+/// that run Simple code, so it must reach the same switch as the Rust spawn
+/// entry points. Not an `rt_*` symbol on purpose (no second implementation lane).
+#[no_mangle]
+pub extern "C" fn simple_note_user_threads_started() {
+    note_user_threads_started();
+}
+
+#[used]
+static KEEP_SIMPLE_NOTE_USER_THREADS_STARTED: extern "C" fn() = simple_note_user_threads_started;
+
+#[cfg(test)]
+thread_local! {
+    static HONOR_SPAWN_NOTE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Let the calling test thread's spawn notifications reach the global switch.
+#[cfg(test)]
+pub(crate) fn honor_spawn_note_for_test() {
+    HONOR_SPAWN_NOTE.with(|honor| honor.set(true));
+}
+
+#[cfg(test)]
+pub(crate) fn reset_user_threads_started_for_test() {
+    USER_THREADS_STARTED.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Pack a tagged array of integers in place: every slot becomes its raw i64
+/// word, `U64_PACKED | LAZY_WORDS` is set, and the data buffer (8 bytes per
+/// slot either way) is reused. Returns false, leaving the array untouched,
+/// when the array cannot be packed (byte-packed, already packed, or holding a
+/// non-integer slot).
+///
+/// # Safety
+/// `arr` must point to a live `RuntimeArray`.
+unsafe fn pack_tagged_words_in_place(arr: *mut RuntimeArray) -> bool {
+    if (*arr).is_byte_packed()
+        || (*arr).is_u64_packed()
+        || (*arr).header.gc_flags & gc_flags::NO_REPACK != 0
+        || USER_THREADS_STARTED.load(std::sync::atomic::Ordering::SeqCst)
+        // The C thread/pool runtime cannot reach the thread-start switch on
+        // Windows (`SPL_NOTE_USER_THREADS` is a no-op there), so packing there
+        // could race a CreateThread worker: never pack.
+        || cfg!(windows)
+    {
+        return false;
+    }
+    let len = (*arr).len as usize;
+    if len > 0 {
+        if (*arr).data.is_null() {
+            return false;
+        }
+        for i in 0..len {
+            if !slot_is_int_like(*(*arr).data.add(i)) {
+                return false;
+            }
+        }
+        for i in 0..len {
+            let word = slot_word(*(*arr).data.add(i));
+            *((*arr).data as *mut i64).add(i) = word;
+        }
+    }
+    (*arr).header.gc_flags |= gc_flags::U64_PACKED | gc_flags::LAZY_WORDS;
+    true
+}
+
+/// Undo `pack_tagged_words_in_place`: rebuild the tagged slots (wide words are
+/// heap-boxed again) and clear the flags. No-op for any other array.
+///
+/// # Safety
+/// `arr` must point to a live `RuntimeArray`.
+pub(crate) unsafe fn unpack_lazy_words(arr: *mut RuntimeArray) {
+    if (*arr).header.gc_flags & gc_flags::LAZY_WORDS == 0 {
+        return;
+    }
+    let len = (*arr).len as usize;
+    for i in 0..len {
+        let word = *((*arr).data as *const i64).add(i);
+        // not scope-tracked: the array outlives whichever scope is open here
+        *(*arr).data.add(i) = RuntimeValue::from_int_unscoped(word);
+    }
+    (*arr).header.gc_flags &= !(gc_flags::U64_PACKED | gc_flags::LAZY_WORDS);
+    (*arr).header.gc_flags |= gc_flags::NO_REPACK;
+}
+
+/// A generic (type-erased) writer is about to store `value` into `arr`. A
+/// word-lane array only holds integer words, so a nil/float/text/object value
+/// first returns the array to the tagged layout (and bars repacking).
+///
+/// # Safety
+/// `arr` must point to a live `RuntimeArray`.
+#[inline]
+unsafe fn unpack_for_foreign_value(arr: *mut RuntimeArray, value: RuntimeValue) {
+    if (*arr).header.gc_flags & gc_flags::LAZY_WORDS != 0 && !slot_is_int_like(value) {
+        unpack_lazy_words(arr);
+    }
+}
+
+/// The word a u64-packed array stores for `value`: integers (inline or
+/// heap-boxed wide) decode to their word; anything else keeps `as_int`.
+#[inline]
+unsafe fn packed_store_word(_arr: *mut RuntimeArray, value: RuntimeValue) -> u64 {
+    if slot_is_int_like(value) {
+        slot_word(value) as u64
+    } else {
+        value.as_int() as u64
+    }
 }
 
 /// Normalize a Python-style index (handles negative indices)
@@ -570,6 +748,13 @@ impl RuntimeArray {
         self.header.gc_flags & gc_flags::U64_PACKED != 0
     }
 
+    /// True for a tagged array that a typed signed-word store packed in place
+    /// (see `gc_flags::LAZY_WORDS`).
+    #[inline]
+    pub fn is_lazy_words(&self) -> bool {
+        self.header.gc_flags & gc_flags::LAZY_WORDS != 0
+    }
+
     /// Get the elements as a slice
     ///
     /// # Safety
@@ -889,7 +1074,7 @@ pub(crate) fn byte_array_write(value: RuntimeValue, bytes: &[u8]) -> bool {
 #[no_mangle]
 pub extern "C" fn rt_array_bytes_validate(raw: i64) -> i64 {
     let value = RuntimeValue(raw as u64);
-    let Some(array) = get_typed_ptr::<RuntimeArray>(value, HeapObjectType::Array) else {
+    let Some(array) = get_typed_ptr_packed::<RuntimeArray>(value, HeapObjectType::Array) else {
         return -22;
     };
     let array = unsafe { &*array };
@@ -1086,6 +1271,19 @@ fn rt_array_new_uninit(capacity: u64) -> RuntimeValue {
     }
 }
 
+/// Packed-word array that inherits the signed-word semantics of `lazy_src`
+/// (`gc_flags::LAZY_WORDS`), so a copy/slice/concat of a packed `[i64]` is
+/// still ordered as signed by the generic consumers.
+fn array_new_uninit_u64_like(capacity: u64, lazy_src: bool) -> RuntimeValue {
+    let array = rt_array_new_uninit_u64(capacity);
+    if lazy_src && !array.is_nil() {
+        if let Some(ptr) = get_typed_ptr_mut_packed::<RuntimeArray>(array, HeapObjectType::Array) {
+            unsafe { (*ptr).header.gc_flags |= gc_flags::LAZY_WORDS };
+        }
+    }
+    array
+}
+
 fn rt_array_new_uninit_u64(capacity: u64) -> RuntimeValue {
     let array = rt_array_new_uninit(capacity);
     if array.is_nil() {
@@ -1189,13 +1387,13 @@ pub extern "C" fn rt_array_len(array: RuntimeValue) -> i64 {
     if array.to_raw() & !7 == 0 {
         return 0;
     }
-    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, -1);
+    let arr = as_typed_ptr_packed!(array, HeapObjectType::Array, RuntimeArray, -1);
     unsafe { (*arr).len as i64 }
 }
 
 #[no_mangle]
 pub extern "C" fn rt_array_len_safe(array: RuntimeValue) -> i64 {
-    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
+    let arr = as_typed_ptr_packed!(array, HeapObjectType::Array, RuntimeArray, 0);
     unsafe { (*arr).len as i64 }
 }
 
@@ -1234,7 +1432,7 @@ pub extern "C" fn rt_arm_array_get_byte_u32(array: RuntimeValue, index: i64) -> 
 /// Get an element from an array
 #[no_mangle]
 pub extern "C" fn rt_array_get(array: RuntimeValue, index: i64) -> RuntimeValue {
-    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+    let arr = as_typed_ptr_packed!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
     unsafe {
         let len = (*arr).len as i64;
         let idx = normalize_index(index, len);
@@ -1293,7 +1491,7 @@ pub extern "C" fn rt_array_get_text(array: RuntimeValue, index: i64) -> RuntimeV
 /// `stmt_lowering.rs` provides. `case None:` already used `rt_is_none`.
 #[no_mangle]
 pub extern "C" fn rt_array_at(array: RuntimeValue, index: i64) -> RuntimeValue {
-    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, rt_option_none());
+    let arr = as_typed_ptr_packed!(array, HeapObjectType::Array, RuntimeArray, rt_option_none());
     unsafe {
         let len = (*arr).len as i64;
         if index < 0 || index >= len {
@@ -1328,7 +1526,7 @@ pub extern "C" fn rt_array_at(array: RuntimeValue, index: i64) -> RuntimeValue {
 /// lanes -- gains the `Option` result.
 #[no_mangle]
 pub extern "C" fn rt_at(receiver: RuntimeValue, index: i64) -> RuntimeValue {
-    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
+    if get_typed_ptr_packed::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
         return rt_array_at(receiver, index);
     }
     rt_string_char_at(receiver, index)
@@ -1337,8 +1535,9 @@ pub extern "C" fn rt_at(receiver: RuntimeValue, index: i64) -> RuntimeValue {
 /// Set an element in an array
 #[no_mangle]
 pub extern "C" fn rt_array_set(array: RuntimeValue, index: i64, value: RuntimeValue) -> bool {
-    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
+    let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
+        unpack_for_foreign_value(arr, value);
         let len = (*arr).len as i64;
         let idx = normalize_index(index, len);
         if idx < 0 || idx >= len {
@@ -1349,7 +1548,7 @@ pub extern "C" fn rt_array_set(array: RuntimeValue, index: i64, value: RuntimeVa
             return true;
         }
         if (*arr).is_u64_packed() {
-            *((*arr).data as *mut u64).add(idx as usize) = value.as_int() as u64;
+            *((*arr).data as *mut u64).add(idx as usize) = packed_store_word(arr, value);
             return true;
         }
         (*arr).as_mut_slice()[idx as usize] = value;
@@ -1417,7 +1616,7 @@ pub extern "C" fn rt_typed_words_u32_unchecked(array: RuntimeValue, index: i64) 
 
 #[no_mangle]
 pub extern "C" fn rt_array_data_ptr(array: RuntimeValue) -> i64 {
-    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
+    let arr = as_typed_ptr_packed!(array, HeapObjectType::Array, RuntimeArray, 0);
     unsafe { (*arr).data as i64 }
 }
 
@@ -1429,7 +1628,7 @@ pub extern "C" fn rt_array_data_ptr_text(array: RuntimeValue) -> i64 {
 /// Return the stable array header pointer for proven native fast paths.
 #[no_mangle]
 pub extern "C" fn rt_array_header_ptr(array: RuntimeValue) -> i64 {
-    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
+    let arr = as_typed_ptr_packed!(array, HeapObjectType::Array, RuntimeArray, 0);
     arr as i64
 }
 
@@ -1458,7 +1657,7 @@ pub extern "C" fn rt_array_set_len_known_text(header_ptr: i64, len: i64) -> bool
 /// 1 when the array stores packed bytes, else 0 (also for non-arrays).
 #[no_mangle]
 pub extern "C" fn rt_array_is_byte_packed(array: RuntimeValue) -> i64 {
-    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
+    let arr = as_typed_ptr_packed!(array, HeapObjectType::Array, RuntimeArray, 0);
     unsafe { (*arr).is_byte_packed() as i64 }
 }
 
@@ -1491,7 +1690,7 @@ pub extern "C" fn rt_typed_words_u32_data_at(data_ptr: i64, index: i64) -> i64 {
 /// Read a u64 element from a `[u64]`-style runtime array without generic index dispatch.
 #[no_mangle]
 pub extern "C" fn rt_typed_words_u64_at(array: RuntimeValue, index: i64) -> i64 {
-    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
+    let arr = as_typed_ptr_packed!(array, HeapObjectType::Array, RuntimeArray, 0);
     unsafe {
         let len = (*arr).len as i64;
         let idx = normalize_index(index, len);
@@ -1512,7 +1711,7 @@ pub extern "C" fn rt_typed_words_u64_at(array: RuntimeValue, index: i64) -> i64 
 /// Read a u64 element when the caller has already proved `0 <= index < len`.
 #[no_mangle]
 pub extern "C" fn rt_typed_words_u64_unchecked(array: RuntimeValue, index: i64) -> i64 {
-    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
+    let arr = as_typed_ptr_packed!(array, HeapObjectType::Array, RuntimeArray, 0);
     unsafe {
         if (*arr).is_u64_packed() {
             return *((*arr).data as *const u64).add(index as usize) as i64;
@@ -1658,7 +1857,7 @@ pub extern "C" fn rt_typed_words_u32_set(array: RuntimeValue, index: i64, value:
 /// Write a u64 element into a `[u64]`-style runtime array without generic index dispatch.
 #[no_mangle]
 pub extern "C" fn rt_typed_words_u64_set(array: RuntimeValue, index: i64, value: i64) -> bool {
-    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
+    let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
         let len = (*arr).len as i64;
         let idx = normalize_index(index, len);
@@ -1672,6 +1871,75 @@ pub extern "C" fn rt_typed_words_u64_set(array: RuntimeValue, index: i64, value:
         }
         true
     }
+}
+
+/// Read a signed word from a `[i64]`-style runtime array without boxing.
+///
+/// Unlike `rt_typed_words_u64_at` this also decodes a heap-boxed wide integer in
+/// a tagged slot. Works on the tagged and the packed layout.
+#[no_mangle]
+pub extern "C" fn rt_typed_words_i64_at(array: RuntimeValue, index: i64) -> i64 {
+    let arr = as_typed_ptr_packed!(array, HeapObjectType::Array, RuntimeArray, 0);
+    unsafe {
+        let len = (*arr).len as i64;
+        let idx = normalize_index(index, len);
+        if idx < 0 || idx >= len {
+            return 0;
+        }
+        if (*arr).is_u64_packed() {
+            return *((*arr).data as *const i64).add(idx as usize);
+        }
+        slot_word(*(*arr).data.add(idx as usize))
+    }
+}
+
+/// Write a signed word into a `[i64]`-style runtime array.
+///
+/// A value that fits the inline 61-bit payload is stored tagged, exactly as
+/// before. A wider value would need a heap box per store that nothing ever
+/// frees (~48 bytes each), so the first one packs the array in place and the
+/// word is stored raw from then on. An array that cannot be packed (it holds a
+/// non-integer slot) falls back to the boxed store.
+#[no_mangle]
+pub extern "C" fn rt_typed_words_i64_set(array: RuntimeValue, index: i64, value: i64) -> bool {
+    let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
+    unsafe {
+        let len = (*arr).len as i64;
+        let idx = normalize_index(index, len);
+        if idx < 0 || idx >= len {
+            return false;
+        }
+        if (*arr).is_byte_packed() {
+            return false;
+        }
+        if !(*arr).is_u64_packed() && RuntimeValue::fits_inline_int(value) {
+            *(*arr).data.add(idx as usize) = RuntimeValue::from_int(value);
+            return true;
+        }
+        if (*arr).is_u64_packed() || pack_tagged_words_in_place(arr) {
+            *((*arr).data as *mut i64).add(idx as usize) = value;
+        } else {
+            *(*arr).data.add(idx as usize) = RuntimeValue::from_int(value);
+        }
+        true
+    }
+}
+
+/// Append a signed word to a `[i64]`-style runtime array (grows as needed).
+/// Packs the array in place on the first value outside the inline range, like
+/// `rt_typed_words_i64_set`.
+#[no_mangle]
+pub extern "C" fn rt_typed_words_i64_push(array: RuntimeValue, value: i64) -> bool {
+    let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
+    unsafe {
+        if (*arr).is_byte_packed() {
+            return false;
+        }
+        if !(*arr).is_u64_packed() && !RuntimeValue::fits_inline_int(value) {
+            pack_tagged_words_in_place(arr);
+        }
+    }
+    rt_typed_words_u64_push(array, value)
 }
 
 /// Push an element to an array (no grow, returns false if full)
@@ -1774,7 +2042,7 @@ pub extern "C" fn rt_typed_words_u32_push(array: RuntimeValue, value: i64) -> bo
 /// Push a raw u64 into a `[u64]`-style runtime array without RuntimeValue boxing.
 #[no_mangle]
 pub extern "C" fn rt_typed_words_u64_push(array: RuntimeValue, value: i64) -> bool {
-    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
+    let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
         if (*arr).is_byte_packed() {
             return false;
@@ -1828,7 +2096,7 @@ pub extern "C" fn rt_typed_words_u32_push_known_at(array: RuntimeValue, index: i
 /// Store a typed u64 at a caller-proven append slot and update length.
 #[no_mangle]
 pub extern "C" fn rt_typed_words_u64_push_known_at(array: RuntimeValue, index: i64, value: i64) -> bool {
-    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
+    let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
         if (*arr).is_byte_packed() || index < 0 || index as u64 >= (*arr).capacity {
             return false;
@@ -1938,8 +2206,9 @@ pub extern "C" fn rt_typed_words_u64_store_known_data_at(
 /// valid.
 #[no_mangle]
 pub extern "C" fn rt_array_push_grow(array: RuntimeValue, value: RuntimeValue) -> bool {
-    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
+    let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
+        unpack_for_foreign_value(arr, value);
         if (*arr).is_byte_packed() {
             if (*arr).len >= (*arr).capacity {
                 let old_cap = (*arr).capacity;
@@ -1989,7 +2258,7 @@ pub extern "C" fn rt_array_push_grow(array: RuntimeValue, value: RuntimeValue) -
                 (*arr).data = new_data;
                 (*arr).capacity = new_cap;
             }
-            *((*arr).data as *mut u64).add((*arr).len as usize) = value.as_int() as u64;
+            *((*arr).data as *mut u64).add((*arr).len as usize) = packed_store_word(arr, value);
             (*arr).len += 1;
             return true;
         }
@@ -2117,8 +2386,9 @@ pub extern "C" fn rt_array_extend_i64(dst: RuntimeValue, src: RuntimeValue, coun
 /// Push element without grow (legacy behavior)
 #[no_mangle]
 pub extern "C" fn rt_array_push_no_grow(array: RuntimeValue, value: RuntimeValue) -> bool {
-    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
+    let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
+        unpack_for_foreign_value(arr, value);
         if (*arr).len >= (*arr).capacity || (*arr).data.is_null() {
             return false;
         }
@@ -2128,7 +2398,7 @@ pub extern "C" fn rt_array_push_no_grow(array: RuntimeValue, value: RuntimeValue
             return true;
         }
         if (*arr).is_u64_packed() {
-            *((*arr).data as *mut u64).add((*arr).len as usize) = value.as_int() as u64;
+            *((*arr).data as *mut u64).add((*arr).len as usize) = packed_store_word(arr, value);
             (*arr).len += 1;
             return true;
         }
@@ -2171,7 +2441,7 @@ pub extern "C" fn rt_array_new_with_cap_bool(cap: i64) -> RuntimeValue {
 /// Pop an element from an array
 #[no_mangle]
 pub extern "C" fn rt_array_pop(array: RuntimeValue) -> RuntimeValue {
-    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+    let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
     unsafe {
         if (*arr).len == 0 || (*arr).data.is_null() {
             return RuntimeValue::NIL;
@@ -2218,7 +2488,7 @@ pub extern "C" fn rt_array_pop(array: RuntimeValue) -> RuntimeValue {
 /// hand back a raw, untagged integer that the caller then misdecodes.
 #[no_mangle]
 pub extern "C" fn rt_array_remove(array: RuntimeValue, index: i64) -> RuntimeValue {
-    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+    let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
     unsafe {
         let len = (*arr).len;
         if (*arr).data.is_null() || index < 0 || (index as u64) >= len {
@@ -2279,7 +2549,7 @@ pub extern "C" fn rt_array_remove(array: RuntimeValue, index: i64) -> RuntimeVal
 /// every file delete would have gone to the collection helper.
 #[no_mangle]
 pub extern "C" fn rt_collection_remove(receiver: RuntimeValue, key: RuntimeValue) -> RuntimeValue {
-    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
+    if get_typed_ptr_packed::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
         // Array indices arrive as TAGGED ints; `as_int` untags (an arithmetic
         // shift). It is explicitly documented as UNDEFINED on a non-int, so the
         // `is_int` test is required, not defensive padding — calling it on, say,
@@ -2387,7 +2657,7 @@ mod collection_set_tests {
 /// Clear all elements from an array
 #[no_mangle]
 pub extern "C" fn rt_array_clear(array: RuntimeValue) -> bool {
-    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
+    let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
         (*arr).len = 0;
         true
@@ -2457,7 +2727,7 @@ fn transient_heap_children(value: RuntimeValue) -> Option<Vec<RuntimeValue>> {
     }
     match value.heap_type()? {
         HeapObjectType::Array => {
-            let ptr = get_typed_ptr::<RuntimeArray>(value, HeapObjectType::Array)?;
+            let ptr = get_typed_ptr_packed::<RuntimeArray>(value, HeapObjectType::Array)?;
             unsafe {
                 let array = &*ptr;
                 // Same validated-bound contract as the Dict arm: `as_slice`
@@ -2735,7 +3005,7 @@ pub fn rt_array_create_from_slice(values: &[RuntimeValue]) -> RuntimeValue {
 #[no_mangle]
 #[allow(clippy::unused_unit)]
 pub extern "C" fn rt_array_free(array: RuntimeValue) {
-    let ptr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, ());
+    let ptr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, ());
     unsafe {
         if !(*ptr).data.is_null() {
             let data_layout = if (*ptr).is_byte_packed() {
@@ -2783,7 +3053,7 @@ fn deep_free_classify(value: RuntimeValue) -> DeepFreeClass {
     if !value.is_heap() {
         return DeepFreeClass::Leaf;
     }
-    if let Some(ptr) = get_typed_ptr_mut::<RuntimeArray>(value, HeapObjectType::Array) {
+    if let Some(ptr) = get_typed_ptr_mut_packed::<RuntimeArray>(value, HeapObjectType::Array) {
         return DeepFreeClass::Node(ptr as *mut HeapHeader, DeepFreeKind::Array);
     }
     if let Some(ptr) = get_typed_ptr_mut::<RuntimeString>(value, HeapObjectType::String) {
@@ -2840,7 +3110,7 @@ fn deep_free_classify(value: RuntimeValue) -> DeepFreeClass {
 pub extern "C" fn rt_array_free_deep(value: RuntimeValue) -> i64 {
     // The root must be a registered array; a string root belongs to
     // rt_string_free, not here.
-    let Some(root) = get_typed_ptr_mut::<RuntimeArray>(value, HeapObjectType::Array) else {
+    let Some(root) = get_typed_ptr_mut_packed::<RuntimeArray>(value, HeapObjectType::Array) else {
         return 0;
     };
 
@@ -3884,7 +4154,7 @@ fn refuse_non_text_receiver(method: &str, receiver: RuntimeValue) -> ! {
 /// to it any more.
 #[no_mangle]
 pub extern "C" fn rt_reverse(receiver: RuntimeValue) -> RuntimeValue {
-    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
+    if get_typed_ptr_packed::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
         return rt_array_reversed(receiver);
     }
     match string_as_str(receiver) {
@@ -3924,7 +4194,7 @@ pub extern "C" fn rt_reverse(receiver: RuntimeValue) -> RuntimeValue {
 /// leaves text behaviour byte-for-byte as it was.
 #[no_mangle]
 pub extern "C" fn rt_reverse_mut(receiver: RuntimeValue) -> RuntimeValue {
-    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
+    if get_typed_ptr_packed::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
         rt_array_reverse(receiver);
         return receiver;
     }
@@ -3982,7 +4252,7 @@ fn refuse_non_array_sort_receiver() -> ! {
 /// substitution would defeat the text refusal.
 #[no_mangle]
 pub extern "C" fn rt_sort(receiver: RuntimeValue) -> RuntimeValue {
-    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
+    if get_typed_ptr_packed::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
         rt_array_sort(receiver);
         return receiver;
     }
@@ -4010,7 +4280,7 @@ pub extern "C" fn rt_sort(receiver: RuntimeValue) -> RuntimeValue {
 /// dispatched to `rt_string_concat`).
 #[no_mangle]
 pub extern "C" fn rt_push(receiver: RuntimeValue, value: RuntimeValue) -> RuntimeValue {
-    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
+    if get_typed_ptr_packed::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
         rt_array_push(receiver, value);
         return receiver;
     }
@@ -4039,7 +4309,7 @@ pub extern "C" fn rt_push(receiver: RuntimeValue, value: RuntimeValue) -> Runtim
 /// popping an empty array, which is a no-op on both engines.
 #[no_mangle]
 pub extern "C" fn rt_pop(receiver: RuntimeValue) -> RuntimeValue {
-    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
+    if get_typed_ptr_packed::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
         return rt_array_pop(receiver);
     }
     match string_as_str(receiver) {
@@ -4084,7 +4354,7 @@ pub extern "C" fn rt_pop(receiver: RuntimeValue) -> RuntimeValue {
 /// expression evaluates to that same (now empty) array.
 #[no_mangle]
 pub extern "C" fn rt_clear(receiver: RuntimeValue) -> RuntimeValue {
-    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
+    if get_typed_ptr_packed::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
         rt_array_clear(receiver);
         return receiver;
     }
@@ -4104,7 +4374,7 @@ pub extern "C" fn rt_clear(receiver: RuntimeValue) -> RuntimeValue {
 #[no_mangle]
 pub extern "C" fn rt_take(receiver: RuntimeValue, n: i64) -> RuntimeValue {
     let n = n.max(0);
-    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
+    if get_typed_ptr_packed::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
         let len = rt_array_len(receiver);
         let take = n.min(len.max(0));
         let out = rt_array_new(take.max(0) as u64);
@@ -4124,7 +4394,7 @@ pub extern "C" fn rt_take(receiver: RuntimeValue, n: i64) -> RuntimeValue {
 #[no_mangle]
 pub extern "C" fn rt_drop(receiver: RuntimeValue, n: i64) -> RuntimeValue {
     let n = n.max(0);
-    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
+    if get_typed_ptr_packed::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
         let len = rt_array_len(receiver).max(0);
         let start = n.min(len);
         let out = rt_array_new((len - start).max(0) as u64);
@@ -5528,7 +5798,7 @@ pub extern "C" fn rt_slice(collection: RuntimeValue, start: i64, end: i64, step:
 
     match collection.heap_type() {
         Some(HeapObjectType::Array) => {
-            let Some(arr) = get_typed_ptr::<RuntimeArray>(collection, HeapObjectType::Array) else {
+            let Some(arr) = get_typed_ptr_packed::<RuntimeArray>(collection, HeapObjectType::Array) else {
                 return RuntimeValue::NIL;
             };
             unsafe {
@@ -5566,12 +5836,12 @@ pub extern "C" fn rt_slice(collection: RuntimeValue, start: i64, end: i64, step:
                     let result = if bytes {
                         rt_byte_array_new(result_len.max(1))
                     } else {
-                        rt_array_new_uninit_u64(result_len.max(1))
+                        array_new_uninit_u64_like(result_len.max(1), (*arr).is_lazy_words())
                     };
                     if result.is_nil() {
                         return result;
                     }
-                    let dst = as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+                    let dst = as_typed_ptr_packed!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
                     let mut idx = start;
                     let mut out = 0usize;
                     while idx < end {
@@ -5656,7 +5926,7 @@ pub extern "C" fn rt_slice(collection: RuntimeValue, start: i64, end: i64, step:
 /// - [1, 2, 3] → [3, 2, 1]
 #[no_mangle]
 pub extern "C" fn rt_array_reverse(array: RuntimeValue) -> bool {
-    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
+    let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
         // A packed array's buffer holds `len` raw 1-byte / 8-byte elements;
         // `as_mut_slice()` over a `[u8]` swapped 8-byte slots far past the
@@ -5686,7 +5956,7 @@ pub extern "C" fn rt_array_reverse(array: RuntimeValue) -> bool {
 /// - reversed([1, 2, 3]) → [3, 2, 1]
 #[no_mangle]
 pub extern "C" fn rt_array_reversed(array: RuntimeValue) -> RuntimeValue {
-    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+    let arr = as_typed_ptr_packed!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
     unsafe {
         if (*arr).is_byte_packed() || (*arr).is_u64_packed() {
             // Keep the packed layout (as the C twin does): copy, then reverse.
@@ -5724,8 +5994,16 @@ pub extern "C" fn rt_array_reversed(array: RuntimeValue) -> RuntimeValue {
 /// introduced.
 #[no_mangle]
 pub extern "C" fn rt_array_sort(array: RuntimeValue) -> bool {
-    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
+    let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
+        if (*arr).is_lazy_words() {
+            // Packed `[i64]`: the raw words are signed, sort them as such.
+            let len = (*arr).len as usize;
+            if len > 1 && !(*arr).data.is_null() {
+                std::slice::from_raw_parts_mut((*arr).data as *mut i64, len).sort_unstable();
+            }
+            return true;
+        }
         if (*arr).is_byte_packed() {
             let len = (*arr).len as usize;
             let mut bytes: Vec<u8> = (0..len).map(|i| rt_array_get(array, i as i64).as_int() as u8).collect();
@@ -5759,7 +6037,7 @@ pub extern "C" fn rt_array_sort(array: RuntimeValue) -> bool {
 /// Create a new sorted copy of an array (ascending order)
 #[no_mangle]
 pub extern "C" fn rt_array_sorted(array: RuntimeValue) -> RuntimeValue {
-    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+    let arr = as_typed_ptr_packed!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
     unsafe {
         if (*arr).is_byte_packed() || (*arr).is_u64_packed() {
             // Keep the packed layout: `as_slice()` read a `[u8]` as 8-byte
@@ -5928,7 +6206,7 @@ pub extern "C" fn rt_array_find(array: RuntimeValue, closure: RuntimeValue) -> R
 /// answer instead of silently acquiring a new one.
 #[no_mangle]
 pub extern "C" fn rt_find(receiver: RuntimeValue, arg: RuntimeValue) -> i64 {
-    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() && !rt_closure_func_ptr(arg).is_null() {
+    if get_typed_ptr_packed::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() && !rt_closure_func_ptr(arg).is_null() {
         return rt_array_find(receiver, arg).to_raw() as i64;
     }
     rt_string_find(receiver, arg)
@@ -6007,7 +6285,7 @@ pub extern "C" fn rt_array_map(array: RuntimeValue, closure: RuntimeValue) -> Ru
 /// correct implementation on these two lanes — changes.
 #[no_mangle]
 pub extern "C" fn rt_map(receiver: RuntimeValue, closure: RuntimeValue) -> RuntimeValue {
-    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
+    if get_typed_ptr_packed::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
         return rt_array_map(receiver, closure);
     }
     rt_option_map(receiver, closure)
@@ -6078,7 +6356,7 @@ pub extern "C" fn rt_array_reduce(array: RuntimeValue, init: RuntimeValue, closu
 pub extern "C" fn rt_array_index_of(array: RuntimeValue, value: RuntimeValue) -> i64 {
     use super::sffi::rt_value_eq;
 
-    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, -1);
+    let arr = as_typed_ptr_packed!(array, HeapObjectType::Array, RuntimeArray, -1);
     unsafe {
         if let Some(words) = (*arr).packed_words() {
             let Some(want) = words.needle(value) else { return -1 };
@@ -6125,7 +6403,7 @@ pub extern "C" fn rt_index_of(haystack: RuntimeValue, needle: RuntimeValue) -> i
 pub extern "C" fn rt_array_last_index_of(array: RuntimeValue, value: RuntimeValue) -> i64 {
     use super::sffi::rt_value_eq;
 
-    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, -1);
+    let arr = as_typed_ptr_packed!(array, HeapObjectType::Array, RuntimeArray, -1);
     unsafe {
         if let Some(words) = (*arr).packed_words() {
             let Some(want) = words.needle(value) else { return -1 };
@@ -6144,8 +6422,8 @@ pub extern "C" fn rt_array_last_index_of(array: RuntimeValue, value: RuntimeValu
 /// Concatenate two arrays into a new array
 #[no_mangle]
 pub extern "C" fn rt_array_concat(a: RuntimeValue, b: RuntimeValue) -> RuntimeValue {
-    let arr_a = as_typed_ptr!(a, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
-    let arr_b = as_typed_ptr!(b, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+    let arr_a = as_typed_ptr_packed!(a, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+    let arr_b = as_typed_ptr_packed!(b, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
 
     unsafe {
         let len_a = (*arr_a).len;
@@ -6168,7 +6446,7 @@ pub extern "C" fn rt_array_concat(a: RuntimeValue, b: RuntimeValue) -> RuntimeVa
             if result.is_nil() {
                 return result;
             }
-            let dst = as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+            let dst = as_typed_ptr_packed!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
             if len_a > 0 {
                 std::ptr::copy_nonoverlapping((*arr_a).data as *const u8, (*dst).data as *mut u8, len_a as usize);
             }
@@ -6184,11 +6462,11 @@ pub extern "C" fn rt_array_concat(a: RuntimeValue, b: RuntimeValue) -> RuntimeVa
         }
         if a_words && b_words {
             let total = len_a + len_b;
-            let result = rt_array_new_uninit_u64(total.max(1));
+            let result = array_new_uninit_u64_like(total.max(1), (*arr_a).is_lazy_words() || (*arr_b).is_lazy_words());
             if result.is_nil() {
                 return result;
             }
-            let dst = as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+            let dst = as_typed_ptr_packed!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
             if len_a > 0 {
                 std::ptr::copy_nonoverlapping((*arr_a).data as *const u64, (*dst).data as *mut u64, len_a as usize);
             }
@@ -6232,7 +6510,7 @@ pub extern "C" fn rt_array_concat(a: RuntimeValue, b: RuntimeValue) -> RuntimeVa
 /// Create a shallow copy of an array
 #[no_mangle]
 pub extern "C" fn rt_array_copy(array: RuntimeValue) -> RuntimeValue {
-    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+    let arr = as_typed_ptr_packed!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
     unsafe {
         let len = (*arr).len;
 
@@ -6251,11 +6529,11 @@ pub extern "C" fn rt_array_copy(array: RuntimeValue) -> RuntimeValue {
         // are 8 bytes wide for both the packed-u64 and the generic layout, and
         // one byte wide for the byte-packed layout.
         if (*arr).is_u64_packed() {
-            let result = rt_array_new_uninit_u64(len.max(1));
+            let result = array_new_uninit_u64_like(len.max(1), (*arr).is_lazy_words());
             if result.is_nil() {
                 return result;
             }
-            let dst = as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+            let dst = as_typed_ptr_packed!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
             if len > 0 && !(*arr).data.is_null() && !(*dst).data.is_null() {
                 std::ptr::copy_nonoverlapping((*arr).data as *const u64, (*dst).data as *mut u64, len as usize);
             }
@@ -6268,7 +6546,7 @@ pub extern "C" fn rt_array_copy(array: RuntimeValue) -> RuntimeValue {
             if result.is_nil() {
                 return result;
             }
-            let dst = as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+            let dst = as_typed_ptr_packed!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
             if len > 0 && !(*arr).data.is_null() && !(*dst).data.is_null() {
                 std::ptr::copy_nonoverlapping((*arr).data as *const u8, (*dst).data as *mut u8, len as usize);
             }
@@ -6301,7 +6579,7 @@ pub extern "C" fn rt_array_copy(array: RuntimeValue) -> RuntimeValue {
         if result.is_nil() {
             return result;
         }
-        let dst = as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+        let dst = as_typed_ptr_packed!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
         if len > 0 && !(*arr).data.is_null() && !(*dst).data.is_null() {
             debug_assert!((*dst).capacity >= len);
             std::ptr::copy_nonoverlapping((*arr).data, (*dst).data, len as usize);
@@ -6315,7 +6593,7 @@ pub extern "C" fn rt_array_copy(array: RuntimeValue) -> RuntimeValue {
 /// Returns 0 for empty arrays, NIL for non-numeric elements
 #[no_mangle]
 pub extern "C" fn rt_array_sum(array: RuntimeValue) -> RuntimeValue {
-    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+    let arr = as_typed_ptr_packed!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
     unsafe {
         if let Some(words) = (*arr).packed_words() {
             // Raw elements, summed with wrapping i64 arithmetic and without
@@ -6364,8 +6642,17 @@ fn array_int_value(v: RuntimeValue) -> Option<i64> {
 /// Returns NIL for empty arrays
 #[no_mangle]
 pub extern "C" fn rt_array_min(array: RuntimeValue) -> RuntimeValue {
-    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+    let arr = as_typed_ptr_packed!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
     unsafe {
+        if (*arr).is_lazy_words() {
+            // Packed `[i64]`: raw SIGNED words, compared as such.
+            let len = (*arr).len as usize;
+            if len == 0 || (*arr).data.is_null() {
+                return RuntimeValue::NIL;
+            }
+            let words = std::slice::from_raw_parts((*arr).data as *const i64, len);
+            return RuntimeValue::from_int(*words.iter().min().unwrap_or(&0));
+        }
         // Packed `[u8]` / `[u64]` hold raw unsigned elements: compare those
         // directly (`as_slice()` read a `[u8]` past its buffer, and a word of
         // 2^63 or more is negative once tagged).
@@ -6412,8 +6699,17 @@ pub extern "C" fn rt_array_min(array: RuntimeValue) -> RuntimeValue {
 /// Returns NIL for empty arrays
 #[no_mangle]
 pub extern "C" fn rt_array_max(array: RuntimeValue) -> RuntimeValue {
-    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+    let arr = as_typed_ptr_packed!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
     unsafe {
+        if (*arr).is_lazy_words() {
+            // Packed `[i64]`: raw SIGNED words, compared as such.
+            let len = (*arr).len as usize;
+            if len == 0 || (*arr).data.is_null() {
+                return RuntimeValue::NIL;
+            }
+            let words = std::slice::from_raw_parts((*arr).data as *const i64, len);
+            return RuntimeValue::from_int(*words.iter().max().unwrap_or(&0));
+        }
         // Packed `[u8]` / `[u64]` hold raw unsigned elements: compare those
         // directly (`as_slice()` read a `[u8]` past its buffer, and a word of
         // 2^63 or more is negative once tagged).
@@ -6461,7 +6757,7 @@ pub extern "C" fn rt_array_max(array: RuntimeValue) -> RuntimeValue {
 pub extern "C" fn rt_array_count(array: RuntimeValue, value: RuntimeValue) -> i64 {
     use super::sffi::rt_value_eq;
 
-    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, -1);
+    let arr = as_typed_ptr_packed!(array, HeapObjectType::Array, RuntimeArray, -1);
     unsafe {
         if let Some(words) = (*arr).packed_words() {
             let Some(want) = words.needle(value) else { return 0 };
@@ -6688,7 +6984,7 @@ pub extern "C" fn rt_array_join(array: RuntimeValue, separator: RuntimeValue) ->
 /// Returns 1 if all elements are truthy, 0 otherwise
 #[no_mangle]
 pub extern "C" fn rt_array_all_truthy(array: RuntimeValue) -> i64 {
-    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
+    let arr = as_typed_ptr_packed!(array, HeapObjectType::Array, RuntimeArray, 0);
 
     unsafe {
         if let Some(words) = (*arr).packed_words() {
@@ -6764,7 +7060,7 @@ pub extern "C" fn rt_array_all(array: RuntimeValue, closure: RuntimeValue) -> i6
 /// Returns 1 if any element is truthy, 0 otherwise
 #[no_mangle]
 pub extern "C" fn rt_array_any_truthy(array: RuntimeValue) -> i64 {
-    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
+    let arr = as_typed_ptr_packed!(array, HeapObjectType::Array, RuntimeArray, 0);
 
     unsafe {
         if let Some(words) = (*arr).packed_words() {
@@ -6823,7 +7119,7 @@ pub extern "C" fn rt_array_any(array: RuntimeValue, closure: RuntimeValue) -> i6
 /// Fill array with a value (in place)
 #[no_mangle]
 pub extern "C" fn rt_array_fill(array: RuntimeValue, value: RuntimeValue) -> bool {
-    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
+    let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
         if (*arr).is_byte_packed() || (*arr).is_u64_packed() {
             // Raw-element layouts: store through the layout-aware setter.
@@ -6878,8 +7174,8 @@ pub extern "C" fn rt_array_write_span(
         return 0;
     }
     let err = -1;
-    let dst_arr = as_typed_ptr!(mut dst, HeapObjectType::Array, RuntimeArray, err);
-    let Some(src_arr) = crate::value::heap::get_typed_ptr::<RuntimeArray>(src, HeapObjectType::Array) else {
+    let dst_arr = as_typed_ptr_packed!(mut dst, HeapObjectType::Array, RuntimeArray, err);
+    let Some(src_arr) = crate::value::heap::get_typed_ptr_packed::<RuntimeArray>(src, HeapObjectType::Array) else {
         write_span_fail("write_span expects array source argument");
     };
     unsafe {
@@ -6926,7 +7222,11 @@ pub extern "C" fn rt_array_write_span(
                 } else if dst_words {
                     *(*dst_arr).data.cast::<u64>().add(target) = raw;
                 } else {
-                    *(*dst_arr).data.add(target) = if raw <= (i64::MAX as u64 >> 3) {
+                    *(*dst_arr).data.add(target) = if (*src_arr).is_lazy_words() {
+                        // signed words packed from an `[i64]`: a negative word is
+                        // not a huge u64
+                        RuntimeValue::from_int_unscoped(raw as i64)
+                    } else if raw <= (i64::MAX as u64 >> 3) {
                         RuntimeValue::from_int(raw as i64)
                     } else {
                         RuntimeValue::from_u64(raw)
@@ -7171,7 +7471,7 @@ pub extern "C" fn rt_contains(collection: RuntimeValue, value: RuntimeValue) -> 
 
     match collection.heap_type() {
         Some(HeapObjectType::Array) => {
-            let Some(arr) = get_typed_ptr::<RuntimeArray>(collection, HeapObjectType::Array) else {
+            let Some(arr) = get_typed_ptr_packed::<RuntimeArray>(collection, HeapObjectType::Array) else {
                 return 0;
             };
             unsafe {

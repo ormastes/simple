@@ -46,6 +46,17 @@ pub fn lower_to_mir(hir: &HirModule) -> MirLowerResult<MirModule> {
         .lower_module(hir)
 }
 
+/// [`lower_to_mir`] with an explicit `[i64]` word-lane switch (false for
+/// freestanding and WASM targets, whose runtimes lack `rt_typed_words_i64_*`).
+pub fn lower_to_mir_with_word_lane(hir: &HirModule, signed_word_lane: bool) -> MirLowerResult<MirModule> {
+    MirLowerer::new()
+        .with_signed_word_lane(signed_word_lane)
+        .with_refined_types(&hir.refined_types)
+        .with_type_registry(&hir.types)
+        .with_trait_infos(&hir.trait_infos)
+        .lower_module(hir)
+}
+
 /// Lower HIR to MIR with a specific contract mode.
 pub fn lower_to_mir_with_mode(hir: &HirModule, contract_mode: ContractMode) -> MirLowerResult<MirModule> {
     MirLowerer::with_contract_mode(contract_mode)
@@ -80,12 +91,31 @@ pub fn lower_to_mir_with_global_trait_impls(
     trait_impls: &std::collections::HashMap<String, Vec<String>>,
     array_push_returns_header: bool,
 ) -> MirLowerResult<MirModule> {
+    // FAM freestanding runtimes do not define the `[i64]` word lane.
+    lower_to_mir_with_global_trait_impls_and_word_lane(
+        hir,
+        trait_impls,
+        array_push_returns_header,
+        !array_push_returns_header,
+    )
+}
+
+/// Same as [`lower_to_mir_with_global_trait_impls`], with an explicit switch for
+/// the `[i64]` `rt_typed_words_i64_*` lane. Pass `false` for freestanding
+/// targets whose C runtime does not define those symbols.
+pub fn lower_to_mir_with_global_trait_impls_and_word_lane(
+    hir: &HirModule,
+    trait_impls: &std::collections::HashMap<String, Vec<String>>,
+    array_push_returns_header: bool,
+    signed_word_lane: bool,
+) -> MirLowerResult<MirModule> {
     MirLowerer::new()
         .with_refined_types(&hir.refined_types)
         .with_type_registry(&hir.types)
         .with_trait_infos(&hir.trait_infos)
         .with_global_trait_impls(trait_impls)
         .with_array_push_returns_header(array_push_returns_header)
+        .with_signed_word_lane(signed_word_lane)
         .lower_module(hir)
 }
 
@@ -136,7 +166,22 @@ pub fn lower_to_mir_full_with_file(
     coverage_enabled: bool,
     file: Option<String>,
 ) -> MirLowerResult<MirModule> {
+    lower_to_mir_full_with_file_and_word_lane(hir, contract_mode, di_config, coverage_enabled, file, true)
+}
+
+/// [`lower_to_mir_full_with_file`] with an explicit `[i64]` word-lane switch:
+/// pass `false` for targets whose runtime does not define `rt_typed_words_i64_*`
+/// (freestanding, WASM).
+pub fn lower_to_mir_full_with_file_and_word_lane(
+    hir: &HirModule,
+    contract_mode: ContractMode,
+    di_config: Option<crate::di::DiConfig>,
+    coverage_enabled: bool,
+    file: Option<String>,
+    signed_word_lane: bool,
+) -> MirLowerResult<MirModule> {
     let mut lowerer = MirLowerer::with_contract_mode(contract_mode)
+        .with_signed_word_lane(signed_word_lane)
         .with_di_config(di_config)
         .with_coverage(coverage_enabled)
         .with_refined_types(&hir.refined_types)

@@ -690,6 +690,20 @@ impl CompilerPipeline {
         target: Target,
         source_path: Option<&Path>,
     ) -> Result<Vec<u8>, CompileError> {
+        // Freestanding and WASM runtimes do not define the `[i64]` word lane.
+        let previous_lane = self.signed_word_lane;
+        self.signed_word_lane = !target.is_baremetal() && !target.is_wasm();
+        let result = self.compile_module_to_memory_for_target_inner(ast_module, target, source_path);
+        self.signed_word_lane = previous_lane;
+        result
+    }
+
+    fn compile_module_to_memory_for_target_inner(
+        &mut self,
+        ast_module: simple_parser::ast::Module,
+        target: Target,
+        source_path: Option<&Path>,
+    ) -> Result<Vec<u8>, CompileError> {
         // Fail closed with a diagnostic that NAMES the cause. Without the
         // `llvm` cargo feature, `BackendKind::select_for_target` has no 32-bit
         // arm and falls through to Cranelift, which has no ISA for those

@@ -1649,7 +1649,7 @@ fn codegen_inline_array_get_text_does_not_emit_runtime_symbol() {
 }
 
 #[test]
-fn codegen_inline_array_set_does_not_emit_runtime_symbol() {
+fn codegen_inline_array_set_runtime_call_is_only_the_cold_word_lane_fallback() {
     let object = aot_object("inline_array_set", |f| {
         let array = f.new_vreg();
         let index = f.new_vreg();
@@ -1667,7 +1667,10 @@ fn codegen_inline_array_set_does_not_emit_runtime_symbol() {
         dest
     });
 
-    assert!(!object_relocates_to_symbol(&object, "rt_array_set"));
+    // Inline int stores never call. The one remaining reference is the cold
+    // fallback for a word-lane (packed `[i64]`) array receiving a wide or
+    // non-integer value, which must decode/unpack in the runtime.
+    assert!(object_relocates_to_symbol(&object, "rt_array_set"));
 }
 
 #[test]
