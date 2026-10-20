@@ -1,0 +1,178 @@
+"""
+## Purpose and audience
+Purpose: Prove the NOGC-OWN/BOR/ALIAS lint flags exactly the code shapes that
+break under the no-GC unique-owner + strictly-short-borrow default, and stays
+silent on values (struct, array, text), explicit owners (`iso`), explicit
+clones, mutually exclusive branches and terminated paths.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-COMPILER-LINT-001 — stable requirement identity for this spec.
+#
+# Contract: doc/03_plan/language/memory_safety/nogc_ownership_baseline_wp00_01_2026-10-20.md
+# Plan: §3.1 OWN-01, §3.2 short-borrow table, §3.8 migration diagnostics.
+
+use std.spec.*
+use compiler.semantics.lint.nogc_own.checker.{NogcOwnFinding, check_nogc_ownership, check_nogc_ownership_with}
+use compiler.tools.lint.static_rules.{LintParamsV1, LintUnit, static_lint_rule_table, run_static_lint_rule_table}
+use compiler.tools.lint.rules.nogc_ownership_rule.{nogc_ownership_lint_rule}
+
+fn _src(lines: [text]) -> text:
+    lines.join("\n") + "\n"
+
+fn _codes(findings: [NogcOwnFinding]) -> [text]:
+    var out: [text] = []
+    for f in findings:
+        out.push(f.code)
+    out
+
+fn _count(findings: [NogcOwnFinding], code: text) -> i64:
+    var n = 0
+    for f in findings:
+        if f.code == code: n = n + 1
+    n
+
+fn _lines(findings: [NogcOwnFinding], code: text) -> [i64]:
+    var out: [i64] = []
+    for f in findings:
+        if f.code == code: out.push(f.line_num)
+    out
+
+val NODE_DECL = ["class Node:", "    v: i64", "    next: Node?", "", "struct Pt:", "    x: i64", ""]
+
+fn _with_node(body: [text]) -> text:
+    var all: [text] = []
+    for l in NODE_DECL:
+        all.push(l)
+    for l in body:
+        all.push(l)
+    _src(all)
+
+
+describe "NOGC-OWN-001: use after an implicit ownership transfer":
+    it "flags reuse of a class local after `val b = a`":
+        step("Verify: class local reused after val b = a")
+        val src = _with_node(["fn f() -> i64:", "    val a = Node(v: 1, next: nil)", "    val b = a", "    a.v + b.v"])
+        val fs = check_nogc_ownership(src, "src/x.spl")
+        expect(_count(fs, "NOGC-OWN-001")).to_equal(1)  # oracle: one transfer line
+        expect(_lines(fs, "NOGC-OWN-001")[0]).to_equal(10)  # oracle: the `val b = a` line
+
+    it "flags reuse after a field store and after push":
+        step("Verify: field store and push are transfers")
+        val src = _with_node(["fn g(holder: [Node]) -> i64:", "    val a = Node(v: 1, next: nil)", "    var xs: [Node] = []", "    xs.push(a)", "    a.v"])
+        expect(_count(check_nogc_ownership(src, "src/x.spl"), "NOGC-OWN-001")).to_equal(1)  # oracle: push then use
+
+    it "does not flag a struct copy, an array copy, or text":
+        step("Verify: value types are never owners")
+        val src = _with_node(["fn h() -> i64:", "    val p = Pt(x: 1)", "    val q = p", "    val xs = [1, 2]", "    val ys = xs", "    val s = \"a\"", "    val t = s", "    p.x + q.x + xs.len() + ys.len() + s.len() + t.len()"])
+        expect(check_nogc_ownership(src, "src/x.spl").len()).to_equal(0)  # oracle: values only
+
+    it "does not flag an explicit clone or a transfer without a later use":
+        step("Verify: explicit clone and last-use transfer are fine")
+        val src = _with_node(["fn k() -> i64:", "    val a = Node(v: 1, next: nil)", "    val c = a.clone()", "    val b = a", "    b.v + c.v"])
+        expect(_count(check_nogc_ownership(src, "src/x.spl"), "NOGC-OWN-001")).to_equal(0)  # oracle: a never used after the move
+
+    it "does not flag a use in a mutually exclusive else branch or after a return":
+        step("Verify: CFG-exclusive paths are not use-after-move")
+        val src = _with_node(["fn m(c: bool) -> i64:", "    val a = Node(v: 1, next: nil)", "    if c:", "        val b = a", "        return b.v", "    else:", "        return a.v", "    0"])
+        expect(_count(check_nogc_ownership(src, "src/x.spl"), "NOGC-OWN-001")).to_equal(0)  # oracle: exclusive branches
+
+    it "flags a use after a conditional move (maybe-moved)":
+        step("Verify: use after the if that moved on one branch")
+        val src = _with_node(["fn n(c: bool) -> i64:", "    val a = Node(v: 1, next: nil)", "    var keep: [Node] = []", "    if c:", "        keep.push(a)", "    a.v"])
+        expect(_count(check_nogc_ownership(src, "src/x.spl"), "NOGC-OWN-001")).to_equal(1)  # oracle: maybe-moved owner used
+
+    it "stops at reassignment of the moved local":
+        step("Verify: reinitialization makes the local live again")
+        val src = _with_node(["fn r() -> i64:", "    var a = Node(v: 1, next: nil)", "    val b = a", "    a = Node(v: 2, next: nil)", "    a.v + b.v"])
+        expect(_count(check_nogc_ownership(src, "src/x.spl"), "NOGC-OWN-001")).to_equal(0)  # oracle: reinit before use
+
+
+describe "NOGC-BOR-001: returning a borrowed parameter or receiver":
+    it "flags `return p` and a tail-expression receiver":
+        step("Verify: explicit return of a class param and tail self")
+        val src = _with_node(["fn pick(p: Node) -> Node:", "    return p", "", "impl Node:", "    fn me_self() -> Node:", "        self"])
+        val fs = check_nogc_ownership(src, "src/x.spl")
+        expect(_count(fs, "NOGC-BOR-001")).to_equal(2)  # oracle: return p, tail self
+
+    it "flags returning a class-typed field of the receiver":
+        step("Verify: getter returning an owned child")
+        val src = _with_node(["impl Node:", "    fn tail_node() -> Node?:", "        self.next"])
+        expect(_count(check_nogc_ownership(src, "src/x.spl"), "NOGC-BOR-001")).to_equal(1)  # oracle: self.next escapes
+
+    it "does not flag an iso parameter, a scalar field, or a struct receiver":
+        step("Verify: explicit owners and values are not borrows")
+        val src = _with_node(["fn own(p: iso Node) -> Node:", "    return p", "", "impl Node:", "    fn value() -> i64:", "        self.v", "", "impl Pt:", "    fn me_pt() -> Pt:", "        self"])
+        expect(_count(check_nogc_ownership(src, "src/x.spl"), "NOGC-BOR-001")).to_equal(0)  # oracle: none are borrows
+
+
+describe "NOGC-BOR-002: storing a borrowed parameter or receiver":
+    it "flags field store, push, and aggregate constructor storage":
+        step("Verify: three store shapes")
+        val src = _with_node(["class Holder:", "    items: [Node]", "    head: Node?", "", "impl Holder:", "    me keep(n: Node):", "        self.head = n", "        self.items.push(n)", "", "fn wrap(n: Node) -> Holder:", "    Holder(items: [], head: n)"])
+        expect(_count(check_nogc_ownership(src, "src/x.spl"), "NOGC-BOR-002")).to_equal(3)  # oracle: 3 store lines
+
+    it "does not flag reading a borrowed parameter or storing a scalar from it":
+        step("Verify: short reads are fine")
+        val src = _with_node(["class Holder:", "    total: i64", "", "impl Holder:", "    me add(n: Node):", "        self.total = self.total + n.v", "        print n.v"])
+        expect(_count(check_nogc_ownership(src, "src/x.spl"), "NOGC-BOR-002")).to_equal(0)  # oracle: scalar copy only
+
+
+describe "NOGC-BOR-003: borrowed value captured by an escaping closure":
+    it "flags a spawned lambda and a returned lambda capturing a param":
+        step("Verify: spawn and return escape")
+        val src = _with_node(["fn run(n: Node):", "    spawn(\\: print n.v)", "", "fn mk(n: Node) -> fn() -> i64:", "    return \\: n.v"])
+        expect(_count(check_nogc_ownership(src, "src/x.spl"), "NOGC-BOR-003")).to_equal(2)  # oracle: both escape
+
+    it "does not flag a non-escaping callback or a spawned lambda without the borrow":
+        step("Verify: synchronous map and capture-free spawn")
+        val src = _with_node(["fn sum(n: Node, xs: [i64]) -> [i64]:", "    spawn(\\: print 1)", "    xs.map(\\x: x + n.v)"])
+        expect(_count(check_nogc_ownership(src, "src/x.spl"), "NOGC-BOR-003")).to_equal(0)  # oracle: nonescaping
+
+
+describe "NOGC-BOR-004: borrow held across await/yield":
+    it "flags use of a borrowed param after await":
+        step("Verify: use after suspension")
+        val src = _with_node(["async fn fetch(n: Node) -> i64:", "    val before = n.v", "    val r = await load(before)", "    r + n.v"])
+        val fs = check_nogc_ownership(src, "src/x.spl")
+        expect(_count(fs, "NOGC-BOR-004")).to_equal(1)  # oracle: the line after await
+        expect(_lines(fs, "NOGC-BOR-004")[0]).to_equal(11)  # oracle: `r + n.v`
+
+    it "does not flag values copied out before the suspension":
+        step("Verify: copy-out before await is the fix shape")
+        val src = _with_node(["async fn fetch2(n: Node) -> i64:", "    val before = n.v", "    val r = await load(before)", "    r + before"])
+        expect(_count(check_nogc_ownership(src, "src/x.spl"), "NOGC-BOR-004")).to_equal(0)  # oracle: no borrow after await
+
+
+describe "NOGC-ALIAS-001: persistent alias plus mutation":
+    it "flags a local bound to a class field and mutated through":
+        step("Verify: alias of self.head mutated")
+        val src = _with_node(["class List:", "    head: Node", "", "impl List:", "    me bump():", "        val h = self.head", "        h.v = h.v + 1"])
+        expect(_count(check_nogc_ownership(src, "src/x.spl"), "NOGC-ALIAS-001")).to_equal(1)  # oracle: one alias line
+
+    it "does not flag direct owner-path mutation or a read-only alias":
+        step("Verify: owner path and read-only local")
+        val src = _with_node(["class List:", "    head: Node", "", "impl List:", "    me bump():", "        self.head.v = self.head.v + 1", "    fn peek() -> i64:", "        val h = self.head", "        h.v"])
+        expect(_count(check_nogc_ownership(src, "src/x.spl"), "NOGC-ALIAS-001")).to_equal(0)  # oracle: no mutation through alias
+
+
+describe "repo-wide class index":
+    it "classifies a class declared in another file only when passed in":
+        step("Verify: extra_classes extends classification")
+        val src = _src(["fn f(p: Remote) -> Remote:", "    return p"])
+        expect(check_nogc_ownership(src, "src/x.spl").len()).to_equal(0)  # oracle: unknown type, not guessed
+        expect(_count(check_nogc_ownership_with(src, "src/x.spl", ["Remote"], []), "NOGC-BOR-001")).to_equal(1)  # oracle: known class
+
+
+describe "lint table wiring":
+    it "registers nogc_ownership and dispatches it through the table":
+        step("Verify: rule id present and findings reach the table run")
+        var ids: [text] = []
+        for r in static_lint_rule_table():
+            ids.push(r.id())
+        expect(ids).to_contain("nogc_ownership")
+        val src = _with_node(["fn pick(p: Node) -> Node:", "    return p"])
+        val run = run_static_lint_rule_table(LintParamsV1.defaults(), LintUnit("src/x.spl", src), static_lint_rule_table())
+        expect(run.errors.len()).to_equal(0)  # oracle: table order + negotiation accepted
+        val direct = nogc_ownership_lint_rule().check(LintParamsV1.defaults(), LintUnit("src/x.spl", src))
+        expect([f.code for f in direct]).to_contain("NOGC-BOR-001")
+        expect([f.code for f in run.findings]).to_contain("NOGC-BOR-001")
