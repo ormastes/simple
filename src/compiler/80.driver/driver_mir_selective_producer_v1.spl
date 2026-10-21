@@ -1,0 +1,297 @@
+# Single post-mono producer for the opt-in direct selective MIR lane.
+# Canonical HIR remains driver-owned; each publication scope borrows one module
+# and promotes only its small row. No lowering graph is shared with children.
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_source_loading.{_driver_physical_source_key}
+use compiler.driver.driver_mir_physical_owners.{driver_mir_physical_source_indices_v1}
+use compiler.driver.driver_mir_selective_eligibility_v1.{driver_mir_selective_explicit_native_eligible_v1}
+use compiler.frontend.resource_registry.{resource_registry_selective_mir_safe_v1}
+use compiler.semantics.rt_hal_tag.{rt_hal_selective_mir_safe_v1}
+use compiler.mono.mono_selective_emission_publication_v1.{mono_selective_emission_publication_v1}
+use compiler.mir._MirLowering.archive_borrowed_module_v1.{MirArchiveFunctionEmissionV1}
+use compiler.driver.cache.hir_owned_artifact_cache_v1.{hir_owned_artifact_context_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_promote_diagnostic_owner_v1, hir_cache_clear_last_warnings}
+use compiler.driver.driver_build.native_mir_selective_bundle_v1.{NativeMirSelectiveRowV1,
+    NATIVE_MIR_SELECTIVE_MAX_MODULES_V1, NATIVE_MIR_SELECTIVE_MODULE_BYTES_V1,
+    NATIVE_MIR_SELECTIVE_MANIFEST_BYTES_V1,
+    native_mir_selective_artifact_size_v1, native_mir_selective_disk_limit_v1,
+    native_mir_selective_source_binding_v1,
+    native_mir_selective_write_module_in_owned_scope_v1,
+    native_mir_selective_write_manifest_v1}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+
+# A fixed, versioned semantic frame shared by the producer and pre-frontend
+# worker. No source record name participates: parsing projects those names.
+# The admitted source fingerprint is the stable source authority on both sides.
+pub fn driver_mir_selective_context_identity_v1(driver: CompilerDriver) -> Result<text, text>:
+    val source = driver.ctx.native_sources_fingerprint
+    val artifacts = hir_owned_artifact_context_v1()
+    if not sha256_lower_hex_valid(source) or not artifacts.enabled or
+            artifacts.directory == "" or artifacts.producer_header == "":
+        return Err("selective MIR context lacks admitted source/compiler/cache identity")
+    val opts = driver.ctx.options
+    var writer = HirCodecWriter.create()
+    writer.put_text("direct-mir-selective-context-v1")
+    writer.put_text(source)
+    writer.put_text(artifacts.directory)
+    # This is the existing actual compiler/frontend/codec producer frame,
+    # including frontend-exe content identity; no new cache authority is minted.
+    writer.put_text(artifacts.producer_header)
+    writer.put_text(driver.ctx.native_target)
+    writer.put_text(opts.native_target)
+    writer.put_text(opts.backend)
+    writer.put_text(opts.backend_plugin_path)
+    writer.put_bool(opts.optimize)
+    writer.put_i64(opts.opt_level ?? -1)
+    writer.put_bool(opts.release)
+    writer.put_bool(opts.debug_info)
+    writer.put_bool(opts.strip_output)
+    writer.put_text(opts.profile)
+    writer.put_bool(opts.no_borrow_check)
+    writer.put_bool(opts.gc_off)
+    writer.put_text(opts.interpreter_mode)
+    writer.put_text(opts.smf_output_mode)
+    writer.put_bool(opts.low_memory)
+    writer.put_text(opts.debug_trace_level)
+    writer.put_bool(opts.coverage_enabled)
+    writer.put_text(opts.mcdc_mode_text)
+    writer.put_i64(opts.mcdc_owner_bytes)
+    writer.put_i64(opts.mcdc_global_bytes)
+    writer.put_text(opts.collection_policy)
+    writer.put_i64(opts.collection_memory_budget_bytes)
+    writer.put_text(opts.build_mode)
+    writer.put_text(opts.cli_mode_text)
+    writer.put_text(opts.riscv_gen2_target)
+    writer.put_i64(opts.allowed_families.len())
+    for value in opts.allowed_families: writer.put_text(value)
+    for values in [opts.native_libraries, opts.native_library_paths, opts.native_linker_flags]:
+        writer.put_i64(values.len())
+        for value in values: writer.put_text(value)
+    val aspect = opts.aspect_params
+    writer.put_text(aspect.hdr.schema_name)
+    writer.put_i64(aspect.hdr.schema_major)
+    writer.put_i64(aspect.hdr.schema_minor)
+    writer.put_i64(aspect.hdr.present)
+    writer.put_bool(aspect.log_calls)
+    writer.put_bool(aspect.log_assignments)
+    writer.put_i64(aspect.compile_log_level)
+    writer.put_i64(aspect.runtime_log_level)
+    writer.put_i64(aspect.mcdc_mode)
+    writer.put_text(aspect.mcdc_manifest_sha256)
+    writer.put_i64(aspect.ext.len())
+    for extension in aspect.ext:
+        writer.put_text(extension.ext_name)
+        writer.put_i64(extension.ext_major)
+        writer.put_text(extension.payload_schema_hash)
+        writer.put_i64(extension.payload.len())
+        for byte in extension.payload: writer.put_i64(byte as i64)
+    # Routing coordinates, queue paths, write/read directory and claim caps are
+    # deliberately absent. All listed values change frontend/MIR/verification
+    # meaning; diagnostic switches do not authorize a body or change its owner.
+    for name in ["SIMPLE_BOOTSTRAP", "SIMPLE_NATIVE_BUILD_ENTRY", "SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE",
+            "SIMPLE_BOOTSTRAP_STAGE4", "SIMPLE_STUB_HIR", "SIMPLE_UNSTUB_HIR",
+            "SIMPLE_STAGE3_STREAMING_SURFACES", "SIMPLE_STAGE4_STREAMING_SURFACES",
+            "SIMPLE_BOOTSTRAP_SKIP_MIR_LOWER", "SIMPLE_BOOTSTRAP_FULL_HIR",
+            "SIMPLE_VALUE_STRUCT_LAYOUT_CYCLE", "SIMPLE_RESOLVE_METHODS",
+            "SIMPLE_MIR_EAGER_PROVIDER_METHODS", "SIMPLE_MIR_EAGER_PROVIDER_LAYOUTS",
+            "SIMPLE_MIR_VERIFY_LEVELS", "SIMPLE_HIR_LEVELS", "SIMPLE_MONO_LEVELS",
+            "SIMPLE_ASSURANCE_POLICY", "SIMPLE_ASSURANCE_WARNING_PHASE", "SIMPLE_ASSURANCE_STRICTNESS",
+            "SIMPLE_MCDC_MODE", "SIMPLE_MCDC_MANIFEST", "SIMPLE_MCDC_OWNER_BYTES", "SIMPLE_MCDC_GLOBAL_BYTES",
+            "SIMPLE_COVERAGE", "SIMPLE_DEBUG_TRACE", "SIMPLE_COLLECTION_POLICY",
+            "SIMPLE_COLLECTION_MEMORY_BUDGET_BYTES", "SIMPLE_TARGET", "SIMPLE_TARGET_CPU",
+            "SIMPLE_LIB", "SIMPLE_PATH", "SIMPLE_RUNTIME_PROFILE", "SIMPLE_RT_MANIFEST",
+            "SIMPLE_RT_BOUND_MANIFEST", "SIMPLE_RT_IMPLICIT_PROFILE", "SIMPLE_RT_CRITICAL",
+            "SIMPLE_EFFECT_LEVELS", "SIMPLE_LAYER_EQ_LEVELS", "SIMPLE_ASPECT_LEVELS",
+            "SIMPLE_BORROW_REF_CALL_ARGS", "SIMPLE_MONO_ROOT_DISCOVERY", "SIMPLE_SAFETY_PROFILE",
+            "SIMPLE_SAFETY_WARN", "SIMPLE_STRICT_ARRAY_GLOBALS", "SIMPLE_TYPECHECK_WARN",
+            "SIMPLE_NATIVE_RUNTIME_BUNDLE", "SIMPLE_REXMEMO_VERIFY", "SIMPLE_PACKAGE_INDEX_COLD_INIT",
+            "SIMPLE_PACKAGE_INDEX_EXPECTED_SOURCE_COUNT", "SIMPLE_PACKAGE_INDEX_FULL_INVENTORY",
+            "SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST", "SIMPLE_PACKAGE_INDEX_ROOT_GENERATION",
+            "SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST", "SIMPLE_SCV_COMMIT_ID", "SIMPLE_SCV_INVENTORY_DIGEST",
+            "SIMPLE_SCV_INVENTORY_GENERATION", "SIMPLE_SCV_REVISION_ID", "SIMPLE_SCV_SNAPSHOT_ROOT",
+            "SIMPLE_SCV_SOURCE_INVENTORY_DIGEST", "SIMPLE_SCV_TREE_ID", "SIMPLE_KEEP_SOURCE_CONTENTS",
+            "SIMPLE_COMPILER_TRACE", "SIMPLE_COMPILER_PHASE_PROFILE", "SIMPLE_BOOTSTRAP_DIAG",
+            "SIMPLE_BOOTSTRAP_DEBUG", "SIMPLE_FRONTEND_DIAG", "SIMPLE_MONO_DIAG",
+            "SIMPLE_HIR_ABI_INTERFACE_TRACE", "SIMPLE_HIR_CODEC_ROUNDTRIP", "SIMPLE_HIR_ENUM_OWNER_TRACE",
+            "SIMPLE_HIR_EXPORT_ORIGIN_TRACE", "SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE", "SIMPLE_HIR_PHASE_PROFILE",
+            "SIMPLE_HIR_REEXPORT_STATS", "SIMPLE_HIR_SIBLING_TRACE", "SIMPLE_HIR_SIBPROBE",
+            "SIMPLE_HIR_SURFACE_IDENT_DUMP", "SIMPLE_HIR_UNRESOLVED_TYPE_TRACE", "SIMPLE_ENUM_PAYLOAD_TRACE",
+            "SIMPLE_ENUM_REG_TRACE", "SIMPLE_MATCH_DESUGAR_TRACE", "SIMPLE_MIR_BOUNDS_DEBUG",
+            "SIMPLE_MIRB_TRACE", "SIMPLE_MIR_DEFAULT_PAD_TRACE", "SIMPLE_MIR_FIELD_TRACE",
+            "SIMPLE_MIR_GARBAGE_EXPR_DEBUG", "SIMPLE_MIR_LOG_CONV", "SIMPLE_MIR_RET_TRACE",
+            "SIMPLE_MIR_SCOPE_TRACE_MODULE", "SIMPLE_MIR_STMT_CALLER_DEBUG", "SIMPLE_MIR_TAG_PROBE",
+            "SIMPLE_SDN_RACE_TRACE", "SIMPLE_TRACE_DICT_ELEM", "SIMPLE_AMBIGDBG", "SIMPLE_ANYQ_PROBE",
+            "SIMPLE_BARE_VARIANT_WARN", "SIMPLE_DBG_HIR_DEDUP", "SIMPLE_DEBUG_HIR_BLOCK_TAIL",
+            "SIMPLE_DEBUG_MATCH_PAT"]:
+        writer.put_text(name)
+        writer.put_text(env_get_nullable(name) ?? "")
+    if not writer.ok: return Err("selective MIR semantic context encoding refused")
+    Ok(sha256_text(writer.finish()))
+
+fn driver_mir_selective_write_one_v1(driver: CompilerDriver, dir: text,
+        context: text, name: text, weight: i64,
+        selections: [MirArchiveFunctionEmissionV1], admitted_by_path: Dict<text, i64]) -> Result<NativeMirSelectiveRowV1, text>:
+    if not transient_scope_begin(): return Err("selective MIR producer scope unavailable")
+    var result: Result<NativeMirSelectiveRowV1, text> = Err("selective MIR provider lacks HIR: {name}")
+    # Guard immediately before typed dict access, as in direct MIR ownership.
+    if driver.ctx.hir_modules.has(name):
+        val module: HirModule = driver.ctx.hir_modules[name]
+        val physical_path = _driver_physical_source_key(module.path)
+        if not admitted_by_path.has(physical_path):
+            result = Err("selective MIR provider has no real admitted source input: {name}")
+        else:
+            val source_index = admitted_by_path[physical_path]
+            val binding = native_mir_selective_source_binding_v1(name, physical_path,
+                driver.ctx.source_identities_owner[source_index], driver.ctx.source_byte_lengths_owner[source_index])
+            result = native_mir_selective_write_module_in_owned_scope_v1(dir,
+                driver.ctx.native_sources_fingerprint, context, name, module, weight, binding, selections)
+    val paused = transient_scope_pause()
+    var promoted = false
+    if paused:
+        promoted = transient_promote(result) and hir_cache_promote_diagnostic_owner_v1()
+        hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not promoted or not ended: return Err("selective MIR producer row ownership refused")
+    result
+
+pub fn driver_mir_selective_write_v1(driver: CompilerDriver, dir: text) -> Result<i64, text>:
+    if dir == "" or transient_array_scope_state_v1() != 0:
+        return Err("selective MIR producer needs directory and unoccupied owned boundary")
+    # These owners may be populated after a pre-frontend worker's eligibility
+    # check. Only the post-mono producer can refuse their actual late state.
+    if driver.ctx.cold_hir_typed_receipts.len() != 0:
+        return Err("selective MIR cannot transport late cold typed HIR receipts")
+    if driver.ctx.demand_compile_execution != nil:
+        return Err("selective MIR cannot transport late demand execution ownership")
+    if not driver_mir_selective_explicit_native_eligible_v1(driver):
+        return Err("selective MIR producer requires an explicit non-bootstrap native entry")
+    if not resource_registry_selective_mir_safe_v1() or not rt_hal_selective_mir_safe_v1():
+        return Err("selective MIR cannot transport parser resource/HAL registry state")
+    if driver.ctx.storage_binding_module_names.len() != 0 or driver.ctx.storage_view_site_bindings.len() != 0 or
+            driver.ctx.storage_evidence_module_names.len() != 0 or driver.ctx.storage_view_evidence_rows.len() != 0 or
+            driver.ctx.storage_registry_frozen or driver.ctx.options.collection_memory_budget_bytes >= 0:
+        return Err("selective MIR cannot transport typed storage/collection publication state")
+    if driver.ctx.options.coverage_enabled or driver.ctx.config.contains_key("coverage") or
+            (driver.ctx.config["mcdc_mode"] ?? "off") != "off" or driver.ctx.options.aspect_params.mcdc_mode != 0 or
+            (driver.ctx.options.mcdc_mode_text != "" and driver.ctx.options.mcdc_mode_text != "static-off"):
+        return Err("selective MIR coverage/MC-DC requires frontend-owned receipts")
+    val context_result = driver_mir_selective_context_identity_v1(driver)
+    if context_result.is_err(): return Err(context_result.unwrap_err())
+    val context = context_result.unwrap()
+    val count = driver.ctx.sources.len()
+    val retained_count = driver.ctx.source_paths_owner.len()
+    if count < 1 or retained_count < count or retained_count != driver.ctx.source_identities_owner.len() or
+            retained_count != driver.ctx.source_byte_lengths_owner.len():
+        return Err("selective MIR actual source schedule differs from admitted inventory shape")
+    val projected = count != retained_count
+    var admitted_by_path: Dict<text, i64> = {}
+    var admitted_index = 0
+    while admitted_index < retained_count:
+        val admitted_path = _driver_physical_source_key(driver.ctx.source_paths_owner[admitted_index])
+        if admitted_by_path.has(admitted_path):
+            val first = admitted_by_path[admitted_path]
+            if driver.ctx.source_identities_owner[first] != driver.ctx.source_identities_owner[admitted_index]:
+                return Err("selective MIR projected path has conflicting admitted content identities")
+        else:
+            admitted_by_path[admitted_path] = admitted_index
+        admitted_index = admitted_index + 1
+    var paths: [text] = []
+    var owners: [text] = []
+    var identities: [text] = []
+    var source_order: [text] = []
+    var weights: Dict<text, i64> = {}
+    var index = 0
+    while index < count:
+        val actual = driver.ctx.sources[index]
+        val actual_path = _driver_physical_source_key(actual.path)
+        if not admitted_by_path.has(actual_path) or not driver.ctx.hir_modules.has(actual.module_name):
+            return Err("selective MIR projected source lacks admitted path/HIR owner at {index}")
+        val retained_index = if projected: admitted_by_path[actual_path] else: index
+        val admitted_path = _driver_physical_source_key(driver.ctx.source_paths_owner[retained_index])
+        if actual_path != admitted_path:
+            return Err("selective MIR unprojected source differs from admitted order")
+        # Phase-1 logical names may have been projected during parse. Actual
+        # source order + admitted path/content identity remains the authority.
+        val module: HirModule = driver.ctx.hir_modules[actual.module_name]
+        if projected and actual.module_name != module.name:
+            return Err("selective MIR projected source emission differs from its HIR owner")
+        paths.push(admitted_path)
+        owners.push(module.name)
+        identities.push(driver.ctx.source_identities_owner[retained_index])
+        source_order.push(actual.module_name)
+        weights[actual.module_name] = driver.ctx.source_byte_lengths_owner[retained_index]
+        index = index + 1
+    val physical = driver_mir_physical_source_indices_v1(paths, identities, owners)
+    if physical.is_err(): return Err(physical.unwrap_err())
+    if projected and physical.unwrap().len() != count:
+        return Err("selective MIR projected source schedule is not already physically deduplicated")
+    # Freeze the full actual provider order used by direct MIR prescan, including
+    # generated providers that have no separate source emission row.
+    val names = driver.ctx.hir_modules.keys()
+    if names.len() < 1 or names.len() > NATIVE_MIR_SELECTIVE_MAX_MODULES_V1:
+        return Err("selective MIR provider module bound exceeded")
+    val publication = mono_selective_emission_publication_v1()
+    if publication.is_err(): return Err(publication.unwrap_err())
+    var placed: Dict<text, [MirArchiveFunctionEmissionV1]> = {}
+    for placement in publication.unwrap():
+        var records: [MirArchiveFunctionEmissionV1] = if placed.has(placement.logical_key): placed[placement.logical_key] else: []
+        records.push(MirArchiveFunctionEmissionV1(symbol: placement.symbol, name: placement.name,
+            complete_function_digest: placement.complete_function_digest))
+        placed[placement.logical_key] = records
+    var providers: [NativeMirSelectiveRowV1] = []
+    var row_by_name: Dict<text, NativeMirSelectiveRowV1> = {}
+    # Includes the largest final manifest plus a simultaneous identical retry
+    # staging copy. Module staging is covered by the pair reservation below.
+    var written_bytes: i64 = 2 * NATIVE_MIR_SELECTIVE_MANIFEST_BYTES_V1
+    val disk_limit = native_mir_selective_disk_limit_v1()?
+    for name in names:
+        # Reserve a full bounded body/declaration pair before writing. This
+        # makes refusal precede a disk-budget overrun, including the last row.
+        if written_bytes > disk_limit - 2 * NATIVE_MIR_SELECTIVE_MODULE_BYTES_V1:
+            return Err("selective MIR producer disk byte budget exhausted")
+        val weight = if weights.has(name): weights[name] else: 0
+        val selections: [MirArchiveFunctionEmissionV1] = if placed.has(name): placed[name] else: []
+        val result = driver_mir_selective_write_one_v1(driver, dir, context, name, weight, selections, admitted_by_path)
+        if result.is_err(): return Err(result.unwrap_err())
+        val row = result.unwrap()
+        val size = native_mir_selective_artifact_size_v1(dir, name)?
+        written_bytes = written_bytes + size
+        providers.push(row)
+        row_by_name[name] = row
+    var rows: [NativeMirSelectiveRowV1] = []
+    var representative: Dict<text, NativeMirSelectiveRowV1> = {}
+    for source_index in physical.unwrap():
+        val lookup = driver.ctx.sources[source_index].module_name
+        if not row_by_name.has(lookup): return Err("selective MIR physical row lacks frozen provider")
+        var row = row_by_name[lookup]
+        row.is_entry = rows.len() == 0
+        for provider in providers:
+            if provider.lookup_name != lookup and provider.emission_name == row.emission_name and
+                    provider.specialization_functions.len() > 0:
+                if _driver_physical_source_key(provider.path) != _driver_physical_source_key(row.path):
+                    return Err("selective MIR secondary specialization has a conflicting physical path")
+                row.secondary_names.push(provider.lookup_name)
+        rows.push(row)
+        representative[row.emission_name] = row
+    # Actual mono placements are the sole authority for secondary functions.
+    # Ordinary alias bodies retain direct MIR's first-physical-owner behavior.
+    for placement in publication.unwrap():
+        if not row_by_name.has(placement.logical_key) or not row_by_name.has(placement.origin_logical_key):
+            return Err("selective MIR placement lacks an actual origin/target provider")
+        val target = row_by_name[placement.logical_key]
+        val origin = row_by_name[placement.origin_logical_key]
+        if target.emission_name != origin.emission_name or
+                _driver_physical_source_key(target.path) != _driver_physical_source_key(origin.path) or
+                not representative.has(target.emission_name):
+            return Err("selective MIR placement origin has no same-physical emission owner")
+    val published = native_mir_selective_write_manifest_v1(dir,
+        driver.ctx.native_sources_fingerprint, context, providers, rows, source_order)
+    if published.is_err(): return Err(published.unwrap_err())
+    if not published.unwrap(): return Err("selective MIR final manifest was not published")
+    Ok(rows.len())

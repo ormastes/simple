@@ -16,6 +16,11 @@ use compiler.driver.driver_pipeline.*
 use compiler.driver.driver_pipeline_lowering.*
 use compiler.driver.driver_mir_target.{driver_mir_target_context}
 use compiler.driver.driver_aot_pipeline.*
+use compiler.driver.driver_mir_selective_worker_v1.{driver_mir_selective_enabled_v1}
+use compiler.driver.driver_mir_selective_eligibility_v1.{driver_mir_selective_explicit_native_eligible_v1}
+use compiler.driver.driver_build.native_mir_shard_export_v1.{native_mir_shard_export_write_dir_v1}
+use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_spec_v1,
+    native_mir_shard_link_ledger_v1}
 use compiler.driver.driver_collection_native_receipt.{collection_native_clear_v1, collection_native_validate_v1, collection_native_copy_v1}
 use compiler.driver.driver_aot_output.{driver_native_sources_fingerprint}
 use compiler.driver.driver_log_helpers.{
@@ -315,6 +320,15 @@ impl CompilerDriver:
         if compile_mode_text == "aot":
             log_phase("phase1:load_sources:fingerprint:start")
             self.ctx.native_sources_fingerprint = driver_native_sources_fingerprint(self.ctx.sources)
+            if driver_mir_selective_enabled_v1() and native_mir_shard_export_write_dir_v1() != "":
+                if not driver_mir_selective_explicit_native_eligible_v1(self):
+                    return CompileResult.CodegenError("selective MIR export requires an explicit non-bootstrap native entry")
+            # Selective workers consume the admitted post-mono bundle. Enter
+            # before parse/HIR/typecheck/mono, never after a cache-hit frontend.
+            if driver_mir_selective_enabled_v1() and native_mir_shard_spec_v1() != "":
+                return self.aot_compile_mir_shard_v1()
+            if driver_mir_selective_enabled_v1() and native_mir_shard_link_ledger_v1() != "":
+                return self.aot_link_mir_shards_v1()
         if sources_streaming_in_place:
             # Streaming phase 2 consumes source_contents_owner. The boxed
             # SourceFile payloads are independent copies needed only through

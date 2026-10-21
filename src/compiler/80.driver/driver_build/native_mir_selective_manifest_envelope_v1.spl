@@ -1,0 +1,30 @@
+# Slim parent-only envelope admission. No compiler/HIR graph is imported.
+# Workers separately prove source/context and the full declaration repository.
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+
+pub fn native_mir_selective_job_count_v1(dir: text) -> Result<i64, text>:
+    val read = file_read_regular_no_follow_bounded("{dir}/selective.manifest", 32 * 1024 * 1024)
+    if read.is_err(): return Err("selective MIR job manifest unavailable")
+    val lines = read.unwrap().split("\n")
+    if lines.len() < 12 or lines[0] != "simple/mir-selective-post-mono/v1" or
+            not sha256_lower_hex_valid(lines[1]) or not sha256_lower_hex_valid(lines[2]):
+        return Err("selective MIR job manifest format refused")
+    val providers = lines[5].to_i64() ?? -1
+    val jobs = lines[6].to_i64() ?? -1
+    if providers < 1 or providers > 65536 or jobs < 1 or jobs > providers or
+            lines.len() != providers + jobs + 10 or lines[lines.len() - 1] != "":
+        return Err("selective MIR job manifest count bound refused")
+    val sources = lines[7].split("\t")
+    if sources.len() < 2 or sources.len() > 65537 or sources[0] != "source-order":
+        return Err("selective MIR job source barrier order refused")
+    var covered: [text] = []
+    var index = 0
+    while index < providers + jobs + 8:
+        covered.push(lines[index])
+        index = index + 1
+    val body = covered.join("\n") + "\n"
+    if lines[index] != "seal {sha256_text(body)}":
+        return Err("selective MIR job manifest seal refused")
+    Ok(jobs)

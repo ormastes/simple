@@ -38,6 +38,11 @@ use compiler.driver.driver_build.native_mir_shard_export_v1.{
     native_mir_shard_export_enabled_v1, native_mir_shard_export_write_dir_v1}
 use compiler.driver.driver_mir_shard_export_v1.{driver_mir_shard_export_write_v1,
     driver_mir_shard_export_admit_v1}
+use compiler.driver.driver_mir_selective_worker_v1.{driver_mir_selective_enabled_v1}
+use compiler.driver.driver_mir_selective_worker_v1.*
+use compiler.driver.driver_mir_selective_eligibility_v1.{driver_mir_selective_explicit_native_eligible_v1,
+    driver_mir_selective_skip_post_chain_v1}
+use compiler.driver.driver_mir_selective_producer_v1.{driver_mir_selective_write_v1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_seal,
     hir_shard_recovery_complete, hir_shard_recovery_block}
 use compiler.driver.driver_build.build_outcome.{BuildUnitOutcome}
@@ -522,7 +527,11 @@ impl CompilerDriver:
         """Shards publish per-module objects only; lanes whose final step needs
         more than object paths (cold-HIR object persistence, collection
         receipts) or that wipe the shared cache scope stay unsharded."""
-        self.native_staged_codegen_eligible_v1() and
+        val lane_eligible = if driver_mir_selective_enabled_v1():
+            driver_mir_selective_explicit_native_eligible_v1(self)
+        else:
+            self.native_staged_codegen_eligible_v1()
+        lane_eligible and
             self.ctx.cold_hir_typed_receipts.len() == 0 and
             self.ctx.options.collection_memory_budget_bytes < 0 and
             (env_get_opt("SIMPLE_NATIVE_BUILD_CLEAN") ?? "") != "1"
@@ -539,6 +548,8 @@ impl CompilerDriver:
             return CompileResult.CodegenError("MIR shard worker has no ledger ({NATIVE_MIR_SHARD_QUEUE_ENV_V1} unset)")
         if not self.native_mir_shard_eligible_v1():
             val _blocked = hir_shard_recovery_block(queue, "MIR sharding is unsupported for this build lane")
+            val _sealed = hir_shard_recovery_seal(queue, owner, "FAILED")
+            val _completed = hir_shard_recovery_complete(queue, owner)
             return CompileResult.CodegenError("MIR sharding is unsupported for this build lane")
         var shard_state = NativeStagedCodegenStateV1.begin(0)
         shard_state.active = true
@@ -547,7 +558,7 @@ impl CompilerDriver:
         log_phase("aot:mir_shard:start owner={owner}")
         # Export summaries (opt-in): admission only. Lowering still reads the
         # full post-mono HIR; a refusal is reported and changes nothing.
-        if native_mir_shard_export_enabled_v1():
+        if native_mir_shard_export_enabled_v1() and not driver_mir_selective_enabled_v1():
             val export_admitted = driver_mir_shard_export_admit_v1(self)
             if export_admitted.is_ok():
                 print "[mir-shard] export summaries admitted owner={owner} records={export_admitted.unwrap()} lowering=full-hir"
@@ -557,15 +568,23 @@ impl CompilerDriver:
         var module_functions: {text: i64} = {}
         var module_statics: {text: i64} = {}
         var shard_borrow_failed = false
-        val shard_lowered = self.lower_to_mir()
-        if shard_lowered and not self.borrow_check():
+        val shard_lowered = if driver_mir_selective_enabled_v1():
+            self.lower_selective_to_mir_v1()
+        else:
+            self.lower_to_mir()
+        val skip_post_chain = driver_mir_selective_enabled_v1() and driver_mir_selective_skip_post_chain_v1()
+        if shard_lowered and not skip_post_chain and not self.borrow_check():
             shard_borrow_failed = true
         if shard_lowered and not shard_borrow_failed:
-            val _async_state_machines = self.process_async()
-            if (env_get_opt("SIMPLE_BOOTSTRAP_SKIP_MIR_OPT") ?? "") != "1":
-                self.optimize_mir_level(self.ctx.options.opt_level ?? 0)
-            self.weave_aop()
-            self.apply_debug_trace()
+            if not skip_post_chain:
+                val _async_state_machines = self.process_async()
+                if (env_get_opt("SIMPLE_BOOTSTRAP_SKIP_MIR_OPT") ?? "") != "1":
+                    self.optimize_mir_level(self.ctx.options.opt_level ?? 0)
+                self.weave_aop()
+                self.apply_debug_trace()
+            else:
+                log_phase("aot:flat_mir_passes:skipped")
+                log_bootstrap_flat_warning("aot:flat_mir_passes:skipped")
             if self.ctx.error_count_value == 0:
                 for held_name in self.ctx.mir_modules.keys():
                     module_functions[held_name] = self.ctx.mir_modules[held_name].functions.keys().len()
@@ -625,10 +644,12 @@ impl CompilerDriver:
         CompileResult.Success(None)
 
     me aot_write_mir_shard_exports_v1() -> CompileResult:
-        """MIR shard export summary step: this process ran the pipeline
-        through mono; write every source module's declaration summary and
-        exit. It lowers nothing, so its MIR-phase memory is never allocated."""
-        val written = driver_mir_shard_export_write_v1(self)
+        """Post-mono export producer: publish declaration summaries, or the
+        selected complete-body/declaration bundle, then exit before MIR."""
+        val written = if driver_mir_selective_enabled_v1():
+            driver_mir_selective_write_v1(self, native_mir_shard_export_write_dir_v1())
+        else:
+            driver_mir_shard_export_write_v1(self)
         if written.is_err():
             log_error("MIR shard export: {written.unwrap_err()}")
             print "[mir-shard-export] FAIL reason={written.unwrap_err()}"
@@ -644,8 +665,10 @@ impl CompilerDriver:
         and run the ordinary compile_to_native verdict + link over them."""
         if not self.native_mir_shard_eligible_v1():
             return CompileResult.CodegenError("MIR shard link is unsupported for this build lane")
-        val admitted = native_mir_shard_link_inputs_v1(native_mir_shard_link_ledger_v1(),
-            self.ctx.native_sources_fingerprint)
+        val admitted = if driver_mir_selective_enabled_v1():
+            driver_mir_selective_admit_link_v1(self, native_mir_shard_link_ledger_v1())
+        else:
+            native_mir_shard_link_inputs_v1(native_mir_shard_link_ledger_v1(), self.ctx.native_sources_fingerprint)
         if admitted.is_err():
             return CompileResult.CodegenError(admitted.unwrap_err())
         val inputs = admitted.unwrap()

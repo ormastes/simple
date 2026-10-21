@@ -1,0 +1,353 @@
+# Source candidate only: requires an admitted compiled pure-Simple runner.
+# No native codegen, end-to-end qualification or performance claim is made.
+# @req REQ-MIR-SELECTIVE-001
+# @cover src/compiler/80.driver/driver_mir_selective_worker_v1.spl
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io_runtime.{env_set, dir_create_all, dir_remove_all,
+    file_delete, getpid}
+use std.io_runtime.{file_read, env_get_opt}
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.driver_compile_options.{driver_core_compile_options_default}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_build.native_staged_codegen.{NativeStagedCodegenStateV1}
+use compiler.driver.driver_build.native_mir_selective_bundle_v1.{NativeMirSelectiveRowV1,
+    NativeMirSelectiveBundleV1, native_mir_selective_write_module_in_owned_scope_v1,
+    native_mir_selective_write_manifest_v1, native_mir_selective_load_bundle_v1,
+    native_mir_selective_body_path_v1, native_mir_selective_source_binding_v1}
+use compiler.driver.driver_mir_selective_producer_v1.{driver_mir_selective_context_identity_v1}
+use compiler.driver.driver_mir_selective_worker_v1.*
+use compiler.driver.driver_mir_selective_eligibility_v1.*
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_seal, hir_shard_recovery_complete}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.declaration_providers_v1.*
+use compiler.mir._MirLowering.declaration_inventory_barriers_v1.*
+use compiler.mir._MirLowering.transient_owner.*
+use compiler.mir._MirLowering.bootstrap_globals.{bootstrap_mir_registries_promote}
+use compiler.driver.driver_hir_cache.{hir_cache_promote_diagnostic_owner_v1,
+    hir_cache_clear_last_warnings}
+use compiler.common.cache.reverse_reference_facts.{reverse_reference_owner_begin_v1,
+    reverse_reference_owner_end_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
+
+fn selective_fixture_module(name: text, source: text) -> HirModule:
+    val path = "{name}.spl"
+    val ast = parse_full_frontend(source, path, name, Logger(level: 0))
+    var frontend = HirLowering.with_filename(path)
+    val module = frontend.lower_module(ast)
+    expect(frontend.errors.len()).to_equal(0)
+    module
+
+fn selective_fixture_row(dir: text, source: text, context: text,
+        name: text, body: text, weight: i64) -> NativeMirSelectiveRowV1:
+    val module = selective_fixture_module(name, body)
+    expect(transient_scope_begin()).to_equal(true)
+    val result = native_mir_selective_write_module_in_owned_scope_v1(
+        dir, source, context, name, module, weight,
+        native_mir_selective_source_binding_v1(name, module.path, sha256_text(body), body.len()))
+    val paused = transient_scope_pause()
+    var owned = false
+    if paused:
+        owned = transient_promote(result) and hir_cache_promote_diagnostic_owner_v1()
+        hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    expect(paused and owned and ended).to_equal(true)
+    expect(result.is_ok()).to_equal(true)
+    result.unwrap()
+
+fn selective_return_word(module: MirModule) -> i64:
+    expect(module.functions.keys().len()).to_equal(1)
+    val function: MirFunction = module.functions.values()[0]
+    expect(function.signature.return_type.kind).to_equal(MirTypeKind.I64)
+    var words: Dict<i64, i64> = {}
+    var returns: [i64] = []
+    for raw_block in function.blocks:
+        val block: MirBlock = raw_block
+        for raw_inst in block.instructions:
+            val inst: MirInst = raw_inst
+            match inst.kind:
+                case MirInstKind.Const(dest, value, _):
+                    match value:
+                        case MirConstValue.Int(word): words[dest.id] = word
+                        case _: panic("selective scalar fixture emitted a nonword constant")
+                case MirInstKind.Copy(dest, source) | MirInstKind.Move(dest, source):
+                    expect(words.has(source.id)).to_equal(true)
+                    words[dest.id] = words[source.id]
+                case _: panic("selective scalar fixture emitted an unexpected instruction")
+        match block.terminator:
+            case MirTerminator.Ret(value):
+                expect(value != nil).to_equal(true)
+                val operand: MirOperand = value ?? mir_operand_const_int(0)
+                match operand.kind:
+                    case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                        expect(words.has(local.id)).to_equal(true)
+                        returns.push(words[local.id])
+                    case MirOperandKind.Const(value, _):
+                        match value:
+                            case MirConstValue.Int(word): returns.push(word)
+                            case _: panic("selective scalar return was not an actual word")
+                    case _: panic("selective scalar return operand was unexpected")
+            case _: ()
+    expect(returns.len()).to_equal(1)
+    returns[0]
+
+fn selective_default_word(mut lowering: MirLowering, key: text) -> i64:
+    expect(transient_scope_begin()).to_equal(true)
+    val resolved = lowering.resolve_struct_field_default_expr_v1(key, 0)
+    var word: i64 = -1
+    if val present = resolved:
+        val expression: HirExpr = present
+        match expression.kind:
+            case HirExprKind.IntLit(value, _): word = value
+            case _: panic("actual projected field default is not an integer literal")
+    else:
+        panic("actual projected field default is absent")
+    val paused = transient_scope_pause()
+    var owned = false
+    if paused:
+        owned = lowering.promote_transient_owner()
+        owned = bootstrap_fn_registries_promote() and owned
+        owned = bootstrap_mir_registries_promote() and owned
+    val ended = transient_scope_end()
+    expect(paused and owned and ended).to_equal(true)
+    word
+
+describe "selective MIR worker actual mechanics", tag: ["only-compiled"]:
+    it "lowers a claimed scalar body while an unclaimed body is absent":
+        step("Publish two actual scalar HIR bodies and complete provider declarations")
+        val dir = "build/test_tmp/mir_selective_worker_{getpid()}"
+        val _removed = dir_remove_all(dir)
+        expect(dir_create_all(dir)).to_equal(true)
+        var options = driver_core_compile_options_default()
+        options.input_files = ["selective_entry.spl"]
+        val driver = CompilerDriver.create(options)
+        driver.ctx.config["compiler_source_entry"] = "selective_entry.spl"
+        driver.ctx.sources = [SourceFile(path: "selective_entry.spl", content: "fn main() -> i64:\n    7\n", module_name: "selective_entry")]
+        driver.ctx.native_sources_fingerprint = sha256_text("actual-selective-worker-fixture-v1")
+        val context = driver_mir_selective_context_identity_v1(driver)
+        expect(context.is_ok()).to_equal(true)
+        val source = driver.ctx.native_sources_fingerprint
+        val first = selective_fixture_row(dir, source, context.unwrap(), "selective_entry",
+            "fn main() -> i64:\n    7\n", 100)
+        val second = selective_fixture_row(dir, source, context.unwrap(), "selective_unclaimed",
+            "fn unused() -> i64:\n    17\n", 1)
+        var entry = first
+        entry.is_entry = true
+        expect(native_mir_selective_write_manifest_v1(dir, source, context.unwrap(),
+            [first, second], [entry, second], [first.lookup_name, second.lookup_name]).is_ok()).to_equal(true)
+        expect(file_delete(native_mir_selective_body_path_v1(dir, second.lookup_name))).to_equal(true)
+        step("Claim one module and lower only that module without retained frontend graphs")
+        val _shard = env_set("SIMPLE_MIR_SHARD", "0/2")
+        val _owner = env_set("SIMPLE_MIR_SHARD_OWNER", "selective-test-0")
+        val _read_dir = env_set("SIMPLE_MIR_SHARD_EXPORT_DIR", dir)
+        var state = NativeStagedCodegenStateV1.begin(0)
+        state.active = true
+        state.shard_queue = "{dir}/ledger"
+        driver.native_staged_codegen = state
+        expect(dir_create_all(state.shard_queue)).to_equal(true)
+        expect(reverse_reference_owner_begin_v1()).to_equal(true)
+        expect(driver.ctx.hir_modules.keys().len()).to_equal(0)
+        expect(driver.lower_selective_to_mir_v1()).to_equal(true)
+        expect(driver.native_staged_codegen.scheduled_names).to_equal([entry.emission_name, second.emission_name])
+        expect(driver.native_staged_codegen.shard_claimed_names).to_equal([entry.emission_name])
+        expect(driver.ctx.mir_modules.keys().len()).to_equal(1)
+        expect(driver.ctx.hir_modules.keys().len()).to_equal(0)
+        expect(selective_return_word(driver.ctx.mir_modules[entry.emission_name])).to_equal(7)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+        val interval = file_read("{state.shard_queue}/{sha256_text(entry.emission_name)}.mir-interval").split("\n")
+        expect(interval.len()).to_equal(8)
+        expect(interval[0]).to_equal("native-mir-selective-interval-v1")
+        expect(interval[1]).to_equal(env_get_opt("SIMPLE_MIR_SELECTIVE_OBJECT_CONTEXT") ?? "")
+        expect(interval[2]).to_equal(entry.emission_name)
+        expect(interval[4].to_i64() ?? 0).to_be_greater_than(0)
+        expect(interval[5].to_i64() ?? 0).to_be_greater_than((interval[4].to_i64() ?? 0) - 1)
+        expect(interval[6]).to_equal("lower-ok")
+        expect(hir_shard_recovery_seal(state.shard_queue, "selective-test-0", "FAILED")).to_equal(1)
+        expect(hir_shard_recovery_complete(state.shard_queue, "selective-test-0")).to_equal(true)
+        reverse_reference_owner_end_v1()
+        val _clear_shard = env_set("SIMPLE_MIR_SHARD", "")
+        val _clear_owner = env_set("SIMPLE_MIR_SHARD_OWNER", "")
+        val _clear_read = env_set("SIMPLE_MIR_SHARD_EXPORT_DIR", "")
+        val _clear_object_context = env_set("SIMPLE_MIR_SELECTIVE_OBJECT_CONTEXT", "")
+        val _cleanup = dir_remove_all(dir)
+
+    it "copies symbol scratch without changing sealed declaration symbols":
+        step("Mutate only the copied symbol allocation counter")
+        val symbols = SymbolTable.new()
+        val copied = driver_mir_selective_copy_symbols_v1(symbols)
+        expect(copied.is_ok()).to_equal(true)
+        val scratch = copied.unwrap()
+        scratch.next_symbol_id = 41
+        expect(symbols.next_symbol_id).to_equal(0)
+        expect(scratch.next_symbol_id).to_equal(41)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+
+    it "seals a missing claimed body as failed without retaining an aborted body owner":
+        step("Publish one real scalar body, then remove it before its ledger claim")
+        val dir = "build/test_tmp/mir_selective_missing_{getpid()}"
+        val _removed = dir_remove_all(dir)
+        expect(dir_create_all(dir)).to_equal(true)
+        val driver = CompilerDriver.create(driver_core_compile_options_default())
+        driver.ctx.config["compiler_source_entry"] = "selective_missing.spl"
+        driver.ctx.sources = [SourceFile(path: "selective_missing.spl", content: "fn main() -> i64:\n    23\n", module_name: "selective_missing")]
+        driver.ctx.native_sources_fingerprint = sha256_text("selective-missing-claimed-body-v1")
+        val context = driver_mir_selective_context_identity_v1(driver)
+        expect(context.is_ok()).to_equal(true)
+        val first = selective_fixture_row(dir, driver.ctx.native_sources_fingerprint,
+            context.unwrap(), "selective_missing", "fn main() -> i64:\n    23\n", 1)
+        var entry = first
+        entry.is_entry = true
+        expect(native_mir_selective_write_manifest_v1(dir, driver.ctx.native_sources_fingerprint,
+            context.unwrap(), [first], [entry], [first.lookup_name]).is_ok()).to_equal(true)
+        expect(file_delete(native_mir_selective_body_path_v1(dir, entry.lookup_name))).to_equal(true)
+        val _shard = env_set("SIMPLE_MIR_SHARD", "0/1")
+        val _owner = env_set("SIMPLE_MIR_SHARD_OWNER", "selective-test-missing")
+        val _read_dir = env_set("SIMPLE_MIR_SHARD_EXPORT_DIR", dir)
+        var state = NativeStagedCodegenStateV1.begin(0)
+        state.active = true
+        state.shard_queue = "{dir}/ledger"
+        driver.native_staged_codegen = state
+        expect(dir_create_all(state.shard_queue)).to_equal(true)
+        expect(reverse_reference_owner_begin_v1()).to_equal(true)
+        step("Refuse its load, close the body scope, and terminalize the actual claim")
+        expect(driver.lower_selective_to_mir_v1()).to_equal(false)
+        expect(driver.native_staged_codegen.shard_claimed_names).to_equal([entry.emission_name])
+        expect(driver.ctx.mir_modules.keys().len()).to_equal(0)
+        expect(driver.ctx.hir_modules.keys().len()).to_equal(0)
+        expect(driver.ctx.error_count_value).to_be_greater_than(0)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+        val interval = file_read("{state.shard_queue}/{sha256_text(entry.emission_name)}.mir-interval").split("\n")
+        expect(interval.len()).to_equal(8)
+        expect(interval[6]).to_equal("lower-fail")
+        expect(hir_shard_recovery_seal(state.shard_queue, "selective-test-missing", "FAILED")).to_equal(1)
+        expect(hir_shard_recovery_complete(state.shard_queue, "selective-test-missing")).to_equal(true)
+        reverse_reference_owner_end_v1()
+        val _clear_shard = env_set("SIMPLE_MIR_SHARD", "")
+        val _clear_owner = env_set("SIMPLE_MIR_SHARD_OWNER", "")
+        val _clear_read = env_set("SIMPLE_MIR_SHARD_EXPORT_DIR", "")
+        val _clear_object_context = env_set("SIMPLE_MIR_SELECTIVE_OBJECT_CONTEXT", "")
+        val _cleanup = dir_remove_all(dir)
+
+    it "refuses unsupported parse inventories before bundle or body lookup":
+        step("Request coverage and MC/DC without a frontend inventory transport")
+        val driver = CompilerDriver.create(driver_core_compile_options_default())
+        driver.ctx.config["coverage"] = "1"
+        expect(driver_mir_selective_worker_unsupported_v1(driver)).to_contain("coverage parse inventory")
+        driver.ctx.config.remove("coverage")
+        driver.ctx.config["mcdc_mode"] = "dynamic"
+        expect(driver_mir_selective_worker_unsupported_v1(driver)).to_contain("MC/DC parse inventory")
+        expect(driver.native_staged_codegen.shard_claimed_names.len()).to_equal(0)
+
+    it "overrides an earlier same-name class default with the actual local artifact":
+        step("Project distinct real Shared class defaults in original source order")
+        val dir = "build/test_tmp/mir_selective_defaults_{getpid()}"
+        val _removed = dir_remove_all(dir)
+        expect(dir_create_all(dir)).to_equal(true)
+        val source = sha256_text("selective-local-default-source-v1")
+        val context = sha256_text("selective-local-default-context-v1")
+        val first = selective_fixture_row(dir, source, context, "default_provider",
+            "class Shared:\n    value: i64 = 11\n\nfn provider() -> i64:\n    0\n", 1)
+        val local = selective_fixture_row(dir, source, context, "default_local",
+            "class Shared:\n    value: i64 = 7\n\nfn local() -> i64:\n    0\n", 1)
+        var entry = first
+        entry.is_entry = true
+        expect(native_mir_selective_write_manifest_v1(dir, source, context,
+            [first, local], [entry, local], [first.lookup_name, local.lookup_name]).is_ok()).to_equal(true)
+        val admitted = native_mir_selective_load_bundle_v1(dir, source, context)
+        expect(admitted.is_ok()).to_equal(true)
+        val bundle: NativeMirSelectiveBundleV1 = admitted.unwrap()
+        val symbols = driver_mir_selective_copy_symbols_v1(bundle.declarations.modules[local.lookup_name].symbols)
+        expect(symbols.is_ok()).to_equal(true)
+        var lowering = MirLowering.new(symbols.unwrap())
+        lowering.use_explicit_semantic_policy()
+        expect(driver_mir_selective_prepare_v1(lowering, bundle.declarations, bundle.source_order).is_ok()).to_equal(true)
+        expect(selective_default_word(lowering, "Shared")).to_equal(11)
+        step("Install local defaults and resolve bare and qualified keys to the local value")
+        expect(transient_scope_begin()).to_equal(true)
+        lowering.install_declaration_local_composite_defaults_v1(bundle.declarations.modules[local.lookup_name])
+        val paused = transient_scope_pause()
+        val owned = if paused: lowering.promote_transient_owner() else: false
+        val ended = transient_scope_end()
+        expect(paused and owned and ended).to_equal(true)
+        expect(selective_default_word(lowering, "Shared")).to_equal(7)
+        expect(selective_default_word(lowering, "default_local::Shared")).to_equal(7)
+        expect(selective_default_word(lowering, "default_local.Shared")).to_equal(7)
+        expect(lowering.canonical_type_symbols.keys().len()).to_equal(0)
+        expect(lowering.next_canonical_type_symbol).to_equal(1000000000)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+        val _cleanup = dir_remove_all(dir)
+
+    it "keeps canonical IDs private to each freshly created job owner":
+        step("Allocate a type ID independently of another job's canonical history")
+        val symbols = SymbolTable.new()
+        val symbol = symbols.define("Unknown", SymbolKind.Variable, nil,
+            Span.empty(), Visibility.Private, false, Some("body.only"))
+        var lowering = MirLowering.new(symbols)
+        val actual = lowering.canonical_mir_type_symbol(symbol)
+        expect(actual.id).to_equal(1000000000)
+        var fresh = MirLowering.new(SymbolTable.new())
+        expect(fresh.canonical_type_symbols.keys().len()).to_equal(0)
+        expect(fresh.next_canonical_type_symbol).to_equal(1000000000)
+        expect(lowering.canonical_type_symbols.keys().len()).to_equal(1)
+
+    it "refuses a worker spec that could reuse one lowering owner for two physical jobs":
+        step("Require one physical emission for every worker process")
+        expect(driver_mir_selective_one_job_v1("0/2", 2)).to_equal(true)
+        expect(driver_mir_selective_one_job_v1("0/1", 2)).to_equal(false)
+        expect(driver_mir_selective_one_job_v1("0/3", 2)).to_equal(false)
+        expect(driver_mir_selective_one_job_v1("invalid", 2)).to_equal(false)
+
+    it "admits explicit non-bootstrap BOOT profiles while preserving their exact postchain policy":
+        step("Use the same explicit native entry across BOOT0, BOOT1, and STAGE4")
+        val prior_boot = env_get_opt("SIMPLE_BOOTSTRAP") ?? ""
+        val prior_stage = env_get_opt("SIMPLE_BOOTSTRAP_STAGE4") ?? ""
+        val prior_direct = env_get_opt("SIMPLE_BOOTSTRAP_DIRECT_IR") ?? ""
+        val driver = CompilerDriver.create(driver_core_compile_options_default())
+        driver.ctx.config["compiler_source_entry"] = "src/app/cli/_CliMain/main.spl"
+        driver.ctx.sources = [SourceFile(path: "src/app/cli/_CliMain/main.spl", content: "fn main():\n    0\n", module_name: "app.cli._CliMain.main")]
+        val _direct = env_set("SIMPLE_BOOTSTRAP_DIRECT_IR", "")
+        val _boot0 = env_set("SIMPLE_BOOTSTRAP", "0")
+        val _stage0 = env_set("SIMPLE_BOOTSTRAP_STAGE4", "0")
+        expect(driver_mir_selective_explicit_native_eligible_v1(driver)).to_equal(true)
+        expect(driver_mir_selective_skip_post_chain_v1()).to_equal(false)
+        val _boot1 = env_set("SIMPLE_BOOTSTRAP", "1")
+        expect(driver_mir_selective_explicit_native_eligible_v1(driver)).to_equal(true)
+        expect(driver_mir_selective_skip_post_chain_v1()).to_equal(true)
+        val _stage4 = env_set("SIMPLE_BOOTSTRAP_STAGE4", "1")
+        expect(driver_mir_selective_explicit_native_eligible_v1(driver)).to_equal(true)
+        expect(driver_mir_selective_skip_post_chain_v1()).to_equal(false)
+        step("Refuse an explicit dynamic plugin even when its backend name is LLVM")
+        var plugin_options = driver_core_compile_options_default()
+        plugin_options.backend = "llvm"
+        val builtin_owner = CompilerDriver.create(plugin_options)
+        builtin_owner.ctx.config["compiler_source_entry"] = "src/app/cli/_CliMain/main.spl"
+        builtin_owner.ctx.sources = driver.ctx.sources
+        expect(driver_mir_selective_explicit_native_eligible_v1(builtin_owner)).to_equal(true)
+        plugin_options.backend_plugin_path = "/uninspected/backend/llvm.so"
+        val plugin_owner = CompilerDriver.create(plugin_options)
+        plugin_owner.ctx.config["compiler_source_entry"] = "src/app/cli/_CliMain/main.spl"
+        plugin_owner.ctx.sources = driver.ctx.sources
+        expect(driver_mir_selective_explicit_native_eligible_v1(plugin_owner)).to_equal(false)
+        step("Refuse direct IR and an ordinary bootstrap owner anywhere in the source closure")
+        val _direct1 = env_set("SIMPLE_BOOTSTRAP_DIRECT_IR", "1")
+        expect(driver_mir_selective_explicit_native_eligible_v1(driver)).to_equal(false)
+        val _direct0 = env_set("SIMPLE_BOOTSTRAP_DIRECT_IR", "")
+        driver.ctx.sources = driver.ctx.sources.push(SourceFile(path: "src/app/cli/bootstrap_main.spl", content: "", module_name: "app.cli.bootstrap_main"))
+        expect(driver_mir_selective_explicit_native_eligible_v1(driver)).to_equal(false)
+        val _restore_boot = env_set("SIMPLE_BOOTSTRAP", prior_boot)
+        val _restore_stage = env_set("SIMPLE_BOOTSTRAP_STAGE4", prior_stage)
+        val _restore_direct = env_set("SIMPLE_BOOTSTRAP_DIRECT_IR", prior_direct)
