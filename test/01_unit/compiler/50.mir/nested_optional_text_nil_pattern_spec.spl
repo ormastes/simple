@@ -1,0 +1,178 @@
+"""Concrete optional-text nil subpatterns through actual frontend/HIR/MIR.
+
+This is the default legacy MIR lowering lane: semantic capture is opt-in and
+disabled by MirLowering.new. It does not qualify semantic capture or Result<T>.
+"""
+# @req REQ-NONGENERIC-NESTED-OPTIONAL-NIL
+use std.spec.*
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val nil_pattern_data = "pub enum ReadResult:\n    Data(text?)\n    Other(text)\n\npub enum ReadScalar:\n    Data(i64)\n    Other\n\npub enum Unrelated:\n    Data(text?)\n    Other\n"
+
+struct NilPatternLowering:
+    module: MirModule
+    errors: text
+    semantic_capture: bool
+
+fn lower_nil_pattern_consumer(body: text) -> NilPatternLowering:
+    val source = "use lib.data.*\n\n" + body
+    val log = Logger(level: 0)
+    val data_ast = parse_full_frontend(nil_pattern_data, "lib/data.spl", "lib.data", log)
+    val consumer_ast = parse_full_frontend(source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.data"] = data_ast
+    val sources = [SourceFile(path: "lib/data.spl", content: nil_pattern_data, module_name: "lib.data")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var data_lowering = hirlowering_for_module("lib.data", surfaces)
+    var consumer_lowering = hirlowering_for_module("app.main", surfaces)
+    val data_hir = data_lowering.lower_module(data_ast)
+    val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var lowering = MirLowering.new(consumer_hir.symbols)
+    var prescan: Dict<text, HirModule> = {}
+    prescan["data"] = data_hir
+    prescan["consumer"] = consumer_hir
+    lowering.prescan_module_struct_names(prescan, "data")
+    lowering.prescan_module_struct_names(prescan, "consumer")
+    val mir = lowering.lower_module(consumer_hir, [data_hir, consumer_hir])
+    var errors = ""
+    for error in data_lowering.errors:
+        errors = errors + "data: " + error.message + "\n"
+    for error in consumer_lowering.errors:
+        errors = errors + "hir: " + error.message + "\n"
+    for error in lowering.errors:
+        errors = errors + "mir: " + error.message + "\n"
+    NilPatternLowering(module: mir, errors: errors,
+        semantic_capture: lowering.enum_semantic_capture_enabled)
+
+fn nil_pattern_function(probe: NilPatternLowering, name: text) -> MirFunction:
+    for (_, function) in probe.module.functions:
+        if function.name == name or function.name == "app.main." + name:
+            return function
+    panic("missing actual lowered function: " + name)
+
+fn nil_pattern_calls(function: MirFunction) -> [text]:
+    var calls: [text] = []
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, callee, _):
+                    match callee.kind:
+                        case MirOperandKind.Const(MirConstValue.Str(name), _): calls.push(name)
+                        case _: ()
+                case _: ()
+    calls
+
+fn nil_pattern_call_count(calls: [text], name: text) -> i64:
+    var count = 0
+    for call in calls:
+        if call == name: count = count + 1
+    count
+
+val nil_pattern_consumer = "fn read_once() -> ReadResult:\n    ReadResult.Data(Some(\"chunk\"))\n\nfn read_original() -> i64:\n    match read_once():\n        case ReadResult.Data(nil): return 0\n        case ReadResult.Data(Some(chunk)): return 1\n        case ReadResult.Other(problem): return 2\n\nfn present() -> ReadResult:\n    ReadResult.Data(Some(\"chunk\"))\n\nfn empty() -> ReadResult:\n    ReadResult.Data(Some(\"\"))\n\nfn absent() -> ReadResult:\n    ReadResult.Data(None)\n\nfn unrelated_tag() -> ReadResult:\n    ReadResult.Other(\"\")\n"
+
+enum NilPatternReadResult:
+    Data(text?)
+    Other(text)
+
+fn classify_nil_pattern_read(result: NilPatternReadResult) -> i64:
+    match result:
+        case NilPatternReadResult.Data(nil): return 0
+        case NilPatternReadResult.Data(Some(chunk)): return 1
+        case NilPatternReadResult.Other(problem): return 2
+
+describe "concrete optional text enum nil subpatterns":
+    it "distinguishes absence present text empty text and a different outer tag":
+        step("Run concrete source arms without a Result wrapper or text identity helper")
+        expect(classify_nil_pattern_read(NilPatternReadResult.Data(None))).to_equal(0)
+        expect(classify_nil_pattern_read(NilPatternReadResult.Data(Some("chunk")))).to_equal(1)
+        expect(classify_nil_pattern_read(NilPatternReadResult.Data(Some("")))).to_equal(1)
+        expect(classify_nil_pattern_read(NilPatternReadResult.Other(""))).to_equal(2)
+
+    it "lowers original nil and Some arms with present empty and absent producers":
+        step("Lower concrete ReadResult source with actual parser HIR and MIR owners")
+        val probe = lower_nil_pattern_consumer(nil_pattern_consumer)
+        expect(probe.semantic_capture).to_equal(false)
+        expect(probe.errors).to_equal("")
+        val function = nil_pattern_function(probe, "read_original")
+        val calls = nil_pattern_calls(function)
+        expect(nil_pattern_call_count(calls, "rt_is_none")).to_equal(1)
+        expect(calls).to_contain("rt_enum_discriminant")
+        expect(calls).to_contain("rt_enum_payload")
+        expect(calls).to_contain("rt_is_some")
+
+    it "tests the extracted word once with a Bool result and no new allocation":
+        step("Inspect real nil predicate operands signature and branch destination")
+        val probe = lower_nil_pattern_consumer(nil_pattern_consumer)
+        expect(probe.errors).to_equal("")
+        val function = nil_pattern_function(probe, "read_original")
+        val calls = nil_pattern_calls(function)
+        val producer = nil_pattern_function(probe, "read_once")
+        expect(nil_pattern_call_count(calls, producer.name)).to_equal(1)
+        expect(calls.contains("rt_enum_new")).to_equal(false)
+        expect(calls.contains("rt_tuple_new")).to_equal(false)
+        var checked = 0
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(destination, callee, arguments):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str("rt_is_none"), type_):
+                                checked = checked + 1
+                                expect(arguments.len()).to_equal(1)
+                                match type_.kind:
+                                    case MirTypeKind.FuncPtr(signature):
+                                        expect(signature.params).to_equal([MirType.i64()])
+                                        expect(signature.return_type).to_equal(MirType.bool())
+                                    case _: fail("nil predicate must retain its actual callable signature")
+                                val result = destination.unwrap()
+                                var reads_payload = false
+                                for candidate in block.instructions:
+                                    match candidate.kind:
+                                        case MirInstKind.Call(payload, payload_fn, _):
+                                            match payload_fn.kind:
+                                                case MirOperandKind.Const(MirConstValue.Str("rt_enum_payload"), _):
+                                                    if val extracted = payload:
+                                                        reads_payload = arguments[0] == mir_operand_copy(extracted)
+                                                case _: ()
+                                        case _: ()
+                                expect(reads_payload).to_equal(true)
+                                match block.terminator:
+                                    case MirTerminator.If(condition, matched, rejected):
+                                        expect(condition).to_equal(mir_operand_copy(result))
+                                        expect(matched.id == rejected.id).to_equal(false)
+                                    case _: fail("nil predicate must gate arm success and fallthrough")
+                            case _: ()
+                    case _: ()
+        expect(checked).to_equal(1)
+
+    it "rejects nil subpatterns on scalar slots so integer three stays data":
+        step("Use a declared nonoptional payload as the sentinel-alias negative oracle")
+        val probe = lower_nil_pattern_consumer("fn scalar() -> ReadScalar:\n    ReadScalar.Data(3)\n\nfn reject(r: ReadScalar) -> i64:\n    match r:\n        case ReadScalar.Data(nil): return 0\n        case _: return 1\n")
+        expect(probe.errors).to_contain("nil sub-pattern requires a declared optional payload slot")
+        val calls = nil_pattern_calls(nil_pattern_function(probe, "reject"))
+        expect(calls.contains("rt_is_none")).to_equal(false)
+
+    it "retains enum owner rejection for an unrelated Data variant":
+        step("A matching variant spelling cannot bypass the outer enum owner")
+        val probe = lower_nil_pattern_consumer("fn reject(r: ReadResult) -> i64:\n    match r:\n        case Unrelated.Data(nil): return 0\n        case _: return 1\n")
+        expect(probe.errors).to_contain("does not match subject owner")
+
+    it "rejects a nil pattern in a declared nonoptional text payload":
+        step("A text payload owner is not itself Optional slot proof")
+        val probe = lower_nil_pattern_consumer("fn reject(r: ReadResult) -> i64:\n    match r:\n        case ReadResult.Other(nil): return 0\n        case _: return 1\n")
+        expect(probe.errors).to_contain("nil sub-pattern requires a declared optional payload slot")
+
+    it "retains constructor rejection for the wrong payload type":
+        step("A malformed producer cannot manufacture optional-slot authority")
+        val probe = lower_nil_pattern_consumer("fn reject() -> ReadScalar:\n    ReadScalar.Data(\"three\")\n")
+        expect(probe.errors).to_contain("payload type mismatch")
