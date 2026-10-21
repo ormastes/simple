@@ -387,6 +387,81 @@ unsafe fn extract_string(val: RuntimeValue) -> Option<String> {
     Some(String::from_utf8_lossy(slice).into_owned())
 }
 
+thread_local! {
+    static LAST_NATIVE_SHELL_EXIT_CODE: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+}
+
+fn native_shell_command(script: &str) -> std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut command = std::process::Command::new("cmd.exe");
+        // cmd does not decode CRT backslash-escaped quotes. Match the C
+        // Windows command-line owner: quoted payloads pass verbatim through
+        // /S, while quote-free strings retain cmd's existing heuristics.
+        if script.contains('"') {
+            command.arg("/S").arg("/C").raw_arg(format!("\"{script}\""));
+        } else {
+            command.arg("/C").arg(script);
+        }
+        command
+    }
+    #[cfg(not(windows))]
+    {
+        let mut command = std::process::Command::new("/bin/sh");
+        command.arg("-c").arg(script);
+        command
+    }
+}
+
+unsafe fn capture_native_shell(cmd: RuntimeValue) -> Option<std::process::Output> {
+    let script = extract_string(cmd)?;
+    let mut command = native_shell_command(&script);
+    clear_simple_child_stack_env(&mut command);
+    command.stdin(std::process::Stdio::null()).output().ok()
+}
+
+/// Legacy scalar shell status is thread-local and initially zero.
+#[no_mangle]
+pub extern "C" fn rt_shell_exit_code() -> i64 {
+    LAST_NATIVE_SHELL_EXIT_CODE.with(|status| status.get())
+}
+
+/// Execute the platform shell and record only this scalar call's status.
+#[no_mangle]
+pub unsafe extern "C" fn rt_shell_exec(cmd: RuntimeValue) -> RuntimeValue {
+    let Some(script) = extract_string(cmd) else {
+        LAST_NATIVE_SHELL_EXIT_CODE.with(|status| status.set(-1));
+        return RuntimeValue::NIL;
+    };
+    let mut command = native_shell_command(&script);
+    clear_simple_child_stack_env(&mut command);
+    match command.stdin(std::process::Stdio::inherit()).stderr(std::process::Stdio::inherit()).output() {
+        Ok(output) => {
+            LAST_NATIVE_SHELL_EXIT_CODE.with(|status| status.set(output.status.code().map(i64::from).unwrap_or(-1)));
+            rt_string_new(output.stdout.as_ptr(), output.stdout.len() as u64)
+        }
+        Err(_) => {
+            LAST_NATIVE_SHELL_EXIT_CODE.with(|status| status.set(-1));
+            RuntimeValue::NIL
+        }
+    }
+}
+
+/// Atomic stdout/stderr/status capture leaves the scalar shell slot unchanged.
+#[no_mangle]
+pub unsafe extern "C" fn rt_shell_exec_tuple(cmd: RuntimeValue) -> RuntimeValue {
+    let tuple = rt_tuple_new(3);
+    let (stdout, stderr, status) = match capture_native_shell(cmd) {
+        Some(output) => (output.stdout, output.stderr, output.status.code().map(i64::from).unwrap_or(-1)),
+        None => (Vec::new(), Vec::new(), -1),
+    };
+    rt_tuple_set(tuple, 0, rt_string_new(stdout.as_ptr(), stdout.len() as u64));
+    rt_tuple_set(tuple, 1, rt_string_new(stderr.as_ptr(), stderr.len() as u64));
+    rt_tuple_set(tuple, 2, RuntimeValue::from_int(status));
+    tuple
+}
+
 fn spawn_output_reader<R>(reader: Option<R>) -> std::thread::JoinHandle<Vec<u8>>
 where
     R: std::io::Read + Send + 'static,
