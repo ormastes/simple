@@ -1220,7 +1220,22 @@ int64_t rt_host_gpu_lane_last_phase(void) { return rt_host_gpu_lane_last_phase_c
  * the queue arrives as a caller-supplied argument. So this is an honest
  * no-backend answer, not a placeholder: it returns 0.
  */
-int64_t rt_host_gpu_active_backend_handle(void) { return 0; }
+/* BEGIN CORE C GPU BACKEND FALLBACK */
+/* The core C runtime has no active GPU backend. Let a linked provider own
+ * the public symbol: replacing its strong COFF definition can discard a
+ * merged function section also containing other provider exports. */
+#if defined(_MSC_VER)
+int64_t core_c_host_gpu_active_backend_handle(void) { return 0; }
+#if defined(_M_IX86)
+#pragma comment(linker, "/alternatename:_rt_host_gpu_active_backend_handle=_core_c_host_gpu_active_backend_handle")
+#else
+#pragma comment(linker, "/alternatename:rt_host_gpu_active_backend_handle=core_c_host_gpu_active_backend_handle")
+#endif
+#else
+__attribute__((weak)) int64_t rt_host_gpu_active_backend_handle(void) { return 0; }
+#endif
+
+/* END CORE C GPU BACKEND FALLBACK */
 
 void rt_host_gpu_queue_reset(void) {
     rt_host_gpu_queue_next_packet_id = 1;
