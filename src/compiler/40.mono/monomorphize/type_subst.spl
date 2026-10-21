@@ -7,6 +7,7 @@ use compiler.hir.hir_types.{Effect, EffectKind}
 use compiler.hir.hir_definitions.*
 use compiler.monomorphize.types.ConcreteType
 use compiler.common.diagnostics.span.{Span}
+use compiler.mono.mono_invocation_policy_v1.MonoInvocationBudgetV1
 
 
 
@@ -19,6 +20,40 @@ class TypeSubstitution:
     so the same parameter can be met under either spelling."""
     mapping: Dict<text, HirType>
     by_symbol: Dict<i64, HirType>
+    include_retained_defaults: bool = false
+    budget: MonoInvocationBudgetV1? = nil
+    failure: text = ""
+
+    fn failed_v1() -> bool:
+        if self.failure != "": return true
+        if val ledger = self.budget: return ledger.failure != ""
+        false
+
+    me fail_v1(message: text):
+        if self.failure == "": self.failure = message
+        if val ledger = self.budget: ledger.fail_v1(message)
+
+    fn charge_v1(units: i64) -> bool:
+        if self.failed_v1(): return false
+        if val ledger = self.budget: return ledger.charge_v1(units)
+        true
+
+    fn enter_v1() -> bool:
+        if self.failed_v1(): return false
+        if val ledger = self.budget: return ledger.enter_v1()
+        true
+
+    fn leave_v1():
+        if val ledger = self.budget: ledger.leave_v1()
+
+
+fn typesubstitution_context_v1(subst: TypeSubstitution, include_retained_defaults: bool,
+    budget: MonoInvocationBudgetV1?) -> TypeSubstitution:
+    # Dictionaries are read-only during substitution. Policy/failure state is
+    # fresh; the single invocation ledger is deliberately shared, never reset.
+    TypeSubstitution(mapping: subst.mapping, by_symbol: subst.by_symbol,
+        include_retained_defaults: include_retained_defaults or subst.include_retained_defaults,
+        budget: if budget != nil: budget else: subst.budget, failure: subst.failure)
 
 
 fn typesubstitution_empty() -> TypeSubstitution:
@@ -79,6 +114,14 @@ fn typesubstitution_from_concrete(type_params: [HirTypeParam], type_args: [Concr
 
 
 fn substitute_type(ty: HirType, subst: TypeSubstitution) -> HirType:
+    if not subst.enter_v1(): return nil
+    val result = substitute_type_node_v1(ty, subst)
+    subst.leave_v1()
+    if subst.failed_v1(): return nil
+    result
+
+
+fn substitute_type_node_v1(ty: HirType, subst: TypeSubstitution) -> HirType:
     """Substitute type parameters inside a type.
 
     Replaces every `TypeParam(name)` whose name is bound in `subst`, and
@@ -94,8 +137,10 @@ fn substitute_type(ty: HirType, subst: TypeSubstitution) -> HirType:
             else:
                 ty
         case Tuple(elements):
+            if not subst.charge_v1(if elements == nil: 1 else: elements.len() + 1): return nil
             var parts: [HirType] = []
             for e in elements:
+                if subst.failed_v1(): return nil
                 parts = parts.push(substitute_type(e, subst))
             HirType(kind: HirTypeKind.Tuple(parts), span: ty.span)
         case Array(element, size):
@@ -127,18 +172,24 @@ fn substitute_type(ty: HirType, subst: TypeSubstitution) -> HirType:
                 # HIR lowering produces); only a bare reference can be one.
                 if args == nil or args.len() == 0:
                     return subst.by_symbol[nsym.id]
+            if not subst.charge_v1(if args == nil: 1 else: args.len() + 1): return nil
             var nargs: [HirType] = []
             for a in args:
+                if subst.failed_v1(): return nil
                 nargs = nargs.push(substitute_type(a, subst))
             HirType(kind: HirTypeKind.Named(symbol, nargs), span: ty.span)
         case Union(members):
+            if not subst.charge_v1(if members == nil: 1 else: members.len() + 1): return nil
             var mems: [HirType] = []
             for m in members:
+                if subst.failed_v1(): return nil
                 mems = mems.push(substitute_type(m, subst))
             HirType(kind: HirTypeKind.Union(mems), span: ty.span)
         case Function(params, ret, effects):
+            if not subst.charge_v1(if params == nil: 1 else: params.len() + 1): return nil
             var ps: [HirType] = []
             for p in params:
+                if subst.failed_v1(): return nil
                 ps = ps.push(substitute_type(p, subst))
             HirType(kind: HirTypeKind.Function(ps, substitute_type(ret, subst), substitute_effects(effects, subst)), span: ty.span)
         case Projection(base, assoc_name):
@@ -165,8 +216,10 @@ fn substitute_type(ty: HirType, subst: TypeSubstitution) -> HirType:
 fn substitute_effects(effects: [Effect], subst: TypeSubstitution) -> [Effect]:
     """Substitute type-bearing effects without changing order or provenance."""
     if effects == nil: return effects
+    if not subst.charge_v1(effects.len() + 1): return nil
     var out: [Effect] = []
     for raw in effects:
+        if subst.failed_v1(): return nil
         val effect: Effect = raw
         var rewritten = effect
         match effect.kind:
@@ -213,16 +266,20 @@ fn substitute_block_opt(block: HirBlock?, subst: TypeSubstitution) -> HirBlock?:
 
 
 fn substitute_exprs(exprs: [HirExpr], subst: TypeSubstitution) -> [HirExpr]:
+    if not subst.charge_v1(if exprs == nil: 1 else: exprs.len() + 1): return nil
     var out: [HirExpr] = []
     for e in exprs:
+        if subst.failed_v1(): return nil
         val et: HirExpr = e
         out = out.push(substitute_expr(et, subst))
     out
 
 
 fn substitute_call_args(args: [HirCallArg], subst: TypeSubstitution) -> [HirCallArg]:
+    if not subst.charge_v1(if args == nil: 1 else: args.len() + 1): return nil
     var out: [HirCallArg] = []
     for a in args:
+        if subst.failed_v1(): return nil
         val at: HirCallArg = a
         var na = at
         na.value = substitute_expr(at.value, subst)
@@ -231,8 +288,10 @@ fn substitute_call_args(args: [HirCallArg], subst: TypeSubstitution) -> [HirCall
 
 
 fn substitute_named_exprs(fields: [(text, HirExpr)], subst: TypeSubstitution) -> [(text, HirExpr)]:
+    if not subst.charge_v1(if fields == nil: 1 else: fields.len() + 1): return nil
     var out: [(text, HirExpr)] = []
     for f in fields:
+        if subst.failed_v1(): return nil
         val (fname, fexpr) = f
         val fe: HirExpr = fexpr
         out = out.push((fname, substitute_expr(fe, subst)))
@@ -252,16 +311,20 @@ fn substitute_enum_payload(payload: HirEnumPayload?, subst: TypeSubstitution) ->
 
 
 fn substitute_patterns(patterns: [HirPattern], subst: TypeSubstitution) -> [HirPattern]:
+    if not subst.charge_v1(if patterns == nil: 1 else: patterns.len() + 1): return nil
     var out: [HirPattern] = []
     for p in patterns:
+        if subst.failed_v1(): return nil
         val pt: HirPattern = p
         out = out.push(substitute_pattern(pt, subst))
     out
 
 
 fn substitute_named_patterns(fields: [(text, HirPattern)], subst: TypeSubstitution) -> [(text, HirPattern)]:
+    if not subst.charge_v1(if fields == nil: 1 else: fields.len() + 1): return nil
     var out: [(text, HirPattern)] = []
     for f in fields:
+        if subst.failed_v1(): return nil
         val (fname, fpat) = f
         val fp: HirPattern = fpat
         out = out.push((fname, substitute_pattern(fp, subst)))
@@ -281,6 +344,14 @@ fn substitute_pattern_payload(payload: HirPatternPayload?, subst: TypeSubstituti
 
 
 fn substitute_pattern(pattern: HirPattern, subst: TypeSubstitution) -> HirPattern:
+    if not subst.enter_v1(): return nil
+    val result = substitute_pattern_node_v1(pattern, subst)
+    subst.leave_v1()
+    if subst.failed_v1(): return nil
+    result
+
+
+fn substitute_pattern_node_v1(pattern: HirPattern, subst: TypeSubstitution) -> HirPattern:
     """Substitute type parameters inside a pattern and its sub-patterns.
 
     A pattern carries its own `type_` (gated by `has_type_`) and, for the
@@ -317,6 +388,14 @@ fn substitute_pattern(pattern: HirPattern, subst: TypeSubstitution) -> HirPatter
 
 
 fn substitute_stmt(stmt: HirStmt, subst: TypeSubstitution) -> HirStmt:
+    if not subst.enter_v1(): return nil
+    val result = substitute_stmt_node_v1(stmt, subst)
+    subst.leave_v1()
+    if subst.failed_v1(): return nil
+    result
+
+
+fn substitute_stmt_node_v1(stmt: HirStmt, subst: TypeSubstitution) -> HirStmt:
     """Substitute type parameters inside a statement."""
     if stmt == nil:
         return stmt
@@ -347,6 +426,14 @@ fn substitute_stmt(stmt: HirStmt, subst: TypeSubstitution) -> HirStmt:
 
 
 fn substitute_block(block: HirBlock, subst: TypeSubstitution) -> HirBlock:
+    if not subst.enter_v1(): return nil
+    val result = substitute_block_node_v1(block, subst)
+    subst.leave_v1()
+    if subst.failed_v1(): return nil
+    result
+
+
+fn substitute_block_node_v1(block: HirBlock, subst: TypeSubstitution) -> HirBlock:
     """Substitute type parameters throughout a block.
 
     `block.value` is a DESUGARED plain field gated by `block.has` (NOT an
@@ -354,9 +441,11 @@ fn substitute_block(block: HirBlock, subst: TypeSubstitution) -> HirBlock:
     convention as the scan/rewrite walks in `monomorphize_integration.spl`."""
     if block == nil:
         return block
+    if not subst.charge_v1(if block.stmts == nil: 1 else: block.stmts.len() + 1): return nil
     var out = block
     var stmts: [HirStmt] = []
     for stmt in block.stmts:
+        if subst.failed_v1(): return nil
         val st: HirStmt = stmt
         stmts = stmts.push(substitute_stmt(st, subst))
     out.stmts = stmts
@@ -367,10 +456,20 @@ fn substitute_block(block: HirBlock, subst: TypeSubstitution) -> HirBlock:
 
 
 fn substitute_asm(asm_node: HirAsm, subst: TypeSubstitution) -> HirAsm:
+    if not subst.enter_v1(): return nil
+    val result = substitute_asm_node_v1(asm_node, subst)
+    subst.leave_v1()
+    if subst.failed_v1(): return nil
+    result
+
+
+fn substitute_asm_node_v1(asm_node: HirAsm, subst: TypeSubstitution) -> HirAsm:
     """Substitute inside inline-assembly operand expressions."""
+    if not subst.charge_v1(if asm_node.constraints == nil: 1 else: asm_node.constraints.len() + 1): return nil
     var out = asm_node
     var cons: [HirAsmConstraint] = []
     for c in asm_node.constraints:
+        if subst.failed_v1(): return nil
         val ct: HirAsmConstraint = c
         var nc = ct
         nc.value = substitute_expr(ct.value, subst)
@@ -381,6 +480,14 @@ fn substitute_asm(asm_node: HirAsm, subst: TypeSubstitution) -> HirAsm:
 
 
 fn substitute_expr(expr: HirExpr, subst: TypeSubstitution) -> HirExpr:
+    if not subst.enter_v1(): return nil
+    val result = substitute_expr_node_v1(expr, subst)
+    subst.leave_v1()
+    if subst.failed_v1(): return nil
+    result
+
+
+fn substitute_expr_node_v1(expr: HirExpr, subst: TypeSubstitution) -> HirExpr:
     """Substitute type parameters throughout an expression.
 
     Substitutes the expression's own recorded type AND recurses into every
@@ -405,8 +512,10 @@ fn substitute_expr(expr: HirExpr, subst: TypeSubstitution) -> HirExpr:
         case HirExprKind.TupleLit(elements):
             out.kind = HirExprKind.TupleLit(substitute_exprs(elements, subst))
         case HirExprKind.DictLit(entries, key_ty, value_ty):
+            if not subst.charge_v1(if entries == nil: 1 else: entries.len() + 1): return nil
             var new_entries: [(HirExpr, HirExpr)] = []
             for entry in entries:
+                if subst.failed_v1(): return nil
                 val (k, v) = entry
                 val kt: HirExpr = k
                 val vt: HirExpr = v
@@ -456,8 +565,10 @@ fn substitute_expr(expr: HirExpr, subst: TypeSubstitution) -> HirExpr:
         # call inside a specialization names concrete types.
         case HirExprKind.Call(callee, args, type_args):
             val ce: HirExpr = callee
+            if not subst.charge_v1(if type_args == nil: 1 else: type_args.len() + 1): return nil
             var new_targs: [HirType] = []
             for ta in type_args:
+                if subst.failed_v1(): return nil
                 val tat: HirType = ta
                 new_targs = new_targs.push(substitute_type(tat, subst))
             out.kind = HirExprKind.Call(substitute_expr(ce, subst), substitute_call_args(args, subst), new_targs)
@@ -474,8 +585,10 @@ fn substitute_expr(expr: HirExpr, subst: TypeSubstitution) -> HirExpr:
             val th: HirBlock = then_
             out.kind = HirExprKind.If(substitute_expr(cd, subst), substitute_block(th, subst), substitute_block_opt(else_, subst))
         case HirExprKind.IfChain(arms, else_):
+            if not subst.charge_v1(if arms == nil: 1 else: arms.len() + 1): return nil
             var new_arms: [HirIfArm] = []
             for arm in arms:
+                if subst.failed_v1(): return nil
                 val at2: HirIfArm = arm
                 var na = at2
                 na.cond = substitute_expr(at2.cond, subst)
@@ -484,8 +597,10 @@ fn substitute_expr(expr: HirExpr, subst: TypeSubstitution) -> HirExpr:
             out.kind = HirExprKind.IfChain(new_arms, substitute_block_opt(else_, subst))
         case HirExprKind.MatchCase(scrutinee, arms):
             val sc: HirExpr = scrutinee
+            if not subst.charge_v1(if arms == nil: 1 else: arms.len() + 1): return nil
             var marms: [HirMatchArm] = []
             for arm in arms:
+                if subst.failed_v1(): return nil
                 val mt: HirMatchArm = arm
                 var nm = mt
                 nm.pattern = substitute_pattern(mt.pattern, subst)
@@ -506,8 +621,10 @@ fn substitute_expr(expr: HirExpr, subst: TypeSubstitution) -> HirExpr:
             val fb: HirBlock = body
             out.kind = HirExprKind.For(var_, substitute_expr(fi, subst), substitute_block(fb, subst), label)
         case HirExprKind.With(items, body):
+            if not subst.charge_v1(if items == nil: 1 else: items.len() + 1): return nil
             var new_items: [HirWithItem] = []
             for item in items:
+                if subst.failed_v1(): return nil
                 val it2: HirWithItem = item
                 var ni = it2
                 ni.context_expr = substitute_expr(it2.context_expr, subst)
@@ -517,10 +634,12 @@ fn substitute_expr(expr: HirExpr, subst: TypeSubstitution) -> HirExpr:
 
         # Closures and blocks
         case HirExprKind.Lambda(params, body, captures):
+            if not subst.charge_v1(if params == nil: 1 else: params.len() + 1): return nil
             var lparams: [HirParam] = []
             for p in params:
+                if subst.failed_v1(): return nil
                 val pt2: HirParam = p
-                lparams = lparams.push(substitute_param(pt2, subst))
+                lparams = lparams.push(substitute_param_context_v1(pt2, subst))
             val lbody: HirExpr = body
             out.kind = HirExprKind.Lambda(lparams, substitute_expr(lbody, subst), captures)
         case HirExprKind.Block(block):
@@ -577,8 +696,10 @@ fn substitute_expr(expr: HirExpr, subst: TypeSubstitution) -> HirExpr:
             out.kind = HirExprKind.Range(substitute_expr_opt(start, subst), substitute_expr_opt(end, subst), inclusive, substitute_expr_opt(step, subst))
         case HirExprKind.Comprehension(kind, inner, clauses):
             val ce2: HirExpr = inner
+            if not subst.charge_v1(if clauses == nil: 1 else: clauses.len() + 1): return nil
             var new_clauses: [HirCompClause] = []
             for clause in clauses:
+                if subst.failed_v1(): return nil
                 val cl: HirCompClause = clause
                 var nc2 = cl
                 match cl.kind:
@@ -607,8 +728,10 @@ fn substitute_expr(expr: HirExpr, subst: TypeSubstitution) -> HirExpr:
             val an: HirAsm = asm_node
             out.kind = HirExprKind.InlineAsm(substitute_asm(an, subst))
         case HirExprKind.InlineAsmMatch(arms):
+            if not subst.charge_v1(if arms == nil: 1 else: arms.len() + 1): return nil
             var aarms: [HirAsmMatchArm] = []
             for arm in arms:
+                if subst.failed_v1(): return nil
                 val aa: HirAsmMatchArm = arm
                 var na2 = aa
                 if aa.has_asm_body:
@@ -625,8 +748,10 @@ fn substitute_expr(expr: HirExpr, subst: TypeSubstitution) -> HirExpr:
             if val interpolation_items = interps_opt:
                 # @workaround bug=stringlit_optional_array_owner_2026_10_11 reason=retain the declared array shape after optional binding
                 val items: [HirInterpolation] = interpolation_items
+                if not subst.charge_v1(items.len() + 1): return nil
                 var new_interps: [HirInterpolation] = []
                 for item in items:
+                    if subst.failed_v1(): return nil
                     val it: HirInterpolation = item
                     var ni = it
                     ni.expr = substitute_expr(it.expr, subst)
@@ -637,8 +762,10 @@ fn substitute_expr(expr: HirExpr, subst: TypeSubstitution) -> HirExpr:
             out.kind = HirExprKind.TypeTest(substitute_expr(ttv, subst), type_name)
         case HirExprKind.TryCatch(body, clauses, finally_):
             val tcb: HirBlock = body
+            if not subst.charge_v1(if clauses == nil: 1 else: clauses.len() + 1): return nil
             var new_clauses: [HirCatchClause] = []
             for clause in clauses:
+                if subst.failed_v1(): return nil
                 val cc: HirCatchClause = clause
                 var ncc = cc
                 if cc.has_pattern:
@@ -657,14 +784,45 @@ fn substitute_expr(expr: HirExpr, subst: TypeSubstitution) -> HirExpr:
     out
 
 
-fn substitute_param(param: HirParam, subst: TypeSubstitution) -> HirParam:
-    """Substitute type parameters in a single function parameter."""
+fn substitute_param(param: HirParam, subst: TypeSubstitution, include_retained_defaults: bool = false,
+    budget: MonoInvocationBudgetV1? = nil) -> HirParam:
+    substitute_param_context_v1(param, typesubstitution_context_v1(subst, include_retained_defaults, budget))
+
+
+fn substitute_param_context_v1(param: HirParam, subst: TypeSubstitution) -> HirParam:
+    if not subst.enter_v1(): return nil
+    val result = substitute_param_node_v1(param, subst)
+    subst.leave_v1()
+    if subst.failed_v1(): return nil
+    result
+
+
+fn substitute_param_node_v1(param: HirParam, subst: TypeSubstitution) -> HirParam:
+    """Retain parameter identity while substituting admitted executable defaults."""
+    if param == nil:
+        subst.fail_v1("MONO-E-DEFAULT: absent parameter row")
+        return nil
+    if subst.include_retained_defaults and param.has_default and param.default == nil:
+        subst.fail_v1("MONO-E-DEFAULT: parameter {param.name} has no default payload")
+        return nil
     var out = param
     out.type_ = substitute_type(param.type_, subst)
+    if subst.include_retained_defaults and param.has_default:
+        out.default = substitute_expr(param.default, subst)
     out
 
 
-fn substitute_function(func: HirFunction, subst: TypeSubstitution, mangled_name: text) -> HirFunction:
+fn substitute_function(func: HirFunction, subst: TypeSubstitution, mangled_name: text,
+    include_retained_defaults: bool = false, budget: MonoInvocationBudgetV1? = nil) -> HirFunction:
+    val context = typesubstitution_context_v1(subst, include_retained_defaults, budget)
+    if not context.enter_v1(): return nil
+    val result = substitute_function_node_v1(func, context, mangled_name)
+    context.leave_v1()
+    if context.failed_v1(): return nil
+    result
+
+
+fn substitute_function_node_v1(func: HirFunction, subst: TypeSubstitution, mangled_name: text) -> HirFunction:
     """Substitute function-level type parameters for a specialized function.
 
     The specialized function carries concrete parameter, return, effect and body
@@ -678,9 +836,11 @@ fn substitute_function(func: HirFunction, subst: TypeSubstitution, mangled_name:
     # post-mono sweep (which honours the flag as well as `type_params`) would
     # still count it as an emittable generic definition.
     specialized.is_generic_template = false
+    if not subst.charge_v1(if func.params == nil: 1 else: func.params.len() + 1): return nil
     var new_params: [HirParam] = []
     for p in func.params:
-        new_params = new_params.push(substitute_param(p, subst))
+        if subst.failed_v1(): return nil
+        new_params = new_params.push(substitute_param_context_v1(p, subst))
     specialized.params = new_params
     specialized.return_type = substitute_type(func.return_type, subst)
     specialized.effects = substitute_effects(func.effects, subst)
@@ -704,15 +864,29 @@ fn typesubstitution_canonical(type_params: [HirTypeParam]) -> TypeSubstitution:
     TypeSubstitution(mapping: {}, by_symbol: by_sym)
 
 
-fn canonicalize_template(func: HirFunction) -> HirFunction:
+fn canonicalize_template(func: HirFunction, include_retained_defaults: bool = false,
+    budget: MonoInvocationBudgetV1? = nil) -> HirFunction:
+    if val ledger = budget:
+        if not ledger.charge_v1(if func.type_params == nil: 0 else: func.type_params.len()): return nil
+    val subst = typesubstitution_context_v1(typesubstitution_canonical(func.type_params),
+        include_retained_defaults, budget)
+    if not subst.enter_v1(): return nil
+    val result = canonicalize_template_node_v1(func, subst)
+    subst.leave_v1()
+    if subst.failed_v1(): return nil
+    result
+
+
+fn canonicalize_template_node_v1(func: HirFunction, subst: TypeSubstitution) -> HirFunction:
     """Return `func` with every symbol-spelled type-parameter reference in its
     signature, effects and body rewritten to `TypeParam(name)`. Name, symbol,
     `type_params` and template-ness are unchanged."""
-    val subst = typesubstitution_canonical(func.type_params)
     var out = func
+    if not subst.charge_v1(if func.params == nil: 1 else: func.params.len() + 1): return nil
     var new_params: [HirParam] = []
     for p in func.params:
-        new_params = new_params.push(substitute_param(p, subst))
+        if subst.failed_v1(): return nil
+        new_params = new_params.push(substitute_param_context_v1(p, subst))
     out.params = new_params
     out.return_type = substitute_type(func.return_type, subst)
     out.effects = substitute_effects(func.effects, subst)

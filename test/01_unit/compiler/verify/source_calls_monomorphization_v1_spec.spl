@@ -1,0 +1,116 @@
+# REQ-FV2-C1-SM: canonical specialization before resolved call capture.
+# Tests-first source artifact; all scenarios UNRUN. Positive generic cases are
+# source-predicted RED at the existing open-template capture refusal.
+use std.spec.{describe, it, expect, fail}
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
+use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_signature}
+use compiler.mir.verification_call_identity.{validate_resolved_direct_call_manifest_v1}
+use compiler.tools.verify.source_calls_v1.{SourceResolvedCallsV1,
+    source_calls_from_source_v1, source_calls_inventory_v1}
+
+fn source_mono_assert_bindings(result: SourceResolvedCallsV1, count: i64):
+    expect(result.lowered.calls.bindings.len()).to_equal(count)
+    expect(validate_resolved_direct_call_manifest_v1(result.lowered.module,
+        result.lowered.calls).closed()).to_equal(true)
+    for binding in result.lowered.calls.bindings:
+        var found = 0
+        for function in result.lowered.module.functions.values():
+            if function.symbol.id.to_string() == binding.callee_symbol_id:
+                found = found + 1
+                expect(binding.callee_body_hash).to_equal(
+                    sha256_text(serialize_mir_function(function)))
+                expect(binding.callee_signature_hash).to_equal(
+                    sha256_text(serialize_mir_signature(function.signature)))
+        expect(found).to_equal(1)
+    val inventory = source_calls_inventory_v1(result)
+    expect(inventory).to_contain("formal_status=NOT_CHECKED")
+    expect(inventory.contains("formal_status=PASS")).to_equal(false)
+
+describe "canonical source monomorphization before call capture":
+    it "binds an explicit specialization to its actual final signature and body":
+        step("specialize retained HIR before the existing resolved-call boundary")
+        val source = "fn identity<T>(value: T) -> T:\n    value\n\nfn caller() -> i64:\n    identity<i64>(17)\n"
+        match source_calls_from_source_v1(source, "mono_explicit.spl", "x86_64-unknown-linux-gnu"):
+            case Ok(result): source_mono_assert_bindings(result, 1)
+            case Err(message): fail(message)
+
+    it "uses canonical inferred arguments without an explicit call type list":
+        step("infer a concrete request from the actual bool argument")
+        val source = "fn identity<T>(value: T) -> T:\n    value\n\nfn caller() -> bool:\n    identity(true)\n"
+        match source_calls_from_source_v1(source, "mono_inferred.spl", "x86_64-unknown-linux-gnu"):
+            case Ok(result): source_mono_assert_bindings(result, 1)
+            case Err(message): fail(message)
+
+    it "deduplicates repeated requests while retaining distinct actual call sites":
+        step("resolve two callers to one specialized declaration")
+        val source = "fn identity<T>(value: T) -> T:\n    value\n\nfn first() -> i64:\n    identity<i64>(17)\n\nfn second() -> i64:\n    identity<i64>(19)\n"
+        match source_calls_from_source_v1(source, "mono_repeated.spl", "x86_64-unknown-linux-gnu"):
+            case Ok(result):
+                source_mono_assert_bindings(result, 2)
+                val first = result.lowered.calls.bindings[0]
+                val second = result.lowered.calls.bindings[1]
+                expect(first.callee_symbol_id).to_equal(second.callee_symbol_id)
+                expect(first.callee_signature_hash).to_equal(second.callee_signature_hash)
+                expect(first.call_site_hash == second.call_site_hash).to_equal(false)
+            case Err(message): fail(message)
+
+    it "keeps distinct concrete requests and signatures separate":
+        step("specialize the same template for i64 and bool")
+        val source = "fn identity<T>(value: T) -> T:\n    value\n\nfn number() -> i64:\n    identity<i64>(17)\n\nfn truth() -> bool:\n    identity<bool>(true)\n"
+        match source_calls_from_source_v1(source, "mono_distinct.spl", "x86_64-unknown-linux-gnu"):
+            case Ok(result):
+                source_mono_assert_bindings(result, 2)
+                val first = result.lowered.calls.bindings[0]
+                val second = result.lowered.calls.bindings[1]
+                expect(first.callee_symbol_id == second.callee_symbol_id).to_equal(false)
+                expect(first.callee_signature_hash == second.callee_signature_hash).to_equal(false)
+            case Err(message): fail(message)
+
+    it "captures nested requests discovered while specializing another body":
+        step("finish the canonical worklist before finalizing every emitted call")
+        val source = "fn inner<T>(value: T) -> T:\n    value\n\nfn outer<T>(value: T) -> T:\n    inner<T>(value)\n\nfn caller() -> i64:\n    outer<i64>(23)\n"
+        match source_calls_from_source_v1(source, "mono_nested.spl", "x86_64-unknown-linux-gnu"):
+            case Ok(result): source_mono_assert_bindings(result, 2)
+            case Err(message): fail(message)
+
+    it "does not reuse a previous body after a failed same-name invocation":
+        step("retain the first immutable output across failure and changed template source")
+        val first_source = "fn choose<T>(value: T) -> i64:\n    11\n\nfn caller() -> i64:\n    choose<i64>(0)\n"
+        val second_source = "fn choose<T>(value: T) -> i64:\n    22\n\nfn caller() -> i64:\n    choose<i64>(0)\n"
+        match source_calls_from_source_v1(first_source, "mono_sequence.spl", "x86_64-unknown-linux-gnu"):
+            case Ok(first):
+                source_mono_assert_bindings(first, 1)
+                val original_manifest = first.lowered.calls.hash()
+                val original_body = first.lowered.calls.bindings[0].callee_body_hash
+                match source_calls_from_source_v1("fn caller() -> i64:\n    missing()\n",
+                        "mono_sequence.spl", "x86_64-unknown-linux-gnu"):
+                    case Ok(_): fail("unresolved invocation unexpectedly published an inventory")
+                    case Err(message): expect(message).to_contain("SOURCE-CALLS-E-HIR")
+                match source_calls_from_source_v1(second_source, "mono_sequence.spl", "x86_64-unknown-linux-gnu"):
+                    case Ok(second):
+                        source_mono_assert_bindings(second, 1)
+                        expect(second.lowered.calls.bindings[0].callee_body_hash == original_body).to_equal(false)
+                        expect(first.lowered.calls.hash()).to_equal(original_manifest)
+                        source_mono_assert_bindings(first, 1)
+                    case Err(message): fail(message)
+            case Err(message): fail(message)
+
+    it "preserves the nongeneric direct-call path":
+        step("retain ordinary typed source and its final manifest")
+        val source = "fn leaf() -> i64:\n    7\n\nfn caller() -> i64:\n    leaf()\n"
+        match source_calls_from_source_v1(source, "mono_control.spl", "x86_64-unknown-linux-gnu"):
+            case Ok(result):
+                source_mono_assert_bindings(result, 1)
+                expect(result.source_digest).to_equal(sha256_text(source))
+            case Err(message): fail(message)
+
+    it "preserves the explicitly requested target through specialization":
+        step("finalize a generic request under the caller's explicit target")
+        val source = "fn identity<T>(value: T) -> T:\n    value\n\nfn caller() -> i64:\n    identity<i64>(17)\n"
+        match source_calls_from_source_v1(source, "mono_target.spl", "aarch64-unknown-linux-gnu"):
+            case Ok(result):
+                source_mono_assert_bindings(result, 1)
+                expect(result.cfg_receipt.target_triple).to_equal("aarch64-unknown-linux-gnu")
+                expect(source_calls_inventory_v1(result)).to_contain("target=aarch64-unknown-linux-gnu")
+            case Err(message): fail(message)
