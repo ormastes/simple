@@ -564,6 +564,7 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         // Process operations
         "rt_process_run" => value::rt_process_run as *const () as usize,
         "rt_process_run_bounded" => value::rt_process_run_bounded as *const () as usize,
+        "rt_process_run_bounded_bytes" => value::sffi::env_process::rt_process_run_bounded_bytes as *const () as usize,
         "rt_process_run_timeout" => value::rt_process_run_timeout as *const () as usize,
         "rt_process_run_with_limits" => value::sffi::rt_process_run_with_limits as *const () as usize,
         "rt_process_spawn" => value::rt_process_spawn as *const () as usize,
