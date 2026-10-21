@@ -15,6 +15,10 @@ use crate::value::heap::{get_typed_ptr, HeapObjectType};
 use crate::value::{RuntimeString, RuntimeValue};
 use std::sync::{OnceLock, RwLock};
 
+#[cfg(windows)]
+#[path = "process_bytes_windows.rs"]
+mod process_bytes_windows;
+
 fn lexer_source_cache() -> &'static RwLock<String> {
     static CACHE: OnceLock<RwLock<String>> = OnceLock::new();
     CACHE.get_or_init(|| RwLock::new(String::new()))
@@ -477,7 +481,7 @@ where
     })
 }
 
-fn spawn_bounded_output_reader<R>(reader: Option<R>, max_bytes: usize) -> std::sync::mpsc::Receiver<Vec<u8>>
+fn spawn_bounded_output_reader<R>(reader: Option<R>, max_bytes: usize, raw_prefix: bool) -> std::sync::mpsc::Receiver<Vec<u8>>
 where
     R: std::io::Read + Send + 'static,
 {
@@ -485,8 +489,8 @@ where
     std::thread::spawn(move || {
         use std::io::Read;
 
-        let head_limit = max_bytes / 2 + max_bytes % 2;
-        let tail_limit = max_bytes / 2;
+        let head_limit = if raw_prefix { max_bytes } else { max_bytes / 2 + max_bytes % 2 };
+        let tail_limit = if raw_prefix { 0 } else { max_bytes / 2 };
         // Cap the up-front reservation: an unlimited (-1) bound makes the
         // limits ~usize::MAX / 2, which with_capacity would abort on.
         let mut head = Vec::with_capacity(head_limit.min(64 * 1024));
@@ -519,7 +523,7 @@ where
         }
 
         let retained = head.len().saturating_add(tail.len()) as u64;
-        if total > retained {
+        if !raw_prefix && total > retained {
             let marker = format!("\n[output truncated: {} bytes omitted]\n", total - retained);
             head.extend_from_slice(marker.as_bytes());
         }
@@ -530,16 +534,28 @@ where
 }
 
 fn finish_child_output_bounded(
+    child: std::process::Child,
+    timeout_ms: i64,
+    max_output_bytes: usize,
+) -> std::io::Result<(Vec<u8>, Vec<u8>, i64, bool)> {
+    finish_child_output_bounded_mode(child, timeout_ms, max_output_bytes, false, #[cfg(windows)] None)
+}
+
+fn finish_child_output_bounded_mode(
     mut child: std::process::Child,
     timeout_ms: i64,
     max_output_bytes: usize,
+    raw_prefix: bool,
+    #[cfg(windows)] job: Option<&process_bytes_windows::CaptureJob>,
 ) -> std::io::Result<(Vec<u8>, Vec<u8>, i64, bool)> {
     use std::sync::mpsc::TryRecvError;
     use std::time::{Duration, Instant};
 
     let child_pid = child.id();
-    let stdout = spawn_bounded_output_reader(child.stdout.take(), max_output_bytes);
-    let stderr = spawn_bounded_output_reader(child.stderr.take(), max_output_bytes);
+    let stdout = spawn_bounded_output_reader(child.stdout.take(), max_output_bytes, raw_prefix);
+    let stderr = spawn_bounded_output_reader(child.stderr.take(), max_output_bytes, raw_prefix);
+    #[cfg(windows)]
+    let mut tree_stopped = false;
     let deadline = (timeout_ms > 0).then(|| Instant::now() + Duration::from_millis(timeout_ms as u64));
     let mut status = None;
     let mut stdout_bytes = None;
@@ -550,6 +566,8 @@ fn finish_child_output_bounded(
             match child.try_wait() {
                 Ok(child_status) => status = child_status,
                 Err(error) => {
+                    #[cfg(windows)]
+                    if let Some(job) = job { let _ = job.terminate(); }
                     #[cfg(unix)]
                     {
                         if unsafe { libc::kill(-(child_pid as i32), libc::SIGKILL) } != 0 {
@@ -568,6 +586,11 @@ fn finish_child_output_bounded(
                     return Err(error);
                 }
             }
+        }
+        #[cfg(windows)]
+        if status.is_some() && !tree_stopped {
+            if let Some(job) = job { job.terminate()?; }
+            tree_stopped = true;
         }
         if stdout_bytes.is_none() {
             match stdout.try_recv() {
@@ -592,6 +615,8 @@ fn finish_child_output_bounded(
             ));
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            #[cfg(windows)]
+            if let Some(job) = job { job.terminate()?; }
             #[cfg(unix)]
             {
                 let group_kill_rc = unsafe { libc::kill(-(child_pid as i32), libc::SIGKILL) };
@@ -1522,6 +1547,67 @@ pub unsafe extern "C" fn rt_process_run_bounded(
             }
             make_tuple(&stdout, &stderr, exit_code)
         }
+        Err(_) => make_tuple(b"", b"", -1),
+    }
+}
+
+/// Raw bounded prefix capture. Bytes remain arrays until the Simple text
+/// boundary performs strict admission; no RuntimeString contains invalid UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn rt_process_run_bounded_bytes(
+    cmd_ptr: *const u8,
+    cmd_len: u64,
+    args: RuntimeValue,
+    timeout_ms: i64,
+    max_output_bytes: i64,
+) -> RuntimeValue {
+    use std::process::{Command, Stdio};
+    let make_tuple = |stdout: &[u8], stderr: &[u8], status: i64| {
+        let tuple = rt_tuple_new(3);
+        rt_tuple_set(tuple, 0, runtime_byte_array(stdout));
+        rt_tuple_set(tuple, 1, runtime_byte_array(stderr));
+        rt_tuple_set(tuple, 2, RuntimeValue::from_int(status));
+        tuple
+    };
+    if timeout_ms < 0 || !(0..=16_777_216).contains(&max_output_bytes) {
+        return make_tuple(b"", b"", -1);
+    }
+    let Some(cmd) = ptr_bytes(cmd_ptr, cmd_len, 1024 * 1024)
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .filter(|text| !text.contains('\0')) else { return make_tuple(b"", b"", -1); };
+    let count = rt_array_len(args);
+    if count > 65536 { return make_tuple(b"", b"", -1); }
+    let mut command = Command::new(cmd);
+    let mut total = 0usize;
+    for index in 0..count {
+        let value = rt_array_get(args, index);
+        let len = rt_string_len(value) as usize;
+        let ptr = rt_string_data(value);
+        if ptr.is_null() || len > 16_777_216usize.saturating_sub(total) {
+            return make_tuple(b"", b"", -1);
+        }
+        let bytes = std::slice::from_raw_parts(ptr, len);
+        let Ok(arg) = std::str::from_utf8(bytes) else { return make_tuple(b"", b"", -1); };
+        if arg.contains('\0') { return make_tuple(b"", b"", -1); }
+        total += len;
+        command.arg(arg);
+    }
+    clear_simple_child_stack_env(&mut command);
+    configure_timeout_child_process_group(&mut command);
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(windows)]
+    let (child, job) = match process_bytes_windows::spawn(&mut command) {
+        Ok(started) => started,
+        Err(_) => return make_tuple(b"", b"", -1),
+    };
+    #[cfg(not(windows))]
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(_) => return make_tuple(b"", b"", -1),
+    };
+    match finish_child_output_bounded_mode(child, timeout_ms, max_output_bytes as usize,
+        true, #[cfg(windows)] Some(&job)) {
+        Ok((stdout, stderr, status, _)) => make_tuple(&stdout, &stderr, status),
         Err(_) => make_tuple(b"", b"", -1),
     }
 }

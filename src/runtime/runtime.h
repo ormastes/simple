@@ -1209,6 +1209,13 @@ int64_t   rt_process_spawn_async_value(int64_t cmd, SplArray* args);
 int64_t   rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms);
 SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* args,
                                  int64_t timeout_ms, int64_t max_output_bytes);
+/* Strict Windows argv, raw prefix byte arrays, registered tuple; timeout -1.
+ * Each array contains at most max_output_bytes, with no injected markers. */
+int64_t rt_process_run_bounded_bytes(const char* cmd, uint64_t cmd_len, SplArray* args,
+                                    int64_t timeout_ms, int64_t max_output_bytes);
+#if !defined(_WIN32)
+int64_t simple_fork_parent_wait_bounded_bytes(int64_t child_pid, int64_t timeout_ms, uint64_t max_output_bytes);
+#endif
 bool      rt_process_run_owned_bounded(const char* cmd, const char* const* argv,
                                        int64_t timeout_ms, uint64_t max_output_bytes,
                                        char* out, uint64_t out_cap, char* err,

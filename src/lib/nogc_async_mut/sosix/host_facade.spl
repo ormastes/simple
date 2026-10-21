@@ -24,16 +24,18 @@ The `variants/` overlay selects a module ROOT at compile time. That fits a
 per-host tool binary (unlike the compiler, which is multi-target at runtime from
 one binary and is therefore explicitly disqualified from a host-OS variants axis
 by the seam-qualification bar in `.claude/skills/spipe.md`). It is still not
-warranted here: the Windows side is an honest unavailable-stub, so there is no
-second real implementation to select between. A cheap platform check keeps the
-diff minimal and the POSIX path alias-thin. When a real Windows backend lands,
-promoting this seam to the `platform` variants group is a mechanical change.
+warranted for the whole facade: Windows process capture has an operation-specific
+strict byte provider, while directory listing, spawn and ordinary console text
+remain unsupported here. Their admission stays separate; supporting one operation
+does not admit the POSIX text routes for every Windows operation.
 """
 
 use std.nogc_sync_mut.io_runtime.{platform_name}
-use std.nogc_sync_mut.io.process_ops.{process_run_bounded, process_spawn_async}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded, process_run_bounded_bytes, process_windows_executable, process_spawn_async}
 use std.common.string_core.{str_len}
 use std.nogc_sync_mut.io.external_text_io.{TextIoError, io_text_error_message}
+use std.nogc_sync_mut.io.external_text_io.{io_text_decode}
+use std.common.encoding.external_text.{utf8_format}
 use std.nogc_async_mut.sosix.text_boundary.{SOSIX_TEXT_BYTE_LIMIT,
     sosix_admit_utf8, sosix_admit_c_string, sosix_require_posix_text_provider, sosix_resolved_path_checked}
 use std.nogc_sync_mut.io_runtime.{dir_list_optional}
@@ -120,7 +122,15 @@ fn sosix_dir_list(path: text) -> [text]:
         case Ok(entries): entries
         case Err(error): panic(io_text_error_message(error))
 
+fn sosix_decode_process_bytes(captured: ([u8], [u8], i64)) -> Result<SosixRun, TextIoError>:
+    val stdout = io_text_decode(captured.0, utf8_format())?
+    val stderr = io_text_decode(captured.1, utf8_format())?
+    Ok(SosixRun(stdout: stdout, stderr: stderr, exit_code: captured.2))
+
 fn sosix_run_path_checked(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> Result<SosixRun, TextIoError>:
+    if platform_name() == "windows":
+        val captured = process_run_bounded_bytes(cmd, args, timeout_ms, max_output_bytes)
+        return sosix_decode_process_bytes(captured)
     sosix_require_posix_text_provider()?
     # The caller has admitted an explicit path and every argument. Passing an
     # explicit path bypasses the provider's bare-name resolver/early trim.
@@ -131,6 +141,12 @@ fn sosix_run_path_checked(cmd: text, args: [text], timeout_ms: i64, max_output_b
 
 fn sosix_which_checked(name: text) -> Result<text?, TextIoError>:
     val admitted = sosix_admit_c_string(name, false)?
+    if platform_name() == "windows":
+        if admitted.starts_with("-"):
+            return Err(TextIoError.Io("use an explicit path for an executable beginning with a hyphen"))
+        if val found = process_windows_executable(admitted):
+            return Ok(Some(sosix_admit_c_string(found, false)?))
+        return Ok(nil)
     sosix_require_posix_text_provider()?
     if admitted == "": return Ok(nil)
     if admitted.starts_with("-"):
@@ -173,7 +189,7 @@ fn sosix_run_bounded_checked(cmd: text, args: [text], timeout_ms: i64, max_outpu
     # Preflight every argument before a resolver process can be started.
     sosix_arguments_checked(args)?
     var resolved = admitted
-    if not admitted.contains("/"):
+    if not admitted.contains("/") and not (platform_name() == "windows" and (admitted.contains("\\") or admitted.contains(":"))):
         val found = sosix_which_checked(admitted)?
         if val path = found: resolved = path
         else: return Ok(SosixRun(stdout: "", stderr: "SOSIX executable not found: {admitted}", exit_code: 127))
@@ -263,6 +279,7 @@ fn _parse_pct(raw: text) -> f64:
 export SosixRun, SosixProcUsage
 export sosix_platform, sosix_run, sosix_proc_usage, sosix_process_run
 export sosix_run_checked, sosix_run_bounded_checked, sosix_which_checked, sosix_which
+export sosix_decode_process_bytes
 export sosix_dir_list_checked, sosix_dir_list
 
 export sosix_spawn_checked, sosix_spawn
