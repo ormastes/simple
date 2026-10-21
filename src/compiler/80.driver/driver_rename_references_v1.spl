@@ -1,0 +1,581 @@
+"""REQ-MC-008/B5: request-owned compiler facts for an explicit inventory.
+
+This facade admits no edits, redirects, workspace completeness or stable IDs.
+All compiler/runtime/performance execution evidence remains UNRUN.
+Each admitted byte sequence and physical identity come from the same pinned
+descriptor. Publication reacquires each file and verifies identity/revision;
+the complete snapshot is not an atomic filesystem transaction.
+"""
+use std.common.crypto.sha256.{sha256_text, sha256_u8_fast_hex}
+use std.common.text_bytes.{text_to_utf8_bytes}
+use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow}
+use std.nogc_sync_mut.io.external_text_io.{io_legacy_utf8}
+use std.common.io.file_read_policy.{FileReadPolicyV1, FileViewTransportV1}
+use std.common.io.file_view_buffered.{FileViewIdentityV1, file_view_identity_equal_v1}
+use std.common.io.read_only_file_view.{ReadOnlyFileViewV1, ReadOnlyFileViewErrorV1, FileViewSliceV1,
+    read_only_file_view_open_v1, read_only_file_view_read_buffered_uncancellable_v1, read_only_file_view_close_v1}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+use std.nogc_sync_mut.io.dir_entry_ops.{directory_stream_open, directory_stream_count, directory_stream_entry, directory_stream_close}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.frontend._FlatAstBridge.module_assembly.{parse_and_build_module_checked_reference_v1}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module_with_diagnostics, LoweringError}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_lowering._Items.module_build.*
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.hir.hir_reference_snapshot_v1.{HirReferenceSourceIndexV1, HirReferenceDeclarationV1, HirResolvedReferenceV1, HirReferenceModuleFactsV1, HirReferenceCollectorV1, hir_reference_declarations_v1}
+
+struct RenameReferenceConfiguredFileV1:
+    package: text
+    module_path: text
+    file: text
+    revision_sha256: text
+
+struct RenameReferenceLimitsV1:
+    max_files: i64
+    max_total_bytes: i64
+    max_nodes: i64
+    max_references: i64
+    max_inventory_entries: i64
+
+struct RenameReferenceRequestV1:
+    workspace_root: text
+    source_roots: [text]
+    files: [RenameReferenceConfiguredFileV1]
+    selection_file: text
+    line: i64
+    column: i64
+    limits: RenameReferenceLimitsV1
+
+struct RenameReferenceFailureV1:
+    category: text
+    message: text
+
+class RenameReferenceSnapshotV1:
+    kind: text
+    configuration_sha256: text
+    inventory_sha256: text
+    content_sha256: text
+    selected_origin_key: text
+    facts: [HirResolvedReferenceV1]
+    inspected_files: [RenameReferenceConfiguredFileV1]
+    complete_for_manifest: bool
+    visited_nodes: i64
+    parsed_files: i64
+    lowered_files: i64
+    index_by_origin: Dict<text, [i64]>
+
+    fn selected_references() -> [HirResolvedReferenceV1]:
+        var selected: [HirResolvedReferenceV1] = []
+        if self.index_by_origin.contains_key(self.selected_origin_key):
+            for position in self.index_by_origin[self.selected_origin_key]:
+                selected.push(self.facts[position])
+        selected
+
+fn reference_failure_v1(category: text, message: text) -> RenameReferenceFailureV1:
+    RenameReferenceFailureV1(category: category, message: message)
+
+fn reference_fact_failure_v1(message: text) -> RenameReferenceFailureV1:
+    for category in ["capacity", "invalid_span", "unresolved_origin", "unsupported_syntax"]:
+        if message.starts_with(category + ":"):
+            return reference_failure_v1(category, message)
+    reference_failure_v1("unsupported_syntax", message)
+
+fn reference_field_v1(value: text) -> text:
+    "{value.len()}:{value}"
+
+fn reference_normal_path_v1(path: text) -> bool:
+    if not path.starts_with("/") or path.contains("\\") or path.contains("\0") or path.contains("//"):
+        return false
+    if path != "/" and path.ends_with("/"):
+        return false
+    for component in path.split("/"):
+        if component == "." or component == "..":
+            return false
+    true
+
+fn reference_within_v1(path: text, root: text) -> bool:
+    root == "/" or path == root or path.starts_with(root + "/")
+
+fn reference_join_v1(root: text, child: text) -> text:
+    if root == "/": "/" + child else: root + "/" + child
+
+fn reference_identifier_path_v1(name: text) -> bool:
+    for component in name.split("."):
+        if component == "": return false
+        var position = 0
+        while position < component.len():
+            val code = component.char_code_at(position)
+            val letter = (code >= 65 and code <= 90) or (code >= 97 and code <= 122) or code == 95
+            if not letter and not (position > 0 and code >= 48 and code <= 57):
+                return false
+            position = position + 1
+    name != ""
+
+fn reference_revision_v1(value: text) -> bool:
+    if value.len() != 64: return false
+    var position = 0
+    while position < value.len():
+        val code = value.char_code_at(position)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
+            return false
+        position = position + 1
+    true
+
+# Validate every directory ancestor, including ancestors outside the declared
+# workspace: O_NOFOLLOW on the final file alone would still follow those.
+fn reference_real_directory_chain_v1(path: text) -> bool:
+    if not dir_is_real_no_follow("/"): return false
+    var current = ""
+    for component in path.split("/"):
+        if component == "": continue
+        current = current + "/" + component
+        if not dir_is_real_no_follow(current): return false
+    true
+
+fn reference_file_parent_v1(path: text) -> text:
+    val slash = path.last_index_of("/")
+    if slash == 0: "/" else: path.substring(0, slash)
+
+struct RenameReferenceSourceBytesV1:
+    bytes: [u8]
+    identity: FileViewIdentityV1
+
+fn reference_read_source_descriptor_v1(workspace_root: text, path: text, configuration_digest: text) -> Result<RenameReferenceSourceBytesV1, RenameReferenceFailureV1>:
+    var view: ReadOnlyFileViewV1 = match read_only_file_view_open_v1(workspace_root, path,
+            configuration_digest, FileReadPolicyV1.buffered, 1048576u64):
+        case Ok(value): value
+        case Err(_): return Err(reference_failure_v1("incomplete_inventory", "no-follow source descriptor unavailable: {path}"))
+    val identity = FileViewIdentityV1(device: view.identity.device, inode: view.identity.inode,
+        size: view.identity.size, snapshot_digest: view.identity.snapshot_digest)
+    # After successful open, every branch closes the same acquired view.
+    # No cancellation token, pathname byte read or fallback is involved.
+    if identity.size > 1048576u64:
+        val closed = read_only_file_view_close_v1(view)
+        if closed.is_err():
+            return Err(reference_failure_v1("incomplete_inventory", "oversized source descriptor failed to close: {path}"))
+        return Err(reference_failure_v1("capacity", "source file exceeds the one MiB admission ceiling: {path}"))
+    val read = read_only_file_view_read_buffered_uncancellable_v1(&view, 0u64, identity.size)
+    val closed = read_only_file_view_close_v1(view)
+    if closed.is_err():
+        return Err(reference_failure_v1("incomplete_inventory", "source descriptor failed to close: {path}"))
+    val slice: FileViewSliceV1 = match read:
+        case Ok(value): value
+        case Err(ReadOnlyFileViewErrorV1.identity_changed):
+            return Err(reference_failure_v1("revision_changed", "pinned source identity changed during read: {path}"))
+        case Err(_): return Err(reference_failure_v1("incomplete_inventory", "bounded pinned source read failed: {path}"))
+    if not file_view_identity_equal_v1(identity, slice.identity):
+        return Err(reference_failure_v1("revision_changed", "source bytes and identity belong to different descriptor receipts: {path}"))
+    if (slice.offset != 0u64 or slice.length != identity.size or slice.bytes.len().to_u64() != identity.size or
+            slice.transport != FileViewTransportV1.buffered):
+        return Err(reference_failure_v1("invalid_span", "source descriptor returned an invalid bounded byte receipt: {path}"))
+    Ok(RenameReferenceSourceBytesV1(bytes: slice.bytes, identity: identity))
+
+class RenameReferenceIndexBucketV1:
+    positions: [i64]
+
+    me append(position: i64):
+        self.positions.push(position)
+
+# This owner never copies a Dict-owning request state through a loop helper.
+class RenameReferenceBuildV1:
+    request: RenameReferenceRequestV1
+    files_by_path: Dict<text, RenameReferenceConfiguredFileV1>
+    physical_paths: Dict<text, text>
+    identities_by_path: Dict<text, FileViewIdentityV1>
+    sorted_paths: [text]
+    sorted_roots: [text]
+    modules: Dict<text, ParserModule>
+    parsed_modules: [ParserModule]
+    sources: [SourceFile]
+    source_indexes: [HirReferenceSourceIndexV1]
+    declarations_by_module: [[HirReferenceDeclarationV1]]
+    all_declarations: [HirReferenceDeclarationV1]
+    facts: [HirResolvedReferenceV1]
+    fact_keys: Dict<text, i64>
+    declared_origins: Dict<text, bool>
+    token_origins: Dict<text, text>
+    origin_buckets: Dict<text, RenameReferenceIndexBucketV1>
+    configuration_sha256: text
+    inventory_sha256: text
+    content_sha256: text
+    selected_start: i64
+    selected_end: i64
+    visited_nodes: i64
+    parsed_files: i64
+    lowered_files: i64
+
+    static fn new(request: RenameReferenceRequestV1) -> RenameReferenceBuildV1:
+        RenameReferenceBuildV1(request: request, files_by_path: {}, physical_paths: {}, identities_by_path: {}, sorted_paths: [], sorted_roots: [],
+            modules: {}, parsed_modules: [], sources: [], source_indexes: [], declarations_by_module: [], all_declarations: [],
+            facts: [], fact_keys: {}, declared_origins: {}, token_origins: {}, origin_buckets: {},
+            configuration_sha256: "", inventory_sha256: "", content_sha256: "",
+            selected_start: -1, selected_end: -1, visited_nodes: 0, parsed_files: 0, lowered_files: 0)
+
+    me validate_configuration() -> Result<(), RenameReferenceFailureV1>:
+        val limits = self.request.limits
+        if (limits.max_files <= 0 or limits.max_total_bytes <= 0 or limits.max_nodes <= 0 or
+                limits.max_references <= 0 or limits.max_inventory_entries <= 0):
+            return Err(reference_failure_v1("configuration", "all resource limits must be positive"))
+        if self.request.files.len() == 0 or self.request.source_roots.len() == 0:
+            return Err(reference_failure_v1("configuration", "explicit nonempty source roots and file rows required"))
+        if self.request.files.len() > limits.max_files or self.request.source_roots.len() > limits.max_inventory_entries:
+            return Err(reference_failure_v1("capacity", "configuration exceeds the requested inventory bounds"))
+        if (not reference_normal_path_v1(self.request.workspace_root) or
+                not reference_normal_path_v1(self.request.selection_file) or self.request.line <= 0 or self.request.column <= 0):
+            return Err(reference_failure_v1("configuration", "absolute normalized paths and positive selection coordinates required"))
+        if not reference_real_directory_chain_v1(self.request.workspace_root):
+            return Err(reference_failure_v1("incomplete_inventory", "workspace directory is missing, inaccessible or follows a link"))
+        var root_seen: Dict<text, bool> = {}
+        for root in self.request.source_roots:
+            if not reference_normal_path_v1(root) or not reference_within_v1(root, self.request.workspace_root):
+                return Err(reference_failure_v1("configuration", "source root escapes the workspace or is not normalized: {root}"))
+            if root_seen.contains_key(root):
+                return Err(reference_failure_v1("configuration", "duplicate source root: {root}"))
+            root_seen[root] = true
+            self.sorted_roots.push(root)
+        self.sorted_roots.sort()
+        # Check actual component ancestors; lexical neighbors alone miss
+        # overlaps separated by names such as /src-copy and /src/nested.
+        for root in self.sorted_roots:
+            if root == "/": continue
+            if root_seen.contains_key("/"):
+                return Err(reference_failure_v1("configuration", "overlapping source roots are not admitted"))
+            var ancestor = ""
+            for component in root.split("/"):
+                if component == "": continue
+                ancestor = ancestor + "/" + component
+                if ancestor != root and root_seen.contains_key(ancestor):
+                    return Err(reference_failure_v1("configuration", "overlapping source roots are not admitted"))
+        var module_seen: Dict<text, bool> = {}
+        for row in self.request.files:
+            if (not reference_normal_path_v1(row.file) or not row.file.ends_with(".spl") or
+                    not reference_revision_v1(row.revision_sha256) or row.package == "" or row.package != row.package.trim() or
+                    row.package.contains("\0") or
+                    not reference_identifier_path_v1(row.module_path)):
+                return Err(reference_failure_v1("configuration", "invalid configured identity, revision or source path: {row.file}"))
+            var included = false
+            for root in self.sorted_roots:
+                if reference_within_v1(row.file, root): included = true
+            if not included:
+                return Err(reference_failure_v1("configuration", "configured source lies outside source roots: {row.file}"))
+            val module_name = row.module_path
+            if self.files_by_path.contains_key(row.file) or module_seen.contains_key(module_name):
+                return Err(reference_failure_v1("configuration", "duplicate physical source or compiler module identity: {row.file}"))
+            self.files_by_path[row.file] = row
+            module_seen[module_name] = true
+            self.sorted_paths.push(row.file)
+        if not self.files_by_path.contains_key(self.request.selection_file):
+            return Err(reference_failure_v1("configuration", "selection file is not configured"))
+        self.sorted_paths.sort()
+        self.configuration_sha256 = self.configuration_digest()
+        Ok(())
+
+    fn configuration_digest() -> text:
+        var parts = ["rename-reference-configuration-v1", reference_field_v1(self.request.workspace_root)]
+        for root in self.sorted_roots:
+            parts.push("root:" + reference_field_v1(root))
+        for path in self.sorted_paths:
+            val row: RenameReferenceConfiguredFileV1 = self.files_by_path[path]
+            parts.push("file:" + reference_field_v1(row.package) + reference_field_v1(row.module_path) +
+                reference_field_v1(row.file) + reference_field_v1(row.revision_sha256))
+        val limits = self.request.limits
+        parts.push("limits:{limits.max_files}:{limits.max_total_bytes}:{limits.max_nodes}:{limits.max_references}:{limits.max_inventory_entries}")
+        sha256_text(parts.join("\n"))
+
+    me discover_inventory() -> Result<text, RenameReferenceFailureV1>:
+        var pending: [text] = []
+        for root in self.sorted_roots:
+            if not reference_real_directory_chain_v1(root):
+                return Err(reference_failure_v1("incomplete_inventory", "source root is missing, inaccessible or follows a link: {root}"))
+            pending.push(root)
+        var discovered: [text] = []
+        var seen_files: Dict<text, bool> = {}
+        var seen_directories: Dict<text, bool> = {}
+        var entries = 0
+        var pending_index = 0
+        while pending_index < pending.len():
+            val directory = pending[pending_index]
+            pending_index = pending_index + 1
+            if seen_directories.contains_key(directory) or not dir_is_real_no_follow(directory):
+                return Err(reference_failure_v1("incomplete_inventory", "duplicate, linked or changed directory: {directory}"))
+            seen_directories[directory] = true
+            val handle = directory_stream_open(directory)
+            if handle <= 0:
+                return Err(reference_failure_v1("incomplete_inventory", "directory discovery failed: {directory}"))
+            val count = directory_stream_count(handle)
+            if count < 0:
+                directory_stream_close(handle)
+                return Err(reference_failure_v1("incomplete_inventory", "directory count failed: {directory}"))
+            if count > self.request.limits.max_inventory_entries - entries:
+                directory_stream_close(handle)
+                return Err(reference_failure_v1("capacity", "directory inventory entry budget exceeded"))
+            entries = entries + count
+            var entry_index = 0
+            var names: Dict<text, bool> = {}
+            while entry_index < count:
+                val name = directory_stream_entry(handle, entry_index)
+                entry_index = entry_index + 1
+                if (name == "" or name == "." or name == ".." or name.contains("/") or
+                        name.contains("\\") or name.contains("\0") or names.contains_key(name)):
+                    directory_stream_close(handle)
+                    return Err(reference_failure_v1("incomplete_inventory", "invalid or duplicate directory entry: {directory}"))
+                names[name] = true
+                val path = reference_join_v1(directory, name)
+                if dir_is_real_no_follow(path):
+                    pending.push(path)
+                elif file_is_regular_no_follow(path):
+                    if path.ends_with(".spl"):
+                        if seen_files.contains_key(path) or not self.files_by_path.contains_key(path):
+                            directory_stream_close(handle)
+                            return Err(reference_failure_v1("incomplete_inventory", "duplicate or unlisted source: {path}"))
+                        if discovered.len() >= self.request.limits.max_files:
+                            directory_stream_close(handle)
+                            return Err(reference_failure_v1("capacity", "source inventory file budget exceeded"))
+                        seen_files[path] = true
+                        discovered.push(path)
+                else:
+                    directory_stream_close(handle)
+                    return Err(reference_failure_v1("incomplete_inventory", "unreadable, linked or unsupported filesystem entry: {path}"))
+            directory_stream_close(handle)
+        if discovered.len() != self.sorted_paths.len():
+            return Err(reference_failure_v1("incomplete_inventory", "discovered source inventory differs from configured rows"))
+        discovered.sort()
+        var digest_parts = ["rename-reference-inventory-v1"]
+        var position = 0
+        while position < discovered.len():
+            if discovered[position] != self.sorted_paths[position]:
+                return Err(reference_failure_v1("incomplete_inventory", "configured source is missing from discovered inventory"))
+            digest_parts.push(reference_field_v1(discovered[position]))
+            position = position + 1
+        Ok(sha256_text(digest_parts.join("\n")))
+
+    me read_source(row: RenameReferenceConfiguredFileV1) -> Result<text, RenameReferenceFailureV1>:
+        if not reference_real_directory_chain_v1(reference_file_parent_v1(row.file)) or not file_is_regular_no_follow(row.file):
+            return Err(reference_failure_v1("incomplete_inventory", "source is not a no-follow regular file: {row.file}"))
+        val admitted_read: RenameReferenceSourceBytesV1 = reference_read_source_descriptor_v1(self.request.workspace_root,
+            row.file, self.configuration_sha256)?
+        val identity: FileViewIdentityV1 = admitted_read.identity
+        val raw = admitted_read.bytes
+        val physical_key = "{identity.device}:{identity.inode}"
+        if self.physical_paths.contains_key(physical_key) and self.physical_paths[physical_key] != row.file:
+            return Err(reference_failure_v1("configuration", "distinct configured paths identify the same physical source: {row.file}"))
+        if self.identities_by_path.contains_key(row.file):
+            val admitted: FileViewIdentityV1 = self.identities_by_path[row.file]
+            if not file_view_identity_equal_v1(admitted, identity):
+                return Err(reference_failure_v1("revision_changed", "physical source identity changed before publication: {row.file}"))
+        if sha256_u8_fast_hex(raw) != row.revision_sha256:
+            return Err(reference_failure_v1("revision_changed", "configured SHA256 differs from admitted bytes: {row.file}"))
+        val source = match io_legacy_utf8(raw):
+            case Ok(value): value
+            case Err(message): return Err(reference_failure_v1("parse", message))
+        val encoded = text_to_utf8_bytes(source)
+        if encoded.len() != raw.len():
+            return Err(reference_failure_v1("invalid_span", "UTF8 decoding changed original source bytes"))
+        var position = 0
+        while position < raw.len():
+            if raw[position] != encoded[position]:
+                return Err(reference_failure_v1("invalid_span", "UTF8 decoding changed original source bytes"))
+            position = position + 1
+        self.physical_paths[physical_key] = row.file
+        self.identities_by_path[row.file] = identity
+        Ok(source)
+
+    me admit_sources() -> Result<(), RenameReferenceFailureV1>:
+        var total_bytes = 0
+        var content_parts = ["rename-reference-content-v1"]
+        for path in self.sorted_paths:
+            val row: RenameReferenceConfiguredFileV1 = self.files_by_path[path]
+            val source = self.read_source(row)?
+            val byte_count = source.len()
+            if byte_count > self.request.limits.max_total_bytes - total_bytes:
+                return Err(reference_failure_v1("capacity", "total admitted source bytes exceed the requested budget"))
+            total_bytes = total_bytes + byte_count
+            self.sources.push(SourceFile(path: path, authored_path: path, content: source,
+                module_name: row.module_path))
+            content_parts.push(reference_field_v1(path) + reference_field_v1(row.revision_sha256))
+        self.content_sha256 = sha256_text(content_parts.join("\n"))
+        Ok(())
+
+    me parse_sources() -> Result<(), RenameReferenceFailureV1>:
+        var module_ordinal = 0
+        while module_ordinal < self.sources.len():
+            val source: SourceFile = self.sources[module_ordinal]
+            val row: RenameReferenceConfiguredFileV1 = self.files_by_path[source.path]
+            var parsed: ParserModule = match parse_and_build_module_checked_reference_v1(source.content, source.path):
+                case Ok(value): value
+                case Err(message):
+                    if message.starts_with("unsupported_syntax:"):
+                        return Err(reference_fact_failure_v1(message))
+                    return Err(reference_failure_v1("parse", message))
+            # Physical source provenance stays in spans/index/source paths.
+            # The configured module_path is independently validated by the
+            # canonical surface registry; package remains a separate identity.
+            parsed.name = source.module_name
+            self.parsed_files = self.parsed_files + 1
+            val source_index: HirReferenceSourceIndexV1 = match HirReferenceSourceIndexV1.build(source.content, source.path,
+                    row.revision_sha256, self.request.limits.max_nodes):
+                case Ok(value): value
+                case Err(message): return Err(reference_fact_failure_v1(message))
+            val declarations: [HirReferenceDeclarationV1] = match hir_reference_declarations_v1(parsed, source_index, module_ordinal, source.module_name):
+                case Ok(value): value
+                case Err(message): return Err(reference_fact_failure_v1(message))
+            if declarations.len() > self.request.limits.max_references - self.all_declarations.len():
+                return Err(reference_failure_v1("capacity", "declaration inventory exceeds reference budget"))
+            for declaration in declarations:
+                if self.declared_origins.contains_key(declaration.origin_key):
+                    return Err(reference_failure_v1("unresolved_origin", "duplicate parsed declaration origin"))
+                self.declared_origins[declaration.origin_key] = true
+                self.all_declarations.push(declaration)
+            self.declarations_by_module.push(declarations)
+            self.modules[source.module_name] = parsed
+            # Preserve the concrete parser owner; Dict indexing has an optional
+            # transport carrier on the staged ABI, unsuitable for lowering.
+            self.parsed_modules.push(parsed)
+            self.source_indexes.push(source_index)
+            if source.path == self.request.selection_file:
+                for token in source_index.tokens:
+                    if (token.line == self.request.line and self.request.column >= token.column and
+                            self.request.column < token.column + token.codepoint_end - token.codepoint_start):
+                        if self.selected_start >= 0:
+                            return Err(reference_failure_v1("ambiguous_selection", "selection overlaps multiple original tokens"))
+                        self.selected_start = token.byte_start
+                        self.selected_end = token.byte_end
+            module_ordinal = module_ordinal + 1
+        Ok(())
+
+    me append_fact(fact: HirResolvedReferenceV1) -> Result<(), RenameReferenceFailureV1>:
+        if fact.module_ordinal < 0 or fact.module_ordinal >= self.sources.len():
+            return Err(reference_failure_v1("unresolved_origin", "reference has no configured module owner"))
+        val row: RenameReferenceConfiguredFileV1 = self.files_by_path[self.sources[fact.module_ordinal].path]
+        if (fact.file != row.file or fact.revision_sha256 != row.revision_sha256 or
+                fact.byte_start < 0 or fact.byte_end <= fact.byte_start or fact.local_symbol_id < 0):
+            return Err(reference_failure_v1("invalid_span", "reference receipt differs from the admitted source owner"))
+        if not self.declared_origins.contains_key(fact.origin_key):
+            return Err(reference_failure_v1("unresolved_origin", "reference terminal declaration is not in the configured inventory"))
+        val token_key = (reference_field_v1(fact.file) + reference_field_v1(fact.revision_sha256) +
+            ":{fact.byte_start}:{fact.byte_end}:" + reference_field_v1(fact.role))
+        if self.token_origins.contains_key(token_key) and self.token_origins[token_key] != fact.origin_key:
+            return Err(reference_failure_v1("unresolved_origin", "incompatible origins claim one exact token and role"))
+        val fact_key = token_key + reference_field_v1(fact.origin_key)
+        if self.fact_keys.contains_key(fact_key):
+            val previous: HirResolvedReferenceV1 = self.facts[self.fact_keys[fact_key]]
+            if (previous.local_symbol_id != fact.local_symbol_id or previous.module_ordinal != fact.module_ordinal or
+                    previous.spelling != fact.spelling or previous.line != fact.line or previous.column != fact.column):
+                return Err(reference_failure_v1("unresolved_origin", "incompatible duplicate reference receipts"))
+            return Ok(())
+        if self.facts.len() >= self.request.limits.max_references:
+            return Err(reference_failure_v1("capacity", "reference budget exhausted before publication"))
+        self.token_origins[token_key] = fact.origin_key
+        val position = self.facts.len()
+        self.fact_keys[fact_key] = position
+        self.facts.push(fact)
+        if not self.origin_buckets.contains_key(fact.origin_key):
+            self.origin_buckets[fact.origin_key] = RenameReferenceIndexBucketV1(positions: [])
+        if val bucket = self.origin_buckets[fact.origin_key]:
+            bucket.append(position)
+        else:
+            return Err(reference_failure_v1("unresolved_origin", "missing request-local reference index bucket"))
+        Ok(())
+
+    me lower_sources() -> Result<(), RenameReferenceFailureV1>:
+        val surfaces: ModuleSurfacesByName = match module_surfaces_from_modules(self.modules, self.sources):
+            case Ok(value): value
+            case Err(message): return Err(reference_failure_v1("lowering", message))
+        var collector: HirReferenceCollectorV1 = HirReferenceCollectorV1.new(self.request.limits.max_nodes, self.request.limits.max_references)
+        match collector.prepare_declarations(self.all_declarations):
+            case Ok(_): ()
+            case Err(message): return Err(reference_fact_failure_v1(message))
+        var module_ordinal = 0
+        while module_ordinal < self.sources.len():
+            val source: SourceFile = self.sources[module_ordinal]
+            val errors: [LoweringError] = []
+            val messages: [text] = []
+            val recovered: [bool] = []
+            var lowering: HirLowering = hirlowering_for_module_with_diagnostics(source.path, surfaces, errors, messages, recovered)
+            lowering.use_explicit_semantic_policy()
+            lowering.reference_origins_v1.begin_module(module_ordinal)
+            val parsed: ParserModule = self.parsed_modules[module_ordinal]
+            val module: HirModule = lowering.lower_parser_module_unstub(parsed, false)
+            self.lowered_files = self.lowered_files + 1
+            if lowering.errors.len() > 0 or lowering.diagnostic_messages.len() > 0:
+                return Err(reference_failure_v1("lowering", "HIR lowering refused configured module: {source.module_name}"))
+            if lowering.reference_origins_v1.invalid_reason != "":
+                return Err(reference_fact_failure_v1(lowering.reference_origins_v1.invalid_reason))
+            val remaining_nodes = self.request.limits.max_nodes - self.visited_nodes
+            val remaining_references = self.request.limits.max_references - self.facts.len()
+            if remaining_nodes <= 0 or remaining_references <= 0:
+                return Err(reference_failure_v1("capacity", "compiler fact budget exhausted before all files were covered"))
+            collector.max_nodes = remaining_nodes
+            collector.max_references = remaining_references
+            val collected: HirReferenceModuleFactsV1 = match collector.collect(module, self.source_indexes[module_ordinal], module_ordinal,
+                    source.module_name, self.declarations_by_module[module_ordinal],
+                    lowering.reference_origins_v1):
+                case Ok(value): value
+                case Err(message): return Err(reference_fact_failure_v1(message))
+            if collected.visited_nodes < 0 or collected.visited_nodes > remaining_nodes:
+                return Err(reference_failure_v1("capacity", "invalid or excessive compiler node count"))
+            self.visited_nodes = self.visited_nodes + collected.visited_nodes
+            for fact in collected.references:
+                self.append_fact(fact)?
+            module_ordinal = module_ordinal + 1
+        Ok(())
+
+    fn selected_origin() -> Result<text, RenameReferenceFailureV1>:
+        var origin = ""
+        for fact in self.facts:
+            if fact.file == self.request.selection_file and fact.byte_start == self.selected_start and fact.byte_end == self.selected_end:
+                if origin != "" and origin != fact.origin_key:
+                    return Err(reference_failure_v1("ambiguous_selection", "selection resolves to multiple declarations"))
+                origin = fact.origin_key
+        if origin == "":
+            return Err(reference_failure_v1("ambiguous_selection", "selection is not an admitted callable reference token"))
+        Ok(origin)
+
+    me revalidate() -> Result<(), RenameReferenceFailureV1>:
+        # Reacquire the entire bounded inventory around the revision reads;
+        # no mtime, parser cache or injected caller authority can replace it.
+        if self.discover_inventory()? != self.inventory_sha256:
+            return Err(reference_failure_v1("incomplete_inventory", "source inventory changed during compiler analysis"))
+        for path in self.sorted_paths:
+            val row: RenameReferenceConfiguredFileV1 = self.files_by_path[path]
+            val _verified_source = self.read_source(row)?
+        if self.discover_inventory()? != self.inventory_sha256:
+            return Err(reference_failure_v1("incomplete_inventory", "source inventory changed during revision revalidation"))
+        if self.configuration_digest() != self.configuration_sha256:
+            return Err(reference_failure_v1("configuration", "configuration changed before publication"))
+        Ok(())
+
+    me build() -> Result<RenameReferenceSnapshotV1, RenameReferenceFailureV1>:
+        self.validate_configuration()?
+        self.inventory_sha256 = self.discover_inventory()?
+        self.admit_sources()?
+        self.parse_sources()?
+        self.lower_sources()?
+        val selected_origin = self.selected_origin()?
+        self.revalidate()?
+        var inspected: [RenameReferenceConfiguredFileV1] = []
+        for path in self.sorted_paths:
+            inspected.push(self.files_by_path[path])
+        # Copy each completed bucket once. No growing array crosses a Dict
+        # value boundary in the per-reference loop.
+        var frozen_index: Dict<text, [i64]> = {}
+        for origin in self.origin_buckets.keys():
+            if val bucket = self.origin_buckets[origin]:
+                frozen_index[origin] = bucket.positions
+            else:
+                return Err(reference_failure_v1("unresolved_origin", "reference index bucket disappeared before publication"))
+        Ok(RenameReferenceSnapshotV1(kind: "resolved-reference-snapshot-v1",
+            configuration_sha256: self.configuration_sha256, inventory_sha256: self.inventory_sha256,
+            content_sha256: self.content_sha256, selected_origin_key: selected_origin,
+            facts: self.facts, inspected_files: inspected, complete_for_manifest: true,
+            visited_nodes: self.visited_nodes, parsed_files: self.parsed_files,
+            lowered_files: self.lowered_files, index_by_origin: frozen_index))
+
+pub fn driver_collect_rename_references_v1(request: RenameReferenceRequestV1) -> Result<RenameReferenceSnapshotV1, RenameReferenceFailureV1>:
+    """Collect actual parser/HIR references; any incomplete input returns Err."""
+    var owner: RenameReferenceBuildV1 = RenameReferenceBuildV1.new(request)
+    owner.build()
+
+export RenameReferenceConfiguredFileV1, RenameReferenceLimitsV1, RenameReferenceRequestV1
+export RenameReferenceFailureV1, RenameReferenceSnapshotV1, driver_collect_rename_references_v1
