@@ -35,24 +35,7 @@ extern fn rt_http_head(url: text) -> (i64, text, text)
 @unsafe(reason: "raw URL/path/field text and runtime-owned response tuple ABI", capabilities: [ffi])
 extern fn rt_http_upload(url: text, file_path: text, field_name: text) -> (i64, text, text)
 
-# --- HTTP Client Configuration ---
-
-@unsafe(reason: "returns a generation-encoded client handle; zero is failure", capabilities: [ffi])
-extern fn rt_http_client_create() -> i64
-@unsafe(reason: "raw client handle ABI with bounded timeout policy", capabilities: [ffi])
-extern fn rt_http_client_set_timeout(client: i64, timeout_ms: i64) -> bool
-@unsafe(reason: "raw client handle and header text ABI", capabilities: [ffi])
-extern fn rt_http_client_set_header(client: i64, key: text, value: text) -> bool
-@unsafe(reason: "raw client handle plus method/URL/header-array/body ABI and runtime-owned response tuple", capabilities: [ffi])
-extern fn rt_http_client_request(
-    client: i64,
-    method: text,
-    url: text,
-    headers: [text],
-    body: text
-) -> (i64, text, text)
-@unsafe(reason: "invalidates a generation-encoded client handle", capabilities: [ffi])
-extern fn rt_http_client_destroy(client: i64)
+export use std.nogc_sync_mut.io.http_client_handles.{HttpClient, rt_http_client_create, rt_http_client_set_timeout, rt_http_client_set_header, rt_http_client_request, rt_http_client_destroy, http_client_new, http_client_set_timeout, http_client_set_header, http_client_request, http_client_destroy}
 
 # --- HTTP Server ---
 
@@ -97,10 +80,6 @@ extern fn rt_http_url_decode(text: text) -> text
 
 # --- Core Types ---
 
-struct HttpClient:
-    handle: i64
-    is_valid: bool
-
 struct HttpServer:
     handle: i64
     port: i64
@@ -128,56 +107,6 @@ fn http_upload(url: text, file_path: text, field_name: text) -> HttpResponse:
     """
     unsafe(capabilities: [ffi]):
         make_http_response(rt_http_upload(url, file_path, field_name))
-
-# --- HTTP Client with Configuration ---
-
-fn http_client_new() -> HttpClient:
-    """
-    Create a new HTTP client with custom configuration.
-    Allows setting timeouts, default headers, etc.
-    """
-    val handle = unsafe(capabilities: [ffi]):
-        rt_http_client_create()
-    HttpClient(handle: handle, is_valid: handle > 0)
-
-fn http_client_set_timeout(client: HttpClient, timeout_ms: i64) -> bool:
-    """Set request timeout in milliseconds."""
-    if not client.is_valid:
-        false
-    else:
-        unsafe(capabilities: [ffi]):
-            rt_http_client_set_timeout(client.handle, timeout_ms)
-
-# reason: positional io http_sffi API
-fn http_client_set_header(client: HttpClient, key: text, value: text) -> bool:
-    """Set default header for all requests."""
-    if not client.is_valid:
-        false
-    else:
-        unsafe(capabilities: [ffi]):
-            rt_http_client_set_header(client.handle, key, value)
-
-# reason: positional io http_sffi API
-fn http_client_request(client: HttpClient, method: HttpMethod, url: text, headers: [text], body: text) -> HttpResponse:
-    """Perform request using configured client."""
-    if not client.is_valid:
-        HttpResponse(
-            status_code: 0,
-            status: HttpStatus.Unknown,
-            body: "",
-            error: "Invalid HTTP client",
-            is_ok: false
-        )
-    else:
-        val method_str = method_to_string(method)
-        unsafe(capabilities: [ffi]):
-            make_http_response(rt_http_client_request(client.handle, method_str, url, headers, body))
-
-fn http_client_destroy(client: HttpClient):
-    """Release HTTP client resources."""
-    if client.is_valid:
-        unsafe(capabilities: [ffi]):
-            rt_http_client_destroy(client.handle)
 
 # --- HTTP Server Functions ---
 

@@ -1,0 +1,39 @@
+# Local fixture echoes METHOD|Content-Type|body with status 200.
+# This probe verifies the configured-client owner without importing optional
+# server/WebSocket declarations. Compile and run with --url=http://127.0.0.1:PORT/.
+@unsafe(reason: "native fixture reads the existing runtime-owned argv array", capabilities: [ffi])
+extern fn sys_get_args() -> [text]
+use std.nogc_sync_mut.io.http_client_handles.{HttpClient, HttpMethod, http_client_new, http_client_set_timeout, http_client_set_header, http_client_request, http_client_destroy}
+
+fn check(condition: bool, label: text) -> i64:
+    if condition: return 0
+    print("FAIL: " + label)
+    1
+
+fn main() -> i64:
+    var url = ""
+    val args = unsafe(capabilities: [ffi]):
+        sys_get_args()
+    for arg in args:
+        if arg.starts_with("--url="): url = arg[6:]
+    if not url.starts_with("http://127.0.0.1:"): return 2
+    var failures = 0
+    val client = http_client_new()
+    failures = failures + check(client.is_valid and client.handle > 0, "client allocation")
+    failures = failures + check(not http_client_set_timeout(client, -1), "negative timeout rejected")
+    failures = failures + check(http_client_set_timeout(client, 2000), "bounded timeout accepted")
+    failures = failures + check(http_client_set_header(client, "Content-Type", "text/plain"), "default header accepted")
+    val response = http_client_request(client, HttpMethod.POST, url, [], "configured")
+    failures = failures + check(response.status_code == 200 and response.is_ok and response.error == "" and response.body == "POST|text/plain|configured", "configured transport and default header")
+    http_client_destroy(client)
+    failures = failures + check(not http_client_set_timeout(client, 1000), "destroyed handle rejected")
+    val replacement = http_client_new()
+    failures = failures + check(replacement.is_valid and replacement.handle != client.handle, "new generation allocated")
+    val stale = http_client_request(client, HttpMethod.GET, url, [], "")
+    failures = failures + check(not stale.is_ok and stale.error != "", "stale generation request rejected")
+    http_client_destroy(replacement)
+    val invalid = HttpClient(handle: 0, is_valid: false)
+    val rejected = http_client_request(invalid, HttpMethod.GET, url, [], "")
+    failures = failures + check(not rejected.is_ok and rejected.error == "Invalid HTTP client", "invalid wrapper rejected")
+    print("HTTP client handles: 9 checks, " + str(failures) + " failures")
+    if failures == 0: 0 else: 1
