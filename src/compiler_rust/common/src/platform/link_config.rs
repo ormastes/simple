@@ -140,13 +140,23 @@ impl PlatformLinkConfig {
 
     fn freebsd() -> Self {
         Self {
-            libraries: vec!["pthread", "m", "execinfo", "z", "zstd", "util", "rt"],
+            // kvm/procstat/elf back the process-inspection symbols native_all
+            // references (kvm_getprocs, procstat_getfiles, ...). Every linked
+            // library must also be scanned below: a symbol absent from the scan
+            // is stubbed, and these STRONG stubs win over the real library.
+            // Measured 2026-10-21 (FreeBSD 14.4 riscv64 stage1): openpty,
+            // kvm_* and procstat_* were all stubbed for exactly that reason.
+            libraries: vec!["pthread", "m", "execinfo", "z", "zstd", "util", "rt", "kvm", "procstat", "elf"],
             library_search_paths: vec!["/usr/local/lib"],
             system_scan_libs: vec![
                 "/lib/libc.so.7",
                 "/lib/libm.so.5",
                 "/lib/libthr.so.3",
                 "/usr/lib/libexecinfo.so.1",
+                "/lib/libutil.so.9",
+                "/lib/libkvm.so.7",
+                "/usr/lib/libprocstat.so.1",
+                "/lib/libelf.so.2",
             ],
             nm_flags: vec!["-D", "-g", "-p"],
             stub_strategy: StubStrategy::StrongWithAllowMultiple,
