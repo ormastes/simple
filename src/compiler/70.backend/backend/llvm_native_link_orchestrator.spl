@@ -240,6 +240,15 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         options.runtime_bundle
     else:
         env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
+    # This initial observer profile never consumes prebuilt/native-all/Stage4 owners.
+    val allocation_observer = runtime_bundle == "core-c-alloc-observer-v1"
+    if runtime_bundle == "core-c-alloc-observer-v1":
+        if stage4_requested or runtime_path != "" or hosted_os != "linux" or hosted_plan.requires_cross:
+            return Err("allocation observer v1 rejects archive providers, Stage4 and non-native Linux links")
+        # External dependencies and flags can replace or rebind canonical owners,
+        # including re-enabling duplicate forgiveness after config admission.
+        if (env_get("SIMPLE_LINK_OBJECTS") ?? "") != "" or options.libraries.len() > 0 or options.library_paths.len() > 0 or options.linker_flags.len() > 0:
+            return Err("allocation observer v1 rejects external providers and explicit link options")
     val bootstrap_native_all = _llvm_bootstrap_native_all_path(
         stage4_requested, runtime_path, runtime_bundle,
         hosted_plan.requires_cross, hosted_os, _is_mingw())
@@ -247,6 +256,8 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         val _admitted = native_runtime_strict_archives_v1(runtime_path, [bootstrap_native_all])?
     # One owner per rt_* symbol (--runtime-owner / SIMPLE_RUNTIME_OWNER).
     val runtime_owner = llvm_runtime_owner_v1()?
+    if runtime_bundle == "core-c-alloc-observer-v1" and runtime_owner != "c":
+        return Err("allocation observer v1 requires canonical C runtime owners")
     val coff_native_all = bootstrap_native_all != "" and hosted_os == "windows" and not _is_mingw()
 
     # Step 1: Always compile the FRESH C runtime to object files, even when the
@@ -671,8 +682,8 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         strip_output: options.strip_output,
         prefer_size_linker: options.opt_level == 1,
         verbose: options.verbose,
-        allow_duplicate_definitions: llvm_hosted_allow_duplicate_definitions(hosted_os, hosted_target, stage4_requested),
-        allow_cc_fallback: not stage4_requested,
+        allow_duplicate_definitions: not allocation_observer and llvm_hosted_allow_duplicate_definitions(hosted_os, hosted_target, stage4_requested),
+        allow_cc_fallback: not allocation_observer and not stage4_requested,
         retained_symbols: retained_symbols,
         extra_flags: llvm_external_provider_rpath_flags(external_providers),
         target_triple: hosted_target,

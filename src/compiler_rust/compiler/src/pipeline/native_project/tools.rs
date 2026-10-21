@@ -446,6 +446,7 @@ fn build_c_runtime_library(
         // scripts/check/check-runtime-source-list-parity.shs, which is exactly
         // the dropped-list-entry class that gate exists to catch.
         "runtime_memory.c",
+        "runtime_alloc_observer.c",
         // ^ canonical memory provider, compiled WITH -DSIMPLE_RUNTIME_MEMORY_OWNER=1
         // (see the compile flags below).  It shares 16 symbol NAMES with
         // runtime_native.c (rt_alloc, rt_free, rt_realloc, rt_memcpy, rt_memset,
