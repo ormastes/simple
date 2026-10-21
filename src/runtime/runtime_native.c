@@ -16557,11 +16557,32 @@ static SplArray* native_shell_capture(int64_t cmd_value) {
     return captured;
 }
 
-int64_t rt_shell_exit_code(void) {
+/* Standalone core-C owns these real implementations. In a mixed link the
+ * strong Rust shell owner must travel with its own strings/tuples/process ABI.
+ * MSVC has no ELF-style weak function attribute, so expose fallback aliases. */
+#if defined(_MSC_VER)
+#if defined(_M_IX86)
+#pragma comment(linker, "/alternatename:_rt_shell_exit_code=_core_c_shell_exit_code")
+#pragma comment(linker, "/alternatename:_rt_shell_exec=_core_c_shell_exec")
+#pragma comment(linker, "/alternatename:_rt_shell_exec_tuple=_core_c_shell_exec_tuple")
+#else
+#pragma comment(linker, "/alternatename:rt_shell_exit_code=core_c_shell_exit_code")
+#pragma comment(linker, "/alternatename:rt_shell_exec=core_c_shell_exec")
+#pragma comment(linker, "/alternatename:rt_shell_exec_tuple=core_c_shell_exec_tuple")
+#endif
+#define rt_shell_exit_code core_c_shell_exit_code
+#define rt_shell_exec core_c_shell_exec
+#define rt_shell_exec_tuple core_c_shell_exec_tuple
+#define SHELL_C_WEAK
+#else
+#define SHELL_C_WEAK __attribute__((weak))
+#endif
+
+SHELL_C_WEAK int64_t rt_shell_exit_code(void) {
     return rt_shell_last_status;
 }
 
-int64_t rt_shell_exec(int64_t cmd_value) {
+SHELL_C_WEAK int64_t rt_shell_exec(int64_t cmd_value) {
     /* Preserve scalar popen behavior: stdout capture, inherited stderr/stdin,
      * nil on spawn/allocation failure. Only exit-status recording is new. */
     rt_shell_last_status = -1;
@@ -16600,7 +16621,7 @@ int64_t rt_shell_exec(int64_t cmd_value) {
     return result;
 }
 
-int64_t rt_shell_exec_tuple(int64_t cmd_value) {
+SHELL_C_WEAK int64_t rt_shell_exec_tuple(int64_t cmd_value) {
     SplArray* result = native_shell_capture(cmd_value);
     int64_t tuple = rt_tuple_new(3);
     if (result) {
@@ -16613,6 +16634,12 @@ int64_t rt_shell_exec_tuple(int64_t cmd_value) {
     }
     return tuple;
 }
+#undef SHELL_C_WEAK
+#if defined(_MSC_VER)
+#undef rt_shell_exit_code
+#undef rt_shell_exec
+#undef rt_shell_exec_tuple
+#endif
 
 /* ================================================================
  * Process / Environment

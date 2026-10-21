@@ -422,15 +422,12 @@ unsafe fn capture_native_shell(cmd: RuntimeValue) -> Option<std::process::Output
 }
 
 /// Legacy scalar shell status is thread-local and initially zero.
-// Native-all links the core-C shell owner; standalone Rust owns this ABI here.
-#[cfg(not(feature = "native-all-provider"))]
 #[no_mangle]
 pub extern "C" fn rt_shell_exit_code() -> i64 {
     LAST_NATIVE_SHELL_EXIT_CODE.with(|status| status.get())
 }
 
 /// Execute the platform shell and record only this scalar call's status.
-#[cfg(not(feature = "native-all-provider"))]
 #[no_mangle]
 pub unsafe extern "C" fn rt_shell_exec(cmd: RuntimeValue) -> RuntimeValue {
     let Some(script) = extract_string(cmd) else {
@@ -452,7 +449,6 @@ pub unsafe extern "C" fn rt_shell_exec(cmd: RuntimeValue) -> RuntimeValue {
 }
 
 /// Atomic stdout/stderr/status capture leaves the scalar shell slot unchanged.
-#[cfg(not(feature = "native-all-provider"))]
 #[no_mangle]
 pub unsafe extern "C" fn rt_shell_exec_tuple(cmd: RuntimeValue) -> RuntimeValue {
     let tuple = rt_tuple_new(3);
