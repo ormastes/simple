@@ -169,3 +169,17 @@ This checkpoint adds targeted probe outcomes and a separate SF6 source/spec slic
 The historical GEN2 selector counts stay 302 present / 76 missing. A bounded membership comparison at source `c319fb11c1d989dfc38b6019e8e5b134942f8c17` also found 302 tracked entries / 76 absent entries across 51 unique absent paths, but it does not establish cohort identity with the historical 76. The recovered 51 candidates remain unmapped; an initial review of 26 found placeholder LSP/Span cases and repairs are active. No automatic selector-count reduction is recorded.
 
 All native probes and isolated successes above remain separate from SSpec acceptance. The official acceptance states remain 0 PASS, 0 FAIL, 82 UNRUN; ordinary full-source CLI/runner qualification and remaining semantic/runtime failures are open.
+
+
+### Post-b402 source progress and exhausted qualification budget (2026-10-21)
+
+This checkpoint records progress after `b402f7d6e99`; it does not qualify a producer or change the selected acceptance denominator (82 scopes, 111 canonical rows, 378 SSpecs). Official acceptance remains 0 PASS, 0 FAIL, 82 UNRUN.
+
+- **HIR retention guard:** `86a8c43b883` avoids shard-only HIR validation retention and adds a focused guard spec; `36bd9c42a98` preserves the spec's literal HIR guard fragments. The focused compile reaches HIR, then times out during MIR. This is compile-progress evidence only; guard runtime remains UNRUN.
+- **DOC semantic links:** `6672f01b405` adds the semantic document link pipeline, CLI integration, source/spec coverage, and manuals. Source review is GO for this slice; runtime verification remains UNRUN.
+- **LSP query scenarios:** `f45271bb71f` replaces query placeholders with API scenarios. Source review is GO for this slice; the scenarios remain runtime UNRUN. This does not establish recovered-selector membership or reduce the historical missing count.
+- **Iterator/class aliases:** `62cf6b4ea24` hardens iterator/class alias checks and adds acceptance coverage. Source review is GO for this slice; runtime verification remains UNRUN.
+- **Phase 3 attempt 6:** the run hit its RSS cap and produced no binary. All six qualification attempts are exhausted; no further unchanged qualification retry is authorized by this checkpoint. Ordinary full-source compiler/CLI and runner qualification remain open.
+- **Runtime C3 integration:** HOLD because no composite candidate or baseline is available. Individual source reviews cannot establish composite runtime behavior or a baseline comparison.
+
+These source-review GO decisions do not imply runtime PASS. No builds or tests were run for this documentation update, and full Phase 3 remains unqualified.
