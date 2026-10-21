@@ -391,20 +391,32 @@ thread_local! {
     static LAST_NATIVE_SHELL_EXIT_CODE: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
 }
 
-unsafe fn capture_native_shell(cmd: RuntimeValue) -> Option<std::process::Output> {
-    let script = extract_string(cmd)?;
+fn native_shell_command(script: &str) -> std::process::Command {
     #[cfg(windows)]
-    let mut command = {
+    {
+        use std::os::windows::process::CommandExt;
         let mut command = std::process::Command::new("cmd.exe");
-        command.arg("/C").arg(script);
+        // cmd does not decode CRT backslash-escaped quotes. Match the C
+        // Windows command-line owner: quoted payloads pass verbatim through
+        // /S, while quote-free strings retain cmd's existing heuristics.
+        if script.contains('"') {
+            command.arg("/S").arg("/C").raw_arg(format!("\"{script}\""));
+        } else {
+            command.arg("/C").arg(script);
+        }
         command
-    };
+    }
     #[cfg(not(windows))]
-    let mut command = {
+    {
         let mut command = std::process::Command::new("/bin/sh");
         command.arg("-c").arg(script);
         command
-    };
+    }
+}
+
+unsafe fn capture_native_shell(cmd: RuntimeValue) -> Option<std::process::Output> {
+    let script = extract_string(cmd)?;
+    let mut command = native_shell_command(&script);
     clear_simple_child_stack_env(&mut command);
     command.stdin(std::process::Stdio::null()).output().ok()
 }
@@ -425,18 +437,7 @@ pub unsafe extern "C" fn rt_shell_exec(cmd: RuntimeValue) -> RuntimeValue {
         LAST_NATIVE_SHELL_EXIT_CODE.with(|status| status.set(-1));
         return RuntimeValue::NIL;
     };
-    #[cfg(windows)]
-    let mut command = {
-        let mut command = std::process::Command::new("cmd.exe");
-        command.arg("/C").arg(script);
-        command
-    };
-    #[cfg(not(windows))]
-    let mut command = {
-        let mut command = std::process::Command::new("/bin/sh");
-        command.arg("-c").arg(script);
-        command
-    };
+    let mut command = native_shell_command(&script);
     clear_simple_child_stack_env(&mut command);
     match command.stdin(std::process::Stdio::inherit()).stderr(std::process::Stdio::inherit()).output() {
         Ok(output) => {
