@@ -1,0 +1,115 @@
+# C7 raw observation, not a proof/checker/certificate producer.
+use compiler.hir.hir_types.{SymbolTable}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir_opt.result_abi_translation_validation.{
+    ResultSemanticOutcomeV1, ResultTaggedHandleProjectionV1, ResultAbiObservationV1}
+use std.nogc_sync_mut.sffi.enum_wire.{enum_wire_result_i64_capture_v1}
+
+struct ResultAbiRawExpectationV1:
+    enum_runtime_id: i64
+    ok_tag: i64
+    err_tag: i64
+
+struct ResultAbiRawCaptureV1:
+    expected: ResultAbiRawExpectationV1
+    observations: [ResultAbiObservationV1]
+
+fn result_abi_raw_expectation_valid_v1(expected: ResultAbiRawExpectationV1) -> bool:
+    # Restricted builtin contract, explicitly tied to canonical registration.
+    expected.enum_runtime_id == 0 and expected.ok_tag == 0 and expected.err_tag == 1
+
+fn result_abi_expectation_from_lowering_v1(
+    lowering: MirLowering
+) -> Result<ResultAbiRawExpectationV1, text>:
+    val diagnostic = "FV2-E-RESULT-RAW-METADATA: unshadowed canonical Result registration required"
+    if not lowering.enum_runtime_id_index.has("Result") or
+            not lowering.enum_runtime_id_index_q.has("Result") or
+            not lowering.enum_variant_index.has("Result") or
+            not lowering.enum_variant_index_q.has("Result") or
+            not lowering.enum_variant_discriminants.has("Result") or
+            not lowering.enum_variant_discriminants_q.has("Result"):
+        return Err(diagnostic)
+    val names = lowering.enum_variant_index["Result"]
+    val qualified_names = lowering.enum_variant_index_q["Result"]
+    val tags = lowering.enum_variant_discriminants["Result"]
+    val qualified_tags = lowering.enum_variant_discriminants_q["Result"]
+    if names.len() != 2 or qualified_names.len() != 2 or
+            tags.len() != 2 or qualified_tags.len() != 2:
+        return Err(diagnostic)
+    if names[0] != "Ok" or names[1] != "Err" or
+            qualified_names[0] != "Ok" or qualified_names[1] != "Err":
+        return Err(diagnostic)
+    val owner = lowering.enum_runtime_id_index["Result"]
+    if owner != lowering.enum_runtime_id_index_q["Result"] or
+            tags[0] != qualified_tags[0] or tags[1] != qualified_tags[1]:
+        return Err(diagnostic)
+    val expected = ResultAbiRawExpectationV1(
+        enum_runtime_id: owner, ok_tag: tags[0], err_tag: tags[1])
+    if not result_abi_raw_expectation_valid_v1(expected):
+        return Err(diagnostic)
+    Ok(expected)
+
+# Empty diagnostic means only that these raw words agree. It grants no
+# authentication, independently_checked flag, refinement proof, or certificate.
+fn result_abi_raw_compare_v1(
+    expected: ResultAbiRawExpectationV1, normal_bits: i64, error_bits: i64,
+    observations: [ResultAbiObservationV1]
+) -> text:
+    if not result_abi_raw_expectation_valid_v1(expected):
+        return "FV2-E-RESULT-RAW-METADATA: canonical Result expectation required"
+    if observations.len() != 2:
+        return "FV2-E-RESULT-RAW-COVERAGE: exactly Normal then Error required"
+    var index: i64 = 0
+    while index < 2:
+        val observation = observations[index]
+        val expected_bits = if index == 0: normal_bits else: error_bits
+        val expected_tag = if index == 0: expected.ok_tag else: expected.err_tag
+        var source_matches = false
+        match observation.source:
+            case ResultSemanticOutcomeV1.Normal(bits):
+                source_matches = index == 0 and bits == normal_bits
+            case ResultSemanticOutcomeV1.Error(bits):
+                source_matches = index == 1 and bits == error_bits
+        if not source_matches:
+            return "FV2-E-RESULT-RAW-SOURCE: source outcome or input bits changed"
+        if observation.target.enum_runtime_id != expected.enum_runtime_id:
+            return "FV2-E-RESULT-RAW-OWNER: captured owner differs from registration"
+        if observation.target.discriminant != expected_tag:
+            return "FV2-E-RESULT-RAW-TAG: captured variant differs from registration"
+        if observation.target.payload_bits != expected_bits:
+            return "FV2-E-RESULT-RAW-PAYLOAD: captured bits differ from input"
+        index = index + 1
+    ""
+
+fn result_abi_builtin_i64_capture_v1(
+    normal_bits: i64, error_bits: i64
+) -> Result<ResultAbiRawCaptureV1, text>:
+    # Fresh compiler metadata, not the observed prototype, supplies authority
+    # for the restricted builtin expectation. This does not attest loaded code.
+    var lowering = MirLowering.new(SymbolTable.new())
+    lowering.register_builtin_enum_seeds()
+    val expected = result_abi_expectation_from_lowering_v1(lowering)?
+    val raw = enum_wire_result_i64_capture_v1(
+        expected.enum_runtime_id, expected.ok_tag, expected.err_tag,
+        normal_bits, error_bits)?
+    val observations = [
+        ResultAbiObservationV1(
+            source: ResultSemanticOutcomeV1.Normal(normal_bits),
+            target: ResultTaggedHandleProjectionV1(
+                enum_runtime_id: raw.normal.enum_runtime_id,
+                discriminant: raw.normal.discriminant, payload_bits: raw.normal.payload_bits)),
+        ResultAbiObservationV1(
+            source: ResultSemanticOutcomeV1.Error(error_bits),
+            target: ResultTaggedHandleProjectionV1(
+                enum_runtime_id: raw.error.enum_runtime_id,
+                discriminant: raw.error.discriminant, payload_bits: raw.error.payload_bits))
+    ]
+    val diagnostic = result_abi_raw_compare_v1(expected, normal_bits, error_bits, observations)
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(ResultAbiRawCaptureV1(expected: expected, observations: observations))
+
+export ResultAbiRawExpectationV1, ResultAbiRawCaptureV1
+export result_abi_raw_expectation_valid_v1, result_abi_expectation_from_lowering_v1
+export result_abi_raw_compare_v1, result_abi_builtin_i64_capture_v1
