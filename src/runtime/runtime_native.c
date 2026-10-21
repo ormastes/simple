@@ -14308,10 +14308,11 @@ static int64_t rt_env_get_cstr(const char* key) {
     if (!wide) { free(wide_key); return rt_core_nil(); }
     SetLastError(ERROR_SUCCESS);
     DWORD length = GetEnvironmentVariableW(wide_key, wide, capacity);
+    DWORD read_error = GetLastError();
     free(wide_key);
     if (length >= capacity) { free(wide); return rt_core_nil(); }
     if (length == 0) {
-        DWORD error = GetLastError();
+        DWORD error = read_error;
         free(wide);
         return error == ERROR_SUCCESS ? rt_string_new((const uint8_t*)"", 0) : rt_core_nil();
     }
