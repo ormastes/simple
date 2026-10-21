@@ -1914,13 +1914,26 @@ bootstrap_prepare_phase_cache() {
       [ "${stop_after_stage2}" -eq 1 ] && [ "${full_bootstrap}" -eq 1 ] || {
       echo 'error: source refresh requires Rust full-bootstrap Stage2-only, without clean/invalidate' >&2; exit 64;
     }
-    # This reviewed owner folds full module source with unconditional global
-    # structural dependencies, including imported method defaults. The reviewed
-    # target-selection update also binds the effective compilation target.
+    # Reviewed owners fold full module source with structural dependencies,
+    # including imported defaults, and bind the effective compilation target.
+    # The newer owner is admitted ONLY for the exact reviewed transition below:
+    # its quoted Span-like defaults have an open normalization defect. Neither
+    # arbitrary later source changes nor a different producer gain admission.
     # Unknown implementations fail closed; producer identity is still exact.
-    [ "$(hash_file "${repo_root}/src/compiler_rust/compiler/src/pipeline/native_project/mod.rs")" = \
-      5e566362d85041b93f3ae9a8e11733f099adfdebc3dd04172c7b7aafc9cb7f37 ] &&
-      [ "$(hash_file "$4")" = "$(hash_file "${seed_bin}")" ] || {
+    cache_dependency_owner=$(hash_file "${repo_root}/src/compiler_rust/compiler/src/pipeline/native_project/mod.rs") || exit 64
+    case "${cache_dependency_owner}" in
+      5e566362d85041b93f3ae9a8e11733f099adfdebc3dd04172c7b7aafc9cb7f37) ;;
+      e425a0afae279fbedaf8a6afe6b9031a23b5a0affe597291c7cf3bc80058923b)
+        [ "$(hash_file "${refresh_stage2_source_cache}/source-inputs-before.txt")" = \
+          5fda9c7202d9111d859674af8473b049e1e7a9f6c0b861d04c4f33872f80a1bc ] &&
+        [ "$(bootstrap_cache_reviewed_source_digest "${stage3_source_before}")" = \
+          6ca67b6d711d199477a78a752a81d638190e3f2f3296c70f4b638df3cbf09a3d ] || {
+          echo 'error: source refresh rejected: source transition is not the reviewed repair' >&2; exit 64;
+        }
+        ;;
+      *) echo 'error: source refresh rejected: unsupported Rust dependency-key owner' >&2; exit 64 ;;
+    esac
+    [ "$(hash_file "$4")" = "$(hash_file "${seed_bin}")" ] || {
       echo 'error: source refresh rejected: unsupported Rust dependency-key owner/producer' >&2; exit 64;
     }
     bootstrap_cache_new_path_validate "${refresh_stage2_source_cache}" || {
