@@ -1,0 +1,277 @@
+"""Actual parser, HIR receipt, and live lint integration for A5 manifests."""
+use std.spec.*
+use std.io_runtime.{getpid}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.config.{Logger}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.common.assurance.representation_context_v1.{
+    RepresentationProjectContextV1, representation_context_from_project_v1,
+    representation_source_context_v1, representation_contexts_identity_v1}
+use compiler.common.assurance.representation_manifest_v1.{
+    RepresentationDeclarationV1}
+use compiler.common.module_path_naming.{module_logical_name_from_path}
+use compiler.frontend.core.representation_declarations_v1.{
+    parse_representation_source_v1}
+use compiler.frontend.flat_ast_bridge.{flat_pools_dump_all, flat_pools_restore_all}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_encode_reason}
+use compiler.driver.hir_typecheck_consumer_v1.{HirTypecheckReceiptV1}
+use compiler.driver.hir_semantic_consumer_v1.{
+    collect_module_representation_receipt_v1}
+use compiler.tools.lint.lint_rule_api.{LintParamsV1, LintUnit, StaticLintFinding}
+use compiler.tools.lint.main.{Linter, LintConfig, LintRunResult, resolve_lint_config}
+use compiler.tools.lint.representation_lint_context_v1.{representation_lint_params_v1,
+    representation_lint_context_v1}
+use compiler.tools.lint.rules.bare_primitive_internal_rule.{
+    bare_primitive_internal_lint_rule}
+use compiler.semantics.representation_boundary.hir_binding.{representation_bind_hir_v1}
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_dir_remove_all(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+val REPRESENTATION_PROJECT_PATH = "/tmp/a5_fixture_project.sdn"
+val REPRESENTATION_PROJECT_SOURCE = "project:\n  name: fixture_pkg\n"
+
+fn fixture_representation_project_v1() -> RepresentationProjectContextV1:
+    val project = representation_context_from_project_v1(
+        REPRESENTATION_PROJECT_SOURCE, REPRESENTATION_PROJECT_PATH)
+    expect(project.error).to_equal("")
+    project
+
+fn parse_representation_fixture_v1(source: text, path: text, package: text,
+        module_path: text) -> [RepresentationDeclarationV1]:
+    parse_representation_source_v1(source, path, package, module_path)
+
+fn compile_representation_fixture_v1(source: text, path: text,
+        module_name: text, strictness: AssuranceStrictness) -> HirTypecheckReceiptV1:
+    val module = lower_representation_fixture_v1(source, path, module_name)
+    collect_module_representation_receipt_v1(module_name, module, strictness)
+
+fn lower_representation_fixture_v1(source: text, path: text,
+        module_name: text) -> HirModule:
+    val parsed = parse_full_frontend(source, path, module_name, Logger(level: 0))
+    var lowering = HirLowering.with_filename(path)
+    var module: HirModule = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    val source_context = representation_source_context_v1(
+        fixture_representation_project_v1(), module_logical_name_from_path(path),
+        sha256_text(source))
+    module.representation_declarations = representation_bind_hir_v1(module,
+        source_context)
+    expect(module.representation_declarations.len()).to_be_greater_than(0)
+    module
+
+fn lint_representation_fixture_v1(source: text, path: text) -> [StaticLintFinding]:
+    val params = representation_lint_params_v1(fixture_representation_project_v1(),
+        module_logical_name_from_path(path), AssuranceStrictness.Critical, path, source)
+    bare_primitive_internal_lint_rule().check(
+        params, LintUnit(path, source))
+
+fn assert_representation_diagnostics_v1(receipt: HirTypecheckReceiptV1,
+        code: text, expected_error: bool):
+    val rendered = receipt.messages.join("\n")
+    expect(rendered).to_contain(code)
+    if expected_error:
+        expect(receipt.errors.join("\n")).to_contain(code)
+    else:
+        expect(receipt.errors.join("\n")).to_equal("")
+
+fn lint_result_count_v1(results: [LintRunResult], code: text) -> i64:
+    var count = 0
+    for result in results:
+        if result.lint.code == code:
+            count = count + 1
+    count
+
+fn fixture_valid_boundary_v1() -> text:
+    "@representation_boundary(kind: \"layout\", reason: \"Encode a fixed word\", reviewers: [\"layout-owner\"], capabilities: [])\n" +
+    "fn encode_word():\n" +
+    "    val raw = 1\n" +
+    "    raw\n"
+
+fn fixture_invalid_boundary_v1() -> text:
+    "@representation_boundary(kind: \"layout\", reason: \"\", reviewers: [], capabilities: [])\n" +
+    "fn encode_word():\n" +
+    "    val raw = 1\n" +
+    "    raw\n"
+
+describe "A5 representation manifest reaches actual compiler consumers":
+    it "binds a valid source attribute to its parsed declaration and critical HIR receipt":
+        step("Bind the boundary to its declaration")
+        val source = fixture_valid_boundary_v1()
+        val declarations = parse_representation_fixture_v1(
+            source, "src/app/representation_fixture.spl", "fixture_pkg",
+            "fixture_pkg.representation_fixture")
+        expect(declarations.len()).to_equal(1)
+        expect(declarations[0].components.name).to_equal("encode_word")
+
+        val receipt = compile_representation_fixture_v1(source,
+            "src/app/representation_fixture.spl", "fixture_pkg.representation_fixture",
+            AssuranceStrictness.Critical)
+        expect(receipt.errors.len()).to_equal(0)
+
+    it "rejects an incomplete reviewer manifest under the critical profile":
+        step("Validate the reviewer manifest")
+        val receipt = compile_representation_fixture_v1(fixture_invalid_boundary_v1(),
+            "src/app/representation_invalid.spl", "fixture_pkg.representation_invalid",
+            AssuranceStrictness.Critical)
+        assert_representation_diagnostics_v1(receipt, "E-MC-REP-001", true)
+
+    it "removes only the annotated sibling function finding in the live lint rule":
+        step("Apply the scoped primitive exemption")
+        val source = fixture_valid_boundary_v1() +
+            "\nfn sibling():\n    val other = 2\n    other\n"
+        val findings = lint_representation_fixture_v1(source,
+            "src/app/representation_siblings.spl")
+        var bare_findings = 0
+        var sibling_findings = 0
+        for finding in findings:
+            if finding.code == "W-MC-VAL-001":
+                bare_findings = bare_findings + 1
+                if finding.line_num >= 6:
+                    sibling_findings = sibling_findings + 1
+        expect(bare_findings).to_equal(1)
+        expect(sibling_findings).to_equal(1)
+
+    it "keeps a valid representation record from granting unsafe operation capabilities":
+        step("Preserve unsafe capability diagnostics")
+        val source = "@representation_boundary(kind: \"ffi\", reason: \"Describe raw device data\", reviewers: [\"ffi-owner\"], capabilities: [])\n" +
+            "fn read_word():\n" +
+            "    unsafe(capabilities: [ffi]):\n" +
+            "        val raw = 1\n" +
+            "        raw\n"
+        val receipt = compile_representation_fixture_v1(source,
+            "src/app/representation_unsafe.spl", "fixture_pkg.representation_unsafe",
+            AssuranceStrictness.Critical)
+        expect(receipt.messages.join("\n")).to_contain("E-MC-REP-003")
+
+    it "fails closed for missing or duplicated lint context extensions":
+        val source = fixture_valid_boundary_v1()
+        val rule = bare_primitive_internal_lint_rule()
+        val missing = rule.check(LintParamsV1.defaults(),
+            LintUnit("src/app/no_context.spl", source))
+        var raw_count = 0
+        var identity_error_count = 0
+        for finding in missing:
+            if finding.code == "W-MC-VAL-001": raw_count = raw_count + 1
+            if finding.code == "E-MC-REP-002": identity_error_count = identity_error_count + 1
+        expect(raw_count).to_equal(1)
+        expect(identity_error_count).to_be_greater_than(0)
+
+        var duplicated = representation_lint_params_v1(
+            fixture_representation_project_v1(), module_logical_name_from_path(
+                "src/app/duplicate_context.spl"),
+            AssuranceStrictness.Critical, "src/app/duplicate_context.spl", source)
+        expect(representation_lint_context_v1(duplicated,
+            "src/app/duplicate_context.spl", source) != nil).to_be(true)
+        duplicated.ext = [duplicated.ext[0], duplicated.ext[0]]
+        expect(representation_lint_context_v1(duplicated,
+            "src/app/duplicate_context.spl", source)).to_be_nil()
+        val duplicate_findings = rule.check(duplicated,
+            LintUnit("src/app/duplicate_context.spl", source))
+        raw_count = 0
+        identity_error_count = 0
+        for finding in duplicate_findings:
+            if finding.code == "W-MC-VAL-001": raw_count = raw_count + 1
+            if finding.code == "E-MC-REP-002": identity_error_count = identity_error_count + 1
+        expect(raw_count).to_equal(1)
+        expect(identity_error_count).to_be_greater_than(0)
+
+    it "selects nested lint project owners and refuses a missing nested project name":
+        step("Apply the scoped primitive exemption")
+        val root = "/tmp/a5_representation_lint_{getpid()}"
+        val nested = root + "/nested"
+        val root_config_path = root + "/simple.sdn"
+        val nested_config_path = nested + "/simple.sdn"
+        val root_source_path = root + "/root_fixture.spl"
+        val nested_source_path = nested + "/nested_fixture.spl"
+        defer rt_dir_remove_all(root)
+        expect(rt_dir_create_all(nested)).to_equal(true)
+        expect(rt_file_write_text(root_config_path,
+            "project:\n  name: root_fixture_pkg\nlints:\n  profile: critical\n")).to_equal(true)
+        expect(rt_file_write_text(nested_config_path,
+            "project:\n  name: foreign_fixture_pkg\nlints:\n  profile: critical\n")).to_equal(true)
+
+        var linter = Linter.new(false)
+        linter.config = LintConfig.from_sdn_file(root_config_path)
+        val root_results = linter.lint_source(root_source_path, fixture_valid_boundary_v1())
+        expect(lint_result_count_v1(root_results, "W-MC-VAL-001")).to_equal(0)
+        expect(lint_result_count_v1(root_results, "E-MC-REP-002")).to_equal(0)
+
+        val foreign_results = linter.lint_source(nested_source_path,
+            fixture_valid_boundary_v1())
+        val foreign_owner = resolve_lint_config(linter.config, nested_source_path,
+            fixture_valid_boundary_v1()).representation_project
+        expect(foreign_owner.package_identity).to_equal("foreign_fixture_pkg")
+        expect(foreign_owner.manifest_identity).to_equal(nested_config_path)
+        expect(linter.config.representation_project.package_identity).to_equal("root_fixture_pkg")
+        expect(lint_result_count_v1(foreign_results, "W-MC-VAL-001")).to_equal(0)
+        expect(lint_result_count_v1(foreign_results, "E-MC-REP-002")).to_equal(0)
+
+        val unrelated_results = linter.lint_source("/tmp/a5_no_project_{getpid()}/foreign.spl",
+            fixture_valid_boundary_v1())
+        expect(lint_result_count_v1(unrelated_results, "W-MC-VAL-001")).to_equal(1)
+        expect(lint_result_count_v1(unrelated_results, "E-MC-REP-002")).to_be_greater_than(0)
+
+        expect(rt_file_write_text(nested_config_path,
+            "lints:\n  profile: critical\n")).to_equal(true)
+        val missing_name_results = linter.lint_source(nested_source_path,
+            fixture_valid_boundary_v1())
+        expect(lint_result_count_v1(missing_name_results, "W-MC-VAL-001")).to_equal(1)
+        expect(lint_result_count_v1(missing_name_results, "E-MC-REP-002")).to_be_greater_than(0)
+
+    it "binds source, project name, and selected configuration edits into identity":
+        val original = fixture_representation_project_v1()
+        val renamed = representation_context_from_project_v1(
+            "project:\n  name: fixture_pkg_renamed\n", REPRESENTATION_PROJECT_PATH)
+        val edited_config = representation_context_from_project_v1(
+            "project:\n  name: fixture_pkg\n  version: 2\n", REPRESENTATION_PROJECT_PATH)
+        expect(original.package_identity).to_equal("fixture_pkg")
+        expect(renamed.package_identity).to_equal("fixture_pkg_renamed")
+        expect(original.manifest_digest == edited_config.manifest_digest).to_be(false)
+        val source_a = representation_source_context_v1(original,
+            "fixture_pkg.representation_fixture", sha256_text(fixture_valid_boundary_v1()))
+        val source_b = representation_source_context_v1(original,
+            "fixture_pkg.representation_fixture", sha256_text(fixture_valid_boundary_v1() + "# edit\n"))
+        val renamed_source = representation_source_context_v1(renamed,
+            "fixture_pkg.representation_fixture", sha256_text(fixture_valid_boundary_v1()))
+        val config_source = representation_source_context_v1(edited_config,
+            "fixture_pkg.representation_fixture", sha256_text(fixture_valid_boundary_v1()))
+        expect(source_a.source_identity == source_b.source_identity).to_be(false)
+        expect(representation_contexts_identity_v1([source_a]) ==
+            representation_contexts_identity_v1([renamed_source])).to_be(false)
+        expect(representation_contexts_identity_v1([source_a]) ==
+            representation_contexts_identity_v1([config_source])).to_be(false)
+
+        val stale_path = "src/app/stale_context.spl"
+        val original_source = fixture_valid_boundary_v1()
+        val stale_params = representation_lint_params_v1(original,
+            module_logical_name_from_path(stale_path), AssuranceStrictness.Critical,
+            stale_path, original_source)
+        val edited_source = original_source + "# source edit\n"
+        val stale_findings = bare_primitive_internal_lint_rule().check(stale_params,
+            LintUnit(stale_path, edited_source))
+        var stale_raw_count = 0
+        var stale_context_diagnostic_count = 0
+        for finding in stale_findings:
+            if finding.code == "W-MC-VAL-001": stale_raw_count = stale_raw_count + 1
+            if finding.code == "E-MC-REP-002": stale_context_diagnostic_count = stale_context_diagnostic_count + 1
+        expect(stale_raw_count).to_equal(1)
+        expect(stale_context_diagnostic_count).to_be_greater_than(0)
+
+    it "refuses lossy HIR and flat-pool snapshots for typed representation metadata":
+        val module = lower_representation_fixture_v1(fixture_valid_boundary_v1(),
+            "src/app/representation_codec.spl", "fixture_pkg.representation_codec")
+        expect(hir_module_encode(module)).to_equal("")
+        expect(hir_module_encode_reason(module)).to_contain("E-MC-REP-004")
+
+        val declarations = parse_representation_fixture_v1(fixture_valid_boundary_v1(),
+            "src/app/representation_flat_pool.spl", "fixture_pkg",
+            "fixture_pkg.representation_flat_pool")
+        expect(declarations.len()).to_equal(1)
+        val snapshot = flat_pools_dump_all()
+        expect(snapshot).to_equal("")
+        expect(flat_pools_restore_all(snapshot)).to_be(false)

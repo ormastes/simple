@@ -12,6 +12,7 @@ use compiler.core.tokens.{TOK_INT_LIT, TOK_STRING_LIT}
 use compiler.core.tokens.{TOK_IDENT}
 use compiler.core.tokens.{TOK_KW_DYN}
 use compiler.core.tokens.{TOK_KW_VAL, TOK_KW_VAR, TOK_KW_FN}
+use compiler.core.tokens.{TOK_KW_ME, TOK_KW_EXTERN}
 use compiler.core.tokens.{TOK_KW_IF, TOK_KW_ELIF, TOK_KW_ELSE}
 use compiler.core.tokens.{TOK_KW_FOR, TOK_KW_WHILE, TOK_KW_IN, TOK_KW_LOOP}
 use compiler.core.tokens.{TOK_KW_MATCH, TOK_KW_CASE}
@@ -462,6 +463,7 @@ fn _module_has_function_decl(name: text) -> bool:
 # Inlined here (like parse_use_stmt_inline) to avoid a circular dep with
 # the decl-parsing modules, which import parse_block from this file.
 fn parse_extern_fn_stmt_inline() -> i64:
+    val representation_owner = representation_declaration_begin_v1("nested_extern")
     parser_advance()  # consume 'extern'
     parser_expect(20)
     val ef_name = par_text_get()
@@ -490,6 +492,7 @@ fn parse_extern_fn_stmt_inline() -> i64:
     val ef_tparams: [text] = []
     if not _module_has_function_decl(ef_name):
         module_add_decl(decl_extern_fn(ef_name, ef_pnames, ef_ptypes, ef_ret, ef_tparams, 0))
+    representation_declaration_end_v1(representation_owner, -1, ef_name)
     stmt_expr_stmt(expr_pass(0), 0)
 
 fn parse_contract_clause_expr_stmt() -> i64:
@@ -588,6 +591,8 @@ fn try_parse_contract_stmt() -> i64:
     lex_snapshot_commit(snap)
     stmt_contract_clause(tag, binding, body, 0)
 
+use compiler.frontend.core.representation_declarations_v1.{representation_record_region_v1, representation_parse_attribute_v1, representation_declaration_begin_v1, representation_declaration_end_v1, representation_reject_pending_v1}
+
 fn parse_unsafe_block_expr_if_present() -> i64:
     """Parse contextual `unsafe...:` in expression position; return -1 on no match."""
     if par_kind_get() != TOK_IDENT:
@@ -603,6 +608,7 @@ fn parse_unsafe_block_expr_if_present() -> i64:
         parser_advance()
         val unsafe_body = parse_block()
         lex_snapshot_commit(unsafe_snap)
+        representation_record_region_v1([])
         return expr_unsafe_block(unsafe_body, 0)
 
     if par_kind_get() == TOK_LPAREN:
@@ -667,6 +673,7 @@ fn parse_unsafe_block_expr_if_present() -> i64:
                 parser_advance()
                 val unsafe_body = parse_block()
                 lex_snapshot_commit(unsafe_snap)
+                representation_record_region_v1(unsafe_caps)
                 return expr_unsafe_block_with_caps(unsafe_body, unsafe_caps, 0)
 
     lex_snapshot_rollback(unsafe_snap)
@@ -776,9 +783,17 @@ fn try_parse_collection_algorithm_stmt() -> i64:
 # block-level @unsafe in enum_module_body.spl). The declaration after the
 # attribute is parsed by the ordinary statement dispatch.
 fn parse_attributed_nested_decl_stmt() -> i64:
+    val representation_start = lex_token_start_get()
+    val representation_line = par_line_get()
+    val representation_col = par_col_get()
     parser_advance()
     if par_kind_get() == TOK_IDENT:
+        val representation_attribute = par_text_get() == "representation_boundary"
         parser_advance()
+        if representation_attribute:
+            representation_parse_attribute_v1(representation_start, representation_line, representation_col)
+            parser_skip_newlines_and_semicolons()
+            return parse_statement()
     if par_kind_get() == TOK_LPAREN:
         parser_advance()
         var depth = 1
@@ -810,6 +825,8 @@ fn parse_statement() -> i64:
     if contract_stmt >= 0:
         return contract_stmt
     kind = par_kind_get()
+    if kind != TOK_AT and kind != TOK_KW_FN and kind != TOK_KW_ME and kind != TOK_KW_EXTERN:
+        representation_reject_pending_v1()
     if kind == TOK_AT:
         val attributed = try_parse_collection_algorithm_stmt()
         if attributed >= 0:
@@ -1208,10 +1225,12 @@ fn parse_statement() -> i64:
         if par_kind_get() == TOK_IDENT:
             val me_stmt_name = par_text_get()
             parser_advance()
+            val representation_owner = representation_declaration_begin_v1("nested_callable")
             val previous_collection_owner = parser_collection_site_owner_push(me_stmt_name)
             val me_stmt_lambda = parse_fn_lambda_after_kw()
             parser_collection_site_owner_restore(previous_collection_owner)
             lex_snapshot_commit(me_snap)
+            representation_declaration_end_v1(representation_owner, -1, me_stmt_name)
             return stmt_val_decl(me_stmt_name, 0, me_stmt_lambda, 0)
         lex_snapshot_rollback(me_snap)
         parser_tok_restore(me_tok_nums, me_tok_text)
@@ -1230,6 +1249,7 @@ fn parse_statement() -> i64:
     # seed never pre-binds the name before evaluating the body). This
     # desugar matches that: it supports the non-recursive case only.
     if kind == TOK_KW_FN:
+        val representation_owner = representation_declaration_begin_v1("nested_callable")
         parser_advance()  # consume fn
         kind = par_kind_get()
         if kind == TOK_IDENT:
@@ -1238,9 +1258,11 @@ fn parse_statement() -> i64:
             val previous_collection_owner = parser_collection_site_owner_push(nested_fn_name)
             val nested_lambda = parse_fn_lambda_after_kw()
             parser_collection_site_owner_restore(previous_collection_owner)
+            representation_declaration_end_v1(representation_owner, -1, nested_fn_name)
             return stmt_val_decl(nested_fn_name, 0, nested_lambda, 0)
         # fn(...): ... with no name — anonymous lambda expression statement.
         val anon_lambda = parse_fn_lambda_after_kw()
+        representation_declaration_end_v1(representation_owner, -1, "")
         return stmt_expr_stmt(anon_lambda, 0)
 
     # Expression statement (including assignment and walrus)
