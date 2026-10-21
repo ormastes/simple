@@ -22,7 +22,7 @@ use compiler.borrow.borrow_check.nll.*
 use compiler.borrow.borrow_check.nll.{NLLError}  # explicit: enum payload owner must name the payload type (hir-payload-origin-unresolved)
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instruction_support.{MirTerminator, MirOperandKind, MirOperand}
-use compiler.mir.mir_types.{LocalId, BlockId, MirType, MirTypeKind, MirLocal, MirConstValue}  # explicit: a glob is not an import-origin for surface projection
+use compiler.mir.mir_types.{LocalId, BlockId, MirType, MirTypeKind, MirSignature, MirLocal, MirConstValue}  # explicit: a glob is not an import-origin for surface projection
 use compiler.mir.mir_instruction_kinds.{MirInstKind}
 
 # ============================================================================
@@ -64,6 +64,18 @@ fn mir_type_loan_payload_class(type_: MirType) -> i64:
             mir_type_loan_payload_class(element)
         case _:
             2
+
+# An indirect call is admitted only when its full fixed signature and return
+# type are scalar. This is the narrow signature shape for which arguments and
+# results cannot carry loan payloads.
+fn mir_indirect_signature_is_scalar_v1(signature: MirSignature?, argument_count: i64) -> bool:
+    if val sig = signature:
+        if not sig.params_known or sig.is_variadic or sig.params.len() != argument_count:
+            return false
+        for parameter in sig.params:
+            if mir_type_loan_payload_class(parameter) != 0: return false
+        return mir_type_loan_payload_class(sig.return_type) == 0
+    false
 
 # Preserve text types across the short-call summary dictionary lookup. Attempt
 # 5 disassembly showed the pattern-bound key passed through rt_value_int_wide
@@ -403,7 +415,10 @@ class BorrowChecker:
                 self.record_operand_use(func, nll, point)
                 for arg in args:
                     self.record_operand_use(arg, nll, point)
-                self.record_short_call_contract(func, args, nll, point)
+                if self.is_direct_named_call_v1(func):
+                    self.record_short_call_contract(func, args, nll, point)
+                else:
+                    self.record_indirect_call_contract_v1(func, args, nil, nll, point)
                 # A non-unit call (re)initializes its destination, which kills
                 # any moved-out state on that local, exactly as Copy/Const do.
                 if val dest_local = dest:
@@ -508,11 +523,11 @@ class BorrowChecker:
                 nll.record_assign(point, destination)
                 self.record_operand_loan_copy(value, destination, nll, point)
 
-            case MirInstKind.CallIndirect(dest, pointer, args, _):
+            case MirInstKind.CallIndirect(dest, pointer, args, signature):
                 self.record_operand_use(pointer, nll, point)
                 for argument in args:
                     self.record_operand_use(argument, nll, point)
-                self.record_short_call_contract(pointer, args, nll, point)
+                self.record_indirect_call_contract_v1(pointer, args, Some(signature), nll, point)
                 if val result = dest:
                     nll.record_assign(point, Place.local(result.id))
 
@@ -609,7 +624,10 @@ class BorrowChecker:
                 self.record_operand_use(func, nll, point)
                 for arg in args:
                     self.record_operand_use(arg, nll, point)
-                self.record_short_call_contract(func, args, nll, point)
+                if self.is_direct_named_call_v1(func):
+                    self.record_short_call_contract(func, args, nll, point)
+                else:
+                    self.record_indirect_call_contract_v1(func, args, nil, nll, point)
                 if unwind == nil:
                     if val dest_local = dest:
                         nll.record_assign(point, Place.local(dest_local.id))
@@ -675,6 +693,49 @@ class BorrowChecker:
         # The NLL solver resolves aliases and live origins at this event. A
         # source-order active set would conflate branches and loan lifetimes.
         nll.record_short_call(point, places, modes)
+
+    me is_direct_named_call_v1(callee: MirOperand) -> bool:
+        match callee.kind:
+            case MirOperandKind.Const(MirConstValue.Str(_), _): true
+            case _: false
+
+    me indirect_argument_is_scalar_v1(argument: MirOperand) -> bool:
+        match argument.kind:
+            case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                if not self.local_declarations.contains_key(local.id): return false
+                val declaration: MirLocal = self.local_declarations[local.id]
+                if declaration.short_borrow: return false
+                mir_type_loan_payload_class(declaration.type_) == 0
+            case MirOperandKind.Const(MirConstValue.Str(_), _): false
+            case MirOperandKind.Const(_, type_):
+                mir_type_loan_payload_class(type_) == 0
+
+    me record_indirect_call_contract_v1(callee: MirOperand, args: [MirOperand], signature: MirSignature?, nll: NLLChecker, point: i64):
+        # Scalar ABI metadata must not suppress existing alias checks.
+        self.record_short_call_contract(callee, args, nll, point)
+        var resolved_signature = signature
+        if resolved_signature == nil:
+            match callee.kind:
+                case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                    if self.local_declarations.contains_key(local.id):
+                        val declaration: MirLocal = self.local_declarations[local.id]
+                        match declaration.type_.kind:
+                            case MirTypeKind.FuncPtr(found_signature):
+                                resolved_signature = Some(found_signature)
+                            case _: pass_do_nothing("indirect callee local is not declared as a function pointer")
+                case _: pass_do_nothing("indirect call has no typed local callee")
+
+        var admitted = mir_indirect_signature_is_scalar_v1(resolved_signature, args.len())
+        for argument in args:
+            if not self.indirect_argument_is_scalar_v1(argument): admitted = false
+        if admitted: return
+
+        if self.nogc_strict:
+            nll.errors = nll.errors.push(NLLError(message: "strict indirect call requires an admitted non-retaining invocation contract", has_primary_span: true, primary_span: point, secondary_spans: [], has_help: false, help: ""))
+        # An unadmitted call may retain every input. Record that conservatively
+        # even outside strict mode so an unknown call cannot hide an escape.
+        for argument in args:
+            self.record_operand_loan_escape(argument, "passed to an indirect call without an admitted non-retaining invocation contract", nll, point)
 
     me result_retains_loans(destination: LocalId, nll: NLLChecker, point: i64) -> bool:
         if self.local_declarations.contains_key(destination.id):

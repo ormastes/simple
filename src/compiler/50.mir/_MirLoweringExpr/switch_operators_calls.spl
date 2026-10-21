@@ -12,7 +12,7 @@ use compiler.mir._MirLoweringExpr.optional_record_owner.*
 use compiler.mir._MirLowering.declaration_providers_v1.*
 use compiler.mir._MirLowering.resident_default_global_owner.*
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
-use compiler.mir._MirLoweringExpr.lambda_abi.{lambda_abi_type_resolved}
+use compiler.mir._MirLoweringExpr.lambda_abi.{lambda_abi_type_resolved, lambda_scalar_source_signature_v1}
 use compiler.mir._MirLoweringExpr.lambda_match_scope.{lambda_match_pattern_scope_v1, lambda_match_bound_union_v1}
 use compiler.mir.nominal_owner_diagnostics.{mir_nominal_profile_take_receipt}
 use compiler.mir._MirLoweringExpr.function_signature_owner.*
@@ -8460,6 +8460,7 @@ impl MirLowering:
         var ret_type = MirType.i64()
         var indirect_hir_return: HirType? = nil
         var indirect_signature_proven = false
+        var indirect_scalar_source_proven = false
         if val declared_type = function_type:
             match declared_type.kind:
                 case HirTypeKind.Function(declared_params, declared_return, _):
@@ -8478,13 +8479,14 @@ impl MirLowering:
                         indirect_param_index = indirect_param_index + 1
                     ret_type = self.lower_type(declared_return)
                     indirect_hir_return = Some(declared_return)
+                    indirect_scalar_source_proven = lambda_scalar_source_signature_v1(declared_type)
                     indirect_signature_proven = true
                 case _: ()
-        if not indirect_signature_proven:
+        if not indirect_signature_proven and not self.nogc_strict:
             if val callee_mir = self.local_mir_type_of(callee_local):
                 match callee_mir.kind:
                     case MirTypeKind.FuncPtr(legacy_signature):
-                        if legacy_signature.params.len() == args_len and not legacy_signature.is_variadic:
+                        if legacy_signature.params_known and legacy_signature.params.len() == args_len and not legacy_signature.is_variadic:
                             param_types = legacy_signature.params
                             ret_type = legacy_signature.return_type
                             indirect_signature_proven = true
@@ -8492,7 +8494,9 @@ impl MirLowering:
         if not indirect_signature_proven:
             self.error_fatal("indirect callable lacks a proven function signature", Some(call_span))
             return self.builder.emit_const_int(0)
-        val sig = MirSignature(params: param_types, return_type: ret_type, is_variadic: false)
+        # Retain the conservative legacy unknown marker for erased/reference
+        # source types. Only a scalar HIR declaration grants scalar admission.
+        val sig = MirSignature(params: param_types, return_type: ret_type, is_variadic: false, params_known: indirect_scalar_source_proven)
         val indirect_result = self.emit_function_value_call(callee_local, arg_operands, sig, ret_type)
         if val result_hir = indirect_hir_return:
             self.remember_local_hir_type(indirect_result.id, result_hir, 0, 0)
@@ -8557,13 +8561,17 @@ impl MirLowering:
         var closure_b = self.builder
         closure_b.switch_to_block(closure_block)
         var closure_params: [MirType] = [MirType.i64()]
-        var closure_args: [MirOperand] = [mir_operand_copy(callee_local)]
+        # Normalize the compiler-owned environment to its existing word ABI.
+        # Cast preserves loan provenance; this grants no reference-call contract.
+        val closure_environment = closure_b.emit_cast(mir_operand_copy(callee_local), MirType.i64())
+        var closure_args: [MirOperand] = [mir_operand_copy(closure_environment)]
         var closure_arg_index = 0
         for arg_op in arg_operands:
             closure_params = closure_params.push(if closure_arg_index < sig.params.len(): sig.params[closure_arg_index] else: MirType.i64())
             closure_args = closure_args.push(arg_op)
             closure_arg_index = closure_arg_index + 1
-        val closure_sig = MirSignature(params: closure_params, return_type: ret_type, is_variadic: false)
+        val closure_sig = MirSignature(params: closure_params, return_type: ret_type, is_variadic: false,
+            params_known: sig.params_known and not sig.is_variadic and sig.params.len() == arg_operands.len())
         val closure_call_result = closure_b.emit_call_indirect(mir_operand_copy(closure_target), closure_args, closure_sig, ret_type)
         if closure_call_result != nil and result_slot != nil:
             closure_b.emit_store(mir_operand_copy(result_slot.unwrap()), mir_operand_copy(closure_call_result.unwrap()))
