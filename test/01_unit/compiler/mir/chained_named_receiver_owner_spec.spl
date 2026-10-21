@@ -1,0 +1,138 @@
+"""
+Original ByteSpan chained receiver acceptance and an unrelated-owner oracle.
+# @manual: primary
+# @capture: log
+AUTHORED_UNEXECUTED: requires an admitted matching compiler/test runner.
+"""
+use std.spec.{describe, it, expect, step}
+use app.io.mod.{file_read}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+class ParsedSpanChain:
+    errors: text
+    calls: {text: [text]}
+
+fn lower_production_span_chain(fixture_path: text) -> ParsedSpanChain:
+    # Parse the actual producer and the consumer as separate modules. Do not
+    # replace ByteSpan with a miniature stand-in or splice out its workaround.
+    val owner_name = "lib.common.bytes.span"
+    val owner_path = "src/lib/common/bytes/span.spl"
+    val owner_source = file_read(owner_path)
+    val caller_source = file_read(fixture_path)
+    expect(owner_source.len()).to_be_greater_than(0)
+    expect(caller_source.len()).to_be_greater_than(0)
+    val owner_ast = parse_full_frontend(owner_source, owner_path, owner_name, Logger(level: 0))
+    val caller_ast = parse_full_frontend(caller_source, fixture_path, "app.chain_probe", Logger(level: 0))
+    var modules: Dict<text, Module> = {}
+    modules[owner_name] = owner_ast
+    modules["app.chain_probe"] = caller_ast
+    val sources = [SourceFile(path: owner_path, content: owner_source, module_name: owner_name),
+        SourceFile(path: fixture_path, content: caller_source, module_name: "app.chain_probe")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var owner_lowering = hirlowering_for_module(owner_name, surfaces)
+    var caller_lowering = hirlowering_for_module("app.chain_probe", surfaces)
+    val owner_hir = owner_lowering.lower_module(owner_ast)
+    val caller_hir = caller_lowering.lower_module(caller_ast)
+    var hir_modules: Dict<text, HirModule> = {}
+    hir_modules[owner_name] = owner_hir
+    hir_modules["app.chain_probe"] = caller_hir
+    var lowering = MirLowering.new(caller_hir.symbols)
+    for key in hir_modules.keys():
+        lowering.prescan_module_struct_names(hir_modules, key)
+    val mir = lowering.lower_module(caller_hir, [owner_hir, caller_hir])
+    var errors = ""
+    for error in owner_lowering.errors:
+        errors = errors + "owner HIR: " + error.message + "\n"
+    for error in caller_lowering.errors:
+        errors = errors + "caller HIR: " + error.message + "\n"
+    for error in lowering.errors:
+        errors = errors + "MIR: " + error.message + "\n"
+    var calls: {text: [text]} = {}
+    for function in mir.functions.values():
+        for target in ["chained_prefix", "typed_prefix_control", "effect_prefix", "direct_call_prefix", "static_control", "unknown_owner"]:
+            if function.name == target or function.name.ends_with("." + target):
+                var callees: [text] = []
+                for block in function.blocks:
+                    for instruction in block.instructions:
+                        match instruction.kind:
+                            case MirInstKind.Call(_, operand, _):
+                                match operand.kind:
+                                    case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                        callees.push(name)
+                                    case _: ()
+                            case _: ()
+                calls[target] = callees
+    ParsedSpanChain(errors: errors, calls: calls)
+
+fn count_span_method(callees: [text], method: text) -> i64:
+    var count = 0
+    for callee in callees:
+        if callee.ends_with("ByteSpan." + method) or callee.ends_with("ByteSpan::" + method):
+            count = count + 1
+    count
+
+fn count_effect_receiver(callees: [text]) -> i64:
+    var count = 0
+    for callee in callees:
+        if callee == "span_with_effect" or callee.ends_with(".span_with_effect"):
+            count = count + 1
+    count
+
+describe "declared ByteSpan owner through a chained slice", tag: ["only-compiled"]:
+    it "lowers the original chain and typed control through the actual ByteSpan methods":
+        # @req REQ-CHAINED-NAMED-OWNER-001
+        step("Parse production ByteSpan with the original chain and a foreign static equals decoy")
+        val lowered = lower_production_span_chain(
+            "test/fixtures/compiler/chained_named_receiver_owner/parsed_positive/main.spl")
+        expect(lowered.errors).to_equal("")
+        step("Require exactly one ByteSpan slice and equals call in each caller")
+        for target in ["chained_prefix", "typed_prefix_control", "effect_prefix"]:
+            expect(lowered.calls.has(target)).to_equal(true)
+            val callees = lowered.calls.get(target) ?? []
+            expect(count_span_method(callees, "slice")).to_equal(1)
+            expect(count_span_method(callees, "equals")).to_equal(1)
+            expect(callees.contains("spl_str_slice")).to_equal(false)
+            expect(callees.contains("rt_interp_cstr")).to_equal(false)
+            for callee in callees:
+                expect(callee.contains("ForeignSliceOwner")).to_equal(false)
+        step("Require one evaluation of the side-effecting nested receiver")
+        expect(count_effect_receiver(lowered.calls.get("effect_prefix") ?? [])).to_equal(1)
+        step("Preserve the declared owner of a free-call result as well")
+        expect(lowered.calls.has("direct_call_prefix")).to_equal(true)
+        val direct_callees = lowered.calls.get("direct_call_prefix") ?? []
+        expect(count_span_method(direct_callees, "equals")).to_equal(1)
+        for callee in direct_callees:
+            expect(callee.contains("ForeignSliceOwner")).to_equal(false)
+        step("Keep an explicit type-valued static receiver on its selected owner")
+        expect(lowered.calls.has("static_control")).to_equal(true)
+        val static_callees = lowered.calls.get("static_control") ?? []
+        var foreign_static_count = 0
+        for callee in static_callees:
+            if callee.ends_with("ForeignSliceOwner.equals") or callee.ends_with("ForeignSliceOwner::equals"):
+                foreign_static_count = foreign_static_count + 1
+        expect(foreign_static_count).to_equal(1)
+        expect(count_span_method(static_callees, "equals")).to_equal(0)
+
+    it "rejects an absent method instead of borrowing a foreign unique static method":
+        # @req REQ-CHAINED-NAMED-OWNER-002
+        step("Parse a ByteSpan chain beside an unrelated owner declaring the requested leaf")
+        val lowered = lower_production_span_chain(
+            "test/fixtures/compiler/chained_named_receiver_owner/parsed_unknown/main.spl")
+        expect(lowered.errors).to_contain("unresolved method call: foreign_only")
+        step("Require rejection after one actual slice without selecting the foreign owner")
+        expect(lowered.calls.has("unknown_owner")).to_equal(true)
+        val callees = lowered.calls.get("unknown_owner") ?? []
+        expect(count_span_method(callees, "slice")).to_equal(1)
+        for callee in callees:
+            expect(callee.contains("ForeignSliceOwner")).to_equal(false)
+        expect(callees.contains("spl_str_slice")).to_equal(false)
