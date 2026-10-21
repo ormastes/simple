@@ -47,3 +47,9 @@ new source identity and complete its normal build and sanity gates.
 Offline locked Cargo metadata also confirms the Windows compiler feature edge
 and the runtime's optional hosted-provider dependency. `Cargo.lock` includes
 the new runtime-to-hosted edge; no package versions changed.
+
+The guard is registered as automated `bootstrap` tier in
+`config/check/must_check_gates.sdn`. Native fixture compilation requires a
+configured Rust/linker environment and is outside the push/local fast-gate
+budget. The outgoing-range shell hygiene check verifies this wiring without
+executing the native fixture.
