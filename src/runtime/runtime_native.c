@@ -16536,7 +16536,7 @@ static __declspec(thread) int64_t rt_shell_last_status = 0;
 static _Thread_local int64_t rt_shell_last_status = 0;
 #endif
 
-static SplArray* rt_shell_capture(int64_t cmd_value) {
+static SplArray* native_shell_capture(int64_t cmd_value) {
     RtCoreString* cmd = rt_core_as_string(cmd_value);
     if (!cmd || memchr(cmd->data, '\0', (size_t)cmd->len)) return NULL;
     SplArray* args = rt_array_new(2);
@@ -16601,7 +16601,7 @@ int64_t rt_shell_exec(int64_t cmd_value) {
 }
 
 int64_t rt_shell_exec_tuple(int64_t cmd_value) {
-    SplArray* result = rt_shell_capture(cmd_value);
+    SplArray* result = native_shell_capture(cmd_value);
     int64_t tuple = rt_tuple_new(3);
     if (result) {
         for (int64_t i = 0; i < 3; ++i) rt_tuple_set(tuple, i, rt_array_get(result, i));
