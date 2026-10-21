@@ -1488,6 +1488,79 @@ impl MirLowering:
             return false
         self.enum_variant_index_q.has(name) or self.enum_variant_index.contains(name)
 
+    fn binop_optional_text_depth_v1(type_: HirType) -> i64:
+        """Positive only for an exact Optional chain ending in text."""
+        var current = type_
+        var depth: i64 = 0
+        while true:
+            match current.kind:
+                case HirTypeKind.Optional(inner):
+                    depth = depth + 1
+                    current = inner
+                case HirTypeKind.Str: return depth
+                case _: return 0
+        0
+
+    me lower_optional_text_eq_v1(left: LocalId, right: LocalId, depth: i64, negate: bool) -> LocalId:
+        """Compare only proven equal-depth Optional text, without re-lowering operands.
+
+        Absent paths never unwrap or compare a payload. Each present layer
+        unwraps once; the text leaf uses the existing raw/tagged comparator.
+        No value/Option allocation or runtime type guessing is introduced.
+        """
+        var result = LocalId(id: -1)
+        if depth == 0:
+            result = self.emit_text_word_eq(left, right)
+        else:
+            val is_none_fn = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_is_none"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.bool(), is_variadic: false)))
+            ))
+            var pb = self.builder
+            val result_slot = pb.emit_entry_alloc(MirType.bool())
+            val left_none = pb.emit_call(is_none_fn, [mir_operand_copy(left)], MirType.bool()) ?? LocalId(id: 0)
+            val right_none = pb.emit_call(is_none_fn, [mir_operand_copy(right)], MirType.bool()) ?? LocalId(id: 0)
+            val same_presence = pb.emit_binop(MirBinOp.Eq, mir_operand_copy(left_none), mir_operand_copy(right_none), MirType.bool())
+            val same_block = pb.new_block(Some("option_text_same_presence"))
+            val different_block = pb.new_block(Some("option_text_different_presence"))
+            val absent_block = pb.new_block(Some("option_text_both_absent"))
+            val present_block = pb.new_block(Some("option_text_both_present"))
+            val merge_block = pb.new_block(Some("option_text_merge"))
+            pb.terminate_if(mir_operand_copy(same_presence), same_block, different_block)
+
+            pb.switch_to_block(different_block)
+            val not_equal = pb.new_temp(MirType.bool())
+            pb.emit_const(not_equal, MirConstValue.Bool(false), MirType.bool())
+            pb.emit_store(mir_operand_copy(result_slot), mir_operand_copy(not_equal))
+            pb.terminate_goto(merge_block)
+
+            pb.switch_to_block(same_block)
+            pb.terminate_if(mir_operand_copy(left_none), absent_block, present_block)
+            pb.switch_to_block(absent_block)
+            val equal = pb.new_temp(MirType.bool())
+            pb.emit_const(equal, MirConstValue.Bool(true), MirType.bool())
+            pb.emit_store(mir_operand_copy(result_slot), mir_operand_copy(equal))
+            pb.terminate_goto(merge_block)
+
+            pb.switch_to_block(present_block)
+            self.builder = pb
+            val left_payload = self.option_payload_or_self(left)
+            val right_payload = self.option_payload_or_self(right)
+            val payload_equal = self.lower_optional_text_eq_v1(left_payload, right_payload, depth - 1, false)
+            var mb = self.builder
+            mb.emit_store(mir_operand_copy(result_slot), mir_operand_copy(payload_equal))
+            mb.terminate_goto(merge_block)
+            mb.switch_to_block(merge_block)
+            result = mb.emit_load(mir_operand_copy(result_slot), MirType.bool())
+            self.builder = mb
+        if negate:
+            var nb = self.builder
+            val false_local = nb.new_temp(MirType.bool())
+            nb.emit_const(false_local, MirConstValue.Bool(false), MirType.bool())
+            result = nb.emit_binop(MirBinOp.Eq, mir_operand_copy(result), mir_operand_copy(false_local), MirType.bool())
+            self.builder = nb
+        result
+
     me emit_runtime_word_eq(left: LocalId, right: LocalId) -> LocalId:
         """rt_native_eq(left, right) == 1 as a Bool local: the runtime's
         tag-aware structural equality (strings by content, arrays/enums
@@ -4081,6 +4154,15 @@ impl MirLowering:
                         return self.lower_scalar_optional_eq_plain(left_local, right_local, eq_negate)
                     if self.local_is_declared_scalar_optional(right_local) and self.local_is_provably_scalar_payload(left_local):
                         return self.lower_scalar_optional_eq_plain(right_local, left_local, eq_negate)
+                    # Typed Optional text requires presence plus content equality;
+                    # generic enum handles and raw pointer equality are insufficient.
+                    # Resolve each operand owner at most once, never per layer.
+                    if val left_type = self.nil_compare_operand_hir_type(left, left_local):
+                        val left_depth = self.binop_optional_text_depth_v1(left_type)
+                        if left_depth > 0:
+                            if val right_type = self.nil_compare_operand_hir_type(right, right_local):
+                                if self.binop_optional_text_depth_v1(right_type) == left_depth:
+                                    return self.lower_optional_text_eq_v1(left_local, right_local, left_depth, eq_negate)
                 # Custom enum values are tagged runtime handles, so a
                 # raw backend Eq compares allocation addresses. Route
                 # only operands proven to share one declared enum type
