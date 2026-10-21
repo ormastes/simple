@@ -4,12 +4,12 @@ Canonical ID: `native_shell_tuple_status_missing_2026_10_21`.
 Status: scoped provider repair verified; full-bootstrap qualification pending.
 Bug DB reconciliation pending qualified full CLI.
 
-At frozen producer source `3050022d5d5`, the full bootstrap entry closure
+In the retained fullscope diagnostic (`400bd5d1983` plus the ordered JSON workaround), the full bootstrap entry closure
 compiled 1437 modules with zero HIR failures, then failed to link exact native
 symbols `rt_shell_exec_tuple` and `rt_shell_exit_code`, referenced by
 `std.nogc_sync_mut.sffi.process`. Retained original evidence:
 `D:/dev/simple-http-client-imports-20261021/build/mir-json-fullscope/trace-fixed.log`.
-The extern declarations already existed at `380200890ff`.
+The exact frozen bootstrap producer SHA256 was `32014b3401e3cb76aec44acb475a22f2385fefcd1d19ab71049e52d633356825`; this is distinct from the diagnostic source revision. The extern declarations already existed at `380200890ff`.
 
 The admitted frozen native-all/backfill/hosted archives do not export these
 symbols. The generated core-C supplement supplies scalar `rt_shell_exec` only;
