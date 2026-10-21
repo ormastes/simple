@@ -37,6 +37,16 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
 use compiler.mir_opt.mod.{MirPass}
 use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+
+pub fn inline_requires_short_scope_mapping(func: MirFunction) -> bool:
+    """Optional inlining cannot invent a caller scope for a callee loan."""
+    if func.nogc_strict:
+        return true
+    for local in func.locals:
+        if local.short_borrow or local.short_mutable or local.short_boundary != -1:
+            return true
+    false
 
 # ============================================================================
 # Inlining Policy
@@ -148,6 +158,10 @@ impl InlineCostAnalyzer:
         3. Policy
         4. Crypto primitives are always inlined
         """
+        # Even Always is an optional optimization policy, not permission to
+        # erase the originating scope or checked call contracts.
+        if inline_requires_short_scope_mapping(func):
+            return false
         if self._has_always_inline_marker(func):
             return true
 
@@ -249,6 +263,12 @@ impl FunctionInliner:
         4. Connect control flow
         5. Handle return value
         """
+        self.local_map = {}
+        self.generated_locals = []
+        # Direct callers can bypass cost analysis. Keep the original block
+        # intact so its caller retains the original Call on refusal.
+        if inline_requires_short_scope_mapping(callee):
+            return [caller_block]
         if callee.blocks.len() != 1:
             return [caller_block]
 
@@ -257,8 +277,6 @@ impl FunctionInliner:
             return [caller_block]
 
         var new_instructions: [MirInst] = []
-        self.local_map = {}
-        self.generated_locals = []
 
         # Copy instructions before call
         var i = 0
@@ -361,7 +379,10 @@ impl FunctionInliner:
             name: local.name,
             type_: local.type_,
             kind: LocalKind.Temp,
-            is_ghost: local.is_ghost
+            is_ghost: local.is_ghost,
+            short_borrow: local.short_borrow,
+            short_mutable: local.short_mutable,
+            short_boundary: local.short_boundary
         ))
         id
 
@@ -369,6 +390,15 @@ impl FunctionInliner:
         if self.local_map.has(local.id):
             return self.local_map[local.id]
         local
+
+    fn rename_optional_local(local: LocalId?) -> LocalId?:
+        # Preserve the flat optional destination ABI. Some(rename_local(...))
+        # constructs an Option box rather than a declared LocalId? payload.
+        var renamed: LocalId? = None
+        if val present = local:
+            val source: LocalId = present
+            renamed = self.rename_local(source)
+        renamed
 
     fn rename_operand(op: MirOperand) -> MirOperand:
         match op.kind:
@@ -425,11 +455,11 @@ impl FunctionInliner:
                 MirInst(kind: MirInstKind.Cast(self.rename_local(dest), self.rename_operand(operand), target), span: inst.span)
             case Bitcast(dest, operand, target):
                 MirInst(kind: MirInstKind.Bitcast(self.rename_local(dest), self.rename_operand(operand), target), span: inst.span)
-            case Call(dest, func, args):
-                val new_dest = if dest.?: Some(self.rename_local(dest.unwrap())) else: nil
+            case MirInstKind.Call(dest, func, args):
+                val new_dest: LocalId? = self.rename_optional_local(dest)
                 MirInst(kind: MirInstKind.Call(new_dest, self.rename_operand(func), self.rename_operands(args)), span: inst.span)
-            case Intrinsic(dest, name, args):
-                val new_dest = if dest.?: Some(self.rename_local(dest.unwrap())) else: nil
+            case MirInstKind.Intrinsic(dest, name, args):
+                val new_dest: LocalId? = self.rename_optional_local(dest)
                 MirInst(kind: MirInstKind.Intrinsic(new_dest, name, self.rename_operands(args)), span: inst.span)
             case _:
                 inst

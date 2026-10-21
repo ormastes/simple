@@ -36,6 +36,9 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.driver.driver_log_helpers.{log_phase}
 use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
 use compiler.hir.hir_lowering.module_surface.{module_surface_canonical_path}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface}
+use compiler.semantics.param_effects.infer.{infer_param_effects}
+use compiler.semantics.param_effects.imported_callback_receipts.{verified_imported_callback_slots}
 use compiler.common.cache.reverse_reference_facts.{
     reverse_reference_module_abort_v1, reverse_reference_module_seal_v1,
     reverse_reference_module_publish_v1
@@ -290,6 +293,182 @@ pub fn driver_validate_value_struct_layouts(
             module.structs, module.symbols))
         index = index + 1
     driver_validate_value_struct_layout_declarations_v1(module_keys, declarations, hir_modules)
+
+struct DriverNogcParamEffectAdmissionV1:
+    errors: [text]
+    modules: [HirModule]
+    fatal_errors: [text] = []
+
+fn driver_nogc_param_effect_admission_round_v1(
+    modules: Dict<text, HirModule>,
+    module_array: [HirModule],
+    surfaces: [ModuleSurface],
+    verified_providers: [HirModule]
+) -> DriverNogcParamEffectAdmissionV1:
+    # Strictness belongs to the declaring source, never a registry alias or
+    # a name containing "nogc". Legacy modules retain their existing policy.
+    var class_names: {text: bool} = {}
+    for surface in surfaces:
+        for composite in surface.composite_values:
+            if composite.kind == "class": class_names[composite.name] = true
+    var actual_modules: [HirModule] = module_array
+    if actual_modules.len() == 0:
+        for name in modules.keys():
+            val actual: HirModule = modules[name]
+            actual_modules.push(actual)
+    var errors: [text] = []
+    var fatal_errors: [text] = []
+    var admitted: [HirModule] = []
+    for raw_actual in actual_modules:
+        var actual: HirModule = raw_actual
+        actual.nogc_param_effects_checked = false
+        actual.nogc_param_effect_symbol_ids = []
+        actual.nogc_param_effects = []
+        if actual.path == "":
+            errors.push("NOGC-POLICY-001: HIR module {actual.name} has no physical source identity")
+            fatal_errors.push(errors[errors.len() - 1])
+            continue
+        val actual_path = module_surface_canonical_path(actual.path)
+        var strict = false
+        var matched = false
+        var conflicting = false
+        for surface in surfaces:
+            if surface.canonical_path == actual_path:
+                if matched and strict != surface.nogc_strict: conflicting = true
+                strict = surface.nogc_strict
+                matched = true
+        if conflicting or (matched and actual.nogc_strict != strict):
+            errors.push("NOGC-POLICY-001: {actual.path}: cached HIR ownership policy disagrees with its declaring source")
+            fatal_errors.push(errors[errors.len() - 1])
+            continue
+        if not matched and actual.nogc_strict:
+            errors.push("NOGC-POLICY-001: {actual.path}: strict HIR has no declaring source ownership contract")
+            fatal_errors.push(errors[errors.len() - 1])
+            continue
+        if not strict:
+            admitted.push(actual)
+            continue
+        # Only resolver-bound proofs from providers admitted in an earlier
+        # round can grant callback slots. V1/name-only summaries stay unknown.
+        val callbacks = verified_imported_callback_slots(actual, verified_providers, surfaces)
+        val report = infer_param_effects(actual, class_names, {}, callbacks)
+        for diagnostic in report.diags:
+            val formatted = "{diagnostic.code}: {actual.path}:{diagnostic.line}: {diagnostic.message}"
+            errors.push(formatted)
+            # Only a callsite-tagged missing imported proof may be retried.
+            # Generic retained/local captures are fatal even if this module
+            # also happens to import an unrelated callback provider.
+            var missing_callback_proof = false
+            val pending_symbol = diagnostic.pending_import_symbol
+            if diagnostic.code == "NOGC-IMPORT-CALLBACK-PENDING" and pending_symbol >= 0 and actual.symbols.symbols.contains_key(pending_symbol):
+                val resolved: HirSymbol = actual.symbols.symbols[pending_symbol]
+                val owner = resolved.defining_module ?? ""
+                missing_callback_proof = resolved.kind == SymbolKind.Function and not actual.functions.contains_key(resolved.id) and owner != "" and not callbacks.contains_key(pending_symbol)
+            if not missing_callback_proof: fatal_errors.push(formatted)
+        if report.diags.len() != 0: continue
+        var symbol_ids: [i64] = []
+        var rows: [[text]] = []
+        var invalid = false
+        for function in report.functions:
+            val symbol = SymbolId(id: function.symbol_id)
+            if not actual.functions.contains_key(symbol) or symbol_ids.contains(function.symbol_id):
+                invalid = true
+                continue
+            val declaration: HirFunction = actual.functions[symbol]
+            if declaration.params.len() != function.params.len():
+                invalid = true
+                continue
+            var effects: [text] = []
+            var parameter_index = 0
+            for parameter in function.params:
+                if parameter.name != declaration.params[parameter_index].name:
+                    invalid = true
+                if parameter.effect != "read-short" and parameter.effect != "mutate-short" and parameter.effect != "consume" and parameter.effect != "share-explicit":
+                    invalid = true
+                effects.push(parameter.effect)
+                parameter_index = parameter_index + 1
+            symbol_ids.push(function.symbol_id)
+            rows.push(effects)
+        if invalid or symbol_ids.len() != actual.functions.keys().len():
+            errors.push("NOGC-CONTRACT-001: {actual.path}: ownership report does not cover exact local function identities")
+            fatal_errors.push(errors[errors.len() - 1])
+            continue
+        actual.nogc_param_effect_symbol_ids = symbol_ids
+        actual.nogc_param_effects = rows
+        actual.nogc_param_effects_checked = true
+        admitted.push(actual)
+    DriverNogcParamEffectAdmissionV1(errors: errors, modules: admitted, fatal_errors: fatal_errors)
+
+fn driver_nogc_param_effect_admission_v1(modules: Dict<text, HirModule>,
+        module_array: [HirModule], surfaces: [ModuleSurface]) -> DriverNogcParamEffectAdmissionV1:
+    var pending: [HirModule] = []
+    var initial: [HirModule] = module_array
+    if initial.len() == 0:
+        for key in modules.keys():
+            val actual: HirModule = modules[key]
+            initial.push(actual)
+    # Canonical physical order removes dependence on Dict iteration and
+    # shard completion order. Proofs become visible only next round.
+    var selected: {i64: bool} = {}
+    while pending.len() < initial.len():
+        var best = -1
+        var best_path = ""
+        var index = 0
+        while index < initial.len():
+            if not selected.contains_key(index):
+                val path = module_surface_canonical_path(initial[index].path)
+                if best < 0 or path < best_path:
+                    best = index
+                    best_path = path
+            index = index + 1
+        if best < 0: break
+        selected[best] = true
+        pending.push(initial[best])
+    var providers: [HirModule] = []
+    var round = 0
+    while pending.len() > 0 and round <= initial.len():
+        val receipt = driver_nogc_param_effect_admission_round_v1({}, pending, surfaces, providers)
+        if receipt.fatal_errors.len() > 0:
+            return DriverNogcParamEffectAdmissionV1(errors: receipt.errors, modules: [])
+        if receipt.modules.len() == 0:
+            # No new proof can resolve the remaining dependency component.
+            # Unknown providers and cycles retain their actual diagnostics.
+            return DriverNogcParamEffectAdmissionV1(errors: receipt.errors, modules: [])
+        var next: [HirModule] = []
+        for actual in pending:
+            var admitted = false
+            for checked in receipt.modules:
+                if actual.name == checked.name and actual.path == checked.path:
+                    admitted = true
+            if not admitted: next.push(actual)
+        for checked in receipt.modules: providers.push(checked)
+        pending = next
+        round = round + 1
+    if pending.len() != 0:
+        return DriverNogcParamEffectAdmissionV1(errors: ["NOGC-CONTRACT-001: ownership provider admission did not converge"], modules: [])
+    DriverNogcParamEffectAdmissionV1(errors: [], modules: providers)
+
+pub fn driver_nogc_param_effect_errors_v1(modules: Dict<text, HirModule>,
+        module_array: [HirModule], surfaces: [ModuleSurface]) -> [text]:
+    driver_nogc_param_effect_admission_v1(modules, module_array, surfaces).errors
+
+pub fn driver_admit_nogc_param_effects_v1(ctx: CompileContext, surfaces: [ModuleSurface]):
+    val admission = driver_nogc_param_effect_admission_v1(ctx.hir_modules, ctx.validation_module_array, surfaces)
+    for error in admission.errors: ctx.add_error(error)
+    # Admission is transactional. No stale/partial report is published after
+    # one module fails, and downstream MIR never consumes error-bearing HIR.
+    if admission.errors.len() != 0: return
+    var modules: Dict<text, HirModule> = ctx.hir_modules
+    for actual in admission.modules:
+        for key in modules.keys():
+            val previous: HirModule = modules[key]
+            if previous.name == actual.name and previous.path == actual.path:
+                modules[key] = actual
+        if val entry = ctx.bootstrap_entry_hir:
+            if entry.name == actual.name and entry.path == actual.path:
+                ctx.bootstrap_entry_hir = actual
+    ctx.hir_modules = modules
+    ctx.validation_module_array = admission.modules
 
 pub fn driver_validate_value_struct_layout_declarations_v1(
     module_keys: [text],

@@ -1,0 +1,251 @@
+"""AC-BOR02: symbol-based closure capture and ordered suspension evidence."""
+use std.spec
+use compiler.common.config.Logger
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, MethodResolution, CollectionBuiltinOperation}
+use compiler.semantics.param_effects.short_escape.{short_escape_messages}
+
+fn se_expr(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: false,
+        type_: HirType(kind: HirTypeKind.Infer(0, 0), span: Span.empty()), span: Span.empty())
+
+fn se_borrow() -> HirExpr:
+    se_expr(HirExprKind.NamedVar(SymbolId(id: 17), "borrowed"))
+
+fn se_scalar() -> HirExpr:
+    se_expr(HirExprKind.IntLit(1, nil))
+
+fn se_arg(value: HirExpr) -> HirCallArg:
+    HirCallArg(has_name: false, name: "", value: value, span: Span.empty())
+
+fn se_check(value: HirExpr, prefix: [HirStmt], async_: bool = false, checked: {i64: [i64]} = {}, regions: {i64: {i64: [i64]}} = {}, short_params: {i64: bool} = {17: true}) -> [text]:
+    val parsed = parse_full_frontend("fn probe():\n    0\n", "short_escape.spl", "short_escape", Logger(level: 0))
+    var lowering = HirLowering.with_filename("short_escape.spl")
+    val module = lowering.lower_module(parsed)
+    for source_function in module.functions.values():
+        var function = source_function
+        function.is_async = async_
+        function.body = HirBlock(stmts: prefix, has: true, value: value, span: Span.empty())
+        return short_escape_messages(function, short_params, checked, regions)
+    assert(false)
+    []
+
+fn se_view() -> HirExpr:
+    se_expr(HirExprKind.NamedVar(SymbolId(id: 21), "view"))
+
+fn se_region_call(body: HirExpr) -> HirExpr:
+    val type_ = HirType(kind: HirTypeKind.Named(SymbolId(id: 71), []), span: Span.empty())
+    val param = HirParam(symbol: SymbolId(id: 21), name: "view", type_: type_, has_default: false,
+        default: se_scalar(), span: Span.empty(), is_mutable: false)
+    val callback = se_expr(HirExprKind.Lambda([param], body, []))
+    se_expr(HirExprKind.Call(se_expr(HirExprKind.Var(SymbolId(id: 99))), [se_arg(callback)], []))
+
+fn se_fresh_check(body: HirExpr, prefix: [HirStmt]) -> [text]:
+    se_check(se_region_call(body), prefix, false, {99: [0]}, {99: {0: [0]}}, {})
+
+describe "BOR04 invocation-scoped fresh short views":
+    it "seeds the checked callback parameter without caller short parameters":
+        var field = se_expr(HirExprKind.Field(se_view(), "value", nil))
+        field.has_type_ = true
+        field.type_ = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+        expect(se_fresh_check(field, []).len()).to_equal(0)
+
+    it "rejects returning the fresh view":
+        expect(se_fresh_check(se_view(), []).len()).to_be_greater_than(0)
+
+    it "rejects retaining a fresh view in a nested task closure":
+        val task = se_expr(HirExprKind.Lambda([], se_view(), [SymbolId(id: 21)]))
+        expect(se_fresh_check(task, []).len()).to_be_greater_than(0)
+
+    it "rejects suspending with a fresh callback parameter":
+        expect(se_fresh_check(se_expr(HirExprKind.Await(se_scalar())), []).len()).to_be_greater_than(0)
+
+    it "rejects storing a fresh view into an external field":
+        val target = se_expr(HirExprKind.Field(se_expr(HirExprKind.Var(SymbolId(id: 80))), "cached", nil))
+        val store = HirStmt(kind: HirStmtKind.Assign(target, nil, se_view()), span: Span.empty())
+        val body = HirBlock(stmts: [store], has: true, value: se_scalar(), span: Span.empty())
+        expect(se_fresh_check(se_expr(HirExprKind.Block(body)), []).len()).to_be_greater_than(0)
+
+    it "rejects sending a fresh view to an unproved task or device function":
+        val submit = se_expr(HirExprKind.Call(se_expr(HirExprKind.Var(SymbolId(id: 81))), [se_arg(se_view())], []))
+        expect(se_fresh_check(submit, []).len()).to_be_greater_than(0)
+
+    it "starts a fresh view after an earlier borrow-free suspension":
+        val earlier = HirStmt(kind: HirStmtKind.Expr(se_expr(HirExprKind.Await(se_scalar()))), span: Span.empty())
+        expect(se_fresh_check(se_scalar(), [earlier]).len()).to_equal(0)
+
+    it "does not seed a region at an unproved callable slot":
+        val call = se_region_call(se_view())
+        expect(se_check(call, [], false, {99: [0]}, {99: {1: [0]}}, {}).len()).to_be_greater_than(0)
+
+    it "rejects a region proof naming a missing lambda parameter":
+        val callback = se_expr(HirExprKind.Lambda([], se_scalar(), []))
+        val call = se_expr(HirExprKind.Call(se_expr(HirExprKind.Var(SymbolId(id: 99))), [se_arg(callback)], []))
+        expect(se_check(call, [], false, {99: [0]}, {99: {0: [0]}}, {}).len()).to_be_greater_than(0)
+
+    it "rejects an explicitly owning lambda parameter in a short region slot":
+        val inner = HirType(kind: HirTypeKind.Named(SymbolId(id: 71), []), span: Span.empty())
+        val param = HirParam(symbol: SymbolId(id: 21), name: "owner", type_: HirType(kind: HirTypeKind.Unique(inner), span: Span.empty()),
+            has_default: false, default: se_scalar(), span: Span.empty(), is_mutable: false)
+        val callback = se_expr(HirExprKind.Lambda([param], se_scalar(), []))
+        val call = se_expr(HirExprKind.Call(se_expr(HirExprKind.Var(SymbolId(id: 99))), [se_arg(callback)], []))
+        expect(se_check(call, [], false, {99: [0]}, {99: {0: [0]}}, {}).len()).to_be_greater_than(0)
+
+    it "rejects duplicate lambda parameter symbol identities":
+        val inner = HirType(kind: HirTypeKind.Named(SymbolId(id: 71), []), span: Span.empty())
+        val param = HirParam(symbol: SymbolId(id: 21), name: "view", type_: inner,
+            has_default: false, default: se_scalar(), span: Span.empty(), is_mutable: false)
+        val callback = se_expr(HirExprKind.Lambda([param, param], se_scalar(), []))
+        val call = se_expr(HirExprKind.Call(se_expr(HirExprKind.Var(SymbolId(id: 99))), [se_arg(callback)], []))
+        expect(se_check(call, [], false, {99: [0]}, {99: {0: [0, 1]}}, {}).len()).to_be_greater_than(0)
+
+describe "AC-BOR02 short-borrow capture":
+    it "rejects a retained capture with an authoritative symbol ID":
+        val callback = se_expr(HirExprKind.Lambda([], se_scalar(), [SymbolId(id: 17)]))
+        expect(se_check(callback, []).len()).to_be_greater_than(0)
+
+    it "checks body references when recovery HIR omits captures":
+        val callback = se_expr(HirExprKind.Lambda([], se_borrow(), []))
+        expect(se_check(callback, []).len()).to_be_greater_than(0)
+
+    it "does not conflate the same spelling with another symbol":
+        val unrelated = se_expr(HirExprKind.NamedVar(SymbolId(id: 99), "borrowed"))
+        val callback = se_expr(HirExprKind.Lambda([], unrelated, [SymbolId(id: 99)]))
+        expect(se_check(callback, []).len()).to_equal(0)
+
+    it "finds nested retained closures":
+        val inner = se_expr(HirExprKind.Lambda([], se_borrow(), []))
+        val outer = se_expr(HirExprKind.Lambda([], inner, []))
+        expect(se_check(outer, []).len()).to_be_greater_than(0)
+
+    it "allows a synchronous compiler-qualified callback reading a borrow":
+        var scalar_read = se_expr(HirExprKind.Field(se_borrow(), "v", nil))
+        scalar_read.has_type_ = true
+        scalar_read.type_ = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+        val callback = se_expr(HirExprKind.Lambda([], scalar_read, [SymbolId(id: 17)]))
+        val call = se_expr(HirExprKind.MethodCall(se_scalar(), "map", [se_arg(callback)], MethodResolution.BuiltinCollection(CollectionBuiltinOperation.ArrayMap)))
+        expect(se_check(call, []).len()).to_equal(0)
+
+    it "rejects an unqualified free function even when named map":
+        val callback = se_expr(HirExprKind.Lambda([], se_borrow(), [SymbolId(id: 17)]))
+        val callee = se_expr(HirExprKind.NamedVar(SymbolId(id: 99), "map"))
+        val call = se_expr(HirExprKind.Call(callee, [se_arg(callback)], []))
+        expect(se_check(call, []).len()).to_be_greater_than(0)
+
+    it "rejects a qualified callback returning a short borrow":
+        val callback = se_expr(HirExprKind.Lambda([], se_borrow(), [SymbolId(id: 17)]))
+        val call = se_expr(HirExprKind.MethodCall(se_scalar(), "map", [se_arg(callback)], MethodResolution.BuiltinCollection(CollectionBuiltinOperation.ArrayMap)))
+        expect(se_check(call, []).len()).to_be_greater_than(0)
+
+    it "does not let synchronous privilege escape to a returned nested closure":
+        val inner = se_expr(HirExprKind.Lambda([], se_borrow(), [SymbolId(id: 17)]))
+        val outer = se_expr(HirExprKind.Lambda([], inner, []))
+        val call = se_expr(HirExprKind.MethodCall(se_scalar(), "map", [se_arg(outer)], MethodResolution.BuiltinCollection(CollectionBuiltinOperation.ArrayMap)))
+        expect(se_check(call, []).len()).to_be_greater_than(0)
+
+describe "BOR04 definition-checked synchronous callback extent":
+    it "accepts a capturing callback at the exact checked callable and slot":
+        val callback = se_expr(HirExprKind.Lambda([], se_scalar(), [SymbolId(id: 17)]))
+        val callee = se_expr(HirExprKind.NamedVar(SymbolId(id: 99), "visit"))
+        val call = se_expr(HirExprKind.Call(callee, [se_arg(callback)], []))
+        expect(se_check(call, [], false, {99: [0]}).len()).to_equal(0)
+
+    it "rejects a same-named callee with another symbol":
+        val callback = se_expr(HirExprKind.Lambda([], se_scalar(), [SymbolId(id: 17)]))
+        val callee = se_expr(HirExprKind.NamedVar(SymbolId(id: 100), "visit"))
+        val call = se_expr(HirExprKind.Call(callee, [se_arg(callback)], []))
+        expect(se_check(call, [], false, {99: [0]}).len()).to_be_greater_than(0)
+
+    it "does not grant privilege at an unchecked argument slot":
+        val callback = se_expr(HirExprKind.Lambda([], se_scalar(), [SymbolId(id: 17)]))
+        val callee = se_expr(HirExprKind.Var(SymbolId(id: 99)))
+        val call = se_expr(HirExprKind.Call(callee, [se_arg(se_scalar()), se_arg(callback)], []))
+        expect(se_check(call, [], false, {99: [0]}).len()).to_be_greater_than(0)
+
+    it "does not guess a named argument position":
+        val callback = se_expr(HirExprKind.Lambda([], se_scalar(), [SymbolId(id: 17)]))
+        var argument = se_arg(callback)
+        argument.has_name = true
+        argument.name = "callback"
+        val call = se_expr(HirExprKind.Call(se_expr(HirExprKind.Var(SymbolId(id: 99))), [argument], []))
+        expect(se_check(call, [], false, {99: [0]}).len()).to_be_greater_than(0)
+
+    it "accepts a resolved static callback with checked definition identity":
+        val callback = se_expr(HirExprKind.Lambda([], se_scalar(), [SymbolId(id: 17)]))
+        val type_ = HirType(kind: HirTypeKind.Named(SymbolId(id: 70), []), span: Span.empty())
+        val call = se_expr(HirExprKind.StaticCall(type_, "visit", [se_arg(callback)], MethodResolution.StaticMethod(SymbolId(id: 70), SymbolId(id: 99))))
+        expect(se_check(call, [], false, {99: [0]}).len()).to_equal(0)
+
+    it "still rejects a borrowed callback return under a valid extent proof":
+        val callback = se_expr(HirExprKind.Lambda([], se_borrow(), [SymbolId(id: 17)]))
+        val call = se_expr(HirExprKind.Call(se_expr(HirExprKind.Var(SymbolId(id: 99))), [se_arg(callback)], []))
+        expect(se_check(call, [], false, {99: [0]}).len()).to_be_greater_than(0)
+
+    it "still rejects a suspending callback under a valid extent proof":
+        val body = se_expr(HirExprKind.TupleLit([se_expr(HirExprKind.Await(se_scalar())), se_borrow()]))
+        val callback = se_expr(HirExprKind.Lambda([], body, [SymbolId(id: 17)]))
+        val call = se_expr(HirExprKind.Call(se_expr(HirExprKind.Var(SymbolId(id: 99))), [se_arg(callback)], []))
+        expect(se_check(call, [], false, {99: [0]}).len()).to_be_greater_than(0)
+
+    it "rejects suspension of an explicit capture even without a later read":
+        val callback = se_expr(HirExprKind.Lambda([], se_expr(HirExprKind.Await(se_scalar())), [SymbolId(id: 17)]))
+        val call = se_expr(HirExprKind.Call(se_expr(HirExprKind.Var(SymbolId(id: 99))), [se_arg(callback)], []))
+        expect(se_check(call, [], false, {99: [0]}).len()).to_be_greater_than(0)
+
+    it "rejects an explicit borrowed return inside a checked callback block":
+        val returning = se_expr(HirExprKind.Return(Some(se_borrow())))
+        val statement = HirStmt(kind: HirStmtKind.Expr(returning), span: Span.empty())
+        val body = HirBlock(stmts: [statement], has: true, value: se_scalar(), span: Span.empty())
+        val callback = se_expr(HirExprKind.Lambda([], se_expr(HirExprKind.Block(body)), [SymbolId(id: 17)]))
+        val call = se_expr(HirExprKind.Call(se_expr(HirExprKind.Var(SymbolId(id: 99))), [se_arg(callback)], []))
+        expect(se_check(call, [], false, {99: [0]}).len()).to_be_greater_than(0)
+
+describe "AC-BOR02 ordered suspension":
+    it "rejects an earlier borrowed argument retained during a later await":
+        val callee = se_expr(HirExprKind.NamedVar(SymbolId(id: 99), "call"))
+        val waiting = se_expr(HirExprKind.Await(se_scalar()))
+        val call = se_expr(HirExprKind.Call(callee, [se_arg(se_borrow()), se_arg(waiting)], []))
+        expect(se_check(call, []).len()).to_be_greater_than(0)
+
+    it "rejects a borrowed argument evaluated after an await":
+        val waiting = se_expr(HirExprKind.Await(se_scalar()))
+        val tuple = se_expr(HirExprKind.TupleLit([waiting, se_borrow()]))
+        expect(se_check(tuple, []).len()).to_be_greater_than(0)
+
+    it "propagates local aliases across yield":
+        val alias = HirStmt(kind: HirStmtKind.Let(SymbolId(id: 18), se_borrow().type_, se_borrow()), span: Span.empty())
+        val yielding = HirStmt(kind: HirStmtKind.Expr(se_expr(HirExprKind.Yield(nil))), span: Span.empty())
+        val use_alias = se_expr(HirExprKind.NamedVar(SymbolId(id: 18), "alias"))
+        expect(se_check(use_alias, [alias, yielding]).len()).to_be_greater_than(0)
+
+    it "allows a borrow-free suspension":
+        val waiting = se_expr(HirExprKind.Await(se_scalar()))
+        expect(se_check(waiting, []).len()).to_equal(0)
+
+    it "rejects a capture evaluated after an earlier suspension":
+        val waiting = HirStmt(kind: HirStmtKind.Expr(se_expr(HirExprKind.Await(se_scalar()))), span: Span.empty())
+        val callback = se_expr(HirExprKind.Lambda([], se_scalar(), [SymbolId(id: 17)]))
+        val call = se_expr(HirExprKind.MethodCall(se_scalar(), "map", [se_arg(callback)], MethodResolution.BuiltinCollection(CollectionBuiltinOperation.ArrayMap)))
+        expect(se_check(call, [waiting]).len()).to_be_greater_than(0)
+
+    it "rejects short parameters captured by an async function future":
+        expect(se_check(se_scalar(), [], true).len()).to_be_greater_than(0)
+
+    it "checks a scalar condition borrow on the next iteration after await":
+        var condition = se_expr(HirExprKind.Field(se_borrow(), "active", nil))
+        condition.has_type_ = true
+        condition.type_ = HirType(kind: HirTypeKind.Bool, span: Span.empty())
+        val body = HirBlock(stmts: [], has: true, value: se_expr(HirExprKind.Await(se_scalar())), span: Span.empty())
+        val loop_expr = se_expr(HirExprKind.While(condition, body, nil))
+        expect(se_check(loop_expr, []).len()).to_be_greater_than(0)
+
+    it "does not retain a typed scalar field value across await":
+        var field = se_expr(HirExprKind.Field(se_borrow(), "v", nil))
+        field.has_type_ = true
+        field.type_ = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+        val tuple = se_expr(HirExprKind.TupleLit([field, se_expr(HirExprKind.Await(se_scalar()))]))
+        expect(se_check(tuple, []).len()).to_equal(0)

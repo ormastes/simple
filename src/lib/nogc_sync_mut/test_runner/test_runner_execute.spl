@@ -870,6 +870,11 @@ fn cleanup_native_generated_file(path: text, original_path: text, preserved_path
     if not keep_artifacts and path != "" and path != original_path and path != preserved_path and file_exists(path):
         file_delete(path)
 
+fn bounded_native_compile_output(output: text) -> text:
+    if output.len() > 4096:
+        return output[0:4096] + "...[truncated at 4096 characters]"
+    output
+
 fn cleanup_native_generated_files(smf_path: text, source_path: text, wrapped_path: text, cleanup_path: text, original_path: text, keep_artifacts: bool, native_cache_path: text = "", quarantine_path: text = "") -> bool:
     cleanup_native_generated_file(smf_path, original_path, "", keep_artifacts)
     cleanup_native_generated_file(source_path, original_path, wrapped_path, keep_artifacts)
@@ -1266,11 +1271,19 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
 
     if compile_exit != 0:
         if explicit_aot:
+            val completion_detail = match compile_scoped.completion:
+                case Some(receipt): "pid={receipt.pid}, generation={receipt.process_generation}, exit={receipt.exit_code}, signal={receipt.signal_number}, tree_reaped={receipt.tree_reaped}, timed_out={receipt.timed_out}, cancelled={receipt.cancelled}, stdout_digest={receipt.stdout_digest}, stderr_digest={receipt.stderr_digest}, transport_digest={receipt.transport_execution_digest}"
+                case _: "unavailable"
             val compile_cache_clean = cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts, smf_path + ".cache", native_quarantine_path)
             return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
                 duration_ms: (time_now_unix_micros() - start) / 1000, setup_ms: 0,
-                error: (if compile_cache_clean: "" else: "NATIVE-CACHE-CLEANUP-FAILED: ") + "Native backend compilation failed: " + options.native_backend + ": " + compile_stderr,
-                timed_out: false, cached: false, compile_ms: compile_ms)
+                error: (if compile_cache_clean: "" else: "NATIVE-CACHE-CLEANUP-FAILED: ") +
+                    "Native backend compilation failed: " + options.native_backend +
+                    " (exit={compile_exit}, limit={compile_result.limit_type}, budget={compile_scoped.budget_status}, completion={completion_detail})" +
+                    "; stdout: " + bounded_native_compile_output(compile_stdout) +
+                    "; stderr: " + bounded_native_compile_output(compile_stderr),
+                timed_out: compile_result.limit_type.contains("timeout"), cached: false, compile_ms: compile_ms,
+                process_completion: compile_scoped.completion)
         # MC/DC-forced standalone-SMF compilation is impossible for specs
         # that use interpreter-only constructs (TryOperator, PatternMatch,
         # CollectionLiteral, ...) -- "cannot compile to standalone SMF: N

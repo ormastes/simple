@@ -63,6 +63,13 @@ var lex_source_char_count_slot: [i64] = [0]
 var lex_source_code_base_slot: [i64] = [0]
 var lex_source_codes: [i64] = []
 var current_core_lexer_slot: [CoreLexer] = []
+
+# Preserve the record owner at the array storage boundary. A value recovered
+# from the scanner tuple must not be boxed as an integer pointer on writeback.
+# Keep the existing owner slot and initialization; only transport is explicit.
+fn current_core_lexer_store(lexer: CoreLexer):
+    current_core_lexer_slot[0] = lexer
+
 var lex_env_save_enabled: [bool] = [false]
 var lex_generic_close_pending: [bool] = [false]
 # One-shot latch so the dead-lexer diagnostic in lex_next() is reported once
@@ -649,7 +656,7 @@ fn lex_next() -> i64:
             val dead_len = current_core_source_get().len()
             eprint("[lexer_fatal] dead lexer: next_token() produced kind 0 (never a valid token kind) for path '{dead_path}' at line {dead_line} col {dead_col}; source length {dead_len}. Terminating token stream at EOF.")
         kind = 190
-    current_core_lexer_slot[0] = loaded
+    current_core_lexer_store(loaded)
     current_core_lexer_save(loaded)
     val env_save = lex_env_save_on()
     if env_save:
@@ -736,7 +743,7 @@ fn lex_force_set_pos(new_pos: i64, new_line: i64, new_col: i64):
     lx.pos = new_pos
     lx.line = new_line
     lx.col = new_col
-    current_core_lexer_slot[0] = lx
+    current_core_lexer_store(lx)
     current_core_lexer_save(lx)
     lex_token_end_direct[0] = new_pos
 
@@ -750,21 +757,21 @@ fn lex_enable_forced_indentation():
         current_core_lexer_slot = [current_core_lexer_load()]
     var loaded: CoreLexer = current_core_lexer_slot[0]
     loaded = core_lexer_enable_forced_indentation(loaded)
-    current_core_lexer_slot[0] = loaded
+    current_core_lexer_store(loaded)
 
 fn lex_disable_forced_indentation():
     if current_core_lexer_slot.len() == 0:
         current_core_lexer_slot = [current_core_lexer_load()]
     var loaded: CoreLexer = current_core_lexer_slot[0]
     loaded = core_lexer_disable_forced_indentation(loaded)
-    current_core_lexer_slot[0] = loaded
+    current_core_lexer_store(loaded)
 
 fn lex_pop_indent():
     if current_core_lexer_slot.len() == 0:
         current_core_lexer_slot = [current_core_lexer_load()]
     var loaded: CoreLexer = current_core_lexer_slot[0]
     loaded = core_lexer_pop_indent(loaded)
-    current_core_lexer_slot[0] = loaded
+    current_core_lexer_store(loaded)
 
 # Batched advance for the parser hot loop: one cross-module call instead of
 # three (lex_next + lex_token_line + lex_token_col). Under the seed
@@ -887,7 +894,7 @@ fn lex_snapshot_restore(snapshot: LexSnapshot):
     # restore must not serialize through text or environment-backed state.
     _sffi_array_free(lx.indent_stack)
     lx.indent_stack = snapshot.indent_stack
-    current_core_lexer_slot[0] = lx
+    current_core_lexer_store(lx)
     # Restore direct slots only. Environment mirrors are synchronized by the
     # explicit lexer boundary paths, never by speculative parser restore.
     val saved_kind = nums[7]
@@ -905,7 +912,7 @@ fn lex_snapshot_restore(snapshot: LexSnapshot):
     lx.cur_text = saved_text
     lx.cur_line = saved_line
     lx.cur_col = saved_col
-    current_core_lexer_slot[0] = lx
+    current_core_lexer_store(lx)
     # Restore token offsets for lex_token_start/end snapshot consumers.
     lex_token_start_direct[0] = nums[6]
     lex_token_end_direct[0] = nums[0]

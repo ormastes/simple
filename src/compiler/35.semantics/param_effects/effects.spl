@@ -8,7 +8,8 @@
 #                    returned, captured by an escaping closure, or held across
 #                    a suspension on at least one path. The caller MOVES the
 #                    argument; the callee drops it on paths that do not keep it.
-#   share-explicit   the parameter type is an explicit shared owner
+#   share-explicit   an explicit shared owner or weak control-block handle;
+#                    may retain/copy the handle, never a short borrowed view
 #   ambiguous        the body gives no single contract (rejected; see infer.spl)
 #   foreign-unknown  an `extern fn` with a class/pointer parameter: foreign
 #                    retention cannot be inferred away
@@ -40,6 +41,9 @@ pub fn param_effect_join(a: text, b: text) -> text:
     if param_effect_rank(b) > param_effect_rank(a): return b
     a
 
+pub fn param_effect_is_valid(effect: text) -> bool:
+    effect == "read-short" or effect == "mutate-short" or effect == "consume" or effect == "share-explicit" or effect == "ambiguous" or effect == "foreign-unknown"
+
 pub struct ParamEffectEntry:
     name: text
     effect: text
@@ -56,6 +60,7 @@ pub struct ParamEffectDiag:
     param: text
     message: text
     line: i64
+    pending_import_symbol: i64 = -1
 
 pub struct ParamEffectReport:
     functions: [FunctionParamEffects]
@@ -87,9 +92,9 @@ pub fn param_effect_summary_encode_v1(report: ParamEffectReport) -> text:
     out
 
 pub fn param_effect_summary_decode_v1(summary: text) -> {text: [text]}:
-    """Inverse of encode: function name -> per-position effects. A summary
-    with any other domain header decodes to an empty table (fail closed:
-    unknown metadata is never trusted)."""
+    """Decode an entire valid summary or return no trusted entries.
+    Unknown effects, duplicate functions and malformed rows must not turn
+    an unchecked retaining call into a short borrow."""
     var table: {text: [text]} = {}
     val lines = summary.split("\n")
     if lines.len() == 0 or lines[0] != param_effect_summary_domain_v1():
@@ -97,13 +102,21 @@ pub fn param_effect_summary_decode_v1(summary: text) -> {text: [text]}:
     var i = 1
     while i < lines.len():
         val l = lines[i]
+        if l == "":
+            if i != lines.len() - 1: return {}
+            i = i + 1
+            continue
         val tab = l.index_of("\t")
-        if tab > 0:
-            val effs_text = l.substring(tab + 1, l.len())
-            var effs: [text] = []
-            if effs_text != "":
-                effs = effs_text.split(",")
-            table[l.substring(0, tab)] = effs
+        if tab <= 0: return {}
+        val name = l.substring(0, tab)
+        if table.contains_key(name): return {}
+        val effs_text = l.substring(tab + 1, l.len())
+        var effs: [text] = []
+        if effs_text != "":
+            effs = effs_text.split(",")
+            for effect in effs:
+                if not param_effect_is_valid(effect): return {}
+        table[name] = effs
         i = i + 1
     table
 

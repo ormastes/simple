@@ -28,6 +28,8 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, mir_operand_const_int}
 use compiler.mir.array_move.mir_array_move.{array_move_sites_for, array_move_sites_empty, am_block_has_place_let}
 use compiler.hir.hir_types.*
+use compiler.hir.ownership_types.{hir_type_is_short_candidate}
+use compiler.mir.mir_types.{MirLocal}
 use compiler.hir.hir_definitions.*
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at}
 use compiler.common.diagnostics.span.{Span}
@@ -480,6 +482,20 @@ impl MirLowering:
             # local so backends render actual port names, not arg0/arg1/arg2.
             var name_bldr = self.builder
             name_bldr.set_local_name(local, param.name)
+            # A strict bare parameter is a view at this function's original
+            # boundary, not an owning local. Keep the declaration's mutability
+            # and boundary identity attached to the actual MIR argument slot.
+            if self.nogc_strict and hir_type_is_short_candidate(param.type_):
+                var provenance_index = 0
+                while provenance_index < name_bldr.locals.len():
+                    val slot: MirLocal = name_bldr.locals[provenance_index]
+                    if slot.id.id == local.id:
+                        name_bldr.locals[provenance_index] = MirLocal(
+                            id: slot.id, name: slot.name, type_: slot.type_,
+                            kind: slot.kind, is_ghost: slot.is_ghost,
+                            short_borrow: true, short_mutable: param.is_mutable,
+                            short_boundary: fn_.symbol.id)
+                    provenance_index = provenance_index + 1
             self.builder = name_bldr
             # Preserve every parameter's declared HIR type on its MIR local.
             # Receiver expressions on the flat/full-entry path can carry a
@@ -526,13 +542,15 @@ impl MirLowering:
             # convert_nodes.spl's Param.is_mutable -> declaration_lowering.spl's
             # lower_param -> HirParam.is_mutable), mirroring how `me`'s
             # by-reference signal reaches this same lowering step. A PLAIN
-            # (non-`mut`) struct param must keep the Bug #167 copy -- only
-            # `me`/`self` receivers and explicitly `mut`-marked params alias
-            # the caller's memory.
+            # (non-`mut`) struct param keeps the Bug #167 copy in legacy
+            # mode. Strict bare parameters are short borrows, including
+            # readonly structs and trait values, and retain the incoming
+            # place without an allocation or provenance-erasing rebind.
             val is_me_receiver = fn_.is_mutable and pli == 0 and (param.name == "self" or param.name == "me")
             val is_mut_param = param.is_mutable
+            val is_short_param = self.nogc_strict and hir_type_is_short_candidate(param.type_)
             if self.native_trait_value_type(param.type_):
-                if not is_me_receiver and not is_mut_param:
+                if not is_me_receiver and not is_mut_param and not is_short_param:
                     val copied_trait = self.copy_native_trait_value(local, param.type_)
                     self.bind_local(param_symbol_id, copied_trait)
                 pli = pli + 1
@@ -632,8 +650,9 @@ impl MirLowering:
                     # caller's instance. Only a genuine `struct` param keeps
                     # the defensive per-call copy when it's neither a `me`
                     # receiver nor an explicit `mut` param.
-                    if is_named_struct and (is_me_receiver or is_mut_param or is_class_param):
-                        # Bind the receiver/mut-param/class-param directly to
+                    if is_named_struct and (is_me_receiver or is_mut_param or is_class_param or is_short_param):
+                        # Bind the receiver/mut-param/class-param/strict short
+                        # parameter directly to
                         # the raw incoming arg local (already mapped via
                         # self.local_map above) -- NO defensive copy, NO
                         # local_map rebind -- so a `me.field = v` /
@@ -680,7 +699,8 @@ impl MirLowering:
                         # param no longer reaches this copy arm at all. This
                         # copy now applies only to a genuine `struct` param
                         # that is neither a `me` receiver nor `mut`-marked,
-                        # which is exactly Bug #167's original, correct scope.
+                        # in legacy mode. Strict short parameters have already
+                        # taken the direct binding branch above.
                         val copy_local = self.copy_struct_value_recursive(local, parameter_type_name, type_symbol, [parameter_type_name])
                         self.bind_local(param_symbol_id, copy_local)
                 case _:
@@ -823,14 +843,9 @@ impl MirLowering:
                 # which the checker's terminator arm alone already covers
                 # via record_use).
                 var tail_operand = mir_operand_copy(returned_tail_local)
-                if self.local_hir_type_isolation_state(returned_tail_local.id) == 1:
-                    var b_rmove = self.builder
-                    val rmove_ty = self.local_mir_type_of(returned_tail_local) ?? MirType.i64()
-                    val rmove_local = b_rmove.new_temp(rmove_ty)
-                    b_rmove.emit_move(rmove_local, returned_tail_local)
-                    self.builder = b_rmove
-                    bldr2 = self.builder
-                    tail_operand = mir_operand_copy(rmove_local)
+                if fn_.body.has:
+                    tail_operand = self.ownership_return_operand(returned_tail_local, fn_.body.value)
+                bldr2 = self.builder
                 val tail_box: MirOperand? = Some(tail_operand)
                 bldr2.terminate_return(tail_box)
             else:
@@ -1083,17 +1098,17 @@ impl MirLowering:
             val caller_disc = self.mir_tag_probe_pending_caller_disc
             self.mir_tag_probe_pending_site = "recursive-or-other"
             self.mir_tag_probe_pending_caller_disc = -2
-            if type_.kind == 0:
-                eprint("[mir-tag-probe] fn={self.mir_tag_probe_active_function} site={probe_site} caller_disc={caller_disc} callee_disc={callee_disc} kindzero=true\n")
-        if type_.kind == 0:
+            if callee_disc < 0:
+                eprint("[mir-tag-probe] fn={self.mir_tag_probe_active_function} site={probe_site} caller_disc={caller_disc} callee_disc={callee_disc} invalid_kind_carrier=true\n")
+        if callee_disc < 0:
             if self.type_transport_receipts < MIR_TYPE_TRANSPORT_RECEIPT_LIMIT:
                 self.type_transport_receipts = self.type_transport_receipts + 1
-                eprint("[mir-type-invariant] receipt={self.type_transport_receipts}/{MIR_TYPE_TRANSPORT_RECEIPT_LIMIT} owner={self.type_transport_owner} context={self.type_transport_context} param_index={self.type_transport_param_index} caller_disc={self.type_transport_caller_disc} callee_disc={callee_disc} kindzero=true\n")
-                val relation = if self.type_transport_caller_disc > 0:
+                eprint("[mir-type-invariant] receipt={self.type_transport_receipts}/{MIR_TYPE_TRANSPORT_RECEIPT_LIMIT} owner={self.type_transport_owner} context={self.type_transport_context} param_index={self.type_transport_param_index} caller_disc={self.type_transport_caller_disc} callee_disc={callee_disc} invalid_kind_carrier=true\n")
+                val relation = if self.type_transport_caller_disc >= 0:
                     "changed-at-call-boundary"
                 else:
-                    "already-zero-at-caller"
-                self.error_fatal("E-MIR-TYPE-Transport: raw-zero HirType kind observed at MIR boundary owner={self.type_transport_owner} context={self.type_transport_context} param_index={self.type_transport_param_index} caller_disc={self.type_transport_caller_disc} callee_disc={callee_disc} relation={relation}", nil)
+                    "already-invalid-at-caller"
+                self.error_fatal("E-MIR-TYPE-Transport: invalid HirType kind carrier observed at MIR boundary owner={self.type_transport_owner} context={self.type_transport_context} param_index={self.type_transport_param_index} caller_disc={self.type_transport_caller_disc} callee_disc={callee_disc} relation={relation}", nil)
             return MirType.i64()
         # [mir-lower-type-probe] -- DIAGNOSTIC, default OFF, gated by
         # SIMPLE_MIRB_TRACE via mir_trace_enabled().
@@ -1127,7 +1142,7 @@ impl MirLowering:
             if mir_lower_type_probe_seq == 50000:
                 eprint("[mir-lower-type-probe] truncated seq=50000\n")
             else:
-                # kindzero / kindnil discriminate the two candidate mechanisms without
+                # invalid_kind_carrier discriminates absent/corrupt enum carriers without
                 # adding a runtime accessor. There is NO scalar tag accessor in the C
                 # runtime (no rt_value_tag / rt_raw_bits), so `type_ & 7` is not
                 # expressible from Simple, and reaching into the object to synthesise one
@@ -1135,14 +1150,14 @@ impl MirLowering:
                 # relies on: copy_local_hir_type_metadata (mir_lowering_types.spl:595)
                 # tests `source_type == nil or source_type == 0` to reject a
                 # "staged-native raw zero". Same test here:
-                #   disc=-1 with kindzero=true  -> the arm-binding guard FAILED and the
+                #   disc=-1 with invalid_kind_carrier=true -> the arm-binding guard FAILED and the
                 #     copy came from the freshly rt_alloc'd ZEROED block; the migration is
                 #     the cause and the fix is the tagging / the guard's assumption.
-                #   disc=-1 with kindzero=false -> the guard PASSED and the copy is wrong
+                #   disc>=0 with invalid_kind_carrier=false -> the guard PASSED and the copy is wrong
                 #     for some other reason; the zeroed-block story is refuted.
                 # Both operands are compared by value; neither reads a field of the
                 # suspect object beyond `kind`, which round 1 proved safe to touch.
-                eprint("[mir-lower-type-probe] seq={mir_lower_type_probe_seq} fn={probe_fn} disc={_sffi_hir_type_discriminant(type_.kind)} kindzero={type_.kind == 0} kindnil={type_.kind == nil}\n")
+                eprint("[mir-lower-type-probe] seq={mir_lower_type_probe_seq} fn={probe_fn} disc={callee_disc} invalid_kind_carrier={callee_disc < 0}\n")
         val dict_type_disc = _sffi_hir_type_discriminant(HirTypeKind.Dict(type_, type_))
         if _sffi_hir_type_discriminant(type_.kind) == dict_type_disc:
             match type_.kind:

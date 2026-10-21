@@ -36,6 +36,12 @@
 
 ## 1. Decisions and scope
 
+> **2026-10-20 implementation progress:** See
+> [pointer and short-borrow hardening progress](nogc_pointer_borrow_hardening_progress_2026-10-20.md)
+> for the recovered Claude lane state, declaring-module contract hardening,
+> effect-analysis repairs and unresolved execution/Phase 3 gates. Source edits
+> and reviewed regression scenarios do not establish runtime completion.
+
 ### 1.1 Required defaults
 
 The following decisions are requirements for this plan, not claims about complete implementation in the reviewed executable.

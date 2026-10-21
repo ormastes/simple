@@ -319,6 +319,13 @@ fn _semantic_value_lines(u: DeclUniverse, type_text: text, v: text, indent: text
         out = out + indent + "    state = _ast_semantic_mix_tag(state, \"nil\")\n"
         out = out + indent + "else:\n"
         out = out + indent + "    state = _ast_semantic_mix_tag(state, \"some\")\n"
+        val payload_type = _strip_opt(type_text)
+        if payload_type.starts_with("[") and payload_type.ends_with("]"):
+            # Give optional array pattern payloads a concrete iterator type.
+            # The nil/some tags and element stream stay unchanged.
+            val payload = "sov{idx}"
+            out = out + indent + "    val " + payload + ": " + payload_type + " = " + v + " ?? []\n"
+            return out + _semantic_value_lines(u, payload_type, payload, indent + "    ", idx)
         return out + _semantic_value_lines(u, _strip_opt(type_text), v, indent + "    ", idx)
     if c.cat == "node":
         return indent + "state = " + _semantic_fn(c.a) + "(" + v + ", state)\n"
@@ -655,27 +662,64 @@ fn emit_fold_init(d: Dialect) -> text:
 # Driver
 # ============================================================================
 
-fn generate_folds_into(repo_root: text, out_root: text) -> i64:
-    """Write every dialect's fold visitor under `out_root`. Returns file count.
+fn fold_inputs_valid(u: DeclUniverse, dialect: Dialect) -> bool:
+    for carrier in dialect.carriers:
+        val kind = carrier[1]
+        if not u.is_enum(kind) or u.decl_of(kind).variants.len() == 0:
+            print "compiler_schema: refusing empty carrier {dialect.key}.{kind}"
+            return false
+    true
 
-    `out_root` is a tree root, not one directory: each dialect owns its own
-    path, so the freshness checker can regenerate into a temp tree and diff."""
+fn prepare_fold_inputs(repo_root: text) -> [DeclUniverse]:
+    """Retain every validated dialect before any output family is written."""
+    var inputs: [DeclUniverse] = []
+    for dialect in all_dialects():
+        val universe = load_dialect(repo_root, dialect)
+        if not fold_inputs_valid(universe, dialect): return []
+        inputs.push(universe)
+    val semantic = load_ast_semantic_universe(repo_root)
+    if not fold_inputs_valid(semantic, dialect_ast()): return []
+    inputs.push(semantic)
+    inputs
+
+fn generate_folds_into(repo_root: text, out_root: text) -> i64:
+    generate_folds_prepared(prepare_fold_inputs(repo_root), out_root)
+
+fn generate_folds_prepared(inputs: [DeclUniverse], out_root: text) -> i64:
+    val dialects = all_dialects()
+    if inputs.len() != dialects.len() + 1: return -1
+    var index = 0
+    for dialect in dialects:
+        if not fold_inputs_valid(inputs[index], dialect): return -1
+        index = index + 1
+    val semantic: DeclUniverse = inputs[dialects.len()]
+    if not fold_inputs_valid(semantic, dialect_ast()): return -1
     var files = 0
-    for d in all_dialects():
-        val u = load_dialect(repo_root, d)
-        if u.sources.len() == 0:
-            continue
+    index = 0
+    for d in dialects:
+        val u: DeclUniverse = inputs[index]
+        index = index + 1
         val dir = out_root + "/" + d.out_dir
         dir_create_all(dir)
         file_write(dir + "/" + d.out_file, emit_fold_file(u, d))
         if d.key != "hir":
-            # The HIR package __init__ is owned by visitor_gen, which already
-            # re-exports this file; a second writer would fight it.
-            val semantic_u = load_ast_semantic_universe(repo_root)
-            file_write(dir + "/ast_semantic_value.spl", emit_ast_semantic_file(semantic_u))
+            file_write(dir + "/ast_semantic_value.spl", emit_ast_semantic_file(semantic))
             file_write(dir + "/__init__.spl", emit_fold_init(d))
         files = files + 1
     files
+
+fn fold_variant_report_prepared(inputs: [DeclUniverse]) -> text:
+    val dialects = all_dialects()
+    if inputs.len() != dialects.len() + 1: return "invalid prepared fold inputs"
+    var out = ""
+    var index = 0
+    for d in dialects:
+        val u: DeclUniverse = inputs[index]
+        index = index + 1
+        out = out + d.key + ": " + "{d_carrier_variant_total(u, d)}" + " carrier variant(s), "
+        out = out + "{d_variant_total(u, d)}" + " total variant(s), "
+        out = out + "{d_emit_order(u, d).len()}" + " walk fn(s)\n"
+    out
 
 fn fold_variant_report(repo_root: text) -> text:
     var out = ""
@@ -693,4 +737,5 @@ export d_variant_total, d_carrier_variant_total, registry_hash
 export ast_semantic_roots, load_ast_semantic_universe, ast_semantic_closure, ast_semantic_emit_order
 export emit_one_ast_semantic_encoder, emit_ast_semantic_file
 export emit_one_walk, emit_fold_kind_name_fns, emit_fold_file, emit_fold_init
+export prepare_fold_inputs, generate_folds_prepared, fold_variant_report_prepared
 export generate_folds_into, fold_variant_report

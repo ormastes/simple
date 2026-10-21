@@ -5,9 +5,9 @@
 # owner=compiler.mir_opt.var_reassign_ssa dependency=BlockId` and the
 # failure resurfaced as `unresolved type: BlockId` against an importing module.
 # compiler.mir.mir_instructions re-exports it (mir_instructions.spl:9-10).
-use compiler.mir.mir_instructions.{BlockId, MirBlock, MirInst, MirInstKind, MirOperand, MirOperandKind, MirTerminator}
+use compiler.mir.mir_instructions.{BlockId, MirBlock, MirInst, MirInstKind, MirOperand, MirOperandKind}
 use compiler.mir.mir_types.{LocalId, LocalKind, MirConstValue, MirType, MirLocal}
-use compiler.mir.mir_instruction_support.{MirPlace}
+use compiler.mir.mir_instruction_support.{MirPlace, MirTerminator}
 use compiler.interp.execution.tiered_jit.{JitHotspotSpecializationProvider, jit_hotspot_specialization_provider_from_analysis}
 use compiler.mir_opt.pattern.rule_engine.{OptimizerBackendKind, optimization_backend_kind_from_text, optimization_backend_kind_name}
 use compiler.mir_opt.var_reassign_analysis.{
@@ -20,6 +20,7 @@ use compiler.mir_opt.var_reassign_analysis.{
     var_reassign_local_id_value,
     var_reassign_operand_local
 }
+use compiler.mir_opt.ssa_carrier_guard.{ssa_local_carrier_absent, ssa_operand_carrier_absent}
 use std.io_runtime.{env_get_opt}
 
 fn ssa_debug_enabled() -> bool:
@@ -161,7 +162,7 @@ fn ssa_local_id_value(local: LocalId) -> i64:
 fn ssa_local_payload_valid(local: LocalId) -> bool:
     # Staged-native aggregate/list transport can expose absence as raw zero,
     # while source nil uses the tagged RuntimeValue sentinel. Reject both.
-    if local == nil or local == 0:
+    if ssa_local_carrier_absent(local):
         return false
     match local:
         case LocalId(raw_id): raw_id >= 0
@@ -281,7 +282,7 @@ fn ssa_max_local_from_inst(current: i64, inst: MirInst) -> i64:
 
 fn ssa_max_local_from_term(current: i64, term: MirTerminator) -> i64:
     match term:
-        case Ret(_):
+        case MirTerminator.Ret(_):
             # The staged-native alloca lane never decodes return payloads.
             # Value returns are rejected by admission; void returns have no
             # local use to contribute to the max scan.
@@ -348,7 +349,7 @@ fn ssa_var_transform_inst_supported(inst: MirInst) -> bool:
 
 fn ssa_var_transform_term_supported(term: MirTerminator) -> bool:
     match term:
-        case Ret(_): true
+        case MirTerminator.Ret(_): true
         case _: false
 
 fn ssa_rewrite_dest(original_dest: LocalId, keys: [i64], values: [i64], next_local_id: i64) -> (LocalId, [i64], [i64], i64, bool):
@@ -427,7 +428,7 @@ fn ssa_rewrite_inst(inst: MirInst, keys: [i64], values: [i64], next_local_id: i6
 
 fn ssa_rewrite_term(term: MirTerminator, keys: [i64], values: [i64]) -> MirTerminator:
     match term:
-        case Ret(value):
+        case MirTerminator.Ret(value):
             if value.?:
                 val ret_value = value ?? ssa_unreachable_operand_fallback()
                 MirTerminator.Ret(Some(ssa_rewrite_operand(ret_value, keys, values)))
@@ -597,7 +598,7 @@ fn ssa_replace_inst_operands_for_local(inst: MirInst, original_id: i64, replacem
 
 fn ssa_replace_term_operands_for_local(term: MirTerminator, original_id: i64, replacement_id: i64) -> MirTerminator:
     match term:
-        case Ret(value):
+        case MirTerminator.Ret(value):
             if value.?:
                 val ret_value = value ?? ssa_unreachable_operand_fallback()
                 MirTerminator.Ret(Some(ssa_replace_operand_local(ret_value, original_id, replacement_id)))
@@ -902,7 +903,7 @@ fn ssa_operand_local_payload_valid(operand: MirOperand) -> bool:
     # Struct-backed operands can arrive as nil in the staged-native lane.
     # Matching a nil receiver still attempts to read its variant field, so
     # reject it before structural decoding, as ssa_operand_push_local does.
-    if operand == nil or operand == 0:
+    if ssa_operand_carrier_absent(operand):
         return false
     match operand:
         case MirOperand(kind):
@@ -953,7 +954,7 @@ fn ssa_inst_operand_payloads_valid(inst: MirInst) -> bool:
 
 fn ssa_term_operand_payloads_valid(term: MirTerminator) -> bool:
     match term:
-        case Ret(value):
+        case MirTerminator.Ret(value):
             # `??` NOT `.unwrap()`: the stolen unwrap answers raw 0 here, which
             # ssa_operand_local_payload_valid then rejects as absent -> EVERY
             # value-returning function was refused with "invalid terminator
@@ -1182,10 +1183,10 @@ fn ssa_reassigned_locals_for_blocks(blocks: [MirBlock]) -> [i64]:
 
 fn ssa_local_type_lookup(mir_locals: [MirLocal], local_id: i64) -> MirType:
     for local in mir_locals:
-        match local:
-            case MirLocal(id, _, type_, _, _):
-                if ssa_local_id_value(id) == local_id:
-                    return type_
+        # Read the declared type without destructuring the extensible local
+        # schema. This lookup never reconstructs or drops short provenance.
+        if ssa_local_id_value(local.id) == local_id:
+            return local.type_
     MirType.i64()
 
 # --- cross-block-live detection --------------------------------------------
@@ -1366,7 +1367,7 @@ fn ssa_collect_inst_operand_locals(locals: [i64], inst: MirInst) -> [i64]:
 fn ssa_collect_term_operand_locals(locals: [i64], term: MirTerminator) -> [i64]:
     var result = locals
     match term:
-        case Ret(value):
+        case MirTerminator.Ret(value):
             # Same `.unwrap()`-on-an-optional hazard as the admission gate in
             # ssa_term_operand_payloads_valid: a nil here silently drops the
             # RETURN as a use of the returned local, which is bug #2 of
@@ -1727,7 +1728,7 @@ fn ssa_alloca_rewrite_inst(inst: MirInst, slot_keys: [i64], slot_values: [i64], 
 
 fn ssa_alloca_rewrite_term(term: MirTerminator, slot_keys: [i64], slot_values: [i64], next_temp: i64) -> ([MirInst], MirTerminator, i64):
     match term:
-        case Ret(value):
+        case MirTerminator.Ret(value):
             # Third site of the same `.unwrap()` hazard. Once the function IS
             # admitted, this is what loads a slotted local back out of its slot
             # for the `ret`; a nil here leaves the terminator reading the

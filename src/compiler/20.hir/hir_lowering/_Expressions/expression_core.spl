@@ -1,3 +1,7 @@
+# Explicit payload owners survive import-surface projection.
+use compiler.hir.hir_types.{SymbolId, HirType, HirTypeKind}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.hir.hir_operators.{HirBinOp}
 # HIR lowering - Core expression dispatch.
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.hir.hir_types.*
@@ -14,6 +18,10 @@ use compiler.hir.hir_lowering._Expressions.source_union_pattern_v1.*
 use compiler.hir.hir_lowering._Expressions.declared_enum_constructor.*
 use compiler.hir.hir_lowering._Expressions.collection_factory_types.{collection_factory_type_concrete}
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
+
+# A concrete parameter retains the symbol owner after optional extraction.
+fn _hir_callable_named_var_payload(symbol: SymbolId, name: text) -> HirExprKind:
+    HirExprKind.NamedVar(symbol, name)
 
 impl HirLowering:
     fn attributed_collection_family_identity(name: text, owner: text) -> text:
@@ -171,7 +179,8 @@ impl HirLowering:
                 val method_symbol = self.symbols.lookup_static_method_raw(owner.id, method)
                 if val declared_method = method_symbol:
                     if declared_method != nil and declared_method.is_valid():
-                        return MethodResolution.StaticMethod(owner, declared_method)
+                        val method_id: SymbolId = declared_method
+                        return MethodResolution.StaticMethod(owner, method_id)
             case _: ()
         MethodResolution.Unresolved
 
@@ -445,7 +454,7 @@ impl HirLowering:
                                     val mc_callable_name = self.symbols.symbol_display_name(mc_resolved_callable, method_name_t)
                                     return HirExpr(
                                         kind: HirExprKind.Call(
-                                            HirExpr(kind: HirExprKind.NamedVar(mc_resolved_callable, mc_callable_name), has_type_: false, type_: nil, span: e.span),
+                                            HirExpr(kind: _hir_callable_named_var_payload(mc_resolved_callable, mc_callable_name), has_type_: false, type_: nil, span: e.span),
                                             hir_args,
                                             []
                                         ),
@@ -647,7 +656,7 @@ impl HirLowering:
                     )
                 case _:
                     pass
-        if kind_disc_v == 21232742:  # hash("Field")
+        if kind_disc_v == hir_expr_kind_disc(ExprKind.Field(kind_disc_dummy, "")):
             match expr_kind_value:
                 case ExprKind.Field(base, field):
                     val fld_base_t: Expr = base
@@ -677,7 +686,7 @@ impl HirLowering:
                                 val module_callable = self.field_module_callable(module_name, fld_name_t)
                                 if val resolved_callable = module_callable:
                                     val callable_name = self.symbols.symbol_display_name(resolved_callable, fld_name_t)
-                                    return HirExpr(kind: HirExprKind.NamedVar(resolved_callable, callable_name), has_type_: false, type_: nil, span: e.span)
+                                    return HirExpr(kind: _hir_callable_named_var_payload(resolved_callable, callable_name), has_type_: false, type_: nil, span: e.span)
                     # Numeric tuple positional access (`t.0`, `t.1`, ...):
                     # route through HirExprKind.Index (rt_array_get at
                     # runtime) instead of the generic struct-field path
@@ -744,7 +753,7 @@ impl HirLowering:
                     return HirExpr(kind: HirExprKind.Field(fld_lowered_base, fld_name_t, None), has_type_: false, type_: nil, span: e.span)
                 case _:
                     pass
-        if kind_disc_v == 1138084884:  # hash("Block")
+        if kind_disc_v == hir_expr_kind_disc(ExprKind.Block(Block(stmts: [], span: e.span))):
             match expr_kind_value:
                 case ExprKind.Block(block):
                     return HirExpr(kind: HirExprKind.Block(self.lower_hir_block(block)), has_type_: false, type_: nil, span: e.span)
@@ -770,10 +779,11 @@ impl HirLowering:
                 # binaries. The parser has already built `interps` correctly
                 # by this point regardless of SIMPLE_BOOTSTRAP; always lower
                 # it when present.
-                val hir_interps: [HirInterpolation]? = if interps.?:
-                    self.lower_interpolation_list(interps)
-                else:
-                    nil
+                var hir_interps: [HirInterpolation]? = nil
+                if val parsed_interps = interps:
+                    val interpolation_parts: [Interpolation] = parsed_interps
+                    val lowered_interps: [HirInterpolation] = self.lower_interpolation_list(interpolation_parts)
+                    hir_interps = Some(lowered_interps)
                 HirExprKind.StringLit(value, hir_interps)
 
             case ExprKind.BoolLit(value):
@@ -795,7 +805,7 @@ impl HirLowering:
                                 type_: homogeneous_array_type,
                                 span: e.span)
                 # For empty arrays, use configured default element type
-                val elem_type = if hir_elements.is_empty():
+                val elem_type: HirType? = if hir_elements.is_empty():
                     if self.is_strict_empty_collections():
                         self.error("empty array requires explicit type annotation", e.span)
                         nil
@@ -816,7 +826,11 @@ impl HirLowering:
                 HirExprKind.TupleLit(self.lower_expr_list(elements))
 
             case ExprKind.DictLit(entries):
-                HirExprKind.DictLit(self.lower_dict_entries(entries), nil, None)
+                # DictLit requires a concrete key-type slot. Infer(0, 0)
+                # denotes an unannotated type for downstream inference.
+                val dict_entries: [(HirExpr, HirExpr)] = self.lower_dict_entries(entries)
+                val dict_key_type: HirType = HirType(kind: HirTypeKind.Infer(0, 0), span: e.span)
+                HirExprKind.DictLit(dict_entries, dict_key_type, None)
 
             case ExprKind.SetLit(elements):
                 HirExprKind.SetLit(self.lower_expr_list(elements), None)
@@ -840,7 +854,7 @@ impl HirLowering:
                 if symbol == nil or symbol.? == nil:
                     self.lower_unresolved_ident(ident_name_t, e.span)
                 else:
-                    val found_symbol: HirSymbol = symbol.?
+                    val found_symbol: SymbolId = symbol.?
                     # Under a --entry-closure bootstrap build, a
                     # cross-module imported (or same-module,
                     # non-entry-module) function's stored symbol name may
@@ -957,7 +971,7 @@ impl HirLowering:
                 val bin_op_t: BinOp = op
                 val bin_left_t: Expr = left
                 val bin_right_t: Expr = right
-                val hir_op = self.lower_binop(bin_op_t, e.span)
+                val hir_op: HirBinOp = self.lower_binop(bin_op_t, e.span)
                 # `x is i64` / `x is not i64`: when the RIGHT side NAMES A
                 # TYPE it is a type TEST, not a value comparison. Lowering it
                 # as a value is the recorded defect (bug doc
@@ -973,7 +987,9 @@ impl HirLowering:
                         case BinOp.IsNot: HirExprKind.Unary(HirUnaryOp.Not, tested)
                         case _: HirExprKind.TypeTest(self.lower_hir_expr(bin_left_t), is_type_name)
                 else:
-                    HirExprKind.Binary(hir_op, self.lower_hir_expr(bin_left_t), self.lower_hir_expr(bin_right_t))
+                    val lowered_left: HirExpr = self.lower_hir_expr(bin_left_t)
+                    val lowered_right: HirExpr = self.lower_hir_expr(bin_right_t)
+                    HirExprKind.Binary(hir_op, lowered_left, lowered_right)
 
             case ExprKind.Unary(op, operand):
                 val un_op_t: UnaryOp = op
@@ -1235,9 +1251,9 @@ impl HirLowering:
                     HirType(kind: HirTypeKind.Named(symbol, []), span: e.span)
                 else:
                     HirType(kind: HirTypeKind.Error, span: e.span)
-                val hir_payload = match payload:
+                val hir_payload: HirEnumPayload? = match payload:
                     case Some(p):
-                        val lowered_payload = match p:
+                        val lowered_payload: HirEnumPayload = match p:
                             case Tuple(values):
                                 var hir_values: [HirExpr] = []
                                 for v in values:
