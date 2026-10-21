@@ -736,9 +736,13 @@ impl CompilerDriver:
         val collection_target = driver_collection_target_options(target_context, self.ctx.options)
         # A foreign borrowed lease cannot own compiler context mutations.
         if transient_array_scope_state_v1() != 0: return false
+        log_phase("aot:mir_setup:warm_names:start")
         driver_warm_mir_logical_names_v1(self.ctx.hir_modules)
+        log_phase("aot:mir_setup:warm_names:done")
         self.ctx.runtime_std_mir_emissions = {}
+        log_phase("aot:mir_setup:archive_repository:start")
         val production = mir_archive_try_production_repository_v1(self)
+        log_phase("aot:mir_setup:archive_repository:done")
         if production.is_err():
             self.ctx.add_error("MIR actual production repository rejected: {production.unwrap_err()}")
             return false
@@ -750,9 +754,12 @@ impl CompilerDriver:
         # (functions dicts) are corrupt, while dict-index reads (mono's
         # proven shape) are sound. Build the feed via keys + direct bracket.
         self.ctx.mir_feed_modules = []
+        log_phase("aot:mir_setup:feed:start")
         val feed_keys = self.ctx.hir_modules.keys()
         for feed_key in feed_keys:
             self.ctx.mir_feed_modules = self.ctx.mir_feed_modules.push(self.ctx.hir_modules[feed_key])
+        log_phase("aot:mir_setup:feed:done")
+        log_phase("aot:mir_setup:direct_setup:start")
         # Cycle-123 discrimination receipt (SIMPLE_SDN_RACE_TRACE=1): if this
         # expression read faults, the corruption is AT the ctx field read /
         # .values() materialization right here; if it prints, the array is
@@ -1127,6 +1134,8 @@ impl CompilerDriver:
                 native_entry_closure_mir,
                 self.ctx.runtime_std_full_inventory_selection != nil,
                 self.ctx.demand_mir_admission != nil or self.ctx.demand_dirty_modules.len() > 0)
+            log_phase("aot:mir_setup:direct_setup:done")
+            log_phase("aot:mir_setup:struct_prescan:start")
             # Crossmodule field-index prepass: the entry module is lowered
             # BEFORE the dependency modules it imports, so without this an
             # imported struct's field order was unknown while lowering the
@@ -1163,6 +1172,8 @@ impl CompilerDriver:
                     direct_lowering.prescan_module_struct_names(
                         self.ctx.hir_modules, prescan_owner_keys[prescan_owner_i])
                     prescan_owner_i = prescan_owner_i + 1
+                    if prescan_owner_i % 64 == 0:
+                        log_phase("aot:mir_setup:struct_prescan visited={prescan_owner_i} total={prescan_owner_keys.len()}")
             else:
                 # Cycle-118: the flagged unwrap-bind branch -- same corruptor
                 # as cycle-117 (named binds of HirModule elements/values).
@@ -1175,6 +1186,10 @@ impl CompilerDriver:
                         direct_lowering.prescan_module_struct_names(
                             self.ctx.hir_modules, prescan_key)
                     direct_prescan_idx = direct_prescan_idx + 1
+                    if direct_prescan_idx % 64 == 0:
+                        log_phase("aot:mir_setup:struct_prescan visited={direct_prescan_idx} total={self.ctx.sources.len()}")
+            log_phase("aot:mir_setup:struct_prescan:done")
+            log_phase("aot:mir_setup:enum_inventory:start")
             # Enum registry completeness, next to the struct-name prescan:
             # the per-module provider pass in lower_module registers only
             # OTHER modules' enums, so a scheduled module whose callables the
@@ -1196,6 +1211,8 @@ impl CompilerDriver:
                     enum_inventory_modules = enum_inventory_modules.push(present_enum_hir)
                 enum_inventory_idx = enum_inventory_idx + 1
             direct_lowering.register_module_enum_inventory_v1(enum_inventory_modules)
+            log_phase("aot:mir_setup:enum_inventory:done")
+            log_phase("aot:mir_setup:composite_inventory:start")
             # Struct/class NAME-keyed layout rows, same shape: the prescan
             # above covers struct field order + declared types, but the
             # struct default-value rows and every NAME-keyed class row
@@ -1204,6 +1221,7 @@ impl CompilerDriver:
             # module's own lower_module pass -- after the entry has already
             # lowered. See register_module_composite_inventory_v1.
             direct_lowering.register_module_composite_inventory_v1(enum_inventory_modules)
+            log_phase("aot:mir_setup:composite_inventory:done")
             # Staged native codegen (driver_build/native_staged_codegen.spl):
             # record the whole schedule's module names (the frozen storage
             # registry must know modules lowered after it freezes), then flush
