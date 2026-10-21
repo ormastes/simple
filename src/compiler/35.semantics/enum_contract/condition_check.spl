@@ -1,0 +1,40 @@
+# REQ-MC-003: @condition is exactly two states with no variant payloads.
+# Uses the general HIR attribute channel independently of Closed/Evolving.
+
+use compiler.hir.hir_definitions.{HirEnum, HirVariantKind, hir_enum_has_attribute}
+use compiler.semantics.enum_contract.contract_model.{EnumContractDiag, enum_contract_diag}
+
+fn check_condition_enums(enums: [HirEnum]) -> [EnumContractDiag]:
+    """Check @condition cardinality and payloads from lowered declarations.
+
+    Two unit variants produce no diagnostics. Other enum attributes and
+    undecorated declarations do not activate this rule. E-CONDITION-001
+    distinguishes the wrong state count from each variant carrying data.
+    """
+    var diags: [EnumContractDiag] = []
+    for enum_ in enums:
+        if not hir_enum_has_attribute(enum_, "condition"):
+            continue
+        if enum_.variants.len() != 2:
+            diags = diags.push(enum_contract_diag(
+                "E-CONDITION-001", enum_.name,
+                "variant count: " + enum_.variants.len().to_text() + "; expected: 2",
+                "@condition enum '" + enum_.name + "' must declare exactly two variants"))
+        for variant in enum_.variants:
+            var has_payload = false
+            match variant.kind:
+                case HirVariantKind.Unit:
+                    has_payload = false
+                case HirVariantKind.Tuple(types):
+                    has_payload = types.len() > 0
+                case HirVariantKind.Struct(fields):
+                    has_payload = fields.len() > 0
+            if has_payload:
+                diags = diags.push(enum_contract_diag(
+                    "E-CONDITION-001", enum_.name,
+                    "variant " + variant.name + " carries a payload",
+                    "variant '" + variant.name + "' of @condition enum '"
+                        + enum_.name + "' must not carry a payload"))
+    diags
+
+export check_condition_enums
