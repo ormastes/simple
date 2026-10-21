@@ -13402,11 +13402,22 @@ static int64_t rt_http_download_tuple(int64_t status, uint64_t bytes, const char
 
 #define RT_HTTP_CLIENT_CAPACITY 64
 #define RT_HTTP_CLIENT_SLOT_BITS 8
+#define RT_HTTP_CLIENT_HEADER_LIMIT 1024
+#define RT_HTTP_CLIENT_HEADER_BYTES (1024 * 1024)
+
+typedef struct {
+    char* line;
+    size_t len;
+    size_t key_len;
+} RtHttpClientHeader;
 
 typedef struct {
     uint64_t generation;
     int64_t timeout_ms;
     int in_use;
+    size_t header_count;
+    size_t header_bytes;
+    RtHttpClientHeader* headers;
 } RtHttpClientSlot;
 
 static RtHttpClientSlot rt_http_clients[RT_HTTP_CLIENT_CAPACITY];
@@ -13427,18 +13438,6 @@ static int rt_http_client_slot(int64_t handle, uint64_t* generation) {
     if (handle <= 0 || encoded_slot == 0 || encoded_slot > RT_HTTP_CLIENT_CAPACITY) return -1;
     *generation = raw >> RT_HTTP_CLIENT_SLOT_BITS;
     return (int)encoded_slot - 1;
-}
-
-static int rt_http_client_timeout(int64_t handle, int64_t* timeout_ms) {
-    uint64_t generation = 0;
-    int slot = rt_http_client_slot(handle, &generation);
-    if (slot < 0) return 0;
-    rt_http_clients_acquire();
-    RtHttpClientSlot* client = &rt_http_clients[slot];
-    int valid = client->in_use && client->generation == generation;
-    if (valid) *timeout_ms = client->timeout_ms;
-    rt_http_clients_release();
-    return valid;
 }
 
 int64_t rt_http_client_create(void) {
@@ -13474,6 +13473,78 @@ bool rt_http_client_set_timeout(int64_t handle, int64_t timeout_ms) {
     return valid;
 }
 
+static int rt_http_client_key_valid(const char* key, size_t len) {
+    if (!key || len == 0) return 0;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)key[i];
+        if (!(('0' <= c && c <= '9') || ('A' <= c && c <= 'Z') ||
+              ('a' <= c && c <= 'z') || (c && strchr("!#$%&'*+-.^_`|~", c)))) return 0;
+    }
+    return 1;
+}
+
+static int rt_http_client_key_equal(const char* left, size_t left_len,
+                                    const char* right, size_t right_len) {
+    if (left_len != right_len) return 0;
+    for (size_t i = 0; i < left_len; i++) {
+        unsigned char a = (unsigned char)left[i], b = (unsigned char)right[i];
+        if (a >= 'A' && a <= 'Z') a += 'a' - 'A';
+        if (b >= 'A' && b <= 'Z') b += 'a' - 'A';
+        if (a != b) return 0;
+    }
+    return 1;
+}
+
+bool rt_http_client_set_header(int64_t handle, int64_t key_value, int64_t value_value) {
+    RtCoreString* key = rt_core_as_string(key_value);
+    RtCoreString* value = rt_core_as_string(value_value);
+    if (!key || !value || !rt_http_client_key_valid(key->data, (size_t)key->len) ||
+        key->len > RT_HTTP_CLIENT_HEADER_BYTES - 2 ||
+        value->len > RT_HTTP_CLIENT_HEADER_BYTES - 2 - key->len) return false;
+    for (uint64_t i = 0; i < value->len; i++) {
+        unsigned char c = (unsigned char)value->data[i];
+        if ((c < 32 && c != '\t') || c == 127) return false;
+    }
+    uint64_t generation = 0;
+    int slot = rt_http_client_slot(handle, &generation);
+    if (slot < 0) return false;
+    size_t len = (size_t)(key->len + 2 + value->len);
+    char* line = (char*)malloc(len + 1);
+    if (!line) return false;
+    memcpy(line, key->data, (size_t)key->len);
+    memcpy(line + key->len, ": ", 2);
+    memcpy(line + key->len + 2, value->data, (size_t)value->len);
+    line[len] = '\0';
+    bool accepted = false;
+    rt_http_clients_acquire();
+    RtHttpClientSlot* client = &rt_http_clients[slot];
+    if (client->in_use && client->generation == generation) {
+        size_t index = 0;
+        while (index < client->header_count &&
+               !rt_http_client_key_equal(client->headers[index].line,
+                    client->headers[index].key_len, key->data, (size_t)key->len)) index++;
+        size_t previous = index < client->header_count ? client->headers[index].len : 0;
+        if (index < RT_HTTP_CLIENT_HEADER_LIMIT &&
+            len <= RT_HTTP_CLIENT_HEADER_BYTES - (client->header_bytes - previous)) {
+            RtHttpClientHeader* grown = client->headers;
+            if (index == client->header_count)
+                grown = (RtHttpClientHeader*)realloc(client->headers,
+                    (client->header_count + 1) * sizeof(*client->headers));
+            if (grown) {
+                client->headers = grown;
+                if (index < client->header_count) free(client->headers[index].line);
+                else client->header_count++;
+                client->headers[index] = (RtHttpClientHeader){line, len, (size_t)key->len};
+                client->header_bytes = client->header_bytes - previous + len;
+                accepted = true;
+            }
+        }
+    }
+    rt_http_clients_release();
+    if (!accepted) free(line);
+    return accepted;
+}
+
 void rt_http_client_destroy(int64_t handle) {
     uint64_t generation = 0;
     int slot = rt_http_client_slot(handle, &generation);
@@ -13483,6 +13554,11 @@ void rt_http_client_destroy(int64_t handle) {
     if (client->in_use && client->generation == generation) {
         client->in_use = 0;
         client->timeout_ms = 0;
+        for (size_t i = 0; i < client->header_count; i++) free(client->headers[i].line);
+        free(client->headers);
+        client->headers = NULL;
+        client->header_count = 0;
+        client->header_bytes = 0;
     }
     rt_http_clients_release();
 }
@@ -14100,11 +14176,77 @@ int64_t rt_http_request_v2(int64_t method_value, int64_t url_value,
 
 int64_t rt_http_client_request(int64_t client, int64_t method, int64_t url,
                                int64_t headers, int64_t body) {
+    RtCoreArray* requested = rt_core_as_array(headers);
+    if (!requested || requested->len < 0 || requested->len > RT_HTTP_CLIENT_HEADER_LIMIT ||
+        (requested->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) ||
+        (requested->len && !requested->data))
+        return rt_http_tuple(-1, NULL, 0, "invalid HTTP client headers");
+    size_t bytes = 0;
+    for (int64_t i = 0; i < requested->len; i++) {
+        RtCoreString* line = rt_core_as_string(((int64_t*)requested->data)[i]);
+        const char* colon = line ? memchr(line->data, ':', (size_t)line->len) : NULL;
+        if (!line || !colon || !rt_http_client_key_valid(line->data, (size_t)(colon - line->data)) ||
+            line->len > RT_HTTP_CLIENT_HEADER_BYTES - bytes)
+            return rt_http_tuple(-1, NULL, 0, "invalid HTTP client headers");
+        for (uint64_t j = (uint64_t)(colon - line->data + 1); j < line->len; j++) {
+            unsigned char c = (unsigned char)line->data[j];
+            if ((c < 32 && c != '\t') || c == 127)
+                return rt_http_tuple(-1, NULL, 0, "invalid HTTP client headers");
+        }
+        bytes += (size_t)line->len;
+    }
+    uint64_t generation = 0;
+    int slot = rt_http_client_slot(client, &generation);
+    if (slot < 0) return rt_http_tuple(-1, NULL, 0, "invalid HTTP client");
     int64_t timeout_ms = 0;
-    if (!rt_http_client_timeout(client, &timeout_ms)) {
+    size_t owned_count = 0;
+    int failed = 0;
+    rt_http_clients_acquire();
+    RtHttpClientSlot* state = &rt_http_clients[slot];
+    if (!state->in_use || state->generation != generation) {
+        rt_http_clients_release();
         return rt_http_tuple(-1, NULL, 0, "invalid HTTP client");
     }
-    return rt_http_request_with_timeout(method, url, headers, body, timeout_ms);
+    timeout_ms = state->timeout_ms;
+    if (state->header_count == 0) {
+        rt_http_clients_release();
+        return rt_http_request_with_timeout(method, url, headers, body, timeout_ms);
+    }
+    SplArray* merged = rt_array_new((int64_t)(state->header_count + (size_t)requested->len));
+    if (!merged) {
+        rt_http_clients_release();
+        return rt_http_tuple(-1, NULL, 0, "HTTP header allocation failed");
+    }
+    for (size_t i = 0; i < state->header_count; i++) {
+        RtHttpClientHeader* saved = &state->headers[i];
+        int overridden = 0;
+        for (int64_t j = 0; j < requested->len; j++) {
+            RtCoreString* line = rt_core_as_string(((int64_t*)requested->data)[j]);
+            const char* colon = memchr(line->data, ':', (size_t)line->len);
+            if (rt_http_client_key_equal(saved->line, saved->key_len,
+                    line->data, (size_t)(colon - line->data))) { overridden = 1; break; }
+        }
+        if (overridden) continue;
+        if (owned_count + (size_t)requested->len >= RT_HTTP_CLIENT_HEADER_LIMIT ||
+            saved->len > RT_HTTP_CLIENT_HEADER_BYTES - bytes) { failed = 1; break; }
+        int64_t copied = rt_string_new((const uint8_t*)saved->line, saved->len);
+        if (copied == rt_core_nil()) { failed = 1; break; }
+        rt_array_push(merged, copied);
+        owned_count++;
+        bytes += saved->len;
+    }
+    rt_http_clients_release();
+    if (!failed) {
+        for (int64_t i = 0; i < requested->len; i++)
+            rt_array_push(merged, ((int64_t*)requested->data)[i]);
+    }
+    int64_t result = failed
+        ? rt_http_tuple(-1, NULL, 0, "HTTP client header limit or allocation failure")
+        : rt_http_request_with_timeout(method, url, (int64_t)(uintptr_t)merged, body, timeout_ms);
+    RtCoreArray* storage = rt_core_as_array((int64_t)(uintptr_t)merged);
+    for (size_t i = 0; i < owned_count; i++) rt_string_free(((int64_t*)storage->data)[i]);
+    rt_array_free(merged);
+    return result;
 }
 
 int64_t rt_http_download(int64_t url_value, int64_t output_path_value) {

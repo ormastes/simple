@@ -810,6 +810,7 @@ bool     rt_io_udp_leave_multicast(int64_t fd, int64_t multicast_addr);
 bool     rt_io_udp_close(int64_t fd);
 int64_t  rt_http_client_create(void);
 bool     rt_http_client_set_timeout(int64_t client, int64_t timeout_ms);
+bool     rt_http_client_set_header(int64_t client, int64_t key, int64_t value);
 int64_t  rt_http_client_request(int64_t client, int64_t method, int64_t url,
                                 int64_t headers, int64_t body);
 void     rt_http_client_destroy(int64_t client);
