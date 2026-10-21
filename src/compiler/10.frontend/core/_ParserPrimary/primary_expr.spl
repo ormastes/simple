@@ -1,3 +1,5 @@
+use compiler.core.parser.{parser_lexical_scope_enter, parser_lexical_scope_leave, parser_lexical_bind_value, parser_lexical_has_new_value}
+use compiler.core.ast.{expr_get_str}
 # Primary parsing: parse_primary_expr (literals, identifiers, keywords).
 use compiler.frontend.core.parser_primary.*
 use compiler.frontend.core._ParserPrimary.asm_match_suffix.{parser_validate_unit_suffix}
@@ -121,6 +123,7 @@ fn parser_path_literal_has_interpolation(value: text) -> bool:
 # named nested-fn statement desugar (`fn NAME(...): body` -> `val NAME = fn(...): body`,
 # see parser_stmts.spl parse_statement's TOK_KW_FN case).
 fn parse_fn_lambda_after_kw() -> i64:
+    parser_lexical_scope_enter()
     # Parse parameter list
     parser_expect(140)
     var fn_param_names: [i64] = []
@@ -187,6 +190,7 @@ fn parse_fn_lambda_after_kw() -> i64:
         val fn_body_e = parse_expr()
         fn_lam_stmts.push(fn_body_e)
         lex_disable_forced_indentation()
+    parser_lexical_scope_leave()
     expr_lambda(fn_param_names, fn_lam_stmts, 0)
 
 fn unsuffixed_decimal_needs_u64_word(int_text: text) -> bool:
@@ -584,6 +588,10 @@ fn parse_primary_expr() -> i64:
     if par_kind_get() == 211:
         parser_advance()
         val new_next_kind = par_kind_get()
+        # Resolve only proven lexical values before the greedy allocation
+        # operand parse; ordinary postfix and operator precedence then apply.
+        if new_next_kind == TOK_LBRACKET and parser_lexical_has_new_value():
+            return expr_ident("new", 0)
         # `g33_kw_ident_follow` also includes unary-prefix tokens such as
         # `+`, `-`, `*`, and `&`. Those can start the documented generic
         # `new expr` form, so only use G33's unambiguous remainder here.
@@ -669,8 +677,10 @@ fn parse_primary_expr() -> i64:
             # seed_parser_arrow_lambda_block_expr_wrapped_return_type_2026-08-23.md
             if par_kind_get() == 168:
                 parser_advance()
+                parser_lexical_scope_enter()
                 var zero_body: [i64] = []
                 zero_body.push(parse_expr())
+                parser_lexical_scope_leave()
                 return expr_lambda([], zero_body, 0)
             return expr_unit(0)
         val inner = parse_expr()
@@ -697,8 +707,12 @@ fn parse_primary_expr() -> i64:
                         tup_all_idents = false
                 if tup_all_idents:
                     parser_advance()
+                    parser_lexical_scope_enter()
+                    for parameter in tup_elems:
+                        parser_lexical_bind_value(expr_get_str(parameter))
                     var multi_body: [i64] = []
                     multi_body.push(parse_expr())
+                    parser_lexical_scope_leave()
                     return expr_lambda(tup_elems, multi_body, 0)
             return expr_tuple(tup_elems, 0)
         parser_expect(141)
@@ -708,8 +722,11 @@ fn parse_primary_expr() -> i64:
                 parser_advance()
                 var one_params: [i64] = []
                 one_params.push(inner)
+                parser_lexical_scope_enter()
+                parser_lexical_bind_value(expr_get_str(inner))
                 var one_body: [i64] = []
                 one_body.push(parse_expr())
+                parser_lexical_scope_leave()
                 return expr_lambda(one_params, one_body, 0)
         return inner
 
@@ -910,8 +927,10 @@ fn parse_primary_expr() -> i64:
                     break
                 parser_advance()
         parser_expect(121)
+        parser_lexical_scope_enter()
         var pipe_stmts: [i64] = []
         pipe_stmts.push(parse_expr())
+        parser_lexical_scope_leave()
         return expr_lambda(pipe_params, pipe_stmts, 0)
 
     # Backslash lambda: \params: expr  or  \params:\n INDENT stmts DEDENT
@@ -920,6 +939,7 @@ fn parse_primary_expr() -> i64:
     #         \x, y: expr     — multiple params (comma-separated idents before :)
     #         \: (newline+indent block) — block body
     if par_kind_get() == 220:
+        parser_lexical_scope_enter()
         parser_advance()
         # Collect parameter names (comma-separated idents) until ':'
         var lam_params: [i64] = []
@@ -989,6 +1009,7 @@ fn parse_primary_expr() -> i64:
             val body_e = parse_expr()
             lam_stmts.push(body_e)
             lex_disable_forced_indentation()
+        parser_lexical_scope_leave()
         return expr_lambda(lam_params, lam_stmts, 0)
 
     if par_kind_get() == 169:
