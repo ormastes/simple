@@ -51,6 +51,10 @@ pub fn frontend_advisory_policy_from_environment_decision_v1(
         return FrontendAdvisoryPreprocessPolicyV1.PreferSimd
     FrontendAdvisoryPreprocessPolicyV1.Reference
 
+fn _digest_equal_fap(left: EnvironmentDigest256V1, right: EnvironmentDigest256V1) -> bool:
+    (left.w0 == right.w0 and left.w1 == right.w1 and
+        left.w2 == right.w2 and left.w3 == right.w3)
+
 fn _read64_fap(raw: [i64], at: i64) -> u64:
     var value = 0u64
     for i in 0..8: value = value | ((raw[at + i] as u64) << ((i as u64) * 8u64))
@@ -165,7 +169,7 @@ pub fn frontend_advisory_preprocess_result_valid_v1(
     val receipt = result.receipt
     val bytes = text_to_bytes(result.parse_source)
     val source_id = frontend_transformed_source_identity_v1(result.parse_source)
-    if source_id != receipt.transformed_source_identity or
+    if not _digest_equal_fap(source_id, receipt.transformed_source_identity) or
        bytes.len() as u64 != receipt.transformed_source_length or
        not receipt.reference_frontend_required or receipt.gpu_registry_initialized !=
            (receipt.gpu_device_initialization_count > 0u32):
@@ -180,12 +184,12 @@ pub fn frontend_advisory_preprocess_result_valid_v1(
     _pushd_fap(request_material, source_id); _push64_fap(request_material, bytes.len() as u64)
     _push64_fap(request_material, _policy_code_fap(receipt.policy))
     val request_id = _digest_fap(request_material)
-    if request_id != receipt.request_identity: return false
+    if not _digest_equal_fap(request_id, receipt.request_identity): return false
     val status_code = _status_code_fap(receipt.status)
-    if _receipt_identity_fap(request_material, request_id, status_code,
+    if not _digest_equal_fap(_receipt_identity_fap(request_material, request_id, status_code,
             receipt.provider_loaded, receipt.provider_executed,
             receipt.gpu_registry_initialized, receipt.gpu_device_initialization_count,
-            receipt.reference_frontend_required) != receipt.receipt_identity: return false
+            receipt.reference_frontend_required), receipt.receipt_identity): return false
     if receipt.status == FrontendAdvisoryPreprocessStatusV1.ReferenceNoOp:
         receipt.policy == FrontendAdvisoryPreprocessPolicyV1.Reference and
             not receipt.provider_loaded and not receipt.provider_executed and
@@ -201,7 +205,7 @@ pub fn frontend_advisory_preprocess_result_matches_request_v1(
     request: FrontendAdvisoryPreprocessRequestV1
 ) -> bool:
     frontend_advisory_preprocess_result_valid_v1(result) and
-        result.receipt.transformed_source_identity == request.transformed_source_identity and
+        _digest_equal_fap(result.receipt.transformed_source_identity, request.transformed_source_identity) and
         result.receipt.transformed_source_length == request.transformed_source_length and
         result.receipt.policy == request.policy
 
