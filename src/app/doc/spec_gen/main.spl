@@ -14,7 +14,7 @@ use app.utils.colors.{success, error, warning, info}
 use app.doc.spec_gen.types.{SpecFile, categorize_spec}
 use app.doc.spec_gen.parser.{parse_spec_file}
 use app.doc.spec_gen.symbols.{extract_symbols_hybrid}
-use app.doc.spec_gen.markdown.{generate_markdown}
+use app.doc.spec_gen.markdown.{generate_markdown, generate_markdown_semantic_from_file_v1}
 
 
 struct Config:
@@ -22,6 +22,10 @@ struct Config:
     output_dir: text
     process_all: bool
     generate_index: bool
+    source_file: text = ""
+    source_package: text = ""
+    source_module: text = ""
+    source_revision: text = ""
 
 fn main():
     val args = get_args()
@@ -46,6 +50,7 @@ fn parse_args(args: [text]) -> Config:
     var output_dir = "doc/06_spec"
     var process_all = false
     var generate_index = false
+    var authority: Dict<text, text> = {}
 
     var i = 0
     while i < args.len():
@@ -65,6 +70,12 @@ fn parse_args(args: [text]) -> Config:
             else:
                 print error("--output requires a directory path")
                 exit(1)
+        elif ["--source-file", "--package", "--module", "--revision"].contains(arg):
+            if i + 1 >= args.len() or authority.contains_key(arg) or args[i + 1] == "":
+                print error("source authority requires unique nonempty option values")
+                exit(1)
+            authority[arg] = args[i + 1]
+            i = i + 2
         elif arg == "--all" or arg == "-a":
             process_all = true
             i = i + 1
@@ -79,11 +90,22 @@ fn parse_args(args: [text]) -> Config:
             show_usage()
             exit(1)
 
+    if authority.len() != 0 and authority.len() != 4:
+        print error("source authority requires --source-file, --package, --module and --revision together")
+        exit(1)
+    if authority.len() > 0 and (process_all or generate_index or input_file == ""):
+        print error("source authority requires a single --input; --all and --index are unsupported")
+        exit(1)
+
     Config(
         input_file: input_file,
         output_dir: output_dir,
         process_all: process_all,
-        generate_index: generate_index
+        generate_index: generate_index,
+        source_file: if authority.len() == 4: authority["--source-file"] else: "",
+        source_package: if authority.len() == 4: authority["--package"] else: "",
+        source_module: if authority.len() == 4: authority["--module"] else: "",
+        source_revision: if authority.len() == 4: authority["--revision"] else: ""
     )
 
 fn show_usage():
@@ -101,6 +123,8 @@ fn show_usage():
     print "  -o, --output DIR    Output directory (default: doc/06_spec)"
     print "  -a, --all           Process all _spec.spl files"
     print "  --index             Generate root index/TOC"
+    print "  --source-file FILE --package P --module M --revision SHA256"
+    print "                     Verify explicit Links annotations for one --input"
     print "  -h, --help          Show help"
     print ""
     print "Examples:"
@@ -118,10 +142,31 @@ fn process_single_spec(config: Config):
     print "Processing: {config.input_file}"
 
     # Parse spec file
-    val spec = parse_spec_file(config.input_file)
+    val spec = parse_spec_file(config.input_file, config.source_file != "")
 
     # Generate output path
     val output_path = generate_output_path(input_path: config.input_file, output_dir: config.output_dir)
+
+    if config.source_file != "":
+        if spec.test_cases.len() == 0:
+            print error("semantic generation requires extractable test cases; no verified empty fallback")
+            exit(1)
+        for test_case in spec.test_cases:
+            if test_case.code.trim() == "":
+                print error("semantic generation requires extractable test bodies; unsupported empty/inline form")
+                exit(1)
+        # File-authority renderer invokes the actual producer exactly once;
+        # no initial document-shaped cache is manufactured or parsed twice.
+        match generate_markdown_semantic_from_file_v1(spec, output_path, config.source_package, config.source_module, config.source_file, config.source_revision):
+            case Ok(true):
+                print success("✅ Generated: {output_path}")
+            case Ok(false):
+                print error("Failed to publish semantic specification")
+                exit(1)
+            case Err(failure):
+                print error(failure.message)
+                exit(1)
+        return
 
     # Create output directory
     ensure_dir(output_path)

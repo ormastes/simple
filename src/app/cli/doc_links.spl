@@ -1,0 +1,53 @@
+# REQ-MC-008 B3 CLI adapter. Caller owns stdout and atomic output publication.
+use app.doc.semantic_link_lint.{SemanticMarkdownSourceV1, plan_semantic_markdown_links_v1, apply_semantic_markdown_links_v1}
+use compiler.semantics.symbol_id.semantic_link.{SemanticLinkErrorV1, SemanticLinkFailureV1, semantic_link_error_v1}
+use compiler.semantics.symbol_id.semantic_link_source.{open_semantic_link_document_v1}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+
+pub struct DocLinksCommandResultV1:
+    output: text
+    exit_code: i64
+
+pub fn doc_links_command_v1(args: [text]) -> Result<DocLinksCommandResultV1, SemanticLinkErrorV1>:
+    """Check reports diagnostics; fix returns whole replacement Markdown bytes.
+
+    Args exclude doc. Explicit one-source mapping; no repository crawl or guessed
+    package/revision. Fix success is stdout content, not an in-place write.
+    """
+    if args.len() < 1 or (args[0] != "check-links" and args[0] != "fix-links"):
+        return Err(semantic_link_error_v1(SemanticLinkFailureV1.InvalidUri, "expected doc check-links or doc fix-links"))
+    var options: Dict<text, text> = {}
+    var critical = false
+    var position = 1
+    while position < args.len():
+        val key = args[position]
+        if key == "--critical":
+            if critical:
+                return Err(semantic_link_error_v1(SemanticLinkFailureV1.InvalidAuthority, "duplicate --critical"))
+            critical = true
+            position = position + 1
+            continue
+        if not ["--markdown", "--source-file", "--source-link", "--remote-link", "--package", "--module", "--revision"].contains(key) or position + 1 >= args.len() or options.contains_key(key):
+            return Err(semantic_link_error_v1(SemanticLinkFailureV1.InvalidAuthority, "unknown, duplicate, or missing option value"))
+        options[key] = args[position + 1]
+        position = position + 2
+    for required in ["--markdown", "--source-file", "--source-link", "--package", "--module", "--revision"]:
+        if not options.contains_key(required):
+            return Err(semantic_link_error_v1(SemanticLinkFailureV1.InvalidAuthority, "explicit Markdown and source authority are required"))
+    val markdown = match file_read_regular_no_follow_bounded(options["--markdown"], 1048576):
+        case Ok(value): value
+        case Err(message): return Err(semantic_link_error_v1(SemanticLinkFailureV1.IoFailed, message))
+    val document = open_semantic_link_document_v1(options["--package"], options["--module"], options["--source-file"], options["--revision"])?
+    val remote = if options.contains_key("--remote-link"): options["--remote-link"] else: ""
+    val bindings = [SemanticMarkdownSourceV1(local_file: options["--source-link"], remote_file: remote, document: document)]
+    val plan = plan_semantic_markdown_links_v1(markdown, bindings, critical)?
+    if args[0] == "fix-links":
+        return Ok(DocLinksCommandResultV1(output: apply_semantic_markdown_links_v1(markdown, plan)?, exit_code: 0))
+    var lines: [text] = []
+    for diagnostic in plan.diagnostics:
+        lines.push("{diagnostic.severity} {diagnostic.rule} {diagnostic.start}:{diagnostic.end} {diagnostic.target}: {diagnostic.message}")
+    var code = 0
+    for diagnostic in plan.diagnostics:
+        if diagnostic.severity == "deny":
+            code = 1
+    Ok(DocLinksCommandResultV1(output: lines.join("\n"), exit_code: code))
