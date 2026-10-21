@@ -289,13 +289,24 @@ fn io_file_meta_size(fd: i64) -> i64:
     unsafe(capabilities: [ffi]):
         rt_io_file_meta_size(fd)
 
-@unsafe(reason: "raw runtime ABI for rt_io_file_open", capabilities: [ffi])
-extern fn rt_io_file_open(path: text, mode: i64) -> i64
+@unsafe(reason: "native descriptor open ABI consumes byte pointer, UTF-8 byte length and mode", capabilities: [ffi, raw_ptr])
+extern fn rt_io_file_open(path_ptr: i64, path_len: i64, mode: i64) -> i64
+@unsafe(reason: "existing text ABI accessor borrows the retained text byte address", capabilities: [ffi, raw_ptr])
+extern fn rt_string_data(value: Any) -> i64
+@unsafe(reason: "existing text ABI accessor returns UTF-8 bytes, not Unicode scalar count", capabilities: [ffi])
+extern fn rt_string_len(value: Any) -> i64
 
 @always_inline
 fn io_file_open(path: text, mode: i64) -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_io_file_open(path, mode)
+    unsafe(capabilities: [ffi, raw_ptr]):
+        val path_owner: Any = path
+        val count = rt_string_len(path_owner)
+        val address = rt_string_data(path_owner)
+        if count < 0 or (address == 0 and count != 0): return -1
+        # The path owner remains live through this synchronous native call.
+        # Three scalar operands are already expanded, including on old
+        # bootstrap producers whose text-ABI registry omits this provider.
+        rt_io_file_open(address, count, mode)
 
 @unsafe(reason: "raw runtime ABI for rt_io_file_seek", capabilities: [ffi])
 extern fn rt_io_file_seek(fd: i64, offset: i64, whence: i64) -> i64
@@ -317,6 +328,8 @@ extern fn rt_io_file_write_all(fd: i64, data_ptr: i64, data_len: i64) -> bool
 extern fn rt_array_bytes_basis_len(data: [u8]) -> i64
 @unsafe(reason: "native bytes-basis address is zero for nonpacked or unavailable storage", capabilities: [ffi, raw_ptr])
 extern fn rt_array_bytes_basis_ptr(data: [u8]) -> i64
+@unsafe(reason: "checked packed-byte append ABI accepts an array handle and a validated machine-word byte; returns zero on failure", capabilities: [ffi])
+extern fn rt_typed_bytes_u8_push(data: [u8], value: i64) -> i8
 use std.common.text_bytes.{text_byte_buffer}
 
 fn _io_file_write_packed(data: [u8]) -> [u8]?:
@@ -327,13 +340,19 @@ fn _io_file_write_packed(data: [u8]) -> [u8]?:
     if basis == count: return Some(data)
     # A packed basis whose count disagrees is malformed, not a generic array.
     if basis >= 0: return nil
-    var packed = match text_byte_buffer(count):
+    val packed: [u8] = match text_byte_buffer(count):
         case Ok(buffer): buffer
         case Err(_): return nil
     for byte in data:
         val value = byte as i64
         if value < 0 or value > 255: return nil
-        packed.push(byte)
+        # Generic push currently lowers this u8 argument as i8 -> ptr in the
+        # native compiler (schema-input-guarded-build.log). Use the existing
+        # checked byte-storage operation with its exact i64-value ABI instead;
+        # allocation failure must reject the write, never truncate silently.
+        val appended = unsafe(capabilities: [ffi]):
+            rt_typed_bytes_u8_push(packed, value)
+        if appended == 0: return nil
     val copied = unsafe(capabilities: [ffi]):
         rt_array_bytes_basis_len(packed)
     if copied != count: return nil

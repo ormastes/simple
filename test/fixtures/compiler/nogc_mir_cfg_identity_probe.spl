@@ -1,0 +1,56 @@
+"""Exercise MIR-to-NLL identity translation, not direct CFG construction."""
+
+use compiler.borrow.borrow_check.mod.{BorrowChecker, BorrowCheckResult}
+use compiler.mir.mir_instruction_graph.{MirBlock, MirBody}
+use compiler.mir.mir_instruction_support.{MirTerminator}
+use compiler.mir.mir_types.{BlockId}
+use std.nogc_sync_mut.io_runtime.{exit}
+
+fn require_cfg_identity(condition: bool, message: text):
+    if not condition:
+        print "nogc-mir-cfg FAILED: {message}"
+        exit(1)
+
+fn block(id: i64, term: MirTerminator) -> MirBlock:
+    MirBlock(id: BlockId.new(id), label: nil, instructions: [], terminator: term)
+
+fn body(blocks: [MirBlock]) -> MirBody:
+    MirBody.from_bootstrap_parts("cfg_identity_probe", blocks, [], 0)
+
+fn rejected(input: MirBody, entry: i64) -> bool:
+    var checker = BorrowChecker.create()
+    match checker.check_function(input, entry):
+        case BorrowCheckResult.Errors(errors): return errors.len() > 0
+        case BorrowCheckResult.Ok: return false
+
+fn main() -> i64:
+    # Entry is nonzero and stored last; successors name actual MIR IDs.
+    val shuffled = body([
+        block(90, MirTerminator.Ret(None)),
+        block(70, MirTerminator.Goto(BlockId.new(90))),
+        block(40, MirTerminator.Goto(BlockId.new(70)))
+    ])
+    var checker = BorrowChecker.create()
+    val cfg = checker.build_cfg(shuffled, 40)
+    require_cfg_identity(cfg.entry == 40, "MIR entry identity was replaced by storage order")
+    require_cfg_identity(cfg.blocks.contains_key(90), "sparse MIR block identity was lost")
+    require_cfg_identity(cfg.blocks[40].successors[0] == 70, "MIR successor identity changed")
+    require_cfg_identity(cfg.blocks[70].predecessors[0] == 40, "MIR predecessor identity changed")
+    require_cfg_identity(not rejected(shuffled, 40), "valid shuffled MIR CFG was rejected")
+
+    # Conventional direct MirBody callers retain entry block zero.
+    val zero_entry = body([block(9, MirTerminator.Ret(None)),
+        block(0, MirTerminator.Goto(BlockId.new(9)))])
+    require_cfg_identity(checker.build_cfg(zero_entry).entry == 0, "default entry changed")
+    require_cfg_identity(rejected(shuffled, 0), "missing entry was accepted")
+    require_cfg_identity(rejected(shuffled, -1), "negative entry was accepted")
+    require_cfg_identity(rejected(body([block(0, MirTerminator.Ret(None)),
+        block(-2, MirTerminator.Ret(None))]), 0),
+        "negative block identity was accepted")
+    require_cfg_identity(rejected(body([block(0, MirTerminator.Ret(None)),
+        block(0, MirTerminator.Ret(None))]), 0), "duplicate block IDs were accepted")
+    require_cfg_identity(rejected(body([block(0, MirTerminator.Goto(BlockId.new(7)))]), 0),
+        "missing successor was accepted")
+    require_cfg_identity(rejected(body([]), 0), "empty MIR CFG was accepted")
+    print "nogc-mir-cfg: sparse, shuffled, entry and malformed identity controls passed"
+    0

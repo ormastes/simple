@@ -1673,7 +1673,24 @@ case "${SIMPLE_PLUGIN_MANIFEST_POLICY:-unselected}" in
     ;;
 esac
 export SIMPLE_PLUGIN_MANIFEST_POLICY
-plugin_policy_source_root=$(absolute_path "${repo_root}/src/plugins")
+# Entry-closure receipts bind logical inventory selectors, not host paths.
+# Verify these fixed checkout roots physically before publishing relative argv;
+# an external/symlinked tree must not acquire an in-repository identity.
+bootstrap_checkout_source_root() {
+  bootstrap_checkout_relative=$1
+  case "${bootstrap_checkout_relative}" in
+    src/plugins|src/compositions/cuda_static|src/compositions/cuda_dynamic|src/compositions/cuda_disabled) ;;
+    *) echo 'error: unsupported canonical checkout source root' >&2; return 1 ;;
+  esac
+  bootstrap_checkout_expected="${repo_root}/${bootstrap_checkout_relative}"
+  bootstrap_checkout_physical=$(CDPATH= cd -- "${bootstrap_checkout_expected}" && pwd -P) || return 1
+  [ "${bootstrap_checkout_physical}" = "${bootstrap_checkout_expected}" ] || {
+    echo 'error: canonical checkout source root resolves outside its logical identity' >&2
+    return 1
+  }
+  printf '%s\n' "${bootstrap_checkout_relative}"
+}
+plugin_policy_source_root=$(bootstrap_checkout_source_root src/plugins) || exit 1
 # CUDA is a compiler composition choice, not a host-device probe. Generate an
 # immutable selected source root from the canonical compiler manifest, so a
 # disabled build never imports the PTX implementation. Each manifest identity
@@ -1726,8 +1743,8 @@ fi
 # committed source records, not ignored generated build roots. Retain the
 # generated identity/evidence above, but compile its exact canonical bytes.
 # This also lets an admitted older producer build the pure-Simple alias fix.
-cuda_source_root="${repo_root}/src/compositions/cuda_${cuda_mode}"
-cuda_source_file="${cuda_source_root}/plugins/backend_registry/selected_cuda_backend.spl"
+cuda_source_root=$(bootstrap_checkout_source_root "src/compositions/cuda_${cuda_mode}") || exit 1
+cuda_source_file="${repo_root}/${cuda_source_root}/plugins/backend_registry/selected_cuda_backend.spl"
 [ -f "${cuda_source_file}" ] && [ ! -L "${cuda_source_file}" ] &&
   [ "$(bootstrap_stage3_hash_file "${cuda_source_file}")" = "${cuda_template_sha256}" ] &&
   [ "$(bootstrap_stage3_hash_file "${compiler_backend_manifest}")" = "${cuda_manifest_sha256}" ] || {

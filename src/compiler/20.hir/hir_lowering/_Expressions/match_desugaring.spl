@@ -1,3 +1,7 @@
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId}
+use compiler.hir.hir_lowering._Expressions.expression_core.*
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.hir.hir_operators.{HirBinOp}
 # HIR lowering - Pattern tests and match desugaring.
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.hir.hir_types.*
@@ -6,18 +10,56 @@ use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.statements.*
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.core.{int_to_str}
 # Level table only (no MIR data imports): one switch for both halves of the
 # guard-count invariant.
 use compiler.mir.mir_verify_levels.{mir_verify_rule_level_from_spec}
 use compiler.hir.hir_lowering.types.{hir_type_env_get}
-use compiler.hir.hir_lowering._Expressions.runtime_observation.{hir_expr_runtime_discriminant}
+use compiler.hir.hir_lowering._Expressions.runtime_observation.{hir_pattern_runtime_discriminant}
 # Split impl provider: native entry-closure discovery follows import edges and
 # otherwise omits HirLowering.union_narrow_arms from the final link.
 use compiler.hir.hir_lowering._Expressions.union_narrow_arms.*
 
+# Keep both binary operands concrete after optional condition extraction.
+fn _hir_match_binary_payload(op: HirBinOp, left: HirExpr, right: HirExpr, span: Span) -> HirExpr:
+    HirExpr(kind: HirExprKind.Binary(op, left, right), has_type_: false, type_: nil, span: span)
+
 impl HirLowering:
+    me match_index_projection(value_expr: HirExpr, index: i64, span: Span) -> HirExpr:
+        val source_type: HirType = self.binding_source_type(value_expr)
+        var projected: HirType = HirType(kind: HirTypeKind.Error, span: span)
+        match source_type.kind:
+            case HirTypeKind.Tuple(items):
+                if index >= 0 and index < items.len(): projected = items[index]
+            case HirTypeKind.Array(element, _): projected = element
+            case HirTypeKind.Slice(element): projected = element
+            case _: ()
+        val known = match projected.kind:
+            case HirTypeKind.Error: false
+            case _: true
+        val offset = HirExpr(kind: HirExprKind.IntLit(index, None), has_type_: false, type_: nil, span: span)
+        HirExpr(kind: HirExprKind.Index(value_expr, offset), has_type_: known, type_: projected, span: span)
+
+    me match_field_projection(value_expr: HirExpr, name: text, span: Span) -> HirExpr:
+        val projected: HirType = self.field_type_for_hir_base(value_expr, name)
+        val known = match projected.kind:
+            case HirTypeKind.Error: false
+            case _: true
+        HirExpr(kind: HirExprKind.Field(value_expr, name, None), has_type_: known, type_: projected, span: span)
+
+    me match_binding_statement(symbol: SymbolId, value_expr: HirExpr, span: Span) -> HirStmt:
+        val source_type: HirType = self.binding_source_type(value_expr)
+        match source_type.kind:
+            case HirTypeKind.Error: ()
+            case _:
+                if val definition = self.symbols.get_symbol_raw(symbol.id):
+                    var updated = definition
+                    updated.type_ = Some(source_type)
+                    self.symbols.register_preserved_symbol(updated)
+        HirStmt(kind: HirStmtKind.Let(symbol, self.binding_payload_type(value_expr), value_expr), span: span)
+
     me destructure_pattern_prelude(value_expr: HirExpr, pat: HirPattern, span: Span) -> [HirStmt]:
         """Recursively re-create an irrefutable (test-free) pattern's
         bindings as ordinary `Let` statements against `value_expr`, using
@@ -31,7 +73,7 @@ impl HirLowering:
             case HirPatternKind.Wildcard:
                 []
             case Binding(sym, _):
-                [HirStmt(kind: HirStmtKind.Let(sym, nil, value_expr), span: span)]
+                [self.match_binding_statement(sym, value_expr, span)]
             case Tuple(elements):
                 var stmts: [HirStmt] = []
                 var i = 0
@@ -42,7 +84,7 @@ impl HirLowering:
                     # this mirrors the proven-working idiom in
                     # lower_tuple_destructure (hir_lowering/statements.spl)
                     # for `val (a, b) = expr`.
-                    val elem_expr = HirExpr(kind: HirExprKind.Index(value_expr, HirExpr(kind: HirExprKind.IntLit(i, None), has_type_: false, type_: nil, span: span)), has_type_: false, type_: nil, span: span)
+                    val elem_expr = self.match_index_projection(value_expr, i, span)
                     val sub_stmts = self.destructure_pattern_prelude(elem_expr, elements[i], span)
                     var j = 0
                     while j < sub_stmts.len():
@@ -56,7 +98,7 @@ impl HirLowering:
                     val fpair_typed: (text, HirPattern) = fpair
                     val fname: text = fpair_typed.0
                     val fpat: HirPattern = fpair.1
-                    val felem_expr = HirExpr(kind: HirExprKind.Field(value_expr, fname, None), has_type_: false, type_: nil, span: span)
+                    val felem_expr = self.match_field_projection(value_expr, fname, span)
                     val sub_stmts2 = self.destructure_pattern_prelude(felem_expr, fpat, span)
                     var k = 0
                     while k < sub_stmts2.len():
@@ -69,7 +111,7 @@ impl HirLowering:
                 var stmts3: [HirStmt] = []
                 var ai = 0
                 while ai < elements.len():
-                    val ae = HirExpr(kind: HirExprKind.Index(value_expr, HirExpr(kind: HirExprKind.IntLit(ai, None), has_type_: false, type_: nil, span: span)), has_type_: false, type_: nil, span: span)
+                    val ae = self.match_index_projection(value_expr, ai, span)
                     val subs3 = self.destructure_pattern_prelude(ae, elements[ai], span)
                     var s3 = 0
                     while s3 < subs3.len():
@@ -330,7 +372,7 @@ impl HirLowering:
                     # this mirrors the proven-working idiom in
                     # lower_tuple_destructure (hir_lowering/statements.spl)
                     # for `val (a, b) = expr`.
-                    val elem_expr = HirExpr(kind: HirExprKind.Index(value_expr, HirExpr(kind: HirExprKind.IntLit(i, None), has_type_: false, type_: nil, span: span)), has_type_: false, type_: nil, span: span)
+                    val elem_expr = self.match_index_projection(value_expr, i, span)
                     val sub_cond2 = self.pattern_test_condition(elem_expr, elements[i], span)
                     if val sc2 = sub_cond2:
                         conditions = conditions.push(sc2)
@@ -342,7 +384,7 @@ impl HirLowering:
                     val fpair_typed: (text, HirPattern) = fpair
                     val fname: text = fpair_typed.0
                     val fpat: HirPattern = fpair.1
-                    val felem_expr = HirExpr(kind: HirExprKind.Field(value_expr, fname, None), has_type_: false, type_: nil, span: span)
+                    val felem_expr = self.match_field_projection(value_expr, fname, span)
                     val sub_cond3 = self.pattern_test_condition(felem_expr, fpat, span)
                     if val sc3 = sub_cond3:
                         conditions = conditions.push(sc3)
@@ -356,7 +398,7 @@ impl HirLowering:
                 conditions = conditions.push(HirExpr(kind: HirExprKind.Binary(len_op, self.array_len_expr(value_expr, span), n_expr), has_type_: false, type_: nil, span: span))
                 var ai = 0
                 while ai < elements.len():
-                    val ae = HirExpr(kind: HirExprKind.Index(value_expr, HirExpr(kind: HirExprKind.IntLit(ai, None), has_type_: false, type_: nil, span: span)), has_type_: false, type_: nil, span: span)
+                    val ae = self.match_index_projection(value_expr, ai, span)
                     val asub = self.pattern_test_condition(ae, elements[ai], span)
                     if val asc = asub:
                         conditions = conditions.push(asc)
@@ -419,7 +461,7 @@ impl HirLowering:
             if prelude.len() > 0:
                 guard_expr = HirExpr(kind: HirExprKind.Block(HirBlock(stmts: prelude, has: true, value: arm.guard, span: arm.guard.span)), has_type_: false, type_: nil, span: arm.guard.span)
             if val pattern_cond = cond:
-                test = Some(HirExpr(kind: HirExprKind.Binary(HirBinOp.And, pattern_cond, guard_expr), has_type_: false, type_: nil, span: span))
+                test = Some(_hir_match_binary_payload(HirBinOp.And, pattern_cond, guard_expr, span))
             else:
                 test = Some(guard_expr)
             self.match_guards_desugared = self.match_guards_desugared + 1
@@ -456,8 +498,9 @@ impl HirLowering:
         HirExpr(kind: HirExprKind.Block(arm_block), has_type_: false, type_: nil, span: span)
 
     me desugar_match_to_if_chain(hir_scrutinee: HirExpr, hir_arms: [HirMatchArm], span: Span) -> HirExprKind:
-        val fresh = self.symbols.define("__mp_scrutinee", SymbolKind.Variable, nil, span, Visibility.Private, false, nil)
-        val let_stmt = HirStmt(kind: HirStmtKind.Let(fresh, nil, hir_scrutinee), span: span)
+        val scrutinee_type = self.binding_payload_type(hir_scrutinee)
+        val fresh = self.symbols.define("__mp_scrutinee", SymbolKind.Variable, scrutinee_type, span, Visibility.Private, false, nil)
+        val let_stmt = HirStmt(kind: HirStmtKind.Let(fresh, scrutinee_type, hir_scrutinee), span: span)
         val scrut_var = HirExpr(kind: HirExprKind.Var(fresh), has_type_: false, type_: nil, span: span)
         val chain_value = self.build_if_chain(scrut_var, hir_arms, 0, span)
         HirExprKind.Block(HirBlock(stmts: [let_stmt], has: true, value: chain_value, span: span))
@@ -713,7 +756,7 @@ impl HirLowering:
                                         ()
                                     case _:
                                         if (hir_type_env_get("SIMPLE_MATCH_DESUGAR_TRACE") ?? "") == "1":
-                                            eprint("[match-desugar-scan-kind] disc=" + int_to_str(hir_expr_runtime_discriminant<HirPatternKind>(pat.kind)) + " wild=" + int_to_str(hir_expr_runtime_discriminant<HirPatternKind>(HirPatternKind.Wildcard)) + " bind1=" + int_to_str(hir_expr_runtime_discriminant<HirPatternKind>(HirPatternKind.Binding(SymbolId(id: 0), false))))
+                                            eprint("[match-desugar-scan-kind] disc=" + int_to_str(hir_pattern_runtime_discriminant(pat.kind)) + " wild=" + int_to_str(hir_pattern_runtime_discriminant(HirPatternKind.Wildcard)) + " bind1=" + int_to_str(hir_pattern_runtime_discriminant(HirPatternKind.Binding(SymbolId(id: 0), false))))
                                         any_complex = true
                             if any_complex:
                                 var new_patterns: [HirPattern] = []
@@ -741,10 +784,18 @@ impl HirLowering:
                                             # lower_range_payload_arms.
                                             new_patterns = new_patterns.push(pat)
                                         case _:
-                                            val fresh = self.symbols.define("__mp_nested_flat", SymbolKind.Variable, nil, span, Visibility.Private, false, nil)
-                                            val fresh_pat = HirPattern(kind: HirPatternKind.Binding(fresh, false), type_: nil, span: span)
+                                            # Preserve only an attributed payload type. A pattern spelling
+                                            # alone cannot authorize ownership or instantiate generics.
+                                            var nested_type: HirType = HirType(kind: HirTypeKind.Error, span: span)
+                                            if pat.has_type_ and pat.type_ != nil:
+                                                nested_type = pat.type_
+                                            val nested_known = match nested_type.kind:
+                                                case HirTypeKind.Error: false
+                                                case _: true
+                                            val fresh = self.symbols.define("__mp_nested_flat", SymbolKind.Variable, if nested_known: Some(nested_type) else: nil, span, Visibility.Private, false, nil)
+                                            val fresh_pat = HirPattern(kind: HirPatternKind.Binding(fresh, false), has_type_: nested_known, type_: nested_type, span: span)
                                             new_patterns = new_patterns.push(fresh_pat)
-                                            val fresh_var = HirExpr(kind: HirExprKind.Var(fresh), has_type_: false, type_: nil, span: span)
+                                            val fresh_var = HirExpr(kind: HirExprKind.Var(fresh), has_type_: nested_known, type_: nested_type, span: span)
                                             # ONLY Tuple/Struct sub-patterns are safe to flatten this
                                             # way: they are the sole two kinds destructure_pattern_
                                             # prelude actually destructures (everything else --
@@ -773,7 +824,7 @@ impl HirLowering:
                                                         si2 = si2 + 1
                                                 case _:
                                                     if (hir_type_env_get("SIMPLE_MATCH_DESUGAR_TRACE") ?? "") == "1":
-                                                        eprint("[match-desugar-nested-kind] disc=" + int_to_str(hir_expr_runtime_discriminant<HirPatternKind>(pat.kind)) + " wild=" + int_to_str(hir_expr_runtime_discriminant<HirPatternKind>(HirPatternKind.Wildcard)) + " err=" + int_to_str(hir_expr_runtime_discriminant<HirPatternKind>(HirPatternKind.Error)) + " n=" + int_to_str(patterns.len()))
+                                                        eprint("[match-desugar-nested-kind] disc=" + int_to_str(hir_pattern_runtime_discriminant(pat.kind)) + " wild=" + int_to_str(hir_pattern_runtime_discriminant(HirPatternKind.Wildcard)) + " err=" + int_to_str(hir_pattern_runtime_discriminant(HirPatternKind.Error)) + " n=" + int_to_str(patterns.len()))
                                                     # `pat.span` arrives through a nested aggregate
                                                     # payload and can be malformed on the Stage-2
                                                     # native ABI. The enclosing match span is the
@@ -966,8 +1017,9 @@ impl HirLowering:
             # A range sub-pattern's fallthrough re-dispatches the remaining
             # arms, so the scrutinee must be evaluated exactly once into a
             # temp first (same idiom as desugar_match_to_if_chain).
-            val range_scrut = self.symbols.define("__mp_scrutinee", SymbolKind.Variable, nil, span, Visibility.Private, false, nil)
-            val range_let = HirStmt(kind: HirStmtKind.Let(range_scrut, nil, hir_scrutinee), span: span)
+            val scrutinee_type = self.binding_payload_type(hir_scrutinee)
+            val range_scrut = self.symbols.define("__mp_scrutinee", SymbolKind.Variable, scrutinee_type, span, Visibility.Private, false, nil)
+            val range_let = HirStmt(kind: HirStmtKind.Let(range_scrut, scrutinee_type, hir_scrutinee), span: span)
             val range_var = HirExpr(kind: HirExprKind.Var(range_scrut), has_type_: false, type_: nil, span: span)
             val ranged_arms = self.lower_range_payload_arms(range_var, flat_arms, 0, span)
             val ranged_match = HirExpr(kind: HirExprKind.MatchCase(range_var, ranged_arms), has_type_: false, type_: nil, span: span)

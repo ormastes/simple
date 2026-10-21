@@ -427,13 +427,20 @@ impl HirLowering:
                     self.imported_surface_type(referent, imported_module_name),
                     parser_type_kind_reference_is_mutable(type_.kind)),
                 span: type_.span)
-        # memory.md ownership sigils: the pointee belongs to the declaring
-        # module too. `&T`/`*T`/`-T` mean the same thing in every module
-        # (memory.md); the IMPORTING module's mode decides only whether HIR
-        # keeps them distinct, so a strict importer checks an imported
-        # signature with the same kinds it uses for its own code. Default
-        # mode is the legacy Ref / Ptr / Infer (see lower_type).
+        # A default-mode declaration has unchecked legacy Ref/Ptr semantics.
+        # The importing module cannot turn it into an owner: doing so would
+        # authorize drops of storage that the foreign module still aliases.
+        # Resolve the owner's recorded mode through the registry, including
+        # its aliases; never infer it from a file name or importer flag.
         if parser_type_kind_is_unique(type_.kind) or parser_type_kind_is_shared(type_.kind) or parser_type_kind_is_weak(type_.kind):
+            if self.nogc_strict:
+                val owner_index = if self.module_surfaces.index_by_name.contains_key(imported_module_name): self.module_surfaces.index_by_name[imported_module_name] else: -1
+                if owner_index < 0 or owner_index >= self.module_surfaces.surfaces.len():
+                    self.error("NOGC-FOREIGN-001: ownership contract unavailable for imported module `{imported_module_name}`", type_.span)
+                    return HirType(kind: HirTypeKind.Error, span: type_.span)
+                if not self.module_surfaces.surfaces[owner_index].nogc_strict:
+                    self.error("NOGC-FOREIGN-001: unchecked ownership sigil from legacy module `{imported_module_name}`; use an explicit checked boundary", type_.span)
+                    return HirType(kind: HirTypeKind.Error, span: type_.span)
             val owned = self.imported_surface_type(parser_type_kind_ownership_inner(type_.kind, type_), imported_module_name)
             val owner_strict = self.nogc_strict
             if parser_type_kind_is_unique(type_.kind):

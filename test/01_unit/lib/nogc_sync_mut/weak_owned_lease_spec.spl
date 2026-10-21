@@ -1,0 +1,64 @@
+"""Synchronous registry ownership acquisitions; excludes compiler sigil integration."""
+use std.spec
+use std.nogc_sync_mut.ptr.weak.{weak_reset, weak_register, weak_create, weak_remove_strong, weak_strong_count, weak_is_alive, weak_upgrade_owned, weak_lease_value, weak_lease_release}
+
+describe "Synchronous weak owned acquisitions":
+    it "retains the target until the acquired owner releases exactly once":
+        weak_reset()
+        val target = weak_register(42)
+        val observer = weak_create(target)
+        if val lease = weak_upgrade_owned(observer):
+            expect(weak_strong_count(target)).to_equal(2)
+            weak_remove_strong(target)
+            expect(weak_is_alive(observer)).to_equal(true)
+            expect(weak_lease_value(lease)).to_equal(Some(42))
+            expect(weak_lease_release(lease)).to_equal(true)
+            expect(weak_lease_release(lease)).to_equal(false)
+            expect(weak_strong_count(target)).to_equal(0)
+            expect(weak_is_alive(observer)).to_equal(false)
+            expect(weak_upgrade_owned(observer)).to_be_nil()
+            expect(weak_lease_value(lease)).to_be_nil()
+        else:
+            expect(false).to_equal(true)
+
+    it "rejects old references and release tokens after reset reuses slots":
+        weak_reset()
+        val target = weak_register(71)
+        val observer = weak_create(target)
+        if val stale = weak_upgrade_owned(observer):
+            weak_reset()
+            val replacement = weak_register(-1)
+            if val current = weak_upgrade_owned(weak_create(replacement)):
+                expect(target).to_equal(replacement)
+                expect(stale.token_id).to_equal(current.token_id)
+                expect(stale.generation == current.generation).to_equal(false)
+                expect(weak_upgrade_owned(observer)).to_be_nil()
+                expect(weak_lease_value(stale)).to_be_nil()
+                expect(weak_lease_release(stale)).to_equal(false)
+                expect(weak_strong_count(replacement)).to_equal(2)
+                expect(weak_lease_value(current)).to_equal(Some(-1))
+                weak_remove_strong(replacement)
+                expect(weak_lease_release(current)).to_equal(true)
+                expect(weak_strong_count(replacement)).to_equal(0)
+            else:
+                expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "keeps independent upgrade acquisitions separate":
+        weak_reset()
+        val target = weak_register(93)
+        val observer = weak_create(target)
+        if val first = weak_upgrade_owned(observer):
+            if val second = weak_upgrade_owned(observer):
+                weak_remove_strong(target)
+                expect(weak_strong_count(target)).to_equal(2)
+                expect(weak_lease_release(first)).to_equal(true)
+                expect(weak_is_alive(observer)).to_equal(true)
+                expect(weak_lease_value(second)).to_equal(Some(93))
+                expect(weak_lease_release(second)).to_equal(true)
+                expect(weak_is_alive(observer)).to_equal(false)
+            else:
+                expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)

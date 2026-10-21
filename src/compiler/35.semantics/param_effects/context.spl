@@ -38,6 +38,9 @@ pub class PeCtx:
     amb_reason: text
     consume_reason: text
     line: i64
+    checked_sync_callbacks: {i64: [i64]} = {}
+    pending_import_callbacks: {i64: [i64]} = {}
+    pending_import_symbol: i64 = -1
 
     me reset(ids: [i64]):
         self.ids = ids
@@ -48,9 +51,10 @@ pub class PeCtx:
         self.amb_reason = ""
         self.consume_reason = ""
         self.line = 0
+        self.pending_import_symbol = -1
 
     me ambiguous(code: text, reason: text, line: i64):
-        if self.amb_code == "":
+        if self.amb_code == "" or (self.amb_code == "NOGC-IMPORT-CALLBACK-PENDING" and code != "NOGC-IMPORT-CALLBACK-PENDING"):
             self.amb_code = code
             self.amb_reason = reason
             self.line = line
@@ -96,7 +100,7 @@ pub fn _named_symbol_name(module: HirModule, id: i64) -> text:
     ""
 
 pub fn _type_class(ctx: PeCtx, t: HirType) -> text:
-    """"class" / "shared" / "ref" / "iso" / "ptr" / "" (value or unknown)."""
+    """Ownership category, preserving strict sigils and legacy references."""
     if t == nil: return ""
     match t.kind:
         case Named(sym, _):
@@ -114,6 +118,9 @@ pub fn _type_class(ctx: PeCtx, t: HirType) -> text:
         case Ref(_, _): return "ref"
         case Ptr(_, _): return "ptr"
         case Isolated(_): return "iso"
+        case Unique(_): return "unique"
+        case Shared(_): return "shared"
+        case Weak(_): return "weak"
         case _: return ""
 
 # ============================================================================
@@ -276,6 +283,8 @@ pub fn _type_class_id(t: HirType) -> i64:
     match t.kind:
         case Named(sym, _): return sym.id
         case Optional(inner): return _type_class_id(inner)
+        case Unique(inner) | Shared(inner) | Weak(inner) | Ref(inner, _) | Isolated(inner):
+            return _type_class_id(inner)
         case _: return -1
 
 pub class PeIdSink:

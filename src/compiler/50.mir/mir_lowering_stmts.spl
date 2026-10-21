@@ -14,23 +14,128 @@ use compiler.mir._MirLoweringExpr.result_tuple_payload.*
 # - Range-based and iterator-based for loop lowering
 
 use compiler.mir.mir_data.*
+use compiler.mir.mir_instruction_support.{MirBinOp}
 use compiler.mir._MirLowering.native_trait_registration.*
 use compiler.mir._MirLowering.native_trait_conversion.*
 use compiler.mir._MirLowering.global_initializer_guard.*
 use compiler.mir._MirLowering.provider_metadata.{mir_provider_callable_identity}
 use compiler.hir.hir_types.*
+use compiler.hir.hir_kind_carrier.{hir_type_kind_discriminant}
 use compiler.hir.hir_definitions.*
+use compiler.hir.ownership_types.{hir_type_requires_move, hir_type_is_short_candidate, hir_type_ownership_is_known}
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 use compiler.mir._MirLoweringExpr.enum_payload_type_identity.{enum_payload_nominal_kind}
 use compiler.common.diagnostics.span.{Span}
 use compiler.mir.mir_lowering_types.{MirLowering, MirError, marker_map_without, text_map_without}
 use compiler.frontend.resource_registry.{resource_is_declared}
-use compiler.mir.mir_types.{LocalId, mir_type_probe_text}  # explicit: a glob is not an import-origin for surface projection
+use compiler.mir.mir_types.{LocalId, LocalKind, MirLocal, mir_type_probe_text}  # explicit: a glob is not an import-origin for surface projection
 use std.common.mcdc.model.{mcdc_authored_path_v1, mcdc_runtime_decision_id_v1, mcdc_path_in_instrumentation_scope}
 use compiler.semantics.rt_hal_tag.{rt_hal_compilation_requires_finalize}
 use std.io_runtime.{env_get_opt}
 use compiler.mir.array_move.mir_array_move.{am_var_symbol, am_field_base_symbol, am_field_name, am_hir_type_is_array, am_default_is_fresh,
     am_hir_slot_kind, am_call_name_intercepted, am_collect_ctor_refs, ArrayMoveCtorInfo, ArrayMoveCtorTables}
+
+pub fn mir_ownership_return_operand(local: LocalId, source_type: HirType,
+        nogc_strict: bool, short_borrow: bool) -> MirOperand:
+    """Classify a return operand using the source value's ownership facts.
+
+    The caller supplies the active module contract and actual short-borrow
+    provenance. A declared result type must never turn a borrowed source into
+    an owner. Borrow escape validation rejects the short-borrow return; keeping
+    its operand as Copy preserves that provenance for the validator.
+    """
+    if short_borrow:
+        return mir_operand_copy(local)
+    if hir_type_requires_move(source_type, nogc_strict):
+        return mir_operand_move(local)
+    mir_operand_copy(local)
+
+impl MirLowering:
+    fn ownership_assignment_is_short(local: LocalId) -> bool:
+        for definition in self.builder.locals:
+            val source_definition: MirLocal = definition
+            if source_definition.id.id == local.id:
+                return source_definition.short_borrow
+        false
+
+    me copy_assignment_short_provenance(source: LocalId, destination: LocalId):
+        var short_borrow = false
+        var short_mutable = false
+        var short_boundary = -1
+        for definition in self.builder.locals:
+            val source_definition: MirLocal = definition
+            if source_definition.id.id == source.id:
+                short_borrow = source_definition.short_borrow
+                short_mutable = source_definition.short_mutable
+                short_boundary = source_definition.short_boundary
+        var local_index = 0
+        while local_index < self.builder.locals.len():
+            val definition: MirLocal = self.builder.locals[local_index]
+            if definition.id.id == destination.id:
+                self.builder.locals[local_index] = MirLocal(id: definition.id,
+                    name: definition.name, type_: definition.type_, kind: definition.kind,
+                    is_ghost: definition.is_ghost, short_borrow: short_borrow,
+                    short_mutable: short_mutable, short_boundary: short_boundary)
+            local_index = local_index + 1
+
+    me ownership_assignment_requires_move(local: LocalId, source_kind: HirExprKind, span: Span) -> bool:
+        if not mir_expr_kind_is_place(source_kind): return false
+        var source_type = HirType(kind: HirTypeKind.Error, span: span)
+        if val remembered = self.find_local_hir_type(local.id):
+            source_type = remembered
+        if self.nogc_strict:
+            var short_borrow = false
+            for definition in self.builder.locals:
+                val source_definition: MirLocal = definition
+                if source_definition.id.id == local.id:
+                    short_borrow = source_definition.short_borrow
+                    match source_definition.kind:
+                        case LocalKind.Arg(_):
+                            short_borrow = short_borrow or hir_type_is_short_candidate(source_type)
+                        case _: pass
+            if short_borrow:
+                # A local alias remains a view at the original boundary.
+                # It must not turn into an owning transfer or a deep copy.
+                return false
+            if not hir_type_ownership_is_known(source_type):
+                self.error_fatal("E-NOGC-ASSIGN-UNKNOWN: assignment source ownership is unresolved", Some(span))
+                return false
+        if self.local_hir_type_isolation_state(local.id) == 1: return true
+        hir_type_requires_move(source_type, self.nogc_strict)
+
+    me ownership_return_operand(local: LocalId, source: HirExpr) -> MirOperand:
+        # Read the expression/local's actual type, never the declared result
+        # annotation: return annotations cannot confer ownership on a view.
+        var source_type = HirType(kind: HirTypeKind.Error, span: source.span)
+        if val remembered = self.find_local_hir_type(local.id):
+            source_type = remembered
+        elif source.has_type_ and source.type_ != nil:
+            source_type = source.type_
+        var short_borrow = false
+        for definition in self.builder.locals:
+            if definition.id.id == local.id and definition.short_borrow:
+                short_borrow = true
+        val source_symbol: SymbolId? = match source.kind:
+            case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _): Some(symbol)
+            case _: nil
+        if val symbol = source_symbol:
+            if val definition = self.symbols.get_symbol(symbol):
+                if self.nogc_strict and definition.kind == SymbolKind.Parameter:
+                    short_borrow = short_borrow or hir_type_is_short_candidate(source_type)
+        # Coercions can replace the result local; a direct argument local is
+        # still a parameter even when the source HIR lost its symbol spelling.
+        if self.nogc_strict and hir_type_is_short_candidate(source_type):
+            for definition in self.builder.locals:
+                if definition.id.id == local.id:
+                    match definition.kind:
+                        case LocalKind.Arg(_): short_borrow = true
+                        case _: pass
+        if not short_borrow and self.local_hir_type_isolation_state(local.id) == 1:
+            return mir_operand_move(local)
+        if self.nogc_strict and not hir_type_ownership_is_known(source_type):
+            self.error_fatal("E-NOGC-RETURN-UNKNOWN: return source ownership is unresolved", Some(source.span))
+            return mir_operand_copy(local)
+        mir_ownership_return_operand(local, source_type, self.nogc_strict, short_borrow)
 
 # std.alloc.sffi only exists in the seed lib tree; the stage4 strict lane
 # cannot resolve it — declare the runtime extern directly.
@@ -653,11 +758,10 @@ impl MirLowering:
         rt_array_copy" at the ld.lld link step. Adding rt_array_copy to
         runtime_native.c was avoided on purpose (repo hard rule: never wire
         a new `extern fn rt_*` into a CLI-closure module here); the loop
-        form needs zero new runtime surface. Mirrors lower_array_filter's
-        "push the ORIGINAL tagged element unchanged" step (not
-        lower_array_map's decode/re-box round trip): a copy must preserve
-        every element's raw tagged word bit-for-bit, matching
-        rt_array_copy's own memcpy semantics -- this remains a SHALLOW array
+        form needs zero new runtime surface. Ordinary slot arrays preserve
+        each tagged element unchanged. Authoritatively typed u8 arrays use
+        the existing typed getter and box each octet, since packed backing
+        returns raw bytes rather than tagged words. This remains a SHALLOW array
         copy (an array of structs copies each element's pointer, not the
         pointed-to struct). Nested fields inside a directly copied struct use
         copy_struct_value_recursive above; array element depth is separate.
@@ -692,6 +796,38 @@ impl MirLowering:
         self.runtime_array_locals[result_arr.id] = true
         self.mark_runtime_value_local(result_arr.id)
 
+        # `rt_array_get` returns stored words unchanged for ordinary arrays,
+        # but packed byte arrays return a raw octet. Use the typed byte accessor
+        # for an authoritative [u8] element type and re-box that octet before
+        # inserting it into the generic tagged-word copy. Other element types
+        # keep the bit-preserving raw-word path below.
+        var copy_is_u8_array = false
+        var source_type_observed = false
+        var source_element_type_known = false
+        if val source_hir_type = self.find_local_hir_type(init_local.id):
+            source_type_observed = true
+            match source_hir_type.kind:
+                case HirTypeKind.Array(element_hir_type, _):
+                    source_element_type_known = true
+                    copy_is_u8_array = element_hir_type.kind == HirTypeKind.Int(8, false)
+                case _: ()
+        if val source_mir_type = self.local_mir_type_of(init_local):
+            source_type_observed = true
+            if not source_element_type_known:
+                match source_mir_type.kind:
+                    case MirTypeKind.Array(element_mir_type, _):
+                        source_element_type_known = true
+                        copy_is_u8_array = element_mir_type.kind == MirTypeKind.U8
+                    case _: ()
+        # Only use the destination as the final fallback when source metadata
+        # is absent. In particular, an Any destination must not erase a known
+        # [u8] source representation.
+        if not source_type_observed:
+            match effective_type.kind:
+                case MirTypeKind.Array(element_mir_type, _):
+                    copy_is_u8_array = element_mir_type.kind == MirTypeKind.U8
+                case _: ()
+
         var b_init = self.builder
         val counter = b_init.new_local(nil, loop_ty, LocalKind.Var)
         val zero = b_init.new_temp(loop_ty)
@@ -720,8 +856,25 @@ impl MirLowering:
         self.builder = b_cond
 
         var b_get = self.builder
-        val get_call = b_get.emit_call(self.rt_array_get_operand(), [mir_operand_copy(init_local), mir_operand_copy(counter)], MirType.i64())
-        val elem_tagged = get_call ?? b_get.new_temp(MirType.i64())
+        var elem_tagged = b_get.new_temp(MirType.i64())
+        if copy_is_u8_array:
+            val u8_type = MirType(kind: MirTypeKind.U8)
+            val byte_getter = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_bytes_u8_at"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                    params: [MirType(kind: MirTypeKind.Ptr(u8_type, false)), MirType.i64()],
+                    return_type: MirType.i64(), is_variadic: false, params_known: true)))
+            ))
+            val raw_byte = b_get.emit_call_value(byte_getter,
+                [mir_operand_copy(init_local), mir_operand_copy(counter)], MirType.i64())
+            self.builder = b_get
+            elem_tagged = self.box_runtime_value(raw_byte)
+            b_get = self.builder
+        else:
+            val get_call = b_get.emit_call(self.rt_array_get_operand(),
+                [mir_operand_copy(init_local), mir_operand_copy(counter)], MirType.i64())
+            if val stored_word = get_call:
+                b_get.emit_copy(elem_tagged, stored_word)
         self.builder = b_get
 
         var b_push = self.builder
@@ -975,10 +1128,10 @@ impl MirLowering:
                         # slot 1, which this handler deliberately never reads (see the comment
                         # just above), so its tag=1 result said nothing about the value that
                         # actually reaches lower_type. This measures that value's SOURCE.
-                        # Read against the existing [mir-lower-type-probe] kindzero:
-                        #   letkindzero=true  -> already corrupt AT the symbol-table read, so
+                        # Read against the existing [mir-lower-type-probe] invalid-carrier flag:
+                        #   letkindinvalid=true  -> already invalid AT the symbol-table read, so
                         #     the fault is upstream in the table/writer, not in any copy here;
-                        #   letkindzero=false while lower_type reports kindzero=true -> the
+                        #   letkindinvalid=false while lower_type reports invalid=true -> the
                         #     value is intact here and is destroyed by the `case Some(type_value)`
                         #     Option-payload arm binding below, i.e. the guarded copy one level
                         #     down. That is coordinator option 2 and it revives the zeroed-block
@@ -993,7 +1146,8 @@ impl MirLowering:
                                 mir_let_slot_probe_state = 0
                         if mir_let_slot_probe_state == 1:
                             val probe_let_type: HirType = let_type ?? HirType(kind: HirTypeKind.Error, span: Span.empty())
-                            eprint("[mir-let-symtype-probe] letnil={let_type == nil} letzero={let_type == 0} letkindzero={probe_let_type.kind == 0}\n")
+                            val let_kind_disc = hir_type_kind_discriminant(probe_let_type.kind)
+                            eprint("[mir-let-symtype-probe] letnil={let_type == nil} letzero={let_type == 0} letkindinvalid={let_kind_disc < 0}\n")
                         # `val f = \x: ...` -- keep the existing bind-time
                         # capture snapshot, and materialize non-capturing lambdas
                         # through the same lifted FuncPtr used for lambda args.
@@ -1358,8 +1512,10 @@ impl MirLowering:
                         # is false, i.e. every pre-existing case).
                         val struct_sym = self.struct_value_syms.get(init_local.id)
                         val struct_move_hir_type = self.find_local_hir_type(init_local.id)
-                        val struct_is_place_iso = struct_sym != nil and mir_expr_kind_is_place(let_init.kind) and self.local_hir_type_isolation_state(init_local.id) == 1
-                        val struct_copy = if struct_is_place_iso:
+                        val initializer_moves = self.ownership_assignment_requires_move(init_local, let_init.kind, span)
+                        val struct_is_place_iso = struct_sym != nil and initializer_moves
+                        val initializer_is_short = self.ownership_assignment_is_short(init_local)
+                        val struct_copy = if struct_is_place_iso or initializer_is_short:
                             nil
                         else:
                             self.maybe_copy_struct_value(init_local, struct_sym, mir_expr_kind_is_place(let_init.kind))
@@ -1383,7 +1539,7 @@ impl MirLowering:
                             if self.local_hir_type_resource_state(init_local.id) == 1:
                                 self.consumed_resource_locals[init_local.id] = true
                                 self.resource_owned_locals.push(smove_local)
-                        elif bf_sym != nil or struct_sym != nil:
+                        elif (bf_sym != nil or struct_sym != nil) and not initializer_is_short:
                             self.bind_local(symbol_value_id, init_local)
                         else:
                             # Bug #186: array-typed place-read local-alias fix
@@ -1395,7 +1551,7 @@ impl MirLowering:
                             # A place read proven owned and dead afterwards
                             # (mir_array_move.spl, Site A) takes that same
                             # path: the handle moves instead of being copied.
-                            val array_copy = self.maybe_copy_array_value(init_local, effective_type, mir_expr_kind_is_place(let_init.kind) and not self.array_move_let_skips_copy(symbol_value_id, let_init))
+                            val array_copy = self.maybe_copy_array_value(init_local, effective_type, mir_expr_kind_is_place(let_init.kind) and not initializer_is_short and not initializer_moves and not self.array_move_let_skips_copy(symbol_value_id, let_init))
                             if val array_copy_local = array_copy:
                                 self.bind_local(symbol_value_id, array_copy_local)
                             else:
@@ -1403,6 +1559,11 @@ impl MirLowering:
                                 val local = b.new_local(nil, effective_type, LocalKind.Var)
                                 self.builder = b
                                 self.bind_local(symbol_value_id, local)
+                                self.copy_assignment_short_provenance(init_local, local)
+                                if initializer_is_short and struct_sym != nil:
+                                    self.struct_value_syms[local.id] = struct_sym ?? ""
+                                if initializer_is_short and bf_sym != nil:
+                                    self.bitfield_value_syms[local.id] = bf_sym ?? -1
                                 if self.runtime_array_locals.contains(init_local.id):
                                     self.runtime_array_locals[local.id] = true
                                 if self.runtime_dict_locals.contains(init_local.id):
@@ -1490,7 +1651,7 @@ impl MirLowering:
                                 # move is reported; non-iso code is unaffected
                                 # (mir_hir_type_is_isolated is false for every
                                 # pre-existing HirTypeKind).
-                                if mir_expr_kind_is_place(let_init.kind) and self.local_hir_type_isolation_state(init_local.id) == 1:
+                                if initializer_moves:
                                     b2.emit_move(local, init_local)
                                     # WP-E: a `val b = a` move of an owned
                                     # resource local transfers ownership --
@@ -1581,7 +1742,7 @@ impl MirLowering:
                         # actually stored rather than what the guarded copy produced.
                         # This is the measurement that separates the two remaining candidates,
                         # which BOTH yield an all-zero copy and are therefore indistinguishable
-                        # from `kindzero=true` alone:
+                        # from `invalid_kind_carrier=true` alone:
                         #   raw == 3  -> the slot holds the nil sentinel
                         #     (rt_core_nil -> RT_VALUE_SPECIAL_NIL). The store is CORRECT, the
                         #     guard's TEST is correct, and the zeroed-block FALLBACK is a
@@ -1947,6 +2108,7 @@ impl MirLowering:
                                     ()
                     case nil:
                         ()
+                val assignment_moves = self.ownership_assignment_requires_move(value_local, value_kind, span)
                 var b = self.builder
                 # Bug iso_transfer_sites_missing_move_return_assign_field
                 # (2026-08-06), CONFLICT-FLAG (mir_lowering_stmts.spl is
@@ -1959,11 +2121,12 @@ impl MirLowering:
                 # NLL checker sees a real Move fact for `var`-reassignment
                 # too; non-iso code (found type not Isolated, or a fresh
                 # construction rather than a place read) is unaffected.
-                if mir_expr_kind_is_place(value_kind) and self.local_hir_type_isolation_state(assigned_value.id) == 1:
+                if assignment_moves:
                     b.emit_move(local, assigned_value)
                 else:
                     b.emit_copy(local, assigned_value)
                 self.builder = b
+                self.copy_assignment_short_provenance(value_local, local)
                 self.copy_optional_record_owner(assigned_value.id, local.id)
                 self.assign_result_err_record_owner(assigned_value.id, local.id)
                 if self.is_runtime_value_local(assigned_value.id):

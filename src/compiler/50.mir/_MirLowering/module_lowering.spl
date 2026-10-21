@@ -14,6 +14,7 @@ use compiler.mir._MirLowering.exact_extern_provenance.*
 use compiler.mir._MirLowering.provider_globals.*
 use compiler.mir._MirLowering.global_initializer_guard.*
 use compiler.mir._MirLowering.function_lowering.*
+use compiler.mir._MirLowering.short_call_contracts.*
 use compiler.mir._MirLowering.native_trait_registration.*
 use compiler.mir._MirLowering.native_trait_thunks.*
 use compiler.mir._MirLowering.asm_and_targets.*
@@ -928,7 +929,8 @@ impl MirLowering:
         `enum_single_payload_types` lookup: a caller that needs slot N asks
         this first and then `enum_variant_payload_type_at`."""
         self.ensure_declaration_enum_payloads_v1(payload_key)
-        if val types = self.enum_variant_payload_types.get(payload_key):
+        if self.enum_variant_payload_types.has(payload_key):
+            val types: [HirType] = self.enum_variant_payload_types[payload_key]
             return types.len()
         return 0
 
@@ -939,7 +941,8 @@ impl MirLowering:
         `enum_single_payload_types[payload_key]` returns; that map is still
         consulted FIRST by its callers, so its behaviour is unchanged."""
         self.ensure_declaration_enum_payloads_v1(payload_key)
-        if val types = self.enum_variant_payload_types.get(payload_key):
+        if self.enum_variant_payload_types.has(payload_key):
+            val types: [HirType] = self.enum_variant_payload_types[payload_key]
             if index >= 0 and index < types.len():
                 return Some(types[index])
         return nil
@@ -948,7 +951,8 @@ impl MirLowering:
         """Declared field name of payload slot `index`.
 
         Empty for positional (Tuple) slots and for an out-of-range index."""
-        if val names = self.enum_variant_payload_names.get(payload_key):
+        if self.enum_variant_payload_names.has(payload_key):
+            val names: [text] = self.enum_variant_payload_names[payload_key]
             if index >= 0 and index < names.len():
                 return names[index]
         return ""
@@ -958,7 +962,8 @@ impl MirLowering:
 
         Struct-variant field order is the source order recorded at
         registration, so this is the index a positional payload read uses."""
-        if val names = self.enum_variant_payload_names.get(payload_key):
+        if self.enum_variant_payload_names.has(payload_key):
+            val names: [text] = self.enum_variant_payload_names[payload_key]
             var ni = 0
             while ni < names.len():
                 if names[ni] == field_name:
@@ -996,30 +1001,28 @@ impl MirLowering:
             self.generic_enum_constructor_owners[enum_def_r.runtime_name] = generic_constructor
         var names: [text] = []
         var discriminants: [i64] = []
+        var seen_discriminants: Dict<i64, bool> = {}
         var next_value: i64 = 0
         var vi = 0
         while vi < enum_def_r.variants.len():
             val variant: HirVariant = enum_def_r.variants[vi]
             var value = next_value
             if variant.has_discriminant:
-                val folded = self.lower_const_expr(variant.discriminant)
+                val folded: MirConstValue? = self.lower_const_expr(variant.discriminant)
                 if val const_value = folded:
                     match const_value:
-                        case Int(int_value): value = int_value
+                        case MirConstValue.Int(int_value): value = int_value
                         case _:
                             self.error_fatal("enum variant '{enum_def_r.name}.{variant.name}' discriminant must be an integer constant", Some(variant.span))
                 else:
                     self.error_fatal("enum variant '{enum_def_r.name}.{variant.name}' discriminant must be a constant integer expression", Some(variant.span))
             if value < 0 or value > 2147483647:
                 self.error_fatal("enum variant '{enum_def_r.name}.{variant.name}' discriminant {value} is outside portable runtime range 0..2147483647", Some(variant.span))
-            var duplicate = false
-            var di = 0
-            while di < discriminants.len():
-                if discriminants[di] == value:
-                    duplicate = true
-                di = di + 1
-            if duplicate:
+            # Preserve the previous scan's one error per later occurrence,
+            # including invalid values, with bounded local membership storage.
+            if seen_discriminants.contains_key(value):
                 self.error_fatal("enum '{enum_def_r.name}' has duplicate discriminant {value}", Some(variant.span))
+            seen_discriminants[value] = true
             names.push(variant.name)
             discriminants.push(value)
             # Full payload registration (2026-08-21). The arity-1 Tuple write
@@ -1962,9 +1965,9 @@ impl MirLowering:
                     case Named(err_symbol_id, _):
                         if val err_symbol = module_symbols.get_symbol_raw(err_symbol_id.id):
                             match err_symbol.kind:
-                                case Class:
+                                case SymbolKind.Class:
                                     bootstrap_fn_ret_err_shape_register(prescan_call_name, mir_class_identity(err_symbol))
-                                case Struct:
+                                case SymbolKind.Struct:
                                     bootstrap_fn_ret_err_shape_register(prescan_call_name, self.composite_layout_key(err_symbol))
                                 case _: ()
                     case _: ()
@@ -1980,9 +1983,9 @@ impl MirLowering:
                         if val present_prescan_ok_symbol = optional_prescan_ok_symbol:
                             val prescan_ok_symbol: HirSymbol = present_prescan_ok_symbol
                             match prescan_ok_symbol.kind:
-                                case Class:
+                                case SymbolKind.Class:
                                     bootstrap_fn_ret_ok_shape_register(prescan_call_name, mir_class_identity(prescan_ok_symbol))
-                                case Struct:
+                                case SymbolKind.Struct:
                                     # Bare name, matching the spelling
                                     # `struct_value_syms`/`lookup_or_invalid`
                                     # consumers expect downstream
@@ -2018,9 +2021,9 @@ impl MirLowering:
                         if val present_prescan_optional_symbol = optional_prescan_optional_symbol:
                             val prescan_optional_symbol: HirSymbol = present_prescan_optional_symbol
                             match prescan_optional_symbol.kind:
-                                case Class:
+                                case SymbolKind.Class:
                                     bootstrap_fn_ret_opt_shape_register(prescan_call_name, mir_class_identity(prescan_optional_symbol))
-                                case Struct:
+                                case SymbolKind.Struct:
                                     bootstrap_fn_ret_opt_shape_register(
                                         prescan_call_name, self.composite_layout_key(prescan_optional_symbol))
                                 case _: ()
@@ -2343,6 +2346,7 @@ impl MirLowering:
             self.global_constants_by_id = {}
             self.global_const_exprs = {}
             self.exact_extern_signatures = {}
+            self.adapted_file_write_bytes_externs = {}
             self.collection_literal_operands = {}
             self.collection_literal_ordinals = {}
         # Only lower_module's completed prescan/emission loops read this
@@ -2450,6 +2454,10 @@ impl MirLowering:
             archive_function_symbols: [i64]? = nil, archive_primary_globals: MirModule? = nil,
             archive_trait_thunks: [MirFunction] = []) -> MirModule:
         """Lower HIR module to MIR."""
+        # A lowering instance can serve strict and legacy modules in sequence.
+        # Assign both true and false so policy never leaks between consumers.
+        self.nogc_strict = module.nogc_strict
+        self.short_call_contracts = {}
         mir_section_profile_mark("p0_start", module.name)
         self.unsafe_depth = 0
         # Demand rows never cross a module boundary: no provider list is
@@ -2510,11 +2518,15 @@ impl MirLowering:
             self.register_declaration_provider_traits_v1(module, true)
         mir_section_profile_mark("p1_native_traits", module.name)
         self.exact_extern_signatures = {}
+        self.adapted_file_write_bytes_externs = {}
         # E-MIR-TYPE-Error rate limit is per module (see lower_type).
         self.mir_type_error_reports = {}
         val function_keys_37_values: [HirFunction] = module.functions.values()
         for raw_declaration in function_keys_37_values:
             val declaration: HirFunction = raw_declaration
+            self.record_adapted_file_write_bytes_extern_v1(
+                self.current_module_id, declaration, declaration.symbol
+            )
             self.record_exact_extern_declaration_v1(declaration)
         self.record_imported_exact_extern_modules_v1(module.name, providers)
         mir_section_profile_mark("p2_exact_externs", module.name)
@@ -3285,6 +3297,7 @@ impl MirLowering:
             print "[mir-lower] lower_module:done"
         self.publish_native_trait_thunks(false)
         self.attach_external_layout_traces()
+        self.publish_short_call_contracts(module)
         self.builder.module
 
     # Cycle-97: lower_module's per-function emission loop, hosted in a fresh
