@@ -25,21 +25,29 @@ BASE="https://download.freebsd.org/releases/VM-IMAGES/${FREEBSD_VERSION}-RELEASE
 VARIANT=BASIC-CLOUDINIT-ufs; [ "$ARCH" != riscv64 ] || VARIANT=ufs
 NAME="FreeBSD-${FREEBSD_VERSION}-RELEASE-${NAME_ARCH}-${VARIANT}.qcow2"
 WORK="${SIMPLE_BIG_STORAGE_ROOT:-${HOME}/.simple}/qemu/download/freebsd-${FREEBSD_VERSION}-${ARCH}"
+case "$MODE" in
+    --list|--fetch) ;;
+    *) echo "usage: $0 --list|--fetch amd64|arm64|riscv64" >&2; exit 2 ;;
+esac
+hash_file() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+    else sha256 -q "$1"; fi
+}
 mkdir -p "$WORK"
 
 curl -fsSL --retry 3 -o "$WORK/CHECKSUM.SHA256" "$BASE/CHECKSUM.SHA256"
-case "$MODE" in
-    --list) sed -n 's/^SHA256 (\(.*\)) = .*/\1/p' "$WORK/CHECKSUM.SHA256"; exit 0 ;;
-    --fetch) ;;
-    *) echo "usage: $0 --list|--fetch amd64|arm64|riscv64" >&2; exit 2 ;;
-esac
+if [ "$MODE" = --list ]; then
+    sed -n 's/^SHA256 (\(.*\)) = .*/\1/p' "$WORK/CHECKSUM.SHA256"
+    exit 0
+fi
 
 want_xz="$(sed -n "s/^SHA256 (${NAME}.xz) = //p" "$WORK/CHECKSUM.SHA256")"
 [ -n "$want_xz" ] || { echo "error: ${NAME}.xz not listed in $BASE/CHECKSUM.SHA256" >&2; exit 1; }
 curl -fL --retry 3 -o "$WORK/${NAME}.xz" "$BASE/${NAME}.xz"
-got="$(sha256sum "$WORK/${NAME}.xz" | awk '{print $1}')"
+got="$(hash_file "$WORK/${NAME}.xz")"
 [ "$got" = "$want_xz" ] || { rm -f "$WORK/${NAME}.xz"; echo "error: sha256 mismatch for ${NAME}.xz: got $got want $want_xz" >&2; exit 1; }
 xz -dkf "$WORK/${NAME}.xz"
 SIMPLE_FREEBSD_MEDIA_PATH="${SIMPLE_FREEBSD_MEDIA_PATH:-${SIMPLE_BIG_STORAGE_ROOT:-${HOME}/.simple}/qemu/images/freebsd/${NAME}}" \
-    sh "$ROOT_DIR/scripts/qemu/simple-freebsd-media.shs" --supply "$WORK/$NAME" "$(sha256sum "$WORK/$NAME" | awk '{print $1}')"
+    sh "$ROOT_DIR/scripts/qemu/simple-freebsd-media.shs" --supply "$WORK/$NAME" "$(hash_file "$WORK/$NAME")"
 rm -f "$WORK/${NAME}.xz" "$WORK/$NAME"
