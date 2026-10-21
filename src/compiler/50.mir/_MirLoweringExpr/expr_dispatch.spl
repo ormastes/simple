@@ -919,6 +919,33 @@ impl MirLowering:
                 return HirType(kind: HirTypeKind.Slice(rebound), span: declared.span)
             case HirTypeKind.Function(_, _, _):
                 return self.declared_function_field_signature(owner, field_idx, declared)
+            case HirTypeKind.Optional(optional_inner):
+                match optional_inner.kind:
+                    case HirTypeKind.Named(_, optional_args):
+                        if optional_args.len() == 0:
+                            var optional_owner_key = ""
+                            if self.struct_field_type_ownership_key.contains(owner):
+                                val optional_keys: [text]? = self.struct_field_type_ownership_key[owner]
+                                if optional_keys != nil:
+                                    if val present_optional_keys = optional_keys:
+                                        val keys: [text] = present_optional_keys
+                                        if field_idx >= 0 and field_idx < keys.len():
+                                            optional_owner_key = keys[field_idx]
+                            # Missing evidence retains the prior compatibility
+                            # behavior; it is not authenticated owner transport.
+                            if optional_owner_key == "": return declared
+                            val rebound = self.rebind_named_type_owner(optional_inner, optional_owner_key)
+                            match rebound.kind:
+                                case HirTypeKind.Error:
+                                    # Field emission may continue from an HIR
+                                    # fallback. A proven unavailable owner must
+                                    # nevertheless block admission before codegen.
+                                    self.error_fatal("optional field payload owner is unavailable in consumer: owner={optional_owner_key}", Some(declared.span))
+                                    return rebound
+                                case _:
+                                    return HirType(kind: HirTypeKind.Optional(rebound), span: declared.span)
+                    case _: ()
+                declared
             case HirTypeKind.Named(declared_sym, declared_args):
                 var owner_key = ""
                 if self.struct_field_type_ownership_key.contains(owner):
@@ -1124,7 +1151,11 @@ impl MirLowering:
                                     # Imported aggregate fields have an erased MIR
                                     # word. Keep the declared Option owner on that
                                     # projection so unwrap uses the Option contract.
-                                    self.remember_local_hir_type(result.id, decl_field_types[field_idx], 0, 0)
+                                    val rebound_optional = self.declared_field_type_in_current_table(name, field_idx, decl_field_types[field_idx])
+                                    match rebound_optional.kind:
+                                        case HirTypeKind.Optional(_):
+                                            self.remember_local_hir_type(result.id, rebound_optional, 0, 0)
+                                        case _: ()
                                 case HirTypeKind.Dict(_, _):
                                     self.runtime_dict_locals[result.id] = true
                                     # A symbol-free declared type (`{text: i64}`)
