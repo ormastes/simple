@@ -1,0 +1,91 @@
+use app.build.scheduler.worker_request.{BuildWorkerRequestV1,
+    encode_build_worker_request_v1, parse_build_worker_request_v1,
+    worker_request_matches_dispatch_v1}
+use app.build.scheduler.dispatch_wire.{encode_build_dispatch_v1}
+use compiler.common.build_contract.{BuildInputRef, BuildDependencyRef, BuildEnvInput,
+    BuildResolutionProbe, SnapshotManifest, ToolchainManifest, InputManifest,
+    ActionSpec, AttemptSpec, action_spec_digest_v1, input_manifest_digest_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.spec.step
+
+fn _request_fixture_v1() -> BuildWorkerRequestV1:
+    val snap = sha256_text("snapshot")
+    val dependency = sha256_text("producer action")
+    val action = ActionSpec(1, "link", SnapshotManifest(1, snap,
+        sha256_text("tree"), sha256_text("submodules")),
+        ToolchainManifest(1, sha256_text("compiler"), sha256_text("behavior"),
+            sha256_text("provider"), sha256_text("runtime"), sha256_text("sysroot"),
+            "x86_64-unknown-linux-gnu"),
+        InputManifest(1, snap,
+            [BuildInputRef("src/z.c", sha256_text("z")),
+             BuildInputRef("src/a.c", sha256_text("a"))],
+            [BuildInputRef("generated/config.h", sha256_text("generated"))],
+            [dependency], [BuildDependencyRef(dependency, "obj/answer.o", sha256_text("object"))],
+            [BuildEnvInput("LANG", sha256_text("C"))],
+            [BuildResolutionProbe("include/absent.h", false, "", sha256_text("search")),
+             BuildResolutionProbe("include/found.h", true, sha256_text("header"), sha256_text("search"))],
+            sha256_text("context"), true, false),
+        ["clang", "-DVALUE=one|two%0a\nthree", "", "obj/answer.o"],
+        "src", sha256_text("sandbox"), ["z.out", "a.out"], sha256_text("resources"))
+    val attempt = AttemptSpec(1, action_spec_digest_v1(action), "try-1", "node-1", 2, 4, 4096)
+    BuildWorkerRequestV1(action, attempt, 7, 2, 8)
+
+describe "complete canonical worker request":
+    it "roundtrips all manifest families and preserves ordered arguments and probes":
+        step("Roundtrip a complete request including generated inputs and dependencies")
+        val request = _request_fixture_v1()
+        val wire = encode_build_worker_request_v1(request)
+        expect(wire.starts_with("simple-build-worker-request-v1\n")).to_be(true)
+        if val parsed = parse_build_worker_request_v1(wire):
+            expect(encode_build_worker_request_v1(parsed)).to_equal(wire)
+            expect(action_spec_digest_v1(parsed.action)).to_equal(request.attempt.action_digest)
+            expect(input_manifest_digest_v1(parsed.action.inputs)).to_equal(
+                input_manifest_digest_v1(request.action.inputs))
+            expect(parsed.action.argv).to_equal(request.action.argv)
+            expect(parsed.action.inputs.source_inputs[0].logical_path).to_equal("src/a.c")
+            expect(parsed.action.inputs.generated_inputs[0].logical_path).to_equal("generated/config.h")
+            expect(parsed.action.inputs.dependency_outputs[0].output_path).to_equal("obj/answer.o")
+            expect(parsed.action.inputs.env_inputs[0].name).to_equal("LANG")
+            expect(parsed.action.inputs.resolution_probes[0].found).to_be(false)
+            expect(parsed.action.inputs.resolution_probes[1].found).to_be(true)
+            expect(parsed.action.output_paths[0]).to_equal("a.out")
+            expect(parsed.attempt.retry_number).to_equal(2)
+            expect(parsed.attempt.priority).to_equal(4)
+            expect(parsed.attempt.memory_budget_bytes).to_equal(4096)
+            expect(parsed.fence).to_equal(7)
+            expect(parsed.cpu_tokens).to_equal(2)
+            expect(parsed.fd_tokens).to_equal(8)
+        else:
+            expect(false).to_be(true)
+
+    it "rejects identity tampering and mismatched external dispatch":
+        val request = _request_fixture_v1()
+        val wire = encode_build_worker_request_v1(request)
+        val dispatch = encode_build_dispatch_v1(request.action, request.attempt, 7, 2, 8)
+        expect(worker_request_matches_dispatch_v1(request, dispatch)).to_be(true)
+        expect(worker_request_matches_dispatch_v1(request,
+            dispatch.replace("worker=node-1", "worker=node-2"))).to_be(false)
+        expect(parse_build_worker_request_v1(wire.replace("arg|clang\n", "arg|gcc\n"))).to_be_nil()
+        expect(parse_build_worker_request_v1(wire.replace("allocation|7|2|8", "allocation|8|2|8"))).to_be_nil()
+        expect(parse_build_worker_request_v1(wire.replace("|try-1|node-1|", "|try-1|node-2|"))).to_be_nil()
+
+    it "rejects noncanonical numbers escapes order unknown fields and truncation":
+        val wire = encode_build_worker_request_v1(_request_fixture_v1())
+        expect(parse_build_worker_request_v1(wire.replace("allocation|7|", "allocation|07|"))).to_be_nil()
+        expect(parse_build_worker_request_v1(wire.replace("%7c", "%7C"))).to_be_nil()
+        expect(parse_build_worker_request_v1(wire.replace("sources|2", "sources|02"))).to_be_nil()
+        expect(parse_build_worker_request_v1(wire.replace("output|a.out\noutput|z.out", "output|z.out\noutput|a.out"))).to_be_nil()
+        expect(parse_build_worker_request_v1(wire + "unknown|value\n")).to_be_nil()
+        expect(parse_build_worker_request_v1(wire[0:wire.len() - 1])).to_be_nil()
+        expect(parse_build_worker_request_v1(wire.replace("toolchain|1|", "toolchain|2|"))).to_be_nil()
+
+    it "bounds wire allocation collection counts and scalar numeric parsing":
+        val wire = encode_build_worker_request_v1(_request_fixture_v1())
+        expect(parse_build_worker_request_v1(wire.replace("sources|2", "sources|257"))).to_be_nil()
+        expect(parse_build_worker_request_v1(wire.replace("allocation|7|2|8",
+            "allocation|9223372036854775808|2|8"))).to_be_nil()
+        var oversized = wire
+        while oversized.len() <= 262144:
+            oversized = oversized + oversized
+        expect(parse_build_worker_request_v1(oversized)).to_be_nil()
+        expect(parse_build_worker_request_v1(wire + "\x00\n")).to_be_nil()

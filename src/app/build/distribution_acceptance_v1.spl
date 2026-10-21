@@ -1,0 +1,134 @@
+# Pure consistency check over copied observations. A trusted collector must
+# bind the integration candidate, hash downloaded artifact bytes, and
+# authenticate provenance before passing rows to this checker.
+pub struct DistributionTargetRequirementV1:
+    target_id: text
+    target_triple: text
+    artifact_name: text
+    candidate_tree: text
+    require_execution: bool
+
+pub struct DistributionTargetEvidenceV1:
+    target_id: text
+    target_triple: text
+    artifact_name: text
+    candidate_tree: text
+    artifact_sha256: text
+    provenance_artifact_sha256: text
+    product_kind: text
+    execution_status: text
+
+pub struct DistributionAcceptanceV1:
+    accepted: bool
+    reason: text
+
+fn _reject_distribution_v1(reason: text) -> DistributionAcceptanceV1:
+    DistributionAcceptanceV1(false, reason)
+
+fn _lower_hex_v1(value: text, width: i64) -> bool:
+    if value.len() != width:
+        return false
+    for ch in value.chars():
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+fn _candidate_tree_v1(value: text) -> bool:
+    _lower_hex_v1(value, 40) or _lower_hex_v1(value, 64)
+
+fn _identifier_v1(value: text, maximum: i64, allow_slash: bool) -> bool:
+    if value.len() == 0 or value.len() > maximum or value.contains(".."):
+        return false
+    for ch in value.chars():
+        if not ((ch >= "a" and ch <= "z") or
+                (ch >= "A" and ch <= "Z") or
+                (ch >= "0" and ch <= "9") or
+                ch == "-" or ch == "_" or ch == "." or ch == ":" or
+                (allow_slash and ch == "/")):
+            return false
+    true
+
+fn _requirement_valid_v1(row: DistributionTargetRequirementV1) -> bool:
+    _identifier_v1(row.target_id, 128, true) and
+        _identifier_v1(row.target_triple, 128, false) and
+        _identifier_v1(row.artifact_name, 255, false) and
+        _candidate_tree_v1(row.candidate_tree)
+
+fn _evidence_valid_v1(row: DistributionTargetEvidenceV1) -> bool:
+    _identifier_v1(row.target_id, 128, true) and
+        _identifier_v1(row.target_triple, 128, false) and
+        _identifier_v1(row.artifact_name, 255, false) and
+        _candidate_tree_v1(row.candidate_tree) and
+        _lower_hex_v1(row.artifact_sha256, 64) and
+        _lower_hex_v1(row.provenance_artifact_sha256, 64)
+
+pub fn check_distribution_acceptance_v1(
+    requirements: [DistributionTargetRequirementV1],
+    evidence: [DistributionTargetEvidenceV1]
+) -> DistributionAcceptanceV1:
+    """Accept an exact, complete native Stage 2 matrix with valid execution."""
+    if requirements.len() == 0 or evidence.len() == 0:
+        return _reject_distribution_v1("matrix-empty")
+    if requirements.len() > 64 or evidence.len() > 64:
+        return _reject_distribution_v1("matrix-too-large")
+    if requirements.len() != evidence.len():
+        return _reject_distribution_v1("matrix-incomplete")
+
+    var i: i64 = 0
+    while i < requirements.len():
+        val requested = requirements[i]
+        if not _requirement_valid_v1(requested):
+            return _reject_distribution_v1("requirement-invalid")
+        if requested.candidate_tree != requirements[0].candidate_tree:
+            return _reject_distribution_v1("candidate-tree-mixed")
+        var j: i64 = 0
+        while j < i:
+            if requested.target_id == requirements[j].target_id:
+                return _reject_distribution_v1("requirement-target-duplicate")
+            if requested.artifact_name == requirements[j].artifact_name:
+                return _reject_distribution_v1("requirement-artifact-duplicate")
+            j = j + 1
+        i = i + 1
+
+    i = 0
+    while i < evidence.len():
+        val observed = evidence[i]
+        if not _evidence_valid_v1(observed):
+            return _reject_distribution_v1("evidence-invalid")
+        var j: i64 = 0
+        while j < i:
+            if observed.target_id == evidence[j].target_id:
+                return _reject_distribution_v1("evidence-target-duplicate")
+            if observed.artifact_name == evidence[j].artifact_name:
+                return _reject_distribution_v1("evidence-artifact-duplicate")
+            j = j + 1
+        var match_index: i64 = -1
+        j = 0
+        while j < requirements.len():
+            if observed.target_id == requirements[j].target_id:
+                match_index = j
+                break
+            j = j + 1
+        if match_index < 0:
+            return _reject_distribution_v1("target-unrequested")
+        val requested = requirements[match_index]
+        if observed.target_triple != requested.target_triple:
+            return _reject_distribution_v1("target-triple-mismatch")
+        if observed.artifact_name != requested.artifact_name:
+            return _reject_distribution_v1("artifact-name-mismatch")
+        if observed.candidate_tree != requested.candidate_tree:
+            return _reject_distribution_v1("candidate-tree-mismatch")
+        if observed.artifact_sha256 != observed.provenance_artifact_sha256:
+            return _reject_distribution_v1("artifact-provenance-mismatch")
+        if observed.product_kind != "native-stage2":
+            return _reject_distribution_v1("product-kind-invalid")
+        if observed.execution_status != "passed" and
+                observed.execution_status != "not-required":
+            return _reject_distribution_v1("execution-status-invalid")
+        if requested.require_execution and observed.execution_status != "passed":
+            return _reject_distribution_v1("execution-required")
+        i = i + 1
+    DistributionAcceptanceV1(true, "accepted")
+
+export DistributionTargetRequirementV1, DistributionTargetEvidenceV1
+export DistributionAcceptanceV1, check_distribution_acceptance_v1

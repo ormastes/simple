@@ -1,0 +1,64 @@
+# ELF archive closure fixpoint — lane A7 slice 1
+#
+# libchain_a64.a = {mid_a64.o, leaf_a64.o, unused_a64.o} (recipe:
+# test/fixtures/linker/elf/RECIPE.md). start_a64.o needs add_val + msg (mid);
+# mid needs leaf_fn (leaf) — reachable only through mid, so the closure must
+# take a SECOND pass. unused_a64.o must never be extracted.
+#
+# @cover src/compiler/70.backend/linker/elf/archive_closure.spl
+
+use compiler.backend.linker.elf.archive_closure.{elf_archive_closure, elf_archive_members}
+use compiler.backend.linker.elf.elf_static_link.{elf_static_link}
+use compiler.backend.linker.elf_parser.{ElfObject, elf_parse_object}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use std.io_runtime.{file_read_bytes}
+
+val FIX: text = "test/fixtures/linker/elf"
+
+fn load_fixture(name: text) -> [i64]:
+    val raw = file_read_bytes("{FIX}/{name}")
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn start_obj() -> ElfObject:
+    elf_parse_object(load_fixture("start_a64.o")).unwrap()
+
+fn member_names() -> [text]:
+    val r = elf_archive_closure([start_obj()], [load_fixture("libchain_a64.a")])
+    var names: [text] = []
+    if r.is_ok():
+        for m in r.unwrap().members:
+            names = names.push(m.name)
+    names
+
+describe "elf_archive_closure - fixpoint":
+    it "parses every ELF member of the archive":
+        val r = elf_archive_members([load_fixture("libchain_a64.a")])
+        expect(r.is_ok()).to_equal(true)
+        expect(r.unwrap().len()).to_equal(3)
+
+    it "member leaf is pulled only because member mid references it":
+        val names = member_names()
+        expect(names.len()).to_equal(2)
+        expect(names[0]).to_equal("mid_a64.o")
+        expect(names[1]).to_equal("leaf_a64.o")
+
+    it "needs two extracting passes and never extracts the unreferenced member":
+        val r = elf_archive_closure([start_obj()], [load_fixture("libchain_a64.a")])
+        expect(r.unwrap().passes).to_equal(2)
+        expect(member_names().contains("unused_a64.o")).to_equal(false)
+
+    it "extracts nothing when the objects are already closed":
+        val lib = elf_parse_object(load_fixture("lib_a64.o")).unwrap()
+        val r = elf_archive_closure([start_obj(), lib], [load_fixture("libchain_a64.a")])
+        expect(r.unwrap().members.len()).to_equal(0)
+        expect(r.unwrap().passes).to_equal(0)
+
+    it "an object plus the archive links into an executable":
+        val r = elf_static_link([load_fixture("start_a64.o")], [load_fixture("libchain_a64.a")], "_start", RelocArch.AArch64)
+        expect(r.is_ok()).to_equal(true)
+        expect(r.unwrap()[16]).to_equal(2)

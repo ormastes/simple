@@ -1,0 +1,254 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use app.build.scheduler.n2_feedback_evidence_v1.{
+    N2FeedbackFixtureV1, N2FeedbackSampleV1,
+    check_n2_feedback_evidence_v1}
+
+fn _n2_fixture_v1(kind: text, warm: bool, refs: i64,
+        gates: i64) -> N2FeedbackFixtureV1:
+    val refs_digest = if refs == 0: sha256_text("")
+        else: sha256_text("refs-" + refs.to_text())
+    N2FeedbackFixtureV1(kind, sha256_text("fixture"),
+        sha256_text("candidate")[0:40], sha256_text("source")[0:40],
+        refs_digest, sha256_text("runtime"),
+        sha256_text("toolchain"), sha256_text("policy"),
+        "host-01", warm, refs, sha256_text("gates"), gates)
+
+fn _n2_sample_v1(ordinal: i64, fixture: N2FeedbackFixtureV1,
+        wall: i64, outcome: text, memory_kind: text,
+        memory_bytes: i64, executed_gates: i64, phase: i64) -> N2FeedbackSampleV1:
+    N2FeedbackSampleV1(ordinal, fixture.fixture_sha256,
+        fixture.candidate_tree, fixture.source_revision,
+        fixture.outgoing_ref_manifest_sha256, fixture.runtime_sha256,
+        fixture.toolchain_sha256, fixture.policy_sha256, fixture.host_id,
+        fixture.warm, wall, outcome,
+        fixture.required_gate_digest,
+        executed_gates, memory_kind, memory_bytes, 1024, phase, phase,
+        phase, phase, phase, 1, 1)
+
+fn _n2_samples_v1(fixture: N2FeedbackFixtureV1,
+        count: i64, wall: i64) -> [N2FeedbackSampleV1]:
+    var samples: [N2FeedbackSampleV1] = []
+    var ordinal: i64 = 1
+    while ordinal <= count:
+        samples.push(_n2_sample_v1(ordinal, fixture, wall,
+            "pass", "private", 1024, fixture.required_gate_count, 1))
+        ordinal = ordinal + 1
+    samples
+
+describe "N2 copied fast-feedback evidence":
+    it "admits consistent selected edges and computes nearest ranks":
+        val staged = _n2_fixture_v1("staged-hook", false, 0, 2)
+        var rows = _n2_samples_v1(staged, 20, 1000)
+        rows[18] = _n2_sample_v1(19, staged, 5000,
+            "pass", "unique", 2048, 2, 1)
+        rows[19] = _n2_sample_v1(20, staged, 10000,
+            "pass", "pss", 2048, 2, 1)
+        val decision = check_n2_feedback_evidence_v1(staged, rows)
+        expect(decision.admitted).to_be(true)
+        expect(decision.reason).to_equal("n2-copied-evidence-consistent")
+        expect(decision.sample_count).to_equal(20)
+        expect(decision.p50_ms).to_equal(1000)
+        expect(decision.p95_ms).to_equal(5000)
+        expect(decision.p99_ms).to_equal(10000)
+        expect(decision.numeric_target_met).to_be(true)
+
+        val push = _n2_fixture_v1("pre-push-one-ref", false, 1, 1)
+        val push_rows = _n2_samples_v1(push, 20, 9999)
+        expect(check_n2_feedback_evidence_v1(push, push_rows).admitted).to_be(true)
+        val warm = _n2_fixture_v1("warm-preflight", true, 0, 1)
+        val warm_rows = _n2_samples_v1(warm, 20, 59999)
+        expect(check_n2_feedback_evidence_v1(warm, warm_rows).admitted).to_be(true)
+
+    it "uses exact nearest ranks for 21 and 1024 samples":
+        val fixture = _n2_fixture_v1("warm-preflight", true, 0, 1)
+        var rows: [N2FeedbackSampleV1] = []
+        var ordinal: i64 = 1
+        while ordinal <= 21:
+            rows.push(_n2_sample_v1(ordinal, fixture, 22 - ordinal,
+                "pass", "private", 1024, 1, 0))
+            ordinal = ordinal + 1
+        val twenty_one = check_n2_feedback_evidence_v1(fixture, rows)
+        expect(twenty_one.admitted).to_be(true)
+        expect(twenty_one.p50_ms).to_equal(11)
+        expect(twenty_one.p95_ms).to_equal(20)
+        expect(twenty_one.p99_ms).to_equal(21)
+        while ordinal <= 1024:
+            rows.push(_n2_sample_v1(ordinal, fixture, ordinal,
+                "pass", "private", 1024, 1, 0))
+            ordinal = ordinal + 1
+        val many = check_n2_feedback_evidence_v1(fixture, rows)
+        expect(many.admitted).to_be(true)
+        expect(many.p50_ms).to_equal(512)
+        expect(many.p95_ms).to_equal(973)
+        expect(many.p99_ms).to_equal(1014)
+
+    it "rejects incomplete sets, ordinal gaps, fixture and gate mismatches":
+        val fixture = _n2_fixture_v1("staged-hook", false, 0, 2)
+        var rows = _n2_samples_v1(fixture, 20, 1000)
+        expect(check_n2_feedback_evidence_v1(fixture, rows[0:19]).reason).to_equal(
+            "n2-sample-count-invalid")
+        rows[2] = _n2_sample_v1(4, fixture, 1000,
+            "pass", "private", 1024, 2, 1)
+        expect(check_n2_feedback_evidence_v1(fixture, rows).reason).to_equal(
+            "n2-sample-ordinal-invalid")
+        rows[2] = _n2_sample_v1(3, fixture, 1000,
+            "pass", "private", 1024, 2, 1)
+        var changed_tree = rows[2]
+        changed_tree.candidate_tree = sha256_text("another")[0:40]
+        rows[2] = changed_tree
+        expect(check_n2_feedback_evidence_v1(fixture, rows).reason).to_equal(
+            "n2-sample-binding-invalid")
+        rows[2] = _n2_sample_v1(3, fixture, 1000,
+            "pass", "private", 1024, 2, 1)
+        var changed_source = rows[2]
+        changed_source.source_revision = sha256_text("different-source")[0:40]
+        rows[2] = changed_source
+        expect(check_n2_feedback_evidence_v1(fixture, rows).reason).to_equal(
+            "n2-sample-binding-invalid")
+        rows[2] = _n2_sample_v1(3, fixture, 1000,
+            "pass", "private", 1024, 2, 1)
+        var changed_refs = rows[2]
+        changed_refs.outgoing_ref_manifest_sha256 = sha256_text("different-refs")
+        rows[2] = changed_refs
+        expect(check_n2_feedback_evidence_v1(fixture, rows).reason).to_equal(
+            "n2-sample-binding-invalid")
+        rows[2] = _n2_sample_v1(3, fixture, 1000,
+            "pass", "private", 1024, 2, 1)
+        var changed_runtime = rows[2]
+        changed_runtime.runtime_sha256 = sha256_text("different-runtime")
+        rows[2] = changed_runtime
+        expect(check_n2_feedback_evidence_v1(fixture, rows).reason).to_equal(
+            "n2-sample-binding-invalid")
+        rows[2] = _n2_sample_v1(3, fixture, 1000,
+            "pass", "private", 1024, 2, 1)
+        var changed_toolchain = rows[2]
+        changed_toolchain.toolchain_sha256 = sha256_text("different-toolchain")
+        rows[2] = changed_toolchain
+        expect(check_n2_feedback_evidence_v1(fixture, rows).reason).to_equal(
+            "n2-sample-binding-invalid")
+        rows[2] = _n2_sample_v1(3, fixture, 1000,
+            "pass", "private", 1024, 2, 1)
+        var changed_policy = rows[2]
+        changed_policy.policy_sha256 = sha256_text("different-policy")
+        rows[2] = changed_policy
+        expect(check_n2_feedback_evidence_v1(fixture, rows).reason).to_equal(
+            "n2-sample-binding-invalid")
+        rows[2] = _n2_sample_v1(3, fixture, 1000,
+            "pass", "private", 1024, 2, 1)
+        var changed_host = rows[2]
+        changed_host.host_id = "host-02"
+        rows[2] = changed_host
+        expect(check_n2_feedback_evidence_v1(fixture, rows).reason).to_equal(
+            "n2-sample-binding-invalid")
+        rows[2] = _n2_sample_v1(3, fixture, 1000,
+            "pass", "private", 1024, 2, 1)
+        var changed_warmth = rows[2]
+        changed_warmth.warm = true
+        rows[2] = changed_warmth
+        expect(check_n2_feedback_evidence_v1(fixture, rows).reason).to_equal(
+            "n2-sample-binding-invalid")
+        rows[2] = _n2_sample_v1(3, fixture, 1000,
+            "fail", "private", 1024, 2, 1)
+        expect(check_n2_feedback_evidence_v1(fixture, rows).reason).to_equal(
+            "n2-sample-gates-invalid")
+        rows[2] = _n2_sample_v1(3, fixture, 1000,
+            "pass", "private", 1024, 1, 1)
+        expect(check_n2_feedback_evidence_v1(fixture, rows).reason).to_equal(
+            "n2-sample-gates-invalid")
+        rows[2] = _n2_sample_v1(3, fixture, 1000,
+            "pass", "private", 1024, 2, 1)
+        var changed_gates = rows[2]
+        changed_gates.executed_gate_digest = sha256_text("different-gates")
+        rows[2] = changed_gates
+        expect(check_n2_feedback_evidence_v1(fixture, rows).reason).to_equal(
+            "n2-sample-gates-invalid")
+
+    it "requires private, unique, or PSS memory and bounded metrics":
+        val fixture = _n2_fixture_v1("staged-hook", false, 0, 1)
+        var rows = _n2_samples_v1(fixture, 20, 1000)
+        for invalid_kind in ["", "rss", "cgroup", "unknown"]:
+            rows[0] = _n2_sample_v1(1, fixture, 1000,
+                "pass", invalid_kind, 1024, 1, 1)
+            expect(check_n2_feedback_evidence_v1(fixture, rows).reason).to_equal(
+                "n2-memory-kind-invalid")
+        rows[0] = _n2_sample_v1(1, fixture, 1000,
+            "pass", "private", 0, 1, 1)
+        expect(check_n2_feedback_evidence_v1(fixture, rows).reason).to_equal(
+            "n2-sample-metric-invalid")
+        rows[0] = _n2_sample_v1(1, fixture, 1000,
+            "pass", "private", 1024, 1, 1001)
+        expect(check_n2_feedback_evidence_v1(fixture, rows).reason).to_equal(
+            "n2-sample-metric-invalid")
+        rows[0] = _n2_sample_v1(1, fixture, -1,
+            "pass", "private", 1024, 1, 0)
+        expect(check_n2_feedback_evidence_v1(fixture, rows).reason).to_equal(
+            "n2-sample-metric-invalid")
+        rows[0] = _n2_sample_v1(1, fixture, 1000,
+            "pass", "private", 1024, 1, 1)
+        var changed_metrics = rows[0]
+        changed_metrics.bytes_transferred = -1
+        rows[0] = changed_metrics
+        expect(check_n2_feedback_evidence_v1(fixture, rows).reason).to_equal(
+            "n2-sample-metric-invalid")
+        changed_metrics.bytes_transferred = 1024
+        changed_metrics.action_cache_hits = -1
+        rows[0] = changed_metrics
+        expect(check_n2_feedback_evidence_v1(fixture, rows).reason).to_equal(
+            "n2-sample-metric-invalid")
+        changed_metrics.action_cache_hits = 1
+        changed_metrics.receipt_cache_hits = 1000001
+        rows[0] = changed_metrics
+        expect(check_n2_feedback_evidence_v1(fixture, rows).reason).to_equal(
+            "n2-sample-metric-invalid")
+
+    it "rejects malformed scope and numeric misses without admission":
+        val invalid_gate = _n2_fixture_v1("staged-hook", false, 0, 0)
+        expect(check_n2_feedback_evidence_v1(invalid_gate,
+            _n2_samples_v1(invalid_gate, 20, 1000)).reason).to_equal(
+            "n2-required-gates-invalid")
+        val cold = _n2_fixture_v1("warm-preflight", false, 0, 1)
+        expect(check_n2_feedback_evidence_v1(cold,
+            _n2_samples_v1(cold, 20, 1000)).reason).to_equal(
+            "n2-fixture-scope-invalid")
+        val multi = _n2_fixture_v1("pre-push-one-ref", false, 2, 1)
+        expect(check_n2_feedback_evidence_v1(multi,
+            _n2_samples_v1(multi, 20, 1000)).reason).to_equal(
+            "n2-fixture-scope-invalid")
+        val staged_with_ref = _n2_fixture_v1("staged-hook", false, 1, 1)
+        expect(check_n2_feedback_evidence_v1(staged_with_ref,
+            _n2_samples_v1(staged_with_ref, 20, 1000)).reason).to_equal(
+            "n2-fixture-scope-invalid")
+        var staged_with_fake_ref_digest = _n2_fixture_v1(
+            "staged-hook", false, 0, 1)
+        staged_with_fake_ref_digest.outgoing_ref_manifest_sha256 =
+            sha256_text("unexpected-ref")
+        expect(check_n2_feedback_evidence_v1(staged_with_fake_ref_digest,
+            _n2_samples_v1(staged_with_fake_ref_digest, 20, 1000)).reason)
+            .to_equal("n2-fixture-scope-invalid")
+        var push_with_empty_ref_digest = _n2_fixture_v1(
+            "pre-push-one-ref", false, 1, 1)
+        push_with_empty_ref_digest.outgoing_ref_manifest_sha256 = sha256_text("")
+        expect(check_n2_feedback_evidence_v1(push_with_empty_ref_digest,
+            _n2_samples_v1(push_with_empty_ref_digest, 20, 1000)).reason)
+            .to_equal("n2-fixture-scope-invalid")
+        val fixture = _n2_fixture_v1("pre-push-one-ref", false, 1, 1)
+        val miss = check_n2_feedback_evidence_v1(fixture,
+            _n2_samples_v1(fixture, 20, 10000))
+        expect(miss.admitted).to_be(false)
+        expect(miss.numeric_target_met).to_be(false)
+        expect(miss.reason).to_equal("n2-numeric-target-missed")
+        expect(miss.p95_ms).to_equal(10000)
+        var bad_identity = _n2_fixture_v1("staged-hook", false, 0, 1)
+        bad_identity.host_id = ""
+        expect(check_n2_feedback_evidence_v1(bad_identity,
+            _n2_samples_v1(bad_identity, 20, 1000)).reason).to_equal(
+            "n2-fixture-invalid")
+        bad_identity.host_id = "host-01"
+        bad_identity.policy_sha256 = "ABC"
+        expect(check_n2_feedback_evidence_v1(bad_identity,
+            _n2_samples_v1(bad_identity, 20, 1000)).reason).to_equal(
+            "n2-fixture-invalid")
+        val too_many = _n2_samples_v1(fixture, 1025, 1000)
+        expect(check_n2_feedback_evidence_v1(fixture, too_many).reason).to_equal(
+            "n2-sample-count-invalid")

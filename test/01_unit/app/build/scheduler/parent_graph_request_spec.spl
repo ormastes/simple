@@ -1,0 +1,274 @@
+use std.spec.*
+use app.build.scheduler.parent_graph_request.{admit_parent_graph_requests_v1,
+    select_next_parent_graph_request_v1}
+use app.build.scheduler.parent_graph_manifest.{parse_parent_graph_manifest_v1}
+use app.build.scheduler.ledger.{SchedulerCapacityV1, SchedulerLedgerV1,
+    SchedulerAttemptV1, SchedulerFenceV1, SchedulerFailedAttemptV1,
+    empty_scheduler_ledger_v1}
+use app.build.scheduler.worker_request.{BuildWorkerRequestV1,
+    encode_build_worker_request_v1}
+use compiler.common.build_contract.{BuildInputRef, BuildDependencyRef,
+    SnapshotManifest, ToolchainManifest, InputManifest, ActionSpec,
+    AttemptSpec, AcceptedResult, NodeCapabilities, action_spec_digest_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn _graph_fixture_request_v1(label: text, dependency: text,
+        worker: text, attempt_id: text) -> BuildWorkerRequestV1:
+    val snapshot = sha256_text("graph-snapshot")
+    var dependencies: [text] = []
+    var outputs: [BuildDependencyRef] = []
+    if dependency != "":
+        dependencies.push(dependency)
+        outputs.push(BuildDependencyRef(dependency, "lib.o",
+            sha256_text("lib-object")))
+    val action = ActionSpec(1, "compile",
+        SnapshotManifest(1, snapshot, sha256_text("tree"),
+            sha256_text("submodules")),
+        ToolchainManifest(1, sha256_text("compiler"),
+            sha256_text("behavior"), sha256_text("abi"),
+            sha256_text("runtime"), sha256_text("sysroot"),
+            "x86_64-unknown-linux-gnu"),
+        InputManifest(1, snapshot,
+            [BuildInputRef("src/" + label + ".c", sha256_text(label))],
+            [], dependencies, outputs, [], [], sha256_text("context"),
+            true, false),
+        ["/usr/bin/clang", "-c"], "simple-build/outputs",
+        sha256_text("sandbox"),
+        if dependency == "": ["lib.o"] else: ["final.o"],
+        sha256_text("resources"))
+    BuildWorkerRequestV1(action,
+        AttemptSpec(1, action_spec_digest_v1(action), attempt_id,
+            worker, 0, 4, 4096), 1, 2, 8)
+
+fn _graph_capability_v1(worker: text) -> NodeCapabilities:
+    NodeCapabilities(1, worker, ["x86_64-unknown-linux-gnu"],
+        [sha256_text("abi")], "trusted", 16384)
+
+describe "protected parent graph request":
+    it "accepts a complete producer/consumer graph for the selected worker":
+        val producer = _graph_fixture_request_v1("producer", "",
+            "worker-1", "try-producer")
+        val consumer = _graph_fixture_request_v1("consumer",
+            producer.attempt.action_digest, "worker-2", "try-consumer")
+        val graph = admit_parent_graph_requests_v1(
+            [encode_build_worker_request_v1(consumer),
+             encode_build_worker_request_v1(producer)],
+            consumer.attempt.action_digest, "worker-2", 0)
+        expect(graph.valid).to_be(true)
+        expect(graph.actions.len()).to_equal(2)
+        if val selected = graph.selected:
+            expect(selected.attempt.attempt_id).to_equal("try-consumer")
+        else:
+            assert(false)
+
+    it "rejects missing dependencies and selected-worker substitution":
+        val producer = _graph_fixture_request_v1("producer", "",
+            "worker-1", "try-producer")
+        val consumer = _graph_fixture_request_v1("consumer",
+            producer.attempt.action_digest, "worker-2", "try-consumer")
+        val wire = encode_build_worker_request_v1(consumer)
+        expect(admit_parent_graph_requests_v1([wire],
+            consumer.attempt.action_digest, "worker-2", 0).valid).to_be(false)
+        expect(admit_parent_graph_requests_v1([wire],
+            consumer.attempt.action_digest, "worker-1", 0).reason).to_equal(
+                "graph-selected-worker-mismatch")
+
+    it "rejects duplicate actions and malformed graph manifest entries":
+        val request = _graph_fixture_request_v1("producer", "",
+            "worker-1", "try-producer")
+        val wire = encode_build_worker_request_v1(request)
+        val same_action = _graph_fixture_request_v1("producer", "",
+            "worker-1", "try-producer-2")
+        expect(admit_parent_graph_requests_v1([wire,
+            encode_build_worker_request_v1(same_action)],
+            request.attempt.action_digest, "worker-1", 0).reason).to_equal(
+                "graph-action-duplicate")
+        expect(admit_parent_graph_requests_v1([wire, wire],
+            request.attempt.action_digest, "worker-1", 0).reason).to_equal(
+                "graph-attempt-duplicate")
+        val manifest = "simple-dist-build-graph-v1\nrequest=" +
+            sha256_text(wire) + "|/trusted/request.wire\n"
+        expect(parse_parent_graph_manifest_v1(manifest).valid).to_be(true)
+        expect(parse_parent_graph_manifest_v1(manifest +
+            "request=" + sha256_text(wire) + "|/trusted/other.wire\n").valid).to_be(false)
+        expect(parse_parent_graph_manifest_v1(manifest.replace(
+            "/trusted/request.wire", "/trusted/../request.wire")).valid).to_be(false)
+
+    it "chooses the ready action assigned to a worker from ledger state":
+        val producer = _graph_fixture_request_v1("producer", "",
+            "worker-1", "try-producer")
+        val consumer = _graph_fixture_request_v1("consumer",
+            producer.attempt.action_digest, "worker-2", "try-consumer")
+        val graph = admit_parent_graph_requests_v1(
+            [encode_build_worker_request_v1(producer),
+             encode_build_worker_request_v1(consumer)], "", "worker-1", 0)
+        val capacity = SchedulerCapacityV1(4, 16384, 0, 32)
+        val first = select_next_parent_graph_request_v1(graph,
+            empty_scheduler_ledger_v1(), "worker-1",
+            _graph_capability_v1("worker-1"), capacity,
+            "dist-first", 0)
+        expect(first.ready).to_be(true)
+        expect(first.retry_number).to_equal(0)
+        if val request = first.request:
+            expect(request.attempt.action_digest).to_equal(
+                producer.attempt.action_digest)
+        else:
+            assert(false)
+
+        val blocked = select_next_parent_graph_request_v1(graph,
+            empty_scheduler_ledger_v1(), "worker-2",
+            _graph_capability_v1("worker-2"), capacity,
+            "dist-consumer", 0)
+        expect(blocked.ready).to_be(false)
+        val accepted = SchedulerLedgerV1(
+            [SchedulerAttemptV1(producer.attempt.action_digest,
+                "done-producer", "worker-1", 1, 2, 4096, 8, false)],
+            [SchedulerFenceV1(producer.attempt.action_digest, 1)],
+            [AcceptedResult(1, producer.attempt.action_digest,
+                "done-producer", sha256_text("manifest"),
+                sha256_text("receipt"))], [])
+        val second = select_next_parent_graph_request_v1(graph, accepted,
+            "worker-2", _graph_capability_v1("worker-2"),
+            capacity, "dist-second", 0)
+        expect(second.ready).to_be(true)
+        if val request = second.request:
+            expect(request.attempt.action_digest).to_equal(
+                consumer.attempt.action_digest)
+        else:
+            assert(false)
+
+    it "ignores past graph publications while charging active work":
+        val request = _graph_fixture_request_v1("fresh", "",
+            "worker-1", "try-fresh")
+        val graph = admit_parent_graph_requests_v1(
+            [encode_build_worker_request_v1(request)], "", "worker-1", 0)
+        val past = sha256_text("past-graph-action")
+        val running = sha256_text("other-running-action")
+        val ledger = SchedulerLedgerV1(
+            [SchedulerAttemptV1(past, "past-attempt", "worker-1",
+                1, 1, 4096, 8, false),
+             SchedulerAttemptV1(running, "other-active", "worker-2",
+                1, 1, 4096, 8, true)],
+            [SchedulerFenceV1(past, 1), SchedulerFenceV1(running, 1)],
+            [AcceptedResult(1, past, "past-attempt",
+                sha256_text("past-manifest"), sha256_text("past-receipt"))], [])
+        val capacity = SchedulerCapacityV1(3, 12288, 0, 24)
+        val selected = select_next_parent_graph_request_v1(graph, ledger,
+            "worker-1", _graph_capability_v1("worker-1"), capacity,
+            "try-current", 0)
+        expect(selected.ready).to_be(true)
+        if val chosen = selected.request:
+            expect(chosen.attempt.action_digest).to_equal(
+                request.attempt.action_digest)
+        else:
+            assert(false)
+        val exhausted = select_next_parent_graph_request_v1(graph, ledger,
+            "worker-1", _graph_capability_v1("worker-1"),
+            SchedulerCapacityV1(2, 12288, 0, 24), "try-exhausted", 0)
+        expect(exhausted.ready).to_be(false)
+        expect(exhausted.reason).to_equal("graph-capacity-exhausted")
+
+    it "does not propose a second attempt to one locked worker":
+        val running = _graph_fixture_request_v1("running", "",
+            "worker-1", "try-running")
+        val waiting = _graph_fixture_request_v1("waiting", "",
+            "worker-1", "try-waiting")
+        val graph = admit_parent_graph_requests_v1(
+            [encode_build_worker_request_v1(running),
+             encode_build_worker_request_v1(waiting)], "", "worker-1", 0)
+        val ledger = SchedulerLedgerV1(
+            [SchedulerAttemptV1(running.attempt.action_digest,
+                "try-running", "worker-1", 1, 2, 4096, 8, true)],
+            [SchedulerFenceV1(running.attempt.action_digest, 1)], [], [])
+        val choice = select_next_parent_graph_request_v1(graph, ledger,
+            "worker-1", _graph_capability_v1("worker-1"),
+            SchedulerCapacityV1(4, 16384, 0, 32), "try-second", 0)
+        expect(choice.ready).to_be(false)
+        expect(choice.reason).to_equal("graph-worker-busy")
+
+    it "does not automatically retry deterministic compiler failure":
+        val producer = _graph_fixture_request_v1("producer", "",
+            "worker-1", "try-producer")
+        val digest = producer.attempt.action_digest
+        val graph = admit_parent_graph_requests_v1(
+            [encode_build_worker_request_v1(producer)], "", "worker-1", 0)
+        val failed = SchedulerLedgerV1(
+            [SchedulerAttemptV1(digest, "failed-producer", "worker-1",
+                1, 2, 4096, 8, false)],
+            [SchedulerFenceV1(digest, 2)], [],
+            [SchedulerFailedAttemptV1(digest, "failed-producer", "worker-1",
+                1, "compiler-failure", "", sha256_text("diagnostics"))])
+        val choice = select_next_parent_graph_request_v1(graph, failed,
+            "worker-1", _graph_capability_v1("worker-1"),
+            SchedulerCapacityV1(4, 16384, 0, 32),
+            "dist-retry", 0)
+        expect(choice.ready).to_be(false)
+        expect(choice.reason).to_equal("graph-retry-requires-explicit-action")
+
+    it "retries an unclassified terminal failure within the durable limit":
+        val producer = _graph_fixture_request_v1("producer", "",
+            "worker-1", "try-producer")
+        val digest = producer.attempt.action_digest
+        val graph = admit_parent_graph_requests_v1(
+            [encode_build_worker_request_v1(producer)], "", "worker-1", 0)
+        val failed = SchedulerLedgerV1(
+            [SchedulerAttemptV1(digest, "try-one", "worker-1",
+                1, 2, 4096, 8, false)],
+            [SchedulerFenceV1(digest, 2)], [],
+            [SchedulerFailedAttemptV1(digest, "try-one", "worker-1",
+                1, "action-failure-unclassified", "",
+                sha256_text("diagnostics"))])
+        val choice = select_next_parent_graph_request_v1(graph, failed,
+            "worker-1", _graph_capability_v1("worker-1"),
+            SchedulerCapacityV1(4, 16384, 0, 32), "try-two", 0)
+        expect(choice.ready).to_be(true)
+        expect(choice.retry_number).to_equal(1)
+
+    it "skips an oversized ready action and bounds automatic retries":
+        var large = _graph_fixture_request_v1("large", "",
+            "worker-1", "try-large")
+        var large_attempt = large.attempt
+        large_attempt.priority = 10
+        large.attempt = large_attempt
+        val small = _graph_fixture_request_v1("small", "",
+            "worker-1", "try-small")
+        val graph = admit_parent_graph_requests_v1(
+            [encode_build_worker_request_v1(large),
+             encode_build_worker_request_v1(small)], "", "worker-1", 0)
+        val choice = select_next_parent_graph_request_v1(graph,
+            empty_scheduler_ledger_v1(), "worker-1",
+            _graph_capability_v1("worker-1"),
+            SchedulerCapacityV1(1, 16384, 0, 32), "dist-small", 0)
+        expect(choice.ready).to_be(false)
+        var expensive = large
+        expensive.cpu_tokens = 4
+        val mixed = admit_parent_graph_requests_v1(
+            [encode_build_worker_request_v1(expensive),
+             encode_build_worker_request_v1(small)], "", "worker-1", 0)
+        val selected = select_next_parent_graph_request_v1(mixed,
+            empty_scheduler_ledger_v1(), "worker-1",
+            _graph_capability_v1("worker-1"),
+            SchedulerCapacityV1(2, 16384, 0, 32), "dist-small", 0)
+        expect(selected.ready).to_be(true)
+        if val request = selected.request:
+            expect(request.attempt.action_digest).to_equal(
+                small.attempt.action_digest)
+        else:
+            assert(false)
+        val digest = small.attempt.action_digest
+        val attempts = [
+            SchedulerAttemptV1(digest, "try-one", "worker-1",
+                1, 1, 4096, 8, false),
+            SchedulerAttemptV1(digest, "try-two", "worker-1",
+                2, 1, 4096, 8, false),
+            SchedulerAttemptV1(digest, "try-three", "worker-1",
+                3, 1, 4096, 8, false)]
+        val exhausted = SchedulerLedgerV1(attempts,
+            [SchedulerFenceV1(digest, 3)], [], [])
+        val small_graph = admit_parent_graph_requests_v1(
+            [encode_build_worker_request_v1(small)], "", "worker-1", 0)
+        val stopped = select_next_parent_graph_request_v1(small_graph,
+            exhausted, "worker-1", _graph_capability_v1("worker-1"),
+            SchedulerCapacityV1(2, 16384, 0, 32), "dist-four", 0)
+        expect(stopped.ready).to_be(false)
+        expect(stopped.reason).to_equal("graph-retry-limit")

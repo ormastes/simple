@@ -1,0 +1,55 @@
+# Host-only observation of the installed worker and live Linux OCI provider.
+use app.io.mod.{host_os, host_arch, file_read_regular_no_follow_bounded}
+use app.build.scheduler.worker_execute.{LocalBuildWorkerConfigV1}
+use app.build.scheduler.worker_capability.{BuildWorkerCapabilityV1,
+    encode_build_worker_capability_v1}
+use app.build.scheduler.worker_sandbox_identity.{build_worker_sandbox_digest_v1}
+use app.build.scheduler.planner.{scheduler_action_digest_valid_v1}
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.{
+    LinuxOciRuntimeProviderV1}
+
+fn _observer_token_v1(value: text) -> bool:
+    if value == "" or value.len() > 128 or value == "." or value == ".." or
+       value.starts_with("-"):
+        return false
+    for c in value.chars():
+        if (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
+           (c >= "0" and c <= "9") or c == "-" or c == "_" or c == ".":
+            continue
+        return false
+    true
+
+fn observe_local_build_worker_capability_v1(config: LocalBuildWorkerConfigV1,
+        nonce: text) -> BuildWorkerCapabilityV1?:
+    """Observe the physical Linux worker and a ready live OCI provider."""
+    if not scheduler_action_digest_valid_v1(nonce) or host_os() != "linux":
+        return nil
+    val os_read = file_read_regular_no_follow_bounded("/proc/sys/kernel/ostype", 64)
+    val boot_read = file_read_regular_no_follow_bounded(
+        "/proc/sys/kernel/random/boot_id", 128)
+    if os_read.is_err() or boot_read.is_err() or
+       os_read.unwrap().trim() != "Linux":
+        return nil
+    val boot_id = boot_read.unwrap().trim()
+    if not _observer_token_v1(boot_id) or
+       config.sandbox_digest != build_worker_sandbox_digest_v1(
+           config.image, config.engine, config.compiler_entry):
+        return nil
+    val provider = LinuxOciRuntimeProviderV1.new("linux", config.engine,
+        config.state_dir, boot_id, config.provider_generation, true,
+        config.timeout_ms)
+    val probe = provider.probe()
+    if probe.provider != "linux-oci-v1" or probe.engine != config.engine or
+       not probe.engine_present or not probe.healthy or not probe.launch_capable or
+       ((config.engine == "podman" and probe.privilege != "rootless") or
+        (config.engine == "docker" and probe.privilege != "root")):
+        return nil
+    val cap = BuildWorkerCapabilityV1(config.worker_id, "linux", host_arch(),
+        boot_id, config.provider_generation, probe.provider, probe.engine,
+        probe.privilege, config.image, config.compiler_entry, config.toolchain,
+        config.sandbox_digest,
+        config.resource_policy_digest, config.cpu_limit, config.memory_limit, nonce)
+    if encode_build_worker_capability_v1(cap) == "": return nil
+    cap
+
+export observe_local_build_worker_capability_v1

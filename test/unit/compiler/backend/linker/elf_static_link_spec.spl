@@ -1,0 +1,58 @@
+# Internal static ELF link errors + input handling — lane A7 slice 1
+#
+# @cover src/compiler/70.backend/linker/elf/elf_static_link.spl
+# @cover src/compiler/70.backend/linker/elf_parser.spl
+
+use compiler.backend.linker.elf.elf_static_link.{elf_static_link}
+use compiler.backend.linker.elf_parser.{elf_parse_object}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use std.io_runtime.{file_read_bytes}
+
+val FIX: text = "test/fixtures/linker/elf"
+
+fn load_fixture(name: text) -> [i64]:
+    val raw = file_read_bytes("{FIX}/{name}")
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn link_err(objs: [[i64]], entry: text, target: RelocArch) -> text:
+    val r = elf_static_link(objs, [], entry, target)
+    if r.is_ok():
+        return ""
+    r.unwrap_err()
+
+describe "elf_static_link - errors":
+    it "duplicate strong definition is an error":
+        val lib = load_fixture("lib_a64.o")
+        val e = link_err([load_fixture("start_a64.o"), lib, lib], "_start", RelocArch.AArch64)
+        expect(e.contains("duplicate symbol: add_val")).to_equal(true)
+
+    it "strong undefined reference is an error":
+        val e = link_err([load_fixture("start_a64.o")], "_start", RelocArch.AArch64)
+        expect(e.contains("undefined symbol")).to_equal(true)
+        expect(e.contains("add_val")).to_equal(true)
+
+    it "missing entry symbol is an error":
+        val e = link_err([load_fixture("start_a64.o"), load_fixture("lib_a64.o")], "main", RelocArch.AArch64)
+        expect(e.contains("entry symbol not defined: main")).to_equal(true)
+
+    it "object for another machine is rejected":
+        val e = link_err([load_fixture("start_x64.o")], "_start", RelocArch.AArch64)
+        expect(e.contains("does not match target")).to_equal(true)
+
+    it "riscv target is rejected in slice 1":
+        val e = link_err([load_fixture("start_a64.o")], "_start", RelocArch.Riscv64)
+        expect(e.contains("slice 1")).to_equal(true)
+
+describe "elf_parser - LLVM combined .strtab":
+    it "resolves symbol names when .strtab is also e_shstrndx":
+        val obj = elf_parse_object(load_fixture("start_a64.o")).unwrap()
+        var names: [text] = []
+        for s in obj.symbols:
+            names = names.push(s.name)
+        expect(names.contains("_start")).to_equal(true)
+        expect(names.contains("add_val")).to_equal(true)

@@ -1,0 +1,38 @@
+# Numeric-only evaluation for the selected N2 fast-feedback targets.
+# The caller must separately prove exact fixture identity, mandatory gate
+# completion, runtime provenance, and raw sample retention before NFR admission.
+
+pub fn n2_nearest_rank_p95_ms_v1(samples: [i64]) -> Result<i64, text>:
+    """Return the nearest-rank P95 of 20..1024 complete duration samples."""
+    if samples.len() < 20 or samples.len() > 1024:
+        return Err("n2-sample-count-invalid")
+    var sorted: [i64] = []
+    for sample in samples:
+        if sample < 0 or sample > 3600000:
+            return Err("n2-duration-invalid")
+        sorted.push(sample)
+    var index: i64 = 1
+    while index < sorted.len():
+        val value = sorted[index]
+        var cursor = index - 1
+        while cursor >= 0 and sorted[cursor] > value:
+            sorted[cursor + 1] = sorted[cursor]
+            cursor = cursor - 1
+        sorted[cursor + 1] = value
+        index = index + 1
+    val rank = (95 * sorted.len() + 99) / 100
+    Ok(sorted[rank - 1])
+
+pub fn n2_numeric_target_met_v1(kind: text, p95_ms: i64) -> Result<bool, text>:
+    """Compare one numeric P95 only; true is not a complete NFR PASS."""
+    if p95_ms < 0 or p95_ms > 3600000:
+        return Err("n2-p95-invalid")
+    if kind == "staged-hook":
+        return Ok(p95_ms <= 5000)
+    if kind == "pre-push-one-ref":
+        return Ok(p95_ms < 10000)
+    if kind == "warm-preflight":
+        return Ok(p95_ms < 60000)
+    Err("n2-kind-invalid")
+
+export n2_nearest_rank_p95_ms_v1, n2_numeric_target_met_v1

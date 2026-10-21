@@ -1,0 +1,68 @@
+use app.build.scheduler.trusted_ssh.{TrustedSshNodeV1}
+use app.build.scheduler.trusted_sftp.{TrustedSftpConfigV1,
+    transfer_build_inputs_sftp_v1}
+use app.io.mod.{dir_create_all, file_atomic_write, file_hash_sha256}
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
+use compiler.common.build_contract.{BuildInputRef, SnapshotManifest,
+    ToolchainManifest, InputManifest, ActionSpec, AttemptSpec,
+    action_spec_digest_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.spec.step
+
+fn _live_sftp_action_v1(content: text) -> ActionSpec:
+    val snapshot = sha256_text("live-sftp-snapshot")
+    ActionSpec(1, "compile",
+        SnapshotManifest(1, snapshot, sha256_text("source"),
+            sha256_text("submodules")),
+        ToolchainManifest(1, sha256_text("cc"), sha256_text("behavior"),
+            sha256_text("abi"), sha256_text("runtime"),
+            sha256_text("sysroot"), "x86_64-unknown-linux-gnu"),
+        InputManifest(1, snapshot,
+            [BuildInputRef("src/main.c", sha256_text(content))],
+            [], [], [], [], [], sha256_text("context"), true, false),
+        ["cc", "-c"], "src", sha256_text("sandbox"),
+        ["main.o"], sha256_text("resources"))
+
+fn _live_sftp_config_v1(root: text, hosts: text) -> TrustedSftpConfigV1:
+    val ssh = env_get_opt("SIMPLE_SFTP_LIVE_SSH") ?? ""
+    val sftp = env_get_opt("SIMPLE_SFTP_LIVE_SFTP") ?? ""
+    val user = env_get_opt("SIMPLE_SFTP_LIVE_USER") ?? ""
+    val port = (env_get_opt("SIMPLE_SFTP_LIVE_PORT") ?? "").to_i64() ?? -1
+    val key = root + "/client"
+    val hosts_digest = if hosts.ends_with("/wrong_hosts"):
+        env_get_opt("SIMPLE_SFTP_LIVE_WRONG_HOSTS_SHA") ?? ""
+    else:
+        env_get_opt("SIMPLE_SFTP_LIVE_HOSTS_SHA") ?? ""
+    TrustedSftpConfigV1(
+        TrustedSshNodeV1("node-1", "127.0.0.1", user, port,
+            ssh, env_get_opt("SIMPLE_SFTP_LIVE_SSH_SHA") ?? "",
+            hosts, hosts_digest,
+            key, env_get_opt("SIMPLE_SFTP_LIVE_KEY_SHA") ?? ""),
+        sftp, env_get_opt("SIMPLE_SFTP_LIVE_SFTP_SHA") ?? "", root + "/inbox")
+
+describe "live pinned SFTP input transfer":
+    it "copies exact bytes with a pinned host and refuses a changed key":
+        val root = env_get_opt("SIMPLE_SFTP_LIVE_ROOT") ?? ""
+        expect(root.starts_with("/")).to_be(true)
+        val source = root + "/source"
+        val content = "int answer(void) { return 42; }\n"
+        expect(dir_create_all(source + "/src")).to_be(true)
+        expect(file_atomic_write(source + "/src/main.c", content)).to_be(true)
+        val action = _live_sftp_action_v1(content)
+        val attempt = AttemptSpec(1, action_spec_digest_v1(action),
+            "try-1", "node-1", 0, 0, 268435456)
+        step("Transfer using the pinned server host key")
+        val good = transfer_build_inputs_sftp_v1(
+            _live_sftp_config_v1(root, root + "/known_hosts"),
+            action, attempt, source, root)
+        expect(good.transferred).to_be(true)
+        expect(file_hash_sha256(root + "/inbox/try-1/src/main.c"))
+            .to_equal(sha256_text(content))
+        step("Reject the same server under a different pinned host key")
+        val wrong_attempt = AttemptSpec(1, action_spec_digest_v1(action),
+            "try-2", "node-1", 0, 0, 268435456)
+        val wrong = transfer_build_inputs_sftp_v1(
+            _live_sftp_config_v1(root, root + "/wrong_hosts"),
+            action, wrong_attempt, source, root)
+        expect(wrong.transferred).to_be(false)
+        expect(wrong.reason).to_equal("sftp-transfer-failed")

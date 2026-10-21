@@ -1,0 +1,104 @@
+# File-backed adapter for one independently approved complete-graph plan.
+# Inputs are read once, bounded and no-follow before the parent owner opens.
+use app.io.mod.{file_read_regular_no_follow_bounded}
+use app.build.scheduler.parent_cli.{DIST_BUILD_CONFIG_MAX_BYTES_V1,
+    parse_dist_build_config_v1}
+use app.build.scheduler.parent_graph_manifest.{
+    PARENT_GRAPH_MANIFEST_MAX_BYTES_V1, parse_parent_graph_manifest_v1}
+use app.build.scheduler.parent_graph_request.{PARENT_GRAPH_MAX_WIRE_BYTES_V1}
+use app.build.scheduler.parent_graph_plan.{ParentGraphPlanV1,
+    prepare_parent_graph_plan_v1}
+use app.build.scheduler.parent_graph_runner.{run_parent_graph_v1}
+use app.build.scheduler.worker_request.{BUILD_WORKER_REQUEST_MAX_BYTES_V1}
+use app.build.scheduler.planner.{scheduler_action_digest_valid_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+struct ParentGraphPlanLoadV1:
+    valid: bool
+    reason: text
+    plan: ParentGraphPlanV1?
+    manifest_wire: text
+    request_wires: [text]
+
+fn _graph_plan_load_reject_v1(reason: text) -> ParentGraphPlanLoadV1:
+    ParentGraphPlanLoadV1(false, reason, nil, "", [])
+
+fn load_parent_graph_plan_v1(approved_plan_digest: text,
+        manifest_path: text, manifest_digest: text,
+        config_paths: [text]) -> ParentGraphPlanLoadV1:
+    """Preflight exact protected files against a separately approved digest."""
+    if not scheduler_action_digest_valid_v1(approved_plan_digest) or
+       not scheduler_action_digest_valid_v1(manifest_digest) or
+       config_paths.len() == 0 or config_paths.len() > 16:
+        return _graph_plan_load_reject_v1("graph-plan-arguments-invalid")
+    var config_wires: [text] = []
+    var graph_path = ""
+    for path in config_paths:
+        val read = file_read_regular_no_follow_bounded(path,
+            DIST_BUILD_CONFIG_MAX_BYTES_V1)
+        if read.is_err():
+            return _graph_plan_load_reject_v1("graph-config-unreadable")
+        val wire = read.unwrap()
+        val parsed = parse_dist_build_config_v1(wire)
+        if parsed == nil or parsed.unwrap().graph_path == "":
+            return _graph_plan_load_reject_v1("graph-config-invalid")
+        if graph_path != "" and graph_path != parsed.unwrap().graph_path:
+            return _graph_plan_load_reject_v1("graph-config-path-mismatch")
+        graph_path = parsed.unwrap().graph_path
+        config_wires.push(wire)
+    if graph_path != manifest_path:
+        return _graph_plan_load_reject_v1("graph-manifest-path-mismatch")
+    val manifest_read = file_read_regular_no_follow_bounded(manifest_path,
+        PARENT_GRAPH_MANIFEST_MAX_BYTES_V1)
+    if manifest_read.is_err() or
+       sha256_text(manifest_read.unwrap()) != manifest_digest:
+        return _graph_plan_load_reject_v1("graph-manifest-mismatch")
+    val manifest_wire = manifest_read.unwrap()
+    val manifest = parse_parent_graph_manifest_v1(manifest_wire)
+    if not manifest.valid:
+        return _graph_plan_load_reject_v1("graph-manifest-invalid")
+    var request_wires: [text] = []
+    var total_bytes: i64 = 0
+    for entry in manifest.entries:
+        val read = file_read_regular_no_follow_bounded(entry.path,
+            BUILD_WORKER_REQUEST_MAX_BYTES_V1)
+        if read.is_err() or sha256_text(read.unwrap()) != entry.digest:
+            return _graph_plan_load_reject_v1("graph-request-mismatch")
+        val wire = read.unwrap()
+        total_bytes = total_bytes + wire.len()
+        if total_bytes > PARENT_GRAPH_MAX_WIRE_BYTES_V1:
+            return _graph_plan_load_reject_v1("graph-request-budget-exceeded")
+        request_wires.push(wire)
+    val plan = ParentGraphPlanV1(manifest_digest, config_wires,
+        approved_plan_digest)
+    val prepared = prepare_parent_graph_plan_v1(plan, manifest_wire,
+        request_wires)
+    if not prepared.valid:
+        return _graph_plan_load_reject_v1(prepared.reason)
+    ParentGraphPlanLoadV1(true, "", plan, manifest_wire, request_wires)
+
+fn run_parent_graph_plan_v1(approved_plan_digest: text,
+        manifest_path: text, manifest_digest: text,
+        config_paths: [text]) -> i64:
+    val loaded = load_parent_graph_plan_v1(approved_plan_digest,
+        manifest_path, manifest_digest, config_paths)
+    if not loaded.valid or loaded.plan == nil:
+        val reason = loaded.reason.replace("\n", " ").replace("\r", " ")
+        print("parent-graph: BLOCKED reason={reason}")
+        return 1
+    val prepared = prepare_parent_graph_plan_v1(loaded.plan.unwrap(),
+        loaded.manifest_wire, loaded.request_wires)
+    if not prepared.valid or prepared.graph == nil:
+        print("parent-graph: BLOCKED reason=preflight-invalid")
+        return 1
+    val result = run_parent_graph_v1(prepared.graph.unwrap(),
+        prepared.workers, 0)
+    if result.complete:
+        print("parent-graph: COMPLETED accepted={result.accepted_count} attempt={result.last_attempt_id}")
+        return 0
+    val reason = result.reason.replace("\n", " ").replace("\r", " ")
+    print("parent-graph: INCOMPLETE reason={reason} accepted={result.accepted_count} attempt={result.last_attempt_id} reconciliation={result.reconciliation_required}")
+    1
+
+export ParentGraphPlanLoadV1, load_parent_graph_plan_v1
+export run_parent_graph_plan_v1

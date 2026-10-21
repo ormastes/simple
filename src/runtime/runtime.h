@@ -447,7 +447,9 @@ int64_t  rt_gpu_provider_submit_raw(int64_t backend_bit, int64_t session,
 int64_t  rt_gpu_provider_wait_raw(int64_t backend_bit, int64_t session,
         int64_t completion, int64_t timeout_ns, int64_t receipt_ptr);
 int64_t  rt_gpu_provider_readback_raw(int64_t backend_bit, int64_t session,
-        int64_t resource, int64_t bytes_ptr);
+    int64_t resource, int64_t bytes_ptr);
+int64_t  rt_gpu_provider_device_identity_raw(int64_t backend_bit,
+    int64_t session, int64_t completion, int64_t identity_ptr);
 int64_t  rt_gpu_provider_completion_release(int64_t backend_bit, int64_t session,
         int64_t completion);
 int64_t  rt_gpu_provider_quarantine_drain(int64_t backend_bit);
@@ -781,6 +783,7 @@ int64_t  rt_io_tcp_connect_timeout(int64_t addr, int64_t timeout_ms);
 int64_t  rt_io_tcp_read(int64_t fd, int64_t size);
 int64_t  rt_io_tcp_read_line(int64_t fd);
 int64_t  rt_io_tcp_write(int64_t fd, int64_t data);
+int64_t  rt_io_socket_send_nosigpipe(int64_t fd, int64_t data);
 int64_t  rt_io_tcp_write_text(int64_t fd, int64_t text);
 int64_t  rt_io_tcp_write_bytes(int64_t fd, int64_t data);
 bool     rt_io_tcp_flush(int64_t fd);
@@ -1764,6 +1767,7 @@ bool        rt_driver_supports_zero_copy(int64_t handle);
 /* ===== QMP Unix-Socket Primitives ===== */
 
 int64_t     rt_unix_socket_connect(const char* path);
+int64_t     rt_unix_socket_connect_timeout(const char* path, int64_t timeout_ms);
 int64_t     rt_fd_write(int64_t fd, const char* data, int64_t len);
 const char* rt_fd_read_until(int64_t fd, uint8_t stop_byte, int64_t max);
 bool        rt_fd_close(int64_t fd);

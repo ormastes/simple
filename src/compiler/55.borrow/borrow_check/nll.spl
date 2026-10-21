@@ -14,7 +14,7 @@
 use compiler.borrow.borrow_check.lifetime.*
 use compiler.borrow.borrow_check.nll_short_calls.*
 use compiler.borrow.borrow_check.borrow_graph.*
-use compiler.borrow.borrow_check.borrow_graph.{LoanAlias, Borrow, BorrowSet, Place, PlaceBase, PlaceElem, BorrowKind}
+use compiler.borrow.borrow_check.borrow_graph.{LoanAlias, Borrow, BorrowSet, Place, PlaceBase, PlaceElem, BorrowKind, loan_alias_place_cross}
 use compiler.borrow.borrow_check.ownership_flow.{OwnershipFlow, OwnershipEvent, OwnershipFlowError, ownership_write_covers}
 
 # ============================================================================
@@ -614,12 +614,23 @@ class NLLChecker:
 
     fn live_aliases(aliases: [LoanAlias], live: [i64]) -> [LoanAlias]:
         var kept: [LoanAlias] = []
-        for alias in aliases:
+        # Indexed reads, not for-in: the for-in iterator misreads the
+        # struct-with-default element layout in seed-built native code
+        # (nil base payload, SIGSEGV at PlaceBase tag read). Indexed access
+        # matches the layout workaround style used across this module.
+        var index = 0
+        while index < aliases.len():
+            val alias: LoanAlias = aliases[index]
             var keep = true
-            match loan_alias_place(alias).base:
+            # Cross-module boundary: same-module field reads mis-infer the
+            # LoanAlias layout in seed-built native code (SIGSEGV at the
+            # PlaceBase tag read); see loan_alias_place_cross in borrow_graph.
+            val alias_place = loan_alias_place_cross(alias)
+            match alias_place.base:
                 case PlaceBase.Local(local): keep = live.contains(local)
                 case _: ()
             if keep: kept = kept.push(alias)
+            index = index + 1
         kept
 
     me install_loans(point: i64, aliases: [LoanAlias]):

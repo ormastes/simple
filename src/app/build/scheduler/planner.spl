@@ -1,0 +1,163 @@
+# Parent-owned, bounded DAG readiness planning. No worker mutates this graph.
+use compiler.common.build_contract.{ActionSpec, action_spec_digest_v1}
+
+struct SchedulerActionV1:
+    action_digest: text
+    spec: ActionSpec
+    dependencies: [text]
+    priority: i64
+    queued_tick: i64
+    cpu_tokens: i64
+    memory_bytes: i64
+    fd_tokens: i64
+
+struct SchedulerBlockedV1:
+    action_digest: text
+    reason: text
+
+struct ReadyActionPlanV1:
+    ready: [text]
+    blocked: [SchedulerBlockedV1]
+    error: text
+
+fn _scheduler_action_index_v1(actions: [SchedulerActionV1], digest: text) -> i64:
+    var i: i64 = 0
+    while i < actions.len():
+        if actions[i].action_digest == digest:
+            return i
+        i = i + 1
+    -1
+
+fn scheduler_action_digest_valid_v1(digest: text) -> bool:
+    if digest.len() != 64:
+        return false
+    var i: i64 = 0
+    while i < digest.len():
+        val c = digest[i:i + 1]
+        if not ((c >= "0" and c <= "9") or (c >= "a" and c <= "f")):
+            return false
+        i = i + 1
+    true
+
+fn _scheduler_effective_priority_v1(action: SchedulerActionV1, now_tick: i64) -> i64:
+    # Bounded inputs prevent overflow. One priority point accrues per tick.
+    val age = if now_tick > action.queued_tick: now_tick - action.queued_tick else: 0
+    action.priority + age
+
+fn _scheduler_order_before_v1(left: SchedulerActionV1, right: SchedulerActionV1, now_tick: i64) -> bool:
+    val lp = _scheduler_effective_priority_v1(left, now_tick)
+    val rp = _scheduler_effective_priority_v1(right, now_tick)
+    lp > rp or (lp == rp and left.action_digest < right.action_digest)
+
+fn plan_ready_actions_v1(actions: [SchedulerActionV1], accepted_actions: [text],
+                         active_actions: [text], now_tick: i64) -> ReadyActionPlanV1:
+    """Validate a bounded DAG, then classify every action with stable ready order.
+
+    The parent supplies accepted and active action snapshots. A dependency is
+    satisfied only by accepted publication, never by a running attempt.
+    """
+    var ready: [text] = []
+    var blocked: [SchedulerBlockedV1] = []
+    if actions.len() > 256 or now_tick < 0 or now_tick > 1000000000:
+        return ReadyActionPlanV1(ready, blocked, "scheduler-error: graph-bound")
+    var edge_count: i64 = 0
+    var i: i64 = 0
+    while i < actions.len():
+        val action = actions[i]
+        if not scheduler_action_digest_valid_v1(action.action_digest) or
+           action_spec_digest_v1(action.spec) != action.action_digest:
+            return ReadyActionPlanV1(ready, blocked, "scheduler-error: action-identity-invalid")
+        if action.priority < 0 or action.priority > 1000000 or
+           action.queued_tick < 0 or action.queued_tick > now_tick or
+           action.cpu_tokens <= 0 or action.memory_bytes <= 0 or action.fd_tokens <= 0:
+            return ReadyActionPlanV1(ready, blocked, "scheduler-error: action-invalid")
+        var j: i64 = 0
+        while j < i:
+            if actions[j].action_digest == action.action_digest:
+                return ReadyActionPlanV1(ready, blocked, "scheduler-error: duplicate-action")
+            j = j + 1
+        edge_count = edge_count + action.dependencies.len()
+        if edge_count > 1024:
+            return ReadyActionPlanV1(ready, blocked, "scheduler-error: graph-bound")
+        var seen: [text] = []
+        for dep in action.dependencies:
+            if not scheduler_action_digest_valid_v1(dep) or
+               dep == action.action_digest or seen.contains(dep):
+                return ReadyActionPlanV1(ready, blocked, "scheduler-error: dependency-invalid")
+            seen.push(dep)
+        if action.spec.inputs.declared_dependency_actions.len() != action.dependencies.len():
+            return ReadyActionPlanV1(ready, blocked, "scheduler-error: dependency-identity-mismatch")
+        for dep in action.dependencies:
+            if not action.spec.inputs.declared_dependency_actions.contains(dep):
+                return ReadyActionPlanV1(ready, blocked, "scheduler-error: dependency-identity-mismatch")
+        i = i + 1
+    for action in actions:
+        for dep in action.dependencies:
+            if _scheduler_action_index_v1(actions, dep) < 0:
+                return ReadyActionPlanV1(ready, blocked, "scheduler-error: dependency-unknown")
+    var accepted_seen: [text] = []
+    for digest in accepted_actions:
+        if _scheduler_action_index_v1(actions, digest) < 0:
+            return ReadyActionPlanV1(ready, blocked, "scheduler-error: accepted-unknown")
+        if accepted_seen.contains(digest):
+            return ReadyActionPlanV1(ready, blocked, "scheduler-error: accepted-duplicate")
+        accepted_seen.push(digest)
+    var active_seen: [text] = []
+    for digest in active_actions:
+        if _scheduler_action_index_v1(actions, digest) < 0 or
+           accepted_actions.contains(digest) or active_seen.contains(digest):
+            return ReadyActionPlanV1(ready, blocked, "scheduler-error: active-invalid")
+        active_seen.push(digest)
+    for action in actions:
+        if accepted_actions.contains(action.action_digest) or
+           active_actions.contains(action.action_digest):
+            for dep in action.dependencies:
+                if not accepted_actions.contains(dep):
+                    return ReadyActionPlanV1(ready, blocked,
+                        "scheduler-error: admitted-dependency-incomplete")
+
+    # Kahn traversal detects cycles independently of current acceptance state.
+    var visited: [text] = []
+    while visited.len() < actions.len():
+        var next = ""
+        for action in actions:
+            if not visited.contains(action.action_digest):
+                var deps_done = true
+                for dep in action.dependencies:
+                    if not visited.contains(dep):
+                        deps_done = false
+                if deps_done and (next == "" or action.action_digest < next):
+                    next = action.action_digest
+        if next == "":
+            return ReadyActionPlanV1([], [], "scheduler-error: dependency-cycle")
+        visited.push(next)
+
+    for action in actions:
+        var reason = ""
+        if accepted_actions.contains(action.action_digest):
+            reason = "accepted"
+        elif active_actions.contains(action.action_digest):
+            reason = "active"
+        else:
+            for dep in action.dependencies:
+                if not accepted_actions.contains(dep):
+                    reason = "dependencies"
+        if reason != "":
+            blocked.push(SchedulerBlockedV1(action.action_digest, reason))
+        else:
+            # Insertion sort by priority + bounded aging, then digest.
+            var ordered: [text] = []
+            var inserted = false
+            for digest in ready:
+                val old = actions[_scheduler_action_index_v1(actions, digest)]
+                if not inserted and _scheduler_order_before_v1(action, old, now_tick):
+                    ordered.push(action.action_digest)
+                    inserted = true
+                ordered.push(digest)
+            if not inserted:
+                ordered.push(action.action_digest)
+            ready = ordered
+    ReadyActionPlanV1(ready, blocked, "")
+
+export SchedulerActionV1, SchedulerBlockedV1, ReadyActionPlanV1
+export plan_ready_actions_v1, scheduler_action_digest_valid_v1

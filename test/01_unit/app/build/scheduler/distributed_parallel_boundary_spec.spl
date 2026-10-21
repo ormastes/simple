@@ -1,0 +1,175 @@
+use std.spec.*
+use app.build.scheduler.distributed_parallel_attempt.{
+    run_parallel_remote_build_attempt_v1,
+    prepare_parallel_remote_build_attempt_v1,
+    transport_parallel_remote_build_attempt_v1,
+    parallel_prepared_envelope_valid_v1}
+use app.build.scheduler.planner.{SchedulerActionV1}
+use app.build.scheduler.distributed_attempt.{DistributedBuildNodeV1,
+    DistributedBuildAttemptV1, PreparedDistributedBuildAttemptV1}
+use app.build.scheduler.trusted_ssh.{TrustedSshNodeV1}
+use app.build.scheduler.trusted_sftp.{TrustedSftpConfigV1}
+use app.build.scheduler.trusted_worker_invocation.{TrustedWorkerCommandV1}
+use app.build.scheduler.ledger.{SchedulerCapacityV1}
+use app.build.scheduler.prepared_upload.{PreparedBuildUploadV1}
+use app.build.scheduler.trusted_request_upload.{BuildRequestUploadPlanV1}
+use app.build.scheduler.trusted_sftp.{BuildSftpPlanV1}
+use app.build.scheduler.worker_request.{BuildWorkerRequestV1,
+    encode_build_worker_request_v1}
+use app.build.scheduler.dispatch_wire.{encode_build_dispatch_v1}
+use compiler.common.build_contract.{BuildInputRef, SnapshotManifest,
+    ToolchainManifest, InputManifest, ActionSpec, AttemptSpec, AcceptedResult,
+    NodeCapabilities,
+    action_spec_digest_v1}
+use std.common.crypto.sha256.{sha256_text}
+use app.io.mod.{cwd, getpid, time_now_unix_micros,
+    dir_create_all, file_atomic_write, file_exists, dir_remove_all}
+
+fn _parallel_boundary_action_v1() -> ActionSpec:
+    val snapshot = sha256_text("parallel-boundary")
+    ActionSpec(1, "compile", SnapshotManifest(1, snapshot,
+        sha256_text("tree"), sha256_text("submodules")),
+        ToolchainManifest(1, sha256_text("compiler"),
+            sha256_text("behavior"), sha256_text("abi"),
+            sha256_text("runtime"), sha256_text("sysroot"),
+            "x86_64-unknown-linux-gnu"),
+        InputManifest(1, snapshot,
+            [BuildInputRef("src/main.c", sha256_text("source"))],
+            [], [], [], [], [], sha256_text("context"), true, false),
+        ["/usr/bin/clang", "-c"], "simple-build/outputs",
+        sha256_text("sandbox"), ["main.o"], sha256_text("resources"))
+
+fn _parallel_boundary_node_v1() -> DistributedBuildNodeV1:
+    val ssh = TrustedSshNodeV1("worker-1", "build.example", "builder", 22,
+        "/usr/bin/ssh", sha256_text("ssh"), "/etc/known_hosts",
+        sha256_text("hosts"), "/etc/key", sha256_text("key"))
+    DistributedBuildNodeV1(
+        TrustedWorkerCommandV1(ssh,
+            "/usr/local/bin/simple-build-worker", 30000),
+        TrustedSftpConfigV1(ssh, "/usr/bin/sftp",
+            sha256_text("sftp"), "/srv/simple-build-inbox"),
+        "/src", "/state", "/cas")
+
+fn _parallel_boundary_prepared_v1(node: DistributedBuildNodeV1) ->
+        PreparedDistributedBuildAttemptV1:
+    val action = _parallel_boundary_action_v1()
+    val digest = action_spec_digest_v1(action)
+    val attempt = AttemptSpec(1, digest, "try-1", "worker-1", 0, 1, 4096)
+    val request = BuildWorkerRequestV1(action, attempt, 1, 1, 8)
+    val wire = encode_build_worker_request_v1(request)
+    val request_digest = sha256_text(wire)
+    val plan = BuildRequestUploadPlanV1(true, "", wire, request_digest,
+        "ready", "/remote/try-1",
+        BuildSftpPlanV1(true, "", "batch", "/remote/try-1", 0, 0))
+    val prepared = PreparedBuildUploadV1(true, "", "/not-created", plan,
+        "", "", "")
+    val dispatch = encode_build_dispatch_v1(action, attempt, 1, 1, 8)
+    PreparedDistributedBuildAttemptV1(true,
+        DistributedBuildAttemptV1(false, false, false, false, "prepared",
+            AcceptedResult(1, "", "", "", "")),
+        prepared, request, dispatch, request_digest, node)
+
+describe "parallel attempt trust boundary":
+    it "rejects an action identity substituted before any remote query":
+        val spec = _parallel_boundary_action_v1()
+        val wrong = sha256_text("different-action")
+        expect(wrong == action_spec_digest_v1(spec)).to_be(false)
+        val action = SchedulerActionV1(wrong, spec, [], 1, 0, 1, 4096, 8)
+        val result = run_parallel_remote_build_attempt_v1(
+            "/nonexistent/simple-parallel-owner", [action], wrong,
+            "try-1", 0, _parallel_boundary_node_v1(),
+            NodeCapabilities(1, "worker-1", [], [], "trusted", 8192),
+            "trusted", SchedulerCapacityV1(1, 8192, 0, 8), 0)
+        expect(result.reason).to_equal("action-or-retry-invalid")
+        expect(result.reconciliation_required).to_be(false)
+
+    it "rejects invalid preparation before opening owner or remote transport":
+        val spec = _parallel_boundary_action_v1()
+        val wrong = sha256_text("different-action")
+        val action = SchedulerActionV1(wrong, spec, [], 1, 0, 1, 4096, 8)
+        val prepared = prepare_parallel_remote_build_attempt_v1(
+            "/nonexistent/simple-parallel-owner", [action], wrong,
+            "try-1", 0, _parallel_boundary_node_v1(),
+            NodeCapabilities(1, "worker-1", [], [], "trusted", 8192),
+            "trusted", SchedulerCapacityV1(1, 8192, 0, 8), 0)
+        expect(prepared.ready).to_be(false)
+        expect(prepared.result.reason).to_equal("action-or-retry-invalid")
+
+    it "rejects an absent prepared snapshot without starting transport":
+        val blocked = DistributedBuildAttemptV1(false, false, false,
+            false, "unprepared", AcceptedResult(1, "", "", "", ""))
+        val absent = PreparedDistributedBuildAttemptV1(false, blocked,
+            nil, nil, "", "", nil)
+        val transport = transport_parallel_remote_build_attempt_v1(absent,
+            _parallel_boundary_node_v1())
+        expect(transport.ready).to_be(false)
+        expect(transport.result.reason).to_equal("prepared-attempt-invalid")
+        expect(transport.result.reconciliation_required).to_be(true)
+
+    it "rejects an SSH or SFTP endpoint substituted after preparation":
+        val approved = _parallel_boundary_node_v1()
+        val snapshot = _parallel_boundary_prepared_v1(approved)
+        expect(parallel_prepared_envelope_valid_v1(snapshot, approved)).to_be(true)
+        var changed_ssh = approved
+        var command = changed_ssh.ssh
+        var endpoint = command.node
+        endpoint.host = "other.example"
+        command.node = endpoint
+        changed_ssh.ssh = command
+        expect(parallel_prepared_envelope_valid_v1(snapshot,
+            changed_ssh)).to_be(false)
+        var changed_sftp = approved
+        var sftp = changed_sftp.sftp
+        sftp.remote_inbox_root = "/other-inbox"
+        changed_sftp.sftp = sftp
+        expect(parallel_prepared_envelope_valid_v1(snapshot,
+            changed_sftp)).to_be(false)
+
+    it "rejects tampered request, upload digest and dispatch envelope":
+        val approved = _parallel_boundary_node_v1()
+        val base = _parallel_boundary_prepared_v1(approved)
+        expect(parallel_prepared_envelope_valid_v1(base, approved)).to_be(true)
+        var changed_digest = base
+        changed_digest.request_digest = sha256_text("wrong-request")
+        expect(parallel_prepared_envelope_valid_v1(changed_digest,
+            approved)).to_be(false)
+        var changed_dispatch = base
+        changed_dispatch.dispatch_wire = "wrong-dispatch"
+        expect(parallel_prepared_envelope_valid_v1(changed_dispatch,
+            approved)).to_be(false)
+        var changed_request = base
+        var request = changed_request.request.unwrap()
+        var attempt = request.attempt
+        attempt.attempt_id = "try-other"
+        request.attempt = attempt
+        changed_request.request = request
+        expect(parallel_prepared_envelope_valid_v1(changed_request,
+            approved)).to_be(false)
+        var changed_upload = base
+        var prepared = changed_upload.prepared.unwrap()
+        var plan = prepared.plan
+        plan.request_digest = sha256_text("wrong-upload")
+        prepared.plan = plan
+        changed_upload.prepared = prepared
+        expect(parallel_prepared_envelope_valid_v1(changed_upload,
+            approved)).to_be(false)
+
+    it "leaves a substituted prepared root untouched on envelope rejection":
+        val root = cwd() + "/build/test/parallel-untrusted-root-" +
+            getpid().to_text() + "-" + time_now_unix_micros().to_text()
+        expect(dir_create_all(root)).to_be(true)
+        val marker = root + "/keep.marker"
+        expect(file_atomic_write(marker, "keep")).to_be(true)
+        val node = _parallel_boundary_node_v1()
+        var snapshot = _parallel_boundary_prepared_v1(node)
+        var prepared = snapshot.prepared.unwrap()
+        prepared.root = root
+        snapshot.prepared = prepared
+        snapshot.dispatch_wire = "substituted-dispatch"
+        val transport = transport_parallel_remote_build_attempt_v1(snapshot,
+            node)
+        expect(transport.ready).to_be(false)
+        expect(transport.result.reason).to_equal("prepared-envelope-invalid")
+        expect(transport.result.reconciliation_required).to_be(true)
+        expect(file_exists(marker)).to_be(true)
+        expect(dir_remove_all(root)).to_be(true)

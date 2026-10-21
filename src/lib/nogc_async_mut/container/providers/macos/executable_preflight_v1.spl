@@ -1,0 +1,70 @@
+# Native Mac executable format preflight. Pure Simple; no launch authority.
+# Constants follow the macOS SDK mach-o/loader.h and mach/machine.h.
+# This intentionally accepts only thin, little-endian 64-bit generic-CPU
+# MH_EXECUTE files with one explicit macOS platform command. Universal files,
+# CPU feature subtypes, translation and legacy platform inference need separate
+# admission. Success proves the checked format subset only: it does NOT prove
+# code signature, executable pinning, minimum OS compatibility or sandboxing.
+
+use std.binary_io.{BinaryReader, ByteOrder}
+use std.common.contracts.container.runtime_v1.{RuntimeValidationV1, runtime_validation}
+
+fn _mac_u32(bytes: [u8], offset: i64) -> i64:
+    var reader = BinaryReader(buffer: bytes, position: offset as usize)
+    val value = reader.read_u32(ByteOrder.LittleEndian) ?? 0
+    value.to_i64()
+
+# `architecture` is the execution architecture selected by the host owner,
+# never inferred from the submitted image. The owner must retain the executable
+# pin and independently validate signatures and sandbox policy before launch.
+# Example: an ELF image returns accepted=false even on an arm64 Mac.
+pub fn macos_executable_preflight_v1(bytes: [u8], architecture: text) -> RuntimeValidationV1:
+    if architecture != "arm64" and architecture != "x86_64":
+        return runtime_validation(false, "macos-executable-unsupported-architecture")
+    if bytes.len() < 32:
+        return runtime_validation(false, "macos-executable-truncated-header")
+    if _mac_u32(bytes, 0) != 0xfeedfacf:
+        return runtime_validation(false, "macos-executable-thin-little-endian-64-required")
+    val cpu = if architecture == "arm64" then 0x0100000c else 0x01000007
+    val subtype = if architecture == "arm64" then 0 else 3
+    if _mac_u32(bytes, 4) != cpu or _mac_u32(bytes, 8) != subtype:
+        return runtime_validation(false, "macos-executable-cpu-mismatch")
+    if _mac_u32(bytes, 12) != 2:
+        return runtime_validation(false, "macos-executable-mh-execute-required")
+    val count = _mac_u32(bytes, 16)
+    val command_bytes = _mac_u32(bytes, 20)
+    # Bound work before walking attacker-controlled load-command counts.
+    if count <= 0 or count > 4096 or command_bytes > 1048576 or
+            command_bytes > bytes.len() - 32 or count > command_bytes / 8:
+        return runtime_validation(false, "macos-executable-invalid-command-bounds")
+    val end = 32 + command_bytes
+    var offset = 32
+    var platform_seen = false
+    for index in 0..count:
+        if end - offset < 8:
+            return runtime_validation(false, "macos-executable-truncated-command")
+        val kind = _mac_u32(bytes, offset)
+        val size = _mac_u32(bytes, offset + 4)
+        if size < 8 or size % 8 != 0 or size > end - offset:
+            return runtime_validation(false, "macos-executable-invalid-command-size")
+        if kind == 0x32:
+            if platform_seen or size < 24:
+                return runtime_validation(false, "macos-executable-invalid-platform-command")
+            if _mac_u32(bytes, offset + 8) != 1:
+                return runtime_validation(false, "macos-executable-macos-platform-required")
+            val tools_count = _mac_u32(bytes, offset + 20)
+            if tools_count != (size - 24) / 8:
+                return runtime_validation(false, "macos-executable-invalid-build-tools")
+            platform_seen = true
+        # Reject mixed/legacy minimum-version declarations rather than infer
+        # native macOS from architecture alone (iOS arm64 uses the same CPU).
+        if kind == 0x24 or kind == 0x25 or kind == 0x2f or kind == 0x30:
+            return runtime_validation(false, "macos-executable-legacy-platform-unsupported")
+        offset = offset + size
+    if offset != end:
+        return runtime_validation(false, "macos-executable-command-size-mismatch")
+    if not platform_seen:
+        return runtime_validation(false, "macos-executable-platform-missing")
+    runtime_validation(true, "macos-executable-format-only-validated")
+
+export macos_executable_preflight_v1

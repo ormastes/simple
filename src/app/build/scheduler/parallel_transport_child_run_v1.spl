@@ -1,0 +1,265 @@
+# Source-only transport child; production parent dispatch remains disabled.
+# Handoff byte limits and flat result inventory are enforced here. The parent
+# still needs hard deadline enforcement and an all-writer cessation proof.
+# The parent alone interprets the observation and commits a candidate;
+# this module has no owner journal or CAS authority.
+use app.build.scheduler.parallel_transport_child_input_v1.{
+    validate_parallel_transport_child_input_v1}
+use app.build.scheduler.parallel_transport_wire_v1.{
+    ParallelTransportFileV1, ParallelTransportHandoffV1,
+    ParallelTransportObservationV1, encode_parallel_transport_observation_v1,
+    parallel_transport_handoff_digest_v1}
+use app.build.scheduler.parallel_retained_result_plan_v1.{
+    plan_parallel_retained_result_v1}
+use app.build.scheduler.parallel_flat_result_inventory_v1.{
+    check_parallel_flat_result_inventory_v1}
+use app.build.scheduler.prepared_upload.{transfer_prepared_build_request_v1}
+use app.build.scheduler.trusted_worker_invocation.{
+    invoke_build_worker_ssh_v1, status_build_worker_ssh_v1}
+use app.build.scheduler.trusted_result_download.{
+    BuildResultTransferLimitsV1, fetch_build_result_sftp_limited_v1,
+    fetch_build_failure_sftp_limited_v1}
+use app.build.scheduler.worker_request.{BuildWorkerRequestV1}
+use app.build.scheduler.dispatch_wire.{encode_build_dispatch_v1}
+use app.build.scheduler.worker_output.{BUILD_OUTPUT_MANIFEST_MAX_BYTES_V1,
+    BUILD_OUTPUT_MAX_DIAGNOSTIC_BYTES_V1}
+use app.build.scheduler.worker_failure_proof.{BUILD_WORKER_FAILURE_PROOF_MAX_V1}
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use std.common.io.read_only_file_view.{read_only_file_view_open_v1,
+    read_only_file_view_read_v1, read_only_file_view_close_v1}
+use std.common.io.file_read_policy.{FileReadPolicyV1}
+use std.async.cancellation.{CancellationToken}
+use std.common.crypto.sha256.{sha256_stream_v1_new,
+    sha256_stream_v1_update, sha256_stream_v1_finish_hex}
+use std.nogc_sync_mut.io.file_ops.{file_publish_noreplace}
+use std.io_runtime.{time_now_monotonic_ms}
+use app.io.mod.{dir_remove, file_delete, file_exists,
+    file_is_regular_no_follow, file_write_bytes,
+    file_fsync, directory_fsync, secure_temp_dir}
+
+val CHILD_RESULT_CHUNK_BYTES_V1: u64 = 1048576u64
+val CHILD_RESULT_MAX_BINARY_BYTES_V1: i64 = 268435456
+
+struct ParallelTransportChildRunV1:
+    fetched: bool
+    status: text
+    reason: text
+    observation: ParallelTransportObservationV1?
+
+fn _child_run_incomplete_v1(reason: text) -> ParallelTransportChildRunV1:
+    ParallelTransportChildRunV1(false, "INCOMPLETE", reason, nil)
+
+fn parallel_transport_deadline_open_v1(deadline_tick: i64,
+        now_tick: i64) -> bool:
+    """Handoff deadline and current time share the host monotonic-ms clock."""
+    now_tick >= 0 and deadline_tick > now_tick and
+    deadline_tick <= 1000000000000000
+
+fn _child_run_deadline_open_v1(handoff: ParallelTransportHandoffV1) -> bool:
+    parallel_transport_deadline_open_v1(handoff.deadline_tick,
+        time_now_monotonic_ms())
+
+fn _child_run_limit_v1(path: text) -> i64:
+    if path == "outputs/result.wire": return 4096
+    if path == "outputs/manifest.wire":
+        return BUILD_OUTPUT_MANIFEST_MAX_BYTES_V1
+    if path == "outputs/diagnostics":
+        return BUILD_OUTPUT_MAX_DIAGNOSTIC_BYTES_V1
+    if path == "outputs/failure-proof.wire":
+        return BUILD_WORKER_FAILURE_PROOF_MAX_V1
+    CHILD_RESULT_MAX_BINARY_BYTES_V1
+
+fn _child_run_file_v1(root: text, relative_path: text,
+        snapshot_digest: text) -> ParallelTransportFileV1?:
+    val opened = read_only_file_view_open_v1(root, relative_path,
+        snapshot_digest, FileReadPolicyV1.buffered)
+    if opened.is_err(): return nil
+    var view = opened.unwrap()
+    val size = view.identity.size
+    if size > _child_run_limit_v1(relative_path).to_u64():
+        val _ = read_only_file_view_close_v1(view)
+        return nil
+    val stream = sha256_stream_v1_new()
+    val cancellation = CancellationToken.new()
+    var offset: u64 = 0u64
+    var good = true
+    while offset < size:
+        val remaining = size - offset
+        val length = if remaining > CHILD_RESULT_CHUNK_BYTES_V1:
+            CHILD_RESULT_CHUNK_BYTES_V1 else: remaining
+        val read = read_only_file_view_read_v1(&view, offset, length,
+            cancellation)
+        if read.is_err():
+            good = false
+            break
+        val bytes = read.unwrap().bytes
+        if bytes.len().to_u64() != length or
+           not sha256_stream_v1_update(stream, bytes):
+            good = false
+            break
+        offset = offset + length
+    val digest = if good: sha256_stream_v1_finish_hex(stream) else: nil
+    val closed = read_only_file_view_close_v1(view)
+    if not good or closed.is_err() or digest == nil: return nil
+    Some(ParallelTransportFileV1(relative_path, size.to_i64(),
+        digest.unwrap()))
+
+fn _child_run_inventory_v1(handoff: ParallelTransportHandoffV1,
+        request: BuildWorkerRequestV1, result_wire: text,
+        success: bool) -> ParallelTransportObservationV1?:
+    var required: [text] = ["outputs/result.wire",
+        "outputs/manifest.wire", "outputs/diagnostics"]
+    if success:
+        for name in request.action.output_paths:
+            required.push("outputs/" + name)
+    else:
+        required.push("outputs/failure-proof.wire")
+    required = canonical_identity_sort_texts(required)
+    if required.len() > handoff.max_output_files: return nil
+    var expected_names: [text] = []
+    for path in required:
+        expected_names.push(path["outputs/".len():])
+    val inventory = check_parallel_flat_result_inventory_v1(
+        handoff.result_root + "/outputs", expected_names)
+    if not inventory.valid: return nil
+    # This remains a child claim. The stopped-child parent verifier must hash
+    # every declared path before granting trust or retaining bytes.
+    var files: [ParallelTransportFileV1] = []
+    var total: i64 = 0
+    for path in required:
+        val file = _child_run_file_v1(handoff.result_root, path,
+            handoff.request_digest)
+        if file == nil: return nil
+        val item = file.unwrap()
+        if item.byte_count > handoff.max_output_bytes - total: return nil
+        if not file_fsync(handoff.result_root + "/" + path): return nil
+        total = total + item.byte_count
+        files.push(item)
+    val observed = ParallelTransportObservationV1(true, "",
+        parallel_transport_handoff_digest_v1(handoff), handoff.nonce,
+        handoff.request_digest, "FETCHED", result_wire, files)
+    val plan = plan_parallel_retained_result_v1(handoff, observed)
+    if not plan.valid or plan.success != success: return nil
+    if not directory_fsync(handoff.result_root + "/outputs"):
+        return nil
+    Some(observed)
+
+fn _child_run_publish_observation_v1(handoff: ParallelTransportHandoffV1,
+        observation: ParallelTransportObservationV1) -> bool:
+    val wire = encode_parallel_transport_observation_v1(observation)
+    if wire.len() == 0: return false
+    val created = secure_temp_dir(handoff.result_root, "observation-stage")
+    if created.is_err(): return false
+    val scratch = created.unwrap()
+    val staged = scratch + "/observation.wire"
+    if not file_write_bytes(staged, wire) or not file_fsync(staged):
+        return false
+    val moved = file_publish_noreplace(staged,
+        handoff.result_root + "/observation.wire")
+    if moved.is_err() or not moved.unwrap(): return false
+    if not directory_fsync(handoff.result_root): return false
+    val _ = dir_remove(scratch, false)
+    true
+
+fn _child_run_claim_root_v1(root: text) -> bool:
+    val slash = root.last_index_of("/")
+    if slash <= 0 or slash + 1 >= root.len():
+        return false
+    val parent = root[0:slash]
+    val created = secure_temp_dir(parent, "child-result-root")
+    if created.is_err(): return false
+    val private_root = created.unwrap()
+    val published = file_publish_noreplace(private_root, root)
+    if published.is_err() or not published.unwrap():
+        val _ = dir_remove(private_root, false)
+        return false
+    true
+
+fn run_parallel_transport_child_v1(handoff_wire: [u8],
+        expected_handoff_digest: text) -> ParallelTransportChildRunV1:
+    """Run only the child transport and publish a bounded FETCHED claim."""
+    val admitted = validate_parallel_transport_child_input_v1(handoff_wire,
+        expected_handoff_digest)
+    if not admitted.valid or admitted.handoff == nil or
+       admitted.request == nil or admitted.prepared == nil:
+        return _child_run_incomplete_v1("handoff: " + admitted.reason)
+    val handoff = admitted.handoff.unwrap()
+    val request = admitted.request.unwrap()
+    val node = handoff.approved_node.unwrap()
+    if not _child_run_deadline_open_v1(handoff):
+        return _child_run_incomplete_v1("deadline-expired")
+    # A fresh private directory is moved to the exact name without replacement.
+    if not _child_run_claim_root_v1(handoff.result_root):
+        return _child_run_incomplete_v1("result-root-unavailable")
+    val uploaded = transfer_prepared_build_request_v1(node.sftp,
+        admitted.prepared.unwrap())
+    if not uploaded.ready or
+       uploaded.request_digest != handoff.request_digest:
+        return _child_run_incomplete_v1("upload-unconfirmed")
+    if not _child_run_deadline_open_v1(handoff):
+        return _child_run_incomplete_v1("deadline-expired")
+    val dispatch = encode_build_dispatch_v1(request.action, request.attempt,
+        request.fence, request.cpu_tokens, request.fd_tokens)
+    val reply = invoke_build_worker_ssh_v1(node.ssh, dispatch,
+        handoff.request_digest)
+    if not reply.received or reply.result == nil:
+        return _child_run_incomplete_v1("worker-unconfirmed")
+    if not _child_run_deadline_open_v1(handoff):
+        return _child_run_incomplete_v1("deadline-expired")
+    val success = reply.result.unwrap().candidate.success
+    if not success:
+        val status = status_build_worker_ssh_v1(node.ssh, dispatch,
+            handoff.request_digest)
+        if not status.received or status.result_wire != reply.result_wire:
+            return _child_run_incomplete_v1("failure-status-unconfirmed")
+        if not _child_run_deadline_open_v1(handoff):
+            return _child_run_incomplete_v1("deadline-expired")
+    val limits = BuildResultTransferLimitsV1(handoff.max_output_bytes,
+        CHILD_RESULT_MAX_BINARY_BYTES_V1, handoff.max_output_files)
+    val fetched = if success:
+        fetch_build_result_sftp_limited_v1(node.sftp, request,
+            handoff.result_root, reply.result_wire, limits)
+    else:
+        fetch_build_failure_sftp_limited_v1(node.sftp, request,
+            handoff.result_root, reply.result_wire, limits)
+    if not fetched.verified or fetched.success != success or
+       fetched.result_wire != reply.result_wire:
+        return _child_run_incomplete_v1("fetch-unverified")
+    if not _child_run_deadline_open_v1(handoff):
+        return _child_run_incomplete_v1("deadline-expired")
+    val stage = fetched.stage_root
+    val prefix = handoff.result_root + "/"
+    if not stage.starts_with(prefix) or
+       stage[prefix.len():] == "" or
+       stage[prefix.len():].contains("/") or
+       (success and fetched.output_root != stage + "/outputs") or
+       (not success and fetched.output_root != ""):
+        return _child_run_incomplete_v1("fetch-stage-invalid")
+    val outputs = stage + "/outputs"
+    if not file_is_regular_no_follow(outputs + "/result.wire") or
+       file_exists(handoff.result_root + "/outputs"):
+        return _child_run_incomplete_v1("fetch-outputs-invalid")
+    val moved = file_publish_noreplace(outputs,
+        handoff.result_root + "/outputs")
+    if moved.is_err() or not moved.unwrap():
+        return _child_run_incomplete_v1("outputs-publish-failed")
+    # The downloader creates only this scratch batch outside outputs.
+    val batch = stage + "/transfer.batch"
+    if file_is_regular_no_follow(batch):
+        val _ = file_delete(batch)
+    val _ = dir_remove(stage, false)
+    val observation = _child_run_inventory_v1(handoff, request,
+        reply.result_wire, success)
+    if observation == nil:
+        return _child_run_incomplete_v1("result-inventory-invalid")
+    if not _child_run_deadline_open_v1(handoff):
+        return _child_run_incomplete_v1("deadline-expired")
+    if not _child_run_publish_observation_v1(handoff,
+            observation.unwrap()):
+        return _child_run_incomplete_v1("observation-publish-failed")
+    if not _child_run_deadline_open_v1(handoff):
+        return _child_run_incomplete_v1("deadline-expired")
+    ParallelTransportChildRunV1(true, "FETCHED", "", observation)
+
+export ParallelTransportChildRunV1, run_parallel_transport_child_v1
+export parallel_transport_deadline_open_v1

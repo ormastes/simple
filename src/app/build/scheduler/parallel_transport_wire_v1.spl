@@ -1,0 +1,449 @@
+# Pure, bounded NBAV envelopes for a future isolated transport child.
+# A parsed observation is a claim; the parent must independently verify files.
+use app.build.scheduler.distributed_attempt.{DistributedBuildNodeV1,
+    distributed_build_node_consistent_v1}
+use app.build.scheduler.trusted_ssh.{TrustedSshNodeV1}
+use app.build.scheduler.trusted_sftp.{TrustedSftpConfigV1}
+use app.build.scheduler.trusted_worker_invocation.{TrustedWorkerCommandV1}
+use app.build.scheduler.worker_request.{parse_build_worker_request_v1,
+    encode_build_worker_request_v1}
+use app.build.scheduler.dispatch_wire.{parse_build_result_v1}
+use app.build.scheduler.planner.{scheduler_action_digest_valid_v1}
+use std.nogc_sync_mut.composition.native_build_argv_v1.{
+    native_build_argv_encode_v1, native_build_argv_decode_bounded_v1}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+
+val PARALLEL_TRANSPORT_WIRE_MAX_BYTES_V1: i64 = 1048576
+# Three fixed metadata files plus up to 128 declared action outputs.
+val PARALLEL_TRANSPORT_MAX_RESULT_FILES_V1: i64 = 131
+# 1 GiB of declared outputs, plus result (4 KiB), manifest (64 KiB), and
+# diagnostics (1 MiB). Failure proof replaces declared outputs.
+val PARALLEL_TRANSPORT_MAX_RESULT_BYTES_V1: i64 = 1074860032
+val PARALLEL_TRANSPORT_MAX_BATCH_BYTES_V1: i64 = 65536
+val _HANDOFF_ID_V1 = "simple-parallel-transport-handoff-v1"
+val _OBSERVATION_ID_V1 = "simple-parallel-transport-observation-v1"
+
+struct ParallelTransportFileV1:
+    relative_path: text
+    byte_count: i64
+    sha256: text
+
+struct ParallelTransportHandoffV1:
+    valid: bool
+    reason: text
+    nonce: text
+    request_wire: text
+    request_digest: text
+    approved_node: DistributedBuildNodeV1?
+    approved_node_digest: text
+    prepared_root: text
+    input_batch: ParallelTransportFileV1?
+    control_batch: ParallelTransportFileV1?
+    result_root: text
+    deadline_tick: i64
+    max_output_files: i64
+    max_output_bytes: i64
+
+struct ParallelTransportObservationV1:
+    valid: bool
+    reason: text
+    handoff_digest: text
+    nonce: text
+    request_digest: text
+    status: text       # FETCHED | INCOMPLETE
+    worker_result_wire: text
+    result_files: [ParallelTransportFileV1]
+
+fn _handoff_reject_v1(reason: text) -> ParallelTransportHandoffV1:
+    ParallelTransportHandoffV1(false, reason, "", "", "", nil, "", "",
+        nil, nil, "", 0, 0, 0)
+
+fn _observation_reject_v1(reason: text) -> ParallelTransportObservationV1:
+    ParallelTransportObservationV1(false, reason, "", "", "", "", "", [])
+
+fn _token_valid_v1(value: text) -> bool:
+    if value == "" or value.len() > 128 or value == "." or value == ".." or
+       value.starts_with("-"):
+        return false
+    for ch in value.chars():
+        if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or
+           (ch >= "0" and ch <= "9") or ch == "-" or ch == "_" or ch == ".":
+            continue
+        return false
+    true
+
+fn _path_valid_v1(path: text, absolute: bool) -> bool:
+    if path.len() > 4096 or path.starts_with("/") != absolute or
+       path.ends_with("/") or path.contains("//") or path.contains("\0"):
+        return false
+    val parts = path.split("/")
+    var i: i64 = if absolute: 1 else: 0
+    if i >= parts.len(): return false
+    while i < parts.len():
+        if not _token_valid_v1(parts[i]): return false
+        i = i + 1
+    true
+
+fn _file_valid_v1(file: ParallelTransportFileV1,
+        max_bytes: i64) -> bool:
+    _path_valid_v1(file.relative_path, false) and
+    file.byte_count >= 0 and file.byte_count <= max_bytes and
+    scheduler_action_digest_valid_v1(file.sha256)
+
+fn _scalar_valid_v1(value: text, bound: i64) -> bool:
+    value.bytes().len() <= bound and not value.contains("\0")
+
+fn _number_v1(value: text, maximum: i64) -> i64:
+    if value == "" or value.len() > 19: return -1
+    val parsed = value.to_i64() ?? -1
+    if parsed < 0 or parsed > maximum or parsed.to_text() != value:
+        return -1
+    parsed
+
+fn _append_v1(items: [text], key: text, value: text,
+        bound: i64) -> [text]:
+    if not _scalar_valid_v1(value, bound): return []
+    var out = items
+    out.push(key + "=" + value)
+    out
+
+fn _field_v1(item: text, key: text, bound: i64) -> Option<text>:
+    val prefix = key + "="
+    if not item.starts_with(prefix): return nil
+    val value = item[prefix.len():]
+    if not _scalar_valid_v1(value, bound): return nil
+    Some(value)
+
+fn _node_values_v1(node: DistributedBuildNodeV1) -> [text]:
+    val ssh = node.ssh.node
+    val sftp_ssh = node.sftp.node
+    [ssh.worker_id, ssh.host, ssh.user, ssh.port.to_text(),
+     ssh.ssh_executable, ssh.ssh_digest, ssh.known_hosts_path,
+     ssh.known_hosts_digest, ssh.identity_path, ssh.identity_digest,
+     node.ssh.remote_executable, node.ssh.timeout_ms.to_text(),
+     sftp_ssh.worker_id, sftp_ssh.host, sftp_ssh.user,
+     sftp_ssh.port.to_text(), sftp_ssh.ssh_executable,
+     sftp_ssh.ssh_digest, sftp_ssh.known_hosts_path,
+     sftp_ssh.known_hosts_digest, sftp_ssh.identity_path,
+     sftp_ssh.identity_digest, node.sftp.sftp_executable,
+     node.sftp.sftp_digest, node.sftp.remote_inbox_root,
+     node.source_root, node.local_state_dir, node.retained_cas_root]
+
+fn _node_keys_v1() -> [text]:
+    ["ssh.worker", "ssh.host", "ssh.user", "ssh.port", "ssh.executable",
+     "ssh.digest", "ssh.hosts", "ssh.hosts_digest", "ssh.identity",
+     "ssh.identity_digest", "worker.executable", "worker.timeout_ms",
+     "sftp.worker", "sftp.host", "sftp.user", "sftp.port",
+     "sftp.ssh_executable", "sftp.ssh_digest", "sftp.hosts",
+     "sftp.hosts_digest", "sftp.identity", "sftp.identity_digest",
+     "sftp.executable", "sftp.digest", "sftp.inbox", "source.root",
+     "state.root", "cas.root"]
+
+fn parallel_transport_approved_node_digest_v1(
+        node: DistributedBuildNodeV1) -> text:
+    if not distributed_build_node_consistent_v1(node): return ""
+    sha256_u8_hex(native_build_argv_encode_v1(_node_values_v1(node)))
+
+fn _node_from_values_v1(v: [text]) -> DistributedBuildNodeV1?:
+    if v.len() != 28: return nil
+    val ssh_port = _number_v1(v[3], 65535)
+    val sftp_port = _number_v1(v[15], 65535)
+    val timeout_ms = _number_v1(v[11], 1000000000)
+    if ssh_port <= 0 or sftp_port <= 0 or timeout_ms <= 0:
+        return nil
+    val ssh = TrustedSshNodeV1(v[0], v[1], v[2], ssh_port,
+        v[4], v[5], v[6], v[7], v[8], v[9])
+    val sftp_ssh = TrustedSshNodeV1(v[12], v[13], v[14], sftp_port,
+        v[16], v[17], v[18], v[19], v[20], v[21])
+    Some(DistributedBuildNodeV1(
+        TrustedWorkerCommandV1(ssh, v[10], timeout_ms),
+        TrustedSftpConfigV1(sftp_ssh, v[22], v[23], v[24]),
+        v[25], v[26], v[27]))
+
+fn _handoff_valid_v1(h: ParallelTransportHandoffV1) -> bool:
+    if not h.valid or h.approved_node == nil or h.input_batch == nil or
+       h.control_batch == nil or not scheduler_action_digest_valid_v1(h.nonce) or
+       not scheduler_action_digest_valid_v1(h.request_digest) or
+       not scheduler_action_digest_valid_v1(h.approved_node_digest) or
+       h.request_wire == "" or h.request_wire.bytes().len() > 262144 or
+       h.request_digest != sha256_text(h.request_wire) or
+       not _path_valid_v1(h.prepared_root, true) or
+       not _path_valid_v1(h.result_root, true) or
+       h.deadline_tick <= 0 or h.deadline_tick > 1000000000000000 or
+       h.max_output_files <= 0 or
+       h.max_output_files > PARALLEL_TRANSPORT_MAX_RESULT_FILES_V1 or
+       h.max_output_bytes <= 0 or
+       h.max_output_bytes > PARALLEL_TRANSPORT_MAX_RESULT_BYTES_V1:
+        return false
+    val node = h.approved_node.unwrap()
+    if h.approved_node_digest !=
+       parallel_transport_approved_node_digest_v1(node) or
+       _node_from_values_v1(_node_values_v1(node)) == nil:
+        return false
+    val request = parse_build_worker_request_v1(h.request_wire)
+    if request == nil or
+       encode_build_worker_request_v1(request.unwrap()) != h.request_wire or
+       request.unwrap().attempt.worker_id != node.ssh.node.worker_id:
+        return false
+    val input = h.input_batch.unwrap()
+    val control = h.control_batch.unwrap()
+    _file_valid_v1(input, PARALLEL_TRANSPORT_MAX_BATCH_BYTES_V1) and
+    _file_valid_v1(control, PARALLEL_TRANSPORT_MAX_BATCH_BYTES_V1) and
+    input.byte_count > 0 and control.byte_count > 0 and
+    input.relative_path == "inputs.batch" and
+    control.relative_path == "control.batch" and
+    h.prepared_root != h.result_root and
+    not h.prepared_root.starts_with(h.result_root + "/") and
+    not h.result_root.starts_with(h.prepared_root + "/")
+
+fn encode_parallel_transport_handoff_v1(
+        handoff: ParallelTransportHandoffV1) -> [u8]:
+    if not _handoff_valid_v1(handoff): return []
+    val node = handoff.approved_node.unwrap()
+    val keys = ["wire", "nonce", "request.wire", "request.digest",
+        "prepared.root", "result.root", "deadline.tick", "output.files",
+        "output.bytes"]
+    val values = [_HANDOFF_ID_V1, handoff.nonce, handoff.request_wire,
+        handoff.request_digest, handoff.prepared_root, handoff.result_root,
+        handoff.deadline_tick.to_text(), handoff.max_output_files.to_text(),
+        handoff.max_output_bytes.to_text()]
+    var items: [text] = []
+    var i: i64 = 0
+    while i < keys.len():
+        items = _append_v1(items, keys[i], values[i],
+            if i == 2: 262144 else: 4096)
+        if items.len() != i + 1: return []
+        i = i + 1
+    val node_keys = _node_keys_v1()
+    val node_values = _node_values_v1(node)
+    i = 0
+    while i < node_keys.len():
+        items = _append_v1(items, node_keys[i], node_values[i], 4096)
+        if items.len() != 9 + i + 1: return []
+        i = i + 1
+    items = _append_v1(items, "node.digest", handoff.approved_node_digest,
+        64)
+    if items.len() != 38: return []
+    val input = handoff.input_batch.unwrap()
+    val control = handoff.control_batch.unwrap()
+    val batch_keys = ["input.path", "input.bytes", "input.sha256",
+        "control.path", "control.bytes", "control.sha256"]
+    val batch_values = [input.relative_path, input.byte_count.to_text(),
+        input.sha256, control.relative_path, control.byte_count.to_text(),
+        control.sha256]
+    i = 0
+    while i < batch_keys.len():
+        items = _append_v1(items, batch_keys[i], batch_values[i], 4096)
+        if items.len() != 38 + i + 1: return []
+        i = i + 1
+    val wire = native_build_argv_encode_v1(items)
+    if wire.len() == 0 or wire.len() > PARALLEL_TRANSPORT_WIRE_MAX_BYTES_V1:
+        []
+    else: wire
+
+fn parse_parallel_transport_handoff_v1(bytes: [u8]) ->
+        ParallelTransportHandoffV1:
+    if bytes.len() == 0 or bytes.len() > PARALLEL_TRANSPORT_WIRE_MAX_BYTES_V1:
+        return _handoff_reject_v1("handoff-size-invalid")
+    val decoded = native_build_argv_decode_bounded_v1(bytes, 44,
+        PARALLEL_TRANSPORT_WIRE_MAX_BYTES_V1)
+    if not decoded.ok or decoded.arguments.len() != 44:
+        return _handoff_reject_v1("handoff-shape-invalid")
+    val items = decoded.arguments
+    val keys = ["wire", "nonce", "request.wire", "request.digest",
+        "prepared.root", "result.root", "deadline.tick", "output.files",
+        "output.bytes"]
+    var values: [text] = []
+    var i: i64 = 0
+    while i < keys.len():
+        val field = _field_v1(items[i], keys[i],
+            if i == 2: 262144 else: 4096)
+        if field == nil: return _handoff_reject_v1("handoff-field-invalid")
+        values.push(field.unwrap())
+        i = i + 1
+    if values[0] != _HANDOFF_ID_V1:
+        return _handoff_reject_v1("handoff-version-invalid")
+    val node_keys = _node_keys_v1()
+    var node_values: [text] = []
+    i = 0
+    while i < node_keys.len():
+        val field = _field_v1(items[9 + i], node_keys[i], 4096)
+        if field == nil: return _handoff_reject_v1("handoff-node-invalid")
+        node_values.push(field.unwrap())
+        i = i + 1
+    val node = _node_from_values_v1(node_values)
+    if node == nil: return _handoff_reject_v1("handoff-node-invalid")
+    val node_digest = _field_v1(items[37], "node.digest", 64)
+    if node_digest == nil:
+        return _handoff_reject_v1("handoff-node-digest-invalid")
+    val batch_keys = ["input.path", "input.bytes", "input.sha256",
+        "control.path", "control.bytes", "control.sha256"]
+    var batch_values: [text] = []
+    i = 0
+    while i < batch_keys.len():
+        val field = _field_v1(items[38 + i], batch_keys[i], 4096)
+        if field == nil: return _handoff_reject_v1("handoff-batch-invalid")
+        batch_values.push(field.unwrap())
+        i = i + 1
+    val deadline = _number_v1(values[6], 1000000000000000)
+    val max_files = _number_v1(values[7], PARALLEL_TRANSPORT_MAX_RESULT_FILES_V1)
+    val max_bytes = _number_v1(values[8],
+        PARALLEL_TRANSPORT_MAX_RESULT_BYTES_V1)
+    val input_bytes = _number_v1(batch_values[1],
+        PARALLEL_TRANSPORT_MAX_BATCH_BYTES_V1)
+    val control_bytes = _number_v1(batch_values[4],
+        PARALLEL_TRANSPORT_MAX_BATCH_BYTES_V1)
+    val h = ParallelTransportHandoffV1(true, "", values[1], values[2],
+        values[3], node, node_digest.unwrap(), values[4],
+        ParallelTransportFileV1(batch_values[0], input_bytes,
+            batch_values[2]),
+        ParallelTransportFileV1(batch_values[3], control_bytes,
+            batch_values[5]), values[5], deadline, max_files, max_bytes)
+    if encode_parallel_transport_handoff_v1(h) != bytes:
+        return _handoff_reject_v1("handoff-noncanonical")
+    h
+
+fn parallel_transport_handoff_digest_v1(
+        handoff: ParallelTransportHandoffV1) -> text:
+    val wire = encode_parallel_transport_handoff_v1(handoff)
+    if wire.len() == 0: "" else: sha256_u8_hex(wire)
+
+fn _observation_valid_v1(o: ParallelTransportObservationV1) -> bool:
+    if not o.valid or not scheduler_action_digest_valid_v1(o.handoff_digest) or
+       not scheduler_action_digest_valid_v1(o.nonce) or
+       not scheduler_action_digest_valid_v1(o.request_digest) or
+       o.reason.bytes().len() > 1024 or o.reason.contains("\0") or
+       o.worker_result_wire.bytes().len() > 262144 or
+       o.result_files.len() > PARALLEL_TRANSPORT_MAX_RESULT_FILES_V1:
+        return false
+    if o.status == "FETCHED":
+        if o.reason != "" or o.worker_result_wire == "": return false
+    elif o.status == "INCOMPLETE":
+        if o.reason == "" or o.worker_result_wire != "" or
+           o.result_files.len() != 0:
+            return false
+    else:
+        return false
+    var previous = ""
+    for file in o.result_files:
+        if not _file_valid_v1(file, 1073741824) or
+           (previous != "" and file.relative_path <= previous):
+            return false
+        previous = file.relative_path
+    true
+
+fn encode_parallel_transport_observation_v1(
+        observation: ParallelTransportObservationV1) -> [u8]:
+    if not _observation_valid_v1(observation): return []
+    val keys = ["wire", "handoff.digest", "nonce", "request.digest",
+        "status", "reason", "worker.result", "file.count"]
+    val values = [_OBSERVATION_ID_V1, observation.handoff_digest,
+        observation.nonce, observation.request_digest, observation.status,
+        observation.reason, observation.worker_result_wire,
+        observation.result_files.len().to_text()]
+    var items: [text] = []
+    var i: i64 = 0
+    while i < keys.len():
+        val bound = if i == 6: 262144 else: 4096
+        items = _append_v1(items, keys[i], values[i], bound)
+        if items.len() != i + 1: return []
+        i = i + 1
+    i = 0
+    while i < observation.result_files.len():
+        val file = observation.result_files[i]
+        val prefix = "file." + i.to_text() + "."
+        items = _append_v1(items, prefix + "path", file.relative_path, 4096)
+        items = _append_v1(items, prefix + "bytes",
+            file.byte_count.to_text(), 19)
+        items = _append_v1(items, prefix + "sha256", file.sha256, 64)
+        i = i + 1
+    val wire = native_build_argv_encode_v1(items)
+    if wire.len() == 0 or wire.len() > PARALLEL_TRANSPORT_WIRE_MAX_BYTES_V1:
+        []
+    else: wire
+
+fn parse_parallel_transport_observation_v1(bytes: [u8]) ->
+        ParallelTransportObservationV1:
+    if bytes.len() == 0 or bytes.len() > PARALLEL_TRANSPORT_WIRE_MAX_BYTES_V1:
+        return _observation_reject_v1("observation-size-invalid")
+    val decoded = native_build_argv_decode_bounded_v1(bytes,
+        8 + PARALLEL_TRANSPORT_MAX_RESULT_FILES_V1 * 3,
+        PARALLEL_TRANSPORT_WIRE_MAX_BYTES_V1)
+    if not decoded.ok or decoded.arguments.len() < 8:
+        return _observation_reject_v1("observation-shape-invalid")
+    val items = decoded.arguments
+    val keys = ["wire", "handoff.digest", "nonce", "request.digest",
+        "status", "reason", "worker.result", "file.count"]
+    var values: [text] = []
+    var i: i64 = 0
+    while i < keys.len():
+        val field = _field_v1(items[i], keys[i],
+            if i == 6: 262144 else: 4096)
+        if field == nil:
+            return _observation_reject_v1("observation-field-invalid")
+        values.push(field.unwrap())
+        i = i + 1
+    if values[0] != _OBSERVATION_ID_V1:
+        return _observation_reject_v1("observation-version-invalid")
+    val count = _number_v1(values[7], PARALLEL_TRANSPORT_MAX_RESULT_FILES_V1)
+    if count < 0 or items.len() != 8 + count * 3:
+        return _observation_reject_v1("observation-count-invalid")
+    var files: [ParallelTransportFileV1] = []
+    i = 0
+    while i < count:
+        val prefix = "file." + i.to_text() + "."
+        val path = _field_v1(items[8 + i * 3], prefix + "path", 4096)
+        val size = _field_v1(items[9 + i * 3], prefix + "bytes", 19)
+        val digest = _field_v1(items[10 + i * 3], prefix + "sha256", 64)
+        if path == nil or size == nil or digest == nil:
+            return _observation_reject_v1("observation-file-invalid")
+        files.push(ParallelTransportFileV1(path.unwrap(),
+            _number_v1(size.unwrap(), 1073741824), digest.unwrap()))
+        i = i + 1
+    val observation = ParallelTransportObservationV1(true, values[5],
+        values[1], values[2], values[3], values[4], values[6], files)
+    if encode_parallel_transport_observation_v1(observation) != bytes:
+        return _observation_reject_v1("observation-noncanonical")
+    observation
+
+fn check_parallel_transport_observation_binding_v1(
+        handoff: ParallelTransportHandoffV1,
+        observation: ParallelTransportObservationV1) -> bool:
+    val digest = parallel_transport_handoff_digest_v1(handoff)
+    if digest == "" or not _observation_valid_v1(observation) or
+       observation.handoff_digest != digest or
+       observation.nonce != handoff.nonce or
+       observation.request_digest != handoff.request_digest or
+       observation.result_files.len() > handoff.max_output_files:
+        return false
+    if observation.status == "FETCHED":
+        val request = parse_build_worker_request_v1(handoff.request_wire)
+        val result = parse_build_result_v1(observation.worker_result_wire)
+        if request == nil or result == nil:
+            return false
+        val attempt = request.unwrap().attempt
+        val claim = result.unwrap()
+        if claim.candidate.action_digest != attempt.action_digest or
+           claim.candidate.attempt_id != attempt.attempt_id or
+           claim.candidate.worker_id != attempt.worker_id or
+           claim.fence != request.unwrap().fence:
+            return false
+    var total: i64 = 0
+    for file in observation.result_files:
+        if file.byte_count > handoff.max_output_bytes - total:
+            return false
+        total = total + file.byte_count
+    true
+
+export PARALLEL_TRANSPORT_WIRE_MAX_BYTES_V1
+export PARALLEL_TRANSPORT_MAX_RESULT_FILES_V1
+export PARALLEL_TRANSPORT_MAX_RESULT_BYTES_V1
+export ParallelTransportFileV1, ParallelTransportHandoffV1
+export ParallelTransportObservationV1
+export parallel_transport_approved_node_digest_v1
+export encode_parallel_transport_handoff_v1
+export parse_parallel_transport_handoff_v1
+export parallel_transport_handoff_digest_v1
+export encode_parallel_transport_observation_v1
+export parse_parallel_transport_observation_v1
+export check_parallel_transport_observation_binding_v1

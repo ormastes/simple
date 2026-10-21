@@ -1,0 +1,58 @@
+"""Exact log stream admission; no host process or container is invoked."""
+
+use std.spec.*
+use std.common.process.observation_v4.{ProcessObservationStreamV4, ProcessObservationStreamStateV4}
+use std.nogc_async_mut.container.providers.linux.oci_exact_logs_v1.{
+    OciExactLogLimitsV1, oci_exact_log_limits_valid_v1,
+    oci_exact_log_stream_complete_v1, start_oci_exact_logs_v1
+}
+
+fn _stream(state: ProcessObservationStreamStateV4, seen: i64,
+        retained: i64, delivered: i64) -> ProcessObservationStreamV4:
+    ProcessObservationStreamV4(state: state, errno_value: 0,
+        seen_bytes: seen, retained_bytes: retained, delivered_bytes: delivered)
+
+describe "OCI exact log byte admission":
+    it "returns a cleanup owner for admission failure without invoking a host process":
+        val limits = OciExactLogLimitsV1(wall_budget_ns: 1000000000,
+            term_grace_ns: 0, cleanup_budget_ns: 1000000000, stream_limit_bytes: 4096)
+        match start_oci_exact_logs_v1("/unopened", [], "container", "unsupported", "/", limits):
+            case Ok(session):
+                fail("unsupported engine must return structured failure")
+            case Err(owner):
+                var failure = owner
+                expect(failure.reason).to_equal("oci-exact-logs: unsupported engine")
+                expect(failure.cleanup_pending()).to_equal(false)
+                expect(failure.cleanup().unwrap()).to_equal(true)
+                expect(failure.cleanup().unwrap()).to_equal(true)
+                expect(failure.cleanup_pending()).to_equal(false)
+
+    it "accepts EOF with all bytes including NUL and non UTF-8":
+        val stream = _stream(ProcessObservationStreamStateV4.Eof, 3, 3, 3)
+        expect(oci_exact_log_stream_complete_v1(stream, [0u8, 255u8, 10u8])).to_equal(true)
+
+    it "rejects retained prefixes and undelivered tails":
+        val truncated = _stream(ProcessObservationStreamStateV4.Eof, 4, 3, 3)
+        val undelivered = _stream(ProcessObservationStreamStateV4.Eof, 4, 4, 3)
+        expect(oci_exact_log_stream_complete_v1(truncated, [1u8, 2u8, 3u8])).to_equal(false)
+        expect(oci_exact_log_stream_complete_v1(undelivered, [1u8, 2u8, 3u8])).to_equal(false)
+
+    it "requires EOF even when every observed byte was delivered":
+        val open_stream = _stream(ProcessObservationStreamStateV4.Open, 0, 0, 0)
+        val deadline = _stream(ProcessObservationStreamStateV4.DeadlineClosed, 0, 0, 0)
+        expect(oci_exact_log_stream_complete_v1(open_stream, [])).to_equal(false)
+        expect(oci_exact_log_stream_complete_v1(deadline, [])).to_equal(false)
+
+    it "accepts empty EOF and rejects impossible counters":
+        val empty = _stream(ProcessObservationStreamStateV4.Eof, 0, 0, 0)
+        val invalid = _stream(ProcessObservationStreamStateV4.Eof, -1, 0, 0)
+        expect(oci_exact_log_stream_complete_v1(empty, [])).to_equal(true)
+        expect(oci_exact_log_stream_complete_v1(invalid, [])).to_equal(false)
+
+    it "requires finite positive capture and execution bounds":
+        val valid = OciExactLogLimitsV1(wall_budget_ns: 1000000000,
+            term_grace_ns: 0, cleanup_budget_ns: 1000000000, stream_limit_bytes: 4096)
+        val invalid = OciExactLogLimitsV1(wall_budget_ns: 0,
+            term_grace_ns: 0, cleanup_budget_ns: 1000000000, stream_limit_bytes: 4096)
+        expect(oci_exact_log_limits_valid_v1(valid)).to_equal(true)
+        expect(oci_exact_log_limits_valid_v1(invalid)).to_equal(false)

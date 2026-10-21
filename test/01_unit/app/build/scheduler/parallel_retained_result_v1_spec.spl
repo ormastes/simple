@@ -1,0 +1,221 @@
+use std.spec.*
+use app.build.scheduler.parallel_retained_result_v1.{
+    verify_parallel_retained_result_v1,
+    PARALLEL_RETAINED_MAX_FILE_BYTES_V1}
+use app.build.scheduler.parallel_transport_wire_v1.{
+    ParallelTransportFileV1, ParallelTransportHandoffV1,
+    ParallelTransportObservationV1,
+    parallel_transport_approved_node_digest_v1,
+    parallel_transport_handoff_digest_v1}
+use app.build.scheduler.distributed_attempt.{DistributedBuildNodeV1}
+use app.build.scheduler.trusted_ssh.{TrustedSshNodeV1}
+use app.build.scheduler.trusted_sftp.{TrustedSftpConfigV1}
+use app.build.scheduler.trusted_worker_invocation.{TrustedWorkerCommandV1}
+use app.build.scheduler.worker_request.{BuildWorkerRequestV1,
+    encode_build_worker_request_v1}
+use app.build.scheduler.dispatch_wire.{encode_build_result_v1}
+use app.build.scheduler.worker_output.{observe_build_outputs_v1}
+use app.build.scheduler.worker_failure_proof.{
+    encode_build_worker_failure_proof_v1}
+use compiler.common.build_contract.{BuildInputRef, SnapshotManifest,
+    ToolchainManifest, InputManifest, ActionSpec, AttemptSpec,
+    ActionResultCandidate, action_spec_digest_v1}
+use std.common.crypto.sha256.{sha256_text}
+use app.io.mod.{cwd, getpid, time_now_unix_micros,
+    dir_create_all, dir_remove_all, file_atomic_write, file_exists}
+
+fn _verified_node_v1() -> DistributedBuildNodeV1:
+    val ssh = TrustedSshNodeV1("worker-1", "build.example", "builder", 22,
+        "/usr/bin/ssh", sha256_text("ssh"), "/etc/ssh/known_hosts",
+        sha256_text("hosts"), "/etc/ssh/key", sha256_text("key"))
+    DistributedBuildNodeV1(
+        TrustedWorkerCommandV1(ssh, "/opt/simple/worker", 30000),
+        TrustedSftpConfigV1(ssh, "/usr/bin/sftp", sha256_text("sftp"),
+            "/srv/inbox"), "/trusted/source", "/trusted/state",
+        "/trusted/cas")
+
+fn _verified_request_v1() -> BuildWorkerRequestV1:
+    val snapshot = sha256_text("retained-success")
+    val action = ActionSpec(1, "compile",
+        SnapshotManifest(1, snapshot, sha256_text("tree"),
+            sha256_text("submodules")),
+        ToolchainManifest(1, sha256_text("compiler"),
+            sha256_text("behavior"), sha256_text("abi"),
+            sha256_text("runtime"), sha256_text("sysroot"),
+            "x86_64-unknown-linux-gnu"),
+        InputManifest(1, snapshot,
+            [BuildInputRef("src/main.c", sha256_text("source"))],
+            [], [], [], [], [], sha256_text("context"), true, false),
+        ["/usr/bin/clang", "-c"], "simple-build/outputs",
+        sha256_text("sandbox"), ["main.o"], sha256_text("resources"))
+    BuildWorkerRequestV1(action,
+        AttemptSpec(1, action_spec_digest_v1(action),
+            "dist-try-1", "worker-1", 0, 2, 4096), 1, 2, 8)
+
+fn _untrusted_handoff_v1(result_root: text) -> ParallelTransportHandoffV1:
+    ParallelTransportHandoffV1(false, "untrusted", "", "", "", nil,
+        "", "", nil, nil, result_root, 0, 0, 0)
+
+fn _untrusted_observation_v1() -> ParallelTransportObservationV1:
+    ParallelTransportObservationV1(false, "untrusted", "", "", "",
+        "INCOMPLETE", "", [])
+
+describe "parallel retained result parent gate":
+    it "refuses verification until the parent establishes writer cessation":
+        val result = verify_parallel_retained_result_v1(
+            _untrusted_handoff_v1("/untrusted/results"),
+            _untrusted_observation_v1(), "/trusted/parent", false)
+        expect(result.verified).to_be(false)
+        expect(result.reason).to_equal("child-writers-not-stopped")
+        expect(result.fetch.verified).to_be(false)
+        expect(PARALLEL_RETAINED_MAX_FILE_BYTES_V1).to_equal(268435456)
+
+    it "does not delete a child root when a stopped child's claim is invalid":
+        val root = cwd() + "/build/test/parallel-retained-gate-" +
+            getpid().to_text() + "-" + time_now_unix_micros().to_text()
+        val child = root + "/child"
+        val parent = root + "/parent"
+        expect(dir_create_all(child)).to_be(true)
+        expect(dir_create_all(parent)).to_be(true)
+        val marker = child + "/keep.marker"
+        expect(file_atomic_write(marker, "keep")).to_be(true)
+        val result = verify_parallel_retained_result_v1(
+            _untrusted_handoff_v1(child),
+            _untrusted_observation_v1(), parent, true)
+        expect(result.verified).to_be(false)
+        expect(result.reason).to_equal("transport-binding-invalid")
+        expect(file_exists(marker)).to_be(true)
+        expect(dir_remove_all(root)).to_be(true)
+
+    it "copies a valid success into a parent stage and rejects changed bytes":
+        val root = cwd() + "/build/test/parallel-retained-success-" +
+            getpid().to_text() + "-" + time_now_unix_micros().to_text()
+        val child = root + "/child"
+        val outputs = child + "/outputs"
+        val parent = root + "/parent"
+        expect(dir_create_all(outputs)).to_be(true)
+        expect(dir_create_all(parent)).to_be(true)
+        val request = _verified_request_v1()
+        # Cross the verifier's 1 MiB copy boundary with a same-size tamper.
+        val object = "object-bytes".repeat(100000)
+        val diagnostics = "compiler diagnostics"
+        expect(file_atomic_write(outputs + "/main.o", object)).to_be(true)
+        val observed = observe_build_outputs_v1(request.action,
+            request.attempt, request.fence, outputs, diagnostics)
+        expect(observed.valid).to_be(true)
+        val candidate = ActionResultCandidate(1,
+            request.attempt.action_digest, request.attempt.attempt_id,
+            request.attempt.worker_id, observed.manifest_digest,
+            observed.diagnostic_digest, true)
+        val result_wire = encode_build_result_v1(candidate, request.fence)
+        expect(file_atomic_write(outputs + "/result.wire", result_wire))
+            .to_be(true)
+        expect(file_atomic_write(outputs + "/manifest.wire",
+            observed.manifest_wire)).to_be(true)
+        expect(file_atomic_write(outputs + "/diagnostics", diagnostics))
+            .to_be(true)
+        val request_wire = encode_build_worker_request_v1(request)
+        val node = _verified_node_v1()
+        val handoff = ParallelTransportHandoffV1(true, "",
+            sha256_text("nonce"), request_wire, sha256_text(request_wire),
+            node, parallel_transport_approved_node_digest_v1(node),
+            root + "/prepared",
+            ParallelTransportFileV1("inputs.batch", 80,
+                sha256_text("inputs-batch")),
+            ParallelTransportFileV1("control.batch", 90,
+                sha256_text("control-batch")),
+            child, 100000, 4, 2097152)
+        val observation = ParallelTransportObservationV1(true, "",
+            parallel_transport_handoff_digest_v1(handoff), handoff.nonce,
+            handoff.request_digest, "FETCHED", result_wire,
+            [ParallelTransportFileV1("outputs/diagnostics",
+                diagnostics.bytes().len(), sha256_text(diagnostics)),
+             ParallelTransportFileV1("outputs/main.o", object.bytes().len(),
+                sha256_text(object)),
+             ParallelTransportFileV1("outputs/manifest.wire",
+                observed.manifest_wire.bytes().len(),
+                sha256_text(observed.manifest_wire)),
+             ParallelTransportFileV1("outputs/result.wire",
+                result_wire.bytes().len(), sha256_text(result_wire))])
+        val verified = verify_parallel_retained_result_v1(handoff,
+            observation, parent, true)
+        expect(verified.verified).to_be(true)
+        expect(verified.fetch.verified).to_be(true)
+        expect(verified.fetch.success).to_be(true)
+        expect(file_exists(verified.fetch.output_root + "/main.o"))
+            .to_be(true)
+        expect(dir_remove_all(verified.fetch.stage_root)).to_be(true)
+        expect(file_atomic_write(outputs + "/main.o", "X" + object[1:]))
+            .to_be(true)
+        val tampered = verify_parallel_retained_result_v1(handoff,
+            observation, parent, true)
+        expect(tampered.verified).to_be(false)
+        expect(tampered.reason).to_equal("result-file-digest")
+        expect(file_exists(outputs + "/main.o")).to_be(true)
+        expect(dir_remove_all(root)).to_be(true)
+
+    it "verifies a failed result with a canonical proof and rejects changed proof bytes":
+        val root = cwd() + "/build/test/parallel-retained-failure-" +
+            getpid().to_text() + "-" + time_now_unix_micros().to_text()
+        val child = root + "/child"
+        val outputs = child + "/outputs"
+        val parent = root + "/parent"
+        expect(dir_create_all(outputs)).to_be(true)
+        expect(dir_create_all(parent)).to_be(true)
+        val request = _verified_request_v1()
+        val diagnostics = "compile failed"
+        val candidate = ActionResultCandidate(1,
+            request.attempt.action_digest, request.attempt.attempt_id,
+            request.attempt.worker_id, "", sha256_text(diagnostics), false)
+        val result_wire = encode_build_result_v1(candidate, request.fence)
+        val request_wire = encode_build_worker_request_v1(request)
+        val proof = encode_build_worker_failure_proof_v1(
+            sha256_text(request_wire), sha256_text("binding"),
+            request.attempt.attempt_id, request.fence, 1,
+            sha256_text(result_wire))
+        expect(proof != "").to_be(true)
+        expect(file_atomic_write(outputs + "/result.wire", result_wire))
+            .to_be(true)
+        expect(file_atomic_write(outputs + "/manifest.wire", ""))
+            .to_be(true)
+        expect(file_atomic_write(outputs + "/diagnostics", diagnostics))
+            .to_be(true)
+        expect(file_atomic_write(outputs + "/failure-proof.wire", proof))
+            .to_be(true)
+        val node = _verified_node_v1()
+        val handoff = ParallelTransportHandoffV1(true, "",
+            sha256_text("failure-nonce"), request_wire,
+            sha256_text(request_wire), node,
+            parallel_transport_approved_node_digest_v1(node),
+            root + "/prepared",
+            ParallelTransportFileV1("inputs.batch", 80,
+                sha256_text("inputs-batch")),
+            ParallelTransportFileV1("control.batch", 90,
+                sha256_text("control-batch")),
+            child, 100000, 4, 1048576)
+        val observation = ParallelTransportObservationV1(true, "",
+            parallel_transport_handoff_digest_v1(handoff), handoff.nonce,
+            handoff.request_digest, "FETCHED", result_wire,
+            [ParallelTransportFileV1("outputs/diagnostics",
+                diagnostics.bytes().len(), sha256_text(diagnostics)),
+             ParallelTransportFileV1("outputs/failure-proof.wire",
+                proof.bytes().len(), sha256_text(proof)),
+             ParallelTransportFileV1("outputs/manifest.wire", 0,
+                sha256_text("")),
+             ParallelTransportFileV1("outputs/result.wire",
+                result_wire.bytes().len(), sha256_text(result_wire))])
+        val verified = verify_parallel_retained_result_v1(handoff,
+            observation, parent, true)
+        expect(verified.verified).to_be(true)
+        expect(verified.fetch.verified).to_be(true)
+        expect(verified.fetch.success).to_be(false)
+        expect(verified.fetch.output_root).to_equal("")
+        expect(dir_remove_all(verified.fetch.stage_root)).to_be(true)
+        expect(file_atomic_write(outputs + "/failure-proof.wire",
+            proof + "tampered")).to_be(true)
+        val tampered = verify_parallel_retained_result_v1(handoff,
+            observation, parent, true)
+        expect(tampered.verified).to_be(false)
+        expect(tampered.reason).to_equal("result-file-size")
+        expect(file_exists(outputs + "/failure-proof.wire")).to_be(true)
+        expect(dir_remove_all(root)).to_be(true)

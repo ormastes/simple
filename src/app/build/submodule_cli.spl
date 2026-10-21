@@ -1,0 +1,121 @@
+# CLI boundary for exact-parent selected-submodule verification.
+use app.io.mod.{file_write, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use app.build.submodule_git_adapter.{probe_selected_submodules_v1}
+use app.build.trusted_git_process.{run_isolated_build_git_v1}
+
+val POLICY_PATH = "config/build/submodule_inventory.sdn"
+val GIT_TIMEOUT_MS = 15000
+val POLICY_MAX = 33554432
+
+struct SubmoduleVerifyArgs:
+    status: text
+    reason: text
+    parent: text
+    policy_rev: text
+    optional: [text]
+
+fn _subcli_bad_args(reason: text) -> SubmoduleVerifyArgs:
+    SubmoduleVerifyArgs("REJECT", reason, "", "", [])
+
+fn _subcli_oid(value: text) -> bool:
+    if value.len() != 40 and value.len() != 64:
+        return false
+    for ch in value:
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+fn _subcli_optional_path(value: text) -> bool:
+    value != "" and not value.starts_with("/") and
+        not value.starts_with("-") and not value.contains("..") and
+        not value.contains("\\") and not value.contains("\n") and
+        not value.contains("\r") and not value.contains("\t") and
+        not value.contains("|")
+
+fn parse_submodule_verify_args(args: [text]) -> SubmoduleVerifyArgs:
+    """Require complete object IDs and explicit options before Git access."""
+    var parent = ""
+    var policy_rev = ""
+    var optional: [text] = []
+    var i = 0
+    while i < args.len():
+        val flag = args[i]
+        if flag != "--parent" and flag != "--policy-rev" and flag != "--optional":
+            return _subcli_bad_args("unknown-argument")
+        if i + 1 >= args.len():
+            return _subcli_bad_args("missing-option-value")
+        val value = args[i + 1]
+        if flag == "--parent":
+            if parent != "" or not _subcli_oid(value):
+                return _subcli_bad_args("invalid-or-duplicate-parent")
+            parent = value
+        elif flag == "--policy-rev":
+            if policy_rev != "" or not _subcli_oid(value):
+                return _subcli_bad_args("invalid-or-duplicate-policy-rev")
+            policy_rev = value
+        else:
+            if not _subcli_optional_path(value):
+                return _subcli_bad_args("invalid-optional-path")
+            for previous in optional:
+                if previous == value:
+                    return _subcli_bad_args("duplicate-optional-path")
+            optional.push(value)
+        i = i + 2
+    if parent == "":
+        return _subcli_bad_args("parent-required")
+    SubmoduleVerifyArgs("READY", "parsed", parent, policy_rev, optional)
+
+fn _subcli_git(args: [text], cap: i64) -> (text, text, i64):
+    var full: [text] = ["--no-replace-objects"]
+    for arg in args:
+        full.push(arg)
+    run_isolated_build_git_v1(full, GIT_TIMEOUT_MS, cap)
+
+fn _subcli_commit_available(oid: text) -> bool:
+    val (out, _err, code) = _subcli_git(["cat-file", "-t", oid], 4096)
+    code == 0 and out.len() < 4096 and out.trim() == "commit"
+
+fn _subcli_result(status: text, reason: text, policy: text) -> i64:
+    print("submodule-verify: {status} reason={reason} policy={policy}")
+    if status == "CLEAN_FETCH_VERIFIED": 0 else: 1
+
+fn run_submodule_verify(args: [text]) -> i64:
+    """Verify selected gitlinks at an explicit parent and policy revision."""
+    val plan = parse_submodule_verify_args(args)
+    if plan.status != "READY":
+        return _subcli_result("REJECT", plan.reason, "unselected")
+    val policy_label = if plan.policy_rev == "": "local-diagnostic-working-tree" else: "git-object:" + plan.policy_rev
+    if not _subcli_commit_available(plan.parent):
+        return _subcli_result("REJECT", "parent-commit-unavailable", policy_label)
+    if plan.policy_rev == "":
+        val probe = probe_selected_submodules_v1(".", plan.parent,
+            POLICY_PATH, plan.optional)
+        # Current checkout policy is useful for diagnosis but cannot authorize
+        # a gate, even after the selected pins pass a clean fetch.
+        return _subcli_result("LOCAL_DIAGNOSTIC_" + probe.status,
+            probe.reason, policy_label)
+    if not _subcli_commit_available(plan.policy_rev):
+        return _subcli_result("REJECT", "policy-commit-unavailable", policy_label)
+    val (source, _err, code) = _subcli_git([
+        "show", plan.policy_rev + ":" + POLICY_PATH
+    ], POLICY_MAX)
+    if code != 0 or source == "" or source.len() >= POLICY_MAX:
+        return _subcli_result("REJECT", "policy-object-unavailable-or-truncated", policy_label)
+    val temp = match secure_temp_dir("/tmp", "simple-submodule-policy-"):
+        case Ok(path): path
+        case Err(_): return _subcli_result("REJECT", "policy-temp-unavailable", policy_label)
+    val policy_file = temp + "/policy.sdn"
+    if not file_write(policy_file, source):
+        val _cleaned = dir_remove_all(temp)
+        return _subcli_result("REJECT", "policy-temp-write-failed", policy_label)
+    val probe = probe_selected_submodules_v1(".", plan.parent,
+        policy_file, plan.optional)
+    if not dir_remove_all(temp):
+        return _subcli_result("REJECT", "policy-temp-cleanup-failed", policy_label)
+    # An exact policy object is still caller-selected. Only a trusted CI
+    # controller can bind it to protected base metadata and admit a gate.
+    _subcli_result("POLICY_REV_DIAGNOSTIC_" + probe.status,
+        probe.reason, policy_label)
+
+export SubmoduleVerifyArgs, parse_submodule_verify_args, run_submodule_verify

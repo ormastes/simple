@@ -1,0 +1,73 @@
+# A versioned terminal-failure receipt. V1 result.wire has no exit or worker
+# version field, so a parent requires this separate exact proof for failures.
+# It binds the result bytes to the request, permanent launch binding, fence,
+# and durable terminal observation without claiming a deterministic cause.
+use app.build.scheduler.planner.{scheduler_action_digest_valid_v1}
+use app.build.scheduler.worker_attempt_binding.{worker_attempt_token_v1}
+use app.build.scheduler.worker_terminal_observation.{
+    worker_terminal_observation_digest_v1}
+
+val BUILD_WORKER_FAILURE_PROOF_MAX_V1 = 512
+
+struct BuildWorkerFailureProofV1:
+    request_digest: text
+    binding_digest: text
+    attempt_id: text
+    fence: i64
+    exit_code: i64
+    result_digest: text
+
+fn encode_build_worker_failure_proof_v1(request_digest: text,
+        binding_digest: text, attempt_id: text, fence: i64,
+        exit_code: i64, result_digest: text) -> text:
+    """Name only a known nonzero exit and the exact durable terminal marker."""
+    if not scheduler_action_digest_valid_v1(request_digest) or
+       not scheduler_action_digest_valid_v1(binding_digest) or
+       not scheduler_action_digest_valid_v1(result_digest) or
+       not worker_attempt_token_v1(attempt_id) or
+       fence <= 0 or fence > 1000000000 or
+       exit_code <= 0 or exit_code > 255:
+        return ""
+    val terminal_digest = worker_terminal_observation_digest_v1(
+        request_digest, binding_digest, attempt_id, fence, exit_code)
+    if terminal_digest == "": return ""
+    val wire = "simple-build-failure-proof-v1\nrequest=" + request_digest +
+        "\nbinding=" + binding_digest + "\nattempt=" + attempt_id +
+        "\nfence=" + fence.to_text() + "\nexit=" + exit_code.to_text() +
+        "\nresult=" + result_digest +
+        "\nterminal=" + terminal_digest + "\n"
+    if wire.len() > BUILD_WORKER_FAILURE_PROOF_MAX_V1: "" else: wire
+
+fn parse_build_worker_failure_proof_v1(wire: text) ->
+        BuildWorkerFailureProofV1?:
+    """Reject missing, noncanonical or mixed-attempt proof bytes."""
+    if wire.len() == 0 or wire.len() > BUILD_WORKER_FAILURE_PROOF_MAX_V1 or
+       not wire.ends_with("\n") or wire.contains("\r") or
+       wire.contains("\x00"):
+        return nil
+    val lines = wire.split("\n")
+    if lines.len() != 9 or lines[0] != "simple-build-failure-proof-v1" or
+       not lines[1].starts_with("request=") or
+       not lines[2].starts_with("binding=") or
+       not lines[3].starts_with("attempt=") or
+       not lines[4].starts_with("fence=") or
+       not lines[5].starts_with("exit=") or
+       not lines[6].starts_with("result=") or
+       not lines[7].starts_with("terminal=") or lines[8] != "":
+        return nil
+    val request_digest = lines[1][8:]
+    val binding_digest = lines[2][8:]
+    val attempt_id = lines[3][8:]
+    val fence = lines[4][6:].to_i64() ?? -1
+    val exit_code = lines[5][5:].to_i64() ?? -1
+    val result_digest = lines[6][7:]
+    if encode_build_worker_failure_proof_v1(request_digest,
+            binding_digest, attempt_id, fence, exit_code,
+            result_digest) != wire:
+        return nil
+    BuildWorkerFailureProofV1(request_digest, binding_digest,
+        attempt_id, fence, exit_code, result_digest)
+
+export BUILD_WORKER_FAILURE_PROOF_MAX_V1, BuildWorkerFailureProofV1
+export encode_build_worker_failure_proof_v1
+export parse_build_worker_failure_proof_v1

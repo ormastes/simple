@@ -1,0 +1,138 @@
+use app.build.scheduler.prepared_upload.{prepare_build_request_upload_v1,
+    transfer_prepared_build_request_v1, release_prepared_build_request_v1}
+use app.build.scheduler.trusted_ssh.{TrustedSshNodeV1}
+use app.build.scheduler.trusted_sftp.{TrustedSftpConfigV1}
+use app.build.scheduler.worker_request.{BuildWorkerRequestV1}
+use app.io.mod.{cwd, dir_create_all, dir_remove_all, file_atomic_write,
+    file_exists, file_hash_sha256, file_read, file_write_bytes,
+    file_read_regular_no_follow_bounded_bytes, getpid, time_now_unix_micros}
+use compiler.common.build_contract.{BuildInputRef, SnapshotManifest,
+    ToolchainManifest, InputManifest, ActionSpec, AttemptSpec,
+    action_spec_digest_v1}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+
+describe "prepared build upload":
+    it "freezes source bytes and rejects a modified SFTP batch":
+        val root = cwd() + "/build/test/prepared-upload-" +
+            getpid().to_text() + "-" + time_now_unix_micros().to_text()
+        val source = root + "/source"
+        expect(dir_create_all(source + "/src")).to_be(true)
+        val original = "int answer(void) { return 42; }\n"
+        expect(file_atomic_write(source + "/src/answer.c", original)).to_be(true)
+        val ssh = root + "/ssh"
+        val sftp = root + "/sftp"
+        val hosts = root + "/known_hosts"
+        val key = root + "/identity"
+        expect(file_atomic_write(ssh, "fake ssh\n")).to_be(true)
+        expect(file_atomic_write(sftp, "fake sftp\n")).to_be(true)
+        expect(file_atomic_write(hosts,
+            "node-a ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeTestOnly\n"))
+            .to_be(true)
+        expect(file_atomic_write(key, "fake key\n")).to_be(true)
+        val node = TrustedSshNodeV1("node-a", "127.0.0.1", "builder", 2222,
+            ssh, file_hash_sha256(ssh), hosts, file_hash_sha256(hosts),
+            key, file_hash_sha256(key))
+        val config = TrustedSftpConfigV1(node, sftp, file_hash_sha256(sftp),
+            "/srv/simple-build-inbox")
+        val snapshot = sha256_text("prepared snapshot")
+        val action = ActionSpec(1, "compile",
+            SnapshotManifest(1, snapshot, sha256_text("source"),
+                sha256_text("submodules")),
+            ToolchainManifest(1, sha256_text("compiler"),
+                sha256_text("behavior"), sha256_text("abi"),
+                sha256_text("runtime"), sha256_text("sysroot"),
+                "x86_64-unknown-linux-gnu"),
+            InputManifest(1, snapshot,
+                [BuildInputRef("src/answer.c", sha256_text(original))],
+                [], [], [], [], [], sha256_text("context"), true, false),
+            ["cc", "-c"], "src", sha256_text("sandbox"),
+            ["answer.o"], sha256_text("resources"))
+        val attempt = AttemptSpec(1, action_spec_digest_v1(action),
+            "try-1", "node-a", 0, 0, 4096)
+        val request = BuildWorkerRequestV1(action, attempt, 7, 1, 8)
+        val prepared = prepare_build_request_upload_v1(config, request,
+            source, root + "/retained", root)
+        expect(prepared.ready).to_be(true)
+        expect(file_atomic_write(source + "/src/answer.c", "changed\n"))
+            .to_be(true)
+        expect(file_read(prepared.root + "/inputs/src/answer.c"))
+            .to_equal(original)
+        expect(prepared.plan.input_plan.batch).to_contain(
+            "put " + prepared.root + "/inputs/src/answer.c ")
+        expect(file_atomic_write(prepared.input_batch_path, "changed\n"))
+            .to_be(true)
+        val transfer = transfer_prepared_build_request_v1(config, prepared)
+        expect(transfer.ready).to_be(false)
+        expect(transfer.reason).to_equal("prepared-batch-changed")
+        var rejected_with_root = prepared
+        rejected_with_root.ready = false
+        expect(release_prepared_build_request_v1(rejected_with_root)).to_be(true)
+        expect(file_exists(prepared.root)).to_be(false)
+        expect(dir_remove_all(root)).to_be(true)
+
+    it "streams binary input beyond one chunk and rejects a wrong digest":
+        val root = cwd() + "/build/test/prepared-upload-binary-" +
+            getpid().to_text() + "-" + time_now_unix_micros().to_text()
+        val source = root + "/source"
+        expect(dir_create_all(source + "/src")).to_be(true)
+        var payload = "A".repeat(1048576).bytes()
+        payload.push(0.to_u8())
+        expect(file_write_bytes(source + "/src/object.bin", payload))
+            .to_be(true)
+        val ssh = root + "/ssh"
+        val sftp = root + "/sftp"
+        val hosts = root + "/known_hosts"
+        val key = root + "/identity"
+        expect(file_atomic_write(ssh, "fake ssh\n")).to_be(true)
+        expect(file_atomic_write(sftp, "fake sftp\n")).to_be(true)
+        expect(file_atomic_write(hosts,
+            "node-a ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeTestOnly\n"))
+            .to_be(true)
+        expect(file_atomic_write(key, "fake key\n")).to_be(true)
+        val node = TrustedSshNodeV1("node-a", "127.0.0.1", "builder", 2222,
+            ssh, file_hash_sha256(ssh), hosts, file_hash_sha256(hosts),
+            key, file_hash_sha256(key))
+        val config = TrustedSftpConfigV1(node, sftp, file_hash_sha256(sftp),
+            "/srv/simple-build-inbox")
+        val snapshot = sha256_text("prepared binary snapshot")
+        val digest = sha256_u8_hex(payload)
+        val action = ActionSpec(1, "compile",
+            SnapshotManifest(1, snapshot, sha256_text("source"),
+                sha256_text("submodules")),
+            ToolchainManifest(1, sha256_text("compiler"),
+                sha256_text("behavior"), sha256_text("abi"),
+                sha256_text("runtime"), sha256_text("sysroot"),
+                "x86_64-unknown-linux-gnu"),
+            InputManifest(1, snapshot,
+                [BuildInputRef("src/object.bin", digest)],
+                [], [], [], [], [], sha256_text("context"), true, false),
+            ["cc", "-c"], "src", sha256_text("sandbox"),
+            ["answer.o"], sha256_text("resources"))
+        val attempt = AttemptSpec(1, action_spec_digest_v1(action),
+            "try-binary", "node-a", 0, 0, 4096)
+        val request = BuildWorkerRequestV1(action, attempt, 7, 1, 8)
+        val prepared = prepare_build_request_upload_v1(config, request,
+            source, root + "/retained", root)
+        expect(prepared.ready).to_be(true)
+        val copied = file_read_regular_no_follow_bounded_bytes(
+            prepared.root + "/inputs/src/object.bin", 1048577)
+        expect(copied.is_ok()).to_be(true)
+        expect(copied.unwrap()).to_equal(payload)
+        expect(release_prepared_build_request_v1(prepared)).to_be(true)
+
+        val wrong_action = ActionSpec(1, "compile", action.snapshot,
+            action.toolchain,
+            InputManifest(1, snapshot,
+                [BuildInputRef("src/object.bin", sha256_text("wrong"))],
+                [], [], [], [], [], sha256_text("context"), true, false),
+            ["cc", "-c"], "src", sha256_text("sandbox"),
+            ["answer.o"], sha256_text("resources"))
+        val wrong_request = BuildWorkerRequestV1(wrong_action,
+            AttemptSpec(1, action_spec_digest_v1(wrong_action),
+                "try-binary-wrong", "node-a", 0, 0, 4096), 7, 1, 8)
+        val rejected = prepare_build_request_upload_v1(config, wrong_request,
+            source, root + "/retained", root)
+        expect(rejected.ready).to_be(false)
+        expect(rejected.reason).to_equal("snapshot-source-digest-mismatch")
+        expect(file_hash_sha256(source + "/src/object.bin")).to_equal(digest)
+        expect(dir_remove_all(root)).to_be(true)

@@ -1,0 +1,237 @@
+# Pure gate receipt validation. The expectation models the trusted admission
+# context supplied by an eventual CI or integration caller.
+
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use app.build.gate_receipt.{
+    GATE_RECEIPT_SCHEMA_V1, GateObservation, GateReceipt,
+    GateReceiptExpectation, validate_gate_receipt_v1, gate_receipt_digest_v1
+}
+use app.build.signed_build_admission.{SignedBuildExpectationV1,
+    SignedBuildExpectationV2}
+use app.build.signed_build_gate_provider.{verify_protected_gate_receipt_v2,
+    verify_protected_bootstrap_gates_v2}
+
+val BASE = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val HEAD = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+val TREE = "cccccccccccccccccccccccccccccccccccccccc"
+val POLICY = sha256_text("protected-policy")
+val CHECKER = sha256_text("base-owned-checker")
+val SUBMODULES = sha256_text("selected-submodule-closure")
+val EVIDENCE = sha256_text("gate-transcript")
+
+fn _expected() -> GateReceiptExpectation:
+    GateReceiptExpectation(
+        BASE, HEAD, TREE, POLICY, CHECKER, SUBMODULES,
+        "protected-ci", ["compile", "platform"]
+    )
+
+fn _receipt(rows: [GateObservation]) -> GateReceipt:
+    GateReceipt(
+        GATE_RECEIPT_SCHEMA_V1, BASE, HEAD, TREE, POLICY, CHECKER,
+        SUBMODULES, "protected-ci", ["compile", "platform"], rows
+    )
+
+fn _pass_row(id: text) -> GateObservation:
+    GateObservation(id, "PASS", EVIDENCE, "")
+
+fn _na_row(id: text) -> GateObservation:
+    GateObservation(id, "NOT_APPLICABLE", EVIDENCE, "platform not selected")
+
+fn _build_expected(gate_digest: text) -> SignedBuildExpectationV2:
+    val build = SignedBuildExpectationV1(
+        base_revision: BASE, head_revision: HEAD, candidate_tree: TREE,
+        target_id: "compiler-stage2", execution_platform: "linux-x86_64",
+        output_target: "x86_64-linux", toolchain_digest: POLICY,
+        action_digest: POLICY, input_manifest_digest: POLICY,
+        submodule_closure_digest: SUBMODULES,
+        protected_policy_digest: POLICY, checker_digest: CHECKER,
+        mandatory_gate_receipt_digest: gate_digest,
+        allowed_signer_id: "builder", allowed_signer_scope: "build",
+        now_utc: "2026-09-25T11:00:00Z",
+        max_expires_at_utc: "2026-09-26T11:00:00Z")
+    SignedBuildExpectationV2("simple-lang/simple", 42, build)
+
+describe("gate receipt validation"):
+    it "accepts complete PASS and evidenced non-applicability":
+        val result = validate_gate_receipt_v1(
+            _receipt([_pass_row("compile"), _na_row("platform")]), _expected()
+        )
+        expect(result.verdict).to_equal("PASS")
+        expect(result.errors.len()).to_equal(0)
+        expect(result.remaining_ids.len()).to_equal(0)
+
+    it "keeps FAIL and all-NOT_APPLICABLE distinct":
+        val failed = validate_gate_receipt_v1(_receipt([
+            GateObservation("compile", "FAIL", EVIDENCE, "compiler error"),
+            _pass_row("platform")
+        ]), _expected())
+        expect(failed.verdict).to_equal("FAIL")
+        val inapplicable = validate_gate_receipt_v1(
+            _receipt([_na_row("compile"), _na_row("platform")]), _expected()
+        )
+        expect(inapplicable.verdict).to_equal("NOT_APPLICABLE")
+
+    it "reports missing mandatory work and an explicit incomplete observation":
+        val missing = validate_gate_receipt_v1(
+            _receipt([_pass_row("compile")]), _expected()
+        )
+        expect(missing.verdict).to_equal("INCOMPLETE")
+        expect(missing.remaining_ids).to_equal(["platform"])
+        val incomplete = validate_gate_receipt_v1(_receipt([
+            _pass_row("compile"),
+            GateObservation("platform", "INCOMPLETE", "", "deadline")
+        ]), _expected())
+        expect(incomplete.verdict).to_equal("INCOMPLETE")
+        val malformed = validate_gate_receipt_v1(_receipt([
+            _pass_row("compile"),
+            GateObservation("platform", "INCOMPLETE", "unknown", "deadline")
+        ]), _expected())
+        expect(malformed.errors).to_contain("invalid-evidence:platform")
+
+    it "requires evidence for PASS, FAIL, and NOT_APPLICABLE":
+        val no_pass = validate_gate_receipt_v1(_receipt([
+            GateObservation("compile", "PASS", "", ""), _pass_row("platform")
+        ]), _expected())
+        expect(no_pass.verdict).to_equal("INCOMPLETE")
+        expect(no_pass.errors).to_contain("missing-or-invalid-evidence:compile")
+        val no_fail = validate_gate_receipt_v1(_receipt([
+            GateObservation("compile", "FAIL", "", "broken"), _pass_row("platform")
+        ]), _expected())
+        expect(no_fail.verdict).to_equal("INCOMPLETE")
+        val no_applicability = validate_gate_receipt_v1(_receipt([
+            _pass_row("compile"), GateObservation("platform", "NOT_APPLICABLE", EVIDENCE, "")
+        ]), _expected())
+        expect(no_applicability.errors).to_contain("missing-applicability-evidence:platform")
+
+    it "rejects duplicate, unknown, and unrecognized observations":
+        val duplicate = validate_gate_receipt_v1(_receipt([
+            _pass_row("compile"), _pass_row("compile"), _pass_row("platform")
+        ]), _expected())
+        expect(duplicate.verdict).to_equal("INCOMPLETE")
+        expect(duplicate.errors).to_contain("duplicate-observation:compile")
+        val unknown = validate_gate_receipt_v1(_receipt([
+            _pass_row("compile"), _pass_row("platform"), _pass_row("extra")
+        ]), _expected())
+        expect(unknown.errors).to_contain("unknown-observation:extra")
+        val status = validate_gate_receipt_v1(_receipt([
+            _pass_row("compile"), GateObservation("platform", "SKIPPED", EVIDENCE, "")
+        ]), _expected())
+        expect(status.errors).to_contain("unknown-status:platform")
+
+    it "binds base, head, candidate tree, policy, checker, closure, and issuer":
+        var receipt = _receipt([_pass_row("compile"), _pass_row("platform")])
+        receipt.base_revision = HEAD
+        receipt.head_revision = BASE
+        receipt.candidate_tree = HEAD
+        receipt.protected_policy_digest = CHECKER
+        receipt.checker_implementation_digest = POLICY
+        receipt.submodule_closure_digest = POLICY
+        receipt.issuer = "candidate-script"
+        val result = validate_gate_receipt_v1(receipt, _expected())
+        expect(result.verdict).to_equal("INCOMPLETE")
+        expect(result.errors).to_contain("base-revision-mismatch")
+        expect(result.errors).to_contain("head-revision-mismatch")
+        expect(result.errors).to_contain("candidate-tree-mismatch")
+        expect(result.errors).to_contain("protected-policy-digest-mismatch")
+        expect(result.errors).to_contain("checker-implementation-digest-mismatch")
+        expect(result.errors).to_contain("submodule-closure-digest-mismatch")
+        expect(result.errors).to_contain("issuer-mismatch")
+
+    it "compares complete declared mandatory IDs with trusted IDs":
+        var receipt = _receipt([_pass_row("compile"), _pass_row("platform")])
+        receipt.expected_mandatory_ids = ["compile", "compile"]
+        val duplicate = validate_gate_receipt_v1(receipt, _expected())
+        expect(duplicate.errors).to_contain("duplicate-mandatory-id:compile")
+        expect(duplicate.errors).to_contain("mandatory-set-mismatch")
+        receipt.expected_mandatory_ids = ["compile", "extra"]
+        val changed = validate_gate_receipt_v1(receipt, _expected())
+        expect(changed.errors).to_contain("mandatory-set-mismatch")
+
+    it "rejects malformed schema and untrusted admission identities":
+        var receipt = _receipt([_pass_row("compile"), _pass_row("platform")])
+        receipt.schema = "future-schema"
+        var expected = _expected()
+        expected.base_revision = "not-a-revision"
+        expected.protected_policy_digest = "not-a-digest"
+        val result = validate_gate_receipt_v1(receipt, expected)
+        expect(result.verdict).to_equal("INCOMPLETE")
+        expect(result.errors).to_contain("unsupported-schema")
+        expect(result.errors).to_contain("invalid-trusted-revision")
+        expect(result.errors).to_contain("protected-policy-digest-mismatch")
+
+describe("protected signed build gate bridge"):
+    it "produces VERIFIED only for exact complete PASS receipt digest":
+        val receipt = _receipt([_pass_row("compile"), _pass_row("platform")])
+        val digest = gate_receipt_digest_v1(receipt)
+        val passed = verify_protected_gate_receipt_v2(receipt,
+            _build_expected(digest), ["compile", "platform"], "protected-ci")
+        expect(passed.verified).to_equal(true)
+        expect(passed.gates.build.status).to_equal("VERIFIED")
+        expect(passed.gates.build.receipt_digest).to_equal(digest)
+        expect(passed.gates.repository_full_name).to_equal("simple-lang/simple")
+        expect(passed.gates.pull_request_number).to_equal(42)
+
+    it "rejects changed digest, incomplete, failed and unselected policy":
+        val receipt = _receipt([_pass_row("compile"), _pass_row("platform")])
+        val expected = _build_expected(gate_receipt_digest_v1(receipt))
+        var changed = receipt
+        changed.observed = [_pass_row("platform"), _pass_row("compile")]
+        expect(verify_protected_gate_receipt_v2(changed, expected,
+            ["compile", "platform"], "protected-ci").verified).to_equal(false)
+        var missing = receipt
+        missing.observed = [_pass_row("compile")]
+        expect(verify_protected_gate_receipt_v2(missing, expected,
+            ["compile", "platform"], "protected-ci").verified).to_equal(false)
+        var failed = receipt
+        failed.observed = [_pass_row("compile"),
+            GateObservation("platform", "FAIL", EVIDENCE, "failed")]
+        expect(verify_protected_gate_receipt_v2(failed, expected,
+            ["compile", "platform"], "protected-ci").verified).to_equal(false)
+        expect(verify_protected_gate_receipt_v2(receipt, expected,
+            ["compile", "extra"], "protected-ci").verified).to_equal(false)
+        var exempted = receipt
+        exempted.observed = [_pass_row("compile"), _na_row("platform")]
+        expect(verify_protected_gate_receipt_v2(exempted,
+            _build_expected(gate_receipt_digest_v1(exempted)),
+            ["compile", "platform"], "protected-ci").verified).to_equal(false)
+
+    it "conservatively derives every bootstrap row from protected manifest bytes":
+        val manifest = "must_check_gates |id, tier, push_blocking, mode, command, ci_job, inputs, description|\n" +
+            "    compile, bootstrap, true, receipt, \"build\", -, -, \"compiler\"\n" +
+            "    platform, bootstrap, true, receipt, \"build\", -, -, \"platform\"\n" +
+            "    rules-full, bootstrap, false, automated, \"check\", -, -, \"separate bootstrap gate\"\n" +
+            "    idiom, ci, true, tree, \"check\", code-idiom-gates, *, \"separate job\"\n" +
+            "    pr-fast, pr, false, range, \"check\", pr-fast-check, -, \"separate PR job\"\n"
+        var receipt = _receipt([_pass_row("compile"), _pass_row("platform"),
+            _pass_row("rules-full")])
+        receipt.expected_mandatory_ids = ["compile", "platform", "rules-full"]
+        val expected = _build_expected(gate_receipt_digest_v1(receipt))
+        val passed = verify_protected_bootstrap_gates_v2(receipt, expected,
+            manifest, sha256_text(manifest), "protected-ci")
+        expect(passed.verified).to_equal(true)
+        expect(verify_protected_bootstrap_gates_v2(receipt, expected,
+            manifest, sha256_text("other-manifest"),
+            "protected-ci").verified).to_equal(false)
+        val added = manifest +
+            "    new-gate, bootstrap, false, automated, \"check\", -, -, \"new\"\n"
+        expect(verify_protected_bootstrap_gates_v2(receipt, expected,
+            added, sha256_text(added), "protected-ci").verified).to_equal(false)
+        val malformed = manifest.replace("must_check_gates |id, tier", 
+            "must_check_gates |gate_id, tier")
+        expect(verify_protected_bootstrap_gates_v2(receipt, expected,
+            malformed, sha256_text(malformed),
+            "protected-ci").verified).to_equal(false)
+        val short_row = manifest.replace(
+            "compile, bootstrap, true, receipt, \"build\", -, -, \"compiler\"",
+            "compile, bootstrap, true, receipt, \"build\", \"compiler\"")
+        expect(verify_protected_bootstrap_gates_v2(receipt, expected,
+            short_row, sha256_text(short_row),
+            "protected-ci").verified).to_equal(false)
+        var omitted = receipt
+        omitted.observed = [_pass_row("compile"), _pass_row("platform")]
+        omitted.expected_mandatory_ids = ["compile", "platform"]
+        expect(verify_protected_bootstrap_gates_v2(omitted,
+            _build_expected(gate_receipt_digest_v1(omitted)),
+            manifest, sha256_text(manifest),
+            "protected-ci").verified).to_equal(false)
