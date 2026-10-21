@@ -1,0 +1,570 @@
+# EE-01 bounded residual coverage. Execution: UNRUN by lane instruction.
+# These exercise the algorithm with actual MIR declarations; producer provenance
+# and final CFG/site binding belong to the independent frontend/API suite.
+use std.spec.{describe, it, expect}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_types.{LocalId, MirType, MirTypeKind, MirConstValue,
+    MirTypeDef, MirTypeDefKind, MirVariantDef}
+use compiler.mir.mir_instruction_support.{BlockId, MirOperand, MirOperandKind}
+use compiler.mir.mir_instruction_graph.{MirModule}
+use compiler.mir.mir_enum_semantic_types.{MirEnumPatternKindV1,
+    MirEnumPatternNodeV1, MirEnumArmSemanticV1, MirEnumMatchSemanticV1,
+    MirEnumDeclarationIdentityV1, MirEnumVariantSlotsV1}
+use compiler.mir.enum_pattern_totality_v1.{enum_pattern_totality_v1,
+    enum_pattern_totality_bounded_v1, enum_pattern_decision_plan_v1,
+    EnumPatternDecisionKindV1, EnumPatternDecisionTestV1}
+
+fn ept_test_enum(owner: i64) -> MirType:
+    MirType(kind: MirTypeKind.Enum(SymbolId(id: owner)))
+
+fn ept_test_node(kind: MirEnumPatternKindV1, type_: MirType) -> MirEnumPatternNodeV1:
+    MirEnumPatternNodeV1(kind: kind, expected_type: type_, source_span: Span.empty())
+
+fn ept_test_module(payload: MirType?) -> MirModule:
+    val owner = SymbolId(id: 101)
+    val definition = MirTypeDef(symbol: owner, name: "Box",
+        kind: MirTypeDefKind.Enum([MirVariantDef(name: "Box", discriminant: 7,
+            payload: payload)]), is_export_c: false, export_name: "")
+    var declarations: Dict<SymbolId, MirTypeDef> = {}
+    declarations[owner] = definition
+    MirModule(name: "coverage", functions: {}, statics: {}, constants: {},
+        types: declarations)
+
+fn ept_test_semantic(nodes: [MirEnumPatternNodeV1], roots: [i64],
+        guarded: bool) -> MirEnumMatchSemanticV1:
+    var arms: [MirEnumArmSemanticV1] = []
+    for index in 0..roots.len():
+        arms.push(MirEnumArmSemanticV1(source_arm_id: index,
+            expanded_alternative_index: 0, pattern_root: roots[index],
+            guard_entry: if guarded: Some(BlockId(id: 1)) else: nil,
+            guard_result: nil, body_entry: BlockId(id: 2),
+            body_exit_blocks: [BlockId(id: 2)],
+            pattern_failure_entry: BlockId(id: 3),
+            guard_failure_entry: BlockId(id: 3), source_span: Span.empty()))
+    MirEnumMatchSemanticV1(match_id: 0, enum_owner: SymbolId(id: 101),
+        scrutinee_operand: MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+        scrutinee_semantic_type: ept_test_enum(101), entry_block: BlockId(id: 0),
+        result_local: LocalId(id: 1), merge_block: BlockId(id: 4),
+        pattern_nodes: nodes, arms: arms, sites: [], source_span: Span.empty(),
+        declaration_identity: "", subject_identity: "")
+
+fn ept_test_status(module: MirModule, semantic: MirEnumMatchSemanticV1) -> text:
+    match enum_pattern_totality_v1(module, semantic):
+        case Ok(_): "covered"
+        case Err(message): message
+
+fn ept_test_bool_nodes() -> [MirEnumPatternNodeV1]:
+    [
+        ept_test_node(MirEnumPatternKindV1.Literal(MirConstValue.Bool(true),
+            MirType.bool()), MirType.bool()),
+        ept_test_node(MirEnumPatternKindV1.Literal(MirConstValue.Bool(false),
+            MirType.bool()), MirType.bool()),
+        ept_test_node(MirEnumPatternKindV1.Variant(SymbolId(id: 101), 7, [0]),
+            ept_test_enum(101)),
+        ept_test_node(MirEnumPatternKindV1.Variant(SymbolId(id: 101), 7, [1]),
+            ept_test_enum(101))
+    ]
+
+describe "EE-01 ordered typed decision plan":
+    it "admits syntax height 128 when the independent shared work budget fits":
+        # A singleton-Or ladder exercises the actual syntactic node boundary
+        # without growing constructor projection paths. This does not claim
+        # that every depth-128 source pattern fits the cumulative work budget.
+        var nodes = [ept_test_node(MirEnumPatternKindV1.Wildcard, ept_test_enum(101))]
+        for index in 1..128:
+            nodes.push(ept_test_node(MirEnumPatternKindV1.Or([index - 1]),
+                ept_test_enum(101)))
+        val module = ept_test_module(nil)
+        match enum_pattern_decision_plan_v1(module,
+                ept_test_semantic(nodes, [127], false), 65536):
+            case Ok(plan):
+                expect(plan.remaining_work).to_be_greater_than(0)
+                expect(plan.nodes.len()).to_equal(1)
+            case Err(message): expect(message).to_equal("syntax height 128 admitted")
+        nodes.push(ept_test_node(MirEnumPatternKindV1.Or([127]), ept_test_enum(101)))
+        match enum_pattern_decision_plan_v1(module,
+                ept_test_semantic(nodes, [128], false), 65536):
+            case Ok(_): expect("accepted").to_equal("syntax height 129 refused")
+            case Err(message):
+                expect(message).to_start_with("EE-E-LIMIT")
+                expect(message).to_contain("pattern")
+                expect(message).to_contain("128")
+
+    it "refuses an uncovered payload instead of emitting a residual fallback":
+        val semantic = ept_test_semantic(ept_test_bool_nodes(), [2], false)
+        match enum_pattern_decision_plan_v1(ept_test_module(Some(MirType.bool())),
+                semantic, 65536):
+            case Ok(_): expect("accepted").to_equal("uncovered payload refused")
+            case Err(message): expect(message).to_start_with("EE-E-RESIDUAL")
+
+    it "emits complete Bool partitions without a residual leaf":
+        val semantic = ept_test_semantic(ept_test_bool_nodes(), [2, 3], false)
+        match enum_pattern_decision_plan_v1(ept_test_module(Some(MirType.bool())),
+                semantic, 65536):
+            case Err(message): expect(message).to_equal("planned")
+            case Ok(plan):
+                expect(plan.remaining_work).to_be_less_than(65536)
+                var leaves: [i64] = []
+                var saw_payload = false
+                for node in plan.nodes:
+                    match node.kind:
+                        case EnumPatternDecisionKindV1.SelectArm(arm, _, failure):
+                            expect(failure == nil).to_equal(true)
+                            leaves.push(arm)
+                        case EnumPatternDecisionKindV1.Test(path, edges):
+                            if path.key == "$.e101:7:0":
+                                saw_payload = true
+                                expect(edges.len()).to_equal(2)
+                                expect(path.steps.len()).to_equal(1)
+                        case EnumPatternDecisionKindV1.Residual:
+                            expect("residual").to_equal("complete")
+                expect(leaves.len()).to_equal(2)
+                expect(leaves).to_contain(0)
+                expect(leaves).to_contain(1)
+                expect(saw_payload).to_equal(true)
+
+    it "selects a guarded binder and resumes the next expanded arm":
+        val nodes = [
+            ept_test_node(MirEnumPatternKindV1.Bind(
+                SymbolId(id: 33), LocalId(id: 5)), ept_test_enum(101)),
+            ept_test_node(MirEnumPatternKindV1.Wildcard, ept_test_enum(101))
+        ]
+        var semantic = ept_test_semantic(nodes, [0, 1], true)
+        var fallback = semantic.arms[1]
+        fallback.guard_entry = nil
+        semantic.arms[1] = fallback
+        match enum_pattern_decision_plan_v1(ept_test_module(nil), semantic, 65536):
+            case Err(message): expect(message).to_equal("planned")
+            case Ok(plan):
+                match plan.nodes[plan.root_node].kind:
+                    case EnumPatternDecisionKindV1.SelectArm(arm, bindings, failure):
+                        expect(arm).to_equal(0)
+                        expect(bindings.len()).to_equal(1)
+                        expect(bindings[0].destination_local.id).to_equal(5)
+                        expect(bindings[0].value_path.key).to_equal("$")
+                        if val target = failure:
+                            match plan.nodes[target].kind:
+                                case EnumPatternDecisionKindV1.SelectArm(next_arm, _, next_failure):
+                                    expect(next_arm).to_equal(1)
+                                    expect(next_failure == nil).to_equal(true)
+                                case _: expect("test").to_equal("fallback leaf")
+                        else:
+                            expect("absent").to_equal("guard continuation")
+                    case _: expect("test").to_equal("guarded leaf")
+
+    it "retains integer literal edges and a real unconditional other branch":
+        val nodes = [
+            ept_test_node(MirEnumPatternKindV1.Literal(
+                MirConstValue.Int(4), MirType.i64()), MirType.i64()),
+            ept_test_node(MirEnumPatternKindV1.Variant(
+                SymbolId(id: 101), 7, [0]), ept_test_enum(101)),
+            ept_test_node(MirEnumPatternKindV1.Wildcard, ept_test_enum(101))
+        ]
+        val semantic = ept_test_semantic(nodes, [1, 2], false)
+        match enum_pattern_decision_plan_v1(ept_test_module(Some(MirType.i64())),
+                semantic, 65536):
+            case Err(message): expect(message).to_equal("planned")
+            case Ok(plan):
+                var literal_edges = 0
+                var other_edges = 0
+                for node in plan.nodes:
+                    match node.kind:
+                        case EnumPatternDecisionKindV1.Test(_, edges):
+                            for edge in edges:
+                                match edge.test:
+                                    case EnumPatternDecisionTestV1.Integer(value):
+                                        expect(value).to_equal(4)
+                                        literal_edges = literal_edges + 1
+                                    case EnumPatternDecisionTestV1.OtherInteger:
+                                        other_edges = other_edges + 1
+                                    case _: ()
+                        case _: ()
+                expect(literal_edges).to_equal(1)
+                expect(other_edges).to_equal(1)
+
+    it "does not reject admitted closed payloads matched by a wildcard":
+        val payloads = [
+            MirType(kind: MirTypeKind.Char),
+            MirType(kind: MirTypeKind.Array(MirType.bool(), 3)),
+            MirType(kind: MirTypeKind.Result(MirType.bool(), MirType.i64()))
+        ]
+        for payload in payloads:
+            val nodes = [
+                ept_test_node(MirEnumPatternKindV1.Wildcard, payload),
+                ept_test_node(MirEnumPatternKindV1.Variant(
+                    SymbolId(id: 101), 7, [0]), ept_test_enum(101))
+            ]
+            match enum_pattern_decision_plan_v1(ept_test_module(Some(payload)),
+                    ept_test_semantic(nodes, [1], false), 65536):
+                case Ok(plan): expect(plan.nodes.len()).to_be_greater_than(0)
+                case Err(message): expect(message).to_equal("planned")
+
+    it "checks a wildcard struct payload against its actual nominal declaration":
+        val symbol = SymbolId(id: 303)
+        val payload = MirType(kind: MirTypeKind.Struct(symbol))
+        var module = ept_test_module(Some(payload))
+        module.types[symbol] = MirTypeDef(symbol: symbol, name: "Payload",
+            kind: MirTypeDefKind.Struct([]), is_export_c: false, export_name: "")
+        val nodes = [
+            ept_test_node(MirEnumPatternKindV1.Bind(
+                SymbolId(id: 34), LocalId(id: 6)), payload),
+            ept_test_node(MirEnumPatternKindV1.Variant(
+                SymbolId(id: 101), 7, [0]), ept_test_enum(101))
+        ]
+        val semantic = ept_test_semantic(nodes, [1], false)
+        match enum_pattern_decision_plan_v1(module, semantic, 65536):
+            case Ok(plan):
+                var found = false
+                for node in plan.nodes:
+                    match node.kind:
+                        case EnumPatternDecisionKindV1.SelectArm(_, bindings, _):
+                            expect(bindings.len()).to_equal(1)
+                            expect(bindings[0].value_path.key).to_equal("$.e101:7:0")
+                            found = true
+                        case _: ()
+                expect(found).to_equal(true)
+            case Err(message): expect(message).to_equal("planned")
+        module.types[symbol] = MirTypeDef(symbol: symbol, name: "WrongKind",
+            kind: MirTypeDefKind.Enum([]), is_export_c: false, export_name: "")
+        match enum_pattern_decision_plan_v1(module, semantic, 65536):
+            case Ok(_): expect("accepted").to_equal("wrong nominal kind refused")
+            case Err(message): expect(message).to_start_with("EE-E-DECLARATION")
+
+    it "expands Or wildcards on a closed domain without testing its representation":
+        val payload = MirType(kind: MirTypeKind.Char)
+        val nodes = [
+            ept_test_node(MirEnumPatternKindV1.Wildcard, payload),
+            ept_test_node(MirEnumPatternKindV1.Or([0, 0]), payload),
+            ept_test_node(MirEnumPatternKindV1.Variant(
+                SymbolId(id: 101), 7, [1]), ept_test_enum(101))
+        ]
+        match enum_pattern_decision_plan_v1(ept_test_module(Some(payload)),
+                ept_test_semantic(nodes, [2], false), 65536):
+            case Err(message): expect(message).to_equal("planned")
+            case Ok(plan):
+                var tests = 0
+                for node in plan.nodes:
+                    match node.kind:
+                        case EnumPatternDecisionKindV1.Test(path, _):
+                            tests = tests + 1
+                            expect(path.key).to_equal("$")
+                        case _: ()
+                expect(tests).to_equal(1)
+
+    it "preserves a single tuple-valued slot from retained declaration facts":
+        val pair = MirType(kind: MirTypeKind.Tuple([MirType.bool(), MirType.bool()]))
+        var module = ept_test_module(Some(pair))
+        var facts = MirEnumDeclarationIdentityV1(owner: SymbolId(id: 101),
+            source_owner: SymbolId(id: 101), runtime_name: "Box", runtime_identity: 2,
+            variants: [MirEnumVariantSlotsV1(discriminant: 7,
+                source_variant: SymbolId(id: 102), slot_types: [pair], slot_names: [])])
+        module.enum_semantic_declarations = [facts]
+        val nodes = [
+            ept_test_node(MirEnumPatternKindV1.Literal(
+                MirConstValue.Bool(true), MirType.bool()), MirType.bool()),
+            ept_test_node(MirEnumPatternKindV1.Literal(
+                MirConstValue.Bool(false), MirType.bool()), MirType.bool()),
+            ept_test_node(MirEnumPatternKindV1.Wildcard, MirType.bool()),
+            ept_test_node(MirEnumPatternKindV1.Tuple([0, 2]), pair),
+            ept_test_node(MirEnumPatternKindV1.Tuple([1, 2]), pair),
+            ept_test_node(MirEnumPatternKindV1.Variant(
+                SymbolId(id: 101), 7, [3]), ept_test_enum(101)),
+            ept_test_node(MirEnumPatternKindV1.Variant(
+                SymbolId(id: 101), 7, [4]), ept_test_enum(101))
+        ]
+        val semantic = ept_test_semantic(nodes, [5, 6], false)
+        match enum_pattern_decision_plan_v1(module, semantic, 65536):
+            case Err(message): expect(message).to_equal("planned")
+            case Ok(plan):
+                var tuple_field = false
+                for node in plan.nodes:
+                    match node.kind:
+                        case EnumPatternDecisionKindV1.Test(path, _):
+                            if path.key == "$.e101:7:0.t0":
+                                tuple_field = true
+                        case _: ()
+                expect(tuple_field).to_equal(true)
+        facts.variants = [MirEnumVariantSlotsV1(discriminant: 7,
+            source_variant: SymbolId(id: 102), slot_types: [MirType.bool()], slot_names: [])]
+        module.enum_semantic_declarations = [facts]
+        match enum_pattern_decision_plan_v1(module, semantic, 65536):
+            case Ok(_): expect("accepted").to_equal("wrong payload type refused")
+            case Err(message): expect(message).to_start_with("EE-E-DECLARATION")
+
+    it "shares the same fallback between an integer other edge and false guard":
+        val nodes = [
+            ept_test_node(MirEnumPatternKindV1.Literal(
+                MirConstValue.Int(4), MirType.i64()), MirType.i64()),
+            ept_test_node(MirEnumPatternKindV1.Variant(
+                SymbolId(id: 101), 7, [0]), ept_test_enum(101)),
+            ept_test_node(MirEnumPatternKindV1.Wildcard, ept_test_enum(101))
+        ]
+        var semantic = ept_test_semantic(nodes, [1, 2], false)
+        var guarded = semantic.arms[0]
+        guarded.guard_entry = Some(BlockId(id: 8))
+        semantic.arms[0] = guarded
+        match enum_pattern_decision_plan_v1(ept_test_module(Some(MirType.i64())),
+                semantic, 65536):
+            case Err(message): expect(message).to_equal("planned")
+            case Ok(plan):
+                var fallback_count = 0
+                var fallback_node = -1
+                var false_target = -2
+                for index in 0..plan.nodes.len():
+                    match plan.nodes[index].kind:
+                        case EnumPatternDecisionKindV1.SelectArm(arm, _, failure):
+                            if arm == 1:
+                                fallback_count = fallback_count + 1
+                                fallback_node = index
+                            if arm == 0:
+                                false_target = failure ?? -2
+                        case _: ()
+                expect(fallback_count).to_equal(1)
+                expect(false_target).to_equal(fallback_node)
+
+    it "does not retry nested Or choices after one actual expanded arm guard":
+        val nodes = [
+            ept_test_node(MirEnumPatternKindV1.Wildcard, ept_test_enum(101)),
+            ept_test_node(MirEnumPatternKindV1.Or([0, 0]), ept_test_enum(101))
+        ]
+        var semantic = ept_test_semantic(nodes, [1, 0], false)
+        var guarded = semantic.arms[0]
+        guarded.guard_entry = Some(BlockId(id: 8))
+        semantic.arms[0] = guarded
+        match enum_pattern_decision_plan_v1(ept_test_module(nil), semantic, 65536):
+            case Err(message): expect(message).to_equal("planned")
+            case Ok(plan):
+                match plan.nodes[plan.root_node].kind:
+                    case EnumPatternDecisionKindV1.SelectArm(arm, _, failure):
+                        expect(arm).to_equal(0)
+                        if val target = failure:
+                            match plan.nodes[target].kind:
+                                case EnumPatternDecisionKindV1.SelectArm(next_arm, _, _):
+                                    expect(next_arm).to_equal(1)
+                                case _: expect("test").to_equal("next actual arm")
+                        else:
+                            expect("absent").to_equal("guard continuation")
+                    case _: expect("test").to_equal("guarded selection")
+
+describe "EE-01 symbolic enum residual totality":
+    it "accepts a nullary variant against the actual declaration":
+        val nodes = [ept_test_node(
+            MirEnumPatternKindV1.Variant(SymbolId(id: 101), 7, []),
+            ept_test_enum(101))]
+        expect(ept_test_status(ept_test_module(nil),
+            ept_test_semantic(nodes, [0], false))).to_equal("covered")
+
+    it "covers Bool payloads through both literals without a default":
+        expect(ept_test_status(ept_test_module(Some(MirType.bool())),
+            ept_test_semantic(ept_test_bool_nodes(), [2, 3], false))).to_equal("covered")
+
+    it "does not mistake covered outer variants for complete payloads":
+        expect(ept_test_status(ept_test_module(Some(MirType.bool())),
+            ept_test_semantic(ept_test_bool_nodes(), [2], false))).to_start_with("EE-E-RESIDUAL")
+
+    it "never treats guarded rows as unconditional coverage":
+        expect(ept_test_status(ept_test_module(Some(MirType.bool())),
+            ept_test_semantic(ept_test_bool_nodes(), [2, 3], true))).to_start_with("EE-E-RESIDUAL")
+
+    it "supports overlapping Or alternatives":
+        var nodes = ept_test_bool_nodes()
+        nodes.push(ept_test_node(MirEnumPatternKindV1.Or([2, 2, 3]),
+            ept_test_enum(101)))
+        expect(ept_test_status(ept_test_module(Some(MirType.bool())),
+            ept_test_semantic(nodes, [4], false))).to_equal("covered")
+
+    it "retains an integer other-value residual even for exhaustive small literals":
+        var nodes: [MirEnumPatternNodeV1] = []
+        var roots: [i64] = []
+        val byte = MirType(kind: MirTypeKind.U8)
+        for value in 0..256:
+            val child = nodes.len()
+            nodes.push(ept_test_node(MirEnumPatternKindV1.Literal(
+                MirConstValue.Int(value), byte), byte))
+            roots.push(nodes.len())
+            nodes.push(ept_test_node(MirEnumPatternKindV1.Variant(
+                SymbolId(id: 101), 7, [child]), ept_test_enum(101)))
+        expect(ept_test_status(ept_test_module(Some(byte)),
+            ept_test_semantic(nodes, roots, false))).to_start_with("EE-E-RESIDUAL")
+        nodes.push(ept_test_node(MirEnumPatternKindV1.Wildcard, ept_test_enum(101)))
+        roots.push(nodes.len() - 1)
+        expect(ept_test_status(ept_test_module(Some(byte)),
+            ept_test_semantic(nodes, roots, false))).to_equal("covered")
+
+    it "specializes a declared product without enumerating concrete payloads":
+        val pair = MirType(kind: MirTypeKind.Tuple([MirType.bool(), MirType.bool()]))
+        var nodes = ept_test_bool_nodes()
+        nodes[2] = ept_test_node(MirEnumPatternKindV1.Wildcard, MirType.bool())
+        nodes[3] = ept_test_node(MirEnumPatternKindV1.Variant(
+            SymbolId(id: 101), 7, [0, 2]), ept_test_enum(101))
+        nodes.push(ept_test_node(MirEnumPatternKindV1.Variant(
+            SymbolId(id: 101), 7, [1, 2]), ept_test_enum(101)))
+        expect(ept_test_status(ept_test_module(Some(pair)),
+            ept_test_semantic(nodes, [3, 4], false))).to_equal("covered")
+
+    it "leaves recursive wildcard payloads folded":
+        val recursive = ept_test_enum(101)
+        var module = ept_test_module(Some(recursive))
+        val owner = SymbolId(id: 101)
+        module.types[owner] = MirTypeDef(symbol: owner, name: "List",
+            kind: MirTypeDefKind.Enum([
+                MirVariantDef(name: "Cons", discriminant: 7, payload: Some(recursive)),
+                MirVariantDef(name: "Nil", discriminant: 8, payload: nil)]),
+            is_export_c: false, export_name: "")
+        val nodes = [
+            ept_test_node(MirEnumPatternKindV1.Wildcard, recursive),
+            ept_test_node(MirEnumPatternKindV1.Variant(
+                owner, 7, [0]), recursive),
+            ept_test_node(MirEnumPatternKindV1.Variant(owner, 8, []), recursive)
+        ]
+        expect(ept_test_status(module,
+            ept_test_semantic(nodes, [1, 2], false))).to_equal("covered")
+
+    it "covers a tuple nested within a single declared payload slot":
+        val pair = MirType(kind: MirTypeKind.Tuple([MirType.bool(), MirType.bool()]))
+        val slots = MirType(kind: MirTypeKind.Tuple([pair]))
+        var nodes = [
+            ept_test_node(MirEnumPatternKindV1.Literal(
+                MirConstValue.Bool(true), MirType.bool()), MirType.bool()),
+            ept_test_node(MirEnumPatternKindV1.Literal(
+                MirConstValue.Bool(false), MirType.bool()), MirType.bool()),
+            ept_test_node(MirEnumPatternKindV1.Wildcard, MirType.bool()),
+            ept_test_node(MirEnumPatternKindV1.Tuple([0, 2]), pair),
+            ept_test_node(MirEnumPatternKindV1.Tuple([1, 2]), pair),
+            ept_test_node(MirEnumPatternKindV1.Variant(
+                SymbolId(id: 101), 7, [3]), ept_test_enum(101)),
+            ept_test_node(MirEnumPatternKindV1.Variant(
+                SymbolId(id: 101), 7, [4]), ept_test_enum(101))
+        ]
+        expect(ept_test_status(ept_test_module(Some(slots)),
+            ept_test_semantic(nodes, [5, 6], false))).to_equal("covered")
+        nodes[4] = ept_test_node(MirEnumPatternKindV1.Tuple([1, 0]), pair)
+        expect(ept_test_status(ept_test_module(Some(slots)),
+            ept_test_semantic(nodes, [5, 6], false))).to_start_with("EE-E-RESIDUAL")
+
+    it "uses each nested enum's exact declared constructor set":
+        var module = ept_test_module(Some(ept_test_enum(202)))
+        val nested_owner = SymbolId(id: 202)
+        module.types[nested_owner] = MirTypeDef(symbol: nested_owner, name: "Inner",
+            kind: MirTypeDefKind.Enum([
+                MirVariantDef(name: "A", discriminant: -3, payload: nil),
+                MirVariantDef(name: "B", discriminant: 19, payload: nil)]),
+            is_export_c: false, export_name: "")
+        val nodes = [
+            ept_test_node(MirEnumPatternKindV1.Variant(nested_owner, -3, []),
+                ept_test_enum(202)),
+            ept_test_node(MirEnumPatternKindV1.Variant(nested_owner, 19, []),
+                ept_test_enum(202)),
+            ept_test_node(MirEnumPatternKindV1.Variant(
+                SymbolId(id: 101), 7, [0]), ept_test_enum(101)),
+            ept_test_node(MirEnumPatternKindV1.Variant(
+                SymbolId(id: 101), 7, [1]), ept_test_enum(101))
+        ]
+        expect(ept_test_status(module,
+            ept_test_semantic(nodes, [2, 3], false))).to_equal("covered")
+        expect(ept_test_status(module,
+            ept_test_semantic(nodes, [2], false))).to_start_with("EE-E-RESIDUAL")
+
+    it "does not confuse per-column coverage with product coverage":
+        val pair = MirType(kind: MirTypeKind.Tuple([MirType.bool(), MirType.bool()]))
+        var nodes = ept_test_bool_nodes()
+        nodes[2] = ept_test_node(MirEnumPatternKindV1.Variant(
+            SymbolId(id: 101), 7, [0, 0]), ept_test_enum(101))
+        nodes[3] = ept_test_node(MirEnumPatternKindV1.Variant(
+            SymbolId(id: 101), 7, [1, 1]), ept_test_enum(101))
+        expect(ept_test_status(ept_test_module(Some(pair)),
+            ept_test_semantic(nodes, [2, 3], false))).to_start_with("EE-E-RESIDUAL")
+
+    it "accepts an unconditional binder following guarded alternatives":
+        var nodes = ept_test_bool_nodes()
+        nodes.push(ept_test_node(MirEnumPatternKindV1.Bind(
+            SymbolId(id: 33), LocalId(id: 5)), ept_test_enum(101)))
+        var semantic = ept_test_semantic(nodes, [2, 3, 4], true)
+        var fallback = semantic.arms[2]
+        fallback.guard_entry = nil
+        semantic.arms[2] = fallback
+        expect(ept_test_status(ept_test_module(Some(MirType.bool())),
+            semantic)).to_equal("covered")
+
+    it "refuses reused discriminants and a non-enum source declaration":
+        var module = ept_test_module(nil)
+        val owner = SymbolId(id: 101)
+        val nodes = [ept_test_node(MirEnumPatternKindV1.Wildcard, ept_test_enum(101))]
+        module.types[owner] = MirTypeDef(symbol: owner, name: "Duplicate",
+            kind: MirTypeDefKind.Enum([
+                MirVariantDef(name: "A", discriminant: 7, payload: nil),
+                MirVariantDef(name: "B", discriminant: 7, payload: nil)]),
+            is_export_c: false, export_name: "")
+        expect(ept_test_status(module,
+            ept_test_semantic(nodes, [0], false))).to_start_with("EE-E-DECLARATION")
+        module.types[owner] = MirTypeDef(symbol: owner, name: "Struct",
+            kind: MirTypeDefKind.Struct([]), is_export_c: false, export_name: "")
+        expect(ept_test_status(module,
+            ept_test_semantic(nodes, [0], false))).to_start_with("EE-E-DECLARATION")
+
+    it "threads actual remaining work and refuses invalid or exhausted budgets":
+        val module = ept_test_module(nil)
+        val nodes = [ept_test_node(MirEnumPatternKindV1.Wildcard, ept_test_enum(101))]
+        val semantic = ept_test_semantic(nodes, [0], false)
+        match enum_pattern_totality_bounded_v1(module, semantic, 65536):
+            case Ok(remaining):
+                expect(remaining).to_be_less_than(65536)
+                match enum_pattern_totality_bounded_v1(module, semantic, remaining):
+                    case Ok(next): expect(next).to_be_less_than(remaining)
+                    case Err(message): expect(message).to_equal("covered")
+            case Err(message): expect(message).to_equal("covered")
+        for budget in [-1, 0, 1, 65537]:
+            match enum_pattern_totality_bounded_v1(module, semantic, budget):
+                case Ok(_): expect(budget).to_equal(65536)
+                case Err(message): expect(message).to_start_with("EE-E-LIMIT")
+
+    it "refuses excessive symbolic work even when repeated alternatives cover":
+        var alternatives: [i64] = []
+        for _ in 0..2048:
+            alternatives.push(0)
+        val nodes = [
+            ept_test_node(MirEnumPatternKindV1.Wildcard, ept_test_enum(101)),
+            ept_test_node(MirEnumPatternKindV1.Or(alternatives), ept_test_enum(101))
+        ]
+        expect(ept_test_status(ept_test_module(nil),
+            ept_test_semantic(nodes, [1], false))).to_start_with("EE-E-LIMIT")
+
+    it "rejects wrong source owners even when wildcard coverage exists":
+        var nodes = ept_test_bool_nodes()
+        nodes[2] = ept_test_node(MirEnumPatternKindV1.Variant(
+            SymbolId(id: 999), 7, [0]), ept_test_enum(101))
+        expect(ept_test_status(ept_test_module(Some(MirType.bool())),
+            ept_test_semantic(nodes, [2, 3], false))).to_start_with("EE-E-DECLARATION")
+
+    it "rejects payload arity and literal type mismatches":
+        var nodes = ept_test_bool_nodes()
+        nodes[2] = ept_test_node(MirEnumPatternKindV1.Variant(
+            SymbolId(id: 101), 7, []), ept_test_enum(101))
+        expect(ept_test_status(ept_test_module(Some(MirType.bool())),
+            ept_test_semantic(nodes, [2, 3], false))).to_start_with("EE-E-PATTERN")
+        nodes = ept_test_bool_nodes()
+        nodes[0] = ept_test_node(MirEnumPatternKindV1.Literal(
+            MirConstValue.Int(1), MirType.i64()), MirType.bool())
+        expect(ept_test_status(ept_test_module(Some(MirType.bool())),
+            ept_test_semantic(nodes, [2, 3], false))).to_start_with("EE-E-PATTERN")
+
+    it "validates unreachable nodes and rejects cycles before coverage":
+        var nodes = [ept_test_node(MirEnumPatternKindV1.Wildcard, ept_test_enum(101))]
+        nodes.push(ept_test_node(MirEnumPatternKindV1.Or([1]), ept_test_enum(101)))
+        expect(ept_test_status(ept_test_module(nil),
+            ept_test_semantic(nodes, [0], false))).to_start_with("EE-E-PATTERN")
+
+    it "rejects missing indices, empty Or and over-depth paths":
+        var nodes = [ept_test_node(MirEnumPatternKindV1.Or([9]), ept_test_enum(101))]
+        expect(ept_test_status(ept_test_module(nil),
+            ept_test_semantic(nodes, [0], false))).to_start_with("EE-E-PATTERN")
+        nodes[0] = ept_test_node(MirEnumPatternKindV1.Or([]), ept_test_enum(101))
+        expect(ept_test_status(ept_test_module(nil),
+            ept_test_semantic(nodes, [0], false))).to_start_with("EE-E-PATTERN")
+        nodes[0] = ept_test_node(MirEnumPatternKindV1.Wildcard, ept_test_enum(101))
+        for index in 1..130:
+            nodes.push(ept_test_node(MirEnumPatternKindV1.Or([index - 1]),
+                ept_test_enum(101)))
+        expect(ept_test_status(ept_test_module(nil),
+            ept_test_semantic(nodes, [129], false))).to_start_with("EE-E-LIMIT")

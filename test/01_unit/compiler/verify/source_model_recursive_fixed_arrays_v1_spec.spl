@@ -1,0 +1,146 @@
+# @manual: show
+# @req: C2, REQ-C2-RV-001, REQ-C2-RV-002, REQ-C2-RV-003
+# Tests first; actual frontend/HIR/MIR/EE/public source APIs. All execution UNRUN.
+use std.spec
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.config.{Logger}
+use compiler.common.mir_target_context.{mir_target_context_from}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.enum_semantic_lowering_v1.{lower_module_with_enum_semantics_v1}
+use compiler.mir.mir_instructions.{MirModule, MirFunction}
+use compiler.mir.mir_types.{MirTypeKind, MirTypeDefKind}
+use compiler.mir.mir_json.{serialize_mir_module, serialize_mir_type}
+use compiler.mir.mir_enum_semantic_types.{MirEnumPatternKindV1}
+use plugins.backend_lean.lean_backend.{LeanBackend, VerificationLevel}
+use compiler.backend.backend.lean_backend.{LeanBackend as CompilerLeanBackend, VerificationLevel as CompilerVerificationLevel}
+use compiler.tools.verify.source_model_v1.{source_model_from_source_v1}
+
+fn rv_source_lower(source: text) -> MirModule:
+    val parsed = parse_full_frontend(source, "recursive_arrays.spl", "recursive_arrays.spl", Logger(level: 0))
+    var lowering = HirLowering.with_filename("recursive_arrays.spl")
+    lowering.preserve_enum_semantic_arms_v1 = true
+    val hir = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    val target = mir_target_context_from("x86_64-unknown-linux-gnu", "unknown", "unknown", "llvm", 1)
+    lower_module_with_enum_semantics_v1(hir, target).unwrap()
+
+fn rv_source_function(module: MirModule, name: text) -> MirFunction?
+    for function in module.functions.values():
+        if function.name == name or function.name == "recursive_arrays." + name: return Some(function)
+    nil
+
+fn rv_source_outputs(module: MirModule) -> [text]:
+    val plugin = LeanBackend.create(VerificationLevel.Contracts)
+    val compiler = CompilerLeanBackend.create(CompilerVerificationLevel.Contracts)
+    val before = serialize_mir_module(module)
+    val outputs = [plugin.export_module(module).unwrap().lean_code,
+        plugin.export_generated_module(module).unwrap().lean_code,
+        compiler.export_module(module).unwrap().lean_code,
+        compiler.export_generated_module(module).unwrap().lean_code]
+    expect(serialize_mir_module(module)).to_equal(before)
+    outputs
+
+fn rv_source_model(source: text) -> text:
+    val code = source_model_from_source_v1(source, "recursive_arrays.spl", "x86_64-unknown-linux-gnu").unwrap()
+    expect(code).to_start_with("-- formal_status=NOT_CHECKED\n")
+    expect(code).to_contain("-- source_hash=" + sha256_text(source) + "\n")
+    expect(code.contains("formal_status=PASS")).to_equal(false)
+    expect(code.contains("sorry")).to_equal(false)
+    code
+
+fn rv_source_array_payloads(module: MirModule, size: i64) -> i64:
+    var found = 0
+    for definition in module.types.values():
+        match definition.kind:
+            case Enum(variants):
+                for variant in variants:
+                    if val payload = variant.payload:
+                        match payload.kind:
+                            case Array(element, count):
+                                expect(count).to_equal(size)
+                                match element.kind:
+                                    case Enum(symbol):
+                                        expect(symbol).to_equal(definition.symbol)
+                                        found = found + 1
+                                    case _: fail("recursive array element lost its enum identity")
+                            case _: ()
+            case _: ()
+    found
+
+describe "recursive fixed-array source and EE representation coherence":
+    it "should export an actual parsed recursive enum array signature":
+        step("Preserve source and declaration authority")
+        val source = "enum Tree:\n    Leaf\n    Branch([Tree; 2])\nfn keep(value: Tree) -> Tree:\n    value\n"
+        val module = rv_source_lower(source)
+        expect(rv_source_array_payloads(module, 2)).to_equal(1)
+        val function = rv_source_function(module, "keep").unwrap()
+        expect(function.signature.params.len()).to_equal(1)
+        expect(serialize_mir_type(function.signature.params[0])).to_equal(serialize_mir_type(function.signature.return_type))
+        val code = rv_source_model(source)
+        expect(code).to_contain("_root_.Fin 2 →")
+        expect(code).to_contain("«Tree»")
+        expect(code).to_contain("«Branch»")
+
+    it "should return a producer-validated array payload with the same continuation type":
+        step("Construct and transport finite arrays")
+        val source = "enum Tree:\n    Leaf\n    Branch([Tree; 2])\nfn select(value: Tree, fallback: [Tree; 2]) -> [Tree; 2]:\n    match value:\n        case Tree.Leaf: fallback\n        case Tree.Branch(children): children\n"
+        val module = rv_source_lower(source)
+        expect(rv_source_array_payloads(module, 2)).to_equal(1)
+        val function = rv_source_function(module, "select").unwrap()
+        expect(function.enum_matches.len()).to_equal(1)
+        expect(function.enum_matches[0].arms.len()).to_equal(2)
+        var bindings = 0
+        for node in function.enum_matches[0].pattern_nodes:
+            match node.kind:
+                case MirEnumPatternKindV1.Bind(_, destination):
+                    expect(serialize_mir_type(node.expected_type)).to_equal(serialize_mir_type(function.signature.return_type))
+                    match node.expected_type.kind:
+                        case Array(_, size): expect(size).to_equal(2)
+                        case _: fail("payload bind lost its actual Array semantic type")
+                    for code in rv_source_outputs(module):
+                        expect(code).to_contain("_root_.Fin 2 →")
+                        expect(code).to_contain("_l" + destination.id.to_text())
+                        expect(code).to_contain("ee_m0_a1_body")
+                        expect(code.contains("rt_enum_payload")).to_equal(false)
+                    bindings = bindings + 1
+                case _: ()
+        expect(bindings).to_equal(1)
+        expect(rv_source_model(source)).to_contain("ee_m0_a1_body")
+
+    it "should transport the same recursive array through an actual match join":
+        val source = "enum Tree:\n    Leaf\n    Branch([Tree; 2])\nfn select(value: Tree, fallback: [Tree; 2]) -> [Tree; 2]:\n    val selected: [Tree; 2] = match value:\n        case Tree.Leaf: fallback\n        case Tree.Branch(children): children\n    selected\n"
+        val module = rv_source_lower(source)
+        val function = rv_source_function(module, "select").unwrap()
+        expect(function.enum_matches.len()).to_equal(1)
+        expect(function.enum_matches[0].arms.len()).to_equal(2)
+        for code in rv_source_outputs(module):
+            expect(code).to_contain("_root_.Fin 2 →")
+            expect(code).to_contain("ee_m0_a0_body")
+            expect(code).to_contain("ee_m0_a1_body")
+            expect(code.contains("rt_enum_payload")).to_equal(false)
+        expect(rv_source_model(source)).to_contain("_root_.Fin 2 →")
+
+    it "should construct an actual source zero-length recursive struct":
+        val source = "struct Node:\n    children: [Node; 0]\nfn make() -> Node:\n    Node(children: [])\n"
+        val module = rv_source_lower(source)
+        var found = 0
+        for definition in module.types.values():
+            match definition.kind:
+                case Struct(fields):
+                    for field in fields:
+                        if field.name == "children":
+                            match field.type_.kind:
+                                case Array(element, size):
+                                    expect(size).to_equal(0)
+                                    expect(element.kind).to_equal(MirTypeKind.Struct(definition.symbol))
+                                    found = found + 1
+                                case _: fail("source recursive field lost its fixed array type")
+                case _: ()
+        expect(found).to_equal(1)
+        val code = rv_source_model(source)
+        expect(code).to_contain("_root_.Fin 0 →")
+        expect(code).to_contain("#[]")
+        expect(code).to_contain(".mk (")

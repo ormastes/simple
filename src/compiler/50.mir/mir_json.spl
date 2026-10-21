@@ -6,6 +6,10 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
 use compiler.mir.mir_types.{MirType}
 use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
+use compiler.common.diagnostics.span.{Span}
+use compiler.mir.mir_enum_semantic_types.{MirEnumPatternKindV1, MirEnumPatternNodeV1,
+    MirEnumSiteKindV1, MirEnumSiteV1, MirEnumArmSemanticV1, MirEnumMatchSemanticV1,
+    MirEnumVariantSlotsV1, MirEnumDeclarationIdentityV1}
 
 fn symbol_id_value(symbol: SymbolId) -> i64:
     symbol.id
@@ -656,7 +660,14 @@ fn serialize_mir_local(local: MirLocal) -> text:
 # ============================================================================
 
 fn serialize_mir_function(func: MirFunction) -> text:
-    """Serialize MIR function to JSON."""
+    """Serialize canonical MIR, including versioned nonempty enum metadata."""
+    serialize_mir_function_canonical_v1(func, true)
+
+fn serialize_mir_function_subject_v1(func: MirFunction) -> text:
+    """The existing canonical function subject, excluding only enum metadata."""
+    serialize_mir_function_canonical_v1(func, false)
+
+fn serialize_mir_function_canonical_v1(func: MirFunction, include_enum_metadata: bool) -> text:
     # MIR capsule identities call this repeatedly. Retain each fragment once
     # instead of copying all previous locals/blocks for every appended item.
     var parts: [text] = ["{"]
@@ -681,12 +692,72 @@ fn serialize_mir_function(func: MirFunction) -> text:
     parts = parts.push("],")
 
     parts = parts.push("\"entry_block\":{block_id_value(func.entry_block)}")
+    if include_enum_metadata and func.enum_matches.len() > 0:
+        val matches = [for record in func.enum_matches: serialize_mir_enum_match_v1(record)]
+        parts.push(",\"enum_matches\":{\"schema\":\"MirEnumMatches-v1\",\"matches\":[")
+        parts.push(matches.join(","))
+        parts.push("]}")
     parts = parts.push("}")
     parts.join("")
 
-# ============================================================================
-# Utility Functions
-# ============================================================================
+fn serialize_mir_enum_span_v1(span: Span) -> text:
+    "{\"start\":{span.start},\"end\":{span.end},\"line\":{span.line},\"col\":{span.col},\"file\":\"{escape_json_string(span.file)}\",\"length\":{span.length}}"
+
+fn serialize_mir_enum_indexes_v1(indexes: [i64]) -> text:
+    val parts = [for index in indexes: "{index}"]
+    "[" + parts.join(",") + "]"
+
+fn serialize_mir_enum_pattern_v1(node: MirEnumPatternNodeV1) -> text:
+    val kind = match node.kind:
+        case MirEnumPatternKindV1.Wildcard: "\"Wildcard\""
+        case MirEnumPatternKindV1.Bind(symbol, local): "{\"Bind\":{\"source_symbol\":{symbol.id},\"destination_local\":{local.id}}}"
+        case MirEnumPatternKindV1.Variant(owner, discriminant, children): "{\"Variant\":{\"owner_symbol\":{owner.id},\"discriminant\":{discriminant},\"children\":{serialize_mir_enum_indexes_v1(children)}}}"
+        case MirEnumPatternKindV1.Tuple(children): "{\"Tuple\":{serialize_mir_enum_indexes_v1(children)}}"
+        case MirEnumPatternKindV1.Literal(value, exact_type): "{\"Literal\":{\"value\":{serialize_const_value(value)},\"exact_type\":{serialize_mir_type(exact_type)}}}"
+        case MirEnumPatternKindV1.Or(alternatives): "{\"Or\":{serialize_mir_enum_indexes_v1(alternatives)}}"
+    "{\"kind\":{kind},\"expected_type\":{serialize_mir_type(node.expected_type)},\"source_span\":{serialize_mir_enum_span_v1(node.source_span)}}"
+
+fn serialize_mir_enum_site_v1(site: MirEnumSiteV1) -> text:
+    val kind = match site.kind:
+        case MirEnumSiteKindV1.Discriminant: "Discriminant"
+        case MirEnumSiteKindV1.VariantIdentityCheck: "VariantIdentityCheck"
+        case MirEnumSiteKindV1.Payload: "Payload"
+        case MirEnumSiteKindV1.PayloadSlot: "PayloadSlot"
+        case MirEnumSiteKindV1.PayloadDecode: "PayloadDecode"
+        case MirEnumSiteKindV1.Guard: "Guard"
+        case MirEnumSiteKindV1.ArmResult: "ArmResult"
+        case MirEnumSiteKindV1.PatternInstruction: "PatternInstruction"
+        case MirEnumSiteKindV1.PatternTerminator: "PatternTerminator"
+    "{\"kind\":\"{kind}\",\"block_id\":{site.block_id.id},\"instruction_index\":{site.instruction_index},\"exact_instruction_identity\":\"{escape_json_string(site.exact_instruction_identity)}\",\"semantic_input_type\":{serialize_mir_type(site.semantic_input_type)},\"semantic_output_type\":{serialize_mir_type(site.semantic_output_type)},\"related_pattern_node\":{site.related_pattern_node}}"
+
+fn serialize_mir_enum_arm_v1(arm: MirEnumArmSemanticV1) -> text:
+    var guard_entry = "null"
+    if val entry = arm.guard_entry: guard_entry = "{entry.id}"
+    var guard_result = "null"
+    if val result = arm.guard_result: guard_result = serialize_operand(result)
+    val exits = [for block in arm.body_exit_blocks: block.id]
+    "{\"source_arm_id\":{arm.source_arm_id},\"expanded_alternative_index\":{arm.expanded_alternative_index},\"pattern_root\":{arm.pattern_root},\"pattern_entry_block\":{arm.pattern_entry_block.id},\"pattern_entry_instruction_index\":{arm.pattern_entry_instruction_index},\"guard_entry\":{guard_entry},\"guard_entry_instruction_index\":{arm.guard_entry_instruction_index},\"guard_result\":{guard_result},\"body_entry\":{arm.body_entry.id},\"body_entry_instruction_index\":{arm.body_entry_instruction_index},\"body_exit_blocks\":{serialize_mir_enum_indexes_v1(exits)},\"pattern_failure_entry\":{arm.pattern_failure_entry.id},\"guard_failure_entry\":{arm.guard_failure_entry.id},\"source_span\":{serialize_mir_enum_span_v1(arm.source_span)}}"
+
+fn serialize_mir_enum_match_v1(record: MirEnumMatchSemanticV1) -> text:
+    # Stable field/vector order is part of the v1 canonical transport.
+    val patterns = [for node in record.pattern_nodes: serialize_mir_enum_pattern_v1(node)]
+    val arms = [for arm in record.arms: serialize_mir_enum_arm_v1(arm)]
+    val sites = [for site in record.sites: serialize_mir_enum_site_v1(site)]
+    var parts: [text] = ["{\"schema\":\"{escape_json_string(record.schema)}\",\"match_id\":{record.match_id},\"enum_owner\":{record.enum_owner.id},"]
+    parts.push("\"scrutinee_operand\":{serialize_operand(record.scrutinee_operand)},\"scrutinee_semantic_type\":{serialize_mir_type(record.scrutinee_semantic_type)},")
+    parts.push("\"entry_block\":{record.entry_block.id},\"entry_instruction_index\":{record.entry_instruction_index},\"result_local\":{record.result_local.id},\"merge_block\":{record.merge_block.id},")
+    parts.push("\"pattern_nodes\":[" + patterns.join(",") + "],\"arms\":[" + arms.join(",") + "],\"sites\":[" + sites.join(",") + "],")
+    parts.push("\"source_span\":{serialize_mir_enum_span_v1(record.source_span)},\"declaration_identity\":\"{escape_json_string(record.declaration_identity)}\",\"subject_identity\":\"{escape_json_string(record.subject_identity)}\"}")
+    parts.join("")
+
+fn serialize_mir_enum_variant_slots_v1(variant: MirEnumVariantSlotsV1) -> text:
+    val types = [for type_ in variant.slot_types: serialize_mir_type(type_)]
+    val names = [for name in variant.slot_names: "\"" + escape_json_string(name) + "\""]
+    "{\"discriminant\":{variant.discriminant},\"source_variant\":{variant.source_variant.id},\"slot_types\":[" + types.join(",") + "],\"slot_names\":[" + names.join(",") + "]}"
+
+fn serialize_mir_enum_declaration_v1(record: MirEnumDeclarationIdentityV1) -> text:
+    val variants = [for variant in record.variants: serialize_mir_enum_variant_slots_v1(variant)]
+    "{\"schema\":\"MirEnumDeclarationIdentity-v1\",\"owner\":{record.owner.id},\"source_owner\":{record.source_owner.id},\"runtime_name\":\"{escape_json_string(record.runtime_name)}\",\"runtime_identity\":{record.runtime_identity},\"variants\":[" + variants.join(",") + "]}"
 
 fn escape_json_string(s: text) -> text:
     """Escape string for JSON."""

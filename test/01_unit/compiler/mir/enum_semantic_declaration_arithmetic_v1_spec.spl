@@ -1,0 +1,195 @@
+# EE-01 R1 checked discriminant preparation. All scenarios are UNRUN.
+# Arithmetic trees replace one discriminant in actual parser-produced HIR;
+# the tests invoke real declaration preparation and inspect its cleanup.
+use std.spec.{describe, it, expect, fail}
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.mir_target_context.{mir_target_context_from}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.hir.hir_operators.{HirBinOp, HirUnaryOp}
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.enum_semantic_declarations_v1.*
+use compiler.mir.verification_source_environment_v1.{verification_source_environment_v1}
+
+fn ee_discriminant_int(value: i64) -> HirExpr:
+    HirExpr(kind: HirExprKind.IntLit(value, nil), has_type_: false, type_: nil, span: Span.empty())
+
+fn ee_discriminant_binary(op: HirBinOp, left: HirExpr, right: HirExpr) -> HirExpr:
+    HirExpr(kind: HirExprKind.Binary(op, left, right), has_type_: false, type_: nil, span: Span.empty())
+
+fn ee_discriminant_unary(op: HirUnaryOp, operand: HirExpr) -> HirExpr:
+    HirExpr(kind: HirExprKind.Unary(op, operand), has_type_: false, type_: nil, span: Span.empty())
+
+fn ee_discriminant_hir() -> HirModule:
+    val source = "enum Arithmetic:\n    First = 2\n    Second = 3\n"
+    val parsed = parse_full_frontend(source, "ee_arithmetic.spl", "ee_arithmetic.spl", Logger(level: 0))
+    var lowering = HirLowering.with_filename("ee_arithmetic.spl")
+    val module = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    module
+
+fn ee_discriminant_replace(source: HirModule, expression: HirExpr) -> HirModule:
+    var module = source
+    var replaced: i64 = 0
+    for key in module.enums.keys():
+        var declaration = module.enums[key]
+        if declaration.name == "Arithmetic":
+            expect(declaration.variants.len()).to_equal(2)
+            var variants = declaration.variants
+            var second = variants[1]
+            second.has_discriminant = true
+            second.discriminant = expression
+            variants[1] = second
+            declaration.variants = variants
+            module.enums[key] = declaration
+            replaced = replaced + 1
+    expect(replaced).to_equal(1)
+    module
+
+fn ee_discriminant_refuses(expression: HirExpr, fragment: text):
+    val source = ee_discriminant_replace(ee_discriminant_hir(), expression)
+    val before = hir_module_encode(source)
+    match verification_source_environment_v1(source.symbols):
+        case Err(message): fail(message)
+        case Ok(symbols):
+            val target = mir_target_context_from("x86_64-unknown-linux-gnu", "x86_64", "linux", "llvm", 1)
+            var lowering = MirLowering.new_for_target(symbols, target)
+            lowering.enum_semantic_capture_enabled = true
+            match lowering.prepare_enum_semantic_declarations_v1(source):
+                case Ok(_): fail("unsafe discriminant was accepted by real declaration preparation")
+                case Err(message):
+                    expect(message).to_contain(fragment)
+                    expect(lowering.enum_semantic_capture_error).to_equal(message)
+            # First is valid and precedes the rejected Second. Preparation must
+            # discard the first variant's retained slots and the predeclared owner.
+            val declarations = lowering.enum_semantic_declarations.values()
+            val owners = lowering.enum_semantic_source_owners.values()
+            val slots = lowering.enum_semantic_variant_slots.values()
+            val fields = lowering.enum_semantic_variant_fields.values()
+            expect(declarations.len()).to_equal(0)
+            expect(owners.len()).to_equal(0)
+            expect(slots.len()).to_equal(0)
+            expect(fields.len()).to_equal(0)
+            expect(lowering.enum_semantic_source_declarations.len()).to_equal(0)
+            expect(hir_module_encode(source)).to_equal(before)
+
+fn ee_discriminant_accepts(expression: HirExpr, expected: i64):
+    val source = ee_discriminant_replace(ee_discriminant_hir(), expression)
+    val before = hir_module_encode(source)
+    match verification_source_environment_v1(source.symbols):
+        case Err(message): fail(message)
+        case Ok(symbols):
+            val target = mir_target_context_from("x86_64-unknown-linux-gnu", "x86_64", "linux", "llvm", 1)
+            var lowering = MirLowering.new_for_target(symbols, target)
+            lowering.enum_semantic_capture_enabled = true
+            match lowering.prepare_enum_semantic_declarations_v1(source):
+                case Err(message): fail(message)
+                case Ok(_):
+                    expect(lowering.enum_semantic_capture_error).to_equal("")
+                    expect(lowering.enum_semantic_source_declarations.len()).to_equal(1)
+                    val declaration = lowering.enum_semantic_source_declarations[0]
+                    expect(declaration.variants.len()).to_equal(2)
+                    expect(declaration.variants[0].discriminant).to_equal(2)
+                    expect(declaration.variants[1].discriminant).to_equal(expected)
+                    expect(declaration.runtime_identity).to_equal(-1)
+                    expect(hir_module_encode(source)).to_equal(before)
+
+describe "EE-01 checked discriminant preparation":
+    it "retains parsed explicit arithmetic followed by an implicit discriminant":
+        val source = "enum Arithmetic:\n    First = 1 + 2\n    Second\n"
+        val parsed = parse_full_frontend(source, "ee_arithmetic.spl", "ee_arithmetic.spl", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("ee_arithmetic.spl")
+        val module = hir_lowering.lower_module(parsed)
+        expect(hir_lowering.errors.len()).to_equal(0)
+        val before = hir_module_encode(module)
+        match verification_source_environment_v1(module.symbols):
+            case Err(message): fail(message)
+            case Ok(symbols):
+                val target = mir_target_context_from("x86_64-unknown-linux-gnu", "x86_64", "linux", "llvm", 1)
+                var lowering = MirLowering.new_for_target(symbols, target)
+                lowering.enum_semantic_capture_enabled = true
+                match lowering.prepare_enum_semantic_declarations_v1(module):
+                    case Err(message): fail(message)
+                    case Ok(_):
+                        expect(lowering.enum_semantic_source_declarations.len()).to_equal(1)
+                        val declaration = lowering.enum_semantic_source_declarations[0]
+                        expect(declaration.variants.len()).to_equal(2)
+                        expect(declaration.variants[0].discriminant).to_equal(3)
+                        expect(declaration.variants[1].discriminant).to_equal(4)
+                        expect(hir_module_encode(module)).to_equal(before)
+
+    it "rejects MIN divided or reduced modulo negative one before folding":
+        val minimum: i64 = -9223372036854775807 - 1
+        for op in [HirBinOp.Div, HirBinOp.Mod]:
+            ee_discriminant_refuses(ee_discriminant_binary(op,
+                ee_discriminant_int(minimum), ee_discriminant_int(-1)), "division overflow")
+
+    it "rejects zero divisors before folding":
+        for op in [HirBinOp.Div, HirBinOp.Mod]:
+            ee_discriminant_refuses(ee_discriminant_binary(op,
+                ee_discriminant_int(7), ee_discriminant_int(0)), "zero divisor")
+
+    it "rejects negation and arithmetic overflow even when a later mask yields zero":
+        val minimum: i64 = -9223372036854775807 - 1
+        val maximum: i64 = 9223372036854775807
+        val controls = [
+            (ee_discriminant_unary(HirUnaryOp.Neg, ee_discriminant_int(minimum)), "negation overflow"),
+            (ee_discriminant_binary(HirBinOp.Add, ee_discriminant_int(maximum), ee_discriminant_int(1)), "addition overflow"),
+            (ee_discriminant_binary(HirBinOp.Add, ee_discriminant_int(minimum), ee_discriminant_int(-1)), "addition overflow"),
+            (ee_discriminant_binary(HirBinOp.Sub, ee_discriminant_int(minimum), ee_discriminant_int(1)), "subtraction overflow"),
+            (ee_discriminant_binary(HirBinOp.Sub, ee_discriminant_int(maximum), ee_discriminant_int(-1)), "subtraction overflow"),
+            (ee_discriminant_binary(HirBinOp.Mul, ee_discriminant_int(maximum), ee_discriminant_int(2)), "multiplication overflow"),
+            (ee_discriminant_binary(HirBinOp.Mul, ee_discriminant_int(minimum), ee_discriminant_int(-1)), "multiplication overflow")]
+        for control in controls:
+            ee_discriminant_refuses(ee_discriminant_binary(HirBinOp.BitAnd,
+                control.0, ee_discriminant_int(0)), control.1)
+
+    it "rejects negative and out-of-width counts for both shifts":
+        for op in [HirBinOp.Shl, HirBinOp.Shr]:
+            for count in [-1, 64]:
+                ee_discriminant_refuses(ee_discriminant_binary(op,
+                    ee_discriminant_int(1), ee_discriminant_int(count)), "shift count")
+
+    it "rejects overflowing left shifts and target-dependent negative operands":
+        ee_discriminant_refuses(ee_discriminant_binary(HirBinOp.Shl,
+            ee_discriminant_int(1), ee_discriminant_int(63)), "left shift overflow")
+        for op in [HirBinOp.Shl, HirBinOp.Shr]:
+            ee_discriminant_refuses(ee_discriminant_binary(op,
+                ee_discriminant_int(-1), ee_discriminant_int(1)), "negative shift operand")
+
+    it "retains safe signed boundaries and exact nearby arithmetic":
+        val minimum: i64 = -9223372036854775807 - 1
+        val maximum: i64 = 9223372036854775807
+        ee_discriminant_accepts(ee_discriminant_binary(HirBinOp.Add,
+            ee_discriminant_int(maximum), ee_discriminant_int(-maximum)), 0)
+        ee_discriminant_accepts(ee_discriminant_binary(HirBinOp.Sub,
+            ee_discriminant_int(minimum), ee_discriminant_int(minimum)), 0)
+        ee_discriminant_accepts(ee_discriminant_binary(HirBinOp.Sub,
+            ee_discriminant_binary(HirBinOp.Mul, ee_discriminant_int(minimum / 2), ee_discriminant_int(2)),
+            ee_discriminant_int(minimum)), 0)
+        ee_discriminant_accepts(ee_discriminant_binary(HirBinOp.Mod,
+            ee_discriminant_int(minimum), ee_discriminant_int(1)), 0)
+        ee_discriminant_accepts(ee_discriminant_unary(HirUnaryOp.Neg,
+            ee_discriminant_int(-2147483647)), 2147483647)
+        ee_discriminant_accepts(ee_discriminant_binary(HirBinOp.Shl,
+            ee_discriminant_int(1), ee_discriminant_int(30)), 1073741824)
+        ee_discriminant_accepts(ee_discriminant_binary(HirBinOp.Shl,
+            ee_discriminant_int(0), ee_discriminant_int(63)), 0)
+        ee_discriminant_accepts(ee_discriminant_binary(HirBinOp.Shr,
+            ee_discriminant_int(maximum), ee_discriminant_int(63)), 0)
+        ee_discriminant_accepts(ee_discriminant_binary(HirBinOp.Sub,
+            ee_discriminant_unary(HirUnaryOp.BitNot, ee_discriminant_int(maximum)),
+            ee_discriminant_int(minimum)), 0)
+        for op in [HirBinOp.BitAnd, HirBinOp.BitOr, HirBinOp.BitXor]:
+            ee_discriminant_accepts(ee_discriminant_binary(op,
+                ee_discriminant_int(7), ee_discriminant_int(0)),
+                if op == HirBinOp.BitAnd: 0 else: 7)
+
+    it "retains the final portable discriminant range check":
+        ee_discriminant_refuses(ee_discriminant_int(2147483648), "portable runtime range")

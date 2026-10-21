@@ -179,6 +179,52 @@ or test launch is authorized here; six-total retry accounting is preserved.
 Native performance, allocator/RSS behavior, C bootstrap emission and formal
 qualification remain UNRUN; source-level call counts do not establish them.
 
+## 2026-10-20 concrete Result Optional payload route
+
+REQ-ENUM-RESULT-OPTIONAL: unwrap/unwrap_err without a default must retain an
+admitted Optional carrier, exact Optional/inner nominal owner, and independent
+presence semantics. The exact current witness is
+`mir_archive_try_production_repository_v1 -> Result<MonoArchiveFinalRepositoryV1?, text>`
+and its `production.unwrap()` consumer in `driver_pipeline_lowering.spl`.
+The captured base is `23085fbde5b00c64024b059dc85bdaf673756e67`.
+
+The bounded implementation admits Optional inner i64/bool/f64/Text and current
+Struct/Class/Enum declarations, copies the raw payload, and records Optional
+and runtime-value provenance. Any/inference/error, unknown/non-type owners,
+nominal generic arguments, nested/container inner shapes and default-bearing
+forms remain rejected. Result tag checks and divergent mismatch paths are
+unchanged. No runtime allocation, clone, scan or ABI change is added.
+
+| Boundary | Authored oracle | Status |
+|---|---|---|
+| Carrier/type/owner preservation, exact tag and mismatch handling, rejected shapes | `result_optional_unwrap_lowering_spec.spl`, five actual-MIR scenarios | UNRUN |
+| Some(0), Some(3), None, false/f64/Text, nominal record projection and error payloads | `result_optional_unwrap_runtime_spec.spl`, four value scenarios | UNRUN |
+| Wrong Result variant | Two `result_optional_unwrap*_mismatch` native fixtures | UNRUN |
+| Dict compatibility | Existing dictionary spec retains Any/default negative controls and exact current diagnostics | UNRUN |
+
+Tracking: `doc/08_tracking/bug/result_optional_unwrap_payload_2026_10_20.md`.
+The initial regression specs preceded production edits; later negative/native
+controls are recorded as additions, not executed red/green evidence.
+
+### Remaining robust/enum ledger
+
+| Historical groups / feature | Current scope and next boundary |
+|---|---|
+| 35/36/38, 107, 155 | Prior PassScope, collector and coherence source repairs retained; no reimplementation or new runtime closure claimed |
+| 99 | Lowercase enum owner resolution/admission remains outside this repair |
+| 104 | Prior typed dictionary receiver repair retained; unidentified receivers remain outside that claim |
+| 108 | Collector constructor payload attribution remains open; a disjoint follow-up must establish which HirExpr field/projection loses ownership before editing collector/type-projection owners |
+| 116 | One exact Optional repository route gains source support here; the original module-only diagnostic is not universally discharged |
+| 111/117/120 | Result/error receiver types remain unattributed; independent source-receipt work in their driver owners must precede any payload expansion |
+| Nested Optional/container/default Result payloads | Deliberately not admitted here; require a separate carrier/projection design and tests after this method-owner lane is integrated |
+| REQ-001/REQ-002, critical wildcard and injected variants | Landed source/specs retained; runtime, compiler wiring and documented lint performance qualifications remain open |
+
+Author: dedicated isolated enum lane. Review coordinator:
+`proof_constraints_review`; merge/qualification owner: root. Additional
+sidecars: N/A. The Char MIR packet remains separately frozen. No compiler,
+build, test, docgen, or cache operation was launched; historical retry limits
+and stopped build profiles are not reset.
+
 ## 2026-10-21 critical static coverage production wiring
 
 REQ-002 requires the existing critical static policy to reach production enum

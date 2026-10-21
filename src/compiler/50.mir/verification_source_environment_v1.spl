@@ -1,0 +1,65 @@
+# Fresh mutable name-routing environment for one verified lowering invocation.
+# HIR types/spans are immutable borrowed values. Every mutable dictionary and
+# outer symbol/scope row is newly allocated, including secondary indexes.
+use compiler.hir.hir_types.{SymbolTable, HirSymbol, Scope, ScopeId, SymbolId}
+
+fn verification_copy_text_ids_v1(source: Dict<text, i64>) -> Dict<text, i64>:
+    var copy: Dict<text, i64> = {}
+    for key in source.keys(): copy[key] = source[key]
+    copy
+
+fn verification_copy_text_values_v1(source: Dict<text, text>) -> Dict<text, text>:
+    var copy: Dict<text, text> = {}
+    for key in source.keys(): copy[key] = source[key]
+    copy
+
+pub fn verification_source_environment_v1(source: SymbolTable
+) -> Result<SymbolTable, text>:
+    if source == nil or source.current_scope == nil:
+        return Err("FV2-E-CALL-SOURCE-OWNER: source symbol environment is absent")
+    var target = SymbolTable.new()
+    target.symbols = {}
+    for key in source.symbols.keys():
+        val symbol: HirSymbol = source.symbols[key]
+        if symbol == nil or symbol.id == nil or symbol.scope == nil or symbol.id.id != key:
+            return Err("FV2-E-CALL-SOURCE-OWNER: source symbol row identity is inconsistent")
+        target.symbols[key] = HirSymbol(id: SymbolId(id: symbol.id.id),
+            name: symbol.name, kind: symbol.kind, type_: symbol.type_,
+            scope: ScopeId(id: symbol.scope.id), span: symbol.span,
+            visibility: symbol.visibility, is_public: symbol.is_public,
+            is_mutable: symbol.is_mutable, defining_module: symbol.defining_module,
+            builtin_method_tag: symbol.builtin_method_tag)
+    target.scopes = {}
+    for key in source.scopes.keys():
+        val scope: Scope = source.scopes[key]
+        if scope == nil or scope.id == nil or scope.id.id != key:
+            return Err("FV2-E-CALL-SOURCE-OWNER: source scope row identity is inconsistent")
+        target.scopes[key] = Scope(id: ScopeId(id: scope.id.id),
+            parent: scope.parent, kind: scope.kind,
+            symbols: verification_copy_text_ids_v1(scope.symbols))
+    if not target.scopes.contains(0) or not target.scopes.contains(source.current_scope.id):
+        return Err("FV2-E-CALL-SOURCE-OWNER: source root or current scope is absent")
+    val root_keys = source.root_scope_symbols.keys()
+    if root_keys.len() != target.scopes[0].symbols.keys().len():
+        return Err("FV2-E-CALL-SOURCE-OWNER: source root lexical mirror is inconsistent")
+    for key in root_keys:
+        if (not target.scopes[0].symbols.contains(key) or
+                target.scopes[0].symbols[key] != source.root_scope_symbols[key]):
+            return Err("FV2-E-CALL-SOURCE-OWNER: source root lexical mirror is inconsistent")
+    # SymbolTable.new intentionally aliases these two root dictionaries.
+    # Preserve that invariant only inside the new environment.
+    target.root_scope_symbols = target.scopes[0].symbols
+    target.current_scope = ScopeId(id: source.current_scope.id)
+    target.next_symbol_id = source.next_symbol_id
+    target.next_scope_id = source.next_scope_id
+    target.gpu_function_targets = verification_copy_text_values_v1(source.gpu_function_targets)
+    target.gpu_function_backend_orders = verification_copy_text_values_v1(source.gpu_function_backend_orders)
+    target.qualified_functions = verification_copy_text_ids_v1(source.qualified_functions)
+    target.qualified_types = verification_copy_text_ids_v1(source.qualified_types)
+    target.exact_symbols = verification_copy_text_ids_v1(source.exact_symbols)
+    target.module_callables = verification_copy_text_ids_v1(source.module_callables)
+    target.structural_union_symbols = verification_copy_text_ids_v1(source.structural_union_symbols)
+    target.structural_union_owners = {}
+    for key in source.structural_union_owners.keys():
+        target.structural_union_owners[key] = source.structural_union_owners[key]
+    Ok(target)

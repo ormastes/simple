@@ -1,0 +1,49 @@
+"""Actual bounded POSIX pipe tests. Native fixture must be supplied; UNRUN."""
+use std.spec
+use std.nogc_sync_mut.io_runtime.{env_get_nullable}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
+fn check_stdin_session(mode: text, script: text):
+    val fixture = env_get_nullable("SIMPLE_STDIN_SESSION_FIXTURE").unwrap()
+    assert(fixture.starts_with("/"))
+    val result = process_run_bounded("/bin/sh", ["-c", script, "stdin-test", fixture, mode], 10000, 4096)
+    expect(result.2).to_equal(0)
+    expect(result.0).to_equal("stdin-session-ok\n")
+    expect(result.1).to_equal("")
+
+describe "SOSIX checked stdin on an actual pipe":
+    it "preserves UTF8 NUL and split supplementary scalar":
+        check_stdin_session("utf8", "printf '\\101\\000\\360\\237\\231\\202' | \"$1\" \"$2\"")
+    it "decodes UTF16LE BOM and surrogate pair":
+        check_stdin_session("utf16le", "printf '\\377\\376\\075\\330\\102\\336\\000\\000\\132\\000' | \"$1\" \"$2\"")
+    it "decodes UTF16BE BOM and surrogate pair":
+        check_stdin_session("utf16be", "printf '\\376\\377\\330\\075\\336\\102\\000\\000\\000\\132' | \"$1\" \"$2\"")
+    it "preserves a requested BOM as scalar text":
+        check_stdin_session("preserve", "printf '\\357\\273\\277Z' | \"$1\" \"$2\"")
+    it "rejects forbidden BOM without consuming the following scalar":
+        check_stdin_session("forbid", "printf '\\357\\273\\277Z' | \"$1\" \"$2\"")
+    it "reports missing UTF16 BOM":
+        check_stdin_session("missing-bom", "printf '\\101\\000' | \"$1\" \"$2\"")
+    it "sticks to malformed UTF8 error without another read":
+        check_stdin_session("invalid", "printf '\\377Z' | \"$1\" \"$2\"")
+    it "rejects truncated UTF8 only when EOF is observed":
+        check_stdin_session("truncated", "printf '\\360\\237' | \"$1\" \"$2\"")
+    it "rejects truncated UTF16 at EOF":
+        check_stdin_session("truncated16", "printf '\\075\\330' | \"$1\" \"$2\"")
+    it "rejects invalid read sizes before IO and never closes borrowed stdin":
+        check_stdin_session("closed", "printf 'AB' | \"$1\" \"$2\"")
+    it "distinguishes empty EOF from an incomplete scalar":
+        check_stdin_session("empty", "printf '' | \"$1\" \"$2\"")
+    it "rejects unknown formats and invalid limits before consuming input":
+        check_stdin_session("metadata", "printf 'Z' | \"$1\" \"$2\"")
+
+    it "decodes UTF32LE with immutable BOM and endian policy":
+        check_stdin_session("utf32le", "printf '\\377\\376\\000\\000\\102\\366\\001\\000\\000\\000\\000\\000' | \"$1\" \"$2\"")
+    it "decodes UTF32BE with immutable BOM and endian policy":
+        check_stdin_session("utf32be", "printf '\\000\\000\\376\\377\\000\\001\\366\\102\\000\\000\\000\\000' | \"$1\" \"$2\"")
+    it "preserves a typed sticky provider failure for closed fd0":
+        check_stdin_session("provider-error", "exec 0<&-; exec \"$1\" \"$2\"")
+    it "shares logical close across ordinary class references":
+        check_stdin_session("alias-close", "printf 'Z' | \"$1\" \"$2\"")
+    it "cancels pending input without finishing or closing the descriptor":
+        check_stdin_session("cancel-pending", "printf '\\360\\237\\231\\202' | \"$1\" \"$2\"")

@@ -31,3 +31,19 @@ Existing successful zero/one/multiargument exports protect against always-refuse
 behavior. The completeness counter increments only after row validation, with no
 Dict.len dependency, keys allocation or extra traversal. This additional scenario
 brings the body total to 41; all remain UNRUN.
+
+NB-08 adds 32 authored UNRUN scenarios in `lean_nominal_linear_flow_spec.spl` and `compiler_lean_nominal_linear_flow_spec.spl` (16 each), using the real full/generated APIs and exact direct emitted body. The three prior CFG refusal assertions now name cycle, missing-entry and disconnected-block errors. Existing 41 body scenarios remain; none was executed or relabeled PASS. See the two matching linear-flow manuals for the new scenario mapping. The full nominal body inventory is now 73 authored scenarios, not 73 executed successes.
+
+NB-09 adds 40 authored UNRUN terminal-branch scenarios across the two new owner-specific specs (20 each). The previously prepared 73 body scenarios remain; their linear-flow conditional refusal is narrowed to the actual shared-successor graph, and its diagnostic wording names the current supported terminators. No test execution is claimed; the inventory becomes 113 authored body scenarios. Both-arm moves, condition/prefix consumption, sibling-local isolation, either-arm return errors and graph refusals use actual public export APIs.
+
+Cycle2 NB09-01 adds eight actual API scenarios: instruction-free Struct/Enum selection, nominal Copy/Move, unresolved/kind-mismatched nominal refusal and scalar/Result identity controls, mirrored across both backend owners. All remain UNRUN; baseline failure is source-predicted only.
+
+## NB-10 diamond acceptance
+
+The mirrored `lean_nominal_diamond_flow_spec.spl` and `compiler_lean_nominal_diamond_flow_spec.spl` use real typed MIR and the existing direct translator plus full/generated module APIs. Cover Struct/Enum values, exact zero/single/multiple transport, retained ordering and dominating values, block reordering, move/definition joins, condition/arm/suffix failures and malformed graphs. All40 new scenarios are UNRUN/source-predicted RED only. Existing linear/terminal fixtures remain negative where the shared path lacks a definition, redefines a local, or leaves a disconnected block; only their now-more-specific expected diagnostics change. No unrelated external builder is used as a vacuous atomicity oracle: public module failure must return Err with no published source value.
+
+## CV-01 composite value acceptance
+
+The mirrored `lean_composite_values_spec.spl` and `compiler_lean_composite_values_spec.spl` suites exercise actual typed MIR through direct translation and full/generated backend exports. Cover exact empty/nonempty/nested fixed arrays and tuples, nominal local elements, every tuple projection position, operation/retained-type routing, copy/move and join use, malformed lengths/types/constants, depth/node boundaries including aggregate arm budgets, legacy call-only compatibility and mixed-operation refusal. Existing explicit unsupported pointer/heap and nominal constant forms remain negative controls.
+
+Tests-first Array snapshots precede production changes. RED is source-predicted only; no compiler, Simple test, Lean or proof run occurred. Source review and emitted text assertions are not native execution/alias/performance acceptance. No existing fixture or diagnostic oracle is weakened for this increment.

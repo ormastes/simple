@@ -10,6 +10,7 @@ use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use monomorphize.type_subst.*
 use .types (SpecializationKey, ConcreteType, concretetype_Named)
+use compiler.mono.mono_invocation_policy_v1.MonoInvocationBudgetV1
 
 
 fn concrete_types_to_text(types: [ConcreteType]) -> text:
@@ -132,7 +133,8 @@ impl Monomorphizer:
 # Function Specialization with HirFunction
 # ============================================================================
 
-fn specialize_function_with_types(func: HirFunction, type_args: [HirType]) -> HirFunction:
+fn specialize_function_with_types(func: HirFunction, type_args: [HirType],
+    include_retained_defaults: bool = false, budget: MonoInvocationBudgetV1? = nil) -> HirFunction:
     """Create a specialized version of a generic function.
 
     Args:
@@ -142,6 +144,13 @@ fn specialize_function_with_types(func: HirFunction, type_args: [HirType]) -> Hi
     Returns:
         A new HirFunction with type parameters replaced by concrete types
     """
+    # The isolated pass certifies/reserves the template and type-argument
+    # expansion before this call. Charge local map/name construction before
+    # allocation as well; recursive substitution uses this same ledger.
+    if val ledger = budget:
+        val parameter_count = if func.type_params == nil: 0 else: func.type_params.len()
+        val argument_count = if type_args == nil: 0 else: type_args.len()
+        if not ledger.charge_v1(parameter_count + argument_count + 1): return nil
     # Create substitution map from type parameters to concrete types
     val subst = typesubstitution_from_params(func.type_params, type_args)
 
@@ -149,7 +158,7 @@ fn specialize_function_with_types(func: HirFunction, type_args: [HirType]) -> Hi
     val mangled = generate_mangled_name(func.name, type_args)
 
     # Apply substitution to create specialized function
-    substitute_function(func, subst, mangled)
+    substitute_function(func, subst, mangled, include_retained_defaults, budget)
 
 fn generate_mangled_name(base_name: text, type_args: [HirType]) -> text:
     """Generate a unique mangled name for a specialization."""

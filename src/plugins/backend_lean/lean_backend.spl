@@ -24,8 +24,9 @@ use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirBinOp, HirUnaryOp, Hi
 use compiler.hir.hir_types.{HirTypeKind}
 use compiler.mir.verification_contract_bridge.{verification_pure_state_semantics_v1, verification_state_predicate_bindings_from_module_v1}
 use compiler.mir.verification_region_effects.{verification_region_effect_manifest_v1}
-use plugins.backend_lean.lean_type_declarations.{LeanTypeContext, lean_plan_type_declarations, lean_context_type_to_lean}
+use plugins.backend_lean.lean_type_declarations.{LeanTypeContext, lean_plan_type_declarations, lean_context_type_to_lean, lean_recursive_struct_projections}
 use plugins.backend_lean.lean_nominal_body.{translate_mir_nominal_body}
+use plugins.backend_lean.lean_enum_body_v1.{prepare_mir_enum_body_v1, lean_enum_missing_metadata_v1}
 
 # ============================================================================
 # Verification Level
@@ -718,7 +719,7 @@ class LeanBackend:
             fns = fns.push(module.functions[symbol])
         for mir_fn in sort_mir_functions_by_name(fns):
             val body = MirBody.from_function(mir_fn)
-            self.export_function(builder, mir_fn, body, state_predicates, Some(type_context))?
+            self.export_function(builder, mir_fn, body, state_predicates, Some(type_context), Some(module))?
 
         # Generate proof obligations
         if self.generate_proofs:
@@ -750,7 +751,7 @@ class LeanBackend:
             fns = fns.push(module.functions[symbol])
         for mir_fn in sort_mir_functions_by_name(fns):
             val body = MirBody.from_function(mir_fn)
-            self.export_function(builder, mir_fn, body, state_predicates, Some(type_context))?
+            self.export_function(builder, mir_fn, body, state_predicates, Some(type_context), Some(module))?
         builder.end_namespace("{self.module_prefix}.{module.name}")
         Ok(LeanExportResult(
             module_name: "{module.name}.Generated",
@@ -768,13 +769,27 @@ class LeanBackend:
         val plan = lean_plan_type_declarations(module, "{self.module_prefix}.{module.name}")?
         if plan.declarations.len() > 0:
             builder.emit_comment("MIR semantic types; retained metadata is not a native-layout proof")
-        for declaration in plan.declarations:
+        for group in plan.groups:
             builder.emit_blank()
-            if declaration.is_enum:
-                builder.emit_inductive(declaration.name, declaration.variants)
-            else:
-                builder.emit_structure(declaration.name, declaration.fields)
-            for line in declaration.metadata: builder.emit(line)
+            if group.recursive:
+                builder.emit("mutual")
+                builder.indent()
+            for declaration in group.declarations:
+                if declaration.is_enum:
+                    builder.emit_inductive(declaration.name, declaration.variants)
+                elif group.recursive:
+                    var payloads: [text] = []
+                    for (_, field_type) in declaration.fields: payloads.push(field_type)
+                    builder.emit_inductive(declaration.name, [("mk", payloads)])
+                else:
+                    builder.emit_structure(declaration.name, declaration.fields)
+            if group.recursive:
+                builder.dedent()
+                builder.emit("end")
+            for declaration in group.declarations:
+                if group.recursive and not declaration.is_enum:
+                    for line in lean_recursive_struct_projections(declaration, plan.context): builder.emit(line)
+                for line in declaration.metadata: builder.emit(line)
         Ok(plan.context)
 
     fn export_function(
@@ -782,7 +797,29 @@ class LeanBackend:
         mir_fn: MirFunction,
         body: MirBody,
         approved_state_predicates: [StateInvariantPredicateV1] = [],
-        type_context: LeanTypeContext? = nil
+        type_context: LeanTypeContext? = nil,
+        enum_module: MirModule? = nil
+    ) -> Result<(), CompileError>:
+        if mir_fn.enum_matches.len() > 0:
+            if enum_module == nil or type_context == nil:
+                return Err(compileerror_backend_error(BackendKind.Lean,
+                    "EE-E-METADATA: enum export requires the actual module and declaration context"))
+            val prepared = prepare_mir_enum_body_v1(enum_module.unwrap(), mir_fn, type_context.unwrap())?
+            return self.export_function_body_v1(builder, prepared.semantic_function,
+                MirBody.from_function(prepared.semantic_function), approved_state_predicates,
+                type_context, Some(prepared.body))
+        val missing = lean_enum_missing_metadata_v1(mir_fn)
+        if missing != "":
+            return Err(compileerror_backend_error(BackendKind.Lean, missing))
+        self.export_function_body_v1(builder, mir_fn, body, approved_state_predicates, type_context)
+
+    fn export_function_body_v1(
+        builder: LeanBuilder,
+        mir_fn: MirFunction,
+        body: MirBody,
+        approved_state_predicates: [StateInvariantPredicateV1] = [],
+        type_context: LeanTypeContext? = nil,
+        enum_body: text? = nil
     ) -> Result<(), CompileError>:
         """Export a function definition.
 
@@ -875,7 +912,9 @@ class LeanBackend:
                     builder, params, stateful.state_type, stateful.written_regions)
             else:
                 var lean_body = ""
-                if val context = type_context:
+                if val generated_enum = enum_body:
+                    lean_body = generated_enum
+                elif val context = type_context:
                     lean_body = translate_mir_nominal_body(mir_fn, context)?
                 else:
                     lean_body = translate_mir_body(body)?

@@ -1,0 +1,248 @@
+"""C7 actual MIR extraction and real DCE checked-mode integration. UNRUN."""
+# @req REQ-C7-DCE-ACTUAL
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_types.{MirSignature, MirType, MirConstValue, LocalId, LocalKind, MirLocal}
+use compiler.mir.mir_instruction_graph.{MirFunction, MirBlock, MirInst}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_instruction_support.{MirOperand, MirOperandKind, MirTerminator, MirBinOp, mir_operand_copy}
+use compiler.mir_opt.dce.*
+use compiler.mir_opt.dce_mir_translation_validation.*
+use compiler.mir_opt.dce_translation_validation.*
+
+struct C7MirFixture:
+    function: MirFunction
+    left: LocalId
+    right: LocalId
+    sum: LocalId
+    result: LocalId
+    dead: LocalId
+    dead_copy: LocalId
+
+fn c7_mir_fixture_with_ids(left_value: i64, right_value: i64) -> C7MirFixture:
+    var builder = MirBuilder.new()
+    builder.begin_function(SymbolId(id: 77), "c7_closed",
+        MirSignature(params: [], return_type: MirType.i64(), is_variadic: false,
+            params_known: true, declared_params: [], declared_params_known: true), Span.empty())
+    val left = builder.emit_const_int(left_value)
+    val right = builder.emit_const_int(right_value)
+    val sum = builder.emit_binop(MirBinOp.Add, mir_operand_copy(left), mir_operand_copy(right), MirType.i64())
+    val result = builder.new_temp(MirType.i64())
+    builder.emit_copy(result, sum)
+    val dead = builder.emit_const_int(19)
+    val dead_copy = builder.new_temp(MirType.i64())
+    builder.emit_copy(dead_copy, dead)
+    builder.terminate_return(Some(mir_operand_copy(result)))
+    C7MirFixture(function: builder.end_function(), left: left, right: right,
+        sum: sum, result: result, dead: dead, dead_copy: dead_copy)
+
+fn c7_mir_fixture(left_value: i64, right_value: i64) -> MirFunction:
+    c7_mir_fixture_with_ids(left_value, right_value).function
+
+fn c7_with_instructions(function: MirFunction, instructions: [MirInst], terminator: MirTerminator) -> MirFunction:
+    val block = function.blocks[0]
+    MirFunction.with_blocks(function, [MirBlock(id: block.id, label: block.label,
+        instructions: instructions, terminator: terminator)])
+
+fn c7_no_cover(function: MirFunction, code: text):
+    var pass_ = DeadCodeElimination.new()
+    val before_count = function.blocks[0].instructions.len()
+    val run = pass_.run_closed_with_validation(function)
+    expect(run.observation.coverage).to_equal(DceMirCoverageV1.NotCovered)
+    expect(run.observation.diagnostic).to_start_with(code)
+    expect(run.observation.before_hash).to_equal("")
+    expect(run.function.blocks[0].instructions.len()).to_equal(before_count)
+    expect(pass_.iterations).to_equal(0)
+
+describe "C7 actual closed MIR DCE translation":
+    it "runs the real checked pass and validates two distinct dead-chain removal steps":
+        step("Capture the real MIR before transformation and retain the model's one-pass dependency relation")
+        val source = c7_mir_fixture(20, 22)
+        val frozen = dce_mir_extract_v1(source).snapshot.unwrap()
+        val original = frozen.program.canonical_text()
+        var pass_ = DeadCodeElimination.new()
+        val first = pass_.run_closed_with_validation(source)
+        expect(first.observation.coverage).to_equal(DceMirCoverageV1.Covered)
+        expect(first.observation.before_hash).to_equal(frozen.artifact_hash)
+        expect(first.observation.after_hash == first.observation.before_hash).to_equal(false)
+        expect(first.function.blocks[0].instructions.len()).to_equal(5)
+        expect(source.blocks[0].instructions.len()).to_equal(6)
+        expect(dce_mir_extract_v1(source).snapshot.unwrap().program.canonical_text()).to_equal(original)
+        val first_snapshot = dce_mir_extract_v1(first.function).snapshot.unwrap()
+        expect(first_snapshot.program.canonical_text()).to_equal(dce_tv_optimize(frozen.program).canonical_text())
+        expect(first_snapshot.program.result_register).to_equal(0)
+        expect(first_snapshot.return_local).to_equal(frozen.return_local)
+        val second = pass_.run_closed_with_validation(first.function)
+        expect(second.observation.coverage).to_equal(DceMirCoverageV1.Covered)
+        expect(second.function.blocks[0].instructions.len()).to_equal(4)
+        expect(pass_.removed_instructions).to_equal(2)
+        expect(pass_.iterations).to_equal(2)
+
+    it "preserves ordinary conservative dispatch while the explicit checked mode transforms":
+        step("Exercise the existing class entrypoint with and without its checked-mode selector")
+        val source = c7_mir_fixture(1, 2)
+        var ordinary = DeadCodeElimination.new()
+        expect(ordinary.run_on_function(source).blocks[0].instructions.len()).to_equal(6)
+        var checked = DeadCodeElimination.new()
+        expect(checked.run_on_function(source, true).blocks[0].instructions.len()).to_equal(5)
+        expect(dce_run_on_function(checked, source).blocks[0].instructions.len()).to_equal(6)
+
+    it "admits exact safe Add boundaries including a minimum right operand":
+        step("Derive operands from real Const and Copy instructions before checking the signed bounds")
+        val maximum: i64 = 9223372036854775807
+        val minimum: i64 = -9223372036854775807 - 1
+        for pair in [(maximum, 0), (minimum, 0), (0, minimum), (maximum, minimum), (-1, 1), (1, -1)]:
+            val (left, right) = pair
+            var pass_ = DeadCodeElimination.new()
+            val run = pass_.run_closed_with_validation(c7_mir_fixture(left, right))
+            expect(run.observation.coverage).to_equal(DceMirCoverageV1.Covered)
+        c7_no_cover(c7_mir_fixture(maximum, 1), "FV2-E-DCE-MIR-OVERFLOW:")
+        c7_no_cover(c7_mir_fixture(minimum, -1), "FV2-E-DCE-MIR-OVERFLOW:")
+        c7_no_cover(c7_mir_fixture(-1, minimum), "FV2-E-DCE-MIR-OVERFLOW:")
+
+    it "rejects post-pass corruption using the source's frozen return bijection":
+        step("Use actual builder IDs for valid-domain constant and operand mutations")
+        val fixture = c7_mir_fixture_with_ids(20, 22)
+        val source = fixture.function
+        val frozen = dce_mir_extract_v1(source).snapshot.unwrap()
+        val original_hash = frozen.artifact_hash
+        expect(frozen.return_local).to_equal(fixture.result.id)
+        var pass_ = DeadCodeElimination.new()
+        val first = pass_.run_closed_with_validation(source)
+        var changed = first.function.blocks[0].instructions
+        changed[0] = MirInst(kind: MirInstKind.Const(fixture.left, MirConstValue.Int(21), MirType.i64()), span: nil)
+        val corrupt = c7_with_instructions(first.function, changed, first.function.blocks[0].terminator)
+        val constant_result = dce_mir_validate_after_v1(frozen, corrupt)
+        expect(constant_result.coverage).to_equal(DceMirCoverageV1.Rejected)
+        expect(constant_result.diagnostic).to_equal("FV2-E-DCE-MIR-REFINEMENT: target is not the exact one-pass DCE refinement")
+        val changed_return = c7_with_instructions(source, source.blocks[0].instructions,
+            MirTerminator.Ret(Some(mir_operand_copy(fixture.left))))
+        val wrong_return = dce_mir_validate_after_v1(frozen, changed_return)
+        expect(wrong_return.coverage).to_equal(DceMirCoverageV1.Rejected)
+        expect(wrong_return.diagnostic).to_equal("FV2-E-DCE-MIR-RETURN: target changed the source return local")
+        expect(frozen.artifact_hash).to_equal(original_hash)
+        val mapped_left = if fixture.left.id == 0: fixture.result.id else: fixture.left.id
+        expect(frozen.program.instructions[0]).to_equal(DceTvInstructionV1.Const(mapped_left, 20))
+        expect(dce_mir_extract_v1(source).snapshot.unwrap().artifact_hash).to_equal(original_hash)
+        val operand_fixture = c7_mir_fixture_with_ids(20, 22)
+        var operand_pass = DeadCodeElimination.new()
+        var changed_operand = operand_pass.run_closed_with_validation(operand_fixture.function).function
+        expect(dce_mir_validate_after_v1(frozen, changed_operand).coverage).to_equal(DceMirCoverageV1.Covered)
+        changed_operand.blocks[0].instructions[2] = MirInst(kind: MirInstKind.BinOp(operand_fixture.sum,
+            MirBinOp.Add, mir_operand_copy(operand_fixture.left), mir_operand_copy(operand_fixture.left)), span: nil)
+        val operand_result = dce_mir_validate_after_v1(frozen, changed_operand)
+        expect(operand_result.coverage).to_equal(DceMirCoverageV1.Rejected)
+        expect(operand_result.diagnostic).to_equal("FV2-E-DCE-MIR-REFINEMENT: target is not the exact one-pass DCE refinement")
+
+    it "rejects stale captured snapshot hashes content and return mappings before target validation":
+        step("Mutate real captured evidence, including a changed program with an otherwise matching target")
+        for mode in 0..6:
+            val fixture = c7_mir_fixture_with_ids(20, 22)
+            var captured = dce_mir_extract_v1(fixture.function).snapshot.unwrap()
+            var pass_ = DeadCodeElimination.new()
+            var after = pass_.run_closed_with_validation(fixture.function).function
+            if mode == 0:
+                captured.artifact_hash = "invented-before-hash"
+            elif mode == 1:
+                match captured.program.instructions[0]:
+                    case DceTvInstructionV1.Const(destination, _):
+                        captured.program.instructions[0] = DceTvInstructionV1.Const(destination, 21)
+                    case _: fail("builder's first instruction must be Const")
+                after.blocks[0].instructions[0] = MirInst(kind: MirInstKind.Const(fixture.left,
+                    MirConstValue.Int(21), MirType.i64()), span: nil)
+            elif mode == 2:
+                captured.function_identity = captured.function_identity + "changed"
+            elif mode == 3:
+                captured.return_local = fixture.left.id
+            elif mode == 4:
+                captured.program.result_register = 1
+            else:
+                captured.return_local = -1
+            val rejected = dce_mir_validate_after_v1(captured, after)
+            expect(rejected.coverage).to_equal(DceMirCoverageV1.Rejected)
+            expect(rejected.diagnostic).to_equal("FV2-E-DCE-MIR-SNAPSHOT: source snapshot content or return mapping does not match its hash")
+            expect(rejected.before_hash).to_equal("")
+            expect(rejected.after_hash).to_equal("")
+        val fixture = c7_mir_fixture_with_ids(20, 22)
+        var captured = dce_mir_extract_v1(fixture.function).snapshot.unwrap()
+        captured.artifact_hash = "stale"
+        val bad_target = c7_with_instructions(fixture.function, fixture.function.blocks[0].instructions,
+            MirTerminator.Abort("invalid target"))
+        expect(dce_mir_validate_after_v1(captured, bad_target).diagnostic).to_equal(
+            "FV2-E-DCE-MIR-SNAPSHOT: source snapshot content or return mapping does not match its hash")
+
+    it "keeps candidate local and signature arrays independent of the caller":
+        step("Mutate returned candidate metadata and retain the frozen source artifact")
+        val source = c7_mir_fixture(1, 2)
+        val before = dce_mir_extract_v1(source).snapshot.unwrap()
+        var pass_ = DeadCodeElimination.new()
+        var run = pass_.run_closed_with_validation(source)
+        val candidate_local = run.function.locals[0]
+        run.function.locals[0] = MirLocal(id: candidate_local.id, name: nil, type_: MirType.bool(),
+            kind: LocalKind.Temp, is_ghost: false)
+        run.function.signature.params.push(MirType.i64())
+        run.function.signature.declared_params.push(MirType.i64())
+        expect(dce_mir_extract_v1(source).snapshot.unwrap().artifact_hash).to_equal(before.artifact_hash)
+        expect(dce_mir_validate_after_v1(before, run.function).coverage).to_equal(DceMirCoverageV1.Rejected)
+
+    it "refuses unknown or inconsistent signature authority and argument locals":
+        step("Both retained parameter lists and their authority flags must establish zero inputs")
+        for mode in 0..5:
+            var source = c7_mir_fixture(1, 2)
+            source.signature = MirSignature(params: if mode == 2: [MirType.i64()] else: [],
+                return_type: MirType.i64(), is_variadic: mode == 4,
+                params_known: mode != 0, declared_params: if mode == 3: [MirType.i64()] else: [],
+                declared_params_known: mode != 1)
+            c7_no_cover(source, "FV2-E-DCE-MIR-SIGNATURE:")
+        var argument = c7_mir_fixture(1, 2)
+        val argument_local = argument.locals[0]
+        argument.locals[0] = MirLocal(id: argument_local.id, name: nil, type_: MirType.i64(),
+            kind: LocalKind.Arg(0), is_ghost: false)
+        c7_no_cover(argument, "FV2-E-DCE-MIR-LOCAL:")
+
+    it "refuses malformed declarations redefinitions and undefined reads atomically":
+        step("Validate the complete closed SSA domain before invoking the optimizer")
+        var wrong_type = c7_mir_fixture(1, 2)
+        val typed_local = wrong_type.locals[0]
+        wrong_type.locals[0] = MirLocal(id: typed_local.id, name: nil, type_: MirType.bool(),
+            kind: LocalKind.Temp, is_ghost: false)
+        c7_no_cover(wrong_type, "FV2-E-DCE-MIR-LOCAL:")
+        var duplicate = c7_mir_fixture(1, 2)
+        duplicate.locals.push(duplicate.locals[0])
+        c7_no_cover(duplicate, "FV2-E-DCE-MIR-LOCAL:")
+        for mode in 0..2:
+            val fixture = c7_mir_fixture_with_ids(1, 2)
+            val source = fixture.function
+            val instruction = if mode == 0:
+                MirInst(kind: MirInstKind.Copy(fixture.dead_copy, LocalId(id: -1)), span: nil)
+            else:
+                MirInst(kind: MirInstKind.Const(fixture.left, MirConstValue.Int(7), MirType.i64()), span: nil)
+            var instructions = source.blocks[0].instructions
+            instructions.push(instruction)
+            val malformed = c7_with_instructions(source, instructions, source.blocks[0].terminator)
+            c7_no_cover(malformed, "FV2-E-DCE-MIR-SSA:")
+            val expected = if mode == 0: "FV2-E-DCE-MIR-SSA: copy reads an undefined local"
+                else: "FV2-E-DCE-MIR-SSA: destination must be declared and assigned exactly once"
+            expect(dce_mir_extract_v1(malformed).diagnostic).to_equal(expected)
+
+    it "refuses effects checked arithmetic and unsupported control flow":
+        step("No erased instruction or block may disappear from the extracted observation")
+        for mode in 0..2:
+            val fixture = c7_mir_fixture_with_ids(1, 2)
+            val source = fixture.function
+            val instruction = if mode == 0:
+                MirInst(kind: MirInstKind.CheckedBinOp(fixture.sum, MirBinOp.Add,
+                    mir_operand_copy(fixture.left), mir_operand_copy(fixture.right)), span: nil)
+            else:
+                MirInst(kind: MirInstKind.Store(mir_operand_copy(fixture.left), mir_operand_copy(fixture.right)), span: nil)
+            var instructions = source.blocks[0].instructions
+            instructions[2] = instruction
+            c7_no_cover(c7_with_instructions(source, instructions, source.blocks[0].terminator),
+                "FV2-E-DCE-MIR-INSTRUCTION:")
+        val source = c7_mir_fixture(1, 2)
+        c7_no_cover(c7_with_instructions(source, source.blocks[0].instructions, MirTerminator.Abort("stop")),
+            "FV2-E-DCE-MIR-CFG:")
+        c7_no_cover(MirFunction.with_blocks(source, [source.blocks[0], source.blocks[0]]),
+            "FV2-E-DCE-MIR-CFG:")

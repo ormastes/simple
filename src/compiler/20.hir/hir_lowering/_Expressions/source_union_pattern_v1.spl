@@ -1,0 +1,87 @@
+# Bind parsed union type-pattern payloads while the arm scope is active.
+# The later union arm rewrite runs after guard/body lowering and cannot
+# introduce their binder retroactively. Reuse its canonical member identity
+# and enum registry, but create the actual typed symbol before either use.
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.parser_types_expr.{Pattern, PatternKind, MatchArm}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolKind}
+use compiler.hir.hir_definitions.{HirPattern, HirPatternKind, HirPatternPayload}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.semantics.union_normalize.canonical.{
+    UnionNormalized, union_normalize, union_member_key, union_variant_name
+}
+use compiler.semantics.union_normalize.narrow.{
+    union_narrow_member_key_for_type_name
+}
+
+struct SourceUnionPatternContextV1:
+    # Owned by one match invocation; never stored in HirLowering or a global.
+    normalized: UnionNormalized
+    enum_type: HirType
+
+fn source_union_pattern_needs_context_v1(p: Pattern) -> bool:
+    match p.kind:
+        case PatternKind.TypeTest(_, _): return true
+        case PatternKind.Or(alternatives):
+            for alternative in alternatives:
+                if source_union_pattern_needs_context_v1(alternative):
+                    return true
+        case _: ()
+    false
+
+impl HirLowering:
+    me prepare_source_union_match_v1(subject_type: HirType?, arms: [MatchArm]) -> SourceUnionPatternContextV1?:
+        # Nonunion matches neither scan patterns nor allocate a description.
+        if subject_type == nil:
+            return nil
+        match subject_type.unwrap().kind:
+            case HirTypeKind.Union(_): ()
+            case _: return nil
+        for raw_arm in arms:
+            val arm: MatchArm = raw_arm
+            if source_union_pattern_needs_context_v1(arm.pattern):
+                # Explicit once-per-match boundary: return before the next arm.
+                return self.prepare_source_union_pattern_v1(subject_type)
+        nil
+
+    me prepare_source_union_pattern_v1(subject_type: HirType?) -> SourceUnionPatternContextV1?:
+        if subject_type == nil:
+            return nil
+        var members: [HirType] = []
+        match subject_type.unwrap().kind:
+            case HirTypeKind.Union(union_members): members = union_members
+            case _: return nil
+        if members.len() < 2:
+            return nil
+        val normalized = union_normalize(members)
+        val enum_symbol = self.symbols.structural_union_symbol(normalized.name, 0)
+        val enum_type = HirType(kind: HirTypeKind.Named(enum_symbol, []), span: subject_type.unwrap().span)
+        Some(SourceUnionPatternContextV1(normalized: normalized, enum_type: enum_type))
+
+    me lower_source_union_type_pattern_v1(p: Pattern, context: SourceUnionPatternContextV1?, type_name: text, binder_name: text) -> HirPattern?:
+        # A nil result delegates to the existing nonunion diagnostic path.
+        if context == nil:
+            return nil
+        val description = context.unwrap()
+        val normalized = description.normalized
+        var requested_key = union_narrow_member_key_for_type_name(type_name)
+        if not normalized.keys.contains(requested_key):
+            if val named_symbol = self.symbols.lookup(type_name):
+                requested_key = union_member_key(HirType(
+                    kind: HirTypeKind.Named(named_symbol, []), span: p.span))
+        var index = 0
+        while index < normalized.keys.len():
+            if normalized.keys[index] == requested_key:
+                val member_type: HirType = normalized.members[index]
+                val binder_symbol = self.symbols.define(binder_name, SymbolKind.Variable, Some(member_type), p.span, Visibility.Private, false, nil)
+                val payload_pattern = HirPattern(
+                    kind: HirPatternKind.Binding(binder_symbol, false),
+                    has_type_: true, type_: member_type, span: p.span)
+                return Some(HirPattern(
+                    kind: HirPatternKind.Enum(description.enum_type, union_variant_name(requested_key), Some(HirPatternPayload.Tuple([payload_pattern]))),
+                    has_type_: true, type_: description.enum_type, span: p.span))
+            index = index + 1
+        # Never leave a rejected union pattern as a TypeTest: the later arm
+        # rewrite must not create a detached symbol for the already-lowered body.
+        self.error("E-NARROW-002: `case " + type_name + " " + binder_name + ":` is not a member of union " + normalized.name, p.span)
+        Some(HirPattern(kind: HirPatternKind.Error, type_: nil, span: p.span))

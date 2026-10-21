@@ -88,3 +88,108 @@ awk '/^stage3_compiler_cap=$/ { copying=1 }
      copying { print }' "$root/scripts/bootstrap/resume-stage3-from-admitted.sh" >"$scratch/launcher-prefix.sh"
 reject sh -c 'root=$1; stage3_threads=8; stage3_compiler_ceiling_env=$2; bootstrap_stage3_error() { echo "$*" >&2; exit 1; }; SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=12582912; SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=10000000; SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor; . "$3"' sh "$root" "$row" "$scratch/launcher-prefix.sh"
 printf 'PASS: %s compiler ceiling transport contracts; no product execution\n' "$checks"
+
+# Exercise actual finite observation-budget policy and positional transport.
+python3 - "$root" "$scratch" <<'PY_OBSERVATION'
+import os
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+root, scratch = map(Path, sys.argv[1:])
+launcher = (root / "scripts/bootstrap/resume-stage3-from-admitted.sh").read_text()
+worker = (root / "scripts/bootstrap/lib/stage3-native-build-worker.sh").read_text()
+begin = launcher.index("stage3_observation_host=$(")
+end = launcher.index("\nBOOTSTRAP_STAGE3_FACADE_PATH=", begin)
+policy = launcher[begin:end]
+# Execute actual host-default policies with controlled uname, independent of
+# the machine running this test. The watchdog still owns these defaults.
+watchdog = (root / "scripts/resource/process-tree-rss-watchdog.pl").read_text()
+assert "$platform eq 'freebsd' ? 5000 : 1000" in watchdog
+host_bin = scratch / "observation-host-bin"
+host_bin.mkdir()
+uname = host_bin / "uname"
+uname.write_text('#!/bin/sh\nprintf "%s\\n" "${OBSERVATION_TEST_HOST:?}"\n')
+uname.chmod(0o755)
+base = {"PATH": str(host_bin) + ":/usr/bin:/bin", "OBSERVATION_TEST_HOST": "Linux"}
+def run(code, args=(), env=None, expected=0):
+    result = subprocess.run(["sh", "-c", code, "observation-test", *args],
+        env=env or base, text=True, capture_output=True, timeout=10)
+    assert result.returncode == expected, (result.returncode, expected, result.stdout, result.stderr)
+    return result
+setup = 'bootstrap_stage3_error() { echo "$*" >&2; exit 2; };\n'
+for value, expected in [(None, "1000"), ("1000", "1000"), ("5000", "5000"), ("60000", "60000")]:
+    env = dict(base)
+    if value is not None: env["SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS"] = value
+    result = run(setup + policy + '\nprintf "%s" "$stage3_observation_budget_ms"', env=env)
+    assert result.stdout == expected
+for host, default in [("Linux", "1000"), ("FreeBSD", "5000"), ("Darwin", "1000")]:
+    env = dict(base, OBSERVATION_TEST_HOST=host)
+    result = run(setup + policy + '\nprintf "%s" "$stage3_observation_budget_ms"', env=env)
+    assert result.stdout == default
+    result = run(setup + policy + '\nprintf "%s" "$stage3_observation_budget_ms"',
+        env=dict(env, SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS="60000"))
+    assert result.stdout == "60000"
+for value in ("", "0", "999", "60001", "05000", "-1", "5x", "5000 6000", "9"*80):
+    run(setup + policy, env=dict(base, SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS=value), expected=2)
+
+prefix = scratch / "observation-worker-prefix.sh"
+prefix.write_text(worker[:worker.index("# The caller fully verified")] +
+    '\nprintf "budget=%s\\n" "$SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS"\n')
+prefix.chmod(0o755)
+args = ["fixture"] * 28
+args[1] = str(root)
+for selected in [args, args + ["", ""], args + ["", "", "1000"], args + ["", "", "5000"], args + ["", "", "60000"]]:
+    expected = selected[30] if len(selected) == 31 else "1000"
+    result = run('exec sh "$@"', [str(prefix), *selected])
+    assert result.stdout == "budget=" + expected + "\n"
+for host, default in [("Linux", "1000"), ("FreeBSD", "5000"), ("Darwin", "1000")]:
+    env = dict(base, OBSERVATION_TEST_HOST=host)
+    for selected in [args, args + ["", ""]]:
+        result = run('exec sh "$@"', [str(prefix), *selected], env=env)
+        assert result.stdout == "budget=" + default + "\n"
+        result = run('exec sh "$@"', [str(prefix), *selected],
+            env=dict(env, SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS=default))
+        assert result.stdout == "budget=" + default + "\n"
+    result = run('exec sh "$@"', [str(prefix), *args, "", "", "1000"], env=env)
+    assert result.stdout == "budget=1000\n"
+# Explicit positional authority wins over a stale service-manager environment.
+result = run('exec sh "$@"', [str(prefix), *args, "", "", "5000"],
+    env=dict(base, SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS="60000"))
+assert result.stdout == "budget=5000\n"
+for bad in ("", "999", "60001", "05000", "-1", "5x", "9"*80):
+    run('exec sh "$@"', [str(prefix), *args, "", "", bad], expected=64)
+for selected in (args + [""], args + ["", "", "5000", "extra"]):
+    run('exec sh "$@"', [str(prefix), *selected], expected=64)
+run('exec sh "$@"', [str(prefix), *args],
+    env=dict(base, SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS="5000"), expected=64)
+
+# All four actual launcher argv paths carry the same 31st value.
+branches = re.findall(r'"\$worker" "\$stage3_transcript".*? &', launcher, re.S)
+assert len(branches) == 4
+for branch in branches:
+    env = dict(base)
+    for name in re.findall(r'\$\{?([A-Za-z_][A-Za-z_0-9]*)', branch): env[name] = "fixture"
+    env.update(worker="record", stage3_observation_budget_ms="5000")
+    result = run('record() { printf "%s\\n" "$@"; };\n' + branch[:-2], env=env)
+    argv = result.stdout.splitlines()
+    assert len(argv) == 31 and argv[30] == "5000", argv
+
+# Execute the actual systemd branch with a service double that clears ambient
+# variables, then the actual worker prefix. No service/compiler is launched.
+start = launcher.index("  systemd-run --user --quiet --wait")
+stop = launcher.index(" &", start)
+branch = launcher[start:stop]
+bin_dir = scratch / "observation-bin"
+bin_dir.mkdir()
+service = bin_dir / "systemd-run"
+service.write_text('#!/bin/sh\nset -eu\nwhile [ "$#" -gt 0 ]; do case "$1" in --*) shift ;; *) break ;; esac; done\nexec env -i PATH=/usr/bin:/bin "$@"\n')
+service.chmod(0o755)
+env = dict(base, PATH=str(bin_dir) + ":/usr/bin:/bin")
+for name in re.findall(r'\$\{?([A-Za-z_][A-Za-z_0-9]*)', branch): env[name] = "fixture"
+env.update(root=str(root), worker=str(prefix), stage3_compiler_ceiling_env="", stage3_compiler_cap="", stage3_observation_budget_ms="5000")
+result = run(branch, env=env)
+assert result.stdout == "budget=5000\n", result.stdout
+print("PASS: observation default/range/invalid/arity and actual four-route argv + clean-service worker transfer; no compiler/watchdog workload")
+PY_OBSERVATION
