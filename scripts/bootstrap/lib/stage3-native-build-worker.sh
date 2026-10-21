@@ -4,7 +4,8 @@ set -eu
 # Internal worker for resume-stage3-from-admitted.sh.  The launcher runs this
 # file in a dedicated systemd user-service cgroup so every descendant remains
 # kernel-owned even after double-fork/reparenting.
-[ "$#" -eq 28 ] || [ "$#" -eq 30 ] || { echo 'stage3 worker: invalid argument count' >&2; exit 64; }
+worker_arg_count=$#
+[ "$#" -eq 28 ] || [ "$#" -eq 30 ] || [ "$#" -eq 31 ] || { echo 'stage3 worker: invalid argument count' >&2; exit 64; }
 transcript=$1 root=$2 log=$3 worker_home=$4 worker_tmp=$5 worker_path=$6
 admitted=$7 platform=$8 backend=$9
 shift 9
@@ -17,6 +18,29 @@ memory_high_mib=$7
 abi_policy=$8 abi_receipt=$9 abi_receipt_sha=${10}
 compiler_ceiling_env=${11:-}
 compiler_cap=${12:-}
+
+# The new positional value is the controller authority, including across a
+# systemd manager that drops or supplies stale ambient environment. Legacy
+# 28/30-argument callers retain only the historical host-platform default.
+if [ "$worker_arg_count" -eq 31 ]; then
+  observation_budget_ms=${13}
+else
+  observation_host=$(uname -s) || { echo 'stage3 worker: cannot identify observation host' >&2; exit 64; }
+  case "$observation_host" in FreeBSD) observation_budget_ms=5000 ;; *) observation_budget_ms=1000 ;; esac
+  [ "${SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS-$observation_budget_ms}" = "$observation_budget_ms" ] || {
+    echo 'stage3 worker: unrecorded observation budget' >&2; exit 64;
+  }
+fi
+case "$observation_budget_ms" in
+  ''|0*|*[!0-9]*) echo 'stage3 worker: invalid observation budget' >&2; exit 64 ;;
+esac
+[ "${#observation_budget_ms}" -le 5 ] &&
+  [ "$observation_budget_ms" -ge 1000 ] &&
+  [ "$observation_budget_ms" -le 60000 ] || {
+    echo 'stage3 worker: observation budget must be 1000..60000 ms' >&2; exit 64;
+  }
+SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS=$observation_budget_ms
+export SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS
 
 BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
 BOOTSTRAP_STAGE3_VERSION_ROOT=$root
