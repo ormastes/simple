@@ -171,6 +171,36 @@ pub fn run_under_engine(spl_path: text, engine: text) -> (text, text, i64):
     env_set("SIMPLE_RUNTIME_MODE", previous_runtime)
     result
 
+pub fn engine_max_rss_kb(spl_path: text, engine: text) -> i64:
+    """Peak resident set (KiB) of `spl_path` under `engine`, or -1 if unmeasurable.
+
+    Measured from OUTSIDE the probe with /usr/bin/time, because a probe that
+    imports a sysinfo extern the JIT cannot resolve is demoted to the
+    interpreter and would measure the wrong engine. Same engine pinning and
+    reentrancy guard as `run_under_engine`.
+    """
+    if not is_known_engine(engine) or not file_exists(spl_path) or probe_spawn_is_reentrant():
+        return -1
+    if not file_exists("/usr/bin/time"):
+        return -1
+
+    val binary = simple_binary()
+    val previous = env_get("SIMPLE_EXECUTION_MODE") ?? ""
+    env_set("SIMPLE_EXECUTION_MODE", engine)
+    val previous_runtime = env_get("SIMPLE_RUNTIME_MODE") ?? ""
+    env_set("SIMPLE_RUNTIME_MODE", engine)
+    env_set(PROBE_DEPTH_VAR, "1")
+
+    val (_out, err, _code) = rt_process_run_bounded("/usr/bin/time", ["-f", "MAXRSS_KB %M", binary, "run", spl_path], PROBE_TIMEOUT_MS, PROBE_MAX_OUTPUT)
+
+    env_set(PROBE_DEPTH_VAR, "")
+    env_set("SIMPLE_EXECUTION_MODE", previous)
+    env_set("SIMPLE_RUNTIME_MODE", previous_runtime)
+    for line in err.split("\n"):
+        if line.starts_with("MAXRSS_KB "):
+            return line.replace("MAXRSS_KB ", "").trim().to_int()
+    -1
+
 pub fn engine_stdout(spl_path: text, engine: text) -> text:
     """stdout of `spl_path` run under `engine` — the usual `expect` target."""
     val (out, err, code) = run_under_engine(spl_path, engine)

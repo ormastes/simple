@@ -1,0 +1,148 @@
+# Selected source-model union stage. All mutation targets an invocation-owned
+# SymbolTable graph, and no model escapes until the entire stage succeeds.
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
+use compiler.semantics.union_normalize.source_union_admission_v1.{
+    SourceUnionLimitsV1, SourceUnionUsageV1, SourceUnionErrorV1, SourceUnionLedgerV1,
+    source_union_clone_symbols_v1, source_union_reserve_snapshot_v1,
+    source_union_check_snapshot_v1, source_union_reserve_text_v1
+}
+use compiler.semantics.union_normalize.source_union_preflight_v1.{source_union_preflight_v1}
+use compiler.semantics.union_normalize.source_union_types_v1.{SourceUnionMapV1}
+use compiler.semantics.union_normalize.source_union_rewrite_v1.{SourceUnionRewriterV1}
+
+struct SourceUnionOutputV1:
+    module: HirModule
+    usage: SourceUnionUsageV1
+
+fn source_union_unchanged_carrier_v1(type_: HirType, map: SourceUnionMapV1,
+    span: Span) -> Result<(), SourceUnionErrorV1>:
+    val normalized = map.normalize_type(type_, span)?
+    if not hir_types_equal(type_, normalized):
+        return Err(map.ledger.fail("UNION-E-CARRIER",
+            "union declaration field requires aggregate value conversion", span))
+    Ok(())
+
+pub fn source_union_normalize_v1(module: HirModule, limits: SourceUnionLimitsV1
+) -> Result<SourceUnionOutputV1, SourceUnionErrorV1>:
+    val ledger = SourceUnionLedgerV1.create(limits)?
+    val found = source_union_preflight_v1(module, ledger)?
+    if not found:
+        # Preserve the exact old source-model route for union-free modules.
+        return Ok(SourceUnionOutputV1(module: module, usage: ledger.snapshot()))
+    var owned = module
+    owned.symbols = source_union_clone_symbols_v1(module.symbols, ledger)?
+    var map = SourceUnionMapV1.create(owned, ledger)
+    var rewrite = SourceUnionRewriterV1.create(map)
+    val span = Span.empty()
+    val symbol_count = owned.symbols.symbols.len()
+    source_union_reserve_snapshot_v1(symbol_count, ledger, span)?
+    source_union_reserve_snapshot_v1(symbol_count, ledger, span)?
+    var symbol_ids = owned.symbols.symbols.keys()
+    source_union_check_snapshot_v1(symbol_count, symbol_ids.len(), ledger, span)?
+    # Reserve conservative comparison work before the existing sort runs.
+    for index in 0..symbol_count: ledger.debit("work", symbol_count, span)?
+    symbol_ids.sort()
+    for id in symbol_ids:
+        val row = owned.symbols.symbols[id]
+        if val type_ = row.type_:
+            rewrite.original_types[id] = type_
+    # Function bodies must resolve direct calls against original declarations,
+    # so collect replacements separately and commit them only at the end.
+    val function_count = module.functions.len()
+    source_union_reserve_snapshot_v1(function_count, ledger, span)?
+    val function_ids = module.functions.keys()
+    source_union_check_snapshot_v1(function_count, function_ids.len(), ledger, span)?
+    var names: [text] = []
+    var by_name: Dict<text, SymbolId> = {}
+    for id in function_ids:
+        val function = module.functions[id]
+        if function.symbol.id != id.id or by_name.has(function.name):
+            return Err(ledger.fail("UNION-E-IDENTITY", "duplicate or mismatched function declaration", function.span))
+        source_union_reserve_text_v1(function.name, ledger, function.span)?
+        ledger.debit("copy_units", 2, function.span)?
+        names.push(function.name)
+        by_name[function.name] = id
+    for index in 0..function_count: ledger.debit("work", function_count, span)?
+    names.sort()
+    var functions: Dict<SymbolId, HirFunction> = {}
+    for name in names:
+        val id = by_name[name]
+        val transformed = rewrite.function(module.functions[id])?
+        ledger.debit("copy_units", 1, transformed.span)?
+        functions[id] = transformed
+    # Retained declaration types/defaults are never silently skipped. Nested
+    # aggregate union conversions remain explicitly outside this source slice.
+    val struct_count = module.structs.len()
+    source_union_reserve_snapshot_v1(struct_count, ledger, span)?
+    val structs = module.structs.keys()
+    source_union_check_snapshot_v1(struct_count, structs.len(), ledger, span)?
+    for id in structs:
+        var definition = module.structs[id]
+        var fields: [HirField] = []
+        for field in definition.fields:
+            source_union_unchanged_carrier_v1(field.type_, map, field.span)?
+            var rewritten = field
+            if field.has_default:
+                rewritten.default = rewrite.expression(field.default, Some(field.type_), field.type_, 1)?
+            ledger.debit("copy_units", 1, field.span)?
+            fields.push(rewritten)
+        definition.fields = fields
+        map.module.structs[id] = definition
+    val class_count = module.classes.len()
+    source_union_reserve_snapshot_v1(class_count, ledger, span)?
+    val classes = module.classes.keys()
+    source_union_check_snapshot_v1(class_count, classes.len(), ledger, span)?
+    for id in classes:
+        if module.classes[id].fields.len() > 0 or module.classes[id].methods.len() > 0:
+            return Err(ledger.fail("UNION-E-CARRIER", "class carriers require their own union conversion", span))
+    # Source enums remain unchanged; generated enum declarations are owned by
+    # map.module and must not be overwritten with the original table.
+    val enum_count = module.enums.len()
+    source_union_reserve_snapshot_v1(enum_count, ledger, span)?
+    val enums = module.enums.keys()
+    source_union_check_snapshot_v1(enum_count, enums.len(), ledger, span)?
+    for id in enums:
+        var definition = module.enums[id]
+        var variants: [HirVariant] = []
+        for variant in definition.variants:
+            var rewritten = variant
+            if variant.has_discriminant:
+                rewritten.discriminant = rewrite.expression(variant.discriminant,
+                    Some(HirType(kind: HirTypeKind.Int(64, true), span: variant.span)),
+                    HirType(kind: HirTypeKind.Int(64, true), span: variant.span), 1)?
+            match variant.kind:
+                case Tuple(types):
+                    for type_ in types: source_union_unchanged_carrier_v1(type_, map, variant.span)?
+                case Struct(fields):
+                    var rewritten_fields: [HirField] = []
+                    for field in fields:
+                        source_union_unchanged_carrier_v1(field.type_, map, field.span)?
+                        var rewritten_field = field
+                        if field.has_default:
+                            rewritten_field.default = rewrite.expression(field.default,
+                                Some(field.type_), field.type_, 1)?
+                        ledger.debit("copy_units", 1, field.span)?
+                        rewritten_fields.push(rewritten_field)
+                    rewritten.kind = HirVariantKind.Struct(rewritten_fields)
+                case Unit: ()
+            ledger.debit("copy_units", 1, variant.span)?
+            variants.push(rewritten)
+        definition.variants = variants
+        map.module.enums[id] = definition
+    if (module.traits.len() != 0 or module.impls.len() != 0 or
+        module.constants.len() != 0 or module.static_asserts.len() != 0 or module.bitfields.len() != 0):
+        return Err(ledger.fail("UNION-E-CARRIER",
+            "trait impl constant or static-assert carriers require separate union conversion", span))
+    # Keep every symbol type consistent with rewritten signatures and locals.
+    for id in symbol_ids:
+        var row = map.module.symbols.symbols[id]
+        if val original = rewrite.original_symbol_type(row.id):
+            row.type_ = Some(map.normalize_type(original, row.span)?)
+            map.module.symbols.symbols[id] = row
+    map.module.functions = functions
+    Ok(SourceUnionOutputV1(module: map.module, usage: ledger.snapshot()))
+
+export SourceUnionOutputV1, source_union_normalize_v1

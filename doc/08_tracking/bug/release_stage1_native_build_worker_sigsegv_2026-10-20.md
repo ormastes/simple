@@ -37,6 +37,17 @@ in the compiler itself, before any binary is written:
   The remaining stubs are unconfirmed suspects. For example, `swprintf` is used
   by the Windows process-spawn wrapper path in `src/runtime/runtime_process.c`.
 
+**Update (run 39362039541, job 118430432384).** The Windows segfault was caused
+by `MSYSTEM=MINGW64`: the seed picked the GNU flavor and built the core-C
+runtime with MinGW headers. release.yml now pins `SIMPLE_LINKER_FLAVOR=msvc`, and
+PRs #3942 and #3953 fixed the system-symbol stubs. Stage1 then links with zero
+stub warnings and no longer segfaults. Each stage1 native-build now fails
+cleanly instead:
+`fatal: called unresolved symbol rt_secure_temp_dir_set_parent (stubbed for link only)`.
+That runtime symbol has no Windows definition in the stage1 link. The seed
+fallback still applies on Windows for this reason. Linux in the same run still
+fails with the HIR worker SIGSEGV (job 118430432407).
+
 The Linux MCP builds hit the same crash on earlier runs. They were masked
 because those builds are non-fatal ("source fallback remains available").
 

@@ -1,0 +1,139 @@
+# @manual: show
+# @req: EE-01, EE-PV05
+# Actual declaration preparation and pattern capture APIs. Execution UNRUN.
+use std.spec.{describe, it, expect, fail}
+use std.spec.step
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.mir_target_context.{mir_target_context_from}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{SymbolId, HirType, HirTypeKind}
+use compiler.hir.hir_definitions.{HirPattern, HirPatternKind, HirPatternPayload}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.enum_semantic_declarations_v1.*
+use compiler.mir._MirLoweringExpr.enum_semantic_capture_v1.*
+use compiler.mir.verification_source_environment_v1.{verification_source_environment_v1}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirSignature}
+use compiler.mir.mir_enum_semantic_types.{MirEnumPatternKindV1}
+use compiler.mir.mir_json.{serialize_mir_type}
+
+struct EnumCaptureBudgetFixtureV1:
+    lowering: MirLowering
+    owner: SymbolId
+    function: SymbolId
+    capture: i64
+
+fn enum_capture_budget_fixture_v1() -> EnumCaptureBudgetFixtureV1:
+    val source = "enum Budget:\n    First = 7\n    Second = 42\n    Pair(i64, bool)\nfn budget_owner() -> i64:\n    0\n"
+    val parsed = parse_full_frontend(source, "capture_budget.spl", "capture_budget.spl", Logger(level: 0))
+    var frontend = HirLowering.with_filename("capture_budget.spl")
+    val hir = frontend.lower_module(parsed)
+    expect(frontend.errors.len()).to_equal(0)
+    var owner = SymbolId(id: -1)
+    var function = SymbolId(id: -1)
+    for _, declaration in hir.enums:
+        if declaration.name == "Budget": owner = declaration.symbol
+    for _, declaration in hir.functions:
+        if declaration.name == "budget_owner" or declaration.name.ends_with(".budget_owner"):
+            function = declaration.symbol
+    expect(owner.id).to_be_greater_than(-1)
+    expect(function.id).to_be_greater_than(-1)
+    val symbols = verification_source_environment_v1(hir.symbols).unwrap()
+    var owned = hir
+    owned.symbols = symbols
+    val target = mir_target_context_from("x86_64-unknown-linux-gnu", "unknown", "unknown", "llvm", 1)
+    var lowering = MirLowering.new_for_target(symbols, target)
+    lowering.allow_ambient_bootstrap_policy = false
+    lowering.enum_semantic_capture_enabled = true
+    lowering.prepare_enum_semantic_declarations_v1(owned).unwrap()
+    expect(lowering.enum_semantic_source_owners.get(owner.id).unwrap()).to_equal(owner.id)
+    expect(lowering.enum_semantic_function_work.get(function.id)).to_be_nil()
+    var builder = lowering.builder
+    builder.begin_function(function, "capture_budget.budget_owner",
+        MirSignature(params: [], return_type: MirType.i64(), is_variadic: false), Span.empty())
+    val scrutinee = builder.new_temp(MirType(kind: MirTypeKind.Struct(owner)))
+    val result = builder.new_temp(MirType.i64())
+    val merge = builder.new_block(Some("capture_budget_merge"))
+    lowering.builder = builder
+    val capture = lowering.enum_semantic_begin_v1(scrutinee, Span.empty())
+    expect(capture).to_equal(0)
+    lowering.enum_semantic_select_owner_v1(capture, owner.id, result, merge)
+    expect(lowering.enum_semantic_capture_error).to_equal("")
+    expect(lowering.enum_semantic_function_work.get(function.id).unwrap()).to_equal(1)
+    expect(lowering.enum_semantic_function_counts.get(function.id).unwrap()).to_equal(1)
+    expect(lowering.enum_semantic_captures[capture].function_symbol.id).to_equal(function.id)
+    expect(lowering.enum_semantic_captures[capture].semantic.enum_owner.id).to_equal(owner.id)
+    expect(lowering.enum_semantic_captures[capture].semantic.pattern_nodes.len()).to_equal(0)
+    EnumCaptureBudgetFixtureV1(lowering: lowering, owner: owner, function: function, capture: capture)
+
+fn enum_capture_budget_pattern_v1(owner: SymbolId, name: text, item_count: i64) -> HirPattern:
+    val declared_type = HirType(kind: HirTypeKind.Named(owner, []), span: Span.empty())
+    var payload: HirPatternPayload? = nil
+    if item_count >= 0:
+        var items: [HirPattern] = []
+        for _ in 0..item_count:
+            items.push(HirPattern(kind: HirPatternKind.Wildcard, has_type_: false,
+                type_: HirType(kind: HirTypeKind.Error, span: Span.empty()), span: Span.empty()))
+        payload = Some(HirPatternPayload.Tuple(items))
+    HirPattern(kind: HirPatternKind.Enum(declared_type, name, payload),
+        has_type_: true, type_: declared_type, span: Span.empty())
+
+describe "EE-PV05 actual enum pattern capture budget":
+    it "refuses an exhausted variant-name scan before publishing even a matched nullary pattern":
+        step("Give the actual First-pattern capture two units for its node and three-name declaration scan")
+        val fixture = enum_capture_budget_fixture_v1()
+        var lowering = fixture.lowering
+        lowering.enum_semantic_function_work[fixture.function.id] = 65534
+        expect(lowering.enum_semantic_function_work.get(fixture.function.id).unwrap()).to_equal(65534)
+        val result = lowering.enum_semantic_pattern_v1(fixture.capture,
+            enum_capture_budget_pattern_v1(fixture.owner, "First", -1),
+            MirType(kind: MirTypeKind.Enum(fixture.owner)), 0)
+        expect(result).to_equal(-1)
+        expect(lowering.enum_semantic_capture_error).to_equal("EE-E-LIMIT: function capture budget")
+        expect(lowering.enum_semantic_function_work.get(fixture.function.id).unwrap()).to_equal(65536)
+        expect(lowering.enum_semantic_captures[fixture.capture].semantic.pattern_nodes.len()).to_equal(0)
+
+    it "accepts exactly eight units and retains the selected discriminant and ordered payload slots":
+        step("Charge one root, three names, two payload copies and two child nodes through actual capture")
+        val fixture = enum_capture_budget_fixture_v1()
+        var lowering = fixture.lowering
+        lowering.enum_semantic_function_work[fixture.function.id] = 65528
+        expect(lowering.enum_semantic_function_work.get(fixture.function.id).unwrap()).to_equal(65528)
+        val result = lowering.enum_semantic_pattern_v1(fixture.capture,
+            enum_capture_budget_pattern_v1(fixture.owner, "Pair", 2),
+            MirType(kind: MirTypeKind.Enum(fixture.owner)), 0)
+        expect(lowering.enum_semantic_capture_error).to_equal("")
+        expect(lowering.enum_semantic_function_work.get(fixture.function.id).unwrap()).to_equal(65536)
+        expect(result).to_equal(2)
+        val nodes = lowering.enum_semantic_captures[fixture.capture].semantic.pattern_nodes
+        expect(nodes.len()).to_equal(3)
+        match nodes[result].kind:
+            case MirEnumPatternKindV1.Variant(owner, discriminant, children):
+                expect(owner.id).to_equal(fixture.owner.id)
+                expect(discriminant).to_equal(43)
+                expect(children).to_equal([0, 1])
+            case _: fail("Actual successful capture did not publish a variant pattern")
+        expect(serialize_mir_type(nodes[0].expected_type)).to_equal("\"I64\"")
+        expect(serialize_mir_type(nodes[1].expected_type)).to_equal("\"Bool\"")
+        val slots = lowering.enum_semantic_variant_slots.get(fixture.owner.id.to_string() + ":43").unwrap()
+        expect(slots.len()).to_equal(2)
+        expect(serialize_mir_type(slots[0])).to_equal("\"I64\"")
+        expect(serialize_mir_type(slots[1])).to_equal("\"Bool\"")
+
+    it "refuses oversized tuple arity before attempting any payload-copy debit":
+        step("Exhaust four units on root and declaration scan, then reject three items for two declared slots")
+        val fixture = enum_capture_budget_fixture_v1()
+        var lowering = fixture.lowering
+        lowering.enum_semantic_function_work[fixture.function.id] = 65532
+        expect(lowering.enum_semantic_function_work.get(fixture.function.id).unwrap()).to_equal(65532)
+        val result = lowering.enum_semantic_pattern_v1(fixture.capture,
+            enum_capture_budget_pattern_v1(fixture.owner, "Pair", 3),
+            MirType(kind: MirTypeKind.Enum(fixture.owner)), 0)
+        expect(result).to_equal(-1)
+        expect(lowering.enum_semantic_capture_error).to_equal("EE-E-PATTERN: declared payload arity")
+        expect(lowering.enum_semantic_function_work.get(fixture.function.id).unwrap()).to_equal(65536)
+        expect(lowering.enum_semantic_captures[fixture.capture].semantic.pattern_nodes.len()).to_equal(0)

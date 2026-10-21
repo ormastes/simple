@@ -1,0 +1,64 @@
+# Invocation-owned verification policy. Ordinary compiler paths pass nil.
+
+pub struct MonoInvocationLimitsV1:
+    max_specializations: i64
+    max_work_units: i64
+    max_hir_depth: i64
+
+pub fn mono_verification_limits_v1() -> MonoInvocationLimitsV1:
+    MonoInvocationLimitsV1(max_specializations: 4096, max_work_units: 65536, max_hir_depth: 128)
+
+pub fn mono_invocation_limits_valid_v1(limits: MonoInvocationLimitsV1) -> bool:
+    limits.max_specializations > 0 and limits.max_specializations <= 4096 and limits.max_work_units > 0 and limits.max_work_units <= 65536 and limits.max_hir_depth > 0 and limits.max_hir_depth <= 128
+
+pub class MonoInvocationBudgetV1:
+    limits: MonoInvocationLimitsV1
+    var remaining_work: i64
+    var failure: text
+    var hir_depth: i64
+    var specializations: i64
+
+    pub static fn create(limits: MonoInvocationLimitsV1) -> Result<MonoInvocationBudgetV1, text>:
+        if not mono_invocation_limits_valid_v1(limits): return Err("E-MONO-LIMIT: invalid invocation limits")
+        Ok(MonoInvocationBudgetV1(limits: limits, remaining_work: limits.max_work_units,
+            failure: "", hir_depth: 0, specializations: 0))
+
+    me fail_v1(message: text):
+        if self.failure == "": self.failure = message
+
+    me charge_v1(units: i64) -> bool:
+        if self.failure != "": return false
+        if units < 0 or self.remaining_work < 0 or units > self.remaining_work:
+            self.fail_v1("E-MONO-WORK: invocation work exhausted before allocation")
+            return false
+        self.remaining_work = self.remaining_work - units
+        true
+
+    me charge_product_v1(count: i64, units: i64) -> bool:
+        if self.failure != "": return false
+        if count < 0 or units < 0 or (units > 0 and count > self.remaining_work / units):
+            self.fail_v1("E-MONO-WORK: invocation expansion exceeds remaining work")
+            return false
+        self.charge_v1(count * units)
+
+    me enter_v1() -> bool:
+        if self.failure != "": return false
+        if self.hir_depth < 0 or self.hir_depth >= self.limits.max_hir_depth:
+            self.fail_v1("E-MONO-DEPTH: invocation HIR depth exceeded")
+            return false
+        if not self.charge_v1(1): return false
+        self.hir_depth = self.hir_depth + 1
+        true
+
+    me leave_v1():
+        if self.hir_depth > 0: self.hir_depth = self.hir_depth - 1
+
+    me specialization_v1() -> bool:
+        if self.failure != "": return false
+        if self.specializations < 0 or self.specializations >= self.limits.max_specializations:
+            self.fail_v1("E-MONO-SPECIALIZATIONS: invocation specialization limit exceeded")
+            return false
+        if not self.charge_v1(1): return false
+        self.specializations = self.specializations + 1
+        true
+

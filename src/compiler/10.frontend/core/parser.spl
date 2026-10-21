@@ -680,10 +680,10 @@ fn parser_parse_cast_type() -> i64:
 # bootstrap tag registry. Parse `label: T` by discarding the provisional named
 # type for `label` and retaining T; anonymous tuple elements remain unchanged.
 fn parser_parse_tuple_element_type() -> i64:
-    val candidate = parser_parse_type()
+    val candidate = parser_parse_type_with_union()
     if par_kind_get() == TOK_COLON:
         parser_advance()
-        return parser_parse_type()
+        return parser_parse_type_with_union()
     candidate
 
 fn parser_array_tag_for_elem(elem_type: i64) -> i64:
@@ -1259,11 +1259,13 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
         # element types and a destructure of the call result defaulted every
         # element to i64 (parity case process_run_timeout).
         var tuple_elem_tags: [i64] = []
+        var tuple_has_comma = false
         if par_kind_get() != 141:
             tuple_elem_tags.push(parser_parse_tuple_element_type())
             while true:
                 if par_kind_get() != 160:
                     break
+                tuple_has_comma = true
                 parser_advance()
                 if par_kind_get() == 141:
                     break
@@ -1290,14 +1292,17 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
                 return parser_absorb_optional_suffix(TYPE_ANY)
             return parser_absorb_optional_suffix(unit_tag)
         # A real tuple (2+ elements) carries its element tags via the
-        # registry; a one-element paren group keeps the old TYPE_ANY behavior
-        # because `(T)` is not a tuple.
+        # registry. A sole unseparated element is grouping, so retain its
+        # actual type (including a nested union) instead of erasing it to Any.
+        # Preserve the separate legacy single-element trailing-comma path.
         if tuple_elem_tags.len() >= 2:
             val tuple_tag = tuple_type_register(tuple_elem_tags)
             if tuple_tag < 0:
                 parser_error("too many distinct tuple type annotations")
                 return parser_absorb_optional_suffix(TYPE_ANY)
             return parser_absorb_optional_suffix(tuple_tag)
+        if not tuple_has_comma:
+            return parser_absorb_optional_suffix(tuple_elem_tags[0])
         return parser_absorb_optional_suffix(TYPE_ANY)
     # Dict type: {K: V}
     if par_kind_get() == 142:

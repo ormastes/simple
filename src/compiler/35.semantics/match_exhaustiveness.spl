@@ -4,7 +4,7 @@
 #
 # Wraps compiler.hir.match_coverage.ResolvedMatchCoverage with the severity
 # decision MIR lowering needs: under the `critical` assurance profile ONLY, a
-# non-exhaustive match against a closed enum with no wildcard arm is a hard
+# non-exhaustive static match against a closed enum is a hard
 # error, not the warning every other profile still gets (see
 # switch_operators_calls.spl's existing `self.error(...)` non-fatal
 # diagnostic -- premise #10/#10b: 286 non-exhaustive matches exist in-tree
@@ -46,17 +46,27 @@ pub fn build_match_coverage(
 # through the shared alias table so "mission-critical" behaves identically to
 # "critical". moderate/strict/robust always return false here: they keep
 # today's warn-only behavior at the call site, unchanged by this function.
+# REQ-002's selected static policy sees through wildcard/default arms under
+# critical, exactly like ResolvedMatchCoverage.is_exhaustive_for.
 # Not `pub`: cross-module import still works via explicit `use module.{name}`
 # (same pattern as `compiler.backend.gpu_intrinsics.is_gpu_intrinsic`, also a
 # plain `fn`) -- kept non-pub specifically to avoid the `primitive_api` lint
 # rule, which flags any `pub fn`/`pub me` returning a bare `bool`/int/float
 # from its public surface. This function is an internal severity predicate,
 # not part of a published API, so the rule's concern does not apply.
-fn match_coverage_requires_hard_error(coverage: ResolvedMatchCoverage, strictness_name: text) -> bool:
-    if coverage.is_exhaustive():
-        return false
+fn match_coverage_profile_is_critical(strictness_name: text) -> bool:
     val canonical = normalize_profile_name(strictness_name)
     val strictness = AssuranceStrictness.from_name(canonical)
     match strictness:
         AssuranceStrictness.Critical: true
         _: false
+
+fn match_coverage_critical_missing_ids(coverage: ResolvedMatchCoverage, strictness_name: text) -> [i64]:
+    if not match_coverage_profile_is_critical(strictness_name):
+        return []
+    # One canonical ID-set difference, reusable by both the boolean API and
+    # the diagnostic producer without repeating the coverage traversal.
+    coverage.static_missing_variant_ids()
+
+fn match_coverage_requires_hard_error(coverage: ResolvedMatchCoverage, strictness_name: text) -> bool:
+    match_coverage_critical_missing_ids(coverage, strictness_name).len() > 0

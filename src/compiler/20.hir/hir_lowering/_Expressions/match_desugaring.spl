@@ -889,7 +889,30 @@ impl HirLowering:
             case _:
                 0
 
+    fn enum_semantic_named_arm_v1(pattern: HirPattern, depth: i64) -> bool:
+        # Only the opted path uses this selector. Depth overflow remains intact
+        # for the bounded MIR pattern validator to refuse; never expand it here.
+        if depth > 128: return true
+        if pattern == nil: return false
+        match pattern.kind:
+            case HirPatternKind.Enum(type_, _, _):
+                if type_ == nil: return false
+                match type_.kind:
+                    case HirTypeKind.Named(_, _): return true
+                    case _: return false
+            case HirPatternKind.Or(alternatives):
+                for alternative in alternatives:
+                    if self.enum_semantic_named_arm_v1(alternative, depth + 1): return true
+                false
+            case _: false
+
     me build_match_expr_unchecked(hir_scrutinee: HirExpr, hir_arms: [HirMatchArm], span: Span) -> HirExprKind:
+        if self.preserve_enum_semantic_arms_v1:
+            for source_arm in hir_arms:
+                if self.enum_semantic_named_arm_v1(source_arm.pattern, 1):
+                    # No Span-derived identity and no shared registry. The MIR
+                    # producer receives this exact original ordered arm list.
+                    return HirExprKind.MatchCase(hir_scrutinee, hir_arms)
         # `case i64 v:` narrowing arms become ordinary `__Union_...` enum arms
         # BEFORE the fast-path decision below, so a union match takes the
         # tested enum-match path instead of the general if-chain fallback

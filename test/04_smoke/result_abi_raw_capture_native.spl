@@ -1,0 +1,36 @@
+# Execute only with a qualified producer/runtime built from this exact change.
+# An old host compiler or interpreter success cannot qualify the selected ABI.
+use std.io_runtime.{exit}
+use compiler.mir_opt.result_abi_observation_capture.*
+use compiler.mir_opt.result_abi_translation_validation.{
+    ResultAbiObservationV1, ResultTaggedHandleProjectionV1}
+
+fn require_raw(condition: bool):
+    if not condition:
+        print "RESULT_ABI_RAW_CAPTURE_FAIL"
+        exit(1)
+
+fn main():
+    for bits in [0, -1, -9223372036854775807 - 1, 9223372036854775807]:
+        match result_abi_builtin_i64_capture_v1(bits, bits):
+            case Err(_): require_raw(false)
+            case Ok(captured):
+                require_raw(captured.expected.enum_runtime_id == 0)
+                require_raw(captured.observations.len() == 2)
+                require_raw(captured.observations[0].target.payload_bits == bits)
+                require_raw(captured.observations[1].target.payload_bits == bits)
+                require_raw(result_abi_raw_compare_v1(
+                    captured.expected, bits, bits, captured.observations) == "")
+                # Corrupt a copied scalar projection, never the runtime handle.
+                for index in [0, 1]:
+                    val original = captured.observations[index]
+                    for field in [0, 1, 2]:
+                        val corrupt = ResultTaggedHandleProjectionV1(
+                            enum_runtime_id: if field == 0: 31 else: original.target.enum_runtime_id,
+                            discriminant: if field == 1: 7 else: original.target.discriminant,
+                            payload_bits: if field == 2: 19 else: original.target.payload_bits)
+                        var rows = [captured.observations[0], captured.observations[1]]
+                        rows[index] = ResultAbiObservationV1(source: original.source, target: corrupt)
+                        require_raw(result_abi_raw_compare_v1(
+                            captured.expected, bits, bits, rows) != "")
+    print "RESULT_ABI_RAW_CAPTURE_OK_UNAUTHENTICATED_NOT_CHECKED"

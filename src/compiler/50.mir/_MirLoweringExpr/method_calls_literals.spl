@@ -850,6 +850,24 @@ impl MirLowering:
     me lower_result_unwrap(receiver: HirExpr, payload_type: HirType, default_expr: HirExpr?, unwrap_err: bool) -> LocalId:
         self.lower_result_unwrap_core(receiver, payload_type, default_expr, unwrap_err, 0, false)
 
+    me result_optional_inner_supported(inner: HirType) -> bool:
+        # This route preserves a canonical Optional handle, not an inner
+        # value. Admit established scalar/nominal owners without broadening
+        # Any, inference, generic or nested-container payload admission.
+        match inner.kind:
+            case HirTypeKind.Int(bits, signed): bits == 64 and signed
+            case HirTypeKind.Float(bits): bits == 64
+            case HirTypeKind.Bool | HirTypeKind.Str: true
+            case HirTypeKind.Named(symbol, args):
+                if args.len() != 0: return false
+                if val found = self.symbols.get_symbol_raw(symbol.id):
+                    val declaration: HirSymbol = found
+                    if declaration.id.id != symbol.id: return false
+                    return (declaration.kind == SymbolKind.Struct or
+                        declaration.kind == SymbolKind.Class or declaration.kind == SymbolKind.Enum)
+                false
+            case _: false
+
     me lower_result_unwrap_core(receiver: HirExpr, payload_type: HirType, default_expr: HirExpr?, unwrap_err: bool, prelowered: LocalId, has_prelowered: bool) -> LocalId:
         # `has_prelowered`: the receiver was already evaluated (a chained
         # `r.map(f).unwrap_or(d)`); reuse that local, never lower it twice.
@@ -860,7 +878,15 @@ impl MirLowering:
         var result_is_array = false
         var result_is_dict = false
         var result_is_tuple = false
+        var result_is_optional = false
         match payload_type.kind:
+            case HirTypeKind.Optional(inner):
+                if default_expr == nil and self.result_optional_inner_supported(inner):
+                    # rt_enum_payload returns the existing Option handle or
+                    # nil sentinel verbatim. Presence and inner decoding stay
+                    # with the Optional owner; never rebox or decode this word.
+                    result_is_optional = true
+                    supported = true
             case HirTypeKind.Tuple(_):
                 if default_expr == nil:
                     # Same admitted tuple shapes as `r?` (decode_result_tuple_payload):
@@ -902,22 +928,25 @@ impl MirLowering:
                 if default_expr == nil:
                     if val present_type_symbol = self.symbols.get_symbol_raw(symbol.id):
                         val type_symbol: HirSymbol = present_type_symbol
-                        match type_symbol.kind:
-                            case Struct:
-                                result_struct_name = type_symbol.name
-                                supported = true
-                            case Class:
-                                result_struct_name = mir_class_identity(type_symbol)
-                                supported = true
-                            case Enum:
-                                # An enum payload is its own boxed enum handle
-                                # word, kept as i64 exactly like the record
-                                # arms above (enum_payload_value passes it
-                                # through raw). The merge below remembers the
-                                # declared HIR type so a later `match v:`
-                                # keeps its owner.
-                                supported = true
-                            case _: ()
+                        # A table key alone does not prove the payload owner.
+                        # Reject stale/remapped entries before reading the receiver.
+                        if type_symbol.id.id == symbol.id:
+                            match type_symbol.kind:
+                                case Struct:
+                                    result_struct_name = type_symbol.name
+                                    supported = true
+                                case Class:
+                                    result_struct_name = mir_class_identity(type_symbol)
+                                    supported = true
+                                case Enum:
+                                    # An enum payload is its own boxed enum handle
+                                    # word, kept as i64 exactly like the record
+                                    # arms above (enum_payload_value passes it
+                                    # through raw). The merge below remembers the
+                                    # declared HIR type so a later `match v:`
+                                    # keeps its owner.
+                                    supported = true
+                                case _: ()
             # Result payloads are boxed runtime values.  Keeping the carrier
             # as i64 lets `Result<Result<T, E>, F>.ok` use the same
             # discriminant/payload path as scalar projections.
@@ -1008,6 +1037,9 @@ impl MirLowering:
         b_merge.switch_to_block(merge_block)
         self.builder = b_merge
         self.remember_local_hir_type(result_local.id, payload_type, 0, 0)
+        if result_is_optional:
+            self.option_value_locals[result_local.id] = true
+            self.mark_runtime_value_local(result_local.id)
         if result_is_array:
             self.runtime_array_locals[result_local.id] = true
             self.mark_runtime_value_local(result_local.id)

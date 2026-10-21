@@ -135,19 +135,31 @@ impl MonoCache:
             nil
 
     me store(key: text, value: MonoCacheValue, content_hash: i64):
-        if self.entry_count >= self.config.max_entries:
-            self.evict_oldest()
-        val now = self.stats.hits + self.stats.misses + self.stats.evictions + self.entry_count + 1
+        # Replacement consumes no additional slot. In particular, replacing a
+        # restored metadata row must not evict an unrelated specialization.
+        if self.config.max_entries <= 0:
+            return
         val is_new_key = not self.entries.has(key)
+        if is_new_key and self.entry_count >= self.config.max_entries:
+            self.evict_oldest()
+        val was_empty = self.entry_count == 0
+        val now = self.stats.hits + self.stats.misses + self.stats.evictions + self.entry_count + 1
         self.entries[key] = CacheEntry(key: key, value: value,
             last_access: now, content_hash: content_hash)
         if is_new_key:
             self.entry_count = self.entry_count + 1
-        # Track oldest: if cache was empty or this is older than current oldest
-        if self.oldest_key == "" or not self.entries.has(self.oldest_key):
+        # An empty marker on a populated table means the minimum is unknown.
+        # Replacing that minimum changes its timestamp; defer rediscovery to
+        # eviction instead of scanning on this hot path. Intervening writes
+        # must preserve the unknown marker, not nominate an arbitrary new key.
+        if was_empty:
             self.oldest_key = key
-        else:
-            if now < self.entries[self.oldest_key].last_access:
+        elif not is_new_key and self.oldest_key == key:
+            self.oldest_key = ""
+        elif self.oldest_key != "":
+            if not self.entries.has(self.oldest_key):
+                self.oldest_key = ""
+            elif now < self.entries[self.oldest_key].last_access:
                 self.oldest_key = key
 
     me evict_oldest():
@@ -276,11 +288,27 @@ impl MonoCache:
                                     last_access = access_value
 
                             if key != "":
+                                # The persisted count/capacity are not authority.
+                                # Count unique retained rows; duplicate keys keep
+                                # the existing last-row-wins metadata policy.
+                                if not cache.entries.has(key):
+                                    if cache.entry_count >= config.max_entries:
+                                        return MonoCache.create(config)
+                                    cache.entry_count = cache.entry_count + 1
                                 cache.entries[key] = CacheEntry(
                                     key: key, value: nil,
                                     last_access: last_access,
                                     content_hash: content_hash)
 
+                # One cold-load scan, after duplicates have settled, restores
+                # the persisted minimum. This does not change lookup aging or
+                # the existing synthetic store timestamps into a true LRU.
+                for key in cache.entries.keys():
+                    if cache.oldest_key == "":
+                        cache.oldest_key = key
+                    else:
+                        if cache.entries[key].last_access < cache.entries[cache.oldest_key].last_access:
+                            cache.oldest_key = key
                 cache
             case Err(_):
                 MonoCache.create(config)

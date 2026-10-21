@@ -1,0 +1,74 @@
+# Typed source-to-Lean artifact generation. This worker does not run Lean,
+# issue proof receipts, or admit native/compiler/release evidence.
+use std.io_runtime.{get_args}
+use app.io.mod.{file_is_regular_no_follow, read_file_text_result}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend_target_receipted_v1}
+use compiler.core.parser.{parser_has_errors, parser_get_errors}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.enum_semantic_lowering_v1.{lower_module_with_enum_semantics_v1}
+use compiler.tools.verify.source_calls_v1.{source_calls_target_v1,
+    source_calls_transform_error_v1}
+use plugins.backend_lean.lean_backend.{LeanBackend}
+use compiler.semantics.union_normalize.source_union_admission_v1.{SourceUnionLimitsV1}
+use compiler.semantics.union_normalize.source_union_normalization_v1.{source_union_normalize_v1}
+
+pub fn source_model_from_source_v1(source: text, path: text, target: text
+) -> Result<text, text>:
+    val context = source_calls_target_v1(target)?
+    if path.trim() == "":
+        return Err("SOURCE-MODEL-E-FILE: a nonempty source path is required")
+    val digest = sha256_text(source)
+    val parsed = match parse_full_frontend_target_receipted_v1(source,
+            path, path, Logger(level: 0), path, digest, target):
+        case Ok(value): value
+        case Err(message): return Err("SOURCE-MODEL-E-PARSE: " + message)
+    if parser_has_errors():
+        return Err("SOURCE-MODEL-E-PARSE: " + parser_get_errors().join("; "))
+    val boundary = source_calls_transform_error_v1(parsed.0)
+    if boundary != "": return Err(boundary)
+    var lowering = HirLowering.with_filename(path)
+    lowering.preserve_enum_semantic_arms_v1 = true
+    val hir = lowering.lower_module(parsed.0)
+    if lowering.errors.len() > 0:
+        return Err("SOURCE-MODEL-E-HIR: " + lowering.diagnostic_messages.join("; "))
+    val normalized = match source_union_normalize_v1(hir, SourceUnionLimitsV1()):
+        case Ok(value): value.module
+        case Err(error): return Err(error.code + ": " + error.message)
+    val module = lower_module_with_enum_semantics_v1(normalized, context)?
+    val backend = LeanBackend.full()
+    val exported = match backend.export_module(module):
+        case Ok(value): value
+        case Err(error): return Err("SOURCE-MODEL-E-EXPORT: " + error.message)
+    # Assemble the public result only after the complete module succeeded.
+    # These are artifact comments, not transformed-source or proof authority.
+    Ok("-- formal_status=NOT_CHECKED\n" +
+        "-- source_hash=" + digest + "\n" +
+        "-- target=" + parsed.1.target_triple + "\n" +
+        "-- cfg_preprocessed_hash=" + parsed.1.preprocessed_digest + "\n" +
+        "-- cfg_decision_hash=" + parsed.1.decision_digest + "\n" +
+        exported.lean_code)
+
+pub fn source_model_command_v1(args: [text]) -> Result<text, text>:
+    if args.len() != 2:
+        return Err("SOURCE-MODEL-E-USAGE: source-model requires FILE.spl TARGET_TRIPLE")
+    val _context = source_calls_target_v1(args[1])?
+    val path = args[0]
+    if path.trim() == "" or not file_is_regular_no_follow(path):
+        return Err("SOURCE-MODEL-E-FILE: source path must be an existing regular file")
+    val source = match read_file_text_result(path):
+        case Ok(value): value
+        case Err(_): return Err("SOURCE-MODEL-E-FILE: source could not be read")
+    source_model_from_source_v1(source, path, args[1])
+
+fn main() -> i64:
+    val argv = get_args()
+    match source_model_command_v1(argv[1:]):
+        case Ok(model):
+            print(model)
+            0
+        case Err(message):
+            eprint(message)
+            1

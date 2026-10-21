@@ -1,10 +1,11 @@
 # Body-free facts shared by the retained pass and owned archive consumers.
-use compiler.hir.hir_types.{HirType, SymbolId}
+use compiler.hir.hir_types.{HirType, SymbolId, Effect, EffectKind}
 use compiler.hir.hir_definitions.{HirFunction, HirTypeParam}
 use compiler.hir.hir_codec_support.{HirCodecWriter}
-use compiler.hir.generated.hir_codec.{hc_enc_hir_type, hc_enc_hir_type_param}
-use compiler.monomorphize.type_subst.{canonicalize_template, substitute_type, typesubstitution_from_params, typesubstitution_canonical}
+use compiler.hir.generated.hir_codec.{hc_enc_hir_type, hc_enc_hir_type_param, hc_enc_effect}
+use compiler.monomorphize.type_subst.{canonicalize_template, substitute_type, substitute_effects, typesubstitution_from_params, typesubstitution_canonical}
 use std.common.crypto.sha256.{sha256_text}
+use compiler.mono.mono_invocation_policy_v1.MonoInvocationBudgetV1
 
 enum MonoTemplateBodyModeV1:
     Retained
@@ -17,6 +18,8 @@ struct MonoTemplateSignatureV1:
     type_params: [HirTypeParam]
     # Physical ABI ownership survives retained and archive-request modes.
     global_linkage: bool = false
+    # Ordered declaration effects are body-free signature facts.
+    effects: [Effect] = []
 
 struct MonoTemplateRecipeV1:
     module_name: text
@@ -42,7 +45,8 @@ fn mono_template_signature_v1(func: HirFunction) -> MonoTemplateSignatureV1:
         params = params.push(param.type_)
     MonoTemplateSignatureV1(name: func.name, param_types: params,
         return_type: func.return_type, type_params: func.type_params,
-        global_linkage: func.is_extern or func.has_export_attr or func.func_attr.is_global or func.func_attr.is_entry)
+        global_linkage: func.is_extern or func.has_export_attr or func.func_attr.is_global or func.func_attr.is_entry,
+        effects: func.effects)
 
 fn mono_specialized_signature_v1(template: MonoTemplateSignatureV1, args: [HirType], name: text) -> MonoTemplateSignatureV1:
     val subst = typesubstitution_from_params(template.type_params, args)
@@ -51,7 +55,8 @@ fn mono_specialized_signature_v1(template: MonoTemplateSignatureV1, args: [HirTy
         params = params.push(substitute_type(param, subst))
     MonoTemplateSignatureV1(name: name, param_types: params,
         return_type: substitute_type(template.return_type, subst), type_params: [],
-        global_linkage: template.global_linkage)
+        global_linkage: template.global_linkage,
+        effects: substitute_effects(template.effects, subst))
 
 fn mono_template_signature_digest_v1(signature: MonoTemplateSignatureV1) -> text:
     var writer = HirCodecWriter.create()
@@ -64,8 +69,20 @@ fn mono_template_signature_digest_v1(signature: MonoTemplateSignatureV1) -> text
     writer.put_i64(signature.type_params.len())
     for param in signature.type_params:
         hc_enc_hir_type_param(writer, param)
+    # The existing canonical node owner preserves effect order, Throws types
+    # and spans. Absent legacy lists mean no effects, like an empty list.
+    writer.put_i64(if signature.effects == nil: 0 else: signature.effects.len())
+    if signature.effects != nil:
+        for raw in signature.effects:
+            val effect: Effect = raw
+            if effect == nil or effect.kind == nil: return ""
+            match effect.kind:
+                case EffectKind.Throws(type_):
+                    if type_ == nil or type_.kind == nil: return ""
+                case _: ()
+            hc_enc_effect(writer, effect)
     if not writer.ok: return ""
-    sha256_text("mono-template-signature-v2\n" + writer.finish())
+    sha256_text("mono-template-signature-v3\n" + writer.finish())
 
 fn mono_archive_put_type_v1(writer: HirCodecWriter, type_: HirType):
     # Declaration summaries can contain an absent inferred type. Preserve its
@@ -73,13 +90,17 @@ fn mono_archive_put_type_v1(writer: HirCodecWriter, type_: HirType):
     writer.put_bool(type_ != nil)
     if type_ != nil: hc_enc_hir_type(writer, type_)
 
-fn mono_apply_template_recipe_v1(original: HirFunction, recipe: MonoTemplateRecipeV1) -> HirFunction:
+fn mono_apply_template_recipe_v1(original: HirFunction, recipe: MonoTemplateRecipeV1,
+    include_retained_defaults: bool = false, budget: MonoInvocationBudgetV1? = nil) -> HirFunction:
+    if val ledger = budget:
+        if not ledger.charge_v1(1): return nil
     var template = original
     template.type_params = recipe.canonical_type_params
     if recipe.inherent_method:
         template.name = recipe.template_name
         template.is_method = false
-    var canonical = canonicalize_template(template)
+    var canonical = canonicalize_template(template, include_retained_defaults, budget)
+    if canonical == nil: return nil
     canonical.type_params = recipe.bound_type_params
     canonical
 
@@ -98,7 +119,8 @@ fn mono_template_recipe_signature_v1(original: HirFunction, recipe: MonoTemplate
         param_types: params,
         return_type: substitute_type(signature.return_type, subst),
         type_params: recipe.bound_type_params,
-        global_linkage: signature.global_linkage)
+        global_linkage: signature.global_linkage,
+        effects: substitute_effects(signature.effects, subst))
 
 export MonoTemplateBodyModeV1, MonoTemplateSignatureV1, MonoTemplateRecipeV1, MonoSpecializationRequestV1
 export mono_template_signature_v1, mono_specialized_signature_v1

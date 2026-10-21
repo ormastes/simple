@@ -1,0 +1,571 @@
+# C1 actual frontend/HIR to resolved MIR call transport.
+# @req REQ-FV2-C1
+# All scenarios are UNRUN; source assertions do not authenticate compiler execution.
+use std.spec.{describe, it, expect, fail}
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.config.{Logger}
+use compiler.common.mir_target_context.{mir_target_context_from}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.hir.hir_definitions.{HirExprKind}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir_data.{bootstrap_fn_param_defaults_lookup}
+use compiler.hir.hir_types.{HirModule, HirTypeKind, SymbolId}
+use compiler.mir.mir_instruction_graph.{MirFunction, MirModule}
+use compiler.mir.mir_instructions.{MirInstKind, MirOperandKind, MirTerminator}
+use compiler.mir.mir_types.{MirConstValue, MirType, MirTypeKind}
+use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_signature}
+use compiler.mir.verification_call_identity.{validate_resolved_direct_call_manifest_v1,
+    resolved_direct_call_site_hash_v1, resolved_direct_call_callee_symbol_v1}
+use compiler.mir.verification_call_lowering_v1.{ResolvedCallLoweringV1,
+    lower_module_with_resolved_calls_v1, lower_module_with_resolved_calls_for_target_v1,
+    verification_ir_module_from_hir_calls_v1}
+use compiler.mir.verification_source_environment_v1.{verification_source_environment_v1}
+
+fn c1_calls_hir(source: text) -> HirModule:
+    val ast = parse_full_frontend(source, "c1_calls.spl", "c1_calls.spl", Logger(level: 0))
+    var lowering = HirLowering.with_filename("c1_calls.spl")
+    val hir = lowering.lower_module(ast)
+    expect(lowering.errors.len()).to_equal(0)
+    hir
+
+fn c1_calls_source_result(source: text) -> Result<ResolvedCallLoweringV1, text>:
+    lower_module_with_resolved_calls_v1(c1_calls_hir(source))
+
+fn c1_calls_function(module: MirModule, name: text) -> MirFunction?:
+    # Every fixture is an ordinary local declaration in c1_calls.spl.
+    # provider_metadata.mir_provider_callable_identity prefixes that exact owner.
+    val qualified_name = "c1_calls." + name
+    for function in module.functions.values():
+        if function.name == qualified_name: return Some(function)
+    nil
+
+fn c1_calls_check_site(result: ResolvedCallLoweringV1, owner_name: text,
+    callee_name: text, expected_arguments: i64):
+    val owner_option = c1_calls_function(result.module, owner_name)
+    val callee_option = c1_calls_function(result.module, callee_name)
+    if owner_option == nil or callee_option == nil:
+        fail("producer omitted a declared owner or callee")
+        return
+    val owner = owner_option.unwrap()
+    val callee = callee_option.unwrap()
+    var matching_sites = 0
+    for block_index in 0..owner.blocks.len():
+        val block = owner.blocks[block_index]
+        for instruction_index in 0..block.instructions.len():
+            match block.instructions[instruction_index].kind:
+                case MirInstKind.Call(_, operand, arguments):
+                    match operand.kind:
+                        case MirOperandKind.Const(MirConstValue.Str(name), type_):
+                            if name == callee.name:
+                                matching_sites = matching_sites + 1
+                                expect(arguments.len()).to_equal(expected_arguments)
+                                match type_.kind:
+                                    case MirTypeKind.FuncPtr(signature):
+                                        expect(serialize_mir_signature(signature)).to_equal(
+                                            serialize_mir_signature(callee.signature))
+                                        expect(signature.params.len()).to_equal(expected_arguments)
+                                    case _: fail("direct call lost its declaration signature")
+                                val site = resolved_direct_call_site_hash_v1(owner,
+                                    block_index, instruction_index)
+                                var matching_bindings = 0
+                                for binding in result.calls.bindings:
+                                    if binding.call_site_hash == site:
+                                        matching_bindings = matching_bindings + 1
+                                        expect(binding.owner_symbol_id).to_equal(owner.symbol.id.to_string())
+                                        expect(binding.callee_symbol_id).to_equal(callee.symbol.id.to_string())
+                                        expect(binding.callee_signature_hash).to_equal(
+                                            sha256_text(serialize_mir_signature(callee.signature)))
+                                        expect(binding.callee_body_hash).to_equal(
+                                            sha256_text(serialize_mir_function(callee)))
+                                expect(matching_bindings).to_equal(1)
+                                match resolved_direct_call_callee_symbol_v1(result.module,
+                                        result.calls, owner, block_index, instruction_index):
+                                    case Ok(symbol): expect(symbol).to_equal(callee.symbol.id.to_string())
+                                    case Err(message): fail(message)
+                        case _: fail("direct call lost its textual target")
+                case _: continue
+    expect(matching_sites).to_equal(1)
+
+# Test-only serialized input oracle; not canonical admission or execution proof.
+fn c1_calls_input_snapshot(hir: HirModule) -> text:
+    val encoded = hir_module_encode(hir)
+    expect(encoded == "").to_equal(false)
+    encoded
+
+fn c1_calls_arg_literal(result: ResolvedCallLoweringV1, owner_name: text,
+    callee_name: text, argument_index: i64) -> Result<i64, text>:
+    val owner_option = c1_calls_function(result.module, owner_name)
+    val callee_option = c1_calls_function(result.module, callee_name)
+    if owner_option == nil or callee_option == nil: return Err("missing literal call owner or callee")
+    val owner = owner_option.unwrap()
+    val callee = callee_option.unwrap()
+    var local_id = -1
+    var found = false
+    for block in owner.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, operand, arguments):
+                    match operand.kind:
+                        case MirOperandKind.Const(MirConstValue.Str(name), _):
+                            if name == callee.name:
+                                if found: return Err("literal oracle requires one matching call")
+                                if argument_index < 0 or argument_index >= arguments.len(): return Err("argument absent")
+                                found = true
+                                match arguments[argument_index].kind:
+                                    case MirOperandKind.Const(MirConstValue.Int(value), _): return Ok(value)
+                                    case MirOperandKind.Copy(local) | MirOperandKind.Move(local): local_id = local.id
+                                    case _: return Err("argument is not an integer literal or local")
+                        case _: ()
+                case _: ()
+    if not found: return Err("call absent")
+    var remaining = owner.locals.len() + 1
+    while remaining > 0:
+        var next_local = -1
+        for block in owner.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Const(destination, MirConstValue.Int(value), _):
+                        if destination.id == local_id: return Ok(value)
+                    case MirInstKind.Copy(destination, source) | MirInstKind.Move(destination, source):
+                        if destination.id == local_id: next_local = source.id
+                    case _: ()
+        if next_local < 0: return Err("argument has no literal definition")
+        local_id = next_local
+        remaining = remaining - 1
+    Err("literal argument copy chain did not terminate")
+
+describe "C1 compiler-owned resolved call transport":
+    it "captures an actual zero-argument declaration and admits its resolved VIR":
+        step("lower fresh source and validate the exact zero-argument call site")
+        val source = "fn leaf() -> i64:\n    7\n\nfn caller() -> i64:\n    leaf()\n"
+        match c1_calls_source_result(source):
+            case Ok(result):
+                expect(result.calls.bindings.len()).to_equal(1)
+                expect(validate_resolved_direct_call_manifest_v1(result.module, result.calls).closed()).to_equal(true)
+                c1_calls_check_site(result, "caller", "leaf", 0)
+            case Err(message): fail(message)
+        match verification_ir_module_from_hir_calls_v1(c1_calls_hir(source),
+                sha256_text("source"), sha256_text("expanded"),
+                sha256_text("woven"), sha256_text("policy")):
+            case Ok(result):
+                expect(result.closure_ready()).to_equal(true)
+                expect(result.vir.functions.len()).to_equal(2)
+                expect(result.resolved_call_manifest_hash == "").to_equal(false)
+            case Err(message): fail(message)
+
+    it "retains a one-argument declaration signature rather than an unknown parameter list":
+        step("compare the actual one-argument call operand and declaration signature")
+        match c1_calls_source_result("fn leaf(value: i64) -> i64:\n    value\n\nfn caller() -> i64:\n    leaf(8)\n"):
+            case Ok(result):
+                expect(result.calls.bindings.len()).to_equal(1)
+                expect(validate_resolved_direct_call_manifest_v1(result.module, result.calls).closed()).to_equal(true)
+                c1_calls_check_site(result, "caller", "leaf", 1)
+            case Err(message): fail(message)
+
+    it "preserves ordered heterogeneous parameters for a multi-argument direct call":
+        step("retain declaration order across bool and integer arguments")
+        match c1_calls_source_result("fn leaf(enabled: bool, value: i64) -> i64:\n    value\n\nfn caller() -> i64:\n    leaf(true, 9)\n"):
+            case Ok(result):
+                expect(result.calls.bindings.len()).to_equal(1)
+                c1_calls_check_site(result, "caller", "leaf", 2)
+                match c1_calls_function(result.module, "leaf"):
+                    case Some(function):
+                        match function.signature.params[0].kind:
+                            case MirTypeKind.Bool: expect(function.signature.params.len()).to_equal(2)
+                            case _: fail("first declared parameter is not Bool")
+                        match function.signature.params[1].kind:
+                            case MirTypeKind.I64: expect(function.signature.is_variadic).to_equal(false)
+                            case _: fail("second declared parameter is not I64")
+                    case _: fail("missing leaf declaration")
+            case Err(message): fail(message)
+
+    it "captures nested calls at their final distinct instruction positions":
+        step("lower the inner call before capturing the outer emitted site")
+        val source = "fn inner() -> i64:\n    3\n\nfn outer(value: i64) -> i64:\n    value\n\nfn caller() -> i64:\n    outer(inner())\n"
+        match c1_calls_source_result(source):
+            case Ok(result):
+                expect(result.calls.bindings.len()).to_equal(2)
+                expect(result.calls.bindings[0].call_site_hash == result.calls.bindings[1].call_site_hash).to_equal(false)
+                expect(validate_resolved_direct_call_manifest_v1(result.module, result.calls).closed()).to_equal(true)
+                c1_calls_check_site(result, "caller", "inner", 0)
+                c1_calls_check_site(result, "caller", "outer", 1)
+            case Err(message): fail(message)
+
+    it "captures the call after materializing its omitted trailing default":
+        step("bind the final two-argument call after default expression lowering")
+        val source = "fn leaf(value: i64, extra: i64 = 11) -> i64:\n    value + extra\n\nfn caller() -> i64:\n    leaf(5)\n"
+        val hir = c1_calls_hir(source)
+        val source_next_symbol = hir.symbols.next_symbol_id
+        val source_next_scope = hir.symbols.next_scope_id
+        val source_symbol_keys = hir.symbols.symbols.keys()
+        val source_scope_keys = hir.symbols.scopes.keys()
+        val source_root_keys = hir.symbols.root_scope_symbols.keys()
+        match lower_module_with_resolved_calls_v1(hir):
+            case Ok(result):
+                expect(result.calls.bindings.len()).to_equal(1)
+                expect(validate_resolved_direct_call_manifest_v1(result.module, result.calls).closed()).to_equal(true)
+                c1_calls_check_site(result, "caller", "leaf", 2)
+            case Err(message): fail(message)
+
+        expect(hir.symbols.next_symbol_id).to_equal(source_next_symbol)
+        expect(hir.symbols.next_scope_id).to_equal(source_next_scope)
+        val final_symbol_keys = hir.symbols.symbols.keys()
+        val final_scope_keys = hir.symbols.scopes.keys()
+        val final_root_keys = hir.symbols.root_scope_symbols.keys()
+        expect(final_symbol_keys.len()).to_equal(source_symbol_keys.len())
+        expect(final_scope_keys.len()).to_equal(source_scope_keys.len())
+        expect(final_root_keys.len()).to_equal(source_root_keys.len())
+
+    it "rejects final MIR body and signature mutations against the original produced manifest":
+        step("mutate real completed MIR without rebuilding or replacing its manifest")
+        val source = "fn leaf() -> i64:\n    7\n\nfn caller() -> i64:\n    leaf()\n"
+        match c1_calls_source_result(source):
+            case Ok(result):
+                var changed = result.module
+                match c1_calls_function(changed, "leaf"):
+                    case Some(function):
+                        var stale = function
+                        stale.blocks[0].terminator = MirTerminator.Ret(nil)
+                        changed.functions[stale.symbol] = stale
+                        val closure = validate_resolved_direct_call_manifest_v1(changed, result.calls)
+                        expect(closure.closed()).to_equal(false)
+                        expect(closure.diagnostic).to_contain("CALL-IDENTITY-MODULE")
+                    case _: fail("missing leaf for body mutation")
+            case Err(message): fail(message)
+        match c1_calls_source_result(source):
+            case Ok(result):
+                var changed = result.module
+                match c1_calls_function(changed, "leaf"):
+                    case Some(function):
+                        var stale = function
+                        stale.signature.return_type = MirType.unit()
+                        changed.functions[stale.symbol] = stale
+                        val closure = validate_resolved_direct_call_manifest_v1(changed, result.calls)
+                        expect(closure.closed()).to_equal(false)
+                        expect(closure.diagnostic).to_contain("CALL-IDENTITY-MODULE")
+                    case _: fail("missing leaf for signature mutation")
+            case Err(message): fail(message)
+
+    it "refuses a foreign declaration instead of fabricating a local resolver capture":
+        step("refuse the whole result when a foreign call follows a valid captured local call")
+        val result = c1_calls_source_result("extern fn foreign_value(value: i64) -> i64\n\nfn leaf(value: i64) -> i64:\n    value\n\nfn caller() -> i64:\n    val local = leaf(5)\n    foreign_value(local)\n")
+        expect(result.is_err()).to_equal(true)
+        match result:
+            case Err(message): expect(message == "").to_equal(false)
+            case Ok(_): fail("foreign call published a resolved local module")
+
+    it "refuses an actual function-parameter indirect call":
+        step("retain the unsupported indirect-call boundary")
+        val result = c1_calls_source_result("fn apply(callback: fn(i64) -> i64, value: i64) -> i64:\n    callback(value)\n")
+        expect(result.is_err()).to_equal(true)
+        match result:
+            case Err(message): expect(message == "").to_equal(false)
+            case Ok(_): fail("indirect call published a direct-call manifest")
+
+    it "refuses an open generic template before publishing resolved MIR":
+        step("retain the pre-monomorphization declaration boundary")
+        val result = c1_calls_source_result("fn identity<T>(value: T) -> T:\n    value\n")
+        expect(result.is_err()).to_equal(true)
+        match result:
+            case Err(message): expect(message == "").to_equal(false)
+            case Ok(_): fail("open template published a closed resolved module")
+
+    it "refuses HIR owner and parameter-signature mismatches":
+        step("corrupt one actual declaration identity or signature while retaining its symbol table")
+        val source = "fn leaf(value: i64) -> i64:\n    value\n\nfn caller() -> i64:\n    leaf(5)\n"
+        var wrong_owner = c1_calls_hir(source)
+        var changed_owner = false
+        for key in wrong_owner.functions.keys():
+            var function = wrong_owner.functions[key]
+            if function.name == "leaf":
+                function.symbol = SymbolId(id: 999999)
+                wrong_owner.functions[key] = function
+                changed_owner = true
+        expect(changed_owner).to_equal(true)
+        expect(lower_module_with_resolved_calls_v1(wrong_owner).is_err()).to_equal(true)
+        var wrong_signature = c1_calls_hir(source)
+        var changed_signature = false
+        for key in wrong_signature.functions.keys():
+            var function = wrong_signature.functions[key]
+            if function.name == "leaf":
+                function.params[0].type_.kind = HirTypeKind.Bool
+                wrong_signature.functions[key] = function
+                changed_signature = true
+        expect(changed_signature).to_equal(true)
+        expect(lower_module_with_resolved_calls_v1(wrong_signature).is_err()).to_equal(true)
+        # Reordering preserves arity and the type set, but changes the declaration ABI.
+        var reordered = c1_calls_hir("fn leaf(enabled: bool, value: i64) -> i64:\n    value\n\nfn caller() -> i64:\n    leaf(true, 5)\n")
+        var changed_order = false
+        for key in reordered.functions.keys():
+            var function = reordered.functions[key]
+            if function.name == "leaf":
+                expect(function.params.len()).to_equal(2)
+                val first_type = function.params[0].type_
+                function.params[0].type_ = function.params[1].type_
+                function.params[1].type_ = first_type
+                reordered.functions[key] = function
+                changed_order = true
+        expect(changed_order).to_equal(true)
+        expect(lower_module_with_resolved_calls_v1(reordered).is_err()).to_equal(true)
+
+    it "keeps empty and pure call-free modules valid with zero capture rows":
+        step("validate fresh empty and pure controls through the same producer")
+        for source in ["", "fn pure(value: i64) -> i64:\n    value + 1\n"]:
+            match c1_calls_source_result(source):
+                case Ok(result):
+                    expect(result.calls.bindings.len()).to_equal(0)
+                    expect(validate_resolved_direct_call_manifest_v1(result.module, result.calls).closed()).to_equal(true)
+                case Err(message): fail(message)
+
+    it "isolates sequential producer owners even when source function names repeat":
+        step("produce a called module then a fresh pure module then a differently typed call")
+        match c1_calls_source_result("fn leaf() -> i64:\n    1\n\nfn caller() -> i64:\n    leaf()\n"):
+            case Ok(first):
+                expect(first.calls.bindings.len()).to_equal(1)
+                match c1_calls_source_result("fn leaf(value: i64) -> i64:\n    value\n"):
+                    case Ok(second):
+                        expect(second.calls.bindings.len()).to_equal(0)
+                        expect(validate_resolved_direct_call_manifest_v1(first.module, first.calls).closed()).to_equal(true)
+                        expect(validate_resolved_direct_call_manifest_v1(second.module, first.calls).closed()).to_equal(false)
+                    case Err(message): fail(message)
+                match c1_calls_source_result("fn leaf(value: bool) -> bool:\n    value\n\nfn caller() -> bool:\n    leaf(true)\n"):
+                    case Ok(third):
+                        expect(third.calls.bindings.len()).to_equal(1)
+                        c1_calls_check_site(third, "caller", "leaf", 1)
+                        expect(validate_resolved_direct_call_manifest_v1(first.module, first.calls).closed()).to_equal(true)
+                        expect(validate_resolved_direct_call_manifest_v1(third.module, first.calls).closed()).to_equal(false)
+                    case Err(message): fail(message)
+            case Err(message): fail(message)
+
+    it "copies mutable symbol rows and root maps without aliasing the source environment":
+        step("mutate the public environment copy and check the original plus copied root mirror")
+        val hir = c1_calls_hir("fn leaf(value: i64) -> i64:\n    value\n")
+        val original_symbol_keys = hir.symbols.symbols.keys()
+        val original_scope_keys = hir.symbols.scopes.keys()
+        val original_root_keys = hir.symbols.root_scope_symbols.keys()
+        val original_next_symbol = hir.symbols.next_symbol_id
+        val original_next_scope = hir.symbols.next_scope_id
+        var leaf_id = -1
+        for key in hir.functions.keys():
+            if hir.functions[key].name == "leaf": leaf_id = key.id
+        expect(leaf_id).to_be_greater_than(-1)
+        if leaf_id < 0:
+            fail("source leaf declaration missing before environment copy")
+            return
+        val original_name = hir.symbols.symbols[leaf_id].name
+        expect(hir.symbols.root_scope_symbols.contains("c1_copy_only")).to_equal(false)
+        expect(hir.symbols.root_scope_symbols.contains("c1_scope_only")).to_equal(false)
+        match verification_source_environment_v1(hir.symbols):
+            case Ok(copied):
+                var changed = copied.symbols[leaf_id]
+                changed.name = "copy_only_leaf"
+                copied.symbols[leaf_id] = changed
+                expect(copied.symbols[leaf_id].name).to_equal("copy_only_leaf")
+                expect(hir.symbols.symbols[leaf_id].name).to_equal(original_name)
+                copied.root_scope_symbols["c1_copy_only"] = leaf_id
+                expect(copied.scopes[0].symbols["c1_copy_only"]).to_equal(leaf_id)
+                copied.scopes[0].symbols["c1_scope_only"] = leaf_id
+                expect(copied.root_scope_symbols["c1_scope_only"]).to_equal(leaf_id)
+                expect(hir.symbols.root_scope_symbols.contains("c1_copy_only")).to_equal(false)
+                expect(hir.symbols.scopes[0].symbols.contains("c1_copy_only")).to_equal(false)
+                expect(hir.symbols.root_scope_symbols.contains("c1_scope_only")).to_equal(false)
+                expect(hir.symbols.scopes[0].symbols.contains("c1_scope_only")).to_equal(false)
+                val copied_root_keys = copied.root_scope_symbols.keys()
+                val copied_scope_root_keys = copied.scopes[0].symbols.keys()
+                expect(copied_root_keys.len()).to_equal(original_root_keys.len() + 2)
+                expect(copied_scope_root_keys.len()).to_equal(copied_root_keys.len())
+            case Err(message): fail(message)
+        val final_symbol_keys = hir.symbols.symbols.keys()
+        val final_scope_keys = hir.symbols.scopes.keys()
+        val final_root_keys = hir.symbols.root_scope_symbols.keys()
+        expect(final_symbol_keys.len()).to_equal(original_symbol_keys.len())
+        expect(final_scope_keys.len()).to_equal(original_scope_keys.len())
+        expect(final_root_keys.len()).to_equal(original_root_keys.len())
+        expect(hir.symbols.next_symbol_id).to_equal(original_next_symbol)
+        expect(hir.symbols.next_scope_id).to_equal(original_next_scope)
+
+    it "binds distinct explicit targets into the resolver receipt for the same typed source":
+        step("produce and validate x86_64 and aarch64 modules from the same HIR")
+        val hir = c1_calls_hir("fn leaf(value: i64) -> i64:\n    value\n\nfn caller() -> i64:\n    leaf(5)\n")
+        val x86_target = mir_target_context_from("x86_64-unknown-linux-gnu", "unknown", "unknown", "llvm", 1)
+        val arm_target = mir_target_context_from("aarch64-unknown-linux-gnu", "unknown", "unknown", "llvm", 1)
+        expect(x86_target.arch).to_equal("x86_64")
+        expect(arm_target.arch).to_equal("aarch64")
+        match lower_module_with_resolved_calls_for_target_v1(hir, x86_target):
+            case Ok(x86):
+                expect(validate_resolved_direct_call_manifest_v1(x86.module, x86.calls).closed()).to_equal(true)
+                c1_calls_check_site(x86, "caller", "leaf", 1)
+                match lower_module_with_resolved_calls_for_target_v1(hir, arm_target):
+                    case Ok(arm):
+                        expect(validate_resolved_direct_call_manifest_v1(arm.module, arm.calls).closed()).to_equal(true)
+                        c1_calls_check_site(arm, "caller", "leaf", 1)
+                        expect(x86.calls.resolver_receipt_hash == arm.calls.resolver_receipt_hash).to_equal(false)
+                        expect(validate_resolved_direct_call_manifest_v1(x86.module, x86.calls).closed()).to_equal(true)
+                    case Err(message): fail(message)
+            case Err(message): fail(message)
+
+    it "captures a same-module call inside an omitted default before its consuming call":
+        step("lower the retained default expression and bind both emitted call sites")
+        val source = "fn seed() -> i64:\n    17\n\nfn leaf(enabled: bool, value: i64 = seed()) -> i64:\n    value\n\nfn caller() -> i64:\n    leaf(true)\n"
+        match c1_calls_source_result(source):
+            case Ok(result):
+                expect(result.calls.bindings.len()).to_equal(2)
+                expect(validate_resolved_direct_call_manifest_v1(result.module, result.calls).closed()).to_equal(true)
+                c1_calls_check_site(result, "caller", "seed", 0)
+                c1_calls_check_site(result, "caller", "leaf", 2)
+                match c1_calls_function(result.module, "caller"):
+                    case Some(owner):
+                        var seed_result = -1
+                        var consuming_calls = 0
+                        for block in owner.blocks:
+                            for instruction in block.instructions:
+                                match instruction.kind:
+                                    case MirInstKind.Call(destination, operand, arguments):
+                                        match operand.kind:
+                                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                                if name == "c1_calls.seed":
+                                                    match destination:
+                                                        case Some(local): seed_result = local.id
+                                                        case _: fail("default call lost its result")
+                                                if name == "c1_calls.leaf":
+                                                    consuming_calls = consuming_calls + 1
+                                                    expect(seed_result).to_be_greater_than(-1)
+                                                    expect(arguments.len()).to_equal(2)
+                                                    match arguments[1].kind:
+                                                        case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                                                            expect(local.id).to_equal(seed_result)
+                                                        case _: fail("default call result did not occupy the second argument")
+                                            case _: ()
+                                    case _: ()
+                        expect(consuming_calls).to_equal(1)
+                    case _: fail("default expression owner missing")
+            case Err(message): fail(message)
+
+    it "keeps same-path same-name defaults invocation-local across an intervening failure":
+        step("produce distinct default literals with a failed producer between them")
+        val first_source = "fn sequence_leaf(value: i64 = 23) -> i64:\n    value\n\nfn caller() -> i64:\n    sequence_leaf()\n"
+        val failed_source = "extern fn unavailable() -> i64\n\nfn sequence_leaf(value: i64 = unavailable()) -> i64:\n    value\n\nfn caller() -> i64:\n    sequence_leaf()\n"
+        val last_source = "fn sequence_leaf(value: i64 = 47) -> i64:\n    value\n\nfn caller() -> i64:\n    sequence_leaf()\n"
+        match c1_calls_source_result(first_source):
+            case Ok(first):
+                match c1_calls_arg_literal(first, "caller", "sequence_leaf", 0):
+                    case Ok(value): expect(value).to_equal(23)
+                    case Err(message): fail(message)
+                expect(c1_calls_source_result(failed_source).is_err()).to_equal(true)
+                match c1_calls_source_result(last_source):
+                    case Ok(last):
+                        match c1_calls_arg_literal(last, "caller", "sequence_leaf", 0):
+                            case Ok(value): expect(value).to_equal(47)
+                            case Err(message): fail(message)
+                        expect(validate_resolved_direct_call_manifest_v1(last.module, last.calls).closed()).to_equal(true)
+                        expect(validate_resolved_direct_call_manifest_v1(first.module, first.calls).closed()).to_equal(true)
+                        match c1_calls_arg_literal(first, "caller", "sequence_leaf", 0):
+                            case Ok(value): expect(value).to_equal(23)
+                            case Err(message): fail(message)
+                    case Err(message): fail(message)
+            case Err(message): fail(message)
+
+    it "ignores a stale process-global default installed through the real MIR prescan":
+        step("seed the existing global registry with an old declaration then lower a fresh retained default")
+        val stale_hir = c1_calls_hir("fn warm_leaf(value: i64 = 83) -> i64:\n    value\n")
+        var prescan = MirLowering.new(stale_hir.symbols)
+        var seeded = false
+        for key in stale_hir.functions.keys():
+            val function = stale_hir.functions[key]
+            if function.name == "warm_leaf":
+                prescan.prescan_one_function_v1(stale_hir.name, stale_hir.symbols,
+                    function.symbol, function.name, function.is_extern, function.is_method,
+                    function.is_static, function.has_export_attr, function.func_attr,
+                    function.return_type, function.params)
+                seeded = true
+        expect(seeded).to_equal(true)
+        match bootstrap_fn_param_defaults_lookup("c1_calls.warm_leaf"):
+            case Some(parameters):
+                expect(parameters.len()).to_equal(1)
+                expect(parameters[0].has_default).to_equal(true)
+                match parameters[0].default.kind:
+                    case HirExprKind.IntLit(value, _): expect(value).to_equal(83)
+                    case _: fail("real prescan did not retain the stale literal")
+            case _: fail("real prescan did not publish its default registry row")
+        match c1_calls_source_result("fn warm_leaf(value: i64 = 97) -> i64:\n    value\n\nfn caller() -> i64:\n    warm_leaf()\n"):
+            case Ok(result):
+                c1_calls_check_site(result, "caller", "warm_leaf", 1)
+                match c1_calls_arg_literal(result, "caller", "warm_leaf", 0):
+                    case Ok(value): expect(value).to_equal(97)
+                    case Err(message): fail(message)
+            case Err(message): fail(message)
+
+    it "preserves the serialized HIR and complete symbol table on default success and failure":
+        step("compare existing codec snapshots around successful and failed default expansion")
+        val good = c1_calls_hir("fn snapshot_leaf(value: i64 = 31) -> i64:\n    value\n\nfn caller() -> i64:\n    snapshot_leaf()\n")
+        val good_before = c1_calls_input_snapshot(good)
+        match lower_module_with_resolved_calls_v1(good):
+            case Ok(result):
+                expect(validate_resolved_direct_call_manifest_v1(result.module, result.calls).closed()).to_equal(true)
+            case Err(message): fail(message)
+        expect(c1_calls_input_snapshot(good)).to_equal(good_before)
+        val bad = c1_calls_hir("extern fn unavailable() -> i64\n\nfn snapshot_leaf(value: i64 = unavailable()) -> i64:\n    value\n\nfn caller() -> i64:\n    snapshot_leaf()\n")
+        val bad_before = c1_calls_input_snapshot(bad)
+        expect(lower_module_with_resolved_calls_v1(bad).is_err()).to_equal(true)
+        expect(c1_calls_input_snapshot(bad)).to_equal(bad_before)
+
+    it "binds an omitted default to the earlier supplied parameter in the same invocation":
+        step("use a declaration parameter reference rather than a caller or global name")
+        val source = "fn prior_leaf(first: i64, second: i64 = first) -> i64:\n    second\n\nfn caller() -> i64:\n    val first = 99\n    prior_leaf(41)\n"
+        match c1_calls_source_result(source):
+            case Ok(result):
+                c1_calls_check_site(result, "caller", "prior_leaf", 2)
+                match c1_calls_arg_literal(result, "caller", "prior_leaf", 0):
+                    case Ok(value): expect(value).to_equal(41)
+                    case Err(message): fail(message)
+                match c1_calls_arg_literal(result, "caller", "prior_leaf", 1):
+                    case Ok(value): expect(value).to_equal(41)
+                    case Err(message): fail(message)
+            case Err(message): fail(message)
+
+    it "refuses an active omitted-default expansion cycle while retaining ordinary recursive calls":
+        step("distinguish recursive default expansion from a fully supplied recursive call")
+        val cycle = c1_calls_hir("fn cycle_leaf(value: i64 = cycle_peer()) -> i64:\n    value\n\nfn cycle_peer(value: i64 = cycle_leaf()) -> i64:\n    value\n\nfn caller() -> i64:\n    cycle_leaf()\n")
+        val before = c1_calls_input_snapshot(cycle)
+        match lower_module_with_resolved_calls_v1(cycle):
+            case Err(message): expect(message == "").to_equal(false)
+            case Ok(_): fail("cyclic omitted-default expansion published a module")
+        expect(c1_calls_input_snapshot(cycle)).to_equal(before)
+        match c1_calls_source_result("fn recursive_leaf(value: i64) -> i64:\n    recursive_leaf(value)\n"):
+            case Ok(result):
+                expect(result.calls.bindings.len()).to_equal(1)
+                expect(validate_resolved_direct_call_manifest_v1(result.module, result.calls).closed()).to_equal(true)
+                c1_calls_check_site(result, "recursive_leaf", "recursive_leaf", 1)
+            case Err(message): fail(message)
+        # A function identity alone is not an active-default cycle key:
+        # outer parameter a expands an inner call omitting only parameter b.
+        match c1_calls_source_result("fn distinct_defaults(a: i64 = distinct_defaults(1), b: i64 = 2) -> i64:\n    a + b\n\nfn caller() -> i64:\n    distinct_defaults()\n"):
+            case Ok(result):
+                expect(result.calls.bindings.len()).to_equal(2)
+                expect(result.calls.bindings[0].call_site_hash == result.calls.bindings[1].call_site_hash).to_equal(false)
+                expect(validate_resolved_direct_call_manifest_v1(result.module, result.calls).closed()).to_equal(true)
+            case Err(message): fail(message)
+        # These are actual source functions; no synthetic frame counter is supplied.
+        var declarations = "fn depth_0(value: i64 = 1) -> i64:\n    value\n"
+        for index in 1..129:
+            val previous = index - 1
+            declarations = declarations + "\nfn depth_{index}(value: i64 = depth_{previous}()) -> i64:\n    value\n"
+        val boundary_hir = c1_calls_hir(declarations + "\nfn caller() -> i64:\n    depth_127()\n")
+        val boundary_before = c1_calls_input_snapshot(boundary_hir)
+        match lower_module_with_resolved_calls_v1(boundary_hir):
+            case Ok(result):
+                expect(result.calls.bindings.len()).to_equal(128)
+                expect(validate_resolved_direct_call_manifest_v1(result.module, result.calls).closed()).to_equal(true)
+            case Err(message): fail(message)
+        expect(c1_calls_input_snapshot(boundary_hir)).to_equal(boundary_before)
+        val excessive_hir = c1_calls_hir(declarations + "\nfn caller() -> i64:\n    depth_128()\n")
+        val excessive_before = c1_calls_input_snapshot(excessive_hir)
+        match lower_module_with_resolved_calls_v1(excessive_hir):
+            case Err(message): expect(message).to_contain("DEFAULT-DEPTH")
+            case Ok(_): fail("129 active omitted-default frames were admitted")
+        expect(c1_calls_input_snapshot(excessive_hir)).to_equal(excessive_before)

@@ -78,6 +78,23 @@ case "$stage3_rss_cap_mode" in enforce|monitor) ;; *)
   bootstrap_stage3_error 'invalid Stage 3 RSS cap mode' ;;
 esac
 
+# Transport this finite watchdog bound explicitly: systemd services do not
+# inherit the controller environment. It is supervision metadata, not a
+# compiler environment input or a change to historical parent transcripts.
+# Match the watchdog's host-based defaults ($^O), not the compiler target.
+stage3_observation_host=$(uname -s) || bootstrap_stage3_error 'cannot identify observation host'
+case "$stage3_observation_host" in FreeBSD) stage3_observation_default_ms=5000 ;; *) stage3_observation_default_ms=1000 ;; esac
+stage3_observation_budget_ms=${SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS-$stage3_observation_default_ms}
+case "$stage3_observation_budget_ms" in
+  ''|0*|*[!0-9]*) bootstrap_stage3_error 'invalid Stage 3 observation budget' ;;
+esac
+[ "${#stage3_observation_budget_ms}" -le 5 ] &&
+  [ "$stage3_observation_budget_ms" -ge 1000 ] &&
+  [ "$stage3_observation_budget_ms" -le 60000 ] ||
+  bootstrap_stage3_error 'Stage 3 observation budget must be 1000..60000 ms'
+SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS=$stage3_observation_budget_ms
+export SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS
+
 BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
 BOOTSTRAP_STAGE3_VERSION_ROOT=$root
 export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
@@ -158,6 +175,24 @@ else
 fi
 [ "$(bootstrap_stage3_canonical_path "$archive")" = "$archive" ] ||
   bootstrap_stage3_error "recovery-threads1 is not canonical: $archive"
+
+# Seal the selected supervision setting in this invocation's immutable archive.
+# The compiler argv/env digest remains unchanged: the watchdog reads this value
+# before env-i constructs the admitted compiler environment.
+stage3_observation_receipt="$archive/observation-budget.env"
+[ ! -e "$stage3_observation_receipt" ] && [ ! -L "$stage3_observation_receipt" ] ||
+  bootstrap_stage3_error 'observation budget receipt already exists'
+{
+  echo 'schema=simple-stage3-observation-budget-v1'
+  echo 'status=selected-not-executed'
+  echo "observation_budget_ms=$stage3_observation_budget_ms"
+  echo 'transport=worker-positional-31'
+  echo 'failure_mode=enforce'
+} >"$stage3_observation_receipt" || bootstrap_stage3_error 'cannot record observation budget'
+chmod 0400 "$stage3_observation_receipt" || bootstrap_stage3_error 'cannot seal observation budget'
+bootstrap_stage3_hash_file "$stage3_observation_receipt" >"$archive/observation-budget.sha256" ||
+  bootstrap_stage3_error 'cannot hash observation budget'
+chmod 0400 "$archive/observation-budget.sha256" || bootstrap_stage3_error 'cannot seal observation budget hash'
 
 # A self-hosted native-build controller can contain a crashed worker, print the
 # worker's unsigned exit code, and still return shell status 0.  The recovery
@@ -956,7 +991,7 @@ if [ "$stage3_guard_watch" = linux-proc-memavailable ] &&
     "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
     "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" \
-    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" &
+    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" "$stage3_observation_budget_ms" &
 elif [ "$stage3_guard_watch" = linux-proc-memavailable ]; then
   systemd-run --user --quiet --wait --collect --unit="$stage3_guard_unit" \
     --property=KillMode=control-group \
@@ -969,7 +1004,7 @@ elif [ "$stage3_guard_watch" = linux-proc-memavailable ]; then
     "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
     "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" \
-    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" &
+    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" "$stage3_observation_budget_ms" &
 elif case "$platform" in *-apple-darwin*) true ;; *) false ;; esac; then
   # Darwin has no cgroup and rejects RLIMIT_AS, so the worker skips `ulimit -v`.
   # The watchdog must honor a Stage 3 process cap configured below the tree
@@ -997,7 +1032,7 @@ elif case "$platform" in *-apple-darwin*) true ;; *) false ;; esac; then
     "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
     "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" \
-    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" &
+    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" "$stage3_observation_budget_ms" &
 else
   "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
     "$path" "$admitted" "$platform" "$stage2_backend" "$stage3_threads" \
@@ -1006,7 +1041,7 @@ else
     "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
     "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" \
-    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" &
+    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" "$stage3_observation_budget_ms" &
 fi
 stage3_guard_pid=$!
 stage3_guard_tripped=0

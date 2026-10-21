@@ -1,0 +1,897 @@
+# EE-01 bounded symbolic residual coverage and ordered decision graph.
+# Site identity, CFG edges, binding availability and producer provenance remain
+# obligations of validate_enum_semantics_v1. Runtime/Lean execution: UNRUN.
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_types.{LocalId, MirType, MirTypeKind, MirConstValue,
+    MirTypeDefKind, MirVariantDef}
+use compiler.mir.mir_instruction_graph.{MirModule}
+use compiler.mir.mir_enum_semantic_types.{MirEnumPatternKindV1,
+    MirEnumPatternNodeV1, MirEnumMatchSemanticV1, MirEnumDeclarationIdentityV1}
+
+enum EnumPatternValueStepV1:
+    VariantField(owner_symbol: SymbolId, discriminant: i64, slot: i64, field_type: MirType)
+    TupleField(index: i64, field_type: MirType)
+
+struct EnumPatternValuePathV1:
+    root_type: MirType
+    steps: [EnumPatternValueStepV1]
+    type_: MirType
+    key: text
+
+struct EnumPatternBindingV1:
+    source_symbol: SymbolId
+    destination_local: LocalId
+    value_path: EnumPatternValuePathV1
+
+enum EnumPatternDecisionTestV1:
+    Constructor(owner_symbol: SymbolId, discriminant: i64)
+    Bool(value: bool)
+    Product
+    Integer(value: i64)
+    OtherInteger
+
+struct EnumPatternDecisionEdgeV1:
+    test: EnumPatternDecisionTestV1
+    target_node: i64
+
+enum EnumPatternDecisionKindV1:
+    SelectArm(arm_index: i64, bindings: [EnumPatternBindingV1], guard_false_node: i64?)
+    Test(value_path: EnumPatternValuePathV1, edges: [EnumPatternDecisionEdgeV1])
+    # Explicit vocabulary for a residual, never present in an accepted plan.
+    Residual
+
+struct EnumPatternDecisionNodeV1:
+    kind: EnumPatternDecisionKindV1
+
+struct EnumPatternDecisionPlanV1:
+    root_node: i64
+    nodes: [EnumPatternDecisionNodeV1]
+    remaining_work: i64
+
+struct EptRowV1:
+    cells: [i64]
+    arm_index: i64 = -1
+    bindings: [EnumPatternBindingV1] = []
+
+struct EptBranchV1:
+    # 0 = enum, 1 = Bool, 2 = product, 3 = integer literal, 4 = other integer.
+    tag: i64
+    value: i64
+    fields: [MirType]
+
+class EptCheckerV1:
+    module: MirModule
+    nodes: [MirEnumPatternNodeV1]
+    remaining: i64
+    owners: Dict<i64, bool>
+    struct_owners: Dict<i64, bool>
+    slot_facts: Dict<i64, MirEnumDeclarationIdentityV1>
+    slot_fields: Dict<text, [MirType]>
+    heights: Dict<i64, i64>
+    active_nodes: Dict<i64, bool>
+    states: Dict<text, i64>
+    guard_flags: [bool]
+    decision_nodes: [EnumPatternDecisionNodeV1]
+    decision_states: Dict<text, i64>
+    active_decisions: Dict<text, bool>
+
+impl EptCheckerV1:
+    me charge(amount: i64) -> Result<(), text>:
+        if amount < 0 or amount > self.remaining:
+            return Err("EE-E-LIMIT: symbolic totality work budget exhausted")
+        self.remaining = self.remaining - amount
+        Ok(())
+
+    # Do not unfold a nominal type in a type key. The symbol is its identity.
+    # Owner validation separately checks the actual module declaration once.
+    me type_key(type_: MirType, depth: i64) -> Result<text, text>:
+        self.charge(1)?
+        if depth > 128:
+            return Err("EE-E-LIMIT: semantic type depth exceeds 128")
+        match type_.kind:
+            case MirTypeKind.Bool: Ok("b")
+            case MirTypeKind.Char: Ok("c")
+            case MirTypeKind.Unit: Ok("u")
+            case MirTypeKind.I8: Ok("i8")
+            case MirTypeKind.I16: Ok("i16")
+            case MirTypeKind.I32: Ok("i32")
+            case MirTypeKind.I64: Ok("i64")
+            case MirTypeKind.U8: Ok("u8")
+            case MirTypeKind.U16: Ok("u16")
+            case MirTypeKind.U32: Ok("u32")
+            case MirTypeKind.U64: Ok("u64")
+            case MirTypeKind.Enum(symbol):
+                self.owner(symbol, depth + 1)?
+                self.charge(23)?
+                Ok("e{symbol.id};")
+            case MirTypeKind.Struct(symbol):
+                self.struct_owner(symbol, depth + 1)?
+                self.charge(23)?
+                Ok("s{symbol.id};")
+            case MirTypeKind.Array(element, size):
+                if size < 0:
+                    return Err("EE-E-PATTERN: negative closed array extent")
+                val child = self.type_key(element, depth + 1)?
+                self.charge(child.len() + 25)?
+                Ok("a{size}[{child}]")
+            case MirTypeKind.Result(ok_type, err_type):
+                val ok_key = self.type_key(ok_type, depth + 1)?
+                val err_key = self.type_key(err_type, depth + 1)?
+                self.charge(ok_key.len() + err_key.len() + 4)?
+                Ok("r({ok_key};{err_key})")
+            case MirTypeKind.Tuple(elements):
+                self.charge(1)?
+                var parts: [text] = ["("]
+                var size = 2
+                for element in elements:
+                    val child = self.type_key(element, depth + 1)?
+                    self.charge(child.len() + 2)?
+                    parts.push(child)
+                    parts.push(";")
+                    size = size + child.len() + 1
+                self.charge(size + 1)?
+                parts.push(")")
+                Ok(parts.join(""))
+            case _:
+                Err("EE-E-PATTERN: unsupported semantic coverage domain")
+
+    me struct_owner(symbol: SymbolId, depth: i64) -> Result<(), text>:
+        self.charge(1)?
+        if depth > 128:
+            return Err("EE-E-LIMIT: closed struct depth exceeds 128")
+        if val definition = self.module.types.get(symbol):
+            if definition.symbol.id != symbol.id:
+                return Err("EE-E-DECLARATION: relocated struct owner")
+            match definition.kind:
+                case MirTypeDefKind.Struct(fields):
+                    if self.struct_owners.contains_key(symbol.id):
+                        return Ok(())
+                    self.charge(1)?
+                    self.struct_owners[symbol.id] = true
+                    var names: Dict<text, bool> = {}
+                    for field in fields:
+                        self.charge(2)?
+                        if names.contains_key(field.name):
+                            return Err("EE-E-DECLARATION: duplicate struct field identity")
+                        names[field.name] = true
+                        self.type_key(field.type_, depth + 1)?
+                    Ok(())
+                case _:
+                    Err("EE-E-DECLARATION: nominal struct owner has wrong kind")
+        else:
+            Err("EE-E-DECLARATION: struct owner missing from module")
+
+    me slot_key(owner: SymbolId, discriminant: i64) -> Result<text, text>:
+        self.charge(43)?
+        Ok("{owner.id}:{discriminant}")
+
+    me fields(owner: SymbolId, variant: MirVariantDef) -> Result<[MirType], text>:
+        if self.slot_facts.contains_key(owner.id):
+            val key = self.slot_key(owner, variant.discriminant)?
+            if val fields = self.slot_fields.get(key):
+                self.charge(fields.len())?
+                return Ok(fields)
+            return Err("EE-E-DECLARATION: retained variant slots were not validated")
+        # Compatibility for hand-built MIR without retained source slot facts.
+        # Producer-bound admission requires the facts in the outer validator.
+        if val payload = variant.payload:
+            match payload.kind:
+                case MirTypeKind.Tuple(elements):
+                    self.charge(elements.len())?
+                    return Ok(elements)
+                case _:
+                    self.charge(1)?
+                    return Ok([payload])
+        Ok([])
+
+    me owner(symbol: SymbolId, depth: i64) -> Result<[MirVariantDef], text>:
+        self.charge(1)?
+        if depth > 128:
+            return Err("EE-E-LIMIT: declaration nesting exceeds 128")
+        if val definition = self.module.types.get(symbol):
+            if definition.symbol.id != symbol.id:
+                return Err("EE-E-DECLARATION: relocated enum owner")
+            match definition.kind:
+                case MirTypeDefKind.Enum(variants):
+                    if self.owners.contains_key(symbol.id):
+                        return Ok(variants)
+                    # Mark before following payload types: nominal recursion is
+                    # legal and is not a recursive pattern or residual state.
+                    self.charge(1)?
+                    self.owners[symbol.id] = true
+                    var tags: Dict<i64, bool> = {}
+                    var names: Dict<text, bool> = {}
+                    var source_variants: Dict<i64, bool> = {}
+                    if val facts = self.slot_facts.get(symbol.id):
+                        if facts.variants.len() != variants.len():
+                            return Err("EE-E-DECLARATION: retained variant count differs")
+                    for index in 0..variants.len():
+                        val variant = variants[index]
+                        self.charge(3)?
+                        if tags.contains_key(variant.discriminant) or names.contains_key(variant.name):
+                            return Err("EE-E-DECLARATION: duplicate enum constructor identity")
+                        tags[variant.discriminant] = true
+                        names[variant.name] = true
+                        if val payload = variant.payload:
+                            self.type_key(payload, depth + 1)?
+                        if val facts = self.slot_facts.get(symbol.id):
+                            val slots = facts.variants[index]
+                            self.charge(slots.slot_types.len() + slots.slot_names.len() + 2)?
+                            if slots.discriminant != variant.discriminant:
+                                return Err("EE-E-DECLARATION: retained constructor order differs")
+                            if slots.source_variant.id < 0 or source_variants.contains_key(slots.source_variant.id):
+                                return Err("EE-E-DECLARATION: invalid retained source variant identity")
+                            source_variants[slots.source_variant.id] = true
+                            if slots.slot_names.len() != 0 and slots.slot_names.len() != slots.slot_types.len():
+                                return Err("EE-E-DECLARATION: retained slot names and types differ in arity")
+                            var slot_names: Dict<text, bool> = {}
+                            for name in slots.slot_names:
+                                self.charge(1)?
+                                if name == "" or slot_names.contains_key(name):
+                                    return Err("EE-E-DECLARATION: invalid retained slot name")
+                                slot_names[name] = true
+                            for type_ in slots.slot_types:
+                                self.type_key(type_, depth + 1)?
+                            if slots.slot_types.len() == 0:
+                                if variant.payload != nil:
+                                    return Err("EE-E-DECLARATION: nullary retained variant has payload")
+                            else:
+                                if val payload = variant.payload:
+                                    self.charge(1)?
+                                    val collapsed = if slots.slot_types.len() == 1 and slots.slot_names.len() == 0:
+                                        slots.slot_types[0]
+                                    else:
+                                        MirType(kind: MirTypeKind.Tuple(slots.slot_types))
+                                    val expected = self.type_key(collapsed, depth + 1)?
+                                    val actual = self.type_key(payload, depth + 1)?
+                                    if expected != actual:
+                                        return Err("EE-E-DECLARATION: retained slots differ from actual payload")
+                                else:
+                                    return Err("EE-E-DECLARATION: retained payload has no actual type")
+                            val key = self.slot_key(symbol, variant.discriminant)?
+                            self.charge(1)?
+                            self.slot_fields[key] = slots.slot_types
+                    Ok(variants)
+                case _:
+                    Err("EE-E-DECLARATION: nominal owner is not an enum")
+        else:
+            Err("EE-E-DECLARATION: enum owner missing from module")
+
+    me same_type(left: MirType, right: MirType) -> Result<(), text>:
+        val left_key = self.type_key(left, 0)?
+        val right_key = self.type_key(right, 0)?
+        if left_key != right_key:
+            return Err("EE-E-PATTERN: pattern semantic type mismatch")
+        Ok(())
+
+    me literal(value: MirConstValue, type_: MirType) -> Result<(), text>:
+        self.charge(1)?
+        match value:
+            case MirConstValue.Bool(_):
+                match type_.kind:
+                    case MirTypeKind.Bool: return Ok(())
+                    case _: return Err("EE-E-PATTERN: Bool literal type mismatch")
+            case MirConstValue.Int(number):
+                var valid = false
+                match type_.kind:
+                    case MirTypeKind.I8: valid = number >= -128 and number <= 127
+                    case MirTypeKind.I16: valid = number >= -32768 and number <= 32767
+                    case MirTypeKind.I32: valid = number >= -2147483648 and number <= 2147483647
+                    case MirTypeKind.I64: valid = true
+                    case MirTypeKind.U8: valid = number >= 0 and number <= 255
+                    case MirTypeKind.U16: valid = number >= 0 and number <= 65535
+                    case MirTypeKind.U32: valid = number >= 0 and number <= 4294967295
+                    case MirTypeKind.U64: valid = number >= 0
+                    case _: valid = false
+                if valid:
+                    return Ok(())
+                Err("EE-E-PATTERN: integer literal outside its exact semantic type")
+            case _:
+                Err("EE-E-PATTERN: unsupported literal coverage domain")
+
+    me child_height(index: i64, expected: MirType, depth: i64) -> Result<i64, text>:
+        self.charge(1)?
+        if index < 0 or index >= self.nodes.len():
+            return Err("EE-E-PATTERN: child pattern index out of range")
+        self.same_type(self.nodes[index].expected_type, expected)?
+        self.node_height(index, depth)
+
+    me node_height(index: i64, depth: i64) -> Result<i64, text>:
+        self.charge(1)?
+        if depth > 128:
+            return Err("EE-E-LIMIT: pattern depth exceeds 128")
+        if index < 0 or index >= self.nodes.len():
+            return Err("EE-E-PATTERN: pattern index out of range")
+        if val height = self.heights.get(index):
+            if depth + height - 1 > 128:
+                return Err("EE-E-LIMIT: shared pattern path exceeds 128")
+            return Ok(height)
+        if self.active_nodes.get(index) ?? false:
+            return Err("EE-E-PATTERN: cyclic pattern references")
+        self.charge(1)?
+        self.active_nodes[index] = true
+        val node = self.nodes[index]
+        self.type_key(node.expected_type, 0)?
+        var children: [i64] = []
+        var child_types: [MirType] = []
+        match node.kind:
+            case MirEnumPatternKindV1.Wildcard: ()
+            case MirEnumPatternKindV1.Bind(_, _): ()
+            case MirEnumPatternKindV1.Literal(value, exact_type):
+                self.same_type(exact_type, node.expected_type)?
+                self.literal(value, exact_type)?
+            case MirEnumPatternKindV1.Tuple(items):
+                match node.expected_type.kind:
+                    case MirTypeKind.Tuple(elements):
+                        self.charge(items.len() + elements.len())?
+                        children = items
+                        child_types = elements
+                    case _:
+                        return Err("EE-E-PATTERN: tuple pattern on non-tuple type")
+            case MirEnumPatternKindV1.Variant(symbol, tag, items):
+                match node.expected_type.kind:
+                    case MirTypeKind.Enum(expected):
+                        if expected.id != symbol.id:
+                            return Err("EE-E-DECLARATION: pattern names a foreign enum owner")
+                    case _:
+                        return Err("EE-E-PATTERN: variant pattern on non-enum type")
+                val variants = self.owner(symbol, 0)?
+                var found = false
+                for variant in variants:
+                    self.charge(1)?
+                    if variant.discriminant == tag:
+                        child_types = self.fields(symbol, variant)?
+                        found = true
+                if not found:
+                    return Err("EE-E-DECLARATION: unknown constructor discriminant")
+                self.charge(items.len())?
+                children = items
+            case MirEnumPatternKindV1.Or(alternatives):
+                if alternatives.len() == 0:
+                    return Err("EE-E-PATTERN: empty Or pattern")
+                self.charge(alternatives.len())?
+                children = alternatives
+                for _ in alternatives:
+                    self.charge(1)?
+                    child_types.push(node.expected_type)
+        if children.len() != child_types.len():
+            return Err("EE-E-PATTERN: declared payload or tuple arity mismatch")
+        var height = 1
+        for position in 0..children.len():
+            val child = self.child_height(children[position], child_types[position], depth + 1)?
+            if child + 1 > height:
+                height = child + 1
+        if depth + height - 1 > 128:
+            return Err("EE-E-LIMIT: pattern depth exceeds 128")
+        self.charge(2)?
+        self.active_nodes[index] = false
+        self.heights[index] = height
+        Ok(height)
+
+    fn wildcard(index: i64) -> bool:
+        if index == -1:
+            return true
+        match self.nodes[index].kind:
+            case MirEnumPatternKindV1.Wildcard: true
+            case MirEnumPatternKindV1.Bind(_, _): true
+            case _: false
+
+    me state_key(columns: [MirType], rows: [EptRowV1]) -> Result<text, text>:
+        var parts: [text] = []
+        var size = 0
+        for column in columns:
+            val item = self.type_key(column, 0)?
+            self.charge(item.len() + 2)?
+            parts.push(item)
+            parts.push("|")
+            size = size + item.len() + 1
+        for row in rows:
+            self.charge(1)?
+            parts.push("[")
+            size = size + 1
+            for cell in row.cells:
+                self.charge(22)?
+                val item = "{cell},"
+                self.charge(item.len() + 1)?
+                parts.push(item)
+                size = size + item.len()
+            self.charge(1)?
+            parts.push("]")
+            size = size + 1
+        self.charge(size)?
+        Ok(parts.join(""))
+
+    # Expand only the column being inspected, preserving alternative order.
+    # Every replicated row/cell is charged before it enters the matrix.
+    me expand_row(row: EptRowV1, depth: i64) -> Result<[EptRowV1], text>:
+        self.charge(1)?
+        if depth > 128:
+            return Err("EE-E-LIMIT: Or specialization depth exceeds 128")
+        if row.cells[0] >= 0:
+            match self.nodes[row.cells[0]].kind:
+                case MirEnumPatternKindV1.Or(alternatives):
+                    var result: [EptRowV1] = []
+                    for alternative in alternatives:
+                        self.charge(row.cells.len() + 1)?
+                        var cells: [i64] = [alternative]
+                        for position in 1..row.cells.len():
+                            cells.push(row.cells[position])
+                        val expanded = self.expand_row(EptRowV1(cells: cells,
+                            arm_index: row.arm_index, bindings: row.bindings), depth + 1)?
+                        for item in expanded:
+                            self.charge(1)?
+                            result.push(item)
+                    return Ok(result)
+                case _: ()
+        self.charge(1)?
+        Ok([row])
+
+    me branches(type_: MirType, rows: [EptRowV1]) -> Result<[EptBranchV1], text>:
+        self.charge(1)?
+        match type_.kind:
+            case MirTypeKind.Enum(symbol):
+                val variants = self.owner(symbol, 0)?
+                var result: [EptBranchV1] = []
+                for variant in variants:
+                    val fields = self.fields(symbol, variant)?
+                    self.charge(1)?
+                    result.push(EptBranchV1(tag: 0, value: variant.discriminant, fields: fields))
+                Ok(result)
+            case MirTypeKind.Bool:
+                self.charge(2)?
+                Ok([EptBranchV1(tag: 1, value: 0, fields: []),
+                    EptBranchV1(tag: 1, value: 1, fields: [])])
+            case MirTypeKind.Tuple(elements):
+                self.charge(elements.len() + 1)?
+                Ok([EptBranchV1(tag: 2, value: 0, fields: elements)])
+            case MirTypeKind.Unit:
+                self.charge(1)?
+                Ok([EptBranchV1(tag: 2, value: 0, fields: [])])
+            case _:
+                var integer = false
+                match type_.kind:
+                    case MirTypeKind.I8: integer = true
+                    case MirTypeKind.I16: integer = true
+                    case MirTypeKind.I32: integer = true
+                    case MirTypeKind.I64: integer = true
+                    case MirTypeKind.U8: integer = true
+                    case MirTypeKind.U16: integer = true
+                    case MirTypeKind.U32: integer = true
+                    case MirTypeKind.U64: integer = true
+                    case _: ()
+                if not integer:
+                    return Err("EE-E-PATTERN: unsupported tested pattern domain")
+                # The symbolic other branch is deliberate even for U8; it is
+                # discharged only by wildcard/binder rows, never enumeration.
+                self.charge(1)?
+                var result = [EptBranchV1(tag: 4, value: 0, fields: [])]
+                var seen: Dict<i64, bool> = {}
+                for row in rows:
+                    self.charge(1)?
+                    if row.cells[0] >= 0:
+                        match self.nodes[row.cells[0]].kind:
+                            case MirEnumPatternKindV1.Literal(value, _):
+                                match value:
+                                    case MirConstValue.Int(number):
+                                        if not seen.contains_key(number):
+                                            self.charge(2)?
+                                            seen[number] = true
+                                            result.push(EptBranchV1(tag: 3, value: number, fields: []))
+                                    case _: ()
+                            case _: ()
+                Ok(result)
+
+    me bind_head(row: EptRowV1, path: EnumPatternValuePathV1) -> Result<EptRowV1, text>:
+        self.charge(1)?
+        val head = row.cells[0]
+        if head >= 0:
+            match self.nodes[head].kind:
+                case MirEnumPatternKindV1.Bind(symbol, destination):
+                    for existing in row.bindings:
+                        self.charge(1)?
+                        if existing.destination_local.id == destination.id:
+                            return Err("EE-E-PATTERN: duplicate destination in pattern bindings")
+                    self.charge(row.bindings.len() + 1)?
+                    var bindings = row.bindings
+                    bindings.push(EnumPatternBindingV1(source_symbol: symbol,
+                        destination_local: destination, value_path: path))
+                    return Ok(EptRowV1(cells: row.cells, arm_index: row.arm_index,
+                        bindings: bindings))
+                case _: ()
+        Ok(row)
+
+    me specialize(row: EptRowV1, branch: EptBranchV1) -> Result<EptRowV1?, text>:
+        self.charge(1)?
+        val head = row.cells[0]
+        var children: [i64] = []
+        var accepts = self.wildcard(head)
+        if accepts:
+            self.charge(branch.fields.len())?
+            for _ in branch.fields:
+                children.push(-1)
+        else:
+            match self.nodes[head].kind:
+                case MirEnumPatternKindV1.Variant(_, tag, items):
+                    accepts = branch.tag == 0 and branch.value == tag
+                    if accepts:
+                        self.charge(items.len())?
+                        children = items
+                case MirEnumPatternKindV1.Tuple(items):
+                    accepts = branch.tag == 2
+                    if accepts:
+                        self.charge(items.len())?
+                        children = items
+                case MirEnumPatternKindV1.Literal(value, _):
+                    match value:
+                        case MirConstValue.Bool(boolean):
+                            val number = if boolean: 1 else: 0
+                            accepts = branch.tag == 1 and branch.value == number
+                        case MirConstValue.Int(number):
+                            accepts = branch.tag == 3 and branch.value == number
+                        case _: ()
+                case _: ()
+        if not accepts:
+            return Ok(nil)
+        self.charge(children.len() + row.cells.len())?
+        var cells: [i64] = []
+        for child in children:
+            cells.push(child)
+        for position in 1..row.cells.len():
+            cells.push(row.cells[position])
+        Ok(Some(EptRowV1(cells: cells, arm_index: row.arm_index,
+            bindings: row.bindings)))
+
+    me order_rows(rows: [EptRowV1], selected: i64) -> Result<[EptRowV1], text>:
+        var result: [EptRowV1] = []
+        for row in rows:
+            self.charge(row.cells.len() + 1)?
+            var cells: [i64] = [row.cells[selected]]
+            for position in 0..row.cells.len():
+                if position != selected:
+                    cells.push(row.cells[position])
+            val expanded = self.expand_row(EptRowV1(cells: cells,
+                arm_index: row.arm_index, bindings: row.bindings), 1)?
+            for item in expanded:
+                self.charge(1)?
+                result.push(item)
+        Ok(result)
+
+    me specialize_rows(rows: [EptRowV1], branch: EptBranchV1,
+            head_path: EnumPatternValuePathV1?) -> Result<[EptRowV1], text>:
+        var result: [EptRowV1] = []
+        for row in rows:
+            var bound_row = row
+            if val path = head_path:
+                bound_row = self.bind_head(row, path)?
+            val specialized = self.specialize(bound_row, branch)?
+            if val item = specialized:
+                self.charge(1)?
+                result.push(item)
+        Ok(result)
+
+    me covered(columns: [MirType], rows: [EptRowV1], depth: i64) -> Result<bool, text>:
+        self.charge(1)?
+        # Syntactic height is checked independently by node_height (128).
+        # Up to 128 specialization frames may reach one terminal frame.
+        if depth > 129:
+            return Err("EE-E-LIMIT: residual evaluation stack exceeds 129 frames")
+        if rows.len() == 0:
+            return Ok(false)
+        var selected = -1
+        for row in rows:
+            var all_wild = true
+            for position in 0..row.cells.len():
+                self.charge(1)?
+                if not self.wildcard(row.cells[position]):
+                    all_wild = false
+                    if selected == -1:
+                        selected = position
+            if all_wild:
+                return Ok(true)
+        if depth > 128:
+            return Err("EE-E-LIMIT: residual specialization exceeds 128 nonterminal frames")
+        # Pick a tested column; never unfold a wildcard recursive payload.
+        val key = self.state_key(columns, rows)?
+        if val status = self.states.get(key):
+            if status == 0:
+                return Err("EE-E-PATTERN: active residual state recurrence")
+            return Ok(status == 1)
+        self.charge(1)?
+        self.states[key] = 0
+        self.charge(columns.len())?
+        var ordered_columns: [MirType] = [columns[selected]]
+        for position in 0..columns.len():
+            if position != selected:
+                ordered_columns.push(columns[position])
+        val ordered_rows = self.order_rows(rows, selected)?
+        var head_tested = false
+        for row in ordered_rows:
+            self.charge(1)?
+            if not self.wildcard(row.cells[0]):
+                head_tested = true
+        if not head_tested:
+            # Or(Wildcard, Bind, ...) can erase the last test of a closed
+            # payload domain. Do not manufacture a constructor test for it.
+            self.charge(ordered_columns.len() + 1)?
+            var tail_columns: [MirType] = []
+            for position in 1..ordered_columns.len():
+                tail_columns.push(ordered_columns[position])
+            val erased = EptBranchV1(tag: 2, value: 0, fields: [])
+            val tail_rows = self.specialize_rows(ordered_rows, erased, nil)?
+            val result = self.covered(tail_columns, tail_rows, depth + 1)?
+            self.charge(1)?
+            self.states[key] = if result: 1 else: -1
+            return Ok(result)
+        val choices = self.branches(ordered_columns[0], ordered_rows)?
+        for branch in choices:
+            self.charge(branch.fields.len() + ordered_columns.len() + 1)?
+            var next_columns: [MirType] = []
+            for field in branch.fields:
+                next_columns.push(field)
+            for position in 1..ordered_columns.len():
+                next_columns.push(ordered_columns[position])
+            val next_rows = self.specialize_rows(ordered_rows, branch, nil)?
+            if not self.covered(next_columns, next_rows, depth + 1)?:
+                self.charge(1)?
+                self.states[key] = -1
+                return Ok(false)
+        self.charge(1)?
+        self.states[key] = 1
+        Ok(true)
+
+    me path_child(parent: EnumPatternValuePathV1, branch: EptBranchV1,
+            slot: i64) -> Result<EnumPatternValuePathV1, text>:
+        if parent.steps.len() >= 128:
+            return Err("EE-E-LIMIT: decision value path exceeds 128")
+        self.charge(parent.steps.len() + parent.key.len() + 70)?
+        val field = branch.fields[slot]
+        var steps = parent.steps
+        var key = parent.key
+        if branch.tag == 0:
+            match parent.type_.kind:
+                case MirTypeKind.Enum(owner):
+                    steps.push(EnumPatternValueStepV1.VariantField(
+                        owner, branch.value, slot, field))
+                    key = key + ".e{owner.id}:{branch.value}:{slot}"
+                case _:
+                    return Err("EE-E-PATTERN: constructor projection has non-enum owner")
+        else:
+            if branch.tag != 2:
+                return Err("EE-E-PATTERN: scalar test cannot project fields")
+            steps.push(EnumPatternValueStepV1.TupleField(slot, field))
+            key = key + ".t{slot}"
+        Ok(EnumPatternValuePathV1(root_type: parent.root_type, steps: steps,
+            type_: field, key: key))
+
+    me decision_key(paths: [EnumPatternValuePathV1], columns: [MirType],
+            rows: [EptRowV1]) -> Result<text, text>:
+        val matrix = self.state_key(columns, rows)?
+        self.charge(1)?
+        var parts: [text] = [matrix]
+        var size = matrix.len()
+        for path in paths:
+            self.charge(path.key.len() + 1)?
+            parts.push(path.key)
+            parts.push("|")
+            size = size + path.key.len() + 1
+        for row in rows:
+            self.charge(24)?
+            val arm = "a{row.arm_index};"
+            parts.push(arm)
+            size = size + arm.len()
+            for binding in row.bindings:
+                self.charge(binding.value_path.key.len() + 48)?
+                val item = "b{binding.source_symbol.id}:{binding.destination_local.id}:{binding.value_path.key};"
+                parts.push(item)
+                size = size + item.len()
+        self.charge(size)?
+        Ok(parts.join(""))
+
+    me emit_decision(kind: EnumPatternDecisionKindV1) -> Result<i64, text>:
+        self.charge(1)?
+        val index = self.decision_nodes.len()
+        self.decision_nodes.push(EnumPatternDecisionNodeV1(kind: kind))
+        Ok(index)
+
+    me leaf_bindings(row: EptRowV1,
+            paths: [EnumPatternValuePathV1]) -> Result<[EnumPatternBindingV1], text>:
+        var bindings = row.bindings
+        for position in 0..row.cells.len():
+            self.charge(2)?
+            val single = EptRowV1(cells: [row.cells[position]],
+                arm_index: row.arm_index, bindings: bindings)
+            val bound = self.bind_head(single, paths[position])?
+            bindings = bound.bindings
+        Ok(bindings)
+
+    me decision_test(type_: MirType, branch: EptBranchV1) -> Result<EnumPatternDecisionTestV1, text>:
+        self.charge(1)?
+        if branch.tag == 0:
+            match type_.kind:
+                case MirTypeKind.Enum(owner):
+                    return Ok(EnumPatternDecisionTestV1.Constructor(owner, branch.value))
+                case _:
+                    return Err("EE-E-PATTERN: constructor test has non-enum owner")
+        if branch.tag == 1:
+            return Ok(EnumPatternDecisionTestV1.Bool(branch.value == 1))
+        if branch.tag == 2:
+            return Ok(EnumPatternDecisionTestV1.Product)
+        if branch.tag == 3:
+            return Ok(EnumPatternDecisionTestV1.Integer(branch.value))
+        if branch.tag == 4:
+            return Ok(EnumPatternDecisionTestV1.OtherInteger)
+        Err("EE-E-PATTERN: unknown specialization branch")
+
+    # Ordered evaluation and coverage share order_rows / expand_row / branches /
+    # specialize_rows. Only the leaf policy differs: coverage ignores guarded
+    # arms; evaluation selects the first matching expanded arm and retains its
+    # explicit false-guard continuation.
+    me decision(paths: [EnumPatternValuePathV1], rows: [EptRowV1],
+            depth: i64) -> Result<i64, text>:
+        self.charge(1)?
+        # The final unguarded selection is a terminal evaluation frame, not
+        # another syntactic pattern node or specialization. Guard continuations
+        # remain nonterminal work and cannot extend the safe stack bound.
+        if depth > 129:
+            return Err("EE-E-LIMIT: decision evaluation stack exceeds 129 frames")
+        if rows.len() == 0:
+            return Err("EE-E-RESIDUAL: ordered decision reaches an unmatched input")
+        self.charge(paths.len())?
+        var columns: [MirType] = []
+        for path in paths:
+            columns.push(path.type_)
+        val key = self.decision_key(paths, columns, rows)?
+        if val existing = self.decision_states.get(key):
+            return Ok(existing)
+        if self.active_decisions.get(key) ?? false:
+            return Err("EE-E-PATTERN: active decision state recurrence")
+        self.charge(1)?
+        self.active_decisions[key] = true
+        val first = rows[0]
+        var selected = -1
+        for position in 0..first.cells.len():
+            self.charge(1)?
+            if selected == -1 and not self.wildcard(first.cells[position]):
+                selected = position
+        if depth > 128 and (selected != -1 or self.guard_flags[first.arm_index]):
+            return Err("EE-E-LIMIT: decision specialization exceeds 128 nonterminal frames")
+        var result = -1
+        if selected == -1:
+            val bindings = self.leaf_bindings(first, paths)?
+            var false_node: i64? = nil
+            if self.guard_flags[first.arm_index]:
+                var following: [EptRowV1] = []
+                for row in rows:
+                    self.charge(1)?
+                    # An arm_index identifies an actual expanded producer arm.
+                    # Nested Or choices within it do not invent extra guards.
+                    if row.arm_index > first.arm_index:
+                        self.charge(1)?
+                        following.push(row)
+                self.charge(1)?
+                false_node = Some(self.decision(paths, following, depth + 1)?)
+            self.charge(bindings.len() + 1)?
+            result = self.emit_decision(EnumPatternDecisionKindV1.SelectArm(
+                first.arm_index, bindings, false_node))?
+        else:
+            self.charge(paths.len())?
+            var ordered_paths: [EnumPatternValuePathV1] = [paths[selected]]
+            for position in 0..paths.len():
+                if position != selected:
+                    ordered_paths.push(paths[position])
+            val ordered_rows = self.order_rows(rows, selected)?
+            if self.wildcard(ordered_rows[0].cells[0]):
+                # Or expansion may make the first row irrefutable. Select it
+                # before inspecting domains or later rows.
+                result = self.decision(ordered_paths, ordered_rows, depth + 1)?
+            else:
+                val head = ordered_paths[0]
+                val choices = self.branches(head.type_, ordered_rows)?
+                var edges: [EnumPatternDecisionEdgeV1] = []
+                for branch in choices:
+                    self.charge(branch.fields.len() + ordered_paths.len() + 1)?
+                    var next_paths: [EnumPatternValuePathV1] = []
+                    for slot in 0..branch.fields.len():
+                        val child = self.path_child(head, branch, slot)?
+                        next_paths.push(child)
+                    for position in 1..ordered_paths.len():
+                        next_paths.push(ordered_paths[position])
+                    val next_rows = self.specialize_rows(ordered_rows, branch, Some(head))?
+                    val target = self.decision(next_paths, next_rows, depth + 1)?
+                    val test = self.decision_test(head.type_, branch)?
+                    self.charge(1)?
+                    edges.push(EnumPatternDecisionEdgeV1(test: test, target_node: target))
+                self.charge(edges.len() + 1)?
+                result = self.emit_decision(EnumPatternDecisionKindV1.Test(head, edges))?
+        self.charge(2)?
+        self.active_decisions[key] = false
+        self.decision_states[key] = result
+        Ok(result)
+
+    me input_rows(semantic: MirEnumMatchSemanticV1,
+            unconditional: bool) -> Result<[EptRowV1], text>:
+        var rows: [EptRowV1] = []
+        for index in 0..semantic.arms.len():
+            self.charge(1)?
+            val arm = semantic.arms[index]
+            if not unconditional or arm.guard_entry == nil:
+                self.charge(2)?
+                rows.push(EptRowV1(cells: [arm.pattern_root], arm_index: index))
+        Ok(rows)
+
+fn ept_prepare_v1(module: MirModule, semantic: MirEnumMatchSemanticV1,
+        remaining_work: i64) -> Result<EptCheckerV1, text>:
+    if remaining_work < 0 or remaining_work > 65536:
+        return Err("EE-E-LIMIT: invalid shared symbolic work budget")
+    if remaining_work == 0:
+        return Err("EE-E-LIMIT: symbolic totality work budget exhausted")
+    if semantic.pattern_nodes.len() > 65536 or semantic.arms.len() > 65536:
+        return Err("EE-E-LIMIT: pattern or arm count exceeds 65536")
+    var checker = EptCheckerV1(module: module, nodes: semantic.pattern_nodes,
+        remaining: remaining_work - 1, owners: {}, struct_owners: {},
+        slot_facts: {}, slot_fields: {}, heights: {},
+        active_nodes: {}, states: {}, guard_flags: [], decision_nodes: [],
+        decision_states: {}, active_decisions: {})
+    for facts in module.enum_semantic_declarations:
+        checker.charge(1)?
+        if facts.owner.id < 0 or checker.slot_facts.contains_key(facts.owner.id):
+            return Err("EE-E-DECLARATION: duplicate or invalid retained owner identity")
+        checker.slot_facts[facts.owner.id] = facts
+    if semantic.schema != "MirEnumMatchSemantic-v1":
+        return Err("EE-E-PATTERN: unknown enum semantic schema")
+    match semantic.scrutinee_semantic_type.kind:
+        case MirTypeKind.Enum(symbol):
+            if symbol.id != semantic.enum_owner.id:
+                return Err("EE-E-DECLARATION: scrutinee owner differs from source owner")
+        case _:
+            return Err("EE-E-DECLARATION: source scrutinee is not a nominal enum")
+    checker.owner(semantic.enum_owner, 0)?
+    for index in 0..semantic.pattern_nodes.len():
+        checker.node_height(index, 1)?
+    for arm in semantic.arms:
+        checker.charge(1)?
+        checker.child_height(arm.pattern_root, semantic.scrutinee_semantic_type, 1)?
+        checker.charge(1)?
+        checker.guard_flags.push(arm.guard_entry != nil)
+    Ok(checker)
+
+pub fn enum_pattern_totality_bounded_v1(module: MirModule,
+        semantic: MirEnumMatchSemanticV1, remaining_work: i64) -> Result<i64, text>:
+    """Validate full typed pattern coverage and return the unused shared budget.
+
+    The caller threads this result across matches and consumer output work.
+    Neither this API nor its convenience wrapper validates CFG/site provenance.
+    """
+    var checker = ept_prepare_v1(module, semantic, remaining_work)?
+    val rows = checker.input_rows(semantic, true)?
+    checker.charge(1)?
+    if not checker.covered([semantic.scrutinee_semantic_type], rows, 1)?:
+        return Err("EE-E-RESIDUAL: an input remains unmatched by unconditional arms")
+    Ok(checker.remaining)
+
+pub fn enum_pattern_decision_plan_v1(module: MirModule,
+        semantic: MirEnumMatchSemanticV1, remaining_work: i64) -> Result<EnumPatternDecisionPlanV1, text>:
+    """Build a complete ordered decision DAG through the same bounded matrix
+    specialization used by totality. No accepted plan contains a residual.
+    Guards resume the next actual expanded arm; consumers supply post-guard
+    availability and values when calling that continuation.
+    """
+    var checker = ept_prepare_v1(module, semantic, remaining_work)?
+    val unconditional = checker.input_rows(semantic, true)?
+    checker.charge(1)?
+    if not checker.covered([semantic.scrutinee_semantic_type], unconditional, 1)?:
+        return Err("EE-E-RESIDUAL: an input remains unmatched by unconditional arms")
+    val ordered = checker.input_rows(semantic, false)?
+    checker.charge(2)?
+    val root_path = EnumPatternValuePathV1(root_type: semantic.scrutinee_semantic_type,
+        steps: [], type_: semantic.scrutinee_semantic_type, key: "$")
+    val root_node = checker.decision([root_path], ordered, 1)?
+    checker.charge(1)?
+    Ok(EnumPatternDecisionPlanV1(root_node: root_node,
+        nodes: checker.decision_nodes, remaining_work: checker.remaining))
+
+pub fn enum_pattern_totality_v1(module: MirModule,
+        semantic: MirEnumMatchSemanticV1) -> Result<(), text>:
+    """Check enum pattern totality within the fixed 65536-unit work ceiling."""
+    enum_pattern_totality_bounded_v1(module, semantic, 65536)?
+    Ok(())

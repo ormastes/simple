@@ -393,6 +393,10 @@ pub struct MirLowerer<'a> {
     /// or a grow loop keeps re-pushing the stale pre-grow block
     /// (doc/08_tracking/bug/array_push_stale_receiver_store_arm64_2026-09-25.md).
     pub(super) array_push_returns_header: bool,
+    /// Lower statically typed `[i64]` element reads/writes/pushes through the
+    /// layout-aware `rt_typed_words_i64_*` lane (default on; off for freestanding
+    /// runtimes that do not define it).
+    pub(super) signed_word_lane: bool,
 }
 
 impl<'a> MirLowerer<'a> {
@@ -441,6 +445,7 @@ impl<'a> MirLowerer<'a> {
             active_array_u8_data_ptrs: Vec::new(),
             dead_append_array_locals: HashSet::new(),
             array_push_returns_header: false,
+            signed_word_lane: true,
         }
     }
 
@@ -483,6 +488,7 @@ impl<'a> MirLowerer<'a> {
             active_array_u8_data_ptrs: Vec::new(),
             dead_append_array_locals: HashSet::new(),
             array_push_returns_header: false,
+            signed_word_lane: true,
             decision_counter: 0,
             condition_counters: HashMap::new(),
             path_counter: 0,
@@ -1159,8 +1165,17 @@ impl<'a> MirLowerer<'a> {
     /// so push emissions must capture the call result as the post-grow array
     /// value. Defaults to false (canonical hosted bool-return, stable-header
     /// push ABI).
+    pub fn with_signed_word_lane(mut self, enabled: bool) -> Self {
+        self.signed_word_lane = enabled;
+        self
+    }
+
     pub fn with_array_push_returns_header(mut self, returns_header: bool) -> Self {
         self.array_push_returns_header = returns_header;
+        // FAM freestanding runtimes do not define the `[i64]` word lane.
+        if returns_header {
+            self.signed_word_lane = false;
+        }
         self
     }
 
@@ -2361,6 +2376,8 @@ impl<'a> MirLowerer<'a> {
                 | "rt_typed_words_u64_store_known_data_at"
                 | "rt_typed_words_u32_set"
                 | "rt_typed_words_u64_set"
+                | "rt_typed_words_i64_push"
+                | "rt_typed_words_i64_set"
         )
     }
 }

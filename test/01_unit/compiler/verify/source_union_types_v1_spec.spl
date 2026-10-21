@@ -1,0 +1,351 @@
+# @manual: show
+# @req: REQ-C2-UNION-TRANSPORT-001
+# Direct mapper oracles. All scenarios UNRUN; no source-only success claim.
+use std.spec.{describe, it, expect, fail}
+use std.spec.step
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolTable, SymbolId, Effect, EffectKind}
+use compiler.hir.hir_definitions.{HirVariantKind}
+use compiler.semantics.union_normalize.canonical.{union_normalize}
+use compiler.semantics.union_normalize.synth_enum.{synth_union_enum_normalized}
+use compiler.semantics.union_normalize.source_union_admission_v1.{SourceUnionLimitsV1, SourceUnionUsageV1, SourceUnionLedgerV1}
+use compiler.semantics.union_normalize.source_union_types_v1.{SourceUnionMapV1, SourceUnionEntryV1}
+
+fn union_types_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn union_types_module() -> HirModule:
+    HirModule(name: "union_types", path: "union_types.spl", imports: [], exports: [],
+        domain_blocks: [], symbols: SymbolTable.new(), functions: {},
+        gpu_function_targets: {}, gpu_function_backend_orders: {}, classes: {},
+        structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [], constants: {},
+        static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [],
+        mock_decls: [], types: [])
+
+fn union_types_map(limits: SourceUnionLimitsV1) -> SourceUnionMapV1:
+    val ledger = match SourceUnionLedgerV1.create(limits):
+        case Ok(value): value
+        case Err(error):
+            fail(error.code)
+            SourceUnionLedgerV1(limits: limits, usage: SourceUnionUsageV1())
+    SourceUnionMapV1.create(union_types_module(), ledger)
+
+fn union_types_entry(map_: SourceUnionMapV1, type_: HirType) -> SourceUnionEntryV1:
+    match map_.union_entry(type_):
+        case Ok(entry):
+            if val present = entry: return present
+            fail("union entry absent")
+        case Err(error): fail(error.code + ": " + error.message)
+    SourceUnionEntryV1(source: type_, normalized: type_, enum_symbol: SymbolId.new(-1),
+        members: [], keys: [], variant_names: [], variant_symbols: [])
+
+fn union_types_pair() -> HirType:
+    union_types_type(HirTypeKind.Union([
+        union_types_type(HirTypeKind.Int(64, true)), union_types_type(HirTypeKind.Bool)]))
+
+describe "source union invocation-owned canonical map":
+    it "matches existing canonical ordering and synthesized payload shape":
+        step("Compare actual registry output with the existing canonical and synth owners")
+        val integer = union_types_type(HirTypeKind.Int(64, true))
+        val boolean = union_types_type(HirTypeKind.Bool)
+        val source = union_types_type(HirTypeKind.Union([integer, boolean, integer]))
+        val mapper = union_types_map(SourceUnionLimitsV1())
+        val entry = union_types_entry(mapper, source)
+        val canonical = union_normalize([integer, boolean, integer])
+        val expected = synth_union_enum_normalized(canonical, source)
+        val actual = mapper.module.enums[entry.enum_symbol]
+        expect(entry.keys).to_equal(canonical.keys)
+        expect(actual.name).to_equal(expected.name)
+        expect(actual.runtime_name).to_equal(expected.runtime_name)
+        expect(actual.type_params.len()).to_equal(0)
+        expect(actual.attributes[0].name).to_equal("closed")
+        expect(actual.complete_open).to_equal(false)
+        expect(actual.dyn_open).to_equal(false)
+        expect(actual.variants.len()).to_equal(2)
+        for index in 0..2:
+            expect(actual.variants[index].name).to_equal(expected.variants[index].name)
+            expect(actual.variants[index].symbol.id).to_equal(entry.variant_symbols[index].id)
+            match actual.variants[index].kind:
+                case Tuple(payload):
+                    expect(payload.len()).to_equal(1)
+                    expect(mapper.compatible(payload[0], entry.members[index], source.span).unwrap()).to_equal(true)
+                case _: fail("synthetic union payload is not a one-element tuple")
+
+    it "reuses registry identity for reordered unions and reverse symbol lookup":
+        step("Canonical spellings resolve to the same actual enum and variant rows")
+        val mapper = union_types_map(SourceUnionLimitsV1())
+        val first = union_types_entry(mapper, union_types_pair())
+        val reversed = union_types_type(HirTypeKind.Union([first.members[0], first.members[1]]))
+        val second = union_types_entry(mapper, reversed)
+        expect(first.enum_symbol.id).to_equal(second.enum_symbol.id)
+        expect(first.variant_symbols).to_equal(second.variant_symbols)
+        expect(mapper.module.enums.len()).to_equal(1)
+        if val found = mapper.entry_for_symbol(first.enum_symbol):
+            expect(found.keys).to_equal(["bool", "i64"])
+        else: fail("reverse registry entry absent")
+
+    it "flattens nested unions and Optional members into one Unit payload":
+        step("Require canonical nil membership and Tuple1 Unit in the actual synthesized enum")
+        val integer = union_types_type(HirTypeKind.Int(64, true))
+        val optional = union_types_type(HirTypeKind.Optional(integer))
+        val source = union_types_type(HirTypeKind.Union([union_types_pair(), optional]))
+        val mapper = union_types_map(SourceUnionLimitsV1())
+        val entry = union_types_entry(mapper, source)
+        expect(entry.keys).to_equal(["bool", "i64", "nil"])
+        val actual = mapper.module.enums[entry.enum_symbol]
+        match actual.variants[2].kind:
+            case Tuple(payload):
+                expect(payload.len()).to_equal(1)
+                match payload[0].kind:
+                    case Unit: ()
+                    case _: fail("nil variant payload is not Unit")
+            case _: fail("nil was incorrectly erased to a payload-free variant")
+
+    it "retains singleton unions as one-variant named enums and rejects zero members":
+        step("No scalar erasure and no empty-success fallback")
+        val mapper = union_types_map(SourceUnionLimitsV1())
+        val source = union_types_type(HirTypeKind.Union([union_types_type(HirTypeKind.Bool)]))
+        val entry = union_types_entry(mapper, source)
+        expect(entry.keys).to_equal(["bool"])
+        expect(mapper.module.enums[entry.enum_symbol].variants.len()).to_equal(1)
+        match entry.normalized.kind:
+            case Named(symbol, args):
+                expect(symbol.id).to_equal(entry.enum_symbol.id)
+                expect(args.len()).to_equal(0)
+            case _: fail("singleton union was erased")
+        match mapper.union_entry(union_types_type(HirTypeKind.Union([]))):
+            case Err(error): expect(error.code).to_equal("UNION-E-MEMBER")
+            case Ok(_): fail("empty union admitted")
+
+    it "rejects effect-bearing function members before any canonical key debit":
+        step("Function effect omission in the shared key cannot establish membership equivalence")
+        val unit = union_types_type(HirTypeKind.Unit)
+        val effect = Effect(kind: EffectKind.Throws(unit), span: Span.empty())
+        val function = union_types_type(HirTypeKind.Function([], unit, [effect]))
+        val mapper = union_types_map(SourceUnionLimitsV1())
+        match mapper.union_entry(union_types_type(HirTypeKind.Union([function]))):
+            case Err(error):
+                expect(error.code).to_equal("UNION-E-MEMBER")
+                expect(error.usage.key_bytes).to_equal(0)
+                expect(error.usage.registry_rows).to_equal(0)
+            case Ok(_): fail("function member admitted")
+
+    it "refuses union nested in outer carriers while preserving plain carriers":
+        step("Report the exact unsupported Optional path instead of hiding a raw union")
+        val mapper = union_types_map(SourceUnionLimitsV1())
+        val nested = union_types_type(HirTypeKind.Optional(union_types_pair()))
+        match mapper.normalize_type(nested, nested.span):
+            case Err(error):
+                expect(error.code).to_equal("UNION-E-CARRIER")
+                expect(error.message).to_contain("Optional")
+            case Ok(_): fail("unsupported nested union carrier admitted")
+        val plain = union_types_type(HirTypeKind.Optional(union_types_type(HirTypeKind.Bool)))
+        match mapper.normalize_type(plain, plain.span):
+            case Ok(actual): expect(actual).to_equal(plain)
+            case Err(error): fail(error.code)
+
+    it "normalizes function parameters and result while retaining existing effects":
+        step("Direct signature carriers share one registry enum and preserve effect metadata")
+        val unit = union_types_type(HirTypeKind.Unit)
+        val effects = [Effect(kind: EffectKind.Throws(unit), span: Span.empty())]
+        val function = union_types_type(HirTypeKind.Function([union_types_pair()], union_types_pair(), effects))
+        val mapper = union_types_map(SourceUnionLimitsV1())
+        match mapper.normalize_type(function, function.span):
+            case Ok(mapped):
+                match mapped.kind:
+                    case Function(params, result, actual_effects):
+                        expect(params[0]).to_equal(result)
+                        expect(actual_effects).to_equal(effects)
+                        expect(mapper.module.enums.len()).to_equal(1)
+                    case _: fail("function carrier changed kind")
+            case Err(error): fail(error.code)
+
+    it "rejects mismatching existing registry reverse ownership":
+        step("Malformed owner evidence cannot alias an unrelated enum ID")
+        val mapper = union_types_map(SourceUnionLimitsV1())
+        mapper.module.symbols.structural_union_symbols["__Union_bool_i64"] = 900000001
+        mapper.module.symbols.structural_union_owners[900000001] = "__Union_bool"
+        match mapper.union_entry(union_types_pair()):
+            case Err(error): expect(error.code).to_equal("UNION-E-REGISTRY")
+            case Ok(_): fail("mismatching registry owners admitted")
+        expect(mapper.module.enums.len()).to_equal(0)
+
+    it "refuses a nominal member with no actual declaration owner before key generation":
+        step("A symbol number and source spelling do not establish nominal identity")
+        val mapper = union_types_map(SourceUnionLimitsV1())
+        val unknown = union_types_type(HirTypeKind.Named(SymbolId.new(17), []))
+        match mapper.union_entry(union_types_type(HirTypeKind.Union([unknown]))):
+            case Err(error):
+                expect(error.code).to_equal("UNION-E-NOMINAL")
+                expect(error.usage.key_bytes).to_equal(0)
+            case Ok(_): fail("unowned nominal member admitted")
+
+    it "validates unused existing synthetic enum payloads before registry reuse":
+        step("A corrupted preexisting declaration cannot hide behind another union lookup")
+        val original = union_types_map(SourceUnionLimitsV1())
+        val first = union_types_entry(original, union_types_pair())
+        var corrupt = original.module.enums[first.enum_symbol]
+        corrupt.variants[0].kind = HirVariantKind.Unit
+        original.module.enums[first.enum_symbol] = corrupt
+        val checker = union_types_map(SourceUnionLimitsV1())
+        checker.module = original.module
+        val other = union_types_type(HirTypeKind.Union([union_types_type(HirTypeKind.Char)]))
+        match checker.union_entry(other):
+            case Err(error):
+                expect(error.code).to_equal("UNION-E-REGISTRY")
+                expect(error.message).to_contain("Tuple1")
+            case Ok(_): fail("unused malformed synthetic declaration escaped validation")
+
+    it "enforces exact member allowance before key generation":
+        step("Two terminal members require two member debits; one refuses before key construction")
+        var exact = SourceUnionLimitsV1()
+        exact.max_members = 2
+        val allowed = union_types_map(exact)
+        expect(union_types_entry(allowed, union_types_pair()).members.len()).to_equal(2)
+        var short = exact
+        short.max_members = 1
+        val refused = union_types_map(short)
+        match refused.union_entry(union_types_pair()):
+            case Err(error):
+                expect(error.code).to_equal("UNION-E-MEMBERS")
+                expect(error.usage.members).to_equal(1)
+                expect(error.usage.key_bytes).to_equal(0)
+                expect(error.usage.registry_rows).to_equal(0)
+            case Ok(_): fail("one-less member ceiling admitted")
+
+    it "reports exact key and registry ceilings from actual ledger debits":
+        step("Replay the same real map with the measured ceiling and one less")
+        val baseline = union_types_map(SourceUnionLimitsV1())
+        val first = union_types_entry(baseline, union_types_pair())
+        val usage = baseline.ledger.snapshot()
+        var exact = SourceUnionLimitsV1()
+        exact.max_key_bytes = usage.key_bytes
+        exact.max_registry_rows = usage.registry_rows
+        val replay = union_types_map(exact)
+        expect(union_types_entry(replay, union_types_pair()).keys).to_equal(first.keys)
+        var short = exact
+        short.max_key_bytes = usage.key_bytes - 1
+        match union_types_map(short).union_entry(union_types_pair()):
+            case Err(error): expect(error.code).to_equal("UNION-E-KEY")
+            case Ok(_): fail("one-less key ceiling admitted")
+        short = exact
+        short.max_registry_rows = usage.registry_rows - 1
+        match union_types_map(short).union_entry(union_types_pair()):
+            case Err(error): expect(error.code).to_equal("UNION-E-REGISTRY")
+            case Ok(_): fail("one-less registry ceiling admitted")
+
+    it "requires exact zero arity when looking up an already tagged union":
+        step("Reject changed generic arguments on a real registered enum identity")
+        val mapper = union_types_map(SourceUnionLimitsV1())
+        val entry = union_types_entry(mapper, union_types_pair())
+        val good = union_types_type(HirTypeKind.Named(entry.enum_symbol, []))
+        expect(union_types_entry(mapper, good).enum_symbol.id).to_equal(entry.enum_symbol.id)
+        val bad = union_types_type(HirTypeKind.Named(entry.enum_symbol, [union_types_type(HirTypeKind.Bool)]))
+        match mapper.union_entry(bad):
+            case Err(error): expect(error.code).to_equal("UNION-E-TYPE")
+            case Ok(_): fail("nonempty arguments aliased an already-tagged union")
+
+    it "binds every scanned declaration symbol to its actual registry dictionary key":
+        step("A valid preexisting union is accepted; changing only its declaration symbol refuses")
+        val original = union_types_map(SourceUnionLimitsV1())
+        val entry = union_types_entry(original, union_types_pair())
+        val valid = union_types_map(SourceUnionLimitsV1())
+        valid.module = original.module
+        expect(union_types_entry(valid, union_types_pair()).enum_symbol.id).to_equal(entry.enum_symbol.id)
+        val checker = union_types_map(SourceUnionLimitsV1())
+        checker.module = original.module
+        var declaration = checker.module.enums[entry.enum_symbol]
+        declaration.symbol = SymbolId.new(entry.enum_symbol.id + 1)
+        checker.module.enums[entry.enum_symbol] = declaration
+        val before = checker.module.enums.len()
+        val other = union_types_type(HirTypeKind.Union([union_types_type(HirTypeKind.Char)]))
+        match checker.union_entry(other):
+            case Err(error):
+                expect(error.code).to_equal("UNION-E-REGISTRY")
+                expect(error.message).to_contain("declaration symbol mismatch")
+            case Ok(_): fail("unused declaration symbol mismatch was ignored")
+        expect(checker.module.enums.len()).to_equal(before)
+
+    it "reuses an admitted exact structure before flattening key generation or sorting":
+        step("Repeated occurrences spend only charged structural comparison and lookup work")
+        val mapper = union_types_map(SourceUnionLimitsV1())
+        val first = union_types_entry(mapper, union_types_pair())
+        val before = mapper.ledger.snapshot()
+        # Fresh value, not a pointer-identity alias: equivalent construction.
+        val repeated = union_types_entry(mapper, union_types_pair())
+        val after = mapper.ledger.snapshot()
+        expect(repeated.enum_symbol.id).to_equal(first.enum_symbol.id)
+        expect(after.members).to_equal(before.members)
+        expect(after.key_bytes).to_equal(before.key_bytes)
+        expect(after.copy_units).to_equal(before.copy_units)
+        expect(after.registry_rows).to_equal(before.registry_rows)
+        expect(after.nodes - before.nodes).to_equal(3)
+        expect(after.work - before.work).to_equal(10)
+        step("Reordered spellings receive first admission then reuse the completed canonical map")
+        val reordered_type = union_types_type(HirTypeKind.Union([first.members[0], first.members[1]]))
+        val reordered = union_types_entry(mapper, reordered_type)
+        val admitted = mapper.ledger.snapshot()
+        expect(reordered.enum_symbol.id).to_equal(first.enum_symbol.id)
+        expect(admitted.members - after.members).to_equal(2)
+        expect(admitted.key_bytes).to_be_greater_than(after.key_bytes)
+        val repeated_order = union_types_entry(mapper, reordered_type)
+        val cached_order = mapper.ledger.snapshot()
+        expect(repeated_order.enum_symbol.id).to_equal(first.enum_symbol.id)
+        expect(cached_order.members).to_equal(admitted.members)
+        expect(cached_order.key_bytes).to_equal(admitted.key_bytes)
+        expect(cached_order.copy_units).to_equal(admitted.copy_units)
+        step("Changed membership must not acquire cached authority")
+        val changed = union_types_type(HirTypeKind.Union([
+            union_types_type(HirTypeKind.Bool), union_types_type(HirTypeKind.Char)]))
+        val fresh = union_types_entry(mapper, changed)
+        expect(fresh.keys).to_equal(["bool", "char"])
+        expect(fresh.enum_symbol.id == first.enum_symbol.id).to_equal(false)
+        expect(mapper.ledger.snapshot().members - cached_order.members).to_equal(2)
+
+    it "reserves a rebuilt function root with exact and one-less copy allowance":
+        step("An empty-parameter function still needs one copied type record")
+        val unit = union_types_type(HirTypeKind.Unit)
+        val unchanged = union_types_type(HirTypeKind.Function([], unit, []))
+        var exact = SourceUnionLimitsV1()
+        exact.max_copy_units = 1
+        val allowed = union_types_map(exact)
+        match allowed.normalize_type(unchanged, unchanged.span):
+            case Ok(mapped): expect(mapped).to_equal(unchanged)
+            case Err(error): fail(error.code)
+        expect(allowed.ledger.snapshot().copy_units).to_equal(1)
+        var short = exact
+        short.max_copy_units = 0
+        val refused = union_types_map(short)
+        match refused.normalize_type(unchanged, unchanged.span):
+            case Err(error):
+                expect(error.code).to_equal("UNION-E-COPY")
+                expect(error.usage.copy_units).to_equal(0)
+            case Ok(_): fail("rebuilt Function root escaped copy reservation")
+        step("A transformed union signature includes the final root reservation")
+        val changed = union_types_type(HirTypeKind.Function([union_types_pair()], union_types_pair(), []))
+        val baseline = union_types_map(SourceUnionLimitsV1())
+        match baseline.normalize_type(changed, changed.span):
+            case Ok(_): ()
+            case Err(error): fail(error.code)
+        val usage = baseline.ledger.snapshot()
+        exact = SourceUnionLimitsV1()
+        exact.max_copy_units = usage.copy_units
+        val transformed = union_types_map(exact)
+        match transformed.normalize_type(changed, changed.span):
+            case Ok(mapped):
+                match mapped.kind:
+                    case Function(params, result, _):
+                        expect(params[0]).to_equal(result)
+                        match result.kind:
+                            case Named(_, args): expect(args.len()).to_equal(0)
+                            case _: fail("union result was not normalized")
+                    case _: fail("function changed carrier kind")
+            case Err(error): fail(error.code)
+        short = exact
+        short.max_copy_units = usage.copy_units - 1
+        val final_root_refused = union_types_map(short)
+        match final_root_refused.normalize_type(changed, changed.span):
+            case Err(error):
+                expect(error.code).to_equal("UNION-E-COPY")
+                expect(error.usage.copy_units).to_equal(usage.copy_units - 1)
+            case Ok(_): fail("final transformed Function root was not charged")

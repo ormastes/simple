@@ -1,0 +1,105 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Enum subjects and payload values recover their declared owner
+
+Phase-3 MIR residue after #3924 (producer8, 2026-10-20): "bare variant 'X' is
+ambiguous", "payload type mismatch at N" and B5b "multiple wildcard arms" all
+came from values whose declared type MIR had but never attached to the local:
+
+- `if val c = opt:` binds `c = opt.?`; the ExistsCheck result kept no type for
+  a class/struct/enum payload, so `match c: case Int(v)` was ambiguous and
+  `E.V(c)` was rejected (engine, method_calls_literals, module_lowering).
+- `match opt ?? E.Zero:` merged value had no type.
+- `match r.kind:` on a narrowed `r: T?` (resolve_strategies).
+- `val it = xs[i]` / `R.V(k, w.field_types[k])`: an untyped val of a declared
+  element read, and a declared container read (hir_children, mono registration).
+- `E.V(s)` with `s: text` / `s: Node` into a `T?` slot (driver CompileResult).
+- `val r = match o: case Some(e): Some(f(e)); case nil: nil` (resolve.spl).
+"""
+
+# @tag: unit, compiler, mir, hir, enum, stage2
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val data_source = "pub struct Node:\n    v: i64\n\npub enum MC:\n    Int(v: i64)\n    Float(f: f64)\n    Zero\n\npub enum TT:\n    Int(bits: i64)\n    Float(bits: i64)\n    Other\n\npub enum Wrap:\n    One(node: Node)\n\npub enum Hold:\n    C(c: MC)\n\npub enum CR:\n    Success(text?)\n    Fail(text)\n\npub enum OS:\n    V(n: Node?)\n\npub enum Row:\n    Field(key: text, value: Node)\n\npub struct Ty:\n    kind: MC\n\npub struct Sym:\n    t: Ty?\n\npub struct Worker:\n    nodes: Dict<text, Node>\n\npub class Lw:\n    n: i64\n    fn mk(x: i64) -> MC?:\n        if x > 0: Some(MC.Int(x)) else: None\n\npub fn mk_free(x: i64) -> MC?:\n    if x > 0: Some(MC.Int(x)) else: None\n\npub fn mk_node(x: i64) -> Node:\n    Node(v: x)\n"
+
+fn lower_consumer_errors(body: text) -> text:
+    val consumer_source = "use lib.data.*\n\n" + body
+    val log = Logger(level: 0)
+    val data_ast = parse_full_frontend(data_source, "lib/data.spl", "lib.data", log)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.data"] = data_ast
+    val sources = [SourceFile(path: "lib/data.spl", content: data_source, module_name: "lib.data")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var data_lowering = hirlowering_for_module("lib.data", surfaces)
+    var consumer_lowering = hirlowering_for_module("app.main", surfaces)
+    val data_hir = data_lowering.lower_module(data_ast)
+    val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var mir_lowering = MirLowering.new(consumer_hir.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["data_hir"] = data_hir
+    prescan_mods["consumer_hir"] = consumer_hir
+    mir_lowering.prescan_module_struct_names(prescan_mods, "data_hir")
+    mir_lowering.prescan_module_struct_names(prescan_mods, "consumer_hir")
+    val _mir = mir_lowering.lower_module(consumer_hir, [data_hir, consumer_hir])
+    var out = ""
+    for e in consumer_lowering.errors:
+        out = out + "hir: " + e.message + "\n"
+    for e in mir_lowering.errors:
+        out = out + "mir: " + e.message + "\n"
+    out
+
+describe "enum subjects recover their declared owner":
+    it "an if-val binder of an Option<enum> owns its bare variants":
+        expect(lower_consumer_errors("fn a(x: i64) -> i64:\n    val f = mk_free(x)\n    if val c = f:\n        match c:\n            case Int(v): return v\n            case _: return 0\n    -1\n")).to_equal("")
+        expect(lower_consumer_errors("fn b(l: Lw, x: i64) -> i64:\n    val f = l.mk(x)\n    if val c = f:\n        match c:\n            case Int(v): return v\n            case _: return 0\n    -1\n")).to_equal("")
+
+    it "a null-coalesced Option<enum> owns its bare variants":
+        expect(lower_consumer_errors("fn a(x: i64) -> i64:\n    val f = mk_free(x)\n    match f ?? MC.Zero:\n        case Int(v): v\n        case _: 0\n")).to_equal("")
+
+    it "a field of a narrowed optional record owns its bare variants":
+        expect(lower_consumer_errors("fn a(s: Sym) -> i64:\n    val ft = s.t\n    if not ft.?:\n        return -1\n    val r = ft\n    match r.kind:\n        case Int(v): v\n        case _: 0\n")).to_equal("")
+
+    it "a genuinely untyped subject is still ambiguous":
+        val errors = lower_consumer_errors("fn a(o) -> i64:\n    match o:\n        case Int(v): v\n        case _: 0\n")
+        expect(errors.contains("bare variant 'Int' is ambiguous")).to_equal(true)
+
+describe "enum payload values recover their declared type":
+    it "an if-val enum binder fills an enum payload slot":
+        expect(lower_consumer_errors("fn a(x: i64) -> Hold:\n    val f = mk_free(x)\n    if val c = f:\n        return Hold.C(c)\n    Hold.C(MC.Zero)\n")).to_equal("")
+
+    it "an untyped val of a declared element read fills a record slot":
+        expect(lower_consumer_errors("fn a(xs: [Node], i: i64) -> Wrap:\n    val it = xs[i]\n    Wrap.One(it)\n")).to_equal("")
+
+    it "a declared dict read through a field chain fills a record slot":
+        expect(lower_consumer_errors("fn a(w: Worker, k: text) -> Row:\n    Row.Field(k, w.nodes[k])\n")).to_equal("")
+
+    it "a present text or record fills a T? slot as its plain-nullable word":
+        expect(lower_consumer_errors("fn a(s: text) -> CR:\n    CR.Success(s)\n")).to_equal("")
+        expect(lower_consumer_errors("fn b(x: i64) -> CR:\n    val s = x.to_text()\n    CR.Success(s)\n")).to_equal("")
+        expect(lower_consumer_errors("fn c(x: i64) -> OS:\n    val n = mk_node(x)\n    OS.V(n)\n")).to_equal("")
+
+    it "a Some-or-None match value fills a T? slot":
+        expect(lower_consumer_errors("fn a(o: Node?) -> OS:\n    val r = match o:\n        case Some(n): Some(mk_node(n.v))\n        case None: None\n        case _: None\n    OS.V(r)\n")).to_equal("")
+
+    it "a Some-or-nil match value in safe code is not adopted as a T? slot":
+        val errors = lower_consumer_errors("fn a(o: Node?) -> OS:\n    val r = match o:\n        case Some(n): Some(mk_node(n.v))\n        case nil: nil\n    OS.V(r)\n")
+        expect(errors.contains("OS.V': payload type mismatch at 0")).to_equal(true)
+
+    it "a wrong record and nil into a non-optional slot are still rejected":
+        val wrong = lower_consumer_errors("fn a(t: Ty) -> Wrap:\n    Wrap.One(t)\n")
+        expect(wrong.contains("Wrap.One': payload type mismatch at 0")).to_equal(true)
+        val nil_slot = lower_consumer_errors("fn b() -> Wrap:\n    Wrap.One(nil)\n")
+        expect(nil_slot.contains("nil into non-optional payload slot (declared 'Node')")).to_equal(true)

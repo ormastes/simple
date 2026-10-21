@@ -8,6 +8,7 @@ use compiler.frontend.parser_types_expr.*
 use compiler.frontend.parser_types_expr.{EnumPatternPayload}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.{HirLowering, HirDeclaredPatternEnumSlots}
+use compiler.hir.hir_lowering._Expressions.source_union_pattern_v1.*
 
 fn declared_pattern_slot_type_is_concrete(type_: HirType) -> bool:
     if type_ == nil:
@@ -508,9 +509,20 @@ impl HirLowering:
         nil
 
     me lower_match_pattern(p: Pattern, subject_type: HirType?) -> HirPattern:
+        # Standalone/nested subject positions own their description. The actual
+        # match loop prepares once and calls the explicit-context method below.
+        var context: SourceUnionPatternContextV1? = nil
+        if source_union_pattern_needs_context_v1(p):
+            context = self.prepare_source_union_pattern_v1(subject_type)
+        self.lower_match_pattern_with_union_v1(p, subject_type, context)
+
+    me lower_match_pattern_with_union_v1(p: Pattern, subject_type: HirType?, context: SourceUnionPatternContextV1?) -> HirPattern:
         # A bare name is a variant only when the subject's enum owns it.
         # Unrelated enums, mutable bindings and unknown names remain bindings.
         match p.kind:
+            case PatternKind.TypeTest(type_name, binder_name):
+                if val narrowed = self.lower_source_union_type_pattern_v1(p, context, type_name, binder_name):
+                    return narrowed
             case PatternKind.Binding(name, mutable):
                 if not mutable:
                     # subject_unknown: HIR has NO static type for the subject
@@ -650,7 +662,7 @@ impl HirLowering:
                 # unify_or_pattern_bindings with "[Native] vs [Host]".
                 var hir_alts: [HirPattern] = []
                 for alt in alternatives:
-                    hir_alts = hir_alts.push(self.lower_match_pattern(alt, subject_type))
+                    hir_alts = hir_alts.push(self.lower_match_pattern_with_union_v1(alt, subject_type, context))
                 return HirPattern(kind: HirPatternKind.Or(self.unify_or_pattern_bindings(hir_alts, p.span)), type_: nil, span: p.span)
             case _: ()
         self.lower_pattern(p)

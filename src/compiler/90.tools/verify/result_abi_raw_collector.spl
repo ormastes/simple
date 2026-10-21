@@ -1,0 +1,115 @@
+# Point-in-time file measurements around a controlled typed Result capture.
+# No process execution, certificate admission, path deletion, or logging.
+use std.io_runtime.{file_hash_sha256_or_empty}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use compiler.common.mir_target_context.{MirTargetContext}
+use compiler.mir_opt.result_abi_observation_capture.{
+    ResultAbiRawCaptureV1, result_abi_builtin_i64_capture_v1}
+
+struct ResultAbiRawPathsV1:
+    source_artifact: text
+    compiler_artifact: text
+    runtime_artifact: text
+    probe_artifact: text
+    registration_source: text
+
+struct ResultAbiRawFileV1:
+    role: text
+    path: text
+    sha256: text
+
+struct ResultAbiRawMeasuredV1:
+    requested_target: MirTargetContext
+    measurements: [ResultAbiRawFileV1]
+    capture: ResultAbiRawCaptureV1
+    authentication: text
+    checker: text
+    loaded_code_binding: text
+    target_execution_binding: text
+    refinement: text
+
+fn result_abi_raw_path_valid_v1(path: text) -> bool:
+    val byte_length = path.len()
+    if byte_length == 0:
+        return false
+    # len counts UTF-8 bytes. byte_at uses the same byte domain; char_code_at
+    # walks scalar ordinals and returns zero beyond the scalar count, which
+    # would falsely reject valid multibyte paths and repeatedly scan prefixes.
+    var index: i64 = 0
+    while index < byte_length:
+        if path.byte_at(index) == 0:
+            return false
+        index = index + 1
+    true
+
+fn result_abi_raw_digest_valid_v1(digest: text) -> bool:
+    sha256_lower_hex_valid(digest)
+
+fn result_abi_measure_paths_v1(
+    paths: ResultAbiRawPathsV1
+) -> Result<[ResultAbiRawFileV1], text>:
+    val ordered_paths = [paths.source_artifact, paths.compiler_artifact,
+        paths.runtime_artifact, paths.probe_artifact, paths.registration_source]
+    val roles = ["source", "compiler", "runtime", "probe", "registration"]
+    # Complete prevalidation before ANY file-provider call, including when the
+    # final path contains NUL and the first path is nonexistent.
+    var index: i64 = 0
+    while index < 5:
+        if not result_abi_raw_path_valid_v1(ordered_paths[index]):
+            return Err("FV2-E-RESULT-RAW-PATH: empty or NUL path for " + roles[index])
+        index = index + 1
+    var measured: [ResultAbiRawFileV1] = []
+    index = 0
+    while index < 5:
+        # Strict provider: no shell fallback. A hash measures bytes at this
+        # instant; it does not pin an FD or authenticate the loaded executable.
+        val digest = file_hash_sha256_or_empty(ordered_paths[index])
+        if not result_abi_raw_digest_valid_v1(digest):
+            return Err("FV2-E-RESULT-RAW-HASH: unavailable or noncanonical digest for " + roles[index])
+        measured.push(ResultAbiRawFileV1(
+            role: roles[index], path: ordered_paths[index], sha256: digest))
+        index = index + 1
+    Ok(measured)
+
+fn result_abi_measurements_compare_v1(
+    before: [ResultAbiRawFileV1], after: [ResultAbiRawFileV1]
+) -> text:
+    val invalid = "FV2-E-RESULT-RAW-MEASUREMENTS: five canonical ordered roles required"
+    if before.len() != 5 or after.len() != 5:
+        return invalid
+    val roles = ["source", "compiler", "runtime", "probe", "registration"]
+    var index: i64 = 0
+    while index < 5:
+        val first = before[index]
+        val last = after[index]
+        if first.role != roles[index] or last.role != roles[index] or
+                not result_abi_raw_path_valid_v1(first.path) or
+                not result_abi_raw_path_valid_v1(last.path) or
+                not result_abi_raw_digest_valid_v1(first.sha256) or
+                not result_abi_raw_digest_valid_v1(last.sha256):
+            return invalid
+        if first.path != last.path or first.sha256 != last.sha256:
+            return "FV2-E-RESULT-RAW-DRIFT: path or bytes changed for " + roles[index]
+        index = index + 1
+    ""
+
+fn result_abi_collect_raw_v1(
+    paths: ResultAbiRawPathsV1, requested_target: MirTargetContext,
+    normal_bits: i64, error_bits: i64
+) -> Result<ResultAbiRawMeasuredV1, text>:
+    val before = result_abi_measure_paths_v1(paths)?
+    val capture = result_abi_builtin_i64_capture_v1(normal_bits, error_bits)?
+    val after = result_abi_measure_paths_v1(paths)?
+    val diagnostic = result_abi_measurements_compare_v1(before, after)
+    if diagnostic != "":
+        return Err(diagnostic)
+    # No proof root, audit digest, checked bool, certificate or accepted field.
+    # These are mutable diagnostic records, never authentication credentials.
+    Ok(ResultAbiRawMeasuredV1(
+        requested_target: requested_target, measurements: before, capture: capture,
+        authentication: "UNAUTHENTICATED", checker: "NOT_CHECKED",
+        loaded_code_binding: "OPEN", target_execution_binding: "OPEN", refinement: "OPEN"))
+
+export ResultAbiRawPathsV1, ResultAbiRawFileV1, ResultAbiRawMeasuredV1
+export result_abi_raw_path_valid_v1, result_abi_raw_digest_valid_v1
+export result_abi_measure_paths_v1, result_abi_measurements_compare_v1, result_abi_collect_raw_v1
