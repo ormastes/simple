@@ -13,7 +13,7 @@ again; success therefore checks the existing prelowered path's contract.
 | Typed raw dictionary extraction | Independently expected text-key and integer/float/text-value MIR types; exact remembered HIR; dictionary/tagged flags and value metadata; direct copy from payload call to result local |
 | Runtime operations | Exactly discriminant, payload and panic calls; no dictionary allocation/clone/reboxing runtime call |
 | Tag and mismatch paths | Ok uses 0, Err uses 1; exactly one mismatch block ends in Abort with the precise direction-specific message; no zero payload assignment |
-| Rejections | Default-bearing Dict and unsupported Optional shapes emit exact fatal unwrap/unwrap_err diagnostics before any runtime call |
+| Rejections | Default-bearing Dict and unsupported Any payloads emit exact fatal unwrap/unwrap_err diagnostics before any runtime call; supported Optional carriers have a separate spec |
 | Existing scalar boundary | No-default scalar mismatch aborts; a scalar default retains a normal merge edge |
 
 Both direction checks use actual MIR instructions and terminators, not source
