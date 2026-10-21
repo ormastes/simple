@@ -60,53 +60,55 @@ fn gzip_header_create(filename: text?, timestamp: i64, extra_flags: i64, os_type
 
 # Parse GZIP header at the start of `data`
 # Returns: (flags, timestamp, extra_flags, os, header_size) or nil
-fn gzip_header_parse(data) -> [i64]?:
+fn gzip_header_parse(data: [u8]?) -> [i64]?:
     gzip_header_parse_at(data, 0)
 
 # Parse the GZIP member header that starts at byte offset `base` (RFC 1952 2.2: a
 # file is a series of members). The last element is the ABSOLUTE offset of the
 # first byte after the header.
-fn gzip_header_parse_at(data, base: i64) -> [i64]?:
-    if data == nil:
-        return nil
+fn gzip_header_parse_at(data: [u8]?, base: i64) -> [i64]?:
+    # @workaround bug=gzip_untyped_reader_byte_array_text_dispatch_2026_10_21
+    val input: [u8] = match data:
+        case Some(bytes): bytes
+        case nil: return nil
 
-    if base < 0 or data.len() < base + 10:
+    if base < 0 or input.len() < base + 10:
         return nil
 
     # Check magic bytes
-    if data[base].to_i64() != GZIP_MAGIC1:
+    if input[base].to_i64() != GZIP_MAGIC1:
         return nil
-    if data[base + 1].to_i64() != GZIP_MAGIC2:
+    if input[base + 1].to_i64() != GZIP_MAGIC2:
         return nil
 
     # Check compression method
-    if data[base + 2].to_i64() != CM_DEFLATE:
+    if input[base + 2].to_i64() != CM_DEFLATE:
         return nil
 
-    val flags = data[base + 3].to_i64()
+    val flags = input[base + 3].to_i64()
     if (flags & 0xE0) != 0:
         return nil
-    val timestamp = data[base + 4].to_i64() | (data[base + 5].to_i64() << 8) | (data[base + 6].to_i64() << 16) | (data[base + 7].to_i64() << 24)
-    val extra_flags = data[base + 8].to_i64()
-    val os = data[base + 9].to_i64()
+    val timestamp = input[base + 4].to_i64() | (input[base + 5].to_i64() << 8) | (input[base + 6].to_i64() << 16) | (input[base + 7].to_i64() << 24)
+    val extra_flags = input[base + 8].to_i64()
+    val os = input[base + 9].to_i64()
 
     var offset = base + 10
 
     # Skip extra field
     if (flags & FLAG_EXTRA) != 0:
-        if offset + 2 > data.len():
+        if offset + 2 > input.len():
             return nil
-        val xlen = data[offset].to_i64() | (data[offset + 1].to_i64() << 8)
+        val xlen = input[offset].to_i64() | (input[offset + 1].to_i64() << 8)
         offset = offset + 2 + xlen
-        if offset > data.len():
+        if offset > input.len():
             return nil
 
     # Skip filename
     if (flags & FLAG_NAME) != 0:
         loop:
-            if offset >= data.len():
+            if offset >= input.len():
                 return nil
-            if data[offset].to_i64() == 0:
+            if input[offset].to_i64() == 0:
                 offset = offset + 1
                 break
             offset = offset + 1
@@ -114,24 +116,24 @@ fn gzip_header_parse_at(data, base: i64) -> [i64]?:
     # Skip comment
     if (flags & FLAG_COMMENT) != 0:
         loop:
-            if offset >= data.len():
+            if offset >= input.len():
                 return nil
-            if data[offset].to_i64() == 0:
+            if input[offset].to_i64() == 0:
                 offset = offset + 1
                 break
             offset = offset + 1
 
     # Header CRC16: the low 16 bits of the CRC-32 of every header byte before it
     if (flags & FLAG_HCRC) != 0:
-        if offset + 2 > data.len():
+        if offset + 2 > input.len():
             return nil
         var header_bytes: [u8] = []
         var i = base
         while i < offset:
-            header_bytes.push(data[i])
+            header_bytes.push(input[i])
             i = i + 1
         val calculated_hcrc = crc32_calculate(header_bytes) & 0xFFFF
-        val stored_hcrc = data[offset].to_i64() | (data[offset + 1].to_i64() << 8)
+        val stored_hcrc = input[offset].to_i64() | (input[offset + 1].to_i64() << 8)
         if calculated_hcrc != stored_hcrc:
             return nil
         offset = offset + 2
@@ -139,12 +141,13 @@ fn gzip_header_parse_at(data, base: i64) -> [i64]?:
     return [flags, timestamp, extra_flags, os, offset]
 
 # Get header size from parsed header info
-fn gzip_header_size(header_info) -> i64:
-    if header_info == nil:
+fn gzip_header_size(header_info: [i64]?) -> i64:
+    val parsed: [i64] = match header_info:
+        case Some(info): info
+        case nil: return 0
+    if parsed.len() < 5:
         return 0
-    if header_info.len() < 5:
-        return 0
-    return header_info[4].to_i64()
+    return parsed[4].to_i64()
 
 # =============================================================================
 # GZIP FOOTER
@@ -171,35 +174,38 @@ fn gzip_footer_create(crc32: i64, size: i64) -> [u8]:
 
 # Parse GZIP footer
 # Returns: (crc32, size) or nil
-fn gzip_footer_parse(data, offset) -> [i64]?:
-    if data == nil:
-        return nil
+fn gzip_footer_parse(data: [u8]?, offset: i64) -> [i64]?:
+    val input: [u8] = match data:
+        case Some(bytes): bytes
+        case nil: return nil
 
     if offset < 0:
         return nil
 
-    if offset + 8 > data.len():
+    if offset + 8 > input.len():
         return nil
 
-    val crc = data[offset].to_i64() | (data[offset + 1].to_i64() << 8) | (data[offset + 2].to_i64() << 16) | (data[offset + 3].to_i64() << 24)
-    val size = data[offset + 4].to_i64() | (data[offset + 5].to_i64() << 8) | (data[offset + 6].to_i64() << 16) | (data[offset + 7].to_i64() << 24)
+    val crc = input[offset].to_i64() | (input[offset + 1].to_i64() << 8) | (input[offset + 2].to_i64() << 16) | (input[offset + 3].to_i64() << 24)
+    val size = input[offset + 4].to_i64() | (input[offset + 5].to_i64() << 8) | (input[offset + 6].to_i64() << 16) | (input[offset + 7].to_i64() << 24)
 
     return [crc, size]
 
 # Validate GZIP footer
-fn gzip_footer_validate(footer_info, data, expected_size) -> bool:
-    if footer_info == nil:
+fn gzip_footer_validate(footer_info: [i64]?, data: [u8]?, expected_size: i64) -> bool:
+    val parsed: [i64] = match footer_info:
+        case Some(info): info
+        case nil: return false
+    if parsed.len() < 2:
         return false
-    if footer_info.len() < 2:
-        return false
-    if data == nil:
-        return false
+    val input: [u8] = match data:
+        case Some(bytes): bytes
+        case nil: return false
 
-    val crc = footer_info[0]
-    val size = footer_info[1]
+    val crc = parsed[0]
+    val size = parsed[1]
 
     # Verify CRC32
-    val calculated_crc = crc32_calculate(data)
+    val calculated_crc = crc32_calculate(input)
     if calculated_crc != crc:
         return false
 
