@@ -16543,15 +16543,17 @@ static SplArray* rt_shell_capture(int64_t cmd_value) {
     if (!args) return NULL;
 #if defined(_WIN32)
     const char* executable = "cmd.exe";
-    rt_array_push(args, rt_string_new((const uint8_t*)"/C", 2));
+    int64_t flag_value = rt_string_new((const uint8_t*)"/C", 2);
 #else
     const char* executable = "/bin/sh";
-    rt_array_push(args, rt_string_new((const uint8_t*)"-c", 2));
+    int64_t flag_value = rt_string_new((const uint8_t*)"-c", 2);
 #endif
+    rt_array_push(args, flag_value);
     rt_array_push(args, cmd_value);
     SplArray* captured = (SplArray*)(uintptr_t)rt_process_run_timeout(
         executable, (uint64_t)strlen(executable), args, 0);
     rt_array_free(args);
+    rt_string_free(flag_value);
     return captured;
 }
 

@@ -642,6 +642,14 @@ fn collect_defined_runtime_symbols(
     }
 
     let native_all_provider = env::var_os("CARGO_FEATURE_NATIVE_ALL_PROVIDER").is_some();
+    if native_all_provider {
+        // These real Rust exports are cfg-disabled in aggregate builds. The
+        // core-C supplement owns them outside this crate, so retaining their
+        // addresses in the runtime cdylib would create unresolved relocations.
+        for symbol in ["rt_shell_exec", "rt_shell_exec_tuple", "rt_shell_exit_code"] {
+            exported.remove(symbol);
+        }
+    }
     collect_c_runtime_exports(c_root, target_os, native_all_provider, &mut exported);
     exported
 }
