@@ -58,6 +58,9 @@ typedef SSIZE_T ssize_t;
 #endif
 #include <sys/types.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
+#include <sys/wait.h>
+#endif
 #if defined(__linux__)
 #include <sys/auxv.h>
 #endif
@@ -16524,54 +16527,89 @@ int64_t rt_xxh3_128_text(int64_t data_value) {
     return rt_string_new((const uint8_t*)hex, 32u);
 }
 
-/* Run `cmd` through the shell and return captured stdout as a runtime string
- * (stderr passes through, exit status is discarded -- interpreter contract).
- * `cmd` arrives as a tagged runtime value: rt_shell_exec is in no codegen
- * text-ABI table, so the call site passes the value, not (ptr,len). Returns
- * nil when the shell cannot be spawned. */
-int64_t rt_shell_exec(int64_t cmd_value) {
+/* Legacy shell ABI: the scalar call records per-thread status; atomic tuple
+ * capture deliberately leaves that slot alone. Reuse the real process owner
+ * with no deadline/output cap, not the lossy rt_process_run_array fallback. */
+#if defined(_MSC_VER)
+static __declspec(thread) int64_t rt_shell_last_status = 0;
+#else
+static _Thread_local int64_t rt_shell_last_status = 0;
+#endif
+
+static SplArray* rt_shell_capture(int64_t cmd_value) {
     RtCoreString* cmd = rt_core_as_string(cmd_value);
-    if (!cmd) return rt_core_nil();
+    if (!cmd || memchr(cmd->data, '\0', (size_t)cmd->len)) return NULL;
+    SplArray* args = rt_array_new(2);
+    if (!args) return NULL;
+#if defined(_WIN32)
+    const char* executable = "cmd.exe";
+    rt_array_push(args, rt_string_new((const uint8_t*)"/C", 2));
+#else
+    const char* executable = "/bin/sh";
+    rt_array_push(args, rt_string_new((const uint8_t*)"-c", 2));
+#endif
+    rt_array_push(args, cmd_value);
+    SplArray* captured = (SplArray*)(uintptr_t)rt_process_run_timeout(
+        executable, (uint64_t)strlen(executable), args, 0);
+    rt_array_free(args);
+    return captured;
+}
+
+int64_t rt_shell_exit_code(void) {
+    return rt_shell_last_status;
+}
+
+int64_t rt_shell_exec(int64_t cmd_value) {
+    /* Preserve scalar popen behavior: stdout capture, inherited stderr/stdin,
+     * nil on spawn/allocation failure. Only exit-status recording is new. */
+    rt_shell_last_status = -1;
+    RtCoreString* cmd = rt_core_as_string(cmd_value);
+    if (!cmd || memchr(cmd->data, '\0', (size_t)cmd->len)) return rt_core_nil();
     char* command = (char*)malloc((size_t)cmd->len + 1u);
     if (!command) return rt_core_nil();
     memcpy(command, cmd->data, (size_t)cmd->len);
     command[cmd->len] = '\0';
-#if defined(_WIN32)
-    FILE* pipe = _popen(command, "r");
-#else
     FILE* pipe = popen(command, "r");
-#endif
     free(command);
     if (!pipe) return rt_core_nil();
     size_t cap = 4096, len = 0;
     uint8_t* buf = (uint8_t*)malloc(cap);
-    if (!buf) {
-#if defined(_WIN32)
-        _pclose(pipe);
-#else
-        pclose(pipe);
-#endif
-        return rt_core_nil();
-    }
+    if (!buf) { pclose(pipe); return rt_core_nil(); }
     size_t got;
     while ((got = fread(buf + len, 1, cap - len, pipe)) > 0) {
         len += got;
         if (len == cap) {
+            if (cap > SIZE_MAX / 2) { free(buf); buf = NULL; break; }
             uint8_t* grown = (uint8_t*)realloc(buf, cap * 2);
             if (!grown) { free(buf); buf = NULL; break; }
             buf = grown;
             cap *= 2;
         }
     }
-#if defined(_WIN32)
-    _pclose(pipe);
-#else
-    pclose(pipe);
-#endif
+    int status = pclose(pipe);
     if (!buf) return rt_core_nil();
+#if defined(_WIN32)
+    rt_shell_last_status = status;
+#else
+    rt_shell_last_status = status >= 0 && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+#endif
     int64_t result = rt_string_new(buf, (uint64_t)len);
     free(buf);
     return result;
+}
+
+int64_t rt_shell_exec_tuple(int64_t cmd_value) {
+    SplArray* result = rt_shell_capture(cmd_value);
+    int64_t tuple = rt_tuple_new(3);
+    if (result) {
+        for (int64_t i = 0; i < 3; ++i) rt_tuple_set(tuple, i, rt_array_get(result, i));
+        rt_array_free(result);
+    } else {
+        rt_tuple_set(tuple, 0, rt_string_new(NULL, 0));
+        rt_tuple_set(tuple, 1, rt_string_new(NULL, 0));
+        rt_tuple_set(tuple, 2, rt_value_int(-1));
+    }
+    return tuple;
 }
 
 /* ================================================================
