@@ -88,3 +88,12 @@ The only aggregate symbol-row delta is the configured-client probe's extra
 classification are unchanged. Thus neither threshold excess was introduced by
 the HTTP repair. This does not waive the failing repository-wide gate; no
 threshold or governed manifest was relaxed.
+
+The added probe's argv annotation was subsequently given its actual native
+contract: a fresh runtime-layout text array, with nil denoting allocation
+failure. A focused inventory containing only that probe exited 0 and classified
+`sys_get_args` as `unsafe_tag=tagged`, `contract=documented`, and
+`state=unsafe_contract_declared`. This resolves the new declaration's missing
+contract without changing its ABI or relaxing thresholds. The paired full
+inventories above remain the preserved pre-annotation comparison; no repeated
+whole-tree inventory was used to claim an updated full-tree PASS.
