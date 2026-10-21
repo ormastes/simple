@@ -107,15 +107,19 @@ fn gzip_decompress(data: [u8]) -> [u8]?:
     var result: [u8] = []
     var pos = 0
     while pos < data.len():
-        val header_info = gzip_header_parse_at(data, pos)
-        if header_info == nil:
-            return nil
-        val body = inflate_member(data, gzip_header_size(header_info))
-        if body == nil:
-            return nil
+        # @workaround bug=gzip_optional_collection_payload_provenance_2026_10_21
+        # Extract declared payloads explicitly on older native producers.
+        val header_info: [i64] = match gzip_header_parse_at(data, pos):
+            case Some(info): info
+            case nil: return nil
+        val body: [Any] = match inflate_member(data, gzip_header_size(header_info)):
+            case Some(info): info
+            case nil: return nil
         val member: [u8] = body[0]
-        # gzip_footer_validate also rejects a missing (truncated) trailer.
-        val footer_info = gzip_footer_parse(data, body[1])
+        # A missing (truncated) trailer follows the same nil failure path.
+        val footer_info: [i64] = match gzip_footer_parse(data, body[1]):
+            case Some(info): info
+            case nil: return nil
         if not gzip_footer_validate(footer_info, member, member.len()):
             return nil
         for b in member:
@@ -154,15 +158,15 @@ fn gzip_validate(data):
 fn gzip_get_metadata(data):
     if data == nil:
         return nil
-    val header_info = gzip_header_parse(data)
-    if header_info == nil:
-        return nil
-    val body = inflate_member(data, gzip_header_size(header_info))
-    if body == nil:
-        return nil
-    val footer_info = gzip_footer_parse(data, body[1])
-    if footer_info == nil:
-        return nil
+    val header_info: [i64] = match gzip_header_parse(data):
+        case Some(info): info
+        case nil: return nil
+    val body: [Any] = match inflate_member(data, gzip_header_size(header_info)):
+        case Some(info): info
+        case nil: return nil
+    val footer_info: [i64] = match gzip_footer_parse(data, body[1]):
+        case Some(info): info
+        case nil: return nil
     return [header_info[1], header_info[3], header_info[2], footer_info[0], footer_info[1]]
 
 # Check if data is already GZIP compressed
@@ -179,13 +183,13 @@ fn gzip_is_compressed(data):
 fn gzip_extract_payload(data):
     if data == nil:
         return nil
-    val header_info = gzip_header_parse(data)
-    if header_info == nil:
-        return nil
+    val header_info: [i64] = match gzip_header_parse(data):
+        case Some(info): info
+        case nil: return nil
     val header_size = gzip_header_size(header_info)
-    val body = inflate_member(data, header_size)
-    if body == nil:
-        return nil
+    val body: [Any] = match inflate_member(data, header_size):
+        case Some(info): info
+        case nil: return nil
     var payload: [u8] = []
     var i = header_size
     while i < body[1]:
