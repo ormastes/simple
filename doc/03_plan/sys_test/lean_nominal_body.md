@@ -41,3 +41,9 @@ Cycle2 NB09-01 adds eight actual API scenarios: instruction-free Struct/Enum sel
 ## NB-10 diamond acceptance
 
 The mirrored `lean_nominal_diamond_flow_spec.spl` and `compiler_lean_nominal_diamond_flow_spec.spl` use real typed MIR and the existing direct translator plus full/generated module APIs. Cover Struct/Enum values, exact zero/single/multiple transport, retained ordering and dominating values, block reordering, move/definition joins, condition/arm/suffix failures and malformed graphs. All40 new scenarios are UNRUN/source-predicted RED only. Existing linear/terminal fixtures remain negative where the shared path lacks a definition, redefines a local, or leaves a disconnected block; only their now-more-specific expected diagnostics change. No unrelated external builder is used as a vacuous atomicity oracle: public module failure must return Err with no published source value.
+
+## CV-01 composite value acceptance
+
+The mirrored `lean_composite_values_spec.spl` and `compiler_lean_composite_values_spec.spl` suites exercise actual typed MIR through direct translation and full/generated backend exports. Cover exact empty/nonempty/nested fixed arrays and tuples, nominal local elements, every tuple projection position, operation/retained-type routing, copy/move and join use, malformed lengths/types/constants, depth/node boundaries including aggregate arm budgets, legacy call-only compatibility and mixed-operation refusal. Existing explicit unsupported pointer/heap and nominal constant forms remain negative controls.
+
+Tests-first Array snapshots precede production changes. RED is source-predicted only; no compiler, Simple test, Lean or proof run occurred. Source review and emitted text assertions are not native execution/alias/performance acceptance. No existing fixture or diagnostic oracle is weakened for this increment.
