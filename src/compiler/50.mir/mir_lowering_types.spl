@@ -1,3 +1,5 @@
+use compiler.hir.hir_definitions.{HirParam}
+use compiler.mir.verification_call_manifest_finalizer.{ResolvedDirectCallCaptureV1}
 use compiler.mir._MirLoweringExpr.optional_record_owner.*
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
 use compiler.mir.nominal_owner_diagnostics.{mir_nominal_profile_take_receipt}
@@ -732,6 +734,19 @@ struct MirLowering:
     provider_layout_struct_keys: Dict<i64, [SymbolId]> = {}
     provider_layout_class_keys: Dict<i64, [SymbolId]> = {}
 
+    # C1 opt-in source producer. Fresh owner, never a process-global registry.
+    verification_capture_enabled: bool = false
+    verification_call_declarations: Dict<i64, MirSignature> = {}
+    verification_call_defaults: Dict<i64, [HirParam]> = {}
+    # Active lexical frames exist only while lowering retained defaults. Slots
+    # are cleared on exit and reused; the explicit depth limit is 128.
+    verification_default_frames: [Dict<i64, LocalId>] = []
+    verification_default_symbols: [i64] = []
+    verification_default_indices: [i64] = []
+    verification_default_depth: i64 = 0
+    verification_call_captures: [ResolvedDirectCallCaptureV1] = []
+    verification_capture_error: text = ""
+
 impl MirLowering:
     fn local_symbol_slot(symbol_id: i64) -> i64:
         if symbol_id < 0:
@@ -799,6 +814,16 @@ impl MirLowering:
         -1
 
     me bind_local(symbol_id: i64, local: LocalId):
+        # A default parameter is a fresh invocation binding, not the caller's
+        # own parameter even when a recursive call uses the same source ID.
+        var default_frame = self.verification_default_depth - 1
+        while default_frame >= 0:
+            if self.verification_default_frames[default_frame].contains(symbol_id):
+                var bindings = self.verification_default_frames[default_frame]
+                bindings[symbol_id] = local
+                self.verification_default_frames[default_frame] = bindings
+                return
+            default_frame = default_frame - 1
         if symbol_id < 0 or local.id < 0:
             return
         if mir_nominal_profile_take_receipt():
@@ -828,6 +853,11 @@ impl MirLowering:
         self.local_symbol_index_slots[bucket] = new_slot
 
     fn find_local(symbol_id: i64) -> LocalId:
+        var default_frame = self.verification_default_depth - 1
+        while default_frame >= 0:
+            if self.verification_default_frames[default_frame].contains(symbol_id):
+                return self.verification_default_frames[default_frame][symbol_id]
+            default_frame = default_frame - 1
         val slot = self.local_symbol_slot(symbol_id)
         if slot >= 0:
             return self.local_symbol_values[slot]

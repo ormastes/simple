@@ -31,3 +31,9 @@ Existing successful zero/one/multiargument exports protect against always-refuse
 behavior. The completeness counter increments only after row validation, with no
 Dict.len dependency, keys allocation or extra traversal. This additional scenario
 brings the body total to 41; all remain UNRUN.
+
+NB-08 adds 32 authored UNRUN scenarios in `lean_nominal_linear_flow_spec.spl` and `compiler_lean_nominal_linear_flow_spec.spl` (16 each), using the real full/generated APIs and exact direct emitted body. The three prior CFG refusal assertions now name cycle, missing-entry and disconnected-block errors. Existing 41 body scenarios remain; none was executed or relabeled PASS. See the two matching linear-flow manuals for the new scenario mapping. The full nominal body inventory is now 73 authored scenarios, not 73 executed successes.
+
+NB-09 adds 40 authored UNRUN terminal-branch scenarios across the two new owner-specific specs (20 each). The previously prepared 73 body scenarios remain; their linear-flow conditional refusal is narrowed to the actual shared-successor graph, and its diagnostic wording names the current supported terminators. No test execution is claimed; the inventory becomes 113 authored body scenarios. Both-arm moves, condition/prefix consumption, sibling-local isolation, either-arm return errors and graph refusals use actual public export APIs.
+
+Cycle2 NB09-01 adds eight actual API scenarios: instruction-free Struct/Enum selection, nominal Copy/Move, unresolved/kind-mismatched nominal refusal and scalar/Result identity controls, mirrored across both backend owners. All remain UNRUN; baseline failure is source-predicted only.

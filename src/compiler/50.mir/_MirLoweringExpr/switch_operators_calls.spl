@@ -1,3 +1,4 @@
+use compiler.mir._MirLowering.verification_calls_v1.*
 use compiler.mir._MirLowering.declaration_enum_metadata_v1.*
 use compiler.mir._MirLoweringExpr.optional_record_owner.*
 use compiler.mir._MirLowering.declaration_providers_v1.*
@@ -1271,6 +1272,11 @@ impl MirLowering:
         declared default the arg list is returned untouched, so a genuinely
         under-supplied call still fails the way it did before rather than being
         silently completed with a wrong value."""
+        # The verified source path cannot consult process-global name rows,
+        # including method routes that reach this helper before final emit.
+        if self.verification_capture_enabled:
+            self.verification_call_error_v1("FV2-E-CALL-SOURCE-BOUNDARY: unscoped default-argument route in verified source lowering")
+            return args_in
         val callee_name = self.direct_call_extern_name(func)
         if callee_name == "":
             return args_in
@@ -1335,16 +1341,26 @@ impl MirLowering:
                 val owner = self.checked_array_record_layout(element_shape)
                 if owner != "": self.array_element_struct_syms[local.id] = owner
 
-    me emit_resolved_direct_call(func: MirOperand, args_in_raw: [MirOperand], return_type: MirType) -> LocalId:
-        val args_in = self.pad_trailing_default_args(func, args_in_raw)
+    me emit_resolved_direct_call(func: MirOperand, args_in_raw: [MirOperand], return_type: MirType, resolved_symbol: SymbolId? = nil) -> LocalId:
+        val args_in = if self.verification_capture_enabled:
+            self.verification_pad_default_args_v1(resolved_symbol, args_in_raw)
+        else:
+            self.pad_trailing_default_args(func, args_in_raw)
         val boxed_args = self.box_text_abi_args(func, args_in)
         val args = self.expand_text_abi_args(func, boxed_args)
         val effective_return_type = self.repair_direct_struct_return_type(func, return_type)
-        val effective_func = self.direct_call_operand_with_return_type(func, effective_return_type)
+        val legacy_func = self.direct_call_operand_with_return_type(func, effective_return_type)
+        val effective_func = if self.verification_capture_enabled:
+            self.verification_call_operand_v1(legacy_func, resolved_symbol, args.len())
+        else:
+            legacy_func
         var b = self.builder
         if effective_return_type.kind != MirTypeKind.Unit:
             val dest = b.new_temp(effective_return_type)
-            b.emit(MirInst(kind: MirInstKind.Call(dest, effective_func, args), span: nil))
+            if self.verification_capture_enabled:
+                self.verification_capture_site_v1(resolved_symbol)
+            b.emit(MirInst(kind: MirInstKind.Call(dest, effective_func, args),
+                span: if self.verification_capture_enabled: b.current_span else: nil))
             self.builder = b
             self.remember_optional_record_owner(dest, self.direct_call_extern_name(func))
             match effective_return_type.kind:
@@ -1377,7 +1393,10 @@ impl MirLowering:
                             self.struct_value_syms[dest.id] = struct_sym.name
                 case _: ()
             return dest
-        b.emit(MirInst(kind: MirInstKind.Call(None, effective_func, args), span: nil))
+        if self.verification_capture_enabled:
+            self.verification_capture_site_v1(resolved_symbol)
+        b.emit(MirInst(kind: MirInstKind.Call(None, effective_func, args),
+            span: if self.verification_capture_enabled: b.current_span else: nil))
         val temp = b.new_temp(MirType.unit())
         self.builder = b
         temp
@@ -7908,7 +7927,7 @@ impl MirLowering:
                 ))
             else:
                 self.symbol_to_operand(direct_symbol)
-            val result = self.emit_resolved_direct_call(func_operand, arg_operands, return_type)
+            val result = self.emit_resolved_direct_call(func_operand, arg_operands, return_type, direct_symbol)
             if direct_symbol.id < MONO_SYMBOL_BASE or stamped_return == nil:
                 self.remember_call_hir_return(result, direct_symbol)
             if stamped_struct_name != "" and not self.struct_value_syms.contains(result.id):

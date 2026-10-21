@@ -21,9 +21,14 @@ struct LeanTypeDeclaration:
     dependencies: [i64]
     metadata: [text]
 
+struct LeanTypeDeclarationGroup:
+    declarations: [LeanTypeDeclaration]
+    recursive: bool
+
 struct LeanTypeExportPlan:
     context: LeanTypeContext
     declarations: [LeanTypeDeclaration]
+    groups: [LeanTypeDeclarationGroup]
 
 fn lean_type_error(message: text) -> CompileError:
     compileerror_backend_error(BackendKind.Lean, "lean-type-export: " + message)
@@ -172,8 +177,221 @@ fn lean_plan_one_type(definition: MirTypeDef, context: LeanTypeContext) -> Resul
         name: "__MirTypes." + lean_type_quote_name(definition.name), is_enum: is_enum,
         fields: fields, variants: variants, dependencies: dependencies, metadata: metadata))
 
+fn lean_recursive_member_check(name: text) -> Result<(), CompileError>:
+    # Lean 4.30 adds nested recursors and automatic SizeOf functions/lemmas.
+    # Reserve their families before any grouped declarations reach the builder.
+    if name == "_sizeOf_inst":
+        return Err(lean_type_error("reserved recursive member `{name}`"))
+    for prefix in ["rec_", "below_", "brecOn_", "_sizeOf_"]:
+        if not name.starts_with(prefix) or name.len() == prefix.len(): continue
+        var digit_end = name.len()
+        if prefix == "_sizeOf_" and name.ends_with("_eq"):
+            digit_end = digit_end - 3
+        if digit_end <= prefix.len(): continue
+        var numeric = true
+        for index in prefix.len()..digit_end:
+            val code = name.char_code_at(index)
+            if code < 48 or code > 57: numeric = false
+        if numeric: return Err(lean_type_error("reserved recursive member `{name}`"))
+    Ok(())
+
+fn lean_recursive_wrapper_check(ty: MirType, members: Dict<i64, bool>, within_fixed_array: bool = false) -> Result<(), CompileError>:
+    match ty.kind:
+        case Struct(symbol) | Enum(symbol):
+            if within_fixed_array and members.has(symbol.id):
+                return Err(lean_type_error("recursive fixed-array occurrence of symbol {symbol.id} requires an admitted dependent Vector representation"))
+        case Array(element, _):
+            lean_recursive_wrapper_check(element, members, true)?
+        case Slice(element):
+            lean_recursive_wrapper_check(element, members, within_fixed_array)?
+        case Tuple(elements):
+            for element in elements: lean_recursive_wrapper_check(element, members, within_fixed_array)?
+        case Result(ok_type, error_type):
+            lean_recursive_wrapper_check(ok_type, members, within_fixed_array)?
+            lean_recursive_wrapper_check(error_type, members, within_fixed_array)?
+        case _:
+            # Every field was already admitted by lean_context_type_to_lean.
+            # That mapper refuses function pointers, references and raw pointers.
+            pass
+    Ok(())
+
+fn lean_recursive_struct_projections(declaration: LeanTypeDeclaration, context: LeanTypeContext) -> [text]:
+    """Retain the existing nominal-body projection API for recursive structs."""
+    var lines: [text] = []
+    val type_name = context.names[declaration.symbol]
+    var arguments: [text] = []
+    for index in 0..declaration.fields.len(): arguments.push("_field{index}")
+    val pattern = type_name + ".mk " + arguments.join(" ")
+    for index in 0..declaration.fields.len():
+        val (field_name, field_type) = declaration.fields[index]
+        lines.push("def {declaration.name}.{field_name} (_value : {type_name}) : {field_type} :=")
+        lines.push("  match _value with")
+        lines.push("  | {pattern} => _field{index}")
+    lines
+
+# Integer min-heap: plan indexes are already sorted by qualified source name.
+# Kept owner-local; no module cache or external collection policy is introduced.
+class LeanTypeReadyQueue:
+    items: [i64]
+
+    me push(value: i64):
+        self.items.push(value)
+        var index = self.items.len() - 1
+        while index > 0:
+            val parent = (index - 1) / 2
+            if self.items[parent] <= value: break
+            self.items[index] = self.items[parent]
+            index = parent
+        self.items[index] = value
+
+    me pop() -> i64:
+        val result = self.items[0]
+        val last = self.items[self.items.len() - 1]
+        val _ = self.items.pop()
+        if self.items.len() == 0: return result
+        var index = 0
+        while index * 2 + 1 < self.items.len():
+            var child = index * 2 + 1
+            if child + 1 < self.items.len() and self.items[child + 1] < self.items[child]:
+                child = child + 1
+            if last <= self.items[child]: break
+            self.items[index] = self.items[child]
+            index = child
+        self.items[index] = last
+        result
+
+fn lean_group_type_declarations(plans: [LeanTypeDeclaration], context: LeanTypeContext) -> Result<[LeanTypeDeclarationGroup], CompileError>:
+    # Flat linked adjacency avoids copying a growing neighbor array for every
+    # insertion. Both graph traversals use explicit stacks, never call recursion.
+    var by_symbol: Dict<i64, i64> = {}
+    var heads: [i64] = []
+    var reverse_heads: [i64] = []
+    var visited: [bool] = []
+    var component: [i64] = []
+    for index in 0..plans.len():
+        by_symbol[plans[index].symbol] = index
+        heads.push(-1)
+        reverse_heads.push(-1)
+        visited.push(false)
+        component.push(-1)
+    var targets: [i64] = []
+    var next_edges: [i64] = []
+    var reverse_targets: [i64] = []
+    var reverse_next: [i64] = []
+    for index in 0..plans.len():
+        for symbol in plans[index].dependencies:
+            val target = by_symbol[symbol]
+            val edge = targets.len()
+            targets.push(target)
+            next_edges.push(heads[index])
+            heads[index] = edge
+            reverse_targets.push(index)
+            reverse_next.push(reverse_heads[target])
+            reverse_heads[target] = edge
+    var finished: [i64] = []
+    for start in 0..plans.len():
+        if visited[start]: continue
+        var nodes = [start]
+        var cursors = [heads[start]]
+        visited[start] = true
+        while nodes.len() > 0:
+            val top = nodes.len() - 1
+            val edge = cursors[top]
+            if edge < 0:
+                finished.push(nodes[top])
+                val _ = nodes.pop()
+                val _ = cursors.pop()
+            else:
+                cursors[top] = next_edges[edge]
+                val target = targets[edge]
+                if not visited[target]:
+                    visited[target] = true
+                    nodes.push(target)
+                    cursors.push(heads[target])
+    var components: [[i64]] = []
+    var finish_index = finished.len()
+    while finish_index > 0:
+        finish_index = finish_index - 1
+        val start = finished[finish_index]
+        if component[start] >= 0: continue
+        val group_id = components.len()
+        var members: [i64] = []
+        var pending = [start]
+        component[start] = group_id
+        while pending.len() > 0:
+            val current = pending[pending.len() - 1]
+            val _ = pending.pop()
+            members.push(current)
+            var edge = reverse_heads[current]
+            while edge >= 0:
+                val target = reverse_targets[edge]
+                if component[target] < 0:
+                    component[target] = group_id
+                    pending.push(target)
+                edge = reverse_next[edge]
+        members.sort()
+        components.push(members)
+    # Count cross-component edges once and release their users once. Multiple
+    # edges between the same components are counted/decremented symmetrically.
+    var remaining: [i64] = []
+    var user_heads: [i64] = []
+    var users: [i64] = []
+    var user_next: [i64] = []
+    for members in components:
+        remaining.push(0)
+        user_heads.push(-1)
+    for index in 0..plans.len():
+        val user_group = component[index]
+        var edge = heads[index]
+        while edge >= 0:
+            val dependency_group = component[targets[edge]]
+            if user_group != dependency_group:
+                remaining[user_group] = remaining[user_group] + 1
+                val user_edge = users.len()
+                users.push(user_group)
+                user_next.push(user_heads[dependency_group])
+                user_heads[dependency_group] = user_edge
+            edge = next_edges[edge]
+    var ready = LeanTypeReadyQueue(items: [])
+    for group_id in 0..components.len():
+        if remaining[group_id] == 0: ready.push(components[group_id][0])
+    var groups: [LeanTypeDeclarationGroup] = []
+    while ready.items.len() > 0:
+        val first = ready.pop()
+        val group_id = component[first]
+        val indexes = components[group_id]
+        val recursive = indexes.len() > 1 or plans[first].dependencies.contains(plans[first].symbol)
+        var declarations: [LeanTypeDeclaration] = []
+        var member_symbols: Dict<i64, bool> = {}
+        for index in indexes:
+            declarations.push(plans[index])
+            member_symbols[plans[index].symbol] = true
+        if recursive:
+            for declaration in declarations:
+                match context.definitions[declaration.symbol].kind:
+                    case Struct(fields):
+                        for field in fields:
+                            lean_recursive_member_check(field.name)?
+                            lean_recursive_wrapper_check(field.type_, member_symbols)?
+                    case Enum(variants):
+                        for variant in variants:
+                            lean_recursive_member_check(variant.name)?
+                            if val payload = variant.payload: lean_recursive_wrapper_check(payload, member_symbols)?
+                    case Union(_):
+                        return Err(lean_type_error("union declaration has no admitted recursive representation"))
+        groups.push(LeanTypeDeclarationGroup(declarations: declarations, recursive: recursive))
+        var user_edge = user_heads[group_id]
+        while user_edge >= 0:
+            val user_group = users[user_edge]
+            remaining[user_group] = remaining[user_group] - 1
+            if remaining[user_group] == 0: ready.push(components[user_group][0])
+            user_edge = user_next[user_edge]
+    if groups.len() != components.len():
+        return Err(lean_type_error("incomplete recursive declaration component order"))
+    Ok(groups)
+
 fn lean_plan_type_declarations(module: MirModule, namespace: text) -> Result<LeanTypeExportPlan, CompileError>:
-    """Validate the complete table before emission; reject unsupported cycles."""
+    """Validate the complete table and positive recursive groups before emission."""
     if not lean_type_name_valid(namespace):
         return Err(lean_type_error("invalid module namespace `{namespace}`"))
     # Namespace strings are emitted by the existing backend without quotation.
@@ -216,27 +434,11 @@ fn lean_plan_type_declarations(module: MirModule, namespace: text) -> Result<Lea
     var plans: [LeanTypeDeclaration] = []
     for name in ordered_names:
         plans.push(lean_plan_one_type(module.types[SymbolId(id: by_name[name])], context)?)
-    # Deterministic topological selection: choose the first name-sorted ready
-    # declaration. No partial source escapes if an edge is cyclic.
-    var emitted: Dict<i64, bool> = {}
+    val groups = lean_group_type_declarations(plans, context)?
     var ordered: [LeanTypeDeclaration] = []
-    while ordered.len() < plans.len():
-        var selected = -1
-        for index in 0..plans.len():
-            val plan = plans[index]
-            if emitted.has(plan.symbol): continue
-            var ready = true
-            for dependency in plan.dependencies:
-                if not emitted.has(dependency): ready = false
-            if ready:
-                selected = index
-                break
-        if selected < 0:
-            return Err(lean_type_error("recursive nominal declarations require an explicit mutually inductive representation"))
-        val plan = plans[selected]
-        ordered.push(plan)
-        emitted[plan.symbol] = true
-    Ok(LeanTypeExportPlan(context: context, declarations: ordered))
+    for group in groups:
+        for declaration in group.declarations: ordered.push(declaration)
+    Ok(LeanTypeExportPlan(context: context, declarations: ordered, groups: groups))
 
-export LeanTypeContext, LeanTypeDeclaration, LeanTypeExportPlan
-export lean_plan_type_declarations, lean_context_type_to_lean, lean_type_quote_name
+export LeanTypeContext, LeanTypeDeclaration, LeanTypeDeclarationGroup, LeanTypeExportPlan
+export lean_plan_type_declarations, lean_context_type_to_lean, lean_type_quote_name, lean_recursive_struct_projections
