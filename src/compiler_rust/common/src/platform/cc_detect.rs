@@ -179,8 +179,8 @@ pub fn find_archive_tool() -> String {
         // Prefer llvm-ar on macOS — it tolerates malformed Mach-O objects
         // that system ar/libtool/ranlib reject (Cranelift n_strx bug).
         for tool in &[
-            "/opt/homebrew/opt/llvm@18/bin/llvm-ar",
             "/opt/homebrew/opt/llvm/bin/llvm-ar",
+            "/opt/homebrew/opt/llvm@18/bin/llvm-ar",
             "/usr/local/opt/llvm/bin/llvm-ar",
             "llvm-ar",
         ] {
