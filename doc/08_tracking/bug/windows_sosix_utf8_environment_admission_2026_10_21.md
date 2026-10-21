@@ -27,6 +27,14 @@ now rejects a non-Unicode OS path instead of `to_string_lossy` replacement.
 No charset is inferred, unavailable provider is substituted, or global Windows
 platform gate relaxed.
 
+The legacy nullable provider ABI still conflates an unset variable, allocation
+failure, and invalid OS Unicode as NIL. The SOSIX nullable environment facade
+cannot distinguish those outcomes; cwd reports its corresponding NIL as an I/O
+failure. Raw Rust pointer-to-string helpers retain their existing lossy input
+behavior. The checked SOSIX facade strictly validates UTF-8 and embedded NUL
+before calling them; this repair does not claim that every raw legacy ABI input
+is strict or that nullable lookup exposes a complete error taxonomy.
+
 ## Focused native evidence
 
 Private branch `work/phase3-windows-utf8-provider-20261021`, worktree
