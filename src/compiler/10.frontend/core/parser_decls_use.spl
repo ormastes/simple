@@ -37,7 +37,7 @@ use compiler.frontend.core.lexer.{lex_token_start_get}
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.frontend.core.parser_stmts.{parse_block}
 use compiler.frontend.core.parser_stmts.{fixed_array_no_init_default_expr}
-use compiler.core.ast.{expr_int_lit}
+use compiler.core.ast.{expr_int_lit, expr_nil_lit}
 use compiler.core.ast.{decl_use_import, decl_set_lazy, decl_export_names}
 use compiler.core.ast.{decl_get_imports, decl_get_name, module_add_decl}
 use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding}
@@ -437,11 +437,17 @@ fn parse_var_decl() -> i64:
     # synthesizing `= [zero; N]` from the par_fixed_array_* side-channel
     # captured above. Only trigger on an actual declaration-end token so a
     # genuinely malformed `=`-less declaration followed by garbage still
-    # falls through to the ordinary parser_expect(100) error below. All
-    # other type categories keep the historical require-`=` behavior.
+    # falls through to the ordinary parser_expect(100) error below. Named
+    # bindings use the existing local nil-until-assignment meaning, preserving
+    # their annotation for downstream resolution. Other categories require `=`.
     if type_tag != 0 and not annotation_continuation:
         val at_decl_end = par_kind_get() == TOK_NEWLINE or par_kind_get() == TOK_SEMICOLON or par_kind_get() == TOK_DEDENT or par_kind_get() == TOK_EOF
         if at_decl_end:
+            if type_tag >= TYPE_NAMED_BASE:
+                # Eligibility precedes allocation: nil may be expression 0.
+                val named_init = expr_nil_lit(0)
+                val noinit_span = flat_span_new(decl_start, lex_token_start_get(), decl_line, decl_col)
+                return decl_var_binding(name, type_tag, named_init, noinit_span)
             val arr_init = fixed_array_no_init_default_expr(type_tag, fixed_array_elem, fixed_array_size)
             if arr_init != 0:
                 val noinit_span = flat_span_new(decl_start, lex_token_start_get(), decl_line, decl_col)
