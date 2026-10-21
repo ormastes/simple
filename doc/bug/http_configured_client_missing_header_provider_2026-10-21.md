@@ -53,3 +53,38 @@ Windows `rt_http_get`, request, request-v2 and download still explicitly return
 is deferred by the user's narrowed bootstrap-through-Phase3 scope. The Simple
 nine-check configured-client live echo probe remains pending a usable producer
 and real transport. No self-hosted or Phase3 admission is claimed by this fix.
+
+## Canonical MSVC compile and inventory baseline
+
+The changed runtime was also compiled, without linking or executing a Simple
+compiler, by canonical LLVM 23.1.1 `clang-cl` using the sourced
+`scripts/setup/windows-msvc-bootstrap-env.shs` environment (Visual Studio
+14.44.35207 and Windows SDK 10.0.26100). Flags were `/std:c11 /c
+/DSIMPLE_ABI_VERSION=1 /DSIMPLE_ABI_VERSION_DEFERRED=0`. Compilation exited 0,
+producing `build/http-header-boundary/runtime_native-msvc.obj` (484,155 bytes).
+There were 51 compiler warnings; this is compile evidence, not a warning-free
+claim or product admission.
+
+The mandatory source SFFI backlog audit failed its inventory ratchet. To
+attribute that failure, the same deterministic source-only inventory ran on
+two explicit LF-delimited source lists. The baseline restores every modified
+preexisting Simple source from `git show 380200890ff:<path>` in a private
+overlay and excludes the two new Simple sources. All other source bytes are
+shared unchanged with the current tree. The two lists contain 41,568 and
+41,570 files respectively. Source inventory TSVs are retained privately under
+`build/http-header-boundary/baseline/retry-*` and `current-retry-*`.
+
+Both baseline and `57b80b6fbf7` produce the same failing thresholds:
+
+```text
+source_variants=407/399 migration=3612/3546
+symbols=4320 unique(symbol, source_signature)=4863
+signature-identity set delta=0
+```
+
+The only aggregate symbol-row delta is the configured-client probe's extra
+`sys_get_args` declaration: declarations 34 to 35, contract-missing declarations
+30 to 31. Its two distinct signatures, 26 missing unsafe tags, and migration
+classification are unchanged. Thus neither threshold excess was introduced by
+the HTTP repair. This does not waive the failing repository-wide gate; no
+threshold or governed manifest was relaxed.
