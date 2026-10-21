@@ -249,6 +249,7 @@ fn build_default_levels() -> Dict<String, String>:
     levels["raw_rt_access"] = "warn"
     levels["const_ref_default"] = "warn"
     levels["bare_primitive_internal"] = "allow"
+    levels["representation_boundary"] = "warn"
     levels["unwrapped_foreign_resource"] = "allow"
     levels["raw_sffi_call"] = "allow"
     # ===== SILENT-DEFAULT ESCALATION POINT =====
@@ -330,6 +331,7 @@ fn profile_default_levels(profile: LintProfile) -> Dict<String, String>:
             # const_ref_default keeps its existing default level.
             var mc = _strict_robust_levels(levels)
             mc["bare_primitive_internal"] = "warn"
+            mc["representation_boundary"] = "deny"
             mc["unwrapped_foreign_resource"] = "warn"
             return mc
     levels
@@ -517,6 +519,8 @@ struct LintSuppressionIssue:
     column: i64
     message: text
 
+use compiler.common.assurance.representation_context_v1.{RepresentationProjectContextV1, representation_context_missing_v1, representation_context_from_project_v1}
+
 class LintConfig:
     levels: Dict<String, String>
     # Immutable effective defaults for this selected profile. Built once when
@@ -541,6 +545,7 @@ class LintConfig:
     # compiler.common.assurance.mc_exceptions for the grammar.
     mc_exceptions: [McException]
     suppression_issues: [LintSuppressionIssue] = []
+    representation_project: RepresentationProjectContextV1 = representation_context_missing_v1()
 
     # Create a default config (all defaults, no overrides).
 impl LintConfig:
@@ -565,6 +570,7 @@ impl LintConfig:
             return LintConfig.new()
         var config = LintConfig.from_sdn_string(content)
         config.source_path = path
+        config.representation_project = representation_context_from_project_v1(content, path)
         config
 
     # Parse config from an SDN string.
@@ -829,7 +835,8 @@ impl LintConfig:
                    source_path: self.source_path,
                    profile: self.profile, error: self.error,
                    warning_phase: self.warning_phase,
-                   mc_exceptions: self.mc_exceptions)
+                   mc_exceptions: self.mc_exceptions,
+                   representation_project: self.representation_project)
 
 fn resolve_lint_config(base: LintConfig, path: String, content: String) -> LintConfig:
     resolve_lint_config_with_lines(base, path, content.split("\n"))
@@ -841,8 +848,16 @@ fn resolve_lint_config_with_lines(
     config.apply_file_attributes_lines(lines)
 
     val sdn_path = find_project_sdn(path)
+    # Policy inheritance does not prove namespace ownership. Rebind identity
+    # to this source's nearest selected manifest, including explicit absence.
+    if sdn_path == "":
+        config.representation_project = representation_context_missing_v1()
+    elif sdn_path == base.source_path:
+        config.representation_project = base.representation_project
     if sdn_path != "" and sdn_path != base.source_path:
         val file_config = LintConfig.from_sdn_file(sdn_path)
+        config.representation_project = file_config.representation_project
+        config.source_path = sdn_path
         for key in file_config.levels.keys():
             if not config.levels.has(key):
                 config.levels[key] = file_config.levels[key]
@@ -1018,6 +1033,8 @@ fn map_lint_code_to_config_name(code: String) -> String:
         return "const_ref_default"
     if code == "W-MC-VAL-001":
         return "bare_primitive_internal"
+    if code.starts_with("E-MC-REP-"):
+        return "representation_boundary"
     if code == "W-MC-RES-001":
         return "unwrapped_foreign_resource"
     if code == "SFFI009" or code == "SFFI010":

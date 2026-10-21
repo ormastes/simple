@@ -39,8 +39,8 @@ use std.common.crypto.sha256.{sha256_text}
 # v8 uses typed dictionary key order and rejects v7 bucket-order records.
 # v7 rejected v6 records whose integer 3 was serialized as nil (N).
 # The canonical valid-integer grammar and ownership are unchanged.
-val HIR_CODEC_VERSION: text = "spl-hircodec-v8"
-val HIR_CANONICAL_CODEC_VERSION: text = "spl-hircodec-canonical-v4"
+val HIR_CODEC_VERSION: text = "spl-hircodec-v9-a5-refusal"
+val HIR_CANONICAL_CODEC_VERSION: text = "spl-hircodec-canonical-v5-a5-refusal"
 val HIR_CANONICAL_CODEC_RULES_V1: text =
     "nil-before-present;i64-signed;symbol-id-signed;text-unsigned-utf8;" +
     "stable-bottom-up-merge;duplicate-reject;strict-flatpool-text-v1"
@@ -75,6 +75,8 @@ fn hir_canonical_codec_generated_available_v1() -> bool:
 # "" when the module carries a payload the codec refuses (see
 # hir_codec_support.spl); `hir_module_encode_reason` names it.
 fn hir_module_encode(module: HirModule) -> text:
+    if module.representation_declarations.len() > 0:
+        return ""
     var w = HirCodecWriter.create()
     hc_enc_hir_module(w, module)
     if not w.ok:
@@ -104,6 +106,8 @@ fn hir_module_encode_canonical(
     Ok(encoded)
 
 fn hir_module_encode_reason(module: HirModule) -> text:
+    if module.representation_declarations.len() > 0:
+        return "E-MC-REP-004: representation metadata transport is unsupported"
     var w = HirCodecWriter.create()
     hc_enc_hir_module(w, module)
     if w.ok:
@@ -365,6 +369,8 @@ fn hir_module_has_rt_hal(module: HirModule) -> bool:
 # only extraction shape with a proven-clean draw. Output stays byte-identical
 # to the abi_interface original; keep the two in sync.
 fn hir_codec_abi_interface_parts_v1(module: HirModule) -> Result<[text], text>:
+    # ABI signature identity carries no representation exemption. Full typed
+    # body transport remains refused by hir_module_encode, independently.
     var encoder = HirAbiInterfaceEncoderV1.new(module)
     var parts: [text] = [canon_field("module", canon_str(module.name))]
     var exports: [text] = []
@@ -535,6 +541,8 @@ fn hir_module_decode(blob: text) -> HirModule?:
         return nil
     var r = FlatPoolReader.new(blob.substring(nl + 1, blob.len()))
     val module = hc_dec_hir_module(r)
+    if module.representation_declarations.len() > 0:
+        return nil
     if not r.ok:
         return nil
     if r.pos != r.lines.len() - 1 or r.lines[r.pos] != "":
@@ -583,6 +591,9 @@ fn _hir_module_decode_bounded_impl(
         r.reject_malformed("codec_header")
         return Err(_decode_error(r))
     val module = hc_dec_hir_module(r)
+    if module.representation_declarations.len() > 0:
+        r.reject_malformed("E-MC-REP-004: unsupported representation metadata carrier")
+        return Err(_decode_error(r))
     if not r.ok:
         return Err(_decode_error(r))
     # The canonical encoder terminates every line with a newline.  The split

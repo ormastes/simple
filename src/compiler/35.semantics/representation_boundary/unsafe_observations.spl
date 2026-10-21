@@ -1,0 +1,93 @@
+# Missing-review observations come from actual HIR, so a legacy body-cache hit
+# cannot erase them. Parsed annotation authority is validated separately.
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.{HirExprKind, HirFunction}
+use compiler.hir.generated.hir_visitor.{HirWalkNode, walk_hir_block, walk_hir_expr, walk_hir_param}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.diagnostics.diagnostic.{Diagnostic}
+
+struct RepresentationUnsafeObservationV1:
+    owner_name: text
+    owner_span: Span
+    strictness: AssuranceStrictness
+    diagnostics: [Diagnostic]
+    visited_functions: Dict<i64, bool>
+
+fn representation_observe_unsafe_v1(node: HirWalkNode,
+        state: RepresentationUnsafeObservationV1) -> RepresentationUnsafeObservationV1:
+    var out = state
+    match node:
+        case HirWalkNode.Expr(expression):
+            match expression.kind:
+                case HirExprKind.UnsafeBlock(_):
+                    val span = if expression.span.line > 0: expression.span else: out.owner_span
+                    val message = "unsafe region in {out.owner_name} requires an owning representation reason and reviewers"
+                    val diagnostic = if out.strictness == AssuranceStrictness.Critical:
+                        Diagnostic.error(message)
+                    else:
+                        Diagnostic.warning(message)
+                    out.diagnostics.push(diagnostic.with_code("E-MC-REP-001").with_span(span))
+                case _: pass
+        case _: pass
+    out
+
+fn representation_observe_function_v1(function: HirFunction,
+        annotated: Dict<i64, bool>, state: RepresentationUnsafeObservationV1) -> RepresentationUnsafeObservationV1:
+    if annotated.contains_key(function.symbol.id):
+        return state
+    if function.symbol.id >= 0 and state.visited_functions.contains_key(function.symbol.id):
+        return state
+    var out = state
+    if function.symbol.id >= 0:
+        out.visited_functions[function.symbol.id] = true
+    out.owner_name = function.name
+    out.owner_span = function.span
+    out = walk_hir_block<RepresentationUnsafeObservationV1>(function.body, out, representation_observe_unsafe_v1)
+    for parameter in function.params:
+        out = walk_hir_param<RepresentationUnsafeObservationV1>(parameter, out, representation_observe_unsafe_v1)
+    out
+
+pub fn representation_missing_manifest_observations_v1(module: HirModule,
+        strictness: AssuranceStrictness) -> [Diagnostic]:
+    var annotated: Dict<i64, bool> = {}
+    for declaration in module.representation_declarations:
+        if declaration.local_symbol_id >= 0 and (declaration.manifest != nil or
+                declaration.requires_manifest or declaration.region_capabilities.len() > 0):
+            annotated[declaration.local_symbol_id] = true
+    var state = RepresentationUnsafeObservationV1(owner_name: "", owner_span: Span.empty(),
+        strictness: strictness, diagnostics: [], visited_functions: {})
+    # Each owning HIR tree is walked once, including nested expression forms
+    # through the existing exhaustive visitor. No source reparse or I/O.
+    for function in module.functions.values():
+        state = representation_observe_function_v1(function, annotated, state)
+    # Traits retain their methods outside module.functions. Visit default bodies
+    # before signatures; symbol identity prevents duplicate root observations.
+    # Type-level metadata never supplies admission for a method's own symbol.
+    for declaration in module.traits.values():
+        for function in declaration.defaults:
+            state = representation_observe_function_v1(function, annotated, state)
+        for function in declaration.methods:
+            state = representation_observe_function_v1(function, annotated, state)
+    for constant in module.constants.values():
+        if not annotated.contains_key(constant.symbol.id):
+            state.owner_name = constant.name
+            state.owner_span = constant.span
+            state = walk_hir_expr<RepresentationUnsafeObservationV1>(constant.value, state, representation_observe_unsafe_v1)
+    for declaration in module.structs.values():
+        if not annotated.contains_key(declaration.symbol.id):
+            state.owner_name = declaration.name
+            state.owner_span = declaration.span
+            for field in declaration.fields:
+                if field.has_default:
+                    state = walk_hir_expr<RepresentationUnsafeObservationV1>(field.default, state, representation_observe_unsafe_v1)
+    for declaration in module.classes.values():
+        if not annotated.contains_key(declaration.symbol.id):
+            state.owner_name = declaration.name
+            state.owner_span = declaration.span
+            for field in declaration.fields:
+                if field.has_default:
+                    state = walk_hir_expr<RepresentationUnsafeObservationV1>(field.default, state, representation_observe_unsafe_v1)
+    state.diagnostics
+
+export representation_missing_manifest_observations_v1
