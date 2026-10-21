@@ -428,6 +428,15 @@ class LeanNominalBodyEmitter:
                 val type_ = self.local_type(source)?
                 val term = self.operand(MirOperand(kind: MirOperandKind.Move(source)), type_)?
                 self.bind(dest, type_, term)
+            case Drop(local):
+                val type_ = self.local_type(local)?
+                val _type_name = lean_context_type_to_lean(type_, self.context)?
+                if not self.live.has(local.id) or not self.live[local.id]:
+                    return Err(nominal_body_error("drop before definition or after move: {local.id}"))
+                self.live[local.id] = false
+                # Pure semantic values have no destructor effects. Keep the
+                # definition history so a later bind cannot resurrect it.
+                Ok("")
             case BinOp(dest, op, left, right):
                 # Reuse the exact existing operator policy, including its refusals.
                 val operator = translate_binop(op)?
@@ -545,19 +554,11 @@ class LeanNominalBodyEmitter:
                     case _: Err(nominal_body_error("field projection requires an admitted struct or tuple value"))
             case _: Err(nominal_body_error("unsupported instruction in pure nominal body: {instruction.kind}"))
 
-fn translate_mir_nominal_body(function: MirFunction, context: LeanTypeContext) -> Result<text, CompileError>:
-    """Emit typed nominal construction/projection using this module's declarations.
-
-    Bodies with no retained nominal/composite type or operation retain their
-    existing translator. A nominal body must be an acyclic Goto chain or one
-    If with two returning chains, optionally sharing one linear return suffix.
-    Each path is single-assignment with an exact typed return.
-    Disconnected blocks, crossing successors and nested branches are refused.
-    Unsupported operations return an error; no partial source is returned.
-    """
+pub fn lean_nominal_emitter_for_function_v1(function: MirFunction,
+    context: LeanTypeContext
+) -> Result<LeanNominalBodyEmitter, CompileError>:
+    """Create fresh typed definition/liveness maps from an exact signature."""
     val body = MirBody.from_function(function)
-    if not nominal_body_requested(function, body): return translate_mir_body(body)
-    val flow = nominal_flow_plan(body, function.entry_block.id)?
     if not function.signature.params_known or function.signature.is_variadic:
         return Err(nominal_body_error("requires a known nonvariadic signature"))
     var types: Dict<i64, MirType> = {}
@@ -584,7 +585,15 @@ fn translate_mir_nominal_body(function: MirFunction, context: LeanTypeContext) -
     # Count accepted unique argument rows without the native Dict.len fallback.
     if accepted_arg_count != function.signature.params.len():
         return Err(nominal_body_error("missing argument local"))
-    var emitter = LeanNominalBodyEmitter(context: context, types: types, assigned: assigned, live: live)
+    Ok(LeanNominalBodyEmitter(context: context, types: types,
+        assigned: assigned, live: live))
+
+fn translate_mir_nominal_body(function: MirFunction, context: LeanTypeContext) -> Result<text, CompileError>:
+    """Emit typed nominal/composite values in the established bounded flow."""
+    val body = MirBody.from_function(function)
+    if not nominal_body_requested(function, body): return translate_mir_body(body)
+    val flow = nominal_flow_plan(body, function.entry_block.id)?
+    var emitter = lean_nominal_emitter_for_function_v1(function, context)?
     if flow.branch_index < 0:
         return emitter.returning_path(body, flow.prefix)
     var lines = emitter.instruction_lines(body, flow.prefix)?
@@ -608,4 +617,4 @@ fn translate_mir_nominal_body(function: MirFunction, context: LeanTypeContext) -
         case _: return Err(nominal_body_error("invalid planned branch terminator"))
     Ok(lines.join("\n"))
 
-export translate_mir_nominal_body
+export translate_mir_nominal_body, LeanNominalBodyEmitter, lean_nominal_emitter_for_function_v1

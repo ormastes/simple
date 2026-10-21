@@ -139,6 +139,19 @@ struct MirBuilder:
     unwind_payload: LocalId?
     unwind_type_tag: LocalId?
 
+    # EE-01 records real producer call positions only while an opted enum
+    # pattern test/binding is being emitted. Native instructions are unchanged.
+    enum_semantic_recording: bool = false
+    enum_semantic_site_blocks: [BlockId] = []
+    enum_semantic_site_indices: [i64] = []
+    enum_semantic_site_calls: [MirInst] = []
+    enum_semantic_site_nodes: [i64] = []
+    enum_semantic_node: i64 = -1
+    enum_semantic_term_blocks: [BlockId] = []
+    enum_semantic_terms: [MirTerminator] = []
+    enum_semantic_term_nodes: [i64] = []
+    enum_semantic_site_overflow: bool = false
+
 impl MirBuilder:
     static fn new() -> MirBuilder:
         MirBuilder(
@@ -203,6 +216,16 @@ impl MirBuilder:
         self.blocks = []
         self.instructions = []
         self.current_block = BlockId.entry()
+        self.enum_semantic_recording = false
+        self.enum_semantic_site_blocks = []
+        self.enum_semantic_site_indices = []
+        self.enum_semantic_site_calls = []
+        self.enum_semantic_site_nodes = []
+        self.enum_semantic_node = -1
+        self.enum_semantic_term_blocks = []
+        self.enum_semantic_terms = []
+        self.enum_semantic_term_nodes = []
+        self.enum_semantic_site_overflow = false
         # DS5: seed the per-function default span from the function's own
         # declaration span. lower_stmt/lower_expr push a more specific span
         # while lowering a given node and restore this on the way back out,
@@ -464,6 +487,14 @@ impl MirBuilder:
 
     me emit(inst: MirInst):
         """Emit an instruction to current block."""
+        if self.enum_semantic_recording:
+            if self.enum_semantic_site_calls.len() + self.enum_semantic_terms.len() >= 65536:
+                self.enum_semantic_site_overflow = true
+            else:
+                self.enum_semantic_site_blocks.push(self.current_block)
+                self.enum_semantic_site_indices.push(self.instructions.len())
+                self.enum_semantic_site_calls.push(inst)
+                self.enum_semantic_site_nodes.push(self.enum_semantic_node)
         self.instructions.push(inst)
 
     me emit_const(dest: LocalId, value: MirConstValue, type_: MirType):
@@ -811,6 +842,13 @@ impl MirBuilder:
 
     me set_terminator(term: MirTerminator):
         """Set terminator for current block."""
+        if self.enum_semantic_recording:
+            if self.enum_semantic_site_calls.len() + self.enum_semantic_terms.len() >= 65536:
+                self.enum_semantic_site_overflow = true
+            else:
+                self.enum_semantic_term_blocks.push(self.current_block)
+                self.enum_semantic_terms.push(term)
+                self.enum_semantic_term_nodes.push(self.enum_semantic_node)
         self.finalize_block()
 
         for i in 0..self.blocks.len():
