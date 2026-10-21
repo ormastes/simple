@@ -72,21 +72,51 @@ fn rt_bound_manifest_capabilities() -> [RtBoundCapability]:
     rt_bound_manifest_entries
 
 fn rt_sort_text(items: [text]) -> [text]:
+    # Independent buffers preserve caller ownership without depending on
+    # aggregate assignment aliasing. Each level performs O(N) indexed writes;
+    # no merge pass allocates another array or changes the text comparator.
     var out: [text] = []
+    var scratch: [text] = []
     for item in items:
-        var at = out.len()
-        var i = 0
-        while i < out.len():
-            if item < out[i]:
-                at = i
-                break
-            i = i + 1
         out.push(item)
-        var j = out.len() - 1
-        while j > at:
-            out[j] = out[j - 1]
-            j = j - 1
-        out[at] = item
+        scratch.push(item)
+    val count = out.len()
+    var width = 1
+    while width < count:
+        var run = 0
+        while run < count:
+            val left_size = if width < count - run: width else: count - run
+            val middle = run + left_size
+            val right_size = if width < count - middle: width else: count - middle
+            val end = middle + right_size
+            var left = run
+            var right = middle
+            var dest = run
+            while left < middle and right < end:
+                # Equality takes the left element, matching insertion stability.
+                if out[right] < out[left]:
+                    scratch[dest] = out[right]
+                    right = right + 1
+                else:
+                    scratch[dest] = out[left]
+                    left = left + 1
+                dest = dest + 1
+            while left < middle:
+                scratch[dest] = out[left]
+                left = left + 1
+                dest = dest + 1
+            while right < end:
+                scratch[dest] = out[right]
+                right = right + 1
+                dest = dest + 1
+            run = end
+        var i = 0
+        while i < count:
+            out[i] = scratch[i]
+            i = i + 1
+        # Avoid overflowing doubled indices even at the array-size limit.
+        if width >= count - width: break
+        width = width + width
     out
 
 fn rt_closure_digest(root_name: text, facts: [RtCriticalFact]) -> text:
