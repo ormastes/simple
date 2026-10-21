@@ -25,7 +25,10 @@ use std.io.{shell, shell_bool, shell_output_trimmed, file_write, file_delete, fi
 use std.nogc_sync_mut.io.{process_spawn_piped}
 use app.io.mod.{cwd, env_get}
 use app.debug.remote.protocol.gdb_mi.GdbMiClient
-use app.debug.remote.protocol.gdb_mi_parser.{GdbBreakpoint}
+use app.debug.remote.protocol.gdb_mi_parser.{GdbBreakpoint, GdbMiParser}
+use app.dap.adapter.gdb_mi.GdbMiAdapter
+use std.nogc_sync_mut.dap.adapter.mod.{AdapterConfig, AdapterCapabilities}
+use std.spec.step
 
 # NOTE: uses shell_bool(), not shell(...).exit_code — under `bin/simple
 # test`'s interpreter/module graph, ProcessResult field access on a
@@ -72,6 +75,39 @@ fn _piped_process_probe_status() -> text:
     "RUNNER_FAILED"
 
 describe "GdbMiClient over a real gdb subprocess pipe":
+    it "encodes one MI C-string argument without command delimiters":
+        expect(GdbMiClient.quote_mi_argument("a b.c:3")).to_equal("\"a b.c:3\"")
+        expect(GdbMiClient.quote_mi_argument("\"\\\n\r\t")).to_equal("\"\\\"\\\\\\n\\r\\t\"")
+        val controls = "\"\\\n\r\t"
+        val quoted = GdbMiClient.quote_mi_argument(controls)
+        expect(GdbMiParser.unescape_string(quoted)).to_equal(controls)
+        expect(GdbMiParser.unescape_mi_string("\\\\n\\\\t")).to_equal("\\n\\t")
+
+    it "decodes the real wrapped MI breakpoint tuple and rejects missing or invalid ids":
+        val parsed = GdbMiClient.parse_breakpoint_result({"bkpt": '{number="7",cond="x == 1",line="3"}'}).unwrap()
+        expect(parsed.id).to_equal(7)
+        expect(parsed.condition).to_equal("x == 1")
+        expect(parsed.line).to_equal(3)
+        expect(GdbMiClient.parse_breakpoint_result({}).is_err()).to_equal(true)
+        expect(GdbMiClient.parse_breakpoint_result({"bkpt": '{}'}).is_err()).to_equal(true)
+        expect(GdbMiClient.parse_breakpoint_result({"bkpt": '{number="0"}'}).is_err()).to_equal(true)
+        expect(GdbMiClient.parse_breakpoint_result({"bkpt": '{number="bad"}'}).is_err()).to_equal(true)
+        expect(GdbMiClient.parse_breakpoint_result({"bkpt": '{number="7"'}).is_err()).to_equal(true)
+        expect(GdbMiClient.parse_breakpoint_result({"bkpt": '{number="7"},{}'}).is_err()).to_equal(true)
+        expect(GdbMiClient.parse_breakpoint_result({"bkpt": '{number="7",cond="unterminated}'}).is_err()).to_equal(true)
+        expect(GdbMiClient.parse_breakpoint_result({"bkpt": '{number="7",nested={}'}).is_err()).to_equal(true)
+
+    it "preserves disconnected breakpoint errors and rejects unknown architecture before spawning":
+        step("Create a disconnected GDB adapter")
+        val config = AdapterConfig.gdb("localhost", 1234, "")
+        var adapter = GdbMiAdapter(client: nil, config: config, attached: false, capabilities: AdapterCapabilities.basic())
+        expect(adapter.set_breakpoint("missing.c", 3)).to_equal(Err("GDB client not connected"))
+        expect(adapter.set_breakpoint_rich("missing.c", 3, Some("x > 0"), nil, nil)).to_equal(Err("GDB client not connected"))
+        step("Reject an architecture absent from the canonical DebugConfig target enum")
+        var unknown = config
+        unknown.architecture = "unknown-target"
+        expect(GdbMiAdapter.connect(unknown)).to_equal(Err("unsupported GDB architecture: unknown-target"))
+
     it "quotes repository and probe paths containing spaces and apostrophes":
         expect(_repo_simple_bin("/tmp/simple repo")).to_equal("/tmp/simple repo/bin/simple")
         expect(_shell_quote("/tmp/simple repo/owner's probe.spl")).to_equal("'/tmp/simple repo/owner'\\''s probe.spl'")
@@ -94,14 +130,13 @@ describe "GdbMiClient over a real gdb subprocess pipe":
             print "SKIP: rt_process_spawn_piped is not registered in this interpreter build's extern dispatch table (pre-existing gap, not caused by this change — see doc/08_tracking/bug/interpreter_sffi_missing_piped_process_externs_2026-07-29.md)"
             return
 
-        val c_path = "/tmp/ds6_gdb_mi_fixture.c"
+        val c_path = "/tmp/ds6 gdb_mi_fixture.c"
         val bin_path = "/tmp/ds6_gdb_mi_fixture"
         file_write(c_path, "int main(void) {\n    int x = 1;\n    return x;\n}\n")
-        val compiled = shell_bool("gcc -g -o {bin_path} {c_path}")
+        val compiled = shell_bool("gcc -g -o {_shell_quote(bin_path)} {_shell_quote(c_path)}")
         if not compiled:
-            print "SKIP: gcc failed to build MI fixture binary"
             file_delete(c_path)
-            return
+        expect(compiled).to_equal(true)
 
         # Spawn gdb directly over the piped-subprocess facade, bypassing
         # GdbMiClient.connect()'s "target-select remote host:port" step —
@@ -152,7 +187,60 @@ describe "GdbMiClient over a real gdb subprocess pipe":
                     Ok(info):
                         expect(info.condition).to_equal("x == 1")
 
-        client.disconnect()
+        step("Pass the live pipe client into the actual DAP adapter")
+        var adapter = GdbMiAdapter.from_client(client, AdapterConfig.gdb("localhost", 1234, bin_path))
+        val condition = "x == 1 && sizeof(\"a\\\\b\\\"c\") > 0\n && sizeof(\"\\n\\t\") > 0"
+        step("Set a condition containing quotes, backslashes and a newline at a spaced source path")
+        val rich_result = adapter.set_breakpoint_rich(c_path, 3, Some(condition), nil, nil)
+        expect(rich_result.is_ok()).to_equal(true)
+        val rich_id = rich_result.unwrap()
+        match adapter.client:
+            Some(live):
+                val info = live.get_breakpoint_info(rich_id).unwrap()
+                expect(info.condition).to_equal(condition)
+                expect(info.line).to_equal(3)
+                expect(live.token_counter).to_equal(4)
+            nil: fail("adapter lost its owning GDB client")
+
+        step("Follow the conditional command with None, empty and basic breakpoints")
+        val plain_id = adapter.set_breakpoint_rich(c_path, 3, nil, nil, nil).unwrap()
+        val empty_id = adapter.set_breakpoint_rich(c_path, 3, Some(""), nil, nil).unwrap()
+        val basic_id = adapter.set_breakpoint(c_path, 3).unwrap()
+        expect(plain_id).to_be_greater_than(rich_id)
+        expect(empty_id).to_be_greater_than(plain_id)
+        expect(basic_id).to_be_greater_than(empty_id)
+        match adapter.client:
+            Some(live):
+                expect(live.get_breakpoint_info(rich_id).unwrap().condition).to_equal(condition)
+                expect(live.get_breakpoint_info(plain_id).unwrap().condition).to_equal("")
+                expect(live.get_breakpoint_info(empty_id).unwrap().condition).to_equal("")
+                expect(live.get_breakpoint_info(basic_id).unwrap().condition).to_equal("")
+            nil: fail("adapter lost sequential breakpoint state")
+
+        step("Propagate a GDB condition error and keep the next command usable")
+        val invalid = adapter.set_breakpoint_rich(c_path, 3, Some("unknown_ds6_symbol == 1"), nil, nil)
+        expect(invalid.is_err()).to_equal(true)
+        expect(invalid.unwrap_err()).to_start_with("GDB error:")
+        val after_error = adapter.set_breakpoint(c_path, 3).unwrap()
+        expect(after_error).to_be_greater_than(basic_id)
+        match adapter.client:
+            Some(live):
+                expect(live.token_counter).to_equal(9)
+                expect(live.breakpoints.len()).to_equal(6)
+                val recovered = live.get_breakpoint_info(after_error).unwrap()
+                expect(recovered.condition).to_equal("")
+            nil: fail("adapter lost the client after a GDB error")
+
+        step("Disconnect through the adapter that owns the pipe")
+        expect(adapter.detach()).to_equal(Ok("detached"))
+        expect(adapter.is_attached()).to_equal(false)
+
+        step("Exercise the real AdapterConfig to DebugConfig bridge on a startup failure")
+        var missing_config = AdapterConfig.gdb("localhost", 1234, "/tmp/ds6_nonexistent_program")
+        missing_config.architecture = "x86_64"
+        val missing = GdbMiAdapter.connect(missing_config)
+        expect(missing.is_err()).to_equal(true)
+        expect(missing.unwrap_err()).to_start_with("GDB error:")
         file_delete(c_path)
         if file_exists(bin_path):
             shell("rm -f {bin_path}")

@@ -9,7 +9,7 @@ use std.nogc_sync_mut.io.process_ops.{shell_bool, shell_output_trimmed}
 use std.nogc_sync_mut.io.{process_spawn_piped, process_write_stdin, process_read_stdout, process_close_piped}
 use app.debug.coordinator.{VarInfo, FrameInfo, LocationInfo}
 use app.debug.remote.protocol.gdb_mi_parser.{GdbMiParser, GdbMiRecord, GdbVariable, GdbBreakpoint, parse_hex_value, parse_hex_byte, hex_char_value}
-use std.nogc_sync_mut.debug.remote.types.{DebugConfig, DebugError}
+use std.nogc_sync_mut.debug.remote.types.{DebugConfig, DebugError, Architecture}
 
 # A single decoded MI result record, keyed by its command token. Filled in
 # by the streaming reader as lines arrive and drained by whichever
@@ -66,7 +66,12 @@ class GdbMiClient:
 
         # Load symbols before connecting so GDB can infer the target layout.
         if config.program.len() > 0:
-            client.send_command("file-exec-and-symbols {config.program}")?
+            val program_arg = GdbMiClient.quote_mi_argument(config.program)
+            match client.send_command("file-exec-and-symbols {program_arg}"):
+                Ok(_): pass
+                Err(e):
+                    client.cleanup()
+                    return Err(e)
 
         # Connect to remote target
         val connect_result = client.send_command("target-select remote {config.host}:{config.port}")
@@ -77,6 +82,7 @@ class GdbMiClient:
                 if msg.contains("Truncated register") or msg.contains("remote 'g' packet"):
                     client.connected = true
                 else:
+                    client.cleanup()
                     return Err(msg)
 
         Ok(client)
@@ -507,16 +513,64 @@ class GdbMiClient:
     me set_breakpoint_full(location: text, condition: text, ignore_count: i32) -> Result<GdbBreakpoint, text>:
         var cmd = "break-insert"
         if condition.len() > 0:
-            cmd = cmd + " -c \"{condition}\""
+            val condition_arg = GdbMiClient.quote_mi_argument(condition)
+            cmd = cmd + " -c {condition_arg}"
         if ignore_count >= 0:
             cmd = cmd + " -i {ignore_count}"
-        cmd = cmd + " {location}"
+        val location_arg = GdbMiClient.quote_mi_argument(location)
+        cmd = cmd + " {location_arg}"
         val data = self.send_command(cmd)?
-        val bkpt_raw = data.get("bkpt") ?? "{}"
-        val bkpt = GdbMiParser.parse_kv_pairs(bkpt_raw)
-        val bp = GdbBreakpoint.from_tuple(bkpt)
+        val bp = GdbMiClient.parse_breakpoint_result(data)?
         self.breakpoints.push(bp)
         Ok(bp)
+
+    # parse_kv_pairs retains tuple braces in a result field. Strip exactly
+    # that outer tuple before decoding its fields; never cache a default id 0.
+    static fn parse_breakpoint_result(data: Dict<text, text>) -> Result<GdbBreakpoint, text>:
+        val raw = (data.get("bkpt") ?? "").trim()
+        if not raw.starts_with('{') or not raw.ends_with('}'):
+            return Err("malformed GDB breakpoint result: missing bkpt tuple")
+        # The general parser's brace finder is deliberately permissive on
+        # incomplete records. This cache boundary requires balanced input.
+        var depth = 0
+        var quoted = false
+        var pos = 0
+        while pos < raw.len():
+            val ch = raw[pos:pos + 1]
+            if quoted:
+                if ch == "\\":
+                    pos = pos + 1
+                elif ch == '"':
+                    quoted = false
+            else:
+                if ch == '"':
+                    quoted = true
+                elif ch == '{':
+                    depth = depth + 1
+                elif ch == '}':
+                    depth = depth - 1
+                    if depth == 0 and pos != raw.len() - 1:
+                        return Err("malformed GDB breakpoint result: invalid bkpt tuple")
+            pos = pos + 1
+        if quoted or depth != 0:
+            return Err("malformed GDB breakpoint result: invalid bkpt tuple")
+        val end = raw.len() - 1
+        val fields = GdbMiParser.parse_kv_pairs(raw[1:end])
+        val bp = GdbBreakpoint.from_tuple(fields)
+        if bp.id <= 0:
+            return Err("malformed GDB breakpoint result: invalid breakpoint number")
+        Ok(bp)
+
+    # MI arguments are C strings, independently of shell quoting. Escape
+    # backslashes first so expression escapes survive one MI decode and
+    # physical newlines cannot introduce another MI command.
+    static fn quote_mi_argument(value: text) -> text:
+        var escaped = value.replace("\\", "\\\\")
+        escaped = escaped.replace("\"", "\\\"")
+        escaped = escaped.replace("\n", "\\n")
+        escaped = escaped.replace("\r", "\\r")
+        escaped = escaped.replace("\t", "\\t")
+        "\"{escaped}\""
 
     # Look up the rich breakpoint model (condition, hit count, location,
     # ...) previously captured by set_breakpoint()/set_breakpoint_full().
