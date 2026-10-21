@@ -8,7 +8,7 @@ use std.common.io.file_read_policy.{
 }
 use std.common.io.file_view_buffered.{
     BufferedFileViewErrorV1, FileViewIdentityV1,
-    file_view_buffered_read_v1, file_view_descriptor_identity_v1,
+    file_view_buffered_read_v1, file_view_buffered_read_uncancellable_v1, file_view_descriptor_identity_v1,
     file_view_identity_equal_v1, file_view_range_valid_v1
 }
 
@@ -152,6 +152,27 @@ fn read_only_file_view_read_now_v1(
                 FileViewTransportV1.buffered))
         Err(error):
             Err(read_only_file_view_buffer_error_v1(error))
+
+# Caller retains this view and closes it on every success/error path. This
+# buffered-only synchronous API binds bytes and identity to the same admitted
+# descriptor without allocating cancellation registry state or async work.
+fn read_only_file_view_read_buffered_uncancellable_v1(
+    view: &ReadOnlyFileViewV1,
+    offset: u64,
+    length: u64
+) -> Result<FileViewSliceV1, ReadOnlyFileViewErrorV1>:
+    if not view.open or view.descriptor < 0:
+        return Err(ReadOnlyFileViewErrorV1.closed)
+    if view.policy != FileReadPolicyV1.buffered:
+        return Err(ReadOnlyFileViewErrorV1.mapping_unsupported)
+    if length > view.address_space_budget or not file_view_range_valid_v1(view.identity.size, offset, length):
+        return Err(ReadOnlyFileViewErrorV1.invalid_range)
+    match file_view_buffered_read_uncancellable_v1(view.descriptor, view.identity, offset, length):
+        case Ok(bytes):
+            Ok(FileViewSliceV1(bytes: bytes, offset: offset, length: length,
+                identity: view.identity, transport: FileViewTransportV1.buffered))
+        case Err(reason):
+            Err(read_only_file_view_buffer_error_v1(reason))
 
 fn read_only_file_view_read_async_v1(
     view: &ReadOnlyFileViewV1,

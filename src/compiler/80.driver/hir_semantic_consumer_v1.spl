@@ -8,7 +8,29 @@ use compiler.common.assurance.policy_schema.{AssuranceStrictness}
 use compiler.semantics.safety_checker.{SafetyChecker, safetychecker_check_module,
     safetychecker_check_transfer_module_with_policy}
 use compiler.semantics.any_escape.{AnyEscapeProfile, any_escape_check}
-use compiler.semantics.enum_contract.{enum_contract_check}
+use compiler.semantics.enum_contract.{enum_contract_declaration_report_v1}
+use compiler.semantics.representation_boundary.validation.{representation_index_build_v1, representation_manifest_diagnostics_v1, representation_diagnostics_order_v1}
+use compiler.semantics.representation_boundary.unsafe_observations.{representation_missing_manifest_observations_v1}
+
+pub fn collect_module_representation_receipt_v1(name: text, module: HirModule,
+        strictness: AssuranceStrictness) -> HirTypecheckReceiptV1:
+    val index = representation_index_build_v1(module.representation_declarations, strictness)
+    var messages: [text] = []
+    var warnings: [text] = []
+    var errors: [text] = []
+    var diagnostics = representation_manifest_diagnostics_v1(index)
+    for observation in representation_missing_manifest_observations_v1(module, strictness):
+        diagnostics.push(observation)
+    for diagnostic in representation_diagnostics_order_v1(diagnostics):
+        val code = diagnostic.code ?? "E-MC-REP-001"
+        val span = diagnostic.span ?? Span.empty()
+        val message = "[{code}] {name}: {diagnostic.message} at {span.line}:{span.col}"
+        messages.push(message)
+        if strictness == AssuranceStrictness.Critical:
+            errors.push(message)
+        else:
+            warnings.push(message)
+    HirTypecheckReceiptV1(messages: messages, warnings: warnings, errors: errors)
 
 pub fn collect_module_safety_receipt_v1(name: text, m: HirModule,
         severity: SafetyPassSeverity, parallel_policy: ResolvedParallelPolicyV1) -> HirTypecheckReceiptV1:
@@ -145,14 +167,22 @@ pub fn collect_module_enum_contract_receipt_v1(name: text, module: HirModule,
     var out: [text] = []
     var warnings: [text] = []
     var errors: [text] = []
-    for d in enum_contract_check(module, strictness):
+    val report = enum_contract_declaration_report_v1(module, strictness)
+    for d in report.diags:
         val msg = "[{d.code}] {name}: {d.message} ({d.enum_name}: {d.detail})"
         out = out.push(msg)
         if is_critical:
             errors.push(msg)
         else:
             warnings.push(msg)
+    # MIR rejects explicit noninteger/unavailable discriminants in every profile.
+    # Keep those failures fatal here too, without relabeling them as contract IDs.
+    for failure in report.constant_failures:
+        val msg = failure.message()
+        out = out.push(msg)
+        errors.push(msg)
     HirTypecheckReceiptV1(messages: out, warnings: warnings, errors: errors)
 
 export collect_module_safety_receipt_v1, collect_module_any_escape_receipt_v1
 export collect_module_enum_contract_receipt_v1
+export collect_module_representation_receipt_v1

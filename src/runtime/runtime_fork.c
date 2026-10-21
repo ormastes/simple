@@ -96,6 +96,7 @@ typedef struct {
     size_t tail_start;
     size_t head_limit;
     size_t tail_limit;
+    int raw_prefix;
 } ForkCapture;
 
 static void drain_capture_fds(int stdout_fd, ForkCapture* stdout_capture,
@@ -148,6 +149,7 @@ static void capture_append(ForkCapture* capture, const char* bytes, size_t len) 
  * believe a short capture is the whole of the child's output. */
 static size_t capture_note_incomplete(ForkCapture* capture, size_t result_len,
                                       const char* reason) {
+    if (capture->raw_prefix) return result_len;
     if (!reason) return result_len;
     char marker[FORK_CAPTURE_MARKER_MAX];
     int written = snprintf(marker, sizeof(marker),
@@ -163,6 +165,12 @@ static size_t capture_note_incomplete(ForkCapture* capture, size_t result_len,
 }
 
 static size_t capture_finish(ForkCapture* capture) {
+    if (capture->raw_prefix) {
+        /* Legacy exec-failure classification still borrows a C string;
+         * the terminator occupies reserved storage, never captured bytes. */
+        capture->data[capture->head_len] = '\0';
+        return capture->head_len;
+    }
     char* tail = capture->data + capture->head_limit;
     if (capture->tail_start != 0 && capture->tail_len != 0) {
         reverse_bytes(tail, capture->tail_start);
@@ -280,8 +288,8 @@ int64_t rt_fork_child_setup(void) {
     return (int64_t)pid;
 }
 
-int64_t rt_fork_parent_wait_bounded(int64_t child_pid, int64_t timeout_ms,
-                                    uint64_t max_output_bytes) {
+static int64_t fork_parent_wait_mode(int64_t child_pid, int64_t timeout_ms,
+                                     uint64_t max_output_bytes, int raw_prefix) {
     /* Reject invalid pids: kill(-1)/waitpid(-1) would signal/reap every
      * process the user owns (e.g. when a failed fork's -1 is passed in). */
     if (child_pid <= 0) {
@@ -316,10 +324,10 @@ int64_t rt_fork_parent_wait_bounded(int64_t child_pid, int64_t timeout_ms,
         close(stderr_fd);
         return -1;
     }
-    size_t head_limit = capture_limit / 2U + capture_limit % 2U;
-    size_t tail_limit = capture_limit / 2U;
-    ForkCapture out_capture = {out_buf, 0, 0, 0, 0, head_limit, tail_limit};
-    ForkCapture err_capture = {err_buf, 0, 0, 0, 0, head_limit, tail_limit};
+    size_t head_limit = raw_prefix ? capture_limit : capture_limit / 2U + capture_limit % 2U;
+    size_t tail_limit = raw_prefix ? 0 : capture_limit / 2U;
+    ForkCapture out_capture = {out_buf, 0, 0, 0, 0, head_limit, tail_limit, raw_prefix};
+    ForkCapture err_capture = {err_buf, 0, 0, 0, 0, head_limit, tail_limit, raw_prefix};
 
     /* Set non-blocking for poll */
     set_nonblocking(stdout_fd);
@@ -584,6 +592,14 @@ static void drain_capture_fds(int stdout_fd, ForkCapture* stdout_capture,
     }
     if (stdout_eof) *stdout_eof = eof_seen[0];
     if (stderr_eof) *stderr_eof = eof_seen[1];
+}
+
+int64_t rt_fork_parent_wait_bounded(int64_t child_pid, int64_t timeout_ms, uint64_t max_output_bytes) {
+    return fork_parent_wait_mode(child_pid, timeout_ms, max_output_bytes, 0);
+}
+
+int64_t simple_fork_parent_wait_bounded_bytes(int64_t child_pid, int64_t timeout_ms, uint64_t max_output_bytes) {
+    return fork_parent_wait_mode(child_pid, timeout_ms, max_output_bytes, 1);
 }
 
 int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {

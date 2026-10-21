@@ -1,0 +1,98 @@
+# @req REQ-MC-003
+# @tag: integration, compiler, enum, condition
+"""Source -> frontend -> HIR -> existing enum contract checker entry points.
+
+The lowerer and checker assertions prevent missing enum/attribute metadata
+from turning a declaration-contract test into a vacuous pass.
+"""
+
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.{HirEnum, hir_enum_has_attribute}
+use compiler.semantics.enum_contract.contract_model.{EnumContractTable, EnumContractDiag}
+use compiler.semantics.enum_contract.check.{
+    enum_contract_check, enum_contract_check_with_table, enum_contract_check_module, enum_contract_table
+}
+
+fn condition_enum_setup(source: text, enum_count: i64) -> HirModule:
+    val parsed = parse_full_frontend(source, "condition_integration.spl", "condition_integration", Logger(level: 0))
+    expect(parsed.enums.len()).to_equal(enum_count)
+    var lowering = HirLowering.with_filename("condition_integration.spl")
+    val module = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    expect(module.enums.len()).to_equal(enum_count)
+    module
+
+fn condition_enum_check(source: text, variants: i64) -> [EnumContractDiag]:
+    val module = condition_enum_setup(source, 1)
+    for key in module.enums.keys():
+        val enum_: HirEnum = module.enums[key]
+        expect(hir_enum_has_attribute(enum_, "condition")).to_equal(true)
+        expect(enum_.variants.len()).to_equal(variants)
+    enum_contract_check(module, AssuranceStrictness.Critical)
+
+describe "REQ-MC-003 @condition is wired into the production enum checker":
+    it "accepts the source declaration with two unit variants":
+        val diags = condition_enum_check("@condition\nenum Switch:\n    Off\n    On\n", 2)
+        expect(diags.len()).to_equal(0)
+
+    it "rejects zero one and three source variants through the public checker":
+        val empty = condition_enum_check("@condition\nenum Empty:\n    \"No states\"\n", 0)
+        val unary = condition_enum_check("@condition\nenum Unary:\n    Only\n", 1)
+        val ternary = condition_enum_check("@condition\nenum Ternary:\n    Low\n    Mid\n    High\n", 3)
+        expect(empty.len()).to_equal(1)
+        expect(empty[0].code).to_equal("E-CONDITION-001")
+        expect(empty[0].detail).to_equal("variant count: 0; expected: 2")
+        expect(unary.len()).to_equal(1)
+        expect(unary[0].detail).to_equal("variant count: 1; expected: 2")
+        expect(ternary.len()).to_equal(1)
+        expect(ternary[0].detail).to_equal("variant count: 3; expected: 2")
+
+    it "rejects positional and named payloads through the public checker":
+        val tuple = condition_enum_check("@condition\nenum TupleData:\n    None\n    Some(i64)\n", 2)
+        val named = condition_enum_check("@condition\nenum NamedData:\n    None\n    Some(value: i64)\n", 2)
+        expect(tuple.len()).to_equal(1)
+        expect(tuple[0].code).to_equal("E-CONDITION-001")
+        expect(tuple[0].detail).to_equal("variant Some carries a payload")
+        expect(named.len()).to_equal(1)
+        expect(named[0].code).to_equal("E-CONDITION-001")
+        expect(named[0].detail).to_equal("variant Some carries a payload")
+
+    it "checks condition attributes even when the Closed Evolving table is empty":
+        val module = condition_enum_setup("@condition\nenum Unary:\n    Only\n", 1)
+        expect(enum_contract_table(module).len()).to_equal(0)
+        val diags = enum_contract_check_with_table(module, EnumContractTable(contracts: []), AssuranceStrictness.Strict)
+        expect(diags.len()).to_equal(1)
+        expect(diags[0].code).to_equal("E-CONDITION-001")
+
+    it "also reaches the rule from the full module checker":
+        val module = condition_enum_setup("@condition\nenum Unary:\n    Only\n", 1)
+        val report = enum_contract_check_module(module, AssuranceStrictness.Critical)
+        expect(report.diags.len()).to_equal(1)
+        expect(report.diags[0].code).to_equal("E-CONDITION-001")
+        expect(report.diags[0].enum_name).to_equal("Unary")
+        expect(report.sites.len()).to_equal(0)
+
+    it "keeps a condition attribute on its own enum without affecting a neighbor":
+        val source = "@condition\nenum Switch:\n    Off\n    On\n\nenum Ordinary:\n    Only(value: i64)\n"
+        val module = condition_enum_setup(source, 2)
+        var checked = 0
+        for key in module.enums.keys():
+            val enum_: HirEnum = module.enums[key]
+            expect(hir_enum_has_attribute(enum_, "condition")).to_equal(enum_.name == "Switch")
+            checked = checked + 1
+        expect(checked).to_equal(2)
+        expect(enum_contract_check(module, AssuranceStrictness.Critical).len()).to_equal(0)
+
+    it "does not transfer an attribute from a function to a later enum":
+        val source = "@condition\nfn helper() -> i64:\n    0\n\nenum Ordinary:\n    Only(i64)\n"
+        val module = condition_enum_setup(source, 1)
+        for key in module.enums.keys():
+            val enum_: HirEnum = module.enums[key]
+            expect(hir_enum_has_attribute(enum_, "condition")).to_equal(false)
+        expect(enum_contract_check(module, AssuranceStrictness.Critical).len()).to_equal(0)

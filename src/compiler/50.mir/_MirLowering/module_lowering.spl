@@ -5,7 +5,7 @@ use compiler.mir._MirLoweringExpr.function_signature_owner.*
 # @workaround bug=phase3_compiler_unit_or_workaround_2026-10-10 reason= preserve explicit enum owners until bare-pattern inference is repaired.
 use compiler.hir.hir_operators.{HirBinOp}
 use compiler.hir.hir_codec.{hir_fn_scalars_at_v1, hir_fn_scalars_at_key_v1,
-    hir_fn_scalars_in_v1, hir_module_functions_count_in_v1}
+    hir_module_function_keys_in_v1, hir_fn_scalars_with_keys_in_v1}
 # Part of src/compiler/50.mir/mir_lowering.spl: module/struct/class type lowering, asm target-spec accessors
 use compiler.mir._MirLowering.bootstrap_globals.*
 use compiler.mir._MirLowering.provider_metadata.*
@@ -811,7 +811,7 @@ impl MirLowering:
     # That is what left `for f in d.values()` with no element struct name and
     # collapsed every field read to offset 0 (see the bug comment in
     # _MirLoweringExpr/method_calls_literals.spl's values/keys arm). Try the
-    # real symbol table first, then reverse the canonical map, returning the
+    # real symbol table first, then use the canonical inverse, returning the
     # bare name (the segment after the last '.') because that is the form
     # `struct_value_syms` / `resolve_field_index` are keyed on.
     me mir_struct_symbol_name(symbol: SymbolId) -> text:
@@ -821,18 +821,42 @@ impl MirLowering:
                     if info.kind == SymbolKind.Class: return mir_class_identity(info)
                     return info.name
             case None: ()
+        val canonical_key = self.canonical_mir_type_key_v1(symbol.id)
+        if canonical_key == "": return ""
+        if self.class_type_names.has(canonical_key):
+            return canonical_key
+        val canonical_parts = canonical_key.split(".")
+        if canonical_parts.len() == 0: return canonical_key
+        canonical_parts[canonical_parts.len() - 1]
+
+    me canonical_mir_type_key_v1(symbol_id: i64) -> text:
+        if val indexed_key = self.canonical_type_symbol_names.get(symbol_id):
+            return indexed_key
+        # Compatibility for a legacy pre-seeded map. Normal compiler writes
+        # all go through canonical_mir_type_symbol_for_key_v1 below, so the
+        # hot path never allocates keys() or walks the type inventory. Retain
+        # the old first-match result if a seeded map contains duplicate IDs.
         val canonical_keys = self.canonical_type_symbols.keys()
         var cki = 0
         while cki < canonical_keys.len():
             val canonical_key = canonical_keys[cki]
-            if self.canonical_type_symbols[canonical_key] == symbol.id:
-                if self.class_type_names.has(canonical_key):
-                    return canonical_key
-                val canonical_parts = canonical_key.split(".")
-                if canonical_parts.len() == 0: return canonical_key
-                return canonical_parts[canonical_parts.len() - 1]
+            self.canonical_type_reverse_scan_rows = self.canonical_type_reverse_scan_rows + 1
+            if self.canonical_type_symbols[canonical_key] == symbol_id:
+                self.canonical_type_symbol_names[symbol_id] = canonical_key
+                return canonical_key
             cki = cki + 1
         ""
+
+    me canonical_mir_type_symbol_for_key_v1(key: text) -> SymbolId:
+        # Keep key normalization at the original callers and mint in their
+        # original order. This index changes neither IDs nor ABI identity.
+        if val id = self.canonical_type_symbols.get(key):
+            return SymbolId(id: id)
+        val id = self.next_canonical_type_symbol
+        self.next_canonical_type_symbol = id + 1
+        self.canonical_type_symbols[key] = id
+        self.canonical_type_symbol_names[id] = key
+        SymbolId(id: id)
 
     me canonical_mir_type_symbol(symbol: SymbolId) -> SymbolId:
         val symbol_info = self.symbols.get_symbol_raw(symbol.id)
@@ -855,12 +879,7 @@ impl MirLowering:
                 if defining_module == "":
                     return symbol
                 val key = "{defining_module}.{info.name}"
-                if val id = self.canonical_type_symbols.get(key):
-                    return SymbolId(id: id)
-                val id = self.next_canonical_type_symbol
-                self.next_canonical_type_symbol = id + 1
-                self.canonical_type_symbols[key] = id
-                SymbolId(id: id)
+                self.canonical_mir_type_symbol_for_key_v1(key)
             case None:
                 symbol
 
@@ -1566,6 +1585,21 @@ impl MirLowering:
                                     # canonical owner, not a bare layout name.
                                     # Keep the separate HIR rebinding key above.
                                     field_type_name = mir_class_identity(field_type_symbol)
+                    case HirTypeKind.Optional(optional_inner):
+                        # A monomorphic record payload still belongs to the
+                        # defining table. The Optional wrapper is not itself
+                        # a record, so retain only its exact inner owner key.
+                        match optional_inner.kind:
+                            case HirTypeKind.Named(optional_symbol, optional_args):
+                                if optional_args.len() == 0:
+                                    val optional_owner_entry: HirSymbol? = symbols.get_symbol_raw(optional_symbol.id)
+                                    if val present_optional_owner = optional_owner_entry:
+                                        val optional_owner: HirSymbol = present_optional_owner
+                                        if optional_owner.kind == SymbolKind.Struct or optional_owner.kind == SymbolKind.Class:
+                                            field_type_ownership_key = self.composite_layout_key(optional_owner)
+                                            if optional_owner.kind == SymbolKind.Class:
+                                                field_type_ownership_key = mir_class_identity(optional_owner)
+                            case _: ()
                     case HirTypeKind.Function(_, field_return, _):
                         # The callback value is not a record, but its named
                         # return type still belongs to the declaring table.
@@ -1830,14 +1864,15 @@ impl MirLowering:
         # local, no field, no bind. (The dict HANDLE param transport from
         # cycle-108/109 stays: reference copy at the call site, C-level
         # rt_dict_values.)
-        # Cycle-144: param-only codec extraction via dict+key -- the
-        # encode-proven access class (hir_fn_scalars_in_v1 /
-        # hir_module_functions_count_in_v1). No .values(), no binds of the
-        # module or keys anywhere on this path.
-        val prescan_fn_count: i64 = hir_module_functions_count_in_v1(modules, module_key)
+        # Freeze original key handles once per invocation. The scalar feeder
+        # below changes provider/layout/default registries only: it cannot
+        # mutate modules or their function dictionaries. Keep the ordered
+        # inventory local, with parameter-only reads in the codec pool.
+        val prescan_fn_keys = hir_module_function_keys_in_v1(modules, module_key)
+        val prescan_fn_count: i64 = prescan_fn_keys.len()
         var psi = 0
         while psi < prescan_fn_count:
-            val prescan_scalars = hir_fn_scalars_in_v1(modules, module_key, psi)
+            val prescan_scalars = hir_fn_scalars_with_keys_in_v1(modules, module_key, prescan_fn_keys, psi)
             self.prescan_one_function_v1(module_name, module_symbols,
                 prescan_scalars[0], prescan_scalars[1], prescan_scalars[2],
                 prescan_scalars[3], prescan_scalars[4], prescan_scalars[5],

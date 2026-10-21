@@ -43,3 +43,34 @@ binary FAILed its `native-build` probe even when it works.
 The gate's probe and temp directories now use `_` instead of `.`
 (`# @workaround bug=native_build_entry_main_undefined_when_source_path_has_dot_2026_10_20`).
 A `TMPDIR` that itself contains a dot still reproduces it.
+
+## Root-aware source-only repair proposal (2026-10-21, cycle 2)
+
+Status remains OPEN pending qualified-producer execution and higher review.
+At source revision `471ccc083397fb17812ba43459b233e7cd3dfde2`, entry-closure
+alias loading puts `_driver_canonical_module_name(physical)` first. That
+canonicalizer drops all-digit dotted segments, including the `1` in external
+`dot.1` and `g.1` paths, while LLVM's requested entry derivation preserves it.
+The primary source then fails the actual `llvm_module_is_native_entry`
+comparison, and neighboring `dot.1` / `dot.2` identities collide. This is a
+source-level mismatch for numeric-dot paths; no every-nonnumeric-dot claim
+is established.
+
+Independent cycle-1 review rejected lexical `/src/` or `/examples/` substring
+classification: an external `/tmp/foreign/src/dot.1/hello.spl` is still
+external, even though shared logical naming strips its host prefix. The
+cycle-2 proposal returns physical name and repository-membership proof
+together from `_driver_physical_module_identity`, using the existing resolved
+path, admitted/current root, root-boundary and repository-relative source
+checks. Alias folding consumes that same proof, retaining repository tier
+aliases while preserving external shared identities. No lexical substring
+is newly treated as evidence of physical repository membership.
+
+The tests were authored before the source change and call actual production
+alias APIs and LLVM's entry predicate with negative neighbors. New fixtures
+cover real external nested `src` and `examples` paths, distinct `dot.1` and
+`dot.2`, and actual existing repository sources in relative/absolute forms.
+Every compiler, test, docgen, link and runtime check remains UNRUN under the
+source-only protocol. Both existing stage-binary gate workaround tags and
+consumer spellings remain unchanged. This proposal requires higher review;
+it is not production, bootstrap or Phase3 PASS.

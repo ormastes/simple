@@ -17,6 +17,9 @@ use compiler.mono.mono_invocation_preflight_v1.{MonoPreflightFactsV1,
     mono_preflight_module_v1, mono_preflight_function_v1, mono_preflight_type_v1}
 use compiler.hir.hir_codec_support.{HirCodecWriter}
 use compiler.hir.generated.hir_codec.{hc_enc_hir_type}
+use compiler.hir.hir_function_record_identity_v1.{mono_complete_function_digest_v1}
+use compiler.mono.mono_selective_emission_publication_v1.{MonoSelectiveFunctionPlacementV1,
+    mono_selective_emission_reset_v1, mono_selective_emission_publish_v1}
 use compiler.hir.hir_types.*
 # EXPLICIT, in addition to the glob above. A `use X.*` is not a declaration, a
 # re-export hop, or an explicit import, so the imported-surface projection walk
@@ -387,6 +390,7 @@ impl MonomorphizationPass:
         time_now_monotonic_ms()
 
     me process_modules_checked_v1(modules: Dict<text, HirModule>) -> Result<MonoInvocationOutputV1, text>:
+        mono_selective_emission_reset_v1()
         val budget = match self.invocation_budget:
             case Some(value): value
             case _: return Err("E-MONO-INVOCATION: checked entry requires isolated policy")
@@ -446,6 +450,16 @@ impl MonomorphizationPass:
         tuple destructuring, which silently produces zero iterations in compiled
         (bootstrap gen2) mode, causing hir_modules to become empty.
         """
+        mono_selective_emission_reset_v1()
+        # Only a direct exporter hashes function bodies for this inventory.
+        # Isolated archive/verification paths do not read export policy.
+        var publish_placements = false
+        if self.invocation_budget == nil and self.template_body_mode == MonoTemplateBodyModeV1.Retained:
+            if (env_get("SIMPLE_MIR_SELECTIVE") ?? "") == "1":
+                publish_placements = (env_get("SIMPLE_MIR_SHARD_EXPORT_WRITE") ?? "") != ""
+        var placements: [MonoSelectiveFunctionPlacementV1] = []
+        var placement_digests: Dict<text, text> = {}
+        var placement_valid = true
         self.declared_global_types = {}
         if self.invocation_budget == nil: mono_diag_refresh_v1()
         # Archive mode installs nominal tables lazily from inside the walk, so
@@ -468,6 +482,8 @@ impl MonomorphizationPass:
 
         if self.stats.generic_functions_found == 0 and self.stats.generic_structs_found == 0 and self.stats.generic_classes_found == 0:
             if self.invocation_budget == nil: mono_last_phase_profile_v1 = "collect_ms={t_collected - t_start} roots_ms=0 drain_ms=0 place_ms=0 roots=0 roots_rewritten=0 discovery={discovery} generics=none"
+            if publish_placements and self.diagnostics.len() == 0 and not self.invocation_failed_v1():
+                mono_selective_emission_publish_v1(placements)
             return modules
         if discovery:
             self.build_root_discovery_index_v1()
@@ -563,6 +579,8 @@ impl MonomorphizationPass:
             val keyed: HirModule = modules[name]
             physical_owner[name] = hir_symbol_owner_module(keyed.name)
         var result: Dict<text, HirModule> = {}
+        # The drained worklist fixes this inventory for every owner alias.
+        val specialized_keys: [text] = self.specialized_functions.keys()
         for name in mod_keys:
             if self.invocation_failed_v1(): return {}
             val module: HirModule = modules[name]
@@ -573,7 +591,6 @@ impl MonomorphizationPass:
                 out.constants = rewritten_consts[name]
             var funcs: Dict<SymbolId, HirFunction> = rewritten[name]
             var owns_specialization = false
-            val specialized_keys: [text] = self.specialized_functions.keys()
             for mangled in specialized_keys:
                 val m: text = mangled
                 val spec_owner: text = self.spec_module[m]
@@ -583,6 +600,22 @@ impl MonomorphizationPass:
                         continue
                 val spec: HirFunction = self.specialized_functions[m]
                 funcs[spec.symbol] = spec
+                if publish_placements:
+                    # Provenance comes from the actual fixed-point placement,
+                    # never a mangled-name pattern or a SymbolId range. Hash
+                    # each completed specialization once, then record every
+                    # logical alias that actually receives that exact body.
+                    if self.spec_symbols[m] != spec.symbol.id or spec.name != m or self.template_module[self.spec_template[m]] != spec_owner:
+                        placement_valid = false
+                    if not placement_digests.has(m):
+                        placement_digests[m] = mono_complete_function_digest_v1(spec)
+                    val digest: text = placement_digests[m]
+                    if digest == "" or spec.is_generic_template or spec.is_extern:
+                        placement_valid = false
+                    placements.push(MonoSelectiveFunctionPlacementV1(
+                        logical_key: name, origin_logical_key: spec_owner,
+                        symbol: spec.symbol.id, name: spec.name,
+                        complete_function_digest: digest))
                 # MIR uses the owning table to resolve callable identity. A
                 # specialization must have a row just like a parsed function.
                 if val budget = self.invocation_budget:
@@ -614,6 +647,8 @@ impl MonomorphizationPass:
 
         val t_placed = self.invocation_clock_v1()
         if self.invocation_budget == nil: mono_last_phase_profile_v1 = "collect_ms={t_collected - t_start} roots_ms={t_roots - t_collected} drain_ms={t_drained - t_roots} place_ms={t_placed - t_drained} roots={roots_total} roots_rewritten={roots_rewritten} queue={self.spec_queue.len()} discovery={discovery}"
+        if publish_placements and placement_valid and self.diagnostics.len() == 0 and not self.invocation_failed_v1():
+            mono_selective_emission_publish_v1(placements)
         result
 
     # ========================================================================
@@ -623,7 +658,7 @@ impl MonomorphizationPass:
     me collect_generics(module: HirModule, module_name: text):
         """Collect generic functions, structs, and classes from a module.
 
-        BUG-001 fix: Use keys()-based iteration instead of tuple destructuring.
+        Keep function values directly; copied aggregate keys are not lookup authority.
         """
         # Locals, parameters and type parameters share the same ID namespace
         # as functions. Reserving only function IDs aliases fresh callees to
@@ -652,9 +687,19 @@ impl MonomorphizationPass:
         if module.symbols != nil:
             if module.symbols.next_symbol_id > self.next_symbol:
                 self.next_symbol = module.symbols.next_symbol_id
-        val function_keys: [SymbolId] = functions.keys()
-        for sym_id in function_keys:
-            self.collect_function_entry_v1(module_name, module, sym_id)
+        # As in sorted_function_indices, retain values and address them by
+        # scalar index. Native erased Dict keys may compare SymbolId identity;
+        # a copied key must not silently discard a retained function body.
+        val function_values: [HirFunction] = functions.values()
+        val trace_provider = mono_diag_enabled() and module_name == "lib.nogc_sync_mut.sffi.transient"
+        if trace_provider:
+            eprint("[mono-diag] collect module={module_name} values={function_values.len()}")
+        var function_index = 0
+        while function_index < function_values.len():
+            self.collect_function_entry_v1(module_name, function_values, function_index, trace_provider and function_index < 32)
+            function_index = function_index + 1
+        if trace_provider:
+            eprint("[mono-diag] collected module={module_name} registered={self.stats.generic_functions_found}")
 
         # Imported callables are declarations in this module's symbol table,
         # not bodies in module.functions. Their signatures were lowered in the
@@ -821,26 +866,15 @@ impl MonomorphizationPass:
             case _: ()
         []
 
-    # Cycles 85-89: this body was inlined in collect_generics, whose draw
-    # corrupts the dict-index rebind (85/86: inline index), the by-value
-    # return bind of an extraction helper (87), the bare-dict-param index in
-    # this fresh method (88), and the plain field-expression index (89).
-    # Final discriminator across all nine draws: EXTRACTIONS DRAW CLEAN ONLY
-    # IN THE GENERATED CODEC'S GUARD-FIRST DOUBLE-ACCESS SHAPE -- every clean
-    # walk (hir_module_has_rt_hal, the seven codec_abi helpers) does
-    # `if dict[k] == nil: skip` BEFORE binding `dict[k]`; every crashing walk
-    # single-accesses. The guard below changes no semantics (values are never
-    # nil); it changes the codegen draw.
-    me collect_function_entry_v1(module_name: text, module: HirModule, sym_id: SymbolId):
-        # Guard-first double access, byte-for-byte the generated codec's
-        # shape (hc_enc_hir_module: `if node.functions[dk3] == nil ... else
-        # use node.functions[dk3]`). Cycles 81-88 retrospective: EVERY clean
-        # extraction double-accesses behind a nil guard; EVERY crashing one
-        # single-accesses. Values are never nil in practice, so the guard
-        # changes no semantics -- it changes the codegen draw.
-        if module.functions[sym_id] == nil:
-            return
-        val func: HirFunction = module.functions[sym_id]
+    # The typed array owner survives the complete scalar-index walk. Avoid
+    # both an erased by-value extraction return and copied aggregate-key lookup.
+    me collect_function_entry_v1(module_name: text, functions: [HirFunction], index: i64, trace_entry: bool = false):
+        val func: HirFunction = functions[index]
+        if trace_entry:
+            # The existing classifier also accepts an absent binder array.
+            val generic_entry = is_generic_function(func)
+            val binder_count = if generic_entry: func.type_params.len() else: 0
+            eprint("[mono-diag] collect-entry index={index} symbol={func.symbol.id} name={func.name} template={func.is_generic_template} generic={generic_entry} binders={binder_count}")
         # Record the symbol -> name edge for call-site resolution, and keep
         # the fresh-symbol counter past every id already in use.
         val fsym: SymbolId = func.symbol

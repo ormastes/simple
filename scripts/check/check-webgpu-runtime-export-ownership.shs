@@ -1,0 +1,133 @@
+#!/bin/sh
+# Link actual provider source archives; no compiler/product build or GPU needed.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+source_root=$root
+if command -v cygpath >/dev/null 2>&1; then source_root=$(cygpath -m "$root"); fi
+work=$(mktemp -d "${TMPDIR:-/tmp}/webgpu-export-owner.XXXXXX")
+echo "webgpu-export-evidence=$work"
+fail() { echo "FAIL: $*" >&2; exit 1; }
+rustc=${RUSTC:-rustc}
+"$rustc" --version >"$work/rustc-version.txt"
+rust_compile() {
+    if [ -n "${RUSTC_LINKER:-}" ]; then "$rustc" -C "linker=$RUSTC_LINKER" "$@"
+    else "$rustc" "$@"; fi
+}
+# Verify the real Cargo owner edge, not just fixture cfg flags.
+awk '/^\[target\.'\''cfg\(windows\)'\''\.dependencies\]$/ { selected=1; next }
+     /^\[/ { selected=0 } selected { print }' "$root/src/compiler_rust/compiler/Cargo.toml" >"$work/windows-dependencies.txt"
+grep -q '^simple-runtime = .*"hosted-webgpu-provider"' "$work/windows-dependencies.txt" || fail 'Windows runtime provider feature missing'
+grep -q '^spl_hosted_runtime = ' "$work/windows-dependencies.txt" || fail 'hosted provider edge missing'
+grep -q '^hosted-webgpu-provider = \["dep:spl_hosted_runtime"\]' "$root/src/compiler_rust/runtime/Cargo.toml" || fail 'runtime provider feature missing its dependency'
+grep -q '^extern crate spl_hosted_runtime;' "$root/src/compiler_rust/runtime/src/lib.rs" || fail 'runtime cdylib provider link missing'
+cat >"$work/runtime.rs" <<EOF
+#[path = "$source_root/src/compiler_rust/runtime/src/webgpu_backfill_twins.rs"]
+pub mod twins;
+#[cfg(feature = "hosted-webgpu-provider")]
+extern crate hosted_owner;
+pub fn anchor() -> i32 { 7 }
+// A generated-table-style ABI relocation must also resolve in the cdylib.
+unsafe extern "C" {
+    fn rt_webgpu_present(handle: i64) -> bool;
+    fn rt_webgpu_upload_pixels(handle: i64, pixels: *const core::ffi::c_void, count: usize, w: i32, h: i32) -> bool;
+    fn rt_webgpu_compute_draw(handle: i64, op: i32, x: i32, y: i32, w: i32, h: i32, color: u32) -> bool;
+}
+struct Registry {
+    present: unsafe extern "C" fn(i64) -> bool,
+    upload: unsafe extern "C" fn(i64, *const core::ffi::c_void, usize, i32, i32) -> bool,
+    draw: unsafe extern "C" fn(i64, i32, i32, i32, i32, i32, u32) -> bool,
+}
+static REGISTRY: Registry = Registry {
+    present: rt_webgpu_present, upload: rt_webgpu_upload_pixels, draw: rt_webgpu_compute_draw,
+};
+#[no_mangle]
+pub extern "C" fn registry_anchor() -> bool {
+    unsafe {
+        (REGISTRY.present)(0) || (REGISTRY.upload)(0, core::ptr::null(), 0, 0, 0) ||
+            (REGISTRY.draw)(0, 0, 0, 0, 0, 0, 0)
+    }
+}
+EOF
+cat >"$work/hosted.rs" <<EOF
+#[path = "$source_root/src/runtime/hosted/webgpu.rs"]
+pub mod webgpu;
+pub fn anchor() -> i32 { 11 }
+EOF
+cat >"$work/composite.rs" <<'EOF'
+extern crate runtime_owner;
+extern crate hosted_owner;
+unsafe extern "C" {
+    fn rt_webgpu_present(handle: i64) -> bool;
+    fn rt_webgpu_upload_pixels(handle: i64, pixels: *const core::ffi::c_void, count: usize, w: i32, h: i32) -> bool;
+    fn rt_webgpu_compute_draw(handle: i64, op: i32, x: i32, y: i32, w: i32, h: i32, color: u32) -> bool;
+}
+fn main() {
+    assert_eq!(runtime_owner::anchor() + hosted_owner::anchor(), 18);
+    assert!(!runtime_owner::registry_anchor());
+    unsafe {
+        assert!(!rt_webgpu_present(0));
+        assert!(!rt_webgpu_upload_pixels(0, core::ptr::null(), 0, 0, 0));
+        assert!(!rt_webgpu_compute_draw(0, 0, 0, 0, 0, 0, 0));
+    }
+    println!("PASS: composite owner anchors and 3 WebGPU ABI calls");
+}
+EOF
+cat >"$work/standalone.rs" <<'EOF'
+extern crate runtime_owner;
+fn main() {
+    assert_eq!(runtime_owner::anchor(), 7);
+    assert!(!runtime_owner::registry_anchor());
+    assert!(!runtime_owner::twins::rt_webgpu_present(0));
+    unsafe { assert!(!runtime_owner::twins::rt_webgpu_upload_pixels(0, core::ptr::null(), 0, 0, 0)); }
+    assert!(!runtime_owner::twins::rt_webgpu_compute_draw(0, 0, 0, 0, 0, 0, 0));
+    println!("PASS: standalone runtime retains all 3 fail-closed ABI calls");
+}
+EOF
+cat >"$work/dll_probe.rs" <<'EOF'
+use std::ffi::c_void;
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn LoadLibraryW(path: *const u16) -> *mut c_void;
+    fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
+    fn FreeLibrary(module: *mut c_void) -> i32;
+}
+fn main() {
+    let path: Vec<u16> = std::env::args().nth(1).unwrap().encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        let dll = LoadLibraryW(path.as_ptr());
+        assert!(!dll.is_null(), "load self-contained runtime fixture DLL");
+        let address = GetProcAddress(dll, b"registry_anchor\0".as_ptr());
+        assert!(!address.is_null(), "exported registry entrypoint");
+        let call: extern "C" fn() -> bool = std::mem::transmute(address);
+        assert!(!call(), "all three table ABI calls retain fail-closed provider behavior");
+        assert_ne!(FreeLibrary(dll), 0);
+    }
+    println!("PASS: runtime DLL loads and executes all 3 ABI addresses from its table");
+}
+EOF
+# One codegen unit forces each archive anchor and its exports into the same
+# object, reproducing the duplicate-definition extraction seen in the seed.
+rust_compile --edition=2021 --crate-type=rlib --crate-name hosted_owner -C codegen-units=1 "$work/hosted.rs" -o "$work/libhosted_owner.rlib"
+rust_compile --edition=2021 --crate-type=rlib --crate-name runtime_owner -C codegen-units=1 "$work/runtime.rs" -o "$work/libruntime_default.rlib"
+if rust_compile --edition=2021 "$work/composite.rs" --extern runtime_owner="$work/libruntime_default.rlib" --extern hosted_owner="$work/libhosted_owner.rlib" -o "$work/negative.exe" >"$work/negative.log" 2>&1; then
+    fail 'negative control linked duplicate owners'
+fi
+for symbol in rt_webgpu_present rt_webgpu_upload_pixels rt_webgpu_compute_draw; do
+    grep -q "duplicate symbol: $symbol\|multiple definition of.*$symbol\|$symbol.*already defined" "$work/negative.log" || fail "negative control missed $symbol"
+done
+rust_compile --edition=2021 "$work/standalone.rs" --extern runtime_owner="$work/libruntime_default.rlib" -o "$work/standalone.exe"
+"$work/standalone.exe"
+for feature in hosted-webgpu-provider native-all-provider; do
+    rust_compile --edition=2021 --crate-type=rlib --crate-name runtime_owner -C codegen-units=1 --cfg "feature=\"$feature\"" --extern hosted_owner="$work/libhosted_owner.rlib" "$work/runtime.rs" -o "$work/libruntime_selected.rlib"
+    rust_compile --edition=2021 "$work/composite.rs" -L "dependency=$work" --extern runtime_owner="$work/libruntime_selected.rlib" --extern hosted_owner="$work/libhosted_owner.rlib" -o "$work/selected.exe"
+    "$work/selected.exe"
+    if [ "$feature" = hosted-webgpu-provider ]; then
+        rust_compile --edition=2021 --crate-type=cdylib --crate-name runtime_owner -C codegen-units=1 --cfg "feature=\"$feature\"" --extern hosted_owner="$work/libhosted_owner.rlib" "$work/runtime.rs" -o "$work/selected-provider.dll"
+        case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*)
+            rust_compile --edition=2021 "$work/dll_probe.rs" -o "$work/dll-probe.exe"
+            "$work/dll-probe.exe" "$(cygpath -m "$work/selected-provider.dll")"
+            ;;
+        esac
+    fi
+done
+printf 'PASS: negative duplicate control, standalone runtime, Windows hosted provider with cdylib ABI relocation, native-all provider\n'

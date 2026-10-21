@@ -3214,7 +3214,7 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         // rt_process_run_with_limits: cmd is (ptr, len) — env_process.rs:1269.
         // Length-safe pinning likewise takes (path_ptr, path_len), rejecting
         // embedded NUL in the native provider without requiring C-string text.
-        "rt_process_run_with_limits"
+        "rt_process_run_with_limits" | "rt_process_run_bounded_bytes"
         | "rt_process_pin_executable_owned_value" => Some(&[0]),
         // rt_io_file_open/exists/delete take (path_ptr, path_len[, mode]) —
         // runtime/src/value/sffi/file_io/io_file.rs:82,331,340. They were absent

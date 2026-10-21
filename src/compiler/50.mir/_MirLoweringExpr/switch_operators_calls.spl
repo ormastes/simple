@@ -1222,12 +1222,7 @@ impl MirLowering:
                 val shape = self.direct_call_struct_return_shape(func)
                 if shape != "":
                     val canonical_key = shape.replace("::", ".")
-                    if self.canonical_type_symbols.contains(canonical_key):
-                        return MirType(kind: MirTypeKind.Struct(SymbolId(id: self.canonical_type_symbols[canonical_key])))
-                    val id = self.next_canonical_type_symbol
-                    self.next_canonical_type_symbol = id + 1
-                    self.canonical_type_symbols[canonical_key] = id
-                    return MirType(kind: MirTypeKind.Struct(SymbolId(id: id)))
+                    return MirType(kind: MirTypeKind.Struct(self.canonical_mir_type_symbol_for_key_v1(canonical_key)))
                 val call_name = self.direct_call_extern_name(func)
                 self.error_fatal("missing struct return type identity for direct call '{call_name}'", nil)
                 MirType.i64()
@@ -1328,12 +1323,7 @@ impl MirLowering:
         val checked = self.checked_array_record_layout(owner)
         if checked == "": return MirType.unit()
         val key = result_err_layout_identity(checked).replace("::", ".")
-        if val id = self.canonical_type_symbols.get(key):
-            return MirType(kind: MirTypeKind.Struct(SymbolId(id: id)))
-        val id = self.next_canonical_type_symbol
-        self.next_canonical_type_symbol = id + 1
-        self.canonical_type_symbols[key] = id
-        MirType(kind: MirTypeKind.Struct(SymbolId(id: id)))
+        MirType(kind: MirTypeKind.Struct(self.canonical_mir_type_symbol_for_key_v1(key)))
 
     me remember_direct_array_return_element(local: LocalId, call_name: text):
         # The return's MIR Array type preserves storage, but field projection
@@ -2873,7 +2863,7 @@ impl MirLowering:
             self.error("enum match: unknown nested variant '{variant}' (no registered enum declares it)", Some(span))
         ""
 
-    me emit_deep_literal_test(value_local: LocalId, lit_expr: HirExpr, next_block: BlockId, span: Span, typed_value: MirType? = nil):
+    me emit_deep_literal_test(value_local: LocalId, lit_expr: HirExpr, next_block: BlockId, span: Span, typed_value: MirType? = nil, nil_optional_slot: bool = false):
         """Runtime test for a LITERAL sub-pattern inside an enum payload:
         compare the extracted payload slot word against the literal and fall
         through to `next_block` (the next arm) when it differs. Int and bool
@@ -2886,6 +2876,24 @@ impl MirLowering:
         var cmp_local = LocalId(id: 0)
         var supported = true
         match lit_expr.kind:
+            case NilLit:
+                if not nil_optional_slot:
+                    self.builder = bt
+                    self.error("enum match: nil sub-pattern requires a declared optional payload slot", Some(span))
+                    return
+                # Same boxed/flat Optional presence predicate as normal == nil.
+                # The declared slot proof excludes raw scalar bits such as 3.
+                val none_fn = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_is_none"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.bool(), is_variadic: false)))
+                ))
+                val none_result = bt.emit_call(none_fn, [mir_operand_copy(value_local)], MirType.bool())
+                if val none_local = none_result:
+                    cmp_local = none_local
+                else:
+                    self.builder = bt
+                    self.error("enum match: nil sub-pattern presence predicate has no result", Some(span))
+                    return
             case IntLit(int_want, _):
                 var ik = LocalId(id: -1)
                 if val actual_type = typed_value:
@@ -2929,7 +2937,7 @@ impl MirLowering:
         bt.switch_to_block(lit_ok_block)
         self.builder = bt
 
-    me emit_deep_subpattern(value_local: LocalId, pat: HirPattern, next_block: BlockId, semantic_capture: i64 = -1, semantic_node: i64 = -1, typed_value: MirType? = nil):
+    me emit_deep_subpattern(value_local: LocalId, pat: HirPattern, next_block: BlockId, semantic_capture: i64 = -1, semantic_node: i64 = -1, typed_value: MirType? = nil, nil_optional_slot: bool = false):
         """One nested payload sub-pattern (`value_local` = its extracted slot
         word): emit its runtime test (failure branches to `next_block`, i.e.
         falls through to the NEXT arm) and/or install its binding, then
@@ -2946,7 +2954,7 @@ impl MirLowering:
                 self.local_map[bind_sym.id] = value_local
                 self.bind_local(bind_sym.id, value_local)
             case Literal(lit_expr):
-                self.emit_deep_literal_test(value_local, lit_expr, next_block, pat.span, typed_value)
+                self.emit_deep_literal_test(value_local, lit_expr, next_block, pat.span, typed_value, nil_optional_slot)
             case Enum(nested_etype, nested_variant, nested_payload):
                 val nested_ename = self.resolve_enum_pattern_owner(nested_etype, nested_variant, pat.span)
                 if nested_ename == "":
@@ -3126,7 +3134,27 @@ impl MirLowering:
                         if val declared_slot = self.deep_binding_declared_slot(slot_owner, slot_variant, slot_i):
                             slot_local = self.decode_declared_enum_payload_slot(slot_local, declared_slot)
                     case _: ()
-                self.emit_deep_subpattern(slot_local, sub_pat, next_block, semantic_capture, semantic_child)
+                var nil_optional_slot = false
+                match sub_pat.kind:
+                    case Literal(literal):
+                        match literal.kind:
+                            case NilLit:
+                                # A raw payload word cannot distinguish None from
+                                # nonoptional scalar 3. Require this exact declared
+                                # owner key to be known nongeneric before its slot
+                                # metadata can prove Optional. No proof is inherited
+                                # by nested enum/tuple descendants.
+                                if self.generic_enum_constructor_owners.has(slot_owner) and not self.generic_enum_constructor_owners[slot_owner]:
+                                    val slot_key = "{slot_owner}::{slot_variant}"
+                                    self.ensure_declaration_enum_payloads_v1(slot_key)
+                                    if val declared_slots = self.enum_variant_payload_types.get(slot_key):
+                                        if slot_i < declared_slots.len():
+                                            match declared_slots[slot_i].kind:
+                                                case HirTypeKind.Optional(_): nil_optional_slot = true
+                                                case _: ()
+                            case _: ()
+                    case _: ()
+                self.emit_deep_subpattern(slot_local, sub_pat, next_block, semantic_capture, semantic_child, nil, nil_optional_slot)
                 self.builder.enum_semantic_node = semantic_node
             slot_i = slot_i + 1
 
@@ -4218,7 +4246,8 @@ impl MirLowering:
                 b_cmp.terminate_if(mir_operand_copy(cmp_local), deep_block, next_block)
                 b_cmp.switch_to_block(deep_block)
                 self.builder = b_cmp
-                self.emit_enum_payload_deep(scrut_local, arm_payload, payload_symbol, next_block, true, deep_arm.pattern.span, "", "", enum_semantic_capture, semantic_pattern_root)
+                val deep_owner = if enum_key != "": enum_key else: enum_name
+                self.emit_enum_payload_deep(scrut_local, arm_payload, payload_symbol, next_block, true, deep_arm.pattern.span, deep_owner, enum_variants[ci], enum_semantic_capture, semantic_pattern_root)
                 # The pre-existing `b_arm.switch_to_block(arm_block)` just
                 # below performs the actual switch into arm_block for BOTH
                 # branches of this `if`; do not switch here (a second
@@ -7221,6 +7250,8 @@ impl MirLowering:
                 lw.enum_runtime_to_bare = self.enum_runtime_to_bare
                 lw.enum_bare_ambiguous = self.enum_bare_ambiguous
                 lw.canonical_type_symbols = self.canonical_type_symbols
+                lw.canonical_type_symbol_names = self.canonical_type_symbol_names
+                lw.canonical_type_reverse_scan_rows = self.canonical_type_reverse_scan_rows
                 lw.next_canonical_type_symbol = self.next_canonical_type_symbol
                 lw.global_symbol_ids = self.global_symbol_ids
                 lw.global_statics_by_id = self.global_statics_by_id
@@ -7345,6 +7376,8 @@ impl MirLowering:
                         self.errors.push(error)
                     return nil
                 self.canonical_type_symbols = lw.canonical_type_symbols
+                self.canonical_type_symbol_names = lw.canonical_type_symbol_names
+                self.canonical_type_reverse_scan_rows = lw.canonical_type_reverse_scan_rows
                 self.next_canonical_type_symbol = lw.next_canonical_type_symbol
                 if self.provider_method_modules.len() > 0:
                     # Rows the lifted body materialized relocated provider

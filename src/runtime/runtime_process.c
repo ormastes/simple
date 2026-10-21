@@ -155,7 +155,8 @@ bool rt_process_kill(int64_t pid) {
 
 static SplArray* process_capture_result(const char* stdout_text, size_t stdout_len,
                                        const char* stderr_text, size_t stderr_len,
-                                       int64_t code, int timed_out, int64_t timeout_ms) {
+                                       int64_t code, int timed_out, int64_t timeout_ms, int raw_bytes,
+                                       int64_t byte_limit) {
     const char* out = stdout_text ? stdout_text : "";
     const char* err = stderr_text ? stderr_text : "";
     if (!stdout_text) stdout_len = 0;
@@ -175,10 +176,25 @@ static SplArray* process_capture_result(const char* stdout_text, size_t stdout_l
             stderr_len = err_len + marker_len;
         }
     }
-    SplArray* result = rt_array_new(3);
-    rt_array_push(result, rt_string_new((const uint8_t*)out, (uint64_t)stdout_len));
-    rt_array_push(result, rt_string_new((const uint8_t*)err, (uint64_t)stderr_len));
-    rt_array_push(result, rt_value_int(code));
+    SplArray* result;
+    if (raw_bytes) {
+        if (byte_limit >= 0 && stdout_len > (uint64_t)byte_limit) stdout_len = (size_t)byte_limit;
+        if (byte_limit >= 0 && stderr_len > (uint64_t)byte_limit) stderr_len = (size_t)byte_limit;
+        SplArray* out_bytes = rt_array_new((int64_t)stdout_len);
+        SplArray* err_bytes = rt_array_new((int64_t)stderr_len);
+        for (size_t i = 0; i < stdout_len; ++i) rt_array_push(out_bytes, rt_value_int((uint8_t)out[i]));
+        for (size_t i = 0; i < stderr_len; ++i) rt_array_push(err_bytes, rt_value_int((uint8_t)err[i]));
+        int64_t tuple = rt_tuple_new(3);
+        rt_tuple_set(tuple, 0, (int64_t)(uintptr_t)out_bytes);
+        rt_tuple_set(tuple, 1, (int64_t)(uintptr_t)err_bytes);
+        rt_tuple_set(tuple, 2, rt_value_int(code));
+        result = (SplArray*)(uintptr_t)tuple;
+    } else {
+        result = rt_array_new(3);
+        rt_array_push(result, rt_string_new((const uint8_t*)out, (uint64_t)stdout_len));
+        rt_array_push(result, rt_string_new((const uint8_t*)err, (uint64_t)stderr_len));
+        rt_array_push(result, rt_value_int(code));
+    }
     free(timeout_error);
     return result;
 }
@@ -187,7 +203,7 @@ static SplArray* process_timeout_result(const char* stdout_text, const char* std
                                        int64_t code, int timed_out, int64_t timeout_ms) {
     return process_capture_result(stdout_text, stdout_text ? strlen(stdout_text) : 0,
                                   stderr_text, stderr_text ? strlen(stderr_text) : 0,
-                                  code, timed_out, timeout_ms);
+                                  code, timed_out, timeout_ms, 0, -1);
 }
 
 #ifdef _WIN32
@@ -205,6 +221,7 @@ struct WinCapture {
     size_t head_len;
     size_t tail_len;
     size_t tail_start;
+    int raw_prefix;
 };
 
 #define WIN_CAPTURE_MARKER_MAX 96U
@@ -218,6 +235,24 @@ static void win_reverse_bytes(char* data, size_t len) {
 }
 
 static int win_capture_append(struct WinCapture* capture, const char* bytes, size_t len) {
+    if (capture->raw_prefix) {
+        size_t keep = capture->limit - capture->len;
+        if (len > keep) len = keep;
+        if (!len) return 1;
+        size_t needed = capture->len + len + 1;
+        if (needed > capture->cap) {
+            size_t next = capture->cap ? capture->cap : 4096;
+            while (next < needed) next *= 2;
+            char* grown = (char*)realloc(capture->data, next);
+            if (!grown) return 0;
+            capture->data = grown;
+            capture->cap = next;
+        }
+        memcpy(capture->data + capture->len, bytes, len);
+        capture->len += len;
+        capture->data[capture->len] = '\0';
+        return 1;
+    }
     if (capture->limit == SIZE_MAX) {
         if (capture->len > SIZE_MAX - len - 1) return 0;
         size_t needed = capture->len + len + 1;
@@ -278,6 +313,7 @@ static int win_capture_append(struct WinCapture* capture, const char* bytes, siz
 }
 
 static void win_capture_finish(struct WinCapture* capture) {
+    if (capture->raw_prefix) return;
     if (capture->limit == SIZE_MAX || !capture->data) return;
     size_t head_limit = capture->limit / 2U + capture->limit % 2U;
     char* tail = capture->data + head_limit;
@@ -367,13 +403,53 @@ static char* win_filtered_environment(void) {
     return filtered;
 }
 
+static wchar_t* win_bytes_command_wide(const char* value) {
+    int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, NULL, 0);
+    if (count <= 0) return NULL;
+    wchar_t* wide = (wchar_t*)malloc((size_t)count * sizeof(wchar_t));
+    if (wide && !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, wide, count)) {
+        free(wide);
+        return NULL;
+    }
+    return wide;
+}
+
+static wchar_t* win_bytes_environment(void) {
+    LPWCH source = GetEnvironmentStringsW();
+    if (!source) return NULL;
+    size_t total = 2;
+    for (const wchar_t* entry = source; *entry; entry += wcslen(entry) + 1) {
+        size_t len = wcslen(entry);
+        if (total > SIZE_MAX / sizeof(wchar_t) - len - 1) {
+            FreeEnvironmentStringsW(source);
+            return NULL;
+        }
+        total += len + 1;
+    }
+    wchar_t* filtered = (wchar_t*)calloc(total, sizeof(wchar_t));
+    if (filtered) {
+        wchar_t* out = filtered;
+        for (const wchar_t* entry = source; *entry; entry += wcslen(entry) + 1) {
+            size_t len = wcslen(entry);
+            if (_wcsnicmp(entry, L"_SIMPLE_STACK_SET=", sizeof(L"_SIMPLE_STACK_SET=") / sizeof(wchar_t) - 1) != 0) {
+                memcpy(out, entry, (len + 1) * sizeof(wchar_t));
+                out += len + 1;
+            }
+        }
+    }
+    FreeEnvironmentStringsW(source);
+    return filtered;
+}
+
 static SplArray* win_process_run_capture(const char* cmd, uint64_t cmd_len, SplArray* args,
-                                         int64_t timeout_ms, int64_t max_output_bytes) {
+                                         int64_t timeout_ms, int64_t max_output_bytes, int raw_bytes) {
     const char* failure = NULL;
     const char** child_args = NULL;
     char* cmd_c = NULL;
     char* cmdline = NULL;
     char* environment = NULL;
+    wchar_t* wide_command = NULL;
+    wchar_t* wide_environment = NULL;
     HANDLE stdout_read = NULL;
     HANDLE stdout_write = NULL;
     HANDLE stderr_read = NULL;
@@ -390,17 +466,22 @@ static SplArray* win_process_run_capture(const char* cmd, uint64_t cmd_len, SplA
     int timed_out = 0;
     int64_t code = -1;
 
+    if (raw_bytes && (timeout_ms < 0 || max_output_bytes < 0 || max_output_bytes > 16777216)) {
+        return process_capture_result("", 0, "", 0, -1, 0, timeout_ms, 1, 0);
+    }
+
     if (!cmd || cmd_len == 0 || cmd_len > SIZE_MAX - 1 || memchr(cmd, '\0', (size_t)cmd_len)) {
-        return process_timeout_result("", "missing command", -1, 0, timeout_ms);
+        return process_capture_result("", 0, raw_bytes ? "" : "missing command", raw_bytes ? 0 : 15, -1, 0, timeout_ms, raw_bytes, max_output_bytes);
     }
     if (max_output_bytes < -1 ||
         (max_output_bytes >= 0 && (uint64_t)max_output_bytes > SIZE_MAX - WIN_CAPTURE_MARKER_MAX - 1U)) {
-        return process_timeout_result("", "", -1, 0, timeout_ms);
+        return process_capture_result("", 0, "", 0, -1, 0, timeout_ms, raw_bytes, max_output_bytes);
     }
     stdout_capture.limit = max_output_bytes < 0 ? SIZE_MAX : (size_t)max_output_bytes;
     stderr_capture.limit = stdout_capture.limit;
+    stdout_capture.raw_prefix = stderr_capture.raw_prefix = raw_bytes;
     cmd_c = (char*)malloc((size_t)cmd_len + 1);
-    if (!cmd_c) return process_timeout_result("", "process spawn failed", -1, 0, timeout_ms);
+    if (!cmd_c) return process_capture_result("", 0, raw_bytes ? "" : "process spawn failed", raw_bytes ? 0 : 20, -1, 0, timeout_ms, raw_bytes, max_output_bytes);
     memcpy(cmd_c, cmd, (size_t)cmd_len);
     cmd_c[cmd_len] = '\0';
 
@@ -416,13 +497,21 @@ static SplArray* win_process_run_capture(const char* cmd, uint64_t cmd_len, SplA
             goto finish;
         }
         for (int64_t i = 0; i < argc; i++) {
-            const uint8_t* data = rt_string_data(rt_array_get(args, i));
+            int64_t value = rt_array_get(args, i);
+            const uint8_t* data = rt_string_data(value);
+            if (raw_bytes && (!data || memchr(data, '\0', (size_t)rt_string_len(value)))) {
+                failure = "invalid process argument";
+                goto finish;
+            }
             child_args[i] = (const char*)(data ? data : (const uint8_t*)"");
         }
     }
     cmdline = win_cmd_build_line(cmd_c, child_args, argc);
-    environment = win_filtered_environment();
-    if (!cmdline || !environment) {
+    if (raw_bytes && cmdline) {
+        wide_command = win_bytes_command_wide(cmdline);
+        wide_environment = win_bytes_environment();
+    } else environment = win_filtered_environment();
+    if (!cmdline || (raw_bytes ? (!wide_command || !wide_environment) : !environment)) {
         failure = "process spawn failed";
         goto finish;
     }
@@ -477,8 +566,16 @@ static SplArray* win_process_run_capture(const char* cmd, uint64_t cmd_len, SplA
     startup.StartupInfo.hStdOutput = stdout_write;
     startup.StartupInfo.hStdError = stderr_write;
     DWORD creation_flags = CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW;
-    if (!CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, creation_flags, environment, NULL,
-                        &startup.StartupInfo, &process)) {
+    BOOL launched;
+    if (raw_bytes) {
+        /* STARTUPINFOEXA/W contain identical scalar/handle fields; no text
+         * pointers are populated. Keep the same inherited-handle list. */
+        launched = CreateProcessW(NULL, wide_command, NULL, NULL, TRUE,
+            creation_flags | CREATE_UNICODE_ENVIRONMENT, wide_environment, NULL,
+            (LPSTARTUPINFOW)&startup.StartupInfo, &process);
+    } else launched = CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, creation_flags, environment, NULL,
+                        &startup.StartupInfo, &process);
+    if (!launched) {
         failure = "process spawn failed";
         goto finish;
     }
@@ -568,8 +665,11 @@ finish:
     win_capture_finish(&stderr_capture);
 
     const char* result_error = failure ? failure : stderr_capture.data;
-    SplArray* result = process_timeout_result(stdout_capture.data, result_error,
-                                              failure ? -1 : code, timed_out, timeout_ms);
+    SplArray* result = raw_bytes
+        ? process_capture_result(stdout_capture.data, stdout_capture.len, stderr_capture.data,
+            stderr_capture.len, failure ? -1 : code,
+            0, timeout_ms, 1, max_output_bytes)
+        : process_timeout_result(stdout_capture.data, result_error, failure ? -1 : code, timed_out, timeout_ms);
     win_close_handle(&stdout_read);
     win_close_handle(&stderr_read);
     win_close_handle(&process.hProcess);
@@ -577,6 +677,8 @@ finish:
     if (attributes_initialized) DeleteProcThreadAttributeList(attributes);
     free(attributes);
     free(environment);
+    free(wide_environment);
+    free(wide_command);
     free(cmdline);
     free(cmd_c);
     free(child_args);
@@ -591,13 +693,30 @@ finish:
  * RuntimeValue; only the C return type was spelled `SplArray*`. See the POSIX
  * twin below. */
 int64_t rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms) {
-    return (int64_t)(uintptr_t)win_process_run_capture(cmd, cmd_len, args, timeout_ms, -1);
+    return (int64_t)(uintptr_t)win_process_run_capture(cmd, cmd_len, args, timeout_ms, -1, 0);
 }
 
 SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* args,
                                  int64_t timeout_ms, int64_t max_output_bytes) {
-    return win_process_run_capture(cmd, cmd_len, args, timeout_ms, max_output_bytes);
+    return win_process_run_capture(cmd, cmd_len, args, timeout_ms, max_output_bytes, 0);
 }
+
+#if defined(_MSC_VER)
+#if defined(_M_IX86)
+#pragma comment(linker, "/alternatename:_rt_process_run_bounded_bytes=_core_c_process_run_bounded_bytes")
+#else
+#pragma comment(linker, "/alternatename:rt_process_run_bounded_bytes=core_c_process_run_bounded_bytes")
+#endif
+int64_t core_c_process_run_bounded_bytes(const char* cmd, uint64_t cmd_len, SplArray* args,
+                                        int64_t timeout_ms, int64_t max_output_bytes) {
+    return (int64_t)(uintptr_t)win_process_run_capture(cmd, cmd_len, args, timeout_ms, max_output_bytes, 1);
+}
+#else
+__attribute__((weak)) int64_t rt_process_run_bounded_bytes(const char* cmd, uint64_t cmd_len, SplArray* args,
+                                                         int64_t timeout_ms, int64_t max_output_bytes) {
+    return (int64_t)(uintptr_t)win_process_run_capture(cmd, cmd_len, args, timeout_ms, max_output_bytes, 1);
+}
+#endif
 
 struct WinPipedSlot {
     DWORD pid;
@@ -2036,21 +2155,29 @@ int64_t rt_browser_renderer_spawn_sandboxed(
 }
 
 static SplArray* posix_process_run_capture(const char* cmd, uint64_t cmd_len, SplArray* args,
-                                           int64_t timeout_ms, int64_t max_output_bytes) {
+                                           int64_t timeout_ms, int64_t max_output_bytes, int raw_bytes) {
+    if (raw_bytes && (timeout_ms < 0 || max_output_bytes < 0 || max_output_bytes > 16777216))
+        return process_capture_result("", 0, "", 0, -1, 0, timeout_ms, 1, 0);
     if (!cmd || cmd_len == 0 || cmd_len > SIZE_MAX - 1) {
-        return process_timeout_result("", "missing command", -1, 0, timeout_ms);
+        return process_capture_result("", 0, raw_bytes ? "" : "missing command", raw_bytes ? 0 : 15, -1, 0, timeout_ms, raw_bytes, max_output_bytes);
     }
+    if (raw_bytes && (cmd_len > 1048576 || memchr(cmd, '\0', (size_t)cmd_len)))
+        return process_capture_result("", 0, "", 0, -1, 0, timeout_ms, 1, max_output_bytes);
 
     char* cmd_c = (char*)malloc((size_t)cmd_len + 1);
-    if (!cmd_c) return process_timeout_result("", "process spawn failed", -1, 0, timeout_ms);
+    if (!cmd_c) return process_capture_result("", 0, raw_bytes ? "" : "process spawn failed", raw_bytes ? 0 : 20, -1, 0, timeout_ms, raw_bytes, max_output_bytes);
     memcpy(cmd_c, cmd, (size_t)cmd_len);
     cmd_c[cmd_len] = '\0';
 
     int64_t argc = args ? rt_array_len(args) : 0;
+    if (raw_bytes && (argc < 0 || argc > 65536)) {
+        free(cmd_c);
+        return process_capture_result("", 0, "", 0, -1, 0, timeout_ms, 1, max_output_bytes);
+    }
     char** argv = (char**)malloc(sizeof(char*) * (size_t)(argc + 2));
     if (!argv) {
         free(cmd_c);
-        return process_timeout_result("", "process spawn failed", -1, 0, timeout_ms);
+        return process_capture_result("", 0, raw_bytes ? "" : "process spawn failed", raw_bytes ? 0 : 20, -1, 0, timeout_ms, raw_bytes, max_output_bytes);
     }
     argv[0] = cmd_c;
     for (int64_t i = 0; i < argc; i++) {
@@ -2074,9 +2201,11 @@ static SplArray* posix_process_run_capture(const char* cmd, uint64_t cmd_len, Sp
 
     free(argv);
     free(cmd_c);
-    if (child_pid < 0) return process_timeout_result("", "process spawn failed", -1, 0, timeout_ms);
+    if (child_pid < 0) return process_capture_result("", 0, raw_bytes ? "" : "process spawn failed", raw_bytes ? 0 : 20, -1, 0, timeout_ms, raw_bytes, max_output_bytes);
 
-    int64_t code = max_output_bytes < 0
+    int64_t code = raw_bytes
+        ? simple_fork_parent_wait_bounded_bytes(child_pid, timeout_ms, (uint64_t)max_output_bytes)
+        : max_output_bytes < 0
         ? rt_fork_parent_wait(child_pid, timeout_ms > 0 ? timeout_ms : 0)
         : rt_fork_parent_wait_bounded(child_pid, timeout_ms > 0 ? timeout_ms : 0,
                                       (uint64_t)max_output_bytes);
@@ -2088,7 +2217,7 @@ static SplArray* posix_process_run_capture(const char* cmd, uint64_t cmd_len, Sp
     simple_fork_parent_capture_lengths(&out_len, &err_len);
     if (code == 127 && err && strstr(err, "rt_process_run_timeout execvp") != NULL) code = -1;
     return process_capture_result(out, (size_t)out_len, err, (size_t)err_len,
-                                  code, timed_out, timeout_ms);
+                                  code, raw_bytes ? 0 : timed_out, timeout_ms, raw_bytes, raw_bytes ? max_output_bytes : -1);
 }
 
 /* (cmd_ptr, cmd_len, args, timeout_ms) -> RuntimeValue (array), per
@@ -2103,7 +2232,7 @@ static SplArray* posix_process_run_capture(const char* cmd, uint64_t cmd_len, Sp
  * spelled `SplArray*` where the compiler says I64, which is what the extern ABI
  * gate flagged; this is a signature correction, not a behaviour change. */
 int64_t rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms) {
-    return (int64_t)(uintptr_t)posix_process_run_capture(cmd, cmd_len, args, timeout_ms, -1);
+    return (int64_t)(uintptr_t)posix_process_run_capture(cmd, cmd_len, args, timeout_ms, -1, 0);
 }
 
 SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* args,
@@ -2111,7 +2240,12 @@ SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* ar
     if (max_output_bytes < 0 || (uint64_t)max_output_bytes > SIZE_MAX - 97U) {
         return process_timeout_result("", "", -1, 0, timeout_ms);
     }
-    return posix_process_run_capture(cmd, cmd_len, args, timeout_ms, max_output_bytes);
+    return posix_process_run_capture(cmd, cmd_len, args, timeout_ms, max_output_bytes, 0);
+}
+
+__attribute__((weak)) int64_t rt_process_run_bounded_bytes(const char* cmd, uint64_t cmd_len, SplArray* args,
+                                                         int64_t timeout_ms, int64_t max_output_bytes) {
+    return (int64_t)(uintptr_t)posix_process_run_capture(cmd, cmd_len, args, timeout_ms, max_output_bytes, 1);
 }
 
 int64_t rt_editor_spawn_simple_dap(void) {

@@ -1639,6 +1639,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_process_execute", &[I64, I64, I64], &[I32]),
     RuntimeFuncSpec::new("rt_process_run_timeout", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_run_bounded", &[I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_run_bounded_bytes", &[I64, I64, I64, I64, I64], &[I64]),
     // Owned-process receipt ABI, backed by src/runtime/runtime_process_owned.c.
     // Lost together with that C file in the tree-wipe restore ae55a746719; without
     // this spec resolve_runtime_func drops whole modules to the interpreter.

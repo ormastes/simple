@@ -1,0 +1,229 @@
+# @req REQ-MC-ANY-001
+# AUTHORED / UNRUN: requires the qualified pure-Simple SSpec runner.
+"""
+## Purpose and audience
+Compiler maintainers verify that converter names grant no authority. Inputs are
+parsed and lowered; actual resolved identities and escape diagnostics are checked.
+An authorized converter positive remains open until a canonical checked-contract
+producer supplies declaration identity. A concrete result is not that contract.
+"""
+use std.spec.*
+use std.spec.step
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.core.parser.{parser_has_errors, parser_set_had_error}
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_types.*
+use compiler.semantics.any_escape.checker.any_escape_check
+use compiler.semantics.any_escape.types.{AnyEscapeProfile, AnyEscapeKind, AnyEscapeSeverity}
+
+fn converter_probe_call_symbol(module: HirModule) -> i64:
+    for function in module.functions.values():
+        if function.name == "probe":
+            expect(function.body.has).to_equal(true)
+            match function.body.value.kind:
+                case HirExprKind.Call(callee, _, _):
+                    match callee.kind:
+                        case HirExprKind.Var(symbol): return symbol.id
+                        case HirExprKind.NamedVar(symbol, _): return symbol.id
+                        case _: assert(false)
+                case _: assert(false)
+    assert(false)
+    -1
+
+describe "Checked converter names require declaration authority":
+    it "rejects resolved exact and prefix lookalikes with warning and error controls":
+        for name in ["checked_downcast", "checked_match", "type_test", "is_type", "checked_decode_fake", "checked_downcast_fake"]:
+            for shadowed in [false, true]:
+                step("parse a constant-return converter and a direct or shadowed erased call")
+                val path = "testdata/converter_identity.spl"
+                val shadow_parameter = if shadowed: ", " + name + ": fn(Any) -> i64" else: ""
+                val source = "fn " + name + "(value: Any) -> i64:\n    0\nfn probe(raw: Any" + shadow_parameter + ") -> i64:\n    " + name + "(raw)\n"
+                parser_set_had_error(false)
+                val parsed = parse_full_frontend(source, path, "converter_identity", Logger(level: 0))
+                var lowering = HirLowering.with_filename(path)
+                val hir = lowering.lower_module(parsed)
+                expect(parser_has_errors()).to_equal(false)
+                expect(lowering.errors.len()).to_equal(0)
+                val callee_id = converter_probe_call_symbol(hir)
+                var declaration_id: i64 = -1
+                var parameter_id: i64 = -1
+                for function in hir.functions.values():
+                    if function.name == name: declaration_id = function.symbol.id
+                    if shadowed and function.name == "probe": parameter_id = function.params[1].symbol.id
+                expect(declaration_id).to_be_greater_than(-1)
+                if shadowed:
+                    expect(parameter_id).to_be_greater_than(-1)
+                    expect(parameter_id == declaration_id).to_equal(false)
+                    expect(callee_id).to_equal(parameter_id)
+                else:
+                    expect(callee_id).to_equal(declaration_id)
+                for critical in [false, true]:
+                    val profile = if critical: AnyEscapeProfile.critical([]) else: AnyEscapeProfile.census([])
+                    val findings = any_escape_check(hir, profile)
+                    var escapes = 0
+                    for finding in findings:
+                        if finding.function_name == "probe" and finding.kind == AnyEscapeKind.EscapeCallArg:
+                            escapes = escapes + 1
+                            expect(finding.code).to_equal("E-MC-ANY-002")
+                            expect(finding.message).to_contain("`" + name + "`")
+                            expect(finding.span.line).to_equal(4)
+                            val expected = if critical: AnyEscapeSeverity.Error else: AnyEscapeSeverity.Warning
+                            expect(finding.severity).to_equal(expected)
+                    step("require exactly one escaped argument at the call site")
+                    expect(escapes).to_equal(1)
+
+    it "permits concrete arguments to an identically named ordinary function":
+        step("keep a concrete call as the control against blanket refusal")
+        val path = "testdata/converter_concrete.spl"
+        val source = "fn checked_downcast(value: i64) -> i64:\n    value\nfn probe(raw: i64) -> i64:\n    checked_downcast(raw)\n"
+        parser_set_had_error(false)
+        val parsed = parse_full_frontend(source, path, "converter_concrete", Logger(level: 0))
+        var lowering = HirLowering.with_filename(path)
+        val hir = lowering.lower_module(parsed)
+        expect(parser_has_errors()).to_equal(false)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(converter_probe_call_symbol(hir)).to_be_greater_than(-1)
+        expect(any_escape_check(hir, AnyEscapeProfile.critical([])).len()).to_equal(0)
+
+    it "checks parsed erased method receivers and method or static arguments with concrete controls":
+        for route in ["receiver", "method_argument", "static_argument"]:
+            for erased in [true, false]:
+                step("parse a declared method owner and inspect the actual HIR call route")
+                val value_type = if erased: "Any" else: "i64"
+                var source = "struct Converter:\n    marker: i64\nimpl Converter:\n"
+                if route == "receiver":
+                    val receiver_type = if erased: "Any" else: "Converter"
+                    source = source + "    fn checked_downcast(self) -> i64:\n        0\nfn probe(raw: " + receiver_type + ") -> i64:\n    raw.checked_downcast()\n"
+                elif route == "method_argument":
+                    source = source + "    fn checked_downcast(self, value: " + value_type + ") -> i64:\n        0\nfn probe(receiver: Converter, raw: " + value_type + ") -> i64:\n    receiver.checked_downcast(raw)\n"
+                else:
+                    source = source + "    static fn checked_downcast(value: " + value_type + ") -> i64:\n        0\nfn probe(raw: " + value_type + ") -> i64:\n    Converter.checked_downcast(raw)\n"
+                val path = "testdata/converter_method.spl"
+                parser_set_had_error(false)
+                val parsed = parse_full_frontend(source, path, "converter_method", Logger(level: 0))
+                var lowering = HirLowering.with_filename(path)
+                val hir = lowering.lower_module(parsed)
+                expect(parser_has_errors()).to_equal(false)
+                expect(lowering.errors.len()).to_equal(0)
+                var calls = 0
+                for function in hir.functions.values():
+                    if function.name == "probe":
+                        expect(function.body.has).to_equal(true)
+                        match function.body.value.kind:
+                            case HirExprKind.MethodCall(receiver, method, args, resolution):
+                                calls = calls + 1
+                                expect(method).to_equal("checked_downcast")
+                                if route == "receiver":
+                                    expect(args.len()).to_equal(0)
+                                    expect(converter_receiver_symbol(receiver)).to_equal(function.params[0].symbol.id)
+                                else:
+                                    expect(args.len()).to_equal(1)
+                                    val raw_index = if route == "method_argument": 1 else: 0
+                                    expect(converter_receiver_symbol(args[0].value)).to_equal(function.params[raw_index].symbol.id)
+                                if route == "static_argument":
+                                    match resolution:
+                                        case MethodResolution.StaticMethod(owner, method_symbol):
+                                            converter_require_static_declaration(hir, owner, method_symbol)
+                                        case _: assert(false)
+                            case _: assert(false)
+                expect(calls).to_equal(1)
+                for critical in [false, true]:
+                    val profile = if critical: AnyEscapeProfile.critical([]) else: AnyEscapeProfile.census([])
+                    val findings = any_escape_check(hir, profile)
+                    var escapes = 0
+                    for finding in findings:
+                        if finding.function_name == "probe" and finding.kind == AnyEscapeKind.EscapeCallArg:
+                            escapes = escapes + 1
+                            expect(finding.code).to_equal("E-MC-ANY-002")
+                            expect(finding.span.line).to_equal(7)
+                            val expected = if critical: AnyEscapeSeverity.Error else: AnyEscapeSeverity.Warning
+                            expect(finding.severity).to_equal(expected)
+                            if route == "receiver": expect(finding.message).to_contain("erased receiver")
+                            else: expect(finding.message).to_contain("passed to `checked_downcast`")
+                    val expected_count = if erased: 1 else: 0
+                    expect(escapes).to_equal(expected_count)
+                    if not erased: expect(findings.len()).to_equal(0)
+
+    it "checks the StaticCall consumer directly without claiming a parsed StaticCall producer":
+        for erased in [true, false]:
+            step("retain parsed owner argument identities then project the typed StaticCall API variant")
+            val value_type = if erased: "Any" else: "i64"
+            val source = "struct Converter:\n    marker: i64\nimpl Converter:\n    static fn checked_downcast(value: " + value_type + ") -> i64:\n        0\nfn probe(raw: " + value_type + ") -> i64:\n    Converter.checked_downcast(raw)\n"
+            val path = "testdata/converter_static_api.spl"
+            parser_set_had_error(false)
+            val parsed = parse_full_frontend(source, path, "converter_static_api", Logger(level: 0))
+            var lowering = HirLowering.with_filename(path)
+            var hir = lowering.lower_module(parsed)
+            expect(parser_has_errors()).to_equal(false)
+            expect(lowering.errors.len()).to_equal(0)
+            var projected = 0
+            for key in hir.functions.keys():
+                var function = hir.functions[key]
+                if function.name == "probe":
+                    val tail = function.body.value
+                    match tail.kind:
+                        case HirExprKind.MethodCall(receiver, method, args, resolution):
+                            expect(method).to_equal("checked_downcast")
+                            expect(args.len()).to_equal(1)
+                            expect(converter_receiver_symbol(args[0].value)).to_equal(function.params[0].symbol.id)
+                            match resolution:
+                                case MethodResolution.StaticMethod(owner, method_symbol):
+                                    converter_require_static_declaration(hir, owner, method_symbol)
+                                    val type_ = HirType(kind: HirTypeKind.Named(owner, []), span: receiver.span)
+                                    function.body.value = HirExpr(kind: HirExprKind.StaticCall(type_, method, args, resolution), has_type_: tail.has_type_, type_: tail.type_, span: tail.span)
+                                    hir.functions[key] = function
+                                    projected = projected + 1
+                                case _: assert(false)
+                        case _: assert(false)
+            expect(projected).to_equal(1)
+            for critical in [false, true]:
+                val profile = if critical: AnyEscapeProfile.critical([]) else: AnyEscapeProfile.census([])
+                val findings = any_escape_check(hir, profile)
+                var escapes = 0
+                for finding in findings:
+                    if finding.function_name == "probe" and finding.kind == AnyEscapeKind.EscapeCallArg:
+                        escapes = escapes + 1
+                        expect(finding.code).to_equal("E-MC-ANY-002")
+                        expect(finding.message).to_contain("passed to `checked_downcast`")
+                        expect(finding.span.line).to_equal(7)
+                        val expected = if critical: AnyEscapeSeverity.Error else: AnyEscapeSeverity.Warning
+                        expect(finding.severity).to_equal(expected)
+                val expected_count = if erased: 1 else: 0
+                expect(escapes).to_equal(expected_count)
+                if not erased: expect(findings.len()).to_equal(0)
+
+fn converter_receiver_symbol(expression: HirExpr) -> i64:
+    match expression.kind:
+        case HirExprKind.Var(symbol): symbol.id
+        case HirExprKind.NamedVar(symbol, _): symbol.id
+        case _:
+            assert(false)
+            -1
+
+fn converter_require_static_declaration(module: HirModule, owner: SymbolId, method_symbol: SymbolId):
+    # Valid but unrelated symbol IDs must fail: bind the resolution to the
+    # actual parsed type and method declarations, not merely to valid handles.
+    var declared_owners = 0
+    for declaration in module.structs.values():
+        if declaration.name == "Converter":
+            declared_owners = declared_owners + 1
+            expect(owner.id).to_equal(declaration.symbol.id)
+    expect(declared_owners).to_equal(1)
+    val owner_entry = module.symbols.get_symbol_raw(owner.id)
+    expect(owner_entry.?).to_equal(true)
+    expect(owner_entry!.name).to_equal("Converter")
+    val bound_method = module.symbols.lookup_static_method_raw(owner.id, "checked_downcast")
+    expect(bound_method.?).to_equal(true)
+    expect(method_symbol.id).to_equal(bound_method!.id)
+    val method_entry = module.symbols.get_symbol_raw(method_symbol.id)
+    expect(method_entry.?).to_equal(true)
+    expect(method_entry!.name).to_equal(module.symbols.method_symbol_name(owner, "checked_downcast"))
+    var declared_methods = 0
+    for declaration in module.functions.values():
+        if declaration.name == "checked_downcast" and declaration.is_static:
+            declared_methods = declared_methods + 1
+            expect(method_symbol.id).to_equal(declaration.symbol.id)
+    expect(declared_methods).to_equal(1)

@@ -224,3 +224,64 @@ Author: dedicated isolated enum lane. Review coordinator:
 sidecars: N/A. The Char MIR packet remains separately frozen. No compiler,
 build, test, docgen, or cache operation was launched; historical retry limits
 and stopped build profiles are not reset.
+
+## 2026-10-21 critical static coverage production wiring
+
+REQ-002 requires the existing critical static policy to reach production enum
+lowering, including defaults that would otherwise hide a newly added variant.
+The previous production check sat inside `if not has_default` and used legacy
+`is_exhaustive()`. The static policy API/spec alone did not enforce this path.
+The existing severity spec's old critical-wildcard-false assertion is updated
+to the later selected static policy; the legacy coverage API remains unchanged.
+
+Implementation owns only `match_exhaustiveness.spl`, the enum-match portion of
+`switch_operators_calls.spl`, and the dispatch boundary in `expr_dispatch.spl`.
+Critical and the normalized mission-critical alias use the canonical static
+missing-ID projection. Other profiles retain existing behavior. Explicitly
+covering all variants still permits a default. Guarded named arms cover no
+static variant. No new annotation grammar or assurance mode is introduced.
+
+The enum path reuses one unguarded-arm coverage collection for its critical
+check and existing no-default warning/trap. Qualified declaration metadata is
+preferred; an uncontested owner whose runtime name is its bare name may use
+bare metadata. Missing qualified metadata is not substituted with a foreign
+bare declaration. Existing unresolved-owner diagnostics remain authoritative.
+New default diagnostics identify E-COMPLETE-001, the owner and missing variants.
+The old no-default critical diagnostic shape and panic/Abort edge remain.
+
+Wildcard/capture-only matches bypass the enum runtime lowering route. Their
+existing normalized-arm scan now identifies catchalls; for an actually resolved
+Named enum subject, a critical-only static call uses already-obtained metadata.
+It neither reevaluates the subject nor emits enum discriminant/payload calls.
+The ordinary scalar/guarded/default routing remains in place. Non-enum and
+unresolved subjects do not acquire fabricated enum identities.
+
+Coverage buffers are allocated only for no-default or critical matches.
+Ordinary enum defaults reuse existing array references without new coverage
+buffers. New critical default diagnostics index missing IDs and render in
+one declaration-order pass; no per-missing-variant registry traversal is added.
+Existing no-default name rendering is preserved. These are source arguments;
+allocation, RSS and latency measurements remain UNRUN.
+
+Eight new actual frontend/HIR/MIR scenarios cover injected variants, aliases,
+wildcard/capture-only dispatch, subject call count, guarded arms, wrong owners,
+ordinary profile controls, non-enum defaults, and no-default panic/Abort.
+The severity spec contains twelve cases: ten carried unchanged, one corrected,
+and one added. All twenty cases in these two files are **AUTHORED / UNRUN**;
+no compiler, native runner, proof checker, docgen, or build was launched.
+Run the real-pipeline specification in an isolated test process because it
+sets the existing safety-profile environment and restores the exact nullable
+value before assertions. This does not authorize a new runner/toolchain.
+
+Historical groups 108/111/117/120 still lack exact diagnostic/receiver
+attribution. Groups 35/36/38/104/107/155 have scoped source fixes on the base;
+Optional Result payload and nominal declaration identity are already authored
+and published in draft PR4019, not recoded here. PR4020 supplies raw observations,
+not authenticated Result refinement. Full robust/enum and C7 qualification
+remain open. The frozen Char packet overlaps both MIR owners and requires
+later semantic composition; this lane does not edit or activate that packet.
+
+Implementation owner: isolated enum agent. Root owns integration; the assigned
+independent reviewer reviews this exact packet. Architecture revision 2 was
+approved before production changes. The existing compiler-attempt accounting
+is unchanged; no runtime or formal PASS is claimed.

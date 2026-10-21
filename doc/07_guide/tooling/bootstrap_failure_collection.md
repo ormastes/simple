@@ -2,6 +2,22 @@
 
 ## Windows bootstrap harness prerequisites
 
+The Windows compiler seed links the hosted WebGPU provider. Its runtime
+dependency selects `hosted-webgpu-provider` so the runtime's three overlapping
+backfills do not also export the ABI; the selected provider must also link
+into the runtime cdylib. The bounded regression is
+`sh scripts/check/check-webgpu-runtime-export-ownership.shs` (set
+`RUSTC_LINKER` to the pinned `lld-link.exe` on Windows). It uses actual provider
+source archives, a duplicate-definition negative control, and standalone,
+hosted, and native-all positive controls; it does not admit a seed build.
+
+Preflight's paired-conflict-marker scan prunes `vendor` directories before
+reading files. Vendored compiler dependencies are outside owned-code scope;
+filtering their matches after a recursive grep still incurs their full scan.
+`sh scripts/check/check-bootstrap-preflight.shs --selftest` checks owned paired
+and unpaired markers, vendor exclusion, and paths containing spaces without
+running Cargo or a full preflight.
+
 The MSVC setup helper supports callers using `set -euo pipefail`. SDK discovery
 must skip non-SDK Include children such as `wdf` without turning the final
 directory predicate into a pipeline failure. Keep missing-SDK and tool failures

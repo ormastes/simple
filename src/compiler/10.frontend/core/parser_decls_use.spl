@@ -37,7 +37,7 @@ use compiler.frontend.core.lexer.{lex_token_start_get}
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.frontend.core.parser_stmts.{parse_block}
 use compiler.frontend.core.parser_stmts.{fixed_array_no_init_default_expr}
-use compiler.core.ast.{expr_int_lit}
+use compiler.core.ast.{expr_int_lit, expr_nil_lit}
 use compiler.core.ast.{decl_use_import, decl_set_lazy, decl_export_names}
 use compiler.core.ast.{decl_get_imports, decl_get_name, module_add_decl}
 use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding}
@@ -320,7 +320,10 @@ fn parse_export_decl() -> i64:
         return _export_record_reexport_surface(decl_use_import(from_module, names, 0))
     decl_export_names(names, 0)
 
+use compiler.frontend.core.representation_declarations_v1.{representation_reject_pending_v1, representation_method_begin_v1, representation_declaration_header_v1, representation_declaration_end_v1}
+
 fn parse_val_decl() -> i64:
+    representation_reject_pending_v1()
     val decl_start = lex_token_start_get()
     val decl_line = par_line_get()
     val decl_col = par_col_get()
@@ -373,6 +376,7 @@ fn parse_val_decl() -> i64:
     decl_val_binding(name, type_tag, init, decl_span)
 
 fn parse_lazy_val_decl() -> i64:
+    representation_reject_pending_v1()
     val decl_start = lex_token_start_get()
     val decl_line = par_line_get()
     val decl_col = par_col_get()
@@ -399,6 +403,7 @@ fn parse_lazy_val_decl() -> i64:
     decl_lazy_val_binding(name, type_tag, init, decl_span)
 
 fn parse_var_decl() -> i64:
+    representation_reject_pending_v1()
     val decl_start = lex_token_start_get()
     val decl_line = par_line_get()
     val decl_col = par_col_get()
@@ -437,11 +442,17 @@ fn parse_var_decl() -> i64:
     # synthesizing `= [zero; N]` from the par_fixed_array_* side-channel
     # captured above. Only trigger on an actual declaration-end token so a
     # genuinely malformed `=`-less declaration followed by garbage still
-    # falls through to the ordinary parser_expect(100) error below. All
-    # other type categories keep the historical require-`=` behavior.
+    # falls through to the ordinary parser_expect(100) error below. Named
+    # bindings use the existing local nil-until-assignment meaning, preserving
+    # their annotation for downstream resolution. Other categories require `=`.
     if type_tag != 0 and not annotation_continuation:
         val at_decl_end = par_kind_get() == TOK_NEWLINE or par_kind_get() == TOK_SEMICOLON or par_kind_get() == TOK_DEDENT or par_kind_get() == TOK_EOF
         if at_decl_end:
+            if type_tag >= TYPE_NAMED_BASE:
+                # Eligibility precedes allocation: nil may be expression 0.
+                val named_init = expr_nil_lit(0)
+                val noinit_span = flat_span_new(decl_start, lex_token_start_get(), decl_line, decl_col)
+                return decl_var_binding(name, type_tag, named_init, noinit_span)
             val arr_init = fixed_array_no_init_default_expr(type_tag, fixed_array_elem, fixed_array_size)
             if arr_init != 0:
                 val noinit_span = flat_span_new(decl_start, lex_token_start_get(), decl_line, decl_col)
@@ -461,6 +472,7 @@ fn parse_class_body_method(struct_name: text, is_static: bool, is_me: bool) -> i
     parse_class_body_method_typed(struct_name, is_static, is_me, -1)
 
 fn parse_class_body_method_typed(struct_name: text, is_static: bool, is_me: bool, self_type_override: i64) -> i64:
+    val representation_owner = representation_method_begin_v1()
     var _pp = parse_prof_now()
     # Advance past leading keyword (static fn / fn / me)
     if is_static:
@@ -553,6 +565,7 @@ fn parse_class_body_method_typed(struct_name: text, is_static: bool, is_me: bool
         ret_type = parser_parse_type()
 
     # Signature-only methods (trait declarations) have no `:` body.
+    representation_declaration_header_v1(representation_owner)
     _pp = parse_prof_mark("method:signature", _pp)
     var body: [i64] = []
     if par_kind_get() == 161:
@@ -638,6 +651,7 @@ fn parse_class_body_method_typed(struct_name: text, is_static: bool, is_me: bool
     val mid = decl_fn(mangled_name, param_names, param_types, ret_type, body, static_flag, type_params, 0)
     decl_set_param_defaults(mid, param_defaults)
     decl_set_param_muts(mid, param_muts)
+    representation_declaration_end_v1(representation_owner, mid, method_name)
     _pp = parse_prof_mark("method:declreg", _pp)
     return mid
 

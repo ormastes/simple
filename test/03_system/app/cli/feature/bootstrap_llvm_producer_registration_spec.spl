@@ -1,0 +1,50 @@
+"""Run only in a fresh process with the explicit LLVM producer projection.
+
+This spec calls the real installer and real registry; static source checks do
+not substitute for execution. Runtime status remains UNRUN until admitted.
+"""
+use std.spec.{describe, it, expect, step}
+use app.cli.bootstrap_backend_installer.{
+    bootstrap_install_worker_backends_v1, bootstrap_backend_choices_v1,
+    bootstrap_backend_request_error_v1}
+use compiler.backend.static_backend_registry.{
+    active_static_backend_table_v1, select_static_backend_v1,
+    installed_k1_static_backend_policy_v1}
+use app.cli.bootstrap_main.{run_native_build_bootstrap}
+use app.io.file_ops.{file_exists}
+
+describe "Real LLVM producer backend registration":
+    it "installs only real K1 ports and rejects unavailable output backends":
+        step("Install the explicitly projected LLVM producer composition")
+        expect(bootstrap_install_worker_backends_v1()).to_equal(true)
+        expect(installed_k1_static_backend_policy_v1()).to_equal("llvm")
+        expect(bootstrap_backend_choices_v1()).to_equal("llvm")
+        val table = active_static_backend_table_v1()
+        expect(table.len()).to_equal(2)
+        step("Resolve the genuine LLVM adapter through the active registry")
+        val llvm_name = match select_static_backend_v1("llvm", table):
+            case Ok(entry): entry.plugin.describe().name
+            case Err(failure): failure.code()
+        expect(llvm_name).to_equal("llvm")
+        step("Check real registry errors and public request refusals")
+        for backend in ["cranelift", "vhdl", "c", "wasm"]:
+            val code = match select_static_backend_v1(backend, table):
+                case Ok(entry): entry.plugin.describe().name
+                case Err(failure): failure.code()
+            expect(code).to_equal("PLUG-E-NOTFOUND")
+            expect(bootstrap_backend_request_error_v1(
+                backend, "")).to_contain("PLUG-E-NOTFOUND")
+        expect(bootstrap_backend_request_error_v1(
+            "llvm", "custom.smf")).to_contain("PLUG-E-UNSUPPORTED")
+
+    it "routes unavailable native requests through the real bootstrap body":
+        val source = "src/compiler/bootstrap_admission/hello_world.spl"
+        expect(file_exists(source)).to_equal(true)
+        step("Reject VHDL output for a real valid LLVM hello source")
+        expect(run_native_build_bootstrap([
+            "simple", "native-build", source,
+            "--backend=vhdl"])).to_equal(1)
+        step("Reject an LLVM plugin override through the same real command body")
+        expect(run_native_build_bootstrap([
+            "simple", "native-build", source,
+            "--backend=llvm", "--backend-plugin=custom.smf"])).to_equal(1)

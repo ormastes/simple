@@ -1,0 +1,84 @@
+# Declaration-only counterpart of register_module_composite_inventory_v1.
+# The caller supplies SOURCE order after its provider-order name prescan and
+# source-order enum barrier. No body or default expression is reconstructed.
+use compiler.hir.hir_types.{HirSymbol}
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.hir_declaration_types_v1.{MirHirModuleDeclarationsV1,
+    MirHirNominalDeclarationV1, MirHirFieldDeclarationV1}
+use compiler.mir.hir_declaration_summary_v1.{mir_hir_declaration_logical_key_v1}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.provider_metadata.{mir_class_identity}
+
+impl MirLowering:
+    me register_declaration_composite_inventory_v1(module: MirHirModuleDeclarationsV1):
+        # Like the full-HIR barrier, structs contribute only bare default
+        # rows here. Field order/type rows already belong to the prescan.
+        # Retain exact declaration artifacts for the existing lazy default
+        # resolver instead of storing a fabricated HirExpr in its old map.
+        val owner = mir_hir_declaration_logical_key_v1(module)
+        for raw_struct in module.structs:
+            val struct_def: MirHirNominalDeclarationV1 = raw_struct
+            if struct_def == nil: continue
+            if not self.struct_field_has_default.has(struct_def.name):
+                var flags: [bool] = []
+                for raw_field in struct_def.fields:
+                    val field: MirHirFieldDeclarationV1 = raw_field
+                    flags.push(field.has_default)
+                self.struct_field_has_default[struct_def.name] = flags
+                self.declaration_field_defaults[struct_def.name] = struct_def.fields
+                self.declaration_field_default_owners[struct_def.name] = owner
+
+        for raw_class in module.classes:
+            val class_def: MirHirNominalDeclarationV1 = raw_class
+            if class_def == nil: continue
+            var names: [text] = []
+            var flags: [bool] = []
+            for raw_field in class_def.fields:
+                val field: MirHirFieldDeclarationV1 = raw_field
+                names.push(field.name)
+                flags.push(field.has_default)
+            var keys: [text] = [class_def.name]
+            val optional_symbol: HirSymbol? = module.symbols.get_symbol_raw(class_def.symbol.id)
+            if val present_symbol = optional_symbol:
+                val symbol: HirSymbol = present_symbol
+                keys.push(self.composite_layout_key(symbol))
+                keys.push(mir_class_identity(symbol))
+            for key in keys:
+                self.class_type_names[key] = true
+                # Each legacy map has an independent keep-first guard.
+                # A bare name can already have a field order from a struct
+                # while its defaults are still absent; retain that behavior.
+                if not self.struct_field_order.has(key):
+                    self.struct_field_order[key] = names
+                if not self.struct_field_has_default.has(key):
+                    self.struct_field_has_default[key] = flags
+                if not self.struct_field_default_expr.has(key) and
+                        not self.declaration_field_defaults.has(key):
+                    self.declaration_field_defaults[key] = class_def.fields
+                    self.declaration_field_default_owners[key] = owner
+
+    me install_declaration_local_composite_defaults_v1(module: MirHirModuleDeclarationsV1):
+        # lower_module unconditionally replaces the current module's own
+        # default expressions (struct bare name, then all class aliases).
+        # The artifact resolver takes precedence over that compatibility
+        # map, so mirror the SAME shadowing here before the owned body runs.
+        # An empty default list is still an authoritative local override.
+        val owner = mir_hir_declaration_logical_key_v1(module)
+        for raw_struct in module.structs:
+            val struct_def: MirHirNominalDeclarationV1 = raw_struct
+            if struct_def == nil: continue
+            self.declaration_field_defaults[struct_def.name] = struct_def.fields
+            self.declaration_field_default_owners[struct_def.name] = owner
+        for raw_class in module.classes:
+            val class_def: MirHirNominalDeclarationV1 = raw_class
+            if class_def == nil: continue
+            var keys: [text] = [class_def.name]
+            val optional_symbol: HirSymbol? = module.symbols.get_symbol_raw(class_def.symbol.id)
+            if val present_symbol = optional_symbol:
+                val symbol: HirSymbol = present_symbol
+                keys.push(self.composite_layout_key(symbol))
+                keys.push(mir_class_identity(symbol))
+            for key in keys:
+                self.declaration_field_defaults[key] = class_def.fields
+                self.declaration_field_default_owners[key] = owner

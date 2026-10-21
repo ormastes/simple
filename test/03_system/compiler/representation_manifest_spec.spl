@@ -1,0 +1,583 @@
+"""System acceptance for source ownership and fail-closed A5 behavior.
+
+Execution: UNRUN in fixture-authoring phase; root build owner has not qualified
+the runtime for this isolated source snapshot. This spec uses actual frontend,
+HIR receipt, lint dispatch, and raw-extern checker APIs.
+HOLD: Runtime execution is still required to verify compiler behavior and the
+deferred cleanup paths; source inspection alone does not establish a test pass.
+"""
+# Requirement anchors: MC00439–43, MC01199–100.
+use std.spec.*
+use std.io_runtime.{getpid}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_source_inventory_core.{
+    CompileSourceInventoryEntryV1, CompileSourceInventoryV1,
+    compile_source_inventory_digest_v1}
+use std.nogc_sync_mut.env.variables.{env_get, env_set, env_unset}
+use compiler.common.config.{Logger}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.common.driver_core_types.{CompileMode}
+use compiler.common.assurance.representation_context_v1.{
+    RepresentationProjectContextV1, representation_context_from_project_v1,
+    representation_source_context_v1}
+use compiler.common.assurance.representation_manifest_v1.{
+    RepresentationDeclarationV1}
+use compiler.common.module_path_naming.{module_logical_name_from_path}
+use compiler.frontend.core.representation_declarations_v1.{
+    parse_representation_source_v1}
+use compiler.frontend.flat_ast_bridge.{flat_pools_dump_all, flat_pools_restore_all}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_encode_reason,
+    hir_module_decode, hir_codec_abi_interface_parts_v1}
+use compiler.driver.hir_typecheck_consumer_v1.{HirTypecheckReceiptV1}
+use compiler.driver.hir_semantic_consumer_v1.{
+    collect_module_representation_receipt_v1}
+use compiler.driver.cache.cold_hir_semantic_seed_v1.{cold_hir_semantic_seed_v1}
+use compiler.tools.lint.lint_rule_api.{LintUnit, StaticLintFinding}
+use compiler.tools.lint.representation_lint_context_v1.{representation_lint_params_v1}
+use compiler.tools.lint.rules.bare_primitive_internal_rule.{
+    bare_primitive_internal_lint_rule}
+use compiler.semantics.lint.raw_sffi_call.{check_raw_sffi_declarations}
+use compiler.semantics.representation_boundary.hir_binding.{representation_bind_hir_v1}
+use compiler.semantics.any_escape.types.{AnyEscapeProfile}
+use compiler.semantics.any_escape.checker.{any_escape_check}
+use compiler.driver.driver_api_compile_single.{
+    compile_file_with_representation_project_v1}
+
+val REPRESENTATION_PROJECT_PATH = "/tmp/a5_fixture_project.sdn"
+val REPRESENTATION_PROJECT_SOURCE = "project:\n  name: fixture_pkg\n"
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_dir_remove_all(path: text) -> bool
+
+fn fixture_representation_project_v1() -> RepresentationProjectContextV1:
+    val project = representation_context_from_project_v1(
+        REPRESENTATION_PROJECT_SOURCE, REPRESENTATION_PROJECT_PATH)
+    expect(project.error).to_equal("")
+    project
+
+fn write_file(path: text, source: text):
+    expect(rt_file_write_text(path, source)).to_equal(true)
+
+fn restore_env_value(key: text, previous: text?):
+    match previous:
+        case Some(value): env_set(key, value)
+        case None: env_unset(key)
+
+fn cleanup_entry_sources(root: text):
+    rt_dir_remove_all(root)
+
+fn parse_representation_fixture_v1(source: text, path: text, package: text,
+        module_path: text) -> [RepresentationDeclarationV1]:
+    parse_representation_source_v1(source, path, package, module_path)
+
+fn compile_representation_fixture_v1(source: text, path: text,
+        module_name: text, strictness: AssuranceStrictness) -> HirTypecheckReceiptV1:
+    val module = lower_representation_fixture_v1(source, path, module_name)
+    collect_module_representation_receipt_v1(module_name, module, strictness)
+
+fn lower_representation_fixture_v1(source: text, path: text,
+        module_name: text) -> HirModule:
+    val parsed = parse_full_frontend(source, path, module_name, Logger(level: 0))
+    var lowering = HirLowering.with_filename(path)
+    var module: HirModule = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    val source_context = representation_source_context_v1(
+        fixture_representation_project_v1(), module_logical_name_from_path(path),
+        sha256_text(source))
+    module.representation_declarations = representation_bind_hir_v1(module,
+        source_context)
+    expect(module.representation_declarations.len()).to_be_greater_than(0)
+    module
+
+fn lower_plain_fixture_v1(source: text, path: text, module_name: text) -> HirModule:
+    val parsed = parse_full_frontend(source, path, module_name, Logger(level: 0))
+    var lowering = HirLowering.with_filename(path)
+    val module: HirModule = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    module
+
+fn lint_representation_fixture_v1(source: text, path: text) -> [StaticLintFinding]:
+    val params = representation_lint_params_v1(fixture_representation_project_v1(),
+        module_logical_name_from_path(path), AssuranceStrictness.Critical, path, source)
+    bare_primitive_internal_lint_rule().check(
+        params, LintUnit(path, source))
+
+fn assert_representation_diagnostics_v1(receipt: HirTypecheckReceiptV1,
+        code: text, expected_error: bool):
+    val rendered = receipt.messages.join("\n")
+    expect(rendered).to_contain(code)
+    if expected_error:
+        expect(receipt.errors.join("\n")).to_contain(code)
+    else:
+        expect(receipt.errors.join("\n")).to_equal("")
+
+fn system_boundary_v1() -> text:
+    "@representation_boundary(kind: \"layout\", reason: \"Encode a fixed device word\", reviewers: [\"platform-owner\"], capabilities: [])\n" +
+    "fn encode_device_word():\n" +
+    "    val raw = 1\n" +
+    "    raw\n"
+
+fn assert_trait_cache_observations_v1(source: text, identity: text,
+        expected_unsafe: i64, expected_defaults: i64, expected_signatures: i64):
+    val root = "/tmp/a5_trait_observations"
+    val module = lower_plain_fixture_v1(source, root + "/" + identity, identity)
+    expect(module.traits.len()).to_equal(1)
+    var default_count = 0
+    var signature_count = 0
+    for trait_ in module.traits.values():
+        default_count = default_count + trait_.defaults.len()
+        signature_count = signature_count + trait_.methods.len()
+    expect(default_count).to_equal(expected_defaults)
+    expect(signature_count).to_equal(expected_signatures)
+    expect(module.representation_declarations.len()).to_equal(0)
+    expect(hir_codec_abi_interface_parts_v1(module).is_ok()).to_be(true)
+    val encoded = hir_module_encode(module)
+    expect(encoded != "").to_be(true)
+    val decoded = hir_module_decode(encoded)
+    expect(decoded != nil).to_be(true)
+    val restored = decoded.unwrap()
+    val fresh = collect_module_representation_receipt_v1(module.name, module,
+        AssuranceStrictness.Critical)
+    val warm = collect_module_representation_receipt_v1(restored.name, restored,
+        AssuranceStrictness.Critical)
+    expect(fresh.errors.len()).to_equal(expected_unsafe)
+    expect(warm.errors.join("\n")).to_equal(fresh.errors.join("\n"))
+    val moderate = collect_module_representation_receipt_v1(module.name, module,
+        AssuranceStrictness.Moderate)
+    val warm_moderate = collect_module_representation_receipt_v1(restored.name, restored,
+        AssuranceStrictness.Moderate)
+    expect(moderate.errors.len()).to_equal(0)
+    expect(moderate.warnings.len()).to_equal(expected_unsafe)
+    expect(warm_moderate.warnings.join("\n")).to_equal(moderate.warnings.join("\n"))
+    if expected_unsafe > 0:
+        expect(fresh.errors.join("\n")).to_contain("E-MC-REP-001")
+        expect(moderate.warnings.join("\n")).to_contain("E-MC-REP-001")
+    val digest = sha256_text(source)
+    val inventory = CompileSourceInventoryV1(1, 1, [
+        CompileSourceInventoryEntryV1(identity, digest, digest,
+            digest, digest, digest, source.len())])
+    expect(cold_hir_semantic_seed_v1(module, root, identity, source,
+        inventory, compile_source_inventory_digest_v1(inventory)).is_ok()).to_be(true)
+
+describe "A5 system source-to-consumer ownership" :
+    it "retains the real source declaration at its owning identity":
+        step("Bind the boundary to its declaration")
+        val declarations = parse_representation_fixture_v1(system_boundary_v1(),
+            "src/app/device_word.spl", "hardware_pkg", "hardware_pkg.device_word")
+        expect(declarations.len()).to_equal(1)
+        expect(declarations[0].components.name).to_equal("encode_device_word")
+        val receipt = compile_representation_fixture_v1(system_boundary_v1(),
+            "src/app/device_word.spl", "hardware_pkg.device_word",
+            AssuranceStrictness.Critical)
+        expect(receipt.errors.len()).to_equal(0)
+
+    it "rejects malformed and unknown metadata without granting the primitive exception":
+        step("Validate the reviewer manifest")
+        val malformed = "@representation_boundary(kind: \"layout\", reason: \"word\", reviewers: [\"one\", \"one\"], capabilities: [\"made_up\"])\n" +
+            "fn encode_device_word():\n" +
+            "    val raw = 1\n" +
+            "    raw\n"
+        val receipt = compile_representation_fixture_v1(malformed,
+            "src/app/device_word_bad.spl", "hardware_pkg.device_word_bad",
+            AssuranceStrictness.Critical)
+        assert_representation_diagnostics_v1(receipt, "E-MC-REP-001", true)
+        assert_representation_diagnostics_v1(receipt, "E-MC-REP-003", true)
+        val findings = lint_representation_fixture_v1(malformed,
+            "src/app/device_word_bad.spl")
+        var bare_count = 0
+        for finding in findings:
+            if finding.code == "W-MC-VAL-001":
+                bare_count = bare_count + 1
+        expect(bare_count).to_equal(1)
+
+    it "limits the primitive exception to the exact annotated callable":
+        step("Apply the scoped primitive exemption")
+        val distinct_sibling_functions = system_boundary_v1() +
+            "\nfn inspect_device_word():\n    val raw = 2\n    raw\n"
+        val findings = lint_representation_fixture_v1(distinct_sibling_functions,
+            "src/app/device_word_pair.spl")
+        var bare_count = 0
+        for finding in findings:
+            if finding.code == "W-MC-VAL-001":
+                bare_count = bare_count + 1
+                expect(finding.line_num).to_be_greater_than(4)
+        expect(bare_count).to_equal(1)
+
+    it "rejects duplicate callable identity before either primitive exemption":
+        val source = system_boundary_v1() +
+            "\nfn encode_device_word():\n    val raw = 2\n    raw\n"
+        val findings = lint_representation_fixture_v1(source,
+            "src/app/device_word_duplicate.spl")
+        var bare_count = 0
+        var identity_count = 0
+        for finding in findings:
+            if finding.code == "W-MC-VAL-001": bare_count = bare_count + 1
+            if finding.code == "E-MC-REP-002": identity_count = identity_count + 1
+        expect(bare_count).to_equal(2)
+        expect(identity_count).to_be_greater_than(0)
+
+    it "rejects manifests on associated types and placeholders before the next method":
+        step("Reject stale or misplaced metadata")
+        for unsupported in ["type Item = i64", "pass"]:
+            val source = "class UnsupportedMember:\n" +
+                "    @representation_boundary(kind: \"layout\", reason: \"Describe a member\", reviewers: [\"layout-owner\"], capabilities: [])\n" +
+                "    " + unsupported + "\n" +
+                "    fn inspect(self):\n        val raw = 4\n        raw\n"
+            val declarations = parse_representation_fixture_v1(source,
+                "src/app/unsupported_member.spl", "fixture_pkg",
+                "fixture_pkg.unsupported_member")
+            var rejected = false
+            var method_seen = false
+            for declaration in declarations:
+                if declaration.components.name == "" and declaration.metadata_errors.len() > 0:
+                    rejected = true
+                if declaration.components.name == "inspect":
+                    method_seen = true
+                    expect(declaration.manifest).to_be_nil()
+                    expect(declaration.metadata_errors.len()).to_equal(0)
+            expect(rejected).to_be(true)
+            expect(method_seen).to_be(true)
+            val findings = lint_representation_fixture_v1(source,
+                "src/app/unsupported_member.spl")
+            var bare_count = 0
+            var metadata_count = 0
+            for finding in findings:
+                if finding.code == "W-MC-VAL-001": bare_count = bare_count + 1
+                if finding.code == "E-MC-REP-001": metadata_count = metadata_count + 1
+            expect(bare_count).to_equal(1)
+            expect(metadata_count).to_be_greater_than(0)
+
+    it "observes unannotated trait default bodies and parameter defaults fresh and warm":
+        val body_source = "trait UnsafeDefault:\n" +
+            "    fn inspect(self) -> i64:\n" +
+            "        unsafe(capabilities: [ffi]): 7\n"
+        assert_trait_cache_observations_v1(body_source, "trait_unsafe_body.spl", 1, 1, 0)
+        val signature_source = "trait UnsafeSignatureDefault:\n" +
+            "    fn inspect(self, value: i64 = unsafe(capabilities: [ffi]): 7) -> i64\n"
+        assert_trait_cache_observations_v1(signature_source, "trait_unsafe_signature.spl", 1, 0, 1)
+        val parameter_source = "trait UnsafeMethodDefault:\n" +
+            "    fn inspect(self, value: i64 = unsafe(capabilities: [ffi]): 7) -> i64: value\n"
+        assert_trait_cache_observations_v1(parameter_source, "trait_unsafe_parameter.spl", 1, 1, 0)
+
+    it "preserves safe trait default and signature cache controls without project context":
+        val source = "trait SafeDefaults:\n" +
+            "    fn inspect(self, value: i64 = 7) -> i64: value\n" +
+            "    fn required(self, value: i64 = 8) -> i64\n"
+        assert_trait_cache_observations_v1(source, "trait_safe_defaults.spl", 0, 1, 1)
+
+    it "does not turn representation metadata into an unsafe operation grant":
+        step("Preserve unsafe capability diagnostics")
+        val source = "@representation_boundary(kind: \"ffi\", reason: \"Describe a raw interface\", reviewers: [\"ffi-owner\"], capabilities: [])\n" +
+            "fn read_device_word():\n" +
+            "    unsafe(capabilities: [ffi]):\n" +
+            "        val raw = 1\n" +
+            "        raw\n"
+        val receipt = compile_representation_fixture_v1(source,
+            "src/app/device_word_ffi.spl", "hardware_pkg.device_word_ffi",
+            AssuranceStrictness.Critical)
+        expect(receipt.messages.join("\n")).to_contain("E-MC-REP-003")
+
+    it "does not let representation metadata grant the type-erasure capability":
+        val source = "@representation_boundary(kind: \"layout\", reason: \"Describe an erased boundary\", reviewers: [\"layout-owner\"], capabilities: [])\n" +
+            "fn erased_boundary(raw: Any) -> Any:\n" +
+            "    raw\n"
+        val module = lower_representation_fixture_v1(source,
+            "src/app/representation_any.spl", "hardware_pkg.representation_any")
+        val diagnostics = any_escape_check(module, AnyEscapeProfile.critical([]))
+        var outside_unsafe_count = 0
+        for diagnostic in diagnostics:
+            if diagnostic.code == "E-MC-ANY-001":
+                outside_unsafe_count = outside_unsafe_count + 1
+        expect(outside_unsafe_count).to_be_greater_than(0)
+
+    it "binds method manifests, rejects member carryover, and keeps type scope off methods":
+        step("Bind the boundary to its declaration")
+        val method_source = "class DeviceWord:\n" +
+            "    @representation_boundary(kind: \"layout\", reason: \"Encode a device word\", reviewers: [\"layout-owner\"], capabilities: [])\n" +
+            "    fn encode(self):\n" +
+            "        val raw = 7\n" +
+            "        raw\n"
+        val declarations = parse_representation_fixture_v1(method_source,
+            "src/app/annotated_method.spl", "hardware_pkg",
+            "hardware_pkg.annotated_method")
+        var found_method_manifest = false
+        for declaration in declarations:
+            if declaration.components.name == "encode" and declaration.manifest != nil:
+                found_method_manifest = true
+        expect(found_method_manifest).to_be(true)
+        val method_receipt = compile_representation_fixture_v1(method_source,
+            "src/app/annotated_method.spl", "hardware_pkg.annotated_method",
+            AssuranceStrictness.Critical)
+        expect(method_receipt.errors.len()).to_equal(0)
+
+        step("Reject stale or misplaced metadata")
+        val invalid_member_source = "class DeviceWord:\n" +
+            "    @representation_boundary(kind: \"layout\", reason: \"Describe the field\", reviewers: [\"layout-owner\"], capabilities: [])\n" +
+            "    bits: i32 = 1\n" +
+            "    fn clean(self):\n" +
+            "        0\n"
+        val invalid_member_declarations = parse_representation_fixture_v1(
+            invalid_member_source, "src/app/invalid_member.spl", "hardware_pkg",
+            "hardware_pkg.invalid_member")
+        var rejected_member_metadata = false
+        var clean_method_inherited = false
+        for declaration in invalid_member_declarations:
+            if declaration.components.name == "" and declaration.metadata_errors.len() > 0:
+                rejected_member_metadata = true
+            if declaration.components.name == "clean" and
+                    (declaration.manifest != nil or declaration.metadata_errors.len() > 0):
+                clean_method_inherited = true
+        expect(rejected_member_metadata).to_be(true)
+        expect(clean_method_inherited).to_be(false)
+
+        step("Apply the scoped primitive exemption")
+        val type_source = "@representation_boundary(kind: \"layout\", reason: \"Describe the type layout\", reviewers: [\"layout-owner\"], capabilities: [])\n" +
+            "class TypeScopedWord:\n" +
+            "    fn inspect(self):\n" +
+            "        val raw = 8\n" +
+            "        raw\n"
+        val type_findings = lint_representation_fixture_v1(type_source,
+            "src/app/type_scope_method.spl")
+        var method_bare_count = 0
+        for finding in type_findings:
+            if finding.code == "W-MC-VAL-001":
+                method_bare_count = method_bare_count + 1
+        expect(method_bare_count).to_equal(1)
+
+        val method_unsafe_source = "@representation_boundary(kind: \"layout\", reason: \"Describe the type layout\", reviewers: [\"layout-owner\"], capabilities: [])\n" +
+            "class UnsafeWord:\n" +
+            "    @representation_boundary(kind: \"ffi\", reason: \"Describe the method boundary\", reviewers: [\"ffi-owner\"], capabilities: [])\n" +
+            "    fn read(self):\n" +
+            "        unsafe(capabilities: [ffi]):\n" +
+            "            val raw = 9\n" +
+            "            raw\n"
+        val method_unsafe_declarations = parse_representation_fixture_v1(
+            method_unsafe_source, "src/app/method_unsafe_scope.spl", "hardware_pkg",
+            "hardware_pkg.method_unsafe_scope")
+        var type_received_unsafe_cap = false
+        var method_received_unsafe_cap = false
+        for declaration in method_unsafe_declarations:
+            if declaration.components.name == "UnsafeWord" and
+                    declaration.region_capabilities.contains("ffi"):
+                type_received_unsafe_cap = true
+            if declaration.components.name == "read" and
+                    declaration.region_capabilities.contains("ffi"):
+                method_received_unsafe_cap = true
+        expect(type_received_unsafe_cap).to_be(false)
+        expect(method_received_unsafe_cap).to_be(true)
+        step("Preserve unsafe capability diagnostics")
+        val method_unsafe_receipt = compile_representation_fixture_v1(
+            method_unsafe_source, "src/app/method_unsafe_scope.spl",
+            "hardware_pkg.method_unsafe_scope", AssuranceStrictness.Critical)
+        expect(method_unsafe_receipt.messages.join("\n")).to_contain("E-MC-REP-003")
+
+    it "keeps method findings and raw extern diagnostics outside declaration waivers":
+        step("Reject stale or misplaced metadata")
+        val multiline_source = "@representation_boundary(\n" +
+            "    kind: \"layout\",\n" +
+            "    reason: \"Store a fixed word\",\n" +
+            "    reviewers: [\"layout-owner\"],\n" +
+            "    capabilities: [],\n" +
+            ")\n" +
+            "fn encode_multiline():\n    val raw = 4\n    raw\n"
+        val multiline_declarations = parse_representation_fixture_v1(
+            multiline_source, "src/app/multiline_manifest.spl", "hardware_pkg",
+            "hardware_pkg.multiline_manifest")
+        expect(multiline_declarations.len()).to_equal(1)
+        expect(multiline_declarations[0].components.name).to_equal("encode_multiline")
+
+        val spoof_source = "# @representation_boundary(kind: \"layout\", reason: \"comment\", reviewers: [\"x\"], capabilities: [])\n" +
+            "const marker = \"@representation_boundary(kind: layout)\"\n" +
+            "fn ordinary():\n    0\n"
+        val spoof_declarations = parse_representation_fixture_v1(spoof_source,
+            "src/app/manifest_spoof.spl", "hardware_pkg",
+            "hardware_pkg.manifest_spoof")
+        expect(spoof_declarations.len()).to_equal(0)
+
+        val duplicate_source = "@representation_boundary(kind: \"layout\", reason: \"word\", reviewers: [\"one\"], capabilities: [])\n" +
+            "@representation_boundary(kind: \"layout\", reason: \"word\", reviewers: [\"two\"], capabilities: [])\n" +
+            "fn duplicate_boundary():\n    val raw = 5\n    raw\n"
+        val duplicate_declarations = parse_representation_fixture_v1(
+            duplicate_source, "src/app/duplicate_manifest.spl", "hardware_pkg",
+            "hardware_pkg.duplicate_manifest")
+        expect(duplicate_declarations.len()).to_equal(1)
+        expect(duplicate_declarations[0].metadata_errors.len()).to_be_greater_than(0)
+        val after_duplicate = parse_representation_fixture_v1(
+            "fn clean_after_duplicate():\n    0\n",
+            "src/app/clean_after_duplicate.spl", "hardware_pkg",
+            "hardware_pkg.clean_after_duplicate")
+        expect(after_duplicate.len()).to_equal(0)
+
+        val first_source = system_boundary_v1()
+        val first_findings = lint_representation_fixture_v1(first_source,
+            "src/app/stale_manifest.spl")
+        expect(first_findings.len()).to_equal(0)
+        val changed_source = "@representation_boundary(kind: \"layout\", reason: \"\", reviewers: [], capabilities: [])\n" +
+            "fn encode_device_word():\n" +
+            "    val raw = 1\n" +
+            "    raw\n"
+        val changed_findings = lint_representation_fixture_v1(changed_source,
+            "src/app/stale_manifest.spl")
+        var changed_bare_count = 0
+        for finding in changed_findings:
+            if finding.code == "W-MC-VAL-001":
+                changed_bare_count = changed_bare_count + 1
+        expect(changed_bare_count).to_equal(1)
+
+        val type_scoped = "@representation_boundary(kind: \"layout\", reason: \"Store a word\", reviewers: [\"layout-owner\"], capabilities: [])\n" +
+            "class DeviceWord:\n" +
+            "    bits: u32\n" +
+            "    fn inspect(self):\n" +
+            "        val raw = 3\n" +
+            "        raw\n"
+        val method_findings = lint_representation_fixture_v1(type_scoped,
+            "src/app/device_word_method.spl")
+        var method_bare_count = 0
+        for finding in method_findings:
+            if finding.code == "W-MC-VAL-001":
+                method_bare_count = method_bare_count + 1
+        expect(method_bare_count).to_equal(1)
+
+        val raw_extern = "@representation_boundary(kind: \"ffi\", reason: \"Describe raw ABI data\", reviewers: [\"ffi-owner\"], capabilities: [])\n" +
+            "extern fn raw_read() -> i32\n"
+        val extern_findings = check_raw_sffi_declarations(raw_extern,
+            "src/app/raw_device.spl")
+        expect(extern_findings.len()).to_equal(1)
+        expect(extern_findings[0].code).to_equal("SFFI010")
+
+    it "does not inherit an outer admission inside a named nested callable":
+        step("Apply the scoped primitive exemption")
+        val source = "@representation_boundary(kind: \"layout\", reason: \"Encode a word\", reviewers: [\"layout-owner\"], capabilities: [])\n" +
+            "fn encode_outer():\n" +
+            "    fn nested():\n" +
+            "        val nested_raw = 2\n" +
+            "        nested_raw\n" +
+            "    val own_raw = 3\n" +
+            "    own_raw\n"
+        val findings = lint_representation_fixture_v1(source,
+            "src/app/representation_nested.spl")
+        var own_count = 0
+        var nested_count = 0
+        for finding in findings:
+            if finding.code == "W-MC-VAL-001" and finding.line_num == 4:
+                nested_count = nested_count + 1
+            if finding.code == "W-MC-VAL-001" and finding.line_num == 6:
+                own_count = own_count + 1
+        expect(nested_count).to_equal(1)
+        expect(own_count).to_equal(0)
+
+    it "admits valid and rejects malformed metadata at the actual selected-project check entry":
+        val root = "/tmp/a5_representation_entry_{getpid()}"
+        val previous_profile = env_get("SIMPLE_SAFETY_PROFILE")
+        defer restore_env_value("SIMPLE_SAFETY_PROFILE", previous_profile)
+        val previous_streaming = env_get("SIMPLE_STAGE3_STREAMING_SURFACES")
+        defer restore_env_value("SIMPLE_STAGE3_STREAMING_SURFACES", previous_streaming)
+        val previous_entry = env_get("SIMPLE_NATIVE_BUILD_ENTRY")
+        defer restore_env_value("SIMPLE_NATIVE_BUILD_ENTRY", previous_entry)
+        val valid_path = root + "/entry_valid.spl"
+        val invalid_path = root + "/entry_invalid.spl"
+        val streaming_path = root + "/entry_streaming_invalid.spl"
+        defer cleanup_entry_sources(root)
+        expect(rt_dir_create_all(root)).to_equal(true)
+        val invalid_source = "@representation_boundary(kind: \"layout\", reason: \"word\", reviewers: [], capabilities: [])\n" +
+            "fn encode_device_word():\n    val raw = 6\n    raw\n"
+        expect(env_set("SIMPLE_SAFETY_PROFILE", "critical")).to_equal(true)
+        write_file(valid_path, system_boundary_v1())
+        write_file(invalid_path, invalid_source)
+        write_file(streaming_path, invalid_source)
+        val valid_result = compile_file_with_representation_project_v1(
+            valid_path, REPRESENTATION_PROJECT_PATH, REPRESENTATION_PROJECT_SOURCE)
+        val invalid_result = compile_file_with_representation_project_v1(
+            invalid_path, REPRESENTATION_PROJECT_PATH, REPRESENTATION_PROJECT_SOURCE)
+        expect(env_set("SIMPLE_STAGE3_STREAMING_SURFACES", "1")).to_equal(true)
+        expect(env_set("SIMPLE_NATIVE_BUILD_ENTRY", streaming_path)).to_equal(true)
+        val streaming_result = compile_file_with_representation_project_v1(
+            streaming_path, REPRESENTATION_PROJECT_PATH, REPRESENTATION_PROJECT_SOURCE,
+            CompileMode.Aot)
+        expect(valid_result.is_success()).to_equal(true)
+        expect(invalid_result.is_success()).to_equal(false)
+        expect(invalid_result.get_errors().join("\n")).to_contain("E-MC-REP-001")
+        expect(streaming_result.is_success()).to_equal(false)
+        expect(streaming_result.get_errors().join("\n")).to_contain("E-MC-REP-001")
+
+    it "refuses lossy HIR and source AST snapshots for typed representation metadata":
+        val module = lower_representation_fixture_v1(system_boundary_v1(),
+            "src/app/representation_codec.spl", "fixture_pkg.representation_codec")
+        expect(hir_module_encode(module)).to_equal("")
+        expect(hir_module_encode_reason(module)).to_contain("E-MC-REP-004")
+        val declarations = parse_representation_fixture_v1(system_boundary_v1(),
+            "src/app/representation_flat_pool.spl", "fixture_pkg",
+            "fixture_pkg.representation_flat_pool")
+        expect(declarations.len()).to_equal(1)
+        val snapshot = flat_pools_dump_all()
+        expect(snapshot).to_equal("")
+        expect(flat_pools_restore_all(snapshot)).to_be(false)
+
+    it "keeps ordinary unsafe ABI and cold semantic projection without storing representation metadata":
+        val source = "fn ordinary_unsafe():\n" +
+            "    unsafe(capabilities: [ffi]):\n" +
+            "        val raw = 10\n" +
+            "        raw\n"
+        val root = "/tmp/a5_ordinary_unsafe"
+        val identity = "ordinary_unsafe.spl"
+        val path = root + "/" + identity
+        val module = lower_plain_fixture_v1(source, path, "ordinary_unsafe")
+        expect(module.representation_declarations.len()).to_equal(0)
+        expect(hir_codec_abi_interface_parts_v1(module).is_ok()).to_equal(true)
+
+        val encoded = hir_module_encode(module)
+        expect(encoded != "").to_be(true)
+        val decoded = hir_module_decode(encoded)
+        expect(decoded != nil).to_be(true)
+        val restored = decoded.unwrap()
+        expect(restored.representation_declarations.len()).to_equal(0)
+
+        val fresh_critical = collect_module_representation_receipt_v1(
+            module.name, module, AssuranceStrictness.Critical)
+        val restored_critical = collect_module_representation_receipt_v1(
+            restored.name, restored, AssuranceStrictness.Critical)
+        expect(fresh_critical.errors.join("\n")).to_contain("E-MC-REP-001")
+        expect(restored_critical.errors.join("\n")).to_equal(
+            fresh_critical.errors.join("\n"))
+        val fresh_moderate = collect_module_representation_receipt_v1(
+            module.name, module, AssuranceStrictness.Moderate)
+        val restored_moderate = collect_module_representation_receipt_v1(
+            restored.name, restored, AssuranceStrictness.Moderate)
+        expect(fresh_moderate.warnings.join("\n")).to_contain("E-MC-REP-001")
+        expect(restored_moderate.warnings.join("\n")).to_equal(
+            fresh_moderate.warnings.join("\n"))
+
+        val source_digest = sha256_text(source)
+        val inventory = CompileSourceInventoryV1(1, 1, [
+            CompileSourceInventoryEntryV1(identity, source_digest, source_digest,
+                source_digest, source_digest, source_digest, source.len())])
+        val inventory_digest = compile_source_inventory_digest_v1(inventory)
+        val cold_seed = cold_hir_semantic_seed_v1(module, root, identity, source,
+            inventory, inventory_digest)
+        expect(cold_seed.is_ok()).to_equal(true)
+        expect(cold_seed.unwrap().source_digest).to_equal(source_digest)
+
+    it "preserves the ordinary safe control without project context or representation diagnostics":
+        val source = "fn ordinary_safe() -> i64:\n    return 10\n"
+        val root = "/tmp/a5_ordinary_safe"
+        val identity = "ordinary_safe.spl"
+        val module = lower_plain_fixture_v1(source, root + "/" + identity, "ordinary_safe")
+        expect(module.representation_declarations.len()).to_equal(0)
+        expect(hir_codec_abi_interface_parts_v1(module).is_ok()).to_equal(true)
+        val encoded = hir_module_encode(module)
+        expect(encoded != "").to_be(true)
+        val restored = hir_module_decode(encoded).unwrap()
+        expect(collect_module_representation_receipt_v1(module.name, module,
+            AssuranceStrictness.Moderate).messages.len()).to_equal(0)
+        expect(collect_module_representation_receipt_v1(restored.name, restored,
+            AssuranceStrictness.Critical).messages.len()).to_equal(0)
+        val digest = sha256_text(source)
+        val inventory = CompileSourceInventoryV1(1, 1, [
+            CompileSourceInventoryEntryV1(identity, digest, digest,
+                digest, digest, digest, source.len())])
+        expect(cold_hir_semantic_seed_v1(module, root, identity, source,
+            inventory, compile_source_inventory_digest_v1(inventory)).is_ok()).to_equal(true)

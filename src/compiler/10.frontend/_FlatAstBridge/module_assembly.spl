@@ -1,3 +1,4 @@
+use compiler.frontend.core.parser_preprocessor.{preprocess_conditionals}
 # Flat AST Bridge: module assembly (flat_ast_to_module, parse_and_build_module).
 use compiler.frontend.flat_ast_bridge.*
 use compiler.core.frontend.{ParserProviderV1, ParserProviderAdmissionV1, parser_provider_v1_admit, parser_provider_v1_default}
@@ -279,6 +280,8 @@ fn flat_parser_field_from_nodes(
         is_volatile: false, has_bits: has_bits, bits: bits,
         has_fixed_address: false, fixed_address: 0,
         span: make_span())
+
+use compiler.frontend.core.representation_declarations_v1.{representation_parser_metadata_v1, representation_parser_has_metadata_v1, representation_parser_refuse_restored_metadata_v1}
 
 fn flat_ast_to_module(path: text) -> ParserModule:
     val saved_compiler_trace_scope = frontend_compiler_trace_scope_enter()
@@ -1259,6 +1262,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
     built_module.function_headers = function_headers
     built_module.nogc_strict = module_nogc_strict
     built_module.extend_enums = build_parser_extend_enums()
+    built_module.representation_declarations = representation_parser_metadata_v1()
     if flat_bridge_trace_enabled():
         print "[flat-bridge] built frontend module path={path}"
     frontend_compiler_trace_scope_exit(saved_compiler_trace_scope)
@@ -1298,6 +1302,10 @@ pub fn flat_pools_dump_for_cache() -> text:
     blob
 
 pub fn flat_pools_dump_all() -> text:
+    # The flat snapshot has no typed representation carrier yet. Refuse to
+    # cache these modules rather than silently dropping reviewer authority.
+    if representation_parser_has_metadata_v1():
+        return ""
     var out = FLAT_POOL_CODEC_VERSION + "\n"
     out = out + flat_decl_pools_dump()
     out = out + flat_expr_pools_dump()
@@ -1317,6 +1325,7 @@ pub fn flat_pools_dump_all() -> text:
 # short-circuited: a restore that stops halfway leaves the pools in a torn
 # state that a later `and` would hide.
 pub fn flat_pools_restore_all(blob: text) -> bool:
+    representation_parser_refuse_restored_metadata_v1()
     val r = FlatPoolReader.new_canonical(blob)
     val version = r.next()
     if version != FLAT_POOL_CODEC_VERSION:
@@ -1456,16 +1465,36 @@ pub fn build_module_from_flat_pool_blob(blob: text, source: text, path: text) ->
     Some(built)
 
 pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: bool) -> ParserModule:
-    parse_and_build_module_with_scope_owner(source, path, streaming_scope, false)
+    val receipt = parse_and_build_module_with_scope_owner(source, path, streaming_scope, false, false)
+    receipt.module
 
 # The caller must keep its transient scope alive until the returned module and
 # any captured blob have been consumed or promoted. This entry never opens,
 # pauses, promotes out of, or ends that borrowed scope.
 pub fn parse_and_build_module_in_borrowed_scope(source: text, path: text) -> ParserModule:
-    parse_and_build_module_with_scope_owner(source, path, false, true)
+    val receipt = parse_and_build_module_with_scope_owner(source, path, false, true, false)
+    receipt.module
+
+struct FlatReferenceCheckedParseV1:
+    module: ParserModule
+    had_errors: bool
+    errors: [text]
+
+pub fn parse_and_build_module_checked_reference_v1(source: text, path: text) -> Result<ParserModule, text>:
+    # This path admits original coordinates only. Never preprocess directives
+    # or reuse a cache blob lacking a checked source/coordinate receipt.
+    val admission = parser_provider_v1_admit(parser_provider_v1_default())?
+    if admission.provider != ParserProviderV1.LegacyReference:
+        return Err("parse: unsupported parser provider: " + admission.provider_id)
+    if preprocess_conditionals(source) != source:
+        return Err("unsupported_syntax: conditional source requires an original-source map")
+    val receipt = parse_and_build_module_with_scope_owner(source, path, false, false, true)
+    if receipt.had_errors:
+        return Err("parse: " + receipt.errors.join("\n"))
+    Ok(receipt.module)
 
 fn parse_and_build_module_with_scope_owner(source: text, path: text,
-    streaming_scope: bool, borrowed_scope: bool) -> ParserModule:
+    streaming_scope: bool, borrowed_scope: bool, reference_checked: bool) -> FlatReferenceCheckedParseV1:
     val admission: ParserProviderAdmissionV1 = match parser_provider_v1_admit(parser_provider_v1_default()):
         case Err(reason): panic("flat AST parser provider admission failed: {reason}")
         case Ok(receipt): receipt
@@ -1474,14 +1503,15 @@ fn parse_and_build_module_with_scope_owner(source: text, path: text,
     val saved_compiler_trace_scope = frontend_compiler_trace_scope_enter()
     val saved_lex_source = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
     val saved_lex_path = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
-    if fab_lex_prof_enabled():
+    if not reference_checked and fab_lex_prof_enabled():
         val _lx_t0 = _sffi_time_now_unix_micros()
         val _lx_tokens = lex_tokenize_all(source)
         val _lx_t1 = _sffi_time_now_unix_micros()
         print("LEXPHASE\ttokenize_all\t{_lx_t1 - _lx_t0}\ttokens\t{_lx_tokens}\tchars\t{source.len()}\tpath\t{path}")
     reset_all_pools()
     parser_init_with_path(source, path)
-    val _rt_zero = if flat_roundtrip_enabled(): flat_pools_dump_all() else: ""
+    val reference_roundtrip = not reference_checked and flat_roundtrip_enabled()
+    val _rt_zero = if reference_roundtrip: flat_pools_dump_all() else: ""
     # The caller has already admitted this only for the experimental Stage4
     # AOT low-memory path. Keep the scope alive while the rich ParserModule is
     # copied out of the flat AST, then promote that retained graph before the
@@ -1533,7 +1563,7 @@ fn parse_and_build_module_with_scope_owner(source: text, path: text,
     val _pp_t4 = if fab_phase_prof_enabled(): _sffi_time_now_unix_micros() else: 0
     compiler_coverage_inventory_record_module(path)
     val _pp_t5 = if fab_phase_prof_enabled(): _sffi_time_now_unix_micros() else: 0
-    if parser_has_errors():
+    if parser_has_errors() and not reference_checked:
         val errors = parser_get_errors()
         var ei = 0
         while ei < errors.len():
@@ -1542,7 +1572,7 @@ fn parse_and_build_module_with_scope_owner(source: text, path: text,
     if transient_scope:
         if not _sffi_transient_array_scope_pause():
             panic("transient parser scope pause failed for {path}")
-    if flat_roundtrip_enabled():
+    if reference_roundtrip:
         flat_pools_roundtrip_selfcheck(path, _rt_zero)
     # A parse that reported errors is never stored: the driver poisons that
     # module and keeps going, and a stored error-parse would come back as a
@@ -1551,7 +1581,7 @@ fn parse_and_build_module_with_scope_owner(source: text, path: text,
     # Nor is a parse the captured-write check warned on: the stored tree is
     # post-desugar, where an `x = x + y` write is no longer visible to the
     # cache-hit re-check, and a warm hit would drop the warning.
-    if _fab_capture_pools == 1 and not parser_has_errors() and not capture_write_warned:
+    if _fab_capture_pools == 1 and not reference_checked and not parser_has_errors() and not capture_write_warned:
         val dump_t0 = if fab_cache_boundary_prof_enabled(): _sffi_time_now_unix_micros() else: 0
         # A parser-owned or caller-owned scope already contains the temporary
         # encoder objects. Its owner controls promotion and reclamation. Only
@@ -1564,6 +1594,10 @@ fn parse_and_build_module_with_scope_owner(source: text, path: text,
             val dump_t1 = _sffi_time_now_unix_micros()
             print("PARSECACHE\tdump_ms={(dump_t1 - dump_t0) / 1000}\tbytes={_fab_captured_blob.len()}\tpath={path}")
     val built_module = flat_ast_to_module(path)
+    # Capture the bridge result while this parse owns the error state. The
+    # next parse/lexer cleanup cannot turn a recovered tree into admission.
+    val reference_had_errors = if reference_checked: parser_has_errors() else: false
+    val reference_errors: [text] = if reference_checked: parser_get_errors() else: []
     # Bound fragments are validated by the bridge after flat-pool capture.
     # Never publish a captured parse that the canonical type parser rejected.
     if parser_has_errors():
@@ -1595,7 +1629,8 @@ fn parse_and_build_module_with_scope_owner(source: text, path: text,
         if not _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path):
             panic("failed to restore SIMPLE_BOOTSTRAP_LEX_PATH for {path}")
     frontend_compiler_trace_scope_exit(saved_compiler_trace_scope)
-    built_module
+    FlatReferenceCheckedParseV1(module: built_module, had_errors: reference_had_errors,
+        errors: reference_errors)
 
 pub fn parse_and_build_module_scoped_for_provider(
     provider: ParserProviderV1,

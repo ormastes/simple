@@ -58,6 +58,9 @@ typedef SSIZE_T ssize_t;
 #endif
 #include <sys/types.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
+#include <sys/wait.h>
+#endif
 #if defined(__linux__)
 #include <sys/auxv.h>
 #endif
@@ -1220,7 +1223,22 @@ int64_t rt_host_gpu_lane_last_phase(void) { return rt_host_gpu_lane_last_phase_c
  * the queue arrives as a caller-supplied argument. So this is an honest
  * no-backend answer, not a placeholder: it returns 0.
  */
-int64_t rt_host_gpu_active_backend_handle(void) { return 0; }
+/* BEGIN CORE C GPU BACKEND FALLBACK */
+/* The core C runtime has no active GPU backend. Let a linked provider own
+ * the public symbol: replacing its strong COFF definition can discard a
+ * merged function section also containing other provider exports. */
+#if defined(_MSC_VER)
+int64_t core_c_host_gpu_active_backend_handle(void) { return 0; }
+#if defined(_M_IX86)
+#pragma comment(linker, "/alternatename:_rt_host_gpu_active_backend_handle=_core_c_host_gpu_active_backend_handle")
+#else
+#pragma comment(linker, "/alternatename:rt_host_gpu_active_backend_handle=core_c_host_gpu_active_backend_handle")
+#endif
+#else
+__attribute__((weak)) int64_t rt_host_gpu_active_backend_handle(void) { return 0; }
+#endif
+
+/* END CORE C GPU BACKEND FALLBACK */
 
 void rt_host_gpu_queue_reset(void) {
     rt_host_gpu_queue_next_packet_id = 1;
@@ -14246,13 +14264,67 @@ int64_t rt_path_join(
     return result;
 }
 
+#if defined(_WIN32)
+/* Environment names and values are UTF-8 at this boundary, never ACP bytes. */
+static wchar_t* native_env_widen(const char* value) {
+    int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, NULL, 0);
+    if (count <= 0) return NULL;
+    wchar_t* wide = (wchar_t*)malloc((size_t)count * sizeof(wchar_t));
+    if (!wide) return NULL;
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, wide, count)) {
+        free(wide);
+        return NULL;
+    }
+    return wide;
+}
+
+static int64_t native_host_text_from_wide(const wchar_t* wide, DWORD length) {
+    if (length == 0) return rt_string_new((const uint8_t*)"", 0);
+    if (length > INT_MAX) return rt_core_nil();
+    int bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, (int)length, NULL, 0, NULL, NULL);
+    if (bytes <= 0) return rt_core_nil();
+    uint8_t* utf8 = (uint8_t*)malloc((size_t)bytes);
+    if (!utf8) return rt_core_nil();
+    int converted = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, (int)length, (char*)utf8, bytes, NULL, NULL);
+    int64_t result = converted == bytes ? rt_string_new(utf8, (uint64_t)bytes) : rt_core_nil();
+    free(utf8);
+    return result;
+}
+#endif
+
 static int64_t rt_env_get_cstr(const char* key) {
     if (!key) return rt_core_nil();
+#if defined(_WIN32)
+    wchar_t* wide_key = native_env_widen(key);
+    if (!wide_key) return rt_core_nil();
+    SetLastError(ERROR_SUCCESS);
+    DWORD capacity = GetEnvironmentVariableW(wide_key, NULL, 0);
+    if (capacity == 0) {
+        DWORD error = GetLastError();
+        free(wide_key);
+        return error == ERROR_SUCCESS ? rt_string_new((const uint8_t*)"", 0) : rt_core_nil();
+    }
+    wchar_t* wide = (wchar_t*)malloc((size_t)capacity * sizeof(wchar_t));
+    if (!wide) { free(wide_key); return rt_core_nil(); }
+    SetLastError(ERROR_SUCCESS);
+    DWORD length = GetEnvironmentVariableW(wide_key, wide, capacity);
+    DWORD read_error = GetLastError();
+    free(wide_key);
+    if (length >= capacity) { free(wide); return rt_core_nil(); }
+    if (length == 0) {
+        DWORD error = read_error;
+        free(wide);
+        return error == ERROR_SUCCESS ? rt_string_new((const uint8_t*)"", 0) : rt_core_nil();
+    }
+    int64_t result = native_host_text_from_wide(wide, length);
+    free(wide);
+    return result;
+#else
     const char* value = getenv(key);
     if (!value) return rt_core_nil();
     return rt_string_new((const uint8_t*)value, (uint64_t)strlen(value));
+#endif
 }
-
 int64_t rt_env_get(const uint8_t* key_ptr, uint64_t key_len) {
     char* key = rt_core_text_arg_to_cstr(key_ptr, key_len);
     int64_t result = rt_env_get_cstr(key);
@@ -14364,7 +14436,16 @@ bool rt_env_set(const uint8_t* key_ptr, uint64_t key_len, const uint8_t* value_p
         return false;
     }
 #if defined(_WIN32)
-    bool ok = rt_win_env_fits(key, value) && _putenv_s(key, value) == 0;
+    wchar_t* wide_key = native_env_widen(key);
+    wchar_t* wide_value = native_env_widen(value);
+    bool ok = wide_key && wide_value && rt_win_env_fits(key, value);
+    /* CRT's empty assignment deletes; restore the actual Win32 empty value. */
+    if (ok) {
+        ok = _wputenv_s(wide_key, wide_value) == 0;
+        if (ok) ok = SetEnvironmentVariableW(wide_key, wide_value) != 0;
+    }
+    free(wide_key);
+    free(wide_value);
 #else
     bool ok = setenv(key, value, 1) == 0;
 #endif
@@ -14383,8 +14464,13 @@ int8_t rt_env_remove(const uint8_t* key_ptr, uint64_t key_len) {
     char* key = rt_core_text_arg_to_cstr(key_ptr, key_len);
     if (!key) return 0;
 #if defined(_WIN32)
-    /* Windows deletes a variable by assigning it an empty value. */
-    bool ok = _putenv_s(key, "") == 0;
+    wchar_t* wide_key = native_env_widen(key);
+    bool ok = wide_key && rt_win_env_fits(key, "");
+    if (ok) {
+        ok = _wputenv_s(wide_key, L"") == 0;
+        if (ok) ok = SetEnvironmentVariableW(wide_key, NULL) != 0 || GetLastError() == ERROR_ENVVAR_NOT_FOUND;
+    }
+    free(wide_key);
 #else
     bool ok = unsetenv(key) == 0;
 #endif
@@ -15171,12 +15257,24 @@ int rt_file_move(const uint8_t* src_ptr, uint64_t src_len,
  * rejected it ("probable compiler/FFI ABI mismatch"), so a perfectly good cwd
  * read back as garbage/empty -- see the rt_file_read_text sibling. */
 int64_t rt_env_cwd(void) {
+#if defined(_WIN32)
+    DWORD capacity = GetCurrentDirectoryW(0, NULL);
+    if (!capacity) return rt_core_nil();
+    wchar_t* wide = (wchar_t*)malloc((size_t)capacity * sizeof(wchar_t));
+    if (!wide) return rt_core_nil();
+    DWORD length = GetCurrentDirectoryW(capacity, wide);
+    int64_t result = length > 0 && length < capacity ?
+        native_host_text_from_wide(wide, length) : rt_core_nil();
+    free(wide);
+    return result;
+#else
     char* cwd = rt_getcwd();
     /* RT_NIL == 3 (TAG_SPECIAL, payload 0); == RuntimeValue::NIL. */
     if (!cwd) return 3;
     int64_t result = rt_string_new((const uint8_t*)cwd, (uint64_t)strlen(cwd));
     free(cwd);
     return result;
+#endif
 }
 
 /* () -> RuntimeValue, per runtime_sffi.rs:1791.  Used to return a pointer into
@@ -16509,55 +16607,119 @@ int64_t rt_xxh3_128_text(int64_t data_value) {
     return rt_string_new((const uint8_t*)hex, 32u);
 }
 
-/* Run `cmd` through the shell and return captured stdout as a runtime string
- * (stderr passes through, exit status is discarded -- interpreter contract).
- * `cmd` arrives as a tagged runtime value: rt_shell_exec is in no codegen
- * text-ABI table, so the call site passes the value, not (ptr,len). Returns
- * nil when the shell cannot be spawned. */
-int64_t rt_shell_exec(int64_t cmd_value) {
+/* Legacy shell ABI: the scalar call records per-thread status; atomic tuple
+ * capture deliberately leaves that slot alone. Reuse the real process owner
+ * with no deadline/output cap, not the lossy rt_process_run_array fallback. */
+#if defined(_MSC_VER)
+static __declspec(thread) int64_t rt_shell_last_status = 0;
+#else
+static _Thread_local int64_t rt_shell_last_status = 0;
+#endif
+
+static SplArray* native_shell_capture(int64_t cmd_value) {
     RtCoreString* cmd = rt_core_as_string(cmd_value);
-    if (!cmd) return rt_core_nil();
+    if (!cmd || memchr(cmd->data, '\0', (size_t)cmd->len)) return NULL;
+    SplArray* args = rt_array_new(2);
+    if (!args) return NULL;
+#if defined(_WIN32)
+    const char* executable = "cmd.exe";
+    int64_t flag_value = rt_string_new((const uint8_t*)"/C", 2);
+#else
+    const char* executable = "/bin/sh";
+    int64_t flag_value = rt_string_new((const uint8_t*)"-c", 2);
+#endif
+    rt_array_push(args, flag_value);
+    rt_array_push(args, cmd_value);
+    SplArray* captured = (SplArray*)(uintptr_t)rt_process_run_timeout(
+        executable, (uint64_t)strlen(executable), args, 0);
+    rt_array_free(args);
+    rt_string_free(flag_value);
+    return captured;
+}
+
+/* Standalone core-C owns these real implementations. In a mixed link the
+ * strong Rust shell owner must travel with its own strings/tuples/process ABI.
+ * MSVC has no ELF-style weak function attribute, so expose fallback aliases. */
+#if defined(_MSC_VER)
+#if defined(_M_IX86)
+#pragma comment(linker, "/alternatename:_rt_shell_exit_code=_core_c_shell_exit_code")
+#pragma comment(linker, "/alternatename:_rt_shell_exec=_core_c_shell_exec")
+#pragma comment(linker, "/alternatename:_rt_shell_exec_tuple=_core_c_shell_exec_tuple")
+#else
+#pragma comment(linker, "/alternatename:rt_shell_exit_code=core_c_shell_exit_code")
+#pragma comment(linker, "/alternatename:rt_shell_exec=core_c_shell_exec")
+#pragma comment(linker, "/alternatename:rt_shell_exec_tuple=core_c_shell_exec_tuple")
+#endif
+#define rt_shell_exit_code core_c_shell_exit_code
+#define rt_shell_exec core_c_shell_exec
+#define rt_shell_exec_tuple core_c_shell_exec_tuple
+#define SHELL_C_WEAK
+#else
+#define SHELL_C_WEAK __attribute__((weak))
+#endif
+
+SHELL_C_WEAK int64_t rt_shell_exit_code(void) {
+    return rt_shell_last_status;
+}
+
+SHELL_C_WEAK int64_t rt_shell_exec(int64_t cmd_value) {
+    /* Preserve scalar popen behavior: stdout capture, inherited stderr/stdin,
+     * nil on spawn/allocation failure. Only exit-status recording is new. */
+    rt_shell_last_status = -1;
+    RtCoreString* cmd = rt_core_as_string(cmd_value);
+    if (!cmd || memchr(cmd->data, '\0', (size_t)cmd->len)) return rt_core_nil();
     char* command = (char*)malloc((size_t)cmd->len + 1u);
     if (!command) return rt_core_nil();
     memcpy(command, cmd->data, (size_t)cmd->len);
     command[cmd->len] = '\0';
-#if defined(_WIN32)
-    FILE* pipe = _popen(command, "r");
-#else
     FILE* pipe = popen(command, "r");
-#endif
     free(command);
     if (!pipe) return rt_core_nil();
     size_t cap = 4096, len = 0;
     uint8_t* buf = (uint8_t*)malloc(cap);
-    if (!buf) {
-#if defined(_WIN32)
-        _pclose(pipe);
-#else
-        pclose(pipe);
-#endif
-        return rt_core_nil();
-    }
+    if (!buf) { pclose(pipe); return rt_core_nil(); }
     size_t got;
     while ((got = fread(buf + len, 1, cap - len, pipe)) > 0) {
         len += got;
         if (len == cap) {
+            if (cap > SIZE_MAX / 2) { free(buf); buf = NULL; break; }
             uint8_t* grown = (uint8_t*)realloc(buf, cap * 2);
             if (!grown) { free(buf); buf = NULL; break; }
             buf = grown;
             cap *= 2;
         }
     }
-#if defined(_WIN32)
-    _pclose(pipe);
-#else
-    pclose(pipe);
-#endif
+    int status = pclose(pipe);
     if (!buf) return rt_core_nil();
+#if defined(_WIN32)
+    rt_shell_last_status = status;
+#else
+    rt_shell_last_status = status >= 0 && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+#endif
     int64_t result = rt_string_new(buf, (uint64_t)len);
     free(buf);
     return result;
 }
+
+SHELL_C_WEAK int64_t rt_shell_exec_tuple(int64_t cmd_value) {
+    SplArray* result = native_shell_capture(cmd_value);
+    int64_t tuple = rt_tuple_new(3);
+    if (result) {
+        for (int64_t i = 0; i < 3; ++i) rt_tuple_set(tuple, i, rt_array_get(result, i));
+        rt_array_free(result);
+    } else {
+        rt_tuple_set(tuple, 0, rt_string_new(NULL, 0));
+        rt_tuple_set(tuple, 1, rt_string_new(NULL, 0));
+        rt_tuple_set(tuple, 2, rt_value_int(-1));
+    }
+    return tuple;
+}
+#undef SHELL_C_WEAK
+#if defined(_MSC_VER)
+#undef rt_shell_exit_code
+#undef rt_shell_exec
+#undef rt_shell_exec_tuple
+#endif
 
 /* ================================================================
  * Process / Environment

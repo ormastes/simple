@@ -1546,6 +1546,7 @@ See [coding_style.md](../language/coding_style.md) for the current inheritance p
 ## See Also
 
 - [language/syntax.md](../language/syntax.md) - Main syntax guide
+- [Representation boundary manifests](../language/representation_boundary.md) - Exact declaration metadata, scoped MC011 exemption, and explicit unsafe capability bounds (source candidate; runtime unqualified)
 - [language/error_handling.md](../language/error_handling.md) - `Result`, `Option`, and `?`
 - [language/coding_style.md](../language/coding_style.md) - Canonical style rules
 - [../../06_spec/app/compiler/modules/grammar/grammar_reference.md](../../06_spec/app/compiler/modules/grammar/grammar_reference.md) - Grammar registry output

@@ -3,7 +3,12 @@
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.hir_typecheck_consumer_v1.{HirTypecheckReceiptV1, collect_module_typecheck_receipt_v1}
 use compiler.driver.hir_semantic_consumer_v1.{collect_module_safety_receipt_v1,
-    collect_module_any_escape_receipt_v1, collect_module_enum_contract_receipt_v1}
+    collect_module_any_escape_receipt_v1, collect_module_enum_contract_receipt_v1,
+    collect_module_representation_receipt_v1}
+use compiler.common.assurance.representation_context_v1.{RepresentationSourceContextV1}
+use compiler.common.assurance.representation_manifest_v1.{RepresentationDeclarationV1}
+use compiler.semantics.representation_boundary.hir_binding.{representation_bind_hir_v1}
+use std.common.crypto.sha256.{sha256_text}
 use compiler.driver.driver_collection_planner.*
 use std.env.{env_get}
 use compiler.driver.driver_types.{CompileContext}
@@ -279,4 +284,70 @@ pub fn run_enum_contract_pass(
         diagnostics: out.len(),
         errors_raised: errors_raised
     ))
+    out
+
+pub fn representation_invocation_context_index_v1(ctx: CompileContext) -> Dict<text, RepresentationSourceContextV1>:
+    if val ready = ctx.representation_context_index_v1:
+        return ready
+    var contexts: Dict<text, RepresentationSourceContextV1> = {}
+    var conflicting: Dict<text, bool> = {}
+    for context in ctx.options.representation_sources:
+        if contexts.contains_key(context.module_identity):
+            conflicting[context.module_identity] = true
+        else:
+            contexts[context.module_identity] = context
+    if ctx.options.representation_sources.len() == 0:
+        ctx.representation_context_index_v1 = Some(contexts)
+        return contexts
+    var source_identities: Dict<text, text> = {}
+    var source_conflicts: Dict<text, bool> = {}
+    if ctx.source_module_names_owner.len() > 0 and
+            ctx.source_module_names_owner.len() == ctx.source_identities_owner.len() and
+            ctx.source_module_names_owner.len() == ctx.source_paths_owner.len():
+        for i in 0..ctx.source_module_names_owner.len():
+            val name = ctx.source_module_names_owner[i]
+            if source_identities.contains_key(name):
+                source_conflicts[name] = true
+            else:
+                source_identities[name] = ctx.source_identities_owner[i]
+    else:
+        for source in ctx.sources:
+            if source_identities.contains_key(source.module_name):
+                source_conflicts[source.module_name] = true
+            else:
+                source_identities[source.module_name] = sha256_text(source.content)
+    var admitted: Dict<text, RepresentationSourceContextV1> = {}
+    for name in contexts.keys():
+        if contexts.contains_key(name) and not conflicting.contains_key(name) and
+                not source_conflicts.contains_key(name) and source_identities.contains_key(name):
+            val proposed = contexts[name]
+            if proposed.source_identity == source_identities[name]:
+                admitted[name] = proposed
+    ctx.representation_context_index_v1 = Some(admitted)
+    admitted
+
+pub fn representation_bind_module_facts_v1(contexts: Dict<text, RepresentationSourceContextV1>,
+        name: text, module: HirModule) -> [RepresentationDeclarationV1]:
+    val missing = RepresentationSourceContextV1(package_identity: "", module_identity: name,
+        owner_kind: "project-config", owner_manifest_path: "", owner_manifest_digest: "", source_identity: "")
+    val context = contexts[name] ?? missing
+    representation_bind_hir_v1(module, context)
+
+pub fn run_representation_manifest_pass(ctx: CompileContext,
+        hir_modules: Dict<text, HirModule>) -> [text]:
+    val strictness = ctx.assurance_policy.strictness
+    val contexts = representation_invocation_context_index_v1(ctx)
+    var out: [text] = []
+    var errors_raised = 0
+    for name in hir_modules.keys():
+        var module: HirModule = hir_modules[name]
+        module.representation_declarations = representation_bind_module_facts_v1(contexts, name, module)
+        hir_modules[name] = module
+        val receipt = collect_module_representation_receipt_v1(name, module, strictness)
+        for message in receipt.messages: out.push(message)
+        errors_raised = errors_raised + receipt.errors.len()
+        publish_module_typecheck_receipt_v1(ctx, receipt)
+    val _receipt = record_pass_receipt(PassReceipt(pass_name: "representation_manifest",
+        profile: strictness.name(), executed: true, modules_checked: hir_modules.keys().len(),
+        diagnostics: out.len(), errors_raised: errors_raised))
     out

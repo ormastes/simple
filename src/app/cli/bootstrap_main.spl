@@ -31,8 +31,9 @@ use app.cli.native_build_main.{run_native_build_worker, run_native_build_entry_v
 use app.cli.native_build_worker_entry.{run_native_build_worker_entry}
 use app.io._CliCompile.compile_targets.{cli_native_build_option_error}
 use app.io._CliCompile.compile_options.{cli_print_shared_optimization_inventory}
-use plugins.backend_registry.full_static_backend_registry.{
-    install_full_static_backends_for_k1_policy_v1}
+use app.cli.bootstrap_backend_installer.{bootstrap_install_worker_backends_v1,
+    bootstrap_backend_request_error_v1, bootstrap_backend_choices_v1,
+    bootstrap_backend_capability_label_v1}
 use std.nogc_sync_mut.io_runtime.{env_get, env_set, file_exists, file_size, remove_file_if_exists, dir_create}
 
 fn native_build_help() -> i64:
@@ -256,6 +257,12 @@ fn native_build_no_borrow_check_from_args(args: [text], i: i64) -> bool:
 
 # Native commands use the pure driver or its compiled CLI coordinator.
 pub fn run_native_build_bootstrap(args: [text]) -> i64:
+    val composition_error = bootstrap_backend_request_error_v1(
+        native_build_backend_from_args(args, 0),
+        native_build_backend_plugin_from_args(args, 0))
+    if composition_error != "":
+        print "error: {composition_error}"
+        return 1
     # The admitted Stage-2 compiler must route a grouped request through the
     # same isolated native-build coordinator as the normal CLI. Its special
     # Stage3/Stage4 focused-binary paths are single-entry only and reject the
@@ -269,7 +276,7 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
     # to `return 0` in bootstrap MIR lowering (module_lowering.spl), so edits to
     # its .spl source are ignored in the capsule.
     if removed_bundle == "--help" or removed_bundle == "-h":
-        print "Usage: simple native-build <file>.spl [-o <output>] [--backend=<llvm|cranelift>]"
+        print "Usage: simple native-build <file>.spl [-o <output>] [--backend=<{bootstrap_backend_choices_v1()}>]"
         print ""
         print "Options:"
         print "  -o <output>                 Output artifact path (default build/native/<stem>)"
@@ -277,7 +284,7 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
         print "  --emit-entry-object         Emit the admitted entry module object before linking"
         print "  --emit-archive              Emit a static archive"
         print "  --emit-shared               Emit a shared library"
-        print "  --backend=<llvm|cranelift>  Codegen backend (default auto)"
+        print "  --backend=<{bootstrap_backend_choices_v1()}>  Codegen backend (default auto)"
         print "  --mode=<dynload|one-binary> Link mode"
         print "  --no-borrow-check           Skip the borrow checker"
         print "  --entry <file.spl>          Explicit entry module"
@@ -291,7 +298,7 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
     # There is nothing to build, so fail like `compile` does.
     if args.len() < 3:
         print "error: missing source file"
-        print "Usage: simple native-build <file>.spl [-o <output>] [--backend=<llvm|cranelift>]"
+        print "Usage: simple native-build <file>.spl [-o <output>] [--backend=<{bootstrap_backend_choices_v1()}>]"
         return 1
     if removed_bundle != "":
         print "Error: runtime bundle '{removed_bundle}' was removed; use simple-core or core-c-bootstrap"
@@ -543,6 +550,11 @@ fn run_compile_bootstrap(args: [text]) -> i64:
     if output == "":
         output = source.replace(".spl", ".smf")
     val backend = bootstrap_compile_backend_from_args(args, 0)
+    val composition_error = bootstrap_backend_request_error_v1(
+        backend, native_build_backend_plugin_from_args(args, 0))
+    if composition_error != "":
+        print "error: {composition_error}"
+        return 1
     if not remove_file_if_exists(output):
         print "error: cannot replace SMF output '{output}'"
         return 1
@@ -588,13 +600,13 @@ fn main() -> i64:
     val all_args = get_cli_args()
     val argc = all_args.len()
     if argc < 2:
-        print "Simple Bootstrap Compiler v{bootstrap_version()}"
+        print "Simple Bootstrap Compiler v{bootstrap_version()}{bootstrap_backend_capability_label_v1()}"
         # `compile` accepts --format=smf ONLY (run_compile_bootstrap rejects
         # everything else); advertising --native here made the usage text lie
         # about an interface the implementation refuses. Native output is
         # reached through `native-build`, which is listed separately.
         print "Usage: simple compile <file> --format=smf [-o <output>] [--opt-level=<level>] [--list-optimizations]"
-        print "       simple native-build <file>.spl [-o <output>] [--backend=<llvm|cranelift>]"
+        print "       simple native-build <file>.spl [-o <output>] [--backend=<{bootstrap_backend_choices_v1()}>]"
         return 0
     val first = all_args[1]
     val native_worker_marker = env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? ""
@@ -607,8 +619,7 @@ fn main() -> i64:
             return run_parse_shard(bootstrap_internal_worker_args_v1(all_args, native_worker_marker))
         # Same preamble as native_build_worker.spl's main: without the backend
         # table, codegen entry answers PLUG-E-NOTFOUND as a ud2/SIGILL.
-        if not install_selected_k1_backend_table_v1() or
-                not install_full_static_backends_for_k1_policy_v1(selected_k1_backend_policy_v1()):
+        if not bootstrap_install_worker_backends_v1():
             print "error: PLUG-E-TABLE: native-build worker backend composition refused: {selected_k1_backend_table_diagnostic_v1()}"
             return 1
         # The shared worker entry strips and validates the coordinator's one
@@ -624,10 +635,10 @@ fn main() -> i64:
     if first == "native-build":
         return run_native_build_bootstrap(all_args)
     if first.len() == 9 and first.starts_with("--version"):
-        print "simple-bootstrap {bootstrap_version()}"
+        print "simple-bootstrap {bootstrap_version()}{bootstrap_backend_capability_label_v1()}"
         return 0
     if first.len() == 6 and first.starts_with("--help"):
-        print "Simple Bootstrap Compiler v{bootstrap_version()}"
+        print "Simple Bootstrap Compiler v{bootstrap_version()}{bootstrap_backend_capability_label_v1()}"
         print "Built from Simple source via the staged bootstrap"
         print ""
         print "Commands:"

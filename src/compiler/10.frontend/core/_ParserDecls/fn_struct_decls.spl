@@ -1,6 +1,8 @@
+use compiler.core.parser.{parser_lexical_scope_enter, parser_lexical_scope_leave, parser_lexical_bind_value}
 # Declaration parsing: fn, extern fn, struct/class, type params, domain blocks.
 use compiler.frontend.core.parser_decls.*
 use compiler.frontend.core._ParserDecls.enum_module_body.{parse_top_level_visibility}
+use compiler.frontend.core.representation_declarations_v1.{representation_declaration_begin_v1, representation_declaration_header_v1, representation_declaration_end_v1, representation_reject_pending_v1}
 # Parser — Declaration Module
 #
 # Declaration parsing: fn, extern fn, struct/class, enum.
@@ -644,6 +646,7 @@ fn parser_skip_where_clause(type_params: [text]) -> [[text]]:
     bounds
 
 fn parse_fn_decl(is_async: i64) -> i64:
+    val representation_owner = representation_declaration_begin_v1("fn")
     val decl_start = lex_token_start_get()
     val decl_line = par_line_get()
     val decl_col = par_col_get()
@@ -733,6 +736,10 @@ fn parse_fn_decl(is_async: i64) -> i64:
     # Canonical declarations may be bodyless (forward/extern-style surface),
     # or may use the legacy colonless indented block spelling. Do not consume
     # the next same-level declaration while deciding between those forms.
+    representation_declaration_header_v1(representation_owner)
+    parser_lexical_scope_enter()
+    for parameter_name in param_names:
+        parser_lexical_bind_value(parameter_name)
     var body: [i64] = []
     if par_kind_get() == TOK_COLON:
         parser_advance()
@@ -742,15 +749,18 @@ fn parse_fn_decl(is_async: i64) -> i64:
     elif par_kind_get() == TOK_SEMICOLON:
         parser_advance()
 
+    parser_lexical_scope_leave()
     parser_collection_site_owner_restore(previous_collection_owner)
     val decl_span = flat_span_new(decl_start, lex_token_start_get(), decl_line, decl_col)
     val fn_decl_idx = decl_fn(fn_name, param_names, param_types, ret_type, body, is_async, type_params, decl_span)
     decl_set_type_param_constraints(fn_decl_idx, where_bounds)
     decl_set_param_defaults(fn_decl_idx, param_defaults)
     decl_set_param_muts(fn_decl_idx, param_muts)
+    representation_declaration_end_v1(representation_owner, fn_decl_idx, fn_name)
     fn_decl_idx
 
 fn parse_extern_fn_decl() -> i64:
+    val representation_owner = representation_declaration_begin_v1("extern_fn")
     # Already consumed 'extern'
     val decl_start = lex_token_start_get()
     val decl_line = par_line_get()
@@ -803,7 +813,10 @@ fn parse_extern_fn_decl() -> i64:
         ret_type = parser_parse_type()
 
     val decl_span = flat_span_new(decl_start, lex_token_start_get(), decl_line, decl_col)
-    decl_extern_fn(fn_name, param_names, param_types, ret_type, type_params, decl_span)
+    representation_declaration_header_v1(representation_owner)
+    val extern_decl = decl_extern_fn(fn_name, param_names, param_types, ret_type, type_params, decl_span)
+    representation_declaration_end_v1(representation_owner, extern_decl, fn_name)
+    extern_decl
 
 # ===== @derive Implementation Generator =====
 
@@ -943,6 +956,7 @@ fn parse_struct_decl(is_class: bool) -> i64:
     parse_struct_or_trait_decl(is_class, false)
 
 fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
+    val representation_owner = representation_declaration_begin_v1(if is_trait: "trait" else: if is_class: "class" else: "struct")
     parser_advance()
     val struct_name = par_text_get()
     parser_expect(6)
@@ -981,6 +995,7 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
     # body colon intact for parser_expect below; semantic bound enforcement
     # remains a separate gate before these types are instantiated.
     val where_bounds = parser_skip_where_clause(type_params)
+    representation_declaration_header_v1(representation_owner)
     parser_expect(161)
     parser_skip_newlines()
     parser_expect(181)
@@ -1087,6 +1102,7 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
         # `type: T` is instead a keyword-named field, as in the canonical Rust
         # parser's parse_field/expect_identifier path.
         if par_kind_get() == 35 and not parser_class_member_followed_by_colon():
+            representation_reject_pending_v1()
             if collection_algorithm_next != "":
                 parser_error("@collection_algorithm requires a field")
                 collection_algorithm_next = ""
@@ -1110,6 +1126,7 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
         val is_any_pass2: bool = is_pass_dn2 or is_pass_kw
         val is_pass: bool = is_any_pass or is_any_pass2
         if is_pass and not parser_class_member_followed_by_colon():
+            representation_reject_pending_v1()
             if collection_algorithm_next != "":
                 parser_error("@collection_algorithm requires a field")
                 collection_algorithm_next = ""
@@ -1167,6 +1184,7 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
         if is_field_prefix and not parser_class_member_followed_by_colon():
             parser_advance()
         var fname = par_text_get()
+        representation_reject_pending_v1()
         val fname_kw = use_kw_segment_text(par_kind_get())
         if par_kind_get() != TOK_IDENT and fname_kw == "":
             if collection_algorithm_next != "":
@@ -1329,6 +1347,8 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
         module_add_decl(impl_d)
 
     parser_collection_site_owner_restore(previous_collection_owner)
+    representation_reject_pending_v1()
+    representation_declaration_end_v1(representation_owner, struct_d, struct_name)
     struct_d
 
 export parse_type_params, parser_generic_constraints_reset

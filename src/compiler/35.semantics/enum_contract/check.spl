@@ -1,12 +1,12 @@
 # Enum-contract checker entry point (S2/S3, hardening plan §10.1/§10.2).
 #
-# `enum_contract_check` is the function the driver wires in. It is the ONLY
-# file in this package that touches HIR; every rule below it works on plain
-# data (contract_model / declaration_check / match_check) so the rules stay
-# testable without a symbol table.
+# The driver consumes `enum_contract_declaration_report_v1`. This file adapts
+# HIR for Closed/Evolving declaration checks; condition_check also reads HIR's
+# general attributes and variant shapes. The Closed/Evolving rules work on
+# plain data so they stay testable without a symbol table.
 #
 # SCOPE, stated rather than implied: `enum_contract_check` performs the
-# DECLARATION checks (E-CLOSED-002, E-EVOLVING-001/002), decidable from
+# DECLARATION checks (E-CONDITION-001, E-CLOSED-002, E-EVOLVING-001/002), decidable from
 # `module.enums` alone. The MATCH-SITE checks (E-CLOSED-001, E-EVOLVING-003)
 # need a `ResolvedMatchCoverage`: `enum_contract_check_module` builds one per
 # HIR match site from the arm patterns (hir_match_coverage.spl) so the whole
@@ -16,7 +16,9 @@
 # resolves arms to numeric discriminants and remains the codegen authority.
 
 use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind}
-use compiler.hir.hir_definitions.{HirEnum, HirVariant, HirVariantKind, HirExprKind}
+use compiler.hir.hir_definitions.{HirEnum, HirVariant, HirVariantKind}
+use compiler.hir.hir_literal_constant_v1.{HirLiteralConstantV1, hir_fold_literal_constant_v1}
+use compiler.common.diagnostics.span.{Span}
 use compiler.hir.match_coverage.{ResolvedMatchCoverage}
 use compiler.common.assurance.policy_schema.{AssuranceStrictness}
 use compiler.semantics.enum_contract.contract_model.{
@@ -28,6 +30,32 @@ use compiler.semantics.enum_contract.declaration_check.{
     EnumVariantShape, check_enum_declaration
 }
 use compiler.semantics.enum_contract.match_check.{check_match_for_contract}
+use compiler.semantics.enum_contract.condition_check.{check_condition_enums}
+
+enum EnumDiscriminantFailureKindV1:
+    NonInteger
+    Unavailable
+
+struct EnumDiscriminantFailureV1:
+    """An explicit discriminant that MIR's literal subset cannot admit."""
+    enum_name: text
+    variant_name: text
+    span: Span
+    kind: EnumDiscriminantFailureKindV1
+
+impl EnumDiscriminantFailureV1:
+    fn message() -> text:
+        val prefix = "enum variant '" + self.enum_name + "." + self.variant_name + "' discriminant must be "
+        match self.kind:
+            case EnumDiscriminantFailureKindV1.NonInteger:
+                prefix + "an integer constant"
+            case EnumDiscriminantFailureKindV1.Unavailable:
+                prefix + "a constant integer expression"
+
+struct EnumDeclarationReportV1:
+    """Contract diagnostics and fatal explicit-constant failures stay separate."""
+    diags: [EnumContractDiag]
+    constant_failures: [EnumDiscriminantFailureV1]
 
 fn hir_type_name(t: HirType) -> text:
     """Source-level spelling of the few type shapes a wire payload may use.
@@ -49,8 +77,8 @@ fn hir_type_name(t: HirType) -> text:
         case HirTypeKind.Unit: "()"
         case _: "<non-scalar>"
 
-fn variant_shape(v: HirVariant) -> EnumVariantShape:
-    """Flatten one `HirVariant` into the contract checker's plain shape."""
+fn variant_shape_from_value_v1(v: HirVariant, discriminant: i64) -> EnumVariantShape:
+    """Flatten payload metadata only after explicit-value validation succeeds."""
     var names: [text] = []
     var types: [text] = []
     match v.kind:
@@ -64,58 +92,100 @@ fn variant_shape(v: HirVariant) -> EnumVariantShape:
             for f in fields:
                 names = names.push(f.name)
                 types = types.push(hir_type_name(f.type_))
-    var disc = 0
-    var has_disc = false
-    if v.has_discriminant:
-        match v.discriminant.kind:
-            case HirExprKind.IntLit(value, suffix):
-                disc = value
-                has_disc = true
-            case _:
-                has_disc = false
     EnumVariantShape(
         name: v.name,
         payload_names: names,
         payload_types: types,
-        has_discriminant: has_disc,
-        discriminant: disc,
+        has_discriminant: v.has_discriminant,
+        discriminant: discriminant,
     )
 
-fn enum_variant_shapes(e: HirEnum) -> [EnumVariantShape]:
+fn variant_discriminant_result_v1(enum_name: text, v: HirVariant) -> Result<i64, EnumDiscriminantFailureV1>:
+    """An implicit placeholder is legal only when the explicit flag is absent."""
+    if not v.has_discriminant:
+        return Ok(0)
+    val folded: HirLiteralConstantV1? = hir_fold_literal_constant_v1(v.discriminant)
+    if val constant = folded:
+        match constant:
+            case HirLiteralConstantV1.Int(value):
+                return Ok(value)
+            case _:
+                return Err(EnumDiscriminantFailureV1(enum_name: enum_name,
+                    variant_name: v.name, span: v.span, kind: EnumDiscriminantFailureKindV1.NonInteger))
+    Err(EnumDiscriminantFailureV1(enum_name: enum_name,
+        variant_name: v.name, span: v.span, kind: EnumDiscriminantFailureKindV1.Unavailable))
+
+fn enum_variant_shapes_result_v1(e: HirEnum, collect_shapes: bool) -> Result<[EnumVariantShape], [EnumDiscriminantFailureV1]>:
+    """Fold each explicit value once; an incomplete value sequence is not checked."""
     var out: [EnumVariantShape] = []
+    var failures: [EnumDiscriminantFailureV1] = []
     for v in e.variants:
-        out = out.push(variant_shape(v))
-    out
+        match variant_discriminant_result_v1(e.name, v):
+            case Ok(value):
+                if collect_shapes:
+                    out = out.push(variant_shape_from_value_v1(v, value))
+            case Err(failure):
+                failures = failures.push(failure)
+    if failures.len() > 0:
+        return Err(failures)
+    Ok(out)
+
+fn enum_contract_declaration_report_with_table_v1(
+    module: HirModule,
+    table: EnumContractTable,
+    profile: AssuranceStrictness,
+) -> EnumDeclarationReportV1:
+    """Retain MIR constant failures for every enum plus existing contract checks.
+
+    Split out from `enum_contract_check` so a caller that already has the
+    Closed/Evolving contract table can reuse it without rebuilding it.
+    @condition checks use general HIR attributes independently of this table."""
+    var diags: [EnumContractDiag] = []
+    var constant_failures: [EnumDiscriminantFailureV1] = []
+    var enums: [HirEnum] = []
+    val fallback = EnumContract(enum_name: "", kind: EnumContractKind.Closed)
+    for dk_17 in module.enums.keys():
+        # ANY-transport: annotated rebind (cycle-70 sweep).
+        val e: HirEnum = module.enums[dk_17]
+        enums = enums.push(e)
+        val contracted = table.has(e.name)
+        match enum_variant_shapes_result_v1(e, contracted):
+            case Ok(shapes):
+                if contracted:
+                    val contract: EnumContract = table.lookup_or(e.name, fallback)
+                    for d in check_enum_declaration(contract, shapes):
+                        diags = diags.push(d)
+            case Err(failures):
+                for failure in failures:
+                    constant_failures = constant_failures.push(failure)
+    for d in check_condition_enums(enums):
+        diags = diags.push(d)
+    EnumDeclarationReportV1(diags: diags, constant_failures: constant_failures)
+
+fn enum_contract_declaration_report_v1(module: HirModule, profile: AssuranceStrictness) -> EnumDeclarationReportV1:
+    """Admission-capable declaration report, including explicit constant failures.
+
+    The table comes from HIR attributes; no source text or general evaluator is
+    consulted. All enum constants are validated under every profile, as in MIR."""
+    enum_contract_declaration_report_with_table_v1(module, enum_contract_table(module), profile)
 
 fn enum_contract_check_with_table(
     module: HirModule,
     table: EnumContractTable,
     profile: AssuranceStrictness,
 ) -> [EnumContractDiag]:
-    """Declaration checks for every contracted enum in `module`.
+    """Legacy contract-diagnostic collector, not an explicit-constant admission receipt.
 
-    Split out from `enum_contract_check` so a caller that already has the
-    contract table -- notably a future fixed parser that carries the decorator
-    into HIR -- does not have to go back through the source text."""
-    var diags: [EnumContractDiag] = []
-    val fallback = EnumContract(enum_name: "", kind: EnumContractKind.Closed)
-    for dk_17 in module.enums.keys():
-        # ANY-transport: annotated rebind (cycle-70 sweep).
-        val e: HirEnum = module.enums[dk_17]
-        if table.has(e.name):
-            val contract: EnumContract = table.lookup_or(e.name, fallback)
-            for d in check_enum_declaration(contract, enum_variant_shapes(e)):
-                diags = diags.push(d)
-    diags
+    Call the declaration report API when constant failures must be retained."""
+    val report = enum_contract_declaration_report_with_table_v1(module, table, profile)
+    report.diags
 
 fn enum_contract_check(module: HirModule, profile: AssuranceStrictness) -> [EnumContractDiag]:
-    """S2/S3 entry point: validate every `@closed` / `@evolving` enum declared
-    in `module` against its contract.
+    """Legacy contract-diagnostic collector; empty diags do not admit constants.
 
-    The contract table is read from `HirEnum.attributes` -- the decorator now
-    survives lowering (doc/08_tracking/bug/enum_decorators_dropped_before_hir_2026-08-21.md),
-    so no source text is consulted here."""
-    enum_contract_check_with_table(module, enum_contract_table(module), profile)
+    Use enum_contract_declaration_report_v1 for explicit-constant validity."""
+    val report = enum_contract_declaration_report_v1(module, profile)
+    report.diags
 
 fn enum_contract_table(module: HirModule) -> EnumContractTable:
     """Contract table of every decorated enum declared in `module`."""
@@ -128,17 +198,20 @@ fn enum_contract_table(module: HirModule) -> EnumContractTable:
 
 struct EnumContractModuleReport:
     """Declaration + match-site diagnostics for one module, with the match
-    sites that were examined so a caller can prove the check was not vacuous."""
+    sites that were examined and fatal explicit-constant failures retained.
+    An empty diagnostic array alone does not imply valid discriminants."""
     diags: [EnumContractDiag]
     sites: [HirMatchSite]
     contracted_sites: i64
+    constant_failures: [EnumDiscriminantFailureV1] = []
 
 fn enum_contract_check_module(module: HirModule, profile: AssuranceStrictness) -> EnumContractModuleReport:
     """Full S2/S3 check of one lowered module: declaration rules over
     `module.enums` plus E-CLOSED-001 / E-EVOLVING-003 over every enum match in
     its function bodies (coverage built by hir_match_coverage)."""
     val table = enum_contract_table(module)
-    var diags = enum_contract_check_with_table(module, table, profile)
+    val declarations = enum_contract_declaration_report_with_table_v1(module, table, profile)
+    var diags = declarations.diags
     val sites = hir_enum_match_sites(module)
     var contracted = 0
     val fallback = EnumContract(enum_name: "", kind: EnumContractKind.Closed)
@@ -148,7 +221,8 @@ fn enum_contract_check_module(module: HirModule, profile: AssuranceStrictness) -
             val contract: EnumContract = table.lookup_or(site.coverage.enum_name, fallback)
             for d in check_match_for_contract(contract, site.coverage, profile):
                 diags = diags.push(d)
-    EnumContractModuleReport(diags: diags, sites: sites, contracted_sites: contracted)
+    EnumContractModuleReport(diags: diags, sites: sites, contracted_sites: contracted,
+                             constant_failures: declarations.constant_failures)
 
 fn enum_contract_check_matches(
     coverages: [ResolvedMatchCoverage],
@@ -172,4 +246,6 @@ fn enum_contract_check_matches(
 
 export enum_contract_check, enum_contract_check_with_table, enum_contract_check_matches
 export enum_contract_table, enum_contract_check_module, EnumContractModuleReport
-export hir_type_name, variant_shape, enum_variant_shapes
+export hir_type_name
+export EnumDiscriminantFailureKindV1, EnumDiscriminantFailureV1, EnumDeclarationReportV1
+export enum_contract_declaration_report_v1

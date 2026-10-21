@@ -1209,6 +1209,13 @@ int64_t   rt_process_spawn_async_value(int64_t cmd, SplArray* args);
 int64_t   rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms);
 SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* args,
                                  int64_t timeout_ms, int64_t max_output_bytes);
+/* Strict Windows argv, raw prefix byte arrays, registered tuple; timeout -1.
+ * Each array contains at most max_output_bytes, with no injected markers. */
+int64_t rt_process_run_bounded_bytes(const char* cmd, uint64_t cmd_len, SplArray* args,
+                                    int64_t timeout_ms, int64_t max_output_bytes);
+#if !defined(_WIN32)
+int64_t simple_fork_parent_wait_bounded_bytes(int64_t child_pid, int64_t timeout_ms, uint64_t max_output_bytes);
+#endif
 bool      rt_process_run_owned_bounded(const char* cmd, const char* const* argv,
                                        int64_t timeout_ms, uint64_t max_output_bytes,
                                        char* out, uint64_t out_cap, char* err,
@@ -1586,8 +1593,11 @@ bool        rt_file_rename(const uint8_t* old_ptr, uint64_t old_len,
 /* Lower-case hex SHA-256 of the file as a runtime string; nil if unreadable. */
 int64_t     rt_file_hash_sha256(const uint8_t* path_ptr, uint64_t path_len);
 int64_t     rt_xxh3_128_text(int64_t data_value);
-/* Tagged text cmd -> captured stdout as a runtime string; nil on spawn failure. */
+/* Tagged text cmd -> captured stdout, recording this thread's last shell status. */
 int64_t     rt_shell_exec(int64_t cmd_value);
+int64_t     rt_shell_exit_code(void);
+/* Registered (stdout, stderr, status) tuple; does not change scalar-shell status. */
+int64_t     rt_shell_exec_tuple(int64_t cmd_value);
 int         rt_file_move(const uint8_t* src_ptr, uint64_t src_len,
                          const uint8_t* dst_ptr, uint64_t dst_len);
 int64_t     rt_file_size(const uint8_t* path_ptr, uint64_t path_len);

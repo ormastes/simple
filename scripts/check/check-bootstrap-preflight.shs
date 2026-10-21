@@ -12,7 +12,7 @@
 #                blocker, RESOLVED — this fences its regression) runs under the
 #                current seed and prints the expected value
 #   4. disk    — free space on the selected Cargo target partition >= MIN_FREE_GB (default 20)
-#   5. markers — no PAIRED conflict markers in src/compiler_rust (open '<<<<<<<'
+#   5. markers — no PAIRED conflict markers in owned src/compiler_rust (open '<<<<<<<'
 #                plus close '>>>>>>>' in the same file; prose mentioning one
 #                marker does not false-positive — anti-FP decision per rule 7)
 #
@@ -310,10 +310,13 @@ banner_ok() {
   return $?
 }
 
-# paired_markers <dir> : prints files having BOTH an open and a close marker
+# paired_markers <dir> : prints owned files having BOTH marker forms.
+# Prune vendor directories before reading files: filtering grep's output still
+# scans the entire dependency tree and can consume minutes on Windows.
 paired_markers() {
   _dir=$1
-  /usr/bin/grep -rl "^<<<<<<< " "$_dir" 2>/dev/null | while IFS= read -r _f; do
+  find "$_dir" -type d -name vendor -prune -o -type f \
+    -exec /usr/bin/grep -l "^<<<<<<< " {} + 2>/dev/null | while IFS= read -r _f; do
     if /usr/bin/grep -q "^>>>>>>>" "$_f"; then echo "$_f"; fi
   done
 }
@@ -374,6 +377,23 @@ selftest() {
   printf 'doc: a line starting with conflict text\n<<<<<<< example only\n' > "$TMP/mk_prose/doc.rs"
   n=$(paired_markers "$TMP/mk_prose" | wc -l)
   [ "$n" -eq 0 ] || { echo "selftest FAIL: unpaired prose marker flagged (FP)"; st_fail=1; }
+  # Scope controls: owned paired files survive, vendor pairs are ignored,
+  # separate unpaired files never combine, and spaces preserve path identity.
+  st_scope="$TMP/mk scope with spaces"
+  mkdir -p "$st_scope/owned dir" "$st_scope/vendor/dependency" "$st_scope/vendor-owned"
+  printf '<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> other\n' > "$st_scope/owned dir/conflict file.rs"
+  cp "$st_scope/owned dir/conflict file.rs" "$st_scope/vendor/dependency/conflict.rs"
+  cp "$st_scope/owned dir/conflict file.rs" "$st_scope/vendor-owned/conflict.rs"
+  printf '<<<<<<< HEAD\n' > "$st_scope/open only.rs"
+  printf '>>>>>>> other\n' > "$st_scope/close only.rs"
+  st_markers=$(paired_markers "$st_scope" | LC_ALL=C sort)
+  st_expected=$(printf '%s\n' "$st_scope/owned dir/conflict file.rs" "$st_scope/vendor-owned/conflict.rs" | LC_ALL=C sort)
+  [ "$st_markers" = "$st_expected" ] || {
+    echo "selftest FAIL: owned/vendor marker scope or spaced path changed"; st_fail=1;
+  }
+  [ -z "$(paired_markers "$st_scope/vendor")" ] || {
+    echo "selftest FAIL: vendor root traversed"; st_fail=1;
+  }
   # probe classifier: must-PASS and must-FAIL
   printf 'noise\nPROBE_BYTEORDER=little,big\n' > "$TMP/p_ok"
   probe_ok "$TMP/p_ok" || { echo "selftest FAIL: probe must-pass fixture"; st_fail=1; }
@@ -648,7 +668,7 @@ fi
 
 # ---- 5. no paired conflict markers in src/compiler_rust ----
 CHECKED=$((CHECKED+1))
-mk=$(paired_markers "$ROOT/src/compiler_rust" | grep -v "/vendor/" | head -20)
+mk=$(paired_markers "$ROOT/src/compiler_rust" | head -20)
 if [ -n "$mk" ]; then
   FAILS="$FAILS conflict-markers($(echo "$mk" | wc -l) file(s))"
   echo "check markers: FAIL:"; echo "$mk"
