@@ -1,4 +1,6 @@
 //! Real native shell ABI, independently of the interpreter dispatch table.
+#![cfg(not(feature = "native-all-provider"))]
+
 use simple_runtime::value::sffi::env_process::{rt_shell_exec, rt_shell_exec_tuple, rt_shell_exit_code};
 use simple_runtime::value::{rt_string_data, rt_string_len, rt_string_new, rt_tuple_get, RuntimeValue};
 
