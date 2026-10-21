@@ -9,6 +9,11 @@
 
 include!(concat!(env!("OUT_DIR"), "/runtime_symbol_entries.rs"));
 
+// Keep the selected provider linked into this crate's cdylib too: the
+// generated symbol table takes its ABI addresses before the compiler links.
+#[cfg(feature = "hosted-webgpu-provider")]
+extern crate spl_hosted_runtime;
+
 #[cfg(all(target_os = "macos", not(feature = "native-all-provider")))]
 mod cocoa_dynload_owner;
 
