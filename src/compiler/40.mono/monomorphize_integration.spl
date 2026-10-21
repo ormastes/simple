@@ -658,7 +658,7 @@ impl MonomorphizationPass:
     me collect_generics(module: HirModule, module_name: text):
         """Collect generic functions, structs, and classes from a module.
 
-        BUG-001 fix: Use keys()-based iteration instead of tuple destructuring.
+        Keep function values directly; copied aggregate keys are not lookup authority.
         """
         # Locals, parameters and type parameters share the same ID namespace
         # as functions. Reserving only function IDs aliases fresh callees to
@@ -687,9 +687,19 @@ impl MonomorphizationPass:
         if module.symbols != nil:
             if module.symbols.next_symbol_id > self.next_symbol:
                 self.next_symbol = module.symbols.next_symbol_id
-        val function_keys: [SymbolId] = functions.keys()
-        for sym_id in function_keys:
-            self.collect_function_entry_v1(module_name, module, sym_id)
+        # As in sorted_function_indices, retain values and address them by
+        # scalar index. Native erased Dict keys may compare SymbolId identity;
+        # a copied key must not silently discard a retained function body.
+        val function_values: [HirFunction] = functions.values()
+        val trace_provider = mono_diag_enabled() and module_name == "lib.nogc_sync_mut.sffi.transient"
+        if trace_provider:
+            eprint("[mono-diag] collect module={module_name} values={function_values.len()}")
+        var function_index = 0
+        while function_index < function_values.len():
+            self.collect_function_entry_v1(module_name, function_values, function_index, trace_provider and function_index < 32)
+            function_index = function_index + 1
+        if trace_provider:
+            eprint("[mono-diag] collected module={module_name} registered={self.stats.generic_functions_found}")
 
         # Imported callables are declarations in this module's symbol table,
         # not bodies in module.functions. Their signatures were lowered in the
@@ -856,26 +866,15 @@ impl MonomorphizationPass:
             case _: ()
         []
 
-    # Cycles 85-89: this body was inlined in collect_generics, whose draw
-    # corrupts the dict-index rebind (85/86: inline index), the by-value
-    # return bind of an extraction helper (87), the bare-dict-param index in
-    # this fresh method (88), and the plain field-expression index (89).
-    # Final discriminator across all nine draws: EXTRACTIONS DRAW CLEAN ONLY
-    # IN THE GENERATED CODEC'S GUARD-FIRST DOUBLE-ACCESS SHAPE -- every clean
-    # walk (hir_module_has_rt_hal, the seven codec_abi helpers) does
-    # `if dict[k] == nil: skip` BEFORE binding `dict[k]`; every crashing walk
-    # single-accesses. The guard below changes no semantics (values are never
-    # nil); it changes the codegen draw.
-    me collect_function_entry_v1(module_name: text, module: HirModule, sym_id: SymbolId):
-        # Guard-first double access, byte-for-byte the generated codec's
-        # shape (hc_enc_hir_module: `if node.functions[dk3] == nil ... else
-        # use node.functions[dk3]`). Cycles 81-88 retrospective: EVERY clean
-        # extraction double-accesses behind a nil guard; EVERY crashing one
-        # single-accesses. Values are never nil in practice, so the guard
-        # changes no semantics -- it changes the codegen draw.
-        if module.functions[sym_id] == nil:
-            return
-        val func: HirFunction = module.functions[sym_id]
+    # The typed array owner survives the complete scalar-index walk. Avoid
+    # both an erased by-value extraction return and copied aggregate-key lookup.
+    me collect_function_entry_v1(module_name: text, functions: [HirFunction], index: i64, trace_entry: bool = false):
+        val func: HirFunction = functions[index]
+        if trace_entry:
+            # The existing classifier also accepts an absent binder array.
+            val generic_entry = is_generic_function(func)
+            val binder_count = if generic_entry: func.type_params.len() else: 0
+            eprint("[mono-diag] collect-entry index={index} symbol={func.symbol.id} name={func.name} template={func.is_generic_template} generic={generic_entry} binders={binder_count}")
         # Record the symbol -> name edge for call-site resolution, and keep
         # the fresh-symbol counter past every id already in use.
         val fsym: SymbolId = func.symbol
