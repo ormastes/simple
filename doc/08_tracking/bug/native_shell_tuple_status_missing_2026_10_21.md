@@ -85,3 +85,23 @@ aggregate-bootstrap PASS is claimed, and no Vulkan/retention waiver was added.
 Source pairing removes only obsolete `rt_shell_exec c-only` after genuine native
 Rust execution/export proof. No new single-lane exception or fake Rust helper
 was introduced. Private helper names do not use the runtime ABI prefix.
+
+At source commit `1e4e1f9bdab`, the final C fixture including the heap-free NIL
+thread case and private-helper rename built and ran successfully. Exact logs:
+`tiny/main-build.log`, `tiny/main-run.stdout`, `tiny/main-run.stderr`; native
+object directory `tiny/native-objects-reW8dB`. No unchanged Rust controls were
+repeated after their earlier passing implementation.
+
+Committed local-tier command
+`sh scripts/check/check-rt-dual-implementation-ratchet.shs --rev HEAD
+--baseline-rev 3050022d5d5` passed: 10 detector selftests, 2623 single-lane names
+versus 2624 at base, zero new. Frozen-baseline drift (216 new/79 stale) was
+reported by that existing differential gate as informational, not waived by a
+new baseline. Retained `ratchet.log`. Scoped diff whitespace check passed.
+
+The additional SFFI source-only queue did NOT pass:
+`scripts/audit/sffi-unsafe-backlog.shs` exited 1 because its inventory dependency
+reported `source_variants=407/399 migration=3613/3546`. Retained
+`sffi-source-audit.log`. This global source-inventory failure is not runtime
+execution evidence and is not relabeled PASS or attributed without a baseline
+comparison. Full production/SPipe verification remains unclaimed.
