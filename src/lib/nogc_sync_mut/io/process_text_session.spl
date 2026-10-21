@@ -1,0 +1,201 @@
+"""Explicit Linux process codecs over the existing native V3 opaque lease.
+
+The caller serializes shared class references and must cancel/collect each
+started owner. No affine guarantee, raw handle adoption, global cache, automatic
+retry, or total-RSS bound is introduced. Collection explicitly discards output.
+"""
+use std.nogc_sync_mut.io.process_ops.{OwnedProcessLease, OwnedProcessPoll, OwnedProcessInputReceipt, OwnedProcessCancelReceipt, OwnedProcessResult}
+use std.nogc_sync_mut.io.text_session.{TextSessionCodec}
+use std.nogc_sync_mut.io.external_text_io.{TextIoError}
+use std.nogc_sync_mut.sffi.platform.{platform_name_raw}
+use std.common.encoding.external_text.{ExternalFormat, ExternalTextDecoder, CodecError, external_text_decoder, external_encode_internal, utf8_format}
+
+pub enum ProcessTextError:
+    InvalidRequest(text)
+    Configuration(TextIoError)
+    Codec(text, CodecError)
+    Provider(text)
+    Native(i64)
+    Truncated(text)
+    Closed
+
+pub struct ProcessTextPoll:
+    stdout: text
+    stderr: text
+    terminal: bool
+    output_finished: bool
+    timed_out: bool
+    cancel_requested: bool
+    reaped: bool
+
+fn process_text_encode(value: text, format: ExternalFormat, stream: text) -> Result<[u8], ProcessTextError>:
+    match external_encode_internal(value, format):
+        case Ok(bytes): Ok(bytes)
+        case Err(error): Err(ProcessTextError.Codec(stream, error))
+
+fn process_text_profile(codec: TextSessionCodec) -> Result<(), ProcessTextError>:
+    match codec.validate():
+        case Ok(_): Ok(())
+        case Err(error): Err(ProcessTextError.Configuration(error))
+
+fn process_text_decoder(codec: TextSessionCodec, stream: text) -> Result<ExternalTextDecoder, ProcessTextError>:
+    val format = ExternalFormat(encoding: codec.read_encoding(), byte_order: codec.read_byte_order(), bom: codec.read_bom())
+    match external_text_decoder(format):
+        case Ok(decoder): Ok(decoder)
+        case Err(error): Err(ProcessTextError.Codec(stream, error))
+
+fn process_text_argv(value: text) -> Result<(), ProcessTextError>:
+    if value.contains("\u{0}"):
+        return Err(ProcessTextError.InvalidRequest("process command and arguments cannot contain NUL"))
+    val checked = process_text_encode(value, utf8_format(), "argv")?
+    Ok(())
+
+pub class ProcessTextSession:
+    _lease: OwnedProcessLease
+    _stdout_decoder: ExternalTextDecoder
+    _stderr_decoder: ExternalTextDecoder
+    _capture_limit: i64
+    var _stdout_delivered: i64
+    var _stderr_delivered: i64
+    var _failure: ProcessTextError?
+    var _finished: bool
+    var _retiring: bool
+    var _closed: bool
+
+    pub fn is_open() -> bool:
+        not self._closed
+
+    me _reject(error: ProcessTextError) -> Result<ProcessTextPoll, ProcessTextError>:
+        self._failure = Some(error)
+        Err(error)
+
+    me _take(wait_ms: i64, capacity: i64) -> Result<OwnedProcessPoll, ProcessTextError>:
+        val poll = match self._lease.poll(wait_ms, capacity, capacity):
+            case Ok(value): value
+            case Err(error): return Err(ProcessTextError.Provider(error))
+        # V3 delivered counts describe this call, not cumulative delivery.
+        if poll.stdout_delivered != poll.stdout.len() or poll.stderr_delivered != poll.stderr.len() or poll.stdout.len() > capacity or poll.stderr.len() > capacity:
+            return Err(ProcessTextError.Provider("invalid process delivery receipt"))
+        if poll.stdout_kept < 0 or poll.stderr_kept < 0 or poll.stdout_kept > self._capture_limit or poll.stderr_kept > self._capture_limit or poll.stdout_seen < poll.stdout_kept or poll.stderr_seen < poll.stderr_kept:
+            return Err(ProcessTextError.Provider("invalid process capture counters"))
+        if poll.stdout.len() > self._capture_limit - self._stdout_delivered or poll.stderr.len() > self._capture_limit - self._stderr_delivered:
+            return Err(ProcessTextError.Provider("process cumulative delivery exceeded capture limit"))
+        self._stdout_delivered = self._stdout_delivered + poll.stdout.len()
+        self._stderr_delivered = self._stderr_delivered + poll.stderr.len()
+        if self._stdout_delivered > poll.stdout_kept or self._stderr_delivered > poll.stderr_kept:
+            return Err(ProcessTextError.Provider("process delivery exceeded retained bytes"))
+        Ok(poll)
+
+    pub me fn poll(wait_ms: i64, capacity: i64) -> Result<ProcessTextPoll, ProcessTextError>:
+        """One bounded provider poll. Empty text is progress/pending, never EOF.
+
+        output_finished requires native terminal state, all retained bytes
+        delivered, and both decoder finishes. A nonzero exit is result data.
+        Consuming errors are sticky; cancel and collect remain available.
+        """
+        if self._closed: return Err(ProcessTextError.Closed)
+        if val error = self._failure: return Err(error)
+        if self._retiring or self._finished:
+            return Err(ProcessTextError.InvalidRequest("text polling already finished or retirement began"))
+        if wait_ms < 0 or wait_ms > 250 or capacity <= 0 or capacity > 65536:
+            return Err(ProcessTextError.InvalidRequest("poll requires wait 0..250 ms and capacity 1..65536 bytes"))
+        val raw = match self._take(wait_ms, capacity):
+            case Ok(value): value
+            case Err(error): return self._reject(error)
+        if raw.runtime_error != 0: return self._reject(ProcessTextError.Native(raw.runtime_error))
+        if raw.stdout_truncated: return self._reject(ProcessTextError.Truncated("stdout"))
+        if raw.stderr_truncated: return self._reject(ProcessTextError.Truncated("stderr"))
+        var out = match self._stdout_decoder.push(raw.stdout):
+            case Ok(value): value
+            case Err(error): return self._reject(ProcessTextError.Codec("stdout", error))
+        var err = match self._stderr_decoder.push(raw.stderr):
+            case Ok(value): value
+            case Err(error): return self._reject(ProcessTextError.Codec("stderr", error))
+        if raw.terminal and self._stdout_delivered == raw.stdout_kept and self._stderr_delivered == raw.stderr_kept:
+            val out_tail = match self._stdout_decoder.finish():
+                case Ok(value): value
+                case Err(error): return self._reject(ProcessTextError.Codec("stdout", error))
+            val err_tail = match self._stderr_decoder.finish():
+                case Ok(value): value
+                case Err(error): return self._reject(ProcessTextError.Codec("stderr", error))
+            out = out + out_tail
+            err = err + err_tail
+            self._finished = true
+        Ok(ProcessTextPoll(stdout: out, stderr: err, terminal: raw.terminal, output_finished: self._finished, timed_out: raw.timed_out, cancel_requested: raw.cancel_requested, reaped: raw.reaped))
+
+    pub fn input_receipt() -> Result<OwnedProcessInputReceipt, ProcessTextError>:
+        """Accepted input is not necessarily written; preserve the native receipt."""
+        if self._closed: return Err(ProcessTextError.Closed)
+        match self._lease.input_receipt():
+            case Ok(value): Ok(value)
+            case Err(error): Err(ProcessTextError.Provider(error))
+
+    pub fn cancel() -> Result<OwnedProcessCancelReceipt, ProcessTextError>:
+        """Request cancellation without discarding the outstanding owner."""
+        if self._closed: return Err(ProcessTextError.Closed)
+        match self._lease.cancel():
+            case Ok(value): Ok(value)
+            case Err(error): Err(ProcessTextError.Provider(error))
+
+    pub me fn collect(wait_ms: i64) -> Result<OwnedProcessResult?, ProcessTextError>:
+        """Explicit retirement: one bounded raw drain, then collect if ready.
+
+        Unread output is intentionally discarded, even after a codec error.
+        nil means cleanup is pending and ownership remains with the caller.
+        Call cancel when termination is wanted, then repeat bounded collection.
+        Runtime errors stay in a collected result; this is not codec success.
+        """
+        if self._closed: return Err(ProcessTextError.Closed)
+        if wait_ms < 0 or wait_ms > 250:
+            return Err(ProcessTextError.InvalidRequest("collection wait must be 0..250 ms"))
+        self._retiring = true
+        val raw = self._take(wait_ms, 65536)?
+        if not raw.terminal or self._stdout_delivered != raw.stdout_kept or self._stderr_delivered != raw.stderr_kept:
+            return Ok(nil)
+        val result = match self._lease.collect():
+            case Ok(value): value
+            case Err(error): return Err(ProcessTextError.Provider(error))
+        if result.runtime_error == 11 or result.runtime_error == 16 or not result.reaped:
+            return Ok(nil)
+        self._closed = true
+        Ok(Some(result))
+
+pub fn process_text_session(command: text, args: [text], input: text, stdin_codec: TextSessionCodec, stdout_codec: TextSessionCodec, stderr_codec: TextSessionCodec, timeout_ms: i64, term_grace_ms: i64, max_output_bytes: i64) -> Result<ProcessTextSession, ProcessTextError>:
+    """Admit codecs and encode stdin before starting a Linux native child.
+
+    stdin uses the write profile; stdout/stderr use independent read profiles.
+    No process effects occur before all admission/encoding succeeds. The caller
+    must serialize aliases and eventually cancel/collect a successful owner.
+    """
+    process_text_profile(stdin_codec)?
+    process_text_profile(stdout_codec)?
+    process_text_profile(stderr_codec)?
+    if timeout_ms <= 0 or timeout_ms > 3600000 or term_grace_ms < 0 or term_grace_ms > 30000:
+        return Err(ProcessTextError.InvalidRequest("process timeout must be 1..3600000 ms and grace 0..30000 ms"))
+    if max_output_bytes <= 0 or max_output_bytes > 1048576 or max_output_bytes > stdout_codec.input_byte_limit() or max_output_bytes > stderr_codec.input_byte_limit():
+        return Err(ProcessTextError.InvalidRequest("capture limit must be 1..1048576 bytes and fit both read profiles"))
+    if not command.starts_with("/") or command.len() > 1048576 or args.len() > 256:
+        return Err(ProcessTextError.InvalidRequest("command must be absolute and argv bounded"))
+    var argv_bytes = command.len()
+    process_text_argv(command)?
+    for arg in args:
+        if arg.len() > 1048576 - argv_bytes:
+            return Err(ProcessTextError.InvalidRequest("command plus arguments exceed 1048576 bytes"))
+        argv_bytes = argv_bytes + arg.len()
+        process_text_argv(arg)?
+    if input.len() > 1048576:
+        return Err(ProcessTextError.InvalidRequest("internal stdin exceeds 1048576 bytes"))
+    val format = ExternalFormat(encoding: stdin_codec.write_encoding(), byte_order: stdin_codec.write_byte_order(), bom: stdin_codec.write_bom())
+    val encoded = process_text_encode(input, format, "stdin")?
+    if encoded.len() > 1048576 or encoded.len() > stdin_codec.output_byte_limit():
+        return Err(ProcessTextError.InvalidRequest("encoded stdin exceeds the session or provider input limit"))
+    val out = process_text_decoder(stdout_codec, "stdout")?
+    val err = process_text_decoder(stderr_codec, "stderr")?
+    if platform_name_raw() != "linux":
+        return Err(ProcessTextError.InvalidRequest("explicit process text sessions require the Linux native V3 provider"))
+    val started = match OwnedProcessLease.start(command, args, encoded, timeout_ms, term_grace_ms, max_output_bytes):
+        case Ok(value): value
+        case Err(error): return Err(ProcessTextError.Provider(error))
+    Ok(ProcessTextSession(_lease: started.lease(), _stdout_decoder: out, _stderr_decoder: err, _capture_limit: max_output_bytes, _stdout_delivered: 0, _stderr_delivered: 0, _failure: nil, _finished: false, _retiring: false, _closed: false))
+
+export ProcessTextError, ProcessTextPoll, ProcessTextSession, process_text_session

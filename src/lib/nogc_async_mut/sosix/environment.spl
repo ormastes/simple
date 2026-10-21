@@ -1,12 +1,79 @@
-"""Hosted SOSIX environment service.
+"""SOSIX environment/cwd text admission. Ordinary APIs explicitly require UTF-8.
 
-The nullable lookup preserves the raw distinction between an absent variable
-and a present value. The no-GC sync runtime owns the sole foreign call.
+Nullable lookup preserves missing versus empty. Encoding failures panic only
+in legacy text/nullable adapters; checked siblings retain typed errors. Boolean
+mutators already have a failure value and return false on rejected admission.
+No charset is inferred from POSIX, environment variables or locale.
 """
+use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_set_process, env_remove_process}
+use std.nogc_sync_mut.sffi.env.{env_cwd_nullable_raw}
+use std.nogc_async_mut.sosix.text_boundary.{sosix_require_posix_text_provider}
+use std.nogc_sync_mut.io.external_text_io.{TextIoError, io_text_error_message}
+use std.nogc_async_mut.sosix.text_boundary.{sosix_admit_utf8, sosix_admit_c_string}
 
-export use std.nogc_sync_mut.io_runtime.{
-    env_get_nullable as sosix_env_get_nullable,
-    env_set_process as sosix_env_set,
-    env_remove_process as sosix_env_remove,
-    cwd_process as sosix_cwd
-}
+# Raw provider APIs remain in io_runtime/sffi; ordinary SOSIX signatures do not
+# expose external encoding objects. Provider nil still conflates missing/OOM.
+
+fn sosix_env_get_checked(key: text) -> Result<text?, TextIoError>:
+    val admitted = sosix_admit_c_string(key, true)?
+    sosix_require_posix_text_provider()?
+    if val raw = env_get_nullable(admitted):
+        val value = sosix_admit_utf8(raw)?
+        return Ok(Some(value))
+    Ok(nil)
+
+fn sosix_env_get_nullable(key: text) -> text?:
+    match sosix_env_get_checked(key):
+        case Ok(value): value
+        case Err(error): panic(io_text_error_message(error))
+
+fn sosix_env_get(key: text) -> text:
+    sosix_env_get_nullable(key) ?? ""
+
+fn sosix_env_get_opt(key: text) -> text?:
+    val value = sosix_env_get_nullable(key)
+    if val present = value:
+        if present != "": return Some(present)
+    nil
+
+fn sosix_env_set_checked(key: text, value: text) -> Result<(), TextIoError>:
+    val admitted_key = sosix_admit_c_string(key, true)?
+    val admitted_value = sosix_admit_c_string(value, false)?
+    sosix_require_posix_text_provider()?
+    if not env_set_process(admitted_key, admitted_value):
+        return Err(TextIoError.Io("environment provider rejected assignment"))
+    Ok(())
+
+fn sosix_env_set(key: text, value: text) -> bool:
+    match sosix_env_set_checked(key, value):
+        case Ok(_): true
+        case Err(_): false
+
+fn sosix_env_remove_checked(key: text) -> Result<(), TextIoError>:
+    val admitted = sosix_admit_c_string(key, true)?
+    sosix_require_posix_text_provider()?
+    if not env_remove_process(admitted):
+        return Err(TextIoError.Io("environment provider rejected removal"))
+    Ok(())
+
+fn sosix_env_remove(key: text) -> bool:
+    match sosix_env_remove_checked(key):
+        case Ok(_): true
+        case Err(_): false
+
+fn sosix_cwd_checked() -> Result<text, TextIoError>:
+    sosix_require_posix_text_provider()?
+    val raw = env_cwd_nullable_raw()
+    if val present = raw:
+        if present == "": return Err(TextIoError.Io("current directory provider returned empty path"))
+        return sosix_admit_c_string(present, false)
+    Err(TextIoError.Io("current directory provider failed"))
+
+fn sosix_cwd() -> text:
+    match sosix_cwd_checked():
+        case Ok(value): value
+        case Err(error): panic(io_text_error_message(error))
+
+export sosix_env_get_checked, sosix_env_get_nullable, sosix_env_get, sosix_env_get_opt
+export sosix_env_set_checked, sosix_env_set, sosix_env_remove_checked, sosix_env_remove
+export sosix_cwd_checked, sosix_cwd
