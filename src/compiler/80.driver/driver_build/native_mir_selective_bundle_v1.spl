@@ -1,0 +1,457 @@
+# Immutable direct post-mono transport. This authority is deliberately separate
+# from the driver-issued mono archive authority. Only encoded bodies cross the
+# process boundary; a worker decodes its claimed body in its own scratch scope.
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_codec.{hir_module_encode, hir_codec_header, hir_module_has_rt_hal}
+use compiler.hir.generated.hir_codec.{hc_dec_hir_module}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, flat_pool_escape, flat_pool_unescape}
+use compiler.mir.hir_declaration_types_v1.{MirHirModuleDeclarationsV1, MirHirDeclarationRepositoryV1, MirHirDeclarationSourceV1}
+use compiler.mir.hir_declaration_summary_v1.{mir_hir_project_module_in_owned_scope_v1, mir_hir_declarations_same_physical_source_v1}
+use compiler.mir.hir_declaration_codec_v1.{mir_hir_declaration_repository_digest_v1}
+use compiler.mir.hir_declaration_decoder_v1.{mir_hir_encode_module_declarations_v1, mir_hir_decode_module_declarations_v1}
+use compiler.mir._MirLowering.module_lowering.{mir_layout_canonical_module_name}
+use compiler.mir._MirLowering.archive_borrowed_module_v1.{MirArchiveFunctionEmissionV1}
+use compiler.driver.cache.hir_owned_artifact_cache_v1.{hir_owned_artifact_context_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_promote_diagnostic_owner_v1, hir_cache_clear_last_warnings}
+export use compiler.driver.driver_build.native_mir_selective_manifest_envelope_v1.{native_mir_selective_job_count_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use std.common.encoding.utf8.{text_byte_len}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, secure_temp_dir_raw, file_publish_noreplace_raw}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove}
+use std.nogc_sync_mut.io_runtime.{file_write, file_size_raw, env_get_nullable}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+
+pub const NATIVE_MIR_SELECTIVE_MODULE_BYTES_V1: i64 = 8 * 1024 * 1024
+pub const NATIVE_MIR_SELECTIVE_MANIFEST_BYTES_V1: i64 = 32 * 1024 * 1024
+pub const NATIVE_MIR_SELECTIVE_BUNDLE_BYTES_V1: i64 = 512 * 1024 * 1024
+pub const NATIVE_MIR_SELECTIVE_MAX_MODULES_V1: i64 = 65536
+pub const NATIVE_MIR_SELECTIVE_FORMAT_V1: text = "simple/mir-selective-post-mono/v1"
+
+pub struct NativeMirSelectiveRowV1:
+    lookup_name: text
+    emission_name: text
+    path: text
+    body_digest: text
+    declaration_digest: text
+    is_entry: bool
+    weight: i64
+    secondary_names: [text] = []
+    # Actual monomorphizer placements, never inferred from mangled names.
+    specialization_functions: [MirArchiveFunctionEmissionV1] = []
+
+pub struct NativeMirSelectiveBundleV1:
+    source_identity: text
+    context_identity: text
+    rows: [NativeMirSelectiveRowV1]
+    declarations: MirHirDeclarationRepositoryV1
+    # Exact covered manifest bytes bind source/provider/emission/alias order.
+    # This is the verified manifest seal digest, never a reconstructed guess.
+    manifest_identity: text = ""
+    source_order: [text] = []
+    provider_rows: Dict<text, NativeMirSelectiveRowV1> = {}
+    specialization_selections: Dict<text, [MirArchiveFunctionEmissionV1]> = {}
+
+pub fn native_mir_selective_provider_row_v1(bundle: NativeMirSelectiveBundleV1,
+        name: text) -> Result<NativeMirSelectiveRowV1, text>:
+    if not bundle.provider_rows.has(name): return Err("selective MIR requested provider absent from admitted inventory")
+    Ok(bundle.provider_rows[name])
+
+pub fn native_mir_selective_authority_v1(source: text, context: text) -> text:
+    sha256_text("mir-selective-direct-authority-v1\n{source}\n{context}")
+
+pub fn native_mir_selective_module_key_v1(source: text, context: text, name: text) -> text:
+    sha256_text("mir-selective-direct-module-v1\n{native_mir_selective_authority_v1(source, context)}\n{sha256_text(name)}")
+
+pub fn native_mir_selective_source_binding_v1(lookup: text, physical_path: text,
+        digest: text, bytes: i64) -> MirHirDeclarationSourceV1:
+    MirHirDeclarationSourceV1(logical_key: lookup, physical_path: physical_path,
+        source_digest: digest, source_bytes: bytes,
+        input_archive_key: sha256_text("mir-selective-direct-input-v1\n{sha256_text(physical_path)}\n{digest}\n{bytes}"))
+
+pub fn native_mir_selective_body_path_v1(dir: text, name: text) -> text:
+    "{dir}/{sha256_text(name)}.hirbody"
+
+pub fn native_mir_selective_declaration_path_v1(dir: text, name: text) -> text:
+    "{dir}/{sha256_text(name)}.hirdecl"
+
+pub fn native_mir_selective_artifact_size_v1(dir: text, name: text) -> Result<i64, text>:
+    val body = file_size_raw(native_mir_selective_body_path_v1(dir, name))
+    val declaration = file_size_raw(native_mir_selective_declaration_path_v1(dir, name))
+    if body <= 0 or body > NATIVE_MIR_SELECTIVE_MODULE_BYTES_V1 or
+            declaration <= 0 or declaration > NATIVE_MIR_SELECTIVE_MODULE_BYTES_V1:
+        return Err("selective MIR provider artifact missing or oversized")
+    Ok(body + declaration)
+
+pub fn native_mir_selective_disk_limit_v1() -> Result<i64, text>:
+    val requested = env_get_nullable("SIMPLE_MIR_SELECTIVE_DISK_BYTES") ?? ""
+    if requested == "": return Ok(NATIVE_MIR_SELECTIVE_BUNDLE_BYTES_V1)
+    val bytes = requested.to_i64() ?? -1
+    if bytes < 2 * NATIVE_MIR_SELECTIVE_MODULE_BYTES_V1:
+        return Err("selective MIR disk budget cannot reserve one bounded body/declaration pair")
+    Ok(if bytes < NATIVE_MIR_SELECTIVE_BUNDLE_BYTES_V1: bytes else: NATIVE_MIR_SELECTIVE_BUNDLE_BYTES_V1)
+
+# Immutable names: a concurrent/pre-existing writer may only have identical bytes.
+fn native_mir_selective_publish_v1(dir: text, path: text, content: text, bound: i64) -> Result<bool, text>:
+    if content == "" or text_byte_len(content) > bound:
+        return Err("selective MIR artifact byte bound exceeded")
+    if not dir_create_all(dir): return Err("selective MIR artifact directory refused")
+    val temporary = secure_temp_dir_raw(dir, "mir-selective")
+    if temporary == "": return Err("selective MIR staging directory refused")
+    val staged = "{temporary}/record"
+    if not file_write(staged, content):
+        dir_remove(temporary, true)
+        return Err("selective MIR staged write refused")
+    val status = file_publish_noreplace_raw(staged, path)
+    val removed = dir_remove(temporary, true)
+    if not removed or (status != 0 and status != 1):
+        return Err("selective MIR immutable publication refused")
+    val read = file_read_regular_no_follow_bounded(path, bound)
+    if read.is_err(): return Err("selective MIR published artifact read refused")
+    if read.unwrap() != content: return Err("selective MIR immutable artifact differs")
+    Ok(true)
+
+fn native_mir_selective_row_valid_v1(row: NativeMirSelectiveRowV1) -> bool:
+    if row.lookup_name == "" or row.emission_name == "" or row.path == "" or row.weight < 0 or
+            not sha256_lower_hex_valid(row.body_digest) or not sha256_lower_hex_valid(row.declaration_digest):
+        return false
+    var seen: Dict<text, bool> = {}
+    for name in row.secondary_names:
+        if name == "" or seen.has(name) or name == row.lookup_name: return false
+        seen[name] = true
+    var symbols: Dict<i64, bool> = {}
+    for function in row.specialization_functions:
+        if function.symbol < 0 or function.name == "" or not sha256_lower_hex_valid(function.complete_function_digest) or
+                symbols.has(function.symbol): return false
+        symbols[function.symbol] = true
+    true
+
+fn native_mir_selective_selections_match_v1(declaration: MirHirModuleDeclarationsV1,
+        selections: [MirArchiveFunctionEmissionV1]) -> bool:
+    for selected in selections:
+        var matches = 0
+        for function in declaration.functions:
+            if function.symbol.id == selected.symbol and function.name == selected.name and
+                    function.complete_function_digest == selected.complete_function_digest and not function.is_generic_template:
+                matches = matches + 1
+        if matches != 1: return false
+    true
+
+# One complete body + declaration projection per producer-owned scratch scope.
+pub fn native_mir_selective_write_module_in_owned_scope_v1(dir: text, source: text,
+        context: text, lookup: text, module: HirModule, weight: i64,
+        source_binding: MirHirDeclarationSourceV1,
+        selections: [MirArchiveFunctionEmissionV1] = []) -> Result<NativeMirSelectiveRowV1, text>:
+    if transient_array_scope_state_v1() != 1 or not sha256_lower_hex_valid(source) or
+            not sha256_lower_hex_valid(context) or lookup == "" or weight < 0:
+        return Err("selective MIR body publication lacks identity or scratch ownership")
+    val expected_source = native_mir_selective_source_binding_v1(lookup, source_binding.physical_path,
+        source_binding.source_digest, source_binding.source_bytes)
+    if source_binding.logical_key != lookup or source_binding.physical_path == "" or source_binding.source_bytes < 0 or
+            not sha256_lower_hex_valid(source_binding.source_digest) or source_binding.input_archive_key != expected_source.input_archive_key:
+        return Err("selective MIR provider lacks exact direct input source binding")
+    if module.aop_advices.len() != 0 or module.di_bindings.len() != 0 or
+            module.arch_rules.len() != 0 or module.mock_decls.len() != 0 or module.domain_blocks.len() != 0:
+        return Err("selective MIR cannot omit post-MIR AOP/DI/architecture/domain provider bodies")
+    if hir_module_has_rt_hal(module):
+        return Err("selective MIR HAL bodies require frontend-owned resource registries")
+    val complete = hir_module_encode(module)
+    if complete == "" or text_byte_len(complete) > NATIVE_MIR_SELECTIVE_MODULE_BYTES_V1:
+        return Err("selective MIR complete body codec/bound refused: {lookup}")
+    val digest = sha256_text(complete)
+    val artifacts = hir_owned_artifact_context_v1()
+    if not artifacts.enabled or artifacts.directory == "" or artifacts.producer_header == "":
+        return Err("selective MIR requires exact enabled owned-artifact context")
+    val projected = mir_hir_project_module_in_owned_scope_v1(artifacts, module,
+        native_mir_selective_authority_v1(source, context),
+        native_mir_selective_module_key_v1(source, context, lookup), digest, Some(source_binding))
+    if projected.is_err(): return Err(projected.unwrap_err())
+    val declaration = projected.unwrap()
+    if not native_mir_selective_selections_match_v1(declaration, selections):
+        return Err("selective MIR mono placements differ from complete provider functions")
+    val payload = mir_hir_encode_module_declarations_v1(declaration)
+    val row = NativeMirSelectiveRowV1(lookup_name: lookup,
+        emission_name: mir_layout_canonical_module_name(module.name), path: module.path,
+        body_digest: digest, declaration_digest: declaration.declaration_digest,
+        is_entry: false, weight: weight, secondary_names: [], specialization_functions: selections)
+    if not native_mir_selective_row_valid_v1(row): return Err("selective MIR invalid provider metadata")
+    val body_written = native_mir_selective_publish_v1(dir,
+        native_mir_selective_body_path_v1(dir, lookup), complete, NATIVE_MIR_SELECTIVE_MODULE_BYTES_V1)?
+    if not body_written: return Err("selective MIR body publication did not succeed")
+    val declaration_written = native_mir_selective_publish_v1(dir,
+        native_mir_selective_declaration_path_v1(dir, lookup), payload, NATIVE_MIR_SELECTIVE_MODULE_BYTES_V1)?
+    if not declaration_written: return Err("selective MIR declaration publication did not succeed")
+    # Weight is a source scheduling estimate; disk budgets use actual bytes.
+    Ok(row)
+
+fn native_mir_selective_row_line_v1(row: NativeMirSelectiveRowV1) -> text:
+    var fields: [text] = [flat_pool_escape(row.lookup_name), flat_pool_escape(row.emission_name),
+        flat_pool_escape(row.path), row.body_digest, row.declaration_digest,
+        if row.is_entry: "1" else: "0", "{row.weight}", "{row.secondary_names.len()}"]
+    for name in row.secondary_names: fields.push(flat_pool_escape(name))
+    fields.push("{row.specialization_functions.len()}")
+    for function in row.specialization_functions:
+        fields.push("{function.symbol}")
+        fields.push(flat_pool_escape(function.name))
+        fields.push(function.complete_function_digest)
+    fields.join("\t")
+
+fn native_mir_selective_parse_row_v1(line: text) -> Result<NativeMirSelectiveRowV1, text>:
+    val fields = line.split("\t")
+    if fields.len() < 9 or (fields[5] != "0" and fields[5] != "1"):
+        return Err("selective MIR manifest row shape refused")
+    var row = NativeMirSelectiveRowV1(lookup_name: flat_pool_unescape(fields[0]),
+        emission_name: flat_pool_unescape(fields[1]), path: flat_pool_unescape(fields[2]),
+        body_digest: fields[3], declaration_digest: fields[4], is_entry: fields[5] == "1",
+        weight: fields[6].to_i64() ?? -1, secondary_names: [])
+    val secondary_count = fields[7].to_i64() ?? -1
+    if secondary_count < 0 or secondary_count > NATIVE_MIR_SELECTIVE_MAX_MODULES_V1 or fields.len() < secondary_count + 9:
+        return Err("selective MIR secondary inventory count refused")
+    var index = 0
+    while index < secondary_count:
+        row.secondary_names.push(flat_pool_unescape(fields[8 + index]))
+        index = index + 1
+    val function_count = fields[8 + secondary_count].to_i64() ?? -1
+    if function_count < 0 or function_count > 65536 or fields.len() != secondary_count + 9 + 3 * function_count:
+        return Err("selective MIR specialization inventory count refused")
+    index = 0
+    while index < function_count:
+        val offset = secondary_count + 9 + 3 * index
+        row.specialization_functions.push(MirArchiveFunctionEmissionV1(symbol: fields[offset].to_i64() ?? -1,
+            name: flat_pool_unescape(fields[offset + 1]), complete_function_digest: fields[offset + 2]))
+        index = index + 1
+    if not native_mir_selective_row_valid_v1(row) or native_mir_selective_row_line_v1(row) != line:
+        return Err("selective MIR manifest row canonical identity refused")
+    Ok(row)
+
+# Providers preserve actual dict-key prescan order. Emissions separately preserve
+# admitted physical source order; a sorted set cannot stand in for either order.
+pub fn native_mir_selective_write_manifest_v1(dir: text, source: text, context: text,
+        providers: [NativeMirSelectiveRowV1], rows: [NativeMirSelectiveRowV1],
+        source_order: [text] = []) -> Result<bool, text>:
+    if not sha256_lower_hex_valid(source) or not sha256_lower_hex_valid(context) or
+            providers.len() < 1 or providers.len() > NATIVE_MIR_SELECTIVE_MAX_MODULES_V1 or
+            rows.len() < 1 or rows.len() > providers.len():
+        return Err("selective MIR manifest inventory bound refused")
+    val artifacts = hir_owned_artifact_context_v1()
+    var lines: [text] = [NATIVE_MIR_SELECTIVE_FORMAT_V1, source, context,
+        flat_pool_escape(artifacts.directory), flat_pool_escape(artifacts.producer_header),
+        "{providers.len()}", "{rows.len()}"]
+    var seen: Dict<text, bool> = {}
+    var bytes: i64 = 0
+    val limit = native_mir_selective_disk_limit_v1()?
+    var sources: [text] = source_order
+    if sources.len() == 0:
+        for provider in providers: sources.push(provider.lookup_name)
+    if sources.len() > NATIVE_MIR_SELECTIVE_MAX_MODULES_V1:
+        return Err("selective MIR original source barrier order exceeds module bound")
+    var source_fields: [text] = ["source-order"]
+    for name in sources: source_fields.push(flat_pool_escape(name))
+    lines.push(source_fields.join("\t"))
+    for row in providers:
+        if not native_mir_selective_row_valid_v1(row) or seen.has(row.lookup_name) or row.secondary_names.len() != 0:
+            return Err("selective MIR provider inventory repeats or lacks identity")
+        seen[row.lookup_name] = true
+        val size = native_mir_selective_artifact_size_v1(dir, row.lookup_name)?
+        bytes = bytes + size
+        if bytes > limit:
+            return Err("selective MIR aggregate disk byte bound exceeded")
+        lines.push(native_mir_selective_row_line_v1(row))
+    for name in sources:
+        if not seen.has(name): return Err("selective MIR source barrier has no frozen provider")
+    var emitted: Dict<text, bool> = {}
+    var position = 0
+    for row in rows:
+        if not seen.has(row.lookup_name) or emitted.has(row.emission_name) or row.is_entry != (position == 0):
+            return Err("selective MIR emission schedule ownership refused")
+        emitted[row.emission_name] = true
+        lines.push(native_mir_selective_row_line_v1(row))
+        position = position + 1
+    val body = lines.join("\n") + "\n"
+    val sealed = body + "seal {sha256_text(body)}\n"
+    # A retry can coexist with the identical immutable manifest, so reserve
+    # both the published copy and its temporary staging copy.
+    if bytes > limit - 2 * text_byte_len(sealed):
+        return Err("selective MIR manifest publication exceeds total disk byte budget")
+    native_mir_selective_publish_v1(dir, "{dir}/selective.manifest",
+        sealed, NATIVE_MIR_SELECTIVE_MANIFEST_BYTES_V1)
+
+fn native_mir_selective_load_declaration_owned_v1(dir: text, source: text, context: text,
+        row: NativeMirSelectiveRowV1) -> Result<MirHirModuleDeclarationsV1, text>:
+    if not transient_scope_begin(): return Err("selective MIR declaration scope unavailable")
+    var result: Result<MirHirModuleDeclarationsV1, text> = Err("selective MIR declaration read refused")
+    val read = file_read_regular_no_follow_bounded(native_mir_selective_declaration_path_v1(dir,
+        row.lookup_name), NATIVE_MIR_SELECTIVE_MODULE_BYTES_V1)
+    if read.is_ok():
+        result = mir_hir_decode_module_declarations_v1(read.unwrap(), row.declaration_digest)
+        if result.is_ok():
+            val declaration = result.unwrap()
+            var source_valid = false
+            if val source_binding = declaration.source_binding:
+                val expected = native_mir_selective_source_binding_v1(row.lookup_name, source_binding.physical_path,
+                    source_binding.source_digest, source_binding.source_bytes)
+                source_valid = source_binding.logical_key == row.lookup_name and source_binding.physical_path != "" and
+                    source_binding.source_bytes >= 0 and sha256_lower_hex_valid(source_binding.source_digest) and
+                    source_binding.input_archive_key == expected.input_archive_key
+            if not source_valid or declaration.final_repository_authority != native_mir_selective_authority_v1(source, context) or
+                    declaration.final_archive_key != native_mir_selective_module_key_v1(source, context, row.lookup_name) or
+                    declaration.final_body_digest != row.body_digest or declaration.path != row.path or
+                    mir_layout_canonical_module_name(declaration.name) != row.emission_name or
+                    not native_mir_selective_selections_match_v1(declaration, row.specialization_functions):
+                result = Err("selective MIR declaration body/owner/context binding refused")
+    val paused = transient_scope_pause()
+    var promoted = false
+    if paused:
+        promoted = transient_promote(result) and hir_cache_promote_diagnostic_owner_v1()
+        hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not promoted or not ended: return Err("selective MIR declaration ownership refused")
+    result
+
+pub fn native_mir_selective_load_bundle_v1(dir: text, source_identity: text,
+        context_identity: text) -> Result<NativeMirSelectiveBundleV1, text>:
+    if transient_array_scope_state_v1() != 0 or not sha256_lower_hex_valid(source_identity) or
+            not sha256_lower_hex_valid(context_identity):
+        return Err("selective MIR bundle lacks identity or unoccupied owner boundary")
+    val read = file_read_regular_no_follow_bounded("{dir}/selective.manifest", NATIVE_MIR_SELECTIVE_MANIFEST_BYTES_V1)
+    if read.is_err(): return Err("selective MIR sealed manifest unavailable")
+    val lines = read.unwrap().split("\n")
+    if lines.len() < 12 or lines[0] != NATIVE_MIR_SELECTIVE_FORMAT_V1 or
+            lines[1] != source_identity or lines[2] != context_identity:
+        return Err("selective MIR manifest format/source/context refused")
+    val artifacts = hir_owned_artifact_context_v1()
+    if not artifacts.enabled or lines[3] != flat_pool_escape(artifacts.directory) or
+            lines[4] != flat_pool_escape(artifacts.producer_header):
+        return Err("selective MIR expression artifact context differs")
+    val count = lines[5].to_i64() ?? -1
+    val emissions = lines[6].to_i64() ?? -1
+    if count < 1 or count > NATIVE_MIR_SELECTIVE_MAX_MODULES_V1 or emissions < 1 or
+            emissions > count or lines.len() != count + emissions + 10 or lines[lines.len() - 1] != "":
+        return Err("selective MIR manifest inventory/count bound refused")
+    val source_fields = lines[7].split("\t")
+    if source_fields.len() < 2 or source_fields.len() > NATIVE_MIR_SELECTIVE_MAX_MODULES_V1 + 1 or source_fields[0] != "source-order":
+        return Err("selective MIR source barrier order shape refused")
+    var source_order: [text] = []
+    var source_index = 1
+    while source_index < source_fields.len():
+        val name = flat_pool_unescape(source_fields[source_index])
+        if name == "" or flat_pool_escape(name) != source_fields[source_index]:
+            return Err("selective MIR source barrier order encoding refused")
+        source_order.push(name)
+        source_index = source_index + 1
+    var covered: [text] = []
+    var index = 0
+    while index < count + emissions + 8:
+        covered.push(lines[index])
+        index = index + 1
+    val manifest_identity = sha256_text(covered.join("\n") + "\n")
+    if lines[index] != "seal {manifest_identity}":
+        return Err("selective MIR manifest seal refused")
+    var repository = MirHirDeclarationRepositoryV1(artifact_context: artifacts,
+        final_repository_authority: native_mir_selective_authority_v1(source_identity, context_identity),
+        ordered_modules: [], modules: {}, authority: "")
+    var provider_rows: Dict<text, NativeMirSelectiveRowV1> = {}
+    var bytes: i64 = text_byte_len(read.unwrap())
+    val limit = native_mir_selective_disk_limit_v1()?
+    index = 0
+    while index < count:
+        val parsed = native_mir_selective_parse_row_v1(lines[index + 8])
+        if parsed.is_err(): return Err(parsed.unwrap_err())
+        val row = parsed.unwrap()
+        if repository.modules.has(row.lookup_name) or row.is_entry or row.secondary_names.len() != 0:
+            return Err("selective MIR provider inventory duplicates an owner or entry")
+        val size = native_mir_selective_artifact_size_v1(dir, row.lookup_name)?
+        bytes = bytes + size
+        if bytes > limit:
+            return Err("selective MIR admitted bundle exceeds aggregate byte budget")
+        val declaration = native_mir_selective_load_declaration_owned_v1(dir, source_identity, context_identity, row)
+        if declaration.is_err(): return Err(declaration.unwrap_err())
+        repository.ordered_modules.push(row.lookup_name)
+        repository.modules[row.lookup_name] = declaration.unwrap()
+        provider_rows[row.lookup_name] = row
+        index = index + 1
+    for name in source_order:
+        if not provider_rows.has(name): return Err("selective MIR source barrier order names an absent provider")
+    var rows: [NativeMirSelectiveRowV1] = []
+    var emitted: Dict<text, bool> = {}
+    var secondary_owners: Dict<text, bool> = {}
+    index = 0
+    while index < emissions:
+        val parsed = native_mir_selective_parse_row_v1(lines[8 + count + index])
+        if parsed.is_err(): return Err(parsed.unwrap_err())
+        val row = parsed.unwrap()
+        if not provider_rows.has(row.lookup_name) or emitted.has(row.emission_name) or row.is_entry != (index == 0):
+            return Err("selective MIR emission owner/order refused")
+        val provider = provider_rows[row.lookup_name]
+        var provider_identity = row
+        provider_identity.is_entry = false
+        provider_identity.secondary_names = []
+        if row.emission_name != provider.emission_name or row.path != provider.path or
+                row.body_digest != provider.body_digest or row.declaration_digest != provider.declaration_digest or
+                row.weight != provider.weight or
+                native_mir_selective_row_line_v1(provider_identity) != native_mir_selective_row_line_v1(provider):
+            return Err("selective MIR emission differs from frozen provider")
+        for secondary_name in row.secondary_names:
+            if not provider_rows.has(secondary_name) or secondary_owners.has(secondary_name):
+                return Err("selective MIR secondary provider has no unique physical owner")
+            val secondary = provider_rows[secondary_name]
+            if secondary.emission_name != row.emission_name or secondary.path != row.path or
+                    secondary.specialization_functions.len() == 0 or
+                    not mir_hir_declarations_same_physical_source_v1(repository.modules[row.lookup_name], repository.modules[secondary_name]):
+                return Err("selective MIR secondary specialization has no same-physical placement")
+            secondary_owners[secondary_name] = true
+        emitted[row.emission_name] = true
+        rows.push(row)
+        index = index + 1
+    # Re-derive the complete ordered alias schedule from the frozen provider
+    # inventory. A sealed manifest may not omit a real specialization provider.
+    for row in rows:
+        var expected: [text] = []
+        for name in repository.ordered_modules:
+            val provider = provider_rows[name]
+            if name != row.lookup_name and provider.emission_name == row.emission_name and
+                    provider.specialization_functions.len() > 0:
+                expected.push(name)
+        if expected != row.secondary_names:
+            return Err("selective MIR secondary schedule differs from exact provider order")
+    repository.authority = mir_hir_declaration_repository_digest_v1(repository)
+    if repository.authority == "": return Err("selective MIR declaration repository digest refused")
+    var selections: Dict<text, [MirArchiveFunctionEmissionV1]> = {}
+    for name in repository.ordered_modules:
+        selections[name] = provider_rows[name].specialization_functions
+    Ok(NativeMirSelectiveBundleV1(source_identity: source_identity, context_identity: context_identity,
+        rows: rows, declarations: repository, manifest_identity: manifest_identity, source_order: source_order,
+        provider_rows: provider_rows, specialization_selections: selections))
+
+pub fn native_mir_selective_load_body_in_owned_scope_v1(dir: text,
+        bundle: NativeMirSelectiveBundleV1, row: NativeMirSelectiveRowV1) -> Result<HirModule, text>:
+    if transient_array_scope_state_v1() != 1 or not bundle.declarations.modules.has(row.lookup_name):
+        return Err("selective MIR body load lacks claimed owner scratch scope")
+    val declaration = bundle.declarations.modules[row.lookup_name]
+    if declaration.final_repository_authority != native_mir_selective_authority_v1(bundle.source_identity, bundle.context_identity) or
+            declaration.final_archive_key != native_mir_selective_module_key_v1(bundle.source_identity, bundle.context_identity, row.lookup_name) or
+            declaration.final_body_digest != row.body_digest or declaration.declaration_digest != row.declaration_digest or
+            declaration.path != row.path or mir_layout_canonical_module_name(declaration.name) != row.emission_name:
+        return Err("selective MIR body row differs from declaration authority")
+    val read = file_read_regular_no_follow_bounded(native_mir_selective_body_path_v1(dir,
+        row.lookup_name), NATIVE_MIR_SELECTIVE_MODULE_BYTES_V1)
+    if read.is_err(): return Err("selective MIR complete body unavailable")
+    val payload = read.unwrap()
+    if sha256_text(payload) != row.body_digest: return Err("selective MIR complete body checksum refused")
+    # Projection final_body_digest binds the established legacy HIR codec.
+    # The separate canonical HIR decoder expects a different header and may
+    # not decode these bytes. Apply the existing reader limits to the exact
+    # generated legacy record, then prove stable full byte equality.
+    var reader = FlatPoolReader.new_bounded(payload, NATIVE_MIR_SELECTIVE_MODULE_BYTES_V1,
+        128 * 1024 * 1024, 65536, 128, 1000000)
+    if not reader.ok or reader.next() != hir_codec_header():
+        return Err("selective MIR complete body codec/header bound refused")
+    val module = hc_dec_hir_module(reader)
+    if not reader.ok or reader.pos != reader.lines.len() - 1 or reader.lines[reader.pos] != "":
+        return Err("selective MIR complete body bounded decode refused")
+    if hir_module_encode(module) != payload:
+        return Err("selective MIR complete body codec round-trip refused")
+    if module.name != declaration.name or module.path != declaration.path or module.aop_advices.len() != 0:
+        return Err("selective MIR complete body owner/post-MIR metadata refused")
+    Ok(module)
