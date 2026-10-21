@@ -48,3 +48,25 @@ comprehension controls with nonempty expected values under optional-join
 pollution, then compile the original fullscope MIR JSON source and pass the
 serializer regressions. A compiler/link success alone cannot retire this
 workaround. The underlying compiler bug remains open.
+
+An independent source review confirmed that all nine loop conversions retain
+their original iteration order, selected fields and mapping expressions.
+The exact production escape and index-serialization functions, extracted with
+the native smoke fixture's body into a private diagnostic executable, reported
+`MIR JSON serialization: 40 checks, 0 failures`. This includes empty, single,
+multiple and negative index values, all control bytes, quotes, backslashes,
+UTF-8 text and ordinary slashes. The actual owner import in the checked-in
+smoke remains distinct from that extracted-function runtime evidence.
+
+The independent two-module diagnostic under
+`test/fixtures/native/json_comprehension_join` retains three real outcomes:
+original untyped comprehension fails optional Add; typed comprehension links
+but incorrectly prints an empty vector; explicit typed iteration prints the
+required `[1,2]`. These expected failures describe this frozen producer only.
+
+The private fullscope diagnostic used the canonical toolchain and frozen
+runtime authority. Environment comparison found `SIMPLE_ABI_POLICY` unset in
+that diagnostic, versus explicit `v1` in the canonical campaign transcript;
+Windows ABI, linker flavor and no-stub policy match. No compatibility archive
+was recorded in either context. Therefore the canonical retry remains the
+authority for the later link failure and phase qualification.
