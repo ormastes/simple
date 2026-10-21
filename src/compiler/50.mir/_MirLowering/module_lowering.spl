@@ -5,7 +5,7 @@ use compiler.mir._MirLoweringExpr.function_signature_owner.*
 # @workaround bug=phase3_compiler_unit_or_workaround_2026-10-10 reason= preserve explicit enum owners until bare-pattern inference is repaired.
 use compiler.hir.hir_operators.{HirBinOp}
 use compiler.hir.hir_codec.{hir_fn_scalars_at_v1, hir_fn_scalars_at_key_v1,
-    hir_fn_scalars_in_v1, hir_module_functions_count_in_v1}
+    hir_module_function_keys_in_v1, hir_fn_scalars_with_keys_in_v1}
 # Part of src/compiler/50.mir/mir_lowering.spl: module/struct/class type lowering, asm target-spec accessors
 use compiler.mir._MirLowering.bootstrap_globals.*
 use compiler.mir._MirLowering.provider_metadata.*
@@ -1864,14 +1864,15 @@ impl MirLowering:
         # local, no field, no bind. (The dict HANDLE param transport from
         # cycle-108/109 stays: reference copy at the call site, C-level
         # rt_dict_values.)
-        # Cycle-144: param-only codec extraction via dict+key -- the
-        # encode-proven access class (hir_fn_scalars_in_v1 /
-        # hir_module_functions_count_in_v1). No .values(), no binds of the
-        # module or keys anywhere on this path.
-        val prescan_fn_count: i64 = hir_module_functions_count_in_v1(modules, module_key)
+        # Freeze original key handles once per invocation. The scalar feeder
+        # below changes provider/layout/default registries only: it cannot
+        # mutate modules or their function dictionaries. Keep the ordered
+        # inventory local, with parameter-only reads in the codec pool.
+        val prescan_fn_keys = hir_module_function_keys_in_v1(modules, module_key)
+        val prescan_fn_count: i64 = prescan_fn_keys.len()
         var psi = 0
         while psi < prescan_fn_count:
-            val prescan_scalars = hir_fn_scalars_in_v1(modules, module_key, psi)
+            val prescan_scalars = hir_fn_scalars_with_keys_in_v1(modules, module_key, prescan_fn_keys, psi)
             self.prescan_one_function_v1(module_name, module_symbols,
                 prescan_scalars[0], prescan_scalars[1], prescan_scalars[2],
                 prescan_scalars[3], prescan_scalars[4], prescan_scalars[5],
