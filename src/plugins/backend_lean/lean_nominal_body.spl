@@ -5,7 +5,7 @@ use compiler.mir.mir_instructions.{MirFunction, MirBody, MirInst, MirInstKind, M
 use compiler.mir.mir_types.{MirType, MirTypeKind, MirTypeDef, MirTypeDefKind, MirLocal, LocalId, LocalKind, MirConstValue}
 use compiler.mir.mir_json.{serialize_mir_type}
 use compiler.backend.backend.backend_types.{BackendKind, CompileError, compileerror_backend_error}
-use plugins.backend_lean.lean_type_declarations.{LeanTypeContext, lean_context_type_to_lean, lean_type_quote_name}
+use plugins.backend_lean.lean_type_declarations.{LeanTypeContext, lean_context_type_to_lean, lean_type_quote_name, lean_array_uses_finite_carrier_v1}
 use plugins.backend_lean.lean_mir_translate.{translate_mir_body, translate_const_value_exact, translate_binop, translate_unaryop}
 
 fn nominal_body_error(reason: text) -> CompileError:
@@ -232,7 +232,8 @@ class LeanNominalBodyEmitter:
                 branch_live[identity] = live_value
                 if not branch_live.has(identity) or branch_live[identity] != live_value:
                     return Err(nominal_body_error("cannot retain branch liveness state"))
-        # No emitter method mutates the shared types/context maps.
+        # Nominal identity/type maps stay read-only. The context's per-export
+        # array-policy work ledger is shared, so branch lookup work is cumulative.
         Ok(LeanNominalBodyEmitter(context: self.context, types: self.types,
             assigned: branch_assigned, live: branch_live,
             constant_nodes_left: self.constant_nodes_left))
@@ -354,10 +355,20 @@ class LeanNominalBodyEmitter:
         "(" + terms.join(", ") + ")"
 
     fn vector_value(terms: [text], element: MirType, size: i64) -> Result<text, CompileError>:
+        if size < 0 or terms.len() != size:
+            return Err(nominal_body_error("array length mismatch"))
         val element_name = lean_context_type_to_lean(element, self.context)?
+        val finite = lean_array_uses_finite_carrier_v1(element, size, self.context)?
         val literal = "#[" + terms.join(", ") + "]"
-        Ok("(_root_.Vector.mk (" + literal + " : _root_.Array (" + element_name +
-            ")) (by rfl) : _root_.Vector (" + element_name + ") " + size.to_text() + ")")
+        val vector = "(_root_.Vector.mk (" + literal + " : _root_.Array (" + element_name +
+            ")) (by rfl) : _root_.Vector (" + element_name + ") " + size.to_text() + ")"
+        if not finite: return Ok(vector)
+        # Operand locals use _l<id>; nominal names are fully qualified. These
+        # private binders cannot capture them. A nonrecursive let does not scope
+        # over its initializer, so nested captures may reuse the same names.
+        # Keep the Vector initializer outside the lambda: operands occur once.
+        Ok("(let _rv_values := " + vector + "; fun _rv_index : _root_.Fin " +
+            size.to_text() + " => _rv_values.get _rv_index)")
 
     me composite_constant(value: MirConstValue, type_: MirType, depth: i64) -> Result<text, CompileError>:
         # Debit before recursive work or term-vector allocation. The root and
@@ -475,6 +486,13 @@ class LeanNominalBodyEmitter:
                                 self.same_type(element, expected_element)?
                                 if size < 0 or operands.len() != size:
                                     return Err(nominal_body_error("array length mismatch"))
+                                if lean_array_uses_finite_carrier_v1(expected_element, size, self.context)?:
+                                    # Charge the root and retained operand terms before
+                                    # growth or Move consumption. Literal operands also
+                                    # retain their existing recursive constant charge.
+                                    if self.constant_nodes_left <= 0 or operands.len() > self.constant_nodes_left - 1:
+                                        return Err(nominal_body_error("selected array term budget"))
+                                    self.constant_nodes_left = self.constant_nodes_left - 1 - operands.len()
                                 var terms: [text] = []
                                 for operand in operands:
                                     terms.push(self.operand(operand, expected_element)?)

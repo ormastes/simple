@@ -41,7 +41,7 @@ Both builders must remain exactly unchanged.
 
 | Scenario | Observable refusal | Requirement |
 |---|---|---|
-| Recursive fixed arrays | Vector beneath Result refuses; independent scalar Vector in recursive struct remains supported | REC-003/004 |
+| Recursive fixed arrays | Recursive array beneath Result uses exact Fin-indexed carrier; independent scalar Vector in recursive struct remains supported | REC-003/004 |
 | Negative function position | FuncPtr taking the recursive type retains faithful-representation refusal | REC-004 |
 | Missing/wrong nominal kind | Exact missing-symbol and kind-mismatch diagnostics | REC-004 |
 | Malformed identity/members | Wrong key, duplicate type name, generated member, injected name | REC-002/004 |

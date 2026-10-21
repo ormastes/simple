@@ -5693,6 +5693,28 @@ impl MirLowering:
             return typed_result
         payload_local
 
+    me lower_struct_array_initializer_v1(expression: HirExpr, owner: text,
+        field_index: i64, declared: HirType?
+    ) -> LocalId:
+        # Literal-only contextual admission. Casts, variables, functions and
+        # ordinary uncontextualized [] retain their existing lowering path.
+        if val expected = declared:
+            match expected.kind:
+                case HirTypeKind.Array(_, _):
+                    match expression.kind:
+                        case HirExprKind.ArrayLit(_, _):
+                            val errors_before = self.errors.len()
+                            val slot = self.declared_field_type_in_current_table(owner, field_index, expected)
+                            if self.errors.len() != errors_before: return nil
+                            # Reuse exact element/length validation and native
+                            # array construction; do not relabel a lowered i64[].
+                            val result = self.lower_declared_enum_payload_expression(slot, expression)
+                            if self.errors.len() != errors_before: return nil
+                            return result
+                        case _: ()
+                case _: ()
+        self.lower_expr(expression)
+
     me lower_struct_construct(symbol: SymbolId, struct_name: text, args: [HirCallArg]) -> LocalId:
         """Lower `Point(x:3, y:4)` (or `Point{...}`) into an aggregate: one i64
         word per field, in declared field order. Named args are matched by name;
@@ -5850,7 +5872,8 @@ impl MirLowering:
                                     return nil
                                 self.lower_expr_for_slot(default_expr, declared_slot)
                             else:
-                                self.lower_expr(default_expr)
+                                val declared = if fi < field_hir_types.len(): Some(field_hir_types[fi]) else: nil
+                                self.lower_struct_array_initializer_v1(default_expr, struct_name, fi, declared)
                             if def_v != nil:
                                 if fi < field_hir_types.len():
                                     match field_hir_types[fi].kind:
@@ -5924,7 +5947,8 @@ impl MirLowering:
                     return nil
                 self.lower_expr_for_slot(chosen, declared_slot)
             else:
-                self.lower_expr(chosen)
+                val declared = if fi < field_hir_types.len(): Some(field_hir_types[fi]) else: nil
+                self.lower_struct_array_initializer_v1(chosen, struct_name, fi, declared)
             if v == nil:
                 self.error("unsupported struct field initializer (cannot lower to a value)", nil)
                 ops = ops.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64())))
