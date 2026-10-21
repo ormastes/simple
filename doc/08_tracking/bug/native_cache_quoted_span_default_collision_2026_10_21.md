@@ -16,12 +16,14 @@ not been executed, and general cache correctness is not claimed.
 Independent review of the Phase 2 recovery delta from `0bfa8039acd` through
 `afb3b74059a` found no changed line containing `Span {`. Added defaults are
 numeric, layout changes enter ordinary interface rows, and the enum, Lean and
-JSON repairs change consumer bodies. Canonical source refresh admits this
-owner only for the exact old snapshot and the exact reviewed new snapshot,
-excluding exactly the wrapper's own record to avoid recursive hashing.
-Producer, runtime, tools, cache binding and actual inner dependency keys remain
-checked. Every other source transition fails closed. This scoped recovery
-does not resolve the underlying normalizer bug.
+JSON repairs change consumer bodies. A diagnostic recovery at `400bd5d1983`
+permitted only an exact reviewed source-snapshot pair; that run reused 800
+modules and retained its failed evidence. That temporary allowance is not
+part of the final patch. The existing general source-refresh owner guard
+continues to reject this unreviewed implementation. Native shell-provider
+repairs require a fresh canonical authority and output, preserving the old
+cache rather than rebinding incompatible runtime/producer identities. The
+underlying normalizer bug remains unresolved.
 
 Repair the normalizer to recognize quoted/escaped strings before general
 admission. Regressions must show changed Span-like literal defaults invalidate
