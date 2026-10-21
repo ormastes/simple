@@ -19,7 +19,8 @@
 # guest and a seed build together was OOM-killed, corrupting the guest UFS.
 #
 # Env: QEMU_MEM (8G) QEMU_CPUS (4) QEMU_PORT (2224) FREEBSD_RV64_WORK
-#      (~/.simple/freebsd-riscv64) STAGE1_TIMEOUT (86400 s) CARGO_JOBS (3).
+#      (~/.simple/freebsd-riscv64) STAGE1_TIMEOUT (86400 s) STAGE1_FILE_TIMEOUT
+#      (7200 s per file) CARGO_JOBS (3).
 # Host packages (Ubuntu): qemu-system-misc qemu-utils opensbi u-boot-qemu
 #      expect openssh-client clang lld llvm; rustup nightly + rust-src.
 set -eu
@@ -32,6 +33,10 @@ QEMU_CPUS="${QEMU_CPUS:-4}"
 QEMU_PORT="${QEMU_PORT:-2224}"
 WORK="${FREEBSD_RV64_WORK:-${HOME}/.simple/freebsd-riscv64}"
 STAGE1_TIMEOUT="${STAGE1_TIMEOUT:-86400}"
+# The seed default per-file timeout (300 s) is sized for native hosts; under
+# riscv64 TCG 10.frontend/core/__init__.spl alone exceeded it and the seed then
+# refused every remaining file.
+STAGE1_FILE_TIMEOUT="${STAGE1_FILE_TIMEOUT:-7200}"
 CARGO_JOBS="${CARGO_JOBS:-3}"
 OPENSBI="${QEMU_OPENSBI:-/usr/lib/riscv64-linux-gnu/opensbi/generic/fw_jump.bin}"
 UBOOT="${QEMU_UBOOT:-/usr/lib/u-boot/qemu-riscv64_smode/uboot.elf}"
@@ -195,7 +200,7 @@ set +e
 guest "cd /root/simple && mkdir -p build/bootstrap/stage1 && timeout $STAGE1_TIMEOUT env RUST_LOG=error SIMPLE_BOOTSTRAP=1 \
 SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=0 \
 ./src/compiler_rust/target/bootstrap/simple native-build --source src --entry-closure \
---entry src/app/cli/bootstrap_main.spl --mode dynload --threads $QEMU_CPUS \
+--entry src/app/cli/bootstrap_main.spl --mode dynload --threads $QEMU_CPUS --timeout $STAGE1_FILE_TIMEOUT \
 --output build/bootstrap/stage1/simple" >"$WORK/stage1.log" 2>&1
 rc=$?
 set -e
