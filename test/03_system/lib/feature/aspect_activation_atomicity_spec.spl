@@ -1,0 +1,115 @@
+# Purpose: startup consumers see one complete binding publication or no change.
+# @req 05-12; selected plan §13.5
+use std.spec
+use std.common.aspect_pack.{ApkModuleSourceV1, ApkCatalogEntryV2,
+    APK_ENTRY_FACET, APK_ACT_STARTUP, APK_ACT_LAZY_FACET,
+    apk_build_pack_v1, apk_build_catalog_v2, apk_loader_new,
+    apk_loader_register_pack, apk_loader_set_host_offer_v1,
+    apk_load_facet, apk_activate_startup, apk_loader_generation,
+    apk_try_facet_binding_v1, apk_loader_last_error, apk_loader_unloads}
+use std.common.string_core.{text_to_bytes, bytes_to_text}
+use common.plugin.iface_id.{IfaceId, ParamHeader}
+use common.plugin.negotiation.{HostOfferV1}
+
+fn atomic_catalog(second_module: text) -> [u8]:
+    apk_build_catalog_v2([
+        ApkCatalogEntryV2("atomic/Existing", "atomic.apk", "existing", APK_ENTRY_FACET, APK_ACT_LAZY_FACET, ""),
+        ApkCatalogEntryV2("atomic/First", "atomic.apk", "first", APK_ENTRY_FACET, APK_ACT_STARTUP, ""),
+        ApkCatalogEntryV2("atomic/Second", "atomic.apk", second_module, APK_ENTRY_FACET, APK_ACT_STARTUP, "")]).bytes
+
+fn atomic_loader() -> i64:
+    val ld = apk_loader_new()
+    apk_loader_set_host_offer_v1(ld,
+        HostOfferV1(ParamHeader("simple.plugin.HostOfferV1", 1, 0, 0), 0, true, "atomicity",
+            [IfaceId("atomic/Existing", 1, 0, ""), IfaceId("atomic/First", 1, 0, ""),
+                IfaceId("atomic/Second", 1, 0, "")], [], [], []))
+    val built = apk_build_pack_v1([
+        ApkModuleSourceV1("existing", "atomic", text_to_bytes("resident")),
+        ApkModuleSourceV1("first", "atomic", text_to_bytes("first payload")),
+        ApkModuleSourceV1("second", "atomic", text_to_bytes("second payload"))])
+    expect(built.ok).to_equal(true)
+    expect(apk_loader_register_pack(ld, "atomic.apk", built.bytes)).to_equal(true)
+    ld
+
+describe "startup binding publication atomicity":
+    it "05-12 plan §13.5 publishes two routed bindings under one new generation":
+        step("Prepare a resident binding before startup activation")
+        val ld = atomic_loader()
+        val catalog = atomic_catalog("second")
+        val resident = apk_load_facet(ld, catalog, "atomic/Existing")
+        expect(resident.ok and resident.found).to_equal(true)
+        val before = apk_loader_generation(ld)
+        step("Activate both required startup routes")
+        expect(apk_activate_startup(ld, catalog)).to_equal(2)
+        step("Observe complete publication through real binding lookups")
+        val first = apk_try_facet_binding_v1(ld, "atomic", "First")
+        val second = apk_try_facet_binding_v1(ld, "atomic", "Second")
+        expect(first.ok and first.found).to_equal(true)
+        expect(second.ok and second.found).to_equal(true)
+        expect(bytes_to_text(first.payload)).to_equal("first payload")
+        expect(bytes_to_text(second.payload)).to_equal("second payload")
+        expect(apk_loader_generation(ld)).to_equal(before + 1)
+        expect(first.generation).to_equal(before + 1)
+        expect(second.generation).to_equal(first.generation)
+        expect(apk_try_facet_binding_v1(ld, "atomic", "Existing").generation).to_equal(resident.generation)
+        step("Repeat startup using the cached bindings")
+        expect(apk_activate_startup(ld, catalog)).to_equal(2)
+        expect(apk_loader_generation(ld)).to_equal(before + 1)
+
+    it "05-12 plan §13.5 second-route failure publishes nothing and preserves resident bindings":
+        step("Prepare an existing binding and a dangling second route")
+        val ld = atomic_loader()
+        val catalog = atomic_catalog("missing")
+        val resident = apk_load_facet(ld, catalog, "atomic/Existing")
+        expect(resident.ok and resident.found).to_equal(true)
+        val before = apk_loader_generation(ld)
+        val unloads = apk_loader_unloads(ld)
+        step("Reject startup when the second routed module is absent")
+        expect(apk_activate_startup(ld, catalog)).to_equal(0)
+        expect(apk_loader_last_error(ld)).to_contain("absent from its pack")
+        step("Observe the unchanged generation and binding registry")
+        expect(apk_loader_generation(ld)).to_equal(before)
+        expect(apk_try_facet_binding_v1(ld, "atomic", "First").found).to_equal(false)
+        expect(apk_try_facet_binding_v1(ld, "atomic", "Second").found).to_equal(false)
+        val preserved = apk_try_facet_binding_v1(ld, "atomic", "Existing")
+        expect(preserved.ok and preserved.found).to_equal(true)
+        expect(preserved.generation).to_equal(resident.generation)
+        expect(bytes_to_text(preserved.payload)).to_equal("resident")
+        expect(apk_loader_unloads(ld)).to_equal(unloads)
+        step("Recover by activating a corrected catalog")
+        expect(apk_activate_startup(ld, atomic_catalog("second"))).to_equal(2)
+        expect(apk_loader_generation(ld)).to_equal(before + 1)
+
+    it "05-12 plan §13.5 keeps a cached startup binding when publishing its new peer":
+        step("Acquire the first startup facet before the batch")
+        val ld = atomic_loader()
+        val catalog = atomic_catalog("second")
+        val first = apk_load_facet(ld, catalog, "atomic/First")
+        expect(first.ok and first.found).to_equal(true)
+        val before = apk_loader_generation(ld)
+        step("Activate the cached route and the new route together")
+        expect(apk_activate_startup(ld, catalog)).to_equal(2)
+        step("Observe the retained binding and the single new publication")
+        val retained = apk_try_facet_binding_v1(ld, "atomic", "First")
+        val second = apk_try_facet_binding_v1(ld, "atomic", "Second")
+        expect(retained.ok and retained.found).to_equal(true)
+        expect(retained.generation).to_equal(first.generation)
+        expect(bytes_to_text(retained.payload)).to_equal("first payload")
+        expect(second.ok and second.found).to_equal(true)
+        expect(second.generation).to_equal(before + 1)
+        expect(bytes_to_text(second.payload)).to_equal("second payload")
+        expect(apk_loader_generation(ld)).to_equal(before + 1)
+
+    it "05-12 plan §13.5 leaves the epoch unchanged when there are no startup routes":
+        step("Build a catalog containing only a lazy route")
+        val ld = atomic_loader()
+        val catalog = apk_build_catalog_v2([
+            ApkCatalogEntryV2("atomic/Existing", "atomic.apk", "existing",
+                APK_ENTRY_FACET, APK_ACT_LAZY_FACET, "")])
+        expect(catalog.ok).to_equal(true)
+        val before = apk_loader_generation(ld)
+        step("Activate an empty startup set")
+        expect(apk_activate_startup(ld, catalog.bytes)).to_equal(0)
+        expect(apk_loader_generation(ld)).to_equal(before)
+        expect(apk_loader_last_error(ld)).to_equal("")
+        expect(apk_try_facet_binding_v1(ld, "atomic", "Existing").found).to_equal(false)
