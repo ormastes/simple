@@ -168,8 +168,8 @@ impl MirBlock:
                         case MirOperandKind.Const(_, _): 3
             case _: -1
 
-    # @workaround bug=mir_ret_optional_operand_owner_2026_10_11 reason=preserve optional operand and enum owners through staged coalescing
     # Name every operand variant: future enum additions must be classified.
+    # @workaround bug=mir_ret_optional_operand_owner_2026_10_11 reason=preserve optional operand and enum owners through staged coalescing
     fn bootstrap_ret_local_id() -> i64:
         match self.terminator:
             case MirTerminator.Ret(value):
@@ -299,6 +299,8 @@ struct MirFunction:
     simd_req_level: text = ""    # "" | must | prefer | error_not | warn_not
     simd_req_backend: text = ""  # "" | simd | avx2 | avx512 | sse | neon | ...
     simd_disabled: bool = false  # @simd(disable) — pass must not vectorize
+    nogc_strict: bool = false
+    short_call_contracts: Dict<text, [text]> = {}
 
     # Opt-in producer-owned semantic transport; ordinary lowering leaves empty.
     enum_matches: [MirEnumMatchSemanticV1] = []
@@ -342,7 +344,9 @@ impl MirFunction:
             simd_disabled: func.simd_disabled,
             # Preserve the original binding; changed bodies must fail consumer
             # validation until the producer's actual finalizer revalidates.
-            enum_matches: func.enum_matches
+            enum_matches: func.enum_matches,
+            nogc_strict: func.nogc_strict,
+            short_call_contracts: func.short_call_contracts
         )
 
 """Function body wrapper for borrow checking."""
@@ -352,13 +356,17 @@ struct MirBody:
     locals: [MirLocal]
     arg_count: i64
     return_ty: MirType
+    nogc_strict: bool = false
+    short_call_contracts: Dict<text, [text]> = {}
 
 impl MirBody:
     static fn from_bootstrap_parts(
         name: text,
         blocks: [MirBlock],
         locals: [MirLocal],
-        arg_count: i64
+        arg_count: i64,
+        nogc_strict: bool = false,
+        short_call_contracts: Dict<text, [text]> = {}
     ) -> MirBody:
         """Create a flat-bootstrap body without crossing a MirType ABI."""
         MirBody(
@@ -366,7 +374,9 @@ impl MirBody:
             blocks: blocks,
             locals: locals,
             arg_count: arg_count,
-            return_ty: MirType.unit()
+            return_ty: MirType.unit(),
+            nogc_strict: nogc_strict,
+            short_call_contracts: short_call_contracts
         )
 
     static fn from_parts(
@@ -374,7 +384,9 @@ impl MirBody:
         blocks: [MirBlock],
         locals: [MirLocal],
         arg_count: i64,
-        return_ty: MirType
+        return_ty: MirType,
+        nogc_strict: bool = false,
+        short_call_contracts: Dict<text, [text]> = {}
     ) -> MirBody:
         """Create MirBody through its owner layout."""
         MirBody(
@@ -382,7 +394,9 @@ impl MirBody:
             blocks: blocks,
             locals: locals,
             arg_count: arg_count,
-            return_ty: return_ty
+            return_ty: return_ty,
+            nogc_strict: nogc_strict,
+            short_call_contracts: short_call_contracts
         )
 
     static fn from_function(func: MirFunction) -> MirBody:
@@ -392,7 +406,9 @@ impl MirBody:
             blocks: func.blocks,
             locals: func.locals,
             arg_count: func.signature.params.len(),
-            return_ty: func.signature.return_type
+            return_ty: func.signature.return_type,
+            nogc_strict: func.nogc_strict,
+            short_call_contracts: func.short_call_contracts
         )
 
     me bootstrap_return_type() -> MirType:

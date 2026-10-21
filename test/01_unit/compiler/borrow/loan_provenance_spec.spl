@@ -1,0 +1,142 @@
+"""AC-BOR-01 reference provenance across aliases and aggregate payloads.
+
+These assert the graph transfer/diagnostic API. CFG ordering and source-route
+enforcement are verified separately by the NLL and compiler integration lanes.
+"""
+
+use std.spec
+use compiler.borrow.borrow_check.borrow_graph.{BorrowGraph, BorrowKind, LoanAlias, Place, PlaceBase, PlaceElem, place_local, place_field, place_index, loan_alias_append}
+
+fn loan_graph() -> BorrowGraph:
+    var graph = BorrowGraph.create()
+    val loan = graph.record_borrow(0, place_local(0), BorrowKind.Shared)
+    assert(loan.is_some())
+    graph.note_borrow_dest(loan.unwrap().id, 1)
+    graph
+
+describe "AC-BOR-01 short loan provenance":
+    it "rejects a direct returned reference with its origin and return point":
+        var graph = loan_graph()
+        graph.record_loan_escape(0, place_local(1), "return")
+        expect(graph.errors.len()).to_equal(1)
+        expect(graph.errors[0].point).to_equal(0)
+        expect(graph.errors[0].has_borrow).to_equal(true)
+        expect(graph.errors[0].borrow.borrow_point).to_equal(0)
+        expect(graph.errors[0].message).to_contain("return")
+
+    it "follows multiple local aliases to a returned payload":
+        var graph = loan_graph()
+        graph.record_loan_copy(0, place_local(1), place_local(2))
+        graph.record_loan_copy(0, place_local(2), place_local(3))
+        graph.record_loan_escape(0, place_local(3), "return alias")
+        expect(graph.errors.len()).to_equal(1)
+        expect(graph.errors[0].borrow.id).to_equal(0)
+
+    it "preserves nested aggregate fields across a whole aggregate copy":
+        var graph = loan_graph()
+        val field = place_field(place_field(place_local(2), 0), 1)
+        graph.record_loan_copy(0, place_local(1), field)
+        graph.record_loan_copy(0, place_local(2), place_local(3))
+        graph.record_loan_escape(0, place_field(place_field(place_local(3), 0), 1), "return tuple payload")
+        expect(graph.errors.len()).to_equal(1)
+        graph.record_loan_escape(0, place_field(place_local(3), 2), "unrelated scalar")
+        expect(graph.errors.len()).to_equal(1)
+
+    it "rejects a reference payload stored in a global field":
+        var graph = loan_graph()
+        val global = Place(base: PlaceBase.Static("cache"), projections: [])
+        graph.record_loan_copy(0, place_local(1), place_field(global, 0))
+        graph.record_loan_escape(0, global, "global cache store")
+        expect(graph.errors.len()).to_equal(1)
+        expect(graph.errors[0].message).to_contain("global cache store")
+
+    it "keeps symbolic container elements conservative":
+        var graph = loan_graph()
+        graph.record_loan_copy(0, place_local(1), place_index(place_local(2), 8))
+        graph.record_loan_copy(0, place_local(9), place_index(place_local(2), 9))
+        graph.record_loan_escape(0, place_local(2), "retained container")
+        expect(graph.errors.len()).to_equal(1)
+
+    it "kills aliases after a definite field overwrite without losing siblings":
+        var graph = loan_graph()
+        graph.record_loan_copy(0, place_local(1), place_field(place_local(2), 0))
+        graph.record_loan_copy(0, place_local(1), place_field(place_local(2), 1))
+        graph.record_loan_copy(0, place_local(9), place_field(place_local(2), 0))
+        graph.record_loan_escape(0, place_field(place_local(2), 0), "overwritten field")
+        expect(graph.errors.len()).to_equal(0)
+        graph.record_loan_escape(0, place_field(place_local(2), 1), "live sibling")
+        expect(graph.errors.len()).to_equal(1)
+
+    it "kills every nested reference when its whole aggregate is overwritten":
+        var graph = loan_graph()
+        graph.record_loan_copy(0, place_local(1), place_field(place_local(2), 0))
+        graph.record_loan_copy(0, place_local(9), place_local(2))
+        graph.record_loan_escape(0, place_local(2), "overwritten aggregate")
+        expect(graph.errors.len()).to_equal(0)
+
+    it "preserves provenance across a self copy and deduplicates repeated payloads":
+        var graph = loan_graph()
+        graph.record_loan_copy(0, place_local(1), place_local(1))
+        graph.record_loan_copy(0, place_local(1), place_field(place_local(2), 0))
+        graph.record_loan_copy(0, place_local(1), place_field(place_local(2), 1))
+        graph.record_loan_escape(0, place_local(2), "aggregate return")
+        expect(graph.errors.len()).to_equal(1)
+
+    it "propagates alias provenance without mutating its predecessor snapshot":
+        var graph = loan_graph()
+        graph.propagate_borrows(0, 1)
+        graph.record_loan_copy(1, place_local(1), place_local(2))
+        graph.record_loan_escape(0, place_local(2), "not present in predecessor")
+        expect(graph.errors.len()).to_equal(0)
+        graph.record_loan_escape(1, place_local(2), "return successor alias")
+        expect(graph.errors.len()).to_equal(1)
+        expect(graph.errors[0].point).to_equal(1)
+
+    it "rejects live loans at suspension and accepts a loan ended at that point":
+        var graph = loan_graph()
+        graph.record_suspend(0, "await")
+        expect(graph.errors.len()).to_equal(1)
+        expect(graph.errors[0].message).to_contain("await")
+        var ended = loan_graph()
+        ended.end_borrow(0, 0)
+        ended.record_suspend(0, "await")
+        expect(ended.errors.len()).to_equal(0)
+
+    it "accepts unrelated scalar returns and body local aliases":
+        var graph = loan_graph()
+        graph.record_loan_copy(0, place_local(1), place_local(2))
+        graph.record_loan_escape(0, place_local(9), "return scalar")
+        expect(graph.errors.len()).to_equal(0)
+
+    it "rejects owner writes while a shared short loan is active":
+        var graph = loan_graph()
+        graph.record_assign(0, place_local(0))
+        expect(graph.errors.len()).to_equal(1)
+        expect(graph.errors[0].has_borrow).to_equal(true)
+        expect(graph.errors[0].message).to_contain("Assignment while borrowed")
+
+    it "retains actual and inherited alternatives at a join and through copies":
+        var graph = loan_graph()
+        val actual = LoanAlias(loan_id: 0, place: place_local(2))
+        val inherited = LoanAlias(loan_id: 0, place: place_local(2), origin_only: true)
+        graph.loan_aliases[0] = loan_alias_append(loan_alias_append([], actual), inherited)
+        expect(graph.loan_aliases[0].len()).to_equal(2)
+        graph.record_loan_copy(0, place_local(2), place_local(3))
+        var actual_count = 0
+        var inherited_count = 0
+        for alias in graph.aliases_at(0):
+            match alias.place.base:
+                case PlaceBase.Local(3):
+                    if alias.origin_only: inherited_count = inherited_count + 1
+                    else: actual_count = actual_count + 1
+                case _: pass
+        expect(actual_count).to_equal(1)
+        expect(inherited_count).to_equal(1)
+        graph.record_loan_escape(0, place_local(3), "joined payload return")
+        expect(graph.errors.len()).to_equal(1)
+
+    it "keeps inherited origins subject to escape checks":
+        var graph = loan_graph()
+        graph.loan_aliases[0] = [LoanAlias(loan_id: 0, place: place_local(2), origin_only: true)]
+        graph.record_loan_escape(0, place_local(2), "inherited origin return")
+        expect(graph.errors.len()).to_equal(1)

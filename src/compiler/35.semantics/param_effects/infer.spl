@@ -1,36 +1,25 @@
 # Parameter-effect inference over HIR (plan §3.3; contract in effects.spl).
+# Path-sensitive HIR walks; strict driver admission enforces diagnostics.
+# NOGC-AMB-001/002: repeated use or move, including loop moves.
+# NOGC-AMB-003/004/005: escaping callback, unknown contract, consumed reference.
+# NOGC-OWN-002/003: local use after transfer, discarded consuming receiver.
 #
-# One pass per function, path-sensitive over the HIR block structure, with a
-# bounded in-module fixpoint so a parameter forwarded into a consuming callee
-# is itself consume. Imported callees contribute through decoded summaries.
-#
-# Diagnostics (WARNING; nothing here changes code generation):
-#   NOGC-AMB-001  a parameter is used, or consumed again, after a consume on
-#                 the same path (unconditional or conditional)
-#   NOGC-AMB-002  a parameter is consumed inside a loop body (repeated move)
-#   NOGC-AMB-003  a parameter is captured by a callback passed to a callee
-#                 with no non-escape contract
-#   NOGC-AMB-004  an `extern fn` takes a class/pointer parameter: foreign
-#                 retention is unknown
-#   NOGC-AMB-005  an explicit reference parameter (`&T`) is consumed
-#   NOGC-OWN-002  a class-typed local is used after its ownership was
-#                 transferred (stored, returned, or moved into a consuming
-#                 parameter) on the same path
-#   NOGC-OWN-003  a method that consumes its receiver is called as a
-#                 statement: the result (the receiver's new owner) is
-#                 discarded, so the object is dropped instead of mutated
-#
-# Known limits (stated, not hidden): `val y = x` makes y an alias of the same
-# owner rather than a move; class detection needs the type to be a module
-# class, an imported symbol of kind Class, or a name in the caller-supplied
-# class index; method calls resolve by symbol when resolved, else by unique
-# method name in the module.
+# Limits: local binding aliases owners; class detection needs the module,
+# imported Class symbols or caller class index. Method contracts need resolved
+# symbols; callback privileges require compiler-owned builtin identity.
 
 use compiler.hir.hir_definitions.*
 use compiler.hir.hir_types.*
+use compiler.hir.ownership_types.{hir_type_is_short_candidate, hir_type_ownership_is_known}
+use compiler.semantics.param_effects.short_param_validation.{short_parameter_capture_diags, exact_call_symbol, checked_callback_slot, pending_import_callback_slots}
+use compiler.semantics.param_effects.projection_escape.{projection_copies_scalar}
+use compiler.semantics.param_effects.callback_contracts.{checked_sync_callback_slots, checked_sync_callback_regions}
+use compiler.semantics.param_effects.collection_identity.{builtin_collection_receiver}
 use compiler.semantics.param_effects.effects.{
     ParamEffectEntry, FunctionParamEffects, ParamEffectDiag, ParamEffectReport,
     param_effect_join}
+use compiler.semantics.param_effects.contracts.{
+    declared_parameter_category, declared_param_effect, param_effect_entry_values, param_effect_lists_equal}
 use compiler.semantics.param_effects.context.{
     PeFlow, PeCtx, _flow0, _has_id, _is_owner, _root_is_owner, _shared_type_name, _named_symbol_name, _type_class, _uses_opt, _uses_list, _uses_args, _uses_block, _uses_block_opt, _uses_stmt, _uses, _effects_by_sym, _effects_by_name, _sym_by_name, _field_is,
     _type_class_id, _function_locals}
@@ -45,16 +34,18 @@ fn _is_insertion(m: text) -> bool:
 fn _is_mutating_builtin(m: text) -> bool:
     _is_insertion(m) or m == "pop" or m == "remove" or m == "clear" or m == "sort" or m == "merge" or m == "extend" or m == "reverse" or m == "truncate" or m == "swap" or m == "pop_front" or m == "pop_back"
 
-fn _is_nonescape_callback(m: text) -> bool:
-    """Builtin higher-order methods whose callback runs synchronously and is
-    not retained: a capture there stays inside the short boundary."""
-    val names = ["map", "filter", "any", "all", "each", "for_each", "find", "find_index", "position", "sort_by", "sort_with", "reduce", "fold", "count", "flat_map", "take_while", "skip_while", "filter_map", "min_by", "max_by", "group_by", "partition", "sum_by", "map_err", "and_then", "or_else", "unwrap_or_else", "retain"]
-    for n in names:
-        if n == m: return true
-    false
+fn _is_nonescape_callback(method: text, resolution: MethodResolution) -> bool:
+    # Receiver type and method spelling cannot exclude a retaining extension.
+    match resolution:
+        case BuiltinCollection(operation):
+            match operation:
+                case ArrayMap: return method == "map"
+                case ArrayFilter: return method == "filter"
+        case _: return false
 
 fn _is_spawn(name: text) -> bool:
     name == "spawn" or name == "thread_spawn" or name == "spawn_task" or name == "task_spawn" or name == "actor_spawn" or name == "go"
+
 
 fn _lambda_captures_owner(ctx: PeCtx, e: HirExpr) -> bool:
     match e.kind:
@@ -62,28 +53,28 @@ fn _lambda_captures_owner(ctx: PeCtx, e: HirExpr) -> bool:
         case _: return false
 
 fn _method_sym(ctx: PeCtx, method: text, res: MethodResolution) -> i64:
-    """In-module method symbol for a call, or -1."""
     match res:
         case InstanceMethod(_, mid): return mid.id
         case TraitMethod(_, mid): return mid.id
-        case _: pass
-    _sym_by_name(ctx.method_sym_by_name, method)
+        case StaticMethod(_, mid): return mid.id
+        case FreeFunction(fid): return fid.id
+        case _: return -1
 
 fn _summary_for_method(ctx: PeCtx, method: text, res: MethodResolution) -> [text]:
     val sid = _method_sym(ctx, method, res)
     if sid >= 0:
         val local = _effects_by_sym(ctx.by_sym, sid)
         if local.len() > 0: return local
-    _effects_by_name(ctx.by_name, method)
+    # V1 imported rows lack declaring identity: never trust them for methods.
+    []
 
 fn _receiver_offset(ctx: PeCtx, method: text, res: MethodResolution, summary: [text], nargs: i64) -> i64:
-    """Index of the first argument in a method summary: 1 when the summary
-    belongs to an in-module method (slot 0 is `self`); for an imported
-    by-name summary, 1 only when it has one more slot than the call has
-    arguments."""
     val sid = _method_sym(ctx, method, res)
     if sid >= 0 and ctx.method_ids.contains_key(sid): return 1
-    if summary.len() == nargs + 1: return 1
+    match res:
+        case FreeFunction(_):
+            if sid >= 0 and ctx.by_sym.contains_key(sid): return 1
+        case _: pass
     0
 
 fn _callee_name(ctx: PeCtx, callee: HirExpr) -> text:
@@ -181,12 +172,9 @@ fn _flows_through(ctx: PeCtx, e: HirExpr, out: bool, line: i64) -> bool:
             return hit
         case Block(b): return _block_tail_flows(ctx, b, out, line)
         case Lambda(_, _, _): return _uses(ctx, e)
-        case Field(base, fname, _):
-            if out and _is_owner(ctx, base) and _field_is(ctx.class_field_types, "{ctx.owner_class_id}.{fname}"):
-                if ctx.owner_is_receiver:
-                    ctx.ambiguous("NOGC-AMB-006", "a class field `{fname}` is moved out of the receiver; a getter that consumes its whole receiver is not a contract (return a clone or a handle)", line)
-                return true
-            return false
+        case Field(base, _, _) | Index(base, _):
+            if projection_copies_scalar(ctx, e, base): return false
+            return _flows_through(ctx, base, out, line)
         case _: return false
 
 fn _flows_out(ctx: PeCtx, e: HirExpr, line: i64) -> bool:
@@ -208,21 +196,30 @@ fn _consume_list(ctx: PeCtx, es: [HirExpr], what: text, line: i64) -> bool:
             hit = true
     hit
 
-fn _consume_args(ctx: PeCtx, args: [HirCallArg], summary: [text], offset: i64, callee: text, nonescape: bool, spawn: bool, line: i64) -> bool:
+fn _consume_args(ctx: PeCtx, args: [HirCallArg], summary: [text], offset: i64, callee: text, nonescape: bool, spawns_task: bool, line: i64, stored_args: bool = false, callee_symbol: i64 = -1) -> bool:
     var hit = false
     var i = 0
     while i < args.len():
         val v = args[i].value
         if _lambda_captures_owner(ctx, v):
-            if spawn:
+            if spawns_task:
                 ctx.consumed("captured by a task spawned with `{callee}`", line)
                 hit = true
-            elif not nonescape:
-                ctx.ambiguous("NOGC-AMB-003", "captured by a callback passed to `{callee}`, which has no non-escape contract", line)
+            elif not nonescape and not checked_callback_slot(ctx.checked_sync_callbacks, callee_symbol, args, i, offset):
+                if checked_callback_slot(ctx.pending_import_callbacks, callee_symbol, args, i, offset):
+                    ctx.ambiguous("NOGC-IMPORT-CALLBACK-PENDING", "imported callback has no admitted definition proof", line)
+                    ctx.pending_import_symbol = callee_symbol
+                else:
+                    ctx.ambiguous("NOGC-AMB-003", "captured by a callback passed to `{callee}`, which has no non-escape contract", line)
         elif _flows_out(ctx, v, line):
-            if _effect_at(summary, i + offset) == "consume":
+            # V1 summaries contain positions, not parameter names. Refuse a
+            # named owner argument rather than consulting a different slot.
+            val effect = if args[i].has_name: "foreign-unknown" else: _effect_at(summary, i + offset)
+            if not stored_args and effect == "consume":
                 ctx.consumed("moved into consuming parameter of `{callee}`", line)
                 hit = true
+            elif not stored_args and effect != "read-short" and effect != "mutate-short":
+                ctx.ambiguous("NOGC-AMB-004", "passed to `{callee}` without a checked non-retaining or consuming contract", line)
         elif _consumes(ctx, v, line):
             hit = true
         i = i + 1
@@ -262,7 +259,10 @@ fn _consumes(ctx: PeCtx, e: HirExpr, line: i64) -> bool:
         case DictLit(entries, _, _):
             var hit = false
             for (k, v) in entries:
-                if _consumes(ctx, k, line): hit = true
+                if _flows_out(ctx, k, line):
+                    ctx.consumed("stored as a dict key", line)
+                    hit = true
+                elif _consumes(ctx, k, line): hit = true
                 if _flows_out(ctx, v, line):
                     ctx.consumed("stored in a dict literal", line)
                     hit = true
@@ -272,21 +272,24 @@ fn _consumes(ctx: PeCtx, e: HirExpr, line: i64) -> bool:
         case MethodCall(recv, method, args, res):
             val summary = _summary_for_method(ctx, method, res)
             val offset = _receiver_offset(ctx, method, res, summary, args.len())
+            val builtin = builtin_collection_receiver(ctx, recv, res)
             var hit = false
             if _root_is_owner(ctx, recv):
                 if _is_owner(ctx, recv) and offset == 1 and _effect_at(summary, 0) == "consume":
                     ctx.consumed("receiver consumed by `{method}`", line)
                     hit = true
-                elif _is_mutating_builtin(method) or (offset == 1 and _effect_at(summary, 0) == "mutate-short"):
+                elif (builtin and _is_mutating_builtin(method)) or (offset == 1 and _effect_at(summary, 0) == "mutate-short"):
                     ctx.mutated = true
+                elif offset != 1 or _effect_at(summary, 0) != "read-short":
+                    ctx.ambiguous("NOGC-AMB-004", "receiver passed to `{method}` without a checked non-retaining or consuming contract", line)
             elif _consumes(ctx, recv, line):
                 hit = true
-            if _is_insertion(method):
+            if builtin and _is_insertion(method):
                 for a in args:
                     if _flows_out(ctx, a.value, line):
                         ctx.consumed("inserted into a container with `{method}`", line)
                         hit = true
-            if _consume_args(ctx, args, summary, offset, method, _is_nonescape_callback(method), _is_spawn(method), line):
+            if _consume_args(ctx, args, summary, offset, method, _is_nonescape_callback(method, res), _is_spawn(method), line, builtin and _is_insertion(method)):
                 hit = true
             return hit
         case Call(callee, args, _):
@@ -300,9 +303,9 @@ fn _consumes(ctx: PeCtx, e: HirExpr, line: i64) -> bool:
                     elif _consumes(ctx, a.value, line):
                         hit = true
                 return hit
-            return _consume_args(ctx, args, _summary_for_call(ctx, callee), 0, name, false, _is_spawn(name), line)
+            return _consume_args(ctx, args, _summary_for_call(ctx, callee), 0, name, false, _is_spawn(name), line, false, exact_call_symbol(callee))
         case StaticCall(_, method, args, res):
-            return _consume_args(ctx, args, _summary_for_method(ctx, method, res), 0, method, false, _is_spawn(method), line)
+            return _consume_args(ctx, args, _summary_for_method(ctx, method, res), 0, method, false, _is_spawn(method), line, false, _method_sym(ctx, method, res))
         case Await(x):
             ctx.suspended = true
             return _consumes(ctx, x, line)
@@ -526,37 +529,51 @@ fn _flow_expr(ctx: PeCtx, e: HirExpr, tail: bool) -> PeFlow:
             return _flow0()
 
 # ============================================================================
-# Driver
 # ============================================================================
 
 fn _param_effect(ctx: PeCtx, f: HirFunction, p: HirParam) -> ParamEffectEntry:
-    val tc = _type_class(ctx, p.type_)
+    ctx.reset([p.symbol.id])
+    val tc = declared_parameter_category(p.type_)
     if f.is_extern:
-        if tc == "class" or tc == "ptr":
+        if tc != "" or hir_type_is_short_candidate(p.type_) or not hir_type_ownership_is_known(p.type_):
             return ParamEffectEntry(name: p.name, effect: "foreign-unknown", reason: "extern class/pointer parameter")
         return ParamEffectEntry(name: p.name, effect: "read-short", reason: "")
-    if tc == "shared":
-        return ParamEffectEntry(name: p.name, effect: "share-explicit", reason: "explicit shared owner type")
-    if tc == "iso":
-        return ParamEffectEntry(name: p.name, effect: "consume", reason: "declared `iso` owner")
-    if tc != "class" and tc != "ref":
+    if tc == "shared" or tc == "weak":
+        return ParamEffectEntry(name: p.name, effect: "share-explicit", reason: "explicit shared or weak handle")
+    if tc == "unique" or tc == "iso":
+        return ParamEffectEntry(name: p.name, effect: "consume", reason: "declared owning parameter")
+    if not hir_type_ownership_is_known(p.type_):
+        ctx.ambiguous("NOGC-PE-INCOMPLETE", "parameter ownership is unresolved", p.span.line)
+        return ParamEffectEntry(name: p.name, effect: "ambiguous", reason: "parameter ownership is unresolved")
+    if not hir_type_is_short_candidate(p.type_):
         if p.is_mutable:
             return ParamEffectEntry(name: p.name, effect: "mutate-short", reason: "declared `mut`")
         return ParamEffectEntry(name: p.name, effect: "read-short", reason: "")
+    ctx.owner_class_id = _type_class_id(p.type_)
+    ctx.owner_is_receiver = p.name == "self"
+    val flow = _flow_block(ctx, f.body, true)
+    if ctx.amb_code == "NOGC-IMPORT-CALLBACK-PENDING" and (flow.any or ctx.consume_reason != ""):
+        ctx.ambiguous("NOGC-BOR-001", "short parameter also escapes independently of its pending import proof", ctx.line)
+    if ctx.amb_code != "":
+        return ParamEffectEntry(name: p.name, effect: "ambiguous", reason: "{ctx.amb_code}: {ctx.amb_reason}")
+    if flow.any or ctx.consume_reason != "":
+        ctx.ambiguous("NOGC-BOR-001", "short parameter escapes ({ctx.consume_reason})", ctx.line)
+        return ParamEffectEntry(name: p.name, effect: "ambiguous", reason: "NOGC-BOR-001: short parameter escapes ({ctx.consume_reason})")
+    if ctx.mutated or p.is_mutable:
+        return ParamEffectEntry(name: p.name, effect: "mutate-short", reason: "")
+    ParamEffectEntry(name: p.name, effect: "read-short", reason: "")
+
+fn _consuming_param_diags(ctx: PeCtx, f: HirFunction, p: HirParam) -> [ParamEffectDiag]:
+    if f.is_extern: return []
+    val category = declared_parameter_category(p.type_)
+    if category != "unique" and category != "iso": return []
     ctx.reset([p.symbol.id])
     ctx.owner_class_id = _type_class_id(p.type_)
     ctx.owner_is_receiver = p.name == "self"
     val flow = _flow_block(ctx, f.body, true)
-    if ctx.amb_code != "":
-        return ParamEffectEntry(name: p.name, effect: "ambiguous", reason: "{ctx.amb_code}: {ctx.amb_reason}")
-    if flow.any or ctx.consume_reason != "":
-        if tc == "ref":
-            ctx.ambiguous("NOGC-AMB-005", "explicit reference parameter is consumed ({ctx.consume_reason})", ctx.line)
-            return ParamEffectEntry(name: p.name, effect: "ambiguous", reason: "NOGC-AMB-005: explicit reference parameter is consumed")
-        return ParamEffectEntry(name: p.name, effect: "consume", reason: ctx.consume_reason)
-    if ctx.mutated or p.is_mutable:
-        return ParamEffectEntry(name: p.name, effect: "mutate-short", reason: "")
-    ParamEffectEntry(name: p.name, effect: "read-short", reason: "")
+    if ctx.amb_code == "": return []
+    return [ParamEffectDiag(code: ctx.amb_code, function: f.name, param: p.name,
+        message: "consuming parameter `{p.name}` has an invalid body: {ctx.amb_reason}", line: ctx.line, pending_import_symbol: ctx.pending_import_symbol)]
 
 fn _fn_label(f: HirFunction) -> text:
     f.name
@@ -568,27 +585,25 @@ fn _new_ctx(module: HirModule, class_names: {text: bool}, imported: {text: [text
     var struct_ids: {i64: bool} = {}
     for st in module.structs.values():
         struct_ids[st.symbol.id] = true
-    var method_counts: {text: i64} = {}
-    var method_sym: {text: i64} = {}
-    for f in module.functions.values():
-        if f.is_method:
-            var n = 0
-            if method_counts.contains_key(f.name): n = method_counts[f.name]
-            method_counts[f.name] = n + 1
-            method_sym[f.name] = f.symbol.id
     var unique_methods: {text: i64} = {}
     var method_ids: {i64: bool} = {}
     for f in module.functions.values():
         if f.is_method:
             method_ids[f.symbol.id] = true
-            if method_counts[f.name] == 1:
-                unique_methods[f.name] = method_sym[f.name]
     val ctx = PeCtx(module: module, class_ids: class_ids, struct_ids: struct_ids, class_names: class_names,
         by_sym: {}, by_name: imported, method_sym_by_name: unique_methods,
         method_ids: method_ids, class_field_types: {}, local_ids: {},
         owner_class_id: -1, owner_is_receiver: false, consume_events: 0,
         ids: [], mutated: false, suspended: false, amb_code: "",
         amb_reason: "", consume_reason: "", line: 0)
+    # Seed every known local signature before walking bodies. Otherwise an
+    # innocent forward call looks foreign on the first fixpoint round and
+    # its transient ambiguity becomes permanent in the monotone join.
+    for f in module.functions.values():
+        var declared: [text] = []
+        for p in f.params:
+            declared.push(declared_param_effect(ctx, f, p))
+        ctx.by_sym[f.symbol.id] = declared
     # Class-typed fields of module classes, keyed "<class symbol id>.<field>".
     var fields: {text: HirType} = {}
     for c in module.classes.values():
@@ -598,25 +613,17 @@ fn _new_ctx(module: HirModule, class_names: {text: bool}, imported: {text: [text
     ctx.class_field_types = fields
     ctx
 
-fn _effects_of(entries: [ParamEffectEntry]) -> [text]:
-    var out: [text] = []
-    for e in entries:
-        out.push(e.effect)
-    out
-
-fn _same(a: [text], b: [text]) -> bool:
-    if a.len() != b.len(): return false
-    var i = 0
-    while i < a.len():
-        if a[i] != b[i]: return false
-        i = i + 1
-    true
-
-pub fn infer_param_effects(module: HirModule, class_names: {text: bool}, imported: {text: [text]}) -> ParamEffectReport:
+pub fn infer_param_effects(module: HirModule, class_names: {text: bool}, imported: {text: [text]}, verified_imported_callbacks: {i64: [i64]} = {}) -> ParamEffectReport:
     """Infer every function's parameter effects, iterate to a fixpoint over
     in-module calls (bounded: effects only climb a finite lattice), then
     report ambiguities and caller-side use-after-transfer of class locals."""
     val ctx = _new_ctx(module, class_names, imported)
+    val checked_callbacks = checked_sync_callback_slots(module)
+    for symbol in verified_imported_callbacks.keys():
+        if not module.functions.contains_key(SymbolId(symbol)): checked_callbacks[symbol] = verified_imported_callbacks[symbol]
+    val checked_regions = checked_sync_callback_regions(module)
+    ctx.checked_sync_callbacks = checked_callbacks
+    ctx.pending_import_callbacks = pending_import_callback_slots(module, checked_callbacks)
     var round = 0
     var changed = true
     while changed and round < 8:
@@ -626,7 +633,7 @@ pub fn infer_param_effects(module: HirModule, class_names: {text: bool}, importe
             var entries: [ParamEffectEntry] = []
             for p in f.params:
                 entries.push(_param_effect(ctx, f, p))
-            val effs = _effects_of(entries)
+            val effs = param_effect_entry_values(entries)
             val prev = _effects_by_sym(ctx.by_sym, f.symbol.id)
             var joined: [text] = []
             var i = 0
@@ -635,7 +642,7 @@ pub fn infer_param_effects(module: HirModule, class_names: {text: bool}, importe
                 if i < prev.len(): e = param_effect_join(prev[i], e)
                 joined.push(e)
                 i = i + 1
-            if not _same(prev, joined):
+            if not param_effect_lists_equal(prev, joined):
                 var table = ctx.by_sym
                 table[f.symbol.id] = joined
                 ctx.by_sym = table
@@ -659,9 +666,14 @@ pub fn infer_param_effects(module: HirModule, class_names: {text: bool}, importe
                 var line = ctx.line
                 if line == 0 or entry.effect == "foreign-unknown": line = f.span.line
                 diags.push(ParamEffectDiag(code: code, function: _fn_label(f), param: p.name,
-                    message: "parameter `{p.name}` of `{f.name}` has no single ownership contract: {entry.reason}", line: line))
+                    message: "parameter `{p.name}` of `{f.name}` has no single ownership contract: {entry.reason}", line: line,
+                    pending_import_symbol: ctx.pending_import_symbol))
+            for diagnostic in _consuming_param_diags(ctx, f, p):
+                diags.push(diagnostic)
         functions.push(FunctionParamEffects(function: _fn_label(f), symbol_id: f.symbol.id, params: entries))
         if not f.is_extern:
+            for diagnostic in short_parameter_capture_diags(f, checked_callbacks, checked_regions, ctx.pending_import_callbacks):
+                diags.push(diagnostic)
             for d in _local_transfer_diags(ctx, f):
                 diags.push(d)
             val discarded = PeDiagSink(items: [])
@@ -675,7 +687,8 @@ pub fn infer_param_effects(module: HirModule, class_names: {text: bool}, importe
 # ============================================================================
 
 fn _local_class(ctx: PeCtx, ty: HirType, init: HirExpr) -> bool:
-    if _type_class(ctx, ty) == "class": return true
+    val category = _type_class(ctx, ty)
+    if category == "class" or category == "unique": return true
     match init.kind:
         case StructLit(t, _): return _type_class(ctx, t) == "class"
         case Call(callee, _, _): return _is_class_ctor(ctx, callee)

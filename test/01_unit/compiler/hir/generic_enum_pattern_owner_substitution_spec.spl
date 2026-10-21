@@ -1,0 +1,103 @@
+"""REQ-ACOWN-03: declared generic pattern slots retain actual owner types.
+
+Authored; executable qualification awaits a current admitted producer.
+"""
+use std.spec.*
+use std.spec.step
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.parser_types_expr.{Pattern, PatternKind, EnumPatternPayload}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolKind, ScopeKind}
+use compiler.hir.hir_definitions.{HirPatternKind, HirPatternPayload}
+use compiler.hir.hir_lowering.types.{HirLowering, HirDeclaredPatternEnumSlots}
+use compiler.hir.hir_lowering._Expressions.expression_components.*
+use compiler.hir.hir_lowering._Items.declaration_lowering.*
+use compiler.hir.hir_lowering.pattern_enum_substitution.*
+
+fn generic_pattern_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn generic_pattern_binding() -> Pattern:
+    Pattern(kind: PatternKind.Binding("payload", false), span: Span.empty())
+
+describe "generic enum declaration payload substitution":
+    it "preserves every ownership wrapper and nominal argument identity":
+        step("Substitute a declaration binder beneath each owner wrapper")
+        val parameter = generic_pattern_type(HirTypeKind.TypeParam("T", []))
+        val actual = generic_pattern_type(HirTypeKind.Named(SymbolId(id: 77), []))
+        val templates = [generic_pattern_type(HirTypeKind.Unique(parameter)), generic_pattern_type(HirTypeKind.Shared(parameter)), generic_pattern_type(HirTypeKind.Weak(parameter))]
+        val expected = [generic_pattern_type(HirTypeKind.Unique(actual)), generic_pattern_type(HirTypeKind.Shared(actual)), generic_pattern_type(HirTypeKind.Weak(actual))]
+        expect(substitute_declared_pattern_types(templates, ["T"], [actual])).to_equal(expected)
+
+    it "uses declaration order across nested aggregates rather than occurrence order":
+        step("Substitute repeated and reordered formal occurrences recursively")
+        val first = generic_pattern_type(HirTypeKind.TypeParam("First", []))
+        val second = generic_pattern_type(HirTypeKind.TypeParam("Second", []))
+        val unique = generic_pattern_type(HirTypeKind.Unique(generic_pattern_type(HirTypeKind.Named(SymbolId(id: 17), []))))
+        val shared = generic_pattern_type(HirTypeKind.Shared(generic_pattern_type(HirTypeKind.Named(SymbolId(id: 23), []))))
+        val template = generic_pattern_type(HirTypeKind.Named(SymbolId(id: 91), [generic_pattern_type(HirTypeKind.Optional(generic_pattern_type(HirTypeKind.Tuple([second, first, second]))))]))
+        val expected = generic_pattern_type(HirTypeKind.Named(SymbolId(id: 91), [generic_pattern_type(HirTypeKind.Optional(generic_pattern_type(HirTypeKind.Tuple([shared, unique, shared]))))]))
+        expect(substitute_declared_pattern_type(template, ["First", "Second"], [unique, shared])).to_equal(expected)
+
+    it "refuses unknown formals unresolved actuals and mismatched arity":
+        step("Keep unresolved ownership from becoming a concrete pattern slot")
+        val parameter = generic_pattern_type(HirTypeKind.TypeParam("T", []))
+        val unresolved = generic_pattern_type(HirTypeKind.Unique(generic_pattern_type(HirTypeKind.Infer(0, 0))))
+        expect(declared_pattern_slot_type_is_concrete(unresolved)).to_equal(false)
+        expect(declared_pattern_slot_type_is_concrete(substitute_declared_pattern_type(parameter, ["Other"], [generic_pattern_type(HirTypeKind.Bool)]))).to_equal(false)
+        expect(declared_pattern_slot_type_is_concrete(substitute_declared_pattern_type(parameter, ["T"], [unresolved]))).to_equal(false)
+        expect(declared_pattern_slot_type_is_concrete(substitute_declared_pattern_type(parameter, ["T"], []))).to_equal(false)
+        expect(declared_pattern_slot_type_is_concrete(substitute_declared_pattern_type(parameter, ["T", "T"], [generic_pattern_type(HirTypeKind.Bool), generic_pattern_type(HirTypeKind.Str)]))).to_equal(false)
+
+    it "registers real generic declarations and binds the actual tuple slot":
+        step("Read declaration binders before lowering a concrete subject pattern")
+        val parsed = parse_and_build_module("enum Packet<T>:\n    Item(value: T)\n", "generic_packet.spl")
+        var hir = HirLowering.with_filename("generic_packet.spl")
+        hir.nogc_strict = true
+        val owner = hir.symbols.define("Packet", SymbolKind.Enum, nil, Span.empty(), Visibility.Public, false, Some("generic_packet"))
+        hir.register_declared_pattern_enum_slots(parsed.enums["Packet"], owner, "generic_packet", false)
+        val actual = generic_pattern_type(HirTypeKind.Unique(generic_pattern_type(HirTypeKind.Named(SymbolId(id: 77), []))))
+        val subject = generic_pattern_type(HirTypeKind.Named(owner, [actual]))
+        val input = Pattern(kind: PatternKind.Enum("Packet", "Item", Some(EnumPatternPayload.Tuple([generic_pattern_binding()]))), span: Span.empty())
+        val output = hir.lower_match_pattern(input, Some(subject))
+        var child_type = generic_pattern_type(HirTypeKind.Error)
+        var owner_type = generic_pattern_type(HirTypeKind.Error)
+        match output.kind:
+            case HirPatternKind.Enum(type_, _, payload):
+                owner_type = type_
+                if val value = payload:
+                    match value:
+                        case HirPatternPayload.Tuple(children):
+                            if children.len() == 1: child_type = children[0].type_
+                        case _: ()
+            case _: ()
+        expect(owner_type).to_equal(subject)
+        expect(child_type).to_equal(actual)
+        expect(hir.errors.len()).to_equal(0)
+
+    it "specializes named slots and rejects a same-spelled foreign owner":
+        step("Use owner identity and named declaration order for a generic row")
+        var hir = HirLowering.with_filename("generic_named")
+        val owner = hir.symbols.define("Packet", SymbolKind.Enum, nil, Span.empty(), Visibility.Public, false, Some("first"))
+        hir.symbols.push_scope(ScopeKind.Class)
+        val other = hir.symbols.define("Packet", SymbolKind.Enum, nil, Span.empty(), Visibility.Public, false, Some("second"))
+        hir.symbols.pop_scope()
+        val parameter = generic_pattern_type(HirTypeKind.TypeParam("T", []))
+        hir.declared_pattern_enum_slots["{owner.id}:Item"] = HirDeclaredPatternEnumSlots(tuple_types: [], field_names: ["value"], field_types: [parameter], is_struct: true, type_parameters: ["T"], declaring_owner: owner)
+        val actual = generic_pattern_type(HirTypeKind.Shared(generic_pattern_type(HirTypeKind.Named(SymbolId(id: 77), []))))
+        val input = Pattern(kind: PatternKind.Enum("Packet", "Item", Some(EnumPatternPayload.Struct([("value", generic_pattern_binding())]))), span: Span.empty())
+        val output = hir.lower_match_pattern(input, Some(generic_pattern_type(HirTypeKind.Named(owner, [actual]))))
+        var child_type = generic_pattern_type(HirTypeKind.Error)
+        match output.kind:
+            case HirPatternKind.Enum(_, _, payload):
+                if val value = payload:
+                    match value:
+                        case HirPatternPayload.Struct(children):
+                            if children.len() == 1: child_type = children[0][1].type_
+                        case _: ()
+            case _: ()
+        expect(child_type).to_equal(actual)
+        expect(hir.errors.len()).to_equal(0)
+        hir.lower_match_pattern(input, Some(generic_pattern_type(HirTypeKind.Named(other, [actual]))))
+        expect(hir.errors.len()).to_be_greater_than(0)

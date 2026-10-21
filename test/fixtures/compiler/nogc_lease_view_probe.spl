@@ -1,0 +1,90 @@
+"""Scalar lease/view diagnostic; no claim of compiler static borrow checking."""
+use std.nogc_sync_mut.io_runtime.{exit}
+use std.nogc_sync_mut.ptr.weak.{WeakLease, weak_reset, weak_register, weak_create, weak_remove_strong, weak_strong_count, weak_is_alive}
+use std.nogc_sync_mut.ptr.lease.{LeaseView, lease_acquire, lease_release, lease_with_view, lease_view_read, lease_with_view_result}
+
+var saved_view: LeaseView = LeaseView(view_id: -1, epoch: -1)
+var callback_count: i64 = 0
+var callback_lease: WeakLease = WeakLease(token_id: -1, generation: -1)
+
+fn lease_probe_require(condition: bool, message: text):
+    if not condition:
+        print "nogc-lease-view: FAIL {message}"
+        exit(1)
+
+fn lease_probe_unused(view: LeaseView):
+    lease_probe_require(false, "reentrant callback executed")
+
+fn lease_probe_read(view: LeaseView):
+    lease_probe_require(lease_view_read(saved_view) == nil, "previous callback view revived")
+    lease_probe_require(lease_view_read(view) == Some(42), "fresh view lost retained target")
+    lease_probe_require(not lease_with_view(callback_lease, lease_probe_unused), "reentrant view widened active epoch")
+    saved_view = view
+    callback_count = callback_count + 1
+
+fn lease_probe_release_inside(view: LeaseView):
+    lease_probe_require(lease_release(callback_lease), "live lease release failed")
+    lease_probe_require(lease_view_read(view) == nil, "released lease left active view readable")
+    saved_view = view
+
+fn lease_probe_reset_inside(view: LeaseView):
+    saved_view = view
+    weak_reset()
+    lease_probe_require(lease_view_read(view) == nil, "reset left view readable")
+
+fn lease_probe_failure() -> Result<i64, text>:
+    Err("intentional callback failure")
+
+fn lease_probe_result_error(view: LeaseView) -> Result<i64, text>:
+    saved_view = view
+    lease_probe_require(lease_view_read(view) == Some(42), "error callback view unavailable")
+    val value = lease_probe_failure()?
+    lease_probe_require(false, "postfix error propagation continued")
+    Ok(value)
+
+fn lease_probe_result_ok(view: LeaseView) -> Result<i64, text>:
+    lease_probe_require(lease_view_read(saved_view) == nil, "error callback epoch revived")
+    saved_view = view
+    Ok(73)
+
+fn main() -> i64:
+    weak_reset()
+    val target = weak_register(42)
+    val reference = weak_create(target)
+    if val lease = lease_acquire(reference):
+        callback_lease = lease
+        lease_probe_require(weak_strong_count(target) == 2, "lease failed to retain target")
+        weak_remove_strong(target)
+        lease_probe_require(weak_strong_count(target) == 1, "original owner release consumed lease")
+        lease_probe_require(lease_with_view(lease, lease_probe_read), "first short view failed")
+        lease_probe_require(lease_view_read(saved_view) == nil, "escaped first view readable")
+        lease_probe_require(lease_with_view(lease, lease_probe_read), "repeated short view failed")
+        lease_probe_require(callback_count == 2, "callbacks did not run twice")
+        lease_probe_require(lease_view_read(saved_view) == nil, "escaped repeated view readable")
+        val failure = lease_with_view_result(lease, lease_probe_result_error)
+        match failure:
+            case Err(message): lease_probe_require(message == "intentional callback failure", "callback error payload changed")
+            case _: lease_probe_require(false, "callback failure became success")
+        lease_probe_require(lease_view_read(saved_view) == nil, "failed callback leaked active view")
+        val recovery = lease_with_view_result(lease, lease_probe_result_ok)
+        match recovery:
+            case Ok(value): lease_probe_require(value == 73, "callback success payload changed")
+            case _: lease_probe_require(false, "fresh view after failure rejected")
+        lease_probe_require(lease_view_read(saved_view) == nil, "successful result callback leaked view")
+        lease_probe_require(not lease_with_view(lease, lease_probe_release_inside), "released lease reported live")
+        lease_probe_require(not lease_release(lease), "lease released twice")
+        lease_probe_require(not weak_is_alive(reference), "last lease release retained target")
+        lease_probe_require(not lease_with_view(lease, lease_probe_unused), "released lease created view")
+    else:
+        lease_probe_require(false, "live target acquisition failed")
+    val next_target = weak_register(42)
+    if val next_lease = lease_acquire(weak_create(next_target)):
+        lease_probe_require(not lease_with_view(next_lease, lease_probe_reset_inside), "reset lease reported live")
+        lease_probe_require(lease_view_read(saved_view) == nil, "reset escaped view readable")
+        lease_probe_require(not lease_release(next_lease), "reset token released a new generation")
+    else:
+        lease_probe_require(false, "second acquisition failed")
+    lease_probe_require(lease_view_read(LeaseView(view_id: -1, epoch: 0)) == nil, "invalid view id read")
+    lease_probe_require(lease_view_read(LeaseView(view_id: 999999, epoch: 0)) == nil, "out-of-range view id read")
+    print "nogc-lease-view: retained lifetime, repeated views, escape, reentrancy, release, reset and recoverable callback errors passed"
+    0

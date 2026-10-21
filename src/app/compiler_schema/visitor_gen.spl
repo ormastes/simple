@@ -540,9 +540,13 @@ fn _recurse_frame_lines_reverse(
         out = out + indent + "    ri{idx} = ri{idx} - 1\n"
         out = out + indent + "    val (ka{idx}, kb{idx}) = " + v + "[ri{idx}]\n"
         if c.b != "":
-            out = out + indent + "    " + _one_frame_call(c.b, "kb{idx}") + "\n"
+            # Schema-declared nominal types survive the older bootstrap
+            # producer's tuple destructuring without guessing a payload owner.
+            out = out + indent + "    val frame_b{idx}: " + c.b + " = kb{idx}\n"
+            out = out + indent + "    " + _one_frame_call(c.b, "frame_b{idx}") + "\n"
         if c.a != "":
-            out = out + indent + "    " + _one_frame_call(c.a, "ka{idx}") + "\n"
+            out = out + indent + "    val frame_a{idx}: " + c.a + " = ka{idx}\n"
+            out = out + indent + "    " + _one_frame_call(c.a, "frame_a{idx}") + "\n"
         return out
     ""
 
@@ -944,7 +948,15 @@ fn emit_init_file() -> text:
 fn generate_visitors_into(repo_root: text, out_dir: text) -> i64:
     """Write the three generated files. Returns the number of visitor
     functions emitted (three per reachable declaration)."""
-    val u = DeclUniverse.load(repo_root)
+    generate_visitors_prepared(DeclUniverse.load(repo_root), out_dir)
+
+fn generate_visitors_prepared(u: DeclUniverse, out_dir: text) -> i64:
+    """Emit from the retained universe preflighted with sibling generators."""
+    for pair in base_pairs():
+        val kind = pair[1]
+        if not u.is_enum(kind) or u.decl_of(kind).variants.len() == 0:
+            print "compiler_schema: refusing empty carrier schema {kind}"
+            return -1
     dir_create_all(out_dir)
     file_write(out_dir + "/hir_visit.spl", emit_visit_file(u))
     file_write(out_dir + "/hir_children.spl", emit_children_file(u))
@@ -957,7 +969,7 @@ fn visitor_kind_count(repo_root: text) -> i64:
     emit_order(u).len()
 
 export emit_order, emit_visit_file, emit_children_file, emit_hash_file
-export emit_init_file, generate_visitors_into, visitor_kind_count
+export emit_init_file, generate_visitors_into, generate_visitors_prepared, visitor_kind_count
 export GEN_HEADER, FieldDecl, FieldClass, NodeDecl, DeclUniverse
 export base_pairs, decl_sources, opaque_types, prim_types
 export extract_struct_fields, parse_payload_fields, node_closure

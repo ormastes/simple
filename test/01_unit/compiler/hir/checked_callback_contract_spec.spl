@@ -1,0 +1,93 @@
+# Local definition proof only; these tests do not establish AC-BOR-04 freshness.
+use std.spec.*
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.semantics.param_effects.callback_contracts.{checked_sync_callback_slots, checked_sync_callback_regions}
+
+fn callback_contract_has_slot(source: text, name: text) -> bool:
+    val parsed = parse_and_build_module(source, "callback_contract.spl")
+    var lowering = HirLowering.with_filename("callback_contract.spl")
+    lowering.use_explicit_semantic_policy()
+    val module = lowering.lower_module(parsed)
+    val contracts = checked_sync_callback_slots(module)
+    for function in module.functions.values():
+        val actual: HirFunction = function
+        if actual.name != name: continue
+        val symbol = actual.symbol.id
+        if not contracts.contains_key(symbol): return false
+        val positions = contracts[symbol]
+        return positions.len() == 1 and positions[0] == 0
+    false
+
+
+fn callback_contract_has_region(source: text, name: text) -> bool:
+    val parsed = parse_and_build_module(source, "callback_region.spl")
+    var lowering = HirLowering.with_filename("callback_region.spl")
+    lowering.use_explicit_semantic_policy()
+    val module = lowering.lower_module(parsed)
+    val contracts = checked_sync_callback_regions(module)
+    for function in module.functions.values():
+        val actual: HirFunction = function
+        if actual.name != name: continue
+        if not contracts.contains_key(actual.symbol.id): return false
+        val callbacks = contracts[actual.symbol.id]
+        if not callbacks.contains_key(0): return false
+        val positions = callbacks[0]
+        return positions.len() == 1 and positions[0] == 0
+    false
+
+describe "definition checked local synchronous callback slots":
+    it "proves a direct synchronous callback independently of its spelling":
+        expect(callback_contract_has_slot("fn arbitrary(action: fn(i64) -> i64) -> i64:\n    action(42)\n", "arbitrary")).to_equal(true)
+
+    it "does not trust a familiar lease spelling without a proof":
+        expect(callback_contract_has_slot("fn lease_with_view(action: fn(i64) -> i64) -> i64:\n    val saved = action\n    saved(42)\n", "lease_with_view")).to_equal(false)
+
+    it "rejects forwarding callback identity to an unknown call":
+        expect(callback_contract_has_slot("extern fn save(action: fn(i64) -> i64) -> i64\nfn forward(action: fn(i64) -> i64) -> i64:\n    save(action)\n", "forward")).to_equal(false)
+
+    it "rejects reference bearing callback results":
+        expect(callback_contract_has_slot("fn retain(action: fn(i64) -> [i64]) -> i64:\n    val saved = action(42)\n    0\n", "retain")).to_equal(false)
+
+    it "does not issue a receipt for an unused or external callback":
+        expect(callback_contract_has_slot("fn idle(action: fn(i64) -> i64) -> i64:\n    0\n", "idle")).to_equal(false)
+        expect(callback_contract_has_slot("extern fn imported(action: fn(i64) -> i64) -> i64\n", "imported")).to_equal(false)
+
+    it "rejects duplicate definition SymbolIDs even when only one body proves safe":
+        val source = "fn valid(action: fn(i64) -> i64) -> i64:\n    action(42)\nfn unused(action: fn(i64) -> i64) -> i64:\n    0\n"
+        val parsed = parse_and_build_module(source, "callback_duplicate.spl")
+        var lowering = HirLowering.with_filename("callback_duplicate.spl")
+        lowering.use_explicit_semantic_policy()
+        var module = lowering.lower_module(parsed)
+        var duplicate_id: i64 = -1
+        for function in module.functions.values():
+            val actual: HirFunction = function
+            if actual.name == "valid": duplicate_id = actual.symbol.id
+        expect(duplicate_id >= 0).to_equal(true)
+        for key in module.functions.keys():
+            var actual: HirFunction = module.functions[key]
+            if actual.name == "unused":
+                actual.symbol = SymbolId(id: duplicate_id)
+                module.functions[key] = actual
+        expect(checked_sync_callback_slots(module).contains_key(duplicate_id)).to_equal(false)
+
+    it "proves repeated fresh invocations from an explicit owned source":
+        val source = "class Node:\n    value: i64\nfn visit(action: fn(Node) -> i64, owner: &Node) -> i64:\n    val first = action(owner)\n    action(owner)\n"
+        expect(callback_contract_has_region(source, "visit")).to_equal(true)
+
+    it "does not upgrade bare or weak sources to owned callback regions":
+        val bare = "class Node:\n    value: i64\nfn visit(action: fn(Node) -> i64, owner: Node) -> i64:\n    action(owner)\n"
+        val weak = "class Node:\n    value: i64\nfn visit(action: fn(Node) -> i64, owner: -Node) -> i64:\n    action(owner)\n"
+        expect(callback_contract_has_region(bare, "visit")).to_equal(false)
+        expect(callback_contract_has_region(weak, "visit")).to_equal(false)
+
+    it "rejects a mixed owned and unproved source across repeated invocations":
+        val source = "class Node:\n    value: i64\nfn visit(action: fn(Node) -> i64, owner: &Node, other: Node) -> i64:\n    val first = action(owner)\n    action(other)\n"
+        expect(callback_contract_has_region(source, "visit")).to_equal(false)
+
+    it "rejects owner use outside the proven lending argument between callbacks":
+        val source = "class Node:\n    value: i64\nfn visit(action: fn(Node) -> i64, owner: &Node) -> i64:\n    val first = action(owner)\n    val moved = owner\n    action(owner)\n"
+        expect(callback_contract_has_region(source, "visit")).to_equal(false)

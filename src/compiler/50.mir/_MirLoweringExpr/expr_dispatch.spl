@@ -1,7 +1,14 @@
+# Explicit payload owners survive import-surface projection.
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_instruction_support.{MirBinOp, MirOperand, MirOperandKind}
+use compiler.mir.mir_instruction_graph.{MirInst}
+use compiler.mir.mir_types.{MirConstValue}
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
 use std.io_runtime.{env_get_nullable}
 use compiler.semantics.match_exhaustiveness.{match_coverage_profile_is_critical}
+use compiler.mir.mir_lowering_stmts.*
 use compiler.mir._MirLoweringExpr.result_tuple_payload.*
+use compiler.mir._MirLoweringExpr.tuple_projection_types.*
 # Part of src/compiler/50.mir/mir_lowering_expr.spl: expression dispatch, match-case, gpu lane, bitfield helpers
 use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 use compiler.mir._MirLowering.native_trait_conversion.*
@@ -1020,6 +1027,7 @@ impl MirLowering:
         # An owner key is evidence from the provider, never a bare-name guess.
         match declared.kind:
             case HirTypeKind.Named(declared_sym, declared_args):
+                val owner_arguments: [HirType] = declared_args
                 if owner_key == "": return HirType(kind: HirTypeKind.Error, span: declared.span)
                 if self.symbol_matches_ownership_key(declared_sym.id, owner_key): return declared
                 var bare_start = 0
@@ -1034,10 +1042,12 @@ impl MirLowering:
                     val owner_module = owner_key.substring(0, bare_start - separator_width)
                     val qualified = self.symbols.lookup_qualified_type_raw(mir_layout_canonical_module_name(owner_module), owner_key.substring(bare_start))
                     if qualified >= 0 and self.symbol_matches_ownership_key(qualified, owner_key):
-                        return HirType(kind: HirTypeKind.Named(SymbolId(id: qualified), declared_args), span: declared.span)
-                if val rebound = self.symbols.lookup_exact_type(owner_key.substring(bare_start)):
+                        val qualified_symbol: SymbolId = SymbolId(id: qualified)
+                        return HirType(kind: HirTypeKind.Named(qualified_symbol, owner_arguments), span: declared.span)
+                if val present_rebound = self.symbols.lookup_exact_type(owner_key.substring(bare_start)):
+                    val rebound: SymbolId = present_rebound
                     if self.symbol_matches_ownership_key(rebound.id, owner_key):
-                        return HirType(kind: HirTypeKind.Named(rebound, declared_args), span: declared.span)
+                        return HirType(kind: HirTypeKind.Named(rebound, owner_arguments), span: declared.span)
                 HirType(kind: HirTypeKind.Error, span: declared.span)
             case _: declared
 
@@ -2392,7 +2402,8 @@ impl MirLowering:
             val guardable_value_type = self.mir_type_is_integer(dict_result_type) or self.mir_type_is_str(dict_result_type)
             if as_option and guardable_value_type:
                 decoded = self.dict_get_preserve_flat_nil(get_local, decoded, dict_result_type)
-            if val value_hir_type = dict_value_hir_type:
+            if val present_value_hir_type = dict_value_hir_type:
+                val value_hir_type: HirType = present_value_hir_type
                 if as_option:
                     # `d.get(k)` is declared `V?`: retain it so a later
                     # `x.unwrap()` / `x ?? d` on the binding sees an Option
@@ -2667,8 +2678,9 @@ impl MirLowering:
         var b = self.builder
         val len_result = b.emit_call(func_operand, [mir_operand_copy(base_local)], MirType.i64())
         if val len_local = len_result:
+            val optional_dest: LocalId? = nil
             b.emit(MirInst(
-                kind: MirInstKind.Intrinsic(None, "bounds_check", [
+                kind: MirInstKind.Intrinsic(optional_dest, "bounds_check", [
                     mir_operand_copy(index_local),
                     mir_operand_copy(len_local)
                 ]),
@@ -2846,7 +2858,7 @@ impl MirLowering:
                     else:
                         self.optional_payload_struct_name(optional_inner)
                     if val registered = registered_payload:
-                        val rebound = self.rebind_record_element_owner(optional_inner, registered)
+                        val rebound: HirType = self.rebind_record_element_owner(optional_inner, registered)
                         self.remember_local_hir_type(local.id, HirType(kind: HirTypeKind.Optional(rebound), span: found_type.span), 0, 0)
                     if optional_payload_name != "":
                         if not self.struct_value_syms.contains(local.id):
@@ -2896,8 +2908,9 @@ impl MirLowering:
             return ""
         match inner.kind:
             case HirTypeKind.Named(optional_payload_sym, _):
-                val raw_symbol = self.symbols.get_symbol_raw(optional_payload_sym.id)
-                if val optional_payload_symbol = raw_symbol:
+                val raw_symbol: HirSymbol? = self.symbols.get_symbol_raw(optional_payload_sym.id)
+                if val present_payload_symbol = raw_symbol:
+                    val optional_payload_symbol: HirSymbol = present_payload_symbol
                     # A class is keyed by its owner identity everywhere this
                     # name is consumed (register_provider_class layouts and
                     # `{identity}::{method}` dispatch rows, the opt/ok shape
@@ -2908,9 +2921,9 @@ impl MirLowering:
                     # call`. Structs keep their bare-name convention.
                     var payload_key = ""
                     match optional_payload_symbol.kind:
-                        case Class:
+                        case SymbolKind.Class:
                             payload_key = mir_class_identity(optional_payload_symbol)
-                        case Struct:
+                        case SymbolKind.Struct:
                             payload_key = optional_payload_symbol.name
                         case _:
                             return ""
@@ -2980,8 +2993,9 @@ impl MirLowering:
         match field:
             case HirBitfieldField(_, _, has_type_, type_, bit_width, _, _, _):
                 if has_type_:
-                    match type_.kind:
-                        case Bool:
+                    val field_type: HirType = type_
+                    match field_type.kind:
+                        case HirTypeKind.Bool:
                             return MirType.bool()
                         case _:
                             return MirType.bits(bit_width)
@@ -3066,15 +3080,10 @@ impl MirLowering:
             # -- a later use of `a` in a sibling/merge block went
             # undetected. `record_move` (what a real Move instruction
             # triggers) does add to moved_now, closing that gap.
-            var ret_operand = mir_operand_copy(result)
-            if self.local_hir_type_isolation_state(result.id) == 1:
-                var b_rmove = self.builder
-                val rmove_ty = self.local_mir_type_of(result) ?? MirType.i64()
-                val rmove_local = b_rmove.new_temp(rmove_ty)
-                b_rmove.emit_move(rmove_local, result)
-                self.builder = b_rmove
-                br = self.builder
-                ret_operand = mir_operand_copy(rmove_local)
+            # The Ret operand carries the transfer itself, exactly once.
+            # No intermediate Move plus second consuming operand is needed.
+            val ret_operand = self.ownership_return_operand(result, rv)
+            br = self.builder
             val ret_box: MirOperand? = Some(ret_operand)
             br.terminate_return(ret_box)
             self.builder = br
@@ -3212,8 +3221,9 @@ impl MirLowering:
             var b_text_len = self.builder
             val text_len_res = b_text_len.emit_call(text_len_op, [mir_operand_copy(tagged_base)], MirType.i64())
             if val text_len = text_len_res:
+                val optional_dest: LocalId? = nil
                 b_text_len.emit(MirInst(
-                    kind: MirInstKind.Intrinsic(None, "bounds_check", [
+                    kind: MirInstKind.Intrinsic(optional_dest, "bounds_check", [
                         mir_operand_copy(index_local),
                         mir_operand_copy(text_len)
                     ]),
@@ -3522,6 +3532,7 @@ impl MirLowering:
             # the semantic owner/container markers on this fresh projection
             # so destructured records resolve fields and methods by name.
             self.mark_native_tuple_projection(field_local, result_type)
+            self.remember_native_tuple_member_hir_type(base_local, self.tuple_index_literal(index), field_local)
             self.remember_result_try_tuple_projection(base_local, self.tuple_index_literal(index), field_local)
             field_local
         else:
@@ -4250,7 +4261,8 @@ impl MirLowering:
                             # real None handle for free.
                             val left_is_option = self.option_value_locals.contains(left_local.id)
                             val right_is_option = self.option_value_locals.contains(right_local.id)
-                            val opt_bool_type = HirType(kind: HirTypeKind.Optional(HirType(kind: HirTypeKind.Bool, span: nil)), span: nil)
+                            val bool_payload_type: HirType = HirType(kind: HirTypeKind.Bool, span: nil)
+                            val opt_bool_type = HirType(kind: HirTypeKind.Optional(bool_payload_type), span: nil)
                             if left_is_option and not right_is_option:
                                 var right_wrappable = self.nil_locals.contains(right_local.id)
                                 if not right_wrappable:
@@ -5544,7 +5556,9 @@ impl MirLowering:
                 # Empty/absent parts -> unchanged plain-literal behavior.
                 var has_interps = false
                 var interp_list: [HirInterpolation] = []
-                if val il = interps_opt:
+                val interpolations: [HirInterpolation]? = interps_opt
+                if val present_interpolations = interpolations:
+                    val il: [HirInterpolation] = present_interpolations
                     interp_list = il
                     if interp_list.len() > 0:
                         has_interps = true
@@ -5698,12 +5712,13 @@ impl MirLowering:
                 val op_disc = _sffi_enum_discriminant<HirUnaryOp>(op)
                 val is_ref = op_disc == _sffi_enum_discriminant<HirUnaryOp>(HirUnaryOp.Ref)
                 val is_ref_mut = op_disc == _sffi_enum_discriminant<HirUnaryOp>(HirUnaryOp.RefMut)
-                val global_addr = if is_ref or is_ref_mut:
+                val global_addr: LocalId? = if is_ref or is_ref_mut:
                     self.try_lower_global_addr(operand, is_ref_mut)
                 else:
                     nil
-                if global_addr.?:
-                    global_addr.unwrap()
+                if val present_global_addr = global_addr:
+                    val address: LocalId = present_global_addr
+                    address
                 else:
                     # Bug jit_if_nil_takes_true_branch_2026-08-04. `Not` is the
                     # LOGICAL negation (`BitNot` is the separate bitwise one),
@@ -6202,7 +6217,8 @@ impl MirLowering:
                 # is the provenance the present-branch decode needs, carried
                 # forward from the Option's declared inner type rather than
                 # re-sniffed from the desugared shape.
-                if val exists_payload_type = self.option_inner_hir_type_for_local(base, base_local):
+                if val present_exists_payload_type = self.option_inner_hir_type_for_local(base, base_local):
+                    val exists_payload_type: HirType = present_exists_payload_type
                     match exists_payload_type.kind:
                         case HirTypeKind.Float(_) | HirTypeKind.Bool:
                             self.remember_local_hir_type(result_local.id, exists_payload_type, 0, 0)
@@ -6704,8 +6720,9 @@ impl MirLowering:
                 self.emit_mcdc_abort_if_active()
                 var throw_builder = self.builder
                 val throw_type_tag = mir_exception_type_tag(throw_value.type_)
+                val optional_dest: LocalId? = nil
                 throw_builder.emit(MirInst(kind: MirInstKind.Intrinsic(
-                    None, "__simple_exception_set_type_tag", [mir_operand_const_int(throw_type_tag)]),
+                    optional_dest, "__simple_exception_set_type_tag", [mir_operand_const_int(throw_type_tag)]),
                     span: Some(throw_value.span)))
                 if throw_builder.unwind_target.? and throw_builder.unwind_payload.?:
                     throw_builder.emit_copy(throw_builder.unwind_payload.unwrap(), throw_local)
@@ -7092,8 +7109,9 @@ impl MirLowering:
                                 self.enum_variant_is_unit(candidate_owners[0], bname):
                             selected_owner = candidate_owners[0]
                     if selected_owner != "":
-                        val pattern_type = if val known_type = selected_type:
-                            known_type
+                        val pattern_type: HirType = if val known_type = selected_type:
+                            val concrete_pattern_type: HirType = known_type
+                            concrete_pattern_type
                         else:
                             HirType(kind: HirTypeKind.Error, span: arm0.pattern.span)
                         val enum_pat = HirPattern(
@@ -7323,6 +7341,36 @@ impl MirLowering:
                     val t_x = b_x.new_temp(MirType.unit())
                     self.builder = b_x
                     return t_x
+                case CompleteRegion(binder):
+                    self.error_fatal(
+                        "E-COMPLETE-UNLOWERED: `case complete {binder}:` reached MIR lowering without region lowering",
+                        Some(arm.pattern.span)
+                    )
+                    var b_complete = self.builder
+                    val t_complete = b_complete.new_temp(MirType.unit())
+                    self.builder = b_complete
+                    return t_complete
+                case DynRegion(binder):
+                    self.error_fatal(
+                        "E-COMPLETE-UNLOWERED: `case dyn {binder}:` reached MIR lowering without region lowering",
+                        Some(arm.pattern.span)
+                    )
+                    var b_dyn = self.builder
+                    val t_dyn = b_dyn.new_temp(MirType.unit())
+                    self.builder = b_dyn
+                    return t_dyn
+                case TypeTest(type_name, binder):
+                    # Valid union type patterns are rewritten to Enum before
+                    # MIR lowering. A surviving TypeTest has no MIR semantics;
+                    # do not turn it into an unconditional/default arm.
+                    self.error_fatal(
+                        "E-NARROW-001: unnormalized type pattern `case {type_name} {binder}:` reached MIR lowering; expected union normalization to rewrite it to an enum pattern",
+                        Some(arm.pattern.span)
+                    )
+                    var b_type_test = self.builder
+                    val t_type_test = b_type_test.new_temp(MirType.unit())
+                    self.builder = b_type_test
+                    return t_type_test
             idx = idx + 1
 
         # Phase 1 also requires a wildcard default arm; without one we'd

@@ -3,7 +3,7 @@
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
-use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_lowering_types.{MirLowering, MirAdaptedFileWriteBytesExternReceiptV1}
 use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir._MirLowering.provider_metadata.{mir_provider_callable_key}
 
@@ -43,6 +43,43 @@ fn mir_imported_extern_owner_keys_v1(consumers: Dict<text, [HirSymbol]>) -> Dict
             owners[mir_provider_callable_key(symbol.defining_module ?? "", "")] = true
     owners
 
+fn mir_file_write_bytes_facade_decl_v1(declaration: HirFunction) -> bool:
+    if declaration.name != "rt_file_write_bytes" or not declaration.is_extern or
+            declaration.is_method or declaration.is_async or declaration.type_params.len() != 0 or
+            declaration.is_generic_template or declaration.params.len() != 2 or
+            declaration.return_type.kind != HirTypeKind.Bool:
+        return false
+    for raw_parameter in declaration.params:
+        val parameter: HirParam = raw_parameter
+        if parameter.has_default: return false
+    if declaration.params[0].type_.kind != HirTypeKind.Str:
+        return false
+    match declaration.params[1].type_.kind:
+        case HirTypeKind.Array(element, size): size == nil and element.kind == HirTypeKind.Int(8, false)
+        case _: false
+
+impl MirLowering:
+    me record_adapted_file_write_bytes_extern_v1(owner: text, declaration: HirFunction, consumer: SymbolId):
+        if not mir_file_write_bytes_facade_decl_v1(declaration) or consumer.id < 0:
+            return
+        val owner_key = mir_provider_callable_key(owner, "")
+        val semantic_signature = MirSignature(
+            params: [self.lower_type(declaration.params[0].type_), self.lower_type(declaration.params[1].type_)],
+            return_type: self.lower_type(declaration.return_type),
+            is_variadic: false
+        )
+        val incoming = MirAdaptedFileWriteBytesExternReceiptV1(
+            owner: owner_key,
+            link_name: declaration.name,
+            signature: semantic_signature
+        )
+        if self.adapted_file_write_bytes_externs.has(consumer.id):
+            val existing = self.adapted_file_write_bytes_externs[consumer.id]
+            if existing.owner != incoming.owner or existing.link_name != incoming.link_name:
+                self.error_fatal("ambiguous adapted rt_file_write_bytes extern declaration", nil)
+            return
+        self.adapted_file_write_bytes_externs[consumer.id] = incoming
+
 impl MirLowering:
     me record_imported_exact_extern_modules_v1(owner: text, providers: [HirModule]):
         val consumers = mir_imported_extern_consumers_v1(self.symbols, owner)
@@ -73,6 +110,13 @@ impl MirLowering:
                     continue
                 var relocated = declaration
                 relocated.symbol = consumer.id
+                self.record_adapted_file_write_bytes_extern_v1(owner, declaration, consumer.id)
+                if self.adapted_file_write_bytes_externs.has(consumer.id.id):
+                    val receipt = self.adapted_file_write_bytes_externs[consumer.id.id]
+                    if receipt.owner == mir_provider_callable_key(owner, "") and receipt.link_name == declaration.name:
+                        var links = self.callable_link_names
+                        links[key] = declaration.name
+                        self.callable_link_names = links
                 self.record_exact_extern_declaration_v1(relocated)
                 if self.exact_extern_signatures.has(consumer.id.id):
                     # Only the proved extern declaration owns its physical C

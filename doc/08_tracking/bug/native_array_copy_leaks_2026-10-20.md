@@ -48,3 +48,14 @@ These sites accumulate into locals, extend with small fresh chunks, index nested
 - `elf/tls_relax.spl`: batched TLS patches
 - `elf/section_gc.spl`: flat live table, direct range indexing, renamed `marks`/`bases` fields
 - `elf/synthetic_sections.spl`: `elf_rela_entry` and `elf_sym_entry` return chunks
+
+## 2026-10-21 follow-up: packed byte arrays in the copy loop
+
+The native local-array value-copy loop assumed every `rt_array_get` result was
+an already-tagged slot word. That is false for packed `[u8]` arrays: their
+getter returns a raw octet, so pushing it directly into the generic copied
+array corrupts the element. The copy loop now dispatches only authoritative
+U8 arrays through `rt_bytes_u8_at`, then boxes the octet with
+`box_runtime_value` before `rt_array_push`; all other element types retain the
+original bit-for-bit `rt_array_get` path. A parsed frontend/HIR/MIR regression
+covers both U8 and non-U8 copies. Source changes are unbuilt and unverified.

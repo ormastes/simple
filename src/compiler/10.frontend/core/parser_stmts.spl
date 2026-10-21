@@ -39,6 +39,7 @@ use compiler.core.tokens.{TOK_KW_BIND, TOK_KW_RECEIVE, TOK_KW_AFTER}
 use compiler.core.tokens.{TOK_BACKSLASH}
 use compiler.core.ast.{EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT}
 use compiler.core.ast.{EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT}
+use compiler.core.ast.{EXPR_TUPLE, EXPR_UNIT}
 use compiler.core.ast.{EXPR_BINARY, EXPR_UNARY, EXPR_CALL, EXPR_METHOD_CALL, EXPR_ARRAY_LIT, EXPR_FIELD_ACCESS}
 use compiler.core.ast.{expr_ident, expr_call, expr_binary, expr_nil_lit, expr_field_access, expr_bool_lit, expr_string_lit}
 use compiler.core.ast.{expr_int_lit, expr_float_lit}
@@ -1111,15 +1112,34 @@ fn parse_statement() -> i64:
 
         if ident_text == "assert":
             parser_advance()
+            val assert_parenthesized = par_kind_get() == TOK_LPAREN
             val assert_cond = parse_expr()
             # Desugar to the raising builtin `__assert(cond[, msg])`. Returning
             # the bare condition here made every `assert` a no-op: the value was
             # evaluated and discarded, never checked.
             var assert_args: [i64] = []
-            assert_args.push(assert_cond)
+            # A parenthesized assertion's comma separates builtin arguments,
+            # not fields of a truthy tuple. Parse the complete expression first
+            # so grouped conditions such as `(left) or right` keep working.
+            if assert_parenthesized and expr_get_tag(assert_cond) == EXPR_TUPLE:
+                val parenthesized_args = expr_get_args(assert_cond)
+                if parenthesized_args.len() == 0 or parenthesized_args.len() > 2:
+                    parser_error("assert requires a condition and at most one message")
+                for assert_arg in parenthesized_args:
+                    assert_args.push(assert_arg)
+            else:
+                assert_args.push(assert_cond)
             if par_kind_get() == 160:
                 parser_advance()
                 assert_args.push(parse_expr())
+                if par_kind_get() == TOK_COMMA:
+                    parser_error("assert accepts at most one message")
+            if assert_args.len() > 2:
+                parser_error("assert accepts at most one message")
+            if assert_args.len() > 0:
+                val condition_tag = expr_get_tag(assert_args[0])
+                if condition_tag == EXPR_UNIT or condition_tag == EXPR_TUPLE:
+                    parser_error("assert requires a condition, not a unit or tuple value")
             val assert_call = expr_call(expr_ident("__assert", 0), assert_args, 0)
             return stmt_expr_stmt(assert_call, 0)
 

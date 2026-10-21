@@ -1,0 +1,32 @@
+"""Focused native compiler diagnostic, not a general SPipe runner.
+
+An admitted Stage 2 producer can compile this small closure to verify the
+ownership-effect wire contract without claiming Stage 4 tool qualification.
+"""
+
+use compiler.semantics.param_effects.effects.{param_effect_summary_decode_v1, param_effect_summary_domain_v1}
+
+use std.nogc_sync_mut.io_runtime.{exit}
+
+fn effect_codec_require(condition: bool, message: text):
+    if not condition:
+        print "nogc-effect-codec: FAIL {message}"
+        exit(1)
+
+fn main() -> i64:
+    val header = param_effect_summary_domain_v1() + "\n"
+    val valid = param_effect_summary_decode_v1(header + "consume_it\tconsume\ninspect\tread-short,mutate-short\nno_args\t\n")
+    effect_codec_require(valid.len() == 3, "valid effect summary lost a function")
+    effect_codec_require(valid["consume_it"][0] == "consume", "consume contract changed")
+    effect_codec_require(valid["inspect"][0] == "read-short", "read-short contract changed")
+    effect_codec_require(valid["inspect"][1] == "mutate-short", "mutable borrow contract changed")
+    effect_codec_require(valid["no_args"].len() == 0, "empty parameter list changed")
+    var rejected = 0
+    for bad in ["f\tread-shrot\n", "f\tconsume\nf\tread-short\n", "f\tconsume\nbroken\n", "f\tconsume,\n", "f\tconsume\n\ng\tread-short\n", "f\tconsume\tg\n"]:
+        val decoded = param_effect_summary_decode_v1(header + bad)
+        effect_codec_require(decoded.len() == 0, "malformed summary retained trusted effects")
+        rejected = rejected + 1
+    effect_codec_require(rejected == 6, "malformed-summary corpus was truncated")
+    effect_codec_require(param_effect_summary_decode_v1("simple/param-effects/v0\nf\tconsume\n").len() == 0, "stale schema accepted")
+    print "nogc-effect-codec: malformed and valid summary corpus passed"
+    0

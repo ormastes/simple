@@ -1,0 +1,123 @@
+use std.io_runtime.{exit, file_read_bytes_result, file_exists, file_delete, getpid}
+use std.nogc_sync_mut.sffi.file_bytes.{file_write_bytes_tagged_native, file_write_bytes_runtime_native}
+
+@unsafe(reason: "allocates an owned packed byte-array handle for the direct runtime-entry control", capabilities: [ffi])
+extern fn rt_byte_array_new_len(count: i64) -> Any
+@unsafe(reason: "reads packed-byte backing length for the runtime-entry control", capabilities: [ffi])
+extern fn rt_array_bytes_basis_len(data: Any) -> i64
+@unsafe(reason: "returns packed byte-array backing address for the probe copy", capabilities: [ffi, raw_ptr])
+extern fn rt_array_bytes_basis_ptr(data: Any) -> i64
+@unsafe(reason: "copies a validated generic byte array into probe-owned packed storage", capabilities: [ffi, raw_ptr])
+extern fn rt_array_bytes_copy_checked(source: Any, output_ptr: i64, capacity: i64) -> i64
+@unsafe(reason: "releases only the probe-owned packed test value", capabilities: [ffi])
+extern fn rt_array_free(data: Any)
+
+fn check_byte_write(condition: bool, message: text):
+    if not condition:
+        print "FAIL: {message}"
+        exit(1)
+
+fn main() -> i64:
+    val dynamic_path = ".native-file-bytes-{getpid()}.bin"
+    val typed_roundtrip_path = ".native-file-bytes-typed-roundtrip-{getpid()}.bin"
+    val literal_path = ".native-file-bytes-abi-literal.bin"
+    val packed_path = ".native-file-bytes-packed-{getpid()}.bin"
+    val invalid_source_path = ".native-file-bytes-invalid-{getpid()}.bin"
+    val out_of_range_path = ".native-file-bytes-out-of-range-{getpid()}.bin"
+    val empty_path = ".native-file-bytes-abi-empty.bin"
+    val missing_path = ".native-file-bytes-missing-{getpid()}/entry.bin"
+
+    var expected: [u8] = []
+    for value in 0..8192:
+        expected = expected.push(value.to_u8())
+    check_byte_write(expected.len() == 8192, "payload construction length")
+    check_byte_write(expected[0] == 0 and expected[128] == 128 and expected[255] == 255, "zero/high-byte controls")
+    check_byte_write(file_write_bytes_tagged_native(dynamic_path, expected), "dynamic-path 8 KiB write")
+    match file_read_bytes_result(dynamic_path):
+        case Ok(actual):
+            check_byte_write(actual.len() == 8192, "8 KiB readback length {actual.len()}")
+            for index in 0..8192:
+                check_byte_write(actual[index] == expected[index], "readback byte {index}")
+            check_byte_write(file_write_bytes_tagged_native(typed_roundtrip_path, actual), "typed packed-readback source write")
+            match file_read_bytes_result(typed_roundtrip_path):
+                case Ok(typed_repeated):
+                    check_byte_write(typed_repeated.len() == 8192, "typed packed-readback length")
+                    for index in 0..8192:
+                        check_byte_write(typed_repeated[index] == expected[index], "typed packed-readback byte {index}")
+                case Err(error):
+                    check_byte_write(false, "typed packed-readback failed: {error}")
+            check_byte_write(actual.len() == 8192, "typed source length preserved")
+            for index in 0..8192:
+                check_byte_write(actual[index] == expected[index], "typed source byte preserved {index}")
+            val generic_control: Any = [0, 128, 255]
+            val packed: Any = unsafe(capabilities: [ffi]):
+                rt_byte_array_new_len(3)
+            check_byte_write(packed != nil, "packed control allocation")
+            val packed_basis = unsafe(capabilities: [ffi]):
+                rt_array_bytes_basis_len(packed)
+            if packed_basis != 3:
+                unsafe(capabilities: [ffi]):
+                    rt_array_free(packed)
+                check_byte_write(false, "packed control basis length")
+            val packed_ptr = unsafe(capabilities: [ffi, raw_ptr]):
+                rt_array_bytes_basis_ptr(packed)
+            if packed_ptr == 0:
+                unsafe(capabilities: [ffi]):
+                    rt_array_free(packed)
+                check_byte_write(false, "packed control backing pointer")
+            val copied = unsafe(capabilities: [ffi, raw_ptr]):
+                rt_array_bytes_copy_checked(generic_control, packed_ptr, 3)
+            if copied != 3:
+                unsafe(capabilities: [ffi]):
+                    rt_array_free(packed)
+                check_byte_write(false, "packed control initialization")
+            val packed_written = file_write_bytes_runtime_native(packed_path, packed)
+            val packed_after_len = unsafe(capabilities: [ffi]):
+                rt_array_bytes_basis_len(packed)
+            val packed_after_ptr = unsafe(capabilities: [ffi, raw_ptr]):
+                rt_array_bytes_basis_ptr(packed)
+            unsafe(capabilities: [ffi]):
+                rt_array_free(packed)
+            check_byte_write(packed_written, "unchanged packed Any write")
+            check_byte_write(packed_after_len == 3 and packed_after_ptr == packed_ptr, "callee leaves caller-owned packed source unchanged")
+            match file_read_bytes_result(packed_path):
+                case Ok(repeated):
+                    check_byte_write(repeated.len() == 3, "packed Any readback length")
+                    check_byte_write(repeated[0] == 0 and repeated[1] == 128 and repeated[2] == 255, "packed Any exact readback")
+                case Err(error):
+                    check_byte_write(false, "packed Any file read failed: {error}")
+        case Err(error):
+            check_byte_write(false, "8 KiB readback failed: {error}")
+    check_byte_write(file_delete(dynamic_path), "dynamic-path cleanup")
+    check_byte_write(file_delete(typed_roundtrip_path), "typed packed-readback cleanup")
+    check_byte_write(file_delete(packed_path), "packed control cleanup")
+
+    val literal_bytes: [u8] = [0, 128, 255]
+    check_byte_write(file_write_bytes_tagged_native(literal_path, literal_bytes), "literal-path write")
+    match file_read_bytes_result(literal_path):
+        case Ok(actual):
+            check_byte_write(actual.len() == 3, "literal-path readback length")
+            for index in 0..3:
+                check_byte_write(actual[index] == literal_bytes[index], "literal-path byte {index}")
+        case Err(error):
+            check_byte_write(false, "literal-path readback failed: {error}")
+    check_byte_write(file_delete(literal_path), "literal-path cleanup")
+
+    check_byte_write(file_write_bytes_tagged_native(empty_path, []), "empty-array write")
+    check_byte_write(file_exists(empty_path), "empty write creates file")
+    match file_read_bytes_result(empty_path):
+        case Ok(actual): check_byte_write(actual.len() == 0, "empty-array readback")
+        case Err(error): check_byte_write(false, "empty-array readback failed: {error}")
+    check_byte_write(file_delete(empty_path), "empty-path cleanup")
+
+    val invalid_source: Any = "not a byte array"
+    check_byte_write(not file_write_bytes_runtime_native(invalid_source_path, invalid_source), "nonarray Any is rejected")
+    check_byte_write(not file_exists(invalid_source_path), "nonarray input rejected before file creation")
+    val out_of_range_values: [i64] = [256]
+    val out_of_range_source: Any = out_of_range_values
+    check_byte_write(not file_write_bytes_runtime_native(out_of_range_path, out_of_range_source), "out-of-range generic byte is rejected")
+    check_byte_write(not file_exists(out_of_range_path), "out-of-range input rejected before file creation")
+
+    check_byte_write(not file_write_bytes_tagged_native(missing_path, [1]), "missing-parent write must fail")
+    print "native byte-write ABI: exact bytes, packed ownership, invalid-input rejection, and failed writes passed"
+    0

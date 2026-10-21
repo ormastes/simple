@@ -25,9 +25,13 @@ use compiler.mir._MirLoweringExpr.enum_payload_type_identity.{enum_payload_types
 # - Field access
 
 use compiler.mir.mir_data.*
+use compiler.mir.mir_instruction_support.{MirBinOp}
 use compiler.hir.hir_types.*
+use compiler.hir.hir_kind_carrier.{hir_type_kind_discriminant}
 use compiler.hir.hir_definitions.*
 use compiler.hir.hir_literal_constant_v1.{HirLiteralConstantV1, hir_fold_literal_constant_v1}
+use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
+use compiler.hir.ownership_types.{hir_type_requires_move, hir_type_ownership_is_known}
 use compiler.semantics.perf_facts.builtin_collection.{resolve_builtin_collection_operation}
 use compiler.common.diagnostics.span.{Span}
 use compiler.blocks.value.BlockValue
@@ -70,6 +74,25 @@ fn mir_conv_log_on() -> bool:
 # ============================================================================
 
 impl MirLowering:
+    me aggregate_literal_source_type(source: HirExpr, source_local: LocalId) -> HirType:
+        if val registered_type = self.find_local_hir_type(source_local.id):
+            return registered_type
+        if source.has_type_ and source.type_ != nil:
+            return source.type_
+        HirType(kind: HirTypeKind.Error, span: source.span)
+
+    me aggregate_literal_operand(source: HirExpr, source_local: LocalId, stored_local: LocalId) -> MirOperand:
+        # Decide before erasing owner metadata through runtime boxing. This is
+        # a storage transfer, not a short read of the initializer. The caller
+        # has already evaluated the expression exactly once.
+        val source_type = self.aggregate_literal_source_type(source, source_local)
+        if self.nogc_strict and not hir_type_ownership_is_known(source_type):
+            self.error_fatal("unresolved ownership type at aggregate storage transfer", Some(source.span))
+            return mir_operand_copy(stored_local)
+        if hir_type_requires_move(source_type, self.nogc_strict):
+            return mir_operand_move(stored_local)
+        mir_operand_copy(stored_local)
+
     me lower_dict_keys_or_values_array(receiver_local: LocalId, method: text) -> LocalId?:
         """Emit `rt_dict_keys` / `rt_dict_values` on a dict-typed local and
         return a fresh temp typed `Array(elem, 0)` (element type recovered
@@ -1227,12 +1250,13 @@ impl MirLowering:
                 val owner_inner_uw = inner_type_uw ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
                 match owner_inner_uw.kind:
                     case HirTypeKind.Named(inner_owner_symbol, _):
-                        match self.symbols.get_symbol_raw(inner_owner_symbol.id):
-                            case Some(inner_owner_sym):
+                        val inner_owner_result: HirSymbol? = self.symbols.get_symbol_raw(inner_owner_symbol.id)
+                        match inner_owner_result:
+                            case Option.Some(inner_owner_sym):
                                 if inner_owner_sym.name != "":
                                     var inner_owner_name = inner_owner_sym.name
                                     match inner_owner_sym.kind:
-                                        case Class: inner_owner_name = mir_class_identity(inner_owner_sym)
+                                        case SymbolKind.Class: inner_owner_name = mir_class_identity(inner_owner_sym)
                                         case _: ()
                                     self.struct_value_syms[result_local_uw.id] = inner_owner_name
                             case _: ()
@@ -1510,7 +1534,7 @@ impl MirLowering:
             )))
         ))
         var b_push = self.builder
-        b_push.emit_call(push_op, [mir_operand_copy(push_recv), mir_operand_copy(push_val_tagged)], MirType(kind: MirTypeKind.I8))
+        b_push.emit_call(push_op, [mir_operand_copy(push_recv), self.aggregate_literal_operand(push_value, push_val_raw, push_val_tagged)], MirType(kind: MirTypeKind.I8))
         self.builder = b_push
         self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, push_recv)
         push_recv
@@ -2366,7 +2390,10 @@ impl MirLowering:
                 val chr_receiver_type = self.receiver_declared_type(receiver)
                 if chr_receiver_type != nil:
                     val found_chr_receiver_type = chr_receiver_type ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
-                    val named_disc = _sffi_method_hir_type_discriminant<HirTypeKind>(HirTypeKind.Named(SymbolId(id: -1), []))
+                    val named_probe_symbol: SymbolId = SymbolId(id: -1)
+                    val named_probe_args: [HirType] = []
+                    val named_probe_kind: HirTypeKind = HirTypeKind.Named(named_probe_symbol, named_probe_args)
+                    val named_disc = _sffi_method_hir_type_discriminant<HirTypeKind>(named_probe_kind)
                     if _sffi_method_hir_type_discriminant<HirTypeKind>(found_chr_receiver_type.kind) == named_disc:
                         match found_chr_receiver_type.kind:
                             case HirTypeKind.Named(chr_owner_symbol, _):
@@ -2525,7 +2552,7 @@ impl MirLowering:
             # producer that hands out a HirType with an unwritten kind is a
             # separate defect and is still open; see
             # doc/08_tracking/bug/self_hosted_symbol_table_hirtype_garbage_at_rest_2026-08-31.md
-            if found_receiver_type.kind != 0:
+            if hir_type_kind_discriminant(found_receiver_type.kind) >= 0:
                 receiver_type = self.lower_type(found_receiver_type)
         if mir_mc_trace_state == 1:
             eprint("[mir-method-call] receiver-type method={method}\n")
@@ -2882,7 +2909,8 @@ impl MirLowering:
         # d.set(k, v)` leaves `d` and `e` both mutated/aliased).
         if receiver_is_dict and method == "set" and args.len() == 2:
             val receiver_local = if dict_recv_lowered: dict_recv_local else: self.lower_expr(receiver)
-            val key_local = self.lower_dict_key(args[0].value)
+            val raw_key_local = self.lower_expr(args[0].value)
+            val key_local = self.box_runtime_value(raw_key_local)
             val value_local = self.lower_expr(args[1].value)
             self.note_container_elem_type(receiver_local, value_local)
             val boxed_value = self.box_runtime_value(value_local)
@@ -2891,7 +2919,9 @@ impl MirLowering:
                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
             ))
             var b_set = self.builder
-            b_set.emit_call(set_op, [mir_operand_copy(receiver_local), mir_operand_copy(key_local), mir_operand_copy(boxed_value)], MirType.i64())
+            b_set.emit_call(set_op, [mir_operand_copy(receiver_local),
+                self.aggregate_literal_operand(args[0].value, raw_key_local, key_local),
+                self.aggregate_literal_operand(args[1].value, value_local, boxed_value)], MirType.i64())
             self.builder = b_set
             return receiver_local
 
@@ -3775,9 +3805,10 @@ impl MirLowering:
                     eprint("[mir-method-call] text-special-local-id method={method} id={ts_local.id}\n")
                 if method == "parse_f64":
                     self.mark_runtime_value_local(ts_local.id)
-                    val float_type = HirType(kind: HirTypeKind.Float(64), span: receiver.span)
+                    val float_type: HirType = HirType(kind: HirTypeKind.Float(64), span: receiver.span)
+                    val optional_float_kind: HirTypeKind = HirTypeKind.Optional(float_type)
                     self.remember_local_hir_type(ts_local.id, HirType(
-                        kind: HirTypeKind.Optional(float_type),
+                        kind: optional_float_kind,
                         span: receiver.span
                     ), 2, 0)
                 # `parse_int` is the seed's strict optional parse
@@ -3786,9 +3817,10 @@ impl MirLowering:
                 # the same nullable tagged shape parse_f64 carries above.
                 if method == "parse_int":
                     self.mark_runtime_value_local(ts_local.id)
-                    val parsed_int_type = HirType(kind: HirTypeKind.Int(64, true), span: receiver.span)
+                    val parsed_int_type: HirType = HirType(kind: HirTypeKind.Int(64, true), span: receiver.span)
+                    val optional_int_kind: HirTypeKind = HirTypeKind.Optional(parsed_int_type)
                     self.remember_local_hir_type(ts_local.id, HirType(
-                        kind: HirTypeKind.Optional(parsed_int_type),
+                        kind: optional_int_kind,
                         span: receiver.span
                     ), 2, 0)
                 # `to_float` is total per the interpreter (0.0 on failure), so
@@ -4163,13 +4195,15 @@ impl MirLowering:
                     static_method_id = Some(self.struct_method_syms[static_method_key])
                 elif static_receiver_name != "":
                     match static_receiver_symbol:
-                        case Some(static_symbol):
-                            match self.symbols.lookup_method_in_type(static_symbol, method):
-                                case Some(static_candidate_id):
-                                    match self.symbols.get_symbol_raw(static_candidate_id.id):
-                                        case Some(static_candidate_symbol):
+                        case Option.Some(static_symbol):
+                            val static_candidate_result: SymbolId? = self.symbols.lookup_method_in_type(static_symbol, method)
+                            match static_candidate_result:
+                                case Option.Some(static_candidate_id):
+                                    val static_candidate_symbol_result: HirSymbol? = self.symbols.get_symbol_raw(static_candidate_id.id)
+                                    match static_candidate_symbol_result:
+                                        case Option.Some(static_candidate_symbol):
                                             match static_candidate_symbol.kind:
-                                                case Function: static_method_id = Some(static_candidate_id)
+                                                case SymbolKind.Function: static_method_id = Some(static_candidate_id)
                                                 case _: ()
                                         case _: ()
                                 case _: ()
@@ -4213,12 +4247,14 @@ impl MirLowering:
                 if static_method_id == nil and static_receiver_name != "":
                     val nd_static_owner = self.symbols.lookup_or_invalid(static_receiver_name)
                     if nd_static_owner.is_valid():
-                        match self.symbols.lookup_method_in_type(nd_static_owner, method):
-                            case Some(nd_static_candidate):
-                                match self.symbols.get_symbol_raw(nd_static_candidate.id):
-                                    case Some(nd_static_symbol):
+                        val nd_static_candidate_result: SymbolId? = self.symbols.lookup_method_in_type(nd_static_owner, method)
+                        match nd_static_candidate_result:
+                            case Option.Some(nd_static_candidate):
+                                val nd_static_symbol_result: HirSymbol? = self.symbols.get_symbol_raw(nd_static_candidate.id)
+                                match nd_static_symbol_result:
+                                    case Option.Some(nd_static_symbol):
                                         match nd_static_symbol.kind:
-                                            case Function: static_method_id = Some(nd_static_candidate)
+                                            case SymbolKind.Function: static_method_id = Some(nd_static_candidate)
                                             case _: ()
                                     case _: ()
                             case _: ()
@@ -4263,7 +4299,7 @@ impl MirLowering:
                         for static_result_symbol in self.symbols.symbols.values():
                             if static_result_symbol.name == static_result_name:
                                 match static_result_symbol.kind:
-                                    case Class | Struct | Enum:
+                                    case SymbolKind.Class | SymbolKind.Struct | SymbolKind.Enum:
                                         static_return_type = MirType(kind:
                                             MirTypeKind.Struct(
                                                 self.canonical_mir_type_symbol(
@@ -4306,12 +4342,14 @@ impl MirLowering:
                     # A non-variable receiver (`parse_layout_kind(name).to_wire()`)
                     # has no declared binding; its call result's remembered
                     # HIR return type is the same authority.
-                    if val declared_receiver = self.receiver_declared_or_result_type(receiver, unresolved_receiver_local):
+                    val declared_receiver_result: HirType? = self.receiver_declared_or_result_type(receiver, unresolved_receiver_local)
+                    if val declared_receiver = declared_receiver_result:
                         match declared_receiver.kind:
-                            case Named(declared_owner_id, _):
-                                if val declared_owner = self.symbols.get_symbol_raw(declared_owner_id.id):
+                            case HirTypeKind.Named(declared_owner_id, _):
+                                val declared_owner_result: HirSymbol? = self.symbols.get_symbol_raw(declared_owner_id.id)
+                                if val declared_owner = declared_owner_result:
                                     match declared_owner.kind:
-                                        case Enum:
+                                        case SymbolKind.Enum:
                                             val enum_owner_key = mir_class_identity(declared_owner)
                                             if self.enum_has_variants(enum_owner_key):
                                                 unresolved_struct_name = Some(enum_owner_key)
@@ -4325,12 +4363,14 @@ impl MirLowering:
                 # Named SymbolId is authoritative for method dispatch and must
                 # replace that bare layout spelling. This also keeps a
                 # same-named type from another provider out of the lookup.
-                if val exact_receiver_type = self.receiver_declared_or_result_type(receiver, unresolved_receiver_local):
+                val exact_receiver_type_result: HirType? = self.receiver_declared_or_result_type(receiver, unresolved_receiver_local)
+                if val exact_receiver_type = exact_receiver_type_result:
                     match exact_receiver_type.kind:
-                        case Named(exact_owner_id, _):
-                            if val exact_owner = self.symbols.get_symbol_raw(exact_owner_id.id):
+                        case HirTypeKind.Named(exact_owner_id, _):
+                            val exact_owner_result: HirSymbol? = self.symbols.get_symbol_raw(exact_owner_id.id)
+                            if val exact_owner = exact_owner_result:
                                 match exact_owner.kind:
-                                    case Struct | Class:
+                                    case SymbolKind.Struct | SymbolKind.Class:
                                         val exact_owner_identity = mir_class_identity(exact_owner)
                                         if exact_owner_identity != "":
                                             unresolved_struct_name = Some(exact_owner_identity)
@@ -4355,16 +4395,19 @@ impl MirLowering:
                     elif self.struct_method_key_present_v1(unresolved_method_key):
                         Some(self.struct_method_syms[unresolved_method_key])
                     else:
-                        match self.receiver_declared_or_result_type(receiver, unresolved_receiver_local):
-                            case Some(found_receiver_type):
+                        val found_receiver_type_result: HirType? = self.receiver_declared_or_result_type(receiver, unresolved_receiver_local)
+                        match found_receiver_type_result:
+                            case Option.Some(found_receiver_type):
                                 match found_receiver_type.kind:
-                                    case Named(receiver_type_symbol, _):
-                                        match self.symbols.lookup_method_in_type(receiver_type_symbol, method):
-                                            case Some(instance_candidate_id):
-                                                match self.symbols.get_symbol_raw(instance_candidate_id.id):
-                                                    case Some(instance_candidate_symbol):
+                                    case HirTypeKind.Named(receiver_type_symbol, _):
+                                        val instance_candidate_result: SymbolId? = self.symbols.lookup_method_in_type(receiver_type_symbol, method)
+                                        match instance_candidate_result:
+                                            case Option.Some(instance_candidate_id):
+                                                val instance_candidate_symbol_result: HirSymbol? = self.symbols.get_symbol_raw(instance_candidate_id.id)
+                                                match instance_candidate_symbol_result:
+                                                    case Option.Some(instance_candidate_symbol):
                                                         match instance_candidate_symbol.kind:
-                                                            case Method: Some(instance_candidate_id)
+                                                            case SymbolKind.Method: Some(instance_candidate_id)
                                                             case _: nil
                                                     case _: nil
                                             case _: nil
@@ -5463,6 +5506,9 @@ impl MirLowering:
         """Lower array literal."""
         var operands: [MirOperand] = []
         var lowered_elem_type = MirType.i64()
+        var inferred_element_hir = HirType(kind: HirTypeKind.Error, span: Span.empty())
+        var complete_element_hir = true
+        var observed_element_hir = false
         # Bug (array-of-structs field misread): `pts[i].y` on
         # `[Point(x:1,y:2), Point(x:3,y:4)]` always read field 0 (x) no
         # matter which field name was requested, because reading an array
@@ -5531,8 +5577,22 @@ impl MirLowering:
                     val elem_vname = self.struct_value_syms.get(local.id)
                     if elem_vname != nil:
                         elem_struct_name = elem_vname ?? ""
+                # Keep semantic metadata before boxing. A fresh nested array
+                # has no expression attribute, so its result-local metadata is
+                # the only evidence that it contains an owning value.
+                if not element_context.?:
+                    val current_hir = self.aggregate_literal_source_type(elem, local)
+                    match current_hir.kind:
+                        case HirTypeKind.Infer(_, _) | HirTypeKind.Error:
+                            complete_element_hir = false
+                        case _:
+                            if not observed_element_hir:
+                                inferred_element_hir = current_hir
+                                observed_element_hir = true
+                            elif not hir_types_equal(inferred_element_hir, current_hir):
+                                complete_element_hir = false
                 val boxed = self.box_runtime_value(local)
-                operands = operands.push(mir_operand_copy(boxed))
+                operands = operands.push(self.aggregate_literal_operand(elem, local, boxed))
 
         # The lowered local is authoritative. Flat HIR expression metadata may
         # still carry the parser's default i64 for typed variables.
@@ -5548,6 +5608,14 @@ impl MirLowering:
         if element_context.?:
             self.runtime_elem_value_type[arr_local.id] = elem_type
         self.mark_runtime_value_local(arr_local.id)
+        # Empty literals acquire a semantic element type only from an explicit
+        # declared context. Erased MIR i64 is never ownership evidence.
+        if val declared_element = element_context:
+            self.remember_local_hir_type(arr_local.id,
+                HirType(kind: HirTypeKind.Array(declared_element, None), span: declared_element.span), 0, 0)
+        elif complete_element_hir and observed_element_hir:
+            self.remember_local_hir_type(arr_local.id,
+                HirType(kind: HirTypeKind.Array(inferred_element_hir, None), span: inferred_element_hir.span), 0, 0)
         if elem_struct_name != "":
             self.array_element_struct_syms[arr_local.id] = elem_struct_name
         arr_local
@@ -5658,7 +5726,9 @@ impl MirLowering:
                     MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType(kind: MirTypeKind.I8), is_variadic: false)))
                 ))
                 var b_set = self.builder
-                val inserted = b_set.emit_call(set_op, [mir_operand_copy(dict_local), mir_operand_copy(key_local), mir_operand_copy(boxed_value)], MirType(kind: MirTypeKind.I8))
+                val inserted = b_set.emit_call(set_op, [mir_operand_copy(dict_local),
+                    self.aggregate_literal_operand(key_expr, key_local_raw, key_local),
+                    self.aggregate_literal_operand(value_expr, value_local, boxed_value)], MirType(kind: MirTypeKind.I8))
                 if retain_collection_operands:
                     if val insertion_result = inserted:
                         collection_operands = collection_operands.push((key_local, insertion_result))
@@ -5845,10 +5915,12 @@ impl MirLowering:
         val mapped_raw = self.lower_inline_lambda_with_locals(map_params, map_body, [elem_raw])
         if val found_mapped_type = self.local_mir_type_of(mapped_raw):
             mapped_elem_type = found_mapped_type
+        val mapped_hir_type = self.aggregate_literal_source_type(map_body, mapped_raw)
         val mapped_tagged = self.box_runtime_value(mapped_raw)
 
         var b_push = self.builder
-        b_push.emit_call(self.rt_array_push_operand(), [mir_operand_copy(result_arr), mir_operand_copy(mapped_tagged)], MirType(kind: MirTypeKind.I8))
+        b_push.emit_call(self.rt_array_push_operand(), [mir_operand_copy(result_arr),
+            self.aggregate_literal_operand(map_body, mapped_raw, mapped_tagged)], MirType(kind: MirTypeKind.I8))
         self.builder = b_push
 
         var b_body_end = self.builder
@@ -5873,6 +5945,11 @@ impl MirLowering:
         self.builder = b_exit
         self.runtime_array_locals[typed_result_arr.id] = true
         self.mark_runtime_value_local(typed_result_arr.id)
+        match mapped_hir_type.kind:
+            case HirTypeKind.Infer(_, _) | HirTypeKind.Error: pass
+            case _:
+                self.remember_local_hir_type(typed_result_arr.id,
+                    HirType(kind: HirTypeKind.Array(mapped_hir_type, None), span: map_body.span), 0, 0)
         typed_result_arr
 
     me lower_array_filter(arr: LocalId, lam_op: MirOperand) -> LocalId:
@@ -6412,7 +6489,7 @@ impl MirLowering:
         var hir_elements_complete = true
         for elem in elements:
             val local = self.lower_expr(elem)
-            operands = operands.push(mir_operand_copy(local))
+            operands = operands.push(self.aggregate_literal_operand(elem, local, local))
             if hir_elements_complete:
                 if val elem_hir = self.find_local_hir_type(local.id):
                     match elem_hir.kind:
