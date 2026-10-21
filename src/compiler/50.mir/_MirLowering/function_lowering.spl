@@ -601,6 +601,23 @@ impl MirLowering:
                                 self.struct_value_syms[local.id] = parameter_type_name
                         case _:
                             ()
+                case HirTypeKind.Ref(inner, _):
+                    # Borrowed nominal parameters retain their owner's field
+                    # layout without a value copy: writes must reach the same
+                    # object the caller borrowed. Otherwise a field such as
+                    # scope.capabilities falls back to I64 and loses its array
+                    # element type before iteration/pop dispatch.
+                    match inner.kind:
+                        case Named(type_symbol, _):
+                            val optional_reference_owner: HirSymbol? = self.symbols.get_symbol_raw(type_symbol.id)
+                            if val reference_owner = optional_reference_owner:
+                                var reference_owner_name = reference_owner.name
+                                match reference_owner.kind:
+                                    case Class: reference_owner_name = mir_class_identity(reference_owner)
+                                    case _: ()
+                                if self.struct_field_order.has(reference_owner_name):
+                                    self.struct_value_syms[local.id] = reference_owner_name
+                        case _: ()
                 case Named(type_symbol, _):
                     # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
                     val optional_parameter_type: HirSymbol? = self.symbols.get_symbol_raw(type_symbol.id)
