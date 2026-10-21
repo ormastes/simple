@@ -22,6 +22,9 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
 use compiler.mir_opt.mod.{MirPass}
+use compiler.mir_opt.dce_translation_validation.{dce_tv_keep_flags_v1}
+use compiler.mir_opt.dce_mir_translation_validation.{DceMirCoverageV1,
+    DceMirObservationV1, DceMirCheckedRunV1, dce_mir_extract_v1, dce_mir_validate_after_v1}
 
 fn dce_instruction_is_mandatory_observation(inst: MirInst) -> bool:
     """True for ordered observations which may never be removed as dead."""
@@ -108,7 +111,7 @@ impl DeadCodeElimination:
         val _ = self.description()
         []  # No dependencies
 
-    me run_on_function(func: MirFunction) -> MirFunction:
+    me run_on_function(func: MirFunction, checked_closed: bool = false) -> MirFunction:
         """
         Run DCE on a function.
 
@@ -119,6 +122,8 @@ impl DeadCodeElimination:
            b. Remove dead instructions
         3. Remove unreachable blocks
         """
+        if checked_closed:
+            return self.run_closed_with_validation(func).function
         self.iterations = self.iterations + 1
 
         # Phase 1: Find reachable blocks
@@ -141,6 +146,44 @@ impl DeadCodeElimination:
 
         # Return optimized function
         MirFunction(..func, blocks: optimized_blocks)
+
+    me run_closed_with_validation(func: MirFunction) -> DceMirCheckedRunV1:
+        """Validate and optimize the actual closed Const/Add/Copy MIR fragment.
+        The before snapshot is fresh and complete before any candidate exists.
+        Unsupported input and rejected candidates leave caller MIR and stats
+        unchanged. Ordinary/default dispatch retains its conservative behavior.
+        """
+        val extraction = dce_mir_extract_v1(func)
+        if val before = extraction.snapshot:
+            val reverse_flags = dce_tv_keep_flags_v1(before.program)
+            val source_block = func.blocks[0]
+            var kept: [MirInst] = []
+            for index in 0..source_block.instructions.len():
+                if reverse_flags[source_block.instructions.len() - 1 - index]:
+                    kept.push(source_block.instructions[index])
+            val candidate_block = MirBlock(id: source_block.id, label: source_block.label,
+                instructions: kept, terminator: source_block.terminator)
+            var candidate = MirFunction.with_blocks(func, [candidate_block])
+            # with_blocks intentionally shares retained metadata in ordinary
+            # passes. This checked result exposes fresh admitted local/signature
+            # arrays so mutation of a candidate cannot alter its caller input.
+            var candidate_locals: [MirLocal] = []
+            for local in func.locals:
+                candidate_locals.push(MirLocal(id: LocalId(id: local.id.id), name: local.name,
+                    type_: MirType.i64(), kind: local.kind, is_ghost: false))
+            candidate.locals = candidate_locals
+            candidate.signature = MirSignature(params: [], return_type: MirType.i64(),
+                is_variadic: false, params_known: true, declared_params: [], declared_params_known: true)
+            candidate.generic_params = []
+            candidate.type_bindings = {}
+            val observation = dce_mir_validate_after_v1(before, candidate)
+            if observation.coverage == DceMirCoverageV1.Covered:
+                self.iterations = self.iterations + 1
+                self.removed_instructions = self.removed_instructions + source_block.instructions.len() - kept.len()
+                return DceMirCheckedRunV1(candidate, observation)
+            return DceMirCheckedRunV1(func, observation)
+        DceMirCheckedRunV1(func, DceMirObservationV1(DceMirCoverageV1.NotCovered,
+            "", "", extraction.diagnostic))
 
     # ========================================================================
     # Reachability Analysis
