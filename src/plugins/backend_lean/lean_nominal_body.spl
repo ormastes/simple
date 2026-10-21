@@ -1,4 +1,5 @@
-# C2: pure nominal linear flow or one terminal branch. No native-layout certificate.
+# C2: pure nominal linear flow, terminal branch or one diamond join.
+# No native-layout certificate.
 use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir_instructions.{MirFunction, MirBody, MirInst, MirInstKind, MirOperand, MirOperandKind, MirTerminator, AggregateKind}
 use compiler.mir.mir_types.{MirType, MirTypeKind, MirTypeDef, MirTypeDefKind, MirLocal, LocalId, LocalKind}
@@ -59,6 +60,7 @@ struct LeanNominalFlowPlan:
     branch_index: i64
     then_path: [i64]
     else_path: [i64]
+    join_path: [i64] = []
 
 class LeanNominalFlowPlanner:
     body: MirBody
@@ -66,12 +68,15 @@ class LeanNominalFlowPlanner:
     visited: Dict<i64, bool>
     visited_count: i64
 
-    me path(start: i64, allow_branch: bool) -> Result<[i64], CompileError>:
+    me path(start: i64, allow_branch: bool,
+        forbidden: Dict<i64, bool> = {}) -> Result<[i64], CompileError>:
         var order: [i64] = []
         var current = start
         while order.len() < self.body.blocks.len():
             if not self.indices.has(current):
                 return Err(nominal_body_error("missing successor block"))
+            if forbidden.has(current):
+                return Err(nominal_body_error("cyclic linear flow into prefix"))
             if self.visited.has(current):
                 return Err(nominal_body_error("cyclic linear flow or shared branch block"))
             self.visited[current] = true
@@ -94,7 +99,8 @@ class LeanNominalFlowPlanner:
         Err(nominal_body_error("cyclic linear flow or shared branch block"))
 
 fn nominal_flow_plan(body: MirBody, entry_id: i64) -> Result<LeanNominalFlowPlan, CompileError>:
-    # Validate all paths before emission; one membership map detects merges too.
+    # Validate complete flow before emission. Each arm has a private traversal
+    # map; the two retained paths may share only one identical returning suffix.
     var indices: Dict<i64, i64> = {}
     for index in 0..body.blocks.len():
         val identity = body.blocks[index].id.id
@@ -109,17 +115,57 @@ fn nominal_flow_plan(body: MirBody, entry_id: i64) -> Result<LeanNominalFlowPlan
     var branch_index = -1
     var then_path: [i64] = []
     var else_path: [i64] = []
+    var join_path: [i64] = []
     match body.blocks[terminal].terminator:
         case If(_, then_target, else_target):
             branch_index = terminal
-            then_path = planner.path(then_target.id, false)?
-            else_path = planner.path(else_target.id, false)?
+            var then_planner = LeanNominalFlowPlanner(body: body, indices: indices, visited: {}, visited_count: 0)
+            var else_planner = LeanNominalFlowPlanner(body: body, indices: indices, visited: {}, visited_count: 0)
+            val then_full = then_planner.path(then_target.id, false, planner.visited)?
+            val else_full = else_planner.path(else_target.id, false, planner.visited)?
+            var prefix_members: Dict<i64, bool> = {}
+            for index in prefix: prefix_members[index] = true
+            var then_positions: Dict<i64, i64> = {}
+            for position in 0..then_full.len():
+                val index = then_full[position]
+                if prefix_members.has(index):
+                    return Err(nominal_body_error("branch enters the prefix"))
+                then_positions[index] = position
+                planner.visited[body.blocks[index].id.id] = true
+                planner.visited_count = planner.visited_count + 1
+            var shared_then = -1
+            var shared_else = -1
+            for position in 0..else_full.len():
+                val index = else_full[position]
+                if prefix_members.has(index):
+                    return Err(nominal_body_error("branch enters the prefix"))
+                if then_positions.has(index):
+                    if shared_else < 0:
+                        shared_then = then_positions[index]
+                        shared_else = position
+                else:
+                    planner.visited[body.blocks[index].id.id] = true
+                    planner.visited_count = planner.visited_count + 1
+            if shared_else < 0:
+                then_path = then_full
+                else_path = else_full
+            else:
+                val remaining = then_full.len() - shared_then
+                if remaining != else_full.len() - shared_else:
+                    return Err(nominal_body_error("branch join has inconsistent suffix"))
+                for offset in 0..remaining:
+                    if then_full[shared_then + offset] != else_full[shared_else + offset]:
+                        return Err(nominal_body_error("branch join has crossing successors"))
+                    join_path.push(then_full[shared_then + offset])
+                for position in 0..shared_then: then_path.push(then_full[position])
+                for position in 0..shared_else: else_path.push(else_full[position])
         case Ret(_): pass
         case _: return Err(nominal_body_error("invalid planned prefix terminator"))
     # Count only admitted unique visits. Native Dict.len is not count authority.
     if planner.visited_count != body.blocks.len():
         return Err(nominal_body_error("unvisited block outside nominal flow"))
-    Ok(LeanNominalFlowPlan(prefix: prefix, branch_index: branch_index, then_path: then_path, else_path: else_path))
+    Ok(LeanNominalFlowPlan(prefix: prefix, branch_index: branch_index,
+        then_path: then_path, else_path: else_path, join_path: join_path))
 
 class LeanNominalBodyEmitter:
     context: LeanTypeContext
@@ -166,6 +212,64 @@ class LeanNominalBodyEmitter:
                     lines.push("()")
             case _: return Err(nominal_body_error("requires an exact return terminator"))
         Ok(lines.join("\n"))
+
+    me diamond_lines(body: MirBody, flow: LeanNominalFlowPlan,
+        condition_term: text) -> Result<[text], CompileError>:
+        # The caller has already consumed the Bool condition. Emit each arm in
+        # its own state; a returning_path would incorrectly return the function
+        # result here instead of transporting the values needed by the suffix.
+        var then_emitter = self.fork_for_branch(body.locals)?
+        var else_emitter = self.fork_for_branch(body.locals)?
+        var then_lines = then_emitter.instruction_lines(body, flow.then_path)?
+        var else_lines = else_emitter.instruction_lines(body, flow.else_path)?
+        var merged_assigned: Dict<i64, bool> = {}
+        var merged_live: Dict<i64, bool> = {}
+        var transport_names: [text] = []
+        var transport_types: [text] = []
+        for local in body.locals:
+            val identity = local.id.id
+            # Definition history is a union; a one-arm definition cannot be
+            # redefined later merely because it is not definitely live.
+            if then_emitter.assigned.has(identity) or else_emitter.assigned.has(identity):
+                merged_assigned[identity] = true
+            val both_live = (
+                then_emitter.live.has(identity) and then_emitter.live[identity] and
+                else_emitter.live.has(identity) and else_emitter.live[identity])
+            if both_live:
+                merged_live[identity] = true
+                # Dominating values are unchanged: bind() rejects redefining
+                # them in either arm, so their existing outer binding suffices.
+                if not self.assigned.has(identity):
+                    transport_names.push("_l{identity}")
+                    transport_types.push(lean_context_type_to_lean(local.type_, self.context)?)
+        var pattern = "_"
+        var transport_type = "_root_.Unit"
+        var transport_value = "()"
+        if transport_names.len() == 1:
+            pattern = transport_names[0]
+            transport_type = transport_types[0]
+            transport_value = transport_names[0]
+        elif transport_names.len() > 1:
+            pattern = "(" + transport_names.join(", ") + ")"
+            var product_types: [text] = []
+            for type_name in transport_types: product_types.push("(" + type_name + ")")
+            transport_type = "(" + product_types.join(" × ") + ")"
+            transport_value = "(" + transport_names.join(", ") + ")"
+        then_lines.push(transport_value)
+        else_lines.push(transport_value)
+        var lines: [text] = []
+        lines.push("let " + pattern + " : " + transport_type + " :=")
+        lines.push("  if " + condition_term + " then")
+        for line in then_lines: lines.push("    " + line)
+        lines.push("  else")
+        for line in else_lines: lines.push("    " + line)
+        # Publish merged state only after both arms and the transport types
+        # succeed. The suffix is checked once against these fresh maps.
+        self.assigned = merged_assigned
+        self.live = merged_live
+        val suffix = self.returning_path(body, flow.join_path)?
+        for line in suffix.split("\n"): lines.push(line)
+        Ok(lines)
 
     fn local_type(local: LocalId) -> Result<MirType, CompileError>:
         if not self.types.has(local.id):
@@ -315,9 +419,9 @@ fn translate_mir_nominal_body(function: MirFunction, context: LeanTypeContext) -
 
     Bodies with no retained nominal type or nominal operation retain their
     existing translator. A nominal body must be an acyclic Goto chain or one
-    terminal If with two disjoint
-    returning chains. Each path is single-assignment with an exact typed return.
-    Disconnected blocks, shared successors and nested branches are refused.
+    If with two returning chains, optionally sharing one linear return suffix.
+    Each path is single-assignment with an exact typed return.
+    Disconnected blocks, crossing successors and nested branches are refused.
     Unsupported operations return an error; no partial source is returned.
     """
     val body = MirBody.from_function(function)
@@ -357,14 +461,18 @@ fn translate_mir_nominal_body(function: MirFunction, context: LeanTypeContext) -
         case If(condition, _, _):
             # Consume the condition before either independent arm state exists.
             val condition_term = emitter.operand(condition, MirType(kind: MirTypeKind.Bool))?
-            var then_emitter = emitter.fork_for_branch(body.locals)?
-            var else_emitter = emitter.fork_for_branch(body.locals)?
-            val then_code = then_emitter.returning_path(body, flow.then_path)?
-            val else_code = else_emitter.returning_path(body, flow.else_path)?
-            lines.push("if " + condition_term + " then")
-            for line in then_code.split("\n"): lines.push("  " + line)
-            lines.push("else")
-            for line in else_code.split("\n"): lines.push("  " + line)
+            if flow.join_path.len() > 0:
+                val diamond = emitter.diamond_lines(body, flow, condition_term)?
+                for line in diamond: lines.push(line)
+            else:
+                var then_emitter = emitter.fork_for_branch(body.locals)?
+                var else_emitter = emitter.fork_for_branch(body.locals)?
+                val then_code = then_emitter.returning_path(body, flow.then_path)?
+                val else_code = else_emitter.returning_path(body, flow.else_path)?
+                lines.push("if " + condition_term + " then")
+                for line in then_code.split("\n"): lines.push("  " + line)
+                lines.push("else")
+                for line in else_code.split("\n"): lines.push("  " + line)
         case _: return Err(nominal_body_error("invalid planned branch terminator"))
     Ok(lines.join("\n"))
 
