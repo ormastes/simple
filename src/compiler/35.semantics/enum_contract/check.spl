@@ -1,12 +1,12 @@
 # Enum-contract checker entry point (S2/S3, hardening plan §10.1/§10.2).
 #
-# `enum_contract_check` is the function the driver wires in. It is the ONLY
-# file in this package that touches HIR; every rule below it works on plain
-# data (contract_model / declaration_check / match_check) so the rules stay
-# testable without a symbol table.
+# `enum_contract_check` is the function the driver wires in. This file adapts
+# HIR for Closed/Evolving declaration checks; condition_check also reads HIR's
+# general attributes and variant shapes. The Closed/Evolving rules work on
+# plain data so they stay testable without a symbol table.
 #
 # SCOPE, stated rather than implied: `enum_contract_check` performs the
-# DECLARATION checks (E-CLOSED-002, E-EVOLVING-001/002), decidable from
+# DECLARATION checks (E-CONDITION-001, E-CLOSED-002, E-EVOLVING-001/002), decidable from
 # `module.enums` alone. The MATCH-SITE checks (E-CLOSED-001, E-EVOLVING-003)
 # need a `ResolvedMatchCoverage`: `enum_contract_check_module` builds one per
 # HIR match site from the arm patterns (hir_match_coverage.spl) so the whole
@@ -28,6 +28,7 @@ use compiler.semantics.enum_contract.declaration_check.{
     EnumVariantShape, check_enum_declaration
 }
 use compiler.semantics.enum_contract.match_check.{check_match_for_contract}
+use compiler.semantics.enum_contract.condition_check.{check_condition_enums}
 
 fn hir_type_name(t: HirType) -> text:
     """Source-level spelling of the few type shapes a wire payload may use.
@@ -95,21 +96,25 @@ fn enum_contract_check_with_table(
     """Declaration checks for every contracted enum in `module`.
 
     Split out from `enum_contract_check` so a caller that already has the
-    contract table -- notably a future fixed parser that carries the decorator
-    into HIR -- does not have to go back through the source text."""
+    Closed/Evolving contract table can reuse it without rebuilding it.
+    @condition checks use general HIR attributes independently of this table."""
     var diags: [EnumContractDiag] = []
+    var enums: [HirEnum] = []
     val fallback = EnumContract(enum_name: "", kind: EnumContractKind.Closed)
     for dk_17 in module.enums.keys():
         # ANY-transport: annotated rebind (cycle-70 sweep).
         val e: HirEnum = module.enums[dk_17]
+        enums = enums.push(e)
         if table.has(e.name):
             val contract: EnumContract = table.lookup_or(e.name, fallback)
             for d in check_enum_declaration(contract, enum_variant_shapes(e)):
                 diags = diags.push(d)
+    for d in check_condition_enums(enums):
+        diags = diags.push(d)
     diags
 
 fn enum_contract_check(module: HirModule, profile: AssuranceStrictness) -> [EnumContractDiag]:
-    """S2/S3 entry point: validate every `@closed` / `@evolving` enum declared
+    """Validate every `@condition` / `@closed` / `@evolving` enum declared
     in `module` against its contract.
 
     The contract table is read from `HirEnum.attributes` -- the decorator now
