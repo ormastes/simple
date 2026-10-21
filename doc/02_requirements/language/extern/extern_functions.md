@@ -1,4 +1,10 @@
 # extern functions
+
+**Evidence qualification (2026-10-21, SF6):** Reviewed against source commit `380200890ff030b34c68ff38f362b482e1276769`. Original dates and historical example/pass labels are retained as provenance, not a current execution result. This documentation correction ran no compiler, Lean, benchmark, or runtime tests; executable qualification is **UNRUN**.
+
+**Selected wrapper/boundary requirements:** `doc/02_requirements/language/mission_critical_profile.md`, REQ-MC-001 (lines 16–23), allows raw extern signatures only beneath generated checked wrappers in that profile. REQ-MC-004 (37–43) requires scoped unsafe boundaries, reason and reviewer manifest, with its stated warn/deny phases. The foreign-resource exemptions (300–310) identify representation/FFI boundary carve-outs; they do not certify providers or remove wrapper obligations. These existing requirements are retained, not a new language-wide ban on extern calls.
+
+Source anchors: `src/compiler/35.semantics/unsafe.spl` defines `UnsafeContext`, unsafe-operation classification, and context checks (lines 24–46, 82–117, 165–225); `src/compiler/00.common/assurance/unsafe_capabilities.spl` defines the scoped vocabulary (lines 30–51, 60–106). Their presence establishes source machinery, not complete enforcement in every compiler route. In particular `is_sffi_function` returns false for a bare `Var` (unsafe.spl:206–217); no blanket FFI-checker coverage is claimed. Trusted runtime/provider implementations and checked wrappers must supply their own ABI, pointer, ownership, and lifecycle evidence; successful primitive return-value examples do not qualify that boundary.
 *Source:* `test/03_system/feature/usage/extern_functions_spec.spl`
 
 ## Overview
@@ -6,10 +12,10 @@
 External FFI Functions Tests
 Feature: External FFI function calls and native interoperability
 Category: Runtime
-Status: Complete
+Status: Historical FFI examples; memory-safety and wrapper enforcement not qualified
 
 Tests for calling external functions defined in the native runtime,
-including FFI bindings, memory safety, and parameter passing.
+including FFI bindings and parameter passing. Their values alone do not establish memory safety or resource lifecycle correctness.
 
 ## Feature: External FFI Functions
 
@@ -90,8 +96,7 @@ Tests for handling return values from FFI functions,
 
 ## Feature: External FFI Memory Safety
 
-Tests for memory safety when calling external functions,
-    including pointer handling and resource lifecycle.
+Historical examples labeled as memory-safety tests. Repeated square-root calls and argument inspection do not exercise raw-pointer validity, use-after-free rejection, ownership transfer, or resource release; those properties remain unqualified here.
 
 ### Scenario: General
 

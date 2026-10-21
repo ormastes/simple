@@ -1,6 +1,12 @@
 # Effect System Specification
+
+**Evidence qualification (2026-10-21, SF6):** Reviewed against source commit `380200890ff030b34c68ff38f362b482e1276769`. Original dates and historical example/pass labels are retained as provenance, not a current execution result. This documentation correction ran no compiler, Lean, benchmark, or runtime tests; executable qualification is **UNRUN**.
+
+Selected authority: `doc/02_requirements/language/mission_critical_profile.md`, REQ-MC-004 (lines 37–43), explicitly supersedes blanket “unsafe = all capabilities” for that profile: capability scope, reason, and reviewer manifest are required. This is a requirement with its stated phase, not evidence that every path enforces it.
+
+Source anchors: `src/compiler/35.semantics/unsafe.spl` defines `UnsafeContext`, unsafe-operation classification, and context checks (lines 24–46, 82–117, 165–225); `src/compiler/00.common/assurance/unsafe_capabilities.spl` defines the scoped vocabulary (lines 30–51, 60–106). Their presence establishes source machinery, not complete enforcement in every compiler route. In particular `is_sffi_function` returns false for a bare `Var` (unsafe.spl:206–217); no blanket FFI-checker coverage is claimed. Effects and unsafe capabilities have distinct roles: the canonical vocabulary describes capabilities as permissions, not effects (`unsafe_capabilities.spl:30–35`). These historical effect examples do not prove that annotation alone validates operation preconditions. Legacy `expect true` examples are not current enforcement evidence.
 *Source:* `test/03_system/feature/usage/effect_system_spec.spl`
-**Feature IDs:** #EFFECT-SYS-001 to #EFFECT-SYS-040  |  **Category:** Type System | Effects  |  **Status:** Implemented
+**Feature IDs:** #EFFECT-SYS-001 to #EFFECT-SYS-040  |  **Category:** Type System | Effects  |  **Status:** Historical generated examples; current implementation qualification not established
 
 ## Overview
 
@@ -135,7 +141,7 @@ fn fetch_and_log(url: str) -> str:
 
 ## Unsafe Function Semantics
 
-    Tests that @unsafe functions can perform unchecked operations.
+    Historical description superseded for the mission-critical profile by REQ-MC-004: `@unsafe` is not permission for arbitrary unchecked operations. The arithmetic example below demonstrates only its stated computation, not enforcement, FFI safety, or checker completeness.
 
 ### Scenario: General
 
