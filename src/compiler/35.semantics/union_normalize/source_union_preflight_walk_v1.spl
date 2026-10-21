@@ -1,0 +1,722 @@
+# Read-only bounded HIR traversal. No canonical keys, registration or rewrites.
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.semantics.union_normalize.source_union_admission_v1.*
+
+class SourceUnionPreflightV1:
+    ledger: SourceUnionLedgerV1
+    direct_functions: Dict<i64, bool>
+    required_signatures: Dict<i64, bool>
+    union_sites: i64 = 0
+    opaque_position: text = ""
+    opaque_span: Span = Span.empty()
+
+    me node(depth: i64, span: Span) -> Result<(), SourceUnionErrorV1>:
+        if span == nil:
+            return Err(self.ledger.fail("UNION-E-TYPE", "absent source span", Span.empty()))
+        self.ledger.enter(depth, span)?
+        self.ledger.debit("nodes", 1, span)?
+        self.ledger.debit("work", 1, span)?
+        # Admits a future value-record copy; owner dictionaries are charged
+        # separately by the fresh-symbol-owner helper.
+        self.ledger.debit("copy_units", 1, span)?
+        source_union_reserve_text_v1(span.file, self.ledger, span)?
+        Ok(())
+
+    me slots(count: i64, span: Span) -> Result<(), SourceUnionErrorV1>:
+        source_union_reserve_snapshot_v1(count, self.ledger, span)
+
+    me text(value: text, span: Span) -> Result<(), SourceUnionErrorV1>:
+        source_union_reserve_text_v1(value, self.ledger, span)
+
+    me opaque(position: text, span: Span):
+        if self.opaque_position == "":
+            self.opaque_position = position
+            self.opaque_span = span
+
+    me retained_type(present: bool, value: HirType, depth: i64, path: text, root_union: bool) -> Result<(), SourceUnionErrorV1>:
+        if value == nil:
+            if present: return Err(self.ledger.fail("UNION-E-PRESENCE", path, Span.empty()))
+            return Ok(())
+        val before = self.union_sites
+        self.type_(value, depth, root_union, false, path)?
+        if not present and self.union_sites != before:
+            return Err(self.ledger.fail("UNION-E-PRESENCE", path, value.span))
+        Ok(())
+
+    me retained_expr(present: bool, value: HirExpr, depth: i64, path: text) -> Result<(), SourceUnionErrorV1>:
+        if value == nil:
+            if present: return Err(self.ledger.fail("UNION-E-PRESENCE", path, Span.empty()))
+            return Ok(())
+        val before = self.union_sites
+        self.expr(value, depth)?
+        if not present and self.union_sites != before:
+            return Err(self.ledger.fail("UNION-E-PRESENCE", path, value.span))
+        Ok(())
+
+    me retained_pattern(present: bool, value: HirPattern, depth: i64, path: text) -> Result<(), SourceUnionErrorV1>:
+        if value == nil:
+            if present: return Err(self.ledger.fail("UNION-E-PRESENCE", path, Span.empty()))
+            return Ok(())
+        val before = self.union_sites
+        self.pattern(value, depth)?
+        if not present and self.union_sites != before:
+            return Err(self.ledger.fail("UNION-E-PRESENCE", path, value.span))
+        Ok(())
+
+    me type_(value: HirType, depth: i64, root_union: bool, union_member: bool, path: text) -> Result<(), SourceUnionErrorV1>:
+        if value == nil or value.kind == nil:
+            return Err(self.ledger.fail("UNION-E-TYPE", "absent HIR type at " + path, Span.empty()))
+        self.node(depth, value.span)?
+        match value.kind:
+            case HirTypeKind.Union(members):
+                if not root_union and not union_member:
+                    return Err(self.ledger.fail("UNION-E-POSITION", path, value.span))
+                self.union_sites = self.union_sites + 1
+                self.ledger.debit("members", source_union_array_count_v1(members), value.span)?
+                self.slots(source_union_array_count_v1(members), value.span)?
+                if source_union_array_count_v1(members) == 0:
+                    return Err(self.ledger.fail("UNION-E-MEMBERS", "empty structural union", value.span))
+                for member in members:
+                    self.type_(member, depth + 1, true, true, path)?
+            case HirTypeKind.Optional(inner):
+                if union_member: self.ledger.debit("members", 1, value.span)?
+                self.type_(inner, depth + 1, union_member, union_member, "Optional carrier")?
+            case HirTypeKind.Tuple(items):
+                self.slots(source_union_array_count_v1(items), value.span)?
+                for item in items: self.type_(item, depth + 1, false, false, "Tuple carrier")?
+            case HirTypeKind.Array(inner, _) | HirTypeKind.Slice(inner):
+                self.type_(inner, depth + 1, false, false, "Array or Slice carrier")?
+            case HirTypeKind.Ref(inner, _) | HirTypeKind.Ptr(inner, _):
+                self.type_(inner, depth + 1, false, false, "borrowed or pointer carrier")?
+            case HirTypeKind.Isolated(inner) | HirTypeKind.Unique(inner) | HirTypeKind.Shared(inner) | HirTypeKind.Weak(inner):
+                self.type_(inner, depth + 1, false, false, "ownership carrier")?
+            case HirTypeKind.Dict(key, item) | HirTypeKind.Result(key, item):
+                self.type_(key, depth + 1, false, false, "Dict or Result carrier")?
+                self.type_(item, depth + 1, false, false, "Dict or Result carrier")?
+            case HirTypeKind.Named(symbol, args):
+                if symbol == nil: return Err(self.ledger.fail("UNION-E-SCOPE", "absent named type symbol", value.span))
+                self.slots(source_union_array_count_v1(args), value.span)?
+                for arg in args: self.type_(arg, depth + 1, false, false, "named generic argument")?
+            case HirTypeKind.TypeParam(name, bounds):
+                self.text(name, value.span)?
+                self.slots(source_union_array_count_v1(bounds), value.span)?
+                for bound in bounds: self.type_(bound, depth + 1, false, false, "type parameter bound")?
+            case HirTypeKind.Function(params, ret, effects):
+                self.slots(source_union_array_count_v1(params), value.span)?
+                for param in params: self.type_(param, depth + 1, false, false, "indirect function parameter")?
+                self.type_(ret, depth + 1, false, false, "indirect function result")?
+                self.effects(effects, depth + 1)?
+            case HirTypeKind.Projection(base, name):
+                self.text(name, value.span)?
+                self.type_(base, depth + 1, false, false, "associated type projection")?
+            case HirTypeKind.Tensor(inner, dims, _):
+                self.type_(inner, depth + 1, false, false, "tensor element")?
+                self.dimensions(dims, depth + 1, value.span)?
+            case HirTypeKind.Layer(inputs, outputs):
+                self.dimensions(inputs, depth + 1, value.span)?
+                self.dimensions(outputs, depth + 1, value.span)?
+            case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char | HirTypeKind.Str | HirTypeKind.Unit:
+                ()
+            case HirTypeKind.DynTrait(symbol):
+                if symbol == nil: return Err(self.ledger.fail("UNION-E-SCOPE", "absent trait symbol", value.span))
+            case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Never | HirTypeKind.Any:
+                ()
+            case _:
+                return Err(self.ledger.fail("UNION-E-TYPE", "unrecognized HIR type", value.span))
+        Ok(())
+
+    me dimensions(items: [DimExpr], depth: i64, span: Span) -> Result<(), SourceUnionErrorV1>:
+        self.slots(source_union_array_count_v1(items), span)?
+        for item in items: self.dimension(item, depth)?
+        Ok(())
+
+    me dimension(value: DimExpr, depth: i64) -> Result<(), SourceUnionErrorV1>:
+        if value == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent DimExpr", Span.empty()))
+        if value.kind == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent DimExpr kind or identity", Span.empty()))
+        self.node(depth, value.span)?
+        match value.kind:
+            case DimExprKind.Add(left, right) | DimExprKind.Mul(left, right) | DimExprKind.Div(left, right):
+                self.dimension(left, depth + 1)?
+                self.dimension(right, depth + 1)?
+            case DimExprKind.Named(name, _, _) | DimExprKind.ConstParam(name): self.text(name, value.span)?
+            case _: ()
+        Ok(())
+
+    me effects(items: [Effect], depth: i64) -> Result<(), SourceUnionErrorV1>:
+        self.slots(source_union_array_count_v1(items), Span.empty())?
+        for effect in items:
+            if effect == nil or effect.kind == nil:
+                return Err(self.ledger.fail("UNION-E-TYPE", "absent effect metadata", Span.empty()))
+            self.node(depth, effect.span)?
+            match effect.kind:
+                case EffectKind.Throws(type_): self.type_(type_, depth + 1, false, false, "effect payload")?
+                case EffectKind.Custom(name): self.text(name, effect.span)?
+                case _: ()
+        Ok(())
+
+    me params(items: [HirParam], depth: i64, root_union: bool) -> Result<(), SourceUnionErrorV1>:
+        self.slots(source_union_array_count_v1(items), Span.empty())?
+        for item in items:
+            if item == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent declaration child", Span.empty()))
+            if item.symbol == nil or item.name == nil: return Err(self.ledger.fail("UNION-E-SCOPE", "absent declaration child identity", Span.empty()))
+            self.node(depth, item.span)?
+            self.text(item.name, item.span)?
+            self.type_(item.type_, depth + 1, root_union, false, "parameter")?
+            self.retained_expr(item.has_default, item.default, depth + 1, "inactive declared default")?
+        Ok(())
+
+    me type_params(items: [HirTypeParam], depth: i64) -> Result<(), SourceUnionErrorV1>:
+        self.slots(source_union_array_count_v1(items), Span.empty())?
+        for item in items:
+            if item == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent declaration child", Span.empty()))
+            if item.symbol == nil or item.name == nil: return Err(self.ledger.fail("UNION-E-SCOPE", "absent declaration child identity", Span.empty()))
+            self.node(depth, item.span)?
+            self.text(item.name, item.span)?
+            self.slots(source_union_array_count_v1(item.bounds), item.span)?
+            for bound in item.bounds: self.type_(bound, depth + 1, false, false, "generic bound")?
+            self.retained_type(item.has_default, item.default, depth + 1, "generic default", false)?
+        Ok(())
+
+    me function(value: HirFunction, depth: i64, allow_absent_body: bool) -> Result<(), SourceUnionErrorV1>:
+        if value == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent function", Span.empty()))
+        if value.symbol == nil or value.name == nil: return Err(self.ledger.fail("UNION-E-SCOPE", "absent function identity", Span.empty()))
+        self.node(depth, value.span)?
+        val before = self.union_sites
+        self.text(value.name, value.span)?
+        self.type_params(value.type_params, depth + 1)?
+        self.params(value.params, depth + 1, true)?
+        self.type_(value.return_type, depth + 1, true, false, "function result")?
+        self.effects(value.effects, depth + 1)?
+        if value.body != nil:
+            self.block(value.body, depth + 1)?
+        elif not value.is_extern and not allow_absent_body:
+            return Err(self.ledger.fail("UNION-E-TYPE", "absent required function body", value.span))
+        if val contract = value.verification_contract:
+            if contract == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent contract payload", value.span))
+            self.slots(source_union_array_count_v1(contract.clauses), value.span)?
+            self.text(contract.proof_uses, value.span)?
+            for clause in contract.clauses:
+                if clause == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent contract clause", Span.empty()))
+                if clause.kind == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent contract clause kind", Span.empty()))
+                self.node(depth + 1, clause.span)?
+                self.text(clause.binding_name, clause.span)?
+                self.expr(clause.predicate, depth + 2)?
+        self.text(value.doc_comment, value.span)?
+        if value.func_attr == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent function attributes", value.span))
+        if val section = value.func_attr.section: self.text(section, value.span)?
+        self.text(value.func_attr.gpu_target, value.span)?
+        self.text(value.func_attr.gpu_backends, value.span)?
+        self.text(value.func_attr.rt_hal_error, value.span)?
+        self.text(value.func_attr.placement_error, value.span)?
+        if value.export_attr != nil: self.text(value.export_attr.export_name, value.span)?
+        elif value.has_export_attr: return Err(self.ledger.fail("UNION-E-TYPE", "absent export attributes", value.span))
+        self.text(value.gpu_target, value.span)?
+        self.text(value.gpu_backend_order, value.span)?
+        if (source_union_array_count_v1(value.type_params) > 0 or value.is_generic_template or value.is_extern) and before != self.union_sites:
+            return Err(self.ledger.fail("UNION-E-POSITION", "generic or external function boundary", value.span))
+        if value.has_vhdl_metadata or value.has_driver_manifest_attr:
+            self.opaque("hardware or driver metadata", value.span)
+        Ok(())
+
+    me fields(items: [HirField], depth: i64) -> Result<(), SourceUnionErrorV1>:
+        self.slots(source_union_array_count_v1(items), Span.empty())?
+        for item in items:
+            if item == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent declaration child", Span.empty()))
+            if item.symbol == nil or item.name == nil: return Err(self.ledger.fail("UNION-E-SCOPE", "absent declaration child identity", Span.empty()))
+            self.node(depth, item.span)?
+            self.text(item.name, item.span)?
+            self.type_(item.type_, depth + 1, false, false, "declaration field")?
+            self.retained_expr(item.has_default, item.default, depth + 1, "inactive declared default")?
+        Ok(())
+
+    me bindings(items: HirTypeBindings, depth: i64, span: Span) -> Result<(), SourceUnionErrorV1>:
+        if items == nil: return Ok(())
+        val count = items.len()
+        self.slots(count, span)?
+        val keys = items.keys()
+        source_union_check_snapshot_v1(count, source_union_array_count_v1(keys), self.ledger, span)?
+        for key in keys:
+            self.text(key, span)?
+            self.type_(items[key], depth, false, false, "declaration type binding")?
+        Ok(())
+
+    me block(value: HirBlock, depth: i64) -> Result<(), SourceUnionErrorV1>:
+        if value == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent HirBlock", Span.empty()))
+        self.node(depth, value.span)?
+        self.slots(source_union_array_count_v1(value.stmts), value.span)?
+        self.slots(source_union_array_count_v1(value.unsafe_caps), value.span)?
+        for capability in value.unsafe_caps: self.text(capability, value.span)?
+        for stmt in value.stmts:
+            if stmt == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent statement", Span.empty()))
+            if stmt.kind == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent statement kind", Span.empty()))
+            self.node(depth + 1, stmt.span)?
+            match stmt.kind:
+                case HirStmtKind.Expr(expr): self.expr(expr, depth + 2)?
+                case HirStmtKind.Let(symbol, type_, init):
+                    if symbol == nil: return Err(self.ledger.fail("UNION-E-SCOPE", "absent local symbol", stmt.span))
+                    self.type_(type_, depth + 2, true, false, "local declaration")?
+                    self.expr(init, depth + 2)?
+                case HirStmtKind.Assign(target, _, expr):
+                    self.expr(target, depth + 2)?
+                    self.expr(expr, depth + 2)?
+                case HirStmtKind.Block(block): self.block(block, depth + 2)?
+                case HirStmtKind.AsmAssert(_): self.opaque("assembly assertion", stmt.span)
+                case _: return Err(self.ledger.fail("UNION-E-POSITION", "unrecognized HIR statement", stmt.span))
+        self.retained_expr(value.has, value.value, depth + 1, "inactive block result")?
+        Ok(())
+
+    me exprs(items: [HirExpr], depth: i64, span: Span) -> Result<(), SourceUnionErrorV1>:
+        self.slots(source_union_array_count_v1(items), span)?
+        for item in items: self.expr(item, depth)?
+        Ok(())
+
+    me args(items: [HirCallArg], depth: i64, span: Span) -> Result<(), SourceUnionErrorV1>:
+        self.slots(source_union_array_count_v1(items), span)?
+        for item in items:
+            if item == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent child record", Span.empty()))
+            self.node(depth, item.span)?
+            self.text(item.name, item.span)?
+            self.expr(item.value, depth + 1)?
+        Ok(())
+
+    me expr(value: HirExpr, depth: i64) -> Result<(), SourceUnionErrorV1>:
+        if value == nil or value.kind == nil:
+            return Err(self.ledger.fail("UNION-E-TYPE", "absent HIR expression", Span.empty()))
+        self.node(depth, value.span)?
+        if value.has_type_ or value.type_ != nil:
+            val annotation_before = self.union_sites
+            var direct = false
+            match value.kind:
+                case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+                    if symbol == nil: return Err(self.ledger.fail("UNION-E-SCOPE", "absent variable symbol", value.span))
+                    direct = self.direct_functions.has(symbol.id)
+                case _: ()
+            if direct:
+                self.signature_type(value.type_, depth + 1)?
+            else:
+                self.type_(value.type_, depth + 1, true, false, "expression annotation")?
+            if not value.has_type_ and self.union_sites != annotation_before:
+                return Err(self.ledger.fail("UNION-E-PRESENCE", "inactive expression annotation", value.span))
+        match value.kind:
+            case HirExprKind.IntLit(_, suffix) | HirExprKind.FloatLit(_, suffix):
+                if val item = suffix: self.text(item, value.span)?
+            case HirExprKind.FloatLexeme(lexeme, suffix):
+                self.text(lexeme, value.span)?
+                if val item = suffix: self.text(item, value.span)?
+            case HirExprKind.StringLit(text, interpolations):
+                self.text(text, value.span)?
+                if val items = interpolations:
+                    self.slots(source_union_array_count_v1(items), value.span)?
+                    for item in items:
+                        if item == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent expression child", Span.empty()))
+                        self.node(depth + 1, item.span)?
+                        self.expr(item.expr, depth + 2)?
+                        self.text(item.format, item.span)?
+            case HirExprKind.BoolLit(_) | HirExprKind.CharLit(_) | HirExprKind.UnitLit | HirExprKind.NilLit | HirExprKind.Error: ()
+            case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+                if symbol == nil: return Err(self.ledger.fail("UNION-E-SCOPE", "absent variable symbol", value.span))
+                match value.kind:
+                    case HirExprKind.NamedVar(_, name):
+                        if name == nil: return Err(self.ledger.fail("UNION-E-SCOPE", "absent variable name", value.span))
+                        self.text(name, value.span)?
+                    case _: ()
+            case HirExprKind.ArrayLit(items, type_) | HirExprKind.SetLit(items, type_):
+                self.exprs(items, depth + 1, value.span)?
+                if val annotation = type_: self.type_(annotation, depth + 1, false, false, "collection element")?
+            case HirExprKind.TupleLit(items): self.exprs(items, depth + 1, value.span)?
+            case HirExprKind.ArrayRepeat(item, count, type_):
+                self.expr(item, depth + 1)?
+                self.expr(count, depth + 1)?
+                if val annotation = type_: self.type_(annotation, depth + 1, false, false, "array element")?
+            case HirExprKind.DictLit(entries, key_type, value_type):
+                self.slots(source_union_array_count_v1(entries), value.span)?
+                self.type_(key_type, depth + 1, false, false, "dictionary key")?
+                if val annotation = value_type: self.type_(annotation, depth + 1, false, false, "dictionary value")?
+                for (key, item) in entries:
+                    self.expr(key, depth + 1)?
+                    self.expr(item, depth + 1)?
+            case HirExprKind.Field(base, field, _):
+                self.expr(base, depth + 1)?
+                self.text(field, value.span)?
+            case HirExprKind.OptionalChain(base, field):
+                self.expr(base, depth + 1)?
+                self.text(field, value.span)?
+            case HirExprKind.Index(base, index) | HirExprKind.NullCoalesce(base, index) | HirExprKind.Binary(_, base, index):
+                self.expr(base, depth + 1)?
+                self.expr(index, depth + 1)?
+            case HirExprKind.TupleIndex(base, _) | HirExprKind.ExistsCheck(base) | HirExprKind.Unwrap(base) | HirExprKind.Unary(_, base):
+                self.expr(base, depth + 1)?
+            case HirExprKind.Call(callee, args, types):
+                self.expr(callee, depth + 1)?
+                self.args(args, depth + 1, value.span)?
+                self.slots(source_union_array_count_v1(types), value.span)?
+                for type_ in types: self.type_(type_, depth + 1, false, false, "call type argument")?
+            case HirExprKind.MethodCall(receiver, method, args, _):
+                self.expr(receiver, depth + 1)?
+                self.text(method, value.span)?
+                self.args(args, depth + 1, value.span)?
+            case HirExprKind.StaticCall(type_, method, args, _):
+                self.type_(type_, depth + 1, false, false, "static call owner")?
+                self.text(method, value.span)?
+                self.args(args, depth + 1, value.span)?
+            case HirExprKind.If(cond, then_, else_):
+                self.expr(cond, depth + 1)?
+                self.block(then_, depth + 1)?
+                if val block = else_: self.block(block, depth + 1)?
+            case HirExprKind.IfChain(arms, else_):
+                self.slots(source_union_array_count_v1(arms), value.span)?
+                for arm in arms:
+                    if arm == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent expression child", Span.empty()))
+                    self.node(depth + 1, arm.span)?
+                    self.expr(arm.cond, depth + 2)?
+                    self.block(arm.then_, depth + 2)?
+                if val block = else_: self.block(block, depth + 1)?
+            case HirExprKind.MatchCase(scrutinee, arms):
+                self.expr(scrutinee, depth + 1)?
+                self.slots(source_union_array_count_v1(arms), value.span)?
+                for arm in arms:
+                    if arm == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent expression child", Span.empty()))
+                    self.node(depth + 1, arm.span)?
+                    self.pattern(arm.pattern, depth + 2)?
+                    self.retained_expr(arm.has_guard, arm.guard, depth + 2, "inactive match guard")?
+                    self.block(arm.body, depth + 2)?
+            case HirExprKind.Loop(body, label):
+                self.block(body, depth + 1)?
+                if val name = label: self.text(name, value.span)?
+            case HirExprKind.While(cond, body, label) | HirExprKind.For(_, cond, body, label):
+                self.expr(cond, depth + 1)?
+                self.block(body, depth + 1)?
+                if val name = label: self.text(name, value.span)?
+            case HirExprKind.With(items, body):
+                self.slots(source_union_array_count_v1(items), value.span)?
+                for item in items:
+                    if item == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent expression child", Span.empty()))
+                    self.node(depth + 1, item.span)?
+                    self.expr(item.context_expr, depth + 2)?
+                self.block(body, depth + 1)?
+            case HirExprKind.Lambda(params, body, captures):
+                val before = self.union_sites
+                self.params(params, depth + 1, false)?
+                self.slots(source_union_array_count_v1(captures), value.span)?
+                self.expr(body, depth + 1)?
+                if self.union_sites != before:
+                    return Err(self.ledger.fail("UNION-E-POSITION", "closure body or capture", value.span))
+            case HirExprKind.Block(body) | HirExprKind.LossBlock(body) | HirExprKind.NogradBlock(body) | HirExprKind.UnsafeBlock(body):
+                self.block(body, depth + 1)?
+            case HirExprKind.HostGpuLane(_, _, marker, body):
+                self.expr(marker, depth + 1)?
+                self.block(body, depth + 1)?
+            case HirExprKind.Return(item) | HirExprKind.Yield(item):
+                if val expr = item: self.expr(expr, depth + 1)?
+            case HirExprKind.Break(label, item):
+                self.text(label, value.span)?
+                if val expr = item: self.expr(expr, depth + 1)?
+            case HirExprKind.Continue(label):
+                if val name = label: self.text(name, value.span)?
+            case HirExprKind.Throw(item) | HirExprKind.Try(item) | HirExprKind.Await(item): self.expr(item, depth + 1)?
+            case HirExprKind.StructLit(type_, fields):
+                self.type_(type_, depth + 1, false, false, "struct literal owner")?
+                self.slots(source_union_array_count_v1(fields), value.span)?
+                for (name, item) in fields:
+                    self.text(name, value.span)?
+                    self.expr(item, depth + 1)?
+            case HirExprKind.EnumLit(type_, variant, payload):
+                self.type_(type_, depth + 1, false, false, "enum literal owner")?
+                self.text(variant, value.span)?
+                if val inner = payload:
+                    if inner == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent enum payload", value.span))
+                    match inner:
+                        case HirEnumPayload.Tuple(items): self.exprs(items, depth + 1, value.span)?
+                        case HirEnumPayload.Struct(fields):
+                            self.slots(source_union_array_count_v1(fields), value.span)?
+                            for (name, item) in fields:
+                                self.text(name, value.span)?
+                                self.expr(item, depth + 1)?
+            case HirExprKind.Cast(item, type_) | HirExprKind.As(item, type_) | HirExprKind.ConvertCall(item, type_):
+                self.expr(item, depth + 1)?
+                self.type_(type_, depth + 1, false, false, "cast target")?
+            case HirExprKind.Range(start, end, _, stride):
+                if val item = start: self.expr(item, depth + 1)?
+                if val item = end: self.expr(item, depth + 1)?
+                if val item = stride: self.expr(item, depth + 1)?
+            case HirExprKind.Comprehension(_, body, clauses):
+                self.expr(body, depth + 1)?
+                self.slots(source_union_array_count_v1(clauses), value.span)?
+                for clause in clauses:
+                    if clause == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent expression child", Span.empty()))
+                    self.node(depth + 1, clause.span)?
+                    if clause.kind == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent comprehension clause kind", clause.span))
+                    match clause.kind:
+                        case HirCompClauseKind.For(_, iter): self.expr(iter, depth + 2)?
+                        case HirCompClauseKind.If(cond): self.expr(cond, depth + 2)?
+            case HirExprKind.CustomBlock(_, _): self.opaque("custom block payload", value.span)
+            case HirExprKind.InlineAsm(assembly): self.assembly(assembly, depth + 1)?
+            case HirExprKind.InlineAsmMatch(arms):
+                self.slots(source_union_array_count_v1(arms), value.span)?
+                for arm in arms:
+                    if arm == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent expression child", Span.empty()))
+                    self.node(depth + 1, arm.span)?
+                    if arm.asm_body != nil: self.assembly(arm.asm_body, depth + 2)?
+                    elif arm.has_asm_body: return Err(self.ledger.fail("UNION-E-PRESENCE", "absent assembly body", arm.span))
+                    self.text(arm.error_message, arm.span)?
+                self.opaque("target assembly metadata", value.span)
+            case HirExprKind.TypeTest(item, name):
+                self.expr(item, depth + 1)?
+                self.text(name, value.span)?
+            case HirExprKind.TryCatch(body, clauses, finally_):
+                self.block(body, depth + 1)?
+                self.slots(source_union_array_count_v1(clauses), value.span)?
+                for clause in clauses:
+                    if clause == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent expression child", Span.empty()))
+                    self.node(depth + 1, clause.span)?
+                    self.retained_pattern(clause.has_pattern, clause.pattern, depth + 2, "inactive catch pattern")?
+                    self.retained_type(clause.has_type_, clause.type_, depth + 2, "catch filter", false)?
+                    self.block(clause.body, depth + 2)?
+                if val block = finally_: self.block(block, depth + 1)?
+            case _: return Err(self.ledger.fail("UNION-E-POSITION", "unrecognized HIR expression", value.span))
+        Ok(())
+
+    me pattern(value: HirPattern, depth: i64) -> Result<(), SourceUnionErrorV1>:
+        if value == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent HirPattern", Span.empty()))
+        if value.kind == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent HirPattern kind or identity", Span.empty()))
+        self.node(depth, value.span)?
+        self.retained_type(value.has_type_, value.type_, depth + 1, "pattern annotation", true)?
+        match value.kind:
+            case HirPatternKind.Wildcard | HirPatternKind.Error: ()
+            case HirPatternKind.Binding(symbol, _):
+                if symbol == nil: return Err(self.ledger.fail("UNION-E-SCOPE", "absent binding symbol", value.span))
+            case HirPatternKind.Literal(item): self.expr(item, depth + 1)?
+            case HirPatternKind.Tuple(items) | HirPatternKind.Array(items, _) | HirPatternKind.Or(items):
+                self.slots(source_union_array_count_v1(items), value.span)?
+                for item in items: self.pattern(item, depth + 1)?
+            case HirPatternKind.Struct(type_, fields):
+                self.type_(type_, depth + 1, false, false, "struct pattern owner")?
+                self.slots(source_union_array_count_v1(fields), value.span)?
+                for (name, item) in fields:
+                    self.text(name, value.span)?
+                    self.pattern(item, depth + 1)?
+            case HirPatternKind.Enum(type_, variant, payload):
+                self.type_(type_, depth + 1, false, false, "enum pattern owner")?
+                self.text(variant, value.span)?
+                if val inner = payload:
+                    if inner == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent enum payload", value.span))
+                    match inner:
+                        case HirPatternPayload.Tuple(items):
+                            self.slots(source_union_array_count_v1(items), value.span)?
+                            for item in items: self.pattern(item, depth + 1)?
+                        case HirPatternPayload.Struct(fields):
+                            self.slots(source_union_array_count_v1(fields), value.span)?
+                            for (name, item) in fields:
+                                self.text(name, value.span)?
+                                self.pattern(item, depth + 1)?
+            case HirPatternKind.Range(start, end, _):
+                self.expr(start, depth + 1)?
+                self.expr(end, depth + 1)?
+            case HirPatternKind.CompleteRegion(binder) | HirPatternKind.DynRegion(binder): self.text(binder, value.span)?
+            case HirPatternKind.TypeTest(name, binder):
+                self.text(name, value.span)?
+                self.text(binder, value.span)?
+            case _: return Err(self.ledger.fail("UNION-E-POSITION", "unrecognized HIR pattern", value.span))
+        Ok(())
+
+    me assembly(value: HirAsm, depth: i64) -> Result<(), SourceUnionErrorV1>:
+        if value == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent HirAsm", Span.empty()))
+        self.node(depth, value.span)?
+        self.text(value.asm_template, value.span)?
+        self.slots(source_union_array_count_v1(value.constraints), value.span)?
+        for item in value.constraints:
+            if item == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent assembly constraint", Span.empty()))
+            if item.kind == nil or item.location == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent assembly constraint kind", Span.empty()))
+            self.node(depth + 1, item.span)?
+            self.text(item.name, item.span)?
+            self.expr(item.value, depth + 2)?
+            if val output = item.output_value: self.expr(output, depth + 2)?
+        self.slots(source_union_array_count_v1(value.clobbers), value.span)?
+        for name in value.clobbers: self.text(name, value.span)?
+        self.slots(source_union_array_count_v1(value.clobber_abis), value.span)?
+        for name in value.clobber_abis: self.text(name, value.span)?
+        self.slots(source_union_array_count_v1(value.options), value.span)?
+        for name in value.options: self.text(name, value.span)?
+        self.opaque("inline assembly", value.span)
+        Ok(())
+
+    me signature_type(value: HirType, depth: i64) -> Result<(), SourceUnionErrorV1>:
+        if value == nil or value.kind == nil:
+            return Err(self.ledger.fail("UNION-E-TYPE", "absent direct function signature", Span.empty()))
+        match value.kind:
+            case HirTypeKind.Function(params, ret, effects):
+                self.node(depth, value.span)?
+                self.slots(source_union_array_count_v1(params), value.span)?
+                for param in params: self.type_(param, depth + 1, true, false, "direct formal parameter")?
+                self.type_(ret, depth + 1, true, false, "direct formal result")?
+                self.effects(effects, depth + 1)?
+            case _: self.type_(value, depth, true, false, "direct function symbol")?
+        Ok(())
+
+    me trait_(value: HirTrait, depth: i64) -> Result<(), SourceUnionErrorV1>:
+        if value == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent HirTrait", Span.empty()))
+        if value.symbol == nil or value.name == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent HirTrait kind or identity", Span.empty()))
+        self.node(depth, value.span)?
+        val before = self.union_sites
+        self.type_params(value.type_params, depth + 1)?
+        self.slots(source_union_array_count_v1(value.methods), value.span)?
+        for method in value.methods: self.function(method, depth + 1, true)?
+        self.slots(source_union_array_count_v1(value.defaults), value.span)?
+        for method in value.defaults: self.function(method, depth + 1, false)?
+        self.slots(source_union_array_count_v1(value.supertraits), value.span)?
+        for type_ in value.supertraits: self.type_(type_, depth + 1, false, false, "supertrait")?
+        self.bounds(value.where_clause, depth + 1, value.span)?
+        self.slots(source_union_array_count_v1(value.assoc_types), value.span)?
+        for item in value.assoc_types:
+            if item == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent associated type", Span.empty()))
+            self.node(depth + 1, value.span)?
+            self.text(item.name, value.span)?
+            self.slots(source_union_array_count_v1(item.bounds), value.span)?
+            for type_ in item.bounds: self.type_(type_, depth + 2, false, false, "associated type bound")?
+            self.retained_type(item.has_default, item.default, depth + 2, "associated type default", false)?
+        self.bindings(value.type_bindings, depth + 1, value.span)?
+        self.text(value.doc_comment, value.span)?
+        self.text(value.specialization_of, value.span)?
+        if self.union_sites != before:
+            return Err(self.ledger.fail("UNION-E-POSITION", "trait declaration", value.span))
+        Ok(())
+
+    me bounds(items: [HirTraitBound], depth: i64, span: Span) -> Result<(), SourceUnionErrorV1>:
+        self.slots(source_union_array_count_v1(items), span)?
+        for item in items:
+            if item == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent child record", Span.empty()))
+            self.node(depth, item.span)?
+            self.type_(item.trait_, depth + 1, false, false, "where clause")?
+        Ok(())
+
+    me enum_(value: HirEnum, depth: i64) -> Result<(), SourceUnionErrorV1>:
+        if value == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent HirEnum", Span.empty()))
+        if value.symbol == nil or value.name == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent HirEnum kind or identity", Span.empty()))
+        self.node(depth, value.span)?
+        self.text(value.name, value.span)?
+        self.text(value.runtime_name, value.span)?
+        self.type_params(value.type_params, depth + 1)?
+        self.bindings(value.type_bindings, depth + 1, value.span)?
+        self.text(value.doc_comment, value.span)?
+        self.text(value.specialization_of, value.span)?
+        self.slots(source_union_array_count_v1(value.variants), value.span)?
+        for variant in value.variants:
+            if variant == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent enum variant", Span.empty()))
+            if variant.kind == nil or variant.symbol == nil or variant.name == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent enum variant identity or kind", Span.empty()))
+            self.node(depth + 1, variant.span)?
+            self.text(variant.name, variant.span)?
+            match variant.kind:
+                case HirVariantKind.Unit: ()
+                case HirVariantKind.Tuple(types):
+                    self.slots(source_union_array_count_v1(types), variant.span)?
+                    for type_ in types: self.type_(type_, depth + 2, false, false, "enum payload")?
+                case HirVariantKind.Struct(fields): self.fields(fields, depth + 2)?
+            self.retained_expr(variant.has_discriminant, variant.discriminant, depth + 2, "inactive enum discriminant")?
+        self.slots(source_union_array_count_v1(value.attributes), value.span)?
+        for attribute in value.attributes:
+            if attribute == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent enum attribute", Span.empty()))
+            self.text(attribute.name, value.span)?
+            self.text(attribute.args, value.span)?
+        Ok(())
+
+    me text_id_index(items: Dict<text, SymbolId>, span: Span) -> Result<(), SourceUnionErrorV1>:
+        if items == nil: return Ok(())
+        val count = items.len()
+        self.slots(count, span)?
+        val keys = items.keys()
+        source_union_check_snapshot_v1(count, source_union_array_count_v1(keys), self.ledger, span)?
+        for key in keys: self.text(key, span)?
+        Ok(())
+
+    me text_bool_index(items: Dict<text, bool>, span: Span) -> Result<(), SourceUnionErrorV1>:
+        if items == nil: return Ok(())
+        val count = items.len()
+        self.slots(count, span)?
+        val keys = items.keys()
+        source_union_check_snapshot_v1(count, source_union_array_count_v1(keys), self.ledger, span)?
+        for key in keys: self.text(key, span)?
+        Ok(())
+
+    me text_text_index(items: Dict<text, text>, span: Span) -> Result<(), SourceUnionErrorV1>:
+        if items == nil: return Ok(())
+        val count = items.len()
+        self.slots(count, span)?
+        val keys = items.keys()
+        source_union_check_snapshot_v1(count, source_union_array_count_v1(keys), self.ledger, span)?
+        for key in keys:
+            self.text(key, span)?
+            self.text(items[key], span)?
+        Ok(())
+
+    me module_metadata(module: HirModule) -> Result<(), SourceUnionErrorV1>:
+        val span = Span.empty()
+        self.text(module.name, span)?
+        self.text(module.path, span)?
+        self.slots(source_union_array_count_v1(module.exports), span)?
+        for name in module.exports: self.text(name, span)?
+        self.slots(source_union_array_count_v1(module.types), span)?
+        for name in module.types: self.text(name, span)?
+        self.text_text_index(module.gpu_function_targets, span)?
+        self.text_text_index(module.gpu_function_backend_orders, span)?
+        self.slots(source_union_array_count_v1(module.imports), span)?
+        for item in module.imports:
+            if item == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent module metadata child", Span.empty()))
+            self.node(1, item.span)?
+            self.text(item.module_path, item.span)?
+            self.slots(source_union_array_count_v1(item.items), item.span)?
+            for member in item.items:
+                if member == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent module metadata child", Span.empty()))
+                self.node(2, item.span)?
+                self.text(member.name, item.span)?
+                if val alias_name = member.alias: self.text(alias_name, item.span)?
+        self.slots(source_union_array_count_v1(module.domain_blocks), span)?
+        for item in module.domain_blocks:
+            if item == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent module metadata child", Span.empty()))
+            self.node(1, item.span)?
+            self.text(item.kind, item.span)?
+            self.text(item.payload, item.span)?
+            self.text(item.context, item.span)?
+        self.slots(source_union_array_count_v1(module.aop_advices), span)?
+        for item in module.aop_advices:
+            if item == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent module metadata child", Span.empty()))
+            self.node(1, item.span)?
+            self.text(item.predicate_text, item.span)?
+            self.text(item.advice_function, item.span)?
+            self.text(item.form, item.span)?
+        self.slots(source_union_array_count_v1(module.di_bindings), span)?
+        for item in module.di_bindings:
+            if item == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent module metadata child", Span.empty()))
+            self.node(1, item.span)?
+            self.text(item.predicate_text, item.span)?
+            self.text(item.implementation, item.span)?
+        self.slots(source_union_array_count_v1(module.arch_rules), span)?
+        for item in module.arch_rules:
+            if item == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent module metadata child", Span.empty()))
+            self.node(1, item.span)?
+            self.text(item.kind, item.span)?
+            self.text(item.predicate_text, item.span)?
+            self.text(item.message, item.span)?
+        self.slots(source_union_array_count_v1(module.mock_decls), span)?
+        for item in module.mock_decls:
+            if item == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent module metadata child", Span.empty()))
+            self.node(1, item.span)?
+            self.text(item.name, item.span)?
+            self.text(item.trait_name, item.span)?
+        self.slots(source_union_array_count_v1(module.extend_enums), span)?
+        for item in module.extend_enums:
+            if item == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent module metadata child", Span.empty()))
+            self.node(1, item.span)?
+            self.text(item.target, item.span)?
+            self.slots(source_union_array_count_v1(item.constructors), item.span)?
+            for constructor in item.constructors:
+                if constructor == nil: return Err(self.ledger.fail("UNION-E-TYPE", "absent module metadata child", Span.empty()))
+                self.node(2, constructor.span)?
+                self.text(constructor.provider, constructor.span)?
+                self.text(constructor.name, constructor.span)?
+                self.slots(source_union_array_count_v1(constructor.payload_types), constructor.span)?
+            self.opaque("unlowered enum extension payload", item.span)
+        Ok(())
+
+export SourceUnionPreflightV1
