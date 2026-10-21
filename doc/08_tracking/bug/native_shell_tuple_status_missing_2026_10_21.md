@@ -40,7 +40,11 @@ The annotated SSpec remains authored, not executed by a bootstrap-only producer.
 Provider input/output/cache-read/cache-create tokens: unavailable. Comparable
 cohort average and usage ratio: unavailable, not guessed or zero-filled.
 
-## Actual focused evidence
+## Earlier focused evidence (superseded aggregate ownership)
+
+The C-only and standalone Rust executions below remain valid evidence for
+their respective providers. The earlier aggregate Rust-export suppression and
+zero-export archive are historical diagnostics, not the final ownership matrix.
 
 Producer SHA256:
 `32014b3401e3cb76aec44acb475a22f2385fefcd1d19ab71049e52d633356825`.
@@ -75,12 +79,26 @@ Every writable native/Cargo cache and output stayed under the private worktree
 - The private updated core-C archive defines exactly one of each name. Frozen
   canonical native-all/backfill archives were never overwritten.
 
-The tiny fixture renamed `bootstrap_main.spl` forces frozen native-all plus
-updated core-C supplement. That combined link is BLOCKED on an unrelated COFF
+The earlier tiny fixture renamed `bootstrap_main.spl` forces frozen native-all
+plus updated core-C supplement. That combined link was blocked on a COFF
 error: `relocation against symbol in discarded section:
 rt_vulkan_async_session_supported`, referenced by frozen native-all CGU.03.
 Shell names resolved. Retained `tiny/bootstrap_main-build.log`; no execution or
 aggregate-bootstrap PASS is claimed, and no Vulkan/retention waiver was added.
+
+After the separate real weak GPU-owner repair, that old mixed fixture linked
+but exited 2 at scalar stdout. Its inputs came from Rust string constructors;
+the strong C shell decoder requires its own string registry. This was a real
+mixed-owner defect, not evidence that a fresh archive with the same suppressed
+Rust exports would work. The failed logs remain at
+`D:/dev/simple-windows-http-provider-20261021/build/session/gpu-owner-repair/tiny/`.
+
+The final design restores genuine Rust shell exports and retention references
+in every feature configuration. C provides real weak fallbacks (MSVC private
+`core_c_shell_*` definitions with `/alternatename`, GNU weak definitions).
+Aggregate callers therefore use Rust strings, tuples, capture and TLS together;
+C-only executables use the complete C provider. No public-value bridge or
+single-lane exception substitutes for coherent ownership.
 
 Source pairing removes only obsolete `rt_shell_exec c-only` after genuine native
 Rust execution/export proof. No new single-lane exception or fake Rust helper
@@ -105,3 +123,61 @@ reported `source_variants=407/399 migration=3613/3546`. Retained
 `sffi-source-audit.log`. This global source-inventory failure is not runtime
 execution evidence and is not relabeled PASS or attributed without a baseline
 comparison. Full production/SPipe verification remains unclaimed.
+
+## Final coherent ownership evidence
+
+At implementation commit `d66c4bdf171`, both Windows native fixture paths
+passed all 14 checks, including native TLS isolation, subprocess success and
+failure, quoted commands, separate tuple streams, and tuple status-slot
+noninterference. Scalar stderr remained inherited (`scalar-error` in each
+separate run stderr log).
+
+- C weak fallback: `tiny/final-weak-c-build.log`,
+  `tiny/final-weak-c-run.stdout`, `tiny/final-weak-c-run.stderr`; exit 0,
+  279 KB executable, objects `tiny/native-objects-jrDcQ5`.
+- Genuine new Rust native-all plus updated C supplement:
+  `tiny/final-mixed-build.log`, `tiny/final-mixed-run.stdout`,
+  `tiny/final-mixed-run.stderr`; exit 0, 8425 KB executable, objects
+  `tiny/native-objects-ToDx93`.
+- Aggregate-feature Rust integration tests actually executed and passed 2/2:
+  `final-aggregate-rust-tests.log`. Command: `cargo test --manifest-path
+  src/compiler_rust/Cargo.toml -p simple-runtime --no-default-features
+  --features hosted-webgpu-provider,native-all-provider --target
+  x86_64-pc-windows-msvc --test native_shell_provider -- --nocapture`.
+- `final-native-all-shell-symbols.txt` records one strong definition each of
+  `rt_shell_exec`, `rt_shell_exec_tuple`, `rt_shell_exit_code` in the new
+  aggregate. `final-c-shell-symbols.txt` and `final-c-shell-directives.txt`
+  record only the three private `core_c_shell_*` definitions and their real
+  MSVC weak `/alternatename` fallbacks in the C supplement.
+
+All paths above are relative to the private `build/native-shell/` directory.
+The exact finite diagnostic scripts are `default-ownership.sh`, `native.sh`
+and `final-mixed.sh`. Both native rows use the frozen producer hash recorded
+above, `--backend llvm --runtime-bundle core-c-bootstrap --source src
+--entry-closure --threads 1 --mode one-binary --target
+x86_64-pc-windows-msvc`, with distinct output and cache paths. The mixed row
+uses `src/bootstrap_main.spl` to select the aggregate route.
+
+The new archive was built with `cargo build --manifest-path
+src/compiler_rust/Cargo.toml -p simple-native-all --target
+x86_64-pc-windows-msvc --lib`, with private `CARGO_TARGET_DIR` and two jobs.
+Its SHA256 is
+`be4a24cb99c0793aa33397f74336d0996490b11e5828eeb94912ff703997d16a`.
+This default-feature choice follows
+`scripts/bootstrap/build-coherent-frozen-provider.shs`: LLVM Support embedding
+is excluded from that coherent provider route. An earlier explicit optional
+`--features llvm` invocation failed in `aya-llvm-sys` because the installed
+Windows `llvm-config` rejected dynamic linking; its unchanged failure is
+retained in `new-native-all-build.log`, not relabeled as a runtime failure.
+
+`final-mixed-runtime/diagnostic-components.txt` records the distinct new
+aggregate and unchanged frozen backfill/LLVM/hosted components. No frozen
+archive, producer, receipt, or cache was overwritten or rebound. This private
+mixed fixture proves the repaired ownership boundary; fresh canonical
+authority and full-bootstrap qualification remain the campaign owner's work.
+
+The actual final implementation ratchet passed once at `d66c4bdf171` with
+`sh scripts/check/check-rt-dual-implementation-ratchet.shs --rev HEAD
+--baseline-rev 3050022d5d5`: 10 selftests, 2623 versus 2624 single-lane
+symbols, zero new; retained `final-ratchet.log`. Only the obsolete scalar
+`rt_shell_exec c-only` baseline entry was removed after genuine Rust proof.

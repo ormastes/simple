@@ -12,10 +12,13 @@ unbounded process-capture owner, not the fallback that drops stderr. Commands
 use `cmd.exe /C` on Windows and `/bin/sh -c` elsewhere. Windows quoted payloads
 use the existing `/S` verbatim convention instead of CRT backslash escaping.
 
-Core-C supplies the three native ABI names in `runtime_native.c`. Standalone
-Rust supplies real implementations in `runtime/src/value/sffi/env_process.rs`.
-With `native-all-provider`, the Rust exports and generated address-table
-references are omitted; the bootstrap core-C supplement owns those symbols.
+Rust supplies strong definitions of all three native ABI names in every feature
+configuration, including `native-all-provider`. Its strings, tuples, process
+capture and shell status remain in one runtime owner. `runtime_native.c`
+provides genuine weak fallbacks for C-only executables: MSVC uses private
+`core_c_shell_*` definitions with `/alternatename`; GNU uses weak definitions.
+The aggregate selects Rust, while a C-only link selects C. The Rust symbol
+retention table keeps the real shell exports in aggregate builds.
 Check actual archive exports and successful configured linking, not cfg text
 alone. Runtime source edits require fresh authority/fingerprint review and
 private output caches; never overwrite a frozen producer or rebind old receipts.
