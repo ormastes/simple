@@ -2,6 +2,13 @@
 
 ## Windows bootstrap harness prerequisites
 
+Preflight's paired-conflict-marker scan prunes `vendor` directories before
+reading files. Vendored compiler dependencies are outside owned-code scope;
+filtering their matches after a recursive grep still incurs their full scan.
+`sh scripts/check/check-bootstrap-preflight.shs --selftest` checks owned paired
+and unpaired markers, vendor exclusion, and paths containing spaces without
+running Cargo or a full preflight.
+
 The MSVC setup helper supports callers using `set -euo pipefail`. SDK discovery
 must skip non-SDK Include children such as `wdf` without turning the final
 directory predicate into a pipeline failure. Keep missing-SDK and tool failures
