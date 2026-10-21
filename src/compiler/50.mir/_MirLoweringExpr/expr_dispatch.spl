@@ -3182,7 +3182,10 @@ impl MirLowering:
                 return self.builder.emit_const_int(0)
             case _: ()
         # Runtime arrays are tagged handles, not raw element pointers.
-        val base_local = self.lower_expr(base)
+        var base_local = self.lower_expr(base)
+        if self.tuple_index_literal(index) >= 0:
+            if val tuple_payload = self.narrow_optional_tuple_index_base(base, base_local):
+                base_local = tuple_payload
         # Dict handles compare keys as tagged heap values, so a `d[k]`
         # read routes to rt_dict_get with a tagged key -- NOT the raw GEP
         # array path below (which would treat the string key pointer as
@@ -5860,6 +5863,7 @@ impl MirLowering:
                 # fallback once right_local exists, below.
                 var result_struct_name = ""
                 var coalesce_record_type: HirType? = nil
+                var coalesce_tuple_type: HirType? = nil
                 var coalesce_record_fallback_valid = true
                 if val nc_inner_type = self.option_inner_hir_type_for_local(left, left_local):
                     # Bug (native_typed_array_text_element_destroyed_at_store,
@@ -5886,6 +5890,12 @@ impl MirLowering:
                     # changes.
                     val nc_result_is_erased_i64 = _sffi_enum_discriminant<MirTypeKind>(result_type.kind) == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.I64)
                     match nc_inner_type.kind:
+                        case HirTypeKind.Tuple(_):
+                            if val native_tuple_type = self.result_try_tuple_payload_type(nc_inner_type):
+                                result_type = native_tuple_type
+                                coalesce_tuple_type = Some(nc_inner_type)
+                            else:
+                                self.error_fatal("unsupported optional tuple payload", Some(left.span))
                         case HirTypeKind.Str:
                             if not self.mir_type_is_str(result_type):
                                 result_type = self.bootstrap_text_type()
@@ -5962,6 +5972,8 @@ impl MirLowering:
                     left_value = self.decode_runtime_value(left_local, result_type)
                 else:
                     left_value = self.enum_payload_value(left_value, result_type)
+                if val tuple_payload = coalesce_tuple_type:
+                    left_value = self.recover_optional_tuple_payload(left_value, tuple_payload)
                 b_left = self.builder
                 b_left.emit_copy(result_local, left_value)
                 b_left.terminate_goto(merge_block)
@@ -5974,6 +5986,10 @@ impl MirLowering:
                 var right_value = right_local
                 val right_terminated = self.builder.current_block_has_explicit_terminator()
                 if not right_terminated:
+                    if val tuple_payload = coalesce_tuple_type:
+                        if not self.optional_tuple_fallback_matches(tuple_payload, right, right_local):
+                            self.error_fatal("null coalesce fallback does not match declared tuple owner", Some(right.span))
+                            coalesce_record_fallback_valid = false
                     if val record_type = coalesce_record_type:
                         if not self.enum_payload_local_compatible(record_type, right, right_local):
                             self.error_fatal("null coalesce fallback does not match declared record owner", Some(right.span))
@@ -6005,6 +6021,8 @@ impl MirLowering:
                     self.runtime_array_locals[result_local.id] = true
                     self.remember_local_hir_type(result_local.id, array_type, 0, 0)
                 if coalesce_record_fallback_valid:
+                    if val tuple_payload = coalesce_tuple_type:
+                        self.remember_local_hir_type(result_local.id, tuple_payload, 0, 0)
                     if val record_type = coalesce_record_type:
                         self.remember_local_hir_type(result_local.id, record_type, 0, 0)
                 if coalesce_record_type == nil and coalesce_array_type == nil and not right_terminated:
@@ -6075,6 +6093,11 @@ impl MirLowering:
                 var result_struct_name = ""
                 if val exists_inner_type = self.option_inner_hir_type_for_local(base, base_local):
                     match exists_inner_type.kind:
+                        case HirTypeKind.Tuple(_):
+                            # The result is payload-or-nil, not the Optional
+                            # MIR (Bool, payload) envelope or a decoded tuple.
+                            # Only the authored present edge may recover it.
+                            result_type = MirType.i64()
                         case HirTypeKind.Named(exists_struct_symbol, _):
                             if val present_exists_type_symbol = self.symbols.get_symbol_raw(exists_struct_symbol.id):
                                 val exists_type_symbol: HirSymbol = present_exists_type_symbol
@@ -6190,6 +6213,10 @@ impl MirLowering:
                             self.exists_collection_locals[result_local.id] = true
                             val optional_collection = HirType(kind: HirTypeKind.Optional(exists_payload_type), span: base.span)
                             self.remember_local_hir_type(result_local.id, optional_collection, 0, 0)
+                        case HirTypeKind.Tuple(_):
+                            self.exists_collection_locals[result_local.id] = true
+                            val optional_tuple = HirType(kind: HirTypeKind.Optional(exists_payload_type), span: base.span)
+                            self.remember_local_hir_type(result_local.id, optional_tuple, 0, 0)
                         case HirTypeKind.Named(exists_named_owner, _):
                             # The if-val binder carries a raw payload-or-nil
                             # word. Preserve its exact declared trait owner so
@@ -6238,6 +6265,8 @@ impl MirLowering:
                 # via struct_value_syms -- because `!` and `.unwrap()` are the
                 # same runtime operation with different call syntax.
                 val uw_base_local = self.lower_expr(base)
+                if self.is_plain_native_tuple_payload(uw_base_local):
+                    return uw_base_local
                 var uw_result_type = MirType.i64()
                 var uw_is_text = false
                 var uw_is_bool = false
@@ -6251,6 +6280,11 @@ impl MirLowering:
                         case HirTypeKind.Bool:
                             uw_result_type = MirType.bool()
                             uw_is_bool = true
+                        case HirTypeKind.Tuple(_):
+                            if val native_tuple_type = self.result_try_tuple_payload_type(uw_found_inner):
+                                uw_result_type = native_tuple_type
+                            else:
+                                self.error_fatal("unsupported optional tuple payload", Some(base.span))
                         case _: uw_result_type = self.lower_type(uw_found_inner)
                 elif self.local_is_str(uw_base_local):
                     uw_result_type = self.bootstrap_text_type()
@@ -6289,6 +6323,11 @@ impl MirLowering:
                     some_val_uw = self.option_bool_value(some_val_uw)
                 else:
                     some_val_uw = self.enum_payload_value(some_val_uw, uw_result_type)
+                if val payload_type_uw = uw_inner_type:
+                    match payload_type_uw.kind:
+                        case HirTypeKind.Tuple(_):
+                            some_val_uw = self.recover_optional_tuple_payload(some_val_uw, payload_type_uw)
+                        case _: ()
                 b_some_uw = self.builder
                 b_some_uw.emit_copy(result_local_uw, some_val_uw)
                 b_some_uw.terminate_goto(merge_block_uw)
@@ -6311,6 +6350,12 @@ impl MirLowering:
 
                 if self.is_runtime_value_local(some_val_uw.id):
                     self.mark_runtime_value_local(result_local_uw.id)
+
+                if val payload_type_uw = uw_inner_type:
+                    match payload_type_uw.kind:
+                        case HirTypeKind.Tuple(_):
+                            self.copy_local_hir_type_metadata(some_val_uw.id, result_local_uw.id)
+                        case _: ()
 
                 if self.struct_value_syms.contains(uw_base_local.id):
                     self.struct_value_syms[result_local_uw.id] = self.struct_value_syms[uw_base_local.id]
