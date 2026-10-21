@@ -1,0 +1,192 @@
+# REQ-MC-008 / B1 explicit redirect-table foundation. Execution: UNRUN.
+# These fixtures register resolved component pairs, not a B5 rename event.
+use std.spec.step
+use compiler.semantics.symbol_id.stable_id.{
+    SymbolComponents, stable_symbol_id, short_fingerprint, normalize_signature,
+    symbol_id_schema_version
+}
+use compiler.semantics.symbol_id.index.{
+    SymbolIndex, build_symbol_index, build_symbol_index_with_short_len,
+    build_symbol_index_with_redirects_v1
+}
+use compiler.semantics.symbol_id.redirects_v1.{
+    SymbolRedirectV1, build_symbol_redirect_table_v1
+}
+
+fn redirect_symbol_components(name: text, signature: text) -> SymbolComponents:
+    SymbolComponents(
+        package: "ormastes.simple",
+        module_path: "compiler.frontend.parser",
+        item_kind: "fn",
+        owner_id: "",
+        name: name,
+        signature: signature
+    )
+
+fn require_redirect_index(items: [SymbolComponents], rows: [SymbolRedirectV1]) -> SymbolIndex:
+    # unwrap fails on Err: this helper never supplies a fallback index.
+    build_symbol_index_with_redirects_v1(items, rows).unwrap()
+
+fn require_redirect_error(items: [SymbolComponents], rows: [SymbolRedirectV1], fragment: text):
+    match build_symbol_index_with_redirects_v1(items, rows):
+        case Err(message):
+            expect(message).to_contain(fragment)
+        case Ok(_):
+            assert(false)
+
+fn assert_redirect_resolution(idx: SymbolIndex, old_id: text, terminal_id: text):
+    expect(idx.resolve_full_id_v1(old_id)).to_equal(terminal_id)
+
+describe "B1 explicit stable-symbol redirects v1":
+    it "resolves historical IDs through the actual current index":
+        step("Resolve an explicit name-only rename through the actual index")
+        val old = redirect_symbol_components("parse_old", "fn parse_old(src: text) -> i64")
+        val new = redirect_symbol_components("parse_new", "fn parse_new(src: text) -> i64")
+        val row = SymbolRedirectV1(table_version: 1, old_symbol: old, new_symbol: new)
+        val idx = require_redirect_index([new], [row])
+        val old_id = stable_symbol_id(old)
+        val new_id = stable_symbol_id(new)
+        assert_redirect_resolution(idx, old_id, new_id)
+        assert_redirect_resolution(idx, new_id, new_id)
+        assert_redirect_resolution(idx, "not-an-indexed-full-id", "")
+        expect(idx.size()).to_equal(1)
+        expect(idx.full_id_of(short_fingerprint(new_id))).to_equal(new_id)
+        expect(idx.module_of(short_fingerprint(new_id))).to_equal(new.module_path)
+        expect(idx.contains(short_fingerprint(old_id))).to_equal(false)
+        expect(idx.full_id_of(short_fingerprint(old_id))).to_equal("")
+        expect(idx.redirect_table_v1.table_version).to_equal(1)
+        expect(idx.redirect_table_v1.edge_count).to_equal(1)
+        expect(idx.redirect_table_v1.resolve_old_id_v1(new_id)).to_equal("")
+        expect(idx.redirect_table_v1.resolve_old_id_v1("unknown")).to_equal("")
+
+    it "keeps schema1 goldens and old builders unchanged":
+        step("Preserve frozen identity and legacy index behavior")
+        val symbol = redirect_symbol_components("f", "fn f(a: i64) -> bool")
+        val full = stable_symbol_id(symbol)
+        expect(symbol_id_schema_version()).to_equal(1)
+        expect(full).to_equal("51210ea1fc01c8f01638c27b2168f691")
+        val legacy = build_symbol_index([symbol, symbol]).unwrap()
+        val idx = require_redirect_index([symbol, symbol], [])
+        expect(idx.size()).to_equal(legacy.size())
+        expect(idx.size()).to_equal(1)
+        expect(idx.full_id_of(short_fingerprint(full))).to_equal(legacy.full_id_of(short_fingerprint(full)))
+        expect(idx.module_of(short_fingerprint(full))).to_equal(legacy.module_of(short_fingerprint(full)))
+        expect(idx.redirect_table_v1.edge_count).to_equal(0)
+        assert_redirect_resolution(idx, full, full)
+        assert_redirect_resolution(legacy, full, full)
+        expect(legacy.full_id_of("unknown")).to_equal("")
+        expect(legacy.module_of("unknown")).to_equal("")
+        val empty = require_redirect_index([], [])
+        expect(empty.size()).to_equal(0)
+        assert_redirect_resolution(empty, full, "")
+        var many: [SymbolComponents] = []
+        for i in 0..40:
+            many = many.push(redirect_symbol_components("f{i}", "fn f{i}() -> i64"))
+        expect(build_symbol_index_with_short_len(many, 1).is_err()).to_equal(true)
+
+    it "refuses identity changes while preserving existing signature normalization":
+        step("Reject identity changes instead of guessing a rename")
+        val old = redirect_symbol_components("before", "fn before(n: i64) -> bool")
+        val new = redirect_symbol_components("after", "fn after(n: i64) -> bool")
+        var package_change = new
+        package_change.package = "another.package"
+        var module_change = new
+        module_change.module_path = "compiler.frontend.lexer"
+        var kind_change = new
+        kind_change.item_kind = "method"
+        var owner_change = new
+        owner_change.owner_id = "0123456789abcdef0123456789abcdef"
+        val type_change = redirect_symbol_components("after", "fn after(n: text) -> bool")
+        val arity_change = redirect_symbol_components("after", "fn after(n: i64, m: i64) -> bool")
+        val return_change = redirect_symbol_components("after", "fn after(n: i64) -> i64")
+        for changed in [package_change, module_change, kind_change, owner_change, type_change, arity_change, return_change]:
+            val row = SymbolRedirectV1(table_version: 1, old_symbol: old, new_symbol: changed)
+            require_redirect_error([changed], [row], "identity")
+        val no_rows = require_redirect_index([new], [])
+        assert_redirect_resolution(no_rows, stable_symbol_id(old), "")
+        val normalized_new = redirect_symbol_components("after", "fn after( renamed : i64 = 7 ) -> bool")
+        expect(normalize_signature(old.signature)).to_equal(normalize_signature(normalized_new.signature))
+        val row = SymbolRedirectV1(table_version: 1, old_symbol: old, new_symbol: normalized_new)
+        val idx = require_redirect_index([normalized_new], [row])
+        assert_redirect_resolution(idx, stable_symbol_id(old), stable_symbol_id(normalized_new))
+
+    it "rejects conflicts, malformed rows, cycles, dangling chains and live old IDs":
+        step("Refuse ambiguous and malformed redirect histories")
+        val a = redirect_symbol_components("a", "fn a() -> i64")
+        val b = redirect_symbol_components("b", "fn b() -> i64")
+        val c = redirect_symbol_components("c", "fn c() -> i64")
+        val ab = SymbolRedirectV1(table_version: 1, old_symbol: a, new_symbol: b)
+        val ac = SymbolRedirectV1(table_version: 1, old_symbol: a, new_symbol: c)
+        val ba = SymbolRedirectV1(table_version: 1, old_symbol: b, new_symbol: a)
+        val bc = SymbolRedirectV1(table_version: 1, old_symbol: b, new_symbol: c)
+        val ca = SymbolRedirectV1(table_version: 1, old_symbol: c, new_symbol: a)
+        require_redirect_error([b, c], [ab, ac], "conflict")
+        require_redirect_error([b, c], [ac, ab], "conflict")
+        require_redirect_error([c], [ab, ac, bc], "conflict")
+        require_redirect_error([a], [SymbolRedirectV1(table_version: 1, old_symbol: a, new_symbol: a)], "self")
+        val same_old = redirect_symbol_components("same\nname", "fn f() -> i64")
+        val same_new = redirect_symbol_components("same name", "fn g() -> i64")
+        expect(stable_symbol_id(same_old)).to_equal(stable_symbol_id(same_new))
+        require_redirect_error([same_new], [SymbolRedirectV1(table_version: 1, old_symbol: same_old, new_symbol: same_new)], "self")
+        require_redirect_error([b], [SymbolRedirectV1(table_version: 2, old_symbol: a, new_symbol: b)], "version")
+        require_redirect_error([], [ab, ba], "cycle")
+        require_redirect_error([], [ab, bc, ca], "cycle")
+        require_redirect_error([], [ab], "terminal")
+        require_redirect_error([c], [ab], "terminal")
+        require_redirect_error([a, b], [ab], "live")
+        require_redirect_error([b, c], [ab, bc], "live")
+        val duplicate = require_redirect_index([b], [ab, ab])
+        expect(duplicate.redirect_table_v1.edge_count).to_equal(1)
+        assert_redirect_resolution(duplicate, stable_symbol_id(a), stable_symbol_id(b))
+        expect(build_symbol_redirect_table_v1([ab], []).is_err()).to_equal(true)
+
+    it "pre-resolves chains independently of row order and admits convergent histories":
+        step("Resolve chains once with deterministic terminal ownership")
+        val a = redirect_symbol_components("a", "fn a() -> i64")
+        val b = redirect_symbol_components("b", "fn b() -> i64")
+        val c = redirect_symbol_components("c", "fn c() -> i64")
+        val d = redirect_symbol_components("d", "fn d() -> i64")
+        val ab = SymbolRedirectV1(table_version: 1, old_symbol: a, new_symbol: b)
+        val bc = SymbolRedirectV1(table_version: 1, old_symbol: b, new_symbol: c)
+        val db = SymbolRedirectV1(table_version: 1, old_symbol: d, new_symbol: b)
+        val first = require_redirect_index([c], [ab, bc, db])
+        val reversed = require_redirect_index([c], [db, bc, ab])
+        val terminal = stable_symbol_id(c)
+        for historical in [stable_symbol_id(a), stable_symbol_id(b), stable_symbol_id(d)]:
+            assert_redirect_resolution(first, historical, terminal)
+            assert_redirect_resolution(reversed, historical, terminal)
+        expect(first.redirect_table_v1.edge_count).to_equal(3)
+        expect(reversed.redirect_table_v1.edge_count).to_equal(3)
+        expect(first.redirect_table_v1.direct_to_full[stable_symbol_id(a)]).to_equal(stable_symbol_id(b))
+        expect(first.redirect_table_v1.terminal_by_old[stable_symbol_id(a)]).to_equal(terminal)
+        val table = build_symbol_redirect_table_v1([ab, bc], [terminal]).unwrap()
+        expect(table.edge_count).to_equal(2)
+        expect(table.resolve_old_id_v1(stable_symbol_id(a))).to_equal(terminal)
+
+    it "bounds long histories and leaves one built snapshot stable over repeated reads":
+        step("Bound history work and preserve lookup ownership")
+        var symbols: [SymbolComponents] = []
+        for i in 0..129:
+            symbols = symbols.push(redirect_symbol_components("history{i}", "fn history{i}() -> i64"))
+        var rows: [SymbolRedirectV1] = []
+        for i in 0..128:
+            rows = rows.push(SymbolRedirectV1(table_version: 1, old_symbol: symbols[i], new_symbol: symbols[i + 1]))
+        val terminal = stable_symbol_id(symbols[128])
+        val first_id = stable_symbol_id(symbols[0])
+        val middle_id = stable_symbol_id(symbols[64])
+        val idx = require_redirect_index([symbols[128]], rows)
+        # Direct calls reuse this one owner; no by-value assertion helper in loop.
+        for i in 0..256:
+            expect(idx.resolve_full_id_v1(first_id)).to_equal(terminal)
+            expect(idx.resolve_full_id_v1(middle_id)).to_equal(terminal)
+            expect(idx.resolve_full_id_v1(terminal)).to_equal(terminal)
+            expect(idx.resolve_full_id_v1("missing")).to_equal("")
+        expect(idx.size()).to_equal(1)
+        expect(idx.redirect_table_v1.edge_count).to_equal(128)
+        val shared = redirect_symbol_components("shared", "fn shared() -> i64")
+        rows = rows.push(SymbolRedirectV1(table_version: 1, old_symbol: shared, new_symbol: symbols[64]))
+        val shared_idx = require_redirect_index([symbols[128]], rows)
+        assert_redirect_resolution(shared_idx, stable_symbol_id(shared), terminal)
+        expect(shared_idx.redirect_table_v1.edge_count).to_equal(129)
+        rows = rows.push(SymbolRedirectV1(table_version: 1, old_symbol: symbols[128], new_symbol: symbols[0]))
+        require_redirect_error([], rows, "cycle")
