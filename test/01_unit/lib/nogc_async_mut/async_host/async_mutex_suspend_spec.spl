@@ -1,0 +1,363 @@
+# @req REQ-MC-006
+# Actual HostScheduler polling and cleanup; no timing or source-text oracle.
+use std.spec
+use std.spec.step
+use std.async_core.{Poll, Priority, TaskState}
+use std.async.cancellation.{CancellationToken, token_new, cancellation_registry_capacity, cancellation_registry_live_count}
+use std.async.sync.{AsyncMutex, AsyncMutexLease}
+use std.async_host.scheduler.{HostScheduler, HostTaskContext}
+
+var scheduler = HostScheduler.new(1)
+var mutex = AsyncMutex.hosted(0)
+var visits: [i64] = []
+var owner_id: usize = 0
+var waiter_id: usize = 0
+var second_id: usize = 0
+var owner_polls: i64 = 0
+var saved_lease: Option<AsyncMutexLease> = nil
+var finish_holder: bool = false
+var foreign_context: Option<HostTaskContext> = nil
+
+fn holding_task() -> Poll<()>:
+    owner_polls = owner_polls + 1
+    if finish_holder and owner_polls > 1:
+        visits = visits.push(11)
+        return Poll.Ready(())
+    val cx_lookup = scheduler.task_context(owner_id)
+    val cx = cx_lookup.unwrap()
+    match mutex.poll_acquire(cx):
+        case Poll.Ready(Ok(lease)):
+            saved_lease = Some(lease)
+            visits = visits.push(10)
+        case _: fail("holder must acquire")
+    Poll.Pending
+
+fn waiting_task() -> Poll<()>:
+    val cx_lookup = scheduler.task_context(waiter_id)
+    val cx = cx_lookup.unwrap()
+    match mutex.poll_acquire(cx):
+        case Poll.Pending:
+            val again = mutex.poll_acquire(cx)
+            expect(again.is_pending()).to_equal(true)
+            visits = visits.push(20)
+            Poll.Pending
+        case Poll.Ready(Ok(lease)):
+            visits = visits.push(21)
+            expect(mutex.release(lease)).to_equal(true)
+            expect(mutex.release(lease)).to_equal(false)
+            Poll.Ready(())
+        case _: fail("waiter unexpectedly refused")
+
+fn second_waiting_task() -> Poll<()>:
+    val cx_lookup = scheduler.task_context(second_id)
+    val cx = cx_lookup.unwrap()
+    match mutex.poll_acquire(cx):
+        case Poll.Pending:
+            visits = visits.push(30)
+            Poll.Pending
+        case Poll.Ready(Ok(lease)):
+            visits = visits.push(31)
+            expect(mutex.release(lease)).to_equal(true)
+            Poll.Ready(())
+        case _: fail("second waiter unexpectedly refused")
+
+fn independent_task() -> Poll<()>:
+    visits = visits.push(99)
+    Poll.Ready(())
+
+fn setup_tasks():
+    scheduler = HostScheduler.new(1)
+    mutex = AsyncMutex.hosted(2)
+    visits = []
+    owner_polls = 0
+    saved_lease = nil
+    finish_holder = false
+    owner_id = scheduler.schedule(Priority.Normal, holding_task)
+    waiter_id = scheduler.schedule(Priority.Normal, waiting_task)
+    second_id = scheduler.schedule(Priority.Normal, second_waiting_task)
+    scheduler.schedule(Priority.Normal, independent_task)
+
+fn refused_task() -> Poll<()>:
+    val cx_lookup = scheduler.task_context(second_id)
+    val cx = cx_lookup.unwrap()
+    match mutex.poll_acquire(cx):
+        case Poll.Ready(Err(_)):
+            visits = visits.push(40)
+            Poll.Ready(())
+        case _: fail("full/closed mutex must refuse without parking")
+
+fn foreign_task() -> Poll<()>:
+    val cx = foreign_context.unwrap()
+    match mutex.poll_acquire(cx):
+        case Poll.Ready(Err(_)):
+            visits = visits.push(88)
+            Poll.Ready(())
+        case _: fail("another scheduler's local task zero cannot borrow this context")
+
+fn epoch_task() -> Poll<()>:
+    val cx_lookup = scheduler.task_context(owner_id)
+    val cx = cx_lookup.unwrap()
+    val first = match mutex.poll_acquire(cx):
+        case Poll.Ready(Ok(lease)): lease
+        case _: fail("first acquire")
+    expect(mutex.release(first)).to_equal(true)
+    val second = match mutex.poll_acquire(cx):
+        case Poll.Ready(Ok(lease)): lease
+        case _: fail("reacquire")
+    expect(mutex.release(first)).to_equal(false)
+    expect(mutex.release(second)).to_equal(true)
+    Poll.Ready(())
+
+fn closing_waiter_task() -> Poll<()>:
+    val cx_lookup = scheduler.task_context(waiter_id)
+    val cx = cx_lookup.unwrap()
+    match mutex.poll_acquire(cx):
+        case Poll.Pending:
+            visits = visits.push(50)
+            Poll.Pending
+        case Poll.Ready(Err(_)):
+            visits = visits.push(51)
+            Poll.Ready(())
+        case _: fail("closing waiter may not acquire")
+
+var reentrant_polls: i64 = 0
+var parked_polls: i64 = 0
+
+fn reentrant_wake_task() -> Poll<()>:
+    reentrant_polls = reentrant_polls + 1
+    if reentrant_polls == 1:
+        val cx_lookup = scheduler.task_context(owner_id)
+        val cx = cx_lookup.unwrap()
+        expect(cx.wake()).to_equal(true)
+        # This drains readiness while this task is still Running.
+        scheduler.has_runnable()
+        return Poll.Pending
+    Poll.Ready(())
+
+fn parked_worker_task() -> Poll<()>:
+    parked_polls = parked_polls + 1
+    Poll.Pending
+
+fn sequential_resources_task() -> Poll<()>:
+    val cx_lookup = scheduler.task_context(owner_id)
+    val cx = cx_lookup.unwrap()
+    for _ in 0..65:
+        var resource = AsyncMutex.hosted(1)
+        val lease = match resource.poll_acquire(cx):
+            case Poll.Ready(Ok(value)): value
+            case _: fail("released registrations must be reusable")
+        expect(resource.release(lease)).to_equal(true)
+        expect(resource.close()).to_equal(true)
+    expect(cx.cleanup_ids.len()).to_equal(0)
+    Poll.Ready(())
+
+describe "hosted mutex suspension and terminal cleanup":
+    it "parks contention while another task progresses and hands off FIFO":
+        step("Suspend a holder and two waiters, then run unrelated work")
+        setup_tasks()
+        scheduler.run()
+        expect(visits).to_equal([10, 20, 30, 99])
+        expect(owner_polls).to_equal(1)
+        expect(scheduler.tasks[waiter_id].state).to_equal(TaskState.Suspended)
+        expect(mutex.pending_count()).to_equal(2)
+        step("Cancel the suspended holder and resume both waiters in FIFO order")
+        expect(scheduler.cancel_task(owner_id)).to_equal(true)
+        scheduler.run()
+        expect(visits).to_equal([10, 20, 30, 99, 21, 31])
+        expect(mutex.pending_count()).to_equal(0)
+        expect(scheduler.cancel_task(owner_id)).to_equal(false)
+        expect(mutex.close()).to_equal(true)
+
+    it "unlinks a queued cancellation before holder cleanup":
+        step("Cancel the first queued waiter before releasing the owner")
+        setup_tasks()
+        scheduler.run()
+        expect(scheduler.cancel_task(waiter_id)).to_equal(true)
+        expect(mutex.pending_count()).to_equal(1)
+        expect(scheduler.cancel_task(owner_id)).to_equal(true)
+        scheduler.run()
+        expect(visits).to_equal([10, 20, 30, 99, 31])
+        expect(scheduler.tasks[waiter_id].state).to_equal(TaskState.Cancelled)
+        expect(mutex.close()).to_equal(true)
+
+    it "revokes a handed-off waiter before its next poll":
+        step("Grant the first waiter, cancel it before dispatch, preserve the successor")
+        setup_tasks()
+        scheduler.run()
+        expect(scheduler.cancel_task(owner_id)).to_equal(true)
+        expect(scheduler.cancel_task(waiter_id)).to_equal(true)
+        scheduler.run()
+        expect(visits).to_equal([10, 20, 30, 99, 31])
+        expect(mutex.pending_count()).to_equal(0)
+        expect(mutex.close()).to_equal(true)
+
+    it "rejects a retained lease after owner lifetime cleanup":
+        step("Retain an old lease across cancellation and subsequent handoff")
+        setup_tasks()
+        scheduler.run()
+        val stale = saved_lease.unwrap()
+        expect(scheduler.cancel_task(owner_id)).to_equal(true)
+        expect(mutex.release(stale)).to_equal(false)
+        scheduler.run()
+        expect(visits).to_equal([10, 20, 30, 99, 21, 31])
+        expect(mutex.close()).to_equal(true)
+
+    it "cleans a held lease on ordinary task completion":
+        step("Suspend tasks, wake the holder, and complete without manual release")
+        setup_tasks()
+        scheduler.run()
+        finish_holder = true
+        val cx_lookup = scheduler.task_context(owner_id)
+        val cx = cx_lookup.unwrap()
+        expect(cx.wake()).to_equal(true)
+        expect(cx.wake()).to_equal(true)
+        scheduler.run()
+        expect(visits).to_equal([10, 20, 30, 99, 11, 21, 31])
+        expect(scheduler.tasks[owner_id].state).to_equal(TaskState.Completed)
+        expect(cx.wake()).to_equal(false)
+        expect(scheduler.reap_task(owner_id)).to_equal(true)
+        expect(scheduler.reap_task(owner_id)).to_equal(false)
+        expect(mutex.close()).to_equal(true)
+
+    it "refuses a full waiter queue without retaining or parking rejected work":
+        step("Admit one waiter and refuse the next task at capacity")
+        scheduler = HostScheduler.new(1)
+        mutex = AsyncMutex.hosted(1)
+        visits = []
+        owner_polls = 0
+        finish_holder = false
+        owner_id = scheduler.schedule(Priority.Normal, holding_task)
+        waiter_id = scheduler.schedule(Priority.Normal, waiting_task)
+        second_id = scheduler.schedule(Priority.Normal, refused_task)
+        scheduler.run()
+        expect(visits).to_equal([10, 20, 40])
+        expect(mutex.pending_count()).to_equal(1)
+        expect(scheduler.tasks[second_id].state).to_equal(TaskState.Completed)
+        expect(scheduler.cancel_task(owner_id)).to_equal(true)
+        scheduler.run()
+        expect(visits).to_equal([10, 20, 40, 21])
+        expect(mutex.close()).to_equal(true)
+
+    it "keeps equal local task IDs in different schedulers separate":
+        step("Try to use the first scheduler's context inside a second scheduler")
+        setup_tasks()
+        scheduler.run()
+        val foreign_lookup = scheduler.task_context(owner_id)
+        foreign_context = Some(foreign_lookup.unwrap())
+        var other = HostScheduler.new(1)
+        expect(other.schedule(Priority.Normal, foreign_task)).to_equal(owner_id)
+        other.run()
+        expect(visits).to_equal([10, 20, 30, 99, 88])
+        expect(mutex.pending_count()).to_equal(2)
+        expect(scheduler.cancel_task(owner_id)).to_equal(true)
+        scheduler.run()
+        expect(visits).to_equal([10, 20, 30, 99, 88, 21, 31])
+        expect(mutex.close()).to_equal(true)
+
+    it "does not authorize a previous grant when the same task reacquires":
+        step("Release, reacquire, and present the old epoch from the same task")
+        scheduler = HostScheduler.new(1)
+        mutex = AsyncMutex.hosted(1)
+        owner_id = scheduler.schedule_on_worker(0, epoch_task)
+        scheduler.run()
+        expect(scheduler.tasks[owner_id].state).to_equal(TaskState.Completed)
+        expect(mutex.pending_count()).to_equal(0)
+        expect(mutex.close()).to_equal(true)
+        expect(mutex.close()).to_equal(false)
+
+    it "wakes queued tasks to observe terminal close refusal":
+        step("Close after parking; both queued polls must terminate with an error")
+        scheduler = HostScheduler.new(1)
+        mutex = AsyncMutex.hosted(1)
+        visits = []
+        owner_polls = 0
+        finish_holder = false
+        owner_id = scheduler.schedule(Priority.Normal, holding_task)
+        # First poll parks, second poll observes terminal close.
+        waiter_id = scheduler.schedule(Priority.Normal, closing_waiter_task)
+        scheduler.run()
+        expect(mutex.pending_count()).to_equal(1)
+        expect(mutex.close()).to_equal(true)
+        expect(scheduler.cancel_task(owner_id)).to_equal(true)
+        scheduler.run()
+        expect(visits).to_equal([10, 50, 51])
+        expect(mutex.pending_count()).to_equal(0)
+
+    it "preserves a wake drained by a reentrant query during its own poll":
+        step("Wake the Running task, query the scheduler reentrantly, then return Pending")
+        scheduler = HostScheduler.new(1)
+        reentrant_polls = 0
+        owner_id = scheduler.schedule(Priority.Normal, reentrant_wake_task)
+        scheduler.run()
+        expect(reentrant_polls).to_equal(2)
+        expect(scheduler.tasks[owner_id].state).to_equal(TaskState.Completed)
+        expect(scheduler.reap_task(owner_id)).to_equal(true)
+
+    it "does not requeue the waiter granted during dead-owner recovery":
+        step("Cancel the holder token directly and independently wake the first queued waiter")
+        setup_tasks()
+        scheduler.run()
+        val owner_lookup = scheduler.task_context(owner_id)
+        val owner = owner_lookup.unwrap()
+        owner.lifetime.cancel()
+        val first_lookup = scheduler.task_context(waiter_id)
+        val first = first_lookup.unwrap()
+        expect(first.wake()).to_equal(true)
+        scheduler.run()
+        expect(visits).to_equal([10, 20, 30, 99, 21, 31])
+        expect(mutex.pending_count()).to_equal(0)
+        expect(scheduler.tasks[waiter_id].state).to_equal(TaskState.Completed)
+        expect(scheduler.tasks[second_id].state).to_equal(TaskState.Completed)
+        expect(scheduler.cancel_task(owner_id)).to_equal(true)
+        expect(mutex.close()).to_equal(true)
+
+    it "admits one worker queue entry and never repolls an unwoken parked task":
+        step("Schedule through the worker path and drain all runnable queues")
+        scheduler = HostScheduler.new(1)
+        parked_polls = 0
+        owner_id = scheduler.schedule_on_worker(0, parked_worker_task)
+        scheduler.run()
+        expect(parked_polls).to_equal(1)
+        expect(scheduler.tasks[owner_id].state).to_equal(TaskState.Suspended)
+        expect(scheduler.cancel_task(owner_id)).to_equal(true)
+
+    it "reuses resource registrations across more than sixty-four sequential locks":
+        step("Acquire, release and close each resource within one live task")
+        scheduler = HostScheduler.new(1)
+        owner_id = scheduler.schedule(Priority.Normal, sequential_resources_task)
+        scheduler.run()
+        expect(scheduler.tasks[owner_id].state).to_equal(TaskState.Completed)
+
+    it "reports finite ordinary scheduling refusal and recovers without publishing a phantom task":
+        step("Fill token storage, refuse both scheduling forms, then reclaim one slot")
+        val before = cancellation_registry_live_count()
+        var tokens: [CancellationToken] = []
+        val available = cancellation_registry_capacity() - before
+        for _ in 0..available:
+            tokens = tokens.push(token_new())
+        scheduler = HostScheduler.new(1)
+        expect(scheduler.schedule(Priority.Normal, independent_task)).to_equal(9223372036854775807)
+        val refused = scheduler.try_schedule(Priority.Normal, independent_task)
+        expect(refused.is_err()).to_equal(true)
+        expect(scheduler.tasks.len()).to_equal(0)
+        expect(scheduler.has_runnable()).to_equal(false)
+        expect(tokens[0].release()).to_equal(true)
+        visits = []
+        val admission = scheduler.try_schedule(Priority.Normal, independent_task)
+        val admitted = admission.unwrap()
+        expect(admitted).to_equal(0)
+        scheduler.run()
+        expect(visits).to_equal([99])
+        for index in 1..tokens.len():
+            expect(tokens[index].release()).to_equal(true)
+        expect(cancellation_registry_live_count()).to_equal(before)
+
+    it "keeps the existing multithreaded mode queue selection usable on its owner carrier":
+        step("Use the real multithreaded scheduler constructor and worker admission path")
+        scheduler = HostScheduler.new_multi_threaded(1)
+        visits = []
+        expect(scheduler.is_multi_threaded()).to_equal(true)
+        owner_id = scheduler.schedule_on_worker(0, independent_task)
+        scheduler.run()
+        expect(visits).to_equal([99])
+        expect(scheduler.tasks[owner_id].state).to_equal(TaskState.Completed)
