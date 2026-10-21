@@ -81,8 +81,8 @@ pass "admitted image $IMAGE"
 
 if [ "$MODE" != --smoke ] && [ ! -f "$SYSROOT/usr/lib/crt1.o" ]; then
     base="https://download.freebsd.org/releases/riscv/riscv64/${VER}-RELEASE"
-    curl -fsSL --retry 3 -o "$WORK/MANIFEST" "$base/MANIFEST"
-    curl -fL --retry 3 -o "$WORK/base.txz" "$base/base.txz"
+    curl -fsSL --retry 3 -o "$WORK/MANIFEST" "$base/MANIFEST" || fail "MANIFEST download failed"
+    curl -fL --retry 3 -o "$WORK/base.txz" "$base/base.txz" || fail "base.txz download failed"
     want="$(awk '$1 == "base.txz" {print $2}' "$WORK/MANIFEST")"
     [ -n "$want" ] && [ "$(hash_file "$WORK/base.txz")" = "$want" ] || fail "base.txz sha256 does not match MANIFEST"
     rm -rf "$SYSROOT" && mkdir -p "$SYSROOT"
@@ -97,7 +97,12 @@ if [ "$MODE" != --smoke ]; then
     # The repo replaces crates-io with ./vendor, which lacks std's own deps;
     # merge std's vendored deps into a side directory for -Zbuild-std.
     STD_VENDOR="$WORK/std-vendor"; MERGED="$WORK/merged-vendor"
-    [ -d "$STD_VENDOR" ] || (cd "$RUST_SRC" && cargo "+$TOOLCHAIN" vendor -q --versioned-dirs "$STD_VENDOR" >/dev/null)
+    if [ ! -d "$STD_VENDOR" ]; then
+        rm -rf "$STD_VENDOR.part"
+        (cd "$RUST_SRC" && cargo "+$TOOLCHAIN" vendor -q --versioned-dirs "$STD_VENDOR.part" >/dev/null) ||
+            fail "cargo vendor of std dependencies failed"
+        mv "$STD_VENDOR.part" "$STD_VENDOR"
+    fi
     rm -rf "$MERGED" && mkdir -p "$MERGED"
     for d in "$ROOT_DIR"/src/compiler_rust/vendor/* "$STD_VENDOR"/*; do
         [ -e "$MERGED/$(basename "$d")" ] || ln -s "$d" "$MERGED/$(basename "$d")"
@@ -124,7 +129,7 @@ fi
 printf '[4] Boot (OpenSBI -> U-Boot -> FreeBSD) and provision SSH\n'
 OVERLAY="$WORK/run.overlay.qcow2"; CONSOLE="$WORK/console.log"; EXP="$WORK/provision.exp"
 rm -f "$OVERLAY" "$CONSOLE"
-qemu-img create -q -f qcow2 -b "$IMAGE" -F qcow2 "$OVERLAY" 40G
+qemu-img create -q -f qcow2 -b "$IMAGE" -F qcow2 "$OVERLAY" 40G || fail "overlay creation failed"
 cat > "$EXP" <<'EOF'
 set timeout 3600
 set pub [exec cat $env(PUB)]
@@ -170,13 +175,17 @@ pass "guest: $UNAME"
 
 # ── Phase 0: seed runs in guest ───────────────────────────────────────────
 printf '[5] Phase 0: sync sources + seed, seed --version in guest\n'
-(cd "$ROOT_DIR" && tar -cf - --exclude=src/compiler_rust src config VERSION release) |
-    guest 'mkdir -p /root/simple && tar -xf - -C /root/simple' || fail "source sync failed"
+SRC_TAR="$WORK/src.tar"
+(cd "$ROOT_DIR" && tar -cf "$SRC_TAR" --exclude=src/compiler_rust src config VERSION release) || fail "source tar failed"
+guest 'mkdir -p /root/simple && tar -xf - -C /root/simple' <"$SRC_TAR" || fail "source sync failed"
+rm -f "$SRC_TAR"
 guest 'mkdir -p /root/simple/src/compiler_rust/target/bootstrap'
 scp -q $SSH_OPTS -P "$QEMU_PORT" "$SEED_DIR/simple" "$SEED_DIR/libsimple_native_all.a" \
     root@127.0.0.1:/root/simple/src/compiler_rust/target/bootstrap/ || fail "seed copy failed"
-SEED_VERSION="$(guest 'cd /root/simple && ./src/compiler_rust/target/bootstrap/simple --version 2>/dev/null | tail -1')" ||
+SEED_VERSION="$(guest 'cd /root/simple && ./src/compiler_rust/target/bootstrap/simple --version 2>/dev/null')" ||
     fail "seed does not run in guest"
+case "$SEED_VERSION" in *"Simple Language v"*) ;; *) fail "seed --version printed no version: $SEED_VERSION" ;; esac
+SEED_VERSION="$(printf '%s\n' "$SEED_VERSION" | grep 'Simple Language v')"
 pass "seed in guest: $SEED_VERSION"
 [ "$MODE" = --phase0 ] && { printf 'PASS — phase0: Rust seed runs on FreeBSD %s riscv64\n' "$VER"; exit 0; }
 
@@ -191,7 +200,8 @@ SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDIN
 rc=$?
 set -e
 [ "$rc" -eq 0 ] || fail "stage1 native-build exit $rc (log: $WORK/stage1.log)"
-STAGE1_VERSION="$(guest 'cd /root/simple && ./build/bootstrap/stage1/simple --version 2>&1 | tail -1')" ||
+STAGE1_VERSION="$(guest 'cd /root/simple && ./build/bootstrap/stage1/simple --version 2>/dev/null')" ||
     fail "stage1 binary does not run (log: $WORK/stage1.log)"
+case "$STAGE1_VERSION" in *[0-9].[0-9]*) ;; *) fail "stage1 --version printed no version: $STAGE1_VERSION" ;; esac
 pass "stage1: $STAGE1_VERSION"
 printf 'PASS — phase1: stage1 built and runs on FreeBSD %s riscv64\n' "$VER"
