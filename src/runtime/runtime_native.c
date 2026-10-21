@@ -14264,13 +14264,67 @@ int64_t rt_path_join(
     return result;
 }
 
+#if defined(_WIN32)
+/* Environment names and values are UTF-8 at this boundary, never ACP bytes. */
+static wchar_t* native_env_widen(const char* value) {
+    int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, NULL, 0);
+    if (count <= 0) return NULL;
+    wchar_t* wide = (wchar_t*)malloc((size_t)count * sizeof(wchar_t));
+    if (!wide) return NULL;
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, wide, count)) {
+        free(wide);
+        return NULL;
+    }
+    return wide;
+}
+
+static int64_t native_host_text_from_wide(const wchar_t* wide, DWORD length) {
+    if (length == 0) return rt_string_new((const uint8_t*)"", 0);
+    if (length > INT_MAX) return rt_core_nil();
+    int bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, (int)length, NULL, 0, NULL, NULL);
+    if (bytes <= 0) return rt_core_nil();
+    uint8_t* utf8 = (uint8_t*)malloc((size_t)bytes);
+    if (!utf8) return rt_core_nil();
+    int converted = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, (int)length, (char*)utf8, bytes, NULL, NULL);
+    int64_t result = converted == bytes ? rt_string_new(utf8, (uint64_t)bytes) : rt_core_nil();
+    free(utf8);
+    return result;
+}
+#endif
+
 static int64_t rt_env_get_cstr(const char* key) {
     if (!key) return rt_core_nil();
+#if defined(_WIN32)
+    wchar_t* wide_key = native_env_widen(key);
+    if (!wide_key) return rt_core_nil();
+    SetLastError(ERROR_SUCCESS);
+    DWORD capacity = GetEnvironmentVariableW(wide_key, NULL, 0);
+    if (capacity == 0) {
+        DWORD error = GetLastError();
+        free(wide_key);
+        return error == ERROR_SUCCESS ? rt_string_new((const uint8_t*)"", 0) : rt_core_nil();
+    }
+    wchar_t* wide = (wchar_t*)malloc((size_t)capacity * sizeof(wchar_t));
+    if (!wide) { free(wide_key); return rt_core_nil(); }
+    SetLastError(ERROR_SUCCESS);
+    DWORD length = GetEnvironmentVariableW(wide_key, wide, capacity);
+    DWORD read_error = GetLastError();
+    free(wide_key);
+    if (length >= capacity) { free(wide); return rt_core_nil(); }
+    if (length == 0) {
+        DWORD error = read_error;
+        free(wide);
+        return error == ERROR_SUCCESS ? rt_string_new((const uint8_t*)"", 0) : rt_core_nil();
+    }
+    int64_t result = native_host_text_from_wide(wide, length);
+    free(wide);
+    return result;
+#else
     const char* value = getenv(key);
     if (!value) return rt_core_nil();
     return rt_string_new((const uint8_t*)value, (uint64_t)strlen(value));
+#endif
 }
-
 int64_t rt_env_get(const uint8_t* key_ptr, uint64_t key_len) {
     char* key = rt_core_text_arg_to_cstr(key_ptr, key_len);
     int64_t result = rt_env_get_cstr(key);
@@ -14382,7 +14436,16 @@ bool rt_env_set(const uint8_t* key_ptr, uint64_t key_len, const uint8_t* value_p
         return false;
     }
 #if defined(_WIN32)
-    bool ok = rt_win_env_fits(key, value) && _putenv_s(key, value) == 0;
+    wchar_t* wide_key = native_env_widen(key);
+    wchar_t* wide_value = native_env_widen(value);
+    bool ok = wide_key && wide_value && rt_win_env_fits(key, value);
+    /* CRT's empty assignment deletes; restore the actual Win32 empty value. */
+    if (ok) {
+        ok = _wputenv_s(wide_key, wide_value) == 0;
+        if (ok) ok = SetEnvironmentVariableW(wide_key, wide_value) != 0;
+    }
+    free(wide_key);
+    free(wide_value);
 #else
     bool ok = setenv(key, value, 1) == 0;
 #endif
@@ -14401,8 +14464,13 @@ int8_t rt_env_remove(const uint8_t* key_ptr, uint64_t key_len) {
     char* key = rt_core_text_arg_to_cstr(key_ptr, key_len);
     if (!key) return 0;
 #if defined(_WIN32)
-    /* Windows deletes a variable by assigning it an empty value. */
-    bool ok = _putenv_s(key, "") == 0;
+    wchar_t* wide_key = native_env_widen(key);
+    bool ok = wide_key && rt_win_env_fits(key, "");
+    if (ok) {
+        ok = _wputenv_s(wide_key, L"") == 0;
+        if (ok) ok = SetEnvironmentVariableW(wide_key, NULL) != 0 || GetLastError() == ERROR_ENVVAR_NOT_FOUND;
+    }
+    free(wide_key);
 #else
     bool ok = unsetenv(key) == 0;
 #endif
@@ -15189,12 +15257,24 @@ int rt_file_move(const uint8_t* src_ptr, uint64_t src_len,
  * rejected it ("probable compiler/FFI ABI mismatch"), so a perfectly good cwd
  * read back as garbage/empty -- see the rt_file_read_text sibling. */
 int64_t rt_env_cwd(void) {
+#if defined(_WIN32)
+    DWORD capacity = GetCurrentDirectoryW(0, NULL);
+    if (!capacity) return rt_core_nil();
+    wchar_t* wide = (wchar_t*)malloc((size_t)capacity * sizeof(wchar_t));
+    if (!wide) return rt_core_nil();
+    DWORD length = GetCurrentDirectoryW(capacity, wide);
+    int64_t result = length > 0 && length < capacity ?
+        native_host_text_from_wide(wide, length) : rt_core_nil();
+    free(wide);
+    return result;
+#else
     char* cwd = rt_getcwd();
     /* RT_NIL == 3 (TAG_SPECIAL, payload 0); == RuntimeValue::NIL. */
     if (!cwd) return 3;
     int64_t result = rt_string_new((const uint8_t*)cwd, (uint64_t)strlen(cwd));
     free(cwd);
     return result;
+#endif
 }
 
 /* () -> RuntimeValue, per runtime_sffi.rs:1791.  Used to return a pointer into

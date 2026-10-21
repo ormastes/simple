@@ -282,7 +282,9 @@ pub unsafe extern "C" fn rt_env_cwd() -> RuntimeValue {
     let Ok(cwd) = std::env::current_dir() else {
         return RuntimeValue::NIL;
     };
-    let text = cwd.to_string_lossy();
+    let Some(text) = cwd.to_str() else {
+        return RuntimeValue::NIL;
+    };
     rt_string_new(text.as_ptr(), text.len() as u64)
 }
 
