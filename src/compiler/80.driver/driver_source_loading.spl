@@ -435,7 +435,7 @@ fn _driver_module_name_from_repo_rel(rel: text) -> text:
         segs = segs.push(part)
     segs.join(".")
 
-fn _driver_physical_module_name(path: text, fallback: text) -> text:
+fn _driver_physical_module_identity(path: text, fallback: text) -> (text, bool):
     """Module name derived from the SYMLINK-RESOLVED path.
     `_driver_module_name_from_path` is lexical, so a file reached through
     `src/compiler/frontend` and the same file reached through
@@ -445,12 +445,14 @@ fn _driver_physical_module_name(path: text, fallback: text) -> text:
     mis-split when the checkout itself lives under a `.../src/...` directory).
     Falls back to the lexical name whenever the file cannot be proven to be a
     repo-relative `src/` or `examples/` source — out-of-tree entries keep their
-    existing names."""
+    existing names. Return that root-membership decision with the name so
+    alias folding cannot mistake an external `/src/` substring for a repo
+    tier. Both values come from this one physical-root proof."""
     var resolved = ""
     unsafe(capabilities: [ffi]):
         resolved = rt_path_absolute(path) ?? ""
     if resolved == "":
-        return fallback
+        return (fallback, false)
     var root = ""
     if driver_admitted_epoch_active_v1():
         root = driver_admitted_epoch_root_v1()
@@ -459,13 +461,13 @@ fn _driver_physical_module_name(path: text, fallback: text) -> text:
         unsafe(capabilities: [ffi]):
             root = rt_path_absolute(".") ?? ""
     if root == "":
-        return fallback
+        return (fallback, false)
     if not resolved.starts_with(root + "/"):
-        return fallback
+        return (fallback, false)
     val rel = resolved.substring(root.len() + 1)
     if not rel.starts_with("src/") and not rel.starts_with("examples/"):
-        return fallback
-    _driver_module_name_from_repo_rel(rel)
+        return (fallback, false)
+    (_driver_module_name_from_repo_rel(rel), true)
 
 fn _driver_push_unique_module_name(names: [text], name: text) -> [text]:
     """Append a spelling once. Alias lists are a handful of entries, so a linear
@@ -513,13 +515,17 @@ fn _driver_module_aliases_with_closure(
     `_driver_entry_closure_mode`. The legacy branches further down therefore
     apply only when the mode is off."""
     if entry_closure:
-        val physical = _driver_physical_module_name(path, module_name)
-        val canonical = _driver_canonical_module_name(physical)
+        val (physical, repository_source) = _driver_physical_module_identity(path, module_name)
+        # Fold numeric tier aliases only after the physical source has been
+        # proven to belong to the repository root. External `dot.1` / `dot.2`
+        # sources keep distinct names matching LLVM's requested entry name.
+        val canonical = if repository_source: _driver_canonical_module_name(physical) else: physical
         var names: [text] = []
         names = _driver_push_unique_module_name(names, canonical)
         names = _driver_push_unique_module_name(names, module_name)
         names = _driver_push_unique_module_name(names, physical)
-        names = _driver_push_unique_module_name(names, _driver_canonical_module_name(module_name))
+        if repository_source:
+            names = _driver_push_unique_module_name(names, _driver_canonical_module_name(module_name))
         # `src/std -> lib`: a file actually walked THROUGH the symlink derives a
         # `std.*` spelling, and both twins must then exist so sibling lookup can
         # cross them. CONDITIONAL on this file really having a `std.` spelling

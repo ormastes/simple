@@ -1,0 +1,52 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use app.cli.native_build_closure_roots.{native_build_closure_roots_v1}
+use compiler.driver.driver_build.native_entry_closure_receipt.*
+
+fn root_format_binding(roots: [text]) -> NativeEntryClosureBindingV1:
+    NativeEntryClosureBindingV1("revision", "commit", "tree", sha256_text("inventory"),
+        "src/app/main.spl", roots, sha256_text("policy"), sha256_text("producer"))
+
+describe "parse closure producer canonical source selectors":
+    it "binds checkout absolute, snapshot absolute and relative roots identically":
+        val checkout = "/owned/checkout"
+        val snapshot = "/owned/cache/snapshot"
+        val relative = ["src/compiler", "src/app", "src/lib", "src/os", "src/plugins", "src/app/main.spl"]
+        var absolute: [text] = []
+        var frozen: [text] = []
+        for root in relative:
+            absolute = absolute.push(checkout + "/" + root)
+            frozen = frozen.push(snapshot + "/" + root)
+        val canonical = native_build_closure_roots_v1(checkout, snapshot, absolute).unwrap()
+        expect(canonical).to_equal(relative)
+        expect(native_build_closure_roots_v1(checkout, snapshot, frozen).unwrap()).to_equal(relative)
+        expect(native_build_closure_roots_v1(checkout, snapshot, relative).unwrap()).to_equal(relative)
+        val binding = root_format_binding(canonical)
+        val digest = native_entry_closure_binding_digest_v1(binding).unwrap()
+        expect(digest).to_equal(native_entry_closure_binding_digest_v1(root_format_binding(relative)).unwrap())
+        val selection = NativeEntryClosureSelectionV1(digest, [binding.entry], [sha256_text("entry")], [5])
+        expect(native_entry_closure_validate_selection_v1(binding, selection,
+            selection.identities, selection.digests, selection.byte_counts).is_ok()).to_equal(true)
+        # The receipt owner still refuses raw absolute selectors.
+        expect(native_entry_closure_binding_digest_v1(root_format_binding(absolute)).is_err()).to_equal(true)
+
+    it "refuses foreign, prefix sibling, traversal and unbounded selectors":
+        for unsafe_root in ["/outside/src/lib", "/owned/checkout-other/src/lib",
+                "/owned/cache/snapshot-other/src/lib", "/owned/checkout", "/owned/cache/snapshot",
+                "../src/lib", "/owned/checkout/src/../lib", "src/../lib", "", ".",
+                "src|lib", "src\nlib", "src\rlib", "src\tlib", "D:/outside/src/lib"]:
+            expect(native_build_closure_roots_v1("/owned/checkout", "/owned/cache/snapshot",
+                [unsafe_root]).is_err()).to_equal(true)
+        expect(native_build_closure_roots_v1("/owned/checkout", "/owned/cache/snapshot", []).is_err()).to_equal(true)
+        expect(native_build_closure_roots_v1("", "/owned/cache/snapshot", ["src/lib"]).is_err()).to_equal(true)
+        expect(native_build_closure_roots_v1("/owned/checkout", "", ["src/lib"]).is_err()).to_equal(true)
+
+    it "preserves ordered duplicate selectors and rejects unproven derived roots":
+        val roots = ["src/lib", "src/app", "src/lib"]
+        expect(native_build_closure_roots_v1("/owned/checkout", "/owned/cache/snapshot", roots).unwrap()).to_equal(roots)
+        val ordered = native_entry_closure_binding_digest_v1(root_format_binding(roots)).unwrap()
+        val reordered = native_entry_closure_binding_digest_v1(root_format_binding(
+            ["src/app", "src/lib", "src/lib"])).unwrap()
+        expect(ordered == reordered).to_equal(false)
+        expect(native_build_closure_roots_v1("/owned/checkout", "/owned/cache/snapshot",
+            ["build/unproven/compositions/cuda-forged"]).is_err()).to_equal(true)
