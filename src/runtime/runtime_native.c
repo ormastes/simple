@@ -3008,17 +3008,23 @@ int8_t rt_transient_heap_promote(int64_t value) {
     RtCoreTransientNode root;
     int root_class = rt_core_transient_classify(value, &root);
     if (root_class == 0 && rt_core_is_heap(value)) {
-        /* A registered heap string that is not transient-owned is already
+        /* A registered heap object that is not transient-owned is already
          * persistent: promotion is a no-op, not a failure. HIR phase memos
          * keep text fields that alias persistent strings
          * (glob_reachable_importer_owner = module_filename, set before the
          * per-file scope), and treating those as failures made every retained
          * HIR lowering fail "HIR phase memo ownership promotion failed"
-         * (Windows stage-2, 2026-09-25). Arrays/dicts/enums/closures still
-         * classify as 1 and walk normally; anything unregistered still fails. */
+         * (Windows stage-2, 2026-09-25). 2026-10-22 (Linux aarch64 stage-2
+         * sanity): the same class covers module-global parse metadata arrays
+         * (UNSAFE_ANNOTATIONS / ENUM_ATTRIBUTES / ENUM_OPEN_REGIONS) reset to
+         * fresh process-immortal arrays by driver_end_transient_parse_scope:
+         * a file with no enum/annotation content promotes an empty immortal
+         * array, which classified as 0 and aborted the whole retained parse
+         * with "transient retained parser ownership failed". Any registered
+         * immortal kind is a valid no-op; anything unregistered still fails.
+         * See doc/08_tracking/bug/stage2_sanity_transient_parser_ownership_panic_2026_10_22.md */
         void* root_ptr = (void*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
-        if (rt_core_is_registered_immortal_ptr(root_ptr) &&
-                rt_core_registered_object_kind(root_ptr) == RT_VALUE_HEAP_STRING) {
+        if (rt_core_is_registered_immortal_ptr(root_ptr)) {
             rt_core_heap_lifecycle_release();
             return 1;
         }
