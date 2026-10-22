@@ -3029,6 +3029,19 @@ int8_t rt_transient_heap_promote(int64_t value) {
             return 1;
         }
     }
+    if (root_class == 0 && !rt_core_is_heap(value)) {
+        /* Scalars, nil optionals and by-value struct copies (e.g. Span.empty()
+         * passed through the generic T extern) own no transient heap state:
+         * there is no scope-owned tag to retag, so promotion is a no-op
+         * success, not a failure. 2026-10-22: without this, every file with
+         * no @representation block failed
+         * representation_parser_promote_transient_owner_v1 (nil pending
+         * optional + empty span) and the retained parse panicked
+         * "transient retained parser ownership failed" in the stage2 sanity.
+         * See doc/08_tracking/bug/stage2_sanity_transient_parser_ownership_panic_2026_10_22.md */
+        rt_core_heap_lifecycle_release();
+        return 1;
+    }
     int ok = root_class == 1 &&
         rt_core_transient_add(&plan, value) == 1;
     if (!ok && getenv("SIMPLE_TRANSIENT_PROMOTE_DEBUG")) {
