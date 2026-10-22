@@ -1,0 +1,269 @@
+# devhub messenger — MessengerReadPortV1 registry + stub adapter unit tests.
+#
+# Feature: DevHub messenger read-only access (plan §10.2, §6.4, §6.8, §11.2)
+# Category: DevHub, Messenger, Plugin
+# Status: Implemented
+#
+# Static registration with a lazy-load seam: admission is fail-closed (ABI,
+# interface major, duplicate provider, writable db port), the built-in DB
+# stub is truthful about having no capabilities, and every send attempt
+# through the read port answers CapabilityUnavailable.
+#
+# Source: src/app/devhub/messenger/plugin_access.spl
+
+use std.spec.{describe, it, expect}
+use app.devhub.messenger.config.{parse_messenger_config, MessengerTarget}
+use app.devhub.messenger.plugin_access.{
+    MessengerReadPortV1, MESSENGER_READ_PORT_ABI,
+    registry_admit, registry_find, registry_capabilities,
+    messenger_register_adapter, messenger_load_adapter,
+    messenger_stub_db_adapter, messenger_reset_adapters,
+    port_call_read, port_call_send,
+    MESSENGER_PORT_OK, MESSENGER_PORT_PERMISSION_DENIED,
+    MESSENGER_PORT_CAPABILITY_UNAVAILABLE
+}
+
+
+fn _db_target_sdn(name: text) -> text:
+    "messenger:\n" +
+    "    schema_version: 1\n" +
+    "\n" +
+    "messenger.{name}:\n" +
+    "    read_provider: sqlcipher4_database\n" +
+    "    send_provider: none\n" +
+    "\n" +
+    "messenger.{name}.db:\n" +
+    "    path: /home/user/messages.db\n" +
+    "    format: sqlcipher4\n" +
+    "    access: read_only\n" +
+    "    profile: sqlcipher4_4k_sha512\n" +
+    "    secret_ref: secret://messenger/{name}/db_key\n" +
+    "\n" +
+    "messenger.{name}.schema:\n" +
+    "    profile_id: {name}_v1\n" +
+    "    room_table: room\n" +
+    "    room_id: id\n" +
+    "    room_name: title\n" +
+    "    member_table: room_member\n" +
+    "    member_room_id: room_id\n" +
+    "    member_identity_id: member_id\n" +
+    "    message_table: messages\n" +
+    "    message_id: id\n" +
+    "    message_room_id: room_id\n" +
+    "    message_sender_id: sender_id\n" +
+    "    message_body: body\n" +
+    "    message_created_at: created_at\n" +
+    "    message_sequence: seq\n" +
+    "    timestamp_unit: ms\n" +
+    "    sequence_kind: monotonic_within_room\n"
+
+
+fn _api_target_sdn(name: text) -> text:
+    "messenger:\n" +
+    "    schema_version: 1\n" +
+    "\n" +
+    "messenger.{name}:\n" +
+    "    read_provider: api\n" +
+    "    send_provider: api\n" +
+    "\n" +
+    "messenger.{name}.api:\n" +
+    "    adapter: mattermost\n" +
+    "    endpoint: https://chat.example.org\n" +
+    "    credential_ref: secret://messenger/{name}/token\n"
+
+
+fn _db_target() -> MessengerTarget:
+    parse_messenger_config(_db_target_sdn("vault")).config.targets[0]
+
+
+fn _api_target() -> MessengerTarget:
+    parse_messenger_config(_api_target_sdn("chat")).config.targets[0]
+
+
+fn _fake_adapter() -> MessengerReadPortV1:
+    """A real-adapter-shaped port: one working verb, honest about the rest."""
+    MessengerReadPortV1(
+        abi: MESSENGER_READ_PORT_ABI,
+        provider_id: "messenger.fake_test",
+        provider_kind: "api",
+        semantic_version: "1.0.0",
+        interface_version: 1,
+        capabilities: ["list_rooms"],
+        permissions: [],
+        read_only: false,
+        unavailable_reason: ""
+    )
+
+
+describe "devhub messenger read-port registry (pure admission)":
+
+    it "admits a well-formed adapter":
+        val (ports, error) = registry_admit([], _fake_adapter())
+        expect(error).to_equal("")
+        expect(ports.len()).to_equal(1)
+
+    it "rejects a wrong ABI":
+        val bad = MessengerReadPortV1(
+            abi: "messenger.read.v2",
+            provider_id: "messenger.fake_test",
+            provider_kind: "api",
+            semantic_version: "1.0.0",
+            interface_version: 1,
+            capabilities: ["list_rooms"],
+            permissions: [],
+            read_only: false,
+            unavailable_reason: ""
+        )
+        val (ports, error) = registry_admit([], bad)
+        expect(ports.len()).to_equal(0)
+        expect(error.contains("admission rejected: abi")).to_be(true)
+
+    it "rejects an unsupported interface major":
+        val bad = MessengerReadPortV1(
+            abi: MESSENGER_READ_PORT_ABI,
+            provider_id: "messenger.fake_test",
+            provider_kind: "api",
+            semantic_version: "1.0.0",
+            interface_version: 2,
+            capabilities: ["list_rooms"],
+            permissions: [],
+            read_only: false,
+            unavailable_reason: ""
+        )
+        val (ports, error) = registry_admit([], bad)
+        expect(ports.len()).to_equal(0)
+        expect(error.contains("unsupported interface major 2")).to_be(true)
+
+    it "rejects a duplicate provider_id":
+        val (ports, error) = registry_admit([_fake_adapter()], _fake_adapter())
+        expect(ports.len()).to_equal(1)
+        expect(error.contains("already registered")).to_be(true)
+
+    it "rejects a writable-looking database adapter (capability closure, §6.8)":
+        val bad = MessengerReadPortV1(
+            abi: MESSENGER_READ_PORT_ABI,
+            provider_id: "messenger.sqlite3_database",
+            provider_kind: "sqlite3_database",
+            semantic_version: "1.0.0",
+            interface_version: 1,
+            capabilities: ["list_rooms"],
+            permissions: [],
+            read_only: false,
+            unavailable_reason: ""
+        )
+        val (ports, error) = registry_admit([], bad)
+        expect(ports.len()).to_equal(0)
+        expect(error.contains("must be read_only")).to_be(true)
+
+    it "finds adapters and reports truthful capabilities by kind":
+        expect(registry_find([], "api") == nil).to_be(true)
+        expect(registry_capabilities([], "api")).to_equal([])
+        val ports = registry_admit([], _fake_adapter()).0
+        expect(registry_capabilities(ports, "api")).to_equal(["list_rooms"])
+        expect(registry_capabilities(ports, "sqlcipher4_database")).to_equal([])
+
+
+describe "devhub messenger static registration + lazy seam":
+
+    it "the lazy seam serves the built-in DB stub with truthful (empty) capabilities":
+        messenger_reset_adapters()
+        val stub = messenger_load_adapter("sqlcipher4_database")
+        expect(stub == nil).to_be(false)
+        if val port = stub:
+            expect(port.capabilities.len()).to_equal(0)
+            expect(port.read_only).to_be(true)
+            expect(port.unavailable_reason).to_equal("codec-not-integrated")
+        else:
+            expect(true).to_be(false)
+
+    it "a registered adapter wins over the stub at the seam":
+        messenger_reset_adapters()
+        expect(messenger_register_adapter(_fake_adapter())).to_be(true)
+        val found = messenger_load_adapter("api")
+        expect(found == nil).to_be(false)
+        if val port = found:
+            expect(port.provider_id).to_equal("messenger.fake_test")
+        else:
+            expect(true).to_be(false)
+        messenger_reset_adapters()
+
+    it "registration fails closed on admission violations":
+        messenger_reset_adapters()
+        val bad = MessengerReadPortV1(
+            abi: MESSENGER_READ_PORT_ABI,
+            provider_id: "messenger.sqlite3_database",
+            provider_kind: "sqlite3_database",
+            semantic_version: "1.0.0",
+            interface_version: 1,
+            capabilities: ["list_rooms"],
+            permissions: [],
+            read_only: false,
+            unavailable_reason: ""
+        )
+        expect(messenger_register_adapter(bad)).to_be(false)
+        val stub = messenger_load_adapter("sqlite3_database")
+        expect(stub == nil).to_be(false)
+        if val port = stub:
+            expect(port.unavailable_reason).to_equal("codec-not-integrated")
+        else:
+            expect(true).to_be(false)
+        messenger_reset_adapters()
+
+
+describe "devhub messenger port invocation":
+
+    it "stub adapter: every read verb is CapabilityUnavailable(codec-not-integrated), exit 4":
+        messenger_reset_adapters()
+        val stub = messenger_load_adapter("sqlcipher4_database").?
+        val target = _db_target()
+        for op in ["list_rooms", "list_members", "history", "fetch_message"]:
+            val result = port_call_read(stub, target, op, "user")
+            expect(result.status).to_equal(MESSENGER_PORT_CAPABILITY_UNAVAILABLE)
+            expect(result.exit_code).to_equal(4)
+            expect(result.error).to_equal("codec-not-integrated")
+        messenger_reset_adapters()
+
+    it "unknown verbs are refused before any capability check":
+        messenger_reset_adapters()
+        val stub = messenger_load_adapter("sqlcipher4_database").?
+        val result = port_call_read(stub, _db_target(), "delete_everything", "user")
+        expect(result.status).to_equal(MESSENGER_PORT_CAPABILITY_UNAVAILABLE)
+        expect(result.error.contains("unsupported read verb")).to_be(true)
+        messenger_reset_adapters()
+
+    it "a registered adapter serves only its advertised verbs":
+        messenger_reset_adapters()
+        expect(messenger_register_adapter(_fake_adapter())).to_be(true)
+        val port = messenger_load_adapter("api").?
+        expect(port_call_read(port, _api_target(), "list_rooms", "user").status).to_equal(MESSENGER_PORT_OK)
+        val unadvertised = port_call_read(port, _api_target(), "history", "user")
+        expect(unadvertised.status).to_equal(MESSENGER_PORT_CAPABILITY_UNAVAILABLE)
+        expect(unadvertised.error).to_equal("history-unsupported by messenger.fake_test")
+        messenger_reset_adapters()
+
+    it "agent history access hits the body-access policy gate before capabilities":
+        messenger_reset_adapters()
+        expect(messenger_register_adapter(_fake_adapter())).to_be(true)
+        val port = messenger_load_adapter("api").?
+        val denied = port_call_read(port, _api_target(), "history", "agent")
+        expect(denied.status).to_equal(MESSENGER_PORT_PERMISSION_DENIED)
+        expect(denied.exit_code).to_equal(3)
+        expect(denied.error.contains("agent body access denied")).to_be(true)
+        messenger_reset_adapters()
+
+    it "send through a read port is CapabilityUnavailable for api sources":
+        messenger_reset_adapters()
+        val stub = messenger_load_adapter("sqlcipher4_database").?
+        val result = port_call_send(stub, _api_target())
+        expect(result.status).to_equal(MESSENGER_PORT_CAPABILITY_UNAVAILABLE)
+        expect(result.exit_code).to_equal(4)
+        expect(result.error).to_equal("send-not-integrated")
+        messenger_reset_adapters()
+
+    it "send through a read port is PermissionDenied for read-only sources":
+        messenger_reset_adapters()
+        val stub = messenger_load_adapter("sqlcipher4_database").?
+        val result = port_call_send(stub, _db_target())
+        expect(result.status).to_equal(MESSENGER_PORT_PERMISSION_DENIED)
+        expect(result.exit_code).to_equal(3)
+        messenger_reset_adapters()

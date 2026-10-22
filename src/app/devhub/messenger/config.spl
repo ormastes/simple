@@ -1,0 +1,1024 @@
+# devhub messenger — typed SDN parser/validator for ~/.config/devhub/messenger.sdn
+#
+# Plan: simple_devhub_sqlite_sqlcipher_messenger_master_plan_2026-10-21.md
+# §7.1 (file responsibilities / target resolution precedence), §7.2 (complete
+# grammar), §7.3 (locked-profile rejection), §12.2 (security invariants).
+#
+# The file uses the SAME flat dotted-section grammar as the existing
+# parse_sdn_sections (app.devhub.config) — messenger:<target>:,
+# messenger:<target>.db:, messenger:<target>.schema:,
+# messenger:<target>.policy:, messenger:<target>.api: — but applies NEW typed
+# validation on top (§7.2 implementation note): unknown keys, duplicate keys
+# (security fields called out by name), oversized values, invalid identifiers
+# and missing required fields are REJECTED, never silently coerced.
+#
+# Fail-closed posture (§7.1): this file grants nothing by itself. Secrets are
+# opaque secret_ref strings (validated shape, never read here); the db
+# `access` key accepts ONLY `read_only`, so a writable source handle is not
+# even representable (§6.8). The SQLCipher profile is the locked
+# `sqlcipher4_4k_sha512`; a divergent cipher field is rejected rather than
+# reinterpreted (§7.3).
+#
+# Target precedence (§7.1), implemented as a pure chain like
+# backend_resolve.pick_git_backend so the whole surface is offline-testable:
+#
+#   --target flag > DEVHUB_MESSENGER_TARGET > .spipe/config.sdn [devhub]
+#   messenger_target alias > messenger.sdn default_target > ERROR
+#
+# INTEGRATION (sibling lanes): nothing in this file opens a database. The db
+# subsection is validated configuration data consumed by
+# messenger/plugin_access.spl's adapter seam (sqlcipher4 codec / sqlite_format
+# pager lanes land behind that port).
+
+use app.devhub.config.{parse_sdn_sections, config_dir}
+use app.devhub.flags.{_extract_flag}
+use app.devhub.messenger.schema_profile.{
+    SchemaProfile, is_valid_sqlite_identifier, schema_profile_validate
+}
+use app.io.mod.{file_read, file_exists}
+use std.nogc_sync_mut.io.env_ops.{env_get, cwd}
+
+
+val MESSENGER_READ_PROVIDERS = ["sqlite3_database", "sqlcipher4_database", "api", "provider_specific"]
+val MESSENGER_SEND_PROVIDERS = ["none", "api"]
+val MESSENGER_CACHE_MODES = ["none", "separately_encrypted_owned_cache"]
+val MESSENGER_SYNC_POLICIES = ["on_demand", "manual"]
+val MESSENGER_DB_FORMATS = ["sqlite3", "sqlcipher4"]
+val MESSENGER_SNAPSHOT_MODES = ["consistent_live", "frozen_snapshot"]
+val MESSENGER_KEY_KINDS = ["passphrase", "raw_key"]
+val MESSENGER_TIMESTAMP_UNITS = ["s", "ms", "us", "iso8601"]
+val MESSENGER_BODY_STORAGE = ["text", "blob"]
+val MESSENGER_BODY_FORMATS = ["plain", "html", "thml", "markdown", "rich_json", "encrypted_opaque"]
+val MESSENGER_VISIBILITY_MODELS = ["member_rooms", "provider_scoped"]
+val MESSENGER_API_ADAPTERS = ["mattermost", "matrix", "zulip", "telegram_bot"]
+val MESSENGER_SOURCE_KINDS = ["external_owned_by_messenger", "provider_api"]
+
+# Fields whose repetition is a security event, not a typo (§7.2 "repeated
+# security fields"): duplicate detection reports these by name.
+val MESSENGER_SECURITY_KEYS = [
+    "secret_ref", "credential_ref", "key_kind", "cipher_kdf_iter",
+    "cipher_page_size", "cipher_kdf_algorithm", "cipher_hmac_algorithm"
+]
+
+val MESSENGER_MAX_VALUE_CHARS = 4096
+val MESSENGER_DEFAULT_MAX_TARGETS = 32
+val MESSENGER_DEFAULT_MAX_READ_BATCH = 200
+val MESSENGER_DEFAULT_MAX_ATTACHMENT_BYTES = 10485760
+
+# Locked SQLCipher 4 profile (plan §4.1 `sqlcipher4_4k_sha512`). A db block
+# that names this profile but diverges in any present cipher field is
+# rejected (§7.3) — a different parameter set must use a different profile ID.
+val MESSENGER_LOCKED_SQLCIPHER_PROFILE = "sqlcipher4_4k_sha512"
+
+
+class MessengerDbConfig:
+    path: text
+    format: text
+    access: text            # ONLY "read_only" is representable (§6.8)
+    snapshot_mode: text
+    profile: text
+    key_kind: text
+    secret_ref: text        # opaque ref (secret://...), NEVER a key value
+    cipher_page_size: i64
+    cipher_kdf_iter: i64
+    cipher_kdf_algorithm: text
+    cipher_hmac_algorithm: text
+    cipher_page_hmac: bool
+    cipher_hmac_pgno: text
+    cipher_reserved_bytes: i64
+    cipher_plaintext_header_bytes: i64
+    immutable: bool
+
+    static fn empty() -> MessengerDbConfig:
+        MessengerDbConfig(
+            path: "", format: "", access: "", snapshot_mode: "consistent_live",
+            profile: "", key_kind: "", secret_ref: "",
+            cipher_page_size: 4096, cipher_kdf_iter: 256000,
+            cipher_kdf_algorithm: "pbkdf2_hmac_sha512", cipher_hmac_algorithm: "hmac_sha512",
+            cipher_page_hmac: true, cipher_hmac_pgno: "little_endian",
+            cipher_reserved_bytes: 80, cipher_plaintext_header_bytes: 0,
+            immutable: false
+        )
+
+
+class MessengerApiConfig:
+    adapter: text
+    endpoint: text
+    credential_ref: text    # opaque ref (secret://...), NEVER a token value
+    read_scope: text
+    request_timeout_ms: i64
+    max_rate_per_minute: i64
+
+    static fn empty() -> MessengerApiConfig:
+        MessengerApiConfig(
+            adapter: "", endpoint: "", credential_ref: "", read_scope: "",
+            request_timeout_ms: 15000, max_rate_per_minute: 60
+        )
+
+
+class MessengerPolicy:
+    """Per-target access policy. EVERY grant defaults to false (§7.1
+    "defaults deny agent body access and send", §12.2 agent access)."""
+    current_identity: text
+    visibility_model: text
+    allow_export: bool
+    allow_remote_send: bool
+    send_room_allowlist: text      # "none" or comma-separated room identifiers
+    expose_message_body_to_agents: bool
+    allow_mark_read: bool
+    allow_live_presence: bool
+    allow_cache_plaintext: bool
+    max_read_batch: i64
+    max_attachment_bytes: i64
+
+    static fn deny_all() -> MessengerPolicy:
+        MessengerPolicy(
+            current_identity: "", visibility_model: "member_rooms",
+            allow_export: false, allow_remote_send: false,
+            send_room_allowlist: "none",
+            expose_message_body_to_agents: false,
+            allow_mark_read: false, allow_live_presence: false,
+            allow_cache_plaintext: false,
+            max_read_batch: MESSENGER_DEFAULT_MAX_READ_BATCH,
+            max_attachment_bytes: MESSENGER_DEFAULT_MAX_ATTACHMENT_BYTES
+        )
+
+
+class MessengerTarget:
+    """One named messenger target (§6.2 MessengerTarget)."""
+    name: text
+    read_provider: text     # sqlite3_database | sqlcipher4_database | api | provider_specific
+    send_provider: text     # none | api
+    send_enabled: bool
+    source_kind: text
+    schema_profile_name: text   # references messenger.<target>.schema profile_id
+    content_pipeline: text
+    cache_mode: text
+    sync_policy: text
+    db: MessengerDbConfig?
+    api: MessengerApiConfig?
+    schema: SchemaProfile?
+    policy: MessengerPolicy
+
+
+class MessengerPipeline:
+    """Content pipeline block (messenger.pipeline.<name>). Owned by the
+    content lane; validated for key shape here, passed through as data."""
+    name: text
+    version: i64
+    settings: [(text, text)]
+
+
+class MessengerConfig:
+    schema_version: i64
+    default_target: text
+    max_targets: i64
+    targets: [MessengerTarget]
+    pipelines: [MessengerPipeline]
+
+
+class MessengerParseResult:
+    """ok=false means the file is REJECTED — no partial trust. `problems`
+    carries every finding (fatal included) for doctor-style reporting."""
+    ok: bool
+    problems: [text]
+    config: MessengerConfig
+
+    static fn rejected(problems: [text], config: MessengerConfig) -> MessengerParseResult:
+        MessengerParseResult(ok: false, problems: problems, config: config)
+
+    static fn accepted(config: MessengerConfig) -> MessengerParseResult:
+        MessengerParseResult(ok: true, problems: [], config: config)
+
+
+# ============================================================================
+# Small typed-value helpers
+# ============================================================================
+
+fn _parse_bool(value: text) -> bool?:
+    val v = value.trim().lower()
+    if v == "true" or v == "yes" or v == "1":
+        return true
+    if v == "false" or v == "no" or v == "0":
+        return false
+    nil
+
+
+fn _parse_i64(value: text) -> i64?:
+    var digits = value.trim()
+    if digits == "":
+        return nil
+    var negative = false
+    if digits.starts_with("-"):
+        negative = true
+        digits = digits[1:]
+    if digits == "":
+        return nil
+    var n: i64 = 0
+    var i = 0
+    while i < digits.len():
+        val ch = digits[i:i + 1]
+        if ch < "0" or ch > "9":
+            return nil
+        n = n * 10 + (ch.to_i64() - "0".to_i64())
+        i = i + 1
+    if negative:
+        return -n
+    n
+
+
+fn _bool_text(value: bool) -> text:
+    if value:
+        return "true"
+    "false"
+
+
+fn _in_list(values: [text], want: text) -> bool:
+    for v in values:
+        if v == want:
+            return true
+    false
+
+
+fn _is_valid_target_name(name: text) -> bool:
+    """Target names: 1..63 chars of [A-Za-z0-9_-], first char alphanumeric.
+    'pipeline' is reserved (it owns the messenger.pipeline.<name> space)."""
+    if name == "" or name.len() > 63:
+        return false
+    if name == "pipeline" or name.starts_with("pipeline."):
+        return false
+    val first = name[0:1]
+    if not ((first >= "a" and first <= "z") or (first >= "A" and first <= "Z") or (first >= "0" and first <= "9")):
+        return false
+    var i = 1
+    while i < name.len():
+        val ch = name[i:i + 1]
+        if not ((ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or
+                (ch >= "0" and ch <= "9") or ch == "_" or ch == "-"):
+            return false
+        i = i + 1
+    true
+
+
+fn _is_valid_secret_ref(ref: text) -> bool:
+    """Opaque secret reference shape (§12.3): secret://<path>, no whitespace,
+    bounded. The value is NEVER resolved or read here."""
+    if not ref.starts_with("secret://"):
+        return false
+    if ref.len() > 512:
+        return false
+    if ref.contains(" ") or ref.contains("\t") or ref.contains("\n"):
+        return false
+    true
+
+
+# ============================================================================
+# Typed parser
+# ============================================================================
+
+fn _section_parts(section: text) -> [text]:
+    """'messenger.local_work.db' -> ['messenger', 'local_work', 'db'].
+    Split on EVERY dot (the live seed ignores a split limit anyway); the
+    grammar has at most 4 meaningful parts."""
+    section.split(".")
+
+
+fn _security_key(key: text) -> bool:
+    _in_list(MESSENGER_SECURITY_KEYS, key)
+
+
+fn _check_value_size(problems: [text], section: text, key: text, value: text) -> [text]:
+    if value.len() > MESSENGER_MAX_VALUE_CHARS:
+        return problems + ["oversized value for {section}.{key} ({value.len()} chars > {MESSENGER_MAX_VALUE_CHARS})"]
+    problems
+
+
+fn parse_messenger_config(content: text) -> MessengerParseResult:
+    """Parse and VALIDATE messenger.sdn content. Unknown messenger keys,
+    duplicate keys (security fields named), oversized values, invalid
+    identifiers and missing required fields all reject the file. Sections
+    outside the messenger namespace (plugin.*, other lanes) are ignored."""
+    val entries = parse_sdn_sections(content)
+    var problems: [text] = []
+    var seen: [(text, text)] = []
+
+    var schema_version: i64 = 0
+    var default_target = ""
+    var max_targets: i64 = MESSENGER_DEFAULT_MAX_TARGETS
+    var target_names: [text] = []
+    var pipeline_names: [text] = []
+
+    # ---- pass 1: classify sections, apply messenger-root keys --------------
+    for entry in entries:
+        val section = entry.0
+        val key = entry.1
+        val value = entry.2
+        if not (section == "messenger" or section.starts_with("messenger.")):
+            continue
+        val parts = _section_parts(section)
+        if parts.len() > 3 or (parts.len() > 1 and parts[1] == ""):
+            problems = problems + ["invalid messenger section name: '{section}'"]
+            continue
+        # duplicate detection across the whole messenger namespace
+        for prev in seen:
+            if prev.0 == section and prev.1 == key:
+                if _security_key(key):
+                    problems = problems + ["duplicate security field '{key}' in section '{section}'"]
+                else:
+                    problems = problems + ["duplicate key '{key}' in section '{section}'"]
+        seen = seen + [(section, key)]
+        problems = _check_value_size(problems, section, key, value)
+
+        if parts.len() == 1:
+            # messenger: schema_version | default_target | max_targets
+            if key == "schema_version":
+                if val n = _parse_i64(value):
+                    schema_version = n
+                else:
+                    problems = problems + ["invalid schema_version: '{value}'"]
+            else if key == "default_target":
+                default_target = value
+            else if key == "max_targets":
+                if val n = _parse_i64(value):
+                    max_targets = n
+                else:
+                    problems = problems + ["invalid max_targets: '{value}'"]
+            else:
+                problems = problems + ["unknown messenger key '{key}' in section 'messenger'"]
+        else if parts[1] == "pipeline":
+            # messenger.pipeline.<name>: content pipelines (content lane owns
+            # the semantics; we validate the key shape)
+            if parts.len() == 2:
+                problems = problems + ["unknown key '{key}' in section 'messenger.pipeline' (want messenger.pipeline.<name>)"]
+            else:
+                if not _in_list(pipeline_names, parts[2]):
+                    pipeline_names = pipeline_names + [parts[2]]
+        else:
+            # messenger.<target> or messenger.<target>.<subsection>
+            if not _in_list(target_names, parts[1]):
+                target_names = target_names + [parts[1]]
+            if parts.len() == 3:
+                if not _in_list(["db", "schema", "policy", "api"], parts[2]):
+                    problems = problems + ["unknown messenger subsection '{section}' (want messenger.<target>.db|schema|policy|api)"]
+
+    # ---- structural validation of names -----------------------------------
+    for name in target_names:
+        if not _is_valid_target_name(name):
+            problems = problems + ["invalid messenger target name: '{name}'"]
+
+    # ---- pass 2: per-target typed build ------------------------------------
+    var targets: [MessengerTarget] = []
+    for name in target_names:
+        val built = _build_target(name, entries)
+        targets = targets + [built.0]
+        for p in built.1:
+            problems = problems + [p]
+
+    # ---- pass 3: pipelines (key-shape validation, values passed through) ---
+    var pipelines: [MessengerPipeline] = []
+    val pipeline_keys = [
+        "version", "plugin_1", "plugin_2", "plugin_3", "output",
+        "content_mode", "charset_policy", "invalid_bytes",
+        "max_input_bytes", "max_output_bytes"
+    ]
+    for pname in pipeline_names:
+        var version: i64 = 0
+        var settings: [(text, text)] = []
+        for entry in entries:
+            if entry.0 == "messenger.pipeline.{pname}":
+                if _in_list(pipeline_keys, entry.1):
+                    settings = settings + [(entry.1, entry.2)]
+                    if entry.1 == "version":
+                        if val n = _parse_i64(entry.2):
+                            version = n
+                        else:
+                            problems = problems + ["invalid pipeline version for '{pname}': '{entry.2}'"]
+                else:
+                    problems = problems + ["unknown pipeline key '{entry.1}' in section 'messenger.pipeline.{pname}'"]
+        pipelines = pipelines + [MessengerPipeline(name: pname, version: version, settings: settings)]
+
+    # ---- file-level requirements -------------------------------------------
+    if target_names.len() > 0 and schema_version != 1:
+        problems = problems + ["missing or unsupported messenger schema_version (want 1, found {schema_version})"]
+    if target_names.len() > max_targets:
+        problems = problems + ["too many messenger targets ({target_names.len()} > max_targets {max_targets})"]
+    if default_target != "" and not _in_list(target_names, default_target):
+        problems = problems + ["default_target '{default_target}' does not name a declared target"]
+
+    val config = MessengerConfig(
+        schema_version: schema_version,
+        default_target: default_target,
+        max_targets: max_targets,
+        targets: targets,
+        pipelines: pipelines
+    )
+    if problems.len() > 0:
+        return MessengerParseResult.rejected(problems, config)
+    MessengerParseResult.accepted(config)
+
+
+fn _entries_for(entries: [(text, text, text)], section: text) -> [(text, text)]:
+    var out: [(text, text)] = []
+    for entry in entries:
+        if entry.0 == section:
+            out = out + [(entry.1, entry.2)]
+    out
+
+
+fn _build_target(name: text, entries: [(text, text, text)]) -> (MessengerTarget, [text]):
+    """Typed-build one target. Returns (target, problems); every field is
+    validated, and provider-kind requirements (db block for db sources, api
+    block for api sources) are enforced here."""
+    var problems: [text] = []
+    var read_provider = ""
+    var send_provider = "none"
+    var send_enabled = false
+    var source_kind = ""
+    var schema_profile_name = ""
+    var content_pipeline = ""
+    var cache_mode = "none"
+    var sync_policy = "on_demand"
+
+    for pair in _entries_for(entries, "messenger.{name}"):
+        val key = pair.0
+        val value = pair.1
+        if key == "read_provider":
+            if _in_list(MESSENGER_READ_PROVIDERS, value):
+                read_provider = value
+            else:
+                problems = problems + ["target '{name}': invalid read_provider '{value}' (want one of: sqlite3_database, sqlcipher4_database, api, provider_specific)"]
+        else if key == "send_provider":
+            if _in_list(MESSENGER_SEND_PROVIDERS, value):
+                send_provider = value
+            else:
+                problems = problems + ["target '{name}': invalid send_provider '{value}' (want none|api)"]
+        else if key == "send_enabled":
+            if val b = _parse_bool(value):
+                send_enabled = b
+            else:
+                problems = problems + ["target '{name}': invalid send_enabled '{value}'"]
+        else if key == "source_kind":
+            if _in_list(MESSENGER_SOURCE_KINDS, value):
+                source_kind = value
+            else:
+                problems = problems + ["target '{name}': invalid source_kind '{value}'"]
+        else if key == "schema_profile":
+            schema_profile_name = value
+        else if key == "content_pipeline":
+            content_pipeline = value
+        else if key == "cache_mode":
+            if _in_list(MESSENGER_CACHE_MODES, value):
+                cache_mode = value
+            else:
+                problems = problems + ["target '{name}': invalid cache_mode '{value}' (want none|separately_encrypted_owned_cache)"]
+        else if key == "sync_policy":
+            if _in_list(MESSENGER_SYNC_POLICIES, value):
+                sync_policy = value
+            else:
+                problems = problems + ["target '{name}': invalid sync_policy '{value}' (want on_demand|manual)"]
+        else:
+            problems = problems + ["target '{name}': unknown key '{key}'"]
+
+    if read_provider == "":
+        problems = problems + ["target '{name}': missing required read_provider"]
+    if source_kind == "":
+        source_kind = if read_provider == "api": "provider_api" else: "external_owned_by_messenger"
+
+    val is_db_source = read_provider == "sqlite3_database" or read_provider == "sqlcipher4_database"
+    if is_db_source and send_provider != "none":
+        problems = problems + ["target '{name}': a database read source cannot declare send_provider '{send_provider}' (read-only source, §6.8)"]
+    if is_db_source and send_enabled:
+        problems = problems + ["target '{name}': a database read source cannot set send_enabled: true (read-only source, §6.8)"]
+
+    # ---- db subsection ------------------------------------------------------
+    var db: MessengerDbConfig? = nil
+    val db_entries = _entries_for(entries, "messenger.{name}.db")
+    if db_entries.len() > 0:
+        val built = _build_db(name, db_entries, read_provider)
+        db = built.0
+        for p in built.1:
+            problems = problems + [p]
+    if is_db_source and db == nil:
+        problems = problems + ["target '{name}': read_provider '{read_provider}' requires a messenger.{name}.db block"]
+
+    # ---- api subsection -----------------------------------------------------
+    var api: MessengerApiConfig? = nil
+    val api_entries = _entries_for(entries, "messenger.{name}.api")
+    if api_entries.len() > 0:
+        val built = _build_api(name, api_entries)
+        api = built.0
+        for p in built.1:
+            problems = problems + [p]
+    if read_provider == "api" and api == nil:
+        problems = problems + ["target '{name}': read_provider 'api' requires a messenger.{name}.api block"]
+
+    # ---- schema subsection --------------------------------------------------
+    var schema: SchemaProfile? = nil
+    val schema_entries = _entries_for(entries, "messenger.{name}.schema")
+    if schema_entries.len() > 0:
+        val built = _build_schema(name, schema_entries)
+        schema = built.0
+        for p in built.1:
+            problems = problems + [p]
+    if is_db_source and schema == nil:
+        problems = problems + ["target '{name}': a database read source requires a messenger.{name}.schema identifier block (§7.4)"]
+    if schema != nil and schema_profile_name != "":
+        val built_profile = schema.?
+        if built_profile.profile_id != schema_profile_name:
+            problems = problems + ["target '{name}': schema_profile '{schema_profile_name}' does not match schema block profile_id '{built_profile.profile_id}'"]
+
+    # ---- policy subsection (defaults deny everything) -----------------------
+    val built_policy = _build_policy(name, _entries_for(entries, "messenger.{name}.policy"))
+    val policy = built_policy.0
+    for p in built_policy.1:
+        problems = problems + [p]
+
+    (MessengerTarget(
+        name: name, read_provider: read_provider, send_provider: send_provider,
+        send_enabled: send_enabled, source_kind: source_kind,
+        schema_profile_name: schema_profile_name, content_pipeline: content_pipeline,
+        cache_mode: cache_mode, sync_policy: sync_policy,
+        db: db, api: api, schema: schema, policy: policy
+    ), problems)
+
+
+fn _build_db(name: text, entries: [(text, text)], read_provider: text) -> (MessengerDbConfig?, [text]):
+    var problems: [text] = []
+    var db = MessengerDbConfig.empty()
+    var saw_path = false
+    var saw_format = false
+    var saw_access = false
+    var saw_profile = false
+    var saw_key_kind = false
+    var saw_secret = false
+    for pair in entries:
+        val key = pair.0
+        val value = pair.1
+        if key == "path":
+            saw_path = true
+            db.path = value
+        else if key == "format":
+            saw_format = true
+            if _in_list(MESSENGER_DB_FORMATS, value):
+                db.format = value
+            else:
+                problems = problems + ["target '{name}': invalid db format '{value}' (want sqlite3|sqlcipher4)"]
+        else if key == "access":
+            saw_access = true
+            # ONLY read_only is representable (§6.8): anything else is a
+            # hard rejection, not a coercion.
+            if value != "read_only":
+                problems = problems + ["target '{name}': db access '{value}' rejected — only 'read_only' is supported"]
+            else:
+                db.access = value
+        else if key == "snapshot_mode":
+            if _in_list(MESSENGER_SNAPSHOT_MODES, value):
+                db.snapshot_mode = value
+            else:
+                problems = problems + ["target '{name}': invalid snapshot_mode '{value}' (want consistent_live|frozen_snapshot)"]
+        else if key == "profile":
+            saw_profile = true
+            db.profile = value
+        else if key == "key_kind":
+            saw_key_kind = true
+            if _in_list(MESSENGER_KEY_KINDS, value):
+                db.key_kind = value
+            else:
+                problems = problems + ["target '{name}': invalid key_kind '{value}' (want passphrase|raw_key)"]
+        else if key == "secret_ref":
+            saw_secret = true
+            if _is_valid_secret_ref(value):
+                db.secret_ref = value
+            else:
+                problems = problems + ["target '{name}': invalid secret_ref '{value}' (want opaque secret:// reference, never a key value)"]
+        else if key == "cipher_page_size":
+            if val n = _parse_i64(value):
+                db.cipher_page_size = n
+            else:
+                problems = problems + ["target '{name}': invalid cipher_page_size '{value}'"]
+        else if key == "cipher_kdf_iter":
+            if val n = _parse_i64(value):
+                db.cipher_kdf_iter = n
+            else:
+                problems = problems + ["target '{name}': invalid cipher_kdf_iter '{value}'"]
+        else if key == "cipher_kdf_algorithm":
+            db.cipher_kdf_algorithm = value
+        else if key == "cipher_hmac_algorithm":
+            db.cipher_hmac_algorithm = value
+        else if key == "cipher_page_hmac":
+            if val b = _parse_bool(value):
+                db.cipher_page_hmac = b
+            else:
+                problems = problems + ["target '{name}': invalid cipher_page_hmac '{value}'"]
+        else if key == "cipher_hmac_pgno":
+            db.cipher_hmac_pgno = value
+        else if key == "cipher_reserved_bytes":
+            if val n = _parse_i64(value):
+                db.cipher_reserved_bytes = n
+            else:
+                problems = problems + ["target '{name}': invalid cipher_reserved_bytes '{value}'"]
+        else if key == "cipher_plaintext_header_bytes":
+            if val n = _parse_i64(value):
+                db.cipher_plaintext_header_bytes = n
+            else:
+                problems = problems + ["target '{name}': invalid cipher_plaintext_header_bytes '{value}'"]
+        else if key == "immutable":
+            if val b = _parse_bool(value):
+                db.immutable = b
+            else:
+                problems = problems + ["target '{name}': invalid immutable '{value}'"]
+        else:
+            problems = problems + ["target '{name}': unknown db key '{key}'"]
+
+    if not saw_path or db.path == "":
+        problems = problems + ["target '{name}': db block missing required path"]
+    if not saw_format or db.format == "":
+        problems = problems + ["target '{name}': db block missing required format"]
+    if not saw_access:
+        problems = problems + ["target '{name}': db block missing required access (only 'read_only' is supported)"]
+    if read_provider == "sqlcipher4_database":
+        if not saw_profile or db.profile == "":
+            problems = problems + ["target '{name}': sqlcipher4 source missing required locked profile name"]
+        if db.profile == MESSENGER_LOCKED_SQLCIPHER_PROFILE:
+            for divergent in _locked_profile_divergences(db):
+                problems = problems + ["target '{name}': {divergent} diverges from locked profile {MESSENGER_LOCKED_SQLCIPHER_PROFILE} (§7.3: use a different explicit profile ID)"]
+    if read_provider == "sqlite3_database" and db.format != "sqlite3":
+        problems = problems + ["target '{name}': read_provider sqlite3_database requires db format 'sqlite3'"]
+    if read_provider == "sqlcipher4_database" and db.format != "sqlcipher4":
+        problems = problems + ["target '{name}': read_provider sqlcipher4_database requires db format 'sqlcipher4'"]
+    if saw_key_kind and not saw_secret:
+        problems = problems + ["target '{name}': key_kind requires a secret_ref"]
+    if not saw_secret or db.secret_ref == "":
+        problems = problems + ["target '{name}': db block missing required secret_ref (opaque secret:// reference)"]
+
+    (db, problems)
+
+
+fn _locked_profile_divergences(db: MessengerDbConfig) -> [text]:
+    """Every PRESENT cipher field must equal the locked sqlcipher4_4k_sha512
+    values (§4.1). Defaults are already the locked values; the checks below
+    therefore only fire on explicitly divergent config."""
+    var out: [text] = []
+    if db.cipher_page_size != 4096:
+        out = out + ["cipher_page_size {db.cipher_page_size} (locked: 4096)"]
+    if db.cipher_kdf_iter != 256000:
+        out = out + ["cipher_kdf_iter {db.cipher_kdf_iter} (locked: 256000)"]
+    if db.cipher_kdf_algorithm != "pbkdf2_hmac_sha512":
+        out = out + ["cipher_kdf_algorithm {db.cipher_kdf_algorithm} (locked: pbkdf2_hmac_sha512)"]
+    if db.cipher_hmac_algorithm != "hmac_sha512":
+        out = out + ["cipher_hmac_algorithm {db.cipher_hmac_algorithm} (locked: hmac_sha512)"]
+    if not db.cipher_page_hmac:
+        out = out + ["cipher_page_hmac false (locked: true)"]
+    if db.cipher_hmac_pgno != "little_endian":
+        out = out + ["cipher_hmac_pgno {db.cipher_hmac_pgno} (locked: little_endian)"]
+    if db.cipher_reserved_bytes != 80:
+        out = out + ["cipher_reserved_bytes {db.cipher_reserved_bytes} (locked: 80)"]
+    if db.cipher_plaintext_header_bytes != 0:
+        out = out + ["cipher_plaintext_header_bytes {db.cipher_plaintext_header_bytes} (locked: 0)"]
+    out
+
+
+fn _build_api(name: text, entries: [(text, text)]) -> (MessengerApiConfig?, [text]):
+    var problems: [text] = []
+    var api = MessengerApiConfig.empty()
+    var saw_adapter = false
+    var saw_endpoint = false
+    var saw_credential = false
+    for pair in entries:
+        val key = pair.0
+        val value = pair.1
+        if key == "adapter":
+            saw_adapter = true
+            if _in_list(MESSENGER_API_ADAPTERS, value):
+                api.adapter = value
+            else:
+                problems = problems + ["target '{name}': unknown api adapter '{value}'"]
+        else if key == "endpoint":
+            saw_endpoint = true
+            if _is_valid_api_endpoint(value):
+                api.endpoint = value
+            else:
+                problems = problems + ["target '{name}': invalid api endpoint '{value}' (want https://, or http://localhost/127.0.0.1)"]
+        else if key == "credential_ref":
+            saw_credential = true
+            if _is_valid_secret_ref(value):
+                api.credential_ref = value
+            else:
+                problems = problems + ["target '{name}': invalid credential_ref '{value}' (want opaque secret:// reference, never a token)"]
+        else if key == "read_scope":
+            api.read_scope = value
+        else if key == "request_timeout_ms":
+            if val n = _parse_i64(value):
+                api.request_timeout_ms = n
+            else:
+                problems = problems + ["target '{name}': invalid request_timeout_ms '{value}'"]
+        else if key == "max_rate_per_minute":
+            if val n = _parse_i64(value):
+                api.max_rate_per_minute = n
+            else:
+                problems = problems + ["target '{name}': invalid max_rate_per_minute '{value}'"]
+        else:
+            problems = problems + ["target '{name}': unknown api key '{key}'"]
+    if not saw_adapter or api.adapter == "":
+        problems = problems + ["target '{name}': api block missing required adapter"]
+    if not saw_endpoint or api.endpoint == "":
+        problems = problems + ["target '{name}': api block missing required endpoint"]
+    if not saw_credential or api.credential_ref == "":
+        problems = problems + ["target '{name}': api block missing required credential_ref (opaque secret:// reference)"]
+    (api, problems)
+
+
+fn _is_valid_api_endpoint(endpoint: text) -> bool:
+    if endpoint.starts_with("https://"):
+        return true
+    if endpoint.starts_with("http://localhost"):
+        return true
+    if endpoint.starts_with("http://127.0.0.1"):
+        return true
+    false
+
+
+fn _build_schema(name: text, entries: [(text, text)]) -> (SchemaProfile?, [text]):
+    var problems: [text] = []
+    var profile = SchemaProfile(
+        profile_id: "",
+        room_table: "", room_id: "", room_name: "", room_created_at: "",
+        member_table: "", member_room_id: "", member_identity_id: "",
+        member_joined_at: "", member_left_at: "", member_role: "",
+        message_table: "", message_id: "", message_room_id: "", message_sender_id: "",
+        message_body: "", message_created_at: "", message_updated_at: "",
+        message_sequence: "", message_reply_to_id: "",
+        timestamp_unit: "", sequence_kind: ""
+    )
+    for pair in entries:
+        val key = pair.0
+        val value = pair.1
+        if key == "profile_id":
+            profile.profile_id = value
+        else if key == "room_table":
+            profile.room_table = value
+        else if key == "room_id":
+            profile.room_id = value
+        else if key == "room_name":
+            profile.room_name = value
+        else if key == "room_created_at":
+            profile.room_created_at = value
+        else if key == "member_table":
+            profile.member_table = value
+        else if key == "member_room_id":
+            profile.member_room_id = value
+        else if key == "member_identity_id":
+            profile.member_identity_id = value
+        else if key == "member_joined_at":
+            profile.member_joined_at = value
+        else if key == "member_left_at":
+            profile.member_left_at = value
+        else if key == "member_role":
+            profile.member_role = value
+        else if key == "message_table":
+            profile.message_table = value
+        else if key == "message_id":
+            profile.message_id = value
+        else if key == "message_room_id":
+            profile.message_room_id = value
+        else if key == "message_sender_id":
+            profile.message_sender_id = value
+        else if key == "message_body":
+            profile.message_body = value
+        else if key == "message_created_at":
+            profile.message_created_at = value
+        else if key == "message_updated_at":
+            profile.message_updated_at = value
+        else if key == "message_sequence":
+            profile.message_sequence = value
+        else if key == "message_reply_to_id":
+            profile.message_reply_to_id = value
+        else if key == "message_body_storage":
+            if not _in_list(MESSENGER_BODY_STORAGE, value):
+                problems = problems + ["target '{name}': invalid message_body_storage '{value}' (want text|blob)"]
+        else if key == "message_body_encoding":
+            pass_dn("codec label validated by the encoding plugin lane")
+        else if key == "message_body_format":
+            if not _in_list(MESSENGER_BODY_FORMATS, value):
+                problems = problems + ["target '{name}': invalid message_body_format '{value}'"]
+        else if key == "timestamp_unit":
+            if _in_list(MESSENGER_TIMESTAMP_UNITS, value):
+                profile.timestamp_unit = value
+            else:
+                problems = problems + ["target '{name}': invalid timestamp_unit '{value}' (want s|ms|us|iso8601)"]
+        else if key == "sequence_kind":
+            profile.sequence_kind = value
+        else:
+            problems = problems + ["target '{name}': unknown schema key '{key}'"]
+
+    # Required identifiers (§6.5): the fixed query templates cannot be built
+    # without them. Optional mappings stay "" and templates omit them.
+    val required_idents = [
+        ("room_table", profile.room_table),
+        ("room_id", profile.room_id),
+        ("room_name", profile.room_name),
+        ("member_table", profile.member_table),
+        ("member_room_id", profile.member_room_id),
+        ("member_identity_id", profile.member_identity_id),
+        ("message_table", profile.message_table),
+        ("message_id", profile.message_id),
+        ("message_room_id", profile.message_room_id),
+        ("message_sender_id", profile.message_sender_id),
+        ("message_body", profile.message_body),
+        ("message_created_at", profile.message_created_at),
+        ("message_sequence", profile.message_sequence),
+    ]
+    for req in required_idents:
+        if req.1 == "":
+            problems = problems + ["target '{name}': schema block missing required '{req.0}'"]
+    if profile.profile_id == "":
+        problems = problems + ["target '{name}': schema block missing required profile_id"]
+    if profile.timestamp_unit == "":
+        problems = problems + ["target '{name}': schema block missing required timestamp_unit"]
+    if profile.sequence_kind == "":
+        problems = problems + ["target '{name}': schema block missing required sequence_kind"]
+    for ident_problem in schema_profile_validate(profile):
+        problems = problems + ["target '{name}': {ident_problem}"]
+    (profile, problems)
+
+
+fn _build_policy(name: text, entries: [(text, text)]) -> (MessengerPolicy, [text]):
+    var problems: [text] = []
+    var policy = MessengerPolicy.deny_all()
+    for pair in entries:
+        val key = pair.0
+        val value = pair.1
+        if key == "current_identity":
+            policy.current_identity = value
+        else if key == "visibility_model":
+            if _in_list(MESSENGER_VISIBILITY_MODELS, value):
+                policy.visibility_model = value
+            else:
+                problems = problems + ["target '{name}': invalid visibility_model '{value}' (want member_rooms|provider_scoped)"]
+        else if key == "allow_export":
+            if val b = _parse_bool(value):
+                policy.allow_export = b
+            else:
+                problems = problems + ["target '{name}': invalid allow_export '{value}'"]
+        else if key == "allow_remote_send":
+            if val b = _parse_bool(value):
+                policy.allow_remote_send = b
+            else:
+                problems = problems + ["target '{name}': invalid allow_remote_send '{value}'"]
+        else if key == "send_room_allowlist":
+            policy.send_room_allowlist = value
+            if value != "none":
+                for room in value.split(","):
+                    if not is_valid_sqlite_identifier(room.trim()):
+                        problems = problems + ["target '{name}': invalid room in send_room_allowlist: '{room.trim()}'"]
+        else if key == "expose_message_body_to_agents":
+            if val b = _parse_bool(value):
+                policy.expose_message_body_to_agents = b
+            else:
+                problems = problems + ["target '{name}': invalid expose_message_body_to_agents '{value}'"]
+        else if key == "allow_mark_read":
+            if val b = _parse_bool(value):
+                policy.allow_mark_read = b
+            else:
+                problems = problems + ["target '{name}': invalid allow_mark_read '{value}'"]
+        else if key == "allow_live_presence":
+            if val b = _parse_bool(value):
+                policy.allow_live_presence = b
+            else:
+                problems = problems + ["target '{name}': invalid allow_live_presence '{value}'"]
+        else if key == "allow_cache_plaintext":
+            if val b = _parse_bool(value):
+                policy.allow_cache_plaintext = b
+            else:
+                problems = problems + ["target '{name}': invalid allow_cache_plaintext '{value}'"]
+        else if key == "max_read_batch":
+            if val n = _parse_i64(value):
+                if n < 1 or n > 1000:
+                    problems = problems + ["target '{name}': max_read_batch {n} out of range (1..1000)"]
+                else:
+                    policy.max_read_batch = n
+            else:
+                problems = problems + ["target '{name}': invalid max_read_batch '{value}'"]
+        else if key == "max_attachment_bytes":
+            if val n = _parse_i64(value):
+                if n < 1 or n > 1073741824:
+                    problems = problems + ["target '{name}': max_attachment_bytes {n} out of range (1..1073741824)"]
+                else:
+                    policy.max_attachment_bytes = n
+            else:
+                problems = problems + ["target '{name}': invalid max_attachment_bytes '{value}'"]
+        else:
+            problems = problems + ["target '{name}': unknown policy key '{key}'"]
+    (policy, problems)
+
+
+# ============================================================================
+# Target resolution precedence (pure chain + I/O wrapper)
+# ============================================================================
+
+fn pick_messenger_target(flag: text, env_value: text, repo_alias: text, config: MessengerConfig) -> (text, text):
+    """The §7.1 precedence chain as a PURE function, mirroring
+    backend_resolve.pick_git_backend: returns (target_name, source); ("", "")
+    when nothing decides. source names the winning rung so callers can tell
+    the user WHERE a surprising target came from."""
+    if flag.trim() != "":
+        return (flag.trim(), "--target flag")
+    if env_value.trim() != "":
+        return (env_value.trim(), "DEVHUB_MESSENGER_TARGET")
+    if repo_alias.trim() != "":
+        return (repo_alias.trim(), ".spipe/config.sdn [devhub] messenger_target")
+    if config.default_target != "":
+        return (config.default_target, "messenger.sdn default_target")
+    ("", "")
+
+
+fn unresolved_messenger_target_message() -> text:
+    "no messenger target resolved.\n" +
+    "  set one of (highest precedence first):\n" +
+    "    devhub messenger <verb> --target <name>\n" +
+    "    DEVHUB_MESSENGER_TARGET=<name>\n" +
+    "    .spipe/config.sdn  ->  devhub: messenger_target: <name>\n" +
+    "    ~/.config/devhub/messenger.sdn  ->  messenger: default_target: <name>"
+
+
+fn messenger_config_path() -> text:
+    "{config_dir()}/messenger.sdn"
+
+
+fn load_messenger_config() -> MessengerParseResult:
+    """Read and validate ~/.config/devhub/messenger.sdn. A missing file is a
+    config error (exit 2), never a silent empty config — with nothing
+    declared there is nothing to resolve."""
+    val path = messenger_config_path()
+    if not file_exists(path):
+        return MessengerParseResult.rejected(
+            ["messenger config not found: {path}"], MessengerConfig(schema_version: 0, default_target: "", max_targets: MESSENGER_DEFAULT_MAX_TARGETS, targets: [], pipelines: []))
+    val content = file_read(path)
+    if content == nil:
+        return MessengerParseResult.rejected(
+            ["messenger config unreadable: {path}"], MessengerConfig(schema_version: 0, default_target: "", max_targets: MESSENGER_DEFAULT_MAX_TARGETS, targets: [], pipelines: []))
+    parse_messenger_config(content)
+
+
+fn _find_repo_root() -> text:
+    """Walk up from cwd for .spipe/config.sdn (the repo-scoped alias file).
+    Deliberately uses app.io.mod.file_exists (verified honest) rather than
+    std.nogc_sync_mut.file_system.file_ops, which is a MOCK that answers
+    true for nonexistent paths (devhub skill.md landmine)."""
+    var dir = cwd()
+    var guard: i64 = 0
+    while dir != "" and guard < 64:
+        if file_exists("{dir}/.spipe/config.sdn"):
+            return dir
+        val slash = dir.rfind("/")
+        if slash <= 0:
+            return ""
+        dir = dir[0:slash]
+        guard = guard + 1
+    ""
+
+
+fn repo_messenger_alias() -> text:
+    """The repo-tracked alias: .spipe/config.sdn [devhub] messenger_target.
+    A repository may NAME a default target but can never widen permissions
+    (§7.1) — the name is still validated against the user's messenger.sdn."""
+    val root = _find_repo_root()
+    if root == "":
+        return ""
+    val content = file_read("{root}/.spipe/config.sdn")
+    if content == nil:
+        return ""
+    for entry in parse_sdn_sections(content):
+        if entry.0 == "devhub" and entry.1 == "messenger_target":
+            return entry.2.trim()
+    ""
+
+
+fn resolve_messenger_target(args: [text]) -> (MessengerTarget?, text, text):
+    """Resolve the effective target for this invocation: (target, source,
+    error). Exactly one of target/error is set. The chain is pure;
+    only this wrapper touches the filesystem and environment."""
+    val parsed = load_messenger_config()
+    if not parsed.ok:
+        var detail = ""
+        for p in parsed.problems:
+            detail = detail + "; " + p
+        if detail.len() >= 2:
+            detail = detail[2:]
+        return (nil, "", "invalid messenger config: {detail}")
+    val flag = _extract_flag(args, "--target", "")
+    val picked = pick_messenger_target(flag, env_get("DEVHUB_MESSENGER_TARGET"), repo_messenger_alias(), parsed.config)
+    if picked.0 == "":
+        return (nil, "", unresolved_messenger_target_message())
+    for target in parsed.config.targets:
+        if target.name == picked.0:
+            return (target, picked.1, "")
+    (nil, picked.1, "messenger target '{picked.0}' (from {picked.1}) is not declared in {messenger_config_path()}")
+
+
+fn find_messenger_target(config: MessengerConfig, name: text) -> MessengerTarget?:
+    """Pure lookup used by specs and by the targets verb."""
+    for target in config.targets:
+        if target.name == name:
+            return target
+    nil

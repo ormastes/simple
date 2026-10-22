@@ -1,0 +1,198 @@
+# devhub messenger — allowlisted schema profile identifiers.
+#
+# Plan: simple_devhub_sqlite_sqlcipher_messenger_master_plan_2026-10-21.md
+# §6.5 (external schema mapping), §7.2 (messenger.<target>.schema block),
+# §7.4 (schema introspection and query generation safeguards).
+#
+# A SchemaProfile is an ALLOWLIST of SQLite identifiers (table/column names)
+# for one external messenger database. Identifiers are validated here and are
+# the ONLY names a query template may interpolate; every SQL VALUE is a bound
+# parameter (§7.4). `schema_profile_fingerprint` canonicalizes the profile
+# (sorted key=value lines) into a stable hash so `doctor` and delta sync can
+# detect a schema change and demand a fresh snapshot instead of mixing rows
+# across generations (§6.5, §7.4 "stale-cursor/schema-change result").
+#
+# The fingerprint is a canonicalization/stability hash (FNV-1a 32), not a
+# security digest. INTEGRATION: when the CR-A/CR-B crypto lane's SHA-256 is
+# linked into devhub's closure, swap `_fnv1a32_hex` for
+# std.common.crypto.sha256.sha256_text over the same canonical text.
+
+# SQLite keywords that must never appear as an allowlisted identifier even
+# though they pass the charset gate. The primary defense is the charset gate
+# plus fixed query templates; this denylist is defense in depth against the
+# statement-initial words.
+val MESSENGER_SCHEMA_PROFILE_VERSION = "messenger.schema_profile.v1"
+
+val _SQLITE_KEYWORD_DENY = [
+    "select", "insert", "update", "delete", "drop", "alter", "create",
+    "attach", "detach", "pragma", "vacuum", "reindex", "replace", "truncate",
+    "union", "intersect", "except", "values", "with"
+]
+
+
+struct SchemaProfile:
+    """Allowlisted identifier map for room/room_member/messages (§7.2).
+
+    Every field is one validated SQLite identifier (or a validated unit/kind
+    token). Query templates bind VALUES as parameters and interpolate only
+    these names after one more `is_valid_sqlite_identifier` gate."""
+    profile_id: text
+    room_table: text
+    room_id: text
+    room_name: text
+    room_created_at: text
+    member_table: text
+    member_room_id: text
+    member_identity_id: text
+    member_joined_at: text
+    member_left_at: text
+    member_role: text
+    message_table: text
+    message_id: text
+    message_room_id: text
+    message_sender_id: text
+    message_body: text
+    message_created_at: text
+    message_updated_at: text
+    message_sequence: text
+    message_reply_to_id: text
+    timestamp_unit: text      # s | ms | us | iso8601 (§7.4: never inferred)
+    sequence_kind: text       # e.g. monotonic_within_room
+
+
+fn _is_ident_char_first(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_"
+
+
+fn _is_ident_char_rest(ch: text) -> bool:
+    _is_ident_char_first(ch) or (ch >= "0" and ch <= "9") or ch == "$"
+
+
+fn is_valid_sqlite_identifier(name: text) -> bool:
+    """Allowlist gate for one SQLite identifier (§7.4 TableIdentifier).
+
+    ASCII [A-Za-z_][A-Za-z0-9_$]*, 1..63 chars, and not a statement-initial
+    SQLite keyword. Anything else — quotes, spaces, semicolons, dots, dashes —
+    is rejected, so an identifier can never smuggle raw SQL into a template.
+    """
+    if name == nil or name == "":
+        return false
+    if name.len() > 63:
+        return false
+    if not _is_ident_char_first(name[0:1]):
+        return false
+    var i = 1
+    while i < name.len():
+        if not _is_ident_char_rest(name[i:i + 1]):
+            return false
+        i = i + 1
+    val lowered = name.lower()
+    for kw in _SQLITE_KEYWORD_DENY:
+        if lowered == kw:
+            return false
+    true
+
+
+fn schema_profile_identifier_fields(profile: SchemaProfile) -> [(text, text)]:
+    """(canonical key, identifier value) pairs in stable key order — the
+    canonicalization used by the fingerprint. Keys are kept sorted so the
+    fingerprint never depends on declaration order."""
+    [
+        ("member_identity_id", profile.member_identity_id),
+        ("member_joined_at", profile.member_joined_at),
+        ("member_left_at", profile.member_left_at),
+        ("member_role", profile.member_role),
+        ("member_room_id", profile.member_room_id),
+        ("member_table", profile.member_table),
+        ("message_body", profile.message_body),
+        ("message_created_at", profile.message_created_at),
+        ("message_id", profile.message_id),
+        ("message_reply_to_id", profile.message_reply_to_id),
+        ("message_room_id", profile.message_room_id),
+        ("message_sender_id", profile.message_sender_id),
+        ("message_sequence", profile.message_sequence),
+        ("message_table", profile.message_table),
+        ("message_updated_at", profile.message_updated_at),
+        ("profile_id", profile.profile_id),
+        ("room_created_at", profile.room_created_at),
+        ("room_id", profile.room_id),
+        ("room_name", profile.room_name),
+        ("room_table", profile.room_table),
+        ("sequence_kind", profile.sequence_kind),
+        ("timestamp_unit", profile.timestamp_unit),
+    ]
+
+
+fn schema_profile_validate(profile: SchemaProfile) -> [text]:
+    """Validation problems; [] means the profile is usable. Empty OPTIONAL
+    mappings (a column the external schema simply does not have, e.g. no
+    member_left_at) are fine — query templates omit them. Required-field
+    presence is the config parser's job (it rejects a missing message_table
+    etc.); this gate is the identifier-SHAPE check: any present value must be
+    a valid allowlisted identifier."""
+    var problems: [text] = []
+    for pair in schema_profile_identifier_fields(profile):
+        if pair.1 == "":
+            continue
+        if not is_valid_sqlite_identifier(pair.1):
+            problems = problems + ["invalid identifier for {pair.0}: '{pair.1}'"]
+    if profile.timestamp_unit != "" and profile.timestamp_unit != "s" and profile.timestamp_unit != "ms" and
+            profile.timestamp_unit != "us" and profile.timestamp_unit != "iso8601":
+        problems = problems + ["invalid timestamp_unit: '{profile.timestamp_unit}' (want s|ms|us|iso8601)"]
+    problems
+
+
+fn _xor_nonneg(a: i64, b: i64) -> i64:
+    """a ^ b for non-negative integers via the SWAR identity a+b-2*(a&b) —
+    Simple has no `^` operator (house precedent: the bit-loop in
+    src/lib/nogc_async_mut/payment/src/vault/encrypted_vault.spl)."""
+    a + b - 2 * (a & b)
+
+
+fn _fnv1a32_hex(data: text) -> text:
+    """FNV-1a 32-bit over the character codes, 8 lowercase hex digits.
+
+    Canonical text is pure ASCII (validated identifiers plus `=`/newlines), so
+    character codes equal UTF-8 bytes. 32-bit limbs with `& 4294967295`
+    wrapping (house discipline, src/lib/common/hash/djb2.spl) — the multiply
+    stays far below i64 range. Stability hash only, NOT a security digest."""
+    val FNV_OFFSET: i64 = 2166136261
+    val FNV_PRIME: i64 = 16777619
+    val MASK: i64 = 4294967295
+    var hash: i64 = FNV_OFFSET
+    for ch in data.chars():
+        val c = ch.char_code_at(0) & MASK
+        hash = _xor_nonneg(hash, c) & MASK
+        hash = (hash * FNV_PRIME) & MASK
+    _u32_hex(hash)
+
+
+fn _u32_hex(value: i64) -> text:
+    """8 lowercase hex digits of the low 32 bits."""
+    val digits = "0123456789abcdef"
+    var out = ""
+    var shift: i64 = 28
+    while shift >= 0:
+        val nibble = (value >> shift) & 15
+        out = out + digits[nibble:nibble + 1]
+        shift = shift - 4
+    out
+
+
+fn schema_profile_canonical_text(profile: SchemaProfile) -> text:
+    """Sorted, newline-joined `key=value` lines (keys pre-sorted by
+    schema_profile_identifier_fields) under a version banner. Two profiles
+    with the same identifiers canonicalize identically regardless of file key
+    order, so the fingerprint is key-order independent."""
+    var out = MESSENGER_SCHEMA_PROFILE_VERSION + "\n"
+    for pair in schema_profile_identifier_fields(profile):
+        out = out + "{pair.0}={pair.1}\n"
+    out
+
+
+fn schema_profile_fingerprint(profile: SchemaProfile) -> text:
+    """Stable fingerprint of the allowlisted identifier set (§7.4 "validated
+    schema fingerprint"). A changed fingerprint must produce a
+    stale-cursor/schema-change result, never mixed rows. Pure and
+    offline-testable."""
+    _fnv1a32_hex(schema_profile_canonical_text(profile))

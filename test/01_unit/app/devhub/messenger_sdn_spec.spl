@@ -1,0 +1,452 @@
+# devhub messenger — typed SDN parser/validator + target precedence unit tests.
+#
+# Feature: DevHub messenger read-only access (plan §7.1/§7.2/§7.3)
+# Category: DevHub, Messenger, Config
+# Status: Implemented
+#
+# Accept/reject tables for ~/.config/devhub/messenger.sdn: unknown keys,
+# duplicate keys (security fields named), invalid identifiers, missing
+# required fields, locked-profile divergence — plus the §7.1 target
+# precedence chain (pure) and the schema-profile fingerprint stability.
+#
+# Source: src/app/devhub/messenger/config.spl,
+#         src/app/devhub/messenger/schema_profile.spl
+
+use std.spec.{describe, it, expect}
+use app.devhub.messenger.config.{
+    parse_messenger_config, pick_messenger_target, MessengerConfig
+}
+use app.devhub.messenger.schema_profile.{schema_profile_fingerprint}
+
+
+fn _full_fixture() -> text:
+    """The plan §7.2 example grammar: one sqlcipher4 DB target and one API
+    target, with the locked cipher profile spelled out."""
+    """
+messenger:
+    schema_version: 1
+    default_target: local_work
+    max_targets: 32
+
+messenger.local_work:
+    read_provider: sqlcipher4_database
+    send_provider: none
+    send_enabled: false
+    source_kind: external_owned_by_messenger
+    schema_profile: work_room_v1
+    content_pipeline: message_default
+    cache_mode: none
+    sync_policy: on_demand
+
+messenger.local_work.db:
+    path: /home/user/authorized-messenger/messages.db
+    format: sqlcipher4
+    access: read_only
+    immutable: false
+    snapshot_mode: consistent_live
+    profile: sqlcipher4_4k_sha512
+    cipher_page_size: 4096
+    cipher_kdf_iter: 256000
+    cipher_kdf_algorithm: pbkdf2_hmac_sha512
+    cipher_hmac_algorithm: hmac_sha512
+    cipher_page_hmac: true
+    cipher_hmac_pgno: little_endian
+    cipher_reserved_bytes: 80
+    cipher_plaintext_header_bytes: 0
+    key_kind: passphrase
+    secret_ref: secret://messenger/local_work/db_key
+
+messenger.local_work.schema:
+    profile_id: work_room_v1
+    room_table: room
+    room_id: id
+    room_name: title
+    room_created_at: created_at
+    member_table: room_member
+    member_room_id: room_id
+    member_identity_id: member_id
+    member_joined_at: joined_at
+    member_left_at: left_at
+    member_role: role
+    message_table: messages
+    message_id: id
+    message_room_id: room_id
+    message_sender_id: sender_id
+    message_body: body
+    message_created_at: created_at
+    message_updated_at: updated_at
+    message_sequence: seq
+    message_reply_to_id: reply_to_id
+    message_body_storage: blob
+    message_body_encoding: cp949
+    message_body_format: html
+    timestamp_unit: ms
+    sequence_kind: monotonic_within_room
+
+messenger.local_work.policy:
+    current_identity: self_user_id
+    visibility_model: member_rooms
+    allow_export: false
+    allow_remote_send: false
+    max_read_batch: 200
+    max_attachment_bytes: 10485760
+    expose_message_body_to_agents: false
+    allow_mark_read: false
+    allow_live_presence: false
+    allow_cache_plaintext: false
+
+messenger.team_chat:
+    read_provider: api
+    send_provider: api
+    send_enabled: false
+    content_pipeline: message_default
+    cache_mode: none
+    sync_policy: on_demand
+
+messenger.team_chat.api:
+    adapter: mattermost
+    endpoint: https://chat.example.org
+    credential_ref: secret://messenger/team_chat/api_token
+    read_scope: channels_membership
+    request_timeout_ms: 15000
+    max_rate_per_minute: 60
+
+messenger.team_chat.policy:
+    visibility_model: provider_scoped
+    allow_export: false
+    allow_remote_send: false
+    send_room_allowlist: none
+    expose_message_body_to_agents: false
+"""
+
+
+fn _minimal_db_target_sdn(name: text) -> text:
+    """One minimal VALID sqlcipher4 database target (locked profile implied
+    by defaults). Double-quoted: the fixture INTERPOLATES {name} (triple-
+    quoted strings are raw and would keep the literal placeholder)."""
+    "messenger:\n" +
+    "    schema_version: 1\n" +
+    "\n" +
+    "messenger.{name}:\n" +
+    "    read_provider: sqlcipher4_database\n" +
+    "    send_provider: none\n" +
+    "\n" +
+    "messenger.{name}.db:\n" +
+    "    path: /home/user/messages.db\n" +
+    "    format: sqlcipher4\n" +
+    "    access: read_only\n" +
+    "    profile: sqlcipher4_4k_sha512\n" +
+    "    key_kind: passphrase\n" +
+    "    secret_ref: secret://messenger/{name}/db_key\n" +
+    "\n" +
+    "messenger.{name}.schema:\n" +
+    "    profile_id: {name}_v1\n" +
+    "    room_table: room\n" +
+    "    room_id: id\n" +
+    "    room_name: title\n" +
+    "    member_table: room_member\n" +
+    "    member_room_id: room_id\n" +
+    "    member_identity_id: member_id\n" +
+    "    message_table: messages\n" +
+    "    message_id: id\n" +
+    "    message_room_id: room_id\n" +
+    "    message_sender_id: sender_id\n" +
+    "    message_body: body\n" +
+    "    message_created_at: created_at\n" +
+    "    message_sequence: seq\n" +
+    "    timestamp_unit: ms\n" +
+    "    sequence_kind: monotonic_within_room\n"
+
+
+fn _problems(content: text) -> [text]:
+    parse_messenger_config(content).problems
+
+
+fn _mentions(problems: [text], needle: text) -> bool:
+    for p in problems:
+        if p.contains(needle):
+            return true
+    false
+
+
+describe "devhub messenger.sdn typed parser":
+
+    describe "accept table":
+        it "accepts the plan §7.2 example grammar with two targets":
+            val result = parse_messenger_config(_full_fixture())
+            expect(result.ok).to_be(true)
+            expect(result.problems.len()).to_equal(0)
+            expect(result.config.targets.len()).to_equal(2)
+            expect(result.config.default_target).to_equal("local_work")
+            expect(result.config.schema_version).to_equal(1)
+
+        it "parses the db target into typed read-only configuration":
+            val result = parse_messenger_config(_full_fixture())
+            expect(result.ok).to_be(true)
+            val target = result.config.targets[0]
+            expect(target.name).to_equal("local_work")
+            expect(target.read_provider).to_equal("sqlcipher4_database")
+            expect(target.send_provider).to_equal("none")
+            expect(target.send_enabled).to_be(false)
+            expect(target.cache_mode).to_equal("none")
+            expect(target.db == nil).to_be(false)
+
+        it "keeps secrets as opaque refs, never values":
+            val result = parse_messenger_config(_full_fixture())
+            expect(result.ok).to_be(true)
+            val target = result.config.targets[0]
+            if val db = target.db:
+                expect(db.secret_ref).to_equal("secret://messenger/local_work/db_key")
+                expect(db.access).to_equal("read_only")
+                expect(db.format).to_equal("sqlcipher4")
+                expect(db.profile).to_equal("sqlcipher4_4k_sha512")
+            else:
+                expect(true).to_be(false)
+
+        it "parses the api target with its adapter block":
+            val result = parse_messenger_config(_full_fixture())
+            expect(result.ok).to_be(true)
+            val target = result.config.targets[1]
+            expect(target.name).to_equal("team_chat")
+            expect(target.read_provider).to_equal("api")
+            if val api = target.api:
+                expect(api.adapter).to_equal("mattermost")
+                expect(api.endpoint).to_equal("https://chat.example.org")
+                expect(api.credential_ref).to_equal("secret://messenger/team_chat/api_token")
+            else:
+                expect(true).to_be(false)
+
+        it "defaults policy to deny-all":
+            val result = parse_messenger_config(_full_fixture())
+            expect(result.ok).to_be(true)
+            val target = result.config.targets[0]
+            expect(target.policy.expose_message_body_to_agents).to_be(false)
+            expect(target.policy.allow_remote_send).to_be(false)
+            expect(target.policy.allow_export).to_be(false)
+            expect(target.policy.allow_mark_read).to_be(false)
+
+    describe "reject table — unknown keys and values":
+        it "rejects an unknown messenger root key":
+            val bad = _minimal_db_target_sdn("t1").replace("    schema_version: 1\n", "    schema_version: 1\n    bogus_root: yes\n")
+            expect(_mentions(_problems(bad), "unknown messenger key 'bogus_root'")).to_be(true)
+
+        it "rejects an unknown target-level key":
+            val bad = _minimal_db_target_sdn("t1").replace("    send_provider: none\n", "    send_provider: none\n    teleport: true\n")
+            expect(_mentions(_problems(bad), "unknown key 'teleport'")).to_be(true)
+
+        it "rejects an unknown db key":
+            val bad = _minimal_db_target_sdn("t1").replace("    key_kind: passphrase\n", "    key_kind: passphrase\n    wal_mode: delete\n")
+            expect(_mentions(_problems(bad), "unknown db key 'wal_mode'")).to_be(true)
+
+        it "rejects an unknown schema key":
+            val bad = _minimal_db_target_sdn("t1").replace("    sequence_kind: monotonic_within_room\n", "    sequence_kind: monotonic_within_room\n    where_clause: 1=1\n")
+            expect(_mentions(_problems(bad), "unknown schema key 'where_clause'")).to_be(true)
+
+        it "rejects an unknown policy key":
+            val bad = _minimal_db_target_sdn("t1") + "\nmessenger.t1.policy:\n    allow_sql_injection: true\n"
+            expect(_mentions(_problems(bad), "unknown policy key 'allow_sql_injection'")).to_be(true)
+
+        it "rejects an unknown subsection":
+            val bad = _minimal_db_target_sdn("t1") + "\nmessenger.t1.bogus:\n    key: value\n"
+            expect(_mentions(_problems(bad), "unknown messenger subsection")).to_be(true)
+
+        it "rejects an invalid read_provider":
+            val bad = _minimal_db_target_sdn("t1").replace("    read_provider: sqlcipher4_database\n", "    read_provider: telepathy\n")
+            expect(_mentions(_problems(bad), "invalid read_provider")).to_be(true)
+
+        it "rejects a non-https api endpoint outside localhost":
+            val bad = _full_fixture().replace("    endpoint: https://chat.example.org\n", "    endpoint: http://chat.example.org\n")
+            expect(_mentions(_problems(bad), "invalid api endpoint")).to_be(true)
+
+    describe "reject table — security shape":
+        it "rejects any db access other than read_only (§6.8 hard boundary)":
+            val bad = _minimal_db_target_sdn("t1").replace("    access: read_only\n", "    access: read_write\n")
+            expect(_mentions(_problems(bad), "only 'read_only' is supported")).to_be(true)
+
+        it "names duplicate security fields explicitly (§7.2)":
+            val dup = "\nmessenger.t1.db:\n    secret_ref: secret://messenger/t1/other\n"
+            val bad = _minimal_db_target_sdn("t1") + dup
+            expect(_mentions(_problems(bad), "duplicate security field 'secret_ref'")).to_be(true)
+
+        it "rejects duplicate ordinary keys":
+            val dup = "\nmessenger.t1:\n    cache_mode: none\n"
+            val base = _minimal_db_target_sdn("t1").replace("    send_provider: none\n", "    send_provider: none\n    cache_mode: separately_encrypted_owned_cache\n")
+            val bad = base + dup
+            expect(_mentions(_problems(bad), "duplicate key 'cache_mode'")).to_be(true)
+
+        it "rejects a secret_ref that is not an opaque secret:// reference":
+            val bad = _minimal_db_target_sdn("t1").replace("    secret_ref: secret://messenger/t1/db_key\n", "    secret_ref: hunter2\n")
+            expect(_mentions(_problems(bad), "invalid secret_ref")).to_be(true)
+
+        it "rejects a divergent cipher field under the locked profile (§7.3)":
+            val bad = _minimal_db_target_sdn("t1").replace("    profile: sqlcipher4_4k_sha512\n", "    profile: sqlcipher4_4k_sha512\n    cipher_kdf_iter: 64000\n")
+            expect(_mentions(_problems(bad), "diverges from locked profile")).to_be(true)
+
+        it "rejects send_enabled on a database source (§6.8)":
+            val bad = _minimal_db_target_sdn("t1").replace("    send_provider: none\n", "    send_provider: none\n    send_enabled: true\n")
+            expect(_mentions(_problems(bad), "cannot set send_enabled: true")).to_be(true)
+
+        it "rejects a send_provider on a database source":
+            val bad = _minimal_db_target_sdn("t1").replace("    send_provider: none\n", "    send_provider: api\n")
+            expect(_mentions(_problems(bad), "cannot declare send_provider")).to_be(true)
+
+    describe "reject table — identifiers and required fields":
+        it "rejects SQL-smuggling identifiers in the schema block":
+            val bad = _minimal_db_target_sdn("t1").replace("    room_table: room\n", "    room_table: room;drop\n")
+            expect(_mentions(_problems(bad), "invalid identifier")).to_be(true)
+
+        it "rejects statement-initial keywords as identifiers":
+            val bad = _minimal_db_target_sdn("t1").replace("    message_table: messages\n", "    message_table: select\n")
+            expect(_mentions(_problems(bad), "invalid identifier")).to_be(true)
+
+        it "rejects an invalid target name":
+            val bad = _minimal_db_target_sdn("t1").replace("messenger.t1:", "messenger.-bad:").replace("messenger.t1.db:", "messenger.-bad.db:").replace("messenger.t1.schema:", "messenger.-bad.schema:").replace("secret://messenger/t1/db_key", "secret://messenger/bad/db_key").replace("profile_id: t1_v1", "profile_id: bad_v1")
+            expect(_mentions(_problems(bad), "invalid messenger target name")).to_be(true)
+
+        it "rejects a missing read_provider":
+            val bad = _minimal_db_target_sdn("t1").replace("    read_provider: sqlcipher4_database\n", "")
+            expect(_mentions(_problems(bad), "missing required read_provider")).to_be(true)
+
+        it "rejects a db source without a db block":
+            val bad = """
+messenger:
+    schema_version: 1
+
+messenger.t1:
+    read_provider: sqlite3_database
+"""
+            expect(_mentions(_problems(bad), "requires a messenger.t1.db block")).to_be(true)
+
+        it "rejects a db block missing path or secret_ref":
+            val no_path = _minimal_db_target_sdn("t1").replace("    path: /home/user/messages.db\n", "")
+            expect(_mentions(_problems(no_path), "missing required path")).to_be(true)
+            val no_secret = _minimal_db_target_sdn("t1").replace("    secret_ref: secret://messenger/t1/db_key\n", "")
+            expect(_mentions(_problems(no_secret), "missing required secret_ref")).to_be(true)
+
+        it "rejects a db source without a schema identifier block":
+            val bad = """
+messenger:
+    schema_version: 1
+
+messenger.t1:
+    read_provider: sqlcipher4_database
+
+messenger.t1.db:
+    path: /home/user/messages.db
+    format: sqlcipher4
+    access: read_only
+    profile: sqlcipher4_4k_sha512
+    secret_ref: secret://messenger/t1/db_key
+"""
+            expect(_mentions(_problems(bad), "requires a messenger.t1.schema identifier block")).to_be(true)
+
+        it "rejects a schema block missing required identifiers":
+            val bad = _minimal_db_target_sdn("t1").replace("    message_sequence: seq\n", "")
+            expect(_mentions(_problems(bad), "missing required 'message_sequence'")).to_be(true)
+
+        it "rejects a missing or unsupported schema_version":
+            val bad = _minimal_db_target_sdn("t1").replace("    schema_version: 1\n", "")
+            expect(_mentions(_problems(bad), "schema_version")).to_be(true)
+
+        it "rejects a default_target that names no declared target":
+            val bad = _minimal_db_target_sdn("t1").replace("    schema_version: 1\n", "    schema_version: 1\n    default_target: ghost\n")
+            expect(_mentions(_problems(bad), "default_target 'ghost'")).to_be(true)
+
+        it "rejects oversized values":
+            var huge = "x"
+            var i = 0
+            while i < 13:
+                huge = huge + huge
+                i = i + 1
+            val bad = _minimal_db_target_sdn("t1").replace("    room_name: title\n", "    room_name: {huge}\n")
+            expect(_mentions(_problems(bad), "oversized value")).to_be(true)
+
+        it "enforces max_targets":
+            val two = _minimal_db_target_sdn("t1") + _minimal_db_target_sdn("t2").replace("messenger:\n    schema_version: 1\n", "")
+            val capped = two.replace("    schema_version: 1\n", "    schema_version: 1\n    max_targets: 1\n")
+            expect(_mentions(_problems(capped), "too many messenger targets")).to_be(true)
+
+        it "rejects out-of-range policy bounds":
+            val bad = _minimal_db_target_sdn("t1") + "\nmessenger.t1.policy:\n    max_read_batch: 5000\n"
+            expect(_mentions(_problems(bad), "max_read_batch 5000 out of range")).to_be(true)
+
+    describe "target precedence chain (§7.1, pure)":
+        it "puts the --target flag above everything else":
+            val cfg = MessengerConfig(schema_version: 1, default_target: "local_work", max_targets: 32, targets: [], pipelines: [])
+            val (name, source) = pick_messenger_target("flag_t", "env_t", "repo_t", cfg)
+            expect(name).to_equal("flag_t")
+            expect(source).to_equal("--target flag")
+
+        it "puts DEVHUB_MESSENGER_TARGET above the repo alias and default":
+            val cfg = MessengerConfig(schema_version: 1, default_target: "local_work", max_targets: 32, targets: [], pipelines: [])
+            val (name, source) = pick_messenger_target("", "env_t", "repo_t", cfg)
+            expect(name).to_equal("env_t")
+            expect(source).to_equal("DEVHUB_MESSENGER_TARGET")
+
+        it "puts the .spipe/config.sdn alias above messenger.sdn default_target":
+            val cfg = MessengerConfig(schema_version: 1, default_target: "local_work", max_targets: 32, targets: [], pipelines: [])
+            val (name, source) = pick_messenger_target("", "", "repo_t", cfg)
+            expect(name).to_equal("repo_t")
+            expect(source).to_equal(".spipe/config.sdn [devhub] messenger_target")
+
+        it "falls back to messenger.sdn default_target":
+            val cfg = MessengerConfig(schema_version: 1, default_target: "local_work", max_targets: 32, targets: [], pipelines: [])
+            val (name, source) = pick_messenger_target("", "", "", cfg)
+            expect(name).to_equal("local_work")
+            expect(source).to_equal("messenger.sdn default_target")
+
+        it "returns empty when nothing decides — never guesses":
+            val empty_cfg = MessengerConfig(schema_version: 1, default_target: "", max_targets: 32, targets: [], pipelines: [])
+            val (name, source) = pick_messenger_target("", "", "", empty_cfg)
+            expect(name).to_equal("")
+            expect(source).to_equal("")
+
+        it "trims whitespace on every rung":
+            val empty_cfg = MessengerConfig(schema_version: 1, default_target: "", max_targets: 32, targets: [], pipelines: [])
+            val (name, source) = pick_messenger_target("  spaced ", "", "", empty_cfg)
+            expect(name).to_equal("spaced")
+            expect(source).to_equal("--target flag")
+
+
+describe "devhub messenger schema profile fingerprint":
+
+    it "is stable across reparse of the same content":
+        val a = parse_messenger_config(_full_fixture())
+        val b = parse_messenger_config(_full_fixture())
+        expect(a.ok).to_be(true)
+        expect(b.ok).to_be(true)
+        val ta = a.config.targets[0]
+        val tb = b.config.targets[0]
+        if val pa = ta.schema:
+            if val pb = tb.schema:
+                expect(schema_profile_fingerprint(pa)).to_equal(schema_profile_fingerprint(pb))
+            else:
+                expect(true).to_be(false)
+        else:
+            expect(true).to_be(false)
+
+    it "changes when any allowlisted identifier changes":
+        val base = parse_messenger_config(_full_fixture())
+        expect(base.ok).to_be(true)
+        val changed = parse_messenger_config(_full_fixture().replace("    room_name: title\n", "    room_name: subject\n"))
+        expect(changed.ok).to_be(true)
+        val t0 = base.config.targets[0]
+        val t1 = changed.config.targets[0]
+        if val p0 = t0.schema:
+            if val p1 = t1.schema:
+                expect(schema_profile_fingerprint(p0) == schema_profile_fingerprint(p1)).to_be(false)
+            else:
+                expect(true).to_be(false)
+        else:
+            expect(true).to_be(false)
+
+    it "is an 8-digit lowercase hex string":
+        val parsed = parse_messenger_config(_full_fixture())
+        expect(parsed.ok).to_be(true)
+        val target = parsed.config.targets[0]
+        if val p = target.schema:
+            val fp = schema_profile_fingerprint(p)
+            expect(fp.len()).to_equal(8)
+            expect(fp).to_equal(fp.lower())
+        else:
+            expect(true).to_be(false)
