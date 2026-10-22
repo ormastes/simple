@@ -2826,8 +2826,8 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
                     let mut v = vec![];
                     #[cfg(target_os = "macos")]
                     for p in [
-                        "/opt/homebrew/opt/llvm@18/bin/clang",
                         "/opt/homebrew/opt/llvm/bin/clang",
+                        "/opt/homebrew/opt/llvm@18/bin/clang",
                         "/usr/local/opt/llvm/bin/clang",
                     ] {
                         if std::path::Path::new(p).exists() && !v.contains(&p.to_string()) {

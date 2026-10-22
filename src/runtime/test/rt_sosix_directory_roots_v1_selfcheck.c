@@ -9,6 +9,8 @@
 #define make_directory(p) _mkdir(p)
 #else
 #include <sys/mount.h>
+#include <pthread.h>
+#include <sys/stat.h>
 #define make_directory(p) mkdir(p, 0700)
 #endif
 

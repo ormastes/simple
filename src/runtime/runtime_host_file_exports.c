@@ -9,7 +9,7 @@
 #if defined(SIMPLE_RUNTIME_FREESTANDING_V2)
 #error "host-file exports cannot be instantiated in a freestanding profile"
 #endif
-#if !(defined(__linux__) || defined(__APPLE__) || defined(_WIN32))
+#if !(defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__) || defined(_WIN32))
 #error "runtime host-file exports have no admitted provider for this target"
 #endif
 
