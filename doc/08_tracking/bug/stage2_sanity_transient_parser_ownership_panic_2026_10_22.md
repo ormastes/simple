@@ -49,3 +49,16 @@ no-op success by definition; unregistered heap pointers still fail closed.
 
 Pending: full `--full-bootstrap --stop-after-stage2` re-run (runtime archive
 rebuilds via `runtime/build.rs` rerun-if-changed on the edited `.c`).
+
+## Addendum: the fix silently never rebuilt (cargo watch gap)
+
+The first re-run after the runtime fix panicked identically. Cause:
+`src/compiler_rust/runtime/build.rs` discovers its C compile list dynamically
+from `../../runtime` but only printed ~36 per-file `rerun-if-changed` rows —
+`runtime_native.c` was compiled yet NOT watched, so cargo never re-ran the
+build script when it changed and every "rebuilt" seed/runtime archive still
+carried the pre-fix object (verified: newest runtime .o predated the edit).
+Fixed by watching the whole tree (`cargo:rerun-if-changed=../../runtime`).
+The wrapper-level seed fingerprint hashes the .c files, so the stamp updated
+while the bytes did not — a two-level cache identity gap worth remembering
+when a runtime-source fix "doesn't take".

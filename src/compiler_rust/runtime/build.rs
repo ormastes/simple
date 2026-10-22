@@ -16,6 +16,13 @@ fn main() {
     println!("cargo:rerun-if-changed=src/runtime_signature_scan.rs");
     println!("cargo:rerun-if-changed=../compiler/src/codegen/runtime_sffi.rs");
     println!("cargo:rerun-if-changed=src");
+    // The C/H compile list is discovered dynamically from ../../runtime, so a
+    // per-file rerun-if-changed list can never be complete: runtime_native.c
+    // (2026-10-22) had no row, an edit to it was silently absent from every
+    // rebuild candidate, and the stage2 sanity panic it fixed persisted across
+    // "rebuilds". Watch the whole tree; the explicit rows below stay as
+    // documentation of the load-bearing inputs.
+    println!("cargo:rerun-if-changed=../../runtime");
     println!("cargo:rerun-if-changed=../../runtime/runtime_alloc_observer.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_alloc_observer.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory.c");
