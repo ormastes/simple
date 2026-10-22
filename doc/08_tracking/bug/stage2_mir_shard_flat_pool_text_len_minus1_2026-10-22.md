@@ -458,3 +458,33 @@ engaging for tiny builds). Bisect from the mono/archive lane
 2. (b) this — policy mismatch, visible once (a) clears.
 Both fixes are in lanes the parallel session is actively landing; adopt
 theirs or land mine with the 9s repro (Update 1) + lane as verification.
+
+## Update 10 (2026-10-22) — fix-shape analysis for (a); why a blind edit is deferred
+
+Investigated the three documented fix shapes against the source:
+
+1. **Promote decoded texts** (`rt_transient_heap_promote`, collections.rs:2858):
+   SHALLOW per-object retag. A ParserModule's texts live in separate heap
+   objects (struct fields, Dict keys/values, import rows) — a correct
+   promote needs enumeration of ~30 fields plus nested containers, and
+   `reset_all_pools()` frees the POOLS, not just tagged objects; pool
+   blocks the decoded strings point into may not even be registry
+   objects. High effort, moderate risk blind.
+2. **Pin pools across the module lifetime**: the bridge is pool-backed by
+   design (flat_ast_to_module, module_assembly.spl:286 — "legacy reference
+   provider"); pinning changes the arena contract. Too big for an
+   unverified edit.
+3. **Owned copies at the panicking encode site**: cheapest, but the site is
+   inferred (emission record), not confirmed. One 35-min lane per guess.
+
+Mechanism note for the gdb pass: `rt_string_builder_push` rejects the text
+because the bytes are DANGLING (pool freed), so `rt_string_len` reads
+garbage → -1. In the parent the same encodes succeed because its parse
+scope is still alive; the worker's hir phase runs after the worker's parse
+scope ended (or after a second `reset_all_pools`). The discriminating
+breakpoint: `reset_all_pools` between `flat_pools_restore_all` and the
+panic, in the worker process.
+
+**Standing offer**: if the parallel session confirms the encode site (gdb)
+or lands the pool-lifetime repair first, this doc's repros (Update 1) and
+differentials (Update 8) verify it in 9 seconds plus one lane.
