@@ -356,3 +356,44 @@ attempt-37 rejected candidate, which carries the merged binds):
    at that point, the decode is proven corrupt.
 3. For the store write: run the repro with `SIMPLE_FRONTEND_CACHE=1`
    explicitly and diff `hir_cache_dir()`/store path against the lane's.
+
+## Update 7 (2026-10-22, latest) — mechanism found: pool-backed decode lifetime vs re-encode
+
+`build_module_from_flat_pool_blob` (module_assembly.spl:1412-1465) decodes
+via the LEGACY REFERENCE provider:
+
+```
+reset_all_pools()
+parser_init_with_path(source, path)
+flat_pools_restore_all(blob)     # module texts LIVE IN THE POOLS
+flat_ast_to_module(path)         # module references pool-backed texts
+```
+
+The restored ParserModule's text fields are pool-owned references, not
+independent copies. Any later `reset_all_pools()` (next decode, next parse
+capture arm, pool maintenance) frees those texts; a later flat-pool ENCODE
+of anything holding them then reads dangling handles —
+`rt_string_len == -1`, `site=text.value item=0` — exactly this crash, and
+the worker's extra reset/claim cycle explains why the parent survives and
+the worker dies. This also finally unifies the whole evening: every symptom
+(io-write key computation, NOGC strict read, emission-encode panic) is a
+read of a pool-backed or by-value-transported text at a point where its
+owner scope has ended — one bug family, three faces.
+
+### Fix directions (choose with the seed/compiler owner)
+
+1. **Promote on decode**: after `flat_ast_to_module`, deep-copy the module's
+   identity/path texts into caller-owned storage (the "retained scalar
+   owners" pattern the streaming commit already documents). Cheap, local,
+   matches the workaround family.
+2. **Extend the pool lifetime**: keep the module's pools pinned until the
+   module is dropped (refcount or arena membership) — durable but touches
+   the pool allocator.
+3. **Stop re-encoding decoded modules**: the worker only needs the module
+   for lowering; if nothing re-encodes it, the dangling texts are never
+   read. Audit which worker path re-encodes (the emission publish / claim
+   row) and give it owned copies instead.
+
+Probe that proves it without a rebuild: watch `reset_all_pools` call sites
+between `flat_pools_restore_all` and the panicking encode in the worker
+(gdb breakpoint or an env-gated counter print on reset).
