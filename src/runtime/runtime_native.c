@@ -12303,6 +12303,21 @@ int64_t rt_io_file_open(const uint8_t* path_ptr, uint64_t path_len, int64_t mode
 #endif
 }
 
+/* Two-argument open twins: the seed-produced candidate mis-passes the
+ * path_len operand of THREE-argument mixed (ptr, len, mode) text externs
+ * (observed as path_len = -1), while two-argument (ptr, len) text externs
+ * (rt_io_file_exists) expand correctly. Keep in sync with the Rust twins in
+ * io_file.rs. See stage2_sanity_scv_snapshot_entry_zero_sources_2026-10-22. */
+int64_t rt_io_file_open_read(const uint8_t* path_ptr, uint64_t path_len) {
+    return rt_io_file_open(path_ptr, path_len, 0);
+}
+int64_t rt_io_file_open_write(const uint8_t* path_ptr, uint64_t path_len) {
+    return rt_io_file_open(path_ptr, path_len, 1);
+}
+int64_t rt_io_file_open_append(const uint8_t* path_ptr, uint64_t path_len) {
+    return rt_io_file_open(path_ptr, path_len, 3);
+}
+
 /* Canonical FileHandle close ABI. The descriptor originates from
  * rt_io_file_open above; invalid descriptors fail closed. */
 bool rt_io_file_close(int64_t fd) {
@@ -12660,7 +12675,17 @@ int64_t rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
      * report 0 and would silently yield "" (the spl_file_read comment records
      * that incident). Pinned by scripts/check/check-binary-file-read-length.shs. */
     FILE* f = fopen(path, "rb");
-    if (!f) return rt_nil;
+    if (!f) {
+        /* DIAGNOSTIC (bug-linked: stage2_sanity_scv_snapshot_entry_zero_sources_2026-10-22):
+         * ungated dump of the fopen failure on the candidate's actual read path. */
+        fprintf(stderr,
+            "[rt_file_read_text-diag] errno=%d path_len=%llu path_bytes=",
+            errno, (unsigned long long)path_len);
+        for (uint64_t i = 0; i < path_len && i < 200; i++)
+            fprintf(stderr, "%02x", (unsigned)path_ptr[i]);
+        fprintf(stderr, " converted='%s'\n", path);
+        return rt_nil;
+    }
     size_t cap = 4096;
     size_t len = 0;
     char* content = (char*)rt_observed_malloc_v1(cap);
