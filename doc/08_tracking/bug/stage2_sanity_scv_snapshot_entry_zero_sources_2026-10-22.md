@@ -28,16 +28,65 @@ With the SCV inventory present (`build/scv/source-inventory/CURRENT`, published 
 the sanity's own scv_prime step — i.e. the failure is inherent to the sanity flow,
 not this checkout's state):
 
-```
-SIMPLE_LIB="$PWD/src" SIMPLE_BOOTSTRAP=0 timeout 60 \
-  .simple/storage/build/bootstrap/stage2/x86_64-pc-windows-msvc/simple.exe.rejected \
-  native-build --backend llvm --runtime-bundle core-c-bootstrap --entry-closure \
-  --entry src/compiler/bootstrap_admission/p2_add.spl \
-  --cache-dir /tmp/repro-cache --mode one-binary --output /tmp/repro-p2_add.exe
-```
-
 fails in ~5 ms at `phase 1 load_sources`. The same command against the Rust seed
 (`bin/simple`, tracked rc.1 binary) passes load_sources and compiles.
+
+## Root-cause refinement (same session, turn 2) — READ THIS FIRST
+
+The SCV snapshot path is a RED HERRING. The actual defect is narrower and
+worse: **the self-hosted bootstrap binary cannot read ANY absolute path** —
+the snapshot rewrite merely happens to be the thing that feeds it absolute
+paths.
+
+Matrix against the preserved rejected Stage-2 binary
+(`simple.exe.rejected`, `compile --format=smf <path>`), repo root cwd:
+
+| Entry form                                  | Candidate | Seed |
+|---------------------------------------------|-----------|------|
+| `src/compiler/bootstrap_admission/p2_add.spl` (relative) | OK (scv_prime proved this at 09:15) | OK |
+| `D:\dev\simple\src\...\p2_add.spl` (abs, backslash)      | FAIL | OK |
+| `D:/dev/simple/src/.../p2_add.spl` (abs, fwd slash)      | FAIL | OK |
+| `C:\Users\...\Temp\p2_short.spl` (abs, short, backslash) | FAIL | OK |
+| `C:/Users/.../p2_short.spl` (abs, short, fwd slash)      | FAIL | OK |
+| `C:\...\scv-revision-v1-<64hex>\...\p2_add.spl` (long)   | FAIL | OK |
+
+So: relative works, absolute fails, in the SELF-HOSTED binary only; length,
+separator style, and directory are irrelevant. The SCV flow is broken only
+because it rewrites the entry to an absolute snapshot path
+(`driver_source_pipeline_loading.spl:343-392`).
+
+## Suspect chain (candidate-side file open)
+
+`_driver_collect_explicit_compiler_source` (`driver_source_loading.spl:1662`)
+→ `_driver_cached_entry_source_scan` (`:825`) → `file_read_nullable`
+(`src/lib/nogc_sync_mut/io_runtime.spl:198`) → `file_read_result` →
+`FileTextSession.open` (`src/lib/nogc_sync_mut/io/file_text_session.spl:156`):
+`io_file_open(host_path_native(path), mode_int)`.
+
+- `host_path_native` (`src/lib/nogc_sync_mut/fs/host_path.spl:155`) is correct
+  by inspection for absolute paths (drive passthrough, separator flip,
+  `_host_long_path` only past 247 chars).
+- `io_file_open` (`src/lib/nogc_sync_mut/sffi/fs.spl:300-309`) borrows
+  `rt_string_data(path)` + `rt_string_len(path)` and calls
+  `rt_io_file_open(address, count, mode)`.
+- `rt_io_file_open` (`src/runtime/runtime_native.c:12281`) copies the bytes
+  verbatim (`rt_text_arg_to_path`, `:11669`) and calls `_open`. No absolute-path
+  special-casing anywhere — yet absolute opens fail only under the self-hosted
+  core-c-bootstrap runtime.
+
+Most probable: a text-ABI/retention difference — `rt_string_data` on a string
+produced by the absolute-path route (or `host_path_native`'s replace chains on
+drive-letter input) returns a bad pointer/length under the self-hosted text
+ABI, so `_open` sees garbage and returns ENOENT. Relative paths never exercise
+the drive-letter/separator-flip code shape. Verify with a native probe that
+calls `rt_io_file_open` directly on both spellings under the core-c runtime
+before touching the C.
+
+The stage-2 candidate is built with `--runtime-bundle core-c-bootstrap`
+(transcript: `.simple/storage/build/bootstrap/stage3/x86_64-pc-windows-msvc/stage2-command.transcript`),
+so the defect lives in the core-c/runtime_native layer or its text-ABI
+registry — the seed's Rust-hosted runtime (`env_process.rs` /
+`io_file.rs`) does not show it.
 
 ## Evidence chain
 
