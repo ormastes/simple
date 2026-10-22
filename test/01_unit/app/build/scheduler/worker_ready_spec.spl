@@ -1,0 +1,63 @@
+use app.build.scheduler.worker_request.{BuildWorkerRequestV1,
+    encode_build_worker_request_v1}
+use app.build.scheduler.worker_ready.{encode_build_worker_ready_v1,
+    read_ready_build_worker_v1, worker_ready_control_collision_v1}
+use app.io.mod.{cwd, dir_create_all, file_atomic_write,
+    getpid, time_now_unix_micros}
+use compiler.common.build_contract.{BuildInputRef, SnapshotManifest,
+    ToolchainManifest, InputManifest, ActionSpec, AttemptSpec,
+    action_spec_digest_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn _ready_request_v1() -> BuildWorkerRequestV1:
+    val snapshot = sha256_text("ready snapshot")
+    val action = ActionSpec(1, "compile",
+        SnapshotManifest(1, snapshot, sha256_text("source"),
+            sha256_text("submodules")),
+        ToolchainManifest(1, sha256_text("compiler"), sha256_text("behavior"),
+            sha256_text("abi"), sha256_text("runtime"),
+            sha256_text("sysroot"), "x86_64-unknown-linux-gnu"),
+        InputManifest(1, snapshot,
+            [BuildInputRef("src/answer.c", sha256_text("source bytes"))],
+            [], [], [], [], [], sha256_text("context"), true, false),
+        ["cc", "-c", "src/answer.c"], "src", sha256_text("sandbox"),
+        ["answer.o"], sha256_text("resources"))
+    val attempt = AttemptSpec(1, action_spec_digest_v1(action),
+        "try-1", "node-a", 0, 0, 4096)
+    BuildWorkerRequestV1(action, attempt, 7, 1, 8)
+
+describe "ready worker request admission":
+    it "requires the final marker and exact uploaded request bytes":
+        val root = cwd() + "/build/test/worker-ready-" +
+            getpid().to_text() + "-" + time_now_unix_micros().to_text()
+        val control = root + "/try-1/.simple-control"
+        expect(dir_create_all(control)).to_be(true)
+        val request = _ready_request_v1()
+        val wire = encode_build_worker_request_v1(request)
+        val digest = sha256_text(wire)
+        expect(file_atomic_write(control + "/request.wire", wire)).to_be(true)
+        expect(read_ready_build_worker_v1(root, "try-1", "node-a", digest))
+            .to_be_nil()
+        val marker = encode_build_worker_ready_v1(request)
+        expect(file_atomic_write(control + "/ready", marker)).to_be(true)
+        if val accepted = read_ready_build_worker_v1(root, "try-1", "node-a", digest):
+            expect(accepted.attempt.action_digest).to_equal(request.attempt.action_digest)
+            expect(accepted.fence).to_equal(7)
+        else:
+            expect(false).to_be(true)
+        expect(read_ready_build_worker_v1(root, "try-1", "node-a",
+            sha256_text("wrong request"))).to_be_nil()
+        expect(read_ready_build_worker_v1(root, "try-1", "node-b", digest))
+            .to_be_nil()
+        expect(file_atomic_write(control + "/ready", marker + "extra\n"))
+            .to_be(true)
+        expect(read_ready_build_worker_v1(root, "try-1", "node-a", digest))
+            .to_be_nil()
+
+    it "reserves the worker control directory from declared inputs":
+        expect(worker_ready_control_collision_v1(".simple-control"))
+            .to_be(true)
+        expect(worker_ready_control_collision_v1(".simple-control/request.wire"))
+            .to_be(true)
+        expect(worker_ready_control_collision_v1("src/.simple-control"))
+            .to_be(false)

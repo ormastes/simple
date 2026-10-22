@@ -1,0 +1,102 @@
+#!/bin/sh
+# Exercise the Simple trust adapter against a real, disposable OpenSSH server.
+set -eu
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/simple-ssh-loopback.XXXXXX")
+SERVER_PID=
+cleanup() {
+    if [ -n "$SERVER_PID" ]; then
+        kill "$SERVER_PID" 2>/dev/null || true
+        wait "$SERVER_PID" 2>/dev/null || true
+    fi
+    rm -rf -- "$RUN_DIR"
+}
+trap cleanup EXIT HUP INT TERM
+
+# PATH may resolve to a symlink; the Simple adapter requires a regular file
+# so the checked executable is the exact file subsequently spawned.
+SSH_BIN=$(realpath "$(command -v ssh)")
+SSHD_BIN=$(command -v sshd)
+SSH_KEYGEN_BIN=$(command -v ssh-keygen)
+CLIENT_USER=$(id -un)
+PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
+digest() { openssl dgst -sha256 "$1" | awk '{print $NF}'; }
+
+"$SSH_KEYGEN_BIN" -q -t ed25519 -N '' -f "$RUN_DIR/host" >/dev/null
+"$SSH_KEYGEN_BIN" -q -t ed25519 -N '' -f "$RUN_DIR/client" >/dev/null
+"$SSH_KEYGEN_BIN" -q -t ed25519 -N '' -f "$RUN_DIR/other-host" >/dev/null
+cp "$RUN_DIR/client.pub" "$RUN_DIR/authorized_keys"
+chmod 600 "$RUN_DIR/client" "$RUN_DIR/authorized_keys"
+awk '{print "node-1 " $1 " " $2}' "$RUN_DIR/host.pub" > "$RUN_DIR/known_hosts"
+
+cat > "$RUN_DIR/sshd_config" <<EOF
+Port $PORT
+ListenAddress 127.0.0.1
+HostKey $RUN_DIR/host
+PidFile $RUN_DIR/sshd.pid
+AuthorizedKeysFile $RUN_DIR/authorized_keys
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+UsePAM no
+StrictModes no
+PermitRootLogin no
+AllowUsers $CLIENT_USER
+ForceCommand /bin/true
+LogLevel ERROR
+EOF
+
+"$SSHD_BIN" -t -f "$RUN_DIR/sshd_config"
+"$SSHD_BIN" -D -e -f "$RUN_DIR/sshd_config" > "$RUN_DIR/sshd.log" 2>&1 &
+SERVER_PID=$!
+READY=0
+for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    if nc -z 127.0.0.1 "$PORT" >/dev/null 2>&1; then
+        READY=1
+        break
+    fi
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+        break
+    fi
+    sleep 0.1
+done
+if [ "$READY" -ne 1 ]; then
+    echo "trusted SSH loopback: server failed to start" >&2
+    tail -5 "$RUN_DIR/sshd.log" >&2
+    exit 1
+fi
+
+cd "$REPO_ROOT"
+if ! bin/simple run src/app/build/scheduler/trusted_ssh_probe_main.spl \
+    node-1 127.0.0.1 "$CLIENT_USER" "$PORT" \
+    "$SSH_BIN" "$(digest "$SSH_BIN")" \
+    "$RUN_DIR/known_hosts" "$(digest "$RUN_DIR/known_hosts")" \
+    "$RUN_DIR/client" "$(digest "$RUN_DIR/client")" \
+    > "$RUN_DIR/positive.log" 2>&1; then
+    echo "trusted SSH loopback: pinned-host probe failed" >&2
+    tail -8 "$RUN_DIR/positive.log" >&2
+    tail -5 "$RUN_DIR/sshd.log" >&2
+    exit 1
+fi
+if ! grep -q 'trusted-ssh-probe: CONNECTED worker=node-1' "$RUN_DIR/positive.log"; then
+    echo "trusted SSH loopback: missing connected receipt" >&2
+    exit 1
+fi
+
+awk '{print "node-1 " $1 " " $2}' "$RUN_DIR/other-host.pub" > "$RUN_DIR/known_hosts"
+if bin/simple run src/app/build/scheduler/trusted_ssh_probe_main.spl \
+    node-1 127.0.0.1 "$CLIENT_USER" "$PORT" \
+    "$SSH_BIN" "$(digest "$SSH_BIN")" \
+    "$RUN_DIR/known_hosts" "$(digest "$RUN_DIR/known_hosts")" \
+    "$RUN_DIR/client" "$(digest "$RUN_DIR/client")" \
+    > "$RUN_DIR/negative.log" 2>&1; then
+    echo "trusted SSH loopback: wrong host key was accepted" >&2
+    exit 1
+fi
+if ! grep -q 'trusted-ssh-probe: BLOCKED reason=ssh-probe-failed' "$RUN_DIR/negative.log"; then
+    echo "trusted SSH loopback: wrong-key rejection was inconclusive" >&2
+    tail -8 "$RUN_DIR/negative.log" >&2
+    exit 1
+fi
+echo "trusted SSH loopback: pinned host accepted; wrong host key rejected"

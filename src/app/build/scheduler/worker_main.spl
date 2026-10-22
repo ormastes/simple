@@ -1,0 +1,87 @@
+# Fixed-command SSH entrypoint. Administrator configuration is never an argument.
+use app.io.mod.{get_args}
+use app.build.scheduler.worker_execute.{read_local_build_worker_config_v1,
+    execute_ready_build_worker_v1, status_ready_build_worker_v1,
+    cancel_unstarted_build_worker_v1}
+use app.build.scheduler.worker_cleanup_ack.{acknowledge_build_worker_cleanup_v1}
+use app.build.scheduler.worker_capability.{encode_build_worker_capability_v1}
+use app.build.scheduler.worker_capability_observer.{
+    observe_local_build_worker_capability_v1}
+
+fn main() -> i64:
+    var args = get_args()
+    if args.len() > 0 and (args[0].ends_with("worker_main.spl") or
+       args[0].ends_with("simple-build-worker") or args[0].ends_with("worker_main.exe")):
+        args = args[1:]
+    if args.len() > 0 and args[0] == "--": args = args[1:]
+    if args.len() > 0 and args[0] == "--capabilities":
+        if args.len() != 3 or args[1] != "--nonce":
+            print("build-worker: BLOCKED reason=expected-capabilities-nonce")
+            return 2
+        val config = read_local_build_worker_config_v1()
+        if config == nil:
+            print("build-worker: BLOCKED reason=local-configuration-invalid")
+            return 2
+        val observed = observe_local_build_worker_capability_v1(config.unwrap(), args[2])
+        if observed == nil:
+            print("build-worker: BLOCKED reason=capability-unavailable")
+            return 2
+        val wire = encode_build_worker_capability_v1(observed.unwrap())
+        if wire == "":
+            print("build-worker: BLOCKED reason=capability-invalid")
+            return 2
+        print(wire[0:wire.len() - 1])
+        return 0
+    val status_only = args.len() > 0 and args[0] == "--status"
+    val cancel_only = args.len() > 0 and args[0] == "--cancel"
+    val ack_only = args.len() > 0 and args[0] == "--ack"
+    if status_only: args = args[1:]
+    if cancel_only: args = args[1:]
+    if ack_only: args = args[1:]
+    if (not cancel_only and not ack_only and args.len() != 4) or
+       (cancel_only and args.len() != 6) or
+       (ack_only and args.len() != 8) or
+       args[0] != "--attempt" or args[2] != "--request-digest" or
+       ((cancel_only or ack_only) and args[4] != "--fence") or
+       (ack_only and args[6] != "--result-digest"):
+        print("build-worker: BLOCKED reason=expected-attempt-and-request-digest")
+        return 2
+    val config = read_local_build_worker_config_v1()
+    if config == nil:
+        print("build-worker: BLOCKED reason=local-configuration-invalid")
+        return 2
+    if cancel_only:
+        val fence = args[5].to_i64() ?? -1
+        if fence.to_text() != args[5]:
+            print("build-worker: BLOCKED reason=cancel-fence-invalid")
+            return 2
+        val cancelled = cancel_unstarted_build_worker_v1(config.unwrap(),
+            args[1], args[3], fence)
+        if not cancelled.cancelled:
+            print("build-worker: BLOCKED reason={cancelled.reason}")
+            return 2
+        print(cancelled.acknowledgement[0:cancelled.acknowledgement.len() - 1])
+        return 0
+    if ack_only:
+        val fence = args[5].to_i64() ?? -1
+        if fence.to_text() != args[5]:
+            print("build-worker: BLOCKED reason=ack-fence-invalid")
+            return 2
+        val acknowledged = acknowledge_build_worker_cleanup_v1(
+            config.unwrap(), args[1], args[3], fence, args[7])
+        if not acknowledged.acknowledged:
+            print("build-worker: BLOCKED reason={acknowledged.reason}")
+            return 2
+        print(acknowledged.wire[0:acknowledged.wire.len() - 1])
+        return 0
+    val result = if status_only:
+        status_ready_build_worker_v1(config.unwrap(), args[1], args[3])
+    else:
+        execute_ready_build_worker_v1(config.unwrap(), args[1], args[3])
+    if not result.completed:
+        print("build-worker: BLOCKED reason={result.reason}")
+        return 2
+    # The canonical wire already has one trailing LF; print supplies that LF.
+    print(result.result_wire[0:result.result_wire.len() - 1])
+    # A known nonzero exit is a transported unclassified failure candidate.
+    0

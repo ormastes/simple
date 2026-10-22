@@ -1,0 +1,33 @@
+use std.spec.*
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.{
+    LinuxOciRequestV1, build_create_command, OCI_DEFAULT_ENGINE}
+
+fn _entrypoint_request_v1() -> LinuxOciRequestV1:
+    LinuxOciRequestV1(pod_uid: "build-1", attempt: 1,
+        operation_id: "create-build",
+        image: "example/compiler@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        bundle_path: "", command: ["/usr/bin/clang", "-c",
+            "/simple-build/inputs/answer.c", "-o", "answer.o"], args: [],
+        timeout_ms: 5000, cpu_limit_millis: 1000,
+        memory_limit_bytes: 268435456, pid_limit: 64,
+        network_policy: "none", filesystem_policy: "read-only",
+        build_input_root: "/var/lib/simpleorch/build-attempts/build-1-1-abc123/inputs",
+        build_output_root: "/var/lib/simpleorch/build-attempts/build-1-1-abc123/outputs")
+
+describe "Linux OCI build command entrypoint":
+    it "overrides image entrypoint with the approved executable":
+        val request = _entrypoint_request_v1()
+        val built = build_create_command(OCI_DEFAULT_ENGINE, "/var/lib/simpleorch",
+            request, "create-build", 7, "boot-1")
+        expect(built.0).to_equal("")
+        val args = built.1.args.join("|")
+        expect(args).to_contain("--entrypoint|/usr/bin/clang|--mount|")
+        expect(args).to_contain("/simple-build/outputs|" + request.image +
+            "|-c|/simple-build/inputs/answer.c|-o|answer.o")
+        expect(args).to_contain("|--network|none|")
+
+    it "rejects an empty build command before a container is created":
+        var request = _entrypoint_request_v1()
+        request.command = []
+        expect(build_create_command(OCI_DEFAULT_ENGINE, "/var/lib/simpleorch",
+            request, "create-build", 7, "boot-1").0).to_equal("build-command-empty")

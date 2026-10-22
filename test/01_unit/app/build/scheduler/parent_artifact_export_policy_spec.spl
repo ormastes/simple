@@ -1,0 +1,52 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use app.build.scheduler.parent_artifact_export_policy.{
+    parse_parent_artifact_export_policy_v1,
+    select_parent_artifact_export_policy_v1}
+
+fn _export_policy_fixture_v1() -> text:
+    "simple-build-export-policy-v1\n" +
+    "count=2\n" +
+    "row=archive|" + sha256_text("archive-action") +
+        "|libsimple.a|archive|libsimple.a|0644\n" +
+    "row=program|" + sha256_text("program-action") +
+        "|simple|executable|simple|0755|x86_64-unknown-linux-gnu\n"
+
+describe "protected parent artifact export policy":
+    it "selects a canonical, digest-bound local output mode":
+        val policy = parse_parent_artifact_export_policy_v1(
+            _export_policy_fixture_v1())
+        expect(policy.valid).to_be(true)
+        expect(policy.rows.len()).to_equal(2)
+        val row = select_parent_artifact_export_policy_v1(policy, "program")
+        expect(row.?).to_be(true)
+        if val selected = row:
+            expect(selected.kind).to_equal("executable")
+            expect(selected.target_triple).to_equal("x86_64-unknown-linux-gnu")
+            expect(selected.mode).to_equal(0o755)
+            expect(selected.destination_leaf).to_equal("simple")
+        expect(select_parent_artifact_export_policy_v1(policy, "missing")).to_be_nil()
+
+    it "rejects altered modes, unsafe names, and ambiguous rows":
+        val wire = _export_policy_fixture_v1()
+        expect(parse_parent_artifact_export_policy_v1(
+            wire.replace("|0755|x86_64-unknown-linux-gnu\n", "|0777|x86_64-unknown-linux-gnu\n")).valid).to_be(false)
+        expect(parse_parent_artifact_export_policy_v1(
+            wire.replace("|simple|0755|x86_64-unknown-linux-gnu\n", "|../simple|0755|x86_64-unknown-linux-gnu\n")).valid).to_be(false)
+        expect(parse_parent_artifact_export_policy_v1(
+            wire.replace("|libsimple.a|0644\n", "|simple|0644\n")).valid).to_be(false)
+        expect(parse_parent_artifact_export_policy_v1(
+            wire.replace("count=2", "count=02")).valid).to_be(false)
+        expect(parse_parent_artifact_export_policy_v1(
+            wire.replace("row=program|", "row=archive|")).valid).to_be(false)
+        expect(parse_parent_artifact_export_policy_v1(
+            wire[0:wire.len() - 1]).valid).to_be(false)
+
+    it "requires an administrator target for executable rows only":
+        val wire = _export_policy_fixture_v1()
+        expect(parse_parent_artifact_export_policy_v1(
+            wire.replace("|x86_64-unknown-linux-gnu", "")).valid).to_be(false)
+        expect(parse_parent_artifact_export_policy_v1(
+            wire.replace("x86_64-unknown-linux-gnu", "unknown-target")).valid).to_be(false)
+        expect(parse_parent_artifact_export_policy_v1(
+            wire.replace("|0644", "|0644|x86_64-unknown-linux-gnu")).valid).to_be(false)

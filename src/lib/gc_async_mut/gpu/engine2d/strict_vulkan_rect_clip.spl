@@ -1,0 +1,38 @@
+# Exact integer coverage for an opaque clipped rectangle in the strict Vulkan
+# lane. The device receives only the visible target region, so a large source
+# rectangle cannot turn a small clip into unbounded GPU work.
+
+use std.common.ui.draw_ir.{DrawIrCommand, DrawIrRect,
+    DRAW_IR_COMMAND_RECT, draw_ir_no_rect, draw_ir_rect_bounds,
+    draw_ir_command_has_unsupported_v4_state}
+
+pub fn engine2d_strict_vulkan_rect_clip_coverage(command: DrawIrCommand,
+    target_width: i32, target_height: i32) -> DrawIrRect:
+    """Intersect one integer rectangle, its command clip, and the target."""
+    val clip = command.clip_rect
+    if draw_ir_command_has_unsupported_v4_state(command) or
+        command.kind != DRAW_IR_COMMAND_RECT or not clip.present or
+        command.fractional_geometry != nil or target_width <= 0 or
+        target_height <= 0 or command.width <= 0 or command.height <= 0 or
+        clip.width < 0 or clip.height < 0:
+        return draw_ir_no_rect()
+    var left = command.x.to_i64()
+    var top = command.y.to_i64()
+    var right = left + command.width.to_i64()
+    var bottom = top + command.height.to_i64()
+    val clip_left = clip.x.to_i64()
+    val clip_top = clip.y.to_i64()
+    val clip_right = clip_left + clip.width.to_i64()
+    val clip_bottom = clip_top + clip.height.to_i64()
+    if left < clip_left: left = clip_left
+    if top < clip_top: top = clip_top
+    if right > clip_right: right = clip_right
+    if bottom > clip_bottom: bottom = clip_bottom
+    if left < 0: left = 0
+    if top < 0: top = 0
+    if right > target_width.to_i64(): right = target_width.to_i64()
+    if bottom > target_height.to_i64(): bottom = target_height.to_i64()
+    if right <= left or bottom <= top:
+        return draw_ir_no_rect()
+    draw_ir_rect_bounds(left.to_i32(), top.to_i32(),
+        (right - left).to_i32(), (bottom - top).to_i32())

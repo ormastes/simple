@@ -1,0 +1,260 @@
+# Versioned, pure data contracts for build actions. A digest identifies bytes;
+# the snapshot owner and result broker must separately verify those bytes.
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache.canonical_identity.{canon_str, canon_nat, canon_field, canon_seq, canonical_identity_sort_texts}
+
+struct BuildInputRef:
+    logical_path: text
+    content_digest: text
+
+struct BuildDependencyRef:
+    action_digest: text
+    output_path: text
+    content_digest: text
+
+struct BuildEnvInput:
+    name: text
+    value_digest: text
+
+struct BuildResolutionProbe:
+    # Probe order affects resolution. A missing candidate has no content digest.
+    path: text
+    found: bool
+    content_digest: text
+    context_digest: text
+
+struct SnapshotManifest:
+    version: i64
+    snapshot_digest: text
+    source_tree_digest: text
+    submodule_closure_digest: text
+
+struct ToolchainManifest:
+    version: i64
+    executable_digest: text
+    behavior_digest: text
+    provider_abi_digest: text
+    runtime_digest: text
+    sysroot_digest: text
+    target_triple: text
+
+struct InputManifest:
+    version: i64
+    snapshot_digest: text
+    source_inputs: [BuildInputRef]
+    generated_inputs: [BuildInputRef]
+    declared_dependency_actions: [text]
+    dependency_outputs: [BuildDependencyRef]
+    env_inputs: [BuildEnvInput]
+    resolution_probes: [BuildResolutionProbe]
+    context_digest: text
+    discovery_complete: bool
+    has_untracked_reads: bool
+
+struct ActionSpec:
+    version: i64
+    kind: text
+    snapshot: SnapshotManifest
+    toolchain: ToolchainManifest
+    inputs: InputManifest
+    argv: [text]
+    working_directory: text
+    sandbox_digest: text
+    output_paths: [text]
+    resource_policy_digest: text
+
+struct AttemptSpec:
+    version: i64
+    action_digest: text
+    attempt_id: text
+    worker_id: text
+    retry_number: i64
+    priority: i64
+    memory_budget_bytes: i64
+
+struct NodeCapabilities:
+    version: i64
+    node_id: text
+    target_triples: [text]
+    provider_abi_digests: [text]
+    trust_domain: text
+    memory_capacity_bytes: i64
+
+struct ActionResultCandidate:
+    version: i64
+    action_digest: text
+    attempt_id: text
+    worker_id: text
+    output_manifest_digest: text
+    diagnostic_digest: text
+    success: bool
+
+struct AcceptedResult:
+    version: i64
+    action_digest: text
+    accepted_attempt_id: text
+    output_manifest_digest: text
+    broker_receipt_digest: text
+
+fn _valid_path_v1(path: text) -> bool:
+    path != "" and not path.starts_with("/") and not path.contains("\\") and
+        not path.contains(":") and not path.contains("\n") and not path.contains("\r") and
+        not path.split("/").contains("") and not path.split("/").contains("..") and
+        not path.split("/").contains(".")
+
+fn _valid_refs_v1(refs: [BuildInputRef]) -> bool:
+    var paths: [text] = []
+    for item in refs:
+        if not _valid_path_v1(item.logical_path) or item.content_digest == "" or paths.contains(item.logical_path):
+            return false
+        paths = paths.push(item.logical_path)
+    true
+
+# Returns a stable rejection code; "ok" means only structural completeness.
+# It does not attest to the content of a digest or grant cache permission.
+fn validate_input_manifest_v1(manifest: InputManifest) -> text:
+    if manifest.version != 1:
+        return "version-unsupported"
+    if manifest.snapshot_digest == "" or manifest.context_digest == "":
+        return "context-incomplete"
+    if not manifest.discovery_complete or manifest.has_untracked_reads:
+        return "discovery-incomplete"
+    if not _valid_refs_v1(manifest.source_inputs) or not _valid_refs_v1(manifest.generated_inputs):
+        return "input-invalid"
+    var paths: [text] = []
+    for item in manifest.source_inputs:
+        paths = paths.push(item.logical_path)
+    for item in manifest.generated_inputs:
+        if paths.contains(item.logical_path):
+            return "input-duplicate"
+        paths = paths.push(item.logical_path)
+    var dependencies: [text] = []
+    for digest in manifest.declared_dependency_actions:
+        if digest == "" or dependencies.contains(digest):
+            return "dependency-invalid"
+        dependencies = dependencies.push(digest)
+    var covered: [text] = []
+    for item in manifest.dependency_outputs:
+        if item.action_digest == "" or item.content_digest == "" or not _valid_path_v1(item.output_path):
+            return "dependency-invalid"
+        if not dependencies.contains(item.action_digest) or paths.contains(item.output_path):
+            return "dependency-invalid"
+        paths = paths.push(item.output_path)
+        if not covered.contains(item.action_digest):
+            covered = covered.push(item.action_digest)
+    if covered.len() != dependencies.len():
+        return "dependency-incomplete"
+    var names: [text] = []
+    for item in manifest.env_inputs:
+        if item.name == "" or item.value_digest == "" or names.contains(item.name):
+            return "environment-invalid"
+        names = names.push(item.name)
+    for probe in manifest.resolution_probes:
+        if not _valid_path_v1(probe.path) or probe.context_digest == "":
+            return "resolution-invalid"
+        if probe.found and probe.content_digest == "":
+            return "resolution-invalid"
+        if not probe.found and probe.content_digest != "":
+            return "resolution-invalid"
+    "ok"
+
+fn validate_action_spec_v1(action: ActionSpec) -> text:
+    if action.version != 1 or action.snapshot.version != 1 or action.toolchain.version != 1:
+        return "version-unsupported"
+    if action.snapshot.snapshot_digest == "" or action.snapshot.source_tree_digest == "" or
+        action.snapshot.submodule_closure_digest == "":
+        return "snapshot-incomplete"
+    if action.toolchain.executable_digest == "" or action.toolchain.behavior_digest == "" or
+        action.toolchain.provider_abi_digest == "" or action.toolchain.runtime_digest == "" or
+        action.toolchain.sysroot_digest == "" or action.toolchain.target_triple == "":
+        return "toolchain-incomplete"
+    val input_status = validate_input_manifest_v1(action.inputs)
+    if input_status != "ok":
+        return input_status
+    if action.inputs.snapshot_digest != action.snapshot.snapshot_digest:
+        return "snapshot-mismatch"
+    if action.kind == "" or action.argv.len() == 0 or action.argv[0] == "" or
+        not _valid_path_v1(action.working_directory) or action.sandbox_digest == "" or
+        action.resource_policy_digest == "":
+        return "action-incomplete"
+    if action.output_paths.len() == 0:
+        return "output-incomplete"
+    var outputs: [text] = []
+    for path in action.output_paths:
+        if not _valid_path_v1(path) or outputs.contains(path):
+            return "output-invalid"
+        outputs = outputs.push(path)
+    "ok"
+
+fn _strings_v1(values: [text], sorted: bool) -> text:
+    val ordered = if sorted: canonical_identity_sort_texts(values) else: values
+    var encoded: [text] = []
+    for value in ordered:
+        encoded = encoded.push(canon_str(value))
+    canon_seq(encoded)
+
+fn _input_ref_v1(item: BuildInputRef) -> text:
+    canon_seq([canon_str(item.logical_path), canon_str(item.content_digest)])
+
+fn _input_refs_v1(values: [BuildInputRef]) -> text:
+    var encoded: [text] = []
+    for item in values:
+        encoded = encoded.push(_input_ref_v1(item))
+    canon_seq(canonical_identity_sort_texts(encoded))
+
+fn _dependencies_v1(values: [BuildDependencyRef]) -> text:
+    var encoded: [text] = []
+    for item in values:
+        encoded = encoded.push(canon_seq([canon_str(item.action_digest), canon_str(item.output_path), canon_str(item.content_digest)]))
+    canon_seq(canonical_identity_sort_texts(encoded))
+
+fn _environment_v1(values: [BuildEnvInput]) -> text:
+    var encoded: [text] = []
+    for item in values:
+        encoded = encoded.push(canon_seq([canon_str(item.name), canon_str(item.value_digest)]))
+    canon_seq(canonical_identity_sort_texts(encoded))
+
+fn _probes_v1(values: [BuildResolutionProbe]) -> text:
+    var encoded: [text] = []
+    for item in values:
+        encoded = encoded.push(canon_seq([
+            canon_str(item.path), canon_nat(if item.found: 1 else: 0),
+            canon_str(item.content_digest), canon_str(item.context_digest)]))
+    canon_seq(encoded)
+
+fn input_manifest_digest_v1(manifest: InputManifest) -> text:
+    if validate_input_manifest_v1(manifest) != "ok":
+        return ""
+    sha256_text(canon_field("simple/build-input-manifest/v1", canon_seq([
+        canon_str(manifest.snapshot_digest),
+        _input_refs_v1(manifest.source_inputs), _input_refs_v1(manifest.generated_inputs),
+        _strings_v1(manifest.declared_dependency_actions, true),
+        _dependencies_v1(manifest.dependency_outputs), _environment_v1(manifest.env_inputs),
+        _probes_v1(manifest.resolution_probes), canon_str(manifest.context_digest)])))
+
+fn action_spec_digest_v1(action: ActionSpec) -> text:
+    if validate_action_spec_v1(action) != "ok":
+        return ""
+    sha256_text(canon_field("simple/build-action/v1", canon_seq([
+        canon_str(action.kind),
+        canon_str(action.snapshot.snapshot_digest),
+        canon_str(action.snapshot.source_tree_digest),
+        canon_str(action.snapshot.submodule_closure_digest),
+        canon_str(action.toolchain.executable_digest),
+        canon_str(action.toolchain.behavior_digest),
+        canon_str(action.toolchain.provider_abi_digest),
+        canon_str(action.toolchain.runtime_digest),
+        canon_str(action.toolchain.sysroot_digest),
+        canon_str(action.toolchain.target_triple),
+        canon_str(input_manifest_digest_v1(action.inputs)),
+        _strings_v1(action.argv, false),
+        canon_str(action.working_directory),
+        canon_str(action.sandbox_digest),
+        _strings_v1(action.output_paths, true),
+        canon_str(action.resource_policy_digest)])))
+
+export BuildInputRef, BuildDependencyRef, BuildEnvInput, BuildResolutionProbe
+export SnapshotManifest, ToolchainManifest, InputManifest, ActionSpec
+export AttemptSpec, NodeCapabilities, ActionResultCandidate, AcceptedResult
+export validate_input_manifest_v1, validate_action_spec_v1
+export input_manifest_digest_v1, action_spec_digest_v1

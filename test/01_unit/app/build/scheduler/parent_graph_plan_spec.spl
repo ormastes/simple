@@ -1,0 +1,65 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use app.build.scheduler.parent_graph_plan.{ParentGraphPlanV1,
+    parent_graph_plan_digest_v1, prepare_parent_graph_plan_v1}
+
+val GRAPH_PLAN_FIXTURE_DIGEST = sha256_text("graph-plan-fixture")
+
+fn _graph_plan_config_v1(worker: text) -> text:
+    "simple-dist-build-parent-v2\n" +
+    "graph=/trusted/graph.manifest\n" +
+    "owner=/trusted/owner\n" +
+    "source=/trusted/source\n" +
+    "state=/trusted/state\n" +
+    "cas=/trusted/cas\n" +
+    "ssh-executable=/usr/bin/ssh\n" +
+    "ssh-digest=" + GRAPH_PLAN_FIXTURE_DIGEST + "\n" +
+    "sftp-executable=/usr/bin/sftp\n" +
+    "sftp-digest=" + GRAPH_PLAN_FIXTURE_DIGEST + "\n" +
+    "known-hosts=/trusted/known-hosts\n" +
+    "known-hosts-digest=" + GRAPH_PLAN_FIXTURE_DIGEST + "\n" +
+    "identity=/trusted/identity\n" +
+    "identity-digest=" + GRAPH_PLAN_FIXTURE_DIGEST + "\n" +
+    "worker-id=" + worker + "\n" +
+    "host=build.example\n" +
+    "user=builder\n" +
+    "port=22\n" +
+    "remote-executable=/usr/local/bin/simple-build-worker\n" +
+    "inbox=/srv/simple-build-inbox\n" +
+    "trust-domain=trusted\n" +
+    "target-triple=x86_64-unknown-linux-gnu\n" +
+    "provider-abi=" + GRAPH_PLAN_FIXTURE_DIGEST + "\n" +
+    "worker-memory=8192\n" +
+    "scheduler-cpu=2\n" +
+    "scheduler-memory=8192\n" +
+    "scheduler-memory-reserve=512\n" +
+    "scheduler-fd=8\n" +
+    "timeout-ms=30000\n"
+
+describe "independently approved complete-graph execution identity":
+    it "binds ordered exact configuration bytes and manifest digest":
+        val manifest_digest = sha256_text("pinned-graph-manifest")
+        val first = _graph_plan_config_v1("worker-1")
+        val second = _graph_plan_config_v1("worker-2")
+        val plan = ParentGraphPlanV1(manifest_digest,
+            [first, second], "")
+        val approved = parent_graph_plan_digest_v1(plan)
+        expect(approved != "").to_be(true)
+        expect(parent_graph_plan_digest_v1(ParentGraphPlanV1(
+            manifest_digest, [second, first], "")) != approved).to_be(true)
+        expect(parent_graph_plan_digest_v1(ParentGraphPlanV1(
+            manifest_digest, [first.replace("build.example",
+                "other.example"), second], "")) != approved).to_be(true)
+        expect(parent_graph_plan_digest_v1(ParentGraphPlanV1(
+            sha256_text("other-manifest"), [first, second], "")) != approved)
+            .to_be(true)
+
+    it "rejects absent or changed approval before graph admission":
+        val manifest_digest = sha256_text("pinned-graph-manifest")
+        var plan = ParentGraphPlanV1(manifest_digest,
+            [_graph_plan_config_v1("worker-1")], "")
+        expect(prepare_parent_graph_plan_v1(plan, "", [])
+            .reason).to_equal("graph-plan-digest-mismatch")
+        plan.expected_plan_digest = parent_graph_plan_digest_v1(plan)
+        expect(prepare_parent_graph_plan_v1(plan, "", [])
+            .reason).to_equal("graph-manifest-digest-mismatch")

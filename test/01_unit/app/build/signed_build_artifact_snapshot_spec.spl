@@ -1,0 +1,31 @@
+use app.build.signed_build_artifact_snapshot.{
+    snapshot_signed_build_artifact_v2}
+use app.io.mod.{cwd, dir_create_all, file_atomic_write, file_read,
+    file_hash_sha256, getpid, time_now_unix_micros}
+use std.common.crypto.sha256.{sha256_text}
+
+describe "private signed-build artifact snapshot":
+    it "hands downstream consumers the verified copied bytes after source changes":
+        val root = cwd() + "/build/test/signed-build-snapshot-" +
+            getpid().to_text() + "-" + time_now_unix_micros().to_text()
+        expect(dir_create_all(root)).to_be(true)
+        val source = root + "/downloaded"
+        expect(file_atomic_write(source, "candidate bytes\n")).to_be(true)
+        val copied = snapshot_signed_build_artifact_v2(source, root, 1024)
+        expect(copied.ready).to_be(true)
+        expect(copied.length).to_equal(16)
+        expect(copied.digest).to_equal(sha256_text("candidate bytes\n"))
+        expect(file_hash_sha256(copied.snapshot_path)).to_equal(copied.digest)
+        expect(file_atomic_write(source, "changed source\n")).to_be(true)
+        expect(file_read(copied.snapshot_path)).to_equal("candidate bytes\n")
+
+    it "rejects a missing or oversized source before granting a snapshot":
+        val root = cwd() + "/build/test/signed-build-snapshot-reject-" +
+            getpid().to_text() + "-" + time_now_unix_micros().to_text()
+        expect(dir_create_all(root)).to_be(true)
+        expect(snapshot_signed_build_artifact_v2(root + "/missing",
+            root, 1024).ready).to_be(false)
+        val source = root + "/downloaded"
+        expect(file_atomic_write(source, "larger than four")).to_be(true)
+        expect(snapshot_signed_build_artifact_v2(source,
+            root, 4).reason).to_equal("source-size-invalid")

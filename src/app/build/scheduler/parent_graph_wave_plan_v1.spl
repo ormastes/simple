@@ -1,0 +1,195 @@
+# Advisory, value-only wave planning. The durable owner must recheck every
+# proposed slot before recording admission or starting a worker child.
+use app.build.scheduler.parent_cli.{DistBuildConfigV1}
+use app.build.scheduler.parent_graph_request.{ParentGraphRequestV1,
+    select_next_parent_graph_request_v1}
+use app.build.scheduler.parent_graph_runner.{parent_graph_workers_valid_v1}
+use app.build.scheduler.parent_action_admission.{admit_parent_action_intent_v1}
+use app.build.scheduler.ledger.{SchedulerLedgerV1, admit_attempt_v1,
+    SchedulerAttemptV1, SchedulerFenceV1, SchedulerFailedAttemptV1,
+    scheduler_ledger_valid_v1}
+use app.build.scheduler.planner.{plan_ready_actions_v1}
+use compiler.common.build_contract.{AcceptedResult, action_spec_digest_v1}
+
+struct ParentGraphWaveSlotV1:
+    worker_index: i64
+    action_digest: text
+    attempt_id: text
+    retry_number: i64
+
+struct ParentGraphWavePlanV1:
+    status: text             # DISPATCH | WAIT_ACTIVE | COMPLETE | BLOCKED
+    reason: text
+    slots: [ParentGraphWaveSlotV1]
+
+fn _wave_plan_v1(status: text, reason: text,
+        slots: [ParentGraphWaveSlotV1]) -> ParentGraphWavePlanV1:
+    ParentGraphWavePlanV1(status, reason, slots)
+
+fn _wave_attempt_id_valid_v1(value: text) -> bool:
+    if value.len() == 0 or value.len() > 128:
+        return false
+    var i: i64 = 0
+    while i < value.len():
+        val c = value[i:i + 1]
+        if not ((c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
+                (c >= "0" and c <= "9") or c == "-" or c == "_" or c == "."):
+            return false
+        i = i + 1
+    true
+
+fn _wave_ledger_copy_v1(ledger: SchedulerLedgerV1) -> SchedulerLedgerV1:
+    var attempts: [SchedulerAttemptV1] = []
+    var fences: [SchedulerFenceV1] = []
+    var accepted: [AcceptedResult] = []
+    var failures: [SchedulerFailedAttemptV1] = []
+    for item in ledger.attempts:
+        attempts.push(item)
+    for item in ledger.fences:
+        fences.push(item)
+    for item in ledger.accepted:
+        accepted.push(item)
+    for item in ledger.failures:
+        failures.push(item)
+    SchedulerLedgerV1(attempts, fences, accepted, failures)
+
+fn plan_parent_graph_wave_v1(graph: ParentGraphRequestV1,
+        ledger: SchedulerLedgerV1, workers: [DistBuildConfigV1],
+        attempt_ids: [text], now_tick: i64) -> ParentGraphWavePlanV1:
+    """Propose one independent attempt per idle worker from a ledger snapshot."""
+    if not parent_graph_workers_valid_v1(graph, workers) or
+       workers.len() > 16 or not scheduler_ledger_valid_v1(ledger):
+        return _wave_plan_v1("BLOCKED", "graph-or-worker-policy-invalid", [])
+    if attempt_ids.len() != workers.len() or now_tick < 0 or
+       now_tick > 1000000000:
+        return _wave_plan_v1("BLOCKED", "attempt-or-clock-invalid", [])
+    for worker in workers:
+        val capacity = worker.capacity
+        if capacity.cpu_tokens <= 0 or capacity.memory_bytes <= 0 or
+           capacity.fd_tokens <= 0 or capacity.memory_reserve_bytes < 0 or
+           capacity.memory_reserve_bytes >= capacity.memory_bytes:
+            return _wave_plan_v1("BLOCKED", "graph-capacity-invalid", [])
+    var seen_ids: [text] = []
+    for id in attempt_ids:
+        if not _wave_attempt_id_valid_v1(id) or seen_ids.contains(id):
+            return _wave_plan_v1("BLOCKED", "attempt-id-invalid", [])
+        for prior in ledger.attempts:
+            if prior.attempt_id == id:
+                return _wave_plan_v1("BLOCKED", "attempt-id-reused", [])
+        seen_ids.push(id)
+
+    # Graph values may have been reconstructed or changed after wire admission.
+    # Re-derive every action from its paired canonical request before planning.
+    var pair_index: i64 = 0
+    while pair_index < graph.actions.len():
+        val expected = graph.actions[pair_index]
+        val request = graph.requests[pair_index]
+        val admitted = admit_parent_action_intent_v1(request,
+            request.attempt.worker_id, expected.queued_tick)
+        if not admitted.accepted or admitted.action == nil:
+            return _wave_plan_v1("BLOCKED", "graph-request-action-mismatch", [])
+        val derived = admitted.action.unwrap()
+        if derived.action_digest != expected.action_digest or
+           action_spec_digest_v1(expected.spec) != expected.action_digest or
+           derived.priority != expected.priority or
+           derived.cpu_tokens != expected.cpu_tokens or
+           derived.memory_bytes != expected.memory_bytes or
+           derived.fd_tokens != expected.fd_tokens or
+           derived.queued_tick != expected.queued_tick or
+           derived.dependencies.len() != expected.dependencies.len():
+            return _wave_plan_v1("BLOCKED", "graph-request-action-mismatch", [])
+        for dependency in derived.dependencies:
+            if not expected.dependencies.contains(dependency):
+                return _wave_plan_v1("BLOCKED", "graph-request-action-mismatch", [])
+        pair_index = pair_index + 1
+
+    # A graph-active attempt can only be reconciled by its issued worker.
+    # Do not return WAIT_ACTIVE for an attempt with no valid route.
+    for attempt in ledger.attempts:
+        if attempt.active:
+            pair_index = 0
+            while pair_index < graph.actions.len():
+                if attempt.action_digest ==
+                        graph.actions[pair_index].action_digest and
+                   attempt.worker_id !=
+                        graph.requests[pair_index].attempt.worker_id:
+                    return _wave_plan_v1("BLOCKED",
+                        "graph-active-worker-mismatch", [])
+                pair_index = pair_index + 1
+
+    var accepted: [text] = []
+    var active: [text] = []
+    for item in ledger.accepted:
+        for action in graph.actions:
+            if item.action_digest == action.action_digest:
+                accepted.push(item.action_digest)
+    for item in ledger.attempts:
+        if item.active:
+            for action in graph.actions:
+                if item.action_digest == action.action_digest:
+                    active.push(item.action_digest)
+    val readiness = plan_ready_actions_v1(graph.actions, accepted, active,
+        now_tick)
+    if readiness.error != "":
+        return _wave_plan_v1("BLOCKED", readiness.error, [])
+    if accepted.len() == graph.actions.len():
+        return _wave_plan_v1("COMPLETE", "graph-complete", [])
+
+    var working = _wave_ledger_copy_v1(ledger)
+    var slots: [ParentGraphWaveSlotV1] = []
+    var used_workers: [i64] = []
+    var reason = "graph-no-ready-action"
+    while slots.len() < workers.len():
+        var best_index: i64 = -1
+        var best_digest = ""
+        var best_priority: i64 = -1
+        var best_retry: i64 = 0
+        var i: i64 = 0
+        while i < workers.len():
+            if not used_workers.contains(i):
+                val worker = workers[i]
+                val choice = select_next_parent_graph_request_v1(graph,
+                    working, worker.node.ssh.node.worker_id,
+                    worker.capabilities, worker.capacity, attempt_ids[i],
+                    now_tick)
+                if choice.ready and choice.request != nil:
+                    val digest = choice.request.unwrap().attempt.action_digest
+                    for action in graph.actions:
+                        if action.action_digest == digest:
+                            val age = if now_tick > action.queued_tick:
+                                now_tick - action.queued_tick else: 0
+                            val priority = action.priority + age
+                            if best_index < 0 or priority > best_priority or
+                               (priority == best_priority and
+                                (digest < best_digest or
+                                 (digest == best_digest and i < best_index))):
+                                best_index = i
+                                best_digest = digest
+                                best_priority = priority
+                                best_retry = choice.retry_number
+                elif choice.reason != "graph-no-action-for-worker" and
+                     choice.reason != "graph-no-ready-action":
+                    reason = choice.reason
+            i = i + 1
+        if best_index < 0:
+            break
+        val worker = workers[best_index]
+        val transition = admit_attempt_v1(working, graph.actions,
+            best_digest, attempt_ids[best_index],
+            worker.node.ssh.node.worker_id, worker.capacity, now_tick)
+        if not transition.admitted or transition.error != "":
+            val error = if transition.error == "":
+                "graph-wave-admission-rejected" else: transition.error
+            return _wave_plan_v1("BLOCKED", error, [])
+        working = transition.ledger
+        slots.push(ParentGraphWaveSlotV1(best_index, best_digest,
+            attempt_ids[best_index], best_retry))
+        used_workers.push(best_index)
+    if slots.len() > 0:
+        return _wave_plan_v1("DISPATCH", "ready", slots)
+    if active.len() > 0:
+        return _wave_plan_v1("WAIT_ACTIVE", "active-attempt", [])
+    _wave_plan_v1("BLOCKED", reason, [])
+
+export ParentGraphWaveSlotV1, ParentGraphWavePlanV1
+export plan_parent_graph_wave_v1

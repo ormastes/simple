@@ -1,0 +1,230 @@
+# Parent-owned request and intent entrypoints used by the build CLI/controller.
+# The caller supplies protected node policy and transport configuration.
+use app.build.scheduler.worker_request.{parse_build_worker_request_v1}
+use app.build.scheduler.parent_action_admission.{admit_parent_action_request_v1,
+    admit_parent_action_intent_v1}
+use app.build.scheduler.owner.{SchedulerOwnerV1, scheduler_owner_open_v1,
+    scheduler_owner_close_v1}
+use app.build.scheduler.ledger.{SchedulerCapacityV1, SchedulerLedgerV1,
+    scheduler_current_fence_v1}
+use app.build.scheduler.planner.{SchedulerActionV1}
+use app.build.scheduler.distributed_attempt.{DistributedBuildNodeV1,
+    DistributedBuildAttemptV1, distributed_build_node_consistent_v1}
+use app.build.scheduler.remote_worker_preflight.{
+    run_preflighted_remote_build_attempt_v1}
+use app.build.scheduler.distributed_parallel_attempt.{
+    run_parallel_remote_build_attempt_v1,
+    commit_parallel_fetched_result_v1}
+use app.build.scheduler.parent_request_spool.{recover_parent_build_request_v1}
+use app.build.scheduler.parent_cleanup_service.{report_completed_parent_cleanup_v1}
+use app.build.scheduler.dispatch_wire.{encode_build_dispatch_v1}
+use app.build.scheduler.trusted_worker_invocation.{
+    status_build_worker_ssh_v1, cancel_unstarted_build_worker_ssh_v1}
+use app.build.scheduler.trusted_result_download.{fetch_build_result_sftp_v1,
+    fetch_build_failure_sftp_v1}
+use app.build.scheduler.worker_request.{encode_build_worker_request_v1}
+use compiler.common.build_contract.{AcceptedResult, NodeCapabilities}
+
+fn _parent_remote_block_v1(reason: text,
+        reconcile: bool) -> DistributedBuildAttemptV1:
+    DistributedBuildAttemptV1(false, false, false, reconcile, reason,
+        AcceptedResult(1, "", "", "", ""))
+
+fn _parent_remote_close_v1(owner: SchedulerOwnerV1,
+        result: DistributedBuildAttemptV1) -> DistributedBuildAttemptV1:
+    if scheduler_owner_close_v1(owner):
+        return result
+    val reason = if result.reason == "":
+        "owner-close-failed"
+    else:
+        result.reason + ";owner-close-failed"
+    DistributedBuildAttemptV1(result.completed, result.published,
+        result.failure_recorded, true, reason, result.accepted)
+
+fn completed_parent_remote_attempt_v1(ledger: SchedulerLedgerV1,
+        attempt_id: text, worker_id: text) -> DistributedBuildAttemptV1?:
+    """Answer repeated status from the durable ledger without remote launch."""
+    for attempt in ledger.attempts:
+        if attempt.attempt_id == attempt_id and
+           attempt.worker_id == worker_id and not attempt.active:
+            for accepted in ledger.accepted:
+                if accepted.accepted_attempt_id == attempt_id and
+                   accepted.action_digest == attempt.action_digest:
+                    return DistributedBuildAttemptV1(true, true, false,
+                        false, "", accepted)
+            for failure in ledger.failures:
+                if failure.attempt_id == attempt_id and
+                   failure.action_digest == attempt.action_digest and
+                   failure.worker_id == worker_id and
+                   failure.fence == attempt.fence:
+                    return DistributedBuildAttemptV1(true, false, true,
+                        false, failure.classification,
+                        AcceptedResult(1, "", "", "", ""))
+    nil
+
+fn run_parent_remote_build_request_v1(request_wire: text, owner_root: text,
+        node: DistributedBuildNodeV1, capabilities: NodeCapabilities,
+        protected_trust_domain: text, capacity: SchedulerCapacityV1,
+        now_tick: i64) -> DistributedBuildAttemptV1:
+    """Parse a canonical request, own its journal, and run one remote attempt.
+
+    The request is data, not authority for the fence, worker, node policy or
+    result publication. A protected caller must supply those values and keep
+    owner_root private to this controller.
+    """
+    val parsed = parse_build_worker_request_v1(request_wire)
+    if parsed == nil:
+        return _parent_remote_block_v1("request-invalid", false)
+    val request = parsed.unwrap()
+    val owner = scheduler_owner_open_v1(owner_root)
+    if owner.error != "":
+        return _parent_remote_block_v1("owner: " + owner.error, true)
+    val next_fence = scheduler_current_fence_v1(owner.state.ledger,
+        request.attempt.action_digest) + 1
+    val admitted = admit_parent_action_request_v1(request,
+        node.ssh.node.worker_id, next_fence, now_tick)
+    if not admitted.accepted or admitted.action == nil:
+        val closed = scheduler_owner_close_v1(owner)
+        if not closed:
+            return _parent_remote_block_v1("owner-close-failed", true)
+        return _parent_remote_block_v1("action: " + admitted.reason, false)
+    val result = run_preflighted_remote_build_attempt_v1(owner,
+        [admitted.action.unwrap()], request.attempt.action_digest,
+        request.attempt.attempt_id, request.attempt.retry_number, node,
+        capabilities, protected_trust_domain, capacity, now_tick)
+    val closed = _parent_remote_close_v1(owner, result)
+    report_completed_parent_cleanup_v1(owner_root,
+        request.attempt.attempt_id, node, closed)
+
+fn run_parent_remote_action_v1(actions: [SchedulerActionV1],
+        action_digest: text, attempt_id: text, retry_number: i64,
+        owner_root: text, node: DistributedBuildNodeV1,
+        capabilities: NodeCapabilities, protected_trust_domain: text,
+        capacity: SchedulerCapacityV1,
+        now_tick: i64) -> DistributedBuildAttemptV1:
+    """Own one scheduled graph attempt and allocate its fence under the lock.
+
+    The protected caller supplies the complete graph and authoritative action
+    manifests. This entrypoint does not require a caller-guessed fence or a
+    pre-fenced worker request.
+    """
+    run_parallel_remote_build_attempt_v1(owner_root, actions, action_digest,
+        attempt_id, retry_number, node, capabilities,
+        protected_trust_domain, capacity, now_tick)
+
+fn run_parent_remote_build_intent_v1(request_wire: text, owner_root: text,
+        node: DistributedBuildNodeV1, capabilities: NodeCapabilities,
+        protected_trust_domain: text, capacity: SchedulerCapacityV1,
+        now_tick: i64) -> DistributedBuildAttemptV1:
+    """Admit one protected action template and allocate its fence under owner.
+
+    The wire is canonical request data, but its fence is only a placeholder.
+    The protected scheduler verifies the worker and action identity before
+    constructing a fresh request with its current journal fence.
+    """
+    val parsed = parse_build_worker_request_v1(request_wire)
+    if parsed == nil:
+        return _parent_remote_block_v1("request-invalid", false)
+    val request = parsed.unwrap()
+    val admitted = admit_parent_action_intent_v1(request,
+        node.ssh.node.worker_id, now_tick)
+    if not admitted.accepted or admitted.action == nil:
+        return _parent_remote_block_v1("action: " + admitted.reason, false)
+    run_parent_remote_action_v1([admitted.action.unwrap()],
+        request.attempt.action_digest, request.attempt.attempt_id,
+        request.attempt.retry_number, owner_root, node, capabilities,
+        protected_trust_domain, capacity, now_tick)
+
+fn resume_parent_remote_attempt_v1(owner_root: text, attempt_id: text,
+        node: DistributedBuildNodeV1) -> DistributedBuildAttemptV1:
+    """Read a completed remote result without launching a second worker."""
+    if not distributed_build_node_consistent_v1(node):
+        return _parent_remote_block_v1("transport-node-mismatch", false)
+    val owner = scheduler_owner_open_v1(owner_root)
+    if owner.error != "":
+        return _parent_remote_block_v1("owner: " + owner.error, true)
+    val completed = completed_parent_remote_attempt_v1(owner.state.ledger,
+        attempt_id, node.ssh.node.worker_id)
+    if completed != nil:
+        val closed = _parent_remote_close_v1(owner, completed.unwrap())
+        return report_completed_parent_cleanup_v1(owner_root,
+            attempt_id, node, closed)
+    val recovered = recover_parent_build_request_v1(owner, attempt_id)
+    if not recovered.recovered or recovered.request == nil or
+       recovered.request.unwrap().attempt.worker_id != node.ssh.node.worker_id:
+        return _parent_remote_close_v1(owner,
+            _parent_remote_block_v1("request-recovery: " + recovered.reason, true))
+    val request = recovered.request.unwrap()
+    val dispatch = encode_build_dispatch_v1(request.action, request.attempt,
+        request.fence, request.cpu_tokens, request.fd_tokens)
+    if dispatch == "":
+        return _parent_remote_close_v1(owner,
+            _parent_remote_block_v1("dispatch-recovery-invalid", true))
+    if not scheduler_owner_close_v1(owner):
+        return _parent_remote_block_v1("owner-close-before-status", true)
+    val reply = status_build_worker_ssh_v1(node.ssh, dispatch,
+        recovered.request_digest)
+    if not reply.received or reply.result == nil:
+        return _parent_remote_block_v1("worker: " + reply.reason, true)
+    val fetched = if reply.result.unwrap().candidate.success:
+        fetch_build_result_sftp_v1(node.sftp, request,
+            node.local_state_dir, reply.result_wire)
+    else:
+        fetch_build_failure_sftp_v1(node.sftp, request,
+            node.local_state_dir, reply.result_wire)
+    if not fetched.verified:
+        return _parent_remote_block_v1("fetch: " + fetched.reason, true)
+    commit_parallel_fetched_result_v1(owner_root, attempt_id, request,
+        recovered.request_digest, node, fetched)
+
+fn cancel_unstarted_parent_remote_attempt_v1(owner_root: text,
+        attempt_id: text,
+        node: DistributedBuildNodeV1) -> DistributedBuildAttemptV1:
+    """Revoke only after the worker durably acknowledges no launch."""
+    if not distributed_build_node_consistent_v1(node):
+        return _parent_remote_block_v1("transport-node-mismatch", false)
+    val owner = scheduler_owner_open_v1(owner_root)
+    if owner.error != "":
+        return _parent_remote_block_v1("owner: " + owner.error, true)
+    val recovered = recover_parent_build_request_v1(owner, attempt_id)
+    if not recovered.recovered or recovered.request == nil or
+       recovered.request.unwrap().attempt.worker_id != node.ssh.node.worker_id:
+        return _parent_remote_close_v1(owner,
+            _parent_remote_block_v1("request-recovery: " + recovered.reason, true))
+    val request = recovered.request.unwrap()
+    val dispatch = encode_build_dispatch_v1(request.action, request.attempt,
+        request.fence, request.cpu_tokens, request.fd_tokens)
+    if dispatch == "":
+        return _parent_remote_close_v1(owner,
+            _parent_remote_block_v1("dispatch-recovery-invalid", true))
+    if not scheduler_owner_close_v1(owner):
+        return _parent_remote_block_v1("owner-close-before-cancel", true)
+    val cancelled = cancel_unstarted_build_worker_ssh_v1(node.ssh,
+        dispatch, recovered.request_digest)
+    if not cancelled.acknowledged:
+        return _parent_remote_block_v1("worker-cancel: " + cancelled.reason, true)
+    val fresh = scheduler_owner_open_v1(owner_root)
+    if fresh.error != "":
+        return _parent_remote_block_v1("owner-reopen: " + fresh.error, true)
+    val current = recover_parent_build_request_v1(fresh, attempt_id)
+    if not current.recovered or current.request == nil or
+       current.request_digest != recovered.request_digest or
+       encode_build_worker_request_v1(current.request.unwrap()) !=
+           encode_build_worker_request_v1(request) or
+       current.request.unwrap().attempt.worker_id != node.ssh.node.worker_id:
+        return _parent_remote_close_v1(fresh,
+            _parent_remote_block_v1("request-changed-or-no-longer-current", true))
+    val revoked = fresh.revoke(attempt_id)
+    if not revoked.acknowledged:
+        return _parent_remote_close_v1(fresh,
+            _parent_remote_block_v1("revoke: " + revoked.error, true))
+    _parent_remote_close_v1(fresh, DistributedBuildAttemptV1(true, false,
+        false, false, "cancelled-before-start",
+        AcceptedResult(1, "", "", "", "")))
+
+export run_parent_remote_build_request_v1
+export run_parent_remote_action_v1
+export run_parent_remote_build_intent_v1
+export completed_parent_remote_attempt_v1
+export resume_parent_remote_attempt_v1
+export cancel_unstarted_parent_remote_attempt_v1

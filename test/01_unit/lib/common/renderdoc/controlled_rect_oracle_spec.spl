@@ -1,0 +1,84 @@
+# @tag: unit, renderdoc, REQ-2D-003, NFR-2D-003
+
+use std.spec.*
+use common.renderdoc.controlled_rect_oracle.{
+    controlled_rect_expected_rgba, controlled_rect_capture_matches_oracle}
+use common.renderdoc.final_output_pixels.{
+    FinalOutputMetadata, FinalOutputCapture, FinalOutputTolerance,
+    compare_final_output_pixels}
+
+fn _capture(bytes: [i64], resource_id: text) -> FinalOutputCapture:
+    FinalOutputCapture(
+        metadata: FinalOutputMetadata(
+            fixture_id: "controlled-opaque-rect-v1",
+            fixture_digest: "90fc023c54e082fff358647440e8213d45185a6d949d81b6d848c553839484b3",
+            frame_id: "oracle-test-frame", resource_id: resource_id,
+            selected_resource_count: 1, mip_level: 0, array_layer: 0,
+            submission_token: "completed-1", completion_token: "completed-1",
+            frame_complete: true, readback_complete: true, device_status: "ready",
+            width: 16, height: 16, stride: 64,
+            pixel_format: "R8G8B8A8_UNORM", alpha_mode: "opaque",
+            color_space: "srgb", color_primaries: "srgb", transfer_function: "srgb",
+            origin: "top-left", crop_x: 0, crop_y: 0, crop_width: 16, crop_height: 16),
+        pixel_bytes: bytes)
+
+fn _exact() -> FinalOutputTolerance:
+    FinalOutputTolerance(
+        fixture_id: "controlled-opaque-rect-v1",
+        verified_source_digest: "90fc023c54e082fff358647440e8213d45185a6d949d81b6d848c553839484b3",
+        max_channel_delta: 0, max_excess_pixels: 0)
+
+describe "independent controlled rectangle oracle":
+    it "rasterizes the independently pinned expected image":
+        # @req REQ-2D-003 NFR-2D-003
+        step("Check fixture digest and compute analytic RGBA without DrawIR decoding")
+        match controlled_rect_expected_rgba():
+            Ok(rgba):
+                expect(rgba.len()).to_equal(1024)
+                expect(rgba[0:4]).to_equal([16, 32, 48, 255])
+                expect(rgba[(4 * 16 + 4) * 4:(4 * 16 + 4) * 4 + 4]).to_equal([51, 102, 153, 255])
+                expect(rgba[(11 * 16 + 11) * 4:(11 * 16 + 11) * 4 + 4]).to_equal([51, 102, 153, 255])
+                expect(rgba[(12 * 16 + 12) * 4:(12 * 16 + 12) * 4 + 4]).to_equal([16, 32, 48, 255])
+            Err(reason): fail("Pinned oracle failed: {reason}")
+
+    it "rejects two identical wrong captures even when pairwise pixels pass":
+        # @req REQ-2D-003 NFR-2D-003
+        step("Construct two matching wrong readbacks independently of the oracle")
+        var wrong_a: [i64] = []
+        var wrong_b: [i64] = []
+        var index = 0
+        while index < 1024:
+            val byte = if index % 4 == 3: 255 else: 0
+            wrong_a.push(byte)
+            wrong_b.push(byte)
+            index = index + 1
+        val capture_a = _capture(wrong_a, "device-a-output")
+        val capture_b = _capture(wrong_b, "device-b-output")
+        expect(compare_final_output_pixels(capture_a, capture_b, _exact()).status).to_equal("pass")
+        match controlled_rect_capture_matches_oracle(capture_a):
+            Ok(matches): expect(matches).to_equal(false)
+            Err(reason): fail("Wrong pixels were rejected before oracle comparison: {reason}")
+        match controlled_rect_capture_matches_oracle(capture_b):
+            Ok(matches): expect(matches).to_equal(false)
+            Err(reason): fail("Wrong pixels were rejected before oracle comparison: {reason}")
+
+    it "accepts exact canonical pixels and rejects a wrong extent":
+        # @req REQ-2D-003 NFR-2D-004
+        step("Check an exact 16 by 16 readback against the oracle")
+        match controlled_rect_expected_rgba():
+            Ok(rgba):
+                val capture = _capture(rgba, "oracle-matching-output")
+                match controlled_rect_capture_matches_oracle(capture):
+                    Ok(matches): expect(matches).to_equal(true)
+                    Err(reason): fail("Expected exact oracle match: {reason}")
+                var short = _capture(rgba, "short-output")
+                short.metadata.crop_width = 15
+                match controlled_rect_capture_matches_oracle(short):
+                    Ok(_): fail("Wrong extent should be rejected")
+                    Err(reason): expect(reason).to_equal("controlled-rect-oracle-capture-extent")
+                var foreign = _capture(rgba, "foreign-output")
+                foreign.metadata.fixture_id = "unrelated-scene"
+                match controlled_rect_capture_matches_oracle(foreign):
+                    Ok(_): fail("Wrong fixture should be rejected")
+                    Err(reason): expect(reason).to_equal("controlled-rect-oracle-fixture-mismatch")
+            Err(reason): fail("Pinned oracle failed: {reason}")

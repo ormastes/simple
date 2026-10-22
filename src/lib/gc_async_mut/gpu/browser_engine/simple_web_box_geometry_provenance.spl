@@ -1,0 +1,187 @@
+# Conservative CSS box-length provenance for rectangle-only GPU admission.
+# The ordinary Web renderer keeps its existing integer layout behavior; this
+# gate records authored tokens so admission can refuse lost precision.
+
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style}
+
+fn _web_box_length_property(key: text) -> bool:
+    key == "width" or key == "height" or
+        key == "left" or key == "top" or key == "right" or key == "bottom" or
+        key == "min-width" or key == "max-width" or
+        key == "min-height" or key == "max-height" or
+        key == "inline-size" or key == "block-size" or
+        key == "min-inline-size" or key == "max-inline-size" or
+        key == "min-block-size" or key == "max-block-size" or
+        key == "inset" or key == "inset-inline" or key == "inset-block" or
+        key == "inset-inline-start" or key == "inset-inline-end" or
+        key == "inset-block-start" or key == "inset-block-end" or
+        key == "margin" or key == "margin-left" or key == "margin-right" or
+        key == "margin-top" or key == "margin-bottom" or
+        key == "margin-inline" or key == "margin-block" or
+        key == "margin-inline-start" or key == "margin-inline-end" or
+        key == "margin-block-start" or key == "margin-block-end" or
+        key == "padding" or key == "padding-left" or
+        key == "padding-right" or key == "padding-top" or
+        key == "padding-bottom" or key == "padding-inline" or
+        key == "padding-block" or key == "padding-inline-start" or
+        key == "padding-inline-end" or key == "padding-block-start" or
+        key == "padding-block-end" or
+        key == "border" or key == "border-width" or
+        key == "border-left" or key == "border-right" or
+        key == "border-top" or key == "border-bottom" or
+        key == "border-inline" or key == "border-block" or
+        key == "border-inline-start" or key == "border-inline-end" or
+        key == "border-block-start" or key == "border-block-end" or
+        key == "border-left-width" or key == "border-right-width" or
+        key == "border-top-width" or key == "border-bottom-width" or
+        key == "border-inline-width" or key == "border-block-width" or
+        key == "border-inline-start-width" or
+        key == "border-inline-end-width" or
+        key == "border-block-start-width" or
+        key == "border-block-end-width" or
+        key == "border-spacing" or
+        key == "border-radius" or key == "border-top-left-radius" or
+        key == "border-top-right-radius" or
+        key == "border-bottom-left-radius" or
+        key == "border-bottom-right-radius" or
+        key == "border-start-start-radius" or
+        key == "border-start-end-radius" or
+        key == "border-end-start-radius" or
+        key == "border-end-end-radius" or
+        key == "outline" or
+        key == "outline-width" or key == "outline-offset" or
+        key == "flex" or key == "flex-basis" or
+        key == "grid-template-columns" or key == "grid-template-rows" or
+        key == "grid-auto-columns" or key == "grid-auto-rows" or
+        key == "gap" or key == "row-gap" or key == "column-gap" or
+        key == "aspect-ratio" or key == "clip"
+
+fn _web_integer_px_or_zero(token: text, allow_negative: bool) -> bool:
+    if token == "0":
+        return true
+    if not token.ends_with("px") or token.len() <= 2:
+        return false
+    val digits = token.substring(0, token.len() - 2)
+    var index = 0
+    val negative = digits.starts_with("-")
+    if digits.starts_with("-") or digits.starts_with("+"):
+        index = 1
+    if index >= digits.len() or digits.len() - index > 10:
+        return false
+    var magnitude = 0i64
+    while index < digits.len():
+        val code = digits.char_code_at(index)
+        if code < 48 or code > 57:
+            return false
+        magnitude = magnitude * 10i64 + (code - 48).to_i64()
+        if magnitude > 2147483648i64:
+            return false
+        index = index + 1
+    if negative:
+        (allow_negative or magnitude == 0i64) and magnitude <= 2147483648i64
+    else:
+        magnitude <= 2147483647i64
+
+fn _web_box_length_value_resolved(key: text, value: text) -> bool:
+    if value == "":
+        return false
+    # These grammars can change geometry through more than one length or a
+    # functional expression. The first group is always rejected; the later
+    # shorthands admit only an exact zero form.
+    if key == "clip" or key == "aspect-ratio" or key == "flex" or
+        key == "grid-template-columns" or key == "grid-template-rows" or
+        key == "grid-auto-columns" or key == "grid-auto-rows":
+        return false
+    if key == "inset" or key == "inset-inline" or key == "inset-block" or
+        key == "margin" or key == "margin-inline" or key == "margin-block" or
+        key == "padding" or key == "padding-inline" or key == "padding-block" or
+        key == "border" or key == "border-width" or
+        key == "border-left" or key == "border-right" or
+        key == "border-top" or key == "border-bottom" or
+        key == "border-inline" or key == "border-block" or
+        key == "border-inline-start" or key == "border-inline-end" or
+        key == "border-block-start" or key == "border-block-end" or
+        key == "border-inline-width" or key == "border-block-width" or
+        key == "border-spacing" or key == "border-radius" or
+        key == "outline" or key == "gap":
+        return value == "0" or value == "0px"
+    # Longhands have exactly one token. A space, expression, keyword, unit
+    # other than px, or value outside i32 cannot be proved by this producer.
+    val allow_negative = key == "left" or key == "top" or
+        key == "right" or key == "bottom" or
+        key.starts_with("inset-") or key.starts_with("margin-") or
+        key == "outline-offset"
+    _web_integer_px_or_zero(value, allow_negative)
+
+# The flat list stores one "property=normalized-value" entry per property.
+# First-seen order is stable; a later cascade declaration replaces that slot.
+fn web_box_geometry_capture_tokens(previous: [text], table: [text]) -> [text]:
+    var result: [text] = []
+    for entry in previous:
+        result.push(entry)
+    var index = 0
+    while index + 1 < table.len():
+        val key = table[index].trim().lower()
+        if _web_box_length_property(key):
+            val value = table[index + 1].trim().lower()
+            val entry = "{key}={value}"
+            val prefix = "{key}="
+            var found = false
+            var slot = 0
+            while slot < result.len():
+                if result[slot].starts_with(prefix):
+                    result[slot] = entry
+                    found = true
+                    break
+                slot = slot + 1
+            if not found:
+                result.push(entry)
+        index = index + 2
+    result
+
+# Keep all winning authored declarations, including names the integer Style
+# parser does not represent. Fractional admission uses a strict allowlist.
+fn web_fractional_capture_authored_decls(previous: [text], table: [text]) -> [text]:
+    var result: [text] = []
+    for entry in previous:
+        result.push(entry)
+    var index = 0
+    while index + 1 < table.len():
+        val key = table[index].trim().lower()
+        if key != "":
+            val value = table[index + 1].trim().lower()
+            val entry = "{key}={value}"
+            val prefix = "{key}="
+            var found = false
+            var slot = 0
+            while slot < result.len():
+                if result[slot].starts_with(prefix):
+                    result[slot] = entry
+                    found = true
+                    break
+                slot = slot + 1
+            if not found:
+                result.push(entry)
+        index = index + 2
+    result
+
+fn web_box_geometry_tokens_reason(tokens: [text]) -> text:
+    for entry in tokens:
+        val parts = entry.split("=")
+        if parts.len() < 2 or not _web_box_length_property(parts[0]):
+            return "invalid-provenance-token"
+        val value = entry.substring(parts[0].len() + 1, entry.len())
+        if not _web_box_length_value_resolved(parts[0], value):
+            return "unresolved-box-length:{parts[0]}"
+    ""
+
+# Inspect every computed style, including nodes omitted by integer visibility
+# culling. Ancestor geometry therefore blocks an integer-looking descendant.
+fn web_box_geometry_scene_reason(styles: [Style]) -> text:
+    var index = 0
+    for st in styles:
+        if st.box_geometry_unresolved:
+            val reason = web_box_geometry_tokens_reason(st.box_geometry_raw_tokens)
+            return "web-box-geometry-unresolved:node-{index}:{reason}"
+        index = index + 1
+    ""

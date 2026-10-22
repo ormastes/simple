@@ -1,0 +1,276 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# link_engine_external — LinkRequestV1/LinkExecutionPolicyV1 -> NativeLinkConfig
+# projection, and the SIMPLE_LINKER=internal engine selection (internal:elf).
+#
+# Lane A3, doc/03_plan/compiler/linker/mold_mdsocpp_linker_plan_2026-09-18.md
+# row A3. RC1 = zero behaviour change: argv builders in
+# `_LinkerWrapper/native_linking.spl` are untouched; this only covers the
+# projection this adapter adds in front of them, plus the one new rejection
+# `mold.find_linker_path` grew for `SIMPLE_LINKER=internal`.
+#
+# @cover src/compiler/70.backend/linker/link_engine_external.spl
+# @cover src/compiler/70.backend/linker/mold.spl
+
+use std.spec.step
+
+use std.spec.*
+use std.common.kernel_plugin.ids.*
+use std.common.kernel_plugin.schema_header.*
+use std.common.linker.link_request_v1.*
+use std.common.linker.link_policy_v1.*
+use std.common.linker.link_receipt_v1.*
+use compiler.backend.linker.link_engine_external.*
+use compiler.backend.linker.linker_wrapper.{NativeLinkConfig}
+use compiler.backend.linker.mold.{find_linker_path}
+use std.io_runtime.{shell}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text)
+
+fn with_env(key: text, value: text, block: fn()):
+    val previous = rt_env_get(key) ?? ""
+    rt_env_set(key, value)
+    block()
+    rt_env_set(key, previous)
+
+fn header_for(schema_id: KpfId128) -> KpfSchemaHeaderV1:
+    KpfSchemaHeaderV1(
+        abi_version: KPF_ABI_VERSION_V1,
+        struct_size: KPF_SCHEMA_HEADER_V1_SIZE,
+        schema_id: schema_id,
+        schema_major: 1,
+        schema_minor: 0,
+        schema_digest: KpfDigest256(w0: 1, w1: 0, w2: 0, w3: 0),
+        reserved0: 0
+    )
+
+fn request_for(target: LinkTargetV1) -> LinkRequestV1:
+    LinkRequestV1(
+        header: header_for(KpfId128(hi: 1, lo: 1)),
+        target: target,
+        inputs_manifest_digest: KpfDigest256(w0: 2, w1: 0, w2: 0, w3: 0),
+        output_contract: 1,
+        semantic_profile_digest: KpfDigest256(w0: 3, w1: 0, w2: 0, w3: 0),
+        runtime_sysroot_digest: KpfDigest256(w0: 4, w1: 0, w2: 0, w3: 0),
+        required_features: 0,
+        layout_handle: 0,
+        debug_handle: 0,
+        reproducibility: 0
+    )
+
+fn fast_policy() -> LinkExecutionPolicyV1:
+    LinkExecutionPolicyV1(
+        header: header_for(KpfId128(hi: 1, lo: 2)),
+        mode: LinkExecutionModeV1.Fast,
+        job_memory_limit_bytes: 0,
+        scratch_limit_bytes: 0,
+        max_workers: 1,
+        allowed_placements: 0,
+        enforcement_requirement: 0
+    )
+
+fn bounded_policy(job_memory_limit_bytes: u64) -> LinkExecutionPolicyV1:
+    LinkExecutionPolicyV1(
+        header: header_for(KpfId128(hi: 1, lo: 2)),
+        mode: LinkExecutionModeV1.Bounded,
+        job_memory_limit_bytes: job_memory_limit_bytes,
+        scratch_limit_bytes: 0,
+        max_workers: 1,
+        allowed_placements: 0,
+        enforcement_requirement: 0
+    )
+
+fn linux_x86_64() -> LinkTargetV1:
+    LinkTargetV1(arch: LINK_ARCH_X86_64, os: LINK_OS_LINUX, abi: LINK_ABI_GNU, object_format: LINK_OBJECT_FORMAT_ELF, endian: LINK_ENDIAN_LITTLE, address_width: 64)
+
+fn linux_aarch64() -> LinkTargetV1:
+    LinkTargetV1(arch: LINK_ARCH_AARCH64, os: LINK_OS_LINUX, abi: LINK_ABI_GNU, object_format: LINK_OBJECT_FORMAT_ELF, endian: LINK_ENDIAN_LITTLE, address_width: 64)
+
+fn macos_aarch64() -> LinkTargetV1:
+    LinkTargetV1(arch: LINK_ARCH_AARCH64, os: LINK_OS_MACOS, abi: LINK_ABI_GNU, object_format: LINK_OBJECT_FORMAT_MACHO, endian: LINK_ENDIAN_LITTLE, address_width: 64)
+
+fn freebsd_x86_64() -> LinkTargetV1:
+    LinkTargetV1(arch: LINK_ARCH_X86_64, os: LINK_OS_FREEBSD, abi: LINK_ABI_GNU, object_format: LINK_OBJECT_FORMAT_ELF, endian: LINK_ENDIAN_LITTLE, address_width: 64)
+
+fn windows_gnu_x86_64() -> LinkTargetV1:
+    LinkTargetV1(arch: LINK_ARCH_X86_64, os: LINK_OS_WINDOWS, abi: LINK_ABI_GNU, object_format: LINK_OBJECT_FORMAT_PE, endian: LINK_ENDIAN_LITTLE, address_width: 64)
+
+fn windows_msvc_x86_64() -> LinkTargetV1:
+    LinkTargetV1(arch: LINK_ARCH_X86_64, os: LINK_OS_WINDOWS, abi: LINK_ABI_MSVC, object_format: LINK_OBJECT_FORMAT_PE, endian: LINK_ENDIAN_LITTLE, address_width: 64)
+
+fn expect_untouched_defaults(config: NativeLinkConfig):
+    """Every field the request/policy carry no source for must stay exactly
+    at NativeLinkConfig.default()'s value (RC1 = zero behaviour change)."""
+    expect(config.libraries).to_equal([])
+    expect(config.library_paths).to_equal([])
+    expect(config.runtime_path).to_equal("")
+    expect(config.pie).to_be(true)
+    expect(config.debug).to_be(false)
+    expect(config.strip_output).to_be(false)
+    expect(config.verbose).to_be(false)
+    expect(config.allow_duplicate_definitions).to_be(true)
+    expect(config.allow_cc_fallback).to_be(true)
+    expect(config.retained_symbols).to_equal([])
+    expect(config.extra_flags).to_equal([])
+    expect(config.runtime_bundle).to_equal("")
+
+# ============================================================================
+# link_request_to_native_config — field-for-field projection
+# ============================================================================
+
+describe "link_engine_external - link_request_to_native_config projection":
+    it "projects Linux x86_64 to the GNU triple and the ELF linker_abi":
+        # @req REQ-LINKER-A3-PROJECTION
+        step("Linux x86_64 target projects to x86_64-unknown-linux-gnu / elf")
+        val config = link_request_to_native_config(request_for(linux_x86_64()), fast_policy())
+        expect(config.target_triple).to_equal("x86_64-unknown-linux-gnu")
+        expect(config.linker_abi).to_equal("elf")
+        expect_untouched_defaults(config)
+
+    it "projects Linux aarch64 to the GNU triple and the ELF linker_abi":
+        # @req REQ-LINKER-A3-PROJECTION
+        step("Linux aarch64 target projects to aarch64-unknown-linux-gnu / elf")
+        val config = link_request_to_native_config(request_for(linux_aarch64()), fast_policy())
+        expect(config.target_triple).to_equal("aarch64-unknown-linux-gnu")
+        expect(config.linker_abi).to_equal("elf")
+        expect_untouched_defaults(config)
+
+    it "projects macOS to the Darwin triple and the darwin linker_abi":
+        # @req REQ-LINKER-A3-PROJECTION
+        step("macOS target projects to aarch64-apple-darwin / darwin")
+        val config = link_request_to_native_config(request_for(macos_aarch64()), fast_policy())
+        expect(config.target_triple).to_equal("aarch64-apple-darwin")
+        expect(config.linker_abi).to_equal("darwin")
+        expect_untouched_defaults(config)
+
+    it "projects FreeBSD to the FreeBSD triple and the ELF linker_abi":
+        # @req REQ-LINKER-A3-PROJECTION
+        step("FreeBSD target projects to x86_64-unknown-freebsd / elf")
+        val config = link_request_to_native_config(request_for(freebsd_x86_64()), fast_policy())
+        expect(config.target_triple).to_equal("x86_64-unknown-freebsd")
+        expect(config.linker_abi).to_equal("elf")
+        expect_untouched_defaults(config)
+
+    it "projects Windows GNU to the pc-windows-gnu triple and linker_abi":
+        # @req REQ-LINKER-A3-PROJECTION
+        step("Windows GNU target projects to x86_64-pc-windows-gnu / windows-gnu")
+        val config = link_request_to_native_config(request_for(windows_gnu_x86_64()), fast_policy())
+        expect(config.target_triple).to_equal("x86_64-pc-windows-gnu")
+        expect(config.linker_abi).to_equal("windows-gnu")
+        expect_untouched_defaults(config)
+
+    it "projects Windows MSVC to the pc-windows-msvc triple and linker_abi":
+        # @req REQ-LINKER-A3-PROJECTION
+        step("Windows MSVC target projects to x86_64-pc-windows-msvc / windows-msvc")
+        val config = link_request_to_native_config(request_for(windows_msvc_x86_64()), fast_policy())
+        expect(config.target_triple).to_equal("x86_64-pc-windows-msvc")
+        expect(config.linker_abi).to_equal("windows-msvc")
+        expect_untouched_defaults(config)
+
+# ============================================================================
+# SIMPLE_LINKER=internal
+# ============================================================================
+
+describe "link_engine_external - SIMPLE_LINKER=internal":
+    it "find_linker_path rejects the internal alias by name before path resolution":
+        # @req REQ-LINKER-A3-INTERNAL-ALIAS
+        step("SIMPLE_LINKER=internal is a named rejection, not a lookup miss")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            val result = find_linker_path()
+            expect(result.is_err()).to_be(true)
+            expect(result.unwrap_err()).to_equal("internal engine is not a linker path: SIMPLE_LINKER=internal runs in link_engine_external as internal:elf")
+        )
+
+    it "SIMPLE_LINKER unset still resolves normally (override behaviour unchanged)":
+        # @req REQ-LINKER-A3-INTERNAL-ALIAS
+        step("Unsetting SIMPLE_LINKER leaves the existing resolution path alone")
+        with_env("SIMPLE_LINKER", "", fn():
+            val result = find_linker_path()
+            # Either a real linker is found, or the historical "no linker
+            # found" error -- never the internal-engine message.
+            if result.is_err():
+                expect(result.unwrap_err()).not.to_equal("internal engine is not a linker path: SIMPLE_LINKER=internal runs in link_engine_external as internal:elf")
+        )
+
+    it "an unresolvable non-internal override is still a plain lookup error":
+        # @req REQ-LINKER-A3-INTERNAL-ALIAS
+        step("SIMPLE_LINKER=nonexistent-linker-xyz is not reinterpreted as internal")
+        with_env("SIMPLE_LINKER", "nonexistent-linker-xyz", fn():
+            val result = find_linker_path()
+            expect(result.is_err()).to_be(true)
+            expect(result.unwrap_err()).to_equal("Unsupported SIMPLE_LINKER value: nonexistent-linker-xyz")
+        )
+
+    it "classify_link_error maps the propagated internal-engine message to UnsupportedFeature":
+        # @req REQ-LINKER-A3-INTERNAL-ALIAS
+        step("The exact link_native_unix propagation text still classifies")
+        val propagated = "requested-linker-unresolved: internal engine is not a linker path: SIMPLE_LINKER=internal runs in link_engine_external as internal:elf"
+        expect(classify_link_error(propagated).name()).to_equal("UnsupportedFeature")
+
+    it "link_request_to_native reports UnsupportedFeature as internal:elf for a non-ELF target":
+        # @req REQ-LINKER-A3-INTERNAL-ALIAS
+        step("End-to-end: internal override + Mach-O target -> named UnsupportedFeature receipt")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            val receipt = link_request_to_native(
+                request_for(macos_aarch64()), fast_policy(),
+                ["test/fixtures/linker/elf/hello_libc_a64.o"],
+                "/tmp/link_engine_external_spec_output")
+            expect(receipt.outcome.name()).to_equal("UnsupportedFeature")
+            expect(receipt.engine_id).to_equal("internal:elf")
+        )
+
+    it "link_request_to_native links a Linux aarch64 ELF object internally and the output runs":
+        # @req REQ-LINKER-A3-INTERNAL-ALIAS
+        # Host requirement: aarch64 Linux with glibc (crt_discovery finds
+        # Scrt1.o/crti.o/crtn.o and libc.so.6 next to them).
+        step("End-to-end: internal override -> internal:elf dynamic PIE that prints and exits 42")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            val out = "/tmp/link_engine_external_spec_internal_hello"
+            val receipt = link_request_to_native(
+                request_for(linux_aarch64()), fast_policy(),
+                ["test/fixtures/linker/elf/hello_libc_a64.o"], out)
+            expect(receipt.outcome.name()).to_equal("Success")
+            expect(receipt.engine_id).to_equal("internal:elf")
+            val run = shell("'{out}'")
+            expect(run.exit_code).to_equal(42)
+            expect(run.stdout).to_equal("hi from libc\n")
+        )
+
+    it "link_request_to_native reports a missing input as InputError from internal:elf":
+        # @req REQ-LINKER-A3-INTERNAL-ALIAS
+        step("End-to-end: internal override + unreadable object -> InputError, never an external fallback")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            val receipt = link_request_to_native(
+                request_for(linux_aarch64()), fast_policy(),
+                ["/tmp/link_engine_external_spec_nonexistent.o"],
+                "/tmp/link_engine_external_spec_output")
+            expect(receipt.outcome.name()).to_equal("InputError")
+            expect(receipt.engine_id).to_equal("internal:elf")
+        )
+
+# ============================================================================
+# Invalid input never invokes a linker
+# ============================================================================
+
+describe "link_engine_external - link_request_to_native input validation":
+    it "rejects a Bounded policy with a zero memory limit as InputError, without invoking a linker":
+        # @req REQ-LINKER-A3-INPUT-VALIDATION
+        step("Bounded mode + limit 0 -> InputError receipt, no linker probed")
+        val receipt = link_request_to_native(
+            request_for(linux_x86_64()), bounded_policy(0),
+            [], "/tmp/link_engine_external_spec_should_not_run")
+        expect(receipt.outcome.name()).to_equal("InputError")
+        expect(receipt.engine_id).to_equal("none")
+
+    it "rejects a request with an out-of-range address_width as InputError":
+        # @req REQ-LINKER-A3-INPUT-VALIDATION
+        step("address_width outside {32,64} -> InputError receipt")
+        val bad_target = LinkTargetV1(arch: LINK_ARCH_X86_64, os: LINK_OS_LINUX, abi: LINK_ABI_GNU, object_format: LINK_OBJECT_FORMAT_ELF, endian: LINK_ENDIAN_LITTLE, address_width: 16)
+        val receipt = link_request_to_native(
+            request_for(bad_target), fast_policy(),
+            [], "/tmp/link_engine_external_spec_should_not_run_2")
+        expect(receipt.outcome.name()).to_equal("InputError")
+        expect(receipt.engine_id).to_equal("none")

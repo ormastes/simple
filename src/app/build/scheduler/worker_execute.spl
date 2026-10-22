@@ -1,0 +1,564 @@
+# One-shot trusted Linux worker. Configuration belongs to the administrator,
+# never to the uploaded request. A retained binding blocks duplicate execution.
+# Unknown lifecycle states retain mounts and require explicit reconciliation.
+use app.io.mod.{file_read_regular_no_follow_bounded, file_exists,
+    file_create_exclusive, file_atomic_write, file_fsync, directory_fsync,
+    file_lock, file_unlock, dir_create_all, dir_remove_all, file_copy}
+use app.build.scheduler.worker_ready.{read_ready_build_worker_v1}
+use app.build.scheduler.worker_request.{BuildWorkerRequestV1,
+    encode_build_worker_request_v1}
+use app.build.scheduler.worker_materialize.{stage_build_inputs_v1}
+use app.build.scheduler.worker_output.{observe_build_outputs_v1,
+    verify_build_outputs_v1, BUILD_OUTPUT_MAX_DIAGNOSTIC_BYTES_V1}
+use app.build.scheduler.dispatch_wire.{encode_build_result_v1,
+    parse_build_result_v1, BUILD_DISPATCH_WIRE_MAX_V1}
+use app.build.scheduler.planner.{scheduler_action_digest_valid_v1}
+use app.build.scheduler.worker_sandbox_identity.{build_worker_sandbox_digest_v1}
+use app.build.scheduler.worker_execution_profile.{
+    build_worker_execution_profile_problem_v1,
+    build_worker_terminal_exit_problem_v1}
+use app.build.scheduler.worker_attempt_binding.{
+    parse_worker_attempt_binding_v1}
+use app.build.scheduler.worker_terminal_observation.{
+    persist_worker_terminal_observation_v1,
+    recover_worker_terminal_observation_v1}
+use app.build.scheduler.worker_failure_proof.{
+    encode_build_worker_failure_proof_v1,
+    parse_build_worker_failure_proof_v1,
+    BUILD_WORKER_FAILURE_PROOF_MAX_V1}
+use compiler.common.build_contract.{ToolchainManifest, ActionResultCandidate}
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.{
+    LinuxOciRuntimeProviderV1, LinuxOciRequestV1}
+use std.common.crypto.sha256.{sha256_text}
+
+val BUILD_WORKER_LOCAL_CONFIG_V1 = "/etc/simple/build-worker.v1"
+
+struct LocalBuildWorkerConfigV1:
+    worker_id: text
+    inbox_root: text
+    state_dir: text
+    engine: text
+    image: text
+    compiler_entry: text
+    toolchain: ToolchainManifest
+    sandbox_digest: text
+    resource_policy_digest: text
+    cpu_limit: i64
+    memory_limit: i64
+    timeout_ms: i64
+    pid_limit: i64
+    provider_generation: i64
+
+struct BuildWorkerExecutionV1:
+    completed: bool
+    success: bool
+    reason: text
+    result_wire: text
+    results_root: text
+
+struct BuildWorkerCancellationV1:
+    cancelled: bool
+    reason: text
+    acknowledgement: text
+
+fn _execute_block_v1(reason: text) -> BuildWorkerExecutionV1:
+    BuildWorkerExecutionV1(false, false, reason, "", "")
+
+fn _execute_token_v1(value: text) -> bool:
+    if value == "" or value.len() > 128 or value == "." or value == ".." or
+       value.starts_with("-"):
+        return false
+    for c in value.chars():
+        if (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
+           (c >= "0" and c <= "9") or c == "-" or c == "_" or c == ".":
+            continue
+        return false
+    true
+
+fn _execute_path_v1(value: text) -> bool:
+    if not value.starts_with("/") or value.len() > 4096 or value.ends_with("/"):
+        return false
+    val segments = value.split("/")
+    var i: i64 = 1
+    while i < segments.len():
+        if not _execute_token_v1(segments[i]): return false
+        i = i + 1
+    true
+
+fn _execute_nat_v1(value: text, maximum: i64) -> i64:
+    if value == "" or value.len() > 16: return -1
+    for c in value.chars():
+        if c < "0" or c > "9": return -1
+    val number = value.to_i64() ?? -1
+    if number <= 0 or number > maximum or number.to_text() != value: return -1
+    number
+
+fn parse_local_build_worker_config_v1(wire: text) -> LocalBuildWorkerConfigV1?:
+    """Parse only the administrator-owned fixed-path configuration format."""
+    if wire.len() == 0 or wire.len() > 16384 or not wire.ends_with("\n") or
+       wire.contains("\r") or wire.contains("\x00"):
+        return nil
+    val keys = ["worker", "inbox", "state", "engine", "image", "compiler-entry",
+        "tool-executable", "tool-behavior", "provider-abi", "runtime", "sysroot",
+        "target", "sandbox", "resource-policy", "cpu", "memory", "timeout-ms",
+        "pids", "provider-generation"]
+    val lines = wire[0:wire.len() - 1].split("\n")
+    if lines.len() != keys.len() + 1 or lines[0] != "simple-local-build-worker-v1":
+        return nil
+    var values: [text] = []
+    var i: i64 = 0
+    while i < keys.len():
+        val prefix = keys[i] + "="
+        if not lines[i + 1].starts_with(prefix): return nil
+        values.push(lines[i + 1][prefix.len():])
+        i = i + 1
+    if not _execute_token_v1(values[0]) or not _execute_path_v1(values[1]) or
+       not _execute_path_v1(values[2]) or not _execute_path_v1(values[5]) or
+       not ["podman", "docker"].contains(values[3]) or
+       not _execute_token_v1(values[11]):
+        return nil
+    val marker = values[4].index_of("@sha256:")
+    if marker < 1 or values[4].starts_with("-") or
+       not scheduler_action_digest_valid_v1(values[4][marker + 8:]):
+        return nil
+    for c in values[4].chars():
+        if c <= " " or c == "\x7f": return nil
+    for digest in [values[6], values[7], values[8], values[9], values[10], values[12], values[13]]:
+        if not scheduler_action_digest_valid_v1(digest): return nil
+    if values[12] != build_worker_sandbox_digest_v1(values[4], values[3], values[5]):
+        return nil
+    val cpu = _execute_nat_v1(values[14], 1000000)
+    val memory = _execute_nat_v1(values[15], 1000000000000000)
+    val timeout = _execute_nat_v1(values[16], 3600000)
+    val pids = _execute_nat_v1(values[17], 1000000)
+    val generation = _execute_nat_v1(values[18], 1000000000)
+    if cpu < 0 or memory < 0 or timeout < 0 or pids < 0 or generation < 0: return nil
+    LocalBuildWorkerConfigV1(values[0], values[1], values[2], values[3], values[4],
+        values[5], ToolchainManifest(1, values[6], values[7], values[8], values[9],
+            values[10], values[11]), values[12], values[13], cpu, memory, timeout,
+        pids, generation)
+
+fn read_local_build_worker_config_v1() -> LocalBuildWorkerConfigV1?:
+    val read = file_read_regular_no_follow_bounded(BUILD_WORKER_LOCAL_CONFIG_V1, 16384)
+    if read.is_err(): return nil
+    parse_local_build_worker_config_v1(read.unwrap())
+
+fn local_build_worker_request_problem_v1(config: LocalBuildWorkerConfigV1,
+        request: BuildWorkerRequestV1) -> text:
+    """Check the supported profile against independently installed local policy."""
+    if encode_build_worker_request_v1(request) == "": return "request-invalid"
+    val action = request.action
+    val tool = action.toolchain
+    val local = config.toolchain
+    if request.attempt.worker_id != config.worker_id: return "worker-mismatch"
+    if tool.version != local.version or tool.executable_digest != local.executable_digest or
+       tool.behavior_digest != local.behavior_digest or tool.provider_abi_digest != local.provider_abi_digest or
+       tool.runtime_digest != local.runtime_digest or tool.sysroot_digest != local.sysroot_digest or
+       tool.target_triple != local.target_triple:
+        return "toolchain-mismatch"
+    if config.sandbox_digest != build_worker_sandbox_digest_v1(config.image,
+            config.engine, config.compiler_entry) or
+       action.sandbox_digest != config.sandbox_digest or
+       action.resource_policy_digest != config.resource_policy_digest:
+        return "local-policy-mismatch"
+    if request.cpu_tokens > config.cpu_limit or
+       request.attempt.memory_budget_bytes > config.memory_limit:
+        return "local-capacity-exceeded"
+    build_worker_execution_profile_problem_v1(action, config.compiler_entry)
+
+fn _execute_store_v1(path: text, content: text) -> bool:
+    file_atomic_write(path, content) and file_fsync(path)
+
+fn _worker_cancel_wire_v1(config: LocalBuildWorkerConfigV1,
+        attempt_id: text, request_digest: text, fence: i64) -> text:
+    "simple-build-cancel-v1\nworker=" + config.worker_id +
+        "\nattempt=" + attempt_id + "\nrequest=" + request_digest +
+        "\nfence=" + fence.to_text() + "\n"
+
+fn _worker_cancel_ack_v1(attempt_id: text,
+        request_digest: text, fence: i64) -> text:
+    "simple-build-cancelled-v1|" + attempt_id + "|" +
+        request_digest + "|" + fence.to_text() + "\n"
+
+fn _publish_stopped_worker_result_v1(config: LocalBuildWorkerConfigV1,
+        request: BuildWorkerRequestV1, attempt_id: text,
+        stage_root: text, request_digest: text, binding_digest: text,
+        exit_code: i64,
+        diagnostics: text) -> BuildWorkerExecutionV1:
+    """Rebuild a partial result from immutable stopped-container outputs."""
+    if exit_code < 0 or exit_code > 255 or
+       diagnostics.len() > BUILD_OUTPUT_MAX_DIAGNOSTIC_BYTES_V1:
+        return _execute_block_v1("terminal-observation-invalid")
+    val exit_problem = build_worker_terminal_exit_problem_v1(exit_code)
+    if exit_problem != "": return _execute_block_v1(exit_problem)
+    val control = config.inbox_root + "/" + attempt_id + "/.simple-control"
+    val results = control + "/results"
+    if file_exists(results) and not dir_remove_all(results):
+        return _execute_block_v1("partial-results-cleanup-failed")
+    if not dir_create_all(results) or not directory_fsync(control):
+        return _execute_block_v1("results-directory-unavailable")
+    if not _execute_store_v1(results + "/diagnostics", diagnostics):
+        return _execute_block_v1("diagnostics-not-durable")
+    if exit_code != 0:
+        # Outputs from a failed action are never eligible for the CAS.
+        if not _execute_store_v1(results + "/manifest.wire", ""):
+            return _execute_block_v1("failure-manifest-not-durable")
+        val failed = ActionResultCandidate(1,
+            request.attempt.action_digest, attempt_id, config.worker_id,
+            "", sha256_text(diagnostics), false)
+        val failure_wire = encode_build_result_v1(failed, request.fence)
+        val proof_wire = encode_build_worker_failure_proof_v1(
+            request_digest, binding_digest, attempt_id, request.fence,
+            exit_code, sha256_text(failure_wire))
+        if failure_wire == "" or proof_wire == "" or
+           not _execute_store_v1(results + "/failure-proof.wire", proof_wire) or
+           not directory_fsync(results) or
+           not directory_fsync(control) or
+           not _execute_store_v1(results + "/result.wire", failure_wire) or
+           not directory_fsync(results):
+            return _execute_block_v1("failure-result-not-durable")
+        return BuildWorkerExecutionV1(true, false,
+            "action-failure-unclassified", failure_wire, results)
+    val observed = observe_build_outputs_v1(request.action, request.attempt,
+        request.fence, stage_root + "/outputs", diagnostics)
+    if not observed.valid: return _execute_block_v1(observed.reason)
+    for path in request.action.output_paths:
+        if not file_copy(stage_root + "/outputs/" + path,
+                results + "/" + path) or
+           not file_fsync(results + "/" + path):
+            return _execute_block_v1("output-copy-failed")
+    val copied = verify_build_outputs_v1(request.action, request.attempt,
+        request.fence, results, diagnostics, observed.manifest_wire,
+        observed.manifest_digest)
+    if not copied.valid: return _execute_block_v1(copied.reason)
+    if not _execute_store_v1(results + "/manifest.wire", copied.manifest_wire):
+        return _execute_block_v1("manifest-not-durable")
+    val candidate = ActionResultCandidate(1, request.attempt.action_digest,
+        attempt_id, config.worker_id, copied.manifest_digest,
+        sha256_text(diagnostics), true)
+    val result_wire = encode_build_result_v1(candidate, request.fence)
+    if result_wire == "" or not directory_fsync(results) or
+       not directory_fsync(control) or
+       not _execute_store_v1(results + "/result.wire", result_wire) or
+       not directory_fsync(results):
+        return _execute_block_v1("result-not-durable")
+    BuildWorkerExecutionV1(true, true, "", result_wire, results)
+
+fn _execute_locked_v1(config: LocalBuildWorkerConfigV1, attempt_id: text,
+        expected_request_digest: text, boot_id: text) -> BuildWorkerExecutionV1:
+    val ready = read_ready_build_worker_v1(config.inbox_root, attempt_id,
+        config.worker_id, expected_request_digest)
+    if ready == nil: return _execute_block_v1("ready-request-invalid")
+    val request = ready.unwrap()
+    val problem = local_build_worker_request_problem_v1(config, request)
+    if problem != "": return _execute_block_v1(problem)
+    if file_exists(config.state_dir + "/worker-attempt-" + attempt_id + ".cancel"):
+        return _execute_block_v1("attempt-cancelled")
+    val binding_path = config.state_dir + "/worker-attempt-" + attempt_id + ".binding"
+    if file_exists(binding_path): return _execute_block_v1("attempt-reconciliation-required")
+    val provider = LinuxOciRuntimeProviderV1.new("linux", config.engine, config.state_dir,
+        boot_id, config.provider_generation, true, config.timeout_ms)
+    val probe = provider.probe()
+    if not probe.healthy or not probe.launch_capable or
+       (config.engine == "podman" and probe.privilege != "rootless") or
+       (config.engine == "docker" and probe.privilege != "root"):
+        return _execute_block_v1("provider-unavailable")
+    val stage = stage_build_inputs_v1(request.action, request.attempt, attempt_id,
+        request.fence, config.inbox_root + "/" + attempt_id, config.state_dir)
+    if not stage.staged: return _execute_block_v1(stage.reason)
+    val operation_id = "build-" + request.fence.to_text()
+    val oci = LinuxOciRequestV1(pod_uid: attempt_id, attempt: request.fence,
+        operation_id: operation_id, image: config.image, bundle_path: "",
+        command: request.action.argv, args: [], timeout_ms: config.timeout_ms,
+        cpu_limit_millis: request.cpu_tokens * 1000,
+        memory_limit_bytes: request.attempt.memory_budget_bytes, pid_limit: config.pid_limit,
+        network_policy: "none", filesystem_policy: "read-only",
+        build_input_root: stage.input_root, build_output_root: stage.output_root)
+    val valid = provider.validate(oci)
+    if not valid.accepted:
+        if not dir_remove_all(stage.stage_root):
+            return _execute_block_v1("prelaunch-stage-cleanup-failed: " + valid.reason)
+        return _execute_block_v1(valid.reason)
+    val intent = "simple-worker-binding-v1\nrequest=" + expected_request_digest +
+        "\nworker=" + config.worker_id + "\nattempt=" + attempt_id +
+        "\nfence=" + request.fence.to_text() + "\nboot=" + boot_id +
+        "\ngeneration=" + config.provider_generation.to_text() + "\nengine=" + config.engine +
+        "\noperation=" + operation_id + "\nimage=" + config.image +
+        "\nstage=" + stage.stage_root + "\n"
+    if not file_create_exclusive(binding_path, intent) or
+       not file_fsync(binding_path) or not directory_fsync(config.state_dir):
+        return _execute_block_v1("attempt-binding-not-durable")
+    val created = provider.create(oci)
+    if created.status != "ok":
+        return _execute_block_v1("create-reconciliation-required: " + created.reason)
+    val provider_intent = config.state_dir + "/runtime-intent-" + attempt_id + "-" +
+        request.fence.to_text() + "-" + config.provider_generation.to_text()
+    if not file_fsync(provider_intent) or not directory_fsync(config.state_dir) or
+       not _execute_store_v1(binding_path, intent + "native=" + created.state.identity.native_id + "\n") or
+       not directory_fsync(config.state_dir):
+        return _execute_block_v1("container-binding-not-durable")
+    val started = provider.start(oci)
+    if started.status != "ok":
+        return _execute_block_v1("start-reconciliation-required: " + started.reason)
+    val waited = provider.wait(oci)
+    if waited.status != "ok" or waited.state.phase != "exited":
+        val stopped = provider.stop(oci)
+        return _execute_block_v1("wait-failed; stop=" + stopped.status + ": " + stopped.reason)
+    val bound_wire = file_read_regular_no_follow_bounded(binding_path, 8192)
+    if bound_wire.is_err(): return _execute_block_v1("binding-unavailable-after-wait")
+    val bound = parse_worker_attempt_binding_v1(bound_wire.unwrap(),
+        config.state_dir, expected_request_digest, config.worker_id,
+        attempt_id, request.fence, boot_id, config.provider_generation,
+        config.engine, config.image, true)
+    if not bound.valid or
+       bound.stage != stage.stage_root or
+       bound.native_id != waited.state.identity.native_id:
+        return _execute_block_v1("terminal-binding-mismatch")
+    val terminal = persist_worker_terminal_observation_v1(config.state_dir,
+        expected_request_digest, bound.digest, attempt_id,
+        request.fence, waited.state.exit_code)
+    if not terminal.recorded:
+        return _execute_block_v1(terminal.reason)
+    val logs = provider.logs(oci)
+    if logs.status != "ok": return _execute_block_v1("logs-unavailable: " + logs.reason)
+    val diagnostics = "stdout\n" + logs.stdout + "\nstderr\n" + logs.stderr
+    # Preserve stopped container identity and staged bytes until parent ACK.
+    _publish_stopped_worker_result_v1(config, request, attempt_id,
+        stage.stage_root, expected_request_digest, bound.digest,
+        terminal.exit_code, diagnostics)
+
+fn execute_ready_build_worker_v1(config: LocalBuildWorkerConfigV1, attempt_id: text,
+        expected_request_digest: text) -> BuildWorkerExecutionV1:
+    """Run one authenticated ready request; a crash never authorizes duplicate launch."""
+    if not _execute_token_v1(attempt_id) or
+       not scheduler_action_digest_valid_v1(expected_request_digest) or
+       not _execute_path_v1(config.state_dir) or not file_exists(config.state_dir):
+        return _execute_block_v1("attempt-or-state-invalid")
+    val os_read = file_read_regular_no_follow_bounded("/proc/sys/kernel/ostype", 64)
+    val boot_read = file_read_regular_no_follow_bounded("/proc/sys/kernel/random/boot_id", 128)
+    if os_read.is_err() or boot_read.is_err(): return _execute_block_v1("linux-host-required")
+    val os_name = os_read.unwrap().trim()
+    val boot_id = boot_read.unwrap().trim()
+    if os_name != "Linux" or not _execute_token_v1(boot_id):
+        return _execute_block_v1("linux-boot-identity-invalid")
+    val handle = file_lock(config.state_dir + "/worker.lock", 1)
+    if handle < 0: return _execute_block_v1("worker-busy")
+    val result = _execute_locked_v1(config, attempt_id, expected_request_digest, boot_id)
+    if not file_unlock(handle): return _execute_block_v1("worker-unlock-failed")
+    result
+
+fn _recover_unpublished_worker_result_v1(config: LocalBuildWorkerConfigV1,
+        request: BuildWorkerRequestV1, attempt_id: text,
+        expected_request_digest: text, boot_id: text,
+        stage: text, native_id: text,
+        binding_digest: text) -> BuildWorkerExecutionV1:
+    var terminal = recover_worker_terminal_observation_v1(config.state_dir,
+        expected_request_digest, binding_digest, attempt_id, request.fence)
+    if not terminal.recorded and
+       terminal.reason != "terminal-observation-unavailable":
+        return _execute_block_v1(terminal.reason)
+    val oci = LinuxOciRequestV1(pod_uid: attempt_id, attempt: request.fence,
+        operation_id: "build-" + request.fence.to_text(), image: config.image,
+        bundle_path: "", command: request.action.argv, args: [],
+        timeout_ms: config.timeout_ms,
+        cpu_limit_millis: request.cpu_tokens * 1000,
+        memory_limit_bytes: request.attempt.memory_budget_bytes,
+        pid_limit: config.pid_limit, network_policy: "none",
+        filesystem_policy: "read-only", build_input_root: stage + "/inputs",
+        build_output_root: stage + "/outputs")
+    val provider = LinuxOciRuntimeProviderV1.new("linux", config.engine,
+        config.state_dir, boot_id, config.provider_generation, true,
+        config.timeout_ms)
+    val intent = provider.intent_for(oci)
+    if intent.native_id != native_id or
+       intent.operation_id != oci.operation_id or
+       intent.node_boot_id != boot_id or
+       intent.provider_generation != config.provider_generation or
+       intent.engine != config.engine:
+        return _execute_block_v1("provider-intent-mismatch")
+    val recovered = provider.recover(oci)
+    if recovered.status != "ok" or
+       (recovered.state.phase != "exited" and
+        recovered.state.phase != "stopped") or
+       recovered.state.identity.native_id != native_id or
+       recovered.state.identity.operation_id != oci.operation_id or
+       recovered.state.identity.node_boot_id != boot_id or
+       recovered.state.identity.provider_generation != config.provider_generation:
+        return _execute_block_v1("terminal-container-unavailable")
+    if terminal.recorded and recovered.state.exit_code >= 0 and
+       recovered.state.exit_code != terminal.exit_code:
+        return _execute_block_v1("terminal-exit-disagreement")
+    if not terminal.recorded:
+        if recovered.state.phase != "exited" or
+           recovered.state.exit_code < 0 or
+           recovered.state.exit_code > 255:
+            return _execute_block_v1("terminal-exit-unknown")
+        terminal = persist_worker_terminal_observation_v1(config.state_dir,
+            expected_request_digest, binding_digest, attempt_id,
+            request.fence, recovered.state.exit_code)
+        if not terminal.recorded: return _execute_block_v1(terminal.reason)
+    val logs = provider.logs(oci)
+    if logs.status != "ok":
+        return _execute_block_v1("logs-unavailable: " + logs.reason)
+    val diagnostics = "stdout\n" + logs.stdout + "\nstderr\n" + logs.stderr
+    _publish_stopped_worker_result_v1(config, request, attempt_id,
+        stage, expected_request_digest, binding_digest,
+        terminal.exit_code, diagnostics)
+
+fn _status_locked_build_worker_v1(config: LocalBuildWorkerConfigV1,
+        attempt_id: text, expected_request_digest: text,
+        boot_id: text) -> BuildWorkerExecutionV1:
+    val ready = read_ready_build_worker_v1(config.inbox_root, attempt_id,
+        config.worker_id, expected_request_digest)
+    if ready == nil: return _execute_block_v1("ready-request-invalid")
+    val request = ready.unwrap()
+    val binding = file_read_regular_no_follow_bounded(
+        config.state_dir + "/worker-attempt-" + attempt_id + ".binding", 8192)
+    if binding.is_err(): return _execute_block_v1("attempt-not-started")
+    val bound = parse_worker_attempt_binding_v1(binding.unwrap(),
+        config.state_dir, expected_request_digest, config.worker_id,
+        attempt_id, request.fence, boot_id, config.provider_generation,
+        config.engine, config.image, false)
+    if not bound.valid: return _execute_block_v1(bound.reason)
+    val result = file_read_regular_no_follow_bounded(
+        config.inbox_root + "/" + attempt_id +
+            "/.simple-control/results/result.wire",
+        BUILD_DISPATCH_WIRE_MAX_V1)
+    if result.is_err():
+        if local_build_worker_request_problem_v1(config, request) != "":
+            return _execute_block_v1("request-policy-invalid")
+        val current = parse_worker_attempt_binding_v1(binding.unwrap(),
+            config.state_dir, expected_request_digest, config.worker_id,
+            attempt_id, request.fence, boot_id, config.provider_generation,
+            config.engine, config.image, true)
+        if not current.valid: return _execute_block_v1(current.reason)
+        return _recover_unpublished_worker_result_v1(config, request,
+            attempt_id, expected_request_digest, boot_id,
+            bound.stage, bound.native_id, bound.digest)
+    val parsed = parse_build_result_v1(result.unwrap())
+    if parsed == nil:
+        return _execute_block_v1("result-invalid")
+    val envelope = parsed.unwrap()
+    if envelope.candidate.action_digest != request.attempt.action_digest or
+       envelope.candidate.attempt_id != attempt_id or
+       envelope.candidate.worker_id != config.worker_id or
+       envelope.fence != request.fence:
+        return _execute_block_v1("result-identity-mismatch")
+    if not envelope.candidate.success:
+        val terminal = recover_worker_terminal_observation_v1(
+            config.state_dir, expected_request_digest, bound.digest,
+            attempt_id, request.fence)
+        val result_root = config.inbox_root + "/" + attempt_id +
+            "/.simple-control/results"
+        val manifest = file_read_regular_no_follow_bounded(
+            result_root + "/manifest.wire", 1)
+        val diagnostics = file_read_regular_no_follow_bounded(
+            result_root + "/diagnostics",
+            BUILD_OUTPUT_MAX_DIAGNOSTIC_BYTES_V1)
+        val proof_read = file_read_regular_no_follow_bounded(
+            result_root + "/failure-proof.wire",
+            BUILD_WORKER_FAILURE_PROOF_MAX_V1)
+        val proof = if proof_read.is_ok():
+            parse_build_worker_failure_proof_v1(proof_read.unwrap())
+        else: nil
+        if proof == nil: return _execute_block_v1("failure-proof-invalid")
+        val confirmed = proof.unwrap()
+        if not terminal.recorded or terminal.exit_code <= 0 or
+           envelope.candidate.output_manifest_digest != "" or
+           manifest.is_err() or manifest.unwrap() != "" or
+           diagnostics.is_err() or
+           confirmed.request_digest != expected_request_digest or
+           confirmed.binding_digest != bound.digest or
+           confirmed.attempt_id != attempt_id or
+           confirmed.fence != request.fence or
+           confirmed.exit_code != terminal.exit_code or
+           confirmed.result_digest != sha256_text(result.unwrap()) or
+           sha256_text(diagnostics.unwrap()) !=
+               envelope.candidate.diagnostic_digest:
+            return _execute_block_v1("failure-evidence-invalid")
+        return BuildWorkerExecutionV1(true, false,
+            "action-failure-unclassified", result.unwrap(), result_root)
+    BuildWorkerExecutionV1(true, true, "", result.unwrap(),
+        config.inbox_root + "/" + attempt_id + "/.simple-control/results")
+
+fn status_ready_build_worker_v1(config: LocalBuildWorkerConfigV1,
+        attempt_id: text, expected_request_digest: text) -> BuildWorkerExecutionV1:
+    """Read one durable result under the worker lock; never relaunch OCI."""
+    if not _execute_token_v1(attempt_id) or
+       not scheduler_action_digest_valid_v1(expected_request_digest) or
+       not _execute_path_v1(config.state_dir) or not file_exists(config.state_dir):
+        return _execute_block_v1("attempt-or-state-invalid")
+    val os_read = file_read_regular_no_follow_bounded("/proc/sys/kernel/ostype", 64)
+    val boot_read = file_read_regular_no_follow_bounded(
+        "/proc/sys/kernel/random/boot_id", 128)
+    if os_read.is_err() or boot_read.is_err() or
+       os_read.unwrap().trim() != "Linux" or
+       not _execute_token_v1(boot_read.unwrap().trim()):
+        return _execute_block_v1("linux-boot-identity-invalid")
+    val handle = file_lock(config.state_dir + "/worker.lock", 1)
+    if handle < 0: return _execute_block_v1("worker-busy")
+    val result = _status_locked_build_worker_v1(config, attempt_id,
+        expected_request_digest, boot_read.unwrap().trim())
+    if not file_unlock(handle): return _execute_block_v1("worker-unlock-failed")
+    result
+
+fn _cancel_locked_build_worker_v1(config: LocalBuildWorkerConfigV1,
+        attempt_id: text, request_digest: text,
+        fence: i64) -> BuildWorkerCancellationV1:
+    val binding = config.state_dir + "/worker-attempt-" + attempt_id + ".binding"
+    if file_exists(binding):
+        return BuildWorkerCancellationV1(false,
+            "attempt-started-or-unknown", "")
+    # A cancellation may race an incomplete upload, before the ready marker.
+    # Once ready exists, its exact request and fence must match the caller.
+    val ready_path = config.inbox_root + "/" + attempt_id +
+        "/.simple-control/ready"
+    if file_exists(ready_path):
+        val ready = read_ready_build_worker_v1(config.inbox_root, attempt_id,
+            config.worker_id, request_digest)
+        if ready == nil or ready.unwrap().fence != fence:
+            return BuildWorkerCancellationV1(false,
+                "cancel-request-mismatch", "")
+    val path = config.state_dir + "/worker-attempt-" + attempt_id + ".cancel"
+    val wire = _worker_cancel_wire_v1(config, attempt_id,
+        request_digest, fence)
+    if file_exists(path):
+        val existing = file_read_regular_no_follow_bounded(path, 512)
+        if existing.is_err() or existing.unwrap() != wire:
+            return BuildWorkerCancellationV1(false,
+                "cancel-collision", "")
+    elif not file_create_exclusive(path, wire):
+        return BuildWorkerCancellationV1(false,
+            "cancel-write-failed", "")
+    if not file_fsync(path) or not directory_fsync(config.state_dir):
+        return BuildWorkerCancellationV1(false,
+            "cancel-not-durable", "")
+    BuildWorkerCancellationV1(true, "",
+        _worker_cancel_ack_v1(attempt_id, request_digest, fence))
+
+fn cancel_unstarted_build_worker_v1(config: LocalBuildWorkerConfigV1,
+        attempt_id: text, request_digest: text,
+        fence: i64) -> BuildWorkerCancellationV1:
+    """Fence a not-yet-started attempt under the same worker lock as launch."""
+    if not _execute_token_v1(attempt_id) or
+       not scheduler_action_digest_valid_v1(request_digest) or
+       fence <= 0 or fence > 1000000000 or
+       not _execute_path_v1(config.state_dir) or not file_exists(config.state_dir):
+        return BuildWorkerCancellationV1(false,
+            "cancel-request-invalid", "")
+    val handle = file_lock(config.state_dir + "/worker.lock", 1)
+    if handle < 0:
+        return BuildWorkerCancellationV1(false, "worker-busy", "")
+    val result = _cancel_locked_build_worker_v1(config, attempt_id,
+        request_digest, fence)
+    if not file_unlock(handle):
+        return BuildWorkerCancellationV1(false,
+            "worker-unlock-failed", "")
+    result
+
+export BUILD_WORKER_LOCAL_CONFIG_V1, LocalBuildWorkerConfigV1, BuildWorkerExecutionV1
+export build_worker_sandbox_digest_v1
+export parse_local_build_worker_config_v1, read_local_build_worker_config_v1
+export local_build_worker_request_problem_v1, execute_ready_build_worker_v1
+export status_ready_build_worker_v1
+export BuildWorkerCancellationV1, cancel_unstarted_build_worker_v1

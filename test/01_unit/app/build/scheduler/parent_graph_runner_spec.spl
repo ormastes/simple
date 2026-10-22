@@ -1,0 +1,299 @@
+use std.spec.*
+use app.build.scheduler.parent_graph_runner.{plan_parent_graph_step_v1,
+    run_parent_graph_v1}
+use app.build.scheduler.parent_graph_request.{ParentGraphRequestV1,
+    admit_parent_graph_requests_v1}
+use app.build.scheduler.parent_cli.{DistBuildConfigV1}
+use app.build.scheduler.trusted_ssh.{TrustedSshNodeV1}
+use app.build.scheduler.trusted_sftp.{TrustedSftpConfigV1}
+use app.build.scheduler.trusted_worker_invocation.{TrustedWorkerCommandV1}
+use app.build.scheduler.distributed_attempt.{DistributedBuildNodeV1}
+use app.build.scheduler.ledger.{SchedulerCapacityV1, SchedulerLedgerV1,
+    SchedulerAttemptV1, SchedulerFenceV1, SchedulerFailedAttemptV1,
+    empty_scheduler_ledger_v1}
+use app.build.scheduler.worker_request.{BuildWorkerRequestV1,
+    encode_build_worker_request_v1}
+use app.build.scheduler.parent_request_spool.{
+    persist_parent_build_intent_v1}
+use app.build.scheduler.owner.{scheduler_owner_open_v1,
+    scheduler_owner_admit_v1, scheduler_owner_close_v1}
+use app.io.mod.{getpid, time_now_unix_micros, dir_create_all,
+    dir_remove_all}
+use compiler.common.build_contract.{BuildInputRef, BuildDependencyRef,
+    SnapshotManifest, ToolchainManifest, InputManifest, ActionSpec,
+    AttemptSpec, AcceptedResult, NodeCapabilities, action_spec_digest_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn _runner_request_v1(label: text, dependency: text,
+        worker: text, attempt_id: text) -> BuildWorkerRequestV1:
+    val snapshot = sha256_text("runner-snapshot")
+    var dependencies: [text] = []
+    var outputs: [BuildDependencyRef] = []
+    if dependency != "":
+        dependencies.push(dependency)
+        outputs.push(BuildDependencyRef(dependency, "lib.o",
+            sha256_text("lib-object")))
+    val action = ActionSpec(1, "compile",
+        SnapshotManifest(1, snapshot, sha256_text("tree"),
+            sha256_text("submodules")),
+        ToolchainManifest(1, sha256_text("compiler"),
+            sha256_text("behavior"), sha256_text("abi"),
+            sha256_text("runtime"), sha256_text("sysroot"),
+            "x86_64-unknown-linux-gnu"),
+        InputManifest(1, snapshot,
+            [BuildInputRef("src/" + label + ".c", sha256_text(label))],
+            [], dependencies, outputs, [], [], sha256_text("context"),
+            true, false),
+        ["/usr/bin/clang", "-c"], "simple-build/outputs",
+        sha256_text("sandbox"),
+        if dependency == "": ["lib.o"] else: ["final.o"],
+        sha256_text("resources"))
+    BuildWorkerRequestV1(action,
+        AttemptSpec(1, action_spec_digest_v1(action), attempt_id,
+            worker, 0, 4, 4096), 1, 2, 8)
+
+fn _runner_worker_v1(worker_id: text) -> DistBuildConfigV1:
+    val node = TrustedSshNodeV1(worker_id, "build.example", "builder", 22,
+        "/usr/bin/ssh", sha256_text("ssh"), "/etc/ssh/known_hosts",
+        sha256_text("known-hosts"), "/home/builder/.ssh/id_ed25519",
+        sha256_text("identity"))
+    val capacity = SchedulerCapacityV1(4, 16384, 0, 32)
+    DistBuildConfigV1("", "/trusted/graph.manifest", "/trusted/owner",
+        DistributedBuildNodeV1(
+            TrustedWorkerCommandV1(node, "/opt/simple/bin/simple-worker", 60000),
+            TrustedSftpConfigV1(node, "/usr/bin/sftp", sha256_text("sftp"),
+                "/srv/simple/inbox"),
+            "/trusted/source", "/trusted/state", "/trusted/cas"),
+        NodeCapabilities(1, worker_id, ["x86_64-unknown-linux-gnu"],
+            [sha256_text("abi")], "trusted-build", 16384),
+        "trusted-build", capacity, "", "", "")
+
+fn _runner_worker_at_root_v1(worker_id: text,
+        owner_root: text) -> DistBuildConfigV1:
+    var worker = _runner_worker_v1(worker_id)
+    worker.owner_root = owner_root
+    worker
+
+fn _runner_graph_v1() -> ParentGraphRequestV1:
+    val producer = _runner_request_v1("producer", "", "worker-1",
+        "template-producer")
+    val consumer = _runner_request_v1("consumer",
+        producer.attempt.action_digest, "worker-2", "template-consumer")
+    admit_parent_graph_requests_v1(
+        [encode_build_worker_request_v1(producer),
+         encode_build_worker_request_v1(consumer)], "", "worker-1", 0)
+
+fn _runner_accepted_v1(request: BuildWorkerRequestV1,
+        attempt_id: text) -> AcceptedResult:
+    AcceptedResult(1, request.attempt.action_digest, attempt_id,
+        sha256_text("output-manifest"), sha256_text("broker-receipt"))
+
+describe "parent graph runner planning":
+    it "restarts past an admitted graph attempt with no request spool":
+        expect(dir_create_all("build/test")).to_be(true)
+        val root = "build/test/graph-recovery-" + getpid().to_text() +
+            "-" + time_now_unix_micros().to_text()
+        val graph = _runner_graph_v1()
+        val workers = [_runner_worker_at_root_v1("worker-1", root),
+            _runner_worker_at_root_v1("worker-2", root)]
+        val owner = scheduler_owner_open_v1(root)
+        expect(owner.error).to_equal("")
+        val action_digest = graph.actions[0].action_digest
+        expect(persist_parent_build_intent_v1(owner, action_digest,
+            "admitted-no-spool", "worker-1").persisted).to_be(true)
+        val admitted = scheduler_owner_admit_v1(owner, graph.actions,
+            action_digest, "admitted-no-spool", "worker-1",
+            workers[0].capacity, 0)
+        expect(admitted.dispatch).to_be(true)
+        expect(scheduler_owner_close_v1(owner)).to_be(true)
+
+        # A negative clock stops after startup recovery, before remote work.
+        val restarted = run_parent_graph_v1(graph, workers, -1)
+        expect(restarted.complete).to_be(false)
+        expect(restarted.reason).to_equal("attempt-or-clock-invalid")
+        val replay = scheduler_owner_open_v1(root)
+        expect(replay.error).to_equal("")
+        expect(replay.state.ledger.attempts[0].active).to_be(false)
+        expect(replay.state.ledger.fences[0].epoch > admitted.fence)
+            .to_be(true)
+        expect(scheduler_owner_close_v1(replay)).to_be(true)
+        expect(dir_remove_all(root)).to_be(true)
+
+    it "never revokes an unrelated attempt named by a mismatched request":
+        expect(dir_create_all("build/test")).to_be(true)
+        val root = "build/test/graph-recovery-mismatch-" +
+            getpid().to_text() + "-" + time_now_unix_micros().to_text()
+        val unrelated_request = _runner_request_v1("unrelated", "",
+            "worker-1", "template-unrelated")
+        val unrelated_graph = admit_parent_graph_requests_v1(
+            [encode_build_worker_request_v1(unrelated_request)], "",
+            "worker-1", 0)
+        var graph = _runner_graph_v1()
+        graph.requests[0] = unrelated_graph.requests[0]
+        val workers = [_runner_worker_at_root_v1("worker-1", root),
+            _runner_worker_at_root_v1("worker-2", root)]
+        val owner = scheduler_owner_open_v1(root)
+        expect(owner.error).to_equal("")
+        val unrelated_digest = unrelated_graph.actions[0].action_digest
+        expect(persist_parent_build_intent_v1(owner, unrelated_digest,
+            "unrelated-active", "worker-1").persisted).to_be(true)
+        val admitted = scheduler_owner_admit_v1(owner,
+            unrelated_graph.actions, unrelated_digest, "unrelated-active",
+            "worker-1", workers[0].capacity, 0)
+        expect(admitted.dispatch).to_be(true)
+        expect(scheduler_owner_close_v1(owner)).to_be(true)
+
+        val rejected = run_parent_graph_v1(graph, workers, -1)
+        expect(rejected.complete).to_be(false)
+        expect(rejected.reason).to_equal("graph-request-action-mismatch")
+        expect(rejected.reconciliation_required).to_be(true)
+        val replay = scheduler_owner_open_v1(root)
+        expect(replay.error).to_equal("")
+        expect(replay.state.ledger.attempts[0].active).to_be(true)
+        expect(replay.state.ledger.fences[0].epoch).to_equal(admitted.fence)
+        expect(scheduler_owner_close_v1(replay)).to_be(true)
+        expect(dir_remove_all(root)).to_be(true)
+
+    it "chooses the highest-priority ready action across worker configs":
+        val low = _runner_request_v1("low", "", "worker-1", "template-low")
+        var high = _runner_request_v1("high", "", "worker-2",
+            "template-high")
+        var high_attempt = high.attempt
+        high_attempt.priority = 10
+        high.attempt = high_attempt
+        val graph = admit_parent_graph_requests_v1(
+            [encode_build_worker_request_v1(low),
+             encode_build_worker_request_v1(high)], "", "worker-1", 0)
+        val workers = [_runner_worker_v1("worker-1"),
+            _runner_worker_v1("worker-2")]
+        val step = plan_parent_graph_step_v1(graph,
+            empty_scheduler_ledger_v1(), workers, "dist-high", 0)
+        expect(step.action).to_equal("DISPATCH")
+        expect(step.worker_index).to_equal(1)
+        expect(step.action_digest).to_equal(high.attempt.action_digest)
+
+    it "dispatches the producer, then consumer, and completes after both are accepted":
+        val graph = _runner_graph_v1()
+        val workers = [_runner_worker_v1("worker-1"),
+            _runner_worker_v1("worker-2")]
+        val first = plan_parent_graph_step_v1(graph,
+            empty_scheduler_ledger_v1(), workers, "dist-producer", 0)
+        expect(first.action).to_equal("DISPATCH")
+        expect(first.reason).to_equal("ready")
+        expect(first.worker_index).to_equal(0)
+        expect(first.action_digest).to_equal(graph.actions[0].action_digest)
+        expect(first.attempt_id).to_equal("dist-producer")
+        expect(first.retry_number).to_equal(0)
+
+        val producer = graph.requests[0]
+        val accepted_producer = SchedulerLedgerV1([], [],
+            [_runner_accepted_v1(producer, "done-producer")], [])
+        val second = plan_parent_graph_step_v1(graph, accepted_producer,
+            workers, "dist-consumer", 1)
+        expect(second.action).to_equal("DISPATCH")
+        expect(second.worker_index).to_equal(1)
+        expect(second.action_digest).to_equal(
+            graph.requests[1].attempt.action_digest)
+        expect(second.attempt_id).to_equal("dist-consumer")
+
+        val consumer = graph.requests[1]
+        val complete_ledger = SchedulerLedgerV1([], [],
+            [_runner_accepted_v1(producer, "done-producer"),
+             _runner_accepted_v1(consumer, "done-consumer")], [])
+        val complete = plan_parent_graph_step_v1(graph, complete_ledger,
+            workers, "", 2)
+        expect(complete.action).to_equal("COMPLETE")
+        expect(complete.reason).to_equal("graph-complete")
+
+    it "resumes the graph's active producer attempt":
+        val graph = _runner_graph_v1()
+        val workers = [_runner_worker_v1("worker-1"),
+            _runner_worker_v1("worker-2")]
+        val producer = graph.requests[0]
+        val ledger = SchedulerLedgerV1(
+            [SchedulerAttemptV1(producer.attempt.action_digest,
+                "active-producer", "worker-1", 1, 2, 4096, 8, true)],
+            [SchedulerFenceV1(producer.attempt.action_digest, 1)], [], [])
+        val step = plan_parent_graph_step_v1(graph, ledger, workers,
+            "unused-next", 1)
+        expect(step.action).to_equal("RESUME")
+        expect(step.reason).to_equal("active-attempt")
+        expect(step.worker_index).to_equal(0)
+        expect(step.action_digest).to_equal(producer.attempt.action_digest)
+        expect(step.attempt_id).to_equal("active-producer")
+
+    it "resumes the first durable active attempt when two workers are active":
+        val first = _runner_request_v1("first", "", "worker-1",
+            "template-first")
+        val second = _runner_request_v1("second", "", "worker-2",
+            "template-second")
+        val graph = admit_parent_graph_requests_v1(
+            [encode_build_worker_request_v1(first),
+             encode_build_worker_request_v1(second)], "", "worker-1", 0)
+        val workers = [_runner_worker_v1("worker-1"),
+            _runner_worker_v1("worker-2")]
+        val ledger = SchedulerLedgerV1(
+            [SchedulerAttemptV1(first.attempt.action_digest,
+                "active-first", "worker-1", 1, 2, 4096, 8, true),
+             SchedulerAttemptV1(second.attempt.action_digest,
+                "active-second", "worker-2", 1, 2, 4096, 8, true)],
+            [SchedulerFenceV1(first.attempt.action_digest, 1),
+             SchedulerFenceV1(second.attempt.action_digest, 1)], [], [])
+        val step = plan_parent_graph_step_v1(graph, ledger, workers,
+            "unused-next", 1)
+        expect(step.action).to_equal("RESUME")
+        expect(step.worker_index).to_equal(0)
+        expect(step.attempt_id).to_equal("active-first")
+
+    it "blocks missing worker assignments and duplicate worker identities":
+        val graph = _runner_graph_v1()
+        val only_worker = [_runner_worker_v1("worker-1")]
+        val missing = plan_parent_graph_step_v1(graph,
+            empty_scheduler_ledger_v1(), only_worker, "dist-missing", 0)
+        expect(missing.action).to_equal("BLOCKED")
+        expect(missing.reason).to_equal("graph-or-worker-policy-invalid")
+        val duplicate_workers = [_runner_worker_v1("worker-1"),
+            _runner_worker_v1("worker-1")]
+        val duplicate = plan_parent_graph_step_v1(graph,
+            empty_scheduler_ledger_v1(), duplicate_workers, "dist-duplicate", 0)
+        expect(duplicate.action).to_equal("BLOCKED")
+        expect(duplicate.reason).to_equal("graph-or-worker-policy-invalid")
+
+    it "blocks deterministic compiler failures and exhausted automatic retries":
+        val graph = _runner_graph_v1()
+        val workers = [_runner_worker_v1("worker-1"),
+            _runner_worker_v1("worker-2")]
+        val producer = graph.requests[0]
+        val digest = producer.attempt.action_digest
+        val deterministic = SchedulerLedgerV1(
+            [SchedulerAttemptV1(digest, "failed-producer", "worker-1",
+                1, 2, 4096, 8, false)],
+            [SchedulerFenceV1(digest, 1)], [],
+            [SchedulerFailedAttemptV1(digest, "failed-producer", "worker-1",
+                1, "compiler-failure", "", sha256_text("diagnostics"))])
+        val failed = plan_parent_graph_step_v1(graph, deterministic, workers,
+            "dist-no-retry", 1)
+        expect(failed.action).to_equal("BLOCKED")
+        expect(failed.reason).to_equal("graph-retry-requires-explicit-action")
+
+        val exhausted = SchedulerLedgerV1(
+            [SchedulerAttemptV1(digest, "try-one", "worker-1",
+                1, 2, 4096, 8, false),
+             SchedulerAttemptV1(digest, "try-two", "worker-1",
+                2, 2, 4096, 8, false),
+             SchedulerAttemptV1(digest, "try-three", "worker-1",
+                3, 2, 4096, 8, false)],
+            [SchedulerFenceV1(digest, 3)], [],
+            [SchedulerFailedAttemptV1(digest, "try-one", "worker-1",
+                1, "action-failure-unclassified", "",
+                sha256_text("diagnostics-one")),
+             SchedulerFailedAttemptV1(digest, "try-two", "worker-1",
+                2, "action-failure-unclassified", "",
+                sha256_text("diagnostics-two")),
+             SchedulerFailedAttemptV1(digest, "try-three", "worker-1",
+                3, "action-failure-unclassified", "",
+                sha256_text("diagnostics-three"))])
+        val limited = plan_parent_graph_step_v1(graph, exhausted, workers,
+            "dist-limit", 3)
+        expect(limited.action).to_equal("BLOCKED")
+        expect(limited.reason).to_equal("graph-retry-limit")

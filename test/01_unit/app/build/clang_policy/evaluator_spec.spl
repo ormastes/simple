@@ -1,0 +1,221 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use app.build.clang_policy.evaluator.{
+    ClangMacroRuleV1, ClangMacroObservationV1, ClangPolicyExceptionV1,
+    ClangPolicyContextV1, evaluate_clang_policy_v1
+}
+use app.build.clang_policy.native_noop_gate.{
+    ClangNativeNoopInputV1, decide_clang_native_noop_v1
+}
+use app.build.clang_policy.output_observation.{
+    observe_and_decide_clang_native_noop_v1}
+use app.io.mod.{cwd, getpid, time_now_unix_micros, dir_create_all,
+    dir_remove_all, file_write_bytes}
+
+val FIXED = sha256_text("object-like PROJECT_ABI=3")
+val CHANGED = sha256_text("object-like PROJECT_ABI=4")
+val VARIANT = sha256_text("object-like FEATURE_LOG=1")
+val OTHER = sha256_text("object-like FEATURE_LOG=2")
+
+fn _context() -> ClangPolicyContextV1:
+    ClangPolicyContextV1(
+        "//app:demo", "host-cxx", sha256_text("snapshot"),
+        sha256_text("protected-policy"), sha256_text("exact-invocation"),
+        sha256_text("toolchain"), sha256_text("complete-context"),
+        "tu", true, true, true,
+        [ClangMacroRuleV1("FEATURE_LOG", "variants", [VARIANT]),
+         ClangMacroRuleV1("PROJECT_ABI", "fixed", [FIXED])],
+        [ClangMacroObservationV1("FEATURE_LOG", VARIANT, "entry", "app/main.cpp"),
+         ClangMacroObservationV1("PROJECT_ABI", FIXED, "entry", "app/main.cpp")],
+        []
+    )
+
+fn _gate(ctx: ClangPolicyContextV1) -> ClangNativeNoopInputV1:
+    val policy = evaluate_clang_policy_v1(ctx)
+    ClangNativeNoopInputV1(policy, true, policy.stamp_digest,
+        policy.stamp_digest, sha256_text("accepted-object"),
+        sha256_text("accepted-object"),
+        sha256_text("build-request-1"), "", 1, 0, true)
+
+describe("Clang strict, complex, none policy and native no-op gate"):
+    it "admits exact strict context and exact native no-op evidence":
+        val ctx = _context()
+        val policy = evaluate_clang_policy_v1(ctx)
+        expect(policy.verdict).to_equal("ACCEPT")
+        expect(policy.cache_mode).to_equal("strict")
+        val gate = decide_clang_native_noop_v1(_gate(ctx))
+        expect(gate.action).to_equal("ADMIT_NOOP")
+        expect(gate.required_dependency_digest).to_equal(policy.stamp_digest)
+
+    it "rejects unapproved entry variation on both cold and warm decisions":
+        var ctx = _context()
+        ctx.observations = [
+            ClangMacroObservationV1("FEATURE_LOG", OTHER, "entry", "app/main.cpp"),
+            ClangMacroObservationV1("PROJECT_ABI", FIXED, "entry", "app/main.cpp")
+        ]
+        val rejected = evaluate_clang_policy_v1(ctx)
+        expect(rejected.verdict).to_equal("REJECT")
+        expect(rejected.reason).to_equal("undeclared-or-forbidden-variation")
+        val gate = decide_clang_native_noop_v1(_gate(ctx))
+        expect(gate.action).to_equal("REJECT")
+
+    it "never lets an exception override a fixed ABI rule":
+        var ctx = _context()
+        ctx.observations = [
+            ClangMacroObservationV1("FEATURE_LOG", VARIANT, "entry", "app/main.cpp"),
+            ClangMacroObservationV1("PROJECT_ABI", CHANGED, "entry", "app/main.cpp")
+        ]
+        ctx.exceptions = [ClangPolicyExceptionV1(
+            "bad-abi-waiver", "PROJECT_ABI", "entry", "app/main.cpp",
+            "allow_variation", "none"
+        )]
+        expect(evaluate_clang_policy_v1(ctx).verdict).to_equal("REJECT")
+
+    it "scopes complex variation to exact macro origin and consumer":
+        var ctx = _context()
+        ctx.observations = [
+            ClangMacroObservationV1("FEATURE_LOG", OTHER, "entry", "app/main.cpp"),
+            ClangMacroObservationV1("PROJECT_ABI", FIXED, "entry", "app/main.cpp")
+        ]
+        ctx.exceptions = [ClangPolicyExceptionV1(
+            "vendor", "FEATURE_LOG", "entry", "app/main.cpp",
+            "allow_variation", "complex"
+        )]
+        val accepted = evaluate_clang_policy_v1(ctx)
+        expect(accepted.cache_mode).to_equal("complex")
+        ctx.observations = [
+            ClangMacroObservationV1("FEATURE_LOG", OTHER, "entry", "app/other.cpp"),
+            ClangMacroObservationV1("PROJECT_ABI", FIXED, "entry", "app/main.cpp")
+        ]
+        expect(evaluate_clang_policy_v1(ctx).verdict).to_equal("REJECT")
+        ctx.observations = [
+            ClangMacroObservationV1("FEATURE_LOG", OTHER, "entry", "app/main.cpp"),
+            ClangMacroObservationV1("PROJECT_ABI", FIXED, "entry", "app/main.cpp")
+        ]
+        ctx.dependency_observations_complete = false
+        expect(evaluate_clang_policy_v1(ctx).reason).to_equal("incomplete-observation")
+
+    it "makes none force the enclosing native action on every request":
+        var ctx = _context()
+        ctx.observations = [
+            ClangMacroObservationV1("FEATURE_LOG", OTHER, "entry", "app/main.cpp"),
+            ClangMacroObservationV1("PROJECT_ABI", FIXED, "entry", "app/main.cpp")
+        ]
+        ctx.exceptions = [ClangPolicyExceptionV1(
+            "dynamic", "FEATURE_LOG", "entry", "app/main.cpp",
+            "allow_variation", "none"
+        )]
+        val policy = evaluate_clang_policy_v1(ctx)
+        expect(policy.cache_mode).to_equal("none")
+        val first = decide_clang_native_noop_v1(_gate(ctx))
+        expect(first.action).to_equal("REBUILD_REQUIRED")
+        var second_input = _gate(ctx)
+        second_input.request_digest = sha256_text("build-request-2")
+        second_input.request_sequence = 2
+        second_input.prior_request_sequence = 1
+        val second = decide_clang_native_noop_v1(second_input)
+        expect(second.action).to_equal("REBUILD_REQUIRED")
+        expect(first.required_dependency_digest == second.required_dependency_digest).to_equal(false)
+        second_input.prior_request_digest = second_input.request_digest
+        expect(decide_clang_native_noop_v1(second_input).reason).to_equal("repeated-request-identity")
+
+    it "requires rebuild for policy-only stamp changes even on a native no-op":
+        var ctx = _context()
+        var input = _gate(ctx)
+        ctx.protected_policy_digest = sha256_text("changed-policy")
+        input.policy = evaluate_clang_policy_v1(ctx)
+        val decision = decide_clang_native_noop_v1(input)
+        expect(decision.action).to_equal("REBUILD_REQUIRED")
+        expect(decision.required_dependency_digest == input.observed_native_stamp_digest).to_equal(false)
+        input.can_force_native_action = false
+        expect(decide_clang_native_noop_v1(input).action).to_equal("REJECT")
+
+    it "binds observed definitions and rejects noncanonical observation order":
+        val original = evaluate_clang_policy_v1(_context())
+        var ctx = _context()
+        ctx.rules = [
+            ClangMacroRuleV1("FEATURE_LOG", "variants", [OTHER, VARIANT]),
+            ClangMacroRuleV1("PROJECT_ABI", "fixed", [FIXED])
+        ]
+        val changed_rule = evaluate_clang_policy_v1(ctx)
+        expect(changed_rule.verdict).to_equal("ACCEPT")
+        expect(changed_rule.stamp_digest == original.stamp_digest).to_equal(false)
+        ctx = _context()
+        ctx.observations = [
+            ClangMacroObservationV1("FEATURE_LOG", OTHER, "entry", "app/main.cpp"),
+            ClangMacroObservationV1("PROJECT_ABI", FIXED, "entry", "app/main.cpp")
+        ]
+        ctx.rules = [
+            ClangMacroRuleV1("FEATURE_LOG", "variants", [OTHER, VARIANT]),
+            ClangMacroRuleV1("PROJECT_ABI", "fixed", [FIXED])
+        ]
+        val changed_observation = evaluate_clang_policy_v1(ctx)
+        expect(changed_observation.verdict).to_equal("ACCEPT")
+        expect(changed_observation.stamp_digest == changed_rule.stamp_digest).to_equal(false)
+        ctx.observations = [
+            ClangMacroObservationV1("PROJECT_ABI", FIXED, "entry", "app/main.cpp"),
+            ClangMacroObservationV1("FEATURE_LOG", OTHER, "entry", "app/main.cpp")
+        ]
+        expect(evaluate_clang_policy_v1(ctx).reason).to_equal("noncanonical-observation-order")
+
+    it "rejects missing native dependency, missing accepted output, and unknown context":
+        val ctx = _context()
+        var input = _gate(ctx)
+        input.native_dependency_installed = false
+        expect(decide_clang_native_noop_v1(input).reason).to_equal("native-policy-dependency-missing")
+        input.native_dependency_installed = true
+        input.prior_accepted_output_digest = ""
+        expect(decide_clang_native_noop_v1(input).action).to_equal("REBUILD_REQUIRED")
+        input.prior_accepted_output_digest = sha256_text("accepted-object")
+        input.observed_output_digest = ""
+        expect(decide_clang_native_noop_v1(input).action).to_equal("REBUILD_REQUIRED")
+        input.observed_output_digest = sha256_text("changed-object")
+        expect(decide_clang_native_noop_v1(input).action).to_equal("REBUILD_REQUIRED")
+        input.observed_output_digest = "not-a-digest"
+        expect(decide_clang_native_noop_v1(input).reason).to_equal("invalid-observed-output")
+        var unknown = _context()
+        unknown.entry_observations_complete = false
+        expect(evaluate_clang_policy_v1(unknown).verdict).to_equal("REJECT")
+        unknown.entry_observations_complete = true
+        unknown.complete_context_digest = ""
+        expect(evaluate_clang_policy_v1(unknown).verdict).to_equal("REJECT")
+
+    it "uses exact binary output bytes for native no-op admission":
+        val root = cwd() + "/build/test/clang-output-" +
+            getpid().to_text() + "-" + time_now_unix_micros().to_text()
+        expect(dir_create_all(root)).to_be(true)
+        val path = root + "/unit.o"
+        val original = [0x00.to_u8(), 0x7F.to_u8(), 0xFF.to_u8()]
+        var input = _gate(_context())
+        input.prior_accepted_output_digest = sha256_u8_hex(original)
+        input.observed_output_digest = input.prior_accepted_output_digest
+        val missing = observe_and_decide_clang_native_noop_v1(
+            input, path, path, 8)
+        expect(missing.decision.action).to_equal("REBUILD_REQUIRED")
+        expect(missing.snapshot_bytes.len()).to_equal(0)
+
+        expect(file_write_bytes(path, original)).to_be(true)
+        val accepted = observe_and_decide_clang_native_noop_v1(
+            input, path, path, 8)
+        expect(accepted.decision.action).to_equal("ADMIT_NOOP")
+        expect(accepted.observed_digest).to_equal(sha256_u8_hex(original))
+        expect(accepted.snapshot_bytes).to_equal(original)
+
+        val changed = [0x00.to_u8(), 0x7F.to_u8(), 0x01.to_u8()]
+        expect(file_write_bytes(path, changed)).to_be(true)
+        val drift = observe_and_decide_clang_native_noop_v1(
+            input, path, path, 8)
+        expect(drift.decision.action).to_equal("REBUILD_REQUIRED")
+        expect(drift.snapshot_bytes.len()).to_equal(0)
+        expect(accepted.snapshot_bytes).to_equal(original)
+        expect(file_write_bytes(path, original)).to_be(true)
+        val too_small = observe_and_decide_clang_native_noop_v1(
+            input, path, path, 1)
+        expect(too_small.decision.action).to_equal("REBUILD_REQUIRED")
+        expect(too_small.observation_problem)
+            .to_equal("output-unreadable-or-empty")
+        expect(too_small.snapshot_bytes.len()).to_equal(0)
+        expect(observe_and_decide_clang_native_noop_v1(
+            input, path, root + "/another.o", 8).decision.action)
+            .to_equal("REJECT")
+        expect(dir_remove_all(root)).to_be(true)

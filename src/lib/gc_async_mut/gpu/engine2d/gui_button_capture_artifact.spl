@@ -1,0 +1,87 @@
+# Owner-bound Engine2D capture adapter for the pinned two-state GUI button.
+
+use std.gc_async_mut.gpu.engine2d.final_output_capture.{
+    Engine2dStrictVulkanCapturedFrame}
+use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
+    vulkan_sffi_selected_device_identity_v1,
+    vulkan_sffi_selected_device_type}
+use common.renderdoc.final_output_pixels.{final_output_validate}
+use common.renderdoc.physical_vulkan_2d_qualification.{
+    PreparedRenderScene, VulkanBackendCaptureArtifact}
+use common.renderdoc.gui_button_qualification.{gui_button_prepared_scene}
+
+pub fn engine2d_gui_button_artifact(
+    captured: Engine2dStrictVulkanCapturedFrame,
+    scene: PreparedRenderScene, pressed: bool
+) -> Result<VulkanBackendCaptureArtifact, text>:
+    """Require a live selected Engine2D owner for one GUI widget state."""
+    val pinned = gui_button_prepared_scene(pressed)?
+    if scene.fixture_id != pinned.fixture_id or
+        scene.source_path != pinned.source_path or
+        scene.source_sha256 != pinned.source_sha256 or
+        scene.scene_scope != pinned.scene_scope or
+        scene.render_degraded or scene.degrade_reason != "":
+        return Err("Engine2D GUI button state or source invalid")
+    val pixels = captured.capture
+    if pixels.metadata.fixture_id != scene.fixture_id or
+        pixels.metadata.fixture_digest != scene.source_sha256 or
+        pixels.metadata.device_status != "ready" or
+        pixels.metadata.width != 16 or pixels.metadata.height != 16 or
+        pixels.metadata.crop_x != 0 or pixels.metadata.crop_y != 0 or
+        pixels.metadata.crop_width != 16 or pixels.metadata.crop_height != 16:
+        return Err("Engine2D GUI button capture domain mismatch")
+    val expected_resource = "engine2d-vulkan-framebuffer-{captured.backend_handle}"
+    val expected_completion = "{captured.device_identity}:{captured.submission_generation}"
+    if pixels.metadata.resource_id != expected_resource or
+        pixels.metadata.submission_token != expected_completion or
+        pixels.metadata.completion_token != expected_completion:
+        return Err("Engine2D GUI button capture owner mismatch")
+    match final_output_validate(pixels):
+        case Err(err): return Err("Engine2D GUI button capture invalid: " + err.code)
+        case Ok(_): ()
+    if captured.engine.backend_name() != "vulkan" or
+        captured.device_identity <= 0 or captured.backend_handle <= 0 or
+        captured.submission_generation <= 0 or captured.submit_count <= 0 or
+        captured.fence_count <= 0 or captured.readback_source != "device_readback" or
+        not (captured.device_type == "discrete" or
+             captured.device_type == "integrated") or
+        captured.device_name == "" or captured.driver_identity == "":
+        return Err("Engine2D GUI button physical Vulkan owner incomplete")
+    if captured.engine.vulkan_submission_generation() != captured.submission_generation or
+        captured.engine.vulkan_device_identity() != captured.device_identity or
+        captured.engine.vulkan_device_name() != captured.device_name or
+        captured.engine.vulkan_device_type() != captured.device_type or
+        captured.engine.vulkan_driver_identity() != captured.driver_identity:
+        return Err("Engine2D GUI button physical Vulkan owner changed")
+    if val Some(frame) = captured.engine.latest_vulkan_frame_receipt():
+        if not frame.completion_known or frame.cpu_fallback_used or
+            frame.backend_handle != captured.backend_handle or
+            frame.device_identity != captured.device_identity or
+            frame.device_fence_count != captured.submission_generation or
+            frame.device_submit_count < captured.submit_count or
+            frame.device_fence_count < captured.fence_count or
+            frame.framebuffer_width.to_i64() != pixels.metadata.width or
+            frame.framebuffer_height.to_i64() != pixels.metadata.height:
+            return Err("Engine2D GUI button frame receipt changed")
+    else:
+        return Err("Engine2D GUI button frame receipt absent")
+    val identity = vulkan_sffi_selected_device_identity_v1(
+        captured.device_identity)?
+    if identity.device_uuid != captured.device_uuid or
+        identity.driver_uuid != captured.driver_uuid or
+        vulkan_sffi_selected_device_type() != captured.device_type or
+        captured.engine.vulkan_submission_generation() != captured.submission_generation:
+        return Err("Engine2D GUI button selected device changed")
+    Ok(VulkanBackendCaptureArtifact(
+        backend_id: "engine2d-vulkan", fixture_id: scene.fixture_id,
+        fixture_sha256: scene.source_sha256,
+        producer_authenticated: true, provider_identity: 0,
+        device_name: captured.device_name, device_type: captured.device_type,
+        driver_identity: captured.driver_identity,
+        physical_device_uuid: captured.device_uuid,
+        driver_uuid: captured.driver_uuid,
+        device_identity: captured.device_identity,
+        backend_handle: captured.backend_handle,
+        submit_count: captured.submit_count, fence_count: captured.fence_count,
+        readback_source: captured.readback_source, fallback_required: false,
+        capture: Some(pixels)))

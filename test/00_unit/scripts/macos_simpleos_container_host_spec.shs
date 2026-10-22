@@ -1,0 +1,63 @@
+#!/bin/sh
+# Deterministic preflight contract; a PREFLIGHT_ONLY result is not a VM boot.
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+checker=$repo_root/scripts/check/check-macos-simpleos-container-host.shs
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-macos-host-spec.XXXXXXXX")
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+mkdir -p "$fixture/bin"
+
+cat > "$fixture/bin/uname" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+    -s) printf 'Darwin\n' ;;
+    -m) printf 'arm64\n' ;;
+    *) exit 2 ;;
+esac
+EOF
+cat > "$fixture/bin/qemu-system-aarch64" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = '-accel' ] && [ "${2:-}" = 'help' ]; then
+    printf 'Accelerators supported in QEMU binary: hvf\n'
+    exit 0
+fi
+exit 2
+EOF
+chmod +x "$fixture/bin/uname" "$fixture/bin/qemu-system-aarch64"
+PATH="$fixture/bin:$PATH"
+export PATH
+
+expect_case() {
+    expected_status=$1
+    expected_line=$2
+    shift 2
+    if output=$(sh "$checker" --sdn "$@" 2>&1); then
+        actual_status=0
+    else
+        actual_status=$?
+    fi
+    if [ "$actual_status" -ne "$expected_status" ] ||
+       ! printf '%s\n' "$output" | grep -Fq "$expected_line"; then
+        printf 'macOS host preflight case failed: status=%s expected=%s line=%s\n' \
+            "$actual_status" "$expected_status" "$expected_line" >&2
+        printf '%s\n' "$output" >&2
+        exit 1
+    fi
+}
+
+image=$fixture/simpleos.img
+printf 'pinned SimpleOS test image\n' > "$image"
+digest=$(shasum -a 256 "$image" | awk '{print $1}')
+ln -s "$image" "$fixture/image-link.img"
+
+expect_case 2 '"image", "pinned-image-required"'
+expect_case 2 '"image", "digest-mismatch"' \
+    --image "$image" --image-sha256 \
+    0000000000000000000000000000000000000000000000000000000000000000
+expect_case 2 '"image", "regular-readable-file-required"' \
+    --image "$fixture/image-link.img" --image-sha256 "$digest"
+expect_case 0 '"status", "PREFLIGHT_ONLY"' \
+    --image "$image" --image-sha256 "$digest"
+
+printf 'macOS SimpleOS host preflight contract: PASS\n'
