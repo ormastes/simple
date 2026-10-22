@@ -143,3 +143,41 @@ registry — the seed's Rust-hosted runtime (`env_process.rs` /
 - Seed comparison is meaningful only with identical env: the seed's JIT demotion
   on the full CLI (`bin/simple`) prints jit-fallback noise but does pass
   load_sources for both the working-tree and snapshot entry paths.
+
+## Update 2026-10-22 (second session)
+
+Fix attempts and evidence gathered after the initial filing:
+
+1. **cdb kernel-level proof (both old and rebuilt candidates)**: breaking on
+   `ntdll!NtCreateFile` during the failing repro shows the snapshot path is
+   NEVER opened at the kernel (14 opens captured, none for the entry), while
+   absolute-path WRITES (SMF output, cache `BLOCKED` markers) succeed. The read
+   failure is entirely userland, before `_open`.
+2. **Instrumentation landed in `io_file_open`** (`src/lib/nogc_sync_mut/sffi/fs.spl`):
+   a guard print of the raw operands fires when `rt_string_len`/`rt_string_data`
+   fail to decode the path value. **The print never appears** even when the
+   guard must have fired → `eprint` is silently inert in the core-c-bootstrap
+   candidate (C-level stderr works; Simple-level `print` works). Any future
+   in-candidate diagnostics must use `print`, not `eprint`.
+3. **Concat re-materialization fallback** (`path + ""` then retry) does NOT
+   rescue the read: same zero-source outcome with no kernel open. The bad value
+   is undecodable by the whole text-ABI family (`rt_string_len`,
+   `rt_string_data`, and via `rt_to_string` in `rt_string_concat`), only
+   language-level interpreter ops see it. The fallback remains in-tree
+   (bug-linked, zero hot-path cost) but is not a fix.
+4. **Seed aggregate-typing flake** (separate defect exposed by any source
+   edit shifting TypeIds): `safety_alias_join` failed deterministically with
+   `cannot infer field type ... struct 'ANY' field 'owner_id'` once module
+   numbering shifted. Fixed by rewriting the dict iteration as key iteration
+   (`for key in first.keys()` + annotated `first[key]`/`second[key]` bindings),
+   which the seed infers robustly. Stage-2 now compiles 1485 modules, 0 failed.
+5. Net: Stage-2 builds clean with the fixes in, but the pinned frontend
+   sanity still rejects the candidate at the zero-source gate. The remaining
+   defect is in the self-hosted string representation/ABI (candidate-produced
+   text values for absolute paths don't decode under `rt_string_len`/
+   `rt_string_data`), i.e. runtime C string-tag territory — see
+   `runtime_native.c` `rt_core_as_string` / `rt_string_len` / `rt_to_string`.
+   Suspect the tagged-value form produced for these strings by the candidate
+   codegen differs from `RT_VALUE_TAG_HEAP` expectations, so every ABI decoder
+   misses and the `>= 0x10000` bare-pointer fallback also fails (negative or
+   small tagged value).
