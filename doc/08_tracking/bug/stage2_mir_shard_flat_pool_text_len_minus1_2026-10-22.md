@@ -488,3 +488,35 @@ panic, in the worker process.
 **Standing offer**: if the parallel session confirms the encode site (gdb)
 or lands the pool-lifetime repair first, this doc's repros (Update 1) and
 differentials (Update 8) verify it in 9 seconds plus one lane.
+
+## Update 11 (2026-10-22) — delegation structure + trace-level sequence; store-failure is flaky
+
+Env-gated traces (SIMPLE_PARSE_PHASE_PROFILE=1,
+SIMPLE_FRONTEND_CACHE_BOUNDARY_PROFILE=1, SIMPLE_FLAT_POOL_ROUNDTRIP=1) on
+the canonical repro yield the exact sequence (one log, processes
+interleaved):
+
+1. Driver: PARSECACHE load bytes=0 (miss) → FLATROUNDTRIP reset=true
+   ok=true stable=true (capture selfcheck SUCCEEDS) → dump 4582 →
+   PARSECACHE store stored=TRUE (the frontend store succeeded under trace
+   env — the "store failed" line in prior runs is FLAKY/nondeterministic,
+   likely a timing race, and is NOT the crash) → desugar.
+2. Delegate child (the same candidate re-exec'd via
+   _cli_run_frontend_delegate, cli_ops.spl:392-395, loop-guarded by
+   SIMPLE_FRONTEND_DELEGATED): PARSECACHE load bytes=4582 (HIT) →
+   PARSECHEHIT init=0 restore=0 bridge=0 total=1ms (decode SUCCEEDS, module
+   built cleanly) → desugar → **flat-pool panic at the following hir phase**.
+
+Refined mechanism: the crash is in the DELEGATED FRONTEND child. The
+decode itself is clean (1ms, PARSEHIT ok); the module's texts are
+pool-backed and something between the decode and the hir-entry encode
+frees them. Candidates for the freeing event: a second
+`reset_all_pools()` (module_assembly.spl:1430 runs at EVERY decode entry —
+any second parse/decode in the child dangles the first module), or the
+child's parse-scope end before hir. The child's parse set for p2_add is
+minimal, so instrumenting `reset_all_pools` (call-site counter print under
+an env gate) in ONE candidate build discriminates these definitively.
+
+Also confirmed: `hir-shard done lowered=0 claimed=1` co-occurs — the shard
+claims and lowers nothing because the delegated child's lowering never
+completes.
