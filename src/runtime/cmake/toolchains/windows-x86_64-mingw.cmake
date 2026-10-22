@@ -1,16 +1,16 @@
-# CMake toolchain — Windows x86_64 (MinGW Clang ABI)
+# CMake toolchain — Windows x86_64 (MinGW UCRT, the default Windows config)
 #
-# Target: x86_64-w64-mingw32
-# Compiler: clang with MinGW target
-# Runtime: msvcrt.dll + libstdc++ (MinGW)
-# ABI: Itanium C++ ABI (GCC-compatible)
+# Target: x86_64-w64-windows-gnu (x86_64-w64-mingw32)
+# Compiler: clang with MinGW target, linked by LLD (no GCC)
+# Runtime: UCRT (ucrtbase.dll) + libc++/libunwind, as in MSYS2 CLANG64
+# ABI: Itanium C++ ABI
 #
 # Usage:
 #   cmake -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/windows-x86_64-mingw.cmake ..
 #
 # Requirements (Native Windows):
-#   - LLVM/Clang with MinGW support
-#   - MinGW-w64 headers/libraries
+#   - MSYS2 CLANG64: mingw-w64-clang-x86_64-{clang,lld,libc++,libunwind}
+#   (see doc/07_guide/infra/toolchain/windows_mingw_ucrt.md)
 #
 # Requirements (Cross-compilation from Linux):
 #   - clang/clang++ (with --target=x86_64-w64-mingw32 support)
@@ -52,9 +52,9 @@ endif()
 set(CMAKE_C_FLAGS_INIT "-Wall -Wextra -Wno-unused-parameter")
 set(CMAKE_CXX_FLAGS_INIT "-Wall -Wextra -Wno-unused-parameter -std=c++20")
 
-# Static linking (prefer static runtime to avoid DLL dependencies)
-set(CMAKE_C_FLAGS_INIT "${CMAKE_C_FLAGS_INIT} -static-libgcc")
-set(CMAKE_CXX_FLAGS_INIT "${CMAKE_CXX_FLAGS_INIT} -static-libgcc -static-libstdc++")
+# LLD + LLVM runtimes (CLANG64 ships no libgcc/libstdc++)
+set(CMAKE_C_FLAGS_INIT "${CMAKE_C_FLAGS_INIT} -fuse-ld=lld --rtlib=compiler-rt --unwindlib=libunwind")
+set(CMAKE_CXX_FLAGS_INIT "${CMAKE_CXX_FLAGS_INIT} -fuse-ld=lld --rtlib=compiler-rt --unwindlib=libunwind -stdlib=libc++")
 
 # Optimization flags
 set(CMAKE_C_FLAGS_RELEASE_INIT "-O2 -DNDEBUG")
