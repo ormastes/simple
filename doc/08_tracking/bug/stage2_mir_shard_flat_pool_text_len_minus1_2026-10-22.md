@@ -542,3 +542,31 @@ So the panic fires inside `flat_pool_builder_push` itself (encode side),
 consistent with the "texts freed between decode and hir-entry encode"
 mechanism above. The driver-side log ends at `phase=hir current=...p2_add`
 with no diagnostic text — the aborting frame is in the delegated child.
+
+## Annotation 2026-10-23 (lane A, macOS): env-knob discrimination + pool instrumentation
+
+Owning lane quiet >6h; lane A took over the discrimination per the crash
+cycle cap. Repro (10 s, no rebuild needed):
+
+```
+CAND=$PWD/.simple/storage/build/bootstrap/stage2/aarch64-apple-darwin/simple.rejected
+env SIMPLE_BINARY=$CAND SIMPLE_BIN=$CAND SIMPLE_HIR_SHARDING=0 SIMPLE_LIB=$PWD/src \
+  SIMPLE_BOOTSTRAP= "$CAND" native-build --entry src/compiler/bootstrap_admission/p2_add.spl \
+  --runtime-bundle core-c-bootstrap --entry-closure --mode one-binary -o /tmp/p2_add_probe
+```
+
+Results on candidate ab07dfa3-era (with rr-publish workaround):
+- `SIMPLE_FRONTEND_CACHE=0` (no decode): NO crash — clean, later,
+  unrelated failure (`MIR final repository policy or emission schedule
+  differs`, exit 1). So the crash REQUIRES the parse-cache decode path.
+- Cache on + `SIMPLE_FRONTEND_DELEGATED=0`: still SIGABRT, same locus
+  (`rt_panic <- flat_pool_builder_push`, byProc=simple.rejected). So the
+  panic is in the candidate's own encode, delegation-independent.
+- Conclusion: the dangling-text window is the decode-hit rebuild
+  (`build_module_from_flat_pool_blob`) and the hir-entry encode.
+
+Instrumented (SIMPLE_POOLDBG=1, env-gated): a reset counter print inside
+`reset_all_pools` plus a pool-state probe (`flat_pool_debug_state_v1`) at
+decode-built, in compiler.core.types. Sequence discrimination: a reset
+line between `decode-built` and the push panic => second-reset theory
+(module_assembly decode entry); no reset => scope-teardown reclaim theory.
