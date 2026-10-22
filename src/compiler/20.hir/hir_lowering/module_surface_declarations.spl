@@ -199,14 +199,28 @@ pub class ModuleSurfaceParserOwner:
     value: ParserModule
 
     static fn new(value: ParserModule) -> ModuleSurfaceParserOwner:
-        ModuleSurfaceParserOwner(value: value)
+        # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=by_value_struct_ctor_arg_corrupts_field
+        # Passing the large ParserModule struct straight into the constructor
+        # stored a corrupt field copy in the self-hosted candidate (reads of
+        # owner.value later return garbage: name.len() == -1). An explicit
+        # typed local bind before construction lowers cleanly.
+        val bound: ParserModule = value
+        ModuleSurfaceParserOwner(value: bound)
 
 pub fn module_surface_from_owner(
     owner: ModuleSurfaceParserOwner, source: SourceFile, source_index: i64
 ) -> Result<ModuleSurface, text>:
     # Compute while the complete ParserModule owner is alive; only four flat
     # limbs cross into persistent surface storage.
-    val semantic_hex = module_surface_semantic_projection(owner.value)
+    # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=by_value_struct_arg_transport_corrupts
+    # Passing owner.value (a 15+ field struct) directly as a by-value argument
+    # corrupted the copy in transit in the self-hosted candidate: the callee
+    # SIGSEGV'd in its prologue before executing a single body statement
+    # (unconditional entry eprint never printed; crash PC in the callee's
+    # symbol region). Binding to an explicitly typed local first — the same
+    # pattern that fixed the poll/future generic-enum case — lowers cleanly.
+    val module_local: ParserModule = owner.value
+    val semantic_hex = module_surface_semantic_projection(module_local)
     val semantic_cacheable = semantic_hex.len() == 64
     var callables: Dict<text, ModuleSurfaceCallable> = {}
     var callable_names: [text] = []
