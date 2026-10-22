@@ -1,0 +1,54 @@
+# Source-only ownership guard; this is not cold runtime/RSS acceptance.
+# Native cold/warm/failure execution still requires a rebuilt admitted producer.
+use std.spec.*
+use std.io.{file_read}
+
+val RETAINED_SHARD_DRIVER = "src/compiler/80.driver/driver_hir_pipeline_lowering.spl"
+
+fn retained_shard_transaction_source() -> text:
+    val source = file_read(RETAINED_SHARD_DRIVER)
+    val chunks = source.split("    me lower_retained_hir_shard_v1(")
+    expect(chunks.len()).to_equal(2)
+    chunks[1].split("    me lower_retained_surface_module(")[0]
+
+describe "retained cold HIR shard source ownership":
+    it "borrows retained parsers and owns cache decode/store without full graph promotion":
+        val transaction = retained_shard_transaction_source()
+        expect(transaction).to_contain("parser_module = self.ctx.modules[source.module_name]")
+        expect(transaction).to_contain("is_entry and source.content != \"\"")
+        expect(transaction).to_contain("self.parse_full_frontend_in_borrowed_scope_selected_v1(")
+        expect(transaction).to_contain("hir_cache_load_in_owned_scope(key, binding)")
+        expect(transaction).to_contain("hir_cache_store_in_owned_scope(key, module, warnings, parser_record)")
+        expect(transaction.contains("rt_transient_heap_promote(module)")).to_equal(false)
+        expect(transaction.contains("promote_symbol_table_transient_owners")).to_equal(false)
+        expect(transaction.contains("bootstrap_hir_modules_promote_last")).to_equal(false)
+        expect(transaction.contains("phase_hir_modules[")).to_equal(false)
+        expect(transaction.contains("phase_entry_hir =")).to_equal(false)
+
+    it "finishes body readers before pausing and detaches all transient lowerer owners":
+        val transaction = retained_shard_transaction_source()
+        val paused = transaction.split("if not rt_transient_array_scope_pause():")
+        expect(paused.len()).to_equal(2)
+        expect(paused[0]).to_contain("hir_cache_store_in_owned_scope")
+        expect(paused[0]).to_contain("value_struct_layout_declarations_v1")
+        expect(paused[0]).to_contain("val compact_roots = (errors, warnings, failure, abi_receipt, layout)")
+        expect(paused[1]).to_contain("rt_transient_heap_promote(compact_roots)")
+        expect(paused[1]).to_contain("lowering.promote_phase_memo_transient_owners()")
+        val publication = paused[1].split("if not driver_publish_reverse_reference_parse_scope_v1(reverse_token):")
+        expect(publication.len()).to_equal(2)
+        expect(publication[0]).to_contain("driver_rollback_flat_hir_row_or_abort(flat_rows_before)")
+        expect(publication[0]).to_contain("lowering.begin_module(source.path)")
+        expect(publication[0]).to_contain("lowering.prescan_type_parameters = {}")
+        expect(publication[0]).to_contain("hir_cache_clear_last_warnings()")
+        expect(publication[1]).to_contain("exit(1)")
+        expect(publication[1]).to_contain("self.capture_native_parsed_objectless_v1(parsed_code_less, source)")
+
+    it "guards complete module owners and keeps source identity and terminal publication gates":
+        val source = file_read(RETAINED_SHARD_DRIVER)
+        expect(source).to_contain("if is_requested_bootstrap_entry and not hir_shard_mode:")
+        expect(source).to_contain("if val Some(layout) = shard.layout:")
+        expect(source).to_contain("Missing immutable source receipt for {name}")
+        expect(source).to_contain("driver_stage3_surface_identity_matches_receipt(")
+        expect(source).to_contain("Missing module surface alias for {name}")
+        expect(source).to_contain("hir_shard_finish(src.path, outcome, shard.stored)")
+        expect(source).to_contain("phase3:hir:retained-shard:reclaimed")

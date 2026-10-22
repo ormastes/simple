@@ -2711,6 +2711,11 @@ impl MirLowering:
                         return rt
             case HirExprKind.Unwrap(unwrap_base):
                 return self.enum_match_unwrapped_type(unwrap_base)
+            case HirExprKind.Try(try_base):
+                # `?` produces the same declared Optional/Result payload
+                # owner as unwrap. Preserve it for unannotated local bindings;
+                # do not guess a nominal owner from a method spelling.
+                return self.enum_match_unwrapped_type(try_base)
             case HirExprKind.Index(index_base, index_expr):
                 # `t.0` desugars to Index(t, IntLit 0). Element type of a
                 # declared tuple/array base; dict/text bases stay unresolved.
@@ -4566,7 +4571,7 @@ impl MirLowering:
                                     case HirTypeKind.Tuple(_): true
                                     case _: false
                                 if result_payload_type != nil and declared_tuple:
-                                    if val native_tuple = wrapper_native_tuple_payload_type(found_payload_type):
+                                    if val native_tuple = self.wrapper_owned_native_tuple_payload_type(found_payload_type):
                                         self.recover_result_tuple_payload(pl, native_tuple)
                                     else:
                                         # No new admission for text/record/erased
@@ -5715,7 +5720,10 @@ impl MirLowering:
         if args.len() > 1 and metadata_owner == "":
             self.error_fatal("enum construction '{enum_name}.{variant}': ambiguous or missing payload owner", nil)
             return self.builder.emit_const_int(0)
-        if typed_slots:
+        # Missing declared slots are not generic authority. A known owner
+        # without an explicit generic exemption must fail closed before any
+        # argument lowering or untyped tuple boxing can bypass validation.
+        if metadata_owner != "" and not (self.generic_enum_constructor_owners.get(metadata_owner) ?? false):
             val payload_reason = self.enum_positional_payload_reason(metadata_owner, variant, args.len())
             if payload_reason != "":
                 self.error_fatal("enum construction '{metadata_key}': {payload_reason}", nil)

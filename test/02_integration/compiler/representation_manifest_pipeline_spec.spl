@@ -99,6 +99,46 @@ fn fixture_invalid_boundary_v1() -> text:
     "    raw\n"
 
 describe "A5 representation manifest reaches actual compiler consumers":
+    it "reads only literal SDN strings while keeping project-name precedence":
+        val primary_source = "project:\n  name: primary_pkg\nname: alias_pkg\n"
+        val primary = representation_context_from_project_v1(
+            primary_source, REPRESENTATION_PROJECT_PATH)
+        expect(primary.package_identity).to_equal("primary_pkg")
+        expect(primary.error).to_equal("")
+        expect(primary.manifest_digest).to_equal(sha256_text(primary_source))
+
+        val alias_source = "name: alias_pkg\n"
+        val alias = representation_context_from_project_v1(
+            alias_source, REPRESENTATION_PROJECT_PATH)
+        expect(alias.package_identity).to_equal("alias_pkg")
+        expect(alias.error).to_equal("")
+
+        val wrong_primary = representation_context_from_project_v1(
+            "project:\n  name: 17\nname: fallback_pkg\n", REPRESENTATION_PROJECT_PATH)
+        expect(wrong_primary.package_identity).to_equal("")
+        expect(wrong_primary.error).to_equal("project.name must be literal text")
+
+        val wrong_alias = representation_context_from_project_v1(
+            "name: false\n", REPRESENTATION_PROJECT_PATH)
+        expect(wrong_alias.package_identity).to_equal("")
+        expect(wrong_alias.error).to_equal("project name must be literal text")
+
+    it "retains malformed empty and line-separated project-name rejection":
+        val malformed = representation_context_from_project_v1(
+            "project:\n  name: \"unterminated\n", REPRESENTATION_PROJECT_PATH)
+        expect(malformed.package_identity).to_equal("")
+        expect(malformed.error).to_equal("selected project configuration is malformed")
+
+        val empty = representation_context_from_project_v1(
+            "project:\n  name: \"\"\n", REPRESENTATION_PROJECT_PATH)
+        expect(empty.package_identity).to_equal("")
+        expect(empty.error).to_equal("selected project configuration with an explicit project.name is required")
+
+        val line_separator = representation_context_from_project_v1(
+            "project:\n  name: \"line\\nname\"\n", REPRESENTATION_PROJECT_PATH)
+        expect(line_separator.package_identity).to_equal("")
+        expect(line_separator.error).to_equal("project namespace cannot contain line separators")
+
     it "binds a valid source attribute to its parsed declaration and critical HIR receipt":
         step("Bind the boundary to its declaration")
         val source = fixture_valid_boundary_v1()

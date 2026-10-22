@@ -1,0 +1,72 @@
+# @req REQ-MC-006
+# Actual registry lifecycle acceptance; no local token implementation.
+use std.spec
+use std.spec.step
+use std.async.cancellation.{CancellationToken, token_new, cancellation_registry_capacity, cancellation_registry_live_count}
+
+describe "generation-bound cancellation lifetimes":
+    it "reclaims repeated roots without authorizing stale copies":
+        step("Retain a stale alias, release its lifetime and allocate replacements")
+        val before = cancellation_registry_live_count()
+        var original = token_new()
+        val stale = original
+        expect(original.release()).to_equal(true)
+        expect(original.release()).to_equal(false)
+        var i = 0
+        while i < cancellation_registry_capacity() + 2:
+            var next = token_new()
+            stale.cancel()
+            expect(next.is_cancelled()).to_equal(false)
+            expect(next.release()).to_equal(true)
+            i = i + 1
+        expect(stale.is_cancelled()).to_equal(true)
+        expect(cancellation_registry_live_count()).to_equal(before)
+
+    it "fails closed when a released ancestor slot is reused":
+        step("Release a parent before its child and reuse the parent storage")
+        var parent = token_new()
+        var child = parent.child()
+        expect(child.is_cancelled()).to_equal(false)
+        expect(parent.release()).to_equal(true)
+        var replacement = token_new()
+        expect(child.is_cancelled()).to_equal(true)
+        expect(replacement.is_cancelled()).to_equal(false)
+        val refused = parent.child()
+        expect(refused.is_cancelled()).to_equal(true)
+        expect(child.release()).to_equal(true)
+        expect(replacement.release()).to_equal(true)
+
+    it "refuses finite-capacity admission and recovers after release":
+        step("Fill the remaining live capacity, refuse one token, then release all")
+        val before = cancellation_registry_live_count()
+        var tokens: [CancellationToken] = []
+        val available = cancellation_registry_capacity() - before
+        for _ in 0..available:
+            tokens = tokens.push(token_new())
+        var refused = token_new()
+        expect(refused.is_cancelled()).to_equal(true)
+        expect(refused.release()).to_equal(false)
+        for token in tokens:
+            expect(token.release()).to_equal(true)
+        var recovered = token_new()
+        expect(recovered.is_cancelled()).to_equal(false)
+        expect(recovered.release()).to_equal(true)
+        expect(cancellation_registry_live_count()).to_equal(before)
+
+    it "observes a deep parent chain after intervening unrelated allocations":
+        step("Cancel a grandparent after creating an unrelated root and sibling")
+        var grandparent = token_new()
+        var parent = grandparent.child()
+        var unrelated = token_new()
+        var child = parent.child()
+        var sibling = grandparent.child()
+        expect(child.is_cancelled()).to_equal(false)
+        grandparent.cancel()
+        expect(child.is_cancelled()).to_equal(true)
+        expect(sibling.is_cancelled()).to_equal(true)
+        expect(unrelated.is_cancelled()).to_equal(false)
+        expect(child.release()).to_equal(true)
+        expect(parent.release()).to_equal(true)
+        expect(sibling.release()).to_equal(true)
+        expect(grandparent.release()).to_equal(true)
+        expect(unrelated.release()).to_equal(true)

@@ -1,0 +1,265 @@
+# B2 staged parsed-source resolver. Own facts, never retain flat-arena indices.
+# Parser access is serial like the existing core parser; this is not a concurrent
+# query-service adapter. The caller supplies package/module configuration, not IDs.
+use compiler.semantics.symbol_id.semantic_link.{SemanticLinkFailureV1, SemanticLinkErrorV1, SemanticLinkBatchErrorV1, semantic_link_error_v1, semantic_link_path_v1, semantic_link_identifier_v1, semantic_link_hex_v1, parse_semantic_link_v1}
+use compiler.semantics.symbol_id.stable_id.{SymbolComponents, stable_symbol_id, short_fingerprint, format_short_link}
+use compiler.semantics.symbol_id.index.{SymbolIndex, build_symbol_index, build_symbol_index_with_short_len}
+use compiler.core.parser.{parse_module_silent_checked}
+use compiler.frontend.core.parser_preprocessor.{_pp_preprocess_conditionals}
+use compiler.frontend.core.lexer.{lex_source_byte_offset, lexer_new, lexer_next_token}
+use compiler.frontend.core.lexer_types.{TokenKind}
+use compiler.core.ast.{module_decl_count_get, module_decl_at, decl_get_tag, decl_get_name, decl_get_type_params, decl_get_param_types, decl_get_ret_type, decl_get_span, DECL_FN}
+use compiler.core.types.{span_is_valid, span_start, span_end, span_line, span_col, type_tag_name, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+
+pub struct SemanticLinkDeclarationV1:
+    symbol: SymbolComponents
+    full_id: text
+    file: text
+    start: i64
+    end: i64
+    line: i64
+    column: i64
+
+pub class SemanticLinkDocumentV1:
+    package: text
+    module_path: text
+    file: text
+    revision: text
+    declarations: [SemanticLinkDeclarationV1]
+    fingerprints: SymbolIndex
+    by_name: Dict<text, [i64]>
+
+fn semantic_link_primitive_v1(tag: i64) -> bool:
+    [TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32].contains(tag)
+
+fn semantic_link_exact_header_v1(source: text, declaration: SemanticLinkDeclarationV1) -> bool:
+    """Check exact lexical types against copied resolved facts, never produce them.
+
+    The core parser collapses u7/u3/etc to TYPE_I64. Only matching canonical
+    primitive spellings can certify that those tags preserve signature identity.
+    Richer/defaulted signatures need their own source/type provenance and refuse.
+    This resets the global lexer: call only AFTER all flat spans/facts are copied.
+    """
+    val lexer = lexer_new(source.slice(declaration.start, declaration.end))
+    var tokens: [text] = []
+    var depth = 0
+    var finished = false
+    for count in 0..4096:
+        val token = lexer_next_token(lexer)
+        if token.kind == TokenKind.Eof:
+            finished = true
+            break
+        if token.kind == TokenKind.Newline or token.kind == TokenKind.Indent or token.kind == TokenKind.Dedent:
+            continue
+        if token.text == ":" and depth == 0:
+            finished = true
+            break
+        if token.text == "(":
+            depth = depth + 1
+        elif token.text == ")":
+            depth = depth - 1
+        tokens.push(token.text)
+    if not finished or tokens.len() < 6 or tokens[0] != "fn" or tokens[1] != declaration.symbol.name or tokens[2] != "(":
+        return false
+    val primitives = ["bool", "i64", "f64", "text", "u8", "u16", "u32", "u64", "i8", "i16", "i32"]
+    var position = 3
+    var types: [text] = []
+    while position < tokens.len() and tokens[position] != ")":
+        if position + 2 >= tokens.len() or not semantic_link_identifier_v1(tokens[position]) or tokens[position + 1] != ":" or not primitives.contains(tokens[position + 2]):
+            return false
+        types.push(tokens[position + 2])
+        position = position + 3
+        if position < tokens.len() and tokens[position] == ",":
+            position = position + 1
+        elif position >= tokens.len() or tokens[position] != ")":
+            return false
+    if position + 3 != tokens.len() or tokens[position] != ")" or tokens[position + 1] != "->" or not primitives.contains(tokens[position + 2]):
+        return false
+    val signature = "fn " + declaration.symbol.name + "(" + types.join(",") + ") -> " + tokens[position + 2]
+    signature == declaration.symbol.signature
+
+pub fn semantic_link_read_revision_v1(file: text, revision: text) -> Result<text, SemanticLinkErrorV1>:
+    if file == "" or not semantic_link_hex_v1(revision, 64):
+        return Err(semantic_link_error_v1(SemanticLinkFailureV1.InvalidAuthority, "a file and exact SHA256 source revision are required"))
+    val source = match file_read_regular_no_follow_bounded(file, 1048576):
+        case Ok(value): value
+        case Err(message):
+            return Err(semantic_link_error_v1(SemanticLinkFailureV1.IoFailed, message))
+    if sha256_text(source) != revision:
+        return Err(semantic_link_error_v1(SemanticLinkFailureV1.RevisionChanged, "source bytes do not match the requested revision"))
+    Ok(source)
+
+pub fn open_semantic_link_document_v1(package: text, module_path: text, file: text, revision: text) -> Result<SemanticLinkDocumentV1, SemanticLinkErrorV1>:
+    """Read and parse this exact content revision, then copy resolved primitive facts.
+
+    This staged producer supports top-level fn declarations with fully explicit
+    primitive parameter/return types and no generics. Other signatures refuse;
+    non-function declarations are not exported by this producer. It neither
+    substitutes an outline parser nor asserts whole-module type correctness.
+    """
+    if package.len() > 4096 or module_path.len() > 4096 or not semantic_link_path_v1(package) or not semantic_link_path_v1(module_path):
+        return Err(semantic_link_error_v1(SemanticLinkFailureV1.InvalidAuthority, "configured package and module identity are required"))
+    val source = semantic_link_read_revision_v1(file, revision)?
+    # Conditional preprocessing shortens directive/excluded lines. Until a
+    # source map is admitted, never attach transformed offsets to this revision.
+    if _pp_preprocess_conditionals(source) != source:
+        return Err(semantic_link_error_v1(SemanticLinkFailureV1.UnsupportedSourceTransform, "conditional preprocessing changes source; original-span mapping is required"))
+    # This returns the failure flag directly. Reading parser_has_errors after
+    # the cross-module call is known to lose the flag in native codegen.
+    if parse_module_silent_checked(source, file):
+        return Err(semantic_link_error_v1(SemanticLinkFailureV1.ParseFailed, "source parse failed; no declaration index published"))
+    val count = module_decl_count_get()
+    if count < 0 or count > 4096:
+        return Err(semantic_link_error_v1(SemanticLinkFailureV1.CapacityExceeded, "declaration snapshot exceeds 4096 top-level items"))
+    var declarations: [SemanticLinkDeclarationV1] = []
+    var components: [SymbolComponents] = []
+    var by_name: Dict<text, [i64]> = {}
+    for position in 0..count:
+        val node = module_decl_at(position)
+        if decl_get_tag(node) != DECL_FN:
+            continue
+        val name = decl_get_name(node)
+        val params = decl_get_param_types(node)
+        val result = decl_get_ret_type(node)
+        if not semantic_link_identifier_v1(name) or not decl_get_type_params(node).is_empty() or not semantic_link_primitive_v1(result):
+            return Err(semantic_link_error_v1(SemanticLinkFailureV1.UnsupportedSignature, "declaration needs a broader resolved-signature producer: " + name))
+        var types: [text] = []
+        for param in params:
+            if not semantic_link_primitive_v1(param):
+                return Err(semantic_link_error_v1(SemanticLinkFailureV1.UnsupportedSignature, "parameter type is unresolved or unsupported: " + name))
+            types.push(type_tag_name(param))
+        val signature = "fn " + name + "(" + types.join(",") + ") -> " + type_tag_name(result)
+        val symbol = SymbolComponents(package: package, module_path: module_path, item_kind: "fn", owner_id: "", name: name, signature: signature)
+        val full_id = stable_symbol_id(symbol)
+        val span = decl_get_span(node)
+        if not span_is_valid(span):
+            return Err(semantic_link_error_v1(SemanticLinkFailureV1.InvalidSpan, "parsed declaration has no source span"))
+        # Flat function declaration spans use core-lexer CODEPOINT indices.
+        # Convert while the original lexer is live, before any header check
+        # can reset it. Store only original UTF8 byte offsets in the snapshot.
+        val start = lex_source_byte_offset(span_start(span))
+        val end = lex_source_byte_offset(span_end(span))
+        if start < 0 or end <= start or end > source.len() or span_line(span) < 1 or span_col(span) < 1:
+            return Err(semantic_link_error_v1(SemanticLinkFailureV1.InvalidSpan, "parsed declaration has an invalid source span"))
+        var rows: [i64] = []
+        if by_name.contains_key(name):
+            rows = by_name[name]
+            for row in rows:
+                if declarations[row].full_id == full_id:
+                    return Err(semantic_link_error_v1(SemanticLinkFailureV1.AmbiguousTarget, "one stable identity has multiple parsed declarations"))
+        rows.push(declarations.len())
+        by_name[name] = rows
+        components.push(symbol)
+        declarations.push(SemanticLinkDeclarationV1(symbol: symbol, full_id: full_id, file: file,
+            start: start, end: end, line: span_line(span), column: span_col(span)))
+    # All arena-derived values and byte offsets are now owned. Header lexing
+    # below cannot invalidate another declaration's offset conversion.
+    for declaration in declarations:
+        if not semantic_link_exact_header_v1(source, declaration):
+            return Err(semantic_link_error_v1(SemanticLinkFailureV1.UnsupportedSignature, "exact primitive signature provenance is unavailable: " + declaration.symbol.name))
+    val fingerprints = match build_symbol_index(components):
+        case Ok(value): value
+        case Err(message):
+            return Err(semantic_link_error_v1(SemanticLinkFailureV1.FingerprintCollision, message))
+    # A second bounded read refuses an edit during parsing/publication.
+    semantic_link_read_revision_v1(file, revision)?
+    Ok(SemanticLinkDocumentV1(package: package, module_path: module_path, file: file, revision: revision,
+        declarations: declarations, fingerprints: fingerprints, by_name: by_name))
+
+fn semantic_link_snapshot_lookup_v1(uri: text, document: SemanticLinkDocumentV1, revision: text) -> Result<SemanticLinkDeclarationV1, SemanticLinkErrorV1>:
+    """Resolve only the requested source revision; never retarget by fingerprint.
+
+    Reuses the parsed snapshot and B1 lookup. One bounded fresh read per request
+    checks content authority until an admitted file-watch revision owner exists.
+    The returned span belongs to revision, not to future filesystem mutations.
+    """
+    val link = parse_semantic_link_v1(uri)?
+    if link.package != "" and link.package != document.package:
+        return Err(semantic_link_error_v1(SemanticLinkFailureV1.WrongPackage, "URI package differs from the configured source package"))
+    if revision != document.revision:
+        return Err(semantic_link_error_v1(SemanticLinkFailureV1.RevisionChanged, "snapshot does not belong to the requested revision"))
+    if link.item_kind != "fn":
+        return Err(semantic_link_error_v1(SemanticLinkFailureV1.UnsupportedKind, "this parsed-source producer currently exports top-level functions"))
+    if link.module_path != document.module_path or not document.by_name.contains_key(link.name):
+        return Err(semantic_link_error_v1(SemanticLinkFailureV1.UnresolvedTarget, "declaration module and name are unresolved"))
+    val full_id = document.fingerprints.full_id_of(link.fingerprint)
+    var found = -1
+    for row in document.by_name[link.name]:
+        val declaration = document.declarations[row]
+        if declaration.full_id == full_id:
+            if found >= 0:
+                return Err(semantic_link_error_v1(SemanticLinkFailureV1.AmbiguousTarget, "fingerprint resolves to multiple declarations"))
+            found = row
+    if found < 0:
+        return Err(semantic_link_error_v1(SemanticLinkFailureV1.StaleFingerprint, "fingerprint does not identify the named declaration"))
+    return Ok(document.declarations[found])
+
+pub fn semantic_link_document_uri_v1(document: SemanticLinkDocumentV1, declaration: i64, package_qualified: bool) -> Result<text, SemanticLinkErrorV1>:
+    if declaration < 0 or declaration >= document.declarations.len():
+        return Err(semantic_link_error_v1(SemanticLinkFailureV1.UnresolvedTarget, "declaration index is outside the snapshot"))
+    val target = document.declarations[declaration]
+    val uri = if package_qualified:
+        "spl://" + document.package + "/" + document.module_path + "#fn:" + target.symbol.name + "~" + short_fingerprint(target.full_id)
+    else:
+        format_short_link(target.symbol, target.full_id)
+    # An emitter must not return success for a URI the shared parser refuses.
+    parse_semantic_link_v1(uri)?
+    Ok(uri)
+
+pub fn semantic_link_document_collision_check_v1(document: SemanticLinkDocumentV1, short_len: i64) -> Result<(), SemanticLinkErrorV1>:
+    """B1's collision test seam over actual parsed facts; publishes no index.
+
+    Production publication always uses B1's default 12-character fingerprint.
+    """
+    var components: [SymbolComponents] = []
+    for declaration in document.declarations:
+        components.push(declaration.symbol)
+    match build_symbol_index_with_short_len(components, short_len):
+        case Ok(_): Ok(())
+        case Err(message): Err(semantic_link_error_v1(SemanticLinkFailureV1.FingerprintCollision, message))
+
+
+pub fn resolve_semantic_links_source_v1(uris: [text], document: SemanticLinkDocumentV1, revision: text) -> Result<[SemanticLinkDeclarationV1], SemanticLinkErrorV1>:
+    # Compatibility API retains its existing error type and actual-source path.
+    match resolve_semantic_links_source_indexed_v1(uris, document, revision):
+        case Ok(declarations): Ok(declarations)
+        case Err(failure): Err(failure.error)
+
+pub fn resolve_semantic_links_source_indexed_v1(uris: [text], document: SemanticLinkDocumentV1, revision: text) -> Result<[SemanticLinkDeclarationV1], SemanticLinkBatchErrorV1>:
+    if revision != document.revision:
+        return Err(SemanticLinkBatchErrorV1(row: -1, error: semantic_link_error_v1(
+            SemanticLinkFailureV1.RevisionChanged, "snapshot does not belong to the requested revision")))
+    resolve_semantic_links_file_indexed_v1(uris, document.package, document.module_path, document.file, revision)
+
+pub fn resolve_semantic_links_file_v1(uris: [text], package: text, module_path: text, file: text, revision: text) -> Result<[SemanticLinkDeclarationV1], SemanticLinkErrorV1>:
+    match resolve_semantic_links_file_indexed_v1(uris, package, module_path, file, revision):
+        case Ok(declarations): Ok(declarations)
+        case Err(failure): Err(failure.error)
+
+pub fn resolve_semantic_links_file_indexed_v1(uris: [text], package: text, module_path: text, file: text, revision: text) -> Result<[SemanticLinkDeclarationV1], SemanticLinkBatchErrorV1>:
+    """Reauthenticate once per bounded batch and retain the failing input row.
+
+    Global admission/revision failures have row -1; a URI lookup failure carries
+    its exact ordinal. Error attribution never adds a source reparse per URI.
+    """
+    if uris.len() > 4096:
+        return Err(SemanticLinkBatchErrorV1(row: -1, error: semantic_link_error_v1(
+            SemanticLinkFailureV1.CapacityExceeded, "batch exceeds 4096 URI lookups")))
+    val authenticated = match open_semantic_link_document_v1(package, module_path, file, revision):
+        case Ok(value): value
+        case Err(error): return Err(SemanticLinkBatchErrorV1(row: -1, error: error))
+    var declarations: [SemanticLinkDeclarationV1] = []
+    for row in 0..uris.len():
+        match semantic_link_snapshot_lookup_v1(uris[row], authenticated, revision):
+            case Ok(declaration): declarations.push(declaration)
+            case Err(error): return Err(SemanticLinkBatchErrorV1(row: row, error: error))
+    match semantic_link_read_revision_v1(authenticated.file, revision):
+        case Ok(_): ()
+        case Err(error): return Err(SemanticLinkBatchErrorV1(row: -1, error: error))
+    Ok(declarations)
+
+pub fn resolve_semantic_link_source_v1(uri: text, document: SemanticLinkDocumentV1, revision: text) -> Result<SemanticLinkDeclarationV1, SemanticLinkErrorV1>:
+    val declarations = resolve_semantic_links_source_v1([uri], document, revision)?
+    Ok(declarations[0])

@@ -77,6 +77,30 @@ fn result_tuple_kind_label(type_: HirType) -> text:
         case _: "other"
 
 impl MirLowering:
+    me wrapper_owned_native_tuple_payload_type(type_: HirType) -> MirType?:
+        # Dispatch tuples once: probing the old recursive classifier first
+        # repeats failed subtree walks when a deep leaf is a native enum.
+        # Non-tuple fields retain the existing wrapper admission policy.
+        match type_.kind:
+            case HirTypeKind.Tuple(elements):
+                if elements.len() == 0: return nil
+                var fields: [MirType] = []
+                for element in elements:
+                    match element.kind:
+                        case HirTypeKind.Tuple(_):
+                            if val nested = self.wrapper_owned_native_tuple_payload_type(element):
+                                fields.push(nested)
+                            else: return nil
+                        case HirTypeKind.Named(_, _):
+                            if self.result_try_tuple_nominal_owner(element, false) == "": return nil
+                            fields.push(self.lower_type(element))
+                        case _:
+                            if val existing_field = wrapper_native_tuple_field_type(element):
+                                fields.push(existing_field)
+                            else: return nil
+                Some(MirType(kind: MirTypeKind.Tuple(fields)))
+            case _: nil
+
     me result_try_tuple_nominal_owner(type_: HirType, record: bool) -> text:
         # These IDs come from a consumer-owned, relocated callable signature.
         # Relocation establishes origin; an integer ID alone cannot do that.
@@ -217,6 +241,20 @@ impl MirLowering:
                         match expected.kind:
                             case HirTypeKind.Named(_, _):
                                 var slot_owner = self.result_try_tuple_nominal_owner(expected, false)
+                                # GetField loaded an intact handle from the exact
+                                # declared slot of an admitted native tuple.
+                                if (slot_owner != "" and
+                                    not self.option_value_locals.contains(base.id) and
+                                    not self.exists_collection_locals.contains(base.id) and
+                                    not self.nil_locals.contains(base.id) and
+                                    not self.is_runtime_value_local(base.id)):
+                                    if val carrier = self.local_mir_type_of(base):
+                                        match carrier.kind:
+                                            case MirTypeKind.Tuple(fields):
+                                                if fields.len() == elements.len() and field < fields.len():
+                                                    if fields[field].kind == declared.kind:
+                                                        self.mark_runtime_value_local(destination.id)
+                                            case _: ()
                                 if slot_owner == "":
                                     slot_owner = self.result_try_tuple_nominal_owner(expected, true)
                                 if slot_owner != "":
