@@ -430,3 +430,31 @@ Conclusions:
    decoded module and serialized later. Fix shapes: promote the decoded
    module's texts (owned copies at decode or at record construction), or
    pin the pools across the module's lifetime.
+
+## Update 9 (2026-10-22) — defect (b) mapped: archive records raw SIMPLE_BOOTSTRAP; route engagement is the regression
+
+The policy check reads `MonoArchiveFinalRepositoryV1.bootstrap_mode`,
+assigned at issuance (hir_mono_final_repository_v1.spl:307) as the RAW env
+value: `bootstrap_mode: env_get("SIMPLE_BOOTSTRAP")`. The lane builds the
+candidate/archive under `SIMPLE_BOOTSTRAP=1` → archive carries "1"; the
+smoke runs the candidate with `SIMPLE_BOOTSTRAP=0`
+(candidate_frontend_admission.shs, CANDIDATE_FRONTEND_BOOTSTRAP default) →
+`lower_archived_to_mir_v1` (driver_pipeline_lowering.spl:614, "only issued
+by the real full0 production owner", fatal on mismatch) rejects. The
+mismatch is SEMANTICALLY real (bootstrap_mode changes lowering,
+module_build.spl:313+), so blind normalization is wrong.
+
+The regression is ENGAGEMENT, not the check: attempt 30 (pre-regression)
+passed sanity, so the p2_add smoke previously never reached the archived
+route — no final repository existed in its fresh probe cache. Now something
+publishes a MonoArchiveFinalRepository that the p2_add smoke can see (build
+phase leaking into probe-visible cache, or the mono-final route newly
+engaging for tiny builds). Bisect from the mono/archive lane
+(dc7e9136bf1, 8a447adbdb4 family) — the parallel session owns it.
+
+### Ordered critical path to a green stage2 gate
+
+1. (a) decode-dangle (Update 8) — crash with cache enabled (gate default).
+2. (b) this — policy mismatch, visible once (a) clears.
+Both fixes are in lanes the parallel session is actively landing; adopt
+theirs or land mine with the 9s repro (Update 1) + lane as verification.
