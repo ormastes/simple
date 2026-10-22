@@ -106,8 +106,10 @@ impl PlatformLinkConfig {
             libraries: vec![
                 "m", "System", "z", "ffi", "edit", "zstd", "xml2", "ncurses", "objc", "iconv",
             ],
-            // Homebrew prefix so `-lzstd` resolves (no `libzstd.tbd` ships in the SDK).
-            library_search_paths: vec!["/opt/homebrew/lib"],
+            // Homebrew prefixes so `-lzstd` resolves (no `libzstd.tbd` ships in the SDK):
+            // /opt/homebrew on Apple silicon, /usr/local on Intel (release run 39709151208,
+            // darwin-x86_64: `ld: library not found for -lzstd`).
+            library_search_paths: vec!["/opt/homebrew/lib", "/usr/local/lib"],
             system_scan_libs: vec!["/usr/lib/libSystem.B.dylib"],
             nm_flags: vec!["-g", "-p"],
             stub_strategy: StubStrategy::WeakDefinition,
