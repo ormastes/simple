@@ -51,3 +51,24 @@ stage3/stage4 lanes drive it; hand-driving it for the provisional lane
 (coordinator + N shard workers + link worker) is the immediate lever for
 ~Nx throughput. The per-module pathological cost (32 GB RSS cap hit on the
 first/largest driver modules) still needs a profile.
+
+## Addendum 2026-10-22 (session 2): sharding wired for ad-hoc lanes; two more blockers found
+
+1. `src/app/cli/native_build_main.spl` now defaults `SIMPLE_MIR_SHARDING=1` for
+   ad-hoc lanes (opt out with `=0`; managed bootstrap lanes with
+   `SIMPLE_BOOTSTRAP=1` unchanged). Shards engage without hand-driving the
+   coordinator.
+2. On macOS the fanout clamp degenerates to sequential: `shard_mem_available_kb`
+   reads /proc/meminfo (Linux-only) → 0 → "unknown memory permits only the
+   sequential path". Ad-hoc macOS lanes must declare
+   `SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB` (e.g. 22000000 on a 24 GB host) to get
+   parallel > 1. With 6 GB workers (`SIMPLE_MIR_SHARD_WORKER_KB=6000000`) the
+   60%-usable rule yields parallel=2.
+3. The shard eligibility guard (`native_mir_shard_eligible_v1` in
+   `driver_aot_pipeline.spl`) refused the phase-3 lane with the opaque message
+   "MIR sharding is unsupported for this build lane" and the coordinator fell
+   back to in-process unsharded MIR (the ~100 h path). The guard now prints a
+   per-condition refusal reason (`[mir-shard] eligibility refused ...`).
+   Follow-up: whichever condition refuses the bootstrap_main dynload lane still
+   needs a real fix (or an admitted narrower carve-out) — see the lane log for
+   the recorded reason.
