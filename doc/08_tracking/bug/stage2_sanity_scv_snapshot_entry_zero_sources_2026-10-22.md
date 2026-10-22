@@ -304,3 +304,19 @@ instrumenting the Rust promote to print `value.0` (hex), `is_heap()`, and
 fix is to classify through the C classifier (`rt_core_transient_classify`
 family, which IS linkable — `rt_transient_raw_words` already is) or to
 un-shadow the promote symbols across the two runtimes.
+
+## Update: after PR #4133 (merge 05157642057), p2_add regressed to a surface_build crash
+
+On merged HEAD 05157642057 (this lane's stack + PR #4133
+windows-stage2-runtime-repairs: twin-based rt_io_file_open_* in fs.spl,
+io_file.rs / runtime_native.c repairs), the stage2 sanity now fails on the
+FIRST probe: p2_add dies right after `phase=surface_build current=start`
+(worker crash → HIR aggregate failure), before any alias-scan/lowering
+milestone (SIMPLE_NSCOPE_HIR_TRACE silent). The same p2_add probe PASSED on
+this lane's pre-merge stack (e0e6dd8d1c8..e000f4525ef). The
+stage2_module_path_naming SEGV bracket from this lane's instrumentation
+(fault precedes alias scan; parse/entry-scan stage) still applies — the crash
+simply now also reaches p2_add with the merged runtime-repair changes. Treat
+the merged runtime-repair surface (fs.spl twins + io_file.rs) as the active
+suspect for the surface_build-time worker crash; coordinate with the
+#4133 lane before further full-sanity cycles.
