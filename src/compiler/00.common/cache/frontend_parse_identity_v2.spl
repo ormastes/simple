@@ -1,0 +1,45 @@
+# Exact parser-input identity and independently receipt-bound frozen source evidence.
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache.reverse_reference_key.{reverse_reference_hash256_valid_v1}
+
+val FRONTEND_PARSE_IDENTITY_VERSION_V2: text = "frontend-parser-input-v2"
+
+fn frontend_parse_policy_digest_v2(script_path: bool, advisory_identity: text) -> text:
+    val warning_policy = if script_path: "script" else: "application"
+    sha256_text("frontend-parser-policy-v2|conditional-v1|domain-v1|" +
+        warning_policy + "|" + sha256_text(advisory_identity))
+
+fn frontend_parse_key_from_digests_v2(parser_digest: text, policy_digest: text) -> text:
+    if not reverse_reference_hash256_valid_v1(parser_digest) or
+            not reverse_reference_hash256_valid_v1(policy_digest):
+        return ""
+    sha256_text(FRONTEND_PARSE_IDENTITY_VERSION_V2 + "|" + parser_digest + "|" + policy_digest)
+
+fn frontend_parse_identity_frame_v2(parser_digest: text, policy_digest: text,
+    raw_digest: text, raw_generation: text) -> text:
+    val key = frontend_parse_key_from_digests_v2(parser_digest, policy_digest)
+    if key == "":
+        return ""
+    # Unauthenticated local callers may cache exact input, but cannot publish
+    # cross-phase provenance. Empty raw fields are explicit, never fabricated.
+    FRONTEND_PARSE_IDENTITY_VERSION_V2 + "|" + parser_digest + "|" +
+        policy_digest + "|" + raw_digest + "|" + raw_generation + "|" + key
+
+fn frontend_parse_identity_valid_v2(frame: text, expected_key: text,
+    require_raw_authority: bool) -> bool:
+    val fields = frame.split("|")
+    if fields.len() != 6 or fields[0] != FRONTEND_PARSE_IDENTITY_VERSION_V2:
+        return false
+    val key = frontend_parse_key_from_digests_v2(fields[1], fields[2])
+    if key == "" or key != fields[5] or key != expected_key:
+        return false
+    if require_raw_authority:
+        return reverse_reference_hash256_valid_v1(fields[3]) and
+            reverse_reference_hash256_valid_v1(fields[4])
+    (fields[3] == "" and fields[4] == "") or
+        (reverse_reference_hash256_valid_v1(fields[3]) and
+            reverse_reference_hash256_valid_v1(fields[4]))
+
+export FRONTEND_PARSE_IDENTITY_VERSION_V2
+export frontend_parse_policy_digest_v2, frontend_parse_key_from_digests_v2
+export frontend_parse_identity_frame_v2, frontend_parse_identity_valid_v2

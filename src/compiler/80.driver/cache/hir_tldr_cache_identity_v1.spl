@@ -1,0 +1,39 @@
+# Identity-only extension for already admitted TLDR function headers. Compute
+# once for the compile-owned frozen imports, never from a body or whole archive.
+use compiler.hir.archive.tldr_function_header_v1.{AdmittedTldrFunctionImportV1, tldr_function_identifier_v1}
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use std.common.crypto.sha256.{sha256_text}
+
+fn hir_tldr_identity_frame_v1(value: text) -> text:
+    value.len().to_text() + ":" + value
+
+fn hir_tldr_identity_digest_valid_v1(value: text) -> bool:
+    if value.len() != 64: return false
+    for index in 0..value.len():
+        val byte = value.byte_at(index) as i64
+        if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102)): return false
+    true
+
+fn hir_tldr_cache_closure_digest_v1(base: text,
+        imports: [AdmittedTldrFunctionImportV1]) -> text:
+    if base == "": return ""
+    if imports.len() == 0: return base
+    var rows: [text] = []
+    var owners: Dict<text, bool> = {}
+    for prepared in imports:
+        val authority = prepared.authority
+        if not tldr_function_identifier_v1(authority.module_name, true) or owners.has(authority.module_name) or prepared.payload == "": return ""
+        owners[authority.module_name] = true
+        var fields = hir_tldr_identity_frame_v1(authority.module_name)
+        for digest in [authority.source_digest, authority.producer_digest,
+                authority.variant_digest, authority.abi_digest, authority.payload_digest]:
+            if not hir_tldr_identity_digest_valid_v1(digest): return ""
+            fields = fields + hir_tldr_identity_frame_v1(digest)
+        rows.push(hir_tldr_identity_frame_v1(fields))
+    # Variant identity retains target/aspect/capture policy supplied by the
+    # existing admission owner. This function never grants a missing seal.
+    val sorted = canonical_identity_sort_texts(rows)
+    sha256_text("hir-tldr-cache-closure-v1" + hir_tldr_identity_frame_v1(base) +
+        imports.len().to_text() + ":" + sorted.join(""))
+
+export hir_tldr_cache_closure_digest_v1

@@ -63,6 +63,7 @@ set -o pipefail
 approve_conversion=0
 strict_missing=0
 receipt_path=""
+allow_receipt_roots=""
 repo_root=""
 undo_mode=0
 selftest_mode=0
@@ -72,6 +73,12 @@ while [ $# -gt 0 ]; do
         --strict-missing) strict_missing=1; shift ;;
         --undo|--dematerialize) undo_mode=1; shift ;;
         --selftest) selftest_mode=1; shift ;;
+        --allow-receipt-root)
+            [ "$#" -ge 2 ] || { echo "$SELF: --allow-receipt-root requires an absolute path" >&2; exit 2; }
+            case "$2" in *[[:cntrl:]]*) echo "$SELF: invalid allowed receipt root" >&2; exit 2 ;; esac
+            allow_receipt_roots="${allow_receipt_roots} ${2}"
+            shift 2
+            ;;
         --receipt)
             [ "$#" -ge 2 ] || { echo "$SELF: --receipt requires an absolute path" >&2; exit 2; }
             receipt_path=$2
@@ -414,18 +421,26 @@ trap 'exit 143' HUP TERM
 : >"$manifest_tmp" || exit 1
 if [ -n "$receipt_path" ]; then
     case "$receipt_path" in *[[:cntrl:]]*) echo "$SELF: invalid receipt path" >&2; exit 2 ;; esac
-    # Dedicated bootstrap output roots: the legacy in-repo build/bootstrap and
-    # the centralized worktree storage default (.simple/storage/build/bootstrap,
-    # or an explicit SIMPLE_BOOTSTRAP_BUILD_ROOT). Both are output roots whose
-    # contents are ephemeral build artifacts, never tracked source.
-    bms_dedicated_root="${SIMPLE_BOOTSTRAP_BUILD_ROOT:-${SIMPLE_WORKTREE_STORAGE_ROOT:-$repo_root/.simple/storage}/build/bootstrap}"
-    case "$receipt_path" in
-        "$repo_root/build/bootstrap"/*|/tmp/*|/var/tmp/*) ;;
-        "$bms_dedicated_root"/*) ;;
-        "$repo_root"/*) echo "$SELF: receipt must use the dedicated bootstrap output root" >&2; exit 2 ;;
-        /*) ;;
-        *) echo "$SELF: invalid receipt path" >&2; exit 2 ;;
-    esac
+    # Receipts are evidence: they must live under a dedicated output root,
+    # never at an arbitrary path inside the source tree. The dedicated roots
+    # are the legacy repo-root build/bootstrap output, the system temp dirs,
+    # any absolute path OUTSIDE the repo root, plus caller-authorized output
+    # roots (e.g. the centralized-storage bootstrap output root, which lives
+    # under <repo>/.simple/storage/build/bootstrap on in-repo storage).
+    receipt_allowed=0
+    for allowed_root in "$repo_root/build/bootstrap" /tmp /var/tmp $allow_receipt_roots; do
+        [ -n "$allowed_root" ] || continue
+        case "$receipt_path" in "$allowed_root"/*) receipt_allowed=1; break ;; esac
+    done
+    if [ "$receipt_allowed" -eq 0 ]; then
+        case "$receipt_path" in
+            /*) ;;
+            *) echo "$SELF: invalid receipt path" >&2; exit 2 ;;
+        esac
+        case "$receipt_path" in
+            "$repo_root"/*) echo "$SELF: receipt must use the dedicated bootstrap output root" >&2; exit 2 ;;
+        esac
+    fi
     [ ! -e "$receipt_path" ] && [ ! -L "$receipt_path" ] || {
         echo "$SELF: receipt path already exists: $receipt_path" >&2
         exit 1
