@@ -1,0 +1,307 @@
+# SQLCipher 4 key sessions — locked `sqlcipher4_4k_sha512` KDF pipeline.
+#
+# LANE OWNERSHIP: cipher-b (key derivation and secret sessions), lane 2 of 4 of
+# the pure-Simple SQLCipher 4 codec. Sibling lanes own the page codec, manifest,
+# and registry; this module owns ONLY key derivation, key byte ownership, and
+# session zeroization. Design authority: master plan 2026-10-21 §4.1-§4.4
+# (exact pipeline in §4.3); canonical byte-level source: sqlcipher.c
+# (PBKDF2_ITER 256000, FAST_PBKDF2_ITER 2, HMAC_SALT_MASK 0x3a).
+#
+# CONTRACT
+#   Profile `sqlcipher4_4k_sha512` is LOCKED. The KDF iteration count, key
+#   sizes, salt size, and salt mask are constants in this module, never
+#   parameters. A caller requesting any other value is rejected with
+#   `Sqlcipher4KeyError.CipherProfileMismatch`; the code never adapts,
+#   weakens, or guesses an alternative profile (plan §4.1).
+#
+#   Pipeline (plan §4.3):
+#     page_key  = PBKDF2-HMAC-SHA512(passphrase, file_salt, 256000, 32)
+#     hmac_salt = each file_salt byte XOR 0x3a
+#     hmac_key  = PBKDF2-HMAC-SHA512(page_key, hmac_salt, 2, 32)
+#
+#   KDF engine: PBKDF2-HMAC-SHA512 executes through the seed runtime's
+#   native helper `rt_pbkdf2_hmac_sha512` (RustCrypto `pbkdf2`+`hmac`+`sha2`,
+#   src/compiler_rust/runtime/src/value/pbkdf2_native.rs), which its own
+#   evidence shows byte-exact with the pure-Simple canonical reference
+#   (std.common.crypto.pbkdf2.pbkdf2_sha512_bytes) and with Python
+#   hashlib.pbkdf2_hmac("sha512", ...). The pure-Simple loop remains the
+#   canonical reference; at 256000 iterations it is not viable in seed
+#   interpreter mode (~177 ms per HMAC-SHA512 on this host, i.e. hours per
+#   derivation), which is exactly the cost fact plan §4.4 records for the
+#   compiled native/SMF path. Iteration counts are NEVER reduced for speed,
+#   and no "native is faster" claim is made here; the unit spec measures and
+#   records the actual wall-clock of one open().
+#
+#   Passphrase mode only. Raw-key / key+explicit-salt modes are rejected with
+#   `UnsupportedKeyType` until independently validated fixtures exist
+#   (plan §4.3); passphrases arrive as secret bytes, never SDN/CLI/log text.
+#
+# SECRET HYGIENE
+#   * No function in this module converts key material or passphrases to
+#     `text`; no print/log path exists here. Errors carry only safe profile
+#     diagnostics (see `sqlcipher4_key_error_text`).
+#   * `Sqlcipher4KeySession.close()` zeroizes both key buffers in place
+#     (overwrite every byte with 0, read every byte back to verify), then
+#     releases them by replacing the fields with fresh empty buffers and
+#     marks the session closed.
+#
+#   Documented language/runtime limits (honest, per lane bug filings):
+#     - Zeroization covers the owner-reachable heap buffer only; KDF-engine
+#       temporaries inside the runtime helper are outside Simple reach.
+#     - In the seed interpreter at this base, buffers returned through the
+#       native extern arrive as frozen arrays that Simple cannot wipe or
+#       shrink (index-assign fails; `rt_array_set_len_known` is a no-op
+#       stub). The session therefore stores MUTABLE push-built copies of the
+#       derived keys; the frozen originals are dropped to GC unwiped — the
+#       same residual-copy limit the secure_memory owner documents. See:
+#       doc/08_tracking/bug/secure_memory_u8_zeroize_unregistered_extern_2026-10-22.md
+#       doc/08_tracking/bug/rt_array_set_len_known_interpreter_noop_2026-10-22.md
+#     - The canonical volatile zeroization owner
+#       (std.common.crypto.secure_memory.secure_zero_u8_slots) is unusable
+#       in the seed interpreter at this base (first bug above); this
+#       module's overwrite + readback loop is the portable fallback and
+#       should be re-pointed at the canonical owner once fixed.
+#
+# Error taxonomy (plan §4.5 subset owned by this module):
+#   MissingSecret            — empty passphrase bytes.
+#   UnsupportedKeyType       — raw-key (or any non-passphrase) key type.
+#   CipherProfileMismatch    — any requested profile field (kdf_iter,
+#                              cipher_key_bytes, kdf_salt_bytes) differs
+#                              from the locked constants.
+
+# Native PBKDF2-HMAC-SHA512 runtime helper (interpreter-registered and
+# linkable at this base). Byte-exact with the pure-Simple canonical
+# reference and Python hashlib; see the module contract. No Simple-side
+# wrapper existed at this base, so this lane declares it minimally (lane
+# overlap noted with the future std wrapper for
+# doc/02_requirements/feature/pbkdf2_native_runtime_helpers_2026-05-01.md).
+extern fn rt_pbkdf2_hmac_sha512(password: [u8], salt: [u8], iterations: i64, dk_len: i64) -> [u8]
+
+# ============================================================================
+# Locked profile constants — sqlcipher4_4k_sha512 (plan §4.1). Never mutable.
+# ============================================================================
+
+val SQLCIPHER4_KDF_ITER: i64 = 256000        # sqlcipher.c PBKDF2_ITER
+val SQLCIPHER4_KEY_BYTES: i64 = 32           # AES-256 page key
+val SQLCIPHER4_SALT_BYTES: i64 = 16          # kdf_salt_bytes
+val SQLCIPHER4_HMAC_KDF_ITER: i64 = 2        # sqlcipher.c FAST_PBKDF2_ITER
+val SQLCIPHER4_HMAC_SALT_MASK: i64 = 0x3a    # sqlcipher.c HMAC_SALT_MASK
+val SQLCIPHER4_HMAC_KEY_BYTES: i64 = 32      # HMAC-SHA512 key (64 B MAC out)
+
+# ============================================================================
+# Public types
+# ============================================================================
+
+enum Sqlcipher4KeyType:
+    """How the caller presents secret key material. Only `Passphrase` is
+    supported at this stage; `RawKey` requires independently validated
+    fixtures (plan §4.3) and is rejected with UnsupportedKeyType."""
+    Passphrase
+    RawKey
+
+enum Sqlcipher4KeyError:
+    """Typed key-pipeline errors (plan §4.5). No stringly control flow:
+    callers match on the variant; payloads carry only non-secret profile
+    diagnostics."""
+    MissingSecret
+    UnsupportedKeyType
+    CipherProfileMismatch(field: text, expected: i64, requested: i64)
+
+struct Sqlcipher4KeySession:
+    """Owns the derived 32-byte AES page key and 32-byte HMAC key as owned
+    [u8] buffers for the lifetime of an explicit cipher session (plan §4.2:
+    only these two keys are long-lived within the session).
+
+    Fields are readable by the page-codec lane for byte-level use only;
+    NEVER convert them to text or log them. Always close() the session."""
+    page_key: [u8]
+    hmac_key: [u8]
+    closed: bool
+
+    fn is_open() -> bool:
+        not self.closed
+
+    me close() -> bool:
+        """Deterministic zeroization: overwrite every byte of both key
+        buffers with 0, read every byte back to verify, release both buffers
+        (fields become fresh empty arrays), and mark closed. Returns true
+        iff no non-zero byte remained. See the module contract for the
+        documented runtime limits."""
+        val page_ok = _sqlcipher4_zeroize_u8(self.page_key)
+        val hmac_ok = _sqlcipher4_zeroize_u8(self.hmac_key)
+        self.page_key = []
+        self.hmac_key = []
+        self.closed = true
+        (page_ok and hmac_ok)
+
+# ============================================================================
+# Internal KDF engine and byte helpers
+# ============================================================================
+
+fn _sqlcipher4_pbkdf2_sha512(password: [u8], salt: [u8], iterations: i64,
+                             dk_len: i64) -> [u8]:
+    """PBKDF2-HMAC-SHA512 through the seed runtime native helper. Byte-exact
+    with the pure-Simple canonical reference and hashlib; see module
+    contract. `iterations` and `dk_len` are validated against the locked
+    profile by every public entry point before reaching this engine."""
+    rt_pbkdf2_hmac_sha512(password, salt, iterations, dk_len)
+
+fn _sqlcipher4_mutable_copy(src: [u8]) -> [u8]:
+    """Copy into a fresh push-built [u8] buffer. The session stores mutable
+    copies because native-extern results are frozen arrays in the seed
+    interpreter at this base (cannot be wiped or shrunk); see the module
+    contract and the filed bug docs."""
+    var out: [u8] = []
+    var i: i64 = 0
+    val n = src.len().to_i64()
+    while i < n:
+        out.push(src[i])
+        i = i + 1
+    out
+
+fn _sqlcipher4_zeroize_u8(bytes: [u8]) -> bool:
+    """Overwrite every byte of a [u8] buffer with 0 and read every byte back
+    to verify. Lane-local because the canonical volatile owner
+    (secure_memory.secure_zero_u8_slots) is broken in the seed interpreter
+    at this base — see the module contract and the filed bug docs. The
+    readback loop makes every write observable, which is the strongest
+    portable guarantee Simple offers (same idiom as x25519_mlkem768
+    `_raw_wipe`). Returns true iff no non-zero byte remains."""
+    val n = bytes.len().to_i64()
+    if n == 0:
+        return true
+    var i: i64 = 0
+    while i < n:
+        bytes[i] = 0u8
+        i = i + 1
+    var residual: i64 = 0
+    i = 0
+    while i < n:
+        if bytes[i] != 0u8:
+            residual = residual + 1
+        i = i + 1
+    residual == 0
+
+fn _wipe_secret_bytes(bytes: [u8]):
+    """Best-effort zeroization of a scratch secret buffer (masked salt).
+    Failures cannot be reported through the typed taxonomy, so the verified
+    flag is intentionally dropped here; the session spec asserts the
+    verified path through close()."""
+    _sqlcipher4_zeroize_u8(bytes)
+
+# ============================================================================
+# Salt mask (exported: page codec and tests reuse it)
+# ============================================================================
+
+fn sqlcipher4_hmac_salt_from_file_salt(file_salt16: [u8]) -> Result<[u8], Sqlcipher4KeyError>:
+    """hmac_salt = each file_salt byte XOR 0x3a (sqlcipher.c HMAC_SALT_MASK).
+
+    Strict: the input must be exactly the locked 16-byte file salt; any
+    other length is a CipherProfileMismatch on `kdf_salt_bytes`, never a
+    silent adaptation."""
+    if file_salt16.len().to_i64() != SQLCIPHER4_SALT_BYTES:
+        return Err(Sqlcipher4KeyError.CipherProfileMismatch(
+            field: "kdf_salt_bytes", expected: SQLCIPHER4_SALT_BYTES,
+            requested: file_salt16.len().to_i64()))
+    var out: [u8] = []
+    var i: i64 = 0
+    val n = file_salt16.len().to_i64()
+    while i < n:
+        out.push(file_salt16[i] ^ SQLCIPHER4_HMAC_SALT_MASK.to_u8())
+        i = i + 1
+    Ok(out)
+
+# ============================================================================
+# Session open — the only derivation entry point
+# ============================================================================
+
+fn _sqlcipher4_key_session_open_impl(passphrase_bytes: [u8], file_salt16: [u8],
+                                     requested_kdf_iter: i64,
+                                     requested_key_bytes: i64) -> Result<Sqlcipher4KeySession, Sqlcipher4KeyError>:
+    # 1. Secret presence: a passphrase must carry bytes.
+    if passphrase_bytes.len().to_i64() == 0:
+        return Err(Sqlcipher4KeyError.MissingSecret)
+    # 2. Locked profile: reject, never adapt. Salt length is a profile field.
+    if file_salt16.len().to_i64() != SQLCIPHER4_SALT_BYTES:
+        return Err(Sqlcipher4KeyError.CipherProfileMismatch(
+            field: "kdf_salt_bytes", expected: SQLCIPHER4_SALT_BYTES,
+            requested: file_salt16.len().to_i64()))
+    if requested_kdf_iter != SQLCIPHER4_KDF_ITER:
+        return Err(Sqlcipher4KeyError.CipherProfileMismatch(
+            field: "kdf_iter", expected: SQLCIPHER4_KDF_ITER,
+            requested: requested_kdf_iter))
+    if requested_key_bytes != SQLCIPHER4_KEY_BYTES:
+        return Err(Sqlcipher4KeyError.CipherProfileMismatch(
+            field: "cipher_key_bytes", expected: SQLCIPHER4_KEY_BYTES,
+            requested: requested_key_bytes))
+    # 3. Derivation (plan §4.3 pipeline, constants only). The session owns
+    #    mutable copies; the frozen extern originals are dropped unwiped
+    #    (documented runtime limit — see module contract).
+    val page_key_raw = _sqlcipher4_pbkdf2_sha512(
+        passphrase_bytes, file_salt16, SQLCIPHER4_KDF_ITER, SQLCIPHER4_KEY_BYTES)
+    val hmac_salt = sqlcipher4_hmac_salt_from_file_salt(file_salt16)?
+    val hmac_key_raw = _sqlcipher4_pbkdf2_sha512(
+        page_key_raw, hmac_salt, SQLCIPHER4_HMAC_KDF_ITER, SQLCIPHER4_HMAC_KEY_BYTES)
+    _wipe_secret_bytes(hmac_salt)
+    Ok(Sqlcipher4KeySession(
+        page_key: _sqlcipher4_mutable_copy(page_key_raw),
+        hmac_key: _sqlcipher4_mutable_copy(hmac_key_raw),
+        closed: false))
+
+fn sqlcipher4_key_session_open(passphrase_bytes: [u8], file_salt16: [u8]) -> Result<Sqlcipher4KeySession, Sqlcipher4KeyError>:
+    """Open a key session from passphrase bytes and the 16-byte file salt,
+    at the locked sqlcipher4_4k_sha512 profile. See module contract for the
+    exact pipeline; profile fields are constants, not parameters."""
+    _sqlcipher4_key_session_open_impl(
+        passphrase_bytes, file_salt16, SQLCIPHER4_KDF_ITER, SQLCIPHER4_KEY_BYTES)
+
+fn sqlcipher4_key_session_open_typed(passphrase_bytes: [u8], file_salt16: [u8],
+                                     key_type: Sqlcipher4KeyType) -> Result<Sqlcipher4KeySession, Sqlcipher4KeyError>:
+    """Key-type-selective entry point. `Passphrase` derives; `RawKey` is
+    rejected with UnsupportedKeyType until independently validated fixtures
+    exist (plan §4.3)."""
+    match key_type:
+        Sqlcipher4KeyType.Passphrase:
+            _sqlcipher4_key_session_open_impl(
+                passphrase_bytes, file_salt16,
+                SQLCIPHER4_KDF_ITER, SQLCIPHER4_KEY_BYTES)
+        Sqlcipher4KeyType.RawKey:
+            Err(Sqlcipher4KeyError.UnsupportedKeyType)
+
+fn sqlcipher4_key_session_open_profile(passphrase_bytes: [u8], file_salt16: [u8],
+                                       requested_kdf_iter: i64,
+                                       requested_key_bytes: i64) -> Result<Sqlcipher4KeySession, Sqlcipher4KeyError>:
+    """Explicit-profile entry point for callers that carry their own profile
+    request (e.g. an on-disk header declaring its KDF parameters). Any value
+    other than the locked constants is rejected with CipherProfileMismatch —
+    the pipeline never silently adapts to a wrong-profile request."""
+    _sqlcipher4_key_session_open_impl(
+        passphrase_bytes, file_salt16, requested_kdf_iter, requested_key_bytes)
+
+# ============================================================================
+# Safe error rendering (diagnostics only — never carries secret bytes)
+# ============================================================================
+
+fn sqlcipher4_key_error_text(err: Sqlcipher4KeyError) -> text:
+    """Stable, safe structured error code for diagnostics/logging (plan §4.5:
+    log a safe structured error code). Contains no key, passphrase, or salt
+    material — only the variant name and non-secret profile numbers."""
+    match err:
+        Sqlcipher4KeyError.MissingSecret:
+            "missing_secret"
+        Sqlcipher4KeyError.UnsupportedKeyType:
+            "unsupported_key_type"
+        Sqlcipher4KeyError.CipherProfileMismatch(field, expected, requested):
+            "cipher_profile_mismatch:{field}:{expected}:{requested}"
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export Sqlcipher4KeySession, Sqlcipher4KeyError, Sqlcipher4KeyType
+export sqlcipher4_key_session_open, sqlcipher4_key_session_open_typed
+export sqlcipher4_key_session_open_profile
+export sqlcipher4_hmac_salt_from_file_salt, sqlcipher4_key_error_text
+export SQLCIPHER4_KDF_ITER, SQLCIPHER4_KEY_BYTES, SQLCIPHER4_SALT_BYTES
+export SQLCIPHER4_HMAC_KDF_ITER, SQLCIPHER4_HMAC_SALT_MASK
+export SQLCIPHER4_HMAC_KEY_BYTES
