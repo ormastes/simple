@@ -208,3 +208,27 @@ had no rerun-if-changed row and edits to it silently never rebuilt).
 If the zero-sources symptom still reproduces after this stack, the next
 suspects are the ones named below; otherwise this doc's OPEN status can move
 to FIXED pending the full sanity PASS receipt.
+
+## Update 2026-10-22 (Windows lane): STILL REPRODUCES after the two-arg fix
+
+Lane attempt 9 on this host rebuilt the Rust seed and Stage-2 candidate on
+`848d89ed504` (5eccf04d3f0 + companions integrated, caches invalidated) and
+the pinned sanity failed with the BYTE-IDENTICAL error:
+
+- Stage-2 compile: `rebuilt 1485`, 0 failed.
+- Sanity: `compiler entry 'src/compiler/bootstrap_admission/p2_add.spl'
+  collected zero source files` (both passes), rejected binary preserved at
+  `.simple/storage/build/bootstrap/stage2/x86_64-pc-windows-msvc/simple.exe.rejected`.
+- 5-second repro against that fresh rejected binary reproduces identically.
+
+So on the Windows self-hosted native path the two-arg ABI restore did NOT
+make the candidate's driver collect the entry, contrary to the Linux-lane
+evidence ("load_sources succeeds, parse phase reached"). Either a second
+operand-shape defect remains on this path (the cdb findings above still
+hold: the entry open never reaches `NtCreateFile`; `ucrtbase!_open` fired
+once with `rcx = -1`), or the Windows candidate build did not actually pick
+up the restored declaration (the 7265bfe0a11 build.rs watch fix was in this
+rebuild, so the runtime C did recompile). Next diagnostic: the `print`-based
+`io_file_open` guard dump (eprint is inert in the core-c candidate) to see
+the exact operands on this path, then compare the emitted call shape against
+`text_extern_abi.spl`'s table for the current seed producer.
