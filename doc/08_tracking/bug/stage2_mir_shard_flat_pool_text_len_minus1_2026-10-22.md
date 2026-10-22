@@ -73,3 +73,81 @@ env SIMPLE_HIR_SHARDING=0 SIMPLE_LIB=$PWD/src SIMPLE_BOOTSTRAP= SIMPLE_FRONTEND_
   (`dir_create_all=true`) appears in the same window; modules reparse.
   Looks like a benign tmp-dir IO race, noted separately from this defect.
 - Not yet verified on: any tree after a868480a973.
+
+## Update 1 (2026-10-22, same day) — exact-env repro, io-write side-channel, policy-gate datapoint
+
+### Exact-environment repro (9 seconds, reproduces the crash)
+
+The generic repro in the section above does NOT reproduce this crash — it
+takes a different path and dies earlier at a policy gate (see below). The
+gate's delegated environment is required:
+
+```
+CAND=$PWD/.simple/storage/build/bootstrap/stage2/x86_64-pc-windows-msvc/simple.exe.rejected
+env SIMPLE_BINARY="$CAND" SIMPLE_BIN="$CAND" SIMPLE_BOOTSTRAP_DRIVER="$CAND" \
+    SIMPLE_FRONTEND_DELEGATE="$CAND" SIMPLE_FRONTEND_DELEGATED=1 \
+    SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NATIVE_BUILD_FORCE_WORKER=0 \
+    SIMPLE_BOOTSTRAP=0 SIMPLE_LIB=$PWD/src \
+    "$CAND" native-build --backend llvm --runtime-bundle core-c-bootstrap \
+    --entry-closure --entry src/compiler/bootstrap_admission/p2_add.spl \
+    --cache-dir <fresh-temp>/cache --mode one-binary --output <out>
+```
+
+With this env the full crash chain reproduces in ~9s: flat-pool panic,
+mir-shard worker 0xC00000FD, fallback 0xC0000409. (SIMPLE_HIR_SHARDING=0 in
+the original repro also matters: without delegation the build reaches MIR
+through a different route.)
+
+### Side-channel: every hir-cache store fails io-write (both processes)
+
+Immediately before the panic, the DRIVER logs:
+
+```
+[hir-cache] hits=0 misses=1 stores=0 refused=0 io_failed=1 reason=io-write dir=<home>/.cache/simple/v1/projects/7dcf…/native-build/v1/default/hir ... selfchecked=1 selfcheck_failed=0 store_failures=1
+```
+
+- The encode + selfcheck SUCCEED (artifact bytes valid); only the FILE WRITE
+  fails (`rt_file_write_text` at driver_hir_cache.spl:478).
+- The directory tree is created successfully all the way down (verified on a
+  fresh HOME); the file write itself is rejected.
+- Reproduces on any cache root (user cache, fresh temp HOME, lane
+  stage2-home), so it is not stale-dir state or permissions.
+- All candidate writes route through the SECURITY runtime
+  (src/compiler_rust/runtime/src/security_runtime.rs: rt_file_write_text is
+  policy-gated; `registry().is_allowed(...)` / LAST_POLICY_ALLOWED). Next
+  probe: whether the sandbox write policy's allowlist excludes these cache
+  roots; a deny would explain the universal io-write.
+- The store failure is designed non-fatal ("a cache that cannot store is a
+  slow build, not a wrong one"), and the mir worker then runs in
+  `hir-recovery` mode (ledger dir `hir-recovery/mir-queue-*`). The invalid
+  text appears in a recovery-mode artifact encode — the two failures are
+  likely causally linked (recovery path encodes a text it does not own).
+
+### Datapoint: non-delegated env fails EARLIER at a policy gate
+
+Without the delegate env (plain `SIMPLE_HIR_SHARDING=0` repro), the build
+dies at:
+
+```
+[ERROR] MIR error: MIR final repository policy or emission schedule differs
+```
+
+i.e. `lower_archived_to_mir_v1` (driver_pipeline_lowering.spl:612-615):
+archived `MonoArchiveFinalRepositoryV1` has force_all_sources /
+allow_bootstrap_shortcuts / bootstrap_mode / empty emission_rows mismatching
+the caller's expectation. With SIMPLE_BOOTSTRAP=0 the archived
+`bootstrap_mode == "1"` arm matches; whether that is intended admission
+policy or part of the same regression needs the archived repository's
+provenance.
+
+### Next probes (ordered)
+
+1. Security-runtime write policy: log the deny decision for
+   `rt_file_write_text` (or inspect the allowlist) — confirms/refutes the
+   io-write root cause.
+2. Print-marker the recovery-mode artifact encode in the mir shard worker:
+   which record's first text field is encoded, and its provenance (scope
+   owner).
+3. If (1) confirms a policy deny: fix the allowlist (or route hir-cache
+   under the admitted cache root), then re-run the 9s repro to see whether
+   the invalid-text panic disappears with the recovery path.
