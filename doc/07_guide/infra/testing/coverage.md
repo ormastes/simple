@@ -236,7 +236,7 @@ bin/simple test --sdoctest
 
 **1. Public API Documentation** -- Docstrings for public functions, classes, structs, enums:
 
-```simple
+```text
 fn parse_config(path: text) -> Config:
     """
     Parse configuration file and return Config struct.
@@ -253,13 +253,13 @@ fn parse_config(path: text) -> Config:
 
 **2. SDoctest Examples** -- Executable code examples in docstrings:
 
-```simple
+```text
 fn factorial(n: i64) -> i64:
     """
     Compute factorial of n.
 
     Examples:
-        ```simple
+        ```text
         val result = factorial(5)
         expect(result).to_equal(120)
         ```
@@ -274,7 +274,7 @@ fn factorial(n: i64) -> i64:
 
 **4. Group Comments** -- Related variables grouped with a comment header:
 
-```simple
+```text
 # Parser state tracking
 var current_token: Token = nil
 var peek_token: Token = nil
@@ -330,7 +330,7 @@ Configure in `doc_coverage.sdn`:
 
 ### Grouped Example
 
-```simple
+```text
 # File operations
 #   - file_read
 #   - file_write
@@ -339,7 +339,7 @@ Configure in `doc_coverage.sdn`:
 
 One example covering any function in the group satisfies coverage:
 
-```simple
+```text
 use std.io.{file_read}
 val content = file_read("example.txt")
 print content
@@ -347,7 +347,7 @@ print content
 
 ### Non-grouped Example
 
-```simple
+```text
 # Public API:
 #   - sqrt
 #   - pow
@@ -419,7 +419,7 @@ cargo test
 
 Get coverage data BEFORE clearing:
 
-```simple
+```text
 val sdn = coverage.get_coverage_sdn()  # Has data
 coverage.clear_coverage()              # Now clear
 ```
@@ -430,7 +430,7 @@ coverage.clear_coverage()              # Now clear
 - Must use `"""` triple-quotes
 - No blank lines between declaration and docstring
 
-```simple
+```text
 # Wrong:
 fn my_function():
 
@@ -445,10 +445,10 @@ fn my_function():
 
 Must use proper fence syntax with `simple` language tag:
 
-```simple
+```text
 """
 Examples:
-    ```simple
+    ```text
     val result = my_function(5)
     expect(result).to_equal(10)
     ```

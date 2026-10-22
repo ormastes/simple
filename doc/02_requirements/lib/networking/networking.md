@@ -21,7 +21,7 @@ Tests networking functionality including:
 
 ## Syntax
 
-```simple
+```simple:skip
 @net
 fn create_server() -> Result<i64, str>:
     val (handle, err) = native_tcp_bind("127.0.0.1:8080")

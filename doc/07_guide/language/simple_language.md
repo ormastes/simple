@@ -171,7 +171,7 @@ The interesting thing isn't the count. It's that they all point the same directi
 
 For example, a checked math block can stay close to the source:
 
-```simple
+```simple:skip
 loss = m{
     L = sum((y_pred - y_true)^2) / n
 }

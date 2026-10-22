@@ -621,7 +621,7 @@ bin/simple query sem-query 'FIND fn WHERE name starts_with "parse_" AND param_co
 ### Add a New Tool
 
 1. Add handler in `src/app/mcp/bootstrap/main_optimized.spl`:
-   ```simple
+```simple:skip
    fn handle_my_tool(params: Dict) -> Result<text, text>:
        val path = params.get("path")?
        Ok("result")

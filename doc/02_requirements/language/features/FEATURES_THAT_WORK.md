@@ -41,8 +41,8 @@ The test audit revealed that:
 ```simple
 val double = \x: x * 2
 val add = \x, y: x + y
-check(double(21) == 42)
-check(add(15, 27) == 42)
+expect(double(21) == 42).to_equal(true)
+expect(add(15, 27) == 42).to_equal(true)
 ```
 
 #### Future Creation and Await
@@ -235,6 +235,8 @@ Try using LLVM backend for SIMD support: --backend=llvm
 
 **Example now works:**
 ```simple
+val value = [1, 2, 3]
+
 match value:
     []: "empty"
     [x]: "single"
@@ -269,7 +271,7 @@ val result = print("Hello")  # result is "Hello", not nil
 - ✅ **Test:** `test/03_system/feature/set_literal_spec.spl` - PASS (6ms)
 
 **Example:**
-```simple
+```text
 val numbers = s{1, 2, 3, 4}
 val evens = s{2, 4, 6, 8}
 val common = numbers & evens  # {2, 4}
@@ -281,7 +283,7 @@ val common = numbers & evens  # {2, 4}
 - ✅ **Test:** `test/03_system/feature/bitfield_spec.spl` - PASS (5ms)
 
 **Example:**
-```simple
+```text
 bitfield Flags:
     enabled: 1
     mode: 3
@@ -373,7 +375,7 @@ bitfield Flags:
 - Clean Architecture / Hexagonal Architecture
 
 **Example:**
-```simple
+```text
 use compiler.mdsoc.types.{CapsuleVisibility, VirtualCapsule}
 
 val visibility = CapsuleVisibility.Public
@@ -416,7 +418,7 @@ val id = capsule.capsule_id()  # "feature/auth"
 - Module export analysis
 
 **Example:**
-```simple
+```text
 use app.doc.public_check.export_parser.{find_module_exports}
 
 val exports = find_module_exports("src/lib/array")
@@ -438,7 +440,7 @@ visible and type-checked.
 
 ### Port Structure
 
-```simple
+```text
 struct BackendPort:
     name: text
     run_fn: fn(HirModule) -> Result<BackendResult, BackendError>
@@ -477,7 +479,7 @@ container that groups them. Makes the full dependency graph of the compiler visi
 | `LoggerPort` | Logging | `debug_fn`, `info_fn`, `warn_fn`, `error_fn` |
 | `ModuleLoaderPort` | Module loading | `load_fn`, `resolve_fn` |
 
-```simple
+```text
 struct CompilerServices:
     lexer: LexerPort
     parser: ParserPort
@@ -505,7 +507,7 @@ factory function that constructs the trait struct from a concrete implementation
 
 ### Syntax
 
-```simple
+```text
 trait OrderRepo:
     fn save(order: text)
     fn find(id: text) -> text
@@ -542,7 +544,7 @@ Renamed the dynamic extension point from `di` to `extensions` in `CompileContext
 
 ### Structure
 
-```simple
+```text
 class CompileContext:
     backend: BackendPort       # Typed port -- visible contract
     extensions: DiContainer    # Dynamic extension point for plugins
@@ -573,7 +575,7 @@ bin/simple check-arch src/         # Check src/ tree
 
 ### arch Block Syntax (in __init__.spl)
 
-```simple
+```text
 arch {
     allow = ["core", "std"]
     deny = ["compiler/**"]

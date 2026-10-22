@@ -41,6 +41,14 @@ Pure function tests with no external dependencies:
 - `server_spec.spl` - LLM server/daemon
 - `types_spec.spl` - Type definitions
 
+Response field checks are deterministic when run against a recorded payload:
+
+```sdoctest
+>>> val raw = "{\"model\": \"claude-opus-4-6\", \"session_id\": \"sess_1\"}"
+>>> raw.contains("sess_1")
+true
+```
+
 ## Running Tests
 
 ### Full Live Integration Suite
@@ -165,7 +173,7 @@ See test session logs for details.
 
 ### CliResponse
 
-```simple
+```text
 struct CliResponse:
     content: text              # Model output
     model: text                # Model name (e.g., "claude-opus-4-6")
@@ -180,7 +188,7 @@ struct CliResponse:
 
 ### API Usage
 
-```simple
+```text
 # Initialize
 use app.llm_caret.mod.{llm_init_defaults, llm_chat, llm_clear}
 llm_init_defaults()

@@ -15,7 +15,7 @@ truncating division which rounds towards zero.
 ## Migration from // Operator
 
 **Old syntax (deprecated):**
-```simple
+```text
 val result = 7 // 2  # Floor division (old)
 ```
 

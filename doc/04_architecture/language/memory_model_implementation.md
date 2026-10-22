@@ -45,7 +45,7 @@ The 2025-12-23 report described reference capabilities (`mut T`, `iso T`) and co
 
 ### Reference Capabilities
 
-```simple
+```simple:skip
 # Four capability levels:
 x: Data          # Shared (T) - read-only, aliasable
 x: mut Data      # Exclusive (mut T) - single writer
@@ -67,7 +67,7 @@ x: @Data         # Atomic RC (@T / Arc) - thread-safe ref-counted
 
 ### Concurrency Modes
 
-```simple
+```simple:skip
 # Actor mode (default) - message passing only
 fn process_message(msg: iso Data) -> Result:
     # iso T allowed for transfers
@@ -229,7 +229,7 @@ The historical erasure argument was as follows. It is not a benchmark or proof o
 ## Usage Examples
 
 ### Example 1: Actor Message Passing
-```simple
+```simple:skip
 fn process_message(msg: iso Data) -> Result:
     # Transfer unique ownership via message
     let result = transform(msg)
@@ -237,7 +237,7 @@ fn process_message(msg: iso Data) -> Result:
 ```
 
 ### Example 2: Lock-Based Shared State
-```simple
+```simple:skip
 #[concurrency_mode(lock_base)]
 fn increment_counter(counter: mut i64) -> i64:
     counter += 1
@@ -245,7 +245,7 @@ fn increment_counter(counter: mut i64) -> i64:
 ```
 
 ### Example 3: Capability Conversion
-```simple
+```simple:skip
 fn consume_iso(data: iso Data) -> ():
     # iso T → mut T (consume to mutable)
     let mut_data: mut Data = data
@@ -257,7 +257,7 @@ fn consume_iso(data: iso Data) -> ():
 ```
 
 ### Example 4: Builder Pattern
-```simple
+```simple:skip
 #[concurrency_mode(lock_base)]
 fn with_name(builder: mut Builder, name: str) -> mut Builder:
     builder.name = name

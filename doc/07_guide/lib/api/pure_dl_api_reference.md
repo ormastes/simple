@@ -16,13 +16,13 @@ Complete API documentation for Pure Simple Deep Learning library.
 
 ## Core Tensor API
 
-### Module: `lib.pure.tensor`
+### Module: `std.pure.tensor`
 
 Core tensor implementation with flat array storage.
 
 #### PureTensor<T>
 
-```simple
+```simple:skip
 class PureTensor<T>:
     data: [T]           # Flat array storage
     shape: [i64]        # Dimensions [batch, height, width, ...]
@@ -31,7 +31,7 @@ class PureTensor<T>:
 
 **Factory Methods:**
 
-```simple
+```simple:skip
 static fn zeros(shape: [i64]) -> PureTensor<f64>
 ```
 Create tensor filled with zeros.
@@ -42,13 +42,13 @@ Create tensor filled with zeros.
 **Returns:** Tensor with all elements = 0.0
 
 **Example:**
-```simple
+```simple:skip
 val t = PureTensor.zeros([2, 3])  # 2×3 matrix of zeros
 ```
 
 ---
 
-```simple
+```simple:skip
 static fn ones(shape: [i64]) -> PureTensor<f64>
 ```
 Create tensor filled with ones.
@@ -59,13 +59,13 @@ Create tensor filled with ones.
 **Returns:** Tensor with all elements = 1.0
 
 **Example:**
-```simple
+```simple:skip
 val t = PureTensor.ones([3, 3])  # 3×3 identity-ready matrix
 ```
 
 ---
 
-```simple
+```simple:skip
 static fn from_data(data: [T], shape: [i64]) -> PureTensor<T>
 ```
 Create tensor from existing data array.
@@ -77,7 +77,7 @@ Create tensor from existing data array.
 **Returns:** Tensor wrapping the data
 
 **Example:**
-```simple
+```simple:skip
 val t = PureTensor.from_data([1.0, 2.0, 3.0, 4.0], [2, 2])
 # [[1.0, 2.0],
 #  [3.0, 4.0]]
@@ -85,7 +85,7 @@ val t = PureTensor.from_data([1.0, 2.0, 3.0, 4.0], [2, 2])
 
 ---
 
-```simple
+```simple:skip
 static fn randn(shape: [i64]) -> PureTensor<f64>
 ```
 Create tensor with random normal distribution N(0, 1).
@@ -96,13 +96,13 @@ Create tensor with random normal distribution N(0, 1).
 **Returns:** Tensor with random values (mean=0, std=1)
 
 **Example:**
-```simple
+```simple:skip
 val weights = PureTensor.randn([256, 784])  # Random weight init
 ```
 
 **Instance Methods:**
 
-```simple
+```simple:skip
 fn get(indices: [i64]) -> T
 ```
 Get element at multi-dimensional index.
@@ -113,14 +113,14 @@ Get element at multi-dimensional index.
 **Returns:** Element at that position
 
 **Example:**
-```simple
+```simple:skip
 val t = PureTensor.from_data([1, 2, 3, 4], [2, 2])
 val x = t.get([0, 1])  # 2 (first row, second column)
 ```
 
 ---
 
-```simple
+```simple:skip
 me set(indices: [i64], value: T)
 ```
 Set element at multi-dimensional index.
@@ -130,14 +130,14 @@ Set element at multi-dimensional index.
 - `value`: New value
 
 **Example:**
-```simple
+```simple:skip
 var t = PureTensor.zeros([2, 2])
 t.set([1, 1], 5.0)  # Bottom-right = 5.0
 ```
 
 ---
 
-```simple
+```simple:skip
 fn numel() -> i64
 ```
 Total number of elements (product of shape dimensions).
@@ -145,14 +145,14 @@ Total number of elements (product of shape dimensions).
 **Returns:** Total element count
 
 **Example:**
-```simple
+```simple:skip
 val t = PureTensor.zeros([2, 3, 4])
 val count = t.numel()  # 24 (2 * 3 * 4)
 ```
 
 ---
 
-```simple
+```simple:skip
 fn reshape(new_shape: [i64]) -> PureTensor<T>
 ```
 Create view with different shape (must have same numel).
@@ -163,7 +163,7 @@ Create view with different shape (must have same numel).
 **Returns:** Reshaped tensor (shares data)
 
 **Example:**
-```simple
+```simple:skip
 val t = PureTensor.randn([6])
 val matrix = t.reshape([2, 3])  # Convert vector to 2×3 matrix
 ```
@@ -172,13 +172,13 @@ val matrix = t.reshape([2, 3])  # Convert vector to 2×3 matrix
 
 ## Tensor Operations
 
-### Module: `lib.pure.tensor_ops`
+### Module: `std.pure.tensor_ops`
 
 Pure Simple implementations of tensor operations.
 
 #### Element-wise Operations
 
-```simple
+```simple:skip
 fn add(a: PureTensor<f64>, b: PureTensor<f64>) -> PureTensor<f64>
 ```
 Element-wise addition: `result[i] = a[i] + b[i]`
@@ -186,7 +186,7 @@ Element-wise addition: `result[i] = a[i] + b[i]`
 **Broadcasting:** Supported (smaller tensor broadcast to larger)
 
 **Example:**
-```simple
+```simple:skip
 val a = PureTensor.ones([2, 3])
 val b = PureTensor.ones([2, 3])
 val c = add(a, b)  # All elements = 2.0
@@ -194,7 +194,7 @@ val c = add(a, b)  # All elements = 2.0
 
 ---
 
-```simple
+```simple:skip
 fn sub(a: PureTensor<f64>, b: PureTensor<f64>) -> PureTensor<f64>
 fn mul(a: PureTensor<f64>, b: PureTensor<f64>) -> PureTensor<f64>
 fn div(a: PureTensor<f64>, b: PureTensor<f64>) -> PureTensor<f64>
@@ -203,7 +203,7 @@ Element-wise subtraction, multiplication, division.
 
 ---
 
-```simple
+```simple:skip
 fn neg(x: PureTensor<f64>) -> PureTensor<f64>
 ```
 Negate all elements: `result[i] = -x[i]`
@@ -212,7 +212,7 @@ Negate all elements: `result[i] = -x[i]`
 
 #### Matrix Operations
 
-```simple
+```simple:skip
 fn matmul(a: PureTensor<f64>, b: PureTensor<f64>) -> PureTensor<f64>
 ```
 Matrix multiplication: `C = A @ B`
@@ -230,7 +230,7 @@ Matrix multiplication: `C = A @ B`
 - 1000×1000: ~40sec
 
 **Example:**
-```simple
+```simple:skip
 val A = PureTensor.randn([10, 20])  # 10×20 matrix
 val B = PureTensor.randn([20, 5])   # 20×5 matrix
 val C = matmul(A, B)                # 10×5 result
@@ -238,7 +238,7 @@ val C = matmul(A, B)                # 10×5 result
 
 ---
 
-```simple
+```simple:skip
 fn transpose(x: PureTensor<f64>) -> PureTensor<f64>
 ```
 Transpose 2D matrix (swap rows ↔ columns).
@@ -246,7 +246,7 @@ Transpose 2D matrix (swap rows ↔ columns).
 **Requirements:** 2D tensor only
 
 **Example:**
-```simple
+```simple:skip
 val A = PureTensor.from_data([1, 2, 3, 4], [2, 2])
 # [[1, 2],
 #  [3, 4]]
@@ -260,20 +260,20 @@ val AT = transpose(A)
 
 #### Reduction Operations
 
-```simple
+```simple:skip
 fn sum(x: PureTensor<f64>) -> f64
 ```
 Sum all elements.
 
 **Example:**
-```simple
+```simple:skip
 val t = PureTensor.from_data([1, 2, 3, 4], [2, 2])
 val total = sum(t)  # 10.0
 ```
 
 ---
 
-```simple
+```simple:skip
 fn mean(x: PureTensor<f64>) -> f64
 fn max(x: PureTensor<f64>) -> f64
 fn min(x: PureTensor<f64>) -> f64
@@ -284,20 +284,20 @@ Mean, maximum, minimum of all elements.
 
 #### Activation Functions
 
-```simple
+```simple:skip
 fn relu(x: PureTensor<f64>) -> PureTensor<f64>
 ```
 Rectified Linear Unit: `max(0, x)`
 
 **Example:**
-```simple
+```simple:skip
 val x = PureTensor.from_data([-1, 0, 1, 2], [2, 2])
 val activated = relu(x)  # [0, 0, 1, 2]
 ```
 
 ---
 
-```simple
+```simple:skip
 fn sigmoid(x: PureTensor<f64>) -> PureTensor<f64>
 ```
 Sigmoid activation: `1 / (1 + exp(-x))`
@@ -305,14 +305,14 @@ Sigmoid activation: `1 / (1 + exp(-x))`
 **Range:** (0, 1)
 
 **Example:**
-```simple
+```simple:skip
 val logits = PureTensor.randn([10, 1])
 val probs = sigmoid(logits)  # Probabilities in (0, 1)
 ```
 
 ---
 
-```simple
+```simple:skip
 fn tanh(x: PureTensor<f64>) -> PureTensor<f64>
 ```
 Hyperbolic tangent: `tanh(x)`
@@ -321,7 +321,7 @@ Hyperbolic tangent: `tanh(x)`
 
 ---
 
-```simple
+```simple:skip
 fn softmax(x: PureTensor<f64>, dim: i64) -> PureTensor<f64>
 ```
 Softmax activation along dimension.
@@ -331,7 +331,7 @@ Softmax activation along dimension.
 **Use case:** Multi-class classification
 
 **Example:**
-```simple
+```simple:skip
 val logits = PureTensor.randn([10, 3])  # 10 samples, 3 classes
 val probs = softmax(logits, dim: 1)    # Probabilities per class
 # Each row sums to 1.0
@@ -341,13 +341,13 @@ val probs = softmax(logits, dim: 1)    # Probabilities per class
 
 ## Neural Network Layers
 
-### Module: `lib.pure.nn`
+### Module: `std.pure.nn`
 
 Neural network building blocks.
 
 #### Linear Layer
 
-```simple
+```simple:skip
 class Linear:
     weights: PureTensor<f64>    # [out_features, in_features]
     bias: PureTensor<f64>?      # [out_features] (optional)
@@ -356,7 +356,7 @@ class Linear:
 ```
 
 **Constructor:**
-```simple
+```simple:skip
 static fn create(in_features: i64, out_features: i64, bias: bool = true) -> Linear
 ```
 
@@ -368,13 +368,13 @@ Creates fully-connected layer with Xavier initialization.
 - `bias`: Include bias term (default: true)
 
 **Example:**
-```simple
+```simple:skip
 val fc1 = Linear.create(784, 256)  # MNIST hidden layer
 val fc2 = Linear.create(256, 10)   # Output layer (10 classes)
 ```
 
 **Forward Pass:**
-```simple
+```simple:skip
 fn forward(x: PureTensor<f64>) -> PureTensor<f64>
 ```
 
@@ -386,7 +386,7 @@ Computes: `y = xW^T + b`
 **Returns:** Output tensor `[batch_size, out_features]`
 
 **Example:**
-```simple
+```simple:skip
 val layer = Linear.create(784, 256)
 val x = PureTensor.randn([32, 784])  # Batch of 32 samples
 val y = layer.forward(x)              # [32, 256] output
@@ -396,7 +396,7 @@ val y = layer.forward(x)              # [32, 256] output
 
 #### Activation Layers
 
-```simple
+```simple:skip
 class ReLU:
     fn forward(x: PureTensor<f64>) -> PureTensor<f64>
 ```
@@ -404,7 +404,7 @@ class ReLU:
 Applies ReLU activation element-wise.
 
 **Example:**
-```simple
+```simple:skip
 val relu = ReLU()
 val x = PureTensor.from_data([-1, 0, 1, 2], [2, 2])
 val y = relu.forward(x)  # [0, 0, 1, 2]
@@ -412,7 +412,7 @@ val y = relu.forward(x)  # [0, 0, 1, 2]
 
 ---
 
-```simple
+```simple:skip
 class Sigmoid:
     fn forward(x: PureTensor<f64>) -> PureTensor<f64>
 
@@ -426,7 +426,7 @@ Sigmoid and tanh activation layers.
 
 #### Sequential Container
 
-```simple
+```simple:skip
 class Sequential:
     layers: [Layer]
 
@@ -437,7 +437,7 @@ class Sequential:
 Chains multiple layers sequentially.
 
 **Example:**
-```simple
+```simple:skip
 val model = Sequential(layers: [
     Linear.create(784, 256),
     ReLU(),
@@ -454,13 +454,13 @@ val output = model.forward(x)  # [32, 10] logits
 
 ## Training Utilities
 
-### Module: `lib.pure.training`
+### Module: `std.pure.training`
 
 Loss functions and training infrastructure.
 
 #### Loss Functions
 
-```simple
+```simple:skip
 fn mse_loss(predictions: PureTensor<f64>, targets: PureTensor<f64>) -> f64
 ```
 
@@ -469,7 +469,7 @@ Mean Squared Error loss: `mean((predictions - targets)^2)`
 **Use case:** Regression problems
 
 **Example:**
-```simple
+```simple:skip
 val pred = model.forward(x)
 val loss = mse_loss(pred, y_true)
 print "Loss: {loss}"
@@ -477,7 +477,7 @@ print "Loss: {loss}"
 
 ---
 
-```simple
+```simple:skip
 fn mae_loss(predictions: PureTensor<f64>, targets: PureTensor<f64>) -> f64
 ```
 
@@ -487,7 +487,7 @@ Mean Absolute Error loss: `mean(abs(predictions - targets))`
 
 #### LinearModel
 
-```simple
+```simple:skip
 class LinearModel:
     weights: PureTensor<f64>
     bias: f64
@@ -499,7 +499,7 @@ class LinearModel:
 Simple linear regression model with gradient descent.
 
 **Example:**
-```simple
+```simple:skip
 val model = LinearModel.create(n_features: 5)
 model.fit(X_train, y_train, lr: 0.01, epochs: 100)
 val predictions = model.predict(X_test)
@@ -509,13 +509,13 @@ val predictions = model.predict(X_test)
 
 ## Acceleration Layer
 
-### Module: `lib.pure.accel`
+### Module: `std.pure.accel`
 
 Configures Pure Simple vs FFI acceleration.
 
 #### Acceleration Modes
 
-```simple
+```simple:skip
 enum AccelMode:
     PureSimple      # Never use FFI (pure Simple only)
     PyTorchFFI      # Always use FFI if available
@@ -524,7 +524,7 @@ enum AccelMode:
 
 #### Configuration Functions
 
-```simple
+```simple:skip
 fn set_acceleration(mode: AccelMode)
 ```
 
@@ -532,7 +532,7 @@ Set global acceleration mode.
 
 **Example:**
 ```simple
-use lib.pure.accel (set_acceleration, AccelMode)
+use std.pure.accel (set_acceleration, AccelMode)
 
 set_acceleration(AccelMode.Auto)  # Smart selection (recommended)
 ```
@@ -598,7 +598,7 @@ Decides whether to use FFI for a given operation.
    - Else: return false
 
 **Example:**
-```simple
+```simple:skip
 val a = PureTensor.randn([1000, 1000])  # 1M elements
 val b = PureTensor.randn([1000, 1000])
 
@@ -623,7 +623,7 @@ fn get_stats() -> AccelStats
 Get acceleration statistics.
 
 **Example:**
-```simple
+```simple:skip
 val stats = get_stats()
 print "Pure: {stats.pure_count}, FFI: {stats.ffi_count}, Fallbacks: {stats.fallback_count}"
 ```
@@ -640,7 +640,7 @@ Reset statistics counters to zero.
 
 ## PyTorch FFI
 
-### Module: `lib.pure.torch_ffi`
+### Module: `std.pure.torch_ffi`
 
 PyTorch FFI wrapper functions (two-tier pattern).
 
@@ -655,7 +655,7 @@ Check if PyTorch FFI library is loaded.
 **Returns:** true if FFI available, false otherwise
 
 **Example:**
-```simple
+```simple:skip
 if torch_available():
     print "✅ PyTorch FFI enabled"
     set_acceleration(AccelMode.Auto)
@@ -713,7 +713,7 @@ Matrix multiplication via PyTorch FFI.
 **Automatically manages memory** (frees all handles).
 
 **Example:**
-```simple
+```simple:skip
 val a = PureTensor.randn([1000, 1000])
 val b = PureTensor.randn([1000, 1000])
 val c = matmul_torch_ffi(a, b)  # ~50ms (vs ~40sec in pure Simple)
@@ -748,7 +748,7 @@ extern fn rt_torch_free(handle: i64)
 
 ## Data Utilities
 
-### Module: `lib.pure.data`
+### Module: `std.pure.data`
 
 Data preprocessing utilities.
 
@@ -763,7 +763,7 @@ Normalize data to [0, 1] range.
 **Formula:** `(x - min) / (max - min)`
 
 **Example:**
-```simple
+```simple:skip
 val pixels = PureTensor.from_data([0, 127, 255], [3])
 val normalized = normalize(pixels, min_val: 0.0, max_val: 255.0)
 # [0.0, 0.498, 1.0]
@@ -780,7 +780,7 @@ Standardize data to mean=0, std=1.
 **Formula:** `(x - mean) / std`
 
 **Example:**
-```simple
+```simple:skip
 val features = PureTensor.randn([100, 10])
 val standardized = standardize(features)
 val new_mean = mean(standardized)  # ~0.0
@@ -790,14 +790,14 @@ val new_mean = mean(standardized)  # ~0.0
 
 ## Complete Example
 
-```simple
-use lib.pure.tensor (PureTensor)
-use lib.pure.tensor_ops (matmul, add, relu)
-use lib.pure.nn (Linear, ReLU, Sequential)
-use lib.pure.training (mse_loss, LinearModel)
-use lib.pure.accel (set_acceleration, AccelMode, get_stats)
-use lib.pure.torch_ffi (torch_available)
-use lib.pure.data (normalize)
+```simple:skip
+use std.pure.tensor (PureTensor)
+use std.pure.tensor_ops (matmul, add, relu)
+use std.pure.nn (Linear, ReLU, Sequential)
+use std.pure.training (mse_loss, LinearModel)
+use std.pure.accel (set_acceleration, AccelMode, get_stats)
+use std.pure.torch_ffi (torch_available)
+use std.pure.data (normalize)
 
 # Configure acceleration
 if torch_available():
@@ -836,21 +836,21 @@ print "Acceleration: {stats.ffi_count} FFI, {stats.pure_count} Pure"
 
 ```simple
 # Core tensors
-use lib.pure.tensor (PureTensor)
-use lib.pure.tensor_ops (add, mul, matmul, relu, sigmoid, softmax)
+use std.pure.tensor (PureTensor)
+use std.pure.tensor_ops (add, mul, matmul, relu, sigmoid, softmax)
 
 # Neural networks
-use lib.pure.nn (Linear, ReLU, Sigmoid, Tanh, Sequential)
+use std.pure.nn (Linear, ReLU, Sigmoid, Tanh, Sequential)
 
 # Training
-use lib.pure.training (mse_loss, mae_loss, LinearModel)
+use std.pure.training (mse_loss, mae_loss, LinearModel)
 
 # Acceleration
-use lib.pure.accel (set_acceleration, AccelMode, get_stats, reset_stats)
-use lib.pure.torch_ffi (torch_available, matmul_torch_ffi)
+use std.pure.accel (set_acceleration, AccelMode, get_stats, reset_stats)
+use std.pure.torch_ffi (torch_available, matmul_torch_ffi)
 
 # Data utilities
-use lib.pure.data (normalize, standardize)
+use std.pure.data (normalize, standardize)
 ```
 
 ---

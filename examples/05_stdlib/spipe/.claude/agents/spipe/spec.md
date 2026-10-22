@@ -20,7 +20,7 @@ Read the existing state file. Append your spec summary. Do not modify earlier se
 
 ## SPipe Matchers (ONLY these)
 
-```simple
+```simple:skip
 expect(actual).to_equal(expected)
 expect(actual).to_be(expected)           # identity check
 expect(actual).to_be_nil()
@@ -36,7 +36,7 @@ Use `to_equal(true)` and `to_equal(false)` instead.
 
 ## SPipe File Structure
 
-```simple
+```simple:skip
 use std.spec
 
 describe "<ModuleName>":

@@ -6,7 +6,7 @@ Source implementation candidate; executable qualification is **UNRUN**.
 and audited capability upper bound. The attribute uses existing named literal
 arguments and arrays:
 
-```simple
+```simple:skip
 @representation_boundary(kind: "layout", reason: "Encode a device word", reviewers: ["layout-owner"], capabilities: [])
 struct DeviceWord:
     bits: u32

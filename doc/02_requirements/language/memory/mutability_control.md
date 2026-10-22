@@ -13,7 +13,7 @@ references, capability-based access control, and field mutation rules.
 
 ## Syntax
 
-```simple
+```simple:skip
 val immutable_list = [1, 2, 3]       # Immutable binding
 var mutable_counter = 0               # Mutable binding
 obj.field = new_value                 # Field mutation

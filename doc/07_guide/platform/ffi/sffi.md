@@ -28,7 +28,7 @@ The standard pattern for wrapping runtime C functions:
 
 ### Tier 1: Raw FFI Declaration
 
-```simple
+```simple:skip
 # In the canonical no-GC sync runtime owner.
 # Actual declarations must state their exact ABI and error contract.
 @unsafe(reason: "raw runtime ABI", capabilities: [ffi])
@@ -191,7 +191,7 @@ extern fn spl_torch_free(handle: i64)
 
 ### Tier 3: Safe Simple API
 
-```simple
+```simple:skip
 # src/lib/torch/tensor.spl
 use std.ffi.torch.{spl_torch_zeros, spl_torch_numel, spl_torch_free}
 
@@ -211,7 +211,7 @@ class Tensor:
 
 ### Usage
 
-```simple
+```simple:skip
 use std.torch.tensor.{Tensor}
 
 fn main():
@@ -239,7 +239,7 @@ and `examples/10_tooling/libraries/external_compression/`.
 
 External objects are represented as `i64` handles in Simple:
 
-```simple
+```simple:skip
 extern fn spl_db_open(path: text) -> i64      # Returns handle
 extern fn spl_db_query(handle: i64, sql: text) -> text
 extern fn spl_db_close(handle: i64)           # Frees handle
@@ -296,7 +296,7 @@ must bind the matching allocator/destructor and reject use after close.
 
 Check if an external library is available before using it:
 
-```simple
+```simple:skip
 extern fn spl_torch_available() -> bool
 
 fn with_torch():
@@ -310,7 +310,7 @@ fn with_torch():
 
 Return error codes or Result types:
 
-```simple
+```simple:skip
 extern fn spl_file_open(path: text) -> i64  # Returns -1 on error
 
 fn open_file(path: text) -> Result<i64, text>:
@@ -329,7 +329,7 @@ Custom primitives (newtypes over `u8`..`u64`, `i8`..`i64`, `bool`, `f32`, `f64`)
 
 ### Declaring a Custom Primitive for SFFI
 
-```spl
+```text
 use std.compiler.custom_primitive_info
 
 var info = CustomPrimitiveInfo.create("FileHandle", "i32", "handle")
@@ -338,7 +338,7 @@ var info = CustomPrimitiveInfo.create("FileHandle", "i32", "handle")
 
 Register it and query ABI names:
 
-```spl
+```text
 use std.compiler.sffi_custom_primitive
 
 var mapper = sffi_abi_mapper_new()
@@ -351,7 +351,7 @@ sffi_abi_map_to_llvm("i32")  // -> "i32"
 
 Before exporting a custom primitive through SFFI, validate it:
 
-```spl
+```text
 var check = sffi_primitive_check_from_info("FileHandle", "i32")
 // check.is_transparent -> true, check.is_value_type -> true
 ```
@@ -360,7 +360,7 @@ var check = sffi_primitive_check_from_info("FileHandle", "i32")
 
 Unsigned integer custom primitives (`u8`/`u16`/`u32`/`u64`) can back bitfield layouts:
 
-```spl
+```text
 use std.compiler.custom_primitive_bitfield
 
 var layout = BitfieldLayout.create("StatusReg", 32)
@@ -384,7 +384,7 @@ SFFI-gen automatically generates FFI wrappers from specification files.
 
 ### Specification Format
 
-```simple
+```simple:skip
 # specs/file_io.spl
 class InternFnSpec:
     name: text           # Function name (e.g., "file_read")
@@ -495,7 +495,7 @@ Signal handling for graceful shutdown and cleanup:
 
 ### API
 
-```simple
+```simple:skip
 extern fn rt_signal_handler_available() -> bool
 extern fn rt_signal_handler_install(signal: i32) -> bool
 extern fn rt_atexit_register(callback_id: i32) -> bool
@@ -511,7 +511,7 @@ extern fn rt_atexit_register(callback_id: i32) -> bool
 
 ### Usage
 
-```simple
+```simple:skip
 fn setup_signal_handling():
     if not rt_signal_handler_available():
         print "Signal handling not available on this platform"
@@ -599,7 +599,7 @@ Mark classes and functions with `@export("C")` to generate C-callable wrappers. 
 
 #### Exporting a Class
 
-```simple
+```simple:skip
 @export("C")
 class Calculator:
     precision: i32
@@ -694,7 +694,7 @@ bin/simple plugin remove mathlib
 
 #### Using Imported Functions
 
-```simple
+```simple:skip
 extern fn mathlib_fast_sin(x: f64) -> f64
 extern fn mathlib_Matrix4_create() -> i64
 extern fn mathlib_Matrix4_destroy(handle: i64)

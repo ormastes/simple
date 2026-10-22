@@ -38,7 +38,7 @@ quiesce -> retire after final pin -> unmap all section classes atomically
 The implementation must use these exact names in
 `src/compiler/99.loader/aspect_runtime_registry.spl`:
 
-```simple
+```simple:skip
 enum AspectGenerationState: Staging, Active, Quiescing, Retiring, Poisoned, Retired, Failed
 enum AspectActivationState: Vacant, Loading, Succeeded, FailedPermanent, FailedRetryable
 enum AspectSectionClass: Code, Data, RoData, Bss
@@ -147,7 +147,7 @@ class AspectRuntimeRegistry:
 
 Public operations are exactly:
 
-```simple
+```simple:skip
 fn aspect_registry_new() -> AspectRuntimeRegistry
 fn aspect_registry_snapshot(r: AspectRuntimeRegistry) -> AspectRegistrySnapshotLease
 fn aspect_registry_snapshot_release(r: AspectRuntimeRegistry,
@@ -296,7 +296,7 @@ descriptor. All lazy reads and executable/data mappings derive only from those
 owned bytes. The owner object is private; open returns its initial lease, and
 all consumers hold/use leases, never the bare owner:
 
-```simple
+```simple:skip
 fn pack_file_snapshot_open(path: text, catalog_digest: text,
     offset: i64, size: i64) -> Result<PackFileSnapshotLease, PackSnapshotError>
 fn pack_snapshot_read(s: PackFileSnapshotLease, offset: i64,

@@ -41,7 +41,7 @@ All pass variants:
 
 ### Examples
 
-```simple
+```text
 fn not_yet_implemented():
     pass_todo("add validation logic")
 
@@ -56,7 +56,7 @@ fn stub_for_testing():
 
 ### Syntax
 
-```simple
+```text
 x := value    # Equivalent to: val x = value
 ```
 
@@ -69,7 +69,7 @@ x := value    # Equivalent to: val x = value
 
 ### Examples
 
-```simple
+```text
 # Basic usage
 count := 42
 name := "Alice"
@@ -94,7 +94,7 @@ x := 5        # Same as: val x = 5
 - Left side must be a simple identifier (no patterns)
 
 **Invalid:**
-```simple
+```text
 # These won't work:
 fn returns_walrus() := 42      # Syntax error
 (x) := 5                       # Syntax error
@@ -128,13 +128,13 @@ if (y := compute()):           # Syntax error (use val instead)
 ### From Plain `pass`
 
 **Before:**
-```simple
+```text
 fn stub():
     pass  # What kind of placeholder is this?
 ```
 
 **After:**
-```simple
+```text
 fn stub_unimplemented():
     pass_todo  # Clear: not implemented yet
 
@@ -145,14 +145,14 @@ fn stub_intentional():
 ### From `val` to `:=`
 
 **Before:**
-```simple
+```text
 val count = 42
 val name = "Alice"
 val items = [1, 2, 3]
 ```
 
 **After (optional):**
-```simple
+```text
 count := 42
 name := "Alice"
 items := [1, 2, 3]

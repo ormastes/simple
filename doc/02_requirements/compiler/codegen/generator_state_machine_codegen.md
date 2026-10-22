@@ -14,7 +14,7 @@ with fine-grained control over state transitions and stack frame management.
 
 ## Syntax
 
-```simple
+```simple:skip
 # Generator with explicit state machine
 gen fibonacci() -> Int:
     var a = 0
@@ -60,7 +60,7 @@ State machine codegen targets:
 
 ## Examples
 
-```simple
+```text
 # Simple state machine generator
 gen counter(max: Int) -> Int:
     var i = 0

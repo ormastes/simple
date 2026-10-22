@@ -17,26 +17,26 @@ calls, trailing lambdas, colon-blocks, and works with identifiers, field access,
 
 ### Basic No-Paren Calls
 
-```simple
+```simple:skip
 print "Hello"              # print("Hello")
 val result = add 2, 3      # val result = add(2, 3)
 ```
 
 ### With Field Access
 
-```simple
+```text
 obj.method arg             # obj.method(arg)
 ```
 
 ### With Trailing Lambdas
 
-```simple
+```text
 map numbers \x: x * 2      # map(numbers, \x: x * 2)
 ```
 
 ### With Colon-Blocks
 
-```simple
+```text
 describe "Feature":
     test code
 # describe("Feature", fn(): test code)
@@ -82,7 +82,7 @@ describe "Feature":
 
 ## Examples
 
-```simple
+```text
 # Basic calls
 print "Hello World"
 val sum = add 5, 10
@@ -115,7 +115,7 @@ call arg1, arg2, arg3
 
         Function with one argument can omit parentheses.
 
-        ```simple
+        ```text
         fn double(x):
             x * 2
 
@@ -147,7 +147,7 @@ call arg1, arg2, arg3
 
         Multiple arguments require comma separation.
 
-        ```simple
+        ```text
         fn add(a, b):
             a + b
 
@@ -185,7 +185,7 @@ call arg1, arg2, arg3
 
         Integer, float, string, and boolean literals as arguments.
 
-        ```simple
+        ```text
         func 42                 # Integer
         func 3.14               # Float
         func "text"             # String
@@ -216,7 +216,7 @@ call arg1, arg2, arg3
 
         Complex expressions can be wrapped in parentheses.
 
-        ```simple
+        ```text
         func (a + b), (c * d)
         ```
 
@@ -245,7 +245,7 @@ call arg1, arg2, arg3
 
         Inner calls use parentheses, outer call uses no-paren syntax.
 
-        ```simple
+        ```text
         outer inner(arg)
         ```
 
@@ -274,7 +274,7 @@ call arg1, arg2, arg3
 
         Combine regular argument with trailing lambda.
 
-        ```simple
+        ```text
         map array \x: x * 2
         ```
 
@@ -306,7 +306,7 @@ call arg1, arg2, arg3
 
         Methods can be called without parentheses.
 
-        ```simple
+        ```text
         obj.method arg
         ```
 
@@ -331,7 +331,7 @@ call arg1, arg2, arg3
 
         No-paren calls on right side of assignments.
 
-        ```simple
+        ```text
         val result = func arg
         ```
 
@@ -354,7 +354,7 @@ call arg1, arg2, arg3
 
         No-paren calls in return expressions.
 
-        ```simple
+        ```text
         fn wrapper(x):
             double x
         ```
@@ -379,7 +379,7 @@ call arg1, arg2, arg3
 
         Pass strings without parentheses.
 
-        ```simple
+        ```text
         print "Hello World"
         greet "Alice"
         ```
@@ -409,7 +409,7 @@ call arg1, arg2, arg3
 
         Some calls with parens, some without.
 
-        ```simple
+        ```text
         outer inner(x), arg2
         ```
 
@@ -438,7 +438,7 @@ call arg1, arg2, arg3
 
         Functions with no arguments require parentheses.
 
-        ```simple
+        ```text
         func()  # Parentheses required for zero args
         ```
 

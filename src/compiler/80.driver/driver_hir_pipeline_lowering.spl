@@ -1,3 +1,4 @@
+use compiler.driver.cache.hir_tldr_cache_identity_v1.{hir_tldr_cache_closure_digest_v1}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.cache.hir_body_typecheck_lease_v1.{
     HirBodyArchiveInputV1, HirBodyArchiveV1,
@@ -509,16 +510,19 @@ impl CompilerDriver:
             return Err("transient HIR scope reverse-reference owner unavailable for {source_path}")
         val flat_row_count_before = bootstrap_hir_module_count()
         val parsed_code_less = driver_native_parsed_module_has_no_runtime_body_v1(module)
+        if nscope_trace: eprint("[nscope-hir] retained-pre-lower path={source_path}")
         val hir_module = lowering.lower_parser_module_unstub(module, is_entry)
         if nscope_trace: eprint("[nscope-hir] retained-lowered path={source_path}")
         if not rt_transient_array_scope_pause():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             return Err("transient HIR scope pause failed for {source_path}")
+        if nscope_trace: eprint("[nscope-hir] retained-paused path={source_path}")
         if not rt_transient_heap_promote(hir_module):
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             return Err("HIR ownership promotion failed for {source_path}")
+        if nscope_trace: eprint("[nscope-hir] retained-promoted path={source_path}")
         # Cycle-137 REVERT of the cycle-135 deep-promotion block: the
         # runtime promote is a recursive plan walker (runtime_native.c:2776 --
         # RAW structs scan words for children, DICT nodes walk every occupied
@@ -987,7 +991,16 @@ impl CompilerDriver:
         if not rt_heap_ref_wellformed(surfaces):
             self.ctx.add_error("E-DRIVER-HIR-OWNER-MALFORMED: streaming module surface owner payload malformed after phase 2 (heap-typed payload word is 0 or in the zero page)")
             return false
+        # Fail-closed empty-surface abort (2026-08-24 zero-module incident):
+        # non-zero sources must produce a non-empty surface graph; typing an
+        # empty program through phase 3 SIGSEGV'd three phases downstream in
+        # MIR lowering with no diagnostic naming this phase.
+        if self.ctx.source_paths_owner.len() > 0 and surfaces.surfaces.len() == 0:
+            self.ctx.add_error("E-DRV-PHASE3-EMPTY-SURFACES]: streaming phase 3 received zero module surfaces from {self.ctx.source_paths_owner.len()} non-zero sources (the phase-2 surface carrier was lost before phase 3); refusing to type-check an empty program")
+            return false
         var lowering: HirLowering = hirlowering_for_module("", surfaces)
+        lowering.tldr_entry_only = self.ctx.tldr_entry_only
+        lowering.tldr_imports = self.ctx.tldr_imports
         if driver_hir_explicit_semantic_policy(self.ctx):
             lowering.use_explicit_semantic_policy()
         lowering.forbid_written_any = driver_hir_forbids_written_any(self.ctx)
@@ -1022,8 +1035,8 @@ impl CompilerDriver:
         # in full before this loop (surface_freeze completes in phase 2), so
         # one digest over every surface is exactly what each module's
         # lowering can see, and the key stays sound.
-        val hir_closure_digest: text = if (not driver_hir_explicit_semantic_policy(self.ctx)) and hir_cache_enabled():
-            hir_cache_closure_digest(surfaces)
+        val hir_closure_digest: text = if (not self.ctx.tldr_entry_only or self.ctx.tldr_imports.len() > 0) and (not driver_hir_explicit_semantic_policy(self.ctx)) and hir_cache_enabled():
+            hir_tldr_cache_closure_digest_v1(hir_cache_closure_digest(surfaces), self.ctx.tldr_imports)
         else:
             ""
         val hir_shard_mode: bool = hir_shard_active() and hir_closure_digest != ""
@@ -1046,6 +1059,12 @@ impl CompilerDriver:
             hir_levels = hir_shard_levels(surfaces)
             hir_level_count = hir_shard_level_count(hir_levels)
         val hir_visit_order: [i64] = hir_shard_visit_order(self.ctx.source_module_names_owner, surfaces, hir_levels)
+        # Fail-closed visit-order abort: with non-zero sources the carrier
+        # proven present (the surfaces) must yield at least one module visit;
+        # an empty order would silently type-check zero modules again.
+        if not hir_shard_mode and self.ctx.source_paths_owner.len() > 0 and hir_visit_order.len() == 0:
+            self.ctx.add_error("E-DRV-PHASE3-EMPTY-VISIT]: streaming phase 3 produced an empty HIR visit order for {self.ctx.source_paths_owner.len()} non-zero sources; refusing to type-check an empty program")
+            return false
         var hir_loop_pos: i64 = 0
         val hir_bootstrap_mode_gate = driver_hir_ambient_bootstrap_enabled(self.ctx)
         log_build_progress("hir", "modules", 0, surfaces.surfaces.len(),
@@ -1562,6 +1581,21 @@ impl CompilerDriver:
         val log = self.ctx.logger
         driver_register_reverse_reference_sources_v1(self.ctx)
 
+        # Fail-closed phase-3 routing (doc/08_tracking/bug/stage3_n_modules_zero_segv_mir_lowering_x86_64_2026-08-24.md):
+        # the streaming readiness scalar is mutable native state that value
+        # semantics can drop across the phase boundary, so it can never route
+        # alone -- stable streaming configuration must participate on the same
+        # `if`, and the legacy module loop must abort on zero modules from
+        # non-zero sources instead of typing an empty program through to MIR.
+        val streaming_ready_flag = self.streaming_surface_owner_ready
+        val streaming_config_gate = driver_streaming_surface_enabled(self.ctx)
+        if streaming_ready_flag or streaming_config_gate:
+            val streamed_ok = self.lower_and_check_streaming_surfaces_impl()
+            return (self.ctx, streamed_ok)
+        if self.ctx.sources.len() > 0 and driver_dict_entry_count(self.ctx.modules) == 0:
+            self.ctx.add_error("E-DRV-PHASE3-EMPTY]: phase 3 legacy path received zero HIR modules from {self.ctx.sources.len()} non-zero sources (the phase-2 module set was lost before phase 3); refusing to type-check an empty program")
+            return (self.ctx, false)
+
         # Build module_name -> source_path map so each module gets the right
         # filename in module_filename (required for defining_module + visibility).
         var source_path_map: Dict<text, text> = {}
@@ -1627,6 +1661,8 @@ impl CompilerDriver:
             var bootstrap_lowering: HirLowering = hirlowering_for_module_with_diagnostics(
                 "", retained_module_surfaces, bootstrap_lowering_errors,
                 bootstrap_lowering_messages, bootstrap_lowering_recovered)
+            bootstrap_lowering.tldr_entry_only = self.ctx.tldr_entry_only
+            bootstrap_lowering.tldr_imports = self.ctx.tldr_imports
             if driver_hir_explicit_semantic_policy(self.ctx):
                 bootstrap_lowering.use_explicit_semantic_policy()
             bootstrap_lowering.forbid_written_any = driver_hir_forbids_written_any(self.ctx)
@@ -1690,6 +1726,8 @@ impl CompilerDriver:
             "", retained_module_surfaces, module_lowering_errors,
             module_lowering_diagnostic_messages,
             module_lowering_diagnostic_recovered)
+        lowering.tldr_entry_only = self.ctx.tldr_entry_only
+        lowering.tldr_imports = self.ctx.tldr_imports
         if driver_hir_explicit_semantic_policy(self.ctx):
             lowering.use_explicit_semantic_policy()
         lowering.forbid_written_any = driver_hir_forbids_written_any(self.ctx)
@@ -1698,8 +1736,8 @@ impl CompilerDriver:
             bootstrap_hir_modules_reset()
         # HIR cache (driver_hir_cache.spl): one digest of every frozen surface
         # per build; a hit below replaces lowering for that module.
-        val hir_closure_digest: text = if (not driver_hir_explicit_semantic_policy(self.ctx)) and hir_cache_enabled():
-            hir_cache_closure_digest(retained_module_surfaces)
+        val hir_closure_digest: text = if (not self.ctx.tldr_entry_only or self.ctx.tldr_imports.len() > 0) and (not driver_hir_explicit_semantic_policy(self.ctx)) and hir_cache_enabled():
+            hir_tldr_cache_closure_digest_v1(hir_cache_closure_digest(retained_module_surfaces), self.ctx.tldr_imports)
         else:
             ""
         # HIR shard child (SIMPLE_HIR_SHARD, see driver_hir_cache.spl): visit
@@ -2396,6 +2434,8 @@ impl CompilerDriver:
 
         var compatibility_lowering: HirLowering = hirlowering_for_module(
             "", retained_module_surfaces)
+        compatibility_lowering.tldr_entry_only = ctx.tldr_entry_only
+        compatibility_lowering.tldr_imports = ctx.tldr_imports
         if driver_hir_explicit_semantic_policy(ctx):
             compatibility_lowering.use_explicit_semantic_policy()
         compatibility_lowering.forbid_written_any = driver_hir_forbids_written_any(ctx)

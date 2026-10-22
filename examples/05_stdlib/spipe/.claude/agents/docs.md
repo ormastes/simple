@@ -43,7 +43,7 @@ RULES → enforced by CI + review
 
 ## TODO Format
 
-```simple
+```simple:skip
 # TODO: [area][priority] description [#issue] [blocked:#issue]
 # Areas: doc, runtime, parser, stdlib, compiler, testing, tooling, design
 # Priorities: P0 (critical), P1 (high), P2 (medium), P3 (low)

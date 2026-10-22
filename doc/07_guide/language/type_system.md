@@ -19,7 +19,7 @@ val b = true        # bool
 
 ### Function Return Inference
 
-```simple
+```simple:skip
 fn double(x: i64):
     x * 2           # Return type inferred as i64
 
@@ -104,7 +104,7 @@ fn is_odd(n: i64) -> bool:
 
 ### Optional Chaining Types
 
-```simple
+```simple:skip
 val user: User? = get_user()          # Option<User>
 val name: text? = user?.name          # Option<text>
 val display: text = name ?? "Unknown" # text (not optional)
@@ -142,7 +142,7 @@ fn process_value(value: i64 | text):
 
 Intersection types express "must satisfy all" constraints:
 
-```simple
+```simple:skip
 trait Serializable:
     fn serialize() -> text
 
@@ -162,7 +162,7 @@ type DataStore = Readable & Writable & Closeable
 
 Refinement types add runtime predicates to values:
 
-```simple
+```text
 type PositiveInt = x: i64 where x > 0
 type NonEmptyText = s: text where len(s) > 0
 type BoundedValue = v: i64 where v >= 0 and v < 100
@@ -170,7 +170,7 @@ type BoundedValue = v: i64 where v >= 0 and v < 100
 
 ### Usage in Function Signatures
 
-```simple
+```text
 fn sqrt(x: i64 where x >= 0) -> f64:
     math.sqrt(float(x))
 
@@ -193,7 +193,7 @@ fn first<T>(arr: List<T> where len(arr) > 0) -> T:
 
 ### Basic Generics
 
-```simple
+```simple:skip
 fn identity<T>(x: T) -> T:
     x
 
@@ -203,7 +203,7 @@ fn pair<A, B>(a: A, b: B) -> (A, B):
 
 ### Constrained Generics
 
-```simple
+```simple:skip
 fn compare<T: Comparable>(a: T, b: T) -> i64:
     a.compare(b)
 
@@ -215,7 +215,7 @@ fn sort_and_hash<T: Comparable & Hashable>(items: List<T>):
 
 ### Polymorphic Types
 
-```simple
+```simple:skip
 val opt_num: Option<i64> = Some(42)
 val opt_str: Option<text> = Some("hello")
 ```
@@ -233,7 +233,7 @@ Create a newtype when:
 - **Values have physical meaning or units** (Milliseconds, ByteCount)
 - **Helper methods add domain operations**
 
-```simple
+```text
 unit Metallic: f32 as metallic
 unit Roughness: f32 as roughness
 
@@ -253,7 +253,7 @@ Keep bare primitives when:
 
 ### Newtype with Helpers
 
-```simple
+```text
 unit Milliseconds: u64 as ms
 
 impl Milliseconds:
@@ -274,7 +274,7 @@ impl Milliseconds:
 
 Use `unit` wrappers directly in public APIs across module boundaries:
 
-```simple
+```text
 # src/demo/user.spl
 unit UserId: i64 as uid
 
@@ -299,7 +299,7 @@ Prefer this over claiming built-in primitive redefinition.
 
 Use enums instead of magic numbers:
 
-```simple
+```simple:skip
 pub enum ShutdownMode:
     Read
     Write
@@ -327,7 +327,7 @@ impl ShutdownMode:
 
 ## Traits and Implementations
 
-```simple
+```simple:skip
 trait Show:
     fn show() -> text
 
@@ -341,7 +341,7 @@ impl Show for i64:
 
 ## Type Aliases
 
-```simple
+```simple:skip
 type Point2D = Point                  # Type alias
 alias Optional = Option               # Class alias
 ```

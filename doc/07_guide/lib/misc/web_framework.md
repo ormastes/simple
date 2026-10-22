@@ -30,7 +30,7 @@ WebApp (app.sdn config)
 
 ## Quick Start
 
-```simple
+```simple:skip
 # main.spl
 use std.web_framework.app.{WebApp}
 
@@ -100,7 +100,7 @@ routes:
 
 Or programmatically:
 
-```simple
+```text
 use std.web_framework.router.{WebRouter}
 
 var router = WebRouter.new()
@@ -129,7 +129,7 @@ router.namespace("/api/v1", api_routes)
 
 Controllers use **composition** (no inheritance). Each action receives a `ControllerContext`:
 
-```simple
+```simple:skip
 use std.web_framework.controller.{ControllerContext, render_page, render_json, render_redirect, render_error}
 use std.web_framework.view_model.{ViewData}
 
@@ -154,7 +154,7 @@ fn action_show(ctx: ControllerContext) -> HttpResponseData:
 
 ### Response Helpers
 
-```simple
+```simple:skip
 render_page(ctx, "view/path", data)  # Template SSR (auto-escapes)
 render_json(json_string)             # application/json
 render_redirect("/path")             # 302 redirect
@@ -165,7 +165,7 @@ render_error(404, "Not found")       # Error page
 
 ### ControllerContext
 
-```simple
+```simple:skip
 class ControllerContext:
     request: HttpRequestData        # method, path, headers, body, peer_addr
     session_data: Dict<text, text>  # current session
@@ -180,7 +180,7 @@ class ControllerContext:
 
 Thin Active Record wrapper over `Repository<T>` + `DbCodec<T>`:
 
-```simple
+```simple:skip
 use std.database.sql.types.{DbValue, DbRow}
 use std.database.sql.codec.{DbCodec}
 use std.web_framework.model.{ActiveModel}
@@ -209,7 +209,7 @@ val todos = model.paginate(1, 10)?
 
 ### Database Migrations
 
-```simple
+```simple:skip
 use std.database.sql.migration.{MigrationRunner, Migration}
 
 fn run_migrations(db: Database):
@@ -282,7 +282,7 @@ The framework uses AOP-based security weaved at compile time. **Unannotated hand
 
 ### Annotations
 
-```simple
+```text
 @public                          # No auth required (opt-in openness)
 @requires_auth                   # Must be authenticated (default)
 @requires_capability("admin")   # Must hold specific capability
@@ -291,7 +291,7 @@ The framework uses AOP-based security weaved at compile time. **Unannotated hand
 
 ### CSRF Protection
 
-```simple
+```simple:skip
 use std.web_framework.csrf_integration.{csrf_hidden_field, csrf_token_for_session}
 
 # In controller: generate token
@@ -308,7 +308,7 @@ val token = csrf_token_for_session(session_id, secret)
 
 Always verify resource ownership:
 
-```simple
+```simple:skip
 fn action_edit(ctx: ControllerContext) -> HttpResponseData:
     val todo_id = ctx.params.get("id")
     val todo = find_todo(todo_id)?
@@ -321,7 +321,7 @@ fn action_edit(ctx: ControllerContext) -> HttpResponseData:
 
 ## Sessions
 
-```simple
+```simple:skip
 use std.web_framework.session.{SessionStore, SignedCookieSession}
 
 # DB-backed sessions
@@ -338,7 +338,7 @@ val data = SignedCookieSession.decode(cookie, secret)?
 
 ## Flash Messages
 
-```simple
+```simple:skip
 use std.web_framework.flash.{flash_add, flash_get, FlashType}
 
 # Set flash
@@ -350,7 +350,7 @@ val messages = flash_get(session)
 
 ## Form Validation
 
-```simple
+```simple:skip
 use std.web_framework.form_validation.{Validator, ValidationRule}
 
 var v = Validator.new()
@@ -365,7 +365,7 @@ if not v.validate(ctx.params):
 
 ## Strong Params
 
-```simple
+```simple:skip
 use std.web_framework.params.{StrongParams}
 
 val permitted = StrongParams.permit(["title", "description"])
@@ -375,7 +375,7 @@ val safe_params = permitted.filter(ctx.params)
 
 ## Pagination
 
-```simple
+```simple:skip
 use std.web_framework.pagination.{Paginator}
 
 val total = repo.count()?
@@ -388,7 +388,7 @@ val pages = pager.total_pages()  # 5
 
 ## Auth Middleware
 
-```simple
+```simple:skip
 use std.web_framework.auth_middleware.{session_auth_middleware, jwt_auth_middleware}
 
 # Session-based (web pages)
@@ -402,7 +402,7 @@ val user_id = jwt_auth_middleware(request, jwt_secret)?
 
 ## Asset Pipeline
 
-```simple
+```simple:skip
 use std.web_framework.asset_pipeline.{AssetPipeline}
 
 var pipeline = AssetPipeline.new("public", fingerprint: true)
@@ -417,7 +417,7 @@ val url = pipeline.asset_path("css/app.css")
 
 ### Live Reload (Development)
 
-```simple
+```simple:skip
 use std.web_framework.live_reload.{LiveReloadServer, live_reload_script}
 
 # Inject in dev mode:

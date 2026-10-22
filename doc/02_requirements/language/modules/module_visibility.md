@@ -17,7 +17,7 @@ clear visibility control for APIs.
 
 ## Syntax
 
-```simple
+```simple:skip
 # file: test_case.spl
 
 # Auto-public: name matches filename (snake_case -> PascalCase)

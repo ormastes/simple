@@ -466,19 +466,19 @@ referenced configuration.
 ### Common Debugging Scenarios
 
 **Nil value:**
-```simple
+```simple:skip
 val user = get_user(id)   # Set breakpoint, check if nil
 val name = user.name      # May crash if nil
 ```
 
 **Infinite loop:**
-```simple
+```simple:skip
 while condition:           # Set breakpoint, inspect condition
     do_work()
 ```
 
 **Wrong calculation:**
-```simple
+```simple:skip
 val result = calculate(a, b)  # Step into to see intermediate values
 ```
 

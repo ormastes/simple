@@ -91,3 +91,65 @@ Next step: instrument the parse-shard / entry-scan path
 with the same env-gated trace to bracket the exact operation; suspect an
 env-dependent parse path (package-index cold route) interacting with this
 file's multi-line `or` continuations / docstring content.
+
+## Update: symbolized backtrace (p2_add reproduces manually since merge 05157642057)
+
+gdb on the exact worker argv (strace-captured) deterministically catches:
+
+```
+#0 module_surface_semantic_projection +5580   <- nearest-symbol; likely a
+                                                  following static helper
+#1 module_surface_from_owner (module_surface_declarations.spl:209)
+#2 ModuleSurfaceBuilder.add_parsed_canonical (module_surface_registry)
+#3 CompilerDriver.parse_all_impl
+```
+
+The fault fires during parse-all's surface projection of the freshly parsed
+canonical module — between the alias scan (trace fires) and retained lowering
+(trace silent). The [proj] entry trace in the projection does NOT fire even
+though the crash symbolizes inside the function — consistent with the PC
+landing in a STATIC helper laid out after it (the file's `_surface_mix_text`
+byte loop over a garbage text field is the prime suspect; the source already
+carries three rounds of "ANY-transport hazard sweep: annotated rebind"
+defenses, so the corrupting transport shape is one the sweeps miss).
+
+The same defect family explains this lane's earlier manifestations:
+NLL live_aliases method-arg corruption (fixed by free-function conversion)
+and the original module_path_naming sanity-only SEGV (same bracket).
+
+Also ruled out this cycle: PR #4133's fs.spl Any-expansion variant as the
+Linux cause (restored the two-arg text form — landed, matches the pre-merge
+proven shape; crash persists, so the regression trigger is the binary-layout
+shift, not the file-io path). io_file.rs changes are Windows-only; the
+collections.rs merge correctly retains both promote exemptions.
+
+Next: either compile a -g (line-info) candidate for an exact fault line, or
+move per-helper env-gated traces into _surface_fold/_surface_mix_text/
+_surface_function to name the corrupting field.
+
+## Update: DEFINITIVE root cause — class-with-large-struct-field read returns garbage
+
+Trace chain (all committed): `module_surface_from_owner` entry prints with a
+valid owner reference (`owner_nil=false`); `val module_local: ParserModule =
+owner.value` then reads `module_local.name.len() == -1` and
+`module_local.functions.len() == -1` — the struct FIELD of the class
+`ModuleSurfaceParserOwner` (`value: ParserModule`, a 15+ field struct stored
+inline) reads back garbage in the self-hosted candidate. The callee
+(`module_surface_semantic_projection`) consequently SIGSEGVs in its prologue
+before executing any body statement (an unconditional entry eprint never
+printed; the crash PC lands in the callee's symbol region — a nearest-symbol
+artifact). Local binds at BOTH the call site and the wrapper constructor
+(`static fn new(value: ParserModule)`) do NOT rescue it — the corruption is
+the class field store/read itself for large inline struct fields.
+
+This is the same by-value/aggregate-transport family as the NLL
+`live_aliases` array-argument corruption (fixed by module-scope free-function
+conversion) and the poll/future generic-enum-pattern case (fixed by local
+bind — shallower shape).
+
+Source-level workaround candidate (not yet attempted): flatten
+`ModuleSurfaceParserOwner` to handle-sized fields (`name: text`,
+`functions: Dict<...>`, … one slot per ParserModule limb, all 8-byte
+handles/texts) and reconstruct the ParserModule at the use site — avoiding
+any large inline-struct class field. The proper repair is in the compiler's
+class-field layout/copy for large inline structs.

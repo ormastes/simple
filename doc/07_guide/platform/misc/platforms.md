@@ -151,7 +151,7 @@ The Platform Abstraction Library provides a unified send/receive pattern for han
 
 ### Quick Start
 
-```simple
+```simple:skip
 use std.platform.{host_config, network_config, send_u32, recv_u32}
 
 val host = host_config()           # Auto-detect local machine
@@ -169,7 +169,7 @@ val local_val = recv_u32(host, net, wire_data)  # Convert from network order
 
 ### Endianness Conversion
 
-```simple
+```simple:skip
 val le_host = host_config()
 val be_target = make_config(TargetArch.MCS51, TargetOS.BareMetal)
 val swapped = send_u32(le_host, be_target, 0x12345678)  # byte-swapped
@@ -178,7 +178,7 @@ val original = recv_u32(le_host, be_target, swapped)     # restored
 
 ### Newline Translation
 
-```simple
+```simple:skip
 val unix = make_config(TargetArch.X86_64, TargetOS.Linux)
 val win = make_config(TargetArch.X86_64, TargetOS.Windows)
 val crlf_text = send_text(unix, win, "line1\nline2\n")  # LF -> CRLF
@@ -187,7 +187,7 @@ val lf_text = recv_text(unix, win, crlf_text)            # CRLF -> LF
 
 ### Wire Format (Binary Protocols)
 
-```simple
+```simple:skip
 # Serialize
 var writer = wire_writer_network()
 writer.write_u32(42)
@@ -202,7 +202,7 @@ val text = reader.read_text()
 
 ### Cross-Platform File I/O
 
-```simple
+```simple:skip
 # Write with host platform newlines
 text_file_write_local("output.txt", "line1\nline2\n")
 

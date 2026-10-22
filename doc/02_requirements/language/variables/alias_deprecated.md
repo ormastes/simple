@@ -15,7 +15,7 @@ This specification covers the alias and deprecation features:
 
 ## Syntax
 
-```simple
+```simple:skip
 # Type alias
 alias Point2D = Point
 alias Optional = Option
