@@ -312,8 +312,15 @@ fn driver_register_reverse_reference_sources_v1(ctx: CompileContext):
         reverse_reference_owner_register_source_alias_v1(
             source.module_name, source.path)
         if ctx.modules.contains_key(source.module_name):
+            # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=dict_value_read_needs_typed_bind
+            # Bind the Dict value to a typed local before it crosses any
+            # further boundary: the inline `ctx.modules[k]` form fed a corrupt
+            # copy (SIGSEGV in the aliases walk). The annotated rebind is the
+            # hazard-sweep primitive used everywhere else (cf.
+            # driver_orchestration.spl's source_module bind).
+            val module_binding: ParserModule = ctx.modules[source.module_name]
             driver_register_parser_module_source_aliases_v1(
-                ctx.modules[source.module_name], source.path)
+                ModuleSurfaceParserOwner.new(module_binding), source.path)
 
 impl CompilerDriver:
     # Capture before the streaming path frees source bodies and before the
@@ -609,7 +616,7 @@ impl CompilerDriver:
             if not (error_ok and owners_ok and ended):
                 return Err("transient parser scope error ownership failed for {source.path}")
             return Err(selected.unwrap_err())
-        val module = selected.unwrap()
+        val module: ParserModule = selected.unwrap()
         driver_register_parser_module_source_aliases_v1(
             ModuleSurfaceParserOwner.new(module), source.path)
         if par_had_error_get():
@@ -818,7 +825,7 @@ impl CompilerDriver:
             if parsed.is_err():
                 errors.push(parsed.unwrap_err())
             else:
-                val parser_module = parsed.unwrap()
+                val parser_module: ParserModule = parsed.unwrap()
                 driver_register_parser_module_source_aliases_v1(
                     ModuleSurfaceParserOwner.new(parser_module), source.path)
                 if par_had_error_get():
