@@ -326,29 +326,51 @@ jobs:
           sh scripts/check/check-bootstrap-keep-going-policy.shs
           sh scripts/check/check-bootstrap-windows-authority-paths.shs
 
-      - name: Setup MSVC
+      # Default Windows configuration: MinGW UCRT via MSYS2 CLANG64 (UCRT +
+      # clang + LLD + libunwind/libc++, no GCC); Rust host gnullvm. The MSVC
+      # configuration stays in-tree (SIMPLE_WINDOWS_ABI=msvc) but CI builds
+      # only GNU. See doc/07_guide/infra/toolchain/windows_mingw_ucrt.md.
+      - name: Setup MSYS2 CLANG64 (Windows)
+        id: msys2
         if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          path-type: inherit
+          install: >-
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-lld
+            mingw-w64-clang-x86_64-llvm
+            mingw-w64-clang-x86_64-libc++
+            mingw-w64-clang-x86_64-libunwind
 
-      - name: Select Clang C driver (Windows)
+      - name: Select CLANG64 C driver (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          clang-cl --version
-          if ($LASTEXITCODE -ne 0) { throw 'clang-cl is required for the Windows bootstrap' }
-          "CC=clang-cl" >> $env:GITHUB_ENV
-          "CC_x86_64_pc_windows_msvc=clang-cl" >> $env:GITHUB_ENV
-      - name: Fix MSVC linker PATH
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          if [ -f /usr/bin/link ]; then
-            mv /usr/bin/link /usr/bin/link.bak
-          fi
+          $clang64 = Join-Path '${{ steps.msys2.outputs.msys2-location }}' 'clang64\bin'
+          & (Join-Path $clang64 'clang.exe') --version
+          if ($LASTEXITCODE -ne 0) { throw 'CLANG64 clang is required for the Windows bootstrap' }
+          $clang64 >> $env:GITHUB_PATH
+          "CC=clang" >> $env:GITHUB_ENV
+          "CC_x86_64_pc_windows_gnullvm=clang" >> $env:GITHUB_ENV
+          "AR_x86_64_pc_windows_gnullvm=llvm-ar" >> $env:GITHUB_ENV
+          "CC_x86_64_pc_windows_gnu=clang" >> $env:GITHUB_ENV
+          "AR_x86_64_pc_windows_gnu=llvm-ar" >> $env:GITHUB_ENV
 
       - uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: nightly-2026-09-15
+
+      - name: Select gnullvm Rust host (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          rustup set default-host x86_64-pc-windows-gnullvm
+          rustup toolchain install nightly-2026-09-15 --profile minimal -c rustfmt -c clippy
+          (cd src/compiler_rust && rustc -vV) | tee "$RUNNER_TEMP/rustc-vV.txt"
+          grep -qx 'host: x86_64-pc-windows-gnullvm' "$RUNNER_TEMP/rustc-vV.txt"
 
       - name: Install FreeType (Linux)
         if: runner.os == 'Linux'
@@ -399,14 +421,6 @@ jobs:
             echo "LLVM_SYS_180_PREFIX=$llvm_prefix" >> "$GITHUB_ENV"
           fi
 
-      - name: Install dependencies (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          vcpkg install freetype:x64-windows
-          "RUSTFLAGS=-L native=$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/lib" >> $env:GITHUB_ENV
-          "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin" >> $env:GITHUB_PATH
-
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
@@ -414,9 +428,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             src/compiler_rust/target
-          key: ${{ runner.os }}-${{ runner.arch }}-bootstrap-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ runner.os == 'Windows' && 'gnullvm-' || '' }}bootstrap-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-bootstrap-
+            ${{ runner.os }}-${{ runner.arch }}-${{ runner.os == 'Windows' && 'gnullvm-' || '' }}bootstrap-
 
       - name: Build seed and native_all library
         shell: bash
@@ -448,7 +462,7 @@ jobs:
           SIMPLE_NO_STUB_FALLBACK: "1"
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then
-            export SIMPLE_LINKER_FLAVOR=msvc SIMPLE_WINDOWS_ABI=msvc
+            export SIMPLE_LINKER_FLAVOR=gnu SIMPLE_WINDOWS_ABI=gnu
           fi
           if [ "$RUNNER_OS" = "Linux" ] && [ "${{ matrix.backend }}" = "llvm" ]; then
             mcp_flag=--full-cli
@@ -782,7 +796,7 @@ jobs:
           SIMPLE_RUNTIME_PATH="$PWD/src/compiler_rust/target/bootstrap" \
             SIMPLE_NO_STUB_FALLBACK=1 "$stage3" native-build \
             --backend cranelift \
-            --target aarch64-pc-windows-msvc --emit-object --entry-closure \
+            --target aarch64-pc-windows-gnu --emit-object --entry-closure \
             --entry scripts/check/cert/redeploy_gate/fixtures/p2_add.spl \
             --cache-dir build/check/windows-arm64/cache-cranelift \
             --output "$arm64_obj"
@@ -795,7 +809,7 @@ jobs:
           SIMPLE_RUNTIME_PATH="$PWD/src/compiler_rust/target/bootstrap" \
             SIMPLE_NO_STUB_FALLBACK=1 "$stage3" native-build \
             --backend cranelift \
-            --target aarch64-pc-windows-msvc --emit-object --entry-closure \
+            --target aarch64-pc-windows-gnu --emit-object --entry-closure \
             --source test/fixtures --source src/lib \
             --entry test/fixtures/native_crossmodule_result_u8/main.spl \
             --cache-dir build/check/windows-arm64/crossmodule-result-u8-cranelift-cache \
@@ -805,7 +819,7 @@ jobs:
           [[ "$chr_relocations" == *"rt_char_from_code"* ]]
           SIMPLE_BIN="$stage3" BUILD_DIR=build/check/windows-arm64/option-try-cranelift \
             sh scripts/check/check-native-option-try-target-fail.shs \
-            aarch64-pc-windows-msvc cranelift
+            aarch64-pc-windows-gnu cranelift
           for obj in build/check/windows-arm64/option-try-cranelift/*.o; do
             test -s "$obj"
             option_header="$(llvm-readobj --file-headers "$obj")"

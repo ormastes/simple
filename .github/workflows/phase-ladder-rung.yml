@@ -67,6 +67,40 @@ jobs:
             "$VERSION_CODENAME" "$VERSION_CODENAME" | sudo tee /etc/apt/sources.list.d/riscv64-ports.sources
           sudo apt-get update -qq
           sudo apt-get install -y -qq libsqlite3-dev:riscv64 zlib1g-dev:riscv64 libzstd-dev:riscv64 libncurses-dev:riscv64
+      # Windows lane = MinGW UCRT via MSYS2 CLANG64 (clang + LLD, no GCC),
+      # Rust host gnullvm. See doc/07_guide/infra/toolchain/windows_mingw_ucrt.md.
+      - name: Setup MSYS2 CLANG64 (windows-x86_64)
+        id: msys2
+        if: steps.sel.outputs.on == 'true' && matrix.platform == 'windows-x86_64'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          path-type: inherit
+          install: >-
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-lld
+            mingw-w64-clang-x86_64-llvm
+            mingw-w64-clang-x86_64-libc++
+            mingw-w64-clang-x86_64-libunwind
+      - name: Bind CLANG64 toolchain and gnullvm Rust host (windows-x86_64)
+        if: steps.sel.outputs.on == 'true' && matrix.platform == 'windows-x86_64'
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+        run: |
+          clang64=$(cygpath -u "$MSYS2_LOCATION")/clang64/bin
+          "$clang64/clang.exe" --version
+          cygpath -w "$clang64" >> "$GITHUB_PATH"
+          {
+            echo "CC=clang"
+            echo "CC_x86_64_pc_windows_gnullvm=clang"
+            echo "AR_x86_64_pc_windows_gnullvm=llvm-ar"
+            echo "SIMPLE_WINDOWS_ABI=gnu"
+            echo "SIMPLE_LINKER_FLAVOR=gnu"
+          } >> "$GITHUB_ENV"
+          rustup set default-host x86_64-pc-windows-gnullvm
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' src/compiler_rust/rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal
       - name: Climb one phase
         if: steps.sel.outputs.on == 'true'
         env:

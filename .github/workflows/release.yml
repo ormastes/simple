@@ -98,12 +98,9 @@ jobs:
     # cross/freebsd legs build bootstrap-only seeds that refuse release by
     # design. Keep those rows visible without letting them hold the release.
     continue-on-error: ${{ matrix.cross_compile == true || matrix.experimental == true || contains(matrix.platform, 'freebsd') || startsWith(matrix.os, 'macos') }}
-    # Windows x86_64 C toolchain authority (same pin as windows-build.yml):
-    # src/compiler_rust/lib/build.rs refuses cl.exe for the MSVC target.
-    env:
-      LLVM_VERSION: 23.1.1
-      LLVM_ARCHIVE_SHA256: c8a12d754b5050c5668b56a5425c806792d46c70f7244b1216046164aa4b6462
-      LLVM_ROOT: ${{ github.workspace }}\.toolchains\llvm-23.1.1
+    # Windows rows publish the MinGW UCRT (MSYS2 CLANG64) configuration; the
+    # MSVC configuration stays in-tree but is not built by CI. See
+    # doc/07_guide/infra/toolchain/windows_mingw_ucrt.md.
 
     steps:
       - name: Checkout code
@@ -121,9 +118,9 @@ jobs:
             src/compiler_rust/target
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-${{ runner.arch }}-rust-bootstrap-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ runner.os == 'Windows' && 'gnullvm-' || '' }}rust-bootstrap-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-rust-bootstrap-
+            ${{ runner.os }}-${{ runner.arch }}-${{ runner.os == 'Windows' && 'gnullvm-' || '' }}rust-bootstrap-
 
       - name: Invalidate stale workspace-crate fingerprints
         # The prefix restore-key above can resurrect a target/ dir built from
@@ -500,103 +497,48 @@ jobs:
             echo "⚠ LLVM lib stage2 failed — using stage1 binary"
           fi
 
-      - name: Cache LLVM 23.1.1 (Windows x86_64)
+      - name: Setup MSYS2 CLANG64 (Windows x86_64)
+        id: msys2
         if: matrix.platform == 'windows-x86_64'
-        id: llvm-cache
-        uses: actions/cache@v4
+        uses: msys2/setup-msys2@v2
         with:
-          path: ${{ env.LLVM_ROOT }}
-          key: llvm-${{ runner.os }}-${{ runner.arch }}-${{ env.LLVM_VERSION }}-${{ env.LLVM_ARCHIVE_SHA256 }}
+          msystem: CLANG64
+          update: true
+          path-type: inherit
+          install: >-
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-lld
+            mingw-w64-clang-x86_64-llvm
+            mingw-w64-clang-x86_64-libc++
+            mingw-w64-clang-x86_64-libunwind
 
-      - name: Install LLVM 23.1.1 (Windows x86_64)
-        if: matrix.platform == 'windows-x86_64' && steps.llvm-cache.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $archiveName = 'clang+llvm-23.1.1-x86_64-pc-windows-msvc.tar.zst'
-          $archive = Join-Path $env:RUNNER_TEMP $archiveName
-          $staging = Join-Path $env:RUNNER_TEMP 'simple-llvm-23.1.1-extract'
-          $uri = 'https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.1/clang%2Bllvm-23.1.1-x86_64-pc-windows-msvc.tar.zst'
-          $ProgressPreference = 'SilentlyContinue'
-          Invoke-WebRequest -Uri $uri -OutFile $archive
-          $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actualHash -ne $env:LLVM_ARCHIVE_SHA256) {
-            throw "LLVM archive SHA-256 mismatch: $actualHash"
-          }
-          New-Item -ItemType Directory -Force -Path $staging | Out-Null
-          & 7z x $archive "-o$staging" -y | Out-Null
-          if ($LASTEXITCODE -ne 0) {
-            throw "failed to decompress LLVM archive: exit $LASTEXITCODE"
-          }
-          $tar = Join-Path $staging 'clang+llvm-23.1.1-x86_64-pc-windows-msvc.tar'
-          & 7z x $tar "-o$staging" -y | Out-Null
-          if ($LASTEXITCODE -ne 0) {
-            throw "failed to extract LLVM archive: exit $LASTEXITCODE"
-          }
-          $sourceRoot = Join-Path $staging 'clang+llvm-23.1.1-x86_64-pc-windows-msvc'
-          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $env:LLVM_ROOT) | Out-Null
-          Move-Item -LiteralPath $sourceRoot -Destination $env:LLVM_ROOT
-
-      - name: Verify LLVM 23.1.1 authority (Windows x86_64)
+      # Default Windows configuration: MinGW UCRT (UCRT + clang + LLD +
+      # libunwind/libc++, no GCC). Git Bash exports MSYSTEM=MINGW64, which
+      # never selects the ABI; pin gnu explicitly so the core-C runtime and
+      # the link agree (run 39357315407 SEGV'd on an ABI mix).
+      - name: Bind CLANG64 C driver (Windows x86_64)
         if: matrix.platform == 'windows-x86_64'
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          $checks = @(
-            @{ Tool = 'clang.exe'; Pattern = 'clang version 23\.1\.1(?:\s|$)' },
-            @{ Tool = 'clang-cl.exe'; Pattern = 'clang version 23\.1\.1(?:\s|$)' },
-            @{ Tool = 'llvm-ar.exe'; Pattern = 'LLVM version 23\.1\.1(?:\s|$)' },
-            @{ Tool = 'lld-link.exe'; Pattern = 'LLD 23\.1\.1(?:\s|$)' }
-          )
-          foreach ($check in $checks) {
-            $tool = Join-Path $env:LLVM_ROOT "bin\$($check.Tool)"
-            if (!(Test-Path -LiteralPath $tool -PathType Leaf)) {
-              throw "missing LLVM 23.1.1 tool: $tool"
-            }
-            $versionLines = @(& $tool --version 2>&1)
-            if ($LASTEXITCODE -ne 0) {
-              throw "$($check.Tool) --version failed: exit $LASTEXITCODE"
-            }
-            $version = $versionLines -join "`n"
-            if ($version -notmatch $check.Pattern) {
-              $summary = ($versionLines | Select-Object -First 3) -join ' | '
-              throw "$($check.Tool) is not LLVM 23.1.1: $summary"
-            }
-            $toolHash = (Get-FileHash -LiteralPath $tool -Algorithm SHA256).Hash.ToLowerInvariant()
-            $summary = ($versionLines | Select-Object -First 3) -join ' | '
-            Write-Host "LLVM_TOOL_ATTESTATION tool=$($check.Tool) sha256=$toolHash version=$summary"
-          }
-          (Join-Path $env:LLVM_ROOT 'bin') | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          "SIMPLE_LLVM_PATH=$env:LLVM_ROOT\bin\LLVM-C.dll" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $clang64 = Join-Path '${{ steps.msys2.outputs.msys2-location }}' 'clang64\bin'
+          & (Join-Path $clang64 'clang.exe') --version
+          if ($LASTEXITCODE -ne 0) { throw 'CLANG64 clang is required for the Windows release build' }
+          $clang64 | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "CC=clang" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CC_x86_64_pc_windows_gnullvm=clang" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "AR_x86_64_pc_windows_gnullvm=llvm-ar" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SIMPLE_WINDOWS_ABI=gnu" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SIMPLE_LINKER_FLAVOR=gnu" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Setup MSVC (Windows x86_64)
-        if: matrix.platform == 'windows-x86_64'
-        uses: ilammy/msvc-dev-cmd@v1
-
-      # Hide Git's /usr/bin/link so it doesn't shadow MSVC's link.exe.
-      - name: Fix MSVC linker PATH (Windows x86_64)
+      - name: Select gnullvm Rust host (Windows x86_64)
         if: matrix.platform == 'windows-x86_64'
         shell: bash
         run: |
-          if [ -f /usr/bin/link ]; then
-            mv /usr/bin/link /usr/bin/link.bak
-          fi
-
-      - name: Bind MSVC Clang compiler (Windows x86_64)
-        if: matrix.platform == 'windows-x86_64'
-        shell: pwsh
-        run: |
-          "CC=$env:LLVM_ROOT\bin\clang-cl.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "CXX=$env:LLVM_ROOT\bin\clang-cl.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "CC_x86_64_pc_windows_msvc=$env:LLVM_ROOT\bin\clang-cl.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "CXX_x86_64_pc_windows_msvc=$env:LLVM_ROOT\bin\clang-cl.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          # Git Bash exports MSYSTEM=MINGW64, which makes the Rust seed's
-          # Target::linker_flavor() pick GNU: the core-C runtime was then
-          # compiled with --target=x86_64-w64-windows-gnu (MinGW headers:
-          # strtok_r, swprintf, stat64i32, ignored __declspec(thread)) and
-          # linked into an MSVC image, and stage1 SEGV'd on native-build
-          # (run 39357315407). Pin the MSVC flavor for this row only.
-          "SIMPLE_LINKER_FLAVOR=msvc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          rustup set default-host x86_64-pc-windows-gnullvm
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' src/compiler_rust/rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal -c rustfmt -c clippy
+          (cd src/compiler_rust && rustc -vV) | tee "$RUNNER_TEMP/rustc-vV.txt"
+          grep -qx 'host: x86_64-pc-windows-gnullvm' "$RUNNER_TEMP/rustc-vV.txt"
 
       - name: Build next phase with configured previous compiler (config/bootstrap.sdn)
         id: prevc_windows
@@ -620,7 +562,8 @@ jobs:
           CROSS_TARGET=""
           TARGET_DIR="bootstrap"
           if [[ "${{ matrix.platform }}" == "windows-aarch64" ]]; then
-            CROSS_TARGET="aarch64-pc-windows-msvc"
+            # Experimental: no CLANGARM64 runner/sysroot yet; bootstrap-only.
+            CROSS_TARGET="aarch64-pc-windows-gnullvm"
             TARGET_DIR="${CROSS_TARGET}/bootstrap"
             rustup target add "$CROSS_TARGET" 2>/dev/null || true
           fi
