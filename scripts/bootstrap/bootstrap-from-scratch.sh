@@ -3495,6 +3495,8 @@ if [ "${rust_rebuilt}" -eq 1 ] || [ "${compiler_backfill_rebuilt}" -eq 1 ]; then
     [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
     *) echo "error: could not generate Rust authority nonce" >&2; exit 1 ;;
   esac
+  BOOTSTRAP_STAGE3_LLVM_FEATURES="${llvm_features:-}"
+  export BOOTSTRAP_STAGE3_LLVM_FEATURES
   bootstrap_stage3_prepare_seed_generation \
     "${rust_authority_profile_dir}" "${rust_authority_generation_root}" \
     "${seed_inputs_fingerprint}" "simple${exe_suffix}" \
