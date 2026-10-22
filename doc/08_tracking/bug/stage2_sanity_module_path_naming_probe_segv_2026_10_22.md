@@ -91,3 +91,38 @@ Next step: instrument the parse-shard / entry-scan path
 with the same env-gated trace to bracket the exact operation; suspect an
 env-dependent parse path (package-index cold route) interacting with this
 file's multi-line `or` continuations / docstring content.
+
+## Update: symbolized backtrace (p2_add reproduces manually since merge 05157642057)
+
+gdb on the exact worker argv (strace-captured) deterministically catches:
+
+```
+#0 module_surface_semantic_projection +5580   <- nearest-symbol; likely a
+                                                  following static helper
+#1 module_surface_from_owner (module_surface_declarations.spl:209)
+#2 ModuleSurfaceBuilder.add_parsed_canonical (module_surface_registry)
+#3 CompilerDriver.parse_all_impl
+```
+
+The fault fires during parse-all's surface projection of the freshly parsed
+canonical module — between the alias scan (trace fires) and retained lowering
+(trace silent). The [proj] entry trace in the projection does NOT fire even
+though the crash symbolizes inside the function — consistent with the PC
+landing in a STATIC helper laid out after it (the file's `_surface_mix_text`
+byte loop over a garbage text field is the prime suspect; the source already
+carries three rounds of "ANY-transport hazard sweep: annotated rebind"
+defenses, so the corrupting transport shape is one the sweeps miss).
+
+The same defect family explains this lane's earlier manifestations:
+NLL live_aliases method-arg corruption (fixed by free-function conversion)
+and the original module_path_naming sanity-only SEGV (same bracket).
+
+Also ruled out this cycle: PR #4133's fs.spl Any-expansion variant as the
+Linux cause (restored the two-arg text form — landed, matches the pre-merge
+proven shape; crash persists, so the regression trigger is the binary-layout
+shift, not the file-io path). io_file.rs changes are Windows-only; the
+collections.rs merge correctly retains both promote exemptions.
+
+Next: either compile a -g (line-info) candidate for an exact fault line, or
+move per-helper env-gated traces into _surface_fold/_surface_mix_text/
+_surface_function to name the corrupting field.
