@@ -319,14 +319,13 @@ fn _semantic_value_lines(u: DeclUniverse, type_text: text, v: text, indent: text
         out = out + indent + "    state = _ast_semantic_mix_tag(state, \"nil\")\n"
         out = out + indent + "else:\n"
         out = out + indent + "    state = _ast_semantic_mix_tag(state, \"some\")\n"
-        val payload_type = _strip_opt(type_text)
-        if payload_type.starts_with("[") and payload_type.ends_with("]"):
-            # Give optional array pattern payloads a concrete iterator type.
-            # The nil/some tags and element stream stay unchanged.
-            val payload = "sov{idx}"
-            out = out + indent + "    val " + payload + ": " + payload_type + " = " + v + " ?? []\n"
-            return out + _semantic_value_lines(u, payload_type, payload, indent + "    ", idx)
-        return out + _semantic_value_lines(u, _strip_opt(type_text), v, indent + "    ", idx)
+        val present_type = _strip_opt(type_text)
+        if present_type.starts_with("[") and present_type.ends_with("]"):
+            # @workaround bug=optional_array_payload_narrowing_native_2026_10_21 reason=old_producer_does_not_narrow_optional_array_after_nil_guard
+            val present_value = "semantic_present{idx}"
+            out = out + indent + "    val " + present_value + ": " + present_type + " = " + v + "!\n"
+            return out + _semantic_value_lines(u, present_type, present_value, indent + "    ", idx)
+        return out + _semantic_value_lines(u, present_type, v, indent + "    ", idx)
     if c.cat == "node":
         return indent + "state = " + _semantic_fn(c.a) + "(" + v + ", state)\n"
     if c.cat == "prim":
@@ -437,13 +436,13 @@ fn emit_ast_semantic_file(u: DeclUniverse) -> text:
     out = out + "use std.nogc_sync_mut.io_runtime.{{exit}}\n\n"
     out = out + "class AstSemanticHash:\n    var stream: Sha256StreamV1\n    scratch: [u8]\n    units: i64\n    cacheable: bool\n\n"
     out = out + "fn ast_semantic_hash_seed() -> AstSemanticHash:\n    AstSemanticHash(sha256_stream_v1_new(), [0u8; 8], 0, true)\n\n"
-    out = out + "fn _ast_semantic_mix_i64(input: AstSemanticHash, value: i64) -> AstSemanticHash:\n    var state = input\n    var shift = 0\n    while shift < 64:\n        state.scratch[shift / 8] = ((value >> shift) & 255) as u8\n        shift = shift + 8\n    if not state.stream.update(state.scratch): state.cacheable = false\n    state.units = state.units + 1\n    state\n\n"
+    out = out + "fn _ast_semantic_mix_i64(input: AstSemanticHash, value: i64) -> AstSemanticHash:\n    var state = input\n    var shift = 0\n    while shift < 64:\n        state.scratch[shift / 8] = ((value >> shift) & 255) as u8\n        shift = shift + 8\n    # @workaround bug=native_method_result_overwrites_receiver_slot_2026_10_21 reason=old_producer_field_writeback_uses_bool_result\n    val stream: Sha256StreamV1 = state.stream\n    if not stream.update(state.scratch): state.cacheable = false\n    state.units = state.units + 1\n    state\n\n"
     out = out + "fn _ast_semantic_mix_text(state: AstSemanticHash, value: text) -> AstSemanticHash:\n    val byte_len = value.len()\n    var result = _ast_semantic_mix_i64(state, byte_len)\n    var i = 0\n    while i < byte_len:\n        result = _ast_semantic_mix_i64(result, value.byte_at(i) as i64)\n        i = i + 1\n    result\n\n"
     out = out + "fn _ast_semantic_mix_tag(state: AstSemanticHash, tag: text) -> AstSemanticHash:\n    _ast_semantic_mix_text(state, tag)\n\n"
     out = out + "fn _ast_semantic_mix_scalar_i64(state: AstSemanticHash, width_tag: text, value: i64) -> AstSemanticHash:\n    var result = _ast_semantic_mix_tag(state, width_tag)\n    _ast_semantic_mix_i64(result, value)\n\n"
     out = out + "fn _ast_semantic_mix_scalar_text(state: AstSemanticHash, width_tag: text, value: text) -> AstSemanticHash:\n    var result = _ast_semantic_mix_tag(state, width_tag)\n    _ast_semantic_mix_text(result, value)\n\n"
     out = out + "fn _ast_semantic_mark_uncacheable(state: AstSemanticHash, reason: text) -> AstSemanticHash:\n    state.cacheable = false\n    _ast_semantic_mix_tag(state, reason)\n\n"
-    out = out + "fn ast_semantic_hash_finish(input: AstSemanticHash) -> text:\n    var state = input\n    if not state.cacheable: return \"\"\n    # @workaround bug=seed_coalesce_stateful_operand_twice_2026_10_12 recover=fcc1d91ea1b92992c7ebd7ba50f44379999bab4e reason=seed_coalesce_evaluates_stateful_operand_twice\n    val digest = state.stream.finish_hex()\n    digest ?? \"\"\n\n"
+    out = out + "fn ast_semantic_hash_finish(input: AstSemanticHash) -> text:\n    var state = input\n    if not state.cacheable: return \"\"\n    # @workaround bug=seed_coalesce_stateful_operand_twice_2026_10_12 recover=fcc1d91ea1b92992c7ebd7ba50f44379999bab4e reason=seed_coalesce_evaluates_stateful_operand_twice\n    val stream: Sha256StreamV1 = state.stream\n    val digest = stream.finish_hex()\n    digest ?? \"\"\n\n"
     out = out + "fn _ast_semantic_unhandled(kind: text, where_: text):\n    print \"E-AST-SEMANTIC-UNHANDLED: {{kind}} at {{where_}}; regenerate encoder\"\n    exit(1)\n\n"
     for name in ast_semantic_emit_order(u): out = out + emit_one_ast_semantic_encoder(u, name) + "\n"
     out = out + "export AstSemanticHash, ast_semantic_hash_seed, ast_semantic_hash_finish\n"
@@ -662,64 +661,27 @@ fn emit_fold_init(d: Dialect) -> text:
 # Driver
 # ============================================================================
 
-fn fold_inputs_valid(u: DeclUniverse, dialect: Dialect) -> bool:
-    for carrier in dialect.carriers:
-        val kind = carrier[1]
-        if not u.is_enum(kind) or u.decl_of(kind).variants.len() == 0:
-            print "compiler_schema: refusing empty carrier {dialect.key}.{kind}"
-            return false
-    true
-
-fn prepare_fold_inputs(repo_root: text) -> [DeclUniverse]:
-    """Retain every validated dialect before any output family is written."""
-    var inputs: [DeclUniverse] = []
-    for dialect in all_dialects():
-        val universe = load_dialect(repo_root, dialect)
-        if not fold_inputs_valid(universe, dialect): return []
-        inputs.push(universe)
-    val semantic = load_ast_semantic_universe(repo_root)
-    if not fold_inputs_valid(semantic, dialect_ast()): return []
-    inputs.push(semantic)
-    inputs
-
 fn generate_folds_into(repo_root: text, out_root: text) -> i64:
-    generate_folds_prepared(prepare_fold_inputs(repo_root), out_root)
+    """Write every dialect's fold visitor under `out_root`. Returns file count.
 
-fn generate_folds_prepared(inputs: [DeclUniverse], out_root: text) -> i64:
-    val dialects = all_dialects()
-    if inputs.len() != dialects.len() + 1: return -1
-    var index = 0
-    for dialect in dialects:
-        if not fold_inputs_valid(inputs[index], dialect): return -1
-        index = index + 1
-    val semantic: DeclUniverse = inputs[dialects.len()]
-    if not fold_inputs_valid(semantic, dialect_ast()): return -1
+    `out_root` is a tree root, not one directory: each dialect owns its own
+    path, so the freshness checker can regenerate into a temp tree and diff."""
     var files = 0
-    index = 0
-    for d in dialects:
-        val u: DeclUniverse = inputs[index]
-        index = index + 1
+    for d in all_dialects():
+        val u = load_dialect(repo_root, d)
+        if u.sources.len() == 0:
+            continue
         val dir = out_root + "/" + d.out_dir
         dir_create_all(dir)
         file_write(dir + "/" + d.out_file, emit_fold_file(u, d))
         if d.key != "hir":
-            file_write(dir + "/ast_semantic_value.spl", emit_ast_semantic_file(semantic))
+            # The HIR package __init__ is owned by visitor_gen, which already
+            # re-exports this file; a second writer would fight it.
+            val semantic_u = load_ast_semantic_universe(repo_root)
+            file_write(dir + "/ast_semantic_value.spl", emit_ast_semantic_file(semantic_u))
             file_write(dir + "/__init__.spl", emit_fold_init(d))
         files = files + 1
     files
-
-fn fold_variant_report_prepared(inputs: [DeclUniverse]) -> text:
-    val dialects = all_dialects()
-    if inputs.len() != dialects.len() + 1: return "invalid prepared fold inputs"
-    var out = ""
-    var index = 0
-    for d in dialects:
-        val u: DeclUniverse = inputs[index]
-        index = index + 1
-        out = out + d.key + ": " + "{d_carrier_variant_total(u, d)}" + " carrier variant(s), "
-        out = out + "{d_variant_total(u, d)}" + " total variant(s), "
-        out = out + "{d_emit_order(u, d).len()}" + " walk fn(s)\n"
-    out
 
 fn fold_variant_report(repo_root: text) -> text:
     var out = ""
@@ -737,5 +699,4 @@ export d_variant_total, d_carrier_variant_total, registry_hash
 export ast_semantic_roots, load_ast_semantic_universe, ast_semantic_closure, ast_semantic_emit_order
 export emit_one_ast_semantic_encoder, emit_ast_semantic_file
 export emit_one_walk, emit_fold_kind_name_fns, emit_fold_file, emit_fold_init
-export prepare_fold_inputs, generate_folds_prepared, fold_variant_report_prepared
 export generate_folds_into, fold_variant_report

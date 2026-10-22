@@ -1,0 +1,38 @@
+# REQ-MC-008 B3 actual top-level route, exact stdout bytes and critical deny.
+# Runtime UNRUN; invoke once only after the canonical binary is qualified.
+use std.spec.{describe, it, expect, step}
+use app.cli.command_registry.{cli_registry_has_command_v1}
+use app.io.mod.{process_run_timeout}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io_runtime.{file_write, file_read, file_delete, getpid, time_now_unix_micros}
+use std.env.platform.{get_temp_dir}
+
+describe "semantic doc links top-level command route":
+    it "should fix exact stdout bytes and deny line links in critical checks":
+        step("Prepare the production input")
+        val source = "fn increment(value: i64) -> i64:\n    value + 1\n"
+        val base = get_temp_dir() + "/doc-links-cli-{getpid()}-{time_now_unix_micros()}"
+        val source_file = base + ".spl"
+        val markdown_file = base + ".md"
+        val markdown = "[increment](src/math.spl#L1)"
+        expect(file_write(source_file, source)).to_equal(true)
+        expect(file_write(markdown_file, markdown)).to_equal(true)
+        expect(cli_registry_has_command_v1("doc")).to_equal(true)
+        val options = ["--markdown", markdown_file, "--source-file", source_file, "--source-link", "src/math.spl", "--package", "pkg", "--module", "sample.math", "--revision", sha256_text(source)]
+        step("Exercise the production boundary")
+        val (check_out, check_err, check_code) = process_run_timeout("bin/simple", ["doc", "check-links", "--critical"].merge(options), 30000)
+        expect(check_code).to_equal(1)
+        expect(check_out).to_contain("W-DOC-AST-001")
+        val (fixed, fix_err, fix_code) = process_run_timeout("bin/simple", ["doc", "fix-links"].merge(options), 30000)
+        step("Inspect the observed result")
+        expect(fix_code).to_equal(0)
+        expect(fixed).to_start_with("[increment](spl:fn@sample.math.increment~")
+        expect(fixed).to_end_with(")")
+        expect(file_read(markdown_file)).to_equal(markdown)
+        step("Reject the negative control")
+        expect(file_write(source_file, source + "# edited\n")).to_equal(true)
+        val (stale_out, stale_err, stale_code) = process_run_timeout("bin/simple", ["doc", "fix-links"].merge(options), 30000)
+        expect(stale_code).to_equal(1)
+        expect(file_read(markdown_file)).to_equal(markdown)
+        expect(file_delete(source_file)).to_equal(true)
+        expect(file_delete(markdown_file)).to_equal(true)

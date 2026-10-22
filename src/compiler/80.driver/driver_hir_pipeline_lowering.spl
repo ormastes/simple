@@ -119,6 +119,13 @@ struct DriverHirShardTransactionReceiptV1:
     archive: HirBodyArchiveV1?
     declaration_registration: MonoArchiveRegistrationReceiptV1?
 
+# A retained-path cache worker exports projections, never the module body.
+struct DriverRetainedHirShardReceiptV1:
+    status: i64
+    stored: bool
+    function_count: i64
+    layout: ValueStructLayoutModuleV1?
+
 # The only issuer is the actual selected-source transaction below. Neither an
 # archive store nor a journal publisher can populate these private lookups.
 struct DriverHirSourceLoweringOwnerV1:
@@ -496,6 +503,159 @@ impl CompilerDriver:
         val proof = driver_native_parsed_objectless_proof_v1(
             source.module_name, source.path, sha256_text(source.content))
         if proof != "": self.ctx.native_parsed_objectless_proofs[source.module_name] = proof
+
+    # Retained phase-2 parsers are borrowed. Everything newly lowered or decoded
+    # belongs to this one transaction until its last cache/layout reader finishes.
+    me lower_retained_hir_shard_v1(lowering: HirLowering, source: SourceFile,
+            source_index: i64, key: text, is_entry: bool, unstub: bool,
+            bootstrap_mode: bool, validation_keys: i64, validation_values: i64) -> DriverRetainedHirShardReceiptV1:
+        if not rt_transient_array_scope_begin():
+            self.ctx.add_error("retained HIR shard transient scope unavailable")
+            return DriverRetainedHirShardReceiptV1(status: -1, stored: false, function_count: 0, layout: nil)
+        val reverse_token = reverse_reference_module_begin_v1()
+        if reverse_token < 0:
+            val ended = driver_end_transient_parse_scope()
+            self.ctx.add_error("retained HIR shard reverse-reference owner unavailable; cleanup={ended}")
+            return DriverRetainedHirShardReceiptV1(status: -1, stored: false, function_count: 0, layout: nil)
+        val parser_generation = parser_initialization_generation_v1()
+        val flat_rows_before = bootstrap_hir_module_count()
+        lowering.begin_module(source.path)
+        # Not a phase memo: no HirType from a completed module may survive here.
+        lowering.prescan_type_parameters = {}
+        var module: HirModule = nil
+        var errors: [text] = []
+        var warnings: [text] = []
+        var failure = ""
+        var cached = false
+        var stored = false
+        var parsed_known = false
+        var parsed_code_less = false
+        var function_count: i64 = 0
+        var layout: ValueStructLayoutModuleV1? = nil
+        var abi_receipt: (text, Result<text, text>) = ("", Err(""))
+        val binding = hir_cache_parser_binding_v1(key, source.module_name,
+            source.path, self.ctx.source_identities_owner[source_index])
+        val found = if binding.len() == 64: hir_cache_load_in_owned_scope(key, binding) else: nil
+        if val decoded = found:
+            module = decoded
+            module.path = source.path
+            cached = true
+            stored = true
+            parsed_known = true
+            parsed_code_less = hir_cache_last_parser_objectless()
+            warnings = hir_cache_last_warnings()
+        else:
+            # Preserve the authoritative entry reparse, retained-parser path,
+            # and low-memory/explicit-stub fallback selection of the normal loop.
+            val reparse = (is_entry and source.content != "") or
+                (not is_entry and unstub and self.ctx.modules[source.module_name] == nil and
+                    source.content != "" and not self.ctx.options.low_memory)
+            var parser_module: ParserModule = nil
+            if reparse:
+                val parsed = self.parse_full_frontend_in_borrowed_scope_selected_v1(
+                    source.content, source.path, source.module_name)
+                if parsed.is_err(): errors.push(parsed.unwrap_err())
+                else:
+                    parser_module = parsed.unwrap()
+                    if par_had_error_get(): errors.push(driver_parse_error_message(source.path))
+            elif is_entry or (unstub and self.ctx.modules[source.module_name] != nil):
+                parser_module = self.ctx.modules[source.module_name]
+            if errors.len() == 0:
+                if parser_module != nil or is_entry:
+                    parsed_known = true
+                    parsed_code_less = driver_native_parsed_module_has_no_runtime_body_v1(parser_module)
+                    module = lowering.lower_parser_module_unstub(parser_module, is_entry)
+                else:
+                    module = HirModule(name: source.module_name, path: source.path,
+                        imports: [], exports: [], domain_blocks: [], symbols: lowering.symbols.module_snapshot(),
+                        functions: {}, gpu_function_targets: {}, gpu_function_backend_orders: {},
+                        classes: {}, structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [],
+                        constants: {}, static_asserts: [], aop_advices: [], di_bindings: [],
+                        arch_rules: [], mock_decls: [], types: [])
+                var error_index = 0
+                while error_index < lowering.lowering_error_count():
+                    val message = lowering.lowering_error_message_at(error_index, source.module_name)
+                    if lowering.lowering_error_is_recovered_at(error_index): warnings.push(message)
+                    else:
+                        if errors.len() < 10:
+                            eprint("[hir-fatal] source_idx={source_index} path={source.path} error_idx={error_index} text={message}")
+                        errors.push(message)
+                    error_index = error_index + 1
+                if module == nil and errors.len() == 0:
+                    failure = "retained HIR shard lowering returned no module"
+        if not driver_hir_mem_snapshot("hir-post-lowering", source_index, source.path,
+                0, validation_keys, validation_values, lowering.lowered_trait_count_value):
+            failure = "durable memory snapshot write failed at hir-post-lowering"
+        if not driver_hir_mem_snapshot("hir-post-diagnostics", source_index, source.path,
+                0, validation_keys, validation_values, lowering.lowered_trait_count_value):
+            failure = "durable memory snapshot write failed at hir-post-diagnostics"
+        if (env_get("SIMPLE_M4_WORK_RECEIPT") ?? "") == "1":
+            val work = if cached: 0 else: 1
+            print "[M4 lower] module={source.module_name} work={work}"
+        if errors.len() == 0 and failure == "":
+            if (env_get("SIMPLE_HIR_CODEC_ROUNDTRIP")) == "1":
+                val round_trip = hir_codec_roundtrip_selfcheck(module)
+                print hir_codec_roundtrip_line(round_trip, source.path)
+                module = round_trip.module
+            if driver_hir_abi_interface_trace_enabled():
+                abi_receipt = (module.name, driver_hir_abi_interface_digest_in_owned_scope_v1(module))
+            if not cached:
+                val parser_record = if parsed_known and binding != "":
+                    (if parsed_code_less: "objectless:" else: "bodyful:") + binding
+                else: ""
+                # Preserve retained-path PASS+UNCACHED for refused stores,
+                # including I/O refusal; streaming uses a different policy.
+                if parser_record != "":
+                    stored = hir_cache_store_in_owned_scope(key, module, warnings, parser_record)
+            function_count = driver_dict_entry_count(module.functions)
+            layout = Some(value_struct_layout_declarations_v1(source.module_name,
+                module.path, module.structs, module.symbols))
+        if not driver_hir_mem_snapshot("hir-post-store", source_index, source.path,
+                0, validation_keys, validation_values, lowering.lowered_trait_count_value):
+            failure = "durable memory snapshot write failed at hir-post-store"
+        # Allocate this wrapper while active, then pause after the final body
+        # reader. No module, SymbolTable or bootstrap flat row is included.
+        val compact_roots = (errors, warnings, failure, abi_receipt, layout)
+        if not rt_transient_array_scope_pause():
+            driver_rollback_flat_hir_row_or_abort(flat_rows_before)
+            val ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
+            eprint("retained HIR shard pause failed; cleanup={ended}")
+            exit(1)
+            return DriverRetainedHirShardReceiptV1(status: -1, stored: false, function_count: 0, layout: nil)
+        val compact_owned = rt_transient_heap_promote(compact_roots)
+        val memos_owned = lowering.promote_phase_memo_transient_owners()
+        val frontend_owned = driver_promote_retained_frontend_owners_v1(
+            parser_initialization_generation_v1() != parser_generation)
+        val cfg_owned = self.ctx.runtime_std_full_inventory_selection == nil or self.promote_target_cfg_receipt_v1(source.path)
+        val cache_owned = hir_cache_promote_diagnostic_owner_v1()
+        driver_rollback_flat_hir_row_or_abort(flat_rows_before)
+        lowering.begin_module(source.path)
+        lowering.prescan_type_parameters = {}
+        lowering.lowered_trait_count_value = 0
+        hir_cache_clear_last_warnings()
+        if not (compact_owned and memos_owned and frontend_owned and cfg_owned and cache_owned):
+            val ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
+            eprint("retained HIR shard retained-root promotion failed; cleanup={ended}")
+            exit(1)
+            return DriverRetainedHirShardReceiptV1(status: -1, stored: false, function_count: 0, layout: nil)
+        if not driver_publish_reverse_reference_parse_scope_v1(reverse_token):
+            # Failed cleanup may leave retained roots dangling. Never reuse.
+            eprint("retained HIR shard reverse-reference publication/reclamation failed")
+            exit(1)
+            return DriverRetainedHirShardReceiptV1(status: -1, stored: false, function_count: 0, layout: nil)
+        # Only closed-scope allocations and explicit compact owners enter ctx.
+        if parsed_known: self.capture_native_parsed_objectless_v1(parsed_code_less, source)
+        if abi_receipt.0 != "":
+            driver_log_typed_hir_abi_result_v1(abi_receipt.0, abi_receipt.1, source.path)
+        if not bootstrap_mode:
+            for message in warnings: self.ctx.add_warning(message)
+        for message in errors: self.ctx.add_error(message)
+        if errors.len() > 0:
+            eprint("[hir-fatal-count] source_idx={source_index} path={source.path} count={errors.len()} shown={driver_shown_fatal_count(errors.len(), false)}")
+        if failure != "": self.ctx.add_error(failure)
+        DriverRetainedHirShardReceiptV1(
+            status: if failure != "": -1 elif errors.len() > 0: 2 elif cached: 0 elif stored: 1 else: 3,
+            stored: stored, function_count: function_count, layout: layout)
 
     me lower_retained_surface_module(lowering: HirLowering, module: ParserModule, source_path: text, is_entry: bool, source: SourceFile) -> Result<HirModule, text>:
         if not rt_transient_array_scope_begin():
@@ -1771,270 +1931,297 @@ impl CompilerDriver:
                 return false
             log_trace("processing module")
 
-            # Set per-module filename so Symbol.defining_module is populated
-            # correctly and effective_visibility() matches against the right file.
-            val src_path = source_path_map[name]
-            # Reuse the explicitly typed owner. begin_module clears diagnostics
-            # in place and resets all per-module state without recopying the
-            # retained registry across a constructor call.
-            lowering.begin_module(src_path ?? "")
-            if src_path != nil:
-                lowering.module_filename = src_path
-            # This loop-owned lowerer is the trait registry owner. Do not copy
-            # the closure-sized dictionary through a second local each module.
-
-            # Step 1: Lower to HIR
-            # Real single-file HIR lowering is the default; SIMPLE_STUB_HIR=1 is the
-            # escape hatch forcing the empty-HIR stub (pre-2026-07-03 behavior) if a
-            # stage4 lowering regression ever needs to be bypassed in the field.
-            val unstub_hir = driver_hir_explicit_semantic_policy(self.ctx) or
-                (env_get("SIMPLE_STUB_HIR")) != "1"
             val is_requested_bootstrap_entry = source_idx == entry_source_index
             val is_bootstrap_entry = is_requested_bootstrap_entry
-            dtrace("[DRV] lac-loop name={name} content_len={src.content.len()}")
-            val hir_cache_key_value: text = if hir_closure_digest != "":
-                hir_cache_key(src.path, hir_closure_digest, is_bootstrap_entry)
-            else:
-                ""
-            val hir_cached: HirModule? = if hir_cache_key_value != "":
-                hir_cache_load_parsed_v1(hir_cache_key_value, hir_cache_parser_binding_v1(hir_cache_key_value, src.module_name, src.path, self.ctx.source_identities_owner[source_idx]), src.path)
-            else:
-                nil
-            val hir_cache_hit: bool = hir_cached != nil
-            if (env_get("SIMPLE_M4_WORK_RECEIPT") ?? "") == "1":
-                val hir_work = if hir_cache_hit: 0 else: 1
-                print "[M4 lower] module={name} work={hir_work}"
-            if hir_cache_hit:
-                self.capture_native_parsed_objectless_v1(hir_cache_last_parser_objectless(), src)
-                # Replay the one global side effect lowering has besides its
-                # return value: the flat HIR rows the bootstrap MIR bridge
-                # reads (module_build.spl's bootstrap_flat_mode block).
-                val hir_registry_name = if is_bootstrap_entry:
-                    hir_module_logical_name_from_path(src_path ?? "")
-                else:
-                    name
-                if hir_bootstrap_mode_gate:
-                    bootstrap_hir_modules_add_from_module(hir_cached.unwrap(), hir_registry_name, is_bootstrap_entry)
-                # Replay the stored warning-level diagnostics under the same
-                # gate the in-process path applies (warnings are advisory and
-                # dropped in bootstrap mode there too).
-                if not hir_bootstrap_mode_gate:
-                    for hir_cached_warning in hir_cache_last_warnings():
-                        self.ctx.add_warning(hir_cached_warning)
-            var hir_module: HirModule = if hir_cache_hit:
-                dtrace("[DRV] branch=hir_cache_hit")
-                hir_cached.unwrap()
-            elif is_bootstrap_entry:
-                dtrace("[DRV] branch=bootstrap_entry")
-                # The phase-2 cached ParserModule can still be non-nil after
-                # its flat-AST arena has been reset while carrying an empty
-                # functions Dict. Reparse the one authoritative entry source
-                # immediately before HIR lowering so real bodies are owned by
-                # this lowering pass rather than a stale arena-backed cache.
-                val bootstrap_module_for_hir: ParserModule = if src.content != "":
-                    parse_full_frontend(src.content, src.path, name, self.ctx.logger)
-                else:
-                    self.ctx.modules[name]
-                val bootstrap_lower_result = self.lower_retained_surface_module(
-                    lowering, bootstrap_module_for_hir, src.path, is_bootstrap_entry, src)
-                if bootstrap_lower_result.is_err():
-                    self.ctx.add_error(bootstrap_lower_result.unwrap_err())
-                    hir_shard_guard_block("durable memory snapshot or source identity guard failed")
-                    mem_snapshot_abort()
-                    return false
-                bootstrap_lower_result.unwrap()
-            elif unstub_hir and (self.ctx.modules[name] != nil):
-                # Reuse phase 2's parsed closure module. Re-parsing every source
-                # makes entry-closure HIR lowering superlinear and bypasses the
-                # object cache before code generation starts.
-                dtrace("[DRV] branch=unstub_cached")
-                val cached_lower_result = self.lower_retained_surface_module(
-                    lowering, self.ctx.modules[name], src.path, is_bootstrap_entry, src)
-                if cached_lower_result.is_err():
-                    self.ctx.add_error(cached_lower_result.unwrap_err())
-                    hir_shard_guard_block("durable memory snapshot or source identity guard failed")
-                    mem_snapshot_abort()
-                    return false
-                cached_lower_result.unwrap()
-            elif unstub_hir and (src.content != "") and (not self.ctx.options.low_memory):
-                # Opt-in real lowering via a fresh frontend re-parse (see caveat above).
-                # MUST call the uniquely-named lower_parser_module_unstub: a plain
-                # `lowering.lower_module(...)` mis-dispatches on the stage4 binary
-                # (same-name sibling on MirLowering; iteration 17) and the real
-                # HIR lowering body never runs.
-                dtrace("[DRV] branch=unstub_reparse")
-                val entry_module_for_hir = parse_full_frontend(src.content, src.path, name, self.ctx.logger)
-                val reparsed_lower_result = self.lower_retained_surface_module(
-                    lowering, entry_module_for_hir, src.path, is_bootstrap_entry, src)
-                if reparsed_lower_result.is_err():
-                    self.ctx.add_error(reparsed_lower_result.unwrap_err())
-                    hir_shard_guard_block("durable memory snapshot or source identity guard failed")
-                    mem_snapshot_abort()
-                    return false
-                val lowered_hm: HirModule = reparsed_lower_result.unwrap()
-                dtrace("[DRV] lowered funcs={lowered_hm.functions.len()} name={lowered_hm.name}")
-                lowered_hm
-            else:
-                # Empty-HIR stub: forced via SIMPLE_STUB_HIR=1, or fallback when the
-                # phase-2 module was evicted/unavailable (re-parse would be unsafe).
-                dtrace("[DRV] branch=STUB (empty HIR)")
-                HirModule(
-                    name: name,
-                    path: src.path,
-                    imports: [],
-                    exports: [],
-                    domain_blocks: [],
-                    symbols: lowering.symbols.module_snapshot(),
-                    functions: {},
-                    gpu_function_targets: {},
-                    gpu_function_backend_orders: {},
-                    classes: {},
-                    structs: {},
-                    enums: {},
-                    bitfields: {},
-                    traits: {},
-                    impls: [],
-                    constants: {},
-                    static_asserts: [],
-                    aop_advices: [],
-                    di_bindings: [],
-                    arch_rules: [],
-                    mock_decls: [],
-                    types: []
-                )
-            if source_idx < 3:
-                eprint("[bootstrap-error-count] source_idx={source_idx} point=post-lowering count={self.ctx.error_count_value}")
-            if not driver_hir_mem_snapshot(
-                "hir-post-lowering", source_idx, src.path,
-                retained_hir_module_count,
-                validation_module_keys.len(), validation_module_values.len(),
-                lowering.lowered_trait_count_value):
-                self.ctx.add_error("durable memory snapshot write failed at hir-post-lowering")
-                hir_shard_guard_block("durable memory snapshot or source identity guard failed")
-                mem_snapshot_abort()
-                return false
+            var hir_module: HirModule = nil
+            var hir_function_count: i64 = 0
             val focused_future_driver_diag = src.path == "src/lib/nogc_async_mut/async/future.spl"
-            if focused_future_driver_diag:
-                eprint("[driver-hir] returned future")
-            log_trace("HIR lowered")
-            if focused_future_driver_diag:
-                eprint("[driver-hir] trace done")
-            # Keep the aggregate LoweringError array inside HirLowering. The
-            # owner methods return only scalar/text projections, avoiding the
-            # stage4 array-of-struct transport failure under closure pressure.
-            val module_error_count: i64 = lowering.lowering_error_count()
-            val bootstrap_mode = hir_bootstrap_mode_gate
-            val bootstrap_diag = bootstrap_mode and
-                (env_get("SIMPLE_BOOTSTRAP_DEBUG")) == "1"
-            if bootstrap_diag and module_error_count > 0 and source_idx < 20:
-                eprint("[bootstrap-hir-module-errors] source_idx={source_idx} path={src.path} count={module_error_count}")
-            var module_error_idx = 0
-            var module_fatal_error_count = 0
-            var hir_module_warnings: [text] = []
-            while module_error_idx < module_error_count:
-                val module_error_message: text = lowering.lowering_error_message_at(module_error_idx, name)
-                val module_error_recovered: bool = lowering.lowering_error_is_recovered_at(module_error_idx)
-                if bootstrap_diag and source_idx < 20 and module_error_idx < 20:
-                    eprint("[bootstrap-hir-module-error] source_idx={source_idx} error_idx={module_error_idx} len={module_error_message.len()} recovered={module_error_recovered} text={module_error_message}")
-                if module_error_recovered:
-                    hir_module_warnings.push(module_error_message)
-                    # Avoid warning aggregate mutation on the old staged ABI;
-                    # bounded debug output above keeps diagnostics visible.
-                    if not bootstrap_mode:
-                        self.ctx.add_warning(module_error_message)
+            var retained_shard: DriverRetainedHirShardReceiptV1? = nil
+            if hir_shard_mode:
+                val shard_key = hir_cache_key(src.path, hir_closure_digest, is_bootstrap_entry)
+                val shard_unstub = driver_hir_explicit_semantic_policy(self.ctx) or
+                    (env_get("SIMPLE_STUB_HIR")) != "1"
+                val receipt = self.lower_retained_hir_shard_v1(lowering, src,
+                    source_idx, shard_key, is_bootstrap_entry, shard_unstub, hir_bootstrap_mode_gate,
+                    validation_module_keys.len(), validation_module_values.len())
+                retained_shard = Some(receipt)
+                hir_function_count = receipt.function_count
+                if receipt.status < 0:
+                    hir_shard_guard_block("retained HIR shard transaction failed")
+                    mem_snapshot_abort()
+                    return false
+                if receipt.status == 2:
+                    if not hir_shard_finish(src.path, "FAILED", false):
+                        hir_shard_guard_block("HIR diagnostic receipt publication failed")
+                        self.ctx.add_error("HIR diagnostic receipt publication failed")
+                        return false
+                    self.ctx.mark_module_poisoned(name)
+                    if self.ctx.poison_budget_exhausted(): return false
+                    hir_loop_pos = hir_loop_pos + 1
+                    continue
+                if receipt.status == 1: hir_shard_lowered = hir_shard_lowered + 1
+            else:
+                # Set per-module filename so Symbol.defining_module is populated
+                # correctly and effective_visibility() matches against the right file.
+                val src_path = source_path_map[name]
+                # Reuse the explicitly typed owner. begin_module clears diagnostics
+                # in place and resets all per-module state without recopying the
+                # retained registry across a constructor call.
+                lowering.begin_module(src_path ?? "")
+                if src_path != nil:
+                    lowering.module_filename = src_path
+                # This loop-owned lowerer is the trait registry owner. Do not copy
+                # the closure-sized dictionary through a second local each module.
+
+                # Step 1: Lower to HIR
+                # Real single-file HIR lowering is the default; SIMPLE_STUB_HIR=1 is the
+                # escape hatch forcing the empty-HIR stub (pre-2026-07-03 behavior) if a
+                # stage4 lowering regression ever needs to be bypassed in the field.
+                val unstub_hir = driver_hir_explicit_semantic_policy(self.ctx) or
+                    (env_get("SIMPLE_STUB_HIR")) != "1"
+                dtrace("[DRV] lac-loop name={name} content_len={src.content.len()}")
+                val hir_cache_key_value: text = if hir_closure_digest != "":
+                    hir_cache_key(src.path, hir_closure_digest, is_bootstrap_entry)
                 else:
-                    # Print fatal text immediately and bound volume per module;
-                    # the count line below always reports the true total.
-                    if module_fatal_error_count < 10 or bootstrap_diag:
-                        eprint("[hir-fatal] source_idx={source_idx} path={src.path} error_idx={module_error_idx} text={module_error_message}")
-                    module_fatal_error_count = module_fatal_error_count + 1
-                    self.ctx.add_error(module_error_message)
-                module_error_idx = module_error_idx + 1
-            if module_fatal_error_count > 0:
-                eprint("[hir-fatal-count] source_idx={source_idx} path={src.path} count={module_fatal_error_count} shown={driver_shown_fatal_count(module_fatal_error_count, bootstrap_diag)}")
-            if source_idx < 3:
-                eprint("[bootstrap-error-count] source_idx={source_idx} point=post-diagnostics count={self.ctx.error_count_value}")
-            if not driver_hir_mem_snapshot(
-                "hir-post-diagnostics", source_idx, src.path,
-                retained_hir_module_count,
-                validation_module_keys.len(), validation_module_values.len(),
-                lowering.lowered_trait_count_value):
-                self.ctx.add_error("durable memory snapshot write failed at hir-post-diagnostics")
-                hir_shard_guard_block("durable memory snapshot or source identity guard failed")
-                mem_snapshot_abort()
-                return false
-            if focused_future_driver_diag:
-                eprint("[driver-hir] errors done")
-
-            # Drop a fatally poisoned partial aggregate but keep checking later
-            # modules. The count delta prevents poisoning them transitively.
-            if self.ctx.error_count_value > module_errors_before:
-                if not hir_shard_finish(src.path, "FAILED", false):
-                    hir_shard_guard_block("HIR diagnostic receipt publication failed")
-                    self.ctx.add_error("HIR diagnostic receipt publication failed")
+                    ""
+                val hir_cached: HirModule? = if hir_cache_key_value != "":
+                    hir_cache_load_parsed_v1(hir_cache_key_value, hir_cache_parser_binding_v1(hir_cache_key_value, src.module_name, src.path, self.ctx.source_identities_owner[source_idx]), src.path)
+                else:
+                    nil
+                val hir_cache_hit: bool = hir_cached != nil
+                if (env_get("SIMPLE_M4_WORK_RECEIPT") ?? "") == "1":
+                    val hir_work = if hir_cache_hit: 0 else: 1
+                    print "[M4 lower] module={name} work={hir_work}"
+                if hir_cache_hit:
+                    self.capture_native_parsed_objectless_v1(hir_cache_last_parser_objectless(), src)
+                    # Replay the one global side effect lowering has besides its
+                    # return value: the flat HIR rows the bootstrap MIR bridge
+                    # reads (module_build.spl's bootstrap_flat_mode block).
+                    val hir_registry_name = if is_bootstrap_entry:
+                        hir_module_logical_name_from_path(src_path ?? "")
+                    else:
+                        name
+                    if hir_bootstrap_mode_gate:
+                        bootstrap_hir_modules_add_from_module(hir_cached.unwrap(), hir_registry_name, is_bootstrap_entry)
+                    # Replay the stored warning-level diagnostics under the same
+                    # gate the in-process path applies (warnings are advisory and
+                    # dropped in bootstrap mode there too).
+                    if not hir_bootstrap_mode_gate:
+                        for hir_cached_warning in hir_cache_last_warnings():
+                            self.ctx.add_warning(hir_cached_warning)
+                hir_module = if hir_cache_hit:
+                    dtrace("[DRV] branch=hir_cache_hit")
+                    hir_cached.unwrap()
+                elif is_bootstrap_entry:
+                    dtrace("[DRV] branch=bootstrap_entry")
+                    # The phase-2 cached ParserModule can still be non-nil after
+                    # its flat-AST arena has been reset while carrying an empty
+                    # functions Dict. Reparse the one authoritative entry source
+                    # immediately before HIR lowering so real bodies are owned by
+                    # this lowering pass rather than a stale arena-backed cache.
+                    val bootstrap_module_for_hir: ParserModule = if src.content != "":
+                        parse_full_frontend(src.content, src.path, name, self.ctx.logger)
+                    else:
+                        self.ctx.modules[name]
+                    val bootstrap_lower_result = self.lower_retained_surface_module(
+                        lowering, bootstrap_module_for_hir, src.path, is_bootstrap_entry, src)
+                    if bootstrap_lower_result.is_err():
+                        self.ctx.add_error(bootstrap_lower_result.unwrap_err())
+                        hir_shard_guard_block("durable memory snapshot or source identity guard failed")
+                        mem_snapshot_abort()
+                        return false
+                    bootstrap_lower_result.unwrap()
+                elif unstub_hir and (self.ctx.modules[name] != nil):
+                    # Reuse phase 2's parsed closure module. Re-parsing every source
+                    # makes entry-closure HIR lowering superlinear and bypasses the
+                    # object cache before code generation starts.
+                    dtrace("[DRV] branch=unstub_cached")
+                    val cached_lower_result = self.lower_retained_surface_module(
+                        lowering, self.ctx.modules[name], src.path, is_bootstrap_entry, src)
+                    if cached_lower_result.is_err():
+                        self.ctx.add_error(cached_lower_result.unwrap_err())
+                        hir_shard_guard_block("durable memory snapshot or source identity guard failed")
+                        mem_snapshot_abort()
+                        return false
+                    cached_lower_result.unwrap()
+                elif unstub_hir and (src.content != "") and (not self.ctx.options.low_memory):
+                    # Opt-in real lowering via a fresh frontend re-parse (see caveat above).
+                    # MUST call the uniquely-named lower_parser_module_unstub: a plain
+                    # `lowering.lower_module(...)` mis-dispatches on the stage4 binary
+                    # (same-name sibling on MirLowering; iteration 17) and the real
+                    # HIR lowering body never runs.
+                    dtrace("[DRV] branch=unstub_reparse")
+                    val entry_module_for_hir = parse_full_frontend(src.content, src.path, name, self.ctx.logger)
+                    val reparsed_lower_result = self.lower_retained_surface_module(
+                        lowering, entry_module_for_hir, src.path, is_bootstrap_entry, src)
+                    if reparsed_lower_result.is_err():
+                        self.ctx.add_error(reparsed_lower_result.unwrap_err())
+                        hir_shard_guard_block("durable memory snapshot or source identity guard failed")
+                        mem_snapshot_abort()
+                        return false
+                    val lowered_hm: HirModule = reparsed_lower_result.unwrap()
+                    dtrace("[DRV] lowered funcs={lowered_hm.functions.len()} name={lowered_hm.name}")
+                    lowered_hm
+                else:
+                    # Empty-HIR stub: forced via SIMPLE_STUB_HIR=1, or fallback when the
+                    # phase-2 module was evicted/unavailable (re-parse would be unsafe).
+                    dtrace("[DRV] branch=STUB (empty HIR)")
+                    HirModule(
+                        name: name,
+                        path: src.path,
+                        imports: [],
+                        exports: [],
+                        domain_blocks: [],
+                        symbols: lowering.symbols.module_snapshot(),
+                        functions: {},
+                        gpu_function_targets: {},
+                        gpu_function_backend_orders: {},
+                        classes: {},
+                        structs: {},
+                        enums: {},
+                        bitfields: {},
+                        traits: {},
+                        impls: [],
+                        constants: {},
+                        static_asserts: [],
+                        aop_advices: [],
+                        di_bindings: [],
+                        arch_rules: [],
+                        mock_decls: [],
+                        types: []
+                    )
+                if source_idx < 3:
+                    eprint("[bootstrap-error-count] source_idx={source_idx} point=post-lowering count={self.ctx.error_count_value}")
+                if not driver_hir_mem_snapshot(
+                    "hir-post-lowering", source_idx, src.path,
+                    retained_hir_module_count,
+                    validation_module_keys.len(), validation_module_values.len(),
+                    lowering.lowered_trait_count_value):
+                    self.ctx.add_error("durable memory snapshot write failed at hir-post-lowering")
+                    hir_shard_guard_block("durable memory snapshot or source identity guard failed")
+                    mem_snapshot_abort()
                     return false
-                # Fail LOUDLY rather than silently: the module is about to be
-                # poisoned and dropped. If the rise in error_count did not come
-                # from the diagnostic loop above, nothing has printed a reason,
-                # and that silence is the defect this block exists to prevent.
-                # Say so explicitly instead of leaving the reader with only a
-                # count delta.
-                if module_fatal_error_count == 0:
-                    eprint("[hir-fatal] source_idx={source_idx} path={src.path} text=<no diagnostic text> errors rose {module_errors_before}->{self.ctx.error_count_value} with zero fatal lowering diagnostics; the cause is outside the module-error loop (memory-snapshot write failure or a directly added context error)")
-                eprint("[hir-poisoned] source_idx={source_idx} path={src.path} module={name} errors={module_errors_before}->{self.ctx.error_count_value}")
-                val poison_ctx: CompileContext = self.ctx
-                poison_ctx.mark_module_poisoned(name)
-                if poison_ctx.poison_budget_exhausted():
-                    if not mem_snapshot_finish_with_outcome("hir-diagnostic"):
-                        self.ctx.add_error("durable memory snapshot diagnostic terminal publication failed")
+                if focused_future_driver_diag:
+                    eprint("[driver-hir] returned future")
+                log_trace("HIR lowered")
+                if focused_future_driver_diag:
+                    eprint("[driver-hir] trace done")
+                # Keep the aggregate LoweringError array inside HirLowering. The
+                # owner methods return only scalar/text projections, avoiding the
+                # stage4 array-of-struct transport failure under closure pressure.
+                val module_error_count: i64 = lowering.lowering_error_count()
+                val bootstrap_mode = hir_bootstrap_mode_gate
+                val bootstrap_diag = bootstrap_mode and
+                    (env_get("SIMPLE_BOOTSTRAP_DEBUG")) == "1"
+                if bootstrap_diag and module_error_count > 0 and source_idx < 20:
+                    eprint("[bootstrap-hir-module-errors] source_idx={source_idx} path={src.path} count={module_error_count}")
+                var module_error_idx = 0
+                var module_fatal_error_count = 0
+                var hir_module_warnings: [text] = []
+                while module_error_idx < module_error_count:
+                    val module_error_message: text = lowering.lowering_error_message_at(module_error_idx, name)
+                    val module_error_recovered: bool = lowering.lowering_error_is_recovered_at(module_error_idx)
+                    if bootstrap_diag and source_idx < 20 and module_error_idx < 20:
+                        eprint("[bootstrap-hir-module-error] source_idx={source_idx} error_idx={module_error_idx} len={module_error_message.len()} recovered={module_error_recovered} text={module_error_message}")
+                    if module_error_recovered:
+                        hir_module_warnings.push(module_error_message)
+                        # Avoid warning aggregate mutation on the old staged ABI;
+                        # bounded debug output above keeps diagnostics visible.
+                        if not bootstrap_mode:
+                            self.ctx.add_warning(module_error_message)
+                    else:
+                        # Print fatal text immediately and bound volume per module;
+                        # the count line below always reports the true total.
+                        if module_fatal_error_count < 10 or bootstrap_diag:
+                            eprint("[hir-fatal] source_idx={source_idx} path={src.path} error_idx={module_error_idx} text={module_error_message}")
+                        module_fatal_error_count = module_fatal_error_count + 1
+                        self.ctx.add_error(module_error_message)
+                    module_error_idx = module_error_idx + 1
+                if module_fatal_error_count > 0:
+                    eprint("[hir-fatal-count] source_idx={source_idx} path={src.path} count={module_fatal_error_count} shown={driver_shown_fatal_count(module_fatal_error_count, bootstrap_diag)}")
+                if source_idx < 3:
+                    eprint("[bootstrap-error-count] source_idx={source_idx} point=post-diagnostics count={self.ctx.error_count_value}")
+                if not driver_hir_mem_snapshot(
+                    "hir-post-diagnostics", source_idx, src.path,
+                    retained_hir_module_count,
+                    validation_module_keys.len(), validation_module_values.len(),
+                    lowering.lowered_trait_count_value):
+                    self.ctx.add_error("durable memory snapshot write failed at hir-post-diagnostics")
+                    hir_shard_guard_block("durable memory snapshot or source identity guard failed")
+                    mem_snapshot_abort()
                     return false
-                # Skip the shared-trait fold and the phase_hir_modules store
-                # below: neither may observe a poisoned module.
-                hir_loop_pos = hir_loop_pos + 1
-                continue
+                if focused_future_driver_diag:
+                    eprint("[driver-hir] errors done")
 
-            # Codec self-check (SIMPLE_HIR_CODEC_ROUNDTRIP=1, default off): one
-            # receipt per module, and the build CONTINUES FROM THE DECODED
-            # module so a lossy codec cannot pass quietly. Gate:
-            # scripts/check/check-hir-codec-roundtrip.shs
-            if (env_get("SIMPLE_HIR_CODEC_ROUNDTRIP")) == "1":
-                val hir_round_trip = hir_codec_roundtrip_selfcheck(hir_module)
-                print hir_codec_roundtrip_line(hir_round_trip, src.path)
-                hir_module = hir_round_trip.module
+                # Drop a fatally poisoned partial aggregate but keep checking later
+                # modules. The count delta prevents poisoning them transitively.
+                if self.ctx.error_count_value > module_errors_before:
+                    if not hir_shard_finish(src.path, "FAILED", false):
+                        hir_shard_guard_block("HIR diagnostic receipt publication failed")
+                        self.ctx.add_error("HIR diagnostic receipt publication failed")
+                        return false
+                    # Fail LOUDLY rather than silently: the module is about to be
+                    # poisoned and dropped. If the rise in error_count did not come
+                    # from the diagnostic loop above, nothing has printed a reason,
+                    # and that silence is the defect this block exists to prevent.
+                    # Say so explicitly instead of leaving the reader with only a
+                    # count delta.
+                    if module_fatal_error_count == 0:
+                        eprint("[hir-fatal] source_idx={source_idx} path={src.path} text=<no diagnostic text> errors rose {module_errors_before}->{self.ctx.error_count_value} with zero fatal lowering diagnostics; the cause is outside the module-error loop (memory-snapshot write failure or a directly added context error)")
+                    eprint("[hir-poisoned] source_idx={source_idx} path={src.path} module={name} errors={module_errors_before}->{self.ctx.error_count_value}")
+                    val poison_ctx: CompileContext = self.ctx
+                    poison_ctx.mark_module_poisoned(name)
+                    if poison_ctx.poison_budget_exhausted():
+                        if not mem_snapshot_finish_with_outcome("hir-diagnostic"):
+                            self.ctx.add_error("durable memory snapshot diagnostic terminal publication failed")
+                        return false
+                    # Skip the shared-trait fold and the phase_hir_modules store
+                    # below: neither may observe a poisoned module.
+                    hir_loop_pos = hir_loop_pos + 1
+                    continue
 
-            driver_log_typed_hir_abi_interface_v1(hir_module, src.path)
-            var hir_cache_stored: bool = hir_cache_hit
-            if hir_cache_key_value != "" and not hir_cache_hit:
-                val parser_record = self.native_parser_cache_record_v1(hir_cache_key_value, src, source_idx)
-                if parser_record != "" and hir_cache_store(hir_cache_key_value, hir_module, hir_module_warnings, parser_record):
-                    hir_shard_lowered = hir_shard_lowered + 1
-                    hir_cache_stored = true
-            if not hir_shard_finish(src.path, "PASS", hir_cache_stored):
-                hir_shard_guard_block("HIR completion receipt publication failed")
-                self.ctx.add_error("HIR completion receipt publication failed")
-                return false
-            val hir_function_count: i64 = driver_dict_entry_count(hir_module.functions)
-            if focused_future_driver_diag:
-                eprint("[driver-hir] functions={hir_function_count}")
+                # Codec self-check (SIMPLE_HIR_CODEC_ROUNDTRIP=1, default off): one
+                # receipt per module, and the build CONTINUES FROM THE DECODED
+                # module so a lossy codec cannot pass quietly. Gate:
+                # scripts/check/check-hir-codec-roundtrip.shs
+                if (env_get("SIMPLE_HIR_CODEC_ROUNDTRIP")) == "1":
+                    val hir_round_trip = hir_codec_roundtrip_selfcheck(hir_module)
+                    print hir_codec_roundtrip_line(hir_round_trip, src.path)
+                    hir_module = hir_round_trip.module
 
-            # Newly lowered traits remain on the loop-owned lowerer so later
-            # modules resolve cross-module trait defaults without a Dict copy.
-            if not phase_hir_modules.contains_key(name):
-                retained_hir_module_count = retained_hir_module_count + 1
-            phase_hir_modules[name] = hir_module
-            if not driver_hir_mem_snapshot(
-                "hir-post-store", source_idx, src.path,
-                retained_hir_module_count,
-                validation_module_keys.len(), validation_module_values.len(),
-                lowering.lowered_trait_count_value):
-                self.ctx.add_error("durable memory snapshot write failed at hir-post-store")
-                hir_shard_guard_block("durable memory snapshot or source identity guard failed")
-                mem_snapshot_abort()
-                return false
-            if source_idx < 3:
-                eprint("[bootstrap-error-count] source_idx={source_idx} point=post-store count={self.ctx.error_count_value}")
-            if source_idx < 4:
-                log_phase("phase3:hir:validation:lookup:start index={source_idx}")
+                driver_log_typed_hir_abi_interface_v1(hir_module, src.path)
+                var hir_cache_stored: bool = hir_cache_hit
+                if hir_cache_key_value != "" and not hir_cache_hit:
+                    val parser_record = self.native_parser_cache_record_v1(hir_cache_key_value, src, source_idx)
+                    if parser_record != "" and hir_cache_store(hir_cache_key_value, hir_module, hir_module_warnings, parser_record):
+                        hir_shard_lowered = hir_shard_lowered + 1
+                        hir_cache_stored = true
+                if not hir_shard_finish(src.path, "PASS", hir_cache_stored):
+                    hir_shard_guard_block("HIR completion receipt publication failed")
+                    self.ctx.add_error("HIR completion receipt publication failed")
+                    return false
+                hir_function_count = driver_dict_entry_count(hir_module.functions)
+                if focused_future_driver_diag:
+                    eprint("[driver-hir] functions={hir_function_count}")
+
+                # The normal compiler owns complete HIR through aggregate
+                # validation and MIR; cache workers return only projections.
+                if not phase_hir_modules.contains_key(name):
+                    retained_hir_module_count = retained_hir_module_count + 1
+                phase_hir_modules[name] = hir_module
+                if not driver_hir_mem_snapshot(
+                    "hir-post-store", source_idx, src.path,
+                    retained_hir_module_count,
+                    validation_module_keys.len(), validation_module_values.len(),
+                    lowering.lowered_trait_count_value):
+                    self.ctx.add_error("durable memory snapshot write failed at hir-post-store")
+                    hir_shard_guard_block("durable memory snapshot or source identity guard failed")
+                    mem_snapshot_abort()
+                    return false
+                if source_idx < 3:
+                    eprint("[bootstrap-error-count] source_idx={source_idx} point=post-store count={self.ctx.error_count_value}")
+                if source_idx < 4:
+                    log_phase("phase3:hir:validation:lookup:start index={source_idx}")
             # Keep the retained graph, SourceFile content, and ModuleSurface
             # declarations on this frame. Passing any of them through a value
             # parameter duplicates the no-GC Stage-3 ownership graph.
@@ -2127,54 +2314,75 @@ impl CompilerDriver:
                         retained_module_surfaces.surfaces[validation_surface_index].logical_name)
                     if source_idx < 4:
                         log_phase("phase3:hir:validation:key-push:done index={source_idx}")
-                    validation_module_values = validation_module_values.push(
-                        value_struct_layout_declarations_v1(
-                            name, hir_module.path, hir_module.structs,
-                            hir_module.symbols))
-                    # ANY-transport: annotated rebind before the composite push
-                    # (cycle-78: pushing the bare local hit the codegen's
-                    # unpromoted global-load capture).
-                    # Cycle-78: carried on self.ctx (proven transport); the
-                    # local-var form hit an unpromoted-capture codegen path.
-                    val hir_module_copy: HirModule = hir_module
-                    self.ctx.validation_module_array = self.ctx.validation_module_array.push(hir_module_copy)
-                    # Codec transport twin: encoding happens HERE, in the lane
-                    # whose reads work (same lane as the HIR cache store).
-                    # workaround(p2_add): a codec refusal (encode "") must NOT
-                    # become a validation blob -- hir_module_decode("") is nil
-                    # and the RT blob gate fails the whole build on "module
-                    # blob 0" (repro: p2_add sanity, reason=codec,
-                    # RT-E-HIR-BLOB-DECODE, 2026-10-18). Skip the blob-family
-                    # entries together so the parallel arrays stay in sync;
-                    # when every blob refuses, the validator's empty-blobs
-                    # contract falls back to validation_module_array.
-                    val validation_blob: text = hir_module_encode_retained_v1(hir_module_copy)
-                    if validation_blob != "":
-                        self.ctx.validation_module_blobs = self.ctx.validation_module_blobs.push(validation_blob)
-                        # Cycle-81 CLEAN escalation (revised cycle-82): producer-side
-                        # scalar facts parallel to the blobs. Cycle-82 shim proved
-                        # even a support-unit callee's Dict value reads of
-                        # HirFunction arrive erased in this lane (fault at the
-                        # +120 field load on rt_index_get's result); the ONLY
-                        # context that demonstrably walks module.functions values
-                        # is the codec unit's (the generated encoder reads
-                        # node.functions[dk3] on every encode), so the extraction
-                        # lives there (hir_module_has_rt_hal). The blobs
-                        # validation entry must NEVER read a field off a decoded
-                        # HirModule.
-                        val validation_has_rt_hal: bool = hir_module_has_rt_hal(hir_module)
-                        self.ctx.validation_module_has_rt_hal = self.ctx.validation_module_has_rt_hal.push(validation_has_rt_hal)
-                        val validation_claim_count: i64 = rt_criticality_claim_keys().len()
-                        self.ctx.validation_module_claim_counts = self.ctx.validation_module_claim_counts.push(validation_claim_count)
+                    if val Some(shard) = retained_shard:
+                        if val Some(layout) = shard.layout:
+                            validation_module_values = validation_module_values.push(layout)
+                        else:
+                            hir_shard_guard_block("retained HIR shard layout receipt missing")
+                            self.ctx.add_error("retained HIR shard layout receipt missing")
+                            return false
+                    else:
+                        validation_module_values = validation_module_values.push(
+                            value_struct_layout_declarations_v1(
+                                name, hir_module.path, hir_module.structs,
+                                hir_module.symbols))
+                    # Shards publish cache entries and exit before aggregate
+                    # validation. Keep identity/layout receipts above, but
+                    # avoid retaining this unused validation transport.
+                    if not hir_shard_mode:
+                        # ANY-transport: annotated rebind before the composite push
+                        # (cycle-78: pushing the bare local hit the codegen's
+                        # unpromoted global-load capture).
+                        # Cycle-78: carried on self.ctx (proven transport); the
+                        # local-var form hit an unpromoted-capture codegen path.
+                        val hir_module_copy: HirModule = hir_module
+                        self.ctx.validation_module_array = self.ctx.validation_module_array.push(hir_module_copy)
+                        # Codec transport twin: encoding happens HERE, in the lane
+                        # whose reads work (same lane as the HIR cache store).
+                        # workaround(p2_add): a codec refusal (encode "") must NOT
+                        # become a validation blob -- hir_module_decode("") is nil
+                        # and the RT blob gate fails the whole build on "module
+                        # blob 0" (repro: p2_add sanity, reason=codec,
+                        # RT-E-HIR-BLOB-DECODE, 2026-10-18). Skip the blob-family
+                        # entries together so the parallel arrays stay in sync;
+                        # when every blob refuses, the validator's empty-blobs
+                        # contract falls back to validation_module_array.
+                        val validation_blob: text = hir_module_encode_retained_v1(hir_module_copy)
+                        if validation_blob != "":
+                            self.ctx.validation_module_blobs = self.ctx.validation_module_blobs.push(validation_blob)
+                            # Cycle-81 CLEAN escalation (revised cycle-82): producer-side
+                            # scalar facts parallel to the blobs. Cycle-82 shim proved
+                            # even a support-unit callee's Dict value reads of
+                            # HirFunction arrive erased in this lane (fault at the
+                            # +120 field load on rt_index_get's result); the ONLY
+                            # context that demonstrably walks module.functions values
+                            # is the codec unit's (the generated encoder reads
+                            # node.functions[dk3] on every encode), so the extraction
+                            # lives there (hir_module_has_rt_hal). The blobs
+                            # validation entry must NEVER read a field off a decoded
+                            # HirModule.
+                            val validation_has_rt_hal: bool = hir_module_has_rt_hal(hir_module)
+                            self.ctx.validation_module_has_rt_hal = self.ctx.validation_module_has_rt_hal.push(validation_has_rt_hal)
+                            val validation_claim_count: i64 = rt_criticality_claim_keys().len()
+                            self.ctx.validation_module_claim_counts = self.ctx.validation_module_claim_counts.push(validation_claim_count)
                     if source_idx < 4:
                         log_phase("phase3:hir:validation:value-push:done index={source_idx}")
             if focused_future_driver_diag:
                 eprint("[driver-hir] stored")
-            if is_requested_bootstrap_entry:
+            if is_requested_bootstrap_entry and not hir_shard_mode:
                 # Keep the concrete aggregate in an explicit owner. Reading it
                 # back through Dict<text, HirModule> is unsafe under staged
                 # full-closure pressure and can lose the bootstrap entry.
                 phase_entry_hir = Some(hir_module)
+            if val Some(shard) = retained_shard:
+                # Identity/layout checks above still gate the terminal receipt.
+                val outcome = if self.ctx.error_count_value > module_errors_before: "FAILED" else: "PASS"
+                if not hir_shard_finish(src.path, outcome, shard.stored):
+                    hir_shard_guard_block("HIR completion receipt publication failed")
+                    self.ctx.add_error("HIR completion receipt publication failed")
+                    return false
+                if outcome == "FAILED": return false
+                log_phase("phase3:hir:retained-shard:reclaimed source_idx={source_idx} full_modules=0 flat_rows={bootstrap_hir_module_count()}")
             log_phase("phase3:hir:file:done {src.path} module={name} funcs={hir_function_count}")
             log_trace("stored HIR module")
             hir_loop_pos = hir_loop_pos + 1

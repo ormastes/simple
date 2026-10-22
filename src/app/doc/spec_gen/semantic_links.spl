@@ -1,0 +1,41 @@
+# REQ-MC-008 B4: bind explicit document symbols to the common B2 source owner.
+use app.doc.spec_gen.types.{SpecFile}
+use compiler.semantics.symbol_id.semantic_link.{SemanticLinkFailureV1, SemanticLinkErrorV1, semantic_link_error_v1}
+use compiler.semantics.symbol_id.semantic_link_source.{SemanticLinkDocumentV1, resolve_semantic_links_file_v1}
+
+pub fn semantic_doc_label_v1(label: text) -> text:
+    """Escape a link label for ordinary Markdown and table cells."""
+    var result = label
+    for replacement in [("&", "&amp;"), ("<", "&lt;"), (">", "&gt;"), ("\\", "\\\\"), ("[", "\\["), ("]", "\\]"), ("|", "&#124;"), ("\r", " "), ("\n", " "), ("`", "\\`"), ("*", "\\*"), ("_", "\\_")]:
+        result = result.replace(replacement.0, replacement.1)
+    result
+
+pub fn semantic_doc_symbol_map_v1(spec: SpecFile, document: SemanticLinkDocumentV1, revision: text) -> Result<Dict<text, text>, SemanticLinkErrorV1>:
+    if revision != document.revision:
+        return Err(semantic_link_error_v1(SemanticLinkFailureV1.RevisionChanged, "snapshot does not belong to the requested revision"))
+    semantic_doc_symbol_map_from_file_v1(spec, document.package, document.module_path, document.file, revision)
+
+pub fn semantic_doc_symbol_map_from_file_v1(spec: SpecFile, package: text, module_path: text, file: text, revision: text) -> Result<Dict<text, text>, SemanticLinkErrorV1>:
+    """Validate one bounded batch; reuse the snapshot and copied identity facts.
+
+    Only explicit semantic URIs claim declaration authority. Extractor guesses
+    keep the existing renderer's plain symbol behavior. No source parse or
+    filesystem walk occurs here; B2 owns revision checks and indexed resolution.
+    """
+    var uris: [text] = []
+    var seen: Dict<text, bool> = {}
+    for test_case in spec.test_cases:
+        for symbol in test_case.symbols:
+            if symbol.starts_with("spl:") and not seen.contains_key(symbol):
+                if uris.len() >= 4096:
+                    return Err(semantic_link_error_v1(SemanticLinkFailureV1.InvalidAuthority, "document exceeds the semantic-link batch bound"))
+                seen[symbol] = true
+                uris.push(symbol)
+    val declarations = resolve_semantic_links_file_v1(uris, package, module_path, file, revision)?
+    var links: Dict<text, text> = {}
+    for row in 0..uris.len():
+        val symbol = declarations[row].symbol
+        val label = semantic_doc_label_v1(symbol.module_path + "." + symbol.name)
+        # The B2 URI parser admits no Markdown URL delimiters or whitespace.
+        links[uris[row]] = "[" + label + "](" + uris[row] + ")"
+    Ok(links)

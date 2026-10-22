@@ -1,0 +1,37 @@
+# REQ-MC-008 B2 actual top-level command route; runtime UNRUN.
+use std.spec.{describe, it, expect, step}
+use app.cli.command_registry.{cli_registry_has_command_v1, cli_registry_direct_script_target_v1}
+use app.io.mod.{process_run_timeout}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io_runtime.{file_write, file_delete, getpid, time_now_unix_micros}
+use std.env.platform.{get_temp_dir}
+
+describe "semantic ast-link top-level command route":
+    it "should route from-line and resolve through the registered production command":
+        step("Prepare the production input")
+        val source = "fn increment(value: i64) -> i64:\n    value + 1\n"
+        val path = get_temp_dir() + "/ast-link-cli-{getpid()}-{time_now_unix_micros()}.spl"
+        expect(file_write(path, source)).to_equal(true)
+        expect(cli_registry_has_command_v1("ast-link")).to_equal(true)
+        expect(cli_registry_direct_script_target_v1("ast-link")).to_equal("")
+        val options = ["--package", "pkg", "--module", "sample.math", "--revision", sha256_text(source)]
+        step("Exercise the production boundary")
+        val (out, err, code) = process_run_timeout("bin/simple", ["ast-link", "from-line", path + "#L1"].merge(options), 30000)
+        expect(code).to_equal(0)
+        expect(out.trim()).to_start_with("spl:fn@sample.math.increment~")
+        val (resolved, resolve_error, resolve_code) = process_run_timeout("bin/simple", ["ast-link", "resolve", out.trim(), "--file", path].merge(options), 30000)
+        step("Inspect the observed result")
+        expect(resolve_code).to_equal(0)
+        expect(resolved.trim()).to_equal(path + ":1:1")
+        step("Reject the negative control")
+        expect(file_write(path, source + "# edited\n")).to_equal(true)
+        val (stale_out, stale_error, stale_code) = process_run_timeout("bin/simple", ["ast-link", "resolve", out.trim(), "--file", path].merge(options), 30000)
+        expect(stale_code).to_equal(1)
+        expect(stale_error + stale_out).to_contain("revision")
+        expect(file_delete(path)).to_equal(true)
+
+    it "should return a nonzero status for a malformed registered command":
+        step("Reject the negative control")
+        val (out, err, code) = process_run_timeout("bin/simple", ["ast-link", "resolve"], 30000)
+        expect(code).to_equal(1)
+        expect(out + err).to_contain("expected ast-link")

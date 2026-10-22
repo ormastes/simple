@@ -1,6 +1,11 @@
 #if defined(__linux__) && !defined(_GNU_SOURCE)
 #define _GNU_SOURCE
 #endif
+#include "runtime_alloc_observer.h"
+#if defined(SIMPLE_ALLOC_OBSERVER_V1) && SIMPLE_ALLOC_OBSERVER_V1
+const volatile int rt_alloc_observer_native_owner_v1 = 1;
+#endif
+
 /*
  * Simple Native Runtime Bridge
  *
@@ -176,7 +181,7 @@ const char* rt_random_hex(int64_t len) {
     size_t byte_len = (size_t)len;
     unsigned char* random_bytes = NULL;
     if (byte_len > 0) {
-        random_bytes = (unsigned char*)malloc(byte_len);
+        random_bytes = (unsigned char*)rt_observed_malloc_v1(byte_len);
         if (!random_bytes) return NULL;
 #if defined(_WIN32)
         typedef long (WINAPI *BCryptGenRandomFn)(void*, unsigned char*, unsigned long, unsigned long);
@@ -204,7 +209,7 @@ const char* rt_random_hex(int64_t len) {
         close(fd);
 #endif
     }
-    char* encoded = (char*)malloc(byte_len * 2 + 1);
+    char* encoded = (char*)rt_observed_malloc_v1(byte_len * 2 + 1);
     if (!encoded) { free(random_bytes); return NULL; }
     for (size_t i = 0; i < byte_len; i++) {
         encoded[i * 2] = hex[random_bytes[i] >> 4];
@@ -708,7 +713,7 @@ const char* rt_fd_read_until(int64_t fd, uint8_t stop_byte, int64_t max) {
     return "";
 #else
     if (fd < 0 || max <= 0) return "";
-    char* buf = (char*)malloc((size_t)max + 1);
+    char* buf = (char*)rt_observed_malloc_v1((size_t)max + 1);
     if (!buf) return "";
     int64_t count = 0;
     while (count < max) {
@@ -837,7 +842,7 @@ int64_t rt_open_fd(const char* path, int64_t flags, int64_t mode) {
     if (flags & 0x400) oflag |= _O_APPEND;
     int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, p, -1, NULL, 0);
     if (wide_len <= 0) { errno = EINVAL; return -1; }
-    wchar_t* wide = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    wchar_t* wide = (wchar_t*)rt_observed_malloc_v1((size_t)wide_len * sizeof(wchar_t));
     if (!wide) { errno = ENOMEM; return -1; }
     MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, p, -1, wide, wide_len);
     int fd = _wopen(wide, oflag, _S_IREAD | _S_IWRITE);
@@ -943,7 +948,7 @@ typedef struct RtCoreAtomicInt {
 } RtCoreAtomicInt;
 
 SPL_CORE_C_WEAK int64_t rt_atomic_int_new(int64_t initial) {
-    RtCoreAtomicInt* value = (RtCoreAtomicInt*)malloc(sizeof(RtCoreAtomicInt));
+    RtCoreAtomicInt* value = (RtCoreAtomicInt*)rt_observed_malloc_v1(sizeof(RtCoreAtomicInt));
     if (!value) return 0;
     atomic_init(&value->value, initial);
     return (int64_t)(intptr_t)value;
@@ -1023,7 +1028,7 @@ typedef struct RtCoreAtomicBool {
 } RtCoreAtomicBool;
 
 SPL_CORE_C_WEAK int64_t rt_atomic_bool_new(bool initial) {
-    RtCoreAtomicBool* value = (RtCoreAtomicBool*)malloc(sizeof(RtCoreAtomicBool));
+    RtCoreAtomicBool* value = (RtCoreAtomicBool*)rt_observed_malloc_v1(sizeof(RtCoreAtomicBool));
     if (!value) return 0;
     atomic_init(&value->value, initial);
     return (int64_t)(intptr_t)value;
@@ -1613,7 +1618,7 @@ static int rt_core_track_transient_immortal(void* ptr) {
             next_cap > SIZE_MAX / sizeof(void*)) {
             return 0;
         }
-        void** next = (void**)realloc(
+        void** next = (void**)rt_observed_realloc_v1(
             rt_core_transient_heap_scope_objects, next_cap * sizeof(void*));
         if (!next) return 0;
         rt_core_transient_heap_scope_objects = next;
@@ -1702,7 +1707,7 @@ static int rt_core_register_mutex(RtCoreMutex* mutex) {
     while (atomic_flag_test_and_set_explicit(&rt_core_mutex_registry_lock, memory_order_acquire)) { }
     if (rt_core_mutex_registry_len == rt_core_mutex_registry_cap) {
         size_t next_cap = rt_core_mutex_registry_cap == 0 ? 16 : rt_core_mutex_registry_cap * 2;
-        RtCoreMutex** next = (RtCoreMutex**)realloc(rt_core_mutex_registry, next_cap * sizeof(RtCoreMutex*));
+        RtCoreMutex** next = (RtCoreMutex**)rt_observed_realloc_v1(rt_core_mutex_registry, next_cap * sizeof(RtCoreMutex*));
         if (!next) {
             atomic_flag_clear_explicit(&rt_core_mutex_registry_lock, memory_order_release);
             return 0;
@@ -1991,7 +1996,7 @@ static int rt_core_transient_raw_grow(void) {
         next_cap = rt_core_transient_raw_alloc_cap;
     }
     if (next_cap > SIZE_MAX / sizeof(RtCoreTransientRawAlloc)) return 0;
-    RtCoreTransientRawAlloc* fresh = (RtCoreTransientRawAlloc*)calloc(
+    RtCoreTransientRawAlloc* fresh = (RtCoreTransientRawAlloc*)rt_observed_calloc_v1(
         next_cap, sizeof(RtCoreTransientRawAlloc));
     if (!fresh) return 0;
     RtCoreTransientRawAlloc* old = rt_core_transient_raw_allocs;
@@ -2185,7 +2190,7 @@ static int rt_core_immortal_registry_erase_raw(uintptr_t p) {
 /* caller holds the lock */
 static int rt_core_immortal_registry_resize(size_t new_cap) {
     if (new_cap > SIZE_MAX / sizeof(uintptr_t)) return 0;
-    uintptr_t* fresh = (uintptr_t*)calloc(new_cap, sizeof(uintptr_t));
+    uintptr_t* fresh = (uintptr_t*)rt_observed_calloc_v1(new_cap, sizeof(uintptr_t));
     if (!fresh) return 0;
     uintptr_t* old = rt_core_immortal_registry;
     size_t old_cap = rt_core_immortal_registry_cap;
@@ -2755,7 +2760,7 @@ static int rt_core_transient_seen_insert(RtCoreTransientPlan* plan, uintptr_t pt
     if ((plan->seen_len + 1) * 10 >= plan->seen_cap * 7) {
         size_t next_cap = plan->seen_cap == 0 ? 256 : plan->seen_cap * 2;
         if (next_cap > SIZE_MAX / sizeof(uintptr_t)) return -1;
-        uintptr_t* fresh = (uintptr_t*)calloc(next_cap, sizeof(uintptr_t));
+        uintptr_t* fresh = (uintptr_t*)rt_observed_calloc_v1(next_cap, sizeof(uintptr_t));
         if (!fresh) return -1;
         size_t mask = next_cap - 1;
         size_t live = 0;
@@ -2799,7 +2804,7 @@ static int rt_core_transient_plan_push(
     if (plan->len == plan->cap) {
         size_t next_cap = plan->cap == 0 ? 32 : plan->cap * 2;
         if (next_cap > RT_CORE_TRANSIENT_MAX_NODES) return 0;
-        RtCoreTransientNode* fresh = (RtCoreTransientNode*)realloc(
+        RtCoreTransientNode* fresh = (RtCoreTransientNode*)rt_observed_realloc_v1(
             plan->nodes, next_cap * sizeof(RtCoreTransientNode));
         if (!fresh) return 0;
         plan->nodes = fresh;
@@ -3205,7 +3210,7 @@ int64_t rt_stdin_read_chars_text(int64_t count) {
     if (count <= 0) {
         return rt_string_new(NULL, 0);
     }
-    char* buf = (char*)malloc((size_t)count);
+    char* buf = (char*)rt_observed_malloc_v1((size_t)count);
     if (!buf) {
         return rt_string_new(NULL, 0);
     }
@@ -3339,7 +3344,7 @@ int64_t rt_value_int_wide(int64_t value) {
     if (rt_core_int_fits_tagged(value)) {
         return (int64_t)(((uint64_t)value << 3) | RT_VALUE_TAG_INT);
     }
-    RtCoreWideInt* n = (RtCoreWideInt*)malloc(sizeof(RtCoreWideInt));
+    RtCoreWideInt* n = (RtCoreWideInt*)rt_observed_malloc_v1(sizeof(RtCoreWideInt));
     if (!n) {
         /* OOM: the truncating form is still wrong, but crashing here is worse. */
         return (int64_t)(((uint64_t)value << 3) | RT_VALUE_TAG_INT);
@@ -3393,7 +3398,7 @@ int64_t rt_value_as_int_wide(int64_t value) {
  * degrade-don't-crash choice rt_value_int_wide and rt_value_float already make,
  * and it is only reachable on OOM. */
 int64_t rt_value_u64(int64_t bits) {
-    RtCoreUInt* u = (RtCoreUInt*)malloc(sizeof(RtCoreUInt));
+    RtCoreUInt* u = (RtCoreUInt*)rt_observed_malloc_v1(sizeof(RtCoreUInt));
     if (!u) return (int64_t)(((uint64_t)bits << 3) | RT_VALUE_TAG_INT);
     u->kind = RT_VALUE_HEAP_UINT;
     u->transient_scope_id = 0;
@@ -3516,7 +3521,7 @@ int64_t rt_value_as_int(int64_t value) {
 int64_t rt_value_float(double value_f64) {
     int64_t raw_bits = 0;
     memcpy(&raw_bits, &value_f64, sizeof(raw_bits));
-    RtCoreFloat* f = (RtCoreFloat*)malloc(sizeof(RtCoreFloat));
+    RtCoreFloat* f = (RtCoreFloat*)rt_observed_malloc_v1(sizeof(RtCoreFloat));
     if (!f) {
         /* OOM: fall back to the legacy lossy inline form rather than crash. */
         return (int64_t)(((uint64_t)raw_bits & ~RT_VALUE_TAG_MASK) | RT_VALUE_TAG_FLOAT);
@@ -3611,7 +3616,7 @@ static int64_t rt_string_new_uncached_impl(
     if (!bytes && len > 0) return rt_core_nil();
     if (len > SIZE_MAX - sizeof(RtCoreString) - 1) return rt_core_nil();
 
-    RtCoreString* s = (RtCoreString*)malloc(sizeof(RtCoreString) + (size_t)len + 1);
+    RtCoreString* s = (RtCoreString*)rt_observed_malloc_v1(sizeof(RtCoreString) + (size_t)len + 1);
     if (!s) return rt_core_nil();
     s->kind = RT_VALUE_HEAP_STRING;
     s->reserved = 0;
@@ -3707,7 +3712,7 @@ int64_t rt_string_new_literal(const uint8_t* bytes, uint64_t len) {
      * so this object outlives any single holder: never freeable. */
     RtCoreString* interned = rt_core_as_string(value);
     if (interned) interned->reserved |= RT_CORE_STRING_FLAG_SHARED;
-    RtLiteralInternNode* node = (RtLiteralInternNode*)malloc(sizeof(RtLiteralInternNode));
+    RtLiteralInternNode* node = (RtLiteralInternNode*)rt_observed_malloc_v1(sizeof(RtLiteralInternNode));
     if (!node) return value;
     node->bytes = bytes;
     node->len = len;
@@ -3795,7 +3800,7 @@ static RtStringBuilder* rt_string_builder_from_handle(int64_t handle) {
 }
 
 int64_t rt_string_builder_new(void) {
-    RtStringBuilder* builder = (RtStringBuilder*)calloc(1, sizeof(RtStringBuilder));
+    RtStringBuilder* builder = (RtStringBuilder*)rt_observed_calloc_v1(1, sizeof(RtStringBuilder));
     if (!builder) return 0;
     builder->magic = RT_STRING_BUILDER_MAGIC;
     return (int64_t)(uintptr_t)builder;
@@ -3818,7 +3823,7 @@ int64_t rt_string_builder_push(int64_t handle, int64_t string) {
             }
             next_cap *= 2;
         }
-        uint8_t* next = (uint8_t*)realloc(builder->data, next_cap);
+        uint8_t* next = (uint8_t*)rt_observed_realloc_v1(builder->data, next_cap);
         if (!next) return 0;
         builder->data = next;
         builder->cap = next_cap;
@@ -4030,7 +4035,7 @@ int64_t rt_string_concat(int64_t left, int64_t right) {
         spl_panic("rt_string_concat: length overflow");
     }
     uint64_t len = a->len + b->len;
-    RtCoreString* out = (RtCoreString*)malloc(sizeof(RtCoreString) + (size_t)len + 1);
+    RtCoreString* out = (RtCoreString*)rt_observed_malloc_v1(sizeof(RtCoreString) + (size_t)len + 1);
     if (!out) return rt_core_nil();
     out->kind = RT_VALUE_HEAP_STRING;
     out->reserved = 0;
@@ -4280,7 +4285,7 @@ static int rt_core_dict_sort_entry_less(int64_t a_str, int64_t b_str) {
 static int64_t rt_core_format_dict(RtCoreDict* dict) {
     int64_t n = dict->len;
     if (n <= 0) return rt_string_new((const uint8_t*)"{}", 2);
-    RtCoreDictSortEntry* entries = (RtCoreDictSortEntry*)malloc((size_t)n * sizeof(RtCoreDictSortEntry));
+    RtCoreDictSortEntry* entries = (RtCoreDictSortEntry*)rt_observed_malloc_v1((size_t)n * sizeof(RtCoreDictSortEntry));
     if (!entries) return rt_string_new((const uint8_t*)"{}", 2);
     int64_t out_i = 0;
     for (int64_t i = 0; i < dict->cap && out_i < n; i++) {
@@ -5006,7 +5011,7 @@ int64_t rt_slice(int64_t value, int64_t start, int64_t end, int64_t step) {
     if (stride != 1) {
         uint64_t out_len = 0;
         for (int64_t i = begin; i < finish; i += stride) out_len++;
-        RtCoreString* out = (RtCoreString*)malloc(sizeof(RtCoreString) + (size_t)out_len + 1);
+        RtCoreString* out = (RtCoreString*)rt_observed_malloc_v1(sizeof(RtCoreString) + (size_t)out_len + 1);
         if (!out) return rt_core_nil();
         out->kind = RT_VALUE_HEAP_STRING;
         out->reserved = 0;
@@ -5130,7 +5135,7 @@ int64_t rt_string_rfind(int64_t value, int64_t needle) {
 }
 
 int64_t rt_mutex_new(int64_t initial) {
-    RtCoreMutex* mutex = (RtCoreMutex*)calloc(1, sizeof(RtCoreMutex));
+    RtCoreMutex* mutex = (RtCoreMutex*)rt_observed_calloc_v1(1, sizeof(RtCoreMutex));
     if (!mutex) return rt_core_nil();
     mutex->kind = RT_VALUE_HEAP_MUTEX;
     atomic_flag_clear(&mutex->lock);
@@ -5190,7 +5195,7 @@ static int64_t rt_string_ascii_case(int64_t value, int to_lower) {
         }
         return rt_core_nil();
     }
-    RtCoreString* out = (RtCoreString*)malloc(sizeof(RtCoreString) + (size_t)s->len + 1);
+    RtCoreString* out = (RtCoreString*)rt_observed_malloc_v1(sizeof(RtCoreString) + (size_t)s->len + 1);
     if (!out) return rt_core_nil();
     out->kind = RT_VALUE_HEAP_STRING;
     out->reserved = 0;
@@ -5370,7 +5375,7 @@ int64_t rt_string_join(int64_t array_value, int64_t separator) {
     if (!array || !sep) return rt_core_nil();
     RtCoreString** items = NULL;
     if (array->len > 0) {
-        items = (RtCoreString**)malloc((size_t)array->len * sizeof(RtCoreString*));
+        items = (RtCoreString**)rt_observed_malloc_v1((size_t)array->len * sizeof(RtCoreString*));
         if (!items) return rt_core_nil();
     }
     uint64_t total = 0;
@@ -5382,7 +5387,7 @@ int64_t rt_string_join(int64_t array_value, int64_t separator) {
         if (item) total += item->len;
         if (i + 1 < array->len) total += sep->len;
     }
-    RtCoreString* out = (RtCoreString*)malloc(sizeof(RtCoreString) + (size_t)total + 1);
+    RtCoreString* out = (RtCoreString*)rt_observed_malloc_v1(sizeof(RtCoreString) + (size_t)total + 1);
     if (!out) {
         free(items);
         return rt_core_nil();
@@ -5444,7 +5449,7 @@ int64_t rt_array_join_any(int64_t array_value, int64_t separator) {
      * once, then join those handles. */
     int64_t* rendered = NULL;
     if ((array->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) && array->len > 0) {
-        rendered = (int64_t*)malloc((size_t)array->len * sizeof(int64_t));
+        rendered = (int64_t*)rt_observed_malloc_v1((size_t)array->len * sizeof(int64_t));
         if (!rendered) return rt_string_new(NULL, 0);
         for (int64_t i = 0; i < array->len; i++) rendered[i] = rt_to_string(spl_core_slot_value(array, i));
     }
@@ -5463,7 +5468,7 @@ int64_t rt_array_join_any(int64_t array_value, int64_t separator) {
             total += sep_len;
         }
     }
-    RtCoreString* out = (RtCoreString*)malloc(sizeof(RtCoreString) + total + 1);
+    RtCoreString* out = (RtCoreString*)rt_observed_malloc_v1(sizeof(RtCoreString) + total + 1);
     if (!out) goto done;
     out->kind = RT_VALUE_HEAP_STRING;
     out->reserved = 0;
@@ -5645,7 +5650,7 @@ int64_t rt_string_repeat(int64_t value, int64_t count) {
     if (s->len != 0 && n > (uint64_t)SIZE_MAX / s->len) return rt_core_nil();
     uint64_t out_len = s->len * n;
 
-    RtCoreString* out = (RtCoreString*)malloc(sizeof(RtCoreString) + (size_t)out_len + 1);
+    RtCoreString* out = (RtCoreString*)rt_observed_malloc_v1(sizeof(RtCoreString) + (size_t)out_len + 1);
     if (!out) return rt_core_nil();
     out->kind = RT_VALUE_HEAP_STRING;
     out->reserved = 0;
@@ -5757,7 +5762,7 @@ int64_t rt_string_capitalize(int64_t value) {
         return value;
     }
     if (s->len == 0) return rt_string_new((const uint8_t*)"", 0);
-    char* out = (char*)malloc((size_t)s->len);
+    char* out = (char*)rt_observed_malloc_v1((size_t)s->len);
     if (!out) return value;
     uint64_t first = rt_utf8_width(s->data, 0, s->len);
     for (uint64_t i = 0; i < s->len; i++) {
@@ -5781,7 +5786,7 @@ int64_t rt_string_swapcase(int64_t value) {
         return value;
     }
     if (s->len == 0) return rt_string_new((const uint8_t*)"", 0);
-    char* out = (char*)malloc((size_t)s->len);
+    char* out = (char*)rt_observed_malloc_v1((size_t)s->len);
     if (!out) return value;
     for (uint64_t i = 0; i < s->len; i++) {
         unsigned char c = (unsigned char)s->data[i];
@@ -5807,7 +5812,7 @@ int64_t rt_string_title(int64_t value) {
         return value;
     }
     if (s->len == 0) return rt_string_new((const uint8_t*)"", 0);
-    char* out = (char*)malloc((size_t)s->len);
+    char* out = (char*)rt_observed_malloc_v1((size_t)s->len);
     if (!out) return value;
     int capitalize_next = 1;
     for (uint64_t i = 0; i < s->len; i++) {
@@ -5910,7 +5915,7 @@ int64_t rt_string_squeeze(int64_t value, int64_t set) {
     }
     if (s->len == 0) return rt_string_new((const uint8_t*)"", 0);
     RtCoreString* set_s = rt_core_as_string(set);
-    char* out = (char*)malloc((size_t)s->len);
+    char* out = (char*)rt_observed_malloc_v1((size_t)s->len);
     if (!out) return value;
     uint64_t out_len = 0;
     uint64_t prev_off = 0, prev_w = 0; /* previous character, empty until set */
@@ -5995,7 +6000,7 @@ int64_t rt_string_pad_left(int64_t value, int64_t width, int64_t pad) {
     uint64_t n = (uint64_t)(width - current);
     uint64_t npw = rt_checked_mul_u64(n, pw, "rt_string_pad_left: length overflow");
     uint64_t out_len = rt_checked_add_u64(npw, s->len, "rt_string_pad_left: length overflow");
-    char* out = (char*)malloc((size_t)out_len);
+    char* out = (char*)rt_observed_malloc_v1((size_t)out_len);
     if (!out) return value;
     for (uint64_t i = 0; i < n; i++) memcpy(out + i * pw, pc, (size_t)pw);
     memcpy(out + n * pw, s->data, (size_t)s->len);
@@ -6020,7 +6025,7 @@ int64_t rt_string_pad_right(int64_t value, int64_t width, int64_t pad) {
     uint64_t n = (uint64_t)(width - current);
     uint64_t npw = rt_checked_mul_u64(n, pw, "rt_string_pad_right: length overflow");
     uint64_t out_len = rt_checked_add_u64(s->len, npw, "rt_string_pad_right: length overflow");
-    char* out = (char*)malloc((size_t)out_len);
+    char* out = (char*)rt_observed_malloc_v1((size_t)out_len);
     if (!out) return value;
     memcpy(out, s->data, (size_t)s->len);
     for (uint64_t i = 0; i < n; i++) memcpy(out + s->len + i * pw, pc, (size_t)pw);
@@ -6048,7 +6053,7 @@ int64_t rt_string_center(int64_t value, int64_t width, int64_t pad) {
     uint64_t lr_pw = rt_checked_mul_u64(rt_checked_add_u64(left, right, "rt_string_center: length overflow"),
                                          pw, "rt_string_center: length overflow");
     uint64_t out_len = rt_checked_add_u64(lr_pw, s->len, "rt_string_center: length overflow");
-    char* out = (char*)malloc((size_t)out_len);
+    char* out = (char*)rt_observed_malloc_v1((size_t)out_len);
     if (!out) return value;
     uint64_t o = 0;
     for (uint64_t i = 0; i < left; i++, o += pw) memcpy(out + o, pc, (size_t)pw);
@@ -6075,7 +6080,7 @@ int64_t rt_string_zfill(int64_t value, int64_t width) {
     uint64_t sign = (s->len > 0 && (s->data[0] == '+' || s->data[0] == '-')) ? 1 : 0;
     uint64_t zeros = (uint64_t)(width - current);
     uint64_t out_len = rt_checked_add_u64(s->len, zeros, "rt_string_zfill: length overflow");
-    char* out = (char*)malloc((size_t)out_len);
+    char* out = (char*)rt_observed_malloc_v1((size_t)out_len);
     if (!out) return value;
     if (sign) out[0] = s->data[0];
     memset(out + sign, '0', (size_t)zeros);
@@ -6195,7 +6200,7 @@ static int64_t spl_core_array_value_at(SplArray* a, int64_t idx) {
 /* Reverse the CHARACTERS of a runtime string (helper, no receiver check). */
 static int64_t rt_string_reverse_chars(RtCoreString* s) {
     if (s->len == 0) return rt_string_new((const uint8_t*)"", 0);
-    char* out = (char*)malloc((size_t)s->len);
+    char* out = (char*)rt_observed_malloc_v1((size_t)s->len);
     if (!out) return rt_core_nil();
     uint64_t o = s->len;
     for (uint64_t i = 0; i < s->len;) {
@@ -6409,7 +6414,7 @@ int64_t rt_sort(int64_t receiver) {
         qsort(packed->data, (size_t)n, sizeof(uint64_t), rt_sorted_u64_cmp);
         return receiver;
     }
-    int64_t* buf = (int64_t*)malloc((size_t)n * sizeof(int64_t));
+    int64_t* buf = (int64_t*)rt_observed_malloc_v1((size_t)n * sizeof(int64_t));
     if (!buf) return receiver;
     for (int64_t i = 0; i < n; i++) buf[i] = rt_array_get(arr, i);
     for (int64_t i = 1; i < n; i++) {
@@ -6521,7 +6526,7 @@ int64_t rt_array_sorted(int64_t receiver) {
         rt_array_free(copy);
         return rt_core_nil();
     }
-    int64_t* scratch = (int64_t*)malloc(n * sizeof(int64_t));
+    int64_t* scratch = (int64_t*)rt_observed_malloc_v1(n * sizeof(int64_t));
     if (!scratch) {
         rt_array_free(copy);
         return rt_core_nil();
@@ -6638,9 +6643,9 @@ int64_t rt_string_sorted(int64_t value) {
     /* Collect codepoint spans, insertion-sort them by codepoint value, emit. */
     uint64_t n = 0;
     for (uint64_t i = 0; i < s->len; i += rt_utf8_width(s->data, i, s->len)) n++;
-    uint64_t* off = (uint64_t*)malloc((size_t)n * sizeof(uint64_t));
-    uint64_t* wid = (uint64_t*)malloc((size_t)n * sizeof(uint64_t));
-    uint32_t* cp  = (uint32_t*)malloc((size_t)n * sizeof(uint32_t));
+    uint64_t* off = (uint64_t*)rt_observed_malloc_v1((size_t)n * sizeof(uint64_t));
+    uint64_t* wid = (uint64_t*)rt_observed_malloc_v1((size_t)n * sizeof(uint64_t));
+    uint32_t* cp  = (uint32_t*)rt_observed_malloc_v1((size_t)n * sizeof(uint32_t));
     if (!off || !wid || !cp) { free(off); free(wid); free(cp); return value; }
     uint64_t k = 0;
     for (uint64_t i = 0; i < s->len;) {
@@ -6662,7 +6667,7 @@ int64_t rt_string_sorted(int64_t value) {
         while (j >= 0 && cp[j] > c) { off[j+1] = off[j]; wid[j+1] = wid[j]; cp[j+1] = cp[j]; j--; }
         off[j+1] = o; wid[j+1] = w; cp[j+1] = c;
     }
-    char* out = (char*)malloc((size_t)s->len);
+    char* out = (char*)rt_observed_malloc_v1((size_t)s->len);
     if (!out) { free(off); free(wid); free(cp); return value; }
     uint64_t o = 0;
     for (uint64_t i = 0; i < n; i++) { memcpy(out + o, s->data + off[i], (size_t)wid[i]); o += wid[i]; }
@@ -6735,7 +6740,7 @@ int64_t rt_string_replace_first(int64_t value, int64_t pattern, int64_t replacem
         if (memcmp(s->data + i, p->data, (size_t)p->len) != 0) continue;
         uint64_t out_len = rt_checked_add_u64(s->len - p->len, r->len,
                                                "rt_string_replace_first: length overflow");
-        char* out = (char*)malloc((size_t)out_len > 0 ? (size_t)out_len : 1);
+        char* out = (char*)rt_observed_malloc_v1((size_t)out_len > 0 ? (size_t)out_len : 1);
         if (!out) return value;
         memcpy(out, s->data, (size_t)i);
         memcpy(out + i, r->data, (size_t)r->len);
@@ -6770,7 +6775,7 @@ int64_t rt_string_replace(int64_t value, int64_t old_value, int64_t new_value) {
     } else {
         out_len -= count * (old_s->len - new_s->len);
     }
-    RtCoreString* out = (RtCoreString*)malloc(sizeof(RtCoreString) + (size_t)out_len + 1);
+    RtCoreString* out = (RtCoreString*)rt_observed_malloc_v1(sizeof(RtCoreString) + (size_t)out_len + 1);
     if (!out) return rt_core_nil();
     out->kind = RT_VALUE_HEAP_STRING;
     out->reserved = 0;
@@ -6870,7 +6875,7 @@ int64_t rt_string_to_int(int64_t value) {
     char* buf = stack_buf;
     if (s->len >= sizeof(stack_buf)) {
         if (s->len > SIZE_MAX - 1) return 0;
-        buf = (char*)malloc((size_t)s->len + 1);
+        buf = (char*)rt_observed_malloc_v1((size_t)s->len + 1);
         if (!buf) return 0;
     }
     if (s->len > 0) memcpy(buf, s->data, (size_t)s->len);
@@ -7119,7 +7124,7 @@ void rt_set_args_wide(int argc, const wchar_t** argv) {
         spl_init_args(argc > 0 ? argc : 0, NULL);
         return;
     }
-    char** utf8_argv = (char**)calloc((size_t)argc, sizeof(char*));
+    char** utf8_argv = (char**)rt_observed_calloc_v1((size_t)argc, sizeof(char*));
     if (!utf8_argv) {
         spl_init_args(0, NULL);
         return;
@@ -7135,7 +7140,7 @@ void rt_set_args_wide(int argc, const wchar_t** argv) {
             utf8_argv[i] = _strdup("");
             continue;
         }
-        char* converted = (char*)malloc((size_t)needed);
+        char* converted = (char*)rt_observed_malloc_v1((size_t)needed);
         if (!converted) {
             utf8_argv[i] = _strdup("");
             continue;
@@ -7205,7 +7210,7 @@ int64_t rt_file_preload_pages(int64_t path_value) {
 #else
     RtCoreString* path = rt_core_as_string(path_value);
     if (!path) return -1;
-    char* cpath = (char*)malloc((size_t)path->len + 1);
+    char* cpath = (char*)rt_observed_malloc_v1((size_t)path->len + 1);
     if (!cpath) return -1;
     memcpy(cpath, path->data, (size_t)path->len);
     cpath[path->len] = '\0';
@@ -7375,7 +7380,7 @@ static int rt_struct_alloc_insert_raw(uintptr_t ptr, size_t bytes) {
 static int rt_struct_alloc_resize(size_t next_cap) {
     if (next_cap > RT_STRUCT_ALLOC_MAX_CAP ||
             next_cap > SIZE_MAX / sizeof(RtStructAllocation)) return 0;
-    RtStructAllocation* fresh = (RtStructAllocation*)calloc(
+    RtStructAllocation* fresh = (RtStructAllocation*)rt_observed_calloc_v1(
         next_cap, sizeof(RtStructAllocation));
     if (!fresh) return 0;
     RtStructAllocation* old = rt_struct_allocs;
@@ -7490,7 +7495,7 @@ void* rt_alloc(int64_t size) {
          * to the normal allocator below rather than returning NULL for a
          * sampling decision that isn't itself an OOM. */
     }
-    void* ptr = malloc((size_t)size);
+    void* ptr = rt_observed_malloc_v1((size_t)size);
     if (ptr && !rt_core_transient_raw_register(ptr, (size_t)size)) {
         free(ptr);
         return NULL;
@@ -7564,7 +7569,7 @@ void* rt_realloc(void* ptr, int64_t size) {
             rt_mem_guard_free_sampled(ptr);
             return NULL;
         }
-        void* next = malloc((size_t)size);
+        void* next = rt_observed_malloc_v1((size_t)size);
         if (!next) return NULL;
         if (!rt_core_transient_raw_register(next, (size_t)size)) {
             free(next);
@@ -7575,7 +7580,7 @@ void* rt_realloc(void* ptr, int64_t size) {
         return next;
     }
     RtCoreTransientRawAlloc* tracked = rt_core_transient_raw_lookup((uintptr_t)ptr);
-    if (!tracked) return realloc(ptr, (size_t)size);
+    if (!tracked) return rt_observed_realloc_v1(ptr, (size_t)size);
     if (size == 0) {
         rt_core_transient_raw_erase(ptr);
         free(ptr);
@@ -7583,7 +7588,7 @@ void* rt_realloc(void* ptr, int64_t size) {
     }
     size_t old_size = tracked->bytes & RT_CORE_TRANSIENT_RAW_SIZE_MASK;
     int owned = (tracked->bytes & RT_CORE_TRANSIENT_RAW_OWNED_BIT) != 0;
-    void* next = malloc((size_t)size);
+    void* next = rt_observed_malloc_v1((size_t)size);
     if (!next) return NULL;
     if (!rt_core_transient_raw_register_state(next, (size_t)size, owned)) {
         free(next);
@@ -8097,7 +8102,7 @@ int64_t rt_strcat_tagged(int64_t a, int64_t b) {
     size_t right_len = right_string ? (size_t)right_string->len : (right ? strlen(right) : 0);
     size_t total = left_len + right_len;
 
-    RtCoreString* out = (RtCoreString*)malloc(sizeof(RtCoreString) + total + 1);
+    RtCoreString* out = (RtCoreString*)rt_observed_malloc_v1(sizeof(RtCoreString) + total + 1);
     if (!out) return rt_core_nil();
     out->kind = RT_VALUE_HEAP_STRING;
     out->reserved = 0;
@@ -8156,13 +8161,13 @@ static SplArray* rt_core_array_new_fill(int64_t cap, uint8_t flags, int zero_ite
         actual_cap > INT64_MAX / (int64_t)sizeof(int64_t)) {
         return NULL;
     }
-    RtCoreArray* a = (RtCoreArray*)calloc(1, sizeof(RtCoreArray));
+    RtCoreArray* a = (RtCoreArray*)rt_observed_calloc_v1(1, sizeof(RtCoreArray));
     if (!a) return NULL;
     a->kind = RT_VALUE_HEAP_ARRAY;
     a->flags = flags;
     a->cap = actual_cap;
     size_t elem_size = (flags & RT_CORE_ARRAY_FLAG_BYTES) ? sizeof(uint8_t) : sizeof(int64_t);
-    a->data = zero_items ? calloc((size_t)actual_cap, elem_size) : malloc((size_t)actual_cap * elem_size);
+    a->data = zero_items ? rt_observed_calloc_v1((size_t)actual_cap, elem_size) : rt_observed_malloc_v1((size_t)actual_cap * elem_size);
     if (!a->data) {
         free(a);
         return NULL;
@@ -8377,7 +8382,7 @@ typedef struct RtCoreDeepFreePlan {
 static int rt_core_deep_free_seen_grow(RtCoreDeepFreePlan* plan) {
     size_t new_cap = plan->seen_cap == 0 ? 256 : plan->seen_cap * 2;
     if (new_cap > SIZE_MAX / sizeof(uintptr_t)) return 0;
-    uintptr_t* fresh = (uintptr_t*)calloc(new_cap, sizeof(uintptr_t));
+    uintptr_t* fresh = (uintptr_t*)rt_observed_calloc_v1(new_cap, sizeof(uintptr_t));
     if (!fresh) return 0;
     size_t mask = new_cap - 1;
     for (size_t i = 0; i < plan->seen_cap; i++) {
@@ -8416,7 +8421,7 @@ static int rt_core_deep_free_plan_push(RtCoreDeepFreePlan* plan, void* ptr, int 
     if (plan->len == plan->cap) {
         size_t next_cap = plan->cap == 0 ? 32 : plan->cap * 2;
         if (next_cap > RT_CORE_DEEP_FREE_MAX_NODES) return 0;
-        RtCoreDeepFreeNode* fresh = (RtCoreDeepFreeNode*)realloc(
+        RtCoreDeepFreeNode* fresh = (RtCoreDeepFreeNode*)rt_observed_realloc_v1(
             plan->nodes, next_cap * sizeof(RtCoreDeepFreeNode));
         if (!fresh) return 0;
         plan->nodes = fresh;
@@ -9062,7 +9067,7 @@ int64_t rt_bytes_to_text(int64_t bytes_value) {
     }
     int64_t length = rt_array_bytes_validate(bytes_value);
     if (length <= 0) return rt_string_new(NULL, 0);
-    uint8_t* narrowed = (uint8_t*)malloc((size_t)length);
+    uint8_t* narrowed = (uint8_t*)rt_observed_malloc_v1((size_t)length);
     if (!narrowed) return rt_string_new(NULL, 0);
     int64_t copied = rt_array_bytes_copy_checked(bytes_value, narrowed, length);
     int64_t result = rt_string_new(narrowed, copied > 0 ? (uint64_t)copied : 0);
@@ -9570,7 +9575,7 @@ static HMODULE runtime_dynload_open_utf8(const char *path) {
     wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
         path, -1, NULL, 0);
     if (wide_len <= 0) return NULL;
-    wide_path = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    wide_path = (wchar_t*)rt_observed_malloc_v1((size_t)wide_len * sizeof(wchar_t));
     if (!wide_path) return NULL;
     if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
             path, -1, wide_path, wide_len) != wide_len) {
@@ -9850,7 +9855,7 @@ static int8_t rt_core_array_reserve(SplArray* a, int64_t min_cap) {
         new_cap *= 2;
     }
     size_t elem_size = (array->flags & RT_CORE_ARRAY_FLAG_BYTES) ? sizeof(uint8_t) : sizeof(int64_t);
-    void* data = realloc(array->data, (size_t)new_cap * elem_size);
+    void* data = rt_observed_realloc_v1(array->data, (size_t)new_cap * elem_size);
     if (!data) {
         array->len = 0;
         array->cap = 0;
@@ -10183,7 +10188,7 @@ int64_t rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload) {
             }
         }
     }
-    RtCoreEnum* value = (RtCoreEnum*)calloc(1, sizeof(RtCoreEnum));
+    RtCoreEnum* value = (RtCoreEnum*)rt_observed_calloc_v1(1, sizeof(RtCoreEnum));
     if (!value) return rt_core_nil();
     value->kind = RT_VALUE_HEAP_ENUM;
     value->enum_id = (uint32_t)enum_id;
@@ -10345,7 +10350,7 @@ int64_t rt_closure_new(int64_t func_ptr, int64_t capture_count) {
     size_t count = (size_t)capture_count;
     if (count > (SIZE_MAX - sizeof(RtCoreClosure)) / sizeof(int64_t)) return rt_core_nil();
     RtCoreClosure* closure =
-        (RtCoreClosure*)calloc(1, sizeof(RtCoreClosure) + count * sizeof(int64_t));
+        (RtCoreClosure*)rt_observed_calloc_v1(1, sizeof(RtCoreClosure) + count * sizeof(int64_t));
     if (!closure) return rt_core_nil();
     closure->kind = RT_VALUE_HEAP_CLOSURE;
     closure->func_ptr = func_ptr;
@@ -10389,7 +10394,7 @@ int64_t rt_closure_retain(int64_t closure_value) {
         if (rt_core_closure_pin_len == rt_core_closure_pin_cap) {
             size_t cap = rt_core_closure_pin_cap ? rt_core_closure_pin_cap * 2 : 16;
             RtCoreClosurePin* grown =
-                (RtCoreClosurePin*)realloc(rt_core_closure_pins, cap * sizeof(RtCoreClosurePin));
+                (RtCoreClosurePin*)rt_observed_realloc_v1(rt_core_closure_pins, cap * sizeof(RtCoreClosurePin));
             if (!grown) {
                 rt_core_heap_lifecycle_release();
                 return 0;
@@ -10928,7 +10933,7 @@ static int64_t splc_utf8_array_to_bytes(int64_t value, uint8_t** out) {
     if (len < 0) return -1;
     if (len == 0) return 0;
     if (!array->data) return -1;
-    uint8_t* buf = (uint8_t*)malloc((size_t)len);
+    uint8_t* buf = (uint8_t*)rt_observed_malloc_v1((size_t)len);
     if (!buf) return -1;
     for (int64_t i = 0; i < len; i++) {
         int64_t elem;
@@ -11383,7 +11388,7 @@ static int rt_core_dict_key_eq(int64_t a, int64_t b) {
 static void rt_core_dict_resize(RtCoreDict* d, int64_t new_cap) {
     RtCoreDictEntry* old = d->entries;
     int64_t old_cap = d->cap;
-    RtCoreDictEntry* fresh = (RtCoreDictEntry*)calloc((size_t)new_cap, sizeof(RtCoreDictEntry));
+    RtCoreDictEntry* fresh = (RtCoreDictEntry*)rt_observed_calloc_v1((size_t)new_cap, sizeof(RtCoreDictEntry));
     if (!fresh) return;
     d->entries = fresh;
     d->cap = new_cap;
@@ -11506,13 +11511,13 @@ static int rt_core_dict_del(RtCoreDict* d, int64_t key, int64_t* removed) {
 
 int64_t rt_dict_new(int64_t cap_hint) {
     (void)cap_hint;
-    RtCoreDict* d = (RtCoreDict*)calloc(1, sizeof(RtCoreDict));
+    RtCoreDict* d = (RtCoreDict*)rt_observed_calloc_v1(1, sizeof(RtCoreDict));
     if (!d) return rt_core_nil();
     d->kind = RT_VALUE_HEAP_DICT;
     d->cap = RT_CORE_DICT_INIT_CAP;
     d->len = 0;
     d->tombstones = 0;
-    d->entries = (RtCoreDictEntry*)calloc((size_t)d->cap, sizeof(RtCoreDictEntry));
+    d->entries = (RtCoreDictEntry*)rt_observed_calloc_v1((size_t)d->cap, sizeof(RtCoreDictEntry));
     if (!d->entries) {
         free(d);
         return rt_core_nil();
@@ -12310,13 +12315,13 @@ int64_t rt_io_file_read_all(int64_t fd) {
     if (fd < 0 || fd > INT_MAX) return rt_core_nil();
     size_t len = 0;
     size_t cap = 4096;
-    uint8_t* bytes = (uint8_t*)malloc(cap);
+    uint8_t* bytes = (uint8_t*)rt_observed_malloc_v1(cap);
     if (!bytes) return rt_core_nil();
     for (;;) {
         if (len == cap) {
             if (cap > SIZE_MAX / 2) { free(bytes); return rt_core_nil(); }
             size_t next_cap = cap * 2;
-            uint8_t* grown = (uint8_t*)realloc(bytes, next_cap);
+            uint8_t* grown = (uint8_t*)rt_observed_realloc_v1(bytes, next_cap);
             if (!grown) { free(bytes); return rt_core_nil(); }
             bytes = grown;
             cap = next_cap;
@@ -12365,7 +12370,7 @@ int64_t rt_io_file_read(int64_t fd, int64_t size) {
     uint64_t usize = (uint64_t)size;
     uint8_t* buf = NULL;
     if (usize != 0) {
-        buf = (uint8_t*)malloc((size_t)usize);
+        buf = (uint8_t*)rt_observed_malloc_v1((size_t)usize);
         if (!buf) return rt_core_nil();
     }
 #if defined(_WIN32)
@@ -12398,7 +12403,7 @@ int64_t rt_io_file_read(int64_t fd, int64_t size) {
 int64_t rt_io_file_read_line(int64_t fd) {
     if (fd < 0 || fd > INT_MAX) return rt_core_nil();
     size_t cap = 64, len = 0;
-    uint8_t* line = (uint8_t*)malloc(cap);
+    uint8_t* line = (uint8_t*)rt_observed_malloc_v1(cap);
     if (!line) return rt_core_nil();
     for (;;) {
         uint8_t byte_val;
@@ -12412,7 +12417,7 @@ int64_t rt_io_file_read_line(int64_t fd) {
         if (n < 0) { free(line); return rt_core_nil(); }
         if (len == cap) {
             size_t next_cap = cap * 2;
-            uint8_t* grown = (uint8_t*)realloc(line, next_cap);
+            uint8_t* grown = (uint8_t*)rt_observed_realloc_v1(line, next_cap);
             if (!grown) { free(line); return rt_core_nil(); }
             line = grown;
             cap = next_cap;
@@ -12652,12 +12657,12 @@ int64_t rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
     if (!f) return rt_nil;
     size_t cap = 4096;
     size_t len = 0;
-    char* content = (char*)malloc(cap);
+    char* content = (char*)rt_observed_malloc_v1(cap);
     if (!content) { fclose(f); return rt_nil; }
     for (;;) {
         if (len >= cap) {
             size_t new_cap = cap * 2;
-            char* grown = (char*)realloc(content, new_cap);
+            char* grown = (char*)rt_observed_realloc_v1(content, new_cap);
             if (!grown) { free(content); fclose(f); return rt_nil; }
             content = grown;
             cap = new_cap;
@@ -12791,12 +12796,12 @@ static int rt_read_regular_no_follow_buffer(const uint8_t* path_ptr,
     }
     capacity = (size_t)st.st_size + 1;
 #endif
-    bytes = (uint8_t*)malloc(capacity);
+    bytes = (uint8_t*)rt_observed_malloc_v1(capacity);
     if (!bytes) { error = 9; goto done; }
     while (total < limit) {
         if (total == capacity) {
             size_t grown = capacity > limit / 2 ? limit : capacity * 2;
-            uint8_t* replacement = (uint8_t*)realloc(bytes, grown);
+            uint8_t* replacement = (uint8_t*)rt_observed_realloc_v1(bytes, grown);
             if (!replacement) { error = 9; goto done; }
             bytes = replacement;
             capacity = grown;
@@ -12900,12 +12905,12 @@ int64_t rt_file_read_text_rv(int64_t path_value) {
     if (!f) return rt_nil;
     size_t cap = 4096;
     size_t len = 0;
-    char* content = (char*)malloc(cap);
+    char* content = (char*)rt_observed_malloc_v1(cap);
     if (!content) { fclose(f); return rt_nil; }
     for (;;) {
         if (len >= cap) {
             size_t new_cap = cap * 2;
-            char* grown = (char*)realloc(content, new_cap);
+            char* grown = (char*)rt_observed_realloc_v1(content, new_cap);
             if (!grown) { free(content); fclose(f); return rt_nil; }
             content = grown;
             cap = new_cap;
@@ -13294,7 +13299,7 @@ int64_t rt_path_absolute(const uint8_t* path_ptr, uint64_t path_len) {
     if (!path_ptr || path_len > (uint64_t)SIZE_MAX - 1) {
         return rt_string_new(NULL, 0);
     }
-    char* path = (char*)malloc((size_t)path_len + 1);
+    char* path = (char*)rt_observed_malloc_v1((size_t)path_len + 1);
     if (!path) return rt_string_new(NULL, 0);
     memcpy(path, path_ptr, (size_t)path_len);
     path[(size_t)path_len] = '\0';
@@ -13319,7 +13324,7 @@ int64_t rt_path_absolute(const uint8_t* path_ptr, uint64_t path_len) {
                 size_t cwd_len = strlen(cwd);
                 if (cwd_len <= SIZE_MAX - 2 &&
                         (size_t)path_len <= SIZE_MAX - cwd_len - 2) {
-                    absolute = (char*)malloc(cwd_len + (size_t)path_len + 2);
+                    absolute = (char*)rt_observed_malloc_v1(cwd_len + (size_t)path_len + 2);
                 }
                 if (absolute) {
                     memcpy(absolute, cwd, cwd_len);
@@ -13567,7 +13572,7 @@ static int rt_http_resolve(const char* host, const char* port, const struct addr
     if (deadline_ms == 0) return getaddrinfo(host, port, hints, results_out);
     if (rt_http_remaining_ms(deadline_ms) == 0) return EAI_SYSTEM;
 
-    RtHttpResolveJob* job = (RtHttpResolveJob*)calloc(1, sizeof(*job));
+    RtHttpResolveJob* job = (RtHttpResolveJob*)rt_observed_calloc_v1(1, sizeof(*job));
     if (!job) return EAI_MEMORY;
     job->host = strdup(host);
     job->port = strdup(port);
@@ -13655,7 +13660,7 @@ static int rt_http_append(char** dst, size_t* len, size_t* cap,
             if (next > SIZE_MAX / 2) return 0;
             next *= 2;
         }
-        char* grown = (char*)realloc(*dst, next);
+        char* grown = (char*)rt_observed_realloc_v1(*dst, next);
         if (!grown) return 0;
         *dst = grown;
         *cap = next;
@@ -13740,7 +13745,7 @@ static int64_t rt_http_content_length(const char* headers, size_t len) {
 static int rt_http_decode_chunked(const uint8_t* src, size_t src_len,
                                   uint8_t** out, size_t* out_len) {
     size_t pos = 0, used = 0, cap = src_len;
-    uint8_t* result = cap ? (uint8_t*)malloc(cap) : NULL;
+    uint8_t* result = cap ? (uint8_t*)rt_observed_malloc_v1(cap) : NULL;
     if (cap && !result) return 0;
     while (pos < src_len) {
         size_t line_start = pos;
@@ -13761,7 +13766,7 @@ static int rt_http_decode_chunked(const uint8_t* src, size_t src_len,
             free(result); return 0;
         }
         if (used + (size_t)chunk > cap) {
-            uint8_t* grown = (uint8_t*)realloc(result, used + (size_t)chunk);
+            uint8_t* grown = (uint8_t*)rt_observed_realloc_v1(result, used + (size_t)chunk);
             if (!grown) { free(result); return 0; }
             result = grown; cap = used + (size_t)chunk;
         }
@@ -13841,7 +13846,7 @@ static int rt_http_perform(const char* method, const char* url, RtCoreArray* hea
     const char* authority_end = target ? target : authority + strlen(authority);
     if (authority_end == authority) { snprintf(error, error_cap, "HTTP URL has no host"); return 0; }
     size_t authority_len = (size_t)(authority_end - authority);
-    char* host_port = (char*)malloc(authority_len + 1);
+    char* host_port = (char*)rt_observed_malloc_v1(authority_len + 1);
     if (!host_port) { snprintf(error, error_cap, "out of memory"); return 0; }
     memcpy(host_port, authority, authority_len); host_port[authority_len] = '\0';
     int port = 80;
@@ -13896,7 +13901,7 @@ static int rt_http_perform(const char* method, const char* url, RtCoreArray* hea
     const char* request_target = target ? target : "/";
     char* query_target = NULL;
     if (request_target[0] == '?' || request_target[0] == '#') {
-        query_target = (char*)malloc(strlen(request_target) + 2);
+        query_target = (char*)rt_observed_malloc_v1(strlen(request_target) + 2);
         if (!query_target) { close(fd); free(host_port); snprintf(error, error_cap, "out of memory"); return 0; }
         query_target[0] = '/'; strcpy(query_target + 1, request_target); request_target = query_target;
     }
@@ -13930,12 +13935,12 @@ static int rt_http_perform(const char* method, const char* url, RtCoreArray* hea
         return 0;
     }
     size_t received = 0, capacity = 8192;
-    uint8_t* response = (uint8_t*)malloc(capacity + 1);
+    uint8_t* response = (uint8_t*)rt_observed_malloc_v1(capacity + 1);
     if (!response) { close(fd); snprintf(error, error_cap, "out of memory"); return 0; }
     for (;;) {
         if (received == capacity) {
             if (capacity >= 64 * 1024 * 1024) { free(response); close(fd); snprintf(error, error_cap, "HTTP response too large"); return 0; }
-            capacity *= 2; uint8_t* grown = (uint8_t*)realloc(response, capacity + 1);
+            capacity *= 2; uint8_t* grown = (uint8_t*)rt_observed_realloc_v1(response, capacity + 1);
             if (!grown) { free(response); close(fd); snprintf(error, error_cap, "out of memory"); return 0; }
             response = grown;
         }
@@ -13990,14 +13995,14 @@ static int rt_http_perform(const char* method, const char* url, RtCoreArray* hea
             if (reason_end > status_reason && reason_end[-1] == '\r') reason_end--;
             status_reason_len = (size_t)(reason_end - status_reason);
             if (status_reason_len > 0) {
-                reason_copy = (uint8_t*)malloc(status_reason_len);
+                reason_copy = (uint8_t*)rt_observed_malloc_v1(status_reason_len);
                 if (!reason_copy) { free(response); snprintf(error, error_cap, "out of memory"); return 0; }
                 memcpy(reason_copy, status_reason, status_reason_len);
             }
         }
     }
     if (headers_out && header_len > 0) {
-        headers_copy = (uint8_t*)malloc(header_len);
+        headers_copy = (uint8_t*)rt_observed_malloc_v1(header_len);
         if (!headers_copy) { free(reason_copy); free(response); snprintf(error, error_cap, "out of memory"); return 0; }
         memcpy(headers_copy, header_start, header_len);
     }
@@ -14232,7 +14237,7 @@ int64_t rt_file_size(const uint8_t* path_ptr, uint64_t path_len) {
 
 static char* rt_core_text_arg_to_cstr(const uint8_t* ptr, uint64_t len) {
     if (!ptr && len != 0) return NULL;
-    char* out = (char*)malloc((size_t)len + 1);
+    char* out = (char*)rt_observed_malloc_v1((size_t)len + 1);
     if (!out) return NULL;
     if (len != 0) memcpy(out, ptr, (size_t)len);
     out[len] = '\0';
@@ -14254,7 +14259,7 @@ int64_t rt_path_join(
     if (separator_len > SIZE_MAX - right_len) return rt_core_nil();
     if (left_len > SIZE_MAX - right_len - separator_len) return rt_core_nil();
     size_t joined_len = (size_t)(left_len + right_len + separator_len);
-    uint8_t* joined = (uint8_t*)malloc(joined_len);
+    uint8_t* joined = (uint8_t*)rt_observed_malloc_v1(joined_len);
     if (!joined) return rt_core_nil();
     memcpy(joined, left, (size_t)left_len);
     if (separator_len) joined[left_len] = '/';
@@ -14269,7 +14274,7 @@ int64_t rt_path_join(
 static wchar_t* native_env_widen(const char* value) {
     int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, NULL, 0);
     if (count <= 0) return NULL;
-    wchar_t* wide = (wchar_t*)malloc((size_t)count * sizeof(wchar_t));
+    wchar_t* wide = (wchar_t*)rt_observed_malloc_v1((size_t)count * sizeof(wchar_t));
     if (!wide) return NULL;
     if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, wide, count)) {
         free(wide);
@@ -14283,7 +14288,7 @@ static int64_t native_host_text_from_wide(const wchar_t* wide, DWORD length) {
     if (length > INT_MAX) return rt_core_nil();
     int bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, (int)length, NULL, 0, NULL, NULL);
     if (bytes <= 0) return rt_core_nil();
-    uint8_t* utf8 = (uint8_t*)malloc((size_t)bytes);
+    uint8_t* utf8 = (uint8_t*)rt_observed_malloc_v1((size_t)bytes);
     if (!utf8) return rt_core_nil();
     int converted = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, (int)length, (char*)utf8, bytes, NULL, NULL);
     int64_t result = converted == bytes ? rt_string_new(utf8, (uint64_t)bytes) : rt_core_nil();
@@ -14304,7 +14309,7 @@ static int64_t rt_env_get_cstr(const char* key) {
         free(wide_key);
         return error == ERROR_SUCCESS ? rt_string_new((const uint8_t*)"", 0) : rt_core_nil();
     }
-    wchar_t* wide = (wchar_t*)malloc((size_t)capacity * sizeof(wchar_t));
+    wchar_t* wide = (wchar_t*)rt_observed_malloc_v1((size_t)capacity * sizeof(wchar_t));
     if (!wide) { free(wide_key); return rt_core_nil(); }
     SetLastError(ERROR_SUCCESS);
     DWORD length = GetEnvironmentVariableW(wide_key, wide, capacity);
@@ -14350,7 +14355,7 @@ static void rt_lexer_source_release(void) {
 
 bool rt_lexer_source_set(const uint8_t* source_ptr, uint64_t source_len) {
     if (!source_ptr && source_len != 0) return false;
-    uint8_t* replacement = (uint8_t*)malloc((size_t)source_len + 1);
+    uint8_t* replacement = (uint8_t*)rt_observed_malloc_v1((size_t)source_len + 1);
     if (!replacement) return false;
     if (source_len != 0) memcpy(replacement, source_ptr, (size_t)source_len);
     replacement[source_len] = 0;
@@ -14484,7 +14489,7 @@ int8_t rt_env_remove(const uint8_t* key_ptr, uint64_t key_len) {
 static char* rt_core_string_to_cpath(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
     if (!s) return NULL;
-    char* out = (char*)malloc((size_t)s->len + 1);
+    char* out = (char*)rt_observed_malloc_v1((size_t)s->len + 1);
     if (!out) return NULL;
     if (s->len > 0) memcpy(out, s->data, (size_t)s->len);
     out[s->len] = '\0';
@@ -14659,14 +14664,14 @@ int64_t rt_file_canonicalize(const uint8_t* path_ptr, uint64_t path_len) {
         char* cwd = rt_getcwd();
         if (!cwd) { free(path); return rt_core_nil(); }
         size_t need = strlen(cwd) + 1 + strlen(path) + 1;
-        abs = (char*)malloc(need);
+        abs = (char*)rt_observed_malloc_v1(need);
         if (abs) snprintf(abs, need, "%s/%s", cwd, path);
         free(cwd);
     }
     free(path);
     if (!abs) return rt_core_nil();
 
-    char* out = (char*)malloc(strlen(abs) + 2);
+    char* out = (char*)rt_observed_malloc_v1(strlen(abs) + 2);
     if (!out) { free(abs); return rt_core_nil(); }
     out[0] = '/';
     size_t out_len = 1;
@@ -14709,7 +14714,7 @@ int64_t rt_file_read_lines(const uint8_t* path_ptr, uint64_t path_len) {
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return rt_core_nil(); }
     long size = ftell(f);
     if (size < 0 || fseek(f, 0, SEEK_SET) != 0) { fclose(f); return rt_core_nil(); }
-    char* content = (char*)malloc((size_t)size + 1);
+    char* content = (char*)rt_observed_malloc_v1((size_t)size + 1);
     if (!content) { fclose(f); return rt_core_nil(); }
     size_t got = size > 0 ? fread(content, 1, (size_t)size, f) : 0;
     fclose(f);
@@ -14842,7 +14847,7 @@ static int64_t rt_file_atomic_write_impl(int64_t path_value, int64_t content_val
     }
     free(parent);
     size_t path_len = strlen(path);
-    char* temp_path = (char*)malloc(path_len + 64);
+    char* temp_path = (char*)rt_observed_malloc_v1(path_len + 64);
     if (!temp_path) {
         free(path);
         return 0;
@@ -15018,7 +15023,7 @@ int64_t rt_file_list_dir(int64_t path_value) {
     }
 #if defined(_WIN32)
     size_t path_len = strlen(path);
-    char* pattern = (char*)malloc(path_len + 3);
+    char* pattern = (char*)rt_observed_malloc_v1(path_len + 3);
     if (!pattern) { free(path); return (int64_t)(uintptr_t)out; }
     memcpy(pattern, path, path_len);
     /* Tolerate a trailing separator so "dir\" and "dir" behave alike. */
@@ -15029,7 +15034,7 @@ int64_t rt_file_list_dir(int64_t path_value) {
     free(path);
 
     int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, pattern, -1, NULL, 0);
-    wchar_t* wide_pattern = wide_len > 0 ? (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t)) : NULL;
+    wchar_t* wide_pattern = wide_len > 0 ? (wchar_t*)rt_observed_malloc_v1((size_t)wide_len * sizeof(wchar_t)) : NULL;
     if (!wide_pattern ||
         !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, pattern, -1, wide_pattern, wide_len)) {
         if (wide_pattern) free(wide_pattern);
@@ -15046,7 +15051,7 @@ int64_t rt_file_list_dir(int64_t path_value) {
         if (wcscmp(data.cFileName, L".") == 0 || wcscmp(data.cFileName, L"..") == 0) continue;
         int utf8_len = WideCharToMultiByte(CP_UTF8, 0, data.cFileName, -1, NULL, 0, NULL, NULL);
         if (utf8_len <= 1) continue;
-        char* name = (char*)malloc((size_t)utf8_len);
+        char* name = (char*)rt_observed_malloc_v1((size_t)utf8_len);
         if (!name) continue;
         if (WideCharToMultiByte(CP_UTF8, 0, data.cFileName, -1, name, utf8_len, NULL, NULL) > 0)
             rt_array_push(out, rt_string_new((const uint8_t*)name, (uint64_t)utf8_len - 1));
@@ -15118,7 +15123,7 @@ const char* rt_file_read_text_at(const char* path_value, int64_t offset, int64_t
     free(path);
     if (fd < 0) return "";
 
-    char* buffer = (char*)malloc((size_t)size + 1);
+    char* buffer = (char*)rt_observed_malloc_v1((size_t)size + 1);
     if (!buffer) {
         close(fd);
         return "";
@@ -15172,7 +15177,7 @@ int64_t rt_file_read_text_at_checked(int64_t path_value, int64_t offset, int64_t
         return rt_string_new(NULL, 0);
     }
 
-    uint8_t* buffer = (uint8_t*)malloc((size_t)size);
+    uint8_t* buffer = (uint8_t*)rt_observed_malloc_v1((size_t)size);
     if (!buffer) {
         close(fd);
         return rt_core_nil();
@@ -15260,7 +15265,7 @@ int64_t rt_env_cwd(void) {
 #if defined(_WIN32)
     DWORD capacity = GetCurrentDirectoryW(0, NULL);
     if (!capacity) return rt_core_nil();
-    wchar_t* wide = (wchar_t*)malloc((size_t)capacity * sizeof(wchar_t));
+    wchar_t* wide = (wchar_t*)rt_observed_malloc_v1((size_t)capacity * sizeof(wchar_t));
     if (!wide) return rt_core_nil();
     DWORD length = GetCurrentDirectoryW(capacity, wide);
     int64_t result = length > 0 && length < capacity ?
@@ -15408,7 +15413,7 @@ static char* rt_core_shell_quote(const char* s) {
     for (const char* p = s; *p; p++) {
         extra += (*p == '\'') ? 4 : 1;
     }
-    char* out = (char*)malloc(extra + 1);
+    char* out = (char*)rt_observed_malloc_v1(extra + 1);
     if (!out) return spl_strdup("''");
     char* w = out;
     *w++ = '\'';
@@ -15449,7 +15454,7 @@ static SplArray* rt_process_run_array(const char* cmd, uint64_t cmd_len, SplArra
         return result;
     }
 
-    char* cmd_c = (char*)malloc((size_t)cmd_len + 1);
+    char* cmd_c = (char*)rt_observed_malloc_v1((size_t)cmd_len + 1);
     if (!cmd_c) {
         rt_array_push(result, rt_string_new((const uint8_t*)"", 0));
         rt_array_push(result, rt_string_new((const uint8_t*)"process spawn failed", 20));
@@ -15468,7 +15473,7 @@ static SplArray* rt_process_run_array(const char* cmd, uint64_t cmd_len, SplArra
         const char* arg_s = arg_data ? (const char*)arg_data : "";
         char* quoted = rt_core_shell_quote(arg_s);
         size_t new_len = strlen(command) + strlen(quoted) + 2;
-        char* joined = (char*)malloc(new_len);
+        char* joined = (char*)rt_observed_malloc_v1(new_len);
         if (!joined) {
             free(quoted);
             continue;
@@ -15492,7 +15497,7 @@ static SplArray* rt_process_run_array(const char* cmd, uint64_t cmd_len, SplArra
 
     size_t cap = 4096;
     size_t len = 0;
-    char* stdout_buf = (char*)malloc(cap);
+    char* stdout_buf = (char*)rt_observed_malloc_v1(cap);
     if (!stdout_buf) stdout_buf = spl_strdup("");
     if (stdout_buf) stdout_buf[0] = '\0';
     char chunk[512];
@@ -15500,7 +15505,7 @@ static SplArray* rt_process_run_array(const char* cmd, uint64_t cmd_len, SplArra
         size_t chunk_len = strlen(chunk);
         if (len + chunk_len + 1 > cap) {
             while (len + chunk_len + 1 > cap) cap *= 2;
-            stdout_buf = (char*)realloc(stdout_buf, cap);
+            stdout_buf = (char*)rt_observed_realloc_v1(stdout_buf, cap);
             if (!stdout_buf) break;
         }
         memcpy(stdout_buf + len, chunk, chunk_len);
@@ -15520,13 +15525,13 @@ static SplArray* rt_process_run_array(const char* cmd, uint64_t cmd_len, SplArra
 
 int64_t rt_process_run_inherit(const char* cmd, uint64_t cmd_len, SplArray* args) {
     if (!cmd || cmd_len == 0) return -1;
-    char* command = (char*)malloc((size_t)cmd_len + 1);
+    char* command = (char*)rt_observed_malloc_v1((size_t)cmd_len + 1);
     if (!command) return -1;
     memcpy(command, cmd, (size_t)cmd_len);
     command[cmd_len] = '\0';
 
     int64_t argc = rt_array_len(args);
-    const char** argv = (const char**)calloc((size_t)argc, sizeof(char*));
+    const char** argv = (const char**)rt_observed_calloc_v1((size_t)argc, sizeof(char*));
     if (argc > 0 && !argv) {
         free(command);
         return -1;
@@ -15542,7 +15547,7 @@ int64_t rt_process_run_inherit(const char* cmd, uint64_t cmd_len, SplArray* args
      * reported as a failure with no exit status (stage-2 test rows,
      * 2026-09-26). A synchronous _spawnvp returns the child's exit code
      * directly. */
-    const char** wargv = (const char**)calloc((size_t)argc + 2, sizeof(char*));
+    const char** wargv = (const char**)rt_observed_calloc_v1((size_t)argc + 2, sizeof(char*));
     int64_t code = -1;
     if (wargv) {
         wargv[0] = command;
@@ -15595,7 +15600,7 @@ int64_t rt_process_spawn_guarded_value(int64_t cmd, SplArray* args) {
     const char* command = rt_interp_cstr(cmd);
     if (!command) return -1;
     int64_t argc = rt_array_len(args);
-    const char** argv = (const char**)calloc((size_t)argc + 1, sizeof(char*));
+    const char** argv = (const char**)rt_observed_calloc_v1((size_t)argc + 1, sizeof(char*));
     if (!argv) return -1;
     for (int64_t i = 0; i < argc; i++) {
         const char* value = rt_interp_cstr(rt_array_get_text(args, i));
@@ -15613,7 +15618,7 @@ int64_t rt_process_spawn_async_value(int64_t cmd, SplArray* args) {
     if (!command) return -1;
     int64_t argc = rt_array_len(args);
     if (argc < 0 || (uint64_t)argc > SIZE_MAX / sizeof(char*) - 2) return -1;
-    const char** argv = (const char**)calloc((size_t)argc + 1, sizeof(char*));
+    const char** argv = (const char**)rt_observed_calloc_v1((size_t)argc + 1, sizeof(char*));
     if (!argv) return -1;
     for (int64_t i = 0; i < argc; i++) {
         const char* value = rt_interp_cstr(rt_array_get_text(args, i));
@@ -15689,7 +15694,7 @@ int64_t* rt_process_run_bounded_tuple(int64_t cmd, SplArray* args, int64_t timeo
 
 int64_t rt_file_read_bytes(const uint8_t* path_ptr, uint64_t path_len) {
     if (!path_ptr || path_len > SIZE_MAX - 1) return 0;
-    char* path = (char*)malloc((size_t)path_len + 1);
+    char* path = (char*)rt_observed_malloc_v1((size_t)path_len + 1);
     if (!path) return 0;
     memcpy(path, path_ptr, (size_t)path_len);
     path[path_len] = '\0';
@@ -16139,7 +16144,7 @@ static wchar_t* spl_widen_long_path(const char* path) {
     static const wchar_t sep = (wchar_t)92;
     int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
     if (wide_len <= 0) return NULL;
-    wchar_t* wide = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    wchar_t* wide = (wchar_t*)rt_observed_malloc_v1((size_t)wide_len * sizeof(wchar_t));
     if (!wide) return NULL;
     if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, wide_len)) {
         free(wide);
@@ -16159,14 +16164,14 @@ static wchar_t* spl_widen_long_path(const char* path) {
         for (scan = wide; *scan; scan++) { if (*scan == L'/') *scan = sep; }
         need = GetFullPathNameW(wide, 0, NULL, NULL);
         if (need == 0) return wide;
-        full = (wchar_t*)malloc(((size_t)need + 8) * sizeof(wchar_t));
+        full = (wchar_t*)rt_observed_malloc_v1(((size_t)need + 8) * sizeof(wchar_t));
         if (!full) return wide;
         {
             DWORD written = GetFullPathNameW(wide, need, full, NULL);
             if (written == 0 || written >= need) { free(full); return wide; }
         }
         if (wcslen(full) < 248) { free(full); return wide; }
-        out = (wchar_t*)malloc(((size_t)wcslen(full) + 8) * sizeof(wchar_t));
+        out = (wchar_t*)rt_observed_malloc_v1(((size_t)wcslen(full) + 8) * sizeof(wchar_t));
         if (!out) { free(full); return wide; }
         out[0] = sep; out[1] = sep; out[2] = L'?'; out[3] = sep;
         memcpy(out + 4, full, (wcslen(full) + 1) * sizeof(wchar_t));
@@ -16668,7 +16673,7 @@ SHELL_C_WEAK int64_t rt_shell_exec(int64_t cmd_value) {
     rt_shell_last_status = -1;
     RtCoreString* cmd = rt_core_as_string(cmd_value);
     if (!cmd || memchr(cmd->data, '\0', (size_t)cmd->len)) return rt_core_nil();
-    char* command = (char*)malloc((size_t)cmd->len + 1u);
+    char* command = (char*)rt_observed_malloc_v1((size_t)cmd->len + 1u);
     if (!command) return rt_core_nil();
     memcpy(command, cmd->data, (size_t)cmd->len);
     command[cmd->len] = '\0';
@@ -16676,14 +16681,14 @@ SHELL_C_WEAK int64_t rt_shell_exec(int64_t cmd_value) {
     free(command);
     if (!pipe) return rt_core_nil();
     size_t cap = 4096, len = 0;
-    uint8_t* buf = (uint8_t*)malloc(cap);
+    uint8_t* buf = (uint8_t*)rt_observed_malloc_v1(cap);
     if (!buf) { pclose(pipe); return rt_core_nil(); }
     size_t got;
     while ((got = fread(buf + len, 1, cap - len, pipe)) > 0) {
         len += got;
         if (len == cap) {
             if (cap > SIZE_MAX / 2) { free(buf); buf = NULL; break; }
-            uint8_t* grown = (uint8_t*)realloc(buf, cap * 2);
+            uint8_t* grown = (uint8_t*)rt_observed_realloc_v1(buf, cap * 2);
             if (!grown) { free(buf); buf = NULL; break; }
             buf = grown;
             cap *= 2;
@@ -17051,7 +17056,7 @@ static HMODULE simple_load_library_utf8(const char *path) {
     if (!path || !path[0]) return NULL;
     wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
     if (wide_len <= 0) return NULL;
-    wide_path = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    wide_path = (wchar_t*)rt_observed_malloc_v1((size_t)wide_len * sizeof(wchar_t));
     if (!wide_path) return NULL;
     if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
             wide_path, wide_len) != wide_len) {
@@ -17066,7 +17071,7 @@ static HMODULE simple_load_library_utf8(const char *path) {
 
 int64_t rt_host_dynlib_open(const uint8_t *path_ptr, int64_t path_len, int64_t mode) {
     if (!path_ptr || path_len <= 0 || path_len > 1048576) return 0;
-    char *path = (char*)malloc((size_t)path_len + 1);
+    char *path = (char*)rt_observed_malloc_v1((size_t)path_len + 1);
     if (!path) return 0;
     memcpy(path, path_ptr, (size_t)path_len);
     path[path_len] = '\0';
@@ -17083,7 +17088,7 @@ int64_t rt_host_dynlib_open(const uint8_t *path_ptr, int64_t path_len, int64_t m
 
 int64_t rt_host_dynlib_symbol(int64_t handle, const uint8_t *name_ptr, int64_t name_len) {
     if (handle <= 0 || !name_ptr || name_len <= 0 || name_len > 1048576) return 0;
-    char *name = (char*)malloc((size_t)name_len + 1);
+    char *name = (char*)rt_observed_malloc_v1((size_t)name_len + 1);
     if (!name) return 0;
     memcpy(name, name_ptr, (size_t)name_len);
     name[name_len] = '\0';
@@ -17854,7 +17859,7 @@ int64_t rt_channel_new(void) {
             RtChannel* ch = &rt_channels[i];
             pthread_mutex_init(&ch->lock, NULL);
             pthread_cond_init(&ch->not_empty, NULL);
-            ch->queue = (int64_t*)malloc(sizeof(int64_t) * RT_CHAN_QSIZE);
+            ch->queue = (int64_t*)rt_observed_malloc_v1(sizeof(int64_t) * RT_CHAN_QSIZE);
             if (!ch->queue) {
                 pthread_cond_destroy(&ch->not_empty);
                 pthread_mutex_destroy(&ch->lock);
@@ -17881,7 +17886,7 @@ int64_t rt_channel_send(int64_t id, int64_t value) {
     pthread_mutex_lock(&ch->lock);
     if (ch->count == ch->capacity) {
         int new_capacity = ch->capacity * 2;
-        int64_t* grown = (int64_t*)malloc(sizeof(int64_t) * new_capacity);
+        int64_t* grown = (int64_t*)rt_observed_malloc_v1(sizeof(int64_t) * new_capacity);
         if (!grown) {
             pthread_mutex_unlock(&ch->lock);
             fprintf(stderr, "rt_channel_send: failed to grow channel buffer\n");
@@ -18231,7 +18236,7 @@ static int simple_startup_load_aspect_spec(const char *spec) {
         if (i != len && spec[i] != SIMPLE_STARTUP_ASPECT_SEP) continue;
         if (i > start) {
             size_t n = i - start;
-            char *path = (char *)malloc(n + 1);
+            char *path = (char *)rt_observed_malloc_v1(n + 1);
             int rc;
             if (!path) {
                 fprintf(stderr,
@@ -18979,7 +18984,7 @@ int8_t rt_file_write_bytes_array(int64_t path, int64_t data) {
     int8_t ok;
     if (a == NULL) return 0;
     n = rt_array_len(a);
-    buf = (unsigned char*)malloc((size_t)(n > 0 ? n : 1));
+    buf = (unsigned char*)rt_observed_malloc_v1((size_t)(n > 0 ? n : 1));
     if (buf == NULL) return 0;
     for (i = 0; i < n; i++) buf[i] = (unsigned char)(rt_array_get(a, i) & 0xFF);
     {

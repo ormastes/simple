@@ -12,6 +12,7 @@ use compiler.hir.hir_types.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.parallel_policy.policy_schema.{ResolvedParallelPolicyV1}
 use compiler.semantics.safety_checker_expr.*
+use compiler.semantics.safety_checker_places.*
 use compiler.semantics.safety_checker_transfer.{
     safetychecker_check_transfer_module_impl,
     safetychecker_check_transfer_module_with_policy_impl
@@ -86,6 +87,13 @@ struct SafetyContext:
     class_symbol_ids: [i64] # module-local `class` symbol ids (E1047 s19 gate)
     params: [SafetyParamTrack]  # current function's trackable non-mut params
     iter_tracks: [SafetyIterTrack]  # E1048: stack of collections currently being for-iterated
+    place_class_ids: Dict<i64, bool>
+    place_owner_fields: Dict<i64, Dict<text, SafetyDeclaredCollectionField>>
+    class_aliases: Dict<i64, SafetyClassAlias>
+    collection_places: [SafetyCollectionPlace]
+    place_unmodeled_sites: [Span]  # honest incomplete-analysis ledger, not diagnostics/PASS
+    place_written_bindings: Dict<i64, bool>
+    place_loop_depth: i64
     expr_depth: i64  # bounded HIR-expression traversal; shared through class ownership
 
 
@@ -94,7 +102,7 @@ struct SafetyContext:
 # ============================================================================
 
 fn safetycontext_new() -> SafetyContext:
-        SafetyContext(unsafe_depth: 0, errors: [], extern_symbol_ids: {}, static_mutability: {}, class_symbol_ids: [], params: [], iter_tracks: [], expr_depth: 0)
+        SafetyContext(unsafe_depth: 0, errors: [], extern_symbol_ids: {}, static_mutability: {}, class_symbol_ids: [], params: [], iter_tracks: [], place_class_ids: {}, place_owner_fields: {}, class_aliases: {}, collection_places: [], place_unmodeled_sites: [], place_written_bindings: {}, place_loop_depth: 0, expr_depth: 0)
 
 
 fn safetychecker_static_mutability(self: SafetyChecker, expr: HirExpr) -> bool?:
@@ -302,6 +310,7 @@ fn safetychecker_flag_iter_method_call(self: SafetyChecker, receiver: HirExpr, m
             is_mutating = true
     if not is_mutating:
         return
+    safety_flag_collection_place(self, receiver, span)
     match receiver.kind:
         case NamedVar(symbol, name):
             match safety_lookup_iter(self, symbol.id):
@@ -353,6 +362,10 @@ fn safetychecker_check_module(self: SafetyChecker, module: HirModule) -> [Safety
     self.context.unsafe_depth = 0
     self.context.extern_symbol_ids = {}
     self.context.static_mutability = {}
+    self.context.class_symbol_ids = []
+    self.context.place_class_ids = {}
+    self.context.place_owner_fields = {}
+    self.context.place_unmodeled_sites = []
     for _for_item_e in module.functions:
         val ext_func: HirFunction = _for_item_e[1]
         if ext_func.is_extern:
@@ -378,6 +391,19 @@ fn safetychecker_check_module(self: SafetyChecker, module: HirModule) -> [Safety
     for _for_item_cls in module.classes:
         val cls_: HirClass = _for_item_cls[1]
         self.context.class_symbol_ids = self.context.class_symbol_ids.push(cls_.symbol.id)
+        self.context.place_class_ids[cls_.symbol.id] = true
+        var declared_fields: Dict<text, SafetyDeclaredCollectionField> = {}
+        for field in cls_.fields:
+            var is_collection = false
+            match field.type_.kind:
+                case Array(_, _) | Slice(_): is_collection = true
+                case _: ()
+            if declared_fields.contains(field.name):
+                # Ambiguous declarations never acquire an invented identity.
+                declared_fields[field.name] = SafetyDeclaredCollectionField(field_id: -1, is_collection: false)
+            else:
+                declared_fields[field.name] = SafetyDeclaredCollectionField(field_id: field.symbol.id, is_collection: is_collection)
+        self.context.place_owner_fields[cls_.symbol.id] = declared_fields
 
     # Check all functions
     for _for_item_0 in module.functions:
@@ -423,17 +449,35 @@ fn safetychecker_check_function(self: SafetyChecker, func: HirFunction):
     # authority into the next function checked by the shared module owner.
     self.context.unsafe_depth = 0
     self.context.params = safetychecker_build_param_tracks(self, func.params)
+    self.context.class_aliases = {}
+    self.context.place_written_bindings = {}
+    self.context.collection_places = []
+    self.context.place_loop_depth = 0
+    for param in func.params:
+        val owner = safety_class_owner(self, param.type_)
+        if owner >= 0:
+            # Exact aliases of this parameter are known, but different incoming
+            # parameters are not proven disjoint. Record that incomplete relation
+            # rather than introducing a blanket cross-parameter rejection policy.
+            self.context.class_aliases[param.symbol.id] = SafetyClassAlias(owner_id: owner, roots: {param.symbol.id: true})
+            self.context.place_unmodeled_sites = self.context.place_unmodeled_sites.push(param.type_.span)
     safetychecker_check_block(self, func.body)
     self.context.unsafe_depth = 0
 
 
 fn safetychecker_check_block(self: SafetyChecker, block: HirBlock):
     """Check a block of statements."""
+    val incoming_aliases = self.context.class_aliases
     for stmt in block.stmts:
         safetychecker_check_stmt(self, stmt)
 
     if block.has:
         safetychecker_check_expr(self, block.value)
+    var outer_aliases: Dict<i64, SafetyClassAlias> = {}
+    for entry in incoming_aliases:
+        if self.context.class_aliases.contains(entry[0]):
+            outer_aliases[entry[0]] = self.context.class_aliases[entry[0]]
+    self.context.class_aliases = outer_aliases
 
 
 fn safetychecker_check_stmt(self: SafetyChecker, stmt: HirStmt):
@@ -451,14 +495,19 @@ fn safetychecker_check_stmt(self: SafetyChecker, stmt: HirStmt):
         case Expr(expr):
             safetychecker_check_expr(self, expr)
 
-        case Let(_, _, init):
+        case Let(symbol, type_, init):
             safetychecker_check_expr(self, init)
+            safety_alias_declare(self, symbol, type_, init)
 
         case Assign(target, _, value):
             safetychecker_check_expr(self, target)
             safetychecker_check_expr(self, value)
             safetychecker_flag_param_assign(self, target)
             safetychecker_flag_iter_assign(self, target)
+            match target.kind:
+                case Index(base, _): safety_flag_collection_place(self, base, target.span)
+                case _: safety_flag_collection_place(self, target, target.span)
+            safety_alias_rebind(self, target, value)
 
         case Block(block):
             safetychecker_check_block(self, block)

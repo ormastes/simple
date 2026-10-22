@@ -5,6 +5,7 @@ use compiler.hir.hir_definitions.*
 use compiler.hir.sffi_identity.{hir_type_is_sffi_raw_callable,
     sffi_method_resolution_symbol}
 use compiler.semantics.safety_checker.*
+use compiler.semantics.safety_checker_places.*
 
 
 fn safetychecker_check_args(self: SafetyChecker, args: [HirCallArg]):
@@ -59,37 +60,67 @@ fn safetychecker_check_expr(self: SafetyChecker, expr: HirExpr):
         # Control flow
         case If(cond, then_, else_):
             safetychecker_check_expr(self, cond)
+            val incoming_aliases = self.context.class_aliases
             safetychecker_check_block(self, then_)
+            val then_aliases = self.context.class_aliases
+            self.context.class_aliases = incoming_aliases
             match else_:
                 case Some(block):
                     safetychecker_check_block(self, block)
                 case nil:
                     pass
+            self.context.class_aliases = safety_alias_join(then_aliases, self.context.class_aliases)
 
         case IfChain(arms, else_):
+            val incoming_aliases = self.context.class_aliases
+            var joined_aliases = incoming_aliases
+            var first_arm = true
             for arm in arms:
+                self.context.class_aliases = incoming_aliases
                 val typed_arm: HirIfArm = arm
                 safetychecker_check_expr(self, typed_arm.cond)
                 safetychecker_check_block(self, typed_arm.then_)
+                if first_arm:
+                    joined_aliases = self.context.class_aliases
+                    first_arm = false
+                else:
+                    joined_aliases = safety_alias_join(joined_aliases, self.context.class_aliases)
+            self.context.class_aliases = incoming_aliases
             match else_:
-                case Some(block):
-                    safetychecker_check_block(self, block)
-                case nil:
-                    pass
+                case Some(block): safetychecker_check_block(self, block)
+                case nil: ()
+            self.context.class_aliases = safety_alias_join(joined_aliases, self.context.class_aliases)
 
         case MatchCase(scrutinee, arms):
             safetychecker_check_expr(self, scrutinee)
+            val incoming_aliases = self.context.class_aliases
+            val outer_writes = self.context.place_written_bindings
+            self.context.place_written_bindings = {}
             for arm in arms:
+                self.context.class_aliases = incoming_aliases
                 if arm.has_guard:
                     safetychecker_check_expr(self, arm.guard)
                 safetychecker_check_block(self, arm.body)
+            safety_alias_forget_boundary(self, incoming_aliases, outer_writes, expr.span)
 
         case Loop(body, _):
+            val incoming_aliases = self.context.class_aliases
+            val outer_writes = self.context.place_written_bindings
+            self.context.place_written_bindings = {}
+            self.context.place_loop_depth = self.context.place_loop_depth + 1
             safetychecker_check_block(self, body)
+            self.context.place_loop_depth = self.context.place_loop_depth - 1
+            safety_alias_forget_boundary(self, incoming_aliases, outer_writes, expr.span)
 
         case While(cond, body, _):
+            val incoming_aliases = self.context.class_aliases
+            val outer_writes = self.context.place_written_bindings
+            self.context.place_written_bindings = {}
+            self.context.place_loop_depth = self.context.place_loop_depth + 1
             safetychecker_check_expr(self, cond)
             safetychecker_check_block(self, body)
+            self.context.place_loop_depth = self.context.place_loop_depth - 1
+            safety_alias_forget_boundary(self, incoming_aliases, outer_writes, expr.span)
 
         case For(_, iter, body, _):
             safetychecker_check_expr(self, iter)
@@ -97,6 +128,13 @@ fn safetychecker_check_expr(self: SafetyChecker, expr: HirExpr):
             # collection identity to track; a call result, literal, or
             # range expression is intentionally skipped (lane G7 scope).
             val saved_iter_depth = self.context.iter_tracks.len()
+            val saved_places = self.context.collection_places
+            val incoming_aliases = self.context.class_aliases
+            val outer_writes = self.context.place_written_bindings
+            self.context.place_written_bindings = {}
+            if val place = safety_collection_place(self, iter):
+                self.context.collection_places = self.context.collection_places.push(place)
+            self.context.place_loop_depth = self.context.place_loop_depth + 1
             match iter.kind:
                 case NamedVar(symbol, name):
                     self.context.iter_tracks = self.context.iter_tracks.push(SafetyIterTrack(symbol_id: symbol.id, name: name))
@@ -115,6 +153,9 @@ fn safetychecker_check_expr(self: SafetyChecker, expr: HirExpr):
                     restored_iter_tracks = restored_iter_tracks.push(track)
                 iter_depth_idx = iter_depth_idx + 1
             self.context.iter_tracks = restored_iter_tracks
+            self.context.collection_places = saved_places
+            self.context.place_loop_depth = self.context.place_loop_depth - 1
+            safety_alias_forget_boundary(self, incoming_aliases, outer_writes, expr.span)
 
         # Function calls: direct calls to raw-pointer primitives or module
         # extern fns outside an `unsafe:` block violate the safety boundary.
