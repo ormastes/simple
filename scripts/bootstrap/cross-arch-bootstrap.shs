@@ -1,91 +1,152 @@
 #!/bin/sh
 # Cross-CPU bootstrap / release: build the compiler for a target CPU on the
-# host (fast), then check it on the target CPU (qemu-user sanity, VM tests).
+# host (fast), then check it on the target CPU (user-mode emulator sanity and
+# tests, or the target's QEMU system VM lane).
 #
 #   sh scripts/bootstrap/cross-arch-bootstrap.shs --target <platform>
-#      [--compiler <host compiler>] [--phase <N>] [--qemu-sanity] [--vm-test]
+#      [--compiler <host compiler>|auto] [--phase <N>] [--sanity] [--tests <path>] [--vm-test]
 #
 # platform: linux-riscv64 | linux-aarch64 | freebsd-riscv64 | freebsd-aarch64
-# --compiler  host compiler that cross-compiles. Default: the Rust seed
-#             (result = phase 1). A host phase-3 compiler gives phase 4: the
-#             phase-3 sources rebuilt for the target CPU by a fixpoint compiler.
-# --phase     phase label of the result (default: 1 for the seed, else 4).
-# --qemu-sanity  run `--version` of the result under qemu-user (Linux targets).
-# --vm-test   sync the result into the target's QEMU system VM lane and run
-#             the sanity + hello build + test smoke there.
-# Output: build/cross/<platform>/simple, PHASE next to it. Exit 1 on failure.
+# --compiler  host compiler that cross-compiles:
+#               (none) Rust seed, result = phase 1
+#               auto   newest proven host compiler per config/bootstrap.sdn
+#                      (local stage, then newest RC/release), result = its phase + 1
+#               <path> that binary; give --phase for the result (default 4)
+#             Phase 4 = phase-3 sources rebuilt for the target by a phase-3
+#             (fixpoint) compiler; phases never go above 4.
+# --sanity    run the result's --version under a user-mode emulator (Linux targets).
+# --tests P   also cross-build the test runner and run spec path P under the emulator.
+# --vm-test   hand the result to the target's QEMU system VM lane (--cross-test).
+#
+# Resources (env, all optional):
+#   SIMPLE_CROSS_THREADS       native-build threads       (default: host CPUs)
+#   SIMPLE_CROSS_FILE_TIMEOUT  per-file compile timeout s  (default: 1800)
+#   SIMPLE_CROSS_TEST_TIMEOUT  test-run timeout s          (default: 3600)
+#   SIMPLE_CROSS_USER_EMU      qemu (default) | ria-jit | full command prefix
+#   SIMPLE_RIA_JIT             ria-jit translator binary   (default: ria-jit on PATH)
+#   QEMU_CPUS / QEMU_MEM       passed through to the VM lane for --vm-test
+# ria-jit translates RV64 to x86_64 faster than qemu-user but covers fewer
+# syscalls; an emulator failure is reported as a failure, never a pass.
+# Output: build/cross/<platform>/simple (+ simple_test_runner) and PHASE.
 set -eu
 
-target= compiler= phase= qemu_sanity=0 vm_test=0
+target= compiler= phase= sanity=0 tests= vm_test=0
 while [ $# -gt 0 ]; do
   case $1 in
     --target) target=${2:?}; shift 2 ;;
     --compiler) compiler=${2:?}; shift 2 ;;
     --phase) phase=${2:?}; shift 2 ;;
-    --qemu-sanity) qemu_sanity=1; shift ;;
+    --sanity|--qemu-sanity) sanity=1; shift ;;
+    --tests) tests=${2:?}; sanity=1; shift 2 ;;
     --vm-test) vm_test=1; shift ;;
     *) echo "cross-arch-bootstrap: unknown argument $1" >&2; exit 2 ;;
   esac
 done
 
-# platform -> rust triple, simple triple, linker, qemu-user, VM lane
+cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+threads=${SIMPLE_CROSS_THREADS:-$cpus}
+file_timeout=${SIMPLE_CROSS_FILE_TIMEOUT:-1800}
+test_timeout=${SIMPLE_CROSS_TEST_TIMEOUT:-3600}
+
+# platform -> rust triple, simple triple, linker, user-mode emulator arch, sysroot, VM lane
 case $target in
   linux-riscv64)   rust=riscv64gc-unknown-linux-gnu; triple=riscv64-unknown-linux-gnu
-                   linker=riscv64-linux-gnu-gcc; qemu=qemu-riscv64-static; sysroot=/usr/riscv64-linux-gnu
+                   linker=riscv64-linux-gnu-gcc; emu_arch=riscv64; sysroot=/usr/riscv64-linux-gnu
                    lane=scripts/check/check-linux-riscv64-bootstrap-qemu.shs ;;
   linux-aarch64)   rust=aarch64-unknown-linux-gnu; triple=aarch64-unknown-linux-gnu
-                   linker=aarch64-linux-gnu-gcc; qemu=qemu-aarch64-static; sysroot=/usr/aarch64-linux-gnu; lane= ;;
+                   linker=aarch64-linux-gnu-gcc; emu_arch=aarch64; sysroot=/usr/aarch64-linux-gnu; lane= ;;
   freebsd-riscv64) rust=riscv64gc-unknown-freebsd; triple=riscv64-unknown-freebsd
-                   linker=${FREEBSD_CROSS_CC:-}; qemu=; sysroot=${FREEBSD_SYSROOT:-}
+                   linker=${FREEBSD_CROSS_CC:-}; emu_arch=; sysroot=${FREEBSD_SYSROOT:-}
                    lane=scripts/check/check-freebsd-riscv64-bootstrap-qemu.shs ;;
   freebsd-aarch64) rust=aarch64-unknown-freebsd; triple=aarch64-unknown-freebsd
-                   linker=${FREEBSD_CROSS_CC:-}; qemu=; sysroot=${FREEBSD_SYSROOT:-}; lane= ;;
+                   linker=${FREEBSD_CROSS_CC:-}; emu_arch=; sysroot=${FREEBSD_SYSROOT:-}; lane= ;;
   *) echo "cross-arch-bootstrap: unsupported --target $target" >&2; exit 2 ;;
 esac
 [ -n "$linker" ] || { echo "cross-arch-bootstrap: $target needs FREEBSD_CROSS_CC and FREEBSD_SYSROOT" >&2; exit 2; }
 
+# User-mode emulator prefix for running target binaries on this host.
+emu=
+if [ -n "$emu_arch" ]; then
+  case ${SIMPLE_CROSS_USER_EMU:-qemu} in
+    qemu) emu="qemu-$emu_arch-static"; QEMU_LD_PREFIX=$sysroot; export QEMU_LD_PREFIX ;;
+    ria-jit) emu="${SIMPLE_RIA_JIT:-ria-jit} -f" ;;
+    *) emu=$SIMPLE_CROSS_USER_EMU ;;
+  esac
+fi
+
+host_platform() {
+  os=$(uname -s | tr 'A-Z' 'a-z'); m=$(uname -m)
+  case $m in amd64|x86_64) m=x86_64 ;; arm64|aarch64) m=aarch64 ;; riscv|riscv64) m=riscv64 ;; esac
+  printf '%s-%s\n' "$os" "$m"
+}
+
 seed=src/compiler_rust/target/bootstrap/simple
-if [ -z "$compiler" ]; then
+use_seed() {
   compiler=$seed
   [ -x "$compiler" ] || (cd src/compiler_rust && cargo build --profile bootstrap -p simple-driver)
   : "${phase:=1}"
-else
-  : "${phase:=4}"
-fi
+}
+case $compiler in
+  '') use_seed ;;
+  auto)
+    picked=$(sh scripts/bootstrap/resolve-bootstrap-compiler.shs --platform "$(host_platform)") || picked=
+    if [ -n "$picked" ]; then
+      compiler=${picked% *}
+      : "${phase:=$((${picked##* } + 1))}"
+    else
+      echo "cross-arch-bootstrap: no proven host compiler; using the Rust seed" >&2
+      use_seed
+    fi ;;
+  *) : "${phase:=4}" ;;
+esac
+[ "$phase" -le 4 ] || phase=4
 
 # Target runtime archive. The std for the target must belong to the toolchain
 # rust-toolchain.toml pins, not whatever rustup default is active.
 upper=$(printf '%s' "$rust" | tr 'a-z-' 'A-Z_')
-(cd src/compiler_rust && rustup target add "$rust" >/dev/null 2>&1 || true
+(cd src/compiler_rust && { rustup target add "$rust" >/dev/null 2>&1 || true; } &&
  env "CARGO_TARGET_${upper}_LINKER=$linker" \
    cargo build --profile bootstrap -p simple-native-all --features driver-compat --target "$rust")
 runtime=src/compiler_rust/target/$rust/bootstrap
 
 out_dir=build/cross/$target
 mkdir -p "$out_dir"
-rm -f "$out_dir/simple"
 seed_env=
 [ "$compiler" = "$seed" ] && seed_env=SIMPLE_NATIVE_BUILD_RUST=1
-echo "cross-arch-bootstrap: $compiler -> $target (phase $phase)"
-env RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=0 $seed_env \
-  "$compiler" native-build --target "$triple" --runtime-path "$runtime" \
-  --source src/compositions/kernel_llvm_cranelift --source src \
-  --entry-closure --entry src/app/cli/bootstrap_main.spl \
-  --mode dynload --threads "${SIMPLE_NATIVE_BUILD_THREADS:-4}" \
-  --output "$out_dir/simple" || true
-[ -f "$out_dir/simple" ] || { echo "cross-arch-bootstrap: no binary produced" >&2; exit 1; }
+
+cross_build() { # <entry> <output>
+  rm -f "$2"
+  env RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=0 $seed_env \
+    "$compiler" native-build --target "$triple" --runtime-path "$runtime" \
+    --source src/compositions/kernel_llvm_cranelift --source src \
+    --entry-closure --entry "$1" \
+    --mode dynload --threads "$threads" --timeout "$file_timeout" \
+    --output "$2" || true
+  [ -f "$2" ] || { echo "cross-arch-bootstrap: no binary produced for $1" >&2; exit 1; }
+}
+
+echo "cross-arch-bootstrap: $compiler -> $target (phase $phase, $threads threads)"
+cross_build src/app/cli/bootstrap_main.spl "$out_dir/simple"
 echo "$phase" > "$out_dir/PHASE"
 file "$out_dir/simple" 2>/dev/null || true
 
-if [ "$qemu_sanity" = 1 ]; then
-  [ -n "$qemu" ] || { echo "cross-arch-bootstrap: no qemu-user for $target; use --vm-test" >&2; exit 1; }
-  QEMU_LD_PREFIX=$sysroot "$qemu" "$out_dir/simple" --version
-  echo "cross-arch-bootstrap: qemu-user sanity PASS"
+if [ "$sanity" = 1 ]; then
+  [ -n "$emu" ] || { echo "cross-arch-bootstrap: no user-mode emulator for $target; use --vm-test" >&2; exit 1; }
+  $emu "$out_dir/simple" --version
+  echo "cross-arch-bootstrap: user-mode sanity PASS (${SIMPLE_CROSS_USER_EMU:-qemu})"
+fi
+
+if [ -n "$tests" ]; then
+  cross_build src/app/test_runner_new/main.spl "$out_dir/simple_test_runner"
+  rc=0
+  SIMPLE_BINARY=$out_dir/simple timeout "$test_timeout" $emu "$out_dir/simple_test_runner" "$tests" || rc=$?
+  [ "$rc" -eq 0 ] || { echo "cross-arch-bootstrap: tests FAILED under ${SIMPLE_CROSS_USER_EMU:-qemu} (rc=$rc)" >&2; exit 1; }
+  echo "cross-arch-bootstrap: tests PASS under ${SIMPLE_CROSS_USER_EMU:-qemu}"
 fi
 
 if [ "$vm_test" = 1 ]; then
   [ -n "$lane" ] || { echo "cross-arch-bootstrap: no VM lane for $target yet" >&2; exit 1; }
-  # The lane owns VM lifecycle and transport; it runs the sanity + tests there.
+  # The lane owns VM lifecycle and transport (QEMU_CPUS/QEMU_MEM pass through).
   sh "$lane" --cross-test "$out_dir/simple"
 fi
 echo "cross-arch-bootstrap: $out_dir/simple (phase $phase)"
