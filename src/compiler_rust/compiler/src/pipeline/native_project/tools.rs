@@ -2732,6 +2732,9 @@ pub(crate) fn partial_link_tombstone_relocations(path: &Path) -> Result<Vec<Stri
     let bytes = std::fs::read(path).map_err(|err| format!("failed to read {}: {err}", path.display()))?;
     let file = object::File::parse(&*bytes).map_err(|err| format!("failed to parse {}: {err}", path.display()))?;
     let mut found = Vec::new();
+    // RISC-V linker-relaxation markers R_RISCV_ALIGN (43) and R_RISCV_RELAX
+    // (51) carry symbol index 0 by definition; they are not tombstones.
+    let riscv = matches!(file.architecture(), object::Architecture::Riscv64 | object::Architecture::Riscv32);
     for section in file.sections() {
         let allocated = match section.flags() {
             SectionFlags::Elf { sh_flags } => sh_flags & u64::from(object::elf::SHF_ALLOC) != 0,
@@ -2744,7 +2747,8 @@ pub(crate) fn partial_link_tombstone_relocations(path: &Path) -> Result<Vec<Stri
         for (offset, relocation) in section.relocations() {
             // r_type 0 is R_<arch>_NONE on every ELF machine.
             let is_none = matches!(relocation.flags(), RelocationFlags::Elf { r_type: 0 });
-            if !is_none && relocation.target() == RelocationTarget::Absolute {
+            let is_relax_marker = riscv && matches!(relocation.flags(), RelocationFlags::Elf { r_type: 43 | 51 });
+            if !is_none && !is_relax_marker && relocation.target() == RelocationTarget::Absolute {
                 found.push(format!("{name}+{offset:#x}"));
             }
         }
