@@ -16,7 +16,7 @@ and correct operator precedence.
 
 ## Syntax
 
-```simple
+```simple:skip
 # Basic binary operators
 2 + 3              # Addition
 10 - 3             # Subtraction

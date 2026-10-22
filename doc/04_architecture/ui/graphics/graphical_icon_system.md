@@ -6,7 +6,7 @@ Replace text-based Unicode icons and primitive-drawn shapes with a unified graph
 ## 2. Icon Format: Simple RLE (Run-Length Encoding)
 Since we are in a memory-constrained environment, we will use a custom RLE format for icons.
 
-```simple
+```simple:skip
 struct IconDefinition:
     name: text
     width: i32

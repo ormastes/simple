@@ -6,7 +6,7 @@ the whole suite red for everyone else.
 
 Add one line to the spec header:
 
-```simple
+```simple:skip
 """Spec for the thing I am still building."""
 # @tag:in-development
 

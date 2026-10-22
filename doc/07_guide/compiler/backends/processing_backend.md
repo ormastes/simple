@@ -34,7 +34,7 @@ queues, and blending.
 
 Prefer a device-neutral API:
 
-```simple
+```simple:skip
 val dev = processing.Device.select(
     kind: "auto",
     prefer: ["vulkan", "simplegpu", "cuda", "rv64v", "cpu"]

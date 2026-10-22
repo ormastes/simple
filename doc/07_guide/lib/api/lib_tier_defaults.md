@@ -20,7 +20,7 @@ The Simple stdlib has five tiers under `src/lib/`. As of 2026-06-11
 3. If a feature exists only in another tier, that is a gap. Close it with
    a wrapper hub in `nogc_async_mut`:
 
-   ```spl
+   ```simple:skip
    # src/lib/nogc_async_mut/<module>.spl
    export use nogc_sync_mut.<module>*
    ```

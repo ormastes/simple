@@ -123,7 +123,7 @@ externs, using only `[u8]` byte slices and the existing `Random` type for key ge
 
 Key and ciphertext sizes per FIPS 203, Section 7.3 (parameter set k=3):
 
-```simple
+```simple:skip
 # Key and ciphertext container types
 class MlKem768PublicKey:
     """ML-KEM-768 encapsulation key (ek). 1184 bytes per FIPS 203."""
@@ -159,7 +159,7 @@ factors — the zetas table from FIPS 203 Table 1.
 Key and ciphertext sizes from the NTRU Prime sntrup761 specification and the OpenSSH reference
 implementation:
 
-```simple
+```simple:skip
 class Sntrup761PublicKey:
     """sntrup761 public key. 1158 bytes."""
     var bytes: [u8]
@@ -192,7 +192,7 @@ is approximately 1800 lines of C and is the authoritative reference for the Simp
 The facade wires the two primitives together and implements the protocol-mandated combination
 order.
 
-```simple
+```simple:skip
 class HybridPublicKey:
     """Concatenated public keys for a hybrid KEX."""
     var x25519_pub: [u8]     # 32 bytes

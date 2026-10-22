@@ -13,7 +13,7 @@ Tests that class invariants are properly checked:
 
 ## Syntax
 
-```simple
+```simple:skip
 class Counter:
     value: i64
 

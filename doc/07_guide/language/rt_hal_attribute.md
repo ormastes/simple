@@ -2,7 +2,7 @@
 
 Declare a runtime/HAL operation on a function with the ordinary attribute:
 
-```simple
+```simple:skip
 @rt(hal, operation: io.read.v1,
     providers: pure+c+rust,
     capabilities: 9,

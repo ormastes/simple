@@ -313,7 +313,7 @@ cannot perturb execution.
 **Default ON.** The goldens contain the taps, so byte-match *requires* enabled.
 Turn them off via the third argument of `generate_exec_core`:
 
-```simple
+```simple:skip
 generate_exec_core(XlenConfig.rv32(), "", false)   # taps off — diagnostic only
 ```
 

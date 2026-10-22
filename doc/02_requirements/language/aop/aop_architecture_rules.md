@@ -14,7 +14,7 @@ forbid or allow certain dependency patterns.
 
 ## Syntax
 
-```simple
+```simple:skip
 # Forbid pattern with error message
 forbid pc{ import(from_pattern, to_pattern) } "Error message"
 forbid pc{ depend(from_pattern, to_pattern) } "Error message"

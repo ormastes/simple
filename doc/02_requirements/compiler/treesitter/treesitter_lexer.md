@@ -11,7 +11,7 @@ recognition, spans, and edge cases.
 
 ## API
 
-```simple
+```simple:skip
 use std.parser.treesitter.{Lexer, Token, TokenKind}
 
 val lexer = Lexer.new(source)

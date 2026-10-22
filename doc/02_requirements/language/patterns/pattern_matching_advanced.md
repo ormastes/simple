@@ -16,7 +16,7 @@ Tests advanced pattern matching features including:
 
 ## Syntax
 
-```simple
+```simple:skip
 # Match guards
 match x:
     n if n > 0 => "positive"

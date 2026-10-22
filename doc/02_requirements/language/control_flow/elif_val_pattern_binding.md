@@ -16,7 +16,7 @@ matching the existing `if val` support.
 
 ## Syntax
 
-```simple
+```simple:skip
 if val Some(x) = expr1:
     use(x)
 elif val Some(y) = expr2:

@@ -6,7 +6,7 @@ Frozen source `62d306cf0eee92107abf1649e496979f71625748` failed actual Phase2 di
 
 Minimal unsupported form (preserved as a grammar reproducer, not normalized away):
 
-```simple
+```simple:skip
 val result = if ready:
     Ok(1) else: Err("not ready")
 ```

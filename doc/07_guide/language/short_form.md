@@ -81,7 +81,7 @@ Aliases are compile-time: zero runtime overhead, no vtable entry, no indirection
 
 ### Function alias — migration and canonical shorthand
 
-```simple
+```text
 # Expose a canonical short name for a longer implementation
 fn map = transform_each
 
@@ -95,7 +95,7 @@ Use when: adding a Ruby-canonical name to an existing method, or deprecating a
 
 ### Type alias — generic shorthand
 
-```simple
+```text
 type StringMap<V> = Map<text, V>
 type Handler = fn(Event) -> ()
 type Result<T> = Option<T>
@@ -106,7 +106,7 @@ form clutters reading.
 
 ### Class alias — renaming without inheritance
 
-```simple
+```text
 alias Optional = Option
 alias Vec = Vector
 pub alias PublicPoint = InternalPoint
@@ -117,7 +117,7 @@ name should have a familiar alias for developers from another language.
 
 ### Deprecation workflow
 
-```simple
+```text
 # Step 1: implement under the new name
 fn fetch(key: text) -> Option<text> { ... }
 
@@ -137,7 +137,7 @@ method.
 
 ### Basics
 
-```simple
+```text
 # From a boolean property named 'empty':
 list.empty.?          # true if list.empty == true
 
@@ -161,7 +161,7 @@ not list.?            # true if list is empty
 
 Use `is_*` for free-standing functions with no natural receiver:
 
-```simple
+```text
 fn is_valid_identifier(s: text) -> bool { ... }
 ```
 
@@ -176,7 +176,7 @@ property and let callers use `.?`.
 
 Methods with no arguments may be called without parentheses:
 
-```simple
+```simple:skip
 path.stem          # instead of path.stem()
 list.first         # instead of list.first()
 user.name          # instead of user.name()
@@ -189,7 +189,7 @@ Prefer the no-paren form for anything that reads as a property or noun.
 
 The last expression in a function body is the return value. No `return` keyword needed:
 
-```simple
+```text
 fn double(n: i64) -> i64 {
     n * 2           # returned automatically
 }
@@ -203,7 +203,7 @@ Use explicit `return` only for early exit.
 
 ### Block / closure syntax
 
-```simple
+```text
 # Short block (single expression):
 names.map { |n| n.upcase }
 

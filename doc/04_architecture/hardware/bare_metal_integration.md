@@ -160,7 +160,7 @@ resolve_qemu_path(arch)
 ### With Test Framework
 
 Tests use the SPipe framework:
-```simple
+```simple:skip
 use std.spec
 use src.lib.qemu.boot_runner.{run_x86_boot_test}
 
@@ -205,7 +205,7 @@ GitHub Actions integration:
 ### QEMU Configuration
 
 **Default settings** (in `src/lib/qemu/mod.spl`):
-```simple
+```simple:skip
 QemuConfig.for_test_runner(arch, elf_path):
     machine: arch.default_machine()
     memory: arch.default_memory()

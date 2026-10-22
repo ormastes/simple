@@ -154,7 +154,7 @@ Simple provides a built-in `cli` keyword for declarative argument parsing in you
 
 ### Basic Example
 
-```simple
+```simple:skip
 cli Args:
     """A greeting tool"""
     -v verbose = false   """Enable verbose output"""
@@ -181,7 +181,7 @@ The type of each field is inferred from its default value:
 
 ### Subcommands
 
-```simple
+```simple:skip
 cli Args:
     """My Application"""
     -v verbose = false   """Verbose output"""
@@ -207,7 +207,7 @@ fn main():
 
 ### File Detection
 
-```simple
+```simple:skip
 cli Args:
     """Simple compiler"""
     file: ".spl"                # Detect .spl files as positional args

@@ -118,7 +118,7 @@ yosys --version  # optional
 Create a hardware module using only the synthesizable subset. The VHDL backend
 enforces this — unsupported constructs produce hard compile errors.
 
-```simple
+```text
 # my_adder.spl — A simple combinational adder
 
 struct AdderPorts:

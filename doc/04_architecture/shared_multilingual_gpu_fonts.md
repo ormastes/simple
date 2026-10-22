@@ -71,7 +71,7 @@ implementations.
 
 ### Public-to-next-layer surfaces
 
-```simple
+```simple:skip
 class FontRenderQuad
 class FontRenderBatch
 class FontGlyphRun

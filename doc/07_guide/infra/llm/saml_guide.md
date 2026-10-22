@@ -267,6 +267,7 @@ is registered as a row in `ide_feature_check_report`; its self-probe reports
 SAML is also reachable directly as library calls from Simple code:
 
 ```simple
+use std.io_runtime.{read_file}
 use std.common.saml.parser.{parse_saml}
 use std.common.saml.analysis.{analyze_module}
 use std.common.saml.emit.{emit_analysis_report, emit_baml, emit_markdown_manual}

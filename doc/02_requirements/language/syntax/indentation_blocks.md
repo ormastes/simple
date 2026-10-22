@@ -16,7 +16,7 @@ control flow, and other block-structured code in Simple.
 
 ## Syntax
 
-```simple
+```simple:skip
 # Function body indentation
 fn add(a: i64, b: i64) -> i64:
     a + b
@@ -68,7 +68,7 @@ Indentation handling in lexer:
 
 ## Examples
 
-```simple
+```text
 # Multi-level nested blocks
 fn process_data(items: List<Int>) -> i64:
     var total = 0

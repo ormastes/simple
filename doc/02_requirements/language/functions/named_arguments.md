@@ -14,6 +14,11 @@ parameter names, improving code clarity and enabling flexible argument ordering.
 ## Syntax
 
 ```simple
+struct User:
+    name: str
+    email: str
+    age: i64
+
 fn create_user(name: str, email: str, age: i64) -> User:
     User(name: name, email: email, age: age)
 
