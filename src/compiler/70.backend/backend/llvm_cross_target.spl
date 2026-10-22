@@ -15,6 +15,7 @@ use compiler.backend.riscv_target.{riscv_linux_target_contract}
 use std.platform.{get_host_os, host_arch}
 use std.io_runtime.{file_exists}
 use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.backend.llvm_target.{hosted_windows_llvm_env}
 
 # ============================================================================
 # Toolchain Descriptor
@@ -172,7 +173,8 @@ fn toolchain_x86_64_native(os: text) -> TargetToolchain:
             requires_external: false,
             install_hint: "Xcode Command Line Tools: xcode-select --install"
         )
-    elif os == "windows":
+    elif os == "windows" and hosted_windows_llvm_env() == "msvc":
+        # Explicit SIMPLE_WINDOWS_ABI=msvc / SIMPLE_LINKER_FLAVOR=msvc lane.
         TargetToolchain(
             target: CodegenTarget.X86_64,
             triple: "x86_64-pc-windows-msvc",
@@ -183,6 +185,19 @@ fn toolchain_x86_64_native(os: text) -> TargetToolchain:
             default_flags: ["/MACHINE:X64"],
             requires_external: false,
             install_hint: "Visual Studio Build Tools or MSVC"
+        )
+    elif os == "windows":
+        # Default: MinGW UCRT via MSYS2 CLANG64 (clang + LLD, no GCC).
+        TargetToolchain(
+            target: CodegenTarget.X86_64,
+            triple: "x86_64-pc-windows-gnu",
+            linker: "ld.lld",
+            linker_flavor: "gnu",
+            sysroot: "",
+            crt_dir: "",
+            default_flags: ["-m", "i386pep"],
+            requires_external: false,
+            install_hint: "MSYS2 CLANG64: pacman -S mingw-w64-clang-x86_64-clang mingw-w64-clang-x86_64-lld"
         )
     elif os == "freebsd":
         TargetToolchain(
@@ -250,10 +265,11 @@ fn toolchain_aarch64(os: text, host: text) -> TargetToolchain:
             install_hint: "Xcode Command Line Tools: xcode-select --install"
         )
     elif os == "windows":
+        val windows_arm64_env = hosted_windows_llvm_env()
         unsupported_target_toolchain(
             CodegenTarget.AArch64,
-            "aarch64-pc-windows-msvc",
-            "Windows ARM64 linking is unsupported: MSVC linker and CRT discovery are x64-only"
+            "aarch64-pc-windows-{windows_arm64_env}",
+            if windows_arm64_env == "msvc": "Windows ARM64 linking is unsupported: MSVC linker and CRT discovery are x64-only" else: "Windows ARM64 linking is unsupported: no MSYS2 CLANGARM64 sysroot discovery yet"
         )
     elif os == "freebsd":
         if host != "aarch64" and host != "arm64":
@@ -305,9 +321,10 @@ fn toolchain_aarch64(os: text, host: text) -> TargetToolchain:
         )
 
 fn toolchain_armv7(os: text, _host: text) -> TargetToolchain:
+    val windows_env = hosted_windows_llvm_env()
     val triple = match os:
         case "macos": "armv7-apple-darwin"
-        case "windows": "armv7-pc-windows-msvc"
+        case "windows": "armv7-pc-windows-{windows_env}"
         case "freebsd": "armv7-unknown-freebsd"
         case "linux": "armv7-unknown-linux-gnueabihf"
         case _: "armv7-unknown-{os}"
@@ -334,9 +351,10 @@ fn toolchain_riscv64(os: text, host: text) -> TargetToolchain:
             install_hint: "FreeBSD base system toolchain"
         )
     if os != "linux":
+        val windows_env = hosted_windows_llvm_env()
         val triple = match os:
             case "macos": "riscv64-apple-darwin"
-            case "windows": "riscv64-pc-windows-msvc"
+            case "windows": "riscv64-pc-windows-{windows_env}"
             case "freebsd": "riscv64-unknown-freebsd"
             case _: "riscv64-unknown-{os}"
         return unsupported_target_toolchain(

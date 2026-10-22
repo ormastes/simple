@@ -20,6 +20,22 @@ use compiler.backend.portable_numeric_capabilities.{portable_numeric_default_pla
 # std.io_runtime.host_os() instead, proven correct in this exact harness.
 use std.io_runtime.{host_arch, host_os, env_get_opt}
 
+pub fn hosted_windows_llvm_env() -> text:
+    """Hosted Windows LLVM environment: "gnu" (MinGW UCRT via MSYS2 CLANG64:
+    clang + LLD + libunwind over UCRT) by default; "msvc" only when
+    SIMPLE_LINKER_FLAVOR=msvc or SIMPLE_WINDOWS_ABI=msvc selects it.
+    MSYSTEM is never consulted. See
+    doc/07_guide/infra/toolchain/windows_mingw_ucrt.md."""
+    val flavor = (env_get_opt("SIMPLE_LINKER_FLAVOR") ?? "").trim().lower()
+    if flavor == "msvc":
+        return "msvc"
+    if flavor == "gnu" or flavor == "mingw":
+        return "gnu"
+    val abi = (env_get_opt("SIMPLE_WINDOWS_ABI") ?? "").trim().lower()
+    if abi == "msvc":
+        return "msvc"
+    "gnu"
+
 fn llvm_riscv64_hard_float_requested() -> bool:
     """True when the explicit target selects the RV64GC/LP64D profile."""
     val requested = (env_get_opt("SIMPLE_NATIVE_BUILD_TARGET") ?? "").trim().lower()
@@ -105,7 +121,8 @@ impl LlvmTargetTriple:
         - Linux: x86_64-unknown-linux-gnu
         - FreeBSD: x86_64-unknown-freebsd
         - macOS: x86_64-apple-darwin or aarch64-apple-darwin
-        - Windows: x86_64-pc-windows-msvc
+        - Windows: x86_64-pc-windows-gnu (MinGW UCRT / MSYS2 CLANG64;
+          x86_64-pc-windows-msvc with SIMPLE_WINDOWS_ABI=msvc)
         """
         # An explicit OS target is independent of the compiler host.  Resolve it
         # before hosted-mode detection so in-guest compilation never shells out
@@ -177,7 +194,7 @@ impl LlvmTargetTriple:
             val env_result = match detected_host_os:
                 case "freebsd": nil
                 case "macos": nil
-                case "windows": Some("msvc")
+                case "windows": Some(hosted_windows_llvm_env())
                 case _: Some("gnu")
 
             match target:

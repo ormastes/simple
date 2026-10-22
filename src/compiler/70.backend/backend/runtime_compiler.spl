@@ -57,14 +57,17 @@ pub fn windows_link_flavor_select(target: text, linker_abi: text, flavor_overrid
     An ABI-qualified TARGET wins (`*-windows-msvc` / `windows-msvc` -> msvc;
     `*-windows-gnu`, `*-w64-mingw32` / `windows-gnu` -> gnu), then the
     explicit env overrides `SIMPLE_LINKER_FLAVOR` (msvc|gnu|mingw) and
-    `SIMPLE_WINDOWS_ABI` (msvc|gnu); otherwise msvc.
+    `SIMPLE_WINDOWS_ABI` (msvc|gnu); otherwise gnu, the default Windows
+    configuration (MinGW UCRT via MSYS2 CLANG64: clang + LLD + libunwind,
+    matching the Rust seed's default and scripts/setup/platform-detect.shs).
 
-    MSYSTEM (set by every MSYS2/Git Bash shell) is deliberately not consulted,
-    unlike the Rust seed's `Target::linker_flavor`: it says nothing about the
-    C compiler, and the runtime objects are compiled for the C compiler's
-    default (MSVC) ABI, so MSYSTEM -> gnu linked MSVC objects through MinGW
-    (undefined `__stdio_common_vfprintf`, `__chkstk`, `_fltused`). See
-    doc/08_tracking/bug/windows_unqualified_native_build_msystem_gnu_flavor_mismatch_2026-10-18.md."""
+    MSYSTEM (set by every MSYS2/Git Bash shell) is deliberately not consulted:
+    it says nothing about the C compiler. Mixing ABIs (MSVC-ABI runtime
+    objects through the MinGW arm) fails with undefined
+    `__stdio_common_vfprintf`, `__chkstk`, `_fltused`; select msvc explicitly
+    for a clang-cl build. See
+    doc/08_tracking/bug/windows_unqualified_native_build_msystem_gnu_flavor_mismatch_2026-10-18.md
+    and doc/07_guide/infra/toolchain/windows_mingw_ucrt.md."""
     val normalized_target = target.lower()
     val normalized_abi = linker_abi.lower()
     if normalized_abi == "windows-msvc" or normalized_target.ends_with("-windows-msvc"):
@@ -82,7 +85,7 @@ pub fn windows_link_flavor_select(target: text, linker_abi: text, flavor_overrid
         return "msvc"
     if abi == "gnu":
         return "gnu"
-    "msvc"
+    "gnu"
 
 pub fn windows_link_flavor_env_conflict(target: text, linker_abi: text, flavor_override: text) -> text:
     """Message when SIMPLE_LINKER_FLAVOR contradicts an ABI-qualified target
@@ -366,13 +369,15 @@ fn _cc_verify_compiles(cc: text) -> bool:
     ok
 
 fn _find_c_compiler_windows() -> text:
-    """Find a C compiler on Windows (MSVC cl.exe or MinGW gcc/clang).
+    """Find a C compiler on Windows (MinGW UCRT CLANG64 clang by default,
+    clang-cl for the explicit msvc lane).
 
     Every candidate is verified by actually compiling a trivial file
     (_cc_verify_compiles) — a `where` hit alone selects nothing."""
-    # MinGW: prefer gcc/clang
+    # MinGW UCRT (default): CLANG64 clang only. Clang-only policy: never gcc,
+    # which a runner may still carry on PATH (e.g. C:/mingw64/bin).
     if _is_mingw():
-        val mingw_candidates = ["gcc", "clang", "cc"]
+        val mingw_candidates = ["clang", "cc"]
         for candidate in mingw_candidates:
             val resolved = _first_verified_windows_compiler(candidate)
             if resolved != "":
