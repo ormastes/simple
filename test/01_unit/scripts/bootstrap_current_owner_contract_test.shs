@@ -79,6 +79,7 @@ def matrix(source):
     def evaluate(node, event, lane, labels=()):
         if isinstance(node, ast.Expression): return evaluate(node.body, event, lane, labels)
         if isinstance(node, ast.Constant) and isinstance(node.value, str): return node.value
+        if isinstance(node, ast.Constant) and isinstance(node.value, bool): return node.value
         if isinstance(node, ast.Name) and node.id in ['event', 'lane', 'labels']: return {'event': event, 'lane': lane, 'labels': labels}[node.id]
         if isinstance(node, ast.Compare) and len(node.ops) == 1 and isinstance(node.ops[0], (ast.Eq, ast.NotEq)):
             equal = evaluate(node.left, event, lane, labels) == evaluate(node.comparators[0], event, lane, labels)
@@ -105,7 +106,9 @@ def matrix(source):
     guards = [line.strip()[4:] for line in source.splitlines() if line.startswith('    if: ') and 'inputs.native_lane' in line]
     assert len(guards) == 4, 'non-native job focus policy authority changed'
     for guard in guards:
-        guard = guard.replace('github.event.pull_request.labels.*.name', 'labels').replace('github.event_name', 'event').replace('inputs.native_lane', 'lane').replace('&&', ' and ').replace('||', ' or ')
+        # The Windows symlink diagnostic input defaults to false in every case
+        # below, so its negation is constant true for this policy table.
+        guard = guard.replace('!inputs.diagnose_windows_symlinks', 'True').replace('github.event.pull_request.labels.*.name', 'labels').replace('github.event_name', 'event').replace('inputs.native_lane', 'lane').replace('&&', ' and ').replace('||', ' or ')
         guard_tree = ast.parse(guard, mode='eval')
         for event, lane, labels, expected_enabled in [('push', '', [], True), ('push', 'windows-cranelift', [], True), ('workflow_dispatch', 'all', [], True), ('workflow_dispatch', '', [], True), ('workflow_dispatch', 'linux-llvm', [], False), ('workflow_dispatch', 'linux-cranelift', [], False), ('workflow_dispatch', 'windows-cranelift', [], False), ('pull_request', '', [], False), ('pull_request', '', ['ci:full'], True)]:
             assert evaluate(guard_tree, event, lane, labels) == expected_enabled, 'dependent-job focus or PR policy drift'
