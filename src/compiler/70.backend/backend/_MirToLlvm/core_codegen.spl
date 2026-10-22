@@ -8,7 +8,8 @@ use compiler.backend.mir_to_llvm.*
 # Implements MirTextCodegen trait for shared instruction dispatch.
 
 use compiler.mir.mir_data.*
-use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, MirInst}
+use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, MirInst,
+    mir_module_functions_sorted, mir_module_statics_sorted}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
@@ -364,7 +365,7 @@ impl MirTextCodegen for MirToLlvm:
         # translate_function.
         if self.debug_info:
             var dbg_source_file = ""
-            for fn_dbg in module.functions.values():
+            for fn_dbg in mir_module_functions_sorted(module):
                 match fn_dbg.span:
                     nil: ()
                     _:
@@ -394,10 +395,10 @@ impl MirTextCodegen for MirToLlvm:
         # See doc/08_tracking/bug/stage2_cross_module_call_mangling_asymmetry_undefined_symbol_2026-09-13.md
         self.module_qualified_symbol_names = {}
         if not is_entry_module and module.name != "":
-            for fn_qualify in module.functions.values():
+            for fn_qualify in mir_module_functions_sorted(module):
                 if not fn_qualify.name.contains("."):
                     self.module_qualified_symbol_names[fn_qualify.name] = "{module.name}.{fn_qualify.name}"
-        for fn_owner in module.functions.values():
+        for fn_owner in mir_module_functions_sorted(module):
             if mir_runtime_owned_call_name(fn_owner.name):
                 self.owned_name_has_local[fn_owner.name] = true
             # `@export("C", name: "...")`: record the requested ABI symbol so
@@ -447,7 +448,7 @@ impl MirTextCodegen for MirToLlvm:
             self.builder.emit("")
             self.builder.emit("; Module-level mutable globals")
             var declared_external_globals: Dict<text, bool> = {}
-            for static_ in module.statics.values():
+            for static_ in mir_module_statics_sorted(module):
                 val g_ty = self.valid_llvm_type(self.llvm_type_text(static_.type_))
                 val g_name = "@g_{static_.name}"
                 val g_key = self.global_static_key(static_.symbol.id)
@@ -530,7 +531,7 @@ impl MirTextCodegen for MirToLlvm:
                 print "[llvm-translate] function-done"
                 bootstrap_fni = bootstrap_fni + 1
         else:
-            for fn_ in module.functions.values():
+            for fn_ in mir_module_functions_sorted(module):
                 # Signature discovery needs no rewritten blocks. Both SSA
                 # transforms return MirFunction.with_blocks, which preserves
                 # the signature; lower the body once in the emission loop.
@@ -564,7 +565,7 @@ impl MirTextCodegen for MirToLlvm:
                 self.remember_function_return_unsigned(fn_name, ret_unsigned)
                 self.remember_function_param_types_from_signature(fn_.name, fn_.signature)
                 self.remember_function_param_types_from_signature(fn_name, fn_.signature)
-            for fn_ in module.functions.values():
+            for fn_ in mir_module_functions_sorted(module):
                 val body = MirBody.from_function(llvm_bootstrap_ssa_function(
                     fn_, self.bootstrap_mode_enabled()))
                 val fn_name = self.llvm_function_symbol_name(fn_.name)
