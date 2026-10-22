@@ -1,0 +1,225 @@
+# Prepared ordinary-function interfaces. No source fallback or body loading.
+# Payload authority comes from the admitted source/configuration snapshot and
+# a pinned header digest; a self-declared digest is not admission authority.
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind}
+use compiler.hir.abi_interface.{hir_abi_interface_encoded_v1}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use std.common.crypto.sha256.{sha256_text}
+
+struct TldrFunctionHeaderAuthorityV1:
+    module_name: text
+    source_digest: text
+    producer_digest: text
+    variant_digest: text
+    abi_digest: text
+    payload_digest: text
+
+struct TldrFunctionSignatureV1:
+    name: text
+    param_names: [text]
+    param_type_names: [text]
+    return_type_name: text
+    linkage_name: text
+
+struct AdmittedTldrFunctionImportV1:
+    payload: text
+    authority: TldrFunctionHeaderAuthorityV1
+    # Compiler-owned admission result, populated only after current pinned
+    # archive validation. Never deserialize this field from an artifact.
+    # Treat the carrier and nested signature arrays as immutable after admission;
+    # changed source/configuration requires a newly admitted carrier.
+    # Legacy raw carriers leave this nil and are validated by the consumer.
+    admitted_signatures: [TldrFunctionSignatureV1]? = nil
+
+fn tldr_function_identifier_v1(value: text, qualified: bool = false) -> bool:
+    if value == "": return false
+    var start = true
+    for index in 0..value.len():
+        val byte = value.byte_at(index) as i64
+        if qualified and byte == 46:
+            if start: return false
+            start = true
+        elif byte == 95 or (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122):
+            start = false
+        elif not start and byte >= 48 and byte <= 57:
+            start = false
+        else:
+            return false
+    not start
+
+fn tldr_function_digest_v1(value: text) -> bool:
+    if value.len() != 64: return false
+    for index in 0..value.len():
+        val byte = value.byte_at(index) as i64
+        if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102)):
+            return false
+    true
+
+fn tldr_function_type_name_v1(type_: HirType) -> text:
+    match type_.kind:
+        case Int(bits, signed):
+            if bits == 8 or bits == 16 or bits == 32 or bits == 64:
+                (if signed: "i" else: "u") + bits.to_text()
+            else: ""
+        case Float(bits): if bits == 32 or bits == 64: "f" + bits.to_text() else: ""
+        case Bool: "bool"
+        case Unit: "void"
+        case _: ""
+
+fn tldr_function_type_v1(name: text, span: Span) -> Result<HirType, text>:
+    val kind = match name:
+        case "i8": HirTypeKind.Int(8, true)
+        case "i16": HirTypeKind.Int(16, true)
+        case "i32": HirTypeKind.Int(32, true)
+        case "i64": HirTypeKind.Int(64, true)
+        case "u8": HirTypeKind.Int(8, false)
+        case "u16": HirTypeKind.Int(16, false)
+        case "u32": HirTypeKind.Int(32, false)
+        case "u64": HirTypeKind.Int(64, false)
+        case "f32": HirTypeKind.Float(32)
+        case "f64": HirTypeKind.Float(64)
+        case "bool": HirTypeKind.Bool
+        case "void": HirTypeKind.Unit
+        case _: return Err("tldr-body-required:unsupported-type:{name}")
+    Ok(HirType(kind: kind, span: span))
+
+fn tldr_function_type_name_supported_v1(name: text, parameter: bool) -> bool:
+    ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "bool"].contains(name) or
+        (not parameter and name == "void")
+
+fn tldr_function_header_prefix_v1(authority: TldrFunctionHeaderAuthorityV1) -> Result<text, text>:
+    if not tldr_function_identifier_v1(authority.module_name, true):
+        return Err("tldr-module-identity-invalid")
+    for digest in [authority.source_digest, authority.producer_digest,
+            authority.variant_digest, authority.abi_digest]:
+        if not tldr_function_digest_v1(digest): return Err("tldr-authority-invalid")
+    Ok("simple-tldr-functions/1\nmodule={authority.module_name}\nsource={authority.source_digest}\nproducer={authority.producer_digest}\nvariant={authority.variant_digest}\nabi={authority.abi_digest}\n")
+
+# Linkage names must be supplied by the native producer's symbol authority.
+# Never guess an object symbol from a local alias or from an ABI digest.
+fn tldr_function_rows_from_hir_v1(module: HirModule,
+        linkage_names: Dict<text, text>) -> Result<[text], text>:
+    var rows: [text] = []
+    # Coverage is atomic by public name, not by a dictionary's declaration id.
+    # A compact header cannot reproduce overload resolution. Keep every such
+    # name on the body route, including supported/unsupported mixed overloads.
+    var public_counts: Dict<text, i64> = {}
+    for function in module.functions.values():
+        if not function.is_public and not module.exports.contains(function.name): continue
+        if not tldr_function_identifier_v1(function.name):
+            return Err("tldr-function-name-invalid")
+        public_counts[function.name] = (public_counts[function.name] ?? 0) + 1
+    var emitted: Dict<text, bool> = {}
+    for function in module.functions.values():
+        if not function.is_public and not module.exports.contains(function.name): continue
+        if emitted.contains_key(function.name): continue
+        emitted[function.name] = true
+        if public_counts[function.name] > 1:
+            rows.push("body-required|{function.name}|overload")
+            continue
+        if function.type_params.len() > 0 or function.is_generic_template or
+                function.is_async or function.is_method or function.is_const or
+                function.is_gpu_kernel or function.effects.len() > 0 or
+                function.verification_contract != nil or function.has_export_attr:
+            rows.push("body-required|{function.name}|unsupported")
+            continue
+        if not tldr_function_identifier_v1(function.name) or
+                not linkage_names.contains_key(function.name):
+            return Err("tldr-linkage-missing:{function.name}")
+        val linkage = linkage_names[function.name]
+        if not tldr_function_identifier_v1(linkage, true):
+            return Err("tldr-linkage-unsupported:{function.name}")
+        var parameters: [text] = []
+        var unsupported = false
+        for parameter in function.params:
+            val type_name = tldr_function_type_name_v1(parameter.type_)
+            if parameter.has_default or parameter.is_mutable or
+                    not tldr_function_identifier_v1(parameter.name) or
+                    not tldr_function_type_name_supported_v1(type_name, true):
+                unsupported = true
+            parameters.push(parameter.name + ":" + type_name)
+        val return_name = tldr_function_type_name_v1(function.return_type)
+        if unsupported or not tldr_function_type_name_supported_v1(return_name, false):
+            rows.push("body-required|{function.name}|unsupported")
+            continue
+        rows.push("function|{function.name}|{linkage}|" + parameters.join(",") + "|{return_name}")
+    if rows.len() == 0: return Err("tldr-functions-empty")
+    Ok(canonical_identity_sort_texts(rows))
+
+fn tldr_function_header_from_hir_v1(module: HirModule,
+        authority: TldrFunctionHeaderAuthorityV1,
+        linkage_names: Dict<text, text>) -> Result<text, text>:
+    if module.name != authority.module_name: return Err("tldr-module-mismatch")
+    val abi = match hir_abi_interface_encoded_v1(module):
+        case Ok(value): value
+        case Err(reason): return Err("tldr-abi-unresolved:{reason}")
+    if sha256_text(abi) != authority.abi_digest: return Err("tldr-abi-mismatch")
+    val prefix = match tldr_function_header_prefix_v1(authority):
+        case Ok(value): value
+        case Err(reason): return Err(reason)
+    val rows = match tldr_function_rows_from_hir_v1(module, linkage_names):
+        case Ok(value): value
+        case Err(reason): return Err(reason)
+    val payload = prefix + rows.join("\n") + "\n"
+    if payload.len() > 65536: return Err("tldr-header-too-large")
+    Ok(payload)
+
+fn tldr_function_header_admit_v1(payload: text,
+        authority: TldrFunctionHeaderAuthorityV1) -> Result<[TldrFunctionSignatureV1], text>:
+    if payload.len() > 65536: return Err("tldr-header-too-large")
+    if not tldr_function_digest_v1(authority.payload_digest) or
+            sha256_text(payload) != authority.payload_digest:
+        return Err("tldr-payload-digest-mismatch")
+    val prefix = match tldr_function_header_prefix_v1(authority):
+        case Ok(value): value
+        case Err(reason): return Err(reason)
+    if not payload.starts_with(prefix) or not payload.ends_with("\n"):
+        return Err("tldr-source-or-configuration-mismatch")
+    val body = payload[prefix.len():payload.len() - 1]
+    var signatures: [TldrFunctionSignatureV1] = []
+    var names: [text] = []
+    var linkages: [text] = []
+    for row in body.split("\n"):
+        val fields = row.split("|")
+        # Explicit negative coverage is authenticated by the same source,
+        # producer, configuration, full ABI and payload commitments as headers.
+        # Old readers reject this extension; it never resembles a callable.
+        if fields.len() == 3 and fields[0] == "body-required":
+            if not tldr_function_identifier_v1(fields[1]) or names.contains(fields[1]) or
+                    not ["unsupported", "overload"].contains(fields[2]):
+                return Err("tldr-body-demand-invalid")
+            names.push(fields[1])
+            continue
+        if fields.len() != 5 or fields[0] != "function":
+            return Err("tldr-function-record-invalid")
+        if not tldr_function_identifier_v1(fields[1]) or
+                not tldr_function_identifier_v1(fields[2], true) or
+                names.contains(fields[1]) or linkages.contains(fields[2]):
+            return Err("tldr-function-identity-invalid")
+        if not tldr_function_type_name_supported_v1(fields[4], false):
+            return Err("tldr-body-required:return")
+        var param_names: [text] = []
+        var param_types: [text] = []
+        if fields[3] != "":
+            for parameter in fields[3].split(","):
+                val pair = parameter.split(":")
+                if pair.len() != 2 or not tldr_function_identifier_v1(pair[0]) or
+                        param_names.contains(pair[0]):
+                    return Err("tldr-parameter-invalid")
+                if not tldr_function_type_name_supported_v1(pair[1], true):
+                    return Err("tldr-body-required:parameter")
+                param_names.push(pair[0])
+                param_types.push(pair[1])
+        names.push(fields[1])
+        linkages.push(fields[2])
+        signatures.push(TldrFunctionSignatureV1(fields[1], param_names,
+            param_types, fields[4], fields[2]))
+    if names.len() == 0: return Err("tldr-functions-empty")
+    Ok(signatures)
+
+export TldrFunctionHeaderAuthorityV1, TldrFunctionSignatureV1
+export AdmittedTldrFunctionImportV1
+export tldr_function_header_from_hir_v1, tldr_function_header_admit_v1
+export tldr_function_identifier_v1, tldr_function_type_v1
+export tldr_function_rows_from_hir_v1, tldr_function_header_prefix_v1

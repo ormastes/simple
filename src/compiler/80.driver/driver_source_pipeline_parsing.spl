@@ -39,7 +39,7 @@ use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_promote_transie
 use compiler.frontend.frontend_shared_parse_cas_v1.{frontend_shared_parse_promote_transient_owner_v1}
 use compiler.driver.driver_build.incremental.{native_build_cache_scope_key, native_build_frontend_identity, native_build_frontend_portable_source_digest_v1}
 use compiler.driver.cache.phase_compatibility_admission.{
-    driver_import_phase2_frontend_v1
+    driver_import_phase2_frontend_v1, driver_stage_phase2_frontend_frozen_raw_v1
 }
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_enabled, frontend_parse_cache_hits, frontend_parse_cache_misses}
 use compiler.frontend.parser_types.*
@@ -251,7 +251,7 @@ fn _driver_parse_shard_owns(path: text) -> bool:
         return _driver_parse_shard_owns_static(path)
     _driver_parse_shard_claim(queue_dir, path)
 
-fn _driver_publish_frontend_cache_scope() -> bool:
+fn _driver_publish_frontend_cache_scope(ctx: CompileContext) -> bool:
     # The shared parse store is opt-in and carries no caller-supplied parser
     # identity. The manager seals the absolute Stage2 source root and its
     # file-hex authority; verify the parser subset before publishing identity,
@@ -267,6 +267,9 @@ fn _driver_publish_frontend_cache_scope() -> bool:
         return true
     val scope = native_build_cache_scope_key(nil, nil, [], 0, native_build_frontend_identity())
     if not _sffi_env_set("SIMPLE_FRONTEND_CACHE_SCOPE", scope):
+        return false
+    if not driver_stage_phase2_frontend_frozen_raw_v1(ctx.runtime_std_cfg_source_identity_by_path):
+        dtrace("[M3] frontend compatibility frozen-identity-stage-failed")
         return false
     val imported = driver_import_phase2_frontend_v1()
     if imported.starts_with("manifest-rejected:") or imported == "manifest-unreadable":
@@ -663,7 +666,7 @@ impl CompilerDriver:
         self.streaming_entry_source_index_owner = bootstrap_entry_source_index(self.ctx)
         # Same compiler-identity scope the non-streaming parse publishes: the
         # HIR cache keys off it, and without it the streaming path had no cache.
-        val _cache_scope_published = _driver_publish_frontend_cache_scope()
+        val _cache_scope_published = _driver_publish_frontend_cache_scope(self.ctx)
         # The memo retains the scope text across files. Initialize it before
         # opening any per-file arena, so it cannot retain a reclaimed string.
         val _cache_scope_initialized = frontend_parse_cache_enabled()
@@ -942,7 +945,7 @@ impl CompilerDriver:
             val _cache_scope_published = if self.ctx.options.mode == CompileMode.Interpret:
                 false
             else:
-                _driver_publish_frontend_cache_scope()
+                _driver_publish_frontend_cache_scope(self.ctx)
             log_build_progress("parse", "files", 0,
                 unique_entry_sources.len(), "pending", 1, 6, 0, 0, "running")
             for source in unique_entry_sources:

@@ -1,0 +1,121 @@
+# Actual symbol-table admission for a prepared ordinary-function import.
+# The caller must select a pinned header under current source/config authority.
+use compiler.hir.archive.tldr_function_header_v1.{TldrFunctionHeaderAuthorityV1, TldrFunctionSignatureV1,
+    tldr_function_header_admit_v1, tldr_function_identifier_v1, tldr_function_type_v1}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.parser_types.{ParserImport}
+use compiler.common.module_path_naming.{module_logical_name_from_path}
+
+impl HirLowering:
+    me resolve_tldr_import_v1(importer_name: text, imported: ParserImport) -> bool:
+        if not self.tldr_entry_only and self.tldr_imports.len() == 0: return false
+        var owner = imported.module
+        if owner.starts_with("."):
+            var dots = 0
+            while dots < owner.len() and owner[dots:dots + 1] == ".":
+                dots = dots + 1
+            val segments = module_logical_name_from_path(importer_name).split(".")
+            val keep = segments.len() - dots
+            if keep < 0:
+                self.error("tldr-relative-import-escapes-owner", imported.span)
+                return true
+            var prefix: [text] = []
+            for index in 0..keep: prefix.push(segments[index])
+            val tail = owner.substring(dots)
+            owner = if prefix.len() == 0: tail else: prefix.join(".") + "." + tail
+        for prepared in self.tldr_imports:
+            if prepared.authority.module_name != owner: continue
+            if imported.items.len() == 0:
+                if not self.tldr_entry_only: return false
+                self.error("tldr-body-required:namespace-or-glob-import", imported.span)
+                return true
+            # Production carriers come from current pinned archive admission;
+            # this field is an internal typed result, never untrusted wire data.
+            # Registration reads it and creates fresh HIR types without mutation.
+            val signatures = if prepared.admitted_signatures != nil:
+                prepared.admitted_signatures.unwrap()
+            else:
+                match tldr_function_header_admit_v1(prepared.payload, prepared.authority):
+                    case Ok(value): value
+                    case Err(reason):
+                        self.error(reason, imported.span)
+                        return true
+            # Preflight the complete import before changing any binding. Mixed
+            # function/type imports must retain the ordinary surface path.
+            for item in imported.items:
+                var found = false
+                for signature in signatures:
+                    if signature.name == item.name: found = true
+                if not found:
+                    if not self.tldr_entry_only: return false
+                    self.error("tldr-body-required:missing-or-omitted-name:{item.name}", imported.span)
+                    return true
+            for item in imported.items:
+                val local_name = if item.has_alias: item.alias else: item.name
+                match self.register_admitted_tldr_function_v1(signatures,
+                        prepared.authority, item.name, local_name, imported.span):
+                    case Err(reason): self.error(reason, imported.span)
+                    case Ok(_): ()
+            return true
+        if self.tldr_entry_only:
+            self.error("tldr-body-required:missing-prepared-import:{owner}", imported.span)
+            return true
+        false
+
+    me register_tldr_imported_function_v1(payload: text,
+            authority: TldrFunctionHeaderAuthorityV1, imported_name: text,
+            local_name: text, import_span: Span) -> Result<SymbolId, text>:
+        if not tldr_function_identifier_v1(local_name):
+            return Err("tldr-local-name-invalid")
+        val signatures = match tldr_function_header_admit_v1(payload, authority):
+            case Ok(value): value
+            case Err(reason): return Err(reason)
+        self.register_admitted_tldr_function_v1(signatures, authority, imported_name, local_name, import_span)
+
+    # Compile-owned signatures have been authenticated once by the caller above.
+    me register_admitted_tldr_function_v1(signatures: [TldrFunctionSignatureV1],
+            authority: TldrFunctionHeaderAuthorityV1, imported_name: text,
+            local_name: text, import_span: Span) -> Result<SymbolId, text>:
+        if not tldr_function_identifier_v1(local_name):
+            return Err("tldr-local-name-invalid")
+        for signature in signatures:
+            if signature.name != imported_name: continue
+            var parameters: [HirType] = []
+            for name in signature.param_type_names:
+                match tldr_function_type_v1(name, import_span):
+                    case Err(reason): return Err(reason)
+                    case Ok(type_): parameters.push(type_)
+            val result_type = match tldr_function_type_v1(signature.return_type_name, import_span):
+                case Err(reason): return Err(reason)
+                case Ok(type_): type_
+            val function_type = HirType(kind: HirTypeKind.Function(parameters, result_type, []), span: import_span)
+            val existing_id = self.symbols.lookup_or_invalid(local_name)
+            if existing_id.is_valid():
+                val existing = self.symbols.symbols[existing_id.id]
+                if existing.kind != SymbolKind.Function or
+                        existing.name != signature.linkage_name or
+                        (existing.defining_module ?? "") != authority.module_name or
+                        existing.type_ == nil:
+                    return Err("tldr-import-binding-conflict:{local_name}")
+                match existing.type_!.kind:
+                    case Function(previous_params, previous_result, previous_effects):
+                        if previous_params.len() != parameters.len() or
+                                previous_result.kind != result_type.kind or previous_effects.len() != 0:
+                            return Err("tldr-import-binding-conflict:{local_name}")
+                        for index in 0..parameters.len():
+                            if previous_params[index].kind != parameters[index].kind:
+                                return Err("tldr-import-binding-conflict:{local_name}")
+                        self.symbols.admitted_function_abis[existing_id.id] = function_type
+                        return Ok(existing_id)
+                    case _:
+                        return Err("tldr-import-binding-conflict:{local_name}")
+            val symbol = self.symbols.define(local_name, SymbolKind.Function,
+                Some(function_type), import_span, Visibility.Public, false,
+                Some(authority.module_name))
+            self.symbols.rename_symbol(symbol, signature.linkage_name)
+            self.symbols.admitted_function_abis[symbol.id] = function_type
+            return Ok(symbol)
+        Err("tldr-body-required:missing-or-omitted-name:{imported_name}")
