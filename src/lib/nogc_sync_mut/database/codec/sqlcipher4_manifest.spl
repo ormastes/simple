@@ -1,0 +1,134 @@
+# SQLCipher 4 codec manifest: versioned identity of the page codec.
+#
+# The manifest binds a codec implementation to the locked profile through
+# the profile digest (SHA-256 of the canonical profile serialization from
+# `sqlcipher4.spl`), plus the codec version and the PageCodecV1 interface
+# version (master plan §10.2 manifest/versioning, §4.5 module layout). The
+# codec registry admits a codec only when this digest matches a registered,
+# versioned profile.
+
+use nogc_sync_mut.database.codec.sqlcipher4.{
+    Sqlcipher4Error, sqlcipher4_profile, sqlcipher4_profile_digest, SQLCIPHER4_PROFILE_NAME
+}
+use nogc_sync_mut.config_parser.{parse_sdn_config, ConfigSection}
+use std.common.text_bytes.{text_to_utf8_bytes}
+
+# Codec implementation version for the pure-Simple SQLCipher 4 codec.
+# Bump only with a reviewed, fixture-verified format/code change.
+val SQLCIPHER4_CODEC_VERSION: i64 = 1
+
+# Page codec interface version this codec implements (master plan §2.2).
+val SQLCIPHER4_INTERFACE_VERSION: i64 = 1
+
+# Canonical manifest line format marker.
+val SQLCIPHER4_MANIFEST_FORMAT: text = "sqlcipher4-manifest/1"
+
+struct Sqlcipher4Manifest:
+    """Versioned codec manifest.
+
+    `profile_digest` is the SHA-256 (64 lowercase hex chars) of the canonical
+    serialization of the locked `sqlcipher4_4k_sha512` profile; it is the
+    admission key the codec registry checks against registered profiles.
+    `codec_version` identifies the implementation revision; `interface_version`
+    identifies the PageCodecV1 contract revision."""
+    codec_id: text
+    profile_name: text
+    profile_digest: text
+    codec_version: i64
+    interface_version: i64
+
+fn sqlcipher4_manifest() -> Sqlcipher4Manifest:
+    """Manifest of the pure-Simple SQLCipher 4 codec at its locked profile."""
+    val digest = match sqlcipher4_profile_digest(sqlcipher4_profile()):
+        Ok(d): d
+        Err(_): ""
+    Sqlcipher4Manifest(
+        codec_id: "sqlcipher4",
+        profile_name: SQLCIPHER4_PROFILE_NAME,
+        profile_digest: digest,
+        codec_version: SQLCIPHER4_CODEC_VERSION,
+        interface_version: SQLCIPHER4_INTERFACE_VERSION
+    )
+
+fn sqlcipher4_manifest_encode(manifest: Sqlcipher4Manifest) -> text:
+    """Encode the manifest as SDN text (repo configuration convention)."""
+    var lines: [text] = []
+    lines.push("# {SQLCIPHER4_MANIFEST_FORMAT}")
+    lines.push("codec:")
+    lines.push("    id: {manifest.codec_id}")
+    lines.push("    profile_name: {manifest.profile_name}")
+    lines.push("    profile_digest: {manifest.profile_digest}")
+    lines.push("    codec_version: {manifest.codec_version}")
+    lines.push("    interface_version: {manifest.interface_version}")
+    lines.join("\n") + "\n"
+
+fn sqlcipher4_manifest_parse(content: text) -> Result<Sqlcipher4Manifest, Sqlcipher4Error>:
+    """Parse SDN manifest text and verify it against the locked profile.
+
+    Structural problems (missing section/fields, non-numeric versions,
+    malformed digest) are `CorruptPage`; a well-formed digest that does not
+    match the locked profile is `CipherProfileMismatch`; a manifest naming a
+    different profile is `UnsupportedCipherVersion`."""
+    val parsed = parse_sdn_config(content)
+    if parsed.errors.len() > 0:
+        return Err(Sqlcipher4Error.CorruptPage(detail: "manifest SDN parse errors: {parsed.errors.join("; ")}"))
+    var section: ConfigSection? = nil
+    for candidate in parsed.sections:
+        if candidate.name == "codec":
+            section = Some(candidate)
+    if val s = section:
+        if not s.fields.contains_key("id"):
+            return Err(Sqlcipher4Error.CorruptPage(detail: "manifest is missing required field 'id'"))
+        if not s.fields.contains_key("profile_name"):
+            return Err(Sqlcipher4Error.CorruptPage(detail: "manifest is missing required field 'profile_name'"))
+        if not s.fields.contains_key("profile_digest"):
+            return Err(Sqlcipher4Error.CorruptPage(detail: "manifest is missing required field 'profile_digest'"))
+        if not s.fields.contains_key("codec_version"):
+            return Err(Sqlcipher4Error.CorruptPage(detail: "manifest is missing required field 'codec_version'"))
+        if not s.fields.contains_key("interface_version"):
+            return Err(Sqlcipher4Error.CorruptPage(detail: "manifest is missing required field 'interface_version'"))
+        val codec_id = s.fields["id"]
+        val profile_name = s.fields["profile_name"]
+        val profile_digest = s.fields["profile_digest"]
+        val codec_version = s.fields["codec_version"].to_int()
+        val interface_version = s.fields["interface_version"].to_int()
+        if codec_version == nil:
+            return Err(Sqlcipher4Error.CorruptPage(detail: "manifest codec_version is not an integer"))
+        if interface_version == nil:
+            return Err(Sqlcipher4Error.CorruptPage(detail: "manifest interface_version is not an integer"))
+        val manifest = Sqlcipher4Manifest(
+            codec_id: codec_id,
+            profile_name: profile_name,
+            profile_digest: profile_digest,
+            codec_version: codec_version ?? 0,
+            interface_version: interface_version ?? 0
+        )
+        sqlcipher4_manifest_verify(manifest)?
+        Ok(manifest)
+    else:
+        Err(Sqlcipher4Error.CorruptPage(detail: "manifest has no 'codec' section"))
+
+fn sqlcipher4_manifest_verify(manifest: Sqlcipher4Manifest) -> Result<(), Sqlcipher4Error>:
+    """Verify manifest fields and profile digest against the locked profile."""
+    if manifest.profile_name != SQLCIPHER4_PROFILE_NAME:
+        return Err(Sqlcipher4Error.UnsupportedCipherVersion(detail: "manifest profile_name is '{manifest.profile_name}', this codec implements '{SQLCIPHER4_PROFILE_NAME}'"))
+    if not _is_64_lowercase_hex(manifest.profile_digest):
+        return Err(Sqlcipher4Error.CorruptPage(detail: "manifest profile_digest is not 64 lowercase hex characters"))
+    val locked_digest = sqlcipher4_profile_digest(sqlcipher4_profile())?
+    if manifest.profile_digest != locked_digest:
+        return Err(Sqlcipher4Error.CipherProfileMismatch(detail: "manifest profile_digest does not match the locked profile digest"))
+    Ok(())
+
+fn _is_64_lowercase_hex(value: text) -> bool:
+    val bytes = text_to_utf8_bytes(value)
+    if bytes.len() != 64:
+        return false
+    var i: i64 = 0
+    while i < 64:
+        val c = bytes[i]
+        val is_digit = c >= 48 and c <= 57
+        val is_lower_hex = c >= 97 and c <= 102
+        if (not is_digit) and (not is_lower_hex):
+            return false
+        i = i + 1
+    true

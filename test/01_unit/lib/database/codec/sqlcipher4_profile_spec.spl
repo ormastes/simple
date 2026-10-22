@@ -1,0 +1,404 @@
+# SQLCipher 4 locked profile, error taxonomy, probes, and codec manifest.
+#
+# Executable evidence for master plan §4.1 (locked profile), §4.5 (error
+# taxonomy), §5.1 (non-secret header probes), and §10.2 (manifest/versioning).
+
+use std.spipe.*
+use std.common.crypto.sha256.{sha256_text}
+use std.database.codec.sqlcipher4.{
+    Sqlcipher4Error, Sqlcipher4Profile,
+    sqlcipher4_profile, sqlcipher4_validate_profile,
+    sqlcipher4_profile_canonical, sqlcipher4_profile_digest,
+    sqlcipher4_error_code, sqlcipher4_error_text,
+    sqlcipher4_read_file_salt, sqlcipher4_detect_plaintext_sqlite,
+    SQLCIPHER4_PROFILE_NAME, SQLCIPHER4_FORMAT, SQLCIPHER4_PAGE_SIZE,
+    SQLCIPHER4_CIPHER, SQLCIPHER4_CIPHER_PADDING, SQLCIPHER4_CIPHER_KEY_BYTES,
+    SQLCIPHER4_KDF, SQLCIPHER4_KDF_ITER, SQLCIPHER4_KDF_SALT_BYTES,
+    SQLCIPHER4_IV_BYTES, SQLCIPHER4_HMAC, SQLCIPHER4_HMAC_BYTES,
+    SQLCIPHER4_HMAC_KDF, SQLCIPHER4_HMAC_KDF_ITER, SQLCIPHER4_HMAC_SALT_MASK,
+    SQLCIPHER4_HMAC_PAGE_NUMBER, SQLCIPHER4_PAGE_RESERVED_BYTES,
+    SQLCIPHER4_PLAINTEXT_HEADER_BYTES, SQLCIPHER4_HMAC_ON
+}
+use std.database.codec.sqlcipher4_manifest.{
+    Sqlcipher4Manifest, sqlcipher4_manifest, sqlcipher4_manifest_encode,
+    sqlcipher4_manifest_parse, SQLCIPHER4_CODEC_VERSION, SQLCIPHER4_INTERFACE_VERSION
+}
+use std.io_runtime.{file_write_bytes}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn bytes_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: i64 = 0
+    while i < a.len().to_i64():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn is_ok_unit(r: Result<(), Sqlcipher4Error>) -> bool:
+    match r:
+        case Ok(_): true
+        case Err(_): false
+
+fn rejects_mutation(mutator: fn(Sqlcipher4Profile) -> Sqlcipher4Profile) -> bool:
+    val mutated = mutator(sqlcipher4_profile())
+    match sqlcipher4_validate_profile(mutated):
+        case Err(e): sqlcipher4_error_code(e) == "SQLCIPHER4_CIPHER_PROFILE_MISMATCH"
+        case Ok(_): false
+
+# One mutator per locked field — module-level fns to avoid the it-block var
+# mutation interpreter quirk.
+fn _m_profile_name(p: Sqlcipher4Profile) -> Sqlcipher4Profile:
+    p.profile_name = "sqlcipher4_4k_sha256"
+    p
+fn _m_format(p: Sqlcipher4Profile) -> Sqlcipher4Profile:
+    p.format = "sqlcipher3"
+    p
+fn _m_page_size(p: Sqlcipher4Profile) -> Sqlcipher4Profile:
+    p.page_size = 1024
+    p
+fn _m_cipher(p: Sqlcipher4Profile) -> Sqlcipher4Profile:
+    p.cipher = "aes_128_cbc"
+    p
+fn _m_cipher_padding(p: Sqlcipher4Profile) -> Sqlcipher4Profile:
+    p.cipher_padding = "pkcs7"
+    p
+fn _m_cipher_key_bytes(p: Sqlcipher4Profile) -> Sqlcipher4Profile:
+    p.cipher_key_bytes = 16
+    p
+fn _m_kdf(p: Sqlcipher4Profile) -> Sqlcipher4Profile:
+    p.kdf = "pbkdf2_hmac_sha256"
+    p
+fn _m_kdf_iter(p: Sqlcipher4Profile) -> Sqlcipher4Profile:
+    p.kdf_iter = 64000
+    p
+fn _m_kdf_salt_bytes(p: Sqlcipher4Profile) -> Sqlcipher4Profile:
+    p.kdf_salt_bytes = 32
+    p
+fn _m_iv_bytes(p: Sqlcipher4Profile) -> Sqlcipher4Profile:
+    p.iv_bytes = 12
+    p
+fn _m_hmac(p: Sqlcipher4Profile) -> Sqlcipher4Profile:
+    p.hmac = "hmac_sha256"
+    p
+fn _m_hmac_bytes(p: Sqlcipher4Profile) -> Sqlcipher4Profile:
+    p.hmac_bytes = 32
+    p
+fn _m_hmac_kdf(p: Sqlcipher4Profile) -> Sqlcipher4Profile:
+    p.hmac_key_derivation = "pbkdf2_hmac_sha256"
+    p
+fn _m_hmac_kdf_iter(p: Sqlcipher4Profile) -> Sqlcipher4Profile:
+    p.hmac_key_derivation_iter = 1
+    p
+fn _m_hmac_salt_mask(p: Sqlcipher4Profile) -> Sqlcipher4Profile:
+    p.hmac_salt_mask = 0x00
+    p
+fn _m_hmac_page_number(p: Sqlcipher4Profile) -> Sqlcipher4Profile:
+    p.hmac_page_number = "be32"
+    p
+fn _m_page_reserved_bytes(p: Sqlcipher4Profile) -> Sqlcipher4Profile:
+    p.page_reserved_bytes = 48
+    p
+fn _m_plaintext_header_bytes(p: Sqlcipher4Profile) -> Sqlcipher4Profile:
+    p.plaintext_header_bytes = 32
+    p
+fn _m_hmac_on(p: Sqlcipher4Profile) -> Sqlcipher4Profile:
+    p.hmac_on = false
+    p
+
+fn page1_with_salt() -> [u8]:
+    var page1: [u8] = []
+    var i: i64 = 0
+    while i < 32:
+        page1.push(i.to_u8())
+        i = i + 1
+    page1
+
+fn encrypted_looking_file() -> [u8]:
+    var page: [u8] = []
+    var i: i64 = 0
+    while i < 4096:
+        page.push(0xaau8)
+        i = i + 1
+    page
+
+fn sqlite_magic_file() -> [u8]:
+    var page: [u8] = []
+    page.push(0x53u8)
+    page.push(0x51u8)
+    page.push(0x4cu8)
+    page.push(0x69u8)
+    page.push(0x74u8)
+    page.push(0x65u8)
+    page.push(0x20u8)
+    page.push(0x66u8)
+    page.push(0x6fu8)
+    page.push(0x72u8)
+    page.push(0x6du8)
+    page.push(0x61u8)
+    page.push(0x74u8)
+    page.push(0x20u8)
+    page.push(0x33u8)
+    page.push(0x00u8)
+    var i: i64 = 0
+    while i < 100:
+        page.push(0x10u8)
+        i = i + 1
+    page
+
+fn short_file() -> [u8]:
+    var page: [u8] = []
+    var i: i64 = 0
+    while i < 8:
+        page.push(0xaau8)
+        i = i + 1
+    page
+
+fn zeros64() -> text:
+    var out = ""
+    var i: i64 = 0
+    while i < 64:
+        out = out + "0"
+        i = i + 1
+    out
+
+fn is_64_hex(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    val bytes = text_to_utf8_bytes_local(value)
+    var i: i64 = 0
+    while i < 64:
+        val c = bytes[i]
+        if (c < 48 or c > 57) and (c < 97 or c > 102):
+            return false
+        i = i + 1
+    true
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+fn text_to_utf8_bytes_local(s: text) -> [u8]:
+    rt_text_to_bytes(s)
+
+# ============================================================================
+# Locked profile (master plan §4.1)
+# ============================================================================
+
+describe "SQLCipher 4 locked profile":
+    it "exposes every locked field value":
+        val p = sqlcipher4_profile()
+        expect(p.profile_name).to_equal("sqlcipher4_4k_sha512")
+        expect(p.format).to_equal("sqlcipher4")
+        expect(p.page_size).to_equal(4096)
+        expect(p.cipher).to_equal("aes_256_cbc")
+        expect(p.cipher_padding).to_equal("none")
+        expect(p.cipher_key_bytes).to_equal(32)
+        expect(p.kdf).to_equal("pbkdf2_hmac_sha512")
+        expect(p.kdf_iter).to_equal(256000)
+        expect(p.kdf_salt_bytes).to_equal(16)
+        expect(p.iv_bytes).to_equal(16)
+        expect(p.hmac).to_equal("hmac_sha512")
+        expect(p.hmac_bytes).to_equal(64)
+        expect(p.hmac_key_derivation).to_equal("pbkdf2_hmac_sha512")
+        expect(p.hmac_key_derivation_iter).to_equal(2)
+        expect(p.hmac_salt_mask).to_equal(0x3a)
+        expect(p.hmac_page_number).to_equal("le32")
+        expect(p.page_reserved_bytes).to_equal(80)
+        expect(p.plaintext_header_bytes).to_equal(0)
+        expect(p.hmac_on).to_equal(true)
+
+    it "accepts the locked profile through the validator":
+        expect(is_ok_unit(sqlcipher4_validate_profile(sqlcipher4_profile()))).to_equal(true)
+
+    it "rejects a changed profile_name":
+        expect(rejects_mutation(_m_profile_name)).to_equal(true)
+    it "rejects a changed format":
+        expect(rejects_mutation(_m_format)).to_equal(true)
+    it "rejects a changed page_size":
+        expect(rejects_mutation(_m_page_size)).to_equal(true)
+    it "rejects a changed cipher":
+        expect(rejects_mutation(_m_cipher)).to_equal(true)
+    it "rejects added PKCS7 padding on page payload":
+        expect(rejects_mutation(_m_cipher_padding)).to_equal(true)
+    it "rejects a changed cipher_key_bytes":
+        expect(rejects_mutation(_m_cipher_key_bytes)).to_equal(true)
+    it "rejects a changed kdf":
+        expect(rejects_mutation(_m_kdf)).to_equal(true)
+    it "rejects a weakened kdf_iter":
+        expect(rejects_mutation(_m_kdf_iter)).to_equal(true)
+    it "rejects a changed kdf_salt_bytes":
+        expect(rejects_mutation(_m_kdf_salt_bytes)).to_equal(true)
+    it "rejects a changed iv_bytes":
+        expect(rejects_mutation(_m_iv_bytes)).to_equal(true)
+    it "rejects a changed hmac":
+        expect(rejects_mutation(_m_hmac)).to_equal(true)
+    it "rejects a changed hmac_bytes":
+        expect(rejects_mutation(_m_hmac_bytes)).to_equal(true)
+    it "rejects a changed hmac_key_derivation":
+        expect(rejects_mutation(_m_hmac_kdf)).to_equal(true)
+    it "rejects a changed hmac_key_derivation_iter":
+        expect(rejects_mutation(_m_hmac_kdf_iter)).to_equal(true)
+    it "rejects a changed hmac_salt_mask":
+        expect(rejects_mutation(_m_hmac_salt_mask)).to_equal(true)
+    it "rejects a big-endian hmac_page_number":
+        expect(rejects_mutation(_m_hmac_page_number)).to_equal(true)
+    it "rejects a changed page_reserved_bytes":
+        expect(rejects_mutation(_m_page_reserved_bytes)).to_equal(true)
+    it "rejects a nonzero plaintext_header_bytes":
+        expect(rejects_mutation(_m_plaintext_header_bytes)).to_equal(true)
+    it "rejects hmac_on disabled":
+        expect(rejects_mutation(_m_hmac_on)).to_equal(true)
+
+    it "never silently reinterprets a wrong kdf_iter":
+        val mutated = _m_kdf_iter(sqlcipher4_profile())
+        match sqlcipher4_validate_profile(mutated):
+            case Err(e):
+                expect(sqlcipher4_error_code(e)).to_equal("SQLCIPHER4_CIPHER_PROFILE_MISMATCH")
+            case Ok(_):
+                expect(false).to_equal(true)
+
+# ============================================================================
+# Error taxonomy (master plan §4.5)
+# ============================================================================
+
+describe "SQLCipher 4 error taxonomy":
+    it "maps every variant to a stable string code":
+        expect(sqlcipher4_error_code(Sqlcipher4Error.MissingSecret("x"))).to_equal("SQLCIPHER4_MISSING_SECRET")
+        expect(sqlcipher4_error_code(Sqlcipher4Error.CipherProfileMismatch("x"))).to_equal("SQLCIPHER4_CIPHER_PROFILE_MISMATCH")
+        expect(sqlcipher4_error_code(Sqlcipher4Error.AuthenticationFailed("x"))).to_equal("SQLCIPHER4_AUTHENTICATION_FAILED")
+        expect(sqlcipher4_error_code(Sqlcipher4Error.InvalidPageGeometry("x"))).to_equal("SQLCIPHER4_INVALID_PAGE_GEOMETRY")
+        expect(sqlcipher4_error_code(Sqlcipher4Error.CorruptPage("x"))).to_equal("SQLCIPHER4_CORRUPT_PAGE")
+        expect(sqlcipher4_error_code(Sqlcipher4Error.UnsupportedKeyType("x"))).to_equal("SQLCIPHER4_UNSUPPORTED_KEY_TYPE")
+        expect(sqlcipher4_error_code(Sqlcipher4Error.UnsupportedPlaintextHeader("x"))).to_equal("SQLCIPHER4_UNSUPPORTED_PLAINTEXT_HEADER")
+        expect(sqlcipher4_error_code(Sqlcipher4Error.UnsupportedCipherVersion("x"))).to_equal("SQLCIPHER4_UNSUPPORTED_CIPHER_VERSION")
+        expect(sqlcipher4_error_code(Sqlcipher4Error.IoFailure("x"))).to_equal("SQLCIPHER4_IO_FAILURE")
+        expect(sqlcipher4_error_code(Sqlcipher4Error.SnapshotUnavailable("x"))).to_equal("SQLCIPHER4_SNAPSHOT_UNAVAILABLE")
+
+    it "renders structured non-secret diagnostic text":
+        val t = sqlcipher4_error_text(Sqlcipher4Error.AuthenticationFailed("page 7"))
+        expect(t.starts_with("SQLCIPHER4_AUTHENTICATION_FAILED")).to_equal(true)
+
+# ============================================================================
+# File salt probe
+# ============================================================================
+
+describe "SQLCipher 4 file salt":
+    it "reads exactly the first 16 bytes of an encrypted page 1":
+        match sqlcipher4_read_file_salt(page1_with_salt()):
+            case Ok(salt):
+                var expected: [u8] = []
+                var i: i64 = 0
+                while i < 16:
+                    expected.push(i.to_u8())
+                    i = i + 1
+                expect(bytes_equal(salt, expected)).to_equal(true)
+                expect(salt.len()).to_equal(16)
+            case Err(_):
+                expect(false).to_equal(true)
+
+    it "accepts an exactly 16 byte page 1":
+        val page1 = page1_with_salt()
+        var exact: [u8] = []
+        var i: i64 = 0
+        while i < 16:
+            exact.push(page1[i])
+            i = i + 1
+        match sqlcipher4_read_file_salt(exact):
+            case Ok(salt):
+                expect(salt.len()).to_equal(16)
+            case Err(_):
+                expect(false).to_equal(true)
+
+    it "rejects a short buffer with a typed error":
+        var tiny: [u8] = []
+        var i: i64 = 0
+        while i < 8:
+            tiny.push(0x01u8)
+            i = i + 1
+        match sqlcipher4_read_file_salt(tiny):
+            case Err(e):
+                expect(sqlcipher4_error_code(e)).to_equal("SQLCIPHER4_INVALID_PAGE_GEOMETRY")
+            case Ok(_):
+                expect(false).to_equal(true)
+
+# ============================================================================
+# Plaintext SQLite detection (master plan §5.1)
+# ============================================================================
+
+describe "SQLCipher 4 plaintext SQLite detection":
+    it "detects a plaintext SQLite header fixture":
+        val path = "/tmp/sqlcipher4_profile_spec_sqlite.db"
+        expect(file_write_bytes(path, sqlite_magic_file())).to_equal(true)
+        expect(sqlcipher4_detect_plaintext_sqlite(path)).to_equal(true)
+
+    it "returns false for an encrypted-looking file (never guesses from randomness)":
+        val path = "/tmp/sqlcipher4_profile_spec_encrypted.db"
+        expect(file_write_bytes(path, encrypted_looking_file())).to_equal(true)
+        expect(sqlcipher4_detect_plaintext_sqlite(path)).to_equal(false)
+
+    it "returns false for a file shorter than the 16 byte magic":
+        val path = "/tmp/sqlcipher4_profile_spec_short.db"
+        expect(file_write_bytes(path, short_file())).to_equal(true)
+        expect(sqlcipher4_detect_plaintext_sqlite(path)).to_equal(false)
+
+    it "returns false for a missing file":
+        expect(sqlcipher4_detect_plaintext_sqlite("/tmp/sqlcipher4_profile_spec_no_such_file.db")).to_equal(false)
+
+# ============================================================================
+# Codec manifest (master plan §10.2)
+# ============================================================================
+
+describe "SQLCipher 4 codec manifest":
+    it "carries the codec version and PageCodecV1 interface version":
+        val m = sqlcipher4_manifest()
+        expect(m.codec_id).to_equal("sqlcipher4")
+        expect(m.profile_name).to_equal("sqlcipher4_4k_sha512")
+        expect(m.codec_version).to_equal(1)
+        expect(m.interface_version).to_equal(1)
+
+    it "has a 64 lowercase hex profile digest stable across calls":
+        val m1 = sqlcipher4_manifest()
+        val m2 = sqlcipher4_manifest()
+        expect(is_64_hex(m1.profile_digest)).to_equal(true)
+        expect(m1.profile_digest).to_equal(m2.profile_digest)
+
+    it "matches the sha256 of the canonical profile serialization":
+        val p = sqlcipher4_profile()
+        val expected = sha256_text(sqlcipher4_profile_canonical(p))
+        match sqlcipher4_profile_digest(p):
+            case Ok(d):
+                expect(d).to_equal(expected)
+            case Err(_):
+                expect(false).to_equal(true)
+
+    it "round-trips every field through encode and parse":
+        val m = sqlcipher4_manifest()
+        val encoded = sqlcipher4_manifest_encode(m)
+        match sqlcipher4_manifest_parse(encoded):
+            case Ok(parsed):
+                expect(parsed.codec_id).to_equal(m.codec_id)
+                expect(parsed.profile_name).to_equal(m.profile_name)
+                expect(parsed.profile_digest).to_equal(m.profile_digest)
+                expect(parsed.codec_version).to_equal(m.codec_version)
+                expect(parsed.interface_version).to_equal(m.interface_version)
+            case Err(_):
+                expect(false).to_equal(true)
+
+    it "rejects a tampered manifest digest":
+        val tampered = "codec:\n    id: sqlcipher4\n    profile_name: sqlcipher4_4k_sha512\n    profile_digest: " + zeros64() + "\n    codec_version: 1\n    interface_version: 1\n"
+        match sqlcipher4_manifest_parse(tampered):
+            case Err(e):
+                expect(sqlcipher4_error_code(e)).to_equal("SQLCIPHER4_CIPHER_PROFILE_MISMATCH")
+            case Ok(_):
+                expect(false).to_equal(true)
+
+    it "rejects a manifest naming a different profile":
+        val other = "codec:\n    id: sqlcipher4\n    profile_name: sqlcipher5_4k_sha512\n    profile_digest: " + zeros64() + "\n    codec_version: 1\n    interface_version: 1\n"
+        match sqlcipher4_manifest_parse(other):
+            case Err(e):
+                expect(sqlcipher4_error_code(e)).to_equal("SQLCIPHER4_UNSUPPORTED_CIPHER_VERSION")
+            case Ok(_):
+                expect(false).to_equal(true)
