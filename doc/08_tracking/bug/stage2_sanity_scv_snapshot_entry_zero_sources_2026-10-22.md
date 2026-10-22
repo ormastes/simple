@@ -232,3 +232,42 @@ rebuild, so the runtime C did recompile). Next diagnostic: the `print`-based
 `io_file_open` guard dump (eprint is inert in the core-c candidate) to see
 the exact operands on this path, then compare the emitted call shape against
 `text_extern_abi.spl`'s table for the current seed producer.
+
+## Update 2026-10-22 (late session, lane attempts 10-13): actual read path identified
+
+Three decisive findings from the diagnostic lanes:
+
+1. **The candidate's driver read does NOT go through `rt_io_file_open` /
+   `rt_io_file_read_all`.** Ungated C diagnostics in both (failure + the
+   487-byte p2_add fixture success marker) are embedded in the candidate
+   (verified via `strings`) yet never print. The actual implementation on
+   this path is `rt_file_read_text` (`runtime_native.c:12673`) — a
+   `fopen(path, "rb")` + `fread` + `rt_string_new` provider that exists
+   precisely because the core-c-bootstrap bundle links runtime_native.c and
+   NOT runtime.c. Its table row (`text_extern_abi.spl:86`, `Some([0])`) is
+   present in BOTH the pure-Simple and Rust (`calls.rs:3162`) registries,
+   but the diagnostics placed so far never touched THIS function — instrument
+   `rt_file_read_text` next (fprintf on `fopen` failure + `errno` + path
+   bytes).
+
+2. **The single `NtCreateFile` hit for the scv-revision path was a metadata
+   probe, not a content read.** `rt_file_exists` uses `GetFileAttributesW`,
+   which still opens at the kernel — so "the entry opens at the kernel"
+   (previous update) was over-read; the content read via `fopen` may still
+   never happen or fail instantly.
+
+3. **Uncommitted `.spl` edits are NOT reaching the stage-2 candidate binary.**
+   A `print("[fts-open-diag] ...")` added inside
+   `FileTextSession.open` (`src/lib/nogc_sync_mut/io/file_text_session.spl`)
+   is in the worktree but its literal is ABSENT from the built
+   `simple.exe.rejected` (verified via `strings`), while same-session C
+   edits in the same lane ARE present (cargo rlib rebuild works). Suspect
+   the stage-2 build reads Simple sources through the SCV snapshot /
+   frozen source-input capture rather than the live worktree, so Simple-side
+   instrumentation is useless until that routing is confirmed. C-runtime
+   diagnostics remain reliable.
+
+Next session's fastest path: (a) instrument `rt_file_read_text` (ungated,
+fopen-failure dump) and rerun — one lane cycle; (b) in parallel, verify how
+the stage-2 native build sources `.spl` files (SCV snapshot vs worktree) so
+Simple-level fixes actually reach the candidate.
