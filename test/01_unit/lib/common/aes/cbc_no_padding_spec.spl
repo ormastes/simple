@@ -1,0 +1,403 @@
+# AES-CBC WITHOUT padding — executable contract spec for
+# std.common.aes.modes.{aes_cbc_encrypt_blocks_no_padding,
+#                      aes_cbc_decrypt_blocks_no_padding}
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# The SQLCipher 4 page codec (master plan §4.4, 2026-10-21) encrypts exact
+# 4000/4016-byte page bodies with AES-256-CBC and NO PKCS#7 padding. The
+# pre-existing aes_cbc_encrypt in modes.spl ALWAYS appends a padding block, so
+# page plaintext must never be routed through it. These scenarios pin the new
+# no-padding entry points against:
+#
+#   1. NIST SP 800-38A Appendix F.2 published vectors (F.2.1/F.2.2 AES-128,
+#      F.2.5/F.2.6 AES-256) — full ciphertext equality at EXACT length, the
+#      assertion shape a round-trip-only test can never make.
+#   2. A 251-block (4016-byte) page-body vector whose expected ciphertext
+#      blocks were computed INDEPENDENTLY of this module (OpenSSL 3.5.7,
+#      `openssl enc -aes-256-cbc -K <key-hex> -iv <iv-hex> -nopad`, SHA-256 of
+#      the full ciphertext ca18f40de75798b3e64ae1162808474b6e404f4abffb67e0
+#      aa7f26bdb8eab637 — recorded for fixture regeneration).
+#   3. Fail-closed rejection of non-block-aligned lengths (4015/4017 and small
+#      tails) with the TYPED error CbcNoPaddingError.InvalidDataLength, in
+#      BOTH directions, plus wrong key/IV sizes.
+#   4. No aliasing with the padded path: aes_cbc_encrypt of the same 4016-byte
+#      input must produce a LONGER (4032-byte) ciphertext whose final block is
+#      the sixteen-byte 0x10 PKCS#7 trailer — and the padded path's F.2.5
+#      behavior must be byte-identical to its pre-change contract.
+#
+# PERFORMANCE NOTE: `bin/simple test` on this lane runs the tree-walk
+# interpreter at roughly 100 ms per AES block, so the 251-block page-body
+# evidence is collected inside ONE scenario that encrypts and decrypts the
+# body exactly once each (plus one padded-path encryption and one decrypt of
+# that padded result for the padding-block contrast). Splitting those into
+# per-assertment scenarios would multiply the interpreter work for identical
+# evidence. Run this file with `--timeout 600`: the default 120 s safe-mode
+# budget cannot hold three required 251-block passes plus spec-framework
+# compilation; TIMEOUT is reported as UNVERIFIED, not as a failure.
+#
+# All comparisons are on RAW byte lists via to_equal; no hex formatter sits
+# between the module and the assertion.
+
+use std.spec.*
+use std.spec.step
+use std.common.aes.modes.{
+    aes_cbc_encrypt,
+    aes_cbc_decrypt,
+    aes_cbc_encrypt_blocks_no_padding,
+    aes_cbc_decrypt_blocks_no_padding,
+    CbcNoPaddingError
+}
+
+# ============================================================================
+# Helpers (module-level to avoid the it-block var-mutation footgun)
+# ============================================================================
+
+fn _seq(n: i64) -> list:
+    var out = []
+    var i = 0
+    while i < n:
+        out.append((i * 7 + 3) & 0xFF)
+        i = i + 1
+    out
+
+fn _take(arr: list, n: i64) -> list:
+    var out = []
+    var i = 0
+    while i < n:
+        out.append(arr[i])
+        i = i + 1
+    out
+
+fn _slice(arr: list, start: i64, n: i64) -> list:
+    var out = []
+    var i = 0
+    while i < n:
+        out.append(arr[start + i])
+        i = i + 1
+    out
+
+# ============================================================================
+# NIST SP 800-38A Appendix F.2 vectors (verbatim from the standard)
+# ============================================================================
+
+# F.2 IV: 000102030405060708090a0b0c0d0e0f
+fn _iv() -> list:
+    [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+     0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f]
+
+fn _key128() -> list:
+    [0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6,
+     0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c]
+
+fn _key256() -> list:
+    [0x60, 0x3d, 0xeb, 0x10, 0x15, 0xca, 0x71, 0xbe,
+     0x2b, 0x73, 0xae, 0xf0, 0x85, 0x7d, 0x77, 0x81,
+     0x1f, 0x35, 0x2c, 0x07, 0x3b, 0x61, 0x08, 0xd7,
+     0x2d, 0x98, 0x10, 0xa3, 0x09, 0x14, 0xdf, 0xf4]
+
+# Standard 4-block SP 800-38A plaintext
+fn _pt4() -> list:
+    [0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96,
+     0xe9, 0x3d, 0x7e, 0x11, 0x73, 0x93, 0x17, 0x2a,
+     0xae, 0x2d, 0x8a, 0x57, 0x1e, 0x03, 0xac, 0x9c,
+     0x9e, 0xb7, 0x6f, 0xac, 0x45, 0xaf, 0x8e, 0x51,
+     0x30, 0xc8, 0x1c, 0x46, 0xa3, 0x5c, 0xe4, 0x11,
+     0xe5, 0xfb, 0xc1, 0x19, 0x1a, 0x0a, 0x52, 0xef,
+     0xf6, 0x9f, 0x24, 0x45, 0xdf, 0x4f, 0x9b, 0x17,
+     0xad, 0x2b, 0x41, 0x7b, 0xe6, 0x6c, 0x37, 0x10]
+
+# F.2.1 CBC-AES128 ciphertext (4 blocks)
+fn _ct128() -> list:
+    [0x76, 0x49, 0xab, 0xac, 0x81, 0x19, 0xb2, 0x46,
+     0xce, 0xe9, 0x8e, 0x9b, 0x12, 0xe9, 0x19, 0x7d,
+     0x50, 0x86, 0xcb, 0x9b, 0x50, 0x72, 0x19, 0xee,
+     0x95, 0xdb, 0x11, 0x3a, 0x91, 0x76, 0x78, 0xb2,
+     0x73, 0xbe, 0xd6, 0xb8, 0xe3, 0xc1, 0x74, 0x3b,
+     0x71, 0x16, 0xe6, 0x9e, 0x22, 0x22, 0x95, 0x16,
+     0x3f, 0xf1, 0xca, 0xa1, 0x68, 0x1f, 0xac, 0x09,
+     0x12, 0x0e, 0xca, 0x30, 0x75, 0x86, 0xe1, 0xa7]
+
+# F.2.5 CBC-AES256 ciphertext (4 blocks)
+fn _ct256() -> list:
+    [0xf5, 0x8c, 0x4c, 0x04, 0xd6, 0xe5, 0xf1, 0xba,
+     0x77, 0x9e, 0xab, 0xfb, 0x5f, 0x7b, 0xfb, 0xd6,
+     0x9c, 0xfc, 0x4e, 0x96, 0x7e, 0xdb, 0x80, 0x8d,
+     0x67, 0x9f, 0x77, 0x7b, 0xc6, 0x70, 0x2c, 0x7d,
+     0x39, 0xf2, 0x33, 0x69, 0xa9, 0xd9, 0xba, 0xcf,
+     0xa5, 0x30, 0xe2, 0x63, 0x04, 0x23, 0x14, 0x61,
+     0xb2, 0xeb, 0x05, 0xe2, 0xc3, 0x9b, 0xe9, 0xfc,
+     0xda, 0x6c, 0x19, 0x07, 0x8c, 0x6a, 0x9d, 0x1b]
+
+# ============================================================================
+# Specs — NIST SP 800-38A F.2 (CBC-AES128 / CBC-AES256), no padding
+# ============================================================================
+
+describe "AES-CBC no-padding — NIST SP 800-38A F.2.5/F.2.6 (AES-256)":
+    # @req REQ-LIB-AES-CBC-NOPAD-001
+
+    it "F.2.5 encrypts the published 4-block plaintext to the published ciphertext at exact length":
+        # @req REQ-LIB-AES-CBC-NOPAD-001
+        step("Verify: F.2.5 encrypts the published 4-block plaintext to the published ciphertext at exact length")
+        # The padded wrapper would emit 80 bytes here (64 + one PKCS#7 block);
+        # the no-padding path must emit EXACTLY the 64 published bytes.
+        match aes_cbc_encrypt_blocks_no_padding(_key256(), _pt4(), _iv()):
+            Ok(ct):
+                expect(ct.length()).to_equal(64)  # oracle: NIST SP 800-38A F.2.5 ciphertext extent
+                expect(ct).to_equal(_ct256())
+            Err(_):
+                fail("F.2.5 plaintext is block-aligned; encrypt must not fail")
+
+    it "F.2.6 decrypts the published ciphertext back to the published plaintext at exact length":
+        # @req REQ-LIB-AES-CBC-NOPAD-001
+        step("Verify: F.2.6 decrypts the published ciphertext back to the published plaintext at exact length")
+        match aes_cbc_decrypt_blocks_no_padding(_key256(), _ct256(), _iv()):
+            Ok(pt):
+                expect(pt.length()).to_equal(64)  # oracle: NIST SP 800-38A F.2.5 plaintext extent
+                expect(pt).to_equal(_pt4())
+            Err(_):
+                fail("F.2.5 ciphertext is block-aligned; decrypt must not fail")
+
+    it "round-trips the F.2 plaintext with no length change in either direction":
+        # @req REQ-LIB-AES-CBC-NOPAD-001
+        step("Verify: round-trips the F.2 plaintext with no length change in either direction")
+        match aes_cbc_encrypt_blocks_no_padding(_key256(), _pt4(), _iv()):
+            Ok(ct):
+                expect(ct.length()).to_equal(_pt4().length())  # oracle: no-padding contract — lengths equal
+                match aes_cbc_decrypt_blocks_no_padding(_key256(), ct, _iv()):
+                    Ok(pt):
+                        expect(pt).to_equal(_pt4())
+                    Err(_):
+                        fail("own ciphertext must decrypt")
+            Err(_):
+                fail("encrypt must not fail on block-aligned input")
+
+describe "AES-CBC no-padding — NIST SP 800-38A F.2.1/F.2.2 (AES-128)":
+    # @req REQ-LIB-AES-CBC-NOPAD-001
+
+    it "F.2.1 encrypts the published plaintext to the published ciphertext at exact length":
+        # @req REQ-LIB-AES-CBC-NOPAD-001
+        step("Verify: F.2.1 encrypts the published plaintext to the published ciphertext at exact length")
+        match aes_cbc_encrypt_blocks_no_padding(_key128(), _pt4(), _iv()):
+            Ok(ct):
+                expect(ct.length()).to_equal(64)  # oracle: NIST SP 800-38A F.2.1 ciphertext extent
+                expect(ct).to_equal(_ct128())
+            Err(_):
+                fail("F.2.1 plaintext is block-aligned; encrypt must not fail")
+
+    it "F.2.2 decrypts the published ciphertext back to the published plaintext":
+        # @req REQ-LIB-AES-CBC-NOPAD-001
+        step("Verify: F.2.2 decrypts the published ciphertext back to the published plaintext")
+        match aes_cbc_decrypt_blocks_no_padding(_key128(), _ct128(), _iv()):
+            Ok(pt):
+                expect(pt).to_equal(_pt4())
+            Err(_):
+                fail("F.2.1 ciphertext is block-aligned; decrypt must not fail")
+
+# ============================================================================
+# Specs — 4016-byte (251-block) page-body vector, OpenSSL-independent KAT
+# ============================================================================
+#
+# Plaintext: byte i = (i*7 + 3) & 0xFF for i in 0..4016 (the same deterministic
+# counter the padded-CBC sibling spec uses). Key: F.2.5 AES-256 key. IV:
+# 000102...0f. Expected ciphertext computed by OpenSSL 3.5.7
+# (`openssl enc -aes-256-cbc -K 603deb10...dff4 -iv 000102...0f -nopad`);
+# full-ciphertext SHA-256 ca18f40de75798b3e64ae1162808474b6e404f4abffb67e0
+# aa7f26bdb8eab637. Pinning blocks 0, 1, and 250 (the last) anchors every
+# block of the chain: CBC avalanches, so any chaining error lands in one of
+# them.
+
+describe "AES-CBC no-padding — 4016-byte (251-block) page-body vector":
+    # @req REQ-LIB-AES-CBC-NOPAD-002
+
+    it "OpenSSL KAT blocks, exact length, round-trip, and no appended padding in one pass":
+        # @req REQ-LIB-AES-CBC-NOPAD-002
+        step("Verify: OpenSSL KAT blocks, exact length, round-trip, and no appended padding in one pass")
+        val pt = _seq(4016)
+        match aes_cbc_encrypt_blocks_no_padding(_key256(), pt, _iv()):
+            Ok(ct):
+                # EXACT length: nothing padded, nothing truncated.
+                expect(ct.length()).to_equal(4016)  # oracle: exact page-body length, zero bytes appended
+                expect(ct.length()).to_equal(pt.length())  # oracle: no-padding contract — lengths equal
+                # Block 0 (OpenSSL): 6b0cc2fa3f07c100597c412b40bebb35
+                expect(_slice(ct, 0, 16)).to_equal(
+                    [0x6b, 0x0c, 0xc2, 0xfa, 0x3f, 0x07, 0xc1, 0x00,
+                     0x59, 0x7c, 0x41, 0x2b, 0x40, 0xbe, 0xbb, 0x35])
+                # Block 1 (OpenSSL): 3f19f3cbbe9a00468597d4db1eb7229b
+                expect(_slice(ct, 16, 16)).to_equal(
+                    [0x3f, 0x19, 0xf3, 0xcb, 0xbe, 0x9a, 0x00, 0x46,
+                     0x85, 0x97, 0xd4, 0xdb, 0x1e, 0xb7, 0x22, 0x9b])
+                # Block 250, the final 16 bytes (OpenSSL): 9cd91fd058738a500b6f86b2a29d51e8
+                # — these are DATA bytes; the PKCS#7 trailer the padded path
+                # appends instead is asserted further below.
+                expect(_slice(ct, 4000, 16)).to_equal(
+                    [0x9c, 0xd9, 0x1f, 0xd0, 0x58, 0x73, 0x8a, 0x50,
+                     0x0b, 0x6f, 0x86, 0xb2, 0xa2, 0x9d, 0x51, 0xe8])
+                # Round-trip: decrypt and recover the full page body at the
+                # identical length.
+                match aes_cbc_decrypt_blocks_no_padding(_key256(), ct, _iv()):
+                    Ok(back):
+                        expect(back.length()).to_equal(4016)  # oracle: no-padding contract — lengths equal
+                        expect(back).to_equal(pt)
+                    Err(_):
+                        fail("own ciphertext must decrypt")
+                # NO-PADDING contrast against the padded path on the SAME input.
+                val ct_padded = aes_cbc_encrypt(pt, _key256(), _iv())
+                # The padded call appends one full PKCS#7 block.
+                expect(ct_padded.length()).to_equal(4032)  # oracle: 4016 data + 16 PKCS#7 trailer block
+                expect((ct == ct_padded)).to_equal(false)
+                # Chaining consistency: the padded path encrypts pt||0x10^16,
+                # so the no-pad ciphertext must be EXACTLY its leading 4016
+                # bytes. A no-pad implementation with different IV handling or
+                # block order would diverge here.
+                expect(_take(ct_padded, 4016)).to_equal(ct)
+                # The extra 16 bytes are PKCS#7 padding, proven directly:
+                # decrypting the padded ciphertext with the NO-PAD decryptor
+                # must yield the page body followed by a full block of 0x10.
+                # (The no-pad decryptor has no padding logic to strip, so the
+                # bytes appear exactly as the padded encryptor appended them.)
+                match aes_cbc_decrypt_blocks_no_padding(_key256(), ct_padded, _iv()):
+                    Ok(raw):
+                        expect(_slice(raw, 4016, 16)).to_equal(
+                            [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10,
+                             0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10])
+                        expect(_take(raw, 4016)).to_equal(pt)
+                    Err(_):
+                        fail("padded ciphertext is block-aligned; no-pad decrypt must not fail")
+            Err(_):
+                fail("4016 is 251*16; encrypt must not fail")
+
+    it "treats an empty message as zero blocks (Ok of the empty list)":
+        # @req REQ-LIB-AES-CBC-NOPAD-002
+        step("Verify: treats an empty message as zero blocks (Ok of the empty list)")
+        match aes_cbc_encrypt_blocks_no_padding(_key256(), [], _iv()):
+            Ok(ct):
+                expect(ct).to_equal([])
+            Err(_):
+                fail("zero length is 0*16 and must encrypt to zero blocks")
+        match aes_cbc_decrypt_blocks_no_padding(_key256(), [], _iv()):
+            Ok(pt):
+                expect(pt).to_equal([])
+            Err(_):
+                fail("zero length is 0*16 and must decrypt to zero blocks")
+
+# ============================================================================
+# Specs — fail-closed rejection of malformed geometry (typed error, both ways)
+# ============================================================================
+
+describe "AES-CBC no-padding — rejects non-block-aligned input fail-closed":
+    # @req REQ-LIB-AES-CBC-NOPAD-003
+
+    it "encrypt rejects 4015 bytes with InvalidDataLength(4015)":
+        # @req REQ-LIB-AES-CBC-NOPAD-003
+        step("Verify: encrypt rejects 4015 bytes with InvalidDataLength(4015)")
+        match aes_cbc_encrypt_blocks_no_padding(_key256(), _seq(4015), _iv()):
+            Ok(_):
+                fail("4015 is not a multiple of 16; encrypt must fail closed")
+            Err(e):
+                expect(e).to_equal(CbcNoPaddingError.InvalidDataLength(4015))
+
+    it "encrypt rejects 4017 bytes with InvalidDataLength(4017)":
+        # @req REQ-LIB-AES-CBC-NOPAD-003
+        step("Verify: encrypt rejects 4017 bytes with InvalidDataLength(4017)")
+        match aes_cbc_encrypt_blocks_no_padding(_key256(), _seq(4017), _iv()):
+            Ok(_):
+                fail("4017 is not a multiple of 16; encrypt must fail closed")
+            Err(e):
+                expect(e).to_equal(CbcNoPaddingError.InvalidDataLength(4017))
+
+    it "decrypt rejects 4015 bytes with InvalidDataLength(4015)":
+        # @req REQ-LIB-AES-CBC-NOPAD-003
+        step("Verify: decrypt rejects 4015 bytes with InvalidDataLength(4015)")
+        match aes_cbc_decrypt_blocks_no_padding(_key256(), _seq(4015), _iv()):
+            Ok(_):
+                fail("4015 is not a multiple of 16; decrypt must fail closed")
+            Err(e):
+                expect(e).to_equal(CbcNoPaddingError.InvalidDataLength(4015))
+
+    it "decrypt rejects 4017 bytes with InvalidDataLength(4017)":
+        # @req REQ-LIB-AES-CBC-NOPAD-003
+        step("Verify: decrypt rejects 4017 bytes with InvalidDataLength(4017)")
+        match aes_cbc_decrypt_blocks_no_padding(_key256(), _seq(4017), _iv()):
+            Ok(_):
+                fail("4017 is not a multiple of 16; decrypt must fail closed")
+            Err(e):
+                expect(e).to_equal(CbcNoPaddingError.InvalidDataLength(4017))
+
+    it "rejects small non-multiples (1/15/17/31 bytes) in both directions":
+        # @req REQ-LIB-AES-CBC-NOPAD-003
+        step("Verify: rejects small non-multiples (1/15/17/31 bytes) in both directions")
+        val bad = _seq(17)
+        match aes_cbc_encrypt_blocks_no_padding(_key256(), _seq(1), _iv()):
+            Ok(_):
+                fail("1 byte is not block-aligned; encrypt must fail closed")
+            Err(e):
+                expect(e).to_equal(CbcNoPaddingError.InvalidDataLength(1))
+        match aes_cbc_encrypt_blocks_no_padding(_key256(), _seq(15), _iv()):
+            Ok(_):
+                fail("15 bytes are not block-aligned; encrypt must fail closed")
+            Err(e):
+                expect(e).to_equal(CbcNoPaddingError.InvalidDataLength(15))
+        match aes_cbc_encrypt_blocks_no_padding(_key256(), bad, _iv()):
+            Ok(_):
+                fail("17 bytes are not block-aligned; encrypt must fail closed")
+            Err(e):
+                expect(e).to_equal(CbcNoPaddingError.InvalidDataLength(17))
+        match aes_cbc_decrypt_blocks_no_padding(_key256(), bad, _iv()):
+            Ok(_):
+                fail("17 bytes are not block-aligned; decrypt must fail closed")
+            Err(e):
+                expect(e).to_equal(CbcNoPaddingError.InvalidDataLength(17))
+        match aes_cbc_decrypt_blocks_no_padding(_key256(), _seq(31), _iv()):
+            Ok(_):
+                fail("31 bytes are not block-aligned; decrypt must fail closed")
+            Err(e):
+                expect(e).to_equal(CbcNoPaddingError.InvalidDataLength(31))
+
+    it "rejects a non-16-byte IV in both directions with InvalidIvLength":
+        # @req REQ-LIB-AES-CBC-NOPAD-003
+        step("Verify: rejects a non-16-byte IV in both directions with InvalidIvLength")
+        match aes_cbc_encrypt_blocks_no_padding(_key256(), _seq(32), _seq(12)):
+            Ok(_):
+                fail("12-byte IV must fail closed")
+            Err(e):
+                expect(e).to_equal(CbcNoPaddingError.InvalidIvLength(12))
+        match aes_cbc_decrypt_blocks_no_padding(_key256(), _seq(32), _seq(20)):
+            Ok(_):
+                fail("20-byte IV must fail closed")
+            Err(e):
+                expect(e).to_equal(CbcNoPaddingError.InvalidIvLength(20))
+
+    it "rejects a wrong-size key in both directions with InvalidKeyLength":
+        # @req REQ-LIB-AES-CBC-NOPAD-003
+        step("Verify: rejects a wrong-size key in both directions with InvalidKeyLength")
+        match aes_cbc_encrypt_blocks_no_padding(_seq(20), _seq(32), _iv()):
+            Ok(_):
+                fail("20-byte key must fail closed")
+            Err(e):
+                expect(e).to_equal(CbcNoPaddingError.InvalidKeyLength(20))
+        match aes_cbc_decrypt_blocks_no_padding(_seq(24), _seq(32), _iv()):
+            Ok(_):
+                fail("24-byte key must fail closed")
+            Err(e):
+                expect(e).to_equal(CbcNoPaddingError.InvalidKeyLength(24))
+
+# ============================================================================
+# Specs — the padded path is untouched
+# ============================================================================
+
+describe "AES-CBC no-padding — guards the padded path (no drift)":
+    # @req REQ-LIB-AES-CBC-NOPAD-004
+
+    it "padded aes_cbc_encrypt F.2.5 behavior is byte-identical to its pre-change contract":
+        # @req REQ-LIB-AES-CBC-NOPAD-004
+        step("Verify: padded aes_cbc_encrypt F.2.5 behavior is byte-identical to its pre-change contract")
+        # Same assertion the baseline spec pins: 64 published bytes followed
+        # by one PKCS#7 block. If the modes.spl edit drifted the padded path,
+        # this goes red. The 4016-byte aliasing contrast lives in the
+        # page-body scenario above.
+        val ct = aes_cbc_encrypt(_pt4(), _key256(), _iv())
+        expect(ct.length()).to_equal(80)  # oracle: padded contract — 64 data + 16 pad block
+        expect(_take(ct, 64)).to_equal(_ct256())
+        # And the padded decryptor strips exactly that one block back off.
+        expect((aes_cbc_decrypt(ct, _key256(), _iv()) ?? [])).to_equal(_pt4())
