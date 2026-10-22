@@ -153,3 +153,29 @@ Source-level workaround candidate (not yet attempted): flatten
 handles/texts) and reconstruct the ParserModule at the use site — avoiding
 any large inline-struct class field. The proper repair is in the compiler's
 class-field layout/copy for large inline structs.
+
+## Update: flatten workaround IMPLEMENTED (release/1.0, 2026-10-22)
+
+`ModuleSurfaceParserOwner` no longer has a `value: ParserModule` class
+field. It now stores ONE SLOT PER ParserModule LIMB (30 handle-sized
+fields: texts, Dicts, arrays, bools, i64s) with an annotated typed-local
+rebind per limb in `new()`, and the new exported
+`module_surface_owner_value(owner) -> ParserModule` reconstructs the
+ParserModule by named construction at the use site. Call sites migrated
+to the reconstruction as the single sanctioned read path:
+- `module_surface_from_owner` (all `owner.value.*` reads replaced by the
+  reconstructed `module_local`)
+- `driver_native_parser_impls_are_enum_templates_v1`,
+  `driver_native_parser_is_declaration_only`,
+  `driver_native_parser_can_persist_objectless` (typed local `value` bind)
+
+Single-field class reads/writes of handle-sized types are exercised
+throughout the self-hosted candidate; the 30-limb reconstruction only
+relies on those. The proper repair (compiler class-field layout/copy for
+large inline structs) remains open — this workaround should be reverted
+once it lands.
+
+Same session also fixed: `src/compiler_rust/Cargo.lock` had 273 orphaned
+entries after the LLVM-major-23 gate slimmed llvm-sys (110-221,
+stacker/psm, gumdrop, pest, semver 0.11); every `cargo build --locked`
+seed lane failed. Regenerated offline against vendored sources.
