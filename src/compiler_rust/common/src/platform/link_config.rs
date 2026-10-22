@@ -212,11 +212,13 @@ impl PlatformLinkConfig {
         }
     }
 
-    /// Adjust Windows config for MinGW toolchain (GNU ABI instead of MSVC).
+    /// Windows MinGW UCRT config (GNU ABI; the default Windows toolchain).
+    ///
+    /// Targets MSYS2 CLANG64 / llvm-mingw: UCRT through mingw-w64's `msvcrt`
+    /// import name, LLVM `unwind` instead of GCC's `gcc`/`gcc_eh`, linked by
+    /// LLD. Matches what rustc passes for x86_64-pc-windows-gnullvm.
     pub fn windows_mingw() -> Self {
         Self {
-            // Rust std + crate dependencies on MinGW require these system libs.
-            // Matches what rustc normally passes for x86_64-pc-windows-gnu.
             libraries: vec![
                 "kernel32",
                 "ntdll",
@@ -248,11 +250,10 @@ impl PlatformLinkConfig {
                 "uxtheme",
                 "winmm",
                 "shlwapi",
-                "gcc_eh",
+                "unwind",
                 "msvcrt",
                 "mingwex",
                 "mingw32",
-                "gcc",
             ],
             library_search_paths: vec![],
             system_scan_libs: vec![],

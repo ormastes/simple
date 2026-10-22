@@ -706,7 +706,7 @@ impl Target {
         };
 
         let linker_flavor_hint = if os == TargetOS::Windows {
-            if os_joined.ends_with("-gnu") {
+            if os_joined.ends_with("-gnu") || os_joined.ends_with("-gnullvm") {
                 Some(LinkerFlavor::Gnu)
             } else if os_joined.ends_with("-msvc") {
                 Some(LinkerFlavor::Msvc)
@@ -757,16 +757,17 @@ impl Target {
             (TargetArch::Arm, TargetOS::SimpleOS) => "armv7a-unknown-none-eabihf",
             // OS-aware targets
             (TargetArch::X86_64, TargetOS::Linux) => "x86_64-unknown-linux-gnu",
+            // Windows defaults to MinGW UCRT (CLANG64/gnullvm); MSVC only on request.
             (TargetArch::X86_64, TargetOS::Windows) => match self.linker_flavor_hint {
-                Some(LinkerFlavor::Gnu) => "x86_64-pc-windows-gnu",
-                _ => "x86_64-pc-windows-msvc",
+                Some(LinkerFlavor::Msvc) => "x86_64-pc-windows-msvc",
+                _ => "x86_64-pc-windows-gnu",
             },
             (TargetArch::X86_64, TargetOS::MacOS) => "x86_64-apple-darwin",
             (TargetArch::X86_64, TargetOS::FreeBSD) => "x86_64-unknown-freebsd",
             (TargetArch::Aarch64, TargetOS::Linux) => "aarch64-unknown-linux-gnu",
             (TargetArch::Aarch64, TargetOS::Windows) => match self.linker_flavor_hint {
-                Some(LinkerFlavor::Gnu) => "aarch64-pc-windows-gnu",
-                _ => "aarch64-pc-windows-msvc",
+                Some(LinkerFlavor::Msvc) => "aarch64-pc-windows-msvc",
+                _ => "aarch64-pc-windows-gnu",
             },
             (TargetArch::Aarch64, TargetOS::MacOS) => "aarch64-apple-darwin",
             (TargetArch::Aarch64, TargetOS::FreeBSD) => "aarch64-unknown-freebsd",
@@ -875,21 +876,10 @@ impl Target {
             }
         }
         match self.os {
-            TargetOS::Windows => {
-                // Detect MinGW environment: if gcc is available, use GNU linker flavor
-                // instead of MSVC. This allows bootstrap on MSYS2/MinGW without
-                // requiring Visual Studio build tools.
-                // Only check host environment when actually running on Windows;
-                // cross-compiling from Linux should default to Msvc flavor.
-                if cfg!(target_os = "windows") && cfg!(target_env = "gnu") {
-                    LinkerFlavor::Gnu
-                } else if cfg!(target_os = "windows") && std::env::var("MSYSTEM").is_ok() {
-                    // MSYS2 environment detected (MINGW64, UCRT64, etc.)
-                    LinkerFlavor::Gnu
-                } else {
-                    LinkerFlavor::Msvc
-                }
-            }
+            // Windows defaults to MinGW UCRT (MSYS2 CLANG64: clang + LLD +
+            // libunwind). MSVC stays available via SIMPLE_LINKER_FLAVOR=msvc or an
+            // explicit *-windows-msvc target.
+            TargetOS::Windows => LinkerFlavor::Gnu,
             _ if self.is_wasm() => LinkerFlavor::WasmLd,
             _ => LinkerFlavor::Gnu,
         }
@@ -1066,11 +1056,11 @@ mod tests {
         // Windows triples
         assert_eq!(
             Target::new(TargetArch::X86_64, TargetOS::Windows).triple_str(),
-            "x86_64-pc-windows-msvc"
+            "x86_64-pc-windows-gnu"
         );
         assert_eq!(
             Target::new(TargetArch::Aarch64, TargetOS::Windows).triple_str(),
-            "aarch64-pc-windows-msvc"
+            "aarch64-pc-windows-gnu"
         );
 
         // FreeBSD triples
