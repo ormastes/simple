@@ -1,0 +1,51 @@
+use std.spec.*
+use app.build.scheduler.parent_action_admission.{admit_parent_action_intent_v1}
+use app.build.scheduler.worker_request.{BuildWorkerRequestV1}
+use compiler.common.build_contract.{BuildInputRef, SnapshotManifest,
+    ToolchainManifest, InputManifest, ActionSpec, AttemptSpec,
+    action_spec_digest_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn _intent_request_v1() -> BuildWorkerRequestV1:
+    val snapshot = sha256_text("parent-intent")
+    val action = ActionSpec(1, "compile",
+        SnapshotManifest(1, snapshot, sha256_text("tree"),
+            sha256_text("submodules")),
+        ToolchainManifest(1, sha256_text("compiler"),
+            sha256_text("behavior"), sha256_text("abi"),
+            sha256_text("runtime"), sha256_text("sysroot"),
+            "x86_64-unknown-linux-gnu"),
+        InputManifest(1, snapshot,
+            [BuildInputRef("src/main.c", sha256_text("source"))],
+            [], [], [], [], [], sha256_text("context"), true, false),
+        ["/usr/bin/clang", "-c"], "simple-build/outputs",
+        sha256_text("sandbox"), ["main.o"], sha256_text("resources"))
+    val attempt = AttemptSpec(1, action_spec_digest_v1(action),
+        "try-intent", "worker-1", 0, 4, 4096)
+    BuildWorkerRequestV1(action, attempt, 7, 2, 8)
+
+describe "parent action intent admission":
+    it "accepts canonical action data without a caller-guessed current fence":
+        val request = _intent_request_v1()
+        val admitted = admit_parent_action_intent_v1(request,
+            "worker-1", 50)
+        expect(admitted.accepted).to_be(true)
+        if val action = admitted.action:
+            expect(action.action_digest).to_equal(request.attempt.action_digest)
+            expect(action.queued_tick).to_equal(50)
+            expect(action.cpu_tokens).to_equal(2)
+            expect(action.memory_bytes).to_equal(4096)
+            expect(action.fd_tokens).to_equal(8)
+        else:
+            assert(false)
+
+    it "rejects wrong worker and tampered action identity":
+        val request = _intent_request_v1()
+        expect(admit_parent_action_intent_v1(request,
+            "worker-2", 50).reason).to_equal("worker-mismatch")
+        var changed = request
+        var action = changed.action
+        action.argv = ["/usr/bin/clang", "-E"]
+        changed.action = action
+        expect(admit_parent_action_intent_v1(changed,
+            "worker-1", 50).accepted).to_be(false)

@@ -1,0 +1,110 @@
+# Candidate-to-accepted transition. Only the parent calls this after output
+# bytes have been independently verified and placed in immutable storage.
+use app.build.scheduler.ledger.{SchedulerLedgerV1, SchedulerAttemptV1,
+    scheduler_current_fence_v1, scheduler_ledger_valid_v1}
+use app.build.scheduler.planner.{scheduler_action_digest_valid_v1}
+use compiler.common.build_contract.{ActionResultCandidate, AcceptedResult}
+use compiler.common.cache.canonical_identity.{canon_str, canon_nat, canon_field, canon_seq}
+use std.common.crypto.sha256.{sha256_text}
+
+struct FencedCandidateV1:
+    candidate: ActionResultCandidate
+    fence: i64
+
+struct SchedulerPublishV1:
+    ledger: SchedulerLedgerV1
+    published: bool
+    accepted: AcceptedResult
+    error: text
+
+fn _scheduler_empty_accepted_v1() -> AcceptedResult:
+    AcceptedResult(1, "", "", "", "")
+
+fn _scheduler_digest_valid_v1(digest: text) -> bool:
+    if digest.len() != 64:
+        return false
+    var i: i64 = 0
+    while i < digest.len():
+        val c = digest[i:i + 1]
+        if not ((c >= "0" and c <= "9") or (c >= "a" and c <= "f")):
+            return false
+        i = i + 1
+    true
+
+fn scheduler_accept_receipt_digest_v1(candidate: ActionResultCandidate,
+        fence: i64) -> text:
+    """Bind the accepted mapping to the exact successful result candidate."""
+    if candidate.version != 1 or not candidate.success or fence <= 0 or
+       not scheduler_action_digest_valid_v1(candidate.action_digest) or
+       candidate.attempt_id == "" or candidate.worker_id == "" or
+       not _scheduler_digest_valid_v1(candidate.output_manifest_digest) or
+       not _scheduler_digest_valid_v1(candidate.diagnostic_digest):
+        return ""
+    sha256_text(canon_field("simple/build-scheduler-accept/v1",
+        canon_seq([canon_str(candidate.action_digest), canon_str(candidate.attempt_id),
+                   canon_str(candidate.worker_id), canon_nat(fence),
+                   canon_str(candidate.output_manifest_digest),
+                   canon_str(candidate.diagnostic_digest)])))
+
+fn accept_result_v1(ledger: SchedulerLedgerV1, fenced: FencedCandidateV1,
+                    verified_output_manifest_digest: text) -> SchedulerPublishV1:
+    """Accept a successful current-fence candidate in deterministic key order.
+
+    The verified digest must come from the parent's byte-validation/storage
+    stage, not from worker text. This transition cannot itself read artifact
+    bytes or durably journal a result; the integration adapter must do both.
+    """
+    val empty = _scheduler_empty_accepted_v1()
+    val candidate = fenced.candidate
+    if not scheduler_ledger_valid_v1(ledger):
+        return SchedulerPublishV1(ledger, false, empty, "scheduler-error: ledger-invalid")
+    if candidate.version != 1 or
+       not scheduler_action_digest_valid_v1(candidate.action_digest) or
+       candidate.attempt_id == "" or candidate.worker_id == "" or
+       not candidate.success or not _scheduler_digest_valid_v1(candidate.output_manifest_digest) or
+       not _scheduler_digest_valid_v1(candidate.diagnostic_digest) or
+       verified_output_manifest_digest != candidate.output_manifest_digest:
+        return SchedulerPublishV1(ledger, false, empty, "scheduler-error: candidate-invalid")
+    if fenced.fence <= 0 or scheduler_current_fence_v1(ledger, candidate.action_digest) != fenced.fence:
+        return SchedulerPublishV1(ledger, false, empty, "scheduler-error: stale-fence")
+    for accepted in ledger.accepted:
+        if accepted.action_digest == candidate.action_digest:
+            return SchedulerPublishV1(ledger, false, empty, "scheduler-error: already-accepted")
+    if ledger.accepted.len() >= 256:
+        return SchedulerPublishV1(ledger, false, empty, "scheduler-error: ledger-bound")
+    var found = false
+    for attempt in ledger.attempts:
+        if attempt.action_digest == candidate.action_digest and attempt.active and
+           attempt.attempt_id == candidate.attempt_id and attempt.worker_id == candidate.worker_id and
+           attempt.fence == fenced.fence:
+            found = true
+    if not found:
+        return SchedulerPublishV1(ledger, false, empty, "scheduler-error: attempt-not-current")
+    val receipt_digest = scheduler_accept_receipt_digest_v1(candidate,
+        fenced.fence)
+    val accepted = AcceptedResult(1, candidate.action_digest, candidate.attempt_id,
+                                  candidate.output_manifest_digest, receipt_digest)
+    var attempts: [SchedulerAttemptV1] = []
+    for attempt in ledger.attempts:
+        if attempt.attempt_id == candidate.attempt_id:
+            attempts.push(SchedulerAttemptV1(attempt.action_digest, attempt.attempt_id,
+                attempt.worker_id, attempt.fence, attempt.cpu_tokens,
+                attempt.memory_bytes, attempt.fd_tokens, false))
+        else:
+            attempts.push(attempt)
+    # Canonical mapping order is independent of worker arrival order.
+    var accepted_results: [AcceptedResult] = []
+    var inserted = false
+    for prior in ledger.accepted:
+        if not inserted and candidate.action_digest < prior.action_digest:
+            accepted_results.push(accepted)
+            inserted = true
+        accepted_results.push(prior)
+    if not inserted:
+        accepted_results.push(accepted)
+    SchedulerPublishV1(SchedulerLedgerV1(attempts, ledger.fences,
+        accepted_results, ledger.failures),
+                       true, accepted, "")
+
+export FencedCandidateV1, SchedulerPublishV1, accept_result_v1
+export scheduler_accept_receipt_digest_v1

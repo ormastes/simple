@@ -1,0 +1,212 @@
+# Parent-owned cleanup intent. Persist it before closing an accepted or failed
+# attempt so a later acknowledgement can be retried after a parent crash.
+# The owner root is private and every call holds its exclusive lifetime lock.
+use app.io.mod.{dir_create_all, directory_fsync, file_create_exclusive,
+    file_exists, file_fsync, file_read_regular_no_follow_bounded}
+use app.build.scheduler.owner.{SchedulerOwnerV1}
+use app.build.scheduler.parent_request_spool.{
+    recover_parent_build_request_v1, recover_completed_parent_build_request_v1}
+use app.build.scheduler.worker_request.{BuildWorkerRequestV1,
+    encode_build_worker_request_v1}
+use app.build.scheduler.dispatch_wire.{parse_build_result_v1,
+    encode_build_result_v1}
+use app.build.scheduler.broker.{scheduler_accept_receipt_digest_v1}
+use app.build.scheduler.ledger.{SchedulerLedgerV1}
+use app.build.scheduler.planner.{scheduler_action_digest_valid_v1}
+use compiler.common.build_contract.{ActionResultCandidate}
+use std.common.crypto.sha256.{sha256_text}
+
+val BUILD_PARENT_CLEANUP_PENDING_MAX_V1 = 1024
+
+struct BuildParentCleanupPendingV1:
+    ready: bool
+    reason: text
+    request_digest: text
+    result_digest: text
+
+fn _cleanup_pending_reject_v1(reason: text) -> BuildParentCleanupPendingV1:
+    BuildParentCleanupPendingV1(false, reason, "", "")
+
+fn _cleanup_pending_path_v1(owner: SchedulerOwnerV1,
+        attempt_id: text) -> text:
+    owner.root + "/cleanup/" + attempt_id + ".pending"
+
+fn _cleanup_acked_path_v1(owner: SchedulerOwnerV1,
+        attempt_id: text) -> text:
+    owner.root + "/cleanup/" + attempt_id + ".acked"
+
+fn _cleanup_acked_wire_v1(attempt_id: text,
+        pending: BuildParentCleanupPendingV1) -> text:
+    "simple-build-cleanup-acked-v1\nattempt=" + attempt_id +
+        "\nrequest=" + pending.request_digest +
+        "\nresult=" + pending.result_digest + "\n"
+
+fn _cleanup_pending_wire_v1(request: BuildWorkerRequestV1,
+        request_digest: text, result_digest: text,
+        candidate: ActionResultCandidate) -> text:
+    "simple-build-cleanup-pending-v1\nrequest=" + request_digest +
+        "\nresult=" + result_digest +
+        "\nattempt=" + request.attempt.attempt_id +
+        "\nworker=" + request.attempt.worker_id +
+        "\nfence=" + request.fence.to_text() +
+        "\nstatus=" + (if candidate.success: "success" else: "failure") +
+        "\nmanifest=" + candidate.output_manifest_digest +
+        "\ndiagnostics=" + candidate.diagnostic_digest + "\n"
+
+fn parent_cleanup_candidate_committed_v1(request: BuildWorkerRequestV1,
+        candidate: ActionResultCandidate, ledger: SchedulerLedgerV1) -> bool:
+    """Require the pending result to equal the durable completed outcome."""
+    if candidate.version != 1 or
+       candidate.action_digest != request.attempt.action_digest or
+       candidate.attempt_id != request.attempt.attempt_id or
+       candidate.worker_id != request.attempt.worker_id or
+       encode_build_result_v1(candidate, request.fence) == "":
+        return false
+    var committed = 0
+    if candidate.success:
+        val expected_receipt = scheduler_accept_receipt_digest_v1(candidate,
+            request.fence)
+        for accepted in ledger.accepted:
+            if accepted.accepted_attempt_id == candidate.attempt_id and
+               accepted.action_digest == candidate.action_digest and
+               accepted.output_manifest_digest == candidate.output_manifest_digest and
+               accepted.broker_receipt_digest == expected_receipt:
+                committed = committed + 1
+    else:
+        for failure in ledger.failures:
+            if failure.attempt_id == candidate.attempt_id and
+               failure.action_digest == candidate.action_digest and
+               failure.worker_id == candidate.worker_id and
+               failure.fence == request.fence and
+               ["compiler-failure", "action-failure-unclassified"].contains(
+                   failure.classification) and
+               failure.output_manifest_digest == candidate.output_manifest_digest and
+               failure.diagnostic_digest == candidate.diagnostic_digest:
+                committed = committed + 1
+    committed == 1
+
+fn persist_parent_cleanup_pending_v1(owner: SchedulerOwnerV1,
+        request: BuildWorkerRequestV1,
+        result_wire: text) -> BuildParentCleanupPendingV1:
+    """Durably bind the exact fetched result before parent publication."""
+    if owner.error != "" or owner.lock_handle < 0 or owner.state.error != "":
+        return _cleanup_pending_reject_v1("owner-unavailable")
+    val recovered = recover_parent_build_request_v1(owner,
+        request.attempt.attempt_id)
+    if not recovered.recovered or recovered.request == nil or
+       encode_build_worker_request_v1(recovered.request.unwrap()) !=
+           encode_build_worker_request_v1(request):
+        return _cleanup_pending_reject_v1("active-spool-mismatch")
+    val parsed = parse_build_result_v1(result_wire)
+    if parsed == nil:
+        return _cleanup_pending_reject_v1("result-invalid")
+    val result = parsed.unwrap()
+    if result.candidate.action_digest != request.attempt.action_digest or
+       result.candidate.attempt_id != request.attempt.attempt_id or
+       result.candidate.worker_id != request.attempt.worker_id or
+       result.fence != request.fence or
+       encode_build_result_v1(result.candidate, result.fence) != result_wire:
+        return _cleanup_pending_reject_v1("result-mismatch")
+    val result_digest = sha256_text(result_wire)
+    if not scheduler_action_digest_valid_v1(result_digest):
+        return _cleanup_pending_reject_v1("result-digest-invalid")
+    val directory = owner.root + "/cleanup"
+    val created = not file_exists(directory)
+    if not dir_create_all(directory) or
+       (created and not directory_fsync(owner.root)):
+        return _cleanup_pending_reject_v1("cleanup-directory-not-durable")
+    val path = _cleanup_pending_path_v1(owner, request.attempt.attempt_id)
+    val wire = _cleanup_pending_wire_v1(request, recovered.request_digest,
+        result_digest, result.candidate)
+    if file_exists(path):
+        val prior = file_read_regular_no_follow_bounded(path,
+            BUILD_PARENT_CLEANUP_PENDING_MAX_V1)
+        if prior.is_err() or prior.unwrap() != wire:
+            return _cleanup_pending_reject_v1("cleanup-pending-collision")
+    elif not file_create_exclusive(path, wire):
+        return _cleanup_pending_reject_v1("cleanup-pending-write-failed")
+    if not file_fsync(path) or not directory_fsync(directory):
+        return _cleanup_pending_reject_v1("cleanup-pending-not-durable")
+    BuildParentCleanupPendingV1(true, "", recovered.request_digest,
+        result_digest)
+
+fn recover_parent_cleanup_pending_v1(owner: SchedulerOwnerV1,
+        attempt_id: text) -> BuildParentCleanupPendingV1:
+    """Load only a pending record backed by a completed exact spool."""
+    if owner.error != "" or owner.lock_handle < 0 or owner.state.error != "":
+        return _cleanup_pending_reject_v1("owner-unavailable")
+    val recovered = recover_completed_parent_build_request_v1(owner,
+        attempt_id)
+    if not recovered.recovered or recovered.request == nil:
+        return _cleanup_pending_reject_v1("completed-spool-unavailable")
+    val read = file_read_regular_no_follow_bounded(
+        _cleanup_pending_path_v1(owner, attempt_id),
+        BUILD_PARENT_CLEANUP_PENDING_MAX_V1)
+    if read.is_err():
+        return _cleanup_pending_reject_v1("cleanup-pending-unavailable")
+    val lines = read.unwrap().split("\n")
+    if lines.len() != 10 or lines[0] != "simple-build-cleanup-pending-v1" or
+       not lines[1].starts_with("request=") or
+       not lines[2].starts_with("result=") or
+       not lines[3].starts_with("attempt=") or
+       not lines[4].starts_with("worker=") or
+       not lines[5].starts_with("fence=") or
+       not lines[6].starts_with("status=") or
+       not lines[7].starts_with("manifest=") or
+       not lines[8].starts_with("diagnostics=") or lines[9] != "":
+        return _cleanup_pending_reject_v1("cleanup-pending-invalid")
+    val request_digest = lines[1][8:lines[1].len()]
+    val result_digest = lines[2][7:lines[2].len()]
+    val request = recovered.request.unwrap()
+    val status = lines[6][7:lines[6].len()]
+    val manifest_digest = lines[7][9:lines[7].len()]
+    val diagnostic_digest = lines[8][12:lines[8].len()]
+    if status != "success" and status != "failure":
+        return _cleanup_pending_reject_v1("cleanup-status-invalid")
+    val candidate = ActionResultCandidate(1,
+        request.attempt.action_digest, request.attempt.attempt_id,
+        request.attempt.worker_id, manifest_digest, diagnostic_digest,
+        status == "success")
+    val result_wire = encode_build_result_v1(candidate, request.fence)
+    if request_digest != recovered.request_digest or
+       not scheduler_action_digest_valid_v1(result_digest) or
+       result_wire == "" or sha256_text(result_wire) != result_digest or
+       read.unwrap() != _cleanup_pending_wire_v1(request,
+           request_digest, result_digest, candidate):
+        return _cleanup_pending_reject_v1("cleanup-pending-mismatch")
+    if not parent_cleanup_candidate_committed_v1(request, candidate,
+            owner.state.ledger):
+        return _cleanup_pending_reject_v1("cleanup-result-not-committed")
+    BuildParentCleanupPendingV1(true, "", request_digest, result_digest)
+
+fn parent_cleanup_acked_v1(owner: SchedulerOwnerV1,
+        attempt_id: text) -> bool:
+    """Answer only from a completed exact result and its durable ACK marker."""
+    val pending = recover_parent_cleanup_pending_v1(owner, attempt_id)
+    if not pending.ready: return false
+    val read = file_read_regular_no_follow_bounded(
+        _cleanup_acked_path_v1(owner, attempt_id), 512)
+    not read.is_err() and read.unwrap() ==
+        _cleanup_acked_wire_v1(attempt_id, pending)
+
+fn mark_parent_cleanup_acked_v1(owner: SchedulerOwnerV1,
+        attempt_id: text, request_digest: text,
+        result_digest: text) -> bool:
+    """Record an exact worker ACK after rechecking the committed result."""
+    val pending = recover_parent_cleanup_pending_v1(owner, attempt_id)
+    if not pending.ready or pending.request_digest != request_digest or
+       pending.result_digest != result_digest:
+        return false
+    val path = _cleanup_acked_path_v1(owner, attempt_id)
+    val wire = _cleanup_acked_wire_v1(attempt_id, pending)
+    if file_exists(path):
+        val prior = file_read_regular_no_follow_bounded(path, 512)
+        if prior.is_err() or prior.unwrap() != wire: return false
+    elif not file_create_exclusive(path, wire):
+        return false
+    file_fsync(path) and directory_fsync(owner.root + "/cleanup")
+
+export BUILD_PARENT_CLEANUP_PENDING_MAX_V1, BuildParentCleanupPendingV1
+export persist_parent_cleanup_pending_v1, recover_parent_cleanup_pending_v1
+export parent_cleanup_acked_v1, mark_parent_cleanup_acked_v1
+export parent_cleanup_candidate_committed_v1

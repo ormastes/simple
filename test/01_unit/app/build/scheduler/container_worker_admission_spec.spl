@@ -1,0 +1,185 @@
+use std.spec.*
+use app.build.scheduler.container_worker_admission.{BuildWorkerEnvironmentV1,
+    admit_container_build_worker_v1}
+use compiler.common.build_contract.{BuildInputRef, SnapshotManifest,
+    ToolchainManifest, InputManifest, ActionSpec, AttemptSpec, NodeCapabilities,
+    action_spec_digest_v1, input_manifest_digest_v1}
+use std.common.contracts.orchestration.resource_v1.{PodSpecV1, ContainerV1, ResourcesV1}
+use std.common.contracts.container.runtime_v1.{RuntimeProviderContractV1, RuntimeProbeV1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn _artifact_digest() -> text:
+    sha256_text("container-artifact")
+
+fn _locked_image() -> text:
+    "simple-build@sha256:" + _artifact_digest()
+
+fn _build_action() -> ActionSpec:
+    val snapshot = SnapshotManifest(1, "snapshot", "tree", "submodules")
+    ActionSpec(1, "compile", snapshot,
+        ToolchainManifest(1, "executable", "behavior", "abi", "runtime", "sysroot",
+            "aarch64-unknown-linux-gnu"),
+        InputManifest(1, "snapshot", [BuildInputRef("src/main.spl", "source")],
+            [], [], [], [], [], "context", true, false),
+        ["simple", "build"], "src", "sandbox", ["build/main"], "policy")
+
+fn _build_pod() -> PodSpecV1:
+    PodSpecV1("linux", "native-container", "endpoint-v1", [
+        ContainerV1("builder", _locked_image(), "", ["simple", "build"], [], [],
+            ResourcesV1(1000, 1000, 1024, 1024))])
+
+fn _build_env(action: ActionSpec) -> BuildWorkerEnvironmentV1:
+    BuildWorkerEnvironmentV1("linux", "x86_64", "linux", "x86_64", "",
+        RuntimeProviderContractV1("linux-oci-v1", 1, true, true),
+        RuntimeProbeV1("linux-oci-v1", "docker", true, true, true, "root", ""),
+        true, action.toolchain, action.snapshot.snapshot_digest,
+        input_manifest_digest_v1(action.inputs), _artifact_digest(), _artifact_digest(),
+        action.sandbox_digest, 7)
+
+fn _attempt(action: ActionSpec) -> AttemptSpec:
+    AttemptSpec(1, action_spec_digest_v1(action), "attempt-1", "worker-1", 0, 0, 1024)
+
+fn _node() -> NodeCapabilities:
+    NodeCapabilities(1, "worker-1", ["aarch64-unknown-linux-gnu"], ["abi"],
+        "trusted", 4096)
+
+describe "container build worker admission":
+    it "admits a Linux container with an exact cross toolchain and current fence":
+        val action = _build_action()
+        val admission = admit_container_build_worker_v1(action, _attempt(action),
+            _node(), _build_pod(), _build_env(action), 7)
+        expect(admission.admitted).to_be(true)
+        expect(admission.action_digest).to_equal(action_spec_digest_v1(action))
+        expect(admission.attempt_id).to_equal("attempt-1")
+        expect(admission.fence).to_equal(7)
+
+    it "refuses a Linux guest on macOS until a guest provider is qualified":
+        val action = _build_action()
+        var env = _build_env(action)
+        env.physical_host_os = "macos"
+        val absent = admit_container_build_worker_v1(action, _attempt(action),
+            _node(), _build_pod(), env, 7)
+        expect(absent.reason).to_equal("guest-provider-unqualified")
+        env.guest_id = "vm-boot-42"
+        val still_unqualified = admit_container_build_worker_v1(action, _attempt(action),
+            _node(), _build_pod(), env, 7)
+        expect(still_unqualified.reason).to_equal("guest-provider-unqualified")
+        env = _build_env(action)
+        env.execution_arch = "aarch64"
+        expect(admit_container_build_worker_v1(action, _attempt(action),
+            _node(), _build_pod(), env, 7).reason).to_equal("guest-provider-unqualified")
+        var pod = _build_pod()
+        pod.os_name = "macos"
+        expect(admit_container_build_worker_v1(action, _attempt(action),
+            _node(), pod, env, 7).reason).to_equal("execution-platform-mismatch")
+
+    it "refuses unsupported provider classes and an unverified daemon":
+        val action = _build_action()
+        var pod = _build_pod()
+        pod.runtime_class = "native-sandbox"
+        expect(admit_container_build_worker_v1(action, _attempt(action),
+            _node(), pod, _build_env(action), 7).reason).to_equal("provider-unsupported")
+        pod = _build_pod()
+        pod.network_profile = "pod-ip-v1"
+        expect(admit_container_build_worker_v1(action, _attempt(action),
+            _node(), pod, _build_env(action), 7).reason).to_equal("provider-unsupported")
+        var env = _build_env(action)
+        var probe = env.probe
+        probe.launch_capable = false
+        env.probe = probe
+        expect(admit_container_build_worker_v1(action, _attempt(action),
+            _node(), _build_pod(), env, 7).reason).to_equal("provider-unsupported")
+        env = _build_env(action)
+        var provider = env.provider
+        provider.supports_recovery = false
+        env.provider = provider
+        expect(admit_container_build_worker_v1(action, _attempt(action),
+            _node(), _build_pod(), env, 7).reason).to_equal("provider-unsupported")
+        env = _build_env(action)
+        provider = env.provider
+        provider.supports_logs = false
+        env.provider = provider
+        expect(admit_container_build_worker_v1(action, _attempt(action),
+            _node(), _build_pod(), env, 7).reason).to_equal("provider-unsupported")
+        env = _build_env(action)
+        probe = env.probe
+        probe.engine = "runc"
+        env.probe = probe
+        expect(admit_container_build_worker_v1(action, _attempt(action),
+            _node(), _build_pod(), env, 7).reason).to_equal("provider-unsupported")
+        env = _build_env(action)
+        probe = env.probe
+        probe.privilege = "rootless"
+        env.probe = probe
+        expect(admit_container_build_worker_v1(action, _attempt(action),
+            _node(), _build_pod(), env, 7).reason).to_equal("provider-unsupported")
+
+    it "refuses wrong toolchain, immutable input and artifact identities":
+        val action = _build_action()
+        var env = _build_env(action)
+        var toolchain = env.toolchain
+        toolchain.sysroot_digest = "other"
+        env.toolchain = toolchain
+        expect(admit_container_build_worker_v1(action, _attempt(action),
+            _node(), _build_pod(), env, 7).reason).to_equal("toolchain-mismatch")
+        env = _build_env(action)
+        env.verified_input_manifest_digest = "other"
+        expect(admit_container_build_worker_v1(action, _attempt(action),
+            _node(), _build_pod(), env, 7).reason).to_equal("immutable-input-mismatch")
+        env = _build_env(action)
+        env.artifact_digest = "not-a-digest"
+        env.verified_artifact_digest = "not-a-digest"
+        expect(admit_container_build_worker_v1(action, _attempt(action),
+            _node(), _build_pod(), env, 7).reason).to_equal("immutable-input-mismatch")
+        env = _build_env(action)
+        var pod = _build_pod()
+        pod.containers = [ContainerV1("builder", "different", "", ["simple", "build"], [], [],
+            ResourcesV1(1000, 1000, 1024, 1024))]
+        expect(admit_container_build_worker_v1(action, _attempt(action),
+            _node(), pod, env, 7).reason).to_equal("artifact-identity-mismatch")
+        pod.containers = [ContainerV1("builder", _artifact_digest(), "", ["simple", "build"], [], [],
+            ResourcesV1(1000, 1000, 1024, 1024))]
+        expect(admit_container_build_worker_v1(action, _attempt(action),
+            _node(), pod, env, 7).reason).to_equal("artifact-identity-mismatch")
+
+    it "refuses stale attempts, wrong nodes and insufficient pod memory":
+        val action = _build_action()
+        expect(admit_container_build_worker_v1(action, _attempt(action),
+            _node(), _build_pod(), _build_env(action), 8).reason).to_equal("attempt-or-fence-invalid")
+        var attempt = _attempt(action)
+        attempt.worker_id = "other-worker"
+        expect(admit_container_build_worker_v1(action, attempt,
+            _node(), _build_pod(), _build_env(action), 7).reason).to_equal("attempt-or-fence-invalid")
+        var node = _node()
+        node.target_triples = []
+        expect(admit_container_build_worker_v1(action, _attempt(action),
+            node, _build_pod(), _build_env(action), 7).reason).to_equal("node-capability-mismatch")
+        var pod = _build_pod()
+        pod.containers = [ContainerV1("builder", _locked_image(), "", ["simple", "build"], [], [],
+            ResourcesV1(1000, 1000, 512, 512))]
+        expect(admit_container_build_worker_v1(action, _attempt(action),
+            _node(), pod, _build_env(action), 7).reason).to_equal("pod-shape-unsupported")
+        pod.containers = [ContainerV1("builder", _locked_image(), "", ["simple", "build"], [], [],
+            ResourcesV1(1000, 1000, 1024, 2048))]
+        expect(admit_container_build_worker_v1(action, _attempt(action),
+            _node(), pod, _build_env(action), 7).reason).to_equal("pod-shape-unsupported")
+        pod.containers = [ContainerV1("builder", _locked_image(), "", ["simple", "build"], [], [],
+            ResourcesV1(1000, 1000, 1024, 8192))]
+        expect(admit_container_build_worker_v1(action, _attempt(action),
+            _node(), pod, _build_env(action), 7).reason).to_equal("pod-shape-unsupported")
+        pod.containers = [ContainerV1("builder", _locked_image(), "", ["simple", "build"], [], [],
+            ResourcesV1(2000, 1000, 1024, 1024))]
+        expect(admit_container_build_worker_v1(action, _attempt(action),
+            _node(), pod, _build_env(action), 7).reason).to_equal("pod-shape-unsupported")
+        pod.containers = [ContainerV1("builder", _locked_image(), "", ["simple", "build"], [], [],
+            ResourcesV1(1000, 1000, -1, 1024))]
+        expect(admit_container_build_worker_v1(action, _attempt(action),
+            _node(), pod, _build_env(action), 7).reason).to_equal("pod-shape-unsupported")
+
+    it "refuses artifact set references before Linux image materialization exists":
+        val action = _build_action()
+        var pod = _build_pod()
+        pod.containers = [ContainerV1("builder", "", _artifact_digest(), ["simple", "build"], [], [],
+            ResourcesV1(1000, 1000, 1024, 1024))]
+        expect(admit_container_build_worker_v1(action, _attempt(action),
+            _node(), pod, _build_env(action), 7).reason).to_equal("artifact-identity-mismatch")

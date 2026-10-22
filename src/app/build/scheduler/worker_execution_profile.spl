@@ -1,0 +1,53 @@
+# The supported action shape is shared by parent preflight and Linux worker.
+# This module has no host calls, so either side applies the same policy.
+use compiler.common.build_contract.{ActionSpec}
+
+fn _profile_output_name_v1(value: text) -> bool:
+    if value == "" or value.len() > 128 or value == "." or value == ".." or
+       value.starts_with("-"):
+        return false
+    for c in value.chars():
+        if (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
+           (c >= "0" and c <= "9") or c == "-" or c == "_" or c == ".":
+            continue
+        return false
+    true
+
+fn _profile_control_collision_v1(path: text) -> bool:
+    path == ".simple-control" or path.starts_with(".simple-control/")
+
+fn build_worker_execution_profile_problem_v1(action: ActionSpec,
+        compiler_entry: text) -> text:
+    """Return the exact worker profile rejection before any remote upload."""
+    if not ["compile", "link"].contains(action.kind) or
+       action.argv.len() == 0 or action.argv[0] != compiler_entry or
+       action.working_directory != "simple-build/outputs" or
+       action.inputs.env_inputs.len() != 0:
+        return "execution-profile-unsupported"
+    for arg in action.argv:
+        if arg == "" or arg.contains("\n") or arg.contains("\r"):
+            return "argument-unsupported"
+    for path in action.output_paths:
+        if not _profile_output_name_v1(path) or
+           ["manifest.wire", "diagnostics", "result.wire",
+            "failure-proof.wire"].contains(path):
+            return "output-name-unsupported"
+    for item in action.inputs.source_inputs:
+        if _profile_control_collision_v1(item.logical_path):
+            return "control-input-collision"
+    for item in action.inputs.generated_inputs:
+        if _profile_control_collision_v1(item.logical_path):
+            return "control-input-collision"
+    for item in action.inputs.dependency_outputs:
+        if _profile_control_collision_v1(item.output_path):
+            return "control-input-collision"
+    ""
+
+fn build_worker_terminal_exit_problem_v1(exit_code: i64) -> text:
+    """Accept a known terminal code without inferring the failure cause."""
+    if exit_code < 0 or exit_code > 255:
+        return "terminal-exit-invalid"
+    ""
+
+export build_worker_execution_profile_problem_v1
+export build_worker_terminal_exit_problem_v1

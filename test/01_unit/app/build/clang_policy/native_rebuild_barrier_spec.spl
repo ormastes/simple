@@ -1,0 +1,378 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use app.build.clang_policy.native_noop_gate.{ClangNativeNoopDecisionV1}
+use app.build.clang_policy.native_rebuild_barrier.{
+    parse_clang_native_object_map_v1,
+    begin_clang_native_rebuild_barrier_v1,
+    close_clang_native_rebuild_barrier_v1}
+use app.build.clang_policy.native_ninja_graph.{observe_clang_ninja_graph_v1}
+use app.io.mod.{cwd, getpid, time_now_unix_micros, dir_create_all,
+    dir_remove_all, file_exists, file_delete, file_write_bytes,
+    file_read_regular_no_follow_bounded, process_run_bounded}
+use std.sffi.platform.{platform_name_raw}
+
+fn _barrier_root_v1() -> text:
+    cwd() + "/build/test/clang-native-barrier-" +
+        getpid().to_text() + "-" + time_now_unix_micros().to_text()
+
+fn _barrier_map_v1() -> text:
+    "simple-clang-native-object-map-v1\n" +
+    "target=libcore\n" +
+    "stamp=policy.stamp\n" +
+    "accepted-output=libcore.a\n" +
+    "object-count=2\n" +
+    "object=CMakeFiles/libcore.dir/a.c.o\n" +
+    "object=CMakeFiles/libcore.dir/b.c.o\n"
+
+fn _barrier_graph_v1(root: text) -> text:
+    if not file_write_bytes(root + "/build.ninja",
+            ("include CMakeFiles/rules.ninja\n" +
+            "build CMakeFiles/libcore.dir/a.c.o: C_COMPILER__libcore a.c\n" +
+            "build CMakeFiles/libcore.dir/b.c.o: C_COMPILER__libcore b.c\n" +
+            "build libcore.a: C_STATIC_LIBRARY_LINKER__libcore CMakeFiles/libcore.dir/a.c.o CMakeFiles/libcore.dir/b.c.o\n").bytes()):
+        return ""
+    if not file_write_bytes(root + "/CMakeFiles/rules.ninja",
+            ("rule C_COMPILER__libcore\n  command = cc -c $in -o $out\n" +
+            "rule C_STATIC_LIBRARY_LINKER__libcore\n  command = ar qc $out $in\n").bytes()):
+        return ""
+    val graph = observe_clang_ninja_graph_v1(root)
+    if not graph.valid: return ""
+    graph.graph_digest
+
+describe "protected Clang native rebuild barrier":
+    it "invalidates only mapped objects and retains its owner lease":
+        val root = _barrier_root_v1()
+        val objects = root + "/CMakeFiles/libcore.dir"
+        val other = root + "/CMakeFiles/other.dir"
+        expect(dir_create_all(objects)).to_be(true)
+        expect(dir_create_all(other)).to_be(true)
+        expect(file_write_bytes(objects + "/a.c.o", "old-a".bytes()))
+            .to_be(true)
+        expect(file_write_bytes(objects + "/b.c.o", "old-b".bytes()))
+            .to_be(true)
+        expect(file_write_bytes(other + "/stay.c.o", "keep".bytes()))
+            .to_be(true)
+        expect(file_write_bytes(root + "/libcore.a", "old-output".bytes()))
+            .to_be(true)
+        val wire = _barrier_map_v1()
+        val graph_digest = _barrier_graph_v1(root)
+        expect(graph_digest.len()).to_equal(64)
+        val digest = sha256_text("changed-policy")
+        val lease = begin_clang_native_rebuild_barrier_v1(
+            ClangNativeNoopDecisionV1("REBUILD_REQUIRED", digest,
+                "fresh-semantic-action-required"), root, "libcore", wire,
+            sha256_text(wire), graph_digest, "")
+        expect(lease.ready).to_be(true)
+        expect(lease.requires_native_action).to_be(true)
+        expect(lease.invalidated_count).to_equal(2)
+        expect(file_exists(objects + "/a.c.o")).to_be(false)
+        expect(file_exists(objects + "/b.c.o")).to_be(false)
+        expect(file_exists(root + "/libcore.a")).to_be(false)
+        expect(file_read_regular_no_follow_bounded(other + "/stay.c.o", 32)
+            .unwrap()).to_equal("keep")
+        expect(close_clang_native_rebuild_barrier_v1(lease)).to_be(true)
+        expect(dir_remove_all(root)).to_be(true)
+
+    it "preserves existing objects only for an exact current no-op":
+        val root = _barrier_root_v1()
+        val objects = root + "/CMakeFiles/libcore.dir"
+        expect(dir_create_all(objects)).to_be(true)
+        val wire = _barrier_map_v1()
+        val graph_digest = _barrier_graph_v1(root)
+        expect(graph_digest.len()).to_equal(64)
+        val digest = sha256_text("stable-policy")
+        val rebuild = begin_clang_native_rebuild_barrier_v1(
+            ClangNativeNoopDecisionV1("REBUILD_REQUIRED", digest, "rebuild"),
+            root, "libcore", wire, sha256_text(wire), graph_digest, "")
+        expect(rebuild.ready).to_be(true)
+        expect(close_clang_native_rebuild_barrier_v1(rebuild)).to_be(true)
+        expect(file_write_bytes(objects + "/a.c.o", "current-a".bytes()))
+            .to_be(true)
+        expect(file_write_bytes(objects + "/b.c.o", "current-b".bytes()))
+            .to_be(true)
+        expect(file_write_bytes(root + "/libcore.a",
+            "current-library".bytes())).to_be(true)
+        val noop = begin_clang_native_rebuild_barrier_v1(
+            ClangNativeNoopDecisionV1("ADMIT_NOOP", digest, "exact-current"),
+            root, "libcore", wire, sha256_text(wire), graph_digest,
+            sha256_text("current-library"))
+        expect(noop.ready).to_be(true)
+        expect(noop.requires_native_action).to_be(false)
+        expect(file_read_regular_no_follow_bounded(objects + "/a.c.o", 32)
+            .unwrap()).to_equal("current-a")
+        expect(close_clang_native_rebuild_barrier_v1(noop)).to_be(true)
+        expect(file_write_bytes(root + "/libcore.a", "changed".bytes()))
+            .to_be(true)
+        val stale = begin_clang_native_rebuild_barrier_v1(
+            ClangNativeNoopDecisionV1("ADMIT_NOOP", digest, "exact-current"),
+            root, "libcore", wire, sha256_text(wire), graph_digest,
+            sha256_text("current-library"))
+        expect(stale.ready).to_be(false)
+        expect(stale.reason).to_equal("accepted-output-changed")
+        expect(file_read_regular_no_follow_bounded(objects + "/a.c.o", 32)
+            .unwrap()).to_equal("current-a")
+        expect(file_write_bytes(root + "/libcore.a",
+            "current-library".bytes())).to_be(true)
+        expect(file_delete(objects + "/b.c.o")).to_be(true)
+        val missing = begin_clang_native_rebuild_barrier_v1(
+            ClangNativeNoopDecisionV1("ADMIT_NOOP", digest, "exact-current"),
+            root, "libcore", wire, sha256_text(wire), graph_digest,
+            sha256_text("current-library"))
+        expect(missing.ready).to_be(false)
+        expect(missing.reason).to_equal("native-object-unavailable")
+        expect(dir_remove_all(root)).to_be(true)
+
+    it "rejects malformed maps and policy before deleting objects":
+        val root = _barrier_root_v1()
+        val objects = root + "/CMakeFiles/libcore.dir"
+        expect(dir_create_all(objects)).to_be(true)
+        expect(file_write_bytes(objects + "/a.c.o", "keep".bytes()))
+            .to_be(true)
+        val wire = _barrier_map_v1()
+        expect(parse_clang_native_object_map_v1(wire.replace(
+            "object-count=2", "object-count=02")).valid).to_be(false)
+        expect(parse_clang_native_object_map_v1(wire.replace(
+            "CMakeFiles/libcore.dir/b.c.o", "../other/b.c.o"))
+            .valid).to_be(false)
+        val rejected = begin_clang_native_rebuild_barrier_v1(
+            ClangNativeNoopDecisionV1("REJECT", "", "blocked"),
+            root, "libcore", wire, sha256_text(wire),
+            sha256_text("graph"), "")
+        expect(rejected.ready).to_be(false)
+        expect(file_exists(objects + "/a.c.o")).to_be(true)
+        val wrong_map = begin_clang_native_rebuild_barrier_v1(
+            ClangNativeNoopDecisionV1("REBUILD_REQUIRED",
+                sha256_text("policy"), "rebuild"), root, "libcore", wire,
+            sha256_text("other-map"), sha256_text("graph"), "")
+        expect(wrong_map.ready).to_be(false)
+        expect(file_exists(objects + "/a.c.o")).to_be(true)
+        expect(dir_remove_all(root)).to_be(true)
+
+    it "rejects an unapproved graph before changing stamp or objects":
+        val root = _barrier_root_v1()
+        val objects = root + "/CMakeFiles/libcore.dir"
+        expect(dir_create_all(objects)).to_be(true)
+        expect(file_write_bytes(objects + "/a.c.o", "keep-a".bytes()))
+            .to_be(true)
+        expect(file_write_bytes(objects + "/b.c.o", "keep-b".bytes()))
+            .to_be(true)
+        expect(file_write_bytes(root + "/policy.stamp",
+            "old-stamp\n".bytes())).to_be(true)
+        val approved_graph = _barrier_graph_v1(root)
+        expect(approved_graph.len()).to_equal(64)
+        expect(file_write_bytes(root + "/build.ninja",
+            "include CMakeFiles/rules.ninja\n# different\n".bytes()))
+            .to_be(true)
+        val wire = _barrier_map_v1()
+        val rejected = begin_clang_native_rebuild_barrier_v1(
+            ClangNativeNoopDecisionV1("REBUILD_REQUIRED",
+                sha256_text("new-policy"), "rebuild"), root,
+            "libcore", wire, sha256_text(wire), approved_graph, "")
+        expect(rejected.ready).to_be(false)
+        expect(rejected.reason).to_equal("native-graph-unapproved")
+        expect(file_read_regular_no_follow_bounded(
+            root + "/policy.stamp", 32).unwrap()).to_equal("old-stamp\n")
+        expect(file_read_regular_no_follow_bounded(
+            objects + "/a.c.o", 32).unwrap()).to_equal("keep-a")
+        expect(file_read_regular_no_follow_bounded(
+            objects + "/b.c.o", 32).unwrap()).to_equal("keep-b")
+        expect(dir_remove_all(root)).to_be(true)
+
+    it "rejects a pinned map that omits a direct Ninja object input":
+        val root = _barrier_root_v1()
+        val objects = root + "/CMakeFiles/libcore.dir"
+        expect(dir_create_all(objects)).to_be(true)
+        expect(file_write_bytes(objects + "/a.c.o", "keep-a".bytes()))
+            .to_be(true)
+        expect(file_write_bytes(objects + "/b.c.o", "keep-b".bytes()))
+            .to_be(true)
+        expect(file_write_bytes(root + "/libcore.a", "keep-output".bytes()))
+            .to_be(true)
+        expect(file_write_bytes(root + "/policy.stamp",
+            "old-stamp\n".bytes())).to_be(true)
+        val graph_digest = _barrier_graph_v1(root)
+        expect(graph_digest.len()).to_equal(64)
+        val incomplete_map = _barrier_map_v1()
+            .replace("object-count=2\n", "object-count=1\n")
+            .replace("object=CMakeFiles/libcore.dir/b.c.o\n", "")
+        val rejected = begin_clang_native_rebuild_barrier_v1(
+            ClangNativeNoopDecisionV1("REBUILD_REQUIRED",
+                sha256_text("new-policy"), "rebuild"), root,
+            "libcore", incomplete_map, sha256_text(incomplete_map),
+            graph_digest, "")
+        expect(rejected.ready).to_be(false)
+        expect(rejected.reason).to_equal("native-graph-unapproved")
+        expect(file_read_regular_no_follow_bounded(
+            root + "/policy.stamp", 32).unwrap()).to_equal("old-stamp\n")
+        expect(file_read_regular_no_follow_bounded(
+            objects + "/a.c.o", 32).unwrap()).to_equal("keep-a")
+        expect(file_read_regular_no_follow_bounded(
+            objects + "/b.c.o", 32).unwrap()).to_equal("keep-b")
+        expect(file_read_regular_no_follow_bounded(
+            root + "/libcore.a", 32).unwrap()).to_equal("keep-output")
+        expect(dir_remove_all(root)).to_be(true)
+
+    it "rejects continued fake edges and variable-derived archive outputs":
+        val root = _barrier_root_v1()
+        val objects = root + "/CMakeFiles/libcore.dir"
+        expect(dir_create_all(objects)).to_be(true)
+        expect(file_write_bytes(objects + "/a.c.o", "keep-a".bytes()))
+            .to_be(true)
+        expect(file_write_bytes(objects + "/b.c.o", "keep-b".bytes()))
+            .to_be(true)
+        expect(file_write_bytes(root + "/libcore.a", "keep-output".bytes()))
+            .to_be(true)
+        expect(file_write_bytes(root + "/policy.stamp",
+            "old-stamp\n".bytes())).to_be(true)
+        expect(_barrier_graph_v1(root).len()).to_equal(64)
+        val deceptive = "include CMakeFiles/rules.ninja\n" +
+            "target = libcore.a\n" +
+            "text = hidden$\n" +
+            "  build libcore.a: C_STATIC_LIBRARY_LINKER__libcore CMakeFiles/libcore.dir/a.c.o\n" +
+            "build CMakeFiles/libcore.dir/a.c.o: C_COMPILER__libcore a.c\n" +
+            "build CMakeFiles/libcore.dir/b.c.o: C_COMPILER__libcore b.c\n" +
+            "build $target: C_STATIC_LIBRARY_LINKER__libcore CMakeFiles/libcore.dir/a.c.o CMakeFiles/libcore.dir/b.c.o\n"
+        expect(file_write_bytes(root + "/build.ninja",
+            deceptive.bytes())).to_be(true)
+        val observed = observe_clang_ninja_graph_v1(root)
+        expect(observed.valid).to_be(true)
+        val incomplete_map = _barrier_map_v1()
+            .replace("object-count=2\n", "object-count=1\n")
+            .replace("object=CMakeFiles/libcore.dir/b.c.o\n", "")
+        val rejected = begin_clang_native_rebuild_barrier_v1(
+            ClangNativeNoopDecisionV1("REBUILD_REQUIRED",
+                sha256_text("new-policy"), "rebuild"), root,
+            "libcore", incomplete_map, sha256_text(incomplete_map),
+            observed.graph_digest, "")
+        expect(rejected.ready).to_be(false)
+        expect(rejected.reason).to_equal("native-graph-unapproved")
+        val variable_only = "include CMakeFiles/rules.ninja\n" +
+            "target = libcore.a\n" +
+            "build CMakeFiles/libcore.dir/a.c.o: C_COMPILER__libcore a.c\n" +
+            "build CMakeFiles/libcore.dir/b.c.o: C_COMPILER__libcore b.c\n" +
+            "build $target: C_STATIC_LIBRARY_LINKER__libcore CMakeFiles/libcore.dir/a.c.o CMakeFiles/libcore.dir/b.c.o\n"
+        expect(file_write_bytes(root + "/build.ninja",
+            variable_only.bytes())).to_be(true)
+        val variable_observed = observe_clang_ninja_graph_v1(root)
+        expect(variable_observed.valid).to_be(true)
+        val variable_rejected = begin_clang_native_rebuild_barrier_v1(
+            ClangNativeNoopDecisionV1("REBUILD_REQUIRED",
+                sha256_text("new-policy"), "rebuild"), root,
+            "libcore", incomplete_map, sha256_text(incomplete_map),
+            variable_observed.graph_digest, "")
+        expect(variable_rejected.ready).to_be(false)
+        expect(variable_rejected.reason).to_equal("native-graph-unapproved")
+        expect(file_read_regular_no_follow_bounded(
+            root + "/policy.stamp", 32).unwrap()).to_equal("old-stamp\n")
+        expect(file_read_regular_no_follow_bounded(
+            objects + "/a.c.o", 32).unwrap()).to_equal("keep-a")
+        expect(file_read_regular_no_follow_bounded(
+            root + "/libcore.a", 32).unwrap()).to_equal("keep-output")
+        expect(dir_remove_all(root)).to_be(true)
+
+    it "blocks a later symlinked object before changing earlier objects":
+        val platform = platform_name_raw()
+        if platform != "linux" and platform != "macos":
+            skip("blocks a later symlinked object before changing earlier objects",
+                "POSIX symlink fixture requires Linux or macOS")
+        else:
+            val root = _barrier_root_v1()
+            val objects = root + "/CMakeFiles/libcore.dir"
+            expect(dir_create_all(objects)).to_be(true)
+            val outside = root + "/outside.o"
+            expect(file_write_bytes(outside, "protected".bytes()))
+                .to_be(true)
+            expect(file_write_bytes(objects + "/a.c.o", "keep-a".bytes()))
+                .to_be(true)
+            expect(file_write_bytes(root + "/policy.stamp",
+                "old-stamp\n".bytes())).to_be(true)
+            val (_out, _err, code) = process_run_bounded("/bin/ln",
+                ["-s", outside, objects + "/b.c.o"], 5000, 512)
+            expect(code).to_equal(0)
+            val wire = _barrier_map_v1()
+            val graph_digest = _barrier_graph_v1(root)
+            expect(graph_digest.len()).to_equal(64)
+            val result = begin_clang_native_rebuild_barrier_v1(
+                ClangNativeNoopDecisionV1("REBUILD_REQUIRED",
+                    sha256_text("policy"), "rebuild"), root,
+                "libcore", wire, sha256_text(wire),
+                graph_digest, "")
+            expect(result.ready).to_be(false)
+            expect(result.reason).to_equal("object-not-regular")
+            expect(file_read_regular_no_follow_bounded(
+                objects + "/a.c.o", 32).unwrap()).to_equal("keep-a")
+            expect(file_read_regular_no_follow_bounded(
+                root + "/policy.stamp", 32).unwrap())
+                .to_equal("old-stamp\n")
+            expect(file_read_regular_no_follow_bounded(outside, 32)
+                .unwrap()).to_equal("protected")
+            expect(dir_remove_all(root)).to_be(true)
+
+    it "blocks a redirected output before stamp and object invalidation":
+        val platform = platform_name_raw()
+        if platform != "linux" and platform != "macos":
+            skip("blocks a redirected output before stamp and object invalidation",
+                "POSIX symlink fixture requires Linux or macOS")
+        else:
+            val root = _barrier_root_v1()
+            val objects = root + "/CMakeFiles/libcore.dir"
+            expect(dir_create_all(objects)).to_be(true)
+            expect(file_write_bytes(objects + "/a.c.o", "keep-a".bytes()))
+                .to_be(true)
+            expect(file_write_bytes(objects + "/b.c.o", "keep-b".bytes()))
+                .to_be(true)
+            expect(file_write_bytes(root + "/policy.stamp",
+                "old-stamp\n".bytes())).to_be(true)
+            val outside = root + "/outside.a"
+            expect(file_write_bytes(outside, "protected".bytes()))
+                .to_be(true)
+            val (_out, _err, code) = process_run_bounded("/bin/ln",
+                ["-s", outside, root + "/libcore.a"], 5000, 512)
+            expect(code).to_equal(0)
+            val graph_digest = _barrier_graph_v1(root)
+            expect(graph_digest.len()).to_equal(64)
+            val wire = _barrier_map_v1()
+            val result = begin_clang_native_rebuild_barrier_v1(
+                ClangNativeNoopDecisionV1("REBUILD_REQUIRED",
+                    sha256_text("new-policy"), "rebuild"), root,
+                "libcore", wire, sha256_text(wire), graph_digest, "")
+            expect(result.ready).to_be(false)
+            expect(result.reason).to_equal("accepted-output-not-regular")
+            expect(file_read_regular_no_follow_bounded(
+                root + "/policy.stamp", 32).unwrap())
+                .to_equal("old-stamp\n")
+            expect(file_read_regular_no_follow_bounded(
+                objects + "/a.c.o", 32).unwrap()).to_equal("keep-a")
+            expect(file_read_regular_no_follow_bounded(
+                objects + "/b.c.o", 32).unwrap()).to_equal("keep-b")
+            expect(file_read_regular_no_follow_bounded(
+                outside, 32).unwrap()).to_equal("protected")
+            expect(dir_remove_all(root)).to_be(true)
+
+    it "blocks a symlinked object ancestor before invalidation":
+        val platform = platform_name_raw()
+        if platform != "linux" and platform != "macos":
+            skip("blocks a symlinked object ancestor before invalidation",
+                "POSIX symlink fixture requires Linux or macOS")
+        else:
+            val root = _barrier_root_v1()
+            expect(dir_create_all(root + "/CMakeFiles")).to_be(true)
+            val redirected = root + "/redirected"
+            expect(dir_create_all(redirected)).to_be(true)
+            expect(file_write_bytes(redirected + "/a.c.o",
+                "protected".bytes())).to_be(true)
+            val (_out, _err, code) = process_run_bounded("/bin/ln",
+                ["-s", redirected, root + "/CMakeFiles/libcore.dir"],
+                5000, 512)
+            expect(code).to_equal(0)
+            val wire = _barrier_map_v1()
+            val result = begin_clang_native_rebuild_barrier_v1(
+                ClangNativeNoopDecisionV1("REBUILD_REQUIRED",
+                    sha256_text("policy"), "rebuild"), root,
+                "libcore", wire, sha256_text(wire),
+                sha256_text("graph"), "")
+            expect(result.ready).to_be(false)
+            expect(result.reason).to_equal("build-path-ancestor-redirected")
+            expect(file_read_regular_no_follow_bounded(
+                redirected + "/a.c.o", 32).unwrap()).to_equal("protected")
+            expect(dir_remove_all(root)).to_be(true)

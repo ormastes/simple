@@ -1,0 +1,29 @@
+use app.build.scheduler.distributed_attempt.{DistributedBuildNodeV1,
+    resume_completed_distributed_attempt_v1}
+use app.build.scheduler.owner.{scheduler_owner_open_v1,
+    scheduler_owner_close_v1}
+use app.build.scheduler.trusted_ssh.{TrustedSshNodeV1}
+use app.build.scheduler.trusted_sftp.{TrustedSftpConfigV1}
+use app.build.scheduler.trusted_worker_invocation.{TrustedWorkerCommandV1}
+use app.io.mod.{getpid, time_now_unix_micros}
+
+describe "resumed distributed attempt guard":
+    it "rejects mismatched SSH and SFTP nodes before recovery or network I/O":
+        val root = "build/test/distributed-resume-" + getpid().to_text() +
+            "-" + time_now_unix_micros().to_text()
+        val owner = scheduler_owner_open_v1(root)
+        expect(owner.error).to_equal("")
+        val ssh = TrustedSshNodeV1("node-a", "127.0.0.1", "builder", 2222,
+            "/bin/ssh", "", "/tmp/hosts", "", "/tmp/key", "")
+        val sftp = TrustedSshNodeV1("node-b", "127.0.0.1", "builder", 2222,
+            "/bin/ssh", "", "/tmp/hosts", "", "/tmp/key", "")
+        val node = DistributedBuildNodeV1(
+            TrustedWorkerCommandV1(ssh, "/usr/local/bin/simple-build-worker", 30000),
+            TrustedSftpConfigV1(sftp, "/bin/sftp", "", "/srv/simple-build-inbox"),
+            root, root, root + "/retained")
+        val outcome = resume_completed_distributed_attempt_v1(owner,
+            "try-1", node)
+        expect(outcome.completed).to_be(false)
+        expect(outcome.reason).to_equal("transport-node-mismatch")
+        expect(owner.state.sequence).to_equal(0)
+        expect(scheduler_owner_close_v1(owner)).to_be(true)

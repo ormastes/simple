@@ -185,10 +185,14 @@ pub extern "C" fn rt_vulkan_init_window_present(w: i64, h: i64, vsync: i64) -> i
     };
     let surface_handle = alloc_handle();
     let swapchain_handle = alloc_handle();
+    if let Err(error) = state.install_selected_device(device.clone()) {
+        let _ = manager.destroy_window(window);
+        state.set_error(error);
+        return 0;
+    }
     state.instance = Some(instance);
     state.physical_devices = devices;
     state.semaphore_pool = Some(SemaphorePool::new(device.clone()));
-    state.device = Some(device);
     state.surfaces.insert(surface_handle, surface);
     state.swapchains.insert(swapchain_handle, swapchain);
     state.swapchain_windows.insert(swapchain_handle, window);
@@ -267,10 +271,13 @@ pub extern "C" fn rt_vulkan_init_external_window_present(
     };
     let surface_handle = alloc_handle();
     let swapchain_handle = alloc_handle();
+    if let Err(error) = state.install_selected_device(device.clone()) {
+        state.set_error(error);
+        return 0;
+    }
     state.instance = Some(instance);
     state.physical_devices = devices;
     state.semaphore_pool = Some(SemaphorePool::new(device.clone()));
-    state.device = Some(device);
     state.surfaces.insert(surface_handle, surface);
     state.swapchains.insert(swapchain_handle, swapchain);
     swapchain_handle
@@ -366,10 +373,13 @@ pub extern "C" fn rt_vulkan_init_headless_present(w: i64, h: i64, vsync: i64) ->
     };
     let surface_handle = alloc_handle();
     let swapchain_handle = alloc_handle();
+    if let Err(error) = state.install_selected_device(device.clone()) {
+        state.set_error(error);
+        return 0;
+    }
     state.instance = Some(instance);
     state.physical_devices = devices;
     state.semaphore_pool = Some(SemaphorePool::new(device.clone()));
-    state.device = Some(device);
     state.surfaces.insert(surface_handle, surface);
     state.swapchains.insert(swapchain_handle, swapchain);
     swapchain_handle

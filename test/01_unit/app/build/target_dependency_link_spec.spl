@@ -1,0 +1,106 @@
+# Focused admission tests for named-target native link dependencies.
+
+use app.build.targets.build_targets.{parse_targets_text}
+use app.build.targets.target_executor.{
+    target_action, target_action_args_with_manifest,
+    target_dependency_manifest_path, execute_target_plan
+}
+use app.build.targets.artifact_receipt.{
+    DependencyArtifactInputV1, parse_dependency_manifest_v1,
+    publish_dependency_manifest_layer_v1, digest_is_sha256
+}
+use app.io._CliCompile.native_dependency_inputs.{
+    native_dependency_inputs_load_v1, native_dependency_inputs_cleanup_v1
+}
+use app.io.mod.{dir_create_all, file_write, file_read, file_hash_sha256}
+
+val DEP_LINK_ROOT = "/tmp/simple-target-dependency-link-spec"
+val DEP_LINK_CACHE = DEP_LINK_ROOT + "/build/target_cache/app"
+
+fn dep_link_fixture_v1() -> bool:
+    dir_create_all(DEP_LINK_ROOT + "/src") and
+        dir_create_all(DEP_LINK_ROOT + "/build/lib") and
+        dir_create_all(DEP_LINK_CACHE) and
+        file_write(DEP_LINK_ROOT + "/src/lib.spl", "fn helper(): 7\n") and
+        file_write(DEP_LINK_ROOT + "/src/main.spl", "fn main(): 0\n") and
+        file_write(DEP_LINK_ROOT + "/build/lib/lib.a", "archive bytes v1")
+
+val DEP_LINK_TARGETS = "target lib:\n    kind: library\n    entry: src/lib.spl\n    output: build/lib/lib.a\n\ntarget app:\n    kind: binary\n    entry: src/main.spl\n    depends: lib\n"
+
+describe "named target dependency link inputs":
+    it "publishes and admits an archive through the canonical manifest":
+        expect(dep_link_fixture_v1()).to_equal(true)
+        val ts = parse_targets_text(DEP_LINK_TARGETS)
+        val app = ts.targets[1]
+        val path = target_dependency_manifest_path(DEP_LINK_ROOT, ts, app, DEP_LINK_CACHE)
+        expect(path).to_start_with(DEP_LINK_CACHE + "/manifests/")
+        val manifest = parse_dependency_manifest_v1(file_read(path))
+        expect(manifest.errors.len()).to_equal(0)
+        expect(manifest.consumer_target).to_equal("src/main.spl")
+        expect(manifest.inputs.len()).to_equal(1)
+        expect(manifest.inputs[0].artifact_kind).to_equal("archive")
+        val admitted = native_dependency_inputs_load_v1(
+            DEP_LINK_ROOT, DEP_LINK_CACHE, path, "src/main.spl", DEP_LINK_ROOT + "/build/app")
+        expect(admitted.error).to_equal("")
+        expect(admitted.provider_paths.len()).to_equal(1)
+        expect(file_hash_sha256(admitted.provider_paths[0])).to_equal(
+            manifest.inputs[0].artifact_digest)
+        val args = target_action_args_with_manifest(
+            DEP_LINK_ROOT, target_action(DEP_LINK_ROOT, ts, app), path)
+        expect(args).to_contain("--input-manifest")
+        expect(args).to_contain(path)
+        native_dependency_inputs_cleanup_v1(admitted.provider_paths)
+
+    it "refuses a changed archive before handing it to the linker":
+        expect(dep_link_fixture_v1()).to_equal(true)
+        val ts = parse_targets_text(DEP_LINK_TARGETS)
+        val path = target_dependency_manifest_path(DEP_LINK_ROOT, ts, ts.targets[1], DEP_LINK_CACHE)
+        expect(file_write(DEP_LINK_ROOT + "/build/lib/lib.a", "different archive bytes")).to_equal(true)
+        val admitted = native_dependency_inputs_load_v1(
+            DEP_LINK_ROOT, DEP_LINK_CACHE, path, "src/main.spl", DEP_LINK_ROOT + "/build/app")
+        expect(admitted.error).to_contain("dependency-artifact-digest-mismatch")
+        expect(admitted.provider_paths.len()).to_equal(0)
+
+    it "rejects non-linkable manifest artifacts":
+        expect(dep_link_fixture_v1()).to_equal(true)
+        val artifact = "build/lib/lib.a"
+        val digest = file_hash_sha256(DEP_LINK_ROOT + "/" + artifact)
+        expect(digest_is_sha256(digest)).to_equal(true)
+        val inputs = [DependencyArtifactInputV1(
+            "lib", "link", artifact, "shared", digest, digest, digest)]
+        val manifest_digest = publish_dependency_manifest_layer_v1(
+            DEP_LINK_ROOT, DEP_LINK_CACHE, "src/main.spl", inputs)
+        expect(digest_is_sha256(manifest_digest)).to_equal(true)
+        val path = DEP_LINK_CACHE + "/manifests/" + manifest_digest + ".manifest"
+        val admitted = native_dependency_inputs_load_v1(
+            DEP_LINK_ROOT, DEP_LINK_CACHE, path, "src/main.spl", DEP_LINK_ROOT + "/build/app")
+        expect(admitted.error).to_contain("dependency-kind-not-linkable")
+        expect(admitted.provider_paths.len()).to_equal(0)
+
+    it "rejects two archive dependencies before executing any action":
+        expect(dep_link_fixture_v1()).to_equal(true)
+        expect(file_write(DEP_LINK_ROOT + "/src/lib2.spl", "fn helper2(): 9\n")).to_equal(true)
+        val targets = DEP_LINK_TARGETS.replace(
+            "    depends: lib\n", "    depends: lib, lib2\n") +
+            "\ntarget lib2:\n    kind: library\n    entry: src/lib2.spl\n"
+        val summary = execute_target_plan(DEP_LINK_ROOT, parse_targets_text(targets), "app")
+        expect(summary.executed_count).to_equal(0)
+        expect(summary.error).to_contain("multiple-link-dependencies-unsupported")
+
+    it "rejects a direct manifest with two providers before copying":
+        expect(dep_link_fixture_v1()).to_equal(true)
+        expect(file_write(DEP_LINK_ROOT + "/build/lib/lib2.a", "second archive bytes")).to_equal(true)
+        val first = file_hash_sha256(DEP_LINK_ROOT + "/build/lib/lib.a")
+        val second = file_hash_sha256(DEP_LINK_ROOT + "/build/lib/lib2.a")
+        val inputs = [
+            DependencyArtifactInputV1("lib", "link", "build/lib/lib.a", "archive", first, first, first),
+            DependencyArtifactInputV1("lib2", "link", "build/lib/lib2.a", "archive", second, second, second)
+        ]
+        val manifest_digest = publish_dependency_manifest_layer_v1(
+            DEP_LINK_ROOT, DEP_LINK_CACHE, "src/main.spl", inputs)
+        expect(digest_is_sha256(manifest_digest)).to_equal(true)
+        val path = DEP_LINK_CACHE + "/manifests/" + manifest_digest + ".manifest"
+        val admitted = native_dependency_inputs_load_v1(
+            DEP_LINK_ROOT, DEP_LINK_CACHE, path, "src/main.spl", DEP_LINK_ROOT + "/build/app")
+        expect(admitted.error).to_contain("multiple-link-dependencies-unsupported")
+        expect(admitted.provider_paths.len()).to_equal(0)

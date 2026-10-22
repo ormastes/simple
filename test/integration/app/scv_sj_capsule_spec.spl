@@ -1,0 +1,290 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# research: doc/01_research/app/tools/scv/scv_v2_sj_integration_report_2026-08-25.md ; plan: doc/03_plan/app/tools/scv_complete_impl_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+Purpose: This spec proves SCV-IMPL-B-01 — the sj-capsule transaction
+coordinator. All mutating SCV work runs inside ONE capsule transaction of 12
+steps: lease -> cursor_sync -> coalesce -> capture -> wal -> objects -> index ->
+jj_snapshot -> jj_read_ids -> backend_map -> publish -> release. Ten of those
+steps are REAL here. Steps 8 and 9 (jj_snapshot, jj_read_ids) are a declared
+SEAM: `sj raw jj` currently returns the BUILT COMMAND STRING instead of running
+jj, so no jj mutation is drivable from this code today (that is SCV-IMPL-B-02).
+Following the D-06 validation ladder precedent, those two steps run through a
+pluggable executor whose DEFAULT is `unavailable` — never a fabricated success.
+An unavailable jj lane yields the report's own `unanchored` verdict, which this
+spec proves is NOT an anchored/committed claim.
+
+Single-writer is the whole point of the capsule, so the lease is proved rather
+than asserted: the exclusion primitive is mkdir, and a second holder attempting
+to enter while the first holds the lease is REFUSED, cannot release the other's
+lease, and its transaction returns `rejected_no_lease` having written nothing.
+
+The failure matrix from the report is exercised row by row against a real
+scratch directory. No mutating jj/sj command is run against any repository.
+Audience: Maintainers of the SCV backend transaction and the sj capsule.
+"""
+# @req: REQ-SCV-SJ-CAPSULE-001
+# NOTE: the bare `use std.spec.step` line other SCV specs carry is deliberately
+# ABSENT here. On this seed it puts a SECOND `file_rename` into the flattened
+# compilation unit, and the duplicate then dispatches to itself — every write
+# that goes through store.spl's atomic_write dies with "stack overflow:
+# recursion depth 1000 exceeded limit 1000 in function 'file_rename'". Bisected
+# to that single line. `step` is imported below in the braces form, which is
+# what is actually used. TODO(seed): remove this workaround once the flattened
+# -unit duplicate-symbol dispatch bug is fixed.
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.nogc_sync_mut.io.dir_ops.{dir_create}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent}
+use std.scv.sj_capsule.{
+    scv_sj_capsule_version, scv_sj_capsule_steps, scv_sj_capsule_seamed_steps,
+    scv_sj_step_is_seamed, scv_sj_lease_acquire, scv_sj_lease_release,
+    scv_sj_lease_is_held, scv_sj_lease_holder, scv_sj_cursor_sync,
+    scv_sj_cursor_state, scv_sj_capture, scv_sj_capture_row_path,
+    scv_sj_capture_row_id, scv_sj_write_objects, scv_sj_object_exists,
+    scv_sj_update_index, scv_sj_commit_backend_map, scv_sj_backend_map_rows,
+    scv_sj_publish_head, scv_sj_head_state, scv_sj_head_txn,
+    scv_sj_failure_behavior, scv_sj_failure_points, scv_sj_capsule_transaction,
+    scv_sj_capsule_verdict, scv_sj_capsule_step_status, scv_sj_capsule_is_anchored,
+    scv_sj_capsule_recover, scv_sj_coalesce_paths, scv_sj_coalesce_events,
+    ScvJjExecutor, scv_jj_executor_unavailable, scv_jj_executor_recorded,
+    scv_jj_executor_sj_lane, scv_jj_snapshot, scv_jj_read_ids
+}
+
+# A fresh directory per example. dir_remove_all is deliberately NOT used: on
+# this seed it recurses without bound inside file_rename (stack overflow at
+# depth 1000), so isolation comes from a unique name instead of a wipe.
+fn sj_scratch(name: text) -> text:
+    val root = "/tmp/scv_sj_capsule_spec/{current_time_ms()}_{name}"
+    dir_create(root, true)
+    root
+
+fn sj_seed_file(root: text, rel: text, body: text) -> text:
+    val p = "{root}/{rel}"
+    file_write(p, body)
+    p
+
+describe "scv sj-capsule transaction coordinator (B-01)":
+    # @manual scenario evidence
+    it "declares the 12 steps in the report's order and names the seam":
+        # @req REQ-SCV-SJ-CAPSULE-001
+        expect(scv_sj_capsule_version()).to_contain("scv/sj-capsule/v1")
+        val steps = scv_sj_capsule_steps()
+        expect(steps.len()).to_equal(12)
+        expect(steps[0]).to_equal("lease")
+        expect(steps[1]).to_equal("cursor_sync")
+        expect(steps[2]).to_equal("coalesce")
+        expect(steps[3]).to_equal("capture")
+        expect(steps[4]).to_equal("wal")
+        expect(steps[5]).to_equal("objects")
+        expect(steps[6]).to_equal("index")
+        expect(steps[7]).to_equal("jj_snapshot")
+        expect(steps[8]).to_equal("jj_read_ids")
+        expect(steps[9]).to_equal("backend_map")
+        expect(steps[10]).to_equal("publish")
+        expect(steps[11]).to_equal("release")
+        expect(scv_sj_capsule_seamed_steps().len()).to_equal(2)
+        expect(scv_sj_step_is_seamed("jj_snapshot")).to_equal(true)
+        expect(scv_sj_step_is_seamed("capture")).to_equal(false)
+
+    it "refuses a second concurrent capsule: the lease is exclusive":
+        # @req REQ-SCV-SJ-CAPSULE-001
+        val root = sj_scratch("lease")
+        expect(scv_sj_lease_is_held(root)).to_equal(false)
+        val first = scv_sj_lease_acquire(root, "capsule-a")
+        expect(first.starts_with("ok")).to_equal(true)
+        expect(scv_sj_lease_is_held(root)).to_equal(true)
+        expect(scv_sj_lease_holder(root)).to_equal("capsule-a")
+        # Second attempt, lease still held: refused, and it names the holder.
+        val second = scv_sj_lease_acquire(root, "capsule-b")
+        expect(second.starts_with("conflict")).to_equal(true)
+        expect(second).to_contain("capsule-a")
+        # The loser cannot release a lease it does not own.
+        expect(scv_sj_lease_release(root, "capsule-b").starts_with("error")).to_equal(true)
+        expect(scv_sj_lease_is_held(root)).to_equal(true)
+        # Owner releases; only then can the second capsule proceed.
+        expect(scv_sj_lease_release(root, "capsule-a")).to_equal("ok: released")
+        expect(scv_sj_lease_is_held(root)).to_equal(false)
+        expect(scv_sj_lease_acquire(root, "capsule-b").starts_with("ok")).to_equal(true)
+
+    it "rejects a whole transaction that cannot take the lease, writing nothing":
+        # @req REQ-SCV-SJ-CAPSULE-001
+        val root = sj_scratch("lease_txn")
+        expect(scv_sj_lease_acquire(root, "capsule-a").starts_with("ok")).to_equal(true)
+        val report = scv_sj_capsule_transaction(root, "capsule-b", "t1", [], [], scv_jj_executor_unavailable(), "tok-1", false, "")
+        expect(scv_sj_capsule_verdict(report)).to_equal("rejected_no_lease")
+        expect(scv_sj_head_state(root)).to_equal("absent")
+        expect(scv_sj_cursor_state(root)).to_equal("absent")
+        expect(scv_sj_capsule_is_anchored(report)).to_equal(false)
+
+    it "keeps the jj seam honest: default and sj lanes are unavailable, never a pass":
+        # @req REQ-SCV-SJ-CAPSULE-001
+        expect(scv_jj_snapshot(scv_jj_executor_unavailable()).starts_with("unavailable")).to_equal(true)
+        expect(scv_jj_read_ids(scv_jj_executor_unavailable())).to_equal("")
+        val sj = scv_jj_snapshot(scv_jj_executor_sj_lane())
+        expect(sj.starts_with("unavailable")).to_equal(true)
+        expect(sj).to_contain("SCV-IMPL-B-02")
+        expect(scv_jj_read_ids(scv_jj_executor_sj_lane())).to_equal("")
+        # A recorded executor missing ids fails closed rather than anchoring.
+        expect(scv_jj_snapshot(scv_jj_executor_recorded("c1", "", "o1", "t1")).starts_with("fail")).to_equal(true)
+        # A complete recorded executor is the only anchoring path.
+        val ok = scv_jj_executor_recorded("chg1", "cmt1", "op1", "tree1")
+        expect(scv_jj_snapshot(ok)).to_equal("pass")
+        expect(scv_jj_read_ids(ok)).to_contain("change=chg1")
+        expect(scv_jj_read_ids(ok)).to_contain("tree=tree1")
+
+    it "runs the 10 real steps and lands unanchored when the jj lane is absent":
+        # @req REQ-SCV-SJ-CAPSULE-001
+        val root = sj_scratch("unanchored")
+        val a = sj_seed_file(root, "alpha.txt", "alpha body\n")
+        val b = sj_seed_file(root, "beta.txt", "beta body\n")
+        val report = scv_sj_capsule_transaction(root, "capsule-a", "txn-u1", [a, b], ["alpha body\n", "beta body\n"], scv_jj_executor_unavailable(), "tok-7", false, "")
+        expect(scv_sj_capsule_verdict(report)).to_equal("unanchored")
+        expect(scv_sj_capsule_is_anchored(report)).to_equal(false)
+        expect(scv_sj_capsule_step_status(report, "cursor_sync")).to_equal("synced")
+        expect(scv_sj_capsule_step_status(report, "capture")).to_equal("2 stable bytes")
+        expect(scv_sj_capsule_step_status(report, "wal")).to_equal("committed")
+        expect(scv_sj_capsule_step_status(report, "objects")).to_equal("2 written")
+        expect(scv_sj_capsule_step_status(report, "index")).to_equal("2 rows")
+        expect(scv_sj_capsule_step_status(report, "jj_snapshot").starts_with("unavailable")).to_equal(true)
+        expect(scv_sj_capsule_step_status(report, "jj_read_ids")).to_equal("unavailable")
+        expect(scv_sj_capsule_step_status(report, "backend_map")).to_equal("unanchored")
+        expect(scv_sj_capsule_step_status(report, "release")).to_equal("ok: released")
+        # Real side effects: head published, lease released, no backend map row.
+        expect(scv_sj_head_state(root)).to_equal("unanchored")
+        expect(scv_sj_head_txn(root)).to_equal("txn-u1")
+        expect(scv_sj_lease_is_held(root)).to_equal(false)
+        expect(scv_sj_backend_map_rows(root).len()).to_equal(0)
+        expect(scv_sj_capsule_recover(root)).to_contain("anchor pending")
+
+    it "commits and anchors only when a real backend id is supplied":
+        # @req REQ-SCV-SJ-CAPSULE-001
+        val root = sj_scratch("committed")
+        val a = sj_seed_file(root, "alpha.txt", "alpha body\n")
+        val ex = scv_jj_executor_recorded("chgA", "cmtA", "opA", "treeA")
+        val report = scv_sj_capsule_transaction(root, "capsule-a", "txn-c1", [a], ["alpha body\n"], ex, "tok-8", false, "")
+        expect(scv_sj_capsule_verdict(report)).to_equal("committed")
+        expect(scv_sj_capsule_is_anchored(report)).to_equal(true)
+        expect(scv_sj_capsule_step_status(report, "jj_snapshot")).to_equal("pass")
+        expect(scv_sj_capsule_step_status(report, "backend_map")).to_equal("mapped")
+        val rows = scv_sj_backend_map_rows(root)
+        expect(rows.len()).to_equal(1)
+        expect(rows[0]).to_contain("txn-c1")
+        expect(rows[0]).to_contain("commit=cmtA")
+        expect(rows[0]).to_contain("operation=opA")
+        expect(scv_sj_head_state(root)).to_equal("committed")
+        expect(scv_sj_capsule_recover(root)).to_equal("clean")
+        expect(scv_sj_lease_is_held(root)).to_equal(false)
+
+    it "captures stable bytes once and stores content objects idempotently":
+        # @req REQ-SCV-SJ-CAPSULE-001
+        val root = sj_scratch("objects")
+        val a = sj_seed_file(root, "alpha.txt", "same body\n")
+        val b = sj_seed_file(root, "beta.txt", "same body\n")
+        # A duplicate path in the batch is captured once; a missing path is dropped.
+        val captured = scv_sj_capture([a, a, b, "{root}/gone.txt"])
+        expect(captured.len()).to_equal(2)
+        expect(scv_sj_capture_row_path(captured[0])).to_equal(a)
+        # Identical bytes share a content id — dedup is by content, not path.
+        expect(scv_sj_capture_row_id(captured[0])).to_equal(scv_sj_capture_row_id(captured[1]))
+        expect(scv_sj_write_objects(root, captured, ["same body\n", "same body\n"])).to_equal(1)
+        expect(scv_sj_object_exists(root, scv_sj_capture_row_id(captured[0]))).to_equal(true)
+        # Re-running writes nothing new: step 6 is idempotent under WAL replay.
+        expect(scv_sj_write_objects(root, captured, ["same body\n", "same body\n"])).to_equal(0)
+        expect(scv_sj_update_index(root, "txn-o1", captured)).to_equal(2)
+
+    it "folds an atomic save through the real E-04 coalescer":
+        # @req REQ-SCV-SJ-CAPSULE-001
+        # A real atomic save: create tmp, rename tmp -> target, delete tmp.
+        # event_coalesce.spl must collapse that to ONE capture of the target.
+        val events = [
+            FsWatchEvent(seq: 1, kind: "created", path: "/w/doc.txt.tmp", related: ""),
+            FsWatchEvent(seq: 2, kind: "renamed", path: "/w/doc.txt", related: "/w/doc.txt.tmp"),
+            FsWatchEvent(seq: 3, kind: "deleted", path: "/w/doc.txt.tmp", related: ""),
+            FsWatchEvent(seq: 4, kind: "modified", path: "/w/other.txt", related: "")
+        ]
+        val folded = scv_sj_coalesce_events(events)
+        expect(folded.contains("/w/doc.txt")).to_equal(true)
+        expect(folded.contains("/w/other.txt")).to_equal(true)
+        expect(folded.contains("/w/doc.txt.tmp")).to_equal(false)
+        expect(folded.len()).to_equal(2)
+        # The path-level wrapper collapses duplicates and infers nothing more.
+        val paths = scv_sj_coalesce_paths(["/w/a.txt", "/w/a.txt", "/w/b.txt"])
+        expect(paths.len()).to_equal(2)
+
+    it "states a required behavior for every failure-matrix row":
+        # @req REQ-SCV-SJ-CAPSULE-001
+        val points = scv_sj_failure_points()
+        expect(points.len()).to_equal(9)
+        for p in points:
+            expect(scv_sj_failure_behavior(p) == "unknown_failure_point").to_equal(false)
+        expect(scv_sj_failure_behavior("before_capture")).to_contain("no_state_change")
+        expect(scv_sj_failure_behavior("after_wal_before_jj")).to_contain("unanchored")
+        expect(scv_sj_failure_behavior("jj_ok_map_failed")).to_contain("reconcile_required")
+        expect(scv_sj_failure_behavior("map_ok_publish_failed")).to_contain("replay_required")
+        expect(scv_sj_failure_behavior("watcher_overflow")).to_contain("invalidate_cursor")
+        expect(scv_sj_failure_behavior("git_mutation_outside_sj")).to_contain("external-mutation")
+        expect(scv_sj_failure_behavior("nonsense")).to_equal("unknown_failure_point")
+
+    it "aborts before byte capture with no state change and the lease released":
+        # @req REQ-SCV-SJ-CAPSULE-001
+        val root = sj_scratch("fault_precapture")
+        val a = sj_seed_file(root, "alpha.txt", "alpha\n")
+        val report = scv_sj_capsule_transaction(root, "capsule-a", "txn-f1", [a], ["alpha\n"], scv_jj_executor_recorded("c", "m", "o", "t"), "tok-9", false, "before_capture")
+        expect(scv_sj_capsule_verdict(report)).to_equal("aborted")
+        expect(scv_sj_capsule_step_status(report, "capture")).to_equal("aborted")
+        expect(scv_sj_head_state(root)).to_equal("absent")
+        expect(scv_sj_backend_map_rows(root).len()).to_equal(0)
+        expect(scv_sj_lease_is_held(root)).to_equal(false)
+
+    it "marks a post-WAL pre-jj failure unanchored, keeping the local snapshot":
+        # @req REQ-SCV-SJ-CAPSULE-001
+        val root = sj_scratch("fault_postwal")
+        val a = sj_seed_file(root, "alpha.txt", "alpha\n")
+        val report = scv_sj_capsule_transaction(root, "capsule-a", "txn-f2", [a], ["alpha\n"], scv_jj_executor_recorded("c", "m", "o", "t"), "tok-10", false, "after_wal_before_jj")
+        expect(scv_sj_capsule_verdict(report)).to_equal("unanchored")
+        expect(scv_sj_capsule_is_anchored(report)).to_equal(false)
+        # The captured object survives — the snapshot is recoverable.
+        val captured = scv_sj_capture([a])
+        expect(scv_sj_object_exists(root, scv_sj_capture_row_id(captured[0]))).to_equal(true)
+        expect(scv_sj_head_state(root)).to_equal("unanchored")
+        expect(scv_sj_backend_map_rows(root).len()).to_equal(0)
+        expect(scv_sj_lease_is_held(root)).to_equal(false)
+
+    it "demands reconciliation when jj succeeded but the SCV map failed":
+        # @req REQ-SCV-SJ-CAPSULE-001
+        val root = sj_scratch("fault_map")
+        val a = sj_seed_file(root, "alpha.txt", "alpha\n")
+        val report = scv_sj_capsule_transaction(root, "capsule-a", "txn-f3", [a], ["alpha\n"], scv_jj_executor_recorded("cX", "mX", "oX", "tX"), "tok-11", false, "jj_ok_map_failed")
+        expect(scv_sj_capsule_verdict(report)).to_equal("reconcile_required")
+        expect(scv_sj_capsule_step_status(report, "jj_snapshot")).to_equal("pass")
+        expect(scv_sj_capsule_step_status(report, "backend_map")).to_equal("failed")
+        expect(scv_sj_backend_map_rows(root).len()).to_equal(0)
+        expect(scv_sj_capsule_is_anchored(report)).to_equal(false)
+        expect(scv_sj_lease_is_held(root)).to_equal(false)
+
+    it "demands idempotent WAL replay when the head publish failed":
+        # @req REQ-SCV-SJ-CAPSULE-001
+        val root = sj_scratch("fault_publish")
+        val a = sj_seed_file(root, "alpha.txt", "alpha\n")
+        val report = scv_sj_capsule_transaction(root, "capsule-a", "txn-f4", [a], ["alpha\n"], scv_jj_executor_recorded("cY", "mY", "oY", "tY"), "tok-12", false, "map_ok_publish_failed")
+        expect(scv_sj_capsule_verdict(report)).to_equal("replay_required")
+        expect(scv_sj_capsule_step_status(report, "publish")).to_equal("failed")
+        # The map landed but the head never did — exactly the replay condition.
+        expect(scv_sj_backend_map_rows(root).len()).to_equal(1)
+        expect(scv_sj_head_state(root)).to_equal("absent")
+        expect(scv_sj_lease_is_held(root)).to_equal(false)
+
+    it "invalidates the cursor on watcher overflow instead of capturing":
+        # @req REQ-SCV-SJ-CAPSULE-001
+        val root = sj_scratch("overflow")
+        val a = sj_seed_file(root, "alpha.txt", "alpha\n")
+        val report = scv_sj_capsule_transaction(root, "capsule-a", "txn-f5", [a], ["alpha\n"], scv_jj_executor_recorded("cZ", "mZ", "oZ", "tZ"), "tok-13", true, "")
+        expect(scv_sj_capsule_verdict(report)).to_equal("invalidate_cursor")
+        expect(scv_sj_cursor_state(root)).to_equal("invalidate")
+        expect(scv_sj_capsule_step_status(report, "capture")).to_equal("skipped")
+        expect(scv_sj_head_state(root)).to_equal("absent")
+        expect(scv_sj_lease_is_held(root)).to_equal(false)

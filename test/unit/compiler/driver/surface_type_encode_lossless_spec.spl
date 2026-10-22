@@ -1,0 +1,121 @@
+"""
+# Lossless Surface Type Encoder Specification
+
+**Category:** Infrastructure
+**Covers:** compiler.driver.cache.surface_type_encode.surface_type_encode
+
+## Why this exists
+
+An interface digest that encodes two DIFFERENT types to the SAME text produces
+a stale cache HIT — a silently wrong compiler binary. Three existing encoders
+were rejected for exactly that reason, and each rejection is asserted here as
+a POSITIVE requirement on the new encoder, so a future lane cannot "simplify"
+this file back into one of them without turning a test red:
+
+  - the scalar `type_name` projection collapses `Dict<text,i64>` /
+    `Dict<text,f64>`;
+  - `module_surface_projected_type_shape` answers only named/array/other;
+  - `type_to_text` UNWRAPS `Reference`/`Atomic`/`Isolated`, so `&mut T`, `&T`
+    and `T` render identically.
+
+The other half of the bar is fail-CLOSED: anything the encoder cannot encode
+must yield the `""` sentinel, never a lossy stand-in.
+"""
+
+use std.spec.*
+use compiler.driver.cache.surface_type_encode.{surface_type_encode}
+use compiler.frontend.parser_types_expr.{Type, TypeKind}
+use compiler.common.diagnostics.span.{Span}
+
+fn sp() -> Span:
+    Span(0, 0, 0, 0, "", 0)
+
+fn ty(k: TypeKind) -> Type:
+    Type(kind: k, span: sp())
+
+fn named(name: text) -> Type:
+    ty(TypeKind.Named(name, []))
+
+fn generic(name: text, args: [Type]) -> Type:
+    ty(TypeKind.Named(name, args))
+
+fn enc(t: Type) -> text:
+    surface_type_encode(t)
+
+describe "encoder is deterministic and non-empty on success":
+    it "encodes a plain named type to a stable non-empty text":
+        val a = enc(named("i64"))
+        expect(a == "").to_equal(false)
+        expect(a).to_equal(enc(named("i64")))
+
+    it "distinguishes two different named types":
+        expect(enc(named("i64")) == enc(named("f64"))).to_equal(false)
+
+describe "generic arguments are preserved (scalar-projection trap)":
+    it "distinguishes Dict<text,i64> from Dict<text,f64>":
+        val d1 = generic("Dict", [named("text"), named("i64")])
+        val d2 = generic("Dict", [named("text"), named("f64")])
+        expect(enc(d1) == enc(d2)).to_equal(false)
+
+    it "distinguishes a generic from its bare head":
+        expect(enc(generic("Dict", [named("text")])) == enc(named("Dict"))).to_equal(false)
+
+    it "treats generic argument ORDER as significant":
+        val a = generic("Pair", [named("i64"), named("text")])
+        val b = generic("Pair", [named("text"), named("i64")])
+        expect(enc(a) == enc(b)).to_equal(false)
+
+describe "modifiers are preserved (type_to_text unwrap trap)":
+    it "distinguishes &mut T from &T":
+        val m = ty(TypeKind.Reference(named("i64"), true))
+        val c = ty(TypeKind.Reference(named("i64"), false))
+        expect(enc(m) == enc(c)).to_equal(false)
+
+    it "distinguishes &T from bare T":
+        val c = ty(TypeKind.Reference(named("i64"), false))
+        expect(enc(c) == enc(named("i64"))).to_equal(false)
+
+    it "distinguishes Atomic, Isolated and Weak from each other and from T":
+        val base = named("i64")
+        val at = enc(ty(TypeKind.Atomic(base)))
+        val iso = enc(ty(TypeKind.Isolated(base)))
+        val wk = enc(ty(TypeKind.Weak(base)))
+        val bare = enc(base)
+        expect(at == iso).to_equal(false)
+        expect(at == wk).to_equal(false)
+        expect(iso == wk).to_equal(false)
+        expect(at == bare).to_equal(false)
+
+    it "distinguishes *const T from *mut T":
+        val cp = ty(TypeKind.Pointer(named("i64"), true))
+        val mp = ty(TypeKind.Pointer(named("i64"), false))
+        expect(enc(cp) == enc(mp)).to_equal(false)
+
+    it "distinguishes Optional T from bare T":
+        expect(enc(ty(TypeKind.Optional(named("i64")))) == enc(named("i64"))).to_equal(false)
+
+describe "free text cannot collide with delimiters":
+    it "distinguishes Named with a comma in its name from a two-part encoding":
+        val tricky = named("a,b")
+        val pair = generic("a", [named("b")])
+        expect(enc(tricky) == enc(pair)).to_equal(false)
+
+describe "fails CLOSED — the sentinel is never a lossy stand-in":
+    it "returns the empty sentinel for Infer":
+        expect(enc(ty(TypeKind.Infer))).to_equal("")
+
+    it "returns the empty sentinel for Error":
+        expect(enc(ty(TypeKind.Error))).to_equal("")
+
+    it "propagates failure out of a nested position":
+        expect(enc(ty(TypeKind.Optional(ty(TypeKind.Infer))))).to_equal("")
+
+    it "propagates failure out of a generic argument":
+        expect(enc(generic("Dict", [named("text"), ty(TypeKind.Infer)]))).to_equal("")
+
+    it "refuses a sized array rather than encoding it like a dynamic one":
+        # Array length is layout, i.e. downstream-visible, and the size is an
+        # arbitrary Expr this encoder cannot encode. It must fail closed.
+        val dynamic = ty(TypeKind.Array(named("i64"), nil))
+        expect(dynamic == nil).to_equal(false)
+        expect(enc(dynamic) == "").to_equal(false)

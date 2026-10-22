@@ -1,0 +1,106 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use app.build.scheduler.dependency_admission.{
+    validate_retained_dependency_manifest_v1,
+    validate_dependency_provenance_v1}
+use app.build.scheduler.ledger.{SchedulerAttemptV1,
+    SchedulerLedgerV1, empty_scheduler_ledger_v1}
+use app.build.scheduler.retained_binary_cas.{retained_binary_cas_put_v1}
+use app.io.mod.{cwd, getpid, time_now_unix_micros, dir_create_all}
+use compiler.driver.cache.cas_store.{cas_put}
+use compiler.common.build_contract.{AcceptedResult, BuildDependencyRef,
+    SnapshotManifest, ToolchainManifest, InputManifest, ActionSpec}
+
+val PRODUCER = sha256_text("producer action")
+val OBJECT = sha256_text("accepted object bytes")
+val DIAGNOSTIC = sha256_text("compiler diagnostics")
+
+fn _manifest() -> text:
+    "simple-build-output-manifest-v1\n" +
+        "action=" + PRODUCER + "\n" +
+        "attempt=producer-try-1\nworker=worker-a\nfence=1\n" +
+        "diagnostics=" + DIAGNOSTIC + "\ncount=1\n" +
+        "answer.o|21|" + OBJECT + "\n"
+
+fn _accepted(wire: text) -> AcceptedResult:
+    AcceptedResult(1, PRODUCER, "producer-try-1",
+        sha256_text(wire), sha256_text("broker receipt"))
+
+fn _attempt() -> SchedulerAttemptV1:
+    SchedulerAttemptV1(PRODUCER, "producer-try-1", "worker-a", 1,
+        1, 4096, 8, false)
+
+fn _dependency(path: text, digest: text) -> BuildDependencyRef:
+    BuildDependencyRef(PRODUCER, path, digest)
+
+fn _consumer() -> ActionSpec:
+    val snapshot = sha256_text("snapshot")
+    ActionSpec(1, "compile", SnapshotManifest(1, snapshot, snapshot, snapshot),
+        ToolchainManifest(1, snapshot, snapshot, snapshot, snapshot,
+            snapshot, "x86_64-unknown-linux-gnu"),
+        InputManifest(1, snapshot, [], [], [PRODUCER],
+            [_dependency("answer.o", OBJECT)], [], [], snapshot, true, false),
+        ["cc", "-c", "answer.o"], "simple-build/outputs", snapshot,
+        ["consumer.o"], snapshot)
+
+describe "accepted producer dependency provenance":
+    it "accepts only the exact accepted attempt and output row":
+        val wire = _manifest()
+        val result = validate_retained_dependency_manifest_v1(wire,
+            _accepted(wire), _attempt(), _dependency("answer.o", OBJECT))
+        expect(result.valid).to_be(true)
+
+    it "rejects substituted output, wrong attempt, malformed row and extra data":
+        val wire = _manifest()
+        expect(validate_retained_dependency_manifest_v1(wire,
+            _accepted(wire), _attempt(),
+            _dependency("answer.o", sha256_text("substitution"))).valid)
+            .to_be(false)
+        expect(validate_retained_dependency_manifest_v1(wire,
+            _accepted(wire), _attempt(),
+            _dependency("different.o", OBJECT)).valid).to_be(false)
+        var wrong_attempt = _attempt()
+        wrong_attempt.worker_id = "worker-b"
+        expect(validate_retained_dependency_manifest_v1(wire,
+            _accepted(wire), wrong_attempt,
+            _dependency("answer.o", OBJECT)).valid).to_be(false)
+        val extra = wire + "unexpected\n"
+        expect(validate_retained_dependency_manifest_v1(extra,
+            _accepted(extra), _attempt(),
+            _dependency("answer.o", OBJECT)).valid).to_be(false)
+        val malformed = wire.replace("answer.o|21|", "answer.o|0|")
+        expect(validate_retained_dependency_manifest_v1(malformed,
+            _accepted(malformed), _attempt(),
+            _dependency("answer.o", OBJECT)).valid).to_be(false)
+
+    it "rejects a consumer dependency before any accepted producer exists":
+        val result = validate_dependency_provenance_v1(_consumer(),
+            empty_scheduler_ledger_v1(), "/tmp/retained-cas")
+        expect(result.valid).to_be(false)
+        expect(result.reason).to_equal("producer-not-accepted")
+
+    it "admits one accepted regular archive from retained binary CAS":
+        val archive = ("!<arch>\n" +
+            "unit.o/         " + "0           " + "0     " + "0     " +
+            "100644  " + "4         " + "`\n" + "ABCD").bytes()
+        val root = cwd() + "/build/test/archive-dependency-" +
+            getpid().to_text() + "-" + time_now_unix_micros().to_text()
+        expect(dir_create_all(root)).to_be(true)
+        val digest = retained_binary_cas_put_v1(root, "libunit.a", archive)
+        expect(digest != "").to_be(true)
+        val wire = _manifest().replace("answer.o|21|" + OBJECT,
+            "libunit.a|" + archive.len().to_text() + "|" + digest)
+        expect(cas_put(root, wire)).to_equal(sha256_text(wire))
+        val ledger = SchedulerLedgerV1([_attempt()], [], [_accepted(wire)], [])
+        val snapshot = sha256_text("snapshot")
+        val consumer = ActionSpec(1, "link",
+            SnapshotManifest(1, snapshot, snapshot, snapshot),
+            ToolchainManifest(1, snapshot, snapshot, snapshot, snapshot,
+                snapshot, "x86_64-unknown-linux-gnu"),
+            InputManifest(1, snapshot, [], [], [PRODUCER],
+                [_dependency("libunit.a", digest)], [], [], snapshot,
+                true, false),
+            ["cc", "libunit.a"], "simple-build/outputs", snapshot,
+            ["program"], snapshot)
+        expect(validate_dependency_provenance_v1(consumer, ledger, root).valid)
+            .to_be(true)

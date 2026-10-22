@@ -1,0 +1,46 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_u8_hex}
+use app.io.mod.{cwd, getpid, time_now_unix_micros, dir_create_all,
+    file_write_bytes}
+use app.build.scheduler.retained_binary_cas.{
+    retained_regular_archive_valid_v1, retained_binary_cas_put_v1,
+    retained_binary_cas_read_v1, retained_binary_cas_verify_v1}
+use compiler.driver.cache.binary_object_cas.{binary_object_cas_blob_path}
+
+fn _regular_archive_v1() -> [u8]:
+    ("!<arch>\n" +
+        "unit.o/         " + "0           " + "0     " + "0     " +
+        "100644  " + "4         " + "`\n" + "ABCD").bytes()
+
+describe "parent retained regular archive CAS":
+    it "admits complete regular members and rejects thin or truncated archives":
+        val archive = _regular_archive_v1()
+        expect(retained_regular_archive_valid_v1(archive)).to_be(true)
+        expect(retained_regular_archive_valid_v1(
+            "!<arch>\n".bytes())).to_be(true)
+        expect(retained_regular_archive_valid_v1(
+            "!<thin>\n".bytes())).to_be(false)
+        expect(retained_regular_archive_valid_v1(
+            archive[0:archive.len() - 1])).to_be(false)
+        var broken = _regular_archive_v1()
+        broken[66] = 0.to_u8()
+        expect(retained_regular_archive_valid_v1(broken)).to_be(false)
+
+    it "publishes and rereads exact archive bytes but refuses corruption":
+        val root = cwd() + "/build/test/archive-cas-" +
+            getpid().to_text() + "-" + time_now_unix_micros().to_text()
+        expect(dir_create_all(root)).to_be(true)
+        val archive = _regular_archive_v1()
+        val digest = retained_binary_cas_put_v1(root, "libunit.a", archive)
+        expect(digest).to_equal(sha256_u8_hex(archive))
+        expect(retained_binary_cas_verify_v1(root, "libunit.a", digest))
+            .to_be(true)
+        val copied = retained_binary_cas_read_v1(root, "libunit.a", digest,
+            1024)
+        expect(copied.?).to_be(true)
+        if val bytes = copied:
+            expect(sha256_u8_hex(bytes)).to_equal(digest)
+        val path = binary_object_cas_blob_path(root, digest)
+        expect(file_write_bytes(path, "bad".bytes())).to_be(true)
+        expect(retained_binary_cas_verify_v1(root, "libunit.a", digest))
+            .to_be(false)

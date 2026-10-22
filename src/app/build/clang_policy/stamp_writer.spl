@@ -1,0 +1,72 @@
+# Persist the Simple policy gate's dependency digest for CMake/Ninja.
+# This is a native rebuild request, not proof that a compiler action ran.
+use app.build.clang_policy.native_noop_gate.{ClangNativeNoopDecisionV1}
+use app.io.mod.{file_is_regular_no_follow,
+    file_read_regular_no_follow_bounded, file_atomic_write, file_fsync,
+    directory_fsync}
+use std.path.{dirname}
+
+struct ClangNativeStampWriteV1:
+    ready: bool
+    reason: text
+    required_digest: text
+    requires_native_action: bool
+
+fn _stamp_reject_v1(reason: text) -> ClangNativeStampWriteV1:
+    ClangNativeStampWriteV1(false, reason, "", false)
+
+fn _stamp_digest_v1(value: text) -> bool:
+    if value.len() != 64: return false
+    for ch in value.chars():
+        if not ((ch >= "0" and ch <= "9") or
+                (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+fn _stamp_path_v1(path: text) -> bool:
+    if not path.starts_with("/") or path.len() > 4096 or
+            path.ends_with("/") or path.contains("//") or
+            path.contains("\n") or path.contains("\r") or
+            path.contains("\x00"):
+        return false
+    for segment in path.split("/"):
+        if segment == "." or segment == "..": return false
+    true
+
+fn write_clang_native_stamp_v1(decision: ClangNativeNoopDecisionV1,
+        stamp_path: text) -> ClangNativeStampWriteV1:
+    """Make the current policy digest observable to CMake/Ninja.
+
+    The caller must run the policy gate first and independently prove a
+    REBUILD_REQUIRED native action executed before publishing its output.
+    The absolute parent directory is trusted and already exists.
+    """
+    if not _stamp_path_v1(stamp_path):
+        return _stamp_reject_v1("stamp-path-invalid")
+    if not _stamp_digest_v1(decision.required_dependency_digest) or
+            (decision.action != "ADMIT_NOOP" and
+             decision.action != "REBUILD_REQUIRED"):
+        return _stamp_reject_v1("policy-decision-invalid")
+    val expected = decision.required_dependency_digest + "\n"
+    if decision.action == "ADMIT_NOOP":
+        if not file_is_regular_no_follow(stamp_path):
+            return _stamp_reject_v1("native-stamp-unavailable")
+        val current = file_read_regular_no_follow_bounded(stamp_path, 128)
+        if current.is_err() or current.unwrap() != expected:
+            return _stamp_reject_v1("native-stamp-mismatch")
+        return ClangNativeStampWriteV1(true, "exact-current-policy",
+            decision.required_dependency_digest, false)
+    # Always replace for REBUILD_REQUIRED, including when policy bytes match:
+    # a missing/stale output can need native work under the same policy.
+    if not file_atomic_write(stamp_path, expected) or
+            not file_fsync(stamp_path) or
+            not directory_fsync(dirname(stamp_path)) or
+            not file_is_regular_no_follow(stamp_path):
+        return _stamp_reject_v1("native-stamp-write-failed")
+    val observed = file_read_regular_no_follow_bounded(stamp_path, 128)
+    if observed.is_err() or observed.unwrap() != expected:
+        return _stamp_reject_v1("native-stamp-verify-failed")
+    ClangNativeStampWriteV1(true, "native-action-required",
+        decision.required_dependency_digest, true)
+
+export ClangNativeStampWriteV1, write_clang_native_stamp_v1

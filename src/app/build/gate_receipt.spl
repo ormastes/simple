@@ -1,0 +1,211 @@
+# Typed, pure validation of mandatory gate observations. The caller supplies
+# trusted identities; an issuer label is metadata, not signature verification.
+
+val GATE_RECEIPT_SCHEMA_V1 = "simple-gate-receipt-v1"
+use compiler.common.cache.canonical_identity.{canon_str, canon_field, canon_seq}
+use std.common.crypto.sha256.{sha256_text}
+
+struct GateObservation:
+    id: text
+    status: text
+    evidence_digest: text
+    reason: text
+
+struct GateReceipt:
+    schema: text
+    base_revision: text
+    head_revision: text
+    candidate_tree: text
+    protected_policy_digest: text
+    checker_implementation_digest: text
+    submodule_closure_digest: text
+    issuer: text
+    expected_mandatory_ids: [text]
+    observed: [GateObservation]
+
+struct GateReceiptExpectation:
+    base_revision: text
+    head_revision: text
+    candidate_tree: text
+    protected_policy_digest: text
+    checker_implementation_digest: text
+    submodule_closure_digest: text
+    issuer: text
+    mandatory_ids: [text]
+
+struct GateReceiptValidation:
+    verdict: text
+    errors: [text]
+    remaining_ids: [text]
+
+fn gate_receipt_digest_v1(receipt: GateReceipt) -> text:
+    """Canonical digest of every gate identity, declaration and observation."""
+    if receipt.schema != GATE_RECEIPT_SCHEMA_V1:
+        return ""
+    var declared: [text] = []
+    for id in receipt.expected_mandatory_ids:
+        declared.push(canon_str(id))
+    var observations: [text] = []
+    for row in receipt.observed:
+        observations.push(canon_seq([canon_str(row.id),
+            canon_str(row.status), canon_str(row.evidence_digest),
+            canon_str(row.reason)]))
+    sha256_text(canon_field(GATE_RECEIPT_SCHEMA_V1, canon_seq([
+        canon_str(receipt.base_revision), canon_str(receipt.head_revision),
+        canon_str(receipt.candidate_tree),
+        canon_str(receipt.protected_policy_digest),
+        canon_str(receipt.checker_implementation_digest),
+        canon_str(receipt.submodule_closure_digest), canon_str(receipt.issuer),
+        canon_seq(declared), canon_seq(observations)
+    ])))
+
+fn _has_id(ids: [text], id: text) -> bool:
+    var i = 0
+    while i < ids.len():
+        if ids[i] == id:
+            return true
+        i = i + 1
+    false
+
+fn _valid_id(id: text) -> bool:
+    id.len() > 0 and id == id.trim() and not id.contains("|") and
+        not id.contains("\n")
+
+fn _valid_revision(id: text) -> bool:
+    if id.len() != 40 and id.len() != 64:
+        return false
+    var i = 0
+    while i < id.len():
+        val c = id[i:i + 1]
+        if not ((c >= "0" and c <= "9") or (c >= "a" and c <= "f")):
+            return false
+        i = i + 1
+    true
+
+fn _digest_is_sha256(id: text) -> bool:
+    id.len() == 64 and _valid_revision(id)
+
+fn _same_ids(a: [text], b: [text]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if not _has_id(b, a[i]):
+            return false
+        i = i + 1
+    i = 0
+    while i < b.len():
+        if not _has_id(a, b[i]):
+            return false
+        i = i + 1
+    true
+
+fn _invalid_result(errors: [text], remaining: [text]) -> GateReceiptValidation:
+    GateReceiptValidation("INCOMPLETE", errors, remaining)
+
+pub fn validate_gate_receipt_v1(
+    receipt: GateReceipt, expected: GateReceiptExpectation
+) -> GateReceiptValidation:
+    """Validate exact identity, mandatory coverage, and every observed outcome."""
+    var errors: [text] = []
+    var remaining: [text] = []
+    if receipt.schema != GATE_RECEIPT_SCHEMA_V1:
+        errors.push("unsupported-schema")
+    if not _valid_revision(expected.base_revision) or
+            not _valid_revision(expected.head_revision) or
+            not _valid_revision(expected.candidate_tree):
+        errors.push("invalid-trusted-revision")
+    if receipt.base_revision != expected.base_revision:
+        errors.push("base-revision-mismatch")
+    if receipt.head_revision != expected.head_revision:
+        errors.push("head-revision-mismatch")
+    if receipt.candidate_tree != expected.candidate_tree:
+        errors.push("candidate-tree-mismatch")
+    if not _digest_is_sha256(expected.protected_policy_digest) or
+            receipt.protected_policy_digest != expected.protected_policy_digest:
+        errors.push("protected-policy-digest-mismatch")
+    if not _digest_is_sha256(expected.checker_implementation_digest) or
+            receipt.checker_implementation_digest != expected.checker_implementation_digest:
+        errors.push("checker-implementation-digest-mismatch")
+    if not _digest_is_sha256(expected.submodule_closure_digest) or
+            receipt.submodule_closure_digest != expected.submodule_closure_digest:
+        errors.push("submodule-closure-digest-mismatch")
+    if not _valid_id(expected.issuer) or receipt.issuer != expected.issuer:
+        errors.push("issuer-mismatch")
+
+    var declared: [text] = []
+    var i = 0
+    while i < receipt.expected_mandatory_ids.len():
+        val id = receipt.expected_mandatory_ids[i]
+        if not _valid_id(id):
+            errors.push("invalid-mandatory-id")
+        elif _has_id(declared, id):
+            errors.push("duplicate-mandatory-id:" + id)
+        else:
+            declared.push(id)
+        i = i + 1
+    var trusted: [text] = []
+    i = 0
+    while i < expected.mandatory_ids.len():
+        val id = expected.mandatory_ids[i]
+        if not _valid_id(id):
+            errors.push("invalid-trusted-mandatory-id")
+        elif _has_id(trusted, id):
+            errors.push("duplicate-trusted-mandatory-id:" + id)
+        else:
+            trusted.push(id)
+        i = i + 1
+    if trusted.len() == 0:
+        errors.push("empty-mandatory-set")
+    if not _same_ids(declared, trusted):
+        errors.push("mandatory-set-mismatch")
+
+    var seen: [text] = []
+    var any_fail = false
+    var any_applicable = false
+    var any_incomplete = false
+    i = 0
+    while i < receipt.observed.len():
+        val row = receipt.observed[i]
+        if not _valid_id(row.id):
+            errors.push("invalid-observed-id")
+        elif _has_id(seen, row.id):
+            errors.push("duplicate-observation:" + row.id)
+        else:
+            seen.push(row.id)
+        if not _has_id(trusted, row.id):
+            errors.push("unknown-observation:" + row.id)
+        if row.status == "PASS" or row.status == "FAIL":
+            any_applicable = true
+            if not _digest_is_sha256(row.evidence_digest):
+                errors.push("missing-or-invalid-evidence:" + row.id)
+            if row.status == "FAIL":
+                any_fail = true
+        elif row.status == "NOT_APPLICABLE":
+            if not _digest_is_sha256(row.evidence_digest) or
+                    row.reason.trim().len() == 0:
+                errors.push("missing-applicability-evidence:" + row.id)
+        elif row.status == "INCOMPLETE":
+            any_incomplete = true
+            if row.evidence_digest.len() > 0 and
+                    not _digest_is_sha256(row.evidence_digest):
+                errors.push("invalid-evidence:" + row.id)
+        else:
+            errors.push("unknown-status:" + row.id)
+        i = i + 1
+    i = 0
+    while i < trusted.len():
+        if not _has_id(seen, trusted[i]):
+            remaining.push(trusted[i])
+        i = i + 1
+    if errors.len() > 0 or remaining.len() > 0 or any_incomplete:
+        return _invalid_result(errors, remaining)
+    if any_fail:
+        return GateReceiptValidation("FAIL", [], [])
+    if any_applicable:
+        return GateReceiptValidation("PASS", [], [])
+    GateReceiptValidation("NOT_APPLICABLE", [], [])
+
+export GATE_RECEIPT_SCHEMA_V1, GateObservation, GateReceipt
+export GateReceiptExpectation, GateReceiptValidation, validate_gate_receipt_v1
+export gate_receipt_digest_v1

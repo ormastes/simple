@@ -1,0 +1,671 @@
+# REQ-2D-006 / NFR-2D-002: bounded Web-to-GPU scene admission.
+# The pinned document is a source identity, not permission to ignore paint state.
+
+use std.common.crypto.sha256.{sha256_text}
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_CPU, DRAW_IR_BACKEND_GPU, DRAW_IR_COMMAND_RECT,
+    DRAW_IR_SCHEMA_VERSION, DRAW_IR_SOURCE_HTML_AST, DrawIrComposition,
+    DrawIrCommand, draw_ir_batch_with_source, draw_ir_composition,
+    draw_ir_command_has_unsupported_v4_state,
+    draw_ir_embedding_config, draw_ir_rect, draw_ir_rect_bounds,
+    draw_ir_rect_clipped}
+use common.ui.draw_ir_sdn.{draw_ir_to_sdn}
+use common.renderdoc.corpus_case01_oracle.{
+    CORPUS_CASE01_SOURCE_SHA256, CORPUS_CASE01_WIDTH, CORPUS_CASE01_HEIGHT}
+use common.renderdoc.corpus_case06_oracle.{
+    CORPUS_CASE06_SOURCE_SHA256, CORPUS_CASE06_WIDTH, CORPUS_CASE06_HEIGHT}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir_result,
+    simple_web_layout_render_html_draw_ir_fractional_result}
+use std.gc_async_mut.gpu.browser_engine.web_corpus_case02_projection.{
+    web_case02_project_v4}
+use std.gc_async_mut.gpu.browser_engine.web_opaque_box_checks.{
+    _plain_opaque_rect_reason, _plain_opaque_rect_reason_extent,
+    _web_raw_style_reason, _web_style_reason}
+export use std.gc_async_mut.gpu.browser_engine.web_decimal_geometry_diagnostic.{web_decimal_geometry_rejection_reason}
+
+pub val WEB_OPAQUE_BOX_HTML_SHA256: text =
+    "79ddcc965609652c829456fd017767b49e5970bf9c749e7012b135da06e1bd70"
+pub val WEB_CORPUS_CASE02_SOURCE_SHA256: text =
+    "5ad0ddd4a7848160e220c116c7c7f21872a7f184d3444a2d97990e88da10bfe1"
+
+pub struct WebOpaqueBoxGpuScene:
+    html_sha256: text
+    source_draw_ir_sha256: text
+    source_draw_ir: DrawIrComposition
+    gpu_draw_ir: DrawIrComposition
+    source_command_count: i64
+    gpu_command_count: i64
+    source_command_indexes: [i64]
+    gpu_draw_ir_sha256: text = ""
+
+# Diagnostic only. A neutral command here does not authenticate Web producer
+# provenance, batch state, source-node ownership, or physical GPU execution.
+pub fn web_opaque_box_plain_rect_rejection_reason(
+    command: DrawIrCommand
+) -> text:
+    _plain_opaque_rect_reason(command, 0)
+
+pub fn web_opaque_box_gpu_scene_from_html(
+    html: text
+) -> Result<WebOpaqueBoxGpuScene, text>:
+    val source_sha = sha256_text(html)
+    if source_sha != WEB_OPAQUE_BOX_HTML_SHA256:
+        return Err("web-opaque-box-html-sha256-mismatch")
+    val rendered = simple_web_layout_render_html_draw_ir_result(html, 16, 16)
+    if rendered.document_html != html or rendered.render_degraded or
+        rendered.degrade_reason != "":
+        return Err("web-layout-input-or-budget-degraded")
+    if rendered.box_geometry_rejection_reason != "": return Err(rendered.box_geometry_rejection_reason)
+    if rendered.material_fallback.kind != "none" or
+        rendered.material_witness.cpu_composited_count != 0 or
+        rendered.material_witness.solid_material_count != 0:
+        return Err("web-layout-material-fallback")
+    if rendered.animation_property_work_count != 0 or
+        rendered.animation_registry.entries.len() != 0 or
+        rendered.resolved_scroll_y != 0 or rendered.max_scroll_y != 0 or
+        rendered.resolved_input_view_start_byte != 0 or
+        rendered.element_scroll.status != "not-requested" or
+        rendered.element_scroll.resolved_top != 0 or
+        rendered.hit_index.width != 16 or rendered.hit_index.height != 16:
+        return Err("web-layout-state-unhandled")
+    val original = rendered.composition
+    if original.schema != DRAW_IR_SCHEMA_VERSION or
+        original.backend_target != DRAW_IR_BACKEND_CPU or
+        original.batches.len() != 1:
+        return Err("web-layout-batch-topology-unhandled")
+    val batch = original.batches[0]
+    if batch.schema != DRAW_IR_SCHEMA_VERSION or
+        batch.backend_target != DRAW_IR_BACKEND_CPU or
+        batch.source.source_kind != DRAW_IR_SOURCE_HTML_AST or
+        batch.embedding.x != 0 or batch.embedding.y != 0 or
+        batch.embedding.width != 16 or batch.embedding.height != 16 or
+        batch.embedding.layer != 0 or
+        batch.embedding.opacity_milli != 1000 or
+        not batch.embedding.clip:
+        return Err("web-layout-embedding-or-source-unhandled")
+    if batch.commands.len() < 2 or batch.commands.len() > 8:
+        return Err("web-layout-command-count-unhandled")
+    if rendered.hit_index.nodes.len() != rendered.hit_index.styles.len():
+        return Err("web-layout-node-style-count-mismatch")
+    var gpu_commands: [DrawIrCommand] = []
+    var source_indexes: [i64] = []
+    var admitted_ids: Dict<text, bool> = {}
+    var source_count: i64 = 0
+    var saw_canvas = false
+    var saw_box = false
+    for command in batch.commands:
+        val reason = _plain_opaque_rect_reason(command, source_count)
+        if reason != "":
+            return Err(reason)
+        if source_count == 0:
+            if command.component_id != "html-canvas" or command.x != 0 or
+                command.y != 0 or command.parent_id != "" or
+                command.width != 16 or
+                command.height != 16:
+                return Err("web-layout-canvas-unhandled")
+            saw_canvas = true
+        else:
+            if admitted_ids.get(command.component_id) ?? false:
+                return Err("web-layout-duplicate-paint-source")
+            var matched = -1
+            var node_index = 0
+            while node_index < rendered.hit_index.nodes.len():
+                val node = rendered.hit_index.nodes[node_index]
+                val node_id = if node.id_attr != "":
+                    node.id_attr
+                else:
+                    "{node.tag}_{node_index}"
+                if node_id == command.component_id:
+                    if matched >= 0:
+                        return Err("web-layout-ambiguous-paint-source")
+                    matched = node_index
+                node_index = node_index + 1
+            if matched < 0:
+                return Err("web-layout-command-source-missing")
+            val node = rendered.hit_index.nodes[matched]
+            val st = rendered.hit_index.styles[matched]
+            val parent = node.parent
+            var expected_parent = ""
+            if parent >= 0 and parent < rendered.hit_index.nodes.len():
+                val parent_node = rendered.hit_index.nodes[parent]
+                expected_parent = if parent_node.id_attr != "":
+                    parent_node.id_attr
+                else:
+                    "{parent_node.tag}_{parent}"
+            if command.parent_id != expected_parent:
+                return Err("web-layout-paint-order-parent-mismatch")
+            val raw_reason = _web_raw_style_reason(
+                st, command, source_count, false)
+            if raw_reason != "":
+                return Err(raw_reason)
+            admitted_ids[command.component_id] = true
+        if command.component_id == "box":
+            saw_box = true
+        # The one batch is already in producer paint order; parent identity
+        # was checked above and remains in source_draw_ir. The GPU payload
+        # flattens that order because Skia's rect ABI has no parent graph.
+        gpu_commands.push(draw_ir_rect(
+            command.component_id, command.x, command.y,
+            command.width, command.height, command.color))
+        source_indexes.push(source_count)
+        source_count = source_count + 1
+    if not saw_canvas or not saw_box:
+        return Err("web-layout-required-paint-source-missing")
+    # Every admitted command has a full-surface clip, so the Web embedding
+    # clip is semantically redundant on this offscreen 16x16 GPU batch.
+    val gpu_embedding = draw_ir_embedding_config(
+        batch.embedding.surface_id, batch.embedding.component_id,
+        0, 0, 16, 16, 0, 1000, false)
+    val gpu_batch = draw_ir_batch_with_source(
+        batch.batch_id, DRAW_IR_BACKEND_GPU, gpu_embedding,
+        gpu_commands, batch.source)
+    val gpu = draw_ir_composition(
+        original.composition_id, original.scene_key, DRAW_IR_BACKEND_GPU,
+        [gpu_batch])
+    Ok(WebOpaqueBoxGpuScene(
+        html_sha256: source_sha,
+        source_draw_ir_sha256: sha256_text(draw_ir_to_sdn(original)),
+        source_draw_ir: original,
+        gpu_draw_ir: gpu,
+        source_command_count: source_count,
+        gpu_command_count: gpu_commands.len().to_i64(),
+        source_command_indexes: source_indexes))
+
+# Pinned case02's strict fractional producer is a CPU-source receipt. The
+# projection helper proves every source field before rebuilding a GPU v4 batch.
+pub fn web_corpus_case02_gpu_scene_from_html(
+    html: text
+) -> Result<WebOpaqueBoxGpuScene, text>:
+    val source_sha = sha256_text(html)
+    if source_sha != WEB_CORPUS_CASE02_SOURCE_SHA256:
+        return Err("web-corpus-case02-html-sha256-mismatch")
+    val rendered = simple_web_layout_render_html_draw_ir_fractional_result(
+        html, 640, 480)
+    if rendered.document_html != html or rendered.render_degraded or
+        rendered.degrade_reason != "":
+        return Err("web-corpus-case02-render-degraded")
+    if rendered.fractional_scene_rejection_reason != "":
+        return Err(rendered.fractional_scene_rejection_reason)
+    if rendered.animation_property_work_count != 0 or
+        rendered.animation_registry.entries.len() != 0 or
+        rendered.resolved_scroll_y != 0 or
+        rendered.max_scroll_y != 0 or
+        rendered.resolved_input_view_start_byte != 0 or
+        rendered.element_scroll.status != "not-requested" or
+        rendered.element_scroll.resolved_top != 0 or
+        rendered.material_fallback.kind != "none" or
+        rendered.material_witness.cpu_composited_count != 0 or
+        rendered.material_witness.solid_material_count != 0 or
+        rendered.hit_index.width != 640 or
+        rendered.hit_index.height != 480:
+        return Err("web-corpus-case02-render-state-unhandled")
+    val source = rendered.composition
+    val projection = web_case02_project_v4(
+        source, rendered.hit_index.nodes, rendered.hit_index.styles,
+        source_sha)
+    match projection:
+        case Ok(projected):
+            return Ok(WebOpaqueBoxGpuScene(
+                html_sha256: source_sha,
+                source_draw_ir_sha256: sha256_text(draw_ir_to_sdn(source)),
+                source_draw_ir: source,
+                gpu_draw_ir: projected.gpu,
+                source_command_count: 6,
+                gpu_command_count: projected.gpu.batches[0].commands.len().to_i64(),
+                source_command_indexes: projected.source_indexes,
+                gpu_draw_ir_sha256: sha256_text(draw_ir_to_sdn(projected.gpu))))
+        case Err(reason):
+            return Err("web-corpus-case02-{reason}")
+
+# Corpus case 01 is a distinct pinned scene. Its three anonymous colored divs
+# are admitted only after DOM identity, parent, style and full-target clip
+# checks. GPU coordinates and colors are copied solely from producer commands.
+pub fn web_corpus_case01_gpu_scene_from_html(
+    html: text
+) -> Result<WebOpaqueBoxGpuScene, text>:
+    val source_sha = sha256_text(html)
+    if source_sha != CORPUS_CASE01_SOURCE_SHA256:
+        return Err("web-corpus-case01-html-sha256-mismatch")
+    val width = CORPUS_CASE01_WIDTH
+    val height = CORPUS_CASE01_HEIGHT
+    val rendered = simple_web_layout_render_html_draw_ir_result(
+        html, width, height)
+    if rendered.document_html != html or rendered.render_degraded or
+        rendered.degrade_reason != "":
+        return Err("web-layout-input-or-budget-degraded")
+    if rendered.box_geometry_rejection_reason != "": return Err(rendered.box_geometry_rejection_reason)
+    if rendered.material_fallback.kind != "none" or
+        rendered.material_witness.cpu_composited_count != 0 or
+        rendered.material_witness.solid_material_count != 0:
+        return Err("web-layout-material-fallback")
+    if rendered.animation_property_work_count != 0 or
+        rendered.animation_registry.entries.len() != 0 or
+        rendered.resolved_scroll_y != 0 or rendered.max_scroll_y != 0 or
+        rendered.resolved_input_view_start_byte != 0 or
+        rendered.element_scroll.status != "not-requested" or
+        rendered.element_scroll.resolved_top != 0 or
+        rendered.hit_index.width != width or
+        rendered.hit_index.height != height:
+        return Err("web-layout-state-unhandled")
+    val original = rendered.composition
+    if original.schema != DRAW_IR_SCHEMA_VERSION or
+        original.backend_target != DRAW_IR_BACKEND_CPU or
+        original.batches.len() != 1:
+        return Err("web-layout-batch-topology-unhandled")
+    val batch = original.batches[0]
+    if batch.schema != DRAW_IR_SCHEMA_VERSION or
+        batch.backend_target != DRAW_IR_BACKEND_CPU or
+        batch.source.source_kind != DRAW_IR_SOURCE_HTML_AST or
+        batch.embedding.x != 0 or batch.embedding.y != 0 or
+        batch.embedding.width != width or
+        batch.embedding.height != height or batch.embedding.layer != 0 or
+        batch.embedding.opacity_milli != 1000 or
+        not batch.embedding.clip:
+        return Err("web-layout-embedding-or-source-unhandled")
+    # Canvas + html + body + #scene + three authored child divs. Extra or
+    # missing commands can hide a producer paint path and therefore block.
+    if batch.commands.len() != 7 or
+        rendered.hit_index.nodes.len() != rendered.hit_index.styles.len():
+        return Err("web-corpus-case01-command-inventory-unhandled")
+    var scene_index = -1
+    var node_index = 0
+    while node_index < rendered.hit_index.nodes.len():
+        val node = rendered.hit_index.nodes[node_index]
+        if node.id_attr == "scene":
+            if scene_index >= 0 or node.tag != "div":
+                return Err("web-corpus-case01-scene-dom-ambiguous")
+            scene_index = node_index
+        node_index = node_index + 1
+    if scene_index < 0:
+        return Err("web-corpus-case01-scene-dom-missing")
+    val scene_parent = rendered.hit_index.nodes[scene_index].parent
+    if scene_parent < 0 or
+        scene_parent >= rendered.hit_index.nodes.len() or
+        rendered.hit_index.nodes[scene_parent].tag != "body":
+        return Err("web-corpus-case01-scene-parent-unhandled")
+    var authored_children = 0
+    for node in rendered.hit_index.nodes:
+        if node.parent == scene_index:
+            if node.tag != "div" or node.id_attr != "":
+                return Err("web-corpus-case01-child-dom-unhandled")
+            authored_children = authored_children + 1
+    if authored_children != 3:
+        return Err("web-corpus-case01-child-dom-count-unhandled")
+    var gpu_commands: [DrawIrCommand] = []
+    var source_indexes: [i64] = []
+    var admitted_ids: Dict<text, bool> = {}
+    var source_count: i64 = 0
+    var html_count = 0
+    var body_count = 0
+    var scene_count = 0
+    var child_count = 0
+    for command in batch.commands:
+        val reason = _plain_opaque_rect_reason_extent(
+            command, source_count, width, height)
+        if reason != "":
+            return Err(reason)
+        if source_count == 0:
+            if command.component_id != "html-canvas" or
+                command.parent_id != "" or command.x != 0 or
+                command.y != 0 or command.width != width or
+                command.height != height or command.color != 0xFFFFFFFFu32:
+                return Err("web-corpus-case01-canvas-unhandled")
+        else:
+            if admitted_ids.get(command.component_id) ?? false:
+                return Err("web-corpus-case01-duplicate-paint-source")
+            var matched = -1
+            var candidate_index = 0
+            while candidate_index < rendered.hit_index.nodes.len():
+                val node = rendered.hit_index.nodes[candidate_index]
+                val expected_id = if node.id_attr != "":
+                    node.id_attr
+                else:
+                    "{node.tag}_{candidate_index}"
+                if expected_id == command.component_id:
+                    if matched >= 0:
+                        return Err("web-corpus-case01-paint-source-ambiguous")
+                    matched = candidate_index
+                candidate_index = candidate_index + 1
+            if matched < 0:
+                return Err("web-corpus-case01-paint-source-missing")
+            val node = rendered.hit_index.nodes[matched]
+            val st = rendered.hit_index.styles[matched]
+            val parent = node.parent
+            if parent < 0 or parent >= rendered.hit_index.nodes.len():
+                return Err("web-corpus-case01-paint-parent-missing")
+            var expected_parent = ""
+            if parent >= 0 and parent < rendered.hit_index.nodes.len():
+                val parent_node = rendered.hit_index.nodes[parent]
+                expected_parent = if parent_node.id_attr != "":
+                    parent_node.id_attr
+                else:
+                    "{parent_node.tag}_{parent}"
+            if command.parent_id != expected_parent:
+                return Err("web-corpus-case01-paint-parent-unhandled")
+            val is_scene = matched == scene_index
+            if is_scene:
+                if command.component_id != "scene" or
+                    command.x != 0 or command.y != 0 or
+                    command.width != width or command.height != height or
+                    command.color != 0xFFFFFFFFu32:
+                    return Err("web-corpus-case01-scene-clip-unhandled")
+                scene_count = scene_count + 1
+            elif node.tag == "html" and node.id_attr == "":
+                if command.color != 0xFFFFFFFFu32 or
+                    parent < 0 or
+                    rendered.hit_index.nodes[parent].tag != "#root":
+                    return Err("web-corpus-case01-html-role-unhandled")
+                html_count = html_count + 1
+            elif node.tag == "body" and node.id_attr == "":
+                if command.color != 0xFFFFFFFFu32 or
+                    parent < 0 or
+                    rendered.hit_index.nodes[parent].tag != "html":
+                    return Err("web-corpus-case01-body-role-unhandled")
+                body_count = body_count + 1
+            elif node.tag == "div" and node.id_attr == "" and
+                node.parent == scene_index:
+                if command.color == 0xFFFFFFFFu32 or
+                    command.parent_id != "scene":
+                    return Err("web-corpus-case01-colored-div-role-unhandled")
+                child_count = child_count + 1
+            else:
+                return Err("web-corpus-case01-paint-role-unhandled")
+            val raw_reason = _web_raw_style_reason(
+                st, command, source_count, is_scene)
+            if raw_reason != "":
+                return Err(raw_reason)
+            admitted_ids[command.component_id] = true
+        # The Web batch order is retained. Parent links were checked against
+        # the DOM above and remain in source_draw_ir; Skia takes flat rects.
+        gpu_commands.push(draw_ir_rect(
+            command.component_id, command.x, command.y,
+            command.width, command.height, command.color))
+        source_indexes.push(source_count)
+        source_count = source_count + 1
+    if html_count != 1 or body_count != 1 or scene_count != 1 or
+        child_count != 3:
+        return Err("web-corpus-case01-paint-role-count-unhandled")
+    # Every actual command clip spans the full target. Scene overflow:hidden
+    # is therefore a redundant full-target clip for this pinned layout.
+    val gpu_embedding = draw_ir_embedding_config(
+        batch.embedding.surface_id, batch.embedding.component_id,
+        0, 0, width, height, 0, 1000, false)
+    val gpu_batch = draw_ir_batch_with_source(
+        batch.batch_id, DRAW_IR_BACKEND_GPU, gpu_embedding,
+        gpu_commands, batch.source)
+    val gpu = draw_ir_composition(
+        original.composition_id, original.scene_key, DRAW_IR_BACKEND_GPU,
+        [gpu_batch])
+    Ok(WebOpaqueBoxGpuScene(
+        html_sha256: source_sha,
+        source_draw_ir_sha256: sha256_text(draw_ir_to_sdn(original)),
+        source_draw_ir: original,
+        gpu_draw_ir: gpu,
+        source_command_count: source_count,
+        gpu_command_count: gpu_commands.len().to_i64(),
+        source_command_indexes: source_indexes))
+
+# Case 06 has one transparent overflow parent and one child clipped to that
+# parent's box. All source fields are checked before losing producer metadata.
+fn _web_case06_rect_reason(command: DrawIrCommand, index: i64,
+    width: i32, height: i32, clip_x: i32, clip_y: i32,
+    clip_width: i32, clip_height: i32,
+    transparent_parent: bool) -> text:
+    if draw_ir_command_has_unsupported_v4_state(command):
+        return "web-v4-command-state-unhandled:{index}"
+    if command.kind != DRAW_IR_COMMAND_RECT:
+        return "web-corpus-case06-command-kind:{index}"
+    if command.fractional_geometry != nil or command.edge != nil or
+        command.points.len() != 0 or command.image_uri != "" or
+        command.text_value != "" or command.advance_widths.len() != 0 or
+        command.glyph_run.valid or
+        command.glyph_run.glyph_ids.len() != 0 or
+        command.glyph_run.xs.len() != 0 or
+        command.glyph_run.ys.len() != 0 or
+        command.glyph_run.clusters.len() != 0:
+        return "web-corpus-case06-command-payload:{index}"
+    if command.width <= 0 or command.height <= 0 or
+        command.x < 0 or command.y < 0 or
+        command.x.to_i64() + command.width.to_i64() > width.to_i64() or
+        command.y.to_i64() + command.height.to_i64() > height.to_i64():
+        return "web-corpus-case06-command-geometry:{index}"
+    if transparent_parent:
+        if command.color != 0u32:
+            return "web-corpus-case06-parent-paint:{index}"
+    elif ((command.color >> 24) & 255u32) != 255u32:
+        return "web-corpus-case06-command-alpha:{index}"
+    if not command.clip_rect.present or command.clip_rect.x != clip_x or
+        command.clip_rect.y != clip_y or
+        command.clip_rect.width != clip_width or
+        command.clip_rect.height != clip_height:
+        return "web-corpus-case06-command-clip:{index}"
+    if not command.border_rect.present or
+        command.border_rect.x != command.x or
+        command.border_rect.y != command.y or
+        command.border_rect.width != command.width or
+        command.border_rect.height != command.height or
+        not command.content_rect.present or
+        command.content_rect.x != command.x or
+        command.content_rect.y != command.y or
+        command.content_rect.width != command.width or
+        command.content_rect.height != command.height or
+        not command.hit_rect.present or
+        command.hit_rect.x != command.x or
+        command.hit_rect.y != command.y or
+        command.hit_rect.width != command.width or
+        command.hit_rect.height != command.height:
+        return "web-corpus-case06-box-metadata:{index}"
+    _web_style_reason(command, index)
+
+# Pin source bytes, then admit only the producer's documented rectangular
+# overflow clip. Geometry and color in the GPU commands come from Web DrawIR.
+pub fn web_corpus_case06_gpu_scene_from_html(
+    html: text
+) -> Result<WebOpaqueBoxGpuScene, text>:
+    val source_sha = sha256_text(html)
+    if source_sha != CORPUS_CASE06_SOURCE_SHA256:
+        return Err("web-corpus-case06-html-sha256-mismatch")
+    val width = CORPUS_CASE06_WIDTH
+    val height = CORPUS_CASE06_HEIGHT
+    val rendered = simple_web_layout_render_html_draw_ir_result(
+        html, width, height)
+    if rendered.document_html != html or rendered.render_degraded or
+        rendered.degrade_reason != "":
+        return Err("web-layout-input-or-budget-degraded")
+    if rendered.box_geometry_rejection_reason != "": return Err(rendered.box_geometry_rejection_reason)
+    if rendered.material_fallback.kind != "none" or
+        rendered.material_witness.cpu_composited_count != 0 or
+        rendered.material_witness.solid_material_count != 0:
+        return Err("web-layout-material-fallback")
+    if rendered.animation_property_work_count != 0 or
+        rendered.animation_registry.entries.len() != 0 or
+        rendered.resolved_scroll_y != 0 or rendered.max_scroll_y != 0 or
+        rendered.resolved_input_view_start_byte != 0 or
+        rendered.element_scroll.status != "not-requested" or
+        rendered.element_scroll.resolved_top != 0 or
+        rendered.hit_index.width != width or
+        rendered.hit_index.height != height:
+        return Err("web-layout-state-unhandled")
+    val original = rendered.composition
+    if original.schema != DRAW_IR_SCHEMA_VERSION or
+        original.backend_target != DRAW_IR_BACKEND_CPU or
+        original.batches.len() != 1:
+        return Err("web-layout-batch-topology-unhandled")
+    val batch = original.batches[0]
+    if batch.schema != DRAW_IR_SCHEMA_VERSION or
+        batch.backend_target != DRAW_IR_BACKEND_CPU or
+        batch.source.source_kind != DRAW_IR_SOURCE_HTML_AST or
+        batch.embedding.x != 0 or batch.embedding.y != 0 or
+        batch.embedding.width != width or batch.embedding.height != height or
+        batch.embedding.layer != 0 or
+        batch.embedding.opacity_milli != 1000 or
+        not batch.embedding.clip:
+        return Err("web-layout-embedding-or-source-unhandled")
+    # Canvas, html, body, #scene, transparent .parent, cyan .child.
+    if batch.commands.len() != 6 or
+        rendered.hit_index.nodes.len() != rendered.hit_index.styles.len():
+        return Err("web-corpus-case06-command-inventory-unhandled")
+    var scene_index = -1
+    var parent_index = -1
+    var child_index = -1
+    var node_index = 0
+    while node_index < rendered.hit_index.nodes.len():
+        val node = rendered.hit_index.nodes[node_index]
+        if node.id_attr == "scene":
+            if scene_index >= 0 or node.tag != "div":
+                return Err("web-corpus-case06-scene-dom-ambiguous")
+            scene_index = node_index
+        elif node.class_attr == "parent":
+            if parent_index >= 0 or node.tag != "div" or node.id_attr != "":
+                return Err("web-corpus-case06-parent-dom-ambiguous")
+            parent_index = node_index
+        elif node.class_attr == "child":
+            if child_index >= 0 or node.tag != "div" or node.id_attr != "":
+                return Err("web-corpus-case06-child-dom-ambiguous")
+            child_index = node_index
+        node_index = node_index + 1
+    if scene_index < 0 or parent_index < 0 or child_index < 0:
+        return Err("web-corpus-case06-dom-role-missing")
+    val nodes = rendered.hit_index.nodes
+    if nodes[scene_index].parent < 0 or
+        nodes[scene_index].parent >= nodes.len() or
+        nodes[nodes[scene_index].parent].tag != "body" or
+        nodes[parent_index].parent != scene_index or
+        nodes[child_index].parent != parent_index:
+        return Err("web-corpus-case06-dom-parent-unhandled")
+    var scene_children = 0
+    var parent_children = 0
+    for node in nodes:
+        if node.parent == scene_index: scene_children = scene_children + 1
+        if node.parent == parent_index: parent_children = parent_children + 1
+    if scene_children != 1 or parent_children != 1:
+        return Err("web-corpus-case06-dom-child-inventory")
+    val source_parent = batch.commands[4]
+    if source_parent.x != 40 or source_parent.y != 40 or
+        source_parent.width != 160 or source_parent.height != 100:
+        return Err("web-corpus-case06-parent-layout-unhandled")
+    var gpu_commands: [DrawIrCommand] = []
+    var source_indexes: [i64] = []
+    var source_count: i64 = 0
+    for command in batch.commands:
+        var expected_clip_x = 0
+        var expected_clip_y = 0
+        var expected_clip_width = width
+        var expected_clip_height = height
+        if source_count == 5:
+            expected_clip_x = source_parent.x
+            expected_clip_y = source_parent.y
+            expected_clip_width = source_parent.width
+            expected_clip_height = source_parent.height
+        val reason = _web_case06_rect_reason(command, source_count,
+            width, height, expected_clip_x, expected_clip_y,
+            expected_clip_width, expected_clip_height, source_count == 4)
+        if reason != "":
+            return Err(reason)
+        if source_count == 0:
+            if command.component_id != "html-canvas" or
+                command.parent_id != "" or command.x != 0 or command.y != 0 or
+                command.width != width or command.height != height or
+                command.color != 0xFFFFFFFFu32:
+                return Err("web-corpus-case06-canvas-unhandled")
+        else:
+            var matched = -1
+            var candidate_index = 0
+            while candidate_index < nodes.len():
+                val node = nodes[candidate_index]
+                val expected_id = if node.id_attr != "":
+                    node.id_attr
+                else:
+                    "{node.tag}_{candidate_index}"
+                if expected_id == command.component_id:
+                    if matched >= 0:
+                        return Err("web-corpus-case06-paint-source-ambiguous")
+                    matched = candidate_index
+                candidate_index = candidate_index + 1
+            if matched < 0:
+                return Err("web-corpus-case06-paint-source-missing")
+            val node = nodes[matched]
+            val node_parent = node.parent
+            if node_parent < 0 or node_parent >= nodes.len():
+                return Err("web-corpus-case06-paint-parent-missing")
+            val parent_node = nodes[node_parent]
+            val expected_parent = if parent_node.id_attr != "":
+                parent_node.id_attr
+            else:
+                "{parent_node.tag}_{node_parent}"
+            if command.parent_id != expected_parent:
+                return Err("web-corpus-case06-paint-parent-unhandled")
+            val is_scene = matched == scene_index and source_count == 3
+            val is_parent = matched == parent_index and source_count == 4
+            val is_child = matched == child_index and source_count == 5
+            if source_count == 1:
+                if node.tag != "html" or node.id_attr != "" or
+                    parent_node.tag != "#root" or command.color != 0xFFFFFFFFu32:
+                    return Err("web-corpus-case06-html-role-unhandled")
+            elif source_count == 2:
+                if node.tag != "body" or node.id_attr != "" or
+                    parent_node.tag != "html" or command.color != 0xFFFFFFFFu32:
+                    return Err("web-corpus-case06-body-role-unhandled")
+            elif is_scene:
+                if command.x != 0 or command.y != 0 or
+                    command.width != width or command.height != height or
+                    command.color != 0xFFFFFFFFu32:
+                    return Err("web-corpus-case06-scene-layout-unhandled")
+            elif is_parent:
+                if command.color != 0u32:
+                    return Err("web-corpus-case06-parent-paint-unhandled")
+            elif is_child:
+                if command.x != 80 or command.y != 65 or
+                    command.width != 220 or command.height != 170 or
+                    command.color != 0xFF00AAFFu32:
+                    return Err("web-corpus-case06-child-layout-unhandled")
+            else:
+                return Err("web-corpus-case06-paint-role-unhandled")
+            val st = rendered.hit_index.styles[matched]
+            if (is_scene and not st.position_relative) or
+                (is_parent and not st.position_absolute) or
+                (is_child and not st.position_absolute):
+                return Err("web-corpus-case06-position-state-unhandled")
+            val raw_reason = _web_raw_style_reason(
+                st, command, source_count, is_scene or is_parent)
+            if raw_reason != "":
+                return Err(raw_reason)
+        # Transparent .parent contributes an ancestor clip, not visible paint.
+        if source_count != 4:
+            val gpu_command = if source_count == 5:
+                draw_ir_rect_clipped(command.component_id, command.x,
+                    command.y, command.width, command.height, command.color,
+                    draw_ir_rect_bounds(command.clip_rect.x,
+                        command.clip_rect.y, command.clip_rect.width,
+                        command.clip_rect.height))
+            else:
+                draw_ir_rect(command.component_id, command.x, command.y,
+                    command.width, command.height, command.color)
+            gpu_commands.push(gpu_command)
+            source_indexes.push(source_count)
+        source_count = source_count + 1
+    val gpu_embedding = draw_ir_embedding_config(
+        batch.embedding.surface_id, batch.embedding.component_id,
+        0, 0, width, height, 0, 1000, false)
+    val gpu_batch = draw_ir_batch_with_source(
+        batch.batch_id, DRAW_IR_BACKEND_GPU, gpu_embedding,
+        gpu_commands, batch.source)
+    val gpu = draw_ir_composition(
+        original.composition_id, original.scene_key, DRAW_IR_BACKEND_GPU,
+        [gpu_batch])
+    Ok(WebOpaqueBoxGpuScene(
+        html_sha256: source_sha,
+        source_draw_ir_sha256: sha256_text(draw_ir_to_sdn(original)),
+        source_draw_ir: original,
+        gpu_draw_ir: gpu,
+        source_command_count: source_count,
+        gpu_command_count: gpu_commands.len().to_i64(),
+        source_command_indexes: source_indexes))
+
+export WEB_OPAQUE_BOX_HTML_SHA256, WebOpaqueBoxGpuScene,
+    web_opaque_box_gpu_scene_from_html,
+    web_opaque_box_plain_rect_rejection_reason,
+    web_corpus_case01_gpu_scene_from_html,
+    web_corpus_case02_gpu_scene_from_html,
+    web_corpus_case06_gpu_scene_from_html

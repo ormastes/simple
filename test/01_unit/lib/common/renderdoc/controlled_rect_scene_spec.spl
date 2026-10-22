@@ -1,0 +1,42 @@
+# @tag: unit, renderdoc, draw_ir, REQ-2D-006
+
+use std.spec.*
+use std.fs.{read_file}
+use std.common.crypto.sha256.{sha256_text}
+use common.renderdoc.controlled_rect_scene.{
+    simple_2d_controlled_rect_fixture_scene,
+    simple_2d_controlled_rect_scene_from_source}
+
+describe "pinned controlled rectangle DrawIR source":
+    it "hashes and parses the fixture into its two ordered ARGB rectangles":
+        # @req REQ-2D-006
+        val source = read_file("test/fixtures/simple_2d_skia/controlled_opaque_rect_v1.sdn")
+        expect(sha256_text(source)).to_equal(
+            "90fc023c54e082fff358647440e8213d45185a6d949d81b6d848c553839484b3")
+        match simple_2d_controlled_rect_fixture_scene():
+            Ok(scene):
+                expect(scene.backend_target).to_equal("gpu")
+                expect(scene.batches.len()).to_equal(1)
+                val batch = scene.batches[0]
+                expect(batch.embedding.width).to_equal(16)
+                expect(batch.embedding.height).to_equal(16)
+                expect(batch.commands.len()).to_equal(2)
+                expect(batch.commands[0].x).to_equal(0)
+                expect(batch.commands[0].y).to_equal(0)
+                expect(batch.commands[0].width).to_equal(16)
+                expect(batch.commands[0].height).to_equal(16)
+                expect(batch.commands[0].color).to_equal(0xff102030u32)
+                expect(batch.commands[1].x).to_equal(4)
+                expect(batch.commands[1].y).to_equal(4)
+                expect(batch.commands[1].width).to_equal(8)
+                expect(batch.commands[1].height).to_equal(8)
+                expect(batch.commands[1].color).to_equal(0xff336699u32)
+            Err(reason): fail("pinned source rejected: {reason}")
+
+    it "rejects changed rectangle bytes before producing a scene":
+        # @req REQ-2D-006
+        val source = read_file("test/fixtures/simple_2d_skia/controlled_opaque_rect_v1.sdn")
+        val changed = source.replace("0xff336699", "0xff336698")
+        match simple_2d_controlled_rect_scene_from_source(changed):
+            Ok(_): assert(false)
+            Err(reason): expect(reason).to_equal("controlled-rect-source-sha256-mismatch")

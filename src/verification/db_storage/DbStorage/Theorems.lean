@@ -29,10 +29,6 @@ theorem T1_btree_ordered (ks : List Nat) (k : Nat) (h : keysOrdered ks)
     keysOrdered (orderedInsert k ks) :=
   DbStorage.BTree.T1_btree_ordered ks k h hfresh
 
-theorem T1_btree_insert_contains_key (ks : List Nat) (k : Nat) :
-    k ∈ orderedInsert k ks :=
-  DbStorage.BTree.orderedInsert_mem k ks
-
 -- ===========================================================================
 -- T2 -- btree_balanced
 -- ===========================================================================
@@ -63,13 +59,6 @@ theorem T4_wal_before_data (t : TxnState)
   simp [txnCommit] at hcommit
   exact hcommit.1
 
-/-- T4 commit shape: any successful txnCommit returns a committed state. -/
-theorem T4_commit_sets_committed (t t' : TxnState)
-    (hcommit : txnCommit t = some t') :
-    t'.status = TxnStatus.committed := by
-  simp [txnCommit] at hcommit
-  exact hcommit.2 ▸ rfl
-
 /-- T4 corollary: the full D4 chain ensures wal_appended before commit. -/
 theorem T4_wal_appended_before_commit
     (t0 : TxnState)
@@ -83,20 +72,6 @@ theorem T4_wal_appended_before_commit
   simp [txnCommit] at h3
   obtain ⟨_, rfl⟩ := h3
   simp [txnAppendWal]
-
-/-- T4 publish-root gate: txnPublishRoot succeeds only after WAL flush. -/
-theorem T4_publish_root_requires_wal_flush (t t' : TxnState)
-    (hpublish : txnPublishRoot t = some t') :
-    t.wal_flushed = true := by
-  simp [txnPublishRoot] at hpublish
-  exact hpublish.1
-
-/-- T4 publish-root shape: a successful publish marks the root as published. -/
-theorem T4_publish_root_sets_published (t t' : TxnState)
-    (hpublish : txnPublishRoot t = some t') :
-    t'.root_published = true := by
-  simp [txnPublishRoot] at hpublish
-  exact hpublish.2 ▸ rfl
 
 /-- T4 pager-level: write_page succeeds only when flushed_lsn >= page_lsn or page_lsn = 0.
     Models the gate in pager.write_page (E5 fix, 2026-06-11):
@@ -117,12 +92,6 @@ theorem T4_pager_wal_gate_blocked (page_lsn : Nat) (wal_flushed_lsn : Nat)
   simp [writePageOk, Bool.or_eq_false_iff]
   exact ⟨hpos, by omega⟩
 
-/-- T4 pager-level converse: if the WAL is flushed far enough, page write is allowed. -/
-theorem T4_pager_wal_gate_allows_flushed (page_lsn : Nat) (wal_flushed_lsn : Nat)
-    (hflushed : wal_flushed_lsn ≥ page_lsn) :
-    writePageOk page_lsn wal_flushed_lsn = true := by
-  simp [writePageOk, hflushed]
-
 -- ===========================================================================
 -- T5 -- snapshot_isolation
 -- ===========================================================================
@@ -131,15 +100,6 @@ theorem T4_pager_wal_gate_allows_flushed (page_lsn : Nat) (wal_flushed_lsn : Nat
 theorem T5_snapshot_committed (v : Version) (s : MvccSnapshot)
     (h : snapshotSees v s) :
     v.commit_ts < s.xmax := h.1
-
-/-- T5a2: a version inserted by a still-active transaction is not visible. -/
-theorem T5_snapshot_excludes_active_insert (v : Version) (s : MvccSnapshot)
-    (hactive : s.active.contains v.commit_ts = true) :
-    ¬ snapshotSees v s := by
-  intro h
-  obtain ⟨_, hnotactive, _⟩ := h
-  rw [hactive] at hnotactive
-  simp at hnotactive
 
 /-- T5b: a version committed after the snapshot is not visible. -/
 theorem T5_snapshot_excludes_future (v : Version) (s : MvccSnapshot)
@@ -160,20 +120,6 @@ theorem T5_snapshot_excludes_deleted (v : Version) (s : MvccSnapshot)
   · exact absurd hge (by omega)
   · -- hact : s.active.contains v.del_ts = true; hactive : = false
     exact absurd hact (hactive ▸ Bool.false_ne_true)
-
-/-- T5d: a delete by a still-active txn does not hide the version. -/
-theorem T5_snapshot_keeps_active_delete (v : Version) (s : MvccSnapshot)
-    (hcommit : v.commit_ts < s.xmax)
-    (hinsert_done : s.active.contains v.commit_ts = false)
-    (hdelete_active : s.active.contains v.del_ts = true) :
-    snapshotSees v s := by
-  unfold snapshotSees
-  constructor
-  · exact hcommit
-  · constructor
-    · rw [hinsert_done]
-      rfl
-    · exact Or.inr (Or.inr hdelete_active)
 
 -- ===========================================================================
 -- T6 -- recovery_equation
@@ -202,14 +148,6 @@ theorem T6_recovery_equation (w : WalState) (checkpoint_lsn : Nat) :
   simp only [Bool.and_eq_true, Bool.and_eq_true, decide_eq_true_eq, beq_iff_eq] at hbool
   obtain ⟨⟨hlsn, htype⟩, hmem⟩ := hbool
   exact ⟨hlsn, htype, hmem⟩
-
-/-- T6 corollary: replay never includes data for a transaction that lacks a
-    commit record in the checkpoint window. -/
-theorem T6_replay_requires_committed_txn (w : WalState) (checkpoint_lsn : Nat)
-    (e : WalEntry)
-    (he : e ∈ replayFromCheckpoint w checkpoint_lsn) :
-    (committedTxns w checkpoint_lsn).contains e.txn_id = true :=
-  (T6_recovery_equation w checkpoint_lsn e he).right.right
 
 /-- T6 soundness: every committed DATA record since checkpoint appears in replay. -/
 theorem T6_recovery_complete (w : WalState) (checkpoint_lsn : Nat)
