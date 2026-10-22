@@ -2191,11 +2191,17 @@ int main(int argc, char** argv) {
                                 // fallback definitions arrive in the supplement.
                                 // Without these roots, weak copies can satisfy
                                 // references and prevent authoritative extraction.
-                                for symbol in super::tools::bootstrap_mutex_runtime_requested_symbols() {
-                                    if owned.contains(&symbol) {
-                                        roots.push(symbol);
-                                    }
-                                }
+                                // Root every native-all-owned symbol the capsule
+                                // retains, not only the requested ones: the
+                                // C-only exports pull members that also carry
+                                // weakened rt_string_*/rt_array_* copies.
+                                let capsule = bootstrap_mutex_runtime.as_ref().expect("checked above");
+                                let mut retained: Vec<String> = Self::read_defined_symbol_set(capsule)?
+                                    .into_iter()
+                                    .filter(|symbol| owned.contains(symbol))
+                                    .collect();
+                                retained.sort();
+                                roots.extend(retained);
                                 for symbol in [
                                     "rt_fd_stat_snapshot_v1",
                                     "rt_array_bytes_validate",

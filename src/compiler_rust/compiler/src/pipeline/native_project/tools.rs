@@ -2448,6 +2448,12 @@ pub(crate) fn build_bootstrap_mutex_runtime_capsule_archive(
         // Use the exact selected link archive. Inspection failure is fatal;
         // an empty fallback would silently restore overlapping ownership.
         let (defined, _) = archive_global_symbols(native_all)?;
+        let (core_defined, _) = archive_global_symbols(core_archive)?;
+        for name in bootstrap_capsule_c_only_exports(&core_defined, &defined) {
+            if !requested.contains(&name) {
+                requested.push(name);
+            }
+        }
         (requested, native_all_owned) = bootstrap_capsule_symbol_ownership(&requested, &defined)?;
     }
     project_stage4_archive_closure(
@@ -2457,6 +2463,30 @@ pub(crate) fn build_bootstrap_mutex_runtime_capsule_archive(
         temp_dir,
         "bootstrap_mutex_runtime",
     )
+}
+
+/// Core-C entry points the selected native-all does not define at all.
+///
+/// native_all carries no C-only runtime (rt_file_write, rt_eprintln, rt_shell,
+/// rt_process_*, __simple_pow, ...). Requesting them here lets the projected
+/// capsule supply them with native_all-owned symbols still localized. Before,
+/// the Unix stage1 link fabricated them as link-only stubs: 92 on FreeBSD 14.4
+/// riscv64 (2026-10-21), so stage1 answered --version but could not compile.
+fn bootstrap_capsule_c_only_exports(
+    core_defined: &BTreeMap<String, usize>,
+    native_defined: &BTreeMap<String, usize>,
+) -> Vec<String> {
+    let native: BTreeSet<&str> = native_defined.keys().map(|name| canonical_archive_symbol(name)).collect();
+    // Exactly one core definition: project_stage4_archive_closure rejects a
+    // root defined by several members, which would abort the whole link.
+    core_defined
+        .iter()
+        .filter(|(_, count)| **count == 1)
+        .map(|(name, _)| canonical_archive_symbol(name))
+        .filter(|name| name.starts_with("rt_") || name.starts_with("spl_") || name.starts_with("__simple_"))
+        .filter(|name| !native.contains(name))
+        .map(str::to_string)
+        .collect()
 }
 
 /// Split bootstrap exports against the actual selected native-all authority.
@@ -2484,8 +2514,28 @@ fn bootstrap_capsule_symbol_ownership(
 
 #[cfg(test)]
 mod bootstrap_capsule_ownership_tests {
-    use super::bootstrap_capsule_symbol_ownership;
+    use super::{bootstrap_capsule_c_only_exports, bootstrap_capsule_symbol_ownership};
     use std::collections::BTreeMap;
+
+    #[test]
+    fn capsule_requests_only_core_c_exports_missing_from_native_all() {
+        // nm-raw names: Mach-O prefixes every C symbol with `_`.
+        let raw = |name: &str| if cfg!(target_os = "macos") { format!("_{name}") } else { name.to_string() };
+        let mut core = ["rt_file_write", "rt_eprintln", "rt_array_push", "__simple_pow", "spl_thread_sleep", "helper_static"]
+            .into_iter()
+            .map(|name| (raw(name), 1))
+            .collect::<BTreeMap<_, _>>();
+        // Defined by two core members: projecting it would abort the link.
+        core.insert(raw("rt_alloc"), 2);
+        let native = ["rt_array_push", "spl_thread_sleep"]
+            .into_iter()
+            .map(|name| (raw(name), 1))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            bootstrap_capsule_c_only_exports(&core, &native),
+            ["__simple_pow", "rt_eprintln", "rt_file_write"]
+        );
+    }
 
     #[test]
     fn mixed_native_all_keeps_its_abi_file_and_snapshot_exports() {
