@@ -153,3 +153,40 @@ Source-level workaround candidate (not yet attempted): flatten
 handles/texts) and reconstruct the ParserModule at the use site — avoiding
 any large inline-struct class field. The proper repair is in the compiler's
 class-field layout/copy for large inline structs.
+
+## Update 2026-10-22 (later): crash now universal on the convergence head; optional-field dodge insufficient
+
+On 244f807d029 (post release/1.0 convergence merge) the same projection fault
+fires for EVERY probed module, including p2_add and a one-line hello-world —
+not only the path-naming fixture. Symbolized worker backtrace on the current
+candidate:
+
+```
+#0 module_surface_semantic_projection (+~6100; fault: mov 0x8(%rax),%rdi with
+    rax pointing into ASCII text -- a ParserModule field read as a list header
+    lands on text bytes, consistent with a shifted/garbage module copy)
+#1 module_surface_from_owner
+#2 ModuleSurfaceBuilder.add_parsed_canonical
+#3 CompilerDriver.parse_all_impl
+```
+
+Attempted and REJECTED by experiment: making the owner field optional
+(`value: ParserModule?`, keeping the class slot pointer-sized) so no large
+inline struct field remains — the crash persists unchanged at the same site.
+The corruption therefore survives removing the inline-struct class field, so
+the class-field layout read is at most one member of the failing family; the
+by-value arg transport into the projection and/or the enum-payload extraction
+(`unwrap`) of a large struct remain suspect.
+
+Control experiment: the identical owner->from_owner->projection path compiled
+by the Rust seed into a 284-module probe binary runs cleanly
+(`module_surfaces_from_modules` returns OK on a parsed hello-world). The
+failure only appears in the full ~1487-module stage-2 candidate — a
+scale-dependent seed/native-lowering miscompile, not a source-level logic
+error in the surface code.
+
+Host note: all evidence above is from the Linux LLVM-23.1.2 lane on a
+7.6 GiB host; the phase-matrix `compiler_cli_build` separately exceeds the
+process-tree RSS cap there (~5.3 GiB measured, cap 5.59 GiB) and is reported
+as TIMEOUT — that row cannot complete on this host class regardless of this
+crash.
