@@ -320,3 +320,49 @@ simply now also reaches p2_add with the merged runtime-repair changes. Treat
 the merged runtime-repair surface (fs.spl twins + io_file.rs) as the active
 suspect for the surface_build-time worker crash; coordinate with the
 #4133 lane before further full-sanity cycles.
+## Attempt 26 (2026-10-22) — parse crash GONE; next blocker is SCV inventory drift
+
+Attempt 26 reran the lane with a value-dump diagnostic wrapped around the
+Rust `rt_transient_heap_promote` (collections.rs: prints
+`[transient-promote-diag] FAIL value is_heap registered` on every false
+return). Result:
+
+- The parse-phase crash (`transient retained parser ownership failed`,
+  0xC0000409) DID NOT OCCUR. The diagnostic NEVER FIRED (0 lines in every
+  `stage2-sanity.env.frontend-*.log`). Conclusion: the exemption port in
+  #4133 (exact C mirror: registered heap object -> no-op success) already
+  fixed the parse crash; attempts 21-25 were killed by an earlier defect
+  before the promote path was ever reached, and the C-tagged-object
+  hypothesis above is disproved.
+- The failure moved to the SCV admission/materialize step:
+
+  ```
+  SCV-E-ADMISSION: snapshot-index-drift:src/lib/nogc_sync_mut/io/file_text_session.spl
+  candidate_frontend_smoke: p2_add-build failed (raw rc=1)
+  ```
+
+Root cause: the event-maintained source inventory
+(`build/scv/source-inventory`, generation 1213, cursor `git_head=aa6cd63e`
+= HEAD) carries a ROTTEN entry for that file: `content_digest=67cc6410…`,
+`byte_count=17317`. The actual working-tree file (clean in git at HEAD,
+`.gitattributes` forces LF) is 16977 bytes, `sha256=4fb92313…`. The
+recorded digest matches NO commit in the file's history (verified across
+the last 6 commits) — the entry captured uncommitted working-tree dirt at
+some past refresh, and no later git event ever rewrote it, so every warm
+refresh carried it forward. The fail-closed drift check
+(`src/lib/scv/compile_snapshot.spl:430`) caught it exactly as designed.
+
+Fix (operational, sanctioned by the admission gate's own messaging): the
+lane's `scv_prime` cold-init step only fires when
+`build/scv/source-inventory/CURRENT` is ABSENT
+(`scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs:394`).
+A rotten-but-present CURRENT makes every run admit warm and fail forever.
+Recovery = run the scv_prime command manually with
+`SIMPLE_SCV_INVENTORY_COLD_INIT=1` (candidate `native-build
+--entry src/compiler/bootstrap_admission/p2_add.spl --runtime-bundle
+core-c-bootstrap`), which rebuilds the inventory from Git complete
+authority, then rerun the lane.
+
+Follow-up (not done here): consider teaching the lane to auto-cold-init
+when the warm admission reports `snapshot-index-drift` instead of looping
+warm forever. File as a feature request if this recurs.
