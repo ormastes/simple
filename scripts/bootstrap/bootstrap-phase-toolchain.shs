@@ -1,6 +1,7 @@
 #!/bin/sh
 # Phase verification owns the native-build toolchain boundary. Generated
-# sources are C: use clang on Unix-like hosts, never a gcc/g++/cl.exe fallback.
+# sources are C: use clang on Unix-like hosts and CLANG64 clang (default) or
+# clang-cl (explicit msvc) on Windows, never a gcc/g++/cl.exe fallback.
 bootstrap_phase_toolchain_error() {
     echo "bootstrap-phase-toolchain: $1" >&2
     return 1
@@ -12,16 +13,42 @@ bootstrap_phase_windows_llvm_version_valid() {
     printf '%s\n' "$1" | sed -n '1p' | grep -Eq '^clang version 23\.1\.[0-9]+([[:space:]]|$)'
 }
 
+# Windows ABI of the phase: gnu (MinGW UCRT / MSYS2 CLANG64) by default, msvc
+# only by explicit SIMPLE_WINDOWS_ABI=msvc. See
+# doc/07_guide/infra/toolchain/windows_mingw_ucrt.md.
+bootstrap_phase_windows_abi() {
+    case "${SIMPLE_WINDOWS_ABI:-gnu}" in
+        gnu|msvc) printf '%s\n' "${SIMPLE_WINDOWS_ABI:-gnu}" ;;
+        *) bootstrap_phase_toolchain_error 'SIMPLE_WINDOWS_ABI must be gnu or msvc'; return 1 ;;
+    esac
+}
+
+# LLVM prefix that owns the Windows C driver: LLVM_SYS_231_PREFIX when set,
+# else the active MSYS2 environment prefix (MINGW_PREFIX, e.g. /clang64).
+bootstrap_phase_windows_llvm_prefix() {
+    phase_llvm_prefix=${LLVM_SYS_231_PREFIX:-}
+    if [ -z "$phase_llvm_prefix" ] && [ "$(bootstrap_phase_windows_abi)" = gnu ]; then
+        phase_llvm_prefix=${MINGW_PREFIX:-}
+    fi
+    case "$phase_llvm_prefix" in
+        /*|[A-Za-z]:[\\/]*) printf '%s\n' "$phase_llvm_prefix" ;;
+        *) bootstrap_phase_toolchain_error 'Windows requires an absolute LLVM_SYS_231_PREFIX (or MINGW_PREFIX for gnu)'; return 1 ;;
+    esac
+}
+
 # The receipt writer and executor resolve the same C driver. Keep the spelling
 # native on Windows; the canonical authority helper hashes its physical file.
+# gnu uses the CLANG64 clang.exe (target x86_64-w64-windows-gnu, LLD); msvc
+# uses clang-cl.exe from the same pinned prefix.
 bootstrap_phase_c_compiler_path() (
     case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
-        case "${LLVM_SYS_231_PREFIX:-}" in
-            /*|[A-Za-z]:[\\/]*) ;;
-            *) bootstrap_phase_toolchain_error 'Windows requires an absolute LLVM_SYS_231_PREFIX'; exit 1 ;;
+        phase_prefix=$(bootstrap_phase_windows_llvm_prefix) || exit 1
+        case "$(bootstrap_phase_windows_abi)" in
+            msvc) phase_resolved_cc="$phase_prefix/bin/clang-cl.exe" ;;
+            gnu) phase_resolved_cc="$phase_prefix/bin/clang.exe" ;;
+            *) exit 1 ;;
         esac
-        phase_resolved_cc="$LLVM_SYS_231_PREFIX/bin/clang-cl.exe"
         [ -f "$phase_resolved_cc" ] && [ -x "$phase_resolved_cc" ] || exit 1
         cygpath -am "$phase_resolved_cc"
         ;;
@@ -38,7 +65,10 @@ bootstrap_phase_c_compiler_path() (
 
 bootstrap_phase_c_target_platform() {
     case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*) printf '%s\n' x86_64-pc-windows-msvc ;;
+    MINGW*|MSYS*|CYGWIN*)
+        phase_target_abi=$(bootstrap_phase_windows_abi) || return 1
+        printf '%s\n' "x86_64-pc-windows-$phase_target_abi"
+        ;;
     *) bootstrap_stage3_host_platform ;;
     esac
 }
@@ -49,42 +79,50 @@ bootstrap_phase_run_command() (
     [ "${2:-}" = native-build ] || { "$phase_executor" "$@"; exit $?; }
     case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
-        # Git Bash MSYSTEM otherwise selects GNU even for an MSVC compiler.
-        # Keep LLVM 23.1.x clang-cl, MSVC ABI and CL=/TC together. Do not change
-        # this to gcc, g++, cl.exe, or ambient PATH discovery on another host.
-        case "${LLVM_SYS_231_PREFIX:-}" in
-            /*|[A-Za-z]:[\\/]*) ;;
-            *) bootstrap_phase_toolchain_error 'Windows requires an absolute LLVM_SYS_231_PREFIX'; exit 1 ;;
-        esac
+        # Git Bash MSYSTEM never selects the ABI. gnu (default) keeps CLANG64
+        # clang.exe, GNU ABI/linker flavor and the -windows-gnu target
+        # together; msvc keeps LLVM 23.1.x clang-cl, MSVC ABI and CL=/TC
+        # together. Do not change this to gcc, g++, cl.exe, or ambient PATH
+        # discovery on another host.
+        phase_abi=$(bootstrap_phase_windows_abi) || exit 1
+        bootstrap_phase_windows_llvm_prefix >/dev/null || exit 1
         phase_cc=$(bootstrap_phase_c_compiler_path) || exit 1
+        if [ "$phase_abi" = msvc ]; then
+            phase_cc_name=clang-cl.exe
+        else
+            phase_cc_name=clang.exe
+        fi
         if [ -n "${CC:-}" ]; then
             phase_requested_cc=$(cygpath -am "$CC") || exit 1
             [ "$phase_requested_cc" = "$phase_cc" ] || {
-                bootstrap_phase_toolchain_error 'CC must match the pinned LLVM clang-cl.exe'; exit 1;
+                bootstrap_phase_toolchain_error "CC must match the pinned LLVM $phase_cc_name"; exit 1;
             }
         fi
-        case "${SIMPLE_WINDOWS_ABI:-msvc}:${SIMPLE_LINKER_FLAVOR:-msvc}" in
-            msvc:msvc) ;;
-            *) bootstrap_phase_toolchain_error 'Windows phase requires MSVC ABI and linker flavor'; exit 1 ;;
+        case "$phase_abi:${SIMPLE_LINKER_FLAVOR:-$phase_abi}" in
+            msvc:msvc|gnu:gnu) ;;
+            *) bootstrap_phase_toolchain_error 'Windows phase linker flavor must match SIMPLE_WINDOWS_ABI'; exit 1 ;;
         esac
-        case "${CL:-/TC}" in
-            /TC) ;;
-            *) bootstrap_phase_toolchain_error 'Windows phase requires CL=/TC'; exit 1 ;;
-        esac
+        if [ "$phase_abi" = msvc ]; then
+            case "${CL:-/TC}" in
+                /TC) ;;
+                *) bootstrap_phase_toolchain_error 'Windows phase requires CL=/TC'; exit 1 ;;
+            esac
+        fi
+        phase_windows_target="x86_64-pc-windows-$phase_abi"
         phase_target_seen=0
         phase_target_next=0
         for phase_arg in "$@"; do
             if [ "$phase_target_next" = 1 ]; then
-                [ "$phase_arg" = x86_64-pc-windows-msvc ] || {
-                    bootstrap_phase_toolchain_error 'Windows phase requires the MSVC target'; exit 1;
+                [ "$phase_arg" = "$phase_windows_target" ] || {
+                    bootstrap_phase_toolchain_error "Windows phase requires the $phase_windows_target target"; exit 1;
                 }
                 phase_target_next=0
                 continue
             fi
             case "$phase_arg" in
                 --target) phase_target_seen=1; phase_target_next=1 ;;
-                --target=x86_64-pc-windows-msvc) phase_target_seen=1 ;;
-                --target=*) bootstrap_phase_toolchain_error 'Windows phase requires the MSVC target'; exit 1 ;;
+                --target="$phase_windows_target") phase_target_seen=1 ;;
+                --target=*) bootstrap_phase_toolchain_error "Windows phase requires the $phase_windows_target target"; exit 1 ;;
             esac
         done
         [ "$phase_target_next" = 0 ] || {
@@ -93,15 +131,18 @@ bootstrap_phase_run_command() (
         # Reuse the matrix's bounded executor for the version probe too.
         phase_version=$("$phase_executor" "$phase_cc" --version) || exit 1
         bootstrap_phase_windows_llvm_version_valid "$phase_version" || {
-            bootstrap_phase_toolchain_error 'Windows phase requires LLVM clang-cl 23.1.x'; exit 1;
+            bootstrap_phase_toolchain_error "Windows phase requires LLVM $phase_cc_name 23.1.x"; exit 1;
         }
         CC=$phase_cc
-        SIMPLE_WINDOWS_ABI=msvc
-        SIMPLE_LINKER_FLAVOR=msvc
-        CL=/TC
-        export CC SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR CL
-        bootstrap_windows_preserve_cl_mode
-        [ "$phase_target_seen" = 1 ] || set -- "$@" --target x86_64-pc-windows-msvc
+        SIMPLE_WINDOWS_ABI=$phase_abi
+        SIMPLE_LINKER_FLAVOR=$phase_abi
+        export CC SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR
+        if [ "$phase_abi" = msvc ]; then
+            CL=/TC
+            export CL
+            bootstrap_windows_preserve_cl_mode
+        fi
+        [ "$phase_target_seen" = 1 ] || set -- "$@" --target "$phase_windows_target"
         ;;
     *)
         CC=$(bootstrap_phase_c_compiler_path) || {
