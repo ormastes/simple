@@ -2734,7 +2734,10 @@ pub(crate) fn partial_link_tombstone_relocations(path: &Path) -> Result<Vec<Stri
     let mut found = Vec::new();
     // RISC-V linker-relaxation markers R_RISCV_ALIGN (43) and R_RISCV_RELAX
     // (51) carry symbol index 0 by definition; they are not tombstones.
-    let riscv = matches!(file.architecture(), object::Architecture::Riscv64 | object::Architecture::Riscv32);
+    let riscv = matches!(
+        file.architecture(),
+        object::Architecture::Riscv64 | object::Architecture::Riscv32
+    );
     for section in file.sections() {
         let allocated = match section.flags() {
             SectionFlags::Elf { sh_flags } => sh_flags & u64::from(object::elf::SHF_ALLOC) != 0,
