@@ -608,7 +608,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: sh scripts/bootstrap/build-next-phase-ci.shs "${{ matrix.platform }}" 4
+        run: sh scripts/bootstrap/build-next-phase-ci.shs "${{ matrix.platform }}" 2
 
       - name: Build native Windows binary via bootstrap-only Rust seed
         if: runner.os == 'Windows' && steps.prevc_windows.outputs.built != 'true'
@@ -963,6 +963,12 @@ jobs:
                 RUNNER_SEED="src/compiler_rust/target/bootstrap/simple.exe"
               else
                 RUNNER_SEED="src/compiler_rust/target/bootstrap/simple"
+              fi
+              if [ ! -x "$RUNNER_SEED" ]; then
+                # The stage1 seed step is skipped when a previous compiler
+                # built this phase (prevc_*); the runner fallback still needs it.
+                (cd src/compiler_rust && cargo build --profile bootstrap -p simple-driver \
+                  && cargo build --profile bootstrap -p simple-native-all --features driver-compat) || true
               fi
               rm -f "$RUNNER_OUT"
               # Same exit-status policy as the stage1 build: judge by the
@@ -1700,6 +1706,8 @@ jobs:
             echo "A platform missing here did not build in run ${GITHUB_RUN_ID}; a later run adds it."
           } > notes.md
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # `release edit` never moves the tag; point it at this run's commit.
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" -f sha="$GITHUB_SHA" -F force=true >/dev/null
             gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file notes.md --prerelease
           else
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
