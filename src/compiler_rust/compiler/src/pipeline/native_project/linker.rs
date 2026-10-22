@@ -2366,6 +2366,16 @@ int main(int argc, char** argv) {
         for path in &link_config.library_search_paths {
             cmd.arg(format!("-L{}", path));
         }
+        // Extra search paths for cross links whose target sysroot lacks the
+        // platform libraries (e.g. riscv64 sqlite3/z/zstd/tinfo fetched
+        // rootless into a local deb root). The platform config above is
+        // hardcoded and the cross gcc driver ignores LIBRARY_PATH, so this
+        // explicit knob is the only rootless injection point.
+        if let Some(extra_paths) = std::env::var_os("SIMPLE_LINK_LIBRARY_PATHS") {
+            for path in std::env::split_paths(&extra_paths) {
+                cmd.arg(format!("-L{}", path.display()));
+            }
+        }
         let omit_unwind = is_linux_target
             && selected_runtime
                 .as_ref()
