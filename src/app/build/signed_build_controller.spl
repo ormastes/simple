@@ -1,0 +1,39 @@
+# Base-owned handoff from observed mandatory gates to signed artifact reuse.
+# The caller independently obtains protected policy, current candidate identity,
+# gate observations and downloaded bytes. This module does not report a GitHub
+# status or authorize skipping a separate required context.
+use app.build.gate_receipt.{GateReceipt}
+use app.build.signed_build_admission.{SignedBuildExpectationV2,
+    SignedBuildAdmissionV1}
+use app.build.signed_build_gate_provider.{
+    verify_protected_bootstrap_gates_v2}
+use app.build.signed_build_signature_provider.{
+    SignedBuildSshProviderConfigV2,
+    verify_signed_build_private_artifact_with_ssh_v2}
+use app.build.signed_build_verifier.{SignedBuildFileDecisionV2}
+
+fn verify_protected_signed_build_candidate_v2(
+        receipt_wire: text, signature_text: text,
+        gate_receipt: GateReceipt, expected: SignedBuildExpectationV2,
+        protected_manifest_text: text, protected_manifest_digest: text,
+        protected_issuer: text, ssh: SignedBuildSshProviderConfigV2,
+        downloaded_path: text, private_artifact_parent: text,
+        artifact_limit: i64) -> SignedBuildFileDecisionV2:
+    """Reuse only after protected gates, signature and copied artifact agree.
+
+    A FULL_BUILD decision means the required CI job must execute its ordinary
+    build and report that result. A REUSE decision supplies only the private
+    copied artifact path, which the caller must consume without reopening the
+    mutable download path.
+    """
+    val gates = verify_protected_bootstrap_gates_v2(gate_receipt, expected,
+        protected_manifest_text, protected_manifest_digest, protected_issuer)
+    if not gates.verified:
+        return SignedBuildFileDecisionV2(
+            SignedBuildAdmissionV1("FULL_BUILD", "gates: " + gates.reason),
+            "", "")
+    verify_signed_build_private_artifact_with_ssh_v2(receipt_wire,
+        signature_text, expected, gates.gates, ssh, downloaded_path,
+        private_artifact_parent, artifact_limit)
+
+export verify_protected_signed_build_candidate_v2

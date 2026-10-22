@@ -1,0 +1,85 @@
+# A worker may open an uploaded request only after this marker is present and
+# both bounded, no-follow reads match the pinned request digest from SSH.
+# The worker inbox and its parent are private to the trusted worker account.
+use app.io.mod.{file_read_regular_no_follow_bounded}
+use app.build.scheduler.worker_request.{BuildWorkerRequestV1,
+    BUILD_WORKER_REQUEST_MAX_BYTES_V1, encode_build_worker_request_v1,
+    parse_build_worker_request_v1}
+use app.build.scheduler.planner.{scheduler_action_digest_valid_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+val BUILD_WORKER_READY_MARKER_MAX_BYTES_V1: i64 = 512
+val BUILD_WORKER_CONTROL_DIRECTORY_V1 = ".simple-control"
+
+fn _ready_id_v1(value: text) -> bool:
+    if value == "" or value.len() > 128 or value.starts_with("-"):
+        return false
+    for c in value.chars():
+        if (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
+           (c >= "0" and c <= "9") or c == "_" or c == "-" or c == ".":
+            continue
+        return false
+    value != "." and value != ".."
+
+fn _ready_root_v1(root: text) -> bool:
+    if not root.starts_with("/") or root.len() < 2 or root.len() > 4096 or
+       root.ends_with("/") or root.contains("//"):
+        return false
+    val segments = root.split("/")
+    var i: i64 = 1
+    while i < segments.len():
+        if not _ready_id_v1(segments[i]):
+            return false
+        i = i + 1
+    true
+
+fn worker_ready_control_collision_v1(path: text) -> bool:
+    path == BUILD_WORKER_CONTROL_DIRECTORY_V1 or
+        path.starts_with(BUILD_WORKER_CONTROL_DIRECTORY_V1 + "/")
+
+fn encode_build_worker_ready_v1(request: BuildWorkerRequestV1) -> text:
+    """Bind the final marker to the complete request and attempt identity."""
+    val wire = encode_build_worker_request_v1(request)
+    if wire == "" or not _ready_id_v1(request.attempt.attempt_id) or
+       not _ready_id_v1(request.attempt.worker_id):
+        return ""
+    "simple-build-ready-v1\n" +
+        "request=" + sha256_text(wire) + "\n" +
+        "action=" + request.attempt.action_digest + "\n" +
+        "attempt=" + request.attempt.attempt_id + "\n" +
+        "worker=" + request.attempt.worker_id + "\n"
+
+fn read_ready_build_worker_v1(inbox_root: text, attempt_id: text,
+        worker_id: text, expected_request_digest: text) -> BuildWorkerRequestV1?:
+    """Read only the configured attempt's complete ready request."""
+    if not _ready_root_v1(inbox_root) or not _ready_id_v1(attempt_id) or
+       not _ready_id_v1(worker_id) or
+       not scheduler_action_digest_valid_v1(expected_request_digest):
+        return nil
+    val control = inbox_root + "/" + attempt_id + "/" +
+        BUILD_WORKER_CONTROL_DIRECTORY_V1
+    val marker = file_read_regular_no_follow_bounded(control + "/ready",
+        BUILD_WORKER_READY_MARKER_MAX_BYTES_V1)
+    if marker.is_err():
+        return nil
+    val request = file_read_regular_no_follow_bounded(control + "/request.wire",
+        BUILD_WORKER_REQUEST_MAX_BYTES_V1)
+    if request.is_err():
+        return nil
+    val wire = request.unwrap()
+    if sha256_text(wire) != expected_request_digest:
+        return nil
+    val parsed = parse_build_worker_request_v1(wire)
+    if parsed == nil:
+        return nil
+    val full = parsed.unwrap()
+    if full.attempt.attempt_id != attempt_id or
+       full.attempt.worker_id != worker_id or
+       marker.unwrap() != encode_build_worker_ready_v1(full):
+        return nil
+    full
+
+export BUILD_WORKER_READY_MARKER_MAX_BYTES_V1
+export BUILD_WORKER_CONTROL_DIRECTORY_V1
+export worker_ready_control_collision_v1, encode_build_worker_ready_v1
+export read_ready_build_worker_v1

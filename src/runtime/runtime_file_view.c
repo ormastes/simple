@@ -119,7 +119,9 @@ static int open_regular_beneath(const char *root, const char *relative) {
     char *part = strtok_r(work, "/", &save);
     while (part) {
         char *next = strtok_r(NULL, "/", &save);
-        int flags = O_RDONLY | O_NOFOLLOW | O_CLOEXEC | (next ? O_DIRECTORY : 0);
+        /* A child-created FIFO must not block before fstat rejects it. */
+        int flags = O_RDONLY | O_NOFOLLOW | O_CLOEXEC |
+            (next ? O_DIRECTORY : O_NONBLOCK);
         int opened = openat(current, part, flags);
         int saved_errno = errno;
         close(current);

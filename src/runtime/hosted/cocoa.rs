@@ -541,31 +541,33 @@ mod imp {
 }
 
 // ---------------------------------------------------------------------------
-// SFFI exports. Signatures match the `extern fn rt_cocoa_*` decls in
+// macOS C ABI exports belong to the dynamic C runtime; keep these Rust
+// functions callable without defining a second process-wide Cocoa provider.
+// SFFI exports on other platforms. Signatures match the `extern fn rt_cocoa_*` decls in
 // `hosted_backend_cocoa.spl` one-for-one.
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
+#[cfg_attr(not(target_os = "macos"), no_mangle)]
 pub unsafe extern "C" fn rt_cocoa_window_new(w: i64, h: i64, title_rv: i64) -> i64 {
     imp::window_new(w, h, title_rv)
 }
 
-#[no_mangle]
+#[cfg_attr(not(target_os = "macos"), no_mangle)]
 pub unsafe extern "C" fn rt_cocoa_window_resize(win: i64, w: i64, h: i64) -> bool {
     imp::window_resize(win, w, h)
 }
 
-#[no_mangle]
+#[cfg_attr(not(target_os = "macos"), no_mangle)]
 pub unsafe extern "C" fn rt_cocoa_window_close(win: i64) -> bool {
     imp::window_close(win)
 }
 
-#[no_mangle]
+#[cfg_attr(not(target_os = "macos"), no_mangle)]
 pub unsafe extern "C" fn rt_cocoa_layer_create(win: i64, w: i64, h: i64, fill_color: i64) -> i64 {
     imp::layer_create(win, w, h, fill_color)
 }
 
-#[no_mangle]
+#[cfg_attr(not(target_os = "macos"), no_mangle)]
 pub unsafe extern "C" fn rt_cocoa_layer_fill_rect(
     layer: i64,
     x: i64,
@@ -577,22 +579,22 @@ pub unsafe extern "C" fn rt_cocoa_layer_fill_rect(
     imp::layer_fill_rect(layer, x, y, w, h, color)
 }
 
-#[no_mangle]
+#[cfg_attr(not(target_os = "macos"), no_mangle)]
 pub unsafe extern "C" fn rt_cocoa_layer_present(win: i64, layer: i64) -> bool {
     imp::layer_present(win, layer)
 }
 
-#[no_mangle]
+#[cfg_attr(not(target_os = "macos"), no_mangle)]
 pub unsafe extern "C" fn rt_cocoa_layer_free(layer: i64) -> bool {
     imp::layer_free(layer)
 }
 
-#[no_mangle]
+#[cfg_attr(not(target_os = "macos"), no_mangle)]
 pub unsafe extern "C" fn rt_cocoa_layer_read_pixel(layer: i64, x: i64, y: i64) -> i64 {
     imp::layer_read_pixel(layer, x, y)
 }
 
-#[no_mangle]
+#[cfg_attr(not(target_os = "macos"), no_mangle)]
 pub unsafe extern "C" fn rt_cocoa_layer_blend_rect(
     layer: i64,
     x: i64,
@@ -605,7 +607,7 @@ pub unsafe extern "C" fn rt_cocoa_layer_blend_rect(
     imp::layer_blend_rect(layer, x, y, w, h, color, alpha)
 }
 
-#[no_mangle]
+#[cfg_attr(not(target_os = "macos"), no_mangle)]
 pub unsafe extern "C" fn rt_cocoa_layer_blur(
     layer: i64,
     x: i64,
@@ -617,7 +619,7 @@ pub unsafe extern "C" fn rt_cocoa_layer_blur(
     imp::layer_blur(layer, x, y, w, h, radius)
 }
 
-#[no_mangle]
+#[cfg_attr(not(target_os = "macos"), no_mangle)]
 pub unsafe extern "C" fn rt_cocoa_layer_gradient_v(
     layer: i64,
     x: i64,
@@ -630,7 +632,7 @@ pub unsafe extern "C" fn rt_cocoa_layer_gradient_v(
     imp::layer_gradient_v(layer, x, y, w, h, c1, c2)
 }
 
-#[no_mangle]
+#[cfg_attr(not(target_os = "macos"), no_mangle)]
 pub unsafe extern "C" fn rt_cocoa_event_pump(win: i64) -> i64 {
     imp::event_pump(win)
 }

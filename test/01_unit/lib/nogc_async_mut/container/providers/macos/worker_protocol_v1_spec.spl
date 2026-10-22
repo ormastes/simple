@@ -1,0 +1,141 @@
+# Protocol tests only: no native launch, signing, sandbox or cleanup evidence.
+use std.spec.{describe, it, expect}
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1}
+use std.nogc_async_mut.container.providers.macos.worker_protocol_v1.{
+    MacWorkerSessionV1, mac_worker_encode_request_v1,
+    MAC_WORKER_MAX_PAYLOAD_V1, MAC_WORKER_MAX_FRAME_V1}
+
+fn _mac_protocol_identity() -> RuntimeIdentityV1:
+    RuntimeIdentityV1(pod_uid: "pod", attempt: 1, provider_generation: 2,
+        operation_id: "op", engine: "macos-native-sandbox-v1", native_id: "", node_boot_id: "boot")
+
+fn _mac_protocol_repeat(byte: u8, count: i64) -> [u8]:
+    var result: [u8] = []
+    for index in 0..count:
+        result.push(byte)
+    result
+
+fn _mac_protocol_frame(operation: i64, sequence: i64, payload: [u8]) -> [u8]:
+    mac_worker_encode_request_v1(_mac_protocol_identity(),
+        _mac_protocol_repeat(11, 32), _mac_protocol_repeat(1, 32),
+        operation, sequence, payload).unwrap()
+
+fn _mac_protocol_session() -> MacWorkerSessionV1:
+    MacWorkerSessionV1.provision(_mac_protocol_identity(),
+        _mac_protocol_repeat(11, 32), _mac_protocol_repeat(1, 32)).unwrap()
+
+describe "Mac worker authenticated bounded ingress":
+    it "matches an independently generated HMAC-SHA256 wire fixture":
+        # Derived with Python stdlib hmac/hashlib; fixes context, endian and
+        # every authenticated wire byte independently of the receiver.
+        val frame = _mac_protocol_frame(1, 1, [7, 8])
+        val tag: [u8] = [28, 24, 200, 84, 63, 111, 80, 106, 129, 207, 130, 171,
+            249, 25, 172, 122, 185, 242, 233, 110, 76, 201, 206, 111,
+            28, 234, 184, 170, 126, 221, 151, 115]
+        expect(frame.len()).to_equal(76)
+        for index in 0..32:
+            expect(frame[44 + index]).to_equal(tag[index])
+        var session = _mac_protocol_session()
+        val request = session.receive(frame).unwrap()
+        expect(request.operation).to_equal(1)
+        expect(request.sequence).to_equal(1)
+        expect(request.payload).to_equal([7, 8])
+
+    it "rejects replay and sequence gaps without consuming the expected sequence":
+        var session = _mac_protocol_session()
+        expect(session.receive(_mac_protocol_frame(2, 2, [])).is_err()).to_equal(true)
+        expect(session.receive(_mac_protocol_frame(1, 1, [7])).is_ok()).to_equal(true)
+        expect(session.receive(_mac_protocol_frame(1, 1, [7])).is_err()).to_equal(true)
+        expect(session.receive(_mac_protocol_frame(2, 2, [])).is_ok()).to_equal(true)
+
+    it "rejects payload, nonce and tag mutation and still accepts the original":
+        for offset in [10, 42, 44]:
+            var session = _mac_protocol_session()
+            var forged = _mac_protocol_frame(1, 1, [7, 8])
+            forged[offset] = forged[offset] ^ 1
+            expect(session.receive(forged).is_err()).to_equal(true)
+            expect(session.receive(_mac_protocol_frame(1, 1, [7, 8])).is_ok()).to_equal(true)
+
+    it "rejects a different secret and a fresh nonce even for the same attempt":
+        val frame = _mac_protocol_frame(1, 1, [7])
+        var wrong_key = MacWorkerSessionV1.provision(_mac_protocol_identity(),
+            _mac_protocol_repeat(12, 32), _mac_protocol_repeat(1, 32)).unwrap()
+        var fresh_session = MacWorkerSessionV1.provision(_mac_protocol_identity(),
+            _mac_protocol_repeat(11, 32), _mac_protocol_repeat(2, 32)).unwrap()
+        expect(wrong_key.receive(frame).is_err()).to_equal(true)
+        expect(fresh_session.receive(frame).is_err()).to_equal(true)
+
+    it "binds every attempt coordinate and refuses identity delimiter injection":
+        for field in 0..5:
+            var identity = _mac_protocol_identity()
+            if field == 0: identity.pod_uid = "other"
+            if field == 1: identity.attempt = 2
+            if field == 2: identity.provider_generation = 3
+            if field == 3: identity.operation_id = "other"
+            if field == 4: identity.node_boot_id = "other"
+            var session = MacWorkerSessionV1.provision(identity,
+                _mac_protocol_repeat(11, 32), _mac_protocol_repeat(1, 32)).unwrap()
+            expect(session.receive(_mac_protocol_frame(1, 1, [7])).is_err()).to_equal(true)
+        var bad = _mac_protocol_identity()
+        bad.pod_uid = "pod|1"
+        expect(MacWorkerSessionV1.provision(bad, _mac_protocol_repeat(11, 32),
+            _mac_protocol_repeat(1, 32)).is_err()).to_equal(true)
+        bad = _mac_protocol_identity()
+        bad.native_id = "123"
+        expect(MacWorkerSessionV1.provision(bad, _mac_protocol_repeat(11, 32),
+            _mac_protocol_repeat(1, 32)).is_err()).to_equal(true)
+
+    it "consumes one submit and cancel and closes ingress without a lifecycle claim":
+        var session = _mac_protocol_session()
+        expect(session.receive(_mac_protocol_frame(3, 1, [])).is_err()).to_equal(true)
+        expect(session.receive(_mac_protocol_frame(1, 1, [7])).is_ok()).to_equal(true)
+        expect(session.receive(_mac_protocol_frame(1, 2, [8])).is_err()).to_equal(true)
+        expect(session.receive(_mac_protocol_frame(3, 2, [])).is_ok()).to_equal(true)
+        expect(session.receive(_mac_protocol_frame(3, 3, [])).is_err()).to_equal(true)
+        expect(session.receive(_mac_protocol_frame(4, 3, [])).is_ok()).to_equal(true)
+        expect(session.receive(_mac_protocol_frame(2, 4, [])).is_err()).to_equal(true)
+
+    it "rejects bad sizes, length mismatches, versions, opcodes and trailing data":
+        var session = _mac_protocol_session()
+        expect(session.receive([]).is_err()).to_equal(true)
+        expect(session.receive(_mac_protocol_repeat(0, MAC_WORKER_MAX_FRAME_V1 + 1)).is_err()).to_equal(true)
+        for offset in [0, 1, 6]:
+            var frame = _mac_protocol_frame(1, 1, [7])
+            frame[offset] = 255
+            expect(session.receive(frame).is_err()).to_equal(true)
+        var trailing = _mac_protocol_frame(1, 1, [7])
+        trailing.push(0)
+        expect(session.receive(trailing).is_err()).to_equal(true)
+        expect(session.receive(_mac_protocol_frame(1, 1, [7])).is_ok()).to_equal(true)
+
+    it "bounds payloads and rejects malformed controller requests":
+        val key = _mac_protocol_repeat(11, 32)
+        val nonce = _mac_protocol_repeat(1, 32)
+        val identity = _mac_protocol_identity()
+        expect(mac_worker_encode_request_v1(identity, key, nonce, 1, 1, []).is_err()).to_equal(true)
+        expect(mac_worker_encode_request_v1(identity, key, nonce, 2, 1, [7]).is_err()).to_equal(true)
+        expect(mac_worker_encode_request_v1(identity, key, nonce, 5, 1, []).is_err()).to_equal(true)
+        for sequence in [0, 1048577]:
+            expect(mac_worker_encode_request_v1(identity, key, nonce, 2, sequence, []).is_err()).to_equal(true)
+        expect(mac_worker_encode_request_v1(identity, key, nonce, 1, 1,
+            _mac_protocol_repeat(7, MAC_WORKER_MAX_PAYLOAD_V1 + 1)).is_err()).to_equal(true)
+        expect(MacWorkerSessionV1.provision(identity, [], nonce).is_err()).to_equal(true)
+        expect(MacWorkerSessionV1.provision(identity, key, []).is_err()).to_equal(true)
+
+    it "reserves the last sequence for closing and releases the session key":
+        val key = _mac_protocol_repeat(11, 32)
+        val nonce = _mac_protocol_repeat(1, 32)
+        val identity = _mac_protocol_identity()
+        expect(mac_worker_encode_request_v1(identity, key, nonce, 2, 1048576, []).is_err()).to_equal(true)
+        var session = _mac_protocol_session()
+        session.next_sequence = 1048576
+        expect(session.receive(_mac_protocol_frame(4, 1048576, [])).is_ok()).to_equal(true)
+        expect(session.closed).to_equal(true)
+        expect(session.secret.len()).to_equal(0)
+
+    it "accepts the exact maximum bounded frame":
+        val payload = _mac_protocol_repeat(7, MAC_WORKER_MAX_PAYLOAD_V1)
+        val frame = _mac_protocol_frame(1, 1, payload)
+        expect(frame.len()).to_equal(MAC_WORKER_MAX_FRAME_V1)
+        var session = _mac_protocol_session()
+        expect(session.receive(frame).unwrap().payload).to_equal(payload)

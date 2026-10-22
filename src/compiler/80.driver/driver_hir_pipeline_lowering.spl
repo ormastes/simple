@@ -16,7 +16,7 @@ use compiler.driver.cache.driver_hir_source_body_custody_identity_v1.{
     DriverHirSourceBodyCustodyV1, driver_hir_source_body_context_in_owned_scope_v1,
     driver_hir_source_body_lowerer_context_v1}
 use compiler.driver.cache.driver_hir_source_body_surfaces_v1.{driver_hir_source_body_replay_surfaces_v1}
-use std.io_runtime.{exit, hash_text}
+use std.io_runtime.{exit, hash_text, env_get_opt}
 use std.env.{env_get}
 use compiler.driver.driver_types.{CompileContext, driver_native_parsed_module_has_no_runtime_body_v1,
     driver_native_parsed_objectless_proof_v1}
@@ -498,6 +498,9 @@ impl CompilerDriver:
         if proof != "": self.ctx.native_parsed_objectless_proofs[source.module_name] = proof
 
     me lower_retained_surface_module(lowering: HirLowering, module: ParserModule, source_path: text, is_entry: bool, source: SourceFile) -> Result<HirModule, text>:
+        # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=trace_retained_hir_path_to_fault
+        val nscope_trace = (env_get_opt("SIMPLE_NSCOPE_HIR_TRACE") ?? "") == "1"
+        if nscope_trace: eprint("[nscope-hir] retained-enter path={source_path} entry={is_entry}")
         if not rt_transient_array_scope_begin():
             return Err("transient HIR scope unavailable for {source_path}")
         val reverse_token = reverse_reference_module_begin_v1()
@@ -507,6 +510,7 @@ impl CompilerDriver:
         val flat_row_count_before = bootstrap_hir_module_count()
         val parsed_code_less = driver_native_parsed_module_has_no_runtime_body_v1(module)
         val hir_module = lowering.lower_parser_module_unstub(module, is_entry)
+        if nscope_trace: eprint("[nscope-hir] retained-lowered path={source_path}")
         if not rt_transient_array_scope_pause():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
@@ -557,6 +561,9 @@ impl CompilerDriver:
         Ok(hir_module)
 
     me lower_streaming_surface_source(lowering: HirLowering, source: SourceFile, is_entry: bool) -> Result<HirModule, text>:
+        # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=trace_noscope_hir_path_to_fault
+        val nscope_trace = (env_get_opt("SIMPLE_NSCOPE_HIR_TRACE") ?? "") == "1"
+        if nscope_trace: eprint("[nscope-hir] enter path={source.path} entry={is_entry}")
         val parser_generation = parser_initialization_generation_v1()
         if not rt_transient_array_scope_begin():
             return Err("transient parser scope unavailable for {source.path}")
@@ -587,9 +594,11 @@ impl CompilerDriver:
         driver_register_parser_module_source_aliases_v1(module, source.path)
         if par_had_error_get():
             return Err(driver_finish_failed_parse_scope(source.path, reverse_token))
+        if nscope_trace: eprint("[nscope-hir] parsed path={source.path}")
         val flat_row_count_before = bootstrap_hir_module_count()
         val parsed_code_less = driver_native_parsed_module_has_no_runtime_body_v1(module)
         val hir_module = lowering.lower_parser_module_unstub(module, is_entry)
+        if nscope_trace: eprint("[nscope-hir] lowered path={source.path}")
         # Keep the scope active through the complete lowering. The reparsed AST
         # and all lowering scratch graphs are transient; only the canonical HIR,
         # its diagnostics, and frontend registries escape this file boundary.

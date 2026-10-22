@@ -1,0 +1,149 @@
+# Resolve a cold link only from the parent's accepted ledger and retained CAS.
+# The resulting ActionSpec has complete dependency byte identity.
+use app.io.mod.{file_read_regular_no_follow_bounded}
+use app.build.scheduler.parent_link_template.{ParentLinkTemplateV1,
+    parent_link_template_problem_v1}
+use app.build.scheduler.worker_request.{BuildWorkerRequestV1,
+    encode_build_worker_request_v1}
+use app.build.scheduler.dependency_admission.{
+    validate_retained_dependency_manifest_v1,
+    validate_dependency_provenance_v1}
+use app.build.scheduler.worker_output.{BUILD_OUTPUT_MANIFEST_MAX_BYTES_V1}
+use app.build.scheduler.retained_binary_cas.{retained_binary_cas_verify_v1}
+use app.build.scheduler.ledger.{SchedulerLedgerV1, SchedulerAttemptV1,
+    scheduler_ledger_valid_v1}
+use app.build.scheduler.owner.{scheduler_owner_open_v1,
+    scheduler_owner_close_v1}
+use app.build.scheduler.planner.{scheduler_action_digest_valid_v1}
+use compiler.driver.cache.cas_store.{cas_blob_path}
+use compiler.common.build_contract.{ActionSpec, AttemptSpec,
+    BuildDependencyRef, AcceptedResult, action_spec_digest_v1}
+
+struct ParentLinkResolutionV1:
+    valid: bool
+    reason: text
+    action: ActionSpec?
+    action_digest: text
+
+fn _parent_link_reject_v1(reason: text) -> ParentLinkResolutionV1:
+    ParentLinkResolutionV1(false, reason, nil, "")
+
+fn _parent_link_accepted_v1(ledger: SchedulerLedgerV1,
+        action_digest: text) -> AcceptedResult?:
+    for item in ledger.accepted:
+        if item.action_digest == action_digest: return item
+    nil
+
+fn _parent_link_attempt_v1(ledger: SchedulerLedgerV1,
+        accepted: AcceptedResult) -> SchedulerAttemptV1?:
+    for item in ledger.attempts:
+        if item.action_digest == accepted.action_digest and
+           item.attempt_id == accepted.accepted_attempt_id and
+           not item.active:
+            return item
+    nil
+
+fn _parent_link_output_digest_v1(wire: text, output_path: text) -> text:
+    # The retained-manifest validator below checks the entire row set. This
+    # bounded scan only discovers the candidate digest for the selected name.
+    val lines = wire.split("\n")
+    for line in lines:
+        val fields = line.split("|")
+        if fields.len() == 3 and fields[0] == output_path and
+           scheduler_action_digest_valid_v1(fields[2]):
+            return fields[2]
+    ""
+
+fn _resolve_parent_link_output_v1(ledger: SchedulerLedgerV1,
+        cas_root: text, producer_digest: text,
+        output_path: text) -> BuildDependencyRef?:
+    val accepted = _parent_link_accepted_v1(ledger, producer_digest)
+    if accepted == nil: return nil
+    val producer = accepted.unwrap()
+    val attempt = _parent_link_attempt_v1(ledger, producer)
+    if attempt == nil: return nil
+    val manifest_path = cas_blob_path(cas_root,
+        producer.output_manifest_digest)
+    if manifest_path == "": return nil
+    val read = file_read_regular_no_follow_bounded(manifest_path,
+        BUILD_OUTPUT_MANIFEST_MAX_BYTES_V1)
+    if read.is_err(): return nil
+    val digest = _parent_link_output_digest_v1(read.unwrap(), output_path)
+    if digest == "": return nil
+    val dependency = BuildDependencyRef(producer_digest, output_path,
+        digest)
+    if not validate_retained_dependency_manifest_v1(read.unwrap(),
+            producer, attempt.unwrap(), dependency).valid or
+       not retained_binary_cas_verify_v1(cas_root, output_path, digest):
+        return nil
+    dependency
+
+fn resolve_parent_link_v1(template: ParentLinkTemplateV1,
+        ledger: SchedulerLedgerV1, cas_root: text) -> ParentLinkResolutionV1:
+    """Bind every ordered link input to one accepted, byte-verified output."""
+    val problem = parent_link_template_problem_v1(template)
+    if problem != "": return _parent_link_reject_v1(problem)
+    if not scheduler_ledger_valid_v1(ledger):
+        return _parent_link_reject_v1("link-ledger-invalid")
+    var dependencies: [BuildDependencyRef] = []
+    var producers: [text] = []
+    for item in template.ordered_inputs:
+        var already_resolved = false
+        for prior in dependencies:
+            if prior.output_path == item.output_path:
+                already_resolved = true
+        if already_resolved: continue
+        val resolved = _resolve_parent_link_output_v1(ledger, cas_root,
+            item.producer_action_digest, item.output_path)
+        if resolved == nil:
+            return _parent_link_reject_v1("link-producer-output-unavailable")
+        dependencies.push(resolved.unwrap())
+        if not producers.contains(item.producer_action_digest):
+            producers.push(item.producer_action_digest)
+    var action = template.base_action
+    var argv = action.argv
+    for item in template.ordered_inputs:
+        argv[item.argv_index] = "/simple-build/inputs/" + item.output_path
+    action.argv = argv
+    var inputs = action.inputs
+    inputs.declared_dependency_actions = producers
+    inputs.dependency_outputs = dependencies
+    action.inputs = inputs
+    val digest = action_spec_digest_v1(action)
+    if digest == "": return _parent_link_reject_v1("link-action-invalid")
+    val admitted = validate_dependency_provenance_v1(action, ledger,
+        cas_root)
+    if not admitted.valid:
+        return _parent_link_reject_v1("link-provenance: " + admitted.reason)
+    ParentLinkResolutionV1(true, "", action, digest)
+
+fn resolve_parent_link_from_owner_v1(template: ParentLinkTemplateV1,
+        owner_root: text, cas_root: text) -> ParentLinkResolutionV1:
+    """Replay and close the owner before reading retained producer bytes."""
+    val owner = scheduler_owner_open_v1(owner_root)
+    if owner.error != "":
+        return _parent_link_reject_v1("link-owner: " + owner.error)
+    val ledger = owner.state.ledger
+    if not scheduler_owner_close_v1(owner):
+        return _parent_link_reject_v1("link-owner-close-failed")
+    resolve_parent_link_v1(template, ledger, cas_root)
+
+fn resolved_parent_link_request_v1(resolved: ParentLinkResolutionV1,
+        attempt_template: AttemptSpec, fence: i64, cpu_tokens: i64,
+        fd_tokens: i64) -> BuildWorkerRequestV1?:
+    """Create an exact request only after all producer bytes are resolved."""
+    if not resolved.valid or resolved.action == nil or
+       resolved.action_digest == "" or
+       action_spec_digest_v1(resolved.action.unwrap()) !=
+           resolved.action_digest:
+        return nil
+    var attempt = attempt_template
+    attempt.action_digest = resolved.action_digest
+    val request = BuildWorkerRequestV1(resolved.action.unwrap(), attempt,
+        fence, cpu_tokens, fd_tokens)
+    if encode_build_worker_request_v1(request) == "": return nil
+    request
+
+export ParentLinkResolutionV1, resolve_parent_link_v1
+export resolve_parent_link_from_owner_v1
+export resolved_parent_link_request_v1

@@ -1,0 +1,85 @@
+#!/bin/sh
+# Rootless Linux Podman preflight for a distributed-build worker host.
+# This records prerequisites; a live worker attempt must prove containment.
+set -eu
+
+if [ "$#" -ne 0 ]; then
+    printf '%s\n' 'usage: sh scripts/check/check-dist-build-rootless-podman-host.shs' >&2
+    exit 2
+fi
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+blocked=0
+printf 'dist_build_rootless_podman_handoff |field, value|\n'
+
+row() {
+    bad_bytes=$(printf '%s' "$2" | LC_ALL=C tr -d ' -~' | wc -c)
+    if [ "${#2}" -gt 256 ] || [ "$bad_bytes" -ne 0 ]; then
+        printf 'invalid Podman preflight receipt value: %s\n' "$1" >&2
+        exit 2
+    fi
+    escaped=$(printf '%s' "$2" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
+    printf '    "%s", "%s"\n' "$1" "$escaped"
+}
+block() {
+    row "$1" "$2"
+    blocked=1
+}
+
+row schema simple-dist-build-rootless-podman-handoff-v1
+row host "$(uname -s)-$(uname -m)"
+row source_commit "$(git -C "$repo_root" rev-parse HEAD)"
+
+if [ "$(uname -s)" != Linux ]; then
+    block linux_host required
+    row status BLOCKED
+    exit 2
+fi
+row linux_host present
+
+uid=$(id -u)
+row caller_uid "$uid"
+if [ "$uid" -eq 0 ]; then
+    block non_root_caller required
+else
+    row non_root_caller present
+fi
+
+if ! checkout_status=$(git -C "$repo_root" status --porcelain --untracked-files=all --ignore-submodules=none); then
+    block checkout_status unavailable
+elif [ -n "$checkout_status" ]; then
+    block checkout_status dirty
+else
+    row checkout_status clean
+fi
+
+if ! command -v podman >/dev/null 2>&1; then
+    block podman_client missing
+elif ! podman_info=$(podman --remote=false info --format '{{.Host.Security.Rootless}}|{{.Host.CgroupVersion}}|{{.Host.CgroupManager}}' 2>/dev/null); then
+    block podman_engine unavailable
+else
+    case "$podman_info" in
+        true\|v2\|systemd|true\|v2\|cgroupfs)
+            row podman_engine local-rootless
+            row cgroup_v2 present
+            row cgroup_manager "${podman_info##*|}" ;;
+        *) block podman_engine unsupported-or-malformed ;;
+    esac
+
+    if uid_map=$(podman --remote=false unshare cat /proc/self/uid_map 2>/dev/null) &&
+       gid_map=$(podman --remote=false unshare cat /proc/self/gid_map 2>/dev/null) &&
+       printf '%s\n' "$uid_map" | awk 'NF == 3 && $3 > 1 { found=1 } END { exit !found }' &&
+       printf '%s\n' "$gid_map" | awk 'NF == 3 && $3 > 1 { found=1 } END { exit !found }'; then
+        row user_namespace subordinate-uid-and-gid-maps-present
+    else
+        block user_namespace subordinate-maps-unavailable
+    fi
+fi
+
+row cgroup_delegation live-fixture-required
+if [ "$blocked" -ne 0 ]; then
+    row status BLOCKED
+    exit 2
+fi
+row status PREFLIGHT_ONLY
+row next 'Run source-matched native worker lifecycle and exact-ID cleanup checks.'

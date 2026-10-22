@@ -1,0 +1,238 @@
+# @req REQ-2D-005 NFR-2D-005
+# The optional upstream provider must preflight the complete shared drawing
+# value and refuse loss before native work is created.
+
+use std.spec.*
+use common.ui.draw_ir.{draw_ir_batch, draw_ir_composition,
+    draw_ir_embedding_config, draw_ir_rect, draw_ir_rect_bounds,
+    draw_ir_rect_clipped, draw_ir_fractional_rect, draw_ir_affine_rect,
+    draw_ir_affine2d, DRAW_IR_SCHEMA_VERSION_V4,
+    DRAW_IR_RASTER_COVERAGE_AA, DrawIrCommand}
+use std.skia.backend.upstream_ganesh_vulkan.provider.{
+    UPSTREAM_SKIA_GANESH_VULKAN_BACKEND_ID,
+    UPSTREAM_SKIA_GANESH_VULKAN_DRAW_FORMAT_V1,
+    UPSTREAM_SKIA_GANESH_VULKAN_DRAW_FORMAT_V2,
+    UpstreamSkiaGaneshFrame, upstream_skia_ganesh_vulkan_final_capture,
+    upstream_skia_ganesh_vulkan_preflight,
+    upstream_skia_ganesh_vulkan_render}
+
+fn _upstream_scene(commands: [DrawIrCommand]):
+    draw_ir_composition("upstream-probe", "scene", "gpu", [
+        draw_ir_batch("only", "gpu",
+            draw_ir_embedding_config("surface", "root", 0, 0, 16, 16,
+                0, 1000, false), commands)
+    ])
+
+fn _upstream_v4_scene(commands: [DrawIrCommand]):
+    var batch = draw_ir_batch("only", "gpu",
+        draw_ir_embedding_config("surface", "root", 0, 0, 16, 16,
+            0, 1000, false), commands)
+    batch.schema = DRAW_IR_SCHEMA_VERSION_V4
+    var scene = draw_ir_composition("upstream-v4-probe", "scene", "gpu", [batch])
+    scene.schema = DRAW_IR_SCHEMA_VERSION_V4
+    scene
+
+describe "optional upstream Ganesh Vulkan admission":
+    it "admits exact fractional rectangles through the shared DrawIR contract":
+        # @req REQ-2D-005
+        val scene = _upstream_scene([
+            draw_ir_rect("clear", 0, 0, 16, 16, 0xff000000u32),
+            draw_ir_fractional_rect("quarter", 0.25, 1.5, 4.0, 3.5, 0xff336699u32)
+        ])
+        val admission = upstream_skia_ganesh_vulkan_preflight(scene)
+        expect(admission.accepted).to_equal(true)
+        expect(admission.rect_count).to_equal(2)
+        expect(admission.draw_format).to_equal(UPSTREAM_SKIA_GANESH_VULKAN_DRAW_FORMAT_V1)
+        expect(admission.rect_stride).to_equal(40)
+        expect(UPSTREAM_SKIA_GANESH_VULKAN_BACKEND_ID).to_equal("upstream-skia-ganesh-vulkan")
+
+    it "rejects an unsupported later operation before dispatch":
+        # @req REQ-2D-005
+        val scene = _upstream_scene([
+            draw_ir_rect("first", 0, 0, 16, 16, 0xff000000u32),
+            draw_ir_fractional_rect("inexact", 0.1, 2.0, 3.0, 4.0, 0xff000000u32)
+        ])
+        val admission = upstream_skia_ganesh_vulkan_preflight(scene)
+        expect(admission.accepted).to_equal(false)
+        expect(admission.batch_index).to_equal(0)
+        expect(admission.command_index).to_equal(1)
+        expect(admission.reason).to_contain("SkScalar")
+
+    it "rejects unsupported style and invalid surface lifetime scope":
+        # @req REQ-2D-005 NFR-2D-005
+        var styled = draw_ir_rect("styled", 0, 0, 4, 4, 0xff000000u32)
+        styled.parent_id = "parent"
+        val style_admission = upstream_skia_ganesh_vulkan_preflight(_upstream_scene([styled]))
+        expect(style_admission.accepted).to_equal(false)
+        expect(style_admission.command_index).to_equal(0)
+        val empty_admission = upstream_skia_ganesh_vulkan_preflight(_upstream_scene([]))
+        expect(empty_admission.accepted).to_equal(false)
+        expect(empty_admission.reason).to_contain("rectangle count")
+
+    it "does not open a native session for a rejected composition":
+        # @req REQ-2D-005 NFR-2D-005
+        val scene = _upstream_scene([])
+        match upstream_skia_ganesh_vulkan_render(scene, 0, 1):
+            Ok(_): assert(false)
+            Err(reason): expect(reason).to_contain("rectangle count")
+
+    it "rejects hidden payload on an otherwise valid rectangle":
+        # @req REQ-2D-005
+        var rect = draw_ir_rect("hidden", 0, 0, 4, 4, 0xff000000u32)
+        rect.image_uri = "asset.png"
+        val admission = upstream_skia_ganesh_vulkan_preflight(_upstream_scene([rect]))
+        expect(admission.accepted).to_equal(false)
+        expect(admission.command_index).to_equal(0)
+        expect(admission.reason).to_contain("unsupported payload")
+
+    it "requires the same opaque full-target initializer as strict Engine2D":
+        # @req REQ-2D-005 REQ-2D-006
+        val fractional_first = upstream_skia_ganesh_vulkan_preflight(_upstream_scene([
+            draw_ir_fractional_rect("first", 0.0, 0.0, 16.0, 16.0, 0xff000000u32)]))
+        expect(fractional_first.accepted).to_equal(false)
+        expect(fractional_first.reason).to_contain("integer full-target clear")
+        val partial_first = upstream_skia_ganesh_vulkan_preflight(_upstream_scene([
+            draw_ir_rect("first", 0, 0, 4, 4, 0xff000000u32)]))
+        expect(partial_first.accepted).to_equal(false)
+        expect(partial_first.reason).to_contain("integer full-target clear")
+
+    it "rejects transparent and out-of-target rectangles before native work":
+        # @req REQ-2D-005 REQ-2D-006
+        val transparent = upstream_skia_ganesh_vulkan_preflight(_upstream_scene([
+            draw_ir_rect("clear", 0, 0, 16, 16, 0xff000000u32),
+            draw_ir_rect("alpha", 1, 1, 2, 2, 0x80000000u32)]))
+        expect(transparent.accepted).to_equal(false)
+        expect(transparent.command_index).to_equal(1)
+        expect(transparent.reason).to_contain("opaque rectangle")
+        val out_of_target = upstream_skia_ganesh_vulkan_preflight(_upstream_scene([
+            draw_ir_rect("clear", 0, 0, 16, 16, 0xff000000u32),
+            draw_ir_rect("outside", 15, 1, 2, 2, 0xff000000u32)]))
+        expect(out_of_target.accepted).to_equal(false)
+        expect(out_of_target.command_index).to_equal(1)
+        expect(out_of_target.reason).to_contain("outside target")
+
+    it "rejects a non-GPU shared drawing target":
+        # @req REQ-2D-005
+        var scene = _upstream_scene([
+            draw_ir_rect("clear", 0, 0, 16, 16, 0xff000000u32)])
+        scene.backend_target = "cpu"
+        val admission = upstream_skia_ganesh_vulkan_preflight(scene)
+        expect(admission.accepted).to_equal(false)
+        expect(admission.reason).to_contain("Vulkan batch target")
+
+    it "selects v2 when a later rectangle has a clip and admits empty coverage":
+        # @req REQ-2D-005
+        val scene = _upstream_scene([
+            draw_ir_rect("clear", 0, 0, 16, 16, 0xff000000u32),
+            draw_ir_rect_clipped("oversized", -2, -2, 20, 20,
+                0xff336699u32, draw_ir_rect_bounds(2, 3, 0, 10))
+        ])
+        val admission = upstream_skia_ganesh_vulkan_preflight(scene)
+        expect(admission.accepted).to_equal(true)
+        expect(admission.draw_format).to_equal(UPSTREAM_SKIA_GANESH_VULKAN_DRAW_FORMAT_V2)
+        expect(admission.draw_magic).to_equal(0x324b5355)
+        expect(admission.rect_stride).to_equal(64)
+        expect(admission.rect_count).to_equal(2)
+
+    it "keeps the first full-target clear unclipped":
+        # @req REQ-2D-005
+        val scene = _upstream_scene([
+            draw_ir_rect_clipped("clear", 0, 0, 16, 16,
+                0xff000000u32, draw_ir_rect_bounds(0, 0, 16, 16))
+        ])
+        val admission = upstream_skia_ganesh_vulkan_preflight(scene)
+        expect(admission.accepted).to_equal(false)
+        expect(admission.command_index).to_equal(0)
+        expect(admission.reason).to_contain("integer full-target clear")
+
+    it "rejects clip and clipped draw edges that SkScalar would round":
+        # @req REQ-2D-005
+        val bad_clip = upstream_skia_ganesh_vulkan_preflight(_upstream_scene([
+            draw_ir_rect("clear", 0, 0, 16, 16, 0xff000000u32),
+            draw_ir_rect_clipped("bad-edge", 0, 0, 4, 4,
+                0xff336699u32, draw_ir_rect_bounds(16777216, 0, 1, 4))
+        ]))
+        expect(bad_clip.accepted).to_equal(false)
+        expect(bad_clip.command_index).to_equal(1)
+        expect(bad_clip.reason).to_contain("clip edge")
+        val bad_draw = upstream_skia_ganesh_vulkan_preflight(_upstream_scene([
+            draw_ir_rect("clear", 0, 0, 16, 16, 0xff000000u32),
+            draw_ir_rect_clipped("bad-draw-edge", 16777216, 0, 1, 4,
+                0xff336699u32, draw_ir_rect_bounds(0, 0, 4, 4))
+        ]))
+        expect(bad_draw.accepted).to_equal(false)
+        expect(bad_draw.command_index).to_equal(1)
+        expect(bad_draw.reason).to_contain("clipped rectangle edge")
+
+    it "keeps the v1 wire route for v4 scenes using only legacy rectangle state":
+        # @req REQ-2D-005
+        val scene = _upstream_v4_scene([
+            draw_ir_rect("clear", 0, 0, 16, 16, 0xff000000u32),
+            draw_ir_rect("box", 2, 3, 4, 5, 0xff336699u32)
+        ])
+        val admission = upstream_skia_ganesh_vulkan_preflight(scene)
+        expect(admission.accepted).to_equal(true)
+        expect(admission.draw_format).to_equal(UPSTREAM_SKIA_GANESH_VULKAN_DRAW_FORMAT_V1)
+
+    it "rejects affine and coverage raster state before native provider work":
+        # @req REQ-2D-005
+        val matrix = draw_ir_affine2d(1.0, 0.0, 0.0, 1.0, 2.0, 3.0)
+        val affine_scene = _upstream_v4_scene([
+            draw_ir_rect("clear", 0, 0, 16, 16, 0xff000000u32),
+            draw_ir_affine_rect("affine", 4.0, 5.0, 0xff336699u32, matrix)
+        ])
+        val affine_admission = upstream_skia_ganesh_vulkan_preflight(affine_scene)
+        expect(affine_admission.accepted).to_equal(false)
+        expect(affine_admission.command_index).to_equal(1)
+        expect(affine_admission.reason).to_contain("affine transform or raster policy")
+        var coverage = draw_ir_rect("coverage", 2, 3, 4, 5, 0xff336699u32)
+        coverage.raster_policy = DRAW_IR_RASTER_COVERAGE_AA
+        val coverage_scene = _upstream_v4_scene([
+            draw_ir_rect("clear", 0, 0, 16, 16, 0xff000000u32), coverage
+        ])
+        val coverage_admission = upstream_skia_ganesh_vulkan_preflight(coverage_scene)
+        expect(coverage_admission.accepted).to_equal(false)
+        expect(coverage_admission.command_index).to_equal(1)
+        expect(coverage_admission.reason).to_contain("affine transform or raster policy")
+
+    it "keeps the combined case02 affine clip and coverage scene closed":
+        # @req REQ-2D-005
+        val rotation = draw_ir_affine2d(
+            0.7071067811865476, 0.7071067811865476,
+            -0.7071067811865476, 0.7071067811865476,
+            8.0, 3.0)
+        var transformed = draw_ir_affine_rect("case02", 4.0, 4.0,
+            0xff336699u32, rotation, DRAW_IR_RASTER_COVERAGE_AA)
+        transformed.clip_rect = draw_ir_rect_bounds(0, 0, 16, 16)
+        val scene = _upstream_v4_scene([
+            draw_ir_rect("clear", 0, 0, 16, 16, 0xff000000u32), transformed
+        ])
+        val admission = upstream_skia_ganesh_vulkan_preflight(scene)
+        expect(admission.accepted).to_equal(false)
+        expect(admission.command_index).to_equal(1)
+        expect(admission.reason).to_contain("affine transform or raster policy")
+
+    it "packages a completed readback only when its raw checksum matches":
+        # @req REQ-2D-003 REQ-2D-005
+        val frame = UpstreamSkiaGaneshFrame(
+            width: 2, height: 1, rgba_bytes: [1, 2, 3, 255, 4, 5, 6, 255],
+            provider_identity: 0x534b4941564b0001,
+            device_identity: 0, resource_id: 7,
+            submission_token: 9, completion_token: 9,
+            readback_checksum: -7801118042321891404)
+        val digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        match upstream_skia_ganesh_vulkan_final_capture(
+            frame, "controlled-primitives", digest, "frame-1"):
+            Ok(capture):
+                expect(capture.metadata.resource_id).to_equal("upstream-skia-resource-7")
+                expect(capture.metadata.pixel_format).to_equal("R8G8B8A8_UNORM")
+                expect(capture.metadata.alpha_mode).to_equal("straight")
+                expect(capture.metadata.stride).to_equal(8)
+                expect(capture.pixel_bytes).to_equal([1, 2, 3, 255, 4, 5, 6, 255])
+            Err(_): assert(false)
+        var tampered = frame
+        tampered.rgba_bytes = [1, 2, 3, 255, 4, 5, 7, 255]
+        match upstream_skia_ganesh_vulkan_final_capture(
+            tampered, "controlled-primitives", digest, "frame-1"):
+            Ok(_): assert(false)
+            Err(reason): expect(reason).to_contain("checksum mismatch")

@@ -1,0 +1,119 @@
+use std.spec.*
+use app.build.scheduler.remote_worker_preflight.{preflight_remote_build_worker_v1,
+    preflight_remote_build_job_v1}
+use app.build.scheduler.distributed_attempt.{DistributedBuildNodeV1}
+use app.build.scheduler.trusted_ssh.{TrustedSshNodeV1}
+use app.build.scheduler.trusted_sftp.{TrustedSftpConfigV1}
+use app.build.scheduler.trusted_worker_invocation.{TrustedWorkerCommandV1}
+use app.build.scheduler.worker_capability.{BuildWorkerCapabilityV1}
+use app.build.scheduler.worker_sandbox_identity.{build_worker_sandbox_digest_v1}
+use compiler.common.build_contract.{BuildInputRef, SnapshotManifest,
+    ToolchainManifest, InputManifest, ActionSpec, AttemptSpec, NodeCapabilities,
+    action_spec_digest_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn _remote_action_v1() -> ActionSpec:
+    val snapshot = sha256_text("remote-snapshot")
+    ActionSpec(1, "compile", SnapshotManifest(1, snapshot,
+        sha256_text("tree"), sha256_text("submodules")),
+        ToolchainManifest(1, sha256_text("compiler"), sha256_text("behavior"),
+            sha256_text("abi"), sha256_text("runtime"),
+            sha256_text("sysroot"), "aarch64-unknown-linux-gnu"),
+        InputManifest(1, snapshot,
+            [BuildInputRef("src/main.spl", sha256_text("source"))],
+            [], [], [], [], [], sha256_text("resolution"), true, false),
+        ["/usr/local/bin/simple", "build"], "simple-build/outputs",
+        build_worker_sandbox_digest_v1(
+            "simple-build@sha256:" + sha256_text("image"),
+            "podman", "/usr/local/bin/simple"),
+        ["main"], sha256_text("resources"))
+
+fn _remote_node_v1() -> DistributedBuildNodeV1:
+    val ssh = TrustedSshNodeV1("worker-1", "build.example", "builder", 22,
+        "/usr/bin/ssh", sha256_text("ssh"), "/etc/known_hosts",
+        sha256_text("hosts"), "/etc/key", sha256_text("key"))
+    DistributedBuildNodeV1(
+        TrustedWorkerCommandV1(ssh, "/usr/local/bin/simple-build-worker", 30000),
+        TrustedSftpConfigV1(ssh, "/usr/bin/sftp", sha256_text("sftp"),
+            "/srv/simple-build-inbox"),
+        "/src", "/state", "/cas")
+
+fn _remote_report_v1(action: ActionSpec) -> BuildWorkerCapabilityV1:
+    BuildWorkerCapabilityV1("worker-1", "linux", "x86_64",
+        "f0d6844f-451e-4f8d-8d7e-f33f30153b8f", 4,
+        "linux-oci-v1", "podman", "rootless",
+        "simple-build@sha256:" + sha256_text("image"),
+        "/usr/local/bin/simple", action.toolchain,
+        action.sandbox_digest, action.resource_policy_digest,
+        4, 8192, sha256_text("challenge"))
+
+fn _remote_caps_v1(action: ActionSpec) -> NodeCapabilities:
+    NodeCapabilities(1, "worker-1", [action.toolchain.target_triple],
+        [action.toolchain.provider_abi_digest], "trusted-build", 8192)
+
+describe "remote Linux worker binding":
+    it "requires a canonical fenced Job before the live SSH worker path":
+        val action = _remote_action_v1()
+        val attempt = AttemptSpec(1, action_spec_digest_v1(action),
+            "try-1", "worker-1", 0, 0, 4096)
+        val ready = preflight_remote_build_job_v1(action, attempt,
+            _remote_caps_v1(action), "trusted-build", _remote_node_v1(),
+            _remote_report_v1(action), 1, 2, 8)
+        expect(ready.valid).to_be(true)
+        val missing_fd = preflight_remote_build_job_v1(action, attempt,
+            _remote_caps_v1(action), "trusted-build", _remote_node_v1(),
+            _remote_report_v1(action), 1, 2, 0)
+        expect(missing_fd.valid).to_be(false)
+        expect(missing_fd.reason).to_equal("job-plan: request-invalid")
+
+    it "binds a Linux OCI worker independently of the parent host OS":
+        val action = _remote_action_v1()
+        val attempt = AttemptSpec(1, action_spec_digest_v1(action),
+            "try-1", "worker-1", 0, 0, 4096)
+        val bound = preflight_remote_build_worker_v1(action, attempt,
+            _remote_caps_v1(action), "trusted-build", _remote_node_v1(),
+            _remote_report_v1(action), 1, 2)
+        expect(bound.valid).to_be(true)
+        expect(bound.worker_id).to_equal("worker-1")
+        expect(bound.fence).to_equal(1)
+
+    it "rejects identity, trust, image and resource drift before dispatch":
+        val action = _remote_action_v1()
+        val attempt = AttemptSpec(1, action_spec_digest_v1(action),
+            "try-1", "worker-1", 0, 0, 4096)
+        val node = _remote_node_v1()
+        val caps = _remote_caps_v1(action)
+        var report = _remote_report_v1(action)
+        report.worker_id = "worker-2"
+        expect(preflight_remote_build_worker_v1(action, attempt, caps,
+            "trusted-build", node, report, 1, 2).reason)
+            .to_equal("worker-identity-mismatch")
+        report = _remote_report_v1(action)
+        expect(preflight_remote_build_worker_v1(action, attempt, caps,
+            "other-domain", node, report, 1, 2).reason)
+            .to_equal("node-policy-mismatch")
+        report.image = "simple-build@sha256:" + sha256_text("other-image")
+        expect(preflight_remote_build_worker_v1(action, attempt, caps,
+            "trusted-build", node, report, 1, 2).reason)
+            .to_equal("worker-build-policy-mismatch")
+        report = _remote_report_v1(action)
+        report.memory_limit = 1024
+        expect(preflight_remote_build_worker_v1(action, attempt, caps,
+            "trusted-build", node, report, 1, 2).reason)
+            .to_equal("worker-capacity-mismatch")
+        var wrong_action = action
+        wrong_action.argv = ["/usr/local/bin/other", "build"]
+        var wrong_attempt = attempt
+        wrong_attempt.action_digest = action_spec_digest_v1(wrong_action)
+        expect(preflight_remote_build_worker_v1(wrong_action, wrong_attempt, caps,
+            "trusted-build", node, _remote_report_v1(action), 1, 2).reason)
+            .to_equal("execution-profile-unsupported")
+        var wrong_node = node
+        var wrong_sftp = wrong_node.sftp
+        var wrong_ssh = wrong_sftp.node
+        wrong_ssh.host = "other.example"
+        wrong_sftp.node = wrong_ssh
+        wrong_node.sftp = wrong_sftp
+        expect(preflight_remote_build_worker_v1(action, attempt, caps,
+            "trusted-build", wrong_node, _remote_report_v1(action), 1, 2).reason)
+            .to_equal("worker-identity-mismatch")

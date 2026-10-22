@@ -1,0 +1,82 @@
+use app.build.scheduler.trusted_ssh.{TrustedSshNodeV1}
+use app.build.scheduler.trusted_sftp.{TrustedSftpConfigV1}
+use app.build.scheduler.trusted_request_upload.{plan_build_request_upload_v1}
+use app.build.scheduler.worker_request.{BuildWorkerRequestV1}
+use app.io.mod.{cwd, dir_create_all, file_atomic_write, file_hash_sha256,
+    getpid, time_now_unix_micros}
+use compiler.common.build_contract.{BuildInputRef, SnapshotManifest,
+    ToolchainManifest, InputManifest, ActionSpec, AttemptSpec,
+    action_spec_digest_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn _request_upload_config_v1(root: text) -> TrustedSftpConfigV1:
+    val ssh = root + "/ssh"
+    val sftp = root + "/sftp"
+    val hosts = root + "/known_hosts"
+    val key = root + "/identity"
+    file_atomic_write(ssh, "fake ssh\n")
+    file_atomic_write(sftp, "fake sftp\n")
+    file_atomic_write(hosts,
+        "node-a ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeTestOnly\n")
+    file_atomic_write(key, "fake key\n")
+    TrustedSftpConfigV1(
+        TrustedSshNodeV1("node-a", "127.0.0.1", "builder", 2222,
+            ssh, file_hash_sha256(ssh), hosts, file_hash_sha256(hosts),
+            key, file_hash_sha256(key)),
+        sftp, file_hash_sha256(sftp), "/srv/simple-build-inbox")
+
+fn _request_upload_action_v1(input_path: text, content: text) -> ActionSpec:
+    val snapshot = sha256_text("request upload snapshot")
+    ActionSpec(1, "compile",
+        SnapshotManifest(1, snapshot, sha256_text("source"),
+            sha256_text("submodules")),
+        ToolchainManifest(1, sha256_text("compiler"), sha256_text("behavior"),
+            sha256_text("abi"), sha256_text("runtime"),
+            sha256_text("sysroot"), "x86_64-unknown-linux-gnu"),
+        InputManifest(1, snapshot, [BuildInputRef(input_path,
+            sha256_text(content))], [], [], [], [], [],
+            sha256_text("context"), true, false),
+        ["cc", "-c", input_path], "src", sha256_text("sandbox"),
+        ["answer.o"], sha256_text("resources"))
+
+fn _request_upload_v1(action: ActionSpec) -> BuildWorkerRequestV1:
+    val attempt = AttemptSpec(1, action_spec_digest_v1(action),
+        "try-1", "node-a", 0, 0, 4096)
+    BuildWorkerRequestV1(action, attempt, 7, 1, 8)
+
+describe "complete request SFTP upload plan":
+    it "binds a ready marker to verified declared source bytes":
+        val root = cwd() + "/build/test/request-upload-" +
+            getpid().to_text() + "-" + time_now_unix_micros().to_text()
+        val source = root + "/source"
+        expect(dir_create_all(source + "/src")).to_be(true)
+        val content = "int answer(void) { return 42; }\n"
+        expect(file_atomic_write(source + "/src/answer.c", content)).to_be(true)
+        val config = _request_upload_config_v1(root)
+        val request = _request_upload_v1(_request_upload_action_v1(
+            "src/answer.c", content))
+        val plan = plan_build_request_upload_v1(config, request, source)
+        expect(plan.valid).to_be(true)
+        expect(plan.remote_attempt_root).to_equal(
+            "/srv/simple-build-inbox/try-1")
+        expect(plan.ready_wire).to_contain("request=" + plan.request_digest + "\n")
+        expect(plan.ready_wire).to_contain("attempt=try-1\n")
+        expect(plan.request_wire).to_contain("simple-build-worker-request-v1\n")
+        val changed = _request_upload_v1(_request_upload_action_v1(
+            "src/answer.c", "different source"))
+        expect(plan_build_request_upload_v1(config, changed, source).reason)
+            .to_equal("input-digest-mismatch")
+
+    it "rejects a declared input that overlaps the remote control directory":
+        val root = cwd() + "/build/test/request-upload-collision-" +
+            getpid().to_text() + "-" + time_now_unix_micros().to_text()
+        val source = root + "/source"
+        expect(dir_create_all(source + "/.simple-control")).to_be(true)
+        val content = "collision\n"
+        expect(file_atomic_write(source + "/.simple-control/request.wire",
+            content)).to_be(true)
+        val config = _request_upload_config_v1(root)
+        val request = _request_upload_v1(_request_upload_action_v1(
+            ".simple-control/request.wire", content))
+        expect(plan_build_request_upload_v1(config, request, source).reason)
+            .to_equal("control-path-collision")

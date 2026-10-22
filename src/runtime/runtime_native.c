@@ -31,6 +31,9 @@ const volatile int rt_alloc_observer_native_owner_v1 = 1;
 #include "simple_gui_event_provider_abi_v1.h"
 
 #include <stdio.h>
+#if defined(__APPLE__)
+#include <sys/stdio.h>
+#endif
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
@@ -12316,6 +12319,21 @@ int64_t rt_io_file_open(const uint8_t* path_ptr, uint64_t path_len, int64_t mode
 #endif
 }
 
+/* Two-argument open twins: the seed-produced candidate mis-passes the
+ * path_len operand of THREE-argument mixed (ptr, len, mode) text externs
+ * (observed as path_len = -1), while two-argument (ptr, len) text externs
+ * (rt_io_file_exists) expand correctly. Keep in sync with the Rust twins in
+ * io_file.rs. See stage2_sanity_scv_snapshot_entry_zero_sources_2026-10-22. */
+int64_t rt_io_file_open_read(const uint8_t* path_ptr, uint64_t path_len) {
+    return rt_io_file_open(path_ptr, path_len, 0);
+}
+int64_t rt_io_file_open_write(const uint8_t* path_ptr, uint64_t path_len) {
+    return rt_io_file_open(path_ptr, path_len, 1);
+}
+int64_t rt_io_file_open_append(const uint8_t* path_ptr, uint64_t path_len) {
+    return rt_io_file_open(path_ptr, path_len, 3);
+}
+
 /* Canonical FileHandle close ABI. The descriptor originates from
  * rt_io_file_open above; invalid descriptors fail closed. */
 bool rt_io_file_close(int64_t fd) {
@@ -12673,7 +12691,17 @@ int64_t rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
      * report 0 and would silently yield "" (the spl_file_read comment records
      * that incident). Pinned by scripts/check/check-binary-file-read-length.shs. */
     FILE* f = fopen(path, "rb");
-    if (!f) return rt_nil;
+    if (!f) {
+        /* DIAGNOSTIC (bug-linked: stage2_sanity_scv_snapshot_entry_zero_sources_2026-10-22):
+         * ungated dump of the fopen failure on the candidate's actual read path. */
+        fprintf(stderr,
+            "[rt_file_read_text-diag] errno=%d path_len=%llu path_bytes=",
+            errno, (unsigned long long)path_len);
+        for (uint64_t i = 0; i < path_len && i < 200; i++)
+            fprintf(stderr, "%02x", (unsigned)path_ptr[i]);
+        fprintf(stderr, " converted='%s'\n", path);
+        return rt_nil;
+    }
     size_t cap = 4096;
     size_t len = 0;
     char* content = (char*)rt_observed_malloc_v1(cap);
@@ -16243,6 +16271,14 @@ int64_t rt_file_publish_noreplace(const uint8_t* staged_ptr, uint64_t staged_len
     if (errno == EEXIST) return 0;
     if (errno != ENOSYS && errno != EINVAL) return -1;
 #endif
+#if defined(__APPLE__)
+    /* Preserve no-replace semantics for both files and directories. */
+    if (renamex_np(staged, destination, RENAME_EXCL) == 0) return 1;
+    if (errno == EEXIST) return 0;
+    if (errno != ENOTSUP && errno != EOPNOTSUPP && errno != EINVAL) return -1;
+#endif
+    struct stat source_stat;
+    if (lstat(staged, &source_stat) != 0 || !S_ISREG(source_stat.st_mode)) return -1;
     if (link(staged, destination) != 0) return errno == EEXIST ? 0 : -1;
     (void)unlink(staged);
     return 1;
@@ -17581,6 +17617,44 @@ int64_t rt_io_tcp_write(int64_t fd, int64_t data_val) {
     return (int64_t)rt_io_tcp_send_no_sigpipe((int)fd, ca->data, (size_t)ca->len);
 }
 
+/* Byte write for a connected socket. Simple [u8] values may be packed byte
+ * arrays or ordinary arrays with one raw byte per 64-bit slot (text.bytes()).
+ * Validate and pack the latter before sending. Unlike write(2), a dead peer
+ * cannot terminate the verifier process with SIGPIPE. */
+int64_t rt_io_socket_send_nosigpipe(int64_t fd, int64_t data_val) {
+    RtCoreArray* ca = rt_core_array_ptr((SplArray*)(uintptr_t)data_val);
+    if (fd < 0 || !ca || ca->len < 0 || ca->len > 1048576 ||
+        (ca->flags != 0 && ca->flags != RT_CORE_ARRAY_FLAG_BYTES)) return -1;
+    if (ca->len == 0) return 0;
+    if (!ca->data) return -1;
+    const void* payload = ca->data;
+    uint8_t* packed = NULL;
+    if (ca->flags == 0) {
+        packed = (uint8_t*)malloc((size_t)ca->len);
+        if (!packed) return -1;
+        const int64_t* slots = (const int64_t*)ca->data;
+        for (int64_t i = 0; i < ca->len; i++) {
+            if (slots[i] < 0 || slots[i] > 255) {
+                free(packed);
+                return -1;
+            }
+            packed[i] = (uint8_t)slots[i];
+        }
+        payload = packed;
+    }
+    int64_t written = -1;
+#if defined(MSG_NOSIGNAL)
+    written = (int64_t)send((int)fd, payload, (size_t)ca->len, MSG_NOSIGNAL);
+#elif defined(SO_NOSIGPIPE)
+    int enabled = 1;
+    if (setsockopt((int)fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled,
+                   sizeof(enabled)) == 0)
+        written = (int64_t)send((int)fd, payload, (size_t)ca->len, 0);
+#endif
+    free(packed);
+    return written;
+}
+
 int64_t rt_io_tcp_write_text(int64_t fd, int64_t text_val) {
     RtCoreString* s = rt_core_as_string(text_val);
     if (!s || s->len == 0) return 0;
@@ -17821,6 +17895,7 @@ int64_t rt_io_tcp_connect_timeout(int64_t a, int64_t m) { (void)a; (void)m; retu
 int64_t rt_io_tcp_read(int64_t f, int64_t s) { (void)f; (void)s; return rt_core_nil(); }
 int64_t rt_io_tcp_read_line(int64_t f) { (void)f; return rt_core_nil(); }
 int64_t rt_io_tcp_write(int64_t f, int64_t d) { (void)f; (void)d; return -1; }
+int64_t rt_io_socket_send_nosigpipe(int64_t f, int64_t d) { (void)f; (void)d; return -1; }
 int64_t rt_io_tcp_write_text(int64_t f, int64_t d) { (void)f; (void)d; return -1; }
 int64_t rt_io_tcp_write_bytes(int64_t f, int64_t d) { (void)f; (void)d; return -1; }
 bool rt_io_tcp_flush(int64_t f) { (void)f; return false; }

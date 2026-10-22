@@ -1,0 +1,68 @@
+# codex-impl
+# Construct one fenced Simple Orchestrator Job for an observed build worker.
+# The parent owns the request and authenticated capability; construction does
+# not launch a container or make a remote observation trustworthy.
+use app.build.scheduler.worker_request.{BuildWorkerRequestV1,
+    encode_build_worker_request_v1}
+use app.build.scheduler.worker_capability.{BuildWorkerCapabilityV1,
+    encode_build_worker_capability_v1}
+use app.build.providers.build_job_admission.{admit_build_job_v1}
+use std.common.contracts.orchestration.resource_v1.{ObjectMetaV1,
+    ResourcesV1, ContainerV1, PodSpecV1}
+use std.common.contracts.orchestration.ci_v1.{JobV1}
+use std.common.crypto.sha256.{sha256_text}
+
+struct BuildJobPlanV1:
+    ready: bool
+    reason: text
+    job: JobV1?
+
+fn _build_job_plan_reject_v1(reason: text) -> BuildJobPlanV1:
+    BuildJobPlanV1(false, reason, nil)
+
+fn _build_job_namespace_v1(value: text) -> bool:
+    if value == "" or value.len() > 63 or value.starts_with("-") or
+       value.ends_with("-"):
+        return false
+    for ch in value.chars():
+        if (ch >= "a" and ch <= "z") or (ch >= "0" and ch <= "9") or
+           ch == "-":
+            continue
+        return false
+    true
+
+fn plan_build_job_v1(request: BuildWorkerRequestV1,
+        capability: BuildWorkerCapabilityV1, controller_os: text,
+        namespace_name: text) -> BuildJobPlanV1:
+    """Derive exact Job metadata, then recheck it against worker admission.
+
+    A ready Job is still only a plan. The caller must authenticate the nonce
+    bound capability, submit through its trusted provider and retain the
+    scheduler fence through result publication.
+    """
+    if not _build_job_namespace_v1(namespace_name):
+        return _build_job_plan_reject_v1("namespace-invalid")
+    val request_wire = encode_build_worker_request_v1(request)
+    if request_wire == "" or request.cpu_tokens <= 0 or
+       request.cpu_tokens > 1000000:
+        return _build_job_plan_reject_v1("request-invalid")
+    if encode_build_worker_capability_v1(capability) == "":
+        return _build_job_plan_reject_v1("capability-invalid")
+
+    val cpu_millis = request.cpu_tokens * 1000
+    val memory = request.attempt.memory_budget_bytes
+    val resources = ResourcesV1(cpu_millis, cpu_millis, memory, memory)
+    val container = ContainerV1("compiler", capability.image, "",
+        request.action.argv, [], [], resources)
+    val pod = PodSpecV1(capability.execution_os, "native-container",
+        "endpoint-v1", [container])
+    val meta = ObjectMetaV1(request.attempt.attempt_id, namespace_name, {
+        "simple-build-request-digest": sha256_text(request_wire)})
+    val job = JobV1(meta, 0, pod)
+    val admission = admit_build_job_v1(request, capability, job,
+        controller_os)
+    if not admission.ready:
+        return _build_job_plan_reject_v1(admission.reason)
+    BuildJobPlanV1(true, "", job)
+
+export BuildJobPlanV1, plan_build_job_v1

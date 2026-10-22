@@ -1,0 +1,241 @@
+"""Exact observation of one pinned podman/docker logs invocation.
+
+This does not establish container ownership, lifecycle, or log completeness at
+the container engine. It proves only the bytes emitted by this invocation.
+The caller must retain the session until finish or finish_cleanup succeeds.
+Protected path and expected executable digest are caller supplied trust inputs.
+"""
+
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.process.observation_v4.{
+    ProcessObservationRequestV4, ProcessObservationReceiptV4,
+    ProcessObservationStreamV4, ProcessObservationStreamStateV4,
+    ProcessObservationStatusV4, ProcessObservationFailureReasonV4,
+    ProcessObservationEnforcementKindV4, ProcessObservationDescendantPolicyV4,
+    freeze_process_observation_receipt_v4,
+    freeze_process_observation_cleanup_receipt_v4
+}
+use std.nogc_sync_mut.io.process_observation_v4.{
+    OwnedExecutablePin, OwnedCwdPinV4, ProcessObservationLeaseV4,
+    process_observation_capabilities_v4, process_observation_start_pinned_v4
+}
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.{build_logs_command}
+
+pub struct OciExactLogLimitsV1:
+    wall_budget_ns: i64
+    term_grace_ns: i64
+    cleanup_budget_ns: i64
+    stream_limit_bytes: i64
+
+pub struct OciExactLogBytesV1:
+    stdout: [u8]
+    stderr: [u8]
+    stdout_sha256: text
+    stderr_sha256: text
+    executable_sha256: [u8]
+    receipt_binding: [u8]
+
+pub fn oci_exact_log_stream_complete_v1(stream: ProcessObservationStreamV4,
+        payload: [u8]) -> bool:
+    stream.state == ProcessObservationStreamStateV4.Eof and
+        stream.errno_value == 0 and stream.seen_bytes == payload.len() and
+        stream.retained_bytes == payload.len() and
+        stream.delivered_bytes == payload.len()
+
+pub fn oci_exact_log_limits_valid_v1(limits: OciExactLogLimitsV1) -> bool:
+    limits.wall_budget_ns > 0 and limits.wall_budget_ns <= 60000000000 and
+        limits.term_grace_ns >= 0 and limits.term_grace_ns <= 5000000000 and
+        limits.cleanup_budget_ns > 0 and limits.cleanup_budget_ns <= 10000000000 and
+        limits.stream_limit_bytes > 0 and limits.stream_limit_bytes <= 16777216
+
+pub class OciExactLogSessionV1:
+    var lease: ProcessObservationLeaseV4
+    var executable: OwnedExecutablePin
+    var cwd: OwnedCwdPinV4
+    executable_sha256: [u8]
+    max_wait_ns: i64
+    var acknowledged: bool
+    var pending_output: Option<OciExactLogBytesV1>
+
+    pub fn cancel(self) -> Result<ProcessObservationReceiptV4, text>:
+        self.lease.cancel(0)
+
+    # Idempotent retry for pin cleanup if closing fails after acknowledgement.
+    me fn close_pins() -> Result<bool, text>:
+        if not self.acknowledged:
+            return Err("oci-exact-logs: acknowledge observation before closing pins")
+        val executable_result = self.executable.close()
+        val cwd_result = self.cwd.close()
+        val executable_closed = executable_result?
+        val cwd_closed = cwd_result?
+        Ok(true)
+
+    # A pending or failed result retains the session's cleanup authority.
+    # No polling/retry loop is hidden inside this helper.
+    me fn finish(wait_ns: i64) -> Result<OciExactLogBytesV1, text>:
+        if self.acknowledged:
+            val pins_closed = self.close_pins()?
+            match self.pending_output:
+                case Some(output): return Ok(output)
+                case None: return Err("oci-exact-logs: observation discarded during cleanup")
+        if wait_ns < 0 or wait_ns > self.max_wait_ns:
+            return Err("oci-exact-logs: caller wait outside capability bound")
+        val receipt = self.lease.collect(wait_ns)?
+        val frozen = freeze_process_observation_receipt_v4(receipt)?
+        if receipt.packet.exit_code != 0 or receipt.packet.signal_number != 0 or
+                receipt.packet.failure_reason != ProcessObservationFailureReasonV4.Unknown or
+                receipt.packet.errno_value != 0 or receipt.packet.limit_event_bits != 0 or
+                receipt.packet.term_attempted or receipt.packet.kill_attempted:
+            return Err("oci-exact-logs: invocation failed or was interrupted")
+        if not oci_exact_log_stream_complete_v1(receipt.packet.stdout, receipt.stdout) or
+                not oci_exact_log_stream_complete_v1(receipt.packet.stderr, receipt.stderr):
+            return Err("oci-exact-logs: streams lack complete exact bytes")
+        val output = OciExactLogBytesV1(stdout: receipt.stdout, stderr: receipt.stderr,
+            stdout_sha256: sha256_u8_hex(receipt.stdout),
+            stderr_sha256: sha256_u8_hex(receipt.stderr),
+            executable_sha256: self.executable_sha256,
+            receipt_binding: receipt.binding_digest)
+        val acknowledged = self.lease.acknowledge(frozen)?
+        self.acknowledged = true
+        self.pending_output = Some(output)
+        val pins_closed = self.close_pins()?
+        Ok(output)
+
+    # Also accepts an ordinary frozen receipt rejected by finish (for example
+    # a nonzero engine exit or a truncated stream). Such bytes never succeed.
+    me fn finish_cleanup(wait_ns: i64) -> Result<bool, text>:
+        if self.acknowledged:
+            return self.close_pins()
+        if wait_ns < 0 or wait_ns > self.max_wait_ns:
+            return Err("oci-exact-logs: caller wait outside capability bound")
+        val receipt = self.lease.collect(wait_ns)?
+        match freeze_process_observation_receipt_v4(receipt):
+            case Ok(frozen):
+                val acknowledged = self.lease.acknowledge(frozen)?
+            case Err(reason):
+                val cleanup = freeze_process_observation_cleanup_receipt_v4(receipt)?
+                val acknowledged = self.lease.acknowledge_cleanup(cleanup)?
+        self.acknowledged = true
+        self.pending_output = None
+        val pins_closed = self.close_pins()?
+        Ok(true)
+
+pub class OciExactLogStartFailureV1:
+    reason: text
+    var executable: Option<OwnedExecutablePin>
+    var cwd: Option<OwnedCwdPinV4>
+
+    pub static fn without_pins(reason: text) -> OciExactLogStartFailureV1:
+        OciExactLogStartFailureV1(reason: reason, executable: None, cwd: None)
+
+    pub fn cleanup_pending(self) -> bool:
+        match self.executable:
+            case Some(pin): return true
+            case None: pass
+        match self.cwd:
+            case Some(pin): true
+            case None: false
+
+    # A failed close preserves its owner. Always attempt the other close too.
+    # The caller retains this failure object until cleanup_pending is false.
+    me fn cleanup() -> Result<bool, text>:
+        var failure = ""
+        match self.executable:
+            case Some(owner):
+                var pin = owner
+                val result = pin.close()
+                self.executable = Some(pin)
+                match result:
+                    case Ok(closed):
+                        if closed:
+                            self.executable = None
+                        else:
+                            failure = "oci-exact-logs: executable pin close incomplete"
+                    case Err(reason): failure = reason
+            case None: pass
+        match self.cwd:
+            case Some(owner):
+                var pin = owner
+                val result = pin.close()
+                self.cwd = Some(pin)
+                match result:
+                    case Ok(closed):
+                        if closed:
+                            self.cwd = None
+                        else:
+                            failure = "{failure}; cwd pin close incomplete"
+                    case Err(reason): failure = "{failure}; {reason}"
+            case None: pass
+        if failure != "":
+            return Err(failure)
+        Ok(true)
+
+# Startup failures own all pins acquired before the failure; callers must call
+# failure.cleanup(), retaining that object on Err. No startup close can discard
+# the only retry authority, and no failed start is a log observation success.
+pub fn start_oci_exact_logs_v1(engine_path: text, expected_sha256: [u8],
+        native_id: text, engine: text, state_dir: text,
+        limits: OciExactLogLimitsV1) -> Result<OciExactLogSessionV1, OciExactLogStartFailureV1>:
+    if engine != "podman" and engine != "docker":
+        return Err(OciExactLogStartFailureV1.without_pins("oci-exact-logs: unsupported engine"))
+    if not engine_path.starts_with("/") or engine_path.contains("\0") or
+            not state_dir.starts_with("/") or state_dir.contains("\0") or
+            expected_sha256.len() != 32:
+        return Err(OciExactLogStartFailureV1.without_pins("oci-exact-logs: absolute paths and SHA-256 required"))
+    if not oci_exact_log_limits_valid_v1(limits):
+        return Err(OciExactLogStartFailureV1.without_pins("oci-exact-logs: invalid bounded limits"))
+    val command = build_logs_command(engine, state_dir, native_id)
+    if command.0 != "":
+        return Err(OciExactLogStartFailureV1.without_pins(command.0))
+    val capabilities = match process_observation_capabilities_v4():
+        case Ok(value): value
+        case Err(reason): return Err(OciExactLogStartFailureV1.without_pins(reason))
+    if not capabilities.available or capabilities.runtime_error != 0 or
+            capabilities.max_capture_bytes < limits.stream_limit_bytes or
+            capabilities.max_caller_wait_ns <= 0:
+        return Err(OciExactLogStartFailureV1.without_pins("oci-exact-logs: exact observation capability unavailable"))
+    var executable = match OwnedExecutablePin.pin(engine_path):
+        case Ok(pin): pin
+        case Err(reason): return Err(OciExactLogStartFailureV1.without_pins(reason))
+    match executable.digest():
+        case Err(reason):
+            return Err(OciExactLogStartFailureV1(reason: reason,
+                executable: Some(executable), cwd: None))
+        case Ok(digest):
+            if digest != expected_sha256:
+                return Err(OciExactLogStartFailureV1(reason: "oci-exact-logs: executable digest mismatch",
+                    executable: Some(executable), cwd: None))
+    val cwd_result = OwnedCwdPinV4.pin(state_dir)
+    var cwd = match cwd_result:
+        case Ok(pin): pin
+        case Err(reason):
+            return Err(OciExactLogStartFailureV1(reason: reason,
+                executable: Some(executable), cwd: None))
+    var argv = [engine_path]
+    for argument in command.1.args:
+        argv.push(argument)
+    # The owner replaces all raw pin claims/digests with its live pin values.
+    val request = ProcessObservationRequestV4(argv: argv, environment: [],
+        canonical_cwd: state_dir, canonical_pinned_directory: state_dir,
+        executable_pin: 0, executable_digest: [], cwd_pin_claim: 0,
+        cwd_identity_digest: [], capability_bits: capabilities.capability_bits,
+        wall_budget_ns: limits.wall_budget_ns, term_grace_ns: limits.term_grace_ns,
+        cleanup_budget_ns: limits.cleanup_budget_ns,
+        stdout_limit_bytes: limits.stream_limit_bytes,
+        stderr_limit_bytes: limits.stream_limit_bytes, memory_limit_bytes: 0,
+        enforcement_kind: ProcessObservationEnforcementKindV4.None,
+        descendant_policy: ProcessObservationDescendantPolicyV4.ProcessGroup,
+        max_clock_resolution_ns: 1000000)
+    val started_result = process_observation_start_pinned_v4(executable, cwd, request)
+    match started_result:
+        case Err(reason):
+            Err(OciExactLogStartFailureV1(reason: reason,
+                executable: Some(executable), cwd: Some(cwd)))
+        case Ok(started):
+            if started.receipt.packet.status == ProcessObservationStatusV4.Rejected:
+                return Err(OciExactLogStartFailureV1(reason: "oci-exact-logs: request rejected",
+                    executable: Some(executable), cwd: Some(cwd)))
+            Ok(OciExactLogSessionV1(lease: started.lease, executable: executable,
+                cwd: cwd, executable_sha256: expected_sha256,
+                max_wait_ns: capabilities.max_caller_wait_ns,
+                acknowledged: false, pending_output: None))

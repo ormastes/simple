@@ -72,9 +72,6 @@ jobs:
           - os: ubuntu-24.04-arm
             platform: linux-aarch64
             experimental: true
-          - os: ubuntu-latest
-            platform: linux-riscv64
-            cross_compile: true
 
           # macOS platforms
           - os: macos-latest
@@ -1712,33 +1709,43 @@ jobs:
             ./build/sanity/hello | grep -q freebsd-phase1-ok
             echo "FreeBSD phase-1 compiler verified"
       - name: Package FreeBSD phase-1 compiler
-        shell: bash
-        env:
-          VERSION: ${{ needs.check-version.outputs.version }}
-        run: |
-          PLATFORM=freebsd-x86_64
-          PKG_DIR="simple-bootstrap-${VERSION}-${PLATFORM}"
-          mkdir -p "${PKG_DIR}/bin"
-          cp build/bootstrap/stage1/simple "${PKG_DIR}/bin/simple-runtime"
-          chmod +x "${PKG_DIR}/bin/simple-runtime"
-          printf '%s\n' '#!/bin/sh' 'SCRIPT_DIR=$(dirname -- "$0")' 'export SIMPLE_ASSET_ROOT="$SCRIPT_DIR/.."' 'exec "$SCRIPT_DIR/simple-runtime" "$@"' > "${PKG_DIR}/bin/simple"
-          chmod +x "${PKG_DIR}/bin/simple"
-          echo 1 > "${PKG_DIR}/PHASE"
-          rm -rf src/compiler_rust/target   # VM build output; never packaged
-          cp -r lib src examples "${PKG_DIR}/" 2>/dev/null || true
-          cp README.md LICENSE THIRD_PARTY_NOTICES.md "${PKG_DIR}/" 2>/dev/null || true
-          cp -r assets "${PKG_DIR}/"
-          # Same development-only pruning as the matrix packaging step.
-          rm -rf "${PKG_DIR}/src/app/vscode_extension/node_modules" \
-            "${PKG_DIR}/src/app/vscode_extension/.vscode-test" \
-            "${PKG_DIR}/src/compiler_rust/target" "${PKG_DIR}/build"
-          bash scripts/check_release_payload.shs --dir "${PKG_DIR}"
-          tar czf "${PKG_DIR}.spk" "${PKG_DIR}"
-          bash scripts/check_release_payload.shs --tar "${PKG_DIR}.spk"
-          sha256sum "${PKG_DIR}.spk" > "${PKG_DIR}.spk.sha256"
+        run: sh scripts/release/package-phase1-spk.shs "${{ needs.check-version.outputs.version }}" freebsd-x86_64 build/bootstrap/stage1/simple 1
       - uses: actions/upload-artifact@v4
         with:
           name: bootstrap-freebsd-x86_64
+          path: |
+            simple-bootstrap-*.spk
+            simple-bootstrap-*.spk.sha256
+          retention-days: 90
+
+  # Linux riscv64 phase 1: no hosted riscv64 runner exists, and a full
+  # stage1 compile under emulation exceeds the job limit. Cross-build instead:
+  # x86_64 seed + riscv64 runtime archive -> `native-build --target`, then run
+  # the riscv64 binary under qemu-user as the sanity check.
+  linux-riscv64-phase1:
+    name: Build Bootstrap Package (Linux riscv64, cross + qemu-user)
+    needs: check-version
+    if: needs.check-version.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install riscv64 cross toolchain and qemu-user
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm libunwind-dev gcc-riscv64-linux-gnu g++-riscv64-linux-gnu qemu-user-static
+      - name: Cross-build riscv64 compiler + qemu-user sanity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # auto: cross-compile with the newest proven linux-x86_64 compiler from
+        # the RC releases (phase N -> riscv64 phase N+1), else the Rust seed.
+        run: sh scripts/bootstrap/cross-arch-bootstrap.shs --target linux-riscv64 --compiler auto --sanity
+      - name: Package Linux riscv64 compiler
+        run: sh scripts/release/package-phase1-spk.shs "${{ needs.check-version.outputs.version }}" linux-riscv64 build/cross/linux-riscv64/simple "$(cat build/cross/linux-riscv64/PHASE)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-linux-riscv64
           path: |
             simple-bootstrap-*.spk
             simple-bootstrap-*.spk.sha256
@@ -1752,7 +1759,7 @@ jobs:
   # (spipe-vcs-v3-version-tag-*).
   rc-drop:
     name: Publish RC Drop (available platforms)
-    needs: [check-version, build-bootstrap, freebsd-phase1]
+    needs: [check-version, build-bootstrap, freebsd-phase1, linux-riscv64-phase1]
     # Only release lines publish RCs; a dispatch on a topic branch validates builds only.
     if: always() && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/release/') && needs.check-version.outputs.changed == 'true'
     runs-on: ubuntu-latest

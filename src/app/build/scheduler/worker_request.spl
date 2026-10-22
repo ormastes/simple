@@ -1,0 +1,299 @@
+# Complete, bounded worker metadata; payloads and execution authority are external.
+# Tagged records use canonical percent escapes. Set-like collections are sorted;
+# argv and resolution probes retain their semantic order. No shell interpretation.
+use compiler.common.build_contract.{BuildInputRef, BuildDependencyRef, BuildEnvInput,
+    BuildResolutionProbe, SnapshotManifest, ToolchainManifest, InputManifest,
+    ActionSpec, AttemptSpec, action_spec_digest_v1}
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use app.build.scheduler.dispatch_wire.{encode_build_dispatch_v1, parse_build_dispatch_v1}
+use app.build.scheduler.planner.{scheduler_action_digest_valid_v1}
+
+val BUILD_WORKER_REQUEST_MAX_BYTES_V1: i64 = 262144
+val BUILD_WORKER_REQUEST_MAX_ITEMS_V1: i64 = 256
+val BUILD_WORKER_REQUEST_MAX_FIELD_V1: i64 = 4096
+
+struct BuildWorkerRequestV1:
+    action: ActionSpec
+    attempt: AttemptSpec
+    fence: i64
+    cpu_tokens: i64
+    fd_tokens: i64
+
+fn _request_escape_v1(value: text) -> text:
+    val percent = value.replace("%", "%25")
+    val pipe = percent.replace("|", "%7c")
+    val newline = pipe.replace("\n", "%0a")
+    newline.replace("\r", "%0d")
+
+fn _request_unescape_v1(value: text) -> text:
+    val carriage = value.replace("%0d", "\r")
+    val newline = carriage.replace("%0a", "\n")
+    val pipe = newline.replace("%7c", "|")
+    pipe.replace("%25", "%")
+
+fn _request_row_v1(tag: text, fields: [text]) -> text:
+    var row = tag
+    for field in fields:
+        if field.len() > BUILD_WORKER_REQUEST_MAX_FIELD_V1 or field.contains("\x00"):
+            return ""
+        row = row + "|" + _request_escape_v1(field)
+    row
+
+fn _request_nat_v1(value: text) -> i64:
+    if value == "" or value.len() > 19:
+        return -1
+    for c in value.chars():
+        if c < "0" or c > "9":
+            return -1
+    val number = value.to_i64() ?? -1
+    if number < 0 or number.to_text() != value:
+        return -1
+    number
+
+class _WorkerRequestReaderV1:
+    rows: [text]
+    cursor: i64
+    bad: bool
+
+    me take(tag: text, count: i64) -> [text]:
+        var empty: [text] = []
+        var j: i64 = 0
+        while j < count:
+            empty.push("")
+            j = j + 1
+        if self.bad or self.cursor >= self.rows.len():
+            self.bad = true
+            return empty
+        val row = self.rows[self.cursor]
+        self.cursor = self.cursor + 1
+        val parts = row.split("|")
+        if parts.len() != count + 1 or parts[0] != tag:
+            self.bad = true
+            return empty
+        var values: [text] = []
+        j = 1
+        while j < parts.len():
+            val value = _request_unescape_v1(parts[j])
+            if value.len() > BUILD_WORKER_REQUEST_MAX_FIELD_V1 or
+               value.contains("\x00") or _request_escape_v1(value) != parts[j]:
+                self.bad = true
+                return empty
+            values.push(value)
+            j = j + 1
+        values
+
+    me count(tag: text) -> i64:
+        val fields = self.take(tag, 1)
+        val count = _request_nat_v1(fields[0])
+        if count < 0 or count > BUILD_WORKER_REQUEST_MAX_ITEMS_V1:
+            self.bad = true
+            return 0
+        count
+
+fn _request_collection_v1(tag: text, rows: [text], sorted: bool) -> text:
+    if rows.len() > BUILD_WORKER_REQUEST_MAX_ITEMS_V1:
+        return ""
+    val ordered = if sorted: canonical_identity_sort_texts(rows) else: rows
+    var wire = tag + "|" + rows.len().to_text() + "\n"
+    for row in ordered:
+        if row == "":
+            return ""
+        wire = wire + row + "\n"
+    wire
+
+fn _request_refs_v1(tag: text, refs: [BuildInputRef]) -> text:
+    var rows: [text] = []
+    for item in refs:
+        if not scheduler_action_digest_valid_v1(item.content_digest):
+            return ""
+        rows.push(_request_row_v1("file", [item.logical_path, item.content_digest]))
+    _request_collection_v1(tag, rows, true)
+
+fn encode_build_worker_request_v1(request: BuildWorkerRequestV1) -> text:
+    """Return canonical complete metadata, or empty for invalid/bounded-out input."""
+    val action = request.action
+    val attempt = request.attempt
+    if action.inputs.source_inputs.len() > 256 or action.inputs.generated_inputs.len() > 256 or
+       action.inputs.declared_dependency_actions.len() > 256 or
+       action.inputs.dependency_outputs.len() > 256 or action.inputs.env_inputs.len() > 256 or
+       action.inputs.resolution_probes.len() > 256 or action.argv.len() > 256 or
+       action.output_paths.len() > 128:
+        return ""
+    val dispatch = encode_build_dispatch_v1(action, attempt, request.fence,
+        request.cpu_tokens, request.fd_tokens)
+    if dispatch == "" or action.argv.len() > 256 or action.output_paths.len() > 128:
+        return ""
+    val snapshot = action.snapshot
+    val tool = action.toolchain
+    val inputs = action.inputs
+    for digest in [snapshot.source_tree_digest, snapshot.submodule_closure_digest,
+            inputs.context_digest, action.sandbox_digest, action.resource_policy_digest]:
+        if not scheduler_action_digest_valid_v1(digest):
+            return ""
+    var rows = [
+        _request_row_v1("dispatch", [dispatch]),
+        _request_row_v1("action", [action.version.to_text(), action.kind,
+            action.working_directory, action.sandbox_digest, action.resource_policy_digest]),
+        _request_row_v1("snapshot", [snapshot.version.to_text(), snapshot.snapshot_digest,
+            snapshot.source_tree_digest, snapshot.submodule_closure_digest]),
+        _request_row_v1("toolchain", [tool.version.to_text(), tool.executable_digest,
+            tool.behavior_digest, tool.provider_abi_digest, tool.runtime_digest,
+            tool.sysroot_digest, tool.target_triple]),
+        _request_row_v1("inputs", [inputs.version.to_text(), inputs.snapshot_digest,
+            inputs.context_digest, if inputs.discovery_complete: "1" else: "0",
+            if inputs.has_untracked_reads: "1" else: "0"]),
+        _request_row_v1("attempt", [attempt.version.to_text(), attempt.action_digest,
+            attempt.attempt_id, attempt.worker_id, attempt.retry_number.to_text(),
+            attempt.priority.to_text(), attempt.memory_budget_bytes.to_text()]),
+        _request_row_v1("allocation", [request.fence.to_text(),
+            request.cpu_tokens.to_text(), request.fd_tokens.to_text()])]
+    var wire = "simple-build-worker-request-v1\n"
+    for row in rows:
+        if row == "": return ""
+        wire = wire + row + "\n"
+    val sources = _request_refs_v1("sources", inputs.source_inputs)
+    val generated = _request_refs_v1("generated", inputs.generated_inputs)
+    if sources == "" or generated == "": return ""
+    wire = wire + sources + generated
+    rows = []
+    for digest in inputs.declared_dependency_actions:
+        if not scheduler_action_digest_valid_v1(digest): return ""
+        rows.push(_request_row_v1("dependency", [digest]))
+    var groups = [_request_collection_v1("dependencies", rows, true)]
+    rows = []
+    for item in inputs.dependency_outputs:
+        if not scheduler_action_digest_valid_v1(item.content_digest): return ""
+        rows.push(_request_row_v1("dependency-output", [item.action_digest,
+            item.output_path, item.content_digest]))
+    groups.push(_request_collection_v1("dependency-outputs", rows, true))
+    rows = []
+    for item in inputs.env_inputs:
+        if not scheduler_action_digest_valid_v1(item.value_digest): return ""
+        rows.push(_request_row_v1("env", [item.name, item.value_digest]))
+    groups.push(_request_collection_v1("environment", rows, true))
+    rows = []
+    for item in inputs.resolution_probes:
+        if not scheduler_action_digest_valid_v1(item.context_digest) or
+           (item.found and not scheduler_action_digest_valid_v1(item.content_digest)):
+            return ""
+        rows.push(_request_row_v1("probe", [item.path, if item.found: "1" else: "0",
+            item.content_digest, item.context_digest]))
+    groups.push(_request_collection_v1("probes", rows, false))
+    rows = []
+    for arg in action.argv:
+        rows.push(_request_row_v1("arg", [arg]))
+    groups.push(_request_collection_v1("argv", rows, false))
+    rows = []
+    for path in action.output_paths:
+        rows.push(_request_row_v1("output", [path]))
+    groups.push(_request_collection_v1("outputs", rows, true))
+    for group in groups:
+        if group == "": return ""
+        wire = wire + group
+    if wire.len() > BUILD_WORKER_REQUEST_MAX_BYTES_V1: "" else: wire
+
+fn _request_read_refs_v1(reader: _WorkerRequestReaderV1, tag: text) -> [BuildInputRef]:
+    val count = reader.count(tag)
+    var refs: [BuildInputRef] = []
+    var i: i64 = 0
+    while i < count:
+        val fields = reader.take("file", 2)
+        refs.push(BuildInputRef(fields[0], fields[1]))
+        i = i + 1
+    refs
+
+fn worker_request_matches_dispatch_v1(request: BuildWorkerRequestV1,
+        dispatch_wire: text) -> bool:
+    """Compare every dispatch claim against identities derived from the full action."""
+    val derived = encode_build_dispatch_v1(request.action, request.attempt,
+        request.fence, request.cpu_tokens, request.fd_tokens)
+    derived != "" and derived == dispatch_wire
+
+fn parse_build_worker_request_v1(wire: text) -> BuildWorkerRequestV1?:
+    """Reject unknown/reordered fields, noncanonical values, and identity mismatch."""
+    if wire.len() == 0 or wire.len() > BUILD_WORKER_REQUEST_MAX_BYTES_V1 or
+       not wire.ends_with("\n") or wire.contains("\r") or wire.contains("\x00"):
+        return nil
+    val lines = wire[0:wire.len() - 1].split("\n")
+    if lines.len() > 2200 or lines[0] != "simple-build-worker-request-v1":
+        return nil
+    val reader = _WorkerRequestReaderV1(lines, 1, false)
+    val dispatch = reader.take("dispatch", 1)
+    if parse_build_dispatch_v1(dispatch[0]) == nil: return nil
+    val a = reader.take("action", 5)
+    val s = reader.take("snapshot", 4)
+    val t = reader.take("toolchain", 7)
+    val m = reader.take("inputs", 5)
+    val attempt_fields = reader.take("attempt", 7)
+    val allocation = reader.take("allocation", 3)
+    if reader.bad or a[0] != "1" or s[0] != "1" or t[0] != "1" or
+       m[0] != "1" or m[3] != "1" or m[4] != "0" or attempt_fields[0] != "1":
+        return nil
+    val sources = _request_read_refs_v1(reader, "sources")
+    val generated = _request_read_refs_v1(reader, "generated")
+    var dependencies: [text] = []
+    var outputs: [BuildDependencyRef] = []
+    var environment: [BuildEnvInput] = []
+    var probes: [BuildResolutionProbe] = []
+    var argv: [text] = []
+    var paths: [text] = []
+    var count = reader.count("dependencies")
+    var i: i64 = 0
+    while i < count:
+        val fields = reader.take("dependency", 1)
+        dependencies.push(fields[0])
+        i = i + 1
+    count = reader.count("dependency-outputs")
+    i = 0
+    while i < count:
+        val fields = reader.take("dependency-output", 3)
+        outputs.push(BuildDependencyRef(fields[0], fields[1], fields[2]))
+        i = i + 1
+    count = reader.count("environment")
+    i = 0
+    while i < count:
+        val fields = reader.take("env", 2)
+        environment.push(BuildEnvInput(fields[0], fields[1]))
+        i = i + 1
+    count = reader.count("probes")
+    i = 0
+    while i < count:
+        val fields = reader.take("probe", 4)
+        if fields[1] != "0" and fields[1] != "1": return nil
+        probes.push(BuildResolutionProbe(fields[0], fields[1] == "1", fields[2], fields[3]))
+        i = i + 1
+    count = reader.count("argv")
+    i = 0
+    while i < count:
+        val fields = reader.take("arg", 1)
+        argv.push(fields[0])
+        i = i + 1
+    count = reader.count("outputs")
+    i = 0
+    while i < count:
+        val fields = reader.take("output", 1)
+        paths.push(fields[0])
+        i = i + 1
+    if reader.bad or reader.cursor != lines.len(): return nil
+    val snapshot = SnapshotManifest(1, s[1], s[2], s[3])
+    val toolchain = ToolchainManifest(1, t[1], t[2], t[3], t[4], t[5], t[6])
+    val inputs = InputManifest(1, m[1], sources, generated, dependencies,
+        outputs, environment, probes, m[2], true, false)
+    val action = ActionSpec(1, a[1], snapshot, toolchain, inputs, argv,
+        a[2], a[3], paths, a[4])
+    val attempt = AttemptSpec(1, attempt_fields[1], attempt_fields[2],
+        attempt_fields[3], _request_nat_v1(attempt_fields[4]),
+        _request_nat_v1(attempt_fields[5]), _request_nat_v1(attempt_fields[6]))
+    val request = BuildWorkerRequestV1(action, attempt,
+        _request_nat_v1(allocation[0]), _request_nat_v1(allocation[1]),
+        _request_nat_v1(allocation[2]))
+    if action_spec_digest_v1(action) != attempt.action_digest or
+       not worker_request_matches_dispatch_v1(request, dispatch[0]) or
+       encode_build_worker_request_v1(request) != wire:
+        return nil
+    request
+
+export BUILD_WORKER_REQUEST_MAX_BYTES_V1, BUILD_WORKER_REQUEST_MAX_ITEMS_V1
+export BUILD_WORKER_REQUEST_MAX_FIELD_V1, BuildWorkerRequestV1
+export encode_build_worker_request_v1, parse_build_worker_request_v1
+export worker_request_matches_dispatch_v1

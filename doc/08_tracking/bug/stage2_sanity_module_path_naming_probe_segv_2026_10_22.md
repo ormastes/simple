@@ -49,3 +49,45 @@ writeback) likely has more instances reachable through this fixture's shape.
    `self.method(array_arg, ...)` shape and convert to module-scope free
    functions as a targeted workaround.
 3. Land the actual codegen fix for the argument-corruption family.
+
+## Update 2026-10-22 (evening): deterministic on pristine state; crash path isolated
+
+- Reproduced with a COMPLETELY fresh sanity state (stage2-home/stage2-tmp
+  wiped) on HEAD 7f9a8c802a3: the probe SEGV persists — it is not
+  accumulated-state corruption.
+- The sanity probe runs the HIR phase with `[hir-cache] disabled
+  reason=no-compiler-scope` (frontend_parse_cache_scope()=="" — the SCV
+  admitted-epoch probe context). Manual reproductions all ran WITH the cache
+  scope and pass; forcing `SIMPLE_HIR_CACHE=0` (reason=off) also passes. The
+  crash therefore lives in the no-compiler-scope HIR lowering path, only
+  reachable under the sanity's scrubbed SCV-epoch environment.
+- The bounded collector sets RLIMIT_CORE=0, so no core is available; under
+  gdb the coordinator path does not crash (timing/layout heisenbug).
+Next actionable step: instrument the no-scope HIR lowering path
+(driver_hir_pipeline_lowering) with an env-gated progress trace, rebuild the
+candidate, and rerun the wrapper sanity to see the last successful operation
+before the fault.
+
+## Update: trace bracket (SIMPLE_NSCOPE_HIR_TRACE, landed passthrough)
+
+Instrumented `lower_retained_surface_module` (retained-enter/retained-lowered)
+and `_driver_module_aliases_with_closure` (aliases-enter), with the env
+surviving the sanity scrub via the wrapper's inline `bootstrap_stage_sanity`
+passthrough (commit "debug(sanity): passthrough ...").
+
+Result: for the passing p2_add probe all milestones fire (retained-enter →
+retained-lowered → aliases-enter, across both sanity passes and shard
+re-entries). For stage2_module_path_naming.spl NO milestone fires — not even
+aliases-enter — so the SIGSEGV happens at or before entry source processing:
+in the entry PARSE or the load/scan/module-name derivation stage, inside the
+sanity's scrubbed SCV-epoch environment. The same candidate parses and
+compiles this exact file successfully outside the sanity (multiple manual
+runs, cold HOME, cache off, delegate env). The file itself is a verbatim
+mirror of `src/compiler/00.common/module_path_naming.spl` (235 lines, kept in
+sync by header rule; the real functions live there).
+
+Next step: instrument the parse-shard / entry-scan path
+(driver_source_pipeline_loading entry scan, parse_full_frontend_selected_v1)
+with the same env-gated trace to bracket the exact operation; suspect an
+env-dependent parse path (package-index cold route) interacting with this
+file's multi-line `or` continuations / docstring content.

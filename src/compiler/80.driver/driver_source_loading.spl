@@ -6,7 +6,7 @@
 # - Structured error formatting helpers for type, borrow, coherence, and trait errors
 
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
-use std.io_runtime.{file_read_nullable, dir_exists}
+use std.io_runtime.{file_read_nullable, dir_exists, env_get_opt}
 use compiler.common.driver_core_types.{SourceFile, source_file_coverage_identity}
 use compiler.common.module_path_naming.{module_logical_name_from_path}
 use compiler.common.source_root_resolution.{SourceRootResolutionV1,
@@ -491,6 +491,9 @@ fn _driver_module_aliases_with_closure(
     module_name: text,
     entry_closure: bool
 ) -> [SourceFile]:
+    # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=trace_alias_closure_to_fault
+    if (env_get_opt("SIMPLE_NSCOPE_HIR_TRACE") ?? "") == "1":
+        eprint("[nscope-hir] aliases-enter path={path} content_len={content.len()} module={module_name}")
     """One physical file, one canonical module name, every other spelling an alias.
     ENTRY-CLOSURE ONLY. Symlinks (`src/compiler/frontend -> 10.frontend`,
     `src/std -> lib`, `src/app/lsp -> lib/nogc_sync_mut/lsp`, ...) mean the
@@ -837,7 +840,9 @@ pub fn _driver_cached_entry_source_scan(path: text) -> (text, [text], [text], bo
     if epoch_active:
         match driver_admitted_epoch_read_v1(path, key):
             case Ok(content): epoch_content = content
-            case Err(_): return ("", [], [], false)
+            case Err(epoch_error):
+                eprint("[epoch-read-fail] path={path} key={key} reason={epoch_error}")
+                return ("", [], [], false)
     if not epoch_active and _g_entry_scan_content_by_path.contains_key(key):
         _g_entry_scan_hit_count = _g_entry_scan_hit_count + 1
         driver_closure_scan_phase_trace("cached_scan:hit", path)
@@ -1662,12 +1667,17 @@ pub fn _driver_collect_entry_import_source(p: text) -> [SourceFile]:
 pub fn _driver_collect_explicit_compiler_source(p: text) -> [SourceFile]:
     """Load an explicitly requested compiler input without packaging filters."""
     if not p.ends_with(".spl"):
+        eprint("[explicit-source] rejected non-spl path={p}")
         return []
     val (content, _, _, _) = _driver_cached_entry_source_scan(p)
     if content == "":
+        eprint("[explicit-source] empty content path={p}")
         return []
-    _driver_module_aliases_with_closure(
+    val aliases = _driver_module_aliases_with_closure(
         p, content, _driver_module_name_from_path(p), true)
+    if aliases.len() == 0:
+        eprint("[explicit-source] zero aliases path={p} content_len={content.len()}")
+    aliases
 
 pub fn _driver_collect_frozen_compiler_source_v1(
     path: text, expected_digest: text, expected_bytes: i64

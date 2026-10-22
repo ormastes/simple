@@ -1,0 +1,174 @@
+# A protected parent checks one authenticated, nonce-bound Linux worker report
+# before the existing SSH/SFTP attempt driver runs. Boot/generation can change
+# after this query; the worker rechecks installed policy and bytes at launch.
+use app.build.scheduler.distributed_attempt.{DistributedBuildNodeV1,
+    DistributedBuildAttemptV1, run_distributed_build_attempt_v1}
+use app.build.scheduler.trusted_ssh.{TrustedSshNodeV1}
+use app.build.scheduler.trusted_worker_invocation.{
+    query_build_worker_capability_ssh_v1}
+use app.build.scheduler.worker_capability.{BuildWorkerCapabilityV1}
+use app.build.scheduler.worker_request.{BuildWorkerRequestV1}
+use app.build.providers.build_job_plan.{plan_build_job_v1}
+use std.nogc_sync_mut.env.platform.{detect_os}
+use app.build.scheduler.worker_sandbox_identity.{build_worker_sandbox_digest_v1}
+use app.build.scheduler.worker_execution_profile.{
+    build_worker_execution_profile_problem_v1}
+use app.build.scheduler.planner.{SchedulerActionV1}
+use app.build.scheduler.ledger.{SchedulerCapacityV1,
+    scheduler_current_fence_v1}
+use app.build.scheduler.owner.{SchedulerOwnerV1}
+use compiler.common.build_contract.{ActionSpec, AttemptSpec, NodeCapabilities,
+    AcceptedResult, action_spec_digest_v1}
+use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
+
+struct RemoteBuildWorkerPreflightV1:
+    valid: bool
+    reason: text
+    worker_id: text
+    fence: i64
+
+fn _preflight_reject_v1(reason: text) -> RemoteBuildWorkerPreflightV1:
+    RemoteBuildWorkerPreflightV1(false, reason, "", 0)
+
+fn _same_remote_node_v1(a: TrustedSshNodeV1,
+        b: TrustedSshNodeV1) -> bool:
+    a.worker_id == b.worker_id and a.host == b.host and a.user == b.user and
+        a.port == b.port and a.ssh_executable == b.ssh_executable and
+        a.ssh_digest == b.ssh_digest and
+        a.known_hosts_path == b.known_hosts_path and
+        a.known_hosts_digest == b.known_hosts_digest and
+        a.identity_path == b.identity_path and a.identity_digest == b.identity_digest
+
+fn _same_remote_toolchain_v1(a: ActionSpec,
+        cap: BuildWorkerCapabilityV1) -> bool:
+    a.toolchain.version == cap.toolchain.version and
+        a.toolchain.executable_digest == cap.toolchain.executable_digest and
+        a.toolchain.behavior_digest == cap.toolchain.behavior_digest and
+        a.toolchain.provider_abi_digest == cap.toolchain.provider_abi_digest and
+        a.toolchain.runtime_digest == cap.toolchain.runtime_digest and
+        a.toolchain.sysroot_digest == cap.toolchain.sysroot_digest and
+        a.toolchain.target_triple == cap.toolchain.target_triple
+
+fn preflight_remote_build_worker_v1(action: ActionSpec, attempt: AttemptSpec,
+        capabilities: NodeCapabilities, protected_trust_domain: text,
+        node: DistributedBuildNodeV1, report: BuildWorkerCapabilityV1,
+        fence: i64, cpu_tokens: i64) -> RemoteBuildWorkerPreflightV1:
+    """Check remote execution policy; report authentication belongs to SSH query.
+
+    `capabilities` and `protected_trust_domain` must come from protected parent
+    configuration. A parsed report is advisory preflight, not proof of the
+    eventual worker boot or provider generation.
+    """
+    val digest = action_spec_digest_v1(action)
+    if digest == "" or attempt.version != 1 or
+       attempt.action_digest != digest or attempt.attempt_id == "" or
+       attempt.worker_id == "" or fence <= 0:
+        return _preflight_reject_v1("attempt-invalid")
+    if not _same_remote_node_v1(node.ssh.node, node.sftp.node) or
+       attempt.worker_id != node.ssh.node.worker_id or
+       capabilities.version != 1 or
+       capabilities.node_id != attempt.worker_id or
+       report.worker_id != attempt.worker_id:
+        return _preflight_reject_v1("worker-identity-mismatch")
+    if protected_trust_domain == "" or
+       capabilities.trust_domain != protected_trust_domain or
+       not capabilities.target_triples.contains(action.toolchain.target_triple) or
+       not capabilities.provider_abi_digests.contains(
+           action.toolchain.provider_abi_digest):
+        return _preflight_reject_v1("node-policy-mismatch")
+    if report.execution_os != "linux" or report.execution_arch == "" or
+       report.boot_id == "" or report.provider_generation <= 0 or
+       report.provider_id != "linux-oci-v1" or
+       not ["docker", "podman"].contains(report.engine) or
+       (report.engine == "docker" and report.privilege != "root") or
+       (report.engine == "podman" and report.privilege != "rootless"):
+        return _preflight_reject_v1("linux-provider-unavailable")
+    if build_worker_sandbox_digest_v1(report.image, report.engine,
+            report.compiler_entry) != report.sandbox_digest or
+       not _same_remote_toolchain_v1(action, report) or
+       action.sandbox_digest != report.sandbox_digest or
+       action.resource_policy_digest != report.resource_policy_digest:
+        return _preflight_reject_v1("worker-build-policy-mismatch")
+    val profile_problem = build_worker_execution_profile_problem_v1(action,
+        report.compiler_entry)
+    if profile_problem != "":
+        return _preflight_reject_v1(profile_problem)
+    if cpu_tokens <= 0 or cpu_tokens > report.cpu_limit or
+       attempt.memory_budget_bytes <= 0 or
+       attempt.memory_budget_bytes > report.memory_limit or
+       attempt.memory_budget_bytes > capabilities.memory_capacity_bytes:
+        return _preflight_reject_v1("worker-capacity-mismatch")
+    RemoteBuildWorkerPreflightV1(true, "", attempt.worker_id, fence)
+
+fn preflight_remote_build_job_v1(action: ActionSpec, attempt: AttemptSpec,
+        capabilities: NodeCapabilities, protected_trust_domain: text,
+        node: DistributedBuildNodeV1, report: BuildWorkerCapabilityV1,
+        fence: i64, cpu_tokens: i64,
+        fd_tokens: i64) -> RemoteBuildWorkerPreflightV1:
+    """Require a canonical Orchestrator Job plan before worker dispatch.
+
+    This is metadata admission for the existing trusted SSH worker route. The
+    generic CI runner cannot execute the build Job's isolation contract.
+    """
+    val bound = preflight_remote_build_worker_v1(action, attempt,
+        capabilities, protected_trust_domain, node, report, fence,
+        cpu_tokens)
+    if not bound.valid:
+        return bound
+    val request = BuildWorkerRequestV1(action, attempt, fence, cpu_tokens,
+        fd_tokens)
+    val planned = plan_build_job_v1(request, report, detect_os(), "simple-build")
+    if not planned.ready:
+        return _preflight_reject_v1("job-plan: " + planned.reason)
+    bound
+
+fn run_preflighted_remote_build_attempt_v1(owner: SchedulerOwnerV1,
+        actions: [SchedulerActionV1], action_digest: text, attempt_id: text,
+        retry_number: i64, node: DistributedBuildNodeV1,
+        capabilities: NodeCapabilities, protected_trust_domain: text,
+        capacity: SchedulerCapacityV1,
+        now_tick: i64) -> DistributedBuildAttemptV1:
+    """Query pinned SSH, check policy, then use the durable attempt driver.
+
+    The protected caller supplies its node policy. A failed query never
+    consumes scheduler capacity.
+    """
+    val empty = AcceptedResult(1, "", "", "", "")
+    if owner.error != "" or owner.lock_handle < 0 or
+       owner.state.error != "":
+        return DistributedBuildAttemptV1(false, false, false, true,
+            "owner-unavailable", empty)
+    var selected: SchedulerActionV1? = nil
+    for action in actions:
+        if action.action_digest == action_digest:
+            selected = action
+    if selected == nil:
+        return DistributedBuildAttemptV1(false, false, false, false,
+            "action-not-found", empty)
+    val action = selected.unwrap()
+    if action_spec_digest_v1(action.spec) != action_digest or
+       attempt_id == "" or retry_number < 0 or retry_number > 1000000:
+        return DistributedBuildAttemptV1(false, false, false, false,
+            "action-or-retry-invalid", empty)
+    val fresh_nonce = random_hex(32) ?? ""
+    val report = query_build_worker_capability_ssh_v1(node.ssh, fresh_nonce)
+    if not report.received or report.capability == nil:
+        return DistributedBuildAttemptV1(false, false, false, false,
+            "capability: " + report.reason, empty)
+    val fence = scheduler_current_fence_v1(owner.state.ledger,
+        action_digest) + 1
+    val attempt = AttemptSpec(1, action_digest, attempt_id,
+        node.ssh.node.worker_id, retry_number, action.priority,
+        action.memory_bytes)
+    val bound = preflight_remote_build_job_v1(action.spec, attempt,
+        capabilities, protected_trust_domain, node, report.capability.unwrap(),
+        fence, action.cpu_tokens, action.fd_tokens)
+    if not bound.valid:
+        return DistributedBuildAttemptV1(false, false, false, false,
+            "capability: " + bound.reason, empty)
+    run_distributed_build_attempt_v1(owner, actions, action_digest,
+        attempt_id, retry_number, node, capacity, now_tick)
+
+export RemoteBuildWorkerPreflightV1, preflight_remote_build_worker_v1
+export preflight_remote_build_job_v1
+export run_preflighted_remote_build_attempt_v1

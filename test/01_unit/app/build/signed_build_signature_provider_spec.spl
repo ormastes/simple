@@ -1,0 +1,50 @@
+use app.build.signed_build_signature_provider.{
+    SignedBuildSshProviderConfigV2, verify_signed_build_ssh_signature_v2}
+use app.build.signed_build_admission.{SIGNED_BUILD_RECEIPT_SCHEMA_V1,
+    SIGNED_BUILD_RECEIPT_SCHEMA_V2, SignedBuildReceiptV1,
+    SignedBuildReceiptV2, SignedBuildExpectationV1, SignedBuildExpectationV2}
+use app.build.signed_build_wire.{signed_build_receipt_wire_v2}
+use std.common.crypto.sha256.{sha256_text}
+
+val SIGNATURE_REV = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val SIGNATURE_DIGEST = sha256_text("trusted-input")
+
+fn _signature_receipt_v2() -> SignedBuildReceiptV2:
+    SignedBuildReceiptV2(SIGNED_BUILD_RECEIPT_SCHEMA_V2,
+        "simple-lang/simple", 42, SignedBuildReceiptV1(
+            SIGNED_BUILD_RECEIPT_SCHEMA_V1, SIGNATURE_REV, SIGNATURE_REV,
+            SIGNATURE_REV, "stage2", "linux-x86_64", "x86_64-linux",
+            SIGNATURE_DIGEST, SIGNATURE_DIGEST, SIGNATURE_DIGEST,
+            SIGNATURE_DIGEST, SIGNATURE_DIGEST, SIGNATURE_DIGEST,
+            SIGNATURE_DIGEST, sha256_text("abc"), 3,
+            "artifact:stage2", "builder", "build/linux",
+            "2026-09-25T10:00:00Z", "2026-09-25T12:00:00Z"))
+
+fn _signature_expected_v2() -> SignedBuildExpectationV2:
+    SignedBuildExpectationV2("simple-lang/simple", 42,
+        SignedBuildExpectationV1(SIGNATURE_REV, SIGNATURE_REV, SIGNATURE_REV,
+            "stage2", "linux-x86_64", "x86_64-linux",
+            SIGNATURE_DIGEST, SIGNATURE_DIGEST, SIGNATURE_DIGEST,
+            SIGNATURE_DIGEST, SIGNATURE_DIGEST, SIGNATURE_DIGEST,
+            SIGNATURE_DIGEST, "builder", "build/linux",
+            "2026-09-25T11:00:00Z", "2026-09-26T11:00:00Z"))
+
+fn _signature_config_v2(scope: text) -> SignedBuildSshProviderConfigV2:
+    SignedBuildSshProviderConfigV2("/usr/bin/ssh-keygen", SIGNATURE_DIGEST,
+        "/protected/allowed", SIGNATURE_DIGEST,
+        "/protected/revoked.krl", SIGNATURE_DIGEST,
+        scope, "/protected/private")
+
+describe "signed build SSH provider admission":
+    it "rejects malformed receipt wire before touching a process":
+        val result = verify_signed_build_ssh_signature_v2("bad", "bad",
+            _signature_expected_v2(), _signature_config_v2("build/linux"))
+        expect(result.verified).to_be(false)
+        expect(result.reason).to_equal("receipt-invalid")
+
+    it "rejects a signer scope that differs from protected policy":
+        val result = verify_signed_build_ssh_signature_v2(
+            signed_build_receipt_wire_v2(_signature_receipt_v2()), "bad",
+            _signature_expected_v2(), _signature_config_v2("build/windows"))
+        expect(result.verified).to_be(false)
+        expect(result.reason).to_equal("signer-scope-invalid")

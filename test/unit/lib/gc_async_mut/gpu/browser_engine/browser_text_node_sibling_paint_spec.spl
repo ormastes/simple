@@ -1,0 +1,98 @@
+# Purpose and audience: executable regression evidence for the browser-engine
+# owning team. Reader: whoever next touches the HTML layout/paint pipeline in
+# src/lib/gc_async_mut/gpu/browser_engine/.
+#
+# Regression guard for doc/08_tracking/bug/browser_text_node_blanks_frame_2026-08-05.md
+#
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+#
+# WHAT THIS GUARDS
+# The filed defect was NOT "text does not paint". It was that adding a text node
+# BESIDE an already-working box blanked the ENTIRE frame: the same <div> that
+# painted 120 exact pixels alone painted 0 once a <p> was added next to it. Root
+# cause was an unresolved symbol (`_web_budget_expired_at` and the
+# WEB_BUDGET_SITE_* constants) reached only by the real parse->style->layout->paint
+# pipeline, which any text tag or any .class/#id selector routes into. Every such
+# render came back blank, including geometry that had already been computed
+# correctly.
+#
+# Two shapes are covered, because both reach the SAME guarded pipeline and the
+# bug record confirmed they shared one root cause:
+#   (a) a text node beside a box            (Defect 1)
+#   (b) a class selector in a <style> block (Defect 2)
+# Plus the control: the same box with no text and no class selector, which took
+# the simple path and painted correctly even while the bug was live. Without that
+# control a blanket rendering failure would look identical to this defect.
+#
+# OUT OF SCOPE — deliberately not asserted here:
+#   * Glyph shape, text position, or font rasterisation quality.
+#   * Whether the text is VISIBLE at a given viewport. It legitimately is not at
+#     32x24 with default <p> margins (box + margins push the text content box
+#     below the viewport); that is box-model behaviour, not a bug. This spec
+#     therefore asserts the BOX survives, never that glyph pixels appear at 32x24.
+#   * The wider CSS-bounds failures in browser_renderer_spec.spl (rule cap,
+#     variable expansion, 256-declaration limit) — separate, still-open.
+
+use std.spec.step
+
+use std.spec.*
+
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{render_html_to_pixels_with_viewport}
+
+
+val VW: i32 = 32
+val VH: i32 = 24
+val WHITE_BG: u32 = 0xFFFFFFFF
+
+fn _count_non_background(pixels: [u32], bg: u32) -> i32:
+    var count: i32 = 0
+    var idx: i32 = 0
+    while idx < pixels.len():
+        if pixels[idx] != bg:
+            count = count + 1
+        idx = idx + 1
+    count
+
+
+describe "browser text node must not blank its sibling box":
+
+    it "paints a bare box with no text node (control for the simple path)":
+        # @req REQ-SSPEC-UNIT
+        step("paints a bare box with no text node")
+        val html = "<html><body><div style='width: 20px; height: 6px; background-color: #ff0000'></div></body></html>"
+        val pixels = render_html_to_pixels_with_viewport(html, VW, VH).pixel_data
+        expect(pixels.len()).to_equal(VW * VH)
+        expect(_count_non_background(pixels, WHITE_BG)).to_be_greater_than(0)
+
+    it "keeps the box painted when a text node is added beside it":
+        # @req REQ-SSPEC-UNIT
+        step("box plus <p> text sibling still paints the box")
+        val html = "<html><body><div style='width: 20px; height: 6px; background-color: #ff0000'></div><p>Hello, World!</p></body></html>"
+        val pixels = render_html_to_pixels_with_viewport(html, VW, VH).pixel_data
+        expect(pixels.len()).to_equal(VW * VH)
+        # The exact failure this guards: this count was 0 while the bug was live.
+        expect(_count_non_background(pixels, WHITE_BG)).to_be_greater_than(0)
+
+    it "paints a page that is text only (no box to fall back on)":
+        # @req REQ-SSPEC-UNIT
+        step("text-only page paints at 32x24 once default <p> margins are zeroed")
+        # margin:0 rather than a bigger viewport: at 32x24 with default <p>
+        # margins the text content box falls below the viewport, which is correct
+        # box-model behaviour, not a defect. Zeroing the margin keeps the render
+        # small enough to finish under the tree-walk interpreter — a 200x100
+        # viewport is 26x the pixels and does not complete in a usable budget on
+        # the currently deployed binary.
+        val html = "<html><head><style>p { margin: 0; }</style></head><body><p>Hello, World!</p></body></html>"
+        val pixels = render_html_to_pixels_with_viewport(html, VW, VH).pixel_data
+        expect(pixels.len()).to_equal(VW * VH)
+        expect(_count_non_background(pixels, WHITE_BG)).to_be_greater_than(0)
+
+    it "applies a class selector from a style block (same guarded pipeline)":
+        # @req REQ-SSPEC-UNIT
+        step("class selector routes through the layout pipeline and still paints")
+        val html = "<html><head><style>body { margin: 0; } .card { width: 10px; height: 10px; background-color: #123456; }</style></head><body><div class='card'></div></body></html>"
+        val pixels = render_html_to_pixels_with_viewport(html, VW, VH).pixel_data
+        expect(pixels.len()).to_equal(VW * VH)
+        # Was 0 while the bug was live; the tag-selector form always worked.
+        expect(_count_non_background(pixels, WHITE_BG)).to_be_greater_than(0)
