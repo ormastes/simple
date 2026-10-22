@@ -570,3 +570,49 @@ Instrumented (SIMPLE_POOLDBG=1, env-gated): a reset counter print inside
 decode-built, in compiler.core.types. Sequence discrimination: a reset
 line between `decode-built` and the push panic => second-reset theory
 (module_assembly decode entry); no reset => scope-teardown reclaim theory.
+
+## Annotation 2026-10-23 (lane A, macOS) — DISCRIMINATED: silently-lossy child-side restore
+
+Instrumentation (SIMPLE_POOLDBG=1, landed 02766366496) trace on the 10 s
+repro, candidate = stage2 rejected binary built from 02766366496:
+
+```
+[pooldbg] reset_all_pools n=1                      <- decode-entry reset
+[pooldbg] decode-built resets=1 tok_text=0 sym_names=0 spans=78
+[build] phase=hir ... current=compiler.bootstrap_admission.p2_add
+[pooldbg] reset_all_pools n=2                      <- HIR-entry re-parse reset
+```
+
+Facts established:
+1. The stored blob DOES contain the token texts (`grep -c print` on the
+   .fpc under build/bootstrap/native_cache/default/frontend = 4 hits,
+   4939 bytes). Capture side is complete.
+2. The blob is FRESH — written by this same candidate moments earlier
+   (frontend cache was wiped first), so no producer/version skew.
+3. `build_module_from_flat_pool_blob` returned Some (restore reported
+   TRUE) yet `tok_pool_text.len()==0` and `sym_names.len()==0` right
+   after `flat_ast_to_module`, while `span_pool_start.len()==78`.
+   This is exactly the "successfully-restored empty parse" shape this
+   codec's contract forbids — the text/symbol pool sections restore into
+   nothing readable, in the delegated child.
+4. Parent-side roundtrip selfcheck (other lane's trace) reports
+   reset=true ok=true stable=true — so in the PARENT the same restore
+   population works; the loss is specific to the child context.
+5. The reset at HIR entry (n=2) is the driver's legitimate re-parse; it
+   is not the dangling cause. With cache off (no decode) the build does
+   not crash (it fails later at an unrelated MIR repository policy
+   check), confirming the corruption enters via the decode path.
+
+Prime suspect: binding duplication in the dynload candidate's delegated
+child — the section restore for the parser-state pools (tok_pool_text,
+sym_names) writes one copy of the process-global pool arrays while
+`flat_ast_to_module` reads another (same baked-vs-loaded family as the
+shard-worker stale-code finding, c53a65fe). Spans survive because the
+decl-pool section resolves to the same binding on both sides.
+
+Discriminating next probe (one candidate build): print
+`tok_pool_text.len()` at the end of `flat_parser_state_restore` (and
+which section restore owns it) plus the module's first text len inside
+`flat_ast_to_module`; a write/read split confirms the duplication and
+names the sections. Lane A stops here (cycle cap); cure is either a
+restore-path binding fix or the runtime class-layout repair.
