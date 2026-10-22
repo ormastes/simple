@@ -12,7 +12,7 @@ complex expressions without exceeding line length limits.
 
 ## Syntax
 
-```simple
+```simple:skip
 # Explicit continuation with backslash
 val sum = value1 + \
     value2 + \

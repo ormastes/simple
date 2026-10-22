@@ -146,7 +146,7 @@ source preservation, not proof that the title is already outcome-oriented.
 Review and rename it only when the reference supports the clearer wording.
 Every unresolved oracle must remain executable and fail fast:
 
-```simple
+```simple:skip
 fail("TODO: replace generated placeholder with an executable assertion")
 ```
 

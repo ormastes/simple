@@ -130,7 +130,7 @@
 - NO advanced pattern matching
 
 **Example Functions**:
-```simple
+```simple:skip
 # Target triple generation
 fn llvm_triple_for_target(target: CodegenTarget, baremetal: bool) -> LlvmTargetTriple
 

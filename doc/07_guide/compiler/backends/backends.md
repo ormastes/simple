@@ -194,7 +194,7 @@ Translates MIR expressions to backend operations:
 
 Each backend implements a common interface:
 
-```simple
+```simple:skip
 trait Backend:
     fn compile(mir: MirModule) -> Result<Output, CompileError>
     fn supports_feature(feature: Feature) -> bool

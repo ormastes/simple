@@ -169,7 +169,7 @@ Coverage report:
 
 ## Implementation: Pairwise Test File
 
-```spl
+```simple:skip
 # Pairwise covering array for 47 × 8 × 5 × 3 dimensions
 # Generated using IPOG algorithm
 # Coverage: All 831 pairs covered in 250 tests

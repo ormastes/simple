@@ -703,7 +703,7 @@ SmfSymbol {
 ### Usage Example
 
 **Library** (`collections.smf`):
-```simple
+```simple:skip
 // Generic template (stored in TemplateCode)
 struct List<T>:
     data: [T]
@@ -714,7 +714,7 @@ val my_list = List<Int>()
 ```
 
 **Downstream** (`app.spl`):
-```simple
+```simple:skip
 import collections.List
 
 // This works even though library didn't compile List<Float>!

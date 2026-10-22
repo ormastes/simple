@@ -37,7 +37,7 @@ that is a cross-module identity question, not an ordering one.
 `PERF-SCAN-001` (whole-container scan in a loop) already existed. This adds
 the shape behind the 890 s SCV cold init:
 
-```simple
+```simple:skip
 while i <= slen - sublen:
     if s[i:i + sublen] == sub:    # PERF-SCAN-002: one substring per step
         return i

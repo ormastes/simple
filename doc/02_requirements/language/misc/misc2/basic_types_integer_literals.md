@@ -131,7 +131,7 @@ val size = 1024_bytes
 
         Standard decimal integer notation.
 
-        ```simple
+        ```text
         val x = 42
         val y = 0
         val z = 1000000
@@ -166,7 +166,7 @@ val size = 1024_bytes
 
         Underscores improve readability for large numbers.
 
-        ```simple
+        ```text
         val million = 1_000_000
         val billion = 1_000_000_000
         ```
@@ -202,7 +202,7 @@ val size = 1024_bytes
 
         Hex literals start with 0x prefix.
 
-        ```simple
+        ```text
         val x = 0xFF
         val y = 0x10
         ```
@@ -241,7 +241,7 @@ val size = 1024_bytes
 
         Underscores can group hex digits.
 
-        ```simple
+        ```text
         val color = 0xFF_00_FF
         val addr = 0x7F00_0001
         ```
@@ -272,7 +272,7 @@ val size = 1024_bytes
 
         Binary literals start with 0b prefix.
 
-        ```simple
+        ```text
         val x = 0b1010
         val y = 0b1111
         ```
@@ -311,7 +311,7 @@ val size = 1024_bytes
 
         Underscores can group binary digits (nibbles, bytes).
 
-        ```simple
+        ```text
         val byte = 0b1111_0000
         val word = 0b1111_1111_0000_0000
         ```
@@ -342,7 +342,7 @@ val size = 1024_bytes
 
         Octal literals start with 0o prefix.
 
-        ```simple
+        ```text
         val perms = 0o755
         val mode = 0o644
         ```
@@ -384,7 +384,7 @@ val size = 1024_bytes
 
         Signed integers with explicit size.
 
-        ```simple
+        ```text
         val byte = 127i8
         val short = 1000i16
         val int = 100000i32
@@ -410,7 +410,7 @@ val size = 1024_bytes
 
         Unsigned integers with explicit size.
 
-        ```simple
+        ```text
         val byte = 255u8
         val port = 8080u16
         val count = 4294967295u32
@@ -446,7 +446,7 @@ val size = 1024_bytes
 
         Mix decimal, hex, binary, octal in calculations.
 
-        ```simple
+        ```text
         val result = 10 + 0xA + 0b1010 + 0o12
         ```
 
@@ -480,7 +480,7 @@ val size = 1024_bytes
 
         Zero can be represented in any base.
 
-        ```simple
+        ```text
         val dec_zero = 0
         val hex_zero = 0x0
         val bin_zero = 0b0

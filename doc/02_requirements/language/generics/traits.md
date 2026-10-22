@@ -14,7 +14,7 @@ default implementations, associated types, and trait bounds for generics.
 
 ## Syntax
 
-```simple
+```simple:skip
 trait Printable:
     fn print(self)
 

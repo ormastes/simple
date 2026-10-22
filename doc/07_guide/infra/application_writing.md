@@ -18,7 +18,7 @@ my_app/
 
 ## Entry Point & Lifecycle
 
-```simple
+```simple:skip
 fn main():
     init()
     start_server(services.app_config)
@@ -44,7 +44,7 @@ fn reset():
 
 ### Manual Composition
 
-```simple
+```simple:skip
 fn main():
     val db = Database(config: DatabaseConfig(url: env_var("DB_URL"), pool_size: 10))
     val user_svc = UserService(db: db)
@@ -53,7 +53,7 @@ fn main():
 
 ### Service Registry
 
-```simple
+```simple:skip
 # services.spl
 val app_config = load_config()
 val db = Database(DatabaseConfig(url: app_config.db_url, pool_size: app_config.db_pool_size))
@@ -62,14 +62,14 @@ val user_service = UserService(repo: UserRepository(db: db), log: ConsoleLogger(
 
 ### Lazy Init (Proposed)
 
-```simple
+```simple:skip
 lazy val db = Database(DatabaseConfig(url: app_config.db_url, pool_size: app_config.db_pool_size))
 # Created on first access; subsequent accesses return cached value
 ```
 
 ### Test Override
 
-```simple
+```simple:skip
 before_each:
     services.db = MockDatabase()
 after_each:
@@ -82,7 +82,7 @@ after_each:
 
 ### CLI
 
-```simple
+```simple:skip
 fn main():
     cmd = Command.new("myapp")
         .flag(Flag.new("verbose").short("v"))
@@ -93,7 +93,7 @@ fn main():
 
 ### Web
 
-```simple
+```simple:skip
 router = Router.new()
     .get("/") \req: Response.html("<h1>Hello!</h1>")
     .post("/api/users") \req:
@@ -106,7 +106,7 @@ fn main():
 
 ### Database
 
-```simple
+```simple:skip
 fn main():
     db = Database.connect("postgres://localhost/myapp")
     migrate(db, "migrations/")
@@ -116,7 +116,7 @@ fn main():
 
 ### Configuration
 
-```simple
+```simple:skip
 fn load_config() -> AppConfig:
     ConfigLoader.new()
         .with_defaults(AppConfig.new())

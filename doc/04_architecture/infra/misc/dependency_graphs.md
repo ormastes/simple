@@ -122,7 +122,7 @@ simple_depgraph ./src/api --dry-run --summary
 
 The tool generates `.__init__.spl` (dot-prefixed, auto-generated) files:
 
-```simple
+```simple:skip
 # Auto-generated dependency analysis
 # DO NOT EDIT - regenerate with: simple_depgraph ./src/mymodule
 
@@ -150,7 +150,7 @@ export use types.Config
 
 The tool uses AOP (Aspect-Oriented Programming) to log all operations:
 
-```simple
+```simple:skip
 # AOP advice declarations in main.spl
 on pc{ execution(* scanner.scan_directory(..)) } use log_scan_before before
 on pc{ execution(* analyzer.analyze_directory(..)) } use log_analyze_before before

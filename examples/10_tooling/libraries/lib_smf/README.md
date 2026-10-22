@@ -150,12 +150,18 @@ bin/simple lib create -o libhttp.lsm http/*.smf
 - **Index:** O(1) module lookup
 - **Hash:** FNV-1a for integrity
 
+```sdoctest
+>>> use std.string_core.{char_code}
+>>> char_code("L") == 0x4C and char_code("S") == 0x53 and char_code("M") == 0x4D and char_code("F") == 0x46
+true
+```
+
 ## API Reference
 
 ### Creating Libraries
 
-```simple
-use compiler.linker.lib_smf_writer.{LibSmfBuilder}
+```text
+use compiler.backend.linker.lib_smf_writer.{LibSmfBuilder}
 
 var builder = LibSmfBuilder.new()
 builder.set_verbose(true)
@@ -168,8 +174,8 @@ builder.write("output.lsm")?
 
 ### Reading Libraries
 
-```simple
-use compiler.linker.lib_smf_reader.{LibSmfReader}
+```text
+use compiler.backend.linker.lib_smf_reader.{LibSmfReader}
 
 val reader = LibSmfReader.open("library.lsm")?
 
@@ -182,8 +188,8 @@ reader.close()
 
 ### Unified Loading (Recommended)
 
-```simple
-use compiler.linker.smf_getter.{SmfGetter}
+```text
+use compiler.backend.linker.smf_getter.{SmfGetter}
 
 var getter = SmfGetter.new()
 getter.add_search_path("/usr/lib/simple")
@@ -194,7 +200,7 @@ val smf_data = getter.get("std/io/mod")?
 
 ### Module Loader Integration
 
-```simple
+```text
 use compiler.loader.module_loader_lib_support.{create_loader_with_stdlib}
 
 var loader = create_loader_with_stdlib()

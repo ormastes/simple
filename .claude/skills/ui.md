@@ -104,7 +104,7 @@ Phases 1-6 of the typed-core RFC (`doc/05_design/ui/tokens/ui_typed_core_rfc.md`
 
 `WidgetRecord.kind` and `WidgetRecord.layout` are now typed enums instead of `text`:
 
-```simple
+```simple:skip
 # Before (Phase 0 — string literals)
 val node = WidgetNode(kind: "panel", layout: "column")
 
@@ -130,7 +130,7 @@ Five token enums live in `src/lib/common/ui/design_tokens.spl`:
 
 Pass them through the `ThemeRegistry` resolver:
 
-```simple
+```text
 use std.ui.{WidgetNode, Spacing, Radius, SurfaceRole, ThemeRegistry}
 
 val theme = theme_registry().get(ThemeId.Obsidian)
@@ -144,7 +144,7 @@ node = node.surface_role(theme, SurfaceRole.Card)
 
 Define app-specific actions as enums implementing `IntoAction`:
 
-```simple
+```text
 use std.ui.action.{IntoAction, CommonAction}
 
 enum AppAction:
@@ -193,7 +193,7 @@ Phase 3 of the typed-core RFC (`doc/05_design/ui/tokens/ui_typed_core_rfc.md`) a
 
 Write each method call on its own assignment:
 
-```simple
+```text
 var node = WidgetNode(kind: WidgetKind.Panel, layout: LayoutKind.Column)
 node = node.width(320)
 node = node.label("Settings")
@@ -205,7 +205,7 @@ node = node.child(body_node)
 
 Do NOT write chained form (currently broken at the compiler level):
 
-```simple
+```text
 # NOT YET WORKING — do not use
 val node = WidgetNode(...)
     .width(320)

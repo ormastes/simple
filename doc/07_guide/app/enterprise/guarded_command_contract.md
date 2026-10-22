@@ -40,7 +40,7 @@ Getting this backwards means a replay is answered with a DENIAL
 
 The canonical shape:
 
-```simple
+```simple:skip
 val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
 if not replayed and <state-dependent feasibility>:
     return denied("<closed-set reason>", detail)

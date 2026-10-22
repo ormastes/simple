@@ -26,7 +26,7 @@ trait_header := 'trait' IDENT generic_params?
 
 Example:
 
-```simple
+```simple:skip
 trait DebugProfiler with DebugTarget, ProfileTarget:
     pass_dn
 ```

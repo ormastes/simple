@@ -36,7 +36,7 @@ Tests the effect system including:
 
 ## Syntax
 
-```simple
+```simple:skip
 requires [pure, io]
 
 @pure

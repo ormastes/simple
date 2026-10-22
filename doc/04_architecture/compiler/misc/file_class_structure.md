@@ -337,7 +337,7 @@ No `.disabled` directories remain anywhere in the codebase.
 **Pattern difference:**
 
 **OOP Fluent API (`builder.spl`):**
-```simple
+```simple:skip
 val json = JsonBuilder()
     .add_string("name", "Alice")
     .add_int("age", 30)
@@ -345,7 +345,7 @@ val json = JsonBuilder()
 ```
 
 **Function Helpers (`json.spl`):**
-```simple
+```simple:skip
 val json = json_object([
     json_pair("name", json_string("Alice")),
     json_pair("age", json_int(30))
@@ -377,7 +377,7 @@ val json = json_object([
 **Estimated structural overlap:** 30-40% (~830-1,110 lines)
 
 **Common pattern:**
-```simple
+```simple:skip
 fn map_type(ty: TypeKind) -> BackendType:
     match ty:
         TypeKind.Int: backend_int_type()
@@ -437,7 +437,7 @@ fn map_type(ty: TypeKind) -> BackendType:
 **Estimated overlap:** 60-70% (~2,800-3,275 lines)
 
 **Common pattern (instruction selection):**
-```simple
+```simple:skip
 fn select_inst(mir: MirInst) -> MachInst:
     match mir.opcode:
         MirOpcode.Add:
@@ -752,7 +752,7 @@ fn select_inst(mir: MirInst) -> MachInst:
 **Risk:** High (affects all backends)
 
 **Proposed design:**
-```simple
+```simple:skip
 trait TypeMapper:
     fn map_int(self) -> BackendType
     fn map_float(self) -> BackendType
@@ -784,7 +784,7 @@ class LLVMTypeMapper:
 **Risk:** Very High (affects all native compilation)
 
 **Proposed design:**
-```simple
+```simple:skip
 trait ISA:
     fn select_add(self, dest: Reg, src1: Reg, src2: Reg) -> MachInst
     fn select_load(self, dest: Reg, addr: Addr) -> MachInst

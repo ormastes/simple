@@ -19,6 +19,8 @@ syntax patterns.
 ### Basic Trailing Block
 
 ```simple
+val items = [1, 2, 3]
+
 # Traditional lambda syntax
 items.map(\x: x * 2)
 
@@ -29,12 +31,14 @@ items.map \x: x * 2
 ### With Multiple Parameters
 
 ```simple
+val items = [1, 2, 3]
+
 items.reduce(0) \acc, x: acc + x
 ```
 
 ### Block Bodies
 
-```simple
+```text
 items.each \item:
     print(item)
     process(item)
@@ -82,7 +86,7 @@ traditional lambda syntax. They parse in O(1) time after detecting the backslash
 
 ## Examples
 
-```simple
+```text
 # Functional operations
 val doubled = [1, 2, 3].map \x: x * 2
 val positives = numbers.filter \x: x > 0
@@ -110,7 +114,7 @@ items.filter \x: x > 0
 
         A trailing block with one parameter uses `\param: expr` syntax.
 
-        ```simple
+        ```text
         val doubled = map([1, 2, 3]) \x: x * 2
         ```
 
@@ -138,7 +142,7 @@ items.filter \x: x > 0
 
         Trailing blocks support multiple comma-separated parameters.
 
-        ```simple
+        ```text
         reduce(items, 0) \acc, x: acc + x
         ```
 
@@ -167,7 +171,7 @@ items.filter \x: x > 0
 
         Trailing blocks can have no parameters using `\:` syntax.
 
-        ```simple
+        ```text
         router.get "/health" \: "ok"
         ```
 
@@ -197,7 +201,7 @@ items.filter \x: x > 0
 
         Simple expressions can be written inline after the colon.
 
-        ```simple
+        ```text
         items.map \x: x * 2
         ```
 
@@ -222,7 +226,7 @@ items.filter \x: x > 0
 
         Multi-statement blocks use indentation like regular blocks.
 
-        ```simple
+        ```text
         items.each \item:
             print(item)
             process(item)
@@ -253,7 +257,7 @@ items.filter \x: x > 0
 
         Trailing blocks work after parenthesized argument lists.
 
-        ```simple
+        ```text
         func(arg1, arg2) \x: x * 2
         ```
 
@@ -276,7 +280,7 @@ items.filter \x: x > 0
 
         Trailing blocks work naturally with no-paren call syntax.
 
-        ```simple
+        ```text
         map items \x: x * 2
         ```
 
@@ -301,7 +305,7 @@ items.filter \x: x > 0
 
         Trailing blocks can be chained for sequential transformations.
 
-        ```simple
+        ```text
         items.filter \x: x > 0
              .map \x: x * 2
         ```
@@ -334,7 +338,7 @@ items.filter \x: x > 0
 
         Trailing blocks work well with builder/fluent APIs.
 
-        ```simple
+        ```text
         router.get "/hello" \: "Hello World"
         router.post "/user" \req: process(req)
         ```

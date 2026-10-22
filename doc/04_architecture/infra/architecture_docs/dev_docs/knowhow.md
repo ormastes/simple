@@ -204,14 +204,14 @@ var count = 0         # Mutable
 ### Generics: Use `<>` NOT `[]`
 
 ✅ **Correct:**
-```simple
+```text
 Option<T>
 List<Int>
 fn map<T, U>(f: fn(T) -> U) -> U
 ```
 
 ❌ **Wrong (deprecated):**
-```simple
+```text
 Option[T]      # Shows compiler warning
 List[Int]      # Will be removed in v1.0.0
 ```
@@ -219,25 +219,25 @@ List[Int]      # Will be removed in v1.0.0
 ### Constructors: Direct Construction
 
 ✅ **Preferred:**
-```simple
+```text
 val p = Point(x: 3, y: 4)                                           # Direct
 val interner = StringInterner(strings: {}, reverse: {}, next_id: 0) # Direct
 ```
 
 ✅ **Optional (for special cases):**
-```simple
+```text
 val center = Point.origin()                       # Named factory
 val interner = StringInterner.with_capacity(100)  # Named factory
 ```
 
 ❌ **Wrong:**
-```simple
+```text
 val p = Point.new(3, 4)        # Don't use .new() - not idiomatic
 ```
 
 ### Methods
 
-```simple
+```text
 class Point:
     x: i64
     y: i64
@@ -256,7 +256,7 @@ class Point:
 ### Existence Checks: Use `.?` NOT `is_*`
 
 ✅ **Preferred:**
-```simple
+```text
 opt.?                         # Instead of opt.is_some()
 not opt.?                     # Instead of opt.is_none()
 list.first.?                  # Instead of list.first().is_some()
@@ -289,13 +289,13 @@ dependencies:
 ### 1. Question Mark `?` is NOT for Method Names
 
 ❌ **Wrong (Ruby-style):**
-```simple
+```text
 fn is_empty?():              # ERROR: ? not allowed in names
     self.len() == 0
 ```
 
 ✅ **Correct:**
-```simple
+```text
 fn is_empty():               # Use plain name
     self.len() == 0
 
@@ -306,12 +306,12 @@ list.?                       # true if non-empty
 ### 2. Caret `^` Only in Math Blocks
 
 ❌ **Wrong:**
-```simple
+```text
 val result = x^2             # ERROR: ^ not allowed outside m{}
 ```
 
 ✅ **Correct:**
-```simple
+```text
 val result = x ** 2          # Use ** for power
 val formula = m{ x^2 }       # Or use m{} math block
 ```
@@ -319,14 +319,14 @@ val formula = m{ x^2 }       # Or use m{} math block
 ### 3. Don't Remove TODO Markers
 
 ❌ **Wrong:**
-```simple
+```text
 # Implementation done!       # TODO removed but feature incomplete
 fn feature():
     ()                        # Still returns unit!
 ```
 
 ✅ **Correct:**
-```simple
+```text
 # TODO(P1): Complete implementation
 fn feature():
     ()                        # TODO marker stays until fully working
