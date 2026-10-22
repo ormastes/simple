@@ -49,3 +49,21 @@ writeback) likely has more instances reachable through this fixture's shape.
    `self.method(array_arg, ...)` shape and convert to module-scope free
    functions as a targeted workaround.
 3. Land the actual codegen fix for the argument-corruption family.
+
+## Update 2026-10-22 (evening): deterministic on pristine state; crash path isolated
+
+- Reproduced with a COMPLETELY fresh sanity state (stage2-home/stage2-tmp
+  wiped) on HEAD 7f9a8c802a3: the probe SEGV persists — it is not
+  accumulated-state corruption.
+- The sanity probe runs the HIR phase with `[hir-cache] disabled
+  reason=no-compiler-scope` (frontend_parse_cache_scope()=="" — the SCV
+  admitted-epoch probe context). Manual reproductions all ran WITH the cache
+  scope and pass; forcing `SIMPLE_HIR_CACHE=0` (reason=off) also passes. The
+  crash therefore lives in the no-compiler-scope HIR lowering path, only
+  reachable under the sanity's scrubbed SCV-epoch environment.
+- The bounded collector sets RLIMIT_CORE=0, so no core is available; under
+  gdb the coordinator path does not crash (timing/layout heisenbug).
+Next actionable step: instrument the no-scope HIR lowering path
+(driver_hir_pipeline_lowering) with an env-gated progress trace, rebuild the
+candidate, and rerun the wrapper sanity to see the last successful operation
+before the fault.
