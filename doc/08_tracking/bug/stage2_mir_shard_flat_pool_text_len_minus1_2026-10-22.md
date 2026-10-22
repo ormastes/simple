@@ -520,3 +520,25 @@ an env gate) in ONE candidate build discriminates these definitively.
 Also confirmed: `hir-shard done lowered=0 claimed=1` co-occurs — the shard
 claims and lowers nothing because the delegated child's lowering never
 completes.
+
+## Annotation 2026-10-23 (lane A, macOS aarch64): crash backtrace + progression note
+
+Independent reproduction on the stage-2 sanity gate
+(`bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage2`,
+release/1.0 @ ab07dfa3) after landing the reverse-reference publish
+workaround (stage2_sanity_reverse_reference_publish_refused_2026_10_22):
+the sanity p2_add build now reaches the flat-pool crash instead of the
+publish refusal — progression, same bug.
+
+macOS crash report (`~/Library/Logs/DiagnosticReports/simple-2026-10-23-003331.ips`):
+
+```
+SIGABRT  byProc=simple
+  abort <- std::process::abort <- rt_panic
+  <- compiler__frontend__core__flat_pool_codec__flat_pool_builder_push
+```
+
+So the panic fires inside `flat_pool_builder_push` itself (encode side),
+consistent with the "texts freed between decode and hir-entry encode"
+mechanism above. The driver-side log ends at `phase=hir current=...p2_add`
+with no diagnostic text — the aborting frame is in the delegated child.

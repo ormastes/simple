@@ -92,3 +92,15 @@ contention, not this defect.
 corruption; seal/publish/accepts_registration now validate against the
 globals. The class and its array flows are unchanged. Proper repair remains
 the runtime class-layout/copy fix for mixed scalar+array classes.
+
+## Update 2026-10-23: workaround validated at the publish node; next site is the flat-pool bug
+
+With the scalar-globals workaround landed (ab07dfa3), the sanity lane no
+longer records `[rr-publish] publish refused` — the publish node now passes.
+The candidate proceeds to a SIGABRT in
+`compiler__frontend__core__flat_pool_codec__flat_pool_builder_push`
+(rt_panic), which is the independently-tracked delegated-frontend
+flat-pool bug (`stage2_mir_shard_flat_pool_text_len_minus1_2026-10-22.md`,
+annotation 2026-10-23). The stage-2 gate therefore stays red on that bug;
+further whack-a-mole on this lane stops here (cycle cap) — the runtime
+class-layout fix and the flat-pool lifetime fix are the cures.
