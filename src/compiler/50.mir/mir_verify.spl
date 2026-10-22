@@ -24,12 +24,23 @@
 # registry record, never by rewording a message.
 
 use compiler.hir.hir_types.{SymbolId}
+use std.io_runtime.{env_get_opt}
 use compiler.common.diagnostics.span.{Span}
 use compiler.mir.mir_types.*
 use compiler.mir.mir_instruction_support.*
 use compiler.mir.mir_instruction_kinds.{MirInstKind}
 use compiler.mir.mir_instruction_graph.{MirInst, MirBlock, MirFunction, MirModule}
 use compiler.mir.mir_verify_levels.{MirVerifyRule, MirVerifyLevels, mir_verify_rules, mir_verify_rule_lifecycle, mir_verify_levels_from_spec, mir_verify_levels_from_env, mir_verify_rule_level_from_spec, mir_verify_rule_level}
+
+var mir_verify_profile_state: i64 = -1
+var mir_verify_profile_receipts: i64 = 0
+
+fn mir_verify_profile_note(marker: text):
+    if mir_verify_profile_state < 0:
+        mir_verify_profile_state = if (env_get_opt("SIMPLE_COMPILER_PHASE_PROFILE") ?? "") == "1": 1 else: 0
+    if mir_verify_profile_state == 1 and mir_verify_profile_receipts < 1024:
+        mir_verify_profile_receipts = mir_verify_profile_receipts + 1
+        eprint("[MIR-VERIFY-PHASE] {marker}\n")
 
 # ============================================================================
 # Findings
@@ -830,6 +841,7 @@ fn mir_verify_function(func: MirFunction, module: MirModule, fn_by_name: Dict<te
     _mir_verify_function_indexed(func, module, fn_by_name, _mir_verify_type_index(module))
 
 fn _mir_verify_type_index(module: MirModule) -> Dict<i64, MirTypeDef>:
+    mir_verify_profile_note("type-index:entry")
     # MIR type owners carry the same semantic SymbolId as their module key.
     # Index the payload id so separately boxed references resolve consistently.
     var indexed: Dict<i64, MirTypeDef> = {}
@@ -837,11 +849,14 @@ fn _mir_verify_type_index(module: MirModule) -> Dict<i64, MirTypeDef>:
     val owners: [MirTypeDef] = definitions.values()
     for definition in owners:
         indexed[definition.symbol.id] = definition
+    mir_verify_profile_note("type-index:done")
     indexed
 
 fn _mir_verify_function_indexed(func: MirFunction, module: MirModule, fn_by_name: Dict<text, MirFunction>, type_by_id: Dict<i64, MirTypeDef>) -> [MirVerifyFinding]:
     """One linear pass over `func`. Returns every finding (fatal and warn-first)."""
     # --- index locals (dense fast path; one array sized max id + 1) ---------
+    mir_verify_profile_note("function:entry")
+    mir_verify_profile_note("function:locals:start name={func.name}")
     var max_local = -1
     for l in func.locals:
         if l.id.id > max_local: max_local = l.id.id
@@ -855,7 +870,7 @@ fn _mir_verify_function_indexed(func: MirFunction, module: MirModule, fn_by_name
     var cond_def: [bool] = []
     var p = 0
     while p < func.locals.len():
-        val l = func.locals[p]
+        val l: MirLocal = func.locals[p]
         if l.id.id >= 0:
             pos_of_id[l.id.id] = p
         var is_def = false
@@ -867,6 +882,7 @@ fn _mir_verify_function_indexed(func: MirFunction, module: MirModule, fn_by_name
         used = used.push(0)
         cond_def = cond_def.push(false)
         p = p + 1
+    mir_verify_profile_note("function:locals:done name={func.name}")
     # --- index blocks --------------------------------------------------------
     var max_block = -1
     for b in func.blocks:
@@ -887,7 +903,7 @@ fn _mir_verify_function_indexed(func: MirFunction, module: MirModule, fn_by_name
         enum_counts: [])
     var bi = 0
     while bi < func.blocks.len():
-        val b = func.blocks[bi]
+        val b: MirBlock = func.blocks[bi]
         if b.id.id < 0:
             v.cur_block = b.id.id
             v.report("MIRV-005", "block has negative id {b.id.id}")
@@ -915,7 +931,7 @@ fn _mir_verify_function_indexed(func: MirFunction, module: MirModule, fn_by_name
         v.report("MIRV-001", "return type has {ret_reason}")
     p = 0
     while p < func.locals.len():
-        val l = func.locals[p]
+        val l: MirLocal = func.locals[p]
         val reason = mir_verify_type_unresolved_reason(l.type_, 0)
         if reason != "":
             v.report("MIRV-001", "local %{l.id.id} ('" + (l.name ?? "") + "') has {reason}")
@@ -931,7 +947,7 @@ fn _mir_verify_function_indexed(func: MirFunction, module: MirModule, fn_by_name
     var instructions = 0
     bi = 0
     while bi < func.blocks.len():
-        val b = func.blocks[bi]
+        val b: MirBlock = func.blocks[bi]
         v.cur_block = b.id.id
         var ii = 0
         while ii < b.instructions.len():
@@ -951,21 +967,24 @@ fn _mir_verify_function_indexed(func: MirFunction, module: MirModule, fn_by_name
     p = 0
     while p < func.locals.len():
         if v.used[p] > 0 and not v.defined[p]:
-            val l = func.locals[p]
+            val l: MirLocal = func.locals[p]
             v.report("MIRV-005e", "local %{l.id.id} ('" + (l.name ?? "") + "') is read but never defined in this function")
         if v.cond_def[p] and v.used[p] == 0:
-            val l = func.locals[p]
+            val l: MirLocal = func.locals[p]
             v.report("MIRV-005c", "comparison result %{l.id.id} is computed but never consumed by a branch or value (dropped guard/condition)")
         p = p + 1
     v.findings
 
 fn mir_verify_module(module: MirModule) -> MirVerifyReport:
     """Verify every function, static and type owner of one lowered module."""
+    mir_verify_profile_note("module:entry")
+    mir_verify_profile_note("module:function-index:start name={module.name}")
     var findings: [MirVerifyFinding] = []
     var fn_by_name: Dict<text, MirFunction> = {}
     var name_count: Dict<text, i64> = {}
     # --- rule 7: duplicate symbol definitions ------------------------------
     for f in module.functions.values():
+        mir_verify_profile_note("module:function-index:item name={f.name}")
         val prior = name_count[f.name] ?? 0
         name_count[f.name] = prior + 1
         if prior == 0:
@@ -975,8 +994,11 @@ fn mir_verify_module(module: MirModule) -> MirVerifyReport:
                 rule: "MIRV-007", module: module.name, function: f.name, block: -1, inst: -1,
                 message: "function '{f.name}' is defined more than once in this module (distinct symbol ids lower to one emitted name)",
                 span: Some(f.span)))
+    mir_verify_profile_note("module:function-index:done name={module.name}")
+    mir_verify_profile_note("module:statics:start name={module.name}")
     var static_names: Dict<text, i64> = {}
     for s in module.statics.values():
+        mir_verify_profile_note("module:static:start name={s.name} has_init={s.init != nil} external={s.is_external}")
         val prior = static_names[s.name] ?? 0
         static_names[s.name] = prior + 1
         if prior == 1:
@@ -997,6 +1019,7 @@ fn mir_verify_module(module: MirModule) -> MirVerifyReport:
                 message: "static '{s.name}' has {reason}", span: nil))
         # --- rule 7b: initializer type agrees with the declared type ---------
         if val init = s.init:
+            mir_verify_profile_note("module:static:initializer:start name={s.name}")
             val ic = mir_verify_type_class(init.type_)
             val sc = mir_verify_type_class(s.type_)
             val agree = ic == sc or
@@ -1011,13 +1034,17 @@ fn mir_verify_module(module: MirModule) -> MirVerifyReport:
             # A defined (non-consumer) static with no initializer is
             # zero-filled by every backend; that is a valid, explicit state.
             ()
+        mir_verify_profile_note("module:static:done name={s.name}")
+    mir_verify_profile_note("module:statics:done name={module.name}")
     # --- per function -------------------------------------------------------
     var functions_checked = 0
     var instructions_checked = 0
     val type_by_id = _mir_verify_type_index(module)
     for f in module.functions.values():
+        mir_verify_profile_note("module:function:start name={f.name}")
         for fnd in _mir_verify_function_indexed(f, module, fn_by_name, type_by_id):
             findings = findings.push(fnd)
+        mir_verify_profile_note("module:function:done name={f.name}")
         functions_checked = functions_checked + 1
         for b in f.blocks:
             instructions_checked = instructions_checked + b.instructions.len() + 1

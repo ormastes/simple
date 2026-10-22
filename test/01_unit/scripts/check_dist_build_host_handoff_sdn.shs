@@ -1,0 +1,65 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+fixture=$(mktemp -d)
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+
+cat > "$fixture/uname" <<'EOF'
+#!/bin/sh
+case "$1" in
+    -s) printf 'Darwin\n' ;;
+    -m) printf 'arm64\n' ;;
+    *) exit 1 ;;
+esac
+EOF
+cat > "$fixture/git" <<'EOF'
+#!/bin/sh
+case "$*" in
+    *rev-parse*) printf 'abc123\n' ;;
+    *status*) exit 0 ;;
+    *) exit 1 ;;
+esac
+EOF
+cat > "$fixture/docker" <<'EOF'
+#!/bin/sh
+printf '%s\n' 'v1,percent%quote"slash\'
+EOF
+chmod +x "$fixture/uname" "$fixture/git" "$fixture/docker"
+
+set +e
+PATH="$fixture:$PATH" sh "$repo_root/scripts/check/check-dist-build-host-handoff.shs" --sdn > "$fixture/sdn" 2> "$fixture/error"
+sdn_status=$?
+PATH="$fixture:$PATH" sh "$repo_root/scripts/check/check-dist-build-host-handoff.shs" > "$fixture/human" 2> "$fixture/human_error"
+human_status=$?
+set -e
+
+[ "$sdn_status" -eq 2 ]
+[ "$human_status" -eq 2 ]
+[ ! -s "$fixture/error" ]
+grep -Fx 'dist_build_host_handoff |field, value|' "$fixture/sdn" >/dev/null
+grep -Fx '    "schema", "simple-dist-build-host-handoff-v1"' "$fixture/sdn" >/dev/null
+grep -Fx '    "docker_daemon", "v1,percent%quote\"slash\\"' "$fixture/sdn" >/dev/null
+grep -Fx '    "status", "BLOCKED"' "$fixture/sdn" >/dev/null
+grep -Fx 'dist-host-handoff: docker_daemon=v1,percent%quote"slash\' "$fixture/human" >/dev/null
+grep -Fx 'dist-host-handoff: status=BLOCKED' "$fixture/human" >/dev/null
+if grep -F 'dist-host-handoff:' "$fixture/sdn" >/dev/null; then
+    exit 1
+fi
+
+cat > "$fixture/docker" <<'EOF'
+#!/bin/sh
+printf 'bad\nsecond\n'
+EOF
+chmod +x "$fixture/docker"
+set +e
+PATH="$fixture:$PATH" sh "$repo_root/scripts/check/check-dist-build-host-handoff.shs" --sdn > "$fixture/malformed" 2> "$fixture/malformed_error"
+malformed_status=$?
+set -e
+[ "$malformed_status" -eq 2 ]
+grep -Fx 'dist-host-handoff: invalid receipt value for docker_daemon' "$fixture/malformed_error" >/dev/null
+if grep -F '"docker_daemon"' "$fixture/malformed" >/dev/null; then
+    exit 1
+fi
+
+printf 'check_dist_build_host_handoff_sdn: PASS\n'

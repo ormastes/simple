@@ -1,0 +1,163 @@
+"""Definition-checked local synchronous callback receipts, not imported trust.
+
+This transient map proves only nonescape and synchronous direct invocation.
+The separate regions map proves short invocation regions from explicit owned
+parameters only; neither map authorizes imported summaries.
+Unsupported syntax, unknown calls and callback aliases fail closed.
+"""
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_types.{HirType, HirTypeKind, HirSymbol, SymbolKind}
+use compiler.hir.ownership_types.{hir_type_is_short_candidate}
+
+fn callback_scalar(type_: HirType) -> bool:
+    match type_.kind:
+        case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char | HirTypeKind.Unit | HirTypeKind.Never: true
+        case _: false
+
+class CallbackProofWalk:
+    callback_symbol: i64
+    invoked: bool
+    region_positions: [i64]
+    owned_symbols: {i64: bool}
+
+    fn direct_callback(expr: HirExpr) -> bool:
+        match expr.kind:
+            case Var(symbol) | NamedVar(symbol, _): symbol.id == self.callback_symbol
+            case _: false
+
+    me expr(expr: HirExpr) -> bool:
+        match expr.kind:
+            case IntLit(_, _) | FloatLit(_, _) | BoolLit(_) | CharLit(_) | UnitLit: return true
+            case Var(symbol) | NamedVar(symbol, _):
+                # Reading the callback as a value would permit aliasing it.
+                return symbol.id != self.callback_symbol and not self.owned_symbols.contains_key(symbol.id)
+            case Binary(_, left, right):
+                return self.expr(left) and self.expr(right)
+            case Unary(_, value): return self.expr(value)
+            case Call(callee, arguments, type_arguments):
+                if not self.direct_callback(callee): return false
+                if type_arguments.len() != 0: return false
+                for position in self.region_positions:
+                    if position < 0 or position >= arguments.len(): return false
+                    val argument: HirCallArg = arguments[position]
+                    if argument.has_name: return false
+                    var owner_id = -1
+                    match argument.value.kind:
+                        case Var(symbol) | NamedVar(symbol, _): owner_id = symbol.id
+                        case _: return false
+                    if not self.owned_symbols.contains_key(owner_id): return false
+                    if not self.owned_symbols[owner_id]: return false
+                var argument_index = 0
+                for argument in arguments:
+                    var lending_owned_source = false
+                    for position in self.region_positions:
+                        if position == argument_index: lending_owned_source = true
+                    # Only the validated direct short argument may read an
+                    # owner. Any other use could move/alias it between calls.
+                    if not lending_owned_source and not self.expr(argument.value): return false
+                    argument_index = argument_index + 1
+                self.invoked = true
+                return true
+            case If(condition, then_, else_):
+                if not self.expr(condition) or not self.block(then_): return false
+                match else_:
+                    case Some(other): return self.block(other)
+                    case nil: return true
+            case Block(body): return self.block(body)
+            case Return(value):
+                match value:
+                    case Some(result): return self.expr(result)
+                    case nil: return true
+            # In particular no lambda, store, field access, foreign forwarding,
+            # loop/suspension, exception edge, raw call or unresolved node.
+            case _: return false
+
+    me block(block: HirBlock) -> bool:
+        for statement in block.stmts:
+            match statement.kind:
+                case Expr(value):
+                    if not self.expr(value): return false
+                case Let(_, _, value):
+                    if not self.expr(value): return false
+                case Block(body):
+                    if not self.block(body): return false
+                case _: return false
+        if block.has: return self.expr(block.value)
+        true
+
+fn checked_function_callback_slots(function: HirFunction) -> [i64]:
+    var positions: [i64] = []
+    if function.is_extern or function.is_async or function.symbol.id < 0: return positions
+    if not callback_scalar(function.return_type): return positions
+    var index = 0
+    for parameter in function.params:
+        match parameter.type_.kind:
+            case HirTypeKind.Function(_, result, effects):
+                if parameter.symbol.id >= 0 and effects.len() == 0 and callback_scalar(result):
+                    var proof = CallbackProofWalk(parameter.symbol.id, false, [], {})
+                    if proof.block(function.body) and proof.invoked:
+                        positions.push(index)
+            case _: pass
+        index = index + 1
+    positions
+
+pub fn checked_sync_callback_slots(module: HirModule) -> {i64: [i64]}:
+    var slots: {i64: [i64]} = {}
+    var counts: {i64: i64} = {}
+    for function in module.functions.values():
+        val actual: HirFunction = function
+        val id = actual.symbol.id
+        counts[id] = if counts.contains_key(id): counts[id] + 1 else: 1
+    for function in module.functions.values():
+        val actual: HirFunction = function
+        val id = actual.symbol.id
+        if counts[id] != 1: continue
+        if not module.symbols.symbols.contains_key(id): continue
+        val owner: HirSymbol = module.symbols.symbols[id]
+        if owner.id.id != id or owner.kind != SymbolKind.Function: continue
+        if owner.name != actual.name: continue
+        # Local definitions can omit defining_module; an explicit foreign
+        # owner cannot gain local trust merely by inserting a function body.
+        if val declaring_module = owner.defining_module:
+            if declaring_module != module.name and declaring_module != module.path: continue
+        val positions = checked_function_callback_slots(actual)
+        if positions.len() > 0: slots[id] = positions
+    slots
+
+# Strong/unique explicit parameters keep storage owned for the entire direct
+# invocation. No bare parameter, weak handle, type spelling, projection or
+# unproved local initializer can manufacture a region receipt.
+fn callback_owned_parameter(type_: HirType) -> bool:
+    match type_.kind:
+        case HirTypeKind.Unique(_) | HirTypeKind.Shared(_) | HirTypeKind.Isolated(_): true
+        case _: false
+
+pub fn checked_sync_callback_regions(module: HirModule) -> {i64: {i64: [i64]}}:
+    val checked_slots = checked_sync_callback_slots(module)
+    var regions: {i64: {i64: [i64]}} = {}
+    for function in module.functions.values():
+        val actual: HirFunction = function
+        val id = actual.symbol.id
+        if not checked_slots.contains_key(id): continue
+        var owners: {i64: bool} = {}
+        for raw_parameter in actual.params:
+            val parameter: HirParam = raw_parameter
+            if parameter.symbol.id >= 0 and callback_owned_parameter(parameter.type_):
+                owners[parameter.symbol.id] = true
+        var callbacks: {i64: [i64]} = {}
+        for slot in checked_slots[id]:
+            val parameter: HirParam = actual.params[slot]
+            var positions: [i64] = []
+            match parameter.type_.kind:
+                case HirTypeKind.Function(arguments, _, _):
+                    var index = 0
+                    for argument in arguments:
+                        if hir_type_is_short_candidate(argument): positions.push(index)
+                        index = index + 1
+                case _: pass
+            if positions.len() == 0: continue
+            var proof = CallbackProofWalk(parameter.symbol.id, false, positions, owners)
+            if proof.block(actual.body) and proof.invoked:
+                callbacks[slot] = positions
+        if callbacks.len() > 0: regions[id] = callbacks
+    regions

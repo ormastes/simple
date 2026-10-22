@@ -67,12 +67,11 @@ jobs:
           # Linux platforms
           - os: ubuntu-latest
             platform: linux-x86_64
-          - os: ubuntu-latest
+          # Native arm64 runner: builds the phase-1 compiler on the target
+          # instead of a cross seed that cannot satisfy release.
+          - os: ubuntu-24.04-arm
             platform: linux-aarch64
-            cross_compile: true
-          - os: ubuntu-latest
-            platform: linux-riscv64
-            cross_compile: true
+            experimental: true
 
           # macOS platforms
           - os: macos-latest
@@ -81,8 +80,6 @@ jobs:
             platform: darwin-x86_64
 
           # FreeBSD (uses Linux binary via Linuxulator)
-          - os: ubuntu-latest
-            platform: freebsd-x86_64
           - os: ubuntu-latest
             platform: freebsd-x86
             cross_compile: true
@@ -100,14 +97,20 @@ jobs:
     # blocking); FreeBSD is blocked; aarch64/riscv64 are experimental; and the
     # cross/freebsd legs build bootstrap-only seeds that refuse release by
     # design. Keep those rows visible without letting them hold the release.
-    continue-on-error: ${{ matrix.cross_compile == true || contains(matrix.platform, 'freebsd') || startsWith(matrix.os, 'macos') }}
+    continue-on-error: ${{ matrix.cross_compile == true || matrix.experimental == true || contains(matrix.platform, 'freebsd') || startsWith(matrix.os, 'macos') }}
+    # Windows x86_64 C toolchain authority (same pin as windows-build.yml):
+    # src/compiler_rust/lib/build.rs refuses cl.exe for the MSVC target.
+    env:
+      LLVM_VERSION: 23.1.1
+      LLVM_ARCHIVE_SHA256: c8a12d754b5050c5668b56a5425c806792d46c70f7244b1216046164aa4b6462
+      LLVM_ROOT: ${{ github.workspace }}\.toolchains\llvm-23.1.1
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Rust toolchain (macOS/Windows)
-        if: runner.os == 'macOS' || runner.os == 'Windows'
+      - name: Setup Rust toolchain (macOS/Windows/Linux arm64)
+        if: runner.os == 'macOS' || runner.os == 'Windows' || matrix.platform == 'linux-aarch64'
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Cache Rust build artifacts (macOS/Windows)
@@ -301,8 +304,31 @@ jobs:
             echo "NEW_RUNTIME_BUILT=false" >> $GITHUB_ENV
           fi
 
-      - name: Build native Linux x86_64 binary via bootstrap-only Rust seed
-        if: runner.os == 'Linux' && matrix.platform == 'linux-x86_64'
+      # native-build's core-C archive step requires unsuffixed clang/LLVM tools
+      # (llvm-ar); hosted ubuntu runners lack them (same install as build-binaries.yml).
+      - name: Install build tools (Linux x86_64/arm64)
+        if: runner.os == 'Linux' && (matrix.platform == 'linux-x86_64' || matrix.platform == 'linux-aarch64')
+        shell: bash
+        run: |
+          if command -v clang >/dev/null && command -v llvm-ar >/dev/null && command -v ld.lld >/dev/null && command -v llvm-nm >/dev/null && pkg-config --exists libunwind; then
+            echo "Clang/LLD/LLVM tools are already available"
+          else
+            sudo -n apt-get update
+            sudo -n apt-get install -y clang lld llvm libunwind-dev
+          fi
+          command -v llvm-ar
+
+      - name: Build next phase with configured previous compiler (config/bootstrap.sdn)
+        id: prevc_linux
+        if: runner.os == 'Linux' && (matrix.platform == 'linux-x86_64' || matrix.platform == 'linux-aarch64')
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh scripts/bootstrap/build-next-phase-ci.shs "${{ matrix.platform }}" 4
+
+      - name: Build native Linux x86_64/arm64 binary via bootstrap-only Rust seed
+        if: runner.os == 'Linux' && (matrix.platform == 'linux-x86_64' || matrix.platform == 'linux-aarch64') && steps.prevc_linux.outputs.built != 'true'
         shell: bash
         run: |
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -334,7 +360,7 @@ jobs:
           # (native_build_hir_shard_count keys off the same env).
           RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=0 \
             "$BOOTSTRAP_ONLY_SEED" native-build \
-            --source src \
+            --source src/compositions/kernel_llvm_cranelift --source src \
             --entry-closure \
             --entry src/app/cli/bootstrap_main.spl \
             --mode dynload --threads 4 \
@@ -367,8 +393,17 @@ jobs:
           echo "PATH=${LLVM_PREFIX}/bin:${PATH}" >> $GITHUB_ENV
           ls -la "${LLVM_PREFIX}/lib/"libLLVM*.dylib | head -5
 
-      - name: Build native macOS binary via bootstrap-only Rust seed
+      - name: Build next phase with configured previous compiler (config/bootstrap.sdn)
+        id: prevc_macos
         if: runner.os == 'macOS'
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh scripts/bootstrap/build-next-phase-ci.shs "${{ matrix.platform }}" 4
+
+      - name: Build native macOS binary via bootstrap-only Rust seed
+        if: runner.os == 'macOS' && steps.prevc_macos.outputs.built != 'true'
         shell: bash
         run: |
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -406,7 +441,7 @@ jobs:
           # complete on GitHub runners and leak memory; parse in-process.
           RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=0 \
             "$BOOTSTRAP_ONLY_SEED" native-build \
-            --source src \
+            --source src/compositions/kernel_llvm_cranelift --source src \
             --entry-closure \
             --entry src/app/cli/bootstrap_main.spl \
             --mode dynload --threads 4 \
@@ -458,14 +493,122 @@ jobs:
             "./$STAGE2" --version && "./$STAGE2" -c "print 42"
             echo "✓ LLVM lib stage2 verified — updating binary"
             echo "NEW_RUNTIME_PATH=$(pwd)/$STAGE2" >> $GITHUB_ENV
+            echo "BUILT_PHASE=2" >> $GITHUB_ENV
             file "$STAGE2"
             ls -lh "$STAGE2"
           else
             echo "⚠ LLVM lib stage2 failed — using stage1 binary"
           fi
 
+      - name: Cache LLVM 23.1.1 (Windows x86_64)
+        if: matrix.platform == 'windows-x86_64'
+        id: llvm-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.LLVM_ROOT }}
+          key: llvm-${{ runner.os }}-${{ runner.arch }}-${{ env.LLVM_VERSION }}-${{ env.LLVM_ARCHIVE_SHA256 }}
+
+      - name: Install LLVM 23.1.1 (Windows x86_64)
+        if: matrix.platform == 'windows-x86_64' && steps.llvm-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archiveName = 'clang+llvm-23.1.1-x86_64-pc-windows-msvc.tar.zst'
+          $archive = Join-Path $env:RUNNER_TEMP $archiveName
+          $staging = Join-Path $env:RUNNER_TEMP 'simple-llvm-23.1.1-extract'
+          $uri = 'https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.1/clang%2Bllvm-23.1.1-x86_64-pc-windows-msvc.tar.zst'
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -Uri $uri -OutFile $archive
+          $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $env:LLVM_ARCHIVE_SHA256) {
+            throw "LLVM archive SHA-256 mismatch: $actualHash"
+          }
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          & 7z x $archive "-o$staging" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to decompress LLVM archive: exit $LASTEXITCODE"
+          }
+          $tar = Join-Path $staging 'clang+llvm-23.1.1-x86_64-pc-windows-msvc.tar'
+          & 7z x $tar "-o$staging" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to extract LLVM archive: exit $LASTEXITCODE"
+          }
+          $sourceRoot = Join-Path $staging 'clang+llvm-23.1.1-x86_64-pc-windows-msvc'
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $env:LLVM_ROOT) | Out-Null
+          Move-Item -LiteralPath $sourceRoot -Destination $env:LLVM_ROOT
+
+      - name: Verify LLVM 23.1.1 authority (Windows x86_64)
+        if: matrix.platform == 'windows-x86_64'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $checks = @(
+            @{ Tool = 'clang.exe'; Pattern = 'clang version 23\.1\.1(?:\s|$)' },
+            @{ Tool = 'clang-cl.exe'; Pattern = 'clang version 23\.1\.1(?:\s|$)' },
+            @{ Tool = 'llvm-ar.exe'; Pattern = 'LLVM version 23\.1\.1(?:\s|$)' },
+            @{ Tool = 'lld-link.exe'; Pattern = 'LLD 23\.1\.1(?:\s|$)' }
+          )
+          foreach ($check in $checks) {
+            $tool = Join-Path $env:LLVM_ROOT "bin\$($check.Tool)"
+            if (!(Test-Path -LiteralPath $tool -PathType Leaf)) {
+              throw "missing LLVM 23.1.1 tool: $tool"
+            }
+            $versionLines = @(& $tool --version 2>&1)
+            if ($LASTEXITCODE -ne 0) {
+              throw "$($check.Tool) --version failed: exit $LASTEXITCODE"
+            }
+            $version = $versionLines -join "`n"
+            if ($version -notmatch $check.Pattern) {
+              $summary = ($versionLines | Select-Object -First 3) -join ' | '
+              throw "$($check.Tool) is not LLVM 23.1.1: $summary"
+            }
+            $toolHash = (Get-FileHash -LiteralPath $tool -Algorithm SHA256).Hash.ToLowerInvariant()
+            $summary = ($versionLines | Select-Object -First 3) -join ' | '
+            Write-Host "LLVM_TOOL_ATTESTATION tool=$($check.Tool) sha256=$toolHash version=$summary"
+          }
+          (Join-Path $env:LLVM_ROOT 'bin') | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "SIMPLE_LLVM_PATH=$env:LLVM_ROOT\bin\LLVM-C.dll" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Setup MSVC (Windows x86_64)
+        if: matrix.platform == 'windows-x86_64'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # Hide Git's /usr/bin/link so it doesn't shadow MSVC's link.exe.
+      - name: Fix MSVC linker PATH (Windows x86_64)
+        if: matrix.platform == 'windows-x86_64'
+        shell: bash
+        run: |
+          if [ -f /usr/bin/link ]; then
+            mv /usr/bin/link /usr/bin/link.bak
+          fi
+
+      - name: Bind MSVC Clang compiler (Windows x86_64)
+        if: matrix.platform == 'windows-x86_64'
+        shell: pwsh
+        run: |
+          "CC=$env:LLVM_ROOT\bin\clang-cl.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CXX=$env:LLVM_ROOT\bin\clang-cl.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CC_x86_64_pc_windows_msvc=$env:LLVM_ROOT\bin\clang-cl.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CXX_x86_64_pc_windows_msvc=$env:LLVM_ROOT\bin\clang-cl.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # Git Bash exports MSYSTEM=MINGW64, which makes the Rust seed's
+          # Target::linker_flavor() pick GNU: the core-C runtime was then
+          # compiled with --target=x86_64-w64-windows-gnu (MinGW headers:
+          # strtok_r, swprintf, stat64i32, ignored __declspec(thread)) and
+          # linked into an MSVC image, and stage1 SEGV'd on native-build
+          # (run 39357315407). Pin the MSVC flavor for this row only.
+          "SIMPLE_LINKER_FLAVOR=msvc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build next phase with configured previous compiler (config/bootstrap.sdn)
+        id: prevc_windows
+        if: matrix.platform == 'windows-x86_64'
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh scripts/bootstrap/build-next-phase-ci.shs "${{ matrix.platform }}" 2
+
       - name: Build native Windows binary via bootstrap-only Rust seed
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && steps.prevc_windows.outputs.built != 'true'
         shell: bash
         run: |
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -519,7 +662,7 @@ jobs:
             # fits on this runner.
             RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=0 \
               "$BOOTSTRAP_ONLY_SEED" native-build \
-              --source src \
+              --source src/compositions/kernel_llvm_cranelift --source src \
               --entry-closure \
               --entry src/app/cli/bootstrap_main.spl \
               --mode dynload --threads 2 \
@@ -539,6 +682,12 @@ jobs:
               ls -lh "$NATIVE_BIN"
             else
               echo "✗ native-build failed or binary broken; bootstrap-only Rust seed cannot satisfy release"
+              if [ -f "$NATIVE_BIN" ]; then
+                # Name the cause: stderr of the failing --version (a hit stub
+                # prints its own symbol name) and the stub list from the link.
+                "./$NATIVE_BIN" --version || echo "--version exit=$?"
+                cat "$NATIVE_BIN.stubbed_symbols.txt" 2>/dev/null | head -120
+              fi
               echo "NEW_RUNTIME_BUILT=false" >> $GITHUB_ENV
               exit 1
             fi
@@ -632,7 +781,14 @@ jobs:
           sudo apt-get install -y -qq lld clang
 
           # Download FreeBSD sysroot
-          curl -L -o /tmp/freebsd-base.txz "$SYSROOT_URL"
+          # archive.freebsd.org timed out on run 39383952486; try its
+          # ftp-archive mirror before failing.
+          SYSROOT_PATH="${SYSROOT_URL#https://archive.freebsd.org/}"
+          for url in "$SYSROOT_URL" "https://ftp-archive.freebsd.org/pub/FreeBSD-Archive/${SYSROOT_PATH}"; do
+            curl -fL --retry 3 --connect-timeout 30 -o /tmp/freebsd-base.txz "$url" && break
+            rm -f /tmp/freebsd-base.txz
+          done
+          test -s /tmp/freebsd-base.txz
           sudo mkdir -p /opt/sysroots/freebsd
           sudo tar xf /tmp/freebsd-base.txz -C /opt/sysroots/freebsd \
             ./usr/include ./usr/lib ./lib
@@ -727,6 +883,9 @@ jobs:
             chmod +x "${PKG_DIR}/bin/simple"
           fi
           echo "✓ Copied binary: $(basename $BINARY_TO_PACKAGE) → bin/${BIN_NAME}"
+          # Bootstrap phase of the packaged compiler (seed-built = 1). A later
+          # release run reads it to build the next phase from this binary.
+          echo "${BUILT_PHASE:-1}" > "${PKG_DIR}/PHASE"
 
           # Build and package native MCP entrypoints for host-native jobs.
           # npm launchers prefer these binaries so installed packages do not
@@ -764,6 +923,78 @@ jobs:
             done
           else
             echo "ℹ Skipping native MCP package binaries for ${PLATFORM}"
+          fi
+
+          # Native test runner, built by this row's own pure-Simple candidate
+          # (flags mirror bootstrap-provisional-phase3-phase4.shs build_binary).
+          # SIMPLE_BIN/SIMPLE_BINARY must name the invoking producer, or the
+          # bootstrap native-build route rejects it ("producer mismatch").
+          if [ "$PLATFORM" = linux-x86_64 ] || [ "$PLATFORM" = windows-x86_64 ]; then
+            if [[ "$PLATFORM" == windows-* ]]; then
+              RUNNER_BIN="simple_test_runner.exe"
+              PRODUCER="$(cygpath -m "$BINARY_TO_PACKAGE")"
+              RUNNER_THREADS=2
+            else
+              RUNNER_BIN="simple_test_runner"
+              PRODUCER="$BINARY_TO_PACKAGE"
+              RUNNER_THREADS=4
+            fi
+            RUNNER_OUT="build/bootstrap/test-runner/${RUNNER_BIN}"
+            mkdir -p build/bootstrap/test-runner
+            echo "Building native ${RUNNER_BIN} for bootstrap package"
+            if RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=0 \
+              SIMPLE_BIN="$PRODUCER" SIMPLE_BINARY="$PRODUCER" \
+              "$BINARY_TO_PACKAGE" native-build \
+              --source src/compositions/kernel_llvm_cranelift --source src/compiler --source src/app \
+              --source src/lib --source src/os --source src/plugins --source src/package_ownership \
+              --source src/compositions \
+              --entry-closure --entry src/app/test_runner_new/main.spl \
+              --threads "$RUNNER_THREADS" --mode dynload \
+              --output "$RUNNER_OUT" 2>&1; then
+              RUNNER_PRODUCER="stage1"
+            else
+              RUNNER_PRODUCER=""
+            fi
+            if [ -z "$RUNNER_PRODUCER" ] || [ ! -f "$RUNNER_OUT" ]; then
+              # @workaround bug=release_stage1_native_build_worker_sigsegv_2026_10_20 reason=stage1-native-build-worker-sigsegv
+              # Stage1 native-build crashes before producing a binary
+              # (doc/08_tracking/bug/release_stage1_native_build_worker_sigsegv_2026-10-20.md).
+              # Fall back to the same bootstrap-only seed and flags that
+              # produced stage1, and record which producer built the runner.
+              echo "::warning::WORKAROUND release_stage1_native_build_worker_sigsegv_2026_10_20: stage1 could not build ${RUNNER_BIN}; retrying with the bootstrap-only Rust seed"
+              if [[ "$PLATFORM" == windows-* ]]; then
+                RUNNER_SEED="src/compiler_rust/target/bootstrap/simple.exe"
+              else
+                RUNNER_SEED="src/compiler_rust/target/bootstrap/simple"
+              fi
+              if [ ! -x "$RUNNER_SEED" ]; then
+                # The stage1 seed step is skipped when a previous compiler
+                # built this phase (prevc_*); the runner fallback still needs it.
+                (cd src/compiler_rust && cargo build --profile bootstrap -p simple-driver \
+                  && cargo build --profile bootstrap -p simple-native-all --features driver-compat) || true
+              fi
+              rm -f "$RUNNER_OUT"
+              # Same exit-status policy as the stage1 build: judge by the
+              # produced binary (checked below), not the seed's exit code.
+              RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=0 \
+                "$RUNNER_SEED" native-build \
+                --source src/compositions/kernel_llvm_cranelift --source src \
+                --entry-closure --entry src/app/test_runner_new/main.spl \
+                --mode dynload --threads "$RUNNER_THREADS" \
+                --output "$RUNNER_OUT" 2>&1 || echo "⚠ seed native-build exited non-zero"
+              RUNNER_PRODUCER="bootstrap-only-rust-seed (workaround bug=release_stage1_native_build_worker_sigsegv_2026_10_20)"
+            fi
+            if [ ! -f "$RUNNER_OUT" ]; then
+              echo "✗ ${RUNNER_BIN} native build produced no binary" >&2
+              exit 1
+            fi
+            cp "$RUNNER_OUT" "${PKG_DIR}/bin/${RUNNER_BIN}"
+            chmod +x "${PKG_DIR}/bin/${RUNNER_BIN}"
+            printf 'binary=bin/%s\nproducer=%s\nsource=src/app/test_runner_new/main.spl\ncommit=%s\n' \
+              "$RUNNER_BIN" "$RUNNER_PRODUCER" "$GITHUB_SHA" > "${PKG_DIR}/bin/simple_test_runner.provenance"
+            ls -lh "${PKG_DIR}/bin/${RUNNER_BIN}"
+            echo "::notice::${RUNNER_BIN} built by: ${RUNNER_PRODUCER}"
+            echo "✓ Copied test runner → bin/${RUNNER_BIN}"
           fi
 
           sh scripts/check-executable-size-budgets.shs --skip-missing \
@@ -824,6 +1055,58 @@ jobs:
             simple-bootstrap-*.spk
             simple-bootstrap-*.spk.sha256
           retention-days: 90
+
+      - name: Smoke packaged simple and test runner
+        if: matrix.platform == 'linux-x86_64' || matrix.platform == 'windows-x86_64'
+        shell: bash
+        run: |
+          PKG=$(ls simple-bootstrap-*.spk | head -1)
+          rm -rf smoke-pkg
+          mkdir smoke-pkg
+          tar xzf "$PKG" -C smoke-pkg
+          BIN_DIR=$(cd smoke-pkg/simple-bootstrap-*/bin && pwd)
+          if [[ "${{ matrix.platform }}" == windows-* ]]; then
+            SIMPLE="$BIN_DIR/simple.exe"
+            SIMPLE_REAL="$(cygpath -m "$BIN_DIR/simple.exe")"
+            RUNNER="$BIN_DIR/simple_test_runner.exe"
+          else
+            SIMPLE="$BIN_DIR/simple"
+            SIMPLE_REAL="$BIN_DIR/simple-runtime"
+            RUNNER="$BIN_DIR/simple_test_runner"
+          fi
+          ls -l "$BIN_DIR"
+          cat "$BIN_DIR/simple_test_runner.provenance"
+          "$SIMPLE" --version
+          # The packaged simple is the bootstrap CLI (compile/native-build
+          # only), so a spec cannot pass through it yet
+          # (doc/08_tracking/bug/rc1_packaged_simple_is_bootstrap_cli_specs_fail_smf_compile_2026-10-20.md).
+          # The smoke requires the runner to execute the spec. A failing exit
+          # is accepted only with that exact known degradation signature;
+          # anything else (crash, other compile error) fails the step.
+          KNOWN_DEGRADED='degraded=smf-compile-error:error:_bootstrap_compile_supports_--format=smf_only'
+          rc=0
+          SIMPLE_LIB="$PWD/src" SIMPLE_BINARY="$SIMPLE_REAL" SIMPLE_TEST_BINARY="$SIMPLE_REAL" \
+            "$RUNNER" test/01_unit/compiler/interpreter/block_scoped_use_resolves_spec.spl \
+            --mode=interpreter --unstable --assert-ran --no-cache --no-db \
+            --no-session-daemon --sequential > runner-smoke.log 2>&1 || rc=$?
+          cat runner-smoke.log
+          echo "test runner exit=$rc"
+          VERDICT=$(grep "SPEC FILE VERDICT: .*executed=1 " runner-smoke.log || true)
+          if [ -z "$VERDICT" ]; then
+            echo "✗ test runner did not execute the spec" >&2
+            exit 1
+          fi
+          if [ "$rc" -ne 0 ]; then
+            case "$VERDICT" in
+              *"$KNOWN_DEGRADED"*)
+                echo "::warning::test runner executed the spec; it failed only with the known bootstrap-CLI signature (exit $rc), see doc/08_tracking/bug/rc1_packaged_simple_is_bootstrap_cli_specs_fail_smf_compile_2026-10-20.md"
+                ;;
+              *)
+                echo "✗ test runner exit $rc without the known bootstrap-CLI signature: $VERDICT" >&2
+                exit 1
+                ;;
+            esac
+          fi
 
   build-installers:
     name: Build Installation Packages
@@ -1382,6 +1665,158 @@ jobs:
             release/*
         env:
           GH_TOKEN: ${{ github.token }}
+
+  # Native FreeBSD x86_64 phase 1: the cross row could only produce a Rust
+  # seed, which never satisfies release. Build seed -> pure-Simple stage1
+  # inside a FreeBSD VM and package it like the matrix rows (artifact name
+  # bootstrap-freebsd-x86_64, so rc-drop picks it up).
+  freebsd-phase1:
+    name: Build Bootstrap Package (FreeBSD x86_64, native VM)
+    needs: check-version
+    if: needs.check-version.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build phase-1 compiler in FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          mem: 12288
+          prepare: |
+            pkg install -y bash curl git gmake pkgconf zstd llvm
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
+          run: |
+            set -eu
+            . "$HOME/.cargo/env"
+            cd src/compiler_rust
+            CARGO_BUILD_JOBS=2 cargo build --profile bootstrap -p simple-driver
+            CARGO_BUILD_JOBS=2 cargo build --profile bootstrap -p simple-native-all --features driver-compat
+            cd ../..
+            mkdir -p build/bootstrap/stage1
+            RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=0 \
+              src/compiler_rust/target/bootstrap/simple native-build \
+              --source src/compositions/kernel_llvm_cranelift --source src \
+              --entry-closure --entry src/app/cli/bootstrap_main.spl \
+              --mode dynload --threads 2 --timeout 3600 \
+              --output build/bootstrap/stage1/simple 2>&1 | tail -40 || true
+            ./build/bootstrap/stage1/simple --version
+            # Sanity: the phase-1 compiler must build and run a hello world.
+            mkdir -p build/sanity
+            printf 'fn main():\n    print "freebsd-phase1-ok"\n' > build/sanity/hello.spl
+            ./build/bootstrap/stage1/simple native-build build/sanity/hello.spl -o build/sanity/hello
+            ./build/sanity/hello | grep -q freebsd-phase1-ok
+            echo "FreeBSD phase-1 compiler verified"
+      - name: Package FreeBSD phase-1 compiler
+        run: sh scripts/release/package-phase1-spk.shs "${{ needs.check-version.outputs.version }}" freebsd-x86_64 build/bootstrap/stage1/simple 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-freebsd-x86_64
+          path: |
+            simple-bootstrap-*.spk
+            simple-bootstrap-*.spk.sha256
+          retention-days: 90
+
+  # Linux riscv64 phase 1: no hosted riscv64 runner exists, and a full
+  # stage1 compile under emulation exceeds the job limit. Cross-build instead:
+  # x86_64 seed + riscv64 runtime archive -> `native-build --target`, then run
+  # the riscv64 binary under qemu-user as the sanity check.
+  linux-riscv64-phase1:
+    name: Build Bootstrap Package (Linux riscv64, cross + qemu-user)
+    needs: check-version
+    if: needs.check-version.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install riscv64 cross toolchain and qemu-user
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm libunwind-dev gcc-riscv64-linux-gnu g++-riscv64-linux-gnu qemu-user-static
+          # The final link uses the same system libraries as the Linux x86_64
+          # link config (sqlite3, z, zstd, tinfo); fetch their riscv64 builds
+          # from Ubuntu ports so the cross sysroot can resolve them.
+          . /etc/os-release
+          sudo dpkg --add-architecture riscv64
+          for f in /etc/apt/sources.list.d/ubuntu.sources; do
+            [ -f "$f" ] && sudo sed -i '/^Types: deb$/a Architectures: amd64' "$f"
+          done
+          printf 'Types: deb\nURIs: http://ports.ubuntu.com/ubuntu-ports\nSuites: %s %s-updates\nComponents: main universe\nArchitectures: riscv64\n' \
+            "$VERSION_CODENAME" "$VERSION_CODENAME" | sudo tee /etc/apt/sources.list.d/riscv64-ports.sources
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-dev:riscv64 zlib1g-dev:riscv64 libzstd-dev:riscv64 libncurses-dev:riscv64
+      - name: Cross-build riscv64 compiler + qemu-user sanity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # auto: cross-compile with the newest proven linux-x86_64 compiler from
+        # the RC releases (phase N -> riscv64 phase N+1), else the Rust seed.
+        run: sh scripts/bootstrap/cross-arch-bootstrap.shs --target linux-riscv64 --compiler auto --sanity
+      - name: Package Linux riscv64 compiler
+        run: sh scripts/release/package-phase1-spk.shs "${{ needs.check-version.outputs.version }}" linux-riscv64 build/cross/linux-riscv64/simple "$(cat build/cross/linux-riscv64/PHASE)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-linux-riscv64
+          path: |
+            simple-bootstrap-*.spk
+            simple-bootstrap-*.spk.sha256
+          retention-days: 90
+
+  # RC drop: publishes every platform package that DID build, without waiting
+  # for the whole matrix, so a phase-1 binary is downloadable as soon as one
+  # platform produces it. Each dispatch publishes the NEXT numbered prerelease
+  # (rc-<base>-rc.1, rc.2, ...); it is never the final release. The tag is
+  # deliberately not `v*`: version tags are owner-create-only and immutable
+  # (spipe-vcs-v3-version-tag-*).
+  rc-drop:
+    name: Publish RC Drop (available platforms)
+    needs: [check-version, build-bootstrap, freebsd-phase1, linux-riscv64-phase1]
+    # Only release lines publish RCs; a dispatch on a topic branch validates builds only.
+    if: always() && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/release/') && needs.check-version.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download available bootstrap packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bootstrap-*
+          path: artifacts
+      - name: Create or update RC drop release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check-version.outputs.version }}
+        run: |
+          mkdir -p release
+          find artifacts \( -name '*.spk' -o -name '*.spk.sha256' \) -exec cp {} release/ \;
+          if ! ls release/*.spk >/dev/null 2>&1; then
+            echo "✗ No platform produced a package; nothing to publish" >&2
+            exit 1
+          fi
+          # Each run is the next numbered RC of the base version: rc.1, rc.2, ...
+          BASE="${VERSION%%-*}"
+          LAST=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName --jq '.[].tagName' \
+            | sed -n "s/^rc-${BASE//./\\.}-rc\\.\\([0-9][0-9]*\\)$/\\1/p" | sort -n | tail -1)
+          RC_NUM=$(( ${LAST:-0} + 1 ))
+          RC_VERSION="${BASE}-rc.${RC_NUM}"
+          TAG="rc-${RC_VERSION}"
+          {
+            echo "Simple ${RC_VERSION} — prerelease candidate rc${RC_NUM}, not a final release."
+            echo
+            echo "Built from \`${GITHUB_REF_NAME}\` @ ${GITHUB_SHA} (run ${GITHUB_RUN_ID})."
+            echo
+            echo "Platforms in this RC:"
+            for f in release/*.spk; do
+              phase=$(tar -xzf "$f" -O --wildcards '*/PHASE' 2>/dev/null | head -1)
+              echo "- $(basename "$f") — bootstrap phase ${phase:-1}"
+            done
+            echo
+            echo "A platform missing here did not build in this run; the next RC adds it."
+          } > notes.md
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Simple ${RC_VERSION} (rc${RC_NUM})" --notes-file notes.md --prerelease
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber release/*
 
   publish-ghcr:
     name: Publish to GHCR

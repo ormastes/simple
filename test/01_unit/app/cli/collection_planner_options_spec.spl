@@ -1,0 +1,41 @@
+use std.spec.*
+use app.cli.collection_planner_options.{collection_planner_options, collection_planner_fingerprint}
+use app.io._CliCompile.compile_targets.{cli_native_build_option_error}
+use app.cli.bootstrap_focused_native_build.{focused_native_build_error}
+use app.cli.native_build_main.{native_build_is_value_consuming_flag, native_build_has_entry}
+
+describe "native typed collection planner option transport":
+    it "admits equivalent separated and equals forms with a bounded memory budget":
+        val split = collection_planner_options(["--collection-policy", "critical", "--collection-memory-budget", "4096"])
+        val joined = collection_planner_options(["--collection-policy=critical", "--collection-memory-budget=4096"])
+        expect(split.error).to_equal("")
+        expect(split.policy).to_equal("critical")
+        expect(split.memory_budget_bytes).to_equal(4096)
+        expect(collection_planner_fingerprint(split)).to_equal(collection_planner_fingerprint(joined))
+        expect(cli_native_build_option_error(["main.spl", "--collection-policy", "critical", "--collection-memory-budget=4096"])).to_equal("")
+
+    it "rejects unsupported policies duplicates missing negative and overflowing budgets":
+        for args in [
+            ["--collection-policy=fast"], ["--collection-policy"],
+            ["--collection-policy=moderate", "--collection-policy=strict"],
+            ["--collection-memory-budget="], ["--collection-memory-budget=-1"],
+            ["--collection-memory-budget=9223372036854775808"],
+            ["--collection-memory-budget=18446744073709551616"],
+            ["--collection-memory-budget=1.5"], ["--collection-memory-budget=+1"],
+            ["--collection-memory-budget=0", "--collection-memory-budget=0"]
+        ]:
+            expect(collection_planner_options(args).error != "").to_be(true)
+        expect(collection_planner_options(["--collection-memory-budget=9223372036854775807"]).memory_budget_bytes).to_equal(9223372036854775807)
+        expect(collection_planner_options(["--collection-memory-budget=0"]).memory_budget_bytes).to_equal(0)
+
+    it "keeps option values out of positional entry discovery and distinguishes cache semantics":
+        expect(native_build_is_value_consuming_flag("--collection-policy")).to_be(true)
+        expect(native_build_is_value_consuming_flag("--collection-memory-budget")).to_be(true)
+        expect(native_build_has_entry(["--collection-policy", "critical", "--collection-memory-budget", "1024"])).to_be(false)
+        val initial = collection_planner_fingerprint(collection_planner_options([]))
+        expect(collection_planner_fingerprint(collection_planner_options(["--collection-policy=robust"])) == initial).to_be(false)
+        expect(collection_planner_fingerprint(collection_planner_options(["--collection-memory-budget=0"])) == initial).to_be(false)
+
+    it "rejects planner controls on focused bootstrap instead of silently dropping them":
+        expect(focused_native_build_error(["--entry=main.spl", "--output=main", "--collection-policy=moderate"])).to_contain("does not support collection planner controls")
+        expect(collection_planner_options(["--", "--collection-policy=invalid"]).specified).to_be(false)

@@ -32,7 +32,7 @@ make_case() {
   perl -MJSON::PP -e '
     my ($path,$backend,$sha,$spec,$artifact,$threads,$runtime)=@ARGV;
     my $item={backend=>$backend,producer_sha256=>$sha,spec=>$spec,output=>$artifact,
-      compiler=>$path,argv=>["native-build","--backend",$backend,"--source","src/lib",
+      compiler=>$path,argv=>["native-build","--backend",$backend,"--refresh-source-authority",
       "--entry-closure","--entry","/tmp/wrapped.spl","--runtime-bundle","core-c-bootstrap",
       "--runtime-path",$runtime,"--threads",$threads,"--cache-dir","$artifact.cache","--output",$artifact]};
     print "native-aot-invocation|",JSON::PP::encode_json($item),"\n";
@@ -48,6 +48,10 @@ perl "$validator" "$scratch/pass/runner.log" "$scratch/pass/tmp" "$source_root" 
   "$spec" llvm "$compiler" "$producer_sha" 20 "$runtime_path" "$runtime_identity" "$scratch/pass/evidence.tsv" >/dev/null
 [ -f "$scratch/pass/sample-artifact" ] && [ -f "$scratch/pass/evidence.tsv" ] || exit 1
 [ ! -e "$scratch/pass/tmp" ] || { echo 'transient artifacts were not cleaned' >&2; exit 1; }
+make_case pass_cranelift cranelift 20 1
+perl "$validator" "$scratch/pass_cranelift/runner.log" "$scratch/pass_cranelift/tmp" "$source_root" \
+  "$spec" cranelift "$compiler" "$producer_sha" 20 "$runtime_path" "$runtime_identity" "$scratch/pass_cranelift/evidence.tsv" >/dev/null
+[ -f "$scratch/pass_cranelift/evidence.tsv" ] || exit 1
 
 make_case wrong_backend cranelift 20 1
 if perl "$validator" "$scratch/wrong_backend/runner.log" "$scratch/wrong_backend/tmp" "$source_root" \
@@ -69,4 +73,29 @@ if perl "$validator" "$scratch/wrong_runtime/runner.log" "$scratch/wrong_runtime
     "$spec" llvm "$compiler" "$producer_sha" 20 "$scratch/other-runtime" "$runtime_identity" "$scratch/wrong_runtime/evidence.tsv" >/dev/null 2>&1; then
   echo 'wrong runtime path admitted' >&2; exit 1
 fi
+mutate_args() {
+  perl -MJSON::PP -0777 -i -pe '
+    my $mode=$ENV{NATIVE_ARG_MUTATION};
+    s{^native-aot-invocation\|(\{[^\n]+\})}{
+      my $item=JSON::PP::decode_json($1);
+      my @args=@{$item->{argv}};
+      if ($mode eq "missing_refresh") { @args=grep { $_ ne "--refresh-source-authority" } @args }
+      elsif ($mode eq "explicit_source") { push @args,"--source","src/lib" }
+      elsif ($mode eq "wrong_source") { push @args,"--source","src/compiler" }
+      elsif ($mode eq "duplicate_refresh") { push @args,"--refresh-source-authority" }
+      elsif ($mode eq "wrong_producer") { $item->{producer_sha256}="b" x 64 }
+      else { die "unknown mutation" }
+      $item->{argv}=\@args;
+      "native-aot-invocation|".JSON::PP::encode_json($item)
+    }em;
+  ' "$case_dir/runner.log"
+}
+for mutation in missing_refresh explicit_source wrong_source duplicate_refresh wrong_producer; do
+  make_case "$mutation" llvm 20 1
+  NATIVE_ARG_MUTATION=$mutation mutate_args
+  if perl "$validator" "$case_dir/runner.log" "$case_dir/tmp" "$source_root" \
+      "$spec" llvm "$compiler" "$producer_sha" 20 "$runtime_path" "$runtime_identity" "$case_dir/evidence.tsv" >/dev/null 2>&1; then
+    echo "invalid native source authority admitted: $mutation" >&2; exit 1
+  fi
+done
 echo 'PASS: native AOT artifact, backend, producer, and assertion evidence'

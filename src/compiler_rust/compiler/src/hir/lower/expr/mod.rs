@@ -319,7 +319,7 @@ impl Lowerer {
             Expr::Yield(value) => self.lower_yield(value.as_deref(), ctx),
             Expr::ContractResult => self.lower_contract_result(ctx),
             Expr::ContractOld(inner) => self.lower_contract_old(inner, ctx),
-            Expr::New { kind, expr } => self.lower_new(kind, expr, ctx),
+            Expr::New { kind, expr, .. } => self.lower_new(kind, expr, ctx),
             Expr::MethodCall {
                 receiver, method, args, ..
             } => self.lower_method_call(receiver, method, args, ctx),
@@ -699,11 +699,22 @@ impl Lowerer {
 
         match self.globals.get(&target).copied() {
             Some(ty) if matches!(self.module.types.get(ty), Some(HirType::Function { .. })) => Some(ty),
-            _ => None,
+            _ => self.imported_function_value_types.get(&target).copied(),
         }
     }
 
     fn call_return_type(&self, callee: &Expr, fallback: TypeId) -> TypeId {
+        // An imported callee typed from `imported_function_value_types` keeps
+        // the bare-name return resolution it had before that map existed
+        // (`named_callable_return_type` follows the selected owner when two
+        // imports of the name disagree).
+        if let Expr::Identifier(name) = callee {
+            if self.imported_function_value_types.get(name) == Some(&fallback) {
+                if let Some(ret) = self.named_callable_return_type(name) {
+                    return ret;
+                }
+            }
+        }
         if let Some(HirType::Function { ret, .. }) = self.module.types.get(fallback) {
             return *ret;
         }
@@ -786,6 +797,10 @@ impl Lowerer {
         args: &[ast::Argument],
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
+        // Same-named flattened struct/class: bind `Type.member` to the
+        // declaration the current owner sees (flatten_struct_owner.rs).
+        let scoped_type_name = self.module.types.scoped_name(type_name).to_string();
+        let type_name = scoped_type_name.as_str();
         if let Some(type_id) = self.static_enum_variant_type(type_name, member) {
             return self.lower_static_enum_variant_call(type_name, member, type_id, args, ctx);
         }
@@ -1068,12 +1083,7 @@ impl Lowerer {
                 if let Some(params) = self.fn_param_defaults.get(&key)
                     .or_else(|| self.global_method_param_defaults.as_ref().and_then(|defs| defs.get(&key)))
                     .cloned() {
-                    for default in params.iter().skip(hir_args.len()) {
-                        match default {
-                            Some(expr) if Self::is_constant_default(expr) => hir_args.push(self.lower_expr(expr, ctx)?),
-                            _ => break,
-                        }
-                    }
+                    self.fill_omitted_default_args(&key, &params, &mut hir_args, ctx)?;
                 }
             }
         }
@@ -1156,6 +1166,12 @@ impl Lowerer {
     /// (with a non-ANY, non-VOID return) agrees on that type. Trait-typed
     /// receivers are ANY in HIR, so this is the only authoritative source for
     /// their result type.
+    /// True when `arg` is a lambda or has a function/closure type.
+    fn is_callable_arg(&self, arg: &HirExpr) -> bool {
+        matches!(arg.kind, HirExprKind::Lambda { .. })
+            || matches!(self.module.types.get(arg.ty), Some(HirType::Function { .. }))
+    }
+
     fn agreed_trait_method_return_type(&self, method: &str) -> Option<TypeId> {
         let mut trait_return: Option<TypeId> = None;
         for (lookup_name, trait_info) in &self.module.trait_infos {
@@ -1973,7 +1989,11 @@ impl Lowerer {
                         Some(TypeId::ANY)
                     }
                 }
-                "contains" | "is_empty" => Some(TypeId::BOOL),
+                // `any`/`all` return the runtime's RAW 0/1 (rt_array_any /
+                // rt_array_all, both lanes), so they must be typed BOOL like
+                // `contains`; untyped, the raw word reached `print` as a
+                // RuntimeValue (`all` printed `0`, `any` printed `nil`).
+                "contains" | "is_empty" | "any" | "all" => Some(TypeId::BOOL),
                 // `[T].index_of(v)` returns a raw i64 position (-1 when absent),
                 // exactly like the string table's `index_of` above. This table
                 // omitting it is the SAME class of gap as `"length"`/`"bytes"`:
@@ -2138,6 +2158,29 @@ impl Lowerer {
                 "get" | "remove" | "get_or" => Some(dict_kv.map(|(_, v)| v).unwrap_or(TypeId::ANY)),
                 "insert" | "set" | "put" | "clear" => Some(TypeId::VOID),
                 "contains_key" | "has" | "contains" => Some(TypeId::BOOL),
+                // Same raw-result class on an untyped receiver: `any`/`all`
+                // return a raw 0/1 and `index_of` (rt_index_of, array or text)
+                // a raw i64 position, so they need the BOOL / BoxInt
+                // conversion. Left ANY, `<value:0x1>` / nil reached `print`.
+                // `any`/`all` only in the builtin shape (one callable
+                // predicate: a lambda, a named function or a closure value):
+                // a user class method named `any()` / `all(3)` reached through
+                // an untyped receiver keeps its own (dynamic) result.
+                "any" | "all" if hir_args.len() == 1 && self.is_callable_arg(&hir_args[0]) => Some(TypeId::BOOL),
+                "index_of" => Some(TypeId::I64),
+                // Text searches on an untyped receiver, same raw-result class.
+                // `starts_with`/`ends_with`/`rfind` exist only on text and the
+                // erased codegen path (codegen/instr/calls.rs) calls
+                // `rt_string_*`, which return a raw bool / raw i64. `find` is
+                // `rt_find`: a raw i64 position, EXCEPT for an array receiver
+                // with a closure argument (then the tagged element), so it is
+                // typed I64 only for a non-callable argument. Left ANY, an
+                // untyped `x.starts_with(p)` printed `nil` / `0`, `if` took the
+                // wrong branch and `x.rfind(p)` printed `<value:0x4>` under the
+                // JIT. Bug row: interp_option_unwrapped_text_starts_with_nil_2026_10_19.
+                "starts_with" | "ends_with" => Some(TypeId::BOOL),
+                "rfind" | "last_index_of" => Some(TypeId::I64),
+                "find" if hir_args.len() == 1 && !self.is_callable_arg(&hir_args[0]) => Some(TypeId::I64),
                 // "length" synonym — see the string-methods comment above.
                 "len" | "length" | "size" => Some(TypeId::I64),
                 "keys" => Some(match dict_kv {

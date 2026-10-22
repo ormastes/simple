@@ -1,0 +1,139 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Up-front enum inventory registration for the direct MIR lane
+
+The driver's direct per-module lane (driver_pipeline_lowering.spl) lowers every
+scheduled source module through one shared MirLowering. The per-module provider
+pass in lower_module registers only OTHER modules' enums
+(`provider_module.name == module.name` is skipped), so a scheduled module whose
+callables the entry never demands can reach its own bare-variant match arms with
+an empty variant registry: `case X:` degrades to a binding and the scalar gate
+reports B5b "match has multiple wildcard/binding default arms".
+
+Measured 2026-10-16 on the admitted stage2 binary: compiling src/compiler/di.spl
+failed in compiler.common.config.CompilerProfile.to_text (binding `Test`), and a
+two-module fixture (struct with enum-typed static-fn parameter in the entry,
+dependency matching on its own enum's bare variants) reproduces it in ~4s.
+
+`register_module_enum_inventory_v1` closes the gap: the driver registers every
+scheduled source module's own enums up front, next to the struct-name prescan.
+register_enum_variants reads only the HirEnum (no symbol table), and identical
+re-registration inside lower_module is quiet by the existing dedup rules.
+
+These probes contract-test the helper directly: full registration, quiet
+idempotent re-registration, and a lowering that consumes the inventory without
+producing B5b or duplicate-registration diagnostics.
+"""
+
+# @tag: unit, compiler, mir, enum, driver
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{SymbolTable}
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn inventory_lower(src: text, file: text) -> (MirModule, [text]):
+    val parsed = parse_full_frontend(src, file, "fixture_enum_inventory", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    val target_context = driver_mir_target_context(driver_core_compile_options_default())
+    var lowering = MirLowering.new_for_target(hir.symbols, target_context)
+    val mir = lowering.lower_module(hir)
+    var messages: [text] = []
+    for e in hir_lowering.errors:
+        messages = messages.push(e.message)
+    for e in lowering.errors:
+        messages = messages.push(e.message)
+    (mir, messages)
+
+fn inventory_hir(src: text, file: text) -> HirModule:
+    val parsed = parse_full_frontend(src, file, "fixture_enum_inventory", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    hir_lowering.lower_module(parsed)
+
+fn inventory_joined(messages: [text]) -> text:
+    var out = ""
+    for m in messages:
+        out = out + m + "\n"
+    out
+
+describe "module enum inventory registration":
+    it "registers every given module's enum variants up front":
+        val src = "enum Inv:\n    Alpha\n    Beta\n\nfn pick(i: Inv) -> i64:\n    match i:\n        case Alpha:\n            1\n        case Beta:\n            2\n"
+        val hir = inventory_hir(src, "testdata/fixture_enum_inventory.spl")
+        val target_context = driver_mir_target_context(driver_core_compile_options_default())
+        var lowering = MirLowering.new_for_target(SymbolTable.new(), target_context)
+        lowering.register_module_enum_inventory_v1([hir])
+        expect(lowering.enum_variant_names("Inv")).to_equal(["Alpha", "Beta"])
+        expect(lowering.enum_variant_discriminant("Inv", "Alpha")).to_equal(0)
+        expect(lowering.enum_variant_discriminant("Inv", "Beta")).to_equal(1)
+
+    it "advances past the first module (terminates; every module's enums register)":
+        # Regression: 7c1899d73a8 dropped the module-index advance, so the
+        # loop spun on modules[0] allocating enums.values() until OOM (hello
+        # build worker ramped ~370 MB/s to the 20 GiB cap). With the bug this
+        # example never returns; the second module's enum proves the advance.
+        val first = inventory_hir("enum First:\n    A\n    B\n", "testdata/fixture_enum_inventory_first.spl")
+        val second = inventory_hir("enum Second:\n    X\n    Y\n    Z\n", "testdata/fixture_enum_inventory_second.spl")
+        val target_context = driver_mir_target_context(driver_core_compile_options_default())
+        var lowering = MirLowering.new_for_target(SymbolTable.new(), target_context)
+        lowering.register_module_enum_inventory_v1([first, second])
+        expect(lowering.enum_variant_names("First")).to_equal(["A", "B"])
+        expect(lowering.enum_variant_names("Second")).to_equal(["X", "Y", "Z"])
+
+    it "re-registration is quiet (existing dedup rules, no collision noise)":
+        val src = "enum Quiet:\n    One\n    Two\n\nfn take(q: Quiet) -> i64:\n    match q:\n        case One:\n            1\n        case Two:\n            2\n"
+        val hir = inventory_hir(src, "testdata/fixture_enum_inventory_quiet.spl")
+        val target_context = driver_mir_target_context(driver_core_compile_options_default())
+        var lowering = MirLowering.new_for_target(SymbolTable.new(), target_context)
+        lowering.register_module_enum_inventory_v1([hir])
+        lowering.register_module_enum_inventory_v1([hir])
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.enum_variant_names("Quiet")).to_equal(["One", "Two"])
+
+    it "a lowering that consumes the inventory lowers bare arms without B5b":
+        val src = "enum Tone:\n    Low\n    High\n\nimpl Tone:\n    fn level(self) -> i64:\n        match self:\n            case Low:\n                0\n            case High:\n                1\n            case _:\n                -1\n\nfn read(t: Tone) -> i64:\n    t.level()\n"
+        val hir = inventory_hir(src, "testdata/fixture_enum_inventory_tone.spl")
+        val target_context = driver_mir_target_context(driver_core_compile_options_default())
+        var lowering = MirLowering.new_for_target(hir.symbols, target_context)
+        lowering.register_module_enum_inventory_v1([hir])
+        val mir = lowering.lower_module(hir)
+        var messages: [text] = []
+        for e in lowering.errors:
+            messages = messages.push(e.message)
+        val all = inventory_joined(messages)
+        expect(all).to_equal("")
+        expect(all.contains("B5b")).to_equal(false)
+        expect(all.contains("multiple wildcard")).to_equal(false)
+        var found_level = false
+        for function in mir.functions.values():
+            if function.name.ends_with(".level"):
+                found_level = true
+        assert_true(found_level)
+
+    it "a module's own enum payload types win over an inventory row from another symbol table":
+        # Regression (phase-3 2026-10-20, 2781 "enum construction ...: payload
+        # type mismatch at N" errors): the dedup in register_enum_variants kept
+        # the payload HirTypes of whichever module registered the enum FIRST,
+        # and lower_module then compared those foreign SymbolIds inside its own
+        # table. Same declaration, shifted IDs: the padded copy registers first.
+        val padded = "struct Pad1:\n    a: i64\n\nstruct Pad2:\n    b: i64\n\nstruct Ty:\n    width: i64\n\nenum Op:\n    Copy(local: i64)\n    Const(type_: Ty)\n"
+        val real = "struct Ty:\n    width: i64\n\nenum Op:\n    Copy(local: i64)\n    Const(type_: Ty)\n\nfn make() -> Op:\n    Op.Const(Ty(width: 8))\n"
+        val file = "testdata/fixture_enum_inventory_payload_owner.spl"
+        val foreign = inventory_hir(padded, file)
+        val hir = inventory_hir(real, file)
+        val target_context = driver_mir_target_context(driver_core_compile_options_default())
+        var lowering = MirLowering.new_for_target(hir.symbols, target_context)
+        lowering.register_module_enum_inventory_v1([foreign, hir])
+        lowering.lower_module(hir)
+        var messages: [text] = []
+        for e in lowering.errors:
+            messages = messages.push(e.message)
+        val all = inventory_joined(messages)
+        expect(all).to_equal("")
+        expect(lowering.errors.len()).to_equal(0)

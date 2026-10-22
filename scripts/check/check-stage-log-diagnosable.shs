@@ -81,6 +81,20 @@ EV_TRANSCRIPT=""
 # the guard's actual reason text; warnings and bare receipt status are not it.
 diag_pattern='error:|\[hir-fatal\]|\[hir-poisoned\]|\[collect-all\]|panicked|segmentation fault|sigsegv|assertion|fatal|memory allocation of [0-9]+ bytes failed|undefined reference|cannot find|no space left|failed files|build failed|unsupported .*construct|rss-guard: session installation failed: [^[:space:]]'
 
+# SCV diagnostics have a canonical anchored owner. Parser/source text containing
+# its code must not pass via the broad legacy `error:` alternative above.
+. "$(dirname -- "$0")/../bootstrap/bootstrap-scv-prime.shs"
+diagnostic_lines() {
+    # The owner recognizes the code alone too; this guard requires reason text.
+    LC_ALL=C grep -E 'SCV-E-ADMISSION:[[:space:]]*[^[:space:]]' "$1" 2>/dev/null |
+        bootstrap_scv_admission_diagnostic /dev/stdin || :
+    # Git/MSYS GNU grep 3.0 aborts in the C-locale -i/-F path. This ASCII
+    # token has no ERE metacharacters; -E keeps the same case-insensitive
+    # substring exclusion without dropping ordinary diagnostic lines.
+    LC_ALL=C grep -i -v -E 'SCV-E-ADMISSION' "$1" 2>/dev/null |
+        grep -i -E "${diag_pattern}"
+}
+
 usage() {
     echo "usage: $0 --log PATH [--log PATH...] --status N [--stage NAME] [--transcript PATH]"
     echo "       $0 --selftest"
@@ -136,7 +150,7 @@ scan_secondary_logs() {
         if [ "${_found}" -eq 0 ] && resource_policy_diagnosis "${_cand}" "${EV_STATUS}"; then
             return 0
         fi
-        _chits=$(grep -c -i -E "${diag_pattern}" "${_cand}" 2>/dev/null)
+        _chits=$(diagnostic_lines "${_cand}" | wc -l | tr -d ' ')
         [ -n "${_chits}" ] || _chits=0
         if [ "${_chits}" -gt 0 ] && [ "${_found}" -eq 0 ]; then
             _found=1
@@ -152,7 +166,7 @@ EOF
     echo "             not fail where the primary log was produced."
     echo "  real log:  ${_found_log}"
     echo "  ${_found_hits} diagnostic line(s) found there. First 5:"
-    grep -i -E "${diag_pattern}" "${_found_log}" 2>/dev/null | head -5 | sed 's/^/    | /'
+    diagnostic_lines "${_found_log}" | head -5 | sed 's/^/    | /'
     return 0
 }
 
@@ -207,7 +221,7 @@ classify_failure() {
     # numeric test blow up with "Illegal number" and — because the comparison
     # errored rather than being false — reported an undiagnosable log as
     # diagnosable. The counts-without-text fixture caught exactly that.
-    _hits=$(grep -c -i -E "${diag_pattern}" "${_log}" 2>/dev/null)
+    _hits=$(diagnostic_lines "${_log}" | wc -l | tr -d ' ')
     if [ -z "${_hits}" ]; then
         _hits=0
     fi
@@ -225,7 +239,7 @@ classify_failure() {
     fi
 
     echo "  diagnosis: ${_hits} diagnostic line(s) found. First 5:"
-    grep -i -E "${diag_pattern}" "${_log}" 2>/dev/null | head -5 | sed 's/^/    | /'
+    diagnostic_lines "${_log}" | head -5 | sed 's/^/    | /'
     return 0
 }
 
@@ -327,6 +341,44 @@ selftest() {
     # line with lowercase `error:`.
     printf 'FAILED FILES (1):\nBuild failed: Unsupported HIR construct: TypeTest\n' > "${_dir}/native-summary.log"
     _assert "native-summary-must-pass" 0 --log "${_dir}/native-summary.log" --status 1 --stage t5b
+
+    # Actual Windows discovery failure: the C-locale fixed-string exclusion
+    # aborted before the broad diagnostic matcher saw this UTF-8 log. Exercise
+    # both primary and sibling scans and require the original cause excerpt.
+    printf '%s\n' \
+        "note: E-SEED-NATIVE-BUILD-MODE-DYNLOAD-UNSUPPORTED: --mode 'dynload' is not implemented by the Rust seed and is SKIPPED; emitting a single native artifact (--mode one-binary) instead" \
+        'Build failed: failed to parse C:\dev\simple-phase3-attempt10\src\compiler\80.driver\cache\driver_hir_archive_journal_v1.spl at 145:83 during discovery: Unexpected token: expected expression, found Else' \
+        > "${_dir}/windows-discovery.log"
+    _assert "windows-discovery-primary-must-pass" 0 --log "${_dir}/windows-discovery.log" --status 1 --stage t5i
+    case "${_out}" in
+        *"diagnosis: 1 diagnostic line(s)"*"expected expression, found Else"*"failed (exit 1) and said why"*) ;;
+        *) echo "  selftest FAIL windows-discovery-cause-excerpt-missing"; _fails=$((_fails + 1)) ;;
+    esac
+    _assert "windows-discovery-sibling-must-pass" 0 --log "${_dir}/ok.log" --log "${_dir}/windows-discovery.log" --status 1 --stage t5j
+    case "${_out}" in
+        *"real log:  ${_dir}/windows-discovery.log"*"expected expression, found Else"*) ;;
+        *) echo "  selftest FAIL windows-discovery-sibling-owner-missing"; _fails=$((_fails + 1)) ;;
+    esac
+    printf 'bUiLd FaIlEd: UTF-8 discovery cause λ\n' > "${_dir}/utf8-discovery.log"
+    _assert "mixed-case-utf8-diagnostic-must-pass" 0 --log "${_dir}/utf8-discovery.log" --status 1 --stage t5k
+    case "${_out}" in
+        *"UTF-8 discovery cause λ"*) ;;
+        *) echo "  selftest FAIL utf8-cause-excerpt-missing"; _fails=$((_fails + 1)) ;;
+    esac
+
+    # Canonical SCV reasons remain diagnosable; parser/source quotations must
+    # not pass through the legacy error/build-failed alternatives or siblings.
+    printf 'error: SCV-E-ADMISSION: compile-event-journal-missing\n' > "${_dir}/scv-real.log"
+    _assert "canonical-scv-reason-must-pass" 0 --log "${_dir}/scv-real.log" --status 1 --stage t5l
+    printf 'SCV-E-ADMISSION:   \n' > "${_dir}/scv-bare.log"
+    _assert "bare-scv-code-must-fail" 1 --log "${_dir}/scv-bare.log" --status 1 --stage t5m
+    printf '%s\n' 'error: parser source string "SCV-E-ADMISSION: fabricated failure"' > "${_dir}/scv-quoted.log"
+    _assert "quoted-scv-error-must-fail" 1 --log "${_dir}/scv-quoted.log" --status 1 --stage t5n
+    _assert "quoted-scv-sibling-must-fail" 1 --log "${_dir}/ok.log" --log "${_dir}/scv-quoted.log" --status 1 --stage t5o
+    printf '%s\n' 'Build failed: parser source string "scv-e-admission: fabricated failure"' > "${_dir}/scv-quoted-lower.log"
+    _assert "quoted-lowercase-scv-must-fail" 1 --log "${_dir}/scv-quoted-lower.log" --status 1 --stage t5p
+    cat "${_dir}/scv-quoted.log" "${_dir}/windows-discovery.log" > "${_dir}/mixed-scv-discovery.log"
+    _assert "quoted-scv-with-independent-real-cause-must-pass" 0 --log "${_dir}/mixed-scv-discovery.log" --status 1 --stage t5q
 
     # Rust's allocator abort does not prefix its terminal line with `error:` or
     # `fatal`, but it is the complete cause of an exhausted bootstrap process.

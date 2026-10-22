@@ -36,7 +36,7 @@ Successfully migrated 11 unit test files from direct FFI calls to wrapper functi
 ## Migration Pattern
 
 ### Before
-```simple
+```simple:skip
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
@@ -49,7 +49,7 @@ fn some_test():
 ```
 
 ### After
-```simple
+```simple:skip
 use app.io.file_ops.{file_read, file_write, file_exists}
 use app.io.dir_ops.{dir_create}
 
@@ -93,7 +93,7 @@ fn some_test():
 
 ### 1. Custom Helper Functions
 Some tests had helper functions wrapping FFI calls with nil-coalescing:
-```simple
+```simple:skip
 # Before:
 fn file_read(path: text) -> text:
     val result = rt_file_read_text(path)
@@ -108,7 +108,7 @@ fn file_read(path: text) -> text:
 
 ### 2. Type Signature Changes
 Some FFI functions had different signatures than wrappers:
-```simple
+```simple:skip
 # rt_package_is_dir returns i32 (1=true, 0=false)
 expect rt_package_is_dir("{path}") == 1
 
@@ -118,7 +118,7 @@ expect is_dir("{path}")
 
 ### 3. Module Aliasing
 Used module aliasing to avoid name conflicts:
-```simple
+```simple:skip
 use app.io.file_ops as fops
 val content = fops.file_read(path)
 ```

@@ -294,6 +294,9 @@ impl Lowerer {
         // yielding a type-confused box and the SimpleOS boot fault storm.
         let aliased_class_name = self.resolve_type_alias(class_name).map(str::to_string);
         let class_name: &str = aliased_class_name.as_deref().unwrap_or(class_name);
+        // Same-named flattened struct/class: the current owner's declaration.
+        let scoped_class_name = self.module.types.scoped_name(class_name).to_string();
+        let class_name: &str = scoped_class_name.as_str();
 
         let class_ty = self
             .module
@@ -326,13 +329,10 @@ impl Lowerer {
 
         let mut args_hir = self.lower_call_args(args, ctx)?;
         if args.iter().all(|arg| arg.name.is_none()) {
-            if let Some(params) = self.fn_param_defaults.get(&qualified_name).cloned() {
-                for default in params.iter().skip(args_hir.len()) {
-                    match default {
-                        Some(expr) if Self::is_constant_default(expr) => args_hir.push(self.lower_expr(expr, ctx)?),
-                        _ => break,
-                    }
-                }
+            if let Some(params) = self.fn_param_defaults.get(&qualified_name)
+                .or_else(|| self.global_method_param_defaults.as_ref().and_then(|defs| defs.get(&qualified_name)))
+                .cloned() {
+                self.fill_omitted_default_args(&qualified_name, &params, &mut args_hir, ctx)?;
             }
         }
 

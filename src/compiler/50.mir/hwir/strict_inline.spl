@@ -95,6 +95,10 @@ pub fn inline_strict_mir_calls(func: MirFunction, callees: [MirFunction], config
     Returns `func` unchanged when it contains no call. Any call that cannot be
     folded is an error naming the exact obstruction, so a rejection is
     actionable rather than a bare "unsupported instruction".
+
+    This is mandatory call elimination for hardware lowering, not an
+    optional software optimization: a circuit cannot retain the original
+    call. Optional optimizers must keep their original function on Err.
     """
     if func.blocks.len() != 1:
         return Err("HWIR-E-INLINE-CFG: strict call inlining requires one entry block")
@@ -179,6 +183,11 @@ pub fn inline_strict_mir_calls(func: MirFunction, callees: [MirFunction], config
 
                 val prefix = callee_name + "_" + site.to_text() + "_"
                 for callee_local in callee.locals:
+                    # Substitution has no authoritative short-scope map.
+                    # Copying a callee token into its caller could widen the
+                    # borrow; dropping the marker would erase provenance.
+                    if callee_local.short_borrow or callee_local.short_mutable or callee_local.short_boundary >= 0:
+                        return Err("HWIR-E-INLINE-SHORT-BOUNDARY: callee '" + callee_name + "' requires an authoritative short-borrow boundary mapping")
                     match callee_local.kind:
                         case Arg(index):
                             if index >= argument_ids.len():
@@ -195,7 +204,11 @@ pub fn inline_strict_mir_calls(func: MirFunction, callees: [MirFunction], config
                                 targets.push(next_id)
                                 val original = callee_local.name ?? "value_" + callee_local.id.id.to_text()
                                 locals.push(MirLocal(id: LocalId(id: next_id), name: Some(prefix + original),
-                                    type_: callee_local.type_, kind: LocalKind.Temp))
+                                    type_: callee_local.type_, kind: LocalKind.Temp,
+                                    is_ghost: callee_local.is_ghost,
+                                    short_borrow: callee_local.short_borrow,
+                                    short_mutable: callee_local.short_mutable,
+                                    short_boundary: callee_local.short_boundary))
                                 next_id = next_id + 1
 
                 # Substituting arguments in place is only sound when the callee

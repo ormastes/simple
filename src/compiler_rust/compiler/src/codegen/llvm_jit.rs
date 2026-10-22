@@ -67,9 +67,14 @@ impl LlvmJitCompiler {
     pub fn new_for_target(target: simple_common::target::Target) -> Result<Self, String> {
         use simple_common::target::TargetArch;
         match target.arch {
+            // FreeBSD bootstrap LLVM is RISCV-only (see compiler/Cargo.toml),
+            // so inkwell there lacks the x86/arm/aarch64 initializer symbols;
+            // those arches fall through to the native initializer instead.
+            #[cfg(not(target_os = "freebsd"))]
             TargetArch::X86 | TargetArch::X86_64 => {
                 inkwell::targets::Target::initialize_x86(&InitializationConfig::default());
             }
+            #[cfg(not(target_os = "freebsd"))]
             TargetArch::Aarch64 | TargetArch::Arm => {
                 inkwell::targets::Target::initialize_arm(&InitializationConfig::default());
                 inkwell::targets::Target::initialize_aarch64(&InitializationConfig::default());

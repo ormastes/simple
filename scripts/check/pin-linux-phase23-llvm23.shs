@@ -1,0 +1,32 @@
+#!/bin/sh
+# Exact Linux bootstrap authority: LLVM sys, C tools and Rust must agree.
+set -eu
+fail() { echo "Linux LLVM authority: $*" >&2; exit 1; }
+[ "$(uname -s)" = Linux ] || fail 'Linux host required'
+[ -n "${GITHUB_ENV:-}" ] || fail 'GITHUB_ENV required'
+prefix=${SIMPLE_LINUX_PHASE23_LLVM_PREFIX:-/usr/lib/llvm-23}
+case $prefix in /*) ;; *) fail 'absolute LLVM prefix required' ;; esac
+required=23.1.1
+config=$prefix/bin/llvm-config
+for tool in clang clang++ llvm-ar ld.lld llvm-config; do
+    [ -x "$prefix/bin/$tool" ] || fail "missing executable $tool"
+done
+[ "$("$config" --prefix)" = "$prefix" ] || fail 'llvm-config prefix disagrees with admitted tool prefix'
+[ "$("$config" --version)" = "$required" ] || fail 'llvm-config version is not 23.1.1'
+for tool in clang clang++ llvm-ar ld.lld; do
+    version=$("$prefix/bin/$tool" --version | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+\.[0-9]+\.[0-9]+$/){print $i; exit}}')
+    [ "$version" = "$required" ] || fail "$tool version is not 23.1.1"
+done
+rust_llvm=$(rustc --version --verbose | awk '/^LLVM version:/ {print $3}')
+[ "$rust_llvm" = "$required" ] || fail "Rust LLVM version is $rust_llvm, expected $required"
+cat >>"$GITHUB_ENV" <<EOF
+SIMPLE_LLVM_REQUIRED_VERSION=$required
+LLVM_SYS_231_PREFIX=$prefix
+LLVM_CONFIG=$config
+CC=$prefix/bin/clang
+CXX=$prefix/bin/clang++
+AR=$prefix/bin/llvm-ar
+LD=$prefix/bin/ld.lld
+EOF
+if [ -n "${GITHUB_PATH:-}" ]; then printf '%s\n' "$prefix/bin" >>"$GITHUB_PATH"; fi
+printf 'linux_llvm_authority=23.1.1 prefix=%s\n' "$prefix"

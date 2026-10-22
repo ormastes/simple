@@ -1,0 +1,84 @@
+"""AC-BOR-03: optional inlining retains calls without a short-scope map."""
+
+use std.spec
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_instruction_support.{MirOperand, MirOperandKind, MirTerminator}
+use compiler.mir.mir_types.{MirLocal, LocalId, LocalKind, MirType, MirTypeKind, MirSignature, MirConstValue, BlockId}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.common.diagnostics.span.{Span}
+use compiler.mir_opt._Inline.policy.{FunctionInliner, InlineCostAnalyzer, InlinePolicy}
+
+fn short_inline_callee(strict: bool, short: bool) -> MirFunction:
+    val signature = MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)
+    var builder = MirBuilder.new()
+    builder.begin_function(SymbolId(id: 10), "force_inline_callee", signature, Span.empty())
+    var function = builder.end_function()
+    function.nogc_strict = strict
+    function.locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("input"), type_: MirType.i64(), kind: LocalKind.Arg(0), is_ghost: false,
+            short_borrow: short, short_mutable: short, short_boundary: if short: 10 else: -1),
+        MirLocal(id: LocalId(id: 1), name: nil, type_: MirType.i64(), kind: LocalKind.Temp, is_ghost: false)
+    ]
+    function.blocks = [MirBlock(id: BlockId(id: 0), label: nil,
+        instructions: [MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(9), MirType.i64()), span: nil)],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))))))]
+    function
+
+fn short_inline_caller_block(callee: MirFunction) -> MirBlock:
+    val operand = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(callee.name), MirType(kind: MirTypeKind.FuncPtr(callee.signature))))
+    val argument = MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))
+    MirBlock(id: BlockId(id: 0), label: nil,
+        instructions: [MirInst(kind: MirInstKind.Call(Some(LocalId(id: 2)), operand, [argument]), span: nil)],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))))))
+
+fn short_inline_keeps_call(callee: MirFunction) -> bool:
+    val original = short_inline_caller_block(callee)
+    var inliner = FunctionInliner.new(20)
+    val blocks = inliner.inline_call(original, 0, callee, Some(LocalId(id: 2)), [MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))])
+    if blocks.len() != 1 or blocks[0].instructions.len() != 1 or inliner.generated_locals.len() != 0:
+        return false
+    match blocks[0].instructions[0].kind:
+        case MirInstKind.Call(destination, operand, arguments):
+            if (destination ?? LocalId(id: -1)).id != 2 or arguments.len() != 1:
+                return false
+            match operand.kind:
+                case MirOperandKind.Const(MirConstValue.Str(name), _): return name == callee.name
+                case _: return false
+        case _: return false
+
+describe "short provenance through optional inlining":
+    it "retains the actual original call for a strict callee":
+        val callee = short_inline_callee(true, false)
+        expect(short_inline_keeps_call(callee)).to_equal(true)
+        expect(InlineCostAnalyzer.new(100).should_inline(callee, InlinePolicy.Always)).to_equal(false)
+
+    it "retains the actual original call for a short local even outside strict policy":
+        expect(short_inline_keeps_call(short_inline_callee(false, true))).to_equal(true)
+
+    it "still inlines an ordinary scalar callee":
+        val callee = short_inline_callee(false, false)
+        var inliner = FunctionInliner.new(20)
+        val blocks = inliner.inline_call(short_inline_caller_block(callee), 0, callee, Some(LocalId(id: 2)), [MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))])
+        expect(blocks.len()).to_equal(1)
+        expect(blocks[0].instructions.len()).to_equal(2)
+        match blocks[0].instructions[0].kind:
+            case MirInstKind.Const(destination, MirConstValue.Int(value), _):
+                expect(destination.id).to_equal(20)
+                expect(value).to_equal(9)
+            case _: expect(false).to_equal(true)
+        match blocks[0].instructions[1].kind:
+            case MirInstKind.Copy(destination, source):
+                expect(destination.id).to_equal(2)
+                expect(source.id).to_equal(20)
+            case _: expect(false).to_equal(true)
+
+    it "preserves metadata when explicitly cloning a local":
+        var inliner = FunctionInliner.new(20)
+        val source = MirLocal(id: LocalId(id: 0), name: nil, type_: MirType.i64(), kind: LocalKind.Arg(0), is_ghost: false,
+            short_borrow: true, short_mutable: true, short_boundary: 10)
+        val cloned = inliner.fresh_local_like(source)
+        expect(cloned.id).to_equal(20)
+        expect(inliner.generated_locals[0].short_borrow).to_equal(true)
+        expect(inliner.generated_locals[0].short_mutable).to_equal(true)
+        expect(inliner.generated_locals[0].short_boundary).to_equal(10)

@@ -493,8 +493,18 @@ bootstrap_stage3_args_sha256() {
 }
 
 bootstrap_stage3_stage2_canonical_env_names() {
-    [ "$#" -ge 1 ] && [ "$#" -le 2 ] || return 1
+    [ "$#" -ge 1 ] && [ "$#" -le 5 ] || return 1
     case "${2:-}" in ''|1) ;; *) return 1 ;; esac
+    # $3 is dual-mode, merged from both lines: the historical
+    # preflight-context flag ('' or the literal 1) or, from the RSS ceiling
+    # line, a canonical KiB decimal. A literal 1 stays the flag; any other
+    # non-empty value must be a valid ceiling.
+    case "${3:-}" in
+        ''|1) ;;
+        *[!0-9]*) return 1 ;;
+        *) bootstrap_stage3_compiler_ceiling_valid "$3" || return 1 ;;
+    esac
+    bootstrap_stage3_stage2_diagnostic_names_valid "${4:-}" || return 1
     # PATH is in the allowlist because the backend resolves its LLVM tools by
     # name at run time -- find_tool_portable runs `where llc` on Windows and
     # `command -v` elsewhere. Under `env -i` with no PATH that lookup finds
@@ -524,7 +534,7 @@ bootstrap_stage3_stage2_canonical_env_names() {
             printf ' %s' 'CC CXX AR LD LLVM_CONFIG SIMPLE_LLVM_REQUIRED_VERSION'
             ;;
         *windows-gnu*)
-            printf ' %s' 'SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR CC'
+            printf ' %s' 'SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR CC OS'
             ;;
         *windows-msvc*)
             # INCLUDE/LIB/LIBPATH belong here for the same reason CC does:
@@ -532,12 +542,166 @@ bootstrap_stage3_stage2_canonical_env_names() {
             # anything absent is simply gone. Without them cl.exe cannot find the
             # MSVC headers and the core-c-bootstrap runtime supplement fails with
             # "fatal error C1083: cannot open include file 'stdint.h'".
-            printf ' %s' 'SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR CC INCLUDE LIB LIBPATH'
+            # OS is load-bearing too: the pure-Simple stages choose their
+            # process-spawn implementation from env OS (io/process_ops.spl
+            # _is_windows_platform), and without it every bare-name child
+            # spawn (git above all) fails -1 -- observed as SCV-E-ADMISSION
+            # git-event-source-unavailable in the stage-2 sanity.
+            printf ' %s' 'SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR CC INCLUDE LIB LIBPATH OS'
             ;;
     esac
     printf ' %s' 'SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT SIMPLE_BINARY'
     [ "${2:-}" != 1 ] || printf ' %s' SIMPLE_SCV_INVENTORY_COLD_INIT
+    case "${3:-}" in
+        ''|1)
+            [ "${3:-}" != 1 ] || printf ' %s' SIMPLE_BOOTSTRAP_PREFLIGHT_CONTEXT_V1
+            ;;
+        *)
+            printf ' %s' SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB
+            ;;
+    esac
+    # Extra recorded env names (e.g. the parent preflight context on stage2).
+    # The caller derives these from the admission/transcript, never from
+    # ambient env, so a resumed run cannot widen its own allowlist. Printed
+    # after the ceiling slot to match the stage2 builder's assignment order.
+    # Redundant with the historical $3=1 context flag, so the two cannot
+    # combine.
+    [ "${3:-}" != 1 ] || [ -z "${5:-}" ] || return 1
+    case "${5:-}" in
+        ''|SIMPLE_BOOTSTRAP_PREFLIGHT_CONTEXT_V1) ;;
+        *) return 1 ;;
+    esac
+    [ -z "${5:-}" ] || printf ' %s' "$5"
+    [ -z "${4:-}" ] || printf ' %s' "$4"
     printf '\n'
+}
+
+# The descriptor is an ordered set, not an extensible environment allowlist.
+bootstrap_stage3_stage2_diagnostic_names_valid() {
+    [ "$#" -eq 1 ] || return 1
+    case "$1" in
+        ''|SIMPLE_M4_WORK_RECEIPT|'SIMPLE_MEM_SNAPSHOT_FILE SIMPLE_EVIDENCE_RUN_ID'|'SIMPLE_MEM_SNAPSHOT_FILE SIMPLE_EVIDENCE_RUN_ID SIMPLE_M4_WORK_RECEIPT') return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Syntax validation is shared with historical admission readers. It must not
+# require an absent snapshot: completed evidence legitimately occupies that path.
+bootstrap_stage3_stage2_diagnostic_values_valid() {
+    [ "$#" -eq 3 ] || return 1
+    if [ -n "$1$2" ]; then
+        bootstrap_stage3_normalized_absolute "$1" || return 1
+        [ "$1" != / ] && [ -n "$2" ] && [ "${#2}" -le 127 ] || return 1
+        case "$2" in *[!a-zA-Z0-9._-]*) return 1 ;; esac
+    fi
+    case "$3" in ''|1) ;; *) return 1 ;; esac
+}
+
+# New execution only. Low-memory streaming HIR skips mem_snapshot_begin in
+# cache-warming shards; the final non-shard worker alone owns the O_EXCL file.
+# The inherited runtime also enforces O_EXCL/O_NOFOLLOW at open time.
+bootstrap_stage3_stage2_snapshot_destination_valid() {
+    [ "$#" -eq 2 ] && [ "$2" = 1 ] || return 1
+    bootstrap_stage3_normalized_absolute "$1" || return 1
+    [ ! -e "$1" ] && [ ! -L "$1" ] || return 1
+    [ "$(bootstrap_stage3_canonical_path "$1")" = "$1" ] || return 1
+    bootstrap_stage2_snapshot_parent=$(dirname -- "$1")
+    [ -d "$bootstrap_stage2_snapshot_parent" ] && [ -w "$bootstrap_stage2_snapshot_parent" ] || return 1
+    bootstrap_stage2_snapshot_owner_mode=$(
+        stat -c '%u:%a' -- "$bootstrap_stage2_snapshot_parent" 2>/dev/null ||
+        stat -f '%u:%Lp' "$bootstrap_stage2_snapshot_parent" 2>/dev/null
+    ) || return 1
+    [ "$bootstrap_stage2_snapshot_owner_mode" = "$(id -u):700" ]
+}
+
+# Capture once for the hash and execution vectors. Values cannot contain word
+# separators or glob characters, so the optional expansion is safe in both.
+bootstrap_stage3_stage2_diagnostic_environment() {
+    [ "$#" -eq 1 ] || return 1
+    [ "${SIMPLE_MEM_SNAPSHOT_FILE+x}" != x ] || [ -n "$SIMPLE_MEM_SNAPSHOT_FILE" ] || return 1
+    [ "${SIMPLE_EVIDENCE_RUN_ID+x}" != x ] || [ -n "$SIMPLE_EVIDENCE_RUN_ID" ] || return 1
+    [ "${SIMPLE_M4_WORK_RECEIPT+x}" != x ] || [ -n "$SIMPLE_M4_WORK_RECEIPT" ] || return 1
+    bootstrap_stage3_stage2_diagnostic_values_valid "${SIMPLE_MEM_SNAPSHOT_FILE:-}" \
+        "${SIMPLE_EVIDENCE_RUN_ID:-}" "${SIMPLE_M4_WORK_RECEIPT:-}" || return 1
+    if [ -n "${SIMPLE_MEM_SNAPSHOT_FILE:-}" ]; then
+        bootstrap_stage3_stage2_snapshot_destination_valid "$SIMPLE_MEM_SNAPSHOT_FILE" "$1" || return 1
+        printf '%s\n' "SIMPLE_MEM_SNAPSHOT_FILE=$SIMPLE_MEM_SNAPSHOT_FILE" "SIMPLE_EVIDENCE_RUN_ID=$SIMPLE_EVIDENCE_RUN_ID"
+    fi
+    [ -z "${SIMPLE_M4_WORK_RECEIPT:-}" ] || printf '%s\n' 'SIMPLE_M4_WORK_RECEIPT=1'
+    return 0
+}
+
+# Read only recorded bindings. Reject duplicate/case-alias/malformed records,
+# incomplete pairs and reordered names. Never inherit diagnostics from ambient env.
+bootstrap_stage3_stage2_transcript_diagnostics() (
+    [ "$#" -eq 1 ] && [ -f "$1" ] || exit 1
+    transcript=$1
+    snapshot= run_id= m4= names=
+    for name in SIMPLE_MEM_SNAPSHOT_FILE SIMPLE_EVIDENCE_RUN_ID SIMPLE_M4_WORK_RECEIPT; do
+        count=$(grep -ic "^explicit-env:[^:]*:$name=" "$transcript" || true)
+        case "$count" in
+            0) continue ;;
+            1) ;;
+            *) exit 1 ;;
+        esac
+        value=$(bootstrap_stage3_transcript_explicit_env_value "$transcript" "$name") || exit 1
+        [ -n "$value" ] || exit 1
+        names="${names:+$names }$name"
+        case "$name" in
+            SIMPLE_MEM_SNAPSHOT_FILE) snapshot=$value ;;
+            SIMPLE_EVIDENCE_RUN_ID) run_id=$value ;;
+            SIMPLE_M4_WORK_RECEIPT) m4=$value ;;
+        esac
+    done
+    bootstrap_stage3_stage2_diagnostic_names_valid "$names" || exit 1
+    bootstrap_stage3_stage2_diagnostic_values_valid "$snapshot" "$run_id" "$m4" || exit 1
+    recorded_names=$(awk -F: '
+        /^explicit-env:/ {
+            payload=$0; sub(/^explicit-env:[^:]*:/, "", payload)
+            sub(/=.*/, "", payload)
+            if (payload == "SIMPLE_MEM_SNAPSHOT_FILE" || payload == "SIMPLE_EVIDENCE_RUN_ID" || payload == "SIMPLE_M4_WORK_RECEIPT") {
+                printf "%s%s", separator, payload; separator=" "
+            }
+        }
+    ' "$transcript")
+    [ "$recorded_names" = "$names" ] || exit 1
+    if [ -n "$snapshot" ]; then
+        [ "$(grep -c '^argv:12:--low-memory$' "$transcript" || true)" = 1 ] || exit 1
+        printf '%s\n' "SIMPLE_MEM_SNAPSHOT_FILE=$snapshot" "SIMPLE_EVIDENCE_RUN_ID=$run_id"
+    fi
+    [ -z "$m4" ] || printf '%s\n' 'SIMPLE_M4_WORK_RECEIPT=1'
+    exit 0
+)
+
+# Syntax only: live physical/headroom admission belongs to both RSS owners.
+# Limit the canonical decimal before any shell arithmetic or guard launch.
+bootstrap_stage3_compiler_ceiling_valid() {
+    case "$1" in ''|0*|*[!0-9]*) return 1 ;; esac
+    [ "${#1}" -le 15 ]
+}
+
+# Emit an optional NEW invocation binding. An explicitly empty value is not
+# absence. Historical argument reconstruction must instead read its transcript.
+bootstrap_stage3_compiler_ceiling_environment() {
+    [ "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB+x}" = x ] || return 0
+    bootstrap_stage3_compiler_ceiling_valid "$SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB" || return 1
+    printf '%s\n' "SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=$SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB"
+}
+
+# Missing means historically absent, never an invitation to inherit a new
+# ambient budget. Reject duplicates, malformed lengths and case aliases.
+bootstrap_stage3_transcript_compiler_ceiling() {
+    [ "$#" -eq 1 ] && [ -f "$1" ] || return 1
+    bootstrap_stage3_ceiling_records=$(grep -ic '^explicit-env:[^:]*:SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=' "$1" || true)
+    case "$bootstrap_stage3_ceiling_records" in
+        0) return 0 ;;
+        1) ;;
+        *) return 1 ;;
+    esac
+    bootstrap_stage3_recorded_ceiling=$(bootstrap_stage3_transcript_explicit_env_value \
+        "$1" SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB) || return 1
+    bootstrap_stage3_compiler_ceiling_valid "$bootstrap_stage3_recorded_ceiling" || return 1
+    printf '%s\n' "$bootstrap_stage3_recorded_ceiling"
 }
 
 # Optional cold initialization is an exact recorded opt-in, never inherited
@@ -550,6 +714,19 @@ bootstrap_stage3_stage2_transcript_cold_init() {
             "$1" SIMPLE_SCV_INVENTORY_COLD_INIT) || return 1
         [ "$bootstrap_stage2_recorded_cold_init" = 1 ] || return 1
         printf '1\n'
+    fi
+}
+
+# An optional new-parent binding. Absence preserves legacy transcript shape;
+# duplicates, malformed lengths, and empty recorded values never mean absence.
+bootstrap_stage3_stage2_transcript_preflight_context() {
+    [ "$#" -eq 1 ] && [ -f "$1" ] || return 1
+    if grep -q '^explicit-env:[^:]*:SIMPLE_BOOTSTRAP_PREFLIGHT_CONTEXT_V1=' "$1"; then
+        [ "$(grep -c '^explicit-env:[^:]*:SIMPLE_BOOTSTRAP_PREFLIGHT_CONTEXT_V1=' "$1")" = 1 ] || return 1
+        bootstrap_stage2_preflight_context=$(bootstrap_stage3_transcript_explicit_env_value \
+            "$1" SIMPLE_BOOTSTRAP_PREFLIGHT_CONTEXT_V1) || return 1
+        [ -n "$bootstrap_stage2_preflight_context" ] || return 1
+        printf '%s\n' "$bootstrap_stage2_preflight_context"
     fi
 }
 
@@ -612,6 +789,9 @@ bootstrap_stage3_env_assignment_names() {
 # only ADD lines, so this pass-through can make that gate fail closed but can
 # never make it falsely pass.
 bootstrap_stage3_diagnostic_env() {
+    # Full bootstrap records MIR_TAG_PROBE directly, including its empty value.
+    # Other candidate routes still need the default diagnostic pass-through.
+    case "${1:-}" in ''|SIMPLE_MIR_TAG_PROBE) ;; *) return 2 ;; esac
     for bootstrap_stage3_diag_name in \
         SIMPLE_BOOTSTRAP_DIAG \
         SIMPLE_COMPILER_TRACE \
@@ -623,6 +803,7 @@ bootstrap_stage3_diagnostic_env() {
         SIMPLE_MIR_DEFAULT_PAD_TRACE \
         SIMPLE_MIR_FIELD_TRACE \
         SIMPLE_MIR_RET_TRACE; do
+        [ "$bootstrap_stage3_diag_name" != "${1:-}" ] || continue
         bootstrap_stage3_diag_value=$(
             eval "printf '%s' \"\${${bootstrap_stage3_diag_name}-}\""
         ) || return 1
@@ -693,6 +874,27 @@ bootstrap_stage3_canonical_native_command() {
                     [ -f "${bootstrap_stage3_native_command}.exe" ] &&
                         bootstrap_stage3_native_command=\
 "${bootstrap_stage3_native_command}.exe"
+                    ;;
+            esac
+            ;;
+    esac
+    # PATH-selected system tools commonly have symlink leaves (for example
+    # Debian's llvm-config-23). Bind the physical executable, while retaining
+    # the stricter no-symlink rule for receipt-named compiler artifacts.
+    bootstrap_stage3_native_command=$(
+        perl -MCwd=abs_path -e '
+            my $path = abs_path(shift);
+            defined($path) && -f $path && -x $path or exit 1;
+            print "$path\n";
+        ' "$bootstrap_stage3_native_command"
+    ) || return 1
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        MSYS*|MINGW*|CYGWIN*)
+            case "$bootstrap_stage3_native_command" in
+                [A-Za-z]:[\\/]*)
+                    bootstrap_stage3_native_command=$(
+                        cygpath -u "$bootstrap_stage3_native_command"
+                    ) || return 1
                     ;;
             esac
             ;;
@@ -815,6 +1017,16 @@ bootstrap_stage3_host_platform() {
         arm64:Linux|aarch64:Linux) echo aarch64-unknown-linux-gnu ;;
         x86_64:FreeBSD|amd64:FreeBSD) echo x86_64-unknown-freebsd ;;
         arm64:FreeBSD|aarch64:FreeBSD) echo aarch64-unknown-freebsd ;;
+        riscv64:FreeBSD) echo riscv64-unknown-freebsd ;;
+        riscv:FreeBSD)
+            # FreeBSD reports the machine family with -m; -p supplies width.
+            # Match Simple artifact paths; Cargo's gc spelling is separate.
+            bootstrap_stage3_host_processor=$(uname -p 2>/dev/null) || return 1
+            case "$bootstrap_stage3_host_processor" in
+                riscv64) echo riscv64-unknown-freebsd ;;
+                *) return 1 ;;
+            esac
+            ;;
         x86_64:MINGW*|x86_64:MSYS*|x86_64:CYGWIN*|x86_64:Windows*)
             case "${SIMPLE_WINDOWS_ABI:-${MSYSTEM:+gnu}}" in
                 gnu) echo x86_64-pc-windows-gnu ;;
@@ -2000,10 +2212,12 @@ bootstrap_stage3_resolve_llvm_build_authority() (
             # Rust bindings load the installed C API through the package's
             # LLVM-C import library and runtime DLL. Bind those exact files and
             # never reinterpret llvm-config's private static build paths.
-            [ "$bootstrap_stage3_llvm_version" = 23.1.1 ] || {
-                echo "llvm authority: Windows bootstrap requires LLVM 23.1.1, found ${bootstrap_stage3_llvm_version}" >&2
-                return 1
-            }
+            case "$bootstrap_stage3_llvm_version" in
+                23.1.1) ;;
+                23.*) echo "warning: llvm authority: LLVM ${bootstrap_stage3_llvm_version} admitted by major 23 (reference 23.1.1)" >&2 ;;
+                *) echo "llvm authority: Windows bootstrap requires LLVM 23.x, found ${bootstrap_stage3_llvm_version}" >&2
+                   return 1 ;;
+            esac
             bootstrap_stage3_llvm_c_import_requested=\
 "$bootstrap_stage3_llvm_prefix/lib/LLVM-C.lib"
             bootstrap_stage3_llvm_c_runtime_requested=\
@@ -2048,10 +2262,12 @@ bootstrap_stage3_resolve_llvm_build_authority() (
                     sed -n 's/.*clang version \([0-9][0-9.]*\).*/\1/p' |
                     sed -n '1p'
             )
-            [ "$bootstrap_stage3_llvm_clang_cl_version" = 23.1.1 ] || {
-                echo "llvm authority: Windows bootstrap requires clang-cl 23.1.1, found ${bootstrap_stage3_llvm_clang_cl_version:-unknown}" >&2
-                return 1
-            }
+            case "$bootstrap_stage3_llvm_clang_cl_version" in
+                23.1.1) ;;
+                23.*) echo "warning: llvm authority: clang-cl ${bootstrap_stage3_llvm_clang_cl_version} admitted by major 23 (reference 23.1.1)" >&2 ;;
+                *) echo "llvm authority: Windows bootstrap requires clang-cl 23.x, found ${bootstrap_stage3_llvm_clang_cl_version:-unknown}" >&2
+                   return 1 ;;
+            esac
             printf 'llvm-build-status=enabled\nllvm-version=%s\nllvm-major=%s\n' \
                 "$bootstrap_stage3_llvm_version" \
                 "$bootstrap_stage3_llvm_major"
@@ -2709,7 +2925,21 @@ bootstrap_stage3_tool_authority_snapshot() (
                 llc|llvm-as|opt|llvm-readobj) bootstrap_stage3_managed_role=$bootstrap_stage3_tool_name ;;
             esac
             if [ -n "$bootstrap_stage3_managed_role" ]; then
-                [ "$bootstrap_stage3_tool_version_status" -eq 0 ] || return 1
+                case "$(bootstrap_stage3_host_platform)" in
+                    *-apple-darwin*)
+                        # Apple ld(1)/ar(1)/ranlib(1) are BSD tools without a
+                        # GNU --version probe (the probe exits nonzero and the
+                        # first line is a diagnostic), so the managed-role
+                        # status==0 pin can never be met with the platform
+                        # linker/archive tools. The executable sha256 plus the
+                        # recorded diagnostic line remain the authoritative
+                        # identity -- the same stance the non-managed probe
+                        # takes for BSD userland tools above. Require a
+                        # nonempty probe output, not a zero status.
+                        [ -s "$bootstrap_stage3_tool_version_output" ] || return 1 ;;
+                    *)
+                        [ "$bootstrap_stage3_tool_version_status" -eq 0 ] || return 1 ;;
+                esac
                 bootstrap_stage3_managed_native_path=$bootstrap_stage3_tool_canonical
                 case "$(bootstrap_stage3_host_platform)" in
                     *windows*) bootstrap_stage3_managed_native_path=$(cygpath -m "$bootstrap_stage3_tool_canonical") || return 1 ;;
@@ -3303,6 +3533,14 @@ bootstrap_stage3_copy_seed_tuple() {
     esac
     set -- "$@" "$bootstrap_stage3_tuple_runtime_name"
     case "$bootstrap_stage3_tuple_target" in
+        *windows-msvc*)
+            # Carry a previously bound LLVM C API dependency with the same
+            # producer tuple; fresh Cargo trees stage it before publication.
+            if [ -e "$bootstrap_stage3_tuple_source/LLVM-C.lib" ] ||
+                [ -e "$bootstrap_stage3_tuple_source/LLVM-C.lib.producer.txt" ]; then
+                set -- "$@" LLVM-C.lib LLVM-C.lib.producer.txt
+            fi
+            ;;
         *apple-darwin*)
             set -- "$@" libsimple_runtime.dylib
             # Preserve optional diagnostic Cocoa candidates in the same copy
@@ -3424,6 +3662,15 @@ bootstrap_stage3_copy_seed_tuple() {
         case "$bootstrap_stage3_tuple_aliases" in
             '') bootstrap_stage3_tuple_aliases="$bootstrap_stage3_tuple_runtime_name=$bootstrap_stage3_tuple_runtime_root" ;;
             *) bootstrap_stage3_tuple_aliases="$bootstrap_stage3_tuple_aliases;$bootstrap_stage3_tuple_runtime_name=$bootstrap_stage3_tuple_runtime_root" ;;
+        esac
+    fi
+    if [ "$bootstrap_stage3_tuple_runtime_name" = deps/simple_runtime.lib ] &&
+        [ ! -f "$bootstrap_stage3_tuple_source/$bootstrap_stage3_tuple_runtime_name" ] &&
+        [ -f "$bootstrap_stage3_tuple_source/simple_runtime.lib" ] &&
+        [ ! -L "$bootstrap_stage3_tuple_source/simple_runtime.lib" ]; then
+        case "$bootstrap_stage3_tuple_aliases" in
+            '') bootstrap_stage3_tuple_aliases="$bootstrap_stage3_tuple_runtime_name=simple_runtime.lib" ;;
+            *) bootstrap_stage3_tuple_aliases="$bootstrap_stage3_tuple_aliases;$bootstrap_stage3_tuple_runtime_name=simple_runtime.lib" ;;
         esac
     fi
     BOOTSTRAP_STAGE3_TUPLE_SOURCE_ALIASES=$bootstrap_stage3_tuple_aliases
@@ -4009,8 +4256,62 @@ bootstrap_stage3_pin_private_authority() {
 
 # Prepare and publish immutable Rust authority generations. The current marker
 # is the commit record; a generation is never mutated after marker admission.
+bootstrap_stage3_stage_windows_llvm_import() (
+    [ "$#" -eq 3 ] || exit 1
+    llvm_stage=$1 llvm_target=$2 llvm_authority=$3
+    case "$llvm_target" in *windows-msvc*) ;; *) exit 0 ;; esac
+    [ -d "$llvm_stage" ] && [ ! -L "$llvm_stage" ] || exit 1
+    llvm_destination=$llvm_stage/LLVM-C.lib
+    llvm_receipt=$llvm_stage/LLVM-C.lib.producer.txt
+    if [ ! -e "$llvm_destination" ] && [ "${BOOTSTRAP_STAGE3_LLVM_FEATURES-unset}" = "" ]; then
+        # A seed built without the llvm feature (Cranelift lanes) links no
+        # LLVM, so there is no import to carry -- even when the host has an
+        # LLVM install the authority resolver can see.
+        exit 0
+    fi
+    if [ -z "$llvm_authority" ]; then
+        # An admitted parent already owns these bytes. Never rediscover a
+        # different LLVM installation while forwarding its sealed tuple.
+        [ -f "$llvm_destination" ] && [ ! -L "$llvm_destination" ] &&
+            [ -f "$llvm_receipt" ] && [ ! -L "$llvm_receipt" ] || exit 1
+        [ "$(bootstrap_stage3_manifest_value target "$llvm_receipt")" = "$llvm_target" ] &&
+            [ "$(bootstrap_stage3_manifest_value sha256 "$llvm_receipt")" = \
+              "$(bootstrap_stage3_hash_file "$llvm_destination")" ] || exit 1
+        exit 0
+    fi
+    # The current Windows producer authority is the official x64 LLVM 23.1.1
+    # dynamic-C-API package. Other architectures require their own admission.
+    [ "$llvm_target" = x86_64-pc-windows-msvc ] || exit 1
+    for llvm_key in llvm-build-status llvm-link-kind llvm-c-import-lib-path llvm-c-import-lib-sha256; do
+        [ "$(printf '%s\n' "$llvm_authority" | awk -F= -v key="$llvm_key" '$1 == key { n++ } END { print n+0 }')" = 1 ] || exit 1
+    done
+    [ "$(printf '%s\n' "$llvm_authority" | sed -n 's/^llvm-build-status=//p')" = enabled ] &&
+        [ "$(printf '%s\n' "$llvm_authority" | sed -n 's/^llvm-link-kind=//p')" = dynamic-c-api ] || exit 1
+    llvm_source=$(printf '%s\n' "$llvm_authority" | sed -n 's/^llvm-c-import-lib-path=//p')
+    llvm_digest=$(printf '%s\n' "$llvm_authority" | sed -n 's/^llvm-c-import-lib-sha256=//p')
+    bootstrap_stage3_valid_fingerprint "$llvm_digest" || exit 1
+    [ "$llvm_source" = "$(bootstrap_stage3_canonical_file "$llvm_source")" ] || exit 1
+    [ -f "$llvm_source" ] && [ ! -L "$llvm_source" ] &&
+        [ "$(bootstrap_stage3_hash_file "$llvm_source")" = "$llvm_digest" ] || exit 1
+    if [ -e "$llvm_destination" ]; then
+        [ -f "$llvm_destination" ] && [ ! -L "$llvm_destination" ] &&
+            [ -f "$llvm_receipt" ] && [ ! -L "$llvm_receipt" ] &&
+            [ "$(bootstrap_stage3_hash_file "$llvm_destination")" = "$llvm_digest" ] &&
+            [ "$(bootstrap_stage3_manifest_value target "$llvm_receipt")" = "$llvm_target" ] &&
+            [ "$(bootstrap_stage3_manifest_value sha256 "$llvm_receipt")" = "$llvm_digest" ] || exit 1
+        exit 0
+    fi
+    [ ! -e "$llvm_destination" ] && [ ! -L "$llvm_destination" ] || exit 1
+    [ ! -e "$llvm_receipt" ] && [ ! -L "$llvm_receipt" ] || exit 1
+    cp -p -- "$llvm_source" "$llvm_destination" || exit 1
+    [ "$(bootstrap_stage3_hash_file "$llvm_source")" = "$llvm_digest" ] &&
+        [ "$(bootstrap_stage3_hash_file "$llvm_destination")" = "$llvm_digest" ] || exit 1
+    printf 'target=%s\nsha256=%s\nsource=%s\n' "$llvm_target" "$llvm_digest" "$llvm_source" >"$llvm_receipt" || exit 1
+    chmod 400 "$llvm_destination" "$llvm_receipt"
+)
+
 bootstrap_stage3_prepare_seed_generation() {
-    { [ "$#" -eq 7 ] || [ "$#" -eq 8 ]; } || { echo "bootstrap_stage3_prepare_seed_generation: failed check 1" >&2; return 1; }
+    { [ "$#" -eq 7 ] || [ "$#" -eq 8 ] || [ "$#" -eq 9 ]; } || { echo "bootstrap_stage3_prepare_seed_generation: failed check 1" >&2; return 1; }
     bootstrap_stage3_generation_source=$1
     bootstrap_stage3_generation_root=$2
     bootstrap_stage3_generation_inputs=$3
@@ -4042,6 +4343,10 @@ bootstrap_stage3_prepare_seed_generation() {
     # metadata can be added before publication.  Descendant directories and
     # tuple members remain frozen; no marker can admit this staging path.
     chmod 700 "$bootstrap_stage3_generation_staging" || { echo "bootstrap_stage3_prepare_seed_generation: failed check 6" >&2; return 1; }
+    bootstrap_stage3_stage_windows_llvm_import "$bootstrap_stage3_generation_staging" \
+        "$bootstrap_stage3_generation_target" "${9:-}" || {
+        echo "bootstrap_stage3_prepare_seed_generation: producer LLVM import authority missing or changed" >&2; return 1;
+    }
     if [ -n "$bootstrap_stage3_generation_details_source" ]; then
         cp -p -- "$bootstrap_stage3_generation_details_source" \
             "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_seed_name.inputs.sha256.details.env" || { echo "bootstrap_stage3_prepare_seed_generation: failed check 7" >&2; return 1; }
@@ -4823,6 +5128,29 @@ public static class Stage3MaterializedConsumer {
             throw;
         }
     }
+    static HashSet<string> IgnoredDirectories(string root) {
+        var ignored = new HashSet<string>(StringComparer.Ordinal);
+        // --directory collapses ignored output trees to one row. Keeping the
+        // audit at these boundaries avoids opening thousands of generated
+        // files that Git has already excluded from the source inventory.
+        foreach (string row in Nul(Git(root, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z", "--", "."))) {
+            if (!row.EndsWith("/", StringComparison.Ordinal)) continue;
+            string relative = row.Substring(0, row.Length - 1);
+            CheckPath(relative);
+            ignored.Add(relative);
+        }
+        return ignored;
+    }
+    static bool IsIgnoredContent(string relative, HashSet<string> ignored) {
+        string probe = relative;
+        while (probe.Length != 0) {
+            if (ignored.Contains(probe)) return true;
+            int slash = probe.LastIndexOf('/');
+            if (slash < 0) break;
+            probe = probe.Substring(0, slash);
+        }
+        return false;
+    }
     static string[] Nul(byte[] b) {
         string s = Text(b); if (s.Length == 0) return new string[0];
         if (!s.EndsWith("\0")) throw new IOException("git.nul-format");
@@ -4841,7 +5169,7 @@ public static class Stage3MaterializedConsumer {
         // children are listed and the receipt row count check below can never
         // match a real checkout (all 66 materialized links live below root).
         foreach (string row in Nul(Git(root, "ls-tree", "-rz", "-r", "--full-tree", head))) {
-            if (++entries > MaxEntries) throw new IOException("bound.entries");
+            if (++entries > MaxEntries) throw new IOException("bound.entries count=" + entries + " max=" + MaxEntries);
             int tab = row.IndexOf('\t'); if (tab < 0) throw new IOException("git.tree-format");
             string path = row.Substring(tab + 1); CheckPath(path);
             if (!cases.Add(path)) throw new IOException("path.case-collision");
@@ -4976,22 +5304,100 @@ public static class Stage3MaterializedConsumer {
         // Runtime bytes remain the committed-seed owner's content-admission job;
         // hashing them here would consume the source audit's bounded byte budget.
     }
+    // Batched `git check-ignore` over one directory's children (a single git
+    // fork per directory; per-walk-entry IsGitIgnored probes would fork
+    // thousands of times). exit 1 means "none ignored" and is a clean empty
+    // set, not an error.
+    //
+    // Two levels are probed (the root's children, then each remaining child
+    // directory's children): git refuses to call a directory ignored while
+    // it contains tracked files (e.g. build/ holds tracked review artifacts
+    // alongside 60k+ regenerable cache entries), so a single-level probe
+    // cannot skip such directories even though their bulk is ignorable cache
+    // (build/scv, build/c). One batched probe per top-level directory keeps
+    // the fork count bounded at walk start.
+    static HashSet<string> IgnoredChildren(string root, string relativeDir) {
+        var ignored = new HashSet<string>(StringComparer.Ordinal);
+        string abs = relativeDir.Length == 0 ? root : Path.Combine(root, relativeDir.Replace('/', '\\'));
+        var children = new List<string>();
+        foreach (string item in Directory.EnumerateFileSystemEntries(abs)) {
+            string name = item.Substring(abs.Length + 1).Replace('\\','/');
+            if (name.Length == 0 || name == ".git") continue;
+            children.Add(name);
+        }
+        if (children.Count == 0) return ignored;
+        // Path prefix: git runs with cwd=root, so a nested directory's
+        // children must be probed as "<dir>/<name>" to match ignore patterns
+        // like "build/" (a bare "scv" probe would match nothing).
+        string probePrefix = relativeDir.Length == 0 ? "" : relativeDir + "/";
+        // Chunk the probe: argv joins into one command-line string with a
+        // ~32k character Windows limit (build/ alone holds 850+ hash-named
+        // children), so probe in bounded batches.
+        for (int batchStart = 0; batchStart < children.Count; batchStart += 50) {
+            int batchEnd = batchStart + 50; if (batchEnd > children.Count) batchEnd = children.Count;
+            var argv = new List<string>();
+            for (int bi = batchStart; bi < batchEnd; bi++) argv.Add(probePrefix + children[bi]);
+            argv.Insert(0, "--");
+            argv.Insert(0, "check-ignore");
+            byte[] output;
+            try { output = Git(root, argv.ToArray()); }
+            catch (IOException e) {
+                if (e.Message != null && e.Message.StartsWith("command.failed:1")) continue;
+                throw;
+            }
+            foreach (string line in Text(output).Split('\n')) {
+                string name = line.TrimEnd('\r');
+                if (name.Length > probePrefix.Length && name.StartsWith(probePrefix))
+                    name = name.Substring(probePrefix.Length);
+                if (name.Length > 0) ignored.Add(name);
+            }
+        }
+        return ignored;
+    }
     static void AuditTree(string root, Dictionary<string,string> aliases, Dictionary<string,string> gitlinks,
         HashSet<string> inspectedGitlinks, HashSet<string> initializedGitlinks,
         List<string> generatedAuthorities, List<SafeFileHandle> held) {
         var todo = new Stack<string>(); todo.Push(root);
+        var ignoredDirectories = IgnoredDirectories(root);
         Parents(Path.Combine(root, "leaf"), false, held);
         var cases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Git-ignored subtrees (build/, .simple/, target/) are regenerable
+        // output caches, never tracked content: the audit cannot bind what
+        // git itself excludes from the tree. Without this exclusion their
+        // entries (measured: build/scv alone ~62k, build/c ~10k) count
+        // against MaxEntries and trip bound.entries on every post-build
+        // admission walk, and each walked entry retains an open handle (see
+        // stage3_walk_retains_handle_per_entry_2026-09-25.md).
+        var ignoredTop = IgnoredChildren(root, "");
+        var ignoredSecond = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        foreach (string item in Directory.EnumerateFileSystemEntries(root)) {
+            string name = item.Substring(root.Length + 1).Replace('\\','/');
+            if (name.Length == 0 || name == ".git" || ignoredTop.Contains(name)) continue;
+            if (Directory.Exists(item))
+                ignoredSecond[name] = IgnoredChildren(root, name);
+        }
+        const string generatedAuthority = "src/compiler_rust/target/bootstrap";
         while (todo.Count != 0) {
             Tick(); string dir = todo.Pop();
             // Enumerate one ordinary directory at a time, never recurse through
             // an alias, even if Git would eventually classify it as ignored.
             foreach (string item in Directory.EnumerateFileSystemEntries(dir)) {
-                if (++entries > MaxEntries) throw new IOException("bound.entries");
                 string relative = item.Substring(root.Length + 1).Replace('\\','/');
-                if (relative == ".git") continue;
+                if (relative == ".git") { entries++; continue; }
+                if (ignoredTop.Contains(relative)) continue;
+                int firstSlash = relative.IndexOf('/');
+                if (firstSlash > 0) {
+                    HashSet<string> secondSet;
+                    if (ignoredSecond.TryGetValue(relative.Substring(0, firstSlash), out secondSet)
+                        && secondSet.Contains(relative.Substring(firstSlash + 1))) continue;
+                }
+                if (++entries > MaxEntries) throw new IOException("bound.entries count=" + entries + " max=" + MaxEntries);
                 CheckPath(relative);
                 if (!cases.Add(relative)) throw new IOException("path.case-collision");
+                int parentSlash = relative.LastIndexOf('/');
+                string parentRelative = parentSlash < 0 ? "" : relative.Substring(0, parentSlash);
+                if (IsIgnoredContent(parentRelative, ignoredDirectories) &&
+                    relative != generatedAuthority && !generatedAuthority.StartsWith(relative + "/", StringComparison.Ordinal)) continue;
                 if (Path.GetFileName(item).Equals(".git", StringComparison.OrdinalIgnoreCase)) {
                     string parent = relative.Substring(0, relative.Length - 5);
                     // A registered submodule gitlink carries its own nested
@@ -5016,7 +5422,7 @@ public static class Stage3MaterializedConsumer {
                 {
                     var tag = Tag(raw);
                     if (aliases.ContainsKey(relative) && aliases[relative] == "directory") continue;
-                    if ((tag.Attributes & 0x400) != 0 && relative == "src/compiler_rust/target/bootstrap") {
+                    if ((tag.Attributes & 0x400) != 0 && relative == generatedAuthority) {
                         CheckGeneratedAuthority(root, item, held);
                         generatedAuthorities.Add(item);
                         continue;
@@ -5029,7 +5435,13 @@ public static class Stage3MaterializedConsumer {
                         if (CheckGitlink(root, item, oid, gitlinks, true, held)) initializedGitlinks.Add(relative);
                         inspectedGitlinks.Add(relative);
                     }
-                    if ((tag.Attributes & 0x10) != 0) todo.Push(item);
+                    // Inspect ignored directory boundaries themselves for
+                    // aliases/reparse points, then prune their contents. The
+                    // generated bootstrap authority is the sole exception; it
+                    // is checked directly even though target/ is ignored.
+                    bool generatedAncestor = generatedAuthority.StartsWith(relative + "/", StringComparison.Ordinal);
+                    if ((tag.Attributes & 0x10) != 0 &&
+                        (!ignoredDirectories.Contains(relative) || generatedAncestor)) todo.Push(item);
                 }
             }
         }

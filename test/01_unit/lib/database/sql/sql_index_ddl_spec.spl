@@ -1,0 +1,94 @@
+"""
+# SQL Index DDL Specification
+
+CREATE [UNIQUE] INDEX [IF NOT EXISTS] / DROP INDEX [IF EXISTS] semantics on the
+Database facade (SQLite-compatible). Regression: access_store.init_schema runs
+`CREATE INDEX IF NOT EXISTS`, which failed with "unsupported SQL" in the
+interpreter's rt_sqlite emulation (sffi_db.rs).
+"""
+
+use std.spec.step
+use std.database.sql.types.{DbValue, DbRow, DbError}
+use std.database.sql.connection.{Database}
+use std.io_runtime.{file_delete}
+
+fn _db_with_table() -> Database:
+    var db = Database.memory().unwrap()
+    db.exec_sql("CREATE TABLE ix (id INTEGER, a TEXT, b TEXT)").unwrap()
+    db
+
+describe "Index DDL":
+    context "CREATE INDEX":
+        it "creates an index with a column list":
+            step("create")
+            var db = _db_with_table()
+            expect(db.exec_sql("CREATE INDEX i1 ON ix(a, b)").is_ok()).to_equal(true)
+            db.close().unwrap()  # frees the connection slot
+
+        it "accepts ASC/DESC column modifiers":
+            step("create")
+            var db = _db_with_table()
+            expect(db.exec_sql("CREATE INDEX i1 ON ix (a ASC, b DESC)").is_ok()).to_equal(true)
+            db.close().unwrap()  # frees the connection slot
+
+        it "errors on a duplicate name without IF NOT EXISTS":
+            step("create twice")
+            var db = _db_with_table()
+            db.exec_sql("CREATE INDEX i1 ON ix(a)").unwrap()
+            expect(db.exec_sql("CREATE INDEX i1 ON ix(b)").is_err()).to_equal(true)
+            db.close().unwrap()  # frees the connection slot
+
+        it "IF NOT EXISTS is a no-op for an existing name":
+            step("create twice")
+            var db = _db_with_table()
+            db.exec_sql("CREATE INDEX IF NOT EXISTS i1 ON ix(a)").unwrap()
+            expect(db.exec_sql("CREATE INDEX IF NOT EXISTS i1 ON ix(a)").is_ok()).to_equal(true)
+            db.close().unwrap()  # frees the connection slot
+
+        it "IF NOT EXISTS does not mask a missing table":
+            step("create")
+            var db = _db_with_table()
+            expect(db.exec_sql("CREATE INDEX IF NOT EXISTS i1 ON nope(a)").is_err()).to_equal(true)
+            db.close().unwrap()  # frees the connection slot
+
+        it "errors on a missing column":
+            step("create")
+            var db = _db_with_table()
+            expect(db.exec_sql("CREATE INDEX i1 ON ix(zzz)").is_err()).to_equal(true)
+            db.close().unwrap()  # frees the connection slot
+
+    context "DROP INDEX":
+        it "drops an existing index and allows re-creating it":
+            step("drop")
+            var db = _db_with_table()
+            db.exec_sql("CREATE INDEX i1 ON ix(a)").unwrap()
+            expect(db.exec_sql("DROP INDEX i1").is_ok()).to_equal(true)
+            expect(db.exec_sql("CREATE INDEX i1 ON ix(a)").is_ok()).to_equal(true)
+            db.close().unwrap()  # frees the connection slot
+
+        it "errors dropping a missing index without IF EXISTS":
+            step("drop")
+            var db = _db_with_table()
+            expect(db.exec_sql("DROP INDEX nope").is_err()).to_equal(true)
+            db.close().unwrap()  # frees the connection slot
+
+        it "IF EXISTS makes dropping a missing index a no-op":
+            step("drop")
+            var db = _db_with_table()
+            expect(db.exec_sql("DROP INDEX IF EXISTS nope").is_ok()).to_equal(true)
+            db.close().unwrap()  # frees the connection slot
+
+    context "file-backed database":
+        it "remembers index names across close and reopen":
+            step("persist")
+            val path = "/tmp/simple_sql_index_persist_spec.db"
+            file_delete(path)
+            var db = Database.open(path).unwrap()
+            db.exec_sql("CREATE TABLE ix (id INTEGER, a TEXT)").unwrap()
+            db.exec_sql("CREATE INDEX i1 ON ix(a)").unwrap()
+            db.close().unwrap()
+            var db2 = Database.open(path).unwrap()
+            expect(db2.exec_sql("CREATE INDEX i1 ON ix(a)").is_err()).to_equal(true)
+            expect(db2.exec_sql("CREATE INDEX IF NOT EXISTS i1 ON ix(a)").is_ok()).to_equal(true)
+            db2.close().unwrap()
+            file_delete(path)

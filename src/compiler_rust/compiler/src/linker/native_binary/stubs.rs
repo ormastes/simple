@@ -715,7 +715,7 @@ static inline int64_t _rt_wall_nanos(void) {{
     return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
 }}
 #endif
-/* Epoch contract, pinned by test/unit/runtime/time_epoch_convergence_spec.spl:
+/* Epoch contract, pinned by test/01_unit/runtime/time_epoch_convergence_spec.spl:
  * rt_time_now_nanos/micros are MONOTONIC (durations), rt_time_now_unix_micros
  * is WALL-CLOCK (absolute). Until 2026-08-10 all three read CLOCK_REALTIME
  * here, so the two monotonic names were wall-clock in this lane only. */

@@ -210,6 +210,7 @@ lazy_static::lazy_static! {
 /// Returns a task handle (encoded as RuntimeValue integer).
 #[no_mangle]
 pub extern "C" fn rt_async_spawn(future: RuntimeValue) -> RuntimeValue {
+    crate::value::note_user_threads_started();
     let mut sched = GLOBAL_SCHEDULER.lock().unwrap();
     let task_id = sched.spawn(future);
     RuntimeValue::from_int(task_id as i64)
@@ -244,6 +245,7 @@ pub extern "C" fn rt_async_run_until_complete(future: RuntimeValue) -> RuntimeVa
 /// Returns the task ID as an i64.
 #[no_mangle]
 pub extern "C" fn rt_async_spawn_task(future: RuntimeValue) -> i64 {
+    crate::value::note_user_threads_started();
     let mut sched = GLOBAL_SCHEDULER.lock().unwrap();
     sched.spawn(future) as i64
 }

@@ -1,0 +1,74 @@
+# @cover src/os/apps/smux/api.spl 80%
+# @cover src/os/apps/smux/interactive_protocol.spl 80%
+"""Actual production attachment metadata and shared-canvas arbitration.
+TEST_BLOCKED: source scenarios, not evidence of two rendered native consoles.
+"""
+# @manual: primary
+# @req REQ-SMUX-INTERACTIVE-003
+use std.spec.{describe, it, expect, step}
+use os.apps.smux.api.{smux_reset_for_test, smux_create_session, smux_list_windows,
+    smux_list_panes, smux_select_layout, smux_detach_from,
+    smux_list_clients, smux_window_layout, smux_split_pane}
+use os.apps.smux.interactive_protocol.{smux_interactive_dispatch}
+
+fn size_session(name: text) -> [text]:
+    val session = smux_create_session(name)
+    val window = smux_list_windows(session.id)[0]
+    val pane = smux_list_panes(session.id, window.id)[0]
+    expect(smux_select_layout(session.id, window.id, "even-horizontal", 20, 6).is_ok()).to_equal(true)
+    return [session.id, window.id, pane.id]
+
+describe "interactive clients arbitrate a bounded shared canvas":
+    it "fits both clients and retains repeated-frame geometry while ignoring another session":
+        smux_reset_for_test()
+        val ids = size_session("sizes")
+        val other = size_session("other")
+        step("register actual independent client metadata with different dimensions")
+        expect(smux_interactive_dispatch("client-size sizes large 100 30")).to_equal("smux: attached large")
+        expect(smux_interactive_dispatch("client-size sizes small 40 12")).to_equal("smux: attached small")
+        expect(smux_interactive_dispatch("client-size other foreign 10 4")).to_equal("smux: attached foreign")
+        expect(smux_list_clients().len()).to_equal(3)
+        expect(smux_interactive_dispatch("client-layout sizes " + ids[1] + " current 100 30")).to_equal("smux: layout even-horizontal")
+        val current = smux_list_windows(ids[0])[0]
+        expect(current.canvas_cols).to_equal(40)
+        expect(current.canvas_rows).to_equal(12)
+        expect(smux_interactive_dispatch("frame sizes " + ids[1] + " " + ids[2])).to_start_with("SMUX-FRAME/1 40 12\n")
+        expect(smux_interactive_dispatch("frame sizes " + ids[1] + " " + ids[2])).to_start_with("SMUX-FRAME/1 40 12\n")
+        expect(smux_list_windows(ids[0])[0].canvas_cols).to_equal(40)
+        expect(smux_list_windows(ids[0])[0].canvas_rows).to_equal(12)
+        expect(smux_list_windows(other[0])[0].canvas_cols).to_equal(20)
+
+    it "reflows after detach or resize and rejects cross-session or invalid size updates":
+        smux_reset_for_test()
+        val ids = size_session("sizes")
+        val other = size_session("other")
+        expect(smux_interactive_dispatch("client-size sizes large 100 30")).to_equal("smux: attached large")
+        expect(smux_interactive_dispatch("client-size sizes small 40 12")).to_equal("smux: attached small")
+        expect(smux_interactive_dispatch("frame sizes " + ids[1])).to_start_with("SMUX-FRAME/1 40 12\n")
+        step("remove the smaller client and expand on the next actual frame request")
+        expect(smux_detach_from(ids[0], "small")).to_equal(true)
+        expect(smux_interactive_dispatch("frame sizes " + ids[1])).to_start_with("SMUX-FRAME/1 100 30\n")
+        expect(smux_window_layout(ids[0], ids[1]).unwrap()).to_equal("even-horizontal")
+        step("replace one client size without retaining its old dimensions")
+        expect(smux_interactive_dispatch("client-size sizes large 72 20")).to_equal("smux: attached large")
+        expect(smux_interactive_dispatch("frame sizes " + ids[1])).to_start_with("SMUX-FRAME/1 72 20\n")
+        expect(smux_interactive_dispatch("client-size other large 10 4")).to_contain("belongs to another session")
+        expect(smux_interactive_dispatch("client-size sizes large 0 20")).to_contain("invalid dimensions")
+        expect(smux_interactive_dispatch("client-size sizes large 513 20")).to_contain("invalid dimensions")
+        expect(smux_list_clients().len()).to_equal(1)
+        expect(smux_list_clients()[0].session_id).to_equal(ids[0])
+        expect(smux_list_clients()[0].cols).to_equal(72)
+        expect(smux_list_clients()[0].rows).to_equal(20)
+
+    it "reflows manual geometry before a sibling frame even when canvas dimensions match":
+        # @req REQ-SMUX-INTERACTIVE-003
+        smux_reset_for_test()
+        val ids = size_session("sizes")
+        expect(smux_interactive_dispatch("client-size sizes first 20 6")).to_equal("smux: attached first")
+        expect(smux_interactive_dispatch("client-size sizes second 20 6")).to_equal("smux: attached second")
+        step("Split through the real service before the requesting client can arrange")
+        expect(smux_split_pane(ids[0], ids[1], ids[2], "vertical").is_ok()).to_equal(true)
+        expect(smux_window_layout(ids[0], ids[1]).unwrap()).to_equal("manual")
+        step("A sibling frame recovers named geometry without disconnecting")
+        expect(smux_interactive_dispatch("frame sizes " + ids[1] + " " + ids[2])).to_start_with("SMUX-FRAME/1 20 6\n")
+        expect(smux_window_layout(ids[0], ids[1]).unwrap()).to_equal("tiled")

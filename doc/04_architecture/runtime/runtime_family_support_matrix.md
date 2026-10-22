@@ -396,13 +396,13 @@ nogc_async_mut → nogc_async_immut → nogc_sync_immut → nogc_sync_mut → co
 ### 6.5 How to Override the Default Family
 
 To restrict families manually (without a preset):
-```simple
+```simple:skip
 var opts = CompileOptions.default()
 opts.allowed_families = ["nogc_sync_mut", "common"]
 ```
 
 To create a resolver with family restriction:
-```simple
+```simple:skip
 val resolver = ModuleResolver.new(project_root, source_root)
     .with_allowed_families(["nogc_async_mut_noalloc", "common"])
 ```

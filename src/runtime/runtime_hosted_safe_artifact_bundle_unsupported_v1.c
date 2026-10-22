@@ -52,8 +52,8 @@ int64_t rt_hosted_safe_artifact_bundle_n_begin_two_descriptors_v1(int64_t root,
 
 int64_t rt_hosted_safe_artifact_bundle_n_add_slot_v1(int64_t token, int64_t slot,
     const uint8_t* source, uint64_t source_len, const uint8_t* payload, uint64_t payload_len,
-    const uint8_t* scr1, uint64_t scr1_len) {
-    (void)token; (void)slot; (void)source; (void)source_len; (void)payload; (void)payload_len; (void)scr1; (void)scr1_len;
+    const uint8_t* scr1_ptr, uint64_t scr1_len) {
+    (void)token; (void)slot; (void)source; (void)source_len; (void)payload; (void)payload_len; (void)scr1_ptr; (void)scr1_len;
     return RT_HSA_BUNDLE_UNSUPPORTED_V1;
 }
 

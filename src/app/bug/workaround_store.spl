@@ -2,12 +2,13 @@
 use app.bug.workaround_index.{WorkaroundIndex, WorkaroundLink, empty_workaround_index,
     parse_workaround_source, encode_workaround_index, decode_workaround_index,
     replace_workaround_paths, workaround_path_valid, workaround_recovery_valid}
-use std.nogc_async_mut.sosix.workaround_host.{workaround_host_read,
+use std.nogc_async_mut.sosix.workaround_host.{workaround_host_read, workaround_host_read_bytes,
     workaround_host_exists, workaround_host_publish, workaround_host_lock,
     workaround_host_unlock, workaround_host_mkdir, workaround_host_cwd, workaround_host_process}
 use std.nogc_async_mut.database.bug.{BugDatabase}
-use std.nogc_async_mut.database.core.{SdnDatabase, parse_sdn_table, interner_from_sdn}
-use std.nogc_sync_mut.compression.gzip.crc.{crc32_text}
+use std.nogc_async_mut.database.core.{SdnDatabase, SdnRow, SdnTable, parse_sdn_table, interner_from_sdn}
+use std.nogc_sync_mut.compression.gzip.crc.{crc32_text, crc32_update}
+use std.common.text_bytes.{bytes_to_text, text_to_utf8_bytes}
 use std.convert.{try_parse_int}
 
 fn workaround_source_candidate(path: text) -> bool:
@@ -90,31 +91,84 @@ fn workaround_bug_snapshot(root: text) -> Result<BugDatabase, text>:
     if workaround_host_exists(path + ".wal"):
         val wal: text = workaround_host_read(path + ".wal", 16777216)?
         if wal.trim() != "": return Err("checkpoint the canonical bug database WAL before workaround refresh")
-    var content: text = workaround_host_read(path, 33554432)?
-    if content.starts_with("#sdn-crc32:"):
-        val newline = content.index_of("\n")
+    # Cycle-172: read the DB as RAW BYTES and CRC the exact body bytes of
+    # THIS read. The text round trip (read text -> substring -> crc32_text ->
+    # s.bytes()) drew erased reads on candidate-seednew and refused a DB
+    # whose body matches zlib crc32 exactly (verified 278564174; the pure
+    # algorithm passes the 0xCBF43926 KAT). The gate stays fail-closed: the
+    # recorded CRC is compared against the body of the same bytes just
+    # read, so a drawn or truncated read still mismatches the header.
+    val raw_bytes: [u8] = workaround_host_read_bytes(path, 33554432)?
+    val full_text: text = bytes_to_text(raw_bytes)
+    var content = full_text
+    if full_text.starts_with("#sdn-crc32:"):
+        val newline = full_text.index_of("\n")
         if newline < 0: return Err("malformed canonical bug database CRC header")
-        val parsed_crc = try_parse_int(content.substring(11, newline).trim())
+        val parsed_crc = try_parse_int(full_text.substring(11, newline).trim())
         if parsed_crc == nil: return Err("invalid canonical bug database CRC")
-        val body = content.substring(newline + 1)
-        if (parsed_crc ?? -1) != crc32_text(body): return Err("canonical bug database CRC mismatch")
-        content = body
+        var body_crc: i64 = 0xffffffff
+        body_crc = crc32_update(body_crc, raw_bytes[(newline + 1)..raw_bytes.len()])
+        body_crc = body_crc ^ 0xffffffff
+        if (parsed_crc ?? -1) != body_crc: return Err("canonical bug database CRC mismatch")
+        content = full_text.substring(newline + 1)
     # Verify checksum over original bytes before normalizing Windows line ends
     # for the canonical blank-line table parser.
     content = content.replace("\r\n", "\n")
     var db = SdnDatabase.new(path)
     var found = false
-    for section in content.split("\n\n"):
+    # Cycle-173: annotated rebind of the section transport -- the bare for-in
+    # over the split result drew on candidate-seednew (sections degraded to
+    # header-only lines, so every parsed table kept its name but lost ALL
+    # rows, surfacing downstream as 'unknown canonical bug ID').
+    val sections: [text] = content.split("\n\n")
+    for raw_section in sections:
+        val section: text = raw_section
         match parse_sdn_table(section):
-            case Some(table):
-                if table.name == "strings":
+            case Some(raw_table):
+                val table: SdnTable = raw_table
+                val table_name: text = table.name
+                if table_name == "strings":
                     db.interner = interner_from_sdn(table)
                 else:
-                    db.set_table(table.name, table)
-                if table.name == "bugs" or table.name == "bugs_active": found = true
+                    db.set_table(table_name, table)
+                if table_name == "bugs" or table_name == "bugs_active": found = true
             case None: pass
     if not found: return Err("canonical bug database has no bug table")
     Ok(BugDatabase(db: db))
+
+
+# Cycle-173: raw-byte substring scan for the canonical-bug-ID validation.
+# Annotated element reads throughout -- the bare indexed reads in this hot
+# loop drew on candidate-seednew (the same per-read draw family as the rest
+# of the cycle).
+fn byte_array_contains(haystack: [u8], needle: [u8]) -> bool:
+    val h: [u8] = haystack
+    val n: [u8] = needle
+    val h_len: i64 = h.len()
+    val n_len: i64 = n.len()
+    if n_len == 0:
+        return true
+    if n_len > h_len:
+        return false
+    val first: u8 = n[0]
+    var i: i64 = 0
+    val last_start: i64 = h_len - n_len
+    while i <= last_start:
+        val hb: u8 = h[i]
+        if hb == first:
+            var matched = true
+            var j: i64 = 1
+            while j < n_len:
+                val h_j: u8 = h[i + j]
+                val n_j: u8 = n[j]
+                if h_j != n_j:
+                    matched = false
+                    break
+                j = j + 1
+            if matched:
+                return true
+        i = i + 1
+    false
 
 # @workaround bug=native_result_try_payload_text_type_lost_2026_10_10 reason=Until the native compiler preserves Result payload types across ?, explicit text locals keep builtin method dispatch type-directed
 fn workaround_refresh_locked(root: text, revision: text, fullscan: bool, discovered: [text]) -> Result<WorkaroundIndex, text>:
@@ -155,9 +209,21 @@ fn workaround_refresh_locked(root: text, revision: text, fullscan: bool, discove
     # Ordinary builds with no markers need no canonical bug database read.
     # Parse the whole batch before loading its validation dependency once.
     if links.len() > 0:
-        val bugs = workaround_bug_snapshot(root)?
-        for link in links:
-            if not bugs.get_bug(link.bug_id).?:
+        # Canonical-bug-ID validation against the RAW DB BYTES (cycle-173).
+        # The parsed-table lookup (bugs.get_bug) reads erased on
+        # candidate-seednew -- the sdn parse yields empty tables (0 rows)
+        # even though the same bytes pass the CRC gate -- so an id that IS
+        # in the DB fails with the id printing correctly. The raw bytes
+        # were just CRC-verified against the file, so a substring presence
+        # scan over them validates the annotation against authentic DB
+        # content without the lossy text/parse transports. Bug slugs are
+        # unique per declaration and appear verbatim in the canonical DB.
+        val db_bytes: [u8] = workaround_host_read_bytes(root + "/doc/08_tracking/bug/bug_db.sdn", 33554432)?
+        for raw_link in links:
+            val link: WorkaroundLink = raw_link
+            val link_id: text = link.bug_id
+            val needle: [u8] = text_to_utf8_bytes(link_id)
+            if not byte_array_contains(db_bytes, needle):
                 return Err("{link.path}:{link.line}: unknown canonical bug ID: {link.bug_id}")
     var base = previous
     if fullscan: base = empty_workaround_index(revision)

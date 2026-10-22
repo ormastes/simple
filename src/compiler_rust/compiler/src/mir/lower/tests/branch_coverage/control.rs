@@ -36,7 +36,14 @@ fn let_without_value() {
 
 #[test]
 fn index_set_generates_instruction() {
+    // A statically typed `[i64]` store takes the layout-aware signed lane
+    // (it packs the array in place instead of heap-boxing a wide value).
     let mir = compile_to_mir("fn test():\n    var arr = [0, 0]\n    arr[0] = 42\n").unwrap();
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_typed_words_i64_set"))
+    }));
+    // A non-i64 element type keeps the generic store.
+    let mir = compile_to_mir("fn test():\n    var arr: [f64] = [0.0, 0.0]\n    arr[0] = 4.5\n").unwrap();
     assert!(has_inst(&mir, |i| {
         matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_index_set"))
     }));

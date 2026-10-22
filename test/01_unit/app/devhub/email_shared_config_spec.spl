@@ -8,6 +8,10 @@ use std.spec.*
 use std.spec.step
 use app.devhub.cmd_email.{EmailAccount, parse_email_shared_config, email_credential_args, email_mail_process_args, email_expand_path}
 use app.io.mod.{env_get, env_set}
+use app.devhub.email_support.{load_email_config_checked}
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
 
 describe "Devhub shared mail configuration":
     it "should retain the exact shared file and POP3 account for subprocess forwarding":
@@ -42,11 +46,22 @@ describe "Devhub shared mail configuration":
     it "should reject malformed shared configuration and unknown protocols":
         step("Parse malformed JSON and account containers")
         expect(parse_email_shared_config("not-json", "/fixture/mail.json").accounts.len()).to_equal(0)
-        expect(parse_email_shared_config("{\"accounts\":[]}", "/fixture/mail.json").accounts.len()).to_equal(0)
+        expect(parse_email_shared_config('{"accounts":[]}', "/fixture/mail.json").accounts.len()).to_equal(0)
         step("Preserve an unsupported protocol as an explicit unsupported account")
-        val config = parse_email_shared_config("{\"accounts\":{\"work\":{\"protocol\":\"unknown\"}}}", "/fixture/mail.json")
+        val config = parse_email_shared_config('{"accounts":{"work":{"protocol":"unknown"}}}', "/fixture/mail.json")
         expect(config.accounts.len()).to_equal(1)
-        expect(config.accounts[0].provider).to_equal("unsupported")
+        if config.accounts.len() == 1:
+            expect(config.accounts[0].provider).to_equal("unsupported")
+
+    it "should report malformed .json shared config as an error instead of an empty config":
+        val dir = "build/test-email-shared-malformed"
+        val _mk = rt_dir_create_all(dir)
+        val bad_array = "{dir}/array_accounts.json"
+        val _w1 = rt_file_write_text(bad_array, '{"accounts":[]}')
+        val bad_syntax = "{dir}/syntax.json"
+        val _w2 = rt_file_write_text(bad_syntax, "not-json")
+        expect(load_email_config_checked(bad_array).is_err()).to_equal(true)
+        expect(load_email_config_checked(bad_syntax).is_err()).to_equal(true)
 
     it "should prefix an explicitly configured script without splitting spaced paths":
         step("Set the optional mail script prefix while preserving the original environment")

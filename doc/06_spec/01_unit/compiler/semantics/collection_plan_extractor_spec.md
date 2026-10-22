@@ -1,5 +1,16 @@
 # Typed collection region discovery
 
+## 2026-10-19 enum-owner regression additions
+
+REQ-ENUM-FRAME-OWNER in
+`doc/03_plan/sys_test/robust_any_enum_extension_2026-10-14.md` adds a real traversal
+oracle: wrap admitted map and filter expressions in one array expression, then
+require exactly two discovered plans in source order, exact operation IDs, and
+their original source expressions. A typed leaf must drain without a plan or
+blocker. These scenarios exercise optional stack-pop projection and generated
+child expansion through production collection analysis. Execution is UNRUN;
+this authored appendix is not generated evidence or a measured performance claim.
+
 Authored companion to
 `test/01_unit/compiler/semantics/collection_plan_extractor_spec.spl`.
 The tests build resolved typed HIR and call production logical-plan extraction;

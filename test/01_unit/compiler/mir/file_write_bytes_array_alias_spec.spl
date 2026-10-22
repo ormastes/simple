@@ -1,0 +1,165 @@
+use std.spec.{describe, it, expect}
+use compiler.mir.mir_types.{MirSignature, MirType, MirTypeKind, MirConstValue}
+use compiler.mir.text_extern_abi.{file_write_bytes_array_alias_target}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{Module}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_instruction_support.{MirOperandKind}
+
+fn byte_write_signature() -> MirSignature:
+    val path = MirType(kind: MirTypeKind.Tuple([
+        MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.U8), false)),
+        MirType(kind: MirTypeKind.U64)
+    ]))
+    val bytes = MirType(kind: MirTypeKind.Array(MirType(kind: MirTypeKind.U8), 0))
+    MirSignature(params: [path, bytes], return_type: MirType.bool(), is_variadic: false)
+
+fn lowered_callee_count(source: text, expected_name: text, expected_arg_count: i64) -> i64:
+    val ast = parse_full_frontend(source, "adapted_file_write.spl", "adapted_file_write.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("adapted_file_write.spl")
+    val hir = hir_lowering.lower_module(ast)
+    if hir_lowering.errors.len() > 0: return -1
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    if mir_lowering.errors.len() > 0: return -1
+    var count = 0
+    var validate_count = 0
+    var allocate_count = 0
+    var copy_count = 0
+    var free_count = 0
+    var bool_result_seen = false
+    for function in mir.functions.values():
+        if function.name.ends_with("invoke"):
+            bool_result_seen = function.signature.return_type == MirType.bool()
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, args):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), type_):
+                                if name == "rt_array_bytes_validate": validate_count = validate_count + 1
+                                if name == "rt_byte_array_new_len": allocate_count = allocate_count + 1
+                                if name == "rt_array_bytes_copy_checked": copy_count = copy_count + 1
+                                if name == "rt_array_free": free_count = free_count + 1
+                                val name_matches = if expected_name.starts_with("*"):
+                                    name.ends_with(expected_name.substring(1))
+                                else:
+                                    name == expected_name
+                                if name_matches:
+                                    count = count + 1
+                                    expect(args.len()).to_equal(expected_arg_count)
+                                    if expected_name == "rt_file_write_bytes_array":
+                                        match type_.kind:
+                                            case MirTypeKind.FuncPtr(signature):
+                                                expect(signature.params).to_equal([MirType.i64(), MirType.i64()])
+                                                expect(signature.return_type).to_equal(MirType(kind: MirTypeKind.I8))
+                                                expect(signature.params_known).to_equal(true)
+                                            case _: fail("adapted call must carry its tagged two-word ABI")
+                            case _: ()
+                    case _: ()
+    if expected_name == "rt_file_write_bytes_array":
+        expect(validate_count).to_be_greater_than(0)
+        expect(allocate_count).to_equal(1)
+        expect(copy_count).to_equal(1)
+        expect(free_count).to_equal(1)
+        expect(bool_result_seen).to_equal(true)
+    count
+
+fn imported_facade_alias_count() -> i64:
+    val provider_source = "pub extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool\n"
+    val consumer_source = "use lib.io.{rt_file_write_bytes}\n" +
+        "fn invoke(path: text, data: [u8]) -> bool:\n    rt_file_write_bytes(path, data)\n"
+    val logger = Logger(level: 0)
+    val provider_ast = parse_full_frontend(provider_source, "lib/io.spl", "lib.io", logger)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", logger)
+    var modules: Dict<text, Module> = {}
+    modules["lib.io"] = provider_ast
+    modules["app.main"] = consumer_ast
+    val sources = [
+        SourceFile(path: "lib/io.spl", content: provider_source, module_name: "lib.io"),
+        SourceFile(path: "app/main.spl", content: consumer_source, module_name: "app.main")
+    ]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var provider_hir_lowering = hirlowering_for_module("lib/io.spl", surfaces)
+    var consumer_hir_lowering = hirlowering_for_module("app/main.spl", surfaces)
+    val provider_hir = provider_hir_lowering.lower_module(provider_ast)
+    val consumer_hir = consumer_hir_lowering.lower_module(consumer_ast)
+    if provider_hir_lowering.errors.len() > 0 or consumer_hir_lowering.errors.len() > 0: return -1
+    var mir_lowering = MirLowering.new(consumer_hir.symbols)
+    val providers = [provider_hir]
+    val mir = mir_lowering.lower_module(consumer_hir, providers)
+    if mir_lowering.errors.len() > 0: return -1
+    var count = 0
+    var validate_count = 0
+    var allocate_count = 0
+    var copy_count = 0
+    var free_count = 0
+    var bool_result_seen = false
+    for function in mir.functions.values():
+        if function.name.ends_with("invoke"):
+            bool_result_seen = function.signature.return_type == MirType.bool()
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, args):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), type_):
+                                if name == "rt_array_bytes_validate": validate_count = validate_count + 1
+                                if name == "rt_byte_array_new_len": allocate_count = allocate_count + 1
+                                if name == "rt_array_bytes_copy_checked": copy_count = copy_count + 1
+                                if name == "rt_array_free": free_count = free_count + 1
+                                if name == "rt_file_write_bytes_array":
+                                    count = count + 1
+                                    expect(args.len()).to_equal(2)
+                                    match type_.kind:
+                                        case MirTypeKind.FuncPtr(signature):
+                                            expect(signature.params).to_equal([MirType.i64(), MirType.i64()])
+                                            expect(signature.return_type).to_equal(MirType(kind: MirTypeKind.I8))
+                                        case _: fail("imported adapted call must use tagged ABI")
+                            case _: ()
+                    case _: ()
+    expect(validate_count).to_be_greater_than(0)
+    expect(allocate_count).to_equal(1)
+    expect(copy_count).to_equal(1)
+    expect(free_count).to_equal(1)
+    expect(bool_result_seen).to_equal(true)
+    count
+
+describe "byte-array file-write ABI alias admission":
+    it "aliases only the exact two-argument runtime extern signature":
+        expect(file_write_bytes_array_alias_target("rt_file_write_bytes", byte_write_signature(), 2)).to_equal("rt_file_write_bytes_array")
+
+    it "preserves raw four-word calls, qualified homonyms, and mismatched signatures":
+        val exact = byte_write_signature()
+        val raw = MirSignature(params: [exact.params[0], MirType.i64(), MirType.i64(), MirType.i64()],
+            return_type: MirType.bool(), is_variadic: false, params_known: true)
+        val wrong_result = MirSignature(params: exact.params, return_type: MirType.i64(),
+            is_variadic: false, params_known: true)
+        expect(file_write_bytes_array_alias_target("rt_file_write_bytes", raw, 4)).to_be_nil()
+        expect(file_write_bytes_array_alias_target("other.rt_file_write_bytes", exact, 2)).to_be_nil()
+        expect(file_write_bytes_array_alias_target("rt_file_write_bytes", wrong_result, 2)).to_be_nil()
+
+    it "records and consumes a parsed local extern declaration receipt":
+        val source = "extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool\n" +
+            "fn invoke(path: text, data: [u8]) -> bool:\n    rt_file_write_bytes(path, data)\n"
+        expect(lowered_callee_count(source, "rt_file_write_bytes_array", 2)).to_equal(2)
+
+    it "records and consumes a parsed imported extern declaration receipt":
+        expect(imported_facade_alias_count()).to_equal(2)
+
+    it "does not alias an ordinary local function or the raw four-word extern":
+        val ordinary = "fn rt_file_write_bytes(path: text, data: [u8]) -> bool:\n    true\n" +
+            "fn invoke(path: text, data: [u8]) -> bool:\n    rt_file_write_bytes(path, data)\n"
+        val raw = "extern fn rt_file_write_bytes(path: i64, path_len: i64, data: i64, data_len: i64) -> bool\n" +
+            "fn invoke(path: i64, path_len: i64, data: i64, data_len: i64) -> bool:\n" +
+            "    rt_file_write_bytes(path, path_len, data, data_len)\n"
+        # Ordinary local definitions receive a module-qualified MIR name.
+        expect(lowered_callee_count(ordinary, "*rt_file_write_bytes", 2)).to_equal(1)
+        expect(lowered_callee_count(raw, "rt_file_write_bytes", 4)).to_equal(1)

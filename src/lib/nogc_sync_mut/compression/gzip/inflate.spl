@@ -3,212 +3,117 @@
 # Purpose: DEFLATE decompression (inflate) operations
 #
 # Contains:
-# - BitStream reader (LSB-first, RFC 1951 §3.1.1)
-# - Stored block decompression
-# - Fixed-Huffman block decompression (RFC 1951 §3.2.6)
-# - Multi-block stream handling
+# - Canonical Huffman table construction and symbol decoding (RFC 1951 3.2.2)
+# - Stored, fixed-Huffman (3.2.6) and dynamic-Huffman (3.2.7) blocks
+# - Multi-block stream handling with a bounded output budget
+#
+# PERF: the stream position is a single integer bit offset (`bp`) over the input
+# array. The previous reader returned a fresh `[data, byte, bit, failed]` tuple per
+# bit, which copied the input array for every bit decoded (O(n^2) in the
+# interpreter). Nothing here allocates per bit.
 
 use std.nogc_sync_mut.compression.gzip.types.{
     BLOCK_STORED, BLOCK_FIXED, BLOCK_DYNAMIC
 }
 use std.nogc_sync_mut.compression.gzip.huffman.{
-    bitstream_reader_new, bitstream_read_bits_lsb, bitstream_read_one_bit,
-    deflate_fixed_decode_litlen, deflate_fixed_decode_dist,
     deflate_length_decode_info, deflate_distance_decode_info
 }
 
 # =============================================================================
-# DEFLATE INFLATE
+# BIT ACCESS (RFC 1951 3.1.1: data elements are packed LSB-first)
 # =============================================================================
 
-# Decompress a stored block starting at bit-stream reader state br.
-# Returns [output_bytes: [u8], new_br]  or  [nil, br] on error.
-fn _inflate_reader_failed(br) -> bool:
-    br.len() > 3 and br[3]
-
-fn _inflate_block_stored_bounded(br, max_output: i64):
-    # Stored blocks start on a byte boundary; skip remaining bits in current byte
-    var data     = br[0]
-    var byte_pos = br[1]
-    var bit_pos  = br[2]
-    val failed   = if br.len() > 3: br[3] else: false
-
-    if bit_pos != 0:
-        byte_pos = byte_pos + 1
-        bit_pos = 0
-
-    # LEN (2 bytes) + NLEN (2 bytes)
-    if byte_pos + 4 > data.len():
-        return [nil, [data, byte_pos, bit_pos, true]]
-
-    val blen  = data[byte_pos].to_i64() | (data[byte_pos + 1].to_i64() << 8)
-    val bnlen = data[byte_pos + 2].to_i64() | (data[byte_pos + 3].to_i64() << 8)
-    byte_pos = byte_pos + 4
-
-    # NLEN should be one's complement of LEN (only lower 16 bits)
-    val nlen_check = (~blen) & 0xffff
-    if bnlen != nlen_check:
-        return [nil, [data, byte_pos, bit_pos, true]]
-
-    if byte_pos + blen > data.len() or (max_output >= 0 and blen > max_output):
-        return [nil, [data, byte_pos, bit_pos, true]]
-
-    var out: [u8] = []
+# Read `n` bits starting at bit offset `bp`. The caller has checked bp + n <= total.
+fn _bits(data: [u8], bp: i64, n: i64) -> i64:
+    var v = 0
     var i = 0
-    loop:
-        if i >= blen:
-            break
-        out.push(data[byte_pos + i])
+    while i < n:
+        val p = bp + i
+        v = v | (((data[p >> 3].to_i64() >> (p & 7)) & 1) << i)
         i = i + 1
+    v
 
-    byte_pos = byte_pos + blen
-    return [out, [data, byte_pos, bit_pos, failed]]
-
-fn inflate_block_stored(br):
-    _inflate_block_stored_bounded(br, -1)
-
-# Decompress a fixed-Huffman block starting at bit-stream reader state br.
-# `history` is the output of the earlier blocks of the same stream: RFC 1951
-# back-references may reach up to 32 KiB into it (§3.2: "the distance can
-# refer to a string in a previous block"). Returns [history + block output,
-# new_br] or [nil, br] on error; `max_output` bounds the TOTAL length.
-fn _inflate_block_fixed_bounded(br, history: [u8], max_output: i64):
-    var cur_br = br
-    var out: [u8] = history
-
-    loop:
-        # Decode next literal/length symbol
-        val sym_ret = deflate_fixed_decode_litlen(cur_br)
-        val symbol  = sym_ret[0]
-        cur_br = sym_ret[1]
-
-        if symbol < 0 or _inflate_reader_failed(cur_br):
-            # Decode error
-            return [nil, cur_br]
-
-        if symbol == 256:
-            # End of block
-            break
-
-        if symbol < 256:
-            # Literal byte
-            if max_output >= 0 and out.len() >= max_output:
-                return [nil, cur_br]
-            out.push(symbol.to_u8())
-        else:
-            # Length/distance pair
-            if symbol > 285:
-                return [nil, cur_br]
-            val len_info = deflate_length_decode_info(symbol)
-            val base_len = len_info[0]
-            val ex_cnt   = len_info[1]
-
-            var length = base_len
-            if ex_cnt > 0:
-                val ex_ret = bitstream_read_bits_lsb(cur_br, ex_cnt)
-                val ex_val = ex_ret[0]
-                cur_br = ex_ret[1]
-                if _inflate_reader_failed(cur_br):
-                    return [nil, cur_br]
-                length = base_len + ex_val
-
-            # Distance code (5 bits MSB-first)
-            val dc_ret   = deflate_fixed_decode_dist(cur_br)
-            val dist_code = dc_ret[0]
-            cur_br = dc_ret[1]
-            if _inflate_reader_failed(cur_br) or dist_code < 0 or dist_code > 29:
-                return [nil, cur_br]
-
-            val di_info  = deflate_distance_decode_info(dist_code)
-            val base_dist = di_info[0]
-            val dex_cnt  = di_info[1]
-
-            var distance = base_dist
-            if dex_cnt > 0:
-                val dex_ret = bitstream_read_bits_lsb(cur_br, dex_cnt)
-                val dex_val = dex_ret[0]
-                cur_br = dex_ret[1]
-                if _inflate_reader_failed(cur_br):
-                    return [nil, cur_br]
-                distance = base_dist + dex_val
-
-            # Copy length bytes from distance back in output buffer
-            if distance <= 0 or distance > out.len():
-                return [nil, cur_br]
-            if max_output >= 0 and out.len() + length > max_output:
-                return [nil, cur_br]
-            val start_pos = out.len() - distance
-            var j = 0
-            loop:
-                if j >= length:
-                    break
-                val cp = start_pos + j
-                if cp < 0 or cp >= out.len():
-                    return [nil, cur_br]
-                out.push(out[cp])
-                j = j + 1
-
-    return [out, cur_br]
-
-fn inflate_block_fixed(br):
-    _inflate_block_fixed_bounded(br, [], -1)
+# Peek `n` (<= 9) bits at bit offset `bp` without consuming them; bytes past the
+# end of input read as zero (the caller checks the consumed length against `total`).
+fn _peek(data: [u8], bp: i64, n: i64) -> i64:
+    val bi = bp >> 3
+    var w = data[bi].to_i64()
+    if bi + 1 < data.len():
+        w = w | (data[bi + 1].to_i64() << 8)
+    if bi + 2 < data.len():
+        w = w | (data[bi + 2].to_i64() << 16)
+    (w >> (bp & 7)) & ((1 << n) - 1)
 
 # =============================================================================
-# DYNAMIC HUFFMAN BLOCKS (RFC 1951 §3.2.7)
+# CANONICAL HUFFMAN TABLES
 # =============================================================================
+
+# Width of the direct lookup table. Codes up to this many bits decode in one step;
+# longer codes fall back to the bit-by-bit canonical decoder.
+val FAST_BITS = 9
 
 # Build a canonical Huffman decoder from per-symbol code lengths.
-# Returns [counts, symbols]: counts[len] = number of codes of that length,
-# symbols = symbol values sorted by (length, symbol) — the puff layout.
-fn huffman_build(lengths):
-    var counts = []
+# Returns [counts, symbols, fast]: counts[len] = number of codes of that length,
+# symbols = symbol values sorted by (length, symbol) -- the puff layout; fast is a
+# 2^FAST_BITS table indexed by the next FAST_BITS input bits (LSB-first) holding
+# (symbol << 4) | code_length, or 0 when the code is longer than FAST_BITS.
+fn huffman_build(lengths: [i64]) -> [Any]:
+    var counts: [i64] = []
+    var offs: [i64] = []
     var i = 0
-    loop:
-        if i > 15:
-            break
+    while i <= 15:
         counts.push(0)
-        i = i + 1
-    i = 0
-    loop:
-        if i >= lengths.len():
-            break
-        val l = lengths[i]
-        if l > 0:
-            counts[l] = counts[l] + 1
-        i = i + 1
-    # offsets per length
-    var offs = []
-    i = 0
-    loop:
-        if i > 15:
-            break
         offs.push(0)
         i = i + 1
+    for l in lengths:
+        if l > 0:
+            counts[l] = counts[l] + 1
     var len_i = 1
-    loop:
-        if len_i >= 15:
-            break
+    while len_i < 15:
         offs[len_i + 1] = offs[len_i] + counts[len_i]
         len_i = len_i + 1
-    var symbols = []
-    i = 0
-    loop:
-        if i >= lengths.len():
-            break
+    var symbols: [i64] = []
+    for _l in lengths:
         symbols.push(0)
-        i = i + 1
     i = 0
-    loop:
-        if i >= lengths.len():
-            break
+    while i < lengths.len():
         val l = lengths[i]
         if l > 0:
             symbols[offs[l]] = i
             offs[l] = offs[l] + 1
         i = i + 1
-    return [counts, symbols]
+    var fast: [i64] = []
+    i = 0
+    while i < (1 << FAST_BITS):
+        fast.push(0)
+        i = i + 1
+    var code = 0
+    var index = 0
+    var l = 1
+    while l <= FAST_BITS:
+        var n = 0
+        while n < counts[l]:
+            # Codes are sent MSB-first, so the table is indexed by the bit-reversed code.
+            var rev = 0
+            var b = 0
+            while b < l:
+                rev = (rev << 1) | ((code >> b) & 1)
+                b = b + 1
+            var f = rev
+            while f < (1 << FAST_BITS):
+                fast[f] = (symbols[index] << 4) | l
+                f = f + (1 << l)
+            index = index + 1
+            code = code + 1
+            n = n + 1
+        code = code << 1
+        l = l + 1
+    return [counts, symbols, fast]
 
-fn _huffman_lengths_valid(lengths, allow_empty: bool) -> bool:
+# RFC 1951 3.2.2: a code must not be over-subscribed. An incomplete code is
+# only tolerated as the single one-bit code that zlib also accepts
+# (`allow_single`); an empty code only where `allow_empty` (no distances).
+fn _huffman_lengths_valid(lengths: [i64], allow_empty: bool, allow_single: bool) -> bool:
     var counts: [i64] = []
     var i: i64 = 0
     while i <= 15:
@@ -216,8 +121,6 @@ fn _huffman_lengths_valid(lengths, allow_empty: bool) -> bool:
         i = i + 1
     var used: i64 = 0
     for length in lengths:
-        if length < 0 or length > 15:
-            return false
         if length > 0:
             counts[length] = counts[length] + 1
             used = used + 1
@@ -230,284 +133,307 @@ fn _huffman_lengths_valid(lengths, allow_empty: bool) -> bool:
         if remaining < 0:
             return false
         i = i + 1
+    if remaining > 0:
+        return allow_single and used == 1 and counts[1] == 1
     true
 
-# Decode one symbol with a canonical decoder. Returns [symbol, new_br]; -1 on error.
-fn huffman_decode_symbol(br, counts, symbols):
-    var cur_br = br
+# Decode one symbol with a canonical decoder starting at bit offset `bp`.
+# Returns [symbol, new_bp]; symbol is -1 when no code matches within 15 bits or
+# the input ends first.
+fn huffman_decode_symbol(data: [u8], bp: i64, total: i64, counts: [i64], symbols: [i64], fast: [i64]) -> [i64]:
+    if bp < total:
+        val e = fast[_peek(data, bp, FAST_BITS)]
+        if e != 0:
+            if bp + (e & 15) > total:
+                return [-1, total]
+            return [e >> 4, bp + (e & 15)]
+    var pos = bp
     var code = 0
     var first = 0
     var index = 0
     var len_i = 1
-    loop:
-        if len_i > 15:
-            break
-        val bit_ret = bitstream_read_one_bit(cur_br)
-        val bit = bit_ret[0]
-        cur_br = bit_ret[1]
-        if bit < 0:
-            return [-1, cur_br]
-        code = code | bit
+    while len_i <= 15:
+        if pos >= total:
+            return [-1, pos]
+        code = code | ((data[pos >> 3].to_i64() >> (pos & 7)) & 1)
+        pos = pos + 1
         val count = counts[len_i]
-        val symbol_index = index + code - first
-        if (code >= first and code - first < count and
-            symbol_index >= 0 and symbol_index < symbols.len()):
-            return [symbols[symbol_index], cur_br]
+        if code - first < count:
+            return [symbols[index + code - first], pos]
         index = index + count
         first = (first + count) << 1
         code = code << 1
         len_i = len_i + 1
-    return [-1, cur_br]
+    return [-1, pos]
 
-# Decompress a dynamic-Huffman block after `history` (see the fixed-block
-# note). Returns [history + block output, new_br] or [nil, br].
-fn _inflate_block_dynamic_bounded(br, history: [u8], max_output: i64):
-    var cur_br = br
-    val hlit_ret = bitstream_read_bits_lsb(cur_br, 5)
-    val hlit = hlit_ret[0] + 257
-    cur_br = hlit_ret[1]
-    val hdist_ret = bitstream_read_bits_lsb(cur_br, 5)
-    val hdist = hdist_ret[0] + 1
-    cur_br = hdist_ret[1]
-    val hclen_ret = bitstream_read_bits_lsb(cur_br, 4)
-    val hclen = hclen_ret[0] + 4
-    cur_br = hclen_ret[1]
-    if _inflate_reader_failed(cur_br) or hlit > 286 or hdist > 32:
-        return [nil, cur_br]
-
-    # Code-length alphabet lengths, in the RFC's permuted order
-    val order = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
-    var clen_lengths = []
+# Fixed literal/length code lengths (RFC 1951 3.2.6): 288 symbols.
+fn _fixed_litlen_lengths() -> [i64]:
+    var out: [i64] = []
     var i = 0
-    loop:
-        if i >= 19:
-            break
-        clen_lengths.push(0)
+    while i < 288:
+        out.push(if i < 144: 8 elif i < 256: 9 elif i < 280: 7 else: 8)
         i = i + 1
-    i = 0
-    loop:
-        if i >= hclen:
-            break
-        val bits_ret = bitstream_read_bits_lsb(cur_br, 3)
-        clen_lengths[order[i]] = bits_ret[0]
-        cur_br = bits_ret[1]
-        if _inflate_reader_failed(cur_br):
-            return [nil, cur_br]
-        i = i + 1
-    if not _huffman_lengths_valid(clen_lengths, false):
-        return [nil, cur_br]
-    val clen_huff = huffman_build(clen_lengths)
-    val clen_counts = clen_huff[0]
-    val clen_symbols = clen_huff[1]
+    out
 
-    # Decode the hlit+hdist literal/length + distance code lengths
-    var lengths = []
-    loop:
-        if lengths.len() >= hlit + hdist:
-            break
-        val sym_ret = huffman_decode_symbol(cur_br, clen_counts, clen_symbols)
-        val sym = sym_ret[0]
-        cur_br = sym_ret[1]
-        if sym < 0 or _inflate_reader_failed(cur_br):
-            return [nil, cur_br]
-        if sym < 16:
-            lengths.push(sym)
-        elif sym == 16:
-            if lengths.len() == 0:
-                return [nil, cur_br]
-            val prev = lengths[lengths.len() - 1]
-            val rep_ret = bitstream_read_bits_lsb(cur_br, 2)
-            var rep = 3 + rep_ret[0]
-            cur_br = rep_ret[1]
-            if _inflate_reader_failed(cur_br) or lengths.len() + rep > hlit + hdist:
-                return [nil, cur_br]
-            loop:
-                if rep <= 0:
-                    break
-                lengths.push(prev)
-                rep = rep - 1
-        elif sym == 17:
-            val rep_ret = bitstream_read_bits_lsb(cur_br, 3)
-            var rep = 3 + rep_ret[0]
-            cur_br = rep_ret[1]
-            if _inflate_reader_failed(cur_br) or lengths.len() + rep > hlit + hdist:
-                return [nil, cur_br]
-            loop:
-                if rep <= 0:
-                    break
-                lengths.push(0)
-                rep = rep - 1
-        else:
-            val rep_ret = bitstream_read_bits_lsb(cur_br, 7)
-            var rep = 11 + rep_ret[0]
-            cur_br = rep_ret[1]
-            if _inflate_reader_failed(cur_br) or lengths.len() + rep > hlit + hdist:
-                return [nil, cur_br]
-            loop:
-                if rep <= 0:
-                    break
-                lengths.push(0)
-                rep = rep - 1
+# =============================================================================
+# BLOCK BODIES
+# =============================================================================
 
-    var litlen_lengths = []
-    i = 0
+# Decode literal/length + distance symbols until end-of-block. `history` is the
+# output of the earlier blocks: it is only READ (RFC 1951 back-references may reach
+# into earlier blocks, section 3.2) and never copied, so a block costs O(its own
+# output) however much was produced before. `max_output` bounds the TOTAL length
+# (history + block; negative = unbounded).
+# Returns [block_output, new_bp] -- the NEW bytes only -- or nil on malformed or
+# truncated input.
+fn _inflate_codes(data: [u8], bp0: i64, total: i64, history: [u8], max_output: i64, lit: [Any], dist: [Any]) -> [Any]?:
+    val lc: [i64] = lit[0]
+    val ls: [i64] = lit[1]
+    val lf: [i64] = lit[2]
+    val dc: [i64] = dist[0]
+    val ds: [i64] = dist[1]
+    val df: [i64] = dist[2]
+    var bp = bp0
+    val hlen = history.len()
+    var out: [u8] = []
     loop:
-        if i >= hlit:
-            break
-        litlen_lengths.push(lengths[i])
-        i = i + 1
-    var dist_lengths = []
-    i = hlit
-    loop:
-        if i >= hlit + hdist:
-            break
-        dist_lengths.push(lengths[i])
-        i = i + 1
-    if (not _huffman_lengths_valid(litlen_lengths, false) or
-        litlen_lengths.len() <= 256 or litlen_lengths[256] == 0 or
-        not _huffman_lengths_valid(dist_lengths, true)):
-        return [nil, cur_br]
-    val litlen_huff = huffman_build(litlen_lengths)
-    val litlen_counts = litlen_huff[0]
-    val litlen_symbols = litlen_huff[1]
-    val dist_huff = huffman_build(dist_lengths)
-    val dist_counts = dist_huff[0]
-    val dist_symbols = dist_huff[1]
-
-    # Decode the block's symbol stream (same LZ77 loop as fixed blocks)
-    var out: [u8] = history
-    loop:
-        val sym_ret = huffman_decode_symbol(cur_br, litlen_counts, litlen_symbols)
-        val symbol = sym_ret[0]
-        cur_br = sym_ret[1]
-        if symbol < 0 or _inflate_reader_failed(cur_br):
-            return [nil, cur_br]
+        val sr = huffman_decode_symbol(data, bp, total, lc, ls, lf)
+        val symbol: i64 = sr[0]
+        bp = sr[1]
+        if symbol < 0:
+            return nil
         if symbol == 256:
             break
         if symbol < 256:
-            if max_output >= 0 and out.len() >= max_output:
-                return [nil, cur_br]
+            if max_output >= 0 and hlen + out.len() >= max_output:
+                return nil
             out.push(symbol.to_u8())
         else:
             if symbol > 285:
-                return [nil, cur_br]
+                return nil
             val len_info = deflate_length_decode_info(symbol)
-            val base_len = len_info[0]
-            val ex_cnt = len_info[1]
+            val base_len: i64 = len_info[0]
+            val ex_cnt: i64 = len_info[1]
             var length = base_len
             if ex_cnt > 0:
-                val ex_ret = bitstream_read_bits_lsb(cur_br, ex_cnt)
-                length = base_len + ex_ret[0]
-                cur_br = ex_ret[1]
-                if _inflate_reader_failed(cur_br):
-                    return [nil, cur_br]
-            val dc_ret = huffman_decode_symbol(cur_br, dist_counts, dist_symbols)
-            val dist_code = dc_ret[0]
-            cur_br = dc_ret[1]
-            if dist_code < 0 or dist_code > 29 or _inflate_reader_failed(cur_br):
-                return [nil, cur_br]
+                if bp + ex_cnt > total:
+                    return nil
+                length = base_len + _bits(data, bp, ex_cnt)
+                bp = bp + ex_cnt
+            val dr = huffman_decode_symbol(data, bp, total, dc, ds, df)
+            val dist_code: i64 = dr[0]
+            bp = dr[1]
+            if dist_code < 0 or dist_code > 29:
+                return nil
             val di_info = deflate_distance_decode_info(dist_code)
-            val base_dist = di_info[0]
-            val dex_cnt = di_info[1]
+            val base_dist: i64 = di_info[0]
+            val dex_cnt: i64 = di_info[1]
             var distance = base_dist
             if dex_cnt > 0:
-                val dex_ret = bitstream_read_bits_lsb(cur_br, dex_cnt)
-                distance = base_dist + dex_ret[0]
-                cur_br = dex_ret[1]
-                if _inflate_reader_failed(cur_br):
-                    return [nil, cur_br]
-            if distance <= 0 or distance > out.len():
-                return [nil, cur_br]
-            if max_output >= 0 and out.len() + length > max_output:
-                return [nil, cur_br]
-            val start_pos = out.len() - distance
+                if bp + dex_cnt > total:
+                    return nil
+                distance = base_dist + _bits(data, bp, dex_cnt)
+                bp = bp + dex_cnt
+            if distance > hlen + out.len():
+                return nil
+            if max_output >= 0 and hlen + out.len() + length > max_output:
+                return nil
+            var src = hlen + out.len() - distance
             var j = 0
-            loop:
-                if j >= length:
-                    break
-                val cp = start_pos + j
-                if cp < 0 or cp >= out.len():
-                    return [nil, cur_br]
-                out.push(out[cp])
-                j = j + 1
-    return [out, cur_br]
+            if src >= hlen:
+                # Source lies wholly in this block (the common case).
+                src = src - hlen
+                while j < length:
+                    out.push(out[src + j])
+                    j = j + 1
+            else:
+                while j < length:
+                    out.push(if src < hlen: history[src] else: out[src - hlen])
+                    src = src + 1
+                    j = j + 1
+    return [out, bp]
 
-fn inflate_block_dynamic(br):
-    _inflate_block_dynamic_bounded(br, [], -1)
+# Fixed-Huffman tables (RFC 1951 3.2.6) as [literal/length, distance]; built once per stream.
+fn _fixed_tables() -> [Any]:
+    var dist_lengths: [i64] = []
+    var i = 0
+    while i < 32:
+        dist_lengths.push(5)
+        i = i + 1
+    return [huffman_build(_fixed_litlen_lengths()), huffman_build(dist_lengths)]
 
-# Decompress a complete DEFLATE stream without allowing output beyond max_output.
-# A negative max_output preserves the legacy unbounded API.
-fn inflate_bounded(input: [u8], max_output: i64) -> [u8]?:
+# Dynamic-Huffman block (RFC 1951 3.2.7): read the code-length tables, then the body.
+fn _inflate_dynamic(data: [u8], bp0: i64, total: i64, history: [u8], max_output: i64) -> [Any]?:
+    var bp = bp0
+    if bp + 14 > total:
+        return nil
+    val hlit = _bits(data, bp, 5) + 257
+    val hdist = _bits(data, bp + 5, 5) + 1
+    val hclen = _bits(data, bp + 10, 4) + 4
+    bp = bp + 14
+    if hlit > 286 or hdist > 30:
+        return nil
+
+    # Code-length alphabet lengths, in the RFC's permuted order
+    val order = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
+    var clen_lengths: [i64] = []
+    var i = 0
+    while i < 19:
+        clen_lengths.push(0)
+        i = i + 1
+    if bp + hclen * 3 > total:
+        return nil
+    i = 0
+    while i < hclen:
+        clen_lengths[order[i]] = _bits(data, bp, 3)
+        bp = bp + 3
+        i = i + 1
+    if not _huffman_lengths_valid(clen_lengths, false, false):
+        return nil
+    val clen_huff = huffman_build(clen_lengths)
+    val clen_counts: [i64] = clen_huff[0]
+    val clen_symbols: [i64] = clen_huff[1]
+    val clen_fast: [i64] = clen_huff[2]
+
+    # Decode the hlit+hdist literal/length + distance code lengths
+    val want = hlit + hdist
+    var lengths: [i64] = []
+    while lengths.len() < want:
+        val sr = huffman_decode_symbol(data, bp, total, clen_counts, clen_symbols, clen_fast)
+        val sym: i64 = sr[0]
+        bp = sr[1]
+        if sym < 0:
+            return nil
+        if sym < 16:
+            lengths.push(sym)
+        else:
+            # 16: repeat previous 3-6x (2 bits); 17: zeros 3-10x (3 bits); 18: zeros 11-138x (7 bits)
+            val bits_n = if sym == 16: 2 elif sym == 17: 3 else: 7
+            if bp + bits_n > total:
+                return nil
+            val rep_base = if sym == 18: 11 else: 3
+            val rep = rep_base + _bits(data, bp, bits_n)
+            bp = bp + bits_n
+            if sym == 16 and lengths.len() == 0:
+                return nil
+            if lengths.len() + rep > want:
+                return nil
+            val fill = if sym == 16: lengths[lengths.len() - 1] else: 0
+            var r = 0
+            while r < rep:
+                lengths.push(fill)
+                r = r + 1
+
+    var litlen_lengths: [i64] = []
+    i = 0
+    while i < hlit:
+        litlen_lengths.push(lengths[i])
+        i = i + 1
+    var dist_lengths: [i64] = []
+    while i < want:
+        dist_lengths.push(lengths[i])
+        i = i + 1
+    # hlit >= 257, so symbol 256 (end-of-block) is always inside the table; it must be coded.
+    if (not _huffman_lengths_valid(litlen_lengths, false, true) or
+        litlen_lengths[256] == 0 or
+        not _huffman_lengths_valid(dist_lengths, true, true)):
+        return nil
+    val lit = huffman_build(litlen_lengths)
+    val dist = huffman_build(dist_lengths)
+    return _inflate_codes(data, bp, total, history, max_output, lit, dist)
+
+# =============================================================================
+# STREAM
+# =============================================================================
+
+# Shared DEFLATE loop over `input` from byte offset `start`. `max_output` < 0 means
+# unbounded. In `member` mode (a gzip member) the stream must end with a BFINAL
+# block and trailing bytes are left alone; otherwise a stream whose input ends right
+# after a non-final block is accepted (RFC 7692 sync flush) and a BFINAL block must
+# end exactly at the end of `input`. Returns [output, end_byte] or nil, where
+# end_byte is the offset just past the last byte consumed.
+fn _inflate_core(input: [u8], start: i64, max_output: i64, member: bool) -> [Any]?:
     if input.len() == 0 or max_output == 0:
         var empty: [u8] = []
-        return empty
+        return [empty, 0]
 
-    var br = bitstream_reader_new(input)
+    val total = input.len() * 8
+    var bp = start * 8
     var out: [u8] = []
+    var fixed_tables: [Any] = []
 
     loop:
-        # Read BFINAL (1 bit) and BTYPE (2 bits) — LSB-first
-        val bf_ret  = bitstream_read_bits_lsb(br, 1)
-        val bfinal  = bf_ret[0]
-        br = bf_ret[1]
-
-        val bt_ret = bitstream_read_bits_lsb(br, 2)
-        val btype  = bt_ret[0]
-        br = bt_ret[1]
-        if _inflate_reader_failed(br) or btype < BLOCK_STORED or btype > BLOCK_DYNAMIC:
+        # BFINAL (1 bit) and BTYPE (2 bits), LSB-first
+        if bp + 3 > total:
             return nil
-
-        # A negative `remaining` is the sentinel for "unbounded", not an error.
-        # Only the bounded path can genuinely overflow its budget.
-        val remaining = if max_output < 0: -1 else: max_output - out.len()
-        if max_output >= 0 and remaining < 0:
+        val bfinal = _bits(input, bp, 1)
+        val btype = _bits(input, bp + 1, 2)
+        bp = bp + 3
+        if btype < BLOCK_STORED or btype > BLOCK_DYNAMIC:
             return nil
 
         if btype == BLOCK_STORED:
-            val sr = _inflate_block_stored_bounded(br, remaining)
-            val block_out = sr[0]
-            br = sr[1]
-            if block_out == nil:
+            # Skip to the byte boundary, then LEN and NLEN (RFC 1951 3.2.4)
+            var byte_pos = (bp + 7) >> 3
+            if byte_pos + 4 > input.len():
+                return nil
+            val blen = input[byte_pos].to_i64() | (input[byte_pos + 1].to_i64() << 8)
+            val bnlen = input[byte_pos + 2].to_i64() | (input[byte_pos + 3].to_i64() << 8)
+            byte_pos = byte_pos + 4
+            if bnlen != ((~blen) & 0xffff):
+                return nil
+            if byte_pos + blen > input.len():
+                return nil
+            if max_output >= 0 and out.len() + blen > max_output:
                 return nil
             var k = 0
-            loop:
-                if k >= block_out.len():
-                    break
-                out.push(block_out[k])
+            while k < blen:
+                out.push(input[byte_pos + k])
                 k = k + 1
-
-        if btype == BLOCK_FIXED:
-            val fr = _inflate_block_fixed_bounded(br, out, max_output)
-            val all_out = fr[0]
-            br = fr[1]
-            if all_out == nil:
+            bp = (byte_pos + blen) * 8
+        else:
+            if btype == BLOCK_FIXED and fixed_tables.len() == 0:
+                fixed_tables = _fixed_tables()
+            val br = if btype == BLOCK_FIXED: _inflate_codes(input, bp, total, out, max_output, fixed_tables[0], fixed_tables[1]) else: _inflate_dynamic(input, bp, total, out, max_output)
+            if br == nil:
                 return nil
-            out = all_out
+            val block_out: [u8] = br[0]
+            if out.len() == 0:
+                out = block_out
+            else:
+                for b in block_out:
+                    out.push(b)
+            bp = br[1]
 
-        if btype == BLOCK_DYNAMIC:
-            val dr = _inflate_block_dynamic_bounded(br, out, max_output)
-            val all_out = dr[0]
-            br = dr[1]
-            if all_out == nil:
-                return nil
-            out = all_out
-
-        val byte_pos = br[1]
-        val bit_pos = br[2]
-        val consumed_bytes = if bit_pos == 0: byte_pos else: byte_pos + 1
+        val consumed_bytes = (bp + 7) >> 3
 
         if bfinal == 1:
-            if consumed_bytes != input.len():
+            if not member and consumed_bytes != input.len():
                 return nil
-            break
+            return [out, consumed_bytes]
 
         # Non-final block with the input fully consumed: this is a sync-flush
         # stream (RFC 7692 permessage-deflate), which legitimately carries no
         # BFINAL=1 block. Stop cleanly rather than reading past the end.
         if consumed_bytes >= input.len():
-            break
+            if member:
+                return nil
+            return [out, consumed_bytes]
 
+# Decompress a complete DEFLATE stream without allowing output beyond max_output.
+# A negative max_output preserves the legacy unbounded API.
+fn inflate_bounded(input: [u8], max_output: i64) -> [u8]?:
+    val r = _inflate_core(input, 0, max_output, false)
+    if r == nil:
+        return nil
+    val out: [u8] = r[0]
     return out
+
+# Decompress ONE DEFLATE stream that starts at byte offset `start` of `input` and
+# must end with a BFINAL block; bytes after it are left alone (a gzip member
+# trailer follows). Returns [output, end_byte] or nil.
+fn inflate_member(input: [u8], start: i64) -> [Any]?:
+    _inflate_core(input, start, -1, true)
 
 # Decompress a complete DEFLATE stream (one or more blocks).
 # Returns decompressed [u8] or nil on error.

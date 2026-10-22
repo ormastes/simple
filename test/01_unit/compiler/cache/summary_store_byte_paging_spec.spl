@@ -1,0 +1,143 @@
+# Byte-boundary regression for the owner-private rendered-text projection.
+# Oracle: the existing full text_to_bytes conversion followed by a byte slice.
+# Run on both baseline and candidate; performance requires separate evidence.
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.common.crypto.sha256 (sha256_text)
+use std.common.string_core.{text_to_bytes, bytes_to_text}
+use compiler.common.cache_contract.snapshot_contract_v1.{LogicalSourcePathV1, PathSemanticsV1}
+use compiler.common.cache_contract.virtual_source_store_v1.{SummaryAuthV1, VirtualSourceStoreV1}
+use compiler.common.cache_contract.errors_v1 (SummaryErrorCodeV1)
+use compiler.frontend.cache_artifact.public_summary_projector.{FrontendPublicFactKindV1, FrozenPublicFactV1, PublicSummaryProjectionInputV1, project_public_summary_v1, render_public_summary_tldr_v1}
+use compiler.driver.cache.summary.summary_store_v1.{SummaryStoreV1, VirtualSourceStoreAdapterV1}
+
+fn paging_auth() -> SummaryAuthV1:
+    SummaryAuthV1(root_digest: sha256_text("paging-repo"), session_digest: sha256_text("paging-session"),
+        capability_digest: sha256_text("paging-capability"), capability_admission_receipt: sha256_text("paging-admission"),
+        request_epoch: 10, expires_epoch: 20)
+
+fn paging_summary(snapshot: text, path: text):
+    val signature = "pub extern fn visible() -> i64"
+    val facts = [FrozenPublicFactV1(fact_kind: FrontendPublicFactKindV1.ForwardDeclaration,
+        stable_symbol_id: "sym:visible", canonical_bytes: signature, is_public: true,
+        contains_executable_body: false, contains_private_source: false, dependency_symbol_ids: []),
+        FrozenPublicFactV1(fact_kind: FrontendPublicFactKindV1.Declaration,
+        stable_symbol_id: "sym:visible", canonical_bytes: signature, is_public: true,
+        contains_executable_body: false, contains_private_source: false, dependency_symbol_ids: [])]
+    project_public_summary_v1(PublicSummaryProjectionInputV1(snapshot_id: snapshot,
+        logical_path: LogicalSourcePathV1(repository_namespace_digest: paging_auth().root_digest,
+            module_relative_utf8: path, path_semantics: PathSemanticsV1.CaseSensitiveNfc),
+        source_blob_digest: sha256_text("paging-source"), compiler_owner_digest: sha256_text("paging-compiler"),
+        grammar_digest: sha256_text("paging-grammar"), facts: facts)).unwrap()
+
+# Construct the documented token binding independently, including authenticated
+# EOF/out-of-range cursors which normal pagination does not issue.
+fn paging_token(snapshot: text, path: text, cursor: i64, limit: i64) -> text:
+    val auth = paging_auth()
+    val mac = sha256_text("simple.summary.token.v1\u0000{auth.root_digest}\u0000{auth.session_digest}\u0000" +
+        "{auth.capability_digest}\u0000{snapshot}\u0000{path}\u0000{cursor}\u0000" +
+        "{limit}\u00004\u0000{auth.expires_epoch}")
+    "{cursor}:{auth.expires_epoch}:{mac}"
+
+describe "summary projection byte paging":
+    it "preserves every UTF-8 byte boundary, continuation, and page digest":
+        step("Publish an admitted summary containing two, three, and four byte scalars")
+        val snapshot = sha256_text("paging-unicode")
+        val path = "pkg/é한😀.spl"
+        val summary = paging_summary(snapshot, path)
+        var store = SummaryStoreV1.memory().unwrap()
+        store.publish(summary, sha256_text("paging-ast"), "generated/untrusted;public-only").unwrap()
+        var facade = VirtualSourceStoreAdapterV1.new(store, paging_auth().capability_admission_receipt)
+        val uri = "simple-summary://{snapshot}/{path}/_tldr.spl"
+        val rendered = render_public_summary_tldr_v1(summary)
+        val expected = text_to_bytes(rendered)
+        expect(rendered.contains("é한😀")).to_equal(true)
+        expect(facade.stat(paging_auth(), snapshot, uri).unwrap().value?.rendered_size).to_equal(expected.len())
+
+        step("Compare byte reads and decoded pages with the full materialization oracle")
+        # 65-byte partial pages force repeated packed-buffer capacity growth.
+        for limit in [1, 3, 65, 65536]:
+            var cursor: i64 = 0
+            var continuation: text? = nil
+            while cursor < expected.len():
+                val end = min(expected.len(), cursor + limit)
+                val complete = end == expected.len()
+                val wanted = expected[cursor..end]
+                val read = facade.read(paging_auth(), snapshot, uri, cursor, limit).unwrap().value?
+                expect(read.bytes).to_equal(wanted)
+                expect(read.offset).to_equal(cursor)
+                expect(read.next_offset).to_equal(if complete: nil else: Some(end))
+                expect(read.complete).to_equal(complete)
+                expect(read.content_digest).to_equal(summary.virtual_text_digest)
+                val page = facade.page(paging_auth(), snapshot, uri, continuation, limit, 4).unwrap().value?
+                val wanted_text = bytes_to_text(wanted)
+                expect(page.page_index).to_equal(cursor)
+                expect(page.rendered_text).to_equal(wanted_text)
+                expect(page.complete).to_equal(complete)
+                expect(page.continuation).to_equal(if complete: nil else: Some(paging_token(snapshot, path, end, limit)))
+                expect(page.page_digest).to_equal(sha256_text("simple.summary.page.v1\u0000{snapshot}\u0000{path}\u0000{cursor}\u0000" + wanted_text))
+                continuation = page.continuation
+                cursor = end
+
+    it "preserves EOF, rejects invalid byte bounds, and returns independent bytes":
+        step("Read EOF and reject negative, overrun, and maximum integer bounds")
+        val snapshot = sha256_text("paging-bounds")
+        val path = "pkg/bounds.spl"
+        val summary = paging_summary(snapshot, path)
+        var store = SummaryStoreV1.memory().unwrap()
+        store.publish(summary, sha256_text("paging-ast"), "generated/untrusted;public-only").unwrap()
+        var facade = VirtualSourceStoreAdapterV1.new(store, paging_auth().capability_admission_receipt)
+        val uri = "simple-summary://{snapshot}/{path}/_tldr.spl"
+        val expected = text_to_bytes(render_public_summary_tldr_v1(summary))
+        val eof = facade.read(paging_auth(), snapshot, uri, expected.len(), 1).unwrap().value?
+        expect(eof.bytes.len()).to_equal(0)
+        expect(eof.complete).to_equal(true)
+        expect(eof.next_offset).to_equal(nil)
+        for offset in [-1, expected.len() + 1, 9223372036854775807]:
+            val rejected = facade.read(paging_auth(), snapshot, uri, offset, 1)
+            match rejected:
+                case Err(error): expect(error.code).to_equal(SummaryErrorCodeV1.SummaryBoundsExceeded)
+                case Ok(_): assert(false)
+        for limit in [-1, 0, 65537, 9223372036854775807]:
+            expect(facade.read(paging_auth(), snapshot, uri, 0, limit).is_err()).to_equal(true)
+            expect(facade.page(paging_auth(), snapshot, uri, nil, limit, 4).is_err()).to_equal(true)
+        val eof_token = paging_token(snapshot, path, expected.len(), 1)
+        val eof_page = facade.page(paging_auth(), snapshot, uri, Some(eof_token), 1, 4).unwrap().value?
+        expect(eof_page.rendered_text).to_equal("")
+        expect(eof_page.complete).to_equal(true)
+        expect(eof_page.continuation).to_equal(nil)
+        for cursor in [expected.len() + 1, 9223372036854775807]:
+            val token = paging_token(snapshot, path, cursor, 1)
+            match facade.page(paging_auth(), snapshot, uri, Some(token), 1, 4):
+                case Err(error): expect(error.code).to_equal(SummaryErrorCodeV1.SummaryTokenInvalid)
+                case Ok(_): assert(false)
+
+        step("Mutate a returned range without changing subsequent reads or stored identity")
+        var returned = facade.read(paging_auth(), snapshot, uri, 0, 8).unwrap().value?.bytes
+        returned[0] = 0u8
+        val reread = facade.read(paging_auth(), snapshot, uri, 0, 8).unwrap().value?
+        expect(reread.bytes).to_equal(expected[0..8])
+        expect(reread.content_digest).to_equal(summary.virtual_text_digest)
+
+    it "clamps before addition when an owner configures the maximum i64 budget":
+        step("Exercise valid nonzero offsets whose offset plus requested limit would overflow")
+        val snapshot = sha256_text("paging-overflow")
+        val path = "pkg/overflow.spl"
+        val summary = paging_summary(snapshot, path)
+        var store = SummaryStoreV1.memory().unwrap()
+        store.publish(summary, sha256_text("paging-ast"), "generated/untrusted;public-only").unwrap()
+        var facade = VirtualSourceStoreAdapterV1.new(store, paging_auth().capability_admission_receipt)
+        facade.max_bytes = 9223372036854775807
+        val uri = "simple-summary://{snapshot}/{path}/_tldr.spl"
+        val expected = text_to_bytes(render_public_summary_tldr_v1(summary))
+        val wanted = expected[1..expected.len()]
+        val read = facade.read(paging_auth(), snapshot, uri, 1, 9223372036854775807).unwrap().value?
+        expect(read.bytes).to_equal(wanted)
+        expect(read.complete).to_equal(true)
+        expect(read.next_offset).to_equal(nil)
+        val token = paging_token(snapshot, path, 1, 9223372036854775807)
+        val page = facade.page(paging_auth(), snapshot, uri, Some(token), 9223372036854775807, 4).unwrap().value?
+        expect(page.rendered_text).to_equal(bytes_to_text(wanted))
+        expect(page.complete).to_equal(true)
+        expect(page.continuation).to_equal(nil)

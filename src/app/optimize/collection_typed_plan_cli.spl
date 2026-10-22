@@ -1,0 +1,54 @@
+# The compiler returns receipts only after selecting and emitting real MIR.
+use compiler.common.driver_compile_options.{CompileOptions}
+use compiler.driver.driver_collection_plan_explain.{compile_collection_plan_explanations}
+use app.cli.collection_planner_options.{collection_planner_options}
+
+fn collection_typed_plan_options(
+    policy: text, budget_text: text, target: text, level: text
+) -> Result<CompileOptions, text>:
+    """Admit explicit typed-plan policy without guessing target or budget."""
+    val planner = collection_planner_options([
+        "--collection-policy={policy}", "--collection-memory-budget={budget_text}"
+    ])
+    if planner.error != "":
+        return Err(planner.error)
+    if target == "":
+        return Err("typed collection explanation requires --target=<native-triple>")
+    val optimization = match level:
+        case "O0": 0
+        case "O1": 1
+        case "O2": 2
+        case "O3": 3
+        case _: return Err("invalid optimization level; use O0, O1, O2, or O3")
+    var options = CompileOptions.default()
+    options.collection_policy = planner.policy
+    options.collection_memory_budget_bytes = planner.memory_budget_bytes
+    options.native_target = target
+    options.opt_level = optimization
+    options.optimize = optimization > 0
+    Ok(options)
+
+fn collection_typed_plan_explain_file(
+    path: text, policy: text, budget_text: text, target: text, level: text,
+    site_filter: text
+) -> text:
+    """Print compiler-consumed plan receipts, including Original decisions."""
+    val options = match collection_typed_plan_options(policy, budget_text, target, level):
+        case Ok(admitted): admitted
+        case Err(reason): return "error: {reason}"
+    val reports = match compile_collection_plan_explanations(path, options):
+        case Ok(emitted): emitted
+        case Err(reason): return "error: {reason}"
+    var selected: [text] = []
+    for report in reports:
+        var matches_site = site_filter == ""
+        for line in report.split("\n"):
+            if line == "site={site_filter}":
+                matches_site = true
+        if matches_site:
+            selected.push(report)
+    if selected.len() == 0:
+        return "error: no matching typed collection plan in emitted MIR"
+    selected.join("\n")
+
+export collection_typed_plan_options, collection_typed_plan_explain_file

@@ -1,0 +1,168 @@
+"""
+Purpose: Validate target-bound real SMF files and loaded-record refusal.
+Evidence class: authored host fixture, UNRUN; no executable mapping success is claimed.
+"""
+# @req: REQ-GENERIC-CONFIG-TARGET-002
+use std.spec
+use std.spec.step
+use compiler.backend.linker.smf_header.{SmfHeader, smf_header_from_bytes}
+use compiler.backend.linker.smf_enums.{Platform, Arch}
+use compiler.backend.linker.smf_reader.{SmfReaderImpl}
+use compiler.driver.cache.compile_options_hash.{compile_options_hash_compute, compile_options_hash_to_bytes}
+use compiler.driver.smf_writer.{SmfBuildOptions, SmfDependencyEntry, Target, generate_smf_with_raw_code_options}
+use compiler.driver.driver_api_compile_single.{smf_compile_options, smf_expected_compile_options_hash}
+use compiler.driver.driver_types.{compute_options_hash}
+use compiler.driver.watcher.watcher_client.{watcher_validate_generated_smf}
+use compiler.driver.watcher.watcher_types.{watcher_config_default}
+use compiler.driver.cache.cache_validator.{source_to_cache_path}
+use compiler.loader.loader.smf_cache.{validated_smf_load}
+use compiler.loader.loader.module_loader.{LoadedModule, LoadResult,
+    lazymoduleloader_with_defaults, moduleloader_load_validated, moduleloader_any_heavy_service_created}
+use std.io_runtime.{file_write, file_write_bytes, file_delete, getpid, hash_text}
+
+fn target_fixture_options(target: text):
+    compile_options_hash_compute("cranelift", 0, false, false, false, "dev", [], [], [], [], "moderate", -1, target)
+
+fn target_fixture_write(path: text, source: text, target: text):
+    var header = SmfHeader.new_v1_1(Platform.Linux, Arch.X86_64)
+    header.source_hash = hash_text(source)
+    header.set_compile_options_bytes(compile_options_hash_to_bytes(target_fixture_options(target)))
+    expect(file_write_bytes(path, header.to_bytes())).to_equal(true)
+
+# A real canonical writer fixture with a live dependency receipt. The code
+# section is never executed; this exercises artifact acceptance, not codegen.
+fn target_fixture_optimized_acceptance(requested_release: bool):
+    val stem = "/tmp/simple_target_optimized_{getpid()}_{requested_release}"
+    val source_path = "{stem}.spl"
+    val dependency_path = "{stem}_dep.spl"
+    val smf_path = "{stem}.smf"
+    val source = "fn value() -> i64: 1\n"
+    val dependency = "fn dependency() -> i64: 2\n"
+    expect(file_write(source_path, source)).to_equal(true)
+    expect(file_write(dependency_path, dependency)).to_equal(true)
+    var build_options = SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu())
+    build_options.source_hash = hash_text(source)
+    val dep_hash = hash_text(dependency)
+    build_options.deps = [SmfDependencyEntry(module_path: dependency_path,
+        content_hash: if dep_hash == 0: 1 else: dep_hash)]
+    var bytes = generate_smf_with_raw_code_options([], build_options)
+    expect(bytes.len()).to_be_greater_than(128)
+    val opts = smf_compile_options(source_path, smf_path, "cranelift", 2,
+        requested_release, false, false, "dev", [], "x86_64-unknown-linux-gnu").unwrap()
+    expect(opts.release).to_equal(true)
+    var header = smf_header_from_bytes(bytes).unwrap()
+    header.set_compile_options_bytes(compile_options_hash_to_bytes(compute_options_hash(opts)))
+    val trailer = header.to_bytes()
+    for i in 0..128:
+        bytes[bytes.len() - 128 + i] = trailer[i]
+    expect(file_write_bytes(smf_path, bytes)).to_equal(true)
+    val expected = smf_expected_compile_options_hash("cranelift", 2, requested_release,
+        false, false, "dev", [], "x86_64-unknown-linux-gnu").unwrap()
+    val accepted = watcher_validate_generated_smf(source_path, smf_path, expected)
+    expect(accepted.is_ok()).to_equal(true)
+    expect(accepted.unwrap()).to_equal(smf_path)
+    val mapped = validated_smf_load(smf_path, source_path, "cranelift", 2,
+        requested_release, false, false, "dev", [], "x86_64-unknown-linux-gnu")
+    expect(mapped.is_ok()).to_equal(true)
+    expect(mapped.unwrap().close()).to_equal(true)
+    val other_target = smf_expected_compile_options_hash("cranelift", 2, requested_release,
+        false, false, "dev", [], "aarch64-unknown-linux-gnu").unwrap()
+    val wrong = watcher_validate_generated_smf(source_path, smf_path, other_target)
+    expect(wrong.is_err()).to_equal(true)
+    expect(wrong.unwrap_err()).to_contain("compile options changed")
+    val wrong_mapping = validated_smf_load(smf_path, source_path, "cranelift", 2,
+        requested_release, false, false, "dev", [], "aarch64-unknown-linux-gnu")
+    expect(wrong_mapping.is_err()).to_equal(true)
+    expect(wrong_mapping.unwrap_err()).to_contain("SMF options mismatch")
+    expect(file_write(dependency_path, "fn dependency() -> i64: 3\n")).to_equal(true)
+    val stale = watcher_validate_generated_smf(source_path, smf_path, expected)
+    expect(stale.is_err()).to_equal(true)
+    expect(stale.unwrap_err()).to_contain("dependency")
+    expect(file_delete(smf_path)).to_equal(true)
+    expect(file_delete(dependency_path)).to_equal(true)
+    expect(file_delete(source_path)).to_equal(true)
+
+describe "REQ-GENERIC-CONFIG-TARGET-002 actual artifact validation":
+    it "should reject regenerated bytes for a different target":
+        step("Validate a real source and SMF header against a different requested target")
+        val source_path = "/tmp/simple_target_source_{getpid()}.spl"
+        val smf_path = "/tmp/simple_target_generated_{getpid()}.smf"
+        val source = "fn value() -> i64: 1\n"
+        expect(file_write(source_path, source)).to_equal(true)
+        target_fixture_write(smf_path, source, "x86_64-unknown-linux-gnu")
+        val result = watcher_validate_generated_smf(source_path, smf_path, target_fixture_options("aarch64-unknown-linux-gnu"))
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("compile options changed")
+        expect(file_delete(smf_path)).to_equal(true)
+        expect(file_delete(source_path)).to_equal(true)
+
+    it "should retain dependency refusal even when target matches":
+        step("Show matching target does not waive the existing dependency receipt")
+        val source_path = "/tmp/simple_target_dependency_{getpid()}.spl"
+        val smf_path = "/tmp/simple_target_dependency_{getpid()}.smf"
+        val source = "fn value() -> i64: 1\n"
+        expect(file_write(source_path, source)).to_equal(true)
+        target_fixture_write(smf_path, source, "x86_64-unknown-linux-gnu")
+        val result = watcher_validate_generated_smf(source_path, smf_path, target_fixture_options("x86_64-unknown-linux-gnu"))
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("dependency content receipt")
+        expect(file_delete(smf_path)).to_equal(true)
+        expect(file_delete(source_path)).to_equal(true)
+
+    it "should forward explicit target through standalone validated loading":
+        step("Open a real header with matching target then refuse a different target")
+        val path = "/tmp/simple_target_load_{getpid()}.smf"
+        target_fixture_write(path, "fn value() -> i64: 1\n", "x86_64-unknown-linux-gnu")
+        val accepted = validated_smf_load(path, "unused.spl", "cranelift", 0, false, false, false, "dev", [], "x86_64-unknown-linux-gnu")
+        expect(accepted.is_ok()).to_equal(true)
+        val mapping = accepted.unwrap()
+        expect(mapping.close()).to_equal(true)
+        val rejected = validated_smf_load(path, "unused.spl", "cranelift", 0, false, false, false, "dev", [], "aarch64-unknown-linux-gnu")
+        expect(rejected.is_err()).to_equal(true)
+        expect(rejected.unwrap_err()).to_contain("SMF options mismatch")
+        expect(file_delete(path)).to_equal(true)
+
+    it "should refuse explicit target reuse of a loaded record without authority":
+        step("Insert real parsed metadata and refuse both changed and repeated target requests")
+        val path = "/tmp/simple_target_record_{getpid()}.smf"
+        target_fixture_write(path, "fn value() -> i64: 1\n", "x86_64-unknown-linux-gnu")
+        val reader_result = SmfReaderImpl.open(path)
+        expect(reader_result.is_ok()).to_equal(true)
+        var loader = lazymoduleloader_with_defaults()
+        loader.modules[path] = LoadedModule(path: path, reader: reader_result.unwrap(), symbols: {}, load_time: 0, version: 1)
+        for target in ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]:
+            val result = moduleloader_load_validated(loader, path, "cranelift", 0, false, false, false, "dev", [], target)
+            match result:
+                case LoadResult.Error(message):
+                    expect(message).to_equal("SMF mapped target provenance unavailable; use a fresh loader")
+                case _: fail("expected refusal for targetless loaded-record authority")
+        expect(loader.modules.has(path)).to_equal(true)
+        expect(moduleloader_any_heavy_service_created(loader)).to_equal(false)
+        expect(file_delete(path)).to_equal(true)
+
+    it "should also refuse an existing cached-output record reached through a source path":
+        step("Check the derived SMF path before freshness or service creation")
+        val source_path = "logical_target_fixture.spl"
+        val fixture = "/tmp/simple_target_cached_record_{getpid()}.smf"
+        target_fixture_write(fixture, "fn value() -> i64: 1\n", "x86_64-unknown-linux-gnu")
+        val reader = SmfReaderImpl.open(fixture).unwrap()
+        val config = watcher_config_default()
+        val cached_path = source_to_cache_path(source_path, config.smf_dir, ".smf")
+        var loader = lazymoduleloader_with_defaults()
+        loader.modules[cached_path] = LoadedModule(path: cached_path, reader: reader, symbols: {}, load_time: 0, version: 1)
+        val result = moduleloader_load_validated(loader, source_path, "cranelift", 0, false, false, false, "dev", [], "aarch64-unknown-linux-gnu")
+        match result:
+            case LoadResult.Error(message):
+                expect(message).to_equal("SMF mapped target provenance unavailable; use a fresh loader")
+            case _: fail("expected refusal for cached-path mapping without target authority")
+        expect(loader.modules.has(cached_path)).to_equal(true)
+        expect(moduleloader_any_heavy_service_created(loader)).to_equal(false)
+        expect(file_delete(fixture)).to_equal(true)
+
+    it "should accept optimized false-release artifacts with real dependency receipts":
+        step("Normalize release before cache validation and reject target drift or edited dependencies")
+        target_fixture_optimized_acceptance(false)
+
+    it "should preserve optimized true-release acceptance and target refusal":
+        step("Keep explicit release behavior while validating the same canonical writer artifact")
+        target_fixture_optimized_acceptance(true)

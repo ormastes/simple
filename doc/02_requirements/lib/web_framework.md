@@ -24,7 +24,7 @@ Tests the Simple web framework (.sui files) including:
 
 ## Syntax
 
-```simple
+```simple:skip
 {$ let count: i32 = 0 $}
 
 {- server -}

@@ -46,15 +46,12 @@ use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.semantics.join_point_model.{
-    forward_join_points, join_points_matching, join_point_is_forwarder,
+    JoinPoint, forward_join_points, join_points_matching, join_point_is_forwarder,
     join_point_kind_is_measurable, join_point_mode_is_implemented
 }
-use compiler.semantics.aspect_validation.{aspect_module_identity_index}
-use compiler.frontend.aspect_registry.{
-    aspect_registry_claim_keys, aspect_claim_path, aspect_claim_fn,
-    aspect_registry_kind_of_key, aspect_registry_selector_of_key,
-    aspect_registry_mode_of_key
-}
+use compiler.semantics.aspect_validation.{aspect_module_identity_index,
+    AspectContractClaimV1, aspect_contract_claims_v1}
+use compiler.frontend.aspect_registry.{aspect_registry_claim_keys}
 
 fn _advice_call_expr(advice_fn_name: text, span: Span) -> HirExpr:
     val unit_type = HirType(kind: HirTypeKind.Unit, span: span)
@@ -107,35 +104,71 @@ fn _weave_body(body: HirBlock, advice_fn_name: text) -> HirBlock:
 # Returns the number of forwarder bodies actually rewritten, so a caller can
 # assert "N advices requested, N woven" the way `mir_aop_injection.spl`'s
 # `aop_weave_accounting` already does for the physical weaver.
-fn weave_forward_advice(modules: Dict<text, HirModule>) -> i64:
-    var woven: i64 = 0
-    val claim_keys = aspect_registry_claim_keys()
-    if claim_keys.len() == 0:
-        return woven
-    val module_ids = aspect_module_identity_index(modules)
-    # Enumerated once, exactly like validate_aspect_contracts: two advice
-    # declarations on the same edge must weave against the same join point.
-    val forwards = forward_join_points(modules)
+struct AspectForwardWeaveClaimV1:
+    registry_key: text
+    selector: text
+    advice_fn: text
 
-    for key in claim_keys:
-        val claim_path = aspect_claim_path(key)
-        val advice_fn = aspect_claim_fn(key)
+# This is a body-free recipe derived from the real registry and original
+# join-point universe. It is not an admission token: validate aspects first
+# and bind/replay the recipe at the archive publication boundary.
+pub fn aspect_forward_weave_claims_v1(module_ids: Dict<text, bool>,
+        forwards: [JoinPoint]) -> [AspectForwardWeaveClaimV1]:
+    aspect_forward_weave_contract_claims_v1(module_ids, forwards, aspect_contract_claims_v1())
+
+pub fn aspect_forward_weave_contract_claims_v1(module_ids: Dict<text, bool>,
+        forwards: [JoinPoint], contracts: [AspectContractClaimV1]) -> [AspectForwardWeaveClaimV1]:
+    var claims: [AspectForwardWeaveClaimV1] = []
+    if contracts.len() == 0:
+        return claims
+
+    for contract in contracts:
+        val claim_path = contract.path
+        val advice_fn = contract.advice_fn
         if advice_fn == "":
             continue
         if not module_ids.contains_key(claim_path):
             continue
-        val kind = aspect_registry_kind_of_key(key)
+        val kind = contract.kind
         if kind != "forward" or not join_point_kind_is_measurable(kind):
             continue
-        val mode = aspect_registry_mode_of_key(key)
+        val mode = contract.mode
         if not join_point_mode_is_implemented(mode):
             continue
-        val selector = aspect_registry_selector_of_key(key)
+        val selector = contract.selector
         if selector == "":
             continue
         val matched = join_points_matching(forwards, kind, selector)
         if matched.len() == 0:
             continue
+        claims.push(AspectForwardWeaveClaimV1(registry_key: contract.registry_key,
+            selector: selector, advice_fn: advice_fn))
+    claims
+
+# Operates on the actual complete body inside its caller's lease. This is the
+# SAME per-claim rewrite used by the retained claim-major loop below.
+pub fn weave_forward_advice_claim_in_module_v1(module_key: text, original: HirModule,
+        module_ids: Dict<text, bool>, claim: AspectForwardWeaveClaimV1) -> (HirModule, i64):
+    var module = original
+    var woven: i64 = 0
+    if not module_ids.contains_key(module.path) and not module_ids.contains_key(module.name) and
+            not module_ids.contains_key(module_key): return (module, woven)
+    for symbol in module.functions.keys():
+        val func: HirFunction = module.functions[symbol]
+        if func.name != claim.selector: continue
+        # Re-read the live body for every claim. A prior rewrite can make it
+        # cease to be a pure forwarder; cached original matches are not enough.
+        if not join_point_is_forwarder(func): continue
+        module.functions[symbol] = HirFunction(..func, body: _weave_body(func.body, claim.advice_fn))
+        woven = woven + 1
+    (module, woven)
+
+fn weave_forward_advice(modules: Dict<text, HirModule>) -> i64:
+    var woven: i64 = 0
+    if aspect_registry_claim_keys().len() == 0: return woven
+    val module_ids = aspect_module_identity_index(modules)
+    val claims = aspect_forward_weave_claims_v1(module_ids, forward_join_points(modules))
+    for claim in claims:
 
         # The selector names the forwarder's OWN symbol
         # (join_point_model.forward_join_points sets source_symbol = func.name),
@@ -143,37 +176,21 @@ fn weave_forward_advice(modules: Dict<text, HirModule>) -> i64:
         # equals the selector -- there can be more than one under the same
         # name in different modules, and all of them are real matched edges.
         for module_key in modules.keys():
-            var module: HirModule = modules[module_key]
-            if not module_ids.contains_key(module.path) and not module_ids.contains_key(module.name) and not module_ids.contains_key(module_key):
-                continue
-            var module_touched = false
-            for symbol in module.functions.keys():
-                val func: HirFunction = module.functions[symbol]
-                if func.name != selector:
-                    continue
-                # Re-derive "is this function still the forwarder the join
-                # point named" at weave time. Guards against a selector that
-                # matches a same-named function which is NOT itself a
-                # forwarder (e.g. two functions named `submit` in different
-                # modules, only one of which forwards) -- weaving the wrong
-                # one would silently attach the advice to business logic,
-                # exactly the failure `join_point_forward_target`'s
-                # fail-closed shape rules out at enumeration time.
-                if not join_point_is_forwarder(func):
-                    continue
-                val rewoven = HirFunction(..func, body: _weave_body(func.body, advice_fn))
-                module.functions[symbol] = rewoven
-                module_touched = true
-                woven = woven + 1
+            val (module, module_woven) = weave_forward_advice_claim_in_module_v1(
+                module_key, modules[module_key], module_ids, claim)
+            woven = woven + module_woven
             # `module` is a VALUE COPY read out of `modules` above (Dict<text,
             # HirModule> indexing returns a copy of the struct, not a live
             # reference) -- mutating `module.functions[symbol]` only mutates
             # that copy. Without writing the copy back, every weave is lost:
             # the outer `modules` dict a caller inspects (or a second weave
             # pass re-reads) never observes the rewritten body at all.
-            if module_touched:
+            if module_woven > 0:
                 modules[module_key] = module
     woven
 
 export weave_forward_advice
+export AspectForwardWeaveClaimV1, aspect_forward_weave_claims_v1
+export weave_forward_advice_claim_in_module_v1
+export aspect_forward_weave_contract_claims_v1
 use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection

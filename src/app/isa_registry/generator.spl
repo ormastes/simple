@@ -1,0 +1,46 @@
+use app.isa_registry.model.*
+use app.isa_registry.parser.validate_registry
+
+fn escape_column(value: text) -> text:
+    val backslashes = value.replace("\\", "\\\\")
+    val tabs = backslashes.replace("\t", "\\t")
+    val carriage_returns = tabs.replace("\r", "\\r")
+    carriage_returns.replace("\n", "\\n")
+
+# Sort IDs, then use indexed lookup rather than scanning every row per ID.
+fn sorted_ids(registry: IsaRegistry) -> [text]:
+    var ids: [text] = []
+    for row in registry.operations:
+        ids.push(row.id)
+    ids.sort()
+    ids
+
+pub fn coverage_table(registry: IsaRegistry, authority: IsaAuthority, limits: IsaLimits) -> Result<text, RegistryError>:
+    val checked = validate_registry(registry, authority, limits)?
+    var rows: Dict<text, IsaOperation> = {}
+    for row in checked.operations:
+        rows[row.id] = row
+    var lines: [text] = ["operation_id\tlowering\treason\tverification\n"]
+    for id in sorted_ids(checked):
+        val row = rows[id]
+        var verification: [text] = []
+        for kind in row.verification:
+            verification.push(kind)
+        verification.sort()
+        lines.push(escape_column(row.id) + "\t" + escape_column(row.lowering) + "\t" + escape_column(row.reason) + "\t" + verification.join(",") + "\n")
+    Ok(lines.join(""))
+
+pub fn verification_obligations(registry: IsaRegistry, authority: IsaAuthority, limits: IsaLimits) -> Result<[VerificationObligation], RegistryError>:
+    val checked = validate_registry(registry, authority, limits)?
+    var rows: Dict<text, IsaOperation> = {}
+    for row in checked.operations:
+        rows[row.id] = row
+    var obligations: [VerificationObligation] = []
+    for id in sorted_ids(checked):
+        var kinds: [text] = []
+        for kind in rows[id].verification:
+            kinds.push(kind)
+        kinds.sort()
+        for kind in kinds:
+            obligations.push(VerificationObligation(operation_id: id, evidence_kind: kind))
+    Ok(obligations)

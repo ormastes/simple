@@ -26,7 +26,7 @@
 # with no written type is not narrowable -- and the bound is reported, never
 # silent: a type pattern whose scrutinee is not a known union is E-NARROW-001.
 
-use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolKind}
+use compiler.hir.hir_types.{SymbolId, HirType, HirTypeKind, SymbolKind}
 use compiler.hir.hir_definitions.{
     HirExpr, HirExprKind, HirMatchArm, HirPattern, HirPatternKind, HirPatternPayload
 }
@@ -40,11 +40,17 @@ use compiler.semantics.union_normalize.narrow.{
     union_narrow_member_key_for_type_name, union_narrow_error_text
 }
 
+# Preserve a looked-up nominal owner across optional pattern extraction.
+fn _hir_union_named_member_payload(symbol: SymbolId, span: Span) -> HirType:
+    HirType(kind: HirTypeKind.Named(symbol, []), span: span)
+
 impl HirLowering:
     me arms_have_type_test(hir_arms: [HirMatchArm]) -> bool:
         """True when any arm is a `case <T> v:` type pattern."""
         var found = false
-        for a in hir_arms:
+        for raw_a in hir_arms:
+            # ANY-transport hazard sweep round 3: annotated rebind.
+            val a: HirMatchArm = raw_a
             match a.pattern.kind:
                 case HirPatternKind.TypeTest(_, _): found = true
                 case _: ()
@@ -85,7 +91,8 @@ impl HirLowering:
             return self.union_rewrite_arms(members, hir_arms, span)
         if not self.arms_have_type_test(hir_arms):
             return hir_arms
-        for a in hir_arms:
+        for raw_a in hir_arms:
+            val a: HirMatchArm = raw_a
             match a.pattern.kind:
                 case HirPatternKind.TypeTest(tt_type, tt_binder):
                     self.error(union_narrow_error_text(tt_type, tt_binder), a.pattern.span)
@@ -111,7 +118,8 @@ impl HirLowering:
         for key in normalized.keys:
             variant_by_key[key] = union_variant_name(key)
         var out: [HirMatchArm] = []
-        for a in hir_arms:
+        for raw_a in hir_arms:
+            val a: HirMatchArm = raw_a
             var rewritten = a
             match a.pattern.kind:
                 case HirPatternKind.TypeTest(tt_type, tt_binder):
@@ -122,9 +130,7 @@ impl HirLowering:
                     # named union member matches its structural canonical key.
                     if not variant_by_key.contains_key(requested_key):
                         if val named_symbol = self.symbols.lookup(tt_type):
-                            requested_key = union_member_key(HirType(
-                                kind: HirTypeKind.Named(named_symbol, []),
-                                span: a.pattern.span))
+                            requested_key = union_member_key(_hir_union_named_member_payload(named_symbol, a.pattern.span))
                     if not variant_by_key.contains_key(requested_key):
                         # A member the union does not have. Loud, and NOT
                         # rewritten: an arm that names no variant of the
@@ -145,7 +151,7 @@ impl HirLowering:
                             if variant_by_key.contains_key("nil"):
                                 val nil_pattern = HirPattern(
                                     kind: HirPatternKind.Enum(
-                                        enum_type, variant_by_key["nil"], nil),
+                                        enum_type, variant_by_key["nil"], None),
                                     type_: nil,
                                     span: a.pattern.span)
                                 rewritten = HirMatchArm(pattern: nil_pattern, has_guard: a.has_guard, guard: a.guard, body: a.body, span: a.span)

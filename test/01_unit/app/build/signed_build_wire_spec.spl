@@ -1,0 +1,130 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use app.build.signed_build_admission.{
+    SIGNED_BUILD_RECEIPT_SCHEMA_V1, SignedBuildReceiptV1,
+    signed_build_receipt_digest_v1, SIGNED_BUILD_RECEIPT_SCHEMA_V2,
+    SignedBuildReceiptV2, signed_build_receipt_digest_v2
+}
+use app.build.signed_build_wire.{
+    SIGNED_BUILD_WIRE_MAX_LENGTH_V1, signed_build_receipt_wire_v1,
+    parse_signed_build_receipt_wire_v1, signed_build_receipt_wire_v2,
+    parse_signed_build_receipt_wire_v2
+}
+
+val REV = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val DIGEST = sha256_text("signed-build-wire-test")
+
+describe "strict signed build V2 wire":
+    it "round trips repository and PR identity under the V2 digest":
+        val receipt = SignedBuildReceiptV2(SIGNED_BUILD_RECEIPT_SCHEMA_V2,
+            "simple-lang/simple", 42, _receipt())
+        val wire = signed_build_receipt_wire_v2(receipt)
+        expect(wire.starts_with("schema=simple-signed-build-receipt-v2\nrepository_full_name=simple-lang/simple\npull_request_number=42\n")).to_equal(true)
+        match parse_signed_build_receipt_wire_v2(wire):
+            Some(decoded):
+                expect(decoded.repository_full_name).to_equal("simple-lang/simple")
+                expect(decoded.pull_request_number).to_equal(42)
+                expect(signed_build_receipt_digest_v2(decoded)).to_equal(signed_build_receipt_digest_v2(receipt))
+            nil:
+                expect("parse-failed").to_equal("valid-v2-receipt")
+
+    it "rejects V1 downgrade and noncanonical repository or PR fields":
+        val receipt = SignedBuildReceiptV2(SIGNED_BUILD_RECEIPT_SCHEMA_V2,
+            "simple-lang/simple", 42, _receipt())
+        val wire = signed_build_receipt_wire_v2(receipt)
+        expect(parse_signed_build_receipt_wire_v2(signed_build_receipt_wire_v1(_receipt()))).to_equal(nil)
+        expect(parse_signed_build_receipt_wire_v1(wire)).to_equal(nil)
+        expect(parse_signed_build_receipt_wire_v2(wire.replace("pull_request_number=42", "pull_request_number=042"))).to_equal(nil)
+        expect(parse_signed_build_receipt_wire_v2(wire.replace("simple-lang/simple", "simple-lang/../simple"))).to_equal(nil)
+        expect(parse_signed_build_receipt_wire_v2(wire + "pull_request_number=42\n")).to_equal(nil)
+
+fn _receipt() -> SignedBuildReceiptV1:
+    SignedBuildReceiptV1(
+        schema: SIGNED_BUILD_RECEIPT_SCHEMA_V1,
+        base_revision: REV, head_revision: REV, candidate_tree: REV,
+        target_id: "compiler-stage2", execution_platform: "linux-x86_64",
+        output_target: "x86_64-linux", toolchain_digest: DIGEST,
+        action_digest: DIGEST, input_manifest_digest: DIGEST,
+        submodule_closure_digest: DIGEST, protected_policy_digest: DIGEST,
+        checker_digest: DIGEST, mandatory_gate_receipt_digest: DIGEST,
+        artifact_digest: DIGEST, artifact_length: 4096,
+        artifact_locator: "artifact:compiler-stage2/123",
+        signer_id: "approved-builder", signer_scope: "build-binaries/linux",
+        issued_at_utc: "2026-09-25T10:00:00Z",
+        expires_at_utc: "2026-09-25T12:00:00Z"
+    )
+
+describe "signed build receipt canonical wire":
+    it "round trips the exact digest-bound field sequence":
+        val receipt = _receipt()
+        val wire = signed_build_receipt_wire_v1(receipt)
+        expect(wire.starts_with("schema=simple-signed-build-receipt-v1\n")).to_equal(true)
+        expect(wire.ends_with("expires_at_utc=2026-09-25T12:00:00Z\n")).to_equal(true)
+        match parse_signed_build_receipt_wire_v1(wire):
+            Some(decoded):
+                expect(signed_build_receipt_wire_v1(decoded)).to_equal(wire)
+                expect(signed_build_receipt_digest_v1(decoded)).to_equal(
+                    signed_build_receipt_digest_v1(receipt)
+                )
+            nil:
+                expect(false).to_equal(true)
+
+    it "rejects duplicate, unknown, missing, reordered and extra fields":
+        val wire = signed_build_receipt_wire_v1(_receipt())
+        expect(parse_signed_build_receipt_wire_v1(
+            wire.replace("target_id=compiler-stage2\n",
+                "target_id=compiler-stage2\ntarget_id=compiler-stage2\n")
+        )).to_be_nil()
+        expect(parse_signed_build_receipt_wire_v1(
+            wire.replace("target_id=", "unknown_id=")
+        )).to_be_nil()
+        expect(parse_signed_build_receipt_wire_v1(
+            wire.replace("target_id=compiler-stage2\n", "")
+        )).to_be_nil()
+        expect(parse_signed_build_receipt_wire_v1(
+            wire.replace("target_id=compiler-stage2\nexecution_platform=linux-x86_64\n",
+                "execution_platform=linux-x86_64\ntarget_id=compiler-stage2\n")
+        )).to_be_nil()
+        expect(parse_signed_build_receipt_wire_v1(wire + "extra=yes\n")).to_be_nil()
+
+    it "rejects line injection, noncanonical spelling and oversized payload":
+        val wire = signed_build_receipt_wire_v1(_receipt())
+        expect(parse_signed_build_receipt_wire_v1(
+            wire.replace("approved-builder", "approved\r-builder")
+        )).to_be_nil()
+        expect(parse_signed_build_receipt_wire_v1(
+            wire.replace("approved-builder", "approved\nsigner_id=attacker")
+        )).to_be_nil()
+        expect(parse_signed_build_receipt_wire_v1(wire[0:wire.len() - 1])).to_be_nil()
+        expect(parse_signed_build_receipt_wire_v1(
+            wire.replace("artifact_length=4096", "artifact_length=04096")
+        )).to_be_nil()
+        expect(parse_signed_build_receipt_wire_v1(
+            wire + "x" * SIGNED_BUILD_WIRE_MAX_LENGTH_V1
+        )).to_be_nil()
+
+    it "rejects malformed revisions, digests, dates and artifact lengths":
+        val wire = signed_build_receipt_wire_v1(_receipt())
+        expect(parse_signed_build_receipt_wire_v1(
+            wire.replace("base_revision=" + REV, "base_revision=not-a-revision")
+        )).to_be_nil()
+        expect(parse_signed_build_receipt_wire_v1(
+            wire.replace("artifact_digest=" + DIGEST, "artifact_digest=not-a-digest")
+        )).to_be_nil()
+        expect(parse_signed_build_receipt_wire_v1(
+            wire.replace("artifact_length=4096", "artifact_length=-1")
+        )).to_be_nil()
+        expect(parse_signed_build_receipt_wire_v1(
+            wire.replace("2026-09-25T12:00:00Z", "2026-02-31T12:00:00Z")
+        )).to_be_nil()
+        expect(parse_signed_build_receipt_wire_v1(
+            wire.replace("2026-09-25T12:00:00Z", "2026-09-25T09:00:00Z")
+        )).to_be_nil()
+
+    it "refuses to serialize unsafe receipt values":
+        var receipt = _receipt()
+        receipt.signer_id = "builder\nsigner_scope=admin"
+        expect(signed_build_receipt_wire_v1(receipt)).to_equal("")
+        receipt = _receipt()
+        receipt.artifact_length = 0
+        expect(signed_build_receipt_wire_v1(receipt)).to_equal("")

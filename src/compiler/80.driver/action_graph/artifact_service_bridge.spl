@@ -74,24 +74,51 @@ fn demand_artifact_claim_v1(
     val lease = artifact_service_lease_for_action_v1(service, action_id)
     if lease == nil:
         return BuildActionClaimV1(false, "artifact-service-not-ready", nil, "")
+    # A lookup can return an existing lease when no new claim was admitted.
+    # Never borrow that lease's authority for a different caller or epoch.
+    if lease!.owner_id != route.owner_id or lease!.lease_id != lease_id or
+            lease!.generation != route.lease_generation or lease!.cancelled:
+        return BuildActionClaimV1(false, "artifact-service-owner-mismatch", None, "")
     var execution = route.execution
     var coordinator = execution.coordinator!
     val claim_transfer = coordinator_claim_v1(coordinator, action_id, lease!.lease_id)
     coordinator = claim_transfer.coordinator
     val claim = claim_transfer.claim
+    # Dependency and pool admission can reject after the service staged a
+    # lease. Publish neither owner state until both layers accept the claim.
+    if not claim.valid:
+        return claim
     execution.coordinator = Some(coordinator)
     route.execution = execution
     route.service = service
     claim
 
 fn demand_artifact_commit_v1(
-    route: &mut DemandArtifactRouteV1, result: BuildActionResultV1
+    route: &mut DemandArtifactRouteV1, result: BuildActionResultV1,
+    publication_lease: ArtifactLeaseV1? = None
 ) -> bool:
-    if not route.valid or result.output_identity == "":
+    if not route.valid or (result.success and result.output_identity == ""):
         return false
     val lease = artifact_service_lease_for_action_v1(route.service, result.action_id)
     if lease == nil:
         return false
+    # After recovery, action/snapshot alone cannot distinguish a late old
+    # result. Require the worker's original lease, never relabel it as current.
+    val publication_supplied = match publication_lease:
+        Some(_): true
+        _: false
+    for entry in route.service.entries:
+        if entry.request.action_id == result.action_id and
+                entry.error_code == "owner-recovered" and not publication_supplied:
+            return false
+    match publication_lease:
+        Some(supplied):
+            if supplied.cancelled or supplied.action_id != lease!.action_id or
+                    supplied.owner_id != lease!.owner_id or
+                    supplied.lease_id != lease!.lease_id or
+                    supplied.generation != lease!.generation:
+                return false
+        _: ()
     var staged_execution = route.execution
     var staged_coordinator = staged_execution.coordinator!
     val commit_transfer = coordinator_commit_v1(
@@ -127,10 +154,11 @@ fn demand_artifact_claim_owned_v1(
     DemandArtifactClaimTransferV1(owned, claim)
 
 fn demand_artifact_commit_owned_v1(
-    route: DemandArtifactRouteV1, result: BuildActionResultV1
+    route: DemandArtifactRouteV1, result: BuildActionResultV1,
+    publication_lease: ArtifactLeaseV1? = None
 ) -> DemandArtifactCommitTransferV1:
     var owned = route
-    val accepted = demand_artifact_commit_v1(&mut owned, result)
+    val accepted = demand_artifact_commit_v1(&mut owned, result, publication_lease)
     DemandArtifactCommitTransferV1(owned, accepted)
 
 fn demand_artifact_cancel_v1(route: &mut DemandArtifactRouteV1, action_id: text):

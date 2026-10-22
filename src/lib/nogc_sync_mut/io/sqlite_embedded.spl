@@ -1,0 +1,387 @@
+# SQLite-shaped raw handle API backed by Simple's embedded SQL engine.
+#
+# `sqlite_sffi.spl` used to declare 27 `rt_sqlite_*` externs whose only hosted
+# provider was `src/runtime/runtime_sqlite.c`, a wrapper over the external
+# `libsqlite3`. CLAUDE.md § "No external SQLite" forbids that dependency, and the
+# Phase 4 full-CLI link (2026-10-19) demanded all 27 through
+# `cli browser -> UiAccessStore -> Database.open` with no definition in any
+# admitted runtime archive. This module keeps the raw i64-handle surface the
+# wrappers and `database/sql/statement.spl` are written against and implements
+# it over `PureDatabase` (`database/pure_sql`), so no `rt_sqlite_*` symbol is
+# referenced anywhere in the CLI closure.
+#
+# Contract (mirrors runtime_sqlite.c): handles are > 0 and never 3 (the tagged
+# nil sentinel `sqlite_handle_valid` rejects); every status function answers
+# 1 = success / 0 = failure; `*_query_next` answers 1 while a row is current
+# and 0 when done OR failed (the existing "zero conflates done and failure"
+# contract); `*_column_*` read the row made current by the last successful
+# `*_query_next`.
+#
+# Classes are value types (syntax_quick_reference.md § capability groups): a
+# connection or statement read out of the handle table is a COPY, so every
+# mutation below is written back into the table before returning. Never hold
+# a local and expect the table entry to follow it.
+#
+# Named gaps against libsqlite3 semantics (documented, not papered over):
+#   * PRAGMA statements are accepted as no-ops (success). The embedded engine
+#     has no journal modes or foreign-key switch; `PRAGMA query_only=on` does
+#     NOT make a connection read-only.
+#   * `column_count`/`column_name` for a SELECT that matched no rows answer 0 /
+#     "" — `PureDatabase.query` carries column metadata only on rows.
+#   * Only positional `?` parameters are supported (`PureDatabase` binding).
+#   * Prepare-time SQL errors surface at the first step/column call, not at
+#     `sqlite_raw_prepare`; `sqlite_raw_query` executes eagerly and does fail
+#     at call time.
+#   * `sqlite_master` is not a table of the embedded engine
+#     (`sqlite_table_exists` in sqlite_sffi.spl therefore answers false).
+#   * Engine gaps observed while pinning this contract (PureDatabase, not this
+#     layer): an omitted `INTEGER PRIMARY KEY` column stays NULL although
+#     `last_insert_rowid` advances; repeating one parameterized SELECT text
+#     with different bound values can answer stale/empty rows.
+
+use std.database.pure_sql.{PureDatabase}
+use std.database.sql.types.{DbValue, DbRow, DbError}
+
+class EmbeddedSqlConnection:
+    db: PureDatabase
+    last_error: text
+
+class EmbeddedSqlStatement:
+    conn: i64
+    sql: text
+    params: [DbValue]
+    rows: [DbRow]
+    columns: [text]
+    cursor: i64
+    executed: bool
+    failed: bool
+
+# Handles start above the tagged-nil sentinel (3) that `sqlite_handle_valid`
+# rejects, and are never reused within a process.
+var _embedded_sql_conns: Dict<i64, EmbeddedSqlConnection> = {}
+var _embedded_sql_stmts: Dict<i64, EmbeddedSqlStatement> = {}
+var _embedded_sql_next_handle: i64 = 4
+
+fn _embedded_sql_alloc_handle() -> i64:
+    val handle = _embedded_sql_next_handle
+    _embedded_sql_next_handle = handle + 1
+    handle
+
+fn _embedded_sql_first_word_upper(sql: text) -> text:
+    val parts = sql.trim().split(" ")
+    if parts.len() == 0:
+        return ""
+    parts[0].trim().upper()
+
+fn _embedded_sql_is_pragma(sql: text) -> bool:
+    _embedded_sql_first_word_upper(sql) == "PRAGMA"
+
+fn _embedded_sql_returns_rows(sql: text) -> bool:
+    val word = _embedded_sql_first_word_upper(sql)
+    word == "SELECT" or word == "WITH" or word == "EXPLAIN" or word == "VALUES"
+
+# Run `sql` on connection `conn` and store the engine state plus the error
+# text back into the table. Answers 1 on success, 0 on failure.
+fn _embedded_sql_exec_on(conn: i64, sql: text, params: [DbValue]) -> i64:
+    if not _embedded_sql_conns.contains_key(conn):
+        return 0
+    var c = _embedded_sql_conns[conn]
+    var db = c.db
+    var status: i64 = 1
+    match db.exec(sql, params):
+        case Ok(_):
+            c.last_error = ""
+        case Err(reason):
+            c.last_error = reason.message()
+            status = 0
+    c.db = db
+    _embedded_sql_conns[conn] = c
+    status
+
+# Run a row-returning `sql` on `conn`; nil on failure (error text stored).
+fn _embedded_sql_query_on(conn: i64, sql: text, params: [DbValue]) -> [DbRow]?:
+    if not _embedded_sql_conns.contains_key(conn):
+        return nil
+    var c = _embedded_sql_conns[conn]
+    var db = c.db
+    var result: [DbRow]? = nil
+    match db.query(sql, params):
+        case Ok(rows):
+            c.last_error = ""
+            result = Some(rows)
+        case Err(reason):
+            c.last_error = reason.message()
+    c.db = db
+    _embedded_sql_conns[conn] = c
+    result
+
+# Execute a statement once with its bound parameters (idempotent). Answers
+# true when the engine accepted it; the statement is written back either way.
+fn _embedded_sql_execute_stmt(handle: i64) -> bool:
+    var st = _embedded_sql_stmts[handle]
+    if st.executed:
+        return not st.failed
+    st.executed = true
+    st.rows = []
+    st.columns = []
+    st.cursor = -1
+    st.failed = false
+    if _embedded_sql_is_pragma(st.sql):
+        _embedded_sql_stmts[handle] = st
+        return true
+    if _embedded_sql_returns_rows(st.sql):
+        match _embedded_sql_query_on(st.conn, st.sql, st.params):
+            case Some(rows):
+                st.rows = rows
+                if rows.len() > 0:
+                    st.columns = rows[0].columns
+            case nil:
+                st.failed = true
+    else:
+        if _embedded_sql_exec_on(st.conn, st.sql, st.params) != 1:
+            st.failed = true
+    _embedded_sql_stmts[handle] = st
+    not st.failed
+
+fn _embedded_sql_current_value(handle: i64, idx: i64) -> DbValue?:
+    if not _embedded_sql_stmts.contains_key(handle):
+        return nil
+    val st = _embedded_sql_stmts[handle]
+    if st.cursor < 0 or st.cursor >= st.rows.len():
+        return nil
+    val row = st.rows[st.cursor]
+    if idx < 0 or idx >= row.values.len():
+        return nil
+    Some(row.values[idx])
+
+fn _embedded_sql_register(db: PureDatabase) -> i64:
+    val handle = _embedded_sql_alloc_handle()
+    _embedded_sql_conns[handle] = EmbeddedSqlConnection(db: db, last_error: "")
+    handle
+
+fn _embedded_sql_new_stmt(conn: i64, sql: text) -> i64:
+    val handle = _embedded_sql_alloc_handle()
+    _embedded_sql_stmts[handle] = EmbeddedSqlStatement(
+        conn: conn, sql: sql, params: [], rows: [], columns: [], cursor: -1,
+        executed: false, failed: false)
+    handle
+
+fn _embedded_sql_bind(handle: i64, idx: i64, value: DbValue) -> i64:
+    if not _embedded_sql_stmts.contains_key(handle):
+        return 0
+    if idx < 1:
+        return 0
+    var st = _embedded_sql_stmts[handle]
+    var params = st.params
+    while params.len() < idx:
+        params.push(DbValue.Null)
+    params[idx - 1] = value
+    st.params = params
+    _embedded_sql_stmts[handle] = st
+    1
+
+# --- Connection management ---
+
+fn sqlite_raw_open(path: text) -> i64:
+    match PureDatabase.open(path):
+        case Ok(db): _embedded_sql_register(db)
+        case Err(_): 0
+
+fn sqlite_raw_open_memory() -> i64:
+    match PureDatabase.memory():
+        case Ok(db): _embedded_sql_register(db)
+        case Err(_): 0
+
+fn sqlite_raw_close(handle: i64) -> i64:
+    if not _embedded_sql_conns.contains_key(handle):
+        return 0
+    var c = _embedded_sql_conns[handle]
+    var db = c.db
+    val closed = db.close()
+    _embedded_sql_conns.remove(handle)
+    if closed.is_err():
+        return 0
+    1
+
+# --- Basic execution ---
+
+fn sqlite_raw_execute(conn: i64, sql: text) -> i64:
+    if not _embedded_sql_conns.contains_key(conn):
+        return 0
+    if _embedded_sql_is_pragma(sql):
+        return 1
+    _embedded_sql_exec_on(conn, sql, [])
+
+fn sqlite_raw_execute_batch(conn: i64, sql: text) -> i64:
+    if not _embedded_sql_conns.contains_key(conn):
+        return 0
+    val statements = sql.split(";")
+    var i = 0
+    while i < statements.len():
+        val one = statements[i].trim()
+        if one != "" and not _embedded_sql_is_pragma(one):
+            if _embedded_sql_exec_on(conn, one, []) != 1:
+                return 0
+        i = i + 1
+    1
+
+# --- Query execution ---
+
+fn sqlite_raw_query(conn: i64, sql: text) -> i64:
+    if not _embedded_sql_conns.contains_key(conn):
+        return 0
+    val handle = _embedded_sql_new_stmt(conn, sql)
+    if not _embedded_sql_execute_stmt(handle):
+        _embedded_sql_stmts.remove(handle)
+        return 0
+    handle
+
+fn sqlite_raw_query_next(handle: i64) -> i64:
+    if not _embedded_sql_stmts.contains_key(handle):
+        return 0
+    if not _embedded_sql_execute_stmt(handle):
+        return 0
+    var st = _embedded_sql_stmts[handle]
+    st.cursor = st.cursor + 1
+    _embedded_sql_stmts[handle] = st
+    if st.cursor < st.rows.len():
+        return 1
+    0
+
+fn sqlite_raw_query_done(handle: i64):
+    _embedded_sql_stmts.remove(handle)
+
+# --- Column access ---
+
+fn sqlite_raw_column_count(handle: i64) -> i64:
+    if not _embedded_sql_stmts.contains_key(handle):
+        return 0
+    if not _embedded_sql_execute_stmt(handle):
+        return 0
+    _embedded_sql_stmts[handle].columns.len()
+
+fn sqlite_raw_column_name(handle: i64, idx: i64) -> text:
+    if not _embedded_sql_stmts.contains_key(handle):
+        return ""
+    if not _embedded_sql_execute_stmt(handle):
+        return ""
+    val columns = _embedded_sql_stmts[handle].columns
+    if idx < 0 or idx >= columns.len():
+        return ""
+    columns[idx]
+
+fn sqlite_raw_column_text(handle: i64, idx: i64) -> text:
+    match _embedded_sql_current_value(handle, idx):
+        case Some(value):
+            match value:
+                DbValue.Null: ""
+                _: value.to_text()
+        case nil: ""
+
+fn sqlite_raw_column_int(handle: i64, idx: i64) -> i64:
+    match _embedded_sql_current_value(handle, idx):
+        case Some(value):
+            match value:
+                DbValue.Integer(v): v
+                DbValue.Real(v): v as i64
+                DbValue.Bool(v):
+                    if v:
+                        1
+                    else:
+                        0
+                _: 0
+        case nil: 0
+
+fn sqlite_raw_column_float(handle: i64, idx: i64) -> f64:
+    match _embedded_sql_current_value(handle, idx):
+        case Some(value):
+            match value:
+                DbValue.Real(v): v
+                DbValue.Integer(v): v as f64
+                _: 0.0
+        case nil: 0.0
+
+fn sqlite_raw_column_type(handle: i64, idx: i64) -> text:
+    match _embedded_sql_current_value(handle, idx):
+        case Some(value):
+            match value:
+                DbValue.Integer(_): "integer"
+                DbValue.Bool(_): "integer"
+                DbValue.Real(_): "real"
+                DbValue.Text(_): "text"
+                DbValue.Blob(_): "blob"
+                DbValue.Null: "null"
+        case nil: "null"
+
+# --- Prepared statements ---
+
+fn sqlite_raw_prepare(conn: i64, sql: text) -> i64:
+    if not _embedded_sql_conns.contains_key(conn):
+        return 0
+    _embedded_sql_new_stmt(conn, sql)
+
+fn sqlite_raw_bind_text(handle: i64, idx: i64, value: text) -> i64:
+    _embedded_sql_bind(handle, idx, DbValue.Text(value: value))
+
+fn sqlite_raw_bind_int(handle: i64, idx: i64, value: i64) -> i64:
+    _embedded_sql_bind(handle, idx, DbValue.Integer(value: value))
+
+fn sqlite_raw_bind_float(handle: i64, idx: i64, value: f64) -> i64:
+    _embedded_sql_bind(handle, idx, DbValue.Real(value: value))
+
+fn sqlite_raw_bind_null(handle: i64, idx: i64) -> i64:
+    _embedded_sql_bind(handle, idx, DbValue.Null)
+
+# Like sqlite3_reset: forget the result set, keep the bindings.
+fn sqlite_raw_reset(handle: i64) -> i64:
+    if not _embedded_sql_stmts.contains_key(handle):
+        return 0
+    var st = _embedded_sql_stmts[handle]
+    st.executed = false
+    st.failed = false
+    st.rows = []
+    st.columns = []
+    st.cursor = -1
+    _embedded_sql_stmts[handle] = st
+    1
+
+fn sqlite_raw_finalize(handle: i64):
+    _embedded_sql_stmts.remove(handle)
+
+# --- Transactions ---
+
+fn sqlite_raw_begin(conn: i64) -> i64:
+    _embedded_sql_exec_on(conn, "BEGIN", [])
+
+fn sqlite_raw_commit(conn: i64) -> i64:
+    _embedded_sql_exec_on(conn, "COMMIT", [])
+
+fn sqlite_raw_rollback(conn: i64) -> i64:
+    _embedded_sql_exec_on(conn, "ROLLBACK", [])
+
+# --- Metadata ---
+
+fn sqlite_raw_last_insert_rowid(conn: i64) -> i64:
+    if not _embedded_sql_conns.contains_key(conn):
+        return 0
+    _embedded_sql_conns[conn].db.last_insert_rowid()
+
+fn sqlite_raw_changes(conn: i64) -> i64:
+    if not _embedded_sql_conns.contains_key(conn):
+        return 0
+    _embedded_sql_conns[conn].db.changes()
+
+fn sqlite_raw_error_message(conn: i64) -> text:
+    if not _embedded_sql_conns.contains_key(conn):
+        return "invalid connection"
+    _embedded_sql_conns[conn].last_error
+
+export sqlite_raw_open, sqlite_raw_open_memory, sqlite_raw_close
+export sqlite_raw_execute, sqlite_raw_execute_batch
+export sqlite_raw_query, sqlite_raw_query_next, sqlite_raw_query_done
+export sqlite_raw_column_count, sqlite_raw_column_name, sqlite_raw_column_text
+export sqlite_raw_column_int, sqlite_raw_column_float, sqlite_raw_column_type
+export sqlite_raw_prepare, sqlite_raw_bind_text, sqlite_raw_bind_int, sqlite_raw_bind_float, sqlite_raw_bind_null
+export sqlite_raw_reset, sqlite_raw_finalize
+export sqlite_raw_begin, sqlite_raw_commit, sqlite_raw_rollback
+export sqlite_raw_last_insert_rowid, sqlite_raw_changes, sqlite_raw_error_message

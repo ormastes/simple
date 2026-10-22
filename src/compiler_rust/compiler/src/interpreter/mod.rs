@@ -26,7 +26,7 @@ pub(crate) use crate::interpreter_unit::*;
 #[path = "../interpreter_state.rs"]
 mod interpreter_state;
 pub(crate) use interpreter_state::{
-    decode_import_binding_marker, flatten_owner_mangled_name, clear_moved_vars, const_trace, const_trace_target,
+    decode_import_binding_marker, flatten_owner_mangled_name, FLATTEN_OWNER_SYMBOL_PREFIX, clear_moved_vars, const_trace, const_trace_target,
     get_aop_config, get_di_config, mark_as_moved, set_aop_config, set_di_config, ExecutionMode,
     debug_call_stack_snapshot, field_access_debug_enabled, note_enum_payload_function, note_enum_payload_function_opt,
 };
@@ -72,7 +72,7 @@ pub(crate) use interpreter_state::{
     CURRENT_EXEC_MODULE, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX, FLATTEN_IMPORT_BINDING_MARKER_PREFIX,
     FLATTEN_MODULE_OWNER_ATTR_PREFIX, tag_function_module_owner, report_globals_census, owned_globals_snapshot,
     owned_global, owned_global_present, owner_has_globals, steal_owned_global, set_owned_global, seed_owner_globals,
-    reset_owned_globals_from_initial, owner_bindings, record_owner_binding,
+    reset_owned_globals_from_initial, owner_bindings, record_owner_binding, record_owner_binding_layer,
 };
 
 // Core types and utilities
@@ -93,9 +93,12 @@ mod error_macros;
 // Coverage instrumentation helpers
 mod coverage_helpers;
 pub(crate) use coverage_helpers::{
-    current_coverage_file, extract_node_location, record_node_coverage, record_decision_coverage_sffi,
-    record_decision_coverage_here, record_condition_coverage, decision_id_from_span, is_coverage_enabled,
+    current_coverage_file, extract_node_location, record_node_coverage, is_coverage_enabled, eval_and_or_decision,
+    eval_decision_cond, if_expr_site, record_decision_site, sub_elif, swap_fn_anchor, SUB_GUARD, SUB_STMT,
 };
+// Static enumeration of decision/condition sites for coverage denominators.
+mod coverage_sites;
+pub(crate) use coverage_sites::register_module_sites;
 
 // Place (lvalue) model: identifier root + arbitrary field/index projections.
 // Backs both deep field assignment and mutating-method receivers.
@@ -103,7 +106,9 @@ mod place;
 
 // Node execution
 mod node_exec;
-pub(crate) use node_exec::{exec_assignment, exec_augmented_assignment, exec_node};
+pub(crate) use node_exec::{
+    coerce_to_declared_type, coerce_to_declared_unsigned, exec_assignment, exec_augmented_assignment, exec_node,
+};
 
 // Block execution
 mod block_exec;
@@ -184,6 +189,10 @@ pub(crate) use module_cache::take_shared_ast;
 pub use module_cache::{parsed_source_cache_compile_max, parsed_source_cache_set_limit};
 pub use module_cache::clear_module_cache_selective;
 pub(crate) use module_cache::normalize_path_key;
+pub(crate) use module_cache::{
+    filter_functions_from_value, module_dict_contains, module_dict_flat, module_dict_for_each_visible, module_dict_get,
+    module_dict_len, module_dict_make_mut, layered_view as module_dict_layers,
+};
 
 // Module loading and resolution
 #[path = "../interpreter_module/mod.rs"]

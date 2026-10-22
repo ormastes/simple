@@ -1,0 +1,34 @@
+# Pure reference for the legacy shell tuple and scalar-status control layer.
+# Scalar execution remains a host boundary: preserving live inherited stderr
+# and stdin is not equivalent to buffered process output replay. This module
+# therefore accepts the actual scalar result rather than claiming to replace
+# that boundary. Tuple capture composes the existing unbounded process owner.
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
+use std.nogc_sync_mut.runtime.thread_local.{thread_local_i64_new, thread_local_i64_get, thread_local_i64_set, rt_thread_local_free}
+
+@unsafe(reason: "existing unbounded process-capture provider, zero timeout has no deadline", capabilities: [ffi])
+extern fn rt_process_run_timeout(command: text, args: [text], timeout_ms: i64) -> (text, text, i64)
+
+class LegacyShellContract:
+    status_slot: i64
+
+    static fn create() -> Result<LegacyShellContract, text>:
+        val slot = thread_local_i64_new()
+        if slot == 0: return Err("shell status TLS allocation failed")
+        Ok(LegacyShellContract(status_slot: slot))
+
+    fn last_status() -> i64:
+        thread_local_i64_get(self.status_slot)
+
+    fn scalar_result(stdout: text, status: i64) -> text:
+        thread_local_i64_set(self.status_slot, status)
+        stdout
+
+    fn capture_tuple(command: text) -> (text, text, i64):
+        val executable = if host_is_windows_host(): "cmd.exe" else: "/bin/sh"
+        val flag = if host_is_windows_host(): "/C" else: "-c"
+        unsafe(capabilities: [ffi]):
+            rt_process_run_timeout(executable, [flag, command], 0)
+
+    fn close():
+        rt_thread_local_free(self.status_slot)

@@ -10,6 +10,8 @@ use std.common.build_progress.{BUILD_PROGRESS_SCHEMA_V1, BuildProgressSnapshot,
     BuildProgressState, BuildLinkState, build_progress_state_text}
 use std.env.{env_get, env_get_or}
 use std.io_runtime.{time_now_monotonic_ms}
+use compiler.common.build_phase_accounting.{build_phase_succeeded_units_v1,
+    build_phase_snapshot_compiled_units_v1, build_phase_terminal_known_failures_v1}
 
 extern fn rt_stdout_flush()
 # Text expansion belongs to the compiler, as in driver_mem_snapshot.spl.
@@ -23,7 +25,7 @@ extern fn rt_mem_snapshot_record(
     hir_enums: i64, hir_structs: i64, hir_classes: i64
 ) -> bool
 
-fn driver_phase_trace_enabled() -> bool:
+pub fn driver_phase_trace_enabled() -> bool:
     (env_get("SIMPLE_COMPILER_PHASE_PROFILE") == "1") or (env_get("SIMPLE_COMPILER_TRACE") == "1")
 
 # Monotonic base captured at the first log_phase call, so every phase marker
@@ -47,6 +49,13 @@ var _g_progress_snapshot_seq: i64 = 0
 # with `date`. `dt=` makes each file self-timing, which is the input any
 # front-end caching/sharding work has to be judged against.
 var _g_progress_prev_ms: i64 = -1
+# This is the parent process's last actual row, not a shared worker total.
+var _g_progress_scope_phase: text = ""
+var _g_progress_scope_unit: text = ""
+var _g_progress_scope_done: i64 = -1
+var _g_progress_scope_total: i64 = -1
+var _g_progress_scope_failed: i64 = -1
+var _g_progress_scope_cached: i64 = -1
 var _g_phase_profile_fd: i64 = -2
 var _g_phase_profile_seq: i64 = 0
 var _g_execution_metrics_path: text = ""
@@ -163,7 +172,7 @@ fn _publish_progress_snapshot(
     val path = _build_progress_snapshot_path()
     if path == "" or _g_progress_build_id == "":
         return
-    val remaining = if done >= 0 and total >= 0 and total > done: total - done else: 0
+    val remaining = build_progress_remaining_units(done, total)
     val rate = if done > 0 and now_ms > 0: done * 1000000 / now_ms else: -1
     val eta = if remaining > 0 and rate > 0: remaining * 1000000 / rate else: -1
     val state = _snapshot_state(terminal, failed)
@@ -173,10 +182,11 @@ fn _publish_progress_snapshot(
         state: state, verdict: build_progress_state_text(state),
         total_files: total, discovered_files: total, planned_files: total,
         queued_files: remaining, compiling_files: if state == BuildProgressState.Running: 1 else: 0,
-        compiled_files: done, cached_files: cached, failed_files: failed,
+        compiled_files: build_phase_snapshot_compiled_units_v1(phase, done, cached, failed),
+        cached_files: cached, failed_files: failed,
         remaining_files: remaining, current_files: if current == "": [] else: [current],
         last_completed_file: if done > 0: current else: "",
-        error_count: failed, error_summary: if failed > 0: "build phase reported failure" else: "",
+        error_count: failed, error_summary: if state == BuildProgressState.Failed: "build phase reported failure" else: "",
         link_state: _snapshot_link_state(phase, terminal, failed),
         link_input_count: if phase == "link": total else: 0,
         link_output: if phase == "link": current else: "",
@@ -210,6 +220,27 @@ pub fn build_progress_remaining_units(done: i64, total: i64) -> i64:
     else:
         val remaining = total - done
         if remaining > 0: remaining else: 0
+
+fn _build_progress_phase_succeeded_units(phase: text, done: i64, cached: i64, failed: i64) -> i64:
+    # MIR done is the processed count. Other phase callers already exclude
+    # failures from done and keep their existing accounting contract.
+    if phase == "mir": return build_phase_succeeded_units_v1(done, cached, failed)
+    build_progress_succeeded_units(done, cached)
+
+pub fn log_build_progress_failure(phase: text, unit_kind: text, current: text,
+        tasks_done: i64, tasks_total: i64):
+    val failures = if phase == _g_progress_scope_phase and unit_kind == _g_progress_scope_unit:
+        build_phase_terminal_known_failures_v1(_g_progress_scope_done,
+            _g_progress_scope_total, _g_progress_scope_failed)
+    else:
+        -1
+    if failures > 0:
+        log_build_progress(phase, unit_kind, _g_progress_scope_done,
+            _g_progress_scope_total, current, tasks_done, tasks_total,
+            failures, _g_progress_scope_cached, "failed")
+    else:
+        log_build_progress(phase, unit_kind, -1, -1, current,
+            tasks_done, tasks_total, -1, -1, "failed")
 
 fn _execution_metrics_configure():
     if not _g_execution_metrics_set:
@@ -261,7 +292,7 @@ fn _append_execution_metric(
 fn _log_build_progress_event(path: text, phase: text, unit_kind: text, done: i64,
         total: i64, current: text, tasks_done: i64, tasks_total: i64,
         failed: i64, cached: i64, terminal: text, now_ms: i64, dt_ms: i64):
-    val succeeded = build_progress_succeeded_units(done, cached)
+    val succeeded = _build_progress_phase_succeeded_units(phase, done, cached, failed)
     val remaining = build_progress_remaining_units(done, total)
     val tasks_remaining = if tasks_done >= 0 and tasks_total >= 0:
         val delta = tasks_total - tasks_done
@@ -283,6 +314,12 @@ pub fn log_build_progress(
     cached: i64,
     terminal: text
 ):
+    _g_progress_scope_phase = phase
+    _g_progress_scope_unit = unit_kind
+    _g_progress_scope_done = done
+    _g_progress_scope_total = total
+    _g_progress_scope_failed = failed
+    _g_progress_scope_cached = cached
     val path = _build_progress_path()
     # Stdout twin, same reasoning as _append_phase_profile above: the events
     # file is opt-in via SIMPLE_BUILD_PROGRESS_EVENTS, so without this every
@@ -295,7 +332,7 @@ pub fn log_build_progress(
     _g_progress_prev_ms = now_ms
     _publish_progress_snapshot(phase, unit_kind, done, total, current,
         tasks_done, tasks_total, failed, cached, terminal, now_ms)
-    val succeeded = build_progress_succeeded_units(done, cached)
+    val succeeded = _build_progress_phase_succeeded_units(phase, done, cached, failed)
     val remaining = build_progress_remaining_units(done, total)
     _append_execution_metric(phase, unit_kind, done, total, current, failed, cached, terminal, now_ms, dt_ms)
     print "[build] phase={phase} state={terminal} unit_kind={unit_kind} done={_build_progress_number(done)} total={_build_progress_number(total)} remaining={_build_progress_number(remaining)} succeeded={_build_progress_number(succeeded)} cached={_build_progress_number(cached)} failed={_build_progress_number(failed)} task_done={_build_progress_number(tasks_done)} task_total={_build_progress_number(tasks_total)} elapsed_ms={now_ms} dt_ms={dt_ms} current={current}"
@@ -332,3 +369,25 @@ fn mem_snapshot_enabled() -> bool:
 pub fn log_mem_snapshot(phase: text):
     if mem_snapshot_enabled():
         eprint("[MEM-SNAPSHOT] phase={phase} t_ms={_phase_elapsed_ms()} heap_live_bytes={rt_heap_live_bytes()} heap_peak_bytes={rt_heap_peak_bytes()}")
+
+# --- In-process MIR liveness line ---------------------------------------------
+# Unsharded MIR lowering is a single long loop (phase 3: ~1350 modules, hours)
+# that printed nothing between the HIR summary and the end of MIR, so a stalled
+# worker and a slowly growing one looked identical. One line every
+# MIR_PROGRESS_INTERVAL modules (and at the end): position, the process's own
+# resident set and wall time since the loop began. stdout is the stream the
+# parent relays; the same line also goes to SIMPLE_COMPILER_PHASE_PROFILE_FILE
+# when set, which is the only live channel on Windows, where the parent
+# captures the worker's stdout until it exits.
+extern fn rt_process_rss_kib() -> i64
+
+pub const MIR_PROGRESS_INTERVAL: i64 = 50
+
+pub fn mir_progress_due(done: i64, total: i64) -> bool:
+    done > 0 and (done % MIR_PROGRESS_INTERVAL == 0 or done == total)
+
+pub fn log_mir_progress(done: i64, total: i64, started_ms: i64, module_name: text):
+    val line = "[mir] {done}/{total} rss_mib={rt_process_rss_kib() / 1024} elapsed_s={(time_now_monotonic_ms() - started_ms) / 1000} module={module_name}"
+    print line
+    rt_stdout_flush()
+    _append_phase_profile(line)

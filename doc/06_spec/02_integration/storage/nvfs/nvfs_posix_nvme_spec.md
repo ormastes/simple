@@ -1,157 +1,93 @@
-# Nvfs Posix Nvme Specification
+# nvfs posix nvme spec
 
-> <details>
+Status: **2/2 PASS — non-admitting host-memory diagnostic, cycle one**. Retained historical seed only; no current Phase1, self-hosted, native, VM, hardware, or release qualification.
 
-<!-- sdn-diagram:id=nvfs_posix_nvme_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
+Source: `test/02_integration/storage/nvfs/nvfs_posix_nvme_spec.spl`
 
-```sdn id=nvfs_posix_nvme_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
+Source SHA-256: `9b4e493f2535d375d50a8db642e4bc3daf9e7b0b9e6bf5461c7cd1c97a42b0a3`
 
-nvfs_posix_nvme_spec -> std
-nvfs_posix_nvme_spec -> os
-```
+Requirement: `REQ-NVFS-MOUNT-ISOLATION` — each mounted provider owns its namespace, bytes, and explicit backing device. Hosted creation is not remount persistence.
 
-</details>
+## Acceptance scenarios
 
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
+- keeps equal paths on two owned devices independent.
+- does not resurrect an unlinked path after a retained handle is written.
 
-```ascii generated-from=nvfs_posix_nvme_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
+## Evidence boundaries
 
-</details>
-<!-- sdn-diagram:end -->
+The actual DBFS owner, NVFS operation leases, and explicit `MemBlockDevice` backing are exercised by these authored assertions. They are not mocked persistence. Memory-backed block I/O is not physical NVMe, crash recovery, or Windows/Linux/BSD qualification. The frozen source passed the host-only diagnostic described below. Authored UNRUN comments in its exact source are preserved as part of the tested snapshot.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+## Diagnostic evidence
 
-<details>
-<summary>Full Scenario Manual</summary>
+- Inputs: `build/phase-one-storage-gui-diagnostic/nvfs-isolation-host-cycle-one-inputs.sdn` (345 input hashes matched before/after).
+- Log: `build/phase-one-storage-gui-diagnostic/nvfs_posix_nvme_spec/cycle-one.log`; 2321 ms; peak observed process-tree RSS 407632 KiB; exit 0; quiescent 1.
+- Producer SHA-256: `0cceac635e63781b7bf9bc9830735e948986de223434eca46d84eb35233f8b17`.
+- Actual status: `build/phase-one-storage-gui-diagnostic/nvfs-isolation-host-cycle-one-status.sdn`. No rerun or hardware action.
 
-# Nvfs Posix Nvme Specification
-
-## Scenarios
-
-### NvfsPosixDriver NVMe-backed open/read/write
-
-#### write and read round-trip through NVMe backend
-
-- var dev =  make posix device
-- nvfs arena set block device
-   - Expected: nvfs_arena_has_block_device() is true
-   - Expected: trip.ok is true
-   - Expected: trip.write_n equals `5`
-   - Expected: trip.read_n equals `5`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 9 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+## Executable source
 
 ```simple
-var dev = _make_posix_device()
-nvfs_arena_set_block_device(dev)
-expect(nvfs_arena_has_block_device()).to_equal(true)
-val data: [u8] = [0x48, 0x65, 0x6C, 0x6C, 0x6F]
-# _nvme_next_block starts at 64; this test allocates base=64, data LBA=65
-val trip = _do_round_trip(data, 65u64)
-expect(trip.ok).to_equal(true)
-expect(trip.write_n).to_equal(5)
-expect(trip.read_n).to_equal(5)
+"""Explicit block-device NVFS persistence contracts; UNRUN.
+
+The legacy filename is retained. MemBlockDevice exercises the same explicit
+BlockDevice boundary; these cases make no hardware NVMe qualification claim.
+"""
+# @req REQ-NVFS-MOUNT-ISOLATION
+# @manual: primary
+use std.spec.*
+use std.spec.step
+use std.fs_driver.types.{Path, OpenFlags}
+use std.fs_driver.nvfs_posix_driver.{NvfsPosixDriver}
+use std.fs_driver.mem_block_device.{MemBlockDevice}
+use std.fs_driver.error.{FsError}
+
+describe "NVFS explicit block-device ownership":
+    it "keeps equal paths on two owned devices independent":
+        step("Open two distinct device owners with the same file path")
+        val dev_a = MemBlockDevice.new(1024u64, 512u32)
+        val dev_b = MemBlockDevice.new(1024u64, 512u32)
+        var first = NvfsPosixDriver.new_on_owned_device(
+            "device-a", dev_a, 760002u64, 0, 1024).unwrap()
+        var second = NvfsPosixDriver.new_on_owned_device(
+            "device-b", dev_b, 760003u64, 0, 1024).unwrap()
+        val path = Path(raw: "/same.bin")
+        val a = first.open(path, OpenFlags.read_write().with_create()).unwrap()
+        first.pwrite(a, 0, [1u8, 0u8, 255u8]).unwrap()
+        expect(second.stat(path).unwrap_err()).to_equal(FsError.NotFound)
+        val b = second.open(path, OpenFlags.read_write().with_create()).unwrap()
+        second.pwrite(b, 0, [2u8, 128u8]).unwrap()
+        first.fsync(a).unwrap()
+        second.fsync(b).unwrap()
+        expect(first.pread_bytes_handle(a, 0, 8).unwrap()).to_equal([1u8, 0u8, 255u8])
+        expect(second.pread_bytes_handle(b, 0, 8).unwrap()).to_equal([2u8, 128u8])
+        first.close(a).unwrap()
+        second.close(b).unwrap()
+        first.close_owned_device().unwrap()
+        second.close_owned_device().unwrap()
+        step("Reopen both actual devices and recover each independent payload")
+        var reopened_a = NvfsPosixDriver.new_on_owned_device(
+            "device-a-reopened", dev_a, 760002u64, 0, 1024).unwrap()
+        var reopened_b = NvfsPosixDriver.new_on_owned_device(
+            "device-b-reopened", dev_b, 760003u64, 0, 1024).unwrap()
+        val read_a = reopened_a.open(path, OpenFlags.read_only()).unwrap()
+        val read_b = reopened_b.open(path, OpenFlags.read_only()).unwrap()
+        expect(reopened_a.pread_bytes_handle(read_a, 0, 8).unwrap()).to_equal([1u8, 0u8, 255u8])
+        expect(reopened_b.pread_bytes_handle(read_b, 0, 8).unwrap()).to_equal([2u8, 128u8])
+        reopened_a.close(read_a).unwrap()
+        reopened_b.close(read_b).unwrap()
+        reopened_a.close_owned_device().unwrap()
+        reopened_b.close_owned_device().unwrap()
+
+    it "does not resurrect an unlinked path after a retained handle is written":
+        step("Unlink while retaining the inode through its open handle")
+        var driver = NvfsPosixDriver.new("unlink-owner")
+        val path = Path(raw: "/unlinked.bin")
+        val handle = driver.open(path, OpenFlags.read_write().with_create()).unwrap()
+        driver.pwrite(handle, 0, [3u8, 4u8]).unwrap()
+        driver.unlink(path).unwrap()
+        expect(driver.pwrite(handle, 0, [5u8]).unwrap()).to_equal(1)
+        expect(driver.pread_bytes_handle(handle, 0, 8).unwrap()).to_equal([5u8, 4u8])
+        expect(driver.stat(path).unwrap_err()).to_equal(FsError.NotFound)
+        driver.close(handle).unwrap()
+        expect(driver.open(path, OpenFlags.read_only()).unwrap_err()).to_equal(FsError.NotFound)
 ```
-
-</details>
-
-#### data lands on NVMe sectors (raw sector verification)
-
-- var dev =  make posix device
-- nvfs arena set block device
-   - Expected: trip.ok is true
-   - Expected: trip.sec0 equals `0xDE`
-   - Expected: trip.sec1 equals `0xAD`
-   - Expected: trip.sec2 equals `0xBE`
-   - Expected: trip.sec3 equals `0xEF`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 11 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-var dev = _make_posix_device()
-nvfs_arena_set_block_device(dev)
-val data: [u8] = [0xDE, 0xAD, 0xBE, 0xEF]
-# Test 1 consumed base=64; test 2 gets base=96, data LBA=97
-val trip = _do_round_trip(data, 97u64)
-expect(trip.ok).to_equal(true)
-# bytes must appear at the start of the data sector
-expect(trip.sec0).to_equal(0xDE)
-expect(trip.sec1).to_equal(0xAD)
-expect(trip.sec2).to_equal(0xBE)
-expect(trip.sec3).to_equal(0xEF)
-```
-
-</details>
-
-#### multiple files each get distinct NVMe sector regions
-
-- var dev =  make posix device
-- nvfs arena set block device
-   - Expected: result.ok is true
-   - Expected: result.rn1 equals `3`
-   - Expected: result.rn2 equals `3`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-var dev = _make_posix_device()
-nvfs_arena_set_block_device(dev)
-val result = _do_two_files(dev)
-expect(result.ok).to_equal(true)
-expect(result.rn1).to_equal(3)
-expect(result.rn2).to_equal(3)
-```
-
-</details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Other |
-| Status | Active |
-| Source | `test/02_integration/storage/nvfs/nvfs_posix_nvme_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- NvfsPosixDriver NVMe-backed open/read/write
-
-## Scenario Summary
-
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
-
-
-</details>

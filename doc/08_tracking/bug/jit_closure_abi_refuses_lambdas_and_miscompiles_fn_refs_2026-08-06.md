@@ -414,3 +414,15 @@ stamping the dest vreg does not change which print sink MIR already chose.
 Until then the guard is correct and must stay: a lambda under the JIT is a
 crash or a silently wrong number, not a slow-but-right fallback.
 
+
+## 2026-10-15 pure native generic inference regression
+
+The current source-matched pure producer `0658236f9a32f2e346005baa714f2698419b48d236ba5f97af86bf8fc660e574` completed all 415 HIR modules of the actual MC/DC behavior probe, then refused monomorphization with E-MONO-032/E-MONO-033 at `runtime_module_initializers_in_declaration_order`'s `array_sort_by(dynamic, lambda)` call. The local `dynamic` is already explicitly `[HirConst]`; this is an inference gap despite its annotation, not a missing source type. The previously documented containment was absent from actual source even though the adjacent unit specification still expected it.
+
+The scoped repair restores concrete stable insertion ordering over `(span.start, symbol.id)` in a fresh filtered array. Equal keys retain input order, compile-time literals stay excluded, and the caller's declaration inventory is unchanged. This is an explicit compiler-path workaround; the generic inference/callable ABI defect remains OPEN. It does not relax the monomorphic-HIR guard or replace the comparator with another callable. Cost is O(n²) in the number of dynamic globals in one module, O(n) additional storage. No whole-compiler performance improvement is claimed; unusually large single-module global inventories remain a performance limitation requiring a future concrete ordering implementation if measured.
+
+The actual native regression now checks parsed reversed declarations, equal-span ID ordering, equal-key stability, literal filtering, unchanged input, empty and singleton cases. Its adjacent authored SSpec is UNRUN; the updated native probe also awaits a rebuilt producer. The failed prior probe reached 568 seconds and peak 5,287,876 KiB, exited 1 quiescently, and never executed its assertions. Evidence: `.simple/storage/build/phase3-mcdc-entry-configuration-20261015/mcdc-token-stack-native-probe/{result.json,compile.log}` and `mir-probe-supervisor.env`. The successful smaller storage/recording fixture is a separate acceptance result and must not be replayed unchanged.
+
+### Final bounded result, 2026-10-16
+
+With the concrete ordering containment, the final actual native probe completed monomorphization for 413 modules: the earlier `array_sort_by` specialization refusal was crossed. This does not establish the ordering assertions, because subsequent MIR lowering reported semantic failures and the supervisor stopped the process at 8,392,880 KiB (exit88, quiescent1) before native execution. See `native_compiler_behavior_probe_retention_and_semantics.md` and the final output's `mcdc-token-stack-native-probe/final-failure-summary.json`. The general inference/callable defect remains OPEN, the O(n²) local workaround limitation remains explicit, and the authored ordering SSpec is UNRUN. No fourth cycle was attempted.

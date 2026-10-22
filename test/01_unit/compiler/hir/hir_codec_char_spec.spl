@@ -1,0 +1,46 @@
+use std.spec.*
+use compiler.hir.hir_definitions.{HirExprKind}
+use compiler.hir.generated.hir_codec.{hc_enc_hir_expr_kind, hc_dec_hir_expr_kind}
+use compiler.hir.hir_codec_support.{HirCodecWriter, hc_char_bytes_valid, hc_read_char}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+
+describe "HIR CharLit codec preserves typed Unicode and wire nil":
+    it "round trips exact escaped text bytes including nil and real U+FFFD":
+        val payloads = ["a", "é", "😀", "\\n", "\\\\", "�", "N", "\x00", "\x03", "\\N"]
+        for payload in payloads:
+            val wire = "4\n" + payload + "\n"
+            var reader = FlatPoolReader.new(wire)
+            val node = hc_dec_hir_expr_kind(reader)
+            expect(reader.ok).to_equal(true)
+            var writer = HirCodecWriter.create()
+            hc_enc_hir_expr_kind(writer, node)
+            expect(writer.ok).to_equal(true)
+            expect(writer.finish()).to_equal(wire)
+
+    it "constructs a char payload with the astral Unicode scalar value":
+        var reader = FlatPoolReader.new("4\n😀\n")
+        val node = hc_dec_hir_expr_kind(reader)
+        expect(reader.ok).to_equal(true)
+        match node:
+            case HirExprKind.CharLit(value): expect(value as i64).to_equal(128512)
+            case _: fail("expected CharLit")
+
+    it "rejects empty or multiple scalars rather than truncating to one char":
+        for payload in ["", "ab", "éa", "\\\\N"]:
+            var reader = FlatPoolReader.new("4\n" + payload + "\n")
+            expect(hc_dec_hir_expr_kind(reader)).to_equal(nil)
+            expect(reader.ok).to_equal(false)
+
+    it "rejects malformed UTF8 while accepting an actual replacement scalar":
+        expect(hc_char_bytes_valid([0xC0, 0xAF])).to_equal(false)
+        expect(hc_char_bytes_valid([0xED, 0xA0, 0x80])).to_equal(false)
+        expect(hc_char_bytes_valid([0xF4, 0x90, 0x80, 0x80])).to_equal(false)
+        expect(hc_char_bytes_valid([0x80])).to_equal(false)
+        expect(hc_char_bytes_valid([0xE2, 0x82])).to_equal(false)
+        expect(hc_char_bytes_valid([0xEF, 0xBF, 0xBD])).to_equal(true)
+
+    it "rejects a nil marker outside the schema-owned enum slot protocol":
+        var reader = FlatPoolReader.new("\\N\n")
+        val rejected = hc_read_char(reader, reader.next())
+        expect(reader.ok).to_equal(false)
+        expect(reader.failure_detail).to_equal("char_nil_requires_enum_slot")

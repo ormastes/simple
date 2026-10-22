@@ -1,0 +1,110 @@
+# Bounded, pure projection of one real window snapshot into safe terminal ANSI.
+use os.apps.smux.service.{ServiceState}
+use os.apps.smux.window_layout_service.{window_layout_rects}
+use os.apps.smux.vt_screen.{vt_cell_width}
+use std.common.string_core.{text_to_bytes}
+
+pub fn smux_frame_validate(st: ServiceState, session_id: text, window_id: text, cursor_pane: text = "") -> text:
+    val idx = st.find_window_idx(window_id)
+    if idx < 0 or st.get_window(idx).session_id != session_id:
+        return "unknown window: " + window_id
+    val w = st.get_window(idx)
+    if w.canvas_cols <= 0 or w.canvas_cols > 512 or w.canvas_rows <= 0 or w.canvas_rows > 256 or w.canvas_cols * w.canvas_rows > 60000:
+        return "frame canvas exceeds remote limit"
+    if window_layout_rects(st, session_id, window_id).len() == 0:
+        return "select a layout before frame capture"
+    if cursor_pane != "":
+        val pi = st.find_pane_idx(cursor_pane)
+        if pi < 0: return "unknown cursor pane: " + cursor_pane
+        val pane = st.get_pane(pi).pane
+        if pane.session_id != session_id or pane.window_id != window_id:
+            return "unknown cursor pane: " + cursor_pane
+    return ""
+
+fn safe_cell(cell: text) -> text:
+    for scalar in cell:
+        if scalar < " " or (scalar >= "\u{7f}" and scalar <= "\u{9f}"):
+            return " "
+    return cell
+
+fn safe_sgr(style: text) -> text:
+    if style.len() > 128: return ""
+    for scalar in style:
+        if scalar != ";" and (scalar < "0" or scalar > "9"):
+            return ""
+    return style
+
+pub fn smux_frame_from_state(st: ServiceState, session_id: text, window_id: text, cursor_pane: text = "") -> Result<text, text>:
+    val reason = smux_frame_validate(st, session_id, window_id, cursor_pane)
+    if reason != "": return Err(reason)
+    val w = st.get_window(st.find_window_idx(window_id))
+    val rects = window_layout_rects(st, session_id, window_id)
+    var cells: [[[text]]] = []
+    var attrs: [[[text]]] = []
+    var cursor_row: i64 = 0
+    var cursor_col: i64 = 0
+    var cursor_visible = false
+    var cursor_found = cursor_pane == ""
+    for rect in rects:
+        val idx = st.find_pane_idx(rect.pane_id)
+        if idx < 0: return Err("frame pane mapping missing")
+        val pr = st.get_pane(idx)
+        if pr.pane.session_id != session_id or pr.pane.window_id != window_id:
+            return Err("frame pane ownership mismatch")
+        val s = pr.screen
+        val frozen = s.frozen.len() > 0
+        cells.push(if frozen: s.frozen else: s.cells)
+        attrs.push(if frozen: s.frozen_attrs else: s.attrs)
+        if (cursor_pane != "" and rect.pane_id == cursor_pane) or (cursor_pane == "" and pr.focus):
+            cursor_found = true
+            val row = if frozen: s.frozen_row else: s.row
+            val col = if frozen: s.frozen_col else: s.col
+            cursor_visible = if frozen: s.frozen_cursor_visible else: s.modes.cursor_visible
+            cursor_visible = cursor_visible and row >= 0 and row < rect.rows and col >= 0
+            cursor_row = rect.row + row
+            cursor_col = rect.col + (if col >= rect.cols: rect.cols - 1 else: col)
+    if not cursor_found: return Err("unknown cursor pane: " + cursor_pane)
+    val esc = "\x1b"
+    var rows: [text] = ["SMUX-FRAME/1 " + w.canvas_cols.to_text() + " " + w.canvas_rows.to_text() + "\n" + esc + "[?25l" + esc + "[0m"]
+    var used: i64 = text_to_bytes(rows[0]).len()
+    var y: i64 = 0
+    while y < w.canvas_rows:
+        var line = esc + "[" + (y + 1).to_text() + ";1H"
+        var current_style = ""
+        var x: i64 = 0
+        while x < w.canvas_cols:
+            var cell = " "
+            var style = ""
+            var width: i64 = 1
+            var i: i64 = 0
+            while i < rects.len():
+                val rect = rects[i]
+                if y >= rect.row and y < rect.row + rect.rows and x >= rect.col and x < rect.col + rect.cols:
+                    val row = y - rect.row
+                    val col = x - rect.col
+                    if row < cells[i].len() and col < cells[i][row].len():
+                        cell = safe_cell(cells[i][row][col])
+                        if row < attrs[i].len() and col < attrs[i][row].len():
+                            style = safe_sgr(attrs[i][row][col])
+                        val cell_width = vt_cell_width(cell)
+                        if cell_width == 2:
+                            if col + 1 < rect.cols and col + 1 < cells[i][row].len() and cells[i][row][col + 1] == "":
+                                width = 2
+                            else: cell = " "
+                        elif cell_width == 0: cell = " "
+                    break
+                i = i + 1
+            if style != current_style:
+                line = line + (if style == "": esc + "[0m" else: esc + "[0;" + style + "m")
+                current_style = style
+            line = line + cell
+            if line.len() + used > 65450: return Err("frame exceeds reply limit")
+            x = x + width
+        line = line + esc + "[0m"
+        used = used + text_to_bytes(line).len()
+        if used > 65450: return Err("frame exceeds reply limit")
+        rows.push(line)
+        y = y + 1
+    if cursor_visible:
+        rows.push(esc + "[" + (cursor_row + 1).to_text() + ";" + (cursor_col + 1).to_text() + "H" + esc + "[?25h")
+    return Ok(rows.join(""))

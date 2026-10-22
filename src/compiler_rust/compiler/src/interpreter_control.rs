@@ -75,7 +75,9 @@ use super::interpreter_call::exec_block_value;
 use super::interpreter_patterns::{is_catch_all_pattern, pattern_matches};
 
 // Import coverage helpers
-use super::coverage_helpers::{decision_id_from_span, is_coverage_enabled, record_decision_coverage_here};
+use super::coverage_helpers::{
+    eval_decision_cond, is_coverage_enabled, record_decision_site, sub_elif, SUB_GUARD, SUB_STMT,
+};
 
 /// Handle loop control flow result. Returns Some if we should exit the loop.
 /// `my_label` is this loop's label (if any).
@@ -256,6 +258,7 @@ pub(super) fn exec_if(
                 // closure `if val get_value = …` returned `<fn:get_value>`.
                 env.mark_local(name.clone());
                 env.insert(name, inner);
+                record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, true);
                 return exec_block(&if_stmt.then_block, env, functions, classes, enums, impl_methods);
             }
             // value absent — fall through to elif branches / else below.
@@ -267,6 +270,7 @@ pub(super) fn exec_if(
                     for (name, val) in bindings {
                         env.insert(name, val);
                     }
+                    record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, true);
                     return exec_block(&if_stmt.then_block, env, functions, classes, enums, impl_methods);
                 }
                 // Pattern didn't match - fall through to elif branches / else below.
@@ -274,10 +278,21 @@ pub(super) fn exec_if(
                 // every `elif`/`elif val ...` branch.)
             }
         }
+        record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, false);
     } else {
         // Normal if condition
         // For if~ (is_suspend), await the condition value before checking truthiness
-        let cond_val = evaluate_expr(&if_stmt.condition, env, functions, classes, enums, impl_methods)?;
+        let cond_val = eval_decision_cond(
+            &if_stmt.condition,
+            if_stmt.span.line,
+            if_stmt.span.column,
+            SUB_STMT,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )?;
         let cond_val = if if_stmt.is_suspend {
             await_value(cond_val)?
         } else {
@@ -291,7 +306,7 @@ pub(super) fn exec_if(
         let decision_result = is_condition_present(&if_stmt.condition, &cond_val);
 
         // COVERAGE: Record decision for if statement
-        record_decision_coverage_here(if_stmt.span.line, if_stmt.span.column, decision_result);
+        record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, decision_result);
 
         if decision_result {
             return exec_block(&if_stmt.then_block, env, functions, classes, enums, impl_methods);
@@ -313,6 +328,7 @@ pub(super) fn exec_if(
                     // closure `if val get_value = …` returned `<fn:get_value>`.
                     env.mark_local(name.clone());
                     env.insert(name, inner);
+                    record_decision_site(if_stmt.span.line, if_stmt.span.column, sub_elif(idx), true);
                     return exec_block(block, env, functions, classes, enums, impl_methods);
                 }
                 LetBind::Skip => {}
@@ -322,12 +338,24 @@ pub(super) fn exec_if(
                         for (name, val) in bindings {
                             env.insert(name, val);
                         }
+                        record_decision_site(if_stmt.span.line, if_stmt.span.column, sub_elif(idx), true);
                         return exec_block(block, env, functions, classes, enums, impl_methods);
                     }
                 }
             }
+            record_decision_site(if_stmt.span.line, if_stmt.span.column, sub_elif(idx), false);
         } else {
-            let elif_val = evaluate_expr(cond, env, functions, classes, enums, impl_methods)?;
+            let elif_val = eval_decision_cond(
+                cond,
+                if_stmt.span.line,
+                if_stmt.span.column,
+                sub_elif(idx),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
             let elif_val = if if_stmt.is_suspend {
                 await_value(elif_val)?
             } else {
@@ -335,9 +363,11 @@ pub(super) fn exec_if(
             };
             let elif_decision = is_condition_present(cond, &elif_val);
 
-            // COVERAGE: Record decision for elif statement
-            let elif_decision_id = if_stmt.span.line as u32 + idx as u32;
-            record_decision_coverage_here(if_stmt.span.line + idx, if_stmt.span.column, elif_decision);
+            // COVERAGE: an elif is its own decision, keyed by the parent `if`
+            // span plus its index (it has no span of its own). It used to be
+            // keyed `if line + idx`, which for idx 0 IS the `if` itself and for
+            // idx > 0 collided with whatever decision sat on that line.
+            record_decision_site(if_stmt.span.line, if_stmt.span.column, sub_elif(idx), elif_decision);
 
             if elif_decision {
                 return exec_block(block, env, functions, classes, enums, impl_methods);
@@ -359,53 +389,58 @@ pub(super) fn exec_while(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
-    if let Some(ctrl) = try_exec_indexed_int_array_match_count_while_loop(while_stmt, env)? {
-        return Ok(ctrl);
-    }
+    // The shape-specialised loops below run the condition and body natively,
+    // bypassing every decision/condition probe inside them, so coverage runs
+    // take the generic path.
+    if !is_coverage_enabled() {
+        if let Some(ctrl) = try_exec_indexed_int_array_match_count_while_loop(while_stmt, env)? {
+            return Ok(ctrl);
+        }
 
-    if let Some(ctrl) = try_exec_indexed_int_array_while_loop(while_stmt, env)? {
-        return Ok(ctrl);
-    }
+        if let Some(ctrl) = try_exec_indexed_int_array_while_loop(while_stmt, env)? {
+            return Ok(ctrl);
+        }
 
-    if let Some(ctrl) = try_exec_indexed_float_array_match_count_while_loop(while_stmt, env)? {
-        return Ok(ctrl);
-    }
+        if let Some(ctrl) = try_exec_indexed_float_array_match_count_while_loop(while_stmt, env)? {
+            return Ok(ctrl);
+        }
 
-    if let Some(ctrl) = try_exec_indexed_float_array_while_loop(while_stmt, env)? {
-        return Ok(ctrl);
-    }
+        if let Some(ctrl) = try_exec_indexed_float_array_while_loop(while_stmt, env)? {
+            return Ok(ctrl);
+        }
 
-    if let Some(ctrl) = try_exec_indexed_string_match_count_while_loop(while_stmt, env)? {
-        return Ok(ctrl);
-    }
+        if let Some(ctrl) = try_exec_indexed_string_match_count_while_loop(while_stmt, env)? {
+            return Ok(ctrl);
+        }
 
-    if let Some(ctrl) = try_exec_direct_float_while_loop(while_stmt, env)? {
-        return Ok(ctrl);
-    }
+        if let Some(ctrl) = try_exec_direct_float_while_loop(while_stmt, env)? {
+            return Ok(ctrl);
+        }
 
-    if let Some(ctrl) = try_exec_direct_int_match_count_while_loop(while_stmt, env)? {
-        return Ok(ctrl);
-    }
+        if let Some(ctrl) = try_exec_direct_int_match_count_while_loop(while_stmt, env)? {
+            return Ok(ctrl);
+        }
 
-    if let Some(ctrl) = try_exec_direct_int_while_loop(while_stmt, env)? {
-        return Ok(ctrl);
-    }
+        if let Some(ctrl) = try_exec_direct_int_while_loop(while_stmt, env)? {
+            return Ok(ctrl);
+        }
 
-    if let Some(ctrl) = try_exec_one_arg_int_helper_while_loop(while_stmt, env, functions)? {
-        return Ok(ctrl);
-    }
+        if let Some(ctrl) = try_exec_one_arg_int_helper_while_loop(while_stmt, env, functions)? {
+            return Ok(ctrl);
+        }
 
-    if let Some(ctrl) = try_exec_two_arg_int_helper_while_loop(while_stmt, env, functions)? {
-        return Ok(ctrl);
-    }
+        if let Some(ctrl) = try_exec_two_arg_int_helper_while_loop(while_stmt, env, functions)? {
+            return Ok(ctrl);
+        }
 
-    // Runs LAST of the shape matchers, so every shape the specialised matchers
-    // above already recognise keeps its existing, cheaper path untouched. This
-    // one generalises the assigned value to an integer expression tree, which
-    // is what closes the ~940x cliff between `acc = f(acc, i)` and
-    // `acc = acc + f(i, 0)`. See try_exec_inline_int_expr_while_loop.
-    if let Some(ctrl) = try_exec_inline_int_expr_while_loop(while_stmt, env, functions)? {
-        return Ok(ctrl);
+        // Runs LAST of the shape matchers, so every shape the specialised matchers
+        // above already recognise keeps its existing, cheaper path untouched. This
+        // one generalises the assigned value to an integer expression tree, which
+        // is what closes the ~940x cliff between `acc = f(acc, i)` and
+        // `acc = acc + f(i, 0)`. See try_exec_inline_int_expr_while_loop.
+        if let Some(ctrl) = try_exec_inline_int_expr_while_loop(while_stmt, env, functions)? {
+            return Ok(ctrl);
+        }
     }
 
     // Handle while-let: while let PATTERN = EXPR:
@@ -416,7 +451,9 @@ pub(super) fn exec_while(
             check_timeout!();
             let value = evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?;
             let mut bindings = HashMap::new();
-            if !pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
+            let matched = pattern_matches(pattern, &value, &mut bindings, enums, classes)?;
+            record_decision_site(while_stmt.span.line, while_stmt.span.column, SUB_STMT, matched);
+            if !matched {
                 break;
             }
             // Pattern matched - add bindings and execute body
@@ -470,9 +507,19 @@ pub(super) fn exec_while(
                     // Variant side didn't evaluate to an int — bail out of the fast path
                     // and re-run this iteration with the slow path semantics.
                     // This should be very rare; fall through to a full condition eval.
-                    let cond_val = evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?;
+                    let cond_val = eval_decision_cond(
+                        &while_stmt.condition,
+                        while_stmt.span.line,
+                        while_stmt.span.column,
+                        SUB_STMT,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?;
                     let decision_result = is_condition_present(&while_stmt.condition, &cond_val);
-                    record_decision_coverage_here(while_stmt.span.line, while_stmt.span.column, decision_result);
+                    record_decision_site(while_stmt.span.line, while_stmt.span.column, SUB_STMT, decision_result);
                     if !decision_result {
                         break;
                     }
@@ -508,7 +555,7 @@ pub(super) fn exec_while(
                 }
             };
 
-            record_decision_coverage_here(while_stmt.span.line, while_stmt.span.column, decision_result);
+            record_decision_site(while_stmt.span.line, while_stmt.span.column, SUB_STMT, decision_result);
 
             if !decision_result {
                 break;
@@ -525,7 +572,17 @@ pub(super) fn exec_while(
         check_interrupt!();
         check_execution_limit!();
         check_timeout!();
-        let cond_val = evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?;
+        let cond_val = eval_decision_cond(
+            &while_stmt.condition,
+            while_stmt.span.line,
+            while_stmt.span.column,
+            SUB_STMT,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )?;
         let cond_val = if while_stmt.is_suspend {
             await_value(cond_val)?
         } else {
@@ -535,7 +592,7 @@ pub(super) fn exec_while(
         let decision_result = is_condition_present(&while_stmt.condition, &cond_val);
 
         // COVERAGE: Record decision for while condition on each iteration
-        record_decision_coverage_here(while_stmt.span.line, while_stmt.span.column, decision_result);
+        record_decision_site(while_stmt.span.line, while_stmt.span.column, SUB_STMT, decision_result);
 
         if !decision_result {
             break;
@@ -726,11 +783,11 @@ fn try_exec_direct_float_while_loop(while_stmt: &WhileStmt, env: &mut Env) -> Re
         return Ok(None);
     }
 
-    let mut target = match env.get(&loop_shape.target) {
+    let mut target = match fast_path_get(env, &loop_shape.target) {
         Some(Value::Float(value)) => *value,
         _ => return Ok(None),
     };
-    let mut index = match env.get(&loop_shape.index) {
+    let mut index = match fast_path_get(env, &loop_shape.index) {
         Some(Value::Int(value)) => *value,
         _ => return Ok(None),
     };
@@ -758,8 +815,8 @@ fn try_exec_direct_float_while_loop(while_stmt: &WhileStmt, env: &mut Env) -> Re
         iterations = iterations.wrapping_add(1);
     }
 
-    env.insert(loop_shape.target, Value::Float(target));
-    env.insert(loop_shape.index, Value::Int(index));
+    fast_path_store(env, loop_shape.target, Value::Float(target));
+    fast_path_store(env, loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -851,15 +908,15 @@ fn try_exec_indexed_float_array_while_loop(
         return Ok(None);
     }
 
-    let mut target = match env.get(&loop_shape.target) {
+    let mut target = match fast_path_get(env, &loop_shape.target) {
         Some(Value::Float(value)) => *value,
         _ => return Ok(None),
     };
-    let mut index = match env.get(&loop_shape.index) {
+    let mut index = match fast_path_get(env, &loop_shape.index) {
         Some(Value::Int(value)) if *value >= 0 => *value,
         _ => return Ok(None),
     };
-    let values = match env.get(&loop_shape.array) {
+    let values = match fast_path_get(env, &loop_shape.array) {
         Some(Value::Array(values)) | Some(Value::FrozenArray(values)) => values.clone(),
         _ => return Ok(None),
     };
@@ -888,8 +945,8 @@ fn try_exec_indexed_float_array_while_loop(
         iterations = iterations.wrapping_add(1);
     }
 
-    env.insert(loop_shape.target, Value::Float(target));
-    env.insert(loop_shape.index, Value::Int(index));
+    fast_path_store(env, loop_shape.target, Value::Float(target));
+    fast_path_store(env, loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -996,15 +1053,15 @@ fn try_exec_indexed_string_match_count_while_loop(
         return Ok(None);
     }
 
-    let mut target = match env.get(&loop_shape.target) {
+    let mut target = match fast_path_get(env, &loop_shape.target) {
         Some(Value::Int(value)) => *value,
         _ => return Ok(None),
     };
-    let mut index = match env.get(&loop_shape.index) {
+    let mut index = match fast_path_get(env, &loop_shape.index) {
         Some(Value::Int(value)) if *value >= 0 => *value,
         _ => return Ok(None),
     };
-    let text = match env.get(&loop_shape.text) {
+    let text = match fast_path_get(env, &loop_shape.text) {
         Some(Value::Str(value)) if value.is_ascii() => value.clone(),
         _ => return Ok(None),
     };
@@ -1042,8 +1099,8 @@ fn try_exec_indexed_string_match_count_while_loop(
         iterations = iterations.wrapping_add(1);
     }
 
-    env.insert(loop_shape.target, Value::Int(target));
-    env.insert(loop_shape.index, Value::Int(index));
+    fast_path_store(env, loop_shape.target, Value::Int(target));
+    fast_path_store(env, loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -1142,15 +1199,15 @@ fn try_exec_indexed_float_array_match_count_while_loop(
         return Ok(None);
     }
 
-    let mut target = match env.get(&loop_shape.target) {
+    let mut target = match fast_path_get(env, &loop_shape.target) {
         Some(Value::Int(value)) => *value,
         _ => return Ok(None),
     };
-    let mut index = match env.get(&loop_shape.index) {
+    let mut index = match fast_path_get(env, &loop_shape.index) {
         Some(Value::Int(value)) if *value >= 0 => *value,
         _ => return Ok(None),
     };
-    let values = match env.get(&loop_shape.array) {
+    let values = match fast_path_get(env, &loop_shape.array) {
         Some(Value::Array(values)) | Some(Value::FrozenArray(values)) => values.clone(),
         _ => return Ok(None),
     };
@@ -1189,8 +1246,8 @@ fn try_exec_indexed_float_array_match_count_while_loop(
         iterations = iterations.wrapping_add(1);
     }
 
-    env.insert(loop_shape.target, Value::Int(target));
-    env.insert(loop_shape.index, Value::Int(index));
+    fast_path_store(env, loop_shape.target, Value::Int(target));
+    fast_path_store(env, loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -1285,15 +1342,15 @@ fn try_exec_indexed_int_array_match_count_while_loop(
         return Ok(None);
     }
 
-    let mut target = match env.get(&loop_shape.target) {
+    let mut target = match fast_path_get(env, &loop_shape.target) {
         Some(Value::Int(value)) => *value,
         _ => return Ok(None),
     };
-    let mut index = match env.get(&loop_shape.index) {
+    let mut index = match fast_path_get(env, &loop_shape.index) {
         Some(Value::Int(value)) if *value >= 0 => *value,
         _ => return Ok(None),
     };
-    let values = match env.get(&loop_shape.array) {
+    let values = match fast_path_get(env, &loop_shape.array) {
         Some(Value::Array(values)) | Some(Value::FrozenArray(values)) => values.clone(),
         _ => return Ok(None),
     };
@@ -1332,8 +1389,8 @@ fn try_exec_indexed_int_array_match_count_while_loop(
         iterations = iterations.wrapping_add(1);
     }
 
-    env.insert(loop_shape.target, Value::Int(target));
-    env.insert(loop_shape.index, Value::Int(index));
+    fast_path_store(env, loop_shape.target, Value::Int(target));
+    fast_path_store(env, loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -1428,15 +1485,15 @@ fn try_exec_indexed_int_array_while_loop(
         return Ok(None);
     }
 
-    let mut target = match env.get(&loop_shape.target) {
+    let mut target = match fast_path_get(env, &loop_shape.target) {
         Some(Value::Int(value)) => *value,
         _ => return Ok(None),
     };
-    let mut index = match env.get(&loop_shape.index) {
+    let mut index = match fast_path_get(env, &loop_shape.index) {
         Some(Value::Int(value)) if *value >= 0 => *value,
         _ => return Ok(None),
     };
-    let values = match env.get(&loop_shape.array) {
+    let values = match fast_path_get(env, &loop_shape.array) {
         Some(Value::Array(values)) | Some(Value::FrozenArray(values)) => values.clone(),
         _ => return Ok(None),
     };
@@ -1473,8 +1530,8 @@ fn try_exec_indexed_int_array_while_loop(
         iterations = iterations.wrapping_add(1);
     }
 
-    env.insert(loop_shape.target, Value::Int(target));
-    env.insert(loop_shape.index, Value::Int(index));
+    fast_path_store(env, loop_shape.target, Value::Int(target));
+    fast_path_store(env, loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -1658,7 +1715,7 @@ fn lower_indexed_int_array_operand(
 ) -> Result<IndexedIntArrayOperand, CompileError> {
     match operand {
         IndexedIntArrayOperand::DictValue { dict, key } => {
-            let value = match env.get(dict) {
+            let value = match fast_path_get(env, dict) {
                 Some(Value::Dict(values)) | Some(Value::FrozenDict(values)) => values.get(key),
                 _ => None,
             };
@@ -1719,11 +1776,11 @@ fn try_exec_direct_int_match_count_while_loop(
         return Ok(None);
     }
 
-    let mut target = match env.get(&loop_shape.target) {
+    let mut target = match fast_path_get(env, &loop_shape.target) {
         Some(Value::Int(value)) => *value,
         _ => return Ok(None),
     };
-    let mut index = match env.get(&loop_shape.index) {
+    let mut index = match fast_path_get(env, &loop_shape.index) {
         Some(Value::Int(value)) => *value,
         _ => return Ok(None),
     };
@@ -1761,8 +1818,8 @@ fn try_exec_direct_int_match_count_while_loop(
         iterations = iterations.wrapping_add(1);
     }
 
-    env.insert(loop_shape.target, Value::Int(target));
-    env.insert(loop_shape.index, Value::Int(index));
+    fast_path_store(env, loop_shape.target, Value::Int(target));
+    fast_path_store(env, loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -1856,11 +1913,11 @@ fn try_exec_direct_int_while_loop(while_stmt: &WhileStmt, env: &mut Env) -> Resu
         return Ok(None);
     }
 
-    let mut target = match env.get(&loop_shape.target) {
+    let mut target = match fast_path_get(env, &loop_shape.target) {
         Some(Value::Int(value)) => *value,
         _ => return Ok(None),
     };
-    let mut index = match env.get(&loop_shape.index) {
+    let mut index = match fast_path_get(env, &loop_shape.index) {
         Some(Value::Int(value)) => *value,
         _ => return Ok(None),
     };
@@ -1896,8 +1953,8 @@ fn try_exec_direct_int_while_loop(while_stmt: &WhileStmt, env: &mut Env) -> Resu
         iterations = iterations.wrapping_add(1);
     }
 
-    env.insert(loop_shape.target, Value::Int(target));
-    env.insert(loop_shape.index, Value::Int(index));
+    fast_path_store(env, loop_shape.target, Value::Int(target));
+    fast_path_store(env, loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -1982,11 +2039,11 @@ fn try_exec_one_arg_int_helper_while_loop(
         return Ok(None);
     }
 
-    let mut target = match env.get(&loop_shape.target) {
+    let mut target = match fast_path_get(env, &loop_shape.target) {
         Some(Value::Int(value)) => *value,
         _ => return Ok(None),
     };
-    let mut index = match env.get(&loop_shape.index) {
+    let mut index = match fast_path_get(env, &loop_shape.index) {
         Some(Value::Int(value)) => *value,
         _ => return Ok(None),
     };
@@ -2023,8 +2080,8 @@ fn try_exec_one_arg_int_helper_while_loop(
     }
 
     crate::perf_counters::bump(&crate::perf_counters::WHILE_INLINE_INT_ITERS, iterations);
-    env.insert(loop_shape.target, Value::Int(target));
-    env.insert(loop_shape.index, Value::Int(index));
+    fast_path_store(env, loop_shape.target, Value::Int(target));
+    fast_path_store(env, loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -2135,11 +2192,11 @@ fn try_exec_two_arg_int_helper_while_loop(
         return Ok(None);
     }
 
-    let mut target = match env.get(&loop_shape.target) {
+    let mut target = match fast_path_get(env, &loop_shape.target) {
         Some(Value::Int(value)) => *value,
         _ => return Ok(None),
     };
-    let mut index = match env.get(&loop_shape.index) {
+    let mut index = match fast_path_get(env, &loop_shape.index) {
         Some(Value::Int(value)) => *value,
         _ => return Ok(None),
     };
@@ -2176,8 +2233,8 @@ fn try_exec_two_arg_int_helper_while_loop(
     }
 
     crate::perf_counters::bump(&crate::perf_counters::WHILE_INLINE_INT_ITERS, iterations);
-    env.insert(loop_shape.target, Value::Int(target));
-    env.insert(loop_shape.index, Value::Int(index));
+    fast_path_store(env, loop_shape.target, Value::Int(target));
+    fast_path_store(env, loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -2566,11 +2623,11 @@ fn try_exec_inline_int_expr_while_loop(
         return Ok(None);
     }
 
-    let mut target = match env.get(&loop_shape.target) {
+    let mut target = match fast_path_get(env, &loop_shape.target) {
         Some(Value::Int(value)) => *value,
         _ => return Ok(None),
     };
-    let mut index = match env.get(&loop_shape.index) {
+    let mut index = match fast_path_get(env, &loop_shape.index) {
         Some(Value::Int(value)) => *value,
         _ => return Ok(None),
     };
@@ -2624,8 +2681,8 @@ fn try_exec_inline_int_expr_while_loop(
     }
 
     crate::perf_counters::bump(&crate::perf_counters::WHILE_INLINE_INT_ITERS, iterations);
-    env.insert(loop_shape.target, Value::Int(target));
-    env.insert(loop_shape.index, Value::Int(index));
+    fast_path_store(env, loop_shape.target, Value::Int(target));
+    fast_path_store(env, loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -2740,6 +2797,55 @@ fn eval_direct_int_branch_predicate(predicate: &DirectIntBranchPredicate, index:
             match_when_equal,
         } => (index & *mask == *expected) == *match_when_equal,
     }
+}
+
+// Shape fast paths read and write loop variables through `env`, but a NON-local
+// name may be a module global whose live value is in MODULE_GLOBALS (or its
+// owner store), which the identifier read treats as authoritative
+// (interpreter/expr/literals.rs). At module top level every `var` is such a
+// name, so an env-only write-back was invisible to the next read and a stale
+// env copy fed the loop:
+// doc/08_tracking/bug/interp_toplevel_loop_fast_path_global_writeback_2026-10-19.md.
+// Locals short-circuit on `is_local`, so function-local loops run unchanged.
+
+/// `env.get(name)`, or `None` (decline the fast path) when `name` is a
+/// non-local global whose live value the identifier read would resolve to
+/// something other than the `env` copy.
+fn fast_path_get<'a>(env: &'a Env, name: &str) -> Option<&'a Value> {
+    let value = env.get(name)?;
+    if env.is_local(name) {
+        return Some(value);
+    }
+    // Mirrors the non-local branch of the Identifier read in literals.rs.
+    if env.is_refreshed_global(name) {
+        if let Some((owner, source)) = env.global_binding(name) {
+            if let Some(live) = crate::interpreter::owned_global(&owner, &source) {
+                return (live == *value).then_some(value);
+            }
+        }
+    }
+    if let Some(live) = env.live_owned_global(name) {
+        let current = env.has_overlay_entry(name) || live.map_or(true, |live| live == *value);
+        return current.then_some(value);
+    }
+    let current =
+        crate::interpreter::MODULE_GLOBALS.with(|cell| cell.borrow().get(name).map_or(true, |live| live == value));
+    current.then_some(value)
+}
+
+/// Write a fast path's loop result back the way the generic identifier
+/// assignment does (interpreter/node_exec.rs): `env`, plus MODULE_GLOBALS when
+/// the non-local name lives there.
+fn fast_path_store(env: &mut Env, name: String, value: Value) {
+    if !env.is_local(&name) {
+        crate::interpreter::MODULE_GLOBALS.with(|cell| {
+            // Peek first: an unconditional borrow_mut bumps the globals generation.
+            if cell.borrow().contains_key(&name) {
+                cell.borrow_mut().insert(name.clone(), value.clone());
+            }
+        });
+    }
+    env.insert(name, value);
 }
 
 fn inline_operand_is_env_var(operand: &InlineIntOperand, expected: &str) -> bool {
@@ -2948,13 +3054,13 @@ fn lower_stable_inline_operand(
         InlineIntOperand::EnvVar(name) if name == index => Ok(InlineIntOperand::Index),
         InlineIntOperand::IndexPlus { delta } => Ok(InlineIntOperand::IndexPlus { delta }),
         InlineIntOperand::IndexMinus { delta } => Ok(InlineIntOperand::IndexMinus { delta }),
-        InlineIntOperand::EnvVar(name) => match env.get(&name) {
+        InlineIntOperand::EnvVar(name) => match fast_path_get(env, &name) {
             Some(Value::Int(value)) => Ok(InlineIntOperand::Const(*value)),
             _ => Err(CompileError::runtime(format!(
                 "integer helper loop captured non-integer `{name}`"
             ))),
         },
-        InlineIntOperand::LenOf(name) => match env.get(&name) {
+        InlineIntOperand::LenOf(name) => match fast_path_get(env, &name) {
             Some(Value::Array(values)) | Some(Value::FrozenArray(values)) => {
                 Ok(InlineIntOperand::Const(values.len() as i64))
             }
@@ -2972,7 +3078,7 @@ fn lower_stable_inline_operand(
         InlineIntOperand::IndexBitXor { mask } => Ok(InlineIntOperand::IndexBitXor { mask }),
         InlineIntOperand::IndexShiftLeft { bits } => Ok(InlineIntOperand::IndexShiftLeft { bits }),
         InlineIntOperand::IndexShiftRight { bits } => Ok(InlineIntOperand::IndexShiftRight { bits }),
-        InlineIntOperand::DictValue { dict, key } => match env.get(&dict) {
+        InlineIntOperand::DictValue { dict, key } => match fast_path_get(env, &dict) {
             Some(Value::Dict(values)) | Some(Value::FrozenDict(values)) => match values.get(&key) {
                 Some(Value::Int(value)) => Ok(InlineIntOperand::Const(*value)),
                 _ => Err(CompileError::runtime(format!(
@@ -3006,13 +3112,13 @@ fn eval_stable_inline_operand(
         InlineIntOperand::IndexShiftLeft { bits } => Ok(index << *bits),
         InlineIntOperand::IndexShiftRight { bits } => Ok(index >> *bits),
         InlineIntOperand::Const(value) => Ok(*value),
-        InlineIntOperand::EnvVar(name) => match env.get(name) {
+        InlineIntOperand::EnvVar(name) => match fast_path_get(env, name) {
             Some(Value::Int(value)) => Ok(*value),
             _ => Err(CompileError::runtime(format!(
                 "integer helper loop bound `{name}` is not an integer"
             ))),
         },
-        InlineIntOperand::LenOf(name) => match env.get(name) {
+        InlineIntOperand::LenOf(name) => match fast_path_get(env, name) {
             Some(Value::Array(values)) | Some(Value::FrozenArray(values)) => Ok(values.len() as i64),
             Some(Value::FixedSizeArray { size, .. }) => Ok(*size as i64),
             Some(Value::Str(value)) => Ok(value.chars().count() as i64),
@@ -3021,7 +3127,7 @@ fn eval_stable_inline_operand(
                 "integer loop len receiver `{name}` does not have a stable length"
             ))),
         },
-        InlineIntOperand::DictValue { dict, key } => match env.get(dict) {
+        InlineIntOperand::DictValue { dict, key } => match fast_path_get(env, dict) {
             Some(Value::Dict(values)) | Some(Value::FrozenDict(values)) => match values.get(key) {
                 Some(Value::Int(value)) => Ok(*value),
                 _ => Err(CompileError::runtime(format!(
@@ -3155,7 +3261,7 @@ fn try_hoist_loop_invariant_len<'a>(
     // Evaluate the `.len()` once. Re-use evaluate_expr on a fresh synthetic call by
     // evaluating the receiver identifier and extracting length directly. We avoid
     // re-calling evaluate_expr on the MethodCall to keep the cost minimal.
-    let recv_val = match env.get(recv_name) {
+    let recv_val = match fast_path_get(env, recv_name) {
         Some(v) => v.clone(),
         None => return Ok(None),
     };
@@ -3795,36 +3901,40 @@ fn exec_for_inner(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
-    if let Some(ctrl) = try_exec_enumerated_int_array_for_loop(for_stmt, env)? {
-        return Ok(ctrl);
-    }
+    // Shape-specialised loops run their body natively, bypassing the
+    // decision/condition probes inside it; coverage runs take the generic path.
+    if !is_coverage_enabled() {
+        if let Some(ctrl) = try_exec_enumerated_int_array_for_loop(for_stmt, env)? {
+            return Ok(ctrl);
+        }
 
-    if let Some(ctrl) = try_exec_string_match_count_for_loop(for_stmt, env)? {
-        return Ok(ctrl);
-    }
+        if let Some(ctrl) = try_exec_string_match_count_for_loop(for_stmt, env)? {
+            return Ok(ctrl);
+        }
 
-    if let Some(ctrl) = try_exec_string_count_for_loop(for_stmt, env)? {
-        return Ok(ctrl);
-    }
+        if let Some(ctrl) = try_exec_string_count_for_loop(for_stmt, env)? {
+            return Ok(ctrl);
+        }
 
-    if let Some(ctrl) = try_exec_float_array_match_count_for_loop(for_stmt, env)? {
-        return Ok(ctrl);
-    }
+        if let Some(ctrl) = try_exec_float_array_match_count_for_loop(for_stmt, env)? {
+            return Ok(ctrl);
+        }
 
-    if let Some(ctrl) = try_exec_float_array_for_loop(for_stmt, env)? {
-        return Ok(ctrl);
-    }
+        if let Some(ctrl) = try_exec_float_array_for_loop(for_stmt, env)? {
+            return Ok(ctrl);
+        }
 
-    if let Some(ctrl) = try_exec_int_array_match_count_for_loop(for_stmt, env)? {
-        return Ok(ctrl);
-    }
+        if let Some(ctrl) = try_exec_int_array_match_count_for_loop(for_stmt, env)? {
+            return Ok(ctrl);
+        }
 
-    if let Some(ctrl) = try_exec_int_array_for_loop(for_stmt, env)? {
-        return Ok(ctrl);
-    }
+        if let Some(ctrl) = try_exec_int_array_for_loop(for_stmt, env)? {
+            return Ok(ctrl);
+        }
 
-    if let Some(ctrl) = try_exec_int_range_for_loop(for_stmt, env)? {
-        return Ok(ctrl);
+        if let Some(ctrl) = try_exec_int_range_for_loop(for_stmt, env)? {
+            return Ok(ctrl);
+        }
     }
 
     let iterable = evaluate_expr(&for_stmt.iterable, env, functions, classes, enums, impl_methods)?;
@@ -3993,11 +4103,11 @@ fn try_exec_enumerated_int_array_for_loop(for_stmt: &ForStmt, env: &mut Env) -> 
         return Ok(None);
     }
 
-    let mut target = match env.get(&loop_shape.assignment.target) {
+    let mut target = match fast_path_get(env, &loop_shape.assignment.target) {
         Some(Value::Int(value)) => *value,
         _ => return Ok(None),
     };
-    let values = match env.get(&loop_shape.array) {
+    let values = match fast_path_get(env, &loop_shape.array) {
         Some(Value::Array(values)) | Some(Value::FrozenArray(values)) => values.clone(),
         _ => return Ok(None),
     };
@@ -4036,7 +4146,7 @@ fn try_exec_enumerated_int_array_for_loop(for_stmt: &ForStmt, env: &mut Env) -> 
         iterations = iterations.wrapping_add(1);
     }
 
-    env.insert(loop_shape.assignment.target, Value::Int(target));
+    fast_path_store(env, loop_shape.assignment.target, Value::Int(target));
     if let Some(value) = last_index {
         env.insert(loop_shape.index_var, Value::Int(value));
     }
@@ -4160,11 +4270,11 @@ fn try_exec_string_match_count_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Re
         return Ok(None);
     }
 
-    let mut target = match env.get(&loop_shape.assignment.target) {
+    let mut target = match fast_path_get(env, &loop_shape.assignment.target) {
         Some(Value::Int(value)) => *value,
         _ => return Ok(None),
     };
-    let text = match env.get(&loop_shape.text) {
+    let text = match fast_path_get(env, &loop_shape.text) {
         Some(Value::Str(text)) => text.clone(),
         _ => return Ok(None),
     };
@@ -4209,7 +4319,7 @@ fn try_exec_string_match_count_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Re
         iterations = iterations.wrapping_add(1);
     }
 
-    env.insert(loop_shape.assignment.target, Value::Int(target));
+    fast_path_store(env, loop_shape.assignment.target, Value::Int(target));
     if let Some(ch) = last_value {
         env.insert(loop_shape.loop_var, Value::text(ch.to_string()));
     }
@@ -4322,11 +4432,11 @@ fn try_exec_string_count_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<O
         return Ok(None);
     }
 
-    let mut target = match env.get(&loop_shape.assignment.target) {
+    let mut target = match fast_path_get(env, &loop_shape.assignment.target) {
         Some(Value::Int(value)) => *value,
         _ => return Ok(None),
     };
-    let text = match env.get(&loop_shape.text) {
+    let text = match fast_path_get(env, &loop_shape.text) {
         Some(Value::Str(text)) => text.clone(),
         _ => return Ok(None),
     };
@@ -4369,7 +4479,7 @@ fn try_exec_string_count_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<O
         iterations = iterations.wrapping_add(1);
     }
 
-    env.insert(loop_shape.assignment.target, Value::Int(target));
+    fast_path_store(env, loop_shape.assignment.target, Value::Int(target));
     if let Some(ch) = last_value {
         env.insert(loop_shape.loop_var, Value::text(ch.to_string()));
     }
@@ -4440,11 +4550,11 @@ fn try_exec_float_array_match_count_for_loop(
         return Ok(None);
     }
 
-    let mut target = match env.get(&loop_shape.assignment.target) {
+    let mut target = match fast_path_get(env, &loop_shape.assignment.target) {
         Some(Value::Int(value)) => *value,
         _ => return Ok(None),
     };
-    let values = match env.get(&loop_shape.array) {
+    let values = match fast_path_get(env, &loop_shape.array) {
         Some(Value::Array(values)) | Some(Value::FrozenArray(values)) => values.clone(),
         _ => return Ok(None),
     };
@@ -4493,7 +4603,7 @@ fn try_exec_float_array_match_count_for_loop(
         iterations = iterations.wrapping_add(1);
     }
 
-    env.insert(loop_shape.assignment.target, Value::Int(target));
+    fast_path_store(env, loop_shape.assignment.target, Value::Int(target));
     if let Some(value) = last_value {
         env.insert(loop_shape.loop_var, Value::Float(value));
     }
@@ -4601,11 +4711,11 @@ fn try_exec_float_array_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Op
         return Ok(None);
     }
 
-    let mut target = match env.get(&loop_shape.assignment.target) {
+    let mut target = match fast_path_get(env, &loop_shape.assignment.target) {
         Some(Value::Float(value)) => *value,
         _ => return Ok(None),
     };
-    let values = match env.get(&loop_shape.array) {
+    let values = match fast_path_get(env, &loop_shape.array) {
         Some(Value::Array(values)) | Some(Value::FrozenArray(values)) => values.clone(),
         _ => return Ok(None),
     };
@@ -4634,7 +4744,7 @@ fn try_exec_float_array_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Op
         iterations = iterations.wrapping_add(1);
     }
 
-    env.insert(loop_shape.assignment.target, Value::Float(target));
+    fast_path_store(env, loop_shape.assignment.target, Value::Float(target));
     if let Some(value) = last_value {
         env.insert(loop_shape.loop_var, Value::Float(value));
     }
@@ -4718,11 +4828,11 @@ fn try_exec_int_array_match_count_for_loop(for_stmt: &ForStmt, env: &mut Env) ->
         return Ok(None);
     }
 
-    let mut target = match env.get(&loop_shape.assignment.target) {
+    let mut target = match fast_path_get(env, &loop_shape.assignment.target) {
         Some(Value::Int(value)) => *value,
         _ => return Ok(None),
     };
-    let values = match env.get(&loop_shape.array) {
+    let values = match fast_path_get(env, &loop_shape.array) {
         Some(Value::Array(values)) | Some(Value::FrozenArray(values)) => values.clone(),
         _ => return Ok(None),
     };
@@ -4771,7 +4881,7 @@ fn try_exec_int_array_match_count_for_loop(for_stmt: &ForStmt, env: &mut Env) ->
         iterations = iterations.wrapping_add(1);
     }
 
-    env.insert(loop_shape.assignment.target, Value::Int(target));
+    fast_path_store(env, loop_shape.assignment.target, Value::Int(target));
     if let Some(value) = last_value {
         env.insert(loop_shape.loop_var, Value::Int(value));
     }
@@ -4882,11 +4992,11 @@ fn try_exec_int_array_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Opti
         return Ok(None);
     }
 
-    let mut target = match env.get(&loop_shape.assignment.target) {
+    let mut target = match fast_path_get(env, &loop_shape.assignment.target) {
         Some(Value::Int(value)) => *value,
         _ => return Ok(None),
     };
-    let values = match env.get(&loop_shape.array) {
+    let values = match fast_path_get(env, &loop_shape.array) {
         Some(Value::Array(values)) | Some(Value::FrozenArray(values)) => values.clone(),
         _ => return Ok(None),
     };
@@ -4933,7 +5043,7 @@ fn try_exec_int_array_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Opti
         iterations = iterations.wrapping_add(1);
     }
 
-    env.insert(loop_shape.assignment.target, Value::Int(target));
+    fast_path_store(env, loop_shape.assignment.target, Value::Int(target));
     if let Some(value) = last_value {
         env.insert(loop_shape.loop_var, Value::Int(value));
     }
@@ -4997,8 +5107,12 @@ fn try_exec_int_range_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Opti
         return Ok(None);
     }
 
-    let start = eval_range_for_stable_operand(&loop_shape.start, env)?;
-    let mut end = eval_range_for_stable_operand(&loop_shape.end, env)?;
+    let Ok(start) = eval_range_for_stable_operand(&loop_shape.start, env) else {
+        return Ok(None);
+    };
+    let Ok(mut end) = eval_range_for_stable_operand(&loop_shape.end, env) else {
+        return Ok(None);
+    };
     if loop_shape.inclusive {
         let Some(inclusive_end) = end.checked_add(1) else {
             return Ok(None);
@@ -5014,12 +5128,19 @@ fn try_exec_int_range_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Opti
         {
             return Ok(None);
         }
-        let mut target = match env.get(&assignment.target) {
+        let mut target = match fast_path_get(env, &assignment.target) {
             Some(Value::Int(value)) => *value,
             _ => return Ok(None),
         };
-        let left = lower_single_range_for_operand(&assignment.left, env, &assignment.target, &loop_shape.loop_var)?;
-        let right = lower_single_range_for_operand(&assignment.right, env, &assignment.target, &loop_shape.loop_var)?;
+        let Ok(left) = lower_single_range_for_operand(&assignment.left, env, &assignment.target, &loop_shape.loop_var)
+        else {
+            return Ok(None);
+        };
+        let Ok(right) =
+            lower_single_range_for_operand(&assignment.right, env, &assignment.target, &loop_shape.loop_var)
+        else {
+            return Ok(None);
+        };
         let mut current = start;
         let mut last_value: Option<i64> = None;
         let mut iterations = 0u64;
@@ -5041,7 +5162,7 @@ fn try_exec_int_range_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Opti
             current = current.wrapping_add(1);
             iterations = iterations.wrapping_add(1);
         }
-        env.insert(assignment.target.clone(), Value::Int(target));
+        fast_path_store(env, assignment.target.clone(), Value::Int(target));
         if let Some(value) = last_value {
             env.insert(loop_shape.loop_var, Value::Int(value));
         }
@@ -5057,15 +5178,19 @@ fn try_exec_int_range_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Opti
             return Ok(None);
         }
         if !locals.contains_key(&assignment.target) {
-            match env.get(&assignment.target) {
+            match fast_path_get(env, &assignment.target) {
                 Some(Value::Int(value)) => {
                     locals.insert(assignment.target.clone(), *value);
                 }
                 _ => return Ok(None),
             }
         }
-        collect_range_for_operand_var(&assignment.left, env, &mut locals, &loop_shape.loop_var)?;
-        collect_range_for_operand_var(&assignment.right, env, &mut locals, &loop_shape.loop_var)?;
+        if collect_range_for_operand_var(&assignment.left, env, &mut locals, &loop_shape.loop_var).is_err() {
+            return Ok(None);
+        }
+        if collect_range_for_operand_var(&assignment.right, env, &mut locals, &loop_shape.loop_var).is_err() {
+            return Ok(None);
+        }
     }
 
     let mut current = start;
@@ -5095,7 +5220,7 @@ fn try_exec_int_range_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Opti
 
     for assignment in &loop_shape.assignments {
         if let Some(value) = locals.get(&assignment.target) {
-            env.insert(assignment.target.clone(), Value::Int(*value));
+            fast_path_store(env, assignment.target.clone(), Value::Int(*value));
         }
     }
     if let Some(value) = last_value {
@@ -5122,7 +5247,7 @@ fn lower_single_range_for_operand(
         RangeForOperand::Const(value) => Ok(SingleRangeForOperand::Const(*value)),
         RangeForOperand::Var(name) if name == target => Ok(SingleRangeForOperand::Target),
         RangeForOperand::Var(name) if name == loop_var => Ok(SingleRangeForOperand::LoopVar),
-        RangeForOperand::Var(name) => match env.get(name) {
+        RangeForOperand::Var(name) => match fast_path_get(env, name) {
             Some(Value::Int(value)) => Ok(SingleRangeForOperand::Const(*value)),
             _ => Err(CompileError::runtime(format!(
                 "integer range for operand `{name}` is not an integer"
@@ -5213,7 +5338,7 @@ fn parse_range_for_body_operand(expr: &Expr, loop_var: &str) -> Option<RangeForO
 fn eval_range_for_stable_operand(operand: &RangeForOperand, env: &Env) -> Result<i64, CompileError> {
     match operand {
         RangeForOperand::Const(value) => Ok(*value),
-        RangeForOperand::Var(name) => match env.get(name) {
+        RangeForOperand::Var(name) => match fast_path_get(env, name) {
             Some(Value::Int(value)) => Ok(*value),
             _ => Err(CompileError::runtime(format!(
                 "integer range for bound `{name}` is not an integer"
@@ -5237,7 +5362,7 @@ fn collect_range_for_operand_var(
     if name == loop_var || locals.contains_key(name) {
         return Ok(());
     }
-    match env.get(name) {
+    match fast_path_get(env, name) {
         Some(Value::Int(value)) => {
             locals.insert(name.clone(), *value);
             Ok(())
@@ -5291,7 +5416,7 @@ pub(crate) fn exec_match_core(
         }
     }
 
-    for (arm_index, arm) in match_stmt.arms.iter().enumerate() {
+    for arm in match_stmt.arms.iter() {
         let mut bindings = HashMap::new();
         if pattern_matches(&arm.pattern, &subject, &mut bindings, enums, classes)? {
             if let Some(guard) = &arm.guard {
@@ -5299,18 +5424,25 @@ pub(crate) fn exec_match_core(
                 for (name, value) in &bindings {
                     guard_env.insert(name.clone(), value.clone());
                 }
-                let guard_val = evaluate_expr(guard, &mut guard_env, functions, classes, enums, impl_methods)?;
-                if !is_condition_present(guard, &guard_val) {
+                let guard_val = eval_decision_cond(
+                    guard,
+                    arm.span.line,
+                    arm.span.column,
+                    SUB_GUARD,
+                    &mut guard_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
+                // COVERAGE: a guard is a decision (an unguarded arm is not; the
+                // old "arm taken" probe could only ever record `true`).
+                let guard_result = is_condition_present(guard, &guard_val);
+                record_decision_site(arm.span.line, arm.span.column, SUB_GUARD, guard_result);
+                if !guard_result {
                     continue;
                 }
             }
-
-            // COVERAGE: Record that this match arm was taken
-            record_decision_coverage_here(
-                match_stmt.span.line + arm_index,
-                match_stmt.span.column,
-                true, // We matched an arm
-            );
 
             // Scope arm bindings to the arm body: remember what each binding
             // name shadowed so it can be restored after the arm runs. Without
@@ -5404,6 +5536,7 @@ pub(crate) fn exec_if_core(
                 // closure `if val get_value = …` returned `<fn:get_value>`.
                 env.mark_local(name.clone());
                 env.insert(name, inner);
+                record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, true);
                 let (flow, last_val) =
                     exec_block_fn(&if_stmt.then_block, env, functions, classes, enums, impl_methods)?;
                 return match flow {
@@ -5418,6 +5551,7 @@ pub(crate) fn exec_if_core(
                     for (name, val) in bindings {
                         env.insert(name, val);
                     }
+                    record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, true);
                     let (flow, last_val) =
                         exec_block_fn(&if_stmt.then_block, env, functions, classes, enums, impl_methods)?;
                     return match flow {
@@ -5430,9 +5564,20 @@ pub(crate) fn exec_if_core(
                 // every `elif`/`elif val ...` branch in if-expression position.)
             }
         }
+        record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, false);
     } else {
         // Normal if condition
-        let cond_val = evaluate_expr(&if_stmt.condition, env, functions, classes, enums, impl_methods)?;
+        let cond_val = eval_decision_cond(
+            &if_stmt.condition,
+            if_stmt.span.line,
+            if_stmt.span.column,
+            SUB_STMT,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )?;
         let cond_val = if if_stmt.is_suspend {
             await_value(cond_val)?
         } else {
@@ -5452,7 +5597,7 @@ pub(crate) fn exec_if_core(
         // reported zero coverage regardless of how it was exercised. Mirrors
         // `exec_if`'s recording exactly (see also block_execution.rs's two
         // `Node::If` sites, which had the same gap for a different reason).
-        record_decision_coverage_here(if_stmt.span.line, if_stmt.span.column, decision_result);
+        record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, decision_result);
         if decision_result {
             let (flow, last_val) = exec_block_fn(&if_stmt.then_block, env, functions, classes, enums, impl_methods)?;
             return match flow {
@@ -5476,6 +5621,7 @@ pub(crate) fn exec_if_core(
                     // closure `if val get_value = …` returned `<fn:get_value>`.
                     env.mark_local(name.clone());
                     env.insert(name, inner);
+                    record_decision_site(if_stmt.span.line, if_stmt.span.column, sub_elif(elif_idx), true);
                     let (flow, last_val) = exec_block_fn(block, env, functions, classes, enums, impl_methods)?;
                     return match flow {
                         Control::Next => Ok((Control::Next, last_val.unwrap_or(Value::Nil))),
@@ -5489,6 +5635,7 @@ pub(crate) fn exec_if_core(
                         for (name, val) in bindings {
                             env.insert(name, val);
                         }
+                        record_decision_site(if_stmt.span.line, if_stmt.span.column, sub_elif(elif_idx), true);
                         let (flow, last_val) = exec_block_fn(block, env, functions, classes, enums, impl_methods)?;
                         return match flow {
                             Control::Next => Ok((Control::Next, last_val.unwrap_or(Value::Nil))),
@@ -5497,15 +5644,31 @@ pub(crate) fn exec_if_core(
                     }
                 }
             }
+            record_decision_site(if_stmt.span.line, if_stmt.span.column, sub_elif(elif_idx), false);
         } else {
-            let elif_val = evaluate_expr(cond, env, functions, classes, enums, impl_methods)?;
+            let elif_val = eval_decision_cond(
+                cond,
+                if_stmt.span.line,
+                if_stmt.span.column,
+                sub_elif(elif_idx),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
             let elif_val = if if_stmt.is_suspend {
                 await_value(elif_val)?
             } else {
                 elif_val
             };
             let elif_decision = is_condition_present(cond, &elif_val);
-            record_decision_coverage_here(if_stmt.span.line + elif_idx, if_stmt.span.column, elif_decision);
+            record_decision_site(
+                if_stmt.span.line,
+                if_stmt.span.column,
+                sub_elif(elif_idx),
+                elif_decision,
+            );
             if elif_decision {
                 let (flow, last_val) = exec_block_fn(block, env, functions, classes, enums, impl_methods)?;
                 return match flow {

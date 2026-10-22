@@ -21,22 +21,24 @@ use std.io_runtime.{env_get}
 use std.io_runtime.{file_exists}
 use std.io_runtime.{get_args}
 
-use app.lsp.lsp_json
-use app.lsp.lsp_protocol
-use app.lsp.lsp_handlers
+use std.nogc_sync_mut.lsp.lsp_json.*
+use std.nogc_sync_mut.lsp.lsp_protocol.*
+use std.nogc_sync_mut.lsp.lsp_handlers.*
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field}
 
 # Server state
 var LSP_INITIALIZED: bool = false
 var LSP_SHUTDOWN: bool = false
 
 fn _matches_method(body: text, method: text) -> bool:
-    body.contains(Q() + "method" + Q() + ":" + Q() + method + Q())
+    _extract_method(body) == method
 
 fn _extract_method(body: text) -> text:
-    val method = extract_field(body, "method")
-    if method == "":
-        return "<unknown>"
-    method
+    val parsed = json_parse_value_strict(body)
+    if parsed.is_err(): return "<unknown>"
+    match json_value_field(parsed.unwrap(), "method"):
+        case JsonValue.Str(method): method
+        case _: "<unknown>"
 
 fn lsp_main():
     val args = get_args()
@@ -60,86 +62,92 @@ fn lsp_main():
             running = false
         else:
             val id = extract_id(line)
-            if _matches_method(line, "initialize"):
+            # Decode the top-level method once. Ordinary JSON whitespace and
+            # nested params.method fields cannot change request dispatch.
+            val method = _extract_method(line)
+            if method == "initialize":
                 val response = lsp_handle_initialize_with_body(id, line)
                 lsp_write_message(response)
-            elif _matches_method(line, "initialized"):
+            elif method == "initialized":
                 LSP_INITIALIZED = true
-            elif _matches_method(line, "shutdown"):
+            elif method == "shutdown":
                 LSP_SHUTDOWN = true
                 val response = make_json_result(id, "null")
                 lsp_write_message(response)
-            elif _matches_method(line, "exit"):
+            elif method == "exit":
                 running = false
             elif not LSP_INITIALIZED:
                 # Reject requests before initialization (JSON-RPC -32002)
                 if id != "null" and id != "":
                     val response = make_error(id, -32002, "Server not initialized")
                     lsp_write_message(response)
-            elif _matches_method(line, "textDocument/didOpen"):
+            elif method == "textDocument/didOpen":
                 lsp_handle_did_open(line)
-            elif _matches_method(line, "textDocument/didChange"):
+            elif method == "textDocument/didChange":
                 lsp_handle_did_change(line)
-            elif _matches_method(line, "textDocument/didClose"):
+            elif method == "textDocument/didClose":
                 lsp_handle_did_close(line)
-            elif _matches_method(line, "textDocument/didSave"):
+            elif method == "textDocument/didSave":
                 lsp_handle_did_save(line)
-            elif _matches_method(line, "textDocument/definition"):
+            elif method == "textDocument/definition":
                 val response = lsp_handle_definition(id, line)
                 lsp_write_message(response)
-            elif _matches_method(line, "textDocument/references"):
+            elif method == "textDocument/references":
                 val response = lsp_handle_references(id, line)
                 lsp_write_message(response)
-            elif _matches_method(line, "textDocument/hover"):
+            elif method == "textDocument/hover":
                 val response = lsp_handle_hover(id, line)
                 lsp_write_message(response)
-            elif _matches_method(line, "textDocument/completion"):
+            elif method == "textDocument/completion":
                 val response = lsp_handle_completion(id, line)
                 lsp_write_message(response)
-            elif _matches_method(line, "textDocument/documentSymbol"):
+            elif method == "textDocument/documentSymbol":
                 val response = lsp_handle_document_symbol(id, line)
                 lsp_write_message(response)
-            elif _matches_method(line, "textDocument/semanticTokens/full"):
+            elif method == "textDocument/semanticTokens/full":
                 val response = lsp_handle_semantic_tokens_full(id, line)
                 lsp_write_message(response)
-            elif _matches_method(line, "textDocument/semanticTokens/range"):
+            elif method == "textDocument/semanticTokens/range":
                 val response = lsp_handle_semantic_tokens_range(id, line)
                 lsp_write_message(response)
-            elif _matches_method(line, "textDocument/implementation"):
+            elif method == "textDocument/implementation":
                 val response = lsp_handle_implementation(id, line)
                 lsp_write_message(response)
-            elif _matches_method(line, "callHierarchy/incomingCalls"):
+            elif method == "callHierarchy/incomingCalls":
                 val response = lsp_handle_incoming_calls(id, line)
                 lsp_write_message(response)
-            elif _matches_method(line, "callHierarchy/outgoingCalls"):
+            elif method == "callHierarchy/outgoingCalls":
                 val response = lsp_handle_outgoing_calls(id, line)
                 lsp_write_message(response)
-            elif _matches_method(line, "textDocument/prepareCallHierarchy"):
+            elif method == "textDocument/prepareCallHierarchy":
                 val response = lsp_handle_prepare_call_hierarchy(id, line)
                 lsp_write_message(response)
-            elif _matches_method(line, "workspace/symbol"):
+            elif method == "workspace/symbol":
                 val response = lsp_handle_workspace_symbol(id, line)
                 lsp_write_message(response)
-            elif _matches_method(line, "textDocument/inlayHint"):
+            elif method == "textDocument/inlayHint":
                 val response = lsp_handle_inlay_hint(id, line)
                 lsp_write_message(response)
-            elif _matches_method(line, "textDocument/codeAction"):
+            elif method == "textDocument/codeAction":
                 val response = lsp_handle_code_action(id, line)
                 lsp_write_message(response)
-            elif _matches_method(line, "textDocument/diagnostic"):
+            elif method == "textDocument/diagnostic":
                 val response = lsp_handle_pull_diagnostic(id, line)
                 lsp_write_message(response)
-            elif _matches_method(line, "textDocument/foldingRange"):
+            elif method == "textDocument/foldingRange":
                 val response = lsp_handle_folding_range(id, line)
                 lsp_write_message(response)
             else:
                 # Unknown method — respond with method not found for requests (has id)
                 if id != "null" and id != "":
-                    val response = make_error(id, -32601, "Method not found: " + _extract_method(line))
+                    val response = make_error(id, -32601, "Method not found: " + method)
                     lsp_write_message(response)
 
-# Entry point
-lsp_main()
+# Explicit entry keeps importing the protocol loop free of stdio side effects.
+# Direct execution of this library file retains its existing server behavior.
+fn main() -> i64:
+    lsp_main()
+    0
 
 fn print_usage():
     print "Simple Language Server (LSP)"
@@ -163,3 +171,5 @@ fn print_usage():
     print "Editor Integration:"
     print "  VS Code: Install the Simple Language extension"
     print "  Neovim:  require('simple').setup()"
+
+export lsp_main

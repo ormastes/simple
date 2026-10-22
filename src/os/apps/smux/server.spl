@@ -1,0 +1,227 @@
+# Independent foreground owner for hosted smux. Request clients can exit while
+# this process keeps every pane and drains its output. No thread shares _svc.
+# TCP/ConPTY provider availability must be qualified on the selected runtime.
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream, tcp_backend_set_nonblocking}
+use std.common.string_core.{bytes_to_text, text_to_bytes}
+use std.nogc_sync_mut.sosix.time.{sosix_time_now_monotonic_ms as time_now_monotonic_ms,
+    sosix_sleep_ms as thread_sleep_ms}
+use std.nogc_sync_mut.sosix.pty.{sosix_pty_cleanup_pending as pty_cleanup_pending}
+use std.nogc_sync_mut.sosix.stdio.{sosix_println}
+use os.apps.smux.api.{smux_poll_output, smux_reset_for_test}
+use os.apps.smux.smux_remote.{smux_remote_dispatch}
+
+const REQUEST_LIMIT: i64 = 4096
+const REPLY_LIMIT: i64 = 65536
+const CLIENT_LIMIT: i64 = 16
+const CLIENT_DEADLINE_MS: i64 = 2000
+
+class PendingClient:
+    stream: TcpStream
+    input: [u8]
+    output: [u8]
+    offset: i64
+    deadline: i64
+    replying: bool
+    stop_owner: bool
+
+fn valid_token(token: text) -> bool:
+    return token != "" and token.len() <= 128 and not token.contains(" ") and not token.contains("\t") and not token.contains("\r") and not token.contains("\n")
+
+fn local_endpoint(address: text) -> bool:
+    if not address.starts_with("127.0.0.1:"):
+        return false
+    val parts = address.split(":")
+    if parts.len() != 2:
+        return false
+    val port = parts[1].to_int() ?? 0
+    return port > 0 and port <= 65535
+
+# One complete frame, without its newline. Authentication precedes command
+# dispatch, including stop-server. Neither errors nor logs reveal the token.
+pub fn smux_server_dispatch(request: text, token: text) -> text:
+    if text_to_bytes(request).len() > REQUEST_LIMIT or request.contains("\n") or request.contains("\r"):
+        return "smux: invalid request"
+    if not valid_token(token) or not request.starts_with(token + " "):
+        return "smux: unauthorized"
+    val command = request[token.len() + 1:]
+    if command == "stop-server":
+        return "smux: stopping server"
+    return smux_remote_dispatch(command)
+
+fn prepare_reply(client: PendingClient, reply: text, stop: bool) -> PendingClient:
+    var output = text_to_bytes(reply)
+    if output.len() > REPLY_LIMIT:
+        output = text_to_bytes("smux: reply exceeds limit")
+    output = text_to_bytes("SMUX/1 " + output.len().to_text() + "\n") + output
+    return PendingClient(stream: client.stream, input: [], output: output,
+        offset: 0, deadline: time_now_monotonic_ms() + CLIENT_DEADLINE_MS,
+        replying: true, stop_owner: stop)
+
+# EOF alone cannot certify a complete response: a failed partial socket write
+# also ends the stream. The length frame makes truncation an explicit failure.
+pub fn smux_server_decode_reply(wire: [u8]) -> Result<text, text>:
+    var newline: i64 = -1
+    var i: i64 = 0
+    while i < wire.len() and i < 32 and newline < 0:
+        if wire[i] == 10:
+            newline = i
+        i = i + 1
+    if newline < 0:
+        return Err("invalid smux response header")
+    val header = bytes_to_text(wire[0:newline])
+    if not header.starts_with("SMUX/1 "):
+        return Err("invalid smux response header")
+    val length = header[7:].to_int() ?? -1
+    if length < 0 or length > REPLY_LIMIT:
+        return Err("invalid smux response length")
+    if wire.len() - newline - 1 != length:
+        return Err("incomplete smux response")
+    return Ok(bytes_to_text(wire[newline + 1:]))
+
+# Explicit owner lifetime: EOF or closure of a request socket closes ONLY that
+# socket. Only authenticated stop-server shuts down children and the listener.
+pub fn smux_server_serve(address: text, token: text) -> i64:
+    if not local_endpoint(address) or not valid_token(token):
+        return 1
+    val bound = TcpListener.bind(address)
+    if bound.is_err():
+        return 1
+    var listener = bound.unwrap()
+    var clients: [PendingClient] = []
+    var stop = false
+    var socket_cleanup_failed = false
+    sosix_println("smux: owner ready " + address)
+    while not stop:
+        val _polled = smux_poll_output()
+        val accepted = listener.accept_timeout(10)
+        if accepted.is_ok():
+            var stream = accepted.unwrap()
+            if clients.len() >= CLIENT_LIMIT or not tcp_backend_set_nonblocking(stream.fd, true):
+                if stream.close().is_err():
+                    socket_cleanup_failed = true
+            else:
+                clients.push(PendingClient(stream: stream, input: [], output: [],
+                    offset: 0, deadline: time_now_monotonic_ms() + CLIENT_DEADLINE_MS,
+                    replying: false, stop_owner: false))
+        var pending: [PendingClient] = []
+        for original in clients:
+            var client = original
+            var finished = time_now_monotonic_ms() >= client.deadline
+            if not finished and not client.replying:
+                val read = client.stream.read(4096)
+                if read.is_ok():
+                    val chunk = read.unwrap()
+                    if chunk.len() == 0:
+                        finished = true
+                    else:
+                        # Preserve bytes until the complete frame arrives, so
+                        # a split UTF-8 sequence is never decoded in isolation.
+                        client.input = client.input + chunk
+                        var newline: i64 = -1
+                        var i: i64 = 0
+                        while i < client.input.len() and newline < 0:
+                            if client.input[i] == 10:
+                                newline = i
+                            i = i + 1
+                        if newline >= 0:
+                            if newline != client.input.len() - 1 or newline > REQUEST_LIMIT:
+                                client = prepare_reply(client, "smux: invalid request", false)
+                            else:
+                                val frame = bytes_to_text(client.input[0:newline])
+                                val reply = smux_server_dispatch(frame, token)
+                                client = prepare_reply(client, reply, reply == "smux: stopping server")
+                        elif client.input.len() > REQUEST_LIMIT:
+                            client = prepare_reply(client, "smux: invalid request", false)
+                # The current facade conflates WouldBlock with read errors.
+                # Keep partial input until the absolute deadline; never restart
+                # its clock when a peer trickles bytes into the socket.
+            if not finished and client.replying:
+                var end = client.offset + 4096
+                if end > client.output.len():
+                    end = client.output.len()
+                val written = client.stream.write(client.output[client.offset:end])
+                if written.is_ok():
+                    val count = written.unwrap()
+                    if count <= 0:
+                        finished = true
+                    else:
+                        client.offset = client.offset + count
+                        finished = client.offset >= client.output.len()
+                # A short or WouldBlock write retains the exact remaining bytes.
+            if finished:
+                if client.stop_owner:
+                    stop = true
+                if client.stream.close().is_err():
+                    socket_cleanup_failed = true
+            else:
+                pending.push(client)
+        clients = pending
+    for client in clients:
+        var stream = client.stream
+        if stream.close().is_err():
+            socket_cleanup_failed = true
+    if listener.close().is_err():
+        socket_cleanup_failed = true
+    smux_reset_for_test()
+    val cleanup_deadline = time_now_monotonic_ms() + 2000
+    var cleanup = pty_cleanup_pending()
+    while cleanup > 0 and time_now_monotonic_ms() < cleanup_deadline:
+        thread_sleep_ms(5)
+        cleanup = pty_cleanup_pending()
+    if cleanup != 0 or socket_cleanup_failed:
+        return 1
+    return 0
+
+# Each invocation is a disposable client. A partial response or a timeout is
+# an error, not a successful capture. EOF must agree with the byte length frame.
+pub fn smux_server_request(address: text, token: text, command: text) -> Result<text, text>:
+    if not local_endpoint(address) or not valid_token(token):
+        return Err("invalid smux endpoint or token")
+    val frame = token + " " + command
+    if text_to_bytes(frame).len() > REQUEST_LIMIT or frame.contains("\n") or frame.contains("\r"):
+        return Err("invalid smux request")
+    val connected = TcpStream.connect_timeout(address, 1000)
+    if connected.is_err():
+        return Err("smux owner unavailable")
+    var stream = connected.unwrap()
+    if stream.set_read_timeout(1000).is_err() or stream.set_write_timeout(1000).is_err():
+        val _closed = stream.close()
+        return Err("smux transport timeout unavailable")
+    val deadline = time_now_monotonic_ms() + 5000
+    val request_bytes = text_to_bytes(frame + "\n")
+    var offset: i64 = 0
+    while offset < request_bytes.len() and time_now_monotonic_ms() < deadline:
+        val written = stream.write(request_bytes[offset:])
+        if written.is_err():
+            val _closed = stream.close()
+            return Err("smux request write failed")
+        val count = written.unwrap()
+        if count <= 0:
+            val _closed = stream.close()
+            return Err("smux request write failed")
+        offset = offset + count
+    if offset != request_bytes.len():
+        val _closed = stream.close()
+        return Err("smux request write timeout")
+    var output: [u8] = []
+    while time_now_monotonic_ms() < deadline:
+        val read = stream.read(4096)
+        if read.is_err():
+            val _closed = stream.close()
+            return Err("smux response read failed")
+        if read.is_ok():
+            val chunk = read.unwrap()
+            if chunk.len() == 0:
+                if stream.close().is_err():
+                    return Err("smux response close failed")
+                if output.len() == 0:
+                    return Err("empty smux response")
+                return smux_server_decode_reply(output)
+            output = output + chunk
+            if output.len() > REPLY_LIMIT + 32:
+                val _closed = stream.close()
+                return Err("smux response exceeds limit")
+    val _closed = stream.close()
+    return Err("smux response timeout")
+
+export smux_server_dispatch, smux_server_decode_reply, smux_server_serve, smux_server_request

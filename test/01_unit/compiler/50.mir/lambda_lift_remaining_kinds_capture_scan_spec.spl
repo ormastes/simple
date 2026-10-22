@@ -1,0 +1,109 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Capturing lambdas lift when the body uses the remaining HIR expression kinds
+
+PR #3880 gave the three lambda capture walks (`lambda_body_captures`,
+`lambda_capture_scan_supported`, `collect_free_var_syms`) arms for If/IfChain/
+EnumLit. 22 kinds still failed closed with `E-MIR-EXPR-Lambda`. Each case
+below captures a method parameter and must lift. Constructor/variant/function
+names are never captured (keyed by SymbolKind). Await and Yield stay refused:
+a lifted plain function has no async/generator frame, so lifting them would be
+a silent miscompile.
+"""
+# @tag: unit, compiler, mir, lambda
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn mir_errors(src: text) -> text:
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(src, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: src, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hl = hirlowering_for_module("app.main", surfaces)
+    val hir = hl.lower_module(ast)
+    var hm: Dict<text, HirModule> = {}
+    hm["app.main"] = hir
+    var ml = MirLowering.new(hir.symbols)
+    ml.prescan_module_struct_names(hm, "app.main")
+    ml.lower_module(hir)
+    var out = ""
+    for e in ml.errors:
+        out = out + e.message + "\n"
+    out
+
+val prelude = "class Box:\n    v: i64\n    static fn of(v: i64) -> Box:\n        Box(v: v)\n    fn then(f: fn(i64) -> Box) -> Box:\n        f(self.v)\n\nclass Rd:\n    buf: i64\n    pos: i64\n    static fn make(v: i64) -> Rd:\n        Rd(buf: v, pos: v)\n"
+
+fn lam(params: text, body_lines: text) -> text:
+    prelude + "    me go(" + params + ") -> Box:\n        Box.of(1).then(\\r:\n" + body_lines + "        )\n"
+
+describe "remaining HIR kinds in capturing lambdas":
+    it "lifts a capturing body using ArrayLit (collections)":
+        val e = mir_errors(lam("size: i64", "            val a = [r, size]\n            Box.of(a[0])\n"))
+        expect(e).to_equal("")
+    it "lifts a capturing body using ArrayRepeat (collections)":
+        val e = mir_errors(lam("size: i64", "            val a = [r; size]\n            Box.of(a[0])\n"))
+        expect(e).to_equal("")
+    it "lifts a capturing body using TupleLit (collections)":
+        val e = mir_errors(lam("size: i64", "            val t = (r, size)\n            Box.of(t.0)\n"))
+        expect(e).to_equal("")
+    it "lifts a capturing body using DictLit (collections)":
+        val e = mir_errors(lam("size: i64", "            val d = {1: size}\n            Box.of(r)\n"))
+        expect(e).to_equal("")
+    it "lifts a capturing body using OptionalChain (optional)":
+        val e = mir_errors(lam("o: Rd?", "            val p = o?.pos\n            Box.of(r)\n"))
+        expect(e).to_equal("")
+    it "lifts a capturing body using NullCoalesce (optional)":
+        val e = mir_errors(lam("n: i64?", "            val d = n ?? r\n            Box.of(d)\n"))
+        expect(e).to_equal("")
+    it "lifts a capturing body using ExistsCheck (optional)":
+        val e = mir_errors(lam("n: i64?", "            val has = n.?\n            if has:\n                Box.of(r)\n            else:\n                Box.of(0)\n"))
+        expect(e).to_equal("")
+    it "lifts a capturing body using Unwrap (optional)":
+        val e = mir_errors(lam("n: i64?", "            val u = n!\n            Box.of(u + r)\n"))
+        expect(e).to_equal("")
+    it "lifts a capturing body using StructLit (construct)":
+        val e = mir_errors(lam("size: i64", "            val x = Rd(buf: r, pos: size)\n            Box.of(x.pos)\n"))
+        expect(e).to_equal("")
+    it "lifts a capturing body using StaticCall (construct)":
+        val e = mir_errors(lam("size: i64", "            val x = Rd.make(size + r)\n            Box.of(x.pos)\n"))
+        expect(e).to_equal("")
+    it "lifts a capturing body using Range (construct)":
+        val e = mir_errors(lam("size: i64", "            val g = r..size\n            Box.of(r)\n"))
+        expect(e).to_equal("")
+    it "lifts a capturing body using Try (construct)":
+        val e = mir_errors(lam("size: i64", "            val res: Result<i64, text> = Ok(size)\n            val v = res?\n            Box.of(v)\n"))
+        expect(e).to_equal("")
+    it "lifts a capturing body using Return (control)":
+        val e = mir_errors(lam("size: i64", "            if r > size:\n                return Box.of(size)\n            Box.of(r)\n"))
+        expect(e).to_equal("")
+    it "lifts a capturing body using Loop (control)":
+        val e = mir_errors(lam("size: i64", "            var acc = r\n            loop:\n                acc = acc + size\n                if acc > 10:\n                    break\n            Box.of(acc)\n"))
+        expect(e).to_equal("")
+    it "lifts a capturing body using For (control)":
+        val e = mir_errors(lam("size: i64", "            var acc = r\n            for i in 0..3:\n                acc = acc + size + i\n            Box.of(acc)\n"))
+        expect(e).to_equal("")
+    it "lifts a capturing body using BreakContinue (control)":
+        val e = mir_errors(lam("size: i64", "            var acc = r\n            for i in 0..5:\n                if i == size:\n                    continue\n                if i > 3:\n                    break\n                acc = acc + i\n            Box.of(acc)\n"))
+        expect(e).to_equal("")
+    it "refuses a stray break or continue outside the lambda's own loop":
+        val e = mir_errors(lam("size: i64", "            if r > size:\n                break\n            Box.of(r)\n"))
+        expect(e.contains("cannot materialize lambda")).to_equal(true)
+        val c = mir_errors(lam("size: i64", "            if r > size:\n                continue\n            Box.of(r)\n"))
+        expect(c.contains("cannot materialize lambda")).to_equal(true)
+    it "still refuses a capturing body using Throw":
+        val e = mir_errors(lam("size: i64", "            if r > size:\n                throw size\n            Box.of(r)\n"))
+        expect(e.contains("cannot materialize lambda")).to_equal(true)
+    it "still refuses a capturing body using Await":
+        val e = mir_errors(lam("size: i64", "            val a = await Box.of(size)\n            Box.of(r)\n"))
+        expect(e.contains("cannot materialize lambda")).to_equal(true)

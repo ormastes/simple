@@ -15,7 +15,7 @@ Feature: spm-winfs-llm-suite AC-4.
 
 use os.services.vfs.vfs.{Filesystem, SeekWhence}
 use os.kernel.types.fs_types.{FileFlags, FsNode, FsNodeKind, DirEntry}
-use lib.common.win_fs.window_record.{WindowRecord, WindowState, FsOp}
+use lib.common.win_fs.window_record.{WindowRecord, WindowState, FsOp, window_state_name}
 use lib.common.win_fs.fs_encoder.{FsTree, FsEntry, encode_record, tree_has_path, tree_read, tree_readdir}
 use lib.common.win_fs.acl.{acl_check}
 use lib.common.privilege.authority_token.{AuthorityToken}
@@ -119,7 +119,10 @@ class WinVfsDriver:
         self.is_mounted = true
         DriverMountResult(ok: true, error: "")
 
-    me open(path: text, flags: FileFlags) -> OpenResult:
+    # `open`/`readdir` belong to the Filesystem trait below. The record-shaped
+    # facade uses distinct names: when it shared them, the trait methods
+    # (`self.open(...)`) dispatched back into themselves and recursed.
+    me open_result(path: text, flags: FileFlags) -> OpenResult:
         val located = self._locate(path)
         if located.records.len() == 0 as i64:
             return OpenResult.failure("ENOENT: {path}")
@@ -131,7 +134,7 @@ class WinVfsDriver:
         self.open_handles = self.open_handles + [OpenHandle(handle_id: h, wid: rec.wid, path: path)]
         OpenResult.success(h)
 
-    me readdir(path: text) -> ReaddirResult:
+    me readdir_result(path: text) -> ReaddirResult:
         if path == "/" or path == "":
             return ReaddirResult(ok: true, value: self._app_entries(), error: "")
         val located = self._locate(path)
@@ -142,7 +145,7 @@ class WinVfsDriver:
             return ReaddirResult(ok: false, value: [], error: "EACCES: {path}")
         val tree = encode_record(rec)
         var entries: [DirEntry] = []
-        for name in tree.readdir(path):
+        for name in tree_readdir(tree, path):
             entries = entries + [_make_dir_entry(name)]
         ReaddirResult(ok: true, value: entries, error: "")
 
@@ -154,7 +157,7 @@ class WinVfsDriver:
         if not acl_check(rec, self.current_token, FsOp.Read):
             return []
         val tree = encode_record(rec)
-        tree.read(path)
+        tree_read(tree, path)
 
     # -- internals -----------------------------------------------------------
 
@@ -208,7 +211,7 @@ impl Filesystem for WinVfsDriver:
         Result.Ok(true)
 
     fn open(path: text, flags: FileFlags) -> Result<u64, text>:
-        val r = self.open(path, flags)
+        val r = self.open_result(path, flags)
         if r.ok:
             return Result.Ok(r.value)
         Result.Err(r.error)
@@ -244,9 +247,6 @@ impl Filesystem for WinVfsDriver:
             return Result.Err("ENOENT: {path}")
         Result.Ok(_stub_fs_node())
 
-    fn stat_no_follow(path: text) -> Result<FsNode, text>:
-        Result.Err("Unsupported: win_vfs no-follow stat")
-
     fn chmod(path: text, mode: u16) -> Result<bool, text>:
         Result.Err("EROFS")
 
@@ -257,7 +257,7 @@ impl Filesystem for WinVfsDriver:
         Result.Err("EROFS")
 
     fn readdir(path: text) -> Result<[DirEntry], text>:
-        val r = self.readdir(path)
+        val r = self.readdir_result(path)
         if r.ok:
             return Result.Ok(r.value)
         Result.Err(r.error)
@@ -270,9 +270,6 @@ impl Filesystem for WinVfsDriver:
 
     fn symlink(target: text, link_path: text) -> Result<bool, text>:
         Result.Err("EROFS")
-
-    fn readlink(path: text) -> Result<text, text>:
-        Result.Err("ENOTSUP: win_vfs has no symbolic-link records")
 
 # ---------------------------------------------------------------------------
 # Spec-facing constructors + helpers

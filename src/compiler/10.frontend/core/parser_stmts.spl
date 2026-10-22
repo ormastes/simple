@@ -1,3 +1,4 @@
+use compiler.core.parser.{parser_lexical_scope_enter, parser_lexical_scope_leave, parser_lexical_bind_value, parser_lexical_unknown_shadow}
 use compiler.frontend.core.parser_use_path.{parse_use_decl}
 use compiler.core.ast_stmt.{stmt_use_import}
 # Parser — Statement Module
@@ -11,6 +12,7 @@ use compiler.core.tokens.{TOK_INT_LIT, TOK_STRING_LIT}
 use compiler.core.tokens.{TOK_IDENT}
 use compiler.core.tokens.{TOK_KW_DYN}
 use compiler.core.tokens.{TOK_KW_VAL, TOK_KW_VAR, TOK_KW_FN}
+use compiler.core.tokens.{TOK_KW_ME, TOK_KW_EXTERN}
 use compiler.core.tokens.{TOK_KW_IF, TOK_KW_ELIF, TOK_KW_ELSE}
 use compiler.core.tokens.{TOK_KW_FOR, TOK_KW_WHILE, TOK_KW_IN, TOK_KW_LOOP}
 use compiler.core.tokens.{TOK_KW_MATCH, TOK_KW_CASE}
@@ -37,9 +39,11 @@ use compiler.core.tokens.{TOK_KW_BIND, TOK_KW_RECEIVE, TOK_KW_AFTER}
 use compiler.core.tokens.{TOK_BACKSLASH}
 use compiler.core.ast.{EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT}
 use compiler.core.ast.{EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT}
+use compiler.core.ast.{EXPR_TUPLE, EXPR_UNIT}
 use compiler.core.ast.{EXPR_BINARY, EXPR_UNARY, EXPR_CALL, EXPR_METHOD_CALL, EXPR_ARRAY_LIT, EXPR_FIELD_ACCESS}
 use compiler.core.ast.{expr_ident, expr_call, expr_binary, expr_nil_lit, expr_field_access, expr_bool_lit, expr_string_lit}
 use compiler.core.ast.{expr_int_lit, expr_float_lit}
+use compiler.core.ast.{expr_array_repeat}
 use compiler.core.ast_expr.{expr_mark_colon_block}
 use compiler.core.ast.{expr_if_expr, expr_for_expr, expr_while_expr, expr_match_expr}
 use compiler.core.ast.{expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pass_todo_call, expr_pass_do_nothing, expr_pass_dn}
@@ -58,7 +62,8 @@ use compiler.frontend.core.collection_feedback.{parser_collection_site_owner_pus
 use compiler.frontend.core._ParserStmt.match_type_pattern.{parse_match_type_pattern}
 use compiler.frontend.core.lexer.{lex_pop_indent, lex_enable_forced_indentation, lex_disable_forced_indentation}
 use compiler.frontend.core.lexer.{lex_mark_current_token_as_generic_close}
-use compiler.core.ast.{expr_get_tag, expr_get_str, expr_get_left, expr_get_args, expr_set_span}
+use compiler.core.ast.{expr_get_tag, expr_get_str, expr_get_left, expr_get_args, expr_get_span, expr_set_span}
+use compiler.core.types.{span_is_valid, span_start, span_line, span_col}
 use compiler.core.ast.{expr_get_arg_names, expr_call_args_set}
 use compiler.core.ast.{stmt_expr_stmt, stmt_val_decl, stmt_if_val_decl, stmt_lazy_val_decl, stmt_var_decl}
 use compiler.core.ast.{stmt_get_expr, stmt_get_name, module_get_path}
@@ -71,7 +76,7 @@ use compiler.core.ast.{STMT_CONTRACT_IN, STMT_CONTRACT_INVARIANT, STMT_CONTRACT_
 use compiler.core.ast.{STMT_CONTRACT_OUT_ERR, STMT_CONTRACT_DECREASES, STMT_CONTRACT_PROOF_USES, stmt_contract_clause}
 use compiler.core.ast.{STMT_RECEIVE, stmt_receive_stmt, STMT_BIND, stmt_bind_stmt}
 use compiler.core.ast.{stmt_defer_stmt, stmt_errdefer_stmt, stmt_defer_block_stmt, stmt_errdefer_block_stmt}
-use compiler.core.ast.{decl_extern_fn}
+use compiler.core.ast.{decl_extern_fn, decl_get_tag, decl_get_name, module_add_decl, module_decl_at, module_decl_count_get}
 use compiler.core.ast.{STMT_GPU_LAUNCH, stmt_gpu_launch}
 use compiler.core.ast.{STMT_CONTRACT_IN, STMT_CONTRACT_INVARIANT, STMT_CONTRACT_OUT}
 use compiler.core.ast.{STMT_CONTRACT_OUT_ERR, STMT_CONTRACT_DECREASES, STMT_CONTRACT_PROOF_USES}
@@ -83,7 +88,9 @@ use compiler.core.ast.{EXPR_RETURN, EXPR_BREAK, EXPR_CONTINUE}
 use compiler.core.ast.{STMT_RETURN, STMT_BREAK, STMT_CONTINUE, STMT_EXPR}
 use compiler.core.ast.{stmt_tag, stmt_expr}
 use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID, flat_span_new}
-use compiler.core.types.{TYPE_ARRAY_ANY}
+use compiler.core.types.{TYPE_ARRAY_ANY, TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL}
+use compiler.core.types.{is_array_generic_tag}
+use compiler.core.types.{TYPE_RESULT, is_result_tag}
 use compiler.core.types.{TYPE_NIL}
 use compiler.core.types.{TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32}
 use compiler.core.types.{TYPE_NAMED_BASE}
@@ -91,6 +98,8 @@ use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get,
 use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_warn, parser_warn_print_if_needed}
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.core.parser.{parser_parse_type, parser_parse_type_with_union}
+use compiler.core.parser.{par_fixed_array_elem, par_fixed_array_size}
+use compiler.core.parser.{parser_legacy_let_decl_ahead, parser_consume_legacy_let_prefix}
 use compiler.core.parser.{rt_is_debug_mode_enabled}
 use compiler.core.parser.{parser_diagnostics_suppressed_get}
 use compiler.frontend.trace_policy.{frontend_trace_suppressed, frontend_compiler_trace_enabled}
@@ -277,6 +286,10 @@ fn infer_expr_type_from_parse(expr_id: i64) -> i64:
 # leaving the token stream exactly as found (snapshot-restored).
 fn try_parse_bare_ident_string_call() -> (bool, i64):
     val bc_name = par_text_get()
+    val bc_start = lex_token_start_get()
+    val bc_end = lex_token_end_get()
+    val bc_line = par_line_get()
+    val bc_col = par_col_get()
     val bc_snap = lex_snapshot_save()
     val (bc_tok_n, bc_tok_t) = parser_tok_save()
     parser_advance()
@@ -293,22 +306,37 @@ fn try_parse_bare_ident_string_call() -> (bool, i64):
         val next_arg = parse_expr()
         bc_args.push(next_arg)
     lex_snapshot_commit(bc_snap)
-    (true, expr_call(expr_ident(bc_name, 0), bc_args, 0))
+    # Preserve the same source-character coordinate convention as postfix
+    # spans. Consumers needing UTF-8 byte offsets convert against the source.
+    # See sspec_parser_missing_source_spans_2026-10-11.md.
+    val bc_ident_span = flat_span_new(bc_start, bc_end, bc_line, bc_col)
+    val bc_call_span = flat_span_new(bc_start, lex_token_start_get(), bc_line, bc_col)
+    (true, expr_call(expr_ident(bc_name, bc_ident_span), bc_args, bc_call_span))
 
 fn parse_trailing_colon_block_arg(call_expr: i64) -> i64:
+    val cb_start = lex_token_start_get()
+    val cb_line = par_line_get()
+    val cb_col = par_col_get()
+    val call_span = expr_get_span(call_expr)
     parser_expect(TOK_COLON)
     val body_stmts = parse_block()
-    val block_expr = expr_block(body_stmts, -1, 0)
+    # EOF/dedent token starts can still name the preceding token. The end
+    # position is the parser's consumed-source boundary in those cases.
+    val cb_end = if par_kind_get() == TOK_EOF or par_kind_get() == TOK_DEDENT: lex_token_end_get() else: lex_token_start_get()
+    val cb_span = flat_span_new(cb_start, cb_end, cb_line, cb_col)
+    val block_expr = expr_block(body_stmts, -1, cb_span)
     var lambda_body: [i64] = []
     lambda_body.push(block_expr)
     var lambda_params: [i64] = []
-    val lambda_idx = expr_lambda(lambda_params, lambda_body, 0)
+    val lambda_idx = expr_lambda(lambda_params, lambda_body, cb_span)
     expr_mark_colon_block(lambda_idx)
     var cb_args = expr_get_args(call_expr)
     var cb_names = expr_get_arg_names(call_expr)
     cb_args.push(lambda_idx)
     cb_names.push("")
     expr_call_args_set(call_expr, cb_args, cb_names)
+    if span_is_valid(call_span):
+        expr_set_span(call_expr, flat_span_new(span_start(call_span), cb_end, span_line(call_span), span_col(call_span)))
     call_expr
 
 # Can `kind` legally open a FLAT body — a block body written on the NEXT line at
@@ -363,6 +391,12 @@ fn parse_block_flat_body_can_start(kind: i64) -> bool:
     false
 
 fn parse_block() -> [i64]:
+    parser_lexical_scope_enter()
+    val result = parse_block_lexical_body()
+    parser_lexical_scope_leave()
+    result
+
+fn parse_block_lexical_body() -> [i64]:
     var stmts: [i64] = []
     val crossed_newline = par_kind_get() == 180
     parser_skip_newlines()
@@ -405,11 +439,32 @@ fn parse_block() -> [i64]:
 fn parse_use_stmt_inline() -> i64:
     stmt_use_import(parse_use_decl(), 0)
 
-# extern fn declaration inside a function body: register the signature
-# globally (same as a top-level extern) and emit a no-op statement.
+# True when the module being parsed already declares a function named `name`:
+# a `fn` (tag 1) or an extern (tag 2), top-level or hoisted from an earlier
+# body. A body-local extern must never replace a real module function (e.g.
+# the @cfg(not(baremetal)) host twins in src/os/kernel/loader/segment_mapper.spl).
+fn _module_has_function_decl(name: text) -> bool:
+    val count = module_decl_count_get()
+    var i = 0
+    while i < count:
+        val d = module_decl_at(i)
+        if d >= 0 and (decl_get_tag(d) == 1 or decl_get_tag(d) == 2) and decl_get_name(d) == name:
+            return true
+        i = i + 1
+    false
+
+# extern fn declaration inside a function body: register the signature as a
+# module declaration (same as a top-level extern) and emit a no-op statement.
+# The same extern is commonly re-declared in several bodies of one module, so
+# only the first declaration of a name is added (first signature wins); later
+# ones, and any that name an existing module `fn`, are no-ops. This registers
+# at module scope, not the lexical scope of the enclosing body
+# (pure_simple_nested_extern_registration_2026_10_12 asks for lexical scope).
+# A top-level extern of the same name that FOLLOWS the body is not deduped.
 # Inlined here (like parse_use_stmt_inline) to avoid a circular dep with
 # the decl-parsing modules, which import parse_block from this file.
 fn parse_extern_fn_stmt_inline() -> i64:
+    val representation_owner = representation_declaration_begin_v1("nested_extern")
     parser_advance()  # consume 'extern'
     parser_expect(20)
     val ef_name = par_text_get()
@@ -436,7 +491,9 @@ fn parse_extern_fn_stmt_inline() -> i64:
         parser_advance()
         ef_ret = parser_parse_type()
     val ef_tparams: [text] = []
-    decl_extern_fn(ef_name, ef_pnames, ef_ptypes, ef_ret, ef_tparams, 0)
+    if not _module_has_function_decl(ef_name):
+        module_add_decl(decl_extern_fn(ef_name, ef_pnames, ef_ptypes, ef_ret, ef_tparams, 0))
+    representation_declaration_end_v1(representation_owner, -1, ef_name)
     stmt_expr_stmt(expr_pass(0), 0)
 
 fn parse_contract_clause_expr_stmt() -> i64:
@@ -535,6 +592,8 @@ fn try_parse_contract_stmt() -> i64:
     lex_snapshot_commit(snap)
     stmt_contract_clause(tag, binding, body, 0)
 
+use compiler.frontend.core.representation_declarations_v1.{representation_record_region_v1, representation_parse_attribute_v1, representation_declaration_begin_v1, representation_declaration_end_v1, representation_reject_pending_v1}
+
 fn parse_unsafe_block_expr_if_present() -> i64:
     """Parse contextual `unsafe...:` in expression position; return -1 on no match."""
     if par_kind_get() != TOK_IDENT:
@@ -550,6 +609,7 @@ fn parse_unsafe_block_expr_if_present() -> i64:
         parser_advance()
         val unsafe_body = parse_block()
         lex_snapshot_commit(unsafe_snap)
+        representation_record_region_v1([])
         return expr_unsafe_block(unsafe_body, 0)
 
     if par_kind_get() == TOK_LPAREN:
@@ -614,6 +674,7 @@ fn parse_unsafe_block_expr_if_present() -> i64:
                 parser_advance()
                 val unsafe_body = parse_block()
                 lex_snapshot_commit(unsafe_snap)
+                representation_record_region_v1(unsafe_caps)
                 return expr_unsafe_block_with_caps(unsafe_body, unsafe_caps, 0)
 
     lex_snapshot_rollback(unsafe_snap)
@@ -715,16 +776,80 @@ fn try_parse_collection_algorithm_stmt() -> i64:
     stmt_i64_set(decl, "EXPR", call)
     decl
 
+# `@name` / `@name(...)` attribute directly ahead of a nested declaration
+# inside a function body (e.g. `@unsafe(reason: ..., capabilities: [...])`
+# before an `extern fn` in ipc_handlers.spl). Metadata-only: consumed and
+# dropped — a nested declaration is not a module item, so the
+# UNSAFE_ANNOTATIONS consumer never sees it (the same documented gap as
+# block-level @unsafe in enum_module_body.spl). The declaration after the
+# attribute is parsed by the ordinary statement dispatch.
+fn parse_attributed_nested_decl_stmt() -> i64:
+    val representation_start = lex_token_start_get()
+    val representation_line = par_line_get()
+    val representation_col = par_col_get()
+    parser_advance()
+    if par_kind_get() == TOK_IDENT:
+        val representation_attribute = par_text_get() == "representation_boundary"
+        parser_advance()
+        if representation_attribute:
+            representation_parse_attribute_v1(representation_start, representation_line, representation_col)
+            parser_skip_newlines_and_semicolons()
+            return parse_statement()
+    if par_kind_get() == TOK_LPAREN:
+        parser_advance()
+        var depth = 1
+        while depth > 0:
+            val ak = par_kind_get()
+            if ak == TOK_EOF:
+                break
+            if ak == TOK_LPAREN:
+                depth = depth + 1
+            elif ak == TOK_RPAREN:
+                depth = depth - 1
+            parser_advance()
+    parser_skip_newlines_and_semicolons()
+    parse_statement()
+
 fn parse_statement() -> i64:
     var kind = par_kind_get()
+    # Opaque declarations/imports may shadow a captured value. Until their
+    # actual symbol kind is known, retain the allocation path (partial HOLD).
+    val binding_keyword = tok_kind_name(kind)
+    if (binding_keyword == "use" or binding_keyword == "fn" or
+            binding_keyword == "extern" or binding_keyword == "struct" or
+            binding_keyword == "class" or binding_keyword == "enum" or
+            binding_keyword == "trait" or binding_keyword == "type" or
+            binding_keyword == "alias" or binding_keyword == "impl" or
+            binding_keyword == "mod" or kind == TOK_AT):
+        parser_lexical_unknown_shadow()
     val contract_stmt = try_parse_contract_stmt()
     if contract_stmt >= 0:
         return contract_stmt
     kind = par_kind_get()
+    if kind != TOK_AT and kind != TOK_KW_FN and kind != TOK_KW_ME and kind != TOK_KW_EXTERN:
+        representation_reject_pending_v1()
     if kind == TOK_AT:
         val attributed = try_parse_collection_algorithm_stmt()
         if attributed >= 0:
             return attributed
+        # Attribute ahead of a nested declaration inside a body — seed
+        # parity: the seed's statement router accepts attributed items
+        # anywhere (e.g. `@unsafe(reason: ..., capabilities: [...]) extern
+        # fn mmio_read8(...)` inside me _dispatch_ipc,
+        # src/os/services/netstack/_NetstackService/ipc_handlers.spl).
+        # Consumed as a metadata-only skip: a nested declaration is not a
+        # module item, so there is no UNSAFE_ANNOTATIONS consumer for it
+        # (the same documented gap as block-level @unsafe in
+        # enum_module_body.spl). Only entered when an attribute name
+        # follows `@`; anything else keeps the historical expression path.
+        val at_snap = lex_snapshot_save()
+        val (at_nums, at_txt) = parser_tok_save()
+        parser_advance()
+        val has_attr_name = par_kind_get() == TOK_IDENT
+        lex_snapshot_rollback(at_snap)
+        parser_tok_restore(at_nums, at_txt)
+        if has_attr_name:
+            return parse_attributed_nested_decl_stmt()
     if kind == 21:
         return parse_val_decl_stmt()
 
@@ -733,6 +858,12 @@ fn parse_statement() -> i64:
         return parse_lazy_val_decl_stmt()
 
     if kind == 22:
+        return parse_var_decl_stmt()
+
+    # Legacy `let [mut] x ...` statement form (seed parity: parse_let). `let`
+    # lexes as a plain identifier, so the declaration reading is gated on the
+    # contextual parser_legacy_let_decl_ahead() probe.
+    if kind == TOK_IDENT and par_text_get() == "let" and parser_legacy_let_decl_ahead():
         return parse_var_decl_stmt()
 
     # use statement inside function body: consume tokens, return pass (no-op)
@@ -981,15 +1112,34 @@ fn parse_statement() -> i64:
 
         if ident_text == "assert":
             parser_advance()
+            val assert_parenthesized = par_kind_get() == TOK_LPAREN
             val assert_cond = parse_expr()
             # Desugar to the raising builtin `__assert(cond[, msg])`. Returning
             # the bare condition here made every `assert` a no-op: the value was
             # evaluated and discarded, never checked.
             var assert_args: [i64] = []
-            assert_args.push(assert_cond)
+            # A parenthesized assertion's comma separates builtin arguments,
+            # not fields of a truthy tuple. Parse the complete expression first
+            # so grouped conditions such as `(left) or right` keep working.
+            if assert_parenthesized and expr_get_tag(assert_cond) == EXPR_TUPLE:
+                val parenthesized_args = expr_get_args(assert_cond)
+                if parenthesized_args.len() == 0 or parenthesized_args.len() > 2:
+                    parser_error("assert requires a condition and at most one message")
+                for assert_arg in parenthesized_args:
+                    assert_args.push(assert_arg)
+            else:
+                assert_args.push(assert_cond)
             if par_kind_get() == 160:
                 parser_advance()
                 assert_args.push(parse_expr())
+                if par_kind_get() == TOK_COMMA:
+                    parser_error("assert accepts at most one message")
+            if assert_args.len() > 2:
+                parser_error("assert accepts at most one message")
+            if assert_args.len() > 0:
+                val condition_tag = expr_get_tag(assert_args[0])
+                if condition_tag == EXPR_UNIT or condition_tag == EXPR_TUPLE:
+                    parser_error("assert requires a condition, not a unit or tuple value")
             val assert_call = expr_call(expr_ident("__assert", 0), assert_args, 0)
             return stmt_expr_stmt(assert_call, 0)
 
@@ -1095,10 +1245,12 @@ fn parse_statement() -> i64:
         if par_kind_get() == TOK_IDENT:
             val me_stmt_name = par_text_get()
             parser_advance()
+            val representation_owner = representation_declaration_begin_v1("nested_callable")
             val previous_collection_owner = parser_collection_site_owner_push(me_stmt_name)
             val me_stmt_lambda = parse_fn_lambda_after_kw()
             parser_collection_site_owner_restore(previous_collection_owner)
             lex_snapshot_commit(me_snap)
+            representation_declaration_end_v1(representation_owner, -1, me_stmt_name)
             return stmt_val_decl(me_stmt_name, 0, me_stmt_lambda, 0)
         lex_snapshot_rollback(me_snap)
         parser_tok_restore(me_tok_nums, me_tok_text)
@@ -1117,6 +1269,7 @@ fn parse_statement() -> i64:
     # seed never pre-binds the name before evaluating the body). This
     # desugar matches that: it supports the non-recursive case only.
     if kind == TOK_KW_FN:
+        val representation_owner = representation_declaration_begin_v1("nested_callable")
         parser_advance()  # consume fn
         kind = par_kind_get()
         if kind == TOK_IDENT:
@@ -1125,9 +1278,11 @@ fn parse_statement() -> i64:
             val previous_collection_owner = parser_collection_site_owner_push(nested_fn_name)
             val nested_lambda = parse_fn_lambda_after_kw()
             parser_collection_site_owner_restore(previous_collection_owner)
+            representation_declaration_end_v1(representation_owner, -1, nested_fn_name)
             return stmt_val_decl(nested_fn_name, 0, nested_lambda, 0)
         # fn(...): ... with no name — anonymous lambda expression statement.
         val anon_lambda = parse_fn_lambda_after_kw()
+        representation_declaration_end_v1(representation_owner, -1, "")
         return stmt_expr_stmt(anon_lambda, 0)
 
     # Expression statement (including assignment and walrus)
@@ -1327,6 +1482,8 @@ fn parse_val_decl_stmt() -> i64:
     if type_tag == 0:
         type_tag = infer_expr_type_from_parse(init)
 
+    # The initializer sees the prior scope, matching HIR declaration order.
+    parser_lexical_bind_value(name)
     stmt_val_decl(name, type_tag, init, 0)
 
 fn parse_lazy_val_decl_stmt() -> i64:
@@ -1348,7 +1505,18 @@ fn parse_lazy_val_decl_stmt() -> i64:
     stmt_lazy_val_decl(name, type_tag, init, 0)
 
 fn parse_var_decl_stmt() -> i64:
+    # Legacy `let [mut]` prefix: same mutable binding as `var` (seed parity,
+    # stmt_parsing/var_decl.rs parse_let). `let` is not a keyword token here,
+    # so it is recognised contextually and consumed before the ordinary
+    # `var` body runs; the parse_statement dispatch arm gates on
+    # parser_legacy_let_decl_ahead() so identifier usages (`let = 5`,
+    # `let.push(x)`) still take the expression path.
+    var legacy_let = false
+    if par_kind_get() == TOK_IDENT and par_text_get() == "let" and parser_legacy_let_decl_ahead():
+        legacy_let = true
     parser_advance()
+    if legacy_let:
+        parser_consume_legacy_let_prefix()
 
     # Tuple destructuring: var (a, b, c) = expr
     if par_kind_get() == 140:
@@ -1378,6 +1546,8 @@ fn parse_var_decl_stmt() -> i64:
     var type_tag = 0
     var has_type_annotation = false
     var type_looks_named = false
+    var fixed_array_elem = 0
+    var fixed_array_size = -1
     if par_kind_get() == 161:
         parser_advance()
         # Peek the raw type-position token before parser_parse_type() resolves
@@ -1399,6 +1569,8 @@ fn parse_var_decl_stmt() -> i64:
         type_looks_named = type_start_kind == TOK_IDENT and type_start_text.len() > 0 and type_start_text[0:1] >= "A" and type_start_text[0:1] <= "Z"
         type_tag = parser_parse_type()
         has_type_annotation = true
+        fixed_array_elem = par_fixed_array_elem
+        fixed_array_size = par_fixed_array_size
 
     # Type inference for var declarations handled after initialization
 
@@ -1412,10 +1584,12 @@ fn parse_var_decl_stmt() -> i64:
     # to the ordinary parser_expect(100) error below.
     val at_stmt_end = par_kind_get() == TOK_NEWLINE or par_kind_get() == TOK_SEMICOLON or par_kind_get() == TOK_DEDENT or par_kind_get() == TOK_EOF
     if has_type_annotation and at_stmt_end:
-        return stmt_var_decl(name, type_tag, var_no_init_default_expr(type_tag, type_looks_named), 0)
+        parser_lexical_bind_value(name)
+        return stmt_var_decl(name, type_tag, var_no_init_default_expr(type_tag, type_looks_named, fixed_array_elem, fixed_array_size), 0)
 
     parser_expect(100)
     val init = parse_expr()
+    parser_lexical_bind_value(name)
     stmt_var_decl(name, type_tag, init, 0)
 
 # Synthesizes the default-value initializer for a `var name: Type` declared
@@ -1425,14 +1599,17 @@ fn parse_var_decl_stmt() -> i64:
 # (seed's `var t: SomeStruct` reads as a nil receiver until assigned, and
 # accessing a field before assignment already fails loud at runtime via the
 # existing nil-receiver check -- not a new failure mode, just deferred to
-# first use). Every other category (text, Option, Result, Dict, arrays,
+# first use). Fixed-size arrays with an integer-literal size (`var t: [T; N]`)
+# zero-fill via fixed_array_no_init_default_expr — seed parity (module_pass.rs
+# zero-fills `[T; N]` globals; the interpreter zero-fills `[T; N]` locals).
+# Every other category (text, Option, Result, Dict, dynamically-sized arrays,
 # tuples, fn types, unions/intersections/refinements, bare struct/any/void)
 # has no safe, well-defined zero value to replicate: the seed's own
 # read-before-assign behavior for those is undefined garbage (e.g. `var s:
 # text` read before assignment observably returned a corrupt length under
 # the seed), so guessing one here would turn a loud gap into a silently
 # wrong answer. Those are rejected with a located parser error instead.
-fn var_no_init_default_expr(type_tag: i64, type_looks_named: bool) -> i64:
+fn var_no_init_default_expr(type_tag: i64, type_looks_named: bool, fixed_array_elem: i64, fixed_array_size: i64) -> i64:
     if type_tag == TYPE_BOOL:
         return expr_bool_lit(0, 0)
     val is_plain_int = type_tag == TYPE_I64 or type_tag == TYPE_U8 or type_tag == TYPE_U16 or type_tag == TYPE_U32
@@ -1445,8 +1622,54 @@ fn var_no_init_default_expr(type_tag: i64, type_looks_named: bool) -> i64:
         return expr_nil_lit(0)
     if type_tag == TYPE_VOID and type_looks_named:
         return expr_nil_lit(0)
-    parser_error("var without initializer not yet supported for this declared type; only bool/i64/f64/fixed-width-int scalars and named struct/class types support declare-without-initializer -- add an explicit initializer")
+    # Result<T, E> (bare TYPE_RESULT or a registered Result<T,E> instance
+    # tag): seed parity -- parse_let_impl accepts an initializer-less
+    # binding of ANY annotated type and lowers it to a zero-initialized
+    # local slot (HirStmt::Let { value: None }); the declare-then-assign
+    # idiom (`var r: Result<T, E>` then branch assignments, e.g.
+    # src/os/kernel/fd_io.spl:559 and src/os/tools/pkg/pkg_repository.spl:158)
+    # never reads the slot before assignment. A nil literal is the
+    # self-hosted equivalent of the zero slot and is exactly what an
+    # explicit `= nil` initializer produces (verified e2e against the seed).
+    if type_tag == TYPE_RESULT or is_result_tag(type_tag):
+        return expr_nil_lit(0)
+    val fixed_arr = fixed_array_no_init_default_expr(type_tag, fixed_array_elem, fixed_array_size)
+    if fixed_arr != 0:
+        return fixed_arr
+    parser_error("var without initializer not yet supported for this declared type; only bool/i64/f64/fixed-width-int scalars, fixed-size arrays [T; N], and named struct/class types support declare-without-initializer -- add an explicit initializer")
     expr_nil_lit(0)
+
+# Synthesizes the zero-filled default initializer for a `var name: [T; N]`
+# declared with no `=` (module-level parse_var_decl and stmt-level
+# parse_var_decl_stmt). Seed parity: the seed zero-fills fixed-array storage
+# (module globals: hir/lower/module_lowering/module_pass.rs turns an
+# initializer-less `var name: [T; N]` into `vec![0; n]`; locals: the
+# interpreter materializes `[T; N]` bindings as zero-filled FixedSizeArray).
+# The self-hosted type-tag lane is dynamic and drops N, so rebuild the same
+# shape as an explicit `= [zero; N]`: EXPR_ARRAY_REPEAT already lowers
+# through the existing ArrayRepeat flat-bridge/HIR path. `fixed_elem` /
+# `fixed_size` are the par_fixed_array_* side-channel captured immediately
+# after the annotation's parser_parse_type call. Returns 0 when the
+# annotation is not a fixed-size array with a zeroable element type, so
+# callers can fall through to their ordinary missing-initializer error.
+fn fixed_array_no_init_default_expr(type_tag: i64, fixed_elem: i64, fixed_size: i64) -> i64:
+    if fixed_size < 0 or fixed_elem == 0:
+        return 0
+    val is_arr = type_tag == TYPE_ARRAY_I64 or type_tag == TYPE_ARRAY_TEXT or type_tag == TYPE_ARRAY_BOOL or type_tag == TYPE_ARRAY_ANY or is_array_generic_tag(type_tag)
+    if not is_arr:
+        return 0
+    # Zero element per the seed's zero-fill semantics. Decide eligibility on
+    # tags BEFORE allocating anything: expr arena index 0 is a valid node, so
+    # an allocated-expr sentinel would misfire on the first node of a file.
+    # Unsupported element types (text, named, nested arrays, any/unresolved)
+    # keep the ordinary missing-initializer error.
+    if fixed_elem == TYPE_BOOL:
+        return expr_array_repeat(expr_bool_lit(0, 0), expr_int_lit(fixed_size, 0), 0)
+    if fixed_elem == TYPE_F64:
+        return expr_array_repeat(expr_float_lit("0.0", 0), expr_int_lit(fixed_size, 0), 0)
+    if fixed_elem == TYPE_I64 or fixed_elem == TYPE_U8 or fixed_elem == TYPE_U16 or fixed_elem == TYPE_U32 or fixed_elem == TYPE_U64 or fixed_elem == TYPE_I8 or fixed_elem == TYPE_I16 or fixed_elem == TYPE_I32:
+        return expr_array_repeat(expr_int_lit(0, 0), expr_int_lit(fixed_size, 0), 0)
+    0
 
 # ===== Control Flow Statements =====
 
@@ -1657,7 +1880,10 @@ fn parse_for_stmt() -> i64:
     parser_expect(50)
     val iterable = parse_expr()
     parser_expect(161)
+    parser_lexical_scope_enter()
+    parser_lexical_bind_value(iter_name)
     val body = parse_block()
+    parser_lexical_scope_leave()
     stmt_for_stmt(iter_name, iterable, body, 0)
 
 fn parse_static_for_stmt() -> i64:
@@ -2465,6 +2691,7 @@ fn parse_tuple_destructure_val() -> i64:
     joined = joined + ")"
     parser_expect(100)
     val init = parse_expr()
+    parser_lexical_unknown_shadow()
     stmt_val_decl(joined, 0, init, 0)
 
 fn parse_tuple_destructure_var() -> i64:
@@ -2508,6 +2735,7 @@ fn parse_tuple_destructure_var() -> i64:
     joined = joined + ")"
     parser_expect(100)
     val init = parse_expr()
+    parser_lexical_unknown_shadow()
     stmt_var_decl(joined, 0, init, 0)
 
 # ===== GPU Launch Statement =====
@@ -2568,6 +2796,7 @@ fn parse_gpu_launch_stmt() -> i64:
 export parse_block, parse_statement, parse_trailing_colon_block_arg
 export try_parse_bare_ident_string_call
 export parse_val_decl_stmt, parse_lazy_val_decl_stmt, parse_var_decl_stmt
+export var_no_init_default_expr, fixed_array_no_init_default_expr
 export parse_if_stmt, parse_for_stmt, parse_while_stmt
 export parse_match_stmt_tail, parse_match_expr_tail, g33_kw_ident_follow
 export parse_unsafe_block_expr_if_present

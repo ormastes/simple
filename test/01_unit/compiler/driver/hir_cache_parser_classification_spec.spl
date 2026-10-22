@@ -1,0 +1,70 @@
+# Selected shard publication and final warm admission share one v4 namespace.
+use std.spec.*
+use app.io.env_ops.{env_get, env_set}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.driver.driver_types.{driver_native_parsed_module_has_no_runtime_body_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_store, hir_cache_load,
+    hir_cache_load_parsed_v1, hir_cache_load_in_owned_scope, hir_cache_store_in_owned_scope,
+    hir_cache_path, hir_cache_has, hir_cache_parser_binding_v1,
+    hir_cache_last_parser_objectless, hir_cache_last_warnings}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end}
+use test.helpers.lowering_harness.{lower_hir_checked}
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_dir_remove_all(path: text) -> bool
+extern fn rt_getpid() -> i64
+
+describe "parser-bound HIR shard cache admission":
+    it "loads the selected shard publication warm without reading the generic namespace":
+        val dir = "build/hir_parser_classification_{rt_getpid()}"
+        expect(rt_dir_create_all(dir)).to_be(true)
+        val old_scope = env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? ""
+        val old_dir = env_get("SIMPLE_HIR_CACHE_DIR") ?? ""
+        expect(env_set("SIMPLE_FRONTEND_CACHE_SCOPE", "parser-classification-spec")).to_be(true)
+        expect(env_set("SIMPLE_HIR_CACHE_DIR", dir)).to_be(true)
+        val key = sha256_text("parser-classification-type-only")
+        val source = "pub struct Completion:\n    code: i64\n"
+        val parsed = parse_full_frontend(source, "completion.spl", "completion", Logger(level: 0))
+        expect(driver_native_parsed_module_has_no_runtime_body_v1(parsed)).to_be(true)
+        val hir = lower_hir_checked(source, "completion.spl", 0)
+        val binding = hir_cache_parser_binding_v1(key, "completion", "completion.spl", sha256_text(source))
+        expect(transient_scope_begin()).to_be(true)
+        val stored = hir_cache_store_in_owned_scope(key, hir, ["kept"], "objectless:" + binding)
+        expect(transient_scope_pause()).to_be(true)
+        expect(transient_scope_end()).to_be(true)
+        expect(stored).to_be(true)
+        expect(hir_cache_has(key, binding)).to_be(true)
+        val warm = hir_cache_load_parsed_v1(key, binding)
+        expect(warm != nil).to_be(true)
+        expect(hir_cache_last_parser_objectless()).to_be(true)
+        expect(hir_cache_last_warnings()).to_equal(["kept"])
+        expect(hir_cache_path(key, true) != hir_cache_path(key)).to_be(true)
+        expect(hir_cache_load(key)).to_be_nil()
+        expect(hir_cache_store(key, hir, ["generic"])).to_be(true)
+        expect(hir_cache_load(key) != nil).to_be(true)
+        expect(hir_cache_load_parsed_v1(key, binding) != nil).to_be(true)
+        expect(hir_cache_last_warnings()).to_equal(["kept"])
+        expect(hir_cache_load_parsed_v1(key, sha256_text("wrong source"))).to_be_nil()
+        expect(hir_cache_load_parsed_v1(key, "")).to_be_nil()
+        expect(env_set("SIMPLE_HIR_CACHE_DIR", old_dir)).to_be(true)
+        expect(env_set("SIMPLE_FRONTEND_CACHE_SCOPE", old_scope)).to_be(true)
+        expect(rt_dir_remove_all(dir)).to_be(true)
+
+    it "admits a bodyful warm module without granting an objectless classification":
+        val dir = "build/hir_parser_bodyful_{rt_getpid()}"
+        expect(rt_dir_create_all(dir)).to_be(true)
+        val old_dir = env_get("SIMPLE_HIR_CACHE_DIR") ?? ""
+        expect(env_set("SIMPLE_HIR_CACHE_DIR", dir)).to_be(true)
+        val source = "fn answer() -> i64:\n    42\n"
+        val parsed = parse_full_frontend(source, "answer.spl", "answer", Logger(level: 0))
+        expect(driver_native_parsed_module_has_no_runtime_body_v1(parsed)).to_be(false)
+        val hir = lower_hir_checked(source, "answer.spl", 1)
+        val key = sha256_text("parser-classification-bodyful")
+        val binding = hir_cache_parser_binding_v1(key, "answer", "answer.spl", sha256_text(source))
+        expect(hir_cache_store(key, hir, [], "bodyful:" + binding)).to_be(true)
+        expect(hir_cache_load_parsed_v1(key, binding) != nil).to_be(true)
+        expect(hir_cache_last_parser_objectless()).to_be(false)
+        expect(env_set("SIMPLE_HIR_CACHE_DIR", old_dir)).to_be(true)
+        expect(rt_dir_remove_all(dir)).to_be(true)

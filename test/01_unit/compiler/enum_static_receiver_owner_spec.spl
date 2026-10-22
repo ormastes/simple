@@ -50,7 +50,23 @@ fn enum_static_has_integer_constant(lowering: MirLowering, from_index: i64, expe
         index = index + 1
     false
 
-describe "declared enum static receiver authority", tag: ["only-compiled"]:
+# Select native backends through the runner, not an unsupported describe tag.
+describe "declared enum static receiver authority":
+    it "retains the enum owner inside its own static method with a colliding Float variant":
+        val lowering = enum_static_lower("enum Decoy:\n    Float(i64)\n\nenum Value:\n    Float(f64)\n\n    static fn float(f: f64) -> Value:\n        Value.Float(f)\n\nfn probe() -> i64:\n    val value = Value.float(3.25)\n    0\n")
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "does not recover a stale enum symbol through a runtime shadow with the same name":
+        var lowering = enum_static_fixture()
+        val enum_symbol = lowering.symbols.lookup_or_invalid("DbValue")
+        val shadow = lowering.symbols.define("DbValue", SymbolKind.Variable, nil, Span.empty(), Visibility.Private, true, nil)
+        expect(shadow.id != enum_symbol.id).to_be(true)
+        val receiver = HirExpr(kind: HirExprKind.NamedVar(enum_symbol, "DbValue"), has_type_: false, type_: nil, span: Span.empty())
+        val before = lowering.builder.instructions.len()
+        expect(lowering.try_lower_declared_enum_static_call(receiver, "Text", [enum_static_text_arg("bad")], MethodResolution.Unresolved)).to_be_nil()
+        expect(lowering.builder.instructions.len()).to_equal(before)
+        expect(lowering.errors.len()).to_equal(0)
+
     it "lowers real source constructors despite shared Integer Real and Text leaves":
         val lowering = enum_static_lower("enum DbType:\n    Integer\n    Real\n    Text\n\nenum DbValue:\n    Integer(value: i64)\n    Real(value: f64)\n    Text(value: text)\n\nfn probe(name: text, number: i64) -> i64:\n    val values: [DbValue] = [DbValue.Text(value: name)]\n    val value = DbValue.Integer(value: 0 - number)\n    values.len()\n")
         expect(lowering.errors.len()).to_equal(0)

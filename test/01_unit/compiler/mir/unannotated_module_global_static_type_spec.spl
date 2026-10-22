@@ -14,7 +14,7 @@ provider globals.
 use std.spec.*
 use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
-use compiler.hir.hir_types.{SymbolTable, HirModule}
+use compiler.hir.hir_types.{SymbolTable, HirModule, HirTypeKind}
 use compiler.hir.hir_definitions.{HirConst}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
@@ -158,3 +158,54 @@ describe "unannotated module global static storage":
         # init); the two reads of `r` call nothing.
         expect(init_calls).to_equal(1)
         expect(reader_calls).to_equal(0)
+
+# #3131: the array's elements are named integer constants, not literals.
+# Inspect the semantic element type as well as both storage declarations.
+fn inferred_integer_array_type(src: text, name: text) -> text:
+    val hir = lower_hir(src)
+    for constant in hir.constants.values():
+        if constant.name == name:
+            match constant.type_.kind:
+                case HirTypeKind.Array(element, _):
+                    match element.kind:
+                        case HirTypeKind.Int(bits, signed):
+                            if signed: return "i{bits}"
+                            return "u{bits}"
+                        case _: return "noninteger-array"
+                case HirTypeKind.Infer(_, _): return "infer"
+                case _: return "other"
+    "missing"
+
+describe "module register array type evidence":
+    it "uses declared integer constant types regardless of declaration order":
+        val source = "val R0: i64 = 0\npub val REGS = [R0, R1, 2]\nval R1: i64 = 1\n"
+        expect(inferred_integer_array_type(source, "REGS")).to_equal("i64")
+        expect(owner_errors(source).len()).to_equal(0)
+        val (storage, error_count, _) = imported_storage(source, "REGS")
+        expect(error_count).to_equal(0)
+        expect(storage).to_equal("array")
+
+    it "preserves a homogeneous declared narrow unsigned element type":
+        val source = "val R0: u32 = 0\nval R1: u32 = 1\npub val REGS = [R0, R1]\n"
+        expect(inferred_integer_array_type(source, "REGS")).to_equal("u32")
+
+    it "retains literal integer array inference":
+        expect(inferred_integer_array_type("pub val REGS = [-1, 0, 2]\n", "REGS")).to_equal("i64")
+
+    it "does not silently coerce different widths signs or scalar kinds":
+        val mixed_width = "val A: i32 = 0\nval B: i64 = 1\npub val REGS = [A, B]\n"
+        val mixed_sign = "val A: u64 = 0\nval B: i64 = 1\npub val REGS = [A, B]\n"
+        val mixed_kind = "val A: i64 = 0\npub val REGS = [A, true]\n"
+        for source in [mixed_width, mixed_sign, mixed_kind]:
+            expect(inferred_integer_array_type(source, "REGS")).to_equal("infer")
+            expect(owner_errors(source).len()).to_be_greater_than(0)
+            val (_, error_count, all_spanned) = imported_storage(source, "REGS")
+            expect(error_count).to_be_greater_than(0)
+            expect(all_spanned).to_equal(true)
+
+    it "leaves empty unresolved and cyclic integer evidence unsettled":
+        val empty = "pub val REGS = []\n"
+        val unresolved = "val A: i64 = 0\npub val REGS = [A, missing_register]\n"
+        val cyclic = "val A = B\nval B = A\npub val REGS = [A, B]\n"
+        for source in [empty, unresolved, cyclic]:
+            expect(inferred_integer_array_type(source, "REGS")).to_equal("infer")

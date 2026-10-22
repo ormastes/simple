@@ -1,0 +1,276 @@
+# codex-system-test
+# @manual: show
+# @req: REQ-MC-007, C2
+# Real MIR -> admitted declaration plan -> emitted body/module. All execution UNRUN.
+use std.spec
+use std.spec.step
+use compiler.hir.hir_types.{SymbolId}
+use compiler.common.attributes.{vhdl_hardware_metadata_default, DriverManifestAttr, DriverManifestAttrKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBody, MirInst, MirInstKind, AggregateKind, MirBlock, BlockId, MirOperand, MirOperandKind, MirTerminator, MirBinOp, MirUnaryOp}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirConstValue, MirTypeDef, MirTypeDefKind, MirFieldDef, MirVariantDef, MirSignature, MirLocal, LocalId, LocalKind}
+use compiler.backend.backend.lean_backend.{LeanBackend, LeanBuilder, VerificationLevel}
+use plugins.backend_lean.lean_type_declarations.{lean_plan_type_declarations}
+use plugins.backend_lean.lean_nominal_body.{translate_mir_nominal_body}
+
+fn ty(kind: MirTypeKind) -> MirType: MirType(kind: kind)
+fn packet_ty() -> MirType: ty(MirTypeKind.Struct(SymbolId(id: 7)))
+fn state_ty() -> MirType: ty(MirTypeKind.Enum(SymbolId(id: 9)))
+fn copy(id: i64) -> MirOperand: MirOperand(kind: MirOperandKind.Copy(LocalId(id: id)))
+fn local(id: i64, type_: MirType, kind: LocalKind) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: nil, type_: type_, kind: kind, is_ghost: false)
+fn inst(kind: MirInstKind) -> MirInst: MirInst(kind: kind, span: nil)
+fn ret(id: i64) -> MirTerminator: MirTerminator.Ret(Some(copy(id)))
+
+fn fixture_function(parameters: [MirType], locals: [MirLocal], instructions: [MirInst], return_type: MirType, terminator: MirTerminator) -> MirFunction:
+    MirFunction(symbol: SymbolId(id: 20), name: "nominalValue",
+        signature: MirSignature(params: parameters, return_type: return_type, is_variadic: false, params_known: true),
+        locals: locals,
+        blocks: [MirBlock(id: BlockId(id: 0), label: nil, instructions: instructions, terminator: terminator)],
+        entry_block: BlockId(id: 0), span: Span.default(), generic_params: [], is_generic_template: false,
+        specialization_of: nil, type_bindings: {}, layout_phase: nil, is_kernel: false, gpu_target: "", gpu_backend_order: "", is_export_c: false,
+        export_name: "", has_driver_manifest_attr: false, driver_manifest_attr: DriverManifestAttr(kind: DriverManifestAttrKind.Driver, driver_class: 0, vendor: 0, device_ids: [], version: "", abi: ""),
+        has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false, unroll_factor: 0, pipeline_ii: 0, memory_banks: 0, verification_contract: nil)
+
+fn fixture_module(function: MirFunction) -> MirModule:
+    val packet = MirTypeDef(symbol: SymbolId(id: 7), name: "wire.Packet",
+        kind: MirTypeDefKind.Struct([
+            MirFieldDef(name: "byte", type_: ty(MirTypeKind.U8), offset: 0, has_bits_attr: false, bits_width: 0),
+            MirFieldDef(name: "count", type_: ty(MirTypeKind.I32), offset: 4, has_bits_attr: false, bits_width: 0)]),
+        is_export_c: false, export_name: "")
+    val state = MirTypeDef(symbol: SymbolId(id: 9), name: "wire.State",
+        kind: MirTypeDefKind.Enum([
+            MirVariantDef(name: "Idle", discriminant: -3, payload: nil),
+            MirVariantDef(name: "Packet", discriminant: 12, payload: Some(packet_ty()))]),
+        is_export_c: false, export_name: "")
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[function.symbol] = function
+    var types: Dict<SymbolId, MirTypeDef> = {}
+    types[packet.symbol] = packet
+    types[state.symbol] = state
+    MirModule(name: "LinearFlow", functions: functions, statics: {}, constants: {}, types: types)
+
+fn linear_function() -> MirFunction:
+    var function = fixture_function([ty(MirTypeKind.U8), ty(MirTypeKind.I32)],
+        [local(0, ty(MirTypeKind.U8), LocalKind.Arg(0)), local(1, ty(MirTypeKind.I32), LocalKind.Arg(1)),
+         local(2, packet_ty(), LocalKind.Temp), local(3, ty(MirTypeKind.I32), LocalKind.Temp)],
+        [], ty(MirTypeKind.I32), ret(3))
+    function.entry_block = BlockId(id: 10)
+    function.blocks = [
+        MirBlock(id: BlockId(id: 10), label: nil,
+            instructions: [inst(MirInstKind.Aggregate(LocalId(id: 2), AggregateKind.Struct(SymbolId(id: 7)), [copy(0), copy(1)]))],
+            terminator: MirTerminator.Goto(BlockId(id: 20))),
+        MirBlock(id: BlockId(id: 20), label: nil,
+            instructions: [inst(MirInstKind.GetField(LocalId(id: 3), copy(2), 1))],
+            terminator: MirTerminator.Goto(BlockId(id: 30))),
+        MirBlock(id: BlockId(id: 30), label: nil, instructions: [], terminator: ret(3))]
+    function
+
+fn linear_body() -> text:
+    "let _l2 : _root_.Simple.LinearFlow.__MirTypes.«wire».«Packet» := _root_.Simple.LinearFlow.__MirTypes.«wire».«Packet».mk (_l0) (_l1)\nlet _l3 : _root_.BitVec 32 := _root_.Simple.LinearFlow.__MirTypes.«wire».«Packet».«count» (_l2)\n_l3"
+
+fn expect_flow(function: MirFunction, body: text):
+    val module = fixture_module(function)
+    val context = lean_plan_type_declarations(module, "Simple.LinearFlow").unwrap().context
+    expect(translate_mir_nominal_body(function, context).unwrap()).to_equal(body)
+    val backend = LeanBackend.create(VerificationLevel.Contracts)
+    val expected = body.replace("\n", "\n  ")
+    expect(backend.export_module(module).unwrap().lean_code).to_contain(expected)
+    expect(backend.export_generated_module(module).unwrap().lean_code).to_contain(expected)
+
+fn expect_flow_refusal(function: MirFunction, reason: text):
+    val module = fixture_module(function)
+    val backend = LeanBackend.create(VerificationLevel.Contracts)
+    match backend.export_module(module):
+        case Err(error): expect(error.message).to_contain(reason)
+        case Ok(_): assert(false)
+    match backend.export_generated_module(module):
+        case Err(error): expect(error.message).to_contain(reason)
+        case Ok(_): assert(false)
+
+fn branch_function() -> MirFunction:
+    var function = linear_function()
+    function.signature.params.push(ty(MirTypeKind.Bool))
+    function.locals.push(local(5, ty(MirTypeKind.Bool), LocalKind.Arg(2)))
+    function.blocks[0].terminator = MirTerminator.If(copy(5), BlockId(id: 20), BlockId(id: 30))
+    function.blocks[1].terminator = ret(3)
+    function.blocks[2].instructions = [inst(MirInstKind.GetField(LocalId(id: 3), copy(2), 1))]
+    function
+
+fn branch_body() -> text:
+    "let _l2 : _root_.Simple.LinearFlow.__MirTypes.«wire».«Packet» := _root_.Simple.LinearFlow.__MirTypes.«wire».«Packet».mk (_l0) (_l1)\nif _l5 then\n  let _l3 : _root_.BitVec 32 := _root_.Simple.LinearFlow.__MirTypes.«wire».«Packet».«count» (_l2)\n  _l3\nelse\n  let _l3 : _root_.BitVec 32 := _root_.Simple.LinearFlow.__MirTypes.«wire».«Packet».«count» (_l2)\n  _l3"
+
+fn parameter_branch(type_: MirType) -> MirFunction:
+    var function = fixture_function([ty(MirTypeKind.Bool), type_],
+        [local(0, ty(MirTypeKind.Bool), LocalKind.Arg(0)), local(1, type_, LocalKind.Arg(1))],
+        [], type_, ret(1))
+    function.blocks = [
+        MirBlock(id: BlockId(id: 0), label: nil, instructions: [], terminator: MirTerminator.If(copy(0), BlockId(id: 1), BlockId(id: 2))),
+        MirBlock(id: BlockId(id: 1), label: nil, instructions: [], terminator: ret(1)),
+        MirBlock(id: BlockId(id: 2), label: nil, instructions: [], terminator: ret(1))]
+    function
+
+fn expect_parameter_refusal(function: MirFunction, reason: text):
+    val module = fixture_module(function)
+    val context = lean_plan_type_declarations(module, "Simple.LinearFlow").unwrap().context
+    match translate_mir_nominal_body(function, context):
+        case Err(error): expect(error.message).to_contain(reason)
+        case Ok(_): assert(false)
+    expect_flow_refusal(function, reason)
+
+describe "typed nominal terminal branches":
+    it "renders both typed return arms with independent local definitions":
+        step("Translate the actual Bool branch and both retained successors")
+        expect_flow(branch_function(), branch_body())
+
+    it "preserves semantic order when physical arm and entry order change":
+        var function = branch_function()
+        val entry = function.blocks[0]
+        val yes = function.blocks[1]
+        val no = function.blocks[2]
+        function.blocks = [no, yes, entry]
+        expect_flow(function, branch_body())
+
+    it "follows Goto prefixes and disjoint arm continuations":
+        var function = branch_function()
+        function.blocks[0].terminator = MirTerminator.Goto(BlockId(id: 15))
+        function.blocks.push(MirBlock(id: BlockId(id: 15), label: nil, instructions: [], terminator: MirTerminator.If(copy(5), BlockId(id: 20), BlockId(id: 30))))
+        function.blocks[1].terminator = MirTerminator.Goto(BlockId(id: 25))
+        function.blocks.push(MirBlock(id: BlockId(id: 25), label: nil, instructions: [], terminator: ret(3)))
+        expect_flow(function, branch_body())
+
+    it "allows each mutually exclusive arm to move the same incoming aggregate":
+        step("Fork scalar definition and move state without aliasing")
+        var function = branch_function()
+        function.locals.push(local(4, packet_ty(), LocalKind.Temp))
+        for index in [1, 2]:
+            function.blocks[index].instructions = [inst(MirInstKind.Move(LocalId(id: 4), LocalId(id: 2))), inst(MirInstKind.GetField(LocalId(id: 3), copy(4), 1))]
+        val moved = "  let _l4 : _root_.Simple.LinearFlow.__MirTypes.«wire».«Packet» := _l2\n  let _l3"
+        val expected = branch_body().replace("  let _l3", moved).replace("«count» (_l2)", "«count» (_l4)")
+        expect_flow(function, expected)
+
+    it "preserves condition Move before creating either arm state":
+        var function = branch_function()
+        function.blocks[0].terminator = MirTerminator.If(MirOperand(kind: MirOperandKind.Move(LocalId(id: 5))), BlockId(id: 20), BlockId(id: 30))
+        expect_flow(function, branch_body())
+
+    it "returns nominal values from each terminal arm":
+        var function = branch_function()
+        function.signature.return_type = packet_ty()
+        function.blocks[1].instructions = []
+        function.blocks[2].instructions = []
+        function.blocks[1].terminator = ret(2)
+        function.blocks[2].terminator = ret(2)
+        val prefix = "let _l2 : _root_.Simple.LinearFlow.__MirTypes.«wire».«Packet» := _root_.Simple.LinearFlow.__MirTypes.«wire».«Packet».mk (_l0) (_l1)"
+        expect_flow(function, prefix + "\nif _l5 then\n  _l2\nelse\n  _l2")
+
+    it "retains the existing linear body unchanged":
+        expect_flow(linear_function(), linear_body())
+
+    it "refuses a non-Bool or undefined branch condition":
+        step("Refuse incorrect conditions and either ill-typed branch")
+        var wrong_type = branch_function()
+        wrong_type.blocks[0].terminator = MirTerminator.If(copy(1), BlockId(id: 20), BlockId(id: 30))
+        expect_flow_refusal(wrong_type, "exact MIR type mismatch")
+        var missing = branch_function()
+        missing.blocks[0].terminator = MirTerminator.If(copy(99), BlockId(id: 20), BlockId(id: 30))
+        expect_flow_refusal(missing, "missing local 99")
+
+    it "does not resurrect a moved condition in either arm":
+        for index in [1, 2]:
+            var function = branch_function()
+            function.signature.return_type = ty(MirTypeKind.Bool)
+            function.blocks[0].terminator = MirTerminator.If(MirOperand(kind: MirOperandKind.Move(LocalId(id: 5))), BlockId(id: 20), BlockId(id: 30))
+            function.blocks[1].terminator = MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Const(MirConstValue.Bool(true), ty(MirTypeKind.Bool)))))
+            function.blocks[2].terminator = MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Const(MirConstValue.Bool(false), ty(MirTypeKind.Bool)))))
+            function.blocks[index].terminator = ret(5)
+            expect_flow_refusal(function, "use before definition or after move: 5")
+
+    it "does not resurrect a value consumed in the common prefix":
+        for index in [1, 2]:
+            var function = branch_function()
+            function.locals.push(local(4, packet_ty(), LocalKind.Temp))
+            function.blocks[0].instructions.push(inst(MirInstKind.Move(LocalId(id: 4), LocalId(id: 2))))
+            function.blocks[1].instructions = [inst(MirInstKind.GetField(LocalId(id: 3), copy(4), 1))]
+            function.blocks[2].instructions = [inst(MirInstKind.GetField(LocalId(id: 3), copy(4), 1))]
+            function.blocks[index].instructions = [inst(MirInstKind.GetField(LocalId(id: 3), copy(2), 1))]
+            expect_flow_refusal(function, "use before definition or after move: 2")
+
+    it "does not leak then-arm definitions to the else arm":
+        var function = branch_function()
+        function.locals.push(local(4, packet_ty(), LocalKind.Temp))
+        function.blocks[1].instructions = [inst(MirInstKind.Copy(LocalId(id: 4), LocalId(id: 2))), inst(MirInstKind.GetField(LocalId(id: 3), copy(4), 1))]
+        function.blocks[2].instructions = [inst(MirInstKind.GetField(LocalId(id: 3), copy(4), 1))]
+        expect_flow_refusal(function, "use before definition or after move: 4")
+
+    it "validates exact return types in both arms even for a literal condition":
+        for index in [1, 2]:
+            var function = branch_function()
+            function.blocks[0].terminator = MirTerminator.If(MirOperand(kind: MirOperandKind.Const(MirConstValue.Bool(true), ty(MirTypeKind.Bool))), BlockId(id: 20), BlockId(id: 30))
+            function.blocks[index].terminator = ret(0)
+            expect_flow_refusal(function, "exact MIR type mismatch")
+
+    it "refuses a common-prefix local redefinition in either arm":
+        for index in [1, 2]:
+            var function = branch_function()
+            function.blocks[index].instructions.push(function.blocks[0].instructions[0])
+            expect_flow_refusal(function, "local redefinition requires mutable state semantics: 2")
+
+    it "rejects missing targets disconnected alternatives and suffix redefinition":
+        var missing = branch_function()
+        missing.blocks[0].terminator = MirTerminator.If(copy(5), BlockId(id: 20), BlockId(id: 99))
+        expect_flow_refusal(missing, "missing successor block")
+        var same = branch_function()
+        same.blocks[0].terminator = MirTerminator.If(copy(5), BlockId(id: 20), BlockId(id: 20))
+        expect_flow_refusal(same, "unvisited block outside nominal flow")
+        var merge = branch_function()
+        merge.blocks[1].terminator = MirTerminator.Goto(BlockId(id: 30))
+        expect_flow_refusal(merge, "local redefinition requires mutable state semantics: 3")
+
+    it "rejects cycles nested branches and disconnected blocks":
+        var cycle = branch_function()
+        cycle.blocks[1].terminator = MirTerminator.Goto(BlockId(id: 10))
+        expect_flow_refusal(cycle, "cyclic linear flow")
+        var nested = branch_function()
+        nested.blocks[1].terminator = MirTerminator.If(copy(5), BlockId(id: 30), BlockId(id: 30))
+        expect_flow_refusal(nested, "nested conditional requires general structured flow")
+        var disconnected = branch_function()
+        disconnected.blocks.push(MirBlock(id: BlockId(id: 99), label: nil, instructions: [], terminator: ret(3)))
+        expect_flow_refusal(disconnected, "unvisited block outside nominal flow")
+
+    it "retains duplicate-ID and unsupported-terminator refusals":
+        var duplicate = branch_function()
+        duplicate.blocks.push(duplicate.blocks[1])
+        expect_flow_refusal(duplicate, "negative or duplicate block identity")
+        var exceptional = branch_function()
+        exceptional.blocks[2].terminator = MirTerminator.Unreachable
+        expect_flow_refusal(exceptional, "requires only Goto edges, one terminal If and exact returns")
+
+    it "routes instruction-free Struct and Enum parameter selection through the nominal translator":
+        step("Route actual retained nominal types without an incidental constructor")
+        for (type_, type_name) in [(packet_ty(), "_root_.Simple.LinearFlow.__MirTypes.«wire».«Packet»"), (state_ty(), "_root_.Simple.LinearFlow.__MirTypes.«wire».«State»")]:
+            val function = parameter_branch(type_)
+            expect_flow(function, "if _l0 then\n  _l1\nelse\n  _l1")
+            val declaration = "def nominalValue (_l0 : _root_.Bool) (_l1 : " + type_name + ") : " + type_name + " :="
+            val backend = LeanBackend.create(VerificationLevel.Contracts)
+            expect(backend.export_module(fixture_module(function)).unwrap().lean_code).to_contain(declaration)
+            expect(backend.export_generated_module(fixture_module(function)).unwrap().lean_code).to_contain(declaration)
+
+    it "validates independent Copy and Move of nominal parameters without Aggregate or GetField":
+        for (type_, type_name) in [(packet_ty(), "_root_.Simple.LinearFlow.__MirTypes.«wire».«Packet»"), (state_ty(), "_root_.Simple.LinearFlow.__MirTypes.«wire».«State»")]:
+            var function = parameter_branch(type_)
+            function.locals.push(local(2, type_, LocalKind.Temp))
+            function.blocks[1].instructions = [inst(MirInstKind.Copy(LocalId(id: 2), LocalId(id: 1)))]
+            function.blocks[2].instructions = [inst(MirInstKind.Move(LocalId(id: 2), LocalId(id: 1)))]
+            function.blocks[1].terminator = ret(2)
+            function.blocks[2].terminator = ret(2)
+            expect_flow(function, "if _l0 then\n  let _l2 : " + type_name + " := _l1\n  _l2\nelse\n  let _l2 : " + type_name + " := _l1\n  _l2")
+
+    it "rejects unresolved or kind-mismatched nominal parameter evidence without nominal instructions":
+        expect_parameter_refusal(parameter_branch(ty(MirTypeKind.Struct(SymbolId(id: 99)))), "unresolved nominal symbol 99")
+        expect_parameter_refusal(parameter_branch(ty(MirTypeKind.Enum(SymbolId(id: 7)))), "nominal kind mismatch for symbol 7")
+
+    it "retains scalar-only and nonnominal Result identity routes":
+        for type_ in [ty(MirTypeKind.I32), ty(MirTypeKind.Result(ty(MirTypeKind.I32), ty(MirTypeKind.I64)))]:
+            val function = fixture_function([type_], [local(0, type_, LocalKind.Arg(0))], [], type_, ret(0))
+            expect_flow(function, "_l0")

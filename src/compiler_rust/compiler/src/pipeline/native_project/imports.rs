@@ -21,6 +21,8 @@ pub(crate) struct ImportMapResult {
     /// to distinguish real cross-module vtable dispatch from unsupported
     /// duck-typed calls.
     pub trait_impls: std::collections::HashMap<String, Vec<String>>,
+    /// Every method name declared by any trait (abstract or default).
+    pub trait_method_names: std::collections::HashSet<String>,
     /// Collision-free native owners whose object layout includes a vtable
     /// header. Keys use the same `module_prefix__Type` identity as native
     /// symbols and are therefore safe across duplicate bare type names.
@@ -76,6 +78,13 @@ pub(crate) struct ImportMapResult {
     pub fn_return_types: std::collections::HashMap<String, simple_parser::Type>,
     /// Defaults for uniquely resolved Owner.method symbols, excluding self.
     pub method_param_defaults: std::collections::HashMap<String, Vec<Option<simple_parser::ast::Expr>>>,
+    /// Every declared parameter default in the closure, keyed by the
+    /// owner-mangled symbol (`prefix__fn`, `prefix__Type_dot_method`), for
+    /// free functions AND for methods whose bare name is not unique. Not read
+    /// by codegen: the HIR import loader inlines these defaults at call sites
+    /// straight from the imported file, so the object cache key
+    /// (`InterfaceSliceIndex`) needs them to see a default-only change.
+    pub interface_param_defaults: std::collections::HashMap<String, Vec<Option<simple_parser::ast::Expr>>>,
 }
 
 fn record_method_defaults(
@@ -359,11 +368,18 @@ pub(crate) fn build_import_map(
     let mut vtable_symbols: HashMap<String, String> = HashMap::new();
     let mut pending_vtable_impls: Vec<(String, String, String)> = Vec::new();
     let mut trait_def_names: HashSet<String> = HashSet::new();
+    // `class Name with Trait:` candidates, resolved once every trait and mixin
+    // declaration in the project has been scanned (see the resolution below).
+    let mut pending_class_with: Vec<(String, String, String, HashSet<String>)> = Vec::new();
+    let mut trait_abstract_methods: HashMap<String, Vec<HashSet<String>>> = HashMap::new();
+    let mut mixin_def_names: HashSet<String> = HashSet::new();
+    let mut trait_method_names: HashSet<String> = HashSet::new();
     // Bare function name -> declared return type. This includes primitive
     // returns: losing `u64` here turns native comparisons into mixed ANY/scalar
     // operations whose tagged ABI differs from raw machine integers.
     let mut fn_return_types: HashMap<String, simple_parser::Type> = HashMap::new();
     let mut mangled_method_defaults: std::collections::HashMap<String, Vec<Option<simple_parser::ast::Expr>>> = HashMap::new();
+    let mut interface_param_defaults: std::collections::HashMap<String, Vec<Option<simple_parser::ast::Expr>>> = HashMap::new();
 
     // Parse each physical module once, in parallel. Both collection passes
     // below walk `parsed` in `file_sources` order, so every first-wins /
@@ -408,6 +424,12 @@ pub(crate) fn build_import_map(
             for item in &ast.items {
                 match item {
                     simple_parser::ast::Node::Function(f) => {
+                        if f.params.iter().any(|p| p.default.is_some()) {
+                            interface_param_defaults.insert(
+                                format!("{}__{}", prefix, f.name),
+                                f.params.iter().map(|p| p.default.clone()).collect(),
+                            );
+                        }
                         if !f.body.statements.is_empty() {
                             let mangled = format!("{}__{}", prefix, f.name);
                             fn_arities.insert(mangled.clone(), f.params.len());
@@ -461,6 +483,10 @@ pub(crate) fn build_import_map(
                                 fields,
                             );
                         }
+                        let own_methods: HashSet<String> = c.methods.iter().map(|m| m.name.clone()).collect();
+                        for mixin_ref in &c.mixins {
+                            pending_class_with.push((prefix.clone(), c.name.clone(), mixin_ref.name.clone(), own_methods.clone()));
+                        }
                         for m in &c.methods {
                             if !m.body.statements.is_empty() {
                                 let raw = format!("{}.{}", c.name, m.name);
@@ -509,6 +535,21 @@ pub(crate) fn build_import_map(
                         data_exports.insert(mangled);
                     }
                     simple_parser::ast::Node::Struct(s) => {
+                        // HIR synthesizes a real implementation for `struct S(T):`.
+                        // Its constructor therefore has the same vtable header as
+                        // an explicit impl. Include it in the project layout
+                        // inventory used by field accesses and value copies too.
+                        if let Some(trait_name) = s.attributes.iter()
+                            .find(|attribute| attribute.name == "implements")
+                            .and_then(|attribute| attribute.args.as_ref())
+                            .and_then(|arguments| arguments.first())
+                            .and_then(|argument| match argument {
+                                simple_parser::ast::Expr::Identifier(name) => Some(name),
+                                _ => None,
+                            })
+                        {
+                            pending_vtable_impls.push((prefix.clone(), s.name.clone(), trait_name.clone()));
+                        }
                         // Register the bare struct type name so cross-module imports
                         // resolve to the defining module's symbol, not the importer's.
                         let type_mangled = format!("{}__{}", prefix, s.name);
@@ -646,8 +687,15 @@ pub(crate) fn build_import_map(
                             }
                         }
                     }
+                    simple_parser::ast::Node::Mixin(m) => {
+                        mixin_def_names.insert(m.name.clone());
+                    }
                     simple_parser::ast::Node::Trait(t) => {
                         trait_def_names.insert(t.name.clone());
+                        trait_method_names.extend(t.methods.iter().map(|m| m.name.clone()));
+                        trait_abstract_methods.entry(t.name.clone()).or_default().push(
+                            t.methods.iter().filter(|m| m.is_abstract).map(|m| m.name.clone()).collect(),
+                        );
                         for m in &t.methods {
                             if has_concrete_body(&m.body) {
                                 let raw = format!("{}.{}", t.name, m.name);
@@ -720,7 +768,25 @@ pub(crate) fn build_import_map(
             // Public ambiguous names keep first-wins until all consumers check
             // the `ambiguous` set.
             if !raw.starts_with('_') {
-                map.insert(raw.clone(), mangled_list[0].clone());
+                // Prefer an extern identity binding over first-wins file order.
+                // `Node::Extern` registers `name -> name` (the module asks for
+                // the exact link symbol); a class method registers the same
+                // BARE name towards its mangled `Owner.method`. When both are
+                // present the callee is ambiguous, and pure file-order
+                // first-wins bound path_identity's libc `free` to
+                // RtStringBuilder.free whenever the builder module sorted
+                // first — the freed "/home/..." path pointer then crashed
+                // rt_string_builder_free at candidate startup
+                // (bootstrap_imported_free_method_rebind_2026_10_12, #3352).
+                // An explicit extern declaration is stronger evidence than a
+                // same-named method's bare-name fallback, so it wins
+                // regardless of module order. No extern identity among the
+                // candidates keeps the historical first-wins behavior.
+                let preferred = mangled_list
+                    .iter()
+                    .find(|candidate| candidate.as_str() == raw.as_str())
+                    .unwrap_or(&mangled_list[0]);
+                map.insert(raw.clone(), preferred.clone());
             }
         }
     }
@@ -955,6 +1021,47 @@ pub(crate) fn build_import_map(
         }
     }
 
+    // `class Name with Trait:` is a trait implementation when the name is a
+    // trait (not a mixin). HIR records it (`record_class_with_trait_impls`) only
+    // when the class defines every abstract method of the selected trait, so
+    // this side must be the MORE permissive one: if same-named traits exist,
+    // require only the methods abstract in ALL of them. A class HIR declines is
+    // then marked here and fails the link on its undefined vtable symbol --
+    // never the reverse (a vtable-less object behind a virtual call).
+    // One vtable header per object: only a class whose `with` clause names
+    // exactly one non-mixin entry, and that has no explicit `impl Trait for`,
+    // qualifies (same rule as HIR).
+    let mut with_entry_counts: HashMap<(String, String), usize> = HashMap::new();
+    for (class_prefix, class_name, name, _) in &pending_class_with {
+        if !mixin_def_names.contains(name) {
+            *with_entry_counts.entry((class_prefix.clone(), class_name.clone())).or_default() += 1;
+        }
+    }
+    let explicitly_implemented: HashSet<String> = trait_impls.values().flatten().cloned().collect();
+    for (class_prefix, class_name, trait_name, own_methods) in pending_class_with {
+        if mixin_def_names.contains(&trait_name)
+            || with_entry_counts.get(&(class_prefix.clone(), class_name.clone())) != Some(&1)
+            || explicitly_implemented.contains(&class_name)
+        {
+            continue;
+        }
+        let Some(abstract_sets) = trait_abstract_methods.get(&trait_name) else { continue };
+        let satisfies_common_required = abstract_sets
+            .first()
+            .into_iter()
+            .flatten()
+            .filter(|method| abstract_sets.iter().all(|set| set.contains(*method)))
+            .all(|method| own_methods.contains(method));
+        if !satisfies_common_required {
+            continue;
+        }
+        let implementations = trait_impls.entry(trait_name.clone()).or_default();
+        if !implementations.iter().any(|candidate| candidate == &class_name) {
+            implementations.push(class_name.clone());
+        }
+        pending_vtable_impls.push((class_prefix, class_name, trait_name));
+    }
+
     // Resolve trait-impl target ownership after every class/struct definition
     // has been scanned. Split `impl Trait for Type` files are common, so the
     // impl file's module prefix is not necessarily the concrete type owner.
@@ -1050,13 +1157,16 @@ pub(crate) fn build_import_map(
         if !raw.contains('.') || owners.len() != 1 { return None; }
         mangled_method_defaults.get(&owners[0]).map(|defaults| (raw.clone(), defaults.clone()))
     }).collect();
+    interface_param_defaults.extend(mangled_method_defaults.iter().map(|(k, v)| (k.clone(), v.clone())));
     ImportMapResult {
         method_param_defaults,
+        interface_param_defaults,
         map,
         ambiguous,
         all_mangled: raw_to_mangled,
         re_exports,
         trait_impls,
+        trait_method_names,
         vtable_type_owners,
         vtable_symbols,
         struct_defs,

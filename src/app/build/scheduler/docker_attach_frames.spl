@@ -1,0 +1,50 @@
+# Decoder for a supplied non-TTY Docker attach byte buffer. Success only
+# establishes frame syntax, including for an empty buffer: the caller must
+# independently establish transport EOF, authenticity, and output completeness.
+struct DockerAttachDecodedV1:
+    stdout_bytes: [u8]
+    stderr_bytes: [u8]
+    frame_count: i64
+
+# max_output_bytes bounds combined stdout/stderr payload, excluding headers.
+# A four-byte unsigned length is widened before arithmetic; subtraction-based
+# bounds checks keep cursor and accumulated-size additions within i64 range.
+fn decode_docker_attach_frames_v1(bytes: [u8], max_output_bytes: i64) -> Result<DockerAttachDecodedV1, text>:
+    if max_output_bytes < 0:
+        return Err("docker attach: negative output cap")
+    var stdout_bytes: [u8] = []
+    var stderr_bytes: [u8] = []
+    var cursor: i64 = 0
+    var output_size: i64 = 0
+    var frame_count: i64 = 0
+    while cursor < bytes.len():
+        if bytes.len() - cursor < 8:
+            return Err("docker attach: partial header")
+        val stream_type = bytes[cursor]
+        if stream_type != 1 and stream_type != 2:
+            return Err("docker attach: invalid stream type")
+        if (bytes[cursor + 1] != 0 or bytes[cursor + 2] != 0 or
+                bytes[cursor + 3] != 0):
+            return Err("docker attach: nonzero reserved header")
+        var payload_size: i64 = 0
+        var header_index: i64 = 4
+        while header_index < 8:
+            payload_size = payload_size * 256 + (bytes[cursor + header_index] as i64)
+            header_index = header_index + 1
+        cursor = cursor + 8
+        if payload_size > max_output_bytes - output_size:
+            return Err("docker attach: output cap exceeded")
+        if payload_size > bytes.len() - cursor:
+            return Err("docker attach: partial payload")
+        val payload_end = cursor + payload_size
+        while cursor < payload_end:
+            if stream_type == 1:
+                stdout_bytes.push(bytes[cursor])
+            else:
+                stderr_bytes.push(bytes[cursor])
+            cursor = cursor + 1
+        output_size = output_size + payload_size
+        frame_count = frame_count + 1
+    Ok(DockerAttachDecodedV1(stdout_bytes, stderr_bytes, frame_count))
+
+export DockerAttachDecodedV1, decode_docker_attach_frames_v1

@@ -20,8 +20,12 @@ use os.crypto.chacha20.{chacha20_encrypt}
 use os.crypto.chacha20_poly1305.{chacha20_poly1305_encrypt, chacha20_poly1305_decrypt, Chacha20Poly1305Result}
 use os.crypto.random.{random_bytes}
 use os.apps.sshd.ssh_kex_primitives.{SshSessionKeys}
+use os.apps.sshd.ssh_hex.{format_hex}
 use os.apps.sshd.ssh_mac.{ssh_mac_compute, ssh_mac_verify, ssh_mac_len}
 use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_get_u32, ssh_packet_build, ssh_packet_build_with_block_size, ssh_packet_parse_payload}
+
+extern fn serial_println(msg: text)
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 
 # ============================================================================
 # Constants
@@ -32,7 +36,6 @@ val GCM_NONCE_LEN: u64 = 12     # AES-GCM nonce length
 val AES_BLOCK_SIZE: u64 = 16    # AES block size for padding calculation
 val POLY1305_TAG_LEN: u64 = 16  # Poly1305 authentication tag length
 val SSH_MIN_PADDING: u64 = 4
-val SSH_GCM_PACKET_BODY_MAX: u64 = 35000
 
 struct SshCtrPacketResult:
     packet: [u8]
@@ -52,9 +55,7 @@ enum CipherMode:
     Chacha20Poly1305  # chacha20-poly1305@openssh.com
 
 fn _u8_at(data: [u8], idx: u64) -> u8:
-    if idx >= data.len():
-        return 0u8
-    data[idx]
+    rt_bytes_u8_at(data, idx.to_i64()).to_u8()
 
 fn _push_byte(arr: [u8], byte_val: u8) -> [u8]:
     var out = arr
@@ -110,17 +111,10 @@ impl SshCipher:
 
 fn ssh_encrypt_packet_aes_gcm(payload: [u8], seq_s2c: u32, enc_key_s2c: [u8], iv_s2c: [u8]) -> [u8]:
     """Encrypt an outgoing SSH packet (server-to-client direction)."""
-    if enc_key_s2c.len() != 32 or iv_s2c.len() != GCM_NONCE_LEN:
-        return []
-    if payload.len() > SSH_GCM_PACKET_BODY_MAX:
-        return []
-
     var padding_len: u64 = 4
     while ((1 + payload.len() + padding_len) % 16) != 0:
         padding_len = padding_len + 1
     val packet_length: u64 = 1 + payload.len() + padding_len
-    if packet_length > SSH_GCM_PACKET_BODY_MAX:
-        return []
     val aad_b0: u8 = ((packet_length >> 24) & 0xFF).to_u8()
     val aad_b1: u8 = ((packet_length >> 16) & 0xFF).to_u8()
     val aad_b2: u8 = ((packet_length >> 8) & 0xFF).to_u8()
@@ -142,8 +136,6 @@ fn ssh_encrypt_packet_aes_gcm(payload: [u8], seq_s2c: u32, enc_key_s2c: [u8], iv
         i = i + 1
     val nonce = _make_nonce(iv_s2c, seq_s2c)
     val encrypted_with_tag = aes256_gcm_encrypt(enc_key_s2c, nonce, body, aad)
-    if encrypted_with_tag.len() != body.len() + GCM_TAG_LEN:
-        return []
 
     var result: [u8] = []
     i = 0
@@ -159,12 +151,8 @@ fn ssh_encrypt_packet_aes_gcm(payload: [u8], seq_s2c: u32, enc_key_s2c: [u8], iv
 
 fn ssh_decrypt_packet_aes_gcm(data: [u8], seq_c2s: u32, enc_key_c2s: [u8], iv_c2s: [u8]) -> Result<[u8], text>:
     """Decrypt an incoming SSH packet (client-to-server direction)."""
-    if enc_key_c2s.len() != 32:
-        return Err("invalid AES-256 key length")
-    if iv_c2s.len() != GCM_NONCE_LEN:
-        return Err("invalid AES-GCM IV length")
-    if not _ssh_gcm_frame_allowed(data):
-        return Err("invalid encrypted packet frame")
+    if data.len() < 4 + GCM_TAG_LEN:
+        return Err("encrypted packet too short")
 
     # Extract AAD (4-byte packet_length)
     var aad: [u8] = []
@@ -172,6 +160,8 @@ fn ssh_decrypt_packet_aes_gcm(data: [u8], seq_c2s: u32, enc_key_c2s: [u8], iv_c2
     while i < 4:
         aad.push(data[i])
         i = i + 1
+
+    val packet_length = ssh_get_u32(data, 0).to_u64()
 
     # The rest is encrypted_body + tag
     val ct_with_tag_len = data.len() - 4
@@ -202,8 +192,6 @@ fn ssh_decrypt_packet_aes_gcm(data: [u8], seq_c2s: u32, enc_key_c2s: [u8], iv_c2
 
     match result:
         AesGcmResult.Ok(plaintext):
-            if plaintext.len() != ct_len:
-                return Err("invalid AES-GCM plaintext length")
             # Parse plaintext: padding_length(1) + payload + padding
             if plaintext.len() < 1:
                 return Err("decrypted body empty")
@@ -229,15 +217,17 @@ fn ssh_decrypt_packet_aes_gcm(data: [u8], seq_c2s: u32, enc_key_c2s: [u8], iv_c2
 # Helpers
 # ============================================================================
 
-fn _ssh_gcm_frame_allowed(data: [u8]) -> bool:
-    if data.len() < 4 + 1 + GCM_TAG_LEN:
-        return false
-    if data.len() > 4 + SSH_GCM_PACKET_BODY_MAX + GCM_TAG_LEN:
-        return false
-    val packet_length = ssh_get_u32(data, 0).to_u64()
-    if packet_length < 1 or packet_length > SSH_GCM_PACKET_BODY_MAX:
-        return false
-    data.len() == 4 + packet_length + GCM_TAG_LEN
+fn _u8s_hex(data: [u8]) -> text:
+    var out = ""
+    var i: u64 = 0
+    while i < data.len():
+        val piece = format_hex(_u8_at(data, i).to_i64())
+        if piece.len() == 1:
+            out = out + "0" + piece
+        else:
+            out = out + piece
+        i = i + 1
+    out
 
 fn _make_nonce(base_iv: [u8], seq: u32) -> [u8]:
     """Construct the SSH AES-GCM nonce from the 12-byte IV.
@@ -245,14 +235,12 @@ fn _make_nonce(base_iv: [u8], seq: u32) -> [u8]:
     RFC 5647 treats the low 8 bytes as an invocation counter. The packet
     sequence number is folded in by adding it to that big-endian counter.
     """
-    if base_iv.len() != GCM_NONCE_LEN:
-        return []
-
     var nonce: [u8] = []
     var i: u64 = 0
 
-    while i < GCM_NONCE_LEN:
-        nonce.push(base_iv[i])
+    while i < 12:
+        val b = if i < base_iv.len(): _u8_at(base_iv, i) else: 0
+        nonce.push(b)
         i = i + 1
 
     var carry: u64 = seq.to_u64()
@@ -423,6 +411,8 @@ impl SshCipher:
         aad.push(((packet_length_be >> 16) & 0xFF).to_u8())
         aad.push(((packet_length_be >> 8) & 0xFF).to_u8())
         aad.push((packet_length_be & 0xFF).to_u8())
+        serial_println("[ssh-cipher] encrypt payload_len={payload_len} packet_length={packet_length} aad={_u8s_hex(aad)}")
+
         # Nonce from sequence number
         val nonce = _make_chacha20_nonce(self.seq_s2c)
 

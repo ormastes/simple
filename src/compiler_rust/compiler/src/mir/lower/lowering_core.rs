@@ -287,12 +287,17 @@ pub struct MirLowerer<'a> {
     /// Trait parameters alias to `Any`, but native dispatch still needs the
     /// declared trait owner to select its vtable slot.
     pub(super) local_type_name_hints: HashMap<usize, String>,
+    pub(super) local_trait_dispatch: HashMap<usize, crate::hir::HirTraitDispatch>,
     /// F1/S5 — declaration kind per type name, carried from HIR by S3.
     /// `Some(true)` = declared `struct` (value semantics), `Some(false)` =
     /// declared `class`/`actor` (identity semantics), absent = UNKNOWN.
     /// Absence must never be read as "value type": copying an identity type
     /// converts the class defect into its struct sibling.
     pub(super) type_value_kinds: HashMap<String, bool>,
+    /// Array copy sites that may move a provably dead, uniquely owned source
+    /// instead of copying it; recomputed per function by
+    /// `array_move::compute_array_move_sites`.
+    pub(super) array_move_sites: super::array_move::ArrayMoveSites,
     /// Reference to trait infos for vtable slot resolution (static polymorphism)
     pub(super) trait_infos: Option<&'a std::collections::HashMap<String, crate::hir::HirTraitInfo>>,
     /// Project-wide trait implementations for cross-module vtable dispatch.
@@ -375,6 +380,9 @@ pub struct MirLowerer<'a> {
     pub(super) active_array_append_ptrs: Vec<ArrayAppendPtrs>,
     /// Hoisted array data pointers for read-only loops with active length proofs.
     pub(super) active_array_data_ptrs: Vec<(usize, VReg)>,
+    /// Hoisted `[u8]` read pointers: the data pointer with bit 0 set when the
+    /// array is NOT byte-packed (slot layout), computed once per loop entry.
+    pub(super) active_array_u8_data_ptrs: Vec<(usize, VReg)>,
     /// Array locals allocated only to receive ignored appends.
     pub(super) dead_append_array_locals: HashSet<usize>,
     /// True when the compilation target's `rt_array_push` returns the
@@ -385,6 +393,10 @@ pub struct MirLowerer<'a> {
     /// or a grow loop keeps re-pushing the stale pre-grow block
     /// (doc/08_tracking/bug/array_push_stale_receiver_store_arm64_2026-09-25.md).
     pub(super) array_push_returns_header: bool,
+    /// Lower statically typed `[i64]` element reads/writes/pushes through the
+    /// layout-aware `rt_typed_words_i64_*` lane (default on; off for freestanding
+    /// runtimes that do not define it).
+    pub(super) signed_word_lane: bool,
 }
 
 impl<'a> MirLowerer<'a> {
@@ -396,7 +408,9 @@ impl<'a> MirLowerer<'a> {
             type_registry: None,
             erased_local_class_types: HashMap::new(),
             local_type_name_hints: HashMap::new(),
+            local_trait_dispatch: HashMap::new(),
             type_value_kinds: HashMap::new(),
+            array_move_sites: Default::default(),
             trait_infos: None,
             global_trait_impls: None,
             di_config: None,
@@ -428,8 +442,10 @@ impl<'a> MirLowerer<'a> {
             active_array_append_bounds: Vec::new(),
             active_array_append_ptrs: Vec::new(),
             active_array_data_ptrs: Vec::new(),
+            active_array_u8_data_ptrs: Vec::new(),
             dead_append_array_locals: HashSet::new(),
             array_push_returns_header: false,
+            signed_word_lane: true,
         }
     }
 
@@ -442,7 +458,9 @@ impl<'a> MirLowerer<'a> {
             type_registry: None,
             erased_local_class_types: HashMap::new(),
             local_type_name_hints: HashMap::new(),
+            local_trait_dispatch: HashMap::new(),
             type_value_kinds: HashMap::new(),
+            array_move_sites: Default::default(),
             trait_infos: None,
             global_trait_impls: None,
             di_config: None,
@@ -467,8 +485,10 @@ impl<'a> MirLowerer<'a> {
             active_array_append_bounds: Vec::new(),
             active_array_append_ptrs: Vec::new(),
             active_array_data_ptrs: Vec::new(),
+            active_array_u8_data_ptrs: Vec::new(),
             dead_append_array_locals: HashSet::new(),
             array_push_returns_header: false,
+            signed_word_lane: true,
             decision_counter: 0,
             condition_counters: HashMap::new(),
             path_counter: 0,
@@ -611,6 +631,17 @@ impl<'a> MirLowerer<'a> {
         }
         let array_local_index = Self::local_index_for_expr(receiver)?;
         self.active_array_data_ptrs
+            .iter()
+            .rev()
+            .find_map(|(idx, ptr)| (*idx == array_local_index).then_some(*ptr))
+    }
+
+    pub(super) fn active_array_u8_data_ptr(&self, receiver: &HirExpr, index: &HirExpr) -> Option<VReg> {
+        if !self.index_has_active_len_bound(receiver, index) {
+            return None;
+        }
+        let array_local_index = Self::local_index_for_expr(receiver)?;
+        self.active_array_u8_data_ptrs
             .iter()
             .rev()
             .find_map(|(idx, ptr)| (*idx == array_local_index).then_some(*ptr))
@@ -1134,8 +1165,17 @@ impl<'a> MirLowerer<'a> {
     /// so push emissions must capture the call result as the post-grow array
     /// value. Defaults to false (canonical hosted bool-return, stable-header
     /// push ABI).
+    pub fn with_signed_word_lane(mut self, enabled: bool) -> Self {
+        self.signed_word_lane = enabled;
+        self
+    }
+
     pub fn with_array_push_returns_header(mut self, returns_header: bool) -> Self {
         self.array_push_returns_header = returns_header;
+        // FAM freestanding runtimes do not define the `[i64]` word lane.
+        if returns_header {
+            self.signed_word_lane = false;
+        }
         self
     }
 
@@ -2170,12 +2210,22 @@ impl<'a> MirLowerer<'a> {
         // recomputed (not accumulated) or one function's locals would be read
         // as another's.
         self.erased_local_class_types = compute_single_assignment_class_types(func, self.type_registry);
+        self.array_move_sites =
+            super::array_move::compute_array_move_sites(
+                func,
+                self.type_registry,
+                &self.type_value_kinds,
+                &self.inject_functions,
+            );
         self.local_type_name_hints = func
             .params
             .iter()
             .chain(func.locals.iter())
             .enumerate()
             .filter_map(|(index, local)| local.type_name_hint.clone().map(|name| (index, name)))
+            .collect();
+        self.local_trait_dispatch = func.params.iter().chain(func.locals.iter()).enumerate()
+            .filter_map(|(index, local)| local.trait_dispatch_owner.clone().map(|info| (index, info)))
             .collect();
 
         let mut mir_func = MirFunction::new(func.name.clone(), func.return_type, func.visibility);
@@ -2326,6 +2376,8 @@ impl<'a> MirLowerer<'a> {
                 | "rt_typed_words_u64_store_known_data_at"
                 | "rt_typed_words_u32_set"
                 | "rt_typed_words_u64_set"
+                | "rt_typed_words_i64_push"
+                | "rt_typed_words_i64_set"
         )
     }
 }

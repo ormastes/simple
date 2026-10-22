@@ -1,0 +1,86 @@
+# @tag:in-development
+# @req REQ-TRC-012 REQ-TRC-013 REQ-TRC-018
+use std.spec.*
+use std.test_runner.test_runner_types.{TestExecutionMode, TestOptions}
+use app.test_runner_new.trace_execution_config.{capture_trace_execution_configuration}
+use std.common.traceability.execution_config.{validate_trace_execution_configuration}
+
+fn _capture_options() -> TestOptions:
+    var options = TestOptions()
+    options.mode = TestExecutionMode.Interpreter
+    options.timeout = 90
+    options.fail_fast = true
+    options.seed = 123
+    options.seed_set = true
+    options.native_backend = "llvm"
+    options.parallel = true
+    options.max_workers = 4
+    options.no_cache = true
+    options
+
+describe "runner execution configuration capture":
+    it "copies supplied options and exact selected path membership without I/O":
+        val captured = capture_trace_execution_configuration(
+            _capture_options(), ["test/日本_spec.spl", "test/runner_spec.spl"],
+            "lane-native-parent", "shard-2-of-3", 1, 3)
+        match captured:
+            case Err(reason): fail("capture failed: {reason}")
+            case Ok(result):
+                expect(result.configuration.execution_mode).to_equal("interpreter")
+                expect(result.configuration.backend).to_equal("llvm")
+                expect(result.configuration.lane_id).to_equal("lane-native-parent")
+                expect(result.configuration.timeout_secs).to_equal(90)
+                expect(result.configuration.seed).to_equal(123)
+                expect(result.configuration.seed_set).to_equal(true)
+                expect(result.configuration.fail_fast).to_equal(true)
+                expect(result.configuration.parallel).to_equal(true)
+                expect(result.configuration.worker_count).to_equal(4)
+                expect(result.configuration.shard_index).to_equal(1)
+                expect(result.configuration.shard_count).to_equal(3)
+                expect(result.configuration.shard_membership[0]).to_equal("test/日本_spec.spl")
+                expect(result.configuration.shard_membership[1]).to_equal("test/runner_spec.spl")
+                expect(result.configuration_id.starts_with("sha256:")).to_equal(true)
+
+    it "retains unresolved runner behavior instead of admitting default options":
+        val captured = capture_trace_execution_configuration(
+            _capture_options(), ["test/a_spec.spl"], "lane-1", "shard-1", 0, 1)
+        match captured:
+            case Err(reason): fail("capture failed: {reason}")
+            case Ok(result):
+                expect(result.configuration.timeout_binding).to_equal("per_file_unresolved")
+                expect(result.configuration.cache_policy).to_equal("unresolved")
+                expect(result.configuration.unresolved_fields).to_contain("effective_timeout_per_file")
+                expect(result.configuration.unresolved_fields).to_contain("feature_gate_disposition")
+                match validate_trace_execution_configuration(result.configuration):
+                    case Ok(_): fail("unresolved options were admitted")
+                    case Err(reason): expect(reason).to_contain("timeout")
+
+    it "marks unmodeled active filters as unsupported":
+        var options = _capture_options()
+        options.tag = "critical"
+        options.only_skipped = true
+        match capture_trace_execution_configuration(options, ["test/a_spec.spl"], "lane-1", "shard-1", 0, 1):
+            case Err(reason): fail("capture should preserve unsupported options: {reason}")
+            case Ok(result):
+                expect(result.configuration.unsupported_fields).to_contain("tag_filter")
+                expect(result.configuration.unsupported_fields).to_contain("only_skipped_filter")
+
+    it "rejects missing lane, empty paths, and duplicate selected paths":
+        match capture_trace_execution_configuration(_capture_options(), [], "lane-1", "shard-1", 0, 1):
+            case Ok(_): fail("empty path inventory was accepted")
+            case Err(reason): expect(reason).to_contain("selected paths")
+        match capture_trace_execution_configuration(_capture_options(), ["test/a_spec.spl"], "", "shard-1", 0, 1):
+            case Ok(_): fail("empty lane identity was accepted")
+            case Err(reason): expect(reason).to_contain("identity")
+        match capture_trace_execution_configuration(_capture_options(), ["test/a_spec.spl", "test/a_spec.spl"], "lane-1", "shard-1", 0, 1):
+            case Ok(_): fail("duplicate path inventory was accepted")
+            case Err(reason): expect(reason).to_contain("duplicate")
+
+    it "preserves composite mode as unsupported rather than flattening it":
+        var options = _capture_options()
+        options.mode = TestExecutionMode.Composite("jit(remote(linux))")
+        match capture_trace_execution_configuration(options, ["test/a_spec.spl"], "lane-1", "shard-1", 0, 1):
+            case Err(reason): fail("composite snapshot failed: {reason}")
+            case Ok(result):
+                expect(result.configuration.execution_mode).to_equal("composite:jit(remote(linux))")
+                expect(result.configuration.unsupported_fields).to_contain("composite_execution_mode")

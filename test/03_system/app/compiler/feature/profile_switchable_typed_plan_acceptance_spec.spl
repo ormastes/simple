@@ -1,9 +1,11 @@
+# @cover src/app/optimize/sprof_collection_profile.spl 80%
 """# Typed collection physical-plan acceptance
 
 For compiler maintainers, a profile replay must reach the actual compiled
 representation and expose a receipt from the lowering owner. The existing
-`optimize --explain-collection-plan` text is advisory and is not that receipt.
-This scenario deliberately fails MissingEvidence until the production compiler
+Runtime-attributed explanation text is advisory. The explicit typed explanation
+route consumes MIR, but does not yet bind its receipt to a native artifact.
+The profile scenario deliberately fails MissingEvidence until the production compiler
 emits a versioned typed site decision tied to the native artifact.
 """
 
@@ -28,6 +30,79 @@ describe "typed collection plan reaches executable storage":
             typed_plan_suite_binary_digest = file_hash_sha256(typed_plan_suite_runtime)
             typed_plan_suite_provenance_digest = file_hash_sha256(
                 typed_plan_suite_runtime + ".provenance.env")
+
+    it "should honor literal plan guards and preserve native membership results":
+        """Literal lowering obeys optimization and memory admission before execution."""
+        # @req: REQ-PSC-001 REQ-PSC-003 REQ-PSC-005 REQ-PSC-008
+        step("Admit source-matched compiler and literal fixture")
+        val runtime = typed_plan_suite_runtime
+        if runtime == "" or typed_plan_suite_binary_digest == "" or typed_plan_suite_provenance_digest == "":
+            fail("MissingEvidence: literal acceptance requires a source-matched runtime")
+            return
+        expect(file_hash_sha256(runtime)).to_equal(typed_plan_suite_binary_digest)
+        expect(file_hash_sha256(runtime + ".provenance.env")).to_equal(typed_plan_suite_provenance_digest)
+        val source = "test/fixtures/profile_switchable/typed_literal_membership_probe.spl"
+        val source_digest = file_hash_sha256(source)
+        expect(source_digest != "").to_be(true)
+        expect(mkdir_p("build/test-artifacts/compiler")).to_be(true)
+        val evidence = "build/test-artifacts/compiler/literal-membership-{getpid()}.txt"
+        var transcript = "source={source}\nsource_sha256={source_digest}\n"
+
+        step("Require Original for O0 and exhausted memory budget")
+        for guard in [("O0", "512", "x86_64-unknown-linux-gnu"),
+            ("O2", "0", "x86_64-unknown-linux-gnu"),
+            ("O2", "512", "x86_64-unknown-linux-gnu"),
+            ("O2", "512", "x86_64-madeup")]:
+            val (out, err, code) = process_run_timeout(runtime, [
+                "optimize", source, "--explain-collection-plan",
+                "--collection-policy=moderate", "--collection-memory-budget=" + guard.1,
+                "--target=" + guard.2, "--level=" + guard.0
+            ], 120000)
+            transcript = transcript + "explain_level={guard.0}\nbudget={guard.1}\ntarget={guard.2}\nexit={code}\n{out}\n{err}\n"
+            expect(file_write(evidence, transcript)).to_be(true)
+            expect(code).to_equal(0)
+            expect(out).to_contain("collection-plan-v1")
+            if guard.0 == "O2" and guard.1 == "512" and guard.2 != "x86_64-madeup":
+                expect(out).to_contain("selected=linear")
+                expect(out).to_contain("typed_mir=consumed")
+                expect(out).to_contain("fallback=original-on-materialization-failure")
+            else:
+                expect(out).to_contain("selected=original")
+                expect(out).to_contain("typed_mir=original")
+            if guard.2 == "x86_64-madeup":
+                expect(out).to_contain("target.admitted=false")
+                expect(out.contains("typed_mir=consumed")).to_be(false)
+
+        step("Compare interpreted and native logical membership")
+        val (reference_out, reference_err, reference_code) = process_run_timeout(runtime,
+            ["run", source], 120000)
+        transcript = transcript + "reference_exit={reference_code}\n{reference_out}\n{reference_err}\n"
+        expect(file_write(evidence, transcript)).to_be(true)
+        expect(reference_code).to_equal(0)
+        expect(reference_out).to_contain("COLLECTION_TYPED_LITERAL_MEMBERSHIP: PASS")
+        val binary = "build/literal-membership-{getpid()}.exe"
+        _ = file_delete(binary)
+        # Build for the actual host. The explicit Linux MIR explanation above
+        # is separate evidence, not an artifact-bound native decision receipt.
+        val (build_out, build_err, build_code) = process_run_timeout(runtime, [
+            "native-build", "--backend=llvm", "--mode=one-binary", "--entry-closure",
+            "--entry", source, "--source", "src/lib", "--output", binary,
+            "--opt-level=2", "--collection-policy=moderate", "--collection-memory-budget=512"
+        ], 600000)
+        transcript = transcript + "build_exit={build_code}\n{build_out}\n{build_err}\n"
+        expect(file_write(evidence, transcript)).to_be(true)
+        expect(build_code).to_equal(0)
+        expect(file_exists(binary)).to_be(true)
+        val (native_out, native_err, native_code) = process_run_timeout(binary, [], 120000)
+        transcript = transcript + "native_exit={native_code}\n{native_out}\n{native_err}\n"
+        expect(file_write(evidence, transcript)).to_be(true)
+        expect(native_code).to_equal(0)
+        expect(native_out).to_contain("COLLECTION_TYPED_LITERAL_MEMBERSHIP: PASS")
+        expect(native_out.trim()).to_equal(reference_out.trim())
+        expect(file_hash_sha256(source)).to_equal(source_digest)
+        expect(file_hash_sha256(runtime)).to_equal(typed_plan_suite_binary_digest)
+        expect(file_hash_sha256(runtime + ".provenance.env")).to_equal(typed_plan_suite_provenance_digest)
+        _ = file_delete(binary)
 
     it "should bind an admitted exact-site choice to its lowered native representation":
         """My workload changes physical storage only with a typed, executable proof."""

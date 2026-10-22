@@ -1,6 +1,8 @@
+use compiler.core.parser.{parser_lexical_scope_enter, parser_lexical_scope_leave, parser_lexical_bind_value}
 # Declaration parsing: fn, extern fn, struct/class, type params, domain blocks.
 use compiler.frontend.core.parser_decls.*
 use compiler.frontend.core._ParserDecls.enum_module_body.{parse_top_level_visibility}
+use compiler.frontend.core.representation_declarations_v1.{representation_declaration_begin_v1, representation_declaration_header_v1, representation_declaration_end_v1, representation_reject_pending_v1}
 # Parser — Declaration Module
 #
 # Declaration parsing: fn, extern fn, struct/class, enum.
@@ -47,7 +49,7 @@ use compiler.core.ast.{decl_set_is_value_type, decl_set_type_params, decl_set_ty
 use compiler.core.ast.{decl_set_param_defaults}
 use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding}
 use compiler.core.ast.{decl_use_import, decl_export_names, decl_enum_def, decl_set_lazy}
-use compiler.core.ast.{decl_impl_block, decl_set_trait}
+use compiler.core.ast.{decl_impl_block, decl_set_trait, decl_set_impl_with_trait}
 use compiler.core.ast.{decl_set_comptime}
 use compiler.core.ast.{decl_set_visibility_text}
 use compiler.core.ast.{decl_is_gpu_kernel, decl_is_simd, decl_is_packed, decl_derives}
@@ -355,6 +357,7 @@ fn parse_type_param_constraint_list() -> [text]:
                     break
                 parser_advance()
                 if par_kind_get() != 6:
+                    parser_error("expected trait bound after +")
                     break
                 types.push(par_text_get())
                 parser_advance()
@@ -380,11 +383,12 @@ fn parse_type_param_constraint_list() -> [text]:
     parser_expect(145)
     types
 
-fn parse_type_params() -> [text]:
+fn parse_type_params_with_trait_bounds() -> ([text], [[text]]):
     # Parses canonical <T> and deprecated [T] declaration parameters.
     # Returns list of type parameter names (e.g., ["T", "U"])
     # Side effect: populates last_type_param_constraints and last_type_param_modes
     var type_params: [text] = []
+    var trait_rows: [[text]] = []
 
     # Check for < token (either TOK_LT or TOK_LT_GENERIC)
     val has_lt: bool = par_kind_get() == 82
@@ -393,7 +397,7 @@ fn parse_type_params() -> [text]:
     val has_angle: bool = has_lt or has_lt_gen
     val has_generic: bool = has_angle or has_square
     if not has_generic:
-        return type_params
+        return (type_params, trait_rows)
 
     parser_advance()
 
@@ -413,6 +417,7 @@ fn parse_type_params() -> [text]:
 
         val param_name = par_text_get()
         type_params.push(param_name)
+        var trait_bounds: [text] = []
         parser_advance()
 
         # Check for inline constraint: `T limits [...]` or `T: [...]`
@@ -421,7 +426,13 @@ fn parse_type_params() -> [text]:
         val is_colon_constraint: bool = par_kind_get() == 161
         if is_limits or is_candidates or is_colon_constraint:
             parser_advance()
+            # Bracket lists are hardware candidate/limit sets, not trait conjunctions.
+            val is_trait_bound = is_colon_constraint and par_kind_get() != 144
             val constraint_types = parse_type_param_constraint_list()
+            if is_trait_bound:
+                trait_bounds = constraint_types
+                if trait_bounds.len() == 0:
+                    parser_error("expected inline trait bound")
             if constraint_types.len() > 0:
                 # Check for * (candidate mode marker)
                 var has_star = false
@@ -435,6 +446,8 @@ fn parse_type_params() -> [text]:
                 file_generic_constraints[param_name] = filtered
                 file_generic_constraint_modes[param_name] = mode_str
 
+        trait_rows.push(trait_bounds)
+
     # Keep accepting the legacy square form until the source migration is
     # complete.  The Rust seed accepts it with a deprecation warning, so the
     # pure-Simple checker must not reject otherwise valid bootstrap inputs.
@@ -443,7 +456,11 @@ fn parse_type_params() -> [text]:
     else:
         parser_expect(83)
 
-    type_params
+    (type_params, trait_rows)
+
+fn parse_type_params() -> [text]:
+    val parsed = parse_type_params_with_trait_bounds()
+    parsed.0
 
 fn bitfield_backing_bits_from_name(type_name: text) -> i64:
     val primitive_bits = primitive_backing_bits_from_name(type_name)
@@ -629,6 +646,7 @@ fn parser_skip_where_clause(type_params: [text]) -> [[text]]:
     bounds
 
 fn parse_fn_decl(is_async: i64) -> i64:
+    val representation_owner = representation_declaration_begin_v1("fn")
     val decl_start = lex_token_start_get()
     val decl_line = par_line_get()
     val decl_col = par_col_get()
@@ -641,7 +659,9 @@ fn parse_fn_decl(is_async: i64) -> i64:
     val previous_collection_owner = parser_collection_site_owner_push(fn_name)
 
     # Parse optional type parameters: fn name<T, U>(...)
-    val type_params = parse_type_params()
+    val parsed_type_params = parse_type_params_with_trait_bounds()
+    val type_params = parsed_type_params.0
+    val inline_trait_bounds = parsed_type_params.1
 
     var param_names: [text] = []
     var param_types: [i64] = []
@@ -706,11 +726,20 @@ fn parse_fn_decl(is_async: i64) -> i64:
         if par_kind_get() == TOK_NEWLINE:
             parser_try_skip_signature_layout_before_colon()
 
-    val where_bounds = parser_skip_where_clause(type_params)
+    var where_bounds = parser_skip_where_clause(type_params)
+    for i in 0..type_params.len():
+        var merged = inline_trait_bounds[i]
+        for bound in where_bounds[i]:
+            merged.push(bound)
+        where_bounds[i] = merged
 
     # Canonical declarations may be bodyless (forward/extern-style surface),
     # or may use the legacy colonless indented block spelling. Do not consume
     # the next same-level declaration while deciding between those forms.
+    representation_declaration_header_v1(representation_owner)
+    parser_lexical_scope_enter()
+    for parameter_name in param_names:
+        parser_lexical_bind_value(parameter_name)
     var body: [i64] = []
     if par_kind_get() == TOK_COLON:
         parser_advance()
@@ -720,15 +749,18 @@ fn parse_fn_decl(is_async: i64) -> i64:
     elif par_kind_get() == TOK_SEMICOLON:
         parser_advance()
 
+    parser_lexical_scope_leave()
     parser_collection_site_owner_restore(previous_collection_owner)
     val decl_span = flat_span_new(decl_start, lex_token_start_get(), decl_line, decl_col)
     val fn_decl_idx = decl_fn(fn_name, param_names, param_types, ret_type, body, is_async, type_params, decl_span)
     decl_set_type_param_constraints(fn_decl_idx, where_bounds)
     decl_set_param_defaults(fn_decl_idx, param_defaults)
     decl_set_param_muts(fn_decl_idx, param_muts)
+    representation_declaration_end_v1(representation_owner, fn_decl_idx, fn_name)
     fn_decl_idx
 
 fn parse_extern_fn_decl() -> i64:
+    val representation_owner = representation_declaration_begin_v1("extern_fn")
     # Already consumed 'extern'
     val decl_start = lex_token_start_get()
     val decl_line = par_line_get()
@@ -781,7 +813,10 @@ fn parse_extern_fn_decl() -> i64:
         ret_type = parser_parse_type()
 
     val decl_span = flat_span_new(decl_start, lex_token_start_get(), decl_line, decl_col)
-    decl_extern_fn(fn_name, param_names, param_types, ret_type, type_params, decl_span)
+    representation_declaration_header_v1(representation_owner)
+    val extern_decl = decl_extern_fn(fn_name, param_names, param_types, ret_type, type_params, decl_span)
+    representation_declaration_end_v1(representation_owner, extern_decl, fn_name)
+    extern_decl
 
 # ===== @derive Implementation Generator =====
 
@@ -921,6 +956,7 @@ fn parse_struct_decl(is_class: bool) -> i64:
     parse_struct_or_trait_decl(is_class, false)
 
 fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
+    val representation_owner = representation_declaration_begin_v1(if is_trait: "trait" else: if is_class: "class" else: "struct")
     parser_advance()
     val struct_name = par_text_get()
     parser_expect(6)
@@ -941,18 +977,25 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
                 break
             parser_advance()
         parser_expect(141)
-    # Handle one or more mixins: class X with Read, Write, Close:
+    # Handle one or more mixins/traits: class X with Read, Write, Close:
+    # The names are kept (they used to be discarded): exactly ONE name is a
+    # trait-implementation candidate that HIR confirms or drops once the
+    # trait declaration is known (see decl_set_impl_with_trait below).
+    var with_names: [text] = []
     if par_kind_get() == 6:
         if par_text_get() == "with":
             parser_advance()
+            with_names.push(par_text_get())
             parser_expect(6)
             while par_kind_get() == 160:
                 parser_advance()
+                with_names.push(par_text_get())
                 parser_expect(6)
     # The same where grammar applies to generic structs/classes. Keep the
     # body colon intact for parser_expect below; semantic bound enforcement
     # remains a separate gate before these types are instantiated.
     val where_bounds = parser_skip_where_clause(type_params)
+    representation_declaration_header_v1(representation_owner)
     parser_expect(161)
     parser_skip_newlines()
     parser_expect(181)
@@ -1059,6 +1102,7 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
         # `type: T` is instead a keyword-named field, as in the canonical Rust
         # parser's parse_field/expect_identifier path.
         if par_kind_get() == 35 and not parser_class_member_followed_by_colon():
+            representation_reject_pending_v1()
             if collection_algorithm_next != "":
                 parser_error("@collection_algorithm requires a field")
                 collection_algorithm_next = ""
@@ -1082,6 +1126,7 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
         val is_any_pass2: bool = is_pass_dn2 or is_pass_kw
         val is_pass: bool = is_any_pass or is_any_pass2
         if is_pass and not parser_class_member_followed_by_colon():
+            representation_reject_pending_v1()
             if collection_algorithm_next != "":
                 parser_error("@collection_algorithm requires a field")
                 collection_algorithm_next = ""
@@ -1139,6 +1184,7 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
         if is_field_prefix and not parser_class_member_followed_by_colon():
             parser_advance()
         var fname = par_text_get()
+        representation_reject_pending_v1()
         val fname_kw = use_kw_segment_text(par_kind_get())
         if par_kind_get() != TOK_IDENT and fname_kw == "":
             if collection_algorithm_next != "":
@@ -1292,9 +1338,17 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
         # even when the enclosing struct/class is generic.
         if type_params.len() > 0:
             decl_set_type_params(impl_d, type_params)
+        # `class X with Trait:` (one name): a candidate, not yet an impl --
+        # the parser cannot tell a trait from a mixin or check the required
+        # methods. Several names keep the old behaviour: an object has one
+        # vtable header, so `with Read, Close` cannot be one trait impl.
+        if is_class and with_names.len() == 1:
+            decl_set_impl_with_trait(impl_d, with_names[0])
         module_add_decl(impl_d)
 
     parser_collection_site_owner_restore(previous_collection_owner)
+    representation_reject_pending_v1()
+    representation_declaration_end_v1(representation_owner, struct_d, struct_name)
     struct_d
 
 export parse_type_params, parser_generic_constraints_reset

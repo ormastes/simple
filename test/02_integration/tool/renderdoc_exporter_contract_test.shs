@@ -1,0 +1,205 @@
+#!/bin/sh
+# RenderDoc's Python replay API needs an offline Python contract harness.
+# @req REQ-2D-004 NFR-2D-001
+set -eu
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)"
+python3 - "$ROOT_DIR/scripts/tool/renderdoc-qrenderdoc-python-smoke.py" <<'PY'
+"""Offline contract tests for the RenderDoc Python replay exporter.
+
+Mock replay APIs are not GPU evidence; a native capture still needs validation.
+"""
+import ast
+import base64
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace as NS
+
+SOURCE = Path(sys.argv[1])
+
+def load_functions(path):
+    tree = ast.parse(path.read_text())
+    tree.body = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom,
+                  ast.FunctionDef, ast.Assign, ast.Expr))]
+    namespace = {'__name__': 'exporter_unit_test'}
+    exec(compile(tree, str(path), 'exec'), namespace)
+    return namespace
+
+M = load_functions(SOURCE)
+FLAGS = NS(Dispatch=1, Drawcall=2, Clear=4, Copy=8, Present=16, Resolve=32)
+
+def texture(name='R8G8B8A8_UNORM', **kw):
+    return NS(format=NS(Name=lambda: name), width=1, height=1,
+              msSamp=kw.get('samples',1), depth=1, arraysize=1)
+
+def rd():
+    return NS(ResultCode=NS(Succeeded=0), Subresource=lambda *a:a,
+              FileType=NS(PNG=1), AlphaMapping=NS(Preserve=1),
+              TextureSave=lambda: NS(slice=NS(),comp=NS()))
+
+class ExporterTests(unittest.TestCase):
+    def test_marker_named_draw_is_not_gpu_work(self):
+        self.assertEqual(M['_event_type'](NS(customName='Draw menu',flags=0),FLAGS),'other')
+    def test_marker_named_dispatch_does_not_override_draw(self):
+        self.assertEqual(M['_event_type'](NS(customName='Dispatch card',flags=2),FLAGS),'draw')
+    def test_resolve_flag(self):
+        self.assertEqual(M['_event_type'](NS(customName='',flags=32),FLAGS),'copy')
+    def test_missing_flag_api_is_error(self):
+        with self.assertRaises(RuntimeError): M['_event_type'](NS(flags=2),None)
+    def test_bool_result_does_not_confuse_false_with_zero(self):
+        self.assertFalse(M['_result_ok'](False,rd()))
+        self.assertTrue(M['_result_ok'](True,rd()))
+    def test_legacy_result(self):
+        self.assertTrue(M['_result_ok'](0,rd()))
+        self.assertFalse(M['_result_ok'](3,rd()))
+    def test_new_result_details(self):
+        self.assertTrue(M['_result_ok'](NS(OK=lambda:True),rd()))
+        self.assertFalse(M['_result_ok'](NS(OK=lambda:False),rd()))
+    def test_rgba_thumbnail(self):
+        c=NS(GetTextureData=lambda *a:bytes((20,40,60,200)))
+        out=M['_thumb_rgba8'](c,rd(),1,1,1,texture())
+        self.assertEqual(base64.b64decode(out),bytes((20,40,60,200))*4096)
+    def test_bgra_is_swizzled(self):
+        c=NS(GetTextureData=lambda *a:bytes((60,40,20,200)))
+        out=M['_thumb_rgba8'](c,rd(),1,1,1,texture('B8G8R8A8_UNORM'))
+        self.assertEqual(base64.b64decode(out),bytes((20,40,60,200))*4096)
+    def test_truncated_data_is_not_zero_padded(self):
+        c=NS(GetTextureData=lambda *a:bytes((20,40)))
+        with self.assertRaises(ValueError): M['_thumb_rgba8'](c,rd(),1,1,1,texture())
+    def test_float_texture_not_reinterpreted(self):
+        c=NS(GetTextureData=lambda *a:b'\0'*8)
+        with self.assertRaises(ValueError):
+            M['_thumb_rgba8'](c,rd(),1,1,1,texture('R16G16B16A16_FLOAT'))
+    def test_multisample_not_reinterpreted(self):
+        with self.assertRaises(ValueError):
+            M['_thumb_rgba8'](NS(),rd(),1,1,1,texture(samples=4))
+    def test_dimension_mismatch_rejected(self):
+        with self.assertRaises(ValueError): M['_thumb_rgba8'](NS(),rd(),1,2,1,texture())
+    def test_failed_save_cannot_reuse_old_png(self):
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'old.png'; p.write_bytes(b'\x89PNG\r\n\x1a\nold')
+            with self.assertRaises(RuntimeError):
+                M['_save_target_png'](NS(SaveTexture=lambda *a:1),rd(),1,str(p))
+            self.assertFalse(p.exists())
+    def test_success_without_file_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(FileNotFoundError):
+                M['_save_target_png'](NS(SaveTexture=lambda *a:0),rd(),1,str(Path(d)/'none.png'))
+    def test_missing_output_directory_created(self):
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'nested'/'target.png'
+            def save(_,path):
+                Path(path).write_bytes(b'\x89PNG\r\n\x1a\nfixture')
+                return 0
+            self.assertEqual(M['_save_target_png'](NS(SaveTexture=save),rd(),1,str(p)),p.read_bytes())
+    def test_non_png_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            def save(_,path):
+                Path(path).write_bytes(b'not a png'); return 0
+            with self.assertRaises(RuntimeError):
+                M['_save_target_png'](NS(SaveTexture=save),rd(),1,str(Path(d)/'bad.png'))
+    def test_default_smoke_still_works(self):
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'smoke.env'
+            env=dict(os.environ); env.pop('RDOC_EXPORT_RDC',None)
+            env['RDOC_QRENDERDOC_SMOKE_OUT']=str(p)
+            r=subprocess.run([sys.executable,str(SOURCE)],env=env,capture_output=True,timeout=10)
+            self.assertEqual(r.returncode,0,r.stderr)
+            self.assertEqual(p.read_text(),'rdoc_qrenderdoc_python_smoke_status=pass\n')
+
+    def test_capture_session_cleanup_on_initialization_errors(self):
+        mock = '''
+import os
+STAGE = os.environ['FAIL_STAGE']
+LOG = os.environ['CLEANUP_LOG']
+class ResultCode:
+    Succeeded = 0
+def record(name):
+    with open(LOG, 'a', encoding='utf-8') as f: f.write(name + '\\n')
+class Texture:
+    resourceId = 1
+    width = 1
+    height = 1
+    class format:
+        @staticmethod
+        def Name(): raise RuntimeError('metadata failure')
+class Controller:
+    def GetTextures(self):
+        if STAGE in ('textures', 'controller_shutdown'):
+            raise RuntimeError('GetTextures failure')
+        return [Texture()]
+    def Shutdown(self):
+        record('controller')
+        if STAGE == 'controller_shutdown': raise RuntimeError('Shutdown failure')
+class Capture:
+    def OpenFile(self, *args):
+        if STAGE == 'open_file': raise RuntimeError('OpenFile failure')
+        return 0
+    def OpenCapture(self, *args):
+        if STAGE == 'open_capture': raise RuntimeError('OpenCapture failure')
+        return (0, Controller())
+    def Shutdown(self): record('capture')
+def ReplayOptions(): return None
+def OpenCaptureFile(): return Capture()
+'''
+        cases = (
+            ('open_file', ['capture']),
+            ('open_capture', ['capture']),
+            ('textures', ['controller', 'capture']),
+            ('metadata', ['controller', 'capture']),
+            ('controller_shutdown', ['controller', 'capture']),
+        )
+        for stage, expected in cases:
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as d:
+                p = Path(d)
+                (p / 'renderdoc.py').write_text(mock)
+                out = p / 'events.json'
+                out.write_text('{"evidenceStatus":"ready"}')
+                log = p / 'cleanup.log'
+                env = dict(os.environ, PYTHONPATH=d, RDOC_EXPORT_RDC=str(p / 'capture.rdc'),
+                           RDOC_EXPORT_OUT=str(out), FAIL_STAGE=stage, CLEANUP_LOG=str(log))
+                proc = subprocess.run([sys.executable, str(SOURCE)], env=env,
+                                      capture_output=True, timeout=10)
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertEqual(log.read_text().splitlines(), expected)
+                self.assertFalse(out.exists())
+
+    def test_failed_open_removes_stale_success_json(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)
+            (p / 'renderdoc.py').write_text('''
+class ResultCode:
+    Succeeded = 0
+class Capture:
+    def OpenFile(self, *args): return 1
+    def Shutdown(self): pass
+def OpenCaptureFile(): return Capture()
+''')
+            out = p / 'events.json'
+            out.write_text('{"evidenceStatus":"ready"}')
+            env = dict(os.environ, PYTHONPATH=d, RDOC_EXPORT_RDC=str(p / 'capture.rdc'),
+                       RDOC_EXPORT_OUT=str(out))
+            proc = subprocess.run([sys.executable, str(SOURCE)], env=env,
+                                  capture_output=True, timeout=10)
+            self.assertEqual(proc.returncode, 2, proc.stderr)
+            self.assertIn(b'renderdoc_status=blocked:open-failed', proc.stderr)
+            self.assertFalse(out.exists())
+
+    def test_import_failure_removes_stale_success_json(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)
+            (p / 'renderdoc.py').write_text('raise RuntimeError("mock import failure")\n')
+            out = p / 'events.json'
+            out.write_text('{"evidenceStatus":"ready"}')
+            env = dict(os.environ, PYTHONPATH=d, RDOC_EXPORT_RDC=str(p / 'capture.rdc'),
+                       RDOC_EXPORT_OUT=str(out))
+            proc = subprocess.run([sys.executable, str(SOURCE)], env=env,
+                                  capture_output=True, timeout=10)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertFalse(out.exists())
+
+if __name__=='__main__': unittest.main(argv=[sys.argv[0]], verbosity=2)
+PY

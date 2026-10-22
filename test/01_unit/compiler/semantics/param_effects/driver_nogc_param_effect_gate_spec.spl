@@ -1,0 +1,110 @@
+# @req AC-BOR-01
+# @req AC-BOR-02
+"""The production post-HIR ownership gate rejects retaining short contracts
+only when the declaring physical source enables strict no-GC semantics."""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surface_from_owner, ModuleSurfaceParserOwner}
+use compiler.driver.driver_hir_pipeline_support.{driver_nogc_param_effect_errors_v1}
+use compiler.driver.driver_hir_pipeline_support.{driver_admit_nogc_param_effects_v1}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+
+fn gate_errors(body: text, strict: bool, surface_path: text = "testdata/borrow_gate.spl", cached_strict: bool? = nil) -> [text]:
+    val path = "testdata/borrow_gate.spl"
+    val source_text = "class Node:\n    v: i64\n\n" + body
+    var parsed = parse_full_frontend(source_text, path, "borrow_gate", Logger(level: 0))
+    parsed.nogc_strict = strict
+    val source = SourceFile(path: surface_path, content: source_text, module_name: "borrow_gate")
+    val surface = module_surface_from_owner(ModuleSurfaceParserOwner.new(parsed), source, 0).unwrap()
+    var lowering = HirLowering.with_filename(path)
+    var actual: HirModule = lowering.lower_module(parsed)
+    if val cached_policy = cached_strict:
+        actual.nogc_strict = cached_policy
+    driver_nogc_param_effect_errors_v1({}, [actual], [surface])
+
+fn admitted_context(body: text) -> CompileContext:
+    val path = "testdata/admitted_borrow.spl"
+    val source_text = "class Node:\n    v: i64\n\n" + body
+    var parsed = parse_full_frontend(source_text, path, "admitted_borrow", Logger(level: 0))
+    parsed.nogc_strict = true
+    val source = SourceFile(path: path, content: source_text, module_name: "admitted_borrow")
+    val surface = module_surface_from_owner(ModuleSurfaceParserOwner.new(parsed), source, 0).unwrap()
+    var lowering = HirLowering.with_filename(path)
+    val actual: HirModule = lowering.lower_module(parsed)
+    val ctx = CompileContext.create(driver_core_compile_options_default())
+    ctx.hir_modules["admitted_borrow"] = actual
+    ctx.validation_module_array = [actual]
+    ctx.bootstrap_entry_hir = actual
+    driver_admit_nogc_param_effects_v1(ctx, [surface])
+    ctx
+
+describe "strict driver ownership gate":
+    it "returns fatal diagnostics when a short parameter escapes by return":
+        val errors = gate_errors("fn escape(n: Node) -> Node:\n    n\n", true)
+        expect(errors.len()).to_equal(1)
+        expect(errors[0]).to_contain("NOGC-BOR-001")
+        expect(errors[0]).to_contain("testdata/borrow_gate.spl")
+
+    it "returns fatal diagnostics when a short parameter crosses suspension":
+        val errors = gate_errors("fn escape(n: Node):\n    yield 1\n    val after = n.v\n", true)
+        expect(errors.len()).to_equal(1)
+        expect(errors[0]).to_contain("NOGC-BOR-001")
+
+    it "accepts a synchronous read of a short parameter":
+        expect(gate_errors("fn inspect(n: Node) -> i64:\n    n.v\n", true).len()).to_equal(0)
+
+    it "preserves legacy module policy":
+        expect(gate_errors("fn escape(n: Node) -> Node:\n    n\n", false).len()).to_equal(0)
+
+    it "retains legacy compatibility when no physical source surface is retained":
+        expect(gate_errors("fn escape(n: Node) -> Node:\n    n\n", false, "testdata/other.spl").len()).to_equal(0)
+
+    it "rejects strict HIR without authority from its physical source":
+        val errors = gate_errors("fn inspect(n: Node) -> i64:\n    n.v\n", true, "testdata/other.spl")
+        expect(errors.len()).to_equal(1)
+        expect(errors[0]).to_contain("NOGC-POLICY-001")
+
+    it "rejects a legacy cached HIR for a strict source":
+        val errors = gate_errors("fn inspect(n: Node) -> i64:\n    n.v\n", true, "testdata/borrow_gate.spl", Some(false))
+        expect(errors.len()).to_equal(1)
+        expect(errors[0]).to_contain("NOGC-POLICY-001")
+
+    it "rejects a strict cached HIR for a legacy source":
+        val errors = gate_errors("fn inspect(n: Node) -> i64:\n    n.v\n", false, "testdata/borrow_gate.spl", Some(true))
+        expect(errors.len()).to_equal(1)
+        expect(errors[0]).to_contain("NOGC-POLICY-001")
+
+    it "publishes admitted effects to the actual driver module owners":
+        val ctx = admitted_context("fn inspect(n: Node) -> i64:\n    n.v\n")
+        expect(ctx.error_count_value).to_equal(0)
+        val actual: HirModule = ctx.hir_modules["admitted_borrow"]
+        expect(actual.nogc_param_effects_checked).to_equal(true)
+        expect(actual.nogc_param_effect_symbol_ids.len()).to_equal(actual.functions.keys().len())
+        var inspect_symbol = -1
+        for declaration in actual.functions.values():
+            if declaration.name == "inspect": inspect_symbol = declaration.symbol.id
+        var matched = false
+        var row = 0
+        while row < actual.nogc_param_effect_symbol_ids.len():
+            if actual.nogc_param_effect_symbol_ids[row] == inspect_symbol:
+                expect(actual.nogc_param_effects[row]).to_equal(["read-short"])
+                matched = true
+            row = row + 1
+        expect(matched).to_equal(true)
+        expect(ctx.validation_module_array[0].nogc_param_effects_checked).to_equal(true)
+        val entry: HirModule = ctx.bootstrap_entry_hir.unwrap()
+        expect(entry.nogc_param_effects_checked).to_equal(true)
+
+    it "does not publish a partial ownership report after admission fails":
+        val ctx = admitted_context("fn escape(n: Node) -> Node:\n    n\n")
+        expect(ctx.error_count_value).to_be_greater_than(0)
+        val actual: HirModule = ctx.hir_modules["admitted_borrow"]
+        expect(actual.nogc_param_effects_checked).to_equal(false)
+        expect(ctx.validation_module_array[0].nogc_param_effects.len()).to_equal(0)

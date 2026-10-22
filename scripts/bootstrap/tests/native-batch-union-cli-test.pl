@@ -28,12 +28,17 @@ put("$tmp/compiler", "\x7fELFcompiler-fixture");
 put("$tmp/positive.native", "\x7fELFpositive-fixture");put("$tmp/negative.native", "\x7fELFnegative-fixture");
 put("$tmp/review.txt", "Test fixture migration review, not native product qualification.\n");
 my $compiler_sha=sha256_hex(get("$tmp/compiler"));
+my $runtime_sha="a"x64;
+sub initial_build {
+    my($backend)=@_;
+    put("$tmp/build.env", "schema=simple-restricted-native-adapter-build-v1\nformal_product_pass=0\nbackend=$backend\ncompiler_sha256=$compiler_sha\nsource_root=$tmp/source\nruntime_capsule_sha256=$runtime_sha\n");
+}
 save("$tmp/green.json",{schema=>'simple-restricted-native-adapter-result-v1',status=>'RESTRICTED_NATIVE_GATE_PASS',
     formal_product_pass=>JSON::PP::false,variants=>{positive=>{run_exit=>0,source_sha256=>sha256_hex($body),binary_sha256=>sha256_hex(get("$tmp/positive.native"))},negative=>{run_exit=>1,binary_sha256=>sha256_hex(get("$tmp/negative.native"))}}});
 for my $backend(qw(llvm cranelift)) {
     save("$tmp/authority-$backend.json",{schema=>'simple-reviewed-native-authority-v1',backend=>$backend,
         result_sha256=>sha256_hex(get("$tmp/green.json")),reviewed_by=>'controller-test-fixture',review_evidence=>"$tmp/review.txt",review_evidence_sha256=>sha256_hex(get("$tmp/review.txt")),
-        compiler_path=>"$tmp/compiler",compiler_sha256=>$compiler_sha,variants=>{map {$_=>{binary_path=>"$tmp/$_.native",binary_sha256=>sha256_hex(get("$tmp/$_.native"))}} qw(positive negative)}});
+        compiler_path=>"$tmp/compiler",compiler_sha256=>$compiler_sha,runtime_capsule_sha256=>$runtime_sha,variants=>{map {$_=>{binary_path=>"$tmp/$_.native",binary_sha256=>sha256_hex(get("$tmp/$_.native"))}} qw(positive negative)}});
 }
 put("$tmp/diagnostic.log","compiler rejected fixture B\n");
 sub trial {
@@ -46,8 +51,9 @@ sub trial {
         my $proof="$tmp/proof-$n";
         save("$proof/manifest.json",{ordered_paths_sha256=>$r->{ordered_paths_sha256},canonical_inventory_sha256=>sha256_hex(get("$tmp/canonical.tsv")),source_root=>"$tmp/source"});
         put("$proof/positive.native","\x7fELFpositive-$n");put("$proof/negative.native","\x7fELFnegative-$n");
-        put("$proof/build.env", "backend=cranelift\ncompiler_sha256=$compiler_sha\nworkspace=$tmp/source\nmanifest_sha256=".sha256_hex(get("$proof/manifest.json"))."\n");
+        put("$proof/build.env", "schema=simple-restricted-prefix-build-v1\nformal_product_pass=0\nbackend=cranelift\ncompiler_sha256=$compiler_sha\nworkspace=$tmp/source\nruntime_cwd=$tmp/source\nruntime_capsule_sha256=$runtime_sha\nmanifest_sha256=".sha256_hex(get("$proof/manifest.json"))."\n");
         save("$proof/result.json",{schema=>'simple-restricted-prefix-result-v1',status=>'RESTRICTED_PREFIX_GATE_PASS',formal_product_pass=>JSON::PP::false,
+            build_sha256=>sha256_hex(get("$proof/build.env")),backend=>'cranelift',compiler_sha256=>$compiler_sha,workspace=>"$tmp/source",runtime_capsule_sha256=>$runtime_sha,
             detached_owners=>0,quarantined_assertions=>0,compiled_owners=>scalar(@$expected),executed_owners=>scalar(@$expected),manifest_sha256=>sha256_hex(get("$proof/manifest.json")),variants=>{map {$_=>{binary_sha256=>sha256_hex(get("$proof/$_.native"))}} qw(positive negative)}});
         $out->{verified_result}="$proof/result.json";
     }
@@ -59,6 +65,33 @@ sub trial {
         (my $producer=$build)=~s/compiler_sha256=$compiler_sha/compiler_sha256=@{['0'x64]}/;put("$tmp/proof-$n/build.env",$producer);
         ok(!run('record',"$tmp/lane","$tmp/outcome.json"),'different native producer rejected');
         put("$tmp/proof-$n/build.env",$build);
+        my $receipt=obj("$tmp/proof-$n/result.json");
+        # Authentic-shaped LLVM result/build hashes cannot be relabelled by
+        # changing only adjacent build.env to the requested Cranelift lane.
+        my %llvm=%$receipt;$llvm{backend}='llvm';$llvm{build_sha256}=sha256_hex($wrong);
+        save("$tmp/proof-$n/result.json",\%llvm);
+        ok(!run('record',"$tmp/lane","$tmp/outcome.json"),'LLVM receipt plus relabelled Cranelift build rejected');
+        for my $key(qw(backend compiler_sha256 workspace runtime_capsule_sha256 build_sha256)) {
+            my %mismatch=%$receipt;$mismatch{$key}=$key eq 'backend' ? 'llvm' : $key eq 'workspace' ? "$tmp/other-source" : '0'x64;
+            save("$tmp/proof-$n/result.json",\%mismatch);
+            ok(!run('record',"$tmp/lane","$tmp/outcome.json"),"result $key mismatch rejected");
+        }
+        for my $key(qw(schema build_sha256 runtime_capsule_sha256)) {
+            my %missing=%$receipt;delete $missing{$key};save("$tmp/proof-$n/result.json",\%missing);
+            ok(!run('record',"$tmp/lane","$tmp/outcome.json"),"missing result $key rejected");
+        }
+        save("$tmp/proof-$n/result.json",$receipt);
+        for my $key(qw(schema runtime_capsule_sha256)) {
+            (my $missing=$build)=~s/^\Q$key\E=.*\n//m;put("$tmp/proof-$n/build.env",$missing);
+            ok(!run('record',"$tmp/lane","$tmp/outcome.json"),"missing build $key rejected");
+        }
+        (my $other_runtime=$build)=~s/runtime_capsule_sha256=$runtime_sha/runtime_capsule_sha256=@{['b'x64]}/;
+        put("$tmp/proof-$n/build.env",$other_runtime);
+        my %other=%$receipt;$other{runtime_capsule_sha256}='b'x64;$other{build_sha256}=sha256_hex($other_runtime);
+        save("$tmp/proof-$n/result.json",\%other);
+        ok(!run('record',"$tmp/lane","$tmp/outcome.json"),'self-consistent other runtime rejected by reviewed lane');
+        save("$tmp/proof-$n/result.json",$receipt);put("$tmp/proof-$n/build.env",$build);
+        is_deeply(obj("$tmp/lane/state.json")->{accepted},[@paths[0,1]],'identity refusals never inflate accepted union');
         my $native=get("$tmp/proof-$n/positive.native");put("$tmp/proof-$n/positive.native","\x7fELFswapped-artifact");
         ok(!run('record',"$tmp/lane","$tmp/outcome.json"),'swapped result binary rejected');
         put("$tmp/proof-$n/positive.native",$native);
@@ -66,6 +99,7 @@ sub trial {
     ok(run('record',"$tmp/lane","$tmp/outcome.json"),"record trial $n");
     return $r;
 }
+initial_build('cranelift');
 ok(run('init',"$tmp/source","$tmp/canonical.tsv","$tmp/ordered.txt",'interpreter',4,"$tmp/lane","$tmp/green.json",'cranelift',"$tmp/authority-cranelift.json"),'initialize whole remaining batch');
 trial(1,'FAIL',[0,1,2,3,4]);trial(2,'FAIL',[0,1,2]);trial(3,'PASS',[0,1]);trial(4,'FAIL',[0,2]);
 my $cd=trial(5,'PASS',[0,3,4]);
@@ -83,6 +117,7 @@ like(get($s->{quarantine}[0]{retained_fail_marker}),qr/assert\(false\)/,'exclude
 ok(run('next',"$tmp/lane"),'completion returns no new native trial');
 like(get("$tmp/tool.log"),qr/NO_PENDING_BATCHES/,'completion is not a formal native PASS');
 # Same canonical source selection can be prepared independently for LLVM.
+initial_build('llvm');
 ok(run('init',"$tmp/source","$tmp/canonical.tsv","$tmp/ordered.txt",'interpreter',4,"$tmp/llvm","$tmp/green.json",'llvm',"$tmp/authority-llvm.json"),'same source inventory starts independent LLVM lane');
 ok(run('next',"$tmp/llvm"),'LLVM request generated');
 is(get("$tmp/llvm/trial-0001/ordered-paths.txt"),get("$tmp/lane/trial-0001/ordered-paths.txt"),'both backends receive identical source list');

@@ -228,32 +228,136 @@ fn _limit_shell(scope: ExecutionResourceScope) -> text:
 fn _rlimit_as_enforceable() -> bool:
     not file_exists("/System/Library/CoreServices/SystemVersion.plist")
 
+# Resident-memory cap through a transient `systemd-run --user --scope`.
+# The direct cgroup-v2 path above needs the memory controller delegated to a
+# child of the caller's own cgroup, which a login/tmux/`systemd-run --scope`
+# shell never has (no-internal-processes rule: its cgroup.subtree_control is
+# empty). The old fallback was `ulimit -v`, i.e. RLIMIT_AS, which counts
+# RESERVED address space: the seed reserves ~1.2-1.5 GB it never touches
+# (glibc per-thread arenas, 128 MiB AArch64 JIT code arenas, stacks), so under
+# the 3 GiB Unit cap a spec aborted with `memory allocation of N bytes failed`
+# at ~1.6-2.6 GB RSS. A user scope's MemoryMax charges resident pages instead.
+# Probed once per process with the exact property set the wrapper emits (an
+# older systemd that rejects one must fall back, not fail every child), then
+# cached. A scope, not run_in_systemd_resource_scope's `--wait --pipe` service:
+# a service drops the caller's env and cwd (SIMPLE_TEST_RESULT_FILE, relative
+# spec paths); a scope execs in place and keeps both.
+var _systemd_scope_probe: i64 = -1
+var _memscope_sequence: i64 = 0
+
+# The probe must prove ENFORCEMENT, not just that systemd-run exits 0: a user
+# manager without the memory controller delegated (cgroup v1/hybrid, old
+# user@.service) accepts MemoryMax and silently ignores it.
+fn _systemd_scope_available() -> bool:
+    if _systemd_scope_probe < 0:
+        _systemd_scope_probe = 0
+        if file_exists("/usr/bin/systemd-run") and file_exists("/proc/self/cgroup") and file_exists("/sys/fs/cgroup/cgroup.controllers"):
+            val (_out, _err, code) = process_run_bounded("/usr/bin/systemd-run", ["--user", "--scope", "--quiet", "--property=MemoryMax=67108864", "--property=MemorySwapMax=0", "--property=OOMPolicy=continue", "--property=TasksMax=64", "--", "/bin/sh", "-c", "[ \"$(cat /sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.max)\" = 67108864 ]"], 10_000, 4_096)
+            if code == 0:
+                _systemd_scope_probe = 1
+    _systemd_scope_probe == 1
+
+# A user scope is a sibling of the runner's own cgroup, so the caller's
+# MemoryMax (e.g. an outer `systemd-run --scope -p MemoryMax=8G`) no longer
+# bounds the child. Clamp each child to the tightest memory.max on the
+# runner's own cgroup chain so a child never gets more than its parent had.
+fn _ancestor_memory_max() -> i64:
+    var path = _cgroup_v2_parent()
+    var tightest = 0
+    while path.starts_with("/sys/fs/cgroup") and path.len() > "/sys/fs/cgroup".len():
+        if file_exists(path + "/memory.max"):
+            val raw = file_read_text(path + "/memory.max").trim()
+            if raw != "max":
+                val value = raw.to_int()
+                if value > 0 and (tightest == 0 or value < tightest):
+                    tightest = value
+        val slash = path.rfind("/")
+        if slash <= 0:
+            return tightest
+        path = path[0:slash]
+    tightest
+
+fn _cgroup_v2_memory_delegated() -> bool:
+    val parent = _cgroup_v2_parent()
+    if parent == "" or not file_exists(parent + "/cgroup.subtree_control"):
+        return false
+    for controller in file_read_text(parent + "/cgroup.subtree_control").trim().split(" "):
+        if controller == "memory":
+            return true
+    false
+
+pub fn resource_scope_memory_enforcement() -> text:
+    """Mechanism that caps a scoped child's memory on this host: cgroup | systemd-scope | rlimit-as | none."""
+    if host_is_windows_host():
+        return "none"
+    if _cgroup_v2_memory_delegated():
+        return "cgroup"
+    if _systemd_scope_available():
+        return "systemd-scope"
+    if _rlimit_as_enforceable(): "rlimit-as" else: "none"
+
+# Runs inside the scope as `sh -c SUPERVISOR sh <report> <cmd> <args...>`. It
+# outlives the child so the scope's counters can still be read, and writes
+# `oom_kill:memory.peak:pids.events max` to <report> (a private file, so child
+# output can neither forge it nor push it out of a truncated capture). The
+# TERM/INT/HUP trap is deferred while the child runs: a group SIGTERM still
+# reaches the child, and the child keeps its grace period instead of losing
+# its supervisor (the owner SIGKILLs the group once the leader exits). A fatal
+# child signal is re-raised (stop signals excluded, no core) so the caller
+# sees the same signal death as with a plain `exec`.
+val _MEMSCOPE_SUPERVISOR = "trap ':' TERM INT HUP; f=$1; shift; \"$@\"; rc=$?; cg=$(cut -d: -f3 /proc/self/cgroup); k=$(awk '$1 == \"oom_kill\" { print $2 }' \"/sys/fs/cgroup$cg/memory.events\" 2>/dev/null); p=$(cat \"/sys/fs/cgroup$cg/memory.peak\" 2>/dev/null); t=$(awk '$1 == \"max\" { print $2 }' \"/sys/fs/cgroup$cg/pids.events\" 2>/dev/null); printf '%s:%s:%s' \"$k\" \"$p\" \"$t\" > \"$f\"; if [ $rc -gt 128 ] && [ $rc -lt 160 ]; then s=$((rc - 128)); case $s in 19|20|21|22) ;; *) ulimit -c 0; trap - TERM INT HUP; kill -$s $$ ;; esac; fi; exit $rc"
+
 fn _run_with_unix_limits(scope: ExecutionResourceScope, cmd: text, args: [text]) -> ObservedProcessResult:
-    val shell = _limit_shell(scope)
+    val requested_memory = if scope.budget.max_tree_charge_bytes > 0: scope.budget.max_tree_charge_bytes else: scope.budget.max_direct_child_rss_bytes
+    val memory_scoped = requested_memory > 0 and _systemd_scope_available()
+    val ancestor_cap = if memory_scoped: _ancestor_memory_max() else: 0
+    val memory_bytes = if ancestor_cap > 0 and ancestor_cap < requested_memory: ancestor_cap else: requested_memory
+    # Inside a scope the pid cap is TasksMax, so no `ulimit -u` and no bash needed.
+    val shell = if memory_scoped: "/bin/sh" else: _limit_shell(scope)
     if shell == "":
         return ObservedProcessResult(
             stdout: "",
             stderr: "resource scope: max_pids={scope.budget.max_pids} requires a shell with `ulimit -u` (bash/ksh/zsh); none found, refusing to run unlimited",
             usage: _unavailable_usage(0, 125), stdout_truncated: false, stderr_truncated: false, runtime_error: 125)
     var prefix = ""
-    val memory_bytes = if scope.budget.max_tree_charge_bytes > 0: scope.budget.max_tree_charge_bytes else: scope.budget.max_direct_child_rss_bytes
-    if memory_bytes > 0:
+    if memory_bytes > 0 and not memory_scoped:
         if _rlimit_as_enforceable():
             prefix = prefix + "ulimit -v {memory_bytes / 1024} || exit 125; "
         else:
             eprint("[resource-scope] address-space cap of {memory_bytes} bytes NOT enforced: RLIMIT_AS (`ulimit -v`) is unimplemented on this platform; cpu/pid/fd caps still apply")
     if scope.budget.max_cpu_ms > 0:
         prefix = prefix + "ulimit -t {(scope.budget.max_cpu_ms + 999) / 1000} || exit 125; "
-    if scope.budget.max_pids > 0:
+    # RLIMIT_NPROC counts every process of the UID, so inside a scope the pid
+    # cap is the scope's own TasksMax (cgroup pids.max) instead.
+    if scope.budget.max_pids > 0 and not memory_scoped:
         prefix = prefix + "ulimit -u {scope.budget.max_pids} || exit 125; "
     if scope.budget.max_fds > 0:
         prefix = prefix + "ulimit -n {scope.budget.max_fds} || exit 125; "
-    var command = prefix + "exec " + _shell_quote(cmd)
+    var command = prefix + "exec "
+    var report = ""
+    if memory_scoped:
+        _memscope_sequence = _memscope_sequence + 1
+        val temporary = env_get("TMPDIR") ?? "/tmp"
+        report = (if temporary == "": "/tmp" else: temporary) + "/simple-memscope-{getpid()}-{time_now_unix_micros()}-{_memscope_sequence}"
+        val tasks = if scope.budget.max_pids > 0: " --property=TasksMax={scope.budget.max_pids}" else: ""
+        command = command + "/usr/bin/systemd-run --user --scope --quiet --property=MemoryMax={memory_bytes} --property=MemorySwapMax=0 --property=OOMPolicy=continue" + tasks + " -- /bin/sh -c " + _shell_quote(_MEMSCOPE_SUPERVISOR) + " sh " + _shell_quote(report) + " "
+    command = command + _shell_quote(cmd)
     for arg in args:
         command = command + " " + _shell_quote(arg)
     val process = process_run_observed_bounded(shell, ["-c", command], scope.timeout_ms, scope.max_output_bytes)
+    var memscope: [text] = []
+    if report != "" and file_exists(report):
+        memscope = file_read_text(report).trim().split(":")
+        val _removed = file_delete(report)
+    val oom_kills = if memscope.len() == 3: memscope[0].to_int() else: 0
+    val scope_peak = if memscope.len() == 3: memscope[1].to_int() else: 0
+    val pids_max_events = if memscope.len() == 3: memscope[2].to_int() else: 0
     val termination = if process.usage.exit_code == 125:
         TerminationCause.InfrastructureFailure
+    elif oom_kills > 0:
+        TerminationCause.MemoryMax
+    elif pids_max_events > 0:
+        TerminationCause.ProcessLimit
     elif scope.budget.max_cpu_ms > 0 and process.usage.signal == 24:
         TerminationCause.CpuLimit
     else:
@@ -261,7 +365,7 @@ fn _run_with_unix_limits(scope: ExecutionResourceScope, cmd: text, args: [text])
     val usage = ResourceUsage(
         wall_ms: process.usage.wall_ms, user_cpu_ms: process.usage.user_cpu_ms,
         system_cpu_ms: process.usage.system_cpu_ms,
-        peak_tree_charge_bytes: process.usage.peak_tree_charge_bytes,
+        peak_tree_charge_bytes: if scope_peak > 0: scope_peak else: process.usage.peak_tree_charge_bytes,
         peak_direct_child_rss_bytes: process.usage.peak_direct_child_rss_bytes,
         heap_live_end_bytes: process.usage.heap_live_end_bytes,
         heap_peak_bytes: process.usage.heap_peak_bytes,
@@ -745,7 +849,7 @@ export CgroupV2Events, CgroupV2Observation, ObservedProcessResult
 export ExecutionResourceClass, ExecutionResourceScope, ExecutionScopeResult
 export CurrentExecutionResourceScope, begin_current_execution_resource_scope, end_current_execution_resource_scope
 export standard_resource_budget, execution_resource_scope, execution_resource_scope_with_budget, run_in_execution_resource_scope
-export run_in_systemd_resource_scope
+export run_in_systemd_resource_scope, resource_scope_memory_enforcement
 export parse_cgroup_v2_events, cgroup_memory_high_event, cgroup_memory_max_event, cgroup_process_limit_event
 export read_cgroup_v2_observation
 export process_run_observed_bounded

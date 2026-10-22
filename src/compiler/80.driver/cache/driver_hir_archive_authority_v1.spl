@@ -1,0 +1,111 @@
+# Inactive driver authority adapter. The bounded main loop is not selected here.
+# Runtime/std selection is admitted by its existing sealed CAS owner, not by a
+# caller asserting that an arbitrary receipt file has a particular SHA-256.
+use compiler.driver.cache.package_module_index_builder.{PackageModuleIndexBuildAuthorityV1}
+use compiler.driver.cache.package_tldr_metadata.{config_variant_digest_v1}
+use compiler.driver.cache.runtime_std_authority_admission.{runtime_std_authority_admit_v2}
+use compiler.driver.cache.hir_body_typecheck_lease_v1.{HirBodyArchiveInputV1}
+use compiler.driver.driver_build.incremental.{native_build_compiler_executable_hash}
+use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_header,
+    hir_cache_key, hir_cache_closure_digest}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName,
+    module_surface_index_for_source}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.driver_source_file.{source_file_coverage_identity}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
+
+struct DriverHirRuntimeStdArchiveSelectionV1:
+    index_read_root: text
+    receipt_path: text
+    receipt_digest: text
+    # This is the selected typed index authority already used by the existing
+    # native-group publisher. Its variant supplies target/config, its snapshot
+    # supplies revision, and its producer is rechecked against the actual file.
+    authority: PackageModuleIndexBuildAuthorityV1
+
+fn driver_hir_archive_source_binding_v1(
+    source: SourceFile, surfaces: ModuleSurfacesByName, source_index: i64
+) -> Result<(text, text), text>:
+    if source.module_name == "" or source.path == "":
+        return Err("HIR archive source identity unavailable")
+    val physical = file_read_regular_no_follow_bounded(source.path, 67108864)
+    if physical.is_err(): return Err("HIR archive physical source unavailable")
+    # Use the same reserved-wrapper owner as SourceFile.load/source loading.
+    # No replacement source or caller-asserted rewrite digest is admitted.
+    val (authored_path, selected_content) = source_file_coverage_identity(source.path, physical.unwrap())
+    val expected_authored = if source.authored_path == "": source.path else: source.authored_path
+    if selected_content != source.content or authored_path != expected_authored:
+        return Err("HIR archive source bytes differ from selected physical source")
+    if module_surface_index_for_source(surfaces, source, source_index) < 0:
+        return Err("HIR archive source is not owned by the frozen surface closure")
+    Ok((sha256_text(selected_content), authored_path))
+
+fn driver_hir_archive_input_from_runtime_std_selection_v1(
+    selection: DriverHirRuntimeStdArchiveSelectionV1,
+    source: SourceFile, surfaces: ModuleSurfacesByName, source_index: i64, is_entry: bool
+) -> Result<HirBodyArchiveInputV1, text>:
+    if transient_array_scope_state_v1() != 0:
+        return Err("HIR archive authority lease already occupied")
+    if selection.authority.producer_digest == "":
+        return Err("HIR archive selected producer differs from actual compiler")
+    # Memo initialization precedes ownership. Receipt/CAS baseline admission,
+    # source hashes and closure material then belong to one bounded lease too.
+    if not hir_cache_enabled():
+        return Err("HIR archive producer cache identity unavailable")
+    val header = hir_cache_header()
+    if not transient_scope_begin():
+        return Err("HIR archive authority lease unavailable")
+    val result = driver_hir_archive_input_from_runtime_std_in_owned_scope_v1(
+        selection, source, surfaces, source_index, is_entry, header)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    val ended = transient_scope_end()
+    if not paused or not owned or not ended:
+        panic("HIR archive authority lease ownership failed")
+    result
+
+fn driver_hir_archive_input_from_runtime_std_in_owned_scope_v1(
+    selection: DriverHirRuntimeStdArchiveSelectionV1,
+    source: SourceFile, surfaces: ModuleSurfacesByName, source_index: i64,
+    is_entry: bool, header: text
+) -> Result<HirBodyArchiveInputV1, text>:
+    if transient_array_scope_state_v1() != 1:
+        return Err("HIR archive authority borrowed lease must be active and unpaused")
+    val producer = native_build_compiler_executable_hash()
+    if producer == "" or producer != selection.authority.producer_digest:
+        return Err("HIR archive selected producer differs from actual compiler")
+    val variant = config_variant_digest_v1(selection.authority.variant)
+    if variant == "":
+        return Err("HIR archive selected variant invalid")
+    val admitted = runtime_std_authority_admit_v2(selection.index_read_root,
+        selection.receipt_path, selection.receipt_digest, producer, variant,
+        selection.authority.variant.target_triple, selection.authority.scv_revision_id)
+    if admitted.is_err():
+        return Err("HIR archive runtime/std authority: {admitted.unwrap_err()}")
+    val source_binding = driver_hir_archive_source_binding_v1(source, surfaces, source_index)?
+    val closure = hir_cache_closure_digest(surfaces)
+    if header == "" or closure.len() != 64 or
+            hir_cache_key(source.path, closure, is_entry) == "":
+        return Err("HIR archive source/closure/cache identity unavailable")
+    Ok(HirBodyArchiveInputV1(source_path: source.path,
+        closure_digest: closure, is_entry: is_entry, module_name: source.module_name,
+        runtime_provider_receipt_path: selection.receipt_path,
+        runtime_provider_digest: selection.receipt_digest,
+        producer_header: header, stage: "lowered-unresolved-v1",
+        provider_selection_digest: sha256_text("driver-runtime-std-selection-v2\n" +
+            sha256_text(selection.index_read_root) + "\n" + selection.receipt_digest + "\n" +
+            producer + "\n" + variant + "\n" + sha256_text(selection.authority.variant.target_triple) + "\n" +
+            sha256_text(selection.authority.scv_revision_id) + "\n"),
+        source_content_digest: source_binding.0, source_authored_path: source_binding.1))
+
+# Environment variants are not inferred from an environment path/hash here.
+# Their adapter requires the real BuildPlan + Publication admission material
+# through environment_variant_provider_receipt_v1 and a selected published
+# file owner. No such retained driver handoff exists in the current full CLI.
+export DriverHirRuntimeStdArchiveSelectionV1
+export driver_hir_archive_input_from_runtime_std_selection_v1
+export driver_hir_archive_source_binding_v1

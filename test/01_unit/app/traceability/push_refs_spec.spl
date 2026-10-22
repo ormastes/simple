@@ -1,0 +1,65 @@
+# @tag:in-development
+# REQ-TRC-009, REQ-TRC-010; protocol unit coverage for AC-TRC-012/013/015.
+# These pure decoder tests do not claim a live Git/SJ publication ran.
+use std.spec
+use app.traceability.snapshot.push_refs.{parse_trace_push_refs, trace_remote_ref_valid, TraceRefUpdateKind, TraceRefKind}
+
+val old_oid = "1111111111111111111111111111111111111111"
+val new_oid = "2222222222222222222222222222222222222222"
+val zero_oid = "0000000000000000000000000000000000000000"
+
+fn push_error(input: text, limit: i64) -> text:
+    match parse_trace_push_refs(input, limit):
+        case Ok(_): "unexpected success"
+        case Err(reason): reason
+
+describe "Captured push subjects":
+    it "retains each outgoing ref and its exact object identities":
+        val input = "refs/heads/work/a {new_oid} refs/heads/a {old_oid}\nrefs/heads/work/b {old_oid} refs/heads/b {new_oid}\n"
+        match parse_trace_push_refs(input, 8):
+            case Ok(rows):
+                expect(rows.len()).to_equal(2)
+                expect(rows[0].local_oid).to_equal(new_oid)
+                expect(rows[1].remote_oid).to_equal(new_oid)
+                expect(rows[1].remote_ref).to_equal("refs/heads/b")
+                expect(rows[0].kind).to_equal(TraceRefUpdateKind.Update)
+            case Err(reason): fail(reason)
+
+    it "classifies creation without using a zero object as the baseline":
+        match parse_trace_push_refs("HEAD {new_oid} refs/heads/new {zero_oid}\n", 1):
+            case Ok(rows): expect(rows[0].kind).to_equal(TraceRefUpdateKind.Create)
+            case Err(reason): fail(reason)
+
+    it "retains deletion as policy work without a candidate tree":
+        match parse_trace_push_refs("(delete) {zero_oid} refs/heads/old {old_oid}\n", 1):
+            case Ok(rows): expect(rows[0].kind).to_equal(TraceRefUpdateKind.Delete)
+            case Err(reason): fail(reason)
+
+    it "keeps a tag subject distinct from branch tree admission":
+        match parse_trace_push_refs("refs/tags/v1 {new_oid} refs/tags/v1 {zero_oid}\n", 1):
+            case Ok(rows): expect(rows[0].ref_kind).to_equal(TraceRefKind.Tag)
+            case Err(reason): fail(reason)
+
+    it "rejects a malformed second row instead of admitting the first":
+        expect(push_error("HEAD {new_oid} refs/heads/a {old_oid}\nbroken\n", 2)).to_contain("malformed push row 2")
+
+    it "rejects duplicate remote destinations":
+        val row = "HEAD {new_oid} refs/heads/a {old_oid}\n"
+        expect(push_error(row + row, 2)).to_contain("duplicate remote ref")
+
+    it "does not turn missing hook input into no relevant changes":
+        expect(push_error("", 2)).to_contain("missing or oversized")
+        expect(push_error("\n", 2)).to_contain("malformed push row")
+
+    it "rejects absent endpoints and conflicting deletion markers":
+        expect(push_error("(delete) {zero_oid} refs/heads/a {zero_oid}\n", 1)).to_contain("both subjects absent")
+        expect(push_error("HEAD {zero_oid} refs/heads/a {old_oid}\n", 1)).to_contain("deletion marker missing")
+
+    it "fails explicitly when a valid second subject exceeds the budget":
+        val input = "HEAD {new_oid} refs/heads/a {old_oid}\nHEAD {new_oid} refs/heads/b {old_oid}\n"
+        expect(push_error(input, 1)).to_contain("ref budget exhausted")
+
+    it "rejects command-like or invalid remote reference syntax":
+        for ref in ["--help", "refs/heads/a..b", "refs/heads/.hidden", "refs/heads/a.lock", "refs/heads/a@{1}", "refs/heads/a b"]:
+            expect(trace_remote_ref_valid(ref)).to_equal(false)
+        expect(trace_remote_ref_valid("refs/heads/work/traceability")).to_equal(true)

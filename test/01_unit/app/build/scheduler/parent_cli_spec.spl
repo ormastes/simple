@@ -1,0 +1,143 @@
+use std.spec.*
+use app.build.scheduler.parent_cli.{parse_dist_build_config_v1,
+    run_dist_build_cli_v1, dist_build_export_allowed_v1,
+    DIST_BUILD_CONFIG_MAX_BYTES_V1}
+use app.io.mod.{cwd, getpid, time_now_unix_micros}
+use std.common.crypto.sha256.{sha256_text}
+
+fn _parent_cli_fixture_v1(root: text) -> text:
+    val digest = sha256_text("parent-cli-fixture")
+    "simple-dist-build-parent-v1\n" +
+    "request=" + root + "/request.wire\n" +
+    "owner=" + root + "/owner\n" +
+    "source=" + root + "/source\n" +
+    "state=" + root + "/state\n" +
+    "cas=" + root + "/cas\n" +
+    "ssh-executable=/usr/bin/ssh\n" +
+    "ssh-digest=" + digest + "\n" +
+    "sftp-executable=/usr/bin/sftp\n" +
+    "sftp-digest=" + digest + "\n" +
+    "known-hosts=" + root + "/known-hosts\n" +
+    "known-hosts-digest=" + digest + "\n" +
+    "identity=" + root + "/identity\n" +
+    "identity-digest=" + digest + "\n" +
+    "worker-id=worker-1\n" +
+    "host=build.example\n" +
+    "user=builder\n" +
+    "port=22\n" +
+    "remote-executable=/usr/local/bin/simple-build-worker\n" +
+    "inbox=/srv/simple-build-inbox\n" +
+    "trust-domain=trusted\n" +
+    "target-triple=x86_64-unknown-linux-gnu\n" +
+    "provider-abi=" + digest + "\n" +
+    "worker-memory=8192\n" +
+    "scheduler-cpu=2\n" +
+    "scheduler-memory=8192\n" +
+    "scheduler-memory-reserve=512\n" +
+    "scheduler-fd=8\n" +
+    "timeout-ms=30000\n"
+
+fn _parent_cli_fixture_v3(root: text) -> text:
+    val header = _parent_cli_fixture_v1(root).replace(
+        "simple-dist-build-parent-v1", "simple-dist-build-parent-v3")
+    val graph = header.replace("request=" + root + "/request.wire",
+        "graph=" + root + "/graph.wire")
+    graph + "export-root=" + root + "/objects\n"
+
+fn _parent_cli_fixture_v4(root: text) -> text:
+    _parent_cli_fixture_v3(root).replace(
+        "simple-dist-build-parent-v3", "simple-dist-build-parent-v4") +
+        "export-policy=" + root + "/export-policy.wire\n" +
+        "export-policy-digest=" + sha256_text("export-policy") + "\n"
+
+fn _parent_cli_root_v1() -> text:
+    cwd() + "/build/test/parent-cli-" + getpid().to_text() + "-" +
+        time_now_unix_micros().to_text()
+
+describe "protected distributed parent CLI":
+    it "maps exact administrator policy into node and scheduler values":
+        val root = _parent_cli_root_v1()
+        val parsed = parse_dist_build_config_v1(_parent_cli_fixture_v1(root))
+        expect(parsed.?).to_be(true)
+        if val config = parsed:
+            expect(config.request_path).to_equal(root + "/request.wire")
+            expect(config.owner_root).to_equal(root + "/owner")
+            expect(config.node.ssh.node.worker_id).to_equal("worker-1")
+            expect(config.node.sftp.node.worker_id).to_equal("worker-1")
+            expect(config.node.sftp.remote_inbox_root).to_equal(
+                "/srv/simple-build-inbox")
+            expect(config.node.ssh.timeout_ms).to_equal(30000)
+            expect(config.capabilities.target_triples[0]).to_equal(
+                "x86_64-unknown-linux-gnu")
+            expect(config.capabilities.provider_abi_digests[0]).to_equal(
+                sha256_text("parent-cli-fixture"))
+            expect(config.capabilities.memory_capacity_bytes).to_equal(8192)
+            expect(config.capacity.cpu_tokens).to_equal(2)
+            expect(config.capacity.memory_reserve_bytes).to_equal(512)
+            expect(config.capacity.fd_tokens).to_equal(8)
+
+    it "rejects noncanonical, reordered, or unsafe policy":
+        val root = _parent_cli_root_v1()
+        val wire = _parent_cli_fixture_v1(root)
+        expect(parse_dist_build_config_v1(wire + "worker-id=other\n")).to_be_nil()
+        expect(parse_dist_build_config_v1(wire.replace(
+            "request=" + root, "request=relative"))).to_be_nil()
+        expect(parse_dist_build_config_v1(wire.replace(
+            "owner=" + root + "/owner", "owner=" + root + "/../owner"))).to_be_nil()
+        expect(parse_dist_build_config_v1(wire.replace(
+            "port=22", "port=022"))).to_be_nil()
+        expect(parse_dist_build_config_v1(wire.replace(
+            "scheduler-memory-reserve=512", "scheduler-memory-reserve=8192"))).to_be_nil()
+        expect(parse_dist_build_config_v1(wire.replace(
+            "provider-abi=" + sha256_text("parent-cli-fixture"),
+            "provider-abi=bad"))).to_be_nil()
+        expect(parse_dist_build_config_v1(wire[0:wire.len() - 1])).to_be_nil()
+        expect(parse_dist_build_config_v1(wire + "x" * DIST_BUILD_CONFIG_MAX_BYTES_V1)).to_be_nil()
+
+    it "pins the export destination in the protected V3 configuration":
+        val root = _parent_cli_root_v1()
+        val wire = _parent_cli_fixture_v3(root)
+        val parsed = parse_dist_build_config_v1(wire)
+        expect(parsed.?).to_be(true)
+        if val config = parsed:
+            expect(config.graph_path).to_equal(root + "/graph.wire")
+            expect(config.export_root).to_equal(root + "/objects")
+            expect(config.request_path).to_equal("")
+        expect(parse_dist_build_config_v1(wire.replace(
+            "export-root=" + root + "/objects",
+            "export-root=" + root + "/../objects"))).to_be_nil()
+        expect(parse_dist_build_config_v1(wire.replace(
+            "export-root=" + root + "/objects",
+            "export-root=relative"))).to_be_nil()
+
+    it "pins the V4 artifact policy path and digest":
+        val root = _parent_cli_root_v1()
+        val wire = _parent_cli_fixture_v4(root)
+        val parsed = parse_dist_build_config_v1(wire)
+        expect(parsed.?).to_be(true)
+        if val config = parsed:
+            expect(config.export_root).to_equal(root + "/objects")
+            expect(config.export_policy_path).to_equal(
+                root + "/export-policy.wire")
+            expect(config.export_policy_digest).to_equal(
+                sha256_text("export-policy"))
+            expect(dist_build_export_allowed_v1(config, "export")).to_be(false)
+            expect(dist_build_export_allowed_v1(config, "export-policy")).to_be(true)
+        val legacy = parse_dist_build_config_v1(_parent_cli_fixture_v3(root))
+        expect(legacy.?).to_be(true)
+        if val v3 = legacy:
+            expect(dist_build_export_allowed_v1(v3, "export")).to_be(true)
+            expect(dist_build_export_allowed_v1(v3, "export-policy")).to_be(false)
+        expect(parse_dist_build_config_v1(wire.replace(
+            "export-policy=" + root + "/export-policy.wire",
+            "export-policy=relative"))).to_be_nil()
+        expect(parse_dist_build_config_v1(wire.replace(
+            "export-policy-digest=" + sha256_text("export-policy"),
+            "export-policy-digest=bad"))).to_be_nil()
+
+    it "requires exact CLI arguments before touching configuration":
+        val root = _parent_cli_root_v1()
+        expect(run_dist_build_cli_v1([])).to_equal(2)
+        expect(run_dist_build_cli_v1(["--config", "relative"])).to_equal(2)
+        expect(run_dist_build_cli_v1(["--config", root + "/parent.conf",
+            "--extra"])).to_equal(2)

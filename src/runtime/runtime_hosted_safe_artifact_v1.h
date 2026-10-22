@@ -42,7 +42,7 @@ int64_t rt_hosted_safe_artifact_publish_v1(int64_t handle, const uint8_t* path,
 #define RT_HSA_BUNDLE_UNSUPPORTED_V1 INT64_C(-4)
 int64_t rt_hosted_safe_artifact_bundle_begin_v1(int64_t root,
     const uint8_t* source, uint64_t source_len, const uint8_t* bundle, uint64_t bundle_len,
-    const uint8_t* payload, uint64_t payload_len, const uint8_t* scr1, uint64_t scr1_len,
+    const uint8_t* payload, uint64_t payload_len, const uint8_t* scr1_ptr, uint64_t scr1_len,
     int64_t max_bytes);
 int64_t rt_hosted_safe_artifact_bundle_read_stage_v1(int64_t token, int64_t max_bytes);
 int64_t rt_hosted_safe_artifact_bundle_identity_v1(int64_t token, int64_t field);
@@ -67,7 +67,7 @@ int64_t rt_hosted_safe_artifact_bundle_n_begin_two_descriptors_v1(int64_t root,
     const uint8_t* descriptor1, uint64_t descriptor1_len, int64_t count, int64_t max_bytes);
 int64_t rt_hosted_safe_artifact_bundle_n_add_slot_v1(int64_t token, int64_t slot,
     const uint8_t* source, uint64_t source_len, const uint8_t* payload, uint64_t payload_len,
-    const uint8_t* scr1, uint64_t scr1_len);
+    const uint8_t* scr1_ptr, uint64_t scr1_len);
 int64_t rt_hosted_safe_artifact_bundle_n_seal_v1(int64_t token);
 int64_t rt_hosted_safe_artifact_bundle_n_read_stage_v1(int64_t token, int64_t slot, int64_t max_bytes);
 int64_t rt_hosted_safe_artifact_bundle_n_identity_v1(int64_t token, int64_t slot, int64_t field);

@@ -1,0 +1,143 @@
+#!/bin/sh
+# Execute bounded source projections only; never invoke a compiler or VM.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+python3 - "$root" "${1:-all}" <<'PYTEST'
+import ast
+import json
+import pathlib
+import re
+import subprocess
+import sys
+import tempfile
+
+root = pathlib.Path(sys.argv[1])
+mode = sys.argv[2]
+assert mode in ["all", "matrix"], "unknown source-contract mode"
+bootstrap = (root / 'scripts/bootstrap/bootstrap-from-scratch.sh').read_text()
+admission = (root / 'scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs').read_text()
+workflow = (root / '.github/workflows/rust-bootstrap-multiplatform.yml').read_text()
+
+def segment(source, start, end):
+    assert source.count(start) == 1, 'ambiguous source start: ' + start
+    tail = source.split(start, 1)[1]
+    assert end in tail, 'source end missing: ' + end
+    return start + tail.split(end, 1)[0]
+
+def frontend(source):
+    body = segment(source, '  if [ "${llvm_features}" = "" ]; then', '  candidate_sha_after=')
+    with tempfile.TemporaryDirectory(prefix='simple-frontend-contract-') as temporary:
+        setup = '''set -eu
+backend=$1 llvm_features=$2 fault=$3
+candidate=candidate frontend_status=0
+CANDIDATE_FRONTEND_CAPTURE_PARENT=$4
+frontend_log_authority=$4/authority
+frontend_bootstrap0_log=$4/bootstrap0.log
+frontend_bootstrap1_log=$4/bootstrap1.log
+frontend_bootstrap0_status_path=$4/bootstrap0.status
+frontend_bootstrap1_status_path=$4/bootstrap1.status
+candidate_frontend_pinned_smoke() {
+    [ "$1" = candidate ] && [ "$2" = "$frontend_log_authority" ] || return 17
+    printf '%s:%s\n' "$CANDIDATE_FRONTEND_BACKEND" "$CANDIDATE_FRONTEND_BOOTSTRAP"
+    [ "$fault" = 0 ] || return 7
+}
+'''
+        for backend, features, expected in [('llvm', '', 'cranelift'), ('llvm', 'llvm', 'llvm'), ('cranelift', 'llvm', 'cranelift')]:
+            for fault in ['0', '1']:
+                result = subprocess.run(['sh', '-c', setup + body + '\nprintf "status:%s\\n" "$frontend_status"\n', 'projection', backend, features, fault, temporary], capture_output=True, text=True)
+                assert result.returncode == 0, result.stderr
+                wanted = [expected + ':0', expected + ':1', 'status:0'] if fault == '0' else [expected + ':0', 'status:7']
+                assert result.stdout.splitlines() == wanted, result.stdout
+
+def delegation(source):
+    match = re.search(r'^candidate_frontend_pinned_smoke\(\) \(\n.*?^\)\n', source, re.M | re.S)
+    assert match, 'pinned smoke source owner missing'
+    with tempfile.TemporaryDirectory(prefix='simple-pinned-contract-') as temporary:
+        log = pathlib.Path(temporary) / 'driver.log'
+        script = '''candidate_frontend_smoke() { [ "$1" = candidate ] || return 18; printf 'fixture-ran\n'; return 19; }
+uname() { printf 'Linux\n'; }
+''' + match.group() + '\ncandidate_frontend_pinned_smoke candidate "$1"\n'
+        result = subprocess.run(['sh', '-c', script, 'projection', str(log)], capture_output=True, text=True)
+        assert result.returncode == 19, 'pinned wrapper lost native failure status'
+        assert log.read_text() == 'fixture-ran\n', 'real smoke delegation missing'
+
+def milestones(source):
+    body = segment(source, '    case "${rust_authority_log}" in', '    bootstrap_progress_mark')
+    assert 'bootstrap_progress_mark "${rust_authority_milestone}"' in source, 'resolved milestone not consumed'
+    for log, expected in [('bootstrap-preflight', 'bootstrap-preflight'), ('seed-build', 'rust-seed-build')]:
+        result = subprocess.run(['sh', '-c', 'set -eu\nrust_authority_log=$1\n' + body + '\nprintf "%s\\n" "$rust_authority_milestone"\n', 'projection', log], capture_output=True, text=True)
+        assert result.returncode == 0 and result.stdout.strip() == expected, result.stderr + result.stdout
+
+def matrix(source):
+    lines = [line for line in source.splitlines() if 'include: ${{ fromJSON(' in line]
+    assert len(lines) == 1, 'one declared native matrix required'
+    line = lines[0].strip()
+    assert line.endswith(') }}'), 'matrix expression boundary changed'
+    expression = line.split('fromJSON(', 1)[1][:-4]
+    expression = expression.replace('github.event_name', 'event').replace('inputs.native_lane', 'lane').replace('&&', ' and ').replace('||', ' or ')
+    tree = ast.parse(expression, mode='eval')
+    def evaluate(node, event, lane, labels=()):
+        if isinstance(node, ast.Expression): return evaluate(node.body, event, lane, labels)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str): return node.value
+        if isinstance(node, ast.Constant) and isinstance(node.value, bool): return node.value
+        if isinstance(node, ast.Name) and node.id in ['event', 'lane', 'labels']: return {'event': event, 'lane': lane, 'labels': labels}[node.id]
+        if isinstance(node, ast.Compare) and len(node.ops) == 1 and isinstance(node.ops[0], (ast.Eq, ast.NotEq)):
+            equal = evaluate(node.left, event, lane, labels) == evaluate(node.comparators[0], event, lane, labels)
+            return equal if isinstance(node.ops[0], ast.Eq) else not equal
+        if isinstance(node, ast.BoolOp):
+            for child in node.values:
+                value = evaluate(child, event, lane, labels)
+                if isinstance(node.op, ast.And) and not value: return value
+                if isinstance(node.op, ast.Or) and value: return value
+            return value
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'contains' and len(node.args) == 2 and not node.keywords:
+            return evaluate(node.args[1], event, lane, labels) in evaluate(node.args[0], event, lane, labels)
+        raise AssertionError('unsupported declared matrix expression: ' + ast.dump(node))
+    expected = [('Linux x86_64', 'llvm'), ('Linux x86_64', 'cranelift'), ('macOS aarch64', 'llvm'), ('macOS aarch64', 'cranelift'), ('macOS x86_64', 'llvm'), ('macOS x86_64', 'cranelift'), ('Windows x86_64', 'cranelift')]
+    for event, lane in [('push', ''), ('push', 'linux-llvm'), ('pull_request', ''), ('workflow_dispatch', ''), ('workflow_dispatch', 'all'), ('workflow_dispatch', 'linux-llvm'), ('workflow_dispatch', 'linux-cranelift'), ('workflow_dispatch', 'windows-cranelift'), ('push', 'windows-cranelift'), ('pull_request', 'windows-cranelift')]:
+        rows = json.loads(evaluate(tree, event, lane))
+        focused = event == 'workflow_dispatch' and lane in ['linux-llvm', 'linux-cranelift', 'windows-cranelift']
+        pairs = [(row['name'], row['backend']) for row in rows]
+        focused_expected = [('Windows x86_64', 'cranelift')] if lane == 'windows-cranelift' else [('Linux x86_64', lane.removeprefix('linux-'))]
+        assert pairs == focused_expected if focused else pairs == expected
+        if focused and lane == 'windows-cranelift':
+            assert rows == [{'os': 'windows-latest', 'name': 'Windows x86_64', 'backend': 'cranelift'}]
+        assert all(row['os'] == 'macos-15-intel' for row in rows if row['name'] == 'macOS x86_64')
+    guards = [line.strip()[4:] for line in source.splitlines() if line.startswith('    if: ') and 'inputs.native_lane' in line]
+    assert len(guards) == 4, 'non-native job focus policy authority changed'
+    for guard in guards:
+        # The Windows symlink diagnostic input defaults to false in every case
+        # below, so its negation is constant true for this policy table.
+        guard = guard.replace('!inputs.diagnose_windows_symlinks', 'True').replace('github.event.pull_request.labels.*.name', 'labels').replace('github.event_name', 'event').replace('inputs.native_lane', 'lane').replace('&&', ' and ').replace('||', ' or ')
+        guard_tree = ast.parse(guard, mode='eval')
+        for event, lane, labels, expected_enabled in [('push', '', [], True), ('push', 'windows-cranelift', [], True), ('workflow_dispatch', 'all', [], True), ('workflow_dispatch', '', [], True), ('workflow_dispatch', 'linux-llvm', [], False), ('workflow_dispatch', 'linux-cranelift', [], False), ('workflow_dispatch', 'windows-cranelift', [], False), ('pull_request', '', [], False), ('pull_request', '', ['ci:full'], True)]:
+            assert evaluate(guard_tree, event, lane, labels) == expected_enabled, 'dependent-job focus or PR policy drift'
+
+
+def reject(checker, source, needle, replacement):
+    assert needle in source, 'negative mutation target absent'
+    try:
+        checker(source.replace(needle, replacement, 1))
+    except (AssertionError, SyntaxError, ValueError, FileNotFoundError):
+        return
+    raise AssertionError('broken production contract accepted: ' + needle)
+
+if mode == "all":
+    frontend(bootstrap)
+    delegation(admission)
+    milestones(bootstrap)
+    reject(frontend, bootstrap, 'frontend_smoke_backend=${backend}', 'frontend_smoke_backend=cranelift')
+    reject(frontend, bootstrap, 'CANDIDATE_FRONTEND_BACKEND="${frontend_smoke_backend}"', 'CANDIDATE_FRONTEND_BACKEND="${backend}"')
+    reject(delegation, admission, 'candidate_frontend_smoke "$pinned_candidate"', 'false')
+    reject(milestones, bootstrap, 'bootstrap-preflight) rust_authority_milestone=bootstrap-preflight', 'bootstrap-preflight) rust_authority_milestone=rust-bootstrap-preflight')
+    reject(milestones, bootstrap, 'bootstrap_progress_mark "${rust_authority_milestone}"', 'bootstrap_progress_mark "ignored"')
+matrix(workflow)
+reject(matrix, workflow, '{"os":"windows-latest","name":"Windows x86_64","backend":"cranelift"}', '{"os":"windows-latest","name":"Windows x86_64","backend":"llvm"}')
+reject(matrix, workflow, "inputs.native_lane == 'linux-llvm'", "inputs.native_lane == 'incorrect-lane'")
+reject(matrix, workflow, '{"os":"ubuntu-24.04","name":"Linux x86_64","backend":"llvm"}]', '{"os":"ubuntu-24.04","name":"Linux x86_64","backend":"cranelift"}]')
+reject(matrix, workflow, ',{"os":"windows-latest","name":"Windows x86_64","backend":"cranelift"}', '')
+reject(matrix, workflow, "inputs.native_lane == 'windows-cranelift'", "inputs.native_lane == 'incorrect-windows-lane'")
+reject(matrix, workflow, "[{\"os\":\"windows-latest\",\"name\":\"Windows x86_64\",\"backend\":\"cranelift\"}]", "[{\"os\":\"windows-latest\",\"name\":\"Windows x86_64\",\"backend\":\"llvm\"}]")
+reject(matrix, workflow, "(github.event_name != 'workflow_dispatch' || inputs.native_lane == 'all' || inputs.native_lane == '')", "('all' == 'all')")
+print('PASS: production-bound Windows/Linux/default matrix and dependent-job policies; destructive matrix/guard mutations rejected')
+PYTEST

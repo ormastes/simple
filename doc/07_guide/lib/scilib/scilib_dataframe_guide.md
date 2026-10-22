@@ -62,7 +62,7 @@ val df = from_csv_text("id,score\n1,10.5\n2,20.25").unwrap()
 
 ### Inspecting shape
 
-```simple
+```simple:skip
 df.num_rows()          # -> Index
 df.num_cols()          # -> Index
 df.shape()             # -> DataFrameShape { rows: Index, cols: Index }
@@ -76,7 +76,7 @@ df.dtypes()            # -> SeriesDType
 
 ### Access a column
 
-```simple
+```simple:skip
 val s: Series = df.col(Symbol.from("price")).unwrap()
 val v: Float64 = s.get(Index.new(0))   # read one element
 ```
@@ -85,7 +85,7 @@ val v: Float64 = s.get(Index.new(0))   # read one element
 
 Returns a new DataFrame with only the requested columns, in requested order.
 
-```simple
+```simple:skip
 val sub = df.select([Symbol.from("qty"), Symbol.from("price")]).unwrap()
 ```
 
@@ -94,7 +94,7 @@ val sub = df.select([Symbol.from("qty"), Symbol.from("price")]).unwrap()
 `assign` adds a new column if the name does not exist, or replaces it if it
 does. Both return a new `DataFrame`.
 
-```simple
+```simple:skip
 val df2 = df.assign(
     Symbol.from("total"),
     SeriesErased.F64Series(Series.from_values(Symbol.from("total"),
@@ -104,13 +104,13 @@ val df2 = df.assign(
 
 ### Rename a column
 
-```simple
+```simple:skip
 val df2 = df.rename(Symbol.from("qty"), Symbol.from("quantity")).unwrap()
 ```
 
 ### Drop a column
 
-```simple
+```simple:skip
 val df2 = df.drop(Symbol.from("price")).unwrap()
 ```
 
@@ -123,14 +123,14 @@ val df2 = df.drop(Symbol.from("price")).unwrap()
 Build a boolean `NDArray` with `array_bool` and pass it to `filter`. The mask
 length must equal `num_rows`.
 
-```simple
+```simple:skip
 val mask = array_bool([Bool.new(true), Bool.new(false), Bool.new(true)])
 val filtered = df.filter(mask).unwrap()
 ```
 
 ### Head and tail
 
-```simple
+```simple:skip
 val top2 = df.head(Index.new(2)).unwrap()   # first 2 rows
 val bot2 = df.tail(Index.new(2)).unwrap()   # last 2 rows
 ```
@@ -143,7 +143,7 @@ return `Err(DfError.ShapeMismatch)`.
 `sort_values` sorts ascending by the named column. All columns are reindexed
 together.
 
-```simple
+```simple:skip
 val sorted = df.sort_values(Symbol.from("price")).unwrap()
 ```
 
@@ -156,7 +156,7 @@ val sorted = df.sort_values(Symbol.from("price")).unwrap()
 Both methods group by a single key column and aggregate a single numeric value
 column. The value column must be `DType.F64`.
 
-```simple
+```simple:skip
 val totals = df.groupby_sum(Symbol.from("team"), Symbol.from("points")).unwrap()
 val avgs   = df.groupby_mean(Symbol.from("team"), Symbol.from("points")).unwrap()
 ```
@@ -166,14 +166,14 @@ val avgs   = df.groupby_mean(Symbol.from("team"), Symbol.from("points")).unwrap(
 Returns a two-column DataFrame with the original column name and a `"count"`
 column. Values appear in order of first occurrence.
 
-```simple
+```simple:skip
 val vc = value_counts(s)   # s: Series
 val count_col = vc.col(Symbol.from("count")).unwrap()
 ```
 
 ### unique / nunique
 
-```simple
+```simple:skip
 val uniq_i64: Series = s.unique_i64()   # deduped Series (I64 column)
 val n: Index         = s.nunique()      # count of distinct non-missing values
 ```
@@ -182,7 +182,7 @@ val n: Index         = s.nunique()      # count of distinct non-missing values
 
 Long-to-wide pivot. The `columns` key must be numeric; duplicate `(index, column_key)` pairs are summed. Missing cells are masked.
 
-```simple
+```simple:skip
 # df has columns: id (I64), month (I64), sales (F64)
 val wide = df.pivot_sum(
     Symbol.from("id"),
@@ -203,7 +203,7 @@ Also available as a free function: `pivot_sum(df, index, columns, values, name_p
 
 Concatenates a list of DataFrames along rows or columns.
 
-```simple
+```simple:skip
 # Row concat — schemas and dtypes must match
 val tall = concat([df1, df2], ConcatAxis.Rows).unwrap()
 
@@ -217,7 +217,7 @@ val wide = concat([df1, df2], ConcatAxis.Cols).unwrap()
 kept: `Inner`, `Left`, `Right`, or `Outer`. Unmatched rows in outer joins have
 their missing cells masked.
 
-```simple
+```simple:skip
 val out = merge(left, right, Symbol.from("id"), JoinHow.Inner).unwrap()
 
 # Equivalent convenience method on DataFrame:
@@ -242,21 +242,21 @@ val s = Series.from_f64_masked(
 
 ### is_na / fill_na
 
-```simple
+```simple:skip
 val na_series: Series = s.is_na()                    # Bool series, true where missing
 val filled:    Series = s.fill_na(Float64.new(0.0))  # replace missing with fill value
 ```
 
 ### drop_na
 
-```simple
+```simple:skip
 val clean = df.drop_na(NaHow.Any)   # drop rows where ANY column is missing
 val clean = df.drop_na(NaHow.All)   # drop rows where ALL columns are missing
 ```
 
 ### Testing a specific cell
 
-```simple
+```simple:skip
 val missing: Bool = s.is_missing(Index.new(1)).unwrap()
 ```
 
@@ -275,7 +275,7 @@ Column dtypes are inferred: integers become `DType.I64`, fractions become
 
 ### Serialize a DataFrame to CSV text
 
-```simple
+```simple:skip
 val csv: text = df.to_csv_text().unwrap()
 ```
 

@@ -1,0 +1,39 @@
+# Shared admission for existing lint --fix and simple fix routes.
+# Coordinates use the same text indices as Replacement producers and slicing.
+use std.tooling.easy_fix.types.{EasyFix, Replacement, FixApplicator, easyfix_replacements, easyfix_sort_replacements_descending}
+
+pub fn validated_fix_sources(fixes: [EasyFix], sources: Dict<text, text>) -> Result<Dict<text, text>, text>:
+    var buckets: Dict<text, [Replacement]> = {}
+    for fix in fixes:
+        for replacement in easyfix_replacements(fix):
+            if not sources.has(replacement.file):
+                return Err("{replacement.file}:{replacement.line}:{replacement.column}: fix targets a different source; rerun lint for that exact path")
+            if not buckets.has(replacement.file): buckets[replacement.file] = []
+            var bucket = buckets[replacement.file]
+            bucket.push(replacement)
+            buckets[replacement.file] = bucket
+    # Validate every file before asking the established applicator to edit any.
+    for path in buckets.keys():
+        val source = sources[path]
+        val lines = source.split("\n")
+        var starts: [i64] = []
+        var offset = 0
+        for line in lines:
+            starts.push(offset)
+            offset = offset + line.len() + 1
+        val ordered = easyfix_sort_replacements_descending(buckets[path])
+        var previous: Replacement? = nil
+        for replacement in ordered:
+            val location = "{path}:{replacement.line}:{replacement.column}"
+            if replacement.start < 0 or replacement.end < replacement.start or replacement.end > source.len():
+                return Err("{location}: fix range [{replacement.start}..{replacement.end}] is outside the analyzed source; rerun lint")
+            if replacement.line < 1 or replacement.line > lines.len() or replacement.column < 1:
+                return Err("{location}: fix has invalid source coordinates; regenerate the diagnostic")
+            val line_index = replacement.line - 1
+            if replacement.column > lines[line_index].len() + 1 or starts[line_index] + replacement.column - 1 != replacement.start:
+                return Err("{location}: fix offset does not match its line and column; regenerate the diagnostic")
+            if val next = previous:
+                if replacement.end > next.start or replacement.start == next.start:
+                    return Err("{location}: fixes overlap or share an insertion point; choose one fix and rerun lint")
+            previous = Some(replacement)
+    FixApplicator.apply(fixes, sources)

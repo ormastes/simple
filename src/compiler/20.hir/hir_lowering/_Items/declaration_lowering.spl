@@ -11,6 +11,7 @@ use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_boots
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
+use compiler.hir.hir_lowering.async.*
 use compiler.hir.hir_lowering.expressions.*
 use compiler.hir.hir_lowering._Items.lowering_helpers.{platform_attr_fields_for, function_params, bootstrap_hir_symbol_for_name}
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, is_valid_asm_symbol_name, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
@@ -339,7 +340,15 @@ impl HirLowering:
             ))
         var pi = 0
         while pi < fn_params.len():
-            params = params.push(self.lower_param(fn_params[pi]))
+            # The parser may already synthesize self/me with no type (notably
+            # primitive impl owners). It is still the receiver, not an ordinary
+            # inference variable. Only its enclosing method owns this context.
+            var declared_receiver: HirType? = nil
+            if pi == 0 and fn_.is_method and not fn_.is_static:
+                if not fn_params[pi].has_type_:
+                    if fn_params[pi].name == "self" or fn_params[pi].name == "me":
+                        declared_receiver = self.current_method_self_type
+            params = params.push(self.lower_param(fn_params[pi], self.dynamic_callback_param_type(fn_, fn_params[pi]), declared_receiver))
             pi = pi + 1
         if bootstrap_diag:
             eprint("[hir-lower] lower_function:params {fn_.name}")
@@ -444,6 +453,19 @@ impl HirLowering:
                             case _: untyped_value_return = true
                     case _:
                         pass
+            # Untyped PARAMETERS make declared_callable_type bail before
+            # infer_untyped_return_type runs, so `fn f(crc): return crc ^ 1`
+            # kept the Unit default while its body still returned a value:
+            # MIR carried Ret(value) out of a void signature (Cranelift:
+            # "arguments of return must match function signature"; LLVM:
+            # the value was dropped). Such a function is dynamically typed
+            # already, so its value return is dynamic too -- the same Any
+            # result the bootstrap route uses ("Unit would discard it").
+            if (not untyped_value_return) and fn_has_untyped_value_param(fn_.params):
+                val dynamic_return_scan = self.scan_ast_block_for_returns(fn_.body, fn_.params)
+                if dynamic_return_scan.found_value_return:
+                    return_type = HirType(kind: HirTypeKind.Any, span: fn_.span)
+                    untyped_value_return = true
 
         # Lower body. A function WITHOUT an explicit return type returns Unit, so
         # its body is not in value position — use `lower_hir_block_unit`, which
@@ -686,7 +708,8 @@ impl HirLowering:
         # fired (jit-0x890 defaulted-field bug chain).
         val fld_has_default = fld.has_default
         val lowered_default = if fld_has_default:
-            self.lower_hir_expr(fld.default)
+            val initializer = self.lower_hir_expr(fld.default)
+            self.retain_attributed_collection_type(initializer, type_)
         else:
             HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: fld.span), span: fld.span)
 
@@ -773,8 +796,27 @@ impl HirLowering:
         else:
             self.lower_type(type_)
 
+    fn scope_binds_type_symbol(name: text) -> bool:
+        """The current scope binds `name` to a type declaration."""
+        val bound = self.symbols.local_type_binding_raw(name)
+        if bound < 0: return false
+        if val symbol = self.symbols.get_symbol_raw(bound):
+            match symbol.kind:
+                case SymbolKind.Struct | SymbolKind.Class | SymbolKind.Enum | SymbolKind.Trait | SymbolKind.TypeAlias: return true
+                case _: return false
+        false
+
     me lower_variant(v: Variant, owner_module: text, project_imported_payloads: bool) -> HirVariant:
-        val symbol = self.symbols.define(v.name, SymbolKind.EnumVariant, nil, v.span, Visibility.Public, false, nil)
+        # A variant name never displaces a type binding in the same scope.
+        # `ExprKind.Block(Block)` / `StmtKind.Expr(Expr)` (lowered here for
+        # local AND imported enums) used to rebind bare `Block`/`Expr` to an
+        # untyped EnumVariant symbol, so a later `val b: Block` or
+        # `f<Block>(..)` lowered to Named(<variant>) and 40.mono refused it
+        # with E-MONO-041 (no proven declaration owner). Variants stay
+        # reachable through their enum; only the bare spelling is kept.
+        # bug: mono_tuple_get_nominal_owner_e_mono_041_2026_10_19
+        val bind_variant_name = not self.scope_binds_type_symbol(v.name)
+        val symbol = self.symbols.define_with_binding(v.name, SymbolKind.EnumVariant, nil, v.span, Visibility.Public, false, nil, bind_variant_name)
 
         # QUALIFIED patterns in a statement match, not `val kind = match` over
         # bare `Tuple(types)` arms: on the seed the bare arm bound `types` to a
@@ -836,8 +878,8 @@ impl HirLowering:
         # Pre-compute bit widths for all fields
         var widths: [i64] = []
         for f in bitfield_fields:
-            val w = if f.bits.?:
-                f.bits.unwrap()
+            val w = if f.has_bits:
+                f.bits
             elif f.is_reserved:
                 0
             else:
@@ -894,3 +936,13 @@ impl HirLowering:
             doc_comment: bitfield_doc_comment,
             span: bitfield_span
         )
+
+fn fn_has_untyped_value_param(params: [Param]) -> bool:
+    """True when a non-receiver parameter has no type annotation."""
+    for raw_param in params:
+        val param_: Param = raw_param
+        if param_.name == "self" or param_.name == "me":
+            continue
+        if not param_.has_type_:
+            return true
+    false

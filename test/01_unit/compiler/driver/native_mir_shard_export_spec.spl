@@ -1,0 +1,121 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/80.driver/driver_build/native_mir_shard_export_v1.spl 0%
+# @cover src/compiler/50.mir/hir_declaration_decoder_v1.spl 0%
+"""
+# MIR shard export summaries round-trip and refuse anything they cannot prove
+
+**Category:** Compiler / driver
+**Design:** doc/05_design/compiler/incremental_build/mir_shard_export_summaries.md
+
+## Purpose and Audience
+
+A MIR shard worker may only replace the full post-mono HIR load with export
+summaries if a summary it admits is exactly the declaration record the
+summary process wrote. These scenarios pin that: a written bundle decodes to
+a record whose declaration digest re-derives, and a tampered record, a
+foreign build identity, a missing seal or a module absent from the manifest
+are each refused (the worker then keeps today's full load).
+
+## Expected Outcome
+
+Round-trip admission succeeds and re-derives the digest; every tampering
+case returns Err.
+"""
+use std.spec.step
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use std.nogc_sync_mut.io_runtime.{dir_create_all, dir_remove_all, file_read, file_write, getpid}
+use compiler.hir.hir_types.{SymbolTable}
+use compiler.mir.hir_declaration_types_v1.{MirHirModuleDeclarationsV1}
+use compiler.mir.hir_declaration_codec_v1.{mir_hir_module_declaration_digest_v1}
+use compiler.driver.driver_build.native_mir_shard_export_v1.{
+    native_mir_shard_export_authority_v1, native_mir_shard_export_module_key_v1,
+    native_mir_shard_export_record_path_v1, native_mir_shard_export_write_module_v1,
+    native_mir_shard_export_write_manifest_v1, native_mir_shard_export_read_manifest_v1,
+    native_mir_shard_export_load_module_v1, native_mir_shard_export_admit_v1}
+
+fn fresh_bundle(tag: text) -> text:
+    val dir = "build/test_tmp/native_mir_shard_export_{tag}_{getpid()}"
+    val _removed = dir_remove_all(dir)
+    val _created = dir_create_all(dir)
+    dir
+
+# A body-free declaration record bound to this build identity, as the
+# summary process would project it for a module with no declarations.
+fn summary_of(identity: text, name: text) -> MirHirModuleDeclarationsV1:
+    var module = MirHirModuleDeclarationsV1(name: name, path: "src/{name}.spl",
+        final_repository_authority: native_mir_shard_export_authority_v1(identity),
+        final_archive_key: native_mir_shard_export_module_key_v1(identity, name),
+        final_body_digest: native_mir_shard_export_authority_v1("body {name}"),
+        symbols: SymbolTable.new(), functions: [], structs: [], classes: [], enums: [],
+        bitfields: [], traits: [], impls: [], globals: [], needs_initialization: false,
+        declaration_digest: "", stage: "mir-hir-module-declarations-v1", source_binding: nil)
+    module.declaration_digest = mir_hir_module_declaration_digest_v1(module)
+    module
+
+fn publish_bundle(dir: text, identity: text, names: [text]) -> bool:
+    var digests: [text] = []
+    for name in names:
+        val written = native_mir_shard_export_write_module_v1(dir, identity, name,
+            summary_of(identity, name))
+        if written.is_err():
+            return false
+        digests.push(written.unwrap())
+    native_mir_shard_export_write_manifest_v1(dir, identity, names, digests)
+
+describe "MIR shard export summary round-trip":
+    it "admits a sealed bundle and re-derives each declaration digest":
+        # @req REQ-SSPEC-COMPILER
+        step("admits a sealed bundle and re-derives each declaration digest")
+        val dir = fresh_bundle("roundtrip")
+        assert_true(publish_bundle(dir, "src-id", ["mod.a", "mod.b"]))
+        val manifest = native_mir_shard_export_read_manifest_v1(dir, "src-id")
+        assert_true(manifest.is_ok())
+        assert_equal(manifest.unwrap().names.len(), 2)
+        val expected = summary_of("src-id", "mod.a").declaration_digest
+        val loaded = native_mir_shard_export_load_module_v1(dir, "src-id", "mod.a", expected)
+        assert_true(loaded.is_ok())
+        val module = loaded.unwrap()
+        assert_equal(module.name, "mod.a")
+        assert_equal(module.declaration_digest, expected)
+        assert_equal(mir_hir_module_declaration_digest_v1(module), expected)
+        val admitted = native_mir_shard_export_admit_v1(dir, "src-id", ["mod.a", "mod.b"])
+        assert_true(admitted.is_ok())
+        assert_equal(admitted.unwrap(), 2)
+        val _cleanup = dir_remove_all(dir)
+
+describe "MIR shard export summary refusal":
+    it "refuses a record whose payload was altered":
+        # @req REQ-SSPEC-COMPILER
+        step("refuses a record whose payload was altered")
+        val dir = fresh_bundle("tamper")
+        assert_true(publish_bundle(dir, "src-id", ["mod.a"]))
+        val path = native_mir_shard_export_record_path_v1(dir, "mod.a")
+        assert_true(file_write(path, file_read(path).replace("src/mod.a.spl", "src/mod.z.spl")))
+        assert_false(native_mir_shard_export_admit_v1(dir, "src-id", ["mod.a"]).is_ok())
+        val _cleanup = dir_remove_all(dir)
+
+    it "refuses a bundle written for another build identity":
+        # @req REQ-SSPEC-COMPILER
+        step("refuses a bundle written for another build identity")
+        val dir = fresh_bundle("foreign")
+        assert_true(publish_bundle(dir, "src-old", ["mod.a"]))
+        assert_false(native_mir_shard_export_admit_v1(dir, "src-new", ["mod.a"]).is_ok())
+        val _cleanup = dir_remove_all(dir)
+
+    it "refuses a bundle whose manifest seal is missing":
+        # @req REQ-SSPEC-COMPILER
+        step("refuses a bundle whose manifest seal is missing")
+        val dir = fresh_bundle("unsealed")
+        assert_true(native_mir_shard_export_write_module_v1(dir, "src-id", "mod.a",
+            summary_of("src-id", "mod.a")).is_ok())
+        assert_false(native_mir_shard_export_admit_v1(dir, "src-id", ["mod.a"]).is_ok())
+        val _cleanup = dir_remove_all(dir)
+
+    it "refuses a schedule module that has no summary":
+        # @req REQ-SSPEC-COMPILER
+        step("refuses a schedule module that has no summary")
+        val dir = fresh_bundle("missing")
+        assert_true(publish_bundle(dir, "src-id", ["mod.a"]))
+        assert_false(native_mir_shard_export_admit_v1(dir, "src-id", ["mod.a", "mod.b"]).is_ok())
+        val _cleanup = dir_remove_all(dir)

@@ -1,0 +1,214 @@
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolKind, MethodResolution}
+use compiler.hir.hir_definitions.{HirFunction, HirExpr, HirExprKind, HirCallArg, HirStmt, HirStmtKind, HirBlock}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.abi_interface.{hir_abi_function_digest_v1}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.hir.generated.hir_codec.{hc_enc_hir_expr, hc_enc_hir_block, hc_enc_hir_call_arg, hc_enc_span}
+use compiler.driver.cache.hir_body_typecheck_lease_v1.*
+use compiler.driver.cache.collection_archive_analysis_types_v1.{CollectionArchiveAnalysisV1}
+use compiler.driver.cache.collection_archive_analysis_v1.{collection_archive_load_analysis_in_owned_scope_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_header, hir_cache_clear_last_warnings, hir_cache_promote_diagnostic_owner_v1}
+use compiler.semantics.perf_facts.registry.{CollectionRegistryBindingV1, CollectionRegistrySnapshotV1}
+use compiler.semantics.perf_facts.types.{HirPerfReceiverKind}
+use compiler.semantics.perf.collection_plan_analysis.{CollectionModuleAnalysisV1}
+use compiler.semantics.perf.collection_plan.{CollectionPlanKind}
+use std.nogc_sync_mut.io_runtime.{file_read_nullable}
+use std.env.{env_get}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+
+fn collection_function(module: HirModule, name: text) -> HirFunction:
+    for function in module.functions.values():
+        if function.name == name: return function
+    panic("collection fixture function missing")
+
+fn collection_lower(path: text, name: text) -> HirModule:
+    val parsed = parse_full_frontend(file_read_nullable(path) ?? "", path, name, Logger(level: 0))
+    var lowering = HirLowering.with_filename(path)
+    lowering.lower_parser_module_unstub(parsed, false)
+
+fn collection_var(symbol: SymbolId, type_: HirType, span: Span) -> HirExpr:
+    HirExpr(kind: HirExprKind.Var(symbol), has_type_: true, type_: type_, span: span)
+
+fn collection_literal(value: i64, type_: HirType, span: Span) -> HirExpr:
+    HirExpr(kind: HirExprKind.IntLit(value, nil), has_type_: true, type_: type_, span: span)
+
+fn collection_typed_module(path: text, name: text, callback_value: i64 = 43, loop_value: i64 = 17) -> HirModule:
+    var module = collection_lower(path, name)
+    val map = collection_function(module, "array_map")
+    val filter = collection_function(module, "array_filter")
+    val append = collection_function(module, "array_append")
+    var chain = collection_function(module, "chain")
+    var loop_function = collection_function(module, "canonical_loop")
+    val span = chain.span
+    val int_type = append.params[1].type_
+    val array_type = chain.params[0].type_
+    val unit_type = HirType(kind: HirTypeKind.Unit, span: span)
+    val unit = HirExpr(kind: HirExprKind.UnitLit, has_type_: true, type_: unit_type, span: span)
+    val callback = HirExpr(kind: HirExprKind.Lambda([], collection_literal(callback_value, int_type, span), []),
+        has_type_: true, type_: map.params[1].type_, span: span)
+    val predicate = HirExpr(kind: HirExprKind.Lambda([], HirExpr(kind: HirExprKind.BoolLit(true),
+        has_type_: true, type_: HirType(kind: HirTypeKind.Bool, span: span), span: span), []),
+        has_type_: true, type_: filter.params[1].type_, span: span)
+    val source = collection_var(chain.params[0].symbol, array_type, span)
+    val mapped = HirExpr(kind: HirExprKind.MethodCall(source, "array_map",
+        [HirCallArg(has_name: false, name: "", value: callback, span: span)],
+        MethodResolution.InstanceMethod(SymbolId(id: 0), map.symbol)),
+        has_type_: true, type_: array_type, span: span)
+    val filtered = HirExpr(kind: HirExprKind.MethodCall(mapped, "array_filter",
+        [HirCallArg(has_name: false, name: "", value: predicate, span: span)],
+        MethodResolution.InstanceMethod(SymbolId(id: 0), filter.symbol)),
+        has_type_: true, type_: array_type, span: span)
+    chain.body = HirBlock(stmts: [], has: true, value: filtered, span: span)
+    module.functions[chain.symbol] = chain
+    # Actual SymbolTable allocator provides independent local identities.
+    val accumulator = module.symbols.define("collection_probe_accumulator", SymbolKind.Variable,
+        array_type, loop_function.span, Visibility.Private, true, Some(name))
+    val induction = module.symbols.define("collection_probe_item", SymbolKind.Variable,
+        int_type, loop_function.span, Visibility.Private, false, Some(name))
+    val receiver = collection_var(accumulator, array_type, loop_function.span)
+    val push = HirExpr(kind: HirExprKind.MethodCall(receiver, "array_append",
+        [HirCallArg(has_name: false, name: "", value: collection_literal(loop_value, int_type, loop_function.span), span: loop_function.span)],
+        MethodResolution.InstanceMethod(SymbolId(id: 0), append.symbol)),
+        has_type_: true, type_: unit_type, span: loop_function.span)
+    val loop_body = HirBlock(stmts: [HirStmt(kind: HirStmtKind.Expr(push), span: loop_function.span)],
+        has: false, value: unit, span: loop_function.span)
+    val for_expr = HirExpr(kind: HirExprKind.For(induction,
+        collection_var(loop_function.params[0].symbol, array_type, loop_function.span), loop_body, nil),
+        has_type_: true, type_: unit_type, span: loop_function.span)
+    val init = HirExpr(kind: HirExprKind.ArrayLit([], Some(int_type)),
+        has_type_: true, type_: array_type, span: loop_function.span)
+    loop_function.body = HirBlock(stmts: [HirStmt(kind: HirStmtKind.Let(accumulator, array_type, init), span: loop_function.span),
+        HirStmt(kind: HirStmtKind.Expr(for_expr), span: loop_function.span)], has: true, value: receiver, span: loop_function.span)
+    module.functions[loop_function.symbol] = loop_function
+    module
+
+fn collection_registry_row(module: HirModule, function_name: text, operation: text,
+        cardinality: text, append: bool) -> text:
+    val digest = hir_abi_function_digest_v1(module, collection_function(module, function_name)).unwrap()
+    val expected = if append: "amortized-constant" else: "linear"
+    val enumeration = if append: "none" else: "once"
+    val allocation = if append: "init-only" else: "unbounded"
+    val reads = not append
+    val materializes = not append
+    "  - stable_name: \"collection_fixture.{function_name}\"\n" +
+    "    operation: \"{operation}\"\n    receiver: \"array\"\n    signature_fingerprint: \"{digest}\"\n" +
+    "    key_contract: \"not-keyed\"\n    expected_cost: \"{expected}\"\n    worst_cost: \"linear\"\n" +
+    "    cardinality: \"{cardinality}\"\n    cardinality_value: -1\n    enumeration: \"{enumeration}\"\n" +
+    "    enumeration_count: -1\n    explicit_argument_count: 1\n    reads: {reads}\n    writes: {append}\n" +
+    "    allocates: true\n    throws: false\n    suspends: false\n    observable: false\n" +
+    "    allocation: \"{allocation}\"\n    preserves_order: true\n    materializes: {materializes}\n" +
+    "    backends: [\"llvm\"]\n    provenance: \"native-diagnostic-content-only\"\n" +
+    "    evidence_receipt: \"collection-fixture-not-production-optimization-admission\"\n"
+
+fn collection_binding(module: HirModule, function_name: text, snapshot: CollectionRegistrySnapshotV1) -> CollectionRegistryBindingV1:
+    val function = collection_function(module, function_name)
+    CollectionRegistryBindingV1(module_path: module.path, symbol_id: function.symbol.id,
+        stable_name: "collection_fixture.{function_name}", receiver: HirPerfReceiverKind.Array,
+        signature_fingerprint: hir_abi_function_digest_v1(module, function).unwrap(), backend: "llvm",
+        evidence_receipt: "collection-fixture-not-production-optimization-admission",
+        metadata_version: snapshot.metadata_version, source_digest: snapshot.source_digest)
+
+fn collection_archive(module: HirModule) -> Result<HirBodyArchiveV1, text>:
+    hir_body_archive_store_v1(HirBodyArchiveInputV1(source_path: module.path, module_name: module.name,
+        is_entry: false, closure_digest: env_get("SIMPLE_HIR_LEASE_CLOSURE_DIGEST"),
+        runtime_provider_digest: env_get("SIMPLE_HIR_LEASE_RUNTIME_PROVIDER_DIGEST"),
+        runtime_provider_receipt_path: env_get("SIMPLE_HIR_LEASE_RUNTIME_PROVIDER_RECEIPT"),
+        producer_header: hir_cache_header(), stage: "lowered-unresolved-v1"), module, [])
+
+struct CollectionObservation:
+    digest: text
+    plans: i64
+    callback_literal: i64
+    loop_literal: i64
+    loop_append: i64
+    maximal_chain_nodes: i64
+    loop_nodes: i64
+    unproven: bool
+
+fn collection_int(expr: HirExpr) -> i64:
+    match expr.kind:
+        case HirExprKind.IntLit(value, _): value
+        case _: -1
+
+fn collection_observation(analysis: CollectionModuleAnalysisV1) -> CollectionObservation:
+    var writer = HirCodecWriter.create()
+    writer.put_i64(analysis.facts.functions_scanned)
+    writer.put_i64(analysis.facts.nodes_scanned)
+    writer.put_i64(analysis.plans.len())
+    var callback = -1
+    var mapped = -1
+    var append = -1
+    var chain_nodes = 0
+    var loop_nodes = 0
+    var unproven = true
+    for plan in analysis.plans:
+        writer.put_i64(plan.function_symbol_id)
+        writer.put_text(plan.registry_version)
+        writer.put_i64(plan.output_id)
+        writer.put_i64(plan.nodes.len())
+        for node in plan.nodes:
+            writer.put_i64(node.id)
+            val kind = match node.kind:
+                case CollectionPlanKind.Source: "source"
+                case CollectionPlanKind.Map: "map"
+                case CollectionPlanKind.Filter: "filter"
+                case _: "unexpected"
+            writer.put_text(kind)
+            for input in node.inputs: writer.put_i64(input)
+            hc_enc_span(writer, node.source_span)
+            if val source = node.source_expr: hc_enc_hir_expr(writer, source)
+            writer.put_i64(node.call_arguments.len())
+            for argument in node.call_arguments:
+                hc_enc_hir_call_arg(writer, argument)
+                match argument.value.kind:
+                    case HirExprKind.Lambda(_, body, _):
+                        if collection_int(body) == 43: callback = 43
+                    case _: pass
+            if val operation = node.operation_symbol_id: writer.put_i64(operation)
+            if val origin = node.loop_origin:
+                hc_enc_hir_block(writer, origin.original_block)
+                hc_enc_hir_expr(writer, origin.original_loop)
+                hc_enc_hir_expr(writer, origin.mapped_expr)
+                writer.put_i64(origin.induction_symbol.id)
+                writer.put_i64(origin.accumulator_symbol.id)
+                writer.put_i64(origin.append_symbol.id)
+                mapped = collection_int(origin.mapped_expr)
+                append = origin.append_symbol.id
+                loop_nodes = plan.nodes.len()
+            elif node.call_arguments.len() != 0: chain_nodes = plan.nodes.len()
+            unproven = unproven and not node.facts.callback_pure and not node.facts.alias_proven and not node.facts.profitability_proven
+    for finding in analysis.findings:
+        writer.put_text(finding.code)
+        writer.put_text(finding.function_name)
+        writer.put_text(finding.message)
+        for evidence in finding.evidence: writer.put_text(evidence)
+    for blocker in analysis.blockers: writer.put_text(blocker)
+    if not writer.ok: panic("collection observation codec")
+    CollectionObservation(digest: sha256_text(writer.finish()), plans: analysis.plans.len(),
+        callback_literal: callback, loop_literal: mapped, loop_append: append,
+        maximal_chain_nodes: chain_nodes, loop_nodes: loop_nodes, unproven: unproven)
+
+fn collection_observe_archive(descriptor: CollectionArchiveAnalysisV1) -> Result<CollectionObservation, text>:
+    if not transient_scope_begin(): return Err("collection observation scope unavailable")
+    val analysis = collection_archive_load_analysis_in_owned_scope_v1(descriptor)
+    var observation: CollectionObservation? = nil
+    if analysis.is_ok(): observation = Some(collection_observation(analysis.unwrap()))
+    val valid = observation != nil
+    val paused = transient_scope_pause()
+    val owned = if paused and valid: transient_promote(observation) else: false
+    val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    if paused: hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not ended or not cache_owned or (valid and not owned): panic("collection observation ownership")
+    if val value = observation: return Ok(value)
+    Err("collection replay refused")
+
+export collection_function, collection_lower, collection_typed_module, collection_registry_row
+export collection_binding, collection_archive, collection_observation, collection_observe_archive
+export CollectionObservation

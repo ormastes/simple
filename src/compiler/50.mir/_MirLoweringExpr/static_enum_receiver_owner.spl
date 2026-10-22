@@ -21,8 +21,38 @@ impl MirLowering:
             case HirExprKind.NamedVar(symbol, name):
                 # This is a lexical lookup in the active module SymbolTable,
                 # never a global variant-name search or a foreign numeric ID.
-                val bound = self.symbols.lookup_or_invalid(name)
-                if bound.id < 0: return nil
+                var bound = self.symbols.lookup_or_invalid(name)
+                if bound.id < 0 and symbol.id >= 0:
+                    # B5b shard-registry family (bug-doc phase2_matrix addendum
+                    # 7): the flat short-name entry can name a foreign owner
+                    # from importer pre-registration and be invisible here.
+                    # Retry through the declaring owner's qualified scope, the
+                    # same owner-qualified resolution as the NamedVar value
+                    # arm in expr_dispatch.spl (`SdnValue.Float(f)` is this
+                    # path: a named-constructor MethodCall, not a NamedVar).
+                    if val foreign_symbol = self.symbols.get_symbol_raw(symbol.id):
+                        if val foreign_owner = foreign_symbol.defining_module:
+                            if foreign_owner != "" and foreign_owner != self.current_module_id:
+                                val qualified_retry = self.symbols.lookup_qualified_type_raw(
+                                    foreign_owner, name)
+                                if qualified_retry >= 0:
+                                    bound = SymbolId(id: qualified_retry)
+                if bound.id < 0:
+                    # CYCLE-42 LANE (in-vivo, verifier-shaped, single-process,
+                    # cold caches): the receiver NamedVar's lexical lookup
+                    # MISSED a declared enum whose payload (module.enums) and
+                    # numeric-id tables are intact -- only the SymbolTable
+                    # NAME index misses it (the BOOT-20 chain-table family at
+                    # 252-module scale). register_enum_variants (lower_module
+                    # start) keys the bare name from the SAME HirModule enums
+                    # dict, so the MIR enum registry is authoritative here.
+                    # Recover the owner from it, unambiguous bare name only.
+                    if self.enum_variant_index.has(name) and not (self.enum_bare_ambiguous.get(name) ?? false):
+                        for variant in self.enum_variant_names(name):
+                            if variant == method:
+                                return Some(self.lower_enum_construct_named(name, method, args))
+                        return Some(self.lower_method_call(receiver, method, args, resolution, name, -1))
+                    return nil
                 if symbol.id >= 0 and symbol.id != bound.id: return nil
                 raw = bound.id
             case _: return nil

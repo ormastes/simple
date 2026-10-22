@@ -204,50 +204,7 @@ pub(crate) fn find_archive_tool() -> Result<String, String> {
     }
 }
 
-fn is_msvc_archive_tool(tool: &str) -> bool {
-    Path::new(tool)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .is_some_and(|stem| {
-            stem.eq_ignore_ascii_case("lib") || stem.eq_ignore_ascii_case("llvm-lib")
-        })
-}
-
-pub(super) fn archive_create_command(
-    tool: &str,
-    archive: &Path,
-    objects: &[PathBuf],
-    append: bool,
-    deterministic: bool,
-) -> std::process::Command {
-    let mut command = std::process::Command::new(tool);
-    if is_msvc_archive_tool(tool) {
-        command.arg("/NOLOGO").arg(format!("/OUT:{}", archive.display()));
-        if append {
-            command.arg(archive);
-        }
-    } else {
-        let mode = match (append, deterministic) {
-            (false, false) => "rcs",
-            (true, false) => "rs",
-            (false, true) => "rcsD",
-            (true, true) => "rsD",
-        };
-        command.arg(mode).arg(archive);
-    }
-    command.args(objects);
-    command
-}
-
-pub(super) fn archive_list_command(tool: &str, archive: &Path) -> std::process::Command {
-    let mut command = std::process::Command::new(tool);
-    if is_msvc_archive_tool(tool) {
-        command.arg("/NOLOGO").arg("/LIST").arg(archive);
-    } else {
-        command.arg("t").arg(archive);
-    }
-    command
-}
+pub(super) use super::archive::{archive_create_command, archive_list_command};
 
 pub(crate) fn find_cxx_compiler() -> String {
     simple_common::platform::cc_detect::find_cxx_compiler()
@@ -423,13 +380,30 @@ pub(crate) fn find_core_c_runtime_source_root() -> Option<PathBuf> {
     None
 }
 
+/// Keep child output inherited, while retaining spawn errors and exit status.
+/// The core-C builder returns Option for its optional callers; diagnostics must
+/// survive that boundary even when native-project tracing is disabled.
+fn run_core_c_command(command: &mut std::process::Command) -> Result<(), String> {
+    let status = command.status().map_err(|error| {
+        format!("core-C command {command:?} could not start: {error}")
+    })?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("core-C command {command:?} failed: {status}"))
+    }
+}
+
 fn build_c_runtime_library(
     build_dir: &Path,
     include_stage4_hosted: bool,
     include_cranelift_stubs: bool,
 ) -> Option<PathBuf> {
     let archive = build_dir.join(host_archive_name());
-    let runtime_root = find_core_c_runtime_source_root()?;
+    let runtime_root = find_core_c_runtime_source_root().or_else(|| {
+        eprintln!("native-build: core-C runtime source root was not found");
+        None
+    })?;
     let target = effective_target();
     let mut runtime_inputs = vec![
         "runtime_native.c",
@@ -472,6 +446,7 @@ fn build_c_runtime_library(
         // scripts/check/check-runtime-source-list-parity.shs, which is exactly
         // the dropped-list-entry class that gate exists to catch.
         "runtime_memory.c",
+        "runtime_alloc_observer.c",
         // ^ canonical memory provider, compiled WITH -DSIMPLE_RUNTIME_MEMORY_OWNER=1
         // (see the compile flags below).  It shares 16 symbol NAMES with
         // runtime_native.c (rt_alloc, rt_free, rt_realloc, rt_memcpy, rt_memset,
@@ -552,6 +527,19 @@ fn build_c_runtime_library(
         // see the TU header; behavioural tests in
         // src/runtime/test/rt_core_exports_behaviour_selfcheck.c.
         "runtime_core_exports.c",
+        // Standalone owner of the intrinsic runtime ABI (__simple_pow and the
+        // __simple_intrinsic_* family), selected by the pure-Simple backend's
+        // own list (src/compiler/70.backend/backend/runtime_compiler.spl) but
+        // never carried here: the only other includer of
+        // runtime_core_intrinsics_impl.h is runtime.c ("exactly one selected
+        // C provider per runtime composition"), which is deliberately NOT in
+        // this list (53/69 collision class). Without this TU the Windows
+        // Stage 2 link fails with `undefined symbol: __simple_pow` referenced
+        // from compiler__mir__mir_instruction_graph__mir_fold_binop (MIR
+        // constant folding, 2026-10-15). Verified collision-free against every
+        // existing member (llvm-nm, 2026-10-15): only MSVC CRT COMDAT names
+        // overlap, which every clang-cl TU shares.
+        "runtime_core_intrinsics.c",
         // Backend-plugin transport (spl_backend_plugin_run_v1), backing
         // compiler.backend.backend_plugin.transport. Same never-an-archive-member
         // class as runtime_terminal.c and runtime_simd_case.c above: the symbol
@@ -567,6 +555,7 @@ fn build_c_runtime_library(
         "runtime_backend_plugin.c",
         "runtime_value.h",
         "runtime.h",
+        "runtime_core_intrinsics_impl.h",
         "runtime_shared_parse_cell_private.h",
         "runtime_packed_span.h",
         "runtime_fork.h",
@@ -612,7 +601,9 @@ fn build_c_runtime_library(
         return Some(archive);
     }
 
-    std::fs::create_dir_all(build_dir).ok()?;
+    std::fs::create_dir_all(build_dir).map_err(|error| {
+        eprintln!("native-build: cannot create core-C build directory {}: {error}", build_dir.display());
+    }).ok()?;
 
     // Level-gated identity capture: records the staging directory's inode before
     // any compile runs so a failure can tell "the directory was replaced" apart
@@ -626,7 +617,9 @@ fn build_c_runtime_library(
     let build_dir_ino_before: u64 = 0;
 
     let cc = target_c_compiler(target);
-    let ar = find_archive_tool().ok()?;
+    let ar = find_archive_tool().map_err(|error| {
+        eprintln!("native-build: core-C archive tool discovery failed: {error}");
+    }).ok()?;
     let obj_ext = host_object_extension();
     let mut objects = Vec::new();
 
@@ -676,7 +669,7 @@ fn build_c_runtime_library(
                         .arg("-fPIC")
                         .arg("-std=gnu11");
                 }
-                let ok = command
+                command
                     .args(msvc_c11_atomics_flags(&cc))
                     .arg("-DSIMPLE_CORE_C_STANDALONE=1")
                     // Selects runtime_memory.c as THE memory provider and compiles out
@@ -691,11 +684,10 @@ fn build_c_runtime_library(
                         vec![format!("-Fo{}", object.display())]
                     } else {
                         vec!["-o".to_string(), object.display().to_string()]
-                    })
-                    .status()
-                    .ok()
-                    .map(|status| status.success())
-                    .unwrap_or(false);
+                    });
+                let ok = run_core_c_command(&mut command).map_err(|error| {
+                    eprintln!("native-build: compiling core-C source {source}: {error}");
+                }).is_ok();
                 (source, object, ok)
             })
             .collect()
@@ -748,15 +740,17 @@ fn build_c_runtime_library(
             return None;
     }
 
-    let status = archive_create_command(&ar, &archive, &objects, false, false)
-        .status()
+    run_core_c_command(&mut archive_create_command(&ar, &archive, &objects, false, false))
+        .map_err(|error| eprintln!("native-build: creating core-C archive: {error}"))
         .ok()?;
-    if status.success() && has_nonempty_archive_payload(&archive) {
-        std::fs::write(fingerprint_path, fingerprint).ok()?;
-        Some(archive)
-    } else {
-        None
+    if !has_nonempty_archive_payload(&archive) {
+        eprintln!("native-build: core-C archive {} has no nonempty payload after successful archiver exit", archive.display());
+        return None;
     }
+    std::fs::write(&fingerprint_path, fingerprint).map_err(|error| {
+        eprintln!("native-build: cannot write core-C fingerprint {}: {error}", fingerprint_path.display());
+    }).ok()?;
+    Some(archive)
 }
 
 pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
@@ -2399,11 +2393,8 @@ pub(crate) fn build_stage4_rust_runtime_projection_archive(
 /// `libsimple_native_all` remains the compiler/native-build owner. Localizing
 /// every non-requested core-C definition makes the supplement disjoint instead of
 /// relying on the linker's multiple-definition tolerance.
-pub(crate) fn build_bootstrap_mutex_runtime_capsule_archive(
-    core_archive: &Path,
-    temp_dir: &Path,
-) -> Result<PathBuf, String> {
-    let requested = [
+pub(super) fn bootstrap_mutex_runtime_requested_symbols() -> Vec<String> {
+    [
         "spl_mutex_create",
         "spl_mutex_lock",
         "spl_mutex_try_lock",
@@ -2412,16 +2403,35 @@ pub(crate) fn build_bootstrap_mutex_runtime_capsule_archive(
         "rt_mem_snapshot_open",
         "rt_mem_snapshot_record",
         "rt_mem_snapshot_close",
+        // The MIR progress line (driver_log_helpers.spl, db00168b079) reads
+        // VmRSS through this core-C export; without it the Stage 2 link failed
+        // with `undefined symbol: rt_process_rss_kib` (aarch64, 2026-10-20).
+        "rt_process_rss_kib",
         "rt_file_create_excl",
         "rt_file_sync",
         "rt_simple_abi_version",
         "rt_simple_abi_version_deferred",
         "rt_sosix_directory_pair_check_v1",
+        // Cycle-170: the secure_temp_dir split-crossing pair (runtime_native.c)
+        // must survive capsule retention -- otherwise the stub generator
+        // fabricates weak return-3 stubs for them and SCV snapshot staging
+        // refuses every snapshot CREATE under candidate-seednew.
+        "rt_secure_temp_dir_set_parent",
+        "rt_secure_temp_dir_set_prefix",
+        "rt_secure_temp_dir_make",
     ]
     .into_iter()
     .map(str::to_string)
-    .collect::<Vec<_>>();
-    let native_all_owned = [
+    .collect::<Vec<_>>()
+}
+
+pub(crate) fn build_bootstrap_mutex_runtime_capsule_archive(
+    core_archive: &Path,
+    temp_dir: &Path,
+    native_all_archive: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let requested = bootstrap_mutex_runtime_requested_symbols();
+    let mut native_all_owned = [
         "rt_heap_live_bytes",
         "rt_heap_peak_bytes",
         "rt_array_bytes_validate",
@@ -2430,6 +2440,22 @@ pub(crate) fn build_bootstrap_mutex_runtime_capsule_archive(
         .into_iter()
         .map(str::to_string)
         .collect::<Vec<_>>();
+    let mut requested = requested;
+    if let Some(native_all) = native_all_archive {
+        if safe_canonicalize(core_archive) == safe_canonicalize(native_all) {
+            return Err("bootstrap core-C supplement and native-all authority must differ".to_string());
+        }
+        // Use the exact selected link archive. Inspection failure is fatal;
+        // an empty fallback would silently restore overlapping ownership.
+        let (defined, _) = archive_global_symbols(native_all)?;
+        let (core_defined, _) = archive_global_symbols(core_archive)?;
+        for name in bootstrap_capsule_c_only_exports(&core_defined, &defined) {
+            if !requested.contains(&name) {
+                requested.push(name);
+            }
+        }
+        (requested, native_all_owned) = bootstrap_capsule_symbol_ownership(&requested, &defined)?;
+    }
     project_stage4_archive_closure(
         &[core_archive],
         &requested,
@@ -2437,6 +2463,424 @@ pub(crate) fn build_bootstrap_mutex_runtime_capsule_archive(
         temp_dir,
         "bootstrap_mutex_runtime",
     )
+}
+
+/// Core-C entry points the selected native-all does not define at all.
+///
+/// native_all carries no C-only runtime (rt_file_write, rt_eprintln, rt_shell,
+/// rt_process_*, __simple_pow, ...). Requesting them here lets the projected
+/// capsule supply them with native_all-owned symbols still localized. Before,
+/// the Unix stage1 link fabricated them as link-only stubs: 92 on FreeBSD 14.4
+/// riscv64 (2026-10-21), so stage1 answered --version but could not compile.
+fn bootstrap_capsule_c_only_exports(
+    core_defined: &BTreeMap<String, usize>,
+    native_defined: &BTreeMap<String, usize>,
+) -> Vec<String> {
+    let native: BTreeSet<&str> = native_defined.keys().map(|name| canonical_archive_symbol(name)).collect();
+    // Exactly one core definition: project_stage4_archive_closure rejects a
+    // root defined by several members, which would abort the whole link.
+    core_defined
+        .iter()
+        .filter(|(_, count)| **count == 1)
+        .map(|(name, _)| canonical_archive_symbol(name))
+        .filter(|name| name.starts_with("rt_") || name.starts_with("spl_") || name.starts_with("__simple_"))
+        .filter(|name| !native.contains(name))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Split bootstrap exports against the actual selected native-all authority.
+fn bootstrap_capsule_symbol_ownership(
+    requested: &[String],
+    native_defined: &BTreeMap<String, usize>,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    let mut canonical = BTreeMap::<String, usize>::new();
+    for (name, count) in native_defined {
+        let name = canonical_archive_symbol(name);
+        if name.starts_with("rt_") || name.starts_with("spl_") {
+            *canonical.entry(name.to_string()).or_default() += count;
+        }
+    }
+    let mut supplement = Vec::new();
+    for name in requested {
+        match canonical.get(name).copied().unwrap_or(0) {
+            0 => supplement.push(name.clone()),
+            1 => (),
+            count => return Err(format!("bootstrap native-all authority `{name}` has {count} definitions")),
+        }
+    }
+    Ok((supplement, canonical.into_keys().collect()))
+}
+
+#[cfg(test)]
+mod bootstrap_capsule_ownership_tests {
+    use super::{bootstrap_capsule_c_only_exports, bootstrap_capsule_symbol_ownership};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn capsule_requests_only_core_c_exports_missing_from_native_all() {
+        // nm-raw names: Mach-O prefixes every C symbol with `_`.
+        let raw = |name: &str| if cfg!(target_os = "macos") { format!("_{name}") } else { name.to_string() };
+        let mut core = ["rt_file_write", "rt_eprintln", "rt_array_push", "__simple_pow", "spl_thread_sleep", "helper_static"]
+            .into_iter()
+            .map(|name| (raw(name), 1))
+            .collect::<BTreeMap<_, _>>();
+        // Defined by two core members: projecting it would abort the link.
+        core.insert(raw("rt_alloc"), 2);
+        let native = ["rt_array_push", "spl_thread_sleep"]
+            .into_iter()
+            .map(|name| (raw(name), 1))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            bootstrap_capsule_c_only_exports(&core, &native),
+            ["__simple_pow", "rt_eprintln", "rt_file_write"]
+        );
+    }
+
+    #[test]
+    fn mixed_native_all_keeps_its_abi_file_and_snapshot_exports() {
+        let owned = ["rt_simple_abi_version", "rt_simple_abi_version_deferred", "rt_file_sync",
+            "rt_file_create_excl", "rt_mem_snapshot_open", "rt_mem_snapshot_record", "rt_mem_snapshot_close"];
+        let mut requested: Vec<String> = owned.iter().map(|name| name.to_string()).collect();
+        requested.extend(["spl_mutex_create".to_string(), "rt_sosix_directory_pair_check_v1".to_string()]);
+        let defined = owned.into_iter().map(|name| (name.to_string(), 1)).collect::<BTreeMap<_, _>>();
+        let (supplement, external) = bootstrap_capsule_symbol_ownership(&requested, &defined).unwrap();
+        assert_eq!(supplement, ["spl_mutex_create", "rt_sosix_directory_pair_check_v1"]);
+        for name in owned { assert!(external.iter().any(|export| export == name)); }
+    }
+
+    #[test]
+    fn bootstrap_capsule_requests_the_mir_progress_rss_export() {
+        assert!(super::bootstrap_mutex_runtime_requested_symbols()
+            .iter()
+            .any(|name| name == "rt_process_rss_kib"));
+    }
+
+    #[test]
+    fn core_only_missing_native_exports_remain_requested() {
+        let requested = vec!["rt_simple_abi_version".to_string(), "rt_file_sync".to_string()];
+        let (supplement, external) = bootstrap_capsule_symbol_ownership(&requested, &BTreeMap::new()).unwrap();
+        assert_eq!(supplement, requested);
+        assert!(external.is_empty());
+    }
+
+    #[test]
+    fn duplicate_native_authority_is_rejected() {
+        let requested = vec!["rt_file_sync".to_string()];
+        let defined = BTreeMap::from([("rt_file_sync".to_string(), 2)]);
+        assert!(bootstrap_capsule_symbol_ownership(&requested, &defined).unwrap_err().contains("has 2 definitions"));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macho_underscore_ownership_matches_unprefixed_requested_exports() {
+        let requested = vec!["rt_file_sync".to_string(), "spl_mutex_create".to_string()];
+        let defined = BTreeMap::from([("_rt_file_sync".to_string(), 1)]);
+        let (supplement, external) = bootstrap_capsule_symbol_ownership(&requested, &defined).unwrap();
+        assert_eq!(supplement, ["spl_mutex_create"]);
+        assert_eq!(external, ["rt_file_sync"]);
+    }
+
+    #[test]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "freebsd", target_os = "macos"))]
+    fn actual_archives_link_mixed_and_core_only_without_duplicate_ownership() {
+        let directory = std::env::temp_dir().join(format!("bootstrap-capsule-ownership-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let owned = ["rt_simple_abi_version", "rt_simple_abi_version_deferred", "rt_file_sync",
+            "rt_file_create_excl", "rt_mem_snapshot_open", "rt_mem_snapshot_record", "rt_mem_snapshot_close"];
+        let compile_archive = |stem: &str, source: &str| {
+            let c = directory.join(format!("{stem}.c"));
+            let object = directory.join(format!("{stem}.o"));
+            let archive = directory.join(format!("lib{stem}.a"));
+            std::fs::write(&c, source).unwrap();
+            let status = std::process::Command::new(super::find_c_compiler())
+                .args(["-c", "-ffunction-sections", "-fdata-sections"]).arg(&c).arg("-o").arg(&object).status().unwrap();
+            assert!(status.success());
+            let ar = super::find_archive_tool().unwrap();
+            let status = super::archive_create_command(&ar, &archive, &[object], false, true).status().unwrap();
+            assert!(status.success());
+            archive
+        };
+        let mut core_source = String::new();
+        let mut native_source = String::new();
+        for name in owned {
+            core_source.push_str(&format!("long {name}(void) {{ return 1; }}\n"));
+            native_source.push_str(&format!("long {name}(void) {{ return 10; }}\n"));
+        }
+        core_source.push_str(&format!("long spl_mutex_create(void) {{ return {}; }}\n", owned.iter().map(|name| format!("{name}()")).collect::<Vec<_>>().join(" + ")));
+        for name in ["spl_mutex_lock", "spl_mutex_try_lock", "spl_mutex_unlock", "spl_mutex_destroy"] {
+            core_source.push_str(&format!("long {name}(void) {{ return 1; }}\n"));
+        }
+        core_source.push_str("long rt_sosix_directory_pair_check_v1(void) { return 5 + rt_file_sync(); }\n");
+        // Every other requested export must exist exactly once in the core
+        // archive too (rt_secure_temp_dir_*, rt_process_rss_kib, ...).
+        for name in super::bootstrap_mutex_runtime_requested_symbols() {
+            if !core_source.contains(&format!("long {name}(void)")) {
+                core_source.push_str(&format!("long {name}(void) {{ return 1; }}\n"));
+            }
+        }
+        native_source.push_str("long rt_native_authority_anchor(void) { return 3; }\n");
+        let core = compile_archive("core", &core_source);
+        let native = compile_archive("native", &native_source);
+        for mixed in [false, true] {
+            let suffix = if mixed { "mixed" } else { "core-only" };
+            let capsule = super::build_bootstrap_mutex_runtime_capsule_archive(
+                &core, &directory.join(suffix), if mixed { Some(native.as_path()) } else { None },
+            ).unwrap();
+            let (defined, _) = super::archive_global_symbols(&capsule).unwrap();
+            let weak = super::archive_weak_global_symbols(&capsule).unwrap();
+            for name in owned {
+                let raw = if cfg!(target_os = "macos") { format!("_{name}") } else { name.to_string() };
+                if mixed { assert!(!defined.contains_key(&raw) || weak.contains(&raw)); }
+                else { assert_eq!(defined.get(&raw), Some(&1)); }
+            }
+            let source = directory.join(format!("{suffix}-main.c"));
+            let exe = directory.join(format!("{suffix}-probe"));
+            // Match native_project's actual native-all-before-supplement order.
+            // Explicit overlap retention roots require extraction of the
+            // authoritative provider member; no unrelated native anchor.
+            let native_check = "";
+            let native_condition = "";
+            std::fs::write(&source, format!("{native_check} extern long spl_mutex_create(void); extern long rt_sosix_directory_pair_check_v1(void); int main(void) {{ return {native_condition}spl_mutex_create() == {} && rt_sosix_directory_pair_check_v1() == {} ? 0 : 1; }}\n", if mixed { 70 } else { 7 }, if mixed { 15 } else { 6 })).unwrap();
+            let mut command = std::process::Command::new(super::find_c_compiler());
+            command.arg(&source);
+            if mixed {
+                // No unrelated native-only anchor: the production overlap
+                // roots alone must extract the authoritative provider member.
+                let (defined, _) = super::archive_global_symbols(&native).unwrap();
+                for name in super::bootstrap_mutex_runtime_requested_symbols() {
+                    let raw = if cfg!(target_os = "macos") { format!("_{name}") } else { name.clone() };
+                    if defined.contains_key(&raw) { command.arg(format!("-Wl,-u,{raw}")); }
+                }
+                command.arg(&native);
+            }
+            command.arg(&capsule);
+            let result = command.arg("-o").arg(&exe).output().unwrap();
+            assert!(result.status.success(), "strict link failed: {}", String::from_utf8_lossy(&result.stderr));
+            assert!(std::process::Command::new(&exe).status().unwrap().success());
+        }
+        assert!(super::build_bootstrap_mutex_runtime_capsule_archive(&core, &directory.join("unreadable"), Some(&directory.join("missing.a"))).unwrap_err().contains("failed to inspect archive"));
+        let duplicate_object = directory.join("duplicate.o");
+        let duplicate_source = directory.join("duplicate.c");
+        std::fs::write(&duplicate_source, "long rt_file_sync(void) { return 20; }\n").unwrap();
+        assert!(std::process::Command::new(super::find_c_compiler()).arg("-c").arg(&duplicate_source).arg("-o").arg(&duplicate_object).status().unwrap().success());
+        let ar = super::find_archive_tool().unwrap();
+        let duplicate = directory.join("duplicate.a");
+        assert!(super::archive_create_command(&ar, &duplicate, &[directory.join("native.o"), duplicate_object], false, true).status().unwrap().success());
+        assert!(super::build_bootstrap_mutex_runtime_capsule_archive(&core, &directory.join("duplicate-rejected"), Some(&duplicate)).unwrap_err().contains("has 2 definitions"));
+        let incomplete = compile_archive("incomplete", "long spl_mutex_create(void) { return 1; }\n");
+        assert!(super::build_bootstrap_mutex_runtime_capsule_archive(&incomplete, &directory.join("missing-root"), Some(&native)).unwrap_err().contains("has 0 archive definitions"));
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn non_runtime_exports_are_not_admitted_as_runtime_dependencies() {
+        let defined = BTreeMap::from([("compiler_private".to_string(), 1)]);
+        let requested = vec!["rt_file_sync".to_string()];
+        let (supplement, external) = bootstrap_capsule_symbol_ownership(&requested, &defined).unwrap();
+        assert_eq!(supplement, requested);
+        assert!(external.is_empty());
+    }
+}
+
+/// Whether a `-Wl,--version` banner names mold.
+fn linker_banner_is_mold(banner: &str) -> bool {
+    banner.trim_start().starts_with("mold ")
+}
+
+/// `-Wl,--gc-sections` is safe for a relocatable (`-r`) closure link unless
+/// the driver's effective linker is mold. mold (measured 2.42.0) does not
+/// garbage-collect sections in `-r` mode -- every `.text.*` of every pulled
+/// member survives -- yet it still drops the SHF_MERGE|SHF_STRINGS literal
+/// sections (`.rodata.str1.1`) and rewrites each kept reference to them as a
+/// symbol-0 relocation with addend -1. The final link then resolves every
+/// string literal of the closure to address -1 (the 2026-10-19 Stage 2 SEGV
+/// in `rt_secure_temp_dir_make`). Since mold keeps the same `.text.*` sections
+/// and defined symbols with or without the flag (pinned by
+/// `string_literal_closure_keeps_its_literals`), omitting it under mold
+/// changes nothing but the literals.
+///
+/// A probe that cannot run keeps the previous command line (gc allowed):
+/// `reject_partial_link_tombstones` still refuses a closure that lost its
+/// literals, so a failed probe cannot ship the defect.
+///
+/// The Stage4 live projection no longer runs a linker on Linux: it is
+/// computed in-process by `live_projection.rs`, because mold (and ld.bfd)
+/// also skip `--gc-sections` under `-r` there and doubled its result.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn partial_link_gc_sections_allowed(cc: &str, fuse_ld: Option<&str>) -> bool {
+    let mut probe = std::process::Command::new(cc);
+    if let Some(linker) = fuse_ld {
+        probe.arg(format!("-fuse-ld={linker}"));
+    }
+    match probe.arg("-Wl,--version").output() {
+        Ok(output) if output.status.success() => {
+            !linker_banner_is_mold(&String::from_utf8_lossy(&output.stdout))
+        }
+        _ => true,
+    }
+}
+
+/// Relocations in allocated sections that a partial link left pointing at no
+/// symbol at all (symbol index 0) -- the discarded-section tombstone. A
+/// compiler never emits such a relocation (other than R_*_NONE). mold writes
+/// addend -1 on aarch64 (the final link resolves the reference to -1) and
+/// addend 0 on x86_64 (it resolves into the null page), so the addend is not
+/// part of the test.
+pub(crate) fn partial_link_tombstone_relocations(path: &Path) -> Result<Vec<String>, String> {
+    use object::{Object, ObjectSection, RelocationFlags, RelocationTarget, SectionFlags};
+    let bytes = std::fs::read(path).map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    let file = object::File::parse(&*bytes).map_err(|err| format!("failed to parse {}: {err}", path.display()))?;
+    let mut found = Vec::new();
+    // RISC-V linker-relaxation markers R_RISCV_ALIGN (43) and R_RISCV_RELAX
+    // (51) carry symbol index 0 by definition; they are not tombstones.
+    let riscv = matches!(
+        file.architecture(),
+        object::Architecture::Riscv64 | object::Architecture::Riscv32
+    );
+    for section in file.sections() {
+        let allocated = match section.flags() {
+            SectionFlags::Elf { sh_flags } => sh_flags & u64::from(object::elf::SHF_ALLOC) != 0,
+            _ => false,
+        };
+        if !allocated {
+            continue;
+        }
+        let name = section.name().unwrap_or("<unnamed>");
+        for (offset, relocation) in section.relocations() {
+            // r_type 0 is R_<arch>_NONE on every ELF machine.
+            let is_none = matches!(relocation.flags(), RelocationFlags::Elf { r_type: 0 });
+            let is_relax_marker = riscv && matches!(relocation.flags(), RelocationFlags::Elf { r_type: 43 | 51 });
+            if !is_none && !is_relax_marker && relocation.target() == RelocationTarget::Absolute {
+                found.push(format!("{name}+{offset:#x}"));
+            }
+        }
+    }
+    Ok(found)
+}
+
+fn reject_partial_link_tombstones(path: &Path, what: &str) -> Result<(), String> {
+    let found = partial_link_tombstone_relocations(path)?;
+    if found.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{what} closure link left {} relocation(s) pointing into a discarded section (symbol 0): {}",
+        found.len(),
+        found.iter().take(16).cloned().collect::<Vec<_>>().join(", ")
+    ))
+}
+
+#[cfg(test)]
+mod partial_link_tombstone_tests {
+    use super::{linker_banner_is_mold, partial_link_tombstone_relocations};
+
+    #[test]
+    fn mold_banner_is_recognised_and_others_are_not() {
+        assert!(linker_banner_is_mold("mold 2.42.0 (441dc1d; compatible with GNU ld)\n"));
+        assert!(!linker_banner_is_mold("LLD 23.1.0 (compatible with GNU linkers)"));
+        assert!(!linker_banner_is_mold("GNU ld (GNU Binutils for Ubuntu) 2.42"));
+    }
+
+    /// Replays the 2026-10-19 Stage 2 shape: a `-r --gc-sections` closure of
+    /// function-sectioned members whose string literals live in
+    /// `.rodata.str1.1`. Under mold that closure carried symbol-0/addend -1
+    /// relocations; the projection must now refuse such a closure and must
+    /// not build one in the first place.
+    #[test]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    fn string_literal_closure_keeps_its_literals() {
+        let directory = std::env::temp_dir().join(format!("partial-link-tombstone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let cc = super::find_c_compiler();
+        let mut objects = Vec::new();
+        for (stem, source) in [
+            ("a", "int snprintf(char*, unsigned long, const char*, ...);\nint rt_fix_root(char *b, const char *s) { return snprintf(b, 64, \"%s-root\", s); }\nint rt_fix_other(char *b) { return snprintf(b, 64, \"other %s\", \"x\"); }\n"),
+            ("b", "int snprintf(char*, unsigned long, const char*, ...);\nint rt_fix_helper(char *b) { return snprintf(b, 64, \"%s\", \"helper\"); }\nint rt_fix_root2(char *b) { return rt_fix_helper(b) + snprintf(b, 64, \"%s\", \"r2\"); }\n"),
+        ] {
+            let c = directory.join(format!("{stem}.c"));
+            let o = directory.join(format!("{stem}.o"));
+            std::fs::write(&c, source).unwrap();
+            let status = std::process::Command::new(&cc)
+                .args(["-O2", "-c", "-ffunction-sections", "-fdata-sections"]).arg(&c).arg("-o").arg(&o).status().unwrap();
+            assert!(status.success());
+            objects.push(o);
+        }
+        let archive = directory.join("libfix.a");
+        let ar = super::find_archive_tool().unwrap();
+        assert!(super::archive_create_command(&ar, &archive, &objects, false, true).status().unwrap().success());
+
+        let mold_present = std::process::Command::new("mold").arg("--version").output().is_ok_and(|o| o.status.success());
+        if mold_present {
+            assert!(!super::partial_link_gc_sections_allowed(&cc, Some("mold")));
+            let bad = directory.join("mold_gc_closure.o");
+            let status = std::process::Command::new(&cc)
+                .args(["-fuse-ld=mold", "-nostdlib", "-Wl,-r", "-no-pie", "-Wl,--gc-sections",
+                    "-Wl,--undefined=rt_fix_root", "-Wl,--undefined=rt_fix_root2"])
+                .arg(&archive).arg("-o").arg(&bad).status().unwrap();
+            assert!(status.success());
+            let found = partial_link_tombstone_relocations(&bad).unwrap();
+            assert!(!found.is_empty(), "mold -r --gc-sections no longer tombstones literals; re-check the probe");
+            assert!(found.iter().any(|site| site.starts_with(".text.rt_fix_root")), "{found:?}");
+
+            // Dropping --gc-sections under mold must be lossless: the same
+            // .text.* sections and defined symbols either way.
+            let kept = directory.join("mold_nogc_closure.o");
+            let status = std::process::Command::new(&cc)
+                .args(["-fuse-ld=mold", "-nostdlib", "-Wl,-r", "-no-pie",
+                    "-Wl,--undefined=rt_fix_root", "-Wl,--undefined=rt_fix_root2"])
+                .arg(&archive).arg("-o").arg(&kept).status().unwrap();
+            assert!(status.success());
+            assert!(partial_link_tombstone_relocations(&kept).unwrap().is_empty());
+            let shape = |path: &std::path::Path| {
+                use object::{Object, ObjectSection, ObjectSymbol};
+                let bytes = std::fs::read(path).unwrap();
+                let file = object::File::parse(&*bytes).unwrap();
+                let text: std::collections::BTreeSet<String> = file.sections()
+                    .filter_map(|section| section.name().ok().map(str::to_string))
+                    .filter(|name| name.starts_with(".text"))
+                    .collect();
+                let defined: std::collections::BTreeSet<String> = file.symbols()
+                    .filter(|symbol| symbol.is_global() && !symbol.is_undefined())
+                    .filter_map(|symbol| symbol.name().ok().map(str::to_string))
+                    .collect();
+                (text, defined)
+            };
+            assert_eq!(shape(&bad), shape(&kept), "mold -r kept different sections/symbols with --gc-sections");
+
+            // The x86_64 shape differs (symbol 0, addend 0 instead of -1); the
+            // scan must not depend on the addend.
+            let x86_object = directory.join("a_x86_64.o");
+            let x86_closure = directory.join("mold_gc_closure_x86_64.o");
+            let cross = std::process::Command::new(&cc)
+                .args(["--target=x86_64-unknown-linux-gnu", "-O2", "-fPIC", "-c", "-ffunction-sections", "-fdata-sections"])
+                .arg(directory.join("a.c")).arg("-o").arg(&x86_object).status().unwrap();
+            if cross.success() {
+                let status = std::process::Command::new(&cc)
+                    .args(["--target=x86_64-unknown-linux-gnu", "-fuse-ld=mold", "-nostdlib", "-Wl,-r", "-no-pie",
+                        "-Wl,--gc-sections", "-Wl,--undefined=rt_fix_root"])
+                    .arg(&x86_object).arg("-o").arg(&x86_closure).status().unwrap();
+                assert!(status.success());
+                let found = partial_link_tombstone_relocations(&x86_closure).unwrap();
+                assert!(found.iter().any(|site| site.starts_with(".text.rt_fix_root")), "{found:?}");
+            } else {
+                eprintln!("SKIP x86_64 mold replay: {cc} cannot target x86_64");
+            }
+        } else {
+            eprintln!("SKIP mold replay: mold is not on PATH");
+        }
+
+        let roots = ["rt_fix_root".to_string(), "rt_fix_root2".to_string()];
+        let capsule = super::project_stage4_archive_closure(&[archive.as_path()], &roots, &[], &directory.join("capsule"), "fixture")
+            .expect("projection must succeed without tombstoned literals");
+        assert!(capsule.exists());
+        let closure = directory.join("capsule").join("fixture_closure.o");
+        if closure.exists() {
+            assert!(partial_link_tombstone_relocations(&closure).unwrap().is_empty());
+        }
+        let _ = std::fs::remove_dir_all(&directory);
+    }
 }
 
 fn project_stage4_archive_closure(
@@ -2517,12 +2961,18 @@ fn project_stage4_archive_closure(
         // A relocatable closure made by GNU ld can carry misaligned AArch64
         // LDST relocations into an lld final link. Use the selected linker
         // for both steps so the capsule has the same relocation semantics.
-        if let Some(linker) = super::linker::requested_linker_driver_name()? {
+        let fuse_ld = super::linker::requested_linker_driver_name()?;
+        if let Some(linker) = fuse_ld {
             closure_cmd.arg(format!("-fuse-ld={linker}"));
         }
         closure_cmd.arg("-nostdlib").arg("-Wl,-r");
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        closure_cmd.arg("-no-pie").arg("-Wl,--gc-sections");
+        {
+            closure_cmd.arg("-no-pie");
+            if partial_link_gc_sections_allowed(&cc, fuse_ld) {
+                closure_cmd.arg("-Wl,--gc-sections");
+            }
+        }
         for symbol in &requested {
             #[cfg(target_os = "macos")]
             closure_cmd.arg(format!("-Wl,-u,_{symbol}"));
@@ -2582,6 +3032,7 @@ fn project_stage4_archive_closure(
             ));
         }
 
+        reject_partial_link_tombstones(&closure_object, "Stage4 runtime capsule")?;
         let (closure_defined, closure_undefined) = archive_global_symbols(&closure_object)?;
         for symbol in &requested {
             let count: usize = closure_defined
@@ -2882,12 +3333,18 @@ pub(crate) fn build_compiler_backfill_archive(
         // Match the final linker's relocation handling. GNU ld's partial
         // AArch64 closure can leave misaligned LDST128 relocations that lld
         // rejects when the localized backfill reaches the final link.
-        if let Some(linker) = super::linker::requested_linker_driver_name()? {
+        let fuse_ld = super::linker::requested_linker_driver_name()?;
+        if let Some(linker) = fuse_ld {
             closure_cmd.arg(format!("-fuse-ld={linker}"));
         }
         closure_cmd.arg("-nostdlib").arg("-Wl,-r");
         #[cfg(target_os = "linux")]
-        closure_cmd.arg("-no-pie").arg("-Wl,--gc-sections");
+        {
+            closure_cmd.arg("-no-pie");
+            if partial_link_gc_sections_allowed(&cc, fuse_ld) {
+                closure_cmd.arg("-Wl,--gc-sections");
+            }
+        }
         for export in &manifest {
             #[cfg(target_os = "macos")]
             closure_cmd.arg(format!("-Wl,-u,_{export}"));
@@ -2907,6 +3364,7 @@ pub(crate) fn build_compiler_backfill_archive(
             ));
         }
 
+        reject_partial_link_tombstones(&closure_object, "compiler backfill")?;
         let (closure_defined, closure_undefined) = archive_global_symbols(&closure_object)?;
         for export in &manifest {
             let count: usize = closure_defined
@@ -3149,10 +3607,13 @@ pub(crate) enum VerifyOutcome {
 /// Find an objdump (or llvm-objdump) tool for archive verification.
 fn find_objdump_tool() -> Option<String> {
     for prefix in &[
-        "/opt/homebrew/opt/llvm@18/bin",
+        // Unversioned brew llvm first: release.yml exports its lib/ in
+        // DYLD_LIBRARY_PATH, so llvm@18's llvm-objdump would bind the newer
+        // libLLVM.dylib and abort in dyld (run 39383952486, darwin-x86_64).
         "/opt/homebrew/opt/llvm/bin",
-        "/usr/local/opt/llvm@18/bin",
         "/usr/local/opt/llvm/bin",
+        "/opt/homebrew/opt/llvm@18/bin",
+        "/usr/local/opt/llvm@18/bin",
     ] {
         let path = format!("{prefix}/llvm-objdump");
         if std::path::Path::new(&path).exists() {
@@ -3592,6 +4053,97 @@ fn is_windows_system_name(name: &str) -> bool {
             | "UnmapViewOfFile"
             | "VirtualProtect"
             | "lstrlenW"
+            // The MSVC link config has no system symbol scan, so any Win32 or
+            // UCRT import missing from this list was fabricated as a return-3
+            // stub that shadowed the real kernel32/bcrypt/psapi/d3d11/ucrt
+            // definition. The windows-x86_64 release stage1 then SEGV'd on
+            // native-build (release.yml run 39348340950, 33 stubs).
+            | "AcquireSRWLockExclusive"
+            | "AcquireSRWLockShared"
+            | "ReleaseSRWLockExclusive"
+            | "ReleaseSRWLockShared"
+            | "BCryptCloseAlgorithmProvider"
+            | "BCryptCreateHash"
+            | "BCryptDestroyHash"
+            | "BCryptFinishHash"
+            | "BCryptHashData"
+            | "BCryptOpenAlgorithmProvider"
+            | "D3D11CreateDevice"
+            | "GlobalMemoryStatusEx"
+            | "InitializeProcThreadAttributeList"
+            | "UpdateProcThreadAttribute"
+            | "K32GetProcessMemoryInfo"
+            | "QueryInformationJobObject"
+            | "ResumeThread"
+            | "Sleep"
+            | "TerminateJobObject"
+            | "TerminateProcess"
+            | "_fstat64i32"
+            | "_localtime64_s"
+            | "_time64"
+            | "ferror"
+            | "signal"
+            | "wcscat"
+            | "wcschr"
+            | "wcslen"
+            | "wcsncmp"
+            | "wcsrchr"
+            // Imports of the src/runtime C sources compiled for
+            // x86_64-pc-windows-msvc (clang-cl/UCRT headers) that the
+            // list above still missed. Measured by compiling every owned
+            // src/runtime/*.c for the MSVC target and filtering its undefined
+            // symbols through this classifier: each was otherwise stubbed and
+            // shadowed its ucrt/vcruntime/msvcrt/oldnames/mswsock definition.
+            | "TransmitFile"
+            | "__chkstk"
+            | "_fltused"
+            | "_access"
+            | "_aligned_free"
+            | "_aligned_malloc"
+            | "_chmod"
+            | "_chsize_s"
+            | "_commit"
+            | "_controlfp_s"
+            | "_errno"
+            | "_fdopen"
+            | "_fflush_nolock"
+            | "_fileno"
+            | "_fstat64"
+            | "_ftelli64"
+            | "_fullpath"
+            | "_get_osfhandle"
+            | "_getcwd"
+            | "_getpid"
+            | "_lock_file"
+            | "_pclose"
+            | "_popen"
+            | "_putenv_s"
+            | "_rmdir"
+            | "_set_fmode"
+            | "_set_thread_local_invalid_parameter_handler"
+            | "_setmode"
+            | "_spawnvp"
+            | "_stat64i32"
+            | "_stricmp"
+            | "_strnicmp"
+            | "_unlink"
+            | "_unlock_file"
+            | "_wassert"
+            | "_wcsicmp"
+            | "_wcsnicmp"
+            | "_wfopen"
+            | "_wfopen_s"
+            | "_wmkdir"
+            | "_wstat64"
+            | "feof"
+            | "fopen_s"
+            | "getpid"
+            | "ldexp"
+            | "putchar"
+            | "rmdir"
+            | "strtok_s"
+            | "ungetc"
+            | "unlink"
     )
 }
 
@@ -3879,6 +4431,15 @@ fn is_known_system_name(name: &str) -> bool {
             // only in is_macos_system_symbol, so on a Linux host they were
             // weak-stub candidates (test_cxx_abi_symbols_are_not_stub_candidates).
             | "clock_getres"
+            // Cycle-170: the hosted candidate link's system scan missed these
+            // libc entry points, so the stub fabricator gave them 8-byte
+            // `return 3` bodies (measured: _mkdtemp = mov x0,#3; ret, which
+            // made rt_secure_temp_dir's mkdtemp "succeed" without creating
+            // the directory -- chmod then failed with ENOENT). Real libc
+            // definitions must win on every hosted link.
+            | "mkdtemp"
+            | "mkstemp"
+            | "wmemchr"
             | "flock"
             | "recvmsg"
             | "sendfile"
@@ -4234,6 +4795,32 @@ fn is_known_system_name(name: &str) -> bool {
 mod llvm_tool_policy_tests {
     use super::{build_rust_std_shim_for_rlib, is_llvm_archive_tool, missing_llvm_tool_error};
 
+    #[test]
+    fn core_c_command_reports_spawn_error_and_command() {
+        let missing = std::env::temp_dir().join(format!("simple-core-c-missing-tool-{}", std::process::id()));
+        assert!(!missing.exists());
+        let error = super::run_core_c_command(std::process::Command::new(&missing).arg("runtime_native.c"))
+            .expect_err("a missing compiler must fail");
+        assert!(error.contains("could not start"), "{error}");
+        assert!(error.contains("runtime_native.c"), "{error}");
+        assert!(error.contains(missing.to_str().unwrap()), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn core_c_command_reports_nonzero_exit_and_arguments() {
+        let error = super::run_core_c_command(std::process::Command::new("/bin/sh").args(["-c", "exit 7"]))
+            .expect_err("a failing command must fail");
+        assert!(error.contains("exit status: 7"), "{error}");
+        assert!(error.contains("exit 7"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn core_c_command_accepts_successful_exit() {
+        assert!(super::run_core_c_command(std::process::Command::new("/bin/sh").args(["-c", "exit 0"])).is_ok());
+    }
+
     #[cfg(all(target_os = "windows", target_env = "msvc"))]
     #[test]
     fn bootstrap_tools_sqlite_sdk_loads_adjacent_dll_without_sdk_path() {
@@ -4267,7 +4854,7 @@ mod llvm_tool_policy_tests {
         let core = super::build_core_c_runtime_library(&directory.path().join("core"))
             .expect("compile the real core runtime");
         let capsule = super::build_bootstrap_mutex_runtime_capsule_archive(
-            &core, &directory.path().join("capsule"),
+            &core, &directory.path().join("capsule"), None,
         ).expect("project the native bootstrap runtime capsule");
         let (defined, _) = super::archive_global_symbols(&capsule).unwrap();
         let weak = super::archive_weak_global_symbols(&capsule).unwrap();

@@ -1,0 +1,625 @@
+# Certify the actual native pattern prefix before a semantic consumer erases it.
+# Hashes select sites; the interpreter below checks their operation/operand
+# meaning, complete tests, binding origins and actual failure edges.
+use std.common.crypto.sha256.{sha256_text}
+use compiler.mir.mir_types.{LocalId, MirType, MirTypeKind, MirConstValue, LocalKind}
+use compiler.mir.mir_instruction_graph.{MirFunction, MirBlock}
+use compiler.mir.mir_instruction_support.{MirOperand, MirOperandKind, MirTerminator, MirBinOp}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_enum_semantic_types.*
+use compiler.mir.mir_json.{serialize_mir_inst_kind, serialize_mir_terminator, serialize_mir_type}
+
+struct EnumPatternPhysicalPlanV1:
+    replaced_instruction_sites: Dict<text, bool>
+    replaced_terminator_blocks: Dict<i64, bool>
+    binding_types: Dict<i64, MirType>
+    remaining_work: i64
+
+class EnumPatternPhysicalCheckerV1:
+    function: MirFunction
+    semantic: MirEnumMatchSemanticV1
+    blocks: Dict<i64, i64>
+    locals: Dict<i64, i64>
+    declarations: Dict<i64, MirEnumDeclarationIdentityV1>
+    multiple_definitions: Dict<i64, bool>
+    remaining: i64
+    records: Dict<text, MirEnumSiteV1>
+    instructions: Dict<text, bool>
+    terminators: Dict<i64, bool>
+    bindings: Dict<i64, MirType>
+    origins: Dict<i64, i64>
+    payloads: Dict<i64, i64>
+    predicates: Dict<i64, i64>
+    constants: Dict<i64, MirConstValue>
+    tested: Dict<i64, bool>
+    assigned: Dict<i64, bool>
+    raw_bool_tests: Dict<i64, i64>
+    tagged_bool_tests: Dict<i64, i64>
+    tuple_pointers: Dict<i64, i64>
+    tuple_values: Dict<i64, i64>
+    typed_fields: Dict<i64, bool>
+
+impl EnumPatternPhysicalCheckerV1:
+    me charge(amount: i64) -> Result<(), text>:
+        if amount < 0 or amount > self.remaining:
+            return Err("EE-E-LIMIT: physical pattern work budget exhausted")
+        self.remaining = self.remaining - amount
+        Ok(())
+
+    me local(operand: MirOperand) -> Result<i64, text>:
+        self.charge(1)?
+        match operand.kind:
+            case MirOperandKind.Copy(local): Ok(local.id)
+            case MirOperandKind.Move(_):
+                Err("EE-E-AVAILABILITY: native pattern consumes an operand")
+            case _: Err("EE-E-PATTERN: expected a captured local operand")
+
+    me origin(operand: MirOperand) -> Result<i64, text>:
+        val local = self.local(operand)?
+        if val node = self.origins.get(local): return Ok(node)
+        Err("EE-E-PATTERN: pattern value has no checked scrutinee projection")
+
+    me number(operand: MirOperand) -> Result<i64, text>:
+        self.charge(1)?
+        var value: MirConstValue? = nil
+        match operand.kind:
+            case MirOperandKind.Copy(local):
+                match self.function.locals[self.locals[local.id]].type_.kind:
+                    case MirTypeKind.I64: value = self.constants.get(local.id)
+                    case _: return Err("EE-E-SITE: native integer constant local is not I64")
+            case MirOperandKind.Const(constant, type_):
+                match type_.kind:
+                    case MirTypeKind.I64: value = Some(constant)
+                    case _: return Err("EE-E-SITE: native integer constant operand is not I64")
+            case _: ()
+        if val constant = value:
+            match constant:
+                case MirConstValue.Int(integer): return Ok(integer)
+                case _: ()
+        Err("EE-E-PATTERN: adapter identity or slot is not an actual integer constant")
+
+    me destination(local: LocalId) -> Result<(), text>:
+        self.charge(1)?
+        if (not self.locals.contains_key(local.id) or self.assigned.contains_key(local.id) or
+                self.multiple_definitions.contains_key(local.id)):
+            return Err("EE-E-PATTERN: native pattern writes a missing or repeated destination")
+        # Actual native pattern emission creates temporaries. A binding may
+        # alias an existing argument, but no erased write may change it.
+        match self.function.locals[self.locals[local.id]].kind:
+            case LocalKind.Temp: ()
+            case _:
+                return Err("EE-E-PATTERN: erased pattern writes an outer non-temporary local")
+        self.assigned[local.id] = true
+        Ok(())
+
+    me children(node: i64) -> Result<[i64], text>:
+        self.charge(1)?
+        if node < 0 or node >= self.semantic.pattern_nodes.len():
+            return Err("EE-E-PATTERN: physical pattern node is out of range")
+        match self.semantic.pattern_nodes[node].kind:
+            case MirEnumPatternKindV1.Variant(_, _, children): Ok(children)
+            case MirEnumPatternKindV1.Tuple(children): Ok(children)
+            case _: Err("EE-E-PATTERN: physical slot extraction targets a non-product pattern")
+
+    me related(site: MirEnumSiteV1, actual: i64) -> Result<(), text>:
+        self.charge(1)?
+        if site.related_pattern_node != actual:
+            return Err("EE-E-PATTERN: physical site is attached to another pattern node")
+        Ok(())
+
+    me semantic_types(site: MirEnumSiteV1, input: MirType, output: MirType) -> Result<(), text>:
+        self.charge(1)?
+        match site.kind:
+            case MirEnumSiteKindV1.PatternInstruction: return Ok(())
+            case _: ()
+        if (serialize_mir_type(site.semantic_input_type) != serialize_mir_type(input) or
+                serialize_mir_type(site.semantic_output_type) != serialize_mir_type(output)):
+            return Err("EE-E-SITE: retained semantic adapter types differ from checked operands")
+        Ok(())
+
+    me physical_type(type_: MirType, depth: i64) -> Result<MirType, text>:
+        self.charge(1)?
+        if depth > 128: return Err("EE-E-LIMIT: native tuple type nesting exceeds 128")
+        match type_.kind:
+            case MirTypeKind.Enum(owner):
+                if not self.declarations.contains_key(owner.id):
+                    return Err("EE-E-DECLARATION: tuple enum field lacks its exact native owner")
+                Ok(MirType(kind: MirTypeKind.Struct(owner)))
+            case MirTypeKind.Tuple(elements):
+                self.charge(elements.len())?
+                var fields: [MirType] = []
+                for element in elements: fields.push(self.physical_type(element, depth + 1)?)
+                Ok(MirType(kind: MirTypeKind.Tuple(fields)))
+            case _: Ok(type_)
+
+    me typed_literal(node: i64, operand: MirOperand) -> Result<(), text>:
+        self.charge(1)?
+        var value: MirConstValue? = nil
+        var type_ = MirType.unit()
+        match operand.kind:
+            case MirOperandKind.Copy(local):
+                value = self.constants.get(local.id)
+                type_ = self.function.locals[self.locals[local.id]].type_
+            case MirOperandKind.Const(constant, constant_type):
+                value = Some(constant)
+                type_ = constant_type
+            case _: ()
+        if value == nil: return Err("EE-E-PATTERN: typed tuple literal is not a constant")
+        val physical = self.physical_type(self.semantic.pattern_nodes[node].expected_type, 0)?
+        if serialize_mir_type(type_) != serialize_mir_type(physical):
+            return Err("EE-E-PATTERN: typed tuple literal has another physical type")
+        match self.semantic.pattern_nodes[node].kind:
+            case MirEnumPatternKindV1.Literal(expected, _):
+                match expected:
+                    case MirConstValue.Int(integer):
+                        match value.unwrap():
+                            case MirConstValue.Int(actual):
+                                if integer == actual: return Ok(())
+                            case _: ()
+                    case MirConstValue.Bool(boolean):
+                        match value.unwrap():
+                            case MirConstValue.Bool(actual):
+                                if boolean == actual: return Ok(())
+                            case _: ()
+                    case _: ()
+            case _: ()
+        Err("EE-E-PATTERN: typed tuple literal value differs")
+
+    me physical_call_type(callee: MirOperand, destination: LocalId, arity: i64,
+            result: MirType) -> Result<(), text>:
+        self.charge(arity + 2)?
+        if serialize_mir_type(self.function.locals[self.locals[destination.id]].type_) != serialize_mir_type(result):
+            return Err("EE-E-SITE: native adapter destination type differs")
+        match callee.kind:
+            case MirOperandKind.Const(_, type_):
+                match type_.kind:
+                    case MirTypeKind.FuncPtr(signature):
+                        if (signature.params.len() != arity or signature.is_variadic or
+                                serialize_mir_type(signature.return_type) != serialize_mir_type(result)):
+                            return Err("EE-E-SITE: native adapter signature differs")
+                        for parameter in signature.params:
+                            match parameter.kind:
+                                case MirTypeKind.I64: ()
+                                case _: return Err("EE-E-SITE: native adapter parameter ABI differs")
+                    case _: return Err("EE-E-SITE: native adapter is not function typed")
+            case _: return Err("EE-E-SITE: native adapter callee is not constant")
+        Ok(())
+
+    me record(block: i64, offset: i64) -> Result<MirEnumSiteV1, text>:
+        val key = "{block}:{offset}"
+        self.charge(key.len() + 1)?
+        if not self.records.contains_key(key):
+            return Err("EE-E-SITE: native pattern region contains an unrecorded operation")
+        Ok(self.records[key])
+
+    me same_literal(node: i64, operand: MirOperand) -> Result<(), text>:
+        self.charge(1)?
+        val actual = self.number(operand)?
+        match self.semantic.pattern_nodes[node].kind:
+            case MirEnumPatternKindV1.Literal(value, _):
+                match value:
+                    case MirConstValue.Int(expected):
+                        if actual == expected: return Ok(())
+                    case MirConstValue.Bool(expected):
+                        if actual == (if expected: 1 else: 0): return Ok(())
+                    case _: ()
+            case _: ()
+        Err("EE-E-PATTERN: native literal test differs from the retained exact literal")
+
+    me copy(destination: LocalId, source: LocalId, site: MirEnumSiteV1) -> Result<(), text>:
+        self.destination(destination)?
+        if not self.locals.contains_key(source.id):
+            return Err("EE-E-AVAILABILITY: pattern copy source is outside the function")
+        if val node = self.tuple_pointers.get(source.id):
+            self.related(site, node)?
+            val physical = self.physical_type(self.semantic.pattern_nodes[node].expected_type, 0)?
+            if serialize_mir_type(self.function.locals[self.locals[destination.id]].type_) != serialize_mir_type(physical):
+                return Err("EE-E-SITE: recovered tuple copy has another physical tuple type")
+            self.tuple_values[destination.id] = node
+            self.origins[destination.id] = node
+            return Ok(())
+        if (serialize_mir_type(self.function.locals[self.locals[destination.id]].type_) !=
+                serialize_mir_type(self.function.locals[self.locals[source.id]].type_)):
+            return Err("EE-E-SITE: native pattern copy changes physical type")
+        if val node = self.origins.get(source.id):
+            self.related(site, node)?
+            self.origins[destination.id] = node
+            if self.typed_fields.contains_key(source.id): self.typed_fields[destination.id] = true
+            if self.tuple_values.contains_key(source.id): self.tuple_values[destination.id] = node
+            return Ok(())
+        if val value = self.constants.get(source.id):
+            self.constants[destination.id] = value
+            return Ok(())
+        Err("EE-E-PATTERN: native pattern copy has no checked origin")
+
+    me call(destination: LocalId?, callee: MirOperand, args: [MirOperand],
+            site: MirEnumSiteV1) -> Result<(), text>:
+        self.charge(args.len() + 1)?
+        if destination == nil: return Err("EE-E-SITE: native adapter has no result")
+        val dest = destination.unwrap()
+        self.destination(dest)?
+        var name = ""
+        match callee.kind:
+            case MirOperandKind.Const(MirConstValue.Str(symbol), _): name = symbol
+            case _: return Err("EE-E-SITE: indirect native pattern adapter")
+        if name == "rt_enum_check_variant":
+            if args.len() != 3: return Err("EE-E-SITE: variant test arity")
+            self.physical_call_type(callee, dest, 3, MirType.bool())?
+            val node = self.origin(args[0])?
+            self.related(site, node)?
+            self.semantic_types(site, self.semantic.pattern_nodes[node].expected_type, MirType.bool())?
+            match self.semantic.pattern_nodes[node].kind:
+                case MirEnumPatternKindV1.Variant(owner, tag, _):
+                    if not self.declarations.contains_key(owner.id):
+                        return Err("EE-E-DECLARATION: native variant owner lacks runtime identity")
+                    if (self.number(args[1])? != self.declarations[owner.id].runtime_identity or
+                            self.number(args[2])? != tag):
+                        return Err("EE-E-PATTERN: native variant identity or discriminant differs")
+                    self.predicates[dest.id] = node
+                case _: return Err("EE-E-PATTERN: native identity test is not a variant pattern")
+        elif name == "rt_enum_discriminant":
+            if args.len() != 1: return Err("EE-E-SITE: discriminant arity")
+            self.physical_call_type(callee, dest, 1, MirType.i64())?
+            val node = self.origin(args[0])?
+            if site.related_pattern_node != -1: self.related(site, node)?
+            self.semantic_types(site, self.semantic.pattern_nodes[node].expected_type, MirType.i64())?
+            match self.semantic.pattern_nodes[node].expected_type.kind:
+                case MirTypeKind.Enum(_): ()
+                case _: return Err("EE-E-PATTERN: discriminant input is not an enum")
+        elif name == "rt_enum_payload":
+            if args.len() != 1: return Err("EE-E-SITE: payload arity")
+            self.physical_call_type(callee, dest, 1, MirType.i64())?
+            val node = self.origin(args[0])?
+            self.related(site, node)?
+            if not self.tested.contains_key(node):
+                return Err("EE-E-PATTERN: payload read precedes the actual constructor test")
+            val children = self.children(node)?
+            self.charge(children.len())?
+            var types: [MirType] = []
+            for child in children: types.push(self.semantic.pattern_nodes[child].expected_type)
+            val output = if types.len() == 1: types[0] else: MirType(kind: MirTypeKind.Tuple(types))
+            self.semantic_types(site, self.semantic.pattern_nodes[node].expected_type, output)?
+            if children.len() == 1:
+                self.origins[dest.id] = children[0]
+            elif children.len() > 1:
+                self.payloads[dest.id] = node
+            else:
+                return Err("EE-E-PATTERN: nullary variant has a native payload read")
+        elif name == "rt_tuple_get":
+            if args.len() != 2: return Err("EE-E-SITE: tuple slot arity")
+            self.physical_call_type(callee, dest, 2, MirType.i64())?
+            val source = self.local(args[0])?
+            val slot = self.number(args[1])?
+            var parent: i64 = -1
+            if val payload = self.payloads.get(source):
+                parent = payload
+            elif val origin = self.origins.get(source):
+                match self.semantic.pattern_nodes[origin].kind:
+                    case MirEnumPatternKindV1.Tuple(_): parent = origin
+                    case _: ()
+            if parent < 0: return Err("EE-E-PATTERN: tuple carrier has no checked product origin")
+            val children = self.children(parent)?
+            if slot < 0 or slot >= children.len():
+                return Err("EE-E-PATTERN: native tuple slot differs from declared payload arity")
+            self.related(site, children[slot])?
+            self.charge(children.len())?
+            var types: [MirType] = []
+            for child in children: types.push(self.semantic.pattern_nodes[child].expected_type)
+            self.semantic_types(site, MirType(kind: MirTypeKind.Tuple(types)),
+                self.semantic.pattern_nodes[children[slot]].expected_type)?
+            self.origins[dest.id] = children[slot]
+        elif name == "rt_value_as_int" or name == "rt_value_as_u64":
+            if args.len() != 1: return Err("EE-E-SITE: payload decode arity")
+            # The existing native u64 unbox ABI returns an i64 carrier.
+            self.physical_call_type(callee, dest, 1, MirType.i64())?
+            val node = self.origin(args[0])?
+            self.related(site, node)?
+            self.semantic_types(site, self.semantic.pattern_nodes[node].expected_type,
+                self.semantic.pattern_nodes[node].expected_type)?
+            if name == "rt_value_as_u64":
+                match self.semantic.pattern_nodes[node].expected_type.kind:
+                    case MirTypeKind.U64: ()
+                    case _: return Err("EE-E-SITE: unsigned decoder is attached to another payload type")
+            match self.semantic.pattern_nodes[node].expected_type.kind:
+                case MirTypeKind.U64:
+                    if name != "rt_value_as_u64":
+                        return Err("EE-E-SITE: unsigned payload uses another decode adapter")
+                case MirTypeKind.I8: ()
+                case MirTypeKind.I16: ()
+                case MirTypeKind.I32: ()
+                case MirTypeKind.I64: ()
+                case MirTypeKind.U8: ()
+                case MirTypeKind.U16: ()
+                case MirTypeKind.U32: ()
+                case _:
+                    return Err("EE-E-SITE: unsupported semantic payload decode type")
+            self.origins[dest.id] = node
+        else:
+            return Err("EE-E-SITE: unknown native pattern adapter")
+        Ok(())
+
+    me instruction(block: i64, offset: i64, kind: MirInstKind) -> Result<(), text>:
+        self.charge(1)?
+        val site = self.record(block, offset)?
+        if sha256_text(serialize_mir_inst_kind(kind)) != site.exact_instruction_identity:
+            return Err("EE-E-SITE: pattern instruction canonical identity differs")
+        match kind:
+            case MirInstKind.Const(destination, value, type_):
+                if site.related_pattern_node < 0:
+                    return Err("EE-E-PATTERN: constant has no source pattern node")
+                self.destination(destination)?
+                if serialize_mir_type(type_) != serialize_mir_type(self.function.locals[self.locals[destination.id]].type_):
+                    return Err("EE-E-SITE: native constant destination type differs")
+                match value:
+                    case MirConstValue.Int(_):
+                        match type_.kind:
+                            case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64 | MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64:
+                                self.constants[destination.id] = value
+                            case _: return Err("EE-E-SITE: native pattern integer constant type differs")
+                    case MirConstValue.Bool(_):
+                        match type_.kind:
+                            case MirTypeKind.Bool: self.constants[destination.id] = value
+                            case _: return Err("EE-E-SITE: native pattern Bool constant type differs")
+                    case _: return Err("EE-E-SITE: unsupported native pattern constant")
+                match type_.kind:
+                    case MirTypeKind.I64: ()
+                    case _:
+                        self.typed_literal(site.related_pattern_node,
+                            MirOperand(kind: MirOperandKind.Copy(destination)))?
+            case MirInstKind.Copy(destination, source):
+                self.copy(destination, source, site)?
+            case MirInstKind.Move(_, _):
+                return Err("EE-E-AVAILABILITY: erased native pattern consumes a value")
+            case MirInstKind.Call(destination, callee, args):
+                self.call(destination, callee, args, site)?
+            case MirInstKind.BinOp(destination, operation, left, right):
+                self.destination(destination)?
+                match self.function.locals[self.locals[destination.id]].type_.kind:
+                    case MirTypeKind.Bool: ()
+                    case _: return Err("EE-E-SITE: native pattern comparison result is not Bool")
+                match operation:
+                    case MirBinOp.Eq:
+                        val source_local = self.local(left)?
+                        val node = self.origin(left)?
+                        self.related(site, node)?
+                        if self.typed_fields.contains_key(source_local):
+                            self.typed_literal(node, right)?
+                            self.predicates[destination.id] = node
+                        else:
+                            match self.function.locals[self.locals[source_local]].type_.kind:
+                                case MirTypeKind.I64: ()
+                                case _: return Err("EE-E-SITE: native payload comparison operand is not I64")
+                            match self.semantic.pattern_nodes[node].kind:
+                                case MirEnumPatternKindV1.Literal(_, _):
+                                    self.same_literal(node, right)?
+                                    self.predicates[destination.id] = node
+                                case _:
+                                    match self.semantic.pattern_nodes[node].expected_type.kind:
+                                        case MirTypeKind.Bool:
+                                            val word = self.number(right)?
+                                            if word == 1: self.raw_bool_tests[destination.id] = node
+                                            elif word == 11: self.tagged_bool_tests[destination.id] = node
+                                            else: return Err("EE-E-SITE: Bool payload decode has another true encoding")
+                                        case _: return Err("EE-E-PATTERN: native equality is not a literal or Bool decode")
+                    case MirBinOp.BitOr:
+                        val raw = self.local(left)?
+                        val tagged = self.local(right)?
+                        if (not self.raw_bool_tests.contains_key(raw) or
+                                not self.tagged_bool_tests.contains_key(tagged) or
+                                self.raw_bool_tests[raw] != self.tagged_bool_tests[tagged]):
+                            return Err("EE-E-SITE: Bool decode does not combine exact raw/tagged true tests")
+                        val node = self.raw_bool_tests[raw]
+                        self.related(site, node)?
+                        self.origins[destination.id] = node
+                    case _: return Err("EE-E-SITE: unexpected arithmetic in native pattern prefix")
+            case MirInstKind.Cast(destination, operand, target):
+                self.destination(destination)?
+                if serialize_mir_type(target) != serialize_mir_type(self.function.locals[self.locals[destination.id]].type_):
+                    return Err("EE-E-SITE: native cast destination type differs")
+                val node = self.origin(operand)?
+                self.related(site, node)?
+                match target.kind:
+                    case MirTypeKind.Ptr(pointee, mutable):
+                        if mutable: return Err("EE-E-SITE: tuple recovery pointer is mutable")
+                        match self.semantic.pattern_nodes[node].expected_type.kind:
+                            case MirTypeKind.Tuple(_): ()
+                            case _: return Err("EE-E-SITE: native pointer cast is not tuple recovery")
+                        val physical = self.physical_type(self.semantic.pattern_nodes[node].expected_type, 0)?
+                        if serialize_mir_type(pointee) != serialize_mir_type(physical):
+                            return Err("EE-E-SITE: tuple recovery pointer has another pointee")
+                        val source = self.local(operand)?
+                        match self.function.locals[self.locals[source]].type_.kind:
+                            case MirTypeKind.I64: ()
+                            case MirTypeKind.Tuple(_):
+                                if (not self.typed_fields.contains_key(source) or
+                                        not self.tuple_values.contains_key(source) or
+                                        self.tuple_values[source] != node or
+                                        serialize_mir_type(self.function.locals[self.locals[source]].type_) != serialize_mir_type(physical)):
+                                    return Err("EE-E-SITE: nested tuple recovery lacks its checked field origin")
+                            case _: return Err("EE-E-SITE: tuple recovery source is not the raw payload or checked tuple field")
+                        self.tuple_pointers[destination.id] = node
+                    case MirTypeKind.I8: ()
+                    case MirTypeKind.I16: ()
+                    case MirTypeKind.I32: ()
+                    case MirTypeKind.I64: ()
+                    case MirTypeKind.U8: ()
+                    case MirTypeKind.U16: ()
+                    case MirTypeKind.U32: ()
+                    case MirTypeKind.U64: ()
+                    case _: return Err("EE-E-SITE: unsupported semantic payload cast")
+                if not self.tuple_pointers.contains_key(destination.id):
+                    if serialize_mir_type(target) != serialize_mir_type(self.semantic.pattern_nodes[node].expected_type):
+                        return Err("EE-E-SITE: payload cast target differs from exact semantic type")
+                self.origins[destination.id] = node
+            case MirInstKind.GetField(destination, base, field):
+                self.destination(destination)?
+                val source = self.local(base)?
+                if not self.tuple_values.contains_key(source):
+                    return Err("EE-E-SITE: native field projection lacks exact tuple recovery")
+                val parent = self.tuple_values[source]
+                val children = self.children(parent)?
+                if field < 0 or field >= children.len():
+                    return Err("EE-E-SITE: native tuple field index is out of range")
+                val child = children[field]
+                self.related(site, child)?
+                val physical = self.physical_type(self.semantic.pattern_nodes[child].expected_type, 0)?
+                if serialize_mir_type(self.function.locals[self.locals[destination.id]].type_) != serialize_mir_type(physical):
+                    return Err("EE-E-SITE: native tuple field type differs from the exact declared slot")
+                self.origins[destination.id] = child
+                self.typed_fields[destination.id] = true
+                match self.semantic.pattern_nodes[child].expected_type.kind:
+                    case MirTypeKind.Tuple(_): self.tuple_values[destination.id] = child
+                    case _: ()
+            case _: return Err("EE-E-SITE: unsupported operation in erased pattern region")
+        self.charge(1)?
+        self.instructions["{block}:{offset}"] = true
+        Ok(())
+
+    me completion(node: i64, depth: i64) -> Result<(), text>:
+        self.charge(1)?
+        if depth > 128: return Err("EE-E-LIMIT: physical pattern nesting exceeds 128")
+        val pattern = self.semantic.pattern_nodes[node]
+        match pattern.kind:
+            case MirEnumPatternKindV1.Wildcard: ()
+            case MirEnumPatternKindV1.Bind(_, destination):
+                if (not self.origins.contains_key(destination.id) or
+                        self.origins[destination.id] != node):
+                    return Err("EE-E-PATTERN: captured binding is not its actual payload projection")
+                if val prior = self.bindings.get(destination.id):
+                    if serialize_mir_type(prior) != serialize_mir_type(pattern.expected_type):
+                        return Err("EE-E-PATTERN: shared binding has another semantic type")
+                self.bindings[destination.id] = pattern.expected_type
+            case MirEnumPatternKindV1.Literal(_, _):
+                if not self.tested.contains_key(node):
+                    return Err("EE-E-PATTERN: native success path omits a literal test")
+            case MirEnumPatternKindV1.Variant(_, _, children):
+                if not self.tested.contains_key(node):
+                    return Err("EE-E-PATTERN: native success path omits a constructor test")
+                for child in children: self.completion(child, depth + 1)?
+            case MirEnumPatternKindV1.Tuple(children):
+                for child in children: self.completion(child, depth + 1)?
+            case MirEnumPatternKindV1.Or(_):
+                return Err("EE-E-PATTERN: expanded native arm retains an unexpanded Or root")
+        Ok(())
+
+    me arm(arm: MirEnumArmSemanticV1) -> Result<(), text>:
+        self.origins = {}
+        self.payloads = {}
+        self.predicates = {}
+        self.constants = {}
+        self.tested = {}
+        self.assigned = {}
+        self.raw_bool_tests = {}
+        self.tagged_bool_tests = {}
+        self.tuple_pointers = {}
+        self.tuple_values = {}
+        self.typed_fields = {}
+        self.charge(1)?
+        self.origins[self.local(self.semantic.scrutinee_operand)?] = arm.pattern_root
+        var block_id = arm.pattern_entry_block.id
+        var offset = arm.pattern_entry_instruction_index
+        val stop_block = if arm.guard_entry != nil: arm.guard_entry.unwrap().id else: arm.body_entry.id
+        val stop_offset = if arm.guard_entry != nil:
+            arm.guard_entry_instruction_index
+        else:
+            arm.body_entry_instruction_index
+        val irrefutable = match self.semantic.pattern_nodes[arm.pattern_root].kind:
+            case MirEnumPatternKindV1.Wildcard | MirEnumPatternKindV1.Bind(_, _): true
+            case _: false
+        var visited: Dict<i64, bool> = {}
+        while true:
+            self.charge(1)?
+            if not self.blocks.contains_key(block_id) or visited.contains_key(block_id):
+                return Err("EE-E-EDGE: native pattern region is cyclic or leaves its function")
+            visited[block_id] = true
+            val block = self.function.blocks[self.blocks[block_id]]
+            val end = if block_id == stop_block: stop_offset else: block.instructions.len()
+            if offset < 0 or end < offset or end > block.instructions.len():
+                return Err("EE-E-SITE: native pattern cursor is outside its actual block")
+            while offset < end:
+                self.instruction(block_id, offset, block.instructions[offset].kind)?
+                offset = offset + 1
+            if block_id == stop_block:
+                self.completion(arm.pattern_root, 1)?
+                return Ok(())
+            val site = self.record(block_id, -1)?
+            match site.kind:
+                case MirEnumSiteKindV1.PatternTerminator: ()
+                case _: return Err("EE-E-SITE: native pattern edge lacks its terminator record")
+            if sha256_text(serialize_mir_terminator(block.terminator)) != site.exact_instruction_identity:
+                return Err("EE-E-SITE: native pattern edge identity differs")
+            self.charge(1)?
+            self.terminators[block_id] = true
+            match block.terminator:
+                case MirTerminator.Goto(target):
+                    if target.id == arm.pattern_failure_entry.id:
+                        return Err("EE-E-PATTERN: actual native pattern has no successful path")
+                    block_id = target.id
+                case MirTerminator.If(condition, success, failure):
+                    if irrefutable or arm.pattern_failure_entry.id < 0:
+                        return Err("EE-E-EDGE: irrefutable native pattern contains a failing test")
+                    if failure.id != arm.pattern_failure_entry.id:
+                        return Err("EE-E-EDGE: native pattern failure reaches another expanded arm")
+                    val predicate = self.local(condition)?
+                    if not self.predicates.contains_key(predicate):
+                        return Err("EE-E-PATTERN: native edge condition lacks an exact pattern test")
+                    val node = self.predicates[predicate]
+                    self.related(site, node)?
+                    self.tested[node] = true
+                    block_id = success.id
+                case _: return Err("EE-E-EDGE: unexpected native pattern terminator")
+            offset = 0
+        Err("EE-E-EDGE: native pattern did not reach its body")
+
+    me validate() -> Result<EnumPatternPhysicalPlanV1, text>:
+        self.charge(self.semantic.sites.len() + self.semantic.arms.len())?
+        for node in self.semantic.pattern_nodes:
+            self.charge(1)?
+            match node.kind:
+                case MirEnumPatternKindV1.Bind(symbol, local):
+                    if symbol.id < 0 or not self.locals.contains_key(local.id):
+                        return Err("EE-E-PATTERN: binding source or destination identity is invalid")
+                case _: ()
+        for site in self.semantic.sites:
+            match site.kind:
+                case MirEnumSiteKindV1.Guard: ()
+                case MirEnumSiteKindV1.ArmResult: ()
+                case _:
+                    val key = "{site.block_id.id}:{site.instruction_index}"
+                    self.charge(key.len() + 1)?
+                    if self.records.contains_key(key):
+                        return Err("EE-E-SITE: duplicate physical pattern record")
+                    self.records[key] = site
+        for arm in self.semantic.arms: self.arm(arm)?
+        # No captured operation may be used as an unchecked authorization to
+        # erase code outside the regions actually interpreted above.
+        # @workaround bug=dict_nominal_tuple_binders_any_bootstrap_2026_10_21 recover=0bfa8039acd reason=bootstrap dictionary tuple binders erase declared nominal K/V types
+        for raw_key, raw_site in self.records:
+            val key: text = raw_key
+            val site: MirEnumSiteV1 = raw_site
+            self.charge(1)?
+            if site.instruction_index == -1:
+                if not self.terminators.contains_key(site.block_id.id):
+                    return Err("EE-E-SITE: captured pattern edge is outside the checked region")
+            elif not self.instructions.contains_key(key):
+                return Err("EE-E-SITE: captured pattern instruction is outside the checked region")
+        Ok(EnumPatternPhysicalPlanV1(replaced_instruction_sites: self.instructions,
+            replaced_terminator_blocks: self.terminators, binding_types: self.bindings,
+            remaining_work: self.remaining))
+
+pub fn enum_pattern_physical_plan_v1(function: MirFunction,
+        semantic: MirEnumMatchSemanticV1, block_indices: Dict<i64, i64>,
+        local_indices: Dict<i64, i64>, declarations: Dict<i64, MirEnumDeclarationIdentityV1>,
+        multiple_definitions: Dict<i64, bool>, remaining_work: i64) -> Result<EnumPatternPhysicalPlanV1, text>:
+    if remaining_work < 0 or remaining_work > 65536:
+        return Err("EE-E-LIMIT: invalid physical pattern work budget")
+    var checker = EnumPatternPhysicalCheckerV1(function: function, semantic: semantic,
+        blocks: block_indices, locals: local_indices, declarations: declarations,
+        multiple_definitions: multiple_definitions,
+        remaining: remaining_work, records: {}, instructions: {}, terminators: {},
+        bindings: {}, origins: {}, payloads: {}, predicates: {},
+        constants: {}, tested: {}, assigned: {},
+        raw_bool_tests: {}, tagged_bool_tests: {}, tuple_pointers: {}, tuple_values: {}, typed_fields: {})
+    checker.validate()
+
+export EnumPatternPhysicalPlanV1, enum_pattern_physical_plan_v1

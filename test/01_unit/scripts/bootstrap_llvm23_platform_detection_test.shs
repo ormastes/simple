@@ -49,33 +49,31 @@ make_prefix "$tmp/llvm18" 18.1.8
   [ "$LLVM_PREFIX" = "$tmp/llvm23" ] || fail wrong-prefix
   [ "$LLVM_SYS_231_PREFIX" = "$tmp/llvm23" ] || fail wrong-rust-prefix
   LLVM_FOUND=0
-  PLATFORM_UNAME=Linux
-  PLATFORM_OS=linux
-  if _llvm_try_prefix "$tmp/llvm230" 23; then fail older-23-admitted; fi
-  _llvm_try_prefix "$tmp/llvm232" 23 || fail linux-llvm23-patch-rejected
-  if _llvm_try_prefix "$tmp/llvm233" 23; then fail future-patch-admitted; fi
-  if _llvm_try_prefix "$tmp/llvm18" 23; then fail llvm18-admitted; fi
-  PLATFORM_UNAME=Darwin
-  PLATFORM_OS=freebsd
-  if _llvm_try_prefix "$tmp/llvm232" 23; then fail cross-target-override-admitted-freebsd-patch; fi
-  PLATFORM_UNAME=FreeBSD
-  _llvm_try_prefix "$tmp/llvm232" 23 || fail freebsd-llvm23-patch-rejected
-  if _llvm_try_prefix "$tmp/llvm233" 23; then fail freebsd-future-patch-admitted; fi
-  PLATFORM_UNAME=Darwin
-  PLATFORM_OS=macos
-  if _llvm_try_prefix "$tmp/llvm232" 23; then fail macos-llvm23-patch-admitted; fi
+  # Major is strict; any 23.x.y is admitted on every host, with a warning
+  # when it is not the 23.1.1 reference (owner decision 2026-10-22).
+  for host in Linux:linux FreeBSD:freebsd Darwin:macos; do
+    PLATFORM_UNAME=${host%%:*}
+    PLATFORM_OS=${host#*:}
+    for v in 230 232 233; do
+      _llvm_try_prefix "$tmp/llvm$v" 23 2>"$tmp/warn" || fail "$host-llvm$v-rejected"
+      grep -q '^warning: LLVM 23\.' "$tmp/warn" || fail "$host-llvm$v-no-warning"
+    done
+    _llvm_try_prefix "$tmp/llvm23" 23 2>"$tmp/warn" || fail "$host-reference-rejected"
+    [ ! -s "$tmp/warn" ] || fail "$host-reference-warned"
+    if _llvm_try_prefix "$tmp/llvm18" 23 2>/dev/null; then fail "$host-llvm18-admitted"; fi
+  done
 )
 
 grep -Fq 'if [ "$LLVM_VERSION" != 23 ]; then' "$bootstrap" ||
   fail bootstrap-does-not-reject-other-major
 grep -Fq '! _llvm23_version_admitted "${rust_llvm_version}"' "$bootstrap" ||
   fail bootstrap-does-not-check-rust-llvm-patch
-grep -Fq 'admitted LLVM 23.1.1 (native Linux/FreeBSD: 23.1.2) not found' "$bootstrap" ||
+grep -Fq 'admitted LLVM 23 (any 23.x.y) not found' "$bootstrap" ||
   fail bootstrap-error-not-pinned
-# The Rust seed's aya-llvm-sys build script must admit the same host-scoped patch.
+# The Rust seed's aya-llvm-sys build script applies the same major-only rule.
 aya_build="$root/src/compiler_rust/vendor/aya-llvm-sys/build.rs"
-grep -Fq 'POSIX_ADMITTED_LLVM_VERSION: &str = "23.1.2"' "$aya_build" ||
-  fail aya-llvm-sys-posix-patch-not-admitted
-grep -Fq 'cfg!(any(target_os = "linux", target_os = "freebsd"))' "$aya_build" ||
-  fail aya-llvm-sys-posix-admission-not-host-scoped
+grep -Fq 'REQUIRED_LLVM_MAJOR: &str = "23"' "$aya_build" ||
+  fail aya-llvm-sys-major-not-strict
+grep -Fq 'cargo:warning=LLVM {actual} admitted by major' "$aya_build" ||
+  fail aya-llvm-sys-minor-patch-not-warned
 echo 'bootstrap_llvm23_platform_detection_test: PASS'

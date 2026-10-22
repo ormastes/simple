@@ -1,12 +1,16 @@
-# Complete Memory Model Formal Verification - Summary Report
+# Memory Model Formal Verification — Historical Summary and Qualification
+
+**Evidence qualification (2026-10-21, SF6):** Reviewed against source commit `380200890ff030b34c68ff38f362b482e1276769`. Original dates and historical example/pass labels are retained as provenance, not a current execution result. This documentation correction ran no compiler, Lean, benchmark, or runtime tests; executable qualification is **UNRUN**.
+
+Current model anchors: `src/verification/memory_capabilities/src/MemoryCapabilities.lean:1–6` identifies a reduced-valid reference model; `wellFormed` (79–82) bounds Exclusive and Isolated counts, and `conversion_is_safe` (84–86) proves the stated conversion relation. `src/verification/memory_model_drf/src/MemoryModelDRF.lean:1–6` identifies a reduced-valid DRF/SC model; `scDRF` (1095–1098) constructs that model’s `SequentiallyConsistent` witness. These source theorem declarations do not prove compiler refinement, actual runtime instrumentation coverage, native memory ordering, or production safety. Lean checking was not run for this correction; historical signatures below are historical sketches, not a current API/theorem inventory. The historical commands, diagrams, tables and safety-claim bullets retain the report’s original provenance; they are not reproduced verification results.
 
 **Date:** 2025-12-23
-**Features:** #1096-1106 - Complete memory model with formal verification
-**Status:** ✅ Complete
+**Features:** #1096-1106 — historical memory-model/formal-verification report
+**Status:** Historical “Complete” label superseded; model/source/runtime qualification separated
 
 ## Overview
 
-Successfully implemented **complete formal verification** of the Simple language memory model using Lean 4. This provides mathematical proofs that the type system prevents data races through a combination of reference capabilities (compile-time) and SC-DRF guarantees (runtime).
+The original report claimed “complete formal verification.” That conclusion is withdrawn: the reviewed sources contain reduced-valid Lean models, which do not establish a verified production compiler or runtime. Model properties depend on their definitions and premises; runtime race-freedom is not established here.
 
 ## Verification Modules
 
@@ -22,7 +26,7 @@ Successfully implemented **complete formal verification** of the Simple language
 - **Capability Conversions**: Safe downgrades (iso→mut→shared)
 - **Concurrency Modes**: Actor, LockBase, Unsafe
 
-**Proven Theorems:**
+**Historical theorem sketches (current declarations and proof checking require separate evidence):**
 
 ```lean
 theorem exclusive_is_unique :
@@ -50,7 +54,7 @@ theorem actor_mode_safety :
   capabilityAllowedInMode cap Actor → cap ≠ Exclusive
 ```
 
-**Properties Verified:**
+**Historically reported model properties:**
 
 1. **Uniqueness**: Exclusive and Isolated refs are unique
 2. **Isolation**: Exclusive and Isolated prevent all aliasing
@@ -72,7 +76,7 @@ theorem actor_mode_safety :
 - **Sequential Consistency**: Total order respecting program order
 - **HappensBeforeGraph**: Runtime implementation
 
-**Proven Theorems:**
+**Historical theorem sketches (current declarations and proof checking require separate evidence):**
 
 ```lean
 theorem happensBefore_transitive :
@@ -120,7 +124,7 @@ axiom channelSynchronization :
 - **CapabilityExecution**: Execution with per-operation capabilities
 - **Well-Typed Execution**: Operations satisfy capability requirements
 
-**Proven Theorems:**
+**Historical theorem sketches (current declarations and proof checking require separate evidence):**
 
 ```lean
 theorem capability_prevents_unsafe_write :
@@ -139,7 +143,7 @@ theorem welltyped_reduces_races :
 1. **Compile-time**: Capabilities prevent most races via type checking
 2. **Runtime**: SC-DRF catches remaining dynamic races
 3. **Defense in Depth**: Two independent safety mechanisms
-4. **Zero Overhead**: Capabilities erased at runtime
+4. **Zero-overhead target**: Historical capability-erasure rationale; no current measurement
 
 ## Verification Summary
 
@@ -344,7 +348,7 @@ test result: ok. 6 passed; 0 failed
 
 ## Impact
 
-### Safety Guarantees
+### Historical Safety Claims (not current runtime qualification)
 
 1. **Compile-Time Safety**: Capabilities prevent most data races
    - Type checker rejects programs with aliasing violations
@@ -356,14 +360,14 @@ test result: ok. 6 passed; 0 failed
    - Race detector identifies conflicting operations
    - Optional runtime checking via `SIMPLE_RACE_CHECK=1`
 
-3. **Formal Verification**: Mathematical proof of correctness
-   - Lean 4 proof assistant validates all theorems
-   - 860+ lines of verified code (350 + 510)
-   - Independent verification of type system and runtime
+3. **Formal models**: Source-level mathematical statements about the modeled definitions
+   - Current Lean validation is UNRUN in this correction
+   - Historical line counts are not proof-closure evidence
+   - No compiler/runtime refinement or independent runtime verification is established
 
 ### Performance
 
-- **Compile-time**: Zero overhead - capabilities erased at codegen
+- **Capability overhead target**: Historical erasure rationale; no current performance evidence
 - **Runtime**: Optional race detection (disabled by default)
 - **Memory**: O(operations) for happens-before graph when enabled
 
@@ -372,26 +376,26 @@ test result: ok. 6 passed; 0 failed
 1. **Clear Error Messages**: Type errors point to aliasing violations
 2. **Safe Refactoring**: Capability system guides code changes
 3. **Debug Mode**: Runtime race detection finds remaining bugs
-4. **Formal Guarantees**: Mathematical proof of safety
+4. **Formal model properties**: Conditional on modeled definitions and assumptions; no runtime safety conclusion
 
 ## Comparison with Other Languages
 
 | Language | Compile-Time Safety | Runtime Detection | Formal Verification |
 |----------|-------------------|------------------|-------------------|
-| Simple | ✅ Capabilities | ✅ SC-DRF | ✅ Lean 4 (860+ lines) |
+| Simple (historical report) | Capability design | Runtime detection claimed, unqualified here | Reduced-valid Lean models; no runtime refinement evidence |
 | Rust | ✅ Borrow checker | ❌ None | ⚠️ Partial (RustBelt) |
 | C++ | ❌ None | ⚠️ TSan (optional) | ❌ None |
 | Java | ⚠️ Weak (volatile) | ❌ None | ❌ None |
 | Go | ❌ None | ⚠️ Race detector (optional) | ❌ None |
 | Pony | ✅ Capabilities | ❌ None | ⚠️ Informal |
 
-**Simple is unique** in combining comprehensive compile-time safety, optional runtime detection, AND complete formal verification.
+The historical comparison does not establish uniqueness, comprehensive safety, or complete verification; those comparative/runtime claims are unqualified here.
 
 ## Future Work
 
 ### Verification Enhancements
 
-1. **Complete Lean Proofs**: Fill in `sorry` placeholders
+1. **Historical proof-completion task**: The original report asked to fill `sorry` placeholders despite its “Complete” heading. This contradicts that historical closure claim; it does not assert that the current pinned models contain `sorry`. Current proof checking and refinement qualification remain separate work.
 2. **Proof Automation**: Use Lean tactics for repetitive proofs
 3. **Verified Compiler**: Extend verification to code generation
 4. **Proof Certificates**: Export machine-checkable proofs
@@ -428,17 +432,17 @@ test result: ok. 6 passed; 0 failed
 
 ## Conclusion
 
-The Simple language now has **one of the most comprehensive memory safety systems** of any programming language:
+The original report claimed one of the most comprehensive memory safety systems. That comparative and safety conclusion is historical and unqualified here; the following items separate its claims from current evidence:
 
-✅ **Compile-time prevention** via reference capabilities (#1096-1098, #1104)
-✅ **Runtime detection** via SC-DRF happens-before tracking (#1099-1100, #1105)
-✅ **Formal verification** via Lean 4 proofs (#1104-1106)
-✅ **Complete integration** between all three layers
+- **Compile-time prevention claim** via reference capabilities (#1096-1098, #1104): historical; current compiler-wide enforcement is not established by this model/source review
+- **Runtime detection claim** (#1099-1100, #1105): historical, not qualified by this source/model review
+- **Formal model source** (#1104-1106): reduced-valid models; current Lean execution UNRUN
+- **Integration closure**: not established between model, compiler, and runtime
 
 This provides:
-- **Strong safety**: Both static and dynamic guarantees
-- **Formal proof**: Mathematical certainty of correctness
-- **Zero overhead**: Capabilities erased at runtime
+- **Safety target**: requires independent implementation and runtime evidence
+- **Model proof scope**: mathematical statements about modeled definitions and premises
+- **Zero-overhead target**: requires measurements for the relevant execution paths
 - **Developer friendly**: Clear errors and debugging tools
 
-The memory model implementation is **complete** with 45 tests passing and 860+ lines of formally verified code.
+The original report recorded 45 passing tests and 860+ lines as historical evidence. Those counts do not establish current proof closure, runtime refinement, complete instrumentation, or zero overhead. Current executable qualification remains UNRUN.

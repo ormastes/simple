@@ -1,4 +1,5 @@
 # Shared-library linking — link_to_shared and unix/windows/msvc/mingw backends.
+use compiler.traits.trait_impl.{ImplBlock}
 use compiler.backend.linker.linker_wrapper.*
 # Linker Wrapper - Unified Linking API
 #
@@ -82,6 +83,8 @@ fn _link_native_mingw(object_files: [text], output: text, config: NativeLinkConf
     "/bin/sh -c", which can never spawn on native Windows (CreateProcess has
     no /bin/sh), so every link died with exit -1 and no output. Direct argv
     also removes shell-quoting hazards in object paths."""
+    val argument_error = native_windows_strict_extra_args_error(config.extra_flags, config.allow_duplicate_definitions)
+    if argument_error != "": return Err(argument_error)
     val cc = if native_tool_strict_requested_v1():
         native_tool_strict_resolve_v1("cc")?
     else: env_get("CC")
@@ -139,10 +142,10 @@ fn _link_native_mingw(object_files: [text], output: text, config: NativeLinkConf
     if config.strip_output:
         args = args.push("-Wl,-s")
 
-    # Same duplicate-definition tolerance the Linux/FreeBSD cc path gets from
-    # unresolved_symbol_flags_for_cc: runtime.o and runtime_native.o
-    # intentionally both carry a handful of rt_* fallback copies.
-    args = args.push("-Wl,--allow-multiple-definition")
+    # Duplicate forgiveness is an explicit caller policy, including on GNU
+    # Windows. Strict hosted links must diagnose conflicting definitions.
+    if config.allow_duplicate_definitions:
+        args = args.push("-Wl,--allow-multiple-definition")
 
     # Extra flags
     for flag in config.extra_flags:
@@ -286,7 +289,7 @@ fn _link_shared_unix(object_files: [text], output: text, config: NativeLinkConfi
 
 fn _link_shared_windows(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
     """Link a shared library on Windows. The GNU/MSVC arm is decided from the
-    target (windows_link_flavor_for_config), never from MSYSTEM alone."""
+    target (windows_link_flavor_for_config), never from MSYSTEM."""
     if windows_link_flavor_for_config(config) == "gnu":
         return _link_shared_mingw(object_files, output, config)
     _link_shared_msvc(object_files, output, config)

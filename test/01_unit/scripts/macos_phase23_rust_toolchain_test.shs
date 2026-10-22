@@ -14,6 +14,7 @@ sub read_file {
 my $policy = read_file("$root/src/compiler_rust/rust-toolchain.toml");
 my ($channel) = $policy =~ /^channel\s*=\s*"([A-Za-z0-9_.-]+)"\s*$/m;
 defined $channel or die "missing repository channel\n";
+$channel =~ /^nightly-\d{4}-\d{2}-\d{2}$/ or die "floating Rust channel cannot establish exact LLVM authority\n";
 my ($component_list) = $policy =~ /^components\s*=\s*\[([^\]]+)\]\s*$/m;
 defined $component_list or die "missing repository components\n";
 my @components = sort($component_list =~ /"([A-Za-z0-9_-]+)"/g);
@@ -24,7 +25,10 @@ sub has_pinned_setup {
     my $installed = 0;
     for my $step (split /^      - /m, $text) {
         if ($step =~ /(?:^|\n        )uses: dtolnay\/rust-toolchain\@([^\s]+)\s*$/m) {
-            return 0 unless $1 eq $channel;
+            my $action_channel = $1;
+            my ($explicit_channel) = $step =~ /^          toolchain:\s*([^\n]+)$/m;
+            my $resolved_channel = defined $explicit_channel ? $explicit_channel : $action_channel;
+            return 0 unless $action_channel eq "nightly" && $resolved_channel eq $channel;
             # Optional/advisory provisioning cannot establish build authority.
             return 0 if $step =~ /^        (?:if|continue-on-error):/m;
             my ($wanted) = $step =~ /^          components:\s*([^\n]+)$/m;
@@ -42,7 +46,10 @@ my $missing = $workflow;
 $missing =~ s/dtolnay\/rust-toolchain\@[^\s]+/missing\/setup\@none/g;
 has_pinned_setup($missing) and die "missing setup accepted\n";
 my $mismatched = $workflow;
-$mismatched =~ s/dtolnay\/rust-toolchain\@[^\s]+/dtolnay\/rust-toolchain\@wrong-channel/g;
+$mismatched =~ s/toolchain: nightly-\d{4}-\d{2}-\d{2}/toolchain: nightly/g;
 has_pinned_setup($mismatched) and die "mismatched setup accepted\n";
+my $implicit = $workflow;
+$implicit =~ s/^          toolchain:.*\n//mg;
+has_pinned_setup($implicit) and die "floating action default accepted\n";
 print "PASS: macOS Phase 2/3 provisions repository Rust channel and components before bootstrap\n";
 PERL

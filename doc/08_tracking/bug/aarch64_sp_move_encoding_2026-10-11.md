@@ -43,11 +43,19 @@ MOV sp,sp = ff 03 00 91; MOV x0,x1 = e0 03 01 aa.
 These independently confirm the ADD-immediate SP alias and ordinary ORR alias.
 Assembler evidence does not replace admitted runtime or native execution gates.
 
-The retained global_addr_aarch64_riscv64_contract failure is still unresolved:
-its wrong memory-operand refusal is a distinct cause, and the repair does not
-claim that invocation passed. AVX2's retained instruction-count oracle also
+The historical global_addr_aarch64_riscv64_contract invocation remained failed:
+its wrong memory-operand refusal was a distinct cause. The separately retained
+frame-pair operand repair addresses that cause at source level; neither repair
+claims the original full invocation passed. AVX2's retained instruction-count oracle also
 needs independent current-source review before attributing it to codegen.
 
 Regression: test/01_unit/compiler/backend/native/aarch64_sp_move_encoding_spec.spl.
 Manual: doc/06_spec/01_unit/compiler/backend/native/aarch64_sp_move_encoding_spec.md.
 No instruction IR, encoded format, architecture boundary, or UI changes.
+
+## Current merge qualification
+
+The observations above belong to their pinned historical producers and source
+owners. The current release_phase3 merge retains the source repair, but its
+admitted compiler/core/MCP/LSP and full Phase 3 qualification remain pending.
+No historical diagnostic or experimental native fixture is a current merge PASS.

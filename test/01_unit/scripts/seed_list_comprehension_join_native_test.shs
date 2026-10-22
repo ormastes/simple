@@ -1,0 +1,50 @@
+#!/bin/sh
+# Frozen-seed bootstrap diagnostic, never compiler/product qualification.
+# Keep expected failures explicit until the linked inference/emission bug retires.
+set -eu
+[ "$#" = 4 ] || { echo "usage: $0 COMPILER TARGET RUNTIME_AUTHORITY FRESH_OUTPUT" >&2; exit 2; }
+compiler=$1 target=$2 runtime=$3 output=$4
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+[ -x "$compiler" ] && [ -d "$runtime" ] && [ ! -e "$output" ] || exit 2
+mkdir -p "$output"
+output=$(CDPATH= cd -- "$output" && pwd -P)
+cd "$root"
+sha256sum "$compiler" >"$output/compiler.sha256"
+fail() { echo "FAIL: $*; evidence=$output" >&2; exit 1; }
+for variant in original typed explicit; do
+  source="test/fixtures/native/json_comprehension_join/$variant"
+  attempt="$output/$variant"
+  mkdir -p "$attempt/cache" "$attempt/rt-obj" "$attempt/tmp" "$attempt/home"
+  code=0
+  (
+    export SIMPLE_PROJECT_ROOT="$root" SIMPLE_LIB="$root/src"
+    export SIMPLE_RT_OBJ_CACHE_DIR="$attempt/rt-obj" HOME="$attempt/home" TMPDIR="$attempt/tmp"
+    TEMP=$TMPDIR
+    if command -v cygpath >/dev/null 2>&1; then TEMP=$(cygpath -m "$TMPDIR"); fi
+    TMP=$TEMP
+    export TEMP TMP SIMPLE_COMPILE_FAIL_FAST=0 SIMPLE_SEED_RETURN_TYPE_DEBUG=1
+    "$compiler" native-build --backend llvm --runtime-bundle core-c-bootstrap \
+      --source "$source" --entry "$source/main.spl" --entry-closure --threads 1 \
+      --cache-dir "$attempt/cache" --mode one-binary --target "$target" \
+      --runtime-path "$runtime" -o "$attempt/probe.exe"
+  ) >"$attempt/build.log" 2>&1 || code=$?
+  printf 'build_exit_status=%s\n' "$code" >"$attempt/result.env"
+  if [ "$variant" = original ]; then
+    [ "$code" = 1 ] || fail 'original must expose the frozen seed inference defect'
+    grep -q 'lowering error in function main:.*cannot apply.*Add.*optional' "$attempt/build.log" || fail 'original reached wrong failure'
+    echo 'EXPECTED FAILURE: original comprehension receiver selects optional join'
+    continue
+  fi
+  [ "$code" = 0 ] && [ -s "$attempt/probe.exe" ] || fail "$variant build failed"
+  code=0
+  "$attempt/probe.exe" >"$attempt/run.log" 2>&1 || code=$?
+  printf 'run_exit_status=%s\n' "$code" >>"$attempt/result.env"
+  if [ "$variant" = typed ]; then
+    [ "$code" = 1 ] && grep -Fxq 'FAIL: []' "$attempt/run.log" || fail 'typed comprehension no longer exposes expected data loss; revisit bug retirement'
+    echo 'EXPECTED FAILURE: typed comprehension compiles but loses nonempty elements'
+  else
+    [ "$code" = 0 ] && grep -Fxq 'PASS: [1,2]' "$attempt/run.log" || fail 'explicit loop changed nonempty order/content'
+    echo 'PASS: explicit typed loop retains [1,2] under optional-join pollution'
+  fi
+done
+echo "PASS: frozen-seed diagnostic controls checked; inference/emission bug remains open; evidence=$output"

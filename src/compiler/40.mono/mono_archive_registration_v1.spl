@@ -1,0 +1,781 @@
+use compiler.mono.mono_archive_nominal_v2.{mono_archive_nominal_put_v2, mono_archive_nominal_digest_v2}
+# Ordered actual collection publication. No production ownership switch.
+use compiler.hir.hir_mono_symbol_projection_v1.*
+use compiler.mono.mono_archive_registration_types_v1.{MonoArchiveRegistrationRowV1,
+    MonoArchiveRootOrderV1, MonoArchiveRegistrationOwnerV1, MonoArchiveRegistrationReceiptV1,
+    MonoArchiveCurrentRegistrationOwnerV1, MonoArchiveCurrentRegistrationReceiptV1,
+    mono_archive_registration_receipt_module_name_v1}
+use compiler.mono.mono_archive_registration_identity_v1.{mono_archive_registration_schedule_digest_v1,
+    mono_archive_registration_owner_digest_v1, mono_archive_current_registration_digest_v1}
+use compiler.hir.hir_types.{HirModule, HirType}
+use compiler.hir.hir_definitions.{HirFunction, HirTypeParam}
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.hir.generated.hir_codec.{hc_enc_hir_type_param}
+use compiler.mono.monomorphize_integration.{MonomorphizationPass,
+    MONO_SYMBOL_BASE, sorted_function_indices, is_generic_function}
+use compiler.mono.mono_archive_types_v1.{MonoTemplateBodyModeV1,
+    MonoTemplateSignatureV1, MonoTemplateRecipeV1, mono_template_signature_digest_v1,
+    mono_archive_put_type_v1}
+use compiler.mono.mono_archive_state_v1.{MonoArchiveFactsV1, MonoArchiveStateV1,
+    mono_archive_state_create_v1, mono_archive_state_digest_v1}
+use compiler.mono.mono_archive_current_body_v1.{MonoArchiveCurrentBodyV1,
+    mono_archive_current_body_digest_v1, mono_archive_current_body_load_in_owned_scope_v1}
+use compiler.driver.cache.hir_owned_artifact_cache_v1.{hir_owned_artifact_context_v1}
+use compiler.driver.cache.hir_body_typecheck_lease_v1.{HirBodyArchiveV1,
+    hir_body_archive_matches_v1, hir_body_archive_warnings_digest_v1}
+use compiler.driver.cache.hir_mono_archive_consumer_v1.{MonoArchiveAdmissionV1,
+    MonoArchiveRepositoryV1, mono_archive_repository_authority_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_load_in_owned_scope,
+    hir_cache_last_warnings, hir_cache_clear_last_warnings, hir_cache_promote_diagnostic_owner_v1}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
+use std.io_runtime.{env_get}
+use std.common.crypto.sha256.{sha256_text}
+
+fn mono_archive_current_registration_create_v1() -> Result<MonoArchiveCurrentRegistrationOwnerV1, text>:
+    # A fresh actual collector, never the journal's unresolved registration.
+    val created = mono_archive_registration_create_v1()
+    if created.is_err(): return Err(created.unwrap_err())
+    val owner = MonoArchiveCurrentRegistrationOwnerV1(registration: created.unwrap(),
+        cache: hir_owned_artifact_context_v1(), bodies: {}, published_digest: "")
+    owner.published_digest = mono_archive_current_registration_digest_v1(owner)
+    if owner.published_digest == "": return Err("fresh current registration owner unavailable")
+    Ok(owner)
+
+fn mono_archive_logical_current_registration_create_v1() -> Result<MonoArchiveCurrentRegistrationOwnerV1, text>:
+    val owner = mono_archive_current_registration_create_v1()?
+    owner.registration.logical_mode = true
+    owner.published_digest = mono_archive_current_registration_digest_v1(owner)
+    if owner.published_digest == "": return Err("fresh logical current registration owner unavailable")
+    Ok(owner)
+
+# Build the prospective compact state in scratch so hashing it cannot retain
+# repeated persistent serializations of the growing provider tables.
+fn mono_archive_current_registration_scratch_successor_v1(current: MonoArchiveCurrentRegistrationOwnerV1,
+        receipt: MonoArchiveCurrentRegistrationReceiptV1, schedule: text) -> text:
+    val owner = current.registration
+    val worker = mono_archive_registration_scratch_collector_v1(owner)
+    val old = owner.state.facts
+    var projections: Dict<text, text> = {}
+    for name in old.symbol_projections.keys(): projections[name] = old.symbol_projections[name]
+    val facts = MonoArchiveFactsV1(nominal_rows: worker.archive_nominal_rows, nominal_keys: worker.archive_nominal_keys, body_authority: old.body_authority, feature_policy: old.feature_policy,
+        initial_symbol: old.initial_symbol, sym_names: worker.sym_names, fn_returns: worker.fn_returns,
+        fn_sigs: worker.fn_sigs, named_types: worker.named_types, named_ambiguous: worker.named_ambiguous,
+        named_symbol_names: worker.named_symbol_names, field_types: worker.field_types,
+        field_owner_modules: worker.field_owner_modules, enum_payload_types: worker.enum_payload_types,
+        module_paths: worker.module_paths, template_module: worker.template_module,
+        generic_methods: worker.generic_methods, generic_method_rejected: worker.generic_method_rejected,
+        generic_type_params: worker.generic_type_params, generic_type_modules: worker.generic_type_modules,
+        generic_type_field_names: worker.generic_type_field_names, generic_type_fields: worker.generic_type_fields,
+        declared_global_types: worker.declared_global_types, templates: worker.archive_template_signatures,
+        recipes: worker.template_recipes, symbol_identities: worker.archive_symbol_identities,
+        symbol_projections: projections)
+    var archives: Dict<text, HirBodyArchiveV1> = {}
+    for name in owner.archives.keys(): archives[name] = owner.archives[name]
+    var roots: [MonoArchiveRootOrderV1] = []
+    for root in owner.roots: roots = roots.push(root)
+    val scratch = MonoArchiveRegistrationOwnerV1(state: mono_archive_state_create_v1(facts),
+        archives: archives, roots: roots, generic_functions: owner.generic_functions,
+        generic_structs: owner.generic_structs, generic_classes: owner.generic_classes,
+        epoch: owner.epoch, sealed: false, published_schedule_digest: owner.published_schedule_digest,
+        sealed_schedule_digest: owner.sealed_schedule_digest, logical_mode: owner.logical_mode)
+    if mono_archive_registration_install_v1(scratch, receipt.registration, schedule).is_err(): return ""
+    var bodies: Dict<text, MonoArchiveCurrentBodyV1> = {}
+    for name in current.bodies.keys(): bodies[name] = current.bodies[name]
+    bodies[mono_archive_registration_receipt_module_name_v1(receipt.registration)] = receipt.current_body
+    mono_archive_current_registration_digest_v1(MonoArchiveCurrentRegistrationOwnerV1(
+        registration: scratch, cache: current.cache, bodies: bodies, published_digest: ""))
+
+fn mono_archive_registration_create_v1() -> Result<MonoArchiveRegistrationOwnerV1, text>:
+    # Cache identity initialization happens outside scratch. No fake provider
+    # authority is assigned while registration is incomplete.
+    if transient_array_scope_state_v1() != 0 or not hir_cache_enabled():
+        return Err("registration owner requires inactive scope and cache identity")
+    val facts = MonoArchiveFactsV1(body_authority: "",
+        feature_policy: env_get("SIMPLE_MONO_LEVELS"), initial_symbol: MONO_SYMBOL_BASE,
+        sym_names: {},
+        fn_returns: {},
+        fn_sigs: {},
+        named_types: {},
+        named_ambiguous: {},
+        named_symbol_names: {},
+        field_types: {},
+        field_owner_modules: {},
+        enum_payload_types: {},
+        module_paths: {},
+        template_module: {},
+        generic_methods: {},
+        generic_method_rejected: {},
+        generic_type_params: {},
+        generic_type_modules: {},
+        generic_type_field_names: {},
+        generic_type_fields: {},
+        declared_global_types: {},
+        templates: {},
+        recipes: {},
+        symbol_identities: {})
+    Ok(MonoArchiveRegistrationOwnerV1(state: mono_archive_state_create_v1(facts),
+        archives: {}, roots: [], generic_functions: 0, generic_structs: 0,
+        generic_classes: 0, epoch: 0, sealed: false,
+        published_schedule_digest: "", sealed_schedule_digest: ""))
+
+fn mono_archive_registration_row_digest_v1(row: MonoArchiveRegistrationRowV1) -> text:
+    var w = HirCodecWriter.create()
+    match row:
+        case MonoArchiveRegistrationRowV1.SymbolName(key, value):
+            w.put_i64(0)
+            w.put_text(key)
+            w.put_text(value)
+        case MonoArchiveRegistrationRowV1.FunctionReturn(key, value):
+            w.put_i64(1)
+            w.put_text(key)
+            mono_archive_put_type_v1(w, value)
+        case MonoArchiveRegistrationRowV1.FunctionSignature(key, value):
+            w.put_i64(2)
+            w.put_text(key)
+            mono_archive_put_type_v1(w, value)
+        case MonoArchiveRegistrationRowV1.NamedType(key, value):
+            w.put_i64(3)
+            w.put_text(key)
+            mono_archive_put_type_v1(w, value)
+        case MonoArchiveRegistrationRowV1.NamedAmbiguous(key, value):
+            w.put_i64(4)
+            w.put_text(key)
+            w.put_bool(value)
+        case MonoArchiveRegistrationRowV1.NamedSymbolName(key, value):
+            w.put_i64(5)
+            w.put_text(key)
+            w.put_text(value)
+        case MonoArchiveRegistrationRowV1.FieldType(key, value):
+            w.put_i64(6)
+            w.put_text(key)
+            mono_archive_put_type_v1(w, value)
+        case MonoArchiveRegistrationRowV1.FieldOwner(key, value):
+            w.put_i64(7)
+            w.put_text(key)
+            w.put_text(value)
+        case MonoArchiveRegistrationRowV1.EnumPayloadType(key, value):
+            w.put_i64(8)
+            w.put_text(key)
+            mono_archive_put_type_v1(w, value)
+        case MonoArchiveRegistrationRowV1.ModulePath(key, value):
+            w.put_i64(9)
+            w.put_text(key)
+            w.put_text(value)
+        case MonoArchiveRegistrationRowV1.TemplateModule(key, value):
+            w.put_i64(10)
+            w.put_text(key)
+            w.put_text(value)
+        case MonoArchiveRegistrationRowV1.GenericMethod(key, value):
+            w.put_i64(11)
+            w.put_text(key)
+            w.put_text(value)
+        case MonoArchiveRegistrationRowV1.RejectedMethod(key, value):
+            w.put_i64(12)
+            w.put_text(key)
+            w.put_text(value)
+        case MonoArchiveRegistrationRowV1.GenericTypeParams(key, value):
+            w.put_i64(13)
+            w.put_text(key)
+            w.put_i64(value.len())
+            for param in value: hc_enc_hir_type_param(w, param)
+        case MonoArchiveRegistrationRowV1.GenericTypeModule(key, value):
+            w.put_i64(14)
+            w.put_text(key)
+            w.put_text(value)
+        case MonoArchiveRegistrationRowV1.GenericFieldNames(key, value):
+            w.put_i64(15)
+            w.put_text(key)
+            w.put_i64(value.len())
+            for text_ in value: w.put_text(text_)
+        case MonoArchiveRegistrationRowV1.GenericFieldType(key, value):
+            w.put_i64(16)
+            w.put_text(key)
+            mono_archive_put_type_v1(w, value)
+        case MonoArchiveRegistrationRowV1.DeclaredGlobalType(key, value):
+            w.put_i64(17)
+            w.put_text(key)
+            mono_archive_put_type_v1(w, value)
+        case MonoArchiveRegistrationRowV1.TemplateSignature(key, value):
+            w.put_i64(18)
+            w.put_text(key)
+            val digest = mono_template_signature_digest_v1(value)
+            if digest == "": return ""
+            w.put_text(digest)
+        case MonoArchiveRegistrationRowV1.TemplateRecipe(key, value):
+            w.put_i64(19)
+            w.put_text(key)
+            w.put_text(value.module_name)
+            w.put_i64(value.original_symbol.id)
+            w.put_text(value.template_name)
+            w.put_bool(value.inherent_method)
+            for params in [value.canonical_type_params, value.bound_type_params]:
+                w.put_i64(params.len())
+                for param in params: hc_enc_hir_type_param(w, param)
+        case MonoArchiveRegistrationRowV1.NominalDeclarationV2(key, value):
+            if key != "{value.module_name}#{value.id}" or mono_archive_nominal_digest_v2(value) == "": return ""
+            w.put_i64(21)
+            w.put_text(key)
+            mono_archive_nominal_put_v2(w, value)
+        case MonoArchiveRegistrationRowV1.SymbolProjection(key, value):
+            w.put_i64(22)
+            w.put_text(key)
+            w.put_text(value)
+        case MonoArchiveRegistrationRowV1.SymbolIdentity(key, value):
+            w.put_i64(20)
+            w.put_text(key)
+            w.put_text(value)
+    if not w.ok: return ""
+    sha256_text("mono-registration-row-v3\n" + w.finish())
+
+fn mono_archive_registration_receipt_seal_v1(receipt: MonoArchiveRegistrationReceiptV1) -> text:
+    var w = HirCodecWriter.create()
+    if receipt.logical_name != "": w.put_text(receipt.logical_name)
+    w.put_text(receipt.archive.archive_key)
+    w.put_text(receipt.archive.body_digest)
+    w.put_text(receipt.archive.lowering_warnings_digest)
+    w.put_text(receipt.base_digest)
+    w.put_i64(receipt.base_epoch)
+    w.put_i64(receipt.next_symbol)
+    w.put_i64(receipt.generic_functions)
+    w.put_i64(receipt.generic_structs)
+    w.put_i64(receipt.generic_classes)
+    w.put_i64(receipt.roots.len())
+    for symbol in receipt.roots: w.put_i64(symbol)
+    w.put_i64(receipt.rows.len())
+    for row in receipt.rows:
+        val digest = mono_archive_registration_row_digest_v1(row)
+        if digest == "": return ""
+        w.put_text(digest)
+    if not w.ok: return ""
+    sha256_text((if receipt.logical_name != "": "mono-logical-registration-receipt-v3\n" else: "mono-registration-receipt-v3\n") + w.finish())
+
+fn mono_archive_registration_row_difference_v1(row: MonoArchiveRegistrationRowV1) -> text:
+    match row:
+        case MonoArchiveRegistrationRowV1.SymbolName(_, _): "registration recollection row differs: symbol name"
+        case MonoArchiveRegistrationRowV1.FunctionReturn(_, _): "registration recollection row differs: function return"
+        case MonoArchiveRegistrationRowV1.FunctionSignature(_, _): "registration recollection row differs: function signature"
+        case MonoArchiveRegistrationRowV1.NamedType(_, _): "registration recollection row differs: named type"
+        case MonoArchiveRegistrationRowV1.NamedAmbiguous(_, _): "registration recollection row differs: named ambiguity"
+        case MonoArchiveRegistrationRowV1.NamedSymbolName(_, _): "registration recollection row differs: named symbol"
+        case MonoArchiveRegistrationRowV1.FieldType(_, _): "registration recollection row differs: field type"
+        case MonoArchiveRegistrationRowV1.FieldOwner(_, _): "registration recollection row differs: field owner"
+        case MonoArchiveRegistrationRowV1.EnumPayloadType(_, _): "registration recollection row differs: enum payload"
+        case MonoArchiveRegistrationRowV1.ModulePath(_, _): "registration recollection row differs: module path"
+        case MonoArchiveRegistrationRowV1.TemplateModule(_, _): "registration recollection row differs: template module"
+        case MonoArchiveRegistrationRowV1.GenericMethod(_, _): "registration recollection row differs: generic method"
+        case MonoArchiveRegistrationRowV1.RejectedMethod(_, _): "registration recollection row differs: rejected method"
+        case MonoArchiveRegistrationRowV1.GenericTypeParams(_, _): "registration recollection row differs: generic type params"
+        case MonoArchiveRegistrationRowV1.GenericTypeModule(_, _): "registration recollection row differs: generic type module"
+        case MonoArchiveRegistrationRowV1.GenericFieldNames(_, _): "registration recollection row differs: generic field names"
+        case MonoArchiveRegistrationRowV1.GenericFieldType(_, _): "registration recollection row differs: generic field type"
+        case MonoArchiveRegistrationRowV1.DeclaredGlobalType(_, _): "registration recollection row differs: declared global type"
+        case MonoArchiveRegistrationRowV1.TemplateSignature(_, _): "registration recollection row differs: template signature"
+        case MonoArchiveRegistrationRowV1.TemplateRecipe(_, _): "registration recollection row differs: template recipe"
+        case MonoArchiveRegistrationRowV1.SymbolIdentity(_, _): "registration recollection row differs: symbol identity"
+        case MonoArchiveRegistrationRowV1.NominalDeclarationV2(_, _): "registration recollection row differs: nominal declaration"
+        case MonoArchiveRegistrationRowV1.SymbolProjection(_, _): "registration recollection row differs: symbol projection"
+
+fn mono_archive_registration_receipt_difference_v1(
+        expected: MonoArchiveRegistrationReceiptV1,
+        actual: MonoArchiveRegistrationReceiptV1) -> text:
+    if expected.logical_name != actual.logical_name: return "registration exact recollection differs: logical name"
+    if expected.archive.archive_key != actual.archive.archive_key or
+            expected.archive.body_digest != actual.archive.body_digest or
+            expected.archive.lowering_warnings_digest != actual.archive.lowering_warnings_digest:
+        return "registration exact recollection differs: archive identity"
+    if expected.base_digest != actual.base_digest or expected.base_epoch != actual.base_epoch:
+        return "registration exact recollection differs: predecessor identity"
+    if expected.next_symbol != actual.next_symbol: return "registration exact recollection differs: next symbol"
+    if expected.generic_functions != actual.generic_functions or
+            expected.generic_structs != actual.generic_structs or
+            expected.generic_classes != actual.generic_classes:
+        return "registration exact recollection differs: generic counts"
+    if expected.roots != actual.roots: return "registration exact recollection differs: root order"
+    if expected.rows.len() != actual.rows.len(): return "registration exact recollection differs: row count"
+    var index = 0
+    while index < expected.rows.len():
+        if mono_archive_registration_row_digest_v1(expected.rows[index]) !=
+                mono_archive_registration_row_digest_v1(actual.rows[index]):
+            return mono_archive_registration_row_difference_v1(expected.rows[index])
+        index = index + 1
+    "registration exact recollection differs: unknown seal component"
+
+fn mono_archive_registration_scratch_collector_v1(owner: MonoArchiveRegistrationOwnerV1) -> MonomorphizationPass:
+    var worker = MonomorphizationPass.create()
+    worker.template_body_mode = MonoTemplateBodyModeV1.ArchiveRequests
+    worker.next_symbol = owner.state.next_symbol
+    # Collection mutates these compact indexes. Clone only their dictionary
+    # indexes into scratch; no complete old map clone escapes publication.
+    val facts = owner.state.facts
+    for key in facts.sym_names.keys(): worker.sym_names[key] = facts.sym_names[key]
+    for key in facts.fn_returns.keys(): worker.fn_returns[key] = facts.fn_returns[key]
+    for key in facts.fn_sigs.keys(): worker.fn_sigs[key] = facts.fn_sigs[key]
+    for key in facts.named_types.keys(): worker.named_types[key] = facts.named_types[key]
+    for key in facts.named_ambiguous.keys(): worker.named_ambiguous[key] = facts.named_ambiguous[key]
+    for key in facts.named_symbol_names.keys(): worker.named_symbol_names[key] = facts.named_symbol_names[key]
+    for key in facts.field_types.keys(): worker.field_types[key] = facts.field_types[key]
+    for key in facts.field_owner_modules.keys(): worker.field_owner_modules[key] = facts.field_owner_modules[key]
+    for key in facts.enum_payload_types.keys(): worker.enum_payload_types[key] = facts.enum_payload_types[key]
+    for key in facts.module_paths.keys(): worker.module_paths[key] = facts.module_paths[key]
+    for key in facts.template_module.keys(): worker.template_module[key] = facts.template_module[key]
+    for key in facts.generic_methods.keys(): worker.generic_methods[key] = facts.generic_methods[key]
+    for key in facts.generic_method_rejected.keys(): worker.generic_method_rejected[key] = facts.generic_method_rejected[key]
+    for key in facts.generic_type_params.keys(): worker.generic_type_params[key] = facts.generic_type_params[key]
+    for key in facts.generic_type_modules.keys(): worker.generic_type_modules[key] = facts.generic_type_modules[key]
+    for key in facts.generic_type_field_names.keys(): worker.generic_type_field_names[key] = facts.generic_type_field_names[key]
+    for key in facts.generic_type_fields.keys(): worker.generic_type_fields[key] = facts.generic_type_fields[key]
+    for key in facts.declared_global_types.keys(): worker.declared_global_types[key] = facts.declared_global_types[key]
+    for key in facts.templates.keys(): worker.archive_template_signatures[key] = facts.templates[key]
+    for key in facts.recipes.keys(): worker.template_recipes[key] = facts.recipes[key]
+    for key in facts.symbol_identities.keys(): worker.archive_symbol_identities[key] = facts.symbol_identities[key]
+    for key in facts.nominal_rows.keys(): worker.archive_nominal_rows[key] = facts.nominal_rows[key]
+    for module in facts.nominal_keys.keys(): worker.archive_nominal_keys[module] = facts.nominal_keys[module]
+    worker
+
+fn mono_archive_collect_registration_in_owned_scope_v1(owner: MonoArchiveRegistrationOwnerV1,
+        module: HirModule, module_name: text, archive: HirBodyArchiveV1) -> Result<MonoArchiveRegistrationReceiptV1, text>:
+    # State query proves active/unpaused, not ownership. The parent exclusively
+    # owns this borrowed scope and promotes the receipt before closing it.
+    if transient_array_scope_state_v1() != 1:
+        return Err("registration capture requires active unpaused parent scope")
+    if owner.logical_mode or owner.sealed or owner.state.queue.len() != 0 or owner.archives.has(module_name) or
+            module.name != module_name or archive.input.module_name != module_name or
+            module.path != archive.input.source_path or
+            owner.state.facts.feature_policy != env_get("SIMPLE_MONO_LEVELS") or
+            not hir_body_archive_matches_v1(archive, archive.input) or
+            sha256_text(hir_module_encode(module)) != archive.body_digest:
+        return Err("registration module, predecessor, or authority refused")
+    if owner.roots.len() > 0:
+        val first: HirBodyArchiveV1 = owner.archives[owner.roots[0].module_name]
+        if first.input.closure_digest != archive.input.closure_digest or
+                first.input.producer_header != archive.input.producer_header or
+                first.input.runtime_provider_digest != archive.input.runtime_provider_digest or
+                first.input.provider_selection_digest != archive.input.provider_selection_digest or
+                first.input.runtime_provider_receipt_path != archive.input.runtime_provider_receipt_path:
+            return Err("registration selected closure, producer, or provider differs")
+    mono_archive_collect_complete_registration_v1(owner, module, module_name, archive)
+
+fn mono_archive_collect_current_registration_in_owned_scope_v1(current: MonoArchiveCurrentRegistrationOwnerV1,
+        module: HirModule, body: MonoArchiveCurrentBodyV1,
+        warnings: [text]) -> Result<MonoArchiveCurrentRegistrationReceiptV1, text>:
+    mono_archive_collect_current_named_registration_in_owned_scope_v1(current, module,
+        body.original_parent.input.module_name, body, warnings, false)
+
+fn mono_archive_collect_logical_current_registration_in_owned_scope_v1(current: MonoArchiveCurrentRegistrationOwnerV1,
+        module: HirModule, logical_name: text, body: MonoArchiveCurrentBodyV1,
+        warnings: [text]) -> Result<MonoArchiveCurrentRegistrationReceiptV1, text>:
+    mono_archive_collect_current_named_registration_in_owned_scope_v1(current, module,
+        logical_name, body, warnings, true)
+
+fn mono_archive_collect_current_named_registration_in_owned_scope_v1(current: MonoArchiveCurrentRegistrationOwnerV1,
+        module: HirModule, module_name: text, body: MonoArchiveCurrentBodyV1,
+        warnings: [text], logical_capture: bool) -> Result<MonoArchiveCurrentRegistrationReceiptV1, text>:
+    if transient_array_scope_state_v1() != 1:
+        return Err("current registration capture requires active unpaused parent scope")
+    val owner = current.registration
+    val predecessor = mono_archive_current_registration_digest_v1(current)
+    if predecessor == "" or predecessor != current.published_digest:
+        return Err("fresh current registration predecessor refused")
+    val archive = body.original_parent
+    val current_digest = mono_archive_current_body_digest_v1(body)
+    if current_digest == "" or owner.sealed or owner.state.queue.len() != 0 or
+            owner.logical_mode != logical_capture or module_name == "" or owner.archives.has(module_name) or
+            module.name != archive.input.module_name or (not logical_capture and module_name != archive.input.module_name) or
+            module.path != archive.input.source_path or
+            owner.state.facts.feature_policy != env_get("SIMPLE_MONO_LEVELS") or
+            sha256_text(hir_module_encode(module)) != body.current_body_digest or
+            hir_body_archive_warnings_digest_v1(warnings) != body.current_warnings_digest:
+        return Err("current registration module, predecessor, or body identity refused")
+    if owner.roots.len() > 0:
+        val first: HirBodyArchiveV1 = owner.archives[owner.roots[0].module_name]
+        if first.input.closure_digest != archive.input.closure_digest or
+                first.input.producer_header != archive.input.producer_header or
+                first.input.runtime_provider_digest != archive.input.runtime_provider_digest or
+                first.input.provider_selection_digest != archive.input.provider_selection_digest or
+                first.input.runtime_provider_receipt_path != archive.input.runtime_provider_receipt_path:
+            return Err("current registration selected closure, producer, or provider differs")
+    val collected = mono_archive_collect_complete_registration_v1(owner, module, module_name, archive)
+    if collected.is_err(): return Err(collected.unwrap_err())
+    val receipt = collected.unwrap()
+    Ok(MonoArchiveCurrentRegistrationReceiptV1(current_body: body, registration: receipt,
+        base_current_digest: predecessor,
+        seal: sha256_text("mono-current-registration-v1\n" + current_digest + "\n" + predecessor + "\n" + receipt.seal)))
+
+# Mechanical publication re-reads the exact complete current artifact and
+# re-collects its rows before state mutation. It is not final/prerequisite
+# admission; the driver still must replay and accept the transform owner.
+fn mono_archive_publish_current_registration_v1(current: MonoArchiveCurrentRegistrationOwnerV1,
+        receipt: MonoArchiveCurrentRegistrationReceiptV1) -> Result<bool, text>:
+    if transient_array_scope_state_v1() != 0 or hir_cache_last_warnings().len() != 0:
+        return Err("current registration publication requires closed lease")
+    if not transient_scope_begin(): return Err("current registration publication scope unavailable")
+    val owner = current.registration
+    var valid = false
+    val loaded = mono_archive_current_body_load_in_owned_scope_v1(current.cache, receipt.current_body)
+    if loaded.is_ok():
+        val body = loaded.unwrap()
+        val exact = mono_archive_collect_current_named_registration_in_owned_scope_v1(current,
+            body.module, mono_archive_registration_receipt_module_name_v1(receipt.registration),
+            receipt.current_body, body.warnings, receipt.registration.logical_name != "")
+        valid = exact.is_ok() and exact.unwrap().seal == receipt.seal and
+            exact.unwrap().base_current_digest == receipt.base_current_digest and
+            exact.unwrap().registration.seal == receipt.registration.seal and
+            receipt.registration.seal == mono_archive_registration_receipt_seal_v1(receipt.registration)
+    val schedule = if valid: mono_archive_registration_schedule_digest_v1(owner.roots +
+        [MonoArchiveRootOrderV1(module_name: mono_archive_registration_receipt_module_name_v1(receipt.registration),
+            symbols: receipt.registration.roots)]) else: ""
+    valid = valid and schedule != ""
+    val next_digest = if valid: mono_archive_current_registration_scratch_successor_v1(current, receipt, schedule) else: ""
+    valid = valid and next_digest != ""
+    val paused = transient_scope_pause()
+    # @workaround bug=a174_transient_promote_inference_2026_10_16 recover=03d33d497ac6d1408683493f74ff9db434e4cfa3 reason=retain-explicit-text-owner-at-generic-promotion
+    val digest_owned = if paused and valid: transient_promote<text>(next_digest) and transient_promote<text>(schedule) else: false
+    val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    if paused: hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not ended or not cache_owned or (valid and not digest_owned): panic("current registration publication ownership")
+    if not valid: return Err("current registration body, rows, or predecessor refused")
+    val installed = mono_archive_registration_install_v1(owner, receipt.registration, schedule)
+    if installed.is_err(): return installed
+    current.bodies[mono_archive_registration_receipt_module_name_v1(receipt.registration)] = receipt.current_body
+    current.published_digest = next_digest
+    Ok(true)
+
+# The body walker is shared with fresh post-HIR collection. Its callers must
+# validate their distinct complete-body stage before entering here; no reader
+# or publication authority is inferred from this internal operation.
+fn mono_archive_collect_complete_registration_v1(owner: MonoArchiveRegistrationOwnerV1,
+        module: HirModule, module_name: text, archive: HirBodyArchiveV1) -> Result<MonoArchiveRegistrationReceiptV1, text>:
+    val base = mono_archive_registration_owner_digest_v1(owner)
+    if base == "": return Err("registration predecessor unavailable")
+    val worker = mono_archive_registration_scratch_collector_v1(owner)
+    worker.module_paths[module_name] = module.path
+    # Preserve exact registration sequence and cross-module collision effects.
+    worker.collect_declared_globals(module, module_name)
+    worker.collect_generics(module, module_name)
+    if worker.generic_functions.len() != 0 or worker.generic_structs.len() != 0 or
+            worker.generic_classes.len() != 0 or worker.module_symbols.len() != 0:
+        return Err("registration collector retained complete provider owners")
+    var roots: [i64] = []
+    val functions: [HirFunction] = module.functions.values()
+    for index in sorted_function_indices(functions):
+        val function: HirFunction = functions[index]
+        if not is_generic_function(function) and not function.is_generic_template:
+            roots = roots.push(function.symbol.id)
+    val facts = owner.state.facts
+    var rows: [MonoArchiveRegistrationRowV1] = []
+    # The archive owner already encoded this exact module and sealed its digest;
+    # do not serialize the complete HIR body again merely to name a body-free
+    # symbol projection. The archive key binds the input, body, and warnings.
+    val projection = hir_mono_symbol_projection_encode_v1(module.symbols,
+        sha256_text(archive.archive_key + "\n" + archive.body_digest))
+    if projection == "": return Err("registration actual nominal symbol projection refused")
+    rows.push(MonoArchiveRegistrationRowV1.SymbolProjection(module_name, projection))
+    for key in worker.sym_names.keys().sort():
+        val row = MonoArchiveRegistrationRowV1.SymbolName(key, worker.sym_names[key])
+        val changed = not facts.sym_names.has(key) or
+            mono_archive_registration_row_digest_v1(row) !=
+                mono_archive_registration_row_digest_v1(MonoArchiveRegistrationRowV1.SymbolName(key, facts.sym_names[key]))
+        if changed: rows = rows.push(row)
+    for key in worker.fn_returns.keys().sort():
+        val row = MonoArchiveRegistrationRowV1.FunctionReturn(key, worker.fn_returns[key])
+        val changed = not facts.fn_returns.has(key) or
+            mono_archive_registration_row_digest_v1(row) !=
+                mono_archive_registration_row_digest_v1(MonoArchiveRegistrationRowV1.FunctionReturn(key, facts.fn_returns[key]))
+        if changed: rows = rows.push(row)
+    for key in worker.fn_sigs.keys().sort():
+        val row = MonoArchiveRegistrationRowV1.FunctionSignature(key, worker.fn_sigs[key])
+        val changed = not facts.fn_sigs.has(key) or
+            mono_archive_registration_row_digest_v1(row) !=
+                mono_archive_registration_row_digest_v1(MonoArchiveRegistrationRowV1.FunctionSignature(key, facts.fn_sigs[key]))
+        if changed: rows = rows.push(row)
+    for key in worker.named_types.keys().sort():
+        val row = MonoArchiveRegistrationRowV1.NamedType(key, worker.named_types[key])
+        val changed = not facts.named_types.has(key) or
+            mono_archive_registration_row_digest_v1(row) !=
+                mono_archive_registration_row_digest_v1(MonoArchiveRegistrationRowV1.NamedType(key, facts.named_types[key]))
+        if changed: rows = rows.push(row)
+    for key in worker.named_ambiguous.keys().sort():
+        val row = MonoArchiveRegistrationRowV1.NamedAmbiguous(key, worker.named_ambiguous[key])
+        val changed = not facts.named_ambiguous.has(key) or
+            mono_archive_registration_row_digest_v1(row) !=
+                mono_archive_registration_row_digest_v1(MonoArchiveRegistrationRowV1.NamedAmbiguous(key, facts.named_ambiguous[key]))
+        if changed: rows = rows.push(row)
+    for key in worker.named_symbol_names.keys().sort():
+        val row = MonoArchiveRegistrationRowV1.NamedSymbolName(key, worker.named_symbol_names[key])
+        val changed = not facts.named_symbol_names.has(key) or
+            mono_archive_registration_row_digest_v1(row) !=
+                mono_archive_registration_row_digest_v1(MonoArchiveRegistrationRowV1.NamedSymbolName(key, facts.named_symbol_names[key]))
+        if changed: rows = rows.push(row)
+    for key in worker.field_types.keys().sort():
+        val row = MonoArchiveRegistrationRowV1.FieldType(key, worker.field_types[key])
+        val changed = not facts.field_types.has(key) or
+            mono_archive_registration_row_digest_v1(row) !=
+                mono_archive_registration_row_digest_v1(MonoArchiveRegistrationRowV1.FieldType(key, facts.field_types[key]))
+        if changed: rows = rows.push(row)
+    for key in worker.field_owner_modules.keys().sort():
+        val row = MonoArchiveRegistrationRowV1.FieldOwner(key, worker.field_owner_modules[key])
+        val changed = not facts.field_owner_modules.has(key) or
+            mono_archive_registration_row_digest_v1(row) !=
+                mono_archive_registration_row_digest_v1(MonoArchiveRegistrationRowV1.FieldOwner(key, facts.field_owner_modules[key]))
+        if changed: rows = rows.push(row)
+    for key in worker.enum_payload_types.keys().sort():
+        val row = MonoArchiveRegistrationRowV1.EnumPayloadType(key, worker.enum_payload_types[key])
+        val changed = not facts.enum_payload_types.has(key) or
+            mono_archive_registration_row_digest_v1(row) !=
+                mono_archive_registration_row_digest_v1(MonoArchiveRegistrationRowV1.EnumPayloadType(key, facts.enum_payload_types[key]))
+        if changed: rows = rows.push(row)
+    for key in worker.module_paths.keys().sort():
+        val row = MonoArchiveRegistrationRowV1.ModulePath(key, worker.module_paths[key])
+        val changed = not facts.module_paths.has(key) or
+            mono_archive_registration_row_digest_v1(row) !=
+                mono_archive_registration_row_digest_v1(MonoArchiveRegistrationRowV1.ModulePath(key, facts.module_paths[key]))
+        if changed: rows = rows.push(row)
+    for key in worker.template_module.keys().sort():
+        val row = MonoArchiveRegistrationRowV1.TemplateModule(key, worker.template_module[key])
+        val changed = not facts.template_module.has(key) or
+            mono_archive_registration_row_digest_v1(row) !=
+                mono_archive_registration_row_digest_v1(MonoArchiveRegistrationRowV1.TemplateModule(key, facts.template_module[key]))
+        if changed: rows = rows.push(row)
+    for key in worker.generic_methods.keys().sort():
+        val row = MonoArchiveRegistrationRowV1.GenericMethod(key, worker.generic_methods[key])
+        val changed = not facts.generic_methods.has(key) or
+            mono_archive_registration_row_digest_v1(row) !=
+                mono_archive_registration_row_digest_v1(MonoArchiveRegistrationRowV1.GenericMethod(key, facts.generic_methods[key]))
+        if changed: rows = rows.push(row)
+    for key in worker.generic_method_rejected.keys().sort():
+        val row = MonoArchiveRegistrationRowV1.RejectedMethod(key, worker.generic_method_rejected[key])
+        val changed = not facts.generic_method_rejected.has(key) or
+            mono_archive_registration_row_digest_v1(row) !=
+                mono_archive_registration_row_digest_v1(MonoArchiveRegistrationRowV1.RejectedMethod(key, facts.generic_method_rejected[key]))
+        if changed: rows = rows.push(row)
+    for key in worker.generic_type_params.keys().sort():
+        val row = MonoArchiveRegistrationRowV1.GenericTypeParams(key, worker.generic_type_params[key])
+        val changed = not facts.generic_type_params.has(key) or
+            mono_archive_registration_row_digest_v1(row) !=
+                mono_archive_registration_row_digest_v1(MonoArchiveRegistrationRowV1.GenericTypeParams(key, facts.generic_type_params[key]))
+        if changed: rows = rows.push(row)
+    for key in worker.generic_type_modules.keys().sort():
+        val row = MonoArchiveRegistrationRowV1.GenericTypeModule(key, worker.generic_type_modules[key])
+        val changed = not facts.generic_type_modules.has(key) or
+            mono_archive_registration_row_digest_v1(row) !=
+                mono_archive_registration_row_digest_v1(MonoArchiveRegistrationRowV1.GenericTypeModule(key, facts.generic_type_modules[key]))
+        if changed: rows = rows.push(row)
+    for key in worker.generic_type_field_names.keys().sort():
+        val row = MonoArchiveRegistrationRowV1.GenericFieldNames(key, worker.generic_type_field_names[key])
+        val changed = not facts.generic_type_field_names.has(key) or
+            mono_archive_registration_row_digest_v1(row) !=
+                mono_archive_registration_row_digest_v1(MonoArchiveRegistrationRowV1.GenericFieldNames(key, facts.generic_type_field_names[key]))
+        if changed: rows = rows.push(row)
+    for key in worker.generic_type_fields.keys().sort():
+        val row = MonoArchiveRegistrationRowV1.GenericFieldType(key, worker.generic_type_fields[key])
+        val changed = not facts.generic_type_fields.has(key) or
+            mono_archive_registration_row_digest_v1(row) !=
+                mono_archive_registration_row_digest_v1(MonoArchiveRegistrationRowV1.GenericFieldType(key, facts.generic_type_fields[key]))
+        if changed: rows = rows.push(row)
+    for key in worker.declared_global_types.keys().sort():
+        val row = MonoArchiveRegistrationRowV1.DeclaredGlobalType(key, worker.declared_global_types[key])
+        val changed = not facts.declared_global_types.has(key) or
+            mono_archive_registration_row_digest_v1(row) !=
+                mono_archive_registration_row_digest_v1(MonoArchiveRegistrationRowV1.DeclaredGlobalType(key, facts.declared_global_types[key]))
+        if changed: rows = rows.push(row)
+    for key in worker.archive_template_signatures.keys().sort():
+        val row = MonoArchiveRegistrationRowV1.TemplateSignature(key, worker.archive_template_signatures[key])
+        val changed = not facts.templates.has(key) or
+            mono_archive_registration_row_digest_v1(row) !=
+                mono_archive_registration_row_digest_v1(MonoArchiveRegistrationRowV1.TemplateSignature(key, facts.templates[key]))
+        if changed: rows = rows.push(row)
+    for key in worker.template_recipes.keys().sort():
+        val row = MonoArchiveRegistrationRowV1.TemplateRecipe(key, worker.template_recipes[key])
+        val changed = not facts.recipes.has(key) or
+            mono_archive_registration_row_digest_v1(row) !=
+                mono_archive_registration_row_digest_v1(MonoArchiveRegistrationRowV1.TemplateRecipe(key, facts.recipes[key]))
+        if changed: rows = rows.push(row)
+    for key in worker.archive_symbol_identities.keys().sort():
+        val row = MonoArchiveRegistrationRowV1.SymbolIdentity(key, worker.archive_symbol_identities[key])
+        val changed = not facts.symbol_identities.has(key) or
+            mono_archive_registration_row_digest_v1(row) !=
+                mono_archive_registration_row_digest_v1(MonoArchiveRegistrationRowV1.SymbolIdentity(key, facts.symbol_identities[key]))
+        if changed: rows = rows.push(row)
+    for key in worker.archive_nominal_rows.keys().sort():
+        val row = MonoArchiveRegistrationRowV1.NominalDeclarationV2(key, worker.archive_nominal_rows[key])
+        val changed = not facts.nominal_rows.has(key) or
+            mono_archive_nominal_digest_v2(worker.archive_nominal_rows[key]) != mono_archive_nominal_digest_v2(facts.nominal_rows[key])
+        if changed: rows = rows.push(row)
+    var receipt = MonoArchiveRegistrationReceiptV1(archive: archive,
+        base_digest: base, base_epoch: owner.epoch, rows: rows, roots: roots,
+        next_symbol: worker.next_symbol,
+        generic_functions: worker.stats.generic_functions_found,
+        generic_structs: worker.stats.generic_structs_found,
+        generic_classes: worker.stats.generic_classes_found, seal: "",
+        logical_name: if owner.logical_mode: module_name else: "")
+    receipt.seal = mono_archive_registration_receipt_seal_v1(receipt)
+    if receipt.seal == "": return Err("registration publication unavailable")
+    Ok(receipt)
+
+fn mono_archive_registration_close_v1(schedule: text, admitted: bool):
+    val paused = transient_scope_pause()
+    val schedule_owned = if paused and admitted: transient_promote(schedule) else: false
+    val owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    if paused: hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not owned or not ended or (admitted and not schedule_owned): panic("registration verification ownership")
+
+fn mono_archive_publish_registration_v1(owner: MonoArchiveRegistrationOwnerV1,
+        receipt: MonoArchiveRegistrationReceiptV1) -> Result<bool, text>:
+    if not hir_cache_enabled() or hir_cache_last_warnings().len() != 0:
+        return Err("registration publication cache owner unavailable")
+    if not transient_scope_begin(): return Err("registration publication scope unavailable")
+    var valid = false
+    var refusal = "registration predecessor or archive authority refused"
+    if not owner.sealed and receipt.base_epoch == owner.epoch and receipt.base_digest != "" and
+            receipt.base_digest == mono_archive_registration_owner_digest_v1(owner) and
+            receipt.seal != "" and receipt.seal == mono_archive_registration_receipt_seal_v1(receipt) and
+            not owner.archives.has(receipt.archive.input.module_name) and
+            hir_body_archive_matches_v1(receipt.archive, receipt.archive.input):
+        if val decoded = hir_cache_load_in_owned_scope(receipt.archive.archive_key):
+            refusal = "registration archived warning identity refused"
+            if hir_body_archive_warnings_digest_v1(hir_cache_last_warnings()) == receipt.archive.lowering_warnings_digest:
+                # Re-run the same actual collector on the admitted complete
+                # body. This proves updates/collisions/order, not just a seal of
+                # caller-created dictionary snapshots.
+                val exact = mono_archive_collect_registration_in_owned_scope_v1(owner,
+                    decoded, receipt.archive.input.module_name, receipt.archive)
+                if exact.is_err():
+                    refusal = "registration exact recollection refused: " + exact.unwrap_err()
+                else:
+                    valid = exact.unwrap().seal == receipt.seal
+                    if not valid:
+                        refusal = mono_archive_registration_receipt_difference_v1(receipt, exact.unwrap())
+        else:
+            refusal = "registration archived body decode refused"
+    val schedule = if valid: mono_archive_registration_schedule_digest_v1(owner.roots +
+        [MonoArchiveRootOrderV1(module_name: receipt.archive.input.module_name, symbols: receipt.roots)]) else: ""
+    if valid and schedule == "": refusal = "registration ordered schedule refused"
+    valid = valid and schedule != ""
+    mono_archive_registration_close_v1(schedule, valid)
+    if not valid: return Err(refusal)
+    mono_archive_registration_install_v1(owner, receipt, schedule)
+
+fn mono_archive_registration_install_v1(owner: MonoArchiveRegistrationOwnerV1,
+        receipt: MonoArchiveRegistrationReceiptV1, schedule: text) -> Result<bool, text>:
+    # Only promoted typed row payloads enter existing resident indexes, AFTER
+    # scratch ends. There is no worker/facts/full-index clone promotion.
+    for row in receipt.rows:
+        match row:
+            case MonoArchiveRegistrationRowV1.SymbolName(key, value): owner.state.facts.sym_names[key] = value
+            case MonoArchiveRegistrationRowV1.FunctionReturn(key, value): owner.state.facts.fn_returns[key] = value
+            case MonoArchiveRegistrationRowV1.FunctionSignature(key, value): owner.state.facts.fn_sigs[key] = value
+            case MonoArchiveRegistrationRowV1.NamedType(key, value): owner.state.facts.named_types[key] = value
+            case MonoArchiveRegistrationRowV1.NamedAmbiguous(key, value):
+                owner.state.facts.named_ambiguous[key] = value
+                if value and owner.state.facts.named_types.has(key):
+                    # The collector removes a collided display name, so its
+                    # NamedAmbiguous row must also retire the resident winner.
+                    # Rebuild the index: Dict.remove has different return
+                    # semantics on interpreted and native compiler lanes.
+                    var unambiguous: Dict<text, HirType> = {}
+                    for name in owner.state.facts.named_types.keys():
+                        if name != key: unambiguous[name] = owner.state.facts.named_types[name]
+                    var facts = owner.state.facts
+                    facts.named_types = unambiguous
+                    owner.state.facts = facts
+            case MonoArchiveRegistrationRowV1.NamedSymbolName(key, value): owner.state.facts.named_symbol_names[key] = value
+            case MonoArchiveRegistrationRowV1.FieldType(key, value): owner.state.facts.field_types[key] = value
+            case MonoArchiveRegistrationRowV1.FieldOwner(key, value): owner.state.facts.field_owner_modules[key] = value
+            case MonoArchiveRegistrationRowV1.EnumPayloadType(key, value): owner.state.facts.enum_payload_types[key] = value
+            case MonoArchiveRegistrationRowV1.ModulePath(key, value): owner.state.facts.module_paths[key] = value
+            case MonoArchiveRegistrationRowV1.TemplateModule(key, value): owner.state.facts.template_module[key] = value
+            case MonoArchiveRegistrationRowV1.GenericMethod(key, value): owner.state.facts.generic_methods[key] = value
+            case MonoArchiveRegistrationRowV1.RejectedMethod(key, value): owner.state.facts.generic_method_rejected[key] = value
+            case MonoArchiveRegistrationRowV1.GenericTypeParams(key, value): owner.state.facts.generic_type_params[key] = value
+            case MonoArchiveRegistrationRowV1.GenericTypeModule(key, value): owner.state.facts.generic_type_modules[key] = value
+            case MonoArchiveRegistrationRowV1.GenericFieldNames(key, value): owner.state.facts.generic_type_field_names[key] = value
+            case MonoArchiveRegistrationRowV1.GenericFieldType(key, value): owner.state.facts.generic_type_fields[key] = value
+            case MonoArchiveRegistrationRowV1.DeclaredGlobalType(key, value): owner.state.facts.declared_global_types[key] = value
+            case MonoArchiveRegistrationRowV1.TemplateSignature(key, value): owner.state.facts.templates[key] = value
+            case MonoArchiveRegistrationRowV1.TemplateRecipe(key, value): owner.state.facts.recipes[key] = value
+            case MonoArchiveRegistrationRowV1.SymbolIdentity(key, value): owner.state.facts.symbol_identities[key] = value
+            case MonoArchiveRegistrationRowV1.NominalDeclarationV2(key, value):
+                if not owner.state.facts.nominal_rows.has(key):
+                    val prior: [text] = owner.state.facts.nominal_keys[value.module_name] ?? []
+                    owner.state.facts.nominal_keys[value.module_name] = prior.push(key)
+                owner.state.facts.nominal_rows[key] = value
+            case MonoArchiveRegistrationRowV1.SymbolProjection(key, value): owner.state.facts.symbol_projections[key] = value
+    owner.state.next_symbol = receipt.next_symbol
+    var facts = owner.state.facts
+    facts.initial_symbol = receipt.next_symbol
+    owner.state.facts = facts
+    val name = mono_archive_registration_receipt_module_name_v1(receipt)
+    owner.archives[name] = receipt.archive
+    owner.roots = owner.roots.push(MonoArchiveRootOrderV1(
+        module_name: name, symbols: receipt.roots))
+    owner.generic_functions = owner.generic_functions + receipt.generic_functions
+    owner.generic_structs = owner.generic_structs + receipt.generic_structs
+    owner.generic_classes = owner.generic_classes + receipt.generic_classes
+    owner.epoch = owner.epoch + 1
+    owner.published_schedule_digest = schedule
+    Ok(true)
+
+fn mono_archive_registration_seal_v1(owner: MonoArchiveRegistrationOwnerV1,
+        expected_inventory: Dict<text, text>,
+        expected_order: [text]) -> Result<MonoArchiveAdmissionV1, text>:
+    # Names, paths and order MUST come from the already admitted driver inventory.
+    # Collision winners depend on collection order; a sorted repository digest
+    # alone cannot establish that the admitted schedule was followed.
+    if owner.sealed or owner.logical_mode or not hir_cache_enabled() or hir_cache_last_warnings().len() != 0:
+        return Err("registration seal owner unavailable")
+    if not transient_scope_begin(): return Err("registration seal scope unavailable")
+    var valid = owner.state.facts.feature_policy == env_get("SIMPLE_MONO_LEVELS") and
+        owner.archives.len() == expected_inventory.len() and
+        owner.roots.len() == expected_inventory.len() and
+        expected_order.len() == expected_inventory.len()
+    var seen: Dict<text, bool> = {}
+    var index = 0
+    for name in expected_order:
+        if seen.has(name) or not expected_inventory.has(name): valid = false
+        seen[name] = true
+        if index >= owner.roots.len():
+            valid = false
+        else:
+            if owner.roots[index].module_name != name: valid = false
+        index = index + 1
+    for name in expected_inventory.keys():
+        if not owner.archives.has(name) or
+                owner.archives[name].input.source_path != expected_inventory[name]: valid = false
+    val schedule = mono_archive_registration_schedule_digest_v1(owner.roots)
+    valid = valid and schedule != "" and schedule == owner.published_schedule_digest
+    val authority = if valid: mono_archive_repository_authority_v1(owner.archives) else: ""
+    valid = valid and authority != ""
+    val paused = transient_scope_pause()
+    # @workaround bug=a174_transient_promote_inference_2026_10_16 recover=03d33d497ac6d1408683493f74ff9db434e4cfa3 reason=retain-explicit-text-owner-at-generic-promotion
+    val owned = if paused and valid: transient_promote<text>(authority) and transient_promote<text>(schedule) else: false
+    val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    if paused: hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not ended or not cache_owned or (valid and not owned):
+        panic("registration seal ownership")
+    if not valid: return Err("registration full inventory or authority refused")
+    var facts = owner.state.facts
+    facts.body_authority = authority
+    owner.state.facts = facts
+    owner.sealed = true
+    owner.sealed_schedule_digest = schedule
+    Ok(MonoArchiveAdmissionV1(repository: MonoArchiveRepositoryV1(
+        modules: owner.archives, authority: authority), state: owner.state))
+
+export mono_archive_registration_create_v1, mono_archive_collect_registration_in_owned_scope_v1
+export mono_archive_publish_registration_v1, mono_archive_registration_seal_v1
+export mono_archive_collect_current_registration_in_owned_scope_v1
+export mono_archive_current_registration_create_v1
+export mono_archive_logical_current_registration_create_v1, mono_archive_collect_logical_current_registration_in_owned_scope_v1
+export mono_archive_publish_current_registration_v1
+export use compiler.mono.mono_archive_registration_types_v1.{MonoArchiveRegistrationRowV1,
+    MonoArchiveRootOrderV1, MonoArchiveRegistrationOwnerV1, MonoArchiveRegistrationReceiptV1,
+    MonoArchiveCurrentRegistrationOwnerV1, MonoArchiveCurrentRegistrationReceiptV1}
+export use compiler.mono.mono_archive_registration_identity_v1.{mono_archive_registration_schedule_digest_v1,
+    mono_archive_registration_owner_digest_v1, mono_archive_current_registration_digest_v1}
+export use compiler.mono.mono_archive_current_registration_seal_v1.{mono_archive_current_registration_seal_v1}

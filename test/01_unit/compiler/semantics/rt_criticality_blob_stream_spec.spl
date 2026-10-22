@@ -1,0 +1,216 @@
+"""Streamed blob validation parity for rt_criticality.
+
+Bug stage3_rt_criticality_validation_memory_spike_2026_10_19: the blobs
+validator decoded every Stage-3 validation blob, re-encoded it and RETAINED
+every decoded HirModule (~30 MB each, 1315 modules) with no transient scope,
+growing the compiler from 6.2 GB to 42 GB after HIR lowering. The streamed
+replacement decodes one blob per scope and keeps only the RT facts; its
+diagnostics must stay byte-identical to the in-memory array oracle.
+"""
+
+use std.spec.*
+use std.io.{file_read}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end}
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.semantics.rt_criticality.{RtCriticalDiagnostic, RtCriticalDiagnosticSeverity}
+use compiler.semantics.rt_criticality_validation.{validate_rt_criticality_diagnostics_blobs, validate_rt_criticality_diagnostics_array}
+use compiler.frontend.rt_criticality_registry.{rt_criticality_reset, rt_criticality_declare, rt_criticality_claim_keys}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirFunction, HirBlock}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolTable}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.attributes.{FunctionAttr}
+
+extern fn rt_heap_live_bytes() -> i64
+
+val RT_VALIDATION = "src/compiler/35.semantics/rt_criticality_validation.spl"
+
+fn unit_type() -> HirType:
+    HirType(kind: HirTypeKind.Unit, span: Span.default())
+
+fn unit_lit() -> HirExpr:
+    HirExpr(kind: HirExprKind.UnitLit, has_type_: true, type_: unit_type(), span: Span.default())
+
+# A direct call through a symbol id: resolved against the cross-module
+# `names` table, so pass 2 of the streamed validator must see every module's
+# declarations, not only its own.
+fn call_symbol(id: i64) -> HirExpr:
+    val callee = HirExpr(kind: HirExprKind.Var(SymbolId(id: id)), has_type_: false,
+        type_: unit_type(), span: Span.default())
+    HirExpr(kind: HirExprKind.Call(callee, [], []), has_type_: true,
+        type_: unit_type(), span: Span.default())
+
+fn stream_fn(id: i64, name: text, attr: FunctionAttr, value: HirExpr) -> HirFunction:
+    HirFunction(
+        symbol: SymbolId(id: id), name: name, type_params: [], params: [],
+        return_type: unit_type(),
+        body: HirBlock(stmts: [], has: true, value: value, span: Span.default()),
+        effects: [], visibility: Visibility.Public,
+        is_async: false, is_static: false, is_public: true, is_method: false,
+        is_mutable: false, is_const: false, is_extern: false, func_attr: attr,
+        has_export_attr: false, export_attr: nil,
+        has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_suspension: false, has_vhdl_metadata: false, vhdl_metadata: nil,
+        has_doc_comment: false, doc_comment: "", span: Span.default())
+
+fn stream_module(name: text, path: text, fns: [HirFunction]) -> HirModule:
+    var functions: Dict<SymbolId, HirFunction> = {}
+    for raw_fn in fns:
+        val fn_: HirFunction = raw_fn
+        functions[fn_.symbol] = fn_
+    HirModule(name: name, path: path, imports: [], exports: [],
+        domain_blocks: [], symbols: SymbolTable.new(), functions: functions,
+        classes: {}, structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [],
+        constants: {}, static_asserts: [], aop_advices: [], di_bindings: [],
+        arch_rules: [], mock_decls: [], types: [])
+
+fn hal_attr() -> FunctionAttr:
+    var attr = FunctionAttr.default()
+    attr.is_rt_hal = true
+    attr
+
+# Six modules: a plain one, a claimed allocator, a HAL root, a cross-module
+# caller of the allocator, and two modules declaring the same bare name so
+# the ambiguity path of the fact graph runs as well.
+fn stream_fleet() -> [HirModule]:
+    [stream_module("stream_m0", "synthetic/stream_m0.spl",
+        [stream_fn(9001, "plain_tick", FunctionAttr.default(), unit_lit())]),
+     stream_module("stream_m1", "synthetic/stream_m1.spl",
+        [stream_fn(9002, "malloc_tick", FunctionAttr.default(), unit_lit())]),
+     stream_module("stream_m2", "synthetic/stream_m2.spl",
+        [stream_fn(9003, "malloc_hal_entry", hal_attr(), unit_lit())]),
+     stream_module("stream_m3", "synthetic/stream_m3.spl",
+        [stream_fn(9004, "caller_tick", FunctionAttr.default(), call_symbol(9002))]),
+     stream_module("stream_m4", "synthetic/stream_m4.spl",
+        [stream_fn(9005, "shared_tick", FunctionAttr.default(), unit_lit())]),
+     stream_module("stream_m5", "synthetic/stream_m5.spl",
+        [stream_fn(9006, "shared_tick", FunctionAttr.default(), call_symbol(9005))])]
+
+fn encode_fleet(modules: [HirModule]) -> [text]:
+    var blobs: [text] = []
+    for raw_module in modules:
+        val module: HirModule = raw_module
+        val blob = hir_module_encode(module)
+        expect(blob == "").to_equal(false)
+        blobs.push(blob)
+    blobs
+
+# No transient scope may survive the validator: a fresh scope must open (and
+# is closed again here). A leaked scope would make begin() answer false.
+fn no_scope_leaked() -> bool:
+    if not transient_scope_begin(): return false
+    transient_scope_end()
+
+fn same_diagnostics(actual: [RtCriticalDiagnostic], oracle: [RtCriticalDiagnostic]) -> bool:
+    if actual.len() != oracle.len(): return false
+    var index = 0
+    while index < actual.len():
+        val a: RtCriticalDiagnostic = actual[index]
+        val o: RtCriticalDiagnostic = oracle[index]
+        if a.message != o.message: return false
+        if a.severity != o.severity: return false
+        index = index + 1
+    true
+
+describe "RT criticality streamed blob validation":
+    it "matches the array oracle for a no-claim inventory and stays empty":
+        rt_criticality_reset()
+        val modules = stream_fleet()
+        val blobs = encode_fleet(modules)
+        # Drop the HAL module: no claims and no HAL root is the Stage-3 shape.
+        var plain: [HirModule] = []
+        var plain_blobs: [text] = []
+        var index = 0
+        while index < modules.len():
+            if index != 2:
+                plain.push(modules[index])
+                plain_blobs.push(blobs[index])
+            index = index + 1
+        expect(rt_criticality_claim_keys().len()).to_equal(0)
+        val oracle = validate_rt_criticality_diagnostics_array(plain)
+        expect(oracle.len()).to_equal(0)
+        val streamed = validate_rt_criticality_diagnostics_blobs(plain_blobs, plain)
+        expect(same_diagnostics(streamed, oracle)).to_equal(true)
+        val without_fallback = validate_rt_criticality_diagnostics_blobs(plain_blobs, [])
+        expect(same_diagnostics(without_fallback, oracle)).to_equal(true)
+        expect(no_scope_leaked()).to_equal(true)
+
+    it "matches the array oracle byte for byte with real claims, HAL and cross-module callees":
+        rt_criticality_reset()
+        rt_criticality_declare("synthetic/stream_m1.spl", "malloc_tick", "critical")
+        rt_criticality_declare("synthetic/stream_m3.spl", "caller_tick", "critical")
+        rt_criticality_declare("synthetic/stream_m5.spl", "shared_tick", "critical")
+        val modules = stream_fleet()
+        val blobs = encode_fleet(modules)
+        val oracle = validate_rt_criticality_diagnostics_array(modules)
+        # The claims and the HAL root must produce real policy output, so the
+        # streamed fact pass (pass 2) is proven to run, not short-circuited.
+        expect(oracle.len() > 0).to_equal(true)
+        # Roots are reported by stable id (module key # symbol id): the caller
+        # claim in stream_m3 must reach the policy through the callee table.
+        var has_callee_closure = false
+        for raw_diagnostic in oracle:
+            val diagnostic: RtCriticalDiagnostic = raw_diagnostic
+            print "oracle: {diagnostic.message}"
+            if diagnostic.message.contains("stream_m3#9004"): has_callee_closure = true
+        expect(has_callee_closure).to_equal(true)
+        val streamed = validate_rt_criticality_diagnostics_blobs(blobs, modules)
+        for raw_streamed in streamed:
+            val streamed_diagnostic: RtCriticalDiagnostic = raw_streamed
+            print "streamed: {streamed_diagnostic.message}"
+        expect(same_diagnostics(streamed, oracle)).to_equal(true)
+        val without_fallback = validate_rt_criticality_diagnostics_blobs(blobs, [])
+        expect(same_diagnostics(without_fallback, oracle)).to_equal(true)
+        expect(no_scope_leaked()).to_equal(true)
+        rt_criticality_reset()
+
+    it "keeps the array oracle's last-wins owner for duplicate module names":
+        rt_criticality_reset()
+        rt_criticality_declare("synthetic/stream_dup_b.spl", "malloc_dup", "critical")
+        val modules = [
+            stream_module("stream_dup", "synthetic/stream_dup_a.spl",
+                [stream_fn(9101, "malloc_dup", FunctionAttr.default(), unit_lit())]),
+            stream_module("stream_dup", "synthetic/stream_dup_b.spl",
+                [stream_fn(9102, "malloc_dup", FunctionAttr.default(), unit_lit())]),
+            stream_module("stream_m0", "synthetic/stream_m0.spl",
+                [stream_fn(9001, "plain_tick", FunctionAttr.default(), unit_lit())])]
+        val blobs = encode_fleet(modules)
+        val oracle = validate_rt_criticality_diagnostics_array(modules)
+        expect(oracle.len() > 0).to_equal(true)
+        val streamed = validate_rt_criticality_diagnostics_blobs(blobs, modules)
+        expect(same_diagnostics(streamed, oracle)).to_equal(true)
+        rt_criticality_reset()
+
+    it "retains no decoded module outside a per-blob transient scope":
+        val source = file_read(RT_VALIDATION)
+        val blobs_parts = source.split("fn validate_rt_criticality_diagnostics_blobs(")
+        expect(blobs_parts.len()).to_equal(2)
+        val body: text = blobs_parts[1].split("fn validate_rt_criticality_diagnostics_array(")[0]
+        expect(body).to_not_contain("modules_list.push(restored)")
+        expect(body).to_not_contain("var modules_list: [HirModule]")
+        expect(body).to_contain("rt_blob_declaration_census_v1(")
+        expect(body).to_contain("rt_blob_function_facts_v1(")
+        val census_parts = source.split("fn rt_blob_declaration_census_v1(")
+        expect(census_parts.len()).to_equal(2)
+        val census_body: text = census_parts[1].split("\nfn ")[0]
+        expect(census_body).to_contain("transient_scope_begin()")
+        expect(census_body).to_contain("transient_promote(")
+        expect(census_body).to_contain("transient_scope_end()")
+
+    it "does not grow the live heap by the decoded modules when the counter is available":
+        rt_criticality_reset()
+        val modules = stream_fleet()
+        val blobs = encode_fleet(modules)
+        var blob_bytes: i64 = 0
+        for blob in blobs: blob_bytes = blob_bytes + blob.len()
+        val oracle = validate_rt_criticality_diagnostics_array(modules)
+        val before = rt_heap_live_bytes()
+        val streamed = validate_rt_criticality_diagnostics_blobs(blobs, [])
+        val after = rt_heap_live_bytes()
+        expect(same_diagnostics(streamed, oracle)).to_equal(true)
+        if before > 0 and after > 0:
+            # A decoded HirModule is far larger than its blob; retaining six
+            # of them would exceed the whole encoded inventory.
+            expect(after - before < blob_bytes).to_equal(true)
+        else:
+            print "rt_heap_live_bytes unavailable in this runtime (before={before} after={after}); heap assertion skipped"

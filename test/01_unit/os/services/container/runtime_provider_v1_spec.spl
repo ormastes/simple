@@ -1,0 +1,219 @@
+use std.spec.{describe, it, expect}
+use os.services.container.container_manager.{ContainerWorld}
+use os.services.container.container_runtime.{ContainerRuntime}
+use os.services.container.runtime_provider_v1.{SimpleOsContainerProviderV1,
+    SimpleOsContainerStartV1, SimpleOsContainerExitV1,
+    simpleos_container_provider_contract_v1}
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1}
+use os.kernel.loader.spawn_recipes.{SPAWN_RECIPE_APP_LAUNCHER, spawn_recipe_grants, spawn_recipe_seed_parent_caps}
+use os.kernel.loader.workload_image_hash.{workload_image_blake3_hash}
+use os.kernel.security.execution_context.{kernel_call_context_from_task}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.types.task_types.{TaskPriority, TaskId}
+use os.kernel.arch.arch_context.{Architecture}
+use os.services.workload.workload_manifest.{
+    WorkloadIdentitySpec, ImageSpec, AuthorityRequest, IsolationSpec,
+    ResourceBudget, LifecyclePolicy, ObservabilityPolicy, WorkloadManifest,
+    CompiledExecutionPolicy, compile_workload_manifest
+}
+
+fn _push_u16(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out.push((value & 0xFF).to_u8())
+    out.push(((value >> 8) & 0xFF).to_u8())
+    out
+
+fn _push_u32(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out.push((value & 0xFF).to_u8())
+    out.push(((value >> 8) & 0xFF).to_u8())
+    out.push(((value >> 16) & 0xFF).to_u8())
+    out.push(((value >> 24) & 0xFF).to_u8())
+    out
+
+fn _push_u64(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out = _push_u32(out, value & 0xFFFFFFFF)
+    out = _push_u32(out, (value >> 32) & 0xFFFFFFFF)
+    out
+
+fn _minimal_x86_64_elf() -> [u8]:
+    var bytes: [u8] = []
+    bytes.push(0x7F.to_u8())
+    bytes.push(0x45.to_u8())
+    bytes.push(0x4C.to_u8())
+    bytes.push(0x46.to_u8())
+    bytes.push(2.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    while bytes.len() < 16:
+        bytes.push(0.to_u8())
+    bytes = _push_u16(bytes, 2)
+    bytes = _push_u16(bytes, 62)
+    bytes = _push_u32(bytes, 1)
+    bytes = _push_u64(bytes, 0x400000)
+    bytes = _push_u64(bytes, 64)
+    bytes = _push_u64(bytes, 0)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u16(bytes, 64)
+    bytes = _push_u16(bytes, 56)
+    bytes = _push_u16(bytes, 1)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u32(bytes, 1)
+    bytes = _push_u32(bytes, 5)
+    bytes = _push_u64(bytes, 0x80)
+    bytes = _push_u64(bytes, 0x400000)
+    bytes = _push_u64(bytes, 0x400000)
+    bytes = _push_u64(bytes, 4)
+    bytes = _push_u64(bytes, 4)
+    bytes = _push_u64(bytes, 0x1000)
+    while bytes.len() < 0x80:
+        bytes.push(0.to_u8())
+    bytes.push(0xC3.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes
+
+fn _provider_manifest(bytes: [u8]) -> WorkloadManifest:
+    val digest = workload_image_blake3_hash(bytes)
+    WorkloadManifest(
+        identity: WorkloadIdentitySpec(
+            principal_id: "container:worker", tenant_id: "system", image_hash: digest,
+            signer: "test", parent_principal: "pid1", expires_at_ms: 1u64
+        ),
+        image: ImageSpec(executable_path: "/sys/apps/live-worker", content_hash: digest, signer: "test"),
+        authority: AuthorityRequest(grants: spawn_recipe_grants(SPAWN_RECIPE_APP_LAUNCHER)),
+        isolation: IsolationSpec(
+            filesystem_view: "/container/worker", process_view: "private", ipc_view: "private",
+            network_view: "none", syscall_allowlist: [4u64]
+        ),
+        resources: ResourceBudget(
+            cpu_weight: 1u64, memory_pages: 1u64, process_limit: 2u64,
+            io_weight: 1u64, network_bytes: 0u64, wall_time_ms: 1u64
+        ),
+        lifecycle: LifecyclePolicy(restart_policy: "never", max_restarts: 0u64, watchdog_timeout_ms: 0u64),
+        observability: ObservabilityPolicy(audit_required: false, log_retention_ms: 0u64)
+    )
+
+fn _live_parent_scheduler() -> Scheduler:
+    var scheduler = Scheduler.new()
+    scheduler.create_task(
+        0x1000, TaskPriority.High,
+        spawn_recipe_seed_parent_caps(SPAWN_RECIPE_APP_LAUNCHER, 0u64))
+    scheduler.schedule()
+    scheduler
+
+fn given_compiled_container_policy(bytes: [u8], root: text) -> CompiledExecutionPolicy:
+    var manifest = _provider_manifest(bytes)
+    manifest.isolation.filesystem_view = root
+    val compiled = compile_workload_manifest(manifest)
+    expect(compiled.is_ok()).to_be(true)
+    compiled.unwrap()
+
+fn _provider_for_image(image_digest: text) -> SimpleOsContainerProviderV1:
+    var world = ContainerWorld.new()
+    val idx = world.sys_create("worker", "/container/worker", [101u64],
+        image_digest, 100u64, 64u64, 10u64, 4u64, [], false)
+    expect(idx).to_be_greater_than(-1)
+    SimpleOsContainerProviderV1.new(ContainerRuntime.new(world), idx,
+        RuntimeIdentityV1(pod_uid: "worker", attempt: 1, provider_generation: 7,
+            operation_id: "start-1", engine: "simpleos-managed-container-v1",
+            native_id: "", node_boot_id: "boot-1"))
+
+fn expect_runtime_task_binding(started: SimpleOsContainerStartV1):
+    expect(started.operation.status).to_equal("ok")
+    expect(started.operation.state.phase).to_equal("running")
+    val identity = started.operation.state.identity
+    val pid = identity.native_id.to_i64() ?? -1
+    expect(pid).to_be_greater_than(0)
+    expect(identity.pod_uid).to_equal("worker")
+    expect(identity.attempt).to_equal(1)
+    expect(identity.provider_generation).to_equal(7)
+    expect(identity.operation_id).to_equal("start-1")
+    expect(identity.node_boot_id).to_equal("boot-1")
+    expect(started.scheduler.get_task(TaskId(id: pid as u64)) != nil).to_be(true)
+
+fn given_scheduler_task_result(started: SimpleOsContainerStartV1,
+        exit_code: i64) -> Scheduler:
+    var scheduler = started.scheduler
+    val pid = started.operation.state.identity.native_id.to_i64() ?? -1
+    expect(pid).to_be_greater_than(0)
+    scheduler.exit_task_by_id(TaskId(id: pid as u64), exit_code)
+    scheduler
+
+fn expect_reconciled_exit(result: SimpleOsContainerExitV1,
+        native_id: text, exit_code: i64):
+    expect(result.operation.status).to_equal("ok")
+    expect(result.operation.state.phase).to_equal("exited")
+    expect(result.operation.state.identity.native_id).to_equal(native_id)
+    expect(result.operation.state.exit_code).to_equal(exit_code)
+    expect(result.operation.exit_code).to_equal(exit_code)
+    expect(result.ipc.connect("provider-exit-cleanup")).to_be_nil()
+
+describe "SimpleOS managed container provider adapter":
+    it "binds a real task and reconciles only its kernel-observed exit":
+        val bytes = _minimal_x86_64_elf()
+        val policy = given_compiled_container_policy(bytes, "/container/worker")
+        var provider = _provider_for_image(workload_image_blake3_hash(bytes))
+        val scheduler = _live_parent_scheduler()
+        val parent = scheduler.get_task(scheduler.get_current())
+        expect(parent != nil).to_be(true)
+        val context = kernel_call_context_from_task(parent.unwrap())
+        val started = provider.start_into_scheduler(context, policy, bytes,
+            Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+        expect_runtime_task_binding(started)
+        val native_id = started.operation.state.identity.native_id
+        val duplicate = provider.start_into_scheduler(context, policy, bytes,
+            Architecture.X86_64, [], [], TaskPriority.Normal, started.scheduler)
+        expect(duplicate.operation.reason).to_equal("attempt-already-started")
+        var ipc = IpcManager.new()
+        val pid = native_id.to_i64() ?? -1
+        val port = ipc.create_port(TaskId(id: pid as u64), "provider-exit-cleanup")
+        expect(port.id).to_be_greater_than(0u64)
+        val waiting = provider.reconcile_exit(started.scheduler, ipc)
+        expect(waiting.operation.status).to_equal("blocked")
+        expect(waiting.operation.reason).to_equal("bound-task-not-exited")
+        expect(waiting.ipc.connect("provider-exit-cleanup") != nil).to_be(true)
+        val exited = given_scheduler_task_result(started, 23)
+        val result = provider.reconcile_exit(exited, waiting.ipc)
+        expect_reconciled_exit(result, native_id, 23)
+        val repeated = provider.reconcile_exit(result.scheduler, result.ipc)
+        expect(repeated.operation.status).to_equal("rejected")
+        expect(repeated.operation.state.exit_code).to_equal(23)
+
+    it "rejects image and filesystem-policy drift without claiming a launch":
+        val bytes = _minimal_x86_64_elf()
+        val policy = given_compiled_container_policy(bytes, "/container/worker")
+        val scheduler = _live_parent_scheduler()
+        val parent = scheduler.get_task(scheduler.get_current())
+        expect(parent != nil).to_be(true)
+        val context = kernel_call_context_from_task(parent.unwrap())
+        var wrong_image = _provider_for_image("blake3:wrong-image")
+        val rejected = wrong_image.start_into_scheduler(context, policy, bytes,
+            Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+        expect(rejected.operation.status).to_equal("rejected")
+        expect(rejected.operation.reason).to_equal("container image/policy hash mismatch")
+        expect(rejected.operation.state.phase).to_equal("unknown")
+        val wide = given_compiled_container_policy(bytes, "/")
+        var provider = _provider_for_image(workload_image_blake3_hash(bytes))
+        val denied = provider.start_into_scheduler(context, wide, bytes,
+            Architecture.X86_64, [], [], TaskPriority.Normal, rejected.scheduler)
+        expect(denied.operation.reason).to_equal("container filesystem/policy root mismatch")
+        expect(denied.operation.state.identity.native_id).to_equal("")
+
+    it "does not manufacture task completion, logs or recovery support":
+        var provider = _provider_for_image("blake3:test-image")
+        val contract = simpleos_container_provider_contract_v1()
+        expect(contract.supports_recovery).to_be(false)
+        expect(contract.supports_logs).to_be(false)
+        expect(provider.logs().status).to_equal("rejected")
+        expect(provider.recover().status).to_equal("rejected")
+        val result = provider.reconcile_exit(Scheduler.new(), IpcManager.new())
+        expect(result.operation.reason).to_equal("live-task-binding-mismatch")
+        expect(result.operation.state.phase).to_equal("unknown")

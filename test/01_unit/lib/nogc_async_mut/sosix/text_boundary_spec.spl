@@ -1,0 +1,102 @@
+"""UTF8-SOSIX-01..05: actual SOSIX admission/conversion APIs. Authored UNRUN."""
+use std.spec
+use std.common.text_bytes.{bytes_to_text, text_to_utf8_bytes}
+use std.common.encoding.external_text.{ExternalFormat, Encoding, TextByteOrder, BomPolicy,
+    external_text, external_char, external_text_decoder, utf8_format, CodecErrorKind}
+use std.nogc_sync_mut.io.external_text_io.{TextIoError}
+use std.nogc_async_mut.sosix.text_boundary.{sosix_admit_utf8, sosix_admit_c_string,
+    sosix_encode_utf8, sosix_decode_text, sosix_decode_char, sosix_resolved_path_checked}
+
+fn sosix_spec_utf16le() -> ExternalFormat:
+    ExternalFormat(encoding: Encoding.Utf16, byte_order: TextByteOrder.LittleEndian, bom: BomPolicy.Preserve)
+
+fn sosix_expect_bytes(actual: [u8], expected: [u8]):
+    expect(actual.len()).to_equal(expected.len())
+    for index in 0..expected.len(): expect(actual[index]).to_equal(expected[index])
+
+describe "SOSIX strict internal text boundary":
+    it "admits multilingual text and embedded NUL without changing bytes":
+        val raw = bytes_to_text([65u8, 0u8, 0xF0u8, 0x9Fu8, 0x99u8, 0x82u8])
+        sosix_expect_bytes(text_to_utf8_bytes(sosix_admit_utf8(raw).unwrap()), [65u8, 0u8, 0xF0u8, 0x9Fu8, 0x99u8, 0x82u8])
+        expect(sosix_admit_utf8("한é🙂").unwrap()).to_equal("한é🙂")
+        expect(sosix_admit_utf8("").unwrap()).to_equal("")
+
+    it "returns precise codec errors for malformed byte carriers":
+        match sosix_admit_utf8(bytes_to_text([65u8, 255u8])):
+            case Err(TextIoError.Codec(error)):
+                expect(error.kind).to_equal(CodecErrorKind.InvalidUtf8)
+                expect(error.byte_offset).to_equal(1)
+            case _: assert(false)
+        expect(sosix_admit_utf8(bytes_to_text([0xC0u8, 0x80u8])).is_err()).to_equal(true)
+        expect(sosix_admit_utf8(bytes_to_text([0xF0u8, 0x9Fu8])).is_err()).to_equal(true)
+
+    it "rejects host C-string NUL and invalid environment names":
+        expect(sosix_admit_c_string("A\0B", false).is_err()).to_equal(true)
+        expect(sosix_admit_c_string("", true).is_err()).to_equal(true)
+        expect(sosix_admit_c_string("A=B", true).is_err()).to_equal(true)
+        expect(sosix_admit_c_string("", false).unwrap()).to_equal("")
+        expect(sosix_admit_c_string("한", true).unwrap()).to_equal("한")
+
+    it "encodes ordinary output as exact UTF8 including NUL":
+        val encoded = sosix_encode_utf8("A\0🙂").unwrap()
+        expect(encoded.external_format().encoding).to_equal(Encoding.Utf8)
+        sosix_expect_bytes(encoded.encoded_bytes().unwrap(), [65u8, 0u8, 0xF0u8, 0x9Fu8, 0x99u8, 0x82u8])
+
+    it "normalizes explicitly declared UTF16 text and a surrogate-pair char":
+        val encoded = external_text([65u8, 0u8, 0u8, 0u8, 61u8, 216u8, 66u8, 222u8], sosix_spec_utf16le()).unwrap()
+        expect(sosix_decode_text(encoded).unwrap()).to_equal("A\0🙂")
+        expect(encoded.encoded_byte_length()).to_equal(8)
+        val character = external_char([61u8, 216u8, 66u8, 222u8], sosix_spec_utf16le()).unwrap()
+        expect(sosix_decode_char(character).unwrap() as i64).to_equal(0x1F642)
+
+    it "rejects malformed declared UTF16 without relabeling its bytes":
+        val encoded = external_text([61u8, 216u8], sosix_spec_utf16le()).unwrap()
+        expect(sosix_decode_text(encoded).is_err()).to_equal(true)
+        sosix_expect_bytes(encoded.encoded_bytes().unwrap(), [61u8, 216u8])
+        val unknown = ExternalFormat(encoding: Encoding.Unknown("host-default"), byte_order: TextByteOrder.NotApplicable, bom: BomPolicy.Preserve)
+        expect(external_text([], unknown).is_err()).to_equal(true)
+
+    it "keeps the reused decoder carry separate for split UTF8 and UTF16 streams":
+        var utf8 = external_text_decoder(utf8_format()).unwrap()
+        var utf16 = external_text_decoder(sosix_spec_utf16le()).unwrap()
+        expect(utf8.push([0xF0u8, 0x9Fu8]).unwrap()).to_equal("")
+        expect(utf16.push([61u8]).unwrap()).to_equal("")
+        expect(utf8.pending_byte_count()).to_equal(2)
+        expect(utf16.pending_byte_count()).to_equal(1)
+        expect(utf8.push([0x99u8, 0x82u8]).unwrap()).to_equal("🙂")
+        expect(utf16.push([216u8, 66u8]).unwrap()).to_equal("")
+        expect(utf16.pending_byte_count()).to_equal(3)
+        expect(utf16.push([222u8]).unwrap()).to_equal("🙂")
+        expect(utf8.finish().unwrap()).to_equal("")
+        expect(utf16.finish().unwrap()).to_equal("")
+
+    it "decodes every split position and rejects a truncated final scalar":
+        val formats = [utf8_format(), sosix_spec_utf16le()]
+        val wires: [[u8]] = [[0xF0u8, 0x9Fu8, 0x99u8, 0x82u8], [61u8, 216u8, 66u8, 222u8]]
+        for index in 0..2:
+            for split in 1..4:
+                var first: [u8] = []
+                var second: [u8] = []
+                for position in 0..4:
+                    if position < split: first.push(wires[index][position])
+                    else: second.push(wires[index][position])
+                var decoder = external_text_decoder(formats[index]).unwrap()
+                expect(decoder.push(first).unwrap()).to_equal("")
+                expect(decoder.pending_byte_count()).to_be_less_than(4)
+                expect(decoder.push(second).unwrap()).to_equal("🙂")
+                expect(decoder.finish().unwrap()).to_equal("")
+            var incomplete = external_text_decoder(formats[index]).unwrap()
+            expect(incomplete.push([wires[index][0]]).unwrap()).to_equal("")
+            expect(incomplete.finish().is_err()).to_equal(true)
+
+    it "normalizes resolver output before trimming and refuses empty success":
+        expect(sosix_resolved_path_checked(" /tmp/한🙂 \n").unwrap()).to_equal("/tmp/한🙂")
+        expect(sosix_resolved_path_checked(" \n").is_err()).to_equal(true)
+        expect(sosix_resolved_path_checked("relative").is_err()).to_equal(true)
+        expect(sosix_resolved_path_checked("/one\n/two").is_err()).to_equal(true)
+        expect(sosix_resolved_path_checked("/one\0suffix").is_err()).to_equal(true)
+        match sosix_resolved_path_checked(bytes_to_text([32u8, 255u8, 10u8])):
+            case Err(TextIoError.Codec(error)):
+                expect(error.kind).to_equal(CodecErrorKind.InvalidUtf8)
+                expect(error.byte_offset).to_equal(1)
+            case _: assert(false)

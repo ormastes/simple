@@ -1,0 +1,239 @@
+"""Parsed builtin collection membership: executable MIR and guarded fallback."""
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.mir_target_context.{mir_target_context_from}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.interp.mir_interpreter.{MirInterpreter}
+use compiler.driver.cache.compile_options_hash.{compile_options_hash_compute}
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.backend.backend.llvm_backend.{generate_runtime_declarations_for_target}
+use compiler.mir_opt.mir_opt.simd_lowering.{run_simd_lowering}
+use compiler.mir_opt.mir_opt._AutoVectorize.recipe.{run_auto_vectorization}
+use compiler.mir_opt.mir_opt.inline.{ModuleInliner, InlinePolicy}
+use compiler.mir_opt.mir_opt.storage_projection_lowering.{lower_mir_storage_project_fields_v1}
+use compiler.mir_opt.mir_opt.typed_storage_view_producer.{produce_mir_typed_storage_views_v1}
+use compiler.mir.mir_debug_trace_injection.{inject_debug_trace}
+
+fn collection_literal_graph(source: text, budget: i64, level: i64 = 2, requested_target: text = "x86_64-unknown-linux-gnu") -> MirModule:
+    val file = "collection_literal_membership.spl"
+    val ast = parse_full_frontend(source, file, file, Logger(level: 0))
+    var hl = HirLowering.with_filename(file)
+    val hir = hl.lower_module(ast)
+    var target = mir_target_context_from(requested_target, "x86_64", "linux", "llvm", -1)
+    target.collection_opt_level = level
+    target.collection_memory_budget_bytes = budget
+    var ml = MirLowering.new_for_target(hir.symbols, target)
+    val mir = ml.lower_module(hir)
+    expect(hl.errors.len()).to_equal(0)
+    expect(ml.errors.len()).to_equal(0)
+    mir
+
+fn collection_literal_mir(source: text, budget: i64, level: i64 = 2) -> text:
+    serialize_mir_module(collection_literal_graph(source, budget, level))
+
+fn collection_literal_function(source: text, name: text) -> text:
+    val module = collection_literal_graph(source, 512)
+    for function in module.functions.values():
+        if function.name == name or function.name.ends_with("." + name):
+            return serialize_mir_function(function)
+    "missing-function"
+
+# Fault model at the actual runtime call boundary of the generated graph.
+# Allocation/boxing calls are deterministic, the first insertion can fail,
+# and Original then observes the missing first key. All emitted guard/control
+# flow/comparison instructions execute unchanged in the MIR interpreter.
+fn collection_literal_fault_model(fail_first_insert: bool, empty: bool = false, fail_allocation: bool = false) -> i64:
+    val source = if empty:
+        "fn pick() -> bool:\n    {}.contains_key(1)\n"
+    else:
+        "fn pick() -> bool:\n    {1: 10, 2: 20}.contains_key(1)\n"
+    val module = collection_literal_graph(source, 384)
+    for source_function in module.functions.values():
+        if source_function.name == "pick" or source_function.name.ends_with(".pick"):
+            var function = source_function
+            var blocks: [MirBlock] = []
+            var insertion = 0
+            for source_block in function.blocks:
+                var block = source_block
+                var instructions: [MirInst] = []
+                for source_inst in block.instructions:
+                    var inst = source_inst
+                    match inst.kind:
+                        case MirInstKind.Call(destination, callee, args):
+                            if val dest = destination:
+                                match callee.kind:
+                                    case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                        if name == "rt_dict_new":
+                                            val handle = if fail_allocation: 3 else: 4097
+                                            inst.kind = MirInstKind.Const(dest, MirConstValue.Int(handle), MirType.i64())
+                                        elif name == "rt_dict_set":
+                                            val status = if fail_first_insert and insertion == 0: 0 else: 1
+                                            inst.kind = MirInstKind.Const(dest, MirConstValue.Int(status), MirType(kind: MirTypeKind.I8))
+                                            insertion = insertion + 1
+                                        elif name == "rt_dict_contains":
+                                            inst.kind = MirInstKind.Const(dest, MirConstValue.Int(0), MirType(kind: MirTypeKind.I8))
+                                        elif name == "rt_value_int_wide":
+                                            inst.kind = MirInstKind.BinOp(dest, MirBinOp.Shl, args[0], MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(3), MirType.i64())))
+                                        else:
+                                            assert(false, "unexpected runtime call in fault model: " + name)
+                                    case _: assert(false, "unexpected indirect runtime call")
+                        case _: ()
+                    instructions = instructions.push(inst)
+                block.instructions = instructions
+                blocks = blocks.push(block)
+            expect(insertion).to_equal(if empty: 0 else: 2)
+            function.blocks = blocks
+            var interpreter = MirInterpreter.create()
+            val result = interpreter.execute_function(function)
+            expect(result[1]).to_be_nil()
+            return result[0] ?? -1
+    -1
+
+describe "literal dictionary membership physical consumer", tag: ["only-compiled"]:
+    it "keeps Original when an explicit target merely resembles host facts":
+        val graph = collection_literal_graph("fn pick(key: i64) -> bool:\n    {1: 10}.contains_key(key)\n",
+            512, 2, "x86_64-madeup")
+        val mir = serialize_mir_module(graph)
+        expect(mir).to_contain("typed_mir=original")
+        expect(mir).to_contain("target.admitted=false")
+        expect(mir.contains("typed_mir=consumed")).to_be(false)
+
+    it "consumes bounded linear selection from real parsed parameter types":
+        step("Lower parsed integer parameter membership to guarded MIR")
+        # @req REQ-PSC-003 REQ-PSC-005
+        val mir = collection_literal_mir("fn pick(key: i64) -> bool:\n    {1: 10, 2: 20}.contains_key(key)\n", 384)
+        expect(mir.contains("HIR_ERROR:")).to_equal(false)
+        expect(mir.contains("MIR_ERROR:")).to_equal(false)
+        expect(mir).to_contain("typed_mir=consumed")
+        expect(mir).to_contain("selected=linear")
+        expect(mir).to_contain("rt_dict_new")
+        expect(mir).to_contain("rt_dict_set")
+        expect(mir).to_contain("collection_original_on_failed_insert")
+
+    it "keeps original when scratch budget is one byte too small":
+        step("Reject the candidate at the exact extra scratch boundary")
+        val mir = collection_literal_mir("fn pick(key: i64) -> bool:\n    {1: 10, 2: 20}.contains_key(key)\n", 383)
+        expect(mir).to_contain("rt_dict_contains")
+        expect(mir).to_contain("memory-budget-exceeded")
+        expect(mir).to_contain("typed_mir=original")
+
+    it "keeps original without a budget or at optimization level zero":
+        step("Preserve Original without explicit optimization admission")
+        val source = "fn pick(key: i64) -> bool:\n    {1: 10}.contains_key(key)\n"
+        expect(collection_literal_mir(source, -1)).to_contain("rt_dict_contains")
+        expect(collection_literal_mir(source, 1024, 0)).to_contain("rt_dict_contains")
+
+    it "rejects ambiguous probe types and noninteger keys":
+        step("Reject absent primitive equality evidence")
+        expect(collection_literal_mir("fn pick(key: Any) -> bool:\n    {1: 10}.contains_key(key)\n", 1024)).to_contain("rt_dict_contains")
+        expect(collection_literal_mir("fn pick(key: text) -> bool:\n    {\"x\": 10}.contains_key(key)\n", 1024)).to_contain("rt_dict_contains")
+
+    it "retains construction before one side effecting typed probe call":
+        step("Check construction and probe call count and order in emitted MIR")
+        val source = "fn probe() -> i64:\n    print 7\n    2\nfn pick() -> bool:\n    {1: 10, 2: 20}.contains_key(probe())\n"
+        val mir = collection_literal_mir(source, 384)
+        expect(mir).to_contain("typed_mir=consumed")
+        expect(mir).to_contain("rt_dict_set")
+        expect(mir).to_contain("collection_original_on_failed_insert")
+        expect(mir.split("rt_dict_new").len()).to_equal(2)
+        expect(mir.split("rt_dict_set").len()).to_equal(3)
+        expect(mir.split("rt_dict_contains").len()).to_equal(2)
+        val function = collection_literal_function(source, "pick")
+        expect(function.split("probe").len()).to_equal(2)
+        val probe_at = function.index_of("probe")
+        val construction = function[0:probe_at]
+        expect(construction.split("rt_dict_new").len()).to_equal(2)
+        expect(construction.split("rt_dict_set").len()).to_equal(3)
+        expect(function).to_contain("\"return_type\":\"I8\"")
+
+    it "executes the Original branch after a failed insertion":
+        step("Execute generated guard with successful and failed insertion statuses")
+        expect(collection_literal_fault_model(true)).to_equal(0)
+        expect(collection_literal_fault_model(false)).to_equal(1)
+
+    it "preserves duplicate insertion attempts with one guarded membership":
+        step("Keep duplicate construction and explain the failure fallback")
+        val mir = collection_literal_mir("fn pick(key: i64) -> bool:\n    {1: 10, 2: 20, 1: 30}.contains_key(key)\n", 512)
+        expect(mir).to_contain("typed_mir=consumed")
+        expect(mir.split("rt_dict_set").len()).to_equal(4)
+        expect(mir).to_contain("fallback=original-on-materialization-failure")
+        expect(mir.contains("fallback=none-after-selection")).to_equal(false)
+
+    it "separates policy budget and target compiler cache identities":
+        step("Compare compilation identities for every new semantic input")
+        val baseline = compile_options_hash_compute("llvm", 2, false, false, false, "dev", [], [], [], [], "moderate", 512, "x86_64-unknown-linux-gnu")
+        val policy = compile_options_hash_compute("llvm", 2, false, false, false, "dev", [], [], [], [], "strict", 512, "x86_64-unknown-linux-gnu")
+        val budget = compile_options_hash_compute("llvm", 2, false, false, false, "dev", [], [], [], [], "moderate", 511, "x86_64-unknown-linux-gnu")
+        val target = compile_options_hash_compute("llvm", 2, false, false, false, "dev", [], [], [], [], "moderate", 512, "aarch64-unknown-linux-gnu")
+        expect(baseline.hash == policy.hash).to_equal(false)
+        expect(baseline.hash == budget.hash).to_equal(false)
+        expect(baseline.hash == target.hash).to_equal(false)
+
+    it "preserves the empty receiver allocation and an effectful probe":
+        step("Lower empty membership without deleting construction or probe calls")
+        val source = "fn probe() -> i64:\n    print 7\n    1\nfn pick() -> bool:\n    {}.contains_key(probe())\n"
+        val mir = collection_literal_mir(source, 128)
+        expect(mir).to_contain("typed_mir=consumed")
+        expect(mir).to_contain("static.size=0")
+        val function = collection_literal_function(source, "pick")
+        expect(function.split("rt_dict_new").len()).to_equal(2)
+        expect(function.contains("rt_dict_set")).to_equal(false)
+        expect(function.split("probe").len()).to_equal(2)
+        expect(function.index_of("rt_dict_new")).to_be_less_than(function.index_of("probe"))
+        expect(function).to_contain("collection_linear")
+        expect(collection_literal_fault_model(false, true, false)).to_equal(0)
+        expect(collection_literal_fault_model(false, true, true)).to_equal(0)
+
+    it "uses the runtime byte status in generated LLVM and the host preamble":
+        step("Compare actual emitted and prefixed dictionary call signatures")
+        val source = "fn pick(key: i64) -> bool:\n    {1: 10, 2: 20}.contains_key(key)\n"
+        val graph = collection_literal_graph(source, 384)
+        var translator = MirToLlvm.create("collection_status", CodegenTarget.X86_64, nil)
+        val llvm = translator.translate_module(graph)
+        val preamble = generate_runtime_declarations_for_target(CodegenTarget.X86_64)
+        expect(llvm).to_contain("call i8 @rt_dict_set(")
+        expect(llvm).to_contain("call i8 @rt_dict_contains(")
+        expect(preamble).to_contain("declare i8 @rt_dict_set(i64, i64, i64)")
+        expect(preamble).to_contain("declare i8 @rt_dict_contains(i64, i64)")
+
+    it "keeps ignored setters and ordinary membership on the same byte ABI":
+        step("Lower preexisting mutation and membership callers through LLVM")
+        val source = "fn pick() -> bool:\n    val values = {1: 10}\n    values.set(2, 20)\n    values.contains_key(2)\n"
+        val graph = collection_literal_graph(source, -1)
+        var translator = MirToLlvm.create("collection_original_status", CodegenTarget.X86_64, nil)
+        val llvm = translator.translate_module(graph)
+        expect(llvm).to_contain("call i8 @rt_dict_set(")
+        expect(llvm).to_contain("call i8 @rt_dict_contains(")
+        expect(llvm.contains("call i64 @rt_dict_set(")).to_equal(false)
+        expect(llvm.contains("call i64 @rt_dict_contains(")).to_equal(false)
+
+    it "retains the actual consumed receipt through module reconstructions":
+        step("Transform parsed membership MIR and compare the complete original receipt")
+        val source = "fn probe() -> i64:\n    1\nfn pick() -> bool:\n    {1: 10, 2: 20}.contains_key(probe())\n"
+        val graph = collection_literal_graph(source, 384)
+        expect(graph.functions.len()).to_be_greater_than(1)
+        expect(graph.collection_plan_explanations.len()).to_equal(1)
+        val expected = graph.collection_plan_explanations
+        expect(expected[0]).to_contain("typed_mir=consumed")
+
+        val simd = run_simd_lowering(graph)
+        expect(simd.collection_plan_explanations).to_equal(expected)
+        val vectorized = run_auto_vectorization(simd)
+        expect(vectorized.collection_plan_explanations).to_equal(expected)
+        var inliner = ModuleInliner.new(500, InlinePolicy.Aggressive)
+        val inlined = inliner.inline_module(vectorized)
+        expect(inlined.collection_plan_explanations).to_equal(expected)
+        val projected = lower_mir_storage_project_fields_v1(inlined, [])
+        expect(projected.ok).to_equal(true)
+        expect(projected.module.collection_plan_explanations).to_equal(expected)
+        val produced = produce_mir_typed_storage_views_v1(projected.module, [])
+        expect(produced.ok).to_equal(true)
+        expect(produced.module.collection_plan_explanations).to_equal(expected)
+        val traced = inject_debug_trace(produced.module, "functions")
+        expect(traced.collection_plan_explanations).to_equal(expected)
+        expect(serialize_mir_module(traced)).to_contain("typed_mir=consumed")

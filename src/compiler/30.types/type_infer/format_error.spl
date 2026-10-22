@@ -1,0 +1,42 @@
+# Shared structured type diagnostic rendering; no driver/pipeline dependencies.
+use compiler.types.type_infer_types.{TypeInferError}
+use compiler.types.dim_constraints_types.{DimError}
+
+pub fn format_type_infer_error_v1(err: TypeInferError) -> text:
+    """Format a TypeInferError into a structured error string with related info."""
+    val span = err.span()
+    val msg = err.message()
+    var result = "{span.line}:{span.col}: {msg}"
+    # Add related information based on error variant
+    match err:
+        case TypeInferError.Mismatch(expected, found, s):
+            if expected.span.line > 0:
+                result = result + "|||RELATED:{expected.span.line}:{expected.span.col}:expected type defined here"
+            if found.span.line > 0 and found.span.line != s.line:
+                result = result + "|||RELATED:{found.span.line}:{found.span.col}:found type originates here"
+        case TypeInferError.OccursCheck(var_id, ty, s):
+            if ty.span.line > 0:
+                result = result + "|||RELATED:{ty.span.line}:{ty.span.col}:recursive type reference here"
+            result = result + "|||HELP:break the recursive type by using an explicit type annotation"
+        case TypeInferError.TraitNotImplemented(ty, trait_name, s):
+            if ty.span.line > 0:
+                result = result + "|||RELATED:{ty.span.line}:{ty.span.col}:type that needs to implement '{trait_name}'"
+            result = result + "|||HELP:add an impl block: impl {trait_name} for {ty.kind}"
+        case TypeInferError.DimensionError(dim_err):
+            val de: DimError = dim_err
+            for note in de.notes:
+                match note.span:
+                    case Some(note_span):
+                        result = result + "|||RELATED:{note_span.line}:{note_span.col}:{note.message}"
+                    case nil:
+                        pass
+            match de.help:
+                case Some(help):
+                    result = result + "|||HELP:{help}"
+                case nil:
+                    pass
+        case TypeInferError.Undefined(name, s):
+            result = result + "|||HELP:check spelling or add an import for '{name}'"
+        case TypeInferError.Other(message, s):
+            pass_do_nothing
+    result

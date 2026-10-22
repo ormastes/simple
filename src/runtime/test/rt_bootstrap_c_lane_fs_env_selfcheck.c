@@ -64,6 +64,7 @@ extern int32_t rt_file_open(const uint8_t* path_ptr, uint64_t path_len, int32_t 
 extern int8_t  rt_file_close(int32_t fd);
 extern int8_t  rt_file_exists_str(int64_t path_value);
 extern int64_t rt_file_hash(int64_t path_value);
+extern int64_t rt_xxh3_128_text(int64_t data_value);
 extern int64_t rt_file_canonicalize(const uint8_t* path_ptr, uint64_t path_len);
 extern int64_t rt_file_read_lines(const uint8_t* path_ptr, uint64_t path_len);
 extern int64_t rt_file_mmap_read_bytes(const uint8_t* path_ptr, uint64_t path_len);
@@ -220,6 +221,15 @@ int main(void) {
     CHECK(hash_missing && strlen(hash_missing) == 0,
           "rt_file_hash returns an EMPTY (not nil) text for a missing file, matching the Rust body");
     free(hash_missing);
+
+    /* ---- rt_xxh3_128_text: XXH128("abc"), canonical big-endian hex ---- */
+    char* xxh3_str = read_string_value(rt_xxh3_128_text(rt_string_new((const uint8_t*)"abc", 3u)), NULL);
+    CHECK(xxh3_str && strcmp(xxh3_str, "06b05ab6733a618578af5f94892f3950") == 0,
+          "rt_xxh3_128_text matches XXH128(\"abc\") (Rust lane and pure-Simple xxh3_128_hex agree)");
+    free(xxh3_str);
+    char* xxh3_bad = read_string_value(rt_xxh3_128_text(RT_TEST_NIL), NULL);
+    CHECK(xxh3_bad && strlen(xxh3_bad) == 0, "rt_xxh3_128_text returns the EMPTY fallback sentinel for a non-text value");
+    free(xxh3_bad);
 
     /* ---- rt_file_canonicalize: lexical ".." popping + cwd-relative join ---- */
     const char* dotdot_path = "/tmp/rt_selfcheck_dir/../rt_selfcheck_file.txt";

@@ -586,6 +586,19 @@ impl<'a> Parser<'a> {
                     // `auto` is a hard keyword (auto modules); it must still work as a
                     // named-arg/field label (e.g. FrontendOffloadSwitch(auto: true)).
                     TokenKind::Auto => Some("auto".to_string()),
+                    // Soft keywords that are already legal field names (see
+                    // `keyword_name`) must also work as named-arg labels, e.g.
+                    // `S(flat: 1, base: 2)`. `flat`/`slice` stay real keywords
+                    // in tensor literals; this only affects `<kw> :|=` in args.
+                    TokenKind::Flat => Some("flat".to_string()),
+                    TokenKind::Slice => Some("slice".to_string()),
+                    TokenKind::Common => Some("common".to_string()),
+                    TokenKind::Comptime => Some("comptime".to_string()),
+                    TokenKind::Newtype => Some("newtype".to_string()),
+                    TokenKind::Bitfield => Some("bitfield".to_string()),
+                    TokenKind::Extend => Some("extend".to_string()),
+                    TokenKind::Asm => Some("asm".to_string()),
+                    TokenKind::OutErr => Some("out_err".to_string()),
                     _ => None,
                 }
             };
@@ -734,6 +747,15 @@ impl<'a> Parser<'a> {
                         | TokenKind::Lazy
                         | TokenKind::Skip
                         | TokenKind::Exists
+                        | TokenKind::Flat
+                        | TokenKind::Slice
+                        | TokenKind::Common
+                        | TokenKind::Comptime
+                        | TokenKind::Newtype
+                        | TokenKind::Bitfield
+                        | TokenKind::Extend
+                        | TokenKind::Asm
+                        | TokenKind::OutErr
                 );
 
                 if is_likely_named_arg {

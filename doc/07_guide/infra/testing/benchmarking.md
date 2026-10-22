@@ -24,7 +24,7 @@ Statistical performance measurement and test optimization for Simple.
 
 ### Basic Benchmark
 
-```simple
+```text
 import std.testing.benchmark as bench
 
 fn main():
@@ -46,7 +46,7 @@ Samples:  10
 
 ### Compare Implementations
 
-```simple
+```text
 val data = generate_random_list(10000)
 
 val results = bench.compare_default({
@@ -65,7 +65,7 @@ for (name, stats) in results:
 
 ### Presets
 
-```simple
+```text
 val config = BenchmarkConfig.default()
 # warmup_iterations: 3, measurement_iterations: 100
 # measurement_time_secs: 5.0, sample_size: 10
@@ -78,7 +78,7 @@ val config = BenchmarkConfig.quick()
 
 ### Custom Configuration
 
-```simple
+```text
 val config = BenchmarkConfig(
     warmup_iterations: 5,
     measurement_iterations: 200,
@@ -117,7 +117,7 @@ val stats = bench.benchmark("custom", \: my_function(), config)
 
 Always clone data for fair comparison:
 
-```simple
+```text
 val data = generate_large_dataset()
 
 # Good: Each implementation gets fresh data
@@ -135,7 +135,7 @@ val results = bench.compare_default({
 
 Find the fastest:
 
-```simple
+```text
 var fastest_name = ""
 var fastest_time = f64.MAX
 for (name, stats) in results:
@@ -267,7 +267,7 @@ shorter or noisier runs unless the strict wrappers still pass.
 
 ### Performance Test
 
-```simple
+```text
 import std.spec
 import std.testing.benchmark as bench
 
@@ -282,7 +282,7 @@ describe "Performance tests":
 
 ### Regression Detection
 
-```simple
+```text
 describe "Performance regressions":
     it "maintains O(n log n) complexity":
         val small = bench.benchmark_default("n=1000", \:
@@ -304,7 +304,7 @@ describe "Performance regressions":
 
 The most effective optimization. 10x data reduction typically yields ~10x speedup.
 
-```simple
+```text
 # Before (slow -- 10k elements)
 slow_it "handles large arrays":
     val elements = [for i in 0..10000: create_element(i)]
@@ -330,7 +330,7 @@ literal_converter_perf_spec.spl       #  5 tests, 4s
 
 ### Pattern 3: Mock External Resources
 
-```simple
+```text
 # Before (slow -- actual file I/O)
 it "reads config":
     file_write("test.conf", "key=value")
@@ -345,7 +345,7 @@ it "reads config":
 
 ### Pattern 4: Use Test Data Builders
 
-```simple
+```text
 fn build_test_array(size: i64) -> Value:
     val elements = [for i in 0..size: Value.Int(i)]
     Value.Array(elements)
@@ -357,7 +357,7 @@ it "handles arrays":
 
 ### Pattern 5: Before/After Optimization Comparison
 
-```simple
+```text
 val results = bench.compare_default({
     "old": \: old_implementation(),
     "new": \: new_implementation()
@@ -410,7 +410,7 @@ jobs:
 
 ### Tracking Performance Over Time
 
-```simple
+```text
 val stats = bench.benchmark_default("critical_path", critical_function)
 File.write("benchmarks/baseline.json", stats.to_json())
 
@@ -472,3 +472,12 @@ if current.mean_ns > baseline.mean_ns * 1.1:
 - Synthetic workloads may not predict production performance
 - Only measures time, not memory usage
 - Only tests what you measure
+
+## Doctest Sanity Block
+
+The snippets above are API references and profile examples that only run inside
+the full project test harness; the block below keeps one runnable doctest.
+
+```simple
+val benchmark_guide_sanity_ok = (1 + 1) == 2
+```

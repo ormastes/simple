@@ -47,7 +47,7 @@ If you copy an existing oracle's scene verbatim (as L6/L7 do, adapting
 call** — rebase every one of them by the matching `ranges.<table>.start`
 before writing, with a `NO_ID`-safe helper:
 
-```simple
+```simple:skip
 fn _rebase_id(id: u32, start: u32) -> u32:
     if id == DRAW_IR_V3_NO_ID: DRAW_IR_V3_NO_ID else: id + start
 ```

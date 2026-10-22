@@ -430,6 +430,8 @@ enum PlaceMutation {
     /// `[T]` leaf reached by `write_span(src, dst_off, src_off, count)`, the
     /// four-operand bulk span copy whose expression result is the COUNT.
     WriteSpan,
+    /// Packed `[u8]` leaf reached by `push`/`append` (`self.buf.push(b)`).
+    BytePush,
     /// `{K: V}` leaf reached by a `DICT_MUTATING_METHODS` method.
     Dict,
     /// Object leaf whose class (carried here) defines the method, together
@@ -519,6 +521,7 @@ pub(crate) fn try_place_mutation_in_place(
         // `write_span` takes four operands and has its own path.
         Some(Value::Array(_) | Value::ByteArray(_)) if method == "write_span" => PlaceMutation::WriteSpan,
         Some(Value::Array(_)) if ARRAY_MUTATING_METHODS.contains(&method) => PlaceMutation::Array,
+        Some(Value::ByteArray(_)) if matches!(method, "push" | "append") => PlaceMutation::BytePush,
         Some(Value::Dict(_)) if DICT_MUTATING_METHODS.contains(&method) => PlaceMutation::Dict,
         // The class name IS needed past the borrow here — the slot is re-read
         // after argument evaluation and must still hold an object of the same
@@ -612,6 +615,42 @@ pub(crate) fn try_place_mutation_in_place(
                 _ => return Ok(None),
             }
         }
+        PlaceMutation::BytePush => {
+            // `[u8]`-typed bindings are packed, so a builder stored in a field
+            // reaches this leaf. Without this arm every push widened the whole
+            // buffer to boxed values and repacked it: O(n) per push. Push in
+            // place (copy-on-write when shared); a value that is not a byte
+            // widens the leaf exactly as the functional path would.
+            let item = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let Some(slot @ Value::ByteArray(_)) = place::place_slot_mut(env, &target) else {
+                return Ok(None);
+            };
+            let byte = match &item {
+                Value::UInt { value, .. } => u8::try_from(*value).ok(),
+                Value::Int(value) => u8::try_from(*value).ok(),
+                _ => None,
+            };
+            let Value::ByteArray(arc) = slot else { unreachable!("matched ByteArray") };
+            note_place_mutation(arc.len(), Arc::strong_count(arc));
+            match byte {
+                Some(byte) => {
+                    Arc::make_mut(arc).push(byte);
+                    Value::ByteArray(Arc::clone(arc))
+                }
+                None => {
+                    let mut values: Vec<Value> = arc
+                        .iter()
+                        .map(|b| Value::UInt {
+                            value: u64::from(*b),
+                            width: 8,
+                        })
+                        .collect();
+                    values.push(item);
+                    *slot = Value::array(values);
+                    slot.clone()
+                }
+            }
+        }
         PlaceMutation::Dict => {
             // Every operand is evaluated AND validated before the leaf is re-read,
             // so a rejected `merge` argument leaves the dict untouched exactly as
@@ -670,7 +709,7 @@ pub(crate) fn try_place_mutation_in_place(
                         impl_methods,
                     )?;
                     match arg0 {
-                        Value::Dict(map) => (None, None, Some(map)),
+                        Value::Dict(map) => (None, None, Some(crate::interpreter::module_dict_flat(&map).unwrap_or(map))),
                         _ => {
                             let ctx = ErrorContext::new()
                                 .with_code(codes::TYPE_MISMATCH)
@@ -785,6 +824,14 @@ pub(crate) fn handle_method_call_with_self_update(
     impl_methods: &ImplMethods,
 ) -> Result<(Value, Option<(String, Value)>), CompileError> {
     let out = handle_method_call_with_self_update_inner(value_expr, env, functions, classes, enums, impl_methods)?;
+    // A bare `expect <subject>` statement (no matcher chained, so it is a plain
+    // Call, not a MethodCall): outside any `it` there is no example end to judge
+    // its provisional failure, so a falsy subject is fatal here.
+    if let Expr::Call { callee, .. } = value_expr {
+        if matches!(callee.as_ref(), Expr::Identifier(n) if n == "expect") {
+            crate::interpreter::interpreter_call::finish_bare_expect_statement()?;
+        }
+    }
     // A mutating method call on a MODULE-GLOBAL receiver (`g.push(x)`) only ever
     // produced a `(name, new_value)` update for the caller to write into `env`.
     // But identifier READS of a non-local name prefer MODULE_GLOBALS over `env`

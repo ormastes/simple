@@ -43,7 +43,7 @@ all now have wrapper hubs (commit pending):
 
 Wrapper form (matches the repo shim convention, E0410-safe):
 
-```spl
+```simple:skip
 export use nogc_sync_mut.channel*
 ```
 

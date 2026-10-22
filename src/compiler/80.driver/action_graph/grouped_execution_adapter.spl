@@ -1,0 +1,220 @@
+# Parent-only grouped execution adapter. The coordinator remains the sole DAG
+# scheduler; the bridge owns service/coordinator admission. Reap DTOs come only
+# from the runner's collected broker owner or verified durable journal replay.
+use std.common.build_manager.grouped_execution_contract.{GroupedActionBindingV1, GroupedActionLeaseV1, GroupedReapReceiptV1}
+use std.common.build_manager.contracts.{builder_digest_valid_v1, builder_identifier_valid_v1}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.package_scc_scheduler.{PackageCompileScheduleV1, PackageCompileResultV1, package_scc_identity_v1, package_scc_publication_batch_v1}
+use compiler.driver.action_graph.artifact_service_bridge.{DemandArtifactRouteV1, demand_artifact_claim_owned_v1, demand_artifact_commit_owned_v1}
+use compiler.driver.action_graph.artifact_owner_recovery.{demand_artifact_requeue_retired_v1}
+use compiler.driver.action_graph.build_action_v1.{BuildActionResultV1}
+use compiler.driver.action_graph.coordinator.{coordinator_ready_actions_v1}
+use lib.compiler_artifact_service.service.{ArtifactLeaseV1}
+
+struct GroupedArtifactDispatchV1:
+    lease: GroupedActionLeaseV1
+    publication_lease: ArtifactLeaseV1
+    attempts: i64
+
+struct GroupedExecutionV1:
+    reason: text
+    schedule: PackageCompileScheduleV1
+    route: DemandArtifactRouteV1
+    bindings: [GroupedActionBindingV1]
+    worker_slots: [text]
+    max_attempts: i64
+    dispatches: [GroupedArtifactDispatchV1?]
+    published_packages: [PackageCompileResultV1]
+
+struct GroupedExecutionTransferV1:
+    execution: GroupedExecutionV1
+    accepted: bool
+    reason: text
+    lease: GroupedActionLeaseV1?
+
+fn grouped_execution_index_v1(state: GroupedExecutionV1, action_id: text) -> i64:
+    for index in 0..state.bindings.len():
+        if state.bindings[index].action_id == action_id: return index
+    -1
+
+fn grouped_execution_reject_v1(state: GroupedExecutionV1, reason: text) -> GroupedExecutionTransferV1:
+    GroupedExecutionTransferV1(state, false, reason, None)
+
+fn grouped_execution_validate_v1(state: GroupedExecutionV1) -> text:
+    if not state.schedule.valid or not state.route.valid or
+            not builder_digest_valid_v1(state.schedule.variant_digest) or
+            not builder_digest_valid_v1(state.route.service.profile.compatibility_id):
+        return "group-authority-invalid"
+    val coordinator = match state.route.execution.coordinator:
+        Some(value): value
+        _: return "group-coordinator-missing"
+    if state.max_attempts < 1 or state.max_attempts > 32 or
+            state.worker_slots.len() < 1 or state.worker_slots.len() > state.route.service.profile.max_workers:
+        return "group-budget-invalid"
+    var workers: [text] = []
+    for worker in state.worker_slots:
+        if not builder_identifier_valid_v1(worker) or workers.contains(worker): return "group-worker-invalid"
+        workers = workers.push(worker)
+    if state.bindings.len() != coordinator.graph.actions.len() or
+            state.dispatches.len() != state.bindings.len(): return "group-binding-count-mismatch"
+    var groups: [text] = []
+    for group in state.schedule.groups:
+        if group.members.len() == 0 or groups.contains(group.identity) or
+                group.identity != package_scc_identity_v1(group.members, state.schedule.variant_digest):
+            return "group-schedule-invalid"
+        groups = groups.push(group.identity)
+    var actions: [text] = []
+    for binding in state.bindings:
+        if actions.contains(binding.action_id) or not groups.contains(binding.group_id) or
+                binding.phase == "" or not builder_digest_valid_v1(binding.snapshot_digest) or
+                binding.snapshot_digest != coordinator.graph.snapshot_revision or
+                binding.cache_identity != state.route.service.profile.compatibility_id:
+            return "group-binding-invalid"
+        var found = false
+        for action in coordinator.graph.actions:
+            if action.action_id == binding.action_id:
+                found = action.snapshot_revision == binding.snapshot_digest
+        if not found: return "group-action-missing"
+        actions = actions.push(binding.action_id)
+    "ok"
+
+fn grouped_execution_new_v1(schedule: PackageCompileScheduleV1,
+    route: DemandArtifactRouteV1, bindings: [GroupedActionBindingV1],
+    worker_slots: [text], max_attempts: i64) -> GroupedExecutionV1:
+    var dispatches: [GroupedArtifactDispatchV1?] = []
+    for binding in bindings: dispatches = dispatches.push(None)
+    var state = GroupedExecutionV1("ok", schedule, route, bindings, worker_slots, max_attempts, dispatches, [])
+    state.reason = grouped_execution_validate_v1(state)
+    state
+
+fn grouped_execution_ready_v1(state: GroupedExecutionV1) -> [GroupedActionBindingV1]:
+    if state.reason != "ok": return []
+    val coordinator = match state.route.execution.coordinator:
+        Some(value): value
+        _: return []
+    var ready: [GroupedActionBindingV1] = []
+    for action in coordinator_ready_actions_v1(coordinator):
+        val index = grouped_execution_index_v1(state, action)
+        if index >= 0: ready = ready.push(state.bindings[index])
+    ready
+
+fn grouped_execution_claim_v1(state: GroupedExecutionV1, action_id: text,
+    worker_id: text, generation: i64, available_memory_bytes: i64) -> GroupedExecutionTransferV1:
+    if state.reason != "ok": return grouped_execution_reject_v1(state, state.reason)
+    val index = grouped_execution_index_v1(state, action_id)
+    if index < 0 or not state.worker_slots.contains(worker_id) or generation < 1 or generation > 1000000000:
+        return grouped_execution_reject_v1(state, "group-claim-invalid")
+    for other in state.dispatches:
+        match other:
+            Some(dispatch):
+                if not dispatch.lease.completed and dispatch.lease.worker_id == worker_id:
+                    return grouped_execution_reject_v1(state, "group-worker-busy")
+            _: ()
+    val previous_attempts = match state.dispatches[index]:
+        Some(dispatch): dispatch.attempts
+        _: 0
+    if previous_attempts >= state.max_attempts:
+        return grouped_execution_reject_v1(state, "group-retry-budget-exhausted")
+    val binding = state.bindings[index]
+    # Parent execution-slot identity, not a fabricated OS process receipt.
+    val owner_id = sha256_text("group-owner-v1|{worker_id}|{generation}|{binding.snapshot_digest}|{binding.cache_identity}")
+    val lease_id = sha256_text("group-lease-v1|{state.route.service.profile.cas_namespace}|{binding.group_id}|{action_id}|{owner_id}")
+    var candidate = state.route
+    candidate.owner_id = owner_id
+    candidate.lease_generation = generation
+    val claim = demand_artifact_claim_owned_v1(candidate, action_id, lease_id, available_memory_bytes)
+    if not claim.claim.valid: return grouped_execution_reject_v1(state, claim.claim.reason)
+    # Capture publication authority now, at dispatch; never reconstruct it when
+    # a worker result arrives. The bridge already verified this exact identity.
+    val publication = ArtifactLeaseV1(lease_id, action_id, owner_id, generation, false)
+    val lease = GroupedActionLeaseV1(binding.group_id, action_id, worker_id, generation,
+        lease_id, binding.snapshot_digest, binding.cache_identity, false)
+    var next = state
+    next.route = claim.route
+    next.dispatches[index] = Some(GroupedArtifactDispatchV1(lease, publication, previous_attempts + 1))
+    GroupedExecutionTransferV1(next, true, "ok", Some(lease))
+
+fn grouped_execution_same_lease_v1(left: GroupedActionLeaseV1, right: GroupedActionLeaseV1) -> bool:
+    left.group_id == right.group_id and left.action_id == right.action_id and
+        left.worker_id == right.worker_id and left.generation == right.generation and
+        left.lease_id == right.lease_id and left.snapshot_digest == right.snapshot_digest and
+        left.cache_identity == right.cache_identity and left.completed == right.completed
+
+fn grouped_execution_commit_v1(state: GroupedExecutionV1, lease: GroupedActionLeaseV1,
+    result: BuildActionResultV1, artifact_digest: text,
+    packages: [PackageCompileResultV1]) -> GroupedExecutionTransferV1:
+    if state.reason != "ok": return grouped_execution_reject_v1(state, state.reason)
+    val index = grouped_execution_index_v1(state, lease.action_id)
+    if index < 0: return grouped_execution_reject_v1(state, "group-action-missing")
+    val dispatch = match state.dispatches[index]:
+        Some(value): value
+        _: return grouped_execution_reject_v1(state, "group-dispatch-missing")
+    if lease.completed or not grouped_execution_same_lease_v1(lease, dispatch.lease) or
+            result.action_id != lease.action_id or result.snapshot_revision != lease.snapshot_digest:
+        return grouped_execution_reject_v1(state, "group-result-owner-mismatch")
+    if artifact_digest != result.output_identity or
+            (result.success and not builder_digest_valid_v1(artifact_digest)) or
+            (not result.success and artifact_digest != ""):
+        return grouped_execution_reject_v1(state, "group-result-artifact-mismatch")
+    val binding = state.bindings[index]
+    if not binding.publishes_package and packages.len() > 0:
+        return grouped_execution_reject_v1(state, "intermediate-action-cannot-publish-packages")
+    if not result.success and packages.len() > 0:
+        return grouped_execution_reject_v1(state, "failed-action-cannot-publish-packages")
+    if binding.publishes_package and result.success:
+        for group in state.schedule.groups:
+            if group.identity == binding.group_id:
+                val batch = package_scc_publication_batch_v1(group, packages)
+                if not batch.valid: return grouped_execution_reject_v1(state, batch.reason)
+        for package in packages:
+            if not builder_digest_valid_v1(package.action_key) or
+                    not builder_digest_valid_v1(package.interface_archive_digest) or
+                    not builder_digest_valid_v1(package.action_archive_digest):
+                return grouped_execution_reject_v1(state, "group-package-identity-invalid")
+    val committed = demand_artifact_commit_owned_v1(state.route, result, Some(dispatch.publication_lease))
+    if not committed.accepted: return grouped_execution_reject_v1(state, "group-result-rejected")
+    var next = state
+    next.route = committed.route
+    var finished = dispatch
+    finished.lease.completed = true
+    next.dispatches[index] = Some(finished)
+    for package in packages: next.published_packages = next.published_packages.push(package)
+    GroupedExecutionTransferV1(next, true, "ok", Some(finished.lease))
+
+# This DTO is trusted only after the runner's exact broker collect/replay path.
+# A digest-shaped string by itself is NOT evidence of process death.
+fn grouped_execution_recover_v1(state: GroupedExecutionV1, receipt: GroupedReapReceiptV1,
+    next_generation: i64) -> GroupedExecutionTransferV1:
+    if state.reason != "ok": return grouped_execution_reject_v1(state, state.reason)
+    val index = grouped_execution_index_v1(state, receipt.action_id)
+    if index < 0: return grouped_execution_reject_v1(state, "group-action-missing")
+    val dispatch = match state.dispatches[index]:
+        Some(value): value
+        _: return grouped_execution_reject_v1(state, "group-dispatch-missing")
+    val old = dispatch.lease
+    if old.completed or receipt.group_id != old.group_id or receipt.worker_id != old.worker_id or
+            receipt.generation != old.generation or receipt.lease_id != old.lease_id or
+            receipt.snapshot_digest != old.snapshot_digest or receipt.cache_identity != old.cache_identity or
+            not builder_digest_valid_v1(receipt.tree_receipt_digest) or
+            next_generation != old.generation + 1 or next_generation > 1000000000:
+        return grouped_execution_reject_v1(state, "group-reap-authority-mismatch")
+    if dispatch.attempts >= state.max_attempts:
+        return grouped_execution_reject_v1(state, "group-retry-budget-exhausted")
+    val successor = sha256_text("group-owner-v1|{old.worker_id}|{next_generation}|{old.snapshot_digest}|{old.cache_identity}")
+    val requeued = demand_artifact_requeue_retired_v1(state.route, dispatch.publication_lease, successor, next_generation)
+    val route = match requeued:
+        Ok(value): value
+        Err(reason): return grouped_execution_reject_v1(state, reason)
+    var staged = state
+    staged.route = route
+    var retired = dispatch
+    retired.lease.completed = true
+    staged.dispatches[index] = Some(retired)
+    val retry = grouped_execution_claim_v1(staged, old.action_id, old.worker_id,
+        next_generation, state.route.service.profile.memory_budget_bytes)
+    if not retry.accepted: return grouped_execution_reject_v1(state, retry.reason)
+    retry
+
+export GroupedArtifactDispatchV1, GroupedExecutionV1, GroupedExecutionTransferV1
+export grouped_execution_new_v1, grouped_execution_ready_v1
+export grouped_execution_claim_v1, grouped_execution_commit_v1, grouped_execution_recover_v1

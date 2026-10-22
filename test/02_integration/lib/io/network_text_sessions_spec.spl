@@ -1,0 +1,374 @@
+# @req REQ-UTF8-EXTERNAL-TEXT-008
+"""Real IPv4 loopback session APIs, no mock transport or unconditional skip.
+
+All sockets use ephemeral ports and bounded read/write timeouts. These tests
+are authored UNRUN until a newly admitted self-hosted runtime is available.
+"""
+use std.spec.*
+use std.spec.step
+use std.io.types.{Shutdown}
+use std.common.encoding.external_text.{Encoding, TextByteOrder, BomPolicy, CodecErrorKind}
+use std.common.text_bytes.{text_byte_buffer, bytes_to_text, text_to_utf8_bytes}
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+use std.nogc_sync_mut.io.udp.{UdpSocket}
+use std.nogc_sync_mut.io.tcp_text_session.{TcpTextSession}
+use std.nogc_sync_mut.io.udp_text_session.{UdpTextSession}
+use std.nogc_sync_mut.io.text_session.{TextSessionCodec, text_session_codec, utf8_text_session_codec}
+use std.nogc_sync_mut.io.external_text_io.{TextIoError, io_text_error_message}
+
+fn network_packed(values: [u8]) -> [u8]:
+    var bytes = text_byte_buffer(values.len()).unwrap()
+    for value in values: bytes.push(value)
+    bytes
+
+fn network_tcp_pair() -> (TcpStream, TcpStream):
+    var listener = TcpListener.bind("127.0.0.1:0").unwrap()
+    val address = listener.local_addr().unwrap()
+    val client = TcpStream.connect_timeout(address, 1000).unwrap()
+    val server = listener.accept_timeout(1000).unwrap()
+    listener.close().unwrap()
+    client.set_read_timeout(Some(1000)).unwrap()
+    client.set_write_timeout(Some(1000)).unwrap()
+    server.set_read_timeout(Some(1000)).unwrap()
+    server.set_write_timeout(Some(1000)).unwrap()
+    (client, server)
+
+fn network_receiver_pair(codec: TextSessionCodec) -> (TcpStream, TcpTextSession):
+    var listener = TcpListener.bind("127.0.0.1:0").unwrap()
+    val peer = TcpStream.connect_timeout(listener.local_addr().unwrap(), 1000).unwrap()
+    val session = TcpTextSession.accept(listener, codec, 1000).unwrap()
+    listener.close().unwrap()
+    peer.set_read_timeout(Some(1000)).unwrap()
+    peer.set_write_timeout(Some(1000)).unwrap()
+    (peer, session)
+
+fn network_writer_pair(codec: TextSessionCodec) -> (TcpTextSession, TcpStream):
+    var listener = TcpListener.bind("127.0.0.1:0").unwrap()
+    val session = TcpTextSession.connect(listener.local_addr().unwrap(), codec, 1000).unwrap()
+    val peer = listener.accept_timeout(1000).unwrap()
+    listener.close().unwrap()
+    peer.set_read_timeout(Some(1000)).unwrap()
+    peer.set_write_timeout(Some(1000)).unwrap()
+    (session, peer)
+
+fn network_session_pair(left: TextSessionCodec, right: TextSessionCodec) -> (TcpTextSession, TcpTextSession):
+    var listener = TcpListener.bind("127.0.0.1:0").unwrap()
+    val first = TcpTextSession.connect(listener.local_addr().unwrap(), left, 1000).unwrap()
+    val second = TcpTextSession.accept(listener, right, 1000).unwrap()
+    listener.close().unwrap()
+    (first, second)
+
+fn network_codec(encoding: Encoding, order: TextByteOrder, bom: BomPolicy, limit: i64) -> TextSessionCodec:
+    text_session_codec(encoding, order, bom, encoding, order, bom, limit, limit).unwrap()
+
+fn expect_network_codec_error(result: Result<text?, TextIoError>, kind: CodecErrorKind):
+    match result:
+        case Ok(value): fail("invalid stream was accepted")
+        case Err(error):
+            match error:
+                case TextIoError.Codec(cause): expect(cause.kind).to_equal(kind)
+                case _: fail("expected codec error: " + io_text_error_message(error))
+
+describe "TCP text sessions over real loopback streams":
+    it "retains a split UTF8 scalar and distinguishes empty decode from EOF":
+        step("Send the euro sign one byte per session read")
+        val pair = network_receiver_pair(utf8_text_session_codec(16, 16).unwrap())
+        var peer = pair.0
+        var session = pair.1
+        peer.write_all(network_packed([0xE2, 0x82, 0xAC])).unwrap()
+        peer.shutdown(Shutdown.Write).unwrap()
+        expect(session.read_chunk(1).unwrap()).to_equal(Some(""))
+        expect(session.read_chunk(1).unwrap()).to_equal(Some(""))
+        expect(session.read_chunk(1).unwrap()).to_equal(Some("€"))
+        expect(session.read_chunk(1).unwrap()).to_be_nil()
+        expect(session.read_chunk(1).unwrap()).to_be_nil()
+        session.close().unwrap()
+        peer.close().unwrap()
+
+    it "handles split required BOM and UTF16 surrogate pairs for both byte orders":
+        for order in [TextByteOrder.LittleEndian, TextByteOrder.BigEndian]:
+            step("Read an encoded BOM and supplementary scalar one byte at a time")
+            val codec = network_codec(Encoding.Utf16, order, BomPolicy.Require, 32)
+            val pair = network_session_pair(codec, codec)
+            var sender = pair.0
+            var receiver = pair.1
+            sender.write_text("😀").unwrap()
+            expect(receiver.read_text(1).unwrap()).to_equal("😀")
+            sender.write_text("Z").unwrap()
+            expect(receiver.read_text(1).unwrap()).to_equal("Z")
+            sender.close().unwrap()
+            expect(receiver.read_text(1).unwrap()).to_equal("")
+            receiver.close().unwrap()
+
+    it "latches truncated EOF and does not return a partial scalar":
+        val pair = network_receiver_pair(utf8_text_session_codec(16, 16).unwrap())
+        var peer = pair.0
+        var session = pair.1
+        peer.write_all(network_packed([0xE2])).unwrap()
+        peer.shutdown(Shutdown.Write).unwrap()
+        expect(session.read_chunk(1).unwrap()).to_equal(Some(""))
+        expect_network_codec_error(session.read_chunk(1), CodecErrorKind.TruncatedInput)
+        expect_network_codec_error(session.read_chunk(1), CodecErrorKind.TruncatedInput)
+        session.close().unwrap()
+        peer.close().unwrap()
+
+    it "rejects malformed input and latches its codec failure":
+        val pair = network_receiver_pair(utf8_text_session_codec(16, 16).unwrap())
+        var peer = pair.0
+        var session = pair.1
+        peer.write_all(network_packed([0xFF])).unwrap()
+        expect_network_codec_error(session.read_chunk(1), CodecErrorKind.InvalidUtf8)
+        expect_network_codec_error(session.read_chunk(1), CodecErrorKind.InvalidUtf8)
+        session.close().unwrap()
+        peer.close().unwrap()
+
+    it "enforces forbidden BOM at stream start across split reads":
+        val pair = network_receiver_pair(network_codec(Encoding.Utf8, TextByteOrder.NotApplicable, BomPolicy.Forbid, 16))
+        var peer = pair.0
+        var session = pair.1
+        peer.write_all(network_packed([0xEF, 0xBB, 0xBF])).unwrap()
+        expect(session.read_chunk(1).unwrap()).to_equal(Some(""))
+        expect(session.read_chunk(1).unwrap()).to_equal(Some(""))
+        expect_network_codec_error(session.read_chunk(1), CodecErrorKind.ForbiddenBom)
+        session.close().unwrap()
+        peer.close().unwrap()
+
+    it "rejects oversized writes before bytes or BOM are committed and permits corrected input":
+        val pair = network_writer_pair(network_codec(Encoding.Utf8, TextByteOrder.NotApplicable, BomPolicy.Require, 16))
+        var session = pair.0
+        var peer = pair.1
+        expect(session.write_text("01234567890123456789").is_err()).to_equal(true)
+        session.write_text("A").unwrap()
+        session.write_text("B").unwrap()
+        expect(peer.read_exact(5).unwrap()).to_equal([0xEF, 0xBB, 0xBF, 65, 66])
+        session.close().unwrap()
+        peer.close().unwrap()
+
+    it "allows exact UTF16 byte limits without conservatively rejecting multibyte UTF8":
+        val pair = network_writer_pair(network_codec(Encoding.Utf16, TextByteOrder.BigEndian, BomPolicy.Preserve, 2))
+        var session = pair.0
+        var peer = pair.1
+        session.write_text("€").unwrap()
+        expect(peer.read_exact(2).unwrap()).to_equal([0x20, 0xAC])
+        session.close().unwrap()
+        peer.close().unwrap()
+
+    it "validates read limits before consuming a transport byte":
+        val pair = network_receiver_pair(utf8_text_session_codec(4, 4).unwrap())
+        var peer = pair.0
+        var session = pair.1
+        peer.write_all(network_packed([65])).unwrap()
+        expect(session.read_chunk(0).is_err()).to_equal(true)
+        expect(session.read_chunk(5).is_err()).to_equal(true)
+        expect(session.read_text(1).unwrap()).to_equal("A")
+        session.close().unwrap()
+        peer.close().unwrap()
+
+    it "writes across bounded send windows without duplicating bytes":
+        val pair = network_writer_pair(utf8_text_session_codec(16384, 16384).unwrap())
+        var session = pair.0
+        var peer = pair.1
+        val payload = "a".repeat(9000)
+        session.write_text(payload).unwrap()
+        val received = peer.read_exact(9000).unwrap()
+        expect(received.len()).to_equal(9000)
+        var exact = true
+        for byte in received:
+            if byte != 97: exact = false
+        expect(exact).to_equal(true)
+        session.close().unwrap()
+        peer.close().unwrap()
+
+    it "keeps simultaneous session encodings isolated":
+        val left = text_session_codec(Encoding.Utf16, TextByteOrder.BigEndian, BomPolicy.Preserve,
+            Encoding.Utf8, TextByteOrder.NotApplicable, BomPolicy.Preserve, 32, 32).unwrap()
+        val right = text_session_codec(Encoding.Utf8, TextByteOrder.NotApplicable, BomPolicy.Preserve,
+            Encoding.Utf16, TextByteOrder.BigEndian, BomPolicy.Preserve, 32, 32).unwrap()
+        val pair = network_session_pair(left, right)
+        var first = pair.0
+        var second = pair.1
+        first.write_text("€").unwrap()
+        expect(second.read_text(1).unwrap()).to_equal("€")
+        second.write_text("Ω").unwrap()
+        expect(first.read_text(1).unwrap()).to_equal("Ω")
+        first.close().unwrap()
+        second.close().unwrap()
+
+    it "rejects operations after owning session close without accepting a raw alias":
+        val pair = network_writer_pair(utf8_text_session_codec(16, 16).unwrap())
+        var session = pair.0
+        var peer = pair.1
+        session.close().unwrap()
+        expect(session.write_text("A").is_err()).to_equal(true)
+        expect(session.read_chunk(1).is_err()).to_equal(true)
+        session.close().unwrap()
+        peer.close().unwrap()
+
+    it "owns connected and accepted transports without exposing raw stream aliases":
+        var listener = TcpListener.bind("127.0.0.1:0").unwrap()
+        val codec = utf8_text_session_codec(16, 16).unwrap()
+        var client = TcpTextSession.connect(listener.local_addr().unwrap(), codec, 1000).unwrap()
+        var server = TcpTextSession.accept(listener, codec, 1000).unwrap()
+        listener.close().unwrap()
+        client.write_text("hello").unwrap()
+        var received = ""
+        while received.len() < 5:
+            val chunk = server.read_text(5 - received.len()).unwrap()
+            expect(chunk.len()).to_be_greater_than(0)
+            received = received + chunk
+        expect(received).to_equal("hello")
+        client.close().unwrap()
+        expect(server.read_text(5).unwrap()).to_equal("")
+        server.close().unwrap()
+
+    it "sends generic and packed binary arrays with identical exact octets":
+        step("Use the actual legacy write_all owner for both array representations")
+        val pair = network_tcp_pair()
+        var sender = pair.0
+        var receiver = pair.1
+        sender.write_all([0u8, 8u8, 128u8, 255u8]).unwrap()
+        sender.write_all(network_packed([0u8, 8u8, 128u8, 255u8])).unwrap()
+        expect(receiver.read_exact(8).unwrap()).to_equal([0u8, 8u8, 128u8, 255u8, 0u8, 8u8, 128u8, 255u8])
+        val generic = [0u8, 8u8, 128u8, 255u8]
+        val sent = sender.write(generic).unwrap()
+        expect(sent).to_be_greater_than(0)
+        expect(sent).to_be_less_than(5)
+        val received = receiver.read_exact(sent).unwrap()
+        for index in 0..sent: expect(received[index]).to_equal(generic[index])
+        expect(sender.write([]).unwrap()).to_equal(0)
+        sender.close().unwrap()
+        receiver.close().unwrap()
+
+    it "emits a required BOM once even when the first write is empty":
+        val pair = network_writer_pair(network_codec(Encoding.Utf8, TextByteOrder.NotApplicable, BomPolicy.Require, 16))
+        var sender = pair.0
+        var receiver = pair.1
+        sender.write_text("").unwrap()
+        sender.write_text("").unwrap()
+        sender.write_text("A").unwrap()
+        sender.close().unwrap()
+        expect(receiver.read_exact(4).unwrap()).to_equal([0xEF, 0xBB, 0xBF, 65])
+        expect(receiver.read(1).unwrap().len()).to_equal(0)
+        receiver.close().unwrap()
+
+    it "keeps a forbidden BOM policy after empty writes and rejects malformed output before commit":
+        val pair = network_writer_pair(network_codec(Encoding.Utf8, TextByteOrder.NotApplicable, BomPolicy.Forbid, 16))
+        var sender = pair.0
+        var receiver = pair.1
+        sender.write_text("").unwrap()
+        expect(sender.write_text(bytes_to_text(network_packed([0xEF, 0xBB, 0xBF]))).is_err()).to_equal(true)
+        val malformed = bytes_to_text(network_packed([0xFF]))
+        match sender.write_text(malformed):
+            case Ok(_): fail("malformed internal UTF8 was written")
+            case Err(error):
+                match error:
+                    case TextIoError.Codec(cause): expect(cause.kind).to_equal(CodecErrorKind.InvalidUtf8)
+                    case _: fail("expected malformed UTF8 diagnostic")
+        sender.write_text("A").unwrap()
+        sender.close().unwrap()
+        expect(receiver.read_exact(1).unwrap()).to_equal([65u8])
+        expect(receiver.read(1).unwrap().len()).to_equal(0)
+        receiver.close().unwrap()
+
+describe "UDP text sessions preserve datagram boundaries":
+    it "applies BOM and UTF16 policies independently to every datagram":
+        val codec = network_codec(Encoding.Utf16, TextByteOrder.BigEndian, BomPolicy.Require, 64)
+        var sender = UdpTextSession.bind("127.0.0.1:0", codec, 1000).unwrap()
+        var receiver = UdpTextSession.bind("127.0.0.1:0", codec, 1000).unwrap()
+        val address = receiver.local_addr().unwrap()
+        sender.send_text("😀", address).unwrap()
+        sender.send_text("Ω", address).unwrap()
+        expect(receiver.recv_text().unwrap().0).to_equal("😀")
+        expect(receiver.recv_text().unwrap().0).to_equal("Ω")
+        sender.close().unwrap()
+        receiver.close().unwrap()
+
+    it "rejects truncated and oversized datagrams without poisoning the next packet":
+        var sender = UdpSocket.bind("127.0.0.1:0").unwrap()
+        var receiver = UdpTextSession.bind("127.0.0.1:0", utf8_text_session_codec(2, 2).unwrap(), 1000).unwrap()
+        val address = receiver.local_addr().unwrap()
+        sender.send_to(network_packed([0xE2]), address).unwrap()
+        sender.send_to(network_packed([65, 66, 67]), address).unwrap()
+        sender.send_to(network_packed([90]), address).unwrap()
+        expect(receiver.recv_text().is_err()).to_equal(true)
+        expect(receiver.recv_text().is_err()).to_equal(true)
+        expect(receiver.recv_text().unwrap().0).to_equal("Z")
+        sender.close().unwrap()
+        receiver.close().unwrap()
+
+    it "transports an empty datagram as an empty message rather than stream EOF":
+        val codec = utf8_text_session_codec(16, 16).unwrap()
+        var sender = UdpTextSession.bind("127.0.0.1:0", codec, 1000).unwrap()
+        var receiver = UdpTextSession.bind("127.0.0.1:0", codec, 1000).unwrap()
+        val address = receiver.local_addr().unwrap()
+        sender.send_text("", address).unwrap()
+        sender.send_text("next", address).unwrap()
+        expect(receiver.recv_text().unwrap().0).to_equal("")
+        expect(receiver.recv_text().unwrap().0).to_equal("next")
+        sender.close().unwrap()
+        receiver.close().unwrap()
+
+
+describe "Network session shared-reference closure and ordinary UTF8 APIs":
+    it "should observe TCP close through another reference to the same session":
+        step("Close one shared reference without adopting a raw descriptor")
+        val pair = network_writer_pair(utf8_text_session_codec(16, 16).unwrap())
+        var session = pair.0
+        var alias = session
+        var peer = pair.1
+        alias.close().unwrap()
+        expect(session.write_text("A").is_err()).to_equal(true)
+        expect(session.read_chunk(1).is_err()).to_equal(true)
+        session.close().unwrap()
+        peer.close().unwrap()
+
+    it "should observe UDP close through another reference to the same session":
+        step("Close a shared session reference and refuse later datagrams")
+        var session = UdpTextSession.bind("127.0.0.1:0", utf8_text_session_codec(16, 16).unwrap(), 1000).unwrap()
+        val address = session.local_addr().unwrap()
+        var alias = session
+        alias.close().unwrap()
+        expect(session.send_text("A", address).is_err()).to_equal(true)
+        expect(session.recv_text().is_err()).to_equal(true)
+        expect(session.local_addr().is_err()).to_equal(true)
+        session.close().unwrap()
+
+    it "should decode exact ordinary UTF8 frames without consuming the following frame":
+        step("Read A NUL and a non-BMP scalar while retaining the next byte")
+        val pair = network_tcp_pair()
+        var writer = pair.0
+        var reader = pair.1
+        writer.write_all(network_packed([65, 0, 240, 159, 152, 128, 66])).unwrap()
+        val first = reader.read_bytes(6).unwrap()
+        val first_bytes = text_to_utf8_bytes(first)
+        expect(first_bytes.len()).to_equal(6)
+        val expected = [65, 0, 240, 159, 152, 128]
+        for index in 0..6: expect(first_bytes[index]).to_equal(expected[index])
+        expect(reader.read_bytes(1).unwrap()).to_equal("B")
+        writer.close().unwrap()
+        reader.close().unwrap()
+
+    it "should reject malformed ordinary UTF8 output before sending any bytes":
+        step("Refuse malformed internal text then send corrected text on the same stream")
+        val pair = network_tcp_pair()
+        var writer = pair.0
+        var reader = pair.1
+        expect(writer.write_text(bytes_to_text(network_packed([255]))).is_err()).to_equal(true)
+        writer.write_text("A\0B").unwrap()
+        val decoded = text_to_utf8_bytes(reader.read_bytes(3).unwrap())
+        expect(decoded.len()).to_equal(3)
+        expect(decoded[0]).to_equal(65)
+        expect(decoded[1]).to_equal(0)
+        expect(decoded[2]).to_equal(66)
+        writer.close().unwrap()
+        reader.close().unwrap()
+
+    it "should reject malformed ordinary incoming UTF8 instead of constructing internal text":
+        step("Send one invalid octet through the byte API")
+        val pair = network_tcp_pair()
+        var writer = pair.0
+        var reader = pair.1
+        writer.write_all(network_packed([255])).unwrap()
+        expect(reader.read_bytes(1).is_err()).to_equal(true)
+        writer.close().unwrap()
+        reader.close().unwrap()

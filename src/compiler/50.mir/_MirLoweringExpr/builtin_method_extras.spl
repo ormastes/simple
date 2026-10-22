@@ -11,6 +11,7 @@
 # their declared element type, and otherwise returns nil so the caller keeps
 # its loud `unresolved method call` failure. Nothing here guesses i64.
 use compiler.mir.mir_data.*
+use compiler.mir.mir_instruction_support.{MirBinOp}
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.common.diagnostics.span.{Span}
@@ -20,6 +21,11 @@ use compiler.mir.mir_types.{LocalId}
 use compiler.mir._MirLoweringExpr.expr_dispatch.*
 use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 use compiler.mir._MirLoweringExpr.method_calls_literals.*
+use compiler.hir.hir_types.{SymbolKind}
+use compiler.mir._MirLowering.provider_metadata.{mir_class_identity}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLoweringExpr.result_err_record_owner.*
+use compiler.mir._MirLoweringExpr.enum_payload_type_identity.{enum_payload_nominal_kind}
 
 fn builtin_extra_rt_operand(name: text, params: [MirType], return_type: MirType) -> MirOperand:
     MirOperand(kind: MirOperandKind.Const(
@@ -236,6 +242,57 @@ impl MirLowering:
         self.builder = b_push
         self.builtin_mark_array_result(result_arr, Some(tuple_type), nil, result_arr)
 
+    me builtin_dict_entries_array(dict_local: LocalId, field_types: [MirType]) -> LocalId:
+        """Snapshot paired slots, then use the same native tuple layout as a dict loop."""
+        var b_entries = self.builder
+        val entries = b_entries.emit_call_value(
+            builtin_extra_rt_operand("rt_dict_entries", [MirType.i64()], MirType.i64()),
+            [mir_operand_copy(dict_local)], MirType.i64())
+        self.builder = b_entries
+        self.runtime_array_locals[entries.id] = true
+        self.mark_runtime_value_local(entries.id)
+        self.builtin_runtime_tuples_to_native(entries, field_types)
+
+    me builtin_dict_items(receiver: HirExpr, dict_local: LocalId) -> LocalId:
+        # A handle alone does not establish either field's representation.
+        # Never decode an unknown record/text slot using a guessed i64 type.
+        var key_mir = MirType(kind: MirTypeKind.Never)
+        var value_mir = MirType(kind: MirTypeKind.Never)
+        if val local_mir = self.local_mir_type_of(dict_local):
+            var dict_mir = local_mir
+            match dict_mir.kind:
+                case MirTypeKind.Ref(inner_mir, _): dict_mir = inner_mir
+                case _: ()
+            match dict_mir.kind:
+                case MirTypeKind.Dict(k, v):
+                    key_mir = if self.mir_type_is_str(k): self.bootstrap_text_type() else: k
+                    value_mir = if self.mir_type_is_str(v): self.bootstrap_text_type() else: v
+                case _: ()
+        var declared: HirType? = self.find_local_hir_type(dict_local.id)
+        if declared == nil:
+            declared = self.receiver_declared_type(receiver)
+        if declared == nil:
+            declared = receiver.type_
+        if val declared_type = declared:
+            var dict_hir = declared_type
+            match dict_hir.kind:
+                case HirTypeKind.Ref(inner_hir, _): dict_hir = inner_hir
+                case _: ()
+            match dict_hir.kind:
+                case HirTypeKind.Dict(k, v):
+                    key_mir = self.builtin_dict_entry_field_type(Some(k), key_mir)
+                    value_mir = self.builtin_dict_entry_field_type(Some(v), value_mir)
+                case _: ()
+        match key_mir.kind:
+            case MirTypeKind.Never:
+                return self.builtin_extra_fail_closed("Dict.items requires a known key type", Some(receiver.span))
+            case _: ()
+        match value_mir.kind:
+            case MirTypeKind.Never:
+                return self.builtin_extra_fail_closed("Dict.items requires a known value type", Some(receiver.span))
+            case _: ()
+        self.builtin_dict_entries_array(dict_local, [key_mir, value_mir])
+
     me builtin_dict_entry_field_type(declared: HirType?, mir_fallback: MirType) -> MirType:
         """Field type of one side of a dict entry: the declared key/value type
         (text in its `bootstrap_text_type` form, the one loop variables use),
@@ -290,7 +347,8 @@ impl MirLowering:
                         case _: ()
             var same_hir: HirType? = nil
             if val known_elem_hir = elem_hir:
-                same_hir = Some(HirType(kind: HirTypeKind.Array(known_elem_hir, nil), span: receiver.span))
+                val declared_element: HirType = known_elem_hir
+                same_hir = Some(HirType(kind: HirTypeKind.Array(declared_element, None), span: receiver.span))
             return Some(self.builtin_mark_array_result(unary_raw, same_elem, same_hir, arr))
 
         # index_of(x): first index whose element equals x, else -1 (seed:
@@ -640,6 +698,26 @@ impl MirLowering:
         else:
             self.remember_local_hir_type(local.id, HirType(kind: HirTypeKind.Float(64), span: init.span), 0, 0)
 
+    me remember_untyped_let_nominal_init(init: HirExpr, local: LocalId):
+        """Untyped `val x = <expr>` whose initialiser has a recoverable
+        declared nominal type (`xs[i]` on `[Node]`, `self.m()` -> `E?`,
+        `d[k]`): record it on the binding, so a later `match x:` owns its bare
+        variants and `E.V(x)` sees the payload type (p3p8 hir_children,
+        mono_archive_registration, engine). Only a non-generic class, struct
+        or enum, or an Optional of one, is recorded. Nothing is lowered."""
+        if self.find_local_hir_type(local.id) != nil:
+            return
+        if val init_type = self.enum_match_expr_type(init):
+            val nominal: HirType = match init_type.kind:
+                case HirTypeKind.Optional(optional_inner): optional_inner
+                case _: init_type
+            match nominal.kind:
+                case HirTypeKind.Named(nominal_owner, nominal_args):
+                    val nominal_kind = enum_payload_nominal_kind(nominal_owner, self.symbols)
+                    if nominal_args.len() == 0 and (nominal_kind == 1 or nominal_kind == 2 or nominal_kind == 3):
+                        self.remember_local_hir_type(local.id, init_type, 0, 0)
+                case _: ()
+
     me builtin_numeric_receiver_kind(receiver: HirExpr, recv: LocalId) -> i64:
         """Numeric kind of a method receiver, or 0 when it is not POSITIVELY a
         builtin number. A local known to hold a user value, a collection, an
@@ -796,8 +874,8 @@ impl MirLowering:
         Some(int_result)
 
     me builtin_result_payload_mir(payload_hir: HirType) -> MirType?:
-        """Result payload types the combinators carry: the same scalar/text
-        set lower_result_unwrap supports with a default."""
+        """Decode proven scalar/text payloads or retain a nominal record's
+        runtime handle. A raw I64 is never proof of a nominal payload."""
         match payload_hir.kind:
             case HirTypeKind.Bool: return Some(MirType.bool())
             case HirTypeKind.Int(bits, signed):
@@ -809,9 +887,21 @@ impl MirLowering:
                     return Some(MirType.f64())
                 return nil
             case HirTypeKind.Str: return Some(self.bootstrap_text_type())
+            case HirTypeKind.Named(owner, _):
+                if val declaration = self.symbols.get_symbol_raw(owner.id):
+                    match declaration.kind:
+                        case SymbolKind.Struct | SymbolKind.Class:
+                            val owner_key = if declaration.kind == SymbolKind.Class:
+                                mir_class_identity(declaration)
+                            else:
+                                self.declared_struct_layout_key(self.composite_layout_key(declaration))
+                            if self.struct_field_order.has(owner_key):
+                                return Some(MirType.i64())
+                        case _: ()
+                return nil
             case _: return nil
 
-    me builtin_result_payload(receiver_local: LocalId, payload_hir: HirType, payload_mir: MirType) -> LocalId:
+    me builtin_result_payload(receiver_local: LocalId, payload_hir: HirType, payload_mir: MirType, nominal_owner: text) -> LocalId:
         """Read and decode the active payload of a Result handle."""
         var b_payload = self.builder
         val payload_word = b_payload.emit_call_value(
@@ -819,6 +909,8 @@ impl MirLowering:
             [mir_operand_copy(receiver_local)], MirType.i64())
         self.builder = b_payload
         var payload_value = self.enum_payload_value(payload_word, payload_mir)
+        if nominal_owner != "" and self.result_err_record_owners.contains(receiver_local.id):
+            payload_value = self.materialize_result_err_record_payload(payload_value, nominal_owner, payload_hir.span)
         var payload_is_text = false
         match payload_hir.kind:
             case HirTypeKind.Str: payload_is_text = true
@@ -829,11 +921,57 @@ impl MirLowering:
                 builtin_extra_rt_operand("rt_interp_cstr", [MirType.i64()], payload_mir),
                 [mir_operand_copy(payload_value)], payload_mir)
             self.builder = b_text
-        self.remember_local_hir_type(payload_value.id, payload_hir, 0, 0)
+        if nominal_owner != "":
+            self.struct_value_syms[payload_value.id] = nominal_owner
+        else:
+            match payload_hir.kind:
+                case HirTypeKind.Named(owner, _):
+                    if val declaration = self.symbols.get_symbol_raw(owner.id):
+                        match declaration.kind:
+                            case SymbolKind.Struct:
+                                self.struct_value_syms[payload_value.id] = self.declared_struct_layout_key(self.composite_layout_key(declaration))
+                            case SymbolKind.Class:
+                                self.struct_value_syms[payload_value.id] = mir_class_identity(declaration)
+                            case _: ()
+                case _: ()
+        var retained_hir = payload_hir
+        if nominal_owner != "":
+            # Registry return types may carry provider-local SymbolIds. Rebind
+            # only an exact owner, preserving its generic arguments. Recording
+            # a colliding consumer ID would make an identity mapper return the
+            # wrong nominal type even though its runtime handle was intact.
+            match payload_hir.kind:
+                case HirTypeKind.Named(symbol, type_args):
+                    if not self.symbol_matches_ownership_key(symbol.id, nominal_owner):
+                        val separator = nominal_owner.rfind("::")
+                        val bare_start = if separator >= 0: separator + 2 else: nominal_owner.rfind(".") + 1
+                        retained_hir = HirType(kind: HirTypeKind.Error, span: payload_hir.span)
+                        if val rebound = self.symbols.lookup_exact_type(nominal_owner.substring(bare_start)):
+                            val rebound_symbol: SymbolId = rebound
+                            val retained_arguments: [HirType] = type_args
+                            if self.symbol_matches_ownership_key(rebound_symbol.id, nominal_owner):
+                                retained_hir = HirType(kind: HirTypeKind.Named(rebound_symbol, retained_arguments), span: payload_hir.span)
+                case _: ()
+        self.remember_local_hir_type(payload_value.id, retained_hir, 0, 0)
         payload_value
 
+    me builtin_result_mapper_hir_type(local: LocalId, span: Span) -> HirType?:
+        # Option.map's helper deliberately accepts primitive results only.
+        # Result.map additionally carries nominal records, but only when the
+        # mapper retained a declared HIR owner (never by guessing from I64).
+        if val known = self.find_local_hir_type(local.id):
+            match known.kind:
+                case HirTypeKind.Named(symbol, _):
+                    if val owner = self.struct_value_syms.get(local.id):
+                        if not self.symbol_matches_ownership_key(symbol.id, owner):
+                            return nil
+                case _: ()
+            if self.builtin_result_payload_mir(known) != nil:
+                return Some(known)
+        self.option_map_value_hir_type(local, span)
+
     me lower_result_combinator(receiver: HirExpr, method: text, args: [HirCallArg], result_type: HirType, prelowered: LocalId, has_prelowered: bool) -> LocalId:
-        """Result.map / map_err / ok, plus unwrap / unwrap_or / unwrap_err on
+        """Result.map / map_err / ok / err, plus unwrap / unwrap_or / unwrap_err on
         a receiver whose Result type is only known from its lowered local (a
         chained `r.map(f).unwrap_or(d)`). Seed oracle:
           Ok(4).map(\\x: x*2) == Ok(8)      Err(e).map(f) == Err(e)
@@ -864,11 +1002,20 @@ impl MirLowering:
             val pred_result = b_pred.emit_binop(MirBinOp.Eq, mir_operand_copy(pred_disc), mir_operand_copy(pred_key), MirType.bool())
             self.builder = b_pred
             return pred_result
-        val maps_err = method == "map_err"
+        val maps_err = method == "map_err" or method == "err"
         val source_hir = if maps_err: err_hir else: ok_hir
-        val source_mir_opt = self.builtin_result_payload_mir(source_hir)
+        # Call-return SymbolIds may belong to the provider's symbol table.
+        # Its retained name registry is authoritative for that payload owner.
+        val source_owner = if maps_err and self.result_err_record_owners.contains(receiver_local.id):
+            self.checked_result_err_record_owner(receiver_local.id, receiver.span)
+        else:
+            self.declared_struct_layout_key(self.result_variant_payload_struct_name(receiver, if maps_err: "Err" else: "Ok") ?? "")
+        val source_mir_opt: MirType? = if source_owner != "":
+            if self.struct_field_order.has(source_owner): Some(MirType.i64()) else: nil
+        else:
+            self.builtin_result_payload_mir(source_hir)
         if source_mir_opt == nil:
-            return self.builtin_extra_fail_closed("unsupported in stage2: Result.{method}() over a payload type that is not i64, f64, bool or text; use match", Some(receiver.span))
+            return self.builtin_extra_fail_closed("unsupported Result.{method}() payload type: expected a proven scalar, text or nominal record", Some(receiver.span))
         val source_mir = source_mir_opt ?? MirType.i64()
 
         var b_disc = self.builder
@@ -885,10 +1032,10 @@ impl MirLowering:
         b_disc.switch_to_block(active_block)
         self.builder = b_disc
 
-        if method == "ok":
-            val option_type = HirType(kind: HirTypeKind.Optional(ok_hir), span: receiver.span)
-            val ok_payload = self.builtin_result_payload(receiver_local, ok_hir, source_mir)
-            val some_handle = self.ensure_option_handle(ok_payload, option_type)
+        if method == "ok" or method == "err":
+            val option_type = HirType(kind: HirTypeKind.Optional(source_hir), span: receiver.span)
+            val projected_payload = self.builtin_result_payload(receiver_local, source_hir, source_mir, source_owner)
+            val some_handle = self.ensure_option_handle(projected_payload, option_type)
             var b_some = self.builder
             b_some.emit_copy(result_local, some_handle)
             b_some.terminate_goto(merge_block)
@@ -914,7 +1061,7 @@ impl MirLowering:
         match args[0].value.kind:
             case Lambda(mapper_params, mapper_body, _):
                 if mapper_params.len() == 1:
-                    val active_payload = self.builtin_result_payload(receiver_local, source_hir, source_mir)
+                    val active_payload = self.builtin_result_payload(receiver_local, source_hir, source_mir, source_owner)
                     mapped = self.lower_inline_lambda_with_locals(mapper_params, mapper_body, [active_payload])
                     mapper_ok = true
             case _: ()
@@ -922,12 +1069,12 @@ impl MirLowering:
             mapped = self.builtin_extra_fail_closed("unsupported in stage2: Result.{method}(f) with a mapper that is not a one-parameter lambda literal; pass `\\x: ...` or use match", Some(receiver.span))
         var mapped_hir_opt: HirType? = nil
         if mapper_ok:
-            mapped_hir_opt = self.option_map_value_hir_type(mapped, receiver.span)
+            mapped_hir_opt = self.builtin_result_mapper_hir_type(mapped, receiver.span)
             if mapped_hir_opt != nil:
                 if self.builtin_result_payload_mir(mapped_hir_opt ?? HirType(kind: HirTypeKind.Error, span: receiver.span)) == nil:
                     mapped_hir_opt = nil
             if mapped_hir_opt == nil:
-                mapped = self.builtin_extra_fail_closed("unsupported in stage2: Result.{method}(f) whose mapper result is not i64, f64, bool or text; use match", Some(receiver.span))
+                mapped = self.builtin_extra_fail_closed("unsupported Result.{method}(f) mapper result: expected a proven scalar, text or nominal record", Some(receiver.span))
         val mapped_hir = mapped_hir_opt ?? source_hir
         val new_result_type = if maps_err:
             HirType(kind: HirTypeKind.Result(ok_hir, mapped_hir), span: receiver.span)
@@ -953,6 +1100,10 @@ impl MirLowering:
         self.builder = b_new
         self.mark_runtime_value_local(result_local.id)
         self.remember_local_hir_type(result_local.id, new_result_type, 2, 0)
+        if not maps_err:
+            self.copy_result_err_record_owner(receiver_local.id, result_local.id)
+        elif val mapped_owner = self.struct_value_syms.get(mapped.id):
+            self.result_err_record_owners[result_local.id] = mapped_owner
         result_local
 
     me lower_list_comprehension(kind: HirComprehensionKind, value_expr: HirExpr, clauses: [HirCompClause], span: Span) -> LocalId:
@@ -1130,7 +1281,8 @@ impl MirLowering:
 
         var value_array_hir: HirType? = nil
         if val value_hir = self.option_map_value_hir_type(value_local, span):
-            value_array_hir = Some(HirType(kind: HirTypeKind.Array(value_hir, nil), span: span))
+            val declared_value: HirType = value_hir
+            value_array_hir = Some(HirType(kind: HirTypeKind.Array(declared_value, None), span: span))
         self.builtin_mark_array_result(result_arr, Some(value_type), value_array_hir, result_arr)
 
     me lower_for_range_stepped(var_symbol_id: i64, start: HirExpr?, end: HirExpr, inclusive: bool, step: HirExpr, body: HirBlock, source_span: Span) -> LocalId:

@@ -1,0 +1,35 @@
+use std.spec.*
+use app.build.scheduler.n2_latency_numeric.{n2_nearest_rank_p95_ms_v1,
+    n2_numeric_target_met_v1}
+
+describe "N2 numeric latency calculation":
+    it "uses the nearest-rank P95 and preserves the strict target edges":
+        var samples: [i64] = [10000]
+        var index: i64 = 0
+        while index < 18:
+            samples.push(1000)
+            index = index + 1
+        samples.push(5000)
+        val p95 = n2_nearest_rank_p95_ms_v1(samples).unwrap()
+        expect(p95).to_equal(5000)
+        expect(n2_numeric_target_met_v1("staged-hook", p95).unwrap()).to_be(true)
+        expect(n2_numeric_target_met_v1("pre-push-one-ref", 10000).unwrap()).to_be(false)
+        expect(n2_numeric_target_met_v1("warm-preflight", 60000).unwrap()).to_be(false)
+
+        # ceil(0.95 * 21) selects the 20th value after sorting.
+        samples.push(1000)
+        expect(n2_nearest_rank_p95_ms_v1(samples).unwrap()).to_equal(5000)
+
+    it "rejects incomplete or malformed numeric evidence":
+        expect(n2_nearest_rank_p95_ms_v1([1, 2]).is_err()).to_be(true)
+        var samples: [i64] = []
+        var index: i64 = 0
+        while index < 20:
+            samples.push(1)
+            index = index + 1
+        samples[3] = -1
+        expect(n2_nearest_rank_p95_ms_v1(samples).is_err()).to_be(true)
+        samples[3] = 3600001
+        expect(n2_nearest_rank_p95_ms_v1(samples).is_err()).to_be(true)
+        expect(n2_numeric_target_met_v1("unknown", 1000).is_err()).to_be(true)
+        expect(n2_numeric_target_met_v1("staged-hook", -1).is_err()).to_be(true)

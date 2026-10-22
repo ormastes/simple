@@ -1,0 +1,303 @@
+# @manual: show
+# @req: REQ-FV2-C1-SM, ARCH-01, ARCH-02
+# Actual parsed-HIR bridge/capture APIs; every scenario UNRUN.
+use std.spec.{describe, it, expect, fail}
+use std.spec.step
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.mir_target_context.{mir_target_context_from}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId}
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.mono.mono_invocation_policy_v1.{MonoInvocationLimitsV1, mono_verification_limits_v1}
+use compiler.mono.verify.post_mono_verify.{post_mono_verify_modules, post_mono_report_is_clean}
+use compiler.mir.verification_call_lowering_v1.{lower_module_with_resolved_calls_for_target_v1}
+use compiler.mir.verification_call_identity.{validate_resolved_direct_call_manifest_v1}
+use compiler.tools.verify.source_calls_monomorphization_v1.{source_calls_monomorphize_v1}
+use compiler.tools.verify.source_calls_v1.{source_calls_from_source_bounded_v1}
+
+fn mono_bridge_hir(source: text) -> HirModule:
+    val parsed = parse_full_frontend(source, "mono_bridge.spl", "mono_bridge.spl", Logger(level: 0))
+    var lowering = HirLowering.with_filename("mono_bridge.spl")
+    val module = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    module
+
+# The existing codec includes declarations/default graphs and all symbol/scope
+# rows/indexes. This is a local equality oracle, not canonical-codec admission.
+fn mono_bridge_snapshot(module: HirModule) -> text:
+    val snapshot = hir_module_encode(module)
+    expect(snapshot == "").to_equal(false)
+    snapshot
+
+fn mono_bridge_source() -> text:
+    "fn choose<T>(first: T, enabled: bool) -> T:\n    first\n\nfn caller() -> i64:\n    choose<i64>(41, true)\n"
+
+fn mono_bridge_new_symbol(before: HirModule, after: HirModule) -> Result<SymbolId, text>:
+    var found: SymbolId? = nil
+    for key in after.functions.keys():
+        if not before.functions.contains(key):
+            if found != nil: return Err("bridge oracle requires exactly one actual new function")
+            expect(after.functions[key].type_params.len()).to_equal(0)
+            found = Some(key)
+    match found:
+        case Some(key): Ok(key)
+        case _: Err("bridge did not place an actual specialized declaration")
+
+fn mono_bridge_capture(module: HirModule):
+    val target = mir_target_context_from("x86_64-unknown-linux-gnu", "", "", "llvm", 0)
+    match lower_module_with_resolved_calls_for_target_v1(module, target):
+        case Ok(result):
+            expect(validate_resolved_direct_call_manifest_v1(result.module,
+                result.calls).closed()).to_equal(true)
+            expect(result.calls.bindings.len()).to_be_greater_than(0)
+        case Err(message): fail(message)
+
+fn mono_bridge_signature_refusal(module: HirModule):
+    val before = mono_bridge_snapshot(module)
+    val target = mir_target_context_from("x86_64-unknown-linux-gnu", "", "", "llvm", 0)
+    match lower_module_with_resolved_calls_for_target_v1(module, target):
+        case Ok(_): fail("contradictory specialized signature published resolved MIR")
+        case Err(message): expect(message).to_contain("FV2-E-CALL-SOURCE-SIGNATURE")
+    expect(mono_bridge_snapshot(module)).to_equal(before)
+
+describe "canonical source monomorphization bridge ownership and refusal":
+    it "preserves complete input HIR and publishes a declaration-derived specialized signature":
+        step("specialize retained defaults privately then validate the actual symbol row before capture")
+        val source = "fn identity<T>(value: T) -> T:\n    value\n\nfn choose<T>(first: T, second: T = identity<T>(first)) -> T:\n    second\n\nfn caller() -> i64:\n    choose<i64>(41)\n"
+        val input = mono_bridge_hir(source)
+        val before = mono_bridge_snapshot(input)
+        val next_symbol = input.symbols.next_symbol_id
+        val next_scope = input.symbols.next_scope_id
+        match source_calls_monomorphize_v1(input, mono_verification_limits_v1()):
+            case Ok(result):
+                expect(result.input_hir_digest == "").to_equal(false)
+                expect(result.output_hir_digest == "").to_equal(false)
+                expect(result.stats.specializations_created).to_equal(2)
+                var checked = 0
+                for key in result.module.functions.keys():
+                    if not input.functions.contains(key):
+                        val function = result.module.functions[key]
+                        val row = result.module.symbols.symbols[function.symbol.id]
+                        expect(row.id.id).to_equal(function.symbol.id)
+                        match row.type_:
+                            case Some(signature):
+                                match signature.kind:
+                                    case HirTypeKind.Function(parameters, return_type, effects):
+                                        expect(parameters.len()).to_equal(function.params.len())
+                                        for index in 0..parameters.len():
+                                            expect(hir_types_equal(parameters[index], function.params[index].type_)).to_equal(true)
+                                        expect(hir_types_equal(return_type, function.return_type)).to_equal(true)
+                                        expect(effects.len()).to_equal(function.effects.len())
+                                    case _: fail("specialized symbol does not retain a function signature")
+                            case _: fail("specialized declaration signature is missing")
+                        checked = checked + 1
+                expect(checked).to_equal(2)
+                mono_bridge_capture(result.module)
+                expect(mono_bridge_snapshot(input)).to_equal(before)
+                # Mutating the actual returned environment must not mutate its input.
+                var output = result.module
+                output.symbols.qualified_functions["bridge_private_probe"] = 999999
+                var changed_defaults = 0
+                for key in output.functions.keys():
+                    if not input.functions.contains(key):
+                        var function = output.functions[key]
+                        for index in 0..function.params.len():
+                            if function.params[index].has_default:
+                                function.params[index].default.type_ = HirType(kind: HirTypeKind.Bool, span: Span.empty())
+                                changed_defaults = changed_defaults + 1
+                        output.functions[key] = function
+                expect(changed_defaults).to_equal(1)
+                expect(mono_bridge_snapshot(input)).to_equal(before)
+                expect(input.symbols.qualified_functions.contains("bridge_private_probe")).to_equal(false)
+                expect(input.symbols.next_symbol_id).to_equal(next_symbol)
+                expect(input.symbols.next_scope_id).to_equal(next_scope)
+            case Err(message): fail(message)
+
+    it "preserves default rows and symbol scopes when specialization fails after one request":
+        step("exhaust the specialization cap while discovering two concrete requests only in defaults")
+        val input = mono_bridge_hir("fn identity<T>(value: T) -> T:\n    value\n\nfn consume(first: i64 = identity<i64>(7), second: bool = identity<bool>(true)) -> i64:\n    first\n\nfn caller() -> i64:\n    consume()\n")
+        val before = mono_bridge_snapshot(input)
+        val limits = MonoInvocationLimitsV1(max_specializations: 1, max_work_units: 65536, max_hir_depth: 128)
+        match source_calls_monomorphize_v1(input, limits):
+            case Ok(_): fail("two default requests escaped the one-specialization cap")
+            case Err(message):
+                expect(message).to_contain("SOURCE-CALLS-E-MONO")
+                expect(message).to_contain("E-MONO-SPECIALIZATIONS")
+        expect(mono_bridge_snapshot(input)).to_equal(before)
+        match source_calls_monomorphize_v1(input, mono_verification_limits_v1()):
+            case Ok(result):
+                expect(result.stats.specializations_created).to_equal(2)
+                mono_bridge_capture(result.module)
+            case Err(message): fail(message)
+        expect(mono_bridge_snapshot(input)).to_equal(before)
+
+    it "refuses an unused retained template at G7 rather than deleting it":
+        step("retain the open declaration and require the actual post-mono gate to reject publication")
+        val input = mono_bridge_hir("fn unused<T>(value: T) -> T:\n    value\n\nfn caller() -> i64:\n    7\n")
+        val before = mono_bridge_snapshot(input)
+        match source_calls_monomorphize_v1(input, mono_verification_limits_v1()):
+            case Ok(_): fail("unused retained template escaped G7")
+            case Err(message): expect(message).to_contain("SOURCE-CALLS-E-G7")
+        expect(mono_bridge_snapshot(input)).to_equal(before)
+
+    it "refuses a real unresolved type residual inserted into completed specialized HIR":
+        step("mutate only an actual specialized body annotation and require the real G7 counter and bridge refusal")
+        val input = mono_bridge_hir("fn choose<T>(value: T) -> i64:\n    7\n\nfn caller() -> i64:\n    choose<i64>(0)\n")
+        match source_calls_monomorphize_v1(input, mono_verification_limits_v1()):
+            case Ok(result):
+                val key = mono_bridge_new_symbol(input, result.module).unwrap()
+                var changed = result.module
+                var function = changed.functions[key]
+                expect(function.body.has).to_equal(true)
+                function.body.value.has_type_ = true
+                function.body.value.type_ = HirType(kind: HirTypeKind.TypeParam("Residual", []), span: Span.empty())
+                changed.functions[key] = function
+                var modules: Dict<text, HirModule> = {}
+                modules[changed.name] = changed
+                val report = post_mono_verify_modules(modules)
+                expect(post_mono_report_is_clean(report)).to_equal(false)
+                expect(report.unresolved_type_param).to_be_greater_than(0)
+                val before = mono_bridge_snapshot(changed)
+                match source_calls_monomorphize_v1(changed, mono_verification_limits_v1()):
+                    case Ok(_): fail("actual residual was hidden before bridge publication")
+                    case Err(message): expect(message).to_contain("SOURCE-CALLS-E-G7")
+                expect(mono_bridge_snapshot(changed)).to_equal(before)
+            case Err(message): fail(message)
+
+    it "accepts the measured exact work budget and atomically refuses one fewer unit":
+        step("measure one actual invocation then use fresh passes with exact and one-less limits")
+        val input = mono_bridge_hir(mono_bridge_source())
+        val before = mono_bridge_snapshot(input)
+        val defaults = mono_verification_limits_v1()
+        match source_calls_monomorphize_v1(input, defaults):
+            case Ok(first):
+                val used = defaults.max_work_units - first.work_remaining
+                expect(used).to_be_greater_than(1)
+                val exact = MonoInvocationLimitsV1(max_specializations: defaults.max_specializations,
+                    max_work_units: used, max_hir_depth: defaults.max_hir_depth)
+                match source_calls_monomorphize_v1(input, exact):
+                    case Ok(result):
+                        expect(result.work_remaining).to_equal(0)
+                        expect(result.output_hir_digest).to_equal(first.output_hir_digest)
+                        mono_bridge_capture(result.module)
+                    case Err(message): fail(message)
+                expect(mono_bridge_snapshot(input)).to_equal(before)
+                val short = MonoInvocationLimitsV1(max_specializations: defaults.max_specializations,
+                    max_work_units: used - 1, max_hir_depth: defaults.max_hir_depth)
+                match source_calls_monomorphize_v1(input, short):
+                    case Ok(_): fail("one-less work budget published a complete module")
+                    case Err(message):
+                        expect(message).to_contain("SOURCE-CALLS-E-MONO")
+                        expect(message).to_contain("E-MONO-WORK")
+                expect(mono_bridge_snapshot(input)).to_equal(before)
+            case Err(message): fail(message)
+
+    it "enforces specialization limits through the public bounded source API":
+        step("refuse two concrete requests with cap one and admit them with cap two")
+        val source = "fn identity<T>(value: T) -> T:\n    value\n\nfn number() -> i64:\n    identity<i64>(17)\n\nfn truth() -> bool:\n    identity<bool>(true)\n"
+        val one = MonoInvocationLimitsV1(max_specializations: 1, max_work_units: 65536, max_hir_depth: 128)
+        match source_calls_from_source_bounded_v1(source, "mono_bridge.spl", "x86_64-unknown-linux-gnu", one):
+            case Ok(_): fail("bounded source API ignored the actual specialization cap")
+            case Err(message): expect(message).to_contain("E-MONO-SPECIALIZATIONS")
+        val two = MonoInvocationLimitsV1(max_specializations: 2, max_work_units: 65536, max_hir_depth: 128)
+        match source_calls_from_source_bounded_v1(source, "mono_bridge.spl", "x86_64-unknown-linux-gnu", two):
+            case Ok(result):
+                expect(result.mono_specializations).to_equal(2)
+                expect(result.lowered.calls.bindings.len()).to_equal(2)
+                expect(validate_resolved_direct_call_manifest_v1(result.lowered.module,
+                    result.lowered.calls).closed()).to_equal(true)
+            case Err(message): fail(message)
+
+    it "rejects zero and over-ceiling invocation limits without changing input":
+        step("validate all three configured resource dimensions before returning any output")
+        val input = mono_bridge_hir(mono_bridge_source())
+        val before = mono_bridge_snapshot(input)
+        val invalid = [
+            MonoInvocationLimitsV1(max_specializations: 0, max_work_units: 65536, max_hir_depth: 128),
+            MonoInvocationLimitsV1(max_specializations: 4097, max_work_units: 65536, max_hir_depth: 128),
+            MonoInvocationLimitsV1(max_specializations: 4096, max_work_units: 0, max_hir_depth: 128),
+            MonoInvocationLimitsV1(max_specializations: 4096, max_work_units: 65537, max_hir_depth: 128),
+            MonoInvocationLimitsV1(max_specializations: 4096, max_work_units: 65536, max_hir_depth: 0),
+            MonoInvocationLimitsV1(max_specializations: 4096, max_work_units: 65536, max_hir_depth: 129)]
+        for limits in invalid:
+            match source_calls_monomorphize_v1(input, limits):
+                case Ok(_): fail("invalid limits published a module")
+                case Err(message): expect(message).to_contain("E-MONO-LIMIT")
+            expect(mono_bridge_snapshot(input)).to_equal(before)
+
+    it "refuses a missing signature on an actual specialized declaration at capture":
+        step("remove the completed specialization's retained signature without inventing a body")
+        val input = mono_bridge_hir(mono_bridge_source())
+        match source_calls_monomorphize_v1(input, mono_verification_limits_v1()):
+            case Ok(result):
+                val key = mono_bridge_new_symbol(input, result.module).unwrap()
+                mono_bridge_capture(result.module)
+                var changed = result.module
+                val symbol = changed.functions[key].symbol.id
+                var row = changed.symbols.symbols[symbol]
+                row.type_ = nil
+                changed.symbols.symbols[symbol] = row
+                mono_bridge_signature_refusal(changed)
+            case Err(message): fail(message)
+
+    it "refuses same-arity parameter order and return-type contradictions in completed signatures":
+        step("mutate actual specialization rows in independent invocations while retaining completed declarations")
+        for change in ["parameter_order", "return_type"]:
+            val input = mono_bridge_hir(mono_bridge_source())
+            match source_calls_monomorphize_v1(input, mono_verification_limits_v1()):
+                case Ok(result):
+                    val key = mono_bridge_new_symbol(input, result.module).unwrap()
+                    var changed = result.module
+                    val symbol = changed.functions[key].symbol.id
+                    var row = changed.symbols.symbols[symbol]
+                    val signature = row.type_.unwrap()
+                    match signature.kind:
+                        case HirTypeKind.Function(parameters, return_type, effects):
+                            expect(parameters.len()).to_equal(2)
+                            var kind = HirTypeKind.Function(parameters, return_type, effects)
+                            if change == "parameter_order":
+                                kind = HirTypeKind.Function([parameters[1], parameters[0]], return_type, effects)
+                            else:
+                                kind = HirTypeKind.Function(parameters, HirType(kind: HirTypeKind.Bool, span: Span.empty()), effects)
+                            row.type_ = Some(HirType(kind: kind, span: signature.span))
+                        case _: fail("completed specialization signature is not a function")
+                    changed.symbols.symbols[symbol] = row
+                    mono_bridge_signature_refusal(changed)
+                case Err(message): fail(message)
+
+    it "normalizes retained nil declaration maps in the actual source bridge without mutating input":
+        step("pass a parsed empty HIR module with absent declaration maps through canonical source processing")
+        var input = mono_bridge_hir("")
+        input.functions = nil
+        input.classes = nil
+        input.structs = nil
+        input.enums = nil
+        input.bitfields = nil
+        input.traits = nil
+        input.constants = nil
+        val before = mono_bridge_snapshot(input)
+        match source_calls_monomorphize_v1(input, mono_verification_limits_v1()):
+            case Ok(result):
+                expect(result.module.functions.len()).to_equal(0)
+                expect(result.module.classes.len()).to_equal(0)
+                expect(result.module.structs.len()).to_equal(0)
+                expect(result.module.enums.len()).to_equal(0)
+                expect(result.module.bitfields.len()).to_equal(0)
+                expect(result.module.traits.len()).to_equal(0)
+                expect(result.module.constants.len()).to_equal(0)
+                expect(result.stats.specializations_created).to_equal(0)
+                expect(result.input_hir_digest == "").to_equal(false)
+                expect(result.output_hir_digest == "").to_equal(false)
+            case Err(message): fail(message)
+        expect(input.functions).to_be_nil()
+        expect(input.classes).to_be_nil()
+        expect(input.structs).to_be_nil()
+        expect(input.enums).to_be_nil()
+        expect(input.bitfields).to_be_nil()
+        expect(input.traits).to_be_nil()
+        expect(input.constants).to_be_nil()
+        expect(mono_bridge_snapshot(input)).to_equal(before)

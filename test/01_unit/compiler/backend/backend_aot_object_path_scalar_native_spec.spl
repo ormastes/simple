@@ -2,9 +2,10 @@
 
 use std.spec.{describe, it, expect}
 use std.spec.step
-use compiler.backend.backend.aot_path_diagnostic.{backend_aot_write_diagnostic}
+use compiler.backend.aot_path_diagnostic.{backend_aot_write_diagnostic}
 use std.nogc_sync_mut.io.file_ops.{file_delete,
-    file_read_regular_no_follow_bounded, file_atomic_write, file_size_raw}
+    file_read_regular_no_follow_bounded, file_atomic_write, file_size_raw,
+    secure_temp_dir_raw}
 use std.nogc_sync_mut.io.dir_ops.{dir_remove}
 use std.io_runtime.{dir_create}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
@@ -44,6 +45,22 @@ fn churn_scalar_path_allocations(rounds: i64) -> text:
     retained
 
 describe "backend AOT object-path scalar boundary":
+    it "retains atomic writer text extents across the native extern boundary":
+        step("pass owned path and content with Unicode and embedded NUL")
+        val directory = secure_temp_dir_raw("/tmp", "simple-atomic-text-abi")
+        expect(directory != "").to_equal(true)
+        val path = "{directory}/message-λ"
+        val content = "diagnostic-λ\0retained-tail"
+        expect(file_atomic_write(path, content)).to_equal(true)
+        expect(file_read_regular_no_follow_bounded(path, 4096).ok().unwrap()).to_equal(content)
+
+        step("reject a NUL-bearing path without overwriting its valid prefix")
+        expect(file_atomic_write("{path}\0ignored", "must-not-overwrite")).to_equal(false)
+        expect(file_read_regular_no_follow_bounded(path, 4096).ok().unwrap()).to_equal(content)
+        expect(file_atomic_write(path, "")).to_equal(true)
+        expect(file_size_raw(path)).to_equal(0)
+        expect(dir_remove(directory, true)).to_equal(true)
+
     it "retains diagnostics across provider and session frames":
         step("forward only scalar status through two compiled frames")
         val diagnostic_path = "/tmp/simple-aot-diagnostic-{getpid()}"

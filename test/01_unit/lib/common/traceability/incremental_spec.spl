@@ -1,0 +1,70 @@
+# @tag:in-development
+# REQ-TRC-017: negative queries, reverse dependencies and bounded invalidation.
+# Full-rebuild equivalence remains a separate adapter/property acceptance test.
+use std.spec
+use std.common.traceability.incremental.*
+
+fn invalidation_fixture(deps: [TraceDependency], paths: [text], identities: [text], memberships: [text], limit: i64) -> TraceInvalidationInput:
+    TraceInvalidationInput(known_paths: ["source", "test", "requirement"],
+        changed_paths: paths, changed_identities: identities,
+        changed_memberships: memberships, changed_configurations: [],
+        dependencies: deps, dependency_inventory_complete: true,
+        policy_changed: false, extractor_changed: false, schema_changed: false,
+        max_affected: limit)
+
+describe "Trace fact invalidation":
+    it "invalidates unchanged incoming references transitively on deletion":
+        val deps = [
+            TraceDependency(owner_path: "requirement", kind: TraceDependencyKind.Artifact, key: "test"),
+            TraceDependency(owner_path: "test", kind: TraceDependencyKind.Artifact, key: "source")]
+        val result = plan_trace_invalidation(invalidation_fixture(deps, ["source"], [], [], 8))
+        expect(result.complete).to_equal(true)
+        expect(result.affected_paths.len()).to_equal(3)
+        expect(result.affected_paths).to_contain("requirement")
+
+    it "invalidates both a negative lookup and uniqueness when an ID appears":
+        val deps = [
+            TraceDependency(owner_path: "test", kind: TraceDependencyKind.MissingIdentity, key: "REQ-1"),
+            TraceDependency(owner_path: "requirement", kind: TraceDependencyKind.UniqueIdentity, key: "REQ-1")]
+        val result = plan_trace_invalidation(invalidation_fixture(deps, [], ["REQ-1"], [], 8))
+        expect(result.affected_paths.len()).to_equal(2)
+        expect(result.affected_paths).to_contain("test")
+
+    it "invalidates a conventional candidate set when membership changes":
+        val deps = [TraceDependency(owner_path: "source", kind: TraceDependencyKind.Membership, key: "app-unit-v1:parser")]
+        val result = plan_trace_invalidation(invalidation_fixture(deps, [], [], ["app-unit-v1:parser"], 8))
+        expect(result.affected_paths).to_equal(["source"])
+
+    it "terminates a dependency cycle without losing either owner":
+        val deps = [
+            TraceDependency(owner_path: "test", kind: TraceDependencyKind.Artifact, key: "source"),
+            TraceDependency(owner_path: "source", kind: TraceDependencyKind.Artifact, key: "test")]
+        val result = plan_trace_invalidation(invalidation_fixture(deps, ["source"], [], [], 8))
+        expect(result.affected_paths.len()).to_equal(2)
+        expect(result.complete).to_equal(true)
+
+    it "refuses to call a truncated reverse closure complete":
+        val deps = [TraceDependency(owner_path: "test", kind: TraceDependencyKind.Artifact, key: "source")]
+        val result = plan_trace_invalidation(invalidation_fixture(deps, ["source"], [], [], 1))
+        expect(result.complete).to_equal(false)
+        expect(result.reasons).to_contain("reverse dependency closure budget exhausted")
+
+    it "requires a full rebuild when the base lacks dependency facts":
+        var input = invalidation_fixture([], [], [], [], 8)
+        input.dependency_inventory_complete = false
+        val result = plan_trace_invalidation(input)
+        expect(result.full_rebuild).to_equal(true)
+        expect(result.affected_paths.len()).to_equal(3)
+
+    it "invalidates all facts for a rule or extractor change":
+        var input = invalidation_fixture([], [], [], [], 8)
+        input.policy_changed = true
+        val result = plan_trace_invalidation(input)
+        expect(result.full_rebuild).to_equal(true)
+        expect(result.affected_paths.len()).to_equal(3)
+
+    it "rejects an orphan dependency owner in a purported complete base":
+        val deps = [TraceDependency(owner_path: "missing", kind: TraceDependencyKind.Artifact, key: "source")]
+        val result = plan_trace_invalidation(invalidation_fixture(deps, ["source"], [], [], 8))
+        expect(result.complete).to_equal(false)
+        expect(result.full_rebuild).to_equal(true)

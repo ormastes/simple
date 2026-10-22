@@ -1,0 +1,57 @@
+"""Component-side byte-slice ABI shim for the dynSMF `crypto` bundle.
+
+Exported symbol follows `std.nogc_sync_mut.sffi.dyn_bytes_abi`:
+`fn(in_ptr, out_ptr, lens) -> i64`.
+
+Input framing: `key[32] || nonce[12] || aad_len (u32 LE) || aad || plaintext`.
+Output: `ciphertext || tag[16]` (the `chacha20_poly1305_encrypt` form).
+"""
+
+use std.common.crypto.chacha20_poly1305.{chacha20_poly1305_encrypt}
+use std.nogc_sync_mut.sffi.dyn_bytes_abi.{dyn_bytes_abi_read_input, dyn_bytes_abi_write_output,
+    DYN_BYTES_ABI_ERR_ARGS}
+
+val CHACHA20_POLY1305_DYN_HEADER: i64 = 48
+
+fn chacha20_poly1305_dyn_input(key: [u8], nonce: [u8], aad: [u8], plaintext: [u8]) -> [u8]:
+    var out: [u8] = []
+    for b in key:
+        out.push(b)
+    for b in nonce:
+        out.push(b)
+    val aad_len = aad.len()
+    out.push((aad_len & 255) as u8)
+    out.push(((aad_len >> 8) & 255) as u8)
+    out.push(((aad_len >> 16) & 255) as u8)
+    out.push(((aad_len >> 24) & 255) as u8)
+    for b in aad:
+        out.push(b)
+    for b in plaintext:
+        out.push(b)
+    out
+
+fn _chacha20_poly1305_dyn_slice(data: [u8], start: i64, end: i64) -> [u8]:
+    var out: [u8] = []
+    var i = start
+    while i < end:
+        out.push(data[i])
+        i = i + 1
+    out
+
+fn simple_dyn_chacha20_poly1305_encrypt_v1(in_ptr: i64, out_ptr: i64, lens: i64) -> i64:
+    val input = dyn_bytes_abi_read_input(in_ptr, lens) ?? return DYN_BYTES_ABI_ERR_ARGS
+    if input.len() < CHACHA20_POLY1305_DYN_HEADER:
+        return DYN_BYTES_ABI_ERR_ARGS
+    val aad_len = (input[44] as i64) | ((input[45] as i64) << 8) |
+        ((input[46] as i64) << 16) | ((input[47] as i64) << 24)
+    val aad_end = CHACHA20_POLY1305_DYN_HEADER + aad_len
+    if aad_end > input.len():
+        return DYN_BYTES_ABI_ERR_ARGS
+    val sealed = chacha20_poly1305_encrypt(
+        key: _chacha20_poly1305_dyn_slice(data: input, start: 0, end: 32),
+        nonce: _chacha20_poly1305_dyn_slice(data: input, start: 32, end: 44),
+        plaintext: _chacha20_poly1305_dyn_slice(data: input, start: aad_end, end: input.len()),
+        aad: _chacha20_poly1305_dyn_slice(data: input, start: CHACHA20_POLY1305_DYN_HEADER, end: aad_end))
+    dyn_bytes_abi_write_output(out_ptr, lens, sealed)
+
+export chacha20_poly1305_dyn_input, simple_dyn_chacha20_poly1305_encrypt_v1

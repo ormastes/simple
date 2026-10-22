@@ -1,0 +1,62 @@
+"""Byte-slice call ABI shared by dynSMF callers and component-side shims.
+
+Callee signature (C ABI, three integer registers, no struct passing):
+
+    fn(in_ptr: i64, out_ptr: i64, lens: i64) -> i64
+
+- `lens` packs both lengths: `in_len = lens & 0xFFFFFFFF`, `out_cap = lens >> 32`.
+  Each is bounded by `DYN_BYTES_ABI_MAX_LEN`.
+- `in_ptr` points at `in_len` readable bytes; `out_ptr` at `out_cap` writable bytes.
+- Return `n` with `0 <= n <= out_cap`: `n` output bytes were written.
+- Return `n > out_cap`: nothing usable was written; the caller should retry
+  with `out_cap = n`.
+- Return `n < 0`: callee error (`DYN_BYTES_ABI_ERR_ARGS`, `DYN_BYTES_ABI_ERR_CALLEE`).
+
+Three arguments rather than four because `rt_call_ptr_3` is the only raw
+function-pointer call primitive registered on every lane (interpreter, C
+runtime, Rust runtime, codegen); `rt_dyncall_4` is Rust-runtime-only.
+"""
+
+use std.nogc_sync_mut.sffi.raw_bytes.{bytes_from_raw}
+extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64)
+
+val DYN_BYTES_ABI_MAX_LEN: i64 = 16777216
+val DYN_BYTES_ABI_ERR_ARGS: i64 = -1
+val DYN_BYTES_ABI_ERR_CALLEE: i64 = -2
+
+fn dyn_bytes_abi_pack_lens(in_len: i64, out_cap: i64) -> i64:
+    (out_cap << 32) | (in_len & 0xFFFFFFFF)
+
+fn dyn_bytes_abi_in_len(lens: i64) -> i64:
+    lens & 0xFFFFFFFF
+
+fn dyn_bytes_abi_out_cap(lens: i64) -> i64:
+    (lens >> 32) & 0xFFFFFFFF
+
+fn dyn_bytes_abi_read_input(in_ptr: i64, lens: i64) -> [u8]?:
+    """Callee side: copy the input slice, or nil when the arguments are invalid."""
+    val in_len = dyn_bytes_abi_in_len(lens)
+    if in_len > DYN_BYTES_ABI_MAX_LEN or dyn_bytes_abi_out_cap(lens) > DYN_BYTES_ABI_MAX_LEN:
+        return nil
+    if in_len == 0:
+        return []
+    if in_ptr <= 0:
+        return nil
+    bytes_from_raw(in_ptr, in_len)
+
+fn dyn_bytes_abi_write_output(out_ptr: i64, lens: i64, bytes: [u8]) -> i64:
+    """Callee side: write `bytes` if they fit, else report the needed size."""
+    val out_cap = dyn_bytes_abi_out_cap(lens)
+    if bytes.len() > out_cap:
+        return bytes.len()
+    if bytes.len() > 0 and out_ptr <= 0:
+        return DYN_BYTES_ABI_ERR_ARGS
+    var i = 0
+    while i < bytes.len():
+        rt_ptr_write_u8(out_ptr, i, bytes[i] as i64)
+        i = i + 1
+    bytes.len()
+
+export DYN_BYTES_ABI_MAX_LEN, DYN_BYTES_ABI_ERR_ARGS, DYN_BYTES_ABI_ERR_CALLEE
+export dyn_bytes_abi_pack_lens, dyn_bytes_abi_in_len, dyn_bytes_abi_out_cap
+export dyn_bytes_abi_read_input, dyn_bytes_abi_write_output

@@ -1,0 +1,113 @@
+# @req REQ-2D-005 NFR-2D-005
+# Candidate-only V4 to private V3 admission and byte layout. Native execution
+# remains default-disabled and this spec does not claim a GPU comparison.
+
+use std.spec.*
+use common.ui.draw_ir.{DrawIrCommand, DRAW_IR_SCHEMA_VERSION_V4,
+    DRAW_IR_RASTER_COVERAGE_AA, draw_ir_affine2d,
+    draw_ir_affine_rect, draw_ir_batch, draw_ir_composition,
+    draw_ir_embedding_config, draw_ir_rect, draw_ir_rect_bounds}
+use std.skia.backend.upstream_ganesh_vulkan.provider.{
+    UPSTREAM_SKIA_GANESH_VULKAN_DRAW_FORMAT_V3,
+    upstream_skia_ganesh_vulkan_preflight,
+    upstream_skia_ganesh_vulkan_render,
+    upstream_skia_ganesh_vulkan_preflight_affine_v3_candidate,
+    upstream_skia_ganesh_vulkan_payload_bytes_affine_v3_candidate}
+
+fn _v3_scene(commands: [DrawIrCommand]):
+    var batch = draw_ir_batch("only", "gpu",
+        draw_ir_embedding_config("surface", "root", 0, 0, 16, 16,
+            0, 1000, true), commands)
+    batch.schema = DRAW_IR_SCHEMA_VERSION_V4
+    var scene = draw_ir_composition("v3-candidate", "scene", "gpu", [batch])
+    scene.schema = DRAW_IR_SCHEMA_VERSION_V4
+    scene
+
+fn _v3_clear() -> DrawIrCommand:
+    draw_ir_rect("clear", 0, 0, 16, 16, 0xff000000u32)
+
+fn _v3_affine() -> DrawIrCommand:
+    var rect = draw_ir_affine_rect("tile", 4.0, 5.0,
+        0xff336699u32, draw_ir_affine2d(1.0, 0.0, 0.0, 1.0, 2.0, 3.0),
+        DRAW_IR_RASTER_COVERAGE_AA)
+    rect.clip_rect = draw_ir_rect_bounds(0, 0, 16, 16)
+    rect
+
+fn _v3_bytes_zero(bytes: [i64], start: i32, end: i32) -> bool:
+    var i = start
+    while i < end:
+        if bytes[i] != 0:
+            return false
+        i = i + 1
+    true
+
+describe "optional upstream Ganesh V3 affine candidate":
+    it "admits a full clear followed by local coverage affine under surface clip":
+        # @req REQ-2D-005
+        val scene = _v3_scene([_v3_clear(), _v3_affine()])
+        val candidate = upstream_skia_ganesh_vulkan_preflight_affine_v3_candidate(scene)
+        expect(candidate.accepted).to_equal(true)
+        expect(candidate.draw_format).to_equal(UPSTREAM_SKIA_GANESH_VULKAN_DRAW_FORMAT_V3)
+        expect(candidate.draw_magic).to_equal(0x334b5355)
+        expect(candidate.rect_stride).to_equal(128)
+        expect(candidate.rect_count).to_equal(2)
+        val ordinary = upstream_skia_ganesh_vulkan_preflight(scene)
+        expect(ordinary.accepted).to_equal(false)
+        match upstream_skia_ganesh_vulkan_render(scene, 0, 1):
+            Ok(_): assert(false)
+            Err(reason): expect(reason).to_contain("batch embedding")
+
+    it "writes fixed V3 records with clip, affine, raster, and zero reserved fields":
+        # @req REQ-2D-005
+        match upstream_skia_ganesh_vulkan_payload_bytes_affine_v3_candidate(
+            _v3_scene([_v3_clear(), _v3_affine()])):
+            Err(_): assert(false)
+            Ok(bytes):
+                expect(bytes.len()).to_equal(272)
+                expect(bytes[0]).to_equal(85)
+                expect(bytes[1]).to_equal(83)
+                expect(bytes[2]).to_equal(75)
+                expect(bytes[3]).to_equal(51)
+                expect(bytes[72]).to_equal(0)
+                expect(bytes[200]).to_equal(3)
+                expect(bytes[201]).to_equal(0)
+                expect(bytes[214]).to_equal(240)
+                expect(bytes[215]).to_equal(63)
+                expect(bytes[256]).to_equal(1)
+                expect(_v3_bytes_zero(bytes, 52, 56)).to_equal(true)
+                expect(_v3_bytes_zero(bytes, 76, 144)).to_equal(true)
+                expect(_v3_bytes_zero(bytes, 180, 184)).to_equal(true)
+                expect(_v3_bytes_zero(bytes, 204, 208)).to_equal(true)
+                expect(_v3_bytes_zero(bytes, 260, 272)).to_equal(true)
+
+    it "rejects a rounded-singular f32 transform and excessive corner error":
+        # @req REQ-2D-005
+        val rounded_singular = draw_ir_affine_rect("singular", 4.0, 5.0,
+            0xff336699u32,
+            draw_ir_affine2d(1.0, 1.0, 1.00000001, 1.0, 2.0, 3.0))
+        val determinant = upstream_skia_ganesh_vulkan_preflight_affine_v3_candidate(
+            _v3_scene([_v3_clear(), rounded_singular]))
+        expect(determinant.accepted).to_equal(false)
+        expect(determinant.command_index).to_equal(1)
+        expect(determinant.reason).to_contain("corner error or determinant")
+        val far = draw_ir_affine_rect("far", 4.0, 5.0,
+            0xff336699u32,
+            draw_ir_affine2d(1.0, 0.0, 0.0, 1.0, 10000000.0, 0.0))
+        val error = upstream_skia_ganesh_vulkan_preflight_affine_v3_candidate(
+            _v3_scene([_v3_clear(), far]))
+        expect(error.accepted).to_equal(false)
+        expect(error.reason).to_contain("corner error or determinant")
+
+    it "rejects a non-clear first draw and hidden parent metadata":
+        # @req REQ-2D-005
+        val first = upstream_skia_ganesh_vulkan_preflight_affine_v3_candidate(
+            _v3_scene([_v3_affine()]))
+        expect(first.accepted).to_equal(false)
+        expect(first.reason).to_contain("integer full-target clear")
+        var hidden = _v3_affine()
+        hidden.parent_id = "ancestor"
+        val state = upstream_skia_ganesh_vulkan_preflight_affine_v3_candidate(
+            _v3_scene([_v3_clear(), hidden]))
+        expect(state.accepted).to_equal(false)
+        expect(state.command_index).to_equal(1)
+        expect(state.reason).to_contain("parent")

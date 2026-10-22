@@ -1,0 +1,48 @@
+# Reads only caller-supplied frozen snapshot bytes, never current worktree files.
+use std.common.traceability.model.{SnapshotInput, TraceLocator, SourceSlice}
+
+fn slop_source_path_valid(path: text) -> bool:
+    if path == "" or path.starts_with("/") or path.contains("\\") or path.contains(":"):
+        return false
+    for part in path.split("/"):
+        if part == ".." or part == "." or part == "":
+            return false
+    true
+
+fn slop_source_slice(snapshot: SnapshotInput, expected_snapshot_id: text, locator: TraceLocator,
+                    start_line: i64, end_line: i64) -> Result<SourceSlice, text>:
+    if snapshot.subject.snapshot_id != expected_snapshot_id:
+        return Err("source snapshot mismatch")
+    if not snapshot.complete:
+        return Err("source snapshot is incomplete")
+    if not slop_source_path_valid(locator.path) or locator.blob_id == "":
+        return Err("source location is not pinned to a valid repository path and blob")
+    if start_line < 1 or end_line < start_line or end_line - start_line >= 200:
+        return Err("source range must contain 1 to 200 lines")
+    var found = false
+    var content = ""
+    for artifact in snapshot.artifacts:
+        if artifact.path == locator.path:
+            if found:
+                return Err("duplicate source artifact")
+            if artifact.blob_id != locator.blob_id:
+                return Err("source blob mismatch")
+            if artifact.visibility != "public":
+                return Err("source visibility requires an admitted access policy")
+            found = true
+            content = artifact.content
+    if not found:
+        return Err("pinned source artifact unavailable")
+    val lines = content.split("\n")
+    if start_line > lines.len():
+        return Err("source start line is outside the artifact")
+    val last_line = if end_line > lines.len(): lines.len() else: end_line
+    var result = ""
+    var line: i64 = start_line
+    while line <= last_line:
+        if line > start_line:
+            result = result + "\n"
+        result = result + lines[line - 1]
+        line = line + 1
+    Ok(SourceSlice(snapshot_id: expected_snapshot_id, blob_id: locator.blob_id,
+        path: locator.path, start_line: start_line, end_line: last_line, content: result))

@@ -1,0 +1,27 @@
+# Producer-side selectors for an already authenticated source/snapshot pair.
+# Receipt validation remains strict and never accepts physical path spellings.
+use app.compiler_entrypoint.derived_composition.{compiler_source_selector_relative_v1,
+    compiler_cuda_composition_root_v1}
+use compiler.driver.driver_build.native_entry_closure_receipt.{native_entry_closure_root_valid_v1}
+
+pub fn native_build_closure_roots_v1(source_root: text, snapshot_root: text,
+        roots: [text]) -> Result<[text], text>:
+    if source_root == "" or snapshot_root == "" or roots.len() == 0:
+        return Err("entry-closure-root-invalid")
+    var selected: [text] = []
+    for root in roots:
+        # A frozen absolute selector belongs only to this admitted snapshot.
+        val frozen = root.starts_with(snapshot_root + "/")
+        val owner = if frozen: snapshot_root else: source_root
+        var relative = compiler_source_selector_relative_v1(owner, root)
+        if not native_entry_closure_root_valid_v1(relative):
+            return Err("entry-closure-root-invalid")
+        if relative.starts_with("build/"):
+            val derived = compiler_cuda_composition_root_v1(
+                source_root, snapshot_root, root, false)
+            if derived.is_err(): return Err(derived.unwrap_err())
+            relative = derived.unwrap()
+        if not native_entry_closure_root_valid_v1(relative):
+            return Err("entry-closure-root-invalid")
+        selected = selected.push(relative)
+    Ok(selected)

@@ -225,7 +225,12 @@ fn rt_hal_results_error(results: [RtHalSafeParallelResult], provider_count: i64,
 
 # Actual tasks are owned by the injected arena. This layer admits only an
 # arena proving bounded timed join, cancellation, and scalar transport.
+# @workaround bug=runner_callback_field_owner_2026_10_11 reason=restore the aggregate return owner before reading outcome/trace/error fields; remove with indirect-call provenance repair.
+fn rt_hal_arena_join_owner(value: RtHalArenaJoin) -> RtHalArenaJoin:
+    value
+
 pub fn rt_hal_execute_parallel_safe(comparison: RtHalComparison, requests: [RtHalEncodedRequest], registry: RtHalProviderRegistry, arena: RtHalTaskArenaPort) -> RtHalSafeParallelReport:
+    # @workaround bug=runner_callback_field_owner_2026_10_11 reason=call supplied function fields explicitly, preserving runtime-selected providers.
     val provider_count = registry.providers.len()
     var results: [RtHalSafeParallelResult] = []
     val arena_error = rt_hal_task_arena_error(arena)
@@ -281,7 +286,7 @@ pub fn rt_hal_execute_parallel_safe(comparison: RtHalComparison, requests: [RtHa
         val base = case_index * provider_count
         var first_ordinal = 0
         if request.operation == RtHalOperationKind.Effectful:
-            val pure_join = arena.execute_pure_effect_fn(registry.providers[0].adapter_handle, request, comparison.timeout_ticks)
+            val pure_join = rt_hal_arena_join_owner((arena.execute_pure_effect_fn)(registry.providers[0].adapter_handle, request, comparison.timeout_ticks))
             if not pure_join.completed:
                 return rt_hal_report(results, "RTHAL-E-TIMEOUT", submitted, completed, cancelled, rounds, max_width, false)
             if pure_join.outcome_word < 0 or pure_join.trace_word < 0 or pure_join.error_word < 0:
@@ -305,7 +310,7 @@ pub fn rt_hal_execute_parallel_safe(comparison: RtHalComparison, requests: [RtHa
                 var encoded = request
                 var handle = -1
                 if current == 0 and provider.query_capable:
-                    handle = arena.spawn_query_fn(provider.adapter_handle, encoded)
+                    handle = (arena.spawn_query_fn)(provider.adapter_handle, encoded)
                 elif current > 0 and request.operation == RtHalOperationKind.Effectful and provider.replay_capable:
                     encoded = RtHalEncodedRequest(
                         case_id: request.case_id, operation: request.operation,
@@ -313,9 +318,9 @@ pub fn rt_hal_execute_parallel_safe(comparison: RtHalComparison, requests: [RtHa
                         input_word: request.input_word,
                         trace_word: results[base].trace_word
                     )
-                    handle = arena.spawn_replay_fn(provider.adapter_handle, encoded)
+                    handle = (arena.spawn_replay_fn)(provider.adapter_handle, encoded)
                 elif current > 0 and request.operation == RtHalOperationKind.Query and provider.query_capable:
-                    handle = arena.spawn_query_fn(provider.adapter_handle, encoded)
+                    handle = (arena.spawn_query_fn)(provider.adapter_handle, encoded)
                 if handle <= 0:
                     results[base + current] = RtHalSafeParallelResult(
                         provider_ordinal: current, case_index: case_index,
@@ -334,9 +339,9 @@ pub fn rt_hal_execute_parallel_safe(comparison: RtHalComparison, requests: [RtHa
             var handle_index = 0
             while handle_index < handles.len():
                 val current = ordinals[handle_index]
-                val joined = arena.join_until_fn(handles[handle_index], comparison.timeout_ticks)
+                val joined = rt_hal_arena_join_owner((arena.join_until_fn)(handles[handle_index], comparison.timeout_ticks))
                 if not joined.completed:
-                    val cancelled_ok = arena.cancel_fn(handles[handle_index])
+                    val cancelled_ok = (arena.cancel_fn)(handles[handle_index])
                     if cancelled_ok:
                         cancelled = cancelled + 1
                     results[base + current] = RtHalSafeParallelResult(

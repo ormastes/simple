@@ -2967,6 +2967,26 @@ class PureDatabase:
 
     # ── Internal: INSERT ─────────────────────────────────────────────────
 
+    fn _pk_col_is_integer(ti: i32, pk_ci: i32) -> bool:
+        if ti < 0 or ti >= self._tbl_col_types.len() as i32:
+            return false
+        val types = self._tbl_col_types[ti]
+        if pk_ci < 0 or pk_ci >= types.len() as i32:
+            return false
+        match types[pk_ci]:
+            PureColumnTypeV1.Integer: true
+            _: false
+
+    # Next rowid not already used as a primary key: the insertion counter plus
+    # one, skipping ids an explicit INSERT already claimed.
+    me _next_free_rowid(ti: i32) -> i64:
+        self._ensure_pk_map(ti)
+        val pkm = self._tbl_pk_map[ti]
+        var candidate = self._tbl_rowids[ti] + 1
+        while pkm.contains_key("{candidate}"):
+            candidate = candidate + 1
+        candidate
+
     me _do_insert(ins: SqlInsert, params: [DbValue]) -> Result<i64, DbError>:
         val ti = _find_idx(self._tbl_names, ins.table)
         if ti < 0:
@@ -2995,6 +3015,18 @@ class PureDatabase:
                 else:
                     row_vals.push(DbValue.Null)
                 ci = ci + 1
+            # SQLite semantics: an omitted or NULL INTEGER PRIMARY KEY takes the
+            # next free rowid. Until 2026-10-20 the column stayed NULL while
+            # `last_insert_rowid` advanced, so every autoincrement consumer
+            # (enterprise_store ordered reads, UiAccessStore) read NULL ids.
+            val auto_pk_ci = self._tbl_pk_col[ti]
+            if auto_pk_ci >= 0 and auto_pk_ci < row_vals.len() as i32 and row_vals[auto_pk_ci].is_null():
+                if self._pk_col_is_integer(ti, auto_pk_ci):
+                    val auto_id = self._next_free_rowid(ti)
+                    row_vals[auto_pk_ci] = DbValue.Integer(value: auto_id)
+                    # The counter below advances by one, so `_last_rowid`
+                    # equals the id actually stored.
+                    self._tbl_rowids[ti] = auto_id - 1
             # Check UNIQUE constraints before inserting
             val uq_check = self._check_unique_for_insert(ti, row_vals)
             if uq_check.is_err():

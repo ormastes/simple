@@ -83,6 +83,32 @@ pub fn clear_xxhash_registry() {
     XXHASH_MAP.lock().unwrap().clear();
 }
 
+/// XXH3-128 as 32 lower-case hex, canonical big-endian (high then low) --
+/// the same spelling as the pure-Simple `xxh3_128_hex`.
+pub fn xxh3_128_hex_bytes(data: &[u8]) -> String {
+    format!("{:032x}", xxhash_rust::xxh3::xxh3_128(data))
+}
+
+/// `extern fn rt_xxh3_128_text(data: text) -> text`: XXH3-128 of the text's
+/// UTF-8 bytes. A non-text argument yields "" -- the caller's fallback
+/// sentinel (the C twin in runtime_native.c does the same).
+#[no_mangle]
+pub extern "C" fn rt_xxh3_128_text(data: crate::value::RuntimeValue) -> crate::value::RuntimeValue {
+    use crate::value::{rt_string_data, rt_string_len, rt_string_new};
+    let len = rt_string_len(data);
+    let ptr = rt_string_data(data);
+    if len < 0 || (len > 0 && ptr.is_null()) {
+        return rt_string_new("".as_ptr(), 0);
+    }
+    let bytes: &[u8] = if len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(ptr, len as usize) }
+    };
+    let hex = xxh3_128_hex_bytes(bytes);
+    rt_string_new(hex.as_ptr(), hex.len() as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

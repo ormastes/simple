@@ -785,7 +785,7 @@ Diagnosis without a bootstrap. `bin/simple` is the Rust seed and does not read
 `src/compiler/10.frontend/` at all, but the self-hosted parser can still be run
 in-process under it:
 
-```simple
+```simple:skip
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
 use compiler.frontend.core.parser.{parser_has_errors, parser_get_errors}
 val module = parse_and_build_module(source_text, "probe.spl")

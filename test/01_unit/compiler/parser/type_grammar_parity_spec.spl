@@ -57,6 +57,14 @@ fn pointer_source() -> text:
         "fn pointer_params(shared: *u8, immutable: *const u8, mutable: *mut u8, borrowed: &u8) -> bool:\n" +
         "    true\n"
 
+# memory.md: `&T` is the unique owner (TypeKind.Unique), `*T` the shared owner
+# (TypeKind.Shared); `&mut T` stays a (mutable) Reference and `*const`/`*mut`
+# stay raw Pointers.
+fn is_named_unique(kind: TypeKind, expected_name: text) -> bool:
+    match kind:
+        case TypeKind.Unique(inner): parser_type_kind_named_name(inner.kind) == expected_name
+        case _: false
+
 fn is_named_reference(kind: TypeKind, expected_name: text, expected_mutable: bool) -> bool:
     match kind:
         case TypeKind.Reference(inner, mutable):
@@ -76,7 +84,7 @@ describe "compiled checker core type grammar parity":
         step("preserves immutable and mutable reference shapes through the flat bridge")
         val module = parse_and_build_module(reference_source(), "type_reference_bridge.spl")
         val convert = module.functions["convert"] ?? panic("missing convert")
-        expect(is_named_reference(convert.params[0].type_.kind, "Tree", false)).to_equal(true)
+        expect(is_named_unique(convert.params[0].type_.kind, "Tree")).to_equal(true)
         match convert.params[1].type_.kind:
             case TypeKind.Reference(inner, mutable):
                 expect(mutable).to_equal(true)
@@ -116,11 +124,16 @@ describe "compiled checker core type grammar parity":
         val module = parse_and_build_module(pointer_source(), "type_pointer_bridge.spl")
         val params = (module.functions["pointer_params"] ?? panic("missing pointer_params")).params
         match params[0].type_.kind:
+            case TypeKind.Shared(inner):
+                expect(parser_type_kind_named_name(inner.kind)).to_equal("u8")
+            case _:
+                fail("shared pointer shape was not preserved")
+        match params[1].type_.kind:
             case TypeKind.Pointer(inner, mutable):
                 expect(mutable).to_equal(false)
                 expect(parser_type_kind_named_name(inner.kind)).to_equal("u8")
             case _:
-                fail("shared pointer shape was not preserved")
+                fail("const raw pointer shape was not preserved")
         match params[2].type_.kind:
             case TypeKind.Pointer(inner, mutable):
                 expect(mutable).to_equal(true)

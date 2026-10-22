@@ -64,12 +64,34 @@ impl Lowerer {
                         ty: TypeId::ANY,
                     });
                     let args_hir = self.lower_call_args(args, ctx)?;
+                    // `Some(f)` with a FUNCTION payload: answer `Option<fn>`,
+                    // not ANY. An ANY payload binds `case Some(h)` as ANY, and
+                    // an indirect call through an ANY callee mixes the raw
+                    // and tagged conventions (LLVM: wrong result even for a
+                    // local `f`). Other payloads keep ANY.
+                    let ty = match (name.as_str(), args_hir.first()) {
+                        ("Some", Some(payload))
+                            if matches!(self.module.types.get(payload.ty), Some(HirType::Function { .. })) =>
+                        {
+                            self.module.types.register(HirType::Enum {
+                                name: "Option".to_string(),
+                                variants: vec![
+                                    ("Some".to_string(), Some(vec![payload.ty])),
+                                    ("None".to_string(), None),
+                                ],
+                                generic_params: vec!["T".to_string()],
+                                is_generic_template: false,
+                                type_bindings: std::collections::HashMap::from([("T".to_string(), payload.ty)]),
+                            })
+                        }
+                        _ => TypeId::ANY,
+                    };
                     return Ok(HirExpr {
                         kind: HirExprKind::Call {
                             func: func_hir,
                             args: args_hir,
                         },
-                        ty: TypeId::ANY,
+                        ty,
                     });
                 }
                 _ => {}
@@ -256,11 +278,11 @@ impl Lowerer {
         };
 
         // M12 3b: fill omitted trailing arguments from the callee's parameter
-        // defaults. Restricted to a directly-named free function called purely
-        // positionally, and to constant default exprs (which cannot reference
-        // caller-scope locals or sibling parameters); anything else is left
-        // unfilled, preserving prior behavior. Method/Path-callee defaults are a
-        // separate follow-up.
+        // defaults, for a directly-named free function called purely
+        // positionally (same-module table first, then the importing file's
+        // cross-module contract table). A default that cannot be materialised
+        // at the call site is a compile error (`fill_omitted_default_args`):
+        // codegen would otherwise pad the slot with tagged nil.
         if let (Expr::Identifier(name), HirExprKind::Global(symbol)) = (callee, &func_hir.kind) {
             if args.iter().all(|a| a.name.is_none()) {
                 let params = self.fn_param_defaults.get(symbol).or_else(|| {
@@ -270,27 +292,9 @@ impl Lowerer {
                             .get(&crate::interpreter::normalize_path_key(path))
                             .and_then(|contracts| contracts.get(name))
                     })
-                });
-                let to_fill: Vec<Expr> = match params {
-                    Some(params) if params.len() > args_hir.len() => {
-                        let mut pending = Vec::new();
-                        for slot in &params[args_hir.len()..] {
-                            match slot {
-                                Some(expr) if Self::is_constant_default(expr) => {
-                                    pending.push(expr.clone());
-                                }
-                                // Positional fill must be contiguous: stop at the
-                                // first trailing param lacking a constant default.
-                                _ => break,
-                            }
-                        }
-                        pending
-                    }
-                    _ => Vec::new(),
-                };
-                for default_expr in to_fill {
-                    let lowered = self.lower_expr(&default_expr, ctx)?;
-                    args_hir.push(lowered);
+                }).cloned();
+                if let Some(params) = params {
+                    self.fill_omitted_default_args(symbol, &params, &mut args_hir, ctx)?;
                 }
             }
         }
@@ -305,6 +309,44 @@ impl Lowerer {
             },
             ty: ret_ty,
         })
+    }
+
+    /// Append the callee's default for every omitted trailing positional
+    /// argument. Defaults are lowered in the CALLER, left to right, once per
+    /// call, after all explicit arguments - so only self-contained constant
+    /// expressions (`is_constant_default`) are admitted: they cannot name
+    /// caller-scope locals, sibling parameters, or callee-module globals the
+    /// caller may not import. Any other omitted default is a compile error
+    /// rather than an unfilled slot, because native codegen pads a missing
+    /// argument with tagged nil and the callee then reads garbage (bug class:
+    /// stage3 `lower_module` SIGSEGV on an omitted `[MirFunction] = []`).
+    /// A slot without a default (a required parameter) stops the fill and is
+    /// left to arity checking.
+    pub(super) fn fill_omitted_default_args(
+        &mut self,
+        callee: &str,
+        defaults: &[Option<Expr>],
+        args_hir: &mut Vec<HirExpr>,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<()> {
+        let first_omitted = args_hir.len();
+        for (index, slot) in defaults.iter().enumerate().skip(first_omitted) {
+            match slot {
+                Some(expr) if Self::is_constant_default(expr) => {
+                    let lowered = self.lower_expr(expr, ctx)?;
+                    args_hir.push(lowered);
+                }
+                Some(_) => {
+                    return Err(LowerError::Unsupported(format!(
+                        "call to `{callee}` omits argument {} whose default is not a call-site constant; \
+                         a cross-module/native call cannot evaluate it, pass the argument explicitly",
+                        index + 1
+                    )));
+                }
+                None => break,
+            }
+        }
+        Ok(())
     }
 
     /// True for default-value expressions that are self-contained constants —
@@ -324,8 +366,18 @@ impl Lowerer {
             // Ordinary quoted strings use FString syntax too. Only literal
             // parts are safe here; interpolation must not capture caller scope.
             Expr::FString { parts, .. } => parts.iter().all(|part| matches!(part, ast::FStringPart::Literal(_))),
+            Expr::TypedInteger(..) | Expr::TypedFloat(..) | Expr::TypedString(..) => true,
             Expr::Unary { operand, .. } => Self::is_constant_default(operand),
             Expr::Binary { left, right, .. } => Self::is_constant_default(left) && Self::is_constant_default(right),
+            // Container literals allocate a FRESH value per call, which is the
+            // per-call default semantics; admitted when every element is itself
+            // a constant (an empty literal vacuously).
+            Expr::Array(items) | Expr::VecLiteral(items) | Expr::Tuple(items) => {
+                items.iter().all(Self::is_constant_default)
+            }
+            Expr::Dict(entries) => entries
+                .iter()
+                .all(|(key, value)| Self::is_constant_default(key) && Self::is_constant_default(value)),
             _ => false,
         }
     }

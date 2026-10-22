@@ -1,0 +1,673 @@
+# Semantic MIR declarations, not a native-layout or proof-closure certificate.
+# This owner-local plan is shared by the two retained Lean backend entrypoints.
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_instructions.{MirModule}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirTypeDef, MirTypeDefKind}
+use compiler.mir.mir_json.{serialize_mir_type}
+use compiler.backend.backend.backend_types.{BackendKind, CompileError, compileerror_backend_error}
+use plugins.backend_lean.lean_mir_translate.{mir_type_to_lean}
+
+struct LeanTypeContext:
+    names: Dict<i64, text>
+    enum_kinds: Dict<i64, bool>
+    definitions: Dict<i64, MirTypeDef>
+    array_policy: LeanRecursiveArrayPolicyV1
+
+struct LeanTypeDeclaration:
+    symbol: i64
+    name: text
+    is_enum: bool
+    fields: [(text, text)]
+    variants: [(text, [text])]
+    dependencies: [i64]
+    metadata: [text]
+
+struct LeanTypeDeclarationGroup:
+    declarations: [LeanTypeDeclaration]
+    recursive: bool
+
+struct LeanTypeExportPlan:
+    context: LeanTypeContext
+    declarations: [LeanTypeDeclaration]
+    groups: [LeanTypeDeclarationGroup]
+
+# The actual planner accepts only downward overrides; backend defaults remain
+# the hard caps. No process/global configuration or private policy injection.
+struct LeanRecursiveArrayLimitsV1:
+    max_depth: i64 = 128
+    max_nodes: i64 = 65536
+    max_work: i64 = 1048576
+    max_key_bytes: i64 = 1048576
+    max_plans: i64 = 4096
+
+# Per-export state; policy keys are completed before rendering. Budget counters
+# are shared by context copies, including signatures, EE and ordinary bodies.
+class LeanRecursiveArrayPolicyV1:
+    keys: Dict<text, bool>
+    limits: LeanRecursiveArrayLimitsV1
+    nodes_left: i64
+    work_left: i64
+    key_bytes_left: i64
+    plans_left: i64
+
+    fn create(limits: LeanRecursiveArrayLimitsV1) -> Result<LeanRecursiveArrayPolicyV1, CompileError>:
+        if limits.max_depth < 1 or limits.max_depth > 128 or limits.max_nodes < 1 or limits.max_nodes > 65536:
+            return Err(lean_type_error("invalid recursive array traversal limits"))
+        if limits.max_work < 1 or limits.max_work > 1048576 or limits.max_key_bytes < 1 or limits.max_key_bytes > 1048576:
+            return Err(lean_type_error("invalid recursive array work/key limits"))
+        if limits.max_plans < 0 or limits.max_plans > 4096:
+            return Err(lean_type_error("invalid recursive array policy entry limit"))
+        Ok(LeanRecursiveArrayPolicyV1(keys: {}, limits: limits,
+            nodes_left: limits.max_nodes, work_left: limits.max_work,
+            key_bytes_left: limits.max_key_bytes, plans_left: limits.max_plans))
+
+    me nodes(count: i64) -> Result<(), CompileError>:
+        if count < 0 or count > self.nodes_left:
+            return Err(lean_type_error("recursive array type node budget"))
+        self.nodes_left = self.nodes_left - count
+        Ok(())
+
+    me work(count: i64) -> Result<(), CompileError>:
+        if count < 0 or count > self.work_left:
+            return Err(lean_type_error("recursive array planning work budget"))
+        self.work_left = self.work_left - count
+        Ok(())
+
+struct LeanTypeDependencyPlanV1:
+    symbol: i64
+    dependencies: [i64]
+
+struct LeanTypeDependencyGroupV1:
+    symbols: [i64]
+    recursive: bool
+
+# Flat preorder scan plus reverse reduction. No traversal follows a nominal
+# definition recursively; the SCC graph is the authority for that relationship.
+struct LeanArrayTypeScanV1:
+    types: [MirType]
+    key_sizes: [i64]
+    subtree_nodes: [i64]
+    touches: [bool]
+    dependencies: [i64]
+
+fn lean_type_error(message: text) -> CompileError:
+    compileerror_backend_error(BackendKind.Lean, "lean-type-export: " + message)
+
+fn lean_type_name_valid(name: text) -> bool:
+    if name == "": return false
+    for part in name.split("."):
+        if part == "" or part == "_" or part == "_root_": return false
+        for index in 0..part.len():
+            val code = part.char_code_at(index)
+            val letter = (code >= 65 and code <= 90) or (code >= 97 and code <= 122) or code == 95
+            val digit = code >= 48 and code <= 57
+            if not letter and (not digit or index == 0): return false
+    true
+
+fn lean_type_quote_name(name: text) -> text:
+    var parts: [text] = []
+    for part in name.split("."): parts.push("«{part}»")
+    parts.join(".")
+
+fn lean_type_string(value: text) -> text:
+    val slash = value.replace("\\", "\\\\")
+    val quote = slash.replace("\"", "\\\"")
+    val newline = quote.replace("\n", "\\n")
+    val carriage = newline.replace("\r", "\\r")
+    val escaped = carriage.replace("\t", "\\t")
+    "\"{escaped}\""
+
+fn lean_type_member_valid(name: text) -> bool:
+    if not lean_type_name_valid(name) or name.contains("."): return false
+    # Lean generates these declarations in the type's own namespace.
+    # Lean 4.30 also generates ctorIdx and multi-constructor eliminators.
+    not ["mk", "rec", "recOn", "casesOn", "noConfusion", "noConfusionType", "below", "brecOn", "binductionOn", "ctorIdx", "ctorElimType", "ctorElim"].contains(name)
+
+fn lean_context_type_to_lean(ty: MirType, context: LeanTypeContext) -> Result<text, CompileError>:
+    # Signatures/body-only types need the same depth/node admission as fields.
+    # Validate before recursive rendering, not after building a nested string.
+    val _scan = lean_array_scan_v1(ty, context, {})?
+    lean_context_type_render_v1(ty, context)
+
+fn lean_context_type_render_v1(ty: MirType, context: LeanTypeContext) -> Result<text, CompileError>:
+    """Resolve nominal references only against this admitted module's symbols."""
+    match ty.kind:
+        case Struct(symbol) | Enum(symbol):
+            if not context.names.has(symbol.id):
+                return Err(lean_type_error("unresolved nominal symbol {symbol.id}"))
+            val expects_enum = match ty.kind:
+                case Enum(_): true
+                case _: false
+            if context.enum_kinds[symbol.id] != expects_enum:
+                return Err(lean_type_error("nominal kind mismatch for symbol {symbol.id}"))
+            Ok(context.names[symbol.id])
+        case Array(element, size):
+            if size < 0: return Err(lean_type_error("negative array length {size}"))
+            val nested = lean_context_type_render_v1(element, context)?
+            if lean_array_uses_finite_carrier_v1(element, size, context)?:
+                context.array_policy.work("(_root_.Fin ".len() + size.to_text().len() + " → ".len() + nested.len() + 1)?
+                return Ok("(_root_.Fin {size} → {nested})")
+            Ok("_root_.Vector ({nested}) {size}")
+        case Slice(element):
+            val nested = lean_context_type_render_v1(element, context)?
+            Ok("_root_.Array ({nested})")
+        case Tuple(elements):
+            var parts: [text] = []
+            for element in elements: parts.push(lean_context_type_render_v1(element, context)?)
+            if parts.len() == 0: return Ok("_root_.Unit")
+            Ok("({parts.join(\" × \")})")
+        case Result(ok_type, error_type):
+            val ok_name = lean_context_type_render_v1(ok_type, context)?
+            val error_name = lean_context_type_render_v1(error_type, context)?
+            Ok("_root_.Except ({error_name}) ({ok_name})")
+        case _:
+            # Preserve the existing exact-width mapper and its refusal policy.
+            # Root qualification prevents a user type named Bool/Char shadowing it.
+            val primitive = mir_type_to_lean(ty)?
+            Ok("_root_.{primitive}")
+
+fn lean_type_dependencies(ty: MirType) -> [i64]:
+    match ty.kind:
+        case Struct(symbol) | Enum(symbol): [symbol.id]
+        case Array(element, _) | Slice(element): lean_type_dependencies(element)
+        case Tuple(elements):
+            var dependencies: [i64] = []
+            for element in elements:
+                for dependency in lean_type_dependencies(element):
+                    if not dependencies.contains(dependency): dependencies.push(dependency)
+            dependencies
+        case Result(ok_type, error_type):
+            var dependencies = lean_type_dependencies(ok_type)
+            for dependency in lean_type_dependencies(error_type):
+                if not dependencies.contains(dependency): dependencies.push(dependency)
+            dependencies
+        case _: []
+
+fn lean_plan_one_type(definition: MirTypeDef, context: LeanTypeContext) -> Result<LeanTypeDeclaration, CompileError>:
+    var fields: [(text, text)] = []
+    var variants: [(text, [text])] = []
+    var dependencies: [i64] = []
+    var members: [text] = []
+    var metadata: [text] = []
+    for index in 0..definition.export_name.len():
+        val code = definition.export_name.char_code_at(index)
+        if (code < 32 and code != 9 and code != 10 and code != 13) or code == 127:
+            return Err(lean_type_error("unsupported control character in export metadata"))
+    val identity = "__MirTypeMetadata.t{definition.symbol.id}"
+    val source_name = lean_type_string(definition.name)
+    val export_name = lean_type_string(definition.export_name)
+    val exported = if definition.is_export_c: "true" else: "false"
+    metadata.push("def {identity} : Int × String × Bool × String := ({definition.symbol.id}, {source_name}, {exported}, {export_name})")
+    var is_enum = false
+    match definition.kind:
+        case Struct(source_fields):
+            var layout: [text] = []
+            for field in source_fields:
+                if not lean_type_member_valid(field.name) or members.contains(field.name):
+                    return Err(lean_type_error("invalid, reserved or duplicate field `{definition.name}.{field.name}`"))
+                if field.offset < 0:
+                    return Err(lean_type_error("negative field offset in `{definition.name}.{field.name}`"))
+                if field.has_bits_attr or field.bits_width != 0:
+                    return Err(lean_type_error("bit-field representation requires a refinement for `{definition.name}.{field.name}`"))
+                members.push(field.name)
+                val mapped = lean_context_type_to_lean(field.type_, context)?
+                fields.push((lean_type_quote_name(field.name), mapped))
+                for dependency in lean_type_dependencies(field.type_):
+                    if not dependencies.contains(dependency): dependencies.push(dependency)
+                val field_name = lean_type_string(field.name)
+                val field_type = lean_type_string(serialize_mir_type(field.type_))
+                layout.push("({field_name}, {field_type}, {field.offset})")
+            metadata.push("def {identity}_fields : List (String × String × Int) := [{layout.join(\", \")}]")
+        case Enum(source_variants):
+            is_enum = true
+            var tags: [i64] = []
+            var layout: [text] = []
+            for variant in source_variants:
+                if not lean_type_member_valid(variant.name) or members.contains(variant.name):
+                    return Err(lean_type_error("invalid, reserved or duplicate variant `{definition.name}.{variant.name}`"))
+                if tags.contains(variant.discriminant):
+                    return Err(lean_type_error("duplicate enum discriminant in `{definition.name}`"))
+                members.push(variant.name)
+                tags.push(variant.discriminant)
+                var payloads: [text] = []
+                var payload_identity = "none"
+                if val payload = variant.payload:
+                    payloads.push(lean_context_type_to_lean(payload, context)?)
+                    payload_identity = "some " + lean_type_string(serialize_mir_type(payload))
+                    for dependency in lean_type_dependencies(payload):
+                        if not dependencies.contains(dependency): dependencies.push(dependency)
+                variants.push((lean_type_quote_name(variant.name), payloads))
+                val variant_name = lean_type_string(variant.name)
+                layout.push("({variant_name}, {variant.discriminant}, {payload_identity})")
+            metadata.push("def {identity}_variants : List (String × Int × Option String) := [{layout.join(\", \")}]")
+        case Union(_):
+            return Err(lean_type_error("union declaration `{definition.name}` has no admitted representation"))
+    Ok(LeanTypeDeclaration(symbol: definition.symbol.id,
+        name: "__MirTypes." + lean_type_quote_name(definition.name), is_enum: is_enum,
+        fields: fields, variants: variants, dependencies: dependencies, metadata: metadata))
+
+fn lean_recursive_member_check(name: text) -> Result<(), CompileError>:
+    # Lean 4.30 adds nested recursors and automatic SizeOf functions/lemmas.
+    # Reserve their families before any grouped declarations reach the builder.
+    if name == "_sizeOf_inst":
+        return Err(lean_type_error("reserved recursive member `{name}`"))
+    for prefix in ["rec_", "below_", "brecOn_", "_sizeOf_"]:
+        if not name.starts_with(prefix) or name.len() == prefix.len(): continue
+        var digit_end = name.len()
+        if prefix == "_sizeOf_" and name.ends_with("_eq"):
+            digit_end = digit_end - 3
+        if digit_end <= prefix.len(): continue
+        var numeric = true
+        for index in prefix.len()..digit_end:
+            val code = name.char_code_at(index)
+            if code < 48 or code > 57: numeric = false
+        if numeric: return Err(lean_type_error("reserved recursive member `{name}`"))
+    Ok(())
+
+fn lean_array_scan_v1(root: MirType, context: LeanTypeContext,
+    members: Dict<i64, bool>
+) -> Result<LeanArrayTypeScanV1, CompileError>:
+    context.array_policy.nodes(1)?
+    context.array_policy.work(1)?
+    var types = [root]
+    var parents = [-1]
+    var depths = [1]
+    var sizes: [i64] = []
+    var counts: [i64] = []
+    var touches: [bool] = []
+    var dependencies: [i64] = []
+    var seen: Dict<i64, bool> = {}
+    var index = 0
+    while index < types.len():
+        context.array_policy.work(1)?
+        var child_count = 0
+        var own_size = 0
+        var touches_member = false
+        match types[index].kind:
+            case Array(_, size):
+                if size < 0: return Err(lean_type_error("negative array length {size}"))
+                child_count = 1
+                own_size = "{\"Array\":{\"element\":".len() + ",\"size\":".len() + size.to_text().len() + 2
+            case Slice(_):
+                child_count = 1
+                own_size = "{\"Slice\":".len() + 1
+            case Tuple(elements):
+                child_count = elements.len()
+                own_size = "{\"Tuple\":[".len() + 2
+                if child_count > 0: own_size = own_size + child_count - 1
+            case Result(_, _):
+                child_count = 2
+                own_size = "{\"Result\":{\"ok\":".len() + ",\"err\":".len() + 2
+            case Struct(symbol) | Enum(symbol):
+                if not context.names.has(symbol.id):
+                    return Err(lean_type_error("unresolved nominal symbol {symbol.id}"))
+                val expects_enum = match types[index].kind:
+                    case Enum(_): true
+                    case _: false
+                if context.enum_kinds[symbol.id] != expects_enum:
+                    return Err(lean_type_error("nominal kind mismatch for symbol {symbol.id}"))
+                own_size = serialize_mir_type(types[index]).len()
+                touches_member = members.has(symbol.id)
+                if not seen.has(symbol.id):
+                    context.array_policy.work(1)?
+                    dependencies.push(symbol.id)
+                    seen[symbol.id] = true
+            case _:
+                # Primitive admission remains the established exact mapper.
+                # Refused compound types never reach recursive serialization.
+                val _primitive = mir_type_to_lean(types[index])?
+                own_size = serialize_mir_type(types[index]).len()
+        if child_count > 0 and depths[index] >= context.array_policy.limits.max_depth:
+            return Err(lean_type_error("recursive array type depth budget"))
+        # Charge all parallel-vector additions before allocating any children.
+        context.array_policy.nodes(child_count)?
+        context.array_policy.work(child_count)?
+        sizes.push(own_size)
+        counts.push(1)
+        touches.push(touches_member)
+        match types[index].kind:
+            case Array(element, _) | Slice(element):
+                types.push(element)
+            case Tuple(elements):
+                for element in elements: types.push(element)
+            case Result(ok_type, error_type):
+                types.push(ok_type)
+                types.push(error_type)
+            case _: ()
+        for child in 0..child_count:
+            parents.push(index)
+            depths.push(depths[index] + 1)
+        index = index + 1
+    var reverse = types.len()
+    while reverse > 0:
+        reverse = reverse - 1
+        val parent = parents[reverse]
+        if sizes[reverse] > 1048576:
+            return Err(lean_type_error("recursive array type key byte budget"))
+        if parent >= 0:
+            # Both operands are already capped: no overflow in this addition.
+            sizes[parent] = sizes[parent] + sizes[reverse]
+            counts[parent] = counts[parent] + counts[reverse]
+            touches[parent] = touches[parent] or touches[reverse]
+    Ok(LeanArrayTypeScanV1(types: types, key_sizes: sizes,
+        subtree_nodes: counts, touches: touches, dependencies: dependencies))
+
+class LeanTypeDependenciesV1:
+    values: [i64]
+    seen: Dict<i64, bool>
+
+    me add(type_: MirType, context: LeanTypeContext) -> Result<(), CompileError>:
+        val scan = lean_array_scan_v1(type_, context, {})?
+        for dependency in scan.dependencies:
+            context.array_policy.work(1)?
+            if not self.seen.has(dependency):
+                self.values.push(dependency)
+                self.seen[dependency] = true
+        Ok(())
+
+fn lean_array_scan_key_v1(scan: LeanArrayTypeScanV1, index: i64,
+    context: LeanTypeContext
+) -> Result<text, CompileError>:
+    val bytes = scan.key_sizes[index]
+    val nodes = scan.subtree_nodes[index]
+    if bytes > context.array_policy.limits.max_key_bytes:
+        return Err(lean_type_error("recursive array type key byte budget"))
+    # serialize_mir_type is the retained exact identity format. Its repeated
+    # concatenation is conservatively charged BEFORE entry, even on a cache hit.
+    # Division avoids overflow and bounds temporary copying as well as the key.
+    if nodes <= 0 or bytes > context.array_policy.work_left / nodes:
+        return Err(lean_type_error("recursive array planning work budget"))
+    context.array_policy.work(bytes * nodes)?
+    val key = serialize_mir_type(scan.types[index])
+    if key.len() != bytes:
+        return Err(lean_type_error("recursive array exact key size disagreement"))
+    Ok(key)
+
+fn lean_array_select_v1(type_: MirType, members: Dict<i64, bool>,
+    context: LeanTypeContext
+) -> Result<(), CompileError>:
+    val scan = lean_array_scan_v1(type_, context, members)?
+    for index in 0..scan.types.len():
+        match scan.types[index].kind:
+            case Array(_, _):
+                if not scan.touches[index]: continue
+                val key = lean_array_scan_key_v1(scan, index, context)?
+                # Hashing/equality work is charged regardless of key reuse.
+                context.array_policy.work(key.len())?
+                if not context.array_policy.keys.has(key):
+                    if context.array_policy.plans_left <= 0:
+                        return Err(lean_type_error("recursive array policy entry budget"))
+                    if key.len() > context.array_policy.key_bytes_left:
+                        return Err(lean_type_error("recursive array retained key byte budget"))
+                    context.array_policy.plans_left = context.array_policy.plans_left - 1
+                    context.array_policy.key_bytes_left = context.array_policy.key_bytes_left - key.len()
+                    context.array_policy.keys[key] = true
+            case _: ()
+    Ok(())
+
+fn lean_array_uses_finite_carrier_v1(element: MirType, size: i64,
+    context: LeanTypeContext
+) -> Result<bool, CompileError>:
+    """One exact per-module decision for declarations, signatures and values."""
+    if size < 0: return Err(lean_type_error("negative array length {size}"))
+    if context.array_policy.keys.len() == 0: return Ok(false)
+    val type_ = MirType(kind: MirTypeKind.Array(element, size))
+    val scan = lean_array_scan_v1(type_, context, {})?
+    val key = lean_array_scan_key_v1(scan, 0, context)?
+    context.array_policy.work(key.len())?
+    Ok(context.array_policy.keys.has(key))
+
+fn lean_recursive_struct_projections(declaration: LeanTypeDeclaration, context: LeanTypeContext) -> [text]:
+    """Retain the existing nominal-body projection API for recursive structs."""
+    var lines: [text] = []
+    val type_name = context.names[declaration.symbol]
+    var arguments: [text] = []
+    for index in 0..declaration.fields.len(): arguments.push("_field{index}")
+    val pattern = type_name + ".mk " + arguments.join(" ")
+    for index in 0..declaration.fields.len():
+        val (field_name, field_type) = declaration.fields[index]
+        lines.push("def {declaration.name}.{field_name} (_value : {type_name}) : {field_type} :=")
+        lines.push("  match _value with")
+        lines.push("  | {pattern} => _field{index}")
+    lines
+
+# Integer min-heap: plan indexes are already sorted by qualified source name.
+# Kept owner-local; no module cache or external collection policy is introduced.
+class LeanTypeReadyQueue:
+    items: [i64]
+
+    me push(value: i64):
+        self.items.push(value)
+        var index = self.items.len() - 1
+        while index > 0:
+            val parent = (index - 1) / 2
+            if self.items[parent] <= value: break
+            self.items[index] = self.items[parent]
+            index = parent
+        self.items[index] = value
+
+    me pop() -> i64:
+        val result = self.items[0]
+        val last = self.items[self.items.len() - 1]
+        val _ = self.items.pop()
+        if self.items.len() == 0: return result
+        var index = 0
+        while index * 2 + 1 < self.items.len():
+            var child = index * 2 + 1
+            if child + 1 < self.items.len() and self.items[child + 1] < self.items[child]:
+                child = child + 1
+            if last <= self.items[child]: break
+            self.items[index] = self.items[child]
+            index = child
+        self.items[index] = last
+        result
+
+fn lean_group_type_declarations(plans: [LeanTypeDependencyPlanV1], context: LeanTypeContext) -> Result<[LeanTypeDependencyGroupV1], CompileError>:
+    # Flat linked adjacency avoids copying a growing neighbor array for every
+    # insertion. Both graph traversals use explicit stacks, never call recursion.
+    var by_symbol: Dict<i64, i64> = {}
+    var heads: [i64] = []
+    var reverse_heads: [i64] = []
+    var visited: [bool] = []
+    var component: [i64] = []
+    for index in 0..plans.len():
+        by_symbol[plans[index].symbol] = index
+        heads.push(-1)
+        reverse_heads.push(-1)
+        visited.push(false)
+        component.push(-1)
+    var targets: [i64] = []
+    var next_edges: [i64] = []
+    var reverse_targets: [i64] = []
+    var reverse_next: [i64] = []
+    for index in 0..plans.len():
+        for symbol in plans[index].dependencies:
+            val target = by_symbol[symbol]
+            val edge = targets.len()
+            targets.push(target)
+            next_edges.push(heads[index])
+            heads[index] = edge
+            reverse_targets.push(index)
+            reverse_next.push(reverse_heads[target])
+            reverse_heads[target] = edge
+    var finished: [i64] = []
+    for start in 0..plans.len():
+        if visited[start]: continue
+        var nodes = [start]
+        var cursors = [heads[start]]
+        visited[start] = true
+        while nodes.len() > 0:
+            val top = nodes.len() - 1
+            val edge = cursors[top]
+            if edge < 0:
+                finished.push(nodes[top])
+                val _ = nodes.pop()
+                val _ = cursors.pop()
+            else:
+                cursors[top] = next_edges[edge]
+                val target = targets[edge]
+                if not visited[target]:
+                    visited[target] = true
+                    nodes.push(target)
+                    cursors.push(heads[target])
+    var components: [[i64]] = []
+    var finish_index = finished.len()
+    while finish_index > 0:
+        finish_index = finish_index - 1
+        val start = finished[finish_index]
+        if component[start] >= 0: continue
+        val group_id = components.len()
+        var members: [i64] = []
+        var pending = [start]
+        component[start] = group_id
+        while pending.len() > 0:
+            val current = pending[pending.len() - 1]
+            val _ = pending.pop()
+            members.push(current)
+            var edge = reverse_heads[current]
+            while edge >= 0:
+                val target = reverse_targets[edge]
+                if component[target] < 0:
+                    component[target] = group_id
+                    pending.push(target)
+                edge = reverse_next[edge]
+        members.sort()
+        components.push(members)
+    # Count cross-component edges once and release their users once. Multiple
+    # edges between the same components are counted/decremented symmetrically.
+    var remaining: [i64] = []
+    var user_heads: [i64] = []
+    var users: [i64] = []
+    var user_next: [i64] = []
+    for members in components:
+        remaining.push(0)
+        user_heads.push(-1)
+    for index in 0..plans.len():
+        val user_group = component[index]
+        var edge = heads[index]
+        while edge >= 0:
+            val dependency_group = component[targets[edge]]
+            if user_group != dependency_group:
+                remaining[user_group] = remaining[user_group] + 1
+                val user_edge = users.len()
+                users.push(user_group)
+                user_next.push(user_heads[dependency_group])
+                user_heads[dependency_group] = user_edge
+            edge = next_edges[edge]
+    var ready = LeanTypeReadyQueue(items: [])
+    for group_id in 0..components.len():
+        if remaining[group_id] == 0: ready.push(components[group_id][0])
+    var groups: [LeanTypeDependencyGroupV1] = []
+    while ready.items.len() > 0:
+        val first = ready.pop()
+        val group_id = component[first]
+        val indexes = components[group_id]
+        val recursive = indexes.len() > 1 or plans[first].dependencies.contains(plans[first].symbol)
+        var symbols: [i64] = []
+        var member_symbols: Dict<i64, bool> = {}
+        for index in indexes:
+            symbols.push(plans[index].symbol)
+            member_symbols[plans[index].symbol] = true
+        if recursive:
+            for symbol in symbols:
+                match context.definitions[symbol].kind:
+                    case Struct(fields):
+                        for field in fields:
+                            lean_recursive_member_check(field.name)?
+                            lean_array_select_v1(field.type_, member_symbols, context)?
+                    case Enum(variants):
+                        for variant in variants:
+                            lean_recursive_member_check(variant.name)?
+                            if val payload = variant.payload: lean_array_select_v1(payload, member_symbols, context)?
+                    case Union(_):
+                        return Err(lean_type_error("union declaration has no admitted recursive representation"))
+        groups.push(LeanTypeDependencyGroupV1(symbols: symbols, recursive: recursive))
+        var user_edge = user_heads[group_id]
+        while user_edge >= 0:
+            val user_group = users[user_edge]
+            remaining[user_group] = remaining[user_group] - 1
+            if remaining[user_group] == 0: ready.push(components[user_group][0])
+            user_edge = user_next[user_edge]
+    if groups.len() != components.len():
+        return Err(lean_type_error("incomplete recursive declaration component order"))
+    Ok(groups)
+
+fn lean_plan_type_declarations(module: MirModule, namespace: text,
+    limits: LeanRecursiveArrayLimitsV1 = LeanRecursiveArrayLimitsV1()
+) -> Result<LeanTypeExportPlan, CompileError>:
+    """Validate the complete table and positive recursive groups before emission."""
+    val array_policy = LeanRecursiveArrayPolicyV1.create(limits)?
+    if not lean_type_name_valid(namespace):
+        return Err(lean_type_error("invalid module namespace `{namespace}`"))
+    # Namespace strings are emitted by the existing backend without quotation.
+    for part in namespace.split("."):
+        if ["namespace", "end", "where", "structure", "inductive", "def", "theorem", "axiom", "class", "instance", "match", "with", "if", "then", "else", "let", "in", "do", "by", "fun", "Type", "Prop", "Sort", "open", "export", "import", "private", "protected", "noncomputable", "unsafe", "mutual", "deriving", "example", "abbrev", "variable", "section", "set_option"].contains(part):
+            return Err(lean_type_error("reserved module namespace component `{part}`"))
+    for key in module.functions.keys():
+        val name = module.functions[key].name
+        if name == "__MirTypes" or name.starts_with("__MirTypes.") or name == "__MirTypeMetadata" or name.starts_with("__MirTypeMetadata."):
+            return Err(lean_type_error("function collides with the declaration namespace `{name}`"))
+    var ids: [i64] = []
+    for key in module.types.keys(): ids.push(key.id)
+    ids.sort()
+    var names: Dict<i64, text> = {}
+    var kinds: Dict<i64, bool> = {}
+    var definitions: Dict<i64, MirTypeDef> = {}
+    var by_name: Dict<text, i64> = {}
+    var ordered_names: [text] = []
+    for id in ids:
+        val definition = module.types[SymbolId(id: id)]
+        if id < 0 or definition.symbol.id != id:
+            return Err(lean_type_error("type table key disagrees with declaration symbol {id}"))
+        if not lean_type_name_valid(definition.name) or by_name.has(definition.name):
+            return Err(lean_type_error("invalid or duplicate type name `{definition.name}`"))
+        # Nested type scopes can collide with Lean-generated fields/eliminators.
+        for previous in ordered_names:
+            if definition.name.starts_with(previous + ".") or previous.starts_with(definition.name + "."):
+                return Err(lean_type_error("overlapping nominal namespaces `{previous}` and `{definition.name}`"))
+        val is_enum = match definition.kind:
+            case Struct(_): false
+            case Enum(_): true
+            case Union(_): return Err(lean_type_error("union declaration `{definition.name}` has no admitted representation"))
+        names[id] = "_root_.{namespace}.__MirTypes." + lean_type_quote_name(definition.name)
+        kinds[id] = is_enum
+        definitions[id] = definition
+        by_name[definition.name] = id
+        ordered_names.push(definition.name)
+    ordered_names.sort()
+    val context = LeanTypeContext(names: names, enum_kinds: kinds, definitions: definitions,
+        array_policy: array_policy)
+    # Raw identity/dependencies only: no preliminary Vector type strings are
+    # rendered before recursive SCCs complete the shared representation policy.
+    var plans: [LeanTypeDependencyPlanV1] = []
+    for name in ordered_names:
+        val definition = definitions[by_name[name]]
+        val dependencies = LeanTypeDependenciesV1(values: [], seen: {})
+        match definition.kind:
+            case Struct(fields):
+                context.array_policy.work(fields.len())?
+                for field in fields: dependencies.add(field.type_, context)?
+            case Enum(variants):
+                context.array_policy.work(variants.len())?
+                for variant in variants:
+                    if val payload = variant.payload: dependencies.add(payload, context)?
+            case Union(_): return Err(lean_type_error("union declaration has no admitted representation"))
+        context.array_policy.work(1)?
+        plans.push(LeanTypeDependencyPlanV1(symbol: definition.symbol.id, dependencies: dependencies.values))
+    val raw_groups = lean_group_type_declarations(plans, context)?
+    var groups: [LeanTypeDeclarationGroup] = []
+    var ordered: [LeanTypeDeclaration] = []
+    for raw_group in raw_groups:
+        var declarations: [LeanTypeDeclaration] = []
+        for symbol in raw_group.symbols:
+            context.array_policy.work(1)?
+            val declaration = lean_plan_one_type(definitions[symbol], context)?
+            declarations.push(declaration)
+            ordered.push(declaration)
+        groups.push(LeanTypeDeclarationGroup(declarations: declarations, recursive: raw_group.recursive))
+    Ok(LeanTypeExportPlan(context: context, declarations: ordered, groups: groups))
+
+export LeanTypeContext, LeanTypeDeclaration, LeanTypeDeclarationGroup, LeanTypeExportPlan
+export LeanRecursiveArrayLimitsV1
+export lean_array_uses_finite_carrier_v1
+export lean_plan_type_declarations, lean_context_type_to_lean, lean_type_quote_name, lean_recursive_struct_projections

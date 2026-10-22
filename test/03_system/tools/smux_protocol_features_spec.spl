@@ -1,0 +1,662 @@
+# @cover src/os/apps/smux/api.spl 80%
+# @cover src/os/apps/smux/smux_remote.spl 80%
+# @cover src/os/apps/smux/server.spl 80%
+"""
+## Purpose and audience
+Maintainer workflows for authenticated smux commands, resource ownership and
+active window/pane routing through the production protocol dispatcher.
+## Evidence boundary
+These source-contract scenarios create production service records without
+children. They prove command routing and authentication state, not a running
+daemon, network isolation, ConPTY output, or persistence across client processes.
+All tests and docgen remain TEST_BLOCKED until an admitted runner executes them.
+# @manual: primary
+# @capture: protocol
+"""
+
+# codex-system-test
+use std.spec.{describe, it, expect, step}
+use os.apps.smux.api.{
+    smux_reset_for_test, smux_create_session, smux_list_sessions,
+    smux_list_windows, smux_list_panes, smux_new_window, smux_active_window,
+    smux_split_pane, smux_close_pane, smux_focused_pane, smux_attach, smux_detach,
+    smux_window_layout, smux_metrics
+}
+use os.apps.smux.smux_remote.{smux_remote_dispatch, smux_remote_reply_ok, smux_composite_cells}
+use os.apps.smux.server.{smux_server_dispatch, smux_server_decode_reply}
+use os.apps.smux.mux_rects.{mux_layout_rects}
+use os.apps.smux.vt_screen.{vt_new, vt_feed, vt_cell_width}
+use std.common.string_core.{text_to_bytes}
+
+# @inline
+fn protocol_session(name: text) -> [text]:
+    val session = smux_create_session(name)
+    expect(session.id.len()).to_be_greater_than(0)
+    val windows = smux_list_windows(session.id)
+    expect(windows.len()).to_equal(1)
+    val panes = smux_list_panes(session.id, windows[0].id)
+    expect(panes.len()).to_equal(1)
+    return [session.id, windows[0].id, panes[0].id]
+
+# @inline
+fn protocol_cells(raw: text, cols: i64) -> [[text]]:
+    val screen = vt_feed(vt_new(1, cols), raw)
+    expect(screen.cells.len()).to_equal(1)
+    expect(screen.cells[0].len()).to_equal(cols)
+    return screen.cells
+
+describe "smux authenticated protocol feature workflows":
+    describe "REQ-SMUX-CORE-001: protocol session and window ownership":
+        it "should list an empty service using the bare list command":
+            smux_reset_for_test()
+            step("List sessions before creating any session")
+            expect(smux_remote_dispatch("list")).to_equal("smux: sessions=0")
+
+        it "should list two independently created sessions":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            val monitor = protocol_session("monitor")
+            step("List the production service without supplying a dummy session")
+            expect(smux_remote_dispatch("list")).to_equal("smux: sessions=2")
+            expect(work[0] == monitor[0]).to_equal(false)
+
+        it "should select a second window and preserve the other session focus":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            val monitor = protocol_session("monitor")
+            val logs = smux_new_window(work[0], "logs")
+            expect(logs.id.len()).to_be_greater_than(0)
+            step("Select logs through the line protocol")
+            val selected = smux_remote_dispatch("select-window work " + logs.id)
+            expect(selected).to_start_with("smux: selected window ")
+            expect(smux_active_window(work[0]).unwrap().id).to_equal(logs.id)
+            expect(smux_active_window(monitor[0]).unwrap().id).to_equal(monitor[1])
+
+        it "should refuse selecting a window owned by another session":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            val monitor = protocol_session("monitor")
+            step("Try selecting monitoring's window under work")
+            expect(smux_remote_dispatch("select-window work " + monitor[1])).to_equal("smux: unknown window " + monitor[1])
+            expect(smux_active_window(work[0]).unwrap().id).to_equal(work[1])
+            expect(smux_active_window(monitor[0]).unwrap().id).to_equal(monitor[1])
+
+        it "should list only the requested session's windows":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            val monitor = protocol_session("monitor")
+            val logs = smux_new_window(work[0], "logs")
+            expect(logs.id.len()).to_be_greater_than(0)
+            step("Inspect windows through the protocol")
+            val listed = smux_remote_dispatch("windows work")
+            expect(listed).to_contain(work[1])
+            expect(listed).to_contain(logs.id)
+            expect(listed.contains(monitor[1])).to_equal(false)
+
+        it "should reject unknown sessions without creating resources":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            step("Select a window in a session that does not exist")
+            expect(smux_remote_dispatch("select-window absent " + work[1])).to_equal("smux: unknown session absent")
+            expect(smux_list_sessions().len()).to_equal(1)
+            expect(smux_active_window(work[0]).unwrap().id).to_equal(work[1])
+
+        it "should refuse a new window without a name before allocating a pane":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            step("Request a new window without its required name")
+            expect(smux_remote_dispatch("new-window work")).to_equal("smux: new-window requires name")
+            expect(smux_list_windows(work[0]).len()).to_equal(1)
+            expect(smux_list_panes(work[0], work[1]).len()).to_equal(1)
+
+        it "should refuse a new window at capacity without starting a shell":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            var i = 0
+            while i < 7:
+                val window = smux_new_window(work[0], "extra" + i.to_text())
+                expect(window.id.len()).to_be_greater_than(0)
+                i = i + 1
+            step("Request a ninth window through the protocol")
+            expect(smux_remote_dispatch("new-window work overflow")).to_equal("smux: window capacity reached")
+            expect(smux_list_windows(work[0]).len()).to_equal(8)
+            expect(smux_active_window(work[0]).unwrap().id).to_equal(work[1])
+
+    describe "REQ-SMUX-CORE-002: protocol split refusal boundaries":
+        it "should reject an invalid split direction before creating a pane or child":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            step("Request a diagonal split through the production protocol")
+            expect(smux_remote_dispatch("split work diagonal")).to_contain("invalid")
+            val panes = smux_list_panes(work[0], work[1])
+            expect(panes.len()).to_equal(1)
+            expect(panes[0].cols).to_equal(80)
+            expect(panes[0].rows).to_equal(24)
+
+        it "should refuse splitting after the last pane closes":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            expect(smux_close_pane(work[0], work[1], work[2])).to_equal(true)
+            step("Request a split without a focused pane")
+            expect(smux_remote_dispatch("split work vertical")).to_contain("no focused pane")
+            expect(smux_list_panes(work[0], work[1]).len()).to_equal(0)
+
+        it "should refuse a split at pane capacity without resizing its original pane":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            val a = protocol_session("a")
+            val b = protocol_session("b")
+            val c = protocol_session("c")
+            val d = protocol_session("d")
+            val e = protocol_session("e")
+            val f = protocol_session("f")
+            val g = protocol_session("g")
+            expect(smux_list_sessions().len()).to_equal(8)
+            step("Request a ninth pane through the protocol")
+            expect(smux_remote_dispatch("split work vertical")).to_contain("capacity")
+            val panes = smux_list_panes(work[0], work[1])
+            expect(panes.len()).to_equal(1)
+            expect(panes[0].cols).to_equal(80)
+            expect(panes[0].rows).to_equal(24)
+
+    describe "REQ-SMUX-CORE-003: protocol active pane routing":
+        it "should send to the focused pane rather than the first pane":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            val split = smux_split_pane(work[0], work[1], work[2], "vertical")
+            expect(split.is_ok()).to_equal(true)
+            val selected = split.unwrap()
+            step("Focus the second pane through the protocol")
+            expect(smux_remote_dispatch("select-pane work " + selected.id)).to_contain("selected pane")
+            expect(smux_focused_pane(work[0], work[1]).unwrap().id).to_equal(selected.id)
+            step("The no-child refusal must name the selected pane")
+            expect(smux_remote_dispatch("send work echo selected pane")).to_equal("smux: send failed: pane has no child: " + selected.id)
+
+        it "should send to the active window rather than the first window":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            val logs = smux_new_window(work[0], "logs")
+            expect(logs.id.len()).to_be_greater_than(0)
+            val panes = smux_list_panes(work[0], logs.id)
+            expect(panes.len()).to_equal(1)
+            step("Select logs then send to its focused pane")
+            expect(smux_remote_dispatch("select-window work " + logs.id)).to_contain("selected window")
+            expect(smux_remote_dispatch("send work echo selected window")).to_equal("smux: send failed: pane has no child: " + panes[0].id)
+
+        it "should capture the selected window after the first window loses its pane":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            val logs = smux_new_window(work[0], "logs")
+            expect(logs.id.len()).to_be_greater_than(0)
+            expect(smux_close_pane(work[0], work[1], work[2])).to_equal(true)
+            step("Select the populated second window and capture its empty screen")
+            expect(smux_remote_dispatch("select-window work " + logs.id)).to_contain("selected window")
+            expect(smux_remote_dispatch("capture work")).to_equal("smux: capture[work]:\n")
+
+        it "should list only panes from the active window":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            val logs = smux_new_window(work[0], "logs")
+            expect(logs.id.len()).to_be_greater_than(0)
+            val panes = smux_list_panes(work[0], logs.id)
+            expect(panes.len()).to_equal(1)
+            expect(smux_remote_dispatch("select-window work " + logs.id)).to_contain("selected window")
+            step("List the selected window's panes")
+            val listed = smux_remote_dispatch("panes work")
+            expect(listed).to_contain(panes[0].id)
+            expect(listed.contains(work[2])).to_equal(false)
+
+        it "should refuse a pane from another window without changing focus":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            val logs = smux_new_window(work[0], "logs")
+            expect(logs.id.len()).to_be_greater_than(0)
+            val panes = smux_list_panes(work[0], logs.id)
+            expect(panes.len()).to_equal(1)
+            step("Try focusing a logs pane while the initial window is active")
+            expect(smux_remote_dispatch("select-pane work " + panes[0].id)).to_equal("smux: unknown pane " + panes[0].id)
+            expect(smux_focused_pane(work[0], work[1]).unwrap().id).to_equal(work[2])
+
+        it "should refuse capture and send when the active window has no panes":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            expect(smux_close_pane(work[0], work[1], work[2])).to_equal(true)
+            step("Issue pane commands after the last pane closes")
+            expect(smux_remote_dispatch("capture work")).to_contain("no focused pane")
+            expect(smux_remote_dispatch("send work echo missing")).to_contain("no focused pane")
+            expect(smux_list_panes(work[0], work[1]).len()).to_equal(0)
+
+        it "should refuse an empty send rather than inventing child input":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            step("Submit send without command text")
+            expect(smux_remote_dispatch("send work")).to_equal("smux: send requires extra arg")
+            expect(smux_remote_dispatch("capture work")).to_equal("smux: capture[work]:\n")
+            expect(smux_focused_pane(work[0], work[1]).unwrap().id).to_equal(work[2])
+
+    describe "REQ-SMUX-CORE-004: protocol detach and reconnect":
+        it "should detach and reattach without replacing session resources":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            step("Attach and detach the first protocol client")
+            expect(smux_remote_dispatch("attach work first")).to_contain("attached")
+            expect(smux_remote_dispatch("detach work first")).to_contain("detached")
+            step("Attach a replacement client to the existing session")
+            expect(smux_remote_dispatch("attach work returned")).to_contain("attached")
+            expect(smux_list_windows(work[0])[0].id).to_equal(work[1])
+            expect(smux_list_panes(work[0], work[1])[0].id).to_equal(work[2])
+            expect(smux_detach("returned")).to_equal(true)
+
+        it "should refuse repeated detach":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            expect(smux_attach(work[0], "screen", 80, 24).attached).to_equal(true)
+            step("Detach a client twice through the protocol")
+            expect(smux_remote_dispatch("detach work screen")).to_contain("detached")
+            expect(smux_remote_dispatch("detach work screen")).to_equal("smux: detach refused: screen")
+            expect(smux_list_sessions().len()).to_equal(1)
+
+        it "should refuse detaching a client from a different session":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            val monitor = protocol_session("monitor")
+            expect(smux_attach(work[0], "screen", 80, 24).attached).to_equal(true)
+            step("Address the work attachment through monitoring")
+            expect(smux_remote_dispatch("detach monitor screen")).to_equal("smux: detach refused: screen")
+            step("The work attachment must still detach exactly once")
+            expect(smux_remote_dispatch("detach work screen")).to_contain("detached")
+            expect(smux_detach("screen")).to_equal(false)
+            expect(smux_list_panes(monitor[0], monitor[1])[0].id).to_equal(monitor[2])
+
+    describe "REQ-SMUX-PROTOCOL-001: authenticate before dispatch":
+        it "should accept a correct token and execute the requested command":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            step("Send an authenticated list request through the server boundary")
+            expect(smux_server_dispatch("secret list", "secret")).to_equal("smux: sessions=1")
+            expect(smux_list_panes(work[0], work[1])[0].id).to_equal(work[2])
+
+        it "should reject a wrong token before a new command can create a shell":
+            smux_reset_for_test()
+            step("Submit a state-changing command with an incorrect token")
+            expect(smux_server_dispatch("wrong new injected", "secret")).to_equal("smux: unauthorized")
+            expect(smux_list_sessions().len()).to_equal(0)
+
+        it "should authenticate before changing the active window":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            val logs = smux_new_window(work[0], "logs")
+            expect(logs.id.len()).to_be_greater_than(0)
+            step("A wrong token must preserve the initial active window")
+            expect(smux_server_dispatch("wrong select-window work " + logs.id, "secret")).to_equal("smux: unauthorized")
+            expect(smux_active_window(work[0]).unwrap().id).to_equal(work[1])
+            step("The correct token authorizes the same window selection")
+            expect(smux_server_dispatch("secret select-window work " + logs.id, "secret")).to_equal("smux: selected window " + logs.id)
+            expect(smux_active_window(work[0]).unwrap().id).to_equal(logs.id)
+
+        it "should authenticate before detaching a client or accepting stop-server":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            expect(smux_attach(work[0], "screen", 80, 24).attached).to_equal(true)
+            step("Unauthenticated detach and stop requests must refuse")
+            expect(smux_server_dispatch("wrong detach work screen", "secret")).to_equal("smux: unauthorized")
+            expect(smux_server_dispatch("wrong stop-server", "secret")).to_equal("smux: unauthorized")
+            expect(smux_detach("screen")).to_equal(true)
+            expect(smux_list_sessions().len()).to_equal(1)
+
+        it "should reject empty configured and supplied tokens without mutation":
+            smux_reset_for_test()
+            step("Submit commands with missing authentication material")
+            expect(smux_server_dispatch(" new injected", "secret")).to_equal("smux: unauthorized")
+            expect(smux_server_dispatch("secret new injected", "")).to_equal("smux: unauthorized")
+            expect(smux_server_dispatch("", "secret")).to_equal("smux: unauthorized")
+            expect(smux_list_sessions().len()).to_equal(0)
+
+        it "should reject embedded line breaks before any command is dispatched":
+            smux_reset_for_test()
+            step("Try appending a second line to an authenticated new command")
+            expect(smux_server_dispatch("secret new injected\nlist", "secret")).to_contain("invalid")
+            expect(smux_server_dispatch("secret new injected\rlist", "secret")).to_contain("invalid")
+            expect(smux_list_sessions().len()).to_equal(0)
+
+        it "should reject oversized requests before resource creation":
+            smux_reset_for_test()
+            var request = "secret new "
+            var i = 0
+            while i < 4096:
+                request = request + "x"
+                i = i + 1
+            step("Submit more than the 4096 byte server request limit")
+            expect(smux_server_dispatch(request, "secret")).to_equal("smux: invalid request")
+            expect(smux_list_sessions().len()).to_equal(0)
+
+        it "should enforce the request limit in UTF-8 bytes rather than characters":
+            smux_reset_for_test()
+            var request = "secret new "
+            var i = 0
+            while i < 2048:
+                request = request + "é"
+                i = i + 1
+            step("Submit fewer than 4096 characters encoding to more than 4096 bytes")
+            expect(text_to_bytes(request).len()).to_be_greater_than(4096)
+            expect(smux_server_dispatch(request, "secret")).to_equal("smux: invalid request")
+            expect(smux_list_sessions().len()).to_equal(0)
+
+    describe "REQ-SMUX-PROTOCOL-002: byte exact response framing":
+        it "should decode multiline Unicode output using its UTF-8 byte length":
+            step("Decode a nine byte body containing a newline and Unicode")
+            val decoded = smux_server_decode_reply(text_to_bytes("SMUX/1 9\ncafé\n界"))
+            expect(decoded.is_ok()).to_equal(true)
+            expect(decoded.unwrap()).to_equal("café\n界")
+
+        it "should decode a complete zero length response":
+            step("Decode a valid empty response frame")
+            val decoded = smux_server_decode_reply(text_to_bytes("SMUX/1 0\n"))
+            expect(decoded.is_ok()).to_equal(true)
+            expect(decoded.unwrap()).to_equal("")
+
+        it "should reject a truncated response body":
+            step("Decode EOF before all declared body bytes arrive")
+            val decoded = smux_server_decode_reply(text_to_bytes("SMUX/1 5\nabc"))
+            expect(decoded.is_err()).to_equal(true)
+            expect(decoded.unwrap_err()).to_equal("incomplete smux response")
+
+        it "should reject extra bytes after a complete declared body":
+            step("Decode a response with unframed trailing bytes")
+            val decoded = smux_server_decode_reply(text_to_bytes("SMUX/1 3\nabcX"))
+            expect(decoded.is_err()).to_equal(true)
+            expect(decoded.unwrap_err()).to_equal("incomplete smux response")
+
+        it "should reject an unframed reply and an unterminated header":
+            step("Decode raw output and a header without its newline")
+            val unframed = smux_server_decode_reply(text_to_bytes("smux: sessions=0\n"))
+            expect(unframed.is_err()).to_equal(true)
+            expect(unframed.unwrap_err()).to_equal("invalid smux response header")
+            val unterminated = smux_server_decode_reply(text_to_bytes("SMUX/1 3"))
+            expect(unterminated.is_err()).to_equal(true)
+            expect(unterminated.unwrap_err()).to_equal("invalid smux response header")
+
+        it "should reject a negative declared body length":
+            step("Decode a frame with a negative length")
+            val decoded = smux_server_decode_reply(text_to_bytes("SMUX/1 -1\n"))
+            expect(decoded.is_err()).to_equal(true)
+            expect(decoded.unwrap_err()).to_equal("invalid smux response length")
+
+        it "should reject a declared body length above the response limit":
+            step("Decode a frame declaring more than 65536 response bytes")
+            val decoded = smux_server_decode_reply(text_to_bytes("SMUX/1 65537\n"))
+            expect(decoded.is_err()).to_equal(true)
+            expect(decoded.unwrap_err()).to_equal("invalid smux response length")
+
+        it "should reject a nonnumeric declared body length":
+            step("Decode a frame whose body length is not an integer")
+            val decoded = smux_server_decode_reply(text_to_bytes("SMUX/1 nope\n"))
+            expect(decoded.is_err()).to_equal(true)
+            expect(decoded.unwrap_err()).to_equal("invalid smux response length")
+
+    describe "REQ-SMUX-PROTOCOL-003: selected layout and composite screen":
+        it "should publish side by side pane rectangles using actual pane identifiers":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            val split = smux_split_pane(work[0], work[1], work[2], "vertical")
+            expect(split.is_ok()).to_equal(true)
+            step("Select even-horizontal on a twelve by six canvas")
+            expect(smux_remote_dispatch("layout work even-horizontal 12 6")).to_equal("smux: layout even-horizontal")
+            expect(smux_window_layout(work[0], work[1]).unwrap()).to_equal("even-horizontal")
+            expect(smux_remote_dispatch("rects work")).to_equal("smux: rects[work]:\n" + work[2] + " 0 0 6 6\n" + split.unwrap().id + " 6 0 6 6\n")
+            val panes = smux_list_panes(work[0], work[1])
+            expect(panes[0].cols).to_equal(6)
+            expect(panes[1].cols).to_equal(6)
+
+        it "should change the same panes from column bands to row bands":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            val split = smux_split_pane(work[0], work[1], work[2], "vertical")
+            expect(split.is_ok()).to_equal(true)
+            expect(smux_remote_dispatch("layout work even-horizontal 12 6")).to_equal("smux: layout even-horizontal")
+            step("Change to even-vertical without replacing either pane")
+            expect(smux_remote_dispatch("layout work even-vertical 12 6")).to_equal("smux: layout even-vertical")
+            expect(smux_remote_dispatch("rects work")).to_equal("smux: rects[work]:\n" + work[2] + " 0 0 12 3\n" + split.unwrap().id + " 0 3 12 3\n")
+            expect(smux_focused_pane(work[0], work[1]).unwrap().id).to_equal(work[2])
+
+        it "should compose a blank twelve by six screen and capture each pane once":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            expect(smux_split_pane(work[0], work[1], work[2], "vertical").is_ok()).to_equal(true)
+            expect(smux_remote_dispatch("layout work even-horizontal 12 6")).to_equal("smux: layout even-horizontal")
+            val before = smux_metrics().capture_count
+            step("Compose both production pane captures at their selected rectangles")
+            val screen = smux_remote_dispatch("screen work")
+            val blank_row = "            "
+            expect(screen).to_equal("smux: screen[work]:\n" + [blank_row, blank_row, blank_row, blank_row, blank_row, blank_row].join("\n"))
+            expect(smux_metrics().capture_count).to_equal(before + 2)
+
+        it "should route layout rectangles and screen to the selected window":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            val logs = smux_new_window(work[0], "logs")
+            expect(logs.id.len()).to_be_greater_than(0)
+            val log_panes = smux_list_panes(work[0], logs.id)
+            expect(log_panes.len()).to_equal(1)
+            expect(smux_remote_dispatch("layout work even-horizontal 12 6")).to_equal("smux: layout even-horizontal")
+            expect(smux_remote_dispatch("select-window work " + logs.id)).to_contain("selected window")
+            step("Select a different canvas in logs")
+            expect(smux_remote_dispatch("layout work tiled 4 2")).to_equal("smux: layout tiled")
+            expect(smux_remote_dispatch("rects work")).to_equal("smux: rects[work]:\n" + log_panes[0].id + " 0 0 4 2\n")
+            expect(smux_remote_dispatch("screen work")).to_equal("smux: screen[work]:\n    \n    ")
+            step("The original window retains its independent named geometry")
+            expect(smux_remote_dispatch("select-window work " + work[1])).to_contain("selected window")
+            expect(smux_remote_dispatch("rects work")).to_equal("smux: rects[work]:\n" + work[2] + " 0 0 12 6\n")
+
+        it "should leave another session's dimensions and layout untouched":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            val monitor = protocol_session("monitor")
+            step("Change work's selected layout and inspect monitoring")
+            expect(smux_remote_dispatch("layout work main-vertical 12 6")).to_equal("smux: layout main-vertical")
+            expect(smux_window_layout(monitor[0], monitor[1]).unwrap()).to_equal("manual")
+            expect(smux_list_panes(monitor[0], monitor[1])[0].cols).to_equal(80)
+            expect(smux_list_panes(monitor[0], monitor[1])[0].rows).to_equal(24)
+            expect(smux_remote_dispatch("rects monitor")).to_equal("smux: rects[monitor]:\n")
+
+        it "should refuse screen composition until named geometry is selected":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            step("Capture a manual window before selecting a layout")
+            expect(smux_remote_dispatch("screen work")).to_equal("smux: select a layout before screen capture")
+            expect(smux_remote_dispatch("rects work")).to_equal("smux: rects[work]:\n")
+            expect(smux_window_layout(work[0], work[1]).unwrap()).to_equal("manual")
+            expect(smux_metrics().capture_count).to_equal(0)
+
+        it "should reject an invalid layout while retaining selected geometry":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            expect(smux_remote_dispatch("layout work tiled 12 6")).to_equal("smux: layout tiled")
+            val before = smux_remote_dispatch("rects work")
+            step("Request an unknown named layout")
+            expect(smux_remote_dispatch("layout work diagonal 12 6")).to_equal("smux: layout failed: invalid layout: diagonal")
+            expect(smux_remote_dispatch("rects work")).to_equal(before)
+            expect(smux_window_layout(work[0], work[1]).unwrap()).to_equal("tiled")
+
+        it "should reject a canvas that cannot fit every pane":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            expect(smux_split_pane(work[0], work[1], work[2], "vertical").is_ok()).to_equal(true)
+            expect(smux_remote_dispatch("layout work even-horizontal 12 6")).to_equal("smux: layout even-horizontal")
+            val before = smux_remote_dispatch("rects work")
+            step("Request two side by side panes in a one column canvas")
+            expect(smux_remote_dispatch("layout work even-horizontal 1 6")).to_equal("smux: layout failed: layout cannot fit panes in canvas")
+            expect(smux_remote_dispatch("rects work")).to_equal(before)
+
+        it "should reject missing nonnumeric and nonpositive dimensions without mutation":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            step("Submit invalid layout argument forms")
+            expect(smux_remote_dispatch("layout work tiled 12")).to_equal("smux: layout requires name cols rows")
+            expect(smux_remote_dispatch("layout work tiled nope 6")).to_equal("smux: layout failed: canvas dimensions must be positive")
+            expect(smux_remote_dispatch("layout work tiled 0 6")).to_equal("smux: layout failed: canvas dimensions must be positive")
+            expect(smux_remote_dispatch("layout work tiled 12 -1")).to_equal("smux: layout failed: canvas dimensions must be positive")
+            expect(smux_window_layout(work[0], work[1]).unwrap()).to_equal("manual")
+            expect(smux_list_panes(work[0], work[1])[0].cols).to_equal(80)
+            expect(smux_list_panes(work[0], work[1])[0].rows).to_equal(24)
+
+        it "should reject each remote canvas limit before resizing a pane":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            step("Exceed columns rows and total cell limits independently")
+            expect(smux_remote_dispatch("layout work tiled 513 1")).to_equal("smux: layout failed: canvas exceeds remote limit")
+            expect(smux_remote_dispatch("layout work tiled 1 257")).to_equal("smux: layout failed: canvas exceeds remote limit")
+            expect(smux_remote_dispatch("layout work tiled 512 118")).to_equal("smux: layout failed: canvas exceeds remote limit")
+            expect(smux_window_layout(work[0], work[1]).unwrap()).to_equal("manual")
+            expect(smux_list_panes(work[0], work[1])[0].cols).to_equal(80)
+            expect(smux_list_panes(work[0], work[1])[0].rows).to_equal(24)
+
+        it "should accept the inclusive column row and total cell limits":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            step("Select canvases exactly on each independent remote limit")
+            expect(smux_remote_dispatch("layout work tiled 512 1")).to_equal("smux: layout tiled")
+            expect(smux_list_panes(work[0], work[1])[0].cols).to_equal(512)
+            expect(smux_remote_dispatch("layout work tiled 1 256")).to_equal("smux: layout tiled")
+            expect(smux_list_panes(work[0], work[1])[0].rows).to_equal(256)
+            expect(smux_remote_dispatch("layout work tiled 300 200")).to_equal("smux: layout tiled")
+            val pane = smux_list_panes(work[0], work[1])[0]
+            expect(pane.cols).to_equal(300)
+            expect(pane.rows).to_equal(200)
+
+        it "should retain CJK continuation cells before an adjacent pane":
+            # @req REQ-SMUX-PROTOCOL-003
+            step("Feed CJK text and a sibling marker into production VT cells")
+            val left = protocol_cells("界A", 4)
+            val right = protocol_cells("R", 4)
+            expect(left[0][0]).to_equal("界")
+            expect(left[0][1]).to_equal("")
+            val rects = mux_layout_rects(["left", "right"], 8, 1, "even-horizontal")
+            expect(rects.len()).to_equal(2)
+            step("Compose cells and verify the sibling begins at display column four")
+            val frame = smux_composite_cells(rects, [left, right])
+            expect(frame).to_equal("界A R   ")
+            val displayed = protocol_cells(frame, 8)
+            expect(displayed[0][4]).to_equal("R")
+
+        it "should retain emoji width before an adjacent pane":
+            # @req REQ-SMUX-PROTOCOL-003
+            step("Feed an emoji into the real two-cell VT representation")
+            val left = protocol_cells("😀X", 4)
+            val right = protocol_cells("R", 4)
+            expect(left[0][0]).to_equal("😀")
+            expect(left[0][1]).to_equal("")
+            val rects = mux_layout_rects(["left", "right"], 8, 1, "even-horizontal")
+            expect(rects.len()).to_equal(2)
+            step("Compose without shifting the sibling marker")
+            val frame = smux_composite_cells(rects, [left, right])
+            expect(frame).to_equal("😀X R   ")
+            val displayed = protocol_cells(frame, 8)
+            expect(displayed[0][4]).to_equal("R")
+
+        it "should replace a right-edge clipped wide glyph with a blank":
+            # @req REQ-SMUX-PROTOCOL-003
+            step("Capture a complete wide glyph before narrowing its destination rectangle")
+            val left = protocol_cells("A界", 4)
+            val right = protocol_cells("R", 2)
+            expect(left[0][1]).to_equal("界")
+            expect(left[0][2]).to_equal("")
+            val rects = mux_layout_rects(["left", "right"], 4, 1, "even-horizontal")
+            expect(rects.len()).to_equal(2)
+            expect(rects[0].cols).to_equal(2)
+            step("Blank the orphan leading half instead of painting over the sibling")
+            val frame = smux_composite_cells(rects, [left, right])
+            expect(frame).to_equal("A R ")
+            val displayed = protocol_cells(frame, 4)
+            expect(displayed[0][1]).to_equal(" ")
+            expect(displayed[0][2]).to_equal("R")
+            expect(left[0][1]).to_equal("界")
+
+        it "should retain combining marks in their original cell":
+            # @req REQ-SMUX-PROTOCOL-003
+            step("Feed a decomposed accented character into production VT cells")
+            val left = protocol_cells("e\u{301}X", 4)
+            val right = protocol_cells("R", 4)
+            expect(left[0][0]).to_equal("e\u{301}")
+            expect(left[0][1]).to_equal("X")
+            val rects = mux_layout_rects(["left", "right"], 8, 1, "even-horizontal")
+            expect(rects.len()).to_equal(2)
+            step("Compose the whole accented cell without advancing an extra column")
+            val frame = smux_composite_cells(rects, [left, right])
+            expect(frame).to_equal("e\u{301}X  R   ")
+            val displayed = protocol_cells(frame, 8)
+            expect(displayed[0][0]).to_equal("e\u{301}")
+            expect(displayed[0][4]).to_equal("R")
+
+        it "should retain a width range endpoint with a combining mark":
+            # @req REQ-SMUX-PROTOCOL-003
+            step("Feed the upper Hangul wide range endpoint followed by a combining mark")
+            val left = protocol_cells("\u{115F}\u{301}X", 4)
+            val right = protocol_cells("R", 4)
+            expect(left[0][0]).to_equal("\u{115F}\u{301}")
+            expect(left[0][1]).to_equal("")
+            expect(vt_cell_width(left[0][0])).to_equal(2)
+            val rects = mux_layout_rects(["left", "right"], 8, 1, "even-horizontal")
+            expect(rects.len()).to_equal(2)
+            step("Classify the first scalar and retain the wide cell continuation")
+            val frame = smux_composite_cells(rects, [left, right])
+            expect(frame).to_equal("\u{115F}\u{301}X R   ")
+            val displayed = protocol_cells(frame, 8)
+            expect(displayed[0][0]).to_equal("\u{115F}\u{301}")
+            expect(displayed[0][1]).to_equal("")
+            expect(displayed[0][4]).to_equal("R")
+
+    describe "REQ-SMUX-PROTOCOL-004: command result classification":
+        it "should accept successful production list geometry and capture replies":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            step("Classify actual successful dispatcher replies")
+            expect(smux_remote_reply_ok(smux_remote_dispatch("list"))).to_equal(true)
+            expect(smux_remote_reply_ok(smux_remote_dispatch("windows work"))).to_equal(true)
+            expect(smux_remote_reply_ok(smux_remote_dispatch("panes work"))).to_equal(true)
+            expect(smux_remote_reply_ok(smux_remote_dispatch("capture work"))).to_equal(true)
+            expect(smux_remote_reply_ok(smux_remote_dispatch("layout work tiled 12 6"))).to_equal(true)
+            expect(smux_remote_reply_ok(smux_remote_dispatch("rects work"))).to_equal(true)
+            expect(smux_remote_reply_ok(smux_remote_dispatch("screen work"))).to_equal(true)
+            expect(smux_list_panes(work[0], work[1]).len()).to_equal(1)
+
+        it "should accept command status prefixes even when captured output contains errors":
+            step("Classify response text without interpreting pane content as command status")
+            expect(smux_remote_reply_ok("smux: capture[work]:\nsmux: unauthorized\n(no shell: printed by child)")).to_equal(true)
+            expect(smux_remote_reply_ok("smux: screen[work]:\nspawn failed: printed by child")).to_equal(true)
+            expect(smux_remote_reply_ok("smux: created session work shell pid=42")).to_equal(true)
+            expect(smux_remote_reply_ok("smux: created window id4")).to_equal(true)
+            expect(smux_remote_reply_ok("smux: selected window id4")).to_equal(true)
+            expect(smux_remote_reply_ok("smux: selected pane id5")).to_equal(true)
+            expect(smux_remote_reply_ok("smux: attached screen to work")).to_equal(true)
+            expect(smux_remote_reply_ok("smux: detached screen from work")).to_equal(true)
+            expect(smux_remote_reply_ok("smux: split pane id5")).to_equal(true)
+            expect(smux_remote_reply_ok("smux: sent to work")).to_equal(true)
+            expect(smux_remote_reply_ok("smux: stopping server")).to_equal(true)
+
+        it "should reject production usage unknown resource and attachment errors":
+            smux_reset_for_test()
+            val work = protocol_session("work")
+            step("Classify dispatcher refusal responses")
+            expect(smux_remote_reply_ok(smux_remote_dispatch(""))).to_equal(false)
+            expect(smux_remote_reply_ok(smux_remote_dispatch("capture absent"))).to_equal(false)
+            expect(smux_remote_reply_ok(smux_remote_dispatch("select-pane work absent"))).to_equal(false)
+            expect(smux_remote_reply_ok(smux_remote_dispatch("attach work"))).to_equal(false)
+            expect(smux_remote_reply_ok(smux_remote_dispatch("detach work absent"))).to_equal(false)
+            expect(smux_remote_reply_ok(smux_remote_dispatch("send work echo absent"))).to_equal(false)
+            expect(smux_remote_reply_ok(smux_remote_dispatch("layout work tiled 0 6"))).to_equal(false)
+            expect(smux_remote_reply_ok(smux_remote_dispatch("screen work"))).to_equal(false)
+            expect(smux_list_panes(work[0], work[1]).len()).to_equal(1)
+
+        it "should reject no-shell capacity spawn and authentication failure messages":
+            step("Classify explicit failure response text without claiming process execution")
+            expect(smux_remote_reply_ok("smux: created session work (no shell: pty open failed)")).to_equal(false)
+            expect(smux_remote_reply_ok("smux: created window id4 (no shell: pty spawn failed)")).to_equal(false)
+            expect(smux_remote_reply_ok("smux: session capacity reached")).to_equal(false)
+            expect(smux_remote_reply_ok("smux: window capacity reached")).to_equal(false)
+            expect(smux_remote_reply_ok("smux: split failed: pty spawn failed")).to_equal(false)
+            expect(smux_remote_reply_ok("smux: layout requires name cols rows")).to_equal(false)
+            expect(smux_remote_reply_ok("smux: layout failed: invalid layout: diagonal")).to_equal(false)
+            expect(smux_remote_reply_ok("smux: unauthorized")).to_equal(false)
+            expect(smux_remote_reply_ok("smux: invalid request")).to_equal(false)
+            expect(smux_remote_reply_ok("")).to_equal(false)

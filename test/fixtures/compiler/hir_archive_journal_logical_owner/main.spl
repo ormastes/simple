@@ -1,0 +1,36 @@
+# Actual selected source producer emits a physical HIR name independent of the
+# logical source label. Genuine alias publication must retain that distinction.
+use test.fixtures.compiler.hir_archive_weave_boundary.support.*
+use compiler.driver.cache.driver_hir_archive_journal_v1.*
+
+fn main() -> i64:
+    val prepared = hir_archive_weave_fixture_setup_v1(
+        "test/fixtures/compiler/hir_archive_weave_boundary/provider.spl",
+        "journal_logical_provider", "journal_logical_alias")
+    if prepared.is_err():
+        print prepared.unwrap_err()
+        return 10
+    val actual = prepared.unwrap()
+    val journal = actual.driver.hir_archive_publication_journal.unwrap()
+    val physical = actual.archive.input.module_name
+    if physical == actual.source.module_name or journal.events.len() != 2 or
+            journal.registration.roots.len() != 1 or journal.registration.roots[0].module_name != physical or
+            journal.logical_order != [actual.source.module_name, actual.alias.module_name] or
+            journal.logical_archives[actual.alias.module_name].archive_key != actual.archive.archive_key or
+            driver_hir_archive_journal_verify_v1(journal, actual.driver.ctx).is_err(): return 11
+    var checks = 1
+    val previous = journal.last_key
+    val digest = journal.registration_digest
+    val physical_parent = driver_hir_archive_journal_alias_v1(journal, actual.driver.ctx,
+        1, actual.alias.module_name, physical)
+    if physical_parent.is_ok() or physical_parent.unwrap_err() != "HIR journal alias canonical owner absent": return 12
+    checks = checks + 1
+    val alias_parent = driver_hir_archive_journal_alias_v1(journal, actual.driver.ctx,
+        1, actual.alias.module_name, actual.alias.module_name)
+    if alias_parent.is_ok() or alias_parent.unwrap_err() != "HIR journal alias canonical transaction absent" or
+            journal.last_key != previous or journal.registration_digest != digest or journal.events.len() != 2 or
+            driver_hir_archive_journal_verify_v1(journal, actual.driver.ctx).is_err(): return 13
+    checks = checks + 1
+    if checks != 3: return 14
+    print "HIR journal logical owner: {checks} checks passed"
+    0

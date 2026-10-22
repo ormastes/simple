@@ -1,0 +1,385 @@
+# EE-01: called only at actual enum producer emission boundaries.
+# Metadata records semantic facts; it never authorizes native code or proof.
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId, HirTypeKind}
+use compiler.hir.hir_definitions.{HirPattern, HirPatternKind, HirPatternPayload, HirExprKind}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir_types.{LocalId, MirType, MirTypeKind, MirTypeDefKind, MirConstValue}
+use compiler.mir.mir_instruction_support.{BlockId, MirOperand, MirOperandKind}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_instruction_support.{MirTerminator}
+use compiler.mir.mir_enum_semantic_types.*
+use compiler.mir.enum_semantic_capture_types_v1.{MirEnumPendingMatchV1}
+use compiler.mir.mir_json.{serialize_mir_inst_kind, serialize_mir_type, serialize_mir_terminator}
+
+impl MirLowering:
+    me enum_semantic_fail_v1(reason: text):
+        if self.enum_semantic_capture_error == "":
+            self.enum_semantic_capture_error = reason
+
+    me enum_semantic_charge_v1() -> bool:
+        if not self.enum_semantic_capture_enabled: return false
+        if self.builder.current_function == nil:
+            self.enum_semantic_fail_v1("EE-E-METADATA: capture outside function")
+            return false
+        val owner = self.builder.current_function.unwrap().symbol.id
+        val used = self.enum_semantic_function_work.get(owner) ?? 0
+        if used >= 65536:
+            self.enum_semantic_fail_v1("EE-E-LIMIT: function capture budget")
+            return false
+        self.enum_semantic_function_work[owner] = used + 1
+        true
+
+    me enum_semantic_begin_v1(scrutinee: LocalId, span: Span) -> i64:
+        if not self.enum_semantic_capture_enabled: return -1
+        if self.enum_semantic_depth >= 128 or not self.enum_semantic_charge_v1():
+            self.enum_semantic_fail_v1("EE-E-LIMIT: nested match capture")
+            return -1
+        val function = self.builder.current_function.unwrap().symbol
+        val match_id = self.enum_semantic_function_counts.get(function.id) ?? 0
+        self.enum_semantic_function_counts[function.id] = match_id + 1
+        val semantic = MirEnumMatchSemanticV1(match_id: match_id,
+            enum_owner: SymbolId(id: -1),
+            scrutinee_operand: MirOperand(kind: MirOperandKind.Copy(scrutinee)),
+            scrutinee_semantic_type: MirType(kind: MirTypeKind.Enum(SymbolId(id: -1))),
+            entry_block: self.builder.current_block, result_local: LocalId(id: -1),
+            merge_block: BlockId(id: -1), pattern_nodes: [], arms: [], sites: [],
+            source_span: span, declaration_identity: "", subject_identity: "",
+            entry_instruction_index: self.builder.instructions.len())
+        val index = self.enum_semantic_captures.len()
+        self.enum_semantic_captures.push(MirEnumPendingMatchV1(
+            function_symbol: function, semantic: semantic,
+            next_site: self.builder.enum_semantic_site_calls.len(), completed: false,
+            next_terminator: self.builder.enum_semantic_terms.len()))
+        self.enum_semantic_depth = self.enum_semantic_depth + 1
+        self.builder.enum_semantic_node = -1
+        self.builder.enum_semantic_recording = true
+        index
+
+    me enum_semantic_select_owner_v1(index: i64, owner: i64,
+        result: LocalId, merge: BlockId):
+        if index < 0: return
+        val canonical_owner = self.enum_semantic_source_owners.get(owner) ?? -1
+        if not self.enum_semantic_declarations.has(canonical_owner):
+            self.enum_semantic_fail_v1("EE-E-DECLARATION: no retained selected enum owner")
+            return
+        var pending = self.enum_semantic_captures[index]
+        pending.semantic.enum_owner = SymbolId(id: canonical_owner)
+        pending.semantic.scrutinee_semantic_type = MirType(kind: MirTypeKind.Enum(SymbolId(id: canonical_owner)))
+        pending.semantic.result_local = result
+        pending.semantic.merge_block = merge
+        self.enum_semantic_captures[index] = pending
+
+    me enum_semantic_pattern_v1(index: i64, pattern: HirPattern,
+        expected: MirType, depth: i64) -> i64:
+        if index < 0: return -1
+        if depth > 128:
+            self.enum_semantic_fail_v1("EE-E-LIMIT: pattern syntax depth exceeds 128")
+            return -1
+        if pattern == nil or expected == nil:
+            self.enum_semantic_fail_v1("EE-E-PATTERN: missing pattern/type")
+            return -1
+        if not self.enum_semantic_charge_v1(): return -1
+        var kind = MirEnumPatternKindV1.Wildcard
+        match pattern.kind:
+            case HirPatternKind.Wildcard: ()
+            case HirPatternKind.Binding(symbol, _):
+                kind = MirEnumPatternKindV1.Bind(symbol, LocalId(id: -1))
+            case HirPatternKind.Literal(expression):
+                if expression == nil:
+                    self.enum_semantic_fail_v1("EE-E-PATTERN: missing literal")
+                    return -1
+                match expression.kind:
+                    case HirExprKind.IntLit(value, _): kind = MirEnumPatternKindV1.Literal(MirConstValue.Int(value), expected)
+                    case HirExprKind.BoolLit(value): kind = MirEnumPatternKindV1.Literal(MirConstValue.Bool(value), expected)
+                    case HirExprKind.UnitLit: kind = MirEnumPatternKindV1.Literal(MirConstValue.Zero, expected)
+                    case _:
+                        self.enum_semantic_fail_v1("EE-E-PATTERN: unsupported semantic literal carrier")
+                        return -1
+            case HirPatternKind.Tuple(elements):
+                match expected.kind:
+                    case MirTypeKind.Tuple(types):
+                        if elements.len() != types.len():
+                            self.enum_semantic_fail_v1("EE-E-PATTERN: tuple arity")
+                            return -1
+                        var children: [i64] = []
+                        for slot in 0..elements.len():
+                            val child = self.enum_semantic_pattern_v1(index, elements[slot], types[slot], depth + 1)
+                            if child < 0: return -1
+                            children.push(child)
+                        kind = MirEnumPatternKindV1.Tuple(children)
+                    case _:
+                        self.enum_semantic_fail_v1("EE-E-PATTERN: tuple expected type")
+                        return -1
+            case HirPatternKind.Enum(declared_type, variant_name, payload):
+                var owner: i64 = -1
+                match expected.kind:
+                    case MirTypeKind.Enum(symbol): owner = symbol.id
+                    case _:
+                        self.enum_semantic_fail_v1("EE-E-PATTERN: enum expected type")
+                        return -1
+                if declared_type != nil:
+                    match declared_type.kind:
+                        case HirTypeKind.Named(symbol, arguments):
+                            val canonical_pattern_owner = self.enum_semantic_source_owners.get(symbol.id) ?? -1
+                            if canonical_pattern_owner != owner or arguments.len() != 0:
+                                self.enum_semantic_fail_v1("EE-E-DECLARATION: foreign or open pattern owner")
+                                return -1
+                        case HirTypeKind.Error: ()
+                        case _:
+                            self.enum_semantic_fail_v1("EE-E-DECLARATION: unresolved pattern owner")
+                            return -1
+                if not self.enum_semantic_declarations.has(owner):
+                    self.enum_semantic_fail_v1("EE-E-DECLARATION: missing nested owner")
+                    return -1
+                var discriminant: i64 = -1
+                match self.enum_semantic_declarations[owner].kind:
+                    case MirTypeDefKind.Enum(variants):
+                        for variant in variants:
+                            if not self.enum_semantic_charge_v1(): return -1
+                            if variant.name == variant_name:
+                                discriminant = variant.discriminant
+                    case _: ()
+                val key = owner.to_string() + ":" + discriminant.to_string()
+                if discriminant < 0 or not self.enum_semantic_variant_slots.has(key):
+                    self.enum_semantic_fail_v1("EE-E-DECLARATION: unresolved variant slots")
+                    return -1
+                val types = self.enum_semantic_variant_slots[key]
+                var patterns: [HirPattern] = []
+                if val present = payload:
+                    match present:
+                        case HirPatternPayload.Tuple(items):
+                            if items.len() != types.len():
+                                self.enum_semantic_fail_v1("EE-E-PATTERN: declared payload arity")
+                                return -1
+                            for item in items:
+                                if not self.enum_semantic_charge_v1(): return -1
+                                patterns.push(item)
+                        case HirPatternPayload.Struct(fields):
+                            if not self.enum_semantic_variant_fields.has(key):
+                                self.enum_semantic_fail_v1("EE-E-PATTERN: missing named payload slots")
+                                return -1
+                            val names = self.enum_semantic_variant_fields[key]
+                            if names.len() != fields.len():
+                                self.enum_semantic_fail_v1("EE-E-PATTERN: named payload arity")
+                                return -1
+                            var named_patterns: Dict<text, HirPattern> = {}
+                            for field in fields:
+                                if not self.enum_semantic_charge_v1(): return -1
+                                if named_patterns.has(field.0):
+                                    self.enum_semantic_fail_v1("EE-E-PATTERN: duplicate named payload slot")
+                                    return -1
+                                named_patterns[field.0] = field.1
+                            for name in names:
+                                if not self.enum_semantic_charge_v1(): return -1
+                                if not named_patterns.has(name):
+                                    self.enum_semantic_fail_v1("EE-E-PATTERN: missing named payload slot")
+                                    return -1
+                                patterns.push(named_patterns[name])
+                if patterns.len() != types.len():
+                    self.enum_semantic_fail_v1("EE-E-PATTERN: declared payload arity")
+                    return -1
+                var children: [i64] = []
+                for slot in 0..patterns.len():
+                    val child = self.enum_semantic_pattern_v1(index, patterns[slot], types[slot], depth + 1)
+                    if child < 0: return -1
+                    children.push(child)
+                kind = MirEnumPatternKindV1.Variant(SymbolId(id: owner), discriminant, children)
+            case HirPatternKind.Or(alternatives):
+                var children: [i64] = []
+                for alternative in alternatives:
+                    val child = self.enum_semantic_pattern_v1(index, alternative, expected, depth + 1)
+                    if child < 0: return -1
+                    children.push(child)
+                kind = MirEnumPatternKindV1.Or(children)
+            case _:
+                self.enum_semantic_fail_v1("EE-E-PATTERN: unsupported source pattern")
+                return -1
+        var pending = self.enum_semantic_captures[index]
+        val result = pending.semantic.pattern_nodes.len()
+        pending.semantic.pattern_nodes.push(MirEnumPatternNodeV1(kind: kind,
+            expected_type: expected, source_span: pattern.span))
+        self.enum_semantic_captures[index] = pending
+        result
+
+    me enum_semantic_start_pattern_v1(index: i64, pattern: HirPattern):
+        if index < 0: return
+        val expected = self.enum_semantic_captures[index].semantic.scrutinee_semantic_type
+        val root = self.enum_semantic_pattern_v1(index, pattern, expected, 1)
+        var pending = self.enum_semantic_captures[index]
+        pending.current_pattern = root
+        if pending.semantic.arms.len() == 0:
+            pending.pattern_entry = pending.semantic.entry_block
+            pending.pattern_entry_index = pending.semantic.entry_instruction_index
+        else:
+            pending.pattern_entry = self.builder.current_block
+            pending.pattern_entry_index = self.builder.instructions.len()
+        self.enum_semantic_captures[index] = pending
+        self.builder.enum_semantic_node = root
+
+    fn enum_semantic_child_v1(index: i64, node: i64, slot: i64) -> i64:
+        if index < 0 or node < 0: return -1
+        val nodes = self.enum_semantic_captures[index].semantic.pattern_nodes
+        if node >= nodes.len(): return -1
+        match nodes[node].kind:
+            case MirEnumPatternKindV1.Variant(_, _, children) | MirEnumPatternKindV1.Tuple(children):
+                if slot >= 0 and slot < children.len(): return children[slot]
+            case _: ()
+        -1
+
+    # Used only for the newly admitted nested tuple producer path. Ordinary
+    # native emission never asks this semantic transport to allocate type IDs.
+    me enum_semantic_tuple_carrier_v1(type_: MirType, depth: i64) -> MirType?:
+        if depth > 128 or not self.enum_semantic_charge_v1(): return nil
+        match type_.kind:
+            case MirTypeKind.Enum(owner) | MirTypeKind.Struct(owner):
+                Some(MirType(kind: MirTypeKind.Struct(self.canonical_mir_type_symbol(owner))))
+            case MirTypeKind.Tuple(fields):
+                var converted: [MirType] = []
+                for field in fields:
+                    val item = self.enum_semantic_tuple_carrier_v1(field, depth + 1)
+                    if item == nil: return nil
+                    converted.push(item.unwrap())
+                Some(MirType(kind: MirTypeKind.Tuple(converted)))
+            case MirTypeKind.Array(element, size):
+                val item = self.enum_semantic_tuple_carrier_v1(element, depth + 1)
+                if item == nil: return nil
+                Some(MirType(kind: MirTypeKind.Array(item.unwrap(), size)))
+            case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64 | MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64 | MirTypeKind.Bool | MirTypeKind.Char | MirTypeKind.F32 | MirTypeKind.F64 | MirTypeKind.Unit:
+                Some(MirType(kind: type_.kind))
+            case _: nil
+
+    me enum_semantic_bind_nodes_v1(index: i64, node: i64, depth: i64):
+        if index < 0 or node < 0: return
+        if depth > 128 or not self.enum_semantic_charge_v1():
+            self.enum_semantic_fail_v1("EE-E-LIMIT: binding capture")
+            return
+        var pending = self.enum_semantic_captures[index]
+        if node >= pending.semantic.pattern_nodes.len():
+            self.enum_semantic_fail_v1("EE-E-PATTERN: missing binding node")
+            return
+        var row = pending.semantic.pattern_nodes[node]
+        match row.kind:
+            case MirEnumPatternKindV1.Bind(symbol, _):
+                val local = self.find_local(symbol.id)
+                if local.id < 0:
+                    self.enum_semantic_fail_v1("EE-E-PATTERN: missing actual pattern binding")
+                    return
+                row.kind = MirEnumPatternKindV1.Bind(symbol, local)
+                pending.semantic.pattern_nodes[node] = row
+                self.enum_semantic_captures[index] = pending
+            case MirEnumPatternKindV1.Variant(_, _, children) | MirEnumPatternKindV1.Tuple(children) | MirEnumPatternKindV1.Or(children):
+                for child in children: self.enum_semantic_bind_nodes_v1(index, child, depth + 1)
+            case _: ()
+
+    me enum_semantic_flush_sites_v1(index: i64, root: i64):
+        if index < 0: return
+        if self.builder.enum_semantic_site_overflow:
+            self.enum_semantic_fail_v1("EE-E-LIMIT: emitted site capture")
+            return
+        var pending = self.enum_semantic_captures[index]
+        while pending.next_site < self.builder.enum_semantic_site_calls.len():
+            if not self.enum_semantic_charge_v1(): return
+            val position = pending.next_site
+            val instruction = self.builder.enum_semantic_site_calls[position]
+            val node = self.builder.enum_semantic_site_nodes[position]
+            var type_ = pending.semantic.scrutinee_semantic_type
+            if node >= 0:
+                if node >= pending.semantic.pattern_nodes.len():
+                    self.enum_semantic_fail_v1("EE-E-SITE: foreign pattern node")
+                    return
+                type_ = pending.semantic.pattern_nodes[node].expected_type
+            pending.semantic.sites.push(MirEnumSiteV1(kind: MirEnumSiteKindV1.PatternInstruction,
+                block_id: self.builder.enum_semantic_site_blocks[position],
+                instruction_index: self.builder.enum_semantic_site_indices[position],
+                exact_instruction_identity: sha256_text(serialize_mir_inst_kind(instruction.kind)),
+                semantic_input_type: type_, semantic_output_type: type_,
+                related_pattern_node: node))
+            pending.next_site = pending.next_site + 1
+        while pending.next_terminator < self.builder.enum_semantic_terms.len():
+            if not self.enum_semantic_charge_v1(): return
+            val position = pending.next_terminator
+            val node = self.builder.enum_semantic_term_nodes[position]
+            var type_ = pending.semantic.scrutinee_semantic_type
+            if node >= 0:
+                if node >= pending.semantic.pattern_nodes.len():
+                    self.enum_semantic_fail_v1("EE-E-SITE: foreign terminator node")
+                    return
+                type_ = pending.semantic.pattern_nodes[node].expected_type
+            pending.semantic.sites.push(MirEnumSiteV1(kind: MirEnumSiteKindV1.PatternTerminator,
+                block_id: self.builder.enum_semantic_term_blocks[position], instruction_index: -1,
+                exact_instruction_identity: sha256_text(serialize_mir_terminator(self.builder.enum_semantic_terms[position])),
+                semantic_input_type: type_, semantic_output_type: type_, related_pattern_node: node))
+            pending.next_terminator = pending.next_terminator + 1
+        self.enum_semantic_captures[index] = pending
+        self.builder.enum_semantic_recording = false
+
+    me enum_semantic_arm_v1(index: i64, source_index: i64, pattern: HirPattern,
+        guard_entry: BlockId?, guard: MirOperand?, body: BlockId,
+        failure: BlockId) -> i64:
+        if index < 0: return -1
+        val root = self.enum_semantic_captures[index].current_pattern
+        if root < 0: return -1
+        self.enum_semantic_bind_nodes_v1(index, root, 1)
+        self.enum_semantic_flush_sites_v1(index, root)
+        if not self.enum_semantic_charge_v1(): return -1
+        var pending = self.enum_semantic_captures[index]
+        val arm = pending.semantic.arms.len()
+        pending.semantic.arms.push(MirEnumArmSemanticV1(
+            source_arm_id: source_index, expanded_alternative_index: arm,
+            pattern_root: root, guard_entry: guard_entry, guard_result: guard,
+            body_entry: body, body_exit_blocks: [],
+            pattern_failure_entry: failure, guard_failure_entry: failure,
+            source_span: pattern.span,
+            pattern_entry_block: pending.pattern_entry,
+            pattern_entry_instruction_index: pending.pattern_entry_index,
+            body_entry_instruction_index: self.builder.instructions.len()))
+        self.enum_semantic_captures[index] = pending
+        arm
+
+    me enum_semantic_arm_exit_v1(index: i64, arm: i64, exit_block: BlockId):
+        if index < 0 or arm < 0: return
+        var pending = self.enum_semantic_captures[index]
+        var row = pending.semantic.arms[arm]
+        row.body_exit_blocks.push(exit_block)
+        pending.semantic.arms[arm] = row
+        self.enum_semantic_captures[index] = pending
+
+    me enum_semantic_finish_v1(index: i64):
+        if index < 0: return
+        var pending = self.enum_semantic_captures[index]
+        pending.completed = true
+        self.enum_semantic_captures[index] = pending
+        self.enum_semantic_depth = self.enum_semantic_depth - 1
+        self.builder.enum_semantic_recording = false
+
+    me enum_semantic_resume_v1(index: i64):
+        if index < 0: return
+        var pending = self.enum_semantic_captures[index]
+        pending.next_site = self.builder.enum_semantic_site_calls.len()
+        pending.next_terminator = self.builder.enum_semantic_terms.len()
+        self.enum_semantic_captures[index] = pending
+        self.builder.enum_semantic_recording = true
+
+    me enum_semantic_guard_v1(index: i64, arm: i64, entry: BlockId,
+        entry_instruction_index: i64, condition_block: BlockId, condition: MirOperand, body: BlockId, failure: BlockId):
+        if index < 0 or arm < 0: return
+        if not self.enum_semantic_charge_v1(): return
+        var pending = self.enum_semantic_captures[index]
+        var row = pending.semantic.arms[arm]
+        row.guard_entry = Some(entry)
+        row.guard_entry_instruction_index = entry_instruction_index
+        row.body_entry_instruction_index = 0
+        row.guard_result = Some(condition)
+        row.body_entry = body
+        row.guard_failure_entry = failure
+        pending.semantic.arms[arm] = row
+        pending.semantic.sites.push(MirEnumSiteV1(kind: MirEnumSiteKindV1.Guard,
+            block_id: condition_block, instruction_index: -1,
+            exact_instruction_identity: sha256_text(serialize_mir_terminator(
+                MirTerminator.If(condition, body, failure))),
+            semantic_input_type: MirType.bool(), semantic_output_type: MirType.bool(),
+            related_pattern_node: row.pattern_root))
+        self.enum_semantic_captures[index] = pending

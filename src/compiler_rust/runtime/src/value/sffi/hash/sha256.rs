@@ -5,7 +5,7 @@
 
 use crate::value::core::RuntimeValue;
 
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha384, Sha512};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -157,6 +157,26 @@ pub extern "C" fn rt_tls13_sha256(data: RuntimeValue) -> RuntimeValue {
     };
     let digest = Sha256::digest(&bytes);
     vec_to_runtime_byte_array(digest.as_slice())
+}
+
+/// One-shot SHA-512 (FIPS 180-4), `extern fn rt_sha512_digest(data: [u8]) -> [u8]`.
+/// Rust twin of `rt_sha512_digest` in `src/runtime/runtime_native.c`.
+#[no_mangle]
+pub extern "C" fn rt_sha512_digest(data: RuntimeValue) -> RuntimeValue {
+    let Some(bytes) = runtime_byte_array_to_vec(data) else {
+        return RuntimeValue::NIL;
+    };
+    vec_to_runtime_byte_array(Sha512::digest(&bytes).as_slice())
+}
+
+/// One-shot SHA-384 (FIPS 180-4), `extern fn rt_sha384_digest(data: [u8]) -> [u8]`.
+/// Rust twin of `rt_sha384_digest` in `src/runtime/runtime_native.c`.
+#[no_mangle]
+pub extern "C" fn rt_sha384_digest(data: RuntimeValue) -> RuntimeValue {
+    let Some(bytes) = runtime_byte_array_to_vec(data) else {
+        return RuntimeValue::NIL;
+    };
+    vec_to_runtime_byte_array(Sha384::digest(&bytes).as_slice())
 }
 
 /// Contract: `int rt_sha256_file_raw_v1(const char *path, uint8_t out[32])`
@@ -325,6 +345,42 @@ mod tests {
         assert_eq!(
             got.iter().map(|b| format!("{:02x}", b)).collect::<String>(),
             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+    }
+
+    fn sha2_512_family_hex(f: extern "C" fn(RuntimeValue) -> RuntimeValue, input: &[u8]) -> String {
+        let arr = vec_to_runtime_byte_array(input);
+        let result = f(arr);
+        assert!(!result.is_nil(), "digest returned nil");
+        runtime_byte_array_to_vec(result)
+            .expect("digest is a byte array")
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    #[test]
+    fn test_rt_sha512_sha384_digest_fips_180_4_vectors() {
+        let m896 = b"abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu";
+        assert_eq!(
+            sha2_512_family_hex(rt_sha512_digest, b""),
+            "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"
+        );
+        assert_eq!(
+            sha2_512_family_hex(rt_sha512_digest, b"abc"),
+            "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+        );
+        assert_eq!(
+            sha2_512_family_hex(rt_sha512_digest, m896),
+            "8e959b75dae313da8cf4f72814fc143f8f7779c6eb9f7fa17299aeadb6889018501d289e4900f7e4331b99dec4b5433ac7d329eeb6dd26545e96e55b874be909"
+        );
+        assert_eq!(
+            sha2_512_family_hex(rt_sha384_digest, b"abc"),
+            "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7"
+        );
+        assert_eq!(
+            sha2_512_family_hex(rt_sha384_digest, m896),
+            "09330c33f71147e83d192fc782cd1b4753111b173b3b05d22fa08086e3b0f712fcc7c71a557e2db966c3e9fa91746039"
         );
     }
 

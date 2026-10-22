@@ -227,9 +227,42 @@ class Formatter:
         var result = []
         var last_was_def = false
         var blank_line_count = 0
+        # Inside a triple-quoted docstring. Prose there is not code: running it
+        # through add_expression_spacing turned "Non-UTF-8" into "Non - UTF - 8"
+        # and "U+FFFD" into "U + FFFD", which the lexical-equivalence guard then
+        # (correctly) refused as a semantics-changing rewrite -- so `fmt --check`
+        # failed on every file with such a docstring (base_encoding.spl,
+        # math.spl; 2026-10-20). Same treatment as full-line comments:
+        # re-indent only.
+        var in_docstring = false
 
         for line in lines:
             val trimmed = line.trim()
+
+            # Docstring body: bytes inside the literal (trailing spaces, odd
+            # indents, blank lines) are part of its value, so the line passes
+            # through untouched -- before the blank-line collapsing below.
+            if in_docstring:
+                result.push(line)
+                if trimmed.contains("\"\"\""):
+                    in_docstring = false
+                continue
+            if trimmed.starts_with("\"\"\""):
+                blank_line_count = 0
+                result.push(line)
+                # A one-line docstring closes on the same line; anything else
+                # stays verbatim until the closing delimiter.
+                val closes_on_line = trimmed.len() >= 6 and trimmed.ends_with("\"\"\"")
+                in_docstring = not closes_on_line
+                continue
+
+            # A line that opens a multi-line string after code (`val s = """`)
+            # leaves its body verbatim too.
+            if (trimmed.split("\"\"\"").len() - 1) % 2 == 1:
+                blank_line_count = 0
+                result.push(line)
+                in_docstring = true
+                continue
 
             # Skip empty lines but track them
             if trimmed.is_empty():
@@ -314,8 +347,24 @@ class Formatter:
         val full_line = indent_str + spaced
 
         if full_line.len() > self.config.max_line_length:
-            # Line too long - apply intelligent breaking
-            return self.break_long_line(spaced, indent)
+            # Line too long - apply intelligent breaking. The breakers are
+            # heuristics (split on dots, on call arguments, on operators) and
+            # can change the token stream of a long condition such as
+            # `if (b2 & 0xC0) == 0x80 and ... and not (cp >= 0xD800 ...)`
+            # (base_encoding.spl:58, 2026-10-20); the file-level lexical guard
+            # then refused the whole file. Keep the line unbroken when breaking
+            # it would not be lexically equivalent -- a long line is valid
+            # Simple, a rewritten one is not.
+            val broken = self.break_long_line(spaced, indent)
+            match formatter_lexical_fingerprint(spaced):
+                case Err(_): return [full_line]
+                case Ok(before):
+                    match formatter_lexical_fingerprint(broken.join("\n")):
+                        case Err(_): return [full_line]
+                        case Ok(after):
+                            if before != after:
+                                return [full_line]
+                            return broken
         else:
             return [full_line]
 
@@ -517,13 +566,23 @@ class Formatter:
                 parts.push(line.substring(i, literal_end))
                 segment_start = literal_end
                 i = literal_end
+            elif line.byte_at(i) == 35:
+                # Trailing comment: bytes after `#` are never code.
+                if i > segment_start:
+                    parts.push(self.space_code_segment(line.substring(segment_start, i)))
+                parts.push(line.substring(i, line_len))
+                segment_start = line_len
+                i = line_len
             else:
                 i = i + 1
 
         if segment_start < line_len:
             parts.push(self.space_code_segment(line.substring(segment_start, line_len)))
 
-        return parts.join("").trim()
+        val spaced = parts.join("").trim()
+        if spaced.starts_with("- "):
+            return "-" + spaced.substring(2, spaced.len())
+        return spaced
 
     fn space_code_segment(line: String) -> String:
         # Add spaces around binary operators.
@@ -534,6 +593,13 @@ class Formatter:
         var result = line
 
         # First, protect multi-character operators by replacing them with placeholders
+        result = result.replace("**=", "@POWEQ@")
+        result = result.replace("**", "@POW@")
+        result = result.replace("-=", "@SUBEQ@")
+        result = result.replace("+=", "@ADDEQ@")
+        result = result.replace("*=", "@MULEQ@")
+        result = result.replace("/=", "@DIVEQ@")
+        result = result.replace("%=", "@MODEQ@")
         result = result.replace("->", "@ARROW@")
         result = result.replace("=>", "@FATARROW@")
         result = result.replace("==", "@EQ@")
@@ -549,6 +615,13 @@ class Formatter:
             result = result.replace(op, " " + op + " ")
 
         # Restore multi-character operators with proper spacing
+        result = result.replace("@POWEQ@", " **= ")
+        result = result.replace("@POW@", " ** ")
+        result = result.replace("@SUBEQ@", " -= ")
+        result = result.replace("@ADDEQ@", " += ")
+        result = result.replace("@MULEQ@", " *= ")
+        result = result.replace("@DIVEQ@", " /= ")
+        result = result.replace("@MODEQ@", " %= ")
         result = result.replace("@ARROW@", " -> ")
         result = result.replace("@FATARROW@", " => ")
         result = result.replace("@EQ@", " == ")
@@ -574,6 +647,14 @@ class Formatter:
         # Clean up dots (no spaces around dots in method calls)
         result = result.replace(" .", ".")
         result = result.replace(". ", ".")
+
+        # A `-` right after an operator, opener or keyword is unary: re-attach it.
+        # A `-` after an operand (identifier, number, `)`) stays binary.
+        # (A leading space makes keyword leads whole-word matches: `min - 1` stays binary.)
+        result = " " + result
+        for lead in ["(", "[", ", ", "= ", "+ ", "- ", "* ", "/ ", "% ", "< ", "> ", ": ", " return ", " and ", " or ", " not ", " in ", " if ", " elif ", " while "]:
+            result = result.replace(lead + "- ", lead + "-")
+        result = result.substring(1, result.len())
 
         return result
 

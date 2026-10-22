@@ -1,0 +1,428 @@
+# codex-system-test
+# @req REQ-MC-005 G7
+# Test-first external packet; execution UNRUN.
+use std.spec.*
+use std.spec.step
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_types.{HirTypeKind, HirModule}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir_data.*
+use compiler.semantics.safety_checker.{SafetyChecker, SafetyError, safetychecker_check_module}
+
+fn assert_alias_e1048(errors: [SafetyError], count_expected: i64, line_expected: i64, col_expected: i64, file_expected: text):
+    var count = 0
+    for diagnostic in errors:
+        match diagnostic:
+            case Other(message, span):
+                if message.starts_with("E1048:"):
+                    count = count + 1
+                    expect(span.line).to_equal(line_expected)
+                    expect(span.col).to_equal(col_expected)
+                    expect(span.file).to_equal(file_expected)
+            case _: ()
+    expect(count).to_equal(count_expected)
+    expect(errors.len()).to_equal(count_expected)
+
+describe "G7 typed class owner aliases":
+    it "should enforce alias collection identity":
+        step("Parse and lower a real typed class collection program")
+        val source = "class Bag:\n    items: [i64]\n\nfn walk(flag: bool) -> i64:\n    var owner: Bag = Bag(items: [1, 2])\n    val alias: Bag = owner\n    for x in owner.items:\n        alias.items.push(x)\n    0\n"
+        val parsed = parse_full_frontend(source, "testdata/g7_alias_alias.spl", "alias_alias", Logger(level: 0))
+        expect(parsed.functions.contains("walk")).to_equal(true)
+        expect(parsed.classes.len()).to_equal(1)
+        var lowering = HirLowering.with_filename("testdata/g7_alias_alias.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.classes.len()).to_equal(1)
+        for class_entry in hir.classes:
+            expect(class_entry[1].fields.len()).to_equal(1)
+            expect(class_entry[1].fields[0].name).to_equal("items")
+            expect(class_entry[1].fields[0].symbol.id).to_be_greater_than(-1)
+            val field_type = class_entry[1].fields[0].type_
+            var collection_field = false
+            match field_type.kind:
+                case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_): collection_field = true
+                case _: ()
+            expect(collection_field).to_equal(true)
+        step("Check production alias and captured iterable identity")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        expect(checker.context.place_owner_fields.len()).to_equal(1)
+        for class_entry in hir.classes:
+            val declared_fields = checker.context.place_owner_fields[class_entry[1].symbol.id]
+            expect(declared_fields["items"].field_id).to_equal(class_entry[1].fields[0].symbol.id)
+            expect(declared_fields["items"].is_collection).to_equal(true)
+        assert_alias_e1048(errors, 1, 8, 9, "testdata/g7_alias_alias.spl")
+
+    it "should enforce parameter collection identity":
+        step("Parse and lower a real typed class collection program")
+        val source = "class Bag:\n    items: [i64]\n\nfn walk(owner: Bag) -> i64:\n    val alias: Bag = owner\n    for x in owner.items:\n        alias.items.push(x)\n    0\n"
+        val parsed = parse_full_frontend(source, "testdata/g7_alias_parameter.spl", "alias_parameter", Logger(level: 0))
+        expect(parsed.functions.contains("walk")).to_equal(true)
+        expect(parsed.classes.len()).to_equal(1)
+        var lowering = HirLowering.with_filename("testdata/g7_alias_parameter.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.classes.len()).to_equal(1)
+        for class_entry in hir.classes:
+            expect(class_entry[1].fields.len()).to_equal(1)
+            expect(class_entry[1].fields[0].name).to_equal("items")
+            expect(class_entry[1].fields[0].symbol.id).to_be_greater_than(-1)
+            val field_type = class_entry[1].fields[0].type_
+            var collection_field = false
+            match field_type.kind:
+                case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_): collection_field = true
+                case _: ()
+            expect(collection_field).to_equal(true)
+        step("Check production alias and captured iterable identity")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        expect(checker.context.place_owner_fields.len()).to_equal(1)
+        for class_entry in hir.classes:
+            val declared_fields = checker.context.place_owner_fields[class_entry[1].symbol.id]
+            expect(declared_fields["items"].field_id).to_equal(class_entry[1].fields[0].symbol.id)
+            expect(declared_fields["items"].is_collection).to_equal(true)
+        assert_alias_e1048(errors, 1, 7, 9, "testdata/g7_alias_parameter.spl")
+
+    it "should enforce fresh collection identity":
+        step("Parse and lower a real typed class collection program")
+        val source = "class Bag:\n    items: [i64]\n\nfn walk(flag: bool) -> i64:\n    var owner: Bag = Bag(items: [1, 2])\n    var other: Bag = Bag(items: [3])\n    for x in owner.items:\n        other.items.push(x)\n    0\n"
+        val parsed = parse_full_frontend(source, "testdata/g7_alias_fresh.spl", "alias_fresh", Logger(level: 0))
+        expect(parsed.functions.contains("walk")).to_equal(true)
+        expect(parsed.classes.len()).to_equal(1)
+        var lowering = HirLowering.with_filename("testdata/g7_alias_fresh.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.classes.len()).to_equal(1)
+        for class_entry in hir.classes:
+            expect(class_entry[1].fields.len()).to_equal(1)
+            expect(class_entry[1].fields[0].name).to_equal("items")
+            expect(class_entry[1].fields[0].symbol.id).to_be_greater_than(-1)
+            val field_type = class_entry[1].fields[0].type_
+            var collection_field = false
+            match field_type.kind:
+                case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_): collection_field = true
+                case _: ()
+            expect(collection_field).to_equal(true)
+        step("Check production alias and captured iterable identity")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        expect(checker.context.place_owner_fields.len()).to_equal(1)
+        for class_entry in hir.classes:
+            val declared_fields = checker.context.place_owner_fields[class_entry[1].symbol.id]
+            expect(declared_fields["items"].field_id).to_equal(class_entry[1].fields[0].symbol.id)
+            expect(declared_fields["items"].is_collection).to_equal(true)
+        assert_alias_e1048(errors, 0, 0, 0, "testdata/g7_alias_fresh.spl")
+
+    it "should enforce copy collection identity":
+        step("Parse and lower a real typed class collection program")
+        val source = "class Bag:\n    items: [i64]\n\nfn walk(flag: bool) -> i64:\n    var xs: [i64] = [1, 2]\n    val ys = xs\n    for x in xs:\n        ys.push(x)\n    0\n"
+        val parsed = parse_full_frontend(source, "testdata/g7_alias_copy.spl", "alias_copy", Logger(level: 0))
+        expect(parsed.functions.contains("walk")).to_equal(true)
+        expect(parsed.classes.len()).to_equal(1)
+        var lowering = HirLowering.with_filename("testdata/g7_alias_copy.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.classes.len()).to_equal(1)
+        for class_entry in hir.classes:
+            expect(class_entry[1].fields.len()).to_equal(1)
+            expect(class_entry[1].fields[0].name).to_equal("items")
+            expect(class_entry[1].fields[0].symbol.id).to_be_greater_than(-1)
+            val field_type = class_entry[1].fields[0].type_
+            var collection_field = false
+            match field_type.kind:
+                case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_): collection_field = true
+                case _: ()
+            expect(collection_field).to_equal(true)
+        step("Check production alias and captured iterable identity")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        expect(checker.context.place_owner_fields.len()).to_equal(1)
+        for class_entry in hir.classes:
+            val declared_fields = checker.context.place_owner_fields[class_entry[1].symbol.id]
+            expect(declared_fields["items"].field_id).to_equal(class_entry[1].fields[0].symbol.id)
+            expect(declared_fields["items"].is_collection).to_equal(true)
+        assert_alias_e1048(errors, 0, 0, 0, "testdata/g7_alias_copy.spl")
+        step("Require the real MIR producer to copy the still-live array source")
+        var modules: Dict<text, HirModule> = {}
+        modules["alias_copy"] = hir
+        var mir_lowering = MirLowering.new(hir.symbols)
+        mir_lowering.prescan_module_struct_names(modules, "alias_copy")
+        val mir = mir_lowering.lower_module(hir)
+        expect(mir_lowering.errors.len()).to_equal(0)
+        var copy_loops = 0
+        for function in mir.functions.values():
+            for block in function.blocks:
+                if (block.label ?? "") == "arrcopy_cond":
+                    copy_loops = copy_loops + 1
+        expect(copy_loops).to_equal(1)
+
+    it "should enforce shadow collection identity":
+        step("Parse and lower a real typed class collection program")
+        val source = "class Bag:\n    items: [i64]\n\nfn walk(flag: bool) -> i64:\n    var owner: Bag = Bag(items: [1, 2])\n    val alias: Bag = owner\n    for x in owner.items:\n        val alias: Bag = Bag(items: [3])\n        alias.items.push(x)\n    0\n"
+        val parsed = parse_full_frontend(source, "testdata/g7_alias_shadow.spl", "alias_shadow", Logger(level: 0))
+        expect(parsed.functions.contains("walk")).to_equal(true)
+        expect(parsed.classes.len()).to_equal(1)
+        var lowering = HirLowering.with_filename("testdata/g7_alias_shadow.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.classes.len()).to_equal(1)
+        for class_entry in hir.classes:
+            expect(class_entry[1].fields.len()).to_equal(1)
+            expect(class_entry[1].fields[0].name).to_equal("items")
+            expect(class_entry[1].fields[0].symbol.id).to_be_greater_than(-1)
+            val field_type = class_entry[1].fields[0].type_
+            var collection_field = false
+            match field_type.kind:
+                case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_): collection_field = true
+                case _: ()
+            expect(collection_field).to_equal(true)
+        step("Check production alias and captured iterable identity")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        expect(checker.context.place_owner_fields.len()).to_equal(1)
+        for class_entry in hir.classes:
+            val declared_fields = checker.context.place_owner_fields[class_entry[1].symbol.id]
+            expect(declared_fields["items"].field_id).to_equal(class_entry[1].fields[0].symbol.id)
+            expect(declared_fields["items"].is_collection).to_equal(true)
+        assert_alias_e1048(errors, 0, 0, 0, "testdata/g7_alias_shadow.spl")
+
+    it "should enforce rebind_before collection identity":
+        step("Parse and lower a real typed class collection program")
+        val source = "class Bag:\n    items: [i64]\n\nfn walk(flag: bool) -> i64:\n    var owner: Bag = Bag(items: [1, 2])\n    var other: Bag = Bag(items: [3])\n    var alias: Bag = owner\n    alias = other\n    for x in owner.items:\n        alias.items.push(x)\n    0\n"
+        val parsed = parse_full_frontend(source, "testdata/g7_alias_rebind_before.spl", "alias_rebind_before", Logger(level: 0))
+        expect(parsed.functions.contains("walk")).to_equal(true)
+        expect(parsed.classes.len()).to_equal(1)
+        var lowering = HirLowering.with_filename("testdata/g7_alias_rebind_before.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.classes.len()).to_equal(1)
+        for class_entry in hir.classes:
+            expect(class_entry[1].fields.len()).to_equal(1)
+            expect(class_entry[1].fields[0].name).to_equal("items")
+            expect(class_entry[1].fields[0].symbol.id).to_be_greater_than(-1)
+            val field_type = class_entry[1].fields[0].type_
+            var collection_field = false
+            match field_type.kind:
+                case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_): collection_field = true
+                case _: ()
+            expect(collection_field).to_equal(true)
+        step("Check production alias and captured iterable identity")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        expect(checker.context.place_owner_fields.len()).to_equal(1)
+        for class_entry in hir.classes:
+            val declared_fields = checker.context.place_owner_fields[class_entry[1].symbol.id]
+            expect(declared_fields["items"].field_id).to_equal(class_entry[1].fields[0].symbol.id)
+            expect(declared_fields["items"].is_collection).to_equal(true)
+        assert_alias_e1048(errors, 0, 0, 0, "testdata/g7_alias_rebind_before.spl")
+
+    it "should enforce captured collection identity":
+        step("Parse and lower a real typed class collection program")
+        val source = "class Bag:\n    items: [i64]\n\nfn walk(flag: bool) -> i64:\n    var owner: Bag = Bag(items: [1, 2])\n    var other: Bag = Bag(items: [3])\n    val alias: Bag = owner\n    for x in owner.items:\n        owner = other\n        alias.items.push(x)\n    0\n"
+        val parsed = parse_full_frontend(source, "testdata/g7_alias_captured.spl", "alias_captured", Logger(level: 0))
+        expect(parsed.functions.contains("walk")).to_equal(true)
+        expect(parsed.classes.len()).to_equal(1)
+        var lowering = HirLowering.with_filename("testdata/g7_alias_captured.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.classes.len()).to_equal(1)
+        for class_entry in hir.classes:
+            expect(class_entry[1].fields.len()).to_equal(1)
+            expect(class_entry[1].fields[0].name).to_equal("items")
+            expect(class_entry[1].fields[0].symbol.id).to_be_greater_than(-1)
+            val field_type = class_entry[1].fields[0].type_
+            var collection_field = false
+            match field_type.kind:
+                case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_): collection_field = true
+                case _: ()
+            expect(collection_field).to_equal(true)
+        step("Check production alias and captured iterable identity")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        expect(checker.context.place_owner_fields.len()).to_equal(1)
+        for class_entry in hir.classes:
+            val declared_fields = checker.context.place_owner_fields[class_entry[1].symbol.id]
+            expect(declared_fields["items"].field_id).to_equal(class_entry[1].fields[0].symbol.id)
+            expect(declared_fields["items"].is_collection).to_equal(true)
+        assert_alias_e1048(errors, 1, 10, 9, "testdata/g7_alias_captured.spl")
+
+    it "should enforce branch collection identity":
+        step("Parse and lower a real typed class collection program")
+        val source = "class Bag:\n    items: [i64]\n\nfn walk(flag: bool) -> i64:\n    var owner: Bag = Bag(items: [1, 2])\n    var other: Bag = Bag(items: [3])\n    var alias: Bag = other\n    if flag:\n        alias = owner\n    else:\n        alias = other\n    for x in owner.items:\n        alias.items.push(x)\n    0\n"
+        val parsed = parse_full_frontend(source, "testdata/g7_alias_branch.spl", "alias_branch", Logger(level: 0))
+        expect(parsed.functions.contains("walk")).to_equal(true)
+        expect(parsed.classes.len()).to_equal(1)
+        var lowering = HirLowering.with_filename("testdata/g7_alias_branch.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.classes.len()).to_equal(1)
+        for class_entry in hir.classes:
+            expect(class_entry[1].fields.len()).to_equal(1)
+            expect(class_entry[1].fields[0].name).to_equal("items")
+            expect(class_entry[1].fields[0].symbol.id).to_be_greater_than(-1)
+            val field_type = class_entry[1].fields[0].type_
+            var collection_field = false
+            match field_type.kind:
+                case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_): collection_field = true
+                case _: ()
+            expect(collection_field).to_equal(true)
+        step("Check production alias and captured iterable identity")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        expect(checker.context.place_owner_fields.len()).to_equal(1)
+        for class_entry in hir.classes:
+            val declared_fields = checker.context.place_owner_fields[class_entry[1].symbol.id]
+            expect(declared_fields["items"].field_id).to_equal(class_entry[1].fields[0].symbol.id)
+            expect(declared_fields["items"].is_collection).to_equal(true)
+        assert_alias_e1048(errors, 1, 13, 9, "testdata/g7_alias_branch.spl")
+
+    it "should enforce branch_distinct collection identity":
+        step("Parse and lower a real typed class collection program")
+        val source = "class Bag:\n    items: [i64]\n\nfn walk(flag: bool) -> i64:\n    var owner: Bag = Bag(items: [1, 2])\n    var other: Bag = Bag(items: [3])\n    var third: Bag = Bag(items: [4])\n    var alias: Bag = other\n    if flag:\n        alias = third\n    else:\n        alias = other\n    for x in owner.items:\n        alias.items.push(x)\n    0\n"
+        val parsed = parse_full_frontend(source, "testdata/g7_alias_branch_distinct.spl", "alias_branch_distinct", Logger(level: 0))
+        expect(parsed.functions.contains("walk")).to_equal(true)
+        expect(parsed.classes.len()).to_equal(1)
+        var lowering = HirLowering.with_filename("testdata/g7_alias_branch_distinct.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.classes.len()).to_equal(1)
+        for class_entry in hir.classes:
+            expect(class_entry[1].fields.len()).to_equal(1)
+            expect(class_entry[1].fields[0].name).to_equal("items")
+            expect(class_entry[1].fields[0].symbol.id).to_be_greater_than(-1)
+            val field_type = class_entry[1].fields[0].type_
+            var collection_field = false
+            match field_type.kind:
+                case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_): collection_field = true
+                case _: ()
+            expect(collection_field).to_equal(true)
+        step("Check production alias and captured iterable identity")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        expect(checker.context.place_owner_fields.len()).to_equal(1)
+        for class_entry in hir.classes:
+            val declared_fields = checker.context.place_owner_fields[class_entry[1].symbol.id]
+            expect(declared_fields["items"].field_id).to_equal(class_entry[1].fields[0].symbol.id)
+            expect(declared_fields["items"].is_collection).to_equal(true)
+        assert_alias_e1048(errors, 0, 0, 0, "testdata/g7_alias_branch_distinct.spl")
+
+    it "should enforce after collection identity":
+        step("Parse and lower a real typed class collection program")
+        val source = "class Bag:\n    items: [i64]\n\nfn walk(flag: bool) -> i64:\n    var owner: Bag = Bag(items: [1, 2])\n    val alias: Bag = owner\n    for x in owner.items:\n        val y = x\n    alias.items.push(9)\n    0\n"
+        val parsed = parse_full_frontend(source, "testdata/g7_alias_after.spl", "alias_after", Logger(level: 0))
+        expect(parsed.functions.contains("walk")).to_equal(true)
+        expect(parsed.classes.len()).to_equal(1)
+        var lowering = HirLowering.with_filename("testdata/g7_alias_after.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.classes.len()).to_equal(1)
+        for class_entry in hir.classes:
+            expect(class_entry[1].fields.len()).to_equal(1)
+            expect(class_entry[1].fields[0].name).to_equal("items")
+            expect(class_entry[1].fields[0].symbol.id).to_be_greater_than(-1)
+            val field_type = class_entry[1].fields[0].type_
+            var collection_field = false
+            match field_type.kind:
+                case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_): collection_field = true
+                case _: ()
+            expect(collection_field).to_equal(true)
+        step("Check production alias and captured iterable identity")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        expect(checker.context.place_owner_fields.len()).to_equal(1)
+        for class_entry in hir.classes:
+            val declared_fields = checker.context.place_owner_fields[class_entry[1].symbol.id]
+            expect(declared_fields["items"].field_id).to_equal(class_entry[1].fields[0].symbol.id)
+            expect(declared_fields["items"].is_collection).to_equal(true)
+        assert_alias_e1048(errors, 0, 0, 0, "testdata/g7_alias_after.spl")
+
+
+# Boundary regressions assert loss of unsupported exact facts and a real ledger
+# record; zero diagnostics here is explicitly not full iterator-safety coverage.
+describe "G7 unsupported alias transfer boundaries":
+    it "should forget affected alias facts after unsupported while transfer":
+        step("Parse and lower a real unsupported transfer followed by an iterator use")
+        val source = "class Bag:\n    items: [i64]\n\nfn walk(flag: bool) -> i64:\n    var owner: Bag = Bag(items: [1, 2])\n    var other: Bag = Bag(items: [3])\n    var alias: Bag = owner\n    while flag:\n        alias = other\n    for x in other.items:\n        alias.items.push(x)\n    0\n"
+        val parsed = parse_full_frontend(source, "testdata/g7_boundary_while.spl", "boundary_while", Logger(level: 0))
+        expect(parsed.functions.len()).to_equal(1)
+        expect(parsed.classes.len()).to_equal(1)
+        var lowering = HirLowering.with_filename("testdata/g7_boundary_while.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        step("Require unsupported transfer evidence instead of an exact last-visited alias")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        expect(errors.len()).to_equal(0)
+        var boundary_records = 0
+        for span in checker.context.place_unmodeled_sites:
+            if span.line == 8 and span.col == 5:
+                boundary_records = boundary_records + 1
+                expect(span.file).to_equal("testdata/g7_boundary_while.spl")
+        expect(boundary_records).to_equal(1)
+
+    it "should forget affected alias facts after unsupported loop transfer":
+        step("Parse and lower a real unsupported transfer followed by an iterator use")
+        val source = "class Bag:\n    items: [i64]\n\nfn walk(flag: bool) -> i64:\n    var owner: Bag = Bag(items: [1, 2])\n    var other: Bag = Bag(items: [3])\n    var alias: Bag = owner\n    loop:\n        alias = other\n        break\n    for x in other.items:\n        alias.items.push(x)\n    0\n"
+        val parsed = parse_full_frontend(source, "testdata/g7_boundary_loop.spl", "boundary_loop", Logger(level: 0))
+        expect(parsed.functions.len()).to_equal(1)
+        expect(parsed.classes.len()).to_equal(1)
+        var lowering = HirLowering.with_filename("testdata/g7_boundary_loop.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        step("Require unsupported transfer evidence instead of an exact last-visited alias")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        expect(errors.len()).to_equal(0)
+        var boundary_records = 0
+        for span in checker.context.place_unmodeled_sites:
+            if span.line == 8 and span.col == 5:
+                boundary_records = boundary_records + 1
+                expect(span.file).to_equal("testdata/g7_boundary_loop.spl")
+        expect(boundary_records).to_equal(1)
+
+    it "should forget affected alias facts after unsupported match transfer":
+        step("Parse and lower a real unsupported transfer followed by an iterator use")
+        val source = "class Bag:\n    items: [i64]\n\nfn walk(flag: bool) -> i64:\n    var owner: Bag = Bag(items: [1, 2])\n    var other: Bag = Bag(items: [3])\n    var alias: Bag = owner\n    match flag:\n        case true:\n            alias = owner\n        case false:\n            alias = other\n    for x in other.items:\n        alias.items.push(x)\n    0\n"
+        val parsed = parse_full_frontend(source, "testdata/g7_boundary_match.spl", "boundary_match", Logger(level: 0))
+        expect(parsed.functions.len()).to_equal(1)
+        expect(parsed.classes.len()).to_equal(1)
+        var lowering = HirLowering.with_filename("testdata/g7_boundary_match.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        step("Require unsupported transfer evidence instead of an exact last-visited alias")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        expect(errors.len()).to_equal(0)
+        var boundary_records = 0
+        for span in checker.context.place_unmodeled_sites:
+            if span.line == 8 and span.col == 5:
+                boundary_records = boundary_records + 1
+                expect(span.file).to_equal("testdata/g7_boundary_match.spl")
+        expect(boundary_records).to_equal(1)
+
+    it "should forget affected alias facts after unsupported for transfer":
+        step("Parse and lower a real unsupported transfer followed by an iterator use")
+        val source = "class Bag:\n    items: [i64]\n\nfn walk(flag: bool) -> i64:\n    var owner: Bag = Bag(items: [1, 2])\n    var other: Bag = Bag(items: [3])\n    var alias: Bag = owner\n    for y in owner.items:\n        alias = other\n    for x in other.items:\n        alias.items.push(x)\n    0\n"
+        val parsed = parse_full_frontend(source, "testdata/g7_boundary_for.spl", "boundary_for", Logger(level: 0))
+        expect(parsed.functions.len()).to_equal(1)
+        expect(parsed.classes.len()).to_equal(1)
+        var lowering = HirLowering.with_filename("testdata/g7_boundary_for.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        step("Require unsupported transfer evidence instead of an exact last-visited alias")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        expect(errors.len()).to_equal(0)
+        var boundary_records = 0
+        for span in checker.context.place_unmodeled_sites:
+            if span.line == 8 and span.col == 5:
+                boundary_records = boundary_records + 1
+                expect(span.file).to_equal("testdata/g7_boundary_for.spl")
+        expect(boundary_records).to_equal(1)
+

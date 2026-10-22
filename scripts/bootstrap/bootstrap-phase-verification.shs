@@ -172,6 +172,9 @@ stage3_provenance=""
 compiler=""
 expected_sha=""
 strategy=normal
+repository_test_execution=interpreter
+repository_test_order=lexical
+repository_test_execution=interpreter
 profile=full
 hash_policy=canonical
 work_root=""
@@ -185,6 +188,16 @@ failed_tool_module_limit=${BOOTSTRAP_VERIFY_FAILED_TOOL_MODULE_LIMIT:-8}
 spec_timeout_seconds=${BOOTSTRAP_VERIFY_SPEC_TIMEOUT_SECONDS:-120}
 native_internal_timeout=${BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT:-600}
 build_threads=${BOOTSTRAP_VERIFY_BUILD_THREADS:-4}
+# Declare the phase's worker count to the process-tree RSS watchdog for every
+# wrapped command, including rows whose argv carries no --threads/--jobs (the
+# interpreter test runner). Without this, non-build rows fall back to the
+# static 8 GiB ceiling, which a full phase-verification matrix on this branch
+# measurably exceeds (~8.4 GiB peak on a 64 GiB Windows host, 2026-10-15) --
+# see doc/08_tracking/bug/tree_rss_floor_kills_stage2_compiler_tests_on_large_hosts_2026-10-15.md.
+# run-process-group-timeout.shs consumes this only when argv detection finds
+# no worker count, so native-build rows keep their own --threads declaration.
+SIMPLE_PROCESS_TREE_RSS_DECLARED_JOBS=$build_threads
+export SIMPLE_PROCESS_TREE_RSS_DECLARED_JOBS
 tool_build_concurrency=${BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY:-2}
 case "$tool_build_concurrency" in
   1|2) ;;
@@ -202,6 +215,9 @@ for arg in "$@"; do
     --compiler=*) compiler=${arg#*=} ;;
     --compiler-sha256=*) expected_sha=${arg#*=} ;;
     --strategy=*) strategy=${arg#*=} ;;
+    --test-execution=*) repository_test_execution=${arg#*=} ;;
+    --test-order=*) repository_test_order=${arg#*=} ;;
+    --test-execution=*) repository_test_execution=${arg#*=} ;;
     --fail-fast|--keep-going) ;; # Resolved together below, in argument order.
     # --profile=slim is an explicit opt-in, phase=stage2 only (see
     # stage2_slim_profile below). EVERY behavioral effect of slim mode --
@@ -226,6 +242,22 @@ done
 
 bootstrap_compile_failure_policy "$@"
 
+case "$repository_test_execution" in
+  interpreter) ;;
+  native) [ "$phase" = stage3 ] || die "--test-execution=native is stage3-only" ;;
+  *) die "--test-execution requires interpreter or native" ;;
+esac
+case "$repository_test_order" in
+  lexical|simple-first) ;;
+  *) die "--test-order requires lexical or simple-first" ;;
+esac
+
+case "$repository_test_execution" in
+  interpreter) ;;
+  native) [ "$phase" = stage3 ] || die "--test-execution=native is stage3-only" ;;
+  *) die "--test-execution requires interpreter or native" ;;
+esac
+
 case "$phase" in stage1|stage2|stage3|stage4) ;; *) die "invalid phase" ;; esac
 [ -z "$stage3_provenance" ] || [ "$phase" = stage3 ] || die "--stage3-provenance is stage3-only"
 if [ "$phase" = stage3 ]; then
@@ -248,6 +280,9 @@ bootstrap_verification_resource_policy "$phase" "$verification_diagnostic" \
   die "invalid verification resource policy (zero deadlines require BOOTSTRAP_VERIFY_DIAGNOSTIC=1; worker pools remain bounded)"
 bootstrap_verification_campaign_policy "$campaign_timeout_seconds" "$failed_tool_module_limit" ||
   die "campaign deadline must be positive and failed-tool module limit nonnegative"
+failed_tool_module_limit=$(bootstrap_verification_module_limit "$strategy" "$profile" \
+  "$SIMPLE_COMPILE_FAIL_FAST" "$failed_tool_module_limit") ||
+  die "invalid module inventory selection policy"
 test_mode_flag=--sequential
 test_worker_flag=
 if [ "$test_workers" -gt 1 ]; then
@@ -514,6 +549,9 @@ stage2_row_delegation_env() {
   echo "phase=$phase"
   echo "verification_backend=$verification_backend"
   echo "strategy=$strategy"
+  echo "repository_test_execution=$repository_test_execution"
+  echo "repository_test_order=$repository_test_order"
+  echo "repository_test_execution=$repository_test_execution"
   echo "hash_policy=$hash_policy"
   echo "diagnostic_execution=$verification_diagnostic"
   echo "task_timeout_seconds=$timeout_seconds"
@@ -817,7 +855,7 @@ run_task() {
       stage4_snapshot_before=mismatch
     fi
   fi
-  if [ "$status" -eq 0 ] && [ -n "$expected_executable" ] && ! rm -f "$expected_executable"; then
+  if [ "$status" -eq 0 ] && [ -n "$expected_executable" ] && ! { mkdir -p -- "$(dirname -- "$expected_executable")" 2>/dev/null && rm -f -- "$expected_executable"; }; then
     printf 'bootstrap-phase-verification: cannot remove prior expected artifact: %s\n' \
       "$expected_executable" >"$log"
     status=88
@@ -838,6 +876,10 @@ run_task() {
       # SCV cold init is a one-time prime (bootstrap_scv_prime below), never
       # an ambient setting: inherited, it re-lists the whole tree per child.
       unset SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY SIMPLE_SCV_INVENTORY_COLD_INIT
+      bootstrap_phase_clear_test_child_authority
+      if [ -n "$task_command_owner_receipt" ]; then
+        bootstrap_phase_export_test_child_authority "$task_command_owner_receipt" "$logs/$task.children" || exit 90
+      fi
       if [ "$phase" = stage1 ]; then
         bootstrap_phase1_validate_invocation "${1:-}" "$task" "$log.phase1-before.env" || exit 89
       fi
@@ -865,13 +907,34 @@ run_task() {
         SIMPLE_NATIVE_BUILD_TARGET="$target_c_platform" SIMPLE_BINARY="$compiler_snapshot"
         SIMPLE_PROJECT_ROOT="$source_root" SIMPLE_ABI_POLICY=v1
         SIMPLE_RUNTIME_RISCV64_VECTOR=0
+        # Per-task watchdog scoping: artifact builds run in the campaign's
+        # inherited session alongside co-resident sibling tool builds; without
+        # this, each build's watchdog counts the siblings' trees into its cap
+        # (the cycle-27 ratchet: mcp_build killed at cap+476 KiB with a 2.07
+        # GiB own tree). scope-group measures/kills only the leader's group.
+        SIMPLE_PROCESS_TREE_RSS_SCOPE_GROUP=1
         unset SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE SIMPLE_NATIVE_BUILD_WORKER
         SIMPLE_BOOTSTRAP_STAGE3=0 SIMPLE_BOOTSTRAP_STAGE4=0
+        if [ "$phase" = stage2 ]; then
+          [ "$(hash_file "$phase_c_managed_tools")" = "$phase_c_managed_tools_sha" ] || exit 88
+          [ "$(hash_file "$phase_c_runtime_snapshot")" = "$phase_c_runtime_snapshot_sha" ] || exit 88
+          SIMPLE_MANAGED_NATIVE_TOOLS=1
+          SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_PATH=$phase_c_managed_tools
+          SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_SHA256=$phase_c_managed_tools_sha
+          SIMPLE_MANAGED_RUNTIME_AUTHORITY_PATH=$phase_c_runtime_authority
+          SIMPLE_MANAGED_RUNTIME_SNAPSHOT_PATH=$phase_c_runtime_snapshot
+          SIMPLE_MANAGED_RUNTIME_SNAPSHOT_SHA256=$phase_c_runtime_snapshot_sha
+          SIMPLE_RUNTIME_PATH=$phase_c_runtime_authority
+          export SIMPLE_MANAGED_NATIVE_TOOLS SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_PATH \
+            SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_SHA256 SIMPLE_MANAGED_RUNTIME_AUTHORITY_PATH \
+            SIMPLE_MANAGED_RUNTIME_SNAPSHOT_PATH SIMPLE_MANAGED_RUNTIME_SNAPSHOT_SHA256
+        fi
         export SIMPLE_NATIVE_RUNTIME_BUNDLE SIMPLE_RUNTIME_PATH SIMPLE_NATIVE_BUILD_THREADS \
            SIMPLE_NATIVE_BUILD_CACHE_DIR SIMPLE_FRONTEND_CACHE_DIR SIMPLE_HIR_CACHE_DIR \
            SIMPLE_NATIVE_BUILD_TARGET SIMPLE_BINARY \
            SIMPLE_BOOTSTRAP_STAGE3 SIMPLE_BOOTSTRAP_STAGE4 SIMPLE_RT_OBJ_CACHE_DIR \
-           SIMPLE_PROJECT_ROOT SIMPLE_ABI_POLICY SIMPLE_RUNTIME_RISCV64_VECTOR
+           SIMPLE_PROJECT_ROOT SIMPLE_ABI_POLICY SIMPLE_RUNTIME_RISCV64_VECTOR \
+           SIMPLE_PROCESS_TREE_RSS_SCOPE_GROUP
          bootstrap_phase_c_apply_frontend_policy || exit 88
         bootstrap_phase_run_command run_with_timeout "$@"
       elif [ "$phase" = stage1 ] && [ "${1:-}" = "$compiler_snapshot" ] && \
@@ -1123,6 +1186,41 @@ write_command_owner_receipt() {
   [ ! -L "$receipt" ] && [ "$(hash_file "$receipt")" ]
 }
 
+# Inner system specs must consume the same receipt already admitted by this
+# controller, not an ambient Rust/source child. Fields are exported as data;
+# the shared Simple helper independently decodes/hash-checks them and launches
+# the native pinned image with typed argv and byte stdin.
+bootstrap_phase_export_test_child_authority() {
+  test_child_owner=$1
+  test_child_evidence=$2
+  validate_command_owner_receipt "$test_child_owner" || return 1
+  mkdir -p "$test_child_evidence" || return 1
+  SIMPLE_TEST_COMMAND_OWNER_RECEIPT=$test_child_owner
+  SIMPLE_TEST_COMMAND_OWNER_RECEIPT_SHA256=$command_owner_receipt_sha
+  SIMPLE_TEST_CHILD_EVIDENCE_DIR=$test_child_evidence
+  SIMPLE_TEST_OWNER_PHASE=$(manifest_value phase "$test_child_owner") || return 1
+  SIMPLE_TEST_OWNER_BACKEND=$(manifest_value verification_backend "$test_child_owner") || return 1
+  SIMPLE_TEST_OWNER_COMPILER_SHA256=$(manifest_value compiler_snapshot_sha256 "$test_child_owner") || return 1
+  SIMPLE_TEST_OWNER_RUNTIME_SHA256=$(manifest_value runtime_identity_sha256 "$test_child_owner") || return 1
+  SIMPLE_TEST_OWNER_SOURCE_SHA256=$(manifest_value target_source_snapshot_sha256 "$test_child_owner") || return 1
+  SIMPLE_TEST_OWNER_TOOL_INPUT_SHA256=$(manifest_value tool_input_identity_sha256 "$test_child_owner") || return 1
+  SIMPLE_BINARY=$(manifest_value compiler_cli_path "$test_child_owner") || return 1
+  SIMPLE_BIN=$SIMPLE_BINARY
+  SIMPLE_TEST_OWNED_RUNNER_PATH=$(manifest_value test_runner_path "$test_child_owner") || return 1
+  SIMPLE_MCP_TEST_BINARY=$(manifest_value mcp_server_path "$test_child_owner") || return 1
+  export SIMPLE_TEST_COMMAND_OWNER_RECEIPT SIMPLE_TEST_COMMAND_OWNER_RECEIPT_SHA256 SIMPLE_TEST_CHILD_EVIDENCE_DIR \
+    SIMPLE_TEST_OWNER_PHASE SIMPLE_TEST_OWNER_BACKEND SIMPLE_TEST_OWNER_COMPILER_SHA256 \
+    SIMPLE_TEST_OWNER_RUNTIME_SHA256 SIMPLE_TEST_OWNER_SOURCE_SHA256 SIMPLE_TEST_OWNER_TOOL_INPUT_SHA256 \
+    SIMPLE_BINARY SIMPLE_BIN SIMPLE_TEST_OWNED_RUNNER_PATH SIMPLE_MCP_TEST_BINARY
+}
+
+bootstrap_phase_clear_test_child_authority() {
+  unset SIMPLE_TEST_COMMAND_OWNER_RECEIPT SIMPLE_TEST_COMMAND_OWNER_RECEIPT_SHA256 SIMPLE_TEST_CHILD_EVIDENCE_DIR
+  unset SIMPLE_TEST_OWNER_PHASE SIMPLE_TEST_OWNER_BACKEND SIMPLE_TEST_OWNER_COMPILER_SHA256
+  unset SIMPLE_TEST_OWNER_RUNTIME_SHA256 SIMPLE_TEST_OWNER_SOURCE_SHA256 SIMPLE_TEST_OWNER_TOOL_INPUT_SHA256
+  unset SIMPLE_TEST_OWNED_RUNNER_PATH
+}
+
 validate_command_owner_receipt() {
   vcor_receipt=$1
   [ -n "${command_owner_receipt_sha:-}" ] || return 1
@@ -1296,6 +1394,9 @@ snapshot_target_c_inputs() (
   tci_sdk_sha=$(hash_file "$tci_sdk_header") || exit 1
   tci_tool_sha=$(hash_file "$tci_cc") || exit 1
   tci_version_sha=$(hash_file "$tci_record.version") || exit 1
+  # A prior campaign ends with this file chmod 400 (immutable evidence); the
+  # work root is shared across campaigns, so replace rather than truncate.
+  rm -f -- "$tci_record" || exit 1
   {
     echo 'target_runtime_profile=core-c-bootstrap'
     echo 'target_runtime_abi_policy=v1'
@@ -1324,7 +1425,10 @@ prepare_phase_c_tool_binding() {
     [ "$(CDPATH= cd -- "$SIMPLE_PROJECT_ROOT" && pwd -P)" = "$source_root" ] || return 1
   fi
   if [ "$phase" = stage3 ]; then
-    [ "$stage3_backend" = llvm ] || return 1
+    # Provenance binds the producer backend independently of the selected
+    # verification backend. Both supported producers use the same separately
+    # bound C runtime profile; its LLVM toolchain does not require LLVM codegen.
+    bootstrap_phase_c_backend_valid "$stage3_backend" || return 1
     target_c_platform=$stage3_platform
     target_c_source_sha=$stage3_source_sha
   else
@@ -1350,8 +1454,35 @@ prepare_phase_c_tool_binding() {
   snapshot_target_c_inputs "$target_c_binding" || return 1
   target_c_identity=$(hash_file "$target_c_binding") || return 1
   chmod 400 "$target_c_binding" || return 1
+  phase_c_runtime_identity=$runtime_cache_identity
+  if [ "$phase" = stage2 ]; then
+    phase_c_admission=$(dirname "$compiler")/admission.env
+    [ -f "$phase_c_admission" ] && [ ! -L "$phase_c_admission" ] || return 1
+    phase_c_runtime_authority=$(manifest_value runtime_authority_path "$phase_c_admission") || return 1
+    phase_c_runtime_snapshot=$(manifest_value runtime_snapshot_path "$phase_c_admission") || return 1
+    phase_c_runtime_snapshot_sha=$(manifest_value runtime_snapshot_sha256 "$phase_c_admission") || return 1
+    phase_c_legacy_tools=$(manifest_value tool_authority_path "$phase_c_admission") || return 1
+    phase_c_legacy_tools_sha=$(manifest_value tool_authority_sha256 "$phase_c_admission") || return 1
+    [ -d "$phase_c_runtime_authority" ] && [ ! -L "$phase_c_runtime_authority" ] || return 1
+    [ -f "$phase_c_runtime_snapshot" ] && [ ! -L "$phase_c_runtime_snapshot" ] || return 1
+    [ "$(hash_file "$phase_c_runtime_snapshot")" = "$phase_c_runtime_snapshot_sha" ] || return 1
+    [ -f "$phase_c_legacy_tools" ] && [ ! -L "$phase_c_legacy_tools" ] || return 1
+    [ "$(hash_file "$phase_c_legacy_tools")" = "$phase_c_legacy_tools_sha" ] || return 1
+    phase_c_managed_path=$(manifest_value PATH "$phase_c_legacy_tools") || return 1
+    [ -n "$phase_c_managed_path" ] || return 1
+    phase_c_managed_tools="$work_root/target-managed-tools.env"
+    if [ -f "$phase_c_managed_tools" ] && [ ! -L "$phase_c_managed_tools" ]; then
+      chmod u+w "$phase_c_managed_tools" 2>/dev/null || true
+    fi
+    SIMPLE_MANAGED_NATIVE_TOOLS=1 bootstrap_stage3_tool_authority_snapshot \
+      "$phase_c_managed_tools" "$phase_c_managed_path" "$source_root" || return 1
+    phase_c_managed_tools_sha=$(hash_file "$phase_c_managed_tools") || return 1
+    chmod 400 "$phase_c_managed_tools" || return 1
+    phase_c_runtime_identity=$(printf '%s\n' "$runtime_cache_identity" \
+      "$phase_c_runtime_snapshot_sha" "$phase_c_managed_tools_sha" | hash_stream) || return 1
+  fi
   tool_input_identity=$(bootstrap_phase_c_tool_input_identity "$verification_backend" \
-    "$runtime_cache_identity" "$target_c_identity" "$target_c_source_sha") || return 1
+    "$phase_c_runtime_identity" "$target_c_identity" "$target_c_source_sha") || return 1
   write_target_c_receipt_fields >>"$summary"
 }
 
@@ -1360,6 +1491,13 @@ write_target_c_receipt_fields() {
     cat "$target_c_binding" || return 1
     echo "target_runtime_identity_sha256=$target_c_identity"
     echo "tool_input_identity_sha256=$tool_input_identity"
+    if [ "$phase" = stage2 ]; then
+      echo "managed_native_tool_authority_path=$phase_c_managed_tools"
+      echo "managed_native_tool_authority_sha256=$phase_c_managed_tools_sha"
+      echo "managed_runtime_authority_path=$phase_c_runtime_authority"
+      echo "managed_runtime_snapshot_path=$phase_c_runtime_snapshot"
+      echo "managed_runtime_snapshot_sha256=$phase_c_runtime_snapshot_sha"
+    fi
     ;;
   esac
 }
@@ -1387,6 +1525,8 @@ validate_phase_c_tool_binding() (
     pcb_runtime=$(sh "$source_root/scripts/bootstrap/phase2-runtime-binding.shs" resolve \
       "$compiler" "$source_root" "$tmp/phase2-tool-binding") || exit 1
     [ "$pcb_runtime" = "$runtime_path" ] || exit 1
+    [ "$(hash_file "$phase_c_managed_tools")" = "$phase_c_managed_tools_sha" ] || exit 1
+    [ "$(hash_file "$phase_c_runtime_snapshot")" = "$phase_c_runtime_snapshot_sha" ] || exit 1
   fi
   snapshot_target_c_inputs "$tmp/target-c-current.env" || exit 1
   [ "$(hash_file "$tmp/target-c-current.env")" = "$target_c_identity" ] &&
@@ -1484,7 +1624,7 @@ run_module_compile_command() (
   exit "$module_status"
 )
 
-run_failed_binary_module_inventory() {
+run_failed_binary_module_inventory() (
   [ "$phase" != stage1 ] || return 0
   module_prior_failure=1
   if [ "${compiler_cli_ready:-0}" = 1 ] && [ "${test_runner_ready:-0}" = 1 ] && \
@@ -1500,12 +1640,39 @@ run_failed_binary_module_inventory() {
   (cd "$source_root" && find src/compositions/kernel_llvm_cranelift src/compiler src/app src/lib \
       -type f -name '*.spl' -print) >"$module_manifest.unsorted" || return 1
   LC_ALL=C sort -u "$module_manifest.unsorted" >"$module_manifest" || return 1
+  # Resume only an exact admitted source/runtime/tool/producer/target lineage.
+  # Source admission snapshots cover transitive imports and compiler sources.
+  case "$phase:${target_c_platform:-}" in
+    stage2:*-linux-*|stage3:*-linux-*) ;;
+    *) printf 'task=module_compile_progress|result=BLOCKED|status=resumable-target-unsupported|log=-\n' >>"$summary"; return 1 ;;
+  esac
+  MODULE_PROGRESS_HELPER="$source_root/scripts/bootstrap/bootstrap-module-progress.py"
+  [ -f "$MODULE_PROGRESS_HELPER" ] && command -v python3 >/dev/null 2>&1 || return 1
+  MODULE_COMPILE_VALIDATE_FULL=1 validate_module_compile_prerequisites || return 1
+  MODULE_PROGRESS_CONTEXT=$(printf '%s\n' module-progress-v1 "$phase" \
+    "$(hash_file "$module_manifest")" "$target_c_source_sha" "$snapshot_sha" \
+    "$runtime_cache_identity" "$tool_input_identity" "$target_c_platform" \
+    "$(hash_file "$MODULE_PROGRESS_HELPER")" | hash_stream) || return 1
+  MODULE_PROGRESS_STATE="$cache_root/module-progress/$MODULE_PROGRESS_CONTEXT"
+  MODULE_PROGRESS_TARGET="$target_c_platform"
+  mkdir -p "$MODULE_PROGRESS_STATE" || return 1
+  # POSIX flock on inherited FD9: the kernel releases it after the campaign and
+  # all workers exit. No PID guessing or stale lock deletion. env-i only resets
+  # environment, not this inherited descriptor; competing writers refuse.
+  [ ! -L "$MODULE_PROGRESS_STATE/writer.lock" ] || return 1
+  exec 9>"$MODULE_PROGRESS_STATE/writer.lock" || return 1
+  python3 "$MODULE_PROGRESS_HELPER" lock 9 || return 1
+  export MODULE_PROGRESS_HELPER MODULE_PROGRESS_STATE MODULE_PROGRESS_CONTEXT MODULE_PROGRESS_TARGET
   module_selected="$work_root/module-compile-selected.txt"
+  module_selection_status=0
   bootstrap_verification_select_modules "$module_manifest" "$module_selected" \
-    "${compiler_cli_ready:-0}" "${test_runner_ready:-0}" "$failed_tool_module_limit" "$summary" || return 1
+    "${compiler_cli_ready:-0}" "${test_runner_ready:-0}" "$failed_tool_module_limit" "$summary" || module_selection_status=$?
+  # Only explicit status3 denotes validated retained failures. Any crash or
+  # refusal is an infrastructure error; never use an old selected manifest.
+  case "$module_selection_status" in 0) ;; 3) matrix_failed=1 ;; *) return 1 ;; esac
   if [ ! -s "$module_selected" ]; then
-    matrix_failed=1
-    return 0
+    [ "$module_selection_status" = 0 ] && [ "$matrix_failed" = 0 ]
+    return $?
   fi
 
   module_effective_workers=$module_workers
@@ -1536,7 +1703,12 @@ run_failed_binary_module_inventory() {
   fi
   unset MODULE_COMPILE_PRIOR_FAILURE
   unset MODULE_COMPILE_PREREQUISITE_BLOCKED
-}
+  # Re-read every seal after the full boundary; pending scope and retained
+  # failures remain nonzero even if this particular batch compiled cleanly.
+  module_final_selected="$module_selected.remaining"
+  python3 "$MODULE_PROGRESS_HELPER" select "$module_manifest" "$module_final_selected" "$MODULE_PROGRESS_STATE" "$MODULE_PROGRESS_CONTEXT" "$MODULE_PROGRESS_TARGET" 0 "$summary" || return 1
+  [ ! -s "$module_final_selected" ] && [ "$matrix_failed" = 0 ]
+)
 
 matrix_should_skip() {
   [ "${SIMPLE_COMPILE_FAIL_FAST:-0}" = 1 ] && [ "$matrix_failed" -ne 0 ]
@@ -1615,6 +1787,8 @@ run_inventory_row() {
       # an ambient setting: inherited, it re-lists the whole tree per child.
       unset SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY SIMPLE_SCV_INVENTORY_COLD_INIT
       stage2_row_delegation_env inventory-row
+      bootstrap_phase_clear_test_child_authority
+      bootstrap_phase_export_test_child_authority "$row_owner" "$row_dir/$row_index.children" || exit 90
       if [ -n "$row_mcp_server" ]; then
         HOME="$row_home" TMPDIR="$row_tmp" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=$row_no_delegate \
           SIMPLE_NATIVE_BUILD_CACHE_DIR="$row_cache" \
@@ -1826,6 +2000,56 @@ run_compiler_unit_tests() {
 # Phase 3 full verification must cover the repository inventory, not only the
 # compiler subtree.  Each spec is terminalized independently so a crash or
 # timeout cannot hide later rows, and --assert-ran rejects zero-example greens.
+order_repository_test_manifest() {
+  # Input is already lexically sorted. Partition its complete inventory;
+  # classification changes scheduling only, never selection or row authority.
+  case "$3" in
+    lexical) cat "$1" ;;
+    simple-first)
+      LC_ALL=C awk -v root="$2/" '
+        function is_core(name) {
+          return name ~ /^(compiler|language|runtime|lib|stdlib)$/
+        }
+        {
+          relative = substr($0, length(root) + 1)
+          split(relative, part, "/")
+          if (part[1] == "test" && (is_core(part[2]) ||
+              (part[2] ~ /^[0-9][0-9]_/ && is_core(part[3])))) {
+            print
+          } else {
+            remaining[++count] = $0
+          }
+        }
+        END { for (i = 1; i <= count; i++) print remaining[i] }
+      ' "$1"
+      ;;
+    *) return 2 ;;
+  esac
+}
+
+run_repository_test_row() {
+  case "$repository_test_execution" in
+    interpreter)
+      run_measured_timeout "$row_rss_file" "$spec_timeout_seconds" 15 \
+        "$test_runner" "$relative" \
+        --mode=interpreter --unstable --assert-ran --no-cache --no-db \
+        --no-session-daemon --sequential --json
+      ;;
+    native)
+      # Each row retains its invocation receipts, sample binary, and runner log.
+      # The existing suite helper verifies actual AOT execution for this exact
+      # backend/compiler/runtime tuple; JSON or exit zero alone is insufficient.
+      native_row_dir=$(mktemp -d "$row_dir/$spec_count.native.XXXXXX") || return 2
+      run_measured_timeout "$row_rss_file" "$spec_timeout_seconds" 15 \
+        sh "$source_root/scripts/bootstrap/run-native-aot-suite.shs" \
+        "$source_root" "$verification_backend" "$compiler_cli" "$compiler_cli_sha" \
+        "$test_runner" "$relative" "$native_row_dir" "$build_threads" \
+        "$runtime_path" "$runtime_cache_identity"
+      ;;
+    *) return 2 ;;
+  esac
+}
+
 run_repository_full_tests() {
   test_runner=$1
   full_owner_receipt=$2
@@ -1846,6 +2070,16 @@ run_repository_full_tests() {
     printf 'task=%s|result=FAIL|status=sort-error|elapsed_seconds=0|log=%s|inventory=%s|spec_count=0\n' \
       "$task" "$log" "$inventory" >>"$summary"
     return 1
+  fi
+  if [ "$repository_test_order" != lexical ]; then
+    ordered_manifest="$tmp/${task}.ordered"
+    if ! order_repository_test_manifest "$manifest" "$source_root" \
+        "$repository_test_order" >"$ordered_manifest" ||
+       ! mv "$ordered_manifest" "$manifest"; then
+      printf 'task=%s|result=FAIL|status=order-error|elapsed_seconds=0|log=%s|inventory=%s|spec_count=0\n' \
+        "$task" "$log" "$inventory" >>"$summary"
+      return 1
+    fi
   fi
   # NOTE: repository_full_tests intentionally does NOT route through the
   # shared run_inventory_rows/run_inventory_row helper used above for
@@ -1900,15 +2134,14 @@ run_repository_full_tests() {
         # SIMPLE_BINARY below is the exact receipt-bound CLI for this matrix.
         unset SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY SIMPLE_SCV_INVENTORY_COLD_INIT
         stage2_row_delegation_env inventory-row
+        bootstrap_phase_clear_test_child_authority
+        bootstrap_phase_export_test_child_authority "$full_owner_receipt" "$row_dir/$spec_count.children" || exit 90
         HOME="$home" TMPDIR="$tmp" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=$row_no_delegate \
           SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache/$task" \
           SIMPLE_BINARY="$compiler_cli" \
           SIMPLE_BIN="$compiler_cli" \
           SIMPLE_MCP_TEST_BINARY="$full_mcp_server" \
-          run_measured_timeout "$row_rss_file" "$spec_timeout_seconds" 15 \
-            "$test_runner" "$relative" \
-            --mode=interpreter --unstable --assert-ran --no-cache --no-db \
-            --no-session-daemon --sequential --json
+          run_repository_test_row
       ) >"$row_output" 2>&1 || status=$?
       cat "$row_output" >>"$log"
       if ! validate_command_owner_receipt "$full_owner_receipt"; then
@@ -2005,6 +2238,9 @@ run_phase3_expanded_tests() {
   status=0
   sh "$source_root/scripts/bootstrap/phase3-test-inventory.shs" discover \
     "$source_root" "$nested_receipt" >"$inventory" 2>"$log" || status=$?
+  if [ "$status" -eq 0 ]; then
+    bootstrap_phase_export_test_child_authority "$expanded_owner_receipt" "$logs/$task.children" || status=90
+  fi
   if [ "$status" -eq 0 ]; then
     PHASE3_COMMAND_OWNER_RECEIPT="$expanded_owner_receipt" \
     PHASE3_COMMAND_OWNER_RECEIPT_SHA256="$command_owner_receipt_sha" \
@@ -2159,7 +2395,7 @@ else
       "$compiler_snapshot" native-build \
       --timeout "$native_internal_timeout" --runtime-bundle "$tool_runtime_bundle" --runtime-path "$runtime_path" \
       --source src/compositions/kernel_llvm_cranelift \
-      --source src/compiler --source src/app --source src/lib --entry-closure \
+      --source src/compiler --source src/app --source src/lib --source src/os --entry-closure \
       --entry src/app/cli/_CliMain/main_and_help.spl --threads "$build_threads" \
       --cache-dir "$tool_cache_cli" --output "$compiler_cli"
     compiler_cli_ready=$matrix_task_passed
@@ -2167,7 +2403,7 @@ else
       "$compiler_snapshot" native-build \
       --timeout "$native_internal_timeout" --runtime-bundle "$tool_runtime_bundle" --runtime-path "$runtime_path" \
       --source src/compositions/kernel_llvm_cranelift \
-      --source src/compiler --source src/app --source src/lib --entry-closure \
+      --source src/compiler --source src/app --source src/lib --source src/os --entry-closure \
       --entry src/app/test_runner_new/main.spl --threads "$build_threads" \
       --cache-dir "$tool_cache_runner" --output "$test_runner"
     test_runner_ready=$matrix_task_passed
@@ -2232,7 +2468,10 @@ else
     record_unsupported_task lsp_build host-gpu-hosted-runtime-authority-unavailable
   fi
 
-  run_failed_binary_module_inventory || die "cannot inventory diagnostic modules"
+  if ! run_failed_binary_module_inventory; then
+    printf 'task=module_compile_campaign|result=INCOMPLETE|status=failed-or-unfinished-inventory|log=%s\n' "$work_root/module-compile-inventory.txt" >>"$summary"
+    matrix_failed=1
+  fi
 
   if [ -n "$compiler_cli_sha" ] && [ -n "$test_runner_sha" ]; then
     if [ "$phase" = stage2 ] || [ "$phase" = stage3 ]; then

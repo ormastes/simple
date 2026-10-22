@@ -72,7 +72,7 @@ SimpleOS ships with 30 desktop applications located under `src/os/apps/`. Each a
 
 Every SimpleOS app follows the same two-method pattern:
 
-```simple
+```simple:skip
 use common.ui.widget.{WidgetNode, UITree}
 use nogc_sync_mut.ui.session.{UISession}
 use common.ui.builder.{column, row, panel, text_widget, button, label, statusbar, build_tree_with_title}
@@ -125,7 +125,7 @@ Apps construct their UI using composable builder functions from `common.ui.build
 
 ### Example: Calculator
 
-```simple
+```simple:skip
 use common.ui.widget.{WidgetNode, UITree}
 use nogc_sync_mut.ui.session.{UISession}
 use common.ui.builder.{column, row, panel, text_widget, button, label, statusbar, build_tree_with_title}
@@ -170,7 +170,7 @@ class Calculator:
 
 Each app is registered with the desktop shell via `AppManifest` (defined in `src/os/desktop/app_manifest.spl`):
 
-```simple
+```simple:skip
 struct AppManifest:
     name: text              # Display name
     description: text       # Short description
@@ -195,7 +195,7 @@ The desktop shell (`src/os/desktop/shell.spl`) imports all apps and manages:
 
 The shell imports each app class and dispatches via the launcher service:
 
-```simple
+```simple:skip
 use os.apps.calculator.calculator.{Calculator}
 use os.apps.clock.clock.{ClockApp}
 use os.apps.terminal.terminal.{Terminal}

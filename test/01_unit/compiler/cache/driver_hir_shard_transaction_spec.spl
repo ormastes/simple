@@ -1,0 +1,105 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_create_exclusive}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_hir_pipeline_lowering.*
+use compiler.common.driver_compile_options.{CompileOptions}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+use compiler.hir.hir_lowering.items.{bootstrap_hir_module_count}
+use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_key}
+
+describe "Driver HIR shard transaction ownership":
+    it "maps only actual cache hits and stores to the ledger cache flag":
+        expect(driver_hir_shard_cache_stored_v1(0)).to_equal(true)
+        expect(driver_hir_shard_cache_stored_v1(1)).to_equal(true)
+        expect(driver_hir_shard_cache_stored_v1(2)).to_equal(false)
+        expect(driver_hir_shard_cache_stored_v1(3)).to_equal(false)
+        expect(driver_hir_shard_cache_stored_v1(-1)).to_equal(false)
+        expect(driver_hir_shard_cache_stored_v1(4)).to_equal(false)
+
+    it "rejects a real parsed module with no parser binding before classifying a store refusal":
+        val root = secure_temp_dir(".", "hir-driver-no-binding-").unwrap()
+        val path = "{root}/answer.spl"
+        val content = "fn answer() -> i64:\n    37\n"
+        expect(file_create_exclusive(path, content)).to_equal(true)
+        val source = SourceFile(path: path, content: content, module_name: "hir_driver.no_binding")
+        var driver = CompilerDriver.create(CompileOptions.default())
+        var lowering = hirlowering_for_module(path, ModuleSurfacesByName.empty())
+        val rows_before = bootstrap_hir_module_count()
+        val receipt = driver.lower_streaming_hir_shard_receipt_transaction_v1(
+            lowering, source, false, "", nil, nil, -1)
+        expect(receipt.status).to_equal(-1)
+        expect(receipt.archive.is_none()).to_equal(true)
+        expect(receipt.declaration_registration.is_none()).to_equal(true)
+        expect(driver.ctx.errors.join("\n")).to_contain("HIR shard parser binding unavailable")
+        expect(driver.ctx.hir_modules.len()).to_equal(0)
+        expect(bootstrap_hir_module_count()).to_equal(rows_before)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+
+    it "rolls back actual failed parser rows and retains diagnostics after reclamation":
+        val root = secure_temp_dir(".", "hir-driver-failure-").unwrap()
+        val path = "{root}/broken.spl"
+        val content = "fn broken(\n"
+        expect(file_create_exclusive(path, content)).to_equal(true)
+        val source = SourceFile(path: path, content: content, module_name: "hir_driver.broken")
+        var driver = CompilerDriver.create(CompileOptions.default())
+        var lowering = hirlowering_for_module(path, ModuleSurfacesByName.empty())
+        val rows_before = bootstrap_hir_module_count()
+        val receipt = driver.lower_streaming_hir_shard_receipt_transaction_v1(
+            lowering, source, false, "", nil, nil, -1)
+        expect(receipt.status).to_equal(2)
+        expect(receipt.archive.is_none()).to_equal(true)
+        expect(receipt.declaration_registration.is_none()).to_equal(true)
+        expect(bootstrap_hir_module_count()).to_equal(rows_before)
+        expect(driver.ctx.hir_modules.len()).to_equal(0)
+        expect(driver.ctx.errors.len()).to_be_greater_than(0)
+        val diagnostic = driver.ctx.errors.join("\n")
+        expect(diagnostic).to_contain(path)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+        expect(transient_scope_begin()).to_equal(true)
+        var scratch: [text] = []
+        var index = 0
+        while index < 64:
+            scratch.push("later-parser-scratch-{index}")
+            index = index + 1
+        expect(transient_scope_end()).to_equal(true)
+        expect(driver.ctx.errors.join("\n")).to_equal(diagnostic)
+        expect(bootstrap_hir_module_count()).to_equal(rows_before)
+
+    it "publishes a real durable module without retaining its body in the context":
+        expect(hir_cache_enabled()).to_equal(true)
+        val root = secure_temp_dir(".", "hir-driver-success-").unwrap()
+        val path = "{root}/answer.spl"
+        val content = "fn answer() -> i64:\n    37\n"
+        expect(file_create_exclusive(path, content)).to_equal(true)
+        val source = SourceFile(path: path, content: content, module_name: "hir_driver.answer")
+        val key = hir_cache_key(path, sha256_text(content), false)
+        expect(key.len()).to_equal(64)
+        var driver = CompilerDriver.create(CompileOptions.default())
+        var lowering = hirlowering_for_module(path, ModuleSurfacesByName.empty())
+        val rows_before = bootstrap_hir_module_count()
+        val receipt = driver.lower_streaming_hir_shard_receipt_transaction_v1(
+            lowering, source, false, key, nil, nil, -1)
+        expect(receipt.status).to_equal(1)
+        expect(receipt.archive.is_none()).to_equal(true)
+        expect(receipt.declaration_registration.is_none()).to_equal(true)
+        expect(driver.ctx.errors.len()).to_equal(0)
+        expect(driver.ctx.hir_modules.len()).to_equal(0)
+        expect(bootstrap_hir_module_count()).to_equal(rows_before)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+        val cached = driver.lower_streaming_hir_shard_receipt_transaction_v1(
+            lowering, source, false, key, nil, nil, -1)
+        expect(cached.status).to_equal(0)
+        expect(cached.archive.is_none()).to_equal(true)
+        expect(cached.declaration_registration.is_none()).to_equal(true)
+        # The production integer wrapper requests no archive roots. Immediate
+        # None values require no heap promotion under the actual core-C owner.
+        expect(driver.lower_streaming_hir_shard_transaction_v1(
+            lowering, source, false, key)).to_equal(0)
+        expect(driver.ctx.hir_modules.len()).to_equal(0)
+        expect(bootstrap_hir_module_count()).to_equal(rows_before)
+        expect(transient_array_scope_state_v1()).to_equal(0)

@@ -1,3 +1,5 @@
+use compiler.hir.hir_lowering.concat_copy_v1.{hir_stmt_concat_copy_v1}
+use compiler.hir.hir_lowering.binding_types.{hir_binding_type_or_infer}
 # HIR Lowering - Statement Lowering
 #
 # This module handles lowering of statements from AST to HIR.
@@ -47,19 +49,33 @@ impl HirLowering:
     # owner from the spelling of a later match alternative. Return a raw type
     # with Error as the unknown sentinel, avoiding optional aggregate transport.
     me binding_source_type(source: HirExpr, bind_optional_payload: bool = false) -> HirType:
-        if bind_optional_payload and source.has_type_:
-            if val source_type = source.type_:
-                match source_type.kind:
-                    case HirTypeKind.Optional(payload): return payload
-                    case _: ()
+        var resolved: HirType = HirType(kind: HirTypeKind.Error, span: source.span)
         if source.has_type_ and source.type_ != nil:
-            return source.type_ ?? HirType(kind: HirTypeKind.Error, span: source.span)
-        val symbol = _hir_expr_symbol_or_invalid(source.kind)
-        if symbol.is_valid():
-            if val definition = self.symbols.get_symbol_raw(symbol.id):
-                if definition.type_ != nil:
-                    return definition.type_ ?? HirType(kind: HirTypeKind.Error, span: source.span)
-        HirType(kind: HirTypeKind.Error, span: source.span)
+            resolved = source.type_ ?? HirType(kind: HirTypeKind.Error, span: source.span)
+        else:
+            val symbol = _hir_expr_symbol_or_invalid(source.kind)
+            if symbol.is_valid():
+                if val definition = self.symbols.get_symbol_raw(symbol.id):
+                    if definition.type_ != nil:
+                        resolved = definition.type_ ?? HirType(kind: HirTypeKind.Error, span: source.span)
+        # Attribute and symbol lookup must share the same optional projection.
+        # Unwrap exactly once so nested optionals retain their inner optional.
+        if bind_optional_payload:
+            match resolved.kind:
+                case HirTypeKind.Optional(payload): return payload
+                case _: ()
+        resolved
+
+    me binding_payload_type(source: HirExpr, bind_optional_payload: bool = false) -> HirType:
+        # Resolve once with the same projection used for symbol registration.
+        # Only the concrete Let payload substitutes the inference marker for
+        # unknown types; symbol registration keeps its existing Error behavior.
+        val resolved: HirType = self.binding_source_type(source, bind_optional_payload)
+        match resolved.kind:
+            case HirTypeKind.Error:
+                hir_binding_type_or_infer(source, bind_optional_payload)
+            case _:
+                resolved
 
     # A discard is an assignment target, never a variable read. Keep this
     # shared by structured statements and the flat parser's expression form.
@@ -81,9 +97,11 @@ impl HirLowering:
                 has: false, value: unit_value, span: span)
             return HirStmtKind.Expr(HirExpr(kind: HirExprKind.Block(discard_block),
                 has_type_: true, type_: unit_type, span: span))
-        val hir_op = self.lower_hir_assign_op_opt(op)
+        val hir_op: HirAssignOp? = self.lower_hir_assign_op_opt(op)
         val lhs = self.lower_hir_expr(target)
         val rhs = self.lower_hir_expr(value)
+        # Preserve the optional operator through the declared optional slot:
+        # absence means a plain write; presence means a compound assignment.
         HirStmtKind.Assign(lhs, hir_op, rhs)
 
     # True only for the parser's encoded `val/var (a, b) = ...` statement
@@ -96,14 +114,14 @@ impl HirLowering:
         val stmt_kind_value: StmtKind = s.kind
         val sk_disc: i64 = hir_stmt_kind_disc(stmt_kind_value)
         val sk_dummy: Expr = Expr(kind: ExprKind.NilLit, span: s.span)
-        if sk_disc == hir_stmt_kind_disc(StmtKind.Val("", nil, sk_dummy)):
+        if sk_disc == hir_stmt_kind_disc(StmtKind.Val("", None, sk_dummy)):
             val v_name: text = match stmt_kind_value:
                 case StmtKind.Val(vname, _, _):
                     vname
                 case _:
                     ""
             return v_name.len() > 1 and v_name[0:1] == "("
-        if sk_disc == hir_stmt_kind_disc(StmtKind.Var("", nil, nil)):
+        if sk_disc == hir_stmt_kind_disc(StmtKind.Var("", None, None)):
             val vr_name: text = match stmt_kind_value:
                 case StmtKind.Var(vrname, _, _):
                     vrname
@@ -148,7 +166,7 @@ impl HirLowering:
                             # recording this once (first construction site
                             # seen) is globally valid for the struct name.
                             if self.struct_field_order_by_name.has(callee_name):
-                                val field_order = self.struct_field_order_by_name[callee_name]
+                                val field_order: [text] = self.struct_field_order_by_name[callee_name]
                                 var known_fields = self.struct_field_types_by_name[callee_name]
                                 var arg_i = 0
                                 while arg_i < call_args.len() and arg_i < field_order.len():
@@ -156,7 +174,7 @@ impl HirLowering:
                                     match call_args[arg_i].value.kind:
                                         case ExprKind.ArrayLit(_):
                                             val elem_i64 = HirType(kind: HirTypeKind.Int(64, true), span: call_args[arg_i].span)
-                                            known_fields[field_name_at_i] = HirType(kind: HirTypeKind.Array(elem_i64, nil), span: call_args[arg_i].span)
+                                            known_fields[field_name_at_i] = HirType(kind: HirTypeKind.Array(elem_i64, None), span: call_args[arg_i].span)
                                         case _: ()
                                     arg_i = arg_i + 1
                                 self.struct_field_types_by_name[callee_name] = known_fields
@@ -174,7 +192,9 @@ impl HirLowering:
         match init_expr.kind:
             case ExprKind.TupleLit(elements):
                 var elem_types: [HirType] = []
-                for elem in elements:
+                for raw_elem in elements:
+                    # ANY-transport hazard sweep round 3: annotated rebind.
+                    val elem: Expr = raw_elem
                     val elem_hir_type = match elem.kind:
                         case ExprKind.IntLit(_):
                             Some(HirType(kind: HirTypeKind.Int(64, true), span: elem.span))
@@ -221,7 +241,7 @@ impl HirLowering:
                             if not range_resolves:
                                 val range_start = self.lower_hir_expr(range_args[0].value)
                                 val range_end = self.lower_hir_expr(range_args[1].value)
-                                return HirExpr(kind: HirExprKind.Range(range_start, range_end, false, nil), has_type_: false, type_: nil, span: iter.span)
+                                return HirExpr(kind: HirExprKind.Range(range_start, range_end, false, None), has_type_: false, type_: nil, span: iter.span)
                     case _:
                         pass
             case _:
@@ -229,15 +249,9 @@ impl HirLowering:
         self.lower_hir_expr(iter)
 
     me lower_hir_assign_op_opt(op: AssignOp?) -> HirAssignOp?:
-        # Returns a PLAIN NULLABLE, not an Option box. All three call sites (:455,
-        # :482, :538) feed the result straight into `HirStmtKind.Assign`, whose `op`
-        # slot is declared FLAT (`op: HirAssignOp`), and all five readers of that slot
-        # (monomorphize_integration.spl:1051, monomorphize/type_subst.spl:302,
-        # monomorphize/hir_subst/body_subst.spl:272, mir_lowering_stmts.spl:1352,
-        # svmg_lowering.spl:539) bind it positionally -- none tests `case Some(...)`.
-        # Boxing it was the same defect class as `HirStmtKind.Let.type_`; here the
-        # symptom is a silently wrong operator rather than a SEGV, because both the
-        # box and the payload are enums.
+        # Bare-lift the concrete operator into the optional return type.
+        # Keep absence for plain assignment; consumers unwrap only when
+        # performing the read/modify/write operation.
         if op.?:
             self.lower_hir_assign_op(op.unwrap())
         else:
@@ -245,7 +259,8 @@ impl HirLowering:
 
     me lower_hir_with_items(items: [WithItem]) -> [HirWithItem]:
         var result: [HirWithItem] = []
-        for item in items:
+        for raw_item in items:
+            val item: WithItem = raw_item
             val hir_context = self.lower_hir_expr(item.context_expr)
             val hir_target: SymbolId? = if item.target.?:
                 val symbol = self.symbols.define(item.target ?? "", SymbolKind.Variable, nil, item.span, Visibility.Private, false, nil)
@@ -273,7 +288,7 @@ impl HirLowering:
         val stmt_kind_value: StmtKind = s.kind
         val sk_disc: i64 = hir_stmt_kind_disc(stmt_kind_value)
         val sk_dummy: Expr = Expr(kind: ExprKind.NilLit, span: s.span)
-        if sk_disc == hir_stmt_kind_disc(StmtKind.Val("", nil, sk_dummy)):
+        if sk_disc == hir_stmt_kind_disc(StmtKind.Val("", None, sk_dummy)):
             val v_name: text = match stmt_kind_value:
                 case StmtKind.Val(vname, _, _):
                     vname
@@ -286,7 +301,7 @@ impl HirLowering:
                     case _:
                         sk_dummy
                 return self.lower_hir_tuple_destructure_val(v_name, v_init, s.span)
-        if sk_disc == hir_stmt_kind_disc(StmtKind.Var("", nil, nil)):
+        if sk_disc == hir_stmt_kind_disc(StmtKind.Var("", None, None)):
             val vr_name = match stmt_kind_value:
                 case StmtKind.Var(vrname, _, _):
                     vrname
@@ -323,8 +338,9 @@ impl HirLowering:
                     while i < names.len():
                         val nm = names[i]
                         val hir_init = self.lower_hir_expr(elements[i])
-                        val symbol = self.symbols.define(nm, SymbolKind.Variable, nil, span, Visibility.Private, false, nil)
-                        result = result.push(HirStmt(kind: HirStmtKind.Let(symbol, nil, hir_init), span: span))
+                        val binding_type = self.binding_payload_type(hir_init)
+                        val symbol = self.symbols.define(nm, SymbolKind.Variable, binding_type, span, Visibility.Private, false, nil)
+                        result = result.push(HirStmt(kind: HirStmtKind.Let(symbol, binding_type, hir_init), span: span))
                         i = i + 1
                     result
             case _:
@@ -356,8 +372,9 @@ impl HirLowering:
                     while i < names.len():
                         val nm = names[i]
                         val hir_init = self.lower_hir_expr(elements[i])
-                        val symbol = self.symbols.define(nm, SymbolKind.Variable, nil, span, Visibility.Private, true, nil)
-                        result = result.push(HirStmt(kind: HirStmtKind.Let(symbol, nil, hir_init), span: span))
+                        val binding_type = self.binding_payload_type(hir_init)
+                        val symbol = self.symbols.define(nm, SymbolKind.Variable, binding_type, span, Visibility.Private, true, nil)
+                        result = result.push(HirStmt(kind: HirStmtKind.Let(symbol, binding_type, hir_init), span: span))
                         i = i + 1
                     result
             case _:
@@ -429,8 +446,9 @@ impl HirLowering:
     me lower_hir_tuple_destructure_assign(targets: [Expr], value: Expr, span: Span) -> HirStmt:
         val hir_value = self.lower_hir_expr(value)
         var stmts: [HirStmt] = []
-        val tmp_sym = self.symbols.define("__tuple_assign", SymbolKind.Variable, nil, span, Visibility.Private, false, nil)
-        stmts = stmts.push(HirStmt(kind: HirStmtKind.Let(tmp_sym, nil, hir_value), span: span))
+        val value_type = self.binding_payload_type(hir_value)
+        val tmp_sym = self.symbols.define("__tuple_assign", SymbolKind.Variable, value_type, span, Visibility.Private, false, nil)
+        stmts = stmts.push(HirStmt(kind: HirStmtKind.Let(tmp_sym, value_type, hir_value), span: span))
         var ta_elem_types: [HirType] = []
         val ta_base_sym: SymbolId? = match hir_value.kind:
             case HirExprKind.Var(ta_sym): ta_sym
@@ -457,10 +475,10 @@ impl HirLowering:
                 val ta_idx_type: HirType? = if i < ta_elem_types.len(): ta_elem_types[i] else: nil
                 val ta_idx_expr = HirExpr(kind: HirExprKind.Index(
                     HirExpr(kind: HirExprKind.Var(tmp_sym), has_type_: false, type_: nil, span: span),
-                    HirExpr(kind: HirExprKind.IntLit(i, nil), has_type_: false, type_: nil, span: span)
+                    HirExpr(kind: HirExprKind.IntLit(i, None), has_type_: false, type_: nil, span: span)
                 ), has_type_: i < ta_elem_types.len(), type_: ta_idx_type, span: span)
                 stmts = stmts.push(HirStmt(kind: HirStmtKind.Assign(
-                    self.lower_hir_expr(targets[i]), nil, ta_idx_expr), span: span))
+                    self.lower_hir_expr(targets[i]), None, ta_idx_expr), span: span))
             i = i + 1
         HirStmt(kind: HirStmtKind.Block(HirBlock(stmts: stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: nil, span: span), span: span)), span: span)
 
@@ -468,8 +486,9 @@ impl HirLowering:
         val inner = name.slice(1, name.len() - 1)
         val parts = inner.split(",")
         var stmts: [HirStmt] = []
-        val tmp_sym = self.symbols.define("__tuple_destr", SymbolKind.Variable, nil, span, Visibility.Private, false, nil)
-        stmts = stmts.push(HirStmt(kind: HirStmtKind.Let(tmp_sym, nil, hir_init), span: span))
+        val value_type = self.binding_payload_type(hir_init)
+        val tmp_sym = self.symbols.define("__tuple_destr", SymbolKind.Variable, value_type, span, Visibility.Private, false, nil)
+        stmts = stmts.push(HirStmt(kind: HirStmtKind.Let(tmp_sym, value_type, hir_init), span: span))
         var td_elem_types: [HirType] = []
         val td_base_sym: SymbolId? = match hir_init.kind:
             case HirExprKind.Var(td_sym): td_sym
@@ -506,10 +525,11 @@ impl HirLowering:
                 val td_idx_type: HirType? = if i < td_elem_types.len(): td_elem_types[i] else: nil
                 val idx_expr = HirExpr(kind: HirExprKind.Index(
                     HirExpr(kind: HirExprKind.Var(tmp_sym), has_type_: false, type_: nil, span: span),
-                    HirExpr(kind: HirExprKind.IntLit(i, nil), has_type_: false, type_: nil, span: span)
+                    HirExpr(kind: HirExprKind.IntLit(i, None), has_type_: false, type_: nil, span: span)
                 ), has_type_: i < td_elem_types.len(), type_: td_idx_type, span: span)
-                val psym = self.symbols.define(pname, SymbolKind.Variable, nil, span, Visibility.Private, is_mut, nil)
-                stmts = stmts.push(HirStmt(kind: HirStmtKind.Let(psym, nil, idx_expr), span: span))
+                val binding_type = self.binding_payload_type(idx_expr)
+                val psym = self.symbols.define(pname, SymbolKind.Variable, binding_type, span, Visibility.Private, is_mut, nil)
+                stmts = stmts.push(HirStmt(kind: HirStmtKind.Let(psym, binding_type, idx_expr), span: span))
             i = i + 1
         HirStmt(kind: HirStmtKind.Block(HirBlock(stmts: stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: nil, span: span), span: span)), span: span)
 
@@ -539,7 +559,7 @@ impl HirLowering:
             val unit_value = HirExpr(kind: HirExprKind.NilLit,
                 has_type_: true, type_: unit_type, span: s.span)
             return HirStmt(kind: HirStmtKind.Expr(unit_value), span: s.span)
-        if sk_disc == hir_stmt_kind_disc(StmtKind.Val("", nil, sk_dummy)):
+        if sk_disc == hir_stmt_kind_disc(StmtKind.Val("", None, sk_dummy)):
             val v_name: text = match stmt_kind_value:
                 case StmtKind.Val(vname, _, _):
                     vname
@@ -581,7 +601,8 @@ impl HirLowering:
             # `case Some` deep-copies and corrupts it (disc=-1), `.unwrap()` is
             # stolen by Poll.unwrap and returns raw 0, `??` corrupts it too.
             # Removing the box removes the extraction, so there is nothing to corrupt.
-            val v_hir_init = self.lower_hir_expr(v_init)
+            val v_lowered_init = self.lower_hir_expr(v_init)
+            val v_hir_init = self.retain_attributed_collection_type(v_lowered_init, v_hir_type)
             var v_sym_type = v_hir_type
             if not v_has_annotation:
                 val inferred = self.binding_source_type(v_hir_init, s.bind_optional_payload)
@@ -591,8 +612,12 @@ impl HirLowering:
             val v_symbol = self.symbols.define(v_name, SymbolKind.Variable, v_sym_type, s.span, Visibility.Private, false, nil)
             self.try_register_local_struct_type(v_symbol, v_init)
             self.try_register_local_tuple_type(v_symbol, v_init)
-            return HirStmt(kind: HirStmtKind.Let(v_symbol, v_hir_type, v_hir_init), span: s.span)
-        if sk_disc == hir_stmt_kind_disc(StmtKind.Var("", nil, nil)):
+            val v_binding_type: HirType = if v_has_annotation:
+                v_hir_type
+            else:
+                self.binding_payload_type(v_hir_init, s.bind_optional_payload)
+            return HirStmt(kind: HirStmtKind.Let(v_symbol, v_binding_type, v_hir_init), span: s.span)
+        if sk_disc == hir_stmt_kind_disc(StmtKind.Var("", None, None)):
             val vr_name = match stmt_kind_value:
                 case StmtKind.Var(vrname, _, _):
                     vrname
@@ -618,10 +643,11 @@ impl HirLowering:
                 nil
             # Same field migration as the `val` path above; see the note there.
             var vr_sym_type = if vr_has_annotation: Some(vr_hir_type) else: nil
-            val vr_hir_init = if vr_init.?:
+            val vr_lowered_init = if vr_init.?:
                 self.lower_hir_expr(vr_init ?? sk_dummy)
             else:
                 HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: nil, span: s.span)
+            val vr_hir_init = self.retain_attributed_collection_type(vr_lowered_init, vr_hir_type)
             if not vr_has_annotation:
                 val inferred = self.binding_source_type(vr_hir_init, s.bind_optional_payload)
                 match inferred.kind:
@@ -631,8 +657,12 @@ impl HirLowering:
             if val vr_init_present = vr_init:
                 self.try_register_local_struct_type(vr_symbol, vr_init_present)
                 self.try_register_local_tuple_type(vr_symbol, vr_init_present)
-            return HirStmt(kind: HirStmtKind.Let(vr_symbol, vr_hir_type, vr_hir_init), span: s.span)
-        if sk_disc == hir_stmt_kind_disc(StmtKind.Return(nil)):
+            val vr_binding_type: HirType = if vr_has_annotation:
+                vr_hir_type
+            else:
+                self.binding_payload_type(vr_hir_init, s.bind_optional_payload)
+            return HirStmt(kind: HirStmtKind.Let(vr_symbol, vr_binding_type, vr_hir_init), span: s.span)
+        if sk_disc == hir_stmt_kind_disc(StmtKind.Return(None)):
             val rt_val: Expr? = match stmt_kind_value:
                 case StmtKind.Return(rvalue):
                     rvalue
@@ -654,7 +684,7 @@ impl HirLowering:
             if (rt_env_get("SIMPLE_MIR_RET_TRACE") ?? "") == "1":
                 print "[hir-ret-fast] ast_nil={rt_val == nil} hir_nil={rt_hir == nil}"
             return HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Return(rt_hir), has_type_: false, type_: nil, span: s.span)), span: s.span)
-        if sk_disc == hir_stmt_kind_disc(StmtKind.Assign(sk_dummy, nil, sk_dummy)):
+        if sk_disc == hir_stmt_kind_disc(StmtKind.Assign(sk_dummy, None, sk_dummy)):
             val as_target: Expr = match stmt_kind_value:
                 case StmtKind.Assign(atarget, _, _):
                     atarget
@@ -740,7 +770,8 @@ impl HirLowering:
                 # (get_symbol_type_raw -> mir_lowering_stmts.spl:812 `case Some`, plus the
                 # get_symbol_type wrapper at hir_symbol_table_methods.spl:467) and is
                 # deliberately NOT migrated here, so it keeps receiving the boxed form.
-                val hir_init = self.lower_hir_expr(init)
+                val lowered_init = self.lower_hir_expr(init)
+                val hir_init = self.retain_attributed_collection_type(lowered_init, hir_type)
                 var sym_type = hir_type
                 if not has_annotation:
                     val inferred = self.binding_source_type(hir_init, s.bind_optional_payload)
@@ -748,7 +779,11 @@ impl HirLowering:
                         case HirTypeKind.Error: ()
                         case _: sym_type = inferred
                 val symbol = self.symbols.define(name, SymbolKind.Variable, sym_type, s.span, Visibility.Private, false, nil)
-                HirStmtKind.Let(symbol, hir_type, hir_init)
+                val binding_type: HirType = if has_annotation:
+                    hir_type
+                else:
+                    self.binding_payload_type(hir_init, s.bind_optional_payload)
+                HirStmtKind.Let(symbol, binding_type, hir_init)
 
             case StmtKind.Var(name, type_, init):
                 val ast_type: Type = type_ ?? Type(kind: TypeKind.Infer, span: s.span)
@@ -769,17 +804,22 @@ impl HirLowering:
                 # get_symbol_type wrapper at hir_symbol_table_methods.spl:467) and is
                 # deliberately NOT migrated here, so it keeps receiving the boxed form.
                 var sym_type = hir_type
-                val hir_init = if init.?:
+                val lowered_init = if init.?:
                     self.lower_hir_expr(init ?? Expr(kind: ExprKind.NilLit, span: s.span))
                 else:
                     HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: nil, span: s.span)
+                val hir_init = self.retain_attributed_collection_type(lowered_init, hir_type)
                 if not has_annotation:
                     val inferred = self.binding_source_type(hir_init, s.bind_optional_payload)
                     match inferred.kind:
                         case HirTypeKind.Error: ()
                         case _: sym_type = inferred
                 val symbol = self.symbols.define(name, SymbolKind.Variable, sym_type, s.span, Visibility.Private, true, nil)
-                HirStmtKind.Let(symbol, hir_type, hir_init)
+                val binding_type: HirType = if has_annotation:
+                    hir_type
+                else:
+                    self.binding_payload_type(hir_init, s.bind_optional_payload)
+                HirStmtKind.Let(symbol, binding_type, hir_init)
 
             case StmtKind.Assign(target, op, value):
                 self.lower_hir_assignment_kind(target, op, value, s.span)
@@ -813,19 +853,20 @@ impl HirLowering:
                         if for_pname != "_":
                             val for_idx_expr = HirExpr(kind: HirExprKind.Index(
                                 HirExpr(kind: HirExprKind.Var(for_elem_sym), has_type_: false, type_: nil, span: s.span),
-                                HirExpr(kind: HirExprKind.IntLit(for_pi, nil), has_type_: false, type_: nil, span: s.span)
+                                HirExpr(kind: HirExprKind.IntLit(for_pi, None), has_type_: false, type_: nil, span: s.span)
                             ), has_type_: false, type_: nil, span: s.span)
                             val for_psym = self.symbols.define(for_pname, SymbolKind.Variable, nil, s.span, Visibility.Private, false, nil)
-                            for_prefix = for_prefix.push(HirStmt(kind: HirStmtKind.Let(for_psym, nil, for_idx_expr), span: s.span))
+                            for_prefix = for_prefix.push(HirStmt(kind: HirStmtKind.Let(for_psym, self.binding_payload_type(for_idx_expr), for_idx_expr), span: s.span))
                         for_pi = for_pi + 1
                     val for_hir_body_raw = self.lower_hir_block(body)
                     val for_hir_body = HirBlock(
-                        stmts: for_prefix.concat(for_hir_body_raw.stmts),
+                        # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
+                        stmts: hir_stmt_concat_copy_v1(for_prefix, for_hir_body_raw.stmts),
                         has: for_hir_body_raw.has,
                         value: for_hir_body_raw.value,
                         span: for_hir_body_raw.span
                     )
-                    HirExprKind.For(for_elem_sym, hir_iter, for_hir_body, nil)
+                    HirExprKind.For(for_elem_sym, hir_iter, for_hir_body, None)
                 else:
                     val iterable_type = self.binding_source_type(hir_iter)
                     var element_type: HirType? = nil
@@ -835,7 +876,7 @@ impl HirLowering:
                         case _: ()
                     val symbol = self.symbols.define(var_, SymbolKind.Variable, element_type, s.span, Visibility.Private, false, nil)
                     val hir_body = self.lower_hir_block(body)
-                    HirExprKind.For(symbol, hir_iter, hir_body, nil)
+                    HirExprKind.For(symbol, hir_iter, hir_body, None)
                 self.loop_depth = self.loop_depth - 1
                 self.symbols.pop_scope()
                 # Desugar to loop
@@ -851,7 +892,7 @@ impl HirLowering:
                 val hir_body = self.lower_hir_block(body)
                 self.loop_depth = self.loop_depth - 1
                 HirStmtKind.Expr(HirExpr(
-                    kind: HirExprKind.While(hir_cond, hir_body, nil),
+                    kind: HirExprKind.While(hir_cond, hir_body, None),
                     has_type_: false, type_: nil,
                     span: s.span
                 ))
@@ -861,7 +902,7 @@ impl HirLowering:
                 val hir_body = self.lower_hir_block(body)
                 self.loop_depth = self.loop_depth - 1
                 HirStmtKind.Expr(HirExpr(
-                    kind: HirExprKind.Loop(hir_body, nil),
+                    kind: HirExprKind.Loop(hir_body, None),
                     has_type_: false, type_: nil,
                     span: s.span
                 ))
@@ -881,7 +922,7 @@ impl HirLowering:
 
             case StmtKind.Break(label):
                 HirStmtKind.Expr(HirExpr(
-                    kind: HirExprKind.Break(label, nil),
+                    kind: HirExprKind.Break(label, None),
                     has_type_: false, type_: nil,
                     span: s.span
                 ))
@@ -894,7 +935,7 @@ impl HirLowering:
                 ))
 
             case StmtKind.Yield(value):
-                val yield_value = Some(self.lower_hir_expr(value))
+                val yield_value: HirExpr? = Some(self.lower_hir_expr(value))
                 HirStmtKind.Expr(HirExpr(
                     kind: HirExprKind.Yield(yield_value),
                     has_type_: false, type_: nil,

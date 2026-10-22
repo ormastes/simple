@@ -1,0 +1,69 @@
+use std.spec
+use std.spec.step
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn optional_payload_diagnostics(source: text) -> text:
+    val filename = "optional_payload_owner.spl"
+    val parsed = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    var errors: [text] = []
+    for error in hir_lowering.errors:
+        errors = errors.push("HIR: " + error.message)
+    for error in lowering.errors:
+        errors = errors.push("MIR: " + error.message)
+    if mir.functions.len() == 0:
+        errors = errors.push("no lowered functions")
+    errors.join("\n")
+
+describe "explicit Some payload type ownership":
+    # REQ-ENUM-COHERENCE-PAYLOAD: match the orphan-suggestion branch merge.
+    it "retains an explicitly optional text merge at a named enum payload":
+        step("Lower both Some and nil branches without erasing the text payload owner")
+        val source = "enum Diagnostic:\n    Orphan(suggestion: text?)\nfn make(available: bool) -> Diagnostic:\n    val suggestion: text? = if available:\n        Some(\"wrap locally\")\n    else:\n        nil\n    Diagnostic.Orphan(suggestion: suggestion)\n"
+        expect(optional_payload_diagnostics(source)).to_equal("")
+    it "rejects a merged optional payload with a different primitive owner":
+        step("Keep the declared text slot authoritative after a boolean optional merge")
+        val source = "enum Diagnostic:\n    Orphan(suggestion: text?)\nfn make(available: bool) -> Diagnostic:\n    val suggestion: bool? = if available:\n        Some(true)\n    else:\n        nil\n    Diagnostic.Orphan(suggestion: suggestion)\n"
+        expect(optional_payload_diagnostics(source)).to_contain("payload type mismatch")
+    # REQ-ENUM-FRAME-OWNER: unwrapping exposes the declared owner; identical
+    # record layouts and a same-shaped foreign enum do not grant compatibility.
+    it "preserves an enum payload owner through a record field and explicit unwrap":
+        step("Project an optional enum field before constructing a payload")
+        val source = "enum Frame:\n    Expr(i64)\nstruct Holder:\n    frame: Frame?\nenum Packet:\n    Value(Frame)\nfn make(holder: Holder) -> Packet:\n    Packet.Value(holder.frame.unwrap())\n"
+        expect(optional_payload_diagnostics(source)).to_equal("")
+    it "rejects the unprojected optional enum at the payload boundary":
+        step("Retain the mandatory payload contract when the field is still optional")
+        val source = "enum Frame:\n    Expr(i64)\nstruct Holder:\n    frame: Frame?\nenum Packet:\n    Value(Frame)\nfn make(holder: Holder) -> Packet:\n    Packet.Value(holder.frame)\n"
+        expect(optional_payload_diagnostics(source)).to_contain("payload type mismatch")
+    it "rejects a projected same-shaped foreign enum owner":
+        step("Reject another enum after optional field projection and unwrap")
+        val source = "enum Frame:\n    Expr(i64)\nenum OtherFrame:\n    Expr(i64)\nstruct Holder:\n    frame: OtherFrame?\nenum Packet:\n    Value(Frame)\nfn make(holder: Holder) -> Packet:\n    Packet.Value(holder.frame.unwrap())\n"
+        expect(optional_payload_diagnostics(source)).to_contain("payload type mismatch")
+    it "retains scalar and nominal owners inside positional optional slots":
+        val source = "struct Owner:\n    id: i64\nenum Packet:\n    Pair(i64?, Owner?)\nfn make(value: i64, owner: Owner) -> Packet:\n    Packet.Pair(Some(value), Some(owner))\nfn literal() -> Packet:\n    Packet.Pair(Some(3), nil)\n"
+        expect(optional_payload_diagnostics(source)).to_equal("")
+    it "rejects Some of the wrong primitive type":
+        val source = "enum Packet:\n    Value(i64?)\nfn make() -> Packet:\n    Packet.Value(Some(true))\n"
+        expect(optional_payload_diagnostics(source)).to_contain("payload type mismatch")
+    it "rejects Some of another nominal owner with identical layout":
+        val source = "struct First:\n    id: i64\nstruct Second:\n    id: i64\nenum Packet:\n    Value(First?)\nfn make(value: Second) -> Packet:\n    Packet.Value(Some(value))\n"
+        expect(optional_payload_diagnostics(source)).to_contain("payload type mismatch")
+    it "does not admit a raw integer carrier as an optional payload":
+        val source = "enum Packet:\n    Value(i64?)\nfn make() -> Packet:\n    Packet.Value(3)\n"
+        expect(optional_payload_diagnostics(source)).to_contain("payload type mismatch")
+    it "does not admit an optional value in a mandatory slot":
+        val source = "enum Packet:\n    Value(i64)\nfn make() -> Packet:\n    Packet.Value(Some(3))\n"
+        expect(optional_payload_diagnostics(source)).to_contain("payload type mismatch")
+
+describe "nominal record nil comparison lowering":
+    it "accepts both operand orders without requiring a struct equality overload":
+        val source = "struct Record:\n    value: i64\nfn absent(value: Record) -> bool:\n    value == nil\nfn present(value: Record) -> bool:\n    nil != value\nfn optional(value: Record?) -> bool:\n    value != nil\n"
+        expect(optional_payload_diagnostics(source)).to_equal("")

@@ -1,0 +1,51 @@
+# A contextual function declaration must determine every physical ABI slot.
+# Inferred lambda expressions continue to use the established word ABI.
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+
+fn lambda_abi_type_resolved(type_: HirType) -> bool:
+    if type_ == nil: return false
+    match type_.kind:
+        case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.TypeParam(_, _) | HirTypeKind.Projection(_, _): return false
+        case HirTypeKind.Tuple(items) | HirTypeKind.Union(items) | HirTypeKind.Named(_, items):
+            for item in items:
+                if not lambda_abi_type_resolved(item): return false
+        case HirTypeKind.Array(inner, _) | HirTypeKind.Slice(inner) | HirTypeKind.Ref(inner, _) | HirTypeKind.Ptr(inner, _) | HirTypeKind.Optional(inner) | HirTypeKind.Isolated(inner):
+            return lambda_abi_type_resolved(inner)
+        case HirTypeKind.Unique(inner) | HirTypeKind.Shared(inner) | HirTypeKind.Weak(inner):
+            return lambda_abi_type_resolved(inner)
+        case HirTypeKind.Dict(left, right) | HirTypeKind.Result(left, right):
+            return lambda_abi_type_resolved(left) and lambda_abi_type_resolved(right)
+        case HirTypeKind.Function(params, ret, _):
+            for parameter in params:
+                if not lambda_abi_type_resolved(parameter): return false
+            return lambda_abi_type_resolved(ret)
+        case HirTypeKind.Tensor(element, _, _): return lambda_abi_type_resolved(element)
+        case _: ()
+    true
+
+# Scalar source proof is stricter than physical ABI resolution. In particular,
+# Any and Weak can be word-shaped after lowering while retaining ownership.
+fn lambda_scalar_source_type_v1(type_: HirType) -> bool:
+    if type_ == nil: return false
+    match type_.kind:
+        case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char | HirTypeKind.Unit | HirTypeKind.Never:
+            true
+        case HirTypeKind.Tuple(items) | HirTypeKind.Union(items):
+            for item in items:
+                if not lambda_scalar_source_type_v1(item): return false
+            true
+        case HirTypeKind.Optional(inner): lambda_scalar_source_type_v1(inner)
+        case HirTypeKind.Result(ok, err):
+            lambda_scalar_source_type_v1(ok) and lambda_scalar_source_type_v1(err)
+        case _: false
+
+fn lambda_scalar_source_signature_v1(type_: HirType) -> bool:
+    if type_ == nil: return false
+    match type_.kind:
+        case HirTypeKind.Function(parameters, result, _):
+            for parameter in parameters:
+                if not lambda_scalar_source_type_v1(parameter): return false
+            lambda_scalar_source_type_v1(result)
+        case _: false
+
+export lambda_abi_type_resolved, lambda_scalar_source_type_v1, lambda_scalar_source_signature_v1

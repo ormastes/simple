@@ -1,0 +1,72 @@
+use std.spec.*
+use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_v1,
+    compiler_source_authority_clear_v1}
+use app.io.file_ops.{path_absolute}
+use app.io.time_ops.{time_now_unix_micros}
+use app.io._CliCompile.native_build_snapshot_roots.{native_build_snapshot_source_roots_v1}
+use std.io_runtime.{dir_create_all, file_write, file_read, file_exists}
+use std.nogc_async_mut.sosix.host_facade.{sosix_run}
+
+fn bootstrap_plugin_scope_fixture(mode: text) -> text:
+    val root = path_absolute("build/tests/bootstrap-plugin-scope-{mode}-{time_now_unix_micros()}")
+    val cuda = "src/compositions/cuda_" + mode
+    val leaf = "/plugins/backend_registry/selected_cuda_backend.spl"
+    val registry = "src/plugins/backend_registry/full_static_backend_registry.spl"
+    val vhdl = "src/plugins/backend_vhdl/driver/driver_aot_vhdl_output.spl"
+    val selected = "pub fn selected_cuda_backend_mode_v1() -> text: \"{mode}\"\n"
+    for directory in ["src/app/cli", "src/compiler", "src/lib",
+            "src/compositions/kernel_llvm_cranelift/compiler/driver",
+            cuda + "/plugins/backend_registry", "src/plugins/backend_registry",
+            "src/plugins/backend_vhdl/driver"]:
+        if not dir_create_all(root + "/" + directory): return "mkdir"
+    val entry = "src/app/cli/bootstrap_main.spl"
+    if not file_write(root + "/" + entry,
+            "use plugins.backend_registry.full_static_backend_registry.*\nfn main() -> i64: 0\n"):
+        return "entry"
+    if not file_write(root + "/" + cuda + leaf, selected): return "selected"
+    if not file_write(root + "/src" + leaf,
+            "pub fn selected_cuda_backend_mode_v1() -> text: \"static\"\n"):
+        return "default"
+    if not file_write(root + "/" + registry,
+            "use plugins.backend_registry.selected_cuda_backend.*\npub fn registry_mode() -> text: selected_cuda_backend_mode_v1()\n"):
+        return "registry"
+    if not file_write(root + "/" + vhdl, "pub fn vhdl_output() -> text: \"vhdl\"\n"):
+        return "vhdl"
+    for args in [["init", "-q"], ["add", "src"],
+            ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"]]:
+        if sosix_run("git", ["-C", root] + args).exit_code != 0: return "git"
+    if not compiler_source_authority_clear_v1(): return "clear"
+    val omitted = ["src/compositions/kernel_llvm_cranelift", cuda,
+        "src/compiler", "src/app", "src/lib"]
+    val before = compiler_source_authority_acquire_v1(root, root + "/build/scv", omitted, true)
+    if not before.valid: return "before:" + before.reason
+    if file_exists(before.snapshot.snapshot_root + "/" + registry): return "negative-registry-present"
+    if file_exists(before.snapshot.snapshot_root + "/" + vhdl): return "negative-vhdl-present"
+    if file_read(before.snapshot.snapshot_root + "/" + cuda + leaf) != selected:
+        return "negative-selected-absent"
+    val corrected = omitted + [root + "/src/plugins"]
+    val selectors = native_build_snapshot_source_roots_v1(entry, corrected)
+    if selectors.len() != 6 or selectors[1] != cuda or selectors[5] != root + "/src/plugins":
+        return "precedence"
+    val after = compiler_source_authority_acquire_v1(root, root + "/build/scv", selectors, false)
+    if not after.valid: return "after:" + after.reason
+    if not file_exists(after.snapshot.snapshot_root + "/" + registry): return "registry-missing"
+    if not file_exists(after.snapshot.snapshot_root + "/" + vhdl): return "vhdl-missing"
+    if file_read(after.snapshot.snapshot_root + "/" + cuda + leaf) != selected:
+        return "selected-mode-changed"
+    if not file_exists(after.snapshot.snapshot_root + "/src" + leaf): return "default-template-missing"
+    if after.snapshot.revision_id == before.snapshot.revision_id: return "scope-change-reused-snapshot"
+    ""
+
+describe "bootstrap canonical plugin source scope":
+    it "freezes missing plugin owners while retaining static CUDA precedence":
+        step("compare actual SCV snapshots before and after the canonical plugin selector")
+        expect(bootstrap_plugin_scope_fixture("static")).to_equal("")
+
+    it "retains dynamic CUDA selection ahead of the default static plugin owner":
+        step("include the plugin family without replacing the selected dynamic composition")
+        expect(bootstrap_plugin_scope_fixture("dynamic")).to_equal("")
+
+    it "retains disabled CUDA selection ahead of the default static plugin owner":
+        step("include required non-CUDA plugin owners without forcing CUDA enabled")
+        expect(bootstrap_plugin_scope_fixture("disabled")).to_equal("")

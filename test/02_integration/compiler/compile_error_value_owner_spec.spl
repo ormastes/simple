@@ -1,0 +1,69 @@
+"""Real TryError factory and concrete interpreter Value payload regressions.
+Execution UNRUN: a qualified pure-Simple producer must compile/run this spec.
+"""
+use std.spec.{describe, it, expect}
+use compiler.common.error.{CompileError}
+use compiler.common.runtime_value_v1.{Value, backend_value_int_v1, backend_value_string_v1}
+use compiler.backend.backend_types.{Value as OldValue, backend_value_string_v1 as old_value_string_v1}
+use compiler.mir.mir_types.{MirTypeKind}
+
+describe "CompileError preserves the canonical interpreter Value payload":
+    it "round trips a nonempty text payload through the actual factory":
+        val error = CompileError.try_error(Value.String("propagated Ω"))
+        var payload = ""
+        var saw_try = false
+        match error:
+            case CompileError.TryError(value):
+                saw_try = true
+                match value:
+                    case Value.String(message): payload = message
+                    case _: ()
+            case _: ()
+        expect(saw_try).to_be(true)
+        expect(payload).to_equal("propagated Ω")
+        expect(error.message()).to_equal("try error (? operator)")
+
+    it "preserves an integer payload without converting it to text":
+        val error = CompileError.try_error(Value.Int(-73))
+        var payload: i64 = 0
+        var saw_integer = false
+        match error:
+            case CompileError.TryError(value):
+                match value:
+                    case Value.Int(number):
+                        saw_integer = true
+                        payload = number
+                    case _: ()
+            case _: ()
+        expect(saw_integer).to_be(true)
+        expect(payload).to_equal(-73)
+
+    it "retains the existing ordinary error factory behavior":
+        expect(CompileError.semantic("ordinary semantic failure").message()).to_equal(
+            "ordinary semantic failure")
+
+    it "accepts old-path genuine constructors as the single shared terminal type":
+        val shared: Value = old_value_string_v1("old to shared")
+        val old: OldValue = backend_value_string_v1("shared to old")
+        expect(shared.as_string()).to_equal("old to shared")
+        expect(old.as_string()).to_equal("shared to old")
+        val error = CompileError.try_error(shared)
+        var payload = ""
+        match error:
+            case CompileError.TryError(value):
+                match value:
+                    case Value.String(message): payload = message
+                    case _: ()
+            case _: ()
+        expect(payload).to_equal("old to shared")
+
+    it "retains static constructors and the existing MIR get_type method":
+        expect(Value.int(-31).as_int()).to_equal(-31)
+        expect(OldValue.string("old static").as_string()).to_equal("old static")
+        val typed = backend_value_int_v1(17).get_type()
+        expect(typed != nil).to_be(true)
+        var saw_i64 = false
+        match typed.unwrap().kind:
+            case MirTypeKind.I64: saw_i64 = true
+            case _: ()
+        expect(saw_i64).to_be(true)

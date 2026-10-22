@@ -1,0 +1,44 @@
+"""AC-BOR-03: MIR locals retain the originating short scope."""
+
+use std.spec
+use compiler.mir.mir_data.{MirBuilder}
+use compiler.mir.mir_types.{MirLocal, LocalId, LocalKind, MirType, MirTypeKind}
+use compiler.mir.mir_json.{serialize_mir_local}
+
+describe "short local provenance transport":
+    it "preserves a short origin when renaming and retyping a local":
+        var builder = MirBuilder.new()
+        val id = LocalId(id: 0)
+        builder.locals = [MirLocal(id: id, name: nil, type_: MirType.i64(), kind: LocalKind.Arg(0), is_ghost: false,
+            short_borrow: true, short_mutable: true, short_boundary: 41)]
+        builder.set_local_name(id, "input")
+        builder.set_local_type(id, MirType(kind: MirTypeKind.I32))
+        val local: MirLocal = builder.locals[0]
+        expect(local.name).to_equal(Some("input"))
+        expect(local.short_borrow).to_equal(true)
+        expect(local.short_mutable).to_equal(true)
+        expect(local.short_boundary).to_equal(41)
+
+    it "retains unknown provenance instead of minting a scope during a rename":
+        var builder = MirBuilder.new()
+        val id = LocalId(id: 0)
+        builder.locals = [MirLocal(id: id, name: nil, type_: MirType.i64(), kind: LocalKind.Arg(0), is_ghost: false,
+            short_borrow: true, short_boundary: -1)]
+        builder.set_local_name(id, "input")
+        expect(builder.locals[0].short_boundary).to_equal(-1)
+        expect(builder.locals[0].short_borrow).to_equal(true)
+
+    it "includes the original scope in serialized short locals":
+        val local = MirLocal(id: LocalId(id: 0), name: nil, type_: MirType.i64(), kind: LocalKind.Arg(0), is_ghost: false,
+            short_borrow: true, short_mutable: true, short_boundary: 41)
+        val encoded = serialize_mir_local(local)
+        expect(encoded).to_contain("\"short_borrow\":true")
+        expect(encoded).to_contain("\"short_mutable\":true")
+        expect(encoded).to_contain("\"short_boundary\":41")
+
+    it "serializes an unknown origin and preserves ordinary local JSON bytes":
+        val ordinary = MirLocal(id: LocalId(id: 0), name: nil, type_: MirType.i64(), kind: LocalKind.Arg(0), is_ghost: false)
+        expect(serialize_mir_local(ordinary)).to_equal("{\"id\":0,\"name\":null,\"type\":\"I64\",\"kind\":{\"Arg\":0}}")
+        val unknown = MirLocal(id: LocalId(id: 0), name: nil, type_: MirType.i64(), kind: LocalKind.Arg(0), is_ghost: false,
+            short_borrow: true)
+        expect(serialize_mir_local(unknown)).to_contain("\"short_boundary\":-1")

@@ -9,8 +9,14 @@ The complete working example is
 `examples/10_tooling/minimal_mcp/minimal_mcp.spl` (~30 lines):
 
 ```simple
-use std.mcp_sdk.server.app.{mcp_server_init, mcp_server_tool, mcp_serve}
-use std.mcp_sdk.transport.transport.{StdioTransport}
+use std.nogc_sync_mut.mcp_sdk.server.app.{mcp_server_init, mcp_server_tool, mcp_serve}
+use std.nogc_sync_mut.mcp_sdk.transport.transport.{StdioTransport}
+
+fn echo_schema() -> text:
+    "{\"type\": \"object\", \"properties\": {\"args\": {\"type\": \"string\"}}}"
+
+fn echo_handler(args: text) -> text:
+    args
 
 fn main():
     mcp_server_init("my-server", "0.1.0")

@@ -1,0 +1,569 @@
+# Site 19: stage2-compiler-tests remaining rows on release_phase3 a1d66e52 (2026-10-15)
+
+## Status: OPEN — two failing rows block stage2 full admission; cascades block three more
+
+Measured on `release_phase3` tip `a1d66e52206` with the canonical macOS
+stage1→2 bootstrap (llvm/dynload, jobs=2, 8 GiB RSS cap, full MC/DC waiver
+atoms). Stage1 seed build, stage2 native compile (1348 modules), LINK,
+sanity probes, and the struct-receiver proof ALL PASS — including with the
+original single-line `else: return false` source (PR #3484 seed fix
+verified at bootstrap scale; zero `unresolved call 'return'` warnings). All
+8 `_cg` module-compile rows now PASS (previously failing).
+
+The slim-profile matrix then fails these rows:
+
+## Row 1: `test_runner_build` (FAIL)
+
+From
+`stage2-compiler-tests/.../verification/logs/test_runner_build.log`
+(compiled by the STAGE2 pure-Simple compiler, not the Rust seed):
+
+```
+[ERROR] MIR lowering error: enum construction 'lib.common.sdn.value.SdnValue::Array':
+        payload type mismatch at 0 at src/lib/common/sdn/value.spl:54:9
+[ERROR] MIR lowering error: B5b: match has multiple wildcard arms
+        (arm 1 in fn lib.common.sdn.value.SdnValue.is_null, module lib.common.sdn.value)
+error: in-process native-build: MIR lowering error: enum construction
+       'lib.common.sdn.value.SdnValue::Array': payload type mismatch at 0
+```
+
+`src/lib/common/sdn/value.spl` is clean at the source level: the enum
+declares `Array([SdnValue])`, the constructor receives `items: [SdnValue]`,
+and `is_null` has exactly one wildcard arm. Both errors are stage2
+lowering artifacts in the test-runner closure (the build also covers
+`lib.nogc_sync_mut.test_runner.test_db` and
+`app.test_runner_new.sdn_worker_protocol`).
+
+Related advisory storm in the same row family:
+`[hir-payload-origin-unresolved] owner=lib.common.sdn.value payload=Dict:
+no declaration, re-export hop, or explicit import of this name in the
+owner`. `Dict` is a builtin container and is deliberately NOT filtered by
+`hir_dependency_is_builtin_type` (user modules may declare `Dict`; see the
+docstring in `20.hir/hir_lowering/_Items/module_reexport_materialization.spl:1647`).
+In a small two-module closure this advisory is benign (compile phases
+succeed); in the test-runner closure it likely becomes load-bearing through
+cross-module type-identity divergence — establish that link before
+changing either side.
+
+## Row 2: `compiler_cli_build` (FAIL)
+
+From `.../verification/logs/compiler_cli_build.log` (~34 MB, ends in):
+
+```
+error: in-process native-build: HIR lowering error in
+       src/compiler/70.backend/backend/backend_types.spl: unresolved type: BackendKind
+error: in-process native-build: HIR lowering error in
+       src/compiler/25.traits/associated_types.spl:129:26: unresolved name: Span
+error: in-process native-build: HIR lowering error in
+       src/os/drivers/pci/pci.spl: unresolved name: _pci_ecam_base at :0:0
+```
+
+Diagnosis per residual:
+
+- `Span` (associated_types.spl:129): genuine missing explicit import —
+  only reachable via the `compiler.frontend.core.lexer.*` glob, which the
+  materialization walk excludes. Fixed in this branch by the same
+  documented pattern as trait_def.spl/trait_impl.spl
+  (`use compiler.common.diagnostics.span.{Span}`).
+- `BackendKind`: declared in the SAME file (backend_types.spl:22), so the
+  error position is fabricated — the walk reports against an importing
+  module, not the owner. Needs owner-walk diagnosis against the full-CLI
+  closure to find which importer cannot name BackendKind and what route
+  (export hop / named import) it lacks.
+- `_pci_ecam_base` (pci.spl, inside `@cfg(arm64)`/`@cfg(riscv64)` blocks):
+  called but declared NOWHERE in the tree — a genuinely lost helper. The
+  provider model carries the platform value as `PciHostConfig.ecam_base`
+  (pci_provider.spl:25), so the missing shim likely returned the boot
+  host's configured ECAM base. Needs the SimpleOS PCI driver owner;
+  inventing a hardcoded base would be a semantic guess.
+
+## Cascaded rows (not independent defects)
+
+`stage2_tool_workers` FAIL (worker-failed cascade), and
+`compiler_bootstrap_tests` / `interpreter_interpreter_tests` /
+`loader_interpreter_tests` UNSUPPORTED (`full-cli-artifact-not-built`)
+— all three unblock once Row 2's CLI artifact builds.
+
+## Repro notes
+
+- Rust-seed minimal repros of the SdnValue enum shape (multi-variant,
+  recursive payloads, static constructors, `is_null` wildcard) do NOT
+  reproduce: the defect is stage2-only and closure-dependent.
+- Ad-hoc stage2 invocations die earlier at
+  `provider-artifact-not-mach-o` in Darwin link-provider admission
+  (runtime/provider env of the matrix campaign is required), so row-level
+  reproduction should go through
+  `scripts/bootstrap/bootstrap-from-scratch.sh --stop-after-stage2` with
+  the four `SIMPLE_MCDC_OFF_WAIVER_*` atoms, not hand-rolled native-build.
+
+## Suggested order
+
+1. `Span`/`BackendKind` import-owner residuals (Row 2) — same fix pattern
+   as the landed hir_definitions named-import family; unblocks four rows.
+2. SdnValue MIR payload identity (Row 1) — needs the advisory-to-error
+   chain established in the test-runner closure first.
+
+## Tooling note (found while landing this record)
+
+`check-no-conflict-markers-push.shs` fails closed with "changed 1 path(s) but
+0 were scanned (1 deletion(s))" on a deletion-only commit, blocking an
+otherwise clean push. A deletion cannot introduce a conflict marker; the
+gate should PASS on ranges whose only changes are deletions. Left as a
+recorded defect for the hook owner rather than bypassed with --no-verify.
+
+## Addendum 2026-10-15: second stage2-only codegen defect in the same closure
+
+Reproducing the test_runner_build row outside the campaign env
+(same admitted stage2 binary, same entry/sources/threads) dies EARLIER
+than the campaign's SdnValue MIR error, at an LLVM codegen ICE in the
+same module family:
+
+```
+error: unsupported LLVM value conversion from void to i64
+       function=lib.nogc_sync_mut.test_runner.runner_lifecycle.cleanup_and_exit
+error: 2 module(s) failed with ICE:
+       lib.nogc_sync_mut.test_runner.runner_lifecycle (codegen, caught),
+       lib.nogc_sync_mut.test_runner.test_runner_mcdc_formal_context (codegen, caught)
+```
+
+The retained llc diagnostic (build/native_cache/s98b3bcc*/simple-aot-
+diagnostic-*/message) shows the true failure is a missing ptr->i64
+conversion in a DEAD block emitted after the function's `ret`:
+
+```
+define i64 @...runner_mcdc_eval_program_cached(ptr %l1, ptr %l2, ptr %l3):
+  ...
+  ret i64 %l32
+bb2:                                  ; unreachable, still emitted
+  %l28 = getelementptr ptr, ptr %l3, i64 %l1   ; %l1 is ptr — needs ptrtoint
+```
+
+The live block correctly emits `ptrtoint ptr %l1 to i64` before use; the
+post-ret block bb2 uses the ptr parameter directly as the GEP index.
+Seed compiles this module fine (stage2 native compile passed) — the
+defect is stage2 MIR->LLVM only. Likely the same bb2-emission path feeds
+the `cleanup_and_exit` void->i64 poisoning. Reaching the campaign's
+SdnValue MIR error requires the campaign's exact env (unreconciled:
+sharded-frontend policy alone did not suffice), so row-level work should
+fix or suppress the dead-block emission path first — it may unblock the
+build to the point where the SdnValue error becomes directly reachable.
+
+## Addendum 2026-10-16: SdnValue trigger bisected (three 5-minute closure runs)
+
+Hypothesis-tested by editing only the enum's Dict variant in
+src/lib/common/sdn/value.spl and re-running the exact test_runner_build
+row entry against the GEP-fixed stage2 compiler:
+
+| Enum Dict-variant shape | `SdnValue::Array` payload mismatch? |
+| --- | --- |
+| `Dict(Dict<text, SdnValue>)` (authored) | YES (plus fabricated B5b wildcard) |
+| `Dict(Dict<text, i64>)` (builtin container, no recursion) | NO |
+| `DictPlaceholder(i64)` (plain payload) | NO |
+
+Trigger: a recursive enum reference routed THROUGH a builtin generic
+container payload (`Dict<text, SdnValue>`). Direct recursion
+(`Array([SdnValue])`) is fine; the builtin container alone is fine; the
+combination breaks stage2 MIR payload validation, and the failure is
+REPORTED against the sibling Array construction (value.spl:54), so the
+enum's whole registration identity is poisoned, not just the Dict slot.
+Consistent with the `[hir-payload-origin-unresolved] payload=Dict`
+advisory seam: the cross-module materialization walk cannot name a
+declaring module for builtin containers, and the recursive element inside
+that unresolved payload never canonicalizes to the enum's own symbol.
+
+Fix direction: canonicalize builtin-container payload ELEMENT types to
+the declaring enum's recursive symbol during enum payload registration
+(module_lowering.spl:900-946) or in the alias comparison
+(enum_constructor_payload.spl:216), so an unresolvable container hop no
+longer poisons sibling payload slots. Fast iteration harness: exact row
+entry (test_runner_new/main.spl, 265-module closure) with
+--cache-dir per experiment, ~5 min per run; the separately recorded
+runner_lifecycle void->i64 ICE remains after the GEP fix and is its own
+defect in the same module family.
+
+## Addendum 2026-10-16 (late): owner-canonicalization fix measured; B5b root cause read from the code
+
+PR #3488 (fold enum payload owner spellings through
+mir_layout_canonical_module_name in enum_payload_named_alias_equal) was
+verified in a full stage1->2 campaign: the `SdnValue::Array` payload type
+mismatch is GONE. The B5b error REMAINS, and reading expr_dispatch.spl:6594-6615
+shows exactly why: `is_null` has one wildcard arm (`case _:`); B5b fires only
+when an arm DEGRADES to wildcard. `case Null:` degrades when the enum variant
+`Null` is not found in the lowering's variant registry — the same two-spelling
+identity split, one consumer over: the enum's variant/discriminant registry
+lookup by bare name misses for the re-materialized enum, so the arm falls back
+to wildcard and collides with `case _:`.
+
+Remaining fix: make the enum variant registry (enum_variant_index_q /
+enum_variant_discriminant registration in module_lowering.spl) canonicalize
+the enum owner the same way — register/look up variants under the folded
+dotted module name so a re-materialized enum declaration resolves by the same
+key its match arms use. The bisection table and the construction-side fix
+evidence above carry over unchanged.
+
+## Addendum 2026-10-16 (final): B5b degrades in the frontend bridge, not MIR
+
+Combined campaign (owner-canonicalization + metadata-owner + both backend
+fixes): `payload type mismatch` count is ZERO — the construction side is
+fixed. B5b persists. Reading expr_dispatch.spl:6490-6541: MIR's wildcard
+duplicate check fires only when the FIRST arm is already a Wildcard kind.
+`case Null:` must therefore arrive at MIR as Wildcard — it is degraded in
+the frontend FlatAstBridge (convert_nodes.spl:1593-1652, the documented
+"B5b shard-registry family" site), which cannot resolve the enum-variant
+name against the subject type at bridge time in this closure. The
+metadata-owner fix (enum_constructor_metadata_owner) stays: it hardens a
+genuinely wrong ambiguity call for the constructor path, but it is not the
+B5b consumer. Remaining fix belongs in the FlatAstBridge enum-subject
+resolution (one identity layer above the two MIR fixes already landed).
+
+## Addendum 2026-10-16 (third layer): B5b replays from the mono archive
+
+Ruled out, with evidence: (a) the FlatAstPattern catch-all degradation
+fired only for tags 33 (EXPR_UNIT, 21x), 26 (EXPR_LAMBDA, 17x), 13
+(EXPR_ARRAY_LIT, 4x) across the closure — never EXPR_IDENT, so
+`case Null:` was not dropped at the bridge; (b) MIR's reclassification
+failure path keeps the arm a Binding (expr_dispatch.spl:6562), and the
+scalar gate tolerates Binding+Wildcard without B5b. The only remaining
+route for arm 0 to BE a Wildcard at the scalar gate is that the arms were
+READ AS Wildcard from materialized state: the mono archive captures
+module bodies in ArchiveRequests mode while the enum subject is
+unresolved (the same unresolvable `Dict<text, SdnValue>` seam), degrading
+`case Null:` at capture time; every later lowering replays the poisoned
+archive body. Fix direction: make enum variant names resolve during
+archive body capture (the ensure_archive_nominal_table_v2 /
+MonoTemplateBodyModeV1.ArchiveRequests path in 40.mono), so archived
+bodies retain Enum patterns for their own module's variants.
+
+## Severity note (2026-10-16)
+
+src/lib/common/sdn/value.spl alone has ~15 bare-variant match arms
+(`case Null:`, `case Bool(_):`, ...) across is_null/is_bool/is_number/
+as_bool/as_int/... plus 19 `case _:` arms. If enum-subject resolution
+fails for the module the way is_null evidences, EVERY one of those matches
+degrades; B5b trips only on the first `variant + case _` pair and is the
+fail-closed tripwire — without it the module would compile to silently
+wrong predicates. Treat the archive-capture fix as correctness-critical,
+not a single-function anomaly. The serialized parser-v4 HIR cache
+(*.parser-v4.hir under the row cache dir) holds the post-bridge arms and
+is the fastest place to confirm the degraded shape once a decoder lands.
+
+## Minimization probes (2026-10-16)
+
+With the GEP/void/owner fixes in the stage2 compiler, neither
+`--entry src/lib/common/sdn/strict_v1.spl` (the enum's main consumer, compile
+phases clean; only the ad-hoc harness link-provider limitation fires) nor
+`--entry src/lib/nogc_sync_mut/test_runner/test_db.spl` reproduces B5b or
+the payload mismatch. Only the full
+`--entry src/app/test_runner_new/main.spl` 265-module closure reproduces.
+The mono-archive capture context that degrades the arms therefore
+activates at whole-entry scale, not at consumer-module scale — debugging
+needs the full closure or an archive-body dump, both owned by the mono
+lane's infrastructure.
+
+## Fifth layer (2026-10-16): the registry itself is absent in replay
+
+PR #3493 (unique-owner fallback also when the subject route misses) was
+campaign-verified: B5b PERSISTS. The fallback is never reached because
+`variant_owner_keys("Null")` does not yield exactly one owner in the
+archive-replay lowering instance — the MIR enum variant registry
+(enum_variant_index_q) is never populated for modules whose bodies are
+lowered from the mono archive in ArchiveRequests mode; the registry is
+built only when a MirLowerer instance processes the enum's HirEnum
+declaration, which body-only replay does not do. Fix direction (mono
+archive owner): at the replay/lowering boundary, register the replayed
+module's enum variants into the MIR registry from the archive nominal
+rows (mono_archive_nominal_*), or re-lower the enum declarations
+alongside the bodies. The scalar-gate message "multiple wildcard arms"
+for is_null was emitted from the WILDCARD branch: arm 0 (`case Null:`)
+is an unresolved Binding that consumed the default slot, arm 1 (`case _:`)
+then collided — the text names the wrong arm kind (diagnostic polish,
+separate).
+
+## Stage3 frontier (2026-10-17): mono passes; MIR enum-construction registration divergence
+
+With the mono fix (#3588) and the 20 GiB ceiling (#3589), stage3 on macOS
+builds past the mono phase (peak 13.9 GiB, status=complete) and fails in MIR
+lowering:
+
+```
+MIR lowering error: enum construction: missing runtime identity for 'Option'
+MIR lowering error: enum construction: unregistered declaration
+  'compiler.common.driver_core_modes.CompileMode'
+  at src/app/cli/bootstrap_main.spl:380:20 and :550:20
+```
+
+SEED-WORKS / STAGE2-FAILS DIVERGENCE: stage2's own build compiled the same
+entry (bootstrap_main.spl) with the same construction sites successfully —
+stage2 was built by the Rust seed; stage3 is built by the stage2 (pure-Simple)
+compiler. The self-hosted compiler does not register what the seed registers
+for enum constructions reached through mono-specialized/generic contexts
+(Option's runtime identity; a qualified enum key from an imported module at
+the entry's construction sites).
+
+Checked and ruled out: register_module_enum_inventory_v1 (#3527) and the
+provider-enum paths DO call register_enum_variants, which registers runtime
+ids — so the gap is in which modules/instantiations those passes cover in the
+stage3 schedule, or in mono's minted instantiations needing their own runtime
+registration (#3521/#3526 family). Owner: self-host divergence lane.
+Repro: the stage3 resume command in /tmp/resume34-cap12.sh (final-push
+worktree); HIR is cached so the mono/MIR phases re-run in ~15 min.
+
+## Module-emission divergence (2026-10-17): whole modules absent from stage3 objects
+
+After #3595 (stage3 bootstrap enum inventory), stage3's mono and MIR phases
+PASS and the final link fails: `app.cli.bootstrap_focused_native_build.
+run_exact_stage3_focused_capsule` / `run_exact_stage4_focused_capsule` and all
+of `bootstrap_focused_native_build_args` are referenced (U) from
+bootstrap_main.o but DEFINED NOWHERE in the stage3 object set (nm across all
+native-objects-*/0-*.o: zero focused_* definitions, no mono renames). The seed
+emits these modules (stage2's own build, same entry, linked fine); the
+self-hosted stage2 compiler's module scheduler skips BOTH modules entirely
+despite phase1 closure scans, imports, and direct uses in the entry's normal
+paths (cache_dir at bootstrap_main.spl:413 etc.).
+
+WORKAROUND (uncommitted, final-push verification tree only): the three
+flag-readers bootstrap_main needs are inlined into bootstrap_main.spl (entry
+module, which the scheduler always emits), and the two focused-capsule
+dispatch routes return a clear error. This unblocks the stage3 link; the
+focused-capsule sub-build routes are disabled in the self-hosted binary.
+
+Owner: self-host divergence lane. The scheduler skips exactly these two
+modules — the trigger (naming? import shape? demand propagation through
+`use ...{a, b, c}` explicit lists?) needs the seed-vs-stage2 scheduler
+comparison; the repro is the stage3 resume in /tmp/resume34-cap12.sh
+(HIR cached, mono/MIR/link re-run in ~20 min).
+
+## Emission divergence is systemic (2026-10-17, second stage3 link)
+
+The focused_native_build workaround cleared its two symbols; the next stage3
+link fails on 25 undefined symbols across ~17 modules, including function-
+level gaps in core modules (`lib.nogc_sync_mut.io_runtime.env_get`,
+`dir_create` — not whole-module) and driver modules (`compiler_driver_create`,
+`run_native_build_entry_v1`, K1 backend table, compile-options/result helpers).
+Counting evidence: the stage3 link inputs carry ~44 defined symbols across 40
+fresh objects; the remaining module objects must come from the content-keyed
+native cache, and the missing 25 are functions whose emitting modules produced
+no object in this scope. Stage2's build (by the seed) emitted all of them.
+
+This is NOT module-pair-specific: the stage2-built compiler's emission/cache
+diverges from the seed's across the closure. Inlining is not viable at this
+scope. Owner: self-host divergence lane — the seed's emitter/caching is the
+reference; compare emission+native-cache admission for the 25 named symbols
+(repro: /tmp/fullchain-monofix.sh on the final-push tree; HIR cached, link
+verdict in ~20 min).
+
+## ROOT CAUSE FOUND (2026-10-17): symbol-mangling scheme mismatch at the stage3 link
+
+Measured (nm over all 40 fresh stage3 objects: 3,059 defs, ALL dotted; all
+1,344 seed-built cache objects: 32,810 defs, ALL double-underscore; zero
+spelling overlap; every undefined symbol's underscore twin exists in the
+cache):
+- Seed rule (mangle.rs module_prefix_from_path): `{prefix}__{fn}`, numbered
+  layers stripped, `_dot_` escaping, suffix disambiguation.
+- Pure-Simple rule (provider_metadata.spl:46 mir_provider_callable_identity;
+  _MirToLlvm/core_codegen.spl:396): `{module.name}.{fn}` — DOTTED.
+Both schemes are internally consistent; stage3 is the FIRST link that mixes
+both emitters by design (phase-compatibility reuse of seed-built cache
+objects), so the fresh entry's dotted references miss the cache's underscore
+definitions. Stage2 "emitted all of these" because stage2 was emitted
+entirely by the seed — one scheme.
+SECOND divergence riding on top: K1 modules are defined in the cache under a
+composed owner prefix (`_compositions__kernel_llvm_cranelift__compiler__...`)
+— scheduler/owner-attribution divergence; scheme alignment alone would not
+fix those.
+
+Ranked fix designs (agent-2, evidence-backed):
+- H1 (long-term): align pure-Simple mangling to the seed's __ scheme —
+  requires changing name-BUILDER and name-PARSER together (mir_provider_callable_key,
+  extension_owner_is_known rfind("."), _hir_symbol_owner_module all split on
+  dots) plus _dot_ escaping and suffix disambiguation. Partial alignment
+  silently mis-links — not a one-cycle change.
+- H2 (next experiment, de-risked): link-lane emitter gate — tag cache
+  capsules with the producing emitter's scheme; the pure-Simple compiler
+  re-emits (never links) seed-scheme cache objects, so stage3 is dotted
+  throughout and links. Correct by construction; costs the cross-stage cache
+  reuse (~1300 modules of MIR/codegen the caches exist to avoid). Verify with
+  /tmp/fullchain-monofix.sh (HIR cached; ~20 min to the link verdict).
+
+## Emission-coverage root cause (2026-10-17, H2 chain cycle falsified the cache hypothesis)
+
+PR #3608 (emitter-scheme gate, landed) made the stage3 link scheme-homogeneous
+via full re-emission — and the SAME 36 symbols stayed undefined. Decisive
+evidence: the link contains NO cache objects at all (stage3-native-cache has
+no objects dir; the runtime archives are Rust-only per nm); the link is the
+entry object + ~40 fresh module objects + Rust runtime. So the bootstrap-fixed
+entry lane (lower_bootstrap_entry_module → entry-only lowering) emits only
+~40 module objects; io_runtime.env_get, driver_compile_options_default, the
+K1 table rows, and the other 30 symbols live in modules THIS LANE NEVER
+LOWERS. The seed's stage3-equivalent lane lowers the whole callable closure
+(~1299 modules) — that is the coverage gap, pure and simple.
+
+Next experiment (one cycle): extend the bootstrap-fixed lane to lower its
+callable closure (walk the entry's demanded callables' owning modules like
+the direct lane's provider loops, or seed the lane with the closure's module
+list before entry lowering). Cheap pre-check without a chain cycle: sweep-
+style per-module compiles of bootstrap_main's closure modules and compare
+the emitted-object count (~40) against the seed's lane's count.
+
+## 2026-10-19 — roundtrip refusal under the ADMITTED binary proves the erased-read encode defect predates the campaign
+
+The clean-seed rebuild (recipe: wt-f836519 @ f83651904da, compiler =
+stage3 storage stage2-admitted/simple, cache /tmp/p2x/seednew-cache,
+SIMPLE_SCV_INVENTORY_COLD_INIT=1, log `/tmp/p2x/build-seednew2.log`)
+lowered all 1311/1311 HIR modules successfully and then died at the very
+end of phase 3 with `RT-E-HIR-BLOB-NONCANONICAL: module blob 0 failed
+roundtrip verification` (`[ERROR] phase 3 FAILED`). The compiler is
+deterministic — a plain retry (build-seednew3.log, cache seednew-cache2)
+reproduced the identical draw. This matters for campaign bookkeeping: the
+failing encode-side read happens INSIDE the stage2-ADMITTED binary — an
+artifact admitted before and independently of this campaign's 26 merged
+PRs — so the erased-read HIR-codec encode defect demonstrably predates the
+whole campaign and is upstream's to repair. The codec selfcheck correctly
+refused the non-roundtripping blob (fail-closed cache behavior, unchanged);
+the campaign-side defect was only that the plain native-build lowering lane
+treated this codec-class refusal as fatal. Fixed in 03fe2c2aaab
+(src/compiler/35.semantics/rt_criticality_validation.spl): a codec-class
+blob refusal (roundtrip-unstable / decode / encode-reject) now validates
+the in-memory fallback module array instead (proven transport, same
+contract as the empty-blobs path), emits a loud `[hir-blob-refused]`
+eprint, records a Warning, and proceeds UNCACHED — slow, not wrong. The
+selfcheck itself was not weakened, and a refusal with no fallback modules
+left to validate stays fatal.
+
+Follow-up (same day, fix commit 03fe2c2aaab): the phase-3 gate is only
+half of the story — the builder embeds its driver, so the fix had to be
+baked into the builder binary. Rebuilt a stage2 candidate from the fixed
+source with the Rust seed (`/tmp/p2x/build-cand-seednew2.log`, 573s; the
+first attempt without `SIMPLE_BOOTSTRAP=1` failed its link because the
+hosted `libsimple_native_all.a` is only resolved for the bootstrap entry),
+then reran the clean-seed recipe with the candidate as the builder
+(`/tmp/p2x/build-seednew6.log`): phase 3 now CLEARS — the refusals appear
+as `[post-hir-validation-warning] RT-E-HIR-BLOB-NONCANONICAL ... (codec-
+class refusal: non-fatal, build proceeds UNCACHED)` — and the build enters
+monomorphize and MIR. It then SIGSEGVs immediately in
+`compiler.mir._MirLowering.module_lowering.MirLowering.lower_module`
+(EXC_BAD_ACCESS at 0xffffffffbfc00800; crash report
+candidate-seednew-2026-10-19-123325.ips) — a NEW crash site: every prior
+candidate today (c167/c168/oldtree) crashed in HIR
+`module_declarations_bootstrap`, this one gets through HIR and dies one
+phase later. That MIR-lower_module fault is the next row; it is downstream
+of and unrelated to the RT-blob gate fix.
+
+## 2026-10-19 (later) — cycle-170: SCV snapshot-staging refusal is a compiled-marshalling draw, not a source-level read
+
+Follow-up to the seednew10 wall (commit c6a4eba8539, PARTIAL). Full evidence
+chain: (1) both linked `rt_secure_temp_dir` implementations (fresh C
+`runtime_native.o`, authority-archive `runtime_secure_staging.o`) are
+byte-logical twins (text_arg_to_path 4096 → snprintf → mkdtemp → chmod 0700);
+(2) mkdtemp succeeds from the shell against the same parent/template; (3)
+string-literal text args cross the text-ABI extern boundary as (NULL, len)
+BY DESIGN (runtime_native.c `rt_string_data`, values < 0x10000; pinned by
+check-text-literal-extern-abi.shs) — literal probes always refuse, a trap;
+(4) a heap-string micro-probe still refused inside the candidate only; (5)
+annotated binds AND single-element array transport of the crossing words
+both failed to cure it, while single-argument crossings (dir_create) draw
+clean in the same binary. Conclusion: candidate-seednew's COMPILED
+marshalling of this two-argument text-ABI extern call draws erased — below
+source-level reach. Latent footprint: the candidate's own AOT "diagnostic
+staging unavailable" on every candidate native-build (invisible unless
+diagnostics stage). Next levers: two single-arg-shaped crossings via a shim,
+candidate-side codegen fix for multi-arg text-ABI externs (root cause), or
+SCV staging via file_create_excl only with explicit review of the 0700→0755
+privacy delta. Cycle-169's lower_module fix remains parked behind this wall.
+
+## 2026-10-19 (cycle-170 conclusion) -- SCV admission unblocked: four stacked causes; MIR reached; cycle-171 is the entry-module MIR erased-value errors
+
+The day-long `snapshot-staging-create-failed` wall had four stacked causes,
+each probe-measured (commit 669c50c11be): (1) weak return-3 stubs preempted
+the new C-runtime exports (stub scan ignored the fresh core-C capsule, and
+the capsule retention list dropped the symbols); (2) the seed's text->(ptr,len)
+expansion is keyed by an explicit NAME MAP in codegen/instr/calls.rs -- the
+runtime_sffi.rs arity rows alone do not expand (disassembly showed the raw
+handle in x0); (3) the compiled two-arg rt_secure_temp_dir crossing drew
+corrupted words, so staging now crosses as two single-arg slot-setters plus a
+zero-arg make(); (4) `_mkdtemp` was ITSELF a weak stub (`mov x0,#3; ret`) --
+mkdtemp "succeeded" without creating the directory and chmod failed ENOENT;
+the core now uses an exclusive mkdir+EEXIST-retry loop and mkdtemp/mkstemp/
+wmemchr are added to is_known_system_name. VERIFIED (build-seednew17.log):
+SCV admission passes, snapshot 3cdae91c is created, all 1311 modules clear
+HIR + mono, and the MIR bootstrap-fixed lane prints closure_module for every
+module + done (closure_modules=1310) -- the cycle-169 SIGSEGV is dead.
+NEXT WALL (cycle-171): entry-module MIR lowering fails with erased-value
+errors -- 'undefined variable BLOCK_FIXED/BLOCK_DYNAMIC/BLOCK_STORED' and a
+corrupted enum declaration name 'HostGpuLaneBegin\n.HwConstant::bits.
+CompileMode' in lib.nogc_sync_mut.compression.* -- the crash-class draw now
+manifests as wrong values; same treatment family (single annotated bind /
+bind-once at the drawing read in the entry module's MIR lowering). Side
+finding: the bug-DB 'CRC mismatch' warning is reader-side (tracked DB body
+matches zlib crc32 exactly; self-hosted crc32_text disagrees) -- warning-only,
+but the workaround table never loads, leaving erased-read workarounds
+unapplied in these builds.
+
+## 2026-10-19 (cycle-171, partial) -- bootstrap-lane registration draws: 64,960 -> 56,801 MIR errors; per-build draw lottery blocks per-site chasing
+
+Cycle-171 opened with 64,960 MIR errors (classes: 'undefined variable
+BLOCK_*' module vals, 'enum construction: unregistered declaration' with
+clean lookup keys, 'missing runtime identity', corrupt qualified keys).
+Commit 7c1899d73a8 applied the bind-once family to the registration reads
+(enum-bootstrap inventory Dict index -> keys()+annotated extraction;
+bootstrap-flat constants element reads -> annotated HirConst rebinds) and
+measured 64,960 -> 56,801 on seednew18. A follow-up treatment (annotated
+rebind of register_enum_variants' by-value HirEnum param plus the second
+inventory loop) REBUILT the lottery and produced 113,653 errors on
+seednew19 -- the rebind hurt and was reverted; the branch sits at the
+verified-best 7c1899d73a8 (wt-f836519 in sync). LESSON FOR THE NEXT ROW:
+error-count deltas across candidate rebuilds are not purely treatment
+effects -- every rebuild reshuffles which compiled read sites draw, so
+single-site bind-once chasing is stochastic at this wall's scale. The
+remaining classes (enum runtime ids, qualified-key construction in
+symbol_name_scalar_raw/enum_qualified_key, method resolution) likely need
+the systemic lever: either the workaround-table load repaired (the
+reader-side crc32_text mismatch means erased-read workaround annotations
+never apply to these builds -- see the cycle-170 conclusion) or a
+seed-side codegen fix for the erased-read defect itself.
+
+## 2026-10-19 (cycle-172) -- CRC gate fixed (byte-path, fail-closed verified); workaround load now blocked one layer deeper at bug-ID validation
+
+Diagnosis: the 'CRC mismatch' was NEVER an algorithm defect -- pure-Simple
+crc32_text passes the 0xCBF43926 KAT and matches zlib on a 320KB input; the
+tracked bug_db.sdn body matches zlib crc32 exactly (278564174, Python-
+verified, clean UTF-8, identity round trip). The defect is the erased-read
+family in the text crossing chain. Fix (5c94e8d92a8): workaround_bug_snapshot
+reads raw bytes (workaround_host_read_bytes alias) and CRCs the exact body
+bytes of the same read via crc32_update -- gate stays fail-closed (verified:
+tracked DB ACCEPTs at 278564174, flipped-byte copy REFUSEs at
+computed=2213474243). Next layer (8e78e147a6c): the refresh then failed
+'unknown canonical bug ID' for an id PRESENT in the DB with a correctly-
+printed key -- get_bug's lookup read drew; bind-once applied there but the
+seed build STILL fails at the same validation: the draw sits deeper
+(available_bug_tables / get_table / get_row / the sdn parse). Workarounds
+therefore still do not load; the MIR count with workarounds applied remains
+UNMEASURED. Control numbers this cycle: same wt tree measured 56,801
+(seednew18) and 113,663 (seednew20) on different builder binaries --
+final confirmation that the count is builder-binary-dependent (draw lottery),
+not tree-determined.
+
+## 2026-10-19 (cycle-173) -- workaround-load chase: parsed tables are EMPTY under the candidate; five bind-once layers applied; still one draw deep
+
+A wa-diag round (env SIMPLE_WORKAROUND_DIAG=1, commit 1ccbe18fec9) proved the
+'unknown canonical bug ID' failure is EMPTY PARSED TABLES, not a lookup miss:
+bugs_active rows=0 / bugs rows=0 under candidate-seednew where the seed engine
+parses 149/1436 rows from the same CRC-verified bytes (header parses fine, so
+every table keeps its name but loses all rows -- sections degrade to
+header-only). Bind-once treatments applied and seed-verified: SdnTable.get_row
+(for-in/key/pk), SdnDatabase.get_table (name/dict), SdnTable.parse row loop
+(lines[i]/columns[j]/parts[j] -- the silent row-skip), the section for-in and
+match-case table crossing in workaround_bug_snapshot. The validation itself
+now re-derives membership from the RAW DB BYTES (CRC-verified) via a byte
+substring scan instead of the parsed-table lookup. MEASURED: the refresh STILL
+fails at the same id -- with 0-row tables persisting, the surviving draw sits
+at/below content.split / bytes_to_text / section materialization. The
+workaround-load master experiment remains UNMEASURED after three cycles; the
+per-build draw lottery (cycle-171 lesson) makes each additional bind-once a
+stochastic step. RECOMMENDED PIVOT for the next row: stop curing individual
+read sites in the refresh path and instead measure whether the SEED-BUILT
+compiler (Rust seed as builder, which parses correctly) can produce the
+workaround index ONCE (simple check-dbs --fullscan bugs equivalent under the
+seed) and ship it as .simple/workarounds.sdn in wt -- the refresh then takes
+the identical-payload early-Ok path and NO candidate-side parse of the bug DB
+is needed at all.

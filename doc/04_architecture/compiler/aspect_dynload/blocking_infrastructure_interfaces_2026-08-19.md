@@ -52,7 +52,7 @@ Module: **new** `src/compiler/99.loader/aspect_pack_io.spl`
 (NOT in `smf_mmap_native.spl` / `object_mapper.spl` — those are whole-file SMF
 policy and must keep their `SEQUENTIAL` behaviour unchanged).
 
-```simple
+```simple:skip
 struct PackWindow:          # an aligned mapping that covers [want_offset, +want_length)
     address: i64            # page-aligned mapping base, 0 = failed
     map_length: i64         # aligned length actually passed to mmap
@@ -106,7 +106,7 @@ file-backed front door that feeds those parsers only the trailer and directory.
 
 Module: **new** `src/compiler/99.loader/aspect_pack_index_cache.spl`.
 
-```simple
+```simple:skip
 struct PackIndexEntry:
     pack_path: text
     file_size: i64

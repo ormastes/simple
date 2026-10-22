@@ -1,0 +1,182 @@
+# @cover src/lib/common/build_manager/group_process_protocol.spl 80%
+# @cover src/compiler/80.driver/action_graph/artifact_service_bridge.spl 80%
+# @cover src/compiler/80.driver/action_graph/artifact_owner_recovery.spl 80%
+# @req REQ-IM-007 REQ-FORMAL-OWNER
+# Real owner APIs with filesystem-backed broker receipt fixtures. These are
+# protocol regressions, not live process death/descendant retirement evidence.
+use std.spec.*
+use std.nogc_sync_mut.io.env_ops.{cwd}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+use std.nogc_sync_mut.io.dir_ops.{dir_create}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_exists}
+use std.common.build_manager.group_process_protocol.{GroupProcessRequestV1, GroupProcessLaunchV1, GroupProcessPollV1, group_process_identity_v1, group_process_observation_encode_v1}
+use std.common.build_manager.grouped_execution_contract.{GroupedActionLeaseV1}
+use std.nogc_sync_mut.io.group_process_owner.{GroupProcessOwnerV1}
+use compiler.driver.action_graph.artifact_owner_recovery.{demand_artifact_recover_owner_v1}
+use compiler.driver.action_graph.artifact_service_bridge.{DemandArtifactRouteV1, demand_artifact_route_v1, demand_artifact_claim_owned_v1, demand_artifact_commit_owned_v1}
+use compiler.driver.action_graph.build_action_v1.{BuildActionV1, BuildActionResultV1, BuildActionPoolV1, BuildActionStateV1}
+use compiler.driver.action_graph.persisted_graph.{PersistedBuildGraphV1}
+use compiler.driver.action_graph.coordinator.{BuildPoolBudgetV1, coordinator_new_v1}
+use compiler.driver.action_graph.demand_compile_integration.{DemandCompileExecutionV1}
+use compiler.driver.backend.native_promotion_queue.{NativePromotionQueueV1}
+use compiler.driver.perf.demand_compile_counters.{demand_compile_counters_empty_v1}
+use lib.compiler_artifact_service.profile.{artifact_service_profile_v1}
+use lib.compiler_artifact_service.protocol.{ArtifactResultV1}
+use lib.compiler_artifact_service.service.{ArtifactRequestStateV1, artifact_service_claim_v1, artifact_service_complete_v1}
+
+struct RecoveryFixtureV1:
+    route: DemandArtifactRouteV1
+    owner: GroupProcessOwnerV1
+    binding: GroupedActionLeaseV1
+
+fn recovery_fixture(label: text) -> RecoveryFixtureV1:
+    val root = cwd().replace("\\", "/") + "/build/artifact-recovery-" +
+        str(getpid()) + "-" + str(current_time_ms()) + "-" + label
+    expect(file_exists(root)).to_be(false)
+    expect(dir_create(root, true)).to_be(true)
+    val snapshot = "a".repeat(64)
+    val cache = "b".repeat(64)
+    val request = GroupProcessRequestV1(root + "/worker", cache, [], [], root,
+        [], root + "/stdout", root + "/stderr", 1000, root + "/broker", cache)
+    val launch = GroupProcessLaunchV1(root, "worker-a", 7, snapshot, cache, 4096, request)
+    val owner = GroupProcessOwnerV1(launch, group_process_identity_v1(launch), "linux")
+    val action = BuildActionV1("action-a", "compile", ["source-a"], [], ["object-a"], BuildActionPoolV1.parse, 1, snapshot, 1024, "")
+    val independent = BuildActionV1("action-b", "compile", ["source-b"], [], ["object-b"], BuildActionPoolV1.parse, 1, snapshot, 1024, "")
+    val coordinator = coordinator_new_v1(PersistedBuildGraphV1("graph", "", snapshot, [action, independent]), [BuildPoolBudgetV1(BuildActionPoolV1.parse, 2, 4096)])
+    val execution = DemandCompileExecutionV1(true, "ok", Some(coordinator), None, NativePromotionQueueV1([]), "action-a", demand_compile_counters_empty_v1(), None, None, 0, "", 0, 0)
+    val initial = demand_artifact_route_v1(execution, artifact_service_profile_v1("recovery", cache, ["parse"], 0, true), true, owner.identity_digest, 7)
+    val claimed = demand_artifact_claim_owned_v1(initial, "action-a", "lease-a", 4096)
+    expect(claimed.claim.valid).to_be(true)
+    RecoveryFixtureV1(claimed.route, owner,
+        GroupedActionLeaseV1("group-a", "action-a", "worker-a", 7, "lease-a", snapshot, cache, false))
+
+fn recovery_write_observation(fixture: RecoveryFixtureV1, observation: GroupProcessPollV1):
+    expect(file_atomic_write(fixture.owner.launch.root + "/broker.tree.sdn",
+        group_process_observation_encode_v1(fixture.owner.identity_digest, observation))).to_be(true)
+
+fn recovery_write_reaped(fixture: RecoveryFixtureV1):
+    recovery_write_observation(fixture, GroupProcessPollV1(true, true, true, 0, 1, false, false, 512, 0, false))
+
+fn recovery_result() -> BuildActionResultV1:
+    BuildActionResultV1("action-a", "a".repeat(64), true, false, "object-a", "", [], 512)
+
+fn recovery_expect_original_owner(route: DemandArtifactRouteV1, owner_id: text):
+    expect(route.service.entries[0].state).to_equal(ArtifactRequestStateV1.leased)
+    expect(route.service.entries[0].lease.unwrap().owner_id).to_equal(owner_id)
+    expect(route.service.entries[0].lease.unwrap().generation).to_equal(7)
+    expect(route.service.entries[0].cas_artifact_digest).to_equal("")
+    expect(route.execution.coordinator.unwrap().runtime[0].state).to_equal(BuildActionStateV1.running)
+    expect(route.execution.coordinator.unwrap().runtime[0].owner_token).to_equal("lease-a")
+    expect(route.execution.coordinator.unwrap().runtime[0].memory_reserved_bytes).to_equal(1024)
+
+describe "REQ-IM-007: requeue only a durably reaped artifact owner":
+    it "should release the reservation, fence old claims and reject stale completions":
+        step("Retain the original dispatch lease and a collected-tree receipt fixture")
+        val fixture = recovery_fixture("success")
+        val old_lease = fixture.route.service.entries[0].lease.unwrap()
+        recovery_write_reaped(fixture)
+        val recovered = demand_artifact_recover_owner_v1(fixture.route, fixture.owner, fixture.binding, "c".repeat(64), 8)
+        expect(recovered.is_ok()).to_be(true)
+        val ready = recovered.unwrap()
+        expect(ready.service.entries[0].state).to_equal(ArtifactRequestStateV1.queued)
+        expect(ready.service.entries[0].lease.unwrap().generation).to_equal(7)
+        expect(ready.execution.coordinator.unwrap().runtime[0].state).to_equal(BuildActionStateV1.pending)
+        expect(ready.execution.coordinator.unwrap().runtime[0].memory_reserved_bytes).to_equal(0)
+        expect(file_exists(fixture.owner.launch.root + "/tree-reaped.sdn")).to_be(true)
+        recovery_expect_original_owner(fixture.route, fixture.owner.identity_digest)
+
+        step("Reject an old-generation claim and completion while the entry is queued")
+        val stale_claim = artifact_service_claim_v1(ready.service, old_lease.owner_id, old_lease.lease_id, 7, 4096, -1)
+        expect(stale_claim.entries[0].state).to_equal(ArtifactRequestStateV1.queued)
+        val stale_queued = demand_artifact_commit_owned_v1(ready, recovery_result(), Some(old_lease))
+        expect(stale_queued.accepted).to_be(false)
+        expect(stale_queued.route.service.entries[0].state).to_equal(ArtifactRequestStateV1.queued)
+
+        step("Claim under the new generation, reusing the token to exercise generation fencing")
+        val retry = demand_artifact_claim_owned_v1(ready, "action-a", "lease-a", 4096)
+        expect(retry.claim.valid).to_be(true)
+        val new_lease = retry.route.service.entries[0].lease.unwrap()
+        expect(new_lease.generation).to_equal(8)
+        expect(new_lease.owner_id).to_equal("c".repeat(64))
+        val stale = demand_artifact_commit_owned_v1(retry.route, recovery_result(), Some(old_lease))
+        expect(stale.accepted).to_be(false)
+        val absent = demand_artifact_commit_owned_v1(stale.route, recovery_result())
+        expect(absent.accepted).to_be(false)
+        expect(absent.route.service.entries[0].state).to_equal(ArtifactRequestStateV1.leased)
+        expect(absent.route.execution.coordinator.unwrap().runtime[0].owner_token).to_equal("lease-a")
+        val stale_service = artifact_service_complete_v1(absent.route.service, old_lease,
+            ArtifactResultV1("action-a", "b".repeat(64), "a".repeat(64), "old-object", [], true, false, ""))
+        expect(stale_service.entries[0].cas_artifact_digest).to_equal("")
+
+        step("Commit only with the lease captured at successor dispatch")
+        val completed = demand_artifact_commit_owned_v1(absent.route, recovery_result(), Some(new_lease))
+        expect(completed.accepted).to_be(true)
+        expect(completed.route.service.entries[0].cas_artifact_digest).to_equal("object-a")
+        expect(completed.route.execution.coordinator.unwrap().runtime[0].memory_reserved_bytes).to_equal(0)
+        expect(completed.route.service.entries[1].state).to_equal(ArtifactRequestStateV1.queued)
+        expect(demand_artifact_recover_owner_v1(completed.route, fixture.owner, fixture.binding, "d".repeat(64), 9).is_err()).to_be(true)
+
+    it "should preserve a completion that wins before recovery":
+        step("Publish the original owner's result before applying its death receipt")
+        val fixture = recovery_fixture("completion-first")
+        recovery_write_reaped(fixture)
+        val completed = demand_artifact_commit_owned_v1(fixture.route, recovery_result(), fixture.route.service.entries[0].lease)
+        expect(completed.accepted).to_be(true)
+        expect(demand_artifact_recover_owner_v1(completed.route, fixture.owner, fixture.binding, "c".repeat(64), 8).is_err()).to_be(true)
+        expect(completed.route.service.entries[0].cas_artifact_digest).to_equal("object-a")
+        expect(file_exists(fixture.owner.launch.root + "/tree-reaped.sdn")).to_be(false)
+
+    it "should reject absent, live, incomplete and differently bound terminal evidence":
+        for kind in 0..5:
+            step("Supply an unproven process-tree retirement observation")
+            val fixture = recovery_fixture("unproven-" + str(kind))
+            if kind == 1:
+                recovery_write_observation(fixture, GroupProcessPollV1(false, false, false, 1, 0, true, false, 512, 512, true))
+            elif kind == 2:
+                recovery_write_observation(fixture, GroupProcessPollV1(true, true, false, 1, 1, false, false, 512, 0, false))
+            elif kind == 3:
+                recovery_write_reaped(fixture)
+                expect(file_atomic_write(fixture.owner.launch.root + "/tree-reaped.sdn", "different-lease-proof")).to_be(true)
+            elif kind == 4:
+                expect(file_atomic_write(fixture.owner.launch.root + "/broker.tree.sdn",
+                    group_process_observation_encode_v1("f".repeat(64), GroupProcessPollV1(true, true, true, 0, 1, false, false, 512, 0, false)))).to_be(true)
+            val denied = demand_artifact_recover_owner_v1(fixture.route, fixture.owner, fixture.binding, "c".repeat(64), 8)
+            expect(denied.is_err()).to_be(true)
+            recovery_expect_original_owner(fixture.route, fixture.owner.identity_digest)
+            if kind != 3:
+                expect(file_exists(fixture.owner.launch.root + "/tree-reaped.sdn")).to_be(false)
+
+    it "should reject identity, epoch, snapshot and cache mismatches before collection":
+        for kind in 0..8:
+            step("Alter one retained binding field or successor generation")
+            val fixture = recovery_fixture("mismatch-" + str(kind))
+            recovery_write_reaped(fixture)
+            var binding = fixture.binding
+            var owner = fixture.owner
+            if kind == 0: binding.worker_id = "another-worker"
+            elif kind == 1: binding.generation = 6
+            elif kind == 2: binding.snapshot_digest = "e".repeat(64)
+            elif kind == 3: binding.cache_identity = "e".repeat(64)
+            elif kind == 4: binding.lease_id = "another-lease"
+            elif kind == 5: owner.identity_digest = "e".repeat(64)
+            elif kind == 6: binding.completed = true
+            val denied = demand_artifact_recover_owner_v1(fixture.route, owner, binding, "c".repeat(64), if kind == 7: 7 else: 8)
+            expect(denied.is_err()).to_be(true)
+            recovery_expect_original_owner(fixture.route, fixture.owner.identity_digest)
+            expect(file_exists(fixture.owner.launch.root + "/tree-reaped.sdn")).to_be(false)
+
+    it "should reject a coordinator mismatch without requeueing the service":
+        step("Retain a different coordinator owner token")
+        val fixture = recovery_fixture("coordinator")
+        recovery_write_reaped(fixture)
+        var split = fixture.route
+        var execution = split.execution
+        var coordinator = execution.coordinator.unwrap()
+        coordinator.runtime[0].owner_token = "different-owner"
+        execution.coordinator = Some(coordinator)
+        split.execution = execution
+        expect(demand_artifact_recover_owner_v1(split, fixture.owner, fixture.binding, "c".repeat(64), 8).is_err()).to_be(true)
+        expect(split.service.entries[0].state).to_equal(ArtifactRequestStateV1.leased)
+        expect(split.execution.coordinator.unwrap().runtime[0].owner_token).to_equal("different-owner")
+        expect(file_exists(fixture.owner.launch.root + "/tree-reaped.sdn")).to_be(false)

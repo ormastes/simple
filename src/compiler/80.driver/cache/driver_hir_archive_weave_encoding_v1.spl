@@ -1,0 +1,189 @@
+# Complete deterministic byte binding for the actual weave result. Every
+# encoding runs in an active scratch lease; bytes are never an admission token.
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.cache.driver_hir_archive_weave_boundary_types_v1.{
+    DriverHirArchiveWeaveBoundaryV1, DriverHirArchiveWeaveBoundaryUseV1}
+use compiler.driver.cache.driver_cold_hir_weave_body_v1.{DriverColdHirWeaveBodyV1}
+use compiler.driver.cache.hir_body_typecheck_lease_v1.{HirBodyArchiveV1}
+use compiler.driver.cache.hir_body_semantic_lease_v1.{hir_body_semantic_policy_v1}
+use compiler.driver.cache.driver_hir_post_validation_policy_v1.{DriverHirPostValidationPolicyOwnerV1,
+    driver_hir_post_validation_policy_load_in_owned_scope_v1}
+use compiler.driver.cache.driver_hir_post_validation_gate_facts_v1.{DriverHirPostValidationGateReportV1}
+use compiler.frontend.frontend_advisory_preprocess_port_v1.{FrontendAdvisoryPreprocessPolicyV1}
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+
+fn driver_hir_weave_put_texts_v1(writer: HirCodecWriter, values: [text]):
+    writer.put_i64(values.len())
+    for value in values: writer.put_text(value)
+
+fn driver_hir_weave_put_archive_v1(writer: HirCodecWriter, archive: HirBodyArchiveV1):
+    writer.put_text(archive.source_key)
+    writer.put_text(archive.archive_key)
+    writer.put_text(archive.body_digest)
+    writer.put_text(archive.lowering_warnings_digest)
+    val input = archive.input
+    writer.put_text(input.source_path)
+    writer.put_text(input.source_authored_path)
+    writer.put_text(input.source_content_digest)
+    writer.put_text(input.closure_digest)
+    writer.put_bool(input.is_entry)
+    writer.put_text(input.module_name)
+    writer.put_text(input.runtime_provider_receipt_path)
+    writer.put_text(input.runtime_provider_digest)
+    writer.put_text(input.producer_header)
+    writer.put_text(input.stage)
+    writer.put_text(input.provider_selection_digest)
+
+fn driver_hir_weave_put_frame_v1(writer: HirCodecWriter, frame: DriverColdHirWeaveBodyV1):
+    driver_hir_weave_put_archive_v1(writer, frame.original_parent)
+    writer.put_text(frame.artifact_key)
+    writer.put_text(frame.body_digest)
+    writer.put_text(frame.warnings_digest)
+    writer.put_text(frame.stage)
+    writer.put_text(frame.boundary_key)
+    writer.put_text(frame.boundary_digest)
+
+pub fn driver_hir_weave_gate_report_bytes_v1(report: DriverHirPostValidationGateReportV1) -> text:
+    if transient_array_scope_state_v1() != 1: return ""
+    var writer = HirCodecWriter.create()
+    writer.put_text("driver-hir-weave-complete-gate-report-v1")
+    driver_hir_weave_put_texts_v1(writer, report.errors)
+    driver_hir_weave_put_texts_v1(writer, report.warnings)
+    driver_hir_weave_put_texts_v1(writer, report.census_messages)
+    driver_hir_weave_put_texts_v1(writer, report.aspect_errors)
+    writer.put_i64(report.skipped_struct_edges)
+    writer.put_i64(report.layout_cycles_downgraded)
+    writer.put_bool(report.gates_skipped)
+    writer.put_i64(report.weave_claims.len())
+    for claim in report.weave_claims:
+        writer.put_text(claim.registry_key)
+        writer.put_text(claim.selector)
+        writer.put_text(claim.advice_fn)
+    writer.finish()
+
+pub fn driver_hir_weave_config_binding_in_owned_scope_v1(ctx: CompileContext,
+        owner: DriverHirPostValidationPolicyOwnerV1) -> Result<text, text>:
+    if transient_array_scope_state_v1() != 1: return Err("weave config binding requires owned scratch")
+    val policy = driver_hir_post_validation_policy_load_in_owned_scope_v1(owner)?
+    val semantic = hir_body_semantic_policy_v1(ctx.assurance_policy.strictness)
+    if semantic.key != owner.semantic_policy_key or policy.layout_cycle_mode != env_get("SIMPLE_VALUE_STRUCT_LAYOUT_CYCLE") or
+            policy.quiet_mode != env_get("SIMPLE_RESOLVE_METHODS"):
+        return Err("weave selected semantic or transform policy changed")
+    var writer = HirCodecWriter.create()
+    writer.put_text("driver-hir-weave-actual-context-v1")
+    writer.put_text(ctx.native_target)
+    writer.put_text(ctx.options.backend)
+    writer.put_bool(ctx.options.release)
+    writer.put_text(ctx.options.cli_mode_text)
+    writer.put_text(ctx.options.mode.to_text())
+    writer.put_bool(ctx.options.no_borrow_check)
+    writer.put_bool(ctx.options.coverage_enabled)
+    writer.put_text(ctx.options.mcdc_mode_text)
+    writer.put_i64(ctx.options.mcdc_owner_bytes)
+    writer.put_i64(ctx.options.mcdc_global_bytes)
+    writer.put_text(ctx.options.native_source_snapshot_root)
+    driver_hir_weave_put_texts_v1(writer, ctx.options.native_source_roots)
+    driver_hir_weave_put_texts_v1(writer, ctx.options.allowed_families)
+    writer.put_text(ctx.options.build_mode)
+    writer.put_text(semantic.key)
+    writer.put_text(env_get("SIMPLE_BOOTSTRAP"))
+    writer.put_text("{ctx.environment_variant_frontend_owner_id}")
+    writer.put_text("{ctx.environment_variant_frontend_session_id}")
+    writer.put_text("{ctx.environment_variant_frontend_generation}")
+    writer.put_text(ctx.environment_variant_frontend_cache_identity)
+    val advisory = match ctx.frontend_advisory_policy:
+        case FrontendAdvisoryPreprocessPolicyV1.Reference: "reference"
+        case FrontendAdvisoryPreprocessPolicyV1.PreferSimd: "prefer-simd"
+        case FrontendAdvisoryPreprocessPolicyV1.RequireSimd: "require-simd"
+    writer.put_text(advisory)
+    # Configuration keys are a semantic map, so ordering must not depend on
+    # incidental insertion. Sorting occurs only in this reclaimed lease.
+    val keys = canonical_identity_sort_texts(ctx.config.keys())
+    writer.put_i64(keys.len())
+    for key in keys:
+        writer.put_text(key)
+        writer.put_text(ctx.config[key])
+    if val Some(selection) = ctx.runtime_std_full_inventory_selection:
+        writer.put_bool(true)
+        writer.put_text(selection.artifact_root)
+        writer.put_text(selection.snapshot_manifest_digest)
+        writer.put_text(selection.source_inventory_digest)
+    else: writer.put_bool(false)
+    writer.put_text(policy.layout_cycle_mode)
+    writer.put_text(policy.quiet_mode)
+    writer.put_bool(policy.implicit_rt_error)
+    Ok(sha256_text(writer.finish()))
+
+pub fn driver_hir_weave_use_bytes_v1(use: DriverHirArchiveWeaveBoundaryUseV1) -> text:
+    if transient_array_scope_state_v1() != 1: return ""
+    val inventory = use.physical_inventory
+    if use.logical_frames.len() != use.logical_order.len() or
+            use.physical_frames.len() != use.physical_module_keys.len(): return ""
+    var writer = HirCodecWriter.create()
+    writer.put_text("driver-hir-weave-complete-use-v2")
+    writer.put_text(use.cache.directory)
+    writer.put_text(use.cache.producer_header)
+    writer.put_bool(use.cache.enabled)
+    writer.put_text(use.source_binding)
+    writer.put_text(use.schedule_digest)
+    writer.put_text(use.policy_key)
+    writer.put_text(use.config_binding)
+    writer.put_text(inventory.inventory_digest)
+    writer.put_i64(inventory.logical_rows.len())
+    for row in inventory.logical_rows:
+        writer.put_text(row.logical_name)
+        writer.put_text(row.physical_path)
+        writer.put_text(row.authored_path)
+        writer.put_text(row.source_digest)
+        writer.put_i64(row.source_bytes)
+        writer.put_text(row.module_owner)
+        writer.put_text(row.archive_key)
+    writer.put_i64(inventory.representative_indices.len())
+    for index in inventory.representative_indices: writer.put_i64(index)
+    driver_hir_weave_put_texts_v1(writer, inventory.ordered_modules)
+    writer.put_i64(inventory.ordered_archives.len())
+    for archive in inventory.ordered_archives: driver_hir_weave_put_archive_v1(writer, archive)
+    # Issued from verified schedule.layout_source_order source labels. Private
+    # producer pins and fresh source/schedule replay bind the complete order.
+    driver_hir_weave_put_texts_v1(writer, use.declaration_order)
+    driver_hir_weave_put_texts_v1(writer, use.logical_order)
+    for name in use.logical_order:
+        if not use.logical_frames.has(name): return ""
+        driver_hir_weave_put_frame_v1(writer, use.logical_frames[name])
+    driver_hir_weave_put_texts_v1(writer, use.physical_module_keys)
+    for name in use.physical_module_keys:
+        if not use.physical_frames.has(name): return ""
+        driver_hir_weave_put_frame_v1(writer, use.physical_frames[name])
+    writer.finish()
+
+pub fn driver_hir_weave_boundary_bytes_v1(owner: DriverHirArchiveWeaveBoundaryV1) -> text:
+    if transient_array_scope_state_v1() != 1: return ""
+    val use_bytes = driver_hir_weave_use_bytes_v1(owner.use)
+    if use_bytes == "": return ""
+    var writer = HirCodecWriter.create()
+    writer.put_text("driver-hir-weave-registered-owner-v1")
+    writer.put_text(use_bytes)
+    writer.put_text(owner.policy.artifact_key)
+    writer.put_text(owner.policy.artifact_digest)
+    writer.put_text(owner.policy.source_binding)
+    writer.put_text(owner.policy.schedule_digest)
+    writer.put_text(owner.policy.journal_key)
+    writer.put_text(owner.policy.registration_digest)
+    writer.put_i64(owner.policy.registration_epoch)
+    writer.put_text(owner.policy.selection_digest)
+    writer.put_text(owner.policy.semantic_policy_key)
+    writer.put_text(owner.policy.cache.directory)
+    writer.put_text(owner.policy.cache.producer_header)
+    writer.put_bool(owner.policy.cache.enabled)
+    writer.put_text(driver_hir_weave_gate_report_bytes_v1(owner.gate_report))
+    writer.put_text(owner.gate_parent_key)
+    writer.put_text(owner.gate_parent_digest)
+    writer.put_i64(owner.woven_count)
+    writer.finish()
+
+export driver_hir_weave_gate_report_bytes_v1, driver_hir_weave_config_binding_in_owned_scope_v1
+export driver_hir_weave_use_bytes_v1, driver_hir_weave_boundary_bytes_v1

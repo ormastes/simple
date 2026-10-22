@@ -1,4 +1,5 @@
 # Native + SMF-bundle linking — link_to_native and cc/windows/msvc backends.
+use compiler.traits.trait_impl.{ImplBlock}
 use compiler.backend.linker.linker_wrapper.*
 use compiler.backend.linker.native_link_result.{NativeLinkSuccessV1, native_link_success_v1, native_link_output_v1, native_link_engine_id_for_path_v1}
 use compiler.backend.linker.native_config.{NativeLinkConfig}
@@ -32,6 +33,7 @@ use compiler.backend.linker._LinkerWrapper.native_link_reproduce_v1.{
 #   linker_wrapper_helpers.spl — SMF linking, self-contained linking, binary helpers
 
 use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read, file_read_bytes, file_write, file_write_bytes, file_rename, file_hash_sha256, env_get, process_run, cwd, host_os, host_arch, getpid, time_now_unix_micros}
+use std.io_runtime.{process_run_bounded}
 use std.common.crypto.sha256.{sha256_text}
 # Was: std.platform.{host_os, host_arch} (nogc_sync_mut.platform), whose
 # host_os()/is_windows_env() ultimately delegates to
@@ -50,6 +52,7 @@ use std.string_builder.{StringBuilder}
 use compiler.backend.linker.managed_native_args_v1.{managed_native_extra_args_error_v1, managed_native_input_args_error_v1}
 use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1, native_tool_strict_resolve_v1, native_tool_strict_revalidate_v1}
 use std.nogc_sync_mut.io.native_runtime_authority_v1.{native_runtime_strict_archives_v1, native_runtime_strict_revalidate_v1, native_runtime_strict_generated_inputs_v1}
+use compiler.backend.linker._LinkerWrapper.native_all_support.{native_all_msvc_llvm_link_inputs, native_all_input_present, native_all_input_dir}
 
 use compiler.backend.linker.lld_sffi.{LldResult, lld_elf_link}
 use compiler.backend.linker.mold.{MoldBackend, MoldConfig, find_linker_path, linker_type_for_path, LinkerType, execute_linker, create_temp_dir, cleanup_temp_dir, linker_file_size}
@@ -62,7 +65,7 @@ use compiler.backend.linker.smf_enums.{Platform, Arch}
 use compiler.backend.linker.obj_taker.{ObjTaker, ObjTakeResult, objtaker_with_defaults, objtaker_take_object}
 use compiler.backend.linker.platform_defaults.{elf_emulation}
 use compiler.backend.linker._LinkerWrapper.link_command_record.{record_link_command, link_command_record_path}
-use compiler.backend.backend.runtime_compiler.{find_c_compiler, hosted_c_compiler_plan, windows_link_flavor_for_target}
+use compiler.backend.runtime_compiler.{find_c_compiler, hosted_c_compiler_plan, windows_link_flavor_for_target}
 
 # Internal ELF engine (lane A7/B3): SIMPLE_LINKER=internal routes here instead
 # of an external linker. Same imports link_engine_external.spl uses for its
@@ -72,6 +75,7 @@ use compiler.backend.linker.elf.elf_static_link.{elf_link_with_operations, ElfLi
 use compiler.backend.linker.elf.elf_operation_bindings.{ElfSealedOperationsV1, elf_builtin_file_operations_v1}
 use compiler.backend.linker.native_image_publish.{native_image_publish}
 use compiler.backend.linker.elf.freebsd_hosted.{freebsd_hosted_inputs, freebsd_brand_image}
+use compiler.backend.linker.elf.link_trace.{elf_link_trace}
 use compiler.backend.linker.elf.elf_boot_link.{elf_boot_link_archives_policy}
 use compiler.backend.linker.boot_layout.boot_layout_plan.{boot_layout_from_text, boot_layout_add_defsym}
 use compiler.backend.linker.reloc_engine.{RelocArch}
@@ -164,8 +168,10 @@ fn hosted_native_link_arch_supported(os: text, arch: text) -> bool:
     val arm64 = arch == "aarch64" or arch == "arm64"
     if os == "windows" or os == "windows-mingw" or os == "windows-msvc":
         return x64 or arm64
-    if os == "macos" or os == "darwin" or os == "freebsd":
+    if os == "macos" or os == "darwin":
         return x64 or arm64
+    if os == "freebsd":
+        return x64 or arm64 or arch == "riscv64" or arch == "rv64"
     if os == "linux":
         return x64 or arm64 or arch == "riscv64" or arch == "rv64"
     false
@@ -195,26 +201,13 @@ fn native_effective_link_os(host: text, target: text, linker_abi: text) -> text:
 # ============================================================================
 
 pub fn link_status_text(site: text, payload: text) -> text:
-    """Normalize an "" == ok / message == failure status returned by a helper.
+    """Preserve explicit empty success and nonempty failure; reject unavailable status.
 
-    Two jobs, both forced by a real incident
-    (doc/08_tracking/bug/stage2_sanity_link_fails_with_nil_error_payload_2026-09-13.md):
-    the stage-2 NATIVE binary produced a status value that rendered as `nil`,
-    which is neither "" nor a message, so `status != ""` fired and the caller
-    returned `Err(nil)` — a link failure with no statement of what failed and
-    no print anywhere on the path.
-
-    Interpolation is the only reliable normalizer here: a nil renders as the
-    literal text "nil", which no legitimate status of these helpers ever is
-    (every failure message on this path starts with a word plus a quoted
-    subject). A `nil` therefore means "the return channel lost the value", and
-    the only value these helpers can lose on a success path is "" — so it is
-    reported LOUDLY, unconditionally, and then treated as the success it was.
-    A genuine failure still renders as its own message and still fails."""
+    A native return value rendering as nil carries no independent success
+    authority. Its lost payload could have been an admission failure."""
     val rendered = "{payload}"
     if rendered == "nil":
-        print "[linker-wrapper] {site}: status lost in the native return channel (rendered nil); treating as ok"
-        return ""
+        return site + ": unavailable link status (native return channel rendered nil)"
     rendered
 
 pub fn link_error_detail(site: text, payload: text) -> text:
@@ -1414,12 +1407,6 @@ class _InternalElfByteInputs:
         self.cache[path] = bytes
         Ok(bytes)
 
-    me read_i64(path: text) -> Result<[i64], text>:
-        val bytes = self.read(path)?
-        var widened: [i64] = []
-        for byte in bytes: widened.push(byte as i64)
-        Ok(widened)
-
     me library_path(path: text) -> Result<_InternalElfLoadedLibrary, text>:
         val bytes = self.read(path)?
         var kind = 0
@@ -1536,20 +1523,22 @@ fn internal_link_native_with_operations(os: text, arch: text, config: NativeLink
         else:
             for directory in ["/lib/aarch64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/lib", "/usr/lib"]:
                 if not system_paths.contains(directory): system_paths.push(directory)
-    var objects: [[i64]] = []
-    for path in before: objects.push(source.read_i64(path)?)
-    for path in object_files:
-        objects = objects.push(source.read_i64(path)?)
-    for path in after: objects.push(source.read_i64(path)?)
-    var archives: [[i64]] = []
-    for path in system_archives: archives.push(source.read_i64(path)?)
+    elf_link_trace("inputs: read start")
+    # Inputs stay packed `[u8]` all the way into the engine. Widening them per
+    # byte to `[i64]` cost 8x the input size and OOM-killed full-CLI links.
+    var objects: [[u8]] = []
+    for path in before: objects.push(source.read(path)?)
+    for path in object_files: objects.push(source.read(path)?)
+    for path in after: objects.push(source.read(path)?)
+    var archives: [[u8]] = []
+    for path in system_archives: archives.push(source.read(path)?)
     var runtime_dir = config.runtime_path
     if runtime_dir == "": runtime_dir = find_runtime_lib_dir()
     for path in native_runtime_archive_inputs(runtime_dir, config.runtime_bundle):
         val loaded = source.library_path(path)?
         if loaded.kind != 1:
             return Err("internal engine: runtime library '{path}' is not an ar archive")
-        archives = archives.push(source.read_i64(loaded.path)?)
+        archives.push(loaded.bytes)
     var library_paths: [text] = []
     for directory in config.library_paths: library_paths.push(directory)
     for directory in system_paths:
@@ -1563,13 +1552,14 @@ fn internal_link_native_with_operations(os: text, arch: text, config: NativeLink
         val loaded = source.library(library, library_paths)?
         val path = loaded.path
         if loaded.kind == 1:
-            archives = archives.push(source.read_i64(path)?)
+            archives.push(loaded.bytes)
         elif loaded.kind == 2:
             shared = shared.push(loaded.bytes)
             shared_names = shared_names.push(
                 internal_elf_library_needed_name(library, path))
         else:
             return Err("internal engine: ELF library '{path}' is neither an ar archive nor an ET_DYN object")
+    elf_link_trace("inputs: read done")
     var target_arch = RelocArch.X86_64
     if norm_arch == "aarch64":
         target_arch = RelocArch.AArch64
@@ -1592,10 +1582,8 @@ fn internal_link_native_with_operations(os: text, arch: text, config: NativeLink
         return Err("internal engine: {linked.unwrap_err()}")
     var image = linked.unwrap().image
     if os == "freebsd": image = freebsd_brand_image(image)?
-    var bytes: [u8] = []
-    for b in image:
-        bytes = bytes.push(b as u8)
-    if not native_image_publish(output, bytes, true):
+    elf_link_trace("publish start")
+    if not native_image_publish(output, image, true):
         return Err("internal engine: could not publish executable {output}")
     Ok(output)
 
@@ -1884,7 +1872,11 @@ fn native_runtime_provider_selection_error_for_config_platform(
             return "runtime path differs from managed authority"
         if config.runtime_bundle == "" or config.runtime_bundle == "auto":
             return "managed runtime requires an explicit provider bundle"
-        val inputs = native_runtime_archive_inputs_for_platform(admitted_dir, config.runtime_bundle, msvc)
+        var inputs = native_runtime_archive_inputs_for_platform(admitted_dir, config.runtime_bundle, msvc)
+        if msvc:
+            val selected = native_msvc_llvm_runtime_inputs(inputs, admitted_dir, config)
+            if selected.is_err(): return selected.unwrap_err()
+            inputs = selected.unwrap()
         match native_runtime_strict_archives_v1(admitted_dir, inputs):
             case Ok(_): return ""
             case Err(reason): return reason
@@ -1900,6 +1892,29 @@ fn native_runtime_provider_selection_error_for_config_platform(
         file_exists(runtime_dir + "/" + backfill_name),
         file_exists(runtime_dir + "/" + native_all_name)
     )
+
+fn native_msvc_llvm_runtime_inputs(inputs: [text], runtime_dir: text,
+        config: NativeLinkConfig) -> Result<[text], text>:
+    native_msvc_llvm_all_inputs([], inputs, [], runtime_dir, config)
+
+fn native_msvc_llvm_all_inputs(configured: [text], objects: [text], runtime: [text],
+        runtime_dir: text, config: NativeLinkConfig) -> Result<[text], text>:
+    val inputs = objects + configured + runtime
+    if not native_all_input_present(inputs): return Ok(inputs)
+    # The LLVM link passes runtime_path "none" (it owns its runtime objects);
+    # the authority is then the directory holding the native_all archive it
+    # selected -- the producer's, or an owner=c derived one.
+    val configured_root = runtime_dir.replace("\\", "/")
+    val root = if configured_root == "" or configured_root == "none":
+        native_all_input_dir(inputs)
+    else:
+        configured_root
+    val target = if config.target_triple != "": config.target_triple else: _windows_link_arch(config) + "-pc-windows-msvc"
+    val selected = native_all_msvc_llvm_link_inputs(configured, objects, runtime,
+        target, root, file_exists(root + "/LLVM-C.lib"))?
+    if native_tool_strict_requested_v1():
+        val _admitted = native_runtime_strict_archives_v1(root, [selected[selected.len() - 1]])?
+    return Ok(selected)
 
 fn native_runtime_archive_inputs(runtime_dir: text) -> [text]:
     if runtime_dir == "" or runtime_dir == "none":
@@ -2310,7 +2325,7 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         for flag in ["-o", output]:
             args.push(flag)
         record_link_command(output, cc, args, config.verbose)
-        val (stdout, stderr, code) = process_run(cc, args)
+        val (stdout, stderr, code) = process_run_bounded(cc, args, 0, 67108864)
         if code == 0:
             val tool_error = link_status_text(
                 "darwin-link-tool-identity-cc", publish_darwin_link_tool_identity(cc))
@@ -2348,7 +2363,7 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         args.push("-o")
         args.push(output)
         record_link_command(output, cc, args, config.verbose)
-        val (stdout, stderr, code) = process_run(cc, args)
+        val (stdout, stderr, code) = process_run_bounded(cc, args, 0, 67108864)
         if code == 0:
             return Ok(output)
         val err_msg = if stderr != "": stderr else: "Unknown linking error"
@@ -2404,7 +2419,9 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         args.push("-o")
         args.push(output)
         record_link_command(output, cc, args, config.verbose)
-        val (stdout, stderr, code) = process_run(cc, args)
+        # Keep the full object inventory as direct argv, rather than one
+        # shell -c string. The capture owner marks any diagnostic truncation.
+        val (stdout, stderr, code) = process_run_bounded(cc, args, 0, 67108864)
         if code == 0:
             return Ok(output)
         val err_msg = if stderr != "": stderr else: "Unknown linking error"
@@ -2413,10 +2430,10 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
 pub fn windows_link_flavor_for_config(config: NativeLinkConfig) -> text:
     """"msvc" or "gnu" for this link request, decided from the TARGET first
     (config.target_triple / config.linker_abi, then the driver's --target),
-    then the SIMPLE_LINKER_FLAVOR / SIMPLE_WINDOWS_ABI overrides, and only
-    for an unqualified target from the host shell (MSYSTEM). Never from
-    MSYSTEM alone: Git Bash sets it for every shell, which used to route an
-    `x86_64-pc-windows-msvc` link through the MinGW arm."""
+    then the SIMPLE_LINKER_FLAVOR / SIMPLE_WINDOWS_ABI overrides, else msvc.
+    Never from MSYSTEM: Git Bash sets it for every shell, which used to route
+    MSVC-ABI runtime objects (and `x86_64-pc-windows-msvc` links) through
+    the MinGW arm."""
     windows_link_flavor_for_target(config.target_triple, config.linker_abi)
 
 fn _is_mingw_link(config: NativeLinkConfig) -> bool:
@@ -2443,7 +2460,24 @@ fn internal_coff_runtime_is_msvc(os: text, mingw_env: bool) -> bool:
 fn link_native_windows(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
     native_link_output_v1(link_native_windows_with_engine(object_files, output, config))
 
+fn native_windows_strict_extra_args_error(extra_flags: [text], allow_duplicate_definitions: bool) -> text:
+    """Reject duplicate-policy overrides before either Windows linker engine runs."""
+    if allow_duplicate_definitions: return ""
+    for flag in extra_flags:
+        # Quotes are command-line syntax, not an escape from policy validation.
+        val normalized = flag.replace("\"", "").trim().lower()
+        if normalized == "/force" or normalized == "-force" or normalized.starts_with("/force:") or normalized.starts_with("-force:"):
+            return "strict Windows link rejects FORCE option: {flag}"
+        if normalized == "--allow-multiple-definition" or normalized == "muldefs":
+            return "strict Windows link rejects duplicate-definition option: {flag}"
+        # Nested argv cannot be checked as ordinary direct-linker flags.
+        if normalized.starts_with("@") or normalized.starts_with("-wl,") or normalized == "-xlinker" or normalized == "/link":
+            return "strict Windows link rejects nested linker arguments: {flag}"
+    ""
+
 fn link_native_windows_with_engine(object_files: [text], output: text, config: NativeLinkConfig) -> Result<NativeLinkSuccessV1, text>:
+    val argument_error = native_windows_strict_extra_args_error(config.extra_flags, config.allow_duplicate_definitions)
+    if argument_error != "": return Err(argument_error)
     if requested_linker_override().trim().lower() == "internal":
         val target_arch = _windows_link_arch(config)
         val arm64_target = target_arch == "aarch64" or target_arch == "arm64"
@@ -2482,12 +2516,19 @@ fn link_native_windows_with_engine(object_files: [text], output: text, config: N
         val runtime_msvc = internal_coff_runtime_is_msvc(
             native_effective_link_os(host_os(), config.target_triple, config.linker_abi),
             _is_mingw_link(config))
-        val runtime_archives = native_runtime_archive_inputs_for_platform(
+        var runtime_archives = native_runtime_archive_inputs_for_platform(
             runtime_dir, config.runtime_bundle, runtime_msvc)
+        if runtime_msvc:
+            runtime_archives = native_msvc_llvm_runtime_inputs(runtime_archives, runtime_dir, config)?
         for path in runtime_archives:
             if not library_files.contains(path): library_files = library_files.push(path)
         var support_inputs = object_files
         for path in runtime_archives: support_inputs.push(path)
+        if runtime_msvc:
+            val with_llvm = native_msvc_llvm_all_inputs(library_files, object_files, runtime_archives, runtime_dir, config)?
+            if native_all_input_present(with_llvm):
+                val llvm = with_llvm[with_llvm.len() - 1]
+                if not library_files.contains(llvm): library_files.push(llvm)
         var support_libraries = ["kernel32.lib", "ws2_32.lib", "bcrypt.lib",
             "userenv.lib", "ntdll.lib", "advapi32.lib", "d3d11.lib", "dxgi.lib"]
         for library in native_all_msvc_support_libraries(support_inputs):
@@ -2623,14 +2664,20 @@ fn _link_native_msvc_with_engine(object_files: [text], output: text, config: Nat
     for wlib in native_all_msvc_support_libraries(object_files):
         if not msvc_config.libs.contains(wlib):
             msvc_config.libs.push(wlib)
-
     # Auto-detect runtime library
     var runtime_dir = config.runtime_path
     if runtime_dir == "":
         runtime_dir = find_runtime_lib_dir()
+    val explicit_inputs = native_msvc_llvm_all_inputs(msvc_config.libs, object_files, [], runtime_dir, config)?
+    if native_all_input_present(explicit_inputs):
+        val dependency = explicit_inputs[explicit_inputs.len() - 1]
+        if not msvc_config.libs.contains(dependency): msvc_config.libs.push(dependency)
     if runtime_dir != "" and runtime_dir != "none":
-        val runtime_archives = native_runtime_archive_inputs_for_platform(
+        var runtime_archives = native_runtime_archive_inputs_for_platform(
             runtime_dir, config.runtime_bundle, true)
+        runtime_archives = native_msvc_llvm_runtime_inputs(runtime_archives, runtime_dir, config)?
+        val _complete_inputs = native_msvc_llvm_all_inputs(msvc_config.libs,
+            object_files, runtime_archives, runtime_dir, config)?
         msvc_config.lib_paths.push(runtime_dir)
         val selected_runtime_libs = native_msvc_runtime_selection(
             config.runtime_bundle, runtime_archives)

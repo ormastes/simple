@@ -68,6 +68,42 @@ A checkpoint is an operator hint only: it cannot
 select a fix or satisfy review, backport/forward-port, integration, candidate,
 or promotion admission.
 
+### Release-line ref contract and rc1 drive lessons
+
+The protected convergence/candidate machinery accepts a release line only when
+every layer agrees on the ref:
+
+- `pr-admission.yml` and `scripts/release/convergence-checkpoint.shs` validate
+  `release_ref` against `^release/[0-9]+\.[0-9]+$`; the review broker maps the
+  PR base to a live ruleset (`release/*` → `spipe-vcs-v3-release-lines`), and
+  `candidate.yml` derives the line from `release/version.sdn` semver
+  (`candidate/vX.Y.Z-pre/aNNN` → `release/X.Y`). A non-standard line
+  (e.g. `release_phase3`) must be added to **all** of these sites on **both**
+  main and the line, plus the `spipe-vcs-v3-release-lines` ruleset conditions,
+  before any dispatch.
+- Failed attempts keep the version: manifest branches
+  `work/release/1.0.0-rc.1_<N>` and candidates `candidate/v1.0.0-rc.1/aNNN`
+  increment only; never rename to a new prerelease to escape a gate.
+- The convergence manifest validator prunes classifications whose commits
+  merged to main and then requires exact equality with
+  `git rev-list origin/main..<release-ref>`. On release-tip drift, rebind a
+  fresh manifest attempt; never merge-sync a manifest PR branch (convergence
+  requires `inventory_head..HEAD` to touch only the manifest).
+- Convergence receipt accumulation must stream (`slurpfile`), not
+  `jq --argjson`, or ~624+ manifest rows hit `MAX_ARG_STRLEN`.
+- Candidate refs are created via `gh api repos/.../git/refs`; direct
+  `git push` to `candidate/...` is ruleset-blocked.
+- Fast-moving release lines routinely lose the broker's resolve→fetch window
+  ("protected base advanced"); resync the PR branch and redrive the broker.
+- Runner image drift breaks llvm archive fingerprints; `candidate.yml`
+  verifies `llvm-config --libfiles` archives exist and installs the matching
+  dev package (e.g. `libpolly-18-dev`) when absent.
+- FreeBSD QEMU bootstrap: wrapper timeouts are hours-scale (14400s), guest
+  logs live under `.simple/storage/build/bootstrap/logs/` inside the guest,
+  and each run needs 4 GiB host free for a 10–14 GB overlay.
+
+See the `release` skill's "rc1 Drive Machinery Lessons" for the full list.
+
 For each operator-selected exact commit:
 
 1. From `main` to `release/X.Y`, create a private backport branch/worktree, verify the source review, apply only that commit, renew focused evidence, and submit to the release-line integration authority.

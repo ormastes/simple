@@ -113,7 +113,7 @@ the canonical implementation (see §5).
 Simple's `.?` postfix predicate is ergonomically closest to Ruby's `?` suffix
 and is the canonical form for all new public APIs:
 
-```simple
+```text
 arr.empty.?
 path.valid.?
 user.present.?
@@ -132,7 +132,7 @@ predicate-prefix counts grow.
 Free-standing predicates (no `self`) remain as `is_*` because the `.?` postfix
 form requires a receiver:
 
-```simple
+```simple:skip
 is_windows()
 is_debug_build()
 is_little_endian()
@@ -171,7 +171,7 @@ different failure semantics.
 
 ### Deprecation Pattern
 
-```simple
+```text
 @deprecated("use extension(path) instead")
 fn get_extension(path: Path) -> text {
     extension(path)
@@ -180,7 +180,7 @@ fn get_extension(path: Path) -> text {
 
 Use `type` for type-level renaming:
 
-```simple
+```text
 type Buf = Buffer   # type alias — same underlying type
 alias OldName = NewName  # class rename at module boundary
 ```
@@ -206,7 +206,7 @@ alias OldName = NewName  # class rename at module boundary
 
 Private items use a `_` prefix:
 
-```simple
+```text
 class Parser {
     _position: i32
     _tokens: [Token]

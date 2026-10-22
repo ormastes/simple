@@ -272,6 +272,30 @@ pub fn analyze_function(f: &FunctionDef, mode: CompilabilityMode) -> Compilabili
 /// * `Or` / `Range` / `Typed` / `Rest` / `Literal` sub-patterns anywhere in a
 ///   payload, and `Struct`/`Tuple`/`Array` at the top level (not inside an
 ///   enum payload) — no verified native lowering yet.
+/// Match shapes with a verified native lowering (AotNative only).
+fn is_native_match(arms: &[MatchArm]) -> bool {
+    is_native_payload_free_enum_match(arms) || is_native_int_literal_match(arms)
+}
+
+/// Every arm an integer literal (`case 3:`) or the wildcard, with at least one
+/// literal. Both HIR match lowerings turn a non-nil `Pattern::Literal` into a
+/// plain `subject == literal` compare feeding a `Terminator::If` chain
+/// (`hir/lower/stmt_lowering.rs`, `hir/lower/expr/control.rs`), which native
+/// codegen already emits. String/nil/float literals stay out of scope.
+fn is_native_int_literal_match(arms: &[MatchArm]) -> bool {
+    let mut saw_literal = false;
+    for arm in arms {
+        match &arm.pattern {
+            Pattern::Literal(lit) if matches!(**lit, Expr::Integer(_) | Expr::TypedInteger(_, _)) => {
+                saw_literal = true;
+            }
+            Pattern::Wildcard => {}
+            _ => return false,
+        }
+    }
+    saw_literal
+}
+
 fn is_native_payload_free_enum_match(arms: &[MatchArm]) -> bool {
     let mut saw_variant = false;
     for arm in arms {
@@ -389,7 +413,7 @@ fn analyze_node(node: &Node, reasons: &mut Vec<FallbackReason>, mode: Compilabil
                 }
                 analyze_block(&arm.body, reasons, mode);
             }
-            if !(mode == CompilabilityMode::AotNative && is_native_payload_free_enum_match(&match_stmt.arms)) {
+            if !(mode == CompilabilityMode::AotNative && is_native_match(&match_stmt.arms)) {
                 add_reason(reasons, FallbackReason::PatternMatch);
             }
         }
@@ -548,7 +572,10 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>, mode: Compilabil
             // Tuple index with literal index is compilable if receiver is
         }
 
-        // Slice needs collection runtime
+        // `recv[a:b:c]` lowers to the ordinary runtime call `rt_slice`
+        // (`hir/lower/expr/collections.rs::lower_slice`), which has a native
+        // runtime spec (`codegen/runtime_sffi.rs`) in both backends. Standalone
+        // artifacts must not refuse it; HybridJit keeps its conservative flag.
         Expr::Slice {
             receiver,
             start,
@@ -565,7 +592,9 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>, mode: Compilabil
             if let Some(st) = step {
                 analyze_expr(st, reasons, mode);
             }
-            add_reason(reasons, FallbackReason::CollectionOps);
+            if mode != CompilabilityMode::AotNative {
+                add_reason(reasons, FallbackReason::CollectionOps);
+            }
         }
 
         // Array/tuple literals lower to MIR ArrayLit/TupleLit and stay on the
@@ -655,7 +684,7 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>, mode: Compilabil
                 }
                 analyze_block(&arm.body, reasons, mode);
             }
-            if !(mode == CompilabilityMode::AotNative && is_native_payload_free_enum_match(arms)) {
+            if !(mode == CompilabilityMode::AotNative && is_native_match(arms)) {
                 add_reason(reasons, FallbackReason::PatternMatch);
             }
         }
@@ -697,10 +726,15 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>, mode: Compilabil
             add_reason(reasons, FallbackReason::Generator);
         }
 
-        // Try operator
+        // Try operator. `expr?` lowers to an enum-discriminant test plus an
+        // early `return` of the error (`hir/lower/expr/control.rs::lower_try`)
+        // -- plain runtime calls and branches with native codegen, the same
+        // shape `?? return` (UnwrapOrReturn below) was admitted for.
         Expr::Try(inner) => {
             analyze_expr(inner, reasons, mode);
-            add_reason(reasons, FallbackReason::TryOperator);
+            if mode != CompilabilityMode::AotNative {
+                add_reason(reasons, FallbackReason::TryOperator);
+            }
         }
 
         // Force unwrap operator
@@ -914,11 +948,14 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>, mode: Compilabil
             // Go expressions are now fully implemented via HIR lowering
         }
 
-        // Array repeat: [value; count]
+        // Array repeat: [value; count]. Lowers to an array literal or the
+        // runtime fill `rt_array_repeat` (`lower_array_repeat`), both native.
         Expr::ArrayRepeat { value, count } => {
             analyze_expr(value, reasons, mode);
             analyze_expr(count, reasons, mode);
-            add_reason(reasons, FallbackReason::CollectionLiteral);
+            if mode != CompilabilityMode::AotNative {
+                add_reason(reasons, FallbackReason::CollectionLiteral);
+            }
         }
 
         // Safe unwrap operators - require Option/Result runtime handling
@@ -965,11 +1002,14 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>, mode: Compilabil
             add_reason(reasons, FallbackReason::TryOperator);
         }
 
-        // Null coalescing: expr ?? default
+        // Null coalescing: expr ?? default. Lowers to a presence test and a
+        // branch (`hir/lower/expr/control.rs::lower_coalesce`), no interpreter.
         Expr::Coalesce { expr: inner, default } => {
             analyze_expr(inner, reasons, mode);
             analyze_expr(default, reasons, mode);
-            add_reason(reasons, FallbackReason::TryOperator);
+            if mode != CompilabilityMode::AotNative {
+                add_reason(reasons, FallbackReason::TryOperator);
+            }
         }
 
         // Optional chaining: expr?.field or expr?.method(args)
@@ -1527,6 +1567,66 @@ fn run_one() -> i64:
             "native HIR lowering must not become an interpreter call in AOT mode: {:?}",
             aot_status.reasons()
         );
+    }
+
+    /// Shapes the crypto/compress dynSMF bundles use: each has native HIR
+    /// lowering, so AotNative must admit it while HybridJit keeps its flag.
+    #[test]
+    fn test_native_lowered_constructs_flagged_hybrid_not_aot() {
+        let cases = [
+            (
+                "try_op",
+                "fn half(x: i64) -> Result<i64, text>:\n    Ok(x)\n\nfn try_op(x: i64) -> Result<i64, text>:\n    val h = half(x)?\n    Ok(h)\n",
+                FallbackReason::TryOperator,
+            ),
+            (
+                "coalesce",
+                "fn coalesce(v: i64?) -> i64:\n    v ?? 9\n",
+                FallbackReason::TryOperator,
+            ),
+            (
+                "slice",
+                "fn slice(s: text) -> text:\n    s[1:3]\n",
+                FallbackReason::CollectionOps,
+            ),
+            (
+                "repeat",
+                "fn repeat(n: i64) -> [i64]:\n    [0; n]\n",
+                FallbackReason::CollectionLiteral,
+            ),
+            (
+                "int_match",
+                "fn int_match(c: i64) -> i64:\n    match c:\n        case 0: 10\n        case 1: 11\n        case _: -1\n",
+                FallbackReason::PatternMatch,
+            ),
+        ];
+        for (name, source, reason) in cases {
+            let hybrid = parse_and_analyze(source);
+            assert!(
+                hybrid.get(name).unwrap().reasons().contains(&reason),
+                "{name}: HybridJit must keep {reason:?}"
+            );
+            let aot = parse_and_analyze_aot(source);
+            let status = aot.get(name).unwrap();
+            assert!(status.is_compilable(), "{name}: AotNative refused: {:?}", status.reasons());
+        }
+    }
+
+    /// The relaxations above must not admit their neighbours: `.?`, a string
+    /// literal match, and an interpreter-only construct nested inside `?`.
+    #[test]
+    fn test_aot_relaxation_keeps_unlowered_neighbours_flagged() {
+        let exists = parse_and_analyze_aot("fn exists(o: i64?) -> bool:\n    o.?\n");
+        assert!(exists.get("exists").unwrap().reasons().contains(&FallbackReason::TryOperator));
+
+        let str_match =
+            parse_and_analyze_aot("fn str_match(s: text) -> i64:\n    match s:\n        case \"a\": 1\n        case _: 0\n");
+        assert!(str_match.get("str_match").unwrap().reasons().contains(&FallbackReason::PatternMatch));
+
+        let nested = parse_and_analyze_aot(
+            "fn g() -> Result<i64, text>:\n    Ok(1)\n\nfn nested() -> Result<i64, text>:\n    val v = (await g())?\n    Ok(v)\n",
+        );
+        assert!(nested.get("nested").unwrap().reasons().contains(&FallbackReason::AsyncAwait));
     }
 
     #[test]

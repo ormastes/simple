@@ -1,10 +1,22 @@
 # @req REQ-GENERIC-NOMINAL-IDENTITY
 # @tag: unit, compiler, mono, generics
 use std.spec
+use compiler.mono.mono_archive_registration_types_v1.{MonoArchiveRegistrationRowV1}
+use compiler.mono.mono_archive_registration_v1.{mono_archive_registration_row_digest_v1}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use std.common.crypto.sha256.{sha256_text}
 use compiler.hir.hir.*
 use compiler.common.diagnostics.span.Span
 use compiler.mono.monomorphize_integration.MonomorphizationPass
 use compiler.mono.nominal_type_identity.mono_owned_type_key
+use compiler.mono.mono_archive_types_v1.MonoTemplateBodyModeV1
+use compiler.mono.mono_archive_state_v1.{mono_archive_facts_from_collector_v1,
+    mono_archive_state_create_v1, mono_archive_scratch_pass_v1, mono_archive_state_digest_v1,
+    mono_archive_delta_v1}
+use compiler.mono.mono_archive_nominal_v2.{mono_archive_nominal_project_v2,
+    mono_archive_nominal_install_v2}
+use compiler.driver.cache.hir_mono_verification_recipe_codec_v1.{MonoVerificationGlobalRecipeV1,
+    mono_verification_global_encode_v1, mono_verification_global_decode_v1}
 
 fn transport_type(kind: HirTypeKind) -> HirType:
     HirType(kind: kind, span: Span.empty())
@@ -55,6 +67,20 @@ fn transport_module(name: text, symbols: SymbolTable, functions: Dict<SymbolId, 
 
 fn transport_nested() -> HirType:
     transport_type(HirTypeKind.Optional(transport_type(HirTypeKind.Array(transport_packet(), 3))))
+
+fn transport_archive_collector() -> MonomorphizationPass:
+    val setup = transport_pass()
+    var provider_functions: Dict<SymbolId, HirFunction> = {}
+    val template = transport_template()
+    provider_functions[template.symbol] = template
+    var pass_ = MonomorphizationPass.create()
+    pass_.template_body_mode = MonoTemplateBodyModeV1.ArchiveRequests
+    pass_.module_paths["provider"] = "synthetic/provider.spl"
+    pass_.module_paths["caller"] = "synthetic/caller.spl"
+    pass_.collect_generics(transport_module("provider", setup.module_symbols["provider"], provider_functions), "provider")
+    pass_.collect_generics(transport_module("caller", setup.module_symbols["caller"], {}), "caller")
+    pass_.current_module = "caller"
+    pass_
 
 fn expect_transport_call(kind: HirExprKind, pass_: MonomorphizationPass, expected: HirType):
     match kind:
@@ -161,3 +187,202 @@ describe "generic specialization transports nominal ownership":
         expect(result["caller"].symbols.next_symbol_id).to_equal(pass_.next_symbol)
         expect(result["caller"].symbols.next_symbol_id).to_be_greater_than(high)
         expect(result["provider"].symbols.lookup_qualified_type_raw("third", "Packet")).to_be_greater_than(0)
+
+describe "body-free archive nominal specialization":
+    it "hydrates only declaration tables and keeps caller and provider argument namespaces distinct":
+        var pass_ = transport_archive_collector()
+        expect(pass_.module_symbols.len()).to_equal(0)
+        expect(pass_.generic_functions.len()).to_equal(0)
+        val before = pass_.next_symbol
+        val actual = transport_nested()
+        val callee = transport_expr(HirExprKind.NamedVar(SymbolId(id: 20), "provider.identity"), transport_type(HirTypeKind.Any))
+        val rewritten = pass_.rewrite_call(callee, [], [actual])
+        expect_transport_call(rewritten, pass_, actual)
+        expect(pass_.diagnostics.len()).to_equal(0)
+        expect(pass_.specialized_functions.len()).to_equal(0)
+        expect(pass_.archive_requests.len()).to_equal(1)
+        expect(pass_.archive_nominal_imports.len()).to_equal(1)
+        expect(pass_.next_symbol).to_equal(before + 2)
+        val request = pass_.archive_requests[0]
+        expect(request.caller_module).to_equal("caller")
+        expect(request.module_name).to_equal("provider")
+        expect(mono_owned_type_key(request.caller_type_args[0], pass_.module_symbols["caller"], "caller")).to_equal(
+            mono_owned_type_key(request.type_args[0], pass_.module_symbols["provider"], "provider"))
+        match request.type_args[0].kind:
+            case HirTypeKind.Optional(array):
+                match array.kind:
+                    case HirTypeKind.Array(packet, size):
+                        expect(size).to_equal(3)
+                        match packet.kind:
+                            case HirTypeKind.Named(id, _): expect(id.id).to_equal(before)
+                            case _: expect(false).to_be(true)
+                    case _: expect(false).to_be(true)
+            case _: expect(false).to_be(true)
+        expect(pass_.request_specialization("identity", [actual])).to_equal(request.symbol_id)
+        expect(pass_.archive_requests.len()).to_equal(1)
+        expect(pass_.next_symbol).to_equal(before + 2)
+
+    it "uses the body-free signature for inherent methods as well as direct calls":
+        var pass_ = transport_archive_collector()
+        val actual = transport_nested()
+        val receiver = transport_expr(HirExprKind.NamedVar(SymbolId(id: 40), "value"),
+            transport_type(HirTypeKind.Named(SymbolId(id: 0), [actual])))
+        val rewritten = pass_.rewrite_generic_method_call("identity", receiver, "identity", [], MethodResolution.Unresolved)
+        expect_transport_call(rewritten, pass_, actual)
+        expect(pass_.specialized_functions.len()).to_equal(0)
+        expect(pass_.diagnostics.len()).to_equal(0)
+
+    it "records import allocation in the delta without retaining worker tables":
+        var collector = transport_archive_collector()
+        expect(collector.ensure_archive_nominal_table_v2("caller")).to_be(true)
+        expect(collector.ensure_archive_nominal_table_v2("provider")).to_be(true)
+        val facts = mono_archive_facts_from_collector_v1(collector,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap()
+        expect(facts.symbol_projections.len()).to_equal(2)
+        val state = mono_archive_state_create_v1(facts)
+        val base = mono_archive_state_digest_v1(state)
+        expect(base.len()).to_equal(64)
+        var worker = mono_archive_scratch_pass_v1(state)
+        worker.current_module = "caller"
+        expect(worker.module_symbols.len()).to_equal(2)
+        expect(worker.request_specialization("identity", [transport_nested()])).to_be_greater_than(state.next_symbol)
+        val delta = mono_archive_delta_v1(state, worker, base, false)
+        expect(delta.nominal_imports.len()).to_equal(1)
+        expect(delta.requests.len()).to_equal(1)
+        expect(delta.next_symbol).to_equal(state.next_symbol + 2)
+        expect(state.nominal_imports.len()).to_equal(0)
+        expect(mono_archive_state_digest_v1(state)).to_equal(base)
+        var hydrated = SymbolTable.new()
+        expect(mono_archive_nominal_install_v2(hydrated, "provider", delta.nominal_imports)).to_be(true)
+        expect(hydrated.lookup_qualified_type_raw("third", "Packet")).to_equal(state.next_symbol)
+
+    it "preserves accepted nominal declarations through the versioned final recipe":
+        var worker = transport_archive_collector()
+        worker.request_specialization("identity", [transport_nested()])
+        val recipe = MonoVerificationGlobalRecipeV1(unresolved_templates: [], emitted_templates: [],
+            next_symbol: worker.next_symbol, nominal_imports: worker.archive_nominal_imports)
+        val encoded = mono_verification_global_encode_v1(recipe)
+        val decoded = mono_verification_global_decode_v1(encoded)
+        expect(decoded.is_ok()).to_be(true)
+        expect(decoded.unwrap().nominal_imports.len()).to_equal(1)
+        expect(mono_verification_global_encode_v1(decoded.unwrap())).to_equal(encoded)
+        expect(mono_verification_global_decode_v1(encoded.replace("mono-verification-global-recipe-v2", "mono-verification-global-recipe-v1")).is_err()).to_be(true)
+        expect(mono_verification_global_decode_v1(encoded + "extra\n").is_err()).to_be(true)
+
+    it "refuses unavailable archive declaration ownership without publishing a request":
+        var worker = transport_archive_collector()
+        worker.archive_nominal_rows.remove("caller#0")
+        val before = worker.next_symbol
+        expect(worker.request_specialization("identity", [transport_packet()])).to_equal(-1)
+        expect(worker.archive_requests.len()).to_equal(0)
+        expect(worker.archive_nominal_imports.len()).to_equal(0)
+        expect(worker.next_symbol).to_equal(before)
+
+    it "refuses conflicting nominal overlays without changing the destination":
+        val setup = transport_pass()
+        val rows = mono_archive_nominal_project_v2("caller", setup.module_symbols["caller"])
+        var destination = SymbolTable.new()
+        destination.define("Packet", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, "wrong")
+        val before = destination.next_symbol_id
+        expect(mono_archive_nominal_install_v2(destination, "caller", rows)).to_be(false)
+        expect(destination.next_symbol_id).to_equal(before)
+        expect(destination.symbols.len()).to_equal(1)
+        expect(destination.symbols[0].defining_module).to_equal("wrong")
+
+# Registration tag 21 remains the nominal DTO; upstream projection is tag 22.
+# The domain changes so persisted pre-merge receipts cannot authenticate v3 rows.
+describe "combined nominal registration protocol":
+    it "binds symbol projections to tag 22 and the v3 row domain":
+        val row = MonoArchiveRegistrationRowV1.SymbolProjection("caller", "projection-bytes")
+        var current = HirCodecWriter.create()
+        current.put_i64(22)
+        current.put_text("caller")
+        current.put_text("projection-bytes")
+        val actual = mono_archive_registration_row_digest_v1(row)
+        expect(actual).to_equal(sha256_text("mono-registration-row-v3\n" + current.finish()))
+        var legacy = HirCodecWriter.create()
+        legacy.put_i64(21)
+        legacy.put_text("caller")
+        legacy.put_text("projection-bytes")
+        expect(actual == sha256_text("mono-registration-row-v2\n" + legacy.finish())).to_be(false)
+
+
+fn transport_effect_pass(mode: MonoTemplateBodyModeV1, missing: bool) -> MonomorphizationPass:
+    val setup = transport_pass()
+    var template = transport_template()
+    val thrown = transport_type(HirTypeKind.Named(SymbolId(id: if missing: 99 else: 0), []))
+    template.effects = [Effect(kind: EffectKind.IO, span: Span.empty()),
+        Effect(kind: EffectKind.Throws(thrown), span: Span.new(5, 6, 7, 8))]
+    var functions: Dict<SymbolId, HirFunction> = {}
+    functions[template.symbol] = template
+    var pass_ = MonomorphizationPass.create()
+    pass_.template_body_mode = mode
+    pass_.module_paths["provider"] = "synthetic/provider.spl"
+    pass_.module_paths["caller"] = "synthetic/caller.spl"
+    pass_.collect_generics(transport_module("provider", setup.module_symbols["provider"], functions), "provider")
+    pass_.collect_generics(transport_module("caller", setup.module_symbols["caller"], {}), "caller")
+    pass_.current_module = "caller"
+    pass_
+
+describe "nominal Throws ownership on specialized caller signatures":
+    it "relocates a provider Throws declaration even when parameters and return are scalar":
+        for mode in [MonoTemplateBodyModeV1.Retained, MonoTemplateBodyModeV1.ArchiveRequests]:
+            var pass_ = transport_effect_pass(mode, false)
+            val integer = transport_type(HirTypeKind.Int(64, true))
+            expect(pass_.request_specialization("identity", [integer])).to_be_greater_than(-1)
+            val name = pass_.mangled_name("identity", [integer])
+            val signature = pass_.specialization_signature_in_caller(name, Span.empty())
+            expect(signature != nil).to_equal(true)
+            match signature.unwrap().kind:
+                case HirTypeKind.Function(_, _, effects):
+                    expect(effects.len()).to_equal(2)
+                    expect(effects[1].span.line).to_equal(7)
+                    match effects[1].kind:
+                        case EffectKind.Throws(type_):
+                            match type_.kind:
+                                case HirTypeKind.Named(id, _):
+                                    expect(id.id).to_be_greater_than(0)
+                                    val owner = pass_.module_symbols["caller"].get_symbol_raw(id.id)
+                                    expect(owner.defining_module ?? "").to_equal("decoy")
+                                    expect(owner.name).to_equal("Packet")
+                                case _: fail("expected relocated nominal Throws")
+                        case _: fail("expected Throws effect")
+                case _: fail("expected specialized function signature")
+            val original = pass_.module_symbols["caller"].get_symbol_raw(0)
+            expect(original.defining_module ?? "").to_equal("third")
+            expect(pass_.diagnostics.len()).to_equal(0)
+
+    it "refuses an absent Throws declaration before caller symbol allocation":
+        for mode in [MonoTemplateBodyModeV1.Retained, MonoTemplateBodyModeV1.ArchiveRequests]:
+            var pass_ = transport_effect_pass(mode, true)
+            val integer = transport_type(HirTypeKind.Int(64, true))
+            expect(pass_.request_specialization("identity", [integer])).to_be_greater_than(-1)
+            val name = pass_.mangled_name("identity", [integer])
+            val signature = pass_.specialization_signature_in_caller(name, Span.empty())
+            expect(signature == nil).to_equal(true)
+            expect(pass_.diagnostics.len()).to_be_greater_than(0)
+            expect(pass_.diagnostics[pass_.diagnostics.len() - 1]).to_contain("nominal source symbol 99 is absent")
+            expect(pass_.module_symbols["caller"].next_symbol_id).to_equal(1)
+
+
+    it "routes a malformed Throws kind through validating transport instead of the scalar fast path":
+        for mode in [MonoTemplateBodyModeV1.Retained, MonoTemplateBodyModeV1.ArchiveRequests]:
+            var pass_ = transport_effect_pass(mode, false)
+            val integer = transport_type(HirTypeKind.Int(64, true))
+            expect(pass_.request_specialization("identity", [integer])).to_be_greater_than(-1)
+            val name = pass_.mangled_name("identity", [integer])
+            unsafe:
+                val malformed = HirType(kind: nil, span: Span.empty())
+                val effects = [Effect(kind: EffectKind.Throws(malformed), span: Span.empty())]
+                if mode == MonoTemplateBodyModeV1.ArchiveRequests:
+                    var signature = pass_.archive_specialized_signatures[name]
+                    signature.effects = effects
+                    pass_.archive_specialized_signatures[name] = signature
+                else:
+                    var function: HirFunction = pass_.specialized_functions[name]
+                    function.effects = effects
+                    pass_.specialized_functions[name] = function
+            expect(pass_.specialization_signature_in_caller(name, Span.empty()) == nil).to_equal(true)
+            expect(pass_.diagnostics.len()).to_be_greater_than(0)
+            expect(pass_.diagnostics[pass_.diagnostics.len() - 1]).to_contain("absent type/kind")
+            expect(pass_.module_symbols["caller"].next_symbol_id).to_equal(1)

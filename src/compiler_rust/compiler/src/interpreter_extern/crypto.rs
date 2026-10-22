@@ -166,6 +166,19 @@ pub fn rt_sha1_finish_base64(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// `rt_xxh3_128_text(data: text) -> text`: 32-hex XXH3-128 of the text's
+/// UTF-8 bytes, through the same runtime function the JIT links. A non-text
+/// argument yields "" (the caller's fallback sentinel), matching the runtime.
+pub fn rt_xxh3_128_text(args: &[Value]) -> Result<Value, CompileError> {
+    match args.first() {
+        Some(Value::Str(s)) => Ok(Value::text(simple_runtime::value::sffi::hash::xxh3_128_hex_bytes(
+            s.as_bytes(),
+        ))),
+        Some(_) => Ok(Value::text("")),
+        None => Err(CompileError::runtime("rt_xxh3_128_text expects 1 argument".to_string())),
+    }
+}
+
 pub fn rt_base64_encode(args: &[Value]) -> Result<Value, CompileError> {
     require_arity(args, 1, "rt_base64_encode")?;
     let data = bytes_arg(args, 0, "rt_base64_encode")?;

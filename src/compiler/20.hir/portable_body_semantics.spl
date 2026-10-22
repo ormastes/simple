@@ -128,7 +128,9 @@ fn _portable_function_header_v1(value: HirFunction,
             not _portable_type_v1(value.return_type) or
             not _portable_function_attrs_v1(value) or
             _normalized_effect_v1(value.effects) == ""): return false
-    for parameter in value.params:
+    for raw_parameter in value.params:
+        # ANY-transport hazard sweep round 3: annotated rebind.
+        val parameter: HirParam = raw_parameter
         if (parameter.symbol.id < 0 or parameter.name == "" or parameter.has_default or
                 parameter.default != nil or parameter.is_mutable or
                 not _portable_type_v1(parameter.type_) or
@@ -202,7 +204,7 @@ fn _reserve_facts_v1(module: HirModule, function_keys: [SymbolId],
     var total_signature_bytes: i64 = 0
     var signature_part_count: i64 = 0
     for key in function_keys:
-        val function_ = module.functions[key]
+        val function_: HirFunction = module.functions[key]
         if not ledger.charge_work_product(function_.name.len(), 4):
             return Err(ledger.error())
         val name_bytes = text_byte_len(function_.name)
@@ -224,7 +226,8 @@ fn _reserve_facts_v1(module: HirModule, function_keys: [SymbolId],
                 _framed_bytes_v1(symbol_bytes) + _framed_bytes_v1(name_bytes)
             if not ledger.charge_work(function_.params.len()):
                 return Err(ledger.error())
-            for parameter in function_.params:
+            for raw_parameter in function_.params:
+                val parameter: HirParam = raw_parameter
                 signature_bytes = signature_bytes +
                     _framed_bytes_v1(_portable_type_text_bytes_v1(parameter.type_))
             signature_bytes = signature_bytes +
@@ -267,7 +270,7 @@ fn _scope_chain_valid_v1(module: HirModule, start: i64,
     var depth: i64 = 0
     while true:
         if current < 0 or not module.symbols.scopes.has(current): return false
-        val scope = module.symbols.scopes[current]
+        val scope: Scope = module.symbols.scopes[current]
         if scope.id.id != current: return false
         depth = depth + 1
         if not ledger.check_semantic_depth(depth): return false
@@ -283,7 +286,7 @@ fn _function_scope_of_v1(module: HirModule, start: i64,
     var current = start
     var depth: i64 = 0
     while module.symbols.scopes.has(current):
-        val scope = module.symbols.scopes[current]
+        val scope: Scope = module.symbols.scopes[current]
         if scope.kind == ScopeKind.Function: return current
         match scope.parent:
             case Some(parent):
@@ -319,7 +322,7 @@ fn _symbol_indexes_valid_v1(module: HirModule,
     var names: Dict<text, bool> = {}
     var expected_module_callables: Dict<text, i64> = {}
     for symbol_key in table.symbols.keys():
-        val symbol = table.symbols[symbol_key]
+        val symbol: HirSymbol = table.symbols[symbol_key]
         val raw_id = symbol.id.id
         if (raw_id < 0 or symbol_key.to_string() != raw_id.to_string() or symbol.name == "" or
                 symbol.name.contains("\u0000") or names.has(symbol.name) or
@@ -363,7 +366,7 @@ fn _symbol_indexes_valid_v1(module: HirModule,
                 table.module_callables[key] != expected_module_callables[key]: return false
     var scoped_count: i64 = 0
     for scope_key in table.scopes.keys():
-        val scope = table.scopes[scope_key]
+        val scope: Scope = table.scopes[scope_key]
         val scope_id = scope.id.id
         if scope_id < 0 or scope_key.to_string() != scope_id.to_string() or
                 not _scope_chain_valid_v1(module, scope_id, ledger): return false
@@ -470,7 +473,7 @@ class _PortableBodyVerifierV1:
         if (not self._charge_node(depth + 1) or type_args.len() != 0 or
                 not self._verify_value_symbol(callee_expr, true)): return false
         val symbol = self._value_symbol(callee_expr)
-        val callee = self.module.functions[symbol]
+        val callee: HirFunction = self.module.functions[symbol]
         if args.len() != callee.params.len() or
                 not _portable_type_same_v1(value.type_, callee.return_type): return false
         var index: i64 = 0
@@ -570,7 +573,9 @@ class _PortableBodyVerifierV1:
         if not self._charge_node(depth) or value.unsafe_caps.len() != 0 or not value.has:
             return false
         var locals: [SymbolId] = []
-        for statement in value.stmts:
+        for raw_statement in value.stmts:
+            # ANY-transport hazard sweep round 3: annotated rebind.
+            val statement: HirStmt = raw_statement
             if not self._charge_node(depth + 1): return false
             match statement.kind:
                 case HirStmtKind.Let(symbol, type_, init):
@@ -597,7 +602,9 @@ class _PortableBodyVerifierV1:
         self.current_function = value.symbol
         self.current_function_name = value.name
         self.current_function_scope = -1
-        for parameter in value.params:
+        for raw_parameter in value.params:
+            # ANY-transport hazard sweep round 3: annotated rebind.
+            val parameter: HirParam = raw_parameter
             if (parameter.symbol.id < 0 or
                     not self.module.symbols.symbols.has(parameter.symbol.id)):
                 return false
@@ -622,7 +629,9 @@ fn _signature_digest_v1(value: HirFunction, effect_digest: text) -> text:
     var parts: [text] = ["simple.portable-hir.signature.v2\u0000",
         text_byte_len(symbol_text).to_string(), ":", symbol_text,
         text_byte_len(value.name).to_string(), ":", value.name]
-    for parameter in value.params:
+    for raw_parameter in value.params:
+        # ANY-transport hazard sweep round 3: annotated rebind.
+        val parameter: HirParam = raw_parameter
         val type_name = _portable_type_text_v1(parameter.type_)
         parts.push(text_byte_len(type_name).to_string() + ":" + type_name)
     val result_name = _portable_type_text_v1(value.return_type)
@@ -638,7 +647,7 @@ fn _facts_v1(module: HirModule, function_keys: [SymbolId],
     var effect_rows: [text] = []
     var entry_by_key: Dict<text, PortableBodyEntryFactV1> = {}
     for key in function_keys:
-        val function_ = module.functions[key]
+        val function_: HirFunction = module.functions[key]
         val effect_digest = _normalized_effect_v1(function_.effects)
         val effect_key = function_.symbol.id.to_string() + ":" + function_.name
         effect_rows.push(text_byte_len(effect_key).to_string() + ":" +
@@ -709,7 +718,7 @@ pub fn portable_hir_semantic_facts_from_typed_v1(
                 not ledger.charge_retained_bytes(48 + exported.len())):
             return Err(ledger.error())
     for key in function_keys:
-        val function_ = module.functions[key]
+        val function_: HirFunction = module.functions[key]
         if (key.id < 0 or key.id != function_.symbol.id or
                 verifier.seen_declarations.has(key.id) or function_names.has(function_.name) or
                 not module.symbols.symbols.has(key.id)): return Err(

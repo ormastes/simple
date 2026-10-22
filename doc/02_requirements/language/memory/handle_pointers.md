@@ -14,7 +14,7 @@ use-after-free and dangling reference bugs while maintaining performance.
 
 ## Syntax
 
-```simple
+```simple:skip
 # Handle type declaration
 struct ObjectHandle:
     id: i64
@@ -59,7 +59,7 @@ Handle implementation uses:
 
 ## Examples
 
-```simple
+```text
 # Create and use handles
 val obj = MyObject(data: 42)
 val handle = get_handle(obj)

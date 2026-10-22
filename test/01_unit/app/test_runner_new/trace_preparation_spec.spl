@@ -1,0 +1,90 @@
+# @tag:in-development
+# @req REQ-TRC-012 REQ-TRC-013 REQ-TRC-018
+# Pure protocol fixtures only; no claim of child execution or durable saving.
+use std.spec.*
+use std.common.traceability.run_plan.{TracePlannedCase}
+use std.common.traceability.run_request.{TraceRunRequest, materialize_trace_run_plan}
+use std.common.traceability.run_preparation.{build_trace_run_preparation, encode_trace_run_preparation}
+use app.test_runner_new.trace_preparation.{verify_trace_preparation_output}
+
+fn adapter_request(name: text) -> TraceRunRequest:
+    TraceRunRequest(subject_id: "subject:fixture", configuration_id: "config:fixture",
+        expectation_id: "expectation:fixture", binary_id: "binary:fixture",
+        cases: [TracePlannedCase(case_id: "case:fixture", test_path: "test/日本_spec.spl",
+            case_name: name, test_definition_id: "definition:fixture", lane_id: "lane:fixture")])
+
+fn adapter_ack(request: TraceRunRequest) -> Result<text, text>:
+    val plan = materialize_trace_run_plan(request, "run:allocated")?
+    encode_trace_run_preparation(build_trace_run_preparation(request, plan)?)
+
+describe "Strict parent preparation acknowledgement verification":
+    it "accepts canonical output with no framing, LF, or CRLF and preserves exact case intent":
+        val request = adapter_request("accepts a,b and quoted names")
+        match adapter_ack(request):
+            case Err(reason): fail(reason)
+            case Ok(source):
+                for ending in ["", "\n", "\r\n"]:
+                    match verify_trace_preparation_output(request, source + ending, 0):
+                        case Err(reason): fail(reason)
+                        case Ok(plan):
+                            expect(plan.run_id).to_equal("run:allocated")
+                            expect(plan.subject_id).to_equal(request.subject_id)
+                            expect(plan.cases.len()).to_equal(1)
+                            expect(plan.cases[0].case_name).to_equal(request.cases[0].case_name)
+                            expect(plan.cases[0].test_path).to_equal("test/日本_spec.spl")
+
+    it "rejects nonzero exit even when the output contains a valid acknowledgement":
+        val request = adapter_request("original")
+        match adapter_ack(request):
+            case Err(reason): fail(reason)
+            case Ok(source):
+                match verify_trace_preparation_output(request, source, 7):
+                    case Ok(_): fail("failed child authorized dispatch")
+                    case Err(reason): expect(reason).to_contain("exited unsuccessfully")
+
+    it "rejects empty, malformed and oversized stdout":
+        val request = adapter_request("original")
+        for source in ["", "not an acknowledgement", "x".repeat(1048577)]:
+            match verify_trace_preparation_output(request, source, 0):
+                case Ok(_): fail("invalid stdout authorized dispatch")
+                case Err(reason): expect(reason.len()).to_be_greater_than(0)
+
+    it "rejects log pollution, comments, repeated documents, extra newlines and spaces":
+        val request = adapter_request("original")
+        match adapter_ack(request):
+            case Err(reason): fail(reason)
+            case Ok(source):
+                for polluted in ["migration complete\n" + source, source + "\nlog", "# log\n" + source,
+                    source + "\n" + source, source + "\n\n", " " + source, source + " "]:
+                    match verify_trace_preparation_output(request, polluted, 0):
+                        case Ok(_): fail("polluted stdout authorized dispatch")
+                        case Err(reason): expect(reason.len()).to_be_greater_than(0)
+
+    it "rejects acknowledgement of a different request despite unchanged caller identities":
+        val request = adapter_request("original")
+        match adapter_ack(adapter_request("changed")):
+            case Err(reason): fail(reason)
+            case Ok(source):
+                match verify_trace_preparation_output(request, source, 0):
+                    case Ok(_): fail("another request authorized dispatch")
+                    case Err(reason): expect(reason).to_contain("request digest mismatch")
+
+    it "rejects forged allocated run and plan digest bindings":
+        val request = adapter_request("original")
+        match materialize_trace_run_plan(request, "run:allocated"):
+            case Err(reason): fail(reason)
+            case Ok(plan):
+                match build_trace_run_preparation(request, plan):
+                    case Err(reason): fail(reason)
+                    case Ok(receipt):
+                        var wrong_run = receipt
+                        wrong_run.run_id = "run:other"
+                        var wrong_plan = receipt
+                        wrong_plan.plan_digest = "sha256:" + "0".repeat(64)
+                        for forged in [wrong_run, wrong_plan]:
+                            match encode_trace_run_preparation(forged):
+                                case Err(reason): fail(reason)
+                                case Ok(source):
+                                    match verify_trace_preparation_output(request, source, 0):
+                                        case Ok(_): fail("forged plan binding authorized dispatch")
+                                        case Err(reason): expect(reason).to_contain("plan digest mismatch")

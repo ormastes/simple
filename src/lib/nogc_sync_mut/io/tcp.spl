@@ -1,3 +1,7 @@
+use std.common.encoding.external_text.{utf8_format}
+use std.common.text_bytes.{text_byte_buffer}
+use std.nogc_sync_mut.io.external_text_io.{TextIoError, io_external_text, io_external_from_internal, io_external_bytes, io_internal_text, io_text_error_message, io_legacy_utf8}
+
 # Sync TCP I/O
 #
 # TCP listener and stream implementing Read, Write, Close traits.
@@ -18,7 +22,6 @@ use std.nogc_sync_mut.sosix.network.{
     sosix_tcp_listen,
     sosix_tcp_local_addr,
     sosix_tcp_read,
-    sosix_tcp_read_line,
     sosix_tcp_peer_addr,
     sosix_tcp_set_nodelay,
     sosix_tcp_set_nonblocking,
@@ -28,16 +31,19 @@ use std.nogc_sync_mut.sosix.network.{
     sosix_tcp_set_write_timeout,
     sosix_tcp_socket_create,
     sosix_tcp_shutdown,
-    sosix_tcp_write,
-    sosix_tcp_write_text
+    sosix_tcp_write
 }
-fn tcp_sub_bytes(data: [u8], start: i64, end: i64) -> [u8]:
-    var result: [u8] = []
-    var i = start
-    while i < end and i < data.len():
-        result.push(data[i])
-        i = i + 1
-    return result
+fn tcp_packed_window(data: [u8], start: i64, end: i64) -> Result<[u8], IoError>:
+    var result = match text_byte_buffer(end - start):
+        case Ok(bytes): bytes
+        case Err(_): return Err(IoError(kind: IoErrorKind.Other, message: "TCP send window allocation failed", source: nil))
+    for index in start..end:
+        val byte = data[index]
+        val value = byte as i64
+        if value < 0 or value > 255:
+            return Err(IoError(kind: IoErrorKind.InvalidInput, message: "TCP byte value outside octet range", source: nil))
+        result.push(byte)
+    Ok(result)
 
 # ============================================================================
 # TcpListener - TCP Server Socket
@@ -57,7 +63,7 @@ class TcpListener with Close:
     fd: i64
     open: bool
 
-    static fn bind(addr: text) -> Result<TcpListener, IoError>:
+    pub static fn bind(addr: text) -> Result<TcpListener, IoError>:
         """Bind to address and start listening.
 
         Args:
@@ -86,7 +92,7 @@ class TcpListener with Close:
             return Err(IoError(kind: IoErrorKind.Other, message: "accept failed", source: nil))
         Ok(TcpStream(fd: client_fd, open: true))
 
-    fn accept_timeout(ms: i64) -> Result<TcpStream, IoError>:
+    pub fn accept_timeout(ms: i64) -> Result<TcpStream, IoError>:
         """Accept with timeout.
 
         Args:
@@ -122,7 +128,7 @@ class TcpListener with Close:
         unsafe(capabilities: [ffi]):
             sosix_tcp_accept_timeout(self.fd, ms)
 
-    fn local_addr() -> Result<text, IoError>:
+    pub fn local_addr() -> Result<text, IoError>:
         """Get local bound address.
 
         Returns:
@@ -136,7 +142,7 @@ class TcpListener with Close:
 
     # --- Close trait ---
 
-    me close() -> Result<(), IoError>:
+    pub me fn close() -> Result<(), IoError>:
         """Close listener."""
         if not self.open:
             return Ok(())
@@ -147,7 +153,7 @@ class TcpListener with Close:
             return Err(IoError(kind: IoErrorKind.Other, message: "close failed", source: nil))
         Ok(())
 
-    fn is_open() -> bool:
+    pub fn is_open() -> bool:
         """Check if listener is open."""
         self.open
 
@@ -196,7 +202,7 @@ class TcpStream with Read, Write, Close:
             return Err(IoError(kind: IoErrorKind.ConnectionRefused, message: "connect failed: {addr}", source: nil))
         Ok(TcpStream(fd: fd, open: true))
 
-    static fn connect_timeout(addr: text, ms: i64) -> Result<TcpStream, IoError>:
+    pub static fn connect_timeout(addr: text, ms: i64) -> Result<TcpStream, IoError>:
         """Connect with timeout.
 
         Args:
@@ -214,7 +220,7 @@ class TcpStream with Read, Write, Close:
 
     # --- Read trait ---
 
-    fn read(size: i64) -> Result<[u8], IoError>:
+    pub fn read(size: i64) -> Result<[u8], IoError>:
         """Read up to size bytes from stream.
 
         Args:
@@ -231,7 +237,7 @@ class TcpStream with Read, Write, Close:
             return Err(IoError(kind: IoErrorKind.ConnectionReset, message: "read failed", source: nil))
         Ok(data!)
 
-    fn read_exact(size: i64) -> Result<[u8], IoError>:
+    pub fn read_exact(size: i64) -> Result<[u8], IoError>:
         """Read exactly size bytes.
 
         Args:
@@ -255,13 +261,13 @@ class TcpStream with Read, Write, Close:
             remaining = remaining - chunk!.len()
         Ok(buf)
 
-    fn read_bytes(count: i32) -> Result<text, IoError>:
+    pub fn read_bytes(count: i32) -> Result<text, IoError>:
         """Read exactly `count` bytes and decode as text.
 
         Used by the HTTP parser for a `Content-Length` body, which is
         defined as an exact byte count (not "read until EOF" like
         `read_text`/`read_all`). Thin wrapper over `read_exact` +
-        `rt_bytes_to_text` so callers that already have a byte count from a
+        strict UTF8 admission so callers that already have a byte count from a
         header don't need to convert bytes themselves.
 
         Args:
@@ -271,9 +277,15 @@ class TcpStream with Read, Write, Close:
             Result with the bytes decoded as text, or an error if the
             stream ended before `count` bytes arrived
         """
+        if count < 0:
+            return Err(tcp_text_io_error(TextIoError.Io("negative external text frame length")))
         val bytes = self.read_exact(count.to_i64())?
-        val s = bytes_to_text(bytes)
-        Ok(s)
+        val external = match io_external_text(bytes, utf8_format()):
+            case Ok(value): value
+            case Err(error): return Err(tcp_text_io_error(error))
+        match io_internal_text(external):
+            case Ok(value): Ok(value)
+            case Err(error): Err(tcp_text_io_error(error))
 
     fn read_all() -> Result<[u8], IoError>:
         """Read all available bytes until EOF.
@@ -294,42 +306,24 @@ class TcpStream with Read, Write, Close:
             val _copied = io_append_chunk(buf, chunk!)
         Ok(buf)
 
-    fn read_text() -> Result<text, IoError>:
+    pub fn read_text() -> Result<text, IoError>:
         """Read all available content as text.
 
         Returns:
             Result with text
         """
         val bytes = self.read_all()?
-        val s = bytes_to_text(bytes)
-        Ok(s)
+        tcp_legacy_utf8(bytes)
 
-    fn read_line() -> Result<text, IoError>:
-        """Read a single line from stream.
+    pub fn read_line() -> Result<text, IoError>:
+        self.read_line_bounded(9223372036854775807)
 
-        Returns:
-            Result with line including newline
-        """
-        if not self.open:
-            return Err(IoError(kind: IoErrorKind.Other, message: "stream is closed", source: nil))
-        val line = unsafe(capabilities: [ffi]):
-            sosix_tcp_read_line(self.fd)
-        if line == nil:
-            return Err(IoError(kind: IoErrorKind.UnexpectedEof, message: "end of stream", source: nil))
-        Ok(line)
+    pub fn read_line_nullable() -> text?:
+        match self.read_line():
+            case Ok(value): value
+            case Err(_): nil
 
-    fn read_line_nullable() -> text?:
-        """Read one line without an aggregate ``Result`` return.
-
-        This is the Phase-3 ABI-safe server boundary. ``nil`` represents a
-        closed stream or read failure.
-        """
-        if not self.open:
-            return nil
-        unsafe(capabilities: [ffi]):
-            sosix_tcp_read_line(self.fd)
-
-    fn read_line_bounded(max_bytes: i64) -> Result<text, IoError>:
+    pub fn read_line_bounded(max_bytes: i64) -> Result<text, IoError>:
         """Read one line, but fail closed once more than max_bytes have
         arrived without a newline, instead of buffering an unbounded amount
         of attacker-controlled input.
@@ -359,36 +353,21 @@ class TcpStream with Read, Write, Close:
                 return Err(IoError(kind: IoErrorKind.Other, message: "line exceeds max_bytes ({max_bytes})", source: nil))
             if chunk![0] == 10:
                 break
-        Ok(bytes_to_text(buf))
+        tcp_legacy_utf8(buf)
 
-    fn read_line_or_empty() -> text:
-        """Read one line through a non-optional Phase-3 ABI boundary."""
-        if not self.open:
-            return ""
-        val line = unsafe(capabilities: [ffi]):
-            sosix_tcp_read_line(self.fd)
-        if line == nil:
-            return ""
-        line
+    pub fn read_line_or_empty() -> text:
+        match self.read_line():
+            case Ok(value): value
+            case Err(_): ""
 
-    fn read_bytes_or_empty(count: i32) -> text:
-        """Read an exact HTTP body without returning an aggregate result."""
-        if not self.open or count <= 0:
-            return ""
-        var buf: [u8] = []
-        var remaining = count.to_i64()
-        while remaining > 0:
-            val chunk = unsafe(capabilities: [ffi]):
-                sosix_tcp_read(self.fd, remaining)
-            if chunk == nil or chunk!.len() == 0:
-                return ""
-            val _copied = io_append_chunk(buf, chunk!)
-            remaining = remaining - chunk!.len()
-        bytes_to_text(buf)
+    pub fn read_bytes_or_empty(count: i32) -> text:
+        match self.read_bytes(count):
+            case Ok(value): value
+            case Err(_): ""
 
     # --- Write trait ---
 
-    fn write(data: [u8]) -> Result<i64, IoError>:
+    pub fn write(data: [u8]) -> Result<i64, IoError>:
         """Write bytes, returning number written.
 
         Args:
@@ -399,13 +378,17 @@ class TcpStream with Read, Write, Close:
         """
         if not self.open:
             return Err(IoError(kind: IoErrorKind.Other, message: "stream is closed", source: nil))
+        if data.len() == 0: return Ok(0)
+        # [u8] may be generic word storage. Retain an actual packed carrier
+        # for this one synchronous call; preserve partial-write semantics.
+        val packed = tcp_packed_window(data, 0, data.len())?
         val written = unsafe(capabilities: [ffi]):
-            sosix_tcp_write(self.fd, data)
-        if written < 0:
+            sosix_tcp_write(self.fd, packed)
+        if written < 0 or written > data.len():
             return Err(IoError(kind: IoErrorKind.BrokenPipe, message: "write failed", source: nil))
         Ok(written)
 
-    fn write_all(data: [u8]) -> Result<(), IoError>:
+    pub fn write_all(data: [u8]) -> Result<(), IoError>:
         """Write all bytes.
 
         Args:
@@ -418,37 +401,32 @@ class TcpStream with Read, Write, Close:
             return Err(IoError(kind: IoErrorKind.Other, message: "stream is closed", source: nil))
         var offset = 0
         while offset < data.len():
-            val remaining = tcp_sub_bytes(data, offset, data.len())
+            # Bounded packed windows: generic [u8] has word-backed storage.
+            # No raw pointer/view API exists here; partial progress repacks at
+            # most 8192 bytes, never the whole remaining payload.
+            val remaining = data.len() - offset
+            val count = if remaining > 8192: 8192 else: remaining
+            val window = tcp_packed_window(data, offset, offset + count)?
             val written = unsafe(capabilities: [ffi]):
-                sosix_tcp_write(self.fd, remaining)
-            if written <= 0:
+                sosix_tcp_write(self.fd, window)
+            if written <= 0 or written > count:
                 return Err(IoError(kind: IoErrorKind.BrokenPipe, message: "write_all failed", source: nil))
             offset = offset + written
         Ok(())
 
-    fn write_text(s: text) -> Result<(), IoError>:
-        """Write text string.
+    pub fn write_text(s: text) -> Result<(), IoError>:
+        val external = match io_external_from_internal(s, utf8_format()):
+            case Ok(value): value
+            case Err(error): return Err(tcp_text_io_error(error))
+        val bytes = match io_external_bytes(external):
+            case Ok(value): value
+            case Err(error): return Err(tcp_text_io_error(error))
+        self.write_all(bytes)
 
-        Args:
-            s: Text to write
-
-        Returns:
-            Result or error
-        """
-        if not self.open:
-            return Err(IoError(kind: IoErrorKind.Other, message: "stream is closed", source: nil))
-        val written = unsafe(capabilities: [ffi]):
-            sosix_tcp_write_text(self.fd, s)
-        if written != s.len():
-            return Err(IoError(kind: IoErrorKind.BrokenPipe, message: "write_text incomplete", source: nil))
-        Ok(())
-
-    fn write_text_status(s: text) -> bool:
-        """Write text and return a scalar success flag."""
-        if not self.open:
-            return false
-        unsafe(capabilities: [ffi]):
-            sosix_tcp_write_text(self.fd, s) == s.len()
+    pub fn write_text_status(s: text) -> bool:
+        match self.write_text(s):
+            case Ok(_): true
+            case Err(_): false
 
     fn flush() -> Result<(), IoError>:
         """Flush write buffer.
@@ -466,7 +444,7 @@ class TcpStream with Read, Write, Close:
 
     # --- Close trait ---
 
-    me close() -> Result<(), IoError>:
+    pub me fn close() -> Result<(), IoError>:
         """Close stream."""
         if not self.open:
             return Ok(())
@@ -486,7 +464,7 @@ class TcpStream with Read, Write, Close:
         self.open = false
         ok
 
-    fn is_open() -> bool:
+    pub fn is_open() -> bool:
         """Check if stream is open."""
         self.open
 
@@ -504,7 +482,7 @@ class TcpStream with Read, Write, Close:
             return Err(IoError(kind: IoErrorKind.Other, message: "peer_addr failed", source: nil))
         Ok(addr)
 
-    fn local_addr() -> Result<text, IoError>:
+    pub fn local_addr() -> Result<text, IoError>:
         """Get local address.
 
         Returns:
@@ -531,7 +509,7 @@ class TcpStream with Read, Write, Close:
             return Err(IoError(kind: IoErrorKind.Other, message: "set_nodelay failed", source: nil))
         Ok(())
 
-    fn set_read_timeout(ms: i64?) -> Result<(), IoError>:
+    pub fn set_read_timeout(ms: i64?) -> Result<(), IoError>:
         """Set read timeout.
 
         Args:
@@ -554,7 +532,7 @@ class TcpStream with Read, Write, Close:
         unsafe(capabilities: [ffi]):
             sosix_tcp_set_read_timeout(self.fd, ms)
 
-    fn set_write_timeout(ms: i64?) -> Result<(), IoError>:
+    pub fn set_write_timeout(ms: i64?) -> Result<(), IoError>:
         """Set write timeout.
 
         Args:
@@ -570,7 +548,7 @@ class TcpStream with Read, Write, Close:
             return Err(IoError(kind: IoErrorKind.Other, message: "set_write_timeout failed", source: nil))
         Ok(())
 
-    fn shutdown(how: Shutdown) -> Result<(), IoError>:
+    pub fn shutdown(how: Shutdown) -> Result<(), IoError>:
         """Shutdown one or both directions.
 
         Args:
@@ -696,70 +674,7 @@ fn tcp_backend_local_addr(fd: i64) -> text?:
     unsafe(capabilities: [ffi]):
         sosix_tcp_local_addr(fd)
 
-# Text/bytes conversion
-use std.common.string_core.{bytes_to_text}
-use std.common.string_core.{text_to_bytes}
-
-# ============================================================================
-# Resource Wrapper (Owning Handle Class) — WP-J
-# ============================================================================
-
-# Raw TCP socket resource wrapper with double-close guard.
-# Sentinel is -1: sosix_tcp_socket_create returns the socket fd on success
-# and -1 on failure (see tcp_backend_socket_create docstring and the
-# `if fd < 0` checks in tcp_backend_bind_with_reuseport above).
-class TcpSocket:
-    fd: i64
-
-impl TcpSocket:
-    fn is_valid() -> bool:
-        self.fd >= 0
-
-    fn bind(addr: text) -> bool:
-        if not self.is_valid():
-            return false
-        unsafe(capabilities: [ffi]):
-            sosix_tcp_bind_fd(self.fd, addr)
-
-    fn listen(backlog: i64) -> bool:
-        if not self.is_valid():
-            return false
-        unsafe(capabilities: [ffi]):
-            sosix_tcp_listen(self.fd, backlog)
-
-    fn set_reuseaddr(enabled: bool) -> bool:
-        if not self.is_valid():
-            return false
-        unsafe(capabilities: [ffi]):
-            sosix_tcp_set_reuseaddr(self.fd, enabled)
-
-    fn set_reuseport(enabled: bool) -> bool:
-        if not self.is_valid():
-            return false
-        unsafe(capabilities: [ffi]):
-            sosix_tcp_set_reuseport(self.fd, enabled)
-
-    fn local_addr() -> text?:
-        if not self.is_valid():
-            return nil
-        unsafe(capabilities: [ffi]):
-            sosix_tcp_local_addr(self.fd)
-
-    fn close():
-        # Consuming drop: one-shot guard against double-close
-        if self.fd >= 0:
-            unsafe(capabilities: [ffi]):
-                sosix_tcp_close(self.fd)
-            self.fd = -1
-
-# Create a raw TCP socket (not yet bound). family: 0 = IPv4, 1 = IPv6.
-# Returns nil on failure.
-fn tcp_socket_create_resource(family: i64) -> TcpSocket?:
-    val fd = unsafe(capabilities: [ffi]):
-        sosix_tcp_socket_create(family)
-    if fd < 0:
-        return nil
-    TcpSocket(fd: fd)
+export use std.nogc_sync_mut.io.tcp_socket.{TcpSocket, tcp_socket_create_resource}
 
 # Scalar descriptor helpers for Phase-3 consumers.  They deliberately avoid
 # constructing/returning TcpStream class values across a native call boundary.
@@ -770,51 +685,59 @@ fn tcp_fd_set_read_timeout(fd: i64, ms: i64) -> bool:
         sosix_tcp_set_read_timeout(fd, ms)
 
 fn tcp_fd_write_text(fd: i64, data: text) -> bool:
-    if fd < 0:
-        return false
-    unsafe(capabilities: [ffi]):
-        sosix_tcp_write_text(fd, data) == data.len()
+    if fd < 0: return false
+    val external = match io_external_from_internal(data, utf8_format()):
+        case Ok(value): value
+        case Err(_): return false
+    val bytes = match io_external_bytes(external):
+        case Ok(value): value
+        case Err(_): return false
+    var offset = 0
+    while offset < bytes.len():
+        val remaining = bytes.len() - offset
+        val count = if remaining > 8192: 8192 else: remaining
+        val window = match tcp_packed_window(bytes, offset, offset + count):
+            case Ok(value): value
+            case Err(_): return false
+        val written = unsafe(capabilities: [ffi]):
+            sosix_tcp_write(fd, window)
+        if written <= 0 or written > count: return false
+        offset = offset + written
+    true
 
 fn tcp_fd_read_line_or_empty(fd: i64) -> text:
-    if fd < 0:
-        return ""
-    val line = unsafe(capabilities: [ffi]):
-        sosix_tcp_read_line(fd)
-    if line == nil:
-        return ""
-    line
+    if fd < 0: return ""
+    var bytes: [u8] = []
+    while true:
+        val chunk = unsafe(capabilities: [ffi]):
+            sosix_tcp_read(fd, 1)
+        if chunk == nil: return ""
+        if chunk!.len() == 0: break
+        if chunk!.len() != 1: return ""
+        val appended = io_append_chunk(bytes, chunk!)
+        if chunk![0] == 10: break
+    match io_legacy_utf8(bytes):
+        case Ok(value): value
+        case Err(_): ""
 
 fn tcp_fd_read_bytes_or_empty(fd: i64, count: i32) -> text:
-    if fd < 0 or count <= 0:
-        return ""
-    var buf: [u8] = []
+    if fd < 0 or count <= 0: return ""
+    var bytes: [u8] = []
     var remaining = count.to_i64()
     while remaining > 0:
         val chunk = unsafe(capabilities: [ffi]):
             sosix_tcp_read(fd, remaining)
-        if chunk == nil or chunk!.len() == 0:
-            return ""
-        buf = buf + chunk!
+        if chunk == nil or chunk!.len() == 0: return ""
+        if chunk!.len() > remaining: return ""
+        val appended = io_append_chunk(bytes, chunk!)
         remaining = remaining - chunk!.len()
-    bytes_to_text(buf)
+    match io_legacy_utf8(bytes):
+        case Ok(value): value
+        case Err(_): ""
 
 fn tcp_fd_read_text_or_empty(fd: i64, count: i32) -> text:
-    """Read a bounded HTTP text body without the Phase-3 array-return ABI.
-
-    `sosix_tcp_read` returns `[u8]?`, whose array ABI is not yet qualified in
-    the staged native lane. `sosix_tcp_read_line` returns runtime-owned text, so
-    accumulate complete lines until Content-Length bytes are present or the
-    peer closes. This supports both one-line protocol JSON and multiline HTML.
-    """
-    if fd < 0 or count <= 0:
-        return ""
-    var out = ""
-    while out.len() < count:
-        val chunk = tcp_fd_read_line_or_empty(fd)
-        if chunk == "":
-            break
-        out = out + chunk
-    out
+    # Content-Length is exact bytes, never whole-line overread or UTF-8 units.
+    tcp_fd_read_bytes_or_empty(fd, count)
 
 fn tcp_fd_close(fd: i64) -> bool:
     if fd < 0:
@@ -849,3 +772,13 @@ export tcp_listener_bind_fd, tcp_listener_accept_fd, tcp_listener_accept_fd_time
 # ============================================================================
 # Exports
 # ============================================================================
+
+fn tcp_text_io_error(error: TextIoError) -> IoError:
+    match error:
+        case TextIoError.Transport(transport): transport
+        case _: IoError(kind: IoErrorKind.Other, message: io_text_error_message(error), source: nil)
+
+fn tcp_legacy_utf8(bytes: [u8]) -> Result<text, IoError>:
+    match io_legacy_utf8(bytes):
+        case Ok(value): Ok(value)
+        case Err(message): Err(IoError(kind: IoErrorKind.Other, message: message, source: nil))

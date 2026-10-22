@@ -108,11 +108,13 @@ grep -q 'command -v gtimeout' scripts/bootstrap/bootstrap-from-scratch.sh || fai
 grep -Fq 'brew install coreutils freetype' .github/workflows/rust-bootstrap-multiplatform.yml || fail "macOS candidate timeout prerequisite missing"
 grep -Fq 'brew install coreutils freetype zstd' .github/workflows/rust-bootstrap-multiplatform.yml || fail "macOS zstd linker dependency missing"
 grep -Fq 'LIBRARY_PATH=$(brew --prefix freetype)/lib:$(brew --prefix zstd)/lib:' .github/workflows/rust-bootstrap-multiplatform.yml || fail "macOS Homebrew library path missing"
-grep -Fq 'clang-18 lld-18 llvm-18-dev libfreetype6-dev libunwind-dev' .github/workflows/rust-bootstrap-multiplatform.yml || fail "Linux bootstrap linker dependency missing"
+sh test/01_unit/scripts/linux_phase23_llvm23_toolchain_test.shs || fail "Linux LLVM authority behavioral contract failed"
+sh test/01_unit/scripts/linux_phase23_llvm23_workflow_test.shs || fail "Linux LLVM installer/dependency wiring contract failed"
+sh test/01_unit/scripts/linux_phase23_llvm23_archive_test.shs || fail "Linux LLVM immutable archive admission failed"
 grep -q '^backend=""$' scripts/bootstrap/bootstrap-from-scratch.sh || fail "bootstrap still hides a backend selection"
 grep -Fq 'backend=llvm' scripts/bootstrap/bootstrap-from-scratch.sh || fail "LLVM+Cranelift authority does not derive its default backend"
-grep -Fq 'selected_k1_policy=$(kernel_policy_value k1_policy)' scripts/bootstrap/bootstrap-from-scratch.sh || fail "bootstrap does not consume canonical K1 authority"
-grep -Fq 'simple-runtime = { path = "../runtime", features = ["runtime-symbol-table", "native-all-provider", "runtime-tls"] }' src/compiler_rust/native_all/Cargo.toml || fail "native-all runtime symbol table or browser TLS is disabled"
+sh test/01_unit/scripts/bootstrap_k1_policy_selection_test.shs || fail "bootstrap canonical/alternate K1 authority behavior"
+grep -Fq 'simple-runtime = { path = "../runtime", features = ["runtime-symbol-table", "native-all-provider", "runtime-tls", "hosted-webgpu-provider"] }' src/compiler_rust/native_all/Cargo.toml || fail "native-all runtime symbol table or browser TLS is disabled"
 grep -Fq 'runtime-tls = ["dep:rustls", "dep:rustls-platform-verifier", "dep:rustls-pemfile"]' src/compiler_rust/runtime/Cargo.toml || fail "browser TLS does not use platform trust"
 grep -Fq '.with_platform_verifier()' src/compiler_rust/runtime/src/value/net_tls.rs || fail "browser TLS platform verifier wiring missing"
 grep -Fq 'run_rust_authority_cargo rust-runtime-nolto-build off \' scripts/bootstrap/bootstrap-from-scratch.sh || fail "bootstrap runtime symbol-table rebuild missing"
@@ -130,17 +132,17 @@ if grep -q -- '--backend cranelift' scripts/bootstrap/bootstrap-from-scratch.sh;
 fi
 grep -q 'bootstrap_stage_sanity "${stage2_bin}"' scripts/bootstrap/bootstrap-from-scratch.sh || fail "missing Stage 2 compiler sanity"
 grep -q 'bootstrap_stage_sanity "${stage3_bin}"' scripts/bootstrap/bootstrap-from-scratch.sh || fail "missing Stage 3 compiler sanity"
-grep -Fq 'CANDIDATE_FRONTEND_BACKEND="${backend}" \' scripts/bootstrap/bootstrap-from-scratch.sh || fail "stage sanity does not export the selected backend"
-grep -Fq 'candidate_frontend_smoke "${candidate}" >"${frontend_log}" 2>&1 ||' scripts/bootstrap/bootstrap-from-scratch.sh || fail "stage sanity does not run the native fixture"
+sh test/01_unit/scripts/bootstrap_current_owner_contract_test.shs || fail "bootstrap current frontend milestone and dispatch behavior"
 grep -Fq 'vendored_sources_absolute=$(cygpath -m "${vendored_sources_absolute}")' scripts/bootstrap/bootstrap-from-scratch.sh || fail "Windows private Cargo config does not use a native vendor path"
 grep -Fq '__SIMPLE_CANDIDATE_ENV_ABI__' scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs || fail "candidate admission does not exercise the four-argument environment ABI"
-generic_smoke_line=$(grep -n '^candidate_frontend_smoke() (' scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs | cut -d: -f1)
+generic_smoke_line=$(grep -nE '^candidate_frontend_smoke\(\) [({]' scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs | cut -d: -f1)
 full_admission_line=$(grep -n '^simple_binary_is_valid() (' scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs | cut -d: -f1)
 env_probe_line=$(grep -n '^[[:space:]]*env_probe=$(SIMPLE_BINARY="$candidate"' scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs | cut -d: -f1)
 [ "${generic_smoke_line}" -lt "${full_admission_line}" ] && [ "${full_admission_line}" -lt "${env_probe_line}" ] || fail "full-CLI environment ABI probe leaked into generic Stage2/3 smoke"
 grep -Fq 'unknown command '\''run'\''' scripts/bootstrap/bootstrap-from-scratch.sh || fail "stage sanity does not reject unsupported run"
 grep -Fq 'stage4-essential-tools-smoke' scripts/bootstrap/bootstrap-from-scratch.sh || fail "Stage 4 essential-tools smoke hook missing"
-grep -Fq 'SIMPLE_BOOTSTRAP_LOW_MEMORY=1 \' scripts/bootstrap/bootstrap-from-scratch.sh || fail "Stage 4 structural low-memory ownership gate missing"
+# Stage 4 now forwards the configured low-memory mode (NATIVE_LOW_MEMORY) instead of a literal 1.
+grep -Fq 'SIMPLE_BOOTSTRAP_LOW_MEMORY="${NATIVE_LOW_MEMORY}" \' scripts/bootstrap/bootstrap-from-scratch.sh || fail "Stage 4 structural low-memory ownership gate missing"
 grep -Fq 'jobs="${host_cpus}"' scripts/bootstrap/bootstrap-from-scratch.sh || fail "full-resource profiles do not use every detected CPU"
 grep -Fq '[ "${execution_profile}" = "clean-release" ]; then' scripts/bootstrap/bootstrap-from-scratch.sh || fail "clean release profile does not share full-resource scheduling"
 grep -Fq 'execution_profile=clean-release' scripts/bootstrap/bootstrap-from-scratch.sh || fail "clean release profile selection missing"
@@ -148,12 +150,12 @@ grep -Fq 'clearing native cache (clean-release profile)' scripts/bootstrap/boots
 grep -Fq -- '--low-memory' scripts/bootstrap/bootstrap-from-scratch.sh || fail "Stage 4 structural low-memory CLI flag missing"
 grep -Fq 'SIMPLE_BOOTSTRAP_DIAGNOSTICS_MODE:-off' scripts/bootstrap/bootstrap-from-scratch.sh || fail "diagnostics mode is not default-off"
 grep -Fq 'SIMPLE_KEEP_LLVM_IR=${SIMPLE_KEEP_LLVM_IR:-1}' scripts/bootstrap/bootstrap-from-scratch.sh || fail "debug mode does not preserve LLVM IR"
-grep -Fq 'bootstrap_progress_mark "rust-${rust_authority_log}"' scripts/bootstrap/bootstrap-from-scratch.sh || fail "Rust authority progress milestone missing"
+# Rust progress milestone behavior is qualified by bootstrap_current_owner_contract_test.shs above.
 if grep -Fq 'stage4_low_memory=0' scripts/bootstrap/bootstrap-from-scratch.sh; then
   fail "a full-resource profile disables Stage 4 structural streaming ownership"
 fi
 grep -Fq 'SIMPLE_STAGE4_STREAMING_SURFACES=1 \' scripts/bootstrap/bootstrap-from-scratch.sh || fail "Stage 4 streaming surface gate missing"
-grep -Fq 'SIMPLE_STAGE3_STREAMING_SURFACES=1 \' scripts/bootstrap/bootstrap-from-scratch.sh || fail "Stage 3 streaming surface gate missing"
+grep -Fq 'SIMPLE_STAGE3_STREAMING_SURFACES=0 \' scripts/bootstrap/bootstrap-from-scratch.sh || fail "Stage 3 retained surface profile missing"
 grep -Fq 'SIMPLE_BINARY="$(absolute_path "${full_bin}")"' scripts/bootstrap/bootstrap-from-scratch.sh || fail "essential-tools smoke does not receive the fresh Stage 4 binary"
 essential_tools_smoke=scripts/check/check-bootstrap-essential-tools-smoke.shs
 seed_probe_dir=$(mktemp -d)
@@ -266,26 +268,7 @@ if printf '%s\n' "${release_windows_steps}" |
     grep -Eq 'choco install llvm|LLVM_SYS_[0-9]+_PREFIX|SIMPLE_LLVM_PATH|--backend([=][[:space:]]*|[[:space:]]+)llvm(-lib)?'; then
   fail "release workflow still presents unsupported Windows LLVM as optional evidence"
 fi
-matrix_backends_for() {
-  awk -v name="$1" '
-    {
-      line = $0
-      sub(/^[[:space:]]*/, "", line)
-    }
-    line == "name: " name {
-      getline
-      sub(/^[[:space:]]*backend:[[:space:]]*/, "")
-      print
-    }
-  ' "${multiplatform}" | LC_ALL=C sort | tr '\n' ' '
-}
-for platform_name in "Linux x86_64" "macOS aarch64" "macOS x86_64"; do
-  [ "$(matrix_backends_for "${platform_name}")" = "cranelift llvm " ] ||
-    fail "multiplatform backend pair missing: ${platform_name}"
-done
-[ "$(matrix_backends_for "Windows x86_64")" = "cranelift " ] ||
-  fail "Windows multiplatform lane must use supported Cranelift only"
-grep -q 'os: macos-15-intel' "${multiplatform}" || fail "active macOS Intel runner missing"
+# Native matrix default/focused dispatch semantics are tested above against its actual expression.
 [ "$(grep -c "scripts/setup/platform-detect.shs" "${multiplatform}")" -eq 2 ] || fail "platform detection trigger missing"
 [ "$(grep -Fc "scripts/check/cert/redeploy_gate/fixtures/p2_add.spl" "${multiplatform}")" -eq 3 ] || fail "stage fixture triggers or Windows ARM64 use missing"
 [ "$(grep -c "scripts/check/check-llvm-simd-row-native-arch.shs" "${multiplatform}")" -eq 3 ] || fail "native architecture gate wiring missing"
@@ -538,14 +521,14 @@ fi
 grep -Fq '#cloud-config' "${freebsd_qemu}" || fail "FreeBSD firstboot seed is not cloud-config"
 grep -Fq '/etc/rc.conf.d/firstboot_freebsd_update' "${freebsd_qemu}" || fail "FreeBSD update is not disabled before LOGIN"
 grep -Fq '/etc/rc.conf.d/firstboot_pkgs' "${freebsd_qemu}" || fail "FreeBSD package bootstrap is not disabled before LOGIN"
-grep -Fq 'pkg install -y rsync curl rust llvm18 git gmake pkgconf libffi zstd perl5 coreutils' "${freebsd_qemu}" || fail "FreeBSD full bootstrap dependencies are incomplete"
+grep -Fq 'pkg install -y rsync curl rust llvm23 git gmake pkgconf libffi zstd perl5 coreutils python3' "${freebsd_qemu}" || fail "FreeBSD full bootstrap dependencies are incomplete"
 grep -Fq 'command -v perl' "${freebsd_qemu}" || fail "FreeBSD bootstrap does not verify the provenance helper runtime"
 write_files_line=$(grep -n '^write_files:' "${freebsd_qemu}" | cut -d: -f1)
 runcmd_line=$(grep -n '^runcmd:' "${freebsd_qemu}" | cut -d: -f1)
 [ "${write_files_line}" -lt "${runcmd_line}" ] || fail "FreeBSD firstboot flags are written after runcmd"
 for required in \
-  'GUEST_ENV="env LIBRARY_PATH=/usr/local/lib PKG_CONFIG_PATH=/usr/local/libdata/pkgconfig"' \
-  '--backend=llvm --mode=dynload --full-bootstrap --stop-after-stage2 --no-mcp --jobs=2' \
+  'GUEST_ENV="env PATH=/usr/local/llvm23/bin:/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin LLVM_SYS_231_PREFIX=/usr/local/llvm23 LIBRARY_PATH=/usr/local/lib PKG_CONFIG_PATH=/usr/local/libdata/pkgconfig"' \
+  '--backend=llvm --mode=dynload --full-bootstrap --stop-after-stage2 --no-mcp --jobs=full' \
   'produce-bootstrap-planner-admission-v2.shs --target=//bootstrap:stage3 --reason=verify-landed-compiler-fix' \
   'freebsd-stage3-planner-admission-v2.env\" --resume-stage3-from-admitted=build/bootstrap --mode=dynload --no-mcp --jobs=1' \
   'produce-bootstrap-planner-admission-v2.shs --target=//bootstrap:stage4 --reason=self-host-convergence-check' \
@@ -556,7 +539,7 @@ done
   fail "FreeBSD Stage 2/3/4 bootstrap commands do not all use library search paths"
 ! grep -Fq 'bootstrap-from-scratch.sh --strategy=adhoc' "${freebsd_qemu}" || fail "FreeBSD QEMU wrapper retains invalid direct adhoc bootstrap invocation"
 grep -Fq 'error: failed to fingerprint Rust seed inputs' scripts/bootstrap/bootstrap-from-scratch.sh || fail "seed fingerprint failure is silent"
-grep -Fq 'STAGE_BIN="${GUEST_BOOTSTRAP_OUTPUT}/stage3/x86_64-unknown-freebsd/simple"' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD Stage4 dynload proof lacks the fresh Stage3 path"
+grep -Fq 'STAGE_BIN="${VM_HOME}/simple/build/bootstrap/stage3/x86_64-unknown-freebsd/simple"' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD Stage4 dynload proof lacks the fresh Stage3 path"
 freebsd_dynload_archive_body=$(awk '
 $0 == "    info \"Running FreeBSD Stage4 dynload provider archive proof...\"" { inside=1; print; next }
 inside && /^    info "/ { exit }
@@ -728,7 +711,7 @@ for required in \
   printf '%s\n' "${open_bug_repros}" | grep -Fq -- "${required}" && fail "fixed Option ABI reproduction must not remain opt-in: ${required}"
   [ "$(grep -Fc -- "${required}" scripts/check/check-native-seed-parity.shs)" -eq 1 ] || fail "mandatory Option ABI reproduction must be registered exactly once: ${required}"
 done
-grep -Fq 'val payload = value?' test/fixtures/compiler/native_option_uniform_tagged_abi_repro.spl || fail "uniform Option fixture must exercise annotated/local try lowering"
+grep -Fq 'val payload = value?' test/fixtures/compiler/native_option_try_annotated_loud.spl || fail "uniform Option fixture must exercise annotated/local try lowering"
 grep -Fq 'val payload = direct_value()?' test/fixtures/compiler/native_option_try_direct_loud.spl || fail "direct Option fixture must exercise call-result try lowering"
 grep -Fq 'return _sffi_core_string_rt_enum_new(1, 1, 3)' src/runtime/simple_core/core_string.spl || fail "text index_of absence must return canonical Option.None"
 grep -Fq 'declare i8 @rt_enum_check_discriminant(i64, i64)' src/compiler/70.backend/backend/llvm_backend.spl || fail "LLVM enum discriminant predicate ABI drift"
@@ -1195,7 +1178,7 @@ for runtime_owner in \
   examples/09_embedded/simple_os/arch/x86_32/boot/baremetal_stubs.c; do
   grep -Fq 'return (RuntimeValue)s->len;' "${runtime_owner}" || fail "baremetal string length raw ABI missing: ${runtime_owner}"
   grep -Eq 'int(32|64)_t i = \(int(32|64)_t\)idx;' "${runtime_owner}" || fail "baremetal string char index raw ABI missing: ${runtime_owner}"
-  grep -Fq 'return rt_string_new((RuntimeValue)(uintptr_t)(s->data + i), 1);' "${runtime_owner}" || fail "baremetal string char text result missing: ${runtime_owner}"
+  grep -Eq 'return rt_string_new\(\(RuntimeValue\)\(uintptr_t\)\((s->data \+ i|&s->data\[i\])\), (\(RuntimeValue\))?1\);' "${runtime_owner}" || fail "baremetal string char text result missing: ${runtime_owner}"
   grep -Fq 'return rt_string_char_at(v, (RuntimeValue)DECODE_INT(idx));' "${runtime_owner}" || fail "generic baremetal string index decode missing: ${runtime_owner}"
 done
 for required in \
@@ -1238,7 +1221,7 @@ for required in \
   grep -Fq -- "${required}" "${enum_eq_mir}" || fail "native enum equality lowering missing: ${required}"
 done
 grep -Fq 'runtime_name: text' src/compiler/20.hir/hir_definitions.spl || fail "HIR enum runtime identity missing"
-grep -Fq 'lower_enum_owners[imported_name] = hir_module_logical_name_from_path(imported_mod.name)' src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl || fail "imported enum owner identity missing"
+grep -Fq 'self.imported_enum_owners[local_name] = imported_mod.module_name' src/compiler/20.hir/hir_lowering/_Items/module_import_registration.spl || fail "imported enum owner identity missing"
 enum_identity_mir=src/compiler/50.mir/_MirLowering/module_lowering.spl
 for required in \
   'me register_enum_runtime_id(enum_def: HirEnum):' \
@@ -1247,10 +1230,14 @@ for required in \
   'self.enum_runtime_id_index[enum_name] = runtime_id'; do
   grep -Fq -- "${required}" "${enum_identity_mir}" || fail "enum runtime identity lowering missing: ${required}"
 done
-grep -Fq '_bootstrap_enum_runtime_id_names = lw.enum_runtime_id_names' src/compiler/50.mir/_MirLowering/bootstrap_globals.spl || fail "bootstrap enum collision registry sharing missing"
-grep -Fq 'error: bootstrap MIR type registration failed:' src/compiler/50.mir/_MirLowering/bootstrap_globals.spl || fail "bootstrap enum collision rejection missing"
+grep -Fq '_bootstrap_type_runtime_names = lw.enum_runtime_id_names' src/compiler/50.mir/_MirLowering/bootstrap_type_registration.spl || fail "bootstrap enum collision registry sharing missing"
+grep -Fq 'lw = bootstrap_type_registration_finish(lw, "bootstrap MIR type registration failed")' src/compiler/50.mir/_MirLowering/bootstrap_type_registration.spl || fail "bootstrap enum collision rejection missing"
 grep -Fq 'collision.Type255081' test/fixtures/compiler/enum_runtime_identity_guard.spl || fail "enum runtime ID collision regression missing"
-driver_mir_pipeline=src/compiler/80.driver/driver_pipeline.spl
+grep -Fq 'lw.enum_runtime_id_names = _bootstrap_type_runtime_names' src/compiler/50.mir/_MirLowering/bootstrap_type_registration.spl || fail "bootstrap enum collision registry restore missing"
+bootstrap_type_finish_body=$(sed -n '/^fn bootstrap_type_registration_finish(/,/^fn bootstrap_register_flat_type_defs(/p' src/compiler/50.mir/_MirLowering/bootstrap_type_registration.spl)
+printf '%s\n' "$bootstrap_type_finish_body" | grep -Fq 'if lw.errors.len() > 0:' || fail "bootstrap type registration failure detection missing"
+printf '%s\n' "$bootstrap_type_finish_body" | grep -Fq 'exit(1)' || fail "bootstrap type registration failure does not stop lowering"
+driver_mir_pipeline=src/compiler/80.driver/driver_pipeline_lowering.spl
 if grep -Ev '^[[:space:]]*#' "${driver_mir_pipeline}" | grep -Fq 'MirLowering('; then
   fail "driver bypasses canonical MIR lowering constructor"
 fi
@@ -1266,11 +1253,11 @@ grep -Fq 'self.enum_runtime_id(enum_name)' src/compiler/50.mir/_MirLoweringExpr/
 enum_eq_runtime=src/runtime/simple_core/core_string.spl
 for required in \
   'fn rt_native_eq_inner(left: i64, right: i64, depth: i64) -> i64:' \
-  'val left_disc = rt_enum_discriminant(left)' \
-  'rt_enum_id(left) != rt_enum_id(right)' \
-  'return rt_native_eq_inner(rt_enum_payload(left), rt_enum_payload(right), depth + 1)' \
+  'val left_disc = _sffi_core_string_rt_enum_discriminant(left)' \
+  '_sffi_core_string_rt_enum_id(left) != _sffi_core_string_rt_enum_id(right)' \
+  'return rt_native_eq_inner(_sffi_core_string_rt_enum_payload(left), _sffi_core_string_rt_enum_payload(right), depth + 1)' \
   'val left_ptr = registered_string_ptr(left)' \
-  'val left_array = array_is_valid(left) > 0' \
+  'val left_array = _sffi_core_string_array_is_valid(left) > 0' \
   'val left_bytes = (left_flags & 8) > 0' \
   'if left_bytes and right_bytes:' \
   'if left_u64 and right_u64:' \

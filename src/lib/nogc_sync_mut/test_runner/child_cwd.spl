@@ -1,0 +1,54 @@
+# Working directory for a spawned test child.
+#
+# Source-contract specs read `src/...` with cwd-relative file APIs, while the
+# interpreter resolves their imports from the spec's own project. A runner
+# started from a subdirectory or outside the checkout passed its cwd through
+# to `simple run <spec>`, so those reads came back empty (or read another
+# checkout). The child runs from the spec's project root instead.
+use std.io_runtime.{is_dir}
+
+fn _child_cwd_parent(path: text) -> text:
+    val trimmed = if path.len() > 1 and path.ends_with("/"): path.substring(0, path.len() - 1) else: path
+    val slash = trimmed.last_index_of("/") ?? -1
+    if slash < 0:
+        return ""
+    if slash == 0:
+        return "/"
+    trimmed.substring(0, slash)
+
+fn _child_cwd_anchor(path: text, cwd: text) -> text:
+    if path.starts_with("/") or cwd == "":
+        return path
+    val sep = if cwd.ends_with("/"): "" else: "/"
+    "{cwd}{sep}{path}"
+
+# Nearest ancestor of the spec holding both `src/` and `test/`; "" when none.
+pub fn spec_project_root(spec_path: text, cwd: text) -> text:
+    var dir = _child_cwd_parent(_child_cwd_anchor(spec_path, cwd))
+    while dir != "":
+        val sep = if dir.ends_with("/"): "" else: "/"
+        if is_dir("{dir}{sep}src") and is_dir("{dir}{sep}test"):
+            return dir
+        if dir == "/":
+            return ""
+        dir = _child_cwd_parent(dir)
+    ""
+
+# (dir to chdir into or "", spec path to pass the child). No chdir is planned
+# when the root is unknown or already the cwd, so the default path is unchanged.
+pub fn spec_child_launch_plan(spec_path: text, cwd: text) -> (text, text):
+    val root = spec_project_root(spec_path, cwd)
+    if root == "" or root == cwd:
+        return ("", spec_path)
+    (root, _child_cwd_anchor(spec_path, cwd))
+
+# Binary path to spawn once the cwd has moved: a relative path such as
+# `../bin/simple` is anchored to the old cwd; a bare name is a PATH lookup.
+pub fn child_cwd_absolute(binary: text, cwd: text) -> text:
+    if binary.contains("/"): _child_cwd_anchor(binary, cwd) else: binary
+
+# File path handed to the child (evidence, coverage output): a relative path,
+# bare name included, is anchored to the runner's cwd so the parent and the
+# runner's caller find it there after the child ran from the project root.
+pub fn child_cwd_anchor_path(path: text, cwd: text) -> text:
+    _child_cwd_anchor(path, cwd)

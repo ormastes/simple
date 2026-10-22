@@ -1,0 +1,83 @@
+"""Result combinators retain nominal payload ownership through an inline mapper."""
+use std.spec.*
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.common.config.{Logger}
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.backend.backend.interpreter.{InterpreterBackendImpl}
+use compiler.backend.backend_types.{BackendResult, Value}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolTable}
+use compiler.common.diagnostics.span.{Span}
+use compiler.mir._MirLoweringExpr.builtin_method_extras.*
+
+fn result_record_map_source(variant: text, method: text, mapper: text) -> text:
+    "struct Item:\n    first: i64\n    second: i64\n\nfn main() -> i64:\n    val input: Result<Item, Item> = " + variant + "(Item(first: 11, second: 37))\n    val output = input." + method + "(" + mapper + ")\n    output." + (if method == "map_err": "unwrap_err" else: "unwrap") + "()\n"
+
+describe "Result map nominal record payloads":
+    it "should reject an unknown payload instead of treating its carrier as i64":
+        var lowering = MirLowering.new(SymbolTable.new())
+        val unknown = HirType(kind: HirTypeKind.Error, span: Span.empty())
+        expect(lowering.builtin_result_payload_mir(unknown) == nil).to_be(true)
+
+    it "should lower both active payload variants using their declared record owner":
+        for method in ["map", "map_err"]:
+            val variant = if method == "map": "Ok" else: "Err"
+            val source = result_record_map_source(variant, method, "\\item: item.second")
+            val parsed = parse_full_frontend(source, "result_record_map", "result_record_map", Logger(level: 0))
+            var hir_lowering = HirLowering.with_filename("result_record_map.spl")
+            val hir = hir_lowering.lower_module(parsed)
+            var mir_lowering = MirLowering.new(hir.symbols)
+            val mir = mir_lowering.lower_module(hir)
+            expect(mir_lowering.errors.len()).to_equal(0)
+            val serialized = serialize_mir_module(mir)
+            expect(serialized).to_contain("result_" + method + "_active")
+            expect(serialized).to_contain("rt_enum_payload")
+            expect(serialized).to_contain("rt_enum_new")
+            val backend = InterpreterBackendImpl.new()
+            val execution = backend.interpret_hir_module(hir)
+            expect(execution.is_ok()).to_be(true)
+            var observed: i64 = -1
+            match execution.unwrap():
+                case BackendResult.Value(Value.Int(value)): observed = value
+                case _: ()
+            expect(observed).to_equal(37)
+
+    it "should retain the returned record when mapping a record to itself":
+        val source = "struct Item:\n    first: i64\n    second: i64\n\nfn main() -> i64:\n    val input: Result<Item, text> = Ok(Item(first: 11, second: 37))\n    val output = input.map(\\item: item)\n    output.unwrap().second\n"
+        val parsed = parse_full_frontend(source, "result_record_identity", "result_record_identity", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("result_record_identity.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        var mir_lowering = MirLowering.new(hir.symbols)
+        val mir = mir_lowering.lower_module(hir)
+        expect(mir_lowering.errors.len()).to_equal(0)
+        expect(serialize_mir_module(mir)).to_contain("rt_enum_payload")
+        val backend = InterpreterBackendImpl.new()
+        val execution = backend.interpret_hir_module(hir)
+        expect(execution.is_ok()).to_be(true)
+        var observed: i64 = -1
+        match execution.unwrap():
+            case BackendResult.Value(Value.Int(value)): observed = value
+            case _: ()
+        expect(observed).to_equal(37)
+
+    it "should preserve the inactive record variant without applying the mapper":
+        for method in ["map", "map_err"]:
+            val variant = if method == "map": "Err" else: "Ok"
+            val unwrap = if method == "map": "unwrap_err" else: "unwrap"
+            val source = "struct Item:\n    first: i64\n    second: i64\n\nfn main() -> i64:\n    val input: Result<Item, Item> = " + variant + "(Item(first: 11, second: 37))\n    val output = input." + method + "(\\item: Item(first: 99, second: 101))\n    output." + unwrap + "().second\n"
+            val parsed = parse_full_frontend(source, "result_record_inactive", "result_record_inactive", Logger(level: 0))
+            var hir_lowering = HirLowering.with_filename("result_record_inactive.spl")
+            val hir = hir_lowering.lower_module(parsed)
+            var mir_lowering = MirLowering.new(hir.symbols)
+            val mir = mir_lowering.lower_module(hir)
+            expect(mir_lowering.errors.len()).to_equal(0)
+            expect(serialize_mir_module(mir)).to_contain("result_" + method + "_other")
+            val backend = InterpreterBackendImpl.new()
+            val execution = backend.interpret_hir_module(hir)
+            expect(execution.is_ok()).to_be(true)
+            var observed: i64 = -1
+            match execution.unwrap():
+                case BackendResult.Value(Value.Int(value)): observed = value
+                case _: ()
+            expect(observed).to_equal(37)

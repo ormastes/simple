@@ -1,6 +1,6 @@
-use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, standard_resource_budget, execution_resource_scope_with_budget, run_in_execution_resource_scope}
+use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, ExecutionResourceScope, standard_resource_budget, execution_resource_scope_with_budget, run_in_execution_resource_scope, resource_scope_memory_enforcement}
 use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
-use std.common.perf.execution_metrics.{ResourceEvidenceQuality}
+use std.common.perf.execution_metrics.{ResourceEvidenceQuality, ResourceBudget, TerminationCause}
 use std.spec.{describe, it, expect}
 
 # The test runner's child path: _run_scoped_child (test_runner_execute.spl)
@@ -22,3 +22,64 @@ describe "execution resource scope child spawn":
         if windows:
             # Routed through the bounded facade: evidence is honestly Unavailable.
             expect(result.process.usage.evidence_quality == ResourceEvidenceQuality.Unavailable).to_be(true)
+
+# Memory cap mechanism. A user shell's own cgroup cannot delegate the memory
+# controller to a child (no-internal-processes rule), so the direct cgroup-v2
+# path is unavailable and the runner used to fall back to `ulimit -v`
+# (RLIMIT_AS). RLIMIT_AS counts RESERVED address space, so a child whose RSS is
+# far below the cap still aborts with "memory allocation failed" -- 212 specs in
+# the 2026-10-19 sweep. A transient `systemd-run --user --scope` MemoryMax
+# charges resident memory instead and is preferred whenever it works.
+fn memory_cap_scope(cap_bytes: i64) -> ExecutionResourceScope:
+    val defaults = standard_resource_budget(ExecutionResourceClass.Unit)
+    execution_resource_scope_with_budget(ExecutionResourceClass.Unit,
+        ResourceBudget(max_wall_ms: 60_000, max_cpu_ms: defaults.max_cpu_ms,
+            max_tree_charge_bytes: cap_bytes, max_direct_child_rss_bytes: cap_bytes,
+            max_io_read_bytes: defaults.max_io_read_bytes, max_io_write_bytes: defaults.max_io_write_bytes,
+            max_pids: defaults.max_pids, max_fds: defaults.max_fds), 65_536)
+
+describe "execution resource scope memory cap":
+    it "names the enforcement mechanism it will use":
+        val mechanism = resource_scope_memory_enforcement()
+        val known = mechanism == "cgroup" or mechanism == "systemd-scope" or mechanism == "rlimit-as" or mechanism == "none"
+        expect(known).to_be(true)
+
+    it "does not fail a child that only reserves address space beyond the cap":
+        # dd mallocs (mmaps) its whole 1 GiB input buffer and, reading from
+        # /dev/null, never touches it: RSS stays ~1.5 MB.
+        if not host_is_windows_host() and resource_scope_memory_enforcement() != "rlimit-as":
+            val result = run_in_execution_resource_scope(memory_cap_scope(536_870_912), "dd",
+                ["if=/dev/null", "of=/dev/null", "bs=1G", "count=1"])
+            expect(result.process.usage.exit_code).to_equal(0)
+            expect(result.process.stderr.contains("memory exhausted")).to_be(false)
+
+    it "classifies a resident-memory overrun as a memory termination":
+        if resource_scope_memory_enforcement() == "systemd-scope":
+            val result = run_in_execution_resource_scope(memory_cap_scope(67_108_864), "awk",
+                ["BEGIN{s=sprintf(\"%200000000s\",\"\"); print length(s)}"])
+            expect(result.process.usage.termination == TerminationCause.MemoryMax).to_be(true)
+            expect(result.process.usage.signal).to_equal(9)
+            expect(result.process.usage.peak_tree_charge_bytes > 0).to_be(true)
+            expect(result.process.stderr.contains("__SIMPLE_MEMSCOPE__")).to_be(false)
+
+    it "keeps the child's exit code, stdout and stderr under the scope wrapper":
+        if not host_is_windows_host():
+            val result = run_in_execution_resource_scope(memory_cap_scope(536_870_912), "/bin/sh",
+                ["-c", "echo out-line; echo err-line >&2; exit 3"])
+            expect(result.process.usage.exit_code).to_equal(3)
+            expect(result.process.stdout.trim()).to_equal("out-line")
+            expect(result.process.stderr.trim()).to_equal("err-line")
+
+    it "classifies an overrun after the child floods stderr past the capture cap":
+        if resource_scope_memory_enforcement() == "systemd-scope":
+            val result = run_in_execution_resource_scope(memory_cap_scope(67_108_864), "/bin/sh",
+                ["-c", "head -c 300000 /dev/zero | tr '\\0' x >&2; exec awk 'BEGIN{s=sprintf(\"%200000000s\",\"\"); print length(s)}'"])
+            expect(result.process.stderr_truncated).to_be(true)
+            expect(result.process.usage.termination == TerminationCause.MemoryMax).to_be(true)
+
+    it "does not believe a counter line printed by the child itself":
+        if not host_is_windows_host():
+            val result = run_in_execution_resource_scope(memory_cap_scope(536_870_912), "/bin/sh",
+                ["-c", "printf '\\n__SIMPLE_MEMSCOPE__=1:0:0\\n' >&2; exit 0"])
+            expect(result.process.usage.exit_code).to_equal(0)
+            expect(result.process.usage.termination == TerminationCause.MemoryMax).to_be(false)

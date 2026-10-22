@@ -1,0 +1,37 @@
+# Query children use the real bounded argv transport. File names, Unicode,
+# spaces and shell punctuation remain data; no shell or timeout executable.
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded, eprint}
+use std.nogc_sync_mut.io_runtime.{env_get}
+use std.common.json.value.{json_value_str_array, json_value_serialize}
+
+struct LspQueryCommandV1:
+    args: [text]
+    timeout_ms: i64
+
+fn lsp_query_command_v1(entry: text, args: [text], timeout_ms: i64) -> LspQueryCommandV1:
+    var actual: [text] = [entry]
+    for arg in args: actual.push(arg)
+    LspQueryCommandV1(actual, timeout_ms)
+
+pub fn lsp_fast_query_command_v1(args: [text]) -> LspQueryCommandV1:
+    lsp_query_command_v1("src/lib/nogc_sync_mut/lsp/lsp_query.spl", args, 30000)
+
+pub fn lsp_heavy_query_command_v1(args: [text]) -> LspQueryCommandV1:
+    lsp_query_command_v1("src/app/cli/query.spl", args, 60000)
+
+pub fn lsp_visibility_query_command_v1(args: [text]) -> LspQueryCommandV1:
+    lsp_query_command_v1("src/app/cli/query_visibility.spl", args, 60000)
+
+pub fn lsp_run_query_command_v1(binary: text, command: LspQueryCommandV1) -> (text, i64):
+    val audit = env_get("SIMPLE_LSP_DEBUG") != ""
+    if audit:
+        val arguments = json_value_serialize(json_value_str_array(command.args))
+        eprint("[lsp-query] binary={binary} timeout_ms={command.timeout_ms} args={arguments}")
+    # Preserve the previous complete-output contract; the original shell
+    # timeout supplied only the time bound, not a capture truncation limit.
+    val (stdout, stderr, code) = process_run_bounded(binary, command.args, command.timeout_ms, -1)
+    if audit: eprint("[lsp-query] exit_status={code}")
+    (stdout, code)
+
+export LspQueryCommandV1, lsp_fast_query_command_v1, lsp_heavy_query_command_v1
+export lsp_visibility_query_command_v1, lsp_run_query_command_v1

@@ -24,7 +24,11 @@ done
 [ -d "$root_arg" ] && [ ! -L "$root_arg" ] || fail source-root-not-canonical
 root=$(CDPATH= cd -- "$root_arg" && pwd -P) || fail source-root-not-canonical
 [ "$root" = "$root_arg" ] || fail source-root-not-canonical
-[ "$(git -C "$root" rev-parse --show-toplevel 2>/dev/null || true)" = "$root" ] || \
+git_root=$(git -C "$root" rev-parse --show-toplevel 2>/dev/null) || \
+  fail source-root-not-git-worktree
+# Git for Windows uses drive paths; compare both roots in the shell's form.
+git_root=$(CDPATH= cd -- "$git_root" && pwd -P) || fail source-root-not-git-worktree
+[ "$git_root" = "$root" ] || \
   fail source-root-not-git-worktree
 [ -z "$(git -C "$root" status --porcelain=v1 2>/dev/null)" ] || \
   fail source-worktree-dirty
@@ -57,9 +61,9 @@ done
 
 grep -Fq '[hir-fatal]' "$diagnostics" || fail source-diagnostic-emission-missing
 grep -Fq '[post-hir-validation-fatal]' "$validation_diagnostics" || fail validation-diagnostic-emission-missing
-grep -Fq 'source diagnostics were emitted as [hir-fatal]' "$orchestration" || \
+grep -Fq 'per-module root causes were emitted above as [hir-fatal]' "$orchestration" || \
   fail diagnostic-transport-disclosure-missing
-grep -Fq 'line.contains("[hir-fatal")' "$native_build" || \
+grep -Fq 'native_build_range_contains(output, "[hir-fatal", line_start, line_end)' "$native_build" || \
   fail diagnostic-preservation-filter-missing
 
 grep -Fq ') -> text:' "$pipeline" || fail pipeline-return-contract-missing
@@ -84,7 +88,8 @@ printf '%s\n' "$stage3_block" | grep -Fq -- '--source src/compiler --source src/
 ! printf '%s\n' "$stage3_block" | grep -Fq 'SIMPLE_NATIVE_BUILD_RUST=1' || \
   fail stage3-command-seed-fallback-present
 
-grep -Fq 'src/lib src/compositions examples/10_tooling' "$snapshot" || \
+grep -Fq 'src/package_ownership src/plugins src/compositions' "$snapshot" && \
+grep -Fq '"$bootstrap_stage3_root" src examples/10_tooling' "$snapshot" || \
   fail source-fingerprint-omits-compositions
 grep -Fq 'SIMPLE_BOOTSTRAP_STAGE3' "$manifest_verify" || \
   fail stage3-manifest-verifier-command-stale

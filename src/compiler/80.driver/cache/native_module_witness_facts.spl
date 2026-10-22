@@ -5,9 +5,10 @@ use compiler.common.native_layout_trace.{MirExternalLayoutTraceV1}
 use compiler.mir.mir_data.{MirModule}
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName}
 use compiler.hir.hir_lowering.module_surface_registry_index.{module_surface_registry_index}
-use compiler.driver.cache.action_key.{
-    ActionDep, ResolutionProbe, interface_digest_of_source
-}
+use compiler.driver.cache.action_key.{ActionDep, ResolutionProbe}
+use compiler.driver.cache.native_interface_slice.{
+    native_interface_decls_v1, native_interface_whole_digest_v1,
+    native_interface_slice_digest_v1}
 use compiler.driver.cache.native_module_witness.{
     NativeModuleResolutionFactV1, NativeModuleLayoutFactV1, NativeModuleConfigFactV1,
     NativeModuleCacheWitnessV1, native_module_cache_witness_invalid_v1,
@@ -71,6 +72,8 @@ fn native_direct_dependency_facts_v1(
             module_id, "missing-direct-dependency-routing")
     var dependencies: [ActionDep] = []
     var dependency_ids: [text] = []
+    var dependency_sources: [text] = []
+    var dependency_items: [[text]] = []
     var index = 0
     while index < consumer.import_target_indices.len():
         val target_index = consumer.import_target_indices[index]
@@ -89,10 +92,28 @@ fn native_direct_dependency_facts_v1(
                 module_id, "ambiguous-dependency-source")
         if not dependency_ids.contains(target_id):
             dependency_ids.push(target_id)
-            dependencies.push(ActionDep(
-                module_id: target_id,
-                iface_digest: interface_digest_of_source(source_content)))
+            dependency_sources.push(source_content)
+            dependency_items.push([])
+        var slot = 0
+        while dependency_ids[slot] != target_id:
+            slot = slot + 1
+        var items = dependency_items[slot]
+        val parsed_items = consumer.imports[index].items
+        if parsed_items.len() == 0:
+            items.push("*")
+        for item in parsed_items:
+            items.push(item.name)
+        dependency_items[slot] = items
         index = index + 1
+    var position = 0
+    while position < dependency_ids.len():
+        val decls = native_interface_decls_v1(dependency_sources[position])
+        dependencies.push(ActionDep(
+            module_id: dependency_ids[position],
+            iface_digest: native_interface_slice_digest_v1(decls,
+                native_interface_whole_digest_v1(decls), true,
+                dependency_items[position])))
+        position = position + 1
     NativeModuleCacheFactSetV1(
         module_id: module_id, dependencies: dependencies,
         resolutions: [], layouts: [], valid: true, reason: "ok")

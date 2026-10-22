@@ -1,3 +1,9 @@
+> Merge candidate status (2026-10-11): **UNRUN**. This resolution combines local
+> `ddff8671e8348a89ab2eed285311a3ffc1809358` and remote
+> `3aa33b9f8de7897fcf4e83c42bc3c44d28782cef`. All counts and PASS statements below
+> retain their historical component/source-stage scope. They are not execution,
+> semantic verification, or admission evidence for this combined source.
+
 # Shared traceability architecture
 
 Status: implementation design; not deployed. Authority: final report sections
@@ -139,3 +145,19 @@ incremental/full equivalence must consume both positive and negative dependencie
 All execution evidence, qualifications, Slop surfaces and remaining plan gates
 continue separately. Coverage/NFR/full core/MCP/LSP checks and admitted SPipe
 manual generation remain open; no full AC/REQ done mark or runtime admission.
+
+## Combined-source public codec boundary (unrun)
+
+The compatibility `types_v1` barrel retains the qualification carrier and factory
+names through their defining envelope/qualification modules. Dedicated
+`trace_qualification_decode_v1` and `trace_qualification_encode_v1` keep
+`TraceQualificationCodecLimitsV1`. Generic `trace_document_decode_v1` and
+`trace_document_encode_v1` now require `TraceDocumentCodecLimitsV1`, including
+bounded graph/declarations tables. This is an explicit source signature migration;
+existing callers of generic APIs must use the document limits factory. Public
+names remain, but old generic argument compatibility is not claimed.
+Qualification consistency, strict schema refusal, canonical encoding and explicit
+unsupported family/version refusal remain required. The merged spec adds a real
+comparison of invalid-scope refusal through the dedicated and generic encoders.
+This combined API, source and spec have not executed; historical evidence above
+must not be promoted into a combined-source PASS.

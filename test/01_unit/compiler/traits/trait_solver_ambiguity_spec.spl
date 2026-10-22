@@ -1,0 +1,139 @@
+"""Real TraitSolver obligation API: unique selection, ambiguity and mutation invalidation."""
+use std.spec.*
+use compiler.hir.hir_types.{HirSymbol, HirType, HirTypeKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.traits.trait_def.{SolverTraitDef}
+use compiler.traits.trait_impl.{ImplBlock}
+use compiler.traits.trait_solver.{TraitSolver, Obligation, ObligationCause}
+use compiler.traits.trait_validation.{TraitError, builtin_trait_symbol}
+
+fn ambiguity_test_type() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+
+fn ambiguity_test_trait(id: i64) -> HirSymbol:
+    builtin_trait_symbol(id, "AmbiguityTrait{id}", Span.empty())
+
+fn ambiguity_test_impl(trait_: HirSymbol, provenance: i64) -> ImplBlock:
+    ImplBlock.create(trait_, ambiguity_test_type(), Span.new(provenance, provenance + 1, 1, 1))
+
+fn ambiguity_test_obligation(trait_: HirSymbol) -> Obligation:
+    Obligation.create(ambiguity_test_type(), trait_, ObligationCause.BuiltIn, Span.empty())
+
+fn ambiguity_result_kind(result: Result<(), TraitError>) -> text:
+    match result:
+        case Ok(_): "ok"
+        case Err(error):
+            match error:
+                case TraitError.Unsatisfied(_): "unsatisfied"
+                case TraitError.Ambiguous(_, _, _): "ambiguous"
+                case _: "other error"
+
+fn ambiguity_candidate_spans(result: Result<(), TraitError>, expected_trait: HirSymbol) -> [i64]:
+    match result:
+        case Err(TraitError.Ambiguous(ty, trait_, candidates)):
+            expect(ty.kind).to_equal(ambiguity_test_type().kind)
+            expect(trait_.id).to_equal(expected_trait.id)
+            var provenance: [i64] = []
+            for candidate in candidates:
+                provenance = provenance.push(candidate.span.start)
+            provenance
+        case _:
+            expect("missing ambiguity").to_equal("ambiguous")
+            []
+
+describe "trait solver uniqueness and cache invalidation":
+    it "accepts one matching implementation":
+        step("Register one exact implementation and solve its obligation")
+        var solver = TraitSolver.create()
+        val trait_ = ambiguity_test_trait(801)
+        solver.add_impl(ambiguity_test_impl(trait_, 101))
+        expect(ambiguity_result_kind(solver.solve_obligation(ambiguity_test_obligation(trait_)))).to_equal("ok")
+
+    it "rejects an obligation without an implementation":
+        step("Solve an obligation with no registered candidate")
+        var solver = TraitSolver.create()
+        val trait_ = ambiguity_test_trait(802)
+        expect(ambiguity_result_kind(solver.solve_obligation(ambiguity_test_obligation(trait_)))).to_equal("unsatisfied")
+
+    it "retains both exact candidate declarations instead of choosing the first":
+        step("Register two matching declarations and inspect both ambiguity spans twice")
+        var solver = TraitSolver.create()
+        val trait_ = ambiguity_test_trait(803)
+        solver.add_impl(ambiguity_test_impl(trait_, 201))
+        solver.add_impl(ambiguity_test_impl(trait_, 202))
+        val obligation = ambiguity_test_obligation(trait_)
+        expect(ambiguity_candidate_spans(solver.solve_obligation(obligation), trait_)).to_equal([201, 202])
+        expect(ambiguity_candidate_spans(solver.solve_obligation(obligation), trait_)).to_equal([201, 202])
+
+    it "ignores nonmatching types and candidates for a different trait":
+        step("Mix a unique match with unrelated candidates")
+        var solver = TraitSolver.create()
+        val trait_ = ambiguity_test_trait(804)
+        val unrelated = ambiguity_test_trait(805)
+        val bool_type = HirType(kind: HirTypeKind.Bool, span: Span.empty())
+        solver.add_impl(ImplBlock.create(trait_, bool_type, Span.empty()))
+        solver.add_impl(ambiguity_test_impl(unrelated, 301))
+        solver.add_impl(ambiguity_test_impl(trait_, 302))
+        expect(ambiguity_result_kind(solver.solve_obligation(ambiguity_test_obligation(trait_)))).to_equal("ok")
+
+    it "invalidates a cached success when another matching implementation is registered":
+        step("Cache a unique decision then add a competing declaration")
+        var solver = TraitSolver.create()
+        val trait_ = ambiguity_test_trait(806)
+        val obligation = ambiguity_test_obligation(trait_)
+        solver.add_impl(ambiguity_test_impl(trait_, 401))
+        expect(ambiguity_result_kind(solver.solve_obligation(obligation))).to_equal("ok")
+        solver.add_impl(ambiguity_test_impl(trait_, 402))
+        expect(ambiguity_candidate_spans(solver.solve_obligation(obligation), trait_)).to_equal([401, 402])
+
+    it "invalidates a cached miss when a matching implementation is registered":
+        step("Cache a missing implementation then register it")
+        var solver = TraitSolver.create()
+        val trait_ = ambiguity_test_trait(807)
+        val obligation = ambiguity_test_obligation(trait_)
+        expect(ambiguity_result_kind(solver.solve_obligation(obligation))).to_equal("unsatisfied")
+        solver.add_impl(ambiguity_test_impl(trait_, 501))
+        expect(ambiguity_result_kind(solver.solve_obligation(obligation))).to_equal("ok")
+
+    it "invalidates cached success when trait replacement adds an unsatisfied supertrait":
+        step("Cache success then introduce a required supertrait without an implementation")
+        var solver = TraitSolver.create()
+        val trait_ = ambiguity_test_trait(808)
+        val supertrait = ambiguity_test_trait(809)
+        val obligation = ambiguity_test_obligation(trait_)
+        solver.add_trait(SolverTraitDef.create(trait_, Span.empty()))
+        solver.add_impl(ambiguity_test_impl(trait_, 601))
+        expect(ambiguity_result_kind(solver.solve_obligation(obligation))).to_equal("ok")
+        var changed = SolverTraitDef.create(trait_, Span.empty())
+        changed.supertraits = [supertrait]
+        solver.add_trait(changed)
+        expect(ambiguity_result_kind(solver.solve_obligation(obligation))).to_equal("unsatisfied")
+
+    it "invalidates cached failure when trait replacement removes an unsatisfied supertrait":
+        step("Cache a failed supertrait obligation then remove that requirement")
+        var solver = TraitSolver.create()
+        val trait_ = ambiguity_test_trait(810)
+        val supertrait = ambiguity_test_trait(811)
+        val obligation = ambiguity_test_obligation(trait_)
+        var constrained = SolverTraitDef.create(trait_, Span.empty())
+        constrained.supertraits = [supertrait]
+        solver.add_trait(constrained)
+        solver.add_impl(ambiguity_test_impl(trait_, 701))
+        expect(ambiguity_result_kind(solver.solve_obligation(obligation))).to_equal("unsatisfied")
+        solver.add_trait(SolverTraitDef.create(trait_, Span.empty()))
+        expect(ambiguity_result_kind(solver.solve_obligation(obligation))).to_equal("ok")
+
+    it "preserves propagated supertrait ambiguity across repeated solves":
+        step("Require an ambiguous supertrait and preserve its declaration provenance twice")
+        var solver = TraitSolver.create()
+        val trait_ = ambiguity_test_trait(812)
+        val supertrait = ambiguity_test_trait(813)
+        var constrained = SolverTraitDef.create(trait_, Span.empty())
+        constrained.supertraits = [supertrait]
+        solver.add_trait(constrained)
+        solver.add_impl(ambiguity_test_impl(trait_, 801))
+        solver.add_impl(ambiguity_test_impl(supertrait, 802))
+        solver.add_impl(ambiguity_test_impl(supertrait, 803))
+        val obligation = ambiguity_test_obligation(trait_)
+        expect(ambiguity_candidate_spans(solver.solve_obligation(obligation), supertrait)).to_equal([802, 803])
+        expect(ambiguity_candidate_spans(solver.solve_obligation(obligation), supertrait)).to_equal([802, 803])

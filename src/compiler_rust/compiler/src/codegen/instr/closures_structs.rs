@@ -26,9 +26,15 @@ fn resolve_unique_module_qualified_func<M: Module>(ctx: &InstrContext<'_, M>, na
         // dynamic dispatch (SIGSEGV: test_config `.index_of` bound to
         // devhub__cmd_storage___index_of). Require the candidate's own tail
         // (after its LAST `__`) to equal the probed tail exactly.
+        //
+        // A flatten-owner identity (`__spl_flat_<owner>__Type.method`, one of
+        // two same-named structs of a flattened unit) is not a module
+        // qualifier: the bare `Type.method` is the OTHER owner's body, so it
+        // must never win by suffix over that exact name.
         if candidate
             .strip_suffix(&suffix)
             .is_some_and(|prefix| !prefix.is_empty() && !prefix.ends_with('_'))
+            && !candidate.starts_with(crate::interpreter::FLATTEN_OWNER_SYMBOL_PREFIX)
             && !ids.contains(id)
         {
             ids.push(*id);
@@ -167,8 +173,13 @@ fn qualified_method_owner_matches(owner: &str, candidate: &str, method: &str) ->
     let Some((candidate_owner, candidate_method)) = normalized.rsplit_once('.') else {
         return false;
     };
+    // A flatten-owner identity (`__spl_flat_<owner>__Type`) is a DIFFERENT
+    // type from the bare `Type` of a flattened unit, never a module qualifier.
+    let flatten_identity = |name: &str| name.starts_with(crate::interpreter::FLATTEN_OWNER_SYMBOL_PREFIX);
     candidate_method == method
-        && (candidate_owner == owner || candidate_owner.ends_with(&format!("__{owner}")))
+        && (candidate_owner == owner
+            || (candidate_owner.ends_with(&format!("__{owner}"))
+                && flatten_identity(candidate_owner) == flatten_identity(owner)))
 }
 
 // `pub(crate)` so `mir/lower/lowering_expr_method.rs` can reuse the exact
@@ -2211,7 +2222,7 @@ fn try_compile_builtin_method_call<M: Module>(
     }
 
     // FR-COMPILER-012: scalar float intrinsics via MethodCallStatic path
-    if matches!(method, "sqrt" | "abs" | "floor" | "ceil" | "round") {
+    if (crate::codegen::scalar_float_methods::is_native_unary(method) && !matches!(method, "trunc" | "round")) {
         let src_ty = builder.func.dfg.value_type(receiver_val);
         let is_float = src_ty == types::F32 || src_ty == types::F64;
         if is_float {
@@ -2220,7 +2231,6 @@ fn try_compile_builtin_method_call<M: Module>(
                 "abs" => builder.ins().fabs(receiver_val),
                 "floor" => builder.ins().floor(receiver_val),
                 "ceil" => builder.ins().ceil(receiver_val),
-                "round" => builder.ins().nearest(receiver_val),
                 _ => unreachable!(),
             };
             return Ok(Some(result_val));
@@ -2255,31 +2265,8 @@ fn try_compile_builtin_method_call<M: Module>(
     // `codegen/instr/methods.rs::compile_builtin_method`.
     // See doc/08_tracking/bug/float_and_int_math_methods_missing_on_numeric_receivers_2026-08-10.md.
     {
-        let unary_rt_name = match method {
-            "sin" => Some("rt_math_sin"),
-            "cos" => Some("rt_math_cos"),
-            "tan" => Some("rt_math_tan"),
-            "asin" => Some("rt_math_asin"),
-            "acos" => Some("rt_math_acos"),
-            "atan" => Some("rt_math_atan"),
-            "sinh" => Some("rt_math_sinh"),
-            "cosh" => Some("rt_math_cosh"),
-            "tanh" => Some("rt_math_tanh"),
-            "exp" => Some("rt_math_exp"),
-            "ln" => Some("rt_math_log"),
-            "log2" => Some("rt_math_log2"),
-            "log10" => Some("rt_math_log10"),
-            "cbrt" => Some("rt_math_cbrt"),
-            _ => None,
-        };
-        let binary_rt_name = match method {
-            "pow" | "powf" => Some("rt_math_pow"),
-            "max" => Some("rt_math_max"),
-            "min" => Some("rt_math_min"),
-            "atan2" => Some("rt_math_atan2"),
-            "hypot" => Some("rt_math_hypot"),
-            _ => None,
-        };
+        let unary_rt_name = crate::codegen::scalar_float_methods::rt_math_unary(method);
+        let binary_rt_name = crate::codegen::scalar_float_methods::rt_math_binary(method);
         let src_ty = builder.func.dfg.value_type(receiver_val);
         let is_float = src_ty == types::F32 || src_ty == types::F64;
         if is_float {

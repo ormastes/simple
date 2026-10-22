@@ -1,5 +1,6 @@
 # Exact deduplication for allocatable ELF SHF_MERGE sections. String sections
-# are split at NUL terminators (sh_entsize == 1); other sections are split into
+# are split at NUL terminators (an sh_entsize-wide zero unit, so .rodata.str4.4
+# UTF-32 strings work); other sections are split into
 # fixed sh_entsize records. The plan owns aligned pooled bytes and maps every
 # original entity byte to its pooled offset, so relocation addends remain exact.
 
@@ -26,6 +27,7 @@ struct ElfMergePlan:
     entsize: i64
     strings: bool
     metadata_compatible: bool
+    section_entries: {text: [i64]} = {}   # "obj:sec" -> entry indices, input order
 
 fn _same_bytes(pool: [i64], at: i64, value: [i64]) -> bool:
     if at < 0 or at + value.len() > pool.len():
@@ -51,6 +53,15 @@ fn _find_fragment(pool: [i64], starts: [i64], value: [i64], alignment: i64) -> i
             return at
     -1
 
+fn _merge_string_unit_ends(raw: [u8], base: i64, cursor: i64, entsize: i64) -> bool:
+    """True when `cursor` is the last byte of an all-zero, entsize-aligned unit."""
+    if (cursor + 1) % entsize != 0: return false
+    var i = cursor - entsize + 1
+    while i <= cursor:
+        if (raw[base + i] as i64) != 0: return false
+        i = i + 1
+    true
+
 fn _align_up(value: i64, alignment: i64) -> i64:
     if alignment <= 1:
         return value
@@ -65,6 +76,7 @@ fn elf_merge_sections(objects: [ElfObject], live: [[bool]]) -> Result<ElfMergePl
     var data: [i64] = []
     var buckets: {i64: [i64]} = {}
     var entries: [ElfMergeEntry] = []
+    var section_entries: {text: [i64]} = {}
     var has_sections = false
     var plan_align: i64 = 1
     var plan_entsize: i64 = 0
@@ -81,10 +93,8 @@ fn elf_merge_sections(objects: [ElfObject], live: [[bool]]) -> Result<ElfMergePl
                 val strings = obj.sections[si].sh_flags & SHF_STRINGS_MERGE != 0
                 if entsize <= 0:
                     return Err("object {oi}: merge section {elf_section_name(obj, si)} has zero sh_entsize")
-                if strings and entsize != 1:
-                    return Err("object {oi}: merge-string section {elf_section_name(obj, si)} has unsupported sh_entsize {entsize}")
                 val sec = obj.sections[si]
-                if not strings and sec.sh_size % entsize != 0:
+                if sec.sh_size % entsize != 0:
                     return Err("object {oi}: merge section {elf_section_name(obj, si)} size is not a multiple of sh_entsize {entsize}")
                 var alignment = elf_section_addralign(obj, si)
                 if alignment < 1:
@@ -102,8 +112,10 @@ fn elf_merge_sections(objects: [ElfObject], live: [[bool]]) -> Result<ElfMergePl
                 var begin: i64 = 0
                 var cursor: i64 = 0
                 while cursor < sec.sh_size:
-                    val at_end = (strings and obj.raw[sec.sh_addr + cursor] == 0) or
-                        (not strings and cursor - begin + 1 == entsize)
+                    val at_end = if strings:
+                        _merge_string_unit_ends(obj.raw, sec.sh_addr, cursor, entsize)
+                    else:
+                        cursor - begin + 1 == entsize
                     if at_end:
                         var value: [i64] = []
                         var p = begin
@@ -122,7 +134,12 @@ fn elf_merge_sections(objects: [ElfObject], live: [[bool]]) -> Result<ElfMergePl
                             buckets[hash] = candidates.push(output)
                             for byte in value:
                                 data = data.push(byte)
-                        entries = entries.push(ElfMergeEntry(obj_idx: oi, section_idx: si,
+                        val entry_key = "{oi}:{si}"
+                        var listed: [i64] = []
+                        if section_entries.has(entry_key): listed = section_entries[entry_key]
+                        listed.push(entries.len())
+                        section_entries[entry_key] = listed
+                        entries.push(ElfMergeEntry(obj_idx: oi, section_idx: si,
                             input_offset: begin, size: cursor - begin + 1, output_offset: output))
                         begin = cursor + 1
                     cursor = cursor + 1
@@ -132,14 +149,25 @@ fn elf_merge_sections(objects: [ElfObject], live: [[bool]]) -> Result<ElfMergePl
         oi = oi + 1
     Ok(ElfMergePlan(data: data, entries: entries, has_sections: has_sections,
         align: plan_align, entsize: plan_entsize, strings: plan_strings,
-        metadata_compatible: metadata_compatible))
+        metadata_compatible: metadata_compatible, section_entries: section_entries))
 
 fn elf_merge_offset(plan: ElfMergePlan, obj_idx: i64, section_idx: i64,
         input_offset: i64) -> Result<i64, text>:
-    for entry in plan.entries:
-        if entry.obj_idx == obj_idx and entry.section_idx == section_idx and
-                input_offset >= entry.input_offset and input_offset < entry.input_offset + entry.size:
-            return Ok(entry.output_offset + input_offset - entry.input_offset)
+    """Binary search the section's entities (they ascend by input offset)."""
+    val key = "{obj_idx}:{section_idx}"
+    if plan.section_entries.has(key):
+        val listed = plan.section_entries[key]
+        var lo: i64 = 0
+        var hi: i64 = listed.len() - 1
+        while lo <= hi:
+            val mid = (lo + hi) / 2
+            val entry = plan.entries[listed[mid]]
+            if input_offset < entry.input_offset:
+                hi = mid - 1
+            elif input_offset >= entry.input_offset + entry.size:
+                lo = mid + 1
+            else:
+                return Ok(entry.output_offset + input_offset - entry.input_offset)
     Err("merge offset {input_offset} is outside an entity in object {obj_idx} section {section_idx}")
 
 export ElfMergeEntry, ElfMergePlan

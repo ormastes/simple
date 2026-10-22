@@ -1,0 +1,90 @@
+#!/bin/sh
+# Real Git objects; retained fixture directory is printed for failure review.
+set -eu
+source_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+fixture=$(mktemp -d)
+echo "conflict-tree batching fixture: $fixture"
+mkdir -p "$fixture/scripts/check/lib" "$fixture/config/check"
+for name in check-no-conflict-tree-push.shs run-gate-tier.shs; do
+    cp "$source_dir/$name" "$fixture/scripts/check/$name"
+done
+cp "$source_dir/lib/conflict-tree-range-batches.shs" "$fixture/scripts/check/lib/"
+cd "$fixture"
+git init -q
+git config user.name 'Batch guard fixture'
+git config user.email 'batch-fixture@example.invalid'
+printf 'must_check_gates |id, tier, push_blocking, mode, command, ci_job, inputs, description|\n    push-conflict-tree, push, true, range, "sh scripts/check/check-no-conflict-tree-push.shs {range}", -, -, "actual guard"\n' > config/check/must_check_gates.sdn
+git add scripts config
+git commit -qm base
+base=$(git rev-parse HEAD)
+tree=$(git rev-parse HEAD^{tree})
+tip=$base
+index=0
+while [ "$index" -lt 70 ]; do
+    tip=$(printf 'safe %s\n' "$index" | git commit-tree "$tree" -p "$tip")
+    index=$((index + 1))
+done
+expect_status() {
+    expected=$1; log=$2; shift 2
+    set +e
+    "$@" > "$log" 2>&1
+    actual=$?
+    set -e
+    if [ "$actual" -ne "$expected" ]; then
+        cat "$log"
+        echo "expected $expected, got $actual: $*" >&2
+        exit 1
+    fi
+}
+caller() {
+    sh -c '. scripts/check/lib/conflict-tree-range-batches.shs && conflict_tree_check_complete_range "$@"' conflict-range "$@"
+}
+# Sourcing alone preserves the parent options and traps and emits no verdict.
+expect_status 0 source-isolation.log sh -eu -c '
+    trap "printf parent-trap" EXIT
+    before_flags=$-
+    before_traps=$(trap)
+    . scripts/check/lib/conflict-tree-range-batches.shs
+    [ "$before_flags" = "$-" ]
+    [ "$before_traps" = "$(trap)" ]
+'
+[ "$(cat source-isolation.log)" = parent-trap ]
+guard=scripts/check/check-no-conflict-tree-push.shs
+expect_status 2 original-limit.log sh "$guard" "$base..$tip"
+grep -q 'bounded limit of 64' original-limit.log
+expect_status 0 safe.log caller "$base..$tip"
+grep -q '70 commits in 2 disjoint batches, complete coverage' safe.log
+grep -q '64 commit(s)' safe.log
+grep -q '6 commit(s)' safe.log
+# The oldest outgoing commit occurs in batch2 of git rev-list's normal order.
+# Descendants have safe trees: checking only endpoints must not pass this.
+subtree=$(printf '' | git mktree)
+conflict_tree=$(printf '040000 tree %s\t.jjconflict-side-0\n' "$subtree" | git mktree)
+conflict=$(printf 'actual conflict tree\n' | git commit-tree "$conflict_tree" -p "$base")
+conflict_tip=$conflict
+index=1
+while [ "$index" -lt 70 ]; do
+    conflict_tip=$(printf 'restored safe %s\n' "$index" | git commit-tree "$tree" -p "$conflict_tip")
+    index=$((index + 1))
+done
+expect_status 1 later-conflict.log caller "$base..$conflict_tip"
+grep -q "CONFLICT COMMIT: $conflict" later-conflict.log
+grep -q 'conflict in batch 2/2' later-conflict.log
+expect_status 1 errexit-conflict.log sh -e -c '. scripts/check/lib/conflict-tree-range-batches.shs; conflict_tree_check_complete_range "$1"' conflict-range "$base..$conflict_tip"
+grep -q "CONFLICT COMMIT: $conflict" errexit-conflict.log
+grep -q 'conflict in batch 2/2' errexit-conflict.log
+expect_status 2 missing-argv.log caller
+expect_status 2 empty-argv.log caller ''
+expect_status 2 missing-base.log caller "missing-base..$tip"
+expect_status 2 missing-tip.log caller "$base..missing-tip"
+expect_status 2 empty-range.log caller "$base..$base"
+expect_status 2 empty-base.log caller "..$tip"
+expect_status 2 empty-tip.log caller "$base.."
+expect_status 2 bare-rev.log caller "$tip"
+# Exercise real runner dispatch, with the original command from BASE even if
+# HEAD's working manifest deletes the row. Manifest base pinning is unchanged.
+printf '# head manifest removed the required row\n' > config/check/must_check_gates.sdn
+expect_status 0 runner-safe.log sh scripts/check/run-gate-tier.shs --tier local --range "$base..$tip" --ref "$tip" --base "$base" --manifest-rev "$base" --jobs 1 --budget 30
+grep -q 'push-conflict-tree.*PASS\|push-conflict-tree.*pass' runner-safe.log
+expect_status 1 runner-conflict.log sh scripts/check/run-gate-tier.shs --tier local --range "$base..$conflict_tip" --ref "$conflict_tip" --base "$base" --manifest-rev "$base" --jobs 1 --budget 30
+echo 'PASS conflict-tree batches: full70 coverage, later conflict, invalid inputs, BASE-pinned runner'

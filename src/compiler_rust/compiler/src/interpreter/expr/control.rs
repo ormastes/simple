@@ -37,7 +37,11 @@ pub(super) fn eval_control_expr(
                     crate::interpreter::MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|c| c
                         .borrow()
                         .iter()
-                        .map(|(o, m)| (o.to_string(), m.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>()))
+                        .map(|(o, m)| {
+                            let mut names = Vec::new();
+                            m.for_each_resolved(|k, _| names.push(k.clone()));
+                            (o.to_string(), names)
+                        })
                         .collect::<Vec<_>>()),
                     capture_all,
                     env.global_bindings()
@@ -78,7 +82,27 @@ pub(super) fn eval_control_expr(
             then_branch,
             else_branch,
         } => {
-            let cond_val = evaluate_expr(condition, env, functions, classes, enums, impl_methods)?;
+            // COVERAGE: an if-expression is a decision anchored on the enclosing
+            // function (Expr has no span). Site computed only when coverage is on.
+            let cov_site = if crate::interpreter::is_coverage_enabled() {
+                Some(crate::interpreter::if_expr_site(condition))
+            } else {
+                None
+            };
+            let cond_val = match cov_site {
+                Some((line, column, sub)) if let_pattern.is_none() => crate::interpreter::eval_decision_cond(
+                    condition,
+                    line,
+                    column,
+                    sub,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?,
+                _ => evaluate_expr(condition, env, functions, classes, enums, impl_methods)?,
+            };
             // `let_pattern` is the `val NAME =` of `if val NAME = EXPR:`. It
             // used to be discarded here by a `..` in this destructure, so an
             // optional-binding `if` in EXPRESSION position (`val x = if val v
@@ -129,6 +153,9 @@ pub(super) fn eval_control_expr(
                 Some(d) => d,
                 None => crate::interpreter::interpreter_control::is_condition_present(condition, &cond_val),
             };
+            if let Some((line, column, sub)) = cov_site {
+                crate::interpreter::record_decision_site(line, column, sub, take_then);
+            }
             let branch_result = if take_then {
                 evaluate_expr(then_branch, env, functions, classes, enums, impl_methods)?
             } else if let Some(else_b) = else_branch {
@@ -228,9 +255,26 @@ pub(super) fn eval_control_expr(
                         for (name, value) in &arm_bindings {
                             guard_env.insert(name.clone(), value.clone());
                         }
+                        let guard_val = crate::interpreter::eval_decision_cond(
+                            guard,
+                            arm.span.line,
+                            arm.span.column,
+                            crate::interpreter::SUB_GUARD,
+                            &mut guard_env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        )?;
                         let guard_result =
-                            evaluate_expr(guard, &mut guard_env, functions, classes, enums, impl_methods)?;
-                        if !crate::interpreter::interpreter_control::is_condition_present(guard, &guard_result) {
+                            crate::interpreter::interpreter_control::is_condition_present(guard, &guard_val);
+                        crate::interpreter::record_decision_site(
+                            arm.span.line,
+                            arm.span.column,
+                            crate::interpreter::SUB_GUARD,
+                            guard_result,
+                        );
+                        if !guard_result {
                             continue;
                         }
                     }

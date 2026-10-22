@@ -1,6 +1,9 @@
 # Canonical ABI interface identity extracted from typed HIR.
 
 use compiler.hir.hir.*
+# HirConst is not provided by the hir.* glob under the seed registry; import
+# it explicitly (same visibility note as declaration_providers_v1).
+use compiler.hir.hir_definitions.{HirConst}
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind}
 use std.common.crypto.sha256.{sha256_text}
 use compiler.common.cache.canonical_identity.{
@@ -8,7 +11,11 @@ use compiler.common.cache.canonical_identity.{
 
 pub const HIR_ABI_INTERFACE_DOMAIN_V1 = "simple/abi-interface/v1"
 
-class HirAbiInterfaceEncoderV1:
+# Cycle-83: public so the codec unit can host a byte-identical copy of the
+# ABI parts walk (that file's composite-walk codegen pool is the campaign's
+# proven-clean one; abi_interface's own draw for hir_abi_interface_parts_v1
+# faults in the shard-stage2 binary).
+pub class HirAbiInterfaceEncoderV1:
     symbols: SymbolTable
     module_name: text
     error: text
@@ -31,14 +38,21 @@ impl HirAbiInterfaceEncoderV1:
             canon_field("name", canon_str(resolved.name))
         ])
 
+    me optional_i64_text(value: i64?, fallback: text) -> text:
+        match value:
+            case Some(found):
+                val typed_value: i64 = found
+                typed_value.to_text()
+            case None: fallback
+
     me dim_identity(dim: DimExpr) -> text:
         match dim.kind:
             case Literal(value): canon_field("literal", canon_nat(value))
             case Named(name, lo, hi):
                 canon_field("named", canon_seq([
                     canon_field("name", canon_str(name)),
-                    canon_field("lo", canon_str(if val value = lo: value.to_text() else: "none")),
-                    canon_field("hi", canon_str(if val value = hi: value.to_text() else: "none"))
+                    canon_field("lo", canon_str(self.optional_i64_text(lo, "none"))),
+                    canon_field("hi", canon_str(self.optional_i64_text(hi, "none")))
                 ]))
             case Var(id): canon_field("var", canon_nat(id))
             case Dynamic: canon_field("dynamic", canon_seq([]))
@@ -88,7 +102,7 @@ impl HirAbiInterfaceEncoderV1:
             case Tuple(elements): canon_field("tuple", self.type_list_identity(elements))
             case Array(element, size): canon_field("array", canon_seq([
                 canon_field("element", self.type_identity(element)),
-                canon_field("size", canon_str(if val value = size: value.to_text() else: "dynamic"))]))
+                canon_field("size", canon_str(self.optional_i64_text(size, "dynamic")))]))
             case Slice(element): canon_field("slice", self.type_identity(element))
             case Dict(key, value): canon_field("dict", canon_seq([
                 canon_field("key", self.type_identity(key)),
@@ -119,6 +133,9 @@ impl HirAbiInterfaceEncoderV1:
                 canon_field("base", self.type_identity(base)),
                 canon_field("assoc", canon_str(assoc_name))]))
             case Isolated(inner): canon_field("isolated", self.type_identity(inner))
+            case Unique(inner): canon_field("unique", self.type_identity(inner))
+            case Shared(inner): canon_field("shared", self.type_identity(inner))
+            case Weak(inner): canon_field("weak", self.type_identity(inner))
             case Infer(id, level): self.fail("unresolved-inference:{id}:{level}")
             case Error: self.fail("error-type")
             case Never: canon_field("never", canon_seq([]))
@@ -150,7 +167,9 @@ impl HirAbiInterfaceEncoderV1:
 
     me type_params_identity(params: [HirTypeParam]) -> text:
         var rows: [text] = []
-        for param in params:
+        for raw_param in params:
+            # ANY-transport hazard sweep round 3: annotated rebind.
+            val param: HirTypeParam = raw_param
             var fields: [text] = [
                 canon_field("name", canon_str(param.name)),
                 canon_field("bounds", self.type_list_identity(param.bounds, true)),
@@ -162,7 +181,8 @@ impl HirAbiInterfaceEncoderV1:
 
     me function_identity(function: HirFunction) -> text:
         var params: [text] = []
-        for param in function.params:
+        for raw_param in function.params:
+            val param: HirParam = raw_param
             params.push(canon_seq([
                 canon_field("name", canon_str(param.name)),
                 canon_field("type", self.type_identity(param.type_)),
@@ -197,7 +217,8 @@ impl HirAbiInterfaceEncoderV1:
     me fields_identity(fields: [HirField]) -> text:
         var rows: [text] = []
         var ordinal = 0
-        for field in fields:
+        for raw_field in fields:
+            val field: HirField = raw_field
             rows.push(canon_seq([
                 canon_field("ordinal", canon_nat(ordinal)),
                 canon_field("name", canon_str(field.name)),
@@ -238,7 +259,9 @@ impl HirAbiInterfaceEncoderV1:
     me enum_identity(enum_: HirEnum) -> text:
         var variants: [text] = []
         var ordinal = 0
-        for variant in enum_.variants:
+        for raw_variant in enum_.variants:
+            # ANY-transport hazard sweep round 3: annotated rebind.
+            val variant: HirVariant = raw_variant
             val payload = match variant.kind:
                 case Unit: canon_field("unit", canon_seq([]))
                 case Tuple(types): canon_field("tuple", self.type_list_identity(types))
@@ -267,7 +290,8 @@ impl HirAbiInterfaceEncoderV1:
 
     me bitfield_identity(bitfield: HirBitfield) -> text:
         var fields: [text] = []
-        for field in bitfield.fields:
+        for raw_field in bitfield.fields:
+            val field: HirBitfieldField = raw_field
             fields.push(canon_seq([
                 canon_field("name", canon_str(field.name)),
                 canon_field("type", if field.has_type_: self.type_identity(field.type_) else: canon_str("none")),
@@ -312,41 +336,48 @@ pub fn hir_abi_interface_parts_v1(module: HirModule) -> Result<[text], text>:
     for name in module.exports:
         exports.push(canon_str(name))
     parts.push(canon_field("exports", canon_seq(canonical_identity_sort_texts(exports))))
-    for function in module.functions.values():
+    for dk_6 in module.functions.keys():
+        val function: HirFunction = module.functions[dk_6]
         if function.is_public:
             parts.push(encoder.function_identity(function))
             if encoder.error != "":
                 return Err(encoder.error + ":declaration=function:" + function.name)
-    for struct_ in module.structs.values():
+    for dk_5 in module.structs.keys():
+        val struct_: HirStruct = module.structs[dk_5]
         if struct_.is_public:
             parts.push(encoder.record_identity("struct", struct_.name,
                 struct_.type_params, struct_.fields, struct_.has_layout_attr,
                 struct_.layout_attr))
             if encoder.error != "":
                 return Err(encoder.error + ":declaration=struct:" + struct_.name)
-    for class_ in module.classes.values():
+    for dk_4 in module.classes.keys():
+        val class_: HirClass = module.classes[dk_4]
         if class_.is_public:
             parts.push(encoder.record_identity("class", class_.name,
                 class_.type_params, class_.fields, class_.has_layout_attr,
                 class_.layout_attr))
             if encoder.error != "":
                 return Err(encoder.error + ":declaration=class:" + class_.name)
-    for enum_ in module.enums.values():
+    for dk_3 in module.enums.keys():
+        val enum_: HirEnum = module.enums[dk_3]
         if enum_.is_public:
             parts.push(encoder.enum_identity(enum_))
             if encoder.error != "":
                 return Err(encoder.error + ":declaration=enum:" + enum_.name)
-    for bitfield in module.bitfields.values():
+    for dk_2 in module.bitfields.keys():
+        val bitfield: HirBitfield = module.bitfields[dk_2]
         if bitfield.is_public:
             parts.push(encoder.bitfield_identity(bitfield))
             if encoder.error != "":
                 return Err(encoder.error + ":declaration=bitfield:" + bitfield.name)
-    for trait_ in module.traits.values():
+    for dk_1 in module.traits.keys():
+        val trait_: HirTrait = module.traits[dk_1]
         if trait_.is_public:
             parts.push(encoder.trait_identity(trait_))
             if encoder.error != "":
                 return Err(encoder.error + ":declaration=trait:" + trait_.name)
-    for constant in module.constants.values():
+    for dk_0 in module.constants.keys():
+        val constant: HirConst = module.constants[dk_0]
         if constant.is_public:
             parts.push(canon_field("constant", canon_seq([
                 canon_field("name", canon_str(constant.name)),

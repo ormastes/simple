@@ -1,0 +1,124 @@
+# @req: AC-OWN-03
+# Dictionary keys retain owners; builtin spellings alone prove no contract.
+use std.spec
+use compiler.common.config.Logger
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.semantics.param_effects.contracts.{declared_parameter_category}
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.semantics.param_effects.effects.{ParamEffectReport, param_effect_report_effect}
+use compiler.semantics.param_effects.infer.{infer_param_effects}
+
+fn collection_contract_report(body: text) -> ParamEffectReport:
+    val source = "class Node:\n    value: i64\n\n" + body
+    var parsed = parse_full_frontend(source, "collection_contract.spl", "collection_contract", Logger(level: 0))
+    parsed.nogc_strict = true
+    var lowering = HirLowering.with_filename("collection_contract.spl")
+    val hir = lowering.lower_module(parsed)
+    infer_param_effects(hir, {}, {})
+
+fn collection_contract_has_code(report: ParamEffectReport, code: text, function: text) -> bool:
+    for diagnostic in report.diags:
+        if diagnostic.code == code and diagnostic.function == function: return true
+    false
+
+describe "collection parameter effects require builtin identity":
+    it "rejects retaining a short parameter as a dictionary key":
+        val report = collection_contract_report("fn retain_key(n: Node):\n    val saved = {n: 1}\n")
+        expect(param_effect_report_effect(report, "retain_key", "n")).to_equal("ambiguous")
+        expect(collection_contract_has_code(report, "NOGC-BOR-001", "retain_key")).to_equal(true)
+
+    it "rejects an unknown receiver method with a builtin mutator spelling":
+        val report = collection_contract_report("fn unknown_clear(n: Node):\n    n.clear()\n")
+        expect(param_effect_report_effect(report, "unknown_clear", "n")).to_equal("ambiguous")
+
+    it "rejects an unknown map method retaining a captured owner":
+        val report = collection_contract_report("fn unknown_map(n: Node, target: Node):\n    target.map(\\x: n.value)\n")
+        expect(param_effect_report_effect(report, "unknown_map", "n")).to_equal("ambiguous")
+
+    it "rejects retaining a short parameter through typed array push":
+        val report = collection_contract_report("fn array_push(xs: [Node], n: Node):\n    xs.push(n)\n")
+        expect(param_effect_report_effect(report, "array_push", "n")).to_equal("ambiguous")
+        expect(collection_contract_has_code(report, "NOGC-BOR-001", "array_push")).to_equal(true)
+
+    it "requires resolved builtin identity even for typed array callbacks":
+        val report = collection_contract_report("fn array_map(xs: [i64], n: Node):\n    xs.map(\\x: x + n.value)\n")
+        expect(param_effect_report_effect(report, "array_map", "n")).to_equal("ambiguous")
+
+describe "declared consuming parameters validate their bodies":
+    it "keeps an explicit consuming interface for a valid transfer":
+        val report = collection_contract_report("fn take(n: &Node):\n    pass\n\nfn forward(n: &Node):\n    take(n)\n")
+        expect(param_effect_report_effect(report, "forward", "n")).to_equal("consume")
+        expect(report.diags.len()).to_equal(0)
+
+    it "rejects a repeated move without rewriting the consuming interface":
+        val report = collection_contract_report("fn take(n: &Node):\n    pass\n\nfn twice(n: &Node):\n    take(n)\n    take(n)\n")
+        expect(param_effect_report_effect(report, "twice", "n")).to_equal("consume")
+        expect(collection_contract_has_code(report, "NOGC-AMB-001", "twice")).to_equal(true)
+
+    it "rejects reading a parameter after its transfer":
+        val report = collection_contract_report("fn take(n: &Node):\n    pass\n\nfn after_move(n: &Node) -> i64:\n    take(n)\n    n.value\n")
+        expect(collection_contract_has_code(report, "NOGC-AMB-001", "after_move")).to_equal(true)
+
+    it "rejects returning a short parameter instead of inferring ownership":
+        val report = collection_contract_report("fn escape(n: Node) -> Node:\n    n\n")
+        expect(param_effect_report_effect(report, "escape", "n")).to_equal("ambiguous")
+        expect(collection_contract_has_code(report, "NOGC-BOR-001", "escape")).to_equal(true)
+
+describe "production reports include capture provenance checks":
+    it "rejects capturing a scalar-element array short parameter":
+        val report = collection_contract_report("fn capture(xs: [i64]):\n    val callback = \\x: xs\n")
+        expect(collection_contract_has_code(report, "NOGC-BOR-001", "capture")).to_equal(true)
+
+    it "accepts an ordinary short array read without capture":
+        val report = collection_contract_report("fn inspect(xs: [i64]):\n    val first = xs[0]\n")
+        expect(collection_contract_has_code(report, "NOGC-BOR-001", "inspect")).to_equal(false)
+
+    it "borrows a bare aggregate independently of its stored unique payload":
+        val report = collection_contract_report("fn owned_tuple(pair: (&Node, i64)):\n    pass\n")
+        expect(param_effect_report_effect(report, "owned_tuple", "pair")).to_equal("read-short")
+
+    it "rejects returning a borrowed aggregate with a unique payload":
+        val report = collection_contract_report("fn tuple_escape(pair: (&Node, i64)) -> (&Node, i64):\n    pair\n")
+        expect(param_effect_report_effect(report, "tuple_escape", "pair")).to_equal("ambiguous")
+        expect(collection_contract_has_code(report, "NOGC-BOR-001", "tuple_escape")).to_equal(true)
+
+    it "never unwraps an optional unique payload into an owning parameter":
+        val scalar = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+        val owner = HirType(kind: HirTypeKind.Unique(scalar), span: scalar.span)
+        val optional = HirType(kind: HirTypeKind.Optional(owner), span: scalar.span)
+        expect(declared_parameter_category(owner)).to_equal("unique")
+        expect(declared_parameter_category(optional)).to_equal("")
+
+describe "short projections cannot escape through aliases":
+    it "rejects returning an indexed owner through a local alias":
+        val report = collection_contract_report("fn element_escape(xs: [Node]) -> Node:\n    val alias = xs[0]\n    alias\n")
+        expect(collection_contract_has_code(report, "NOGC-BOR-001", "element_escape")).to_equal(true)
+
+    it "rejects caching an indexed short owner in a field":
+        val report = collection_contract_report("class Cache:\n    saved: Node\n\nfn cache(xs: [Node], target: Cache):\n    target.saved = xs[0]\n")
+        expect(collection_contract_has_code(report, "NOGC-BOR-001", "cache")).to_equal(true)
+
+    it "rejects returning a projected short field through an alias":
+        val report = collection_contract_report("class Box:\n    inner: Node\n\nfn field_escape(box: Box) -> Node:\n    val alias = box.inner\n    alias\n")
+        expect(collection_contract_has_code(report, "NOGC-BOR-001", "field_escape")).to_equal(true)
+
+    it "accepts copying a scalar element out of a short array":
+        val report = collection_contract_report("fn scalar_copy(xs: [i64]) -> i64:\n    xs[0]\n")
+        expect(collection_contract_has_code(report, "NOGC-BOR-001", "scalar_copy")).to_equal(false)
+
+describe "definition checked local callback contracts":
+    it "accepts a short capture only through a directly checked synchronous callback":
+        val report = collection_contract_report("fn invoke(callback: fn(i64) -> i64) -> i64:\n    callback(1)\n\nfn caller(n: Node) -> i64:\n    invoke(\\x: n.value + x)\n")
+        expect(collection_contract_has_code(report, "NOGC-AMB-003", "caller")).to_equal(false)
+        expect(collection_contract_has_code(report, "NOGC-BOR-001", "caller")).to_equal(false)
+
+    it "rejects the same callback capture when the definition retains the callback":
+        val report = collection_contract_report("class CallbackCache:\n    callback: fn(i64) -> i64\n\nfn retain(cache: CallbackCache, callback: fn(i64) -> i64):\n    cache.callback = callback\n\nfn caller(n: Node, cache: CallbackCache):\n    retain(cache, \\x: n.value + x)\n")
+        expect(collection_contract_has_code(report, "NOGC-AMB-003", "caller")).to_equal(true)
+
+    it "rejects named callback argument positions without identity mapping":
+        val report = collection_contract_report("fn invoke(callback: fn(i64) -> i64) -> i64:\n    callback(1)\n\nfn caller(n: Node) -> i64:\n    invoke(callback: \\x: n.value + x)\n")
+        expect(collection_contract_has_code(report, "NOGC-AMB-003", "caller")).to_equal(true)

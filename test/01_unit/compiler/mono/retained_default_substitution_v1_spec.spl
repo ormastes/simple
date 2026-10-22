@@ -1,0 +1,292 @@
+# @req REQ-C1-SM-ARCH-02
+# Tests-first actual canonical substitution/recipe API oracles. Execution UNRUN.
+use std.spec.{describe, it, expect, fail}
+use compiler.hir.hir.*
+use compiler.common.diagnostics.span.Span
+use compiler.monomorphize.type_subst.{canonicalize_template, substitute_param, typesubstitution_from_params}
+use compiler.monomorphize.engine.specialize_function_with_types
+use compiler.mono.mono_archive_types_v1.{MonoTemplateRecipeV1, mono_apply_template_recipe_v1, mono_template_recipe_signature_v1, mono_template_signature_digest_v1}
+use compiler.hir.hir_function_record_identity_v1.mono_complete_function_digest_v1
+use compiler.mono.mono_invocation_policy_v1.{MonoInvocationBudgetV1, mono_verification_limits_v1}
+
+fn retained_default_type_v1(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn retained_default_template_v1() -> HirFunction:
+    val type_ = retained_default_type_v1(HirTypeKind.Named(SymbolId(id: 21), []))
+    val first = HirExpr(kind: HirExprKind.Var(SymbolId(id: 22)),
+        has_type_: true, type_: type_, span: Span.empty())
+    val callee = HirExpr(kind: HirExprKind.Var(SymbolId(id: 30)),
+        has_type_: false, type_: nil, span: Span.empty())
+    val call = HirExpr(kind: HirExprKind.Call(callee,
+        [HirCallArg(has_name: false, name: "", value: first, span: Span.empty())], [type_]),
+        has_type_: true, type_: type_, span: Span.empty())
+    HirFunction(symbol: SymbolId(id: 20), name: "choose",
+        type_params: [HirTypeParam(symbol: SymbolId(id: 21), name: "T",
+            bounds: [], has_default: false, default: nil, span: Span.empty())],
+        params: [
+            HirParam(symbol: SymbolId(id: 22), name: "first", type_: type_,
+                has_default: false, default: nil, span: Span.empty(), is_mutable: false),
+            HirParam(symbol: SymbolId(id: 23), name: "second", type_: type_,
+                has_default: true, default: call, span: Span.empty(), is_mutable: true)],
+        return_type: type_,
+        body: HirBlock(stmts: [], has: true,
+            value: HirExpr(kind: HirExprKind.Var(SymbolId(id: 23)),
+                has_type_: true, type_: type_, span: Span.empty()), span: Span.empty()),
+        effects: [], visibility: Visibility.Public, is_async: false, is_static: false,
+        is_public: true, is_method: false, is_mutable: false, is_const: false,
+        is_extern: false, func_attr: FunctionAttr.default(), has_export_attr: false,
+        export_attr: nil, has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_suspension: false, has_vhdl_metadata: false, vhdl_metadata: nil,
+        has_doc_comment: false, doc_comment: "", span: Span.empty(),
+        is_gpu_kernel: false, gpu_target: "", gpu_backend_order: "",
+        verification_contract: nil, is_generic_template: true)
+
+fn retained_default_recipe_v1(function: HirFunction) -> MonoTemplateRecipeV1:
+    MonoTemplateRecipeV1(module_name: "provider", original_symbol: function.symbol,
+        template_name: function.name, canonical_type_params: function.type_params,
+        bound_type_params: function.type_params, inherent_method: false)
+
+fn retained_default_check_call_v1(param: HirParam, kind: HirTypeKind):
+    expect(param.has_default).to_be(true)
+    expect(param.default.type_.kind).to_equal(kind)
+    match param.default.kind:
+        case HirExprKind.Call(callee, args, types):
+            expect(callee.kind).to_equal(HirExprKind.Var(SymbolId(id: 30)))
+            expect(types.len()).to_equal(1)
+            expect(types[0].kind).to_equal(kind)
+            expect(args.len()).to_equal(1)
+            expect(args[0].value.kind).to_equal(HirExprKind.Var(SymbolId(id: 22)))
+            expect(args[0].value.type_.kind).to_equal(kind)
+        case _: fail("retained default must remain the actual call expression")
+
+fn retained_default_budget_v1(work: i64, depth: i64) -> MonoInvocationBudgetV1:
+    var limits = mono_verification_limits_v1()
+    limits.max_work_units = work
+    limits.max_hir_depth = depth
+    match MonoInvocationBudgetV1.create(limits):
+        Ok(budget): return budget
+        Err(message):
+            fail(message)
+            return nil
+
+fn retained_default_zero_params_v1(absent: bool) -> HirFunction:
+    var function = retained_default_template_v1()
+    function.params = if absent: nil else: []
+    function.type_params = []
+    function.is_generic_template = false
+    function.return_type = retained_default_type_v1(HirTypeKind.Bool)
+    function.body = HirBlock(stmts: [], has: true,
+        value: HirExpr(kind: HirExprKind.BoolLit(true), has_type_: true,
+            type_: function.return_type, span: Span.empty()), span: Span.empty())
+    function
+
+describe "isolated canonical substitution of retained parameter defaults":
+    it "canonicalizes then specializes nested call arguments and prior parameter references":
+        val original = retained_default_template_v1()
+        val before = mono_complete_function_digest_v1(original)
+        expect(before.len()).to_be_greater_than(0)
+        val canonical = canonicalize_template(original, include_retained_defaults: true)
+        retained_default_check_call_v1(canonical.params[1], HirTypeKind.TypeParam("T", []))
+        val result = specialize_function_with_types(canonical,
+            [retained_default_type_v1(HirTypeKind.Int(64, true))], include_retained_defaults: true)
+        retained_default_check_call_v1(result.params[1], HirTypeKind.Int(64, true))
+        expect(result.params[0].symbol).to_equal(original.params[0].symbol)
+        expect(result.params[0].has_default).to_be(false)
+        expect(result.params[0].default).to_be_nil()
+        expect(result.params[1].symbol).to_equal(original.params[1].symbol)
+        expect(result.params[1].name).to_equal("second")
+        expect(result.params[1].span).to_equal(original.params[1].span)
+        expect(result.params[1].is_mutable).to_be(true)
+        expect(result.type_params.len()).to_equal(0)
+        expect(mono_complete_function_digest_v1(original)).to_equal(before)
+
+    it "keeps ordinary omitted and explicit false policy byte identical":
+        val original = retained_default_template_v1()
+        val ordinary = canonicalize_template(original)
+        val explicit = canonicalize_template(original, include_retained_defaults: false)
+        expect(mono_complete_function_digest_v1(ordinary)).to_equal(mono_complete_function_digest_v1(explicit))
+        retained_default_check_call_v1(ordinary.params[1], HirTypeKind.Named(SymbolId(id: 21), []))
+        val args = [retained_default_type_v1(HirTypeKind.Int(64, true))]
+        expect(mono_complete_function_digest_v1(specialize_function_with_types(ordinary, args))).to_equal(
+            mono_complete_function_digest_v1(specialize_function_with_types(explicit, args, include_retained_defaults: false)))
+
+    it "applies retained defaults through the actual template recipe without mutating its input":
+        val original = retained_default_template_v1()
+        val before = mono_complete_function_digest_v1(original)
+        val recipe = retained_default_recipe_v1(original)
+        val result = mono_apply_template_recipe_v1(original, recipe, include_retained_defaults: true)
+        retained_default_check_call_v1(result.params[1], HirTypeKind.TypeParam("T", []))
+        expect(mono_complete_function_digest_v1(original)).to_equal(before)
+        expect(result.symbol).to_equal(original.symbol)
+        expect(result.type_params).to_equal(recipe.bound_type_params)
+
+    it "leaves signature projection body free even when a default payload is malformed":
+        val original = retained_default_template_v1()
+        val recipe = retained_default_recipe_v1(original)
+        val before = mono_template_signature_digest_v1(mono_template_recipe_signature_v1(original, recipe))
+        var broken = original
+        var param = original.params[1]
+        param.default = nil
+        broken.params = [original.params[0], param]
+        expect(mono_template_signature_digest_v1(mono_template_recipe_signature_v1(broken, recipe))).to_equal(before)
+        expect(broken.params[1].has_default).to_be(true)
+        expect(broken.params[1].default).to_be_nil()
+        expect(original.params[1].default == nil).to_be(false)
+
+    it "refuses a present default without payload before returning a partial function":
+        var broken = retained_default_template_v1()
+        val first = broken.params[0]
+        var second = broken.params[1]
+        second.default = nil
+        broken.params = [first, second]
+        expect(canonicalize_template(broken, include_retained_defaults: true)).to_be_nil()
+        expect(mono_apply_template_recipe_v1(broken, retained_default_recipe_v1(broken),
+            include_retained_defaults: true)).to_be_nil()
+        expect(broken.params[0]).to_equal(first)
+        expect(broken.params[1]).to_equal(second)
+        expect(broken.type_params.len()).to_equal(1)
+
+    it "preserves unresolved type evidence for strict G7 rather than inventing a default value":
+        val original = canonicalize_template(retained_default_template_v1(), include_retained_defaults: true)
+        val substitution = typesubstitution_from_params([], [])
+        val result = substitute_param(original.params[1], substitution, include_retained_defaults: true)
+        retained_default_check_call_v1(result, HirTypeKind.TypeParam("T", []))
+        expect(result.default.kind).to_equal(original.params[1].default.kind)
+
+    it "threads policy through lambda parameter defaults on the same canonical expression traversal":
+        var original = retained_default_template_v1()
+        var outer = original.params[1]
+        val nested = outer
+        outer.default = HirExpr(kind: HirExprKind.Lambda([nested], original.body.value, []),
+            has_type_: false, type_: nil, span: Span.empty())
+        original.params = [original.params[0], outer]
+        val before = mono_complete_function_digest_v1(original)
+        val canonical = canonicalize_template(original, include_retained_defaults: true)
+        val result = specialize_function_with_types(canonical,
+            [retained_default_type_v1(HirTypeKind.Int(64, true))], include_retained_defaults: true)
+        match result.params[1].default.kind:
+            case HirExprKind.Lambda(params, _, _):
+                expect(params.len()).to_equal(1)
+                retained_default_check_call_v1(params[0], HirTypeKind.Int(64, true))
+            case _: fail("default lambda disappeared during canonical substitution")
+        expect(mono_complete_function_digest_v1(original)).to_equal(before)
+
+    it "accepts exactly observed work and refuses one fewer unit without leaking traversal depth":
+        val original = retained_default_template_v1()
+        val before = mono_complete_function_digest_v1(original)
+        val generous = retained_default_budget_v1(65536, 128)
+        val result = canonicalize_template(original, include_retained_defaults: true, budget: generous)
+        expect(result == nil).to_be(false)
+        expect(generous.failure).to_equal("")
+        expect(generous.hir_depth).to_equal(0)
+        val used = 65536 - generous.remaining_work
+        expect(used).to_be_greater_than(1)
+        val exact = retained_default_budget_v1(used, 128)
+        val exact_result = canonicalize_template(original, include_retained_defaults: true, budget: exact)
+        expect(exact_result == nil).to_be(false)
+        expect(exact.remaining_work).to_equal(0)
+        expect(exact.hir_depth).to_equal(0)
+        expect(mono_complete_function_digest_v1(exact_result)).to_equal(mono_complete_function_digest_v1(result))
+        val short = retained_default_budget_v1(used - 1, 128)
+        expect(canonicalize_template(original, include_retained_defaults: true, budget: short)).to_be_nil()
+        expect(short.failure.len()).to_be_greater_than(0)
+        expect(short.hir_depth).to_equal(0)
+        expect(mono_complete_function_digest_v1(original)).to_equal(before)
+
+    it "refuses depth exhaustion and a malformed retained default with independent fresh ledgers":
+        val original = retained_default_template_v1()
+        val before = mono_complete_function_digest_v1(original)
+        val shallow = retained_default_budget_v1(65536, 1)
+        expect(canonicalize_template(original, include_retained_defaults: true, budget: shallow)).to_be_nil()
+        expect(shallow.failure.len()).to_be_greater_than(0)
+        expect(shallow.hir_depth).to_equal(0)
+        var broken = original
+        var second = original.params[1]
+        second.default = nil
+        broken.params = [original.params[0], second]
+        val failed = retained_default_budget_v1(65536, 128)
+        expect(mono_apply_template_recipe_v1(broken, retained_default_recipe_v1(broken),
+            include_retained_defaults: true, budget: failed)).to_be_nil()
+        expect(failed.failure).to_contain("MONO-E-DEFAULT")
+        expect(failed.hir_depth).to_equal(0)
+        val fresh = retained_default_budget_v1(65536, 128)
+        val result = mono_apply_template_recipe_v1(original, retained_default_recipe_v1(original),
+            include_retained_defaults: true, budget: fresh)
+        retained_default_check_call_v1(result.params[1], HirTypeKind.TypeParam("T", []))
+        expect(fresh.failure).to_equal("")
+        expect(fresh.hir_depth).to_equal(0)
+        expect(mono_complete_function_digest_v1(original)).to_equal(before)
+
+    it "preserves nil versus empty zero-parameter inputs under ordinary and enabled default policies":
+        val absent = retained_default_zero_params_v1(true)
+        val empty = retained_default_zero_params_v1(false)
+        val before = mono_complete_function_digest_v1(absent)
+        val expected = mono_complete_function_digest_v1(empty)
+        expect(before.len()).to_be_greater_than(0)
+        expect(expected.len()).to_be_greater_than(0)
+        expect(mono_complete_function_digest_v1(canonicalize_template(absent))).to_equal(expected)
+        expect(mono_complete_function_digest_v1(specialize_function_with_types(absent, []))).to_equal(expected)
+        for include_defaults in [false, true]:
+            val canonical = canonicalize_template(absent, include_retained_defaults: include_defaults)
+            val specialized = specialize_function_with_types(absent, [],
+                include_retained_defaults: include_defaults)
+            expect(canonical.params.len()).to_equal(0)
+            expect(specialized.params.len()).to_equal(0)
+            expect(mono_complete_function_digest_v1(canonical)).to_equal(
+                mono_complete_function_digest_v1(canonicalize_template(empty, include_retained_defaults: include_defaults)))
+            expect(mono_complete_function_digest_v1(specialized)).to_equal(
+                mono_complete_function_digest_v1(specialize_function_with_types(empty, [],
+                    include_retained_defaults: include_defaults)))
+            expect(mono_complete_function_digest_v1(canonical)).to_equal(expected)
+            expect(mono_complete_function_digest_v1(specialized)).to_equal(expected)
+        expect(absent.params).to_be_nil()
+        expect(empty.params.len()).to_equal(0)
+        expect(mono_complete_function_digest_v1(absent)).to_equal(before)
+        expect(mono_complete_function_digest_v1(empty)).to_equal(expected)
+
+    it "handles retained nil type-parameter rows without adding a budget-only dereference":
+        var absent = retained_default_zero_params_v1(true)
+        absent.type_params = nil
+        val before = mono_complete_function_digest_v1(absent)
+        var expected_canonical = retained_default_zero_params_v1(false)
+        expected_canonical.type_params = nil
+        val expected_specialized = retained_default_zero_params_v1(false)
+        expect(before.len()).to_be_greater_than(0)
+        for include_defaults in [false, true]:
+            val canonical_budget = retained_default_budget_v1(65536, 128)
+            val canonical = canonicalize_template(absent, include_retained_defaults: include_defaults,
+                budget: canonical_budget)
+            expect(canonical == nil).to_be(false)
+            expect(mono_complete_function_digest_v1(canonical)).to_equal(mono_complete_function_digest_v1(expected_canonical))
+            expect(canonical_budget.failure).to_equal("")
+            expect(canonical_budget.hir_depth).to_equal(0)
+            val specialization_budget = retained_default_budget_v1(65536, 128)
+            val specialized = specialize_function_with_types(absent, [],
+                include_retained_defaults: include_defaults, budget: specialization_budget)
+            expect(specialized == nil).to_be(false)
+            expect(mono_complete_function_digest_v1(specialized)).to_equal(mono_complete_function_digest_v1(expected_specialized))
+            expect(specialization_budget.failure).to_equal("")
+            expect(specialization_budget.hir_depth).to_equal(0)
+        expect(absent.params).to_be_nil()
+        expect(absent.type_params).to_be_nil()
+        expect(mono_complete_function_digest_v1(absent)).to_equal(before)
+
+    it "returns a defined work failure for nil parameter rows and restores depth":
+        var absent = retained_default_zero_params_v1(true)
+        absent.type_params = nil
+        val before = mono_complete_function_digest_v1(absent)
+        for include_defaults in [false, true]:
+            val canonical_budget = retained_default_budget_v1(1, 128)
+            expect(canonicalize_template(absent, include_retained_defaults: include_defaults,
+                budget: canonical_budget)).to_be_nil()
+            expect(canonical_budget.failure).to_contain("E-MONO-WORK")
+            expect(canonical_budget.hir_depth).to_equal(0)
+            val specialization_budget = retained_default_budget_v1(1, 128)
+            expect(specialize_function_with_types(absent, [],
+                include_retained_defaults: include_defaults, budget: specialization_budget)).to_be_nil()
+            expect(specialization_budget.failure).to_contain("E-MONO-WORK")
+            expect(specialization_budget.hir_depth).to_equal(0)
+        expect(absent.params).to_be_nil()
+        expect(absent.type_params).to_be_nil()
+        expect(mono_complete_function_digest_v1(absent)).to_equal(before)

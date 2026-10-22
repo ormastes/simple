@@ -1,0 +1,78 @@
+# @tag:in-development
+# Shared contracts for the production traceability acceptance families.
+# Every unavailable adapter fails closed; these types are not fixture outputs.
+use std.spec.{expect, fail}
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+pub struct TrcFixture:
+    expected_subject: text
+    candidate_root: text
+    artifact_root: text
+
+pub struct TrcCandidateResult:
+    run_id: text
+    subject_id: text
+    obligation_states: Dict<text, text>
+    exit_code: i64
+    stdout: text
+    stderr: text
+    sdn_path: text
+    markdown_path: text
+
+pub struct TrcRunArtifacts:
+    sdn: text
+    markdown: text
+    sdn_manifest_sha256: text
+    markdown_manifest_sha256: text
+
+pub fn trc_fixture_create(ac_id: text, scenario: text, missing_adapter: text) -> Result<TrcFixture, text>:
+    Err("{ac_id} BLOCKED ({scenario}): missing isolated production fixture adapter: {missing_adapter}. No receipt or candidate output was synthesized.")
+
+pub fn trc_run_candidate(fixture: TrcFixture, profile: text) -> Result<TrcCandidateResult, text>:
+    Err("BLOCKED: compiled production candidate runner is not admitted for profile {profile}; traceability-check currently exposes preview only.")
+
+pub fn trc_read_run_artifacts(run_id: text) -> Result<TrcRunArtifacts, text>:
+    Err("BLOCKED: run-scoped SDN/Markdown artifact reader is not connected to a retained production run: {run_id}.")
+
+fn trc_digest_valid(value: text) -> bool:
+    if value.len() != 71 or not value.starts_with("sha256:"): return false
+    for byte in value.bytes()[7:]:
+        val ch = byte.to_i64()
+        if not ((ch >= 48 and ch <= 57) or (ch >= 97 and ch <= 102)): return false
+    true
+
+pub fn trc_validate_artifact_integrity(artifacts: TrcRunArtifacts) -> Result<(), text>:
+    if artifacts.sdn.len() > 1_048_576 or artifacts.markdown.len() > 1_048_576:
+        return Err("retained artifact exceeds the 1 MiB per-artifact bound")
+    if not trc_digest_valid(artifacts.sdn_manifest_sha256):
+        return Err("retained SDN manifest digest is missing or malformed")
+    if not trc_digest_valid(artifacts.markdown_manifest_sha256):
+        return Err("retained Markdown manifest digest is missing or malformed")
+    val sdn_digest = "sha256:" + sha256_u8_hex(artifacts.sdn.bytes())
+    if sdn_digest != artifacts.sdn_manifest_sha256:
+        return Err("retained SDN bytes do not match the independently supplied manifest digest")
+    val markdown_digest = "sha256:" + sha256_u8_hex(artifacts.markdown.bytes())
+    if markdown_digest != artifacts.markdown_manifest_sha256:
+        return Err("retained Markdown bytes do not match the independently supplied manifest digest")
+    Ok(())
+
+pub fn trc_assert_artifact_integrity(artifacts: TrcRunArtifacts) -> Result<(), text>:
+    trc_validate_artifact_integrity(artifacts)
+
+pub fn trc_validate_criterion_oracle(ac_id: text) -> Result<(), text>:
+    Err("{ac_id} BLOCKED: criterion-specific production oracle is not implemented; an obligation-state label or generic receipt cannot prove this acceptance behavior.")
+
+pub fn trc_assert_subject(result: TrcCandidateResult, expected_subject: text):
+    if expected_subject == "":
+        fail("BLOCKED: fixture did not provide an independent expected subject")
+        return
+    expect(result.subject_id).to_equal(expected_subject)
+
+pub fn trc_assert_obligation(result: TrcCandidateResult, obligation_id: text, expected_state: text):
+    if not result.obligation_states.contains_key(obligation_id):
+        fail("BLOCKED: production result omitted typed obligation {obligation_id}")
+        return
+    expect(result.obligation_states[obligation_id]).to_equal(expected_state)
+
+pub fn trc_capture_result(label: text, result: TrcCandidateResult) -> Result<(), text>:
+    Err("BLOCKED ({label}): real command stdout, stderr, SDN, Markdown and digests have no retained capture writer; exit={result.exit_code}.")

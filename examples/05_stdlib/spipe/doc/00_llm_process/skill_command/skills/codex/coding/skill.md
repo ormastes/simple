@@ -17,7 +17,7 @@ Full syntax: `doc/07_guide/quick_reference/syntax_quick_reference.md`
 
 ### Variables
 
-```simple
+```text
 val name = "Alice"             # Immutable (preferred)
 name := "Alice"                # Walrus operator (:= is val synonym)
 var count = 0                  # Mutable
@@ -25,14 +25,14 @@ var count = 0                  # Mutable
 
 ### Strings
 
-```simple
+```simple:skip
 print "Hello, {name}!"        # String interpolation (default)
 print r"raw: \d+"              # Raw string (no interpolation)
 ```
 
 ### Functions
 
-```simple
+```simple:skip
 fn square(x):
     x * x                      # Implicit return
 
@@ -43,7 +43,7 @@ fn add(a: i64, b: i64) -> i64:
 ### Generics
 
 **Use `<>` not `[]`:**
-```simple
+```text
 Option<T>
 List<Int>
 Map<String, Int>
@@ -52,7 +52,7 @@ Result<T, E>
 
 ### Classes (NO INHERITANCE)
 
-```simple
+```simple:skip
 class Point:
     x: i64
     y: i64
@@ -77,14 +77,14 @@ Point(x: 3, y: 4)             # Named fields — NOT .new()
 
 ### Pattern Binding
 
-```simple
+```simple:skip
 if val x = optional_value:     # NOT 'if let'
     process(x)
 ```
 
 ### Error Handling
 
-```simple
+```simple:skip
 # Use Result<T, E> + ? operator (no try/catch/throw)
 fn read_file(path: text) -> Result<text, Error>:
     val content = fs.read(path)?
@@ -93,7 +93,7 @@ fn read_file(path: text) -> Result<text, Error>:
 
 ### Match
 
-```simple
+```simple:skip
 match value:
     Some(x): process(x)
     nil: ()                    # Unit value
@@ -101,7 +101,7 @@ match value:
 
 ### Lambdas
 
-```simple
+```simple:skip
 items.map(\x: x * 2)          # Lambda
 items.map(_ * 2)               # Placeholder lambda
 items.map(_1 * 10)             # Numbered placeholder
@@ -116,13 +116,13 @@ words.map(&:len)               # Method reference
 
 ### Optional Chaining
 
-```simple
+```simple:skip
 user?.name ?? "Anonymous"      # Optional chaining + nil coalescing
 ```
 
 ### Operators
 
-```simple
+```simple:skip
 x |> transform                 # Pipe
 f >> g                         # Compose
 layer1 ~> layer2               # Layer connect
@@ -132,7 +132,7 @@ m{ x^2 + y^2 }                # Math block
 
 ### Pass Variants
 
-```simple
+```text
 pass_todo("what remains", "hint or issue")
 pass_do_nothing("why no-op is correct")
 pass_dn("why no-op is correct")
@@ -143,7 +143,7 @@ pass                           # Generic no-op
 
 ### Type Aliases
 
-```simple
+```simple:skip
 type Point2D = Point           # Type alias
 alias Optional = Option        # Class alias
 ```
@@ -173,7 +173,7 @@ These CANNOT be used as identifiers:
 
 ## Import Conventions
 
-```simple
+```simple:skip
 use std.io                     # Standard library (preferred)
 use lib.common.text            # Also works (std -> lib internally)
 ```

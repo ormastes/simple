@@ -355,6 +355,18 @@ impl<'a> Parser<'a> {
                             self.advance();
                         }
                         Some(Box::new(Expr::DoBlock(stmts)))
+                    } else if self.check(&TokenKind::Return)
+                        || self.check(&TokenKind::Break)
+                        || self.check(&TokenKind::Continue)
+                    {
+                        // Diverging statement in else branch: `else: return nil`.
+                        // Without this guard `parse_expression` below treated
+                        // `return` as a plain identifier and codegen emitted a
+                        // global load of an undeclared `return` symbol, failing
+                        // the link with undefined `_return` (stage2 bootstrap,
+                        // 2026-10-14). Mirrors the guard in `parse_if_expr`.
+                        let stmt = self.parse_item()?;
+                        Some(Box::new(Expr::DoBlock(vec![stmt])))
                     } else {
                         Some(Box::new(self.parse_expression()?))
                     }
@@ -1413,6 +1425,15 @@ impl<'a> Parser<'a> {
             let nested = if self.check(&TokenKind::Newline) {
                 let block = self.parse_block()?;
                 self.finish_inline_statement_if_block(elif_span, elif_pattern, elif_condition, block)?
+            } else if self.check(&TokenKind::Return)
+                || self.check(&TokenKind::Break)
+                || self.check(&TokenKind::Continue)
+            {
+                // Diverging inline elif body (`elif cond: return x`): a bare
+                // `parse_expression_or_assignment` parsed `return` as an
+                // identifier, emitting an undeclared `return` global load.
+                let stmt = self.parse_item()?;
+                self.finish_inline_statement_if(elif_span, elif_pattern, elif_condition, stmt)?
             } else {
                 let stmt = self.parse_expression_or_assignment()?;
                 self.finish_inline_statement_if(elif_span, elif_pattern, elif_condition, stmt)?
@@ -1434,6 +1455,19 @@ impl<'a> Parser<'a> {
                 self.expect(&TokenKind::Colon)?;
                 if self.check(&TokenKind::Newline) {
                     Some(self.parse_block()?)
+                } else if self.check(&TokenKind::Return)
+                    || self.check(&TokenKind::Break)
+                    || self.check(&TokenKind::Continue)
+                {
+                    // Diverging inline else body (`else: return x`): a bare
+                    // `parse_expression_or_assignment` parsed `return` as an
+                    // identifier, emitting an undeclared `return` global load
+                    // (stage2 link failure, 2026-10-14).
+                    let stmt = self.parse_item()?;
+                    Some(Block {
+                        span: self.previous.span,
+                        statements: vec![stmt],
+                    })
                 } else {
                     let stmt = self.parse_expression_or_assignment()?;
                     Some(Block {

@@ -1,4 +1,6 @@
+use compiler.common.native_output_intent.{NativeOutputIntentV1, native_output_intent_decode_v1}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_build.go_to_end.{go_to_end_enabled_v1}
 use compiler.common.diagnostics.span.{Span}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.driver.driver_backend_plugin_selection.{driver_cuda_plugin_request_error_v1}
@@ -11,7 +13,15 @@ use compiler.driver.driver_backend_plugin_selection.{driver_cuda_plugin_request_
 # and the same extern in driver_hir_pipeline_lowering.spl.
 extern fn rt_heap_ref_wellformed<T>(value: T) -> bool
 use compiler.driver.driver_pipeline.*
+use compiler.driver.driver_pipeline_lowering.*
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
 use compiler.driver.driver_aot_pipeline.*
+use compiler.driver.driver_mir_selective_worker_v1.{driver_mir_selective_enabled_v1}
+use compiler.driver.driver_mir_selective_eligibility_v1.{driver_mir_selective_explicit_native_eligible_v1}
+use compiler.driver.driver_build.native_mir_shard_export_v1.{native_mir_shard_export_write_dir_v1}
+use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_spec_v1,
+    native_mir_shard_link_ledger_v1}
+use compiler.driver.driver_collection_native_receipt.{collection_native_clear_v1, collection_native_validate_v1, collection_native_copy_v1}
 use compiler.driver.driver_aot_output.{driver_native_sources_fingerprint}
 use compiler.driver.driver_log_helpers.{
     log_debug,
@@ -51,6 +61,17 @@ use compiler.driver.perf.compiler_work_counters.{
 }
 use std.io_runtime.{file_copy, env_get_opt}
 use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1}
+use compiler.backend.backend.backend_helpers.{get_effective_backend_name}
+use compiler.driver.cache.driver_hir_managed_runtime_selection_v1.{driver_hir_capture_managed_runtime_selection_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_shard_active}
+use compiler.driver.driver_hir_archive_production_controller_v1.{
+    driver_hir_archive_production_begin_v1,
+    driver_hir_archive_production_phase3_v1,
+    driver_hir_archive_production_phase4_v1,
+    driver_hir_archive_production_finish_v1,
+    driver_hir_archive_production_release_v1}
+use compiler.driver.cache.hir_mir_archive_consumer_v1.{mir_archive_declaration_publication_revoke_v1}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 pub use compiler.driver.driver_phase_gates.{driver_streaming_surface_enabled}
@@ -67,6 +88,20 @@ fn driver_noop_default_output_v1(input_files: [text]) -> text:
     val dot = base.rfind(".")
     val stem = if dot > 0: base.substring(0, dot) else: base
     "build/native/{stem}"
+
+fn driver_hir_archive_production_requested_v1(ctx: CompileContext, mode: text) -> bool:
+    val runtime_bundle = env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
+    mode == "aot" and driver_streaming_surface_route(ctx) == 1 and
+        ctx.options.output_format == driver_output_format_native() and
+        ctx.runtime_std_full_inventory_selection == nil and
+        ctx.demand_compile_execution == nil and ctx.demand_mir_input == nil and
+        ctx.demand_mir_admission == nil and ctx.demand_dirty_modules.len() == 0 and
+        ctx.sources.len() == ctx.source_paths_owner.len() and
+        ctx.source_contents_owner.len() == ctx.source_paths_owner.len() and
+        native_tool_strict_requested_v1() and hir_cache_enabled() and not hir_shard_active() and
+        (env_get("SIMPLE_RUNTIME_PATH") ?? "") != "none" and runtime_bundle != "" and runtime_bundle != "auto" and
+        env_get("SIMPLE_BOOTSTRAP") != "1" and
+        env_get("SIMPLE_BOOTSTRAP_SKIP_MONO") != "1"
 
 fn driver_native_noop_request_v1(ctx: CompileContext) -> NativeNoopRequestV1:
     val options = ctx.options
@@ -150,8 +185,24 @@ impl CompilerDriver:
         if not reverse_reference_owner_begin_v1():
             return CompileResult.RuntimeError(
                 "reverse-reference owner already active in this process")
+        var requested_mode = self.ctx.options.mode.to_text()
+        if self.ctx.options.cli_mode_text != "":
+            requested_mode = self.ctx.options.cli_mode_text
         val result = self.compile_with_reverse_reference_owner_v1()
+        val archive_finished = driver_hir_archive_production_finish_v1(self)
+        # Teardown of every identity-keyed entry this compilation created; ids are
+        # never reused, so long-lived processes would otherwise grow per driver.
+        mir_archive_declaration_publication_revoke_v1(self)
+        val archive_released = driver_hir_archive_production_release_v1(self)
+        if requested_mode == "aot" and not result.is_success():
+            val output = self.ctx.options.output_file ?? driver_noop_default_output_v1(self.ctx.options.input_files)
+            val cleared = collection_native_clear_v1(output)
+            if cleared != "":
+                reverse_reference_owner_end_v1()
+                return CompileResult.CodegenError("native compilation failed and collection receipt cleanup failed: {cleared}")
         reverse_reference_owner_end_v1()
+        if not (archive_finished and archive_released) and result.is_success():
+            return CompileResult.RuntimeError("bounded HIR production cleanup refused")
         result
 
     me compile_with_reverse_reference_owner_v1() -> CompileResult:
@@ -174,7 +225,15 @@ impl CompilerDriver:
             self.ctx.add_error(streaming_error)
             return CompileResult.CodegenError(streaming_error)
 
-        val native_noop_eligible = compile_mode_text == "aot" and
+        val native_output_intent = if compile_mode_text == "aot":
+            match native_output_intent_decode_v1(
+                    env_get("SIMPLE_NATIVE_BUILD_EMIT_OBJECT") ?? ""):
+                case Ok(value): value
+                case Err(reason): return CompileResult.CodegenError(reason)
+        else:
+            NativeOutputIntentV1.Executable
+        val native_noop_eligible = native_output_intent == NativeOutputIntentV1.Executable and
+            compile_mode_text == "aot" and
             self.ctx.options.output_format == driver_output_format_native() and
             self.ctx.runtime_std_full_inventory_selection == nil and
             (env_get("SIMPLE_PACKAGE_INDEX_FULL_INVENTORY") ?? "") != "1" and
@@ -182,12 +241,17 @@ impl CompilerDriver:
         # The request hashes compiler and environment authority. Check,
         # interpret, JIT, and other non-native modes never consume it.
         var native_noop_request = NativeNoopRequestV1("", "", "")
-        if native_noop_eligible:
+        val collection_receipt_requested = compile_mode_text == "aot" and self.ctx.options.collection_memory_budget_bytes >= 0
+        if native_noop_eligible or collection_receipt_requested:
             native_noop_request = driver_native_noop_request_v1(self.ctx)
+        if collection_receipt_requested:
+            self.ctx.config["collection-native-request-identity"] = native_noop_request.identity
         compiler_work_counters_reset_v1()
         if native_noop_eligible:
             val admission = native_noop_admit_v1(native_noop_request)
-            if native_noop_admission_hit_v1(admission):
+            val collection_admitted = not collection_receipt_requested or
+                collection_native_validate_v1(native_noop_request_output_v1(native_noop_request), native_noop_request.identity) == ""
+            if native_noop_admission_hit_v1(admission) and collection_admitted:
                 val work = compiler_work_counters_snapshot_v1()
                 if not compiler_work_counters_zero_v1(work):
                     return CompileResult.RuntimeError(
@@ -198,12 +262,30 @@ impl CompilerDriver:
                         not file_copy(native_noop_request_output_v1(native_noop_request), delivery_output):
                     return CompileResult.RuntimeError(
                         "native no-op admission could not stage the admitted output")
+                if collection_receipt_requested:
+                    val copied = collection_native_copy_v1(native_noop_request_output_v1(native_noop_request), delivery_output, native_noop_request.identity)
+                    if copied != "":
+                        return CompileResult.CodegenError("native collection receipt delivery failed: {copied}")
+                else:
+                    val cleared = collection_native_clear_v1(delivery_output)
+                    if cleared != "":
+                        return CompileResult.CodegenError("native collection receipt cleanup failed: {cleared}")
                 print "[MBH-NFR-002] admission=hit generation={native_noop_admission_generation_v1(admission)} inputs={native_noop_admission_input_count_v1(admission)} {compiler_work_counters_receipt_v1(work)}"
                 return CompileResult.Success(delivery_output)
 
+        # Preserve admitted same-path no-op receipts. Once a full compile is
+        # necessary, remove the previous proof before any compilation work.
+        # The outer owner also clears it on early configuration failures.
+        if compile_mode_text == "aot":
+            val output = self.ctx.options.output_file ?? driver_noop_default_output_v1(self.ctx.options.input_files)
+            val cleared = collection_native_clear_v1(output)
+            if cleared != "":
+                return CompileResult.CodegenError("native collection receipt cleanup failed: {cleared}")
         log_phase("compile:start")
         log_build_progress("load_sources", "files", -1, -1,
             "starting", 0, 6, 0, 0, "running")
+        if not driver_hir_archive_production_begin_v1(self):
+            return CompileResult.RuntimeError("bounded HIR production begin refused")
         log_phase("phase1:load_sources:start")
         val sources_streaming_in_place = streaming_route == 1
         val (loaded_ctx, load_ok) = self.load_sources_impl(nil)
@@ -219,9 +301,34 @@ impl CompilerDriver:
             log_build_progress("load_sources", "files", -1, -1,
                 "failed", 0, 6, 1, 0, "failed")
             return CompileResult.ParseError(self.ctx.errors)
+        # Retain the real managed owner selected by the production native path.
+        # Generated runtime objects ("none") have their separate existing
+        # compilation owner and are not represented as archived providers here.
+        self.hir_archive_managed_runtime_selection = nil
+        if compile_mode_text == "aot" and self.ctx.options.output_format == driver_output_format_native() and
+                native_tool_strict_requested_v1() and
+                (env_get("SIMPLE_RUNTIME_PATH") ?? "") != "none":
+            val runtime_bundle = env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
+            if runtime_bundle != "" and runtime_bundle != "auto":
+                val backend = get_effective_backend_name(self.ctx.options.backend, self.ctx.options.release)
+                val selected = driver_hir_capture_managed_runtime_selection_v1(
+                    backend, self.ctx.native_target, runtime_bundle)
+                if selected.is_err():
+                    self.ctx.add_error(selected.unwrap_err())
+                    return CompileResult.CodegenError(selected.unwrap_err())
+                self.hir_archive_managed_runtime_selection = Some(selected.unwrap())
         if compile_mode_text == "aot":
             log_phase("phase1:load_sources:fingerprint:start")
             self.ctx.native_sources_fingerprint = driver_native_sources_fingerprint(self.ctx.sources)
+            if driver_mir_selective_enabled_v1() and native_mir_shard_export_write_dir_v1() != "":
+                if not driver_mir_selective_explicit_native_eligible_v1(self):
+                    return CompileResult.CodegenError("selective MIR export requires an explicit non-bootstrap native entry")
+            # Selective workers consume the admitted post-mono bundle. Enter
+            # before parse/HIR/typecheck/mono, never after a cache-hit frontend.
+            if driver_mir_selective_enabled_v1() and native_mir_shard_spec_v1() != "":
+                return self.aot_compile_mir_shard_v1()
+            if driver_mir_selective_enabled_v1() and native_mir_shard_link_ledger_v1() != "":
+                return self.aot_link_mir_shards_v1()
         if sources_streaming_in_place:
             # Streaming phase 2 consumes source_contents_owner. The boxed
             # SourceFile payloads are independent copies needed only through
@@ -304,13 +411,31 @@ impl CompilerDriver:
         # methods. lower_and_check_streaming_surfaces_impl validates/rebuilds
         # the frozen owner before doing any work.
         val hir_streaming_in_place = driver_streaming_surface_enabled(self.ctx)
+        val archive_production = driver_hir_archive_production_requested_v1(self.ctx, compile_mode_text)
         var analyze_ok_effective = false
-        if hir_streaming_in_place:
+        if archive_production:
+            log_phase("phase3:hir_typecheck:carrier=owned-archives")
+            analyze_ok_effective = driver_hir_archive_production_phase3_v1(self)
+        elif hir_streaming_in_place:
             analyze_ok_effective = self.lower_and_check_streaming_surfaces_impl()
         else:
             analyze_ok_effective = self.lower_and_check_retained_owner_impl()
         # Both HIR routes commit through self.ctx; a false verdict stays false.
         log_trace("AFTER phase 3")
+        if not analyze_ok_effective and compile_mode_text == "aot" and go_to_end_enabled_v1():
+            # go-to-end (driver_build/go_to_end.spl): drop the failed modules
+            # and every module importing one, then go on with the rest.
+            val go_to_end_shown = if self.ctx.error_count() < 20: self.ctx.error_count() else: 20
+            var go_to_end_show_idx = 0
+            while go_to_end_show_idx < go_to_end_shown:
+                log_error("  {self.ctx.error_message_at(go_to_end_show_idx)}")
+                go_to_end_show_idx = go_to_end_show_idx + 1
+            if self.go_to_end_recover_hir_v1():
+                analyze_ok_effective = true
+            else:
+                log_error("phase 3 FAILED (go-to-end: failure not attributable to modules)")
+                self.go_to_end_absorb_errors_v1("hir")
+                return self.go_to_end_finish_v1(0, [])
         if not analyze_ok_effective:
             log_error("phase 3 FAILED")
             if env_get("SIMPLE_BOOTSTRAP_DEBUG") == "1":
@@ -397,16 +522,27 @@ impl CompilerDriver:
             self.ctx.evict_ast()
 
         if compile_mode_text == "check":
+            if self.ctx.config.contains_key("collection-plan-explain-mir"):
+                if not self.monomorphize_for_explicit_compilation(analyze_ok_effective):
+                    return CompileResult.TypeError(self.ctx.errors)
+                if not self.lower_to_mir_for_explicit_target(driver_mir_target_context(self.ctx.options)):
+                    return CompileResult.CodegenError(self.ctx.errors.join("\n"))
             log_debug("check mode")
-            return CompileResult.Success(nil)
+            return CompileResult.Success(None)
 
         log_phase("phase4:monomorphize:start")
         log_debug("phase 4: monomorphization...")
-        val mono_ok = self.monomorphize_impl(analyze_ok_effective)
+        val mono_ok = if archive_production:
+            driver_hir_archive_production_phase4_v1(self, false, true, true)
+        else:
+            self.monomorphize_impl(analyze_ok_effective)
         if not mono_ok:
             log_error("phase 4 FAILED")
             log_build_progress("monomorphize", "modules", -1, -1,
                 "failed", 3, 6, 1, 0, "failed")
+            if compile_mode_text == "aot" and go_to_end_enabled_v1():
+                self.go_to_end_absorb_errors_v1("mono")
+                return self.go_to_end_finish_v1(0, [])
             return CompileResult.TypeError(self.ctx.errors)
         log_debug("phase 4 done")
         log_phase("phase4:monomorphize:done")
@@ -417,7 +553,7 @@ impl CompilerDriver:
         log_debug("phase 5: mode-specific processing...")
         if compile_mode_text == "check":
             log_debug("check mode")
-            return CompileResult.Success(nil)
+            return CompileResult.Success(None)
         if compile_mode_text == "sdn":
             log_debug("sdn mode")
             return self.process_sdn()
@@ -438,13 +574,17 @@ impl CompilerDriver:
                 if publication != "ok":
                     return CompileResult.CodegenError(
                         "native no-op receipt publication failed: {publication}")
+                if collection_receipt_requested:
+                    val copied = collection_native_copy_v1(built_output, native_noop_request_output_v1(native_noop_request), native_noop_request.identity)
+                    if copied != "":
+                        return CompileResult.CodegenError("native collection receipt cache publication failed: {copied}")
             return aot_result
         if compile_mode_text == "smf_exec":
             log_debug("smf_exec mode")
             return self.execute_smf()
 
         log_warn("no mode matched, falling through")
-        CompileResult.Success(nil)
+        CompileResult.Success(None)
 
     me compile_vhdl_only() -> CompileResult:
         if self.ctx.options.backend != "vhdl" or self.ctx.options.mode != CompileMode.Aot:

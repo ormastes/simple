@@ -460,34 +460,12 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                         // falls back to rt_method_not_found on a vtable miss.
                         names.insert("rt_method_not_found".to_string());
                         let method_suffix = func_name.rsplit('.').next().unwrap_or(func_name.as_str());
-                        const MATH_METHODS: &[&str] = &[
-                            "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "exp", "ln", "log2",
-                            "log10", "cbrt", "pow", "powf", "max", "min", "atan2", "hypot",
-                        ];
-                        if MATH_METHODS.contains(&method_suffix) {
-                            for n in [
-                                "rt_math_sin",
-                                "rt_math_cos",
-                                "rt_math_tan",
-                                "rt_math_asin",
-                                "rt_math_acos",
-                                "rt_math_atan",
-                                "rt_math_sinh",
-                                "rt_math_cosh",
-                                "rt_math_tanh",
-                                "rt_math_exp",
-                                "rt_math_log",
-                                "rt_math_log2",
-                                "rt_math_log10",
-                                "rt_math_cbrt",
-                                "rt_math_pow",
-                                "rt_math_max",
-                                "rt_math_min",
-                                "rt_math_atan2",
-                                "rt_math_hypot",
-                            ] {
-                                names.insert(n.to_string());
-                            }
+                        // Same table the method lowering consults, so a method it
+                        // routes to `rt_math_*` is always predeclared here.
+                        if let Some(n) = super::scalar_float_methods::rt_math_unary(method_suffix)
+                            .or_else(|| super::scalar_float_methods::rt_math_binary(method_suffix))
+                        {
+                            names.insert(n.to_string());
                         }
                     }
                     MirInst::FStringFormat { .. } => {
@@ -707,6 +685,7 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_is_some"
             | "rt_is_present"
             | "rt_is_none"
+            | "rt_try_is_absent"
             | "rt_enum_check_variant"
             | "rt_value_as_u64"
             | "rt_string_eq"
@@ -2469,6 +2448,7 @@ impl<M: Module> CodegenBackend<M> {
                 &mir.global_init_functions,
                 &mir.global_init_structs,
                 &dynamic_init_func_ids,
+                &mir.extern_fn_names,
             )?;
         }
 
@@ -2490,6 +2470,7 @@ impl<M: Module> CodegenBackend<M> {
         init_functions: &std::collections::HashMap<String, String>,
         init_structs: &std::collections::HashMap<String, crate::hir::HirGlobalStructInit>,
         dynamic_init_func_ids: &[cranelift_module::FuncId],
+        extern_fn_names: &std::collections::HashSet<String>,
     ) -> BackendResult<()> {
         use cranelift_codegen::ir::{types, MemFlags, UserFuncName};
 
@@ -2918,38 +2899,65 @@ impl<M: Module> CodegenBackend<M> {
         sorted_functions.sort_by_key(|(name, _)| (*name).clone());
         for (global_name, func_name) in &sorted_functions {
             trace_module_init!(format!("function:{global_name}"));
-            let func_id = self
+            let sanitized_func = func_name.replace('.', "_dot_");
+            // A user function (local or imported) is stored the way a
+            // `GlobalLoad` builds its value: a zero-capture closure over
+            // `F$boxed` (closure_boxed_entry.rs). Only an extern entry point
+            // keeps the raw direct record, which runtime consumers taking an
+            // extern entry accept; `rt_closure_func_ptr` rejects it, so a user
+            // function stored that way called address 0.
+            let boxed_id = self
                 .func_ids
-                .get(func_name.as_str())
-                .copied()
-                .or_else(|| {
-                    let sanitized = if func_name.contains('.') {
-                        func_name.replace('.', "_dot_")
-                    } else {
-                        func_name.to_string()
-                    };
-                    self.func_ids.get(sanitized.as_str()).copied()
-                })
-                .ok_or_else(|| {
-                    BackendError::ModuleError(format!(
-                        "function global initializer '{}' references unknown function '{}'",
-                        global_name, func_name
-                    ))
-                })?;
-            let alloc_ref = self.module.declare_func_in_func(alloc_id.unwrap(), builder.func);
-            let closure_size = builder.ins().iconst(types::I64, 16);
-            let call_inst = builder.ins().call(alloc_ref, &[closure_size]);
-            let closure_ptr = builder.inst_results(call_inst)[0];
-            let func_ref = self.module.declare_func_in_func(func_id, builder.func);
-            let fn_addr = builder.ins().func_addr(types::I64, func_ref);
-            let direct_marker = builder.ins().iconst(types::I64, 0x5344_4952_4543_5446);
-            builder.ins().store(MemFlags::new(), fn_addr, closure_ptr, 0);
-            builder.ins().store(MemFlags::new(), direct_marker, closure_ptr, 8);
+                .get(&super::boxed_entry_name(func_name))
+                .or_else(|| self.func_ids.get(&super::boxed_entry_name(&sanitized_func)))
+                .copied();
+            let is_extern =
+                extern_fn_names.contains(func_name.as_str()) || extern_fn_names.contains(sanitized_func.as_str());
+            let value = if let Some(boxed_id) = boxed_id {
+                let new_id = *self
+                    .runtime_funcs
+                    .get("rt_closure_new")
+                    .ok_or_else(|| BackendError::ModuleError("rt_closure_new not declared".into()))?;
+                let new_ref = self.module.declare_func_in_func(new_id, builder.func);
+                let boxed_ref = self.module.declare_func_in_func(boxed_id, builder.func);
+                let addr = builder.ins().func_addr(types::I64, boxed_ref);
+                let count = builder.ins().iconst(types::I32, 0);
+                let call = builder.ins().call(new_ref, &[addr, count]);
+                builder.inst_results(call)[0]
+            } else if is_extern {
+                let func_id = self
+                    .func_ids
+                    .get(func_name.as_str())
+                    .or_else(|| self.func_ids.get(sanitized_func.as_str()))
+                    .copied()
+                    .ok_or_else(|| {
+                        BackendError::ModuleError(format!(
+                            "function global initializer '{}' references unknown function '{}'",
+                            global_name, func_name
+                        ))
+                    })?;
+                let alloc_ref = self.module.declare_func_in_func(alloc_id.unwrap(), builder.func);
+                let closure_size = builder.ins().iconst(types::I64, 16);
+                let call_inst = builder.ins().call(alloc_ref, &[closure_size]);
+                let closure_ptr = builder.inst_results(call_inst)[0];
+                let func_ref = self.module.declare_func_in_func(func_id, builder.func);
+                let fn_addr = builder.ins().func_addr(types::I64, func_ref);
+                let direct_marker = builder.ins().iconst(types::I64, 0x5344_4952_4543_5446);
+                builder.ins().store(MemFlags::new(), fn_addr, closure_ptr, 0);
+                builder.ins().store(MemFlags::new(), direct_marker, closure_ptr, 8);
+                closure_ptr
+            } else {
+                return Err(BackendError::ModuleError(format!(
+                    "function global initializer '{}' = '{}' has no boxed entry; refusing to store a \
+                     function value that indirect calls reject (would call address 0)",
+                    global_name, func_name
+                )));
+            };
 
             if let Some(&gid) = self.global_ids.get(global_name.as_str()) {
                 let global_ref = self.module.declare_data_in_func(gid, builder.func);
                 let global_addr = builder.ins().global_value(types::I64, global_ref);
-                builder.ins().store(MemFlags::new(), closure_ptr, global_addr, 0);
+                builder.ins().store(MemFlags::new(), value, global_addr, 0);
             } else {
                 let mangled = match &self.module_prefix {
                     Some(prefix) => format!("{}__{}", prefix, global_name),
@@ -2958,7 +2966,7 @@ impl<M: Module> CodegenBackend<M> {
                 if let Some(&gid) = self.global_ids.get(mangled.as_str()) {
                     let global_ref = self.module.declare_data_in_func(gid, builder.func);
                     let global_addr = builder.ins().global_value(types::I64, global_ref);
-                    builder.ins().store(MemFlags::new(), closure_ptr, global_addr, 0);
+                    builder.ins().store(MemFlags::new(), value, global_addr, 0);
                 }
             }
         }
@@ -3749,7 +3757,7 @@ mod tests {
             backend.ensure_runtime_functions_declared(
                 &HashSet::from(["rt_string_new".to_string()]), &HashSet::new(),
             ).expect("declare runtime string allocator");
-            backend.generate_module_init(&strings, &Default::default(), &Default::default(), &Default::default(), &[])
+            backend.generate_module_init(&strings, &Default::default(), &Default::default(), &Default::default(), &[], &Default::default())
                 .expect("compile initializer calling runtime");
             super::super::shared::create_body_stub(&mut backend.module, &mut backend.ctx, "outlined_body")
                 .expect("compile outlined body");
@@ -3773,7 +3781,7 @@ mod tests {
         backend.set_module_prefix("init_owner".to_string());
         backend.generate_module_init(
             &Default::default(), &Default::default(), &Default::default(),
-            &Default::default(), &[],
+            &Default::default(), &[], &Default::default(),
         ).expect("emit module initializer");
         let bytes = backend.module.finish().emit().expect("emit COFF");
         let object = object::File::parse(bytes.as_slice()).expect("read COFF");

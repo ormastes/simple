@@ -1,0 +1,80 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+
+# Regression: AsyncBufferedReader/Writer.close()/is_open() used
+# `self.inner as AsyncClose` (4 sites in src/lib/nogc_async_mut/io/buffer.spl).
+# The self-hosted MIR has no trait-to-trait cast: every `As` expression lowers
+# as `E-MIR-EXPR-As` (expr_dispatch.spl), so the std.io closure could not be
+# built natively (bug as_cast_trait_to_trait_unsupported_natively_2026-10-19).
+# The wrappers now carry the source's AsyncClose view in an explicit `closer`
+# field (`new_closing`); a plain source keeps the old else-branch semantics.
+
+use std.spec.step
+use std.io.types.{IoError}
+use std.async.future.{Future}
+use std.common.io.async_traits.{AsyncRead, AsyncClose}
+use std.nogc_async_mut.io.buffer.{AsyncBufferedReader, AsyncBufferedWriter}
+
+extern fn rt_file_read_text(path: text) -> text
+
+# An AsyncRead source with no AsyncClose view at all.
+class PlainReader with AsyncRead:
+    data: text
+
+    fn read(size: i64) -> Future<Result<[u8], IoError>>:
+        Future.from_value(Ok([]))
+    fn read_exact(size: i64) -> Future<Result<[u8], IoError>>:
+        self.read(size)
+    fn read_all() -> Future<Result<[u8], IoError>>:
+        self.read(0)
+    fn read_text() -> Future<Result<text, IoError>>:
+        Future.from_value(Ok(self.data))
+    fn read_line() -> Future<Result<text, IoError>>:
+        Future.from_value(Ok(self.data))
+
+class StubStream with AsyncRead, AsyncClose:
+    open: bool
+
+    fn read(size: i64) -> Future<Result<[u8], IoError>>:
+        Future.from_value(Ok([]))
+    fn read_exact(size: i64) -> Future<Result<[u8], IoError>>:
+        self.read(size)
+    fn read_all() -> Future<Result<[u8], IoError>>:
+        self.read(0)
+    fn read_text() -> Future<Result<text, IoError>>:
+        Future.from_value(Ok(""))
+    fn read_line() -> Future<Result<text, IoError>>:
+        Future.from_value(Ok(""))
+    me close() -> Future<Result<(), IoError>>:
+        self.open = false
+        Future.from_value(Ok(()))
+    fn is_open() -> bool:
+        self.open
+
+describe "AsyncBuffered wrappers forward close through an explicit closer":
+    # @manual scenario evidence
+
+    it "treats a source without an AsyncClose view as open and closes to Ok":
+        # @req REQ-SSPEC-UNIT
+        step("plain AsyncRead source: is_open true, close Ok")
+        val reader = AsyncBufferedReader.new(PlainReader(data: "abc"))
+        expect(reader.is_open()).to_equal(true)
+        val closed = reader.close()
+        expect(closed != nil).to_equal(true)
+        expect(reader.is_open()).to_equal(true)
+
+    it "forwards is_open to the closer view of the source":
+        # @req REQ-SSPEC-UNIT
+        step("new_closing forwards is_open")
+        val live = StubStream(open: true)
+        val shut = StubStream(open: false)
+        expect(AsyncBufferedReader.new_closing(live, live).is_open()).to_equal(true)
+        expect(AsyncBufferedReader.new_closing(shut, shut).is_open()).to_equal(false)
+
+    it "keeps buffer.spl free of trait-to-trait casts":
+        # @req REQ-SSPEC-UNIT
+        step("no `as AsyncClose` remains in buffer.spl")
+        val src = rt_file_read_text("src/lib/nogc_async_mut/io/buffer.spl") ?? ""
+        expect(src.len() > 0).to_equal(true)
+        expect(src.contains("as AsyncClose")).to_equal(false)
+        expect(src.contains("closer: AsyncClose?")).to_equal(true)

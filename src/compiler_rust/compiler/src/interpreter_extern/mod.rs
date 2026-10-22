@@ -425,7 +425,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_transient_array_scope_begin", memory::rt_transient_array_scope_begin);
     insert_simple!("rt_transient_array_scope_pause", memory::rt_transient_array_scope_pause);
     insert_simple!("rt_transient_array_scope_end", memory::rt_transient_array_scope_end);
+    insert_simple!("rt_transient_array_scope_state_v1", memory::rt_transient_array_scope_state_v1);
     insert_simple!("rt_transient_heap_promote", memory::rt_transient_heap_promote);
+    insert_simple!("rt_transient_heap_promote_share_begin", memory::rt_transient_heap_promote_share_begin);
+    insert_simple!("rt_transient_heap_promote_share_end", memory::rt_transient_heap_promote_share_end);
     insert_simple!("min", math::min);
     insert_simple!("__mock_policy_check", mock_policy::mock_policy_check);
     insert_simple!("__mock_policy_disable", mock_policy::mock_policy_disable);
@@ -773,6 +776,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_base64_encode", crypto::rt_base64_encode);
     insert_simple!("rt_base64url_decode", crypto::rt_base64url_decode);
     insert_simple!("rt_base64url_encode", crypto::rt_base64url_encode);
+    insert_simple!("rt_xxh3_128_text", crypto::rt_xxh3_128_text);
     insert_simple!("rt_black_box", file_io::rt_black_box);
     insert_simple!("__rt_btreemap_clear", collections::__rt_btreemap_clear);
     insert_simple!("__rt_btreemap_contains_key", collections::__rt_btreemap_contains_key);
@@ -805,7 +809,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("__rt_btreeset_to_array", collections::__rt_btreeset_to_array);
     insert_simple!("__rt_btreeset_union", collections::__rt_btreeset_union);
     insert_simple!("rt_byte_array_new", sffi_array::rt_byte_array_new_fn);
-    insert_simple!("rt_byte_array_new_len", sffi_array::rt_byte_array_new_fn);
+    insert_simple!("rt_byte_array_new_len", sffi_array::rt_byte_array_new_len_fn);
     insert_simple!("rt_byte_char", conversion::rt_byte_char_fn);
     insert_simple!("rt_char_from_code", conversion::rt_char_from_code_fn);
     insert_simple!("rt_tuple_get", conversion::rt_tuple_get_fn);
@@ -1494,6 +1498,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_win32_message_pump", win32_hosted::rt_win32_message_pump);
     insert_simple!("rt_file_append_text", file_io::rt_file_append_text);
     insert_simple!("rt_secure_temp_dir", file_io::rt_secure_temp_dir);
+    insert_simple!("rt_secure_temp_dir_set_parent", file_io::rt_secure_temp_dir_set_parent);
+    insert_simple!("rt_secure_temp_dir_set_prefix", file_io::rt_secure_temp_dir_set_prefix);
+    insert_simple!("rt_secure_temp_dir_make", file_io::rt_secure_temp_dir_make);
     insert_simple!("rt_file_atomic_write", file_io::rt_file_atomic_write);
     insert_simple!("rt_file_atomic_write_mode", file_io::rt_file_atomic_write_mode);
     insert_simple!("rt_file_mode", file_io::rt_file_mode);
@@ -1777,6 +1784,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_is_jit_runtime", system::rt_is_jit_runtime);
     insert_simple!("rt_is_error", sffi_value::rt_is_error_fn);
     insert_simple!("rt_heap_ref_wellformed", sffi_value::rt_heap_ref_wellformed_fn);
+    insert_simple!("rt_heap_ref_registered", sffi_value::rt_heap_ref_registered_fn);
     insert_simple!("rt_is_macro_trace_enabled", system::rt_is_macro_trace_enabled);
     #[cfg(not(doctest))]
     {
@@ -2051,6 +2059,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_ptr_write_bytes", memory::rt_ptr_write_bytes);
     insert_simple!("rt_ptr_write_bytes_raw", memory::rt_ptr_write_bytes_raw);
     insert_simple!("rt_array_data_ptr", memory::rt_array_data_ptr);
+    insert_simple!("rt_array_bytes_basis_len", memory::rt_array_bytes_basis_len);
+    insert_simple!("rt_array_bytes_basis_ptr", memory::rt_array_bytes_basis_ptr);
     insert_simple!("rt_call_ptr_0", memory::rt_call_ptr_0);
     insert_simple!("rt_call_ptr_1", memory::rt_call_ptr_1);
     insert_simple!("rt_call_ptr_2", memory::rt_call_ptr_2);
@@ -2968,6 +2978,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_sha512_byte", sha512::rt_sha512_byte);
     insert_simple!("rt_sha512_K", sha512::rt_sha512_k);
     insert_simple!("rt_sha512_H", sha512::rt_sha512_h);
+    insert_simple!("rt_sha512_digest", sha512::rt_sha512_digest);
+    insert_simple!("rt_sha384_digest", sha512::rt_sha384_digest);
     insert_simple!("rt_tls13_sha256", tls13::rt_tls13_sha256);
     insert_simple!("rt_tls13_hkdf_extract", tls13::rt_tls13_hkdf_extract);
     insert_simple!("rt_tls13_hkdf_extract_into", tls13::rt_tls13_hkdf_extract_into);
@@ -3749,7 +3761,10 @@ mod tests {
             "rt_transient_array_scope_begin",
             "rt_transient_array_scope_pause",
             "rt_transient_array_scope_end",
+            "rt_transient_array_scope_state_v1",
             "rt_transient_heap_promote",
+            "rt_transient_heap_promote_share_begin",
+            "rt_transient_heap_promote_share_end",
         ] {
             assert!(EXTERN_DISPATCH.contains_key(name));
         }

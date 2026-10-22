@@ -20,9 +20,9 @@ set -eu
 #           and exits 0. A failed step (e.g. sudo needs a password this
 #           script cannot supply) is reported and does not abort the rest —
 #           the final re-check honestly reports what is still missing.
-#   install-llvm23 — install and check only LLVM 23.1.1. Unlike the general
-#           minimum-version check, this must refuse a rolling 23.1.2 package:
-#           aya-llvm-sys binds exactly 23.1.1 through LLVM_SYS_231_PREFIX.
+#   install-llvm23 — install and check LLVM 23 (any 23.x.y; owner decision 2026-10-22,
+#           major is strict, minor/patch only warn). Installs the 23.1.1 reference:
+#           aya-llvm-sys binds LLVM 23 through LLVM_SYS_231_PREFIX.
 #   --dry-run — with `install`, print the exact plan (same "installing ..."
 #           lines) WITHOUT executing anything. Changes nothing. Exit code
 #           mirrors what `check` would report, since no state changed.
@@ -253,7 +253,7 @@ platform_tools() {
     fam="$(platform_family "$1")"
     case "$fam" in
         linux)
-            printf '%s' "clang clang++ ld.lld llvm-config llvm-ar mold rustc cargo git jj cmake ninja timeout perl sha256sum xxd vulkan renderdoc"
+            printf '%s' "clang clang++ ld.lld llvm-config llvm-ar llvm-objdump mold rustc cargo git jj cmake ninja timeout perl sha256sum xxd vulkan renderdoc"
             ;;
         freebsd)
             # MUST-FIX #9 (review 2026-09-25): renderdoc MUST be in this list
@@ -262,7 +262,7 @@ platform_tools() {
             # check_one("renderdoc", ...) is actually invoked. Excluding the
             # name here (the previous approach) made the UNSUPPORTED note
             # unreachable dead code: the row never appeared at all.
-            printf '%s' "clang clang++ ld.lld llvm-config llvm-ar mold rustc cargo git jj cmake ninja timeout perl sha256sum xxd vulkan renderdoc"
+            printf '%s' "clang clang++ ld.lld llvm-config llvm-ar llvm-objdump mold rustc cargo git jj cmake ninja timeout perl sha256sum xxd vulkan renderdoc"
             ;;
         macos)
             # mold dropped macOS support (its Mach-O backend split out as
@@ -295,7 +295,7 @@ platform_tools() {
 
 req_min_version() {
     case "$1" in
-        clang|clang++|ld.lld|ld64.lld|lld-link|llvm-config|llvm-ar) printf '%s' "23.1.0" ;;
+        clang|clang++|ld.lld|ld64.lld|lld-link|llvm-config|llvm-ar|llvm-objdump) printf '%s' "23.1.0" ;;
         mold) printf '%s' "" ;;
         rustc|cargo) printf '%s' "1.89.0" ;;
         git|jj) printf '%s' "" ;;
@@ -314,6 +314,7 @@ req_reason() {
         lld-link) printf '%s' "Windows linker (mold has no PE/COFF backend; config/llvm_toolchain.sdn: windows -> lld-link)" ;;
         llvm-config|llvm-ar) printf '%s' "LLVM toolchain introspection/archiving, minimum 23.1 (a floor, not an exact pin — 23.2.x, 24.x, etc. also satisfy it) (.claude/rules/commands.md)" ;;
         mold) printf '%s' "preferred Linux/FreeBSD linker (falls back to ld.lld when absent)" ;;
+        llvm-objdump) printf '%s' "disassembler for the Stage 2 tombstone-reference guard (scripts/check/check-linked-tombstone-refs.shs; fails closed on Linux x86_64/aarch64)" ;;
         rustc|cargo) printf '%s' "builds the Rust seed compiler (src/compiler_rust)" ;;
         git) printf '%s' "VCS, colocated with jj" ;;
         jj) printf '%s' "primary VCS (.claude/rules/vcs.md)" ;;
@@ -1387,7 +1388,7 @@ run_install() {
     # failed step left missing.
     for name in $missing_names; do
         case "$name" in
-            clang|clang++|ld.lld|ld64.lld|lld-link|llvm-config|llvm-ar)
+            clang|clang++|ld.lld|ld64.lld|lld-link|llvm-config|llvm-ar|llvm-objdump)
                 if [ "$llvm_done" = "0" ]; then
                     do_install_llvm23 "$dry_run" "$fam" || true
                     llvm_done=1
@@ -1456,7 +1457,7 @@ run_install_llvm23_only() {
         row="$(check_one "$tool" "$fam")"
         split_row "$row"
         case "$ROW_STATUS:$ROW_FOUND" in
-            PRESENT:23.1.1) : ;;
+            PRESENT:23.*) : ;;
             *) missing=1 ;;
         esac
     done
@@ -1470,15 +1471,15 @@ run_install_llvm23_only() {
         printf '%s\n' "$row"
         split_row "$row"
         case "$ROW_STATUS:$ROW_FOUND" in
-            PRESENT:23.1.1) : ;;
+            PRESENT:23.*) : ;;
             *) missing=1 ;;
         esac
     done
     if [ "$missing" -ne 0 ]; then
-        echo "FAIL — exact LLVM 23.1.1 prerequisite(s) remain unavailable"
+        echo "FAIL — LLVM 23 prerequisite(s) remain unavailable"
         return 1
     fi
-    echo "PASS — exact LLVM 23.1.1 prerequisite(s) checked"
+    echo "PASS — LLVM 23 prerequisite(s) checked"
 }
 
 # ---------------------------------------------------------------------------
@@ -1657,11 +1658,11 @@ EOF
 #!/bin/sh
 echo "git version 2.40.0"
 EOF
-    for t in clang clang++ ld.lld llvm-config llvm-ar mold rustc cargo jj cmake ninja timeout perl sha256sum xxd; do
+    for t in clang clang++ ld.lld llvm-config llvm-ar llvm-objdump mold rustc cargo jj cmake ninja timeout perl sha256sum xxd; do
         case "$t" in
             clang|clang++) ver="clang version 23.1.0" ;;
             ld.lld) ver="LLD 23.1.0" ;;
-            llvm-config|llvm-ar) ver="23.1.0" ;;
+            llvm-config|llvm-ar|llvm-objdump) ver="23.1.0" ;;
             rustc) ver="rustc 1.90.0" ;;
             cargo) ver="cargo 1.90.0" ;;
             jj) ver="jj 0.30.0" ;;

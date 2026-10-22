@@ -1,0 +1,68 @@
+"""Explicit invalid AST types must not become inference requests (#3032)."""
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.parser_types_expr.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+
+fn parser_error_hir_is_error(type_: HirType) -> bool:
+    match type_.kind:
+        case HirTypeKind.Error: true
+        case _: false
+
+describe "parser Error lowering diagnostic contract":
+    it "records an unrecovered diagnostic and retains the original error span":
+        var lowering = hirlowering_for_module("invalid_type", ModuleSurfacesByName.empty())
+        val span = Span(12, 17, 3, 4, "invalid_type.spl", 5)
+        val result = lowering.lower_type(Type(kind: TypeKind.Error, span: span))
+        expect(parser_error_hir_is_error(result)).to_equal(true)
+        expect(result.span.file).to_equal("invalid_type.spl")
+        expect(result.span.start).to_equal(12)
+        expect(result.span.end).to_equal(17)
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors[0].message).to_equal("invalid AST type: parser Error")
+        expect(lowering.errors[0].span.line).to_equal(3)
+        expect(lowering.diagnostic_messages.len()).to_equal(1)
+        expect(lowering.diagnostic_messages[0]).to_contain("invalid AST type: parser Error")
+        expect(lowering.diagnostic_recovered.len()).to_equal(1)
+        expect(lowering.diagnostic_recovered[0]).to_equal(false)
+
+    it "retains nested array and optional errors in the fatal diagnostic stream":
+        var lowering = hirlowering_for_module("nested_error", ModuleSurfacesByName.empty())
+        val error = Type(kind: TypeKind.Error, span: Span.empty())
+        val optional = Type(kind: TypeKind.Optional(error), span: Span.empty())
+        val array = Type(kind: TypeKind.Array(optional, nil), span: Span.empty())
+        val result = lowering.lower_type(array)
+        val retains_error = match result.kind:
+            case HirTypeKind.Array(element, _):
+                match element.kind:
+                    case HirTypeKind.Optional(payload): parser_error_hir_is_error(payload)
+                    case _: false
+            case _: false
+        expect(retains_error).to_equal(true)
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.diagnostic_recovered.len()).to_equal(1)
+        expect(lowering.diagnostic_recovered[0]).to_equal(false)
+
+    it "keeps legitimate inference distinct from an explicit Error":
+        var lowering = hirlowering_for_module("inferred_type", ModuleSurfacesByName.empty())
+        val result = lowering.lower_type(Type(kind: TypeKind.Infer, span: Span.empty()))
+        val is_infer = match result.kind:
+            case HirTypeKind.Infer(_, _): true
+            case _: false
+        expect(is_infer).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.diagnostic_messages.len()).to_equal(0)
+
+    it "does not diagnose valid named and Atomic nodes as parser Error":
+        var lowering = hirlowering_for_module("valid_type", ModuleSurfacesByName.empty())
+        val integer = Type(kind: TypeKind.Named("i64", []), span: Span.empty())
+        val named = lowering.lower_type(integer)
+        val atomic = lowering.lower_type(Type(kind: TypeKind.Atomic(integer), span: Span.empty()))
+        expect(parser_error_hir_is_error(named)).to_equal(false)
+        expect(parser_error_hir_is_error(atomic)).to_equal(false)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.diagnostic_recovered.len()).to_equal(0)
+        # Atomic's existing lowering is unchanged; this is only a guard against
+        # conflating its discriminant with Error, not Atomic semantic proof.

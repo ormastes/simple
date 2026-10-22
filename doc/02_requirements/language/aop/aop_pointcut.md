@@ -12,7 +12,7 @@ island contains pointcut predicates that match against the program structure.
 
 ## Syntax
 
-```simple
+```simple:skip
 pc{ selector(pattern) }
 pc{ selector1(...) & selector2(...) }  # AND
 pc{ selector1(...) | selector2(...) }  # OR

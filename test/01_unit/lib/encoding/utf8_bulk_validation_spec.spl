@@ -1,0 +1,142 @@
+use std.spec.{describe, it, expect, fail}
+use std.common.encoding.external_text.{Encoding, TextByteOrder, BomPolicy, ExternalFormat, CodecErrorKind, CodecError, AbstractText, external_text, external_text_decode, external_encode_internal, external_text_from_internal, utf8_format}
+use std.common.text_bytes.{text_to_utf8_bytes, utf8_bytes_valid, text_bytes_concat_checked}
+use std.common.string_core.{str_len}
+use std.nogc_sync_mut.io.external_text_io.{io_legacy_utf8}
+use std.io.types.{FileMode}
+use std.nogc_sync_mut.io.file.{File}
+use std.nogc_sync_mut.io.text_session.{utf8_text_session_codec}
+use std.io_runtime.{file_write, file_write_bytes, file_read, file_read_result, file_read_bytes, dir_create_all}
+
+# The whole-array UTF-8 accept path and the single-owner decode/encode entry
+# points must answer exactly like the per-byte strict codec: same accept set,
+# same error kind and byte offset, BOM and NUL handled as before.
+
+fn utf8_with(bom: BomPolicy) -> ExternalFormat:
+    ExternalFormat(encoding: Encoding.Utf8, byte_order: TextByteOrder.NotApplicable, bom: bom)
+
+fn utf16(order: TextByteOrder, bom: BomPolicy) -> ExternalFormat:
+    ExternalFormat(encoding: Encoding.Utf16, byte_order: order, bom: bom)
+
+fn via_owned(bytes: [u8], format: ExternalFormat) -> Result<text, CodecError>:
+    val external = external_text(bytes, format)?
+    external.to_internal_text()
+
+fn expect_rejected(bytes: [u8], format: ExternalFormat, kind: CodecErrorKind, offset: i64):
+    match external_text_decode(bytes, format):
+        case Ok(_): fail("invalid input decoded")
+        case Err(error):
+            expect(error.kind).to_equal(kind)
+            expect(error.byte_offset).to_equal(offset)
+    match via_owned(bytes, format):
+        case Ok(_): fail("invalid input decoded through ExternalText")
+        case Err(error):
+            expect(error.kind).to_equal(kind)
+            expect(error.byte_offset).to_equal(offset)
+
+describe "strict UTF-8 bulk validation":
+    it "accepts exactly the strict codec's set":
+        expect(utf8_bytes_valid([])).to_be(true)
+        expect(utf8_bytes_valid([65u8, 0u8, 66u8])).to_be(true)
+        expect(utf8_bytes_valid([0xC3u8, 0xA9u8, 0xE2u8, 0x82u8, 0xACu8, 0xF0u8, 0x9Fu8, 0x98u8, 0x80u8])).to_be(true)
+        expect(utf8_bytes_valid([0xF4u8, 0x8Fu8, 0xBFu8, 0xBFu8])).to_be(true)
+        expect(utf8_bytes_valid([0xC0u8, 0x80u8])).to_be(false)
+        expect(utf8_bytes_valid([0xEDu8, 0xA0u8, 0x80u8])).to_be(false)
+        expect(utf8_bytes_valid([0xF4u8, 0x90u8, 0x80u8, 0x80u8])).to_be(false)
+        expect(utf8_bytes_valid([0xE2u8, 0x82u8])).to_be(false)
+        expect(utf8_bytes_valid([0xFFu8])).to_be(false)
+
+    it "keeps every UTF-8 rejection's kind and byte offset":
+        val plain = utf8_format()
+        expect_rejected([65u8, 0xC3u8, 0x28u8], plain, CodecErrorKind.InvalidUtf8, 2)
+        expect_rejected([0xC0u8, 0x80u8], plain, CodecErrorKind.InvalidUtf8, 0)
+        expect_rejected([0xE0u8, 0x80u8, 0x80u8], plain, CodecErrorKind.InvalidUtf8, 1)
+        expect_rejected([0xEDu8, 0xA0u8, 0x80u8], plain, CodecErrorKind.InvalidUtf8, 1)
+        expect_rejected([0xF4u8, 0x90u8, 0x80u8, 0x80u8], plain, CodecErrorKind.InvalidUtf8, 1)
+        expect_rejected([65u8, 0xE2u8, 0x82u8], plain, CodecErrorKind.TruncatedInput, 3)
+        expect_rejected([0x80u8], plain, CodecErrorKind.InvalidUtf8, 0)
+        expect_rejected([0xF5u8, 0x80u8, 0x80u8, 0x80u8], plain, CodecErrorKind.InvalidUtf8, 0)
+        expect_rejected([65u8, 0xFDu8, 0x80u8], plain, CodecErrorKind.InvalidUtf8, 1)
+        expect_rejected([0xC1u8, 0xBFu8], plain, CodecErrorKind.InvalidUtf8, 0)
+        expect_rejected([0xF0u8, 0x80u8, 0x80u8, 0x80u8], plain, CodecErrorKind.InvalidUtf8, 1)
+        expect_rejected([0xF0u8, 0x8Fu8, 0xBFu8, 0xBFu8], plain, CodecErrorKind.InvalidUtf8, 1)
+
+    it "keeps UTF-16 surrogate rejections on the per-unit path":
+        expect_rejected([0x00u8, 0xDCu8], utf16(TextByteOrder.LittleEndian, BomPolicy.Preserve), CodecErrorKind.InvalidUtf16, 0)
+        expect_rejected([0xDCu8, 0x00u8], utf16(TextByteOrder.BigEndian, BomPolicy.Preserve), CodecErrorKind.InvalidUtf16, 0)
+        expect_rejected([0x3Du8, 0xD8u8, 0x41u8, 0x00u8], utf16(TextByteOrder.LittleEndian, BomPolicy.Preserve), CodecErrorKind.InvalidUtf16, 0)
+        expect_rejected([0x3Du8, 0xD8u8], utf16(TextByteOrder.LittleEndian, BomPolicy.Preserve), CodecErrorKind.TruncatedInput, 2)
+
+    it "keeps BOM policy and embedded NUL behaviour":
+        val with_bom = [0xEFu8, 0xBBu8, 0xBFu8, 65u8, 0u8, 66u8]
+        val preserved = external_text_decode(with_bom, utf8_format()).unwrap()
+        expect(text_to_utf8_bytes(preserved)).to_equal([0xEFu8, 0xBBu8, 0xBFu8, 65u8, 0u8, 66u8])
+        val stripped = external_text_decode(with_bom, utf8_with(BomPolicy.Require)).unwrap()
+        expect(text_to_utf8_bytes(stripped)).to_equal([65u8, 0u8, 66u8])
+        expect(str_len(stripped)).to_equal(3)
+        match external_text_decode(with_bom, utf8_with(BomPolicy.Forbid)):
+            case Ok(_): fail("forbidden BOM decoded")
+            case Err(error):
+                expect(error.kind).to_equal(CodecErrorKind.ForbiddenBom)
+                expect(error.byte_offset).to_equal(0)
+        match external_text_decode([65u8], utf8_with(BomPolicy.Require)):
+            case Ok(_): fail("missing BOM decoded")
+            case Err(error): expect(error.kind).to_equal(CodecErrorKind.MissingBom)
+
+    it "encodes the same bytes as the owned ExternalText path":
+        val value = "A\0é€😀"
+        val formats = [utf8_format(), utf8_with(BomPolicy.Require), utf16(TextByteOrder.LittleEndian, BomPolicy.Preserve), utf16(TextByteOrder.BigEndian, BomPolicy.Require)]
+        for format in formats:
+            val direct = external_encode_internal(value, format).unwrap()
+            val owned = external_text_from_internal(value, format).unwrap().encoded_bytes().unwrap()
+            expect(direct).to_equal(owned)
+        expect(external_encode_internal(value, utf8_format()).unwrap()).to_equal(text_to_utf8_bytes(value))
+        expect(external_encode_internal(value, utf16(TextByteOrder.BigEndian, BomPolicy.Require)).unwrap()[0]).to_equal(0xFEu8)
+
+    it "concatenates byte arrays without modifying either input":
+        val head = [1u8, 2u8]
+        val tail = [3u8, 255u8]
+        expect(text_bytes_concat_checked(head, tail).unwrap()).to_equal([1u8, 2u8, 3u8, 255u8])
+        expect(head).to_equal([1u8, 2u8])
+        expect(tail).to_equal([3u8, 255u8])
+        expect(text_bytes_concat_checked(head, []).unwrap()).to_equal([1u8, 2u8])
+
+    it "round-trips a multi-chunk file byte-identically and rejects invalid file bytes":
+        val dir = "build/utf8_bulk_validation"
+        expect(dir_create_all(dir)).to_be(true)
+        var content = "line é€😀 \0 end\n"
+        while str_len(content) < 70000:
+            content = content + content
+        val path = dir + "/roundtrip.txt"
+        expect(file_write(path, content)).to_be(true)
+        expect(file_read_bytes(path)).to_equal(text_to_utf8_bytes(content))
+        expect(file_read(path)).to_equal(content)
+        val invalid_path = dir + "/invalid.txt"
+        expect(file_write_bytes(invalid_path, [65u8, 0xC3u8, 0x28u8])).to_be(true)
+        expect(file_read_result(invalid_path).is_err()).to_be(true)
+
+    it "keeps the legacy UTF-8 bridge's text and error message":
+        expect(io_legacy_utf8([65u8, 0u8, 0xC3u8, 0xA9u8]).unwrap()).to_equal("A\0é")
+        match io_legacy_utf8([65u8, 0xC3u8, 0x28u8]):
+            case Ok(_): fail("invalid legacy bytes decoded")
+            case Err(message): expect(message).to_equal("external text at byte 2: invalid UTF-8 continuation")
+
+    it "reads a multi-chunk UTF-8 file through a text session read and read_at":
+        val dir = "build/utf8_bulk_validation"
+        expect(dir_create_all(dir)).to_be(true)
+        # 13-byte unit: 2 + 3 + 4 + 3 + 1 bytes, so unit multiples are scalar boundaries.
+        val unit = "é€😀abc\n"
+        var content = ""
+        for i in 0..3200:
+            content = content + unit
+        expect(str_len(content)).to_equal(41600)
+        val path = dir + "/session.txt"
+        expect(file_write(path, content)).to_be(true)
+        val codec = utf8_text_session_codec(1048576, 1048576).unwrap()
+        var session = File.open_text(path, FileMode.ReadOnly, codec).unwrap()
+        expect(session.read().unwrap()).to_equal(content)
+        var region = ""
+        for i in 0..2000:
+            region = region + unit
+        expect(session.read_at(1300, 26000).unwrap()).to_equal(region)
+        expect(session.close().is_ok()).to_be(true)

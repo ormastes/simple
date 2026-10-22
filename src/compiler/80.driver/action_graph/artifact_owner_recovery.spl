@@ -1,0 +1,150 @@
+# Parent-owned recovery. The input route and broker owner are retained parent
+# state, never worker-provided DTOs. Unknown cleanup leaves the route unchanged.
+use compiler.driver.action_graph.artifact_service_bridge.{DemandArtifactRouteV1}
+use compiler.driver.action_graph.build_action_v1.{BuildActionStateV1}
+use compiler.driver.action_graph.coordinator.{BuildActionRuntimeV1}
+use lib.compiler_artifact_service.service.{ArtifactLeaseV1, ArtifactQueueEntryV1, ArtifactRequestStateV1}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.common.build_manager.grouped_execution_contract.{GroupedActionLeaseV1}
+use std.common.build_manager.group_process_protocol.{group_process_identity_v1, group_process_launch_validate_v1}
+use std.nogc_sync_mut.io.group_process_owner.{GroupProcessOwnerV1, group_process_collect_reap_v1}
+
+# Consume the existing broker's durable collected-tree proof. No heartbeat,
+# timeout, PID probe, or caller-supplied "dead" flag authorizes this transition.
+# The successor identity names the next admitted broker instance. The caller
+# installs the returned route once; Err never publishes either staged owner.
+fn demand_artifact_recover_owner_v1(
+    route: DemandArtifactRouteV1, owner: GroupProcessOwnerV1,
+    binding: GroupedActionLeaseV1, successor_owner_id: text,
+    successor_generation: i64
+) -> Result<DemandArtifactRouteV1, text>:
+    if not route.valid:
+        return Err("recovery-route-invalid")
+    var coordinator = match route.execution.coordinator:
+        Some(value): value
+        _: return Err("recovery-route-invalid")
+    if not builder_digest_valid_v1(successor_owner_id) or
+            successor_owner_id == owner.identity_digest or
+            successor_generation <= route.lease_generation or
+            successor_generation > 1000000000:
+        return Err("recovery-successor-invalid")
+    if group_process_launch_validate_v1(owner.launch) != "" or owner.identity_digest == "" or
+            group_process_identity_v1(owner.launch) != owner.identity_digest:
+        return Err("recovery-process-identity-mismatch")
+    if binding.completed or binding.group_id == "" or
+            binding.worker_id != owner.launch.worker_id or
+            binding.generation != owner.launch.generation or
+            binding.snapshot_digest != owner.launch.snapshot_digest or
+            binding.cache_identity != owner.launch.cache_identity:
+        return Err("recovery-binding-mismatch")
+    var service_index: i64 = -1
+    for index in 0..route.service.entries.len():
+        if route.service.entries[index].request.action_id == binding.action_id:
+            service_index = index
+    if service_index < 0:
+        return Err("recovery-action-missing")
+    val entry = route.service.entries[service_index]
+    if entry.state != ArtifactRequestStateV1.leased or
+            entry.cas_artifact_digest != "":
+        return Err("recovery-action-not-leased")
+    val lease = match entry.lease:
+        Some(value): value
+        _: return Err("recovery-action-not-leased")
+    if lease.cancelled or lease.action_id != binding.action_id or
+            lease.lease_id != binding.lease_id or
+            lease.owner_id != owner.identity_digest or
+            lease.generation != binding.generation or
+            successor_generation <= lease.generation or
+            entry.request.snapshot_revision != binding.snapshot_digest or
+            entry.request.compatibility_id != binding.cache_identity:
+        return Err("recovery-lease-mismatch")
+    if coordinator.graph.snapshot_revision != binding.snapshot_digest:
+        return Err("recovery-coordinator-snapshot-mismatch")
+    if coordinator.cancelled:
+        return Err("recovery-coordinator-cancelled")
+    var runtime_index: i64 = -1
+    for index in 0..coordinator.runtime.len():
+        if coordinator.runtime[index].action_id == binding.action_id:
+            runtime_index = index
+    if runtime_index < 0:
+        return Err("recovery-coordinator-action-missing")
+    val current = coordinator.runtime[runtime_index]
+    val result_present = match current.result:
+        Some(_): true
+        _: false
+    if current.state != BuildActionStateV1.running or
+            current.owner_token != lease.lease_id or result_present:
+        return Err("recovery-coordinator-owner-mismatch")
+
+    # The provider verifies exact launch identity, terminal leader reap and an
+    # empty descendant tree, then durably binds that proof to this exact lease.
+    # A live/unknown owner or a differently bound retained receipt returns Err.
+    val receipt = group_process_collect_reap_v1(owner, binding)?
+    if receipt.group_id != binding.group_id or
+            receipt.action_id != binding.action_id or
+            receipt.worker_id != binding.worker_id or
+            receipt.generation != binding.generation or
+            receipt.lease_id != binding.lease_id or
+            receipt.snapshot_digest != binding.snapshot_digest or
+            receipt.cache_identity != binding.cache_identity or
+            not builder_digest_valid_v1(receipt.tree_receipt_digest):
+        return Err("recovery-reap-receipt-mismatch")
+
+    demand_artifact_requeue_retired_v1(route, lease, successor_owner_id, successor_generation)
+
+# Shared serialized parent transition. Call only after the existing process
+# owner collected and bound its reap proof (or the parent verified its durable
+# replay record). This is not an untrusted receipt/death-detection entrypoint.
+fn demand_artifact_requeue_retired_v1(
+    route: DemandArtifactRouteV1, retired: ArtifactLeaseV1,
+    successor_owner_id: text, successor_generation: i64
+) -> Result<DemandArtifactRouteV1, text>:
+    if not route.valid or retired.cancelled or successor_owner_id == "" or
+            successor_generation <= retired.generation or successor_generation > 1000000000:
+        return Err("recovery-successor-invalid")
+    var coordinator = match route.execution.coordinator:
+        Some(value): value
+        _: return Err("recovery-route-invalid")
+    if coordinator.cancelled: return Err("recovery-coordinator-cancelled")
+    var service_index: i64 = -1
+    for index in 0..route.service.entries.len():
+        if route.service.entries[index].request.action_id == retired.action_id:
+            service_index = index
+    if service_index < 0: return Err("recovery-action-missing")
+    val entry = route.service.entries[service_index]
+    val current_lease = match entry.lease:
+        Some(value): value
+        _: return Err("recovery-action-not-leased")
+    if entry.state != ArtifactRequestStateV1.leased or entry.cas_artifact_digest != "" or
+            current_lease.cancelled or current_lease.action_id != retired.action_id or
+            current_lease.lease_id != retired.lease_id or
+            current_lease.owner_id != retired.owner_id or current_lease.generation != retired.generation:
+        return Err("recovery-lease-mismatch")
+    var runtime_index: i64 = -1
+    for index in 0..coordinator.runtime.len():
+        if coordinator.runtime[index].action_id == retired.action_id: runtime_index = index
+    if runtime_index < 0: return Err("recovery-coordinator-action-missing")
+    val runtime = coordinator.runtime[runtime_index]
+    match runtime.result:
+        Some(_): return Err("recovery-coordinator-owner-mismatch")
+        _: ()
+    if runtime.state != BuildActionStateV1.running or runtime.owner_token != retired.lease_id or
+            coordinator.graph.snapshot_revision != entry.request.snapshot_revision:
+        return Err("recovery-coordinator-owner-mismatch")
+    var staged = route
+    var service = staged.service
+    # Retain the old lease as a generation tombstone until the next claim.
+    service.entries[service_index] = ArtifactQueueEntryV1(
+        entry.request, ArtifactRequestStateV1.queued, entry.lease, "", "")
+    coordinator.runtime[runtime_index] = BuildActionRuntimeV1(
+        retired.action_id, BuildActionStateV1.pending, "", 0, None)
+    var execution = staged.execution
+    execution.coordinator = Some(coordinator)
+    staged.execution = execution
+    staged.service = service
+    staged.owner_id = successor_owner_id
+    staged.lease_generation = successor_generation
+    Ok(staged)
+
+export demand_artifact_recover_owner_v1
+export demand_artifact_requeue_retired_v1

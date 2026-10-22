@@ -1,0 +1,141 @@
+"""
+## Purpose and audience
+Known-answer evidence for the pure-Simple AES-192 block cipher and AES-192-GCM
+in std.common.crypto.aes_gcm, for crypto maintainers and TLS stack owners
+(TLS cipher suites that negotiate 192-bit keys, key-wrap interop).
+
+Vectors (published, independent of this implementation):
+- FIPS-197 Appendix C.2 (AES-192 block, key 000102..17).
+- McGrew and Viega, "The Galois/Counter Mode of Operation", test cases 8
+  (192-bit key, no AAD, 64-byte plaintext) and 10 (with 20-byte AAD, 60-byte
+  plaintext); the values were cross-checked against pyca/cryptography 41.0.7
+  (OpenSSL) before being pinned here.
+"""
+
+use std.spec.step
+use std.spec.*
+use std.common.crypto.aes_gcm.{
+    aes192_key_expansion, aes192_encrypt_block, aes192_decrypt_block,
+    aes192_gcm_encrypt, aes192_gcm_decrypt, AesGcmResult
+}
+
+fn _hd(c: text) -> i64:
+    if c == "0": return 0
+    if c == "1": return 1
+    if c == "2": return 2
+    if c == "3": return 3
+    if c == "4": return 4
+    if c == "5": return 5
+    if c == "6": return 6
+    if c == "7": return 7
+    if c == "8": return 8
+    if c == "9": return 9
+    if c == "a": return 10
+    if c == "b": return 11
+    if c == "c": return 12
+    if c == "d": return 13
+    if c == "e": return 14
+    if c == "f": return 15
+    -1
+
+fn _hex(s: text) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < s.len():
+        out.push((_hd(s[i]) * 16 + _hd(s[i + 1])).to_u8())
+        i = i + 2
+    out
+
+fn _ints(arr: [u8], from: i64, n: i64) -> list:
+    var out: [i64] = []
+    var i = 0
+    while i < n:
+        out.push(arr[(from + i).to_u64()].to_i64())
+        i = i + 1
+    out
+
+fn _tc_key() -> text:
+    "feffe9928665731c6d6a8f9467308308feffe9928665731c"
+
+fn _tc_iv() -> text:
+    "cafebabefacedbaddecaf888"
+
+fn _tc_pt() -> text:
+    "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b391aafd255"
+
+fn _tc8_ct() -> text:
+    "3980ca0b3c00e841eb06fac4872a2757859e1ceaa6efd984628593b40ca1e19c7d773d00c144c525ac619d18c84a3f4718e2448b2fe324d9ccda2710acade256"
+
+fn _tc10_ct() -> text:
+    "3980ca0b3c00e841eb06fac4872a2757859e1ceaa6efd984628593b40ca1e19c7d773d00c144c525ac619d18c84a3f4718e2448b2fe324d9ccda2710"
+
+fn _tc10_aad() -> text:
+    "feedfacedeadbeeffeedfacedeadbeefabaddad2"
+
+fn _fips_key() -> text:
+    "000102030405060708090a0b0c0d0e0f1011121314151617"
+
+describe "AES-192 and AES-192-GCM known answers":
+    # @manual_section: aes192_kat
+
+    it "encrypts and decrypts the FIPS-197 C.2 block":
+        # @req REQ-CRYPTO-AES192-001
+        step("AES-192 block vs FIPS-197 Appendix C.2")
+        val rk = aes192_key_expansion(_hex(_fips_key()))
+        expect(rk.len().to_i64()).to_equal(208)
+        # @capture(kat): FIPS-197-C.2
+        val ct = aes192_encrypt_block(_hex("00112233445566778899aabbccddeeff"), rk)
+        expect(_ints(ct, 0, 16)).to_equal(_ints(_hex("dda97ca4864cdfe06eaf70a0ec0d7191"), 0, 16))
+        val pt = aes192_decrypt_block(ct, rk)
+        expect(_ints(pt, 0, 16)).to_equal(_ints(_hex("00112233445566778899aabbccddeeff"), 0, 16))
+
+    it "encrypts GCM test case 8 (192-bit key, no AAD)":
+        # @req REQ-CRYPTO-AES192-002
+        step("AES-192-GCM encrypt vs GCM spec test case 8")
+        # @capture(kat): GCM-TC8
+        val out = aes192_gcm_encrypt(_hex(_tc_key()), _hex(_tc_iv()), _hex(_tc_pt()), _hex(""))
+        expect(_ints(out, 0, 64)).to_equal(_ints(_hex(_tc8_ct()), 0, 64))
+        expect(_ints(out, 64, 16)).to_equal(_ints(_hex("9924a7c8587336bfb118024db8674a14"), 0, 16))
+
+    it "encrypts GCM test case 10 (192-bit key, with AAD, 60-byte plaintext)":
+        # @req REQ-CRYPTO-AES192-003
+        step("AES-192-GCM encrypt vs GCM spec test case 10")
+        val pt = _hex(_tc_pt()).slice(0, 60)
+        # @capture(kat): GCM-TC10
+        val out = aes192_gcm_encrypt(_hex(_tc_key()), _hex(_tc_iv()), pt, _hex(_tc10_aad()))
+        expect(_ints(out, 0, 60)).to_equal(_ints(_hex(_tc10_ct()), 0, 60))
+        expect(_ints(out, 60, 16)).to_equal(_ints(_hex("2519498e80f1478f37ba55bd6d27618c"), 0, 16))
+
+    it "decrypts GCM test cases 8 and 10 to the original plaintext":
+        # @req REQ-CRYPTO-AES192-004
+        step("AES-192-GCM decrypt round trip on published vectors")
+        # @capture(kat): GCM-TC8-decrypt
+        val r8 = aes192_gcm_decrypt(_hex(_tc_key()), _hex(_tc_iv()), _hex(_tc8_ct()), _hex(""), _hex("9924a7c8587336bfb118024db8674a14"))
+        match r8:
+            AesGcmResult.Ok(pt):
+                expect(_ints(pt, 0, 64)).to_equal(_ints(_hex(_tc_pt()), 0, 64))
+            AesGcmResult.Err(msg):
+                fail("TC8 decrypt rejected a valid tag")
+        val r10 = aes192_gcm_decrypt(_hex(_tc_key()), _hex(_tc_iv()), _hex(_tc10_ct()), _hex(_tc10_aad()), _hex("2519498e80f1478f37ba55bd6d27618c"))
+        match r10:
+            AesGcmResult.Ok(pt):
+                expect(_ints(pt, 0, 60)).to_equal(_ints(_hex(_tc_pt()), 0, 60))
+            AesGcmResult.Err(msg):
+                fail("TC10 decrypt rejected a valid tag")
+
+    it "rejects a tampered tag and tampered AAD":
+        # @req REQ-CRYPTO-AES192-005
+        step("AES-192-GCM rejects forged tag and AAD")
+        # @capture(kat): GCM-TC10-tamper
+        val bad_tag = aes192_gcm_decrypt(_hex(_tc_key()), _hex(_tc_iv()), _hex(_tc10_ct()), _hex(_tc10_aad()), _hex("2519498e80f1478f37ba55bd6d27618d"))
+        match bad_tag:
+            AesGcmResult.Ok(pt):
+                fail("accepted a bad tag")
+            AesGcmResult.Err(msg):
+                expect(msg).to_equal("authentication tag mismatch")
+        val bad_aad = aes192_gcm_decrypt(_hex(_tc_key()), _hex(_tc_iv()), _hex(_tc10_ct()), _hex("feedfacedeadbeeffeedfacedeadbeefabaddad3"), _hex("2519498e80f1478f37ba55bd6d27618c"))
+        match bad_aad:
+            AesGcmResult.Ok(pt):
+                fail("accepted tampered AAD")
+            AesGcmResult.Err(msg):
+                expect(msg).to_equal("authentication tag mismatch")

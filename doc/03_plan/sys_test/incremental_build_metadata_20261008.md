@@ -1,8 +1,10 @@
 # Incremental metadata acceptance and performance plan
 
+Status: SUPERSEDED as an execution plan on 2026-10-13. Continue in [Phase 3 and incremental build completion](../compiler/phase3_incremental_build_completion_2026-10-13.md). Retained below as historical requirements and design; this closure does not claim implementation or verification.
+
 <!-- codex-design -->
 
-Status: proposed executable SPipe scenarios; no scenario below is reported executed. Production interfaces must exist before generating real executable specs. Do not add placeholder passes or use source-text matching as proof of runtime behavior.
+Historical status: proposed executable SPipe scenarios; no scenario below is reported executed. Production interfaces must exist before generating real executable specs. Do not add placeholder passes or use source-text matching as proof of runtime behavior.
 
 Proposed executable entry: `test/03_system/app/compiler/feature/incremental_build_metadata_spec.spl`. Mirrored manual: `doc/06_spec/03_system/app/compiler/feature/incremental_build_metadata_spec.md`. The implementation owner supplies real fixture builders and bounded native/process evidence, then generates and reviews the manual. Existing source-only candidate tests remain separately labeled UNRUN.
 

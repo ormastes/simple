@@ -1,0 +1,55 @@
+#!/bin/sh
+# Exercise the Git ancestry sequence used after an exact selected-pin fetch.
+# The file:// remote is a local transport fixture, not a Simple adapter test.
+set -eu
+
+fixture_root=$(mktemp -d "${TMPDIR:-/tmp}/simple-submodule-ancestry.XXXXXX")
+trap 'rm -rf "$fixture_root"' EXIT HUP INT TERM
+
+git init --quiet --initial-branch=main "$fixture_root/work"
+git -C "$fixture_root/work" config user.name Fixture
+git -C "$fixture_root/work" config user.email fixture@example.invalid
+printf 'canary\n' > "$fixture_root/work/README.md"
+git -C "$fixture_root/work" add README.md
+git -C "$fixture_root/work" commit --quiet -m pin
+pin=$(git -C "$fixture_root/work" rev-parse HEAD)
+printf 'tip\n' >> "$fixture_root/work/README.md"
+git -C "$fixture_root/work" commit --quiet -am tip
+tip=$(git -C "$fixture_root/work" rev-parse HEAD)
+
+git -C "$fixture_root/work" checkout --quiet --orphan unrelated
+git -C "$fixture_root/work" rm --quiet -rf .
+printf 'unrelated\n' > "$fixture_root/work/README.md"
+git -C "$fixture_root/work" add README.md
+git -C "$fixture_root/work" commit --quiet -m unrelated
+unrelated=$(git -C "$fixture_root/work" rev-parse HEAD)
+git clone --quiet --bare "$fixture_root/work" "$fixture_root/remote.git"
+git --git-dir="$fixture_root/remote.git" config uploadpack.allowReachableSHA1InWant true
+remote="file://$fixture_root/remote.git"
+
+git init --quiet --bare "$fixture_root/ancestor.git"
+git --git-dir="$fixture_root/ancestor.git" -c protocol.file.allow=always \
+    fetch --quiet --no-tags --depth=1 "$remote" "$pin"
+actual_pin=$(git --git-dir="$fixture_root/ancestor.git" rev-parse 'FETCH_HEAD^{commit}')
+test "$actual_pin" = "$pin"
+test "$(git --git-dir="$fixture_root/ancestor.git" cat-file -t "$pin:README.md")" = blob
+git --git-dir="$fixture_root/ancestor.git" -c protocol.file.allow=always \
+    fetch --quiet --no-tags "$remote" refs/heads/main
+actual_tip=$(git --git-dir="$fixture_root/ancestor.git" rev-parse 'FETCH_HEAD^{commit}')
+test "$actual_tip" = "$tip"
+git --git-dir="$fixture_root/ancestor.git" merge-base --is-ancestor "$pin" "$actual_tip"
+
+git init --quiet --bare "$fixture_root/unrelated.git"
+git --git-dir="$fixture_root/unrelated.git" -c protocol.file.allow=always \
+    fetch --quiet --no-tags --depth=1 "$remote" "$unrelated"
+test "$(git --git-dir="$fixture_root/unrelated.git" rev-parse 'FETCH_HEAD^{commit}')" = "$unrelated"
+git --git-dir="$fixture_root/unrelated.git" -c protocol.file.allow=always \
+    fetch --quiet --no-tags "$remote" refs/heads/main
+actual_tip=$(git --git-dir="$fixture_root/unrelated.git" rev-parse 'FETCH_HEAD^{commit}')
+test "$actual_tip" = "$tip"
+if git --git-dir="$fixture_root/unrelated.git" merge-base --is-ancestor "$unrelated" "$actual_tip"; then
+    echo 'FAIL: unrelated exact pin passed ancestry' >&2
+    exit 1
+fi
+
+echo 'PASS: shallow exact ancestor accepted; unrelated exact pin rejected'

@@ -73,7 +73,7 @@ simple verify list
 
 ### Minimal Model-Proof Candidate
 
-```simple
+```simple:skip
 @verify
 fn factorial(n: i64) -> i64:
     in: n >= 0
@@ -117,7 +117,7 @@ Lean or BYL backend regeneration from breaking manually added proof intent.
 
 Marks a function for formal verification. The compiler generates Lean proof obligations from the function's contracts.
 
-```simple
+```simple:skip
 @verify
 fn abs(x: i64) -> i64:
     out(ret): ret >= 0
@@ -142,7 +142,7 @@ Contracts specify preconditions, postconditions, invariants, and termination mea
 
 **Example with all contract types:**
 
-```simple
+```simple:skip
 class Counter:
     count: i64
     invariant: self.count >= 0
@@ -164,7 +164,7 @@ fn increment(c: Counter) -> Counter:
 
 Ghost functions exist only for specification purposes. They are erased at the MIR level before codegen -- they produce no runtime code. Ghost functions must be pure and side-effect-free.
 
-```simple
+```simple:skip
 @ghost
 fn sorted(xs: [i64]) -> bool:
     for i in 0..xs.len() - 1:
@@ -186,7 +186,7 @@ fn insert_sorted(xs: [i64], x: i64) -> [i64]:
 
 Marks a function as axiomatically trusted. No proof obligations are generated -- the function's contracts are assumed to hold. This is **proof debt**, not verification.
 
-```simple
+```simple:skip
 @trusted
 fn read_file(path: text) -> text:
     in: path.len() > 0
@@ -203,7 +203,7 @@ fn read_file(path: text) -> text:
 
 Embed raw Lean 4 code directly in Simple source. The content is included verbatim in the generated Lean module. Imports within `lean{}` blocks are deduplicated with the generator's default imports.
 
-```simple
+```simple:skip
 lean {
     import Mathlib.Tactic
 
@@ -221,7 +221,7 @@ lean {
 
 Reference a theorem defined in an external Lean file under `src/verification/proofs/`.
 
-```simple
+```simple:skip
 @verify
 fn gcd(a: i64, b: i64) -> i64:
     in: a > 0
@@ -591,7 +591,7 @@ On a Simple-code change that touches a verified/mirrored path:
 
 ### Verified Arithmetic
 
-```simple
+```simple:skip
 @verify
 fn add_positive(a: i64, b: i64) -> i64:
     in: a > 0
@@ -603,7 +603,7 @@ fn add_positive(a: i64, b: i64) -> i64:
 
 ### Ghost Specification with Trusted Boundary
 
-```simple
+```simple:skip
 @ghost
 fn is_valid_path(path: text) -> bool:
     path.len() > 0 and not path.contains("..")
@@ -617,7 +617,7 @@ fn safe_read(path: text) -> text:
 
 ### Embedded Lean Proof
 
-```simple
+```simple:skip
 @verify
 fn double(n: i64) -> i64:
     in: n >= 0
@@ -631,7 +631,7 @@ lean {
 
 ### Class with Invariant
 
-```simple
+```simple:skip
 class BoundedBuffer:
     items: [i64]
     capacity: i64

@@ -1,0 +1,141 @@
+# Native behavioral regression: selected AOT parsing must release flat-AST
+# scratch while preserving rich bodies, coverage rows and target receipts.
+# Run with --coverage, --mcdc, or --full-inventory in separate processes.
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver.{CompilerDriver}
+use compiler.driver.driver_types.{CompileMode, RuntimeStdFullInventorySelectionV1}
+use compiler.core.ast.{expr_count, stmt_count, decl_count}
+use compiler.core.parser.{parser_error_count, parser_get_errors}
+use compiler.core.ast_coverage_inventory.{compiler_coverage_inventory_reset,
+    compiler_coverage_inventory_valid, compiler_coverage_inventory_sdn,
+    compiler_mcdc_obligation_manifest_sdn}
+use compiler.frontend.parser_types_expr.{StmtKind, ExprKind}
+use compiler.frontend.frontend_target_cfg_receipt_v1.{frontend_cfg_receipt_valid_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+extern fn sys_get_args() -> [text]
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_transient_array_scope_state_v1() -> i64
+
+fn probe_fail(reason: text) -> i32:
+    print "coverage_retained_parse_owner=FAIL reason={reason}"
+    1
+
+fn main() -> i32:
+    val args = sys_get_args()
+    if args.len() != 2:
+        return probe_fail("expected --coverage, --mcdc, or --full-inventory")
+    val mode = args[1]
+    if mode != "--coverage" and mode != "--mcdc" and mode != "--full-inventory":
+        return probe_fail("unknown mode")
+    if not rt_env_set("SIMPLE_FRONTEND_CACHE", "0"):
+        return probe_fail("cache isolation")
+    var options = driver_core_compile_options_default()
+    options.mode = CompileMode.Aot
+    var driver = CompilerDriver.create(options)
+    driver.ctx.native_target = "x86_64-unknown-linux-gnu"
+    if mode == "--coverage":
+        driver.ctx.config["coverage"] = "1"
+    else:
+        driver.ctx.config["mcdc_mode"] = "on"
+    if mode == "--full-inventory":
+        driver.ctx.runtime_std_full_inventory_selection = Some(
+            RuntimeStdFullInventorySelectionV1(artifact_root: "build/parse-owner",
+                snapshot_manifest_digest: sha256_text("snapshot"),
+                source_inventory_digest: sha256_text("inventory")))
+    compiler_coverage_inventory_reset(true)
+    val first_path = "build/parse-owner/first.spl"
+    val first_source = "pub fn retained() -> i64:\n    return 17\n" +
+        "pub fn decision(a: bool, b: bool) -> i64:\n    if a and b:\n        return 1\n    return 0\n" +
+        "pub fn mapped(values: [i64]) -> [i64]:\n    values.map(_ + 1)\n" +
+        "async fn ready() -> i64:\n    23\n"
+    if mode == "--full-inventory":
+        driver.ctx.runtime_std_cfg_source_identity_by_path[first_path] = "first"
+        driver.ctx.runtime_std_cfg_source_digest_by_path[first_path] = sha256_text(first_source)
+    val first = driver.parse_full_frontend_selected_v1(first_source, first_path, "first")
+    if first.is_err(): return probe_fail("first parse rejected")
+    # This fails against the old coverage/MC/DC/full-inventory bypass even
+    # when returned bodies and row counts happen to remain correct.
+    if expr_count() != 0 or stmt_count() != 0 or decl_count() != 0 or
+            rt_transient_array_scope_state_v1() != 0:
+        return probe_fail("first source scratch not reclaimed")
+    val first_rows = compiler_coverage_inventory_sdn()
+    val first_obligations = compiler_mcdc_obligation_manifest_sdn()
+    if not first_rows.contains(first_path) or not first_obligations.contains("condition|") or
+            not first_obligations.contains("context|"):
+        return probe_fail("first coverage evidence missing")
+    var index = 0
+    while index < 3:
+        val path = "build/parse-owner/later_{index}.spl"
+        val source = "pub fn later(a: bool, b: bool) -> i64:\n    if a or b:\n        return {index + 31}\n    return 0\n"
+        if mode == "--full-inventory":
+            driver.ctx.runtime_std_cfg_source_identity_by_path[path] = "later_{index}"
+            driver.ctx.runtime_std_cfg_source_digest_by_path[path] = sha256_text(source)
+        val later = driver.parse_full_frontend_selected_v1(source, path, "later_{index}")
+        if later.is_err() or expr_count() != 0 or stmt_count() != 0 or decl_count() != 0:
+            return probe_fail("later scope or parse failed")
+        if not compiler_coverage_inventory_valid() or
+                not compiler_coverage_inventory_sdn().contains(path):
+            return probe_fail("later coverage evidence lost")
+        index = index + 1
+    val module = first.unwrap()
+    if not module.functions.contains_key("retained") or
+            not module.functions.contains_key("mapped") or
+            not module.functions.contains_key("__async_ready_body_ready"):
+        return probe_fail("retained or desugared function lost")
+    val function = module.functions["retained"]
+    if function.body.stmts.len() != 1: return probe_fail("retained body lost")
+    match function.body.stmts[0].kind:
+        case StmtKind.Return(value):
+            if value == nil: return probe_fail("retained return lost")
+            match value.unwrap().kind:
+                case ExprKind.IntLit(actual):
+                    if actual != 17: return probe_fail("retained value changed")
+                case _: return probe_fail("retained expression changed")
+        case _: return probe_fail("retained statement changed")
+    # Same-source replay deduplicates decisions/conditions. The existing
+    # inventory appends formal context rows on every traversal; preserve that
+    # exact behavior as well as the cross-source fingerprint collision map.
+    val rows_before_replay = compiler_coverage_inventory_sdn()
+    val obligations_before_replay = compiler_mcdc_obligation_manifest_sdn()
+    for row in first_rows.split("\n"):
+        if row != "" and not rows_before_replay.contains(row):
+            return probe_fail("prior coverage row expired")
+    var expected_replayed_obligations = obligations_before_replay
+    for row in first_obligations.split("\n"):
+        if row != "" and not obligations_before_replay.contains(row):
+            return probe_fail("prior MC/DC obligation expired")
+        if row.starts_with("context|"):
+            expected_replayed_obligations = expected_replayed_obligations + row + "\n"
+    val replay = driver.parse_full_frontend_selected_v1(first_source, first_path, "first")
+    if replay.is_err() or not compiler_coverage_inventory_valid() or
+            compiler_coverage_inventory_sdn() != rows_before_replay or
+            compiler_mcdc_obligation_manifest_sdn() != expected_replayed_obligations:
+        return probe_fail("same-source evidence changed")
+    if mode == "--full-inventory":
+        if driver.ctx.runtime_std_cfg_decisions.len() != 4:
+            return probe_fail("target receipt count changed")
+        val receipt = driver.ctx.runtime_std_cfg_decisions["first"]
+        if not frontend_cfg_receipt_valid_v1(receipt, "first",
+                sha256_text(first_source), driver.ctx.native_target):
+            return probe_fail("target receipt expired")
+        val rejected = driver.parse_full_frontend_selected_v1(first_source,
+            "missing-authority.spl", "missing")
+        if rejected.is_ok() or not rejected.unwrap_err().contains("authority missing"):
+            return probe_fail("missing authority not rejected")
+    val broken_path = "build/parse-owner/broken.spl"
+    val broken_source = "pub fn broken(\n"
+    if mode == "--full-inventory":
+        driver.ctx.runtime_std_cfg_source_identity_by_path[broken_path] = "broken"
+        driver.ctx.runtime_std_cfg_source_digest_by_path[broken_path] = sha256_text(broken_source)
+    val _broken = driver.parse_full_frontend_selected_v1(broken_source, broken_path, "broken")
+    if parser_error_count() == 0 or parser_get_errors().len() == 0 or
+            parser_get_errors()[0] == "":
+        return probe_fail("parser error diagnostic expired")
+    val recovered = driver.parse_full_frontend_selected_v1(first_source, first_path, "first")
+    if recovered.is_err() or parser_error_count() != 0 or expr_count() != 0:
+        return probe_fail("valid source failed after malformed source")
+    if rt_transient_array_scope_state_v1() != 0:
+        return probe_fail("scope left active")
+    print "coverage_retained_parse_owner=PASS mode={mode} modules=4 replay=1"
+    0

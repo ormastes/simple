@@ -91,7 +91,7 @@ val url = api_url.with {"version": "v2", "user_id": "12345"}
         A format with one placeholder is filled with the corresponding
         dictionary value.
 
-        ```simple
+        ```text
         val fmt = r"Hello {name}!"
         val result = fmt.with {"name": "World"}
         # Result: "Hello World!"
@@ -113,7 +113,7 @@ val url = api_url.with {"version": "v2", "user_id": "12345"}
         Formats can contain multiple distinct placeholders, each
         replaced by its corresponding dictionary value.
 
-        ```simple
+        ```text
         val fmt = r"Welcome {user} to {city}!"
         val result = fmt.with {"user": "Alice", "city": "Tokyo"}
         # Result: "Welcome Alice to Tokyo!"
@@ -135,7 +135,7 @@ val url = api_url.with {"version": "v2", "user_id": "12345"}
         The same placeholder can appear multiple times in a format.
         All occurrences are replaced with the same value.
 
-        ```simple
+        ```text
         val fmt = r"{name} says: Hello {name}!"
         val result = fmt.with {"name": "Echo"}
         # Result: "Echo says: Hello Echo!"
@@ -162,7 +162,7 @@ val url = api_url.with {"version": "v2", "user_id": "12345"}
 
         A format with no placeholders returns the original string.
 
-        ```simple
+        ```text
         val fmt = r"No placeholders here"
         val result = fmt.with {}
         # Result: "No placeholders here"
@@ -184,7 +184,7 @@ val url = api_url.with {"version": "v2", "user_id": "12345"}
         Calling `.with {}` on a format with placeholders
         leaves the placeholders unchanged.
 
-        ```simple
+        ```text
         val fmt = r"Hello {name}!"
         val result = fmt.with {}
         # Result: "Hello {name}!"
@@ -206,7 +206,7 @@ val url = api_url.with {"version": "v2", "user_id": "12345"}
 
         Dictionary values are converted to strings automatically.
 
-        ```simple
+        ```text
         val fmt = r"Count: {n}, Active: {flag}"
         val result = fmt.with {"n": 42, "flag": true}
         # Result: "Count: 42, Active: true"
@@ -235,7 +235,7 @@ val url = api_url.with {"version": "v2", "user_id": "12345"}
         When all dictionary keys match placeholders, the code compiles
         and runs successfully.
 
-        ```simple
+        ```text
         val fmt = r"Hello {name}!"
         val result = fmt.with {"name": "Alice"}  # Compiles OK
         ```
@@ -256,7 +256,7 @@ val url = api_url.with {"version": "v2", "user_id": "12345"}
         Formats stored in variables are tracked for compile-time
         validation.
 
-        ```simple
+        ```text
         val fmt = r"Welcome {user} to {city}"
         val msg = fmt.with {"user": "Bob", "city": "Paris"}
         ```
@@ -282,7 +282,7 @@ val url = api_url.with {"version": "v2", "user_id": "12345"}
 
         Format strings are ideal for generating emails with variable content.
 
-        ```simple
+        ```text
         val email_fmt = r"Dear {name}, Welcome to {company}!"
         ```
 
@@ -301,7 +301,7 @@ val url = api_url.with {"version": "v2", "user_id": "12345"}
 
         Build URLs with variable path segments and query parameters.
 
-        ```simple
+        ```text
         val api = r"/api/{version}/users/{id}"
         val url = api.with {"version": "v2", "id": "42"}
         ```
@@ -321,7 +321,7 @@ val url = api_url.with {"version": "v2", "user_id": "12345"}
 
         Build parameterized queries (note: use proper escaping in production).
 
-        ```simple
+        ```text
         val query = r"SELECT * FROM {table} WHERE id = {id}"
         val sql = query.with {"table": "users", "id": "42"}
         ```

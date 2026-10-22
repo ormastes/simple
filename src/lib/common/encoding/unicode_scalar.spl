@@ -1,0 +1,81 @@
+# Checked Unicode scalar conversion. Existing UTF-8 helpers still return text.
+pub fn unicode_scalar_to_char(codepoint: i64) -> Result<char, text>:
+    """Construct a native character only from a valid Unicode scalar.
+
+    Doctests (execution not yet qualified):
+        >>> unicode_scalar_to_char(65).is_ok()
+        true
+        >>> unicode_scalar_to_char(55296).is_err()
+        true
+        >>> unicode_scalar_to_char(4294967361).is_err()
+        true
+    """
+    if codepoint < 0 or codepoint > 1114111:
+        return Err("Unicode scalar is outside 0..1114111")
+    if codepoint >= 55296 and codepoint <= 57343:
+        return Err("Unicode scalar is a surrogate")
+    val character: char = codepoint as char
+    Ok(character)
+
+export unicode_scalar_to_char
+
+pub fn unicode_scalar_valid(value: i64) -> bool:
+    """True for U+0000..U+10FFFF except UTF-16 surrogate code points."""
+    value >= 0 and value <= 0x10FFFF and not (value >= 0xD800 and value <= 0xDFFF)
+
+export unicode_scalar_valid
+
+pub fn unicode_scalar_from_utf8(bytes: [i64]) -> i64?:
+    """Decode exactly one scalar; reject malformed, extra, or missing bytes."""
+    val count = bytes.len()
+    if count < 1 or count > 4:
+        return nil
+    for byte in bytes:
+        if byte < 0 or byte > 255:
+            return nil
+    val lead = bytes[0]
+    if count == 1:
+        if lead < 0x80:
+            return Some(lead)
+        return nil
+    var value: i64 = 0
+    var minimum: i64 = 0
+    if count == 2:
+        if lead < 0xC2 or lead > 0xDF:
+            return nil
+        value = lead & 0x1F
+        minimum = 0x80
+    elif count == 3:
+        if lead < 0xE0 or lead > 0xEF:
+            return nil
+        value = lead & 0x0F
+        minimum = 0x800
+    else:
+        if lead < 0xF0 or lead > 0xF4:
+            return nil
+        value = lead & 0x07
+        minimum = 0x10000
+    var index: i64 = 1
+    while index < count:
+        val byte = bytes[index]
+        if byte < 0x80 or byte > 0xBF:
+            return nil
+        value = (value << 6) | (byte & 0x3F)
+        index = index + 1
+    if value < minimum or not unicode_scalar_valid(value):
+        return nil
+    Some(value)
+
+pub fn unicode_scalar_to_utf8(value: i64) -> [i64]?:
+    """Encode a valid scalar; invalid integers return nil, never replacement."""
+    if not unicode_scalar_valid(value):
+        return nil
+    if value < 0x80:
+        return Some([value])
+    if value < 0x800:
+        return Some([0xC0 | (value >> 6), 0x80 | (value & 0x3F)])
+    if value < 0x10000:
+        return Some([0xE0 | (value >> 12), 0x80 | ((value >> 6) & 0x3F), 0x80 | (value & 0x3F)])
+    Some([0xF0 | (value >> 18), 0x80 | ((value >> 12) & 0x3F), 0x80 | ((value >> 6) & 0x3F), 0x80 | (value & 0x3F)])
+
+export unicode_scalar_from_utf8, unicode_scalar_to_utf8

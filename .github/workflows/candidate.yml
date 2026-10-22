@@ -57,7 +57,7 @@ jobs:
           if test "$EVENT_NAME" = workflow_dispatch; then
             candidate_ref="$REQUESTED_REF"
           fi
-          [[ "$candidate_ref" =~ ^candidate/v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?/a[0-9]{3}$ ]]
+          [[ "$candidate_ref" =~ ^candidate/v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?/a[0-9]{3,}$ ]]
           echo "candidate_ref=$candidate_ref" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -85,7 +85,7 @@ jobs:
           test -n "$version"
           test "${{ steps.identity.outputs.candidate_ref }}" != "candidate/v${version}/a000"
           case "${{ steps.identity.outputs.candidate_ref }}" in
-            candidate/v"$version"/a[0-9][0-9][0-9]) ;;
+            candidate/v"$version"/a[0-9][0-9][0-9]*) ;;
             *) echo "candidate ref/version mismatch" >&2; exit 1 ;;
           esac
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
@@ -125,14 +125,89 @@ jobs:
             done
           fi
 
+      - name: Install pinned Rust toolchain
+        # The seed fingerprint fail-closes when the channel pinned by
+        # src/compiler_rust/rust-toolchain.toml (nightly-2026-09-15, embedded
+        # LLVM 23.1.1) is absent from rustup (candidates a019/a020). dtolnay's
+        # action defaults to floating "nightly", so pin explicitly.
+        run: |
+          set -euo pipefail
+          rustup toolchain install nightly-2026-09-15 --component rustfmt --component clippy
+          rustup default nightly-2026-09-15
+          rustc --version
+
+      - name: Install pinned LLVM 23.1.1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The line's platform-detect admits exactly LLVM 23.1.1 (23.1.2 only
+          # from native package providers); ubuntu-latest images do not ship it.
+          # Mirror aot-lane-fences: reviewed upstream release bytes + sha256.
+          sudo apt-get update
+          sudo apt-get install -y libfreetype6-dev libunwind-dev
+          llvm_archive="$RUNNER_TEMP/LLVM-23.1.1-Linux-X64.tar.xz"
+          llvm_prefix="$RUNNER_TEMP/llvm-23.1.1"
+          gh release download llvmorg-23.1.1 --repo llvm/llvm-project \
+            --pattern 'LLVM-23.1.1-Linux-X64.tar.xz' --dir "$RUNNER_TEMP"
+          printf '%s  %s\n' \
+            '832aeb58d105de1cabc7b982dd2c65de0610f7377df48ae8fc2dd8e97420a15c' \
+            "$llvm_archive" | sha256sum --check
+          mkdir -p "$llvm_prefix"
+          tar -xJf "$llvm_archive" -C "$llvm_prefix" --strip-components=1
+          rm "$llvm_archive"
+          test "$("$llvm_prefix/bin/llvm-config" --version)" = '23.1.1'
+          # The llvmorg release llvm-config carries the BUILD machine's
+          # compiled-in prefix (/home/runner/work/llvm-project/...), so
+          # --libfiles/--ldflags emit paths that do not exist here and the
+          # seed-inputs fingerprint fails fail-closed ("failed to fingerprint
+          # Rust seed inputs", candidate a014). Bind the compiled prefix to
+          # the extracted tree so every llvm-config path resolves.
+          compiled_prefix=$("$llvm_prefix/bin/llvm-config" --prefix)
+          if [ "$compiled_prefix" != "$llvm_prefix" ]; then
+            sudo mkdir -p "$(dirname "$compiled_prefix")"
+            sudo ln -sfn "$llvm_prefix" "$compiled_prefix"
+          fi
+          missing=""
+          for lib in $("$llvm_prefix/bin/llvm-config" --link-static --libfiles); do
+            [ -f "$lib" ] || missing="$missing $lib"
+          done
+          [ -z "$missing" ] || { echo "llvm-config --libfiles missing archives:$missing" >&2; exit 1; }
+          echo "$llvm_prefix/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_231_PREFIX=$llvm_prefix" >> "$GITHUB_ENV"
+
       - name: Build receipt-free admitted Stage 2 trust root
         env:
           SIMPLE_NO_STUB_FALLBACK: '1'
+          BOOTSTRAP_STAGE3_FINGERPRINT_TRACE: '1'
+          # Preserve the reviewed interim delegated CI policy explicitly.
+          BOOTSTRAP_STAGE2_TEST_DELEGATE: '1'
+          # Delegated stage-2 spec rows run MC/DC off under the frozen seed
+          # interpreter (owner-approved interim 2026-09-26, see
+          # scripts/bootstrap/bootstrap-phase-verification.shs). The
+          # verification gate requires these four waiver atoms from the
+          # caller; without them every candidate fails the matrix ~5s in
+          # (issue #3435).
+          SIMPLE_MCDC_OFF_WAIVER_REASON: 'interim-delegated-seed-2026-09-26 stage2 spec rows delegate run to the frozen authority seed which cannot execute MC/DC probes'
+          SIMPLE_MCDC_OFF_WAIVER_REVIEWER: 'ormastes'
+          SIMPLE_MCDC_OFF_WAIVER_REVIEW_ID: 'owner-interim-2026-09-26-delegated-seed'
+          SIMPLE_MCDC_OFF_WAIVER_VERSION: '1'
         run: |
           set -euo pipefail
           SIMPLE_COMPILE_FAIL_FAST=${SIMPLE_COMPILE_FAIL_FAST:-1} sh scripts/bootstrap/bootstrap-from-scratch.sh \
             --backend=llvm --mode=dynload --full-bootstrap \
-            --stop-after-stage2 --no-mcp --jobs=2
+            --stop-after-stage2 --no-mcp --jobs=2 || {
+            status=$?
+            echo '--- rust-authority fingerprint error log ---'
+            find . -name 'rust-authority-fingerprint-error.log' -exec cat {} \; 2>/dev/null
+            echo '--- rust-authority fingerprint observation ---'
+            find . -name 'rust-authority-fingerprint-current.details.env' -not -path './src/compiler_rust/vendor/*' -exec cat {} \; 2>/dev/null
+            echo '--- rust-authority fingerprint tmp trace ---'
+            find . -name 'rust-authority-fingerprint-error.log.raw.*' -exec cat {} \; 2>/dev/null
+            echo '--- stage2 compiler tests (tails) ---'
+            find .simple/storage/build/bootstrap -name 'stage2-compiler-tests*.log' -o -name summary.env -o -name rejection.env 2>/dev/null | head -20 | while read -r f; do echo "=== $f"; tail -n 200 "$f"; done || true
+            exit $status
+          }
 
       - name: Resume admitted Stage 3 with planner receipt
         run: |
@@ -304,8 +379,12 @@ jobs:
             test "$(jq -r '.head_branch' <<<"$run_json")" = main
             test "$(jq -r '.actor.id' <<<"$run_json")" = 2378857
             test "$(jq -r '.triggering_actor.id' <<<"$run_json")" = 2378857
+            # Main may advance after the convergence run was dispatched; the
+            # run is bound to its dispatch-time head, so require ancestry
+            # instead of exact tip equality (exact equality fails silently
+            # the moment any other PR merges to main).
             live_main=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)
-            test "$run_head" = "$live_main"
+            gh api "repos/${GITHUB_REPOSITORY}/compare/${run_head}...${live_main}" --jq '.status' | grep -Eq '^(behind|identical)$'
             workflow_blob_sha=$(gh api "repos/${GITHUB_REPOSITORY}/contents/.github/workflows/pr-admission.yml?ref=${run_head}" --jq .sha)
             test "$workflow_blob_sha" = "$(jq -er '.workflow.workflow_blob_sha' build/convergence-receipt/review-evidence.json)"
           else
@@ -314,26 +393,28 @@ jobs:
           fi
 
           release_line=$(printf '%s\n' "$VERSION" | awk -F. '{print $1 "." $2}')
-          case "$VERSION" in
-            1.0.0-rc*) release_ref="release_phase3" ;;
-            *) release_ref="release/$release_line" ;;
-          esac
+          # BUG-RELEASE-PHASE3-ROUTE-CONTRACT-20261011: build/fix work
+          # branches do not override protected version-derived release routing.
+          release_ref="release/$release_line"
           git fetch --no-tags --unshallow origin \
             "+refs/heads/main:refs/remotes/origin/main" \
             "+refs/heads/$release_ref:refs/remotes/origin/$release_ref"
           main_sha=$(git rev-parse refs/remotes/origin/main)
           release_sha=$(git rev-parse "refs/remotes/origin/$release_ref")
           test "$COMMIT" = "$release_sha"
-          if git merge-base --is-ancestor "$release_sha" "$main_sha"; then
-            echo "release head must remain independent from main" >&2
-            exit 1
-          fi
-          # release_phase3 is the designated main-sync release line: it
-          # intentionally absorbs main (owner sync policy), so the
-          # absorption check is scoped to ordinary release/X.Y lines.
-          if [ "$release_ref" != "release_phase3" ] && git merge-base --is-ancestor "$main_sha" "$release_sha"; then
-            echo "release head must not absorb the main development line" >&2
-            exit 1
+          # release_phase3 is the designated main-sync release line under the
+          # owner repoint policy (main fast-forwards onto the release line):
+          # both independence directions are scoped to ordinary release/X.Y
+          # lines and do not apply to it.
+          if [ "$release_ref" != "release_phase3" ]; then
+            if git merge-base --is-ancestor "$release_sha" "$main_sha"; then
+              echo "release head must remain independent from main" >&2
+              exit 1
+            fi
+            if git merge-base --is-ancestor "$main_sha" "$release_sha"; then
+              echo "release head must not absorb the main development line" >&2
+              exit 1
+            fi
           fi
 
           integration_pr_number=$(jq -r '.provider.integration_pr_number' "$receipt")
@@ -707,7 +788,7 @@ jobs:
           live_main=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)
           live_release=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${release_ref}" --jq .object.sha)
           live_candidate=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${CANDIDATE_REF}" --jq .object.sha)
-          test "$live_main" = "$main_sha"
+          gh api "repos/${GITHUB_REPOSITORY}/compare/${main_sha}...${live_main}" --jq '.status' | grep -Eq '^(behind|identical)$'
           test "$live_release" = "$release_sha"
           test "$live_candidate" = "$COMMIT"
           scripts/release/github-policy.shs verify-live "$GITHUB_REPOSITORY"
@@ -717,7 +798,7 @@ jobs:
             jq -e '((.expires_at|fromdateiso8601)-(.issued_at|fromdateiso8601)) <= 28800 and
               (.expires_at|fromdateiso8601) > now' "$proof" >/dev/null
             run_head=$(jq -er '.workflow.run_head_sha' build/convergence-receipt/review-evidence.json)
-            test "$run_head" = "$live_main"
+            gh api "repos/${GITHUB_REPOSITORY}/compare/${run_head}...${live_main}" --jq '.status' | grep -Eq '^(behind|identical)$'
           else
             test "$authority_class" = external_broker
           fi

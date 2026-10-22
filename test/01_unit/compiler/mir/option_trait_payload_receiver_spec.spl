@@ -1,0 +1,97 @@
+# The PAYLOAD of an `Option<Trait>` (`if val Some(s) = r`, `if val s = r`,
+# `case Some(s)`) is a trait receiver. `trait_receiver_identity` -- the
+# devirtualization fallback taken when the receiver has no native trait
+# expression type (cross-module closures) -- must see through `Optional`
+# to the payload trait. The Option value itself never becomes a trait
+# receiver: `r.is_some()` stays an Option operation.
+# doc/08_tracking/bug/trait_receiver_cross_unit_bare_call_stubbed_2026-10-20.md
+#
+# @cover src/compiler/50.mir/_MirLowering/provider_metadata.spl
+use std.spec.*
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.provider_metadata.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.common.diagnostics.span.{Span}
+
+val PRELUDE = "trait Ident:\n    fn identity() -> text\n\nclass Alpha with Ident:\n    tag: text\n    fn identity() -> text: self.tag\n\n"
+
+fn option_probe_row(body: text) -> text:
+    """`<errors>|<vtable CallIndirects>|<rt_panic calls>` for fn `probe`.
+    In a single-module lowering the trait has a native vtable ABI, so the
+    payload call is one indirect call through the trait object."""
+    val source = PRELUDE + body
+    val parsed = parse_and_build_module(source, "option_trait_payload_probe.spl")
+    var hir_lowering = HirLowering.with_filename("option_trait_payload_probe.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new(hir.symbols)
+    lowering.trait_impl_closure_complete = true
+    val mir = lowering.lower_module(hir)
+    var vtable_calls = 0
+    var panics = 0
+    for function in mir.functions.values():
+        if function.name == "probe" or function.name.ends_with(".probe"):
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.Call(_, callee, _):
+                            match callee.kind:
+                                case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                    if name == "rt_panic":
+                                        panics = panics + 1
+                                case _: ()
+                        case MirInstKind.CallIndirect(_, _, _, _):
+                            vtable_calls = vtable_calls + 1
+                        case _: ()
+    "{hir_lowering.errors.len() + lowering.errors.len()}|{vtable_calls}|{panics}"
+
+fn receiver_identity_row(wrap_optional: bool, method: text) -> text:
+    """trait_receiver_identity of a receiver typed `Ident` or `Ident?`."""
+    val parsed = parse_and_build_module(PRELUDE, "option_trait_identity_probe.spl")
+    var hir_lowering = HirLowering.with_filename("option_trait_identity_probe.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    var trait_symbol = SymbolId(id: -1)
+    for declared in hir.traits.values():
+        if declared.name == "Ident":
+            trait_symbol = declared.symbol
+    val named = HirType(kind: HirTypeKind.Named(trait_symbol, []), span: Span.empty())
+    val receiver_type = if wrap_optional: HirType(kind: HirTypeKind.Optional(named), span: Span.empty()) else: named
+    val receiver = HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: receiver_type, span: Span.empty())
+    var lowering = MirLowering.new(hir.symbols)
+    if lowering.trait_receiver_identity(receiver, method) != "": "trait" else: "none"
+
+describe "Option<Trait> receiver identity in MIR":
+    it "identifies a receiver typed by the trait":
+        expect(receiver_identity_row(false, "identity")).to_equal("trait")
+
+    it "identifies a receiver typed Option of the trait (its payload)":
+        expect(receiver_identity_row(true, "identity")).to_equal("trait")
+
+    it "never identifies the Option value itself for an Option operation":
+        expect(receiver_identity_row(true, "is_some")).to_equal("none")
+
+val OPTION_ONLY = "fn probe(r: Ident?) -> text:\n    if r.is_some():\n        return \"some\"\n    \"none\"\n"
+
+fn payload_call_delta(body: text) -> text:
+    """Errors, extra vtable calls over the Option-only baseline, and panics:
+    the payload call must add exactly ONE trait dispatch."""
+    val base = option_probe_row(OPTION_ONLY).split("|")
+    val row = option_probe_row(body).split("|")
+    "{row[0]}|{row[1].to_int() - base[1].to_int()}|{row[2]}"
+
+describe "Option<Trait> payload receivers in MIR":
+    it "keeps the Option value itself an Option receiver":
+        expect(option_probe_row(OPTION_ONLY).split("|")[0]).to_equal("0")
+
+    it "dispatches a Some(x) payload call through the trait":
+        expect(payload_call_delta("fn probe(r: Ident?) -> text:\n    if val Some(s) = r:\n        return s.identity()\n    \"none\"\n")).to_equal("0|1|0")
+
+    it "dispatches an if-val payload call through the trait":
+        expect(payload_call_delta("fn probe(r: Ident?) -> text:\n    if val s = r:\n        return s.identity()\n    \"none\"\n")).to_equal("0|1|0")
+
+    it "dispatches a match Some(x) payload call through the trait":
+        expect(payload_call_delta("fn probe(r: Ident?) -> text:\n    match r:\n        case Some(s):\n            return s.identity()\n        case _:\n            return \"none\"\n    \"x\"\n")).to_equal("0|1|0")

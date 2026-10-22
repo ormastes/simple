@@ -1,0 +1,117 @@
+# Pure SDN acknowledgement binding full SSpec metadata to an allocated run.
+# This verifies returned values; it does not authenticate the writer or admit evidence.
+# @req REQ-TRC-012 REQ-TRC-013 REQ-TRC-018
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.parser.{parse_with_spans_and_issues}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.traceability.schema.{trace_sdn_preflight}
+use std.common.traceability.run_plan.{TraceRunPlan}
+use std.common.traceability.run_request.{materialize_trace_run_plan}
+use std.common.traceability.run_preparation.{TraceRunPreparation, build_trace_run_preparation,
+    validate_trace_run_preparation, encode_trace_run_preparation, decode_trace_run_preparation}
+use std.common.traceability.sspec_inventory.{TraceSspecPlannedRequest, validate_trace_sspec_planned_request}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+
+pub struct TraceSspecPreparation:
+    preparation: TraceRunPreparation
+    inventory_digest: text
+    evidence_validity: text
+
+fn sspec_preparation_digest_valid(value: text) -> bool:
+    if value.len() != 71 or not value.starts_with("sha256:"): return false
+    val bytes = value.bytes()
+    for i in 7..bytes.len():
+        val byte = bytes[i].to_i64()
+        if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102)): return false
+    true
+
+fn sspec_preparation_fields(value: SdnValue, names: [text]) -> Result<Dict<text, SdnValue>, text>:
+    val fields = match value:
+        case SdnValue.Dict(found): found
+        case _: return Err("trace SSpec preparation must be an SDN dictionary")
+    if fields.len() != names.len(): return Err("unexpected or missing trace SSpec preparation fields")
+    for name in names:
+        if not fields.contains_key(name): return Err("missing trace SSpec preparation field: " + name)
+    Ok(fields)
+
+fn sspec_preparation_text(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("trace SSpec preparation field must be text: " + name)
+
+fn validate_sspec_preparation_fields(value: TraceSspecPreparation) -> Result<(), text>:
+    encode_trace_run_preparation(value.preparation)?
+    if not sspec_preparation_digest_valid(value.inventory_digest):
+        return Err("trace SSpec preparation requires a canonical inventory SHA-256 digest")
+    if value.evidence_validity != "unverified":
+        return Err("trace SSpec preparation cannot grant evidence validity")
+    Ok(())
+
+pub fn build_trace_sspec_preparation(metadata: TraceSspecPlannedRequest, plan: TraceRunPlan) -> Result<TraceSspecPreparation, text>:
+    validate_trace_sspec_planned_request(metadata)?
+    val preparation = build_trace_run_preparation(metadata.request, plan)?
+    Ok(TraceSspecPreparation(preparation: preparation, inventory_digest: metadata.inventory_digest,
+        evidence_validity: "unverified"))
+
+pub fn validate_trace_sspec_preparation(value: TraceSspecPreparation, metadata: TraceSspecPlannedRequest, plan: TraceRunPlan) -> Result<(), text>:
+    validate_sspec_preparation_fields(value)?
+    validate_trace_sspec_planned_request(metadata)?
+    if value.inventory_digest != metadata.inventory_digest:
+        return Err("trace SSpec preparation inventory digest mismatch")
+    validate_trace_run_preparation(value.preparation, metadata.request, plan)
+
+pub fn encode_trace_sspec_preparation(value: TraceSspecPreparation) -> Result<text, text>:
+    validate_sspec_preparation_fields(value)?
+    val preparation_source = encode_trace_run_preparation(value.preparation)?
+    var fields: Dict<text, SdnValue> = {}
+    fields["schema"] = SdnValue.String("simple.trace.sspec-preparation/v1")
+    fields["preparation_sdn"] = SdnValue.String(preparation_source)
+    fields["inventory_digest"] = SdnValue.String(value.inventory_digest)
+    fields["evidence_validity"] = SdnValue.String(value.evidence_validity)
+    val source = sdn_encode_canonical(SdnValue.Dict(fields))
+    if source.len() > 1048576: return Err("trace SSpec preparation document exceeds 1 MiB")
+    Ok(source)
+
+pub fn decode_trace_sspec_preparation(source: text) -> Result<TraceSspecPreparation, text>:
+    trace_sdn_preflight(source)?
+    val parsed = parse_with_spans_and_issues(source)?
+    if parsed.2.len() > 0: return Err("invalid or duplicate trace SSpec preparation fields")
+    val fields = sspec_preparation_fields(parsed.0, ["schema", "preparation_sdn", "inventory_digest", "evidence_validity"])?
+    if sspec_preparation_text(fields, "schema")? != "simple.trace.sspec-preparation/v1":
+        return Err("unsupported trace SSpec preparation schema")
+    val preparation_source = sspec_preparation_text(fields, "preparation_sdn")?
+    val preparation = decode_trace_run_preparation(preparation_source)?
+    if encode_trace_run_preparation(preparation)? != preparation_source:
+        return Err("embedded trace preparation must be canonical SDN")
+    val value = TraceSspecPreparation(preparation: preparation,
+        inventory_digest: sspec_preparation_text(fields, "inventory_digest")?,
+        evidence_validity: sspec_preparation_text(fields, "evidence_validity")?)
+    validate_sspec_preparation_fields(value)?
+    if encode_trace_sspec_preparation(value)? != source:
+        return Err("trace SSpec preparation envelope must be canonical SDN")
+    Ok(value)
+
+# A zero worker exit only establishes that the caller may inspect the returned
+# acknowledgement. The digest bindings establish consistency, not writer identity.
+pub fn verify_trace_sspec_preparation(metadata: TraceSspecPlannedRequest, source: text, worker_exit_code: i64) -> Result<TraceRunPlan, text>:
+    if worker_exit_code != 0: return Err("trace SSpec preparation worker exited unsuccessfully")
+    if source == "" or source.len() > 1048576:
+        return Err("trace SSpec preparation stdout must be nonempty and at most 1 MiB")
+    trace_sdn_preflight(source)?
+    validate_trace_sspec_planned_request(metadata)?
+    val source_bytes = source.bytes()
+    var end = source_bytes.len()
+    if end > 0 and source_bytes[end - 1] == 10:
+        end -= 1
+        if end > 0 and source_bytes[end - 1] == 13: end -= 1
+    var frame_bytes: [u8] = []
+    for i in 0..end: frame_bytes.push(source_bytes[i])
+    val envelope = validated_utf8_bytes_to_text_linear(frame_bytes)?
+    if envelope == "" or envelope.ends_with("\n") or envelope.ends_with("\r"):
+        return Err("trace SSpec preparation stdout must contain one canonical document frame")
+    val value = decode_trace_sspec_preparation(envelope)?
+    if value.inventory_digest != metadata.inventory_digest:
+        return Err("trace SSpec preparation inventory digest mismatch")
+    val plan = materialize_trace_run_plan(metadata.request, value.preparation.run_id)?
+    validate_trace_sspec_preparation(value, metadata, plan)?
+    Ok(plan)

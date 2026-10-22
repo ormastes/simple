@@ -118,8 +118,8 @@ struct ModuleIndexEntry {
 
 ### Using LibSmfBuilder
 
-```simple
-use compiler.linker.lib_smf_writer.{LibSmfBuilder}
+```simple:skip
+use compiler.backend.linker.lib_smf_writer.{LibSmfBuilder}
 
 # Create builder
 var builder = LibSmfBuilder.new()
@@ -136,8 +136,8 @@ builder.write("libstd_io.lsm")
 
 ### Using Convenience Function
 
-```simple
-use compiler.linker.lib_smf_writer.{create_lib_smf}
+```simple:skip
+use compiler.backend.linker.lib_smf_writer.{create_lib_smf}
 
 val modules = [
     ("std/io/mod", "io_mod.smf"),
@@ -150,7 +150,7 @@ create_lib_smf(modules, "libstd_io.lsm", true)
 
 ### Adding In-Memory Data
 
-```simple
+```simple:skip
 var builder = LibSmfBuilder.new()
 
 # Add from in-memory bytes
@@ -164,8 +164,8 @@ builder.write("output.lsm")
 
 ### Using LibSmfReader
 
-```simple
-use compiler.linker.lib_smf_reader.{LibSmfReader}
+```simple:skip
+use compiler.backend.linker.lib_smf_reader.{LibSmfReader}
 
 # Open library
 val reader = LibSmfReader.open("libstd_io.lsm")?
@@ -197,8 +197,8 @@ reader.close()
 
 The `SmfGetter` provides a unified interface for loading SMF modules from both single files and library archives:
 
-```simple
-use compiler.linker.smf_getter.{SmfGetter}
+```simple:skip
+use compiler.backend.linker.smf_getter.{SmfGetter}
 
 # Create getter with search paths
 var getter = SmfGetter.new()
@@ -237,7 +237,7 @@ getter.close()
 
 ### Before (Single Files Only)
 
-```simple
+```simple:skip
 # Old approach - only loads single .smf files
 val reader = SmfReaderImpl.open("path/to/module.smf")?
 val symbol = reader.lookup_symbol("function_name")?
@@ -245,7 +245,7 @@ val symbol = reader.lookup_symbol("function_name")?
 
 ### After (Single Files + Libraries)
 
-```simple
+```simple:skip
 # New approach - loads from single files OR libraries
 var getter = SmfGetter.new()
 getter.add_search_path("/usr/lib/simple")
@@ -263,9 +263,9 @@ val symbol = reader.lookup_symbol("function_name")?
 
 The linker wrapper can now link against library SMF files:
 
-```simple
-use compiler.linker.linker_wrapper.*
-use compiler.linker.smf_getter.{SmfGetter}
+```simple:skip
+use compiler.backend.linker.linker_wrapper.*
+use compiler.backend.linker.smf_getter.{SmfGetter}
 
 # Setup getter with library paths
 var getter = SmfGetter.new()
@@ -298,7 +298,7 @@ link_to_native(
 
 Library SMF uses FNV-1a hashing for integrity verification:
 
-```simple
+```simple:skip
 # Reading with verification
 val reader = LibSmfReader.open("library.lsm")?
 val smf_data = reader.get_module("module/name")?

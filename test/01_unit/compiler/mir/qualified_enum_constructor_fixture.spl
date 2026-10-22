@@ -1,0 +1,285 @@
+# Real MirLowering dispatch controls; no BDD imports or manufactured MIR facts.
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{HirType, HirTypeKind, HirSymbol, SymbolId,
+    SymbolKind, SymbolTable, ScopeId, MethodResolution}
+use compiler.hir.hir_definitions.{HirEnum, HirVariant, HirVariantKind,
+    HirExpr, HirExprKind, HirCallArg}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_types.{MirType, MirSignature, MirConstValue, MirTypeKind, LocalId, LocalKind}
+use compiler.mir.mir_instruction_graph.{MirFunction}
+use compiler.mir.mir_instructions.{MirInstKind, MirOperand, MirOperandKind}
+use compiler.mir._MirLoweringExpr.method_calls_literals.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+
+struct QualifiedEnumCtorFactsV1:
+    errors: i64 = 0
+    enum_calls: i64 = 0
+    enum_id: i64 = -1
+    discriminant: i64 = -1
+    payload_zero: bool = false
+    tuple_calls: i64 = 0
+    tuple_arity: i64 = -1
+    tuple_sets: i64 = 0
+    associated_calls: i64 = 0
+    field_reads: i64 = 0
+    instance_calls: i64 = 0
+    import_binding_valid: bool = true
+
+fn ctor_type_v1(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn ctor_symbol_v1(id: i64, name: text, kind: SymbolKind,
+        owner: text?, type_: HirType?) -> HirSymbol:
+    HirSymbol(id: SymbolId(id: id), name: name, kind: kind, type_: type_,
+        scope: ScopeId(id: 0), span: Span.empty(), visibility: Visibility.Public,
+        is_public: true, is_mutable: false, defining_module: owner, builtin_method_tag: 0)
+
+fn ctor_variant_v1(name: text, index: i64, types: [HirType]) -> HirVariant:
+    val kind = if types.len() == 0: HirVariantKind.Unit else: HirVariantKind.Tuple(types)
+    HirVariant(symbol: SymbolId(id: 100 + index), name: name, kind: kind,
+        has_discriminant: false,
+        discriminant: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: Span.empty()),
+        span: Span.empty())
+
+fn ctor_enum_v1(side: text, name: text = "E") -> HirEnum:
+    val integer = ctor_type_v1(HirTypeKind.Int(64, true))
+    val boolean = ctor_type_v1(HirTypeKind.Bool)
+    var variants: [HirVariant] = []
+    if side == "a":
+        variants.push(ctor_variant_v1("Zero", 0, []))
+        variants.push(ctor_variant_v1("One", 1, [integer]))
+        variants.push(ctor_variant_v1("Two", 2, [integer, boolean]))
+    else:
+        variants.push(ctor_variant_v1("Two", 0, [boolean, integer]))
+        variants.push(ctor_variant_v1("Zero", 1, []))
+        variants.push(ctor_variant_v1("One", 2, [boolean]))
+    HirEnum(symbol: SymbolId(id: if side == "a": 10 else: 11), name: name,
+        runtime_name: side + "." + name, type_params: [], variants: variants,
+        visibility: Visibility.Public, is_public: true, has_doc_comment: false,
+        doc_comment: "", span: Span.empty(), is_generic_template: false,
+        has_specialization_of: false, specialization_of: "", type_bindings: {},
+        attributes: [], complete_open: false, dyn_open: false)
+
+fn ctor_arg_v1(boolean: bool) -> HirCallArg:
+    var expr = HirExpr(kind: HirExprKind.IntLit(17, nil), has_type_: true,
+        type_: ctor_type_v1(HirTypeKind.Int(64, true)), span: Span.empty())
+    if boolean:
+        expr = HirExpr(kind: HirExprKind.BoolLit(true), has_type_: true,
+            type_: ctor_type_v1(HirTypeKind.Bool), span: Span.empty())
+    HirCallArg(has_name: false, name: "", value: expr, span: Span.empty())
+
+fn ctor_operand_integer_v1(operand: MirOperand, constants: Dict<i64, i64>) -> i64:
+    match operand.kind:
+        case MirOperandKind.Const(MirConstValue.Int(value), _): return value
+        case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+            return constants[local.id] ?? -1
+        case _: return -1
+
+fn ctor_facts_v1(function: MirFunction, errors: i64) -> QualifiedEnumCtorFactsV1:
+    var facts = QualifiedEnumCtorFactsV1(errors: errors, enum_calls: 0, enum_id: -1,
+        discriminant: -1, payload_zero: false, tuple_calls: 0, tuple_arity: -1,
+        tuple_sets: 0, associated_calls: 0, field_reads: 0, instance_calls: 0,
+        import_binding_valid: true)
+    var constants: Dict<i64, i64> = {}
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Const(dest, MirConstValue.Int(value), _):
+                    constants[dest.id] = value
+                case MirInstKind.Copy(dest, source) | MirInstKind.Move(dest, source):
+                    if constants.has(source.id): constants[dest.id] = constants[source.id]
+                case MirInstKind.GetField(_, _, _): facts.field_reads = facts.field_reads + 1
+                case MirInstKind.Call(_, callee, args):
+                    match callee.kind:
+                        case MirOperandKind.Const(MirConstValue.Str(name), _):
+                            if name == "rt_enum_new" and args.len() == 3:
+                                facts.enum_calls = facts.enum_calls + 1
+                                facts.enum_id = ctor_operand_integer_v1(args[0], constants)
+                                facts.discriminant = ctor_operand_integer_v1(args[1], constants)
+                                facts.payload_zero = ctor_operand_integer_v1(args[2], constants) == 0
+                            elif name == "rt_tuple_new" and args.len() == 1:
+                                facts.tuple_calls = facts.tuple_calls + 1
+                                facts.tuple_arity = ctor_operand_integer_v1(args[0], constants)
+                            elif name == "rt_tuple_set":
+                                facts.tuple_sets = facts.tuple_sets + 1
+                            elif name == "associated_zero" or name.ends_with(".associated_zero"):
+                                facts.associated_calls = facts.associated_calls + 1
+                            elif name == "make_instance" or name.ends_with(".make_instance"):
+                                facts.instance_calls = facts.instance_calls + 1
+                        case _: ()
+                case _: ()
+    facts
+
+fn ctor_probe_v1(side: text, arity: i64, reverse: bool,
+        mode: text = "constructor") -> (QualifiedEnumCtorFactsV1, i64, i64):
+    var symbols = SymbolTable.new()
+    symbols.register_preserved_symbol(ctor_symbol_v1(10, "E", SymbolKind.Enum, Some("src/a.spl"), nil))
+    symbols.register_preserved_symbol(ctor_symbol_v1(11, "E", SymbolKind.Enum, Some("src/b.spl"), nil))
+    var owner_id = if side == "a": 10 else: 11
+    var import_binding_valid = true
+    if mode == "import-alias":
+        # Same projection API as module_import_registration: lexical alias
+        # stays bound while the stored symbol keeps the author's enum name.
+        val imported = symbols.define("ImportedE", SymbolKind.Enum, nil,
+            Span.empty(), Visibility.Public, false, Some("a"))
+        symbols.rename_symbol(imported, "E")
+        symbols.bind_qualified_type("a", "E", imported)
+        owner_id = imported.id
+        import_binding_valid = symbols.lookup_or_invalid("ImportedE").id == owner_id and
+            symbols.symbol_name_scalar_raw(owner_id) == "E" and
+            symbols.symbol_defining_module_scalar_raw(owner_id) == "a"
+    val nominal = ctor_type_v1(HirTypeKind.Named(SymbolId(id: owner_id), []))
+    symbols.register_preserved_symbol(ctor_symbol_v1(20, "instance", SymbolKind.Parameter, nil, nominal))
+    symbols.register_preserved_symbol(ctor_symbol_v1(30, "associated_zero", SymbolKind.Method,
+        Some("src/a.spl"), ctor_type_v1(HirTypeKind.Function([], ctor_type_v1(HirTypeKind.Int(64, true)), []))))
+    val holder = ctor_symbol_v1(40, "Holder", SymbolKind.Struct, Some("src/holder.spl"), nil)
+    val holder_type = ctor_type_v1(HirTypeKind.Named(SymbolId(id: 40), []))
+    symbols.register_preserved_symbol(holder)
+    symbols.register_preserved_symbol(ctor_symbol_v1(41, "holder", SymbolKind.Parameter, nil, holder_type))
+    symbols.register_preserved_symbol(ctor_symbol_v1(42, "value", SymbolKind.Field, Some("src/holder.spl"), nominal))
+    symbols.register_preserved_symbol(ctor_symbol_v1(43, "make_instance", SymbolKind.Function,
+        Some("src/a.spl"), ctor_type_v1(HirTypeKind.Function([], nominal, []))))
+    var lowering = MirLowering.new(symbols)
+    lowering.register_composite_field_metadata_types_v1(lowering.composite_layout_key(holder),
+        ["value"], [nominal], [Span.empty()], symbols, false)
+    val a = ctor_enum_v1("a")
+    val b = ctor_enum_v1("b")
+    if reverse:
+        lowering.register_enum_variants(b)
+        lowering.register_enum_runtime_id(b)
+        lowering.register_enum_variants(a)
+        lowering.register_enum_runtime_id(a)
+    else:
+        lowering.register_enum_variants(a)
+        lowering.register_enum_runtime_id(a)
+        lowering.register_enum_variants(b)
+        lowering.register_enum_runtime_id(b)
+    val expected_id = lowering.enum_runtime_id(side + ".E")
+    val other_id = lowering.enum_runtime_id(if side == "a": "b.E" else: "a.E")
+    var builder = lowering.builder
+    var parameters: [MirType] = []
+    if mode == "instance": parameters.push(lowering.lower_type(nominal))
+    if mode == "field-instance": parameters.push(MirType(kind: MirTypeKind.Struct(SymbolId(id: 40))))
+    builder.begin_function(SymbolId(id: 90), "qualified_ctor_probe",
+        MirSignature(params: parameters, return_type: MirType.i64(), is_variadic: false), Span.empty())
+    lowering.builder = builder
+    for local in builder.locals:
+        match local.kind:
+            case LocalKind.Arg(index):
+                if index == 0 and mode == "instance":
+                    lowering.bind_local(20, local.id)
+                    lowering.remember_local_hir_type(local.id.id, nominal, 0, 0)
+                elif index == 0 and mode == "field-instance":
+                    lowering.bind_local(41, local.id)
+                    lowering.remember_local_hir_type(local.id.id, holder_type, 0, 0)
+            case _: ()
+    var args: [HirCallArg] = []
+    if arity >= 1: args.push(ctor_arg_v1(side != "a"))
+    if arity == 2: args.push(ctor_arg_v1(side == "a"))
+    if mode == "wrong-payload":
+        args = [ctor_arg_v1(side == "a")]
+    var method = if arity == 0: "Zero" elif arity == 1: "One" else: "Two"
+    if mode == "unknown": method = "Missing"
+    var receiver = HirExpr(kind: HirExprKind.NamedVar(
+        SymbolId(id: if mode == "instance": 20 else: owner_id),
+        if mode == "instance": "instance" elif mode == "import-alias": "ImportedE" else: "E"),
+        has_type_: false, type_: nil, span: Span.empty())
+    if mode == "field-instance":
+        val base = HirExpr(kind: HirExprKind.NamedVar(SymbolId(id: 41), "holder"),
+            has_type_: true, type_: holder_type, span: Span.empty())
+        receiver = HirExpr(kind: HirExprKind.Field(base, "value", Some(SymbolId(id: 42))),
+            has_type_: true, type_: nominal, span: Span.empty())
+    elif mode == "call-instance":
+        val callee = HirExpr(kind: HirExprKind.NamedVar(SymbolId(id: 43), "make_instance"),
+            has_type_: false, type_: nil, span: Span.empty())
+        receiver = HirExpr(kind: HirExprKind.Call(callee, [], []),
+            has_type_: true, type_: nominal, span: Span.empty())
+    var resolution = MethodResolution.Unresolved
+    if mode == "associated":
+        resolution = MethodResolution.StaticMethod(SymbolId(id: owner_id), SymbolId(id: 30))
+    val result = lowering.lower_method_call(receiver, method, args, resolution, "", -1)
+    var finished = lowering.builder
+    finished.terminate_return_copy(result)
+    val function = finished.end_function()
+    var facts = ctor_facts_v1(function, lowering.errors.len())
+    facts.import_binding_valid = import_binding_valid
+    (facts, expected_id, other_id)
+
+fn qualified_enum_constructor_control_v1() -> text:
+    for reverse in [false, true]:
+        for side in ["a", "b"]:
+            for arity in [0, 1, 2]:
+                val (facts, expected, other) = ctor_probe_v1(side, arity, reverse)
+                val case_name = "{side}/{arity}/reverse={reverse}"
+                if expected == other: return case_name + ":runtime-id-control"
+                if facts.errors != 0: return case_name + ":lowering-error"
+                if facts.enum_calls != 1: return case_name + ":constructor-call-count"
+                if facts.enum_id != expected: return case_name + ":wrong-declaration-runtime-id"
+                val expected_disc = if side == "a": arity else: (if arity == 0: 1 elif arity == 1: 2 else: 0)
+                if facts.discriminant != expected_disc: return case_name + ":wrong-owner-discriminant"
+                if arity == 0 and not facts.payload_zero: return case_name + ":unit-payload"
+                if arity < 2 and facts.tuple_calls != 0: return case_name + ":unexpected-tuple"
+                if arity == 2:
+                    if facts.tuple_calls != 1 or facts.tuple_arity != 2 or facts.tuple_sets != 2:
+                        return case_name + ":tuple-payload-slots"
+    for mode in ["unknown", "instance", "field-instance", "call-instance", "wrong-payload"]:
+        val (facts, _expected, _other) = ctor_probe_v1("a", 1, false, mode)
+        if facts.enum_calls != 0: return mode + ":stolen-constructor"
+        if facts.errors == 0: return mode + ":missing-rejection"
+        if mode == "field-instance" and facts.field_reads == 0: return "field-instance:not-evaluated"
+        if mode == "call-instance" and facts.instance_calls != 1: return "call-instance:not-evaluated"
+    val (imported, imported_id, _foreign_id) = ctor_probe_v1("a", 1, false, "import-alias")
+    if not imported.import_binding_valid: return "import-alias:projection-identity"
+    if imported.errors != 0 or imported.enum_calls != 1 or imported.enum_id != imported_id or imported.discriminant != 1:
+        return "import-alias:canonical-constructor-owner"
+    val (associated, _expected, _other) = ctor_probe_v1("a", 0, false, "associated")
+    if associated.errors != 0 or associated.enum_calls != 0 or associated.associated_calls != 1:
+        return "associated-method-stolen"
+    ""
+
+fn qualified_enum_legacy_bare_control_v1() -> text:
+    var lowering = MirLowering.new(SymbolTable.new())
+    val declaration = ctor_enum_v1("a", "Only")
+    lowering.register_enum_variants(declaration)
+    lowering.register_enum_runtime_id(declaration)
+    val expected = lowering.enum_runtime_id("a.Only")
+    for hint in ["", "Only"]:
+        var builder = lowering.builder
+        builder.begin_function(SymbolId(id: 91), "legacy_bare_probe",
+            MirSignature(params: [], return_type: MirType.i64(), is_variadic: false), Span.empty())
+        lowering.builder = builder
+        val receiver = HirExpr(kind: HirExprKind.NamedVar(SymbolId(id: -1), "Only"),
+            has_type_: false, type_: nil, span: Span.empty())
+        val result = lowering.lower_method_call(receiver, "Zero", [], MethodResolution.Unresolved, hint, -1)
+        var finished = lowering.builder
+        finished.terminate_return_copy(result)
+        val facts = ctor_facts_v1(finished.end_function(), lowering.errors.len())
+        if facts.errors != 0 or facts.enum_calls != 1 or facts.enum_id != expected or facts.discriminant != 0:
+            return "unique-bare-constructor-regression"
+    # Identical bare variant lists can still describe distinct owners and
+    # slot types. Name-only dispatch must reject that ambiguity as well.
+    val a = ctor_enum_v1("a")
+    var b = ctor_enum_v1("b")
+    val integer = ctor_type_v1(HirTypeKind.Int(64, true))
+    val boolean = ctor_type_v1(HirTypeKind.Bool)
+    b.variants = [ctor_variant_v1("Zero", 0, []), ctor_variant_v1("One", 1, [boolean]),
+        ctor_variant_v1("Two", 2, [boolean, integer])]
+    lowering.register_enum_variants(a)
+    lowering.register_enum_runtime_id(a)
+    lowering.register_enum_variants(b)
+    lowering.register_enum_runtime_id(b)
+    var builder = lowering.builder
+    builder.begin_function(SymbolId(id: 92), "ambiguous_bare_probe",
+        MirSignature(params: [], return_type: MirType.i64(), is_variadic: false), Span.empty())
+    lowering.builder = builder
+    val receiver = HirExpr(kind: HirExprKind.NamedVar(SymbolId(id: -1), "E"),
+        has_type_: false, type_: nil, span: Span.empty())
+    val result = lowering.lower_method_call(receiver, "Zero", [], MethodResolution.Unresolved, "E", -1)
+    var finished = lowering.builder
+    finished.terminate_return_copy(result)
+    val ambiguous = ctor_facts_v1(finished.end_function(), lowering.errors.len())
+    if ambiguous.enum_calls != 0 or ambiguous.errors == 0: return "ambiguous-bare-owner-accepted"
+    ""
+
+export qualified_enum_constructor_control_v1, qualified_enum_legacy_bare_control_v1

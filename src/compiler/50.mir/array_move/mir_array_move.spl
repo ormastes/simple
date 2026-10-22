@@ -1,0 +1,1334 @@
+# Array move-instead-of-copy analysis for MIR lowering.
+#
+# `var o = s` / `var o = s.f` of a runtime array copies the array
+# (MirLowering.maybe_copy_array_value, mir_lowering_stmts.spl). In a loop such
+# as
+#
+#     var o = st.output
+#     o.push(x)
+#     st = St(output: o, count: st.count + 1)
+#
+# the copy is pure waste -- and, because nothing frees the old buffer, a leak
+# that grows quadratically. This pass proves, per function and from HIR only,
+# where the copy can be replaced by a move of the handle. It mirrors the seed's
+# ArrayMoveSites rules (work/jit-struct-array-leak) and is deliberately
+# conservative: anything it cannot prove keeps the copy.
+#
+# A non-param local `s` (declared by exactly one Let, outside any lambda) is
+#   WHOLE-OWNED when nothing else can hold its buffer: every write is a fresh
+#     value (array literal, or a struct/class constructor routed to
+#     lower_struct_construct whose every non-primitive slot gets a private
+#     buffer -- see is_fresh_ctor), a place-init (copied or itself moved), or a
+#     compound assign; and every read is a scalar use, an
+#     index base, a builtin array method receiver, a place-init source, or a
+#     constructor field arg. Any escaping use -- call arg, return, assignment
+#     RHS, array element, block value, iteration, match scrutinee, lambda
+#     mention -- disqualifies it.
+#   FIELD-OWNED when also no shallow struct copy can share its field buffers:
+#     it was not place-initialized and was never itself a place-init source or
+#     a constructor arg (a struct copy / struct field arg shares array fields).
+#
+# `s` is DEAD after statement i of list L when a forward scan of L finds an
+# unconditional `s = rhs` (rhs not reading s) before any statement that reads
+# s, breaks/continues out of the current loop, or the end of L; reaching the
+# end of L is dead only when L is the list that declared s.
+#
+# Site A: `Let o = s` (s whole-owned & dead) or `Let o = s.f` (s field-owned &
+#   dead, reads of OTHER fields of s do not count) -> move instead of copy.
+# Struct construction NEVER copies (seed decision: copying a live `var` arg
+#   re-created the leak, 39 MB -> 2.46 GB). A `var` local passed into a
+#   declared array slot hands its buffer over: when EVERY constructor-arg use
+#   of it is mentioned once in its statement and dead after it (or the
+#   statement is a `return`, or the use is its own list's tail value; never
+#   inside a loop/lambda of its own), the built struct may be owned;
+#   otherwise the field aliases the local exactly as before, and neither the
+#   local nor the struct is owned. Projections, params, `val`s, index places
+#   and generic/Any/struct slots always share (am_struct_arg_gets_private_buffer).
+#   KNOWN, NOT FIXED (both compilers): `St(output: o); o.push(4)` is visible
+#   through st.output -- pinned by the spec.
+#
+# Permissive-but-sound divergences from the seed (array_move.rs), reviewed:
+#   * Field-filtered mentions (am_mentions with `field`): after `var o = s.f`
+#     a read of `s.g` (g != f) does not keep s live. It cannot observe s.f's
+#     buffer because field ownership excludes any alias between fields.
+#   * A constructor arg in an `if`/`while` condition counts for the hand-over
+#     scan of its statement like any other once-per-statement position (a
+#     while condition is excluded: loops are never descended).
+#   * Site A ignores whether the DESTINATION `o` is later captured by a
+#     closure: o owns the moved buffer exactly as it would own a copy, and the
+#     source is dead, so no second holder is created.
+#
+# Defer: the frontend desugars a top-level `defer` by replaying its statements
+# before each return and at the end of the body, so the replayed statements are
+# ordinary HIR seen by the scan; any other placement is a build error.
+# Unknown expression kinds (comprehension, with, try/catch, custom blocks, asm,
+# ...) fail the whole function closed: no moves.
+
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.common.diagnostics.span.{Span}
+
+struct ArrayMoveSites:
+    """Per-function move approvals, keyed by HIR symbol id."""
+    let_symbols: Dict<i64, bool>
+
+fn array_move_sites_empty() -> ArrayMoveSites:
+    ArrayMoveSites(let_symbols: {})
+
+struct ArrayMoveCtorInfo:
+    """One constructor routed to lower_struct_construct, in declared field
+    order: slot kind (am_hir_slot_kind) and whether an omitted field is filled
+    without a shared buffer (no default, or an array-literal/nil default)."""
+    names: [text]
+    kinds: [i64]
+    omit_ok: [bool]
+    call_name: text
+
+struct ArrayMoveCtorTables:
+    """Constructor symbols of one function, keyed by symbol id: `calls` for
+    `Ctor(..)` call syntax, `lits` for struct-literal syntax. A symbol missing
+    from a table is not a constructor for the analysis (its result is not
+    fresh), which is how every construction path the analysis does not model
+    fails closed."""
+    calls: Dict<i64, ArrayMoveCtorInfo>
+    lits: Dict<i64, ArrayMoveCtorInfo>
+
+struct ArrayMoveCtorRefs:
+    calls: [i64]
+    lits: [i64]
+
+struct ArrayMoveKids:
+    exprs: [HirExpr]
+    blocks: [HirBlock]
+    loop_like: bool
+    lambda: bool
+    unknown: bool
+
+struct ArrayMoveScan:
+    symbols: SymbolTable
+    tables: ArrayMoveCtorTables
+    failed: bool
+    lambda_depth: i64
+    let_count: Dict<i64, i64>
+    whole_bad: Dict<i64, bool>
+    field_bad: Dict<i64, bool>
+    ctor_arg_count: Dict<i64, i64>
+    let_list: Dict<i64, i64>
+    next_list: i64
+    move_lets: Dict<i64, bool>
+    ok_arg_uses: Dict<i64, i64>
+    ctor_deps: Dict<i64, [i64]>
+    # Insertion-ordered key lists for ctor_arg_count / ctor_deps: Dict.keys()
+    # of an i64-keyed dict yields text keys under the seed interpreter, bug
+    # doc/08_tracking/bug/dict_i64_keys_sum_concatenates_as_text_2026-09-02.md
+    # (still open). The lists stay correct once keys() is fixed.
+    ctor_arg_syms: [i64]
+    ctor_dep_targets: [i64]
+    # Static facts for method receivers (HIR leaves receivers untyped): locals
+    # statically known to hold an array, and the routed constructor that
+    # built a struct local (its declared field kinds).
+    array_syms: Dict<i64, bool>
+    struct_info_of: Dict<i64, ArrayMoveCtorInfo>
+    phase: i64
+
+fn array_move_sites_for(body: HirBlock, symbols: SymbolTable, tables: ArrayMoveCtorTables) -> ArrayMoveSites:
+    """Compute the move approvals for one function body. `tables` comes from
+    MirLowering.array_move_ctor_tables over am_collect_ctor_refs(body)."""
+    var scan = ArrayMoveScan(symbols: symbols, tables: tables, failed: false, lambda_depth: 0,
+        let_count: {}, whole_bad: {}, field_bad: {}, ctor_arg_count: {},
+        let_list: {}, next_list: 0, move_lets: {}, ok_arg_uses: {}, ctor_deps: {},
+        ctor_arg_syms: [], ctor_dep_targets: [], array_syms: {}, struct_info_of: {}, phase: 1)
+    scan.classify_block(body)
+    if scan.failed:
+        return array_move_sites_empty()
+    # Phase 1: which constructor-arg uses of `var` locals are dead (the
+    # handle simply moves into the field -- struct construction never copies).
+    scan.approve_block(body)
+    # A local hands its buffer over only when EVERY one of its constructor-arg
+    # uses is dead (uses in loops/lambdas never are); otherwise the field
+    # aliases it exactly as before: neither the local nor any struct built
+    # from it is uniquely owned.
+    for o in scan.ctor_arg_syms:
+        if (scan.ok_arg_uses.get(o) ?? 0) != (scan.ctor_arg_count.get(o) ?? 0):
+            scan.bad_whole(o)
+    for target in scan.ctor_dep_targets:
+        for o in scan.ctor_deps.get(target) ?? []:
+            if scan.whole_bad.contains(o):
+                scan.bad_whole(target)
+    # Phase 2: Site A approvals on the settled ownership facts.
+    scan.phase = 2
+    scan.let_list = {}
+    scan.next_list = 0
+    scan.approve_block(body)
+    ArrayMoveSites(let_symbols: scan.move_lets)
+
+# ----------------------------------------------------------------------------
+# Small single-match helpers (one payload match per function: repeating payload
+# matches in one SSA scope is a known self-host miscompile, see
+# mir_hir_let_symbol in mir_lowering_stmts.spl).
+# ----------------------------------------------------------------------------
+
+fn am_nil_expr() -> HirExpr:
+    HirExpr(kind: HirExprKind.NilLit, has_type_: false,
+        type_: HirType(kind: HirTypeKind.Unit, span: Span.empty()), span: Span.empty())
+
+fn am_stmt_tag(k: HirStmtKind) -> i64:
+    match k:
+        case HirStmtKind.Expr(_): 0
+        case HirStmtKind.Let(_, _, _): 1
+        case HirStmtKind.Assign(_, _, _): 2
+        case HirStmtKind.Block(_): 3
+        case _: 4
+
+fn am_stmt_expr(k: HirStmtKind) -> HirExpr:
+    match k:
+        case HirStmtKind.Expr(e): e
+        case _: am_nil_expr()
+
+fn am_let_symbol(k: HirStmtKind) -> i64:
+    match k:
+        case HirStmtKind.Let(symbol, _, _): symbol.id
+        case _: -1
+
+fn am_let_type_present(k: HirStmtKind) -> bool:
+    """An un-annotated Let carries a nil type payload (same shape as
+    mir_hir_let_type_present in mir_lowering_stmts.spl)."""
+    match k:
+        case HirStmtKind.Let(_, type_, _): type_ != nil
+        case _: false
+
+fn am_let_type(k: HirStmtKind) -> HirType:
+    val fallback = HirType(kind: HirTypeKind.Unit, span: Span.empty())
+    match k:
+        case HirStmtKind.Let(_, type_, _): type_ ?? fallback
+        case _: fallback
+
+fn am_let_declared_array(k: HirStmtKind) -> bool:
+    if not am_let_type_present(k):
+        return false
+    am_hir_type_is_array(am_let_type(k))
+
+fn am_let_init(k: HirStmtKind) -> HirExpr:
+    match k:
+        case HirStmtKind.Let(_, _, init): init
+        case _: am_nil_expr()
+
+fn am_assign_target(k: HirStmtKind) -> HirExpr:
+    match k:
+        case HirStmtKind.Assign(target, _, _): target
+        case _: am_nil_expr()
+
+fn am_assign_value(k: HirStmtKind) -> HirExpr:
+    match k:
+        case HirStmtKind.Assign(_, _, value): value
+        case _: am_nil_expr()
+
+fn am_assign_is_compound(k: HirStmtKind) -> bool:
+    match k:
+        case HirStmtKind.Assign(_, op, _): op != nil
+        case _: false
+
+fn am_stmt_block(k: HirStmtKind) -> HirBlock?:
+    match k:
+        case HirStmtKind.Block(b): Some(b)
+        case _: nil
+
+fn am_var_symbol(e: HirExpr) -> i64:
+    match e.kind:
+        case HirExprKind.Var(symbol): symbol.id
+        case HirExprKind.NamedVar(symbol, _): symbol.id
+        case _: -1
+
+fn am_is_field(e: HirExpr) -> bool:
+    match e.kind:
+        case HirExprKind.Field(_, _, _): true
+        case _: false
+
+fn am_field_base(e: HirExpr) -> HirExpr:
+    match e.kind:
+        case HirExprKind.Field(base, _, _): base
+        case _: am_nil_expr()
+
+fn am_field_name(e: HirExpr) -> text:
+    match e.kind:
+        case HirExprKind.Field(_, field, _): field
+        case _: ""
+
+fn am_place_root(e: HirExpr) -> i64:
+    """Symbol of `s` for `s` / `s.a` / `s.a.b`; -1 otherwise."""
+    if am_is_field(e):
+        return am_place_root(am_field_base(e))
+    am_var_symbol(e)
+
+fn am_field_base_symbol(e: HirExpr) -> i64:
+    """Symbol of `s` for exactly `s.f`; -1 otherwise."""
+    if am_is_field(e):
+        return am_var_symbol(am_field_base(e))
+    -1
+
+fn am_spread_base(e: HirExpr) -> HirExpr?:
+    """`Ctor(..base)` parses as an open-start Range (see
+    struct_construct_spread_base in switch_operators_calls.spl)."""
+    match e.kind:
+        case HirExprKind.Range(start, end, _, _):
+            if start == nil and end != nil:
+                return end
+            nil
+        case _: nil
+
+fn am_hir_type_is_array(t: HirType) -> bool:
+    match t.kind:
+        case HirTypeKind.Array(_, _): true
+        case HirTypeKind.Slice(_): true
+        case _: false
+
+fn am_default_is_fresh(e: HirExpr) -> bool:
+    """A field default that yields a fresh buffer (or none) on every use."""
+    match e.kind:
+        case HirExprKind.ArrayLit(_, _): true
+        case HirExprKind.NilLit: true
+        case _: false
+
+fn am_resolution_is_builtin(res: MethodResolution) -> bool:
+    """HIR leaves every array builtin except map/filter Unresolved, so the
+    resolution alone cannot tell `arr.push` from a user `push`: callers must
+    also prove the receiver is statically an array (receiver_is_array)."""
+    match res:
+        case MethodResolution.Unresolved: true
+        case MethodResolution.BuiltinCollection(_): true
+        case _: false
+
+fn am_method_ok(method: text, res: MethodResolution, result_escapes: bool) -> bool:
+    """A builtin array method (receiver already proven an array) that cannot
+    hand out the receiver's buffer: scalar-result queries anywhere, in-place mutators only
+    when their result is discarded."""
+    if not am_resolution_is_builtin(res):
+        return false
+    if method == "len" or method == "is_empty" or method == "contains" or method == "index_of":
+        return true
+    if result_escapes:
+        return false
+    method == "push" or method == "pop" or method == "clear" or method == "insert" or method == "remove"
+
+fn am_call_callee(e: HirExpr) -> HirExpr:
+    match e.kind:
+        case HirExprKind.Call(callee, _, _): callee
+        case _: am_nil_expr()
+
+fn am_call_args(e: HirExpr) -> [HirCallArg]:
+    match e.kind:
+        case HirExprKind.Call(_, args, _): args
+        case _: []
+
+fn am_struct_lit_fields(e: HirExpr) -> [(text, HirExpr)]:
+    match e.kind:
+        case HirExprKind.StructLit(_, fields): fields
+        case _: []
+
+fn am_expr_tag(e: HirExpr) -> i64:
+    """0 other, 1 literal, 2 array literal, 3 place (var/field), 4 struct lit,
+    5 call. Operator expressions are 0: a struct operand dispatches to a user
+    dunder (`__add__`, `__eq__`, ...) that receives `self`, so an operator
+    result is never known fresh."""
+    match e.kind:
+        case HirExprKind.IntLit(_, _): 1
+        case HirExprKind.FloatLit(_, _): 1
+        case HirExprKind.StringLit(_, _): 1
+        case HirExprKind.BoolLit(_): 1
+        case HirExprKind.CharLit(_): 1
+        case HirExprKind.UnitLit: 1
+        case HirExprKind.NilLit: 1
+        case HirExprKind.FloatLexeme(_, _): 1
+        case HirExprKind.ArrayLit(_, _): 2
+        case HirExprKind.ArrayRepeat(_, _, _): 2
+        case HirExprKind.Var(_): 3
+        case HirExprKind.NamedVar(_, _): 3
+        case HirExprKind.Field(_, _, _): 3
+        case HirExprKind.StructLit(_, _): 4
+        case HirExprKind.Call(_, _, _): 5
+        case _: 0
+
+fn am_symbol_is_var_local(sym: i64, symbols: SymbolTable) -> bool:
+    """A non-parameter `var` local."""
+    if sym < 0:
+        return false
+    if val info = symbols.get_symbol_raw(sym):
+        val declared: HirSymbol = info
+        return declared.kind == SymbolKind.Variable and declared.is_mutable
+    false
+
+fn am_struct_arg_gets_private_buffer(v: HirExpr, symbols: SymbolTable) -> bool:
+    """The struct-construction arg can give the field a buffer no other live
+    binding holds: a fresh array literal, or a `var` local -- the latter only
+    when it is dead at the use (checked by phase 1 of array_move_sites_for).
+    Projections (`st.data`), params, `val` locals, globals and index places
+    always share: the functional-update idiom `S(data: st.data, pos: st.pos +
+    1)` is pervasive (zstd_bits.spl) and construction never copies, so a
+    struct built from them is NOT uniquely owned. Only meaningful for a slot
+    DECLARED array/slice; the callers check the slot kind."""
+    val tag = am_expr_tag(v)
+    if tag == 2:
+        return true
+    am_symbol_is_var_local(am_var_symbol(v), symbols)
+
+fn am_hir_slot_kind(t: HirType) -> i64:
+    """0 primitive scalar, 1 declared array/slice, 2 any other slot (generic
+    T, struct, class, Any/dynamic, optional, dict, function, ...)."""
+    match t.kind:
+        case HirTypeKind.Int(_, _): 0
+        case HirTypeKind.Float(_): 0
+        case HirTypeKind.Bool: 0
+        case HirTypeKind.Char: 0
+        case HirTypeKind.Str: 0
+        case HirTypeKind.Unit: 0
+        case HirTypeKind.Array(_, _): 1
+        case HirTypeKind.Slice(_): 1
+        case _: 2
+
+fn am_call_name_intercepted(name: text) -> bool:
+    """Callee names lower_call handles before reaching lower_struct_construct
+    (switch_operators_calls.spl): a constructor so named is never fresh."""
+    if name == "Ok" or name == "Err" or name == "Some" or name == "None":
+        return true
+    if name == "print" or name == "eprint" or name == "println" or name == "_cli_eprint":
+        return true
+    if name == "panic" or name == "__assert" or name == "str" or name == "text":
+        return true
+    if name == "int" or name == "len":
+        return true
+    # Superset of is_gpu_intrinsic (70.backend/gpu_intrinsics.spl), whose
+    # every intrinsic carries this prefix; avoids a backend import here.
+    name.starts_with("gpu_")
+
+fn am_callee_name(e: HirExpr) -> text:
+    """The name lower_call resolves a callee by: a NamedVar carries its own
+    (compared against the table's symbol name); "" for a plain Var."""
+    match e.kind:
+        case HirExprKind.NamedVar(_, name): name
+        case _: ""
+
+fn am_struct_lit_symbol(e: HirExpr) -> i64:
+    match e.kind:
+        case HirExprKind.StructLit(type_, _):
+            match type_.kind:
+                case HirTypeKind.Named(symbol, _): symbol.id
+                case _: -1
+        case _: -1
+
+fn am_ctor_args_of(e: HirExpr) -> [HirCallArg]:
+    """Constructor args in lower_struct_construct's shape (struct literal
+    fields become named args, exactly as expr_dispatch.spl does)."""
+    if am_expr_tag(e) == 4:
+        var out: [HirCallArg] = []
+        for field in am_struct_lit_fields(e):
+            out.push(HirCallArg(has_name: true, name: field.0, value: field.1, span: field.1.span))
+        return out
+    am_call_args(e)
+
+fn am_ctor_slot_kinds(info: ArrayMoveCtorInfo, args: [HirCallArg]) -> [i64]:
+    """Declared slot kind per arg, mapped like lower_struct_construct: named
+    args by field name, positional args to the unclaimed fields in declared
+    order. -1 = spread or no such field."""
+    var claimed: [bool] = []
+    for _n in info.names:
+        claimed.push(false)
+    for a in args:
+        if a.has_name:
+            var fi = 0
+            while fi < info.names.len():
+                if info.names[fi] == a.name:
+                    claimed[fi] = true
+                fi = fi + 1
+    var kinds: [i64] = []
+    var next = 0
+    for a in args:
+        var k = -1
+        if a.has_name:
+            var fi = 0
+            while fi < info.names.len():
+                if info.names[fi] == a.name and fi < info.kinds.len():
+                    k = info.kinds[fi]
+                fi = fi + 1
+        elif am_spread_base(a.value) == nil:
+            while next < info.names.len() and claimed[next]:
+                next = next + 1
+            if next < info.names.len() and next < info.kinds.len():
+                k = info.kinds[next]
+                claimed[next] = true
+                next = next + 1
+        kinds.push(k)
+    kinds
+
+fn am_ctor_omitted_ok(info: ArrayMoveCtorInfo, args: [HirCallArg]) -> bool:
+    """Every field the args leave out is filled with no shared buffer."""
+    var named: Dict<text, bool> = {}
+    var positional = 0
+    for a in args:
+        if a.has_name:
+            named[a.name] = true
+        else:
+            positional = positional + 1
+    var fi = 0
+    while fi < info.names.len():
+        if not named.contains(info.names[fi]):
+            if positional > 0:
+                positional = positional - 1
+            elif fi >= info.omit_ok.len() or not info.omit_ok[fi]:
+                return false
+        fi = fi + 1
+    true
+
+fn am_children(e: HirExpr) -> ArrayMoveKids:
+    """Every direct child expression/block of `e`. `unknown` = not modelled."""
+    var exprs: [HirExpr] = []
+    var blocks: [HirBlock] = []
+    var loop_like = false
+    var lambda = false
+    var unknown = false
+    match e.kind:
+        case HirExprKind.IntLit(_, _): ()
+        case HirExprKind.FloatLit(_, _): ()
+        case HirExprKind.BoolLit(_): ()
+        case HirExprKind.CharLit(_): ()
+        case HirExprKind.UnitLit: ()
+        case HirExprKind.NilLit: ()
+        case HirExprKind.FloatLexeme(_, _): ()
+        case HirExprKind.Var(_): ()
+        case HirExprKind.NamedVar(_, _): ()
+        case HirExprKind.Continue(_): ()
+        case HirExprKind.StringLit(_, interps):
+            if val list = interps:
+                val interp_list: [HirInterpolation] = list
+                for item in interp_list:
+                    val interp: HirInterpolation = item
+                    exprs.push(interp.expr)
+        case HirExprKind.ArrayLit(elements, _):
+            for x in elements:
+                exprs.push(x)
+        case HirExprKind.ArrayRepeat(value, count, _):
+            exprs.push(value)
+            exprs.push(count)
+        case HirExprKind.TupleLit(elements):
+            for x in elements:
+                exprs.push(x)
+        case HirExprKind.DictLit(entries, _, _):
+            for entry in entries:
+                exprs.push(entry.0)
+                exprs.push(entry.1)
+        case HirExprKind.SetLit(elements, _):
+            for x in elements:
+                exprs.push(x)
+        case HirExprKind.Field(base, _, _): exprs.push(base)
+        case HirExprKind.Index(base, index):
+            exprs.push(base)
+            exprs.push(index)
+        case HirExprKind.TupleIndex(base, _): exprs.push(base)
+        case HirExprKind.OptionalChain(base, _): exprs.push(base)
+        case HirExprKind.NullCoalesce(left, right):
+            exprs.push(left)
+            exprs.push(right)
+        case HirExprKind.ExistsCheck(base): exprs.push(base)
+        case HirExprKind.Unwrap(base): exprs.push(base)
+        case HirExprKind.Binary(_, left, right):
+            exprs.push(left)
+            exprs.push(right)
+        case HirExprKind.Unary(_, operand): exprs.push(operand)
+        case HirExprKind.Call(callee, args, _):
+            exprs.push(callee)
+            for a in args:
+                exprs.push(a.value)
+        case HirExprKind.MethodCall(receiver, _, args, _):
+            exprs.push(receiver)
+            for a in args:
+                exprs.push(a.value)
+        case HirExprKind.StaticCall(_, _, args, _):
+            for a in args:
+                exprs.push(a.value)
+        case HirExprKind.If(cond, then_, else_):
+            exprs.push(cond)
+            blocks.push(then_)
+            if val eb = else_:
+                blocks.push(eb)
+        case HirExprKind.IfChain(arms, else_):
+            for arm in arms:
+                exprs.push(arm.cond)
+                blocks.push(arm.then_)
+            if val eb = else_:
+                blocks.push(eb)
+        case HirExprKind.MatchCase(scrutinee, arms):
+            exprs.push(scrutinee)
+            for arm in arms:
+                if arm.has_guard:
+                    exprs.push(arm.guard)
+                blocks.push(arm.body)
+        case HirExprKind.Loop(body, _):
+            loop_like = true
+            blocks.push(body)
+        case HirExprKind.While(cond, body, _):
+            loop_like = true
+            exprs.push(cond)
+            blocks.push(body)
+        case HirExprKind.For(_, iter, body, _):
+            loop_like = true
+            exprs.push(iter)
+            blocks.push(body)
+        case HirExprKind.Lambda(_, body, _):
+            lambda = true
+            exprs.push(body)
+        case HirExprKind.Block(block): blocks.push(block)
+        case HirExprKind.UnsafeBlock(body): blocks.push(body)
+        case HirExprKind.LossBlock(body): blocks.push(body)
+        case HirExprKind.NogradBlock(body): blocks.push(body)
+        case HirExprKind.Return(value):
+            if val x = value:
+                exprs.push(x)
+        case HirExprKind.Break(_, value):
+            if val x = value:
+                exprs.push(x)
+        case HirExprKind.Throw(value): exprs.push(value)
+        case HirExprKind.Try(inner): exprs.push(inner)
+        case HirExprKind.Await(inner): exprs.push(inner)
+        case HirExprKind.Yield(value):
+            if val x = value:
+                exprs.push(x)
+        case HirExprKind.StructLit(_, fields):
+            for field in fields:
+                exprs.push(field.1)
+        case HirExprKind.EnumLit(_, _, payload):
+            if val p = payload:
+                for x in am_enum_payload_exprs(p):
+                    exprs.push(x)
+        case HirExprKind.Cast(inner, _): exprs.push(inner)
+        case HirExprKind.As(inner, _): exprs.push(inner)
+        case HirExprKind.ConvertCall(inner, _): exprs.push(inner)
+        case HirExprKind.Range(start, end, _, step):
+            if val x = start:
+                exprs.push(x)
+            if val y = end:
+                exprs.push(y)
+            if val z = step:
+                exprs.push(z)
+        case HirExprKind.TypeTest(value, _): exprs.push(value)
+        case _: unknown = true
+    ArrayMoveKids(exprs: exprs, blocks: blocks, loop_like: loop_like, lambda: lambda, unknown: unknown)
+
+fn am_enum_payload_exprs(p: HirEnumPayload) -> [HirExpr]:
+    var out: [HirExpr] = []
+    match p:
+        case HirEnumPayload.Tuple(values):
+            for x in values:
+                out.push(x)
+        case HirEnumPayload.Struct(fields):
+            for field in fields:
+                out.push(field.1)
+    out
+
+fn am_lambda_captures(e: HirExpr) -> [SymbolId]:
+    match e.kind:
+        case HirExprKind.Lambda(_, _, captures): captures
+        case _: []
+
+fn am_break_tag(e: HirExpr) -> i64:
+    """0 not a jump, 1 unlabeled break/continue, 2 labeled break/continue."""
+    match e.kind:
+        case HirExprKind.Break(label, _):
+            if label == "": 1 else: 2
+        case HirExprKind.Continue(label):
+            if label == nil: 1 else: 2
+        case _: 0
+
+# ----------------------------------------------------------------------------
+# Mention / jump scans (used by the dead-after scan).
+# ----------------------------------------------------------------------------
+
+fn am_mentions(e: HirExpr, s: i64, field: text) -> i64:
+    """Occurrences of `s` in `e`. With `field` set, `s.g` for g != field is not
+    an occurrence (it cannot observe s.field's buffer). Unknown kinds count as
+    an occurrence (fail closed)."""
+    val direct = am_var_symbol(e)
+    if direct >= 0:
+        if direct == s:
+            return 1
+        return 0
+    if am_is_field(e) and field != "":
+        if am_var_symbol(am_field_base(e)) == s and am_field_name(e) != field:
+            return 0
+    val kids = am_children(e)
+    if kids.unknown:
+        return 1000
+    var total = 0
+    if kids.lambda:
+        for c in am_lambda_captures(e):
+            if c.id == s:
+                total = total + 1
+    for x in kids.exprs:
+        total = total + am_mentions(x, s, field)
+    for b in kids.blocks:
+        total = total + am_block_mentions(b, s, field)
+    total
+
+fn am_block_mentions(b: HirBlock, s: i64, field: text) -> i64:
+    var total = 0
+    for st in b.stmts:
+        total = total + am_stmt_mentions(st, s, field)
+    if b.has:
+        total = total + am_mentions(b.value, s, field)
+    total
+
+fn am_stmt_mentions(st: HirStmt, s: i64, field: text) -> i64:
+    val tag = am_stmt_tag(st.kind)
+    if tag == 0:
+        return am_mentions(am_stmt_expr(st.kind), s, field)
+    if tag == 1:
+        val declared = if am_let_symbol(st.kind) == s: 1 else: 0
+        return declared + am_mentions(am_let_init(st.kind), s, field)
+    if tag == 2:
+        return am_mentions(am_assign_target(st.kind), s, field) + am_mentions(am_assign_value(st.kind), s, field)
+    if tag == 3:
+        if val b = am_stmt_block(st.kind):
+            return am_block_mentions(b, s, field)
+        return 0
+    0
+
+fn am_jumps_out(e: HirExpr, loop_depth: i64) -> bool:
+    """A break/continue that leaves the loop enclosing the scanned list (any
+    labeled jump counts). Lambdas are separate bodies; unknown kinds count."""
+    val jump = am_break_tag(e)
+    if jump == 2:
+        return true
+    if jump == 1:
+        return loop_depth == 0
+    val kids = am_children(e)
+    if kids.unknown:
+        return true
+    if kids.lambda:
+        return false
+    val depth = if kids.loop_like: loop_depth + 1 else: loop_depth
+    for x in kids.exprs:
+        if am_jumps_out(x, depth):
+            return true
+    for b in kids.blocks:
+        if am_block_jumps_out(b, depth):
+            return true
+    false
+
+fn am_block_jumps_out(b: HirBlock, loop_depth: i64) -> bool:
+    for st in b.stmts:
+        if am_stmt_jumps_out(st, loop_depth):
+            return true
+    if b.has:
+        return am_jumps_out(b.value, loop_depth)
+    false
+
+fn am_stmt_jumps_out(st: HirStmt, loop_depth: i64) -> bool:
+    val tag = am_stmt_tag(st.kind)
+    if tag == 0:
+        return am_jumps_out(am_stmt_expr(st.kind), loop_depth)
+    if tag == 1:
+        return am_jumps_out(am_let_init(st.kind), loop_depth)
+    if tag == 2:
+        return am_jumps_out(am_assign_target(st.kind), loop_depth) or am_jumps_out(am_assign_value(st.kind), loop_depth)
+    if tag == 3:
+        if val b = am_stmt_block(st.kind):
+            return am_block_jumps_out(b, loop_depth)
+    false
+
+fn am_is_return(e: HirExpr) -> bool:
+    match e.kind:
+        case HirExprKind.Return(_): true
+        case _: false
+
+fn am_stmt_is_return(st: HirStmt) -> bool:
+    """`return v`: nothing after it in any list runs."""
+    am_stmt_tag(st.kind) == 0 and am_is_return(am_stmt_expr(st.kind))
+
+fn am_stmt_kills(st: HirStmt, s: i64, field: text) -> bool:
+    """`s = rhs` (plain, unconditional) whose rhs does not observe s."""
+    if am_stmt_tag(st.kind) != 2 or am_assign_is_compound(st.kind):
+        return false
+    if am_var_symbol(am_assign_target(st.kind)) != s:
+        return false
+    am_mentions(am_assign_value(st.kind), s, field) == 0
+
+fn am_collect_ctor_refs(b: HirBlock) -> ArrayMoveCtorRefs:
+    """Every constructor-shaped symbol in a body (lambdas included), in one
+    walk: `calls` for call syntax, `lits` for struct literals."""
+    var refs = ArrayMoveCtorRefs(calls: [], lits: [])
+    refs.visit_block(b)
+    refs
+
+impl ArrayMoveCtorRefs:
+    me visit_block(b: HirBlock):
+        for st in b.stmts:
+            val tag = am_stmt_tag(st.kind)
+            if tag == 0:
+                self.visit_expr(am_stmt_expr(st.kind))
+            elif tag == 1:
+                self.visit_expr(am_let_init(st.kind))
+            elif tag == 2:
+                self.visit_expr(am_assign_target(st.kind))
+                self.visit_expr(am_assign_value(st.kind))
+            elif tag == 3:
+                if val nested = am_stmt_block(st.kind):
+                    self.visit_block(nested)
+        if b.has:
+            self.visit_expr(b.value)
+
+    me visit_expr(e: HirExpr):
+        val tag = am_expr_tag(e)
+        if tag == 4:
+            val lit = am_struct_lit_symbol(e)
+            if lit >= 0:
+                self.lits.push(lit)
+        elif tag == 5:
+            val callee = am_var_symbol(am_call_callee(e))
+            if callee >= 0:
+                self.calls.push(callee)
+        val kids = am_children(e)
+        for x in kids.exprs:
+            self.visit_expr(x)
+        for blk in kids.blocks:
+            self.visit_block(blk)
+
+fn am_block_has_place_let(b: HirBlock) -> bool:
+    """Cheap gate: a body with no `Let x = s` / `Let x = s.f` has no Site A,
+    so the whole analysis (and its constructor tables) can be skipped."""
+    for st in b.stmts:
+        val tag = am_stmt_tag(st.kind)
+        if tag == 1:
+            val init = am_let_init(st.kind)
+            if am_var_symbol(init) >= 0 or am_field_base_symbol(init) >= 0:
+                return true
+            if am_expr_has_place_let(init):
+                return true
+        elif tag == 0:
+            if am_expr_has_place_let(am_stmt_expr(st.kind)):
+                return true
+        elif tag == 2:
+            if am_expr_has_place_let(am_assign_value(st.kind)):
+                return true
+        elif tag == 3:
+            if val nested = am_stmt_block(st.kind):
+                if am_block_has_place_let(nested):
+                    return true
+    if b.has:
+        return am_expr_has_place_let(b.value)
+    false
+
+fn am_expr_has_place_let(e: HirExpr) -> bool:
+    val kids = am_children(e)
+    for blk in kids.blocks:
+        if am_block_has_place_let(blk):
+            return true
+    for x in kids.exprs:
+        if am_expr_has_place_let(x):
+            return true
+    false
+
+impl ArrayMoveScan:
+    me bad_whole(sym: i64):
+        if sym >= 0:
+            self.whole_bad[sym] = true
+            self.field_bad[sym] = true
+
+    me bad_field(sym: i64):
+        if sym >= 0:
+            self.field_bad[sym] = true
+
+    me record_ctor_deps(target: i64, value: HirExpr):
+        """`target` is owned only if every `var` local moved into an array
+        slot of `value`'s constructor is dead at that use."""
+        val args = self.ctor_var_args(value)
+        if args.len() > 0:
+            if not self.ctor_deps.contains(target):
+                self.ctor_dep_targets.push(target)
+            var all = self.ctor_deps.get(target) ?? []
+            for o in args:
+                all.push(o)
+            self.ctor_deps[target] = all
+
+    fn whole_movable(s: i64) -> bool:
+        if s < 0 or self.failed:
+            return false
+        if (self.let_count.get(s) ?? 0) != 1:
+            return false
+        if self.whole_bad.contains(s):
+            return false
+        self.let_list.contains(s)
+
+    fn field_movable(s: i64) -> bool:
+        self.whole_movable(s) and not self.field_bad.contains(s)
+
+    me note_static_type(sym: i64, init: HirExpr, declared_array: bool):
+        if declared_array or am_expr_tag(init) == 2 or self.receiver_is_array(init):
+            self.array_syms[sym] = true
+        if val info = self.ctor_info(init):
+            self.struct_info_of[sym] = info
+
+    fn receiver_is_array(e: HirExpr) -> bool:
+        """`o` with o statically an array, or `s.f` with s built by a routed
+        constructor whose field f is declared array/slice. Anything else
+        (a user type with a `push` method, unknown types) is not."""
+        val direct = am_var_symbol(e)
+        if direct >= 0:
+            return self.array_syms.contains(direct)
+        val base = am_field_base_symbol(e)
+        if base < 0:
+            return false
+        if val info = self.struct_info_of.get(base):
+            val field = am_field_name(e)
+            var fi = 0
+            while fi < info.names.len():
+                if info.names[fi] == field and fi < info.kinds.len():
+                    return info.kinds[fi] == 1
+                fi = fi + 1
+        false
+
+    fn ctor_info(e: HirExpr) -> ArrayMoveCtorInfo?:
+        """Constructor routed to lower_struct_construct, or nil."""
+        val tag = am_expr_tag(e)
+        if tag == 4:
+            return self.tables.lits.get(am_struct_lit_symbol(e))
+        if tag == 5:
+            val callee = am_call_callee(e)
+            if val info = self.tables.calls.get(am_var_symbol(callee)):
+                val named = am_callee_name(callee)
+                if named == "" or named == info.call_name:
+                    return Some(info)
+        nil
+
+    fn is_fresh_ctor(e: HirExpr) -> bool:
+        """Every non-primitive slot of the constructed value gets a buffer no
+        other binding holds: declared array slots take a fresh array value or
+        a dead (moved) `var` local; any other non-primitive slot (generic T,
+        Any, nested struct, ...) only a literal -- a nested value struct
+        disqualifies (accepted). Omitted fields must fill freshly."""
+        if val info = self.ctor_info(e):
+            val args = am_ctor_args_of(e)
+            if not am_ctor_omitted_ok(info, args):
+                return false
+            val kinds = am_ctor_slot_kinds(info, args)
+            var ai = 0
+            while ai < args.len():
+                val v = args[ai].value
+                val k = kinds[ai]
+                val tag = am_expr_tag(v)
+                if k < 0:
+                    return false
+                if k == 1:
+                    if not (tag == 1 or tag == 2 or am_struct_arg_gets_private_buffer(v, self.symbols)):
+                        return false
+                elif k == 2:
+                    if tag != 1:
+                        return false
+                ai = ai + 1
+            return true
+        false
+
+    fn ctor_var_args(e: HirExpr) -> [i64]:
+        """`var` locals passed straight into declared array slots of `e`."""
+        var out: [i64] = []
+        if val info = self.ctor_info(e):
+            val args = am_ctor_args_of(e)
+            val kinds = am_ctor_slot_kinds(info, args)
+            var ai = 0
+            while ai < args.len():
+                val o = am_var_symbol(args[ai].value)
+                if o >= 0 and kinds[ai] == 1 and am_symbol_is_var_local(o, self.symbols):
+                    out.push(o)
+                ai = ai + 1
+        out
+
+    fn is_fresh_init(e: HirExpr) -> bool:
+        if am_expr_tag(e) == 2:
+            return true
+        self.is_fresh_ctor(e)
+
+    fn value_unaliased(v: HirExpr) -> bool:
+        """The value cannot share a buffer with any existing binding."""
+        val tag = am_expr_tag(v)
+        if tag == 1 or tag == 2:
+            return true
+        if tag == 4 or tag == 5:
+            return self.is_fresh_ctor(v)
+        false
+
+    fn collect_ctor_vars(e: HirExpr, out: [i64]) -> [i64]:
+        """`var`-local constructor args in declared array slots, evaluated once
+        per execution of the enclosing statement: never descends into blocks,
+        loops or lambdas."""
+        var acc = out
+        if val info = self.ctor_info(e):
+            val args = am_ctor_args_of(e)
+            val kinds = am_ctor_slot_kinds(info, args)
+            var ai = 0
+            while ai < args.len():
+                val v = args[ai].value
+                val o = am_var_symbol(v)
+                if o >= 0:
+                    if kinds[ai] == 1 and am_symbol_is_var_local(o, self.symbols):
+                        acc.push(o)
+                else:
+                    acc = self.collect_ctor_vars(v, acc)
+                ai = ai + 1
+            return acc
+        val kids = am_children(e)
+        if kids.unknown or kids.lambda or kids.loop_like:
+            return acc
+        for x in kids.exprs:
+            acc = self.collect_ctor_vars(x, acc)
+        acc
+
+    # --- pass 1: ownership classification over the whole body -------------
+
+    me classify_block(b: HirBlock):
+        val n = b.stmts.len()
+        var i = 0
+        while i < n:
+            val tail_stmt = i == n - 1 and not b.has
+            self.classify_stmt(b.stmts[i], tail_stmt)
+            i = i + 1
+        if b.has:
+            self.classify_expr(b.value, true)
+
+    me classify_stmt(st: HirStmt, tail_stmt: bool):
+        val tag = am_stmt_tag(st.kind)
+        if tag == 0:
+            self.classify_expr(am_stmt_expr(st.kind), tail_stmt)
+        elif tag == 1:
+            self.classify_let(am_let_symbol(st.kind), am_let_init(st.kind), am_let_declared_array(st.kind))
+        elif tag == 2:
+            self.classify_assign(am_assign_target(st.kind), am_assign_is_compound(st.kind), am_assign_value(st.kind))
+        elif tag == 3:
+            if val b = am_stmt_block(st.kind):
+                self.classify_block(b)
+
+    me classify_let(sym: i64, init: HirExpr, declared_array: bool):
+        if sym < 0:
+            self.failed = true
+            return
+        self.let_count[sym] = (self.let_count.get(sym) ?? 0) + 1
+        self.note_static_type(sym, init, declared_array)
+        if self.lambda_depth > 0:
+            self.bad_whole(sym)
+            self.classify_expr(init, true)
+            return
+        val src = am_var_symbol(init)
+        if src >= 0:
+            # Whole place-init: an array is copied (or moved), a struct copy
+            # is shallow -- both sides' field buffers may be shared.
+            self.bad_field(sym)
+            self.bad_field(src)
+            return
+        if am_is_field(init) and am_place_root(init) >= 0:
+            # Field place-init: an array field is copied (or moved); a struct
+            # field's own array fields stay shared with the source.
+            self.bad_field(sym)
+            return
+        if not self.is_fresh_init(init):
+            self.bad_whole(sym)
+        else:
+            self.record_ctor_deps(sym, init)
+        self.classify_expr(init, true)
+
+    me classify_assign(target: HirExpr, compound: bool, value: HirExpr):
+        if self.lambda_depth > 0:
+            self.classify_expr(target, true)
+            self.classify_expr(value, true)
+            return
+        val direct = am_var_symbol(target)
+        if direct >= 0:
+            if not compound and not self.is_fresh_init(value):
+                self.bad_whole(direct)
+            elif not compound:
+                self.record_ctor_deps(direct, value)
+            self.classify_expr(value, not compound)
+            return
+        val root = am_place_root(target)
+        if root >= 0:
+            # FieldSet `s.f = v`: v must not share an existing buffer.
+            if not compound and not self.value_unaliased(value):
+                self.bad_whole(root)
+            elif not compound:
+                self.record_ctor_deps(root, value)
+            self.classify_expr(value, not compound)
+            return
+        self.classify_expr(target, false)
+        self.classify_expr(value, true)
+
+    me classify_ctor_args(info: ArrayMoveCtorInfo, args: [HirCallArg]):
+        val kinds = am_ctor_slot_kinds(info, args)
+        var ai = 0
+        while ai < args.len():
+            val v = args[ai].value
+            if val spread = am_spread_base(v):
+                self.classify_expr(spread, true)
+            else:
+                self.classify_ctor_arg(v, kinds[ai])
+            ai = ai + 1
+
+    me classify_ctor_arg(v: HirExpr, slot_kind: i64):
+        if self.lambda_depth > 0:
+            self.classify_expr(v, true)
+            return
+        val o = am_var_symbol(v)
+        if o >= 0:
+            if not self.ctor_arg_count.contains(o):
+                self.ctor_arg_syms.push(o)
+            self.ctor_arg_count[o] = (self.ctor_arg_count.get(o) ?? 0) + 1
+            if slot_kind == 1 and am_struct_arg_gets_private_buffer(v, self.symbols):
+                # Handed over into a declared array slot: shared unless every
+                # such use is dead (settled after phase 1).
+                self.bad_field(o)
+            else:
+                # Shared (val/param, or a generic/Any/struct slot).
+                self.bad_whole(o)
+            return
+        self.classify_expr(v, true)
+
+    me classify_operand(x: HirExpr):
+        """Operand of an operator, interpolation or index: a struct operand
+        dispatches to a user method that receives `self` (expr_dispatch.spl
+        dunder lowering), so only a statically scalar field read `s.f`
+        (declared primitive in s's routed constructor) is harmless; a bare
+        local or any other place escapes (the seed treats all of them Bare)."""
+        if self.lambda_depth > 0:
+            self.classify_expr(x, true)
+            return
+        val direct = am_var_symbol(x)
+        if direct >= 0:
+            self.bad_whole(direct)
+            return
+        val root = am_place_root(x)
+        if root >= 0:
+            if not self.field_is_scalar(x):
+                self.bad_whole(root)
+            return
+        self.classify_expr(x, true)
+
+    fn field_is_scalar(e: HirExpr) -> bool:
+        """`s.f` with s built by a routed constructor declaring f primitive."""
+        val base = am_field_base_symbol(e)
+        if base < 0:
+            return false
+        if val info = self.struct_info_of.get(base):
+            val field = am_field_name(e)
+            var fi = 0
+            while fi < info.names.len():
+                if info.names[fi] == field and fi < info.kinds.len():
+                    return info.kinds[fi] == 0
+                fi = fi + 1
+        false
+
+    me classify_exprs(list: [HirExpr], esc: bool):
+        for x in list:
+            self.classify_expr(x, esc)
+
+    me classify_blocks(list: [HirBlock]):
+        for b in list:
+            self.classify_block(b)
+
+    me classify_expr(e: HirExpr, esc: bool):
+        """`esc`: the value of `e` may be retained by something else."""
+        val in_lambda = self.lambda_depth > 0
+        val sub = in_lambda
+        val esc_here = esc or in_lambda
+        val direct = am_var_symbol(e)
+        if direct >= 0:
+            if esc_here:
+                self.bad_whole(direct)
+            return
+        val root = am_place_root(e)
+        if root >= 0:
+            # `s.f` / `s.f.g`: a scalar read unless its value escapes.
+            if esc_here:
+                self.bad_whole(root)
+            return
+        match e.kind:
+            case HirExprKind.Field(base, _, _):
+                self.classify_expr(base, esc_here)
+            case HirExprKind.Index(base, index):
+                # Element reads of an array never expose the outer buffer; on
+                # anything else `[]` may dispatch to a user method with self.
+                if am_place_root(base) < 0:
+                    self.classify_expr(base, esc_here)
+                elif in_lambda or not self.receiver_is_array(base):
+                    self.bad_whole(am_place_root(base))
+                self.classify_operand(index)
+            case HirExprKind.TupleIndex(base, _):
+                if am_place_root(base) < 0:
+                    self.classify_expr(base, esc_here)
+                elif in_lambda:
+                    self.bad_whole(am_place_root(base))
+            case HirExprKind.Binary(_, left, right):
+                self.classify_operand(left)
+                self.classify_operand(right)
+            case HirExprKind.Unary(_, operand):
+                self.classify_operand(operand)
+            case HirExprKind.ExistsCheck(base): self.classify_expr(base, sub)
+            case HirExprKind.TypeTest(value, _): self.classify_expr(value, sub)
+            case HirExprKind.Call(callee, args, _):
+                if val info = self.ctor_info(e):
+                    self.classify_ctor_args(info, args)
+                else:
+                    self.classify_expr(callee, true)
+                    for a in args:
+                        self.classify_expr(a.value, true)
+            case HirExprKind.StructLit(_, _):
+                val lit_args = am_ctor_args_of(e)
+                if val info = self.ctor_info(e):
+                    self.classify_ctor_args(info, lit_args)
+                else:
+                    for a in lit_args:
+                        self.classify_ctor_arg(a.value, 2)
+            case HirExprKind.MethodCall(receiver, method, args, resolution):
+                val recv_root = am_place_root(receiver)
+                if recv_root >= 0:
+                    if in_lambda or not self.receiver_is_array(receiver) or not am_method_ok(method, resolution, esc):
+                        self.bad_whole(recv_root)
+                else:
+                    self.classify_expr(receiver, true)
+                for a in args:
+                    self.classify_expr(a.value, true)
+            case HirExprKind.If(cond, _, _):
+                self.classify_expr(cond, sub)
+                self.classify_blocks(am_children(e).blocks)
+            case HirExprKind.IfChain(arms, _):
+                for arm in arms:
+                    self.classify_expr(arm.cond, sub)
+                self.classify_blocks(am_children(e).blocks)
+            case HirExprKind.MatchCase(scrutinee, arms):
+                # Pattern bindings alias the scrutinee's payload.
+                self.classify_expr(scrutinee, true)
+                for arm in arms:
+                    if arm.has_guard:
+                        self.classify_expr(arm.guard, sub)
+                    self.classify_block(arm.body)
+            case HirExprKind.Loop(body, _): self.classify_block(body)
+            case HirExprKind.While(cond, body, _):
+                self.classify_expr(cond, sub)
+                self.classify_block(body)
+            case HirExprKind.For(var_, iter, body, _):
+                # The iterator retains the iterated buffer across the body.
+                self.bad_whole(var_.id)
+                self.classify_expr(iter, true)
+                self.classify_block(body)
+            case HirExprKind.Lambda(_, body, captures):
+                for c in captures:
+                    self.bad_whole(c.id)
+                self.lambda_depth = self.lambda_depth + 1
+                self.classify_expr(body, true)
+                self.lambda_depth = self.lambda_depth - 1
+            case HirExprKind.Range(_, _, _, _): self.classify_exprs(am_children(e).exprs, sub)
+            case HirExprKind.StringLit(_, _):
+                # Interpolation may call a user formatting method with self.
+                for part in am_children(e).exprs:
+                    self.classify_operand(part)
+            case HirExprKind.ArrayRepeat(value, count, _):
+                self.classify_expr(value, true)
+                self.classify_expr(count, sub)
+            case HirExprKind.Continue(_): ()
+            case HirExprKind.Yield(_):
+                # A suspended frame's locals outlive the forward scan's model
+                # (the seed poisons generators/futures the same way).
+                self.failed = true
+            case HirExprKind.Await(_):
+                self.failed = true
+            case _:
+                val kids = am_children(e)
+                if kids.unknown:
+                    self.failed = true
+                    return
+                # Literals, collections, optional ops, casts, returns, throws,
+                # awaits, enum payloads, blocks: every child value escapes.
+                self.classify_exprs(kids.exprs, true)
+                self.classify_blocks(kids.blocks)
+
+    # --- pass 2: approvals ---------------------------------------------------
+
+    me approve_block(b: HirBlock):
+        val id = self.next_list
+        self.next_list = id + 1
+        for st in b.stmts:
+            val declared = am_let_symbol(st.kind)
+            if declared >= 0:
+                self.let_list[declared] = id
+        var i = 0
+        while i < b.stmts.len():
+            self.approve_stmt(b, id, i)
+            i = i + 1
+        if b.has and self.phase == 1:
+            # The tail value is the list's last evaluation: a constructor arg
+            # declared in this same list is dead after it.
+            var tail_vars: [i64] = []
+            tail_vars = self.collect_ctor_vars(b.value, tail_vars)
+            for o in tail_vars:
+                if self.whole_movable(o):
+                    if am_mentions(b.value, o, "") == 1 and (self.let_list.get(o) ?? -1) == id:
+                        self.ok_arg_uses[o] = (self.ok_arg_uses.get(o) ?? 0) + 1
+        if b.has:
+            self.approve_descend(b.value)
+
+    me approve_stmt(b: HirBlock, list_id: i64, i: i64):
+        val st = b.stmts[i]
+        val tag = am_stmt_tag(st.kind)
+        if tag == 1 and self.phase == 2:
+            val init = am_let_init(st.kind)
+            val src = am_var_symbol(init)
+            if src >= 0:
+                if self.whole_movable(src) and self.dead_after(b, list_id, i, src, ""):
+                    self.move_lets[am_let_symbol(st.kind)] = true
+            else:
+                val fsrc = am_field_base_symbol(init)
+                if fsrc >= 0 and self.field_movable(fsrc):
+                    if self.dead_after(b, list_id, i, fsrc, am_field_name(init)):
+                        self.move_lets[am_let_symbol(st.kind)] = true
+        var roots: [HirExpr] = []
+        if tag == 0:
+            roots.push(am_stmt_expr(st.kind))
+        elif tag == 1:
+            roots.push(am_let_init(st.kind))
+        elif tag == 2:
+            roots.push(am_assign_target(st.kind))
+            roots.push(am_assign_value(st.kind))
+        var ctor_vars: [i64] = []
+        if self.phase == 1:
+            for r in roots:
+                ctor_vars = self.collect_ctor_vars(r, ctor_vars)
+        for o in ctor_vars:
+            if self.whole_movable(o):
+                if am_stmt_mentions(st, o, "") == 1:
+                    if am_stmt_is_return(st) or self.dead_after(b, list_id, i, o, ""):
+                        self.ok_arg_uses[o] = (self.ok_arg_uses.get(o) ?? 0) + 1
+        for r in roots:
+            self.approve_descend(r)
+        if tag == 3:
+            if val nested = am_stmt_block(st.kind):
+                self.approve_block(nested)
+
+    me approve_descend(e: HirExpr):
+        val kids = am_children(e)
+        if kids.lambda or kids.unknown:
+            return
+        for x in kids.exprs:
+            self.approve_descend(x)
+        for blk in kids.blocks:
+            self.approve_block(blk)
+
+    fn dead_after(b: HirBlock, list_id: i64, i: i64, s: i64, field: text) -> bool:
+        var j = i + 1
+        while j < b.stmts.len():
+            val st = b.stmts[j]
+            if am_stmt_kills(st, s, field):
+                return true
+            if am_stmt_mentions(st, s, field) > 0:
+                return false
+            if am_stmt_jumps_out(st, 0):
+                return false
+            j = j + 1
+        if b.has:
+            if am_mentions(b.value, s, field) > 0:
+                return false
+            if am_jumps_out(b.value, 0):
+                return false
+        (self.let_list.get(s) ?? -1) == list_id

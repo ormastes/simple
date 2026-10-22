@@ -13,6 +13,20 @@ impl MirLowering:
             return nil
         val receiver = self.lower_expr(base)
         if not self.local_is_str(receiver) and not self.local_hir_type_is_str(receiver):
+            # `arr[a..b]` / `arr[a..]` / `arr[..b]` on a proven runtime array
+            # is the same operation as `arr.slice(a, b)`: reuse that owner
+            # (rt_slice, fresh shallow storage, clamped bounds, element
+            # metadata preserved) instead of failing the build.
+            if self.runtime_array_locals.contains(receiver.id):
+                var slice_args: [HirCallArg] = []
+                if val start_value = start:
+                    slice_args.push(HirCallArg(has_name: false, name: "", value: start_value, span: start_value.span))
+                else:
+                    val zero_start = HirExpr(kind: HirExprKind.IntLit(0, None), has_type_: false, type_: nil, span: base.span)
+                    slice_args.push(HirCallArg(has_name: false, name: "", value: zero_start, span: base.span))
+                if val end_value = end:
+                    slice_args.push(HirCallArg(has_name: false, name: "", value: end_value, span: end_value.span))
+                return Some(self.lower_runtime_array_slice(receiver, slice_args))
             return nil
         val text_type = MirType(kind: MirTypeKind.Opaque("str"))
         val raw_callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("rt_interp_cstr"),

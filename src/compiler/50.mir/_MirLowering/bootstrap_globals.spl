@@ -4,6 +4,7 @@ use compiler.hir.hir_types.{SymbolKind}
 use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir._MirLowering.function_lowering.*
 use compiler.mir._MirLowering.provider_metadata.*
+use compiler.mir._MirLowering.exact_extern_provenance.*
 use compiler.mir._MirLowering.provider_globals.*
 use compiler.mir._MirLowering.asm_and_targets.*
 use compiler.mir._MirLowering.bootstrap_type_registration.{bootstrap_type_registry_reset, bootstrap_register_flat_type_defs, bootstrap_register_flat_class_defs, bootstrap_register_flat_class_providers, bootstrap_register_hir_type_defs}
@@ -56,7 +57,7 @@ use compiler.blocks.value.BlockValue
 use compiler.types.type_layout.{compute_struct_layout, layoutattr_default_, FieldLayout}
 use compiler.core.types.{TYPE_BOOL, TYPE_I64, TYPE_F64}
 use compiler.mir.synthetic_driver_codegen.{apply_synthetic_driver_codegen}
-use compiler.mir_opt.mir_opt.var_reassign_ssa.{ssa_alloca_transform_blocks}
+use compiler.mir_opt.var_reassign_ssa.{ssa_alloca_transform_blocks}
 use compiler.frontend.core.types.{custom_primitive_underlying_type_tag_by_symbol}
 use compiler.common.mir_target_context.{MirTargetContext, mir_target_context_from}
 use compiler.common.module_path_naming.{module_logical_name_from_path}
@@ -169,11 +170,19 @@ fn bootstrap_register_function_value_module(module: HirModule):
     for func in module.functions.values():
         val function_name = bootstrap_hir_function_symbol_name(module, func)
         val source_name = module.symbols.symbol_display_name(func.symbol, func.name)
+        # Re-export shims can carry a nil/empty name; a nil text in the key or
+        # value crashes the promotion-time sort (0xC0000005 NULL deref, Windows
+        # stage3 mir boundary). Nameless functions are uncallable by name: skip.
+        if function_name == nil or function_name == "":
+            continue
+        if source_name == nil or source_name == "":
+            continue
         _bootstrap_callable_link_names[mir_provider_callable_key(module_name, source_name)] = function_name
         _bootstrap_callable_text_value_abi[mir_provider_callable_key(module_name, source_name)] = not func.is_extern
         if not func.is_method and not func.is_static:
-            _bootstrap_callable_link_names[mir_provider_callable_key(module_name, func.name)] = function_name
-            _bootstrap_callable_text_value_abi[mir_provider_callable_key(module_name, func.name)] = not func.is_extern
+            if func.name != nil and func.name != "":
+                _bootstrap_callable_link_names[mir_provider_callable_key(module_name, func.name)] = function_name
+                _bootstrap_callable_text_value_abi[mir_provider_callable_key(module_name, func.name)] = not func.is_extern
         _bootstrap_function_value_names.push(function_name)
 
 fn bootstrap_register_fn_ret_types_module(module: HirModule):
@@ -269,7 +278,7 @@ fn bootstrap_mir_static_type_tag(type_: MirType) -> i64:
         case MirTypeKind.F32: 6
         case MirTypeKind.Bool: 7
         case MirTypeKind.Unit | MirTypeKind.Never: 8
-        case MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, _) | MirTypeKind.FuncPtr(_) | MirTypeKind.Function(_, _) | MirTypeKind.Opaque(_): 9
+        case MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, _) | MirTypeKind.FuncPtr(_) | MirTypeKind.Opaque(_): 9
         case MirTypeKind.Struct(_) | MirTypeKind.Enum(_) | MirTypeKind.Tuple(_) | MirTypeKind.Array(_, _) | MirTypeKind.Dict(_, _) | MirTypeKind.Slice(_) | MirTypeKind.Union(_): 9
         case MirTypeKind.Promise(_) | MirTypeKind.Generator(_, _) | MirTypeKind.ActorType(_): 9
         case _: 0
@@ -445,6 +454,29 @@ fn bootstrap_register_flat_function_values():
             function_index = function_index + 1
         module_index = module_index + 1
 
+fn bootstrap_register_imported_exact_externs_v1(lowering_in: MirLowering, module_name: text) -> MirLowering:
+    var lowering = lowering_in
+    val consumers = mir_imported_extern_consumers_v1(lowering.symbols, module_name)
+    val owners = mir_imported_extern_owner_keys_v1(consumers)
+    var visited: Dict<text, bool> = {}
+    var provider_index = 0
+    while provider_index < bootstrap_hir_module_count():
+        val provider_name = bootstrap_mir_logical_module_name(bootstrap_hir_module_name_at(provider_index))
+        val key = mir_provider_callable_key(provider_name, "")
+        if owners.has(key):
+            if visited.has(key):
+                lowering.error_fatal("ambiguous imported extern provider owner", nil)
+            else:
+                visited[key] = true
+                var declarations: [HirFunction] = []
+                var index = 0
+                while index < bootstrap_hir_module_function_count(provider_index):
+                    declarations.push(bootstrap_hir_module_function_at(provider_index, index))
+                    index = index + 1
+                lowering.record_imported_exact_externs_v1(provider_name, declarations, consumers)
+        provider_index = provider_index + 1
+    lowering
+
 fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: MirTargetContext, is_entry: bool) -> (MirModule, i64):
     val module_name = bootstrap_hir_module_name_at(module_index)
     val logical_module_name = bootstrap_mir_logical_module_name(module_name)
@@ -460,7 +492,11 @@ fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: Mir
     val function_count = bootstrap_hir_module_function_count(module_index)
     var extern_index = 0
     while extern_index < function_count:
-        lowering.record_exact_extern_declaration_v1(bootstrap_hir_module_function_at(module_index, extern_index))
+        val declaration = bootstrap_hir_module_function_at(module_index, extern_index)
+        lowering.record_adapted_file_write_bytes_extern_v1(
+            logical_module_name, declaration, declaration.symbol
+        )
+        lowering.record_exact_extern_declaration_v1(declaration)
         extern_index = extern_index + 1
     # `lower_module` sets `current_module_id` before lowering anything
     # (module_lowering.spl). This BOOTSTRAP-FLAT path never calls it, so the
@@ -480,6 +516,7 @@ fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: Mir
     lowering.current_function_names = _bootstrap_function_value_names
     lowering.callable_link_names = _bootstrap_callable_link_names
     lowering.callable_text_value_abi = _bootstrap_callable_text_value_abi
+    lowering = bootstrap_register_imported_exact_externs_v1(lowering, logical_module_name)
     # Register this module's own enum/struct type defs so `E.V` reclassifies to
     # an enum-variant const (not a field-load on an undefined base) and `S(..)`
     # reclassifies to an inline aggregate construct (not a call to an undefined
@@ -910,7 +947,7 @@ fn bootstrap_lower_hir_globals_to_mir_module() -> MirModule:
     val target_context = mir_target_context_from("", "unknown", "unknown", "llvm", -1)
     bootstrap_lower_hir_globals_to_mir_module_for_target(target_context)
 
-fn bootstrap_lower_hir_globals_to_mir_module_for_target(target_context: MirTargetContext) -> MirModule:
+fn bootstrap_lower_hir_globals_to_mir_module_for_target(target_context: MirTargetContext, providers: [HirModule] = []) -> MirModule:
     """Lower the bootstrap entry to MIR with REAL function bodies.
 
     The real HIR module for the entry is produced by the driver's HIR phase
@@ -942,9 +979,13 @@ fn bootstrap_lower_hir_globals_to_mir_module_for_target(target_context: MirTarge
             exit(1)
         var lowering = MirLowering.new_for_target(hir_module.symbols, target_context)
         for declaration in hir_module.functions.values():
+            lowering.record_adapted_file_write_bytes_extern_v1(
+                mir_layout_canonical_module_name(hir_module.name), declaration, declaration.symbol
+            )
             lowering.record_exact_extern_declaration_v1(declaration)
         lowering.callable_link_names = _bootstrap_callable_link_names
         lowering.callable_text_value_abi = _bootstrap_callable_text_value_abi
+        lowering.record_imported_exact_extern_modules_v1(hir_module.name, providers)
         lowering.current_module_id = mir_layout_canonical_module_name(hir_module.name)
         lowering = bootstrap_register_hir_type_defs(lowering, hir_module)
         val entry_functions = hir_module.functions
@@ -1039,7 +1080,7 @@ fn bootstrap_lower_extra_hir_module_to_mir(hir_module: HirModule) -> i64:
     val target_context = mir_target_context_from("", "unknown", "unknown", "llvm", -1)
     bootstrap_lower_extra_hir_module_to_mir_for_target(hir_module, target_context)
 
-fn bootstrap_lower_extra_hir_module_to_mir_for_target(hir_module: HirModule, target_context: MirTargetContext) -> i64:
+fn bootstrap_lower_extra_hir_module_to_mir_for_target(hir_module: HirModule, target_context: MirTargetContext, providers: [HirModule] = []) -> i64:
     """Lower one additional (non-entry) closure module's functions to MIR,
     APPENDING to the same flat _bootstrap_mir_functions/_bootstrap_mir_function_names
     accumulator that bootstrap_lower_hir_globals_to_mir_module() populates for the
@@ -1063,9 +1104,13 @@ fn bootstrap_lower_extra_hir_module_to_mir_for_target(hir_module: HirModule, tar
     var added_instr_total = 0
     var lowering = MirLowering.new_for_target(hir_module.symbols, target_context)
     for declaration in hir_module.functions.values():
+        lowering.record_adapted_file_write_bytes_extern_v1(
+            mir_layout_canonical_module_name(hir_module.name), declaration, declaration.symbol
+        )
         lowering.record_exact_extern_declaration_v1(declaration)
     lowering.callable_link_names = _bootstrap_callable_link_names
     lowering.callable_text_value_abi = _bootstrap_callable_text_value_abi
+    lowering.record_imported_exact_extern_modules_v1(hir_module.name, providers)
     lowering.current_module_id = mir_layout_canonical_module_name(hir_module.name)
     lowering = bootstrap_register_hir_type_defs(lowering, hir_module)
     # Same module-constant registration as the entry path above: non-entry

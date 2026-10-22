@@ -57,7 +57,7 @@ Track improvement ideas discovered while developing Simple standard library and 
 [How should we solve it?]
 
 **Example:**
-```simple
+```simple:skip
 [Code example showing the improvement]
 ```
 
@@ -92,7 +92,7 @@ Method chaining across multiple lines originally failed to parse, forcing develo
 
 **What Works Now (2026-01-05):**
 
-```simple
+```text
 # Pattern 1: Trailing dot (dot at end of line)
 let result = Builder.new().
     add(5).
@@ -110,7 +110,7 @@ let result = Builder.new().add(5).mul(2).build()
 
 **What Does NOT Work (Limitation):**
 
-```simple
+```text
 # Indented dots are NOT supported due to lexer indentation tracking
 # INDENT/DEDENT tokens signal block boundaries and cannot be consumed
 # without breaking the parser's indentation state
@@ -123,7 +123,7 @@ let result = Builder.new()
 **Workaround for Indented Pattern:**
 Use trailing dot style (dot at end of line) instead:
 
-```simple
+```text
 # Instead of indented dots, use trailing dots:
 let result = Builder.new().
     add(5).
@@ -179,7 +179,7 @@ Triple-quoted strings are currently only for documentation comments, not multi-l
 Add parser support for `f"""..."""` (triple-quoted f-strings) to allow multi-line string templates with interpolation, without requiring `\n` escapes.
 
 **Example:**
-```simple
+```text
 # Works: Single-line f-string
 let msg = f"Hello, {name}!"
 
@@ -232,7 +232,7 @@ String multiplication syntax (`"x" * n`) is not supported, forcing manual repeti
 Implement string multiplication operator to repeat strings:
 
 **Example:**
-```simple
+```text
 # Desired syntax (doesn't work):
 separator = "=" * 60
 indent = " " * 4
@@ -274,7 +274,7 @@ Match expressions with arrow syntax (`->`) are specified in the language but not
 Implement parser support for match expressions with arrow syntax:
 
 **Example:**
-```simple
+```text
 match value:
     Some(x) ->
         x + 1
@@ -316,7 +316,7 @@ Function return type annotations (`fn name() -> Type:`) are not parsed correctly
 Implement parser support for `-> Type` return type syntax in function signatures.
 
 **Example:**
-```simple
+```text
 fn read_file(path: String) -> Result[String, Error]:
     # implementation
 ```
@@ -352,7 +352,7 @@ Generic types like `Result[T, E]`, `Option[T]`, `Dict[K, V]` are not recognized 
 Implement parser support for square bracket generic syntax in all type positions.
 
 **Example:**
-```simple
+```text
 class Server:
     cache: Dict[String, String]
     session: Option[Session]
@@ -398,7 +398,7 @@ The implementation includes:
 6. Method calls on `EnumType` construct variants with data
 
 **Example:**
-```simple
+```text
 enum LmsError:
     MethodNotFound(String)
     InvalidParams(String)
@@ -436,7 +436,7 @@ let c = Color.Red  # Works!
 Multi-level qualified method calls and field access work correctly. The previous issue was testing with non-existent modules.
 
 **Example:**
-```simple
+```text
 class Time:
     fn now_ms() -> Int:
         return 1000
@@ -478,7 +478,7 @@ Struct/class construction with field names `ClassName { field: value }` is not p
 Support struct literal syntax for class instantiation.
 
 **Example:**
-```simple
+```text
 let info = protocol.ClientInfo {
     name: "claude",
     version: "1.0.0"
@@ -515,7 +515,7 @@ Using `result` as a parameter name causes "expected identifier, found Result" er
 Allow lowercase identifiers that match type names (e.g., `result`, `option`, `string`) to be used as parameter/variable names. Only treat capitalized identifiers as type references in type positions.
 
 **Example:**
-```simple
+```text
 # Should work:
 pub fn success_response(id: Int, result: Dict) -> Dict:
     return {"jsonrpc": "2.0", "id": id, "result": result}
@@ -557,7 +557,7 @@ Dict literals cannot span multiple lines. Opening brace on new line or nested st
 Support multi-line Dict literals with proper indentation handling, similar to Python dicts or JSON.
 
 **Example:**
-```simple
+```text
 # Should work:
 let response = {
     "jsonrpc": "2.0",
@@ -603,7 +603,7 @@ Modified Dict literal parsing in `src/parser/src/expressions/primary.rs` to skip
 **Implementation:**
 Native file I/O functions are now available via extern function declarations:
 
-```simple
+```text
 # Currently Available ✅
 extern fn native_fs_read(path: Str) -> Any      # Read file as byte array
 extern fn native_fs_write(path: Str, data: Array[Int]) -> Any  # Write bytes
@@ -617,7 +617,7 @@ extern fn native_async_file_close(handle: Any) -> Any
 ```
 
 **Example:**
-```simple
+```text
 extern fn native_fs_read(path: Str) -> Any
 extern fn native_fs_write(path: Str, data: Array[Int]) -> Any
 
@@ -653,7 +653,7 @@ let result = native_fs_write("/tmp/output.txt", data)
 **Implementation:**
 Comprehensive string methods are now available in the interpreter. All requested methods work:
 
-```simple
+```text
 # Substring operations ✅
 text.substring(0, 5)      # Extract substring by indices
 text.slice(0, 5)          # Alias for substring
@@ -734,7 +734,7 @@ Full JSON library implemented in `simple/std_lib/src/compiler_core/json.spl` (44
 - Helper functions: `get_string`, `get_int`, `get_object`, `get_array`
 
 **Example:**
-```simple
+```text
 import core.json
 
 # Parse JSON
@@ -777,7 +777,7 @@ The `?` operator for Result/Option propagation is fully implemented in parser an
 - For `Option[T]`: Unwraps `Some(value)` or early-returns `None`
 
 **Example:**
-```simple
+```text
 fn divide(a: i64, b: i64) -> Result[i64, String]:
     if b == 0:
         return Err("division by zero")
@@ -852,7 +852,7 @@ Full symbol table with cross-reference support implemented in `simple/std_lib/sr
 - `build_symbol_table(files)` - Build table from FileContext list
 
 **Example:**
-```simple
+```text
 use mcp.simple_lang.*
 
 # Build symbol table from files
@@ -889,3 +889,35 @@ print("Call references: {stats.get('call_refs')}")
 - Foundation for LSP implementation
 - Call graph visualization
 - Impact analysis
+
+---
+
+### [Core] Array Repetition Operator (`[T] * i64`)
+
+**Type:** Improvement
+**Category:** Feature
+**Priority:** Low
+**Proposed:** 2026-10-19
+**Status:** Requested
+
+**Problem:**
+`[7u8] * 64` (Python-style list repetition) is not part of the language: both
+the seed interpreter and the JIT reject it with
+`semantic: type mismatch: cannot convert array to int`. Thirteen loader /
+installer specs under `test/01_unit/os/` were written with it and failed in the
+2026-10-19 full sweep; they now use the documented fill literal.
+
+**Current form (works in both engines):**
+```text
+val sig: [u8] = [7u8; 64]
+val oversized = [0u8; MAX_WIRE_BYTES + 1]
+```
+
+**Proposed Solution:**
+Either accept `[x] * n` as sugar for `[x; n]` (single-element literal only),
+or reject it with a diagnostic that names the fill literal instead of the
+misleading array-to-int conversion error.
+
+**Impact:**
+- Breaking changes: No
+- Implementation: binary-op lowering in the interpreter, JIT and self-hosted HIR

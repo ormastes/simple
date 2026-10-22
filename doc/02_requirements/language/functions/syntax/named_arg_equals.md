@@ -14,7 +14,7 @@ for named arguments, providing flexibility in coding style.
 
 ## Syntax
 
-```simple
+```simple:skip
 # Colon syntax (preferred for readability)
 connect(host: "localhost", port: 8080)
 

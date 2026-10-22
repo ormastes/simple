@@ -1,0 +1,176 @@
+"""Actual MIR APIs for Result payloads that retain an nominal declaration identity."""
+# @req REQ-ENUM-RESULT-NOMINAL-IDENTITY
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolKind, SymbolTable}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instruction_graph.{MirFunction}
+use compiler.mir.mir_types.{MirType, MirSignature, MirConstValue}
+use compiler.mir.mir_instruction_support.{MirOperandKind, MirBinOp, MirTerminator}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLoweringExpr.method_calls_literals.*
+
+struct ResultNominalProbe:
+    function: MirFunction
+    diagnostics: [text]
+    fatal: bool
+    output_type: MirType?
+    payload_type: HirType?
+    owner: text
+    output_local: i64
+
+fn result_nominal_probe(payload: HirType, unwrap_err: bool, fallback: HirExpr?,
+        symbols: SymbolTable, has_prelowered: bool) -> ResultNominalProbe:
+    var lowering = MirLowering.new(symbols)
+    var builder = lowering.builder
+    builder.begin_function(SymbolId(id: 71), "result_nominal_probe",
+        MirSignature(params: [], return_type: MirType.unit(), is_variadic: false), Span.empty())
+    val prelowered = builder.emit_const_int(71)
+    lowering.builder = builder
+    val text_type = HirType(kind: HirTypeKind.Str, span: Span.empty())
+    val receiver_type = if unwrap_err:
+        HirType(kind: HirTypeKind.Result(text_type, payload), span: Span.empty())
+    else:
+        HirType(kind: HirTypeKind.Result(payload, text_type), span: Span.empty())
+    # Unexpected fresh evaluation emits E-MIR-EXPR-Error. The refusal oracle
+    # requires exactly the payload diagnostic in both receiver modes.
+    val receiver = HirExpr(kind: HirExprKind.Error, has_type_: true,
+        type_: receiver_type, span: Span.empty())
+    val output = lowering.lower_result_unwrap_core(receiver, payload, fallback, unwrap_err, prelowered, has_prelowered)
+    var diagnostics: [text] = []
+    var fatal = false
+    for error in lowering.errors:
+        diagnostics.push(error.message)
+        fatal = fatal or error.fatal
+    val output_type = lowering.local_mir_type_of(output)
+    val payload_type = lowering.find_local_hir_type(output.id)
+    val owner = lowering.struct_value_syms.get(output.id) ?? ""
+    var finished = lowering.builder
+    finished.terminate_return(nil)
+    ResultNominalProbe(function: finished.end_function(), diagnostics: diagnostics,
+        fatal: fatal, output_type: output_type, payload_type: payload_type,
+        owner: owner, output_local: output.id)
+
+fn result_nominal_calls(function: MirFunction) -> [text]:
+    var calls: [text] = []
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, callee, _):
+                    match callee.kind:
+                        case MirOperandKind.Const(MirConstValue.Str(name), _): calls.push(name)
+                        case _: fail("unexpected indirect call in Result Optional unwrap")
+                case _: ()
+    calls
+
+fn result_nominal_raw_copy(probe: ResultNominalProbe) -> bool:
+    var payload = -1
+    var copied = -1
+    for block in probe.function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(dest, callee, _):
+                    match callee.kind:
+                        case MirOperandKind.Const(MirConstValue.Str("rt_enum_payload"), _):
+                            if val local = dest: payload = local.id
+                        case _: ()
+                case MirInstKind.Copy(dest, source):
+                    if dest.id == probe.output_local: copied = source.id
+                case _: ()
+    payload >= 0 and copied == payload
+
+fn result_nominal_tag(function: MirFunction) -> i64:
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.BinOp(_, MirBinOp.Eq, _, right):
+                    match right.kind:
+                        case MirOperandKind.Copy(local):
+                            for candidate in block.instructions:
+                                match candidate.kind:
+                                    case MirInstKind.Const(dest, MirConstValue.Int(value), _):
+                                        if dest.id == local.id: return value
+                                    case _: ()
+                        case _: fail("Result discriminant key is not a constant local")
+                case _: ()
+    panic("Result unwrap did not compare a discriminant")
+
+fn result_nominal_rejection(probe: ResultNominalProbe, unwrap_err: bool, label: text):
+    val operation = if unwrap_err: "unwrap_err" else: "unwrap"
+    expect(probe.fatal).to_equal(true)
+    expect(probe.diagnostics.len()).to_equal(1)
+    expect(probe.diagnostics[0]).to_equal(
+        "unsupported Result {operation} payload type: payload is {label}, not a tuple")
+    expect(result_nominal_calls(probe.function).len()).to_equal(0)
+    expect(probe.payload_type).to_be_nil()
+    expect(probe.owner).to_equal("")
+
+describe "Result nominal declaration identity":
+    it "preserves each valid nominal owner and raw payload on both unwrap paths":
+        step("Lower real Struct Class and Enum declarations with matching table and declaration IDs")
+        for kind in [SymbolKind.Struct, SymbolKind.Class, SymbolKind.Enum]:
+            for unwrap_err in [false, true]:
+                var symbols = SymbolTable.new()
+                val symbol = symbols.define("Payload", kind, nil, Span.empty(),
+                    Visibility.Public, false, Some("nominal_probe"))
+                val payload = HirType(kind: HirTypeKind.Named(symbol, []), span: Span.empty())
+                val probe = result_nominal_probe(payload, unwrap_err, nil, symbols, true)
+                expect(probe.fatal).to_equal(false)
+                expect(probe.diagnostics.len()).to_equal(0)
+                expect(probe.payload_type).to_equal(Some(payload))
+                expect(probe.output_type).to_equal(Some(MirType.i64()))
+                expect(result_nominal_raw_copy(probe)).to_equal(true)
+                val expected_owner = if kind == SymbolKind.Struct: "Payload"
+                    elif kind == SymbolKind.Class: "nominal_probe.Payload"
+                    else: ""
+                expect(probe.owner).to_equal(expected_owner)
+                expect(result_nominal_tag(probe.function)).to_equal(if unwrap_err: 1 else: 0)
+                val calls = result_nominal_calls(probe.function)
+                expect(calls.len()).to_equal(3)
+                expect(calls).to_contain("rt_enum_discriminant")
+                expect(calls).to_contain("rt_enum_payload")
+                expect(calls).to_contain("rt_panic")
+                var mismatch_count = 0
+                for block in probe.function.blocks:
+                    if block.label == Some("result_unwrap_mismatch"):
+                        mismatch_count = mismatch_count + 1
+                        val reason = if unwrap_err: "called `.unwrap_err()` on an Ok Result"
+                            else: "called `.unwrap()` on an Err Result"
+                        expect(block.terminator).to_equal(MirTerminator.Abort(reason))
+                expect(mismatch_count).to_equal(1)
+
+    it "rejects each wrong declaration ID before evaluating either receiver":
+        step("Keep the requested table key but substitute a different actual declaration of the same kind")
+        for kind in [SymbolKind.Struct, SymbolKind.Class, SymbolKind.Enum]:
+            for unwrap_err in [false, true]:
+                var symbols = SymbolTable.new()
+                val requested = symbols.define("Payload", kind, nil, Span.empty(),
+                    Visibility.Public, false, Some("nominal_probe"))
+                val other_symbol = symbols.define("Other", kind, nil, Span.empty(),
+                    Visibility.Public, false, Some("other_owner"))
+                symbols.symbols[requested.id] = symbols.symbols[other_symbol.id]
+                val payload = HirType(kind: HirTypeKind.Named(requested, []), span: Span.empty())
+                for has_prelowered in [false, true]:
+                    val probe = result_nominal_probe(payload, unwrap_err, nil, symbols, has_prelowered)
+                    result_nominal_rejection(probe, unwrap_err, "Named(args=0)")
+
+    it "retains rejection of missing and non-type declarations":
+        step("Check absent owners and a present function declaration without accepting payload access")
+        var symbols = SymbolTable.new()
+        val function = symbols.define("callable", SymbolKind.Function, nil, Span.empty(),
+            Visibility.Public, false, Some("nominal_probe"))
+        for symbol in [SymbolId(id: -77), function]:
+            for unwrap_err in [false, true]:
+                val payload = HirType(kind: HirTypeKind.Named(symbol, []), span: Span.empty())
+                result_nominal_rejection(result_nominal_probe(payload, unwrap_err, nil, symbols, true),
+                    unwrap_err, "Named(args=0)")
+
+    it "keeps erased Any outside nominal payload admission":
+        step("Verify both unwrap operations retain the exact fatal Any diagnostic")
+        val payload = HirType(kind: HirTypeKind.Any, span: Span.empty())
+        for unwrap_err in [false, true]:
+            result_nominal_rejection(result_nominal_probe(payload, unwrap_err, nil, SymbolTable.new(), true),
+                unwrap_err, "Any")

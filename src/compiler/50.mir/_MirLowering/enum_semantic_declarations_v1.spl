@@ -1,0 +1,376 @@
+# EE-01 invocation-owned semantic declaration capture. Physical lower_type and
+# native MIR remain unchanged. No process-global enum registry supplies facts.
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolKind, SymbolId}
+use compiler.hir.hir_definitions.{HirEnum, HirVariant, HirVariantKind, HirExpr, HirExprKind}
+use compiler.hir.hir_operators.{HirBinOp, HirUnaryOp}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirTypeDef, MirTypeDefKind,
+    MirVariantDef, MirConstValue}
+use compiler.mir._MirLoweringExpr.method_calls_literals.*
+use compiler.mir.mir_enum_semantic_types.{MirEnumVariantSlotsV1, MirEnumDeclarationIdentityV1}
+
+fn enum_semantic_checked_binary_v1(op: HirBinOp, left: i64, right: i64) -> Result<i64, text>:
+    val maximum: i64 = 9223372036854775807
+    val minimum: i64 = -9223372036854775807 - 1
+    # Each threshold operation is itself representable in its guarded sign
+    # domain. Never calculate an overflowing result to discover overflow.
+    match op:
+        case HirBinOp.Add:
+            if right > 0:
+                if left > maximum - right: return Err("EE-01: discriminant addition overflow")
+            elif right < 0:
+                if left < minimum - right: return Err("EE-01: discriminant addition overflow")
+            Ok(left + right)
+        case HirBinOp.Sub:
+            if right > 0:
+                if left < minimum + right: return Err("EE-01: discriminant subtraction overflow")
+            elif right < 0:
+                if left > maximum + right: return Err("EE-01: discriminant subtraction overflow")
+            Ok(left - right)
+        case HirBinOp.Mul:
+            if left > 0:
+                if right > 0:
+                    if left > maximum / right: return Err("EE-01: discriminant multiplication overflow")
+                elif right < 0:
+                    if right < minimum / left: return Err("EE-01: discriminant multiplication overflow")
+            elif left < 0:
+                if right > 0:
+                    if left < minimum / right: return Err("EE-01: discriminant multiplication overflow")
+                elif right < 0:
+                    if left < maximum / right: return Err("EE-01: discriminant multiplication overflow")
+            Ok(left * right)
+        case HirBinOp.Div | HirBinOp.Mod:
+            if right == 0: return Err("EE-01: discriminant zero divisor")
+            # Both division and remainder may trap for MIN / -1 in the legacy
+            # folder, even though the mathematical remainder would be zero.
+            if left == minimum and right == -1:
+                return Err("EE-01: discriminant division overflow")
+            if op == HirBinOp.Div: Ok(left / right) else: Ok(left % right)
+        case HirBinOp.Shl | HirBinOp.Shr:
+            if right < 0 or right >= 64: return Err("EE-01: discriminant shift count outside 0..63")
+            # Do not let implementation-defined signed right shifts or signed
+            # negative left shifts reach the ordinary unchecked folder.
+            if left < 0: return Err("EE-01: discriminant negative shift operand is not portable")
+            if op == HirBinOp.Shl:
+                if left > (maximum >> right): return Err("EE-01: discriminant left shift overflow")
+                Ok(left << right)
+            else: Ok(left >> right)
+        case HirBinOp.BitAnd: Ok(left & right)
+        case HirBinOp.BitOr: Ok(left | right)
+        case HirBinOp.BitXor: Ok(left ^ right)
+        case _: Err("EE-01: unsupported enum discriminant binary operator")
+
+fn enum_semantic_checked_discriminant_v1(expr: HirExpr, depth: i64, work: i64) -> Result<(i64, i64), text>:
+    # Complete checked evaluation precedes the existing folder. Returned work
+    # charges each node before recursion while values prove every inner domain.
+    if depth > 128 or work >= 65536:
+        return Err("EE-01: enum declaration discriminant depth/work limit")
+    if expr == nil:
+        return Err("EE-01: missing explicit enum discriminant expression")
+    val next = work + 1
+    match expr.kind:
+        case HirExprKind.IntLit(value, _): Ok((value, next))
+        case HirExprKind.Unary(op, operand):
+            val inner = enum_semantic_checked_discriminant_v1(operand, depth + 1, next)?
+            val inner_value = inner.0
+            match op:
+                case HirUnaryOp.Neg:
+                    val minimum: i64 = -9223372036854775807 - 1
+                    if inner_value == minimum: return Err("EE-01: discriminant negation overflow")
+                    Ok((0 - inner_value, inner.1))
+                case HirUnaryOp.BitNot: Ok((~inner_value, inner.1))
+                case _: Err("EE-01: unsupported enum discriminant unary operator")
+        case HirExprKind.Binary(op, left, right):
+            val left_result = enum_semantic_checked_discriminant_v1(left, depth + 1, next)?
+            val right_result = enum_semantic_checked_discriminant_v1(right, depth + 1, left_result.1)?
+            val value = enum_semantic_checked_binary_v1(op, left_result.0, right_result.0)?
+            Ok((value, right_result.1))
+        case _: Err("EE-01: unsupported enum discriminant expression")
+
+impl MirLowering:
+    me enum_semantic_named_type_v1(type_: HirType) -> MirType?:
+        """Resolve a nominal enum only from this invocation's selected owners."""
+        if (not self.enum_semantic_capture_enabled or type_ == nil
+                or self.enum_semantic_capture_error != ""): return nil
+        match type_.kind:
+            case HirTypeKind.Named(symbol, arguments):
+                if arguments.len() != 0: return nil
+                if val retained_id = self.enum_semantic_source_owners.get(symbol.id):
+                    if val declaration = self.enum_semantic_declarations.get(retained_id):
+                        if declaration.symbol.id == retained_id:
+                            return Some(MirType(kind: MirTypeKind.Enum(declaration.symbol)))
+                nil
+            case _: nil
+
+    me enum_semantic_declaration_type_v1(module: HirModule, type_: HirType,
+            depth: i64, work: i64) -> Result<(MirType, i64), text>:
+        # This converter describes source semantics, never native carrier types.
+        # Its returned counter charges every visited type before recursion/growth.
+        if depth > 128 or work >= 65536:
+            return Err("EE-01: enum declaration type depth/work limit")
+        if type_ == nil:
+            return Err("EE-01: missing enum payload type")
+        val next = work + 1
+        match type_.kind:
+            case HirTypeKind.Int(bits, signed):
+                val kind = if signed:
+                    match bits:
+                        case 8: MirTypeKind.I8
+                        case 16: MirTypeKind.I16
+                        case 32: MirTypeKind.I32
+                        case 64: MirTypeKind.I64
+                        case _: return Err("EE-01: unsupported signed enum payload width")
+                else:
+                    match bits:
+                        case 8: MirTypeKind.U8
+                        case 16: MirTypeKind.U16
+                        case 32: MirTypeKind.U32
+                        case 64: MirTypeKind.U64
+                        case _: return Err("EE-01: unsupported unsigned enum payload width")
+                Ok((MirType(kind: kind), next))
+            case HirTypeKind.Float(bits):
+                if bits == 32: return Ok((MirType(kind: MirTypeKind.F32), next))
+                if bits == 64: return Ok((MirType(kind: MirTypeKind.F64), next))
+                Err("EE-01: unsupported floating enum payload width")
+            case HirTypeKind.Bool: Ok((MirType(kind: MirTypeKind.Bool), next))
+            case HirTypeKind.Char: Ok((MirType(kind: MirTypeKind.Char), next))
+            case HirTypeKind.Unit: Ok((MirType(kind: MirTypeKind.Unit), next))
+            case HirTypeKind.Never: Ok((MirType(kind: MirTypeKind.Never), next))
+            case HirTypeKind.Named(symbol, arguments):
+                if arguments.len() != 0:
+                    return Err("EE-01: unresolved generic enum payload")
+                if val enum_type = self.enum_semantic_named_type_v1(type_):
+                    return Ok((enum_type, next))
+                if val structure = module.structs.get(symbol):
+                    if (structure.symbol.id != symbol.id or structure.type_params.len() != 0
+                            or structure.is_generic_template):
+                        return Err("EE-01: mismatched or generic struct enum payload owner")
+                    if val source_symbol = module.symbols.symbols.get(symbol.id):
+                        if source_symbol.id.id != symbol.id:
+                            return Err("EE-01: struct enum payload symbol identity mismatch")
+                        match source_symbol.kind:
+                            case SymbolKind.Struct: ()
+                            case _: return Err("EE-01: struct enum payload symbol kind mismatch")
+                    else: return Err("EE-01: struct enum payload symbol is outside the source environment")
+                    return Ok((MirType(kind: MirTypeKind.Struct(structure.symbol)), next))
+                if val class_ = module.classes.get(symbol):
+                    if (class_.symbol.id != symbol.id or class_.type_params.len() != 0
+                            or class_.is_generic_template):
+                        return Err("EE-01: mismatched or generic class enum payload owner")
+                    if val source_symbol = module.symbols.symbols.get(symbol.id):
+                        if source_symbol.id.id != symbol.id:
+                            return Err("EE-01: class enum payload symbol identity mismatch")
+                        match source_symbol.kind:
+                            case SymbolKind.Class: ()
+                            case _: return Err("EE-01: class enum payload symbol kind mismatch")
+                    else: return Err("EE-01: class enum payload symbol is outside the source environment")
+                    return Ok((MirType(kind: MirTypeKind.Struct(class_.symbol)), next))
+                Err("EE-01: enum payload nominal owner is not in the source module")
+            case HirTypeKind.Tuple(elements):
+                var converted: [MirType] = []
+                var used = next
+                for element in elements:
+                    val result = self.enum_semantic_declaration_type_v1(module, element, depth + 1, used)?
+                    converted.push(result.0)
+                    used = result.1
+                Ok((MirType(kind: MirTypeKind.Tuple(converted)), used))
+            case HirTypeKind.Array(element, size):
+                if val fixed_size = size:
+                    if fixed_size < 0: return Err("EE-01: negative enum payload array size")
+                    val result = self.enum_semantic_declaration_type_v1(module, element, depth + 1, next)?
+                    return Ok((MirType(kind: MirTypeKind.Array(result.0, fixed_size)), result.1))
+                Err("EE-01: unresolved enum payload array size")
+            case HirTypeKind.Result(ok, error):
+                val ok_result = self.enum_semantic_declaration_type_v1(module, ok, depth + 1, next)?
+                val error_result = self.enum_semantic_declaration_type_v1(module, error, depth + 1, ok_result.1)?
+                Ok((MirType(kind: MirTypeKind.Result(ok_result.0, error_result.0)), error_result.1))
+            case HirTypeKind.TypeParam(_, _): Err("EE-01: unresolved enum payload type parameter")
+            case HirTypeKind.Infer(_, _): Err("EE-01: unresolved enum payload inference variable")
+            case HirTypeKind.Any: Err("EE-01: erased Any enum payload has no exact semantic type")
+            case HirTypeKind.Error: Err("EE-01: invalid enum payload source type")
+            case HirTypeKind.Str: Err("EE-01: string enum payload has no admitted semantic carrier adapter")
+            case HirTypeKind.Ptr(_, _) | HirTypeKind.Ref(_, _):
+                Err("EE-01: pointer/reference enum payload is outside the pure semantic subset")
+            case _: Err("EE-01: unsupported or unresolved enum payload semantic type")
+
+    me prepare_enum_semantic_declarations_v1(module: HirModule) -> Result<(), text>:
+        """Prepare privately; a failure clears all partial declaration records."""
+        self.enum_semantic_declarations = {}
+        self.enum_semantic_source_owners = {}
+        self.enum_semantic_source_declarations = []
+        self.enum_semantic_variant_slots = {}
+        self.enum_semantic_variant_fields = {}
+        if self.enum_semantic_capture_error != "":
+            return Err(self.enum_semantic_capture_error)
+        if not self.enum_semantic_capture_enabled:
+            self.enum_semantic_capture_error = "EE-01: enum declaration capture is not enabled"
+            return Err(self.enum_semantic_capture_error)
+        match self.collect_enum_semantic_declarations_v1(module):
+            case Ok(_): Ok(())
+            case Err(message):
+                self.enum_semantic_declarations = {}
+                self.enum_semantic_source_owners = {}
+                self.enum_semantic_source_declarations = []
+                self.enum_semantic_variant_slots = {}
+                self.enum_semantic_variant_fields = {}
+                self.enum_semantic_capture_error = message
+                Err(message)
+
+    me collect_enum_semantic_declarations_v1(module: HirModule) -> Result<(), text>:
+        var used: i64 = 0
+        var identities: Dict<i64, bool> = {}
+        # Predeclare every exact owner before inspecting recursive payloads.
+        for raw_declaration in module.enums.values():
+            if used >= 65536: return Err("EE-01: enum declaration node limit")
+            used = used + 1
+            val declaration: HirEnum = raw_declaration
+            val owner_id = declaration.symbol.id
+            if owner_id < 0 or identities.get(owner_id) != nil:
+                return Err("EE-01: duplicate or invalid enum declaration identity")
+            if val keyed = module.enums.get(declaration.symbol):
+                if keyed.symbol.id != owner_id or keyed.name != declaration.name:
+                    return Err("EE-01: enum declaration table key/owner mismatch")
+            else:
+                return Err("EE-01: enum declaration is not keyed by its actual owner")
+            if module.structs.get(declaration.symbol) != nil or module.classes.get(declaration.symbol) != nil:
+                return Err("EE-01: enum identity collides with another nominal declaration")
+            if declaration.name == "":
+                return Err("EE-01: enum declaration has no source name")
+            if declaration.runtime_name == "":
+                return Err("EE-01: enum declaration has no resolved runtime name")
+            if val source_symbol = module.symbols.symbols.get(owner_id):
+                if source_symbol.id.id != owner_id:
+                    return Err("EE-01: enum source symbol identity mismatch")
+                if source_symbol.name != declaration.name and source_symbol.name != declaration.runtime_name:
+                    return Err("EE-01: enum source symbol name mismatch")
+                match source_symbol.kind:
+                    case SymbolKind.Enum: ()
+                    case _: return Err("EE-01: enum source symbol kind mismatch")
+            else: return Err("EE-01: enum owner is outside the source symbol environment")
+            if declaration.type_params.len() != 0 or declaration.is_generic_template:
+                return Err("EE-01: unresolved generic enum declaration")
+            if declaration.complete_open or declaration.dyn_open:
+                return Err("EE-01: open enum declaration has no closed constructor universe")
+            identities[owner_id] = true
+            # Private provisional source IDs do not allocate canonical symbols.
+            # The post-emission finalizer must rebind before publication.
+            self.enum_semantic_source_owners[owner_id] = owner_id
+            self.enum_semantic_declarations[owner_id] = MirTypeDef(
+                symbol: declaration.symbol, name: declaration.name,
+                kind: MirTypeDefKind.Enum([]), is_export_c: false, export_name: "")
+        for raw_declaration in module.enums.values():
+            val declaration: HirEnum = raw_declaration
+            val retained_id = match self.enum_semantic_source_owners.get(declaration.symbol.id):
+                case Some(value): value
+                case nil: return Err("EE-01: missing prepared source enum owner")
+            val retained_owner = SymbolId(id: retained_id)
+            var variants: [MirVariantDef] = []
+            var source_variants: [MirEnumVariantSlotsV1] = []
+            var names: Dict<text, bool> = {}
+            var discriminants: Dict<i64, bool> = {}
+            var next_discriminant: i64 = 0
+            for raw_variant in declaration.variants:
+                if used >= 65536: return Err("EE-01: enum variant node limit")
+                used = used + 1
+                val variant: HirVariant = raw_variant
+                if variant.symbol.id < 0 or identities.get(variant.symbol.id) != nil:
+                    return Err("EE-01: duplicate or invalid enum variant identity")
+                if variant.name == "" or names.get(variant.name) != nil:
+                    return Err("EE-01: empty or duplicate enum variant name")
+                # HIR has no variant owner field. Validate the actual member's
+                # ID/name/kind/source span against the source symbol environment,
+                # plus its containment in this declaration before projection.
+                if val source_symbol = module.symbols.symbols.get(variant.symbol.id):
+                    if source_symbol.id.id != variant.symbol.id or source_symbol.name != variant.name:
+                        return Err("EE-01: enum variant source symbol identity/name mismatch")
+                    match source_symbol.kind:
+                        case SymbolKind.EnumVariant: ()
+                        case _: return Err("EE-01: enum variant source symbol kind mismatch")
+                    val span = source_symbol.span
+                    if (span.start != variant.span.start or span.end != variant.span.end
+                            or span.file != variant.span.file or span.line != variant.span.line
+                            or span.col != variant.span.col):
+                        return Err("EE-01: enum variant source symbol span mismatch")
+                    if (variant.span.file != declaration.span.file
+                            or variant.span.start < declaration.span.start
+                            or variant.span.end > declaration.span.end):
+                        return Err("EE-01: enum variant is outside its source declaration")
+                else: return Err("EE-01: enum variant is outside the source symbol environment")
+                identities[variant.symbol.id] = true
+                names[variant.name] = true
+                var discriminant = next_discriminant
+                if variant.has_discriminant:
+                    val checked = enum_semantic_checked_discriminant_v1(variant.discriminant, 0, used)?
+                    used = checked.1
+                    if checked.0 < 0 or checked.0 > 2147483647:
+                        return Err("EE-01: enum discriminant is outside the portable runtime range")
+                    if val folded = self.lower_const_expr(variant.discriminant):
+                        match folded:
+                            case MirConstValue.Int(value):
+                                if value != checked.0:
+                                    return Err("EE-01: enum discriminant checked evaluation disagrees with native folder")
+                                discriminant = value
+                            case _: return Err("EE-01: explicit enum discriminant is not an integer")
+                    else:
+                        return Err("EE-01: explicit enum discriminant cannot be folded")
+                if discriminant < 0 or discriminant > 2147483647:
+                    return Err("EE-01: enum discriminant is outside the portable runtime range")
+                if discriminants.get(discriminant) != nil:
+                    return Err("EE-01: duplicate enum discriminant")
+                discriminants[discriminant] = true
+                next_discriminant = discriminant + 1
+                var slots: [MirType] = []
+                var field_names: [text] = []
+                var payload: MirType? = nil
+                match variant.kind:
+                    case HirVariantKind.Unit: ()
+                    case HirVariantKind.Tuple(types):
+                        for type_ in types:
+                            val result = self.enum_semantic_declaration_type_v1(module, type_, 0, used)?
+                            slots.push(result.0)
+                            used = result.1
+                        if slots.len() == 1:
+                            payload = Some(slots[0])
+                        else:
+                            payload = Some(MirType(kind: MirTypeKind.Tuple(slots)))
+                    case HirVariantKind.Struct(fields):
+                        var seen_fields: Dict<text, bool> = {}
+                        for field in fields:
+                            if field.name == "" or seen_fields.get(field.name) != nil:
+                                return Err("EE-01: empty or duplicate enum payload field name")
+                            if field.symbol.id < 0 or identities.get(field.symbol.id) != nil:
+                                return Err("EE-01: duplicate or invalid enum payload field identity")
+                            if val source_symbol = module.symbols.symbols.get(field.symbol.id):
+                                if source_symbol.id.id != field.symbol.id or source_symbol.name != field.name:
+                                    return Err("EE-01: enum payload field source identity/name mismatch")
+                                match source_symbol.kind:
+                                    case SymbolKind.Field: ()
+                                    case _: return Err("EE-01: enum payload field source kind mismatch")
+                            else: return Err("EE-01: enum payload field is outside the source environment")
+                            val result = self.enum_semantic_declaration_type_v1(module, field.type_, 0, used)?
+                            slots.push(result.0)
+                            field_names.push(field.name)
+                            used = result.1
+                            identities[field.symbol.id] = true
+                            seen_fields[field.name] = true
+                        payload = Some(MirType(kind: MirTypeKind.Tuple(slots)))
+                # Preserve actual source slot arity separately: a single Tuple
+                # slot is distinct from multiple tuple-variant slots. Struct
+                # field names remain paired with source-order slots until the
+                # producer resolves each named pattern field, never erased.
+                val slot_key = retained_id.to_string() + ":" + discriminant.to_string()
+                self.enum_semantic_variant_slots[slot_key] = slots
+                self.enum_semantic_variant_fields[slot_key] = field_names
+                source_variants.push(MirEnumVariantSlotsV1(discriminant: discriminant,
+                    source_variant: variant.symbol, slot_types: slots, slot_names: field_names))
+                variants.push(MirVariantDef(name: variant.name, discriminant: discriminant, payload: payload))
+            self.enum_semantic_declarations[retained_id] = MirTypeDef(
+                symbol: retained_owner, name: declaration.name,
+                kind: MirTypeDefKind.Enum(variants), is_export_c: false, export_name: "")
+            # -1 deliberately cannot certify a runtime identity. Only the
+            # finalizer's actual post-lowering qualified registry lookup can.
+            self.enum_semantic_source_declarations.push(MirEnumDeclarationIdentityV1(
+                owner: retained_owner, source_owner: declaration.symbol,
+                runtime_name: declaration.runtime_name, runtime_identity: -1,
+                variants: source_variants))
+        Ok(())

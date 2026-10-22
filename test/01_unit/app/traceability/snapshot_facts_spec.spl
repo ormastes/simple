@@ -1,0 +1,75 @@
+# @tag:in-development
+# REQ-TRC-002/007/008: actual immutable extractor behavior, not source-string checks.
+use std.spec
+use std.common.traceability.model.*
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use app.traceability.extract.snapshot_facts.{extract_snapshot_trace_facts}
+
+fn extraction_subject() -> SnapshotSubject:
+    SnapshotSubject(repository_id: "repo", snapshot_id: "snapshot:staged",
+        kind: "git-index", revision_id: "", tree_id: "tree:staged", object_format: "sha1")
+
+fn extraction_policy() -> TracePolicy:
+    TracePolicy(id: "policy:unit", conventions: [], authorities: [], max_nodes: 100, max_claims: 100)
+
+describe "Snapshot trace extraction":
+    it "does not turn a quoted requirement example into semantic coverage":
+        val artifact = SnapshotArtifact(path: "doc/example.md", blob_id: "blob:example",
+            content: "Quoted example: REQ-TRC-002 accepted_by test:sample", visibility: "public")
+        val snapshot = SnapshotInput(subject: extraction_subject(), artifacts: [artifact], complete: true)
+        val facts = extract_snapshot_trace_facts(snapshot, extraction_policy(), [], "manifest:1", "generation:1")
+        expect(facts.nodes.len()).to_equal(1)
+        expect(facts.claims.len()).to_equal(0)
+        expect(facts.nodes[0].kind).to_equal(TraceNodeKind.Document)
+        expect(facts.locators[0].blob_id).to_equal("blob:example")
+
+    it "retains the immutable snapshot identity and source blob":
+        val artifact = SnapshotArtifact(path: "src/app/parser.spl", blob_id: "blob:staged",
+            content: "fn parse(): 1", visibility: "public")
+        val facts = extract_snapshot_trace_facts(SnapshotInput(subject: extraction_subject(),
+            artifacts: [artifact], complete: true), extraction_policy(), [], "manifest:1", "generation:1")
+        expect(facts.subject.snapshot_id).to_equal("snapshot:staged")
+        expect(facts.nodes[0].kind).to_equal(TraceNodeKind.SourceFile)
+        expect(facts.locators[0].blob_id).to_equal("blob:staged")
+
+    it "fails completeness when a registered declaration is absent":
+        val facts = extract_snapshot_trace_facts(SnapshotInput(subject: extraction_subject(),
+            artifacts: [], complete: true), extraction_policy(), ["doc/trace.sdn"], "manifest:1", "generation:1")
+        expect(facts.complete).to_equal(false)
+        expect(facts.diagnostics[0].code).to_equal("TRACE-MISSING-ENDPOINT")
+
+    it "never calls a partial existence inventory complete":
+        val facts = extract_snapshot_trace_facts(SnapshotInput(subject: extraction_subject(),
+            artifacts: [], complete: false), extraction_policy(), [], "manifest:1", "generation:1")
+        expect(facts.complete).to_equal(false)
+        expect(facts.diagnostics[0].code).to_equal("TRACE-SNAPSHOT-INCOMPLETE")
+
+    it "rejects duplicate path inventories rather than choosing a blob":
+        val artifact = SnapshotArtifact(path: "src/a.spl", blob_id: "blob:a", content: "", visibility: "public")
+        val facts = extract_snapshot_trace_facts(SnapshotInput(subject: extraction_subject(),
+            artifacts: [artifact, artifact], complete: true), extraction_policy(), [], "manifest:1", "generation:1")
+        expect(facts.complete).to_equal(false)
+        expect(facts.diagnostics[0].message).to_contain("duplicate snapshot artifact")
+
+    it "uses the declared file identity without creating a competing convention candidate":
+        val declaration = sdn_encode_canonical(SdnValue.Dict({
+            "schema": SdnValue.Dict({"name": SdnValue.String("simple.trace.declarations"), "version": SdnValue.Int(1)}),
+            "nodes": SdnValue.Array([SdnValue.Dict({"id": SdnValue.String("source:canonical"),
+                "kind": SdnValue.String("source_file"), "title": SdnValue.String("Parser")})]),
+            "test_definitions": SdnValue.Array([]), "claims": SdnValue.Array([]), "origins": SdnValue.Array([]),
+            "locators": SdnValue.Array([SdnValue.Dict({"entity_id": SdnValue.String("source:canonical"),
+                "path": SdnValue.String("src/parser.spl"), "locator_kind": SdnValue.String("file"), "locator": SdnValue.String("")})])}))
+        # Inventory order deliberately puts the source before its declaration.
+        val artifacts = [
+            SnapshotArtifact(path: "src/parser.spl", blob_id: "blob:source", content: "fn parse(): 1", visibility: "public"),
+            SnapshotArtifact(path: "doc/trace.sdn", blob_id: "blob:declaration", content: declaration, visibility: "public")]
+        val facts = extract_snapshot_trace_facts(SnapshotInput(subject: extraction_subject(), artifacts: artifacts, complete: true),
+            extraction_policy(), ["doc/trace.sdn"], "manifest:1", "generation:1")
+        var source_count = 0
+        for node in facts.nodes:
+            if node.kind == TraceNodeKind.SourceFile:
+                source_count = source_count + 1
+                expect(node.id).to_equal("source:canonical")
+        expect(source_count).to_equal(1)
+        expect(facts.complete).to_equal(true)

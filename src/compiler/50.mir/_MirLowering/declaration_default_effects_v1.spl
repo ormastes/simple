@@ -1,0 +1,39 @@
+# Function ABI lowering intentionally does not consume effects. Retain and
+# validate every nested Throws type separately before publishing a default call.
+use compiler.hir.hir_types.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.function_lowering.*
+use compiler.mir._MirLoweringExpr.lambda_abi.{lambda_abi_type_resolved}
+
+impl MirLowering:
+    me declaration_default_effect_types_valid_v1(type_: HirType) -> bool:
+        if type_ == nil: return false
+        match type_.kind:
+            case HirTypeKind.Function(params, result, effects):
+                for raw in params:
+                    val parameter: HirType = raw
+                    if not self.declaration_default_effect_types_valid_v1(parameter): return false
+                if not self.declaration_default_effect_types_valid_v1(result): return false
+                for raw in effects:
+                    val effect: Effect = raw
+                    match effect.kind:
+                        case EffectKind.Throws(thrown):
+                            val errors_before = self.errors.len()
+                            val physical_thrown = self.lower_type(thrown)
+                            if self.errors.len() != errors_before or not lambda_abi_type_resolved(thrown): return false
+                            if not self.declaration_default_effect_types_valid_v1(thrown): return false
+                        case _: ()
+            case HirTypeKind.Tuple(items) | HirTypeKind.Union(items) | HirTypeKind.Named(_, items):
+                for raw in items:
+                    val item: HirType = raw
+                    if not self.declaration_default_effect_types_valid_v1(item): return false
+            case HirTypeKind.Array(inner, _) | HirTypeKind.Slice(inner) | HirTypeKind.Ref(inner, _) | HirTypeKind.Ptr(inner, _) | HirTypeKind.Optional(inner) | HirTypeKind.Isolated(inner):
+                return self.declaration_default_effect_types_valid_v1(inner)
+            case HirTypeKind.Unique(inner) | HirTypeKind.Shared(inner) | HirTypeKind.Weak(inner):
+                return self.declaration_default_effect_types_valid_v1(inner)
+            case HirTypeKind.Dict(left, right) | HirTypeKind.Result(left, right):
+                return self.declaration_default_effect_types_valid_v1(left) and self.declaration_default_effect_types_valid_v1(right)
+            case HirTypeKind.Tensor(element, _, _):
+                return self.declaration_default_effect_types_valid_v1(element)
+            case _: ()
+        true

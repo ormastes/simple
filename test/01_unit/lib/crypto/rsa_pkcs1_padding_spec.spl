@@ -1,0 +1,79 @@
+# RSAES-PKCS1-v1_5 type-2 padding must use random NONZERO PS (RFC 8017 7.2.1).
+# Bug: doc/08_tracking/bug/rsa_pkcs1_encrypt_deterministic_padding_2026-06-15.md
+#
+# The padding helper is module-private, so it is observed through the public
+# encrypt with e=1 and an all-0xFF modulus: c = EM^1 mod n = EM (EM < n since
+# EM[0] = 0), which exposes the padded block without an RSA-2048 modexp.
+#
+# tag: unit, crypto, rsa
+
+use std.spec.step
+use std.spipe.*
+use std.common.crypto.rsa_pkcs1.{rsa_pkcs1_public_encrypt}
+
+fn _modulus() -> [u8]:
+    var n: [u8] = []
+    var i: u64 = 0
+    while i < 64:
+        n.push(0xFFu8)
+        i = i + 1
+    n
+
+fn _msg() -> [u8]:
+    var m: [u8] = []
+    var i: u64 = 0
+    while i < 16:
+        m.push((i + 1).to_u8())
+        i = i + 1
+    m
+
+fn _em() -> [u8]:
+    rsa_pkcs1_public_encrypt(_modulus(), [1u8], _msg())
+
+describe "RSAES-PKCS1-v1_5 type-2 padding":
+    it "builds 00 02 PS 00 M with nonzero PS of at least 8 bytes":
+        step("encrypt with e=1 so the ciphertext is the padded block")
+        val em = _em()
+        expect(em.len().to_i64()).to_equal(64)
+        expect(em[0].to_i64()).to_equal(0)
+        expect(em[1].to_i64()).to_equal(2)
+        val sep = 64 - 16 - 1
+        expect(em[sep].to_i64()).to_equal(0)
+        expect((sep - 2) >= 8).to_equal(true)
+        var zeros: i64 = 0
+        var i: i64 = 2
+        while i < sep:
+            if em[i].to_i64() == 0:
+                zeros = zeros + 1
+            i = i + 1
+        expect(zeros).to_equal(0)
+        var j: i64 = 0
+        var tail_ok = true
+        while j < 16:
+            if em[sep + 1 + j].to_i64() != j + 1:
+                tail_ok = false
+            j = j + 1
+        expect(tail_ok).to_equal(true)
+
+    it "draws a different PS on every call":
+        step("two encryptions of the same plaintext")
+        val a = _em()
+        val b = _em()
+        var same = true
+        var i: i64 = 2
+        while i < 47:
+            if a[i] != b[i]:
+                same = false
+            i = i + 1
+        expect(same).to_equal(false)
+
+    it "does not use the 0xFF placeholder fill":
+        step("PS is not all 0xFF")
+        val em = _em()
+        var all_ff = true
+        var i: i64 = 2
+        while i < 47:
+            if em[i].to_i64() != 255:
+                all_ff = false
+            i = i + 1
+        expect(all_ff).to_equal(false)

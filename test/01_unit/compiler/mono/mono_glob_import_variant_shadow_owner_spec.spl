@@ -1,0 +1,96 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-GENERIC-NOMINAL-IDENTITY
+# @tag: unit, compiler, mono, generics
+
+"""
+# Glob-imported nominal type argument whose name is also an enum variant
+
+Bug mono_tuple_get_nominal_owner_e_mono_041_2026_10_19. Phase 3 refused
+`_sffi_tuple_get<Expr>`, `<Block>` and `<Block?>` in
+`20.hir/hir_lowering/_Items/module_callable_types.spl` with E-MONO-041 (no
+proven declaration owner). `Block`/`Expr` reach that module through
+`use compiler.frontend.parser_types_expr.*`, which also declares
+`ExprKind.Block(Block)` and `StmtKind.Expr(Expr)`. HIR lowering of those
+(imported) enums defined each variant name as an untyped EnumVariant symbol
+and rebound the bare `Block`/`Expr` spelling to it, so the written type
+argument lowered to Named(<variant>) and mono could not prove an owner.
+"""
+
+use std.spec
+use std.spec.step
+use compiler.common.config.Logger
+use compiler.common.driver_core_types.SourceFile
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.hirlowering_for_module
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirModule}
+use compiler.mono.monomorphize_integration.{run_monomorphization_with_diagnostics}
+
+val PTYPES_SRC = "struct Expr:\n" +
+    "    v: i64\n" +
+    "\n" +
+    "struct Block:\n" +
+    "    n: i64\n" +
+    "\n" +
+    "enum ExprKind:\n" +
+    "    Lit(i64)\n" +
+    "    Block(Block)\n" +
+    "\n" +
+    "enum StmtKind:\n" +
+    "    Expr(Expr)\n" +
+    "    Block(Block)\n"
+
+val USER_SRC = "use ptypes.*\n" +
+    "use ptypes.{StmtKind, Expr}\n" +
+    "\n" +
+    "fn tget<T>(t: i64, i: i64) -> T?:\n" +
+    "    nil\n" +
+    "\n" +
+    "fn scan(p: i64) -> i64:\n" +
+    "    val c: Expr? = tget<Expr>(p, 0)\n" +
+    "    val b: Block? = tget<Block>(p, 1)\n" +
+    "    val o = tget<Block?>(p, 2)\n" +
+    "    0\n"
+
+struct Lowered:
+    modules: Dict<text, HirModule>
+    errors: [text]
+
+fn lower_ptypes_user() -> Lowered:
+    val log = Logger(level: 0)
+    var parsed: Dict<text, ParserModule> = {}
+    parsed["ptypes"] = parse_full_frontend(PTYPES_SRC, "ptypes.spl", "ptypes", log)
+    parsed["user"] = parse_full_frontend(USER_SRC, "user.spl", "user", log)
+    val surfaces_result = module_surfaces_from_modules(parsed, [
+        SourceFile(path: "ptypes.spl", content: PTYPES_SRC, module_name: "ptypes"),
+        SourceFile(path: "user.spl", content: USER_SRC, module_name: "user")])
+    if surfaces_result.is_err():
+        return Lowered(modules: {}, errors: ["surface build failed: " + surfaces_result.unwrap_err()])
+    val surfaces = surfaces_result.unwrap()
+    var hir: Dict<text, HirModule> = {}
+    var errors: [text] = []
+    for name in ["ptypes", "user"]:
+        var hl = hirlowering_for_module(name, surfaces)
+        hir[name] = hl.lower_module(parsed[name])
+        for e in hl.errors:
+            errors.push(e.message)
+    Lowered(modules: hir, errors: errors)
+
+describe "glob-imported nominal type argument shadowed by an enum variant name":
+    it "proves the declaration owner of Expr, Block and Block? at a local generic call":
+        # @req REQ-GENERIC-NOMINAL-IDENTITY
+        step("lower a provider whose enums carry Block/Expr variants and a glob importer")
+        val low = lower_ptypes_user()
+        expect(low.errors.len()).to_equal(0)
+        step("monomorphize the three explicit instantiations")
+        val (_mono, stats, diags) = run_monomorphization_with_diagnostics(low.modules)
+        var owner_refusals = 0
+        for d in diags:
+            if d.contains("E-MONO-041"):
+                owner_refusals = owner_refusals + 1
+        expect(owner_refusals).to_equal(0)
+        expect(diags.len()).to_equal(0)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(stats.specializations_created).to_equal(3)

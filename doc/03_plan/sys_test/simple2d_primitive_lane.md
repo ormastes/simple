@@ -28,10 +28,10 @@ compiler-admission and QEMU GPU gates remain authoritative in
 4. 2D: composition, animation, font, backend selection, readback, and capture.
 
 Use the existing canonical tests:
-`test/unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_hit_test_events_spec.spl`,
+`test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_hit_test_events_spec.spl`,
 `test/unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_dom_events_spec.spl`,
-`test/unit/app/ui/widget_button_checkbox_dropdown_spec.spl`,
-`test/unit/app/ui/widget_scroll_textarea_spec.spl`,
+`test/01_unit/app/ui/widget_button_checkbox_dropdown_spec.spl`,
+`test/01_unit/app/ui/widget_scroll_textarea_spec.spl`,
 `test/unit/os/compositor/wm_action_applier_spec.spl`,
 `test/unit/os/compositor/layout_manager_spec.spl`,
 `test/system/gui/event_processing_spec.spl`,

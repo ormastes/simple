@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Git delta gate only. Successful alias deltas STILL require the canonical
+# materialized owner/receipt validator; this helper is not materialization proof.
+hir_body_lease_fixture_git_gate_v1() (
+    [ "$#" = 3 ] || exit 1
+    root=$1 output=$2 allow_aliases=$3
+    cd "$root" || exit 1
+    git diff --cached --quiet --exit-code || exit 1
+    git rev-parse HEAD > "$output.head" || exit 1
+    git diff --no-renames --name-only -z HEAD -- > "$output.changed" || exit 1
+    git ls-files --others --exclude-standard -z > "$output.untracked" || exit 1
+    if [ "$allow_aliases" != 1 ]; then
+        [ ! -s "$output.changed" ] && [ ! -s "$output.untracked" ] || exit 1
+        exit 0
+    fi
+    # One exact NUL-framed HEAD snapshot replaces per-path Git process spawns.
+    # No filesystem walk or shell pattern matching supplies alias authority.
+    git ls-tree -rz --full-tree HEAD > "$output.head-tree" || exit 1
+    declare -A head_aliases=()
+    while IFS= read -r -d '' row; do
+        case "$row" in
+            '120000 blob '*)
+                alias_path=${row#*$'\t'}
+                [ "$alias_path" != "$row" ] || exit 1
+                head_aliases["$alias_path"]=1
+                ;;
+        esac
+    done < "$output.head-tree"
+    is_head_alias() {
+        [ "${head_aliases["$1"]+present}" = present ]
+    }
+    while IFS= read -r -d '' changed; do
+        is_head_alias "$changed" || exit 1
+    done < "$output.changed"
+    # Git sees directory-junction descendants as untracked. Permit them only
+    # under an exact HEAD alias; canonical native validation proves its target.
+    while IFS= read -r -d '' untracked; do
+        candidate=$untracked
+        admitted=0
+        while :; do
+            if is_head_alias "$candidate"; then admitted=1; break; fi
+            case "$candidate" in */*) candidate=${candidate%/*} ;; *) break ;; esac
+        done
+        [ "$admitted" = 1 ] || exit 1
+    done < "$output.untracked"
+)

@@ -1,0 +1,108 @@
+# Native dependency manifest admission and attempt-private linker inputs.
+# The receipt module owns parsing and validation; this module only bridges
+# validated archive/object bytes to the explicit native linker input list.
+
+use app.build.targets.artifact_receipt.{
+    DependencyArtifactInputV1, parse_dependency_manifest_v1,
+    dependency_manifest_error_v1, digest_is_sha256
+}
+use app.io.mod.{
+    file_exists, file_read, file_copy, file_delete, file_hash_sha256,
+    file_size_raw, dir_create_all, getpid
+}
+use app.io.time_ops.{time_now_unix_micros}
+use std.common.crypto.sha256.{sha256_text}
+
+struct NativeDependencyInputsV1:
+    manifest_digest: text
+    inputs: [DependencyArtifactInputV1]
+    provider_paths: [text]
+    error: text
+
+fn native_dependency_inputs_empty_v1() -> NativeDependencyInputsV1:
+    NativeDependencyInputsV1("", [], [], "")
+
+fn native_dependency_inputs_cleanup_v1(paths: [text]):
+    for path in paths:
+        file_delete(path)
+
+fn native_dependency_inputs_copies_valid_v1(
+    inputs: [DependencyArtifactInputV1], paths: [text]
+) -> bool:
+    if inputs.len() != paths.len():
+        return false
+    var i = 0
+    while i < paths.len():
+        if file_hash_sha256(paths[i]) != inputs[i].artifact_digest:
+            return false
+        i = i + 1
+    true
+
+fn native_dependency_inputs_load_v1(
+    repo_root: text, cache_dir: text, manifest_path: text,
+    consumer: text, output: text
+) -> NativeDependencyInputsV1:
+    var result = native_dependency_inputs_empty_v1()
+    val prefix = cache_dir + "/manifests/"
+    if not manifest_path.starts_with(prefix) or not manifest_path.ends_with(".manifest"):
+        result.error = "target-receipt-error: dependency-manifest-path-outside-cache"
+        return result
+    if not file_exists(manifest_path):
+        result.error = "target-receipt-error: dependency-manifest-missing"
+        return result
+    val body = file_read(manifest_path)
+    val digest = sha256_text(body)
+    if not digest_is_sha256(digest) or manifest_path != prefix + digest + ".manifest":
+        result.error = "target-receipt-error: dependency-manifest-digest-mismatch"
+        return result
+    val parsed = parse_dependency_manifest_v1(body)
+    if parsed.errors.len() > 0:
+        result.error = parsed.errors[0]
+        return result
+    if parsed.consumer_target != consumer:
+        result.error = "target-receipt-error: dependency-manifest-consumer-mismatch"
+        return result
+    if parsed.inputs.len() == 0:
+        result.error = "target-receipt-error: empty-link-dependency-manifest"
+        return result
+    if parsed.inputs.len() > 1:
+        result.error = "target-receipt-error: multiple-link-dependencies-unsupported"
+        return result
+    val validation = dependency_manifest_error_v1(repo_root, consumer, parsed.inputs)
+    if validation != "":
+        result.error = validation
+        return result
+    # A private copy freezes the exact bytes consumed by the linker. Rehashing
+    # the copy catches source replacement between manifest admission and copy.
+    val attempt = sha256_text(output + "|" + getpid().to_text() + "|" +
+        time_now_unix_micros().to_text())
+    val attempt_dir = cache_dir + "/dependency_inputs/" + attempt
+    if not dir_create_all(attempt_dir):
+        result.error = "target-receipt-error: dependency-input-directory-failed"
+        return result
+    var copies: [text] = []
+    var i = 0
+    while i < parsed.inputs.len():
+        val item = parsed.inputs[i]
+        if item.artifact_kind != "archive" and item.artifact_kind != "object":
+            native_dependency_inputs_cleanup_v1(copies)
+            result.error = "target-receipt-error: dependency-kind-not-linkable: " + item.producer_target
+            return result
+        val suffix = if item.artifact_kind == "archive": ".a" else: ".o"
+        val copy_path = attempt_dir + "/" + i.to_text() + suffix
+        if file_exists(copy_path) or not file_copy(repo_root + "/" + item.artifact_path, copy_path) or
+                file_size_raw(copy_path) <= 0 or file_hash_sha256(copy_path) != item.artifact_digest:
+            file_delete(copy_path)
+            native_dependency_inputs_cleanup_v1(copies)
+            result.error = "target-receipt-error: dependency-input-copy-mismatch: " + item.producer_target
+            return result
+        copies.push(copy_path)
+        i = i + 1
+    result.manifest_digest = digest
+    result.inputs = parsed.inputs
+    result.provider_paths = copies
+    result
+
+export NativeDependencyInputsV1, native_dependency_inputs_empty_v1
+export native_dependency_inputs_load_v1, native_dependency_inputs_cleanup_v1
+export native_dependency_inputs_copies_valid_v1

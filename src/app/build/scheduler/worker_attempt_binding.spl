@@ -1,0 +1,79 @@
+# Parse the complete permanent launch binding before recovering or deleting a
+# container. A prefix alone is never authority for a native OCI operation.
+use std.common.crypto.sha256.{sha256_text}
+
+struct BuildWorkerAttemptBindingV1:
+    valid: bool
+    reason: text
+    stage: text
+    native_id: text
+    digest: text
+
+fn _binding_reject_v1(reason: text) -> BuildWorkerAttemptBindingV1:
+    BuildWorkerAttemptBindingV1(false, reason, "", "", "")
+
+fn worker_attempt_token_v1(value: text) -> bool:
+    if value == "" or value == "." or value == ".." or
+       value.len() > 128 or value.starts_with("-"):
+        return false
+    for c in value.chars():
+        if (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
+           (c >= "0" and c <= "9") or c == "-" or c == "_" or c == ".":
+            continue
+        return false
+    true
+
+fn _binding_stage_v1(state_dir: text, attempt_id: text,
+        fence: i64, stage: text) -> bool:
+    val prefix = state_dir + "/build-attempts/" + attempt_id +
+        "-" + fence.to_text() + "-"
+    if not stage.starts_with(prefix): return false
+    val suffix = stage[prefix.len():]
+    if suffix.len() != 6: return false
+    for c in suffix.chars():
+        if (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
+           (c >= "0" and c <= "9"):
+            continue
+        return false
+    true
+
+fn parse_worker_attempt_binding_v1(wire: text, state_dir: text,
+        request_digest: text, worker_id: text, attempt_id: text,
+        fence: i64, boot_id: text, generation: i64,
+        engine: text, image: text, require_current: bool
+        ) -> BuildWorkerAttemptBindingV1:
+    """Allow a completed tombstone replay across boots; guard live operations."""
+    if wire.len() == 0 or wire.len() > 8192 or
+       not worker_attempt_token_v1(worker_id) or
+       not worker_attempt_token_v1(attempt_id):
+        return _binding_reject_v1("binding-input-invalid")
+    val lines = wire.split("\n")
+    if lines.len() != 13 or lines[0] != "simple-worker-binding-v1" or
+       lines[1] != "request=" + request_digest or
+       lines[2] != "worker=" + worker_id or
+       lines[3] != "attempt=" + attempt_id or
+       lines[4] != "fence=" + fence.to_text() or
+       not lines[5].starts_with("boot=") or
+       not lines[6].starts_with("generation=") or
+       not lines[7].starts_with("engine=") or
+       lines[8] != "operation=build-" + fence.to_text() or
+       not lines[9].starts_with("image=") or
+       not lines[10].starts_with("stage=") or
+       not lines[11].starts_with("native=") or lines[12] != "":
+        return _binding_reject_v1("binding-fields-mismatch")
+    val stage = lines[10][6:]
+    val native_id = lines[11][7:]
+    if not _binding_stage_v1(state_dir, attempt_id, fence, stage) or
+       not worker_attempt_token_v1(native_id):
+        return _binding_reject_v1("binding-identity-invalid")
+    if require_current and
+       (lines[5] != "boot=" + boot_id or
+        lines[6] != "generation=" + generation.to_text() or
+        lines[7] != "engine=" + engine or
+        lines[9] != "image=" + image):
+        return _binding_reject_v1("binding-current-provider-mismatch")
+    BuildWorkerAttemptBindingV1(true, "", stage, native_id,
+        sha256_text(wire))
+
+export BuildWorkerAttemptBindingV1, parse_worker_attempt_binding_v1
+export worker_attempt_token_v1

@@ -174,6 +174,33 @@ fn guard_expect_not_hijacked(name: text, statement: text):
         print "tuple-field handle hijacked by builtin: {f}"
     expect(field_prints.len()).to_equal(0)
 
+val guard_length_owner = "struct CustomLength:\n" +
+    "    count: i64\n\n" +
+    "impl CustomLength:\n" +
+    "    fn len() -> i64:\n" +
+    "        self.count + 40\n\n"
+
+fn guard_expect_custom_length(source: text):
+    val lowered = guard_lower(guard_length_owner + source)
+    expect(lowered.fatal.len()).to_equal(0)
+    expect(guard_has_suffix(lowered.callees, "CustomLength.len")).to_equal(true)
+    expect(guard_has(lowered.callees, "rt_len")).to_equal(false)
+    expect(guard_has(lowered.callees, "rt_string_len")).to_equal(false)
+    expect(guard_has(lowered.callees, "rt_array_len")).to_equal(false)
+
+describe "native length calls preserve their declared owner":
+    it "uses a declared parameter's custom len method":
+        guard_expect_custom_length("fn g(value: CustomLength) -> i64:\n    value.len()\n")
+
+    it "uses a declared call result's custom len method":
+        guard_expect_custom_length("fn make_length() -> CustomLength:\n    CustomLength(count: 2)\n\nfn g() -> i64:\n    val value = make_length()\n    value.len()\n")
+
+    it "keeps native array and text length accessors":
+        val lowered = guard_lower("fn g(items: [i64], label: text) -> i64:\n    items.len() + label.len()\n")
+        expect(lowered.fatal.len()).to_equal(0)
+        expect(guard_has(lowered.callees, "rt_array_len")).to_equal(true)
+        expect(guard_has(lowered.callees, "rt_string_len")).to_equal(true)
+
 describe "builtin method extras: a user method is never hijacked":
     it "abs":
         guard_expect_not_hijacked("abs", "val r = a.abs()")

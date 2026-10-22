@@ -1,0 +1,67 @@
+"""Result Optional runtime values; requires a qualified changed producer."""
+# @req REQ-ENUM-RESULT-OPTIONAL
+use std.spec.*
+
+class ResultOptionalProducer:
+    calls: i64
+
+    me produce(value: i64?) -> Result<i64?, text>:
+        self.calls = self.calls + 1
+        Ok(value)
+
+struct ResultOptionalRecord:
+    first: i64
+    second: i64
+
+fn result_optional_record() -> Result<ResultOptionalRecord?, text>:
+    Ok(Some(ResultOptionalRecord(first: 17, second: 29)))
+
+fn result_optional_boolean(value: bool?) -> Result<bool?, text>: Ok(value)
+fn result_optional_float(value: f64?) -> Result<f64?, text>: Ok(value)
+fn result_optional_text(value: text?) -> Result<text?, text>: Ok(value)
+fn result_optional_error(value: i64?) -> Result<text, i64?>: Err(value)
+
+describe "Result Optional runtime preservation":
+    it "evaluates once and keeps zero false-like and nil-bit integer payloads present":
+        step("Pass Some(0) Some(3) and None through a real Result producer")
+        var producer = ResultOptionalProducer(calls: 0)
+        val zero = producer.produce(Some(0)).unwrap()
+        expect(producer.calls).to_equal(1)
+        expect(zero.is_some()).to_equal(true)
+        expect(zero.unwrap()).to_equal(0)
+        val three = producer.produce(Some(3)).unwrap()
+        expect(producer.calls).to_equal(2)
+        expect(three.is_some()).to_equal(true)
+        expect(three.unwrap()).to_equal(3)
+        val absent = producer.produce(nil).unwrap()
+        expect(producer.calls).to_equal(3)
+        expect(absent.is_none()).to_equal(true)
+
+    it "retains inner bool float and Text without decoding the Optional handle":
+        step("Project Optional values only after Result extraction")
+        val boolean = result_optional_boolean(Some(false)).unwrap()
+        expect(boolean.is_some()).to_equal(true)
+        expect(boolean.unwrap()).to_equal(false)
+        val fraction = result_optional_float(Some(2.5)).unwrap()
+        expect(fraction.is_some()).to_equal(true)
+        expect(fraction.unwrap()).to_equal(2.5)
+        val text = result_optional_text(Some("retained")).unwrap()
+        expect(text.is_some()).to_equal(true)
+        expect(text.unwrap()).to_equal("retained")
+
+    it "retains a named record owner through Result and if-val projection":
+        step("Exercise the same Result<Repository?, text> shape as the driver")
+        val pending = result_optional_record()
+        if val record = pending.unwrap():
+            expect(record.first).to_equal(17)
+            expect(record.second).to_equal(29)
+        else:
+            fail("present record became absent during Result unwrap")
+
+    it "unwraps Optional error payloads without conflating None with an Ok tag":
+        step("Use the Err discriminator for present and absent Optional errors")
+        val present = result_optional_error(Some(3)).unwrap_err()
+        expect(present.is_some()).to_equal(true)
+        expect(present.unwrap()).to_equal(3)
+        val absent = result_optional_error(nil).unwrap_err()
+        expect(absent.is_none()).to_equal(true)

@@ -1,0 +1,287 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering: phase-3 residual container, trait-object and callable shapes
+
+Each fixture below failed MIR lowering in the phase-3 bootstrap (producer6,
+2026-10-20) and was reproduced as a single module:
+
+- `d[k] ?? []` / `d.get(k) ?? []` over an array-valued Dict left the `??`
+  result erased to I64, so `for x in ...` hit #143 (perf_facts,
+  mir_array_move).
+- `return self.items[name]` from a `Dict<text, Trait>` re-wrapped a value that
+  already was the trait object and failed with "missing native trait
+  implementation: Trait for " (blocks.registry).
+- `Result<(text, i64), E>` / `Result<(text, Record), E>` payloads were rejected
+  as "unsupported Result tuple payload element type" / "unwrap payload type".
+  Even `(i64, i64)` was rejected: the seed-built producer never matched the
+  literal-payload pattern `HirTypeKind.Int(64, true)` (now a binding pattern).
+- `Option<fn(..) -> R>` fields collapsed to `Option<any>` in the flat type
+  parser, so `if val cb = self.f` / `self.f.unwrap()` calls had no proven
+  arity (elf_operation_bindings, macho.provider_closure).
+- A collection bound inside a nested pattern (`Some(E.Poly(xs))`) kept only
+  the raw slot word, so `for x in xs` hit #143 (rt_criticality_validation).
+- An unresolved bare-variant match arm cascaded into "enum construction:
+  missing runtime identity for ''".
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn p3_misc_messages(src: text) -> [text]:
+    val file = "testdata/fixture_p3_misc.spl"
+    val parsed = parse_full_frontend(src, file, "fixture_p3_misc", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    lowering.lower_module(hir)
+    var messages: [text] = []
+    for e in hir_lowering.errors:
+        messages = messages.push("hir: " + e.message)
+    for e in lowering.errors:
+        if e.message.starts_with("non-exhaustive enum match on '"):
+            continue
+        messages = messages.push("mir: " + e.message)
+    messages
+
+fn p3_misc_count(messages: [text], needle: text) -> i64:
+    var n = 0
+    for m in messages:
+        if m.contains(needle):
+            n = n + 1
+    n
+
+fn p3_misc_dump(messages: [text]) -> text:
+    var all = ""
+    for m in messages:
+        all = all + m + "\n"
+    all
+
+val coalesce_src = "struct Holder:\n" +
+    "    tags: Dict<text, [i64]>\n" +
+    "\n" +
+    "fn via_get(h: Holder, k: text) -> i64:\n" +
+    "    var n = 0\n" +
+    "    for x in h.tags.get(k) ?? []:\n" +
+    "        n = n + x\n" +
+    "    n\n" +
+    "\n" +
+    "fn via_index(d: Dict<i64, [i64]>, k: i64) -> i64:\n" +
+    "    var n = 0\n" +
+    "    for x in (d[k] ?? []):\n" +
+    "        n = n + x\n" +
+    "    val cur = d[k] ?? []\n" +
+    "    for y in cur:\n" +
+    "        n = n + y\n" +
+    "    n\n"
+
+val trait_dict_src = "trait Shape:\n" +
+    "    fn area() -> i64\n" +
+    "\n" +
+    "class Sq:\n" +
+    "    side: i64\n" +
+    "\n" +
+    "impl Shape for Sq:\n" +
+    "    fn area() -> i64:\n" +
+    "        self.side * self.side\n" +
+    "\n" +
+    "struct Reg:\n" +
+    "    items: Dict<text, Shape>\n" +
+    "\n" +
+    "impl Reg:\n" +
+    "    fn lookup(name: text) -> Shape?:\n" +
+    "        if self.items.has(name):\n" +
+    "            return self.items[name]\n" +
+    "        nil\n"
+
+val result_tuple_src = "class Table:\n" +
+    "    n: i64\n" +
+    "\n" +
+    "fn pair_text(x: i64) -> Result<(text, i64), text>:\n" +
+    "    if x < 0: return Err(\"neg\")\n" +
+    "    Ok((\"a\", x))\n" +
+    "\n" +
+    "fn pair_rec(x: i64) -> Result<(text, Table), text>:\n" +
+    "    if x < 0: return Err(\"neg\")\n" +
+    "    Ok((\"t\", Table(n: x)))\n" +
+    "\n" +
+    "fn bounds(x: i64) -> Result<(i64, i64), text>:\n" +
+    "    if x < 0: return Err(\"neg\")\n" +
+    "    Ok((x, x + 1))\n" +
+    "\n" +
+    "fn use_pairs() -> Result<i64, text>:\n" +
+    "    val (lo, hi) = bounds(2)?\n" +
+    "    val (s, n) = pair_text(3)?\n" +
+    "    val (s2, t) = pair_rec(4)?\n" +
+    "    val p = pair_text(5).unwrap()\n" +
+    "    Ok(s.len() + n + s2.len() + t.n + p.1 + lo + hi)\n"
+
+val result_ok_struct_src = "struct Rec:\n" +
+    "    n: i64\n" +
+    "\n" +
+    "fn pair_struct(x: i64) -> Result<(text, Rec), text>:\n" +
+    "    if x < 0: return Err(\"neg\")\n" +
+    "    Ok((\"r\", Rec(n: x)))\n" +
+    "\n" +
+    "fn use_struct() -> Result<i64, text>:\n" +
+    "    val (s, r) = pair_struct(4)?\n" +
+    "    Ok(s.len() + r.n)\n"
+
+val result_ok_nested_src = "class Table:\n" +
+    "    n: i64\n" +
+    "\n" +
+    "struct Rec:\n" +
+    "    m: i64\n" +
+    "\n" +
+    "fn nested(x: i64) -> Result<(text, (i64, Table), Rec), text>:\n" +
+    "    if x < 0: return Err(\"neg\")\n" +
+    "    Ok((\"n\", (x, Table(n: x)), Rec(m: x)))\n" +
+    "\n" +
+    "fn use_nested() -> Result<i64, text>:\n" +
+    "    val (s, inner, r) = nested(4)?\n" +
+    "    val (k, t) = inner\n" +
+    "    Ok(s.len() + k + t.n + r.m)\n"
+
+val result_err_record_src = "class Fault:\n" +
+    "    code: i64\n" +
+    "\n" +
+    "struct Oops:\n" +
+    "    why: text\n" +
+    "\n" +
+    "fn may_fail(x: i64) -> Result<(text, i64), Fault>:\n" +
+    "    if x < 0: return Err(Fault(code: x))\n" +
+    "    Ok((\"ok\", x))\n" +
+    "\n" +
+    "fn may_oops(x: i64) -> Result<i64, Oops>:\n" +
+    "    if x < 0: return Err(Oops(why: \"neg\"))\n" +
+    "    Ok(x)\n" +
+    "\n" +
+    "fn relay(x: i64) -> Result<i64, Fault>:\n" +
+    "    val (s, n) = may_fail(x)?\n" +
+    "    Ok(s.len() + n)\n" +
+    "\n" +
+    "fn relay_oops(x: i64) -> Result<i64, Oops>:\n" +
+    "    val n = may_oops(x)?\n" +
+    "    Ok(n + 1)\n"
+
+val result_ok_generic_src = "struct Box<T>:\n" +
+    "    v: T\n" +
+    "\n" +
+    "fn boxed(x: i64) -> Result<(text, Box<i64>), text>:\n" +
+    "    if x < 0: return Err(\"neg\")\n" +
+    "    Ok((\"b\", Box(v: x)))\n" +
+    "\n" +
+    "fn use_boxed() -> Result<i64, text>:\n" +
+    "    val (s, b) = boxed(4)?\n" +
+    "    Ok(s.len())\n"
+
+val optional_callable_src = "struct Ops:\n" +
+    "    read_op: Option<fn(text) -> i64>\n" +
+    "\n" +
+    "impl Ops:\n" +
+    "    fn run_ifval(p: text) -> i64:\n" +
+    "        if val cb = self.read_op:\n" +
+    "            return cb(p)\n" +
+    "        0\n" +
+    "    fn run_unwrap(p: text) -> i64:\n" +
+    "        if self.read_op == nil: return 0\n" +
+    "        val r = self.read_op.unwrap()\n" +
+    "        r(p)\n"
+
+val nested_binding_src = "enum Shape:\n" +
+    "    Poly(pts: [i64])\n" +
+    "    Dot\n" +
+    "\n" +
+    "fn total(o: Shape?) -> i64:\n" +
+    "    var n = 0\n" +
+    "    match o:\n" +
+    "        Some(Shape.Poly(xs)):\n" +
+    "            for x in xs:\n" +
+    "                n = n + x\n" +
+    "        _: ()\n" +
+    "    n\n"
+
+val ambiguous_match_src = "enum A:\n" +
+    "    Lit(v: i64)\n" +
+    "    Other\n" +
+    "\n" +
+    "enum B:\n" +
+    "    Lit(v: i64)\n" +
+    "    Else\n" +
+    "\n" +
+    "fn pick(first: any) -> i64:\n" +
+    "    match first:\n" +
+    "        case Lit(v): v\n" +
+    "        case _: 0\n"
+
+describe "MIR lowering: phase-3 residual shapes":
+    it "iterates `d[k] ?? []` and `d.get(k) ?? []` over array-valued dicts":
+        val messages = p3_misc_messages(coalesce_src)
+        print "diagnostics: [{p3_misc_dump(messages)}]"
+        expect(p3_misc_count(messages, "non-array iterables")).to_equal(0)
+        expect(messages.len()).to_equal(0)
+
+    it "returns a trait object read from a Dict<text, Trait> without re-wrapping":
+        val messages = p3_misc_messages(trait_dict_src)
+        print "diagnostics: [{p3_misc_dump(messages)}]"
+        expect(p3_misc_count(messages, "missing native trait implementation")).to_equal(0)
+        expect(messages.len()).to_equal(0)
+
+    it "admits text and record slots in Result tuple payloads":
+        val messages = p3_misc_messages(result_tuple_src)
+        print "diagnostics: [{p3_misc_dump(messages)}]"
+        expect(p3_misc_count(messages, "unsupported Result tuple payload element type")).to_equal(0)
+        expect(p3_misc_count(messages, "unsupported Result unwrap payload type")).to_equal(0)
+        expect(messages.len()).to_equal(0)
+
+    it "admits a struct record in a Result Ok tuple slot":
+        val messages = p3_misc_messages(result_ok_struct_src)
+        print "diagnostics: [{p3_misc_dump(messages)}]"
+        expect(p3_misc_count(messages, "unsupported Result tuple payload element type")).to_equal(0)
+        expect(messages.len()).to_equal(0)
+
+    it "admits nested tuple, class and struct slots in a Result Ok tuple":
+        val messages = p3_misc_messages(result_ok_nested_src)
+        print "diagnostics: [{p3_misc_dump(messages)}]"
+        expect(p3_misc_count(messages, "unsupported Result tuple payload element type")).to_equal(0)
+        expect(messages.len()).to_equal(0)
+
+    it "propagates class and struct records through the Result Err slot":
+        val messages = p3_misc_messages(result_err_record_src)
+        print "diagnostics: [{p3_misc_dump(messages)}]"
+        expect(p3_misc_count(messages, "unsupported Result tuple payload element type")).to_equal(0)
+        expect(p3_misc_count(messages, "Result Err record")).to_equal(0)
+        expect(messages.len()).to_equal(0)
+
+    it "still fails closed on a generic record slot with no proven layout":
+        val messages = p3_misc_messages(result_ok_generic_src)
+        print "diagnostics: [{p3_misc_dump(messages)}]"
+        expect(p3_misc_count(messages, "unsupported Result tuple payload element type: slot 1 is Named(args=1)")).to_equal(1)
+
+    it "calls an Option<fn> field through if-val and unwrap with a proven signature":
+        val messages = p3_misc_messages(optional_callable_src)
+        print "diagnostics: [{p3_misc_dump(messages)}]"
+        expect(p3_misc_count(messages, "proven arity")).to_equal(0)
+        expect(p3_misc_count(messages, "proven function signature")).to_equal(0)
+        expect(messages.len()).to_equal(0)
+
+    it "types a collection bound inside a nested enum pattern":
+        val messages = p3_misc_messages(nested_binding_src)
+        print "diagnostics: [{p3_misc_dump(messages)}]"
+        expect(p3_misc_count(messages, "non-array iterables")).to_equal(0)
+        expect(messages.len()).to_equal(0)
+
+    it "reports an unresolved bare variant once, without a runtime-identity cascade":
+        val messages = p3_misc_messages(ambiguous_match_src)
+        print "diagnostics: [{p3_misc_dump(messages)}]"
+        expect(p3_misc_count(messages, "missing runtime identity")).to_equal(0)
+        expect(p3_misc_count(messages, "enum match:")).to_be_greater_than(0)

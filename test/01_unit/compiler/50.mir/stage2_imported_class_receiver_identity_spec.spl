@@ -101,14 +101,20 @@ fn lower_consumer(consumer_source: text, with_ext2: bool) -> MirLowering:
     val consumer_hir = consumer_lowering.lower_module(consumer_ast)
     var providers = [dep_hir, ext_hir, other_hir]
     var mir_lowering = MirLowering.new(consumer_hir.symbols)
-    mir_lowering.prescan_module_struct_names(dep_hir)
-    mir_lowering.prescan_module_struct_names(ext_hir)
-    mir_lowering.prescan_module_struct_names(other_hir)
+    # Same dict+key prescan the driver's entry-closure loop runs over
+    # ctx.hir_modules (driver_pipeline_lowering.spl): every module is
+    # prescanned before any is lowered.
+    var hir_modules: Dict<text, HirModule> = {}
+    hir_modules["lib.dep"] = dep_hir
+    hir_modules["lib.ext"] = ext_hir
+    hir_modules["lib.other"] = other_hir
     if with_ext2:
-        mir_lowering.prescan_module_struct_names(ext2_hir)
+        hir_modules["lib.ext2"] = ext2_hir
         providers.push(ext2_hir)
-    mir_lowering.prescan_module_struct_names(consumer_hir)
+    hir_modules["app.main"] = consumer_hir
     providers.push(consumer_hir)
+    for module_key in hir_modules.keys():
+        mir_lowering.prescan_module_struct_names(hir_modules, module_key)
     val mir = mir_lowering.lower_module(consumer_hir, providers)
     _last_mir = Some(mir)
     mir_lowering
@@ -200,8 +206,9 @@ describe "extension impl declared in another module":
         expect(decoy_calls).to_equal(0)
 
     it "keys an extension of a generic class by the class identity, without type arguments":
-        val lowering = lower_consumer("use lib.dep.\{Box\}\nuse lib.ext\n\nfn f() -> i64:\n    1\n", false)
-        expect(lowering.struct_method_syms.has("lib.dep.Box::ext_peek")).to_equal(true)
+        var lowering = lower_consumer("use lib.dep.\{Box\}\nuse lib.ext\n\nfn f() -> i64:\n    1\n", false)
+        # Provider rows are materialized on lookup; ask through the lookup.
+        expect(lowering.struct_method_key_present_v1("lib.dep.Box::ext_peek")).to_equal(true)
 
     it "reports a method two extension modules both add to one class":
         val errs = mir_errors(lower_consumer("use lib.dep.\{Reg\}\nuse lib.ext\nuse lib.ext2\n\nfn f(r: Reg) -> i64:\n    r.dup()\n", true))

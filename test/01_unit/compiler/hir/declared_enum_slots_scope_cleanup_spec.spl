@@ -1,0 +1,66 @@
+use std.spec.*
+use std.spec.step
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserEnum}
+use compiler.hir.hir_types.{SymbolKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.context_helpers.*
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering._Expressions.expression_components.*
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end}
+
+describe "Declared enum slots leave the module arena before cleanup", tag: ["only-compiled"]:
+    it "detaches real registered payload metadata while preserving retained phase state":
+        step("Parse a named enum and create the retained lowering owner before the scope")
+        val parsed = parse_full_frontend("enum Payload:\n    Named(bits: i64)\n",
+            "enum_scope.spl", "enum_scope", Logger(level: 0))
+        expect(parsed.enums.len()).to_equal(1)
+        val declaration: ParserEnum = parsed.enums[0]
+        var lowering = HirLowering.with_filename("enum_scope.spl")
+        lowering.surface_index_by_name["retained.provider"] = 17
+        val owner = lowering.symbols.define("Payload", SymbolKind.Enum, Option.None,
+            Span.empty(), Visibility.Public, false, Option.Some("enum_scope"))
+
+        step("Build actual declared slots in the transient arena and reset while paused")
+        if not transient_scope_begin(): panic("enum slot scope unavailable")
+        lowering.register_declared_pattern_enum_slots(declaration, owner, "enum_scope", false)
+        var registered = false
+        if val slots = lowering.declared_pattern_enum_slots.get("{owner.id}:Named"):
+            registered = slots.is_struct and slots.field_names.len() == 1 and
+                slots.field_names[0] == "bits" and slots.field_types.len() == 1
+        if not transient_scope_pause(): panic("enum slot pause unavailable")
+        lowering.begin_module("next.spl")
+        # Capture the scalar oracle before reclamation. The negative control
+        # must fail without dereferencing the old arena after it is freed.
+        val detached = lowering.declared_pattern_enum_slots.keys().len() == 0
+        if not transient_scope_end(): panic("enum slot scope close unavailable")
+
+        step("Require detachment and retained memo identity after closing the scope")
+        expect(registered).to_equal(true)
+        expect(detached).to_equal(true)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+        expect(lowering.surface_index_by_name.get("retained.provider") ?? -1).to_equal(17)
+
+    it "removes numeric owner keys before the next module can reuse them":
+        val parsed = parse_full_frontend("enum Payload:\n    Named(bits: i64)\n",
+            "enum_reuse.spl", "enum_reuse", Logger(level: 0))
+        expect(parsed.enums.len()).to_equal(1)
+        val declaration: ParserEnum = parsed.enums[0]
+        var lowering = HirLowering.with_filename("enum_reuse.spl")
+        lowering.begin_module("enum_reuse.spl")
+        val owner = lowering.symbols.define("Payload", SymbolKind.Enum, Option.None,
+            Span.empty(), Visibility.Public, false, Option.Some("enum_reuse"))
+        lowering.register_declared_pattern_enum_slots(declaration, owner, "enum_reuse", false)
+        val key = "{owner.id}:Named"
+        expect(lowering.declared_pattern_enum_slots.contains_key(key)).to_equal(true)
+        step("Reset the common owner without the archive-only compensating reset")
+        lowering.begin_module("other.spl")
+        val next_owner = lowering.symbols.define("OtherPayload", SymbolKind.Enum, Option.None,
+            Span.empty(), Visibility.Public, false, Option.Some("other"))
+        expect(next_owner.id).to_equal(owner.id)
+        expect(lowering.declared_pattern_enum_slots.contains_key(key)).to_equal(false)
+        expect(lowering.declared_pattern_enum_slots.keys().len()).to_equal(0)

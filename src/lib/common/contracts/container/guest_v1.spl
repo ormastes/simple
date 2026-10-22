@@ -1,0 +1,123 @@
+# Portable identity boundary for a SimpleOS container executed in a guest VM.
+# The host must verify the VM image and own a private command channel before it
+# may treat these values as evidence. This module performs no I/O or launch.
+
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1}
+
+pub const SIMPLEOS_GUEST_PROVIDER_V1 = "simpleos-managed-container-v1"
+pub const SIMPLEOS_GUEST_RUNTIME_CLASS_V1 = "virtual-machine"
+
+pub struct GuestContainerAttemptV1:
+    host_os: text
+    guest_os: text
+    runtime_class: text
+    identity: RuntimeIdentityV1
+    guest_boot_id: text
+    guest_image_sha256: text
+    workload_sha256: text
+    policy_sha256: text
+    nonce: text
+
+pub struct GuestContainerObservationV1:
+    operation_id: text
+    guest_boot_id: text
+    nonce: text
+    native_task_id: text
+    phase: text
+    exit_code: i64
+    kernel_exit_observed: bool
+
+fn _token_v1(value: text) -> bool:
+    if value == "" or value.len() > 128:
+        return false
+    for ch in value.chars():
+        if not ((ch >= "a" and ch <= "z") or
+                (ch >= "A" and ch <= "Z") or
+                (ch >= "0" and ch <= "9") or
+                ch == "-" or ch == "_" or ch == "."):
+            return false
+    true
+
+fn _sha256_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value.chars():
+        if not ((ch >= "0" and ch <= "9") or
+                (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+fn _positive_task_id_v1(value: text) -> bool:
+    if value == "" or value.len() > 19:
+        return false
+    for ch in value.chars():
+        if ch < "0" or ch > "9":
+            return false
+    val parsed = value.parse_i64() ?? 0
+    parsed > 0 and parsed.to_text() == value
+
+pub fn guest_container_attempt_rejection_v1(attempt: GuestContainerAttemptV1) -> text:
+    if attempt.host_os != "macos" or attempt.guest_os != "simpleos":
+        return "host-guest-os-mismatch"
+    if attempt.runtime_class != SIMPLEOS_GUEST_RUNTIME_CLASS_V1:
+        return "runtime-class-mismatch"
+    val identity = attempt.identity
+    if (identity.engine != SIMPLEOS_GUEST_PROVIDER_V1 or
+            not _token_v1(identity.pod_uid) or
+            identity.attempt <= 0 or identity.provider_generation <= 0 or
+            not _token_v1(identity.operation_id) or
+            identity.native_id != ""):
+        return "runtime-identity-invalid"
+    if (not _token_v1(attempt.guest_boot_id) or
+            identity.node_boot_id != attempt.guest_boot_id or
+            not _token_v1(attempt.nonce)):
+        return "guest-binding-invalid"
+    if (not _sha256_v1(attempt.guest_image_sha256) or
+            not _sha256_v1(attempt.workload_sha256) or
+            not _sha256_v1(attempt.policy_sha256)):
+        return "digest-invalid"
+    ""
+
+pub fn guest_container_observation_rejection_v1(
+        attempt: GuestContainerAttemptV1,
+        observed: GuestContainerObservationV1) -> text:
+    val rejected = guest_container_attempt_rejection_v1(attempt)
+    if rejected != "":
+        return rejected
+    if (observed.operation_id != attempt.identity.operation_id or
+            observed.guest_boot_id != attempt.guest_boot_id or
+            observed.nonce != attempt.nonce):
+        return "observation-binding-mismatch"
+    if not _positive_task_id_v1(observed.native_task_id):
+        return "native-task-id-invalid"
+    if observed.phase == "running":
+        if observed.kernel_exit_observed or observed.exit_code != -1:
+            return "running-observation-invalid"
+        return ""
+    if observed.phase == "exited":
+        if not observed.kernel_exit_observed:
+            return "kernel-exit-unobserved"
+        return ""
+    "observation-phase-invalid"
+
+pub fn guest_container_exit_pair_rejection_v1(
+        attempt: GuestContainerAttemptV1,
+        running: GuestContainerObservationV1,
+        exited: GuestContainerObservationV1) -> text:
+    val start_reason = guest_container_observation_rejection_v1(attempt, running)
+    if start_reason != "":
+        return start_reason
+    if running.phase != "running":
+        return "start-phase-invalid"
+    val exit_reason = guest_container_observation_rejection_v1(attempt, exited)
+    if exit_reason != "":
+        return exit_reason
+    if exited.phase != "exited":
+        return "exit-phase-invalid"
+    if running.native_task_id != exited.native_task_id:
+        return "native-task-binding-mismatch"
+    ""
+
+export GuestContainerAttemptV1, GuestContainerObservationV1
+export guest_container_attempt_rejection_v1, guest_container_observation_rejection_v1
+export guest_container_exit_pair_rejection_v1

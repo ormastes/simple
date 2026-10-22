@@ -94,7 +94,15 @@ bsp_run_cli() {
 # code. Only an emitted diagnostic at the start of a log line is admission
 # failure evidence. Keep the selection shared by detection and reporting.
 bootstrap_scv_admission_diagnostic() {
-    LC_ALL=C grep -m1 -E '^(error: )?SCV-E-ADMISSION:([[:space:]]|$)' "$1"
+    LC_ALL=C grep -m1 -E '^(error: )?SCV-E-ADMISSION:[[:blank:]]*[^[:space:]]' "$1"
+}
+
+bootstrap_scv_snapshot_index_drift_diagnostic() {
+    case "$1" in
+        'SCV-E-ADMISSION: snapshot-index-drift:'*|\
+        'error: SCV-E-ADMISSION: snapshot-index-drift:'*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 bootstrap_scv_prime() {
@@ -130,13 +138,36 @@ bootstrap_scv_prime() {
     #    pay for it. Cheap (~seconds) when both already exist. Evidence: no
     #    SCV-E-ADMISSION line and no crash/timeout exit.
     bsp_warm_start=$(date +%s)
-    bsp_run_cli 0 "$bsp_log.warm"
+    bsp_warm_log="$bsp_log.warm"
+    bsp_run_cli 0 "$bsp_warm_log"
     bsp_rc=$?
-    bsp_warm=$(( $(date +%s) - bsp_warm_start ))
     bsp_diagnostic_rc=0
-    bsp_diagnostic=$(bootstrap_scv_admission_diagnostic "$bsp_log.warm") || bsp_diagnostic_rc=$?
+    bsp_diagnostic=$(bootstrap_scv_admission_diagnostic "$bsp_warm_log") || bsp_diagnostic_rc=$?
+    # A syntactically valid same-HEAD cursor can still name a dirty source
+    # version that was later restored without an SCV filesystem event. The
+    # snapshot byte guard correctly rejects that state. Rebuild the inventory
+    # once, then retry the ordinary warm admission once; never retry any other
+    # diagnostic, timeout, crash, or a second drift.
+    if [ "$bsp_rc" -lt 124 ] && [ "$bsp_diagnostic_rc" -eq 0 ] && \
+       bootstrap_scv_snapshot_index_drift_diagnostic "$bsp_diagnostic"; then
+        echo "scv-inventory-prime: rebuilding drifted inventory once" >&2
+        bsp_run_cli 1 "$bsp_log.drift-cold"
+        bsp_cold_rc=$?
+        bsp_cursor=$(bootstrap_scv_cursor_path "$bsp_root")
+        if [ "$bsp_cold_rc" -ge 124 ] || ! bootstrap_scv_journal_valid "$bsp_cursor"; then
+            echo "scv-inventory-prime: FAILED drift recovery after $(( $(date +%s) - bsp_start ))s (rc=$bsp_cold_rc): cold inventory did not complete with a valid $bsp_cursor. Log: $bsp_log.drift-cold" >&2
+            return 1
+        fi
+        bsp_warm_log="$bsp_log.drift-warm"
+        bsp_run_cli 0 "$bsp_warm_log"
+        bsp_rc=$?
+        bsp_diagnostic_rc=0
+        bsp_diagnostic=$(bootstrap_scv_admission_diagnostic "$bsp_warm_log") || bsp_diagnostic_rc=$?
+        bsp_cold="drift recovery ran (rc=$bsp_cold_rc)"
+    fi
+    bsp_warm=$(( $(date +%s) - bsp_warm_start ))
     if [ "$bsp_diagnostic_rc" -eq 0 ] || [ "$bsp_diagnostic_rc" -gt 1 ] || [ "$bsp_rc" -ge 124 ]; then
-        echo "scv-inventory-prime: FAILED warm admission after ${bsp_warm}s (rc=$bsp_rc): $bsp_diagnostic. Log: $bsp_log.warm" >&2
+        echo "scv-inventory-prime: FAILED warm admission after ${bsp_warm}s (rc=$bsp_rc): $bsp_diagnostic. Log: $bsp_warm_log" >&2
         return 1
     fi
     echo "scv-inventory-prime: ready in $(( $(date +%s) - bsp_start ))s (cold init: $bsp_cold; warm admission ${bsp_warm}s, admission probe rc=$bsp_rc)"
@@ -168,7 +199,13 @@ bootstrap_scv_prime_selftest() {
     printf '#!/bin/sh\necho "cold=${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" >>"%s/called"\necho "$*" >>"%s/argv"\nexit 0\n' "$st" "$st" >"$st/bad_cli"
     # admit_fail_cli: warm admission refused.
     printf '#!/bin/sh\necho "SCV-E-ADMISSION: package-index:publish-failed" >&2\nexit 1\n' >"$st/admit_fail_cli"
-    chmod +x "$st/good_cli" "$st/bad_cli" "$st/admit_fail_cli"
+    # drift_cli fails its first warm admission, rebuilds the cursor on the one
+    # cold retry, then admits. persistent_drift_cli proves the retry is bounded.
+    printf '#!/bin/sh\necho "cold=${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" >>"%s/drift_called"\nhead40=%s d64=%s\nif [ "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" = 1 ]; then mkdir -p build/scv/source-inventory; printf "$d64\\nsimple-compile-event-cursor-v3\\ngit_head=$head40\\nfilesystem_rows=0\\nfilesystem_digest=$d64\\ninventory_digest=$d64\\ninventory_generation=1\\nuntracked_src_digest=$d64\\nuntracked_test_digest=$d64\\nuntracked_membership_digest=$d64" >build/scv/source-inventory/CURRENT; exit 1; fi\nif [ ! -f "%s/drift_rebuilt" ]; then echo "SCV-E-ADMISSION: snapshot-index-drift:src/probe.spl" >&2; touch "%s/drift_rebuilt"; exit 1; fi\nexit 0\n' \
+        "$st" "$head40" "$d64" "$st" "$st" >"$st/drift_cli"
+    printf '#!/bin/sh\necho "cold=${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" >>"%s/persistent_called"\nif [ "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" = 1 ]; then exit 1; fi\necho "SCV-E-ADMISSION: snapshot-index-drift:src/probe.spl" >&2\nexit 1\n' \
+        "$st" >"$st/persistent_drift_cli"
+    chmod +x "$st/good_cli" "$st/bad_cli" "$st/admit_fail_cli" "$st/drift_cli" "$st/persistent_drift_cli"
 
     # 1. valid journal present -> cold step skipped, warm admission still runs
     mkdir -p "$st/r1"; write_cursor "$st/r1"; rm -f "$st/called" "$st/argv"
@@ -186,6 +223,21 @@ bootstrap_scv_prime_selftest() {
     # 2b. warm admission refused -> fail closed
     mkdir -p "$st/r2b"; write_cursor "$st/r2b"
     bootstrap_scv_prime "$st/r2b" "$st/admit_fail_cli" "$st" "$st" "$st/l2b" >/dev/null 2>&1; expect "warm SCV-E-ADMISSION -> fail closed" 1 $?
+    # 2c. Only snapshot index drift receives one bounded cold+warm retry.
+    mkdir -p "$st/r2c"; write_cursor "$st/r2c"; rm -f "$st/drift_called" "$st/drift_rebuilt"
+    bootstrap_scv_prime "$st/r2c" "$st/drift_cli" "$st" "$st" "$st/l2c" >/dev/null 2>&1; expect "snapshot drift -> one cold+warm recovery" 0 $?
+    [ "$(sed -n 1p "$st/drift_called")" = "cold=" ] && \
+        [ "$(sed -n 2p "$st/drift_called")" = "cold=1" ] && \
+        [ "$(sed -n 3p "$st/drift_called")" = "cold=" ] && \
+        [ "$(wc -l <"$st/drift_called" | tr -d ' ')" = 3 ]
+    expect "snapshot drift recovery is exactly warm/cold/warm" 0 $?
+    mkdir -p "$st/r2d"; write_cursor "$st/r2d"; rm -f "$st/persistent_called"
+    bootstrap_scv_prime "$st/r2d" "$st/persistent_drift_cli" "$st" "$st" "$st/l2d" >/dev/null 2>&1; expect "persistent snapshot drift -> fail after one retry" 1 $?
+    [ "$(sed -n 1p "$st/persistent_called")" = "cold=" ] && \
+        [ "$(sed -n 2p "$st/persistent_called")" = "cold=1" ] && \
+        [ "$(sed -n 3p "$st/persistent_called")" = "cold=" ] && \
+        [ "$(wc -l <"$st/persistent_called" | tr -d ' ')" = 3 ]
+    expect "persistent snapshot drift retry remains bounded" 0 $?
     # 3. no journal and CLI writes none -> fail closed
     mkdir -p "$st/r3"
     bootstrap_scv_prime "$st/r3" "$st/bad_cli" "$st" "$st" "$st/l3" >/dev/null 2>&1; expect "no journal after prime -> fail closed" 1 $?

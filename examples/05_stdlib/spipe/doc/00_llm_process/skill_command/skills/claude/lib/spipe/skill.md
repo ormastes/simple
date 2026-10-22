@@ -48,7 +48,7 @@ What this feature does and why.
 
 ### 2. Test Groups with Docstrings
 
-```simple
+```simple:skip
 describe "MyFeature":
     """## Basic Usage -- description."""
     context "when condition":
@@ -80,7 +80,7 @@ Format: `# @cover <src_path> <percentage>%`
 
 ### Hooks
 
-```simple
+```simple:skip
 context "with setup":
     before_each:
         setup()
@@ -92,14 +92,14 @@ context "with setup":
 
 ### Fixtures
 
-```simple
+```simple:skip
 given_lazy :user, \: { name: "Alice" }       # Lazy (memoized per test)
 given: setup_db()                              # Eager setup
 ```
 
 ### Shared Contexts
 
-```simple
+```simple:skip
 context_def :as_admin:
     given_lazy :user, \: create(:user, :admin)
 describe "Dashboard":

@@ -23,8 +23,9 @@ use std.spec.skip_governance.{
 }
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.sffi.fs.{file_create_excl}
-use std.io_runtime.{file_append_text, file_exists, file_read}
+use std.io_runtime.{exit, file_append_text, file_exists, file_read}
 use std.nogc_sync_mut.fs.host_path.{host_path_is_absolute}
+use std.nogc_sync_mut.spec.trace_events.{emit_trace_case_event}
 
 # ================================================================
 # Global Test State
@@ -73,6 +74,10 @@ var _aggregate_owner_count: [i64] = []
 var _aggregate_seen_owner_paths: [text] = []
 var _aggregate_in_test: [i64] = []
 var _aggregate_in_hook: [i64] = []
+# Depth of running examples (hooks + body) outside aggregate mode. An array,
+# like the aggregate markers above, so nested-call global writeback cannot
+# restore a stale scalar. Empty means no case can consume a failure.
+var _case_depth: [i64] = []
 var _aggregate_failed_cases: [i64] = []
 var _aggregate_selected_case: [text] = []
 var _aggregate_selected_results: [text] = []
@@ -370,12 +375,14 @@ fn _execute_it(name: text, block: fn()) -> text:
     var full_name = "{current_suite} > {name}"
     if current_context != "":
         full_name = "{current_suite} > {current_context} > {name}"
+    emit_trace_case_event(full_name, "started", "not_finished")
 
     # Preserve the shared array identity across nested calls; rebinding here
     # can leave matchers mutating a stale value under global writeback.
     current_test_errors.clear()
     _expect_provisional_len = -1
     val pending_before = test_pending
+    _case_depth.push(1)
     if _aggregate_active():
         _aggregate_in_test.push(1)
 
@@ -395,6 +402,7 @@ fn _execute_it(name: text, block: fn()) -> text:
         if _aggregate_active():
             _aggregate_hook_callback_marks.push(1)
         hook()
+    val _ = _case_depth.pop()
     if _aggregate_active():
         val _ = _aggregate_in_test.pop()
 
@@ -407,6 +415,7 @@ fn _execute_it(name: text, block: fn()) -> text:
     ):
         # pending(reason); return marks this example without inflating passes.
         _write_test_result_evidence(passed, failed)
+        emit_trace_case_event(full_name, "finished", "pending")
         return "pending"
     elif current_test_errors.len() == 0:
         passed = passed + 1
@@ -415,6 +424,7 @@ fn _execute_it(name: text, block: fn()) -> text:
         # snapshot and stale the local tally under interpreter writeback.
         _write_test_result_evidence(passed, failed)
         print "{indent}  it {name} ... ok"
+        emit_trace_case_event(full_name, "finished", "passed")
         return "pass"
     else:
         # A failing example has one outcome: failure wins over an earlier
@@ -431,6 +441,7 @@ fn _execute_it(name: text, block: fn()) -> text:
         val current_test_error = current_test_errors.join("; ")
         print "{indent}    Error: {current_test_error}"
         test_errors.push("{full_name}: {current_test_error}")
+        emit_trace_case_event(full_name, "finished", "failed")
         return "fail"
 
 fn _aggregate_run_case(name: text, kind: text, block: fn()):
@@ -1552,6 +1563,15 @@ pub fn note_expectation():
 pub fn fail_assertion(message: text):
     if _aggregate_active() and _aggregate_in_test.len() == 0:
         _aggregate_errors.push("assertion outside a case")
+    elif not _aggregate_active() and _case_depth.len() == 0:
+        # Outside aggregate mode nothing consumes current_test_errors unless an
+        # example is running, so a top-level failure (a comment doctest, a
+        # `simple run` script, a describe-level or before_all body) used to
+        # exit 0. With no harness to record it the failure is fatal, matching
+        # the seed's matcher/assert_* rule. bug_db:
+        # bdd_assert_outside_it_silent_false_green_2026_10_19.
+        print "assertion failed outside an `it` block: {message}"
+        exit(1)
     current_test_errors.push(message)
 
 pub fn fail_test(message: text):

@@ -4,7 +4,8 @@
 
 Own layer-specific process knowledge for the driver's cache layer
 (`src/compiler/80.driver/cache/`). This layer owns build artifact identity
-(SHA-256 action keys), content-addressed storage, the workspace/machine/remote
+(SHA-256 action keys and CAS blobs; BLAKE3-256 package TLDR interface/action
+archive keys), content-addressed storage, the workspace/machine/remote
 tier router, storage quota and garbage collection, and remote-main promotion
 policy.
 
@@ -41,6 +42,13 @@ Feature wikis: [cache_identity](../../feature_expert/cache_identity/skill.md),
    freeze (`doc/03_plan/compiler/cache/c0_schema_freeze_2026-08-09.md`) fixes 20
    canonical positions; positions 1–14 are byte-identical to v1 and already
    proven. A rename, reorder, or removal is a `schema_version` bump, not a patch.
+   The digest function is part of the key: `package_tldr_interface_key_v1` and
+   `package_tldr_action_key_v1` hash with BLAKE3-256 under the `/v2` domain tags
+   (2026-10-18). The frontend private parse (`.fpc`) key is XXH3-128 through the
+   `rt_xxh3_128_text` accelerator (2026-10-19), and the M2->M3 `.fpc` binding
+   re-derives it with `frontend_parse_cache_key`, never the build cache's SHA-256
+   `content_hash`. `cas_put`/`cas_get` and HIR body digests stay on SHA-256 (64
+   hex is pinned there; switching needs a schema bump, not just the accelerator).
 2. **Exact-key lookup only.** No prefix, restore-key, nearest-branch, or
    timestamp fallback may return a compiler artifact.
 3. **Git identity is admission, never identity.** Branch, commit, PR number, and

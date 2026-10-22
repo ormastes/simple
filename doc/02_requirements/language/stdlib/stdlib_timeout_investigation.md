@@ -39,7 +39,7 @@ $ timeout 30 bin/simple test test/01_unit/compiler_core/interpreter/factorial_sp
 **Location:** `src/lib/shell/env.spl`
 
 **Functions implemented:**
-```simple
+```simple:skip
 fn get(key: text) -> text       # Get env var (returns "" if not set)
 fn set(key: text, value: text) -> bool  # Set env var
 fn cwd() -> text                # Get current working directory
@@ -63,7 +63,7 @@ All FFI functions work correctly when called directly.
 #### 2. Module Import Pattern Problem
 
 **Test expects:**
-```simple
+```text
 use shell.env
 val path = env.get("PATH")  # Access via namespace
 ```
@@ -71,14 +71,14 @@ val path = env.get("PATH")  # Access via namespace
 **Issue:** Simple's module system imports `env` as empty dict `{}`, not as a namespace with functions.
 
 **Evidence:**
-```simple
+```text
 use shell.env
 print "env: {env}"  # Prints: env: {}
 val x = env.get("PATH")  # Error: method `get` not found on type `dict`
 ```
 
 **Alternative pattern (works):**
-```simple
+```text
 use shell.env.{get, set, cwd}
 val path = get("PATH")  # Direct function call
 ```

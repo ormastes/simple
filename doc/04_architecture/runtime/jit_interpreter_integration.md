@@ -102,7 +102,7 @@ The JIT Interpreter provides a **hybrid execution model** that combines:
 - `Hybrid` - Smart hybrid (future: profile-guided)
 
 **Configuration:**
-```simple
+```text
 struct JitInterpreterConfig:
     mode: JitMode
     backend: text          # "auto", "cranelift", "llvm"
@@ -111,7 +111,7 @@ struct JitInterpreterConfig:
 ```
 
 **Default Behavior:**
-```simple
+```text
 # Interpreter mode → Auto JIT (threshold=10)
 val backend = create_backend(BackendKind.Interpreter)
 
@@ -127,7 +127,7 @@ val backend = create_backend(BackendKind.LlvmJit)
 **File:** `src/compiler/execution/mod.spl`
 
 **SFFI Wrappers:**
-```simple
+```text
 # Create execution manager
 rt_exec_manager_create(backend) -> handle
 
@@ -148,7 +148,7 @@ rt_exec_manager_cleanup(handle)
 ```
 
 **Backend Selection:**
-```simple
+```text
 # Global backend control
 set_jit_backend("cranelift")  # or "llvm" or "auto"
 val current = get_jit_backend()
@@ -176,7 +176,7 @@ All backends use the same `Parser` → `HIR` → `MIR` pipeline.
 **File:** `src/app/io/mod.spl`
 
 All FFI declarations are in one place and shared:
-```simple
+```text
 # File operations
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
@@ -218,7 +218,7 @@ fn main():
 
 ### Example 2: Explicit Cranelift JIT
 
-```simple
+```text
 #!/usr/bin/env simple
 # Force JIT compilation with Cranelift
 
@@ -238,7 +238,7 @@ fn main():
 
 ### Example 3: Backend Switching
 
-```simple
+```text
 #!/usr/bin/env simple
 # Switch between LLVM and Cranelift at runtime
 
@@ -262,7 +262,7 @@ fn main():
 
 ### Example 4: Hybrid Execution
 
-```simple
+```text
 #!/usr/bin/env simple
 # Manually control what gets JIT-compiled
 
@@ -311,13 +311,13 @@ fn main():
 ### Value Semantics
 
 **Problem:** Tree-walking interpreter uses value semantics for arrays:
-```simple
+```text
 var arr = [tensor]
 arr[0].apply_gradient(grad)  # Modifies COPY, not original!
 ```
 
 **Solution:** JIT-compiled code uses reference semantics:
-```simple
+```text
 var arr = [tensor]
 arr[0].apply_gradient(grad)  # Modifies ORIGINAL via pointer!
 ```
@@ -348,7 +348,7 @@ export SIMPLE_JIT_VERBOSE=1
 
 ### Programmatic Configuration
 
-```simple
+```text
 use compiler.backend.{JitInterpreterConfig, JitMode}
 
 # Conservative (interpret most code)
@@ -407,7 +407,7 @@ bin/simple examples/test_jit_autograd.spl
 ### 1. Profile-Guided Optimization
 
 Track hot paths and JIT compile only frequently executed code:
-```simple
+```text
 val config = JitInterpreterConfig(
     mode: JitMode.ProfileGuided,
     profile_window: 1000,  # Sample every 1000 ops
@@ -426,7 +426,7 @@ Interpreted → JIT -O0 → JIT -O2 → JIT -O3
 ### 3. Deoptimization
 
 Fall back from JIT to interpretation when assumptions break:
-```simple
+```text
 # JIT assumes type is always Int
 val jit_fn = compile_assuming(arg_type: Int)
 
@@ -438,7 +438,7 @@ if arg_type != Int:
 ### 4. Mixed-Mode Execution
 
 JIT-compile inner loops only, keep outer code interpreted:
-```simple
+```text
 for i in 0..1000:
     # Outer loop: interpreted (flexible)
     val data = prepare_data(i)
@@ -452,7 +452,7 @@ for i in 0..1000:
 
 ### JIT Compilation Fails
 
-```simple
+```text
 # Check backend availability
 val em = LocalExecutionManager.auto_select()
 print "Backend: {em.backend_name()}"
@@ -463,7 +463,7 @@ set_jit_backend("cranelift")
 
 ### Performance Not Improved
 
-```simple
+```text
 # Check JIT threshold
 val config = JitInterpreterConfig.default()
 print "Threshold: {config.jit_threshold}"
@@ -477,7 +477,7 @@ val config = JitInterpreterConfig(
 
 ### MIR Lowering Errors
 
-```simple
+```text
 # Enable verbose logging
 val config = JitInterpreterConfig(
     verbose: true  # Show lowering/compilation errors

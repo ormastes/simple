@@ -1,0 +1,206 @@
+# @cover src/os/apps/smux/vt_screen.spl 80%
+# @cover src/os/apps/smux/api.spl 80%
+# @cover src/os/apps/smux/smux_remote.spl 80%
+"""
+## Purpose and audience
+Bounded terminal scrollback for smux maintainers, exercised through production
+VT state, PaneRecord capture, the service API and remote protocol dispatch.
+## Evidence boundary
+Pure emulator and service-state scenarios, not a live PTY transcript. Remote
+sessions are created through the real service without spawning children.
+Native execution and manual generation remain pending an admitted runner.
+# @manual: primary
+# @capture: text
+Plan: doc/03_plan/sys_test/smux_windows_phase3_features.md
+"""
+# codex-system-test
+use std.spec.{describe, it, expect, step}
+use os.apps.smux.vt_screen.{vt_new, vt_feed, vt_text, vt_resize,
+    vt_history_text, vt_history_count, vt_set_history_limit}
+use os.apps.smux.service.{PaneRecord}
+use os.apps.smux.contract.{MuxPane}
+use os.apps.smux.api.{smux_reset_for_test, smux_create_session,
+    smux_list_windows, smux_list_panes, smux_capture_history, smux_metrics}
+use os.apps.smux.smux_remote.{smux_remote_dispatch, smux_remote_reply_ok}
+
+# @inline
+fn history_service_session(name: text) -> [text]:
+    val session = smux_create_session(name)
+    expect(session.id.len()).to_be_greater_than(0)
+    val windows = smux_list_windows(session.id)
+    expect(windows.len()).to_equal(1)
+    val panes = smux_list_panes(session.id, windows[0].id)
+    expect(panes.len()).to_equal(1)
+    return [session.id, windows[0].id, panes[0].id]
+
+describe "smux bounded primary-screen scrollback":
+    describe "REQ-SMUX-HISTORY-001: retained cell rows and bounds":
+        it "should retain scrolled Unicode cells before the visible frame":
+            # @req REQ-SMUX-HISTORY-001
+            step("Print three short lines into a two-row production terminal")
+            val screen = vt_feed(vt_new(2, 8), "界A\r\nB\r\nC")
+            expect(vt_history_count(screen)).to_equal(1)
+            expect(vt_text(screen)).to_equal("B\nC")
+            expect(vt_history_text(screen, 3)).to_equal("界A\nB\nC")
+            expect(vt_history_text(screen, 2)).to_equal("B\nC")
+
+        it "should evict oldest rows and clamp configurable retention limits":
+            # @req REQ-SMUX-HISTORY-001
+            expect(vt_new(2, 8).history_limit).to_equal(2000)
+            val base = vt_set_history_limit(vt_new(2, 8), 2)
+            val screen = vt_feed(base, "A\r\nB\r\nC\r\nD\r\nE")
+            expect(vt_history_count(screen)).to_equal(2)
+            expect(vt_history_text(screen, 10)).to_equal("B\nC\nD\nE")
+            expect(vt_set_history_limit(screen, 999999).history_limit).to_equal(10000)
+            val disabled = vt_set_history_limit(screen, -1)
+            expect(disabled.history_limit).to_equal(0)
+            expect(vt_history_count(disabled)).to_equal(0)
+            expect(vt_history_text(disabled, 10)).to_equal("D\nE")
+            expect(vt_history_text(screen, 0)).to_equal("")
+
+        it "should bound huge full-screen scroll parameters to the region height":
+            # @req REQ-SMUX-HISTORY-001
+            val base = vt_feed(vt_new(2, 8), "A\r\nB")
+            step("A huge CSI S removes the two existing rows only")
+            val screen = vt_feed(base, "\x1b[999999999S")
+            expect(vt_history_count(screen)).to_equal(2)
+            expect(vt_history_text(screen, 10)).to_equal("A\nB")
+            expect(vt_text(screen)).to_equal("")
+            val reversed = vt_feed(screen, "\x1b[999999999T")
+            expect(vt_history_count(reversed)).to_equal(2)
+
+    describe "REQ-SMUX-HISTORY-002: primary full-screen scroll provenance":
+        it "should exclude partial scroll regions from saved history":
+            # @req REQ-SMUX-HISTORY-002
+            val base = vt_feed(vt_new(4, 8), "A\r\nB\r\nC\r\nD")
+            step("Scroll only the middle two rows using newline and CSI S")
+            val screen = vt_feed(base, "\x1b[2;3r\x1b[3;1H\n\x1b[999999999S")
+            expect(vt_history_count(screen)).to_equal(0)
+            expect(vt_text(screen)).to_equal("A\n\n\nD")
+
+        it "should retain primary history without mixing it into alternate capture":
+            # @req REQ-SMUX-HISTORY-002
+            val primary = vt_feed(vt_new(2, 8), "A\r\nB\r\nC")
+            step("An alternate-screen application scrolls independently")
+            val alternate = vt_feed(primary, "\x1b[?1049h\x1b[1;1HX\r\nY\r\nZ")
+            expect(vt_history_count(alternate)).to_equal(0)
+            expect(vt_history_text(alternate, 10)).to_equal("Y\nZ")
+            val restored = vt_feed(alternate, "\x1b[?1049l")
+            expect(vt_history_count(restored)).to_equal(1)
+            expect(vt_history_text(restored, 10)).to_equal("A\nB\nC")
+
+        it "should exclude delete-line and insert-line edits even at the top row":
+            # @req REQ-SMUX-HISTORY-002
+            val base = vt_feed(vt_new(2, 8), "A\r\nB")
+            step("Large editing parameters are bounded but never recorded as scrollback")
+            val deleted = vt_feed(base, "\x1b[1;1H\x1b[999999999M")
+            val inserted = vt_feed(base, "\x1b[1;1H\x1b[999999999L")
+            expect(vt_history_count(deleted)).to_equal(0)
+            expect(vt_history_count(inserted)).to_equal(0)
+            expect(vt_text(deleted)).to_equal("")
+            expect(vt_text(inserted)).to_equal("")
+
+    describe "REQ-SMUX-HISTORY-003: synchronized capture clear reset and resize":
+        it "should freeze saved history and visible cells together until update release":
+            # @req REQ-SMUX-HISTORY-003
+            val base = vt_feed(vt_new(2, 8), "A\r\nB\r\nC")
+            step("Scroll another row inside a synchronized update")
+            val updating = vt_feed(base, "\x1b[?2026h\r\nD")
+            expect(vt_history_count(updating)).to_equal(1)
+            expect(vt_history_text(updating, 10)).to_equal("A\nB\nC")
+            expect(vt_text(updating)).to_equal("B\nC")
+            step("Changing alternate mode cannot replace the frozen history snapshot")
+            val alternate = vt_feed(updating, "\x1b[?1049h")
+            expect(vt_history_text(alternate, 10)).to_equal("A\nB\nC")
+            expect(vt_history_text(vt_feed(alternate, "\x1b[?2026l"), 10)).to_equal("")
+            val committed = vt_feed(updating, "\x1b[?2026l")
+            expect(vt_history_count(committed)).to_equal(2)
+            expect(vt_history_text(committed, 10)).to_equal("A\nB\nC\nD")
+
+        it "should clear saved history with CSI 3J while CSI 2J retains it":
+            # @req REQ-SMUX-HISTORY-003
+            val base = vt_feed(vt_new(2, 8), "A\r\nB\r\nC")
+            val cleared_grid = vt_feed(base, "\x1b[2J")
+            expect(vt_text(cleared_grid)).to_equal("")
+            expect(vt_history_text(cleared_grid, 10)).to_equal("A")
+            val cleared_history = vt_feed(base, "\x1b[3J")
+            expect(vt_history_count(cleared_history)).to_equal(0)
+            expect(vt_text(cleared_history)).to_equal("B\nC")
+            step("A history clear during an update cannot alter its frozen capture")
+            val frozen_clear = vt_feed(base, "\x1b[?2026h\x1b[3J")
+            expect(vt_history_text(frozen_clear, 10)).to_equal("A\nB\nC")
+            expect(vt_history_text(vt_feed(frozen_clear, "\x1b[?2026l"), 10)).to_equal("B\nC")
+
+        it "should preserve history on resize and clear it on terminal reset":
+            # @req REQ-SMUX-HISTORY-003
+            val base = vt_feed(vt_set_history_limit(vt_new(2, 8), 7), "A\r\nB\r\nC")
+            val resized = vt_resize(base, 3, 10)
+            expect(vt_history_count(resized)).to_equal(1)
+            expect(vt_history_text(resized, 10)).to_equal("A\nB\nC")
+            val reset = vt_feed(resized, "\x1b" + "c")
+            expect(vt_history_count(reset)).to_equal(0)
+            expect(vt_text(reset)).to_equal("")
+            expect(reset.history_limit).to_equal(7)
+
+    describe "REQ-SMUX-HISTORY-004: production capture ownership and snapshot":
+        it "should return typed empty history from a real service pane without a child":
+            # @req REQ-SMUX-HISTORY-004
+            smux_reset_for_test()
+            val ids = history_service_session("empty-history")
+            val captured = smux_capture_history(ids[0], ids[1], ids[2], 200)
+            expect(captured.is_ok()).to_equal(true)
+            expect(captured.unwrap().pane_id).to_equal(ids[2])
+            expect(captured.unwrap().content).to_equal("")
+            expect(captured.unwrap().rows).to_equal(0)
+            expect(smux_metrics().capture_count).to_equal(1)
+
+        it "should reject wrong pane ownership and invalid limits before draining":
+            # @req REQ-SMUX-HISTORY-004
+            smux_reset_for_test()
+            val first = history_service_session("first")
+            val second = history_service_session("second")
+            expect(smux_capture_history(first[0], second[1], second[2], 200).is_ok()).to_equal(false)
+            expect(smux_capture_history(first[0], first[1], "missing", 200).is_ok()).to_equal(false)
+            expect(smux_capture_history(first[0], first[1], first[2], 0).is_ok()).to_equal(false)
+            expect(smux_capture_history(first[0], first[1], first[2], 10001).is_ok()).to_equal(false)
+            expect(smux_metrics().capture_count).to_equal(0)
+            expect(smux_list_panes(second[0], second[1])[0].id).to_equal(second[2])
+
+        it "should not substitute live tail output for a frozen empty terminal frame":
+            # @req REQ-SMUX-HISTORY-004
+            step("Feed the actual PaneRecord owner a tail and an incomplete screen update")
+            val pane = MuxPane.create("pane", "window", "session")
+            val record = PaneRecord.create(pane).feed("LIVE_NOT_VISIBLE").feed_screen("\x1b[?2026hX")
+            expect(record.capture_history(200).content).to_equal("")
+            expect(record.capture_history(200).rows).to_equal(0)
+            expect(record.capture_history(0).content).to_equal("")
+            expect(record.feed_screen("\x1b[?2026l").capture_history(200).content).to_equal("X")
+            val alternate = PaneRecord.create(pane).feed("PRIMARY_TAIL").feed_screen("\x1b[?1049h")
+            expect(alternate.capture_history(200).content).to_equal("")
+
+    describe "REQ-SMUX-HISTORY-005: bounded remote history command":
+        it "should use the default history count and accept the remote maximum":
+            # @req REQ-SMUX-HISTORY-005
+            smux_reset_for_test()
+            val ids = history_service_session("remote-history")
+            expect(smux_remote_dispatch("history remote-history")).to_equal("smux: history[remote-history]:\n")
+            expect(smux_remote_dispatch("history remote-history 2000")).to_equal("smux: history[remote-history]:\n")
+            step("The actual request reply classifier accepts history success and rejects refusal")
+            expect(smux_remote_reply_ok(smux_remote_dispatch("history remote-history"))).to_equal(true)
+            expect(smux_remote_reply_ok(smux_remote_dispatch("history remote-history 0"))).to_equal(false)
+            expect(smux_list_panes(ids[0], ids[1])[0].id).to_equal(ids[2])
+
+        it "should reject invalid excessive and surplus remote arguments":
+            # @req REQ-SMUX-HISTORY-005
+            smux_reset_for_test()
+            val ids = history_service_session("remote-history")
+            for count in ["0", "-1", "2001", "nonsense"]:
+                expect(smux_remote_dispatch("history remote-history " + count)).to_equal("smux: history line count must be between 1 and 2000")
+            expect(smux_remote_dispatch("history remote-history 20 extra")).to_equal("smux: history requires session and optional line count")
+            expect(smux_list_panes(ids[0], ids[1])[0].id).to_equal(ids[2])
+
+        it "should reject missing and unknown session addresses explicitly":
+            # @req REQ-SMUX-HISTORY-005
+            smux_reset_for_test()
+            expect(smux_remote_dispatch("history")).to_equal("smux: usage: VERB session_id [extra]")
+            expect(smux_remote_dispatch("history unknown")).to_equal("smux: unknown session unknown")

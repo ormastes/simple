@@ -1,5 +1,6 @@
 use std.async.cancellation.{CancellationToken}
 use std.async.future.{Future}
+use std.async.poll.{Poll}
 use std.common.io.file_read_policy.{
     FileReadPolicyV1, FileViewTransportV1,
     file_read_policy_allows_fallback_v1,
@@ -7,7 +8,7 @@ use std.common.io.file_read_policy.{
 }
 use std.common.io.file_view_buffered.{
     BufferedFileViewErrorV1, FileViewIdentityV1,
-    file_view_buffered_read_v1, file_view_descriptor_identity_v1,
+    file_view_buffered_read_v1, file_view_buffered_read_uncancellable_v1, file_view_descriptor_identity_v1,
     file_view_identity_equal_v1, file_view_range_valid_v1
 }
 
@@ -152,14 +153,39 @@ fn read_only_file_view_read_now_v1(
         Err(error):
             Err(read_only_file_view_buffer_error_v1(error))
 
+# Caller retains this view and closes it on every success/error path. This
+# buffered-only synchronous API binds bytes and identity to the same admitted
+# descriptor without allocating cancellation registry state or async work.
+fn read_only_file_view_read_buffered_uncancellable_v1(
+    view: &ReadOnlyFileViewV1,
+    offset: u64,
+    length: u64
+) -> Result<FileViewSliceV1, ReadOnlyFileViewErrorV1>:
+    if not view.open or view.descriptor < 0:
+        return Err(ReadOnlyFileViewErrorV1.closed)
+    if view.policy != FileReadPolicyV1.buffered:
+        return Err(ReadOnlyFileViewErrorV1.mapping_unsupported)
+    if length > view.address_space_budget or not file_view_range_valid_v1(view.identity.size, offset, length):
+        return Err(ReadOnlyFileViewErrorV1.invalid_range)
+    match file_view_buffered_read_uncancellable_v1(view.descriptor, view.identity, offset, length):
+        case Ok(bytes):
+            Ok(FileViewSliceV1(bytes: bytes, offset: offset, length: length,
+                identity: view.identity, transport: FileViewTransportV1.buffered))
+        case Err(reason):
+            Err(read_only_file_view_buffer_error_v1(reason))
+
 fn read_only_file_view_read_async_v1(
     view: &ReadOnlyFileViewV1,
     offset: u64,
     length: u64,
     cancellation: CancellationToken
 ) -> Future<Result[FileViewSliceV1, ReadOnlyFileViewErrorV1] >:
-    Future.from_value(read_only_file_view_read_now_v1(
-        view, offset, length, cancellation))
+    # @workaround bug=native_future_receiver_typeparam_2026_10_18 recover=97d8cb355ed527ee0a50c440022500c37f026726 reason=Explicit real Future construction retains the concrete Poll and Result payload owners after static-call receiver specialization fails
+    val result: Result[FileViewSliceV1, ReadOnlyFileViewErrorV1] = read_only_file_view_read_now_v1(
+        view, offset, length, cancellation)
+    val ready: Poll<Result[FileViewSliceV1, ReadOnlyFileViewErrorV1]> = Poll.Ready(result)
+    val future: Future<Result[FileViewSliceV1, ReadOnlyFileViewErrorV1]> = Future<Result[FileViewSliceV1, ReadOnlyFileViewErrorV1]>(state: [], poll_result: ready)
+    future
 
 fn read_only_file_view_read_v1(
     view: &ReadOnlyFileViewV1,
@@ -179,14 +205,30 @@ fn read_only_file_view_prefetch_async_v1(
     cancellation: CancellationToken
 ) -> Future<Result[(), ReadOnlyFileViewErrorV1] >:
     if not view.open:
-        return Future.from_value(Err(ReadOnlyFileViewErrorV1.closed))
+        # @workaround bug=native_future_receiver_typeparam_2026_10_18 recover=97d8cb355ed527ee0a50c440022500c37f026726 reason=Construct the real Future from explicitly typed Result and Poll locals while the generic static factory loses T
+        val result: Result[(), ReadOnlyFileViewErrorV1] = Err(ReadOnlyFileViewErrorV1.closed)
+        val ready: Poll<Result[(), ReadOnlyFileViewErrorV1]> = Poll.Ready(result)
+        val future: Future<Result[(), ReadOnlyFileViewErrorV1]> = Future<Result[(), ReadOnlyFileViewErrorV1]>(state: [], poll_result: ready)
+        return future
     if cancellation.is_cancelled():
-        return Future.from_value(Err(ReadOnlyFileViewErrorV1.cancelled))
+        # @workaround bug=native_future_receiver_typeparam_2026_10_18 recover=97d8cb355ed527ee0a50c440022500c37f026726 reason=Construct the real Future from explicitly typed Result and Poll locals while the generic static factory loses T
+        val result: Result[(), ReadOnlyFileViewErrorV1] = Err(ReadOnlyFileViewErrorV1.cancelled)
+        val ready: Poll<Result[(), ReadOnlyFileViewErrorV1]> = Poll.Ready(result)
+        val future: Future<Result[(), ReadOnlyFileViewErrorV1]> = Future<Result[(), ReadOnlyFileViewErrorV1]>(state: [], poll_result: ready)
+        return future
     if not file_view_range_valid_v1(view.identity.size, offset, length):
-        return Future.from_value(Err(ReadOnlyFileViewErrorV1.invalid_range))
+        # @workaround bug=native_future_receiver_typeparam_2026_10_18 recover=97d8cb355ed527ee0a50c440022500c37f026726 reason=Construct the real Future from explicitly typed Result and Poll locals while the generic static factory loses T
+        val result: Result[(), ReadOnlyFileViewErrorV1] = Err(ReadOnlyFileViewErrorV1.invalid_range)
+        val ready: Poll<Result[(), ReadOnlyFileViewErrorV1]> = Poll.Ready(result)
+        val future: Future<Result[(), ReadOnlyFileViewErrorV1]> = Future<Result[(), ReadOnlyFileViewErrorV1]>(state: [], poll_result: ready)
+        return future
     unsafe(capabilities: [ffi]):
         _ = rt_file_view_prefetch_v1(view.descriptor, offset, length)
-    Future.from_value(Ok(()))
+    # @workaround bug=native_future_receiver_typeparam_2026_10_18 recover=97d8cb355ed527ee0a50c440022500c37f026726 reason=Construct the real Future from explicitly typed Result and Poll locals while the generic static factory loses T
+    val result: Result[(), ReadOnlyFileViewErrorV1] = Ok(())
+    val ready: Poll<Result[(), ReadOnlyFileViewErrorV1]> = Poll.Ready(result)
+    val future: Future<Result[(), ReadOnlyFileViewErrorV1]> = Future<Result[(), ReadOnlyFileViewErrorV1]>(state: [], poll_result: ready)
+    future
 
 fn read_only_file_view_close_v1(
     view: ReadOnlyFileViewV1

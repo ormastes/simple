@@ -15,6 +15,7 @@
 
 use compiler.core.tokens.{tok_kind_name, keyword_lookup}
 use compiler.core.tokens.{TOK_IDENT}
+use compiler.core.tokens.{TOK_INT_LIT}
 use compiler.core.tokens.{TOK_KW_FN, TOK_KW_DYN}
 use compiler.core.tokens.{TOK_LT, TOK_GT, TOK_LT_GENERIC}
 use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN, TOK_LBRACKET, TOK_RBRACKET}
@@ -25,10 +26,11 @@ use compiler.core.tokens.{TOK_QUESTION, TOK_DOUBLE_QUESTION}
 use compiler.core.tokens.{TOK_NEWLINE, TOK_INDENT, TOK_DEDENT, TOK_EOF}
 use compiler.core.tokens.{TOK_SEMICOLON}
 use compiler.core.tokens.{TOK_AMPERSAND, TOK_STAR, TOK_KW_NIL}
-use compiler.core.tokens.{TOK_AT, TOK_MINUS}
+use compiler.core.tokens.{TOK_AT, TOK_MINUS, TOK_PLUS}
 use compiler.frontend.core.lexer.{lex_init, lex_init_with_path, lex_next, lex_next_snapshot, lex_mark_current_token_as_generic_close}
 use compiler.frontend.core.lexer.{lex_token_kind, lex_token_text, lex_token_line, lex_token_col}
 use compiler.frontend.core.lexer.{lex_cur_suffix_get}
+use compiler.frontend.core.lexer.{lex_snapshot_save, lex_snapshot_rollback}
 use compiler.frontend.core.lexer.{lex_token_start_get, lex_token_end_get}
 use compiler.core.ast.{module_set_path, module_get_path}
 use compiler.core.ast.{ast_reset}
@@ -48,19 +50,20 @@ use compiler.core.types.{TYPE_RESULT, TYPE_NAMED_BASE, TYPE_DICT, TYPE_FN, TYPE_
 use compiler.core.types.{TYPE_UNION}
 use compiler.core.types.{int_to_str}
 use compiler.core.types.{named_type_find, named_type_register}
+use compiler.core.types.{named_type_apply}
 use compiler.core.types.{primitive_integer_bit_width_from_name}
 use compiler.core.types.{type_pools_promote_hir_owners}
 use compiler.core.types.{union_type_register}
 use compiler.core.types.{dict_type_register}
 use compiler.core.types.{tuple_type_register}
 use compiler.core.types.{array_generic_type_register}
-use compiler.core.types.{option_generic_type_register, is_option_generic_tag}
+use compiler.core.types.{option_generic_type_register, is_option_generic_tag, is_function_tag}
 use compiler.core.types.{named_generic_instance_register}
 use compiler.core.types.{result_type_register}
 use compiler.core.types.{isolated_type_register}
 use compiler.core.types.{exclusive_type_register}
 use compiler.core.types.{reference_type_register}
-use compiler.core.types.{pointer_type_register}
+use compiler.core.types.{pointer_type_register_flag, POINTER_FLAG_SHARED, POINTER_FLAG_RAW_CONST, POINTER_FLAG_RAW_MUT}
 use compiler.core.types.{atomic_type_register}
 use compiler.core.types.{weak_type_register}
 use compiler.core.types.{function_type_register, TYPE_FUNCTION_BASE, TYPE_FUNCTION_LIMIT}
@@ -88,9 +91,30 @@ use compiler.frontend.rt_criticality_registry.{rt_criticality_reset_module}
 use compiler.frontend.aspect_registry.{aspect_registry_reset_module, aspect_pending_reset}
 use compiler.core.parser_decls.{parse_val_decl, parse_lazy_val_decl, parse_var_decl}
 use compiler.core.parser_decls.{parse_module_body}
+use compiler.frontend.core.representation_declarations_v1.{representation_parser_reset_v1}
 use compiler.frontend.core.flat_pool_codec.*
 
 # ===== Parser State =====
+
+use compiler.frontend.core.parser_lexical_bindings.{ParserLexicalBindings}
+
+# Owned by this Parser lifecycle; unresolved outer names stay unresolved.
+var par_lexical_bindings = ParserLexicalBindings(authority: 0, scope_authorities: [])
+
+fn parser_lexical_scope_enter():
+    par_lexical_bindings.enter_scope()
+
+fn parser_lexical_scope_leave():
+    par_lexical_bindings.leave_scope()
+
+fn parser_lexical_bind_value(name: text):
+    par_lexical_bindings.bind_value(name)
+
+fn parser_lexical_unknown_shadow():
+    par_lexical_bindings.unknown_shadow()
+
+fn parser_lexical_has_new_value() -> bool:
+    par_lexical_bindings.has_new_value()
 
 var par_errors: [text] = []
 var par_warnings: [text] = []
@@ -105,6 +129,16 @@ var par_list_type_import_seen: bool = false
 # `use m.{Box as B}` -> "B"). Only such a name may become an imported
 # generic instance type; wildcard imports keep the ANY fallback.
 var par_imported_type_names: [text] = []
+# Fixed-array side-channel: element tag + literal-int size of the most recent
+# `[T; N]` annotation parsed by parser_parse_type_impl. The flat type-tag lane
+# is dynamic and drops N ("stage4 arrays are dynamic"), but the var-decl
+# declare-without-initializer paths (parse_var_decl_stmt, parse_var_decl) need
+# N to synthesize the seed's zero-filled default (`var g: [u8; 32]` with no
+# `=` is a zero-filled global in the seed — hir/lower/module_lowering/
+# module_pass.rs — and a zero-filled FixedSizeArray local — interpreter/
+# node_exec.rs). 0 / -1 means "the last annotation was not a sized array".
+var par_fixed_array_elem: i64 = 0
+var par_fixed_array_size: i64 = -1
 var par_diagnostics_suppressed: bool = false
 var par_diagnostic_emit_count: i64 = 0
 var par_kind_slot: [i64] = [0]
@@ -304,6 +338,7 @@ fn parser_init_with_path(source: text, path: text):
     # reclaims that backing; clear() on the next file would reuse freed memory.
     # Assignment discards the stale owner before any read and makes this
     # file's scratch explicitly scope-local.
+    par_lexical_bindings = ParserLexicalBindings(authority: 0, scope_authorities: [])
     par_errors = []
     par_warnings = []
     par_struct_names = []
@@ -321,6 +356,8 @@ fn parser_init_with_path(source: text, path: text):
     par_col_slot[0] = 0
     par_had_error = false
     par_list_type_import_seen = false
+    par_fixed_array_elem = 0
+    par_fixed_array_size = -1
     par_imported_type_names = []
     par_diagnostics_suppressed = false
     # First-error text belongs to this module, including ordinary driver
@@ -338,6 +375,7 @@ fn parser_init_with_path(source: text, path: text):
     # (e.g. a spec that parses two source strings) must not leak the first
     # parse's resource facts into the second. See resource_registry.spl.
     resource_registry_reset()
+    representation_parser_reset_v1(source, path)
     # C1: same reason, for the `@layer_eq`/`@layer_field` facts. Without this a
     # spec (or any multi-module compile) that parses a second source would keep
     # the first source's view->target claims alive and re-check them against a
@@ -665,10 +703,10 @@ fn parser_parse_cast_type() -> i64:
 # bootstrap tag registry. Parse `label: T` by discarding the provisional named
 # type for `label` and retaining T; anonymous tuple elements remain unchanged.
 fn parser_parse_tuple_element_type() -> i64:
-    val candidate = parser_parse_type()
+    val candidate = parser_parse_type_with_union()
     if par_kind_get() == TOK_COLON:
         parser_advance()
-        return parser_parse_type()
+        return parser_parse_type_with_union()
     candidate
 
 fn parser_array_tag_for_elem(elem_type: i64) -> i64:
@@ -692,7 +730,75 @@ fn parser_array_tag_for_elem(elem_type: i64) -> i64:
         return TYPE_ARRAY_I64
     arr_generic_tag
 
+# Legacy `let [mut]` declaration prefix, seed parity:
+# src/compiler_rust/parser/src/stmt_parsing/var_decl.rs parse_let /
+# parse_mut_let -- `let` is the legacy mutable-binding spelling, the `mut`
+# after it is redundant and absorbed, and the binding lowers exactly like
+# `var`. `let` is NOT a keyword token in this lexer (unlike the seed), so
+# the prefix is recognised contextually: an identifier spelled `let` whose
+# next token can open a binding. `parser_legacy_let_decl_ahead` excludes the
+# identifier usages (`let = 5`, `let.push(x)`), matching how the seed's
+# statement router guards `mut`/`shared`/`ghost` behind a peek for `let`.
+fn parser_peek_is_binding_name(steps: i64) -> bool:
+    val snap = lex_snapshot_save()
+    val (nums, txt) = parser_tok_save()
+    var i = 0
+    while i < steps:
+        parser_advance()
+        i = i + 1
+    val k = par_kind_get()
+    lex_snapshot_rollback(snap)
+    parser_tok_restore(nums, txt)
+    k == TOK_IDENT or k == 169
+
+# `new(&)` / `new(*)` / `new(-)` / `new(+)` (memory.md's canonical constructor
+# spelling). Called with the stream on the token after `(`. Returns the
+# new-expression kind code (see primary_expr.spl NEW_KIND_*) and consumes the
+# sigil and `)` when they are present, else returns -1 and leaves the stream
+# untouched so `new(alloc_expr)` still parses as an allocator.
+fn parser_new_paren_sigil_kind() -> i64:
+    val k = par_kind_get()
+    var kind = -1
+    if k == TOK_AMPERSAND:
+        kind = 1
+    elif k == TOK_STAR:
+        kind = 2
+    elif k == TOK_MINUS:
+        kind = 3
+    elif k == TOK_PLUS:
+        kind = 4
+    if kind < 0:
+        return -1
+    val snap = lex_snapshot_save()
+    val (nums, txt) = parser_tok_save()
+    parser_advance()
+    if par_kind_get() == 141:
+        parser_advance()
+        return kind
+    lex_snapshot_rollback(snap)
+    parser_tok_restore(nums, txt)
+    -1
+
+fn parser_legacy_let_decl_ahead() -> bool:
+    par_kind_get() == TOK_IDENT and par_text_get() == "let" and
+        parser_peek_is_binding_name(1)
+
+# Consume a confirmed legacy `let` prefix: the stream is positioned at the
+# token AFTER `let`; absorb a redundant `mut` only when a real binding name
+# follows it, so `let mut = 5` still binds a variable named `mut` (the seed's
+# parse_pattern does the same).
+fn parser_consume_legacy_let_prefix():
+    if par_kind_get() == TOK_IDENT and par_text_get() == "mut" and
+            parser_peek_is_binding_name(1):
+        parser_advance()
+
 fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
+    # Clear the fixed-array side-channel before parsing this annotation so a
+    # var-decl caller never reads a stale `[T; N]` from an earlier annotation
+    # in the file. A nested/recursive call may set it again below; the
+    # outermost sized-array branch writes last and wins.
+    par_fixed_array_elem = 0
+    par_fixed_array_size = -1
     # dyn Trait -- dynamic dispatch type (parsed as named type)
     var kind = par_kind_get()
     # Canonical reference types.  Register the inner tag and mutability so the
@@ -710,19 +816,20 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
             parser_error("too many distinct reference type annotations")
             return reference_inner
         return reference_tag
-    # Raw/shared pointer types.  The flat type lane carries the inner tag and
-    # the only distinction supported by pure HIR (`Ptr(inner, mutable)`).
-    # `*T` and `*const T` are immutable; `*mut T` is mutable.
+    # Shared and raw pointer types (doc/05_design/language/misc/memory.md):
+    # `*T` is the shared (Rc) owner; `*const T` / `*mut T` are raw pointers.
+    # The registry flag keeps all three apart (POINTER_FLAG_* in types.spl).
     if kind == TOK_STAR:
         parser_advance()
-        var pointer_mutable = false
+        var pointer_flag = POINTER_FLAG_SHARED
         if par_text_get() == "const":
             parser_advance()
+            pointer_flag = POINTER_FLAG_RAW_CONST
         elif par_text_get() == "mut":
             parser_advance()
-            pointer_mutable = true
+            pointer_flag = POINTER_FLAG_RAW_MUT
         val pointer_inner = parser_parse_type_impl(allow_spaced_generics)
-        val pointer_tag = pointer_type_register(pointer_inner, pointer_mutable)
+        val pointer_tag = pointer_type_register_flag(pointer_inner, pointer_flag)
         if pointer_tag < 0:
             parser_error("too many distinct pointer type annotations")
             return pointer_inner
@@ -924,7 +1031,13 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
                 # TYPE_OPTION_GENERIC_BASE and bug:
                 # native_option_unwrap_receiver_unresolved_2026-08-09. Register
                 # the inner tag instead, mirroring Result<T,E>/Dict<K,V> above.
-                if inner_type >= TYPE_NAMED_BASE:
+                # A callable inner (`Option<fn(text) -> i64>`, interned in
+                # TYPE_FUNCTION_BASE..LIMIT, below TYPE_NAMED_BASE) collapsed
+                # the same way, so the payload reached MIR as Optional(Any) and
+                # `if val f = self.opt_fn` / `.unwrap()` had no proven arity
+                # (bug: native_optional_fn_payload_binding_arity_mir_2026_10_20).
+                val inner_is_callable = is_function_tag(inner_type)
+                if inner_type >= TYPE_NAMED_BASE or inner_is_callable:
                     val opt_generic_tag = option_generic_type_register(inner_type)
                     if opt_generic_tag >= 0:
                         return parser_absorb_optional_suffix(opt_generic_tag)
@@ -960,6 +1073,10 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
             if par_imported_type_names.contains(type_name):
                 val instance_tag = named_generic_instance_register(type_name, generic_arg_tags)
                 return parser_absorb_optional_suffix(instance_tag)
+            # Adaptive containers need their declared key/value instantiation
+            # at the typed attribute boundary. Keep ordinary runtime layouts.
+            if type_name == "AdaptiveMap" or type_name == "AdaptiveSet":
+                return parser_absorb_optional_suffix(named_type_apply(type_name, generic_arg_tags))
             # Local declarations need the same instance record as imports.
             # Returning the bare base tag here erased T in Bag<text> before
             # HIR and made parameter-field text operations integer adds.
@@ -1115,11 +1232,18 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
             parser_advance()
             return parser_absorb_optional_suffix(TYPE_ARRAY_ANY)
         val elem_type = parser_parse_type()
-        # Sized array type: [T; N] — accept and drop the size expression
-        # (stage4 arrays are dynamic; N is a literal or const ident).
+        # Sized array type: [T; N] — the returned type tag is dynamic and
+        # drops N (stage4 arrays are dynamic; N may be a literal or const
+        # ident). Record an integer-literal N in the par_fixed_array_*
+        # side-channel anyway: the var-decl no-initializer paths read it to
+        # synthesize the seed's zero-filled `[zero; N]` default initializer.
         kind = par_kind_get()
         if kind == 163:
             parser_advance()
+            if par_kind_get() == TOK_INT_LIT:
+                par_fixed_array_elem = elem_type
+                par_fixed_array_size = parse_int_text(par_text_get())
+                parser_advance()
             for _si in 0..50:
                 if par_kind_get() == 145 or par_kind_get() == 190:
                     break
@@ -1158,11 +1282,13 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
         # element types and a destructure of the call result defaulted every
         # element to i64 (parity case process_run_timeout).
         var tuple_elem_tags: [i64] = []
+        var tuple_has_comma = false
         if par_kind_get() != 141:
             tuple_elem_tags.push(parser_parse_tuple_element_type())
             while true:
                 if par_kind_get() != 160:
                     break
+                tuple_has_comma = true
                 parser_advance()
                 if par_kind_get() == 141:
                     break
@@ -1189,14 +1315,17 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
                 return parser_absorb_optional_suffix(TYPE_ANY)
             return parser_absorb_optional_suffix(unit_tag)
         # A real tuple (2+ elements) carries its element tags via the
-        # registry; a one-element paren group keeps the old TYPE_ANY behavior
-        # because `(T)` is not a tuple.
+        # registry. A sole unseparated element is grouping, so retain its
+        # actual type (including a nested union) instead of erasing it to Any.
+        # Preserve the separate legacy single-element trailing-comma path.
         if tuple_elem_tags.len() >= 2:
             val tuple_tag = tuple_type_register(tuple_elem_tags)
             if tuple_tag < 0:
                 parser_error("too many distinct tuple type annotations")
                 return parser_absorb_optional_suffix(TYPE_ANY)
             return parser_absorb_optional_suffix(tuple_tag)
+        if not tuple_has_comma:
+            return parser_absorb_optional_suffix(tuple_elem_tags[0])
         return parser_absorb_optional_suffix(TYPE_ANY)
     # Dict type: {K: V}
     if par_kind_get() == 142:
@@ -1341,6 +1470,8 @@ fn parser_tok_restore(nums: [i64], saved_text: text):
 
 # Parser state (needed by split modules and external consumers)
 export par_errors, par_warnings, par_struct_names
+export par_fixed_array_elem, par_fixed_array_size
+export parser_legacy_let_decl_ahead, parser_consume_legacy_let_prefix, parser_new_paren_sigil_kind
 export parser_init, parser_init_with_path, parser_advance, parser_check, parser_match_tok, parser_expect
 export parser_note_use_import
 export parser_has_errors, parser_get_errors, parser_error_count, parser_set_had_error
@@ -1416,10 +1547,13 @@ pub fn flat_parser_state_dump() -> text:
     parts = parts.push(flat_pool_enc_scalar_i64(par_diagnostic_emit_count))
     parts = parts.push(flat_pool_enc_scalar_bool(par_diagnostics_suppressed))
     parts = parts.push(flat_pool_enc_text(par_errors))
+    parts = parts.push(flat_pool_enc_scalar_i64(par_fixed_array_elem))
+    parts = parts.push(flat_pool_enc_scalar_i64(par_fixed_array_size))
     parts = parts.push(flat_pool_enc_scalar_bool(par_had_error))
     parts = parts.push(flat_pool_enc_text(par_imported_type_names))
     parts = parts.push(flat_pool_enc_i64(par_kind_slot))
     parts = parts.push(flat_pool_enc_i64(par_line_slot))
+    parts = parts.push(flat_pool_enc_scalar_bool(par_list_type_import_seen))
     parts = parts.push(flat_pool_enc_text(par_struct_names))
     parts = parts.push(flat_pool_enc_text(par_text_slot))
     parts = parts.push(flat_pool_enc_text(par_warnings))
@@ -1432,10 +1566,13 @@ pub fn flat_parser_state_restore(r: FlatPoolReader) -> bool:
     par_diagnostic_emit_count = flat_pool_dec_scalar_i64(r)
     par_diagnostics_suppressed = flat_pool_dec_scalar_bool(r)
     par_errors = flat_pool_dec_text(r)
+    par_fixed_array_elem = flat_pool_dec_scalar_i64(r)
+    par_fixed_array_size = flat_pool_dec_scalar_i64(r)
     par_had_error = flat_pool_dec_scalar_bool(r)
     par_imported_type_names = flat_pool_dec_text(r)
     par_kind_slot = flat_pool_dec_i64_into(par_kind_slot, r)
     par_line_slot = flat_pool_dec_i64_into(par_line_slot, r)
+    par_list_type_import_seen = flat_pool_dec_scalar_bool(r)
     par_struct_names = flat_pool_dec_text(r)
     par_text_slot = flat_pool_dec_text(r)
     par_warnings = flat_pool_dec_text(r)

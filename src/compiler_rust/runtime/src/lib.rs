@@ -9,6 +9,11 @@
 
 include!(concat!(env!("OUT_DIR"), "/runtime_symbol_entries.rs"));
 
+// Keep the selected provider linked into this crate's cdylib too: the
+// generated symbol table takes its ABI addresses before the compiler links.
+#[cfg(feature = "hosted-webgpu-provider")]
+extern crate spl_hosted_runtime;
+
 #[cfg(all(target_os = "macos", not(feature = "native-all-provider")))]
 mod cocoa_dynload_owner;
 
@@ -71,6 +76,7 @@ pub mod executor;
 pub mod fiber_identity;
 pub mod gemm_runtime;
 pub mod gpu_provider_twins;
+pub mod webgpu_backfill_twins;
 pub mod gui_html_session_twins;
 pub mod host_gpu_lane;
 pub mod memory;
@@ -918,6 +924,8 @@ pub use value::{
     rt_array_get_i64_raw,
     rt_array_get_text,
     rt_array_len,
+    rt_arm_array_get_byte_u32,
+    rt_arm_array_len_u32,
     rt_array_new,
     rt_array_pop,
     rt_array_push,
@@ -929,6 +937,7 @@ pub use value::{
     rt_collection_set,
     rt_typed_bytes_u8_push,
     rt_typed_bytes_u8_data_at,
+    rt_array_is_byte_packed,
     rt_typed_words_u32_at,
     rt_typed_words_u32_data_at,
     rt_typed_words_u32_push,
@@ -959,6 +968,8 @@ pub use value::{
     rt_closure_func_ptr,
     rt_closure_get_capture,
     rt_closure_new,
+    rt_closure_release,
+    rt_closure_retain,
     rt_closure_set_capture,
     // Dict operations
     rt_dict_entries,
@@ -971,6 +982,7 @@ pub use value::{
     // Enum operations
     rt_enum_check_discriminant,
     rt_enum_check_variant,
+    rt_try_is_absent,
     rt_enum_discriminant,
     rt_enum_id,
     rt_enum_new,
@@ -1007,6 +1019,9 @@ pub use value::{
     rt_bytes_u8_set,
     rt_typed_words_u32_set,
     rt_typed_words_u64_set,
+    rt_typed_words_i64_at,
+    rt_typed_words_i64_push,
+    rt_typed_words_i64_set,
     rt_for_iterable,
     rt_index_get,
     rt_index_set,
@@ -1034,6 +1049,8 @@ pub use value::{
     rt_slice,
     // String operations
     rt_any_add,
+    rt_tagged_add,
+    rt_transient_array_scope_state_v1,
     rt_cstring_to_text,
     rt_string_byte_at,
     rt_string_char_code_at,

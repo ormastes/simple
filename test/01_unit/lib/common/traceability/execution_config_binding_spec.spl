@@ -1,0 +1,72 @@
+# @tag:in-development
+# @req REQ-TRC-012 REQ-TRC-013 REQ-TRC-018
+use std.spec.*
+use std.common.traceability.run_plan.{TracePlannedCase}
+use std.common.traceability.run_request.{TraceRunRequest}
+use std.common.traceability.execution_config.{TraceExecutionConfiguration}
+use std.common.traceability.execution_config_codec.{trace_execution_configuration_id}
+use std.common.traceability.execution_config_binding.{validate_trace_request_configuration}
+
+fn _binding_config(paths: [text]) -> TraceExecutionConfiguration:
+    TraceExecutionConfiguration(
+        execution_mode: "interpreter", backend: "default", lane_id: "lane-α",
+        timeout_secs: 120, timeout_binding: "fixed", slow_policy: "include_slow",
+        seed: 0, seed_set: false, fail_fast: false, cache_policy: "disabled",
+        parallel: false, worker_count: 1, shard_id: "shard-1", shard_index: 0,
+        shard_count: 1, shard_membership: paths,
+        unresolved_fields: [], unsupported_fields: [])
+
+fn _binding_case(id: text, path: text, lane: text) -> TracePlannedCase:
+    TracePlannedCase(case_id: id, test_path: path, case_name: "case-{id}",
+        test_definition_id: "definition-{id}", lane_id: lane)
+
+fn _binding_request(config_id: text, cases: [TracePlannedCase]) -> TraceRunRequest:
+    TraceRunRequest(subject_id: "subject-1", configuration_id: config_id,
+        expectation_id: "expectation-1", binary_id: "binary-1", cases: cases)
+
+fn _binding_id(config: TraceExecutionConfiguration) -> text:
+    match trace_execution_configuration_id(config):
+        case Ok(value): value
+        case Err(reason): fail("valid test configuration could not be identified: {reason}")
+
+describe "trace request and execution configuration intent binding":
+    it "accepts matching configuration ID, exact selection, and planned lanes":
+        val paths = ["test/日本_spec.spl", "test/runner_spec.spl"]
+        val config = _binding_config(paths)
+        val request = _binding_request(_binding_id(config), [
+            _binding_case("case-1", paths[0], "lane-α"),
+            _binding_case("case-2", paths[1], "lane-α")])
+        expect(validate_trace_request_configuration(request, config).is_ok()).to_equal(true)
+
+    it "rejects changed timeout or seed under the original config ID":
+        val base = _binding_config(["test/a_spec.spl"])
+        val request = _binding_request(_binding_id(base), [_binding_case("case-1", "test/a_spec.spl", "lane-α")])
+        var changed_timeout = base
+        changed_timeout.timeout_secs = 121
+        expect(validate_trace_request_configuration(request, changed_timeout).is_err()).to_equal(true)
+        var changed_seed = base
+        changed_seed.seed = 19
+        changed_seed.seed_set = true
+        expect(validate_trace_request_configuration(request, changed_seed).is_err()).to_equal(true)
+
+    it "rejects selected-membership mismatch even with the replacement config ID":
+        val config = _binding_config(["test/other_spec.spl"])
+        val request = _binding_request(_binding_id(config), [_binding_case("case-1", "test/a_spec.spl", "lane-α")])
+        match validate_trace_request_configuration(request, config):
+            case Ok(_): fail("request path outside the frozen membership was accepted")
+            case Err(reason): expect(reason).to_contain("not selected")
+
+    it "rejects planned cases assigned to a different lane":
+        val config = _binding_config(["test/a_spec.spl"])
+        val request = _binding_request(_binding_id(config), [_binding_case("case-1", "test/a_spec.spl", "lane-other")])
+        match validate_trace_request_configuration(request, config):
+            case Ok(_): fail("case lane mismatch was accepted")
+            case Err(reason): expect(reason).to_contain("lane")
+
+    it "rejects unresolved configuration instead of treating it as a complete default":
+        var config = _binding_config(["test/a_spec.spl"])
+        config.unresolved_fields = ["effective_timeout_per_file"]
+        val request = _binding_request(_binding_id(config), [_binding_case("case-1", "test/a_spec.spl", "lane-α")])
+        match validate_trace_request_configuration(request, config):
+            case Ok(_): fail("unresolved configuration was accepted")
+            case Err(reason): expect(reason).to_contain("unresolved")

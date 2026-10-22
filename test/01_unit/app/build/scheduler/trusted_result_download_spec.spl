@@ -1,0 +1,80 @@
+use app.build.scheduler.trusted_ssh.{TrustedSshNodeV1}
+use app.build.scheduler.trusted_sftp.{TrustedSftpConfigV1}
+use app.build.scheduler.trusted_result_download.{plan_build_result_sftp_v1,
+    plan_build_result_metadata_sftp_v1}
+use app.build.scheduler.worker_request.{BuildWorkerRequestV1}
+use app.io.mod.{cwd, dir_create_all, file_atomic_write, file_hash_sha256,
+    getpid, time_now_unix_micros}
+use compiler.common.build_contract.{BuildInputRef, SnapshotManifest,
+    ToolchainManifest, InputManifest, ActionSpec, AttemptSpec,
+    action_spec_digest_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn _download_config_v1(root: text) -> TrustedSftpConfigV1:
+    val ssh = root + "/ssh"
+    val sftp = root + "/sftp"
+    val hosts = root + "/known_hosts"
+    val key = root + "/identity"
+    file_atomic_write(ssh, "fake ssh\n")
+    file_atomic_write(sftp, "fake sftp\n")
+    file_atomic_write(hosts,
+        "node-a ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeTestOnly\n")
+    file_atomic_write(key, "fake key\n")
+    TrustedSftpConfigV1(
+        TrustedSshNodeV1("node-a", "127.0.0.1", "builder", 2222,
+            ssh, file_hash_sha256(ssh), hosts, file_hash_sha256(hosts),
+            key, file_hash_sha256(key)),
+        sftp, file_hash_sha256(sftp), "/srv/simple-build-inbox")
+
+fn _download_request_v1(output: text) -> BuildWorkerRequestV1:
+    val snapshot = sha256_text("download snapshot")
+    val action = ActionSpec(1, "compile",
+        SnapshotManifest(1, snapshot, sha256_text("source"),
+            sha256_text("submodules")),
+        ToolchainManifest(1, sha256_text("compiler"), sha256_text("behavior"),
+            sha256_text("abi"), sha256_text("runtime"),
+            sha256_text("sysroot"), "x86_64-unknown-linux-gnu"),
+        InputManifest(1, snapshot,
+            [BuildInputRef("src/answer.c", sha256_text("source bytes"))],
+            [], [], [], [], [], sha256_text("context"), true, false),
+        ["cc", "-c"], "src", sha256_text("sandbox"),
+        [output], sha256_text("resources"))
+    val attempt = AttemptSpec(1, action_spec_digest_v1(action),
+        "try-1", "node-a", 0, 0, 4096)
+    BuildWorkerRequestV1(action, attempt, 7, 1, 8)
+
+describe "declared result SFTP retrieval plan":
+    it "names only the current attempt's fixed metadata and output paths":
+        val root = cwd() + "/build/test/result-download-" +
+            getpid().to_text() + "-" + time_now_unix_micros().to_text()
+        expect(dir_create_all(root)).to_be(true)
+        val config = _download_config_v1(root)
+        val local = root + "/outputs"
+        val plan = plan_build_result_sftp_v1(config,
+            _download_request_v1("answer.o"), local)
+        expect(plan.valid).to_be(true)
+        expect(plan.output_count).to_equal(1)
+        expect(plan.batch).to_contain(
+            "get /srv/simple-build-inbox/try-1/.simple-control/results/result.wire ")
+        expect(plan.batch).to_contain(
+            "get /srv/simple-build-inbox/try-1/.simple-control/results/answer.o " +
+            local + "/answer.o\n")
+        expect(plan.batch.contains("get -r ")).to_be(false)
+        val metadata = plan_build_result_metadata_sftp_v1(config,
+            _download_request_v1("answer.o"), local)
+        expect(metadata.valid).to_be(true)
+        expect(metadata.batch).to_contain("/results/diagnostics ")
+        expect(metadata.batch.contains("failure-proof.wire"))
+            .to_be(false)
+
+    it "rejects output names that collide with result metadata":
+        val root = cwd() + "/build/test/result-download-collision-" +
+            getpid().to_text() + "-" + time_now_unix_micros().to_text()
+        expect(dir_create_all(root)).to_be(true)
+        val config = _download_config_v1(root)
+        val plan = plan_build_result_sftp_v1(config,
+            _download_request_v1("result.wire"), root + "/outputs")
+        expect(plan.reason).to_equal("output-name-invalid")
+        val proof_collision = plan_build_result_sftp_v1(config,
+            _download_request_v1("failure-proof.wire"), root + "/outputs")
+        expect(proof_collision.reason).to_equal("output-name-invalid")

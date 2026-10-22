@@ -1,0 +1,253 @@
+# Native object PRE-LOWERING lookup key (Go action-ID analog).
+#
+# The MIR-keyed native object cache (driver_aot_native_output.spl) can only
+# decide a hit after the module's MIR exists, so an unchanged rebuild still
+# lowers every module just to compute the key. This module computes an
+# ADDITIONAL key from facts that exist BEFORE MIR lowering:
+#
+#   own source content digest
+#   + fold of every build module's "native interface" digest (see below)
+#   + the module's post-mono instance set (specialization names it emits)
+#   + producer identity (compiler/runtime/ABI, target, cpu, backend, opt,
+#     release, symbol mode, effective environment, emitter scheme, config)
+#   + cache lane
+#
+# Pure: no I/O. Fail-closed: any empty input yields an empty key and a reason;
+# the caller then takes today's path (lower + MIR-keyed lookup).
+#
+# Soundness rules for the dependency part (why interface keying is safe here):
+#   * The dependency set is EVERY module of the build, not the import closure.
+#     That is a superset of the transitive dependency closure, so no edge can
+#     be missed; the cost is over-invalidation on an unrelated interface edit.
+#   * A dependency contributes its native INTERFACE digest only when it is
+#     body-opaque: no generic declaration or generic impl/extend target, no
+#     trait or mixin (default method bodies), no inline attribute, no macro,
+#     no comptime -- each tested AFTER stripping visibility/modifier prefixes
+#     (`pub`, `pub(...)`, `export`, `async`, `static`, `unsafe`, `extern`).
+#     Otherwise its FULL source digest is used, because its bodies can be
+#     copied into consumers (generic instantiation, inlining, default methods,
+#     macro expansion).
+#   * The native interface is a DENY-LIST, not an allow-list: it is every
+#     non-blank, non-comment line of the source EXCEPT the lines strictly
+#     inside a named `fn`/`me` body. Field layout at any nesting depth, enum
+#     variants, `mod` blocks, class `static val` initializers, attributes and
+#     unrecognised declaration forms are therefore all captured. An extractor
+#     mistake can only OVER-capture (a missed miss), never drop a declaration
+#     line, because the only thing ever excluded is a recognised function body.
+#     (A parsed-HIR interface would be stronger but has no canonical printer
+#     today; 35.semantics/interface/compile_interface.spl is the intended
+#     replacement.)
+#   * Mono: post-mono specializations are inserted into the OWNER module
+#     (monomorphize_integration.spl `spec_module`), requested by consumers.
+#     The instance set is therefore keyed explicitly, and an instance whose
+#     type arguments are not all primitive is REFUSED (its layout comes from a
+#     module the owner need not import).
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache.canonical_identity.{
+    canon_str, canon_field, canon_seq, canonical_identity_sort_texts}
+use compiler.driver.cache.action_key.{interface_digest_of, dependency_interface_fold}
+
+# WARNING -- UNQUALIFIED: SIMPLE_NATIVE_PRELOWER_CACHE=1 has never been
+# validated end to end (no native-build hit/miss run). The first landed
+# version (PR #3829) was UNSOUND for `pub` declarations (a `pub struct` field
+# edit did not change the key); that is fixed here, but do not enable this
+# flag for any build whose binary matters until it is qualified.
+val NATIVE_PRELOWER_CACHE_ENV_V1: text = "SIMPLE_NATIVE_PRELOWER_CACHE"
+val NATIVE_PRELOWER_KEY_DOMAIN_V1: text = "simple/native-prelower-object/v1"
+
+val NATIVE_PRELOWER_PRIMITIVE_TYPE_NAMES_V1: [text] = [
+    "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "isize", "usize",
+    "f32", "f64", "bool", "char", "text", "str", "unit", "void"]
+
+struct NativePrelowerKeyInputsV1:
+    module_name: text
+    source_digest: text
+    # "module=digest" rows for every module of the build except this one.
+    dependency_digests: [text]
+    # Post-mono specialization names emitted by this module (may be empty).
+    mono_instances: [text]
+    producer_identity: text
+    cache_lane: text
+
+fn native_prelower_text_indent_v1(line: text) -> i64:
+    var n: i64 = 0
+    while n < line.len() and (line[n:n + 1] == " " or line[n:n + 1] == "\t"):
+        n = n + 1
+    n
+
+fn native_prelower_bracket_delta_v1(line: text) -> i64:
+    var delta: i64 = 0
+    var i: i64 = 0
+    while i < line.len():
+        val c = line[i:i + 1]
+        if c == "(" or c == "[" or c == "{": delta = delta + 1
+        elif c == ")" or c == "]" or c == "}": delta = delta - 1
+        i = i + 1
+    delta
+
+# Strip leading visibility / modifier words so `pub struct`, `pub(crate) fn`,
+# `export class`, `async fn`, `static fn` classify like their bare forms.
+fn native_prelower_strip_modifiers_v1(trimmed: text) -> text:
+    var t = trimmed
+    var changed = true
+    while changed:
+        changed = false
+        if t.starts_with("pub("):
+            val close = t.index_of(")")
+            if close > 0:
+                t = t[close + 1:].trim()
+                changed = true
+        for word in ["pub ", "export ", "async ", "static ", "unsafe ", "extern ", "public ", "priv ", "private "]:
+            if not changed and t.starts_with(word):
+                t = t[word.len():].trim()
+                changed = true
+    t
+
+fn native_prelower_is_ident_char_v1(c: text) -> bool:
+    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
+        (c >= "0" and c <= "9") or c == "_" or c == "."
+
+# True when `t` (modifier-stripped) starts with `keyword` and the declared or
+# targeted NAME is immediately followed by `<` (generic parameters/arguments).
+fn native_prelower_header_generic_v1(t: text, keyword: text) -> bool:
+    if not t.starts_with(keyword): return false
+    var i = keyword.len()
+    while i < t.len():
+        val c = t[i:i + 1]
+        if c == "<": return true
+        if not native_prelower_is_ident_char_v1(c): return false
+        i = i + 1
+    false
+
+fn native_prelower_line_generic_v1(t: text) -> bool:
+    if t.starts_with("impl<") or t.starts_with("extend<"): return true
+    for keyword in ["fn ", "me ", "struct ", "class ", "enum ", "trait ", "type ",
+            "impl ", "extend ", "mixin ", "union ", "bitfield "]:
+        if native_prelower_header_generic_v1(t, keyword): return true
+    # `impl Trait for Name<T>:` / `impl Name for Other<T>:`
+    if (t.starts_with("impl ") or t.starts_with("extend ")) and t.contains("<"): return true
+    false
+
+fn native_prelower_is_fn_header_v1(t: text) -> bool:
+    t.starts_with("fn ") or t.starts_with("me ")
+
+# A dependency whose bodies can never be copied into a consumer object.
+fn native_prelower_source_body_opaque_v1(source: text) -> bool:
+    for line in source.split("\n"):
+        val raw = line.trim()
+        if raw.starts_with("@") and raw.contains("inline"): return false
+        val t = native_prelower_strip_modifiers_v1(raw)
+        if t.starts_with("trait ") or t.starts_with("mixin ") or
+                t.starts_with("macro ") or t.starts_with("comptime") or
+                t.starts_with("inline ") or
+                native_prelower_line_generic_v1(t):
+            return false
+    true
+
+# Native interface parts (deny-list, ORDERED: each part carries its sequence
+# number, because interface_digest_of sorts parts and field ORDER is layout):
+# every non-blank, non-comment line except
+# the lines strictly inside a named function/method body. A function header
+# (with its bracket continuation lines) is kept; when it ends with `:` the
+# following lines indented deeper than the header are its body and skipped.
+fn native_prelower_interface_parts_v1(source: text) -> [text]:
+    var parts: [text] = []
+    val lines = source.split("\n")
+    var i: i64 = 0
+    while i < lines.len():
+        val line = lines[i].trim_end()
+        val t = line.trim()
+        if t == "" or t.starts_with("#"):
+            i = i + 1
+            continue
+        val indent = native_prelower_text_indent_v1(line)
+        val stripped = native_prelower_strip_modifiers_v1(t)
+        if not native_prelower_is_fn_header_v1(stripped):
+            parts.push("{parts.len()}|{indent}|{t}")
+            i = i + 1
+            continue
+        var header = t
+        var depth = native_prelower_bracket_delta_v1(t)
+        var j = i + 1
+        while depth > 0 and j < lines.len():
+            val cont = lines[j].trim()
+            header = header + " " + cont
+            depth = depth + native_prelower_bracket_delta_v1(cont)
+            j = j + 1
+        parts.push("{parts.len()}|{indent}|{header}")
+        if header.ends_with(":"):
+            while j < lines.len():
+                val body = lines[j].trim_end()
+                if body.trim() != "" and native_prelower_text_indent_v1(body) <= indent:
+                    break
+                j = j + 1
+        i = j
+    parts
+
+# One dependency's contribution. Empty source => "" (missing input; the
+# caller must refuse the whole key).
+fn native_prelower_dependency_digest_v1(source: text) -> text:
+    if source == "": return ""
+    if native_prelower_source_body_opaque_v1(source):
+        "iface:" + interface_digest_of(native_prelower_interface_parts_v1(source))
+    else:
+        "source:" + sha256_text(source)
+
+# A specialization is admissible when every type token after `$` is a
+# primitive whose layout is fixed by the producer identity alone.
+fn native_prelower_mono_instance_admissible_v1(name: text) -> bool:
+    val dollar = name.index_of("$")
+    if dollar < 0: return false
+    val suffix = name[dollar + 1:]
+    if suffix == "": return false
+    var token = ""
+    var i: i64 = 0
+    while i <= suffix.len():
+        val c = if i < suffix.len(): suffix[i:i + 1] else: "$"
+        val ident = (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
+            (c >= "0" and c <= "9") or c == "_"
+        if ident:
+            token = token + c
+        else:
+            if token != "" and not NATIVE_PRELOWER_PRIMITIVE_TYPE_NAMES_V1.contains(token):
+                return false
+            token = ""
+        i = i + 1
+    true
+
+# Returns (key, reason). key == "" means refused; reason names the missing
+# or inadmissible input.
+fn native_prelower_object_key_v1(inputs: NativePrelowerKeyInputsV1) -> (text, text):
+    if inputs.module_name == "": return ("", "module-name-missing")
+    if inputs.source_digest == "": return ("", "source-digest-missing")
+    if inputs.producer_identity == "": return ("", "producer-identity-missing")
+    if inputs.cache_lane == "": return ("", "cache-lane-missing")
+    if inputs.dependency_digests.len() == 0: return ("", "dependency-set-missing")
+    for row in inputs.dependency_digests:
+        val eq = row.index_of("=")
+        if eq <= 0 or eq == row.len() - 1:
+            return ("", "dependency-digest-missing:{row}")
+    for instance in inputs.mono_instances:
+        if not native_prelower_mono_instance_admissible_v1(instance):
+            return ("", "mono-instance-inadmissible:{instance}")
+    var mono_items: [text] = []
+    for instance in canonical_identity_sort_texts(inputs.mono_instances):
+        mono_items.push(canon_str(instance))
+    var inner: [text] = []
+    inner.push(canon_field("module", canon_str(inputs.module_name)))
+    inner.push(canon_field("sourceContent", canon_str(inputs.source_digest)))
+    inner.push(canon_field("depInterfaces",
+        canon_str(dependency_interface_fold(inputs.dependency_digests))))
+    inner.push(canon_field("monoInstances", canon_seq(mono_items)))
+    inner.push(canon_field("producer", canon_str(inputs.producer_identity)))
+    inner.push(canon_field("lane", canon_str(inputs.cache_lane)))
+    (sha256_text(canon_field(NATIVE_PRELOWER_KEY_DOMAIN_V1, canon_seq(inner))), "ok")
+
+export NATIVE_PRELOWER_CACHE_ENV_V1
+export NativePrelowerKeyInputsV1
+export native_prelower_source_body_opaque_v1
+export native_prelower_interface_parts_v1
+export native_prelower_dependency_digest_v1
+export native_prelower_mono_instance_admissible_v1
+export native_prelower_object_key_v1

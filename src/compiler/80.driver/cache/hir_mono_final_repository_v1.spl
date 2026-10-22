@@ -1,0 +1,394 @@
+# Actual current factory -> configured collection -> mono -> report policy.
+# Only this closed production transaction can install the private read pin.
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.cache.hir_mono_final_repository_types_v1.*
+use compiler.driver.cache.driver_hir_archive_weave_boundary_v1.*
+use compiler.driver.cache.driver_hir_archive_current_boundary_v1.*
+use compiler.driver.cache.driver_hir_archive_semantic_prerequisite_v1.*
+use compiler.driver.cache.driver_hir_archive_mono_execute_v1.*
+use compiler.driver.cache.hir_mono_current_passthrough_v1.{mono_archive_current_passthrough_v1}
+use compiler.driver.cache.hir_mono_archive_assembly_v1.*
+use compiler.driver.cache.hir_mono_archive_verify_v1.{mono_archive_verify_assembled_modules_v1, mono_archive_post_mono_report_digest_v1}
+use compiler.driver.cache.hir_mono_verification_use_v1.*
+use compiler.driver.cache.hir_mono_replay_selection_v1.{MonoArchiveSelectedFunctionV1}
+use compiler.driver.driver_mono_publication_v1.*
+use compiler.driver.driver_post_mono_publication_v1.{driver_publish_post_mono_report_v1}
+use compiler.driver.driver_mir_physical_owners.{driver_mir_physical_source_indices_v1}
+use compiler.driver.driver_source_loading.{_driver_physical_source_key}
+use compiler.driver.driver_phase_gates.{driver_source_entry_closure_enabled}
+use compiler.driver.cache.collection_archive_analysis_v1.{collection_archive_input_digest_in_owned_scope_v1}
+use compiler.mir._MirLowering.module_lowering.{mir_layout_canonical_module_name}
+use compiler.mono.mono_archive_body_input_v1.*
+use compiler.mono.mono_archive_current_body_v1.{mono_archive_current_body_digest_v1}
+use compiler.mono.monomorphize_integration.{MonoStats}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.common.cache_contract.hir_owned_artifact_cache_v1.{hir_owned_artifact_store_blob_v1, hir_owned_artifact_load_blob_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_last_warnings, hir_cache_clear_last_warnings, hir_cache_promote_diagnostic_owner_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{env_get}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+
+struct MonoArchiveFinalPrivatePinV1:
+    driver_identity: i64
+    serial: i64
+    digest: text
+
+var _mono_final_pins_ready_v1: bool = false
+var _mono_final_pins_v1: Dict<text, MonoArchiveFinalPrivatePinV1> = {}
+var _mono_final_serial_v1: i64 = 0
+
+fn mono_final_close_v1(paused: bool, owned: bool):
+    val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    if paused: hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not owned or not cache_owned or not ended: panic("mono final ownership failed")
+
+fn mono_final_current_inputs_v1(parent: DriverHirArchiveCurrentBoundaryV1) -> Dict<text, MonoArchiveBodyInputV1>:
+    var inputs: Dict<text, MonoArchiveBodyInputV1> = {}
+    for name in parent.logical_order:
+        inputs[name] = MonoArchiveBodyInputV1(original_parent: parent.registration.registration.archives[name],
+            current_body: Some(parent.registration.bodies[name]), current_cache: Some(parent.registration.cache), logical_name: name)
+    inputs
+
+fn mono_final_collection_digest_in_owned_scope_v1(driver: CompilerDriver, parent: DriverHirArchiveCurrentBoundaryV1) -> text:
+    if transient_array_scope_state_v1() != 1 or parent.logical_order.len() == 0: return ""
+    var writer = HirCodecWriter.create()
+    writer.put_bool(driver.collection_registry_configured)
+    writer.put_text(driver.collection_registry_error)
+    writer.put_text(driver.collection_registry_version)
+    # The existing receipt codec binds every actual configured binding field
+    # and exact ordered registry text. Analyzer replay reparses these bytes.
+    writer.put_text(collection_archive_input_digest_in_owned_scope_v1(
+        parent.registration.registration.archives[parent.logical_order[0]],
+        driver.collection_registry_source, driver.collection_bindings, driver.ctx.options.backend))
+    writer.put_i64(driver.collection_current_archived_analyses.len())
+    val names = driver.collection_current_archived_analyses.keys().sort()
+    for name in names:
+        val analysis = driver.collection_current_archived_analyses[name]
+        if analysis.input.current_body == nil or analysis.input.current_cache == nil: return ""
+        val body = analysis.input.current_body.unwrap()
+        val cache = analysis.input.current_cache.unwrap()
+        val body_identity = mono_archive_current_body_digest_v1(body)
+        if body_identity == "": return ""
+        writer.put_text(name)
+        writer.put_text(analysis.input_digest)
+        writer.put_text(mono_archive_body_input_module_name_v1(analysis.input))
+        writer.put_text(mono_archive_body_input_key_v1(analysis.input))
+        writer.put_text(mono_archive_body_input_digest_v1(analysis.input))
+        writer.put_text(mono_archive_body_input_warnings_digest_v1(analysis.input))
+        writer.put_text(body_identity)
+        writer.put_text(cache.directory)
+        writer.put_text(cache.producer_header)
+        writer.put_bool(cache.enabled)
+        writer.put_text(collection_archive_input_digest_in_owned_scope_v1(analysis.input.original_parent,
+            analysis.registry_source, analysis.bindings, analysis.backend))
+        writer.put_i64(analysis.plans_found)
+        writer.put_i64(analysis.findings_found)
+        writer.put_i64(analysis.blockers_found)
+        writer.put_i64(analysis.functions_scanned)
+        writer.put_i64(analysis.nodes_scanned)
+    if not writer.ok: return ""
+    sha256_text("driver-final-actual-collection-v1\n" + writer.finish())
+
+fn mono_final_schedule_kind_in_owned_scope_v1(driver: CompilerDriver, repo: MonoArchiveFinalRepositoryV1) -> text:
+    val ctx = driver.ctx
+    val physical = (repo.force_all_sources or ctx.options.cli_mode_text == "aot" or driver_source_entry_closure_enabled(ctx)) and
+        ctx.runtime_std_full_inventory_selection == nil and ctx.demand_compile_execution == nil and
+        not (repo.allow_bootstrap_shortcuts and repo.bootstrap_mode == "1")
+    if physical: "normal-native-physical-v1" else: "retained-logical-v1"
+
+fn mono_final_rows_digest_in_owned_scope_v1(rows: [MonoArchiveFinalEmissionRowV1]) -> text:
+    var writer = HirCodecWriter.create()
+    writer.put_i64(rows.len())
+    for row in rows:
+        writer.put_i64(row.source_index)
+        writer.put_text(row.logical_name)
+        writer.put_text(row.hir_owner_name)
+        writer.put_text(row.emission_name)
+        writer.put_text(row.path)
+        writer.put_bool(row.is_entry)
+    if not writer.ok: return ""
+    sha256_text("mono-final-actual-emission-rows-v1\n" + writer.finish())
+
+fn mono_final_emission_rows_in_owned_scope_v1(driver: CompilerDriver, repo: MonoArchiveFinalRepositoryV1) -> Result<[MonoArchiveFinalEmissionRowV1], text>:
+    val ctx = driver.ctx
+    val inventory = repo.physical_inventory
+    if transient_array_scope_state_v1() != 1 or inventory.logical_rows.len() != ctx.source_paths_owner.len() or
+            ctx.sources.len() != ctx.source_paths_owner.len(): return Err("final MIR requires unprojected actual source schedule")
+    var paths: [text] = []
+    var owners: [text] = []
+    var indices: [i64] = []
+    var index = 0
+    for row in inventory.logical_rows:
+        if row.logical_name != ctx.source_module_names_owner[index] or row.source_digest != ctx.source_identities_owner[index] or
+                not repo.modules.has(row.logical_name) or ctx.sources[index].module_name != row.logical_name or
+                _driver_physical_source_key(ctx.sources[index].path) != row.physical_path:
+            return Err("final MIR source row differs from admitted custody")
+        val descriptor = repo.modules[row.logical_name]
+        if descriptor.input_archive.input.module_name != row.module_owner or descriptor.input_archive.archive_key != row.archive_key:
+            return Err("final MIR complete body owner differs")
+        paths = paths.push(row.physical_path)
+        owners = owners.push(row.module_owner)
+        indices = indices.push(index)
+        index = index + 1
+    val physical = mono_final_schedule_kind_in_owned_scope_v1(driver, repo) == "normal-native-physical-v1"
+    if physical: indices = driver_mir_physical_source_indices_v1(paths, ctx.source_identities_owner, owners)?
+    var rows: [MonoArchiveFinalEmissionRowV1] = []
+    var position = 0
+    for source_index in indices:
+        val row = inventory.logical_rows[source_index]
+        rows = rows.push(MonoArchiveFinalEmissionRowV1(source_index: source_index, logical_name: row.logical_name,
+            hir_owner_name: row.module_owner, emission_name: if physical: mir_layout_canonical_module_name(row.module_owner) else: row.logical_name,
+            path: ctx.sources[source_index].path, is_entry: position == 0))
+        position = position + 1
+    Ok(rows)
+
+fn mono_final_bytes_in_owned_scope_v1(repo: MonoArchiveFinalRepositoryV1) -> text:
+    if transient_array_scope_state_v1() != 1 or repo.serial < 1 or repo.ordered_inventory.len() == 0 or
+            repo.modules.len() != repo.ordered_inventory.len(): return ""
+    var writer = HirCodecWriter.create()
+    writer.put_text("driver-issued-mono-final-v1")
+    writer.put_i64(repo.serial)
+    writer.put_text(repo.current_parent.artifact_key)
+    writer.put_text(repo.current_parent.artifact_digest)
+    writer.put_text(repo.report_digest)
+    writer.put_text(repo.collection_digest)
+    writer.put_bool(repo.zero_templates)
+    writer.put_bool(repo.force_all_sources)
+    writer.put_bool(repo.allow_bootstrap_shortcuts)
+    writer.put_text(repo.bootstrap_mode)
+    writer.put_text(repo.schedule_kind)
+    writer.put_text(repo.physical_inventory.inventory_digest)
+    writer.put_i64(repo.physical_inventory.logical_rows.len())
+    for row in repo.physical_inventory.logical_rows:
+        writer.put_text(row.logical_name)
+        writer.put_text(row.physical_path)
+        writer.put_text(row.authored_path)
+        writer.put_text(row.source_digest)
+        writer.put_i64(row.source_bytes)
+        writer.put_text(row.module_owner)
+        writer.put_text(row.archive_key)
+    writer.put_i64(repo.physical_inventory.representative_indices.len())
+    for index in repo.physical_inventory.representative_indices: writer.put_i64(index)
+    writer.put_i64(repo.physical_inventory.ordered_modules.len())
+    for name in repo.physical_inventory.ordered_modules: writer.put_text(name)
+    writer.put_i64(repo.physical_inventory.ordered_archives.len())
+    for parent in repo.physical_inventory.ordered_archives:
+        writer.put_text(parent.archive_key)
+        writer.put_text(parent.body_digest)
+    if val capture = repo.verification:
+        if repo.zero_templates: return ""
+        writer.put_text(capture.manifest_key)
+        writer.put_text(capture.manifest_digest)
+        writer.put_text(capture.input_authority)
+        writer.put_text(capture.schedule_digest)
+        writer.put_text(capture.state_digest)
+        writer.put_text(capture.publication_ledger_digest)
+        writer.put_i64(capture.epoch)
+        writer.put_text(capture.stage)
+        writer.put_text(capture.cache.directory)
+        writer.put_text(capture.cache.producer_header)
+        writer.put_bool(capture.cache.enabled)
+        if capture.ordered_inventory != repo.ordered_inventory: return ""
+    else:
+        if not repo.zero_templates: return ""
+    writer.put_i64(repo.ordered_inventory.len())
+    var seen: Dict<text, bool> = {}
+    for name in repo.ordered_inventory:
+        if seen.has(name) or not repo.modules.has(name): return ""
+        seen[name] = true
+        val module = repo.modules[name]
+        if mono_archive_assembled_module_name_v1(module) != name or module.archive_key != mono_archive_assembled_key_v1(module): return ""
+        writer.put_text(name)
+        writer.put_text(module.archive_key)
+        writer.put_text(module.body_digest)
+        writer.put_text(module.lowering_warnings_digest)
+        writer.put_text(module.coverage_digest)
+        writer.put_text(module.closure_state_digest)
+        writer.put_i64(module.final_symbol_counter)
+    writer.put_i64(repo.declaration_order.len())
+    for name in repo.declaration_order:
+        if not repo.modules.has(name): return ""
+        writer.put_text(name)
+    writer.put_i64(repo.emission_rows.len())
+    for row in repo.emission_rows:
+        writer.put_i64(row.source_index)
+        writer.put_text(row.logical_name)
+        writer.put_text(row.hir_owner_name)
+        writer.put_text(row.emission_name)
+        writer.put_text(row.path)
+        writer.put_bool(row.is_entry)
+    if not writer.ok: return ""
+    writer.finish()
+
+pub fn mono_archive_final_repository_capture_production_v1(driver: CompilerDriver, boundary: DriverHirArchiveWeaveBoundaryV1,
+        force_all_sources: bool, allow_bootstrap_shortcuts: bool,
+        allow_ambient_bootstrap_policy: bool = false) -> Result<MonoArchiveFinalRepositoryV1, MonoArchiveFinalFailureV1>:
+    if transient_array_scope_state_v1() != 0 or hir_cache_last_warnings().len() != 0:
+        return Err(MonoArchiveFinalFailureV1.Unpublished(["final factory requires closed leases"]))
+    if not _mono_final_pins_ready_v1:
+        _mono_final_pins_v1 = {}
+        _mono_final_pins_ready_v1 = true
+    # Invoke genuine cold/quiet/current production internally. Supplied current
+    # descriptors or candidate reports cannot reach the private issuer.
+    val current_result = driver_hir_archive_current_boundary_capture_v1(driver, boundary)
+    if current_result.is_err(): return Err(MonoArchiveFinalFailureV1.Unpublished(current_result.unwrap_err()))
+    val produced = current_result.unwrap()
+    val accepted = driver_hir_archive_semantic_prerequisite_use_v1(driver, boundary, produced.semantic)
+    if accepted.is_err(): return Err(MonoArchiveFinalFailureV1.Unpublished([accepted.unwrap_err()]))
+    val weave = accepted.unwrap().weave_use
+    if weave.logical_order != produced.logical_order or weave.declaration_order != produced.declaration_order:
+        return Err(MonoArchiveFinalFailureV1.Unpublished(["final accepted parent order changed"]))
+    val inputs = mono_final_current_inputs_v1(produced)
+    if not driver.analyze_collections_before_current_monomorphize_v1(inputs, produced.logical_order):
+        return Err(MonoArchiveFinalFailureV1.AlreadyPublished("final configured collection admission refused"))
+    # The retained explicit skip returns before report policy. It cannot issue
+    # verified final MIR authority through this consumer. Preserve it on the
+    # retained route until its separately typed scheduling contract exists.
+    if allow_ambient_bootstrap_policy and env_get("SIMPLE_BOOTSTRAP_SKIP_MONO") == "1":
+        return Err(MonoArchiveFinalFailureV1.Unpublished(["final verified archive route does not admit explicit mono skip"]))
+    if not transient_scope_begin(): return Err(MonoArchiveFinalFailureV1.Unpublished(["final current custody lease unavailable"]))
+    val current_match = driver_hir_archive_current_boundary_matches_in_owned_scope_v1(driver, produced)
+    val paused = transient_scope_pause()
+    # @workaround bug=a174_transient_promote_inference_2026_10_16 recover=03d33d497ac6d1408683493f74ff9db434e4cfa3 reason=preserve-declared-result-owner-at-generic-promotion
+    val owned = if paused: transient_promote<Result<bool, text>>(current_match) else: false
+    mono_final_close_v1(paused, owned)
+    if current_match.is_err(): return Err(MonoArchiveFinalFailureV1.Unpublished([current_match.unwrap_err()]))
+    val registration = produced.registration.registration
+    val zero = registration.generic_functions == 0 and registration.generic_structs == 0 and registration.generic_classes == 0
+    var modules: Dict<text, MonoArchiveAssembledModuleV1> = {}
+    var verification: MonoArchiveVerificationUseV1? = nil
+    var report_digest = ""
+    if zero:
+        val passthrough = mono_archive_current_passthrough_v1(produced.registration, produced.logical_order)
+        if passthrough.is_err(): return Err(MonoArchiveFinalFailureV1.Unpublished([passthrough.unwrap_err()]))
+        modules = passthrough.unwrap()
+        driver_publish_mono_warnings_and_stats_v1(driver.ctx, MonoStats(0, 0, 0, 0, 0, 0), [])
+        if not driver_publish_mono_diagnostics_v1(driver.ctx, [], produced.logical_order.len()): return Err(MonoArchiveFinalFailureV1.AlreadyPublished("final mono diagnostics refused"))
+        val report = mono_archive_verify_assembled_modules_v1(modules, produced.logical_order)
+        if report.is_err(): return Err(MonoArchiveFinalFailureV1.Unpublished([report.unwrap_err()]))
+        if not driver_publish_post_mono_report_v1(driver.ctx, report.unwrap(), produced.logical_order.len()): return Err(MonoArchiveFinalFailureV1.AlreadyPublished("final post-mono policy refused"))
+        report_digest = mono_archive_post_mono_report_digest_v1(report.unwrap())
+    else:
+        val executed = driver_hir_archive_current_mono_execute_ledger_v1(produced.registration, produced.expected_inventory, produced.logical_order)
+        if executed.is_err(): return Err(MonoArchiveFinalFailureV1.Unpublished([executed.unwrap_err()]))
+        val execution = executed.unwrap()
+        driver_publish_mono_warnings_and_stats_v1(driver.ctx, driver_hir_archive_mono_stats_v1(execution), execution.warnings)
+        if not driver_publish_mono_diagnostics_v1(driver.ctx, execution.diagnostics, produced.logical_order.len()): return Err(MonoArchiveFinalFailureV1.AlreadyPublished("final mono diagnostics refused"))
+        val captured = mono_archive_verification_use_capture_v1(execution)
+        if captured.is_err(): return Err(MonoArchiveFinalFailureV1.Unpublished([captured.unwrap_err()]))
+        val replay = mono_archive_verification_use_v1(captured.unwrap())
+        if replay.is_err(): return Err(MonoArchiveFinalFailureV1.Unpublished([replay.unwrap_err()]))
+        modules = replay.unwrap().modules
+        verification = Some(replay.unwrap().capture)
+        if not driver_publish_post_mono_report_v1(driver.ctx, replay.unwrap().report, produced.logical_order.len()): return Err(MonoArchiveFinalFailureV1.AlreadyPublished("final post-mono policy refused"))
+        report_digest = mono_archive_post_mono_report_digest_v1(replay.unwrap().report)
+    # A borrowed metadata check is not a fresh source admission. Re-run the
+    # actual closed source/journal/gates/weave route after mono and policy,
+    # before installing any final pin. No full replay occurs in MIR leases.
+    val final_accepted = driver_hir_archive_semantic_prerequisite_use_v1(driver, boundary, produced.semantic)
+    if final_accepted.is_err(): return Err(MonoArchiveFinalFailureV1.Unpublished([final_accepted.unwrap_err()]))
+    val final_weave = final_accepted.unwrap().weave_use
+    if final_weave.boundary_digest != weave.boundary_digest or
+            final_weave.source_binding != weave.source_binding or final_weave.schedule_digest != weave.schedule_digest or
+            final_weave.policy_key != weave.policy_key or final_weave.config_binding != weave.config_binding or
+            final_weave.logical_order != produced.logical_order or final_weave.declaration_order != produced.declaration_order or
+            final_weave.physical_inventory.inventory_digest != weave.physical_inventory.inventory_digest:
+        return Err(MonoArchiveFinalFailureV1.Unpublished(["final actual source, gates, transforms or inventory changed"]))
+    _mono_final_serial_v1 = _mono_final_serial_v1 + 1
+    var repo = MonoArchiveFinalRepositoryV1(authority: "", artifact_key: "", modules: modules,
+        ordered_inventory: produced.logical_order, declaration_order: produced.declaration_order,
+        emission_rows: [], schedule_kind: "", physical_inventory: weave.physical_inventory,
+        current_parent: produced, verification: verification, zero_templates: zero,
+        force_all_sources: force_all_sources, allow_bootstrap_shortcuts: allow_bootstrap_shortcuts,
+        bootstrap_mode: env_get("SIMPLE_BOOTSTRAP"), report_digest: report_digest,
+        collection_digest: "", serial: _mono_final_serial_v1)
+    if not transient_scope_begin(): return Err(MonoArchiveFinalFailureV1.Unpublished(["final issuance lease unavailable"]))
+    val rows = mono_final_emission_rows_in_owned_scope_v1(driver, repo)
+    if rows.is_ok():
+        repo.emission_rows = rows.unwrap()
+        repo.schedule_kind = mono_final_schedule_kind_in_owned_scope_v1(driver, repo)
+    val context = driver_hir_archive_current_context_matches_in_owned_scope_v1(driver, produced)
+    repo.collection_digest = mono_final_collection_digest_in_owned_scope_v1(driver, produced)
+    val bytes = if rows.is_ok() and context.is_ok(): mono_final_bytes_in_owned_scope_v1(repo) else: ""
+    repo.authority = if bytes != "": sha256_text(bytes) else: ""
+    repo.artifact_key = sha256_text("driver-issued-mono-final-key-v1\n" + repo.authority)
+    val stored = bytes != "" and hir_owned_artifact_store_blob_v1(produced.registration.cache, repo.artifact_key, bytes).is_ok()
+    val pin_paused = transient_scope_pause()
+    val pin_owned = if pin_paused: transient_promote(repo) else: false
+    mono_final_close_v1(pin_paused, pin_owned)
+    if not stored: return Err(MonoArchiveFinalFailureV1.Unpublished(["final actual context or complete issuance refused"]))
+    if driver.identity_id == 0: return Err(MonoArchiveFinalFailureV1.Unpublished(["final pin refused: unassigned driver identity"]))
+    _mono_final_pins_v1["{driver.identity_id}:" + repo.artifact_key] = MonoArchiveFinalPrivatePinV1(driver.identity_id, repo.serial, repo.authority)
+    Ok(repo)
+
+pub fn mono_archive_final_repository_capture_v1(driver: CompilerDriver, boundary: DriverHirArchiveWeaveBoundaryV1,
+        force_all_sources: bool, allow_bootstrap_shortcuts: bool,
+        allow_ambient_bootstrap_policy: bool = false) -> Result<MonoArchiveFinalRepositoryV1, [text]>:
+    val actual = mono_archive_final_repository_capture_production_v1(driver, boundary,
+        force_all_sources, allow_bootstrap_shortcuts, allow_ambient_bootstrap_policy)
+    match actual:
+        case Ok(repo): Ok(repo)
+        case Err(MonoArchiveFinalFailureV1.Unpublished(diagnostics)): Err(diagnostics)
+        case Err(MonoArchiveFinalFailureV1.AlreadyPublished(reason)): Err([reason])
+pub fn mono_archive_final_repository_matches_v1(driver: CompilerDriver, repo: MonoArchiveFinalRepositoryV1) -> bool:
+    if transient_array_scope_state_v1() != 1 or not _mono_final_pins_ready_v1: return false
+    val lookup = "{driver.identity_id}:" + repo.artifact_key
+    if not _mono_final_pins_v1.has(lookup): return false
+    val pin: MonoArchiveFinalPrivatePinV1 = _mono_final_pins_v1[lookup]
+    if pin.driver_identity != (driver.identity_id) or pin.serial != repo.serial or pin.digest != repo.authority or
+            repo.bootstrap_mode != env_get("SIMPLE_BOOTSTRAP"): return false
+    val context = driver_hir_archive_current_context_matches_in_owned_scope_v1(driver, repo.current_parent)
+    if context.is_err() or repo.collection_digest == "" or
+            mono_final_collection_digest_in_owned_scope_v1(driver, repo.current_parent) != repo.collection_digest: return false
+    val current_rows = mono_final_emission_rows_in_owned_scope_v1(driver, repo)
+    if current_rows.is_err() or repo.schedule_kind != mono_final_schedule_kind_in_owned_scope_v1(driver, repo) or
+            mono_final_rows_digest_in_owned_scope_v1(current_rows.unwrap()) != mono_final_rows_digest_in_owned_scope_v1(repo.emission_rows): return false
+    val bytes = mono_final_bytes_in_owned_scope_v1(repo)
+    if bytes == "" or sha256_text(bytes) != pin.digest or repo.artifact_key != sha256_text("driver-issued-mono-final-key-v1\n" + pin.digest): return false
+    val stored = hir_owned_artifact_load_blob_v1(repo.current_parent.registration.cache, repo.artifact_key)
+    stored.is_ok() and stored.unwrap() == bytes
+
+pub fn mono_archive_load_final_module_in_owned_scope_v1(driver: CompilerDriver, repo: MonoArchiveFinalRepositoryV1,
+        logical_name: text) -> Result<HirModule, text>:
+    if not mono_archive_final_repository_matches_v1(driver, repo) or not repo.modules.has(logical_name):
+        return Err("final complete reader requires actual issued policy pin")
+    val descriptor = repo.modules[logical_name]
+    var loaded: Result<HirModule, text> = Err("final complete selected body missing")
+    if val capture = repo.verification:
+        loaded = mono_archive_verification_use_load_module_in_owned_scope_v1(capture, logical_name)
+    else:
+        loaded = mono_archive_load_assembled_module_in_owned_scope_v1(descriptor)
+    if loaded.is_err(): return loaded
+    val module = loaded.unwrap()
+    if module.name != descriptor.input_archive.input.module_name or module.path != descriptor.input_archive.input.source_path or
+            sha256_text(hir_module_encode(module)) != descriptor.body_digest or module.symbols.next_symbol_id != descriptor.final_symbol_counter:
+        return Err("final selected complete body differs from actual verified output")
+    Ok(module)
+
+pub fn mono_archive_final_specialization_selections_in_owned_scope_v1(driver: CompilerDriver,
+        repo: MonoArchiveFinalRepositoryV1, logical_name: text) -> Result<[MonoArchiveSelectedFunctionV1], text>:
+    if not mono_archive_final_repository_matches_v1(driver, repo) or not repo.modules.has(logical_name):
+        return Err("final specialization origins require actual issued policy pin")
+    if val capture = repo.verification:
+        return mono_archive_verification_use_specializations_in_owned_scope_v1(capture, logical_name)
+    if not repo.zero_templates: return Err("final specialization recipe missing")
+    Ok([])
+
+export MonoArchiveFinalEmissionRowV1, MonoArchiveFinalRepositoryV1
+export MonoArchiveFinalFailureV1, mono_archive_final_repository_capture_production_v1
+export mono_archive_final_repository_capture_v1, mono_archive_final_repository_matches_v1, mono_archive_load_final_module_in_owned_scope_v1
+
+pub fn mono_archive_final_repository_revoke_driver_v1(driver: CompilerDriver) -> bool:
+    if transient_array_scope_state_v1() != 0: return false
+    if not _mono_final_pins_ready_v1: return true
+    val word = driver.identity_id
+    for key in _mono_final_pins_v1.keys():
+        if _mono_final_pins_v1[key].driver_identity == word: _mono_final_pins_v1.remove(key)
+    true
+
+export mono_archive_final_repository_revoke_driver_v1
+export mono_archive_final_specialization_selections_in_owned_scope_v1

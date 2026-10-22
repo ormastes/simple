@@ -59,7 +59,7 @@ fn check_evolving_declaration(contract: EnumContract, variants: [EnumVariantShap
             "E-EVOLVING-001", contract.enum_name, "unknown: <missing>",
             "@evolving enum '" + contract.enum_name + "' declares no unknown: variant"))
         return diags
-    if bits == 0:
+    if bits != 8 and bits != 16 and bits != 32 and bits != 64:
         diags = diags.push(enum_contract_diag(
             "E-EVOLVING-001", contract.enum_name, "repr: <not u8/u16/u32/u64>",
             "@evolving enum '" + contract.enum_name + "' has no valid unsigned repr"))
@@ -69,7 +69,14 @@ fn check_evolving_declaration(contract: EnumContract, variants: [EnumVariantShap
     for v in variants:
         if v.name == unknown_name:
             found = true
-            if v.payload_types.len() != 1:
+            if v.payload_names.len() != v.payload_types.len():
+                diags = diags.push(enum_contract_diag(
+                    "E-EVOLVING-001", contract.enum_name,
+                    unknown_name + " payload metadata has " + v.payload_names.len().to_text()
+                        + " names for " + v.payload_types.len().to_text() + " types",
+                    "unknown variant '" + unknown_name + "' of @evolving enum '"
+                        + contract.enum_name + "' must have one name slot for each payload type"))
+            elif v.payload_types.len() != 1:
                 diags = diags.push(enum_contract_diag(
                     "E-EVOLVING-001", contract.enum_name,
                     unknown_name + " payload arity " + v.payload_types.len().to_text(),
@@ -113,30 +120,44 @@ fn check_evolving_declaration(contract: EnumContract, variants: [EnumVariantShap
     diags
 
 fn check_closed_declaration(contract: EnumContract, variants: [EnumVariantShape]) -> [EnumContractDiag]:
-    """E-CLOSED-002 -- duplicate explicit discriminants on a `@closed` enum.
+    """E-CLOSED-002 -- duplicate effective discriminants on a `@closed` enum.
 
     §10.1 requires that every discriminant be validated on decode and that
     unknown discriminants fail decode. Both are impossible when two variants
     share one discriminant: decode cannot pick a variant, so the roundtrip
     property the S2 spec asserts (every discriminant decodes back to itself)
-    is unprovable rather than merely violated."""
+    is unprovable rather than merely violated. As in MIR registration, values
+    start at zero and an explicit value resets the following implicit sequence.
+    This plain-data checker compares representable i64 values; MIR owns range
+    rejection, including implicit successors beyond i64::MAX. Such successors
+    are not wrapped into fabricated values. A later explicit value resets the
+    sequence back into this checker's domain."""
     var diags: [EnumContractDiag] = []
-    var seen_values: [i64] = []
-    var seen_names: [text] = []
+    var seen_names: Dict<i64, [text]> = {}
+    var next_value: i64 = 0
+    var next_representable = true
     for v in variants:
+        var value = next_value
         if v.has_discriminant:
-            var i = 0
-            while i < seen_values.len():
-                if seen_values[i] == v.discriminant:
+            value = v.discriminant
+            next_representable = true
+        if next_representable:
+            if seen_names.has(value):
+                val previous: [text] = seen_names[value]
+                for name in previous:
                     diags = diags.push(enum_contract_diag(
                         "E-CLOSED-002", contract.enum_name,
-                        seen_names[i] + " / " + v.name + " = " + v.discriminant.to_text(),
+                        name + " / " + v.name + " = " + value.to_text(),
                         "@closed enum '" + contract.enum_name + "' gives variants '"
-                            + seen_names[i] + "' and '" + v.name
-                            + "' the same discriminant " + v.discriminant.to_text()))
-                i = i + 1
-            seen_values = seen_values.push(v.discriminant)
-            seen_names = seen_names.push(v.name)
+                            + name + "' and '" + v.name
+                            + "' the same discriminant " + value.to_text()))
+                seen_names[value] = previous.push(v.name)
+            else:
+                seen_names[value] = [v.name]
+            if value == 9223372036854775807:
+                next_representable = false
+            else:
+                next_value = value + 1
     diags
 
 fn check_enum_declaration(contract: EnumContract, variants: [EnumVariantShape]) -> [EnumContractDiag]:

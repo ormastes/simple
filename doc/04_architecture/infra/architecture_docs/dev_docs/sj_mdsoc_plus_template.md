@@ -86,7 +86,7 @@ The daemon side (`daemon.spl`) is never imported by the client.
 
 ### Entities (plain structs)
 
-```simple
+```text
 # In lease_manager.spl
 struct Request:
     id: text
@@ -111,7 +111,7 @@ struct Operation:
 
 ### Components (attached to entities via wrapper structs, not inheritance)
 
-```simple
+```text
 struct LeaseExpiry:
     lease_id: text
     expires_at_ms: i64
@@ -125,7 +125,7 @@ struct GhostCandidate:
 
 ### Systems (functions called each tick)
 
-```simple
+```text
 fn tick_watchdog(mgr: LeaseManager, now_ms: i64)  # fires SIGTERM on max_hold exceeded
 fn tick_ghost_reclaim(mgr: LeaseManager, now_ms: i64)  # reclaims dead-PID or TTL-elapsed leases
 fn tick_queue_drain(queue: RequestQueue, mgr: LeaseManager)  # dequeues and dispatches

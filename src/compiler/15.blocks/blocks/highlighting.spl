@@ -7,6 +7,31 @@
 # - Number literal highlighting (int, float, hex, binary, octal)
 
 use compiler.blocks.definition.{HighlightToken, HighlightKind}
+use std.common.binary_inspect.is_hex_digit
+
+fn _highlighting_index_of_from(haystack: text, needle: text, start: i64) -> i64:
+    """Position-aware substring find. The two-argument text method
+    `index_of(needle, start)` ignores the start position on the seed runtime
+    (see simple_web_html_layout_renderer_foundation.spl), so scan explicitly."""
+    val haystack_len = haystack.len()
+    var pos = start
+    if pos < 0:
+        pos = 0
+    if pos > haystack_len:
+        return -1
+    if needle == "":
+        return pos
+    val needle_len = needle.len()
+    if needle_len > haystack_len:
+        return -1
+    while pos <= haystack_len - needle_len:
+        var offset = 0
+        while offset < needle_len and haystack.char_code_at(pos + offset) == needle.char_code_at(offset):
+            offset = offset + 1
+        if offset == needle_len:
+            return pos
+        pos = pos + 1
+    -1
 
 # ============================================================================
 # Syntax Highlighting Helpers
@@ -23,20 +48,20 @@ fn highlight_keywords(text: text, keywords: [text]) -> [HighlightToken]:
         List of highlight tokens
 
     Example:
-    ```simple
+    ```text
     val sql_keywords = ["SELECT", "FROM", "WHERE", "JOIN"]
     val tokens = highlight_keywords(query_text, sql_keywords)
     ```
     """
     var tokens = []
-    var pos = 0
-
     for keyword in keywords:
+        if keyword.is_empty():
+            continue
         # Find all occurrences of keyword
         var search_pos = 0
         while true:
-            val index = text_index_of(text, keyword, start: search_pos)
-            if not has_index:
+            val index = _highlighting_index_of_from(text, keyword, search_pos)
+            if index < 0:
                 break
 
             # Check if it's a whole word
@@ -66,7 +91,7 @@ fn highlight_strings(text: text) -> [HighlightToken]:
     var tokens = []
     var i = 0
 
-    while i < text_len(text):
+    while i < text.len():
         val ch = text[i]
 
         if ch == '"' or ch == '\'':
@@ -75,8 +100,8 @@ fn highlight_strings(text: text) -> [HighlightToken]:
             i = i + 1
 
             # Find closing quote
-            while i < text_len(text):
-                if text[i] == '\\':
+            while i < text.len():
+                if text[i] == "\\":
                     i = i + 2  # Skip escaped character
                 elif text[i] == quote:
                     i = i + 1
@@ -111,7 +136,7 @@ fn highlight_comments(
         List of highlight tokens for comments
 
     Example:
-    ```simple
+    ```text
     val tokens = highlight_comments(code,
         line_comment: "//",
         val _tv_1 = ["/*", "*/"]
@@ -122,13 +147,16 @@ fn highlight_comments(
     var tokens = []
     var i = 0
 
-    while i < text_len(text):
+    while i < text.len():
         # Check for line comment
         if text[i:].starts_with(line_comment):
             val start = i
-            # Find end of line
-            while i < text.len() and text[i] != '\n':
-                i = i + 1
+            # Find the LF boundary; token end excludes the newline.
+            val line_end = _highlighting_index_of_from(text, "\n", i)
+            if line_end < 0:
+                i = text.len()
+            else:
+                i = line_end
 
             val token = HighlightToken(
                 start: start,
@@ -139,16 +167,13 @@ fn highlight_comments(
             continue
 
         # Check for block comment
-        if has_block_comment:
-            val _destruct_0 = block_comment_value
-            val block_start = _destruct_0[0]
-            val block_end = _destruct_0[1]
+        if val Some((block_start, block_end)) = block_comment:
             if text[i:].starts_with(block_start):
                 val start = i
                 i = i + block_start.len()
 
                 # Find end of block
-                while i < text_len(text):
+                while i < text.len():
                     if text[i:].starts_with(block_end):
                         i = i + block_end.len()
                         break
@@ -180,7 +205,7 @@ fn highlight_numbers(text: text) -> [HighlightToken]:
     var tokens = []
     var i = 0
 
-    while i < text_len(text):
+    while i < text.len():
         val ch = text[i]
 
         if ch.is_digit() or (ch == '-' and i + 1 < text.len() and text[i + 1].is_digit()):
@@ -196,7 +221,7 @@ fn highlight_numbers(text: text) -> [HighlightToken]:
                     val next = text[i + 1]
                     if next == 'x' or next == 'X' or next == 'b' or next == 'B' or next == 'o' or next == 'O':
                         i = i + 2
-                        while i < text.len() and (text[i].is_hex_digit() or text[i] == '_'):
+                        while i < text.len() and (is_hex_digit(text[i]) or text[i] == '_'):
                             i = i + 1
 
                         val token = HighlightToken(
@@ -246,7 +271,7 @@ fn highlight_numbers(text: text) -> [HighlightToken]:
 fn is_word_boundary(text: text, pos: i64, length: i64) -> bool:
     """Check if position is at word boundary."""
     val before_ok = pos == 0 or not text[pos - 1].is_alphanumeric()
-    val after_ok = pos + length >= text_len(text) or not text[pos + length].is_alphanumeric()
+    val after_ok = pos + length >= text.len() or not text[pos + length].is_alphanumeric()
     before_ok and after_ok
 
 # ============================================================================
