@@ -2278,6 +2278,10 @@ bootstrap_stage_sanity() (
   sanity_build_timeout=${COMPILER_BUILD_TIMEOUT_SECONDS}
   sanity_exec_timeout=${COMPILER_EXEC_TIMEOUT_SECONDS}
   sanity_scv_prime_timeout=${COMPILER_SCV_PRIME_TIMEOUT_SECONDS}
+  # Diagnostic passthrough (bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22):
+  # the no-scope HIR trace env must survive the scrub or the instrumented
+  # candidate prints nothing during the failing probe.
+  sanity_nscope_hir_trace=${SIMPLE_NSCOPE_HIR_TRACE:-}
   sanity_probe_timeout=${COMPILER_PROBE_TIMEOUT_SECONDS}
   sanity_kill_grace=${COMPILER_CHECK_KILL_GRACE_SECONDS}
   sanity_max_log_bytes=${CANDIDATE_FRONTEND_MAX_LOG_BYTES}
@@ -2327,6 +2331,10 @@ bootstrap_stage_sanity() (
   COMPILER_SCV_PRIME_TIMEOUT_SECONDS=${sanity_scv_prime_timeout}
   COMPILER_PROBE_TIMEOUT_SECONDS=${sanity_probe_timeout}
   COMPILER_CHECK_KILL_GRACE_SECONDS=${sanity_kill_grace}
+  if [ -n "${sanity_nscope_hir_trace}" ]; then
+    SIMPLE_NSCOPE_HIR_TRACE=${sanity_nscope_hir_trace}
+    export SIMPLE_NSCOPE_HIR_TRACE
+  fi
   CANDIDATE_FRONTEND_MAX_LOG_BYTES=${sanity_max_log_bytes}
   CANDIDATE_FRONTEND_ROOT=${sanity_frontend_root}
   export COMPILER_BUILD_TIMEOUT_SECONDS COMPILER_EXEC_TIMEOUT_SECONDS
