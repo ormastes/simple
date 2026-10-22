@@ -5,6 +5,71 @@ Lane: work/phase1-mcp-redeploy-20261021 (worktree on release_phase3 base 3b02fed
 Host: DESKTOP-5A4V03J, Windows 10 / Git Bash, x86_64-pc-windows-gnu, 12 CPUs, 32 GiB RAM
 Producer: phase-1 seed (Rust, nightly-2026-09-15, cranelift); also reproduced on the git-tracked `bin/simple.exe` seed
 
+## Third defect: `index_of`/`substring` corrupt at multibyte boundaries
+
+`text.index_of` and `text.substring` mix byte and character offsets around
+multibyte characters under the seed (both the phase-1 seed and the tracked
+`bin/simple.exe` seed, 2026-10-22). Minimal reproduction:
+
+```
+val line = "left �� styled │ right ● 14133 end"
+val bar = line.index_of("│")
+val sub = line.substring(bar + 1, line.len())
+expect(sub).to_contain("14133")
+# -> fails; the failure dump shows the substring DISPLAYS as
+#    " right ● 14133 end" but its bytes start with a split multibyte
+#    sequence (U+FFFD), and to_contain/contains then never match.
+```
+
+`text.split` + list indexing + `join` handle the same multibyte content
+correctly — use those where extraction after a multibyte delimiter is needed.
+This defect is what made the `cs_live_agents_system_spec` examples fail even
+after correcting the divider character: `right_half` extracted lines via
+`index_of("│")` + `substring`, corrupting every extracted line start, so
+`to_contain("14133")` failed on text that plainly contained it.
+
+## Fourth defect: Windows ConPTY input path swallows ESC and degrades CSI sequences
+
+smux on Windows writes pane input to the ConPTY pipe as a byte stream
+(`windows_pty_write_some_bytes_v1`, WriteFile). Delivery was verified
+2026-10-22 with live kimi panes:
+
+- Printable bytes, CR (`\r`, submits work — kimi answered typed questions) and
+  TAB (`\t`, delivered; kimi rendered the tab spacing) all reach the child.
+- A **bare ESC (`\x1b`) never reaches the child**: pasting `"\x1bQ"` into a
+  kimi input box produced `Q` but no ESC effect; pasting `"\x1b"` alone did
+  nothing (input unchanged). Both the `smux_send_text` and `smux_paste_text`
+  paths behave identically, exonerating the smux queue/flush layer.
+- CSI sequences (`"\x1b[C"`, arrow keys) cannot be relied on either — the ESC
+  prefix is consumed by ConPTY's input parser, degrading the sequence.
+
+Consequence: interactive dialogs that require Esc or arrow navigation (e.g.
+Claude Code's one-time workspace-trust dialog, "Enter to confirm · Esc to
+cancel") cannot be driven through Windows smux panes. Real terminals avoid
+this by writing INPUT_RECORDs instead of a byte stream; a proper fix needs
+INPUT_RECORD-based key delivery in the Windows pty provider (the byte-oriented
+`rt_pty_write` FFI is frozen, so this belongs on the pure-Simple provider
+side).
+
+The `cs_live_agents_system_spec` classifies this as a visible BLOCKED row for
+claude on affected hosts; kimi (no dialog) passes end to end and codex passes
+once the Windows `TERM` gap is closed (see below).
+
+## `cs_live_agents_system_spec` fixes shipped with this doc (2026-10-22)
+
+- `right_half` matched an ASCII `|` while `CS_DIVIDER` is U+2502 — the frame
+  helper silently returned "" and all live examples failed; now splits on "│".
+- Extraction uses `split("│")` instead of `index_of`/`substring` (defect 3).
+- First-run dialogs appearing AFTER the question is sent are now answered and
+  the question re-armed (Claude's trust dialog appears post-send).
+- Provider usage/rate limits are reported as `pending("BLOCKED: ...")`, not
+  failures.
+- `pane_backend` sets `TERM=xterm-256color` for Windows smux spawns when TERM
+  is empty/`dumb` (the POSIX launcher already did); without it Codex refuses
+  to start its TUI at all.
+- `/key` vocabulary extended with `left`/`right` (usable on POSIX tmux and
+  once ConPTY key delivery is fixed).
+
 ## Second defect: `file_read` returns "" — `external text byte buffer allocation failed`
 
 Any spec that reads repo files through `std.io_runtime.file_read` /

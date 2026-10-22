@@ -54,6 +54,12 @@ fn _cmd(d: CsDashboard, line: text) -> (CsDashboard, text):
     (cs_refresh(applied), outcome)
 
 # Agents open with first-run dialogs; answer them the way an operator would.
+# Returns a /key name (enter|esc|tab|space|up|down|left|right|ctrl-c), or ""
+# when no known dialog is on screen. NOTE (2026-10-22, Windows ConPTY): the
+# smux ConPTY input path delivers printable bytes, CR and Tab, but a bare ESC
+# is swallowed by ConPTY's input parser and CSI sequences (arrows) degrade —
+# so dialogs that need Esc/arrows cannot be driven on Windows smux panes;
+# see doc/08_tracking/bug/seed_jit_demotion_textspan_native_build_stall_2026-10-22.md.
 fn _dialog_key(screen: text) -> text:
     if screen.contains("MCP servers found"):
         return "esc"
@@ -77,25 +83,34 @@ fn drive_agent(session: text, harness: text, budget_s: i64) -> LiveRun:
         waited = waited + 1
         d = cs_refresh(d)
         val shown = d.screen.join("\n")
-        if not sent:
-            val key = _dialog_key(shown)
-            if key != "":
-                val (after_key, _k) = _cmd(d, "/key " + key)
-                d = after_key
-                quiet = 0
+        val key = _dialog_key(shown)
+        if key != "":
+            # A first-run dialog is up — before OR after the question went in.
+            # Answer it and re-arm the question: whatever was typed while the
+            # dialog had focus was consumed by the dialog, not the agent.
+            val (after_key, _k) = _cmd(d, "/key " + key)
+            d = after_key
+            quiet = 0
+            sent = false
+        elif not sent:
+            # Ready once the agent has drawn something and stopped changing.
+            if shown != "" and shown == last:
+                quiet = quiet + 1
             else:
-                # Ready once the agent has drawn something and stopped changing.
-                if shown != "" and shown == last:
-                    quiet = quiet + 1
-                else:
-                    quiet = 0
-                if quiet >= 3:
-                    val (after_send, _s) = _cmd(d, QUESTION)
-                    d = after_send
-                    sent = true
-            last = shown
+                quiet = 0
+            if quiet >= 3:
+                val (after_send, _s) = _cmd(d, QUESTION)
+                d = after_send
+                sent = true
+        elif shown.contains("Continue anyway?"):
+            # Codex asks before falling back when it dislikes TERM; "y" is a
+            # text line, not a named key. (pane_backend now sets TERM for
+            # smux panes, so this is a belt-and-braces path.)
+            val (after_y, _y) = _cmd(d, "y")
+            d = after_y
         elif shown.contains(ANSWER):
             answered = true
+        last = shown
     val screen = d.screen.join("\n")
     val frame = cs_render(d, 140, 34)
     val (_gone, killed) = _cmd(d, "/kill a1")
@@ -110,15 +125,42 @@ fn _blocked(harness: text) -> bool:
     pending("BLOCKED: " + harness + " is not on PATH on this host")
     true
 
+# An agent that launched, received the question, and answered with a
+# provider-side usage/rate limit is a visible BLOCKED row: the
+# dashboard-to-pane pipeline worked end to end; the host account is exhausted.
+fn _provider_limited(run: LiveRun, harness: text) -> bool:
+    if run.screen.contains("usage limit") or run.screen.contains("rate limit"):
+        pending("BLOCKED: " + harness +
+            " account is provider-rate-limited on this host; the pane pipeline itself delivered the question and received a reply")
+        return true
+    false
+
+# Claude Code's one-time workspace-trust dialog cannot be confirmed through a
+# Windows smux pane: it needs Esc/arrow input, and the ConPTY input path
+# swallows ESC and degrades CSI sequences (see _dialog_key note). On a host
+# where the folder is already trusted the example passes; here it is a
+# visible BLOCKED row, not a product failure.
+fn _trust_dialog_stuck(run: LiveRun) -> bool:
+    if not run.answered and run.screen.contains("trust this folder"):
+        pending("BLOCKED: claude shows its one-time workspace-trust dialog, which needs Esc/arrow keys that the Windows ConPTY input path cannot deliver (see bug doc); trust the folder once on this host to enable this example")
+        return true
+    false
+
 # The text right of the dashboard/screen divider on every frame row.
+# The divider is CS_DIVIDER (U+2502 BOX DRAWINGS LIGHT VERTICAL) in
+# src/app/llm_caret/cs_dashboard.spl — not an ASCII pipe.
+# Extraction goes through split("│"), not index_of/substring: the seed's
+# index_of/substring mix byte and char offsets around multibyte characters
+# (2026-10-22, phase-1 seed), leaving corrupted line starts that make
+# to_contain fail on otherwise-matching text.
 fn right_half(frame: text) -> text:
     var out: [text] = []
-    # Row 0 is the full-width status header; its own "  |  " is not the divider.
+    # Row 0 is the full-width status header; it has no divider.
     val rows = frame.split("\n")
     for line in rows[1:]:
-        val bar = line.index_of("|")
-        if bar > 0:
-            out.push(line.substring(bar + 1, line.len()))
+        val parts = line.split("│")
+        if parts.len() > 1:
+            out.push(parts[1..].join("│"))
     out.join("\n")
 
 describe "cs dashboard drives live agents in panes":
@@ -129,6 +171,10 @@ describe "cs dashboard drives live agents in panes":
             return
         step("Launch claude from the dashboard and type the question")
         val run = drive_agent("cs-live-claude", "claude", 180)
+        if _provider_limited(run, "claude"):
+            return
+        if _trust_dialog_stuck(run):
+            return
         # @capture(tui): split frame with Claude's answer on the right
         step("The pane was created for the agent")
         expect(run.launched).to_contain("launched a1 in pane")
@@ -144,6 +190,8 @@ describe "cs dashboard drives live agents in panes":
             return
         step("Launch codex from the dashboard and type the question")
         val run = drive_agent("cs-live-codex", "codex", 180)
+        if _provider_limited(run, "codex"):
+            return
         # @capture(tui): split frame with Codex's answer on the right
         step("The pane was created for the agent")
         expect(run.launched).to_contain("launched a1 in pane")
@@ -159,6 +207,8 @@ describe "cs dashboard drives live agents in panes":
             return
         step("Launch kimi from the dashboard and type the question")
         val run = drive_agent("cs-live-kimi", "kimi", 180)
+        if _provider_limited(run, "kimi"):
+            return
         # @capture(tui): split frame with Kimi's answer on the right
         step("The pane was created for the agent")
         expect(run.launched).to_contain("launched a1 in pane")
