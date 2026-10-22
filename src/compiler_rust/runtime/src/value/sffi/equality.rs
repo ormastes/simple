@@ -2,7 +2,7 @@
 
 use crate::value::core::RuntimeValue;
 use crate::value::collections::{RuntimeArray, RuntimeTuple};
-use crate::value::heap::{get_typed_ptr, HeapObjectType};
+use crate::value::heap::{get_typed_ptr, registered_heap_type, HeapInt, HeapObjectType, HeapUInt};
 use crate::value::objects::{RuntimeEnum, RuntimeObject};
 use crate::value::{tags, RuntimeString};
 
@@ -119,34 +119,38 @@ fn value_hash_inner(v: RuntimeValue, depth: u32) -> u64 {
     // value-based float equality in `value_eq_inner`. Without this, a heap-boxed
     // float key would hash its pointer and a dict lookup with an equal-but-
     // distinct float box would miss. Normalize -0.0 to 0.0 (they are ==).
-    if v.is_float() {
+    let heap_type = registered_heap_type(v);
+    if v.tag() == tags::TAG_FLOAT || heap_type == Some(HeapObjectType::Float) {
         let mut d = v.as_float();
         if d == 0.0 {
             d = 0.0;
         }
         return fnv1a_bits(d.to_bits());
     }
-    if let Some(value) = v.as_heap_u64() {
+    if heap_type == Some(HeapObjectType::UInt) {
+        let value = unsafe { (*typed::<HeapUInt>(v)).value };
         return if value <= ((1u64 << 60) - 1) {
             fnv1a_bits(RuntimeValue::from_int(value as i64).to_raw())
         } else {
             fnv1a_bits(value ^ 0x5549_4e54_5f55_3634)
         };
     }
+    if heap_type == Some(HeapObjectType::Int) {
+        // Wide ints (outside the inline range) hash by VALUE like the UInt arm
+        // above, so two boxes of one value -- or a u64 box of it -- share a
+        // bucket. They used to hash their address, so an equal key missed.
+        let value = unsafe { (*typed::<HeapInt>(v)).value };
+        return fnv1a_bits((value as u64) ^ 0x5549_4e54_5f55_3634);
+    }
     if v.tag() != tags::TAG_HEAP {
         return fnv1a_bits(v.to_raw());
     }
-    match v.heap_type() {
-        Some(HeapObjectType::String) => {
-            if let Some(sp) = get_typed_ptr::<RuntimeString>(v, HeapObjectType::String) {
-                return unsafe { super::super::collections::runtime_string_hash(sp as *mut RuntimeString) };
-            }
-            fnv1a_bits(v.to_raw())
-        }
+    match heap_type {
+        Some(HeapObjectType::String) => unsafe {
+            super::super::collections::runtime_string_hash(typed::<RuntimeString>(v) as *mut RuntimeString)
+        },
         Some(HeapObjectType::Enum) => {
-            let Some(ep) = get_typed_ptr::<RuntimeEnum>(v, HeapObjectType::Enum) else {
-                return fnv1a_bits(v.to_raw());
-            };
+            let ep = typed::<RuntimeEnum>(v);
             unsafe {
                 let mut hash = fnv1a_bits((*ep).enum_id as u64);
                 hash = hash.wrapping_mul(0x100000001b3) ^ fnv1a_bits((*ep).discriminant as u64);
@@ -154,9 +158,7 @@ fn value_hash_inner(v: RuntimeValue, depth: u32) -> u64 {
             }
         }
         Some(HeapObjectType::Array) => {
-            let Some(ap) = get_typed_ptr::<RuntimeArray>(v, HeapObjectType::Array) else {
-                return fnv1a_bits(v.to_raw());
-            };
+            let ap = typed::<RuntimeArray>(v);
             unsafe {
                 if (*ap).len > 0 && (*ap).data.is_null() {
                     return fnv1a_bits(v.to_raw());
@@ -171,10 +173,14 @@ fn value_hash_inner(v: RuntimeValue, depth: u32) -> u64 {
                     } else if (*ap).is_u64_packed() {
                         let word = *((*ap).data as *const u64).add(index);
                         let signed = word as i64;
-                        if RuntimeValue::from_int(signed).as_int() == signed {
+                        // Same hash as the tagged element would have, so a packed
+                        // array and an equal tagged one share a bucket: inline
+                        // ints hash their tagged word, wide ones (HeapInt /
+                        // HeapUInt) hash `value ^ tag`. No box is allocated.
+                        if RuntimeValue::fits_inline_int(signed) {
                             value_hash_inner(RuntimeValue::from_int(signed), depth + 1)
                         } else {
-                            fnv1a_bits(word)
+                            fnv1a_bits(word ^ 0x5549_4e54_5f55_3634)
                         }
                     } else {
                         value_hash_inner(*(*ap).data.add(index), depth + 1)
@@ -185,9 +191,7 @@ fn value_hash_inner(v: RuntimeValue, depth: u32) -> u64 {
             }
         }
         Some(HeapObjectType::Object) => {
-            let Some(op) = get_typed_ptr::<RuntimeObject>(v, HeapObjectType::Object) else {
-                return fnv1a_bits(v.to_raw());
-            };
+            let op = typed::<RuntimeObject>(v);
             unsafe {
                 let mut hash = fnv1a_bits((*op).class_id as u64);
                 for field in (*op).fields() {
@@ -197,9 +201,7 @@ fn value_hash_inner(v: RuntimeValue, depth: u32) -> u64 {
             }
         }
         Some(HeapObjectType::Tuple) => {
-            let Some(tp) = get_typed_ptr::<RuntimeTuple>(v, HeapObjectType::Tuple) else {
-                return fnv1a_bits(v.to_raw());
-            };
+            let tp = typed::<RuntimeTuple>(v);
             unsafe {
                 let mut hash = 0xcbf29ce484222325u64;
                 for elem in (*tp).as_slice() {
@@ -217,83 +219,80 @@ fn value_eq_inner(a: RuntimeValue, b: RuntimeValue, visited: &mut Vec<(usize, us
         return true;
     }
 
+    // One registry probe per operand. `is_float`/`as_heap_u64`/`heap_type`/
+    // `get_typed_ptr` each take the global registry mutex, and a text `==`
+    // used to probe it 8 times; that probe was ~half of the Windows stage2
+    // full-CLI parse profile (2026-10-18).
+    let ta = registered_heap_type(a);
+    let tb = registered_heap_type(b);
+
     // Floats (inline TAG_FLOAT or heap-boxed with TAG_HEAP) compare by VALUE.
     // Two heap-boxed floats of the same double are distinct pointers, so the
     // raw-eq fast path above misses them; handle them here before the tag match.
-    if a.is_float() || b.is_float() {
-        return a.is_float() && b.is_float() && a.as_float() == b.as_float();
+    let a_float = a.tag() == tags::TAG_FLOAT || ta == Some(HeapObjectType::Float);
+    let b_float = b.tag() == tags::TAG_FLOAT || tb == Some(HeapObjectType::Float);
+    if a_float || b_float {
+        return a_float && b_float && a.as_float() == b.as_float();
     }
-    if let Some(left) = a.as_heap_u64() {
-        return b.as_heap_u64().map_or_else(
-            || b.is_int() && b.as_int() >= 0 && left == b.as_int() as u64,
-            |right| left == right,
-        );
+    // A u64 box equals a signed integer -- inline OR a heap-boxed wide int --
+    // that is non-negative with the same value (the C twin rt_native_eq agrees).
+    let a_signed = a.is_int() || ta == Some(HeapObjectType::Int);
+    let b_signed = b.is_int() || tb == Some(HeapObjectType::Int);
+    if ta == Some(HeapObjectType::UInt) {
+        let left = unsafe { (*typed::<HeapUInt>(a)).value };
+        return if tb == Some(HeapObjectType::UInt) {
+            left == unsafe { (*typed::<HeapUInt>(b)).value }
+        } else {
+            b_signed && b.as_int() >= 0 && left == b.as_int() as u64
+        };
     }
-    if let Some(right) = b.as_heap_u64() {
-        return a.is_int() && a.as_int() >= 0 && a.as_int() as u64 == right;
+    if tb == Some(HeapObjectType::UInt) {
+        return a_signed && a.as_int() >= 0 && a.as_int() as u64 == unsafe { (*typed::<HeapUInt>(b)).value };
     }
 
     match (a.tag(), b.tag()) {
         (tags::TAG_INT, tags::TAG_INT) => a.as_int() == b.as_int(),
-        (tags::TAG_FLOAT, tags::TAG_FLOAT) => a.as_float() == b.as_float(),
         (tags::TAG_SPECIAL, tags::TAG_SPECIAL) => false,
-        (tags::TAG_HEAP, tags::TAG_HEAP) => heap_value_eq(a, b, visited),
+        (tags::TAG_HEAP, tags::TAG_HEAP) => unsafe { heap_value_eq(a, b, ta, tb, visited) },
         _ => false,
     }
 }
 
-fn heap_value_eq(a: RuntimeValue, b: RuntimeValue, visited: &mut Vec<(usize, usize)>) -> bool {
-    match (a.heap_type(), b.heap_type()) {
+/// Typed view of a heap value whose type was read under the registry lock.
+fn typed<T>(v: RuntimeValue) -> *const T {
+    v.as_heap_ptr() as *const T
+}
+
+/// `ta`/`tb` must come from `registered_heap_type` of `a`/`b`.
+unsafe fn heap_value_eq(
+    a: RuntimeValue,
+    b: RuntimeValue,
+    ta: Option<HeapObjectType>,
+    tb: Option<HeapObjectType>,
+    visited: &mut Vec<(usize, usize)>,
+) -> bool {
+    match (ta, tb) {
         (Some(HeapObjectType::String), Some(HeapObjectType::String)) => {
-            let Some(sa) = get_typed_ptr::<RuntimeString>(a, HeapObjectType::String) else {
-                return false;
-            };
-            let Some(sb) = get_typed_ptr::<RuntimeString>(b, HeapObjectType::String) else {
-                return false;
-            };
-            unsafe { (*sa).as_bytes() == (*sb).as_bytes() }
+            (*typed::<RuntimeString>(a)).as_bytes() == (*typed::<RuntimeString>(b)).as_bytes()
         }
-        (Some(HeapObjectType::UInt), Some(HeapObjectType::UInt)) => a.as_heap_u64() == b.as_heap_u64(),
-        (Some(HeapObjectType::Int), Some(HeapObjectType::Int)) => a.as_heap_i64() == b.as_heap_i64(),
+        (Some(HeapObjectType::Int), Some(HeapObjectType::Int)) => {
+            (*typed::<HeapInt>(a)).value == (*typed::<HeapInt>(b)).value
+        }
         (Some(HeapObjectType::Enum), Some(HeapObjectType::Enum)) => {
-            let Some(ea) = get_typed_ptr::<RuntimeEnum>(a, HeapObjectType::Enum) else {
-                return false;
-            };
-            let Some(eb) = get_typed_ptr::<RuntimeEnum>(b, HeapObjectType::Enum) else {
-                return false;
-            };
-            unsafe {
-                (*ea).enum_id == (*eb).enum_id
-                    && (*ea).discriminant == (*eb).discriminant
-                    && value_eq_inner((*ea).payload, (*eb).payload, visited)
-            }
+            let ea = typed::<RuntimeEnum>(a);
+            let eb = typed::<RuntimeEnum>(b);
+            (*ea).enum_id == (*eb).enum_id
+                && (*ea).discriminant == (*eb).discriminant
+                && value_eq_inner((*ea).payload, (*eb).payload, visited)
         }
         (Some(HeapObjectType::Array), Some(HeapObjectType::Array)) => {
-            let Some(aa) = get_typed_ptr::<RuntimeArray>(a, HeapObjectType::Array) else {
-                return false;
-            };
-            let Some(ab) = get_typed_ptr::<RuntimeArray>(b, HeapObjectType::Array) else {
-                return false;
-            };
-            unsafe { array_eq(aa, ab, visited) }
+            array_eq(typed::<RuntimeArray>(a), typed::<RuntimeArray>(b), visited)
         }
         (Some(HeapObjectType::Object), Some(HeapObjectType::Object)) => {
-            let Some(oa) = get_typed_ptr::<RuntimeObject>(a, HeapObjectType::Object) else {
-                return false;
-            };
-            let Some(ob) = get_typed_ptr::<RuntimeObject>(b, HeapObjectType::Object) else {
-                return false;
-            };
-            unsafe { object_eq(oa, ob, visited) }
+            object_eq(typed::<RuntimeObject>(a), typed::<RuntimeObject>(b), visited)
         }
         (Some(HeapObjectType::Tuple), Some(HeapObjectType::Tuple)) => {
-            let Some(ta) = get_typed_ptr::<RuntimeTuple>(a, HeapObjectType::Tuple) else {
-                return false;
-            };
-            let Some(tb) = get_typed_ptr::<RuntimeTuple>(b, HeapObjectType::Tuple) else {
-                return false;
-            };
-            unsafe { tuple_eq(ta, tb, visited) }
+            tuple_eq(typed::<RuntimeTuple>(a), typed::<RuntimeTuple>(b), visited)
         }
         _ => false,
     }
@@ -446,6 +445,7 @@ fn generic_int_eq(value: RuntimeValue, expected: i64) -> bool {
     // `rt_array_get` returns for a u64-packed element -- so negative values are
     // legitimate and must not be excluded here.
     (value.is_int() && value.as_int() == expected)
+        || value.as_heap_i64() == Some(expected)
         || value.as_heap_u64().is_some_and(|actual| actual == expected as u64)
 }
 

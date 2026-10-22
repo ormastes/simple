@@ -51,7 +51,7 @@ tests only after both are faithful.
 
 ## Debug Console Commands
 
-```simple
+```text
 # Evaluate expressions
 > x + y
 84
@@ -85,7 +85,7 @@ Struct { name: "Alice", age: 30 }
 ## Step Mode Behavior
 
 ### Step Over (F10)
-```simple
+```simple:skip
 fn main():
     val x = 5
     process(x)  # ← If you press F10 here
@@ -156,7 +156,7 @@ match result:
 ```
 
 ### Debug Async Code
-```simple
+```text
 val future = async {
     val data = await fetch_data()  # Breakpoint to see await resolution
     process(data)

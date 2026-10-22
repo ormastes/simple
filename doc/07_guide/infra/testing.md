@@ -84,7 +84,7 @@ test/
 
 Creates a top-level example group:
 
-```simple
+```text
 describe "UserService":
     it "creates a user":
         val user = UserService.create("alice")
@@ -123,7 +123,7 @@ describe "Array":
 
 Skip a test temporarily:
 
-```simple
+```text
 describe "Feature":
     skip "pending implementation":
         nil
@@ -188,7 +188,7 @@ Status values: `Stable`, `Implementing`, `Draft`, `Planned`.
 
 ### Equality and Identity
 
-```simple
+```text
 expect(value).to_equal(expected)     # Equality
 expect(obj).to_be(same_obj)          # Identity
 expect(result).to_be_nil()           # Nil check
@@ -214,7 +214,7 @@ expect("hello").to_end_with("lo")
 
 Use `to_equal(true)` -- not `to_be_true()`.
 
-```simple
+```text
 expect(user.is_valid()).to_equal(true)
 ```
 
@@ -229,7 +229,7 @@ expect(user.is_valid()).to_equal(true)
 | `before_all:` | per group | once, outer -> inner |
 | `after_all:` | per group | once, inner -> outer |
 
-```simple
+```text
 describe "Database":
     before_each:
         setup_database()
@@ -249,7 +249,7 @@ describe "Database":
 
 Memoized once per example:
 
-```simple
+```text
 context "with user":
     given_lazy :user, \:
         { name: "Alice", id: 42 }
@@ -262,7 +262,7 @@ context "with user":
 
 Runs before each example (not memoized):
 
-```simple
+```text
 context "complex setup":
     given :db_connect, \:
         database.connect()
@@ -273,7 +273,7 @@ context "complex setup":
 
 ### Unnamed Eager Setup
 
-```simple
+```text
 context "setup":
     given:
         setup_database()
@@ -296,7 +296,7 @@ Execution order: lazy fixtures memoized, then named `given` blocks in order, the
 
 `given_lazy` works in both `context_def` definitions and regular `context` blocks:
 
-```simple
+```text
 describe "User Service":
     context "with authenticated user":
         given_lazy :user, \:
@@ -322,7 +322,7 @@ context_def :as_admin:
 
 ### Reference a Context
 
-```simple
+```text
 describe "AdminDashboard":
     context :as_admin:
         it "shows admin panel":
@@ -331,7 +331,7 @@ describe "AdminDashboard":
 
 ### Compose Multiple Contexts
 
-```simple
+```text
 context_compose :as_admin, :with_database:
     it "loads from database":
         expect(user.data.is_persisted())
@@ -341,7 +341,7 @@ context_compose :as_admin, :with_database:
 
 Combine context references and variable definitions in a single `given:` block:
 
-```simple
+```text
 describe "Integrated Setup":
     context "with sequential given block":
         given:
@@ -368,7 +368,7 @@ describe "Integrated Setup":
 
 Reuse test examples across multiple contexts:
 
-```simple
+```text
 shared_examples "a collection":
     it "has a length":
         expect(subject.len()).to_be_greater_than(0)
@@ -384,7 +384,7 @@ describe "Array":
 
 ### Adding Tags
 
-```simple
+```text
 # @slow
 # @integration
 
@@ -422,7 +422,7 @@ everyone learns to ignore.
 Add the tag as a plain comment line in the spec header, the same shape as the
 other `# @…` header directives:
 
-```simple
+```text
 # @tag:in-development
 # Tracks: doc/08_tracking/todo/... (or a bug record / plan row)
 
@@ -441,9 +441,9 @@ what this tag must never become.
 | Guarantee | Meaning | Verified today |
 |---|---|---|
 | Expected to FAIL | A red result is the *normal* state; it is not an incident | policy only |
-| SKIPPED in whole-suite runs | `bin/simple test` with no path does not execute it, so it cannot turn the suite red | pending sibling lane |
-| COUNTED in the summary | The runner summary reports the in-development count, so the debt is visible, never invisible | pending sibling lane |
-| Listable | `simple test --tag in-development` selects exactly these specs | `--tag <name>` filtering itself exists (`src/compiler_rust/driver/src/cli/test_runner/args.rs:24`, forwarded at `execution.rs:923-925`); the `in-development` value is pending |
+| SKIPPED in whole-suite runs | `bin/simple test` with no path does not execute it, so it cannot turn the suite red | enforced (2026-10-19): `classify_in_development` in `src/lib/nogc_sync_mut/spec/in_development.spl`, applied per file by `in_development_adjust` in `src/app/test_runner_new/test_runner_main.spl` |
+| COUNTED in the summary | The runner summary reports the in-development count, so the debt is visible, never invisible | enforced: `in_development_summary_line` printed by `test_runner_main.spl`; each `SPEC FILE VERDICT:` line carries `in_development=<n>` |
+| Listable | `simple test --tag in-development` selects exactly these specs | enforced: `content_has_tag` in `src/lib/nogc_sync_mut/test_runner/test_runner_files.spl` matches the `# @tag:in-development` header (pinned by `test/01_unit/app/test_runner_new/tag_filter_header_spec.spl`); on an explicit path a non-matching `--tag` is an empty selection (exit 4), not a run |
 
 Two things follow from "counted, not hidden": the count is a **debt figure that
 is supposed to go down**, and a suite whose in-development count is rising
@@ -493,7 +493,7 @@ this tag's business.
 
 Simple supports Gherkin-style BDD for system tests:
 
-```simple
+```text
 examples addition:
     """Test data for addition"""
     a    b    result
@@ -521,7 +521,7 @@ The mock library provides test doubles for verifying interactions with dependenc
 
 ### Basic Mock
 
-```simple
+```text
 import std.testing.mock as mock
 
 val save_mock = mock.create_mock("save_user")
@@ -534,7 +534,7 @@ expect(save_mock.was_called_with(["user123", "Alice"]))
 
 ### MockBuilder with Return Values
 
-```simple
+```text
 val mock = mock.MockBuilder.new("get_user")
     .returns(["Alice", "Bob", "Charlie"])
 
@@ -547,7 +547,7 @@ match mock.next_return_value():
 
 Manage multiple mocks:
 
-```simple
+```text
 val registry = mock.MockRegistry.new()
 registry.register("save", save_mock)
 registry.register("load", load_mock)
@@ -556,7 +556,7 @@ registry.reset_all()
 
 ### Conditional Returns
 
-```simple
+```text
 val cond = mock.ConditionalReturns.new()
 cond.add_condition(\args: args[0] == "admin", "admin_data")
 cond.add_condition(\args: args[0] == "user", "user_data")
@@ -565,7 +565,7 @@ cond.set_default("guest_data")
 
 ### Behavior Sequences (State Machines)
 
-```simple
+```text
 val seq = mock.BehaviorSequence.new("disconnected")
 seq.add_state("disconnected", "connecting...", Some("connecting"))
 seq.add_state("connecting", "connected!", Some("connected"))
@@ -574,7 +574,7 @@ seq.add_state("connected", "ready", nil)
 
 ### Protocol Mock (Trait-like Interfaces)
 
-```simple
+```text
 val proto = mock.ProtocolMock.new()
 proto.mock_method("authenticate", ["user", "pass"], "token_123")
 val token = proto.record_method_call("authenticate", ["user", "pass"])
@@ -582,7 +582,7 @@ val token = proto.record_method_call("authenticate", ["user", "pass"])
 
 ### Async Mocking
 
-```simple
+```text
 val async_mock = mock.AsyncMock.new("api_call")
 async_mock.set_delay(100)
 async_mock.set_return_values(["response1"])
@@ -617,7 +617,7 @@ val result = async_mock.record_async_call(["request"])
 
 ### Assertion Helpers
 
-```simple
+```text
 import testing
 
 testing.assert_eq(actual, expected, "message")
@@ -632,7 +632,7 @@ val error = testing.assert_err(result, "message")
 
 ### Collection Helpers
 
-```simple
+```text
 testing.assert_contains(list, item, "message")
 testing.assert_not_contains(list, item, "message")
 testing.assert_empty(list, "message")
@@ -641,7 +641,7 @@ testing.assert_len(list, expected_length, "message")
 
 ### Timing Helpers
 
-```simple
+```text
 val (result, elapsed_micros) = testing.measure_time(\:
     expensive_operation()
 )
@@ -655,7 +655,7 @@ val result = testing.assert_fast(
 
 ### Fixture Helpers
 
-```simple
+```text
 testing.with_cleanup(
     \: create_resource(),      # Setup
     \r: cleanup_resource(r),   # Teardown (runs even on failure)
@@ -671,7 +671,7 @@ val result = testing.with_timeout(
 
 ### Spy Helpers
 
-```simple
+```text
 val spy = testing.create_spy("function_name")
 spy.record_call(["arg1", "arg2"])
 testing.assert_called(spy, 3)
@@ -723,7 +723,7 @@ The test database (`doc/08_tracking/test/test_db.sdn` + `test_db_runs.sdn`) prov
 
 ### Key Operations
 
-```simple
+```text
 use app.test_runner_new.test_db_core.TestDatabase
 
 val db = TestDatabase.load().unwrap()
@@ -779,7 +779,7 @@ A test is shared (`# @platform: all`) when it has zero imports, uses only built-
 
 ### Runtime Skip Helpers
 
-```simple
+```text
 # @platform: all
 describe "Cross-platform math":
     it "basic addition":
@@ -950,7 +950,7 @@ bin/simple ui web app.ui.sdn --port 9001 --test-api-external
 
 ### UITestClient
 
-```simple
+```text
 use std.ui_test.client.{UITestClient}
 use std.ui_test.types.{ElementInfo, UIStateInfo}
 
@@ -1005,7 +1005,7 @@ client.wait_for("modal_dialog", 3000)?             # Wait for element
 
 ### Writing UI System Tests
 
-```simple
+```text
 # test/03_system/gui/ui/my_app_spec.spl
 # tag: slow, system
 
@@ -1035,7 +1035,7 @@ describe "My App UI":
 
 Shared helpers in `test/03_system/gui/ui/helpers/ui_test_helpers.spl`:
 
-```simple
+```text
 # Start/stop server with cleanup
 val pid = start_ui_server("web", "app.ui.sdn", free_port())
 # ... run tests ...
@@ -1114,7 +1114,7 @@ The interpreter mode test runner only verifies file loading. The `it` block bodi
 
 ### Fixture not available
 
-```simple
+```text
 # Wrong -- fixture not defined:
 it "uses user":
     expect(user.name).to_equal("Alice")
@@ -1140,7 +1140,7 @@ Use `given:` blocks to reset state before each test instead of `let` at context 
 
 Arguments are stored as strings. Ensure consistency:
 
-```simple
+```text
 mock.record_call(["123", "Alice"])       # Use strings
 mock.was_called_with(["123", "Alice"])   # Match strings
 ```

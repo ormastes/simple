@@ -1,0 +1,159 @@
+# Format admission only. These synthetic headers are not runnable/signature or
+# sandbox evidence. Native owner qualification is a separate integration gate.
+use std.spec.{describe, it, expect}
+use std.nogc_async_mut.container.providers.macos.executable_preflight_v1.{macos_executable_preflight_v1}
+use std.nogc_async_mut.container.providers.macos.native_admission_v1.{MacOsNativeSandboxAdmissionV1, MACOS_NATIVE_SANDBOX_ENGINE_V1}
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1}
+
+fn _words(values: [i64]) -> [u8]:
+    var bytes: [u8] = []
+    for value in values:
+        for shift in 0..4:
+            bytes.push(((value >> (shift * 8)) & 255).to_u8())
+    bytes
+
+fn _image(cpu: i64, subtype: i64, platform: i64) -> [u8]:
+    _words([0xfeedfacf, cpu, subtype, 2, 1, 24, 0, 0,
+        0x32, 24, platform, 0x0b0000, 0x0b0000, 0])
+
+describe "native macOS executable format preflight":
+    it "admits generic arm64 and x86_64 macOS headers as format evidence only":
+        val arm = macos_executable_preflight_v1(_image(0x0100000c, 0, 1), "arm64")
+        expect(arm.accepted).to_equal(true)
+        expect(arm.reason).to_equal("macos-executable-format-only-validated")
+        val intel = macos_executable_preflight_v1(_image(0x01000007, 3, 1), "x86_64")
+        expect(intel.accepted).to_equal(true)
+
+    it "rejects CPU mismatch, feature subtypes and unsupported host architectures":
+        expect(macos_executable_preflight_v1(_image(0x0100000c, 0, 1), "x86_64").accepted).to_equal(false)
+        expect(macos_executable_preflight_v1(_image(0x0100000c, 2, 1), "arm64").accepted).to_equal(false)
+        expect(macos_executable_preflight_v1(_image(0x0100000c, 0, 1), "aarch64").accepted).to_equal(false)
+
+    it "rejects iOS, Catalyst, simulator and unknown platforms with matching CPU":
+        for platform in [0, 2, 6, 7, 10, 15]:
+            val result = macos_executable_preflight_v1(_image(0x0100000c, 0, platform), "arm64")
+            expect(result.reason).to_equal("macos-executable-macos-platform-required")
+
+    it "rejects short, ELF, PE and universal headers":
+        expect(macos_executable_preflight_v1([], "arm64").accepted).to_equal(false)
+        for magic in [0x464c457f, 0x00005a4d, 0xbebafeca, 0xcffaedfe]:
+            val bytes = _words([magic, 0x0100000c, 0, 2, 1, 24, 0, 0])
+            expect(macos_executable_preflight_v1(bytes, "arm64").accepted).to_equal(false)
+
+    it "rejects object files and bounded or truncated command tables":
+        val object_bytes = _words([0xfeedfacf, 0x0100000c, 0, 1, 1, 24, 0, 0])
+        expect(macos_executable_preflight_v1(object_bytes, "arm64").reason).to_equal("macos-executable-mh-execute-required")
+        for count in [0, 0xffffffff]:
+            val bytes = _words([0xfeedfacf, 0x0100000c, 0, 2, count, 24, 0, 0,
+                0x32, 24, 1, 0, 0, 0])
+            expect(macos_executable_preflight_v1(bytes, "arm64").reason).to_equal("macos-executable-invalid-command-bounds")
+
+    it "isolates the maximum command count with a complete otherwise valid table":
+        # 4096 harmless unknown commands plus one valid platform command.
+        # Removing the count cap would make the complete table pass preflight.
+        var bytes = _words([0xfeedfacf, 0x0100000c, 0, 2, 4097, 32792, 0, 0,
+            0x32, 24, 1, 0, 0, 0])
+        val command = _words([0x70000000, 8])
+        for index in 0..4096:
+            for byte in command:
+                bytes.push(byte)
+        expect(bytes.len()).to_equal(32824)
+        val result = macos_executable_preflight_v1(bytes, "arm64")
+        expect(result.reason).to_equal("macos-executable-invalid-command-bounds")
+
+    it "rejects zero, unaligned and overrun command sizes":
+        for size in [0, 7, 9, 32, 0xffffffff]:
+            val bytes = _words([0xfeedfacf, 0x0100000c, 0, 2, 1, 24, 0, 0,
+                0x32, size, 1, 0, 0, 0])
+            expect(macos_executable_preflight_v1(bytes, "arm64").reason).to_equal("macos-executable-invalid-command-size")
+
+    it "rejects missing platform, duplicate platform and inconsistent build tools":
+        val absent = _words([0xfeedfacf, 0x0100000c, 0, 2, 1, 8, 0, 0, 0x1b, 8])
+        expect(macos_executable_preflight_v1(absent, "arm64").reason).to_equal("macos-executable-platform-missing")
+        val duplicate = _words([0xfeedfacf, 0x0100000c, 0, 2, 2, 48, 0, 0,
+            0x32, 24, 1, 0, 0, 0, 0x32, 24, 1, 0, 0, 0])
+        expect(macos_executable_preflight_v1(duplicate, "arm64").reason).to_equal("macos-executable-invalid-platform-command")
+        val tools = _words([0xfeedfacf, 0x0100000c, 0, 2, 1, 24, 0, 0,
+            0x32, 24, 1, 0, 0, 1])
+        expect(macos_executable_preflight_v1(tools, "arm64").reason).to_equal("macos-executable-invalid-build-tools")
+
+    it "accepts a complete nonzero build-tools table as format evidence":
+        val bytes = _words([0xfeedfacf, 0x0100000c, 0, 2, 1, 32, 0, 0,
+            0x32, 32, 1, 0, 0, 1, 3, 0x10000])
+        expect(macos_executable_preflight_v1(bytes, "arm64").accepted).to_equal(true)
+
+    it "rejects legacy and mixed platform commands and unaccounted bytes":
+        for kind in [0x24, 0x25, 0x2f, 0x30]:
+            val bytes = _words([0xfeedfacf, 0x0100000c, 0, 2, 1, 16, 0, 0, kind, 16, 0, 0])
+            expect(macos_executable_preflight_v1(bytes, "arm64").reason).to_equal("macos-executable-legacy-platform-unsupported")
+        val trailing = _words([0xfeedfacf, 0x0100000c, 0, 2, 1, 32, 0, 0,
+            0x32, 24, 1, 0, 0, 0, 0, 0])
+        expect(macos_executable_preflight_v1(trailing, "arm64").reason).to_equal("macos-executable-command-size-mismatch")
+
+fn _identity() -> RuntimeIdentityV1:
+    RuntimeIdentityV1(pod_uid: "mac-workload", attempt: 1,
+        provider_generation: 4, operation_id: "op-1",
+        engine: MACOS_NATIVE_SANDBOX_ENGINE_V1, native_id: "", node_boot_id: "boot-1")
+
+describe "native Mac admission preserves lifecycle state":
+    it "keeps a matching executable blocked until native sandbox ownership exists":
+        val owner = MacOsNativeSandboxAdmissionV1.prepare(_identity())
+        val result = owner.validate_request("macos", "macos", "native-sandbox", "arm64", _image(0x0100000c, 0, 1))
+        expect(result.status).to_equal("blocked")
+        expect(result.reason).to_equal("macos-native-signed-sandbox-owner-required")
+        expect(result.state.phase).to_equal("prepared")
+        expect(result.state.identity.operation_id).to_equal("op-1")
+        expect(result.state.identity.provider_generation).to_equal(4)
+        expect(result.state.identity.native_id).to_equal("")
+        expect(result.exit_code).to_equal(-1)
+        expect(result.command.program).to_equal("")
+
+    it "rejects VM, Windows, SimpleOS and kernel-container claims before host calls":
+        val owner = MacOsNativeSandboxAdmissionV1.prepare(_identity())
+        for execution_os in ["linux", "windows", "simpleos"]:
+            val result = owner.preflight("macos", execution_os, "native-sandbox", "arm64", [])
+            expect(result.status).to_equal("rejected")
+            expect(result.state.phase).to_equal("prepared")
+        for isolation in ["virtual-machine", "native-container"]:
+            val result = owner.preflight("macos", "macos", isolation, "arm64", [])
+            expect(result.status).to_equal("rejected")
+
+    it "rejects caller-supplied native identity and terminal state without adopting them":
+        var identity = _identity()
+        identity.native_id = "1234"
+        val forged = MacOsNativeSandboxAdmissionV1.prepare(identity)
+        val rejected = forged.validate_request("macos", "macos", "native-sandbox", "arm64", [])
+        expect(rejected.reason).to_equal("macos-native-invalid-attempt-identity")
+        expect(rejected.status).to_equal("rejected")
+        var state = MacOsNativeSandboxAdmissionV1.prepare(_identity()).state
+        state.phase = "exited"
+        state.exit_code = 0
+        val terminal = MacOsNativeSandboxAdmissionV1(state: state)
+        val result = terminal.validate_request("macos", "macos", "native-sandbox", "arm64", [])
+        expect(result.reason).to_equal("macos-native-prepared-state-required")
+        expect(result.status).to_equal("rejected")
+        expect(result.state.phase).to_equal("exited")
+        expect(result.exit_code).to_equal(-1)
+
+    it "rejects a malformed image without issuing any process command":
+        val owner = MacOsNativeSandboxAdmissionV1.prepare(_identity())
+        val result = owner.preflight("macos", "macos", "native-sandbox", "arm64", [])
+        expect(result.status).to_equal("rejected")
+        expect(result.reason).to_equal("macos-executable-truncated-header")
+        expect(result.command.program).to_equal("")
+        expect(result.state.identity.node_boot_id).to_equal("boot-1")
+
+    it "rejects zero attempts, zero generations and sibling engine identities":
+        for invalid_field in ["attempt", "generation", "engine"]:
+            var identity = _identity()
+            if invalid_field == "attempt":
+                identity.attempt = 0
+            if invalid_field == "generation":
+                identity.provider_generation = 0
+            if invalid_field == "engine":
+                identity.engine = "windows-hcs-v1"
+            val owner = MacOsNativeSandboxAdmissionV1.prepare(identity)
+            val result = owner.validate_request("macos", "macos", "native-sandbox", "arm64", _image(0x0100000c, 0, 1))
+            expect(result.status).to_equal("rejected")
+            expect(result.reason).to_equal("macos-native-invalid-attempt-identity")
+            expect(result.state.phase).to_equal("prepared")

@@ -1,0 +1,607 @@
+# Native-only fixture: genuine selected managed provider/tool owners, actual
+# parsed source surfaces, registration publication, and frozen source replay.
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_hir_archive_schedule_owner_v1.*
+use compiler.driver.driver_hir_post_validation_policy_owner_v1.*
+use compiler.driver.driver_hir_pipeline_lowering.*
+use compiler.driver.cache.driver_hir_archive_weave_boundary_v1.*
+use compiler.driver.cache.driver_hir_archive_semantic_prerequisite_v1.*
+use compiler.driver.cache.driver_hir_archive_weave_inputs_v1.{driver_hir_weave_inputs_v1,
+    driver_hir_weave_recollect_facts_v1}
+use compiler.driver.cache.driver_hir_archive_weave_facts_v1.{DriverHirArchiveWeaveDeclarationV1}
+use compiler.driver.cache.driver_hir_archive_weave_gate_v1.{driver_hir_archive_weave_gate_v1}
+use compiler.driver.cache.driver_cold_hir_weave_body_v1.{DriverColdHirWeaveBodyV1}
+use compiler.driver.cache.driver_hir_post_validation_policy_v1.{DriverHirPostValidationPolicyOwnerV1}
+use compiler.driver.cache.driver_hir_post_validation_gate_facts_v1.{DriverHirPostValidationGateReportV1}
+use compiler.driver.cache.driver_hir_managed_runtime_selection_v1.*
+use compiler.driver.cache.driver_hir_archive_journal_v1.*
+use compiler.driver.cache.hir_body_typecheck_lease_v1.*
+use compiler.driver.driver_hir_cache.{hir_cache_promote_diagnostic_owner_v1, hir_cache_clear_last_warnings}
+use compiler.mono.mono_archive_registration_v1.*
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.flat_ast_bridge.{flat_pool_capture_arm, flat_pool_capture_take,
+    parse_and_build_module_in_borrowed_scope, flat_parse_module_body_calls}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_enabled,
+    frontend_parse_cache_store, frontend_parse_cache_hits}
+use compiler.frontend.core.parser.{parser_initialization_generation_v1}
+use compiler.core.ast.{ast_prepare_persistent_owner_v1}
+use compiler.driver.driver_source_pipeline_parsing.{driver_promote_retained_frontend_owners_v1,
+    driver_end_transient_parse_scope}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.{HirStmtKind, HirExprKind, HirExpr, HirFunction, HirBlock,
+    HirStruct, HirField}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfaceBuilder, ModuleSurfacesByName}
+use compiler.hir.hir_lowering.module_surface_registry.*
+use compiler.common.config.{Logger}
+use compiler.semantics.join_point_model.{join_point_is_forwarder}
+use compiler.semantics.rt_criticality_validation.*
+use compiler.semantics.rt_criticality.{RtBoundCapability, RT_EFFECT_ALLOC,
+    rt_closure_digest, rt_bound_manifest_replace, rt_bound_manifest_capabilities}
+use std.common.crypto.sha256.{sha256_text}
+use std.env.{env_get}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+
+extern fn rt_hash_text(content: text) -> i64
+
+struct WeaveObservedV1:
+    module_name: text
+    advice_name: text
+    statements: i64
+    forwarder: bool
+    default_value: i64
+    warnings: [text]
+
+fn poison_public_ast_cache_borrowed(source: SourceFile) -> Result<bool, text>:
+    val changed = source.content.replace("value + 1", "69").replace("= 37", "= 99")
+    if changed == source.content: return Err("fixture AST mutation source absent")
+    flat_pool_capture_arm()
+    val parsed = parse_and_build_module_in_borrowed_scope(changed, source.path)
+    val blob = flat_pool_capture_take()
+    if blob == "": return Err("fixture actual fake AST capture absent")
+    if not frontend_parse_cache_store(sha256_text(source.content), blob):
+        return Err("fixture public fake AST cache store refused")
+    Ok(true)
+
+fn poison_public_ast_cache(source: SourceFile) -> Result<bool, text>:
+    if not frontend_parse_cache_enabled(): return Err("fixture requires actual isolated frontend cache")
+    ast_prepare_persistent_owner_v1()
+    val generation = parser_initialization_generation_v1()
+    if not transient_scope_begin(): return Err("fixture fake AST cache lease refused")
+    val result = poison_public_ast_cache_borrowed(source)
+    val entered = generation != parser_initialization_generation_v1()
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    val frontend = if paused: driver_promote_retained_frontend_owners_v1(entered) else: false
+    val ended = driver_end_transient_parse_scope()
+    if not paused or not owned or not frontend or not ended: panic("fixture fake AST cache ownership")
+    result
+
+fn source_values(module: HirModule) -> (i64, i64):
+    var width = -1
+    var submit = -1
+    for declaration in module.structs.values():
+        if declaration.name != "View": continue
+        for field in declaration.fields:
+            if field.name != "width" or not field.has_default: continue
+            match field.default.kind:
+                case HirExprKind.IntLit(value, _): width = value
+                case _: pass
+    for func in module.functions.values():
+        if func.name != "submit_impl" or not func.body.has: continue
+        match func.body.value.kind:
+            case HirExprKind.IntLit(value, _): submit = value
+            case _: pass
+    (width, submit)
+
+fn actual_capability(module: HirModule) -> Result<RtBoundCapability, text>:
+    val declarations = rt_module_function_declarations_v1(module.name, module)
+    val names = rt_unambiguous_declaration_names_v1(declarations)
+    var rows: [RtCriticalFunctionFactsV1] = []
+    var root = ""
+    for func in module.functions.values():
+        val row = rt_function_facts_v1(module.name, module, func, names)
+        rows.push(row)
+        if func.name == "submit_view": root = rt_stable_fn_id(row.declaration.module_key, row.declaration.symbol_id)
+    if root == "": return Err("fixture actual submit_view root absent")
+    Ok(RtBoundCapability(subject_id: root,
+        closure_digest: rt_closure_digest(root, rt_criticality_graph_facts_v1(rows)),
+        effect: RT_EFFECT_ALLOC, max_units: 0, review_id: "FIXTURE-WEAVE-ACTUAL-SUBMIT"))
+
+fn registration(journal: DriverHirArchiveJournalV1, archive: HirBodyArchiveV1) -> Result<MonoArchiveRegistrationReceiptV1, text>:
+    if not transient_scope_begin(): return Err("fixture registration lease refused")
+    val loaded = hir_body_archive_load_in_owned_scope_v1(archive, archive.input)
+    val result: Result<MonoArchiveRegistrationReceiptV1, text> = if loaded.is_err(): Err(loaded.unwrap_err()) else:
+        mono_archive_collect_registration_in_owned_scope_v1(journal.registration, loaded.unwrap(), archive.input.module_name, archive)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    val memo = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not owned or not memo or not ended: panic("fixture registration ownership")
+    result
+
+fn actual_capability_from_archive(archive: HirBodyArchiveV1) -> Result<RtBoundCapability, text>:
+    if not transient_scope_begin(): return Err("fixture capability body lease refused")
+    val loaded = hir_body_archive_load_in_owned_scope_v1(archive, archive.input)
+    val result: Result<RtBoundCapability, text> = if loaded.is_err(): Err(loaded.unwrap_err()) else:
+        actual_capability(loaded.unwrap())
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    val memo = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not owned or not memo or not ended: panic("fixture capability body ownership")
+    result
+
+# Actual public mechanical store attack: source SHA, paths, claims, signatures
+# and producer selection stay genuine while one complete source body changes.
+fn altered_body_borrowed(archive: HirBodyArchiveV1, change_default: bool) -> Result<HirBodyArchiveV1, text>:
+    var module = hir_body_archive_load_in_owned_scope_v1(archive, archive.input)?
+    var changed = false
+    if change_default:
+        for symbol in module.structs.keys():
+            val declaration = module.structs[symbol]
+            if declaration.name != "View": continue
+            var fields: [HirField] = []
+            for field in declaration.fields:
+                if field.name == "width" and field.has_default:
+                    fields.push(HirField(..field, default: HirExpr(..field.default, kind: HirExprKind.IntLit(99, nil))))
+                    changed = true
+                else: fields.push(field)
+            module.structs[symbol] = HirStruct(..declaration, fields: fields)
+    else:
+        for symbol in module.functions.keys():
+            val func = module.functions[symbol]
+            if func.name != "submit_impl" or not func.body.has: continue
+            val value = HirExpr(..func.body.value, kind: HirExprKind.IntLit(69, nil))
+            module.functions[symbol] = HirFunction(..func, body: HirBlock(..func.body, value: value))
+            changed = true
+    if not changed: return Err("fixture actual source body mutation target absent")
+    hir_body_archive_store_in_owned_scope_v1(archive.input, module, [])
+
+fn altered_body(archive: HirBodyArchiveV1, change_default: bool) -> Result<HirBodyArchiveV1, text>:
+    if not transient_scope_begin(): return Err("fixture altered body lease refused")
+    val result = altered_body_borrowed(archive, change_default)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    val memo = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not owned or not memo or not ended: panic("fixture altered body ownership")
+    result
+
+fn public_body_attack_refused(driver: CompilerDriver, selected: DriverHirManagedRuntimeSelectionV1,
+        archive: HirBodyArchiveV1, change_default: bool) -> Result<bool, text>:
+    val altered = altered_body(archive, change_default)?
+    if altered.input.source_content_digest != archive.input.source_content_digest or altered.body_digest == archive.body_digest:
+        return Err("fixture mutation did not retain real source SHA and change complete HIR")
+    val real_journal = driver.hir_archive_publication_journal
+    val real_policy = driver.hir_archive_post_validation_policy
+    val fake = driver_hir_archive_journal_create_v1(driver.ctx, selected)?
+    val receipt = registration(fake, altered)?
+    val published = driver_hir_archive_journal_publish_v1(fake, driver.ctx, 0, "weave.provider", receipt)?
+    val aliased = driver_hir_archive_journal_alias_v1(fake, driver.ctx, 1, "weave.logical_alias", "weave.provider")?
+    driver.hir_archive_publication_journal = Some(fake)
+    driver.hir_archive_post_validation_policy = nil
+    val captured_policy = driver.capture_hir_archive_post_validation_policy_v1()
+    var refused = false
+    if captured_policy.is_ok(): refused = driver_hir_archive_weave_boundary_capture_v1(driver).is_err()
+    driver.hir_archive_publication_journal = real_journal
+    driver.hir_archive_post_validation_policy = real_policy
+    if captured_policy.is_err(): return Err("fixture real captured source policy attack setup refused")
+    Ok(refused)
+
+fn custody_controls(driver: CompilerDriver, archive: HirBodyArchiveV1) -> Result<i64, text>:
+    if driver_hir_source_body_custody_matches_in_owned_scope_v1(driver, archive, 0):
+        return Err("inactive body custody query admitted")
+    var checks = 1
+    val other = CompilerDriver.create(driver.ctx.options)
+    other.ctx = driver.ctx
+    other.streaming_module_surfaces_owner = driver.streaming_module_surfaces_owner
+    other.streaming_surface_owner_ready = driver.streaming_surface_owner_ready
+    other.hir_archive_managed_runtime_selection = driver.hir_archive_managed_runtime_selection
+    other.hir_archive_publication_journal = driver.hir_archive_publication_journal
+    other.hir_archive_schedule = driver.hir_archive_schedule
+    other.hir_archive_post_validation_policy = driver.hir_archive_post_validation_policy
+    if not transient_scope_begin(): return Err("fixture custody query lease refused")
+    val actual = driver_hir_source_body_custody_matches_in_owned_scope_v1(driver, archive, 0)
+    val foreign = driver_hir_source_body_custody_matches_in_owned_scope_v1(other, archive, 0)
+    val alias = driver_hir_source_body_custody_matches_in_owned_scope_v1(driver, archive, 1)
+    if not transient_scope_pause():
+        val ended = transient_scope_end()
+        return Err("fixture custody query pause refused")
+    val paused = driver_hir_source_body_custody_matches_in_owned_scope_v1(driver, archive, 0)
+    val paused_state = transient_array_scope_state_v1()
+    if not transient_scope_end(): return Err("fixture custody query close refused")
+    if not actual: return Err("actual closed selected lower transaction lacks custody")
+    checks = checks + 1
+    if foreign: return Err("distinct driver copied context forged producer identity")
+    checks = checks + 1
+    if alias: return Err("logical alias index replaced actual canonical producer index")
+    checks = checks + 1
+    if paused or paused_state != 2: return Err("paused custody query admitted or changed lease")
+    checks = checks + 1
+    if transient_array_scope_state_v1() != 0 or driver_hir_source_body_custody_matches_in_owned_scope_v1(driver, archive, 0):
+        return Err("post-close custody query admitted or retained lease")
+    checks = checks + 1
+    Ok(checks)
+
+fn observe_borrowed(accepted: DriverHirArchiveWeaveBoundaryUseV1, key: text) -> Result<WeaveObservedV1, text>:
+    val loaded = driver_hir_archive_weave_boundary_load_in_owned_scope_v1(accepted, key)?
+    var advice = ""
+    var statements = -1
+    var forwarder = true
+    var default_value = -1
+    for func in loaded.module.functions.values():
+        if func.name != "submit_view": continue
+        statements = func.body.stmts.len()
+        forwarder = join_point_is_forwarder(func)
+        if statements != 1: return Err("fixture expected one woven statement before original tail")
+        match func.body.stmts[0].kind:
+            case HirStmtKind.Expr(expr):
+                match expr.kind:
+                    case HirExprKind.Call(callee, _, _):
+                        match callee.kind:
+                            case HirExprKind.NamedVar(_, name): advice = name
+                            case _: return Err("fixture advice callee is not named")
+                    case _: return Err("fixture first statement is not advice call")
+            case _: return Err("fixture first statement is not expression")
+    for declaration in loaded.module.structs.values():
+        if declaration.name != "View": continue
+        for field in declaration.fields:
+            if field.name != "width" or not field.has_default: continue
+            match field.default.kind:
+                case HirExprKind.IntLit(value, _): default_value = value
+                case _: return Err("fixture original default body changed")
+    Ok(WeaveObservedV1(loaded.module.name, advice, statements, forwarder, default_value, loaded.warnings))
+
+fn observe(accepted: DriverHirArchiveWeaveBoundaryUseV1, key: text) -> Result<WeaveObservedV1, text>:
+    if not transient_scope_begin(): return Err("fixture observation lease refused")
+    val result = observe_borrowed(accepted, key)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    val ended = transient_scope_end()
+    if not paused or not owned or not ended: panic("fixture woven observation ownership")
+    result
+
+# Mechanical negative census inputs below never grant genuine owner admission.
+# All declarations and complete graphs come from actual source recollection.
+fn gate_controls(driver: CompilerDriver, original: RtBoundCapability,
+        later: RtBoundCapability) -> Result<i64, text>:
+    val inputs = driver_hir_weave_inputs_v1(driver)?
+    val facts = driver_hir_weave_recollect_facts_v1(driver, inputs)?
+    val first = inputs.journal.logical_order[0]
+    val second = inputs.journal.logical_order[1]
+    val first_declaration = facts.declarations[first]
+    val second_declaration = facts.declarations[second]
+    val bodies = facts.bodies
+    facts.declarations[first] = DriverHirArchiveWeaveDeclarationV1(..first_declaration, dropped: true)
+    facts.bodies = {}
+    val partial = driver_hir_archive_weave_gate_v1(inputs.policy, facts, inputs.journal.logical_order,
+        inputs.layout_keys, inputs.schedule.layout_module_order, false, true)?
+    if not partial.gates_skipped or partial.errors.len() != 1 or
+            not partial.errors[0].contains("1 HIR module(s) lost their aggregate") or
+            partial.aspect_errors.len() != 0 or partial.weave_claims.len() != 0 or
+            rt_bound_manifest_capabilities().len() != 1 or rt_bound_manifest_capabilities()[0].review_id != later.review_id:
+        return Err("partial census demanded body rows or consumed later RT grant")
+    var checks = 1
+    if not driver_hir_archive_weave_gate_v1(inputs.policy, facts, inputs.journal.logical_order,
+            [], [], false).is_err(): return Err("partial census skipped physical declaration coverage")
+    checks = checks + 1
+    facts.declarations[second] = DriverHirArchiveWeaveDeclarationV1(..second_declaration, dropped: true)
+    if not driver_hir_archive_weave_gate_v1(inputs.policy, facts, inputs.journal.logical_order,
+            inputs.layout_keys, inputs.schedule.layout_module_order, false).is_err():
+        return Err("all-dropped branch skipped real body coverage")
+    checks = checks + 1
+    facts.bodies = bodies
+    val all_dropped = driver_hir_archive_weave_gate_v1(inputs.policy, facts, inputs.journal.logical_order,
+        inputs.layout_keys, inputs.schedule.layout_module_order, false)?
+    if all_dropped.gates_skipped or all_dropped.errors.len() != 0 or all_dropped.weave_claims.len() != 2 or
+            all_dropped.census_messages.len() != 1 or not all_dropped.census_messages[0].contains("test is unreliable") or
+            rt_bound_manifest_capabilities()[0].review_id != later.review_id:
+        return Err("all-dropped did not execute actual graph gates")
+    checks = checks + 1
+    facts.declarations[first] = first_declaration
+    facts.declarations[second] = second_declaration
+    val mismatches = [RtBoundCapability(..original, subject_id: "different actual subject"),
+        RtBoundCapability(..original, closure_digest: sha256_text("different closure")),
+        RtBoundCapability(..original, effect: original.effect + 1),
+        RtBoundCapability(..original, max_units: original.max_units + 1),
+        RtBoundCapability(..original, review_id: "different review")]
+    for changed in mismatches:
+        rt_bound_manifest_replace([changed])
+        val rejected = driver_hir_archive_weave_gate_v1(inputs.policy, facts, inputs.journal.logical_order,
+            inputs.layout_keys, inputs.schedule.layout_module_order, false, true)?
+        if rejected.errors.len() != 1 or not rejected.errors[0].contains("original RT capability manifest differs") or
+                rt_bound_manifest_capabilities().len() != 1 or rt_bound_manifest_capabilities()[0].review_id != changed.review_id:
+            return Err("changed complete capability was admitted or consumed")
+        checks = checks + 1
+    rt_bound_manifest_replace([original, later])
+    val extra = driver_hir_archive_weave_gate_v1(inputs.policy, facts, inputs.journal.logical_order,
+        inputs.layout_keys, inputs.schedule.layout_module_order, false, true)?
+    if extra.errors.len() != 1 or rt_bound_manifest_capabilities().len() != 2:
+        return Err("different capability cardinality was consumed")
+    checks = checks + 1
+    rt_bound_manifest_replace([original])
+    val consumed = driver_hir_archive_weave_gate_v1(inputs.policy, facts, inputs.journal.logical_order,
+        inputs.layout_keys, inputs.schedule.layout_module_order, false, true)?
+    if consumed.errors.len() != 0 or rt_bound_manifest_capabilities().len() != 0:
+        return Err("genuine original manifest not consumed at no-claim RT gate")
+    checks = checks + 1
+    rt_bound_manifest_replace([later])
+    val replay = driver_hir_archive_weave_gate_v1(inputs.policy, facts, inputs.journal.logical_order,
+        inputs.layout_keys, inputs.schedule.layout_module_order, false)?
+    if replay.errors.len() != 0 or rt_bound_manifest_capabilities().len() != 1 or
+            rt_bound_manifest_capabilities()[0].review_id != later.review_id:
+        return Err("default replay consumed future grant")
+    checks = checks + 1
+    Ok(checks)
+
+fn registered_gate_report(boundary: DriverHirArchiveWeaveBoundaryV1) -> Result<DriverHirPostValidationGateReportV1, text>:
+    if not transient_scope_begin(): return Err("fixture registered gate report lease refused")
+    val result = driver_hir_archive_weave_boundary_registered_report_in_owned_scope_v1(boundary)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    val ended = transient_scope_end()
+    if not paused or not owned or not ended: panic("fixture registered gate report ownership")
+    result
+
+fn semantic_prerequisite_controls(driver: CompilerDriver, boundary: DriverHirArchiveWeaveBoundaryV1,
+        name: text) -> Result<i64, text>:
+    val captured = driver_hir_archive_semantic_prerequisite_capture_v1(driver, boundary)?
+    val actual = driver_hir_archive_semantic_prerequisite_use_v1(driver, boundary, captured)?
+    if actual.prerequisite.stage != "streaming-woven-semantic-prerequisite-v1" or
+            actual.weave_use.declaration_order != [name] or
+            actual.weave_use.boundary_key != boundary.use.boundary_key:
+        return Err("semantic prerequisite actual streaming parent differs")
+    var checks = 1
+    val fabricated_passes = DriverHirArchiveSemanticPrerequisiteV1(..captured,
+        stage: "nonstreaming-four-pass-clean-v1")
+    if not driver_hir_archive_semantic_prerequisite_use_v1(driver, boundary, fabricated_passes).is_err():
+        return Err("semantic prerequisite accepted fabricated nonstreaming clean passes")
+    checks = checks + 1
+    val absent_pin = DriverHirArchiveSemanticPrerequisiteV1(..captured,
+        artifact_key: sha256_text("unissued semantic prerequisite"))
+    if not driver_hir_archive_semantic_prerequisite_use_v1(driver, boundary, absent_pin).is_err():
+        return Err("semantic prerequisite accepted an unissued public owner")
+    checks = checks + 1
+    driver.ctx.config["coverage"] = "1"
+    val unsupported = driver_hir_archive_semantic_prerequisite_capture_v1(driver, boundary).is_err()
+    driver.ctx.config.remove("coverage")
+    if not unsupported or driver_hir_archive_semantic_prerequisite_use_v1(driver, boundary, captured).is_err():
+        return Err("semantic prerequisite lost actual route refusal or restored streaming parent")
+    checks = checks + 1
+    val other = CompilerDriver.create(driver_core_compile_options_default())
+    other.ctx = driver.ctx
+    if not transient_scope_begin(): return Err("semantic prerequisite borrowed control lease refused")
+    val original = driver_hir_archive_semantic_prerequisite_matches_in_owned_scope_v1(driver, captured)
+    val copied = driver_hir_archive_semantic_prerequisite_matches_in_owned_scope_v1(other, captured)
+    if original.is_err() or copied.is_ok():
+        transient_scope_pause()
+        transient_scope_end()
+        return Err("semantic prerequisite did not distinguish actual driver from copied context")
+    checks = checks + 1
+    if not transient_scope_pause(): return Err("semantic prerequisite foreign pause refused")
+    if not driver_hir_archive_semantic_prerequisite_matches_in_owned_scope_v1(driver, captured).is_err() or
+            transient_array_scope_state_v1() != 2:
+        transient_scope_end()
+        return Err("semantic prerequisite borrowed validator changed foreign paused lease")
+    checks = checks + 1
+    if not driver_hir_archive_semantic_prerequisite_capture_v1(driver, boundary).is_err() or
+            not driver_hir_archive_semantic_prerequisite_use_v1(driver, boundary, captured).is_err() or
+            transient_array_scope_state_v1() != 2 or not transient_scope_end():
+        return Err("semantic prerequisite closed APIs changed foreign lease")
+    checks = checks + 1
+    if driver_hir_archive_semantic_prerequisite_use_v1(driver, boundary, captured).is_err() or
+            transient_array_scope_state_v1() != 0:
+        return Err("semantic prerequisite lost post-close parent")
+    checks = checks + 1
+    Ok(checks)
+
+fn main() -> i64:
+    val selected_result = driver_hir_capture_managed_runtime_selection_v1("llvm",
+        env_get("SIMPLE_NATIVE_BUILD_TARGET"), env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE"))
+    if selected_result.is_err(): return 1
+    val selected = selected_result.unwrap()
+    val path = "test/fixtures/compiler/hir_archive_weave_boundary/provider.spl"
+    val name = "weave.provider"
+    val alias_name = "weave.logical_alias"
+    val loaded_source = SourceFile.load(path)
+    val alternate = SourceFile.load("./" + path)
+    if loaded_source.is_err() or alternate.is_err(): return 2
+    val source = SourceFile(..loaded_source.unwrap(), module_name: name)
+    val alias = SourceFile(..alternate.unwrap(), module_name: alias_name)
+    if source.authored_path == alias.authored_path or source.content != alias.content: return 3
+    val poisoned = poison_public_ast_cache(source)
+    if poisoned.is_err(): return 43
+    val calls_before_cached_control = flat_parse_module_body_calls()
+    val hits_before_cached_control = frontend_parse_cache_hits()
+    val parsed = parse_full_frontend(source.content, path, name, Logger(level: 0))
+    var untrusted_lowerer = HirLowering.with_filename(path)
+    val untrusted = untrusted_lowerer.lower_parser_module_unstub(parsed, false)
+    val altered_values = source_values(untrusted)
+    if altered_values.0 != 99 or altered_values.1 != 69 or
+            flat_parse_module_body_calls() != calls_before_cached_control or
+            frontend_parse_cache_hits() != hits_before_cached_control + 1: return 44
+    val builder = ModuleSurfaceBuilder.new()
+    if builder.add_parsed(parsed, source, 0).is_err() or builder.add_alias(alias).is_err(): return 4
+    val surfaces = ModuleSurfacesByName.empty()
+    if builder.finish_into(surfaces) != "": return 5
+    val driver = CompilerDriver.create(driver_core_compile_options_default())
+    driver.ctx.options.low_memory = true
+    driver.ctx.options.cli_mode_text = "aot"
+    driver.ctx.config["compiler_source_entry"] = source.path
+    driver.ctx.native_target = selected.target
+    driver.hir_archive_managed_runtime_selection = Some(selected)
+    driver.ctx.source_paths_owner = [source.path, alias.path]
+    driver.ctx.source_authored_paths_owner = [source.authored_path, alias.authored_path]
+    driver.ctx.source_module_names_owner = [name, alias_name]
+    driver.ctx.source_contents_owner = [source.content, alias.content]
+    driver.ctx.source_identities_owner = [sha256_text(source.content), sha256_text(source.content)]
+    driver.ctx.source_byte_lengths_owner = [source.content.len(), source.content.len()]
+    val raw_hash = rt_hash_text(source.content)
+    val retained_hash = if raw_hash == 0: 1 else: raw_hash
+    driver.ctx.source_content_hashes_owner = [retained_hash, retained_hash]
+    driver.streaming_module_surfaces_owner = surfaces
+    driver.streaming_surface_owner_ready = true
+    driver.streaming_entry_source_index_owner = -1
+    val schedule_result = driver.capture_hir_archive_streaming_schedule_v1()
+    if schedule_result.is_err(): return 6
+    val schedule = schedule_result.unwrap()
+    val journal_result = driver_hir_archive_journal_create_v1(driver.ctx, selected)
+    if journal_result.is_err(): return 9
+    val journal = journal_result.unwrap()
+    driver.hir_archive_publication_journal = Some(journal)
+    # Accepted positive originates in the actual selected read/parse/lower
+    # transaction. A public store of an independently edited HIR is not used.
+    # Even a caller lowerer already fed the poisoned cache cannot become the
+    # actual source producer. The controller owns its own genuine lowerer.
+    untrusted_lowerer.module_surfaces = ModuleSurfacesByName.empty()
+    val calls_before_actual_transaction = flat_parse_module_body_calls()
+    val transaction = driver.lower_streaming_hir_selected_archived_shard_transaction_v1(
+        untrusted_lowerer, source, 0, false, journal.registration)
+    if transaction.is_err(): return 7
+    val completed = transaction.unwrap()
+    if completed.status != 1 or completed.archive == nil or completed.declaration_registration == nil: return 8
+    if flat_parse_module_body_calls() < calls_before_actual_transaction + 2: return 45
+    val archive = completed.archive.unwrap()
+    if driver_hir_archive_journal_publish_v1(journal, driver.ctx, 0, name,
+            completed.declaration_registration.unwrap()).is_err(): return 10
+    if driver_hir_archive_journal_alias_v1(journal, driver.ctx, 1, alias_name, name).is_err(): return 11
+    val granted = actual_capability_from_archive(archive)
+    if granted.is_err(): return 38
+    rt_bound_manifest_replace([granted.unwrap()])
+    if driver.capture_hir_archive_post_validation_policy_v1().is_err(): return 12
+    val captured = driver_hir_archive_weave_boundary_capture_v1(driver)
+    if captured.is_err():
+        print "weave capture failed: {captured.unwrap_err()}"
+        return 13
+    val boundary = captured.unwrap()
+    var checks = 2
+    val registered = registered_gate_report(boundary)
+    if boundary.woven_count != 1 or boundary.gate_report.weave_claims.len() != 2 or
+            boundary.gate_report.errors.len() != 0 or boundary.gate_report.gates_skipped or
+            registered.is_err() or registered.unwrap().errors.len() != 0 or
+            registered.unwrap().weave_claims.len() != 2 or registered.unwrap().gates_skipped: return 14
+    checks = checks + 1
+    if rt_bound_manifest_capabilities().len() != 0: return 15
+    checks = checks + 1
+    val used = driver_hir_archive_weave_boundary_use_v1(driver, boundary)
+    if used.is_err(): return 16
+    val accepted = used.unwrap()
+    if accepted.declaration_order != [name] or accepted.logical_order != [name, alias_name] or
+            accepted.physical_module_keys != [archive.input.module_name] or
+            accepted.physical_inventory.logical_rows[1].authored_path != alias.authored_path or
+            accepted.physical_inventory.representative_indices != [0]: return 17
+    checks = checks + 1
+    val canonical_observed = observe(accepted, name)
+    val alias_observed = observe(accepted, alias_name)
+    if canonical_observed.is_err() or alias_observed.is_err(): return 18
+    val actual = canonical_observed.unwrap()
+    val alias_actual = alias_observed.unwrap()
+    if actual.advice_name != "trace_first" or actual.statements != 1 or actual.forwarder or actual.default_value != 37 or
+            actual.warnings.len() != 0 or alias_actual.advice_name != actual.advice_name or
+            alias_actual.default_value != 37 or alias_actual.warnings != actual.warnings: return 19
+    checks = checks + 1
+    if accepted.logical_frames[name].artifact_key != accepted.logical_frames[alias_name].artifact_key or
+            accepted.logical_frames[name].body_digest == archive.body_digest: return 20
+    checks = checks + 1
+    # A later compilation's real grant is untouched by read-use replay.
+    val next_grant = RtBoundCapability(..granted.unwrap(), review_id: "FIXTURE-NEXT-COMPILATION")
+    rt_bound_manifest_replace([next_grant])
+    val repeated = driver_hir_archive_weave_boundary_use_v1(driver, boundary)
+    if repeated.is_err() or repeated.unwrap().boundary_key != accepted.boundary_key or
+            rt_bound_manifest_capabilities().len() != 1 or rt_bound_manifest_capabilities()[0].review_id != next_grant.review_id:
+        return 21
+    checks = checks + 1
+    if observe(accepted, alias_name).is_err(): return 22
+    checks = checks + 1
+    val wrong_report = DriverHirArchiveWeaveBoundaryV1(..boundary, woven_count: 0)
+    if not driver_hir_archive_weave_boundary_use_v1(driver, wrong_report).is_err() or
+            not registered_gate_report(wrong_report).is_err(): return 23
+    checks = checks + 1
+    val wrong_policy = DriverHirArchiveWeaveBoundaryV1(..boundary,
+        policy: DriverHirPostValidationPolicyOwnerV1(..boundary.policy, artifact_digest: sha256_text("different policy")))
+    if not driver_hir_archive_weave_boundary_use_v1(driver, wrong_policy).is_err(): return 24
+    checks = checks + 1
+    val wrong_pin = DriverHirArchiveWeaveBoundaryUseV1(..accepted, boundary_key: sha256_text("unregistered owner"))
+    if not observe(wrong_pin, name).is_err(): return 25
+    checks = checks + 1
+    val wrong_warning = DriverColdHirWeaveBodyV1(..accepted.logical_frames[name], warnings_digest: sha256_text("dropped warning"))
+    val wrong_frame = DriverHirArchiveWeaveBoundaryUseV1(..accepted, logical_frames: {name: wrong_warning, alias_name: wrong_warning})
+    if not observe(wrong_frame, name).is_err(): return 26
+    checks = checks + 1
+    val wrong_order = DriverHirArchiveWeaveBoundaryUseV1(..accepted, logical_order: [alias_name, name])
+    if not observe(wrong_order, name).is_err(): return 27
+    checks = checks + 1
+    val old_author = driver.ctx.source_authored_paths_owner[1]
+    driver.ctx.source_authored_paths_owner[1] = source.authored_path
+    val alias_refused = driver_hir_archive_weave_boundary_use_v1(driver, boundary).is_err()
+    driver.ctx.source_authored_paths_owner[1] = old_author
+    if not alias_refused or driver_hir_archive_weave_boundary_use_v1(driver, boundary).is_err(): return 28
+    checks = checks + 1
+    val old_identity = driver.ctx.source_identities_owner[0]
+    driver.ctx.source_identities_owner[0] = sha256_text("changed captured physical bytes")
+    val source_refused = driver_hir_archive_weave_boundary_use_v1(driver, boundary).is_err()
+    driver.ctx.source_identities_owner[0] = old_identity
+    if not source_refused or driver_hir_archive_weave_boundary_use_v1(driver, boundary).is_err(): return 29
+    checks = checks + 1
+    val old_backend = driver.ctx.options.backend
+    driver.ctx.options.backend = "interpreter"
+    val config_refused = driver_hir_archive_weave_boundary_use_v1(driver, boundary).is_err()
+    driver.ctx.options.backend = old_backend
+    if not config_refused or driver_hir_archive_weave_boundary_use_v1(driver, boundary).is_err(): return 30
+    checks = checks + 1
+    if not transient_scope_begin() or not transient_scope_pause(): return 31
+    val foreign = driver_hir_archive_weave_boundary_use_v1(driver, boundary).is_err()
+    val borrowed = driver_hir_archive_weave_boundary_load_in_owned_scope_v1(accepted, name).is_err()
+    if not foreign or not borrowed or transient_array_scope_state_v1() != 2 or not transient_scope_end(): return 32
+    checks = checks + 1
+    if observe(accepted, name).is_err() or transient_array_scope_state_v1() != 0: return 33
+    checks = checks + 1
+    if checks != 19: return 34
+    val controls = gate_controls(driver, granted.unwrap(), next_grant)
+    if controls.is_err():
+        print "weave gate controls failed: {controls.unwrap_err()}"
+        return 35
+    if controls.unwrap() != 12: return 36
+    checks = checks + controls.unwrap()
+    if checks != 31: return 37
+    # The source-body producer proof rejects both attacks even though their
+    # genuine source claims and every public journal/artifact seal agree.
+    rt_bound_manifest_replace([granted.unwrap()])
+    val body_attack = public_body_attack_refused(driver, selected, archive, false)
+    if body_attack.is_err() or not body_attack.unwrap(): return 39
+    checks = checks + 1
+    val default_attack = public_body_attack_refused(driver, selected, archive, true)
+    if default_attack.is_err() or not default_attack.unwrap(): return 40
+    checks = checks + 1
+    if observe(accepted, name).is_err() or driver_hir_archive_weave_boundary_use_v1(driver, boundary).is_err(): return 41
+    checks = checks + 1
+    if checks != 34: return 42
+    val custody = custody_controls(driver, archive)
+    if custody.is_err():
+        print "actual source body custody controls failed: {custody.unwrap_err()}"
+        return 46
+    if custody.unwrap() != 6: return 47
+    checks = checks + custody.unwrap()
+    if checks != 40: return 48
+    # An independently authored logical alias cannot replace the genuine
+    # first physical declaration label even though it shares complete HIR.
+    val wrong_declarations = DriverHirArchiveWeaveBoundaryUseV1(..accepted, declaration_order: [alias_name])
+    if not observe(wrong_declarations, name).is_err() or observe(accepted, name).is_err(): return 49
+    checks = checks + 1
+    if checks != 41: return 50
+    val semantics = semantic_prerequisite_controls(driver, boundary, name)
+    if semantics.is_err():
+        print "actual streaming semantic prerequisite controls failed: {semantics.unwrap_err()}"
+        return 51
+    if semantics.unwrap() != 8: return 52
+    checks = checks + semantics.unwrap()
+    if checks != 49: return 53
+    print "HIR archive weave boundary: {checks} checks passed"
+    0

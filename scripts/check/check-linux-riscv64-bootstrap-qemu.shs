@@ -10,6 +10,7 @@ set -eu
 #   sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --provision # guest toolchain (clang/lld/rustup nightly)
 #   sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --sync [REF] # git archive REF (default HEAD) -> guest ~/simple
 #   sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --stage2    # trust-root Stage 2 in guest (cranelift)
+#   sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --cross-test BIN # run a host cross-built compiler in guest
 #   sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --ssh CMD...
 #   sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --stop
 #
@@ -181,6 +182,21 @@ do_sync() {
     say "guest ~/simple = $sha"
 }
 
+# Run a host cross-built riscv64 compiler (cross-arch-bootstrap.shs) on the
+# target CPU: sync HEAD sources, copy the binary in, then --version, a hello
+# native-build + run, and a small spec smoke when a test runner is present.
+do_cross_test() {
+    bin="${1:?usage: --cross-test <riscv64 simple binary>}"
+    [ -f "$bin" ] || die "no such binary: $bin"
+    do_sync HEAD
+    ssh_vm 'mkdir -p ~/simple/build/cross' && ssh_vm 'cat > ~/simple/build/cross/simple && chmod +x ~/simple/build/cross/simple' < "$bin"
+    ssh_vm 'cd ~/simple && ./build/cross/simple --version' || die "cross binary --version failed in guest"
+    ssh_vm 'cd ~/simple && mkdir -p build/sanity && printf "fn main():\n    print \"riscv64-cross-ok\"\n" > build/sanity/hello.spl && \
+        ./build/cross/simple native-build build/sanity/hello.spl -o build/sanity/hello && ./build/sanity/hello | grep -q riscv64-cross-ok' \
+        || die "cross binary hello build/run failed in guest"
+    say "PASS: cross-built riscv64 compiler runs, builds and runs hello in the guest"
+}
+
 do_stage2() {
     vm_running || do_start
     log="${VM_DIR}/stage2-${STAGE2_BACKEND}.log"
@@ -219,6 +235,7 @@ case "${1:-}" in
     --provision) do_provision ;;
     --sync) shift; do_sync "${1:-HEAD}" ;;
     --stage2) do_stage2 ;;
+    --cross-test) shift; do_cross_test "${1:-}" ;;
     --ssh) shift; ssh_vm "$@" ;;
     *) sed -n '4,13p' "$0"; exit 2 ;;
 esac

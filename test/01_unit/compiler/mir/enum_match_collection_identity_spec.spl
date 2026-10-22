@@ -1,0 +1,77 @@
+# @req REQ-ENUM-MATCH-COLLECTION-IDENTITY
+# @tag: unit, compiler, mir
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn match_collection_errors(source: text, inspect_selected: bool = false) -> [text]:
+    val filename = "enum_match_collection.spl"
+    val parsed = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    var errors: [text] = []
+    for error in hir_lowering.errors:
+        errors.push("HIR: " + error.message)
+    for error in lowering.errors:
+        errors.push("MIR: " + error.message)
+    if mir.functions.len() == 0:
+        errors.push("no lowered functions")
+    if inspect_selected:
+        for function in mir.functions.values():
+            for local in function.locals:
+                if local.name == Some("selected"):
+                    if local.type_.kind == MirTypeKind.I64:
+                        errors.push("selected has untyped I64 carrier")
+                    match local.type_.kind:
+                        case MirTypeKind.Array(_, _) | MirTypeKind.Slice(_) | MirTypeKind.Dict(_, _):
+                            errors.push("selected has accepted collection carrier")
+                        case _: ()
+    errors
+
+fn match_collection_has_iteration_diagnostic(evidence: [text]) -> bool:
+    for row in evidence:
+        if row.contains("for-in over non-array iterables") and row.contains("collection mir type: I64"):
+            return true
+    false
+
+describe "enum match collection identity":
+    it "retains a dictionary payload after a returning default arm":
+        val errors = match_collection_errors("enum Value:\n    Map(Dict<text, i64>)\n    Empty\nfn probe(value: Value) -> bool:\n    val fields = match value:\n        case Value.Map(items): items\n        case _: return false\n    fields.contains_key(\"answer\")\n")
+        expect(errors.len()).to_equal(0)
+
+    it "retains an array payload for iteration after a returning default arm":
+        val errors = match_collection_errors("enum Value:\n    Items([i64])\n    Empty\nfn probe(value: Value) -> i64:\n    val items = match value:\n        case Value.Items(found): found\n        case _: return -1\n    var total = 0\n    for item in items:\n        total = total + item\n    total\n")
+        expect(errors.len()).to_equal(0)
+
+    it "joins two live array arms and excludes the terminating arm":
+        val errors = match_collection_errors("enum Value:\n    Left([i64])\n    Right([i64])\n    Empty\nfn probe(value: Value) -> i64:\n    val items = match value:\n        case Value.Left(found): found\n        case Value.Right(found): found\n        case _: return -1\n    var total = 0\n    for item in items:\n        total = total + item\n    total\n")
+        expect(errors.len()).to_equal(0)
+
+    it "does not assign a collection identity to incompatible live arm types":
+        var lowering = MirLowering.new(SymbolTable.new())
+        val left = lowering.builder.new_temp(MirType.i64())
+        val right = lowering.builder.new_temp(MirType.i64())
+        val merged = lowering.builder.new_temp(MirType.i64())
+        lowering.remember_local_hir_type(left.id, HirType(kind: HirTypeKind.Array(HirType.i64(), nil), span: HirType.i64().span), 0, 0)
+        lowering.remember_local_hir_type(right.id, HirType(kind: HirTypeKind.Array(HirType.str(), nil), span: HirType.str().span), 0, 0)
+        lowering.remember_merged_arm_identity(merged, [left, right])
+        expect(lowering.find_local_hir_type(merged.id) == nil).to_be(true)
+
+    it "rejects incompatible array element types through an actual enum match":
+        val evidence = match_collection_errors("enum Value:\n    Numbers([i64])\n    Words([text])\nfn probe(value: Value) -> i64:\n    val selected = match value:\n        case Value.Numbers(items): items\n        case Value.Words(items): items\n    var count = 0\n    for item in selected:\n        count = count + 1\n    count\n", true)
+        expect(match_collection_has_iteration_diagnostic(evidence)).to_be(true)
+        expect(evidence).to_contain("selected has untyped I64 carrier")
+        expect(evidence.contains("selected has accepted collection carrier")).to_be(false)
+
+    it "rejects a live scalar arm joined with a collection arm":
+        val evidence = match_collection_errors("enum Value:\n    Numbers([i64])\n    Scalar(i64)\nfn probe(value: Value) -> i64:\n    val selected = match value:\n        case Value.Numbers(items): items\n        case Value.Scalar(number): number\n    var count = 0\n    for item in selected:\n        count = count + 1\n    count\n", true)
+        expect(match_collection_has_iteration_diagnostic(evidence)).to_be(true)
+        expect(evidence).to_contain("selected has untyped I64 carrier")
+        expect(evidence.contains("selected has accepted collection carrier")).to_be(false)

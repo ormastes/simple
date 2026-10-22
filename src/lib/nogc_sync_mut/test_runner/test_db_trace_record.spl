@@ -1,0 +1,84 @@
+# Versioned SDN-only cross-process trace transport. Summary run-record v1 stays unchanged.
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.sdn.parser.{parse_with_spans_and_issues}
+use std.common.traceability.case_events.{TraceCaseEvent, decode_trace_case_events}
+
+val TEST_DB_TRACE_RECORD_SCHEMA = "simple.test-db.trace-event-batch/v1"
+
+pub struct TestDbTraceFile:
+    path: text
+    events_sdn: text
+
+pub struct TestDbTraceRecord:
+    files: [TestDbTraceFile]
+
+pub fn test_db_trace_record_encode(record: TestDbTraceRecord) -> Result<text, text>:
+    if record.files.len() > 100000:
+        return Err("trace record exceeds 100000 files")
+    var rows: [SdnValue] = []
+    var seen: Dict<text, bool> = {}
+    for row in record.files:
+        if row.path == "" or row.events_sdn == "":
+            return Err("trace transport requires a path and event document")
+        if seen.contains_key(row.path):
+            return Err("trace transport has duplicate test paths")
+        seen[row.path] = true
+        decode_trace_case_events(row.events_sdn)?
+        val parsed = parse_with_spans_and_issues(row.events_sdn)?
+        if parsed.2.len() > 0:
+            return Err("trace event document has duplicate or invalid fields")
+        var fields: Dict<text, SdnValue> = {}
+        fields["path"] = SdnValue.String(row.path)
+        fields["events"] = parsed.0
+        rows.push(SdnValue.Dict(fields))
+    var root: Dict<text, SdnValue> = {}
+    root["schema"] = SdnValue.String(TEST_DB_TRACE_RECORD_SCHEMA)
+    root["files"] = SdnValue.Array(rows)
+    val encoded = sdn_encode_canonical(SdnValue.Dict(root))
+    if encoded.len() > 16777216:
+        return Err("trace record exceeds 16 MiB")
+    Ok(encoded)
+
+pub fn test_db_trace_record_decode(source: text) -> Result<TestDbTraceRecord, text>:
+    if source == "" or source.len() > 16777216:
+        return Err("trace record absent or exceeds 16 MiB")
+    val parsed = parse_with_spans_and_issues(source)?
+    if parsed.2.len() > 0:
+        return Err("trace record has duplicate or invalid fields")
+    val root = match parsed.0:
+        case SdnValue.Dict(fields): fields
+        case _: return Err("trace record must be an SDN dictionary")
+    if root.len() != 2 or not root.contains_key("schema") or not root.contains_key("files"):
+        return Err("trace record has unexpected fields")
+    val schema = match root["schema"]:
+        case SdnValue.String(value): value
+        case _: return Err("trace record schema must be text")
+    if schema != TEST_DB_TRACE_RECORD_SCHEMA:
+        return Err("unsupported trace record schema: " + schema)
+    val rows = match root["files"]:
+        case SdnValue.Array(items): items
+        case _: return Err("trace record files must be an array")
+    if rows.len() > 100000:
+        return Err("trace record exceeds 100000 files")
+    var files: [TestDbTraceFile] = []
+    var seen: Dict<text, bool> = {}
+    for item in rows:
+        val fields = match item:
+            case SdnValue.Dict(values): values
+            case _: return Err("trace file row must be a dictionary")
+        if fields.len() != 2 or not fields.contains_key("path") or not fields.contains_key("events"):
+            return Err("trace file row has unexpected fields")
+        val path = match fields["path"]:
+            case SdnValue.String(value): value
+            case _: return Err("trace file path must be text")
+        if path == "":
+            return Err("trace file path is empty")
+        if seen.contains_key(path):
+            return Err("trace record has duplicate test paths")
+        seen[path] = true
+        val event_value = fields["events"]
+        val event_doc = sdn_encode_canonical(event_value)
+        decode_trace_case_events(event_doc)?
+        files.push(TestDbTraceFile(path: path, events_sdn: event_doc))
+    Ok(TestDbTraceRecord(files: files))

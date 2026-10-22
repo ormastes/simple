@@ -1,0 +1,183 @@
+# codex-system-test
+# @req REQ-MC-005 G7
+# Source-authored production API acceptance; execution UNRUN.
+use std.spec.*
+use std.spec.step
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.semantics.safety_checker.{SafetyChecker, SafetyError, safetychecker_check_module}
+
+# Assertion-only helper; never models the production checker.
+fn assert_e1048_diagnostics(errors: [SafetyError], expected_count: i64, expected_line: i64, expected_col: i64, expected_file: text):
+    var count = 0
+    for diagnostic in errors:
+        match diagnostic:
+            case Other(message, span):
+                if message.starts_with("E1048:"):
+                    count = count + 1
+                    expect(message).to_equal("E1048: collection 'xs' is mutated while being iterated")
+                    expect(span.line).to_equal(expected_line)
+                    expect(span.col).to_equal(expected_col)
+                    expect(span.file).to_equal(expected_file)
+            case _: ()
+    expect(count).to_equal(expected_count)
+    expect(errors.len()).to_equal(expected_count)
+
+describe "G7 direct resolved collection identity":
+    it "should reject direct push":
+        step("Parse and lower the actual collection iteration program")
+        val source = "fn walk() -> i64:\n    var xs: [i64] = [1, 2]\n    for x in xs:\n        xs.push(x)\n    0\n"
+        val parsed = parse_full_frontend(source, "testdata/g7_push.spl", "g7_push", Logger(level: 0))
+        expect(parsed.functions.len()).to_equal(1)
+        expect(parsed.functions.contains("walk")).to_equal(true)
+        var lowering = HirLowering.with_filename("testdata/g7_push.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        step("Check actual resolved HIR and require exact iterator diagnostics")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        assert_e1048_diagnostics(errors, 1, 4, 9, "testdata/g7_push.spl")
+
+    it "should reject direct index assignment":
+        step("Parse and lower the actual collection iteration program")
+        val source = "fn walk() -> i64:\n    var xs: [i64] = [1, 2]\n    for x in xs:\n        xs[0] = x\n    0\n"
+        val parsed = parse_full_frontend(source, "testdata/g7_index.spl", "g7_index", Logger(level: 0))
+        expect(parsed.functions.len()).to_equal(1)
+        expect(parsed.functions.contains("walk")).to_equal(true)
+        var lowering = HirLowering.with_filename("testdata/g7_index.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        step("Check actual resolved HIR and require exact iterator diagnostics")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        assert_e1048_diagnostics(errors, 1, 4, 9, "testdata/g7_index.spl")
+
+    it "should reject direct reassignment":
+        step("Parse and lower the actual collection iteration program")
+        val source = "fn walk() -> i64:\n    var xs: [i64] = [1, 2]\n    for x in xs:\n        xs = [9]\n    0\n"
+        val parsed = parse_full_frontend(source, "testdata/g7_reassign.spl", "g7_reassign", Logger(level: 0))
+        expect(parsed.functions.len()).to_equal(1)
+        expect(parsed.functions.contains("walk")).to_equal(true)
+        var lowering = HirLowering.with_filename("testdata/g7_reassign.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        step("Check actual resolved HIR and require exact iterator diagnostics")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        assert_e1048_diagnostics(errors, 1, 4, 9, "testdata/g7_reassign.spl")
+
+    it "should reject desugared collection merge":
+        step("Parse and lower the actual collection iteration program")
+        val source = "fn walk() -> i64:\n    var xs: [i64] = [1, 2]\n    for x in xs:\n        xs = xs + [x]\n    0\n"
+        val parsed = parse_full_frontend(source, "testdata/g7_merge.spl", "g7_merge", Logger(level: 0))
+        expect(parsed.functions.len()).to_equal(1)
+        expect(parsed.functions.contains("walk")).to_equal(true)
+        var lowering = HirLowering.with_filename("testdata/g7_merge.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        step("Check actual resolved HIR and require exact iterator diagnostics")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        assert_e1048_diagnostics(errors, 1, 4, 9, "testdata/g7_merge.spl")
+
+    it "should retain outer iterable through nested loop":
+        step("Parse and lower the actual collection iteration program")
+        val source = "fn walk() -> i64:\n    var xs: [i64] = [1, 2]\n    var ys: [i64] = [3]\n    for x in xs:\n        for y in ys:\n            xs.push(y)\n    0\n"
+        val parsed = parse_full_frontend(source, "testdata/g7_nested_outer.spl", "g7_nested_outer", Logger(level: 0))
+        expect(parsed.functions.len()).to_equal(1)
+        expect(parsed.functions.contains("walk")).to_equal(true)
+        var lowering = HirLowering.with_filename("testdata/g7_nested_outer.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        step("Check actual resolved HIR and require exact iterator diagnostics")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        assert_e1048_diagnostics(errors, 1, 6, 13, "testdata/g7_nested_outer.spl")
+
+    it "should allow mutation of a separate collection":
+        step("Parse and lower the actual collection iteration program")
+        val source = "fn walk() -> i64:\n    var xs: [i64] = [1, 2]\n    var ys: [i64] = [3]\n    for x in xs:\n        ys.push(x)\n    0\n"
+        val parsed = parse_full_frontend(source, "testdata/g7_other.spl", "g7_other", Logger(level: 0))
+        expect(parsed.functions.len()).to_equal(1)
+        expect(parsed.functions.contains("walk")).to_equal(true)
+        var lowering = HirLowering.with_filename("testdata/g7_other.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        step("Check actual resolved HIR and require exact iterator diagnostics")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        assert_e1048_diagnostics(errors, 0, 0, 0, "testdata/g7_other.spl")
+
+    it "should allow mutation after iteration":
+        step("Parse and lower the actual collection iteration program")
+        val source = "fn walk() -> i64:\n    var xs: [i64] = [1, 2]\n    for x in xs:\n        val y = x\n    xs.push(9)\n    0\n"
+        val parsed = parse_full_frontend(source, "testdata/g7_after.spl", "g7_after", Logger(level: 0))
+        expect(parsed.functions.len()).to_equal(1)
+        expect(parsed.functions.contains("walk")).to_equal(true)
+        var lowering = HirLowering.with_filename("testdata/g7_after.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        step("Check actual resolved HIR and require exact iterator diagnostics")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        assert_e1048_diagnostics(errors, 0, 0, 0, "testdata/g7_after.spl")
+
+    it "should allow collection length reads":
+        step("Parse and lower the actual collection iteration program")
+        val source = "fn walk() -> i64:\n    var xs: [i64] = [1, 2]\n    for x in xs:\n        val n = xs.len()\n    0\n"
+        val parsed = parse_full_frontend(source, "testdata/g7_read.spl", "g7_read", Logger(level: 0))
+        expect(parsed.functions.len()).to_equal(1)
+        expect(parsed.functions.contains("walk")).to_equal(true)
+        var lowering = HirLowering.with_filename("testdata/g7_read.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        step("Check actual resolved HIR and require exact iterator diagnostics")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        assert_e1048_diagnostics(errors, 0, 0, 0, "testdata/g7_read.spl")
+
+    it "should distinguish a shadowed binding":
+        step("Parse and lower the actual collection iteration program")
+        val source = "fn walk() -> i64:\n    var xs: [i64] = [1, 2]\n    for x in xs:\n        var xs: [i64] = [9]\n        xs.push(x)\n    0\n"
+        val parsed = parse_full_frontend(source, "testdata/g7_shadow.spl", "g7_shadow", Logger(level: 0))
+        expect(parsed.functions.len()).to_equal(1)
+        expect(parsed.functions.contains("walk")).to_equal(true)
+        var lowering = HirLowering.with_filename("testdata/g7_shadow.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        step("Check actual resolved HIR and require exact iterator diagnostics")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        assert_e1048_diagnostics(errors, 0, 0, 0, "testdata/g7_shadow.spl")
+
+    it "should retain outer iterable after inner loop exit":
+        step("Parse and lower the actual collection iteration program")
+        val source = "fn walk() -> i64:\n    var xs: [i64] = [1, 2]\n    var ys: [i64] = [3]\n    for x in xs:\n        for y in ys:\n            val z = y\n        xs.push(x)\n    0\n"
+        val parsed = parse_full_frontend(source, "testdata/g7_nested_exit.spl", "g7_nested_exit", Logger(level: 0))
+        expect(parsed.functions.len()).to_equal(1)
+        expect(parsed.functions.contains("walk")).to_equal(true)
+        var lowering = HirLowering.with_filename("testdata/g7_nested_exit.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        step("Check actual resolved HIR and require exact iterator diagnostics")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        assert_e1048_diagnostics(errors, 1, 7, 9, "testdata/g7_nested_exit.spl")
+
+    it "should release inner iterable after inner loop exit":
+        step("Parse and lower the actual collection iteration program")
+        val source = "fn walk() -> i64:\n    var xs: [i64] = [1, 2]\n    var ys: [i64] = [3]\n    for x in xs:\n        for y in ys:\n            val z = y\n        ys.push(x)\n    0\n"
+        val parsed = parse_full_frontend(source, "testdata/g7_inner_after_exit.spl", "g7_inner_after_exit", Logger(level: 0))
+        expect(parsed.functions.len()).to_equal(1)
+        expect(parsed.functions.contains("walk")).to_equal(true)
+        var lowering = HirLowering.with_filename("testdata/g7_inner_after_exit.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        step("Check actual resolved HIR and require exact iterator diagnostics")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        assert_e1048_diagnostics(errors, 0, 0, 0, "testdata/g7_inner_after_exit.spl")
+

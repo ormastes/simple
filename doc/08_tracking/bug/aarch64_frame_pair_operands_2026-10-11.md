@@ -44,3 +44,10 @@ also required for correct frame setup/restore; it is independent of this panic.
 Regression: test/01_unit/compiler/backend/native/aarch64_frame_pair_encoding_spec.spl.
 Manual: doc/06_spec/01_unit/compiler/backend/native/aarch64_frame_pair_encoding_spec.md.
 No architecture boundary, encoded format, or UI change is introduced.
+
+## Current merge qualification
+
+The observations above belong to their pinned historical producers and source
+owners. The current release_phase3 merge retains the source repair, but its
+admitted compiler/core/MCP/LSP and full Phase 3 qualification remain pending.
+No historical diagnostic or experimental native fixture is a current merge PASS.

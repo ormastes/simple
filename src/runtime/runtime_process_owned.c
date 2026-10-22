@@ -3,6 +3,26 @@
  * qualification still requires source-matched Stage2/native facade evidence. */
 #include "runtime.h"
 
+/* The `*_value` wrappers answer the Simple facade's `-> (text, text, [i64])`.
+ * Native codegen destructures that result with rt_tuple_get, which requires a
+ * REGISTERED tuple (an RtCoreArray carrying the TUPLE flag, see rt_tuple_new in
+ * runtime_native.c). Until 2026-10-20 every branch below returned a raw
+ * rt_alloc'd 3-word block instead: rt_core_as_array refused it, each element
+ * read answered nil, the facade saw `fields.len() != 30`, and the self-hosted
+ * test runner reported every spawn as `Resource limit exceeded
+ * (infrastructure)` while the interpreter twin (a real tuple) passed. The
+ * returned pointer is the tuple HANDLE, never to be freed with rt_free. */
+static int64_t* owned_tuple3_value(int64_t stdout_value, int64_t stderr_value, SplArray* fields) {
+    int64_t handle = rt_tuple_new(3);
+    if (!rt_tuple_set(handle, 0, stdout_value) ||
+        !rt_tuple_set(handle, 1, stderr_value) ||
+        !rt_tuple_set(handle, 2, (int64_t)(uintptr_t)fields)) {
+        rt_array_free((SplArray*)(uintptr_t)handle); /* no-op on a nil handle */
+        return NULL;
+    }
+    return (int64_t*)(uintptr_t)handle;
+}
+
 /* Every value this file releases via rt_free_deep is an rt_string_new result
  * (stdout/stderr capture strings on the error-cleanup paths), so a plain
  * rt_string_free is semantically exact. The general rt_free_deep lives in
@@ -4375,11 +4395,8 @@ static int64_t* owned_run_bounded_value_impl(const char* cmd_data, uint64_t cmd_
     stdout_value = rt_string_new((const uint8_t*)out, receipt.stdout_bytes_kept);
     stderr_value = rt_string_new((const uint8_t*)err, receipt.stderr_bytes_kept);
     if (!stdout_value || !stderr_value) goto fail;
-    tuple = (int64_t*)rt_alloc(3 * (int64_t)sizeof(int64_t));
+    tuple = owned_tuple3_value(stdout_value, stderr_value, fields);
     if (!tuple) goto fail;
-    tuple[0] = stdout_value;
-    tuple[1] = stderr_value;
-    tuple[2] = (int64_t)(uintptr_t)fields;
     for (int64_t i = 1; i <= argc; i++) RT_OWNED_HOST_FREE(argv[i]);
     RT_OWNED_HOST_FREE(argv); RT_OWNED_HOST_FREE(cmd);
     RT_OWNED_HOST_FREE(out); RT_OWNED_HOST_FREE(err);
@@ -4394,7 +4411,6 @@ fail:
     if (stdout_value) (void)RT_OWNED_FREE_VALUE(stdout_value);
     if (stderr_value) (void)RT_OWNED_FREE_VALUE(stderr_value);
     if (fields) rt_array_free(fields);
-    if (tuple) rt_free(tuple);
     return NULL;
 }
 
@@ -5051,11 +5067,8 @@ static int64_t* owned_win_run_bounded_value_impl(const char* cmd_data, uint64_t 
     stdout_value = rt_string_new((const uint8_t*)out, receipt.stdout_bytes_kept);
     stderr_value = rt_string_new((const uint8_t*)err, receipt.stderr_bytes_kept);
     if (!stdout_value || !stderr_value) goto fail;
-    tuple = (int64_t*)rt_alloc(3 * (int64_t)sizeof(int64_t));
+    tuple = owned_tuple3_value(stdout_value, stderr_value, fields);
     if (!tuple) goto fail;
-    tuple[0] = stdout_value;
-    tuple[1] = stderr_value;
-    tuple[2] = (int64_t)(uintptr_t)fields;
     for (int64_t i = 1; i <= argc; i++) RT_OWNED_HOST_FREE(argv[i]);
     RT_OWNED_HOST_FREE(argv); RT_OWNED_HOST_FREE(cmd);
     RT_OWNED_HOST_FREE(out); RT_OWNED_HOST_FREE(err);
@@ -5070,7 +5083,6 @@ fail:
     if (stdout_value) (void)RT_OWNED_FREE_VALUE(stdout_value);
     if (stderr_value) (void)RT_OWNED_FREE_VALUE(stderr_value);
     if (fields) rt_array_free(fields);
-    if (tuple) rt_free(tuple);
     return NULL;
 }
 
@@ -5263,17 +5275,16 @@ int64_t* rt_process_run_owned_bounded_value(const char* cmd, uint64_t cmd_len, S
             return NULL;
         }
     }
-    int64_t* tuple = (int64_t*)rt_alloc(3 * (int64_t)sizeof(int64_t));
-    if (!tuple) { rt_array_free(fields); return NULL; }
-    tuple[0] = rt_string_new((const uint8_t*)"", 0);
-    tuple[1] = rt_string_new((const uint8_t*)"", 0);
-    if (!tuple[0] || !tuple[1]) {
-        if (tuple[0]) (void)RT_OWNED_FREE_VALUE(tuple[0]);
-        if (tuple[1]) (void)RT_OWNED_FREE_VALUE(tuple[1]);
-        rt_array_free(fields); rt_free(tuple);
+    int64_t stdout_value = rt_string_new((const uint8_t*)"", 0);
+    int64_t stderr_value = rt_string_new((const uint8_t*)"", 0);
+    int64_t* tuple = (stdout_value && stderr_value)
+        ? owned_tuple3_value(stdout_value, stderr_value, fields) : NULL;
+    if (!tuple) {
+        if (stdout_value) (void)RT_OWNED_FREE_VALUE(stdout_value);
+        if (stderr_value) (void)RT_OWNED_FREE_VALUE(stderr_value);
+        rt_array_free(fields);
         return NULL;
     }
-    tuple[2] = (int64_t)(uintptr_t)fields;
     return tuple;
 }
 
@@ -5294,17 +5305,16 @@ int64_t* rt_process_run_owned_observed_bounded_value(const char* cmd, uint64_t c
             return NULL;
         }
     }
-    int64_t* tuple = (int64_t*)rt_alloc(3 * (int64_t)sizeof(int64_t));
-    if (!tuple) { rt_array_free(fields); return NULL; }
-    tuple[0] = rt_string_new((const uint8_t*)"", 0);
-    tuple[1] = rt_string_new((const uint8_t*)"", 0);
-    if (!tuple[0] || !tuple[1]) {
-        if (tuple[0]) (void)RT_OWNED_FREE_VALUE(tuple[0]);
-        if (tuple[1]) (void)RT_OWNED_FREE_VALUE(tuple[1]);
-        rt_array_free(fields); rt_free(tuple);
+    int64_t stdout_value = rt_string_new((const uint8_t*)"", 0);
+    int64_t stderr_value = rt_string_new((const uint8_t*)"", 0);
+    int64_t* tuple = (stdout_value && stderr_value)
+        ? owned_tuple3_value(stdout_value, stderr_value, fields) : NULL;
+    if (!tuple) {
+        if (stdout_value) (void)RT_OWNED_FREE_VALUE(stdout_value);
+        if (stderr_value) (void)RT_OWNED_FREE_VALUE(stderr_value);
+        rt_array_free(fields);
         return NULL;
     }
-    tuple[2] = (int64_t)(uintptr_t)fields;
     return tuple;
 }
 #endif /* RT_OWNED_WIN32_SYNC_IMPLEMENTED */

@@ -1073,6 +1073,7 @@ impl Lowerer {
         let previous_function_line = self.current_function_line;
         let fn_flatten_owner = Self::flatten_owner_of(f.attributes.iter().map(|a| a.name.as_str()));
         let previous_function_owner = std::mem::replace(&mut self.current_function_owner, fn_flatten_owner.clone());
+        let previous_type_scope = self.enter_flatten_struct_scope();
         self.current_function_name = Some(func_name.clone());
         // Attribution anchor for the `lenient_types` unresolved-name fallback:
         // `Expr::Identifier` has no span, so the enclosing function's
@@ -1167,13 +1168,14 @@ impl Lowerer {
             } else {
                 param.mutability
             };
-            ctx.add_local_with_inject_and_type_hint(
+            let param_index = ctx.add_local_with_inject_and_type_hint(
                 param.name.clone(),
                 ty,
                 param.ty.as_ref().and_then(type_name_hint),
                 param_mutability,
                 param.inject,
             );
+            self.record_optional_trait_payload(param.ty.as_ref(), param_index, &mut ctx);
         }
 
         let params: Vec<LocalVar> = ctx.locals.clone();
@@ -1379,6 +1381,7 @@ impl Lowerer {
         self.current_function_name = previous_function_name;
         self.current_function_line = previous_function_line;
         self.current_function_owner = previous_function_owner;
+        self.module.types.replace_scope_aliases(previous_type_scope);
 
         // Use qualified name for methods (ClassName.method) for DI compatibility
         let name = if let Some(owner) = owner_type {

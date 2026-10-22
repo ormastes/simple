@@ -465,6 +465,35 @@ pub fn rt_transient_heap_promote(args: &[Value]) -> Result<Value, CompileError> 
     Ok(Value::Bool(promoted))
 }
 
+pub fn rt_transient_heap_promote_share_begin(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_transient_heap_promote_share_begin requires 0 arguments",
+        ));
+    }
+    Ok(Value::Bool(simple_runtime::value::rt_transient_heap_promote_share_begin()))
+}
+
+pub fn rt_transient_heap_promote_share_end(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_transient_heap_promote_share_end requires 0 arguments",
+        ));
+    }
+    Ok(Value::Bool(simple_runtime::value::rt_transient_heap_promote_share_end()))
+}
+
+/// Observe this thread's transient parser-array scope without mutating it:
+/// 0 = no scope, 1 = active, 2 = paused (the Rust runtime's own state).
+pub fn rt_transient_array_scope_state_v1(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_transient_array_scope_state_v1 requires 0 arguments",
+        ));
+    }
+    Ok(Value::Int(simple_runtime::value::rt_transient_array_scope_state_v1()))
+}
+
 pub fn rt_transient_array_scope_end(args: &[Value]) -> Result<Value, CompileError> {
     if !args.is_empty() {
         return Err(CompileError::runtime(
@@ -1853,20 +1882,56 @@ pub fn rt_ptr_write_bytes(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
-/// Data pointer of a packed byte array, or 0 when there is none.
+/// Data pointer of a packed byte array.
 ///
 /// Callable from Simple as: `rt_array_data_ptr(arr: [u8]) -> i64`
-/// Only `ByteArray`/`FrozenByteArray` have contiguous byte storage; a boxed
-/// `Array` has no byte data pointer, so this returns 0 and callers MUST fall
-/// back to a per-byte path rather than treating 0 as an address.
+///
+/// Return contract:
+/// - `ByteArray`/`FrozenByteArray` (packed `[u8]`, which every `[u8]`-typed
+///   binding now uses — see `coerce_to_declared_type`): the real data pointer,
+///   valid while the caller retains the array and does not grow it. An EMPTY
+///   packed array still answers non-zero, like the C and Rust runtimes (whose
+///   data block always exists): `text_byte_buffer` reads 0 as allocation
+///   failure. `Vec::as_ptr` is non-null even with no elements.
+/// - Any boxed `Array` (an untyped `[]` that was never bound as `[u8]`, a
+///   bare literal argument, or a non-`u8` array passed through a generic
+///   declaration): 0, meaning INVALID — "no contiguous byte storage in this
+///   engine". It is not an address, and it is not "empty". Callers MUST treat
+///   it as a failure or take a per-byte path (`text_byte_extraction_checked`
+///   reports `AllocationFailed`; `smf_mmap_native` copies byte-wise). Every
+///   `[u8]`-typed binding is packed, so a live `[u8]` held in a typed
+///   `val`/`var` never reaches this case.
+/// Bug: doc/08_tracking/bug/seed_u64_signed_compare_and_u8_data_ptr_2026-10-19.md
 pub fn rt_array_data_ptr(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
         return Err(CompileError::runtime("rt_array_data_ptr requires 1 argument (array)"));
     }
     Ok(Value::Int(match &args[0] {
-        Value::ByteArray(v) | Value::FrozenByteArray(v) if !v.is_empty() => v.as_ptr() as i64,
+        Value::ByteArray(v) | Value::FrozenByteArray(v) => v.as_ptr() as i64,
         _ => 0,
     }))
+}
+
+/// Bytes-basis length (interpreter twin of runtime_native.c): the logical byte
+/// count of packed `[u8]` storage, or -1 when the backing is a boxed array.
+pub fn rt_array_bytes_basis_len(args: &[Value]) -> Result<Value, CompileError> {
+    let arg = args
+        .first()
+        .ok_or_else(|| CompileError::runtime("rt_array_bytes_basis_len requires 1 argument (array)"))?;
+    Ok(Value::Int(match arg {
+        Value::ByteArray(v) | Value::FrozenByteArray(v) => v.len() as i64,
+        _ => -1,
+    }))
+}
+
+/// Bytes-basis address (interpreter twin of runtime_native.c): the data
+/// pointer of non-empty packed `[u8]` storage, or 0. The pointer stays valid
+/// while the caller retains the array value, as the native contract requires.
+pub fn rt_array_bytes_basis_ptr(args: &[Value]) -> Result<Value, CompileError> {
+    if args.is_empty() {
+        return Err(CompileError::runtime("rt_array_bytes_basis_ptr requires 1 argument (array)"));
+    }
+    rt_array_data_ptr(args)
 }
 
 /// Hosted `unsafe_addr_of(ref: any) -> u64` — baremetal SimpleOS code (e.g.
@@ -2128,6 +2193,19 @@ mod tests {
         assert_eq!(promote(&Value::Nil), Value::Bool(false), "nil never promotes");
         assert_eq!(rt_transient_array_scope_end(&[]).unwrap(), Value::Bool(true));
         assert_eq!(promote(&composite), Value::Bool(false), "scope ended");
+    }
+
+    #[test]
+    fn transient_array_scope_state_v1_tracks_begin_pause_end() {
+        let state = || rt_transient_array_scope_state_v1(&[]).unwrap();
+        assert_eq!(state(), Value::Int(0), "no scope open");
+        assert_eq!(rt_transient_array_scope_begin(&[]).unwrap(), Value::Bool(true));
+        assert_eq!(state(), Value::Int(1), "active");
+        assert_eq!(rt_transient_array_scope_pause(&[]).unwrap(), Value::Bool(true));
+        assert_eq!(state(), Value::Int(2), "paused");
+        assert_eq!(rt_transient_array_scope_end(&[]).unwrap(), Value::Bool(true));
+        assert_eq!(state(), Value::Int(0), "ended");
+        assert!(rt_transient_array_scope_state_v1(&[Value::Int(1)]).is_err());
     }
 
     #[test]

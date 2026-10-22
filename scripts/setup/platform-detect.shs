@@ -20,6 +20,14 @@ case "${PLATFORM_ARCH}" in
   x86_64|amd64) PLATFORM_ARCH="x86_64" ;;
   aarch64|arm64) PLATFORM_ARCH="aarch64" ;;
   riscv64) PLATFORM_ARCH="riscv64" ;;
+  riscv)
+    if [ "${PLATFORM_UNAME}" = FreeBSD ]; then
+      case "$(uname -p 2>/dev/null)" in
+        riscv64) PLATFORM_ARCH="riscv64" ;;
+        *) echo 'error: unsupported FreeBSD RISC-V processor' >&2; return 1 2>/dev/null || exit 1 ;;
+      esac
+    fi
+    ;;
 esac
 
 PLATFORM_ABI=""
@@ -48,10 +56,10 @@ case "${PLATFORM_OS}" in
   *)        PLATFORM_TRIPLE="${PLATFORM_ARCH}-unknown-${PLATFORM_OS}" ;;
 esac
 
-# Cargo target triple. Rust names riscv64 Linux "riscv64gc-..." while Simple
-# uses the plain arch; every other triple is spelled the same by both.
+# Cargo uses riscv64gc for Linux and FreeBSD; Simple artifact paths use riscv64.
 case "${PLATFORM_TRIPLE}" in
   riscv64-unknown-linux-gnu) PLATFORM_RUST_TRIPLE="riscv64gc-unknown-linux-gnu" ;;
+  riscv64-unknown-freebsd) PLATFORM_RUST_TRIPLE="riscv64gc-unknown-freebsd" ;;
   *) PLATFORM_RUST_TRIPLE="${PLATFORM_TRIPLE}" ;;
 esac
 
@@ -63,9 +71,8 @@ export PLATFORM_TRIPLE PLATFORM_RUST_TRIPLE PLATFORM_ARCH PLATFORM_OS PLATFORM_A
 #
 # LLVM_VERSIONS is the preference order of major versions to accept (first one
 # found wins). The default is LLVM 23, matching the Rust compiler binding.
-# LLVM 23 normally requires 23.1.1. Native Linux and FreeBSD also admit
-# the llvm23 package's 23.1.2 patch release; a cross-target override cannot
-# grant this.
+# LLVM 23 is admitted by MAJOR version only (owner decision 2026-10-22): any
+# 23.x.y passes; anything other than the reference 23.1.1 prints a warning.
 #
 # Resolves ONCE and feeds the env both downstream worlds consult, so the shell
 # build and the Simple runtime share a single resolution:
@@ -80,6 +87,7 @@ LLVM_VERSION=""
 LLVM_PREFIX=""
 LLVM_LIBDIR=""
 LLVM_LIB=""
+LLVM_PROVIDER_KIND=""
 
 # Shared-library basenames to look for, by OS, for major version $1.
 _llvm_lib_names() {
@@ -118,11 +126,40 @@ _llvm_prefixes() {
 }
 
 _llvm23_version_admitted() {
-  [ "$1" = 23.1.1 ] && return 0
-  case "${PLATFORM_UNAME}" in
-    Linux|FreeBSD) [ "$1" = 23.1.2 ] ;;
+  case "$1" in
+    23.1.1) return 0 ;;
+    23.*) echo "warning: LLVM $1 admitted by major 23 (reference version 23.1.1)" >&2; return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# Explicit native CLI bootstrap can use the same static archives as Cargo.
+# The default remains shared: llvm-lib/SFFI callers must never receive a static
+# archive as SIMPLE_LLVM_PATH. Check the full llvm-config archive set and tools.
+_llvm_try_static_cli_prefix() {
+  [ "${LLVM_PROVIDER_REQUIREMENT:-shared}" = static-cli ] || return 1
+  case "${PLATFORM_UNAME}:${PLATFORM_OS}" in Linux:linux|FreeBSD:freebsd) ;; *) return 1 ;; esac
+  [ "$2" = 23 ] || return 1
+  [ "$("${_prefix_cfg}" --prefix 2>/dev/null)" = "$1" ] || return 1
+  _static_version=$("${_prefix_cfg}" --version 2>/dev/null) || return 1
+  _static_libdir=$("${_prefix_cfg}" --libdir 2>/dev/null) || return 1
+  case "${_static_libdir}" in "$1/lib"|"$1/lib64") ;; *) return 1 ;; esac
+  _static_libnames=$("${_prefix_cfg}" --link-static --libnames 2>/dev/null) || return 1
+  [ -n "${_static_libnames}" ] || return 1
+  for _tool in llc llvm-as opt clang clang++ llvm-ar; do
+    [ -x "$1/bin/${_tool}" ] || return 1
+    _tool_version=$("$1/bin/${_tool}" --version 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+\.[0-9]+\.[0-9]+$/){print $i; exit}}')
+    [ "${_tool_version}" = "${_static_version}" ] || return 1
+  done
+  for _archive in ${_static_libnames} libPolly.a libPollyISL.a; do
+    case "${_archive}" in */*|*[!A-Za-z0-9_.+-]*) return 1 ;; lib*.a) ;; *) return 1 ;; esac
+    [ -s "${_static_libdir}/${_archive}" ] || return 1
+    _archive_members=$("$1/bin/llvm-ar" t "${_static_libdir}/${_archive}" 2>/dev/null) || return 1
+    [ -n "${_archive_members}" ] || return 1
+  done
+  LLVM_FOUND=1; LLVM_VERSION="$2"; LLVM_PREFIX="$1"
+  LLVM_LIBDIR="${_static_libdir}"; LLVM_LIB=""; LLVM_PROVIDER_KIND=static-cli
+  return 0
 }
 
 # Try prefix $1 for version $2; on success set LLVM_* and return 0.
@@ -147,12 +184,12 @@ _llvm_try_prefix() {
     for _name in $(_llvm_lib_names "$2"); do
       if [ -f "$1/${_ld}/${_name}" ]; then
         LLVM_FOUND=1; LLVM_VERSION="$2"; LLVM_PREFIX="$1"
-        LLVM_LIBDIR="$1/${_ld}"; LLVM_LIB="$1/${_ld}/${_name}"
+        LLVM_LIBDIR="$1/${_ld}"; LLVM_LIB="$1/${_ld}/${_name}"; LLVM_PROVIDER_KIND=shared
         return 0
       fi
     done
   done
-  return 1
+  _llvm_try_static_cli_prefix "$1" "$2"
 }
 
 for _v in ${LLVM_VERSIONS}; do
@@ -167,7 +204,14 @@ for _v in ${LLVM_VERSIONS}; do
   # Host config llvm_root (SIMPLE_HOST_LLVM_ROOT, exported by sourcing
   # scripts/setup/host-env.shs; see config/host/host_config.sdn) is tried
   # before any probing, so a user's recorded prefix wins over guesses.
-  if [ -n "${SIMPLE_HOST_LLVM_ROOT:-}" ] && _llvm_try_prefix "${SIMPLE_HOST_LLVM_ROOT}" "${_v}"; then break; fi
+  # Callers that never source host-env.shs (bootstrap-from-scratch.sh) get the
+  # layered value through `host-env.shs --get` in a child shell, the same
+  # non-exporting pattern bootstrap-build-jobs-policy.shs uses.
+  _pd_llvm_root=${SIMPLE_HOST_LLVM_ROOT:-}
+  if [ -z "${_pd_llvm_root}" ] && [ -f "${repo_root:-.}/scripts/setup/host-env.shs" ]; then
+    _pd_llvm_root=$(sh "${repo_root:-.}/scripts/setup/host-env.shs" --get llvm_root 2>/dev/null) || _pd_llvm_root=""
+  fi
+  if [ -n "${_pd_llvm_root}" ] && _llvm_try_prefix "${_pd_llvm_root}" "${_v}"; then break; fi
 
   # 1) llvm-config (portable): versioned, then bare if it reports this major
   for _cfg in "llvm-config-${_v}" "llvm-config"; do
@@ -199,6 +243,6 @@ if [ "${LLVM_FOUND}" = "1" ]; then
     23) export "LLVM_SYS_231_PREFIX=${LLVM_PREFIX}" ;;
     *) export "LLVM_SYS_${LLVM_VERSION}0_PREFIX=${LLVM_PREFIX}" ;;
   esac
-  [ -n "${SIMPLE_LLVM_PATH:-}" ] || export SIMPLE_LLVM_PATH="${LLVM_LIB}"
+  [ -n "${SIMPLE_LLVM_PATH:-}" ] || [ -z "${LLVM_LIB}" ] || export SIMPLE_LLVM_PATH="${LLVM_LIB}"
 fi
-export LLVM_FOUND LLVM_VERSION LLVM_PREFIX LLVM_LIBDIR LLVM_LIB
+export LLVM_FOUND LLVM_VERSION LLVM_PREFIX LLVM_LIBDIR LLVM_LIB LLVM_PROVIDER_KIND

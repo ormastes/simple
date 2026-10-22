@@ -1,0 +1,81 @@
+# Canonical complete-graph launch record, separate from staged-link records.
+use app.build.scheduler.parent_issued_plan_wire.{
+    PARENT_ISSUED_PLAN_MAX_CONFIGS_V1, issued_plan_path_valid_v1}
+use app.build.scheduler.planner.{scheduler_action_digest_valid_v1}
+
+val PARENT_ISSUED_GRAPH_MAX_BYTES_V1: i64 = 131072
+
+struct ParentIssuedGraphWireV1:
+    valid: bool
+    reason: text
+    plan_digest: text
+    manifest_path: text
+    manifest_digest: text
+    config_paths: [text]
+
+fn _issued_graph_reject_v1(reason: text) -> ParentIssuedGraphWireV1:
+    ParentIssuedGraphWireV1(false, reason, "", "", "", [])
+
+fn encode_parent_issued_graph_wire_v1(plan_digest: text,
+        manifest_path: text, manifest_digest: text,
+        config_paths: [text]) -> text:
+    if not scheduler_action_digest_valid_v1(plan_digest) or
+       not scheduler_action_digest_valid_v1(manifest_digest) or
+       not issued_plan_path_valid_v1(manifest_path) or
+       config_paths.len() == 0 or
+       config_paths.len() > PARENT_ISSUED_PLAN_MAX_CONFIGS_V1:
+        return ""
+    var seen: [text] = []
+    var wire = "simple-parent-graph-launch-v1\n" +
+        "plan-digest=" + plan_digest + "\n" +
+        "manifest=" + manifest_digest + "|" + manifest_path + "\n" +
+        "config-count=" + config_paths.len().to_text() + "\n"
+    for path in config_paths:
+        if not issued_plan_path_valid_v1(path) or seen.contains(path):
+            return ""
+        seen.push(path)
+        wire = wire + "config=" + path + "\n"
+    if wire.len() > PARENT_ISSUED_GRAPH_MAX_BYTES_V1: return ""
+    wire
+
+fn parse_parent_issued_graph_wire_v1(wire: text) -> ParentIssuedGraphWireV1:
+    if wire.len() == 0 or wire.len() > PARENT_ISSUED_GRAPH_MAX_BYTES_V1 or
+       not wire.ends_with("\n") or wire.contains("\r") or
+       wire.contains("\x00"):
+        return _issued_graph_reject_v1("issued-graph-wire-invalid")
+    val lines = wire[0:wire.len() - 1].split("\n")
+    if lines.len() < 5 or
+       lines[0] != "simple-parent-graph-launch-v1" or
+       not lines[1].starts_with("plan-digest=") or
+       not lines[2].starts_with("manifest=") or
+       not lines[3].starts_with("config-count="):
+        return _issued_graph_reject_v1("issued-graph-shape-invalid")
+    val plan_digest = lines[1][12:]
+    val manifest_fields = lines[2][9:].split("|")
+    val count_text = lines[3][13:]
+    if manifest_fields.len() != 2 or count_text == "" or
+       count_text.len() > 2:
+        return _issued_graph_reject_v1("issued-graph-fields-invalid")
+    for ch in count_text.chars():
+        if ch < "0" or ch > "9":
+            return _issued_graph_reject_v1("issued-graph-count-invalid")
+    val count = count_text.to_i64() ?? -1
+    if count < 1 or count > PARENT_ISSUED_PLAN_MAX_CONFIGS_V1 or
+       count.to_text() != count_text or lines.len() != count + 4:
+        return _issued_graph_reject_v1("issued-graph-count-invalid")
+    var paths: [text] = []
+    var i: i64 = 4
+    while i < lines.len():
+        if not lines[i].starts_with("config="):
+            return _issued_graph_reject_v1("issued-graph-config-invalid")
+        paths.push(lines[i][7:])
+        i = i + 1
+    val canonical = encode_parent_issued_graph_wire_v1(plan_digest,
+        manifest_fields[1], manifest_fields[0], paths)
+    if canonical == "" or canonical != wire:
+        return _issued_graph_reject_v1("issued-graph-noncanonical")
+    ParentIssuedGraphWireV1(true, "", plan_digest,
+        manifest_fields[1], manifest_fields[0], paths)
+
+export PARENT_ISSUED_GRAPH_MAX_BYTES_V1, ParentIssuedGraphWireV1
+export encode_parent_issued_graph_wire_v1, parse_parent_issued_graph_wire_v1

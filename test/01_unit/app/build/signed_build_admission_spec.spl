@@ -1,0 +1,194 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use app.build.signed_build_admission.{
+    SIGNED_BUILD_RECEIPT_SCHEMA_V1, SignedBuildReceiptV1,
+    SignedBuildExpectationV1, SignedBuildTrustObservationV1,
+    validate_signed_build_admission_v1, signed_build_receipt_digest_v1,
+    SIGNED_BUILD_RECEIPT_SCHEMA_V2, SignedBuildReceiptV2, SignedBuildExpectationV2,
+    validate_signed_build_admission_v2, signed_build_receipt_digest_v2
+}
+
+val BASE = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val HEAD = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+val TREE = "cccccccccccccccccccccccccccccccccccccccc"
+val TOOLCHAIN = sha256_text("linux-compiler")
+val ACTION = sha256_text("exact-build-action")
+val INPUTS = sha256_text("complete-input-manifest")
+val SUBMODULES = sha256_text("selected-gitlinks")
+val POLICY = sha256_text("protected-policy")
+val CHECKER = sha256_text("protected-checker")
+val GATES = sha256_text("complete-mandatory-gate-receipt")
+val ARTIFACT = sha256_text("actual-binary-bytes")
+
+fn _receipt() -> SignedBuildReceiptV1:
+    SignedBuildReceiptV1(
+        schema: SIGNED_BUILD_RECEIPT_SCHEMA_V1,
+        base_revision: BASE, head_revision: HEAD, candidate_tree: TREE,
+        target_id: "compiler-stage2", execution_platform: "linux-x86_64",
+        output_target: "x86_64-linux", toolchain_digest: TOOLCHAIN,
+        action_digest: ACTION, input_manifest_digest: INPUTS,
+        submodule_closure_digest: SUBMODULES,
+        protected_policy_digest: POLICY, checker_digest: CHECKER,
+        mandatory_gate_receipt_digest: GATES,
+        artifact_digest: ARTIFACT, artifact_length: 4096,
+        artifact_locator: "artifact:compiler-stage2/123",
+        signer_id: "approved-builder", signer_scope: "build-binaries/linux",
+        issued_at_utc: "2026-09-25T10:00:00Z",
+        expires_at_utc: "2026-09-25T12:00:00Z"
+    )
+
+fn _expected() -> SignedBuildExpectationV1:
+    SignedBuildExpectationV1(
+        base_revision: BASE, head_revision: HEAD, candidate_tree: TREE,
+        target_id: "compiler-stage2", execution_platform: "linux-x86_64",
+        output_target: "x86_64-linux", toolchain_digest: TOOLCHAIN,
+        action_digest: ACTION, input_manifest_digest: INPUTS,
+        submodule_closure_digest: SUBMODULES,
+        protected_policy_digest: POLICY, checker_digest: CHECKER,
+        mandatory_gate_receipt_digest: GATES,
+        allowed_signer_id: "approved-builder",
+        allowed_signer_scope: "build-binaries/linux",
+        now_utc: "2026-09-25T11:00:00Z",
+        max_expires_at_utc: "2026-09-26T11:00:00Z"
+    )
+
+fn _trust() -> SignedBuildTrustObservationV1:
+    SignedBuildTrustObservationV1(
+        signature_valid: true, signer_authorized: true, signer_revoked: false,
+        verified_payload_digest: signed_build_receipt_digest_v1(_receipt()),
+        verified_signer_id: "approved-builder",
+        verified_signer_scope: "build-binaries/linux",
+        mandatory_gate_receipt_valid: true, verified_gate_receipt_digest: GATES,
+        artifact_retrieved: true, artifact_digest: ARTIFACT,
+        artifact_length: 4096
+    )
+
+fn _receipt_v2() -> SignedBuildReceiptV2:
+    SignedBuildReceiptV2(SIGNED_BUILD_RECEIPT_SCHEMA_V2, "simple-lang/simple", 42, _receipt())
+
+describe "repository and PR bound signed build admission V2":
+    it "admits V2 only with the V2 signed digest":
+        val receipt = _receipt_v2()
+        val expected = SignedBuildExpectationV2("simple-lang/simple", 42, _expected())
+        var trust = _trust()
+        expect(validate_signed_build_admission_v2(receipt, expected, trust).decision).to_equal("FULL_BUILD")
+        trust.verified_payload_digest = signed_build_receipt_digest_v2(receipt)
+        expect(validate_signed_build_admission_v2(receipt, expected, trust).decision).to_equal("REUSE")
+
+    it "rejects replay across repositories and pull requests":
+        val receipt = _receipt_v2()
+        var trust = _trust()
+        trust.verified_payload_digest = signed_build_receipt_digest_v2(receipt)
+        var expected = SignedBuildExpectationV2("other/repository", 42, _expected())
+        expect(validate_signed_build_admission_v2(receipt, expected, trust).reason).to_equal("repository-pr-mismatch")
+        expected = SignedBuildExpectationV2("simple-lang/simple", 43, _expected())
+        expect(validate_signed_build_admission_v2(receipt, expected, trust).reason).to_equal("repository-pr-mismatch")
+
+    it "rejects altered repository metadata with an old signature":
+        var receipt = _receipt_v2()
+        var trust = _trust()
+        trust.verified_payload_digest = signed_build_receipt_digest_v2(receipt)
+        receipt.repository_full_name = "other/repository"
+        val expected = SignedBuildExpectationV2("other/repository", 42, _expected())
+        expect(validate_signed_build_admission_v2(receipt, expected, trust).reason).to_equal("signer-untrusted")
+
+    it "rejects noncanonical trusted repository names and invalid PR numbers":
+        val receipt = _receipt_v2()
+        var expected = SignedBuildExpectationV2("Simple-Lang/simple", 42, _expected())
+        expect(validate_signed_build_admission_v2(receipt, expected, _trust()).reason).to_equal("invalid-trusted-repository-pr")
+        expected = SignedBuildExpectationV2("simple-lang/simple", 0, _expected())
+        expect(validate_signed_build_admission_v2(receipt, expected, _trust()).reason).to_equal("invalid-trusted-repository-pr")
+
+describe "signed local build admission":
+    it "reuses only exact authenticated artifact-backed evidence":
+        val result = validate_signed_build_admission_v1(_receipt(), _expected(), _trust())
+        expect(result.decision).to_equal("REUSE")
+        expect(result.reason).to_equal("exact-build-evidence")
+
+    it "falls back when base moves or the candidate tree changes":
+        var expected = _expected()
+        expected.base_revision = HEAD
+        expect(validate_signed_build_admission_v1(
+            _receipt(), expected, _trust()).decision).to_equal("FULL_BUILD")
+        expected = _expected()
+        expected.candidate_tree = HEAD
+        expect(validate_signed_build_admission_v1(
+            _receipt(), expected, _trust()).reason).to_equal("candidate-mismatch")
+
+    it "falls back when toolchain, inputs or policy changes":
+        var expected = _expected()
+        expected.toolchain_digest = sha256_text("different-toolchain")
+        expect(validate_signed_build_admission_v1(
+            _receipt(), expected, _trust()).reason).to_equal("build-input-mismatch")
+        expected = _expected()
+        expected.submodule_closure_digest = sha256_text("different-pin")
+        expect(validate_signed_build_admission_v1(
+            _receipt(), expected, _trust()).reason).to_equal("policy-mismatch")
+
+    it "falls back on signer failure or a revoked key":
+        var trust = _trust()
+        trust.signature_valid = false
+        expect(validate_signed_build_admission_v1(
+            _receipt(), _expected(), trust).reason).to_equal("signer-untrusted")
+        trust = _trust()
+        trust.signer_revoked = true
+        expect(validate_signed_build_admission_v1(
+            _receipt(), _expected(), trust).decision).to_equal("FULL_BUILD")
+
+    it "requires a complete trusted mandatory gate receipt":
+        var trust = _trust()
+        trust.mandatory_gate_receipt_valid = false
+        expect(validate_signed_build_admission_v1(
+            _receipt(), _expected(), trust).reason).to_equal("mandatory-gates-incomplete")
+        trust = _trust()
+        trust.verified_gate_receipt_digest = sha256_text("another-gate-receipt")
+        expect(validate_signed_build_admission_v1(
+            _receipt(), _expected(), trust).reason).to_equal("mandatory-gates-incomplete")
+
+    it "binds cryptographic observations to these exact receipt fields":
+        var trust = _trust()
+        trust.verified_payload_digest = sha256_text("different-signed-payload")
+        expect(validate_signed_build_admission_v1(
+            _receipt(), _expected(), trust).reason).to_equal("signer-untrusted")
+        trust = _trust()
+        trust.verified_signer_id = "another-signer"
+        expect(validate_signed_build_admission_v1(
+            _receipt(), _expected(), trust).decision).to_equal("FULL_BUILD")
+
+    it "requires retrieved bytes matching the signed artifact":
+        var trust = _trust()
+        trust.artifact_digest = sha256_text("corrupt-download")
+        expect(validate_signed_build_admission_v1(
+            _receipt(), _expected(), trust).reason).to_equal("artifact-unverified")
+        trust = _trust()
+        trust.artifact_retrieved = false
+        expect(validate_signed_build_admission_v1(
+            _receipt(), _expected(), trust).decision).to_equal("FULL_BUILD")
+
+    it "expires receipts and rejects a different job scope":
+        var expected = _expected()
+        expected.now_utc = "2026-09-25T12:00:00Z"
+        expect(validate_signed_build_admission_v1(
+            _receipt(), expected, _trust()).reason).to_equal("receipt-expired")
+        expected = _expected()
+        expected.allowed_signer_scope = "build-binaries/mingw"
+        expect(validate_signed_build_admission_v1(
+            _receipt(), expected, _trust()).reason).to_equal("signer-untrusted")
+        expected = _expected()
+        expected.max_expires_at_utc = "2026-09-25T11:30:00Z"
+        expect(validate_signed_build_admission_v1(
+            _receipt(), expected, _trust()).reason).to_equal("receipt-expired")
+
+    it "rejects nonexistent calendar dates and future issue time":
+        var receipt = _receipt()
+        receipt.expires_at_utc = "2026-02-31T12:00:00Z"
+        var trust = _trust()
+        trust.verified_payload_digest = signed_build_receipt_digest_v1(receipt)
+        expect(validate_signed_build_admission_v1(
+            receipt, _expected(), trust).reason).to_equal("receipt-expired")
+        receipt = _receipt()
+        receipt.issued_at_utc = "2026-09-25T11:01:00Z"
+        trust = _trust()
+        trust.verified_payload_digest = signed_build_receipt_digest_v1(receipt)
+        expect(validate_signed_build_admission_v1(
+            receipt, _expected(), trust).reason).to_equal("receipt-expired")

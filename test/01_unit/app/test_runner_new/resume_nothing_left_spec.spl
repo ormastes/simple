@@ -1,0 +1,36 @@
+# @req REQ-SSPEC-APP
+# `--resume` with every selected file already in the checkpoint returns the
+# carried totals with no per-file results. With a zero-pass, nonzero-fail
+# checkpoint that shape matched the printer's structural "zero executed,
+# failures claimed" preflight-abort detector, so the run printed the carried
+# totals and then "ABORTED BEFORE EXECUTION" with rc=3 (internal error). A
+# carried result is a real verdict: report it (Results line, rc 1 on carried
+# failures, rc 0 on carried passes), never as an abort or "No tests selected".
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+use std.test_runner.checkpoint.{checkpoint_save, checkpoint_delete}
+
+val SELECTED_DIR = "test/fixtures/resume_nothing_left"
+val SELECTED = "test/fixtures/resume_nothing_left/carried_spec.spl"
+
+fn resume_with(passed: i64, failed: i64) -> (text, i64):
+    checkpoint_save([SELECTED], passed, failed, 0, "memory")
+    val bin = env_get("SIMPLE_TEST_BINARY")
+    val exe = if bin != "" and bin != nil: bin else: "bin/simple"
+    val (stdout, stderr, code) = process_run(exe, ["test", SELECTED_DIR, "--resume", "--no-db", "--no-cache"])
+    checkpoint_delete()
+    (stdout + stderr, code)
+
+describe "--resume with nothing left to run":
+    it "reports a zero-pass carried failure as a failure, not an abort":
+        val (out, code) = resume_with(0, 2)
+        expect(out).to_contain("nothing left to run")
+        expect(out).not.to_contain("ABORTED BEFORE EXECUTION")
+        expect(out).to_contain("Results: 2 total, 0 passed, 2 failed")
+        expect(code).to_equal(1)
+
+    it "reports a carried all-pass result as a pass":
+        val (out, code) = resume_with(3, 0)
+        expect(out).to_contain("Results: 3 total, 3 passed, 0 failed")
+        expect(out).not.to_contain("No tests selected")
+        expect(code).to_equal(0)

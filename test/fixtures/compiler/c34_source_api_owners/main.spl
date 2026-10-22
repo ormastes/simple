@@ -1,0 +1,28 @@
+# Run in a fresh process: this intentionally installs a conflicting K1 policy.
+# Both actual composition entry points must refuse before using the context
+# to compile or writing the requested output artifact.
+use compositions.kernel_llvm_cranelift.compiler.driver.bootstrap_k1_selected.{
+    selected_k1_backend_table_v1, bootstrap_compile_to_native_local,
+    bootstrap_compile_context_to_native_local}
+use compiler.backend.backend.static_backend_registry.{
+    install_k1_static_backend_table_v1, installed_k1_static_backend_policy_v1}
+use compiler.common.driver_core_types.{CompileResult, driver_core_compile_options_default}
+use compiler.driver.driver_types.{CompileContext}
+
+fn rejected(result: CompileResult) -> bool:
+    match result:
+        case CompileResult.CodegenError(message):
+            message == "PLUG-E-K1-POLICY: LLVM+Cranelift composition admission failed"
+        case _: false
+
+fn main() -> i64:
+    val table = selected_k1_backend_table_v1()
+    if table.len() != 3: return 10
+    if not install_k1_static_backend_table_v1("llvm", [table[1], table[2]]): return 11
+    val ctx = CompileContext.create(driver_core_compile_options_default())
+    if not rejected(bootstrap_compile_to_native_local(ctx, "llvm", "rejected-policy-must-not-exist")):
+        return 12
+    if not rejected(bootstrap_compile_context_to_native_local(ctx, "llvm", "rejected-policy-must-not-exist")):
+        return 13
+    if installed_k1_static_backend_policy_v1() != "llvm": return 14
+    0

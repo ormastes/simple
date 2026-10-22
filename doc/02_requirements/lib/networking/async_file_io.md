@@ -24,7 +24,7 @@ Tests async file I/O functionality including:
 
 ## Syntax
 
-```simple
+```simple:skip
 # Create async file handle
 val handle = async_file_create(path, flags, prefault)
 

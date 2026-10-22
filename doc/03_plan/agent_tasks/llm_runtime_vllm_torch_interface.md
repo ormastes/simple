@@ -29,7 +29,7 @@ Files:
 - `src/app/llm_runtime/probe.spl`
 - `src/app/llm_runtime/serve_plan.spl`
 - `test/01_unit/app/llm_runtime/vllm_readiness_spec.spl`
-- `test/unit/app/llm_runtime/vllm_readiness_spec.spl`
+- `test/01_unit/app/llm_runtime/vllm_readiness_spec.spl`
 - `test/03_system/app/llm_runtime/feature/vllm_torch_readiness_spec.spl`
 - `doc/06_spec/03_system/app/llm_runtime/feature/vllm_torch_readiness_spec.md`
 
@@ -70,7 +70,7 @@ Evidence:
 - `test/01_unit/app/llm_runtime/vllm_readiness_spec.spl` passed after adding
   path-like model redaction, explicit Torch-unavailable evidence, and injected
   Torch-ready coverage.
-- `test/unit/app/llm_runtime/vllm_readiness_spec.spl` passed with the same
+- `test/01_unit/app/llm_runtime/vllm_readiness_spec.spl` passed with the same
   mirrored coverage.
 - `test/03_system/app/llm_runtime/feature/vllm_torch_readiness_spec.spl`
   passed after covering dashboard readback, Torch unavailable evidence,
@@ -79,38 +79,38 @@ Evidence:
 - `test/01_unit/app/llm_runtime/vllm_live_models_probe_spec.spl` covers ready
   `/v1/models` responses, auth rejection, malformed bodies, wrong-model
   responses, invalid endpoints, and sensitive model redaction.
-- `test/unit/app/llm_runtime/vllm_live_models_probe_spec.spl` mirrors the live
+- `test/01_unit/app/llm_runtime/vllm_live_models_probe_spec.spl` mirrors the live
   response parsing coverage.
 - `test/01_unit/app/llm_runtime/vllm_live_request_plan_spec.spl` covers
   sanitized request planning for models and chat-completions endpoints.
-- `test/unit/app/llm_runtime/vllm_live_request_plan_spec.spl` mirrors the same
+- `test/01_unit/app/llm_runtime/vllm_live_request_plan_spec.spl` mirrors the same
   request-plan coverage.
 - `test/01_unit/app/llm_runtime/vllm_live_chat_probe_spec.spl` covers ready chat
   completion responses, auth rejection, malformed bodies, empty choices,
   missing assistant content, invalid endpoints, and generated-content redaction.
-- `test/unit/app/llm_runtime/vllm_live_chat_probe_spec.spl` mirrors the same
+- `test/01_unit/app/llm_runtime/vllm_live_chat_probe_spec.spl` mirrors the same
   chat response parsing coverage.
 - `test/01_unit/app/llm_runtime/vllm_live_transport_spec.spl` covers transport
   summary from fetched models/chat responses and no-fetch behavior for invalid
   or unsafe request plans.
-- `test/unit/app/llm_runtime/vllm_live_transport_spec.spl` mirrors the same
+- `test/01_unit/app/llm_runtime/vllm_live_transport_spec.spl` mirrors the same
   transport-wrapper coverage.
 - `test/01_unit/app/llm_runtime/vllm_serve_lifecycle_spec.spl` covers no-spawn
   planning failures, spawned-pid adaptation, spawn failures, invalid pid status,
   and invalid pid stop behavior.
-- `test/unit/app/llm_runtime/vllm_serve_lifecycle_spec.spl` mirrors the same
+- `test/01_unit/app/llm_runtime/vllm_serve_lifecycle_spec.spl` mirrors the same
   lifecycle coverage.
 - `test/01_unit/app/llm_runtime/vllm_serve_readiness_spec.spl` covers no-side
   effect preflight, invalid manifests, running-plus-ready observations,
   spawned-but-unpolled state, invalid endpoint plans, synthetic ready
   orchestration, wait-before-probe behavior, spawn failure, timeout cleanup, and
   auth-rejection cleanup policy.
-- `test/unit/app/llm_runtime/vllm_serve_readiness_spec.spl` mirrors the same
+- `test/01_unit/app/llm_runtime/vllm_serve_readiness_spec.spl` mirrors the same
   readiness-orchestration coverage.
 - `test/01_unit/app/llm_runtime/vllm_live_environment_spec.spl` covers explicit
   `skipped` and `ready` live environment evidence for local vLLM/GPU
   availability combinations plus GPU label redaction.
-- `test/unit/app/llm_runtime/vllm_live_environment_spec.spl` mirrors the same
+- `test/01_unit/app/llm_runtime/vllm_live_environment_spec.spl` mirrors the same
   live environment evidence coverage.
 - Resource-aware serve-readiness specs now cover skipped preflight and
   orchestrator short-circuit behavior before spawn/fetch when local vLLM/GPU
@@ -204,9 +204,9 @@ Evidence:
 - `release/x86_64-unknown-linux-gnu/simple check
   src/lib/common/torch/dyn_sffi_ops.spl
   test/01_unit/lib/common/torch/dyn_sffi_ops_readiness_spec.spl
-  test/unit/lib/common/torch/dyn_sffi_ops_readiness_spec.spl` passed.
+  test/01_unit/lib/common/torch/dyn_sffi_ops_readiness_spec.spl` passed.
 - `test/01_unit/lib/common/torch/dyn_sffi_ops_readiness_spec.spl` passed.
-- `test/unit/lib/common/torch/dyn_sffi_ops_readiness_spec.spl` passed.
+- `test/01_unit/lib/common/torch/dyn_sffi_ops_readiness_spec.spl` passed.
 - Generated/manual spec:
   `doc/06_spec/01_unit/lib/common/torch/dyn_sffi_ops_readiness_spec.md`.
 - The same spec now covers dynamic linalg solve delegation to the existing
@@ -220,10 +220,10 @@ Evidence:
   src/lib/io_runtime.spl
   src/lib/gc_async_mut/svllm/model_executor/model_loader/loader.spl
   test/01_unit/lib/gc_async_mut/svllm/model_loader_manifest_spec.spl
-  test/unit/lib/gc_async_mut/svllm/model_loader_manifest_spec.spl` passed.
+  test/01_unit/lib/gc_async_mut/svllm/model_loader_manifest_spec.spl` passed.
 - `test/01_unit/lib/gc_async_mut/svllm/model_loader_manifest_spec.spl` passed
   with 7/7 scenarios.
-- `test/unit/lib/gc_async_mut/svllm/model_loader_manifest_spec.spl` passed
+- `test/01_unit/lib/gc_async_mut/svllm/model_loader_manifest_spec.spl` passed
   with 7/7 scenarios.
 - `direct-env-runtime-guard --working`, `direct-env-runtime-guard --staged`,
   `check-llm-tooling-public-absence-rendering.shs`, and the `doc/06_spec`
@@ -240,10 +240,10 @@ Evidence:
 - `test/01_unit/lib/gc_async_mut/svllm/model_loader_stream_plan_spec.spl`
   covers single-segment plans, cross-chunk ordered segments, pin/device-staging
   intent flags, and `plan_only_not_scheduled`.
-- `test/unit/lib/gc_async_mut/svllm/model_loader_stream_plan_spec.spl` mirrors
+- `test/01_unit/lib/gc_async_mut/svllm/model_loader_stream_plan_spec.spl` mirrors
   the same stream-plan coverage.
 - `test/01_unit/lib/gc_async_mut/svllm/nvfs_client/std_fs_spec.spl` and
-  `test/unit/lib/gc_async_mut/svllm/nvfs_client/std_fs_spec.spl` cover
+  `test/01_unit/lib/gc_async_mut/svllm/nvfs_client/std_fs_spec.spl` cover
   unsupported trait `read_range`/buffer registration, local `read_range_bytes`
   payload correctness, and out-of-bounds rejection.
 - `src/lib/gc_async_mut/svllm/model_executor/model_loader/streaming_readiness.spl`

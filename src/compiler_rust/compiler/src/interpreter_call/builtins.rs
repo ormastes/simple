@@ -182,7 +182,7 @@ pub(super) fn eval_builtin(
                 Value::Array(a) => Ok(Some(Value::Int(a.len() as i64))),
                 Value::ByteArray(a) | Value::FrozenByteArray(a) => Ok(Some(Value::Int(a.len() as i64))),
                 Value::Tuple(t) => Ok(Some(Value::Int(t.len() as i64))),
-                Value::Dict(d) => Ok(Some(Value::Int(d.len() as i64))),
+                Value::Dict(d) => Ok(Some(Value::Int(crate::interpreter::module_dict_len(&d) as i64))),
                 Value::Str(s) => Ok(Some(Value::Int(s.len() as i64))),
                 _ => {
                     let ctx = ErrorContext::new()

@@ -1,0 +1,87 @@
+# Bounded semantic preflight, not a codec or specialization implementation.
+# Field/variant walk is mechanically adapted from all 97 hc_enc_* owners in
+# compiler/20.hir/generated/hir_codec.spl; no decoder or encoded output is used.
+# Frozen input SHA256: e6ddcf4358668819c508742ceb120372cabd3cb03b961a6584a80d0ca6780e05
+# The 97 mono_pf_* names preserve the encoder suffix exactly. Every visited
+# field, enum arm and optional branch corresponds to that source. Wire writes
+# become resource reservations, array lengths reserve before loops, dictionary
+# snapshots reserve a concrete typed count first, sorting is unnecessary here.
+# Reconcile this mirror when the exported codec/schema versions change; the
+# public entries refuse differing actual versions/rules before visiting HIR.
+# Unknown enum variants fail closed. No canonical-codec availability is claimed.
+#
+# Allocation-free dictionary cardinality uses the existing typed provider:
+# _MirLoweringExpr/method_calls_literals.spl routes HirTypeKind.Dict .len()
+# to rt_dict_len; runtime_native.c reads the same registered dictionary length
+# used by rt_dict_keys. The pure-Simple core_array provider uses dict_len_value
+# for the same pair. These concrete receiver types prevent erased rt_len.
+# Snapshot equality detects inconsistency; it is not a substitute for the
+# provider's count/keys contract, and native qualification remains UNRUN.
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_types.{HirModule, HirType}
+use compiler.hir.hir_operators.{HirBinOp, HirUnaryOp, HirAssignOp}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.dynamic_identity.closure.{Closure}
+use compiler.blocks.value.{BlockValue}
+use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind}
+use compiler.common.attributes.{FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata, VhdlClockedMetadata, VhdlGenericMetadata, VhdlReturnFieldMetadata, VhdlResetPolarity, VhdlResetSynchrony, OptimizationReq, OptimizationReqLevel, OptimizationBackend}
+use compiler.frontend.parser_types_expr.{AsmTargetSpec, AsmConstraintKind, AsmLocation, Type, TypeKind, Expr}
+
+use compiler.mono.mono_invocation_policy_v1.{MonoInvocationBudgetV1}
+use compiler.hir.hir_codec.{HIR_CODEC_VERSION, HIR_CANONICAL_CODEC_VERSION,
+    HIR_CANONICAL_CODEC_RULES_V1}
+use compiler.frontend.core.flat_pool_codec.{FLAT_POOL_CODEC_VERSION}
+
+
+export use compiler.mono.mono_preflight_walk_v1.{MonoPreflightFactsV1}
+use compiler.mono.mono_preflight_walk_v1.{MonoPreflightWalkV1}
+use compiler.mono.mono_preflight_visit_01_v1.*
+use compiler.mono.mono_preflight_visit_02_v1.*
+use compiler.mono.mono_preflight_visit_03_v1.*
+use compiler.mono.mono_preflight_visit_04_v1.*
+use compiler.mono.mono_preflight_visit_05_v1.*
+use compiler.mono.mono_preflight_visit_06_v1.*
+use compiler.mono.mono_preflight_visit_07_v1.*
+use compiler.mono.mono_preflight_visit_08_v1.*
+use compiler.mono.mono_preflight_visit_09_v1.*
+
+pub fn mono_preflight_schema_matches_v1(codec: text, canonical: text,
+        rules: text, flatpool: text) -> bool:
+    (codec == "spl-hircodec-v8" and canonical == "spl-hircodec-canonical-v4" and
+        flatpool == "spl-flatpool-v7" and rules ==
+        ("nil-before-present;i64-signed;symbol-id-signed;text-unsigned-utf8;" +
+        "stable-bottom-up-merge;duplicate-reject;strict-flatpool-text-v1"))
+
+fn mono_preflight_begin_v1(budget: MonoInvocationBudgetV1) -> bool:
+    if budget.failure != "": return false
+    if not mono_preflight_schema_matches_v1(HIR_CODEC_VERSION,
+            HIR_CANONICAL_CODEC_VERSION, HIR_CANONICAL_CODEC_RULES_V1,
+            FLAT_POOL_CODEC_VERSION):
+        budget.fail_v1("E-MONO-SCHEMA: preflight codec/schema version is stale")
+        return false
+    true
+
+pub fn mono_preflight_module_v1(module: HirModule,
+        budget: MonoInvocationBudgetV1) -> Result<MonoPreflightFactsV1, text>:
+    if not mono_preflight_begin_v1(budget): return Err(budget.failure)
+    var walk = MonoPreflightWalkV1(budget: budget, start_depth: budget.hir_depth)
+    walk.mono_pf_hir_module_v1(module)
+    walk.finish_v1()
+
+pub fn mono_preflight_function_v1(function: HirFunction,
+        budget: MonoInvocationBudgetV1) -> Result<MonoPreflightFactsV1, text>:
+    if not mono_preflight_begin_v1(budget): return Err(budget.failure)
+    var walk = MonoPreflightWalkV1(budget: budget, start_depth: budget.hir_depth)
+    walk.mono_pf_hir_function_v1(function)
+    walk.finish_v1()
+
+pub fn mono_preflight_type_v1(type_: HirType,
+        budget: MonoInvocationBudgetV1) -> Result<MonoPreflightFactsV1, text>:
+    if not mono_preflight_begin_v1(budget): return Err(budget.failure)
+    var walk = MonoPreflightWalkV1(budget: budget, start_depth: budget.hir_depth)
+    walk.mono_pf_hir_type_v1(type_)
+    walk.finish_v1()
+

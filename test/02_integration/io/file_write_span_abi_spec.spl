@@ -1,0 +1,73 @@
+# @req REQ-FILE-WRITE-SPAN-ABI
+use std.spec.{describe, it, step}
+use std.nogc_sync_mut.sffi.fs.{io_file_open, io_file_close, io_file_seek, io_file_delete, io_file_write, io_file_write_all}
+use std.common.text_bytes.{text_byte_buffer}
+use std.io_runtime.{getpid}
+
+@unsafe(reason: "test actual nullable descriptor read for exact byte oracle", capabilities: [ffi])
+extern fn rt_io_file_read(fd: i64, size: i64) -> [u8]?
+
+fn write_abi_roundtrip(packed: bool):
+    val path = "/tmp/simple-file-write-abi-{getpid()}-{packed}"
+    var bytes: [u8] = if packed: text_byte_buffer(4).unwrap() else: []
+    bytes.push(65)
+    bytes.push(0)
+    bytes.push(128)
+    bytes.push(255)
+    val fd = io_file_open(path, 1)
+    assert(fd >= 0)
+    assert(io_file_write_all(fd, []))
+    assert(io_file_seek(fd, 0, 1) == 0)
+    assert(io_file_write(fd, bytes) == 4)
+    assert(io_file_write_all(fd, bytes))
+    assert(io_file_seek(fd, 0, 1) == 8)
+    assert(io_file_close(fd))
+    val input = io_file_open(path, 0)
+    assert(input >= 0)
+    val received: [u8]? = unsafe(capabilities: [ffi]):
+        rt_io_file_read(input, 9)
+    assert(io_file_close(input))
+    assert(io_file_delete(path))
+    assert(received.is_some())
+    val actual: [u8] = received.unwrap()
+    assert(actual.len() == 8)
+    var index = 0
+    while index < 8:
+        assert(actual[index] == bytes[index % 4])
+        index = index + 1
+    # Caller still owns unchanged data after each synchronous write.
+    assert(bytes.len() == 4 and bytes[1] == 0 and bytes[3] == 255)
+
+fn write_abi_invalid_fd():
+    val data: [u8] = [0, 128, 255]
+    assert(io_file_write(-1, data) == -1)
+    assert(not io_file_write_all(-1, data))
+    assert(io_file_write(2147483648, data) == -1)
+    assert(not io_file_write_all(2147483648, []))
+
+fn write_abi_readonly_error():
+    val path = "/tmp/simple-file-write-abi-error-{getpid()}"
+    val output = io_file_open(path, 1)
+    assert(output >= 0)
+    assert(io_file_close(output))
+    val input = io_file_open(path, 0)
+    assert(input >= 0)
+    assert(io_file_write(input, [65]) == -1)
+    assert(not io_file_write_all(input, [65]))
+    # Facades borrow the descriptor even on error; close still belongs here.
+    assert(io_file_close(input))
+    assert(io_file_delete(path))
+
+describe "file byte-span ABI":
+    it "preserves NUL and high bytes from generic storage":
+        step("Write through both safe facades and read exact native bytes")
+        write_abi_roundtrip(false)
+    it "preserves bytes from packed storage":
+        step("Borrow packed storage without changing its ownership")
+        write_abi_roundtrip(true)
+    it "rejects descriptor values outside native int range":
+        step("Keep failure return contracts for empty and nonempty input")
+        write_abi_invalid_fd()
+    it "retains descriptor ownership after actual write errors":
+        step("Write to a real read-only descriptor then close it")
+        write_abi_readonly_error()

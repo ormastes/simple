@@ -1,3 +1,9 @@
+> Merge candidate status (2026-10-11): **UNRUN**. This resolution combines local
+> `ddff8671e8348a89ab2eed285311a3ffc1809358` and remote
+> `3aa33b9f8de7897fcf4e83c42bc3c44d28782cef`. All counts and PASS statements below
+> retain their historical component/source-stage scope. They are not execution,
+> semantic verification, or admission evidence for this combined source.
+
 # Traceability, evidence, gates and Slop acceptance test plan
 
 Authority: final report section 22; suffixes below refer to REQ-TRC-*.

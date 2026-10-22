@@ -6,38 +6,21 @@
 # - GZIP compress/decompress (all levels)
 # - Data validation and metadata extraction
 # - Compression statistics and analysis
-# - Pattern detection and efficiency metrics
-# - Level comparison and benchmarking
-# - Utility functions for compression tasks
+# - Efficiency metrics
 
 use std.nogc_sync_mut.compression.gzip.types.{
-    GZIP_MAGIC1, GZIP_MAGIC2, CM_DEFLATE, OS_UNIX,
-    LEVEL_NONE, LEVEL_FAST, LEVEL_DEFAULT, LEVEL_BEST,
-    BLOCK_STORED, BLOCK_FIXED, BLOCK_DYNAMIC,
-    FLAG_TEXT, FLAG_HCRC, FLAG_EXTRA, FLAG_NAME, FLAG_COMMENT,
-    WINDOW_SIZE, MIN_MATCH, MAX_MATCH, MAX_DISTANCE,
-    MAX_BITS, MAX_LITERALS, MAX_DISTANCES
+    GZIP_MAGIC1, OS_UNIX, LEVEL_NONE, LEVEL_FAST, LEVEL_DEFAULT, LEVEL_BEST
 }
 use std.nogc_sync_mut.compression.gzip.crc.{
     crc32_calculate, crc32_verify, crc32_update, crc32_finalize, crc32_chunked
 }
 use std.nogc_sync_mut.compression.gzip.header.{
-    gzip_header_create, gzip_header_parse, gzip_header_size,
-    gzip_footer_create, gzip_footer_parse, gzip_footer_validate,
-    char_to_byte
+    gzip_header_create, gzip_header_parse, gzip_header_parse_at, gzip_header_size,
+    gzip_footer_create, gzip_footer_parse, gzip_footer_validate
 }
-use std.nogc_sync_mut.compression.gzip.lz77.{lz77_compress, lz77_decompress, lz77_stats, lz77_find_match}
-use std.nogc_sync_mut.compression.gzip.huffman.{
-    huffman_leaf, huffman_internal, huffman_node_freq, huffman_node_is_leaf,
-    huffman_freq_table, huffman_build_tree, huffman_find_min_node, huffman_remove_node,
-    huffman_generate_codes, huffman_traverse_tree, huffman_lookup,
-    huffman_encode, huffman_decode, deflate_fixed_huffman, deflate_fixed_distances
-}
-use std.nogc_sync_mut.compression.gzip.deflate.{
-    deflate_block_stored, deflate_block_fixed, deflate_length_code, deflate_distance_code
-}
-use std.nogc_sync_mut.compression.gzip.inflate.{inflate}
-use std.nogc_sync_mut.compression.gzip.stream.{gzip_stream_compress}
+use std.nogc_sync_mut.compression.gzip.lz77.{lz77_compress}
+use std.nogc_sync_mut.compression.gzip.deflate.{deflate_block_stored, deflate_block_fixed}
+use std.nogc_sync_mut.compression.gzip.inflate.{inflate_member}
 
 # =============================================================================
 # GZIP COMPRESSION
@@ -114,46 +97,35 @@ fn gzip_compress(data: [u8], level: i64) -> [u8]:
 
     return result
 
-# Decompress GZIP data
+# Decompress a GZIP file: a series of one or more members (RFC 1952 2.2), each
+# with its own header, DEFLATE stream and CRC-32 + ISIZE trailer. The output is the
+# concatenation of the members' data. Any malformed member, and any bytes after the
+# last member that do not form another member, fail the whole file (nil).
 fn gzip_decompress(data: [u8]) -> [u8]?:
     if data.len() < 18:
         return nil
-
-    # Parse header
-    val header_info = gzip_header_parse(data)
-    if header_info == nil:
-        return nil
-
-    val header_size = gzip_header_size(header_info)
-
-    # Parse footer (last 8 bytes)
-    val footer_offset = data.len() - 8
-    val footer_info = gzip_footer_parse(data, footer_offset)
-    if footer_info == nil:
-        return nil
-
-    # Extract compressed data
-    val compressed_size = footer_offset - header_size
-    var compressed: [u8] = []
-    var i = 0
-    loop:
-        if i >= compressed_size:
-            break
-        compressed.push(data[header_size + i])
-        i = i + 1
-
-    # Decompress DEFLATE blocks via inflate()
-    val maybe_decompressed = inflate(compressed)
-    if maybe_decompressed == nil:
-        return nil
-    val decompressed = maybe_decompressed ?? []
-
-    # Validate footer
-    val valid = gzip_footer_validate(footer_info, decompressed, decompressed.len())
-    if not valid:
-        return nil
-
-    return decompressed
+    var result: [u8] = []
+    var pos = 0
+    while pos < data.len():
+        # Extract declared payloads explicitly on older native producers.
+        # @workaround bug=gzip_optional_collection_payload_provenance_2026_10_21
+        val header_info: [i64] = match gzip_header_parse_at(data, pos):
+            case Some(info): info
+            case nil: return nil
+        val body: [Any] = match inflate_member(data, gzip_header_size(header_info)):
+            case Some(info): info
+            case nil: return nil
+        val member: [u8] = body[0]
+        # A missing (truncated) trailer follows the same nil failure path.
+        val footer_info: [i64] = match gzip_footer_parse(data, body[1]):
+            case Some(info): info
+            case nil: return nil
+        if not gzip_footer_validate(footer_info, member, member.len()):
+            return nil
+        for b in member:
+            result.push(b)
+        pos = body[1] + 8
+    return result
 
 # Compress with default level
 fn gzip_compress_default(data):
@@ -175,84 +147,27 @@ fn gzip_compress_none(data):
 # VALIDATION AND METADATA
 # =============================================================================
 
-# Validate GZIP data integrity.
-# Checks structural framing (magic bytes, header, footer) AND performs a full
-# inflate of the payload, comparing the decompressed bytes' CRC32 and length
-# (mod 2^32) against the footer trailer. A stream with valid framing but a
-# corrupted deflate body or corrupted trailer fails validation (fail closed).
+# Validate GZIP data integrity: every member must inflate and match its CRC-32 and
+# ISIZE trailer (fail closed), exactly as gzip_decompress requires.
 fn gzip_validate(data):
     if data == nil:
         return false
+    return gzip_decompress(data) != nil
 
-    # Check minimum size
-    if data.len() < 18:
-        return false
-
-    # Check magic bytes
-    if data[0] != GZIP_MAGIC1:
-        return false
-    if data[1] != GZIP_MAGIC2:
-        return false
-
-    # Parse header
-    val header_info = gzip_header_parse(data)
-    if header_info == nil:
-        return false
-
-    val header_size = gzip_header_size(header_info)
-
-    # Parse footer
-    val footer_offset = data.len() - 8
-    val footer_info = gzip_footer_parse(data, footer_offset)
-    if footer_info == nil:
-        return false
-
-    if footer_offset < header_size:
-        return false
-
-    # Extract compressed payload and inflate it
-    val compressed_size = footer_offset - header_size
-    var compressed: [u8] = []
-    var i = 0
-    loop:
-        if i >= compressed_size:
-            break
-        compressed.push(data[header_size + i])
-        i = i + 1
-
-    val maybe_decompressed = inflate(compressed)
-    if maybe_decompressed == nil:
-        return false
-    val decompressed = maybe_decompressed ?? []
-
-    # Verify CRC32 and ISIZE (mod 2^32) of the decompressed payload against
-    # the footer trailer. Fail closed on any mismatch.
-    return gzip_footer_validate(footer_info, decompressed, decompressed.len())
-
-# Get GZIP metadata
+# Get metadata of the FIRST member: [timestamp, os, extra_flags, crc32, isize] (nil if malformed)
 fn gzip_get_metadata(data):
     if data == nil:
         return nil
-
-    val header_info = gzip_header_parse(data)
-    if header_info == nil:
-        return nil
-
-    val flags = header_info[0]
-    val timestamp = header_info[1]
-    val extra_flags = header_info[2]
-    val os = header_info[3]
-
-    val footer_offset = data.len() - 8
-    val footer_info = gzip_footer_parse(data, footer_offset)
-
-    if footer_info == nil:
-        return nil
-
-    val crc = footer_info[0]
-    val size = footer_info[1]
-
-    return [timestamp, os, extra_flags, crc, size]
+    val header_info: [i64] = match gzip_header_parse(data):
+        case Some(info): info
+        case nil: return nil
+    val body: [Any] = match inflate_member(data, gzip_header_size(header_info)):
+        case Some(info): info
+        case nil: return nil
+    val footer_info: [i64] = match gzip_footer_parse(data, body[1]):
+        case Some(info): info
+        case nil: return nil
+    return [header_info[1], header_info[3], header_info[2], footer_info[0], footer_info[1]]
 
 # Check if data is already GZIP compressed
 fn gzip_is_compressed(data):
@@ -264,55 +179,23 @@ fn gzip_is_compressed(data):
 
     return data[0] == GZIP_MAGIC1
 
-# Extract compressed payload only
+# Extract the DEFLATE payload of the FIRST member (between its header and trailer)
 fn gzip_extract_payload(data):
     if data == nil:
         return nil
-
-    val header_info = gzip_header_parse(data)
-    if header_info == nil:
-        return nil
-
+    val header_info: [i64] = match gzip_header_parse(data):
+        case Some(info): info
+        case nil: return nil
     val header_size = gzip_header_size(header_info)
-    val footer_offset = data.len() - 8
-
-    var payload = []
+    val body: [Any] = match inflate_member(data, header_size):
+        case Some(info): info
+        case nil: return nil
+    var payload: [u8] = []
     var i = header_size
-    loop:
-        if i >= footer_offset:
-            break
+    while i < body[1]:
         payload.push(data[i])
         i = i + 1
-
     return payload
-
-# Create minimal GZIP wrapper
-fn gzip_wrap_deflate(deflate_data):
-    if deflate_data == nil:
-        return nil
-
-    val crc = 0  # Simplified
-    val size = 0
-
-    val header = gzip_header_create(nil, 0, 0, OS_UNIX)
-    val footer = gzip_footer_create(crc, size)
-
-    var result = header
-    var i = 0
-    loop:
-        if i >= deflate_data.len():
-            break
-        result.push(deflate_data[i])
-        i = i + 1
-
-    i = 0
-    loop:
-        if i >= footer.len():
-            break
-        result.push(footer[i])
-        i = i + 1
-
-    return result
 
 # =============================================================================
 # STATISTICS AND METRICS
@@ -398,9 +281,7 @@ fn gzip_analyze_data(data):
             break
 
         val byte = data[i]
-        if byte >= 0:
-            if byte < 256:
-                freqs[byte] = freqs[byte] + 1
+        freqs[byte] = freqs[byte] + 1
 
         i = i + 1
 
@@ -432,84 +313,17 @@ fn gzip_analyze_data(data):
 
     return [size, unique, entropy, freqs]
 
-# Approximate log2
+# Approximate log2 for 0 < x <= 1 (a byte probability): minus the number of doublings
+# needed to reach [1, 2), i.e. floor(log2(x)).
 fn log2_approx(x) -> f64:
-    if x <= 0.0:
-        return 0.0
-
-    # Simple approximation
     var result = 0.0
     var value = x
-
     loop:
         if value >= 1.0:
             break
         value = value * 2.0
         result = result - 1.0
-
-    loop:
-        if value < 2.0:
-            break
-        value = value / 2.0
-        result = result + 1.0
-
     return result
-
-# Find repeated patterns in data
-fn gzip_find_patterns(data, pattern_len):
-    if data == nil:
-        return []
-
-    val size = data.len()
-    if size < pattern_len:
-        return []
-
-    var patterns = []
-    var i = 0
-
-    loop:
-        if i + pattern_len > size:
-            break
-
-        # Extract pattern
-        var pattern = []
-        var j = 0
-        loop:
-            if j >= pattern_len:
-                break
-            pattern.push(data[i + j])
-            j = j + 1
-
-        # Count occurrences
-        var count = 0
-        var k = 0
-        loop:
-            if k + pattern_len > size:
-                break
-
-            var matches = true
-            var m = 0
-            loop:
-                if m >= pattern_len:
-                    break
-
-                if data[k + m] != pattern[m]:
-                    matches = false
-                    break
-
-                m = m + 1
-
-            if matches:
-                count = count + 1
-
-            k = k + 1
-
-        if count > 1:
-            patterns.push([pattern, count])
-
-        i = i + 1
-
-    return patterns
 
 # Calculate optimal compression level for data
 fn gzip_suggest_level(data):
@@ -549,107 +363,3 @@ fn gzip_estimate_size(data, level):
 
     val estimated = original_size.to_float() * ratio
     return estimated.to_int()
-
-# Compare compression levels
-fn gzip_compare_levels(data):
-    if data == nil:
-        return []
-
-    var results = []
-
-    var level = 0
-    loop:
-        if level > 9:
-            break
-
-        val compressed = gzip_compress(data, level)
-        if compressed != nil:
-            val ratio = gzip_compression_ratio(data.len(), compressed.len())
-            results.push([level, compressed.len(), ratio])
-
-        level = level + 1
-
-    return results
-
-# Benchmark compression speed (simplified)
-fn gzip_benchmark(data, iterations):
-    if data == nil:
-        return 0
-
-    var i = 0
-    var total_size = 0
-
-    loop:
-        if i >= iterations:
-            break
-
-        val compressed = gzip_compress_default(data)
-        if compressed != nil:
-            total_size = total_size + compressed.len()
-
-        i = i + 1
-
-    return total_size / iterations
-
-# =============================================================================
-# PUBLIC API EXPORTS
-# =============================================================================
-
-# Main compression functions
-fn compress_gzip(data):
-    return gzip_compress_default(data)
-
-fn decompress_gzip(data):
-    return gzip_decompress(data)
-
-fn compress_gzip_level(data, level):
-    return gzip_compress(data, level)
-
-# Checksum functions
-fn calculate_crc32(data):
-    return crc32_calculate(data)
-
-fn verify_crc32(data, expected):
-    return crc32_verify(data, expected)
-
-# Validation and metadata
-fn validate_gzip(data):
-    return gzip_validate(data)
-
-fn get_gzip_metadata(data):
-    return gzip_get_metadata(data)
-
-# Stream operations
-fn stream_compress_gzip(chunks, level):
-    return gzip_stream_compress(chunks, level)
-
-# Statistics
-fn get_compression_ratio(orig_size, comp_size):
-    return gzip_compression_ratio(orig_size, comp_size)
-
-fn get_space_savings(orig_size, comp_size):
-    return gzip_space_savings(orig_size, comp_size)
-
-# Analysis
-fn analyze_data(data):
-    return gzip_analyze_data(data)
-
-fn find_patterns(data, pattern_len):
-    return gzip_find_patterns(data, pattern_len)
-
-fn compression_efficiency(original, compressed):
-    return gzip_efficiency(original, compressed)
-
-# Block operations
-fn split_into_blocks(data):
-    return gzip_split_blocks(data)
-
-fn merge_blocks(blocks):
-    return gzip_merge_blocks(blocks)
-
-# Utilities
-fn is_gzip_compressed(data):
-    return gzip_is_compressed(data)
-
-fn extract_gzip_payload(data):
-    return gzip_extract_payload(data)

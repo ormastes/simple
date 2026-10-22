@@ -1,8 +1,14 @@
 # Rust to Simple Error Code Mapping Analysis
 
+**Evidence qualification (2026-10-21, SF6):** Reviewed against source commit `380200890ff030b34c68ff38f362b482e1276769`. Original dates and historical example/pass labels are retained as provenance, not a current execution result. This documentation correction ran no compiler, Lean, benchmark, or runtime tests; executable qualification is **UNRUN**.
+
+Source anchors: `src/compiler/35.semantics/unsafe.spl` defines `UnsafeContext`, unsafe-operation classification, and context checks (lines 24–46, 82–117, 165–225); `src/compiler/00.common/assurance/unsafe_capabilities.spl` defines the scoped vocabulary (lines 30–51, 60–106). Their presence establishes source machinery, not complete enforcement in every compiler route. In particular `is_sffi_function` returns false for a bare `Var` (unsafe.spl:206–217); no blanket FFI-checker coverage is claimed.
+
+Selected authority: `doc/02_requirements/language/mission_critical_profile.md`, REQ-MC-004 (lines 37–43), explicitly supersedes blanket “unsafe = all capabilities” for that profile: capability scope, reason, and reviewer manifest are required. This is a requirement with its stated phase, not evidence that every path enforces it. Aggregate counts below remain historical estimates, not a recomputed current diagnostic inventory.
+
 **Date**: 2026-01-19
 **Purpose**: Map Rust's ~500 error codes to Simple, identifying applicable errors and missing features
-**Status**: Complete
+**Status**: Historical mapping analysis; unsafe exclusions corrected below
 
 ---
 
@@ -61,9 +67,9 @@ Rust has **~500-600 error codes** (E0001-E0805+) covering a mature compiler with
 
 | Rust Code | Name | Simple Status | Action |
 |-----------|------|---------------|--------|
-| E0200 | Unsafe Trait Impl | ❌ Not Applicable | Simple has no `unsafe` |
+| E0200 | Unsafe Trait Impl | Mapping unqualified (historically excluded) | Rust unsafe-trait semantics require separate mapping; Simple has unsafe-context machinery |
 | E0201 | Duplicate Assoc Item | 📋 Add to Plan | **E1025**: Duplicate method in impl |
-| E0204 | Unsafe Trait | ❌ Not Applicable | No `unsafe` |
+| E0204 | Unsafe Trait | Mapping unqualified (historically excluded) | Rust unsafe-trait semantics require separate mapping; no blanket exclusion |
 | E0206 | Assoc Type Not in Trait | 📋 Add to Plan | **E1026**: Associated type not declared in trait |
 | E0207 | Unconstrained Type Param | 📋 Add to Plan | **E1027**: Type parameter not constrained |
 | E0210 | Orphan Rule Violation | ❌ Not Applicable | Simple may not have orphan rules |
@@ -326,11 +332,11 @@ Rust has **~500-600 error codes** (E0001-E0805+) covering a mature compiler with
 | E0802 | Generic Const Eval | Generic const evaluation error | ❌ Not Applicable | No const generics |
 | E0803 | `#[diagnostic]` Attribute | Diagnostic attribute errors | ❌ Not Applicable | Internal compiler |
 | E0804 | Invalid Stability Attr | Stability annotation error | ❌ Not Applicable | No stability system |
-| E0805 | Invalid Unsafe Block | Unsafe block validation | ❌ Not Applicable | No unsafe |
+| E0805 | Invalid Unsafe Block | Unsafe block validation | Mapping unqualified (historically excluded) | Unsafe-context machinery exists; diagnostic equivalence unqualified |
 | E0806 | Next Available | Placeholder | 📌 Reserved | For future use |
 
 **Feature Gaps**:
-- ❌ **`unsafe` System** - Not applicable to Simple
+- **`unsafe` System** - The former “not applicable” exclusion is superseded; map individual Rust semantics against Simple source rather than assuming equivalence.
 - ❌ **Inline Assembly** - Not in Simple
 - ❌ **Advanced FFI** (C-unwind, repr, etc.) - Simpler FFI model
 - ❌ **Stability Attributes** - Not needed
@@ -357,7 +363,7 @@ Rust has **~500-600 error codes** (E0001-E0805+) covering a mature compiler with
 
 | Status | Count | Percentage |
 |--------|-------|------------|
-| **Not Applicable** (lifetimes, borrow checker, unsafe, const generics, GATs, advanced features) | ~300 | 60% |
+| **Historical Not Applicable estimate** (lifetimes, borrow checker, const generics, GATs, advanced features; unsafe exclusion superseded) | ~300 | 60% |
 | **Already Implemented** (existing Simple errors) | 80 | 16% |
 | **Add to Plan** (applicable, missing) | ~80 | 16% |
 | **Needs Features** (requires new subsystems) | ~40 | 8% |
@@ -748,7 +754,7 @@ Scenario: Invalid const expression
 **Rust has ~500-600 error codes**, but **~60% are not applicable** to Simple due to different design choices:
 - No borrow checker (GC-based memory model)
 - No explicit lifetimes
-- No `unsafe` blocks
+- Unsafe-context source machinery exists; this analysis does not qualify all parsing, lowering, or enforcement paths
 - No const generics (yet)
 - Simpler FFI model
 

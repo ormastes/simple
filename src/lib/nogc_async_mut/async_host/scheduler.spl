@@ -2,12 +2,134 @@
 #
 # Work-stealing scheduler with optional multi-threading support.
 
-use std.async_core.{Poll, Priority, TaskState}
+use std.async_core.{Poll, Priority, TaskState, CancellationToken}
 use std.async_host.waker.{Waker}
 use std.async_host.future.{HostFuture}
 use std.async_host.thread_safe_queue.{ThreadSafeQueue}
 use std.async_host.task_identity.{enter_scheduler_task_id, exit_scheduler_task_id, current_unified_task_key}
 use std.async_sffi.{waker_check, waker_clear}
+use std.async_host.task_identity.{current_scheduler_task_lifetime, enter_scheduler_task_lifetime, exit_scheduler_task_lifetime}
+use std.thread_sffi.{thread_current_id}
+
+struct HostTaskWake:
+    task_id: usize
+    lifetime_id: i64
+
+class HostTaskSignals:
+    # Shared only within one carrier. At most one outstanding signal per live
+    # task; the token registry bounds live tasks, so wake publication is bounded.
+    ready: [HostTaskWake]
+    cancelled: [HostTaskWake]
+    owner_thread: i64
+
+class HostTaskContext:
+    """One scheduler task lifetime and its bounded resource cleanup authority."""
+    task_id: usize
+    lifetime: CancellationToken
+    signals: HostTaskSignals
+    wake_pending: bool
+    cancel_pending: bool = false
+    cancellation_requested: bool = false
+    cleanup_ids: [i64]
+    cleanup_actions: [fn() -> ()]
+    closed: bool
+
+    fn on_owner_thread() -> bool:
+        self.signals.owner_thread > 0 and self.signals.owner_thread == thread_current_id()
+
+    fn is_live() -> bool:
+        self.on_owner_thread() and not self.closed and not self.lifetime.is_cancelled()
+
+    fn is_current() -> bool:
+        self.is_live() and current_scheduler_task_lifetime() == self.lifetime.token_id
+
+    me wake() -> bool:
+        """Publish one generation-bound readiness signal without polling/spinning."""
+        if not self.is_live():
+            return false
+        if self.wake_pending:
+            return true
+        if self.signals.ready.len() >= 4096:
+            return false
+        self.wake_pending = true
+        self.signals.ready = self.signals.ready.push(HostTaskWake(
+            task_id: self.task_id, lifetime_id: self.lifetime.token_id))
+        true
+
+    me request_cancel() -> bool:
+        """Publish bounded owner control before revoking task readiness."""
+        if not self.on_owner_thread():
+            return false
+        if self.cancellation_requested:
+            return true
+        if self.closed or not self.lifetime.is_valid():
+            return false
+        if self.signals.cancelled.len() >= 4096:
+            return false
+        self.signals.cancelled = self.signals.cancelled.push(HostTaskWake(
+            task_id: self.task_id, lifetime_id: self.lifetime.token_id))
+        self.cancel_pending = true
+        self.cancellation_requested = true
+        self.lifetime.cancel()
+        true
+
+    me register_cleanup(resource_id: i64, action: fn() -> ()) -> bool:
+        """Retain a resource cleanup once; reject before exceeding 64 resources."""
+        if not self.is_current():
+            return false
+        for id in self.cleanup_ids:
+            if id == resource_id:
+                return true
+        if self.cleanup_ids.len() >= 64:
+            return false
+        self.cleanup_ids = self.cleanup_ids.push(resource_id)
+        self.cleanup_actions = self.cleanup_actions.push(action)
+        true
+
+    me unregister_cleanup(resource_id: i64) -> bool:
+        """Release a resource registration after a successful manual release."""
+        if not self.is_current():
+            return false
+        var keep_ids: [i64] = []
+        var keep_actions: [fn() -> ()] = []
+        var removed = false
+        for index in 0..self.cleanup_ids.len():
+            if self.cleanup_ids[index] == resource_id:
+                removed = true
+            else:
+                keep_ids = keep_ids.push(self.cleanup_ids[index])
+                keep_actions = keep_actions.push(self.cleanup_actions[index])
+        self.cleanup_ids = keep_ids
+        self.cleanup_actions = keep_actions
+        removed
+
+    me finish() -> bool:
+        """Revoke admission, unlink/release resources, then reclaim the token."""
+        if not self.on_owner_thread() or self.closed:
+            return false
+        self.closed = true
+        self.wake_pending = false
+        self.cancel_pending = false
+        var cancelled_keep: [HostTaskWake] = []
+        for signal in self.signals.cancelled:
+            if signal.task_id != self.task_id or signal.lifetime_id != self.lifetime.token_id:
+                cancelled_keep = cancelled_keep.push(signal)
+        self.signals.cancelled = cancelled_keep
+        var keep: [HostTaskWake] = []
+        for signal in self.signals.ready:
+            if signal.task_id != self.task_id or signal.lifetime_id != self.lifetime.token_id:
+                keep = keep.push(signal)
+        self.signals.ready = keep
+        self.lifetime.cancel()
+        val actions = self.cleanup_actions
+        self.cleanup_ids = []
+        self.cleanup_actions = []
+        for action in actions:
+            action()
+        self.lifetime.release()
+        true
+
+fn _terminal_host_poll() -> Poll<()>: Poll.Ready(())
 
 # ============================================================================
 # Task Death Record — W2-5 H1+H3
@@ -84,6 +206,7 @@ class HostScheduler:
     - Death-reason bookkeeping (W2-5): death_records holds one entry per
       failed task; zero allocation on the happy (non-failing) path.
     """
+    signals: HostTaskSignals
     workers: [WorkStealingQueue]
     global_queue: [usize]
     global_head: usize
@@ -101,6 +224,7 @@ struct HostTask:
     priority: Priority
     poll_fn: fn() -> Poll<()>
     waker: Option<Waker>
+    context: HostTaskContext
     task_error: text   # W2-5: non-empty when task died with a .spl-level error
 
 impl HostScheduler:
@@ -118,6 +242,7 @@ impl HostScheduler:
             workers = workers.push(WorkStealingQueue.new())
 
         HostScheduler(
+            signals: HostTaskSignals(ready: [], cancelled: [], owner_thread: thread_current_id()),
             workers: workers,
             global_queue: [],
             global_head: 0,
@@ -149,6 +274,7 @@ impl HostScheduler:
             thread_queues = thread_queues.push(ThreadSafeQueue.new())
 
         HostScheduler(
+            signals: HostTaskSignals(ready: [], cancelled: [], owner_thread: thread_current_id()),
             workers: workers,
             global_queue: [],
             global_head: 0,
@@ -177,8 +303,18 @@ impl HostScheduler:
 
     me schedule(priority: Priority, poll_fn: fn() -> Poll<()>) -> usize:
         """Schedule task with priority."""
+        # A fixed invalid ID preserves this legacy signature on failed
+        # admission. try_schedule exposes the same failure as a Result.
+        if self.signals.owner_thread != thread_current_id() or self.next_id >= 9223372036854775807:
+            return 9223372036854775807
+        val lifetime = CancellationToken.new()
+        if not lifetime.is_valid():
+            return 9223372036854775807
         val id = self.next_id
         self.next_id = self.next_id + 1
+        val context = HostTaskContext(task_id: id, lifetime: lifetime,
+            signals: self.signals, wake_pending: false,
+            cleanup_ids: [], cleanup_actions: [], closed: false)
 
         val task = HostTask(
             id: id,
@@ -186,6 +322,7 @@ impl HostScheduler:
             priority: priority,
             poll_fn: poll_fn,
             waker: nil,
+            context: context,
             task_error: ""
         )
 
@@ -208,12 +345,89 @@ impl HostScheduler:
     me schedule_on_worker(worker_id: usize, poll_fn: fn() -> Poll<()>) -> usize:
         """Schedule on specific worker."""
         val id = self.schedule(Priority.Normal, poll_fn)
-        if worker_id < self.worker_count:
+        if id != 9223372036854775807 and worker_id < self.worker_count:
+            # schedule already admitted exactly one global-queue entry. Move
+            # that admission rather than queueing a second poll of the task.
+            self.global_queue = self.global_queue[0:self.global_queue.len() - 1]
             self.workers[worker_id].push(id)
         id
 
-    fn has_runnable() -> bool:
-        """Check if any tasks can run."""
+    me _drain_task_signals():
+        if self.signals.owner_thread != thread_current_id():
+            return
+        # Cancellation is authenticated before the readiness is_live filter.
+        # Running polls defer cleanup until their callback stack has returned.
+        val cancelled = self.signals.cancelled
+        self.signals.cancelled = []
+        for signal in cancelled:
+            if self.tasks.contains_key(signal.task_id):
+                val task = self.tasks[signal.task_id]
+                if task.context.lifetime.token_id == signal.lifetime_id:
+                    if task.state != TaskState.Running:
+                        self.cancel_task(signal.task_id)
+        val ready = self.signals.ready
+        self.signals.ready = []
+        for signal in ready:
+            if self.tasks.contains_key(signal.task_id):
+                val task = self.tasks[signal.task_id]
+                if task.context.lifetime.token_id == signal.lifetime_id and task.context.is_live():
+                    # A reentrant query may drain the signal inside this poll.
+                    # Keep its bit until the Running -> Pending commit consumes
+                    # it; wake_task only enqueues already-Suspended tasks.
+                    if task.state != TaskState.Running:
+                        task.context.wake_pending = false
+                        self.wake_task(signal.task_id)
+
+    me try_schedule(priority: Priority, poll_fn: fn() -> Poll<()>) -> Result<usize, text>:
+        val id = self.schedule(priority, poll_fn)
+        if id == 9223372036854775807:
+            return Err("host task lifetime capacity or task ID exhausted")
+        Ok(id)
+
+    fn task_context(task_id: usize) -> Result<HostTaskContext, text>:
+        if self.signals.owner_thread != thread_current_id():
+            return Err("host scheduler carrier mismatch")
+        if not self.tasks.contains_key(task_id):
+            return Err("unknown host task")
+        val task = self.tasks[task_id]
+        if not task.context.is_live():
+            return Err("host task lifetime ended")
+        Ok(task.context)
+
+    me cancel_task(task_id: usize) -> bool:
+        """Cooperative terminal cancellation between polls, with resource cleanup."""
+        if self.signals.owner_thread != thread_current_id() or not self.tasks.contains_key(task_id):
+            return false
+        var task = self.tasks[task_id]
+        if task.state.is_terminal() or task.state == TaskState.Running:
+            return false
+        task.state = TaskState.Cancelled
+        task.context.cancellation_requested = true
+        self.tasks[task_id] = task
+        task.context.finish()
+        task.poll_fn = _terminal_host_poll
+        self.tasks[task_id] = task
+        true
+
+    me reap_task(task_id: usize) -> bool:
+        """Consume a retained terminal status record after the caller observes it."""
+        if self.signals.owner_thread != thread_current_id() or not self.tasks.contains_key(task_id):
+            return false
+        if not self.tasks[task_id].state.is_terminal():
+            return false
+        self.tasks.remove(task_id)
+        true
+
+    me has_runnable() -> bool:
+        """Check runnable queues after draining bounded task readiness signals."""
+        if self.signals.owner_thread != thread_current_id():
+            return false
+        self._drain_task_signals()
+        # A cleanup action may publish another generation-bound CANCEL while
+        # draining the snapshot. Keep that owner control work runnable; the
+        # next normal dispatch drains it without recursively running cleanup.
+        if not self.signals.cancelled.is_empty():
+            return true
         if self.global_head < self.global_queue.len():
             return true
         for worker in self.workers:
@@ -223,6 +437,9 @@ impl HostScheduler:
 
     me run_one_worker(worker_id: usize) -> bool:
         """Run one task on worker. Returns true if work done."""
+        if self.signals.owner_thread != thread_current_id():
+            return false
+        self._drain_task_signals()
         var task_id: Option<usize> = nil
 
         # Try local queue first
@@ -260,12 +477,39 @@ impl HostScheduler:
                 if not self.tasks.contains_key(id):
                     return false
                 var t = self.tasks[id]
+                if t.state != TaskState.Pending:
+                    # Stale/cancelled/duplicate queue entries never repoll a
+                    # parked task or resurrect a terminal generation.
+                    return true
+                if not t.context.is_live():
+                    t.state = TaskState.Cancelled
+                    t.context.cancellation_requested = true
+                    t.context.finish()
+                    t.poll_fn = _terminal_host_poll
+                    self.tasks[id] = t
+                    return true
                 t.state = TaskState.Running
+                self.tasks[id] = t
 
                 val previous_task_id = enter_scheduler_task_id(id)
-                match t.poll_fn():
+                val previous_lifetime = enter_scheduler_task_lifetime(t.context.lifetime.token_id)
+                val polled = t.poll_fn()
+                # A Running cancellation may have been drained reentrantly.
+                # Cancelled wins over either callback result without repolling.
+                if t.context.lifetime.is_cancelled():
+                    t.state = TaskState.Cancelled
+                    t.context.cancellation_requested = true
+                    t.context.finish()
+                    t.poll_fn = _terminal_host_poll
+                    exit_scheduler_task_lifetime(previous_lifetime)
+                    exit_scheduler_task_id(previous_task_id)
+                    self.tasks[id] = t
+                    return true
+                match polled:
                     case Poll.Ready(_):
                         t.state = TaskState.Completed
+                        t.context.finish()
+                        t.poll_fn = _terminal_host_poll
                         # W2-5: record death reason — tag with task key at time of completion.
                         # If the runtime wired an error into task_error, record it as a
                         # failure; otherwise record clean completion so joiners can correlate.
@@ -283,13 +527,15 @@ impl HostScheduler:
                             case nil: pass
                     case Poll.Pending:
                         # Check if waker fired during poll
-                        if waker_check(id):
+                        if t.context.wake_pending or waker_check(id):
                             waker_clear(id)
+                            t.context.wake_pending = false
                             t.state = TaskState.Pending
                             self.global_queue = self.global_queue.push(id)
                         else:
                             t.state = TaskState.Suspended
 
+                exit_scheduler_task_lifetime(previous_lifetime)
                 exit_scheduler_task_id(previous_task_id)
                 self.tasks[id] = t
                 return true
@@ -319,6 +565,8 @@ impl HostScheduler:
 
     fn wake_task(task_id: usize):
         """Wake suspended task."""
+        if self.signals.owner_thread != thread_current_id():
+            return
         if self.tasks.contains_key(task_id):
             var t = self.tasks[task_id]
             if t.state == TaskState.Suspended:

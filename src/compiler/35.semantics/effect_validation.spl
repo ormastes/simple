@@ -71,13 +71,21 @@ fn effect_struct_sizes(modules: Dict<text, HirModule>) -> Dict<i64, i64>:
     var sizes: Dict<i64, i64> = {}
     for module_key in modules.keys():
         val module: HirModule = modules[module_key]
-        for struct_ in module.structs.values():
-            if struct_.type_params.len() > 0 or struct_.is_generic_template:
-                continue
-            var layout = compute_struct_layout(struct_.fields, layoutattr_default_())
-            if struct_.has_layout_attr:
-                layout = compute_struct_layout(struct_.fields, struct_.layout_attr)
-            sizes[struct_.symbol.id] = layout.size
+        val module_sizes = effect_struct_sizes_for_module_v1(module)
+        for symbol_id in module_sizes.keys(): sizes[symbol_id] = module_sizes[symbol_id]
+    sizes
+
+pub fn effect_struct_sizes_for_module_v1(module: HirModule) -> Dict<i64, i64>:
+    var sizes: Dict<i64, i64> = {}
+    for dk_15 in module.structs.keys():
+        # ANY-transport: annotated rebind (cycle-70 sweep).
+        val struct_: HirStruct = module.structs[dk_15]
+        if struct_.type_params.len() > 0 or struct_.is_generic_template:
+            continue
+        var layout = compute_struct_layout(struct_.fields, layoutattr_default_())
+        if struct_.has_layout_attr:
+            layout = compute_struct_layout(struct_.fields, struct_.layout_attr)
+        sizes[struct_.symbol.id] = layout.size
     sizes
 
 # SymbolId.id -> function name, for resolving direct-call callees by name.
@@ -85,8 +93,13 @@ fn effect_fn_names(modules: Dict<text, HirModule>) -> Dict<i64, text>:
     var names: Dict<i64, text> = {}
     for module_key in modules.keys():
         val module: HirModule = modules[module_key]
-        for func in module.functions.values():
-            names[func.symbol.id] = func.name
+        val module_names = effect_fn_names_for_module_v1(module)
+        for symbol_id in module_names.keys(): names[symbol_id] = module_names[symbol_id]
+    names
+
+pub fn effect_fn_names_for_module_v1(module: HirModule) -> Dict<i64, text>:
+    var names: Dict<i64, text> = {}
+    for func in module.functions.values(): names[func.symbol.id] = func.name
     names
 
 # ============================================================================
@@ -629,18 +642,47 @@ fn effect_module_identities(modules: Dict<text, HirModule>) -> [text]:
             ids = ids.push(module_key)
     ids
 
-fn validate_effect_contracts(modules: Dict<text, HirModule>) -> [text]:
-    """Prove every recorded `@copy_budget(N)` / `@bounded_loop` contract against
-    real lowered bodies; return one diagnostic per violation (empty = clean)."""
+struct EffectFunctionFactsV1:
+    # No HirFunction/HirBlock/default/initializer survives this projection.
+    # Duplicate names remain separate rows for claim checks; only graph rows
+    # retain the original first-name collision policy below.
+    name: text
+    copies: [CopySite]
+    loops: [LoopSite]
+    callees: [text]
+
+pub fn effect_function_facts_v1(func: HirFunction, sizes: Dict<i64, i64>,
+        fn_names: Dict<i64, text>) -> EffectFunctionFactsV1:
+    EffectFunctionFactsV1(name: func.name, copies: effect_block_copies(func.body, sizes),
+        loops: effect_block_loops(func.body), callees: effect_block_callees(func.body, fn_names))
+
+# The original whole-compilation gate, fed by actual body facts in EXACT
+# module/function traversal order. This is not an archive admission API: the
+# driver must bind/replay these editable rows against complete admitted HIR.
+pub fn validate_effect_contract_facts_v1(module_ids: [text],
+        functions: [EffectFunctionFactsV1]) -> [text]:
+    validate_effect_claim_facts_v1(module_ids, functions, effect_contract_claims_v1())
+
+struct EffectContractClaimV1:
+    registry_key: text
+    path: text
+    fn_name: text
+    budget: i64
+    bounded: bool
+
+# Captured from the real parser registry, not a grant from editable rows.
+pub fn effect_contract_claims_v1() -> [EffectContractClaimV1]:
+    var claims: [EffectContractClaimV1] = []
+    for key in effect_registry_claim_keys():
+        claims.push(EffectContractClaimV1(registry_key: key, path: effect_claim_path(key),
+            fn_name: effect_claim_fn(key), budget: effect_registry_budget_of_key(key),
+            bounded: effect_registry_bounded_of_key(key)))
+    claims
+
+pub fn validate_effect_claim_facts_v1(module_ids: [text],
+        functions: [EffectFunctionFactsV1], claims: [EffectContractClaimV1]) -> [text]:
     var errors: [text] = []
-    val claim_keys = effect_registry_claim_keys()
-    if claim_keys.len() == 0:
-        return errors
-
-    val module_ids = effect_module_identities(modules)
-    val sizes = effect_struct_sizes(modules)
-    val fn_names = effect_fn_names(modules)
-
+    if claims.len() == 0: return errors
     # Whole-compilation call graph, so the transitive closure sees callees that
     # are NOT themselves annotated -- an unannotated helper's copy cost is
     # still paid by its annotated caller. Building this from annotated
@@ -648,22 +690,20 @@ fn validate_effect_contracts(modules: Dict<text, HirModule>) -> [text]:
     var graph_names: [text] = []
     var graph_own: [i64] = []
     var graph_callees: [[text]] = []
-    for module_key in modules.keys():
-        val module: HirModule = modules[module_key]
-        for func in module.functions.values():
-            if graph_names.contains(func.name):
-                continue
-            var own: i64 = 0
-            for c in effect_block_copies(func.body, sizes):
-                own = own + c.bytes
-            graph_names = graph_names.push(func.name)
-            graph_own = graph_own.push(own)
-            graph_callees = graph_callees.push(effect_block_callees(func.body, fn_names))
+    for func in functions:
+        if graph_names.contains(func.name):
+            continue
+        var own: i64 = 0
+        for c in func.copies:
+            own = own + c.bytes
+        graph_names = graph_names.push(func.name)
+        graph_own = graph_own.push(own)
+        graph_callees = graph_callees.push(func.callees)
     val totals = effect_copy_closure(graph_names, graph_own, graph_callees)
 
-    for key in claim_keys:
-        val claim_path = effect_claim_path(key)
-        val fn_name = effect_claim_fn(key)
+    for claim in claims:
+        val claim_path = claim.path
+        val fn_name = claim.fn_name
         if fn_name == "":
             continue
         # Out-of-scope contract: recorded for a module that is not part of this
@@ -674,31 +714,27 @@ fn validate_effect_contracts(modules: Dict<text, HirModule>) -> [text]:
         if not module_ids.contains(claim_path):
             continue
 
-        val budget = effect_registry_budget_of_key(key)
-        val bounded = effect_registry_bounded_of_key(key)
+        val budget = claim.budget
+        val bounded = claim.bounded
 
         var found = false
-        for module_key in modules.keys():
-            val module: HirModule = modules[module_key]
-            for func in module.functions.values():
-                if func.name != fn_name:
-                    continue
-                found = true
-                val loops = effect_block_loops(func.body)
-                val copies = effect_block_copies(func.body, sizes)
-                # Callee cost only -- `check_copy_budget` re-adds this body's
-                # own sites from `copies`, so passing the closure total here
-                # would double-count them.
-                var callee_bytes: i64 = 0
-                val gi = effect_find_index(graph_names, fn_name)
-                if gi >= 0:
-                    callee_bytes = totals[gi] - graph_own[gi]
-                    if callee_bytes < 0:
-                        callee_bytes = 0
-                for v in check_copy_budget(fn_name, budget, copies, callee_bytes):
-                    errors = errors.push(format_effect_violation(v))
-                for v in check_bounded_loops(fn_name, bounded, loops):
-                    errors = errors.push(format_effect_violation(v))
+        for func in functions:
+            if func.name != fn_name:
+                continue
+            found = true
+            # Callee cost only -- `check_copy_budget` re-adds this body's
+            # own sites from `copies`, so passing the closure total here
+            # would double-count them.
+            var callee_bytes: i64 = 0
+            val gi = effect_find_index(graph_names, fn_name)
+            if gi >= 0:
+                callee_bytes = totals[gi] - graph_own[gi]
+                if callee_bytes < 0:
+                    callee_bytes = 0
+            for v in check_copy_budget(fn_name, budget, func.copies, callee_bytes):
+                errors = errors.push(format_effect_violation(v))
+            for v in check_bounded_loops(fn_name, bounded, func.loops):
+                errors = errors.push(format_effect_violation(v))
         if not found:
             # An annotated function that never reached HIR cannot be proven,
             # and reporting it as proven is exactly the fail-open this pass
@@ -706,6 +742,20 @@ fn validate_effect_contracts(modules: Dict<text, HirModule>) -> [text]:
             errors = errors.push("error[effect]: '" + fn_name
                 + "' carries an effect contract but is not a function visible in this compilation")
     errors
+
+fn validate_effect_contracts(modules: Dict<text, HirModule>) -> [text]:
+    """Prove every recorded `@copy_budget(N)` / `@bounded_loop` contract against
+    real lowered bodies; return one diagnostic per violation (empty = clean)."""
+    if effect_registry_claim_keys().len() == 0: return []
+    val module_ids = effect_module_identities(modules)
+    val sizes = effect_struct_sizes(modules)
+    val fn_names = effect_fn_names(modules)
+    var functions: [EffectFunctionFactsV1] = []
+    for module_key in modules.keys():
+        val module: HirModule = modules[module_key]
+        for func in module.functions.values():
+            functions.push(effect_function_facts_v1(func, sizes, fn_names))
+    validate_effect_contract_facts_v1(module_ids, functions)
 
 fn effect_find_index(names: [text], target: text) -> i64:
     var i = 0
@@ -718,4 +768,7 @@ fn effect_find_index(names: [text], target: text) -> i64:
 export validate_effect_contracts, effect_struct_sizes, effect_fn_names
 export effect_block_loops, effect_block_copies, effect_block_callees
 export effect_while_bound, effect_for_bound, effect_is_growth_method
+export EffectFunctionFactsV1, effect_function_facts_v1, validate_effect_contract_facts_v1
+export effect_struct_sizes_for_module_v1, effect_fn_names_for_module_v1
+export EffectContractClaimV1, effect_contract_claims_v1, validate_effect_claim_facts_v1
 use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection

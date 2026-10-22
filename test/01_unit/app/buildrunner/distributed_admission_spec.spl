@@ -1,0 +1,109 @@
+# DBC-002/003/007/009: actual build bytes cannot diverge from a managed grant.
+use std.spec.{describe, it, expect}
+use std.common.build_manager.contracts.{BuildTaskV1, BuildHostV1}
+use std.common.contracts.distributed_control_v2.*
+use std.common.contracts.distributed_control_codec_v2.distributed_environment_digest_v2
+use app.buildrunner.distributed_admission.*
+
+fn admission_task() -> BuildTaskV1:
+    BuildTaskV1(id: "compile_1", attempt: 1, phase: "native",
+        producer_digest: "a".repeat(64), source_digest: "b".repeat(64),
+        toolchain_digest: "c".repeat(64), dependencies: [], program: "producer",
+        args: ["compile"], inputs: [], outputs: ["result.o"],
+        cache_key: "d".repeat(64), timeout_ms: 1000, memory_limit_bytes: 1024,
+        links: [], memory_policy: "enforce")
+
+fn admission_host() -> BuildHostV1:
+    BuildHostV1(id: "worker_1", transport: "local", endpoint: "",
+        workspace: "/isolated", worker_program: "compiled_worker",
+        worker_digest: "e".repeat(64), slots: 1)
+
+fn admission_environment() -> ExecutionEnvironmentV2:
+    ExecutionEnvironmentV2(host_id: "worker_1", execution_platform: "linux_x64",
+        target_platform: "linux_x64", test_runtime: "linux_native",
+        isolation_class: "native-process", toolchain_digest: "c".repeat(64),
+        sdk_digest: "f".repeat(64), abi: "gnu", isa: "baseline", optimization: "release")
+
+fn admission_environment_digest() -> text:
+    match distributed_environment_digest_v2(admission_environment()):
+        case Ok(value): value
+        case Err(reason):
+            expect(reason).to_equal("")
+            ""
+
+fn admission_request() -> OperationEnvelopeV2:
+    var payload = ""
+    match distributed_build_payload_digest_v2(admission_task()):
+        case Ok(value): payload = value
+        case Err(reason): expect(reason).to_equal("")
+    OperationEnvelopeV2(version: 2, id: "operation_1", payload_digest: payload,
+        principal: "user_1", project: "project_1", host_id: "worker_1",
+        operation: "build", environment_digest: admission_environment_digest(),
+        policy_revision: 4, revocation_epoch: 2, session_generation: 3,
+        memory_bytes: 1024, duration_ms: 1000)
+
+fn admission_grant() -> ExecutionGrantV2:
+    ExecutionGrantV2(id: "grant_1", principal: "user_1", project: "project_1",
+        host_id: "worker_1", operations: ["build"], environment_digest: admission_environment_digest(),
+        policy_revision: 4, revocation_epoch: 2, expires_at: 200,
+        maximum_memory_bytes: 2048, maximum_duration_ms: 2000)
+
+fn check_admission(task: BuildTaskV1, host: BuildHostV1,
+        request: OperationEnvelopeV2, observed: ExecutionEnvironmentV2) -> text:
+    distributed_build_admission_v2(admission_grant(), request, task, host,
+        admission_environment(), observed, 100, 4, 2, 3)
+
+describe "managed build admission bindings":
+    it "admits a valid exact task and worker environment":
+        expect(check_admission(admission_task(), admission_host(), admission_request(),
+            admission_environment())).to_equal("")
+
+    it "rejects altered source and argv under the same operation envelope":
+        var task = admission_task()
+        task.source_digest = "1".repeat(64)
+        expect(check_admission(task, admission_host(), admission_request(),
+            admission_environment())).to_equal("BUILD_PAYLOAD_DIGEST_MISMATCH")
+        task = admission_task()
+        task.args = ["compile", "changed_flag"]
+        expect(check_admission(task, admission_host(), admission_request(),
+            admission_environment())).to_equal("BUILD_PAYLOAD_DIGEST_MISMATCH")
+
+    it "rejects task limit substitution even within grant maximum":
+        var task = admission_task()
+        task.memory_limit_bytes = 2048
+        expect(check_admission(task, admission_host(), admission_request(),
+            admission_environment())).to_equal("BUILD_RESOURCE_BINDING_MISMATCH")
+        task = admission_task()
+        task.timeout_ms = 0
+        expect(check_admission(task, admission_host(), admission_request(),
+            admission_environment())).to_equal("BUILD_RESOURCE_BINDING_MISMATCH")
+
+    it "rejects monitor-only memory policy":
+        var task = admission_task()
+        task.memory_policy = "monitor"
+        expect(check_admission(task, admission_host(), admission_request(),
+            admission_environment())).to_equal("BUILD_MEMORY_ENFORCEMENT_REQUIRED")
+
+    it "rejects redirected host before environment admission":
+        var host = admission_host()
+        host.id = "other_worker"
+        expect(check_admission(admission_task(), host, admission_request(),
+            admission_environment())).to_equal("BUILD_HOST_BINDING_MISMATCH")
+
+    it "rejects an actual environment that replaces native test execution":
+        var observed = admission_environment()
+        observed.test_runtime = "emulated"
+        expect(check_admission(admission_task(), admission_host(), admission_request(),
+            observed)).to_equal("ENV_NO_MATCH_TEST_RUNTIME")
+
+    it "rejects arbitrary environment digest authorized by neither grant nor binding":
+        var request = admission_request()
+        request.environment_digest = "0".repeat(64)
+        expect(check_admission(admission_task(), admission_host(), request,
+            admission_environment())).to_equal("ENVIRONMENT_DENIED")
+
+    it "rejects a task using another toolchain":
+        var task = admission_task()
+        task.toolchain_digest = "2".repeat(64)
+        expect(check_admission(task, admission_host(), admission_request(),
+            admission_environment())).to_equal("BUILD_TOOLCHAIN_MISMATCH")

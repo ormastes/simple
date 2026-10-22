@@ -88,7 +88,7 @@ fn nonlocal_overlay_superset_covers_every_mutation_ordering() {
     // get_mut promotes a shared-base name into the overlay
     let mut base = HashMap::new();
     base.insert("i".to_string(), v());
-    let mut env = CowEnv::with_base(Arc::new(base));
+    let mut env = CowEnv::with_base(Arc::new(crate::value::LayeredEnv::from_map(base)));
     assert_eq!(env.nonlocal_overlay_entries().count(), 0, "not yet promoted");
     env.get_mut("i").expect("promote");
     assert!(env.nonlocal_overlay_audit_misses().is_empty(), "get_mut");

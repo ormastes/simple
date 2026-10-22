@@ -13,6 +13,7 @@ use compiler.hir.hir_types.{Effect}
 # Uses locally bundled mold binaries or system linkers.
 
 use std.nogc_sync_mut.io_runtime.{shell, shell_output, shell_bool, process_run, file_exists, file_write, file_delete, file_size_raw, file_read_bytes, cwd, host_os, host_arch, env_get}
+use std.nogc_sync_mut.io_runtime.{process_run_bounded}
 use std.string_builder.{StringBuilder}
 
 use compiler.backend.linker.obj_taker (SymbolType)
@@ -156,7 +157,11 @@ fn linker_fuse_ld_name(linker_type: LinkerType) -> text:
 
 fn execute_linker(linker_path: text, args: [text]) -> Result<i64, text>:
     """Execute linker with arguments. Returns exit code."""
-    val (stdout, stderr, code) = process_run(linker_path, args)
+    # Preserve argv boundaries: process_run's POSIX shell transport combines
+    # every object into one -c argument, limited to 128 KiB on 4 KiB-page Linux.
+    # The bounded owner execs argv directly. Zero means no added deadline;
+    # oversized diagnostics retain head/tail and an explicit truncation marker.
+    val (stdout, stderr, code) = process_run_bounded(linker_path, args, 0, 67108864)
     if code != 0:
         var msg = "Linker failed (exit {code})"
         if stderr.len() > 0:

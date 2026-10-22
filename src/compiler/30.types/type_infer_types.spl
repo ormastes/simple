@@ -8,6 +8,7 @@
 # The inference implementation is in type_infer.spl
 
 use compiler.hir.hir.*
+use compiler.hir.hir_types.{SymbolId, SymbolTable}
 use compiler.frontend.core.lexer.*
 use compiler.common.diagnostics.span.{Span}
 
@@ -23,6 +24,25 @@ use compiler.semantics.narrowing.*
 type SubstitutionMap = {i64: HirType}
 type TypeEnvironment = {text: TypeScheme}
 type FunctionBoundsMap = {i64: [HirTraitBound]}
+type FunctionTypeParametersMap = {i64: [SymbolId]}
+
+# One module-owned snapshot; SymbolIds are meaningful only in this context.
+struct FunctionBoundContext:
+    module_name: text
+    symbols: SymbolTable
+    parameters: FunctionTypeParametersMap
+    signatures: Dict<i64, HmGenericSignature> = {}
+
+struct HmGenericSignature:
+    parameters: [HirTypeParam]
+    type_: HirType
+
+struct HmPendingBoundCall:
+    function: SymbolId
+    arguments: [HirType]
+    caller: SymbolId?
+    span: Span
+
 type MutableSymbolsMap = {i64: bool}
 
 fn empty_subst_map() -> SubstitutionMap:
@@ -121,6 +141,12 @@ impl Substitution:
                 HirType(kind: HirTypeKind.Ref(self.apply(inner), mutable), span: ty.span)
             case Ptr(inner, mutable):
                 HirType(kind: HirTypeKind.Ptr(self.apply(inner), mutable), span: ty.span)
+            case Unique(inner):
+                HirType(kind: HirTypeKind.Unique(self.apply(inner)), span: ty.span)
+            case Shared(inner):
+                HirType(kind: HirTypeKind.Shared(self.apply(inner)), span: ty.span)
+            case Weak(inner):
+                HirType(kind: HirTypeKind.Weak(self.apply(inner)), span: ty.span)
             case Named(symbol, args):
                 var new_args: [HirType] = []
                 for a in args:
@@ -229,6 +255,10 @@ struct HmInferContext:
     # diagnostics such as E-TYPE-NIL-COMPARE; never consulted for typing.
     symbol_names: Dict<i64, text>
     symbol_kinds: Dict<i64, text>
+    # Trailing/defaulted for existing constructor compatibility.
+    function_bound_context: FunctionBoundContext? = nil
+    pending_bound_calls: [HmPendingBoundCall] = []
+    current_function_symbol: SymbolId? = nil
 
 
 # ============================================================================

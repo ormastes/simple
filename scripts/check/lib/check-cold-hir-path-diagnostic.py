@@ -14,11 +14,41 @@ def expected_output():
     rows = []
     for case in ('empty-map', 'missing-name', 'empty-names', 'present-name', 'empty-sources'):
         rows.append('CASE ' + case)
-        if case != 'empty-sources':
+        if case == 'empty-sources':
+            rows.append('cold HIR path evidence: no mismatched lowered source located')
+        else:
             hir = '/other/main.spl' if case == 'present-name' else ''
-            rows.append("cold HIR path evidence: root='/frozen' source='/other/main.spl' hir='" + hir + "'")
+            name = '' if case == 'empty-names' else 'pkg.main'
+            rows.append("cold HIR path evidence: index=0 root='/frozen' source='/other/main.spl' module='" + name + "' hir='" + hir + "'")
         rows.extend(['cold HIR receipt capture failed: cold-hir-module-source-mismatch', 'CASE_DONE ' + case])
     return rows + ['NATIVE_DIAGNOSTIC_CASES_COMPLETED 5']
+
+def extract_fixture(driver_text, helper_text, template):
+    begin_marker = '                        if reason == "cold-hir-module-source-mismatch"'
+    end_marker = '                    case Ok(receipts):'
+    helper_begin = 'fn cold_hir_source_mismatch_evidence_v1('
+    helper_end = '\nfn _cold_hir_source_path_error_v1('
+    if driver_text.count(begin_marker) != 1 or driver_text.count(end_marker) != 1:
+        raise ValueError('production diagnostic extraction boundaries are not unique')
+    begin = driver_text.index(begin_marker)
+    end = driver_text.index(end_marker, begin)
+    block = textwrap.dedent(driver_text[begin:end])
+    if ('return false' not in block or 'cold HIR receipt capture failed: {reason}' not in block
+            or 'self.ctx.add_error(cold_hir_source_mismatch_evidence_v1(' not in block):
+        raise ValueError('production diagnostic extraction boundary changed')
+    if helper_text.count(helper_begin) != 1 or helper_text.count(helper_end) != 1:
+        raise ValueError('production helper extraction boundaries are not unique')
+    begin = helper_text.index(helper_begin)
+    end = helper_text.index(helper_end, begin)
+    helper = helper_text[begin:end]
+    marker = '{{production_helper}}'
+    if template['prefix'].count(marker) != 1 or marker in template['suffix']:
+        raise ValueError('production helper insertion point is not unique')
+    # Retain the production helper verbatim, including its HirModule signature.
+    # The fixture supplies only the path/name fields this diagnostic reads.
+    fixture = template['prefix'].replace(marker, helper)
+    fixture += textwrap.indent(block, '        ') + template['suffix']
+    return block, helper, fixture
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -38,8 +68,9 @@ def main():
             parser.error(name + ' must be an absolute non-symlink path')
         paths[name] = path.resolve(strict=True)
     source = paths['source_root'] / 'src/compiler/80.driver/driver_hir_pipeline_lowering.spl'
+    helper_source = paths['source_root'] / 'src/compiler/80.driver/cache/cold_hir_semantic_seed_v1.spl'
     watchdog = paths['source_root'] / 'scripts/bootstrap/run-process-group-timeout.shs'
-    if not paths['runtime'].is_dir() or not all(p.is_file() for p in (source, watchdog, paths['producer'], paths['shell'])):
+    if not paths['runtime'].is_dir() or not all(p.is_file() for p in (source, helper_source, watchdog, paths['producer'], paths['shell'])):
         parser.error('missing source/watchdog/producer/shell/runtime input')
     output = Path(args.output)
     if not output.is_absolute() or output.exists() or output.is_symlink():
@@ -49,17 +80,11 @@ def main():
         if output.is_relative_to(protected) or protected.is_relative_to(output):
             parser.error('output overlaps protected source/runtime')
     original = source.read_bytes()
-    text = original.decode()
-    begin_marker = '                        if reason == "cold-hir-module-source-mismatch"'
-    if text.count(begin_marker) != 1:
-        raise ValueError('production extraction start is not unique')
-    begin = text.index(begin_marker)
-    end = text.index('                    case Ok(receipts):', begin)
-    block = textwrap.dedent(text[begin:end])
-    if 'return false' not in block or 'cold HIR receipt capture failed: {reason}' not in block:
-        raise ValueError('production diagnostic extraction boundary changed')
-    template = json.loads(Path(__file__).with_name('cold-hir-path-diagnostic-template.json').read_text())
-    fixture = template['prefix'] + textwrap.indent(block, '        ') + template['suffix']
+    helper_original = helper_source.read_bytes()
+    template_path = Path(__file__).with_name('cold-hir-path-diagnostic-template.json')
+    template_original = template_path.read_bytes()
+    block, helper, fixture = extract_fixture(original.decode(), helper_original.decode(),
+                                             json.loads(template_original))
     output.mkdir()
     for child in ('src', 'tmp', 'cache'):
         (output / child).mkdir()
@@ -94,6 +119,10 @@ def main():
                    producer_kind=args.producer_kind, producer=str(paths['producer']),
                    producer_sha256=digest(paths['producer']), production_source=str(source),
                    production_sha256=hashlib.sha256(original).hexdigest(),
+                   helper_source=str(helper_source),
+                   helper_source_sha256=hashlib.sha256(helper_original).hexdigest(),
+                   helper_block_sha256=hashlib.sha256(helper.encode()).hexdigest(),
+                   template_sha256=hashlib.sha256(template_original).hexdigest(),
                    block_sha256=hashlib.sha256(block.encode()).hexdigest(),
                    fixture_sha256=digest(output / 'src/main.spl'), backend=args.backend,
                    runtime=str(paths['runtime']), target=args.target, commands=commands, status='FAIL')
@@ -109,8 +138,11 @@ def main():
         expected = expected_output()
         receipt.update(expected_lines=expected, actual_lines=actual,
                        source_unchanged=digest(source) == receipt['production_sha256'],
+                       helper_unchanged=digest(helper_source) == receipt['helper_source_sha256'],
+                       template_unchanged=digest(template_path) == receipt['template_sha256'],
                        producer_unchanged=digest(paths['producer']) == receipt['producer_sha256'])
-        if actual == expected and receipt['source_unchanged'] and receipt['producer_unchanged']:
+        if (actual == expected and receipt['source_unchanged'] and receipt['helper_unchanged']
+                and receipt['template_unchanged'] and receipt['producer_unchanged']):
             receipt['status'] = 'PASS'
     (output / 'result.json').write_text(json.dumps(receipt, indent=2) + '\n')
     print(json.dumps(dict(status=receipt['status'], evidence=str(output / 'result.json'), scope=receipt['scope'])))

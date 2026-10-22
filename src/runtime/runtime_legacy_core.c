@@ -43,9 +43,24 @@ typedef int pid_t;
 #else
 #include <dirent.h>
 #include <signal.h>
+#include <spawn.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <crt_externs.h>
+#endif
+#endif
+#if defined(__APPLE__) || defined(__FreeBSD__)
+#include <sys/types.h>
+#include <sys/param.h>
+#include <sys/resource.h>
+#include <sys/sysctl.h>
+#endif
+#if defined(__APPLE__)
+#include <libproc.h>
+#elif defined(__FreeBSD__)
+#include <sys/user.h>
 #endif
 #include "platform/runtime_group_self_charge.h"
 
@@ -706,6 +721,32 @@ static int64_t rt_mem_snapshot_status_kib(const char* key) {
     if (strcmp(key, "VmRSS:") == 0) return (int64_t)(counters.WorkingSetSize / 1024);
     if (strcmp(key, "VmHWM:") == 0) return (int64_t)(counters.PeakWorkingSetSize / 1024);
     return -1;
+#elif defined(__APPLE__) || defined(__FreeBSD__)
+    /* No /proc/self/status: resident from the kernel, peak from getrusage. */
+    if (strcmp(key, "VmHWM:") == 0) {
+        struct rusage ru;
+        if (getrusage(RUSAGE_SELF, &ru) != 0) return -1;
+#if defined(__APPLE__)
+        int64_t peak = (int64_t)ru.ru_maxrss / 1024; /* bytes on Darwin */
+#else
+        int64_t peak = (int64_t)ru.ru_maxrss;        /* KiB on FreeBSD */
+#endif
+        /* ru_maxrss is tick-sampled on FreeBSD and can trail the live RSS. */
+        int64_t rss = rt_mem_snapshot_status_kib("VmRSS:");
+        return peak > rss ? peak : rss;
+    }
+    if (strcmp(key, "VmRSS:") != 0) return -1;
+#if defined(__APPLE__)
+    struct proc_taskinfo ti;
+    if (proc_pidinfo(getpid(), PROC_PIDTASKINFO, 0, &ti, (int)sizeof(ti)) != (int)sizeof(ti)) return -1;
+    return (int64_t)(ti.pti_resident_size / 1024);
+#else
+    struct kinfo_proc kp;
+    size_t len = sizeof(kp);
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, (int)getpid() };
+    if (sysctl(mib, 4, &kp, &len, NULL, 0) != 0 || len != sizeof(kp)) return -1;
+    return (int64_t)kp.ki_rssize * (int64_t)sysconf(_SC_PAGESIZE) / 1024;
+#endif
 #else
     FILE* f = fopen("/proc/self/status", "r"); if (!f) return -1;
     char line[256]; int64_t value = -1;
@@ -874,9 +915,21 @@ int64_t rt_term_enable_ansi(void) {
 }
 
 int64_t rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_count) {
-    if (!cmd || !*cmd) return -1;
+    if (!cmd || !*cmd || arg_count < 0 ||
+            (arg_count > 0 && !args)) return -1;
 #if defined(_WIN32)
     return rt_process_spawn_async_owned_windows(cmd, args, arg_count);
+#elif defined(__APPLE__)
+    if (arg_count > 32768) return -1;
+    for (int64_t i = 0; i < arg_count; i++) if (!args[i]) return -1;
+    char** argv = (char**)calloc((size_t)arg_count + 2, sizeof(char*));
+    if (!argv) return -1;
+    argv[0] = (char*)cmd;
+    for (int64_t i = 0; i < arg_count; i++) argv[i + 1] = (char*)args[i];
+    pid_t pid = -1;
+    int error = posix_spawnp(&pid, cmd, NULL, NULL, argv, *_NSGetEnviron());
+    free(argv);
+    return error == 0 ? (int64_t)pid : -1;
 #else
     pid_t pid = fork();
     if (pid < 0) return -1;

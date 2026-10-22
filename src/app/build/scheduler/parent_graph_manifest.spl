@@ -1,0 +1,72 @@
+# A protected, bounded list of exact request files for one scheduler graph.
+# SHA-256 pins each file so one manifest read cannot mix request revisions.
+use app.build.scheduler.planner.{scheduler_action_digest_valid_v1}
+
+val PARENT_GRAPH_MANIFEST_MAX_BYTES_V1: i64 = 1100000
+
+struct ParentGraphManifestEntryV1:
+    path: text
+    digest: text
+
+struct ParentGraphManifestV1:
+    valid: bool
+    reason: text
+    entries: [ParentGraphManifestEntryV1]
+
+fn _graph_manifest_reject_v1(reason: text) -> ParentGraphManifestV1:
+    ParentGraphManifestV1(false, reason, [])
+
+fn _graph_manifest_token_v1(value: text) -> bool:
+    if value == "" or value.len() > 128 or value == "." or value == ".." or
+       value.starts_with("-"):
+        return false
+    for c in value.chars():
+        if (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
+           (c >= "0" and c <= "9") or c == "-" or c == "_" or c == ".":
+            continue
+        return false
+    true
+
+fn _graph_manifest_path_v1(value: text) -> bool:
+    if not value.starts_with("/") or value.len() < 2 or
+       value.len() > 4096 or value.ends_with("/"):
+        return false
+    val parts = value.split("/")
+    var i: i64 = 1
+    while i < parts.len():
+        if not _graph_manifest_token_v1(parts[i]): return false
+        i = i + 1
+    true
+
+fn parse_parent_graph_manifest_v1(wire: text) -> ParentGraphManifestV1:
+    """Parse exact SHA-256/path pairs; caller must protect ancestor directories."""
+    if wire.len() == 0 or wire.len() > PARENT_GRAPH_MANIFEST_MAX_BYTES_V1 or
+       not wire.ends_with("\n") or wire.contains("\r") or wire.contains("\x00"):
+        return _graph_manifest_reject_v1("graph-manifest-invalid")
+    val lines = wire[0:wire.len() - 1].split("\n")
+    if lines.len() < 2 or lines.len() > 257 or
+       lines[0] != "simple-dist-build-graph-v1":
+        return _graph_manifest_reject_v1("graph-manifest-shape")
+    var entries: [ParentGraphManifestEntryV1] = []
+    var paths: [text] = []
+    var digests: [text] = []
+    var i: i64 = 1
+    while i < lines.len():
+        val row = lines[i]
+        if not row.starts_with("request="):
+            return _graph_manifest_reject_v1("graph-manifest-row")
+        val fields = row[8:].split("|")
+        if fields.len() != 2 or
+           not scheduler_action_digest_valid_v1(fields[0]) or
+           not _graph_manifest_path_v1(fields[1]) or
+           paths.contains(fields[1]) or digests.contains(fields[0]):
+            return _graph_manifest_reject_v1("graph-manifest-entry")
+        entries.push(ParentGraphManifestEntryV1(fields[1], fields[0]))
+        paths.push(fields[1])
+        digests.push(fields[0])
+        i = i + 1
+    ParentGraphManifestV1(true, "", entries)
+
+export PARENT_GRAPH_MANIFEST_MAX_BYTES_V1
+export ParentGraphManifestEntryV1, ParentGraphManifestV1
+export parse_parent_graph_manifest_v1

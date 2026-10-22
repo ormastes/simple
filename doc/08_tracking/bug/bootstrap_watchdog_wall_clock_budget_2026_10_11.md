@@ -1,5 +1,7 @@
 # Bootstrap watchdog elapsed budgets follow wall-clock adjustments
 
+GitHub: [#3136](https://github.com/ormastes/simple/issues/3136).
+
 Status: OPEN (P1). Source repair and controlled-clock contracts; release and
 cross-platform workload qualification remain pending.
 
@@ -41,7 +43,47 @@ watchdog SHA256 `6fb208db7ebc4ddd867041c1b3ec6e28688e8d52338c29a7fadfe50594c07ea
 Canonical executable bytes differ only in a comment. Exact generated-program
 identity binds that evidence; no green tests were rerun. Retained result SHA256:
 `ef968c77c89f030f512dda0f942cece6837eedd4577fefa48ebd9fbce7bf35af`.
-The new portable test wrapper itself is source-reviewed, not newly executed.
+At that originating lane, the new portable wrapper was source-reviewed but
+not executed. Later isolated port executions are recorded below.
+
+## Initial isolated port qualification
+
+The historical eight-contract PASS and retained result hash above are the
+originating lane's observations. Their generated-program/result receipt was
+not accessible in this review, so that claim was not reused as a local PASS.
+The unchanged new portable wrapper ran once against this port's exact
+canonical watchdog: eight assertions PASS, child/wrapper exit0, empty stderr.
+The extracted generated program and TAP are retained in
+`reviews/watchdog-monotonic-port-dbd/`, with exact wrapper/source/program pins
+in actual-controls-receipt.json. Only extracted clock expressions ran; no
+watchdog main, compiler, workload or actual host clock adjustment executed.
+Linux installed Time::HiRes CLOCK_MONOTONIC availability and canonical Perl
+syntax passed once. Other hosts and full workload integration remain UNRUN;
+historical timeout clock causation remains unproven.
+
+## Checked startup correction
+
+Independent review confirmed the installed Time::HiRes provider can return
+-1 with errno22 and no exception for an unsupported clock ID. Merely importing
+clock_gettime does not establish runtime clock availability. A checked startup
+helper now requires a defined nonnegative monotonic value for the first
+`$started` assignment, before any helper installation or workload fork. Failure
+refuses startup with no civil-clock fallback; a legitimate zero is accepted.
+
+The runtime accessor and existing process/RSS/cleanup paths remain unchanged.
+This validation is deliberately startup-only: throwing on every later clock
+read could bypass existing workload cleanup. Steady-state provider-fault and
+lifecycle behavior remain inherited and unqualified; no broad fault-handling
+claim is made.
+
+The changed-input portable wrapper executed once:12assertions PASS, exit0,
+empty stderr. It extracts both actual helpers and verifies the checked startup
+caller precedes every fork site. Added controls reject -1 and undef, propagate
+a startup provider exception and accept zero. Exact program/source/wrapper
+pins and TAP are retained in changed-startup-controls-receipt.json; the initial
+eight-assertion receipt remains preserved as historical. No watchdog main,
+compiler/native workload or host-clock adjustment ran. Historical timeout
+clock-step causation and cross-platform workload qualification remain unproven.
 
 ## Platform limits
 

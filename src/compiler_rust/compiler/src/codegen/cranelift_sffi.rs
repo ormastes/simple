@@ -669,14 +669,17 @@ pub unsafe extern "C" fn rt_cranelift_declare_global_data(
 fn cranelift_data_linkage_from_code(code: i64) -> Option<Linkage> {
     match code {
         0 => Some(Linkage::Export),
+        1 => Some(Linkage::Import),
         2 => Some(Linkage::Local),
         3 => Some(Linkage::Hidden),
         _ => None,
     }
 }
 
-/// Declare and define writable scalar data with explicit source linkage and
-/// alignment. An alignment of zero selects the scalar's natural alignment.
+/// Declare writable scalar data with explicit source linkage and alignment.
+/// Import linkage (1) declares external storage without defining bytes and
+/// requires zero initial_bits. Other linkages define the scalar's bit pattern.
+/// An alignment of zero selects the scalar's natural alignment.
 #[no_mangle]
 pub unsafe extern "C" fn rt_cranelift_declare_global_data_v2(
     module: i64,
@@ -701,6 +704,9 @@ pub unsafe extern "C" fn rt_cranelift_declare_global_data_v2(
     let Some(linkage) = cranelift_data_linkage_from_code(linkage_code) else {
         return 0;
     };
+    if linkage == Linkage::Import && initial_bits != 0 {
+        return 0;
+    }
     let natural_alignment = bytes.len().min(8) as u64;
     let requested_alignment = if alignment == 0 {
         natural_alignment
@@ -720,7 +726,7 @@ pub unsafe extern "C" fn rt_cranelift_declare_global_data_v2(
                 Ok(id) => id,
                 Err(_) => return 0,
             };
-            if mod_ctx.module.define_data(id, &desc).is_err() {
+            if linkage != Linkage::Import && mod_ctx.module.define_data(id, &desc).is_err() {
                 return 0;
             }
             id
@@ -734,7 +740,7 @@ pub unsafe extern "C" fn rt_cranelift_declare_global_data_v2(
                 Ok(id) => id,
                 Err(_) => return 0,
             };
-            if mod_ctx.module.define_data(id, &desc).is_err() {
+            if linkage != Linkage::Import && mod_ctx.module.define_data(id, &desc).is_err() {
                 return 0;
             }
             id
@@ -2561,7 +2567,7 @@ mod tests {
             assert_eq!(cranelift_data_linkage_from_code(0), Some(Linkage::Export));
             assert_eq!(cranelift_data_linkage_from_code(2), Some(Linkage::Local));
             assert_eq!(cranelift_data_linkage_from_code(3), Some(Linkage::Hidden));
-            assert_eq!(cranelift_data_linkage_from_code(1), None);
+            assert_eq!(cranelift_data_linkage_from_code(1), Some(Linkage::Import));
 
             let module_name = "test_global_addr_v2";
             let module =

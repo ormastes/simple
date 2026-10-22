@@ -103,6 +103,8 @@ use std.spec
 use compiler.common.attributes.{FunctionAttr}
 use compiler.hir.hir_definitions.{HirBlock, HirExpr, HirExprKind, HirField, HirFunction, HirStruct, HirTypeParam}
 use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolTable, SymbolKind}
+use compiler.semantics.value_struct_layout.{value_struct_layout_declarations_v1,
+    value_struct_layout_declaration_report_v1}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind}
@@ -203,6 +205,52 @@ fn mk_module(name: text, table: SymbolTable, structs: [HirStruct]) -> HirModule:
         mock_decls: [],
         types: []
     )
+
+describe "explicit body-free layout declaration graph":
+    it "retains cycle identity and locations while leaving complete original field defaults intact":
+        var table = SymbolTable.new()
+        val symbol = table.define("DefaultNode", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val initial_value = HirExpr(kind: HirExprKind.IntLit(37, nil),
+            has_type_: true, type_: i64_type(), span: mk_span())
+        val default_body = HirBlock(stmts: [], has: true, value: initial_value, span: mk_span())
+        val field = HirField(..mk_field("value", i64_type()), has_default: true,
+            default: HirExpr(kind: HirExprKind.Block(default_body),
+                has_type_: true, type_: i64_type(), span: mk_span()))
+        val struct_ = mk_struct(symbol, "DefaultNode", [field, mk_field("next", named_type(symbol))], [])
+        val original = mk_module("default_projection", table, [struct_])
+        val declarations = value_struct_layout_declarations_v1(original.name, original.path,
+            original.structs, original.symbols)
+        expect(declarations.structs.len()).to_equal(1)
+        expect(declarations.structs[0].fields[0].named_symbol_id).to_equal(-1)
+        expect(declarations.structs[0].fields[1].named_symbol_id).to_equal(symbol.id)
+        expect(declarations.structs[0].fields[1].name).to_equal("next")
+        expect(declarations.structs[0].fields[1].span.file).to_equal("synthetic")
+        val retained = original.structs.values()[0]
+        expect(retained.fields[0].has_default).to_equal(true)
+        val original_default_value = match retained.fields[0].default.kind:
+            case HirExprKind.Block(body):
+                match body.value.kind:
+                    case HirExprKind.IntLit(value, _): value
+                    case _: -1
+            case _: -1
+        expect(original_default_value).to_equal(37)
+        val original_errors = validate_value_struct_layouts([original.name], [original])
+        expect(original_errors.len()).to_equal(1)
+        expect(original_errors[0]).to_contain("DefaultNode.next -> DefaultNode")
+        val report = value_struct_layout_declaration_report_v1([original.name], [declarations])
+        expect(report.errors).to_equal(original_errors)
+        expect(report.skipped_struct_edges).to_equal(0)
+
+    it "keeps indirect fields outside the direct by-value edge set":
+        var table = SymbolTable.new()
+        val symbol = table.define("IndirectNode", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val struct_ = mk_struct(symbol, "IndirectNode", [mk_field("next", optional_type(named_type(symbol)))], [])
+        val original = mk_module("indirect_projection", table, [struct_])
+        val declarations = value_struct_layout_declarations_v1(original.name, original.path,
+            original.structs, original.symbols)
+        expect(declarations.structs[0].fields[0].named_symbol_id).to_equal(-1)
+        expect(value_struct_layout_declaration_report_v1([original.name], [declarations]).errors.len()).to_equal(0)
+        expect(value_struct_layout_declaration_report_v1([], [declarations]).errors.len()).to_equal(1)
 
 describe "validate_value_struct_layouts rejects genuine direct by-value cycles":
     it "flags a struct that embeds itself by value":

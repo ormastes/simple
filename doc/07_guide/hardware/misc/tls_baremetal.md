@@ -17,7 +17,7 @@ and no libc dependencies. All buffers are fixed-size (stack or static).
 
 ## Quick Start
 
-```simple
+```simple:skip
 use std.nogc_async_mut_noalloc.tls
 
 val root_hash = [u8; 32]  # SHA-256 of trusted root CA DER
@@ -64,7 +64,7 @@ val (client2, data) = tls_recv(client)?
 
 Implement `BaremetalTransport` to plug in your hardware:
 
-```simple
+```simple:skip
 trait BaremetalTransport
     fn send(me, data: [u8]) -> Result<Int, TlsError>
     fn recv(me, buf: [u8], max_len: Int) -> Result<[u8], TlsError>

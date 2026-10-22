@@ -115,11 +115,15 @@ impl Default for ChainedProvider {
 
 impl RuntimeSymbolProvider for ChainedProvider {
     fn get_symbol(&self, name: &str) -> Option<*const u8> {
-        let normalized = name.strip_prefix('_').unwrap_or(name);
-        // First match wins
-        for provider in &self.providers {
-            if let Some(ptr) = provider.get_symbol(normalized) {
-                return Some(ptr);
+        // First match wins. Exact name first (libc exports such as
+        // `__errno_location` really begin with `_`); the ABI-underscore-
+        // stripped spelling is only a fallback.
+        let stripped = name.strip_prefix('_');
+        for candidate in std::iter::once(name).chain(stripped) {
+            for provider in &self.providers {
+                if let Some(ptr) = provider.get_symbol(candidate) {
+                    return Some(ptr);
+                }
             }
         }
         None
@@ -188,6 +192,18 @@ mod tests {
         fn name(&self) -> &str {
             &self.name
         }
+    }
+
+    #[test]
+    fn test_exact_leading_underscore_name_reaches_providers() {
+        let ptr: usize = 0x3000;
+        let mut chain = ChainedProvider::new();
+        chain.add(Arc::new(MockProvider::new("libc", vec![("__errno_location", ptr)])));
+        assert_eq!(chain.get_symbol("__errno_location"), Some(ptr as *const u8));
+        // The ABI-underscore spelling still falls back to the bare name.
+        let mut abi = ChainedProvider::new();
+        abi.add(Arc::new(MockProvider::new("rt", vec![("rt_array_new", ptr)])));
+        assert_eq!(abi.get_symbol("_rt_array_new"), Some(ptr as *const u8));
     }
 
     #[test]

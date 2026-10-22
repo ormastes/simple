@@ -8,6 +8,8 @@ use app.optimize.compare.{optimize_compare}
 use app.optimize.apply.{optimize_apply}
 use app.optimize.profile_layout_cli.{profile_layout_write_manifest_file, profile_layout_write_artifact_file}
 use app.optimize.collection_plan_cli.{collection_plan_explain_file}
+use app.optimize.collection_typed_plan_cli.{collection_typed_plan_explain_file}
+use app.cli.collection_planner_options.{collection_planner_options}
 
 fn print_optimize_help():
     print "Usage: simple optimize <file.spl> [options]"
@@ -25,13 +27,15 @@ fn print_optimize_help():
     print "  --collection-workload=NAME  Workload label for collection profile admission"
     print "  --collection-target=NAME    Target identity for collection profile admission"
     print "  --site=AST_ID              Optional exact collection site filter"
+    print "  --collection-policy=NAME   Explain typed MIR with moderate/strict/robust/critical policy"
+    print "  --collection-memory-budget=BYTES  Explicit extra-memory budget for typed MIR plans"
+    print "  --target=TRIPLE            Native target for typed MIR explanation"
     print "  --manifest=PATH       Native/settlement executable metadata input for --layout-plan"
     print "  --out=PATH            Output manifest path for --layout-plan"
     print "  --order-out=PATH      Optional native symbol order output for --layout-plan"
     print "  --c-section-map-out=PATH  Optional generated-C section map output for --layout-plan"
     print "  --passes=P1,P2,...    Comma-separated list of MIR passes to run"
     print "  --level=O0|O1|O2|O3  MIR optimization level (default: O2)"
-    print "  --verbose             List every opportunity location (default: concise per-pass counts)"
     print "  -h, --help            Show this help"
     print ""
     print "Optimization levels (MIR):"
@@ -61,13 +65,17 @@ struct OptimizeArgs:
     collection_workload: text
     collection_target: text
     collection_site: text
+    collection_policy: text = ""
+    collection_memory_budget: text = ""
+    native_target: text = ""
+    do_typed_collection_plan: bool = false
+    collection_option_error: text = ""
     manifest_path: text
     out_path:      text
     order_out_path: text
     c_section_map_out_path: text
     passes:       [text]
     level:        text    # "O0"|"O1"|"O2"|"O3"
-    verbose:      bool    # print every opportunity location (default: concise per-pass counts)
 
 fn parse_flag_value(args: [text], prefix: text) -> text:
     var i = 0
@@ -86,6 +94,12 @@ fn has_flag(args: [text], flag: text) -> bool:
         i = i + 1
     false
 
+fn has_named_option(args: [text], name: text) -> bool:
+    for arg in args:
+        if arg == name or arg.starts_with("{name}="):
+            return true
+    false
+
 fn split_passes(passes_str: text) -> [text]:
     if passes_str == "":
         return []
@@ -98,10 +112,14 @@ fn parse_optimize_args(args: [text]) -> OptimizeArgs:
     var i = if args.len() > 0 and args[0] == "optimize": 1 else: 0
     while i < args.len():
         val a = args[i]
+        if a == "--collection-policy" or a == "--collection-memory-budget":
+            i = i + 2
+            continue
         if not a.starts_with("-"):
             file_path = a
         i = i + 1
 
+    val planner = collection_planner_options(args)
     val level_raw = parse_flag_value(args, "--level=")
     val level = if level_raw == "": "O2" else: level_raw
 
@@ -120,13 +138,18 @@ fn parse_optimize_args(args: [text]) -> OptimizeArgs:
         collection_workload: parse_flag_value(args, "--collection-workload="),
         collection_target: parse_flag_value(args, "--collection-target="),
         collection_site: parse_flag_value(args, "--site="),
+        collection_policy: planner.policy,
+        collection_memory_budget: if planner.memory_budget_bytes < 0: "" else: "{planner.memory_budget_bytes}",
+        collection_option_error: planner.error,
+        native_target: parse_flag_value(args, "--target="),
+        do_typed_collection_plan: (has_named_option(args, "--collection-policy") or
+            has_named_option(args, "--collection-memory-budget") or has_named_option(args, "--target")),
         manifest_path: parse_flag_value(args, "--manifest="),
         out_path:      parse_flag_value(args, "--out="),
         order_out_path: parse_flag_value(args, "--order-out="),
         c_section_map_out_path: parse_flag_value(args, "--c-section-map-out="),
         passes:       passes,
-        level:        level,
-        verbose:      has_flag(args, "--verbose")
+        level:        level
     )
 
 fn run_profile_layout_command(opt_args: OptimizeArgs) -> i64:
@@ -198,7 +221,26 @@ fn run_optimize_command(opt_args: OptimizeArgs) -> i64:
 
     var exit_code = 0
 
+    if opt_args.collection_option_error != "":
+        print "error: {opt_args.collection_option_error}"
+        return 1
+    val typed_collection = (opt_args.do_typed_collection_plan or
+        opt_args.collection_memory_budget != "" or opt_args.native_target != "")
+    if typed_collection and not opt_args.do_explain_collection_plan:
+        print "Error: collection policy, budget, and target require --explain-collection-plan"
+        return 1
+
     if opt_args.do_explain_collection_plan:
+        if typed_collection:
+            if opt_args.profile_path != "" or opt_args.collection_workload != "" or opt_args.collection_target != "":
+                print "error: typed MIR explanation does not yet admit runtime collection profile options"
+                return 1
+            val policy = if opt_args.collection_policy == "": "moderate" else: opt_args.collection_policy
+            val explanation = collection_typed_plan_explain_file(
+                opt_args.file_path, policy, opt_args.collection_memory_budget,
+                opt_args.native_target, opt_args.level, opt_args.collection_site)
+            print explanation
+            return if explanation.starts_with("error:"): 1 else: 0
         val explanation = collection_plan_explain_file(
             opt_args.file_path, opt_args.profile_path,
             opt_args.collection_workload, opt_args.collection_target,
@@ -213,11 +255,11 @@ fn run_optimize_command(opt_args: OptimizeArgs) -> i64:
     elif opt_args.do_apply:
         exit_code = optimize_apply(opt_args.file_path, opt_args.passes, opt_args.level)
     elif opt_args.do_db_analyze:
-        exit_code = optimize_db_analyze(opt_args.file_path, opt_args.verbose)
+        exit_code = optimize_db_analyze(opt_args.file_path)
     elif opt_args.do_full:
-        exit_code = optimize_full_analyze(opt_args.file_path, opt_args.level, opt_args.verbose)
+        exit_code = optimize_full_analyze(opt_args.file_path, opt_args.level)
     else:
-        exit_code = optimize_analyze(opt_args.file_path, opt_args.level, opt_args.verbose)
+        exit_code = optimize_analyze(opt_args.file_path, opt_args.level)
 
     exit_code
 

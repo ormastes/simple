@@ -308,15 +308,19 @@ bootstrap_stage3_windows_frontend_environment() {
     bootstrap_stage3_policy_mode=$2
     bootstrap_stage3_policy_budget=$3
     # Optional 4th argument: the job-scaled hard ceiling the caller resolved
-    # through tree-rss-policy.shs. Absent, the historical fixed ceiling holds.
-    bootstrap_stage3_policy_ceiling=${4:-6835937}
+    # through tree-rss-policy.shs. Absent, the static tree ceiling holds
+    # (BOOTSTRAP_TREE_RSS_STATIC_CEILING_KIB; measured compiler peak evidence).
+    bootstrap_stage3_policy_ceiling=${4:-8388608}
+    # Optional 5th argument: largest admissible frontend budget (default one
+    # 3 GB worker); product lanes on fanout hosts pass the enforced cap.
+    bootstrap_stage3_policy_budget_max=${5:-3000000}
     case "$bootstrap_stage3_policy_cap:$bootstrap_stage3_policy_budget:$bootstrap_stage3_policy_ceiling" in
         *[!0-9:]*|:*|*:|*::*) return 1 ;;
     esac
     [ "$bootstrap_stage3_policy_cap" -gt 0 ] &&
         [ "$bootstrap_stage3_policy_cap" -le "$bootstrap_stage3_policy_ceiling" ] &&
         [ "$bootstrap_stage3_policy_budget" -gt 0 ] &&
-        [ "$bootstrap_stage3_policy_budget" -le 3000000 ] || return 1
+        [ "$bootstrap_stage3_policy_budget" -le "$bootstrap_stage3_policy_budget_max" ] || return 1
     case "$bootstrap_stage3_policy_mode" in
         enforce)
             if [ "$bootstrap_stage3_policy_cap" -lt "$bootstrap_stage3_policy_budget" ]; then
@@ -337,6 +341,31 @@ bootstrap_stage3_run_transcribed() {
     bootstrap_stage3_run_tmpdir=$5
     bootstrap_stage3_run_path=$6
     shift 6
+    # A raised compiler ceiling is an explicit, hashed invocation input. The
+    # caller cannot substitute it, duplicate it, or hide it behind env -i.
+    bootstrap_stage3_run_ceiling_env=$(bootstrap_stage3_compiler_ceiling_environment) || {
+        echo 'bootstrap-transcript-error: invalid compiler RSS ceiling' >&2
+        return 1
+    }
+    bootstrap_stage3_run_ceiling_seen=0
+    for bootstrap_stage3_run_env in "$@"; do
+        [ "$bootstrap_stage3_run_env" != -- ] || break
+        bootstrap_stage3_run_env_name=${bootstrap_stage3_run_env%%=*}
+        bootstrap_stage3_run_env_upper=$(printf '%s' "$bootstrap_stage3_run_env_name" | tr '[:lower:]' '[:upper:]')
+        if [ "$bootstrap_stage3_run_env_upper" = SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB ]; then
+            [ "$bootstrap_stage3_run_ceiling_seen" = 0 ] &&
+                [ -n "$bootstrap_stage3_run_ceiling_env" ] &&
+                [ "$bootstrap_stage3_run_env" = "$bootstrap_stage3_run_ceiling_env" ] || {
+                echo 'bootstrap-transcript-error: conflicting or duplicate compiler RSS ceiling' >&2
+                return 1
+            }
+            bootstrap_stage3_run_ceiling_seen=1
+        fi
+    done
+    [ -z "$bootstrap_stage3_run_ceiling_env" ] || [ "$bootstrap_stage3_run_ceiling_seen" = 1 ] || {
+        echo 'bootstrap-transcript-error: compiler RSS ceiling missing from explicit environment' >&2
+        return 1
+    }
     # The same finite cap feeds the watchdog and the child's shard admission.
     # Carry it as explicit-env before freezing the transcript; do not widen the
     # fixed host-env schema or allow a caller to substitute a different budget.
@@ -352,13 +381,21 @@ bootstrap_stage3_run_transcribed() {
     }
     bootstrap_stage3_run_rss_jobs=$(bootstrap_tree_rss_command_jobs "$@")
     bootstrap_tree_rss_resolve "$bootstrap_stage3_run_rss_jobs" "$bootstrap_stage3_run_cwd" || {
-        printf 'error: pre-exec refusal: %s\n' "$bootstrap_tree_rss_refusal" \
-            > "$bootstrap_stage3_run_log.refusal" || :
+        {
+            printf 'error: pre-exec refusal: %s\n' "$bootstrap_tree_rss_refusal"
+            bootstrap_tree_rss_ceiling_metadata
+        } > "$bootstrap_stage3_run_log.refusal" || :
         printf 'bootstrap-transcript-error: %s\n' "$bootstrap_tree_rss_refusal" >&2
+        bootstrap_tree_rss_ceiling_metadata >&2
         return 1
     }
     bootstrap_stage3_run_rss_cap=$bootstrap_tree_rss_cap_kib
     bootstrap_stage3_run_rss_ceiling=$bootstrap_tree_rss_ceiling_kib
+    bootstrap_stage3_run_rss_ceiling_arg=
+    if [ -n "$bootstrap_stage3_run_ceiling_env" ]; then
+        [ "$bootstrap_tree_rss_ceiling_request_kib" = "$SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB" ] || return 1
+        bootstrap_stage3_run_rss_ceiling_arg=--compiler-ceiling-kib=$bootstrap_tree_rss_ceiling_request_kib
+    fi
     # Recorded in the watchdog receipt: which layer chose the cap, and which
     # rule bounded it.
     bootstrap_stage3_run_rss_source=$bootstrap_tree_rss_source
@@ -466,9 +503,11 @@ ${ProgramData:-${PROGRAMDATA:-}}
                     --rss-cap-mode="${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
                     --max-rss-kib="$bootstrap_stage3_run_rss_cap" \
                     $bootstrap_stage3_run_rss_jobs_arg \
+                    $bootstrap_stage3_run_rss_ceiling_arg \
                     --cap-source="$bootstrap_stage3_run_rss_source" \
                     --cap-bound="$bootstrap_stage3_run_rss_bound" \
                     --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
+                    --timeout-seconds="${SIMPLE_BOOTSTRAP_NATIVE_BUILD_TIMEOUT_SECONDS:-0}" \
                     --receipt="$bootstrap_stage3_run_log.rss.env" -- \
                 env -i "HOME=$bootstrap_stage3_run_home" \
                     "PATH=$bootstrap_stage3_run_path" \
@@ -509,9 +548,11 @@ ${ProgramData:-${PROGRAMDATA:-}}
             --rss-cap-mode="${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
             --max-rss-kib="$bootstrap_stage3_run_rss_cap" \
             $bootstrap_stage3_run_rss_jobs_arg \
+            $bootstrap_stage3_run_rss_ceiling_arg \
             --cap-source="$bootstrap_stage3_run_rss_source" \
             --cap-bound="$bootstrap_stage3_run_rss_bound" \
             --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
+            --timeout-seconds="${SIMPLE_BOOTSTRAP_NATIVE_BUILD_TIMEOUT_SECONDS:-0}" \
             --receipt="$bootstrap_stage3_run_log.rss.env" -- \
         /bin/sh -c '
             if [ "${SIMPLE_BOOTSTRAP_SESSION_ID+x}${SIMPLE_BOOTSTRAP_SESSION_EXEC+x}" != "" ]; then

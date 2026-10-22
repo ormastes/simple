@@ -1,0 +1,73 @@
+# Admission for process-isolated MIR lowering. All budgets include resident
+# metadata, owned bodies, MIR, backend scratch, and child compiler processes.
+# The enclosing process-tree watchdog remains the enforcement owner.
+pub struct NativeMirSelectiveAdmissionV1:
+    workers: i64
+    reason: text
+
+pub fn native_mir_selective_admission_v1(requested: i64,
+        phase_kib: i64, enforced_tree_kib: i64, available_kib: i64,
+        parent_kib: i64, worker_kib: i64, exporter_kib: i64,
+        disk_budget_bytes: i64, disk_reserve_bytes: i64,
+        disk_available_bytes: i64) -> NativeMirSelectiveAdmissionV1:
+    if requested <= 0 or phase_kib <= 0 or enforced_tree_kib <= 0 or
+            available_kib <= 0 or parent_kib <= 0 or worker_kib <= 0 or
+            exporter_kib <= 0:
+        return NativeMirSelectiveAdmissionV1(workers: 0, reason: "positive request and explicit process-tree, phase, parent, worker and exporter budgets required")
+    if disk_budget_bytes <= 0 or disk_reserve_bytes <= 0 or disk_available_bytes <= 0:
+        return NativeMirSelectiveAdmissionV1(workers: 0, reason: "positive disk budget, reserve and available-space measurement required")
+    # Subtraction avoids overflow at adversarial i64 budget magnitudes.
+    if disk_reserve_bytes >= disk_available_bytes or
+            disk_budget_bytes > disk_available_bytes - disk_reserve_bytes:
+        return NativeMirSelectiveAdmissionV1(workers: 0, reason: "disk budget and reserve do not fit available space")
+    var limit = if phase_kib < enforced_tree_kib: phase_kib else: enforced_tree_kib
+    # Keep the existing host policy's 40% headroom, without multiplying a
+    # potentially maximal i64 by six.
+    val host_limit = (available_kib / 10) * 6 + ((available_kib % 10) * 6) / 10
+    if host_limit < limit: limit = host_limit
+    if parent_kib >= limit:
+        return NativeMirSelectiveAdmissionV1(workers: 0, reason: "parent budget exhausts the phase allocation")
+    val children_kib = limit - parent_kib
+    # Export and lowering are distinct phases. The coordinator never admits
+    # exporter memory concurrently with worker memory.
+    if exporter_kib > children_kib:
+        return NativeMirSelectiveAdmissionV1(workers: 0, reason: "single post-mono exporter does not fit the phase allocation")
+    val slots = children_kib / worker_kib
+    if slots <= 0:
+        return NativeMirSelectiveAdmissionV1(workers: 0, reason: "no MIR worker fits beside the parent")
+    var workers = if requested < 15: requested else: 15
+    if slots < workers: workers = slots
+    NativeMirSelectiveAdmissionV1(workers: workers, reason: "admitted")
+
+pub fn native_mir_selective_requested_workers_v1(args: [text], configured: text) -> i64:
+    var requested = if configured == "": 1 else: configured.to_i64() ?? 0
+    var index = 0
+    while index < args.len():
+        val arg = args[index]
+        if arg == "--threads" or arg == "--jobs" or arg == "-j":
+            if index + 1 >= args.len(): return 0
+            requested = args[index + 1].to_i64() ?? 0
+            index = index + 1
+        elif arg.starts_with("--threads="):
+            requested = arg.substring(10).to_i64() ?? 0
+        elif arg.starts_with("--jobs="):
+            requested = arg.substring(7).to_i64() ?? 0
+        index = index + 1
+    requested
+
+# df -Pk emits KiB, independently of host BLOCK_SIZE. Refuse unknown output;
+# an absent probe must never authorize a run that can exhaust the cache disk.
+pub fn native_mir_selective_disk_bytes_v1(output: text) -> i64:
+    val lines = output.trim().split("\n")
+    if lines.len() < 2: return 0
+    var fields: [text] = []
+    for field in lines[lines.len() - 1].split(" "):
+        if field != "": fields.push(field)
+    if fields.len() < 6: return 0
+    val kib = fields[3].to_i64() ?? 0
+    if kib <= 0 or kib > 9007199254740991: return 0
+    kib * 1024
+
+export NativeMirSelectiveAdmissionV1, native_mir_selective_admission_v1
+export native_mir_selective_disk_bytes_v1
+export native_mir_selective_requested_workers_v1

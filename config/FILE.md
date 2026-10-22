@@ -8,6 +8,7 @@ Configuration files for build, test, packaging, and tooling.
 |---|---|
 | `api` | API group registry (`api_registry.sdn`) — one schema for every callable API surface |
 | `bootstrap.sdn` | Bootstrap configuration |
+| `ci` | CI registries: `components.sdn` (separately built kernels/plugins/SIMD variants, read by scripts/ci/plan-components.shs) |
 | `cef` | CEF (Chromium Embedded Framework) binary-distribution pin (`cef_pin.sdn`) — version + per-platform archive digests for the Chrome render dynlib |
 | `critical_files.sdn` | Critical file guard configuration |
 | `critical_mode.sdn` | Mission-critical mode: dynamic-acquire lint severity + gpu.backend manifest pin |

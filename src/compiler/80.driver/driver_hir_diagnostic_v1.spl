@@ -1,0 +1,44 @@
+# Bounded explanatory evidence only. The six-field terminal remains authoritative.
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.utf8.{text_byte_len}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded_bytes}
+use compiler.frontend.core.flat_pool_codec.{flat_pool_escape, flat_pool_unescape}
+
+pub fn hir_diagnostic_read_text_v1(path: text, limit: i64) -> Result<text, text>:
+    val raw = file_read_regular_no_follow_bounded_bytes(path, limit)
+    if raw.is_err(): return Err("diagnostic unknown: missing or unreadable regular file")
+    validated_utf8_bytes_to_text_linear(raw.unwrap())
+
+pub fn hir_diagnostic_encode_v1(queue: text, terminal: text, reason: text) -> text:
+    if queue == "" or terminal == "" or reason == "": return ""
+    var parts: [text] = []
+    var retained_bytes: i64 = 0
+    for character in reason:
+        val width = text_byte_len(character)
+        if retained_bytes + width > 4096: break
+        parts.push(character)
+        retained_bytes = retained_bytes + width
+    val retained = parts.join("")
+    val original_bytes = text_byte_len(reason)
+    "hir-diagnostic-v1\n" + sha256_text(queue) + "\n" + sha256_text(terminal) + "\n" +
+        "{original_bytes}\n{retained_bytes}\n" + sha256_text(retained) + "\n" + flat_pool_escape(retained) + "\n"
+
+pub fn hir_diagnostic_decode_v1(queue: text, terminal: text, record: text) -> Result<text, text>:
+    if text_byte_len(record) > 12288: return Err("diagnostic unknown: oversized record")
+    val fields = record.split("\n")
+    if fields.len() != 8: return Err("diagnostic unknown: malformed record")
+    if fields[0] != "hir-diagnostic-v1" or fields[7] != "":
+        return Err("diagnostic unknown: unsupported version or framing")
+    if fields[1] != sha256_text(queue) or fields[2] != sha256_text(terminal):
+        return Err("diagnostic unknown: queue or terminal mismatch")
+    val original_bytes = fields[3].to_i64() ?? -1
+    val retained_bytes = fields[4].to_i64() ?? -1
+    if retained_bytes <= 0 or retained_bytes > 4096 or original_bytes < retained_bytes:
+        return Err("diagnostic unknown: invalid extent")
+    if fields[3] != "{original_bytes}" or fields[4] != "{retained_bytes}":
+        return Err("diagnostic unknown: noncanonical extent")
+    val reason = flat_pool_unescape(fields[6])
+    if flat_pool_escape(reason) != fields[6] or text_byte_len(reason) != retained_bytes or sha256_text(reason) != fields[5]:
+        return Err("diagnostic unknown: payload mismatch")
+    Ok(reason)

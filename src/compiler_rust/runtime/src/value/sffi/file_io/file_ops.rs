@@ -323,12 +323,6 @@ pub unsafe extern "C" fn rt_file_read_text(path_ptr: *const u8, path_len: u64) -
     }
 }
 
-/// Open, classify, and bounded-read one regular file through the same handle.
-///
-/// Unix uses `O_NOFOLLOW`; Windows opens the reparse point itself and rejects
-/// reparse-point and directory attributes from that handle. Unsupported hosts
-/// fail closed. `NIL` denotes every admission/read/UTF-8 failure, while an
-/// allocated empty text remains a successful empty-file result.
 /// Why the last `rt_file_read_regular_no_follow_bounded` call returned `NIL`.
 ///
 /// That function has eight indistinguishable `NIL` returns, and its Simple
@@ -384,6 +378,76 @@ pub extern "C" fn rt_file_read_regular_no_follow_last_failure() -> i64 {
     READ_NO_FOLLOW_LAST_FAILURE.with(|cell| cell.get())
 }
 
+/// Open, classify, and bounded-read one regular file through the same handle.
+///
+/// Rust twin of the C `rt_read_regular_no_follow_buffer` static helper in
+/// `src/runtime/runtime_native.c`: one admission + bounded read shared by the
+/// text and byte-array entry points, so both lanes factor the same arm codes
+/// through one helper. Unix uses `O_NOFOLLOW`; Windows opens the reparse point
+/// itself and rejects reparse-point and directory attributes from that handle.
+/// Unsupported hosts fail closed with the same arm 9 as the C lane.
+///
+/// Does NOT check the read capability (callers do) and does NOT UTF-8-validate
+/// the content (the text caller does). Returns the arm code (`READ_NF_OK` on
+/// success) plus the raw bytes; an allocated empty `Vec` remains a successful
+/// empty-file result.
+unsafe fn rt_read_regular_no_follow_buffer(
+    path_ptr: *const u8,
+    path_len: u64,
+    max_bytes: i64,
+) -> (i64, Vec<u8>) {
+    if path_ptr.is_null() || max_bytes < 0 {
+        return (READ_NF_BAD_ARGS, Vec::new());
+    }
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path_str = match std::str::from_utf8(path_bytes) {
+        Ok(path) if !path.is_empty() && !path.as_bytes().contains(&0) => path,
+        _ => return (READ_NF_BAD_UTF8_PATH, Vec::new()),
+    };
+    let path = Path::new(path_str);
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    // Reach same-handle admission even for a FIFO with no writer.
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
+    #[cfg(windows)]
+    options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
+    #[cfg(not(any(unix, windows)))]
+    return (READ_NF_READ, Vec::new());
+    let mut file = match options.open(path) {
+        Ok(file) => file,
+        Err(_) => return (READ_NF_OPEN, Vec::new()),
+    };
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(_) => return (READ_NF_METADATA, Vec::new()),
+    };
+    if !metadata.is_file() {
+        return (READ_NF_NOT_REGULAR, Vec::new());
+    }
+    if metadata.len() > max_bytes as u64 {
+        return (READ_NF_TOO_LARGE, Vec::new());
+    }
+    #[cfg(windows)]
+    if metadata.file_attributes() & 0x0000_0400 != 0 {
+        // FILE_ATTRIBUTE_REPARSE_POINT
+        return (READ_NF_REPARSE, Vec::new());
+    }
+    let read_limit = match (max_bytes as u64).checked_add(1) {
+        Some(limit) => limit,
+        None => return (READ_NF_TOO_LARGE, Vec::new()),
+    };
+    let mut raw = Vec::new();
+    let mut bounded = file.take(read_limit);
+    if bounded.read_to_end(&mut raw).is_err() {
+        return (READ_NF_READ, Vec::new());
+    }
+    if raw.len() as i64 > max_bytes {
+        return (READ_NF_TOO_LARGE, Vec::new());
+    }
+    (READ_NF_OK, raw)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rt_file_read_regular_no_follow_bounded(
     path_ptr: *const u8,
@@ -393,53 +457,9 @@ pub unsafe extern "C" fn rt_file_read_regular_no_follow_bounded(
     if !runtime_capability_allowed(READ_FILE_CAPABILITY_ID) {
         return read_no_follow_fail(READ_NF_CAPABILITY);
     }
-    if path_ptr.is_null() || max_bytes < 0 {
-        return read_no_follow_fail(READ_NF_BAD_ARGS);
-    }
-    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
-    let path_str = match std::str::from_utf8(path_bytes) {
-        Ok(path) if !path.is_empty() && !path.as_bytes().contains(&0) => path,
-        _ => return read_no_follow_fail(READ_NF_BAD_UTF8_PATH),
-    };
-    let path = Path::new(path_str);
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    #[cfg(windows)]
-    options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
-    #[cfg(not(any(unix, windows)))]
-    return RuntimeValue::NIL;
-    let mut file = match options.open(path) {
-        Ok(file) => file,
-        Err(_) => return read_no_follow_fail(READ_NF_OPEN),
-    };
-    let metadata = match file.metadata() {
-        Ok(metadata) => metadata,
-        Err(_) => return read_no_follow_fail(READ_NF_METADATA),
-    };
-    if !metadata.is_file() {
-        return read_no_follow_fail(READ_NF_NOT_REGULAR);
-    }
-    if metadata.len() > max_bytes as u64 {
-        return read_no_follow_fail(READ_NF_TOO_LARGE);
-    }
-    #[cfg(windows)]
-    if metadata.file_attributes() & 0x0000_0400 != 0 {
-        // FILE_ATTRIBUTE_REPARSE_POINT
-        return read_no_follow_fail(READ_NF_REPARSE);
-    }
-    let read_limit = match (max_bytes as u64).checked_add(1) {
-        Some(limit) => limit,
-        None => return read_no_follow_fail(READ_NF_TOO_LARGE),
-    };
-    let mut raw = Vec::new();
-    let mut bounded = file.take(read_limit);
-    if bounded.read_to_end(&mut raw).is_err() {
-        return read_no_follow_fail(READ_NF_READ);
-    }
-    if raw.len() as i64 > max_bytes {
-        return read_no_follow_fail(READ_NF_TOO_LARGE);
+    let (code, raw) = rt_read_regular_no_follow_buffer(path_ptr, path_len, max_bytes);
+    if code != READ_NF_OK {
+        return read_no_follow_fail(code);
     }
     if std::str::from_utf8(&raw).is_err() {
         return read_no_follow_fail(READ_NF_BAD_UTF8_CONTENT);
@@ -471,53 +491,9 @@ pub unsafe extern "C" fn rt_file_read_regular_no_follow_bounded_bytes(
     if !runtime_capability_allowed(READ_FILE_CAPABILITY_ID) {
         return read_no_follow_fail(READ_NF_CAPABILITY);
     }
-    if path_ptr.is_null() || max_bytes < 0 {
-        return read_no_follow_fail(READ_NF_BAD_ARGS);
-    }
-    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
-    let path_str = match std::str::from_utf8(path_bytes) {
-        Ok(path) if !path.is_empty() && !path.as_bytes().contains(&0) => path,
-        _ => return read_no_follow_fail(READ_NF_BAD_UTF8_PATH),
-    };
-    let path = Path::new(path_str);
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    #[cfg(windows)]
-    options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
-    #[cfg(not(any(unix, windows)))]
-    return RuntimeValue::NIL;
-    let mut file = match options.open(path) {
-        Ok(file) => file,
-        Err(_) => return read_no_follow_fail(READ_NF_OPEN),
-    };
-    let metadata = match file.metadata() {
-        Ok(metadata) => metadata,
-        Err(_) => return read_no_follow_fail(READ_NF_METADATA),
-    };
-    if !metadata.is_file() {
-        return read_no_follow_fail(READ_NF_NOT_REGULAR);
-    }
-    if metadata.len() > max_bytes as u64 {
-        return read_no_follow_fail(READ_NF_TOO_LARGE);
-    }
-    #[cfg(windows)]
-    if metadata.file_attributes() & 0x0000_0400 != 0 {
-        // FILE_ATTRIBUTE_REPARSE_POINT
-        return read_no_follow_fail(READ_NF_REPARSE);
-    }
-    let read_limit = match (max_bytes as u64).checked_add(1) {
-        Some(limit) => limit,
-        None => return read_no_follow_fail(READ_NF_TOO_LARGE),
-    };
-    let mut raw = Vec::new();
-    let mut bounded = file.take(read_limit);
-    if bounded.read_to_end(&mut raw).is_err() {
-        return read_no_follow_fail(READ_NF_READ);
-    }
-    if raw.len() as i64 > max_bytes {
-        return read_no_follow_fail(READ_NF_TOO_LARGE);
+    let (code, raw) = rt_read_regular_no_follow_buffer(path_ptr, path_len, max_bytes);
+    if code != READ_NF_OK {
+        return read_no_follow_fail(code);
     }
     let value = bytes_to_runtime_array(&raw);
     READ_NO_FOLLOW_LAST_FAILURE.with(|cell| cell.set(READ_NF_OK));
@@ -2100,9 +2076,16 @@ pub extern "C" fn rt_text_to_bytes(text: RuntimeValue) -> RuntimeValue {
     crate::value::collections::rt_string_bytes(text)
 }
 
-/// Convert a byte array ([u8]) to a UTF-8 text value.
+/// Convert bytes to UTF-8 text, replacing malformed sequences with U+FFFD.
+/// Invalid array representations/elements still return NIL; binary callers
+/// must retain their [u8] arrays instead of passing them through text.
 #[no_mangle]
 pub extern "C" fn rt_bytes_to_text(bytes: RuntimeValue) -> RuntimeValue {
+    // rt_array_len accepts zero-payload immediates as empty for legacy callers.
+    // This typed byte decoder requires a genuine non-null array receiver.
+    if !bytes.is_heap() || bytes.as_heap_ptr().is_null() {
+        return RuntimeValue::NIL;
+    }
     let len = crate::value::collections::rt_array_len(bytes);
     if len < 0 {
         return RuntimeValue::NIL;
@@ -2121,7 +2104,10 @@ pub extern "C" fn rt_bytes_to_text(bytes: RuntimeValue) -> RuntimeValue {
     // elements still yield NIL exactly as before.
     // See doc/08_tracking/bug/codegen_lane_still_slow_base64url_utf8_time_utils_2026-08-18.md
     if let Some(packed) = crate::value::collections::packed_byte_array_bytes(bytes) {
-        return unsafe { rt_string_new(packed.as_ptr(), packed.len() as u64) };
+        // Text is UTF-8, not an unchecked binary carrier. Cow borrows valid
+        // input; malformed sequences use the documented U+FFFD text policy.
+        let text = String::from_utf8_lossy(&packed);
+        return rt_string_new(text.as_ptr(), text.len() as u64);
     }
 
     let mut out = Vec::with_capacity(len as usize);
@@ -2137,7 +2123,8 @@ pub extern "C" fn rt_bytes_to_text(bytes: RuntimeValue) -> RuntimeValue {
         out.push(byte as u8);
     }
 
-    unsafe { rt_string_new(out.as_ptr(), out.len() as u64) }
+    let text = String::from_utf8_lossy(&out);
+    rt_string_new(text.as_ptr(), text.len() as u64)
 }
 
 /// Write raw bytes to file
@@ -3191,6 +3178,80 @@ sandbox_lowering:
             );
             assert!(occupied.is_dir());
             assert_eq!(fs::read_dir(temp_dir.path()).unwrap().count(), before);
+        }
+    }
+}
+
+
+#[cfg(test)]
+mod byte_text_utf8_invariant_tests {
+    use super::*;
+    use crate::value::collections::{
+        rt_array_new, rt_array_push, rt_string_data, rt_string_len,
+    };
+
+    fn boxed(bytes: &[u8]) -> RuntimeValue {
+        let array = rt_array_new(bytes.len() as u64);
+        assert!(!array.is_nil());
+        for byte in bytes {
+            assert!(rt_array_push(array, RuntimeValue::from_int(i64::from(*byte))));
+        }
+        array
+    }
+
+    fn assert_decoded(value: RuntimeValue, expected: &str) {
+        assert!(!value.is_nil());
+        let length = rt_string_len(value);
+        assert!(length >= 0);
+        let data = rt_string_data(value);
+        assert!(!data.is_null());
+        let bytes = unsafe { std::slice::from_raw_parts(data, length as usize) };
+        // Establish the invariant before exercising any str operation.
+        let actual = std::str::from_utf8(bytes).expect("decoder constructed invalid RuntimeString");
+        assert_eq!(actual.as_bytes(), expected.as_bytes());
+        assert_eq!(actual.chars().count(), expected.chars().count());
+    }
+
+    #[test]
+    fn malformed_packed_and_boxed_bytes_become_valid_replacement_text() {
+        let cases: &[(&[u8], &str)] = &[
+            (&[0x80, 0xff, 0xc3], "\u{fffd}\u{fffd}\u{fffd}"),
+            (&[0xc0, 0xaf], "\u{fffd}\u{fffd}"),
+            (&[0xed, 0xa0, 0x80], "\u{fffd}\u{fffd}\u{fffd}"),
+            (&[0xf4, 0x90, 0x80, 0x80], "\u{fffd}\u{fffd}\u{fffd}\u{fffd}"),
+            (&[0xe2, 0x82], "\u{fffd}"),
+            (&[0xf0, 0x9f, 0x98], "\u{fffd}"),
+            (&[b'a', 0xe2, 0x82, b'b'], "a\u{fffd}b"),
+            (&[0xe1, 0x80, 0xff], "\u{fffd}\u{fffd}"),
+            (&[0, 0xff, 0], "\0\u{fffd}\0"),
+        ];
+        for (input, expected) in cases {
+            let packed = unsafe { bytes_to_runtime_array(input) };
+            assert_decoded(rt_bytes_to_text(packed), expected);
+            assert_decoded(rt_bytes_to_text(boxed(input)), expected);
+        }
+    }
+
+    #[test]
+    fn valid_utf8_and_embedded_nul_are_unchanged_for_both_representations() {
+        for expected in ["", "ASCII", "A\0B", "한글😀e\u{301}", "\u{7f}\u{800}\u{10000}\u{10ffff}"] {
+            let input = expected.as_bytes();
+            assert_decoded(rt_bytes_to_text(unsafe { bytes_to_runtime_array(input) }), expected);
+            assert_decoded(rt_bytes_to_text(boxed(input)), expected);
+        }
+    }
+
+    #[test]
+    fn invalid_array_receivers_and_elements_keep_nil_contract() {
+        let text = rt_string_new(b"text".as_ptr(), 4);
+        for receiver in [RuntimeValue::NIL, RuntimeValue::from_int(0), RuntimeValue::from_bool(false), RuntimeValue::from_raw(1), RuntimeValue::from_int(7), text] {
+            assert!(rt_bytes_to_text(receiver).is_nil());
+        }
+        for invalid in [RuntimeValue::from_int(-1), RuntimeValue::from_int(256), RuntimeValue::NIL, text] {
+            let array = rt_array_new(2);
+            assert!(rt_array_push(array, RuntimeValue::from_int(65)));
+            assert!(rt_array_push(array, invalid));
+            assert!(rt_bytes_to_text(array).is_nil());
         }
     }
 }

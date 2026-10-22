@@ -1,0 +1,64 @@
+# Actual shared weaver on one complete current body per lease. These mechanical
+# operations are called only by the genuine ordered boundary producer/replayer;
+# a standalone frame constructor is never a gate or source capability.
+use compiler.driver.cache.hir_body_typecheck_lease_v1.{HirBodyArchiveV1, hir_body_archive_load_in_owned_scope_v1}
+use compiler.driver.cache.driver_cold_hir_weave_body_v1.{DriverColdHirWeaveBodyV1,
+    driver_cold_hir_weave_body_store_in_owned_scope_v1, driver_cold_hir_weave_body_load_in_owned_scope_v1}
+use compiler.common.cache_contract.hir_owned_artifact_cache_v1.{HirOwnedArtifactContextV1}
+use compiler.driver.driver_hir_cache.{hir_cache_last_warnings,
+    hir_cache_clear_last_warnings, hir_cache_promote_diagnostic_owner_v1}
+use compiler.semantics.aspect_weave.{AspectForwardWeaveClaimV1, weave_forward_advice_claim_in_module_v1}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
+
+struct DriverHirArchiveWeaveRewriteV1:
+    frame: DriverColdHirWeaveBodyV1
+    woven: i64
+
+fn driver_hir_weave_seed_borrowed_v1(cache: HirOwnedArtifactContextV1, original: HirBodyArchiveV1,
+        boundary_key: text, boundary_digest: text) -> Result<DriverColdHirWeaveBodyV1, text>:
+    val module = hir_body_archive_load_in_owned_scope_v1(original, original.input)?
+    driver_cold_hir_weave_body_store_in_owned_scope_v1(cache, original, boundary_key,
+        boundary_digest, module, hir_cache_last_warnings())
+
+pub fn driver_hir_weave_seed_v1(cache: HirOwnedArtifactContextV1, original: HirBodyArchiveV1,
+        boundary_key: text, boundary_digest: text) -> Result<DriverColdHirWeaveBodyV1, text>:
+    if transient_array_scope_state_v1() != 0 or hir_cache_last_warnings().len() != 0:
+        return Err("weave seed lease or warning owner occupied")
+    if not transient_scope_begin(): return Err("weave seed lease unavailable")
+    val result = driver_hir_weave_seed_borrowed_v1(cache, original, boundary_key, boundary_digest)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    val memo = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    if paused: hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not owned or not memo or not ended: panic("weave seed ownership failed")
+    result
+
+fn driver_hir_weave_rewrite_borrowed_v1(cache: HirOwnedArtifactContextV1,
+        frame: DriverColdHirWeaveBodyV1, module_key: text, identities: Dict<text, bool>,
+        claim: AspectForwardWeaveClaimV1) -> Result<DriverHirArchiveWeaveRewriteV1, text>:
+    val loaded = driver_cold_hir_weave_body_load_in_owned_scope_v1(cache, frame)?
+    val rewritten = weave_forward_advice_claim_in_module_v1(module_key, loaded.module, identities, claim)
+    if rewritten.1 == 0: return Ok(DriverHirArchiveWeaveRewriteV1(frame, 0))
+    val current = driver_cold_hir_weave_body_store_in_owned_scope_v1(cache, frame.original_parent,
+        frame.boundary_key, frame.boundary_digest, rewritten.0, loaded.warnings)?
+    Ok(DriverHirArchiveWeaveRewriteV1(current, rewritten.1))
+
+pub fn driver_hir_weave_rewrite_v1(cache: HirOwnedArtifactContextV1,
+        frame: DriverColdHirWeaveBodyV1, module_key: text, identities: Dict<text, bool>,
+        claim: AspectForwardWeaveClaimV1) -> Result<DriverHirArchiveWeaveRewriteV1, text>:
+    if transient_array_scope_state_v1() != 0 or hir_cache_last_warnings().len() != 0:
+        return Err("weave rewrite lease or warning owner occupied")
+    if not transient_scope_begin(): return Err("weave rewrite lease unavailable")
+    val result = driver_hir_weave_rewrite_borrowed_v1(cache, frame, module_key, identities, claim)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    val memo = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    if paused: hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not owned or not memo or not ended: panic("weave rewrite ownership failed")
+    result
+
+export DriverHirArchiveWeaveRewriteV1, driver_hir_weave_seed_v1, driver_hir_weave_rewrite_v1

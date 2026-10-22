@@ -3,69 +3,74 @@
 # CompilationContext implementation for link-time lazy instantiation.
 # Templates come from input SMF object files.
 
-use compiler.common.compilation_context.{CompilationContext, InstantiationMode, ContractMode, GenericTemplate, TemplateConcreteType, TypeRegistry}
+use compiler.common.compilation_context.{CompilationContext, InstantiationMode, ContractMode, GenericTemplate, TemplateConcreteType, TypeRegistry, TemplateCompiledUnit, InstantiationRecord}
 use compiler.common.di.DiContainer
 use compiler.tools.aop.AopWeaver
 use compiler.driver.pipeline_fn.compile_specialized_template_default
-use compiler.monomorphize.note_sdn.InstantiationEntry
 
 # ============================================================================
 # LinkerCompilationContext
 # ============================================================================
 
-class LinkerCompilationContext(CompilationContext):
+# The class-header spelling `class LinkerCompilationContext(CompilationContext):`
+# registered no trait implementation, so lazy_instantiator's
+# `TemplateInstantiator(linker_ctx, ...)` could not form the trait object
+# ("missing native trait implementation: CompilationContext for
+# LinkerCompilationContext"), and its methods had drifted from the trait's
+# signatures. The data lives in the class; the trait is implemented below.
+class LinkerCompilationContext:
     """Linker loads templates from input SMF object files."""
     object_templates: Dict<text, GenericTemplate>
     project_di: DiContainer
     project_aop: AopWeaver
     type_reg: TypeRegistry
-    recorded: [InstantiationEntry]
+    recorded: [InstantiationRecord]
 
-    me load_template(name: text) -> GenericTemplate?:
+impl CompilationContext for LinkerCompilationContext:
+    fn load_template(name: text) -> GenericTemplate?:
         if self.object_templates.has(name):
             Some(self.object_templates[name])
         else:
             nil
 
-    me has_template(name: text) -> bool:
+    fn has_template(name: text) -> bool:
         self.object_templates.has(name)
 
-    me type_registry() -> TypeRegistry:
+    fn type_registry() -> TypeRegistry:
         self.type_reg
 
-    me contract_mode() -> ContractMode:
+    fn contract_mode() -> ContractMode:
         # Linker applies all contracts
         ContractMode.All
 
-    me di_container() -> has_DiContainer:
-        self.project_di
+    fn di_container() -> DiContainer?:
+        Some(self.project_di)
 
-    me aop_weaver() -> has_AopWeaver:
-        self.project_aop
+    fn aop_weaver() -> AopWeaver?:
+        Some(self.project_aop)
 
-    me coverage_enabled() -> bool:
-        self.recorded.len() < 0
+    fn coverage_enabled() -> bool:
+        false
 
-    me compile_template(tmpl: GenericTemplate, type_args: [TemplateConcreteType]) -> text:
-        compile_specialized_template_default(
+    fn compile_template(tmpl: GenericTemplate, type_args: [TemplateConcreteType]) -> Result<TemplateCompiledUnit, text>:
+        val code = compile_specialized_template_default(
             tmpl, type_args,
             ContractMode.All,
             self.project_di,
             self.project_aop,
             false
         )
+        Ok(TemplateCompiledUnit(name: tmpl.name, symbols: [], code: Some(code),
+            effects: [], instantiation_mode: InstantiationMode.LinkTime))
 
-    me instantiation_mode() -> InstantiationMode:
-        val mode: InstantiationMode = InstantiationMode.LinkTime
-        mode
+    fn instantiation_mode() -> InstantiationMode:
+        InstantiationMode.LinkTime
 
-    me record_instantiation(entry: InstantiationEntry):
+    me record_instantiation(entry: InstantiationRecord):
         self.recorded = self.recorded.push(entry)
 
-
-# ============================================================================
-# LinkerCompilationContext Methods (was: impl LinkerCompilationContext:)
-# ============================================================================
+    fn instantiation_count() -> i64:
+        self.recorded.len()
 
 # ============================================================================
 # Exports

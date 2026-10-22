@@ -1,0 +1,94 @@
+use std.spec.{describe, it, expect}
+use app.build.submodule_git_adapter.{
+    parse_parent_gitlinks_v1, parse_parent_gitmodules_v1,
+    parse_submodule_policy_v1, validate_parent_submodule_closure_v1,
+    probe_selected_submodules_v1
+}
+use app.build.submodule_inventory.{SelectedGitlinkV1,
+    SubmoduleDeclarationV1, SubmodulePolicyV1}
+
+val PIN = "19553c58b7c933fea5affa2273d3b624ecc66099"
+val URL = "https://github.com/ormastes/Spipe.git"
+val CUDA_PIN = "e74405599b8ac4b5649258dc397af5b3ef4d508b"
+val CUDA_URL = "https://github.com/ormastes/simple_cuda_example.git"
+
+fn _parent_links_v1() -> [SelectedGitlinkV1]:
+    [SelectedGitlinkV1(".spipe/spipe", PIN),
+     SelectedGitlinkV1("examples/08_gpu/simple_cuda_example", CUDA_PIN)]
+
+fn _parent_declarations_v1() -> [SubmoduleDeclarationV1]:
+    [SubmoduleDeclarationV1(".spipe/spipe", URL),
+     SubmoduleDeclarationV1("examples/08_gpu/simple_cuda_example", CUDA_URL)]
+
+fn _parent_policies_v1() -> [SubmodulePolicyV1]:
+    [SubmodulePolicyV1(".spipe/spipe", PIN, URL, "test-pipeline", true,
+        "parent-tree", "README.md", "refs/heads/main"),
+     SubmodulePolicyV1("examples/08_gpu/simple_cuda_example", CUDA_PIN,
+        CUDA_URL, "independent-example", false, "parent-tree", "README.md",
+        "refs/heads/main")]
+
+describe "submodule Git adapter parsing and admission":
+    it "requires policy for every gitlink, including dormant optional pins":
+        val links = _parent_links_v1()
+        val declarations = _parent_declarations_v1()
+        val policies = _parent_policies_v1()
+        expect(validate_parent_submodule_closure_v1(links, declarations,
+            policies)).to_equal("")
+        expect(validate_parent_submodule_closure_v1(links, declarations,
+            [policies[0]])).to_equal("missing-or-duplicate-parent-policy")
+        var stale = _parent_policies_v1()
+        stale[1].pin = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        expect(validate_parent_submodule_closure_v1(links, declarations,
+            stale)).to_equal("parent-policy-pin-or-url-mismatch")
+        var orphan = _parent_policies_v1()
+        orphan.push(SubmodulePolicyV1("examples/dormant", PIN, URL,
+            "independent-example", false, "parent-tree", "README.md",
+            "refs/heads/main"))
+        expect(validate_parent_submodule_closure_v1(links, declarations,
+            orphan)).to_equal("policy-for-unselected-path")
+
+    it "derives selected pins only from mode-160000 parent-tree entries":
+        val source = "100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tREADME.md\n" +
+            "160000 commit " + PIN + "\t.spipe/spipe\n"
+        val links = parse_parent_gitlinks_v1(source)
+        expect(links.len()).to_equal(1)
+        expect(links[0].path).to_equal(".spipe/spipe")
+        expect(links[0].pin).to_equal(PIN)
+        expect(parse_parent_gitlinks_v1(
+            "160000 commit " + PIN + "\t../escape\n").len()).to_equal(0)
+
+    it "takes declaration URLs from gitmodules content":
+        val source = "[submodule \"spipe\"]\n\tpath = .spipe/spipe\n" +
+            "\turl = " + URL + "\n" +
+            "[submodule \"dormant\"]\n\tpath = examples/dormant\n" +
+            "\turl = https://github.com/example/dormant.git\n"
+        val entries = parse_parent_gitmodules_v1(source)
+        expect(entries.len()).to_equal(2)
+        expect(entries[0].path).to_equal(".spipe/spipe")
+        expect(entries[0].url).to_equal(URL)
+        expect(parse_parent_gitmodules_v1(
+            "[submodule \"bad\"]\n\tpath = ../bad\n\turl = " + URL + "\n"
+        ).len()).to_equal(0)
+
+    it "requires complete selected policy rows":
+        val source = "selected_submodule .spipe/spipe:\n" +
+            "    pin: " + PIN + "\n" +
+            "    url: " + URL + "\n" +
+            "    role: test-pipeline\n" +
+            "    required: true\n" +
+            "    provenance: parent-tree-gitlink-and-gitmodules\n" +
+            "    canary: README.md\n" +
+            "    branch: refs/heads/main\n"
+        val policy = parse_submodule_policy_v1(source)
+        expect(policy.len()).to_equal(1)
+        expect(policy[0].required).to_equal(true)
+        expect(policy[0].canary).to_equal("README.md")
+        expect(parse_submodule_policy_v1(
+            source.replace("required: true", "required: maybe")
+        ).len()).to_equal(0)
+
+    it "rejects malformed parent identity before any Git or network call":
+        val result = probe_selected_submodules_v1(".", "HEAD",
+            "config/build/submodule_inventory.sdn", [])
+        expect(result.status).to_equal("REJECT")
+        expect(result.reason).to_equal("invalid-input")

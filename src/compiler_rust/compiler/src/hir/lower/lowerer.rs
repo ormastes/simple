@@ -76,6 +76,11 @@ pub struct Lowerer {
     /// imported multiple times with different grouped symbols; path-only
     /// de-duplication skips later function imports.
     pub(super) loaded_import_targets: HashSet<(PathBuf, String)>,
+    /// Nesting depth of dependency-only import loads: an imported module's own
+    /// `use` statements, followed so its signatures resolve. Aliases those
+    /// statements declare are private to that module and must not become
+    /// names of the module being lowered (see `materialize_import_aliases`).
+    pub(super) dependency_import_depth: usize,
     /// Memory safety warning collector
     pub(super) memory_warnings: MemoryWarningCollector,
     /// Lifetime inference context for tracking reference lifetimes
@@ -103,6 +108,9 @@ pub struct Lowerer {
     pub(super) type_inference_config: TypeInferenceConfig,
     /// Pre-registered method return types: "ClassName.method" -> return TypeId
     pub(super) method_return_types: HashMap<String, TypeId>,
+    /// Authored free-function return types, before trait aliases erase to Any.
+    pub(super) declared_function_returns: HashMap<String, Option<crate::hir::HirTraitDispatch>>,
+    pub(super) trait_declared_owners: HashMap<std::path::PathBuf, HashMap<String, crate::hir::HirTraitDispatch>>,
     /// M12 3b: free-function parameter default-value expressions, keyed by
     /// function name (one Option per declared parameter; None = no default).
     /// Keyed by the emitted owner-specific symbol for flattened definitions.
@@ -160,6 +168,12 @@ pub struct Lowerer {
     pub(super) flatten_global_owners: HashMap<String, Vec<Option<String>>>,
     /// Owner-exact symbol of each colliding flattened global -> its owner.
     pub(super) flatten_global_symbol_owners: HashMap<String, Option<String>>,
+    /// Flattened unit only: struct/class name declared by two or more
+    /// distinct owners with differing layouts -> owner of each declaration
+    /// (see `module_lowering/flatten_struct_owner.rs`).
+    pub(super) flatten_struct_owners: super::module_lowering::FlattenStructOwners,
+    /// Per-owner type-name scope cache for `flatten_struct_owners`.
+    pub(super) flatten_struct_scopes: HashMap<Option<String>, super::module_lowering::FlattenStructScope>,
     /// When true, unknown types resolve to ANY instead of erroring.
     /// This allows compilation to proceed even when imports can't be fully resolved.
     pub(super) lenient_types: bool,
@@ -173,6 +187,16 @@ pub struct Lowerer {
     pub(super) extern_fn_names: HashSet<String>,
     /// Function names imported via `use` statements (should not become globals in MIR)
     pub(super) imported_function_names: HashSet<String>,
+    /// `HirType::Function` of each imported free function, for the function
+    /// used as a VALUE. `globals` keeps the RETURN type under the same name
+    /// (callers read it that way), so a value reference typed from `globals`
+    /// claimed `add_one: i64` -- MIR then `BoxInt`ed the code pointer and the
+    /// cranelift backend had no signature to build its `$boxed` entry from.
+    pub(super) imported_function_value_types: HashMap<String, TypeId>,
+    /// `HirType::Function` of each free function DECLARED in this unit, recorded
+    /// at registration so a module-level `val G = f` (lowered before any body)
+    /// is typed as a function value rather than ANY.
+    pub(super) declared_function_value_types: HashMap<String, TypeId>,
     /// Canonical `module_prefix__Type` layouts from all compilation units.
     pub(super) global_struct_defs: Option<GlobalStructDefs>,
     /// Bare names that have exactly one canonical nominal owner.  This is a
@@ -258,6 +282,7 @@ impl Lowerer {
             import_stack: Vec::new(),
             import_cycles: Vec::new(),
             loaded_import_targets: HashSet::new(),
+            dependency_import_depth: 0,
             memory_warnings: MemoryWarningCollector::strict(), // STRICT mode for Rust-level safety
             lifetime_context: LifetimeContext::new(),
             capability_env: CapabilityEnv::new(),
@@ -269,6 +294,8 @@ impl Lowerer {
             flatten_owner_import_bindings: HashMap::new(),
             current_function_owner: None,
             flatten_global_owners: HashMap::new(),
+            flatten_struct_owners: HashMap::new(),
+            flatten_struct_scopes: HashMap::new(),
             flatten_global_symbol_owners: HashMap::new(),
             type_aliases_reverse: HashMap::new(),
             function_aliases_reverse: HashMap::new(),
@@ -276,6 +303,8 @@ impl Lowerer {
             deprecation_warnings: DeprecationWarningCollector::new(),
             type_inference_config: TypeInferenceConfig::default(),
             method_return_types: HashMap::new(),
+            declared_function_returns: HashMap::new(),
+            trait_declared_owners: HashMap::new(),
             fn_param_defaults: HashMap::new(),
             imported_fn_param_defaults: HashMap::new(),
             global_fn_return_types: None,
@@ -285,6 +314,8 @@ impl Lowerer {
             lenient_globals: LenientGlobalCollector::new(),
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
+            imported_function_value_types: HashMap::new(),
+            declared_function_value_types: HashMap::new(),
             global_struct_defs: None,
             unique_global_struct_owners: None,
             struct_module_owners: None,
@@ -322,6 +353,7 @@ impl Lowerer {
             import_stack: Vec::new(),
             import_cycles: Vec::new(),
             loaded_import_targets: HashSet::new(),
+            dependency_import_depth: 0,
             memory_warnings: MemoryWarningCollector::strict(), // STRICT by default
             lifetime_context: LifetimeContext::new(),
             capability_env: CapabilityEnv::new(),
@@ -333,6 +365,8 @@ impl Lowerer {
             flatten_owner_import_bindings: HashMap::new(),
             current_function_owner: None,
             flatten_global_owners: HashMap::new(),
+            flatten_struct_owners: HashMap::new(),
+            flatten_struct_scopes: HashMap::new(),
             flatten_global_symbol_owners: HashMap::new(),
             type_aliases_reverse: HashMap::new(),
             function_aliases_reverse: HashMap::new(),
@@ -340,6 +374,8 @@ impl Lowerer {
             deprecation_warnings: DeprecationWarningCollector::new(),
             type_inference_config: TypeInferenceConfig::default(),
             method_return_types: HashMap::new(),
+            declared_function_returns: HashMap::new(),
+            trait_declared_owners: HashMap::new(),
             fn_param_defaults: HashMap::new(),
             imported_fn_param_defaults: HashMap::new(),
             global_fn_return_types: None,
@@ -349,6 +385,8 @@ impl Lowerer {
             lenient_globals: LenientGlobalCollector::new(),
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
+            imported_function_value_types: HashMap::new(),
+            declared_function_value_types: HashMap::new(),
             global_struct_defs: None,
             unique_global_struct_owners: None,
             struct_module_owners: None,
@@ -409,6 +447,7 @@ impl Lowerer {
             import_stack: Vec::new(),
             import_cycles: Vec::new(),
             loaded_import_targets: HashSet::new(),
+            dependency_import_depth: 0,
             memory_warnings: MemoryWarningCollector::new(), // Lenient mode (warnings only)
             lifetime_context: LifetimeContext::new(),
             capability_env: CapabilityEnv::new(),
@@ -420,6 +459,8 @@ impl Lowerer {
             flatten_owner_import_bindings: HashMap::new(),
             current_function_owner: None,
             flatten_global_owners: HashMap::new(),
+            flatten_struct_owners: HashMap::new(),
+            flatten_struct_scopes: HashMap::new(),
             flatten_global_symbol_owners: HashMap::new(),
             type_aliases_reverse: HashMap::new(),
             function_aliases_reverse: HashMap::new(),
@@ -427,6 +468,8 @@ impl Lowerer {
             deprecation_warnings: DeprecationWarningCollector::new(),
             type_inference_config: TypeInferenceConfig::default(),
             method_return_types: HashMap::new(),
+            declared_function_returns: HashMap::new(),
+            trait_declared_owners: HashMap::new(),
             fn_param_defaults: HashMap::new(),
             imported_fn_param_defaults: HashMap::new(),
             global_fn_return_types: None,
@@ -436,6 +479,8 @@ impl Lowerer {
             lenient_globals: LenientGlobalCollector::new(),
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
+            imported_function_value_types: HashMap::new(),
+            declared_function_value_types: HashMap::new(),
             global_struct_defs: None,
             unique_global_struct_owners: None,
             struct_module_owners: None,
@@ -1017,6 +1062,30 @@ impl Lowerer {
             flattened_global_symbol(owners, Some(source_owner), source_name)
         };
         (resolved != name).then_some(resolved)
+    }
+
+    /// Install the type-name scope of `current_function_owner` as the type
+    /// registry overlay (same-named flattened structs/classes resolve to the
+    /// owner's own or imported declaration), returning the previous overlay.
+    /// No-op (empty overlay) for units without a struct-name collision.
+    pub(super) fn enter_flatten_struct_scope(&mut self) -> super::module_lowering::FlattenStructScope {
+        if self.flatten_struct_owners.is_empty() {
+            return self.module.types.replace_scope_aliases(HashMap::new());
+        }
+        let owner = self.current_function_owner.clone();
+        let scope = match self.flatten_struct_scopes.get(&owner) {
+            Some(scope) => scope.clone(),
+            None => {
+                let scope = super::module_lowering::struct_scope_for(
+                    &self.flatten_struct_owners,
+                    &self.flatten_owner_import_bindings,
+                    owner.as_deref(),
+                );
+                self.flatten_struct_scopes.insert(owner, scope.clone());
+                scope
+            }
+        };
+        self.module.types.replace_scope_aliases(scope)
     }
 
     /// Type of module-global `name` as seen from the function being lowered:

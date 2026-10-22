@@ -235,6 +235,20 @@ impl RuntimeValue {
     /// Larger integers would need heap allocation.
     #[inline]
     pub fn from_int(i: i64) -> Self {
+        Self::from_int_scoped(i, true)
+    }
+
+    /// `from_int`, but a heap box for a wide value is NOT registered with the
+    /// open transient heap scope. For values stored into a long-lived container
+    /// (the array unpack path), where freeing the box at the end of whatever
+    /// scope happens to be open would leave the container dangling.
+    #[inline]
+    pub(crate) fn from_int_unscoped(i: i64) -> Self {
+        Self::from_int_scoped(i, false)
+    }
+
+    #[inline]
+    fn from_int_scoped(i: i64, track_in_scope: bool) -> Self {
         // The inline channel is a 61-bit SIGNED field (`i << 3`, tag 0). An
         // unconditional shift silently destroyed everything wider: 2^60 came
         // back with its sign flipped, 2^62 came back 0, i64::MAX came back -1 —
@@ -260,7 +274,12 @@ impl RuntimeValue {
             }
             (*ptr).header = HeapHeader::new(HeapObjectType::Int, size as u32);
             (*ptr).value = i;
-            super::collections::track_transient_heap(Self::from_heap_ptr(ptr as *mut HeapHeader))
+            let boxed = Self::from_heap_ptr(ptr as *mut HeapHeader);
+            if track_in_scope {
+                super::collections::track_transient_heap(boxed)
+            } else {
+                boxed
+            }
         }
     }
 

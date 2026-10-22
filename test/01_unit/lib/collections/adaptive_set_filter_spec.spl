@@ -1,0 +1,105 @@
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{AdaptiveTextSet, AdaptiveSetAttribute, adaptive_set_default_profile}
+use std.nogc_sync_mut.src.collections.adaptive_set_filter.{adaptive_set_filter_observed}
+
+var filter_test_calls: i64 = 0
+
+fn filter_keep_a(value: text) -> Result<bool, text>:
+    filter_test_calls = filter_test_calls + 1
+    Ok(value == "a")
+
+fn filter_keep_all(value: text) -> Result<bool, text>:
+    Ok(true)
+
+fn filter_keep_none(value: text) -> Result<bool, text>:
+    Ok(false)
+
+fn filter_fail_on_b(value: text) -> Result<bool, text>:
+    filter_test_calls = filter_test_calls + 1
+    if value == "b": return Err("predicate failed at b")
+    Ok(true)
+
+describe "caller-owned completed adaptive set filter observations":
+    it "returns the actual unique result and counts for every representation":
+        for attribute in [AdaptiveSetAttribute.Linear, AdaptiveSetAttribute.Hash, AdaptiveSetAttribute.Ordered]:
+            var source = AdaptiveTextSet.with_attribute(adaptive_set_default_profile(), "ast-filter-source", "native-test", attribute)
+            source.insert("b")
+            source.insert("a")
+            source.insert("a")
+            filter_test_calls = 0
+            val completed = adaptive_set_filter_observed(source, filter_keep_a).unwrap()
+            expect(filter_test_calls).to_equal(2)
+            expect(completed.result.snapshot_values()).to_equal(["a"])
+            val event = completed.observation.unwrap()
+            expect(event.site_id).to_equal("ast-filter-source")
+            expect(event.target_profile_id).to_equal("native-test")
+            expect(event.evaluated).to_equal(2)
+            expect(event.accepted).to_equal(1)
+            expect(source.snapshot_values()).to_equal(["a", "b"])
+            # The derived collection has no source AST identity of its own.
+            expect(completed.result.site_id).to_equal("")
+
+    it "omits empty-input selectivity and reports exact all/none counts":
+        var source = AdaptiveTextSet.with_site_and_target(adaptive_set_default_profile(), "ast-filter", "native-test")
+        filter_test_calls = 0
+        val empty = adaptive_set_filter_observed(source, filter_fail_on_b).unwrap()
+        expect(filter_test_calls).to_equal(0)
+
+        expect(empty.result.snapshot_values()).to_equal([])
+        expect(empty.observation).to_be_nil()
+        source.insert("b")
+        val all = adaptive_set_filter_observed(source, filter_keep_all).unwrap()
+        val none = adaptive_set_filter_observed(source, filter_keep_none).unwrap()
+        expect(all.observation.unwrap().evaluated).to_equal(1)
+        expect(all.observation.unwrap().accepted).to_equal(1)
+        expect(none.observation.unwrap().evaluated).to_equal(1)
+        expect(none.observation.unwrap().accepted).to_equal(0)
+        expect(none.result.snapshot_values()).to_equal([])
+
+    it "returns no completed event or partial result after predicate failure":
+        var source = AdaptiveTextSet.with_site_and_target(adaptive_set_default_profile(), "ast-filter", "native-test")
+        source.insert("a")
+        source.insert("b")
+        source.insert("c")
+        filter_test_calls = 0
+        val failed = adaptive_set_filter_observed(source, filter_fail_on_b)
+        expect(filter_test_calls).to_equal(2)
+        expect(failed.is_err()).to_be(true)
+        match failed:
+            case Err(reason): expect(reason).to_equal("predicate failed at b")
+            case Ok(_): assert(false)
+        expect(source.snapshot_values()).to_equal(["a", "b", "c"])
+
+    it "requires both source and target identities before observing":
+        val no_site = AdaptiveTextSet.with_site_and_target(adaptive_set_default_profile(), "", "native-test")
+        val no_target = AdaptiveTextSet.with_site_and_target(adaptive_set_default_profile(), "ast-filter", "")
+        expect(adaptive_set_filter_observed(no_site, filter_keep_all).is_err()).to_be(true)
+        expect(adaptive_set_filter_observed(no_target, filter_keep_all).is_err()).to_be(true)
+
+    it "rejects incomplete snapshots before calling the predicate":
+        var source = AdaptiveTextSet.with_site_and_target(adaptive_set_default_profile(), "ast-filter", "native-test")
+        source.insert("a")
+        # Models the observable invariant after a dropped backing-array push;
+        # this is not allocator fault-injection evidence.
+        source.size = 2
+        filter_test_calls = 0
+        expect(adaptive_set_filter_observed(source, filter_keep_a).is_err()).to_be(true)
+        expect(filter_test_calls).to_equal(0)
+
+    it "rejects a same-length snapshot with duplicate physical keys":
+        var source = AdaptiveTextSet.with_site_and_target(adaptive_set_default_profile(), "ast-filter", "native-test")
+        source.linear_values = ["a", "a"]
+        source.size = 2
+        filter_test_calls = 0
+        expect(adaptive_set_filter_observed(source, filter_keep_a).is_err()).to_be(true)
+        expect(filter_test_calls).to_equal(0)
+
+    it "owns result storage independently of the source":
+        var source = AdaptiveTextSet.with_site_and_target(adaptive_set_default_profile(), "ast-filter", "native-test")
+        source.insert("a")
+        val completed = adaptive_set_filter_observed(source, filter_keep_all).unwrap()
+        var output = completed.result
+        output.insert("b")
+        expect(source.snapshot_values()).to_equal(["a"])
+        expect(output.snapshot_values()).to_equal(["a", "b"])
+        expect(completed.observation.unwrap().accepted).to_equal(1)

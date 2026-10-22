@@ -19,7 +19,7 @@ with two Windows-relevant properties of the real spawned server process
   subsequent well-formed requests on the same stdin stream — a malformed
   line must not poison or kill the session for requests that follow it.
 
-Every spawn is wrapped in a shell-level `timeout` so a defect that hangs the
+Every spawn uses the bounded native process owner so a defect that hangs the
 server cannot hang this spec.
 """
 
@@ -27,22 +27,7 @@ server cannot hang this spec.
 # tag: system
 
 use std.spec
-use app.io.mod.{process_run, file_write}
-use std.io_runtime.{env_get}
-
-fn is_windows_host() -> bool:
-    val os_env = env_get("OS") ?? ""
-    os_env.contains("Windows")
-
-fn simple_binary() -> text:
-    if is_windows_host():
-        return "src/compiler_rust/target/release/simple.exe"
-    "src/compiler_rust/target/release/simple"
-
-fn posix_shell() -> text:
-    if is_windows_host():
-        return "sh"
-    "/bin/sh"
+use test.support.compiled_child_authority_v1.{test_compiled_child_run_v1, test_compiled_child_text_v1}
 
 fn init_request(id_literal: text) -> text:
     "{\"jsonrpc\":\"2.0\",\"id\":" + id_literal + ",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"crlf-spec\",\"version\":\"1.0\"}}}"
@@ -63,11 +48,11 @@ fn crlf_line(body: text) -> text:
     body + "\r\n"
 
 fn send_mcp_crlf(messages: text, timeout_seconds: text) -> text:
-    val tmp = "/tmp/mcp_stdio_crlf_input_" + messages.len().to_string() + ".txt"
-    file_write(tmp, messages)
-    val cmd = "cat " + tmp + " | timeout " + timeout_seconds + " " + simple_binary() + " run src/app/mcp/main.spl 2>/dev/null"
-    val (stdout, _stderr, _exit_code) = process_run(posix_shell(), ["-c", cmd])
-    stdout
+    val timeout = timeout_seconds.to_int() ?? 0
+    val result = test_compiled_child_run_v1("mcp_server", ["--stdio"], messages.bytes(), timeout * 1000).unwrap()
+    assert_equal(result.exit_code, 0)
+    assert_equal(result.timed_out, false)
+    test_compiled_child_text_v1(result.stdout)
 
 describe "MCP stdio JSON-RPC contract — CRLF framing":
     """

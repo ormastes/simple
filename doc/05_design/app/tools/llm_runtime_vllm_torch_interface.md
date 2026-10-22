@@ -121,7 +121,7 @@ stubs with focused tests, then return to the readiness bridge.
 - `src/app/llm_runtime/probe.spl`
 - `src/app/llm_runtime/serve_plan.spl`
 - `test/01_unit/app/llm_runtime/vllm_readiness_spec.spl`
-- `test/unit/app/llm_runtime/vllm_readiness_spec.spl`
+- `test/01_unit/app/llm_runtime/vllm_readiness_spec.spl`
 - `test/03_system/app/llm_runtime/feature/vllm_torch_readiness_spec.spl`
 - `doc/06_spec/03_system/app/llm_runtime/feature/vllm_torch_readiness_spec.md`
 
@@ -137,7 +137,7 @@ endpoints without starting vLLM or probing live HTTP endpoints.
 
 - `src/app/llm_runtime/live_models_probe.spl`
 - `test/01_unit/app/llm_runtime/vllm_live_models_probe_spec.spl`
-- `test/unit/app/llm_runtime/vllm_live_models_probe_spec.spl`
+- `test/01_unit/app/llm_runtime/vllm_live_models_probe_spec.spl`
 - `doc/06_spec/01_unit/app/llm_runtime/vllm_live_models_probe_spec.md`
 
 The live models response parser consumes an already-fetched HTTP status and
@@ -152,7 +152,7 @@ serving readiness.
 
 - `src/app/llm_runtime/live_request_plan.spl`
 - `test/01_unit/app/llm_runtime/vllm_live_request_plan_spec.spl`
-- `test/unit/app/llm_runtime/vllm_live_request_plan_spec.spl`
+- `test/01_unit/app/llm_runtime/vllm_live_request_plan_spec.spl`
 - `doc/06_spec/01_unit/app/llm_runtime/vllm_live_request_plan_spec.md`
 
 The live request planner produces sanitized, plan-only metadata for the
@@ -165,7 +165,7 @@ parameters before transport. It does not fetch HTTP or supervise vLLM.
 
 - `src/app/llm_runtime/live_chat_probe.spl`
 - `test/01_unit/app/llm_runtime/vllm_live_chat_probe_spec.spl`
-- `test/unit/app/llm_runtime/vllm_live_chat_probe_spec.spl`
+- `test/01_unit/app/llm_runtime/vllm_live_chat_probe_spec.spl`
 - `doc/06_spec/01_unit/app/llm_runtime/vllm_live_chat_probe_spec.md`
 
 The live chat response parser consumes an already-fetched HTTP status and
@@ -180,7 +180,7 @@ prove GPU serving readiness.
 
 - `src/app/llm_runtime/live_transport.spl`
 - `test/01_unit/app/llm_runtime/vllm_live_transport_spec.spl`
-- `test/unit/app/llm_runtime/vllm_live_transport_spec.spl`
+- `test/01_unit/app/llm_runtime/vllm_live_transport_spec.spl`
 - `doc/06_spec/01_unit/app/llm_runtime/vllm_live_transport_spec.md`
 
 The live transport wrapper reuses the existing app-owned
@@ -204,7 +204,7 @@ Runtime-adjacent decision record:
 
 - `src/app/llm_runtime/serve_lifecycle.spl`
 - `test/01_unit/app/llm_runtime/vllm_serve_lifecycle_spec.spl`
-- `test/unit/app/llm_runtime/vllm_serve_lifecycle_spec.spl`
+- `test/01_unit/app/llm_runtime/vllm_serve_lifecycle_spec.spl`
 - `doc/06_spec/01_unit/app/llm_runtime/vllm_serve_lifecycle_spec.md`
 
 The lifecycle wrapper gates `vllm serve` startup through the static serve plan,
@@ -227,7 +227,7 @@ Runtime-adjacent decision record:
 
 - `src/app/llm_runtime/serve_readiness.spl`
 - `test/01_unit/app/llm_runtime/vllm_serve_readiness_spec.spl`
-- `test/unit/app/llm_runtime/vllm_serve_readiness_spec.spl`
+- `test/01_unit/app/llm_runtime/vllm_serve_readiness_spec.spl`
 - `doc/06_spec/01_unit/app/llm_runtime/vllm_serve_readiness_spec.md`
 
 The readiness orchestration layer composes the static serve plan, request plan,
@@ -254,7 +254,7 @@ Runtime-adjacent decision record:
 
 - `src/app/llm_runtime/live_environment.spl`
 - `test/01_unit/app/llm_runtime/vllm_live_environment_spec.spl`
-- `test/unit/app/llm_runtime/vllm_live_environment_spec.spl`
+- `test/01_unit/app/llm_runtime/vllm_live_environment_spec.spl`
 - `doc/06_spec/01_unit/app/llm_runtime/vllm_live_environment_spec.md`
 
 The live-environment evidence classifier records whether a host has observed
@@ -281,7 +281,7 @@ Runtime-adjacent decision record:
 - `src/app/llm_dashboard/collectors/vllm_control_panel.spl`
 - `src/app/web_dashboard/server.spl`
 - `test/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.spl`
-- `test/unit/app/llm_dashboard/collectors/vllm_control_panel_spec.spl`
+- `test/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.spl`
 - `doc/06_spec/test/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.md`
 - `doc/06_spec/test/unit/app/llm_dashboard/collectors/vllm_control_panel_spec.md`
 
@@ -318,7 +318,7 @@ Runtime-adjacent decision record:
 - `src/app/llm_runtime/dashboard_live_control.spl`
 - `src/app/llm_runtime/dashboard_live_control_executor.spl`
 - `test/01_unit/app/llm_runtime/vllm_dashboard_live_control_spec.spl`
-- `test/unit/app/llm_runtime/vllm_dashboard_live_control_spec.spl`
+- `test/01_unit/app/llm_runtime/vllm_dashboard_live_control_spec.spl`
 - `doc/06_spec/test/01_unit/app/llm_runtime/vllm_dashboard_live_control_spec.md`
 - `doc/06_spec/test/unit/app/llm_runtime/vllm_dashboard_live_control_spec.md`
 
@@ -350,7 +350,7 @@ Runtime-adjacent decision record:
 
 - `src/app/llm_runtime/control_cli.spl`
 - `test/01_unit/app/llm_runtime/vllm_control_cli_spec.spl`
-- `test/unit/app/llm_runtime/vllm_control_cli_spec.spl`
+- `test/01_unit/app/llm_runtime/vllm_control_cli_spec.spl`
 - `doc/06_spec/test/01_unit/app/llm_runtime/vllm_control_cli_spec.md`
 - `doc/06_spec/test/unit/app/llm_runtime/vllm_control_cli_spec.md`
 
@@ -390,7 +390,7 @@ Runtime-adjacent decision record:
 ## Implemented Runtime Control CLI Registration Evidence Slice
 
 - `test/01_unit/app/cli/llm_runtime_control_command_spec.spl`
-- `test/unit/app/cli/llm_runtime_control_command_spec.spl`
+- `test/01_unit/app/cli/llm_runtime_control_command_spec.spl`
 - `doc/06_spec/test/01_unit/app/cli/llm_runtime_control_command_spec.md`
 - `doc/06_spec/test/unit/app/cli/llm_runtime_control_command_spec.md`
 
@@ -418,7 +418,7 @@ vLLM command logic.
 
 - `src/app/llm_runtime/control_cli.spl`
 - `test/01_unit/app/llm_runtime/vllm_control_cli_spec.spl`
-- `test/unit/app/llm_runtime/vllm_control_cli_spec.spl`
+- `test/01_unit/app/llm_runtime/vllm_control_cli_spec.spl`
 - `doc/06_spec/test/01_unit/app/llm_runtime/vllm_control_cli_spec.md`
 - `doc/06_spec/test/unit/app/llm_runtime/vllm_control_cli_spec.md`
 
@@ -450,7 +450,7 @@ Runtime-adjacent decision record:
 - `src/app/llm_dashboard/collectors/vllm_control_panel.spl`
 - `src/app/web_dashboard/server.spl`
 - `test/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.spl`
-- `test/unit/app/llm_dashboard/collectors/vllm_control_panel_spec.spl`
+- `test/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.spl`
 - `doc/06_spec/test/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.md`
 - `doc/06_spec/test/unit/app/llm_dashboard/collectors/vllm_control_panel_spec.md`
 
@@ -468,7 +468,7 @@ process or HTTP execution modules.
 
 - `src/lib/common/torch/dyn_sffi_ops.spl`
 - `test/01_unit/lib/common/torch/dyn_sffi_ops_readiness_spec.spl`
-- `test/unit/lib/common/torch/dyn_sffi_ops_readiness_spec.spl`
+- `test/01_unit/lib/common/torch/dyn_sffi_ops_readiness_spec.spl`
 - `doc/06_spec/01_unit/lib/common/torch/dyn_sffi_ops_readiness_spec.md`
 
 The dynamic Torch SFFI availability helper now delegates to

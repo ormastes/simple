@@ -212,7 +212,7 @@ The following APIs define the test contracts. Tests shall be written before impl
 
 ### 3.1 Register File
 
-```simple
+```simple:skip
 # hardware.rv64gc.core.rv64_regfile
 struct Rv64RegFile:
     fn read_gpr(index: i64) -> u64       # x0 always returns 0
@@ -226,7 +226,7 @@ struct Rv64RegFile:
 
 ### 3.2 ALU
 
-```simple
+```text
 # hardware.rv64gc.core.rv64_execute
 fn alu_execute(op: AluOp, a: u64, b: u64) -> u64
 fn alu_execute_w(op: AluOp, a: u64, b: u64) -> u64  # 32-bit W-variants
@@ -234,7 +234,7 @@ fn alu_execute_w(op: AluOp, a: u64, b: u64) -> u64  # 32-bit W-variants
 
 ### 3.3 Decoder
 
-```simple
+```text
 # hardware.rv64gc.core.rv64_decode
 fn decode(instruction: u32) -> Rv64Instruction
 fn decode_compressed(half: u16) -> Rv64Instruction
@@ -243,7 +243,7 @@ fn is_compressed(half: u16) -> bool
 
 ### 3.4 CSR
 
-```simple
+```text
 # hardware.rv64gc.core.rv64_csr
 struct Rv64CsrFile:
     fn read(addr: u16, priv_level: PrivMode) -> Result<u64, CsrError>
@@ -254,7 +254,7 @@ struct Rv64CsrFile:
 
 ### 3.5 MMU
 
-```simple
+```text
 # hardware.rv64gc.core.rv64_mmu
 struct Rv64Mmu:
     fn translate(vaddr: u64, access: MemAccess, priv_level: PrivMode) -> Result<u64, PageFault>
@@ -265,7 +265,7 @@ struct Rv64Mmu:
 
 ### 3.6 Hart (Top-Level CPU)
 
-```simple
+```text
 # hardware.rv64gc.core.rv64_hart
 struct Rv64Hart:
     fn step() -> Result<(), TrapInfo>     # Execute one instruction
@@ -277,7 +277,7 @@ struct Rv64Hart:
 
 ### 3.7 SoC (System-on-Chip)
 
-```simple
+```text
 # hardware.rv64gc.soc.rv64_soc
 struct Rv64Soc:
     fn new(ram_size: u64, num_harts: u64) -> Rv64Soc

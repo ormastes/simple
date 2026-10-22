@@ -1,0 +1,56 @@
+# @tag:in-development
+# @req REQ-TRC-001 REQ-TRC-018
+use std.spec.*
+use std.common.traceability.storage_scalar.{TRACE_STORAGE_SCALAR_PREFIX, encode_trace_storage_scalar, decode_trace_storage_scalar}
+use std.nogc_sync_mut.database.core.{SdnTable, SdnRow}
+
+describe "trace storage scalar":
+    it "round trips CSV punctuation, Unicode, and line breaks through SdnTable serialization":
+        val source = "comma, quote \" backslash \\ Unicode 日本 newline\nlast"
+        match encode_trace_storage_scalar(source):
+            case Err(reason): fail("valid UTF-8 failed encoding: {reason}")
+            case Ok(encoded):
+                expect(encoded.contains(",")).to_equal(false)
+                expect(encoded.contains("\"")).to_equal(false)
+                expect(encoded.contains("\\")).to_equal(false)
+                expect(encoded.contains("\n")).to_equal(false)
+                var table = SdnTable.new("trace_scalars", ["value"])
+                var row = SdnRow(fields: {}, _version: 0)
+                row.set("value", encoded)
+                table.add_row(row)
+                val serialized = table.to_sdn()
+                match SdnTable.parse(serialized):
+                    case None: fail("SdnTable parser rejected its serialized row")
+                    case Some(reloaded):
+                        val stored = reloaded.rows[0].get("value") ?? ""
+                        match decode_trace_storage_scalar(stored):
+                            case Err(reason): fail("reloaded scalar failed decoding: {reason}")
+                            case Ok(decoded): expect(decoded).to_equal(source)
+
+    it "rejects truncated, malformed, lowercase, and unsupported scalar encodings":
+        val truncated = TRACE_STORAGE_SCALAR_PREFIX + "0"
+        match decode_trace_storage_scalar(truncated):
+            case Ok(_): fail("truncated scalar was accepted")
+            case Err(reason): expect(reason).to_contain("truncated")
+        val malformed = TRACE_STORAGE_SCALAR_PREFIX + "GG"
+        match decode_trace_storage_scalar(malformed):
+            case Ok(_): fail("malformed hex was accepted")
+            case Err(reason): expect(reason).to_contain("uppercase hex")
+        val lowercase = TRACE_STORAGE_SCALAR_PREFIX + "af"
+        match decode_trace_storage_scalar(lowercase):
+            case Ok(_): fail("noncanonical lowercase hex was accepted")
+            case Err(reason): expect(reason).to_contain("uppercase hex")
+        match decode_trace_storage_scalar("trace-utf8-hex/v2:41"):
+            case Ok(_): fail("unsupported scalar version was accepted")
+            case Err(reason): expect(reason).to_contain("version")
+
+    it "rejects byte sequences that are not valid UTF-8":
+        val invalid_utf8 = TRACE_STORAGE_SCALAR_PREFIX + "FF"
+        match decode_trace_storage_scalar(invalid_utf8):
+            case Ok(_): fail("invalid UTF-8 scalar was accepted")
+            case Err(reason): expect(reason).to_contain("UTF-8")
+
+    it "rejects non-ASCII hex payloads before character indexing":
+        match decode_trace_storage_scalar(TRACE_STORAGE_SCALAR_PREFIX + "é"):
+            case Ok(_): fail("non-ASCII hex payload was accepted")
+            case Err(reason): expect(reason).to_contain("uppercase hex")

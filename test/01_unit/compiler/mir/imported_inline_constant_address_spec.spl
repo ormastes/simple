@@ -1,0 +1,74 @@
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_lowering.MirLowering
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+use compiler.mir.mir_lowering_types.{MirError}
+use compiler.common.diagnostics.span.{Span}
+
+fn lower_address_fixture(source: text) -> MirLowering:
+    val path = "inline_constant_address.spl"
+    val parsed = parse_full_frontend(source, path, path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(parsed)
+    expect(hir_lowering.errors.len()).to_equal(0)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    expect(lowering.errors.len()).to_equal(0)
+    lowering
+
+describe "inline constant address ownership":
+    it "rejects imported value provenance even when the consumer symbol is public":
+        var lowering = lower_address_fixture("pub val VALUE: i64 = 37\nfn main() -> i64:\n    VALUE\n")
+        expect(lowering.global_constants_by_id.len()).to_equal(1)
+        val symbol_id = lowering.global_constants_by_id.keys()[0]
+        val symbol = lowering.symbols.get_symbol_raw(symbol_id).unwrap()
+        expect(symbol.visibility.is_public()).to_equal(true)
+        # Provider registration imports the folded value, never the provider's
+        # initializer expression. Reproduce that origin state with a Public
+        # consumer symbol: consumer visibility must not authorize storage.
+        lowering.global_const_exprs = {}
+        val before = lowering.builder.module.statics.len()
+        val result = lowering.materialize_folded_global_static_for_address(symbol_id)
+        expect(result.?).to_equal(false)
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.builder.module.statics.len()).to_equal(before)
+
+    it "retains addressable storage for a locally declared private constant":
+        var lowering = lower_address_fixture("val VALUE: i64 = 37\nfn main() -> i64:\n    VALUE\n")
+        expect(lowering.global_constants_by_id.len()).to_equal(1)
+        val symbol_id = lowering.global_constants_by_id.keys()[0]
+        expect(lowering.global_const_exprs.contains(symbol_id)).to_equal(true)
+        val result = lowering.materialize_folded_global_static_for_address(symbol_id)
+        expect(result.?).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.builder.module.statics.len()).to_equal(1)
+
+describe "lifted lambda diagnostics":
+    it "retains child fatal errors and advisories before rejecting publication":
+        var lowering = lower_address_fixture("fn main() -> i64:\n    0\n")
+        val span = Some(Span.new(10, 17, 2, 3))
+        val fatal = MirError(message: "child ownership error", span: span, fatal: true)
+        val advisory = MirError(message: "child advisory", span: span, fatal: false)
+        expect(lowering.absorb_lifted_diagnostics([fatal], [advisory])).to_equal(false)
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors[0].message).to_equal("child ownership error")
+        expect(lowering.errors[0].fatal).to_equal(true)
+        expect(lowering.errors[0].span).to_equal(span)
+        expect(lowering.mir_advisories.len()).to_equal(1)
+        expect(lowering.mir_advisories[0].message).to_equal("child advisory")
+        expect(lowering.mir_advisories[0].fatal).to_equal(false)
+        expect(lowering.mir_advisories[0].span).to_equal(span)
+
+    it "keeps warning-only diagnostics non-fatal and preserves prior errors":
+        var lowering = lower_address_fixture("fn main() -> i64:\n    0\n")
+        lowering.errors = [MirError(message: "parent warning", span: nil, fatal: false)]
+        val warning = MirError(message: "child warning", span: nil, fatal: false)
+        expect(lowering.absorb_lifted_diagnostics([warning], [])).to_equal(true)
+        expect(lowering.errors.len()).to_equal(2)
+        expect(lowering.errors[0].message).to_equal("parent warning")
+        expect(lowering.errors[1].message).to_equal("child warning")
+        expect(lowering.errors[1].fatal).to_equal(false)

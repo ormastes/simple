@@ -1,0 +1,116 @@
+# Bounded HTTP/1.1 non-upgraded Docker attach response for the fixed fixture.
+# This proves syntax only. Container identity and Tty=false must come from
+# the trusted daemon's create/inspect evidence; neither is in this response.
+use app.build.scheduler.docker_attach_frames.{DockerAttachDecodedV1, decode_docker_attach_frames_v1}
+
+fn docker_attach_exact_id_v1(container_id: text) -> bool:
+    if container_id.len() != 64:
+        return false
+    for c in container_id.chars():
+        if not ((c >= "0" and c <= "9") or (c >= "a" and c <= "f")):
+            return false
+    true
+
+fn docker_attach_ascii_equal_v1(bytes: [u8], expected: text) -> bool:
+    val wanted = expected.bytes()
+    if bytes.len() != wanted.len():
+        return false
+    var index: i64 = 0
+    while index < bytes.len():
+        var actual = bytes[index] as i64
+        if actual >= 65 and actual <= 90:
+            actual = actual + 32
+        if actual != (wanted[index] as i64):
+            return false
+        index = index + 1
+    true
+
+# Header cap includes the terminating CRLFCRLF. No chunked, upgraded,
+# compressed, or content-length-delimited bodies are admitted by this lane.
+fn parse_docker_attach_http_v1(bytes: [u8], tty: bool) -> Result<DockerAttachDecodedV1, text>:
+    if tty:
+        return Err("docker attach HTTP: Tty=false required")
+    if bytes.len() > 1089536:
+        return Err("docker attach HTTP: wire cap exceeded")
+    var header_end: i64 = -1
+    var cursor: i64 = 0
+    while cursor + 3 < bytes.len() and cursor + 4 <= 8192:
+        if bytes[cursor] == 13 and bytes[cursor + 1] == 10 and bytes[cursor + 2] == 13 and bytes[cursor + 3] == 10:
+            header_end = cursor + 4
+            break
+        cursor = cursor + 1
+    if header_end < 0:
+        return Err("docker attach HTTP: missing or oversized headers")
+    cursor = 0
+    var line_number: i64 = 0
+    var content_type_seen = false
+    while cursor < header_end - 2:
+        val line_start = cursor
+        while cursor + 1 < header_end and not (bytes[cursor] == 13 and bytes[cursor + 1] == 10):
+            if bytes[cursor] < 32 or bytes[cursor] > 126:
+                return Err("docker attach HTTP: non-ASCII or control in header")
+            cursor = cursor + 1
+        val line_end = cursor
+        if line_number == 0:
+            # Deliberately reject HTTP/1.0, 101, all interim/error statuses,
+            # and malformed status prefixes. Reason phrase is optional.
+            val prefix = "HTTP/1.1 200 ".bytes()
+            if line_end < prefix.len():
+                return Err("docker attach HTTP: unsupported status")
+            var i: i64 = 0
+            while i < prefix.len():
+                if bytes[i] != prefix[i]:
+                    return Err("docker attach HTTP: expected HTTP/1.1 200; upgrades unsupported")
+                i = i + 1
+        else:
+            var colon = line_start
+            while colon < line_end and bytes[colon] != 58:
+                val c = bytes[colon] as i64
+                if not ((c >= 65 and c <= 90) or (c >= 97 and c <= 122) or (c >= 48 and c <= 57) or c == 45):
+                    return Err("docker attach HTTP: unsupported header name")
+                colon = colon + 1
+            if colon == line_start or colon == line_end:
+                return Err("docker attach HTTP: malformed header")
+            val name = bytes[line_start:colon]
+            var value_start = colon + 1
+            var value_end = line_end
+            while value_start < value_end and bytes[value_start] == 32:
+                value_start = value_start + 1
+            while value_end > value_start and bytes[value_end - 1] == 32:
+                value_end = value_end - 1
+            val value = bytes[value_start:value_end]
+            if docker_attach_ascii_equal_v1(name, "content-type"):
+                if content_type_seen or not (docker_attach_ascii_equal_v1(value, "application/vnd.docker.raw-stream") or docker_attach_ascii_equal_v1(value, "application/vnd.docker.multiplexed-stream")):
+                    return Err("docker attach HTTP: missing unique raw-stream content type")
+                content_type_seen = true
+            if (docker_attach_ascii_equal_v1(name, "upgrade") or docker_attach_ascii_equal_v1(name, "transfer-encoding") or
+                    docker_attach_ascii_equal_v1(name, "content-length") or docker_attach_ascii_equal_v1(name, "content-encoding")):
+                return Err("docker attach HTTP: unsupported response framing")
+            if docker_attach_ascii_equal_v1(name, "connection") and not docker_attach_ascii_equal_v1(value, "close"):
+                return Err("docker attach HTTP: unsupported connection mode")
+        line_number = line_number + 1
+        if line_number > 65:
+            return Err("docker attach HTTP: header count cap exceeded")
+        cursor = line_end + 2
+    if not content_type_seen:
+        return Err("docker attach HTTP: raw-stream content type required")
+    cursor = header_end
+    var frame_count: i64 = 0
+    while cursor < bytes.len():
+        if bytes.len() - cursor < 8:
+            return Err("docker attach HTTP: partial frame header")
+        frame_count = frame_count + 1
+        if frame_count > 4096:
+            return Err("docker attach HTTP: frame count cap exceeded")
+        var size: i64 = 0
+        var i: i64 = 4
+        while i < 8:
+            size = size * 256 + (bytes[cursor + i] as i64)
+            i = i + 1
+        cursor = cursor + 8
+        if size > 1048576 or size > bytes.len() - cursor:
+            return Err("docker attach HTTP: oversized or partial frame")
+        cursor = cursor + size
+    decode_docker_attach_frames_v1(bytes[header_end:], 1048576)
+
+export docker_attach_exact_id_v1, parse_docker_attach_http_v1

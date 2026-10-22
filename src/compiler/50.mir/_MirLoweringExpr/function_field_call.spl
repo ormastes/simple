@@ -1,0 +1,125 @@
+use compiler.mir.mir_lowering_types.MirLowering
+use compiler.mir.mir_types.{LocalId, MirType, MirTypeKind, MirSignature}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.MirOperand
+use compiler.mir.mir_instruction_support.mir_operand_copy
+use compiler.hir.hir_definitions.{HirExpr, HirCallArg}
+use compiler.hir.hir_types.{HirTypeKind, SymbolKind}
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+use compiler.mir.mir_lowering_stmts.*
+use compiler.mir._MirLowering.provider_metadata.mir_class_identity
+use compiler.mir.nominal_owner_diagnostics.{mir_nominal_profile_take_receipt}
+
+# This diagnostic bridge belongs to this module. Sibling private SFFI
+# wrappers are not exported by their wildcard imports in the native lane.
+@unsafe(reason: "raw tagged-enum discriminant projection ABI", capabilities: [ffi])
+extern fn rt_enum_discriminant<T>(value: T) -> i64
+
+@always_inline
+fn _function_field_hir_enum_discriminant(value: HirTypeKind) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_discriminant<HirTypeKind>(value)
+
+@always_inline
+fn _function_field_mir_enum_discriminant(value: MirTypeKind) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_discriminant<MirTypeKind>(value)
+
+impl MirLowering:
+    me try_lower_function_field_call(receiver: HirExpr, receiver_local: LocalId,
+        field_name: text, args: [HirCallArg]) -> LocalId?:
+        # Resolve declaration layout and reuse the already evaluated receiver.
+        val owner = self.resolve_base_struct_name(receiver, receiver_local) ?? ""
+        val layout = self.declared_struct_layout_key(owner)
+        if not self.struct_field_order.has(layout) or not self.struct_field_hir_type.has(layout):
+            return nil
+        val names = self.struct_field_order[layout]
+        val types = self.struct_field_hir_type[layout]
+        var field_index = 0
+        while field_index < names.len():
+            if names[field_index] == field_name:
+                break
+            field_index = field_index + 1
+        if field_index >= names.len() or field_index >= types.len():
+            return nil
+        val field_type = self.declared_field_type_in_current_table(layout, field_index, types[field_index])
+        match field_type.kind:
+            case HirTypeKind.Error:
+                match types[field_index].kind:
+                    case HirTypeKind.Function(_, _, _):
+                        self.error_fatal("function field signature ownership is unavailable or unsupported in the consumer", Some(receiver.span))
+                    case _: ()
+                return nil
+            case HirTypeKind.Function(params, ret, _):
+                if args.len() != params.len():
+                    self.error_fatal("function field call argument count differs from its declaration", Some(receiver.span))
+                    return nil
+                match ret.kind:
+                    case HirTypeKind.Error:
+                        self.error_fatal("function field return owner is unavailable in the consumer", Some(receiver.span))
+                        return nil
+                    case _: ()
+                var operands: [MirOperand] = []
+                var parameter_types: [MirType] = []
+                # Capture the callable before argument side effects can replace
+                # the field on this receiver.
+                var builder = self.builder
+                val callee = builder.emit_get_field(mir_operand_copy(receiver_local), field_index, MirType.i64())
+                self.builder = builder
+                var index = 0
+                while index < args.len():
+                    if args[index].has_name:
+                        self.error_fatal("function field call requires positional arguments", Some(args[index].span))
+                        return nil
+                    val argument = self.lower_method_call_arg(args[index], params, index)
+                    operands = operands.push(mir_operand_copy(argument))
+                    parameter_types = parameter_types.push(self.lower_type(params[index]))
+                    index = index + 1
+                val return_type = self.lower_type(ret)
+                val signature = MirSignature(params: parameter_types, return_type: return_type, is_variadic: false)
+                val result = self.emit_function_value_call(callee, operands, signature, return_type)
+                if mir_nominal_profile_take_receipt():
+                    val actual_mir = self.local_mir_type_of(result) ?? MirType.unit()
+                    eprint("[nominal-owner] function-field-return field={field_name} layout={layout} local={result.id} hir_ret_disc={_function_field_hir_enum_discriminant(ret.kind)} mir_ret_disc={_function_field_mir_enum_discriminant(return_type.kind)} operand_mir_disc={_function_field_mir_enum_discriminant(actual_mir.kind)}\n")
+                    match ret.kind:
+                        case HirTypeKind.Result(ok, err):
+                            eprint("[nominal-owner] function-field-result ok_hir_disc={_function_field_hir_enum_discriminant(ok.kind)} err_hir_disc={_function_field_hir_enum_discriminant(err.kind)}\n")
+                            match ok.kind:
+                                case HirTypeKind.Array(element, _):
+                                    eprint("[nominal-owner] function-field-ok-array element_hir_disc={_function_field_hir_enum_discriminant(element.kind)}\n")
+                                    match element.kind:
+                                        case HirTypeKind.Named(element_symbol, _):
+                                            val element_name = self.symbols.symbol_name_scalar_raw(element_symbol.id)
+                                            val element_module = self.symbols.symbol_defining_module_scalar_raw(element_symbol.id)
+                                            eprint("[nominal-owner] function-field-ok-array-owner symbol={element_symbol.id} name={element_name} module={element_module}\n")
+                                        case _: ()
+                                case _: ()
+                        case _: ()
+                self.remember_local_hir_type(result.id, ret, 0, 0)
+                match ret.kind:
+                    case HirTypeKind.Named(return_symbol, _):
+                        if val declaration = self.symbols.get_symbol_raw(return_symbol.id):
+                            match declaration.kind:
+                                case SymbolKind.Struct:
+                                    val result_layout = self.declared_struct_layout_key(self.composite_layout_key(declaration))
+                                    if self.struct_field_order.has(result_layout):
+                                        self.struct_value_syms[result.id] = result_layout
+                                case SymbolKind.Class:
+                                    self.struct_value_syms[result.id] = mir_class_identity(declaration)
+                                case _: ()
+                    case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                        self.runtime_array_locals[result.id] = true
+                        self.mark_runtime_value_local(result.id)
+                    case HirTypeKind.Dict(_, _):
+                        self.runtime_dict_locals[result.id] = true
+                        self.mark_runtime_value_local(result.id)
+                    case HirTypeKind.Optional(_):
+                        self.option_value_locals[result.id] = true
+                        self.mark_runtime_value_local(result.id)
+                    case _: ()
+                if mir_nominal_profile_take_receipt():
+                    val result_owner = self.struct_value_syms.get(result.id) ?? ""
+                    eprint("[nominal-owner] function-field-recorded field={field_name} local={result.id} owner={result_owner}\n")
+                return Some(result)
+            case _: return nil

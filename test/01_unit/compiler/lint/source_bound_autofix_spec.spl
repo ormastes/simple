@@ -1,0 +1,191 @@
+# @req REQ-LINT-SOURCE-BOUND-FIX
+# Actual public application/configuration APIs. Authored, execution UNRUN.
+use std.spec.{describe, it, expect, step}
+use std.tooling.easy_fix.{EasyFix, Replacement, FixConfidence}
+use compiler.tools.fix.main.{FixToolApplicator}
+use compiler.tools.fix.source_edits.{validated_fix_sources}
+use compiler.tools.lint.main.{Linter, LintConfig, LintLevel, LintCategory, LintDiag, LintRunResult, collect_easy_fixes, apply_collected_fixes}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_read, file_remove}
+use std.io_runtime.getpid
+
+fn source_bound_fix(path: text, start: i64, finish: i64, line: i64, column: i64, value: text) -> EasyFix:
+    var fix = EasyFix.create("SOURCE-BOUND", "replace the selected literal", FixConfidence.Certain)
+    fix.add_replacement(Replacement.create(path, start, finish, line, column, value))
+    fix
+
+fn source_bound_literal_fix(path: text, source: text) -> EasyFix:
+    val offset = source.find("1")
+    source_bound_fix(path, offset, offset + 1, 1, offset + 1, "2")
+
+fn source_bound_temp(name: text) -> text:
+    "/tmp/simple_source_bound_fix_{getpid()}_{name}.spl"
+
+fn source_bound_warning_count(source: text, code: text) -> i64:
+    var count = 0
+    for result in Linter.new().lint_source("/tmp/source_bound_spec.spl", source):
+        if result.lint.code == code: count = count + 1
+    count
+
+describe "source-bound warning fixes":
+    it "applies an admitted replacement through the existing fix applicator":
+        step("Validate the original coordinate and apply the actual public API")
+        val source = "val answer = 1\n"
+        val result = FixToolApplicator.apply([source_bound_literal_fix("a.spl", source)], {"a.spl": source})
+        expect(result.is_ok()).to_be(true)
+        expect(result.unwrap()["a.spl"]).to_equal("val answer = 2\n")
+
+    it "rejects a different file before applying any edit":
+        step("The replacement path must belong to the analyzed source map")
+        val result = validated_fix_sources([source_bound_fix("other.spl", 0, 1, 1, 1, "b")], {"a.spl": "a"})
+        expect(result.is_err()).to_be(true)
+        expect(result.unwrap_err()).to_contain("different source")
+
+    it "rejects negative reversed and out-of-range spans":
+        step("Malformed ranges cannot reach the legacy permissive splice fallback")
+        for bounds in [(-1, 0), (1, 0), (0, 9)]:
+            val result = FixToolApplicator.apply([source_bound_fix("a.spl", bounds.0, bounds.1, 1, 1, "b")], {"a.spl": "a"})
+            expect(result.is_err()).to_be(true)
+            expect(result.unwrap_err()).to_contain("outside the analyzed source")
+
+    it "rejects stale line-column coordinates even when offsets fit":
+        step("A plausible range must also identify the diagnostic's exact location")
+        val result = validated_fix_sources([source_bound_fix("a.spl", 1, 2, 1, 1, "b")], {"a.spl": "aa"})
+        expect(result.is_err()).to_be(true)
+        expect(result.unwrap_err()).to_contain("does not match its line and column")
+
+    it "rejects overlap and ambiguous same-position insertions":
+        step("Neither descending order nor confidence resolves conflicting edits")
+        val overlap = [source_bound_fix("a.spl", 0, 3, 1, 1, "x"), source_bound_fix("a.spl", 1, 2, 1, 2, "y")]
+        expect(validated_fix_sources(overlap, {"a.spl": "abc"}).is_err()).to_be(true)
+        val insertions = [source_bound_fix("a.spl", 0, 0, 1, 1, "x"), source_bound_fix("a.spl", 0, 0, 1, 1, "y")]
+        expect(validated_fix_sources(insertions, {"a.spl": "abc"}).is_err()).to_be(true)
+
+    it "keeps adjacent edits and Unicode line coordinates valid":
+        step("Use the source text indexing contract across a Unicode prefix")
+        val source = "# 한🙂\nab\n"
+        val start = source.find("ab")
+        val fixes = [source_bound_fix("a.spl", start, start + 1, 2, 1, "x"), source_bound_fix("a.spl", start + 1, start + 2, 2, 2, "y")]
+        val result = validated_fix_sources(fixes, {"a.spl": source})
+        expect(result.is_ok()).to_be(true)
+        expect(result.unwrap()["a.spl"]).to_equal("# 한🙂\nxy\n")
+
+    it "preserves the file when lint's analyzed revision is stale":
+        step("An intervening edit cannot be overwritten using older diagnostic offsets")
+        val path = source_bound_temp("stale")
+        val original = "val answer = 1\n"
+        val changed = "# edited\nval answer = 1\n"
+        expect(file_write(path, changed)).to_be(true)
+        val accepted = apply_collected_fixes(path, [source_bound_literal_fix(path, original)], false, true, Some(original))
+        val actual = file_read(path)
+        file_remove(path)
+        expect(accepted).to_be(false)
+        expect(actual).to_equal(changed)
+
+    it "applies a pinned lint fix and keeps dry-run read-only":
+        step("Both modes use the same admission checks but only apply writes")
+        val path = source_bound_temp("apply")
+        val original = "val answer = 1\n"
+        expect(file_write(path, original)).to_be(true)
+        val fixes = [source_bound_literal_fix(path, original)]
+        expect(apply_collected_fixes(path, fixes, true, true, Some(original))).to_be(true)
+        expect(file_read(path)).to_equal(original)
+        val accepted = apply_collected_fixes(path, fixes, false, true, Some(original))
+        val actual = file_read(path)
+        file_remove(path)
+        expect(accepted).to_be(true)
+        expect(actual).to_equal("val answer = 2\n")
+
+    it "refuses legacy application without an analyzed revision":
+        step("Missing provenance is an actionable refusal rather than a fresh implicit pin")
+        val path = source_bound_temp("missing")
+        val original = "val answer = 1\n"
+        expect(file_write(path, original)).to_be(true)
+        val accepted = apply_collected_fixes(path, [source_bound_literal_fix(path, original)], false, true)
+        val actual = file_read(path)
+        file_remove(path)
+        expect(accepted).to_be(false)
+        expect(actual).to_equal(original)
+
+    it "preflights all simple-fix sources before the first disk write":
+        step("A stale second source prevents edits to the unchanged first source")
+        val first = source_bound_temp("first")
+        val second = source_bound_temp("second")
+        val original = "val answer = 1\n"
+        expect(file_write(first, original)).to_be(true)
+        expect(file_write(second, "changed\n")).to_be(true)
+        val fixes = [source_bound_literal_fix(first, original), source_bound_literal_fix(second, original)]
+        val result = FixToolApplicator.apply_to_disk(fixes, {first: original, second: original}, false)
+        val first_after = file_read(first)
+        val second_after = file_read(second)
+        file_remove(first)
+        file_remove(second)
+        expect(result.is_err()).to_be(true)
+        expect(first_after).to_equal(original)
+        expect(second_after).to_equal("changed\n")
+
+    it "does not apply allowed diagnostics or uncertain fixes in safe mode":
+        step("Confidence and configured diagnostic level remain admission requirements")
+        val fixed = source_bound_fix("a.spl", 0, 1, 1, 1, "b")
+        val allowed = LintRunResult.new("a.spl", 1, 1, LintDiag.new("X", LintLevel.Allow, LintCategory.Style, "allowed").with_easy_fix(fixed))
+        var uncertain = EasyFix.create("UNCERTAIN", "requires review", FixConfidence.Uncertain)
+        uncertain.add_replacement(Replacement.create("a.spl", 0, 1, 1, 1, "b"))
+        val warned = LintRunResult.new("a.spl", 1, 1, LintDiag.new("X", LintLevel.Warn, LintCategory.Style, "warned").with_easy_fix(uncertain))
+        expect(collect_easy_fixes([allowed, warned], false).len()).to_equal(0)
+        expect(collect_easy_fixes([allowed, warned], true).len()).to_equal(1)
+
+    it "admits a real signature-proven warning fix from the existing lint producer":
+        step("Feed the RAW-RT-002 wrapper rewrite through the shared validated applicator")
+        val path = "/tmp/source_bound_product.spl"
+        val source = "use std.io_runtime.{env_set}\nfn configure(key: text, value: text) -> bool:\n    rt_env_set(key, value)\n"
+        var selected: [LintRunResult] = []
+        for result in Linter.new().lint_source(path, source):
+            if result.lint.code == "RAW-RT-002": selected.push(result)
+        val fixes = collect_easy_fixes(selected, false)
+        expect(fixes.len()).to_equal(1)
+        val result = FixToolApplicator.apply(fixes, {path: source})
+        expect(result.is_ok()).to_be(true)
+        expect(result.unwrap()[path]).to_equal("use std.io_runtime.{env_set}\nfn configure(key: text, value: text) -> bool:\n    env_set(key, value)\n")
+
+describe "described named warning suppressions":
+    it "retains the underlying warning when the reason is missing":
+        step("Emit a located explanation and keep print_in_test_spec enabled")
+        val source = "@allow(print_in_test_spec)\nprint(1)\n"
+        expect(source_bound_warning_count(source, "LINTALLOW001")).to_equal(1)
+        expect(source_bound_warning_count(source, "print_in_test_spec")).to_be_greater_than(0)
+        for result in Linter.new().lint_source("/tmp/source_bound_spec.spl", source):
+            if result.lint.code == "LINTALLOW001":
+                expect(result.line).to_equal(1)
+                expect(result.column).to_equal(1)
+                expect(result.lint.message).to_contain("# reason:")
+                expect(result.has_easy_fix()).to_be(false)
+
+    it "honors a named file suppression with a description":
+        step("The author states the reason; the tool does not invent it")
+        val source = "@allow(print_in_test_spec) # reason: this fixture demonstrates console output\nprint(1)\n"
+        expect(source_bound_warning_count(source, "LINTALLOW001")).to_equal(0)
+        expect(source_bound_warning_count(source, "print_in_test_spec")).to_equal(0)
+
+    it "rejects empty reasons and blanket suppression":
+        step("Neither whitespace nor all-warnings scope qualifies as an explanation")
+        var config = LintConfig.new()
+        config.apply_file_attributes("@allow(print_in_test_spec) # reason:   \n")
+        expect(config.suppression_issues.len()).to_equal(1)
+        expect(config.get_level("print_in_test_spec") == LintLevel.Warn).to_be(true)
+        config.apply_file_attributes("@allow(all) # reason: intentional\n")
+        expect(config.suppression_issues.len()).to_equal(1)
+        expect(config.suppression_issues[0].message).to_contain("blanket")
+
+    it "ignores attribute text in comments and triple strings":
+        step("Reuse lexical state within the existing header parser")
+        val source = "# @allow(print_in_test_spec)\n\"\"\"\n@allow(print_in_test_spec)\n\"\"\"\n"
+        var config = LintConfig.new()
+        config.apply_file_attributes(source)
+        expect(config.suppression_issues.len()).to_equal(0)
+        expect(config.get_level("print_in_test_spec") == LintLevel.Warn).to_be(true)
+
+    it "keeps warning and deny attributes independent of suppression reasons":
+        step("Only lowering a rule to allow requires justification")
+        var config = LintConfig.new()
+        config.apply_file_attributes("@deny(print_in_test_spec)\n")
+        expect(config.get_level("print_in_test_spec") == LintLevel.Deny).to_be(true)
+        expect(config.suppression_issues.len()).to_equal(0)

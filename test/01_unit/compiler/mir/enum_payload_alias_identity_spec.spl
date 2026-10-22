@@ -1,0 +1,138 @@
+# @req REQ-ENUM-PAYLOAD-ALIAS-IDENTITY
+# @tag: unit, compiler, mir
+use std.spec.{describe, it, expect}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLoweringExpr.enum_constructor_payload.*
+use enum_payload_negative_authority_fixture.{enum_payload_negative_authority_controls_v1}
+
+fn alias_payload_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn alias_payload_named(id: SymbolId, args: [HirType]) -> HirType:
+    alias_payload_type(HirTypeKind.Named(id, args))
+
+fn alias_payload_declare(symbols: SymbolTable, local: text, owner: text?, kind: SymbolKind) -> SymbolId:
+    val id = symbols.define(local, kind, nil, Span.empty(), Visibility.Public, false, owner)
+    symbols.rename_symbol(id, "Node")
+    id
+
+fn alias_payload_compare(a: HirType, b: HirType, symbols: SymbolTable) -> bool:
+    enum_payload_types_alias_compatible(a, b, symbols)
+
+fn alias_payload_wrappers(inner: HirType) -> [HirType]:
+    [alias_payload_type(HirTypeKind.Array(inner, Some(2))),
+     alias_payload_type(HirTypeKind.Slice(inner)),
+     alias_payload_type(HirTypeKind.Optional(inner)),
+     alias_payload_type(HirTypeKind.Dict(HirType.str(), inner)),
+     alias_payload_type(HirTypeKind.Tuple([HirType.bool(), inner])),
+     alias_payload_type(HirTypeKind.Result(inner, HirType.str()))]
+
+describe "enum payload aliases preserve container identity":
+    it "retains concrete negative authority while preserving source recovery and missing-metadata fallback":
+        expect(enum_payload_negative_authority_controls_v1()).to_equal("")
+
+    it "rejects differing fixed array lengths even without a nominal leaf":
+        val symbols = SymbolTable.new()
+        val a = alias_payload_type(HirTypeKind.Array(HirType.i64(), Some(2)))
+        val b = alias_payload_type(HirTypeKind.Array(HirType.i64(), Some(3)))
+        val dynamic = alias_payload_type(HirTypeKind.Array(HirType.i64(), nil))
+        expect(alias_payload_compare(a, b, symbols)).to_be(false)
+        expect(alias_payload_compare(a, dynamic, symbols)).to_be(false)
+
+    it "keeps width signedness float precision and Any strict inside existing containers":
+        val symbols = SymbolTable.new()
+        val leaves = [alias_payload_type(HirTypeKind.Int(32, true)),
+                      alias_payload_type(HirTypeKind.Int(64, false)),
+                      alias_payload_type(HirTypeKind.Float(32)),
+                      alias_payload_type(HirTypeKind.Any)]
+        val other = [HirType.i64(), HirType.i64(), alias_payload_type(HirTypeKind.Float(64)), HirType.i64()]
+        for leaf_index in 0..leaves.len():
+            val a = alias_payload_wrappers(leaves[leaf_index])
+            val b = alias_payload_wrappers(other[leaf_index])
+            expect(a.len()).to_equal(6)
+            for index in 0..a.len():
+                expect(alias_payload_compare(a[index], b[index], symbols)).to_be(false)
+
+    it "preserves top-level numeric conversions and explicit Any policy":
+        val symbols = SymbolTable.new()
+        expect(alias_payload_compare(alias_payload_type(HirTypeKind.Int(32, true)), HirType.i64(), symbols)).to_be(true)
+        expect(alias_payload_compare(alias_payload_type(HirTypeKind.Int(64, false)), HirType.i64(), symbols)).to_be(true)
+        expect(alias_payload_compare(alias_payload_type(HirTypeKind.Float(32)), alias_payload_type(HirTypeKind.Float(64)), symbols)).to_be(true)
+        expect(alias_payload_compare(alias_payload_type(HirTypeKind.Any), HirType.i64(), symbols)).to_be(true)
+        expect(alias_payload_compare(HirType.i64(), HirType.str(), symbols)).to_be(false)
+
+    it "accepts real aliases through each already-supported container":
+        var symbols = SymbolTable.new()
+        val left = alias_payload_declare(symbols, "Left", "lib.nodes", SymbolKind.Struct)
+        val right = alias_payload_declare(symbols, "Right", "lib.nodes", SymbolKind.Struct)
+        expect(left.id == right.id).to_be(false)
+        val a = alias_payload_wrappers(alias_payload_named(left, []))
+        val b = alias_payload_wrappers(alias_payload_named(right, []))
+        for index in 0..a.len():
+            expect(alias_payload_compare(a[index], b[index], symbols)).to_be(true)
+
+    it "keeps array length when nominal leaves are legitimate aliases":
+        var symbols = SymbolTable.new()
+        val left = alias_payload_declare(symbols, "Left", "lib.nodes", SymbolKind.Struct)
+        val right = alias_payload_declare(symbols, "Right", "lib.nodes", SymbolKind.Struct)
+        val a = alias_payload_type(HirTypeKind.Array(alias_payload_named(left, []), Some(2)))
+        val b = alias_payload_type(HirTypeKind.Array(alias_payload_named(right, []), Some(3)))
+        expect(alias_payload_compare(a, b, symbols)).to_be(false)
+
+    it "rejects distinct declarations with equal spelling and different owners":
+        var symbols = SymbolTable.new()
+        val left = alias_payload_declare(symbols, "Left", "lib.left", SymbolKind.Struct)
+        val right = alias_payload_declare(symbols, "Right", "lib.right", SymbolKind.Struct)
+        expect(alias_payload_compare(alias_payload_named(left, []), alias_payload_named(right, []), symbols)).to_be(false)
+
+    it "rejects distinct aliases whose defining owner is missing":
+        var symbols = SymbolTable.new()
+        val left = alias_payload_declare(symbols, "Left", nil, SymbolKind.Struct)
+        val right = alias_payload_declare(symbols, "Right", nil, SymbolKind.Struct)
+        expect(left.id == right.id).to_be(false)
+        expect(alias_payload_compare(alias_payload_named(left, []), alias_payload_named(right, []), symbols)).to_be(false)
+        # One existing row remains an identity inside this one symbol table.
+        expect(alias_payload_compare(alias_payload_named(left, []), alias_payload_named(left, []), symbols)).to_be(true)
+
+    it "does not accept equal missing IDs through structural equality":
+        val symbols = SymbolTable.new()
+        val missing = alias_payload_named(SymbolId(id: 987654), [])
+        expect(alias_payload_compare(missing, missing, symbols)).to_be(false)
+        val nested = alias_payload_type(HirTypeKind.Optional(missing))
+        expect(alias_payload_compare(nested, nested, symbols)).to_be(false)
+
+    it "rejects different declaration kinds under the same owner and name":
+        var symbols = SymbolTable.new()
+        val left = alias_payload_declare(symbols, "Left", "lib.nodes", SymbolKind.Struct)
+        val right = alias_payload_declare(symbols, "Right", "lib.nodes", SymbolKind.Enum)
+        expect(alias_payload_compare(alias_payload_named(left, []), alias_payload_named(right, []), symbols)).to_be(false)
+
+    it "preserves nominal argument arity and strict argument element types":
+        var symbols = SymbolTable.new()
+        val left = alias_payload_declare(symbols, "Left", "lib.nodes", SymbolKind.Struct)
+        val right = alias_payload_declare(symbols, "Right", "lib.nodes", SymbolKind.Struct)
+        val a = alias_payload_named(left, [HirType.i64()])
+        expect(alias_payload_compare(a, alias_payload_named(right, [HirType.i64()]), symbols)).to_be(true)
+        expect(alias_payload_compare(a, alias_payload_named(right, []), symbols)).to_be(false)
+        expect(alias_payload_compare(a, alias_payload_named(right, [alias_payload_type(HirTypeKind.Int(32, true))]), symbols)).to_be(false)
+
+    it "preserves nested reference and pointer mutability without adding alias support":
+        var symbols = SymbolTable.new()
+        val left = alias_payload_declare(symbols, "Left", "lib.nodes", SymbolKind.Struct)
+        val right = alias_payload_declare(symbols, "Right", "lib.nodes", SymbolKind.Struct)
+        val a = alias_payload_named(left, [])
+        val b = alias_payload_named(right, [])
+        val refs = [alias_payload_type(HirTypeKind.Ref(a, false)), alias_payload_type(HirTypeKind.Ptr(a, false))]
+        val mutable = [alias_payload_type(HirTypeKind.Ref(a, true)), alias_payload_type(HirTypeKind.Ptr(a, true))]
+        val aliases = [alias_payload_type(HirTypeKind.Ref(b, false)), alias_payload_type(HirTypeKind.Ptr(b, false))]
+        for index in 0..refs.len():
+            val expected = alias_payload_type(HirTypeKind.Optional(refs[index]))
+            expect(alias_payload_compare(expected, alias_payload_type(HirTypeKind.Optional(mutable[index])), symbols)).to_be(false)
+            expect(alias_payload_compare(expected, alias_payload_type(HirTypeKind.Optional(aliases[index])), symbols)).to_be(false)
+            expect(alias_payload_compare(expected, expected, symbols)).to_be(true)

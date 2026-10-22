@@ -1,0 +1,585 @@
+# NB10 typed nominal diamond flow — compiler.backend.backend.lean_backend
+
+Executable source: `test/03_system/compiler/compiler_lean_nominal_diamond_flow_spec.spl`.
+Requirements: NB10 / C2 / REQ-MC-007. **20 authored scenarios; all execution UNRUN.**
+This is a manually maintained source manual, not generated execution or proof evidence. SPipe doc generation, compiler checks, native tests, Lean compilation and proofs are UNRUN by the authorized source-only scope. RED is source-predicted against prerequisite `c151cf021dfa8038cffcce8954e8a6a3fe49de4d`; no observed failing or passing execution is claimed.
+
+The fixtures construct actual typed `MirModule` values, declarations, locals, instructions, and graph edges. Every positive fixture invokes `translate_mir_nominal_body` and requires its exact Lean body, then invokes this owner's full and generated public exports and requires that body with builder indentation. Every refusal checks the concrete error from all three surfaces. `Ok` fails the negative scenario, so a partial public module result cannot satisfy it. Internal `export_function` comment mutation is not claimed to be transactional.
+
+The transport oracle fixes zero locals as typed Unit, one local as its exact nominal type, and multiple locals as a typed product in retained local-table order. Literal qualified names are independent of the mapper under test. Per-component type parentheses preserve product precedence. Branch instructions stay within their conditional arm and the exact expected body contains the common suffix once.
+
+## Manual flow
+
+### 1. should transport one Struct local to one shared projection and return suffix
+
+1. Export both branch-defined Packet values through one shared suffix.
+2. Require the exact body from the direct translator and both public export routes, or require the specified error from all three routes.
+
+<details>
+<summary>Executable SSpec — UNRUN</summary>
+
+```simple
+    it "should transport one Struct local to one shared projection and return suffix":
+        step("Export both branch-defined Packet values through one shared suffix")
+        nb10_export_pair(nb10_function(), nb10_body())
+```
+
+</details>
+
+### 2. should transport an Enum constructed in either arm to one nominal return
+
+1. Export different Enum alternatives through the common return.
+2. Require the exact body from the direct translator and both public export routes, or require the specified error from all three routes.
+
+<details>
+<summary>Executable SSpec — UNRUN</summary>
+
+```simple
+    it "should transport an Enum constructed in either arm to one nominal return":
+        step("Export different Enum alternatives through the common return")
+        var function = nb10_parameter_function(state_ty())
+        function.blocks[1].instructions = [inst(MirInstKind.Aggregate(LocalId(id: 2), AggregateKind.Enum(SymbolId(id: 9), -3), []))]
+        val state = nb10_state_name()
+        val expected = "let _l2 : " + state + " :=\n  if _l0 then\n    let _l2 : " + state + " := " + state + ".«Idle»\n    _l2\n  else\n    let _l2 : " + state + " := _l1\n    _l2\n_l2"
+        nb10_export_pair(function, expected)
+```
+
+</details>
+
+### 3. should emit Unit transport while retaining dominating values in outer scope
+
+1. Keep the prefix Packet live without transporting it again.
+2. Require the exact body from the direct translator and both public export routes, or require the specified error from all three routes.
+
+<details>
+<summary>Executable SSpec — UNRUN</summary>
+
+```simple
+    it "should emit Unit transport while retaining dominating values in outer scope":
+        step("Keep the prefix Packet live without transporting it again")
+        nb10_export_pair(nb10_zero_function(), nb10_zero_body())
+        var arm_only = nb10_zero_function()
+        arm_only.locals.push(local(4, packet_ty(), LocalKind.Temp))
+        arm_only.blocks[1].instructions = [inst(MirInstKind.Copy(LocalId(id: 4), LocalId(id: 2)))]
+        val expected = nb10_zero_body().replace("if _l5 then\n    ()", "if _l5 then\n    let _l4 : " + nb10_packet_name() + " := _l2\n    ()")
+        nb10_export_pair(arm_only, expected)
+```
+
+</details>
+
+### 4. should permit one or both empty arm paths before the common suffix
+
+1. Resolve direct join targets without requiring synthetic arm blocks.
+2. Require the exact body from the direct translator and both public export routes, or require the specified error from all three routes.
+
+<details>
+<summary>Executable SSpec — UNRUN</summary>
+
+```simple
+    it "should permit one or both empty arm paths before the common suffix":
+        step("Resolve direct join targets without requiring synthetic arm blocks")
+        var one_empty = nb10_zero_function()
+        one_empty.blocks[0].terminator = MirTerminator.If(copy(5), BlockId(id: 40), BlockId(id: 30))
+        one_empty.blocks = [one_empty.blocks[0], one_empty.blocks[2], one_empty.blocks[3]]
+        nb10_export_pair(one_empty, nb10_zero_body())
+        var both_empty = nb10_zero_function()
+        both_empty.blocks[0].terminator = MirTerminator.If(copy(5), BlockId(id: 40), BlockId(id: 40))
+        both_empty.blocks = [both_empty.blocks[0], both_empty.blocks[3]]
+        nb10_export_pair(both_empty, nb10_zero_body())
+```
+
+</details>
+
+### 5. should transport multiple typed locals in retained local order rather than identity or instruction order
+
+1. Export the exact typed tuple with scalar local eight before Packet local two.
+2. Require the exact body from the direct translator and both public export routes, or require the specified error from all three routes.
+
+<details>
+<summary>Executable SSpec — UNRUN</summary>
+
+```simple
+    it "should transport multiple typed locals in retained local order rather than identity or instruction order":
+        step("Export the exact typed tuple with scalar local eight before Packet local two")
+        var function = nb10_function()
+        function.locals = [function.locals[0], function.locals[1], function.locals[2],
+            local(8, ty(MirTypeKind.I32), LocalKind.Temp), function.locals[3], function.locals[4]]
+        for index in [1, 2]:
+            function.blocks[index].instructions.push(inst(MirInstKind.Copy(LocalId(id: 8), LocalId(id: 1))))
+        val packet = nb10_packet_name()
+        val arm = "    let _l2 : " + packet + " := " + packet + ".mk (_l0) (_l1)\n    let _l8 : _root_.BitVec 32 := _l1\n    (_l8, _l2)"
+        val expected = "let (_l8, _l2) : ((_root_.BitVec 32) × (" + packet + ")) :=\n  if _l5 then\n" + arm + "\n  else\n" + arm + "\nlet _l3 : _root_.BitVec 32 := " + packet + ".«count» (_l2)\n_l3"
+        nb10_export_pair(function, expected)
+```
+
+</details>
+
+### 6. should retain exact nominal metadata for instruction-free Struct and Enum joins
+
+1. Route Copy-only nominal evidence through both public backend exports.
+2. Require the exact body from the direct translator and both public export routes, or require the specified error from all three routes.
+
+<details>
+<summary>Executable SSpec — UNRUN</summary>
+
+```simple
+    it "should retain exact nominal metadata for instruction-free Struct and Enum joins":
+        step("Route Copy-only nominal evidence through both public backend exports")
+        for (type_, name) in [(packet_ty(), nb10_packet_name()), (state_ty(), nb10_state_name())]:
+            val arm = "    let _l2 : " + name + " := _l1\n    _l2"
+            val expected = "let _l2 : " + name + " :=\n  if _l0 then\n" + arm + "\n  else\n" + arm + "\n_l2"
+            nb10_export_pair(nb10_parameter_function(type_), expected)
+```
+
+</details>
+
+### 7. should preserve semantic order after physically reordering every block
+
+1. Follow block identities from the actual entry and both successors.
+2. Require the exact body from the direct translator and both public export routes, or require the specified error from all three routes.
+
+<details>
+<summary>Executable SSpec — UNRUN</summary>
+
+```simple
+    it "should preserve semantic order after physically reordering every block":
+        step("Follow block identities from the actual entry and both successors")
+        var function = nb10_function()
+        function.blocks = [function.blocks[3], function.blocks[2], function.blocks[0], function.blocks[1]]
+        nb10_export_pair(function, nb10_body())
+```
+
+</details>
+
+### 8. should follow linear prefix and arm continuations and emit a multiblock suffix once
+
+1. Traverse each Goto segment and publish one projection and one return.
+2. Require the exact body from the direct translator and both public export routes, or require the specified error from all three routes.
+
+<details>
+<summary>Executable SSpec — UNRUN</summary>
+
+```simple
+    it "should follow linear prefix and arm continuations and emit a multiblock suffix once":
+        step("Traverse each Goto segment and publish one projection and one return")
+        var function = nb10_function()
+        function.entry_block = BlockId(id: 5)
+        function.blocks.push(nb10_block(5, [], MirTerminator.Goto(BlockId(id: 10))))
+        function.blocks[1].terminator = MirTerminator.Goto(BlockId(id: 25))
+        function.blocks.push(nb10_block(25, [], MirTerminator.Goto(BlockId(id: 40))))
+        function.blocks[2].terminator = MirTerminator.Goto(BlockId(id: 35))
+        function.blocks.push(nb10_block(35, [], MirTerminator.Goto(BlockId(id: 40))))
+        function.blocks[3].terminator = MirTerminator.Goto(BlockId(id: 50))
+        function.blocks.push(nb10_block(50, [], ret(3)))
+        nb10_export_pair(function, nb10_body())
+```
+
+</details>
+
+### 9. should permit both exclusive arms to move the same incoming nominal value
+
+1. Allocate independent arm state and transport the resulting live local.
+2. Require the exact body from the direct translator and both public export routes, or require the specified error from all three routes.
+
+<details>
+<summary>Executable SSpec — UNRUN</summary>
+
+```simple
+    it "should permit both exclusive arms to move the same incoming nominal value":
+        step("Allocate independent arm state and transport the resulting live local")
+        for (type_, name) in [(packet_ty(), nb10_packet_name()), (state_ty(), nb10_state_name())]:
+            var function = nb10_parameter_function(type_)
+            for index in [1, 2]:
+                function.blocks[index].instructions = [inst(MirInstKind.Move(LocalId(id: 2), LocalId(id: 1)))]
+            val arm = "    let _l2 : " + name + " := _l1\n    _l2"
+            nb10_export_pair(function, "let _l2 : " + name + " :=\n  if _l0 then\n" + arm + "\n  else\n" + arm + "\n_l2")
+```
+
+</details>
+
+### 10. should consume a moved Bool condition once and reject its later suffix use
+
+1. Consume the condition before either branch state is forked.
+2. Require the exact body from the direct translator and both public export routes, or require the specified error from all three routes.
+
+<details>
+<summary>Executable SSpec — UNRUN</summary>
+
+```simple
+    it "should consume a moved Bool condition once and reject its later suffix use":
+        step("Consume the condition before either branch state is forked")
+        var function = nb10_function()
+        function.blocks[0].terminator = MirTerminator.If(MirOperand(kind: MirOperandKind.Move(LocalId(id: 5))), BlockId(id: 20), BlockId(id: 30))
+        nb10_export_pair(function, nb10_body())
+        function.signature.return_type = ty(MirTypeKind.Bool)
+        function.blocks[3].terminator = ret(5)
+        nb10_expect_refusal(function, "use before definition or after move: 5")
+```
+
+</details>
+
+### 11. should reject suffix use of an incoming value moved in either single arm
+
+1. Intersect liveness so neither arm can resurrect a consumed Packet.
+2. Require the exact body from the direct translator and both public export routes, or require the specified error from all three routes.
+
+<details>
+<summary>Executable SSpec — UNRUN</summary>
+
+```simple
+    it "should reject suffix use of an incoming value moved in either single arm":
+        step("Intersect liveness so neither arm can resurrect a consumed Packet")
+        for index in [1, 2]:
+            var function = nb10_parameter_function(packet_ty())
+            function.blocks[index].instructions = [inst(MirInstKind.Move(LocalId(id: 2), LocalId(id: 1)))]
+            function.blocks[3].terminator = ret(1)
+            nb10_expect_refusal(function, "use before definition or after move: 1")
+```
+
+</details>
+
+### 12. should reject a one-arm definition read or redefined in the common suffix
+
+1. Intersect readability while preserving the union of assignment history.
+2. Require the exact body from the direct translator and both public export routes, or require the specified error from all three routes.
+
+<details>
+<summary>Executable SSpec — UNRUN</summary>
+
+```simple
+    it "should reject a one-arm definition read or redefined in the common suffix":
+        step("Intersect readability while preserving the union of assignment history")
+        for index in [1, 2]:
+            var function = nb10_parameter_function(packet_ty())
+            function.blocks[index].instructions = []
+            nb10_expect_refusal(function, "use before definition or after move: 2")
+            function.blocks[3].instructions = [inst(MirInstKind.Copy(LocalId(id: 2), LocalId(id: 1)))]
+            nb10_expect_refusal(function, "local redefinition requires mutable state semantics: 2")
+```
+
+</details>
+
+### 13. should reject prefix local redefinition in either arm
+
+1. Retain dominating assignment history in both fresh branch states.
+2. Require the exact body from the direct translator and both public export routes, or require the specified error from all three routes.
+
+<details>
+<summary>Executable SSpec — UNRUN</summary>
+
+```simple
+    it "should reject prefix local redefinition in either arm":
+        step("Retain dominating assignment history in both fresh branch states")
+        for index in [1, 2]:
+            var function = nb10_zero_function()
+            function.blocks[index].instructions = function.blocks[0].instructions
+            nb10_expect_refusal(function, "local redefinition requires mutable state semantics: 2")
+```
+
+</details>
+
+### 14. should reject suffix redefinition even when both arms consumed the old identity
+
+1. Preserve assignment history after live-set intersection.
+2. Require the exact body from the direct translator and both public export routes, or require the specified error from all three routes.
+
+<details>
+<summary>Executable SSpec — UNRUN</summary>
+
+```simple
+    it "should reject suffix redefinition even when both arms consumed the old identity":
+        step("Preserve assignment history after live-set intersection")
+        var redefined = nb10_function()
+        redefined.blocks[3].instructions = [redefined.blocks[1].instructions[0]]
+        nb10_expect_refusal(redefined, "local redefinition requires mutable state semantics: 2")
+        var moved = nb10_function()
+        moved.locals.push(local(4, packet_ty(), LocalKind.Temp))
+        for index in [1, 2]:
+            moved.blocks[index].instructions.push(inst(MirInstKind.Move(LocalId(id: 4), LocalId(id: 2))))
+        moved.blocks[3].instructions = [inst(MirInstKind.Copy(LocalId(id: 2), LocalId(id: 4)))]
+        moved.signature.return_type = packet_ty()
+        moved.blocks[3].terminator = ret(2)
+        nb10_expect_refusal(moved, "local redefinition requires mutable state semantics: 2")
+```
+
+</details>
+
+### 15. should reject non-Bool and undefined conditions before publishing output
+
+1. Require an exactly typed live Bool operand at the sole If.
+2. Require the exact body from the direct translator and both public export routes, or require the specified error from all three routes.
+
+<details>
+<summary>Executable SSpec — UNRUN</summary>
+
+```simple
+    it "should reject non-Bool and undefined conditions before publishing output":
+        step("Require an exactly typed live Bool operand at the sole If")
+        for (operand, reason) in [(copy(1), "exact MIR type mismatch"), (copy(99), "missing local 99")]:
+            var function = nb10_function()
+            function.blocks[0].terminator = MirTerminator.If(operand, BlockId(id: 20), BlockId(id: 30))
+            nb10_expect_refusal(function, reason)
+```
+
+</details>
+
+### 16. should validate the untaken arm even when the condition is a literal
+
+1. Reject malformed field types in either statically untaken arm.
+2. Require the exact body from the direct translator and both public export routes, or require the specified error from all three routes.
+
+<details>
+<summary>Executable SSpec — UNRUN</summary>
+
+```simple
+    it "should validate the untaken arm even when the condition is a literal":
+        step("Reject malformed field types in either statically untaken arm")
+        for (condition, index) in [(true, 2), (false, 1)]:
+            var function = nb10_function()
+            function.blocks[0].terminator = MirTerminator.If(MirOperand(kind: MirOperandKind.Const(MirConstValue.Bool(condition), ty(MirTypeKind.Bool))), BlockId(id: 20), BlockId(id: 30))
+            function.blocks[index].instructions = [inst(MirInstKind.Aggregate(LocalId(id: 2), AggregateKind.Struct(SymbolId(id: 7)), [copy(0), copy(0)]))]
+            nb10_expect_refusal(function, "exact MIR type mismatch")
+
+        var same_width = nb10_function()
+        same_width.signature.params.push(ty(MirTypeKind.U32))
+        same_width.locals.push(local(7, ty(MirTypeKind.U32), LocalKind.Arg(3)))
+        same_width.blocks[2].instructions = [inst(MirInstKind.Aggregate(LocalId(id: 2), AggregateKind.Struct(SymbolId(id: 7)), [copy(0), copy(7)]))]
+        nb10_expect_refusal(same_width, "exact MIR type mismatch")
+```
+
+</details>
+
+### 17. should reject suffix projection and exact return mismatches atomically
+
+1. Validate the single shared suffix before either public result is returned.
+2. Require the exact body from the direct translator and both public export routes, or require the specified error from all three routes.
+
+<details>
+<summary>Executable SSpec — UNRUN</summary>
+
+```simple
+    it "should reject suffix projection and exact return mismatches atomically":
+        step("Validate the single shared suffix before either public result is returned")
+        var projection = nb10_function()
+        projection.blocks[3].instructions = [inst(MirInstKind.GetField(LocalId(id: 3), copy(2), 0))]
+        nb10_expect_refusal(projection, "exact MIR type mismatch")
+        var bad_return = nb10_function()
+        bad_return.blocks[3].terminator = ret(0)
+        nb10_expect_refusal(bad_return, "exact MIR type mismatch")
+        var no_return = nb10_function()
+        no_return.blocks[3].terminator = MirTerminator.Ret(nil)
+        nb10_expect_refusal(no_return, "exact MIR type mismatch")
+```
+
+</details>
+
+### 18. should reject missing successors and duplicate or negative block identities
+
+1. Validate all retained block identities and concrete targets.
+2. Require the exact body from the direct translator and both public export routes, or require the specified error from all three routes.
+
+<details>
+<summary>Executable SSpec — UNRUN</summary>
+
+```simple
+    it "should reject missing successors and duplicate or negative block identities":
+        step("Validate all retained block identities and concrete targets")
+        for index in [1, 2]:
+            var missing = nb10_function()
+            missing.blocks[index].terminator = MirTerminator.Goto(BlockId(id: 99))
+            nb10_expect_refusal(missing, "missing successor block")
+        var duplicate = nb10_function()
+        duplicate.blocks.push(duplicate.blocks[1])
+        nb10_expect_refusal(duplicate, "negative or duplicate block identity")
+        var negative = nb10_function()
+        negative.blocks[3].id = BlockId(id: -1)
+        nb10_expect_refusal(negative, "negative or duplicate block identity")
+```
+
+</details>
+
+### 19. should reject arm cycles prefix backedges and cyclic common suffixes
+
+1. Refuse nonterminating retained paths before emitting any source.
+2. Require the exact body from the direct translator and both public export routes, or require the specified error from all three routes.
+
+<details>
+<summary>Executable SSpec — UNRUN</summary>
+
+```simple
+    it "should reject arm cycles prefix backedges and cyclic common suffixes":
+        step("Refuse nonterminating retained paths before emitting any source")
+        for (index, target) in [(1, 20), (2, 10), (3, 40)]:
+            var function = nb10_function()
+            function.blocks[index].terminator = MirTerminator.Goto(BlockId(id: target))
+            nb10_expect_refusal(function, "cyclic linear flow")
+```
+
+</details>
+
+### 20. should reject disconnected blocks nested branches and unsupported operations
+
+1. Refuse graphs and instructions beyond the one-diamond contract.
+2. Require the exact body from the direct translator and both public export routes, or require the specified error from all three routes.
+
+<details>
+<summary>Executable SSpec — UNRUN</summary>
+
+```simple
+    it "should reject disconnected blocks nested branches and unsupported operations":
+        step("Refuse graphs and instructions beyond the one-diamond contract")
+        var disconnected = nb10_function()
+        disconnected.blocks.push(nb10_block(99, [], ret(3)))
+        nb10_expect_refusal(disconnected, "unvisited block outside nominal flow")
+        for index in [1, 3]:
+            var nested = nb10_function()
+            nested.blocks[index].terminator = MirTerminator.If(copy(5), BlockId(id: 40), BlockId(id: 40))
+            nb10_expect_refusal(nested, "nested conditional requires general structured flow")
+        var exceptional = nb10_function()
+        exceptional.blocks[3].terminator = MirTerminator.Unreachable
+        nb10_expect_refusal(exceptional, "requires only Goto edges")
+        for index in [1, 3]:
+            var dropping = nb10_function()
+            dropping.blocks[index].instructions.push(inst(MirInstKind.Drop(LocalId(id: 2))))
+            nb10_expect_refusal(dropping, "unsupported instruction in pure nominal body")
+```
+
+</details>
+
+## Scope and remaining evidence
+
+Fresh arm maps, assigned union, live intersection, redefinition, consume-once condition handling, and whole-body graph coverage are observable through the independent positive and refusal controls. Unchanged dominating locals remain outside transport. A dead one-arm local is permitted but is not transported; a one-arm definition cannot be read or reassigned after the join. Same-width I32/U32 misuse remains an exact MIR error despite sharing Lean BitVec width.
+
+General CFG joins, loops, calls, mutation, Drop semantics, full C1/C2/C6/C7, native ABI claims, authenticated replay, Lean validation and measured performance remain OPEN. Existing NB09 linear and terminal fixtures are retained; only the obsolete diagnostic expectations for now-plannable invalid diamonds are reconciled in their own files/manuals.
+
+<details>
+<summary>Reusable setup and real API checker definitions</summary>
+
+```simple
+# codex-system-test
+# @manual: show
+# @req: REQ-MC-007, C2
+# NB10 frozen contract; real MIR and public exports. All execution UNRUN.
+# RED is source-predicted only; manual generation and Lean compilation UNRUN.
+use std.spec
+use std.spec.step
+use compiler.hir.hir_types.{SymbolId}
+use compiler.common.attributes.{vhdl_hardware_metadata_default, DriverManifestAttr, DriverManifestAttrKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBody, MirInst, MirInstKind, AggregateKind, MirBlock, BlockId, MirOperand, MirOperandKind, MirTerminator, MirBinOp, MirUnaryOp}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirConstValue, MirTypeDef, MirTypeDefKind, MirFieldDef, MirVariantDef, MirSignature, MirLocal, LocalId, LocalKind}
+use compiler.backend.backend.lean_backend.{LeanBackend, LeanBuilder, VerificationLevel}
+use plugins.backend_lean.lean_type_declarations.{lean_plan_type_declarations}
+use plugins.backend_lean.lean_nominal_body.{translate_mir_nominal_body}
+
+fn ty(kind: MirTypeKind) -> MirType: MirType(kind: kind)
+fn packet_ty() -> MirType: ty(MirTypeKind.Struct(SymbolId(id: 7)))
+fn state_ty() -> MirType: ty(MirTypeKind.Enum(SymbolId(id: 9)))
+fn copy(id: i64) -> MirOperand: MirOperand(kind: MirOperandKind.Copy(LocalId(id: id)))
+fn local(id: i64, type_: MirType, kind: LocalKind) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: nil, type_: type_, kind: kind, is_ghost: false)
+fn inst(kind: MirInstKind) -> MirInst: MirInst(kind: kind, span: nil)
+fn ret(id: i64) -> MirTerminator: MirTerminator.Ret(Some(copy(id)))
+
+fn nb10_base_function(parameters: [MirType], locals: [MirLocal], instructions: [MirInst], return_type: MirType, terminator: MirTerminator) -> MirFunction:
+    MirFunction(symbol: SymbolId(id: 20), name: "nominalValue",
+        signature: MirSignature(params: parameters, return_type: return_type, is_variadic: false, params_known: true),
+        locals: locals,
+        blocks: [MirBlock(id: BlockId(id: 0), label: nil, instructions: instructions, terminator: terminator)],
+        entry_block: BlockId(id: 0), span: Span.default(), generic_params: [], is_generic_template: false,
+        specialization_of: nil, type_bindings: {}, layout_phase: nil, is_kernel: false, gpu_target: "", gpu_backend_order: "", is_export_c: false,
+        export_name: "", has_driver_manifest_attr: false, driver_manifest_attr: DriverManifestAttr(kind: DriverManifestAttrKind.Driver, driver_class: 0, vendor: 0, device_ids: [], version: "", abi: ""),
+        has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false, unroll_factor: 0, pipeline_ii: 0, memory_banks: 0, verification_contract: nil)
+
+fn nb10_module(function: MirFunction) -> MirModule:
+    val packet = MirTypeDef(symbol: SymbolId(id: 7), name: "wire.Packet",
+        kind: MirTypeDefKind.Struct([
+            MirFieldDef(name: "byte", type_: ty(MirTypeKind.U8), offset: 0, has_bits_attr: false, bits_width: 0),
+            MirFieldDef(name: "count", type_: ty(MirTypeKind.I32), offset: 4, has_bits_attr: false, bits_width: 0)]),
+        is_export_c: false, export_name: "")
+    val state = MirTypeDef(symbol: SymbolId(id: 9), name: "wire.State",
+        kind: MirTypeDefKind.Enum([
+            MirVariantDef(name: "Idle", discriminant: -3, payload: nil),
+            MirVariantDef(name: "Packet", discriminant: 12, payload: Some(packet_ty()))]),
+        is_export_c: false, export_name: "")
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[function.symbol] = function
+    var types: Dict<SymbolId, MirTypeDef> = {}
+    types[packet.symbol] = packet
+    types[state.symbol] = state
+    MirModule(name: "DiamondFlow", functions: functions, statics: {}, constants: {}, types: types)
+
+fn nb10_block(id: i64, instructions: [MirInst], terminator: MirTerminator) -> MirBlock:
+    MirBlock(id: BlockId(id: id), label: nil, instructions: instructions, terminator: terminator)
+
+fn nb10_function() -> MirFunction:
+    var function = nb10_base_function([ty(MirTypeKind.U8), ty(MirTypeKind.I32), ty(MirTypeKind.Bool)],
+        [local(0, ty(MirTypeKind.U8), LocalKind.Arg(0)), local(1, ty(MirTypeKind.I32), LocalKind.Arg(1)),
+         local(5, ty(MirTypeKind.Bool), LocalKind.Arg(2)), local(2, packet_ty(), LocalKind.Temp),
+         local(3, ty(MirTypeKind.I32), LocalKind.Temp)], [], ty(MirTypeKind.I32), ret(3))
+    function.entry_block = BlockId(id: 10)
+    function.blocks = [
+        nb10_block(10, [], MirTerminator.If(copy(5), BlockId(id: 20), BlockId(id: 30))),
+        nb10_block(20, [inst(MirInstKind.Aggregate(LocalId(id: 2), AggregateKind.Struct(SymbolId(id: 7)), [copy(0), copy(1)]))], MirTerminator.Goto(BlockId(id: 40))),
+        nb10_block(30, [inst(MirInstKind.Aggregate(LocalId(id: 2), AggregateKind.Struct(SymbolId(id: 7)), [copy(0), copy(1)]))], MirTerminator.Goto(BlockId(id: 40))),
+        nb10_block(40, [inst(MirInstKind.GetField(LocalId(id: 3), copy(2), 1))], ret(3))]
+    function
+
+fn nb10_packet_name() -> text: "_root_.Simple.DiamondFlow.__MirTypes.«wire».«Packet»"
+fn nb10_state_name() -> text: "_root_.Simple.DiamondFlow.__MirTypes.«wire».«State»"
+
+fn nb10_body() -> text:
+    val packet = nb10_packet_name()
+    val arm = "    let _l2 : " + packet + " := " + packet + ".mk (_l0) (_l1)\n    _l2"
+    "let _l2 : " + packet + " :=\n  if _l5 then\n" + arm + "\n  else\n" + arm + "\nlet _l3 : _root_.BitVec 32 := " + packet + ".«count» (_l2)\n_l3"
+
+# @inline
+fn nb10_export_pair(function: MirFunction, expected: text):
+    val module = nb10_module(function)
+    val context = lean_plan_type_declarations(module, "Simple.DiamondFlow").unwrap().context
+    expect(translate_mir_nominal_body(function, context).unwrap()).to_equal(expected)
+    val backend = LeanBackend.create(VerificationLevel.Contracts)
+    val indented = expected.replace("\n", "\n  ")
+    expect(backend.export_module(module).unwrap().lean_code).to_contain(indented)
+    expect(backend.export_generated_module(module).unwrap().lean_code).to_contain(indented)
+
+# @inline
+fn nb10_expect_refusal(function: MirFunction, reason: text):
+    val module = nb10_module(function)
+    val context = lean_plan_type_declarations(module, "Simple.DiamondFlow").unwrap().context
+    match translate_mir_nominal_body(function, context):
+        case Err(error): expect(error.message).to_contain(reason)
+        case Ok(_): assert(false)
+    val backend = LeanBackend.create(VerificationLevel.Contracts)
+    match backend.export_module(module):
+        case Err(error): expect(error.message).to_contain(reason)
+        case Ok(_): assert(false)
+    match backend.export_generated_module(module):
+        case Err(error): expect(error.message).to_contain(reason)
+        case Ok(_): assert(false)
+
+# @inline
+fn nb10_parameter_function(type_: MirType) -> MirFunction:
+    var function = nb10_base_function([ty(MirTypeKind.Bool), type_],
+        [local(0, ty(MirTypeKind.Bool), LocalKind.Arg(0)), local(1, type_, LocalKind.Arg(1)),
+         local(2, type_, LocalKind.Temp)], [], type_, ret(2))
+    function.blocks = [
+        nb10_block(0, [], MirTerminator.If(copy(0), BlockId(id: 1), BlockId(id: 2))),
+        nb10_block(1, [inst(MirInstKind.Copy(LocalId(id: 2), LocalId(id: 1)))], MirTerminator.Goto(BlockId(id: 3))),
+        nb10_block(2, [inst(MirInstKind.Copy(LocalId(id: 2), LocalId(id: 1)))], MirTerminator.Goto(BlockId(id: 3))),
+        nb10_block(3, [], ret(2))]
+    function
+
+fn nb10_zero_function() -> MirFunction:
+    var function = nb10_function()
+    function.blocks[0].instructions = function.blocks[1].instructions
+    function.blocks[1].instructions = []
+    function.blocks[2].instructions = []
+    function
+
+fn nb10_zero_body() -> text:
+    val packet = nb10_packet_name()
+    "let _l2 : " + packet + " := " + packet + ".mk (_l0) (_l1)\nlet _ : _root_.Unit :=\n  if _l5 then\n    ()\n  else\n    ()\nlet _l3 : _root_.BitVec 32 := " + packet + ".«count» (_l2)\n_l3"
+```
+
+</details>

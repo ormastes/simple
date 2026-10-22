@@ -1,0 +1,128 @@
+# Imported externs are proved by the resolved owner declaration, never the
+# spelling or a provider-local numeric SymbolId.
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
+use compiler.mir.mir_lowering_types.{MirLowering, MirAdaptedFileWriteBytesExternReceiptV1}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.provider_metadata.{mir_provider_callable_key}
+
+fn mir_imported_extern_consumers_v1(symbols: SymbolTable, owner: text) -> Dict<text, [HirSymbol]>:
+    var consumers: Dict<text, [HirSymbol]> = {}
+    for symbol in symbols.symbols.values():
+        if symbol.kind != SymbolKind.Function or symbol.type_ == nil:
+            continue
+        val defining_owner = symbol.defining_module ?? ""
+        if defining_owner == "" or mir_provider_callable_key(defining_owner, "") == mir_provider_callable_key(owner, ""):
+            continue
+        val key = mir_provider_callable_key(defining_owner, symbol.name)
+        var matches: [HirSymbol] = if consumers.has(key): consumers[key] else: []
+        matches.push(symbol)
+        consumers[key] = matches
+    consumers
+
+fn mir_imported_extern_type_matches_v1(consumer: HirSymbol, declaration: HirFunction) -> bool:
+    if consumer.type_ == nil:
+        return false
+    if val type_ = consumer.type_:
+        match type_.kind:
+            case HirTypeKind.Function(params, result, _):
+                if params.len() != declaration.params.len() or not hir_types_equal(result, declaration.return_type):
+                    return false
+                for index in 0..params.len():
+                    if not hir_types_equal(params[index], declaration.params[index].type_):
+                        return false
+                return true
+            case _: false
+    false
+
+fn mir_imported_extern_owner_keys_v1(consumers: Dict<text, [HirSymbol]>) -> Dict<text, bool>:
+    var owners: Dict<text, bool> = {}
+    for matches in consumers.values():
+        for symbol in matches:
+            owners[mir_provider_callable_key(symbol.defining_module ?? "", "")] = true
+    owners
+
+fn mir_file_write_bytes_facade_decl_v1(declaration: HirFunction) -> bool:
+    if declaration.name != "rt_file_write_bytes" or not declaration.is_extern or
+            declaration.is_method or declaration.is_async or declaration.type_params.len() != 0 or
+            declaration.is_generic_template or declaration.params.len() != 2 or
+            declaration.return_type.kind != HirTypeKind.Bool:
+        return false
+    for raw_parameter in declaration.params:
+        val parameter: HirParam = raw_parameter
+        if parameter.has_default: return false
+    if declaration.params[0].type_.kind != HirTypeKind.Str:
+        return false
+    match declaration.params[1].type_.kind:
+        case HirTypeKind.Array(element, size): size == nil and element.kind == HirTypeKind.Int(8, false)
+        case _: false
+
+impl MirLowering:
+    me record_adapted_file_write_bytes_extern_v1(owner: text, declaration: HirFunction, consumer: SymbolId):
+        if not mir_file_write_bytes_facade_decl_v1(declaration) or consumer.id < 0:
+            return
+        val owner_key = mir_provider_callable_key(owner, "")
+        val semantic_signature = MirSignature(
+            params: [self.lower_type(declaration.params[0].type_), self.lower_type(declaration.params[1].type_)],
+            return_type: self.lower_type(declaration.return_type),
+            is_variadic: false
+        )
+        val incoming = MirAdaptedFileWriteBytesExternReceiptV1(
+            owner: owner_key,
+            link_name: declaration.name,
+            signature: semantic_signature
+        )
+        if self.adapted_file_write_bytes_externs.has(consumer.id):
+            val existing = self.adapted_file_write_bytes_externs[consumer.id]
+            if existing.owner != incoming.owner or existing.link_name != incoming.link_name:
+                self.error_fatal("ambiguous adapted rt_file_write_bytes extern declaration", nil)
+            return
+        self.adapted_file_write_bytes_externs[consumer.id] = incoming
+
+impl MirLowering:
+    me record_imported_exact_extern_modules_v1(owner: text, providers: [HirModule]):
+        val consumers = mir_imported_extern_consumers_v1(self.symbols, owner)
+        val owners = mir_imported_extern_owner_keys_v1(consumers)
+        var visited: Dict<text, bool> = {}
+        for provider in providers:
+            if provider == nil:
+                continue
+            val provider_key = mir_provider_callable_key(provider.name, "")
+            if not owners.has(provider_key):
+                continue
+            if visited.has(provider_key):
+                self.error_fatal("ambiguous imported extern provider owner", nil)
+                continue
+            visited[provider_key] = true
+            self.record_imported_exact_externs_v1(provider.name, provider.functions.values(), consumers)
+
+    me record_imported_exact_externs_v1(owner: text, declarations: [HirFunction], consumers: Dict<text, [HirSymbol]>):
+        for declaration in declarations:
+            if not declaration.is_extern:
+                continue
+            val key = mir_provider_callable_key(owner, declaration.name)
+            if not consumers.has(key):
+                continue
+            val imported_symbols: [HirSymbol] = consumers[key]
+            for consumer in imported_symbols:
+                if not mir_imported_extern_type_matches_v1(consumer, declaration):
+                    continue
+                var relocated = declaration
+                relocated.symbol = consumer.id
+                self.record_adapted_file_write_bytes_extern_v1(owner, declaration, consumer.id)
+                if self.adapted_file_write_bytes_externs.has(consumer.id.id):
+                    val receipt = self.adapted_file_write_bytes_externs[consumer.id.id]
+                    if receipt.owner == mir_provider_callable_key(owner, "") and receipt.link_name == declaration.name:
+                        var links = self.callable_link_names
+                        links[key] = declaration.name
+                        self.callable_link_names = links
+                self.record_exact_extern_declaration_v1(relocated)
+                if self.exact_extern_signatures.has(consumer.id.id):
+                    # Only the proved extern declaration owns its physical C
+                    # link name; aliases stay lookup keys in the caller table.
+                    var links = self.callable_link_names
+                    links[key] = declaration.name
+                    self.callable_link_names = links
+
+export mir_imported_extern_consumers_v1, mir_imported_extern_type_matches_v1, mir_imported_extern_owner_keys_v1

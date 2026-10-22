@@ -21,6 +21,7 @@ use std.log.{error, info}
 
 # Import EasyFix data types from stdlib
 use std.tooling.easy_fix.*
+use compiler.tools.fix.source_edits.{validated_fix_sources}
 use common.text.{escape_json}
 use std.common.crypto.sha256.{sha256_text}
 use compiler.semantics.lint.riscv_rtl_debuggability_lint.{lint_riscv_rtl_debuggability}
@@ -59,19 +60,24 @@ fn _lint_profile_to_assurance_name(profile: Option<LintProfile>) -> text:
             return ""
     ""
 
+use compiler.frontend.core.representation_declarations_v1.{representation_checked_parse_receipt_v1}
+
 fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintRunResult]:
+    val previous_parse_error = parser_has_errors()
     var results = linter.lint_source_for_parsed_append(path, content)
     if not path.ends_with(".spl"):
         linter.release_combined_lint_view()
         return results
 
-    val previous_parse_error = parser_has_errors()
     # Must use the *_checked form: `parse_module_silent` + `parser_has_errors()`
     # reads back a module-level flag that does not survive the return across the
     # module boundary, which made this gate fail open — lint reported
     # `all files clean` on files the compiler rejects outright. See
     # doc/08_tracking/bug/lint_does_not_detect_syntax_errors_2026-07-28.md.
-    val parse_failed = parse_module_silent_checked(content, path)
+    val parse_failed = if val receipt = representation_checked_parse_receipt_v1(content, path):
+        receipt
+    else:
+        parse_module_silent_checked(content, path)
     parser_set_had_error(previous_parse_error)
     if parse_failed:
         # NOT LINTED, not "one error". Every AST-based lint below this point
@@ -128,15 +134,17 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintRunRes
         any_config, "W-HIR-INFER-003", LintLevel.Allow, LintEvidenceTier.ParsedStructural)
     val any_receiver = lint_policy_decision(
         any_config, "W-ANY-USE-001", LintLevel.Allow, LintEvidenceTier.ParsedStructural)
+    val any_env_level = any_rules_env_level()
+    val any_decl_level = any_rule_relay_level(any_config, "written_any_decl", any_decl.keep, any_decl.level, any_env_level)
+    val any_fallback_level = any_rule_relay_level(any_config, "any_fallback_use", any_fallback.keep, any_fallback.level, any_env_level)
+    val any_receiver_level = any_rule_relay_level(any_config, "any_receiver_use", any_receiver.keep, any_receiver.level, any_env_level)
     var parsed_results = lint_cli_append_parsed_results(linter, path, content, module_get_decls(), results)
-    # OPT-IN: no profile turns these families on. Off (the default, also under
-    # `critical`) = empty mask = no checker process, no HIR lowering, no walk.
-    # On = SIMPLE_ANY_RULES=warn|deny, or an explicit simple.sdn family level.
+    # Robust/critical default to warnings. Moderate/strict and explicit allow
+    # keep an empty mask: no checker process, HIR lowering, or walk.
     # See any_rules.spl for why the rules run in a `check` child.
     val any_mask = any_rules_lint_mask(
-        path, content, any_decl.keep, any_fallback.keep, any_receiver.keep)
+        path, content, any_decl_level != LintLevel.Allow, any_fallback_level != LintLevel.Allow, any_receiver_level != LintLevel.Allow)
     if any_mask != "":
-        val any_env_level = if any_rules_env_level() == "deny": LintLevel.Deny else: LintLevel.Warn
         # The report comes back through a file: the check entry truncates
         # worker stdout, and a truncated report must not read as a short one.
         val any_report = any_rules_report_path(path)
@@ -162,18 +170,19 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintRunRes
             parsed_results.push(LintRunResult.new(path, 1, 0, not_run))
         var any_shown = 0
         for finding in any_relay.findings:
+            var level = any_receiver_level
+            if finding.code == "W-ANY-DECL-001":
+                level = any_decl_level
+            elif finding.code == "W-HIR-INFER-003":
+                level = any_fallback_level
+            if level == LintLevel.Allow:
+                continue
             if any_shown == any_rules_max_shown():
                 val capped = LintDiag.new("W-ANY-CAPPED", LintLevel.Warn, LintCategory.Correctness,
                     "{any_relay.findings.len() - any_shown} more Any-rule finding(s) not shown (cap {any_shown} per file)")
                 parsed_results.push(LintRunResult.new(path, 1, 0, capped))
                 break
             any_shown = any_shown + 1
-            var family = any_receiver
-            if finding.code == "W-ANY-DECL-001":
-                family = any_decl
-            elif finding.code == "W-HIR-INFER-003":
-                family = any_fallback
-            val level = if family.keep: family.level else: any_env_level
             val lint = LintDiag.new(finding.code, level, LintCategory.Correctness, finding.message)
             parsed_results.push(LintRunResult.new(path, finding.line, finding.col, lint))
     parsed_results
@@ -695,9 +704,11 @@ fn _run_lint_with_linter_source(
                 case _:
                     val _ = 0
 
+    var analyzed_source: String? = nil
     var lint_result = LintFileResult.LintFileErr("Failed to read file: {file_path}")
     match content:
         case Some(source):
+            analyzed_source = Some(source)
             lint_result = LintFileResult.LintFileOk(
                 lint_cli_source(linter, file_path, source))
         case nil:
@@ -705,6 +716,7 @@ fn _run_lint_with_linter_source(
                 case LintReadFileResult.ReadFileErr(error):
                     lint_result = LintFileResult.LintFileErr(error)
                 case LintReadFileResult.ReadFileOk(source):
+                    analyzed_source = Some(source)
                     lint_result = LintFileResult.LintFileOk(
                         lint_cli_source(linter, file_path, source))
     match lint_result:
@@ -769,10 +781,10 @@ fn _run_lint_with_linter_source(
                     print("Found {error_count} error(s), {warning_count} warning(s), {fix_count} auto-fix(es) available")
 
                 # Apply fixes if requested
-                if (fix_mode or fix_all or fix_dry_run) and fix_count > 0:
+                if (fix_mode or fix_all or fix_dry_run) and fix_count > 0 and not not_linted:
                     val fixes_to_apply = collect_easy_fixes(results, fix_all)
                     if not fixes_to_apply.is_empty():
-                        if not apply_collected_fixes(file_path, fixes_to_apply, fix_dry_run, json_output):
+                        if not apply_collected_fixes(file_path, fixes_to_apply, fix_dry_run, json_output, analyzed_source):
                             return 1
 
                 # 3 = NOT LINTED. A distinct code so the CLI summary can COUNT
@@ -800,6 +812,7 @@ fn _run_lint_with_linter_source(
 fn collect_easy_fixes(results: [LintRunResult], include_all: Bool) -> [EasyFix]:
     var fixes: [EasyFix] = []
     for result in results:
+        if result.lint.level == LintLevel.Allow: continue
         match result.lint.easy_fix:
             case Some(fix):
                 if include_all or fix.is_safe():
@@ -808,23 +821,26 @@ fn collect_easy_fixes(results: [LintRunResult], include_all: Bool) -> [EasyFix]:
                 val _ = 0
     fixes
 
-fn apply_collected_fixes(file_path: String, fixes: [EasyFix], dry_run: Bool, json_output: Bool) -> Bool:
-    val source = file_read(file_path)
-    if source == "":
-        if json_output:
-            print("{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"reading file for fix failed\"}")
-        else:
-            error("lint", "reading file for fix failed: {file_path}")
-        return false
+fn lint_fix_refused(file_path: String, message: String, json_output: Bool) -> Bool:
+    if json_output:
+        print("{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"{escape_json(message)}\"}")
+    else:
+        error("lint", message)
+    false
 
-    # Sort replacements by position descending and apply
-    var all_replacements: [Replacement] = []
-    for fix in fixes:
-        for rep in easyfix_replacements(fix):
-            all_replacements.push(rep)
-
-    all_replacements = easyfix_sort_replacements_descending(all_replacements)
-    val new_source = easyfix_apply_sorted_replacements(source, all_replacements)
+fn apply_collected_fixes(file_path: String, fixes: [EasyFix], dry_run: Bool, json_output: Bool, analyzed_source: String? = nil) -> Bool:
+    if analyzed_source == nil:
+        return lint_fix_refused(file_path, "{file_path}:1:1: missing analyzed source revision; rerun lint before applying fixes", json_output)
+    val source: String = analyzed_source.unwrap()
+    var sources: Dict<text, text> = {}
+    sources[file_path] = source
+    val new_source = match validated_fix_sources(fixes, sources):
+        case Ok(updated):
+            if not updated.has(file_path): return true
+            updated[file_path]
+        case Err(message): return lint_fix_refused(file_path, message, json_output)
+    if not file_exists(file_path) or file_read(file_path) != source:
+        return lint_fix_refused(file_path, "{file_path}:1:1: source changed since analysis; no fixes applied; rerun lint", json_output)
 
     if dry_run:
         if json_output:
@@ -834,6 +850,8 @@ fn apply_collected_fixes(file_path: String, fixes: [EasyFix], dry_run: Bool, jso
             for fix in fixes:
                 print("  [{easyfix_id(fix)}] {easyfix_description(fix)}")
     else:
+        if not file_exists(file_path) or file_read(file_path) != source:
+            return lint_fix_refused(file_path, "{file_path}:1:1: source changed before fix write; rerun lint", json_output)
         if not file_atomic_write(file_path, new_source):
             if json_output:
                 print("{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"atomic fix write failed\"}")

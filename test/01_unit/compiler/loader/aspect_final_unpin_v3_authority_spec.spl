@@ -28,6 +28,17 @@ use std.common.aspect_pack.{
     APK_ACT_LAZY_FACET,
     ApkCatalogEntryV2,
     apk_build_catalog_v2,
+    apk_facet_refcount_v1,
+    apk_loader_unloads,
+}
+use std.common.aspect_dynload_lifecycle_v1.{
+    ASPECT_DYNLOAD_MAX_LIFECYCLE_CAPACITY_V1,
+    aspect_dynload_lifecycle_create_v1,
+    aspect_dynload_lifecycle_snapshot_v1,
+    aspect_dynload_lifecycle_reclaim_v1,
+    aspect_dynload_callback_begin_v1,
+    aspect_dynload_lease_complete_v1,
+    aspect_dynload_unload_v1,
 }
 use std.io_runtime.{mkdir_p, file_write_bytes}
 use os.smf.dynsmf_session.{dynsmf_policy_default}
@@ -243,6 +254,98 @@ describe "L6 final-unpin V3 release authority":
         val replay = moduleloader_retry_final_unpin_v3(loader, operation)
         expect(replay.native_attempted).to_equal(false)
 
+    it "retains both pins when another bound reference still executes":
+        val before = native_exec_memory_count()
+        val suffix = "cross_reference_execution"
+        val fixture = v3_fixture(suffix)
+        val owner = v3_owner(suffix)
+        _ = mkdir_p("build/dynsmf")
+        expect(file_write_bytes(
+            fixture.manifest[0].path, fixture.artifact_bytes)).to_equal(true)
+        var loader = ModuleLoader.with_defaults()
+        match loader.load(fixture.manifest[0].path):
+            case LoadResult.Success(_): pass
+            case _: panic("V3 cross-reference pack admission failed")
+        expect(moduleloader_install_aspect_catalog(
+            loader, v3_loader_catalog(suffix)).is_ok()).to_equal(true)
+        val catalog_ref = ModuleDynSmfCatalogRefV3(
+            dynsmf_owner: owner, library_id: "v3_" + suffix)
+        val facet_key = "startup/v3_" + suffix
+        val executing_pin = moduleloader_load_bound_facet_v3(
+            loader, catalog_ref, facet_key)
+        val final_pin = moduleloader_load_bound_facet_v3(
+            loader, catalog_ref, facet_key)
+        expect(executing_pin.active).to_equal(true)
+        expect(final_pin.active).to_equal(true)
+        val execution = moduleloader_begin_bound_execution_v3(
+            loader, executing_pin).unwrap()
+        val execution_second = moduleloader_begin_bound_execution_v3(
+            loader, executing_pin).unwrap()
+        val aspect_owner = executing_pin.owner_handle
+        val unloads_before = apk_loader_unloads(aspect_owner)
+        expect(apk_facet_refcount_v1(aspect_owner, facet_key)).to_equal(2)
+        expect(native_exec_memory_count()).to_equal(before + 1)
+
+        step("Reject ordinary release without draining the executing reference")
+        expect(moduleloader_release_bound_facet_v3(
+            loader, executing_pin)).to_equal(false)
+        expect(executing_pin.active).to_equal(true)
+        expect(apk_facet_refcount_v1(aspect_owner, facet_key)).to_equal(2)
+        expect(apk_loader_unloads(aspect_owner)).to_equal(unloads_before)
+        expect(native_exec_memory_count()).to_equal(before + 1)
+
+        step("The other reference cannot acquire final release while A executes")
+        val pending = moduleloader_associate_final_unpin_v3(loader, final_pin)
+        expect(pending.is_err()).to_equal(true)
+        expect(pending.unwrap_err()).to_equal(
+            "dynsmf-owned-library-query-drain-pending")
+        expect(final_pin.active).to_equal(true)
+        expect(moduleloader_release_bound_facet_v3(
+            loader, executing_pin)).to_equal(false)
+        expect(executing_pin.active).to_equal(true)
+        expect(apk_facet_refcount_v1(aspect_owner, facet_key)).to_equal(2)
+        expect(apk_loader_unloads(aspect_owner)).to_equal(unloads_before)
+        expect(native_exec_memory_count()).to_equal(before + 1)
+
+        step("Complete A before releasing its pins and finally unmapping through B")
+        expect(moduleloader_complete_bound_execution_v3(
+            loader, execution)).to_equal(true)
+        expect(moduleloader_complete_bound_execution_v3(
+            loader, execution)).to_equal(false)
+        expect(moduleloader_release_bound_facet_v3(
+            loader, executing_pin)).to_equal(false)
+        expect(executing_pin.active).to_equal(true)
+        expect(apk_facet_refcount_v1(aspect_owner, facet_key)).to_equal(2)
+        expect(native_exec_memory_count()).to_equal(before + 1)
+        expect(moduleloader_complete_bound_execution_v3(
+            loader, execution_second)).to_equal(true)
+        expect(moduleloader_release_bound_facet_v3(
+            loader, executing_pin)).to_equal(true)
+        expect(executing_pin.active).to_equal(false)
+        expect(moduleloader_release_bound_facet_v3(
+            loader, executing_pin)).to_equal(false)
+        expect(moduleloader_begin_bound_execution_v3(
+            loader, executing_pin).is_err()).to_equal(true)
+        expect(apk_facet_refcount_v1(aspect_owner, facet_key)).to_equal(1)
+        expect(apk_loader_unloads(aspect_owner)).to_equal(unloads_before)
+        expect(native_exec_memory_count()).to_equal(before + 1)
+        val operation = moduleloader_associate_final_unpin_v3(
+            loader, final_pin).unwrap()
+        val released = moduleloader_release_final_unpin_v3(loader, operation)
+        expect(released.ok).to_equal(true)
+        expect(released.released).to_equal(true)
+        expect(released.native_attempted).to_equal(true)
+        expect(released.acknowledged).to_equal(true)
+        expect(apk_facet_refcount_v1(aspect_owner, facet_key)).to_equal(-1)
+        expect(apk_loader_unloads(aspect_owner)).to_equal(unloads_before + 1)
+        expect(native_exec_memory_count()).to_equal(before)
+
+        val replay = moduleloader_retry_final_unpin_v3(loader, operation)
+        expect(replay.ok).to_equal(true)
+        expect(replay.native_attempted).to_equal(false)
+        expect(apk_loader_unloads(aspect_owner)).to_equal(unloads_before + 1)
+        expect(native_exec_memory_count()).to_equal(before)
+
     it "publishes Closing before drain and still releases existing bound pins":
         val fixture = v3_fixture("drain-paired")
         val owner = v3_owner("drain-paired")
@@ -355,3 +458,128 @@ describe "L6 final-unpin V3 release authority":
         expect(second.released).to_equal(true)
         expect(second.acknowledged).to_equal(true)
         expect(native_exec_memory_count()).to_equal(before)
+
+    it "drains more than 1024 bound acquisitions without exhausting lifecycle slots":
+        val before = native_exec_memory_count()
+        val suffix = "reclaimed_acquisitions"
+        val fixture = v3_fixture(suffix)
+        val owner = v3_owner(suffix)
+        _ = mkdir_p("build/dynsmf")
+        expect(file_write_bytes(
+            fixture.manifest[0].path, fixture.artifact_bytes)).to_equal(true)
+        var loader = ModuleLoader.with_defaults()
+        match loader.load(fixture.manifest[0].path):
+            case LoadResult.Success(_): pass
+            case _: panic("V3 reclamation pack admission failed")
+        expect(moduleloader_install_aspect_catalog(
+            loader, v3_loader_catalog(suffix)).is_ok()).to_equal(true)
+        val catalog_ref = ModuleDynSmfCatalogRefV3(
+            dynsmf_owner: owner, library_id: "v3_" + suffix)
+        val facet_key = "startup/v3_" + suffix
+        var completed: i64 = 0
+        step("Acquire and drain one bound reference beyond the lifecycle capacity")
+        while completed < ASPECT_DYNLOAD_MAX_LIFECYCLE_CAPACITY_V1 + 1:
+            val reference = moduleloader_load_bound_facet_v3(
+                loader, catalog_ref, facet_key)
+            expect(reference.active).to_equal(true)
+            expect(apk_facet_refcount_v1(reference.owner_handle, facet_key)).to_equal(1)
+            expect(moduleloader_release_bound_facet_v3(loader, reference)).to_equal(true)
+            expect(reference.active).to_equal(false)
+            expect(apk_facet_refcount_v1(reference.owner_handle, facet_key)).to_equal(0)
+            expect(native_exec_memory_count()).to_equal(before + 1)
+            completed = completed + 1
+        expect(completed).to_equal(ASPECT_DYNLOAD_MAX_LIFECYCLE_CAPACITY_V1 + 1)
+
+        step("A final acquisition still consumes exactly one physical mapping")
+        val final_pin = moduleloader_load_bound_facet_v3(loader, catalog_ref, facet_key)
+        expect(final_pin.active).to_equal(true)
+        val operation = moduleloader_associate_final_unpin_v3(loader, final_pin).unwrap()
+        val released = moduleloader_release_final_unpin_v3(loader, operation)
+        expect(released.released).to_equal(true)
+        expect(released.acknowledged).to_equal(true)
+        expect(native_exec_memory_count()).to_equal(before)
+
+    it "replays a terminal final receipt without reclaiming a reused lifecycle":
+        val before = native_exec_memory_count()
+        val probe = aspect_dynload_lifecycle_create_v1("trace/final_replay", 7, 8, false).unwrap()
+        aspect_dynload_unload_v1(probe).unwrap()
+        expect(aspect_dynload_lifecycle_reclaim_v1(probe)).to_equal(true)
+        val final = v3_final_operation("reclaimed_final_replay")
+        var loader = final.0
+        val operation = final.1
+        step("Keep the retired product slot reserved while its final receipt is pending")
+        val pending = aspect_dynload_lifecycle_create_v1("trace/pending_final", 7, 8, false).unwrap()
+        expect(pending.lifecycle_id == probe.lifecycle_id).to_equal(false)
+        expect(native_exec_memory_count()).to_equal(before + 1)
+        aspect_dynload_unload_v1(pending).unwrap()
+        expect(aspect_dynload_lifecycle_reclaim_v1(pending)).to_equal(true)
+        val released = moduleloader_release_final_unpin_v3(loader, operation)
+        expect(released.released).to_equal(true)
+        expect(released.acknowledged).to_equal(true)
+        expect(native_exec_memory_count()).to_equal(before)
+
+        step("Reuse the released product lifecycle slot with a new live callback")
+        val fresh = aspect_dynload_lifecycle_create_v1("trace/final_replay", 7, 8, false).unwrap()
+        expect(fresh.lifecycle_id).to_equal(probe.lifecycle_id)
+        expect(fresh.incarnation).to_equal(probe.incarnation + 2)
+        val callback = aspect_dynload_callback_begin_v1(fresh).unwrap()
+        val replay = moduleloader_retry_final_unpin_v3(loader, operation)
+        expect(replay.released).to_equal(true)
+        expect(replay.native_attempted).to_equal(false)
+        expect(replay.acknowledged).to_equal(true)
+        expect(aspect_dynload_lifecycle_snapshot_v1(fresh).unwrap().callback_count).to_equal(1)
+        expect(aspect_dynload_lifecycle_snapshot_v1(fresh).unwrap().incarnation).to_equal(
+            fresh.incarnation)
+        expect(native_exec_memory_count()).to_equal(before)
+        expect(aspect_dynload_lease_complete_v1(fresh, callback).is_ok()).to_equal(true)
+        aspect_dynload_unload_v1(fresh).unwrap()
+        expect(aspect_dynload_lifecycle_reclaim_v1(fresh)).to_equal(true)
+
+    it "keeps recovered final completion terminal when the original dispatcher resumes":
+        val before = native_exec_memory_count()
+        val probe = aspect_dynload_lifecycle_create_v1("trace/interleaved_final", 7, 8, false).unwrap()
+        aspect_dynload_unload_v1(probe).unwrap()
+        expect(aspect_dynload_lifecycle_reclaim_v1(probe)).to_equal(true)
+        val final = v3_final_operation("interleaved_final_reclaim")
+        var loader = final.0
+        val operation = final.1
+
+        step("A performs production preparation and native dispatch before yielding its continuation")
+        val dispatch_a = loader._dispatch_final_unpin_v3(operation, false).unwrap()
+        expect(dispatch_a.native_attempted).to_equal(true)
+        expect(dispatch_a.observed.physical_complete).to_equal(true)
+        expect(dispatch_a.observed.attempt.opaque_attempt).to_be_greater_than(0)
+        expect(native_exec_memory_count()).to_equal(before)
+
+        step("B recovers the retained in-flight completion and reclaims the old lifecycle")
+        val completed_b = moduleloader_retry_final_unpin_v3(loader, operation)
+        expect(completed_b.ok).to_equal(true)
+        expect(completed_b.released).to_equal(true)
+        expect(completed_b.acknowledged).to_equal(true)
+        expect(completed_b.native_attempted).to_equal(false)
+        expect(completed_b.retryable).to_equal(false)
+        val fresh = aspect_dynload_lifecycle_create_v1("trace/interleaved_final", 7, 8, false).unwrap()
+        expect(fresh.lifecycle_id).to_equal(probe.lifecycle_id)
+        expect(fresh.incarnation).to_equal(probe.incarnation + 2)
+        val callback = aspect_dynload_callback_begin_v1(fresh).unwrap()
+
+        step("A resumes the same production continuation and preserves B's terminal result")
+        val completed_a = loader._resume_final_unpin_v3(dispatch_a)
+        expect(completed_a.ok).to_equal(true)
+        expect(completed_a.released).to_equal(true)
+        expect(completed_a.acknowledged).to_equal(true)
+        expect(completed_a.native_attempted).to_equal(true)
+        expect(completed_a.retryable).to_equal(false)
+        expect(aspect_dynload_lifecycle_snapshot_v1(fresh).unwrap().callback_count).to_equal(1)
+        expect(aspect_dynload_lifecycle_snapshot_v1(fresh).unwrap().incarnation).to_equal(fresh.incarnation)
+
+        step("Later public replay remains terminal and never dispatches native release again")
+        val replay = moduleloader_retry_final_unpin_v3(loader, operation)
+        expect(replay.ok).to_equal(true)
+        expect(replay.released).to_equal(true)
+        expect(replay.retryable).to_equal(false)
+        expect(replay.native_attempted).to_equal(false)
+        expect(native_exec_memory_count()).to_equal(before)
+        expect(aspect_dynload_lease_complete_v1(fresh, callback).is_ok()).to_equal(true)
+        aspect_dynload_unload_v1(fresh).unwrap()
+        expect(aspect_dynload_lifecycle_reclaim_v1(fresh)).to_equal(true)

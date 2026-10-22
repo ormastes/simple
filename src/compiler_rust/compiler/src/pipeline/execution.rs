@@ -583,7 +583,21 @@ impl CompilerPipeline {
         // HIR registration, but do not evaluate them again in this fallback.
         let has_main_function = mir_module.functions.iter().any(|f| f.name == FUNC_MAIN);
 
-        if !has_main_function {
+        // A file-backed library module (no `fn main`, no legacy `main = <expr>`,
+        // and no script body for `wrap_entry_script_as_main` to wrap) is
+        // compiled to real code like the target lane above already does.
+        // Evaluating it instead produced the 219-byte constant stub with no
+        // exported functions -- exactly the hollow artifact dynSMF's export
+        // witness rejects -- and a library carrying a liftable module global
+        // was refused outright by the branch below.
+        let is_library_module = source_file.is_some()
+            && !assigns_to_main(&ast_module.items)
+            && !ast_module
+                .items
+                .iter()
+                .any(|item| matches!(item, Node::Function(f) if f.name == FUNC_MAIN));
+
+        if !has_main_function && !is_library_module {
             if wraps_script_entry {
                 // We already synthesized a `main` from the script body above
                 // (bug seed_compile_smf_stub_fail_open_2026-07-17) and it
@@ -671,6 +685,20 @@ impl CompilerPipeline {
     }
 
     fn compile_module_to_memory_for_target_with_context(
+        &mut self,
+        ast_module: simple_parser::ast::Module,
+        target: Target,
+        source_path: Option<&Path>,
+    ) -> Result<Vec<u8>, CompileError> {
+        // Freestanding and WASM runtimes do not define the `[i64]` word lane.
+        let previous_lane = self.signed_word_lane;
+        self.signed_word_lane = !target.is_baremetal() && !target.is_wasm();
+        let result = self.compile_module_to_memory_for_target_inner(ast_module, target, source_path);
+        self.signed_word_lane = previous_lane;
+        result
+    }
+
+    fn compile_module_to_memory_for_target_inner(
         &mut self,
         ast_module: simple_parser::ast::Module,
         target: Target,
@@ -1312,5 +1340,345 @@ mod tests {
 
         assert!(filtered.libraries.iter().any(|lib| lib == "simple_runtime"));
         assert!(!filtered.libraries.iter().any(|lib| lib == "simple_native_all"));
+    }
+
+    /// Compile a `main`-less library entry to SMF and return its bytes.
+    fn compile_library_smf(files: &[(&str, &str)]) -> Vec<u8> {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, body) in files {
+            std::fs::write(dir.path().join(name), body).unwrap();
+        }
+        let out = dir.path().join("lib.smf");
+        let mut compiler = crate::CompilerPipeline::new().unwrap();
+        compiler
+            .compile(&dir.path().join("lib.spl"), &out)
+            .expect("library entry must compile to SMF");
+        std::fs::read(&out).unwrap()
+    }
+
+    fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    /// dynSMF bundle shape: no `fn main`, reaching a `use m.{f as g}` alias.
+    /// The alias used to be buried in a synthesized `main` (undefined
+    /// identifier), and a `main`-less entry used to become the 219-byte stub.
+    #[test]
+    fn library_smf_resolves_aliased_import_and_emits_real_code() {
+        let bytes = compile_library_smf(&[
+            ("a.spl", "fn upd(x: i64) -> i64:\n    x + 1\n"),
+            ("b.spl", "use a.{upd as _shared_upd}\n\nfn upd(x: i64) -> i64:\n    _shared_upd(x) * 2\n"),
+            ("lib.spl", "use b.{upd}\n\nfn entry_ready() -> i64:\n    upd(20)\n"),
+        ]);
+        assert!(bytes.len() > 219, "got the {}-byte stub, not real code", bytes.len());
+        assert!(contains_bytes(&bytes, b"entry_ready"), "exported function missing from SMF");
+    }
+
+    /// Preservation: a file-backed legacy `main = <expr>` entry still takes
+    /// the interpreter fallback and emits the constant stub, byte for byte.
+    #[test]
+    fn file_backed_main_assignment_still_emits_constant_stub() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("m42.spl");
+        let out = dir.path().join("m42.smf");
+        std::fs::write(&src, "main = 42\n").unwrap();
+        crate::CompilerPipeline::new().unwrap().compile(&src, &out).unwrap();
+        // A few interior stub bytes vary between runs; compare size and tail.
+        let bytes = std::fs::read(&out).unwrap();
+        assert_eq!(bytes.len(), super::generate_smf_bytes(42, None).len());
+        assert!(bytes.ends_with(b"main\0"));
+    }
+
+    /// Preservation: an in-memory (no source path) main-less module keeps the
+    /// interpreter fallback; only file-backed libraries get real codegen.
+    #[test]
+    fn in_memory_mainless_module_still_emits_constant_stub() {
+        let bytes = crate::CompilerPipeline::new()
+            .unwrap()
+            .compile_source_to_memory("fn f() -> i64:\n    1\n")
+            .unwrap();
+        // Same stub shape as before (a few interior bytes are not
+        // deterministic across calls, so compare size and the symbol table).
+        let stub = super::generate_smf_bytes(0, None);
+        assert_eq!(bytes.len(), stub.len());
+        assert!(bytes.ends_with(b"main\0"));
+        assert!(!contains_bytes(&bytes, b"\0f\0"), "real code was emitted for `f`");
+    }
+
+    /// Build `source` as a standalone native binary, run it, return stdout.
+    fn native_stdout(source: &str) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("parity.spl");
+        let bin = dir.path().join("parity.bin");
+        std::fs::write(&src, source).unwrap();
+        crate::CompilerPipeline::new()
+            .unwrap()
+            .compile_file_to_native_binary(&src, &bin, None)
+            .expect("native build");
+        let out = std::process::Command::new(&bin).output().expect("run native binary");
+        assert!(out.status.success(), "native binary failed: {:?}", out);
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    /// `?` on every subject shape. EXPECTED is the tree-walk interpreter's
+    /// output (`SIMPLE_EXECUTION_MODE=interpret simple run`). Before the
+    /// lower_try fix the native build continued past nil `[T]?`/`{K:V}?`/
+    /// tuple?/`Option` None and lost present collections.
+    ///
+    /// Exception, `N1` (`any_try(true)`): `?` on a bare PRESENT value held as
+    /// untyped/`ANY` is rejected by the interpreter at run time ("? operator
+    /// requires Result or Option type"). Natively it is the identity (the
+    /// value continues, `N1 3`) via `rt_unwrap_or_trap`; it must never read
+    /// as nil and continue silently, which is what `rt_enum_payload` did.
+    const TRY_FORMS_SRC: &str = r#"fn arr_opt(flag: bool) -> [u8]?:
+    if flag:
+        return [7u8, 8u8, 9u8]
+    nil
+
+fn arr_try(flag: bool) -> [u8]?:
+    val a = arr_opt(flag)?
+    print "arr_try continued len={a.len()}"
+    [a[0], a[2]]
+
+fn dict_opt(flag: bool) -> Dict<text, i64>?:
+    if flag:
+        return {"k": 5}
+    nil
+
+fn dict_try(flag: bool) -> i64?:
+    val d = dict_opt(flag)?
+    print "dict_try continued"
+    d["k"] + 1
+
+fn tup_opt(flag: bool) -> (i64, i64)?:
+    if flag:
+        return (3, 4)
+    nil
+
+fn tup_try(flag: bool) -> i64?:
+    val t = tup_opt(flag)?
+    print "tup_try continued"
+    t.0 * 10 + t.1
+
+fn enum_opt(flag: bool) -> Option<i64>:
+    if flag:
+        return Some(41)
+    None
+
+fn enum_try(flag: bool) -> Option<i64>:
+    val v = enum_opt(flag)?
+    print "enum_try continued"
+    Some(v + 1)
+
+fn any_src(flag: bool):
+    if flag:
+        return [1, 2, 3]
+    nil
+
+fn any_try(flag: bool) -> i64?:
+    val v = any_src(flag)?
+    print "any_try continued"
+    v.len()
+
+fn res(x: i64) -> Result<i64, text>:
+    if x < 0:
+        return Err("neg")
+    Ok(x * 2)
+
+fn res_try(x: i64) -> Result<i64, text>:
+    val v = res(x)?
+    print "res_try continued"
+    Ok(v + 1)
+
+fn loop_try(n: i64) -> Result<i64, text>:
+    var acc = 0
+    var i = 0
+    while i < n:
+        if i == 2:
+            val bad = res(-1)?
+            acc = acc + bad
+        val r = res(i)?
+        acc = acc + r
+        i = i + 1
+    Ok(acc)
+
+fn err_any(flag: bool):
+    if flag:
+        return Err("boom")
+    Some(5)
+
+fn opt_from_any(flag: bool) -> Option<i64>:
+    val o: Option<i64> = err_any(flag)
+    val v = o?
+    print "opt_from_any continued"
+    Some(v + 1)
+
+fn falsy(k: i64) -> Option<i64>:
+    if k == 0:
+        return Some(0)
+    None
+
+fn falsy_try(k: i64) -> Option<i64>:
+    val v = falsy(k)?
+    print "falsy_try continued v={v}"
+    Some(v + 10)
+
+fn show_arr(a: [u8]?) -> text:
+    if val x = a:
+        return "arr[{x[0]},{x[1]}]"
+    "nil"
+
+fn show_i(v: i64?) -> text:
+    if val x = v:
+        return "{x}"
+    "nil"
+
+fn main():
+    print "A1 {show_arr(arr_try(true))}"
+    print "A2 {show_arr(arr_try(false))}"
+    print "D1 {show_i(dict_try(true))}"
+    print "D2 {show_i(dict_try(false))}"
+    print "T1 {show_i(tup_try(true))}"
+    print "T2 {show_i(tup_try(false))}"
+    match enum_try(true):
+        case Some(v): print "E1 {v}"
+        case None: print "E1 none"
+    match enum_try(false):
+        case Some(v): print "E2 {v}"
+        case None: print "E2 none"
+    print "N1 {show_i(any_try(true))}"
+    print "N2 {show_i(any_try(false))}"
+    match res_try(5):
+        case Ok(v): print "R1 {v}"
+        case Err(e): print "R1 err {e}"
+    match res_try(-5):
+        case Ok(v): print "R2 {v}"
+        case Err(e): print "R2 err {e}"
+    match loop_try(2):
+        case Ok(v): print "L1 {v}"
+        case Err(e): print "L1 err {e}"
+    match loop_try(5):
+        case Ok(v): print "L2 {v}"
+        case Err(e): print "L2 err {e}"
+    # Only the absence of "opt_from_any continued" is observed here: a native
+    # `match` on an Option slot holding a Result.Err is a separate question.
+    val r1 = opt_from_any(true)
+    print "X1 returned"
+    match opt_from_any(false):
+        case Some(v): print "X2 {v}"
+        case None: print "X2 none"
+        case _: print "X2 propagated"
+    match falsy_try(0):
+        case Some(v): print "F1 {v}"
+        case None: print "F1 none"
+    match falsy_try(1):
+        case Some(v): print "F2 {v}"
+        case None: print "F2 none"
+"#;
+
+    const TRY_FORMS_EXPECTED: &str = "arr_try continued len=3\nA1 arr[7,9]\nA2 nil\ndict_try continued\nD1 6\nD2 nil\ntup_try continued\nT1 34\nT2 nil\nenum_try continued\nE1 42\nE2 none\nany_try continued\nN1 3\nN2 nil\nres_try continued\nR1 11\nR2 err neg\nL1 2\nL2 err neg\nX1 returned\nopt_from_any continued\nX2 6\nfalsy_try continued v=0\nF1 10\nF2 none\n";
+
+    #[test]
+    fn native_try_operator_matches_interpreter_on_every_subject_shape() {
+        assert_eq!(native_stdout(TRY_FORMS_SRC), TRY_FORMS_EXPECTED);
+    }
+
+    /// Constructs admitted to AotNative by the compilability relaxation
+    /// (`?`, `??`, slices, `[v; n]` static/dynamic/u8/text, int-literal match).
+    /// EXPECTED is the interpreter's output.
+    const CONSTRUCTS_SRC: &str = r#"fn half(x: i64) -> Result<i64, text>:
+    if x % 2 != 0:
+        return Err("odd")
+    Ok(x / 2)
+
+fn quarter(x: i64) -> Result<i64, text>:
+    val h = half(x)?
+    half(h)
+
+fn maybe_arr(flag: bool) -> [u8]?:
+    if flag:
+        return Some([1u8, 2u8, 3u8])
+    nil
+
+fn arr_or_empty(flag: bool) -> [u8]:
+    maybe_arr(flag) ?? []
+
+fn opt_or(v: i64?) -> i64:
+    v ?? 99
+
+fn mid(s: text) -> text:
+    s[1:3]
+
+fn rev(s: text) -> text:
+    val n = s.len()
+    var out: [text] = []
+    var i = n - 1
+    while i >= 0:
+        out.push(s[i:i + 1])
+        i = i - 1
+    out.join("")
+
+fn tail_from(xs: [i64], k: i64) -> [i64]:
+    xs[k:]
+
+fn fill_sum(n: i64) -> i64:
+    var a: [i64] = [0; n]
+    var i = 0
+    while i < n:
+        a[i] = i * 3
+        i = i + 1
+    var s = 0
+    for v in a:
+        s = s + v
+    s
+
+fn fixed_bytes() -> i64:
+    var b: [u8] = [0u8; 64]
+    b[63] = 7u8
+    b.len() + b[63].to_i64()
+
+fn text_fill() -> text:
+    var t: [text] = [""; 4]
+    t[0] = "a"
+    t[3] = "z"
+    t.join("-")
+
+fn tier(code: i64) -> i64:
+    match code:
+        case 0: 10
+        case 1: 11
+        case 2: 12
+        case _: -1
+
+fn main():
+    match quarter(8):
+        case Ok(v): print "q8={v}"
+        case Err(e): print "q8err={e}"
+    match quarter(6):
+        case Ok(v): print "q6={v}"
+        case Err(e): print "q6err={e}"
+    print "arr_t={arr_or_empty(true).len()} arr_f={arr_or_empty(false).len()}"
+    print "opt={opt_or(5)} none={opt_or(nil)}"
+    print "mid={mid("abcdef")} rev={rev("hello")}"
+    val tl = tail_from([1, 2, 3, 4, 5], 2)
+    print "tail={tl.len()} first={tl[0]}"
+    print "fill={fill_sum(10)} bytes={fixed_bytes()} text={text_fill()}"
+    print "tier={tier(0)},{tier(2)},{tier(9)}"
+"#;
+
+    const CONSTRUCTS_EXPECTED: &str = "q8=2\nq6err=odd\narr_t=3 arr_f=0\nopt=5 none=99\nmid=bc rev=olleh\ntail=3 first=3\nfill=135 bytes=71 text=a---z\ntier=10,12,-1\n";
+
+    #[test]
+    fn native_admitted_constructs_match_interpreter() {
+        assert_eq!(native_stdout(CONSTRUCTS_SRC), CONSTRUCTS_EXPECTED);
+    }
+
+    /// A library with a liftable module global has no script body to wrap and
+    /// was refused with "could not be lowered to a real `main`".
+    #[test]
+    fn library_smf_with_module_global_emits_real_code() {
+        let bytes = compile_library_smf(&[("lib.spl", "val K = 5\n\nfn add_k(x: i64) -> i64:\n    x + K\n")]);
+        assert!(bytes.len() > 219, "got the {}-byte stub, not real code", bytes.len());
+        assert!(contains_bytes(&bytes, b"add_k"), "exported function missing from SMF");
     }
 }

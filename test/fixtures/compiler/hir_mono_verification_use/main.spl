@@ -1,0 +1,253 @@
+# Native only: complete actual selected bodies are consumed inside real leases.
+use support.*
+use provider.{outer}
+use compiler.driver.cache.hir_mono_verification_use_v1.*
+use compiler.driver.cache.hir_mono_archive_execution_v1.*
+use compiler.driver.cache.hir_mono_archive_consumer_v1.*
+use compiler.driver.cache.hir_body_typecheck_lease_v1.{HirBodyArchiveV1}
+use compiler.driver.cache.hir_mono_verification_recipe_codec_v1.*
+use compiler.common.cache_contract.hir_owned_artifact_cache_v1.{hir_owned_artifact_load_blob_v1,
+    hir_owned_artifact_store_blob_v1, HIR_OWNED_ARTIFACT_MAX_BYTES_V1}
+use compiler.driver.cache.hir_mono_function_record_v1.{mono_function_record_encode_v1,
+    mono_function_record_load_in_owned_scope_v1}
+use compiler.mono.mono_archive_registration_v1.*
+use compiler.mono.monomorphize_integration.{MonomorphizationPass}
+use compiler.mono.verify.post_mono_verify.{post_mono_verify_modules, post_mono_report_empty, post_mono_report_total}
+use compiler.driver.cache.hir_mono_archive_verify_v1.{mono_archive_post_mono_report_digest_v1}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.driver.driver_hir_cache.{hir_cache_header, hir_cache_last_warnings,
+    hir_cache_promote_diagnostic_owner_v1, hir_cache_clear_last_warnings}
+use std.env.{env_get}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_write}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+
+fn observe(owner: MonoArchiveVerificationUseV1, name: text) -> Result<text, text>:
+    if not transient_scope_begin(): return Err("verification observation scope unavailable")
+    val loaded = mono_archive_verification_use_load_module_in_owned_scope_v1(owner, name)
+    val digest = if loaded.is_ok(): sha256_text(hir_module_encode(loaded.unwrap())) else: ""
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(digest) else: false
+    val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    if paused: hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not owned or not cache_owned or not ended: panic("verification observation ownership")
+    if digest != "": return Ok(digest)
+    Err("actual verification body unavailable")
+
+fn immutable_recipe_control(owner: MonoArchiveVerificationUseV1) -> bool:
+    if not transient_scope_begin(): return false
+    val loaded = hir_owned_artifact_load_blob_v1(owner.cache, owner.manifest_key)
+    var refused = false
+    if loaded.is_ok():
+        val manifest = mono_verification_manifest_decode_v1(loaded.unwrap())
+        if manifest.is_ok():
+            val row = manifest.unwrap().modules[0]
+            val module_blob = hir_owned_artifact_load_blob_v1(owner.cache, row.recipe_key)
+            if module_blob.is_ok():
+                val recipe = mono_verification_module_decode_v1(module_blob.unwrap())
+                if recipe.is_ok():
+                    var edited = recipe.unwrap()
+                    edited.roots = []
+                    val edited_blob = mono_verification_module_encode_v1(edited)
+                    # A complete valid frame with omitted actual roots cannot
+                    # replace the immutable captured recipe at its owned key.
+                    refused = edited_blob != module_blob.unwrap() and
+                        hir_owned_artifact_store_blob_v1(owner.cache, row.recipe_key, edited_blob).is_err()
+    val paused = transient_scope_pause()
+    val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    if paused: hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not cache_owned or not ended: panic("immutable recipe control ownership")
+    refused
+
+struct RecordRestore:
+    path: text
+    original_bytes: text
+    framed_body_valid: bool
+
+# Adversarial cache corruption is confined to the launcher's private evidence
+# cache. The changed record has a valid complete generated function codec and
+# checksum/header, but cannot satisfy the captured selected-function digest.
+fn corrupt_stored_body(owner: MonoArchiveVerificationUseV1) -> Result<RecordRestore, text>:
+    if not transient_scope_begin(): return Err("record corruption scope unavailable")
+    var restore: RecordRestore? = nil
+    val manifest_blob = hir_owned_artifact_load_blob_v1(owner.cache, owner.manifest_key)
+    if manifest_blob.is_ok():
+        val manifest = mono_verification_manifest_decode_v1(manifest_blob.unwrap())
+        if manifest.is_ok():
+            val row = manifest.unwrap().modules[0]
+            val module_blob = hir_owned_artifact_load_blob_v1(owner.cache, row.recipe_key)
+            if module_blob.is_ok():
+                val recipe = mono_verification_module_decode_v1(module_blob.unwrap())
+                if recipe.is_ok() and recipe.unwrap().roots.len() != 0:
+                    val selected = recipe.unwrap().roots[0]
+                    val function_result = mono_function_record_load_in_owned_scope_v1(selected.function_archive_key,
+                        selected.output_function_digest, selected.target_symbol, selected.target_name)
+                    if function_result.is_ok():
+                        var function = function_result.unwrap()
+                        function.body.stmts = []
+                        function.body.has = true
+                        function.body.value = HirExpr(kind: HirExprKind.IntLit(999, nil),
+                            has_type_: true, type_: function.return_type, span: function.span)
+                        val bad_blob = mono_function_record_encode_v1(function)
+                        val path = owner.cache.directory + "/owned-records-v1/" + selected.function_archive_key + ".hir-record"
+                        val original = file_read_regular_no_follow_bounded(path, HIR_OWNED_ARTIFACT_MAX_BYTES_V1)
+                        if original.is_ok() and bad_blob != "":
+                            val covered = "W\n0\n" + bad_blob
+                            val header = owner.cache.producer_header + " owned-record-v1 " + selected.function_archive_key
+                            val bad_frame = header + "\nC " + sha256_text(covered) + "\n" + covered
+                            if file_write(path, bad_frame):
+                                val raw = hir_owned_artifact_load_blob_v1(owner.cache, selected.function_archive_key)
+                                val typed_refused = mono_function_record_load_in_owned_scope_v1(selected.function_archive_key,
+                                    selected.output_function_digest, selected.target_symbol, selected.target_name).is_err()
+                                restore = Some(RecordRestore(path: path, original_bytes: original.unwrap(),
+                                    framed_body_valid: raw.is_ok() and raw.unwrap() == bad_blob and typed_refused))
+    val valid = restore != nil
+    val paused = transient_scope_pause()
+    # Only bounded encoded restore bytes/text escape, never the decoded function.
+    val owned = if paused and valid: transient_promote(restore) else: false
+    val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    if paused: hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not cache_owned or not ended or (valid and not owned): panic("record corruption ownership")
+    if val saved = restore: return Ok(saved)
+    Err("actual stored body corruption unavailable")
+
+fn main() -> i64:
+    if hir_cache_header() == "" or transient_array_scope_state_v1() != 0 or
+            env_get("SIMPLE_HIR_LEASE_RUNTIME_PROVIDER_DIGEST").len() != 64 or
+            env_get("SIMPLE_HIR_LEASE_CLOSURE_DIGEST").len() != 64: return 1
+    var checks = 1
+    if outer<i64>(7) != 43 or outer<text>("real native generic body") != 43: return 2
+    checks = checks + 1
+    val provider = lower_fixture("provider.spl", "verification.provider")
+    val root = root_for(lower_fixture("root.spl", "verification.root"), "outer", true, true)
+    val root_archive_result = archive_fixture(root)
+    val provider_archive_result = archive_fixture(provider)
+    val registration_result = mono_archive_registration_create_v1()
+    if root_archive_result.is_err() or provider_archive_result.is_err() or registration_result.is_err(): return 3
+    val registration = registration_result.unwrap()
+    val root_archive = root_archive_result.unwrap()
+    val provider_archive = provider_archive_result.unwrap()
+    val root_rows = capture_registration(registration, root_archive)
+    if root_rows.is_err() or mono_archive_publish_registration_v1(registration, root_rows.unwrap()).is_err(): return 4
+    val provider_rows = capture_registration(registration, provider_archive)
+    if provider_rows.is_err() or mono_archive_publish_registration_v1(registration, provider_rows.unwrap()).is_err(): return 5
+    var inventory: Dict<text, text> = {}
+    inventory[root.name] = root.path
+    inventory[provider.name] = provider.path
+    val order = [root.name, provider.name]
+    val admitted = mono_archive_registration_seal_v1(registration, inventory, order)
+    if admitted.is_err(): return 6
+    val execution_result = mono_archive_execution_create_v1(registration, inventory, order)
+    if execution_result.is_err(): return 7
+    val execution = execution_result.unwrap()
+    if not mono_archive_verification_use_capture_v1(execution).is_err(): return 8
+    checks = checks + 1
+    while not mono_archive_roots_complete_v1(execution):
+        if mono_archive_execute_next_root_v1(execution).is_err(): return 9
+    while execution.admission.state.cursor < execution.admission.state.queue.len():
+        if mono_archive_execute_next_specialization_v1(execution).is_err(): return 10
+    if not mono_archive_execution_complete_v1(execution) or execution.specialization_records.len() != 4: return 11
+    checks = checks + 1
+    val captured = mono_archive_verification_use_capture_v1(execution)
+    if captured.is_err(): return 12
+    val owner = captured.unwrap()
+    if owner.epoch != execution.expected_epoch or owner.publication_ledger_digest != execution.publication_ledger_digest or
+            owner.ordered_inventory != order or transient_array_scope_state_v1() != 0: return 13
+    checks = checks + 1
+    var original_modules: Dict<text, HirModule> = {}
+    original_modules[root.name] = root
+    original_modules[provider.name] = provider
+    val retained_pass = MonomorphizationPass.create()
+    val retained = retained_pass.process_modules(original_modules)
+    val root_digest = sha256_text(hir_module_encode(retained[root.name]))
+    val provider_digest = sha256_text(hir_module_encode(retained[provider.name]))
+    val root_observed = observe(owner, root.name)
+    val provider_observed = observe(owner, provider.name)
+    if root_observed.is_err() or provider_observed.is_err() or root_observed.unwrap() != root_digest or
+            provider_observed.unwrap() != provider_digest: return 14
+    checks = checks + 1
+    val expected_report = post_mono_verify_modules(retained)
+    val used = mono_archive_verification_use_v1(owner)
+    if used.is_err() or mono_archive_post_mono_report_digest_v1(used.unwrap().report) !=
+            mono_archive_post_mono_report_digest_v1(expected_report) or used.unwrap().modules.len() != 2: return 15
+    checks = checks + 1
+    # The immutable captured pin has no execution/facts/body references. The
+    # actual consumer still works after mutable root descriptors are detached.
+    val saved_roots = execution.root_records
+    execution.root_records = {}
+    val detached_use = mono_archive_verification_use_v1(owner)
+    execution.root_records = saved_roots
+    if detached_use.is_err() or mono_archive_post_mono_report_digest_v1(detached_use.unwrap().report) !=
+            mono_archive_post_mono_report_digest_v1(expected_report) or not mono_archive_execution_complete_v1(execution): return 16
+    checks = checks + 1
+    # Editing a caller-held returned report cannot edit the immutable selection
+    # or become an argument to use. A fresh actual replay must restore violations.
+    if post_mono_report_total(expected_report) == 0: return 17
+    var forged_clean = used.unwrap()
+    forged_clean.report = post_mono_report_empty()
+    if post_mono_report_total(forged_clean.report) != 0: return 18
+    val replayed = mono_archive_verification_use_v1(owner)
+    if replayed.is_err() or mono_archive_post_mono_report_digest_v1(replayed.unwrap().report) !=
+            mono_archive_post_mono_report_digest_v1(expected_report) or post_mono_report_total(replayed.unwrap().report) == 0: return 19
+    checks = checks + 1
+    if not immutable_recipe_control(owner): return 20
+    val unchanged = observe(owner, root.name)
+    if unchanged.is_err() or unchanged.unwrap() != root_digest: return 21
+    checks = checks + 1
+    val corrupt_result = corrupt_stored_body(owner)
+    if corrupt_result.is_err(): return 33
+    val restore = corrupt_result.unwrap()
+    val bad_use_refused = mono_archive_verification_use_v1(owner).is_err() and observe(owner, root.name).is_err()
+    # Always restore the exact original bytes before evaluating the control.
+    val restored = file_write(restore.path, restore.original_bytes)
+    if not restored or not restore.framed_body_valid or not bad_use_refused: return 34
+    checks = checks + 1
+    val recovered = mono_archive_verification_use_v1(owner)
+    if recovered.is_err() or mono_archive_post_mono_report_digest_v1(recovered.unwrap().report) !=
+            mono_archive_post_mono_report_digest_v1(expected_report): return 35
+    checks = checks + 1
+    var wrong = owner
+    wrong.epoch = owner.epoch + 1
+    if not mono_archive_verification_use_v1(wrong).is_err() or not observe(wrong, root.name).is_err(): return 22
+    checks = checks + 1
+    wrong = owner
+    wrong.ordered_inventory = [provider.name, root.name]
+    if not mono_archive_verification_use_v1(wrong).is_err(): return 23
+    checks = checks + 1
+    wrong = owner
+    wrong.manifest_digest = sha256_text("wrong immutable manifest")
+    if not mono_archive_verification_use_v1(wrong).is_err(): return 24
+    wrong = owner
+    wrong.cache.directory = owner.cache.directory + "/other-capture-owner"
+    if not mono_archive_verification_use_v1(wrong).is_err(): return 25
+    checks = checks + 1
+    if not mono_archive_verification_use_load_module_in_owned_scope_v1(owner, root.name).is_err(): return 26
+    checks = checks + 1
+    if not transient_scope_begin(): return 27
+    val nested_refused = mono_archive_verification_use_v1(owner).is_err() and
+        mono_archive_verification_use_capture_v1(execution).is_err()
+    val paused = transient_scope_pause()
+    val paused_refused = if paused: mono_archive_verification_use_load_module_in_owned_scope_v1(owner, root.name).is_err() else: false
+    if not transient_scope_end() or not nested_refused or not paused_refused: return 28
+    checks = checks + 1
+    if not transient_scope_begin(): return 29
+    var growth: [text] = []
+    var index = 0
+    while index < 4096:
+        growth = growth.push("verification recipe scope growth {index}")
+        index = index + 1
+    val grown = growth.len() == 4096
+    if not transient_scope_end() or not grown: return 30
+    val after_growth = mono_archive_verification_use_v1(owner)
+    if after_growth.is_err() or mono_archive_post_mono_report_digest_v1(after_growth.unwrap().report) !=
+            mono_archive_post_mono_report_digest_v1(expected_report): return 31
+    checks = checks + 1
+    if checks != 18: return 32
+    print "HIR mono verification use: {checks} checks passed"
+    0

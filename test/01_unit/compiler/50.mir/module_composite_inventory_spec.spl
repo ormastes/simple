@@ -1,0 +1,105 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Up-front struct/class layout inventory registration for the direct MIR lane
+
+Struct/class analog of module_enum_inventory_spec.spl (#3527 follow-up).
+
+The driver's struct-name prescan (prescan_module_struct_names) registers
+name-keyed struct field ORDER + declared field types for every module, but it
+deliberately never fills the struct default-value rows
+(struct_field_has_default / struct_field_default_expr) and never fills any
+NAME-keyed class row: class_type_names (bare name, composite layout key, and
+mir_class_identity) plus struct_field_order / struct_field_has_default /
+struct_field_default_expr under the same three keys. Only each module's own
+lower_module pass writes those -- and in the direct per-module lane the entry
+lowers BEFORE its dependency modules, and an undemanded dependency's own pass
+may be the only place its rows would ever come from. Param binding and
+value-method dispatch consult class_type_names to tell a class from a
+same-named value struct, so an empty map in that window degrades exactly the
+receiver/constructor metadata the manual stage3 per-module object sweep keeps
+losing (confirmed sweep failure family after #3527: payload-typed enum static
+constructor sites and lingering B5b in sdn/value.spl contexts).
+
+register_module_composite_inventory_v1 closes the gap the same way the enum
+inventory does: read declaration data through the module's own SymbolTable,
+write NAME-keyed maps only (field_map's per-module SymbolIds stay untouched),
+keep-first on name collisions, and let the module's own lower_module pass
+overwrite unconditionally when its turn comes.
+
+These probes contract-test the helper directly: class rows under all three
+keys, struct default rows, quiet idempotent re-registration, and a lowering
+that consumes the inventory without errors.
+"""
+
+# @tag: unit, compiler, mir, struct, class, driver
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{SymbolTable}
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn composite_hir(src: text, file: text) -> HirModule:
+    val parsed = parse_full_frontend(src, file, "fixture_composite_inventory", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    hir_lowering.lower_module(parsed)
+
+fn composite_ctx():
+    driver_mir_target_context(driver_core_compile_options_default())
+
+describe "module composite inventory registration":
+    it "registers class name-keyed rows under bare, layout, and identity keys":
+        val src = "class Meter:\n    ticks: i64\n\nfn read(m: Meter) -> i64:\n    m.ticks\n"
+        val hir = composite_hir(src, "testdata/fixture_composite_inventory.spl")
+        var lowering = MirLowering.new_for_target(SymbolTable.new(), composite_ctx())
+        lowering.register_module_composite_inventory_v1([hir])
+        expect(lowering.class_type_names.has("Meter")).to_equal(true)
+        expect(lowering.struct_field_order.has("Meter")).to_equal(true)
+        expect(lowering.struct_field_order["Meter"]).to_equal(["ticks"])
+        expect(lowering.struct_field_has_default.has("Meter")).to_equal(true)
+        expect(lowering.struct_field_has_default["Meter"]).to_equal([false])
+        expect(lowering.struct_field_default_expr.has("Meter")).to_equal(true)
+
+    it "registers struct default-value rows the struct-name prescan skips":
+        val src = "struct Gauge:\n    level: i64\n\nfn level_of(g: Gauge) -> i64:\n    g.level\n"
+        val hir = composite_hir(src, "testdata/fixture_composite_inventory_gauge.spl")
+        var lowering = MirLowering.new_for_target(SymbolTable.new(), composite_ctx())
+        lowering.register_module_composite_inventory_v1([hir])
+        expect(lowering.struct_field_has_default.has("Gauge")).to_equal(true)
+        expect(lowering.struct_field_has_default["Gauge"]).to_equal([false])
+        expect(lowering.struct_field_default_expr.has("Gauge")).to_equal(true)
+        expect(lowering.class_type_names.has("Gauge")).to_equal(false)
+
+    it "re-registration is quiet and keeps the first module's rows":
+        val src = "class Meter:\n    ticks: i64\n\nfn read(m: Meter) -> i64:\n    m.ticks\n"
+        val hir = composite_hir(src, "testdata/fixture_composite_inventory.spl")
+        var lowering = MirLowering.new_for_target(SymbolTable.new(), composite_ctx())
+        lowering.register_module_composite_inventory_v1([hir])
+        lowering.register_module_composite_inventory_v1([hir])
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.struct_field_order["Meter"]).to_equal(["ticks"])
+
+    it "a lowering that consumes the inventory constructs the class without errors":
+        val src = "class Meter:\n    ticks: i64\n\nimpl Meter:\n    me tick():\n        self.ticks = self.ticks + 1\n\nfn make() -> Meter:\n    val m = Meter(ticks: 0)\n    m.tick()\n    m\n"
+        val hir = composite_hir(src, "testdata/fixture_composite_inventory_make.spl")
+        var lowering = MirLowering.new_for_target(hir.symbols, composite_ctx())
+        lowering.register_module_composite_inventory_v1([hir])
+        val mir = lowering.lower_module(hir)
+        var messages: [text] = []
+        for e in lowering.errors:
+            messages = messages.push(e.message)
+        var all = ""
+        for m in messages:
+            all = all + m + "\n"
+        print "errors: [{all}]"
+        expect(all.contains("unresolved")).to_equal(false)
+        expect(all.contains("missing native trait")).to_equal(false)
+        var found_make = false
+        for function in mir.functions.values():
+            if function.name.ends_with(".make") or function.name == "make":
+                found_make = true
+        assert_true(found_make)

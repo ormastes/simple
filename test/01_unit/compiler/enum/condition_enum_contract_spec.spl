@@ -1,0 +1,102 @@
+# @req REQ-MC-003
+# @tag: unit, compiler, enum, condition
+"""Condition declaration rules consume real parsed and lowered attributes."""
+
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.{HirEnum, HirVariantKind, hir_enum_has_attribute}
+use compiler.semantics.enum_contract.contract_model.{EnumContractDiag}
+use compiler.semantics.enum_contract.condition_check.{check_condition_enums}
+
+fn condition_enum_setup(source: text) -> [HirEnum]:
+    val parsed = parse_full_frontend(source, "condition_unit.spl", "condition_unit", Logger(level: 0))
+    expect(parsed.enums.len()).to_equal(1)
+    var lowering = HirLowering.with_filename("condition_unit.spl")
+    val module = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    expect(module.enums.len()).to_equal(1)
+    var enums: [HirEnum] = []
+    for key in module.enums.keys():
+        val enum_: HirEnum = module.enums[key]
+        enums = enums.push(enum_)
+    enums
+
+fn condition_enum_check(source: text, variants: i64) -> [EnumContractDiag]:
+    val enums = condition_enum_setup(source)
+    expect(enums[0].variants.len()).to_equal(variants)
+    expect(hir_enum_has_attribute(enums[0], "condition")).to_equal(true)
+    check_condition_enums(enums)
+
+describe "REQ-MC-003 @condition declaration shape":
+    it "accepts exactly two variants without payloads":
+        val diags = condition_enum_check("@condition\nenum Enabled:\n    Off\n    On\n", 2)
+        expect(diags.len()).to_equal(0)
+
+    it "rejects an empty enum whose body contains only documentation":
+        val diags = condition_enum_check("@condition\nenum Empty:\n    \"No states\"\n", 0)
+        expect(diags.len()).to_equal(1)
+        expect(diags[0].code).to_equal("E-CONDITION-001")
+        expect(diags[0].enum_name).to_equal("Empty")
+        expect(diags[0].detail).to_equal("variant count: 0; expected: 2")
+
+    it "rejects one variant":
+        val diags = condition_enum_check("@condition\nenum Unary:\n    Only\n", 1)
+        expect(diags.len()).to_equal(1)
+        expect(diags[0].code).to_equal("E-CONDITION-001")
+        expect(diags[0].detail).to_equal("variant count: 1; expected: 2")
+
+    it "rejects three variants":
+        val diags = condition_enum_check("@condition\nenum Ternary:\n    Low\n    Mid\n    High\n", 3)
+        expect(diags.len()).to_equal(1)
+        expect(diags[0].code).to_equal("E-CONDITION-001")
+        expect(diags[0].detail).to_equal("variant count: 3; expected: 2")
+
+    it "rejects a positional payload in a two-variant enum":
+        val enums = condition_enum_setup("@condition\nenum Sample:\n    Missing\n    Present(i64)\n")
+        expect(enums[0].variants.len()).to_equal(2)
+        expect(hir_enum_has_attribute(enums[0], "condition")).to_equal(true)
+        var tuple_fields = 0
+        match enums[0].variants[1].kind:
+            case HirVariantKind.Tuple(types): tuple_fields = types.len()
+            case _: tuple_fields = -1
+        expect(tuple_fields).to_equal(1)
+        val diags = check_condition_enums(enums)
+        expect(diags.len()).to_equal(1)
+        expect(diags[0].code).to_equal("E-CONDITION-001")
+        expect(diags[0].enum_name).to_equal("Sample")
+        expect(diags[0].detail).to_equal("variant Present carries a payload")
+
+    it "rejects a named payload in a two-variant enum":
+        val enums = condition_enum_setup("@condition\nenum Named:\n    Missing\n    Present(value: i64)\n")
+        expect(enums[0].variants.len()).to_equal(2)
+        expect(hir_enum_has_attribute(enums[0], "condition")).to_equal(true)
+        var field_name = "<not a named payload>"
+        match enums[0].variants[1].kind:
+            case HirVariantKind.Struct(fields):
+                expect(fields.len()).to_equal(1)
+                field_name = fields[0].name
+            case _: field_name = "<not a named payload>"
+        expect(field_name).to_equal("value")
+        val diags = check_condition_enums(enums)
+        expect(diags.len()).to_equal(1)
+        expect(diags[0].code).to_equal("E-CONDITION-001")
+        expect(diags[0].detail).to_equal("variant Present carries a payload")
+
+    it "reports cardinality and payload violations independently":
+        val diags = condition_enum_check("@condition\nenum UnaryData:\n    Only(i64)\n", 1)
+        expect(diags.len()).to_equal(2)
+        expect(diags[0].detail).to_equal("variant count: 1; expected: 2")
+        expect(diags[1].detail).to_equal("variant Only carries a payload")
+
+    it "leaves an unannotated enum with arbitrary cardinality and payloads unchanged":
+        val enums = condition_enum_setup("enum Ordinary:\n    Only(value: i64)\n")
+        expect(hir_enum_has_attribute(enums[0], "condition")).to_equal(false)
+        expect(check_condition_enums(enums).len()).to_equal(0)
+
+    it "matches the exact attribute name":
+        val enums = condition_enum_setup("@conditional\nenum Ordinary:\n    Only(i64)\n")
+        expect(hir_enum_has_attribute(enums[0], "conditional")).to_equal(true)
+        expect(check_condition_enums(enums).len()).to_equal(0)

@@ -27,7 +27,7 @@ use app.optimize.sprof_collection_profile.{
     sprof_load_and_install_collection_feedback_text
 }
 use app.optimize.collection_plan_profile_bridge.{collection_plan_select_with_profile, collection_plan_select_with_prepared_profile, collection_plan_explain_with_prepared_profile, collection_plan_select_with_prepared_metrics, collection_plan_explain_with_prepared_metrics}
-use compiler.mir_opt.mir_opt.collection_plan_selection.{
+use compiler.mir_opt.collection_plan_selection.{
     CollectionPlanAlgorithm, CollectionPlanFacts, collection_plan_unproven_facts
 }
 use compiler.core.parser.{parser_init, parser_skip_newlines, parser_has_errors}
@@ -468,9 +468,15 @@ describe "sprof v2 collection feedback":
         expect(explained).to_contain("selected=ordered")
         facts.profile_hash_probes_p95 = 100
         facts.profile_hash_collisions_p95 = 40
-        val no_metric_decision = collection_plan_select_with_prepared_profile(
+        val prepared_decision = collection_plan_select_with_prepared_profile(
             facts, collection_index, site, target)
-        expect(no_metric_decision.selected).to_equal(CollectionPlanAlgorithm.Hash)
+        expect(prepared_decision.selected).to_equal(decision.selected)
+        expect(prepared_decision.reason).to_equal(decision.reason)
+        val prepared_explained = collection_plan_explain_with_prepared_profile(
+            facts, collection_index, site, target)
+        expect(prepared_explained).to_contain("profile.hash_probes_p95=100")
+        expect(prepared_explained).to_contain("profile.hash_collisions_p95=40")
+        expect(prepared_explained).to_contain("selected=ordered")
         val other_target_decision = collection_plan_select_with_prepared_profile(
             facts, collection_index, site, "aarch64-neon")
         expect(other_target_decision.reason).to_equal("insufficient-cost-evidence")
@@ -478,12 +484,45 @@ describe "sprof v2 collection feedback":
             "module-hash", "collision-workload", [], [sample], [metrics[0]])
         val unpaired = sprof_load_collection_profile_text(
             unpaired_body, "module-hash", "collision-workload")
+        val unpaired_index = sprof_build_collection_set_index(unpaired)
+        expect(unpaired_index.profiles[0].hash_probe_count_p95).to_equal(-2)
+        expect(unpaired_index.profiles[0].hash_collision_count_p95).to_equal(-2)
         val unpaired_decision = collection_plan_select_with_prepared_metrics(
             facts, sprof_build_collection_set_index(unpaired),
             sprof_build_collection_metric_index(unpaired), site, target)
         expect(unpaired_decision.reason).to_equal("invalid-profile-hash-facts")
         expect(collection_plan_select_with_profile(
             facts, unpaired, site, target).reason).to_equal("invalid-profile-hash-facts")
+        expect(collection_plan_select_with_prepared_profile(
+            facts, sprof_build_collection_set_index(unpaired), site, target).reason
+        ).to_equal("invalid-profile-hash-facts")
+        val unmeasured_body = sprof_serialize_collection_profile_with_metrics(
+            "module-hash", "collision-workload", [], [sample], [])
+        val unmeasured = sprof_load_collection_profile_text(
+            unmeasured_body, "module-hash", "collision-workload")
+        val unmeasured_index = sprof_build_collection_set_index(unmeasured)
+        expect(unmeasured_index.profiles[0].hash_probe_count_p95).to_equal(-1)
+        expect(unmeasured_index.profiles[0].hash_collision_count_p95).to_equal(-1)
+        expect(collection_plan_select_with_prepared_profile(
+            facts, unmeasured_index, site, target).selected
+        ).to_equal(CollectionPlanAlgorithm.Hash)
+        expect(collection_plan_explain_with_prepared_profile(
+            facts, unmeasured_index, site, target)
+        ).to_contain("profile.hash_probes_p95=unknown")
+        val zero_metrics: [SprofCollectionMetric] = [
+            SprofCollectionMetric(site_id: site, target_profile_id: target, name: "hash_probe_count", value: 0),
+            SprofCollectionMetric(site_id: site, target_profile_id: target, name: "hash_collision_count", value: 0)
+        ]
+        val zero_body = sprof_serialize_collection_profile_with_metrics(
+            "module-hash", "collision-workload", [], [sample], zero_metrics)
+        val zero_loaded = sprof_load_collection_profile_text(
+            zero_body, "module-hash", "collision-workload")
+        val zero_index = sprof_build_collection_set_index(zero_loaded)
+        expect(zero_index.profiles[0].hash_probe_count_p95).to_equal(0)
+        expect(zero_index.profiles[0].hash_collision_count_p95).to_equal(0)
+        expect(collection_plan_select_with_prepared_profile(
+            facts, zero_index, site, target).selected
+        ).to_equal(CollectionPlanAlgorithm.Hash)
 
     it "admitted feedback cannot supply an unknown memory budget through any bridge":
         val site = "ast://module/memory#stable"

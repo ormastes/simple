@@ -1,0 +1,69 @@
+use compiler.mono.monomorphize.metadata.{MonomorphizationMetadata, GenericFunctionMeta, GenericStructMeta, GenericClassMeta, GenericEnumMeta, GenericTraitMeta, SpecializationEntry, TraitImplEntry}
+use compiler.mono.monomorphize.metadata.{meta_u32_to_bytes, meta_append_bytes, meta_serialize_text, meta_concrete_type_string, serialize_specialization_entry, serialize_trait_impl_entry}
+use compiler.mono.monomorphize.types.{ConcreteType, PointerKind, ReferenceCapability}
+
+fn assert_metadata_bytes(actual: [u8], expected: [u8]):
+    assert(actual.len() == expected.len())
+    for i in 0..expected.len():
+        assert(actual[i] == expected[i])
+
+fn main() -> i32:
+    assert_metadata_bytes(meta_u32_to_bytes(0), [0u8, 0u8, 0u8, 0u8])
+    assert_metadata_bytes(meta_u32_to_bytes(0x12345678), [0x78u8, 0x56u8, 0x34u8, 0x12u8])
+    assert_metadata_bytes(meta_u32_to_bytes(4294967295), [255u8, 255u8, 255u8, 255u8])
+    assert_metadata_bytes(meta_append_bytes([0u8, 128u8], [255u8, 0u8]), [0u8, 128u8, 255u8, 0u8])
+    assert_metadata_bytes(meta_serialize_text([170u8], ""), [170u8, 0u8, 0u8, 0u8, 0u8])
+    # Eleven UTF-8 bytes: ASCII, 2-byte, 3-byte, NUL, then 4-byte code point.
+    assert_metadata_bytes(meta_serialize_text([170u8], "Aé한\0😀"), [170u8, 11u8, 0u8, 0u8, 0u8, 65u8, 195u8, 169u8, 237u8, 149u8, 156u8, 0u8, 240u8, 159u8, 152u8, 128u8])
+    assert(meta_concrete_type_string(ConcreteType.Tuple([ConcreteType.Int, ConcreteType.Named("é")])) == "Tuple_Int_é")
+    assert(meta_concrete_type_string(ConcreteType.Function([ConcreteType.Int, ConcreteType.Bool], ConcreteType.String)) == "Fn_Int_Bool_String")
+    assert(meta_concrete_type_string(ConcreteType.Union([ConcreteType.Int, ConcreteType.String])) == "Union_Int_String")
+    assert(meta_concrete_type_string(ConcreteType.Specialized("Pair", [ConcreteType.Int, ConcreteType.String])) == "Pair_Int_String")
+    assert(meta_concrete_type_string(ConcreteType.Pointer(PointerKind.BorrowMut, ReferenceCapability.Exclusive, ConcreteType.Int)) == "BorrowMutex_Int")
+
+    val entry = SpecializationEntry(type_args: [ConcreteType.Int, ConcreteType.Named("é")], mangled_name: "F$Int", bindings: {"T": ConcreteType.Int})
+    val expected_entry: [u8] = [
+        2u8, 3u8, 0u8, 0u8, 0u8, 73u8, 110u8, 116u8, 2u8, 0u8, 0u8, 0u8, 195u8, 169u8, 5u8, 0u8,
+        0u8, 0u8, 70u8, 36u8, 73u8, 110u8, 116u8, 1u8, 1u8, 0u8, 0u8, 0u8, 84u8, 3u8, 0u8, 0u8,
+        0u8, 73u8, 110u8, 116u8
+    ]
+    assert_metadata_bytes(serialize_specialization_entry([], entry), expected_entry)
+    val implementation = TraitImplEntry(trait_name: "R", type_args: [ConcreteType.String], impl_for_type: "S", mangled_name: "R$S")
+    val expected_impl: [u8] = [
+        1u8, 0u8, 0u8, 0u8, 82u8, 1u8, 6u8, 0u8, 0u8, 0u8, 83u8, 116u8, 114u8, 105u8, 110u8, 103u8,
+        1u8, 0u8, 0u8, 0u8, 83u8, 3u8, 0u8, 0u8, 0u8, 82u8, 36u8, 83u8
+    ]
+    assert_metadata_bytes(serialize_trait_impl_entry([], implementation), expected_impl)
+
+    val empty = MonomorphizationMetadata(functions: {}, structs: {}, classes: {}, enums: {}, traits: {})
+    val expected_empty: [u8] = [
+        77u8, 69u8, 84u8, 65u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8,
+        0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8
+    ]
+    assert_metadata_bytes(empty.serialize(), expected_empty)
+
+    # One key per category makes the fixed golden independent of dictionary
+    # ordering, while asserting category/entry/field order and all five counts.
+    val metadata = MonomorphizationMetadata(
+        functions: {"F": GenericFunctionMeta(base_name: "F", generic_params: ["T"], specializations: [entry])},
+        structs: {"S": GenericStructMeta(base_name: "S", generic_params: [], specializations: [])},
+        classes: {"C": GenericClassMeta(base_name: "C", generic_params: ["U"], specializations: [])},
+        enums: {"E": GenericEnumMeta(base_name: "E", generic_params: [], specializations: [])},
+        traits: {"R": GenericTraitMeta(base_name: "R", generic_params: ["X"], impl_specializations: [implementation])}
+    )
+    # Fixed META v1 bytes; intentionally not produced by the serializer under test.
+    val expected_full: [u8] = [
+        77u8, 69u8, 84u8, 65u8, 1u8, 0u8, 1u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 1u8, 0u8,
+        0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 70u8, 1u8,
+        1u8, 0u8, 0u8, 0u8, 84u8, 1u8, 0u8, 0u8, 0u8, 2u8, 3u8, 0u8, 0u8, 0u8, 73u8, 110u8,
+        116u8, 2u8, 0u8, 0u8, 0u8, 195u8, 169u8, 5u8, 0u8, 0u8, 0u8, 70u8, 36u8, 73u8, 110u8, 116u8,
+        1u8, 1u8, 0u8, 0u8, 0u8, 84u8, 3u8, 0u8, 0u8, 0u8, 73u8, 110u8, 116u8, 1u8, 0u8, 0u8,
+        0u8, 83u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 67u8, 1u8, 1u8, 0u8, 0u8,
+        0u8, 85u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 69u8, 0u8, 0u8, 0u8, 0u8, 0u8,
+        1u8, 0u8, 0u8, 0u8, 82u8, 1u8, 1u8, 0u8, 0u8, 0u8, 88u8, 1u8, 0u8, 0u8, 0u8, 1u8,
+        0u8, 0u8, 0u8, 82u8, 1u8, 6u8, 0u8, 0u8, 0u8, 83u8, 116u8, 114u8, 105u8, 110u8, 103u8, 1u8,
+        0u8, 0u8, 0u8, 83u8, 3u8, 0u8, 0u8, 0u8, 82u8, 36u8, 83u8
+    ]
+    assert_metadata_bytes(metadata.serialize(), expected_full)
+    print("metadata-serialization-goldens:PASS")
+    0

@@ -39,6 +39,7 @@ def check_target_c_contracts(root, base, shell, counterpart_only=False):
 set -eu
 root=$1 fixture=$2 tools=$3 helpers=$4 evidence=$5 mode=$6
 . "$root/scripts/bootstrap/bootstrap-phase-toolchain.shs"
+. "$root/scripts/bootstrap/phase-c-backend-commands.shs"
 . "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
 hash_file() { bootstrap_stage3_hash_file "$1"; }
 hash_stream() { bootstrap_stage3_hash_stream; }
@@ -75,6 +76,34 @@ target_c_platform=aarch64-unknown-linux-gnu
 snapshot_target_c_inputs "$evidence/target.env"
 [ "$(hash_file "$evidence/target.env")" != "$(hash_file "$evidence/tool.env")" ]
 printf 'PASS changed target changes profile identity\n'
+# These are the real target-binding functions with inert C-driver fixture
+# bytes. No Stage3 manifest or compiler admission is fabricated here.
+phase=stage3
+stage3_platform=$target_c_platform
+stage3_source_sha=$target_c_source_sha
+runtime_cache_identity=$(printf 'fixture runtime identity' | hash_stream)
+work_root=$evidence/stage3-binding
+mkdir "$work_root"
+summary=$work_root/summary.env
+for stage3_backend in llvm cranelift; do
+  for verification_backend in llvm cranelift; do
+    prepare_phase_c_tool_binding
+    [ "$(manifest_value target_runtime_backend "$target_c_binding")" = llvm ]
+    [ "$target_c_source_sha" = "$stage3_source_sha" ]
+    [ "$target_c_platform" = "$stage3_platform" ]
+    if [ "$verification_backend" = llvm ]; then llvm_identity=$tool_input_identity
+    else [ "$tool_input_identity" != "$llvm_identity" ]; fi
+  done
+done
+printf 'PASS both admitted producer backends bind both verification backends without sharing caches\n'
+stage3_backend=unsupported
+verification_backend=llvm
+if prepare_phase_c_tool_binding; then exit 1; fi
+printf 'PASS unsupported producer backend is rejected\n'
+stage3_backend=cranelift
+verification_backend=unsupported
+if prepare_phase_c_tool_binding; then exit 1; fi
+printf 'PASS unsupported verification backend is rejected\n'
 phase=stage2
 target_c_binding=$evidence/sdk.env
 target_c_identity=$original
@@ -111,7 +140,7 @@ printf 'PASS conflicting compiler and source root are rejected\n'
                             text=True, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, timeout=90)
     (base / "target-c-contracts.log").write_text(result.stdout, encoding="utf-8")
-    expected = 1 if counterpart_only else 9
+    expected = 1 if counterpart_only else 12
     if result.returncode or result.stdout.count("PASS ") != expected:
         raise AssertionError(f"target C helper contracts failed: {result.returncode}\n{result.stdout}")
     print(f"PASS {expected} target C helper contracts; fixture bytes were never compiled or admitted")

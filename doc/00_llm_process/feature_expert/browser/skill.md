@@ -456,3 +456,6 @@ bodies only arrive over the network path. Specs:
 `test/01_unit/lib/common/image/{jpeg_decode,webp_lossless_decode,webp_lossy_decode,browser_image_decode_dispatch}_spec.spl`,
 `test/01_unit/lib/skia/svg_render_spec.spl`;
 fixtures `test/fixtures/image/{jpeg,webp_lossless,webp_lossy,svg}/` (kept out of LFS by a local `.gitattributes`).
+
+## HTTP Content-Encoding (h1_client)
+`build_request_bytes` sends `Accept-Encoding: gzip, deflate` unless the caller set one. `parse_http_response_bytes` decodes `Content-Encoding` after chunked/length framing (list decoded in reverse; identity no-op; deflate = zlib first, raw fallback), then drops `content-encoding`/`content-length` from the returned header text. Unknown tokens (`br`, `zstd`: not advertised) and decode failures are parse errors, never a pass-through. Cap: decoded size > `BROWSER_MAX_RESOURCE_BYTES` errors, but the check is post-decode (decoders buffer fully). zstd is held back only because `std.common.compress.zstd` costs ~29 MB RSS per interpreted process (the decoder handles predefined/repeat tables since #3739) (gzip+deflate cost ~6 MB). Spec: `h1_content_encoding_spec.spl`.

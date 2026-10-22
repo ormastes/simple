@@ -10,7 +10,7 @@ polling daemon runner.
 
 A live PID is not enough. Clients that need automatic recovery should call:
 
-```simple
+```simple:skip
 daemon_ensure_responsive(config, start_fn, ping_fn)
 ```
 

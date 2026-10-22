@@ -1,0 +1,238 @@
+# @manual: show
+# @req: REQ-FV2-C1-SM, ARCH-02
+# Source-authored actual API scenarios. All UNRUN; no execution/proof claim.
+use std.spec.{describe, it, expect, fail}
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.config.{Logger}
+use compiler.common.mir_target_context.{mir_target_context_from}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.verification_call_lowering_v1.{ResolvedCallLoweringV1,
+    lower_module_with_resolved_calls_for_target_v1}
+use compiler.mir.mir_instruction_graph.{MirFunction}
+use compiler.mir.mir_instructions.{MirInstKind, MirOperandKind}
+use compiler.mir.mir_types.{MirConstValue}
+use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_signature}
+use compiler.mir.verification_call_identity.{validate_resolved_direct_call_manifest_v1}
+use compiler.tools.verify.source_calls_v1.{SourceResolvedCallsV1,
+    source_calls_from_source_v1, source_calls_inventory_v1}
+
+fn mono_defaults_result(source: text) -> Result<SourceResolvedCallsV1, text>:
+    source_calls_from_source_v1(source, "mono_defaults.spl", "x86_64-unknown-linux-gnu")
+
+# These two existing lowerer-depth controls intentionally bypass the NEW
+# whole-stage work cap. They test the unchanged 128-frame MIR contract, not
+# admission of an arbitrarily large module under 65536 monomorphization units.
+fn mono_defaults_depth_capture(source: text) -> Result<ResolvedCallLoweringV1, text>:
+    val parsed = parse_full_frontend(source, "mono_depth.spl", "mono_depth.spl", Logger(level: 0))
+    var lowering = HirLowering.with_filename("mono_depth.spl")
+    val module = lowering.lower_module(parsed)
+    if lowering.errors.len() != 0: return Err(lowering.diagnostic_messages.join("; "))
+    val target = mir_target_context_from("x86_64-unknown-linux-gnu", "", "", "llvm", 0)
+    lower_module_with_resolved_calls_for_target_v1(module, target)
+
+fn mono_defaults_closed(result: SourceResolvedCallsV1, count: i64):
+    expect(result.lowered.calls.bindings.len()).to_equal(count)
+    expect(validate_resolved_direct_call_manifest_v1(result.lowered.module,
+        result.lowered.calls).closed()).to_equal(true)
+    for binding in result.lowered.calls.bindings:
+        var found = 0
+        for function in result.lowered.module.functions.values():
+            if function.symbol.id.to_string() == binding.callee_symbol_id:
+                found = found + 1
+                expect(binding.callee_body_hash).to_equal(sha256_text(serialize_mir_function(function)))
+                expect(binding.callee_signature_hash).to_equal(sha256_text(serialize_mir_signature(function.signature)))
+        expect(found).to_equal(1)
+    val inventory = source_calls_inventory_v1(result)
+    expect(inventory).to_contain("formal_status=NOT_CHECKED")
+    expect(inventory.contains("formal_status=PASS")).to_equal(false)
+
+fn mono_defaults_caller(result: SourceResolvedCallsV1) -> Result<MirFunction, text>:
+    for function in result.lowered.module.functions.values():
+        if function.name == "mono_defaults.caller": return Ok(function)
+    Err("default oracle: actual caller declaration missing")
+
+# Ordinals are the actual emitted call order in the straight-line caller.
+# No specialization name or invented SymbolId is supplied by the oracle.
+fn mono_defaults_literal(result: SourceResolvedCallsV1, call_index: i64,
+    argument_index: i64) -> Result<i64, text>:
+    val owner = mono_defaults_caller(result)?
+    var current = 0
+    var local_id = -1
+    var found = false
+    for block in owner.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, _, arguments):
+                    if current == call_index:
+                        if argument_index < 0 or argument_index >= arguments.len():
+                            return Err("default oracle: missing argument")
+                        found = true
+                        match arguments[argument_index].kind:
+                            case MirOperandKind.Const(MirConstValue.Int(value), _): return Ok(value)
+                            case MirOperandKind.Copy(local) | MirOperandKind.Move(local): local_id = local.id
+                            case _: return Err("default oracle: argument is not an integer or local")
+                    current = current + 1
+                case _: ()
+    if not found: return Err("default oracle: missing call")
+    var remaining = owner.locals.len() + 1
+    while remaining > 0:
+        var next_local = -1
+        for block in owner.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Const(destination, MirConstValue.Int(value), _):
+                        if destination.id == local_id: return Ok(value)
+                    case MirInstKind.Copy(destination, source) | MirInstKind.Move(destination, source):
+                        if destination.id == local_id: next_local = source.id
+                    case _: ()
+        if next_local < 0: return Err("default oracle: no literal definition")
+        local_id = next_local
+        remaining = remaining - 1
+    Err("default oracle: copy chain did not terminate")
+
+fn mono_defaults_expect_literal(result: SourceResolvedCallsV1, call_index: i64,
+    argument_index: i64, expected: i64):
+    match mono_defaults_literal(result, call_index, argument_index):
+        case Ok(value): expect(value).to_equal(expected)
+        case Err(message): fail(message)
+
+fn mono_defaults_flow(result: SourceResolvedCallsV1, producer_index: i64,
+    consumer_index: i64, argument_index: i64):
+    match mono_defaults_caller(result):
+        case Ok(owner):
+            var current = 0
+            var produced = -1
+            var consumers = 0
+            for block in owner.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.Call(destination, _, arguments):
+                            if current == producer_index:
+                                match destination:
+                                    case Some(local): produced = local.id
+                                    case _: fail("default call lost its result")
+                            if current == consumer_index:
+                                consumers = consumers + 1
+                                expect(produced).to_be_greater_than(-1)
+                                expect(arguments.len()).to_be_greater_than(argument_index)
+                                match arguments[argument_index].kind:
+                                    case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                                        expect(local.id).to_equal(produced)
+                                    case _: fail("default result did not reach the consuming argument")
+                            current = current + 1
+                        case _: ()
+            expect(consumers).to_equal(1)
+        case Err(message): fail(message)
+
+describe "canonical source specialization of retained defaults":
+    it "discovers a generic request found only in an omitted default":
+        step("specialize the retained default and bind both actual emitted calls")
+        val source = "fn identity<T>(value: T) -> T:\n    value\n\nfn consume(value: i64 = identity<i64>(7)) -> i64:\n    value\n\nfn caller() -> i64:\n    consume()\n"
+        match mono_defaults_result(source):
+            case Ok(result):
+                mono_defaults_closed(result, 2)
+                mono_defaults_expect_literal(result, 0, 0, 7)
+                mono_defaults_flow(result, 0, 1, 0)
+            case Err(message): fail(message)
+
+    it "substitutes generic default types and binds the preceding parameter":
+        step("instantiate choose and its identity default using one concrete request environment")
+        val source = "fn identity<T>(value: T) -> T:\n    value\n\nfn choose<T>(first: T, second: T = identity<T>(first)) -> T:\n    second\n\nfn caller() -> i64:\n    choose<i64>(41)\n"
+        match mono_defaults_result(source):
+            case Ok(result):
+                mono_defaults_closed(result, 2)
+                mono_defaults_expect_literal(result, 0, 0, 41)
+                mono_defaults_expect_literal(result, 1, 0, 41)
+                mono_defaults_flow(result, 0, 1, 1)
+            case Err(message): fail(message)
+
+    it "expands a nested omitted default through the canonical request queue":
+        step("bind the inner specialized call before the two consuming calls")
+        val source = "fn identity<T>(value: T) -> T:\n    value\n\nfn middle(value: i64 = identity<i64>(13)) -> i64:\n    value\n\nfn consume(value: i64 = middle()) -> i64:\n    value\n\nfn caller() -> i64:\n    consume()\n"
+        match mono_defaults_result(source):
+            case Ok(result):
+                mono_defaults_closed(result, 3)
+                mono_defaults_expect_literal(result, 0, 0, 13)
+                mono_defaults_flow(result, 0, 1, 0)
+                mono_defaults_flow(result, 1, 2, 0)
+            case Err(message): fail(message)
+
+    it "does not emit a default call when every argument is supplied":
+        step("retain and canonicalize the declaration default without evaluating it at a full call")
+        val source = "fn identity<T>(value: T) -> T:\n    value\n\nfn choose<T>(first: T, second: T = identity<T>(first)) -> T:\n    second\n\nfn caller() -> i64:\n    choose<i64>(41, 73)\n"
+        match mono_defaults_result(source):
+            case Ok(result):
+                mono_defaults_closed(result, 1)
+                mono_defaults_expect_literal(result, 0, 0, 41)
+                mono_defaults_expect_literal(result, 0, 1, 73)
+            case Err(message): fail(message)
+
+    it "keeps the earlier parameter binding when a caller local shadows its name":
+        step("pass 41 from the declaration binding instead of caller local first equal to 99")
+        val source = "fn identity<T>(value: T) -> T:\n    value\n\nfn choose<T>(first: T, second: T = identity<T>(first)) -> T:\n    second\n\nfn caller() -> i64:\n    val first = 99\n    choose<i64>(41)\n"
+        match mono_defaults_result(source):
+            case Ok(result):
+                mono_defaults_closed(result, 2)
+                mono_defaults_expect_literal(result, 0, 0, 41)
+                mono_defaults_expect_literal(result, 1, 0, 41)
+                mono_defaults_flow(result, 0, 1, 1)
+            case Err(message): fail(message)
+
+    it "isolates changed same-name defaults across an intervening failed invocation":
+        step("retain the first completed module while a refused default and a fresh default are lowered")
+        val prefix = "fn identity<T>(value: T) -> T:\n    value\n\n"
+        val first_source = prefix + "fn consume(value: i64 = identity<i64>(23)) -> i64:\n    value\n\nfn caller() -> i64:\n    consume()\n"
+        val bad_source = prefix + "extern fn unavailable() -> i64\n\nfn consume(value: i64 = identity<i64>(unavailable())) -> i64:\n    value\n\nfn caller() -> i64:\n    consume()\n"
+        val last_source = prefix + "fn consume(value: i64 = identity<i64>(47)) -> i64:\n    value\n\nfn caller() -> i64:\n    consume()\n"
+        match mono_defaults_result(first_source):
+            case Ok(first):
+                mono_defaults_closed(first, 2)
+                mono_defaults_expect_literal(first, 0, 0, 23)
+                val saved = first.lowered.calls.hash()
+                match mono_defaults_result(bad_source):
+                    case Ok(_): fail("foreign default call unexpectedly published an inventory")
+                    case Err(message):
+                        expect(message == "").to_equal(false)
+                        expect(message.contains("formal_status=NOT_CHECKED")).to_equal(false)
+                match mono_defaults_result(last_source):
+                    case Ok(last):
+                        mono_defaults_closed(last, 2)
+                        mono_defaults_expect_literal(last, 0, 0, 47)
+                        expect(last.lowered.calls.hash() == saved).to_equal(false)
+                        expect(first.lowered.calls.hash()).to_equal(saved)
+                        mono_defaults_closed(first, 2)
+                        mono_defaults_expect_literal(first, 0, 0, 23)
+                    case Err(message): fail(message)
+            case Err(message): fail(message)
+
+    it "preserves the active omitted-default cycle refusal":
+        step("reject repeated active declaration and parameter positions at actual MIR expansion")
+        val source = "fn cycle_leaf(value: i64 = cycle_peer()) -> i64:\n    value\n\nfn cycle_peer(value: i64 = cycle_leaf()) -> i64:\n    value\n\nfn caller() -> i64:\n    cycle_leaf()\n"
+        match mono_defaults_result(source):
+            case Ok(_): fail("cyclic omitted defaults unexpectedly published an inventory")
+            case Err(message): expect(message).to_contain("DEFAULT-CYCLE")
+
+    it "accepts the existing maximum active default expansion depth":
+        step("expand 128 actual omitted defaults and bind every completed call")
+        var source = "fn depth_0(value: i64 = 1) -> i64:\n    value\n"
+        for index in 1..128:
+            val previous = index - 1
+            source = source + "\nfn depth_{index}(value: i64 = depth_{previous}()) -> i64:\n    value\n"
+        match mono_defaults_depth_capture(source + "\nfn caller() -> i64:\n    depth_127()\n"):
+            case Ok(result):
+                expect(result.calls.bindings.len()).to_equal(128)
+                expect(validate_resolved_direct_call_manifest_v1(result.module, result.calls).closed()).to_equal(true)
+            case Err(message): fail(message)
+
+    it "preserves the refusal above the existing active default depth":
+        step("reject 129 actual omitted default frames without publishing a partial inventory")
+        var source = "fn depth_0(value: i64 = 1) -> i64:\n    value\n"
+        for index in 1..129:
+            val previous = index - 1
+            source = source + "\nfn depth_{index}(value: i64 = depth_{previous}()) -> i64:\n    value\n"
+        match mono_defaults_depth_capture(source + "\nfn caller() -> i64:\n    depth_128()\n"):
+            case Ok(_): fail("excessive default depth unexpectedly published an inventory")
+            case Err(message): expect(message).to_contain("DEFAULT-DEPTH")

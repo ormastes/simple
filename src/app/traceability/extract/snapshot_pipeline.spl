@@ -1,0 +1,124 @@
+# Exact selected-scope graph construction with content-derived identities.
+# This adapter binds inputs, but cannot authenticate a policy or admit evidence.
+use std.common.traceability.model.*
+use std.common.traceability.schema.{trace_path_valid}
+use std.common.traceability.resolve.{resolve_trace_graph}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use app.traceability.extract.snapshot_facts.{extract_snapshot_trace_facts}
+
+pub struct TraceSnapshotScope:
+    selected_roots: [text]
+    authority_id: text
+    closure_kind: text
+
+pub struct TraceSnapshotBuild:
+    graph: TraceGraph
+    scope: TraceSnapshotScope
+    admission_eligible: bool
+
+fn identity_texts(values: [text]) -> SdnValue:
+    var items: [SdnValue] = []
+    for value in values: items.push(SdnValue.String(value))
+    SdnValue.Array(items)
+
+fn identity_record(names: [text], values: [text]) -> SdnValue:
+    var fields: Dict<text, SdnValue> = {}
+    for i in 0..names.len(): fields[names[i]] = SdnValue.String(values[i])
+    SdnValue.Dict(fields)
+
+fn identity_rows(rows: [SdnValue]) -> SdnValue:
+    var keys: [text] = []
+    var values: Dict<text, SdnValue> = {}
+    for row in rows:
+        val key = sdn_encode_canonical(row)
+        keys.push(key)
+        values[key] = row
+    var sorted: [SdnValue] = []
+    for key in trace_sorted_ids(keys): sorted.push(values[key])
+    SdnValue.Array(sorted)
+
+fn identity_digest_text(value: text) -> text:
+    var bytes: [u8] = []
+    for byte in value.bytes(): bytes.push(byte)
+    sha256_u8_hex(bytes)
+
+fn identity_digest(value: SdnValue) -> text:
+    identity_digest_text(sdn_encode_canonical(value))
+
+fn scope_contains(roots: [text], path: text) -> bool:
+    for root in roots:
+        if path == root or path.starts_with(root + "/"): return true
+    false
+
+# Only selected-scope closure is currently implemented. A candidate cannot
+# turn its own scope label into an independently admitted repository closure.
+pub fn build_snapshot_trace_graph(snapshot: SnapshotInput, policy: TracePolicy,
+    declarations: [text], scope: TraceSnapshotScope) -> Result<TraceSnapshotBuild, text>:
+    if scope.closure_kind != "selected_scope" or scope.selected_roots.len() == 0 or scope.selected_roots.len() > 256:
+        return Err("TRACE-SNAPSHOT-INCOMPLETE: explicit selected scope required")
+    if not snapshot.complete or snapshot.subject.snapshot_id == "" or snapshot.subject.repository_id == "":
+        return Err("TRACE-SNAPSHOT-INCOMPLETE: immutable selected inventory required")
+    if snapshot.artifacts.len() > 40000 or policy.conventions.len() > 4096 or policy.authorities.len() > 100000 or declarations.len() > 40000:
+        return Err("TRACE-SNAPSHOT-INCOMPLETE: input manifest record budget exhausted")
+    var roots: Dict<text, bool> = {}
+    for root in scope.selected_roots:
+        if not trace_path_valid(root) or roots.contains_key(root):
+            return Err("TRACE-SNAPSHOT-INCOMPLETE: invalid or duplicate scope root")
+        roots[root] = true
+    var artifact_paths: Dict<text, bool> = {}
+    var artifacts: [SdnValue] = []
+    for artifact in snapshot.artifacts:
+        if not trace_path_valid(artifact.path) or artifact.blob_id == "" or artifact.visibility == "" or not scope_contains(scope.selected_roots, artifact.path) or artifact_paths.contains_key(artifact.path):
+            return Err("TRACE-SNAPSHOT-INCOMPLETE: invalid, duplicate or out-of-scope artifact")
+        artifact_paths[artifact.path] = true
+        artifacts.push(identity_record(["path", "blob_id", "content_sha256", "visibility"],
+            [artifact.path, artifact.blob_id, identity_digest_text(artifact.content), artifact.visibility]))
+    for root in scope.selected_roots:
+        var found = false
+        for artifact in snapshot.artifacts:
+            if artifact.path == root or artifact.path.starts_with(root + "/"): found = true
+        if not found:
+            return Err("TRACE-SNAPSHOT-INCOMPLETE: selected root has no captured artifacts")
+    var registered: Dict<text, bool> = {}
+    for path in declarations:
+        if not scope_contains(scope.selected_roots, path) or not artifact_paths.contains_key(path) or registered.contains_key(path):
+            return Err("TRACE-SNAPSHOT-INCOMPLETE: declaration registration is missing, duplicated or out of scope")
+        registered[path] = true
+    var rules: [SdnValue] = []
+    for rule in policy.conventions:
+        rules.push(identity_record(["id", "source_root", "target_root", "source_suffix", "target_suffix", "relation", "version"],
+            [rule.id, rule.source_root, rule.target_root, rule.source_suffix, rule.target_suffix, relation_name(rule.relation), rule.version]))
+    var authorities: [SdnValue] = []
+    for authority in policy.authorities:
+        var fields: Dict<text, SdnValue> = {}
+        fields["declaration"] = identity_record(["origin_id", "relation", "scope_id", "owner_path", "review_id", "reason", "expires_snapshot_id"],
+            [authority.origin_id, relation_name(authority.relation), authority.scope_id, authority.owner_path, authority.review_id, authority.reason, authority.expires_snapshot_id])
+        fields["allow_override"] = SdnValue.Bool(authority.allow_override)
+        authorities.push(SdnValue.Dict(fields))
+    var policy_fields: Dict<text, SdnValue> = {}
+    policy_fields["id"] = SdnValue.String(policy.id)
+    policy_fields["max_nodes"] = SdnValue.Int(policy.max_nodes)
+    policy_fields["max_claims"] = SdnValue.Int(policy.max_claims)
+    policy_fields["conventions"] = identity_rows(rules)
+    policy_fields["authorities"] = identity_rows(authorities)
+    var inputs: Dict<text, SdnValue> = {}
+    inputs["domain"] = SdnValue.String("simple.trace.structural-input/v1")
+    inputs["extractor"] = SdnValue.String("snapshot-declarations-files/v1")
+    inputs["repository_id"] = SdnValue.String(snapshot.subject.repository_id)
+    inputs["object_format"] = SdnValue.String(snapshot.subject.object_format)
+    inputs["scope"] = identity_record(["closure_kind", "authority_id"], [scope.closure_kind, scope.authority_id])
+    inputs["selected_roots"] = identity_texts(trace_sorted_ids(scope.selected_roots))
+    inputs["declarations"] = identity_texts(trace_sorted_ids(declarations))
+    inputs["policy"] = SdnValue.Dict(policy_fields)
+    inputs["artifacts"] = identity_rows(artifacts)
+    val manifest_id = "inputs:sha256:" + identity_digest(SdnValue.Dict(inputs))
+    # Structural identity excludes the candidate tree, which may contain its
+    # own generated page. Generation separately binds the entire exact subject.
+    val generation = identity_record(["domain", "input_manifest_id", "snapshot_id", "kind", "revision_id", "tree_id"],
+        ["simple.trace.graph-generation/v1", manifest_id, snapshot.subject.snapshot_id, snapshot.subject.kind, snapshot.subject.revision_id, snapshot.subject.tree_id])
+    val generation_id = "generation:sha256:" + identity_digest(generation)
+    val facts = extract_snapshot_trace_facts(snapshot, policy, declarations, manifest_id, generation_id)
+    val graph = resolve_trace_graph(facts, policy)
+    Ok(TraceSnapshotBuild(graph: graph, scope: scope, admission_eligible: false))

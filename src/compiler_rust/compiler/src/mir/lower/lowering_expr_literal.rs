@@ -14,6 +14,34 @@ impl<'a> MirLowerer<'a> {
         })
     }
 
+    /// Lower an integer literal, keeping a `u64` literal at or above 2^63
+    /// visibly unsigned to the backends.
+    ///
+    /// `ConstInt` carries no type and every backend types it `i64`, so the
+    /// bit pattern of `0xFFFF_FFFF_FFFF_FFF8u64` reached `icmp`/`sdiv`/`sshr`
+    /// as a negative signed value. A zero-cost `Cast` to `U64` after the
+    /// constant gives the vreg its static type. Literals below 2^63 have the
+    /// same value under either signedness and stay a bare `ConstInt`, so
+    /// constant-pattern consumers (immediates, constant indexes) are
+    /// unaffected. Bug: doc/08_tracking/bug/seed_u64_signed_compare_and_u8_data_ptr_2026-10-19.md
+    pub(super) fn lower_typed_integer_expr(&mut self, n: i64, ty: TypeId) -> MirLowerResult<VReg> {
+        let raw = self.lower_integer_expr(n)?;
+        if ty != TypeId::U64 || n >= 0 {
+            return Ok(raw);
+        }
+        self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::Cast {
+                dest,
+                source: raw,
+                from_ty: TypeId::I64,
+                to_ty: TypeId::U64,
+            });
+            dest
+        })
+    }
+
     pub(super) fn lower_float_expr(&mut self, f: f64) -> MirLowerResult<VReg> {
         self.with_func(|func, current_block| {
             let dest = func.new_vreg();

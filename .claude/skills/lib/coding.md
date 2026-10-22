@@ -31,7 +31,7 @@ bin/simple lint file.spl --fix      # Lint with auto-fix
 
 Use docstring markdown in SPipe tests — NO `println()` for documentation:
 
-```simple
+```simple:skip
 describe "Feature":
     """# Feature — Tests NFA pattern matching."""
 

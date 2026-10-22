@@ -1,0 +1,36 @@
+# MIR section profile sink (FFI boundary module).
+#
+# SIMPLE_MIR_SECTION_PROFILE_FILE=<path>: one durable mem-snapshot row
+# (monotonic_ms + rss_kib) per lower_module section boundary, so the fixed
+# per-module provider-registration cost and the promotion walk can be
+# measured separately from body lowering. Unset = one env read per process.
+use std.io_runtime.{env_get_opt}
+
+extern fn rt_mem_snapshot_open(path: text) -> i64
+extern fn rt_mem_snapshot_record(
+    fd: i64, seq: i64, event: text, phase: text, source_index: i64,
+    source_path: text,
+    retained_modules: i64, validation_keys: i64,
+    validation_values: i64, shared_traits: i64, hir_names: i64,
+    hir_symbols: i64, hir_functions: i64, hir_constants: i64,
+    hir_enums: i64, hir_structs: i64, hir_classes: i64
+) -> bool
+var _mir_section_profile_fd: i64 = -2
+var _mir_section_profile_seq: i64 = 0
+
+fn mir_section_profile_enabled() -> bool:
+    if _mir_section_profile_fd == -2:
+        val sink = env_get_opt("SIMPLE_MIR_SECTION_PROFILE_FILE") ?? ""
+        _mir_section_profile_fd = if sink != "": rt_mem_snapshot_open(sink) else: -1
+    _mir_section_profile_fd >= 0
+
+fn mir_section_profile_mark(section: text, module_name: text):
+    if not mir_section_profile_enabled():
+        return
+    if rt_mem_snapshot_record(_mir_section_profile_fd, _mir_section_profile_seq,
+            "mir_section", section, -1, module_name, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0):
+        _mir_section_profile_seq = _mir_section_profile_seq + 1
+    else:
+        _mir_section_profile_fd = -1
+
+export mir_section_profile_enabled, mir_section_profile_mark

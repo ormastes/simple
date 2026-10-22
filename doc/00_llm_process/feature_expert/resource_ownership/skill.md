@@ -80,6 +80,35 @@ control block — is illegal there. Corroborating measurement: that tier declare
 - **`*T` in type-annotation position already parses** — WP-B is smaller than the
   plan assumed.
 
+## No-GC pointer sigils for every type (memory.md, 2026-10-20)
+
+`&T` / `*T` / `-T` now follow `doc/05_design/language/misc/memory.md` for
+EVERY type, not only for declared resources: `&T` is the unique owner, `*T`
+the shared Rc owner, `-T` the weak observer, `&mut T` (== `mut T`) the short
+exclusive borrow; `new(&)`/`new(*)` canonical with `new&`/`new*` sugar.
+
+- Seed (#4003): `simple-type` keeps Type::Unique/Shared/Weak distinct, checks
+  conversions only under `@no_gc(strict)` / `SIMPLE_NOGC_STRICT=1`
+  (`share(move u)`, `weak_of(s)`, `w.upgrade() -> Option<*T>`). Default mode
+  erases exactly as before.
+- Self-hosted (stage 1b): the parser yields TypeKind.Unique for `&T` and
+  TypeKind.Shared for `*T` in ALL modes; raw pointers are only `*const`/`*mut`
+  (the pointer registry flag now separates `*T` from `*const T`). HIR keeps
+  HirTypeKind.Unique/Shared/Weak ONLY for strict modules; default-mode HIR is
+  the legacy Ref(T,false) / Ptr(T,false) / Infer, so the bootstrap closure is
+  unchanged. Trap: `*R` in a strict module is HirTypeKind.Shared, not Ptr, so
+  WP-G's `mir_hir_type_is_shared_resource` matches both.
+- Strictness is `ParserModule.nogc_strict`, set by the flat bridge from the
+  `@no_gc(strict)` marker and preserved by async desugaring. Imported surfaces
+  follow the IMPORTING module's mode (the sigils mean the same thing
+  everywhere; the mode only decides whether HIR keeps them distinct). A
+  process-wide name-keyed registry was tried and rejected: import names are
+  dotted while the bridge only knows the parse path, and it was never reset.
+  `SIMPLE_NOGC_STRICT=1` is seed-only (it is not in any self-hosted cache key).
+- Trap: the flat bridge used to turn every `new ...` expression into NilLit;
+  it now builds ExprKind.New and HIR lowers it to the constructed value.
+- Spec: `test/01_unit/compiler/frontend/nogc_sigil_selfhost_spec.spl`.
+
 ## Still open
 - RC lowering (WP-B). `sffi_gen` adapter generation (WP-H) is landed but
   template-only (`rt_file*` hardcoded) -- generalizing it to emit for

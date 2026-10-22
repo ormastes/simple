@@ -756,7 +756,7 @@ Acceptance-spec shape that keeps ALL of the above (this is the file measured bel
 `# @tag:in-development` stays on line 1 — it is a separate runner mechanism and
 costs nothing):
 
-```simple
+```simple:skip
 # @tag:in-development
 """
 ## Purpose and audience
@@ -903,7 +903,7 @@ verdict, and keep release cohort-size gates separate.
 Module: `src/lib/common/spec/evidence/model.spl` (selectors, `OracleCheck`,
 `OracleSpec`), `evidence_comparator.spl` (`compare_evidence`).
 
-```simple
+```text
 val checks = [
     check_exact("frame.type", "SYN"),
     check_full_pattern("frame.nonce", "hex:16"),
@@ -913,7 +913,7 @@ val checks = [
 val spec = oracle_spec("protocol.v1", checks)
 ```
 
-```simple
+```text
 # correlate a request id echoed back in the response
 val checks = [
     check_bind("request.id", "req_id"),
@@ -921,7 +921,7 @@ val checks = [
 ]
 ```
 
-```simple
+```text
 val result = compare_evidence(evidence, spec)
 expect(result.status).to_equal(EvidenceStatus.passed)
 ```
@@ -959,7 +959,7 @@ is exactly one such pipeline, do not start a second.
 
 Import surface:
 
-```simple
+```text
 use std.spec.evidence.counterpart.model            # frozen contracts (common)
 use std.spec.evidence.counterpart.evidence_projection
 # registries / converter graph / relation engine / matrix / artifact store:
@@ -1025,7 +1025,7 @@ missed.
 Use `std.spec.*` as the canonical SSpec test-library import in new executable
 specs:
 
-```simple
+```text
 use std.spec.*
 
 describe "Feature":
@@ -1116,7 +1116,7 @@ the SSpec case.
 primitive set (P0 of `doc/03_plan/ui/testing/ui_test_infra_plan.md`) that
 UI-lane specs should instrument with rather than ad-hoc `print`:
 
-```simple
+```text
 use std.diag.{dbg_stage, dbg_deadline, dbg_deadline_clear, dbg_time_begin,
               dbg_time_end, dbg_summary, dbg_provenance, dbg_event_hop,
               dbg_force_facet, dbg_diag_reset}
@@ -2699,6 +2699,10 @@ reimplement an existing algorithm:
 - **Algorithms** (reuse, never reimplement) → `src/lib/common/{crypto,compress,
   hash,base64,base_encoding,huffman,rsa,signature,jwt,...}`; verify against
   RFC/NIST known-answer vectors (never self-comparison — see false-green guard).
+  For a codec, also check the ENCODER with an independent decoder (host
+  `gzip -dc`): a same-path compress→inflate round trip hid a stored-block LEN
+  truncated mod 65536 (2026-10-18). BLAKE3/XXH3/gzip map, vectors and seed
+  coverage recipe: `doc/00_llm_process/feature_expert/hash_compress/skill.md`.
 - **Custom-typed algorithm layers** (additive, wrap the primitive cores — never
   rewrite them): `src/lib/common/search/` (types + exact/prefilter/inverted
   index + BM25/TF-IDF + IVF/kNN ANN + roaring, fixed-point not f64),

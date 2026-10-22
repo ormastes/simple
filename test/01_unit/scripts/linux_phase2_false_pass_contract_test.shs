@@ -14,11 +14,13 @@ cat >"$tmp/source/scripts/bootstrap/bootstrap-phase-verification.shs" <<'EOF'
 #!/bin/sh
 timeout_seen=0
 for arg do case "$arg" in
+    --backend=*) backend=${arg#*=};;
     --work-root=*) work=${arg#*=};;
     --compiler-sha256=*) sha=${arg#*=};;
     --timeout-seconds=900) timeout_seen=1;;
 esac; done
 [ "$timeout_seen" = 1 ] || exit 9
+[ "${backend:-}" = "$TEST_BACKEND" ] || exit 11
 mkdir -p "$work/outputs/compiler-tools/fixture"
 cp "$TEST_TOOL" "$work/outputs/compiler-tools/fixture/simple_cli"
 cp "$TEST_TOOL" "$work/outputs/compiler-tools/fixture/simple_test_runner"
@@ -31,6 +33,7 @@ runner_sha=$(sha256sum "$runner" | awk '{print $1}')
     echo schema=simple-bootstrap-command-owners-v3
     echo status=frozen
     echo phase=stage2
+    echo "verification_backend=$backend"
     echo "compiler_cli_path=$cli"
     echo "compiler_cli_sha256=$cli_sha"
     echo "test_runner_path=$runner"
@@ -43,6 +46,7 @@ if [ "$TEST_CASE" != receipt_missing ]; then
         # base-phase summary; require_base_summary() in the outer runner
         # requires exactly one of each.
         echo "phase=stage2"
+        echo "verification_backend=$backend"
         echo 'hash_policy=canonical'
         echo "expected_compiler_sha256=${sha:-$cli_sha}"
         echo "actual_compiler_sha256=${sha:-$cli_sha}"
@@ -108,15 +112,17 @@ chmod +x "$tmp/tool" "$tmp/bin/uname" \
 export TEST_TOOL="$tmp/tool" PATH="$tmp/bin:$PATH"
 failed=0
 checks=0
+for backend in llvm cranelift; do
+export TEST_BACKEND=$backend
 for scenario in good binding zero missing failed skipped inconsistent duplicate stale nonzero timeout receipt_missing receipt_hash tool_hash; do
     export TEST_CASE=$scenario
-    work="$tmp/$scenario"
+    work="$tmp/$backend-$scenario"
     mkdir -p "$work/post-phase2-fixture"
     printf '#!/bin/sh\necho 42\n' >"$work/post-phase2-fixture/phase2-module-probe"
     chmod +x "$work/post-phase2-fixture/phase2-module-probe"
     status=0
     sh "$root/scripts/bootstrap/run-linux-phase2-tests.shs" \
-        "--compiler=$tmp/tool" \
+        "--compiler=$tmp/tool" --backend="$TEST_BACKEND" \
         --compiler-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
         "--runtime-path=$tmp/runtime" "--work-root=$work" \
         "--source-root=$tmp/source" >"$tmp/run.log" 2>&1 || status=$?
@@ -133,12 +139,14 @@ for scenario in good binding zero missing failed skipped inconsistent duplicate 
         failed=$((failed + 1))
     fi
 done
+done
+export TEST_BACKEND=llvm
 # Invalid cap syntax must fail before the verifier can run.
 status=0
 export TEST_CASE=good
 SIMPLE_LINUX_PHASE2_TEST_MEMORY_MAX=32junkG \
     sh "$root/scripts/bootstrap/run-linux-phase2-tests.shs" \
-        "--compiler=$tmp/tool" \
+        "--compiler=$tmp/tool" --backend="$TEST_BACKEND" \
         --compiler-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
         "--runtime-path=$tmp/runtime" "--work-root=$tmp/bad-cap" \
         "--source-root=$tmp/source" >"$tmp/bad-cap.log" 2>&1 || status=$?
@@ -151,7 +159,7 @@ grep -q 'SIMPLE_LINUX_PHASE2_TEST_MEMORY_MAX must be a positive M/G size' "$tmp/
 status=0
 SIMPLE_LINUX_PHASE2_TEST_MEMORY_MAX=00G \
     sh "$root/scripts/bootstrap/run-linux-phase2-tests.shs" \
-        "--compiler=$tmp/tool" \
+        "--compiler=$tmp/tool" --backend="$TEST_BACKEND" \
         --compiler-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
         "--runtime-path=$tmp/runtime" "--work-root=$tmp/zero-cap" \
         "--source-root=$tmp/source" >"$tmp/zero-cap.log" 2>&1 || status=$?
@@ -161,5 +169,19 @@ grep -q 'SIMPLE_LINUX_PHASE2_TEST_MEMORY_MAX must be a positive M/G size' "$tmp/
     echo 'FAIL: zero memory cap did not reach the validation guard'
     failed=$((failed + 1))
 }
+# Missing and invalid backends must reject before any verifier work.
+for backend_option in missing invalid; do
+    status=0
+    if [ "$backend_option" = missing ]; then set --; else set -- --backend=unsupported; fi
+    sh "$root/scripts/bootstrap/run-linux-phase2-tests.shs" "$@" \
+        "--compiler=$tmp/tool" --compiler-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+        "--runtime-path=$tmp/runtime" "--work-root=$tmp/backend-$backend_option" \
+        "--source-root=$tmp/source" >"$tmp/backend-$backend_option.log" 2>&1 || status=$?
+    checks=$((checks + 1))
+    if [ "$status" -ne 2 ] || ! grep -Fq -- '--backend=llvm|cranelift is required' "$tmp/backend-$backend_option.log" || [ -e "$tmp/backend-$backend_option/verification" ]; then
+        echo "FAIL: backend $backend_option was not rejected before verification"
+        failed=$((failed + 1))
+    fi
+done
 echo "$checks runner scenarios; $failed failures"
 [ "$failed" = 0 ]

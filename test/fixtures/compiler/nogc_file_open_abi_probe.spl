@@ -1,0 +1,26 @@
+"""Read-only native ABI diagnostic, including a non-ASCII UTF-8 path."""
+use std.nogc_sync_mut.sffi.fs.{io_file_open, io_file_close}
+use std.nogc_sync_mut.io.file_text_session.{file_default_text_codec, file_session_read_fd}
+use std.nogc_sync_mut.io_runtime.{cwd, exit}
+
+fn file_open_require(condition: bool, message: text):
+    if not condition:
+        print "nogc-file-open-abi FAILED: {message}"
+        exit(1)
+
+fn main() -> i64:
+    val path = cwd() + "/test/fixtures/compiler/data/nogc_open_경로.txt"
+    val descriptor = io_file_open(path, 0)
+    file_open_require(descriptor >= 0, "read-only open rejected an existing UTF-8 path")
+    val codec_result = file_default_text_codec()
+    file_open_require(codec_result.is_ok(), "UTF-8 text codec was unavailable")
+    val content = file_session_read_fd(descriptor, codec_result.unwrap())
+    # Close before checking the read so a failing read never retains the fd.
+    val closed = io_file_close(descriptor)
+    file_open_require(closed, "read descriptor did not close")
+    file_open_require(content.is_ok(), "read-only descriptor read failed")
+    file_open_require(content.unwrap() == "nogc-open: 한글\n", "UTF-8 path read returned different bytes/text")
+    val missing = io_file_open(path + ".missing", 0)
+    file_open_require(missing < 0, "missing path unexpectedly opened")
+    print "nogc-file-open-abi: UTF-8 read-only open/read/close and missing-file rejection passed"
+    0

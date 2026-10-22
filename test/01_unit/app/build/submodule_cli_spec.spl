@@ -1,0 +1,37 @@
+use std.spec.{describe, it, expect}
+use app.build.submodule_cli.{parse_submodule_verify_args, run_submodule_verify}
+
+val PARENT = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val POLICY = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+describe "selected submodule CLI admission":
+    it "requires an exact parent commit argument":
+        expect(parse_submodule_verify_args([]).reason).to_equal("parent-required")
+        expect(parse_submodule_verify_args(["--parent", "HEAD"]).reason).to_equal(
+            "invalid-or-duplicate-parent")
+        expect(parse_submodule_verify_args(["--parent", PARENT, "--parent", PARENT]).reason).to_equal(
+            "invalid-or-duplicate-parent")
+
+    it "rejects malformed policy and optional selections before Git access":
+        expect(parse_submodule_verify_args(["--parent", PARENT, "--policy-rev", "HEAD"]).reason).to_equal(
+            "invalid-or-duplicate-policy-rev")
+        expect(parse_submodule_verify_args(["--parent", PARENT, "--optional", "../escape"]).reason).to_equal(
+            "invalid-optional-path")
+        expect(parse_submodule_verify_args(["--parent", PARENT, "--optional", "x", "--optional", "x"]).reason).to_equal(
+            "duplicate-optional-path")
+        expect(parse_submodule_verify_args(["--parent", PARENT, "--unknown", "x"]).reason).to_equal(
+            "unknown-argument")
+
+    it "preserves exact revision and optional selection for the verifier":
+        val plan = parse_submodule_verify_args([
+            "--parent", PARENT, "--policy-rev", POLICY,
+            "--optional", "examples/demo"
+        ])
+        expect(plan.status).to_equal("READY")
+        expect(plan.parent).to_equal(PARENT)
+        expect(plan.policy_rev).to_equal(POLICY)
+        expect(plan.optional[0]).to_equal("examples/demo")
+
+    it "fails closed when the exact parent object is unavailable":
+        expect(run_submodule_verify(["--parent", PARENT,
+            "--policy-rev", POLICY])).to_equal(1)

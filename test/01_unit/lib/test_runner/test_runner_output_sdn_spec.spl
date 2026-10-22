@@ -1,0 +1,264 @@
+# @tag:in-development
+# @req REQ-TRC-003 REQ-TRC-012 REQ-TRC-013 REQ-TRC-018
+use std.spec.*
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.parser.{parse_with_spans_and_issues}
+use std.common.perf.execution_metrics.{ResourceUsage, ResourceEvidenceQuality, TerminationCause}
+use std.nogc_sync_mut.io.process_completion.{ProcessCompletionV1}
+use std.test_runner.test_runner_types.{TestFileResult, TestRunResult, TestOmissionEvidence, TestOmissionStatus}
+use std.test_runner.sdoctest.types.{SdoctestBlock, BlockResult, BlockStatus, SdoctestFileResult, SdoctestRunResult, SdoctestModifier}
+use std.test_runner.test_runner_output.{combined_test_run_sdn, test_run_result_sdn, validate_test_output_format}
+
+fn _output_file() -> TestFileResult:
+    TestFileResult(
+        path: "test/日本_spec.spl", passed: 2, failed: 1, skipped: 3, pending: 4,
+        duration_ms: 25, setup_ms: 5, error: "ERROR: expected value", timed_out: false, cached: false,
+        in_development: 1, feature_gated: "", mcdc_evidence_v1: "mcdc-carrier",
+        mcdc_skip_reason: "", degraded_reason: "", blocked: 1, unsupported: 2,
+        omission_evidence: [TestOmissionEvidence(
+            status: TestOmissionStatus.Unsupported, scenario_id: "scenario-α", reason: "no backend",
+            prerequisite: "hardware", owner: "team", tracking_id: "issue-9",
+            artifact_paths: ["artifacts/a.sdn"], resume_command: "simple test --native")],
+        compile_ms: 7, execution_ms: 18,
+        resource_usage: Some(ResourceUsage(
+            wall_ms: 25, user_cpu_ms: 12, system_cpu_ms: 3, peak_tree_charge_bytes: 1000,
+            peak_direct_child_rss_bytes: 900, heap_live_end_bytes: 400, heap_peak_bytes: 700,
+            io_read_bytes: 11, io_write_bytes: 12, pids_peak: 2,
+            evidence_quality: ResourceEvidenceQuality.ExactTree, termination: TerminationCause.Exited,
+            signal: 0, exit_code: 0)),
+        resource_class: "bounded", cohort_id: "cohort-a", budget_status: "within", anomaly_status: "clean",
+        process_completion: Some(ProcessCompletionV1(
+            pid: 42, process_generation: 3, exit_code: 0, signal_number: 0, tree_reaped: true,
+            timed_out: false, cancelled: false, stdout_digest: "sha256:out", stderr_digest: "sha256:err",
+            transport_execution_digest: "sha256:transport")),
+        trace_case_events_sdn: "{schema: \"simple.trace.case-events/v1\"}")
+
+fn _sdoc_result() -> SdoctestRunResult:
+    val block = SdoctestBlock(
+        source_file: "doc/guide.md", line_number: 19, code: "print(\"hi\")", language: "simple",
+        modifiers: [SdoctestModifier.Tag("tutorial"), SdoctestModifier.IgnoreOutput], transcript: "hi\n")
+    val block_result = BlockResult(
+        block: block, status: BlockStatus.Passed, duration_ms: 8, stdout: "hi\n", stderr: "", error: "")
+    val file = SdoctestFileResult(
+        source_file: "doc/guide.md", blocks: [block_result], total: 1, passed: 1, failed: 0,
+        skipped: 0, errors: 0, accepted: 0, duration_ms: 8)
+    SdoctestRunResult(files: [file], total: 1, passed: 1, failed: 0, skipped: 0,
+        errors: 0, accepted: 0, duration_ms: 8)
+
+fn _output_spec(file: TestFileResult) -> TestRunResult:
+    TestRunResult(files: [file], total_passed: file.passed, total_failed: file.failed,
+        total_skipped: file.skipped, total_pending: file.pending, total_timed_out: 0,
+        total_duration_ms: file.duration_ms, total_setup_ms: file.setup_ms, total_cached: 0)
+
+fn _output_fields(value: SdnValue) -> Dict<text, SdnValue>:
+    match value:
+        case SdnValue.Dict(fields): fields
+        case _:
+            fail("expected an SDN record")
+            {}
+
+fn _output_items(value: SdnValue) -> [SdnValue]:
+    match value:
+        case SdnValue.Array(items): items
+        case _:
+            fail("expected an SDN array")
+            []
+
+fn _output_expect_fields(record: Dict<text, SdnValue>, names: [text], values: [SdnValue]):
+    expect(record.len()).to_equal(names.len())
+    for i in 0..names.len():
+        expect(record.contains_key(names[i])).to_equal(true)
+        expect(record[names[i]]).to_equal(values[i])
+
+describe "native SDN test-runner output transport":
+    it "rejects retired JSON while retaining text, doc and native SDN formats":
+        for format in ["text", "doc", "sdn"]:
+            expect(validate_test_output_format(format).is_ok()).to_equal(true)
+        match validate_test_output_format("json"):
+            case Err(reason): expect(reason).to_contain("JSON test output is retired")
+            case Ok(_): fail("legacy JSON output was admitted")
+
+    it "rejects unknown or empty formats instead of falling back to human output":
+        for format in ["", "unknown", "SDN", "jsonl"]:
+            match validate_test_output_format(format):
+                case Err(reason): expect(reason).to_contain("expected text, doc or sdn")
+                case Ok(_): fail("unknown output format was admitted: {format}")
+
+    it "emits standalone SDN summaries with exact grouped counters and full file evidence":
+        var first = _output_file()
+        first.path = "test/01_unit/日本_spec.spl"
+        var second = _output_file()
+        second.path = "test/01_unit/other_spec.spl"
+        second.passed = 4
+        second.failed = 1
+        second.skipped = 7
+        second.pending = 0
+        var gated = _output_file()
+        gated.path = "test/02_integration/gated_spec.spl"
+        gated.passed = 0
+        gated.failed = 0
+        gated.skipped = 5
+        gated.pending = 0
+        gated.error = ""
+        gated.feature_gated = "unavailable-feature"
+        val result = TestRunResult(files: [first, second, gated], total_passed: 6, total_failed: 2,
+            total_skipped: 15, total_pending: 4, total_timed_out: 0, total_duration_ms: 75,
+            total_setup_ms: 15, total_cached: 0)
+        val source = test_run_result_sdn(result).unwrap()
+        val parsed = parse_with_spans_and_issues(source).unwrap()
+        expect(parsed.2.len()).to_equal(0)
+        val root = _output_fields(parsed.0)
+        expect(root["schema"]).to_equal(SdnValue.String("simple.test-runner.output/v1"))
+        expect(root["success"]).to_equal(SdnValue.Bool(false))
+        expect(root["spl_doctest"]).to_equal(SdnValue.Null)
+        expect(root["sdoctest"]).to_equal(SdnValue.Null)
+        val spec = _output_fields(root["spec"])
+        val groups = _output_items(spec["groups"])
+        expect(groups.len()).to_equal(2)
+        _output_expect_fields(_output_fields(groups[0]),
+            ["name", "passed", "failed", "skipped", "pending", "done_pct"],
+            [SdnValue.String("01_unit"), SdnValue.Int(6), SdnValue.Int(2), SdnValue.Int(10), SdnValue.Int(4), SdnValue.Int(50)])
+        _output_expect_fields(_output_fields(groups[1]),
+            ["name", "passed", "failed", "skipped", "pending", "done_pct"],
+            [SdnValue.String("02_integration"), SdnValue.Int(0), SdnValue.Int(0), SdnValue.Int(5), SdnValue.Int(0), SdnValue.Int(0)])
+        val files = _output_items(spec["files"])
+        expect(files.len()).to_equal(3)
+        val retained = _output_fields(files[0])
+        expect(retained.len()).to_equal(27)
+        expect(retained["path"]).to_equal(SdnValue.String("test/01_unit/日本_spec.spl"))
+        expect(_output_fields(retained["resource_usage"])["peak_tree_charge_bytes"]).to_equal(SdnValue.Int(1000))
+        expect(retained["trace_case_events_sdn"]).to_equal(SdnValue.String(first.trace_case_events_sdn))
+
+    it "rejects an oversized standalone summary rather than returning partial evidence":
+        var file = _output_file()
+        file.error = "x".repeat(1048577)
+        expect(test_run_result_sdn(_output_spec(file)).is_err()).to_equal(true)
+
+    it "serializes all runner result evidence and nested documentation blocks":
+        val spec = TestRunResult(files: [_output_file()], total_passed: 2, total_failed: 1,
+            total_skipped: 3, total_pending: 4, total_timed_out: 0, total_duration_ms: 25,
+            total_setup_ms: 5, total_cached: 0)
+        val sdoc = _sdoc_result()
+        match combined_test_run_sdn(true, true, spec, true, sdoc, false, sdoc):
+            case Err(reason): fail("valid runner output failed SDN encoding: {reason}")
+            case Ok(source):
+                expect(source).to_contain("simple.test-runner.output/v1")
+                expect(source).to_contain("trace_case_events_sdn")
+                expect(source).to_contain("mcdc_evidence_v1")
+                expect(source).to_contain("process_completion")
+                expect(source).to_contain("scenario-α")
+                expect(source).to_contain("ignore_output")
+                match parse_with_spans_and_issues(source):
+                    case Err(reason): fail("emitted SDN failed to parse: {reason}")
+                    case Ok(parsed):
+                        expect(parsed.2.len()).to_equal(0)
+                        match parsed.0:
+                            case SdnValue.Dict(root):
+                                expect(root.contains_key("schema")).to_equal(true)
+                                expect(root.contains_key("spec")).to_equal(true)
+                                expect(root.contains_key("spl_doctest")).to_equal(true)
+                                expect(root.contains_key("sdoctest")).to_equal(true)
+                            case _: fail("runner SDN root was not a dictionary")
+
+    it "retains exact scalar, resource, completion and omission evidence fields":
+        val source = combined_test_run_sdn(true, true, _output_spec(_output_file()), false, _sdoc_result(), false, _sdoc_result()).unwrap()
+        val root = _output_fields(parse_with_spans_and_issues(source).unwrap().0)
+        val spec = _output_fields(root["spec"])
+        expect(spec.len()).to_equal(11)
+        val files = _output_items(spec["files"])
+        expect(files.len()).to_equal(1)
+        val file = _output_fields(files[0])
+        expect(file.len()).to_equal(27)
+        expect(file["path"]).to_equal(SdnValue.String("test/日本_spec.spl"))
+        expect(file["trace_case_events_sdn"]).to_equal(SdnValue.String(_output_file().trace_case_events_sdn))
+        expect(file["mcdc_evidence_v1"]).to_equal(SdnValue.String("mcdc-carrier"))
+        expect(file["blocked"]).to_equal(SdnValue.Int(1))
+        expect(file["unsupported"]).to_equal(SdnValue.Int(2))
+        expect(file["compile_ms"]).to_equal(SdnValue.Int(7))
+        expect(file["execution_ms"]).to_equal(SdnValue.Int(18))
+        _output_expect_fields(_output_fields(file["resource_usage"]),
+            ["wall_ms", "user_cpu_ms", "system_cpu_ms", "peak_tree_charge_bytes", "peak_direct_child_rss_bytes",
+                "heap_live_end_bytes", "heap_peak_bytes", "io_read_bytes", "io_write_bytes", "pids_peak",
+                "evidence_quality", "termination", "signal", "exit_code"],
+            [SdnValue.Int(25), SdnValue.Int(12), SdnValue.Int(3), SdnValue.Int(1000), SdnValue.Int(900),
+                SdnValue.Int(400), SdnValue.Int(700), SdnValue.Int(11), SdnValue.Int(12), SdnValue.Int(2),
+                SdnValue.String("exact_tree"), SdnValue.String("exited"), SdnValue.Int(0), SdnValue.Int(0)])
+        _output_expect_fields(_output_fields(file["process_completion"]),
+            ["pid", "process_generation", "exit_code", "signal_number", "tree_reaped", "timed_out", "cancelled",
+                "stdout_digest", "stderr_digest", "transport_execution_digest"],
+            [SdnValue.Int(42), SdnValue.Int(3), SdnValue.Int(0), SdnValue.Int(0), SdnValue.Bool(true),
+                SdnValue.Bool(false), SdnValue.Bool(false), SdnValue.String("sha256:out"), SdnValue.String("sha256:err"), SdnValue.String("sha256:transport")])
+        val omissions = _output_items(file["omission_evidence"])
+        expect(omissions.len()).to_equal(1)
+        _output_expect_fields(_output_fields(omissions[0]),
+            ["status", "scenario_id", "reason", "prerequisite", "owner", "tracking_id", "artifact_paths", "resume_command"],
+            [SdnValue.String("unsupported"), SdnValue.String("scenario-α"), SdnValue.String("no backend"),
+                SdnValue.String("hardware"), SdnValue.String("team"), SdnValue.String("issue-9"),
+                SdnValue.Array([SdnValue.String("artifacts/a.sdn")]), SdnValue.String("simple test --native")])
+
+    it "rejects zero-text artifact and modifier collections before building SDN trees":
+        var paths: [text] = []
+        var modifiers: [SdoctestModifier] = []
+        for i in 0..65537:
+            paths.push("")
+            modifiers.push(SdoctestModifier.IgnoreOutput)
+        var file = _output_file()
+        var omission = file.omission_evidence[0]
+        omission.artifact_paths = paths
+        file.omission_evidence = [omission]
+        match combined_test_run_sdn(true, true, _output_spec(file), false, _sdoc_result(), false, _sdoc_result()):
+            case Ok(_): fail("unbounded zero-text artifact collection was accepted")
+            case Err(reason): expect(reason).to_contain("budget")
+        var doc = _sdoc_result()
+        var doc_file = doc.files[0]
+        var block = doc_file.blocks[0]
+        var source_block = block.block
+        source_block.modifiers = modifiers
+        block.block = source_block
+        doc_file.blocks = [block]
+        doc.files = [doc_file]
+        match combined_test_run_sdn(true, false, _output_spec(_output_file()), true, doc, false, doc):
+            case Ok(_): fail("unbounded zero-text modifiers were accepted")
+            case Err(reason): expect(reason).to_contain("budget")
+
+    it "rejects oversized text and overflowing grouped counters without truncation":
+        var file = _output_file()
+        file.error = "x".repeat(1048577)
+        expect(combined_test_run_sdn(true, true, _output_spec(file), false, _sdoc_result(), false, _sdoc_result()).is_err()).to_equal(true)
+        file = _output_file()
+        file.passed = 9223372036854775807
+        match combined_test_run_sdn(true, true, _output_spec(file), false, _sdoc_result(), false, _sdoc_result()):
+            case Ok(_): fail("overflowing group percentage was accepted")
+            case Err(reason): expect(reason).to_contain("counter aggregation")
+
+    it "ignores disabled failing families and never masks a failed runner status":
+        var file = _output_file()
+        file.error = "x".repeat(1048577)
+        for runner_ok in [true, false]:
+            val source = combined_test_run_sdn(runner_ok, false, _output_spec(file), false, _sdoc_result(), false, _sdoc_result()).unwrap()
+            val root = _output_fields(parse_with_spans_and_issues(source).unwrap().0)
+            expect(root["success"]).to_equal(SdnValue.Bool(runner_ok))
+            expect(root["spec"]).to_equal(SdnValue.Null)
+            expect(root["spl_doctest"]).to_equal(SdnValue.Null)
+            expect(root["sdoctest"]).to_equal(SdnValue.Null)
+
+    it "uses typed nulls for disabled result families and preserves success aggregation":
+        val empty_spec = TestRunResult(files: [], total_passed: 0, total_failed: 1, total_skipped: 0,
+            total_pending: 0, total_timed_out: 0, total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
+        val empty_doc = SdoctestRunResult(files: [], total: 0, passed: 0, failed: 0, skipped: 0,
+            errors: 0, accepted: 0, duration_ms: 0)
+        match combined_test_run_sdn(true, true, empty_spec, false, empty_doc, false, empty_doc):
+            case Err(reason): fail("empty typed output failed encoding: {reason}")
+            case Ok(source):
+                match parse_with_spans_and_issues(source):
+                    case Err(reason): fail("output failed parsing: {reason}")
+                    case Ok(parsed):
+                        match parsed.0:
+                            case SdnValue.Dict(root):
+                                expect(root["success"]).to_equal(SdnValue.Bool(false))
+                                match root["spec"]:
+                                    case SdnValue.Dict(_): pass
+                                    case _: fail("enabled spec result was not an SDN record")
+                                expect(root["spl_doctest"]).to_equal(SdnValue.Null)
+                                expect(root["sdoctest"]).to_equal(SdnValue.Null)
+                            case _: fail("runner SDN root was not a dictionary")

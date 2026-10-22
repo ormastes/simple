@@ -1,0 +1,215 @@
+# Actual MIR-to-LLVM generator matrix. Native qualification is separate.
+use std.spec.*
+use std.spec.step
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.*
+
+fn constant_generator(name: text, target: CodegenTarget) -> MirToLlvm:
+    val generator = MirToLlvm.create(name, target, nil)
+    generator.allow_ambient_codegen_policy = false
+    generator.group_bootstrap_mode_set = true
+    generator.group_bootstrap_mode = false
+    generator
+
+fn pointer_constant_types() -> [MirType]:
+    val scalar = MirType.i64()
+    [MirType(kind: MirTypeKind.Array(scalar, -1)),
+        MirType(kind: MirTypeKind.Slice(scalar)),
+        MirType(kind: MirTypeKind.Struct(SymbolId(id: 90))),
+        MirType(kind: MirTypeKind.Enum(SymbolId(id: 91))),
+        MirType(kind: MirTypeKind.Tuple([scalar])),
+        MirType(kind: MirTypeKind.Dict(scalar, scalar)),
+        MirType(kind: MirTypeKind.Union([scalar, MirType.bool()])),
+        MirType(kind: MirTypeKind.Ref(scalar, true)),
+        MirType.ptr(scalar, false)]
+
+fn constant_operand(value: MirConstValue, type_: MirType) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(value, type_))
+
+fn pointer_roundtrip_module(type_: MirType) -> MirModule:
+    val function = MirFunction(symbol: SymbolId(id: 1), name: "pointer_word_roundtrip",
+        signature: MirSignature(params: [], return_type: type_, is_variadic: false),
+        locals: [
+            MirLocal(id: LocalId(id: 0), name: Some("nil_word"), type_: type_, kind: LocalKind.Temp, is_ghost: false),
+            MirLocal(id: LocalId(id: 1), name: Some("copied"), type_: type_, kind: LocalKind.Temp, is_ghost: false),
+            MirLocal(id: LocalId(id: 2), name: Some("word"), type_: MirType.i64(), kind: LocalKind.Temp, is_ghost: false),
+            MirLocal(id: LocalId(id: 3), name: Some("restored"), type_: type_, kind: LocalKind.Temp, is_ghost: false)],
+        blocks: [MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: [
+            MirInst(kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Int(3), type_), span: nil),
+            MirInst(kind: MirInstKind.Copy(LocalId(id: 1), LocalId(id: 0)), span: nil),
+            MirInst(kind: MirInstKind.Cast(LocalId(id: 2), mir_operand_copy(LocalId(id: 1)), MirType.i64()), span: nil),
+            MirInst(kind: MirInstKind.Cast(LocalId(id: 3), mir_operand_copy(LocalId(id: 2)), type_), span: nil)],
+            terminator: MirTerminator.Ret(Some(mir_operand_copy(LocalId(id: 3)))))],
+        entry_block: BlockId.entry(), span: Span.empty(), generic_params: [], is_generic_template: false,
+        specialization_of: nil, type_bindings: {}, layout_phase: nil, is_kernel: false,
+        gpu_target: "", gpu_backend_order: "", is_export_c: false, export_name: "",
+        has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false)
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[function.symbol] = function
+    MirModule(name: "test.pointer_word.roundtrip", functions: functions, statics: {}, constants: {}, types: {})
+
+fn pointer_static_module(type_: MirType, value: MirConstValue) -> MirModule:
+    val symbol = SymbolId(id: 8)
+    val constant = MirConstant(symbol: symbol, name: "word", type_: type_, value: value)
+    val storage = MirStatic(symbol: symbol, name: "pointer_word", type_: type_, init: Some(constant), is_mutable: false)
+    var statics: Dict<SymbolId, MirStatic> = {}
+    statics[symbol] = storage
+    MirModule(name: "test.pointer_word.global", functions: {}, statics: statics, constants: {}, types: {})
+
+describe "LLVM pointer-typed integer constant contract":
+    it "defines every aggregate and reference numeric word using target-width inttoptr":
+        step("Exercise actual mapped types, including nil tag3 and nonzero/negative words")
+        for target in [CodegenTarget.X86_64, CodegenTarget.X86]:
+            val width = if target == CodegenTarget.X86: "i32" else: "i64"
+            for type_ in pointer_constant_types():
+                for word in [0, 3, 17, -1]:
+                    val generator = constant_generator("test.pointer_integer.matrix", target)
+                    expect(generator.llvm_type_text(type_)).to_equal("ptr")
+                    generator.translate_const(LocalId(id: 7), MirConstValue.Int(word), type_)
+                    val ir = generator.builder.build()
+                    expect(ir).to_contain("%l7 = inttoptr {width} {word} to ptr")
+                    expect(ir.contains("add ptr")).to_equal(false)
+                    expect(generator.local_types[7]).to_equal("ptr")
+                    expect(generator.value_types["%l7"]).to_equal("ptr")
+                    expect(generator.ptr_locals[7]).to_equal(true)
+                    expect(generator.defined_locals[7]).to_equal(true)
+                    expect(generator.codegen_errors.len()).to_equal(0)
+
+    it "preserves pointer operands in both ordinary and indexed renderers":
+        step("Render actual typed immediate operands rather than arbitrary untyped strings")
+        for target in [CodegenTarget.X86_64, CodegenTarget.X86]:
+            val width = if target == CodegenTarget.X86: "i32" else: "i64"
+            for type_ in pointer_constant_types():
+                val generator = constant_generator("test.pointer_integer.operands", target)
+                for word in [0, 3, 17, -1]:
+                    val operand = constant_operand(MirConstValue.Int(word), type_)
+                    expect(generator.translate_operand(operand)).to_equal("inttoptr ({width} {word} to ptr)")
+                    expect(generator.translate_operand_at([operand], 0)).to_equal("inttoptr ({width} {word} to ptr)")
+                    expect(generator.get_operand_type_at([operand], 0)).to_equal("ptr")
+                val zero = constant_operand(MirConstValue.Zero, type_)
+                expect(generator.translate_operand(zero)).to_equal("null")
+                expect(generator.translate_operand_at([zero], 0)).to_equal("null")
+                expect(generator.codegen_errors.len()).to_equal(0)
+
+    it "keeps zero distinct from tagged nil and respects an already pointer-typed destination":
+        step("Model the actual registered pointer slot with an incoming MIR integer word")
+        val generator = constant_generator("test.pointer_integer.registered", CodegenTarget.X86_64)
+        generator.local_types[4] = "ptr"
+        generator.translate_const(LocalId(id: 4), MirConstValue.Int(3), MirType.i64())
+        generator.translate_const(LocalId(id: 5), MirConstValue.Zero, pointer_constant_types()[0])
+        val ir = generator.builder.build()
+        expect(ir).to_contain("%l4 = inttoptr i64 3 to ptr")
+        expect(ir).to_contain("%l5 = inttoptr i64 0 to ptr")
+        expect(ir.contains("%l4 = inttoptr i64 0")).to_equal(false)
+        expect(generator.ptr_locals[4]).to_equal(true)
+        expect(generator.codegen_errors.len()).to_equal(0)
+
+    it "normalizes wide MIR words to the real target pointer width without changing low tag bits":
+        step("MIR i64 payloads preserve full64 bits on64-bit targets and low32 bits on32-bit targets")
+        val type_ = pointer_constant_types()[0]
+        for word in [4294967299, -4294967293]:
+            val narrow = constant_generator("test.pointer_integer.narrow_word", CodegenTarget.X86)
+            narrow.translate_const(LocalId(id: 0), MirConstValue.Int(word), type_)
+            expect(narrow.builder.build()).to_contain("inttoptr i32 3 to ptr")
+            expect(narrow.translate_operand(constant_operand(MirConstValue.Int(word), type_))).to_equal("inttoptr (i32 3 to ptr)")
+            val wide = constant_generator("test.pointer_integer.wide_word", CodegenTarget.X86_64)
+            wide.translate_const(LocalId(id: 0), MirConstValue.Int(word), type_)
+            expect(wide.builder.build()).to_contain("inttoptr i64 {word} to ptr")
+            expect(wide.translate_operand(constant_operand(MirConstValue.Int(word), type_))).to_equal("inttoptr (i64 {word} to ptr)")
+
+    it "preserves pointer identity through actual Copy, Move and Cast dispatch":
+        step("Use the generator's existing copy/cast consumers after defining a tagged pointer")
+        for type_ in pointer_constant_types():
+            val generator = constant_generator("test.pointer_integer.copy_cast", CodegenTarget.X86_64)
+            generator.translate_const(LocalId(id: 0), MirConstValue.Int(3), type_)
+            generator.translate_copy_move(LocalId(id: 1), LocalId(id: 0), false)
+            generator.translate_copy_move(LocalId(id: 2), LocalId(id: 1), true)
+            generator.translate_cast_dispatch(LocalId(id: 3), mir_operand_copy(LocalId(id: 2)), MirType.i64())
+            generator.translate_cast_dispatch(LocalId(id: 4), mir_operand_copy(LocalId(id: 3)), type_)
+            val ir = generator.builder.build()
+            expect(ir).to_contain("%l1 = getelementptr i8, ptr %l0, i64 0")
+            expect(ir).to_contain("%l2 = getelementptr i8, ptr %l1, i64 0")
+            expect(ir).to_contain("ptrtoint ptr %l2 to i64")
+            expect(ir).to_contain("inttoptr i64 %l3 to ptr")
+            expect(ir.contains("add ptr")).to_equal(false)
+            expect(generator.codegen_errors.len()).to_equal(0)
+
+    it "renders complete MIR modules and pointer global initializers with typed words":
+        step("Exercise full module translation as well as direct instruction/operand entrypoints")
+        for type_ in pointer_constant_types():
+            val generator = constant_generator("test.pointer_integer.module", CodegenTarget.X86_64)
+            val ir = generator.translate_module(pointer_roundtrip_module(type_))
+            expect(ir).to_contain("inttoptr i64 3 to ptr")
+            expect(ir).to_contain("ptrtoint ptr")
+            expect(ir).to_contain("ret ptr %l3")
+            expect(ir.contains("add ptr")).to_equal(false)
+            expect(generator.codegen_errors.len()).to_equal(0)
+            val globals = constant_generator("test.pointer_integer.globals", CodegenTarget.X86_64)
+            val global_ir = globals.translate_module(pointer_static_module(type_, MirConstValue.Int(3)))
+            expect(global_ir).to_contain("global ptr inttoptr (i64 3 to ptr)")
+            expect(global_ir.contains("global ptr 3")).to_equal(false)
+            expect(globals.codegen_errors.len()).to_equal(0)
+            val zero = constant_generator("test.pointer_integer.zero_global", CodegenTarget.X86_64)
+            expect(zero.translate_module(pointer_static_module(type_, MirConstValue.Zero))).to_contain("global ptr null")
+            expect(zero.codegen_errors.len()).to_equal(0)
+
+    it "leaves signed, unsigned, boolean and floating scalar encodings scalar":
+        step("Keep real primitive constants out of the pointer word path")
+        val integer_types = [MirType(kind: MirTypeKind.I8), MirType(kind: MirTypeKind.I16),
+            MirType(kind: MirTypeKind.I32), MirType.i64(), MirType(kind: MirTypeKind.U8),
+            MirType(kind: MirTypeKind.U16), MirType(kind: MirTypeKind.U32), MirType(kind: MirTypeKind.U64),
+            MirType(kind: MirTypeKind.Char), MirType.bool()]
+        for type_ in integer_types:
+            val generator = constant_generator("test.pointer_integer.scalar", CodegenTarget.X86_64)
+            val llvm_type = generator.llvm_type_text(type_)
+            generator.translate_const(LocalId(id: 6), MirConstValue.Int(1), type_)
+            val ir = generator.builder.build()
+            expect(ir).to_contain("%l6 = add {llvm_type} 1, 0")
+            expect(ir.contains("inttoptr")).to_equal(false)
+            expect(generator.translate_operand(constant_operand(MirConstValue.Int(1), type_))).to_equal("1")
+            expect(generator.codegen_errors.len()).to_equal(0)
+        val booleans = constant_generator("test.pointer_integer.bool", CodegenTarget.X86_64)
+        booleans.translate_const(LocalId(id: 1), MirConstValue.Bool(true), MirType.bool())
+        expect(booleans.builder.build()).to_contain("add i1 1, 0")
+        val floats = constant_generator("test.pointer_integer.float", CodegenTarget.X86_64)
+        floats.translate_const(LocalId(id: 2), MirConstValue.Float(1.5), MirType(kind: MirTypeKind.F64))
+        floats.translate_const(LocalId(id: 3), MirConstValue.Zero, MirType(kind: MirTypeKind.F32))
+        val float_ir = floats.builder.build()
+        expect(float_ir).to_contain("fadd double 1.5, -0.0")
+        expect(float_ir).to_contain("fadd float 0.0, 0.0")
+        expect(float_ir.contains("inttoptr")).to_equal(false)
+        expect(floats.codegen_errors.len()).to_equal(0)
+        val conversion = constant_generator("test.pointer_integer.numeric_cast", CodegenTarget.X86_64)
+        conversion.translate_const(LocalId(id: 0), MirConstValue.Int(3), MirType.i64())
+        conversion.translate_cast_dispatch(LocalId(id: 1), mir_operand_copy(LocalId(id: 0)), MirType(kind: MirTypeKind.F64))
+        expect(conversion.builder.build()).to_contain("sitofp i64 %l0 to double")
+        expect(conversion.codegen_errors.len()).to_equal(0)
+
+    it "refuses integer tags posing as floating or void constants instead of silently converting":
+        step("A numeric conversion belongs to a MIR Cast, not an integer-tag reinterpretation")
+        for type_ in [MirType(kind: MirTypeKind.F32), MirType(kind: MirTypeKind.F64), MirType.unit()]:
+            val instruction = constant_generator("test.pointer_integer.bad_instruction", CodegenTarget.X86_64)
+            instruction.translate_const(LocalId(id: 9), MirConstValue.Int(3), type_)
+            expect(instruction.codegen_errors.len()).to_equal(1)
+            expect(instruction.codegen_errors[0]).to_contain("E-BACKEND-LLVM-CONST-TYPE")
+            val instruction_ir = instruction.builder.build()
+            expect(instruction_ir.contains("add float")).to_equal(false)
+            expect(instruction_ir.contains("add double")).to_equal(false)
+            expect(instruction_ir.contains("add void")).to_equal(false)
+            val ordinary = constant_generator("test.pointer_integer.bad_operand", CodegenTarget.X86_64)
+            ordinary.translate_operand(constant_operand(MirConstValue.Int(3), type_))
+            expect(ordinary.codegen_errors.len()).to_equal(1)
+            val indexed = constant_generator("test.pointer_integer.bad_indexed_operand", CodegenTarget.X86_64)
+            indexed.translate_operand_at([constant_operand(MirConstValue.Int(3), type_)], 0)
+            expect(indexed.codegen_errors.len()).to_equal(1)
+        val invalid_module = constant_generator("test.pointer_integer.bad_global", CodegenTarget.X86_64)
+        val refused_ir = invalid_module.translate_module(pointer_static_module(MirType(kind: MirTypeKind.F64), MirConstValue.Int(3)))
+        expect(refused_ir).to_contain("SIMPLE-LLVM-CODEGEN-ERROR")
+        expect(refused_ir).to_contain("E-BACKEND-LLVM-CONST-TYPE")
+        expect(refused_ir).to_contain("simple_llvm_codegen_error")

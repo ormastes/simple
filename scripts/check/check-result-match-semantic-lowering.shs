@@ -1,5 +1,5 @@
 #!/bin/sh
-# Fail-closed gate for E-BACKEND-LLVM-INST-ResultMatchSemantic.
+# Fail-closed gate for executable-backend ResultMatchSemantic handling.
 #
 # MirInstKind.ResultMatchSemantic is a VERIFICATION WITNESS, not an executable
 # instruction: the whole Result match is already emitted before the marker is
@@ -36,16 +36,33 @@ backend_reject_pattern() {
       *core_codegen.spl) printf '_unsupported_llvm_inst("ResultMatchSemantic"' ;;
       *instruction_lowering.spl) printf '_unsupported_c_inst("ResultMatchSemantic"' ;;
       *mir_interpreter.spl) printf '_unsupported_inst("ResultMatchSemantic"' ;;
+      *cranelift_codegen_adapter.spl) printf 'panic("compile error: E-BACKEND-CRANELIFT-INST-ResultMatchSemantic' ;;
     esac
 }
 
 BACKENDS="src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl
-src/compiler/70.backend/backend/_CBackendTranslate/instruction_lowering.spl
+src/plugins/backend_c/_CBackendTranslate/instruction_lowering.spl
 src/compiler/70.backend/backend/native/isel_x86_64.spl
-src/compiler/95.interp/mir_interpreter.spl"
+src/compiler/95.interp/mir_interpreter.spl
+src/compiler/70.backend/backend/cranelift_codegen_adapter.spl"
 
 EMIT_SITE="src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl"
-LEAN_SITE="src/compiler/70.backend/backend/lean_mir_translate.spl"
+LEAN_SITE="src/plugins/backend_lean/lean_mir_translate.spl"
+
+# The Cranelift witness must have its own metadata-only arm; merely mentioning
+# the variant above the generic unsupported-instruction fallback is insufficient.
+cranelift_witness_is_metadata_only() {
+    awk '
+      /^[[:space:]]*case ResultMatchSemantic\(_, _, _, _, _, _, _\):[[:space:]]*$/ { inside=1; found++; next }
+      inside && /^[[:space:]]*case / { inside=0 }
+      inside {
+        sub(/#.*/, ""); gsub(/[[:space:]]/, "")
+        if ($0 == "()") noop++
+        else if ($0 != "") bad=1
+      }
+      END { exit !(found == 1 && noop == 1 && !bad) }
+    ' "$1"
+}
 
 # ---------------------------------------------------------------- selftest ---
 selftest() {
@@ -75,6 +92,9 @@ selftest() {
     if grep -q 'case ResultMatchSemantic' "$st_dir/no_arm.spl"; then
         st_fail="$st_fail missing-arm-false-negative"
     fi
+    cranelift_witness_is_metadata_only "$st_dir/core_codegen_fixed.spl" || st_fail="$st_fail metadata-arm-rejected"
+    cranelift_witness_is_metadata_only "$st_dir/core_codegen.spl" && st_fail="$st_fail rejecting-arm-accepted"
+    cranelift_witness_is_metadata_only "$st_dir/no_arm.spl" && st_fail="$st_fail missing-metadata-arm-accepted"
 
     # Direction 4: emit-site presence check must discriminate.
     printf 'MirInstKind.ResultMatchSemantic(\n' > "$st_dir/emit.spl"
@@ -111,6 +131,9 @@ for f in $BACKENDS; do
         FAILED="$FAILED $f(no-named-arm)"
     fi
 done
+
+CHECKED=$((CHECKED + 1))
+cranelift_witness_is_metadata_only "$ROOT/src/compiler/70.backend/backend/cranelift_codegen_adapter.spl" || FAILED="$FAILED cranelift(witness-arm-not-metadata-only)"
 
 # The witness must still be EMITTED and still CONSUMED by the Lean backend.
 for f in "$EMIT_SITE:MirInstKind.ResultMatchSemantic(" "$LEAN_SITE:case ResultMatchSemantic("; do

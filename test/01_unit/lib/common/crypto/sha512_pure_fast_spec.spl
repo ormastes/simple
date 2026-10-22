@@ -1,0 +1,127 @@
+# Purpose and audience: pure-Simple SHA-384/512 and PBKDF2-HMAC-SHA-384/512 must be byte-exact (FIPS 180-4 / NIST, RFC 8018 vectors) and fast enough to run c=4096 without the runtime primitive.
+# @req REQ-SSPEC-UNIT
+# Bug: doc/08_tracking/bug/2026-10-19_pbkdf2_sha384_sha512_no_runtime_primitive.md
+#
+# Expected digests were produced by coreutils sha512sum/sha384sum and
+# `openssl kdf ... PBKDF2` (OpenSSL 3.0.13); NIST/draft-josefsson vectors match
+# the published values. Nothing here calls rt_sha384_digest/rt_sha512_digest,
+# so the spec stays meaningful on a binary without the runtime primitive.
+
+use std.spec.step
+use std.spipe.*
+use std.common.crypto.sha512.{sha384_bytes, sha512_bytes, sha512_256_bytes}
+use std.common.crypto.pbkdf2.{pbkdf2_sha384_bytes, pbkdf2_sha512_bytes}
+use std.crypto.types.{bytes_to_hex}
+use std.nogc_sync_mut.io.time_ops.{time_now_micros}
+
+fn _b(s: text) -> [i64]:
+    var out: [i64] = []
+    for c in s.bytes():
+        out.push(c as i64)
+    out
+
+fn _seq(n: i64) -> [i64]:
+    var out: [i64] = [0; n]
+    var i: i64 = 0
+    while i < n:
+        out[i] = i % 256
+        i = i + 1
+    out
+
+fn _rep(byte: i64, n: i64) -> [i64]:
+    [byte; n]
+
+fn _m896() -> [i64]:
+    _b("abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu")
+
+describe "pure SHA-512 (FIPS 180-4)":
+    it "NIST empty, abc, 896-bit":
+        step("SHA-512 short NIST vectors")
+        expect(bytes_to_hex(sha512_bytes([]))).to_equal("cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e")
+        expect(bytes_to_hex(sha512_bytes(_b("abc")))).to_equal("ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f")
+        expect(bytes_to_hex(sha512_bytes(_m896()))).to_equal("8e959b75dae313da8cf4f72814fc143f8f7779c6eb9f7fa17299aeadb6889018501d289e4900f7e4331b99dec4b5433ac7d329eeb6dd26545e96e55b874be909")
+
+    it "NIST one million 'a'":
+        step("SHA-512 1M a")
+        expect(bytes_to_hex(sha512_bytes(_rep(97, 1000000)))).to_equal("e718483d0ce769644e2e42c7bc15b4638e1f98b13b2044285632a803afa973ebde0ff244877ea60a4cb0432ce577c31beb009c5c2c49aa2e4eadb217ad8cc09b")
+
+describe "pure SHA-384 (FIPS 180-4)":
+    it "NIST empty, abc, 896-bit":
+        step("SHA-384 short NIST vectors")
+        expect(bytes_to_hex(sha384_bytes([]))).to_equal("38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b")
+        expect(bytes_to_hex(sha384_bytes(_b("abc")))).to_equal("cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7")
+        expect(bytes_to_hex(sha384_bytes(_m896()))).to_equal("09330c33f71147e83d192fc782cd1b4753111b173b3b05d22fa08086e3b0f712fcc7c71a557e2db966c3e9fa91746039")
+
+    it "NIST one million 'a'":
+        step("SHA-384 1M a")
+        expect(bytes_to_hex(sha384_bytes(_rep(97, 1000000)))).to_equal("9d0e1809716474cb086e834e310a4a1ced149e9c00f248527972cec5704c2a5b07b8b3dc38ecc4ebae97ddd87f3d8985")
+
+describe "pure SHA-512/256 (FIPS 180-4 §5.3.6.2)":
+    it "abc":
+        step("SHA-512/256 abc")
+        expect(bytes_to_hex(sha512_256_bytes(_b("abc")))).to_equal("53048e2681941ef99b2e29b76b4c7dabe4c2d0c634fc6d46e0e2f13107e7af23")
+
+describe "pure SHA-384/512 padding boundaries":
+    it "lengths 111, 112, 127, 128, 129, 239, 240 (bytes i mod 256)":
+        step("padding boundaries")
+        expect(bytes_to_hex(sha512_bytes(_seq(111)))).to_equal("a1a111449b198d9b1f538bad7f3fc1022b3a5b1a5e90a0bc860de8512746cbc31599e6c834de3a3235327af0b51ff57bf7acf1974a73014d9c3953812edc7c8d")
+        expect(bytes_to_hex(sha384_bytes(_seq(111)))).to_equal("f5f9fe110d809d34029de262a01b208356caec6e054c7f926b2591f6c9780579d4b59f5578c6f531a84f158a33660cef")
+        expect(bytes_to_hex(sha512_bytes(_seq(112)))).to_equal("c5fbd731d19d2ae1180f001be72c2c1aaba1d7b094b3748880e24593b8e117a750e11c1bd867cc2f96dace8c8b74abd2d5c4f236be444e77d30d1916174070b9")
+        expect(bytes_to_hex(sha384_bytes(_seq(112)))).to_equal("33ba080ec0ccb378e4e95fed3b26c23aa1a280476e007519ee47f60cd9c5c8a65d627259a9aa2fd33ca06d3c14ee5548")
+        expect(bytes_to_hex(sha512_bytes(_seq(127)))).to_equal("eab89674feaa34e27aebeeff3c0a4d70070bb872d5e9f186cf1dbbdee517b6e35724d629ff025a5b07185e911ada7e3c8acf830aa0e4f71777bd2d44f504f7f0")
+        expect(bytes_to_hex(sha384_bytes(_seq(127)))).to_equal("d5fcfe2fcf6b3ef375ede37c8123d9b78065fecc1d55197e2f7721e6e9a93d0ba4d7fd15f9b96dea2744df24141ba2ef")
+        expect(bytes_to_hex(sha512_bytes(_seq(128)))).to_equal("1dffd5e3adb71d45d2245939665521ae001a317a03720a45732ba1900ca3b8351fc5c9b4ca513eba6f80bc7b1d1fdad4abd13491cb824d61b08d8c0e1561b3f7")
+        expect(bytes_to_hex(sha384_bytes(_seq(128)))).to_equal("ca2385773319124534111a36d0581fc3f00815e907034b90cff9c3a861e126a741d5dfcff65a417b6d7296863ac0ec17")
+        expect(bytes_to_hex(sha512_bytes(_seq(129)))).to_equal("1d9da57fbbdab09afb3506ab2d223d06109d65c1c8ad197f50138f714bc4c3f2fe5787922639c680acad1c651f955990425954ce2cba0c5cc83f2667d878eb0f")
+        expect(bytes_to_hex(sha384_bytes(_seq(129)))).to_equal("ef49ae5b9ad51433d00323528d81ea8d2e4d2b507dbd9f1cb84f952b66249a788b1c89fcdb77a0db9f1feb901d47fc73")
+        expect(bytes_to_hex(sha512_bytes(_seq(239)))).to_equal("cb4c7fd522756d5781ad3a4f590a1d862906b960e7720136cb3fb36b563caa1ea5689134291fa79c80ccc2b4092b41df32ebdcb36dbe79db483440228c1622a8")
+        expect(bytes_to_hex(sha384_bytes(_seq(239)))).to_equal("2556cf077a788c49bb6d600f4a3cee635c4443832d169f761537afee2980742b9f34afbc87f598dd0aedc4a826ed6a73")
+        expect(bytes_to_hex(sha512_bytes(_seq(240)))).to_equal("6c48466c9f6c07e4ab762c696b7eeb35cfe236fca73683e5fab873ac3489b4d2eb3d7afcce7e8165dbbf37aded3b5b0c889c0b7e0f1790a8330d8677429d91a5")
+        expect(bytes_to_hex(sha384_bytes(_seq(240)))).to_equal("d64769ad58f5a338669b935f3431e5bef31667d0a2437bff78f1e5275075f434fff675f9833ea04ac4e5c2e2c2c99b8c")
+
+describe "pure PBKDF2-HMAC-SHA-512 (RFC 8018)":
+    it "draft-josefsson TC1 c=1 and TC2 c=2":
+        step("SHA-512 TC1/TC2")
+        expect(bytes_to_hex(pbkdf2_sha512_bytes(_b("password"), _b("salt"), 1, 64))).to_equal("867f70cf1ade02cff3752599a3a53dc4af34c7a669815ae5d513554e1c8cf252c02d470a285a0501bad999bfe943c08f050235d7d68b1da55e63f73b60a57fce")
+        expect(bytes_to_hex(pbkdf2_sha512_bytes(_b("password"), _b("salt"), 2, 64))).to_equal("e1d9c16aa681708a45f5c7c4e215ceb66e011a2e9f0040713f18aefdb866d53cf76cab2868a39b9f7840edce4fef5a82be67335c77a6068e04112754f27ccf4e")
+
+    it "200-byte key (hashed first), 3 blocks, dkLen=150":
+        step("SHA-512 long key multi-block")
+        expect(bytes_to_hex(pbkdf2_sha512_bytes(_rep(107, 200), _b("salt"), 3, 150))).to_equal("35af7cebd2e1c297550a8cdeae79788b876bbd859d95d49da98b89812d99542e35fe4c71ab53970bf637721774594169913c31b29e3a1f03b3d601d30215647f3598fddd65d8b2047454b00ab3cf6f920ac4e827ba51db47b4933d90f2471dd8de38d9db66558942d3173a387bf36830f06ff6fc76a21083215bb60b13a76115e0c434d3dea269165e367cbe7a575c875d636cb749a4")
+
+    it "empty password":
+        step("SHA-512 empty password")
+        expect(bytes_to_hex(pbkdf2_sha512_bytes([], _b("salt"), 2, 64))).to_equal("cc5eacbb057f2a5982fce67bf70f79fccf4adf285f5cbae1a5a1c5df012a630a5cd035da88803f2a8b7ad7d3118025e9d848280b733c39c57a76d3fa895f244c")
+
+    it "exactly-128-byte key":
+        step("SHA-512 block-sized key")
+        expect(bytes_to_hex(pbkdf2_sha512_bytes(_rep(107, 128), _b("salt"), 2, 64))).to_equal("235d53be8261ad6213fc111576271bfc9cc4f9d599cdb6c0fed26a67a385a8b114bc07d140236048c52c02c8ee7805f322bb630a7d53465589af687e8f7e5b27")
+
+    it "draft-josefsson TC3 c=4096 dkLen=64 within 60 s on the pure path":
+        step("SHA-512 c=4096 pure perf")
+        val t0 = time_now_micros()
+        val dk = pbkdf2_sha512_bytes(_b("password"), _b("salt"), 4096, 64)
+        val ms = (time_now_micros() - t0) / 1000
+        expect(bytes_to_hex(dk)).to_equal("d197b1b33db0143e018b12f3d1d1479e6cdebdcc97c5c0f87f6902e072f457b5143f30602641b3d55cd335988cb36b84376060ecd532e039b742a239434af2d5")
+        expect(ms).to_be_less_than(60000)
+
+describe "pure PBKDF2-HMAC-SHA-384 (RFC 8018)":
+    it "129-byte key (hashed first), 3 blocks, dkLen=100":
+        step("SHA-384 long key multi-block")
+        expect(bytes_to_hex(pbkdf2_sha384_bytes(_rep(107, 129), _b("NaCl"), 5, 100))).to_equal("770c3da4812c1c44846b63796e847fa573054e82b038cfaef084e4ba27927284bf96773aa8d7a05537b09e9a09f6272811f8ad553effe24a6b04721fe70aedcf9067f58a9534adf60f0f520ef5d341981ff90894b175b906b318a2a8c399b55e30f49a17")
+
+    it "empty salt":
+        step("SHA-384 empty salt")
+        expect(bytes_to_hex(pbkdf2_sha384_bytes(_b("password"), [], 3, 48))).to_equal("ddf7dd18adfcdd3730142dc16e53d2910a93f3fb6273096cd43072def9ee27acccbe86d783c95a31e76a599c2f40a888")
+
+    it "exactly-128-byte key":
+        step("SHA-384 block-sized key")
+        expect(bytes_to_hex(pbkdf2_sha384_bytes(_rep(107, 128), _b("salt"), 2, 48))).to_equal("013242a1329c2c4a038920cafca261f9d2752237dc7271a923a2977e72a402db522ef81ddd9b182362e3656cfb83df14")
+
+    it "c=4096 dkLen=48 within 60 s on the pure path":
+        step("SHA-384 c=4096 pure perf")
+        val t0 = time_now_micros()
+        val dk = pbkdf2_sha384_bytes(_b("password"), _b("salt"), 4096, 48)
+        val ms = (time_now_micros() - t0) / 1000
+        expect(bytes_to_hex(dk)).to_equal("559726be38db125bc85ed7895f6e3cf574c7a01c080c3447db1e8a76764deb3c307b94853fbe424f6488c5f4f1289626")
+        expect(ms).to_be_less_than(60000)

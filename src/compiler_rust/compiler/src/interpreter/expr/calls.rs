@@ -1112,12 +1112,12 @@ pub(super) fn eval_call_expr(
                 // Dict property access (e.g., dict.len, dict.is_empty)
                 // Also supports module namespace access and no-paren method calls
                 Value::Dict(ref map) => match field.as_str() {
-                    "len" => Ok(Value::Int(map.len() as i64)),
-                    "is_empty" => Ok(Value::Bool(map.is_empty())),
+                    "len" => Ok(Value::Int(crate::interpreter::module_dict_len(map) as i64)),
+                    "is_empty" => Ok(Value::Bool(crate::interpreter::module_dict_len(map) == 0)),
                     _ => {
                         // Check if this is a key in the dict (module namespace access)
-                        if let Some(value) = map.get(field) {
-                            Ok(value.clone())
+                        if let Some(value) = crate::interpreter::module_dict_get(map, field) {
+                            Ok(value)
                         } else {
                             // Try calling as a no-arg method (e.g., dict.keys, dict.values)
                             let empty_args: Vec<Argument> = vec![];

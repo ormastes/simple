@@ -1,0 +1,37 @@
+"""Component-side byte-slice ABI shims for the dynSMF `compress` bundle.
+
+Exported symbols follow `std.nogc_sync_mut.sffi.dyn_bytes_abi`:
+`fn(in_ptr, out_ptr, lens) -> i64`. Both directions use
+`zstd_dyn_default_options()` so a dynamic call and the static fallback
+produce identical frames.
+"""
+
+use std.common.compress.types.{CompressionCodec}
+use std.common.compress.lz4.{CompressionOptions, CompressionLevel}
+use std.common.compress.zstd.{zstd_compress_frame, zstd_decompress_frame}
+use std.nogc_sync_mut.sffi.dyn_bytes_abi.{dyn_bytes_abi_read_input, dyn_bytes_abi_write_output,
+    DYN_BYTES_ABI_ERR_ARGS, DYN_BYTES_ABI_ERR_CALLEE}
+
+fn zstd_dyn_default_options() -> CompressionOptions:
+    CompressionOptions(
+        codec: CompressionCodec.zstd,
+        level: CompressionLevel(value: 3),
+        checksum: false,
+        block_mode: "independent",
+        dictionary_bytes: nil,
+        dictionary_id: nil,
+        content_size: nil)
+
+fn simple_dyn_zstd_compress_frame_v1(in_ptr: i64, out_ptr: i64, lens: i64) -> i64:
+    val input = dyn_bytes_abi_read_input(in_ptr, lens) ?? return DYN_BYTES_ABI_ERR_ARGS
+    dyn_bytes_abi_write_output(out_ptr, lens, zstd_compress_frame(input, zstd_dyn_default_options()))
+
+fn simple_dyn_zstd_decompress_frame_v1(in_ptr: i64, out_ptr: i64, lens: i64) -> i64:
+    val input = dyn_bytes_abi_read_input(in_ptr, lens) ?? return DYN_BYTES_ABI_ERR_ARGS
+    val decoded = zstd_decompress_frame(input)
+    if decoded.is_err():
+        return DYN_BYTES_ABI_ERR_CALLEE
+    dyn_bytes_abi_write_output(out_ptr, lens, decoded.unwrap())
+
+export zstd_dyn_default_options
+export simple_dyn_zstd_compress_frame_v1, simple_dyn_zstd_decompress_frame_v1

@@ -350,7 +350,7 @@ fn interp_monotonic_nanos() -> i64 {
 
 /// Get monotonic time in nanoseconds.
 ///
-/// EPOCH CONTRACT (pinned by `test/unit/runtime/time_epoch_convergence_spec.spl`):
+/// EPOCH CONTRACT (pinned by `test/01_unit/runtime/time_epoch_convergence_spec.spl`):
 /// this is MONOTONIC, matching `runtime.h:251`, `runtime_time.c`,
 /// `runtime_native.c`, `platform/unix_common.h`, `platform/platform_win.h`, and
 /// the pure-Simple `src/runtime/simple_core/core_process.spl`. It returned

@@ -13,7 +13,7 @@ hygiene, and integration with the compiler's metaprogramming capabilities.
 
 ## Syntax
 
-```simple
+```simple:skip
 macro my_macro(param) -> Result:
     # Macro body with code generation
     quote:

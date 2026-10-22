@@ -1,0 +1,27 @@
+use std.nogc_sync_mut.test_runner.runner_lifecycle.{cleanup_all_children, spawn_tracked_process}
+use std.nogc_sync_mut.test_runner.process_tracker.{tracker_get_pids, tracker_get_containers}
+use std.nogc_sync_mut.io.process_ops.{process_is_running, process_kill, process_wait}
+
+# Standalone POSIX fixture: only this process's registered child is cleaned.
+fn main() -> i64:
+    val initial_pids = tracker_get_pids()
+    val initial_containers = tracker_get_containers()
+    if initial_pids.len() != 0 or initial_containers.len() != 0: return 11
+    val empty_count = cleanup_all_children()
+    if empty_count != 0: return 12
+    val child = spawn_tracked_process("sleep", ["30"])
+    if child <= 0: return 13
+    val cleaned = cleanup_all_children()
+    val survived = process_is_running(child)
+    # Always attempt fixture-owned cleanup/reap before reporting a failure.
+    if survived:
+        val _ = process_kill(child)
+    val _ = process_wait(child, 2000)
+    if survived: return 14
+    if cleaned != 1: return 15
+    val remaining = tracker_get_pids()
+    if remaining.len() != 0: return 16
+    val again = cleanup_all_children()
+    if again != 0: return 17
+    print "runner-cleanup-count: cleaned={cleaned}, again={again}"
+    0

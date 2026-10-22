@@ -1,0 +1,44 @@
+# Shared actual mono publication. This is not body/report/prerequisite admission.
+# Archived callers must produce actual execution diagnostics and statistics.
+use compiler.driver.driver_types.{CompileContext}
+use compiler.mono.monomorphize_integration.{MonoStats}
+use compiler.driver.driver_log_helpers.{log_debug}
+use compiler.driver.driver_pass_receipt.{PassReceipt, record_pass_receipt}
+
+fn driver_publish_mono_warnings_and_stats_v1(ctx: CompileContext,
+        mono_stats: MonoStats, mono_warnings: [text]):
+    # Leveled diagnostics that resolved to `warning` (SIMPLE_MONO_LEVELS).
+    for mw in mono_warnings:
+        ctx.add_warning(mw)
+    # Phase B receipt: printed so a stage log proves the pass ran and what
+    # it did (the pass was a no-op for months while looking wired).
+    print "[mono] generic_fns={mono_stats.generic_functions_found} call_sites={mono_stats.call_sites_found} specializations={mono_stats.specializations_created} unresolved={mono_stats.unresolved_generic_calls}"
+    # BUG-001 diagnostic: verify module count survives monomorphization
+    log_debug("monomorphization output ready")
+
+fn driver_publish_mono_diagnostics_v1(ctx: CompileContext,
+        mono_diags: [text], modules_checked: i64) -> bool:
+    # Phase 3 (critical_hardening_plan_2026-08-21): the mono pass emits a
+    # loud, coded diagnostic (E-MONO-030 / E-MONO-032) for every generic
+    # call site it could NOT rewrite. Those used to be dropped on the floor
+    # by `run_monomorphization`, so a non-monomorphic HIR reached MIR at
+    # rc=0. They are errors now: an unspecialized generic call is not a
+    # style nit, it is a program the backend cannot lower correctly.
+    var mono_pass_errors = 0
+    for md in mono_diags:
+        mono_pass_errors = mono_pass_errors + 1
+        ctx.add_error(md)
+    val _mono_pass_receipt = record_pass_receipt(PassReceipt(
+        pass_name: "monomorphize",
+        profile: ctx.assurance_policy.strictness.name(),
+        executed: true,
+        modules_checked: modules_checked,
+        diagnostics: mono_diags.len(),
+        errors_raised: mono_pass_errors
+    ))
+    if mono_pass_errors > 0:
+        print "error[E-MONO-033]: monomorphization left {mono_pass_errors} generic call site(s) unspecialized; refusing to lower non-monomorphic HIR to MIR"
+        return false
+    true
+
+export driver_publish_mono_warnings_and_stats_v1, driver_publish_mono_diagnostics_v1

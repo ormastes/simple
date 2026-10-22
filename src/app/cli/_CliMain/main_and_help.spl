@@ -4,6 +4,7 @@ use app.cli._CliMain.args_and_os_commands.{GlobalFlags, get_cli_args, get_versio
     print_error, print_error_with_help, run_dashboard, run_llm_dashboard}
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use app.io.env_ops.{env_get, env_set}
+use app.io.args_ops.{get_args}
 use app.io.aspect_params_env.{aspect_params_from_env}
 use common.plugin.aspect_params.{aspect_coverage_cutover_policy_v1}
 use common.plugin.instrumentation_aspect_pack.{
@@ -12,7 +13,7 @@ use std.sffi.coverage.{coverage_enabled}
 use std.io_runtime.{getpid}
 use app.io.file_ops.{file_write}
 use std.common.mem_infra.config.{resolve_mem_infra, mem_infra_env_assignments}
-use app.io.cli_ops.{cli_file_exists, _cli_eprint}
+use app.io.cli_ops.{cli_file_exists, _cli_eprint, _cli_print_raw}
 use app.io.cli_compile.{cli_compile, cli_native_build}
 use app.io.cli_commands.{cli_run_code, cli_run_file, cli_run_repl,
     cli_run_fmt, cli_run_fix, cli_run_verify,
@@ -27,6 +28,8 @@ use app.io.cli_lint_commands.{run_lint_command}
 use app.io._CliCommands.handler_commands.{cli_watch_daemon}
 use app.cli.cli_helpers.{print_cli_help, handle_init, check_self_contained}
 use app.cli.startup_aspect_packs.{apply_startup_aspect_packs}
+use lazy app.cli.ast_link.{ast_link_command_v1}
+use lazy app.cli.doc_links.{doc_links_command_v1}
 use app.cli.command_registry.{
     cli_registry_has_command_v1,
     cli_registry_direct_script_target_v1,
@@ -62,6 +65,11 @@ use plugins.backend_registry.full_static_backend_registry.{
 use compiler.driver.bootstrap_k1_selected.{
     install_selected_k1_backend_table_v1, selected_k1_backend_policy_v1}
 use app.compiler_entrypoint.admission.{compiler_entrypoint_admit_v1}
+use app.cli.bootstrap_internal_worker_routing.{
+    bootstrap_internal_worker_run_v1, bootstrap_internal_worker_is_parse_v1,
+    bootstrap_internal_worker_args_v1}
+use app.cli.parse_shard_main.{run_parse_shard}
+use app.cli.native_build_worker_entry.{run_native_build_worker_entry}
 use app.startup.dynsmf_status.{run_product_dynsmf_status}
 use app.build_progress.cli.{run_build_progress_cli}
 use app.lock.main.{run_lock_command}
@@ -317,6 +325,24 @@ fn cli_main_with_execution_mode(force_interpreter: bool) -> i64:
         _cli_eprint("PLUG-E-TABLE: invalid policy-bound full-CLI backend composition")
         return 1
 
+    # Coordinator children keep their process boundary, but dispatch their two
+    # fixed worker entrypoints to this compiled binary instead of interpreting
+    # the worker source. The marker and allowlist select this route; source
+    # admission and policy validation still run. Ordinary `run` continues below.
+    if not force_interpreter:
+        val process_args = get_args()
+        val worker_marker = env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? ""
+        if bootstrap_internal_worker_run_v1(process_args, worker_marker):
+            val worker_payload = bootstrap_internal_worker_args_v1(
+                process_args, worker_marker)
+            val admission = compiler_entrypoint_admit_v1(["src"])
+            if not admission.valid:
+                _cli_eprint("SCV-E-ADMISSION: " + admission.reason)
+                return 1
+            if bootstrap_internal_worker_is_parse_v1(process_args, worker_marker):
+                return run_parse_shard(worker_payload)
+            return run_native_build_worker_entry(worker_payload)
+
     # These app commands own option names also recognized by the shared CLI
     # (`--tui`, `--surface`, `--count`, `--timeout`, and `--json`). Delegate
     # before global log/runtime filtering can consume them. The later
@@ -565,6 +591,22 @@ fn cli_main_with_execution_mode(force_interpreter: bool) -> i64:
         return cli_run_diff(filtered_args)
     elif str_eq(first, "constr"):
         return cli_constr(filtered_args)
+    elif str_eq(first, "doc"):
+        match doc_links_command_v1(_cli_args_from(filtered_args, 1)):
+            case Ok(result):
+                _cli_print_raw(result.output)
+                return result.exit_code
+            case Err(error):
+                print_error(error.message)
+                return 1
+    elif str_eq(first, "ast-link"):
+        match ast_link_command_v1(_cli_args_from(filtered_args, 1)):
+            case Ok(output):
+                print "{output}"
+                return 0
+            case Err(error):
+                print_error(error.message)
+                return 1
     elif str_eq(first, "query"):
         return cli_run_query(filtered_args)
     elif str_eq(first, "info"):

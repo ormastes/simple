@@ -11,7 +11,7 @@ Edit:
 Tests:
 
 - `test/01_unit/app/tooling/context_generate_spec.spl`
-- `test/unit/app/tooling/context_generate_spec.spl`
+- `test/01_unit/app/tooling/context_generate_spec.spl`
 - existing `test/02_integration/app/context_log_modes_spec.spl`
 
 ## Helpers
@@ -51,7 +51,7 @@ Edit:
 Tests:
 
 - `test/01_unit/app/llm_dashboard/collectors/tooling_artifact_collector_spec.spl`
-- `test/unit/app/llm_dashboard/collectors/tooling_artifact_collector_spec.spl`
+- `test/01_unit/app/llm_dashboard/collectors/tooling_artifact_collector_spec.spl`
 
 The collector reuses `context_generate`, `context_stats`, and `ponytail_audit`
 instead of duplicating context or ponytail logic. It emits a compact panel model

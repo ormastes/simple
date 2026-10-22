@@ -1,0 +1,166 @@
+# @tag:in-development
+# @req REQ-TRC-003 REQ-TRC-012 REQ-TRC-013 REQ-TRC-018
+# Common-only wire fixtures: no app/compiler import and no persistence claim.
+use std.spec.*
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.parser.{parse_with_spans_and_issues}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.traceability.run_plan.{TracePlannedCase}
+use std.common.traceability.run_request.{TraceRunRequest}
+use std.common.traceability.run_request_codec.{encode_trace_run_request}
+use std.common.traceability.sspec_inventory.{TraceSspecCase, TraceSspecPlannedDefinition, TraceSspecPlannedRequest,
+    trace_sspec_definition_id, trace_sspec_planned_case_id, trace_sspec_inventory_digest,
+    trace_sspec_request_digest, validate_trace_sspec_planned_request}
+use std.common.traceability.sspec_inventory_codec.{encode_trace_sspec_planned_request, decode_trace_sspec_planned_request}
+
+fn metadata_fixture() -> TraceSspecPlannedRequest:
+    val prefix = "use std.spec.*\ndescribe \"suite\":\n    "
+    val first = "it \"first 日本\":\n        assert(false)\n    "
+    val second = "test \"second\":\n        assert(false)\n"
+    val source = prefix + first + second
+    var bytes: [u8] = []
+    for byte in source.bytes(): bytes.push(byte)
+    val source_digest = "sha256:" + sha256_u8_hex(bytes)
+    val items = [
+        TraceSspecCase(test_path: "test/日本_spec.spl", case_name: "suite > first 日本", leaf_name: "first 日本", kind: "normal",
+            suite_path: ["suite"], context_path: [], start_byte: prefix.len(), end_byte: prefix.len() + first.len(), line: 3, column: 5),
+        TraceSspecCase(test_path: "test/日本_spec.spl", case_name: "suite > second", leaf_name: "second", kind: "test",
+            suite_path: ["suite"], context_path: [], start_byte: prefix.len() + first.len(), end_byte: source.len(), line: 5, column: 5)]
+    var cases: [TracePlannedCase] = []
+    var definitions: [TraceSspecPlannedDefinition] = []
+    for item in items:
+        val definition_id = trace_sspec_definition_id(source_digest, "simple.sspec.literal-ast/v1", item)
+        val case_id = trace_sspec_planned_case_id("subject:fixture", "config:fixture", "expectation:fixture", "binary:fixture", "lane:fixture", definition_id)
+        cases.push(TracePlannedCase(case_id: case_id, test_path: item.test_path, case_name: item.case_name,
+            test_definition_id: definition_id, lane_id: "lane:fixture"))
+        definitions.push(TraceSspecPlannedDefinition(case_id: case_id, test_definition_id: definition_id,
+            source_sha256: source_digest, extractor_version: "simple.sspec.literal-ast/v1", definition: item))
+    val request = TraceRunRequest(subject_id: "subject:fixture", configuration_id: "config:fixture",
+        expectation_id: "expectation:fixture", binary_id: "binary:fixture", cases: cases)
+    TraceSspecPlannedRequest(request: request, definitions: definitions,
+        inventory_digest: trace_sspec_inventory_digest(request, definitions).unwrap(), evidence_validity: "unverified")
+
+fn metadata_wire_fields(value: TraceSspecPlannedRequest) -> Dict<text, SdnValue>:
+    val source = encode_trace_sspec_planned_request(value).unwrap()
+    val parsed = parse_with_spans_and_issues(source).unwrap()
+    match parsed.0:
+        case SdnValue.Dict(fields): fields
+        case _:
+            fail("encoded metadata was not a dictionary")
+            {}
+
+fn metadata_wire_reject(source: text, fragment: text):
+    match decode_trace_sspec_planned_request(source):
+        case Ok(_): fail("invalid metadata envelope was accepted")
+        case Err(reason): expect(reason).to_contain(fragment)
+
+fn metadata_change_definition(root: Dict<text, SdnValue>, name: text, replacement: SdnValue) -> Dict<text, SdnValue>:
+    var changed = root
+    var records = match changed["definitions"]:
+        case SdnValue.Array(values): values
+        case _:
+            fail("fixture definitions missing")
+            []
+    var record = match records[0]:
+        case SdnValue.Dict(fields): fields
+        case _:
+            fail("fixture definition wrapper missing")
+            {}
+    var definition = match record["definition"]:
+        case SdnValue.Dict(fields): fields
+        case _:
+            fail("fixture definition missing")
+            {}
+    definition[name] = replacement
+    record["definition"] = SdnValue.Dict(definition)
+    records[0] = SdnValue.Dict(record)
+    changed["definitions"] = SdnValue.Array(records)
+    changed
+
+describe "Strict planned SSpec metadata native SDN codec":
+    it "round trips full definitions and exact ordered request without granting validity":
+        val value = metadata_fixture()
+        val source = encode_trace_sspec_planned_request(value).unwrap()
+        val decoded = decode_trace_sspec_planned_request(source).unwrap()
+        expect(decoded.evidence_validity).to_equal("unverified")
+        expect(decoded.inventory_digest).to_equal(value.inventory_digest)
+        expect(decoded.definitions.len()).to_equal(2)
+        expect(decoded.definitions[0].definition.case_name).to_equal("suite > first 日本")
+        expect(decoded.definitions[1].definition.kind).to_equal("test")
+        expect(decoded.definitions[0].definition.suite_path).to_equal(["suite"])
+        expect(decoded.definitions[0].definition.end_byte).to_equal(value.definitions[0].definition.end_byte)
+        expect(decoded.definitions[0].source_sha256).to_equal(value.definitions[0].source_sha256)
+        expect(encode_trace_run_request(decoded.request).unwrap()).to_equal(encode_trace_run_request(value.request).unwrap())
+        expect(encode_trace_sspec_planned_request(decoded).unwrap()).to_equal(source)
+
+    it "rejects forged validity, request digest and inventory digest":
+        val fields = metadata_wire_fields(metadata_fixture())
+        for name in ["evidence_validity", "request_digest", "inventory_digest"]:
+            var changed = fields
+            changed[name] = SdnValue.String(if name == "evidence_validity": "verified" else: "sha256:" + "0".repeat(64))
+            metadata_wire_reject(sdn_encode_canonical(SdnValue.Dict(changed)), "SSPEC-METADATA")
+
+    it "rejects a different request even when its request digest is recomputed":
+        val value = metadata_fixture()
+        var root = metadata_wire_fields(value)
+        var request = value.request
+        var cases = request.cases
+        var first = cases[0]
+        first.case_name = "suite > different"
+        cases[0] = first
+        request.cases = cases
+        root["request_sdn"] = SdnValue.String(encode_trace_run_request(request).unwrap())
+        root["request_digest"] = SdnValue.String(trace_sspec_request_digest(request).unwrap())
+        metadata_wire_reject(sdn_encode_canonical(SdnValue.Dict(root)), "projection differs")
+
+    it "rejects changes to kind, source digest, byte spans and literal scopes":
+        val root = metadata_wire_fields(metadata_fixture())
+        for name in ["kind", "source_sha256", "start_byte", "suite_path", "extractor_version"]:
+            var replacement = SdnValue.String("slow")
+            if name == "source_sha256": replacement = SdnValue.String("sha256:" + "0".repeat(64))
+            elif name == "start_byte": replacement = SdnValue.Int(1)
+            elif name == "suite_path": replacement = SdnValue.Array([SdnValue.String("other")])
+            elif name == "extractor_version": replacement = SdnValue.String("unknown/v2")
+            metadata_wire_reject(sdn_encode_canonical(SdnValue.Dict(metadata_change_definition(root, name, replacement))), "SSPEC-METADATA")
+
+    it "rejects duplicate definition IDs after request projection is updated to match":
+        var value = metadata_fixture()
+        var definitions = value.definitions
+        var second = definitions[1]
+        second.test_definition_id = definitions[0].test_definition_id
+        definitions[1] = second
+        value.definitions = definitions
+        var request = value.request
+        var cases = request.cases
+        var planned = cases[1]
+        planned.test_definition_id = second.test_definition_id
+        cases[1] = planned
+        request.cases = cases
+        value.request = request
+        match validate_trace_sspec_planned_request(value):
+            case Ok(_): fail("duplicate definition identity was accepted")
+            case Err(reason): expect(reason).to_contain("duplicate definition ID")
+        expect(encode_trace_sspec_planned_request(value).is_err()).to_equal(true)
+
+    it "rejects unknown fields and schemas at root and nested definition boundaries":
+        val root = metadata_wire_fields(metadata_fixture())
+        var unknown = root
+        unknown["admitted"] = SdnValue.Bool(true)
+        metadata_wire_reject(sdn_encode_canonical(SdnValue.Dict(unknown)), "unexpected")
+        var future = root
+        future["schema"] = SdnValue.String("simple.trace.sspec-planned-request/v2")
+        metadata_wire_reject(sdn_encode_canonical(SdnValue.Dict(future)), "unsupported envelope")
+        val nested = metadata_change_definition(root, "unknown", SdnValue.String("x"))
+        metadata_wire_reject(sdn_encode_canonical(SdnValue.Dict(nested)), "unexpected")
+
+    it "rejects string spans, duplicate wire fields, noncanonical embedded requests and oversized input":
+        val value = metadata_fixture()
+        val root = metadata_wire_fields(value)
+        val wrong_type = metadata_change_definition(root, "start_byte", SdnValue.String("35"))
+        metadata_wire_reject(sdn_encode_canonical(SdnValue.Dict(wrong_type)), "must be an integer")
+        metadata_wire_reject("{schema: \"one\", schema: \"two\"}", "duplicate")
+        var noncanonical = root
+        noncanonical["request_sdn"] = SdnValue.String(encode_trace_run_request(value.request).unwrap() + "\n")
+        metadata_wire_reject(sdn_encode_canonical(SdnValue.Dict(noncanonical)), "canonical native SDN")
+        metadata_wire_reject("x".repeat(1048577), "1 MiB")

@@ -1,0 +1,79 @@
+# Shared source-only admission for retained and archived cold HIR consumers.
+# This owns no HIR body and grants no transformed-stage admission. The caller
+# keeps this scratch index inside its inventory lease and promotes only the
+# selected compact rows needed by the actual compilation owner.
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryV1,
+    CompileSourceInventoryEntryV1, compile_source_inventory_digest_v1,
+    compile_source_inventory_path_valid_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+struct ColdHirSourceInventoryAdmissionV1:
+    normalized_root: text
+    source_indices: Dict<text, i64>
+    snapshot_sources: Dict<text, bool>
+
+struct ColdHirSelectedSourceRowV1:
+    source_index: i64
+    source_identity: text
+    source_digest: text
+    source_byte_count: i64
+    module_identity: text
+    inventory_entry: CompileSourceInventoryEntryV1
+
+fn cold_hir_source_inventory_admit_v1(source_root: text,
+        expected_source_inventory_digest: text, inventory: CompileSourceInventoryV1,
+        snapshot_inventory: text, expected_snapshot_inventory_digest: text,
+        path_count: i64, digest_count: i64, byte_count: i64, module_count: i64
+) -> Result<ColdHirSourceInventoryAdmissionV1, text>:
+    if path_count != digest_count or path_count != byte_count or path_count != module_count:
+        return Err("cold-hir-source-owner-alignment")
+    val inventory_digest = compile_source_inventory_digest_v1(inventory)
+    if inventory_digest == "" or inventory_digest != expected_source_inventory_digest:
+        return Err("cold-hir-inventory-mismatch")
+    if sha256_text(snapshot_inventory) != expected_snapshot_inventory_digest:
+        return Err("cold-hir-snapshot-inventory-mismatch")
+    val normalized_root = source_root.replace("\\", "/")
+    if normalized_root == "" or normalized_root.ends_with("/"):
+        return Err("cold-hir-source-root-invalid")
+    var source_indices: Dict<text, i64> = {}
+    var inventory_index = 0
+    while inventory_index < inventory.entries.len():
+        source_indices[inventory.entries[inventory_index].source_identity] = inventory_index
+        inventory_index = inventory_index + 1
+    var snapshot_sources: Dict<text, bool> = {}
+    val snapshot_rows = if snapshot_inventory == "": [] else: snapshot_inventory.split("\n")
+    for row in snapshot_rows:
+        val fields = row.split("|")
+        if fields.len() != 3: return Err("cold-hir-snapshot-row-invalid")
+        val identity = fields[0]
+        if not compile_source_inventory_path_valid_v1(identity) or
+                snapshot_sources.has(identity) or not source_indices.has(identity):
+            return Err("cold-hir-snapshot-source-invalid")
+        val entry = inventory.entries[source_indices[identity]]
+        if fields[1] != "sha256_{entry.content_digest}" or fields[2] != "{entry.byte_count}":
+            return Err("cold-hir-snapshot-source-content-mismatch")
+        snapshot_sources[identity] = true
+    Ok(ColdHirSourceInventoryAdmissionV1(normalized_root: normalized_root,
+        source_indices: source_indices, snapshot_sources: snapshot_sources))
+
+fn cold_hir_source_inventory_row_v1(admission: ColdHirSourceInventoryAdmissionV1,
+        inventory: CompileSourceInventoryV1, source_index: i64, source_path: text,
+        source_digest: text, source_byte_count: i64, module_identity: text
+) -> Result<ColdHirSelectedSourceRowV1, text>:
+    val path = source_path.replace("\\", "/")
+    if not path.starts_with(admission.normalized_root + "/"):
+        return Err("cold-hir-module-source-mismatch")
+    val identity = path.substring(admission.normalized_root.len() + 1, path.len())
+    if not compile_source_inventory_path_valid_v1(identity):
+        return Err("cold-hir-source-identity-invalid")
+    if not admission.source_indices.has(identity) or not admission.snapshot_sources.has(identity):
+        return Err("cold-hir-source-absent")
+    val entry = inventory.entries[admission.source_indices[identity]]
+    if entry.content_digest != source_digest or entry.byte_count != source_byte_count:
+        return Err("cold-hir-source-content-mismatch")
+    Ok(ColdHirSelectedSourceRowV1(source_index: source_index, source_identity: identity,
+        source_digest: source_digest, source_byte_count: source_byte_count,
+        module_identity: module_identity, inventory_entry: entry))
+
+export ColdHirSourceInventoryAdmissionV1, ColdHirSelectedSourceRowV1
+export cold_hir_source_inventory_admit_v1, cold_hir_source_inventory_row_v1

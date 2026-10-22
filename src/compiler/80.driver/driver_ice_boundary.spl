@@ -405,21 +405,58 @@ fn ice_boundary_dead_worker_modules() -> [IceBreadcrumb]:
             dead = dead.push(crumb)
     dead
 
+fn ice_runtime_trap_marker() -> text:
+    # Printed by the C runtime's NAMED TRAP helper `rt_trap_unimplemented`
+    # (src/runtime/runtime_native.c) right before it calls abort(). On Windows
+    # the MSVC CRT turns that abort into a fail-fast, so the worker exits with
+    # 0xC0000409 (-1073740791) and the breadcrumbs alone can only say "died".
+    "unimplemented runtime entrypoint `"
+
+fn ice_runtime_trap_symbol(worker_stderr: text) -> text:
+    """The entrypoint a runtime NAMED TRAP stub reported in the worker's
+    stderr, or "" when no trap fired. A trap is a capability gap of the
+    producer's runtime bundle -- e.g. the core-c-bootstrap bundle links
+    `runtime_cranelift_bridge_stub.c` instead of the Rust Cranelift bridge, so
+    `--backend cranelift` traps in whichever module codegen reaches first.
+    The module in flight did not cause it."""
+    val marker = ice_runtime_trap_marker()
+    val start = worker_stderr.index_of(marker)
+    if start < 0:
+        return ""
+    val name_start = start + marker.len()
+    val name_end = worker_stderr.index_of("`", name_start)
+    if name_end <= name_start:
+        return ""
+    worker_stderr.substring(name_start, name_end)
+
+fn ice_runtime_trap_detail(trap_symbol: text) -> text:
+    """Suffix naming a runtime NAMED TRAP in an attributed ICE message."""
+    if trap_symbol == "":
+        return ""
+    "; runtime NAMED TRAP `{trap_symbol}` fired: the producer's runtime bundle defines this entrypoint only as a trap stub -- a producer capability gap, not a defect in this module"
+
 fn ice_boundary_attribute_dead_worker(exit_code: i64) -> [text]:
     """Parent side, after the worker exited non-zero. Records each module the
     worker had in flight as an attributed ICE and returns one diagnostic line
     per module. With several in flight the death belongs to one of them and
     the message says so. Empty when the worker left every module it entered."""
+    ice_boundary_attribute_dead_worker_with_stderr(exit_code, "")
+
+fn ice_boundary_attribute_dead_worker_with_stderr(exit_code: i64, worker_stderr: text) -> [text]:
+    """`ice_boundary_attribute_dead_worker`, plus: when the worker's stderr
+    shows a runtime NAMED TRAP, every attributed line names the trapped
+    entrypoint, so a producer capability gap is not read as a module defect."""
     var lines: [text] = []
     val dead = ice_boundary_dead_worker_modules()
-    var detail = "(worker exit status {exit_code})"
+    val trap_detail = ice_runtime_trap_detail(ice_runtime_trap_symbol(worker_stderr))
+    var detail = "(worker exit status {exit_code}{trap_detail})"
     if dead.len() > 1:
         var names = ""
         for crumb in dead:
             if names != "":
                 names = names + ", "
             names = names + crumb.module_name
-        detail = "(worker exit status {exit_code}); one of {dead.len()} modules in flight: {names}"
+        detail = "(worker exit status {exit_code}{trap_detail}); one of {dead.len()} modules in flight: {names}"
     for crumb in dead:
         lines = lines.push(ice_boundary_fail(crumb.module_name,
             crumb.source_path, crumb.phase, crumb.backend,
@@ -466,4 +503,5 @@ export ice_boundary_merge_receipt, ice_boundary_prune_dead_runs, ice_owner_marke
 export ice_boundary_module_start, ice_boundary_module_done, ice_boundary_fail, ice_message_arena_aborted
 export ice_record_line, ice_record_parse_lines, ice_records_read, ice_summary_text, ice_boundary_finalize
 export ice_breadcrumbs_open, ice_boundary_dead_worker_modules
+export ice_runtime_trap_symbol, ice_runtime_trap_detail, ice_boundary_attribute_dead_worker_with_stderr
 export ice_boundary_attribute_dead_worker, ice_skip_list_extend, ice_crash_retry_budget, ice_crash_retry_allowed

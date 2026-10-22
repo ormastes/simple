@@ -245,6 +245,9 @@ impl HirLowering:
         lowered
 
     me lower_module(module: ParserModule) -> HirModule:
+        # Opt-in no-GC ownership-sigil mode, carried on the module by the flat
+        # bridge from `@no_gc(strict)` (memory.md).
+        self.nogc_strict = module.nogc_strict
         # Probe MUST be eprint AND ungated (Traps A/C/D, bug doc iters 13-17).
         val bootstrap_mode = self.ambient_bootstrap_enabled()
         # Phase profiling records bounded phase boundaries. Per-item logging
@@ -300,7 +303,9 @@ impl HirLowering:
         var prescan_enum_idx = 0
         while prescan_enum_idx < prescan_enum_names.len():
             val prescan_enum: ParserEnum = module.enums[prescan_enum_names[prescan_enum_idx]]
-            for prescan_variant in prescan_enum.variants:
+            for raw_prescan_variant in prescan_enum.variants:
+                # ANY-transport hazard sweep round 3: annotated rebind.
+                val prescan_variant: Variant = raw_prescan_variant
                 self.enum_variant_names[prescan_variant.name] = true
             prescan_enum_idx = prescan_enum_idx + 1
         # Pass 0: pre-register imported type names so explicit `use` paths win
@@ -687,7 +692,10 @@ impl HirLowering:
                 di_bindings: bootstrap_di_bindings,
                 arch_rules: bootstrap_arch_rules,
                 mock_decls: bootstrap_mock_decls,
-                types: bootstrap_types
+                types: bootstrap_types,
+                representation_declarations: module.representation_declarations,
+                extend_enums: [],
+                nogc_strict: module.nogc_strict
             )
 
         val lower_module_classes = module.classes
@@ -839,5 +847,7 @@ impl HirLowering:
             arch_rules: arch_rules,
             mock_decls: mock_decls,
             types: [],
-            extend_enums: hir_extend_enums
+            extend_enums: hir_extend_enums,
+            representation_declarations: module.representation_declarations,
+            nogc_strict: module.nogc_strict
         )

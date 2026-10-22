@@ -1,0 +1,90 @@
+# A new snapshot revision reuses the verified objects of an already published
+# revision for every inventory row it shares, so its cost follows the CHANGED
+# files. These pin that reuse copies byte-exact content, that it is driven by
+# the admitted inventory rather than a source re-read, that a cheap size guard
+# still routes a length-changing unpublished edit to the refusing full path,
+# and that a tampered published copy is never trusted.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_snapshot.{
+    scv_compile_snapshot_reuse_marks_v1, scv_compile_snapshot_reuse_source_v1}
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryEntryV1}
+use app.io.mod.{dir_create, file_exists, file_hash_sha256}
+use app.io.file_ops.{path_absolute}
+use std.nogc_sync_mut.io_runtime.{getpid}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
+use std.common.text_bytes.{text_to_utf8_bytes}
+
+fn reuse_root(label: text) -> text:
+    path_absolute("build/test-artifacts/snapshot-reuse-{getpid()}-{label}").replace("\\", "/")
+
+# Function-level fixture: a checkout root, a cache root whose chunk store
+# already holds the content object, a published revision directory holding
+# the materialized file, and a fresh staging directory.
+fn reuse_entry(relative: text, content: text) -> CompileSourceInventoryEntryV1:
+    val digest = sha256_text(content)
+    CompileSourceInventoryEntryV1(relative, digest, digest, digest, digest, digest, content.len())
+
+# Byte writes only: app.io.mod.file_write returns false under the test lane
+# (measured 2026-10-19, tracked-seed-3d9d) while file_write_bytes succeeds.
+fn reuse_unit_fixture(root: text, relative: text, source: text, published: text) -> bool:
+    val digest = sha256_text(published)
+    if not dir_create("{root}/src", true): return false
+    if not dir_create("{root}/build/scv/objects/chunks", true): return false
+    if not dir_create("{root}/build/scv/snapshots/published/src", true): return false
+    if not dir_create("{root}/staging", true): return false
+    if not file_write_bytes("{root}/{relative}", text_to_utf8_bytes(source)): return false
+    if not file_write_bytes("{root}/build/scv/objects/chunks/sha256_{digest}.blob", text_to_utf8_bytes(published)): return false
+    file_write_bytes("{root}/build/scv/snapshots/published/{relative}", text_to_utf8_bytes(published))
+
+describe "SCV snapshot revision reuse (per-file)":
+    it "marks exactly the planned rows a published inventory shares, by exact row":
+        val planned = ["src/a.spl|sha256_1|3", "src/b.spl|sha256_2|4", "src/c.spl|sha256_3|5"]
+        val published = ["src/a.spl|sha256_1|3", "src/b.spl|sha256_9|4", "src/d.spl|sha256_3|5"]
+        expect(scv_compile_snapshot_reuse_marks_v1(planned, published)).to_equal([true, false, false])
+        expect(scv_compile_snapshot_reuse_marks_v1(planned, [])).to_equal([false, false, false])
+
+    it "copies the published object byte-exact with no source read":
+        val root = reuse_root("unit-copy")
+        val content = "# published\nfn kept() -> i64:\n    1\n"
+        # The working file differs at equal length: a source read would refuse it.
+        val edited = "# published\nfn kept() -> i64:\n    2\n"
+        expect(reuse_unit_fixture(root, "src/kept.spl", edited, content)).to_equal(true)
+        val result = scv_compile_snapshot_reuse_source_v1(root, "{root}/build/scv", "{root}/staging",
+            "{root}/build/scv/snapshots/published", reuse_entry("src/kept.spl", content))
+        expect(result.reason).to_equal("ok")
+        expect(result.row).to_equal("src/kept.spl|sha256_{sha256_text(content)}|{content.len()}")
+        expect(result.source_drifted).to_equal(false)
+        expect(file_hash_sha256("{root}/staging/src/kept.spl")).to_equal(sha256_text(content))
+
+    it "misses when the working file's length no longer matches the admitted row":
+        val root = reuse_root("unit-size")
+        val content = "# published\n"
+        expect(reuse_unit_fixture(root, "src/kept.spl", content + "# longer\n", content)).to_equal(true)
+        val result = scv_compile_snapshot_reuse_source_v1(root, "{root}/build/scv", "{root}/staging",
+            "{root}/build/scv/snapshots/published", reuse_entry("src/kept.spl", content))
+        expect(result.reason).to_equal("snapshot-reuse-miss:src/kept.spl")
+        expect(file_exists("{root}/staging/src/kept.spl")).to_equal(false)
+
+    it "misses and leaves no staged file when the published copy was tampered":
+        val root = reuse_root("unit-tampered")
+        val content = "# published\n"
+        expect(reuse_unit_fixture(root, "src/kept.spl", content, content)).to_equal(true)
+        expect(file_write_bytes("{root}/build/scv/snapshots/published/src/kept.spl", text_to_utf8_bytes("# tampered\n"))).to_equal(true)
+        val result = scv_compile_snapshot_reuse_source_v1(root, "{root}/build/scv", "{root}/staging",
+            "{root}/build/scv/snapshots/published", reuse_entry("src/kept.spl", content))
+        expect(result.reason).to_equal("snapshot-reuse-miss:src/kept.spl")
+        expect(file_exists("{root}/staging/src/kept.spl")).to_equal(false)
+
+    it "misses when the content object is absent or does not hash to the row":
+        val root = reuse_root("unit-chunk")
+        val content = "# published\n"
+        expect(reuse_unit_fixture(root, "src/kept.spl", content, content)).to_equal(true)
+        expect(file_write_bytes("{root}/build/scv/objects/chunks/sha256_{sha256_text(content)}.blob", text_to_utf8_bytes("# other\n"))).to_equal(true)
+        val result = scv_compile_snapshot_reuse_source_v1(root, "{root}/build/scv", "{root}/staging",
+            "{root}/build/scv/snapshots/published", reuse_entry("src/kept.spl", content))
+        expect(result.reason).to_equal("snapshot-reuse-miss:src/kept.spl")
+        val missing = scv_compile_snapshot_reuse_source_v1(root, "{root}/build/scv", "{root}/staging",
+            "{root}/build/scv/snapshots/published", reuse_entry("src/absent.spl", content))
+        expect(missing.reason).to_equal("snapshot-reuse-miss:src/absent.spl")
+

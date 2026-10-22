@@ -12,12 +12,13 @@ with tempfile.TemporaryDirectory(prefix='product-scv-aux-') as temporary:
         p=root/path; p.parent.mkdir(parents=True,exist_ok=True); p.write_bytes(data); return p
     payload=b'fn main():\n    0\n'
     sha=digest(payload)
-    put('src/app/example.spl',payload)
+    source_paths=['src/app/example.spl', 'test/03_system/stress/stress_{2..25}_system_spec.spl', 'test/system/stress_{2..25}_system_spec.spl']
+    for source_path in source_paths: put(source_path,payload)
     chunk=put('build/scv/objects/chunks/sha256_'+sha+'.blob',payload)
-    generation=('simple-compile-source-inventory-v1\ngeneration=1\ncount=1\nsrc/app/example.spl|'+('|'.join([sha]*5))+'|'+str(len(payload))).encode()
+    generation=('simple-compile-source-inventory-v1\ngeneration=1\ncount=3\n'+'\n'.join(path+'|'+('|'.join([sha]*5))+'|'+str(len(payload)) for path in source_paths)).encode()
     generation_sha=digest(generation)
     generation_file=put('build/scv/source-inventory/generations/'+generation_sha+'.inventory',generation)
-    membership=b'simple-compile-untracked-membership-v1\ncount=1\nsrc/app/example.spl'
+    membership=('simple-compile-untracked-membership-v1\ncount=3\n'+'\n'.join(source_paths)).encode()
     membership_sha=digest(membership)
     membership_file=put('build/scv/compile-events/untracked/'+membership_sha+'.paths',membership)
     current=(generation_sha+'\nsimple-compile-event-cursor-v3\ngit_head='+'a'*40+'\nfilesystem_rows=0\nfilesystem_digest='+digest(b'')+'\ninventory_digest='+generation_sha+'\ninventory_generation=1\nuntracked_src_digest='+sha+'\nuntracked_test_digest='+digest(b'')+'\nuntracked_membership_digest='+membership_sha).encode()
@@ -28,6 +29,36 @@ with tempfile.TemporaryDirectory(prefix='product-scv-aux-') as temporary:
     def run(): return subprocess.run(['perl','-I'+str(repo/'scripts/bootstrap/lib'),'-e',script,str(root),'sha256_'+sha,str(len(payload))],capture_output=True,text=True)
     good=run(); assert good.returncode==0 and good.stdout=='6\n',good.stderr
     checks=1
+    # Direct byte policy rejects separators, traversal and metadata framing.
+    path_script=r'use BootstrapProductScv; BootstrapProductScv::source_path($ARGV[0]);'
+    rejected=['test/../escape.spl','test/{literal}/../escape.spl','test/./x.spl',
+              'test//x.spl','test/x/','/test/x.spl','src\\x.spl','test/x:y.spl',
+              'test/x|y.spl','test/x\ty.spl','test/x\ny.spl','other/x.spl']
+    for bad_path in rejected:
+        result=subprocess.run(['perl','-I'+str(repo/'scripts/bootstrap/lib'),'-e',path_script,bad_path],capture_output=True,text=True)
+        assert result.returncode!=0,bad_path
+        assert 'unsafe SCV source identity' in result.stderr,result.stderr
+        checks+=1
+    # NUL cannot pass through argv; construct the byte inside Perl instead.
+    nul_script=r'use BootstrapProductScv; BootstrapProductScv::source_path("test/x".chr(0).".spl");'
+    nul_result=subprocess.run(['perl','-I'+str(repo/'scripts/bootstrap/lib'),'-e',nul_script],capture_output=True,text=True)
+    assert nul_result.returncode!=0 and 'unsafe SCV source identity' in nul_result.stderr,nul_result.stderr
+    checks+=1
+    # Authenticated membership bytes still cannot authorize a linked source.
+    linked=root/source_paths[1]
+    linked.unlink(); linked.symlink_to(root/source_paths[0])
+    assert run().returncode!=0
+    linked.unlink(); linked.write_bytes(payload); checks+=1
+    # Unknown auxiliary members fail independently of a valid literal path.
+    unknown=put('build/scv/compile-events/untracked/not-a-digest.paths',membership)
+    assert run().returncode!=0
+    unknown.unlink(); checks+=1
+    # Directory ownership remains strict; a symlinked inventory directory fails.
+    generations=root/'build/scv/source-inventory/generations'
+    held=root/'held-generations'
+    generations.rename(held); generations.symlink_to(held,target_is_directory=True)
+    assert run().returncode!=0
+    generations.unlink(); held.rename(generations); checks+=1
     for path,bad in [(chunk,b'corrupt'),(generation_file,generation+b'evil'),(membership_file,membership+b'/../evil'),(current_file,current.replace(generation_sha.encode(),b'f'*64)),(lock,b'unbound')]:
         original=path.read_bytes(); path.write_bytes(bad)
         result=run(); assert result.returncode!=0,str(path)

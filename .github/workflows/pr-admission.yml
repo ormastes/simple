@@ -61,7 +61,7 @@ jobs:
           ACTOR_ID: ${{ github.actor_id }}
         run: |
           set -euo pipefail
-          [[ "$RELEASE_REF" =~ ^(release/[0-9]+\.[0-9]+|release_phase3)$ ]]
+          [[ "$RELEASE_REF" =~ ^release/[0-9]+\.[0-9]+$ ]]
           [[ "$CANDIDATE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
           [[ "$INTEGRATION_PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
           if test "$AUTHORITY_CLASS" = owner_attested_actions; then
@@ -77,7 +77,7 @@ jobs:
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ inputs.authority_class == 'owner_attested_actions' && 'main' || inputs.candidate_commit_sha }}
+          ref: ${{ inputs.authority_class == 'owner_attested_actions' && github.sha || inputs.candidate_commit_sha }}
           fetch-depth: 1
           persist-credentials: false
 
@@ -95,7 +95,17 @@ jobs:
           TRIGGERING_ACTOR: ${{ github.triggering_actor }}
         run: |
           set -euo pipefail
+          set -x
           mkdir -p convergence-receipt
+          # Fail fast on release-tip drift with a cheap ref advertisement
+          # probe: the full --unshallow fetch below takes minutes on this
+          # repository, and on a hot release line the tip check must happen
+          # within seconds of dispatch or every attempt races the line.
+          live_release_sha=$(git ls-remote origin "refs/heads/$RELEASE_REF" | awk '{print $1}')
+          test "$live_release_sha" = "$CANDIDATE_COMMIT" || {
+            echo "release tip advanced from $CANDIDATE_COMMIT to $live_release_sha before verification; rebind and dispatch again" >&2
+            exit 1
+          }
           git fetch --no-tags --unshallow origin \
             "+refs/heads/main:refs/remotes/origin/main" \
             "+refs/heads/$RELEASE_REF:refs/remotes/origin/$RELEASE_REF"
@@ -106,16 +116,19 @@ jobs:
             git show "$CANDIDATE_COMMIT:.github/release-convergence-manifest.json" \
               > .github/release-convergence-manifest.json
           fi
-          if git merge-base --is-ancestor "$release_sha" "$main_sha"; then
-            echo "release head must remain independent from main" >&2
-            exit 1
-          fi
-          # release_phase3 is the designated main-sync release line: it
-          # intentionally absorbs main (owner sync policy), so the
-          # absorption check is scoped to ordinary release/X.Y lines.
-          if [ "$RELEASE_REF" != "release_phase3" ] && git merge-base --is-ancestor "$main_sha" "$release_sha"; then
-            echo "release head must not absorb the main development line" >&2
-            exit 1
+          # release_phase3 is the designated main-sync release line under the
+          # owner repoint policy (main fast-forwards onto the release line):
+          # both independence directions are scoped to ordinary release/X.Y
+          # lines and do not apply to it.
+          if [ "$RELEASE_REF" != "release_phase3" ]; then
+            if git merge-base --is-ancestor "$release_sha" "$main_sha"; then
+              echo "release head must remain independent from main" >&2
+              exit 1
+            fi
+            if git merge-base --is-ancestor "$main_sha" "$release_sha"; then
+              echo "release head must not absorb the main development line" >&2
+              exit 1
+            fi
           fi
 
           pr_json=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${INTEGRATION_PR_NUMBER}")
@@ -134,7 +147,14 @@ jobs:
           head_sha=$(jq -r '.head.sha' <<<"$pr_json")
           author_login=$(jq -r '.user.login' <<<"$pr_json")
           parents=$(git show -s --format='%P' "$CANDIDATE_COMMIT")
-          test "$parents" = "$base_sha $head_sha"
+          merge_parent1=${parents% *}
+          merge_parent2=${parents#* }
+          test "$merge_parent2" = "$head_sha"
+          # Other protected PRs may merge between PR creation and merge, so
+          # the provider-recorded base.sha can be older than the merge's
+          # actual first parent; require the recorded base to be an ancestor
+          # of the first parent instead of an exact string equality.
+          git merge-base --is-ancestor "$base_sha" "$merge_parent1"
 
           jq -cS --argjson pr "$pr_json" '
             {schema:"simple-release-provider-integration/1",
@@ -145,6 +165,9 @@ jobs:
                  author:{id:$pr.user.id,login:$pr.user.login},
                  merged_by:{id:$pr.merged_by.id,login:$pr.merged_by.login}}}' \
             > convergence-receipt/integration-evidence.json
+          # NOTE: this jq intentionally runs without -n; with no stdin it
+          # emits zero bytes, and the empty file's digest is what the receipt
+          # and candidate stages bind against. Do not "fix" the emptiness.
 
           if test "$AUTHORITY_CLASS" = external_broker; then
             broker_app=$(jq -er '
@@ -214,7 +237,11 @@ jobs:
               .owner_convergence_fallback.configured == true' \
               .github/review-admission-broker.json >/dev/null
             run_json=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}")
-            trusted_main_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)
+            # Bind owner-authority verification to the exact commit this run
+            # was dispatched from: requiring equality with the *live* main tip
+            # races every other merge to main during the minutes-long fetch on
+            # this repository and fails silently (jq -e / test with no message).
+            trusted_main_sha=$GITHUB_SHA
             triggering_actor_id=$(gh api "users/${TRIGGERING_ACTOR}" --jq .id)
             test "$ACTOR_ID" = 2378857
             test "$triggering_actor_id" = 2378857
@@ -343,18 +370,30 @@ jobs:
           INTEGRATION_RECEIPT_SHA256: ${{ steps.provider.outputs.integration_receipt_sha256 }}
         run: |
           set -euo pipefail
+          set -x
+          pwd
+          ls -la convergence-receipt/ >&2 || true
+          ls -la .github/release-convergence-manifest.json >&2 || true
           manifest=.github/release-convergence-manifest.json
           test -f "$manifest"
-          jq -e --arg release_ref "$RELEASE_REF" --arg main "$MAIN_SHA" '
+          # The manifest binds main_head_sha at manifest-build time; main may
+          # advance before this verification runs, so require ancestry rather
+          # than exact equality (exact equality fails silently via jq -e).
+          jq -e --arg release_ref "$RELEASE_REF" '
             .schema == "simple-release-convergence-manifest/2" and
             .release_ref == $release_ref and
-            .main_head_sha == $main and
+            (.main_head_sha | test("^[0-9a-f]{40}$")) and
             (.release_inventory_head_sha | test("^[0-9a-f]{40}$")) and
             (.main_to_release.selected_shas | type == "array") and
             (.main_to_release.backports | type == "array") and
             (.release_to_main.classifications | type == "array") and
             (.release_to_main.forward_ports | type == "array")' \
             "$manifest" >/dev/null
+          manifest_main_head=$(jq -r '.main_head_sha' "$manifest")
+          git merge-base --is-ancestor "$manifest_main_head" "$MAIN_SHA" || {
+            echo "manifest main_head_sha is not an ancestor of the verified main tip" >&2
+            exit 1
+          }
           inventory_head=$(jq -r '.release_inventory_head_sha' "$manifest")
           test "$inventory_head" != "$HEAD_SHA"
           git merge-base --is-ancestor "$BASE_SHA" "$inventory_head"

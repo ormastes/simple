@@ -1,114 +1,76 @@
-# Nvfs Name Persistence Specification
+# nvfs name persistence spec
 
-> <details>
+Status: **2/2 PASS — non-admitting host-memory diagnostic, cycle one**. Retained historical seed only; no current Phase1, self-hosted, native, VM, hardware, or release qualification.
 
-<!-- sdn-diagram:id=nvfs_name_persistence_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
+Source: `test/02_integration/storage/nvfs/nvfs_name_persistence_spec.spl`
 
-```sdn id=nvfs_name_persistence_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
+Source SHA-256: `297da55ebb90415e47efe9a0ae093bbe420ba2d765b1f19bd0c2796a985aae5d`
 
-nvfs_name_persistence_spec -> std
-nvfs_name_persistence_spec -> os
-```
+Requirement: `REQ-NVFS-MOUNT-ISOLATION` — each mounted provider owns its namespace, bytes, and explicit backing device. Hosted creation is not remount persistence.
 
-</details>
+## Acceptance scenarios
 
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
+- recovers names and bytes after closing and reopening the same owned device.
+- does not expose names from an independent hosted instance.
 
-```ascii generated-from=nvfs_name_persistence_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
+## Evidence boundaries
 
-</details>
-<!-- sdn-diagram:end -->
+The actual DBFS owner, NVFS operation leases, and explicit `MemBlockDevice` backing are exercised by these authored assertions. They are not mocked persistence. Memory-backed block I/O is not physical NVMe, crash recovery, or Windows/Linux/BSD qualification. The frozen source passed the host-only diagnostic described below. Authored UNRUN comments in its exact source are preserved as part of the tested snapshot.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+## Diagnostic evidence
 
-<details>
-<summary>Full Scenario Manual</summary>
+- Inputs: `build/phase-one-storage-gui-diagnostic/nvfs-isolation-host-cycle-one-inputs.sdn` (345 input hashes matched before/after).
+- Log: `build/phase-one-storage-gui-diagnostic/nvfs_name_persistence_spec/cycle-one.log`; 2012 ms; peak observed process-tree RSS 389484 KiB; exit 0; quiescent 1.
+- Producer SHA-256: `0cceac635e63781b7bf9bc9830735e948986de223434eca46d84eb35233f8b17`.
+- Actual status: `build/phase-one-storage-gui-diagnostic/nvfs-isolation-host-cycle-one-status.sdn`. No rerun or hardware action.
 
-# Nvfs Name Persistence Specification
-
-## Scenarios
-
-### NvfsPosixDriver name table persistence
-
-#### file created on first mount survives remount
-
-- var dev =  make persist device
-   - Expected: res.file_found is true
-   - Expected: res.read_ok is true
-   - Expected: res.read_n equals `3`
-   - Expected: res.first_byte equals `0xABu8`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+## Executable source
 
 ```simple
-var dev = _make_persist_device()
-val res = _do_write_remount_read(dev)
-expect(res.file_found).to_equal(true)
-expect(res.read_ok).to_equal(true)
-expect(res.read_n).to_equal(3)
-expect(res.first_byte).to_equal(0xABu8)
+"""NVFS names persist only through their explicitly selected backing device.
+
+UNRUN source acceptance. Hosted constructors create independent namespaces;
+they do not simulate remount by importing process-global path records.
+"""
+# @req REQ-NVFS-MOUNT-ISOLATION
+# @manual: primary
+use std.spec.*
+use std.spec.step
+use std.fs_driver.types.{Path, OpenFlags}
+use std.fs_driver.nvfs_posix_driver.{NvfsPosixDriver}
+use std.fs_driver.mem_block_device.{MemBlockDevice}
+use std.fs_driver.error.{FsError}
+
+describe "NVFS names belong to the selected backing":
+    it "recovers names and bytes after closing and reopening the same owned device":
+        step("Write and synchronize one exact owned device")
+        val dev = MemBlockDevice.new(1024u64, 512u32)
+        var first = NvfsPosixDriver.new_on_owned_device(
+            "name-first", dev, 760001u64, 0, 1024).unwrap()
+        val path = Path(raw: "/data.bin")
+        val handle = first.open(path, OpenFlags.read_write().with_create()).unwrap()
+        expect(first.pwrite(handle, 0, [0x00u8, 0xabu8, 0xffu8]).unwrap()).to_equal(3)
+        first.fsync(handle).unwrap()
+        first.close(handle).unwrap()
+        expect(first.close_owned_device().unwrap()).to_equal(true)
+        step("Reopen the same device without any process path mirror")
+        var second = NvfsPosixDriver.new_on_owned_device(
+            "name-second", dev, 760001u64, 0, 1024).unwrap()
+        expect(second.stat(path).unwrap().size).to_equal(3)
+        val reopened = second.open(path, OpenFlags.read_only()).unwrap()
+        expect(second.pread_bytes_handle(reopened, 0, 8).unwrap()).to_equal([0x00u8, 0xabu8, 0xffu8])
+        second.close(reopened).unwrap()
+        expect(second.close_owned_device().unwrap()).to_equal(true)
+
+    it "does not expose names from an independent hosted instance":
+        step("Create a file in one hosted namespace")
+        var first = NvfsPosixDriver.new("name-hosted-first")
+        val path = Path(raw: "/private.bin")
+        val handle = first.open(path, OpenFlags.read_write().with_create()).unwrap()
+        first.pwrite(handle, 0, [0xabu8]).unwrap()
+        first.close(handle).unwrap()
+        step("The same path in a separate namespace must stay absent")
+        var second = NvfsPosixDriver.new("name-hosted-second")
+        expect(second.stat(path).unwrap_err()).to_equal(FsError.NotFound)
+        expect(second.open(path, OpenFlags.read_only()).unwrap_err()).to_equal(FsError.NotFound)
 ```
-
-</details>
-
-#### multiple files persist across remount
-
-- var dev =  make persist device
-   - Expected: found equals `3`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-var dev = _make_persist_device()
-val found = _do_multi_file_remount(dev)
-expect(found).to_equal(3)
-```
-
-</details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Other |
-| Status | Active |
-| Source | `test/02_integration/storage/nvfs/nvfs_name_persistence_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- NvfsPosixDriver name table persistence
-
-## Scenario Summary
-
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
-
-
-</details>

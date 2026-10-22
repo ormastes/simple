@@ -1,0 +1,56 @@
+# @cover src/lib/nogc_async_mut/sosix/host_facade.spl 80%
+"""SMUX host-boundary architecture controls, not native runtime qualification.
+
+Read source from the repository root. Negative controls prove that a raw ABI,
+an async capsule import and direct ordinary host imports fail this boundary.
+Real stdin/clock/PID and Windows PTY/console behavior require native fixtures.
+# @manual: primary
+# @capture: text
+"""
+use std.spec.{describe, it, expect, step}
+use std.nogc_async_mut.sosix.host_facade.{sosix_file_read}
+
+fn smux_host_boundary_valid(source: text) -> bool:
+    if source == "": return false
+    for raw_line in source.split("\n"):
+        val line = raw_line.trim()
+        if line.starts_with("#"): continue
+        if line.starts_with("extern fn "): return false
+        if line.contains("rt_read_stdin_line("): return false
+        if line.starts_with("use app.io."): return false
+        if line.starts_with("use std."):
+            if not line.starts_with("use std.common.") and not line.starts_with("use std.nogc_sync_mut.sosix.") and not line.starts_with("use std.nogc_sync_mut.io.tcp.{"):
+                return false
+        if line.contains("print(") or line.starts_with("print "): return false
+    true
+
+describe "SMUX synchronous SOSIX host boundary":
+    it "rejects direct host access and forbidden async layering":
+        # @req REQ-006
+        step("Attempt raw stdin, ordinary host and async capsule bypasses")
+        expect(smux_host_boundary_valid("extern fn rt_read_stdin_line() -> text")).to_equal(false)
+        expect(smux_host_boundary_valid("use std.io_runtime.{time_now_monotonic_ms}")).to_equal(false)
+        expect(smux_host_boundary_valid("use app.io.mod.{thread_sleep_ms}")).to_equal(false)
+        expect(smux_host_boundary_valid("use std.sys.pty.{open}")).to_equal(false)
+        expect(smux_host_boundary_valid("use std.nogc_async_mut.sosix.host_facade.{sosix_spawn}")).to_equal(false)
+        expect(smux_host_boundary_valid("print(\"bypass\")")).to_equal(false)
+        expect(smux_host_boundary_valid("")).to_equal(false)
+
+    it "admits sync aliases and the TCP facade that already uses SOSIX":
+        # @req REQ-006
+        step("Keep the host boundary above the selected provider")
+        expect(smux_host_boundary_valid("use std.nogc_sync_mut.sosix.pty.{sosix_pty_open}")).to_equal(true)
+        expect(smux_host_boundary_valid("use std.nogc_sync_mut.io.tcp.{TcpStream}")).to_equal(true)
+
+    it "keeps product leaves and independent Windows clients behind the boundary":
+        # @req REQ-006
+        step("Inspect actual product and qualification fixture source")
+        val paths = ["src/os/apps/smux/api.spl", "src/os/apps/smux/server.spl",
+            "src/os/apps/smux/interactive_client.spl", "src/os/apps/smux/smux_remote.spl",
+            "src/os/apps/smux/window_layout_service.spl", "src/os/apps/smux/interactive_protocol.spl",
+            "src/os/apps/smux/smux_app.spl", "src/app/hosted_apps/smux_client.spl",
+            "test/fixtures/compiler_entrypoint/windows_smux_interactive/main.spl",
+            "test/fixtures/compiler_entrypoint/windows_smux_shared_clients/main.spl",
+            "test/fixtures/compiler_entrypoint/smux_sosix_host/main.spl"]
+        for path in paths:
+            expect(smux_host_boundary_valid(sosix_file_read(path))).to_equal(true)

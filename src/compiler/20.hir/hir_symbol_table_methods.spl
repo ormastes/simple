@@ -2,6 +2,7 @@
 # Kept separate from hir_types.spl so the core HIR data model stays compact.
 
 use compiler.hir.hir_types.*
+use compiler.hir.hir_types.{SymbolKind}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.hir.hir_owner_name.{hir_symbol_owner_module}
@@ -183,7 +184,7 @@ impl SymbolTable:
         val scope_id = self.current_scope.id
         if scope_id < 0 or scope_id >= self.next_scope_id:
             return SymbolId(id: -1)
-        val scope = self.scopes[scope_id]
+        val scope: Scope = self.scopes[scope_id]
         if rt_dict_contains(scope.symbols, name):
             val found: i64 = scope.symbols[name]
             if found >= 0 and found < self.next_symbol_id:
@@ -230,23 +231,18 @@ impl SymbolTable:
         ("field access on nil receiver"). Eliminating the `get` name collision
         lets Dict.get resolve correctly. See driver.spl lower_and_check_impl.
 
-        Bug 2026-07-29 (hir_get_symbol_id_zero_returns_nil): a naked
-        `case SymbolId(raw):` pattern matched directly against the `SymbolId?`
-        (Option-wrapped) parameter ALWAYS falls through to the wildcard arm on
-        this interpreter -- for every id, not just 0 -- because a struct
-        constructor pattern cannot destructure through the implicit Option
-        layer in one step; only `case Some(SymbolId(raw)):` reliably unwraps
-        it (proven by isolated probe: `case PId(raw):` against a `PId?`
-        returned from a helper fell to wildcard for raw=0 AND raw=1, while
-        `case Some(PId(raw)):` matched both correctly). id 0 is a completely
-        ordinary, validly-allocated id (`is_valid()` already treats it as
-        such) -- the fix is this match shape, not the id allocator."""
-        match id:
-            case Some(SymbolId(raw)):
-                val found: HirSymbol? = self.symbols[raw]
-                found
-            case _:
-                nil
+        Bug 2026-07-29 (hir_get_symbol_id_zero_returns_nil): the optional
+        parameter must be unwrapped before reading its concrete SymbolId.
+        ID zero is valid; a missing optional or missing dictionary row is nil.
+        Bind the payload explicitly instead of a nested Some(SymbolId(raw))
+        struct pattern, whose raw binding is lost by the stage-native lane."""
+        val optional_id: SymbolId? = id
+        if val present_id = optional_id:
+            val concrete_id: SymbolId = present_id
+            val raw: i64 = concrete_id.id
+            val found: HirSymbol? = self.symbols[raw]
+            return found
+        nil
 
     fn get_symbol_raw(raw: i64) -> HirSymbol?:
         """Raw-i64 form of get_symbol: passing a flat optional OR a struct
@@ -276,6 +272,16 @@ impl SymbolTable:
         if self.symbols.has(raw):
             match self.symbols[raw].kind:
                 case SymbolKind.Enum: return true
+                case _: return false
+        false
+
+    fn symbol_is_callable_declaration_scalar_raw(raw: i64) -> bool:
+        """Prove a function, method or enum-variant constructor (`Ok`, `f`)
+        without transporting HirSymbol?: it names a declaration, never a
+        runtime binding a closure could capture."""
+        if self.symbols.has(raw):
+            match self.symbols[raw].kind:
+                case SymbolKind.Function | SymbolKind.Method | SymbolKind.EnumVariant: return true
                 case _: return false
         false
 
@@ -332,14 +338,13 @@ impl SymbolTable:
         silently returns false for the garbage-typed key, and every call
         returns nil regardless of whether the id is actually present (bug
         bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe B)."""
-        match id:
-            case SymbolId(raw):
-                val found: HirSymbol? = self.symbols[raw]
-                if val sym = found:
-                    return sym.name
-                fallback
-            case _:
-                fallback
+        if id.?:
+            val raw: i64 = id.id
+            val found: HirSymbol? = self.symbols[raw]
+            if val payload = found:
+                val sym: HirSymbol = payload
+                return sym.name
+        fallback
 
     me rename_symbol(id: SymbolId, new_name: text):
         """Overwrite a symbol's stored `.name` in place, WITHOUT touching its
@@ -349,37 +354,36 @@ impl SymbolTable:
         alias-local name) while `compute_a`/`compute_b` etc. still resolve
         via the original scope entry created by `define()` (bug
         bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe B)."""
-        match id:
-            case SymbolId(raw):
-                val found: HirSymbol? = self.symbols[raw]
-                if val sym = found:
-                    val renamed = HirSymbol(
-                        id: sym.id,
-                        name: new_name,
-                        kind: sym.kind,
-                        type_: sym.type_,
-                        scope: sym.scope,
-                        span: sym.span,
-                        visibility: sym.visibility,
-                        is_public: sym.is_public,
-                        is_mutable: sym.is_mutable,
-                        defining_module: sym.defining_module,
-                        builtin_method_tag: hir_builtin_method_tag(new_name)
-                    )
-                    self.symbols[raw] = renamed
-                    if not self.exact_symbols.has(new_name):
-                        self.exact_symbols[new_name] = raw
-                    # MODCALLIDX: the rename changes the name the sweep in
-                    # field_module_callable would have matched on, so the
-                    # index must follow it. The pre-rename row is left in
-                    # place: the old sweep saw only the CURRENT name, but a
-                    # stale row can only be reached by a field spelling that
-                    # no symbol answers, and dropping it would need a reverse
-                    # index for no behavioural gain.
-                    if val renamed_module = sym.defining_module:
-                        self.index_module_callable(renamed_module, new_name, raw)
-            case _:
-                pass
+        if id.?:
+            val raw: i64 = id.id
+            val found: HirSymbol? = self.symbols[raw]
+            if val payload = found:
+                val sym: HirSymbol = payload
+                val renamed = HirSymbol(
+                    id: sym.id,
+                    name: new_name,
+                    kind: sym.kind,
+                    type_: sym.type_,
+                    scope: sym.scope,
+                    span: sym.span,
+                    visibility: sym.visibility,
+                    is_public: sym.is_public,
+                    is_mutable: sym.is_mutable,
+                    defining_module: sym.defining_module,
+                    builtin_method_tag: hir_builtin_method_tag(new_name)
+                )
+                self.symbols[raw] = renamed
+                if not self.exact_symbols.has(new_name):
+                    self.exact_symbols[new_name] = raw
+                # MODCALLIDX: the rename changes the name the sweep in
+                # field_module_callable would have matched on, so the
+                # index must follow it. The pre-rename row is left in
+                # place: the old sweep saw only the CURRENT name, but a
+                # stale row can only be reached by a field spelling that
+                # no symbol answers, and dropping it would need a reverse
+                # index for no behavioural gain.
+                if val renamed_module = sym.defining_module:
+                    self.index_module_callable(renamed_module, new_name, raw)
 
     # ========================================================================
     # Method Resolution Helpers (for UFCS support)
@@ -543,12 +547,15 @@ impl SymbolTable:
                     case _: ()
         -1
 
+    # @workaround bug=layout_symbol_function_pattern_owner_2026_10_11 reason=retain SymbolKind owner when optional symbol lookup erases the bare Function pattern
     fn is_function(id: SymbolId) -> bool:
         """Check if symbol is a function."""
         val sym = self.get_symbol(id)
         if val found = sym:
-            match found.kind:
-                case Function: true
+            val symbol: HirSymbol = found
+            val kind: SymbolKind = symbol.kind
+            match kind:
+                case SymbolKind.Function: true
                 case _: false
         else:
             false
@@ -578,7 +585,9 @@ impl SymbolTable:
         val type_name = type_symbol.name
         val prefix = "{type_name}::"
 
-        for sym in self.symbols.values():
+        for dk_8 in self.symbols.keys():
+            # ANY-transport hazard sweep round 3: annotated rebind.
+            val sym: HirSymbol = self.symbols[dk_8]
             if not sym.?:
                 pass
             elif not sym.name.?:
@@ -597,7 +606,8 @@ impl SymbolTable:
         """Get all function names (for error suggestions)."""
         var functions: [text] = []
 
-        for sym in self.symbols.values():
+        for dk_7 in self.symbols.keys():
+            val sym: HirSymbol = self.symbols[dk_7]
             match sym.kind:
                 case Function:
                     # Only include non-qualified names (free functions)

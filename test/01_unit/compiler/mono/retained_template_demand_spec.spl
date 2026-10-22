@@ -1,0 +1,121 @@
+# @req REQ-IM-001
+# Authored regression; execution with the rebuilt producer is still required.
+use std.spec
+use compiler.hir.hir.*
+use compiler.common.diagnostics.span.Span
+use compiler.mono.monomorphize_integration.MonomorphizationPass
+use compiler.mono.mono_archive_types_v1.{MonoTemplateRecipeV1,
+    mono_template_recipe_signature_v1, mono_apply_template_recipe_v1,
+    mono_template_signature_v1, mono_template_signature_digest_v1}
+use compiler.hir.hir_function_record_identity_v1.mono_complete_function_digest_v1
+
+fn demand_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn demand_template() -> HirFunction:
+    val t = demand_type(HirTypeKind.Named(SymbolId(id: 21), []))
+    val value = HirExpr(kind: HirExprKind.Var(SymbolId(id: 22)),
+        has_type_: true, type_: t, span: Span.empty())
+    var attrs = FunctionAttr.default()
+    attrs.is_global = true
+    HirFunction(symbol: SymbolId(id: 20), name: "identity",
+        type_params: [HirTypeParam(symbol: SymbolId(id: 21), name: "T",
+            bounds: [], has_default: false, default: nil, span: Span.empty())],
+        params: [HirParam(symbol: SymbolId(id: 22), name: "value", type_: t,
+            has_default: true, default: value, span: Span.empty(), is_mutable: false)],
+        return_type: t,
+        body: HirBlock(stmts: [], has: true, value: value, span: Span.empty()),
+        effects: [], visibility: Visibility.Public, is_async: false, is_static: false,
+        is_public: true, is_method: false, is_mutable: false, is_const: false,
+        is_extern: false, func_attr: attrs, has_export_attr: false,
+        export_attr: nil, has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_suspension: false, has_vhdl_metadata: false, vhdl_metadata: nil,
+        has_doc_comment: false, doc_comment: "", span: Span.empty(),
+        is_gpu_kernel: false, gpu_target: "", gpu_backend_order: "")
+
+fn demand_recipe(function: HirFunction, method: bool) -> MonoTemplateRecipeV1:
+    MonoTemplateRecipeV1(module_name: "provider", original_symbol: function.symbol,
+        template_name: if method: "Box::identity" else: function.name,
+        canonical_type_params: function.type_params,
+        bound_type_params: function.type_params, inherent_method: method)
+
+describe "retained mono canonicalizes executable templates on demand":
+    it "projects canonical signature parity without changing body or default":
+        var original = demand_template()
+        original.effects = [Effect(kind: EffectKind.IO, span: Span.empty()),
+            Effect(kind: EffectKind.Throws(demand_type(HirTypeKind.TypeParam("T", []))), span: Span.empty())]
+        val before = mono_complete_function_digest_v1(original)
+        expect(before.len()).to_be_greater_than(0)
+        for method in [false, true]:
+            val recipe = demand_recipe(original, method)
+            val projected = mono_template_recipe_signature_v1(original, recipe)
+            val canonical = mono_apply_template_recipe_v1(original, recipe)
+            expect(mono_template_signature_digest_v1(projected)).to_equal(
+                mono_template_signature_digest_v1(mono_template_signature_v1(canonical)))
+            expect(projected.global_linkage).to_equal(true)
+            expect(projected.effects.len()).to_equal(2)
+            expect(mono_complete_function_digest_v1(original)).to_equal(before)
+        # Canonicalization can bind fewer parameters than it normalizes, as
+        # inherent-method recipes do. Signature projection must keep that rule.
+        var narrower = demand_recipe(original, true)
+        narrower.bound_type_params = []
+        expect(mono_template_signature_digest_v1(mono_template_recipe_signature_v1(original, narrower))).to_equal(
+            mono_template_signature_digest_v1(mono_template_signature_v1(mono_apply_template_recipe_v1(original, narrower))))
+
+    it "normalizes nested parameter references without erasing nominal owner":
+        var original = demand_template()
+        val named_parameter = demand_type(HirTypeKind.Named(SymbolId(id: 21), []))
+        val nested = demand_type(HirTypeKind.Optional(demand_type(
+            HirTypeKind.Array(demand_type(HirTypeKind.Named(SymbolId(id: 31), [named_parameter])), 3))))
+        var param: HirParam = original.params[0]
+        param.type_ = nested
+        original.params = [param]
+        original.return_type = nested
+        val recipe = demand_recipe(original, true)
+        val projected = mono_template_recipe_signature_v1(original, recipe)
+        expect(mono_template_signature_digest_v1(projected)).to_equal(
+            mono_template_signature_digest_v1(mono_template_signature_v1(mono_apply_template_recipe_v1(original, recipe))))
+        match projected.return_type.kind:
+            case HirTypeKind.Optional(inner):
+                match inner.kind:
+                    case HirTypeKind.Array(element, _):
+                        match element.kind:
+                            case HirTypeKind.Named(owner, args):
+                                expect(owner.id).to_equal(31)
+                                match args[0].kind:
+                                    case HirTypeKind.TypeParam(name, _): expect(name).to_equal("T")
+                                    case _: expect(false).to_equal(true)
+                            case _: expect(false).to_equal(true)
+                    case _: expect(false).to_equal(true)
+            case _: expect(false).to_equal(true)
+
+    it "retains original body until request and deduplicates concrete emission":
+        val original = demand_template()
+        val before = mono_complete_function_digest_v1(original)
+        var pass_ = MonomorphizationPass.create()
+        val recipe = demand_recipe(original, false)
+        pass_.generic_functions["identity"] = original
+        pass_.template_recipes["identity"] = recipe
+        pass_.archive_template_signatures["identity"] = mono_template_recipe_signature_v1(original, recipe)
+        pass_.template_module["identity"] = "provider"
+        pass_.current_module = "provider"
+        expect(pass_.specialized_functions.len()).to_equal(0)
+        expect(mono_complete_function_digest_v1(pass_.generic_functions["identity"])).to_equal(before)
+        val arg = demand_type(HirTypeKind.Int(64, true))
+        val symbol = pass_.request_specialization("identity", [arg])
+        expect(symbol).to_be_greater_than(-1)
+        expect(pass_.request_specialization("identity", [arg])).to_equal(symbol)
+        expect(pass_.specialized_functions.len()).to_equal(1)
+        expect(pass_.spec_queue.len()).to_equal(1)
+        expect(pass_.monomorphizer.generic_functions.len()).to_equal(0)
+        expect(pass_.monomorphizer.table.pending_functions.len()).to_equal(0)
+        expect(mono_complete_function_digest_v1(pass_.generic_functions["identity"])).to_equal(before)
+        val name = pass_.mangled_name("identity", [arg])
+        val specialized: HirFunction = pass_.specialized_functions[name]
+        expect(specialized.type_params.len()).to_equal(0)
+        expect(specialized.params[0].has_default).to_equal(true)
+        match specialized.body.value.type_.kind:
+            case HirTypeKind.Int(bits, signed):
+                expect(bits).to_equal(64)
+                expect(signed).to_equal(true)
+            case _: expect(false).to_equal(true)

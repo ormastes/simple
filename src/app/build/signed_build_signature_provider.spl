@@ -1,0 +1,213 @@
+# Protected-controller OpenSSH signature verification for canonical V2 receipts.
+# All policy files are copied and checked in a private directory. The pinned
+# executable receives the exact receipt bytes on stdin without a shell.
+use app.io.mod.{secure_temp_dir, dir_remove_all, directory_fsync,
+    file_is_regular_no_follow, file_size_raw, file_copy, file_atomic_write,
+    file_fsync, file_hash_sha256}
+use app.build.signed_build_admission.{SignedBuildExpectationV2,
+    SignedBuildAdmissionV1,
+    signed_build_receipt_digest_v2}
+use app.build.signed_build_wire.{parse_signed_build_receipt_wire_v2}
+use app.build.signed_build_verifier.{SignedBuildSignatureResultV1,
+    SignedBuildGateResultV2, SignedBuildFileDecisionV2,
+    verify_signed_build_private_artifact_v2}
+use std.nogc_sync_mut.io.process_ops.{OwnedExecutablePin}
+use std.common.string_core.{text_to_bytes}
+use std.common.crypto.types.{bytes_to_hex}
+use std.common.crypto.sha256.{sha256_text}
+
+val SIGNED_BUILD_SSH_NAMESPACE_V2 = "simple-build-v2"
+val SIGNED_BUILD_SSH_MAX_SIGNATURE_V2: i64 = 16384
+val SIGNED_BUILD_SSH_MAX_POLICY_FILE_V2: i64 = 1048576
+
+struct SignedBuildSshProviderConfigV2:
+    executable_path: text
+    executable_digest: text
+    allowed_signers_path: text
+    allowed_signers_digest: text
+    revocation_krl_path: text
+    revocation_krl_digest: text
+    authorized_scope: text
+    private_parent: text
+
+struct SignedBuildSignatureProbeV2:
+    verified: bool
+    reason: text
+    signature: SignedBuildSignatureResultV1
+
+fn _signature_rejected_v2(reason: text,
+        root: text) -> SignedBuildSignatureProbeV2:
+    var final_reason = reason
+    if root != "" and not dir_remove_all(root):
+        final_reason = reason + "-cleanup-failed"
+    SignedBuildSignatureProbeV2(false, final_reason,
+        SignedBuildSignatureResultV1("REJECTED", "", "", "",
+            "UNAUTHORIZED", "UNKNOWN", "", ""))
+
+fn _signature_path_v2(path: text) -> bool:
+    path.starts_with("/") and path.len() > 1 and path.len() <= 4096 and
+        not path.ends_with("/") and not path.contains("//") and
+        not path.contains("\n") and not path.contains("\r") and
+        not path.split("/").contains(".") and
+        not path.split("/").contains("..")
+
+fn _signature_digest_v2(value: text) -> bool:
+    if value.len() != 64: return false
+    for c in value.chars():
+        if not ((c >= "0" and c <= "9") or (c >= "a" and c <= "f")):
+            return false
+    true
+
+fn _signature_identity_v2(value: text) -> bool:
+    if value == "" or value.len() > 128 or value.starts_with("-"):
+        return false
+    for c in value.chars():
+        if not ((c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
+               (c >= "0" and c <= "9") or c == "_" or c == "-" or
+               c == "." or c == "@" or c == "/"):
+            return false
+    true
+
+fn _signature_policy_copy_v2(source: text, destination: text,
+        expected_digest: text) -> bool:
+    if not file_is_regular_no_follow(source) or
+       file_size_raw(source) <= 0 or
+       file_size_raw(source) > SIGNED_BUILD_SSH_MAX_POLICY_FILE_V2 or
+       not file_copy(source, destination) or
+       not file_is_regular_no_follow(destination) or
+       file_size_raw(destination) <= 0 or
+       file_size_raw(destination) > SIGNED_BUILD_SSH_MAX_POLICY_FILE_V2 or
+       file_hash_sha256(destination) != expected_digest:
+        return false
+    file_fsync(destination)
+
+fn _run_pinned_ssh_verify_v2(config: SignedBuildSshProviderConfigV2,
+        allowed_copy: text, krl_copy: text, signature_copy: text,
+        wire: text, signer_id: text) -> bool:
+    var pin = match OwnedExecutablePin.pin(config.executable_path):
+        case Ok(value): value
+        case Err(_reason): return false
+    val pin_digest = pin.digest()
+    if pin_digest.is_err() or
+       bytes_to_hex(pin_digest.unwrap()) != config.executable_digest:
+        pin.close()
+        return false
+    val args = ["-Y", "verify", "-f", allowed_copy, "-I", signer_id,
+        "-n", SIGNED_BUILD_SSH_NAMESPACE_V2, "-s", signature_copy,
+        "-r", krl_copy]
+    val started = pin.start(args, text_to_bytes(wire), 15000, 1000, 4096)
+    if started.is_err():
+        pin.close()
+        return false
+    val receipt = started.unwrap()
+    if not receipt.accepted:
+        pin.close()
+        return false
+    var lease = receipt.lease()
+    var terminal = false
+    var valid_poll = true
+    var polls: i64 = 0
+    while not terminal and polls < 160 and valid_poll:
+        val polled = lease.poll(100, 4096, 4096)
+        polls = polls + 1
+        if polled.is_err():
+            valid_poll = false
+        else:
+            val observed = polled.unwrap()
+            if observed.runtime_error != 0 or observed.timed_out or
+               observed.stdout_truncated or observed.stderr_truncated:
+                valid_poll = false
+            terminal = observed.terminal
+    if not terminal or not valid_poll:
+        lease.cancel()
+    val input = lease.input_receipt()
+    val collected = lease.collect()
+    val released = lease.release()
+    val closed = pin.close()
+    if not terminal or not valid_poll or input.is_err() or
+       collected.is_err() or released.is_err() or closed.is_err():
+        return false
+    val fed = input.unwrap()
+    val result = collected.unwrap()
+    fed.accepted == 1 and fed.stdin_closed and fed.written == wire.len() and
+        bytes_to_hex(fed.digest) == sha256_text(wire) and
+        result.exit_code == 0 and not result.timed_out and result.reaped and
+        result.identity_revalidated and result.runtime_error == 0 and
+        not result.stdout_truncated and not result.stderr_truncated
+
+fn verify_signed_build_ssh_signature_v2(wire: text,
+        signature_text: text, expected: SignedBuildExpectationV2,
+        config: SignedBuildSshProviderConfigV2) -> SignedBuildSignatureProbeV2:
+    """Return VERIFIED only after a pinned OpenSSH process checks exact bytes."""
+    val parsed = parse_signed_build_receipt_wire_v2(wire)
+    if parsed == nil:
+        return _signature_rejected_v2("receipt-invalid", "")
+    val receipt = parsed.unwrap()
+    if receipt.build.signer_id != expected.build.allowed_signer_id or
+       receipt.build.signer_scope != expected.build.allowed_signer_scope or
+       config.authorized_scope != expected.build.allowed_signer_scope or
+       not _signature_identity_v2(expected.build.allowed_signer_id) or
+       not _signature_identity_v2(config.authorized_scope):
+        return _signature_rejected_v2("signer-scope-invalid", "")
+    if not _signature_path_v2(config.executable_path) or
+       not _signature_path_v2(config.allowed_signers_path) or
+       not _signature_path_v2(config.revocation_krl_path) or
+       not _signature_path_v2(config.private_parent) or
+       not _signature_digest_v2(config.executable_digest) or
+       not _signature_digest_v2(config.allowed_signers_digest) or
+       not _signature_digest_v2(config.revocation_krl_digest) or
+       not file_is_regular_no_follow(config.executable_path) or
+       signature_text.len() == 0 or
+       signature_text.len() > SIGNED_BUILD_SSH_MAX_SIGNATURE_V2 or
+       not signature_text.starts_with("-----BEGIN SSH SIGNATURE-----\n") or
+       not signature_text.ends_with("-----END SSH SIGNATURE-----\n") or
+       signature_text.contains("\x00"):
+        return _signature_rejected_v2("provider-input-invalid", "")
+    val created = secure_temp_dir(config.private_parent, "signed-build-ssh")
+    if created.is_err():
+        return _signature_rejected_v2("signature-stage-unavailable", "")
+    val root = created.unwrap()
+    val sig = root + "/receipt.sig"
+    val allowed = root + "/allowed-signers"
+    val krl = root + "/revoked.krl"
+    if not file_atomic_write(sig, signature_text) or not file_fsync(sig) or
+       not _signature_policy_copy_v2(config.allowed_signers_path,
+           allowed, config.allowed_signers_digest) or
+       not _signature_policy_copy_v2(config.revocation_krl_path,
+           krl, config.revocation_krl_digest) or
+       not directory_fsync(root):
+        return _signature_rejected_v2("signature-stage-invalid", root)
+    val verified = _run_pinned_ssh_verify_v2(config, allowed, krl, sig,
+        wire, expected.build.allowed_signer_id)
+    if not verified:
+        return _signature_rejected_v2("signature-not-verified", root)
+    if not dir_remove_all(root):
+        return _signature_rejected_v2("signature-cleanup-failed", "")
+    SignedBuildSignatureProbeV2(true, "",
+        SignedBuildSignatureResultV1("VERIFIED",
+            signed_build_receipt_digest_v2(receipt),
+            expected.build.allowed_signer_id, config.authorized_scope,
+            "AUTHORIZED", "CLEAR", receipt.build.protected_policy_digest,
+            receipt.build.checker_digest))
+
+export SIGNED_BUILD_SSH_NAMESPACE_V2, SignedBuildSshProviderConfigV2
+export SignedBuildSignatureProbeV2, verify_signed_build_ssh_signature_v2
+
+fn verify_signed_build_private_artifact_with_ssh_v2(
+    wire: text, signature_text: text,
+    expected: SignedBuildExpectationV2, gates: SignedBuildGateResultV2,
+    config: SignedBuildSshProviderConfigV2, downloaded_path: text,
+    artifact_parent: text, artifact_limit: i64
+) -> SignedBuildFileDecisionV2:
+    """Require live pinned signature proof before any artifact reuse decision."""
+    val signature = verify_signed_build_ssh_signature_v2(wire,
+        signature_text, expected, config)
+    if not signature.verified:
+        return SignedBuildFileDecisionV2(
+            SignedBuildAdmissionV1("FULL_BUILD", "signature: " + signature.reason),
+            "", "")
+    verify_signed_build_private_artifact_v2(wire, expected,
+        signature.signature, gates, downloaded_path,
+        artifact_parent, artifact_limit)
+
+export verify_signed_build_private_artifact_with_ssh_v2

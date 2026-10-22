@@ -2,7 +2,6 @@
 # never executable filesystem paths. Physical publication/open belongs to the
 # existing SCV owner and must validate this contract before driver admission.
 use std.common.crypto.sha256.{sha256_text}
-use std.common.text_bytes.{text_to_utf8_bytes}
 use std.common.build_manager.contracts.{builder_digest_valid_v1}
 use std.scv.compile_source_inventory_core.{compile_source_inventory_path_valid_v1}
 use std.nogc_sync_mut.io.file_ops.{file_create_exclusive, file_read_regular_no_follow_bounded}
@@ -83,10 +82,11 @@ pub fn native_entry_closure_root_valid_v1(value: text) -> bool:
     for segment in value.split("/"):
         if segment == "" or segment == "." or segment == "..":
             return false
-    # Inspect every UTF-8 byte, including controls after multibyte characters;
-    # a text-length/codepoint loop must not truncate the validation window.
-    for byte in text_to_utf8_bytes(value):
-        if byte < 32 or byte == 127:
+    # C0 and DEL are single codepoints. Text iteration visits every codepoint,
+    # including a control after multibyte text; no byte/codepoint length mix.
+    # @workaround bug=bootstrap_raw_byte_loop_unbox_2026_10_16 recover=ba9f1a11d61 reason=inspect-codepoints-without-decoding-raw-u8-words-as-tagged-integers
+    for character in value:
+        if character < " " or character == "\x7f":
             return false
     true
 

@@ -106,8 +106,10 @@ impl PlatformLinkConfig {
             libraries: vec![
                 "m", "System", "z", "ffi", "edit", "zstd", "xml2", "ncurses", "objc", "iconv",
             ],
-            // Homebrew prefix so `-lzstd` resolves (no `libzstd.tbd` ships in the SDK).
-            library_search_paths: vec!["/opt/homebrew/lib"],
+            // Homebrew prefixes so `-lzstd` resolves (no `libzstd.tbd` ships in the SDK):
+            // /opt/homebrew on Apple silicon, /usr/local on Intel (release run 39709151208,
+            // darwin-x86_64: `ld: library not found for -lzstd`).
+            library_search_paths: vec!["/opt/homebrew/lib", "/usr/local/lib"],
             system_scan_libs: vec!["/usr/lib/libSystem.B.dylib"],
             nm_flags: vec!["-g", "-p"],
             stub_strategy: StubStrategy::WeakDefinition,
@@ -140,13 +142,23 @@ impl PlatformLinkConfig {
 
     fn freebsd() -> Self {
         Self {
-            libraries: vec!["pthread", "m", "execinfo", "z", "zstd", "util", "rt"],
+            // kvm/procstat/elf back the process-inspection symbols native_all
+            // references (kvm_getprocs, procstat_getfiles, ...). Every linked
+            // library must also be scanned below: a symbol absent from the scan
+            // is stubbed, and these STRONG stubs win over the real library.
+            // Measured 2026-10-21 (FreeBSD 14.4 riscv64 stage1): openpty,
+            // kvm_* and procstat_* were all stubbed for exactly that reason.
+            libraries: vec!["pthread", "m", "execinfo", "z", "zstd", "util", "rt", "kvm", "procstat", "elf"],
             library_search_paths: vec!["/usr/local/lib"],
             system_scan_libs: vec![
                 "/lib/libc.so.7",
                 "/lib/libm.so.5",
                 "/lib/libthr.so.3",
                 "/usr/lib/libexecinfo.so.1",
+                "/lib/libutil.so.9",
+                "/lib/libkvm.so.7",
+                "/usr/lib/libprocstat.so.1",
+                "/lib/libelf.so.2",
             ],
             nm_flags: vec!["-D", "-g", "-p"],
             stub_strategy: StubStrategy::StrongWithAllowMultiple,

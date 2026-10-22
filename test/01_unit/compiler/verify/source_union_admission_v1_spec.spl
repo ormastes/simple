@@ -1,0 +1,606 @@
+# @manual: show
+# @req: REQ-C2-UNION-TRANSPORT-001
+# Source-only API scenarios; runtime UNRUN.
+use std.spec.{describe, it, expect, fail}
+use std.spec.step
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{SymbolTable, Scope, ScopeId, ScopeKind, HirModule, HirType, HirTypeKind, HirSymbol, SymbolId, SymbolKind}
+use compiler.hir.hir_definitions.{HirFunction, HirExpr, HirExprKind, HirBlock, HirPattern, HirPatternKind, HirStmt, HirStmtKind, HirParam, HirMatchArm}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.frontend.frontend.{parse_full_frontend_target_receipted_v1}
+use compiler.core.parser.{parser_has_errors, parser_get_errors}
+use compiler.common.config.{Logger}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.semantics.union_normalize.source_union_preflight_v1.{source_union_preflight_v1}
+use compiler.semantics.union_normalize.source_union_admission_v1.*
+
+fn admission_test_ledger(limits: SourceUnionLimitsV1) -> SourceUnionLedgerV1:
+    match SourceUnionLedgerV1.create(limits):
+        case Ok(ledger): ledger
+        case Err(error):
+            fail(error.code)
+            SourceUnionLedgerV1(limits: limits, usage: SourceUnionUsageV1())
+
+describe "source union admission ledger and independent symbol owner":
+    it "rejects negative and relaxed limits before traversal":
+        step("Reject caller ceilings outside zero through the published defaults")
+        var negative = SourceUnionLimitsV1()
+        negative.max_nodes = -1
+        match SourceUnionLedgerV1.create(negative):
+            case Err(error):
+                expect(error.code).to_equal("UNION-E-LIMITS")
+                expect(error.usage.nodes).to_equal(0)
+            case Ok(_): fail("negative limit admitted")
+        var relaxed = SourceUnionLimitsV1()
+        relaxed.max_work = 8388609
+        match SourceUnionLedgerV1.create(relaxed):
+            case Err(error): expect(error.code).to_equal("UNION-E-LIMITS")
+            case Ok(_): fail("relaxed limit admitted")
+
+    it "allows exactly the remaining debit and copies refusal counters":
+        step("Admit the exact node allowance and refuse one more without advancing it")
+        var limits = SourceUnionLimitsV1()
+        limits.max_nodes = 2
+        val ledger = admission_test_ledger(limits)
+        match ledger.debit("nodes", 2, Span.empty()):
+            case Ok(_): ()
+            case Err(error): fail(error.code)
+        val captured = ledger.snapshot()
+        match ledger.debit("nodes", 1, Span.empty()):
+            case Err(error):
+                expect(error.code).to_equal("UNION-E-NODES")
+                expect(error.usage.nodes).to_equal(2)
+            case Ok(_): fail("over-budget debit admitted")
+        match ledger.debit("work", 1, Span.empty()):
+            case Ok(_): ()
+            case Err(error): fail(error.code)
+        expect(captured.nodes).to_equal(2)
+        expect(captured.work).to_equal(0)
+        expect(ledger.snapshot().nodes).to_equal(2)
+        expect(ledger.snapshot().work).to_equal(1)
+
+    it "reports negative native counts and unknown debit categories":
+        step("Reject invalid count evidence without incrementing work")
+        val ledger = admission_test_ledger(SourceUnionLimitsV1())
+        match ledger.debit("work", -1, Span.empty()):
+            case Err(error): expect(error.code).to_equal("UNION-E-COUNT")
+            case Ok(_): fail("negative count admitted")
+        match ledger.debit("invented", 1, Span.empty()):
+            case Err(error): expect(error.code).to_equal("UNION-E-COUNT")
+            case Ok(_): fail("unknown counter admitted")
+        expect(ledger.snapshot().work).to_equal(0)
+
+    it "checks depth independently and retains the deepest admitted level":
+        step("Observe exact depth ceiling and unchanged snapshot on refusal")
+        var limits = SourceUnionLimitsV1()
+        limits.max_depth = 2
+        val ledger = admission_test_ledger(limits)
+        match ledger.enter(2, Span.empty()):
+            case Ok(_): ()
+            case Err(error): fail(error.code)
+        match ledger.enter(3, Span.empty()):
+            case Err(error):
+                expect(error.code).to_equal("UNION-E-DEPTH")
+                expect(error.usage.max_depth_seen).to_equal(2)
+            case Ok(_): fail("excess depth admitted")
+
+    it "isolates all mutable index dictionaries and both ID counters":
+        step("Mutate the returned owner and compare original root, nested scope and indexes")
+        val original = SymbolTable.new()
+        original.root_scope_symbols["root"] = 4
+        original.scopes[0].symbols["root"] = 4
+        original.scopes[1] = Scope(id: ScopeId(id: 1), parent: Some(ScopeId(id: 0)), kind: ScopeKind.Block, symbols: {"local": 5})
+        original.next_scope_id = 2
+        original.next_symbol_id = 6
+        original.current_scope = ScopeId(id: 1)
+        original.symbols[4] = HirSymbol(id: SymbolId(id: 4), name: "root", kind: SymbolKind.Variable,
+            type_: Some(HirType.named("i64")), scope: ScopeId(id: 0), span: Span.empty(),
+            visibility: Visibility.Private, is_public: false, is_mutable: false,
+            defining_module: Some("admission"), builtin_method_tag: 0)
+        original.gpu_function_targets["f"] = "cpu"
+        original.gpu_function_backend_orders["f"] = "native"
+        original.qualified_functions["m#f"] = 4
+        original.qualified_types["m#T"] = 5
+        original.exact_symbols["f"] = 4
+        original.module_callables["m#f"] = 4
+        original.structural_union_symbols["bool|i64"] = 9
+        original.structural_union_owners[9] = "bool|i64"
+        val ledger = admission_test_ledger(SourceUnionLimitsV1())
+        match source_union_clone_symbols_v1(original, ledger):
+            case Err(error): fail(error.code)
+            case Ok(cloned):
+                cloned.root_scope_symbols["root"] = 40
+                cloned.scopes[0].symbols["root"] = 40
+                cloned.scopes[1].symbols["local"] = 50
+                cloned.gpu_function_targets["f"] = "gpu"
+                cloned.gpu_function_backend_orders["f"] = "changed"
+                cloned.qualified_functions["m#f"] = 40
+                cloned.qualified_types["m#T"] = 50
+                cloned.exact_symbols["f"] = 40
+                cloned.module_callables["m#f"] = 40
+                cloned.structural_union_symbols["bool|i64"] = 90
+                cloned.structural_union_owners[9] = "changed"
+                cloned.next_symbol_id = 100
+                cloned.next_scope_id = 100
+                cloned.current_scope = ScopeId(id: 0)
+                cloned.symbols[4].name = "changed"
+                var changed_symbol = cloned.symbols[4]
+                if val type_ = changed_symbol.type_:
+                    var changed_type = type_
+                    changed_type.kind = HirTypeKind.Int(32, false)
+                    changed_symbol.type_ = Some(changed_type)
+                    cloned.symbols[4] = changed_symbol
+                else:
+                    fail("clone lost original resolved type")
+                expect(cloned.symbols[4].name).to_equal("changed")
+                if val changed_type = cloned.symbols[4].type_:
+                    match changed_type.kind:
+                        case HirTypeKind.Int(bits, signed):
+                            expect(bits).to_equal(32)
+                            expect(signed).to_equal(false)
+                        case _: fail("clone type payload write did not take effect")
+                else: fail("clone type payload disappeared")
+                if val original_type = original.symbols[4].type_:
+                    match original_type.kind:
+                        case HirTypeKind.Int(bits, signed):
+                            expect(bits).to_equal(64)
+                            expect(signed).to_equal(true)
+                        case _: fail("original nested type payload changed")
+                else: fail("original resolved type disappeared")
+                expect(cloned.root_scope_symbols["root"]).to_equal(40)
+                expect(cloned.scopes[0].symbols["root"]).to_equal(40)
+                expect(cloned.scopes[1].symbols["local"]).to_equal(50)
+                expect(cloned.gpu_function_targets["f"]).to_equal("gpu")
+                expect(cloned.gpu_function_backend_orders["f"]).to_equal("changed")
+                expect(cloned.qualified_functions["m#f"]).to_equal(40)
+                expect(cloned.qualified_types["m#T"]).to_equal(50)
+                expect(cloned.exact_symbols["f"]).to_equal(40)
+                expect(cloned.module_callables["m#f"]).to_equal(40)
+                expect(cloned.structural_union_symbols["bool|i64"]).to_equal(90)
+                expect(cloned.structural_union_owners[9]).to_equal("changed")
+                expect(cloned.next_symbol_id).to_equal(100)
+                expect(cloned.next_scope_id).to_equal(100)
+                expect(cloned.current_scope.id).to_equal(0)
+                expect(original.symbols[4].name).to_equal("root")
+                expect(original.current_scope.id).to_equal(1)
+                expect(original.root_scope_symbols["root"]).to_equal(4)
+                expect(original.scopes[0].symbols["root"]).to_equal(4)
+                expect(original.scopes[1].symbols["local"]).to_equal(5)
+                expect(original.gpu_function_targets["f"]).to_equal("cpu")
+                expect(original.gpu_function_backend_orders["f"]).to_equal("native")
+                expect(original.qualified_functions["m#f"]).to_equal(4)
+                expect(original.qualified_types["m#T"]).to_equal(5)
+                expect(original.exact_symbols["f"]).to_equal(4)
+                expect(original.module_callables["m#f"]).to_equal(4)
+                expect(original.structural_union_symbols["bool|i64"]).to_equal(9)
+                expect(original.structural_union_owners[9]).to_equal("bool|i64")
+                expect(original.next_symbol_id).to_equal(6)
+                expect(original.next_scope_id).to_equal(2)
+
+    it "refuses root-mirror disagreement without repairing the input":
+        step("Reject two conflicting authoritative root views")
+        val original = SymbolTable.new()
+        original.root_scope_symbols = {"root": 1}
+        original.scopes[0] = Scope(id: ScopeId(id: 0), parent: nil, kind: ScopeKind.Module, symbols: {"root": 2})
+        val ledger = admission_test_ledger(SourceUnionLimitsV1())
+        match source_union_clone_symbols_v1(original, ledger):
+            case Err(error): expect(error.code).to_equal("UNION-E-SCOPE")
+            case Ok(_): fail("inconsistent root mirror admitted")
+        expect(original.root_scope_symbols["root"]).to_equal(1)
+        expect(original.scopes[0].symbols["root"]).to_equal(2)
+
+    it "refuses copying before allocating a symbol-table owner with a zero copy budget":
+        step("Retain original counters and scope bindings after admission refusal")
+        val original = SymbolTable.new()
+        var limits = SourceUnionLimitsV1()
+        limits.max_copy_units = 0
+        val ledger = admission_test_ledger(limits)
+        match source_union_clone_symbols_v1(original, ledger):
+            case Err(error):
+                expect(error.code).to_equal("UNION-E-COPY")
+                expect(error.usage.copy_units).to_equal(0)
+            case Ok(_): fail("zero-budget owner allocated")
+        expect(original.next_symbol_id).to_equal(0)
+        expect(original.next_scope_id).to_equal(1)
+
+fn admission_parse_hir(source: text) -> Result<HirModule, text>:
+    val path = "source_union_admission.spl"
+    val parsed = parse_full_frontend_target_receipted_v1(source, path, path,
+        Logger(level: 0), path, sha256_text(source), "x86_64-unknown-linux-gnu")?
+    if parser_has_errors(): return Err(parser_get_errors().join("; "))
+    var lowering = HirLowering.with_filename(path)
+    lowering.preserve_enum_semantic_arms_v1 = true
+    val module = lowering.lower_module(parsed.0)
+    if lowering.errors.len() > 0: return Err(lowering.diagnostic_messages.join("; "))
+    Ok(module)
+
+describe "read-only source union preflight":
+    it "admits parsed local function union signatures and retained defaults":
+        step("Walk actual parsed function and symbol signatures before canonical keys")
+        val source = "fn choose(value: bool | i64 = true) -> bool | i64:\n    value\n"
+        match admission_parse_hir(source):
+            case Err(message): fail(message)
+            case Ok(module):
+                val ledger = admission_test_ledger(SourceUnionLimitsV1())
+                val before = module.symbols.next_symbol_id
+                match source_union_preflight_v1(module, ledger):
+                    case Ok(has_union): expect(has_union).to_equal(true)
+                    case Err(error): fail(error.code + ": " + error.message)
+                expect(module.symbols.next_symbol_id).to_equal(before)
+                expect(ledger.snapshot().nodes).to_be_greater_than(0)
+                expect(ledger.snapshot().key_bytes).to_equal(0)
+                expect(ledger.snapshot().registry_rows).to_equal(0)
+
+    it "requires traversal allowance for an ordinary union-free source":
+        step("Measure actual node debit then require exact and one-less boundaries")
+        match admission_parse_hir("fn number() -> i64:\n    7\n"):
+            case Err(message): fail(message)
+            case Ok(module):
+                val measured = admission_test_ledger(SourceUnionLimitsV1())
+                match source_union_preflight_v1(module, measured):
+                    case Ok(has_union): expect(has_union).to_equal(false)
+                    case Err(error): fail(error.code)
+                val required = measured.snapshot().nodes
+                expect(required).to_be_greater_than(1)
+                var exact = SourceUnionLimitsV1()
+                exact.max_nodes = required
+                val exact_ledger = admission_test_ledger(exact)
+                match source_union_preflight_v1(module, exact_ledger):
+                    case Ok(has_union): expect(has_union).to_equal(false)
+                    case Err(error): fail(error.code)
+                exact.max_nodes = required - 1
+                val short_ledger = admission_test_ledger(exact)
+                match source_union_preflight_v1(module, short_ledger):
+                    case Err(error): expect(error.code).to_equal("UNION-E-NODES")
+                    case Ok(_): fail("one-less node budget admitted")
+
+    it "refuses union nested under an outer Optional before key allocation":
+        step("Mutate an actual lowered return annotation to an unsupported carrier")
+        match admission_parse_hir("fn number() -> i64:\n    7\n"):
+            case Err(message): fail(message)
+            case Ok(module):
+                var input = module
+                val ids = input.functions.keys()
+                var function = input.functions[ids[0]]
+                val union = HirType(kind: HirTypeKind.Union([HirType.named("i64"), HirType.named("bool")]), span: Span.empty())
+                function.return_type = HirType(kind: HirTypeKind.Optional(union), span: Span.empty())
+                input.functions[ids[0]] = function
+                val ledger = admission_test_ledger(SourceUnionLimitsV1())
+                match source_union_preflight_v1(input, ledger):
+                    case Err(error):
+                        expect(error.code).to_equal("UNION-E-POSITION")
+                        expect(error.message).to_equal("Optional carrier")
+                        expect(error.usage.key_bytes).to_equal(0)
+                        expect(error.usage.registry_rows).to_equal(0)
+                    case Ok(_): fail("unsupported nested carrier admitted")
+
+    it "uses distinct refusal codes for every logical growth category":
+        step("Debit each actual ledger category to its exact ceiling then refuse one more")
+        var limits = SourceUnionLimitsV1()
+        limits.max_nodes = 1
+        limits.max_members = 1
+        limits.max_key_bytes = 1
+        limits.max_registry_rows = 1
+        limits.max_injections = 1
+        limits.max_copy_units = 1
+        limits.max_work = 1
+        val ledger = admission_test_ledger(limits)
+        for (kind, code) in [("nodes", "UNION-E-NODES"), ("members", "UNION-E-MEMBERS"), ("key_bytes", "UNION-E-KEY"), ("registry_rows", "UNION-E-REGISTRY"), ("injections", "UNION-E-INJECTIONS"), ("copy_units", "UNION-E-COPY"), ("work", "UNION-E-WORK")]:
+            match ledger.debit(kind, 1, Span.at(23, 5, 7)):
+                case Ok(_): ()
+                case Err(error): fail(error.code)
+            match ledger.debit(kind, 1, Span.at(23, 5, 7)):
+                case Err(error):
+                    expect(error.code).to_equal(code)
+                    expect(error.span.line).to_equal(5)
+                    expect(error.span.col).to_equal(7)
+                case Ok(_): fail("category exceeded its exact allowance")
+        val copied = ledger.snapshot()
+        expect(copied.nodes).to_equal(1)
+        expect(copied.members).to_equal(1)
+        expect(copied.key_bytes).to_equal(1)
+        expect(copied.registry_rows).to_equal(1)
+        expect(copied.injections).to_equal(1)
+        expect(copied.copy_units).to_equal(1)
+        expect(copied.work).to_equal(1)
+
+    it "admits the exact clone allowance and rolls back a late one-less refusal":
+        step("Measure real clone debits including the last reverse-owner text copy")
+        val original = SymbolTable.new()
+        original.structural_union_symbols["bool|i64"] = 8
+        original.structural_union_owners[8] = "bool|i64"
+        val measured = admission_test_ledger(SourceUnionLimitsV1())
+        match source_union_clone_symbols_v1(original, measured):
+            case Ok(copy): expect(copy.structural_union_owners[8]).to_equal("bool|i64")
+            case Err(error): fail(error.code)
+        var limits = SourceUnionLimitsV1()
+        limits.max_copy_units = measured.snapshot().copy_units
+        val exact = admission_test_ledger(limits)
+        match source_union_clone_symbols_v1(original, exact):
+            case Ok(copy): expect(copy.structural_union_symbols["bool|i64"]).to_equal(8)
+            case Err(error): fail(error.code)
+        limits.max_copy_units = limits.max_copy_units - 1
+        val short = admission_test_ledger(limits)
+        match source_union_clone_symbols_v1(original, short):
+            case Err(error):
+                expect(error.code).to_equal("UNION-E-COPY")
+                expect(error.usage.copy_units).to_be_greater_than(16)
+            case Ok(_): fail("one-less clone allowance admitted")
+        expect(original.structural_union_symbols["bool|i64"]).to_equal(8)
+        expect(original.structural_union_owners[8]).to_equal("bool|i64")
+        expect(original.scopes[0].symbols.len()).to_equal(0)
+        expect(original.root_scope_symbols.len()).to_equal(0)
+        expect(original.next_symbol_id).to_equal(0)
+        expect(original.next_scope_id).to_equal(1)
+
+fn admission_expect_error(input: HirModule, code: text) -> SourceUnionUsageV1:
+    val ledger = admission_test_ledger(SourceUnionLimitsV1())
+    match source_union_preflight_v1(input, ledger):
+        case Err(error):
+            expect(error.code).to_equal(code)
+            expect(error.usage.key_bytes).to_equal(0)
+            expect(error.usage.registry_rows).to_equal(0)
+            error.usage
+        case Ok(_):
+            fail("malformed source admission succeeded")
+            ledger.snapshot()
+
+fn admission_expect_clone_error(input: SymbolTable, code: text):
+    val ledger = admission_test_ledger(SourceUnionLimitsV1())
+    match source_union_clone_symbols_v1(input, ledger):
+        case Err(error): expect(error.code).to_equal(code)
+        case Ok(_): fail("malformed symbol table clone succeeded")
+
+describe "checked source union boundary revision two":
+    it "rejects an absent module before traversal or dictionary work":
+        step("Call the checked public preflight with an actual absent required module")
+        unsafe:
+            val absent: HirModule = nil
+            val usage = admission_expect_error(absent, "UNION-E-TYPE")
+            expect(usage.nodes).to_equal(0)
+            expect(usage.work).to_equal(0)
+            expect(usage.copy_units).to_equal(0)
+
+    it "refuses absent current scope and required scope rows without repairing them":
+        step("Exercise the clone's actual owner and scope presence boundaries")
+        val owner = SymbolTable.new()
+        unsafe:
+            owner.current_scope = nil
+            admission_expect_clone_error(owner, "UNION-E-SCOPE")
+            expect(owner.current_scope == nil).to_equal(true)
+            expect(owner.next_scope_id).to_equal(1)
+            owner.current_scope = ScopeId(id: 0)
+            owner.scopes[0] = nil
+            admission_expect_clone_error(owner, "UNION-E-SCOPE")
+            expect(owner.scopes[0] == nil).to_equal(true)
+            owner.scopes[0] = Scope(id: nil, parent: nil, kind: ScopeKind.Module, symbols: {})
+            admission_expect_clone_error(owner, "UNION-E-SCOPE")
+            expect(owner.scopes[0].id == nil).to_equal(true)
+
+    it "refuses a present symbol key with an absent required symbol row":
+        step("Admit dictionary cardinality but reject the malformed row before field access")
+        val owner = SymbolTable.new()
+        unsafe:
+            owner.symbols[7] = nil
+            admission_expect_clone_error(owner, "UNION-E-SCOPE")
+            expect(owner.symbols[7] == nil).to_equal(true)
+            expect(owner.next_symbol_id).to_equal(0)
+
+    it "checks real declaration keys and rows before reading their identities":
+        step("Corrupt one parsed declaration row and one dictionary key independently")
+        match admission_parse_hir("fn number() -> i64:\n    7\n"):
+            case Err(message): fail(message)
+            case Ok(module):
+                val ids = module.functions.keys()
+                val original = module.functions[ids[0]]
+                unsafe:
+                    var missing_row = module
+                    missing_row.functions[ids[0]] = nil
+                    admission_expect_error(missing_row, "UNION-E-SCOPE")
+                    expect(missing_row.functions[ids[0]] == nil).to_equal(true)
+                    var missing_key = module
+                    missing_key.functions = {}
+                    val absent_key: SymbolId = nil
+                    missing_key.functions[absent_key] = original
+                    admission_expect_error(missing_key, "UNION-E-SCOPE")
+                    expect(missing_key.functions.len()).to_equal(1)
+
+    it "rejects absent ordinary function bodies and statement kinds":
+        step("Keep parsed declaration ownership while removing required children")
+        match admission_parse_hir("fn number() -> i64:\n    7\n"):
+            case Err(message): fail(message)
+            case Ok(module):
+                val ids = module.functions.keys()
+                val original = module.functions[ids[0]]
+                unsafe:
+                    var no_body = module
+                    var function = original
+                    function.body = nil
+                    no_body.functions[ids[0]] = function
+                    admission_expect_error(no_body, "UNION-E-TYPE")
+                    expect(no_body.functions[ids[0]].body == nil).to_equal(true)
+                    var no_kind = module
+                    function = original
+                    function.body.stmts = [HirStmt(kind: nil, span: Span.empty())]
+                    no_kind.functions[ids[0]] = function
+                    admission_expect_error(no_kind, "UNION-E-TYPE")
+                    expect(no_kind.functions[ids[0]].body.stmts[0].kind == nil).to_equal(true)
+
+    it "preserves genuine extern and required-trait no-body representations":
+        step("Lower real extern and required method declarations, then test their permitted nil bodies")
+        for source in ["extern fn outside(value: i64) -> i64\n", "trait Identity:\n    fn identity(value: i64) -> i64\n"]:
+            match admission_parse_hir(source):
+                case Err(message): fail(message)
+                case Ok(module):
+                    val ledger = admission_test_ledger(SourceUnionLimitsV1())
+                    match source_union_preflight_v1(module, ledger):
+                        case Ok(has_union): expect(has_union).to_equal(false)
+                        case Err(error): fail(error.code + ": " + error.message)
+                    var declared = module
+                    var absent_bodies = 0
+                    unsafe:
+                        for id in declared.functions.keys():
+                            var function = declared.functions[id]
+                            if function.is_extern:
+                                function.body = nil
+                                declared.functions[id] = function
+                                expect(declared.functions[id].body == nil).to_equal(true)
+                                absent_bodies = absent_bodies + 1
+                        for id in declared.traits.keys():
+                            var trait_ = declared.traits[id]
+                            var methods = trait_.methods
+                            for index in 0..methods.len():
+                                var method = methods[index]
+                                method.body = nil
+                                methods[index] = method
+                                if declared.functions.has(method.symbol): declared.functions[method.symbol] = method
+                                absent_bodies = absent_bodies + 1
+                            trait_.methods = methods
+                            declared.traits[id] = trait_
+                            for method in declared.traits[id].methods:
+                                expect(method.body == nil).to_equal(true)
+                    expect(absent_bodies).to_be_greater_than(0)
+                    val absent_ledger = admission_test_ledger(SourceUnionLimitsV1())
+                    match source_union_preflight_v1(declared, absent_ledger):
+                        case Ok(has_union): expect(has_union).to_equal(false)
+                        case Err(error): fail(error.code + ": " + error.message)
+
+    it "rejects inactive Union annotations instead of reporting union-free input":
+        step("Retain an actual Union type behind a parsed expression's false presence bit")
+        match admission_parse_hir("fn number() -> i64:\n    7\n"):
+            case Err(message): fail(message)
+            case Ok(module):
+                var input = module
+                val ids = input.functions.keys()
+                var function = input.functions[ids[0]]
+                var result = function.body.value
+                result.has_type_ = false
+                result.type_ = HirType(kind: HirTypeKind.Union([HirType.named("i64"), HirType.named("bool")]), span: Span.empty())
+                function.body.value = result
+                input.functions[ids[0]] = function
+                admission_expect_error(input, "UNION-E-PRESENCE")
+                expect(input.functions[ids[0]].body.value.has_type_).to_equal(false)
+                match input.functions[ids[0]].body.value.type_.kind:
+                    case HirTypeKind.Union(members): expect(members.len()).to_equal(2)
+                    case _: fail("preflight modified inactive type")
+
+    it "rejects inactive block results and retained defaults containing unions":
+        step("Use parsed HIR ownership and independently hide the same typed operand in two presence pairs")
+        match admission_parse_hir("fn number(value: i64 = 7) -> i64:\n    value\n"):
+            case Err(message): fail(message)
+            case Ok(module):
+                val ids = module.functions.keys()
+                val original = module.functions[ids[0]]
+                val union = HirType(kind: HirTypeKind.Union([HirType.named("i64"), HirType.named("bool")]), span: Span.empty())
+                val operand = HirExpr(kind: HirExprKind.IntLit(7, nil), has_type_: true, type_: union, span: Span.empty())
+                var block_case = module
+                var function = original
+                function.body.has = false
+                function.body.value = operand
+                block_case.functions[ids[0]] = function
+                admission_expect_error(block_case, "UNION-E-PRESENCE")
+                expect(block_case.functions[ids[0]].body.has).to_equal(false)
+                var default_case = module
+                function = original
+                var params = function.params
+                var param = params[0]
+                param.has_default = false
+                param.default = operand
+                params[0] = param
+                function.params = params
+                default_case.functions[ids[0]] = function
+                admission_expect_error(default_case, "UNION-E-PRESENCE")
+                expect(default_case.functions[ids[0]].params[0].has_default).to_equal(false)
+
+    it "charges inactive non-Union trees and rejects their excessive depth":
+        step("Hide a deep scalar operand behind a false result flag and require the ordinary depth error")
+        match admission_parse_hir("fn number() -> i64:\n    7\n"):
+            case Err(message): fail(message)
+            case Ok(module):
+                var input = module
+                val ids = input.functions.keys()
+                var function = input.functions[ids[0]]
+                var operand = HirExpr(kind: HirExprKind.IntLit(7, nil), has_type_: false, type_: nil, span: Span.empty())
+                for index in 0..8:
+                    operand = HirExpr(kind: HirExprKind.Try(operand), has_type_: false, type_: nil, span: Span.empty())
+                function.body.has = false
+                function.body.value = operand
+                input.functions[ids[0]] = function
+                val admitted = admission_test_ledger(SourceUnionLimitsV1())
+                match source_union_preflight_v1(input, admitted):
+                    case Ok(has_union): expect(has_union).to_equal(false)
+                    case Err(error): fail(error.code)
+                expect(admitted.snapshot().max_depth_seen).to_be_greater_than(8)
+                var limits = SourceUnionLimitsV1()
+                limits.max_depth = 8
+                val tight = admission_test_ledger(limits)
+                match source_union_preflight_v1(input, tight):
+                    case Err(error): expect(error.code).to_equal("UNION-E-DEPTH")
+                    case Ok(_): fail("inactive deep scalar tree bypassed admission")
+                expect(input.functions[ids[0]].body.has).to_equal(false)
+
+    it "preserves nil metadata and charges multibyte text in actual encoded bytes":
+        step("Compare nil and empty text debit with a six-byte UTF-8 metadata value")
+        val ledger = admission_test_ledger(SourceUnionLimitsV1())
+        unsafe:
+            val absent: text = nil
+            match source_union_reserve_text_v1(absent, ledger, Span.empty()):
+                case Ok(_): ()
+                case Err(error): fail(error.code)
+            expect(absent == nil).to_equal(true)
+        match source_union_reserve_text_v1("", ledger, Span.empty()):
+            case Ok(_): ()
+            case Err(error): fail(error.code)
+        expect(ledger.snapshot().copy_units).to_equal(0)
+        match source_union_reserve_text_v1("é🙂", ledger, Span.empty()):
+            case Ok(_): ()
+            case Err(error): fail(error.code)
+        expect(ledger.snapshot().copy_units).to_equal(6)
+        expect(ledger.snapshot().work).to_equal(6)
+        match admission_parse_hir("fn number() -> i64:\n    7\n"):
+            case Err(message): fail(message)
+            case Ok(module):
+                var input = module
+                val ids = input.functions.keys()
+                var function = input.functions[ids[0]]
+                unsafe:
+                    function.doc_comment = nil
+                    function.gpu_target = nil
+                    function.effects = nil
+                    function.type_params = nil
+                    function.params = nil
+                input.functions[ids[0]] = function
+                val admitted = admission_test_ledger(SourceUnionLimitsV1())
+                match source_union_preflight_v1(input, admitted):
+                    case Ok(has_union): expect(has_union).to_equal(false)
+                    case Err(error): fail(error.code)
+                expect(input.functions[ids[0]].doc_comment == nil).to_equal(true)
+                expect(input.functions[ids[0]].gpu_target == nil).to_equal(true)
+
+    it "checks absent parameter pattern and dimension records before reading their spans":
+        step("Inject representative absent children into otherwise real parsed HIR")
+        match admission_parse_hir("fn number(value: i64) -> i64:\n    value\n"):
+            case Err(message): fail(message)
+            case Ok(module):
+                val ids = module.functions.keys()
+                val original = module.functions[ids[0]]
+                unsafe:
+                    var parameter_case = module
+                    var function = original
+                    function.params = [nil]
+                    parameter_case.functions[ids[0]] = function
+                    admission_expect_error(parameter_case, "UNION-E-TYPE")
+                    expect(parameter_case.functions[ids[0]].params[0] == nil).to_equal(true)
+                    var pattern_case = module
+                    function = original
+                    val arm = HirMatchArm(pattern: nil, has_guard: false, guard: nil, body: original.body, span: Span.empty())
+                    function.body.value = HirExpr(kind: HirExprKind.MatchCase(original.body.value, [arm]), has_type_: false, type_: nil, span: Span.empty())
+                    pattern_case.functions[ids[0]] = function
+                    admission_expect_error(pattern_case, "UNION-E-TYPE")
+                    var dimension_case = module
+                    function = original
+                    function.return_type = HirType(kind: HirTypeKind.Tensor(HirType.named("i64"), [nil], nil), span: Span.empty())
+                    dimension_case.functions[ids[0]] = function
+                    admission_expect_error(dimension_case, "UNION-E-TYPE")

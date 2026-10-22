@@ -1,0 +1,102 @@
+# Pure decoder for the exact NUL-framed `git ls-tree -r -z --full-tree` stream.
+# The caller owns process execution and immutable tree resolution.
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+
+pub struct TraceGitTreeEntry:
+    mode: text
+    kind: text
+    oid: text
+    path: text
+
+fn trace_tree_bytes(data: [u8], first: i64, end: i64) -> [u8]:
+    var result: [u8] = []
+    for i in first..end:
+        result.push(data[i])
+    result
+
+fn trace_tree_utf8(data: [u8], first: i64, end: i64) -> Result<text, text>:
+    match validated_utf8_bytes_to_text_linear(trace_tree_bytes(data, first, end)):
+        case Ok(value): Ok(value)
+        case Err(_): Err("TRACE-SNAPSHOT-INCOMPLETE: invalid UTF-8 in tree inventory")
+
+fn trace_tree_oid_valid(oid: text, width: i64) -> bool:
+    if oid.len() != width:
+        return false
+    val hex = "0123456789abcdef"
+    for i in 0..oid.len():
+        if not hex.contains(oid.substring(i, i + 1)):
+            return false
+    true
+
+fn trace_tree_mode_supported(mode: text, kind: text) -> bool:
+    (mode == "100644" or mode == "100755") and kind == "blob"
+
+# Git paths may contain CR/LF and are preserved byte-for-byte after UTF-8
+# decoding. Keep inventory safety checks local; extraction schema policy may
+# later diagnose paths it cannot represent. Backslash is rejected because host
+# adapters must not reinterpret it as a separator.
+fn trace_tree_path_valid(path: text) -> bool:
+    if path == "" or path.starts_with("/") or path.contains("\\"):
+        return false
+    for part in path.split("/"):
+        if part == "" or part == "." or part == "..":
+            return false
+    true
+
+# Empty input is the valid encoding of an empty tree. The effectful caller must
+# distinguish successful command completion from absent or failed process data.
+pub fn decode_trace_git_tree(data: [u8], object_format: text,
+    max_entries: i64, max_bytes: i64) -> Result<[TraceGitTreeEntry], text>:
+    if object_format != "sha1" and object_format != "sha256":
+        return Err("TRACE-SNAPSHOT-INCOMPLETE: unsupported Git object format")
+    if max_entries < 1 or max_entries > 100000 or max_bytes < 1 or max_bytes > 16777216:
+        return Err("TRACE-SNAPSHOT-INCOMPLETE: invalid tree inventory budgets")
+    if data.len() > max_bytes:
+        return Err("TRACE-SNAPSHOT-INCOMPLETE: tree inventory byte budget exhausted")
+    val oid_width = if object_format == "sha1": 40 else: 64
+    var entries: [TraceGitTreeEntry] = []
+    var seen_paths: Dict<text, bool> = {}
+    var offset: i64 = 0
+    while offset < data.len():
+        val record_start = offset
+        var record_end = -1
+        while offset < data.len():
+            if data[offset] == 0:
+                record_end = offset
+                break
+            offset = offset + 1
+        if record_end < 0:
+            return Err("TRACE-SNAPSHOT-INCOMPLETE: unterminated tree inventory record")
+        if record_end == record_start:
+            return Err("TRACE-SNAPSHOT-INCOMPLETE: empty tree inventory record")
+        var tab = -1
+        for i in record_start..record_end:
+            if data[i] == 9:
+                if tab < 0:
+                    tab = i
+        if tab < 0:
+            return Err("TRACE-SNAPSHOT-INCOMPLETE: malformed tree inventory record")
+        val header = trace_tree_utf8(data, record_start, tab)?
+        val fields = header.split(" ")
+        if fields.len() != 3 or fields[0] == "" or fields[1] == "" or fields[2] == "":
+            return Err("TRACE-SNAPSHOT-INCOMPLETE: malformed tree inventory header")
+        val mode = fields[0]
+        val kind = fields[1]
+        val oid = fields[2]
+        if mode == "120000" or mode == "160000":
+            return Err("TRACE-SNAPSHOT-INCOMPLETE: symlink and gitlink entries are unsupported")
+        if not trace_tree_mode_supported(mode, kind):
+            return Err("TRACE-SNAPSHOT-INCOMPLETE: unsupported tree entry mode or object type")
+        if not trace_tree_oid_valid(oid, oid_width):
+            return Err("TRACE-SNAPSHOT-INCOMPLETE: invalid tree entry object identity")
+        val path = trace_tree_utf8(data, tab + 1, record_end)?
+        if not trace_tree_path_valid(path):
+            return Err("TRACE-SNAPSHOT-INCOMPLETE: invalid tree entry path")
+        if seen_paths.contains_key(path):
+            return Err("TRACE-SNAPSHOT-INCOMPLETE: duplicate tree entry path")
+        if entries.len() >= max_entries:
+            return Err("TRACE-SNAPSHOT-INCOMPLETE: tree inventory entry budget exhausted")
+        seen_paths[path] = true
+        entries.push(TraceGitTreeEntry(mode: mode, kind: kind, oid: oid, path: path))
+        offset = record_end + 1
+    Ok(entries)

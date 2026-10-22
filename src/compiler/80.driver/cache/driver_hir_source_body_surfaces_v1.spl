@@ -1,0 +1,123 @@
+# Real declaration replay for the private source-body lowerer. No caller surface
+# bag is adopted. Complete ordinary ParserModules remain in per-file leases.
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfaceBuilder, ModuleSurfacesByName,
+    module_surface_canonical_path, module_surfaces_promote_reason,
+    module_surfaces_retained_alignment_error}
+use compiler.driver.driver_hir_cache.{hir_cache_closure_digest}
+use compiler.common.driver_source_file.{source_file_coverage_identity}
+use compiler.frontend.layer_eq_registry.{layer_eq_registry_owner_snapshot_v1, layer_eq_registry_owner_restore_v1, layer_eq_registry_reset}
+use compiler.frontend.effect_registry.{effect_registry_owner_snapshot_v1, effect_registry_owner_restore_v1, effect_registry_reset}
+use compiler.frontend.rt_criticality_registry.{rt_criticality_registry_owner_snapshot_v1, rt_criticality_registry_owner_restore_v1, rt_criticality_reset}
+use compiler.frontend.aspect_registry.{aspect_registry_owner_snapshot_v1, aspect_registry_owner_restore_v1, aspect_registry_reset}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+
+fn driver_hir_source_body_row_in_owned_scope_v1(driver: CompilerDriver, index: i64) -> Result<bool, text>:
+    val ctx = driver.ctx
+    val path = ctx.source_paths_owner[index]
+    val raw = file_read_regular_no_follow_bounded(path, 67108864)?
+    val coverage = source_file_coverage_identity(path, raw)
+    if coverage.0 != ctx.source_authored_paths_owner[index] or
+            coverage.1 != ctx.source_contents_owner[index] or
+            coverage.1.len() != ctx.source_byte_lengths_owner[index] or
+            sha256_text(coverage.1) != ctx.source_identities_owner[index]:
+        return Err("private source surface replay selected physical snapshot changed")
+    Ok(true)
+
+fn driver_hir_source_body_verify_row_v1(driver: CompilerDriver, index: i64) -> Result<bool, text>:
+    if not transient_scope_begin(): return Err("private source surface row lease unavailable")
+    val result = driver_hir_source_body_row_in_owned_scope_v1(driver, index)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    val ended = transient_scope_end()
+    if not paused or not owned or not ended: panic("private source surface row ownership")
+    result
+
+fn driver_hir_source_body_finish_surfaces_v1(builder: ModuleSurfaceBuilder) -> Result<ModuleSurfacesByName, text>:
+    if not transient_scope_begin(): return Err("private source surface finalization lease unavailable")
+    val surfaces = ModuleSurfacesByName.empty()
+    val reason = builder.finish_into(surfaces)
+    var result: Result<ModuleSurfacesByName, text> = if reason != "": Err(reason) else: Ok(surfaces)
+    val paused = transient_scope_pause()
+    var promoted = false
+    if paused:
+        if reason != "":
+            promoted = transient_promote(result)
+        else:
+            val promotion_reason = module_surfaces_promote_reason(surfaces)
+            if promotion_reason != "": result = Err(promotion_reason)
+            promoted = transient_promote(result)
+    val ended = transient_scope_end()
+    if not paused or not promoted or not ended: panic("private source surface finalization ownership")
+    if result.is_err(): return result
+    Ok(surfaces)
+
+fn driver_hir_source_body_verify_surfaces_v1(driver: CompilerDriver,
+        surfaces: ModuleSurfacesByName) -> Result<bool, text>:
+    if not transient_scope_begin(): return Err("private source surface verification lease unavailable")
+    val alignment = module_surfaces_retained_alignment_error(surfaces)
+    var result: Result<bool, text> = if alignment == "": Ok(true) else: Err(alignment)
+    if alignment == "" and hir_cache_closure_digest(surfaces) != hir_cache_closure_digest(driver.streaming_module_surfaces_owner):
+        result = Err("private source surface replay frozen corpus identity differs")
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    val ended = transient_scope_end()
+    if not paused or not owned or not ended: panic("private source surface verification ownership")
+    result
+
+fn driver_hir_source_body_replay_surfaces_inner_v1(driver: CompilerDriver) -> Result<ModuleSurfacesByName, text>:
+    val ctx = driver.ctx
+    val count = ctx.source_module_names_owner.len()
+    if count == 0 or ctx.source_paths_owner.len() != count or ctx.source_authored_paths_owner.len() != count or
+            ctx.source_contents_owner.len() != count or ctx.source_identities_owner.len() != count or
+            ctx.source_byte_lengths_owner.len() != count: return Err("private source surface replay inventory incomplete")
+    var builder = ModuleSurfaceBuilder.new()
+    var index = 0
+    while index < count:
+        val _row = driver_hir_source_body_verify_row_v1(driver, index)?
+        val canonical = module_surface_canonical_path(ctx.source_paths_owner[index])
+        if canonical == "": return Err("private source surface replay physical identity unavailable")
+        if builder.has_canonical_path(canonical):
+            val added = builder.add_alias_canonical_identity(ctx.source_module_names_owner[index],
+                ctx.source_contents_owner[index], canonical)
+            if added.is_err(): return Err(added.unwrap_err())
+        else:
+            # The shared actual projection drops ordinary executable bodies,
+            # param/field defaults and const values. It preserves the required
+            # trait default methods and enum struct-variant defaults exactly.
+            val added = driver.add_streaming_module_surface(builder, ctx.source_paths_owner[index],
+                ctx.source_authored_paths_owner[index], ctx.source_contents_owner[index],
+                ctx.source_module_names_owner[index], index, canonical, true)
+            if added.is_err(): return Err(added.unwrap_err())
+            builder = added.unwrap()
+        index = index + 1
+    val surfaces = driver_hir_source_body_finish_surfaces_v1(builder)?
+    val _verified = driver_hir_source_body_verify_surfaces_v1(driver, surfaces)?
+    Ok(surfaces)
+
+fn driver_hir_source_body_replay_surfaces_v1(driver: CompilerDriver) -> Result<ModuleSurfacesByName, text>:
+    if transient_array_scope_state_v1() != 0 or not driver.streaming_surface_owner_ready:
+        return Err("private source surface replay requires actual closed driver")
+    # Re-parsing must not append a second set of advice/claims. Restore the
+    # original owners on every Result edge after all per-file leases close.
+    val layer = layer_eq_registry_owner_snapshot_v1()
+    val effect = effect_registry_owner_snapshot_v1()
+    val rt = rt_criticality_registry_owner_snapshot_v1()
+    val aspect = aspect_registry_owner_snapshot_v1()
+    # Snapshot containers are reference owners. Reset to genuinely fresh
+    # containers before replay, so restored originals were never overwritten.
+    layer_eq_registry_reset()
+    effect_registry_reset()
+    rt_criticality_reset()
+    aspect_registry_reset()
+    val result = driver_hir_source_body_replay_surfaces_inner_v1(driver)
+    layer_eq_registry_owner_restore_v1(layer)
+    effect_registry_owner_restore_v1(effect)
+    rt_criticality_registry_owner_restore_v1(rt)
+    aspect_registry_owner_restore_v1(aspect)
+    result
+
+export driver_hir_source_body_replay_surfaces_v1

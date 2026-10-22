@@ -1,0 +1,95 @@
+#!/bin/sh
+# Read-only distributed-build host inventory, apart from one removed cgroup leaf.
+# Run on each proposed Linux worker host before live two-node qualification.
+set -eu
+
+if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != "--sdn" ]; }; then
+    echo "usage: sh $0 [--sdn]" >&2
+    exit 2
+fi
+
+sdn=0
+if [ "$#" -eq 1 ]; then
+    sdn=1
+    printf 'dist_build_host_handoff |field, value|\n'
+    printf '    "schema", "simple-dist-build-host-handoff-v1"\n'
+fi
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+blocked=0
+
+report() {
+    if [ "$sdn" -eq 0 ]; then
+        printf 'dist-host-handoff: %s=%s\n' "$1" "$2"
+        return
+    fi
+    # The receipt is an ASCII, bounded, quoted SDN table. Reject untrusted
+    # command output that cannot be represented without changing row shape.
+    bad_bytes=$(printf '%s' "$2" | LC_ALL=C tr -d ' -~' | wc -c)
+    if [ "${#2}" -gt 256 ] || [ "$bad_bytes" -ne 0 ]; then
+        printf 'dist-host-handoff: invalid receipt value for %s\n' "$1" >&2
+        exit 2
+    fi
+    escaped=$(printf '%s' "$2" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
+    printf '    "%s", "%s"\n' "$1" "$escaped"
+}
+block() {
+    report "$1" "$2"
+    blocked=1
+}
+
+report host "$(uname -s)-$(uname -m)"
+report source_commit "$(git -C "$repo_root" rev-parse HEAD)"
+
+if [ "$(uname -s)" != Linux ]; then
+    block linux_host required
+else
+    report linux_host present
+fi
+
+if [ ! -r "$repo_root/.git" ] && [ ! -d "$repo_root/.git" ]; then
+    block checkout missing
+elif ! checkout_status=$(git -C "$repo_root" status --porcelain --untracked-files=all --ignore-submodules=none); then
+    block checkout_status unavailable
+elif [ -n "$checkout_status" ]; then
+    block checkout_status dirty
+else
+    report checkout_status clean
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+    block docker_client missing
+elif ! docker_version=$(docker version --format '{{.Server.Version}}' 2>/dev/null); then
+    block docker_daemon unavailable
+else
+    report docker_daemon "$docker_version"
+fi
+
+if [ "$(uname -s)" = Linux ]; then
+    if [ ! -f /sys/fs/cgroup/cgroup.controllers ] ||
+       [ ! -f /sys/fs/cgroup/cgroup.procs ]; then
+        block cgroup_v2 unavailable
+    else
+        report cgroup_v2 present
+        # This tests leaf creation only. It does not prove child attachment,
+        # resource enforcement, kill/reap, or populated=0 after execution.
+        leaf="/sys/fs/cgroup/simple-dist-host-preflight-$$"
+        if mkdir "$leaf" 2>/dev/null; then
+            if rmdir "$leaf" 2>/dev/null; then
+                report cgroup_leaf_create removable
+            else
+                block cgroup_leaf_create cleanup_failed
+            fi
+        else
+            block cgroup_leaf_create denied
+        fi
+    fi
+fi
+
+if [ "$blocked" -ne 0 ]; then
+    report status BLOCKED
+    exit 2
+fi
+
+report status PREFLIGHT_ONLY
+report next 'Run check-dist-issued-native.shs with an admitted Stage-4 binary and adjacent provenance; then execute the live two-worker tests in the handoff plan.'

@@ -75,7 +75,7 @@ See `doc/06_spec/FILE.md` for generated-vs-manual rules.
 
 Tests in `test/` directory, use `*_spec.spl` naming. Use docstring markdown, NOT println().
 
-```simple
+```simple:skip
 describe "Feature":
     """
     # Feature Module -- overview, usage examples.
@@ -115,7 +115,7 @@ bin/simple test --prune-runs=50          # Keep 50 most recent
 
 Test TUI/Web UI via `UITestClient` over HTTP test API.
 
-```simple
+```text
 use std.ui_test.client.{UITestClient}
 val client = UITestClient.connect("127.0.0.1", port)?
 client.wait_ready(5000)?

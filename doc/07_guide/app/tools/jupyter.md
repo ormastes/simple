@@ -87,7 +87,7 @@ print factorial(10)
 Output: `3628800`
 
 **Cell 3 (uses state from Cell 1):**
-```simple
+```text
 print greeting
 ```
 Output: `Hello from Simple!`
@@ -98,7 +98,7 @@ Output: `Hello from Simple!`
 
 Run Simple code in different execution environments within the same notebook:
 
-```simple
+```text
 %lanes
 ```
 

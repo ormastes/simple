@@ -19,7 +19,7 @@ When all other strategies fail, the resolver checks if `segments[0]` matches a *
 
 This means **any directory under `src/` is a valid top-level import namespace**:
 
-```simple
+```simple:skip
 use app.ffi_gen.parser       # → src/app/ffi_gen/parser.spl
 use os.kernel.boot.cpu       # → src/os/kernel/boot/cpu.spl
 use compiler.tools.stats     # → src/compiler/90.tools/stats.spl (via numbered dir)

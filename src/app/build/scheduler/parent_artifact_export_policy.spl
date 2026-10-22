@@ -1,0 +1,108 @@
+# Protected parent export policy. Each row selects one already-declared output
+# and its local installation mode; it never grants a build or publication.
+use app.build.scheduler.planner.{scheduler_action_digest_valid_v1}
+
+val PARENT_EXPORT_POLICY_MAX_BYTES_V1: i64 = 65536
+val PARENT_EXPORT_POLICY_MAX_ROWS_V1: i64 = 256
+
+struct ParentArtifactExportPolicyRowV1:
+    id: text
+    action_digest: text
+    output_name: text
+    kind: text
+    destination_leaf: text
+    mode: i64
+    target_triple: text
+
+struct ParentArtifactExportPolicyV1:
+    valid: bool
+    reason: text
+    rows: [ParentArtifactExportPolicyRowV1]
+
+fn parent_export_target_supported_v1(target: text) -> bool:
+    ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu",
+     "x86_64-apple-darwin", "aarch64-apple-darwin"].contains(target)
+
+fn _policy_reject_v1(reason: text) -> ParentArtifactExportPolicyV1:
+    ParentArtifactExportPolicyV1(false, reason, [])
+
+fn _policy_token_v1(value: text, maximum: i64) -> bool:
+    if value == "" or value.len() > maximum or value == "." or value == "..":
+        return false
+    for ch in value.chars():
+        if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or
+           (ch >= "0" and ch <= "9") or ch == "-" or ch == "_" or ch == ".":
+            continue
+        return false
+    true
+
+fn _policy_output_v1(value: text, kind: text) -> bool:
+    if not _policy_token_v1(value, 128): return false
+    if kind == "object": return value.ends_with(".o") or value.ends_with(".obj")
+    if kind == "archive": return value.ends_with(".a") or value.ends_with(".lib")
+    kind == "executable"
+
+fn parse_parent_artifact_export_policy_v1(wire: text) -> ParentArtifactExportPolicyV1:
+    """Read canonical, sorted rows from a digest-pinned administrator file."""
+    if wire.len() == 0 or wire.len() > PARENT_EXPORT_POLICY_MAX_BYTES_V1 or
+       not wire.ends_with("\n") or wire.contains("\r") or wire.contains("\x00"):
+        return _policy_reject_v1("policy-wire-invalid")
+    val lines = wire[0:wire.len() - 1].split("\n")
+    if lines.len() < 3 or lines[0] != "simple-build-export-policy-v1" or
+       not lines[1].starts_with("count="):
+        return _policy_reject_v1("policy-header-invalid")
+    val count_text = lines[1][6:]
+    if count_text.len() == 0 or count_text.len() > 3:
+        return _policy_reject_v1("policy-count-invalid")
+    for ch in count_text.chars():
+        if ch < "0" or ch > "9": return _policy_reject_v1("policy-count-invalid")
+    val count = count_text.to_i64() ?? -1
+    if count <= 0 or count > PARENT_EXPORT_POLICY_MAX_ROWS_V1 or
+       count.to_text() != count_text or lines.len() != count + 2:
+        return _policy_reject_v1("policy-count-invalid")
+    var rows: [ParentArtifactExportPolicyRowV1] = []
+    var prior_id = ""
+    var i: i64 = 0
+    while i < count:
+        val line = lines[i + 2]
+        if not line.starts_with("row="):
+            return _policy_reject_v1("policy-row-invalid")
+        val fields = line[4:].split("|")
+        if (fields.len() != 6 and fields.len() != 7) or
+           not _policy_token_v1(fields[0], 128) or
+           fields[0].starts_with("-") or
+           (prior_id != "" and fields[0] <= prior_id) or
+           not scheduler_action_digest_valid_v1(fields[1]) or
+           not _policy_output_v1(fields[2], fields[3]) or
+           not _policy_output_v1(fields[4], fields[3]) or
+           fields[4] == ".simple-build-export.lock":
+            return _policy_reject_v1("policy-row-invalid")
+        val expected_mode = if fields[3] == "executable": "0755" else: "0644"
+        if fields[5] != expected_mode:
+            return _policy_reject_v1("policy-mode-invalid")
+        var target = ""
+        if fields.len() == 7: target = fields[6]
+        if (fields[3] == "executable" and
+            not parent_export_target_supported_v1(target)) or
+           (fields[3] != "executable" and fields.len() != 6):
+            return _policy_reject_v1("policy-target-unsupported")
+        val mode = if fields[3] == "executable": 0o755 else: 0o644
+        rows.push(ParentArtifactExportPolicyRowV1(fields[0], fields[1],
+            fields[2], fields[3], fields[4], mode, target))
+        prior_id = fields[0]
+        i = i + 1
+    ParentArtifactExportPolicyV1(true, "", rows)
+
+fn select_parent_artifact_export_policy_v1(policy: ParentArtifactExportPolicyV1,
+        id: text) -> ParentArtifactExportPolicyRowV1?:
+    if not policy.valid or not _policy_token_v1(id, 128): return nil
+    for row in policy.rows:
+        if row.id == id: return row
+    nil
+
+export PARENT_EXPORT_POLICY_MAX_BYTES_V1, PARENT_EXPORT_POLICY_MAX_ROWS_V1
+export ParentArtifactExportPolicyRowV1, ParentArtifactExportPolicyV1
+export parse_parent_artifact_export_policy_v1
+export select_parent_artifact_export_policy_v1
+
+export parent_export_target_supported_v1

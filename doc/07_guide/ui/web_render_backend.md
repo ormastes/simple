@@ -11,7 +11,7 @@ rendered (and compared) by Simple's own renderer or by real Chromium.
 
 ## The interface
 
-```spl
+```simple:skip
 use std.gc_async_mut.gpu.browser_engine.web_render_backend.{WebRenderBackend}
 
 val r = WebRenderBackend.create("pure_simple", w, h)   # or "chromium"

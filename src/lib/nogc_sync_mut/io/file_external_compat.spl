@@ -1,0 +1,68 @@
+"""Internal compatibility owner for explicit external file payloads.
+
+Ordinary applications use FileTextSession and receive internal text directly.
+This low-level module exists for codec/transport integration tests and owners.
+"""
+use std.common.encoding.external_text.{ExternalText, ExternalChar, ExternalFormat, Encoding, external_char, utf8_format}
+use std.nogc_sync_mut.io.external_text_io.{TextIoError, io_external_text, io_external_from_internal, io_external_bytes, io_internal_text}
+use std.nogc_sync_mut.io_runtime.{file_read_bytes_result, file_write_bytes}
+use std.nogc_sync_mut.fs.host_path.{host_path_native}
+use std.nogc_sync_mut.io.file_bytes.{file_atomic_write_raw, file_create_excl_raw}
+
+pub fn file_read_external_text(path: text, format: ExternalFormat) -> Result<ExternalText, TextIoError>:
+    # Validate the declaration before consuming I/O. Payload decoding remains
+    # explicit through ExternalText.to_internal_text().
+    val admitted = io_external_text([], format)?
+    match file_read_bytes_result(path):
+        case Ok(bytes): io_external_text(bytes, admitted.external_format())
+        case Err(message): Err(TextIoError.Io(message))
+
+pub fn file_read_external_char(path: text, format: ExternalFormat) -> Result<ExternalChar, TextIoError>:
+    val value = file_read_external_text(path, format)?
+    match external_char(io_external_bytes(value)?, format):
+        case Ok(character): Ok(character)
+        case Err(error): Err(TextIoError.Codec(error))
+
+pub fn file_write_external_text(path: text, value: ExternalText) -> Result<(), TextIoError>:
+    # The external payload remains bytes; no decode/re-encode on forwarding.
+    if file_write_bytes(path, io_external_bytes(value)?):
+        Ok(())
+    else:
+        Err(TextIoError.Io("file byte write failed: {path}"))
+
+pub fn file_write_encoded_text(path: text, value: text, format: ExternalFormat) -> Result<(), TextIoError>:
+    val external = io_external_from_internal(value, format)?
+    file_write_external_text(path, external)
+
+
+fn file_atomic_write_external_text(path: text, value: ExternalText) -> Result<(), TextIoError>:
+    # This provider owns mode preservation, fsync, and atomic replacement.
+    # Its admitted carrier is UTF-8 text. Never disguise UTF-16 bytes as text.
+    if value.external_format().encoding != Encoding.Utf8:
+        return Err(TextIoError.Unsupported("atomic file provider admits UTF-8 output only"))
+    val utf8_payload = io_external_text(io_external_bytes(value)?, utf8_format())?
+    val payload = io_internal_text(utf8_payload)?
+    val written = file_atomic_write_raw(host_path_native(path), payload)
+    if written: Ok(()) else: Err(TextIoError.Io("atomic file write failed: {path}"))
+
+pub fn file_atomic_write_encoded_text(path: text, content: text, format: ExternalFormat) -> Result<(), TextIoError>:
+    val external = io_external_from_internal(content, format)?
+    file_atomic_write_external_text(path, external)
+
+
+fn file_create_external_text_exclusive(path: text, value: ExternalText) -> Result<(), TextIoError>:
+    if value.external_format().encoding != Encoding.Utf8:
+        return Err(TextIoError.Unsupported("exclusive file provider admits UTF-8 output only"))
+    val utf8_payload = io_external_text(io_external_bytes(value)?, utf8_format())?
+    val payload = io_internal_text(utf8_payload)?
+    val created = file_create_excl_raw(host_path_native(path), payload)
+    if created: Ok(()) else: Err(TextIoError.Io("exclusive file creation failed: {path}"))
+
+pub fn file_create_encoded_text_exclusive(path: text, content: text, format: ExternalFormat) -> Result<(), TextIoError>:
+    val external = io_external_from_internal(content, format)?
+    file_create_external_text_exclusive(path, external)
+
+
+export file_read_external_text, file_read_external_char, file_write_external_text, file_write_encoded_text
+export file_atomic_write_external_text, file_atomic_write_encoded_text
+export file_create_external_text_exclusive, file_create_encoded_text_exclusive

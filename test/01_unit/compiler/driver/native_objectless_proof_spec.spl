@@ -1,0 +1,120 @@
+# REQ-3028: parser proof survives AST eviction and is bound to loaded bytes.
+use std.spec
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{CompileOptions, SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.core.parser.{par_had_error_get}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfaceParserOwner, module_surface_canonical_path}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_native_objectless_proof.{driver_native_parser_can_persist_objectless, driver_native_objectless_proof_key, driver_native_retained_objectless_proofs}
+use compiler.driver.driver_aot_native_output.{driver_native_module_is_objectless}
+use compiler.mir.mir_data.{MirModule}
+use compiler.mir.mir_types.{MirConstant, MirConstValue, MirType}
+use compiler.hir.hir_types.{SymbolId}
+
+fn proof_context(source: text) -> CompileContext:
+    val ctx = CompileContext.create(CompileOptions.default())
+    val path = module_surface_canonical_path("test/fixtures/proof.spl")
+    ctx.source_paths_owner = [path]
+    ctx.source_module_names_owner = ["proof"]
+    ctx.source_identities_owner = [sha256_text(source)]
+    val parsed = parse_full_frontend(source, path, "proof", Logger(level: 0))
+    expect(par_had_error_get()).to_equal(false)
+    val owner = ModuleSurfaceParserOwner.new(parsed)
+    if driver_native_parser_can_persist_objectless(owner):
+        ctx.native_objectless_decl_proofs[driver_native_objectless_proof_key("proof", path)] = sha256_text(source)
+    # The consumer has no parser or module-surface carrier to consult.
+    ctx.modules = {}
+    ctx.module_surfaces = nil
+    ctx
+
+fn empty_proof_mir() -> MirModule:
+    MirModule(name: "proof", functions: {}, statics: {}, constants: {}, types: {})
+
+fn retained_proof_context(source: text) -> CompileContext:
+    val ctx = CompileContext.create(CompileOptions.default())
+    val path = module_surface_canonical_path("test/fixtures/retained_proof.spl")
+    ctx.source_paths_owner = [path]
+    ctx.source_module_names_owner = ["proof"]
+    ctx.source_identities_owner = [sha256_text(source)]
+    val parsed = parse_full_frontend(source, path, "proof", Logger(level: 0))
+    expect(par_had_error_get()).to_equal(false)
+    ctx.modules = {"proof": parsed}
+    ctx.sources = [SourceFile(path: path, authored_path: path, content: source, module_name: "proof")]
+    ctx.native_objectless_decl_proofs = driver_native_retained_objectless_proofs(ctx.modules, ctx.sources)
+    ctx.evict_ast()
+    ctx.sources = []
+    ctx
+
+describe "source-bound declaration proof after parser reclamation":
+    it "captures ordinary retained parser proof before low-memory eviction":
+        for source in ["struct Record:\n    value: i64\n", "# empty\n", "extern fn rt_get() -> i64\n", "export use lib.common.string_core.*\n"]:
+            val ctx = retained_proof_context(source)
+            expect(ctx.modules.len()).to_equal(0)
+            expect(driver_native_module_is_objectless(ctx, "proof", empty_proof_mir())).to_equal(true)
+
+    it "never grants retained proof for executable declarations":
+        for source in ["fn answer() -> i64: 42\n", "val answer = 42\n", "print 42\n", "trait Named:\n    fn label() -> text:\n        \"label\"\n"]:
+            val ctx = retained_proof_context(source)
+            expect(ctx.native_objectless_decl_proofs.len()).to_equal(0)
+            expect(driver_native_module_is_objectless(ctx, "proof", empty_proof_mir())).to_equal(false)
+
+    it "rebuilds retained proof from current parser inputs rather than old rows":
+        val ctx = retained_proof_context("# empty\n")
+        ctx.native_objectless_decl_proofs = driver_native_retained_objectless_proofs({}, [])
+        expect(driver_native_module_is_objectless(ctx, "proof", empty_proof_mir())).to_equal(false)
+
+    it "rejects changed bytes after retained proof capture":
+        val ctx = retained_proof_context("# empty\n")
+        ctx.source_identities_owner = [sha256_text("fn answer() -> i64: 42\n")]
+        expect(driver_native_module_is_objectless(ctx, "proof", empty_proof_mir())).to_equal(false)
+
+    it "admits a type-only module after AST eviction":
+        val ctx = proof_context("struct Record:\n    value: i64\nenum Kind:\n    First\n")
+        expect(driver_native_module_is_objectless(ctx, "proof", empty_proof_mir())).to_equal(true)
+
+    it "admits a re-export facade after AST eviction":
+        val ctx = proof_context("export use lib.common.string_core.*\nexport char_code\n")
+        expect(driver_native_module_is_objectless(ctx, "proof", empty_proof_mir())).to_equal(true)
+
+    it "retains struct defaults as consumer construction metadata":
+        val ctx = proof_context("struct Record:\n    values: [i64] = []\n    ready: bool = false\n")
+        expect(driver_native_module_is_objectless(ctx, "proof", empty_proof_mir())).to_equal(true)
+
+    it "does not persist proof for a trait default method body":
+        val ctx = proof_context("trait Named:\n    fn label() -> text:\n        \"label\"\n")
+        expect(ctx.native_objectless_decl_proofs.len()).to_equal(0)
+        expect(driver_native_module_is_objectless(ctx, "proof", empty_proof_mir())).to_equal(false)
+
+    it "admits a parser-confirmed empty module after AST eviction":
+        val ctx = proof_context("# intentionally empty\n")
+        expect(driver_native_module_is_objectless(ctx, "proof", empty_proof_mir())).to_equal(true)
+
+    it "does not infer a missing proof from empty MIR":
+        val ctx = proof_context("# empty\n")
+        ctx.native_objectless_decl_proofs = {}
+        expect(driver_native_module_is_objectless(ctx, "proof", empty_proof_mir())).to_equal(false)
+
+    it "rejects stale content identity and ambiguous physical ownership":
+        val ctx = proof_context("# empty\n")
+        ctx.source_identities_owner = [sha256_text("fn work(): 1\n")]
+        expect(driver_native_module_is_objectless(ctx, "proof", empty_proof_mir())).to_equal(false)
+        val duplicate = proof_context("# empty\n")
+        duplicate.source_paths_owner = [duplicate.source_paths_owner[0], duplicate.source_paths_owner[0]]
+        duplicate.source_module_names_owner = ["proof", "alias"]
+        duplicate.source_identities_owner = [sha256_text("# empty\n"), sha256_text("# empty\n")]
+        expect(driver_native_module_is_objectless(duplicate, "proof", empty_proof_mir())).to_equal(false)
+
+    it "never conceals lost nonextern functions or constants":
+        for source in ["fn answer() -> i64: 42\n", "val answer = 42\n", "print 42\n", "struct P:\n    x: i64\nimpl P:\n    fn get() -> i64: self.x\n"]:
+            val ctx = proof_context(source)
+            expect(ctx.native_objectless_decl_proofs.len()).to_equal(0)
+            expect(driver_native_module_is_objectless(ctx, "proof", empty_proof_mir())).to_equal(false)
+
+    it "never drops emitted MIR data even with a valid parser proof":
+        val ctx = proof_context("# empty\n")
+        val symbol = SymbolId(id: 1)
+        val constant = MirConstant(symbol: symbol, name: "answer", type_: MirType.i64(), value: MirConstValue.Int(42))
+        val mir = MirModule(name: "proof", functions: {}, statics: {}, constants: {symbol: constant}, types: {})
+        expect(driver_native_module_is_objectless(ctx, "proof", mir)).to_equal(false)

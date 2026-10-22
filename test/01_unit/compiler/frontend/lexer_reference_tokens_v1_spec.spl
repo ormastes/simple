@@ -1,0 +1,62 @@
+"""REQ-MC-008/B5 C2 owner token receipt equivalence; authored UNRUN."""
+use std.spec.*
+use std.spec.step
+use compiler.frontend.core.lexer_struct.{make_core_lexer, core_lexer_next_token, core_reference_tokens_v1}
+
+fn require_reference_lexer_parity_v1(source: text):
+    val receipt = core_reference_tokens_v1(source, 10000).unwrap()
+    var legacy = make_core_lexer(source)
+    var offsets: [i64] = [0]
+    var bytes = 0
+    for ch in legacy.source_chars:
+        bytes = bytes + ch.len()
+        offsets.push(bytes)
+    var position = 0
+    while true:
+        val next = core_lexer_next_token(legacy)
+        legacy = next.0
+        val kind = next.1
+        if kind == 190:
+            break
+        if kind == 180 or kind == 181 or kind == 182:
+            continue
+        expect(position < receipt.len()).to_be(true)
+        val token = receipt[position]
+        expect(token.kind).to_equal(kind)
+        expect(token.codepoint_start).to_equal(legacy.cur_start)
+        expect(token.codepoint_end).to_equal(legacy.pos)
+        expect(token.byte_start).to_equal(offsets[legacy.cur_start])
+        expect(token.byte_end).to_equal(offsets[legacy.pos])
+        expect(token.line).to_equal(legacy.cur_line)
+        expect(token.column).to_equal(legacy.cur_col)
+        expect(source[token.byte_start:token.byte_end]).to_equal(token.spelling)
+        position = position + 1
+    expect(position).to_equal(receipt.len())
+
+describe "REQ-MC-008 owner-scoped original lexer receipt":
+    it "matches actual existing lexer tokens for functions, aliases, branches and original UTF8":
+        step("Compare actual old/new token streams without importing a mutable lexer receiver")
+        require_reference_lexer_parity_v1("# λ 한글\nuse pkg.one.\{first as chosen, second\}\nfn entry(n: i64) -> i64:\n    if n > 0:\n        return chosen()\n    return 1\n")
+        require_reference_lexer_parity_v1("use pkg.one.(first as chosen)\nfn entry() -> text: \"plain\"\n")
+
+    it "owns token coordinates across later scans and handles valid empty inventories":
+        step("Retain A receipt across a separate B lexer owner and repeat A")
+        val source = "# λ\nfn target() -> i64: 1\n"
+        val first = core_reference_tokens_v1(source, 100).unwrap()
+        val other = core_reference_tokens_v1("fn different() -> i64: 2\n", 100).unwrap()
+        expect(other.len()).to_be_greater_than(0)
+        val last = core_reference_tokens_v1(source, 100).unwrap()
+        expect(last.len()).to_equal(first.len())
+        for position in 0..first.len():
+            expect(last[position].byte_start).to_equal(first[position].byte_start)
+            expect(last[position].byte_end).to_equal(first[position].byte_end)
+            expect(last[position].spelling).to_equal(first[position].spelling)
+        expect(core_reference_tokens_v1("", 1).unwrap().len()).to_equal(0)
+        expect(core_reference_tokens_v1("# comment\n", 10).unwrap().len()).to_equal(0)
+
+    it "refuses exhausted capacity and lexical failure without a partial receipt":
+        step("Fail before truncation and recover for the next independent lexer owner")
+        expect(core_reference_tokens_v1("fn target() -> i64: 1\n", 1).is_err()).to_be(true)
+        expect(core_reference_tokens_v1("", 0).is_err()).to_be(true)
+        expect(core_reference_tokens_v1("\0", 100).is_err()).to_be(true)
+        expect(core_reference_tokens_v1("fn target() -> i64: 1\n", 100).is_ok()).to_be(true)

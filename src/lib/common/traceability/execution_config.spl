@@ -1,0 +1,96 @@
+# Versioned, explicit snapshot of runner execution configuration.
+# @req REQ-TRC-012 REQ-TRC-013 REQ-TRC-018
+
+# `backend` is the explicit native backend choice (`default`, `llvm`, or
+# `cranelift`); `execution_mode` is the runner's TestExecutionMode spelling.
+# unresolved/unsupported names preserve unknown facts rather than defaulting
+# them into a receipt.
+pub struct TraceExecutionConfiguration:
+    execution_mode: text
+    backend: text
+    lane_id: text
+    timeout_secs: i64
+    timeout_binding: text
+    slow_policy: text
+    seed: i64
+    seed_set: bool
+    fail_fast: bool
+    cache_policy: text
+    parallel: bool
+    worker_count: i64
+    shard_id: text
+    shard_index: i64
+    shard_count: i64
+    shard_membership: [text]
+    unresolved_fields: [text]
+    unsupported_fields: [text]
+
+pub fn validate_trace_execution_configuration_shape(config: TraceExecutionConfiguration) -> Result<(), text>:
+    if config.execution_mode == "" or config.backend == "" or config.lane_id == "":
+        return Err("trace execution configuration identity is incomplete")
+    if config.execution_mode.len() > 128 or config.backend.len() > 128 or config.lane_id.len() > 1024:
+        return Err("trace execution configuration text field exceeds its bound")
+    if config.timeout_binding.len() > 128 or config.slow_policy.len() > 128 or config.cache_policy.len() > 128:
+        return Err("trace execution policy field exceeds its bound")
+    if config.shard_id.len() > 1024:
+        return Err("trace shard identity exceeds its bound")
+    if config.timeout_secs < 0 or config.worker_count < 0 or config.shard_count < 0 or config.shard_index < 0:
+        return Err("trace execution configuration contains a negative bound")
+    if config.shard_membership.len() == 0 or config.shard_membership.len() > 65536:
+        return Err("trace shard membership must contain 1 to 65536 selected paths")
+    var seen: Dict<text, bool> = {}
+    var membership_bytes = 0
+    for path in config.shard_membership:
+        if path == "":
+            return Err("trace shard membership contains an empty path")
+        if path.len() > 4096:
+            return Err("trace shard membership path exceeds its bound")
+        membership_bytes += path.bytes().len()
+        if membership_bytes > 1048576:
+            return Err("trace shard membership exceeds 1 MiB")
+        if seen.contains_key(path):
+            return Err("trace shard membership contains a duplicate path")
+        seen[path] = true
+    if config.unresolved_fields.len() > 128 or config.unsupported_fields.len() > 128:
+        return Err("trace execution configuration has too many unresolved fields")
+    var unresolved_seen: Dict<text, bool> = {}
+    for field in config.unresolved_fields:
+        if field == "" or field.len() > 128:
+            return Err("trace unresolved field name is empty or too long")
+        if unresolved_seen.contains_key(field):
+            return Err("trace unresolved fields contain a duplicate name")
+        unresolved_seen[field] = true
+    var unsupported_seen: Dict<text, bool> = {}
+    for field in config.unsupported_fields:
+        if field == "" or field.len() > 128:
+            return Err("trace unsupported field name is empty or too long")
+        if unsupported_seen.contains_key(field):
+            return Err("trace unsupported fields contain a duplicate name")
+        unsupported_seen[field] = true
+    Ok(())
+
+# Checks the supported configuration profile only. This does not authenticate
+# the executable/lane, prove that workers used these options, or admit evidence.
+pub fn validate_trace_execution_configuration(config: TraceExecutionConfiguration) -> Result<(), text>:
+    validate_trace_execution_configuration_shape(config)?
+    if not ["interpreter", "smf", "native", "compile"].contains(config.execution_mode):
+        return Err("unsupported trace execution mode")
+    if not ["default", "llvm", "cranelift"].contains(config.backend):
+        return Err("unsupported trace execution backend")
+    if config.timeout_secs < 1:
+        return Err("trace execution timeout must be positive")
+    if config.timeout_binding != "fixed":
+        return Err("trace execution timeout is not fully resolved")
+    if not ["include_slow", "only_slow", "exclude_slow"].contains(config.slow_policy):
+        return Err("unsupported trace slow-test policy")
+    if config.cache_policy != "disabled":
+        return Err("trace execution cache policy is unsupported without current-run cache evidence")
+    if config.worker_count < 1:
+        return Err("trace execution worker count must be positive")
+    if config.shard_id == "" or config.shard_count < 1 or config.shard_index >= config.shard_count:
+        return Err("trace shard identity or membership is invalid")
+    if config.unresolved_fields.len() > 0:
+        return Err("trace execution configuration contains unresolved fields")
+    if config.unsupported_fields.len() > 0:
+        return Err("trace execution configuration contains unsupported fields")
+    Ok(())

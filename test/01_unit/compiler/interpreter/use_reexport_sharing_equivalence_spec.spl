@@ -1,0 +1,59 @@
+use std.spec
+use test.fixtures.interp_reexport_sharing.top.*
+use test.fixtures.interp_reexport_sharing.top2.*
+
+# Name-resolution equivalence for the seed interpreter's shared (by-reference)
+# import tables. doc/08_tracking/bug/interpreter_use_unpack_reexports_transitive_closure_2026-10-20.md
+#
+# Every expected value below was recorded from the seed BEFORE imports were
+# shared (binary built from release_phase3 @ dacf1e81637, which copied each
+# imported export into the importer's env, export table and binding table).
+# They pin the CURRENT rules, quirks included -- this spec is not a statement
+# of what the rules should be:
+#   * `use m.{x}` binds m's whole surface, and m's surface includes what m
+#     itself only imported (`selective_leak`).
+#   * last import wins on a collision (`order`); an own `val` placed before a
+#     `use` is overridden by it in the export table, one placed after wins
+#     (`top2_shadow`); local functions beat imports (`mid-dup`).
+#   * a function body reads its own module's globals live before imports
+#     (`mid-early` inside mid_reads).
+#   * an aliased imported global (`lc`) goes stale after a write through the
+#     original name (`top2_write`).
+describe "interpreter use/re-export sharing keeps name resolution identical":
+    it "binds the transitive surface through a selective import":
+        expect(top_selective_leak()).to_equal("mid_fn|mid_other|leaf_fn|mid-dup|mid-early|mid-late|leaf|0|leaf-dup")
+
+    it "resolves an aliased import":
+        expect(top_alias()).to_equal("leaf_fn")
+
+    it "resolves a glob re-export facade and its aliased selective re-export":
+        expect(top_facade()).to_equal("other_fn|leaf|leaf-twin")
+
+    it "lets the last import win a collision":
+        expect(top_order()).to_equal("other-twin|leaf-twin")
+
+    it "resolves through an import cycle":
+        expect(top_cycle()).to_equal("cyc_b_fn|cyc_b_fn")
+
+    it "resolves a qualified module member":
+        expect(top_qualified()).to_equal("leaf_fn")
+
+    it "reads an imported mutable global live":
+        val first = top_live_global()
+        val second = top_live_global()
+        expect(first).to_equal("0|1|1")
+        expect(second).to_equal("1|2|2")
+
+    it "keeps the evaluation-time env in import order":
+        expect(top_eval()).to_equal("mid_fn|mid_other|leaf-dup|leaf")
+
+    it "keeps bare exports fill-only":
+        expect(top_bare()).to_equal("bare_own|leaf_fn|leaf-twin")
+
+    it "keeps own-before-import and own-after-import shadowing":
+        expect(top2_shadow()).to_equal("leaf-early|leaf-late|leaf-early|mid-late|leaf_fn")
+
+    it "keeps aliased live-global and write-through behaviour":
+        expect(top2_alias_live()).to_equal("3|3|3")
+        expect(top2_write_through()).to_equal("40|3|41")
+        expect(top2_alias_live()).to_equal("42|42|42")

@@ -5,7 +5,7 @@
 
 use compiler.blocks.definition.{BlockDefinition, ConstValue, BlockExample}
 use compiler.blocks.value.{BlockValue}
-use compiler.blocks.context.{BlockContext, BlockError}
+use compiler.blocks.context.{BlockContext, BlockError, blockerror_parse}
 use compiler.blocks.modes.{LexerMode, SyntaxFeatures}
 
 # ============================================================================
@@ -15,7 +15,7 @@ use compiler.blocks.modes.{LexerMode, SyntaxFeatures}
 fn define_block(
     kind: text,
     mode: LexerMode,
-    parser: fn(text) -> text
+    parser: fn(text) -> Result<BlockValue, text>
 ):
     """Define a new custom block type with minimal configuration.
 
@@ -27,7 +27,7 @@ fn define_block(
     All optional methods use smart defaults.
 
     Example:
-    ```simple
+    ```text
     val heredoc = define_block("heredoc", LexerMode.Raw, \text:
         Ok(BlockValue.Raw(text.trim()))
     )
@@ -55,7 +55,7 @@ fn define_block(
 fn validated_block(
     kind: text,
     mode: LexerMode,
-    parser: fn(text) -> text,
+    parser: fn(text) -> Result<BlockValue, text>,
     validator: fn(BlockValue) -> [text]
 ):
     """Define a block with validation after parsing.
@@ -101,7 +101,7 @@ fn validated_block(
 fn define_const_block(
     kind: text,
     mode: LexerMode,
-    parser: fn(text) -> text,
+    parser: fn(text) -> Result<BlockValue, text>,
     eval: fn(BlockValue) -> ConstValue
 ):
     """Define a block with compile-time evaluation.
@@ -143,13 +143,13 @@ fn define_const_block(
     )
 
 # Backward-compatible aliases used by public docs/tests.
-fn block(kind: text, mode: LexerMode, parser: fn(text) -> text):
+fn block(kind: text, mode: LexerMode, parser: fn(text) -> Result<BlockValue, text>):
     define_block(kind, mode, parser)
 
 fn block_with_validation(
     kind: text,
     mode: LexerMode,
-    parser: fn(text) -> text,
+    parser: fn(text) -> Result<BlockValue, text>,
     validator: fn(BlockValue) -> [text]
 ):
     validated_block(kind, mode, parser, validator)
@@ -157,7 +157,7 @@ fn block_with_validation(
 fn const_block(
     kind: text,
     mode: LexerMode,
-    parser: fn(text) -> text,
+    parser: fn(text) -> Result<BlockValue, text>,
     eval: fn(BlockValue) -> ConstValue
 ):
     define_const_block(kind, mode, parser, eval)
@@ -166,7 +166,7 @@ fn const_block(
 # Implementation: Simple Block
 # ============================================================================
 
-struct SimpleBlockDef(BlockDefinition):
+struct SimpleBlockDef:
     """Simple block definition with minimal boilerplate.
 
     Wraps user-provided parser with smart defaults for all optional methods.
@@ -174,14 +174,15 @@ struct SimpleBlockDef(BlockDefinition):
 
     _kind: text
     _mode: LexerMode
-    _parser: fn(text) -> text
+    _parser: fn(text) -> Result<BlockValue, text>
 
     # --- Required Methods ---
 
+impl BlockDefinition for SimpleBlockDef:
     fn kind() -> text:
         self._kind
 
-    fn parse_payload(payload: text, ctx: BlockContext) -> text:
+    fn parse_payload(payload: text, ctx: BlockContext) -> Result<BlockValue, BlockError>:
         # Call user's simple parser
         match (self._parser)(payload):
             case Ok(value):
@@ -205,7 +206,7 @@ struct SimpleBlockDef(BlockDefinition):
         val _ = ctx
         []
 
-    fn eval_const(value: BlockValue) -> has_ConstValue?:
+    fn eval_const(value: BlockValue) -> ConstValue?:
         # Default: no compile-time evaluation
         val _ = value
         nil
@@ -223,18 +224,19 @@ struct SimpleBlockDef(BlockDefinition):
 # Implementation: Validated Block
 # ============================================================================
 
-struct ValidatedBlockDef(BlockDefinition):
+struct ValidatedBlockDef:
     """Block definition with post-parse validation."""
 
     _kind: text
     _mode: LexerMode
-    _parser: fn(text) -> text
+    _parser: fn(text) -> Result<BlockValue, text>
     _validator: fn(BlockValue) -> [text]
 
+impl BlockDefinition for ValidatedBlockDef:
     fn kind() -> text:
         self._kind
 
-    fn parse_payload(payload: text, ctx: BlockContext) -> text:
+    fn parse_payload(payload: text, ctx: BlockContext) -> Result<BlockValue, BlockError>:
         match (self._parser)(payload):
             case Ok(value):
                 Ok(value)
@@ -254,7 +256,7 @@ struct ValidatedBlockDef(BlockDefinition):
             out = out.push(BlockError.validation(msg))
         out
 
-    fn eval_const(value: BlockValue) -> has_ConstValue?:
+    fn eval_const(value: BlockValue) -> ConstValue?:
         val _ = value
         nil
 
@@ -269,18 +271,19 @@ struct ValidatedBlockDef(BlockDefinition):
 # Implementation: Const Block
 # ============================================================================
 
-struct ConstBlockDef(BlockDefinition):
+struct ConstBlockDef:
     """Block definition with compile-time evaluation."""
 
     _kind: text
     _mode: LexerMode
-    _parser: fn(text) -> text
+    _parser: fn(text) -> Result<BlockValue, text>
     _eval: fn(BlockValue) -> ConstValue
 
+impl BlockDefinition for ConstBlockDef:
     fn kind() -> text:
         self._kind
 
-    fn parse_payload(payload: text, ctx: BlockContext) -> text:
+    fn parse_payload(payload: text, ctx: BlockContext) -> Result<BlockValue, BlockError>:
         match (self._parser)(payload):
             case Ok(value):
                 Ok(value)
@@ -298,7 +301,7 @@ struct ConstBlockDef(BlockDefinition):
         val _ = ctx
         []
 
-    fn eval_const(value: BlockValue) -> has_ConstValue?:
+    fn eval_const(value: BlockValue) -> ConstValue?:
         # Call user's eval function
         (self._eval)(value)
 

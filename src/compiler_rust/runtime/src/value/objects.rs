@@ -244,6 +244,109 @@ pub extern "C" fn rt_closure_free(closure: RuntimeValue) {
 }
 
 // ============================================================================
+// Closure pins (twin of runtime_native.c RtCoreClosurePin)
+// ============================================================================
+
+/// A consumer that runs a closure LATER (the PoolState v1 task queue in
+/// runtime_pool.c) pins it with `rt_closure_retain` and drops the pin exactly
+/// once with `rt_closure_release`. A closure dies only when its transient scope
+/// ends; the scope end marks a pinned closure orphaned instead of freeing it
+/// (`closure_pin_defer_free`), and the release that drops the last pin of an
+/// orphaned closure frees it. Captured heap objects are not pinned.
+struct ClosurePin {
+    addr: usize,
+    pins: i64,
+    orphaned: bool,
+}
+
+struct ClosurePins {
+    entries: Vec<ClosurePin>,
+    retains: i64,
+    releases: i64,
+}
+
+static CLOSURE_PINS: std::sync::Mutex<ClosurePins> = std::sync::Mutex::new(ClosurePins {
+    entries: Vec::new(),
+    retains: 0,
+    releases: 0,
+});
+
+fn closure_pins() -> std::sync::MutexGuard<'static, ClosurePins> {
+    CLOSURE_PINS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Scope end: true when `addr` is a pinned closure, which is then orphaned
+/// and must NOT be freed by the caller.
+pub(crate) fn closure_pin_defer_free(addr: usize) -> bool {
+    let mut table = closure_pins();
+    match table.entries.iter_mut().find(|e| e.addr == addr) {
+        Some(entry) => {
+            entry.orphaned = true;
+            true
+        }
+        None => false,
+    }
+}
+
+/// Pin a closure for a deferred consumer. 1 = pinned; 0 = not a closure.
+#[no_mangle]
+pub extern "C" fn rt_closure_retain(closure: RuntimeValue) -> i64 {
+    let Some(ptr) = get_typed_ptr::<RuntimeClosure>(closure, HeapObjectType::Closure) else {
+        return 0;
+    };
+    let addr = ptr as usize;
+    let mut table = closure_pins();
+    match table.entries.iter_mut().find(|e| e.addr == addr) {
+        Some(entry) => entry.pins += 1,
+        None => table.entries.push(ClosurePin { addr, pins: 1, orphaned: false }),
+    }
+    table.retains += 1;
+    1
+}
+
+/// Drop one pin taken by `rt_closure_retain`; the last pin of a closure whose
+/// scope already ended frees it. 1 = a pin was dropped; 0 = no pin held
+/// (never a double free).
+#[no_mangle]
+pub extern "C" fn rt_closure_release(closure: RuntimeValue) -> i64 {
+    if !closure.is_heap() {
+        return 0;
+    }
+    let ptr = closure.as_heap_ptr();
+    let addr = ptr as usize;
+    let free_now = {
+        let mut table = closure_pins();
+        let Some(index) = table.entries.iter().position(|e| e.addr == addr) else {
+            return 0;
+        };
+        table.releases += 1;
+        table.entries[index].pins -= 1;
+        if table.entries[index].pins == 0 {
+            table.entries.swap_remove(index).orphaned
+        } else {
+            false
+        }
+    };
+    if free_now {
+        unsafe {
+            let size = (*ptr).size as usize;
+            if let Ok(layout) = std::alloc::Layout::from_size_align(size, 8) {
+                if super::heap::unregister_heap_ptr_checked(ptr) {
+                    std::alloc::dealloc(ptr as *mut u8, layout);
+                }
+            }
+        }
+    }
+    1
+}
+
+/// Test hook (not runtime ABI): (retains, releases, live pinned closures).
+pub fn closure_pin_stats() -> (i64, i64, i64) {
+    let table = closure_pins();
+    (table.retains, table.releases, table.entries.len() as i64)
+}
+
+// ============================================================================
 // Enum SFFI functions
 // ============================================================================
 
@@ -384,6 +487,36 @@ pub extern "C" fn rt_heap_ref_wellformed(value: RuntimeValue) -> i8 {
     }
 }
 
+/// Encoder node guard, tag-aware (v21, 2026-10-18). The generated encoders
+/// receive nodes in TWO shapes:
+///   * Runtime-allocated nodes (arrays/strings/dicts/objects) -- registered
+///     in the heap allocation registry at birth.
+///   * RAW struct blocks -- the AOT lowering allocates Simple structs and
+///     tuples as plain rt_alloc(field_count*8) blocks, tags the value
+///     TAG_HEAP, and never registers them (expr_dispatch.spl: the "no rt_array
+///     header / no runtime tuple type tag under AOT" representation). A pure
+///     registry probe therefore false-rejected EVERYTHING (v20: stores=0
+///     refused=2694) and an unregistered garbage word is INDISTINGUISHABLE
+///     from a live raw block -- no registry can separate them (v21).
+/// So: nil rejects; a registered heap object accepts; an unregistered tagged
+/// value ACCEPTS on the formation check (the erased-read campaign's corrupt
+/// FIELD inside a live block remains guarded writer-side and by the draw
+/// fixes landed upstream). A follow-up should register raw struct blocks at
+/// the allocator so this probe can reject the v19 class again.
+#[no_mangle]
+pub extern "C" fn rt_heap_ref_registered(value: RuntimeValue) -> i8 {
+    let addr = (value.0 & !super::tags::TAG_MASK) as usize;
+    // Untagged by-value copies, registered objects and raw AOT blocks all
+    // accept (see doc), so a registry probe here cannot change the answer and
+    // only costs a lookup per encoded node. Restore it when raw blocks are
+    // registered at the allocator.
+    if addr < 4096 {
+        0
+    } else {
+        1
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn rt_unwrap_or_trap(value: RuntimeValue) -> RuntimeValue {
     let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) else {
@@ -514,6 +647,28 @@ pub extern "C" fn rt_expect_or_trap(value: RuntimeValue, msg: RuntimeValue) -> R
     value
 }
 
+/// `?` absence test in one enum lookup: exactly
+/// `rt_is_none(value) || rt_enum_check_variant(value, expected_enum_id, err_discriminant)`.
+/// Twin of `rt_try_is_absent` in `src/runtime/runtime_native.c`.
+#[no_mangle]
+pub extern "C" fn rt_try_is_absent(value: RuntimeValue, expected_enum_id: i64, err_discriminant: i64) -> bool {
+    if value.is_nil() {
+        return true;
+    }
+    static NONE_DISC: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum).is_some_and(|p| unsafe {
+        let enum_id = (*p).enum_id;
+        let discriminant = (*p).discriminant;
+        if enum_id == OPTION_ENUM_ID
+            && (discriminant == 1 || discriminant == *NONE_DISC.get_or_init(|| hash_variant_discriminant("None")))
+        {
+            return true;
+        }
+        discriminant as i64 == err_discriminant
+            && (expected_enum_id == 0 || enum_id == 0 || enum_id as i64 == expected_enum_id)
+    })
+}
+
 /// Get the payload of an enum value
 #[no_mangle]
 pub extern "C" fn rt_enum_payload(value: RuntimeValue) -> RuntimeValue {
@@ -547,9 +702,13 @@ pub extern "C" fn rt_is_none(value: RuntimeValue) -> bool {
     if value.is_nil() {
         return true;
     }
-    let none_disc = hash_variant_discriminant("None");
+    // `?` calls this on every nullable subject: hash "None" once, not per call
+    // (DefaultHasher::new() is fixed-key, so the value is a constant).
+    static NONE_DISC: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum).is_some_and(|p| unsafe {
-        (*p).enum_id == OPTION_ENUM_ID && ((*p).discriminant == 1 || (*p).discriminant == none_disc)
+        (*p).enum_id == OPTION_ENUM_ID
+            && ((*p).discriminant == 1
+                || (*p).discriminant == *NONE_DISC.get_or_init(|| hash_variant_discriminant("None")))
     })
 }
 

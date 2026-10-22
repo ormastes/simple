@@ -70,6 +70,60 @@ describe "@evolving enum contract (S3)":
             expect(diags.len()).to_equal(1)
             expect(diags[0].code).to_equal("E-EVOLVING-001")
 
+        it "rejects unsupported nonzero repr widths despite matching payload text":
+            # REQ-MC-003 / canonical02-4: the declaration API validates metadata too.
+            for bits in [1, 7, 24, 128]:
+                val diags = check_enum_declaration(evolving("Wire", bits, "Other"),
+                    [known("Start", 0), unknown_variant("Other", "u" + bits.to_text())])
+                expect(diags.len()).to_equal(1)
+                expect(diags[0].code).to_equal("E-EVOLVING-001")
+                expect(diags[0].enum_name).to_equal("Wire")
+                expect(diags[0].detail).to_contain("repr:")
+
+        it "rejects a missing name slot before reading a single payload type":
+            val diags = check_enum_declaration(evolving("Wire", 16, "Other"),
+                [EnumVariantShape(name: "Other", payload_names: [], payload_types: ["u16"],
+                                  has_discriminant: false, discriminant: 0)])
+            expect(diags.len()).to_equal(1)
+            expect(diags[0].code).to_equal("E-EVOLVING-001")
+            expect(diags[0].detail).to_contain("Other")
+
+        it "rejects an extra name slot alongside a single payload type":
+            val diags = check_enum_declaration(evolving("Wire", 16, "Other"),
+                [EnumVariantShape(name: "Other", payload_names: ["raw", "extra"],
+                                  payload_types: ["u16"],
+                                  has_discriminant: false, discriminant: 0)])
+            expect(diags.len()).to_equal(1)
+            expect(diags[0].code).to_equal("E-EVOLVING-001")
+            expect(diags[0].detail).to_contain("Other")
+
+        it "rejects a name slot without any payload types":
+            val diags = check_enum_declaration(evolving("Wire", 16, "Other"),
+                [EnumVariantShape(name: "Other", payload_names: ["raw"], payload_types: [],
+                                  has_discriminant: false, discriminant: 0)])
+            expect(diags.len()).to_equal(1)
+            expect(diags[0].code).to_equal("E-EVOLVING-001")
+
+        it "rejects multiple payload fields with otherwise parallel metadata":
+            val diags = check_enum_declaration(evolving("Wire", 16, "Other"),
+                [EnumVariantShape(name: "Other", payload_names: ["raw", "extra"],
+                                  payload_types: ["u16", "u16"],
+                                  has_discriminant: false, discriminant: 0)])
+            expect(diags.len()).to_equal(1)
+            expect(diags[0].code).to_equal("E-EVOLVING-001")
+
+        it "accepts each supported width with a raw field or positional name slot":
+            for bits in [8, 16, 32, 64]:
+                val ty = "u" + bits.to_text()
+                val named = check_enum_declaration(evolving("Wire", bits, "Other"),
+                    [known("Start", 0), unknown_variant("Other", ty)])
+                expect(named.len()).to_equal(0)
+                val positional = check_enum_declaration(evolving("Wire", bits, "Other"),
+                    [known("Start", 0),
+                     EnumVariantShape(name: "Other", payload_names: [""], payload_types: [ty],
+                                      has_discriminant: false, discriminant: 0)])
+                expect(positional.len()).to_equal(0)
+
         it "accepts a well-formed evolving enum":
             val diags = check_enum_declaration(evolving("MessageKind", 16, "Unknown"),
                 [known("Start", 1), known("Stop", 2), unknown_variant("Unknown", "u16")])

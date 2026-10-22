@@ -29,6 +29,7 @@
 # module level.
 
 use std.spec
+use std.spec.step
 use compiler.common.config.Logger
 use compiler.frontend.frontend.parse_full_frontend
 use compiler.hir.hir_lowering.types.HirLowering
@@ -90,6 +91,38 @@ fn lowering_messages(lowering: MirLowering) -> [text]:
     for e in lowering.errors:
         messages = messages.push(e.message)
     messages
+
+describe "REQ-002 return operand enum extension is diagnosed and traps":
+    it "distinguishes the original enum from an injected unhandled payload variant":
+        step("Lower the same explicit Copy Move Const classifier before and after adding Borrow")
+        # Inline the real frontend pipeline: no hand-built coverage object or
+        # source-text assertion substitutes for the production MIR oracle.
+        for injected in [false, true]:
+            val extension = if injected: "    Borrow(i64)\n" else: ""
+            val src = "enum ReturnOperand:\n" +
+                "    Copy(i64)\n    Move(i64)\n    Const(i64)\n" + extension +
+                "fn classify(value: ReturnOperand) -> i64:\n" +
+                "    match value:\n" +
+                "        case ReturnOperand.Copy(local): local\n" +
+                "        case ReturnOperand.Move(local): local\n" +
+                "        case ReturnOperand.Const(value): value\n"
+            val parsed = parse_full_frontend(src, "testdata/return_operand_extension.spl", "return_operand_extension", Logger(level: 0))
+            var hir_lowering = HirLowering.with_filename("testdata/return_operand_extension.spl")
+            val hir = hir_lowering.lower_module(parsed)
+            expect(hir_lowering.errors.len()).to_equal(0)
+            val target_context = driver_mir_target_context(driver_core_compile_options_default())
+            var lowering = MirLowering.new_for_target(hir.symbols, target_context)
+            val mir = lowering.lower_module(hir)
+            val messages = lowering_messages(lowering)
+            expect(any_contains(messages, "Missing: Borrow.")).to_equal(injected)
+            val classifier = find_function(mir, "classify")
+            assert_true(classifier.?)
+            val function = classifier.unwrap()
+            val traps = abort_trap_messages(function)
+            expect(traps.len()).to_equal(1)
+            expect(any_contains(traps, "Borrow")).to_equal(injected)
+            expect(any_contains(traps, "fell through")).to_equal(true)
+            assert_true(every_abort_block_panics(function))
 
 describe "enum match fall-through: partial no-default match traps at runtime":
     it "lowers the fall-through path to rt_panic + Abort instead of a silent goto-merge placeholder 0":

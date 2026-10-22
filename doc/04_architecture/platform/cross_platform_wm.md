@@ -170,7 +170,7 @@ consume the same `UIEvent` stream.
 ### 1. InputBackend Trait (NEW)
 **File:** `src/os/compositor/input_backend.spl`
 
-```simple
+```simple:skip
 trait InputBackend:
     """Abstract input interface for compositor.
     Returns platform-independent key/mouse events."""
@@ -185,7 +185,7 @@ trait InputBackend:
 ### 2. Ps2InputBackend (ADAPTER)
 **File:** `src/os/compositor/input_backend.spl`
 
-```simple
+```simple:skip
 class Ps2InputBackend:
     keyboard: Ps2Keyboard
     mouse: Ps2Mouse
@@ -201,7 +201,7 @@ impl InputBackend for Ps2InputBackend:
 ### 3. HostedInputBackend (NEW)
 **File:** `src/os/compositor/hosted_input_backend.spl`
 
-```simple
+```simple:skip
 class HostedInputBackend:
     event_loop_id: i64
     _alt_held: bool
@@ -221,7 +221,7 @@ impl InputBackend for HostedInputBackend:
 ### 4. HostedCompositorBackend (NEW)
 **File:** `src/os/compositor/hosted_backend.spl`
 
-```simple
+```simple:skip
 class HostedCompositorBackend:
     window_id: i64
     buffer_id: i64
@@ -247,7 +247,7 @@ impl CompositorBackend for HostedCompositorBackend:
 **File:** `src/os/compositor/compositor.spl`
 
 Change from:
-```simple
+```simple:skip
 class Compositor:
     fb: FramebufferDriver
     keyboard: Ps2Keyboard
@@ -255,7 +255,7 @@ class Compositor:
 ```
 
 To:
-```simple
+```simple:skip
 class Compositor:
     backend: CompositorBackend
     input: InputBackend
@@ -270,7 +270,7 @@ All `self.mouse.poll()` → `self.input.poll_mouse()`
 ### 6. Entry Points
 
 #### Baremetal (unchanged)
-```simple
+```simple:skip
 # examples/09_embedded/simple_os/arch/x86_64/gui_entry.spl
 val fb = FramebufferDriver.from_boot_info(fb_info)
 val backend = FbCompositorBackend.new(fb)
@@ -281,7 +281,7 @@ shell.run()
 ```
 
 #### Hosted (all OS)
-```simple
+```simple:skip
 # src/os/hosted/hosted_entry.spl
 val el = rt_winit_event_loop_new()
 val win = rt_winit_window_new(el, 640, 480, "SimpleOS Desktop")

@@ -1,0 +1,423 @@
+use std.spec.*
+use compiler.mono.monomorphize.deferred.{DeferredMonomorphizer, GenericTemplate}
+use compiler.mono.monomorphize.deferred_subst.{InstantiationMode, deferred_last_error, deferred_clear_error}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+# The decoder cases below exercise actual production definitions. These
+# additional cases isolate their optional-tuple transport through the actual
+# parser/HIR/MIR pipeline, without the typed definition-local workaround.
+val tuple_owner_definitions = "pub struct Definition:\n    name: text\n    ordinal: i64\n\npub struct OtherDefinition:\n    name: text\n    ordinal: i64\n\npub enum DefinitionTemplate:\n    Function(Definition)\n\npub fn definition_pair(d: Definition, offset: i64) -> (Definition, i64)?:\n    Some((d, offset))\n\npub fn fallback_pair(d: Definition, offset: i64) -> (Definition, i64):\n    (d, offset)\n"
+val tuple_owner_original_definitions = "\npub struct FunctionDefinition:\n    name: text\n    ordinal: i64\n\npub struct StructDefinition:\n    name: text\n    ordinal: i64\n\npub class ClassDefinition:\n    name: text\n    ordinal: i64\n\npub struct EnumDefinition:\n    name: text\n    ordinal: i64\n\npub struct TraitDefinition:\n    name: text\n    ordinal: i64\n\npub enum OriginalTemplate:\n    Function(FunctionDefinition)\n    Struct(StructDefinition)\n    Class(ClassDefinition)\n    Enum(EnumDefinition)\n    Trait(TraitDefinition)\n"
+
+fn tuple_owner_lower_projection(body: text) -> (text, HirModule, MirModule):
+    val log = Logger(level: 0)
+    val producer_source = tuple_owner_definitions + tuple_owner_original_definitions
+    val producer = parse_full_frontend(producer_source, "owner/definitions.spl", "owner.definitions", log)
+    val source = "use owner.definitions.*\n\n" + body
+    val consumer = parse_full_frontend(source, "owner/consumer.spl", "owner.consumer", log)
+    var modules: Dict<text, Module> = {}
+    modules["owner.definitions"] = producer
+    val sources = [SourceFile(path: "owner/definitions.spl", content: producer_source, module_name: "owner.definitions")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var producer_lowering = hirlowering_for_module("owner.definitions", surfaces)
+    var consumer_lowering = hirlowering_for_module("owner.consumer", surfaces)
+    val producer_hir = producer_lowering.lower_module(producer)
+    val consumer_hir = consumer_lowering.lower_module(consumer)
+    var lowering = MirLowering.new(consumer_hir.symbols)
+    var prescan: Dict<text, HirModule> = {}
+    prescan["producer"] = producer_hir
+    prescan["consumer"] = consumer_hir
+    lowering.prescan_module_struct_names(prescan, "producer")
+    lowering.prescan_module_struct_names(prescan, "consumer")
+    val mir = lowering.lower_module(consumer_hir, [producer_hir, consumer_hir])
+    var errors = ""
+    for error in producer_lowering.errors:
+        errors = errors + "producer HIR: " + error.message + "\n"
+    for error in consumer_lowering.errors:
+        errors = errors + "consumer HIR: " + error.message + "\n"
+    for error in lowering.errors:
+        errors = errors + "MIR: " + error.message + "\n"
+    (errors, consumer_hir, mir)
+
+fn tuple_owner_projection_metrics(hir: HirModule, mir: MirModule) -> (i64, i64, i64, i64):
+    var hir_functions = 0
+    var mir_blocks = 0
+    var payload_tuples = 0
+    var heap_calls = 0
+    for function in hir.functions.values():
+        if function.name == "tuple_projection" or function.name.ends_with(".tuple_projection"):
+            hir_functions = hir_functions + 1
+    for function in mir.functions.values():
+        if function.name == "tuple_projection" or function.name.ends_with(".tuple_projection"):
+            mir_blocks = mir_blocks + function.blocks.len()
+            for local in function.locals:
+                match local.type_.kind:
+                    case MirTypeKind.Tuple(fields):
+                        if fields.len() == 2:
+                            match fields[0].kind:
+                                case MirTypeKind.Struct(_):
+                                    match fields[1].kind:
+                                        case MirTypeKind.I64: payload_tuples = payload_tuples + 1
+                                        case _: ()
+                                case _: ()
+                    case _: ()
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.Call(_, target, _):
+                            match target.kind:
+                                case MirOperandKind.Const(value, _):
+                                    match value:
+                                        case MirConstValue.Str(name):
+                                            if name == "rt_alloc" or name == "rt_tuple_new":
+                                                heap_calls = heap_calls + 1
+                                        case _: ()
+                                case _: ()
+                        case _: ()
+    (hir_functions, mir_blocks, payload_tuples, heap_calls)
+
+fn tuple_owner_call_placement(mir: MirModule) -> (i64, i64, i64):
+    var producer_calls = 0
+    var fallback_calls = 0
+    var lazy_fallback_calls = 0
+    for function in mir.functions.values():
+        if function.name == "tuple_projection" or function.name.ends_with(".tuple_projection"):
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.Call(_, target, _):
+                            match target.kind:
+                                case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                    if name == "definition_pair" or name.ends_with(".definition_pair"):
+                                        producer_calls = producer_calls + 1
+                                    if name == "fallback_pair" or name.ends_with(".fallback_pair"):
+                                        fallback_calls = fallback_calls + 1
+                                        val label = block.label ?? ""
+                                        if label == "null_coalesce_right" or label == "unwrap_or_none":
+                                            lazy_fallback_calls = lazy_fallback_calls + 1
+                                case _: ()
+                        case _: ()
+    (producer_calls, fallback_calls, lazy_fallback_calls)
+
+fn tuple_owner_actual_projections(mir: MirModule, second_kind: MirTypeKind) -> (i64, i64, i64, i64, i64):
+    # Exact GetField operands/results, not a census of unrelated tuple locals.
+    # Parameter one is an independent same-owner control in each source fixture.
+    var first_fields = 0
+    var second_fields = 0
+    var checked_absent = 0
+    var unsafe_absent = 0
+    var unwrap_calls = 0
+    for function in mir.functions.values():
+        if function.name == "tuple_projection" or function.name.ends_with(".tuple_projection"):
+            expect(function.signature.params.len()).to_be_greater_than(1)
+            val first_kind = function.signature.params[1].kind
+            var types: Dict<i64, MirType> = {}
+            for local in function.locals:
+                types[local.id.id] = local.type_
+            for block in function.blocks:
+                val absent = (block.label ?? "") == "optional_tuple_index_none"
+                if absent:
+                    checked_absent = checked_absent + 1
+                    match block.terminator:
+                        case MirTerminator.Unreachable: ()
+                        case _: unsafe_absent = unsafe_absent + 1
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.GetField(destination, base, field):
+                            if absent: unsafe_absent = unsafe_absent + 1
+                            var base_id = -1
+                            match base.kind:
+                                case MirOperandKind.Copy(local) | MirOperandKind.Move(local): base_id = local.id
+                                case _: ()
+                            if types.has(base_id) and types.has(destination.id):
+                                match types[base_id].kind:
+                                    case MirTypeKind.Tuple(fields):
+                                        if fields.len() == 2 and fields[0].kind == first_kind and fields[1].kind == second_kind:
+                                            if field == 0 and types[destination.id].kind == first_kind:
+                                                first_fields = first_fields + 1
+                                            if field == 1 and types[destination.id].kind == second_kind:
+                                                second_fields = second_fields + 1
+                                    case _: ()
+                        case MirInstKind.Load(_, _) | MirInstKind.GetElementPtr(_, _, _):
+                            if absent: unsafe_absent = unsafe_absent + 1
+                        case MirInstKind.Call(_, operand, _):
+                            match operand.kind:
+                                case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                    if name == "rt_unwrap_or_self": unwrap_calls = unwrap_calls + 1
+                                case _: ()
+                        case _: ()
+    (first_fields, second_fields, checked_absent, unsafe_absent, unwrap_calls)
+
+describe "original deferred optional tuple source forms":
+    it "projects the guarded original Class result without selecting Optional's Bool slot":
+        val body = "fn tuple_projection(result: (ClassDefinition, i64)?, expected: ClassDefinition) -> (OriginalTemplate, i64)?:\n    if result == nil:\n        return None\n    (OriginalTemplate.Class(result.0), result.1)\n"
+        val result = tuple_owner_lower_projection(body)
+        expect(result.0).to_equal("")
+        val identity = tuple_owner_projection_metrics(result.1, result.2)
+        expect(identity.0).to_equal(1)
+        expect(identity.1).to_be_greater_than(0)
+        val fields = tuple_owner_actual_projections(result.2, MirTypeKind.I64)
+        expect(fields.0).to_equal(1)
+        expect(fields.1).to_equal(1)
+        expect(fields.2).to_equal(2)
+        expect(fields.3).to_equal(0)
+        expect(fields.4).to_equal(2)
+
+    it "preserves all original double force-unwrap definition owners and offsets":
+        for kind in ["Function", "Struct", "Enum", "Trait"]:
+            val owner = kind + "Definition"
+            val body = "fn tuple_projection(result: (" + owner + ", i64)?, expected: " + owner + ") -> (OriginalTemplate, i64)?:\n    if result == nil:\n        return None\n    val result_opt = result!\n    val pair = result_opt!\n    (OriginalTemplate." + kind + "(pair.0), pair.1)\n"
+            val result = tuple_owner_lower_projection(body)
+            expect(result.0).to_equal("")
+            val fields = tuple_owner_actual_projections(result.2, MirTypeKind.I64)
+            expect(fields.0).to_equal(1)
+            expect(fields.1).to_equal(1)
+            expect(fields.4).to_equal(1)
+            val identity = tuple_owner_projection_metrics(result.1, result.2)
+            expect(identity.0).to_equal(1)
+            expect(identity.1).to_be_greater_than(0)
+
+    it "preserves the original section loader's GenericTemplate double-unwrap shape":
+        val body = "fn tuple_projection(result: (OriginalTemplate, i64)?, expected: OriginalTemplate) -> OriginalTemplate?:\n    if result == nil:\n        return None\n    val result_opt = result!\n    val pair = result_opt!\n    val offset = pair.1\n    Some(pair.0)\n"
+        val result = tuple_owner_lower_projection(body)
+        expect(result.0).to_equal("")
+        val fields = tuple_owner_actual_projections(result.2, MirTypeKind.I64)
+        expect(fields.0).to_equal(1)
+        expect(fields.1).to_equal(1)
+        expect(fields.4).to_equal(1)
+
+    it "checks a mutated source again while preserving a previously recovered alias":
+        val body = "fn tuple_projection(initial: (ClassDefinition, i64)?, expected: ClassDefinition) -> OriginalTemplate:\n    var result = initial\n    val alias = result.0\n    result = None\n    val offset = result.1\n    OriginalTemplate.Class(alias)\n"
+        val result = tuple_owner_lower_projection(body)
+        expect(result.0).to_equal("")
+        val fields = tuple_owner_actual_projections(result.2, MirTypeKind.I64)
+        expect(fields.0).to_equal(1)
+        expect(fields.1).to_equal(1)
+        expect(fields.2).to_equal(2)
+        expect(fields.3).to_equal(0)
+
+    it "checks bool/f64 payload slots without confusing bool with Optional presence":
+        val body = "fn tuple_projection(result: (bool, f64)?, expected: bool) -> f64:\n    if result == nil:\n        return -1.0\n    if result.0:\n        return result.1\n    0.0\n"
+        val result = tuple_owner_lower_projection(body)
+        expect(result.0).to_equal("")
+        val fields = tuple_owner_actual_projections(result.2, MirTypeKind.F64)
+        expect(fields.0).to_equal(1)
+        expect(fields.1).to_equal(1)
+        expect(fields.2).to_equal(2)
+        expect(fields.3).to_equal(0)
+
+    it "rejects a different definition owner after a checked direct projection":
+        val body = "fn tuple_projection(result: (OtherDefinition, i64)?, expected: ClassDefinition) -> OriginalTemplate?:\n    if result == nil:\n        return None\n    Some(OriginalTemplate.Class(result.0))\n"
+        val result = tuple_owner_lower_projection(body)
+        expect(result.0).to_contain("payload type mismatch at 0")
+
+    it "rejects an unsupported tuple field layout rather than guessing a native word":
+        val body = "fn tuple_projection(result: (ClassDefinition, u8)?, expected: ClassDefinition) -> OriginalTemplate?:\n    if result == nil:\n        return None\n    Some(OriginalTemplate.Class(result.0))\n"
+        val result = tuple_owner_lower_projection(body)
+        expect(result.0).to_contain("unsupported optional tuple payload")
+
+    it "evaluates a direct optional producer once for one literal projection":
+        val body = "fn tuple_projection(d: Definition, expected: Definition) -> DefinitionTemplate:\n    DefinitionTemplate.Function(definition_pair(d, 31).0)\n"
+        val result = tuple_owner_lower_projection(body)
+        expect(result.0).to_equal("")
+        val placement = tuple_owner_call_placement(result.2)
+        expect(placement.0).to_equal(1)
+        val fields = tuple_owner_actual_projections(result.2, MirTypeKind.I64)
+        expect(fields.0).to_equal(1)
+        expect(fields.2).to_equal(1)
+        expect(fields.3).to_equal(0)
+        val census = tuple_owner_projection_metrics(result.1, result.2)
+        expect(census.0).to_equal(1)
+        expect(census.1).to_be_greater_than(0)
+        expect(census.3).to_equal(0)
+
+    it "keeps the tuple alias between historical bangs and evaluates its producer once":
+        val body = "fn tuple_projection(d: Definition, expected: Definition) -> DefinitionTemplate?:\n    val result = definition_pair(d, 31)\n    if result == nil:\n        return None\n    val result_opt = result!\n    val alias = result_opt\n    val pair = alias!\n    val offset = pair.1\n    Some(DefinitionTemplate.Function(pair.0))\n"
+        val result = tuple_owner_lower_projection(body)
+        expect(result.0).to_equal("")
+        val placement = tuple_owner_call_placement(result.2)
+        expect(placement.0).to_equal(1)
+        val fields = tuple_owner_actual_projections(result.2, MirTypeKind.I64)
+        expect(fields.0).to_equal(1)
+        expect(fields.1).to_equal(1)
+        expect(fields.4).to_equal(1)
+        val census = tuple_owner_projection_metrics(result.1, result.2)
+        expect(census.0).to_equal(1)
+        expect(census.1).to_be_greater_than(0)
+        expect(census.3).to_equal(0)
+
+describe "deferred definition optional tuple producer transport":
+    it "if-val projects definition slot zero and offset slot one after presence":
+        val body = "fn tuple_projection(o: (Definition, i64)?) -> DefinitionTemplate?:\n    if val pair = o:\n        val consumed = pair.1\n        return Some(DefinitionTemplate.Function(pair.0))\n    None\n"
+        val result = tuple_owner_lower_projection(body)
+        expect(result.0).to_equal("")
+        val metrics = tuple_owner_projection_metrics(result.1, result.2)
+        expect(metrics.0).to_equal(1)
+        expect(metrics.1).to_be_greater_than(0)
+        expect(metrics.2).to_be_greater_than(0)
+        expect(metrics.3).to_equal(0)
+
+    it "unwrap and force unwrap retain the unannotated definition tuple alias":
+        for expression in ["o.unwrap()", "o!"]:
+            val body = "fn tuple_projection(o: (Definition, i64)?) -> DefinitionTemplate:\n    val pair = " + expression + "\n    val alias = pair\n    val consumed = alias.1\n    DefinitionTemplate.Function(alias.0)\n"
+            val result = tuple_owner_lower_projection(body)
+            expect(result.0).to_equal("")
+            val metrics = tuple_owner_projection_metrics(result.1, result.2)
+            expect(metrics.0).to_equal(1)
+            expect(metrics.1).to_be_greater_than(0)
+            expect(metrics.2).to_be_greater_than(0)
+            expect(metrics.3).to_equal(0)
+
+    it "coalesce and unwrap-or retain the declared tuple without allocation":
+        for expression in ["o ?? fallback", "o.unwrap_or(fallback)"]:
+            val body = "fn tuple_projection(o: (Definition, i64)?, fallback: (Definition, i64)) -> DefinitionTemplate:\n    val pair = " + expression + "\n    val consumed = pair.1\n    DefinitionTemplate.Function(pair.0)\n"
+            val result = tuple_owner_lower_projection(body)
+            expect(result.0).to_equal("")
+            val metrics = tuple_owner_projection_metrics(result.1, result.2)
+            expect(metrics.0).to_equal(1)
+            expect(metrics.1).to_be_greater_than(0)
+            expect(metrics.2).to_be_greater_than(1)
+            expect(metrics.3).to_equal(0)
+
+    it "keeps a different definition owner invalid after optional tuple projection":
+        val body = "fn tuple_projection(o: (OtherDefinition, i64)?) -> DefinitionTemplate?:\n    if val pair = o:\n        return Some(DefinitionTemplate.Function(pair.0))\n    None\n"
+        val result = tuple_owner_lower_projection(body)
+        expect(result.0).to_contain("payload type mismatch at 0")
+        val metrics = tuple_owner_projection_metrics(result.1, result.2)
+        expect(metrics.0).to_equal(1)
+        expect(metrics.1).to_be_greater_than(0)
+
+    it "rejects a coalesce fallback with a different tuple definition owner":
+        val body = "fn tuple_projection(o: (Definition, i64)?, fallback: (OtherDefinition, i64)) -> DefinitionTemplate:\n    val pair = o ?? fallback\n    DefinitionTemplate.Function(pair.0)\n"
+        val result = tuple_owner_lower_projection(body)
+        expect(result.0).to_contain("tuple")
+
+    it "evaluates the optional producer once and puts fallback calls only in the absent block":
+        for expression in ["o ?? fallback_pair(d, 47)", "o.unwrap_or(fallback_pair(d, 47))"]:
+            val body = "fn tuple_projection(d: Definition) -> DefinitionTemplate:\n    val o = definition_pair(d, 31)\n    val pair = " + expression + "\n    val consumed = pair.1\n    DefinitionTemplate.Function(pair.0)\n"
+            val result = tuple_owner_lower_projection(body)
+            expect(result.0).to_equal("")
+            val placement = tuple_owner_call_placement(result.2)
+            expect(placement.0).to_equal(1)
+            expect(placement.1).to_equal(1)
+            expect(placement.2).to_equal(1)
+            val metrics = tuple_owner_projection_metrics(result.1, result.2)
+            expect(metrics.0).to_equal(1)
+            expect(metrics.1).to_be_greater_than(0)
+            expect(metrics.3).to_equal(0)
+
+    it "keeps bool and float tuple element shapes distinct from optional presence":
+        val body = "fn tuple_projection(o: (bool, f64)?) -> f64:\n    if val pair = o:\n        if pair.0:\n            return pair.1\n        return 0.0\n    -1.0\n"
+        val result = tuple_owner_lower_projection(body)
+        expect(result.0).to_equal("")
+        val metrics = tuple_owner_projection_metrics(result.1, result.2)
+        expect(metrics.0).to_equal(1)
+        expect(metrics.1).to_be_greater_than(0)
+        expect(metrics.3).to_equal(0)
+
+    it "keeps None and the mutable optional source storage separate from a present tuple alias":
+        val body = "fn tuple_projection(d: Definition) -> DefinitionTemplate?:\n    var o: (Definition, i64)? = None\n    if val absent = o:\n        return Some(DefinitionTemplate.Function(absent.0))\n    o = Some((d, 31))\n    if val pair = o:\n        val alias = pair\n        o = None\n        return Some(DefinitionTemplate.Function(alias.0))\n    None\n"
+        val result = tuple_owner_lower_projection(body)
+        expect(result.0).to_equal("")
+        val metrics = tuple_owner_projection_metrics(result.1, result.2)
+        expect(metrics.0).to_equal(1)
+        expect(metrics.1).to_be_greater_than(0)
+        expect(metrics.2).to_be_greater_than(0)
+
+fn tuple_owner_append(left: [u8], right: [u8]) -> [u8]:
+    var result = left
+    for byte in right:
+        result = result.push(byte)
+    result
+
+fn tuple_owner_record(kind: i64) -> [u8]:
+    # Independently encoded empty-body records with distinct one-byte names.
+    # All counts are little-endian u32 zero; the generic flag is true.
+    var record: [u8] = []
+    if kind == 3:
+        record = [69u8, 78u8, 86u8, 50u8]  # ENV2
+    val names: [u8] = [70u8, 83u8, 67u8, 69u8, 84u8]  # F/S/C/E/T
+    record = tuple_owner_append(record, [1u8, 0u8, 0u8, 0u8, names[kind], 0u8, 0u8, 0u8, 0u8])
+    record = tuple_owner_append(record, [0u8, 0u8, 0u8, 0u8]) # params/fields/variants/methods
+    if kind == 0:
+        record = tuple_owner_append(record, [0u8, 0u8, 0u8, 0u8, 0u8]) # no return; empty body
+    elif kind == 2:
+        record = tuple_owner_append(record, [0u8, 0u8, 0u8, 0u8]) # empty methods
+    record = record.push(1u8)
+    if kind != 4:
+        record = tuple_owner_append(record, [0u8, 0u8, 0u8, 0u8, 0u8]) # no specialization; empty bindings
+    if kind == 3:
+        # Eight empty parallel lists, then complete_open/dyn_open flags.
+        for _ in 0..8:
+            record = tuple_owner_append(record, [0u8, 0u8, 0u8, 0u8])
+        record = tuple_owner_append(record, [0u8, 0u8])
+    record
+
+fn tuple_owner_kind(template: GenericTemplate) -> i64:
+    match template:
+        case GenericTemplate.Function(_): 0
+        case GenericTemplate.Struct(_): 1
+        case GenericTemplate.Class(_): 2
+        case GenericTemplate.Enum(_): 3
+        case GenericTemplate.Trait(_): 4
+
+describe "deferred optional tuple payload owners":
+    it "retains all five definition owners and exact nonzero consumed offsets":
+        var mono = DeferredMonomorphizer.new(InstantiationMode.LinkTime)
+        val names = ["F", "S", "C", "E", "T"]
+        val lengths = [24, 19, 23, 57, 14]
+        for kind in 0..5:
+            deferred_clear_error()
+            val record = tuple_owner_record(kind)
+            expect(record.len()).to_equal(lengths[kind])
+            var bytes = tuple_owner_append([170u8, 187u8], record)
+            bytes = bytes.push(204u8)
+            if val pair = mono.deserialize_full_template(kind as u8, bytes, 2):
+                val template: GenericTemplate = pair.0
+                expect(tuple_owner_kind(template)).to_equal(kind)
+                expect(template.name()).to_equal(names[kind])
+                expect(template.generic_params().len()).to_equal(0)
+                expect(pair.1).to_equal(lengths[kind] + 2)
+            else:
+                fail("valid template record was rejected")
+            expect(deferred_last_error).to_equal("")
+
+    it "retains all names when the section loader consumes optional template pairs":
+        var mono = DeferredMonomorphizer.new(InstantiationMode.LinkTime)
+        var section: [u8] = [71u8, 84u8, 80u8, 76u8, 2u8, 0u8, 5u8, 0u8, 0u8, 0u8]
+        for kind in 0..5:
+            section = section.push(kind as u8)
+            section = tuple_owner_append(section, tuple_owner_record(kind))
+        expect(mono.deserialize_templates(section)).to_equal(true)
+        expect(mono.template_cache.len()).to_equal(5)
+        for name in ["F", "S", "C", "E", "T"]:
+            expect(mono.has_template(name)).to_equal(true)
+        expect(deferred_last_error).to_equal("")
+
+    it "preserves nil and diagnostics for truncated records and unknown kinds":
+        var mono = DeferredMonomorphizer.new(InstantiationMode.LinkTime)
+        for kind in 0..5:
+            deferred_clear_error()
+            expect(mono.deserialize_full_template(kind as u8, [0u8], 0)).to_be_nil()
+            expect(deferred_last_error.len()).to_be_greater_than(0)
+        deferred_clear_error()
+        expect(mono.deserialize_full_template(99u8, [], 0)).to_be_nil()
+        expect(deferred_last_error).to_equal("Unknown template kind: 99")
+
+    it "returns false when a present section has a failing optional record":
+        var mono = DeferredMonomorphizer.new(InstantiationMode.LinkTime)
+        val section: [u8] = [71u8, 84u8, 80u8, 76u8, 2u8, 0u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8]
+        expect(mono.deserialize_templates(section)).to_equal(false)
+        expect(mono.template_cache.len()).to_equal(0)
+        expect(deferred_last_error.len()).to_be_greater_than(0)
+        deferred_clear_error()

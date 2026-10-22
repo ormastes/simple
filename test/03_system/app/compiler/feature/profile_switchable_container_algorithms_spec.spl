@@ -37,6 +37,9 @@ val COLLECTION_UNSUPPORTED_KEY_PROBE = "test/fixtures/profile_switchable/unsuppo
 val COLLECTION_EMBEDDED_MISMATCH_PROBE = "test/fixtures/profile_switchable/embedded_replay_mismatch_probe.spl"
 val COLLECTION_FORCED_PRIOR_MISMATCH_PROBE = "test/fixtures/profile_switchable/forced_prior_mismatch_probe.spl"
 val COLLECTION_COLLISION_PROBE = "test/02_integration/compiler/probe_profile_switchable_collision_replay.spl"
+val COLLECTION_TRANSITION_MODEL_PROBE = "test/fixtures/profile_switchable/transition_model_probe.spl"
+val COLLECTION_KEY_FAMILIES_PROBE = "test/fixtures/profile_switchable/generic_key_families_probe.spl"
+val COLLECTION_WRONG_FACTORY_PROBE = "test/fixtures/profile_switchable/wrong_factory_payload_probe.spl"
 
 fn collection_system_field(output: text, prefix: text) -> text:
     for line in output.split("\n"):
@@ -46,6 +49,98 @@ fn collection_system_field(output: text, prefix: text) -> text:
     ""
 
 describe "profile-switchable collection system workflow":
+    it "should reject a factory payload mismatch before interpreter or native execution":
+        """PSC-AC-001: My declared map payload type is checked across an attributed factory call."""
+        # @req: REQ-PSC-001, REQ-PSC-002, REQ-PSC-007
+        step("Admit a compiler that checks the actual parsed factory declaration")
+        val runtime = admit_pure_simple_runtime()
+        if runtime == "":
+            return
+        step("Reject an integer-valued factory assigned to a text-valued adaptive map")
+        val (interpreted_out, interpreted_err, interpreted_code) = process_run_timeout(
+            runtime, ["run", COLLECTION_WRONG_FACTORY_PROBE], 120000)
+        expect(interpreted_code == 0).to_be(false)
+        expect(interpreted_out + interpreted_err).to_contain("generic arguments do not match AdaptiveMap")
+        expect(interpreted_out.contains("WRONG_FACTORY_PAYLOAD_ACCEPTED")).to_be(false)
+        step("Reject the same mismatch before publishing native output")
+        val previous_no_stub = env_get("SIMPLE_NO_STUB_FALLBACK") ?? ""
+        expect(env_set("SIMPLE_NO_STUB_FALLBACK", "1")).to_be(true)
+        expect(mkdir_p("build")).to_be(true)
+        val binary_path = "build/collection_wrong_factory_system_{getpid()}.exe"
+        if file_exists(binary_path):
+            expect(file_delete(binary_path)).to_be(true)
+        val (build_out, build_err, build_code) = process_run_timeout(runtime, [
+            "native-build", "--backend=llvm", "--mode=one-binary",
+            "--entry-closure", "--entry", COLLECTION_WRONG_FACTORY_PROBE,
+            "--source", "src/lib", "--output", binary_path
+        ], 600000)
+        expect(build_code == 0).to_be(false)
+        expect(build_out + build_err).to_contain("generic arguments do not match AdaptiveMap")
+        expect(file_exists(binary_path)).to_be(false)
+        expect(env_set("SIMPLE_NO_STUB_FALLBACK", previous_no_stub)).to_be(true)
+
+    it "should preserve generic text and boolean keys across populated transitions":
+        """PSC-AC-007: Empty text and false keys remain real keys in every representation."""
+        # @req: REQ-PSC-002, REQ-PSC-007, REQ-PSC-008
+        step("Admit a source-matched pure-Simple compiler for generic key families")
+        val runtime = admit_pure_simple_runtime()
+        if runtime == "":
+            return
+        val previous_no_stub = env_get("SIMPLE_NO_STUB_FALLBACK") ?? ""
+        expect(env_set("SIMPLE_NO_STUB_FALLBACK", "1")).to_be(true)
+        expect(mkdir_p("build")).to_be(true)
+        step("Interpret generic text and boolean maps and sets with real replacements and removals")
+        val (interpreted_out, interpreted_err, interpreted_code) = process_run_timeout(
+            runtime, ["run", COLLECTION_KEY_FAMILIES_PROBE], 120000)
+        expect(interpreted_code).to_equal(0)
+        expect(interpreted_out + interpreted_err).to_contain("COLLECTION_GENERIC_KEY_FAMILIES: PASS")
+        step("Compile the identical key-family semantics fixture through LLVM")
+        val binary_path = "build/collection_key_families_system_{getpid()}.exe"
+        val (build_out, build_err, build_code) = process_run_timeout(runtime, [
+            "native-build", "--backend=llvm", "--mode=one-binary",
+            "--entry-closure", "--entry", COLLECTION_KEY_FAMILIES_PROBE,
+            "--source", "src/lib", "--output", binary_path
+        ], 600000)
+        expect(build_code).to_equal(0)
+        expect(file_exists(binary_path)).to_be(true)
+        step("Execute both generic families and check empty-string and false keys remain distinct from absence")
+        val (native_out, native_err, native_code) = process_run_timeout(binary_path, [], 120000)
+        expect(native_code).to_equal(0)
+        expect(native_out + native_err).to_contain("COLLECTION_GENERIC_KEY_FAMILIES: PASS")
+        expect(file_delete(binary_path)).to_be(true)
+        expect(env_set("SIMPLE_NO_STUB_FALLBACK", previous_no_stub)).to_be(true)
+
+    it "should compare every populated transition with an independent model on both engines":
+        """PSC-AC-002: Every observed value and mutation agrees with an independent model."""
+        # @req: REQ-PSC-002, REQ-PSC-008
+        expect(mkdir_p("build")).to_be(true)
+        step("Admit a source-matched pure-Simple compiler")
+        val runtime = admit_pure_simple_runtime()
+        if runtime == "":
+            return
+        val previous_no_stub = env_get("SIMPLE_NO_STUB_FALLBACK") ?? ""
+        expect(env_set("SIMPLE_NO_STUB_FALLBACK", "1")).to_be(true)
+        step("Replay 128 modeled operations from each initial algorithm in the interpreter")
+        val (interpreted_out, interpreted_err, interpreted_code) = process_run_timeout(
+            runtime, ["run", COLLECTION_TRANSITION_MODEL_PROBE], 120000)
+        expect(interpreted_code).to_equal(0)
+        expect(interpreted_out + interpreted_err).to_contain("COLLECTION_TRANSITION_MODEL: PASS")
+        step("Build the same independent oracle and operations through LLVM native code")
+        val binary_path = "build/collection_transition_model_system_{getpid()}.exe"
+        val (build_out, build_err, build_code) = process_run_timeout(runtime, [
+            "native-build", "--backend=llvm", "--mode=one-binary",
+            "--entry-closure", "--entry", COLLECTION_TRANSITION_MODEL_PROBE,
+            "--source", "src/lib", "--output", binary_path
+        ], 600000)
+        expect(build_code).to_equal(0)
+        expect(file_exists(binary_path)).to_be(true)
+        step("Check return values, contents, snapshots, and order after every operation")
+        val (native_out, native_err, native_code) = process_run_timeout(binary_path, [], 120000)
+        expect(native_code).to_equal(0)
+        expect(native_out + native_err).to_contain("COLLECTION_TRANSITION_MODEL: PASS")
+        expect(file_delete(binary_path)).to_be(true)
+        expect(env_set("SIMPLE_NO_STUB_FALLBACK", previous_no_stub)).to_be(true)
+
     it "should preserve text set and map behavior across three physical algorithms":
         """My set and map contents stay the same when their physical storage changes."""
         # @req REQ-PSC-001 REQ-PSC-002 REQ-PSC-008
@@ -378,6 +473,14 @@ describe "profile-switchable collection system workflow":
         expect(explain_code).to_equal(0)
         expect(explain_out + explain_err).to_contain("profile.status=admitted-exact-site")
         expect(explain_out + explain_err).to_contain("selected=hash")
+        # PSC-AC-006: expose every alternative and the safety/memory boundary.
+        expect(explain_out + explain_err).to_contain("rejected.linear=")
+        expect(explain_out + explain_err).to_contain("rejected.hash=")
+        expect(explain_out + explain_err).to_contain("rejected.ordered=")
+        expect(explain_out + explain_err).to_contain("guard.initializer=")
+        expect(explain_out + explain_err).to_contain("guard.key_order=")
+        expect(explain_out + explain_err).to_contain("extra_memory_bytes=")
+        expect(explain_out + explain_err).to_contain("fallback=")
 
         step("Build and execute the probe with its captured profile")
         val (build_out, build_err, build_code) = process_run(runtime, [
@@ -409,9 +512,14 @@ describe "profile-switchable collection system workflow":
             "--collection-target=aarch64-neon"
         ])
         val binary_preserved = file_exists(binary_path)
+        # PSC-AC-004: an empty or overwritten file must not satisfy preservation.
+        val (preserved_out, preserved_err, preserved_code) = process_run_timeout(binary_path, [], 120000)
         file_delete(binary_path)
         file_delete(profile_path)
         expect(rejected_code).to_equal(1)
         expect(rejected_err).to_contain("no samples for target")
         expect(binary_preserved).to_be(true)
+        expect(preserved_code).to_equal(0)
+        expect(preserved_out).to_equal(native_out)
+        expect(preserved_err).to_equal(native_err)
         expect(env_set("SIMPLE_NO_STUB_FALLBACK", previous_no_stub)).to_be(true)

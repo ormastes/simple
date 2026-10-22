@@ -11,9 +11,10 @@ use std.test_runner.test_runner_types.{
 use std.mcdc.dynamic_probe.{mcdc_dynamic_probe_controller_load_builtin_current_owner}
 use std.test_runner.test_runner_mcdc_report.{test_runner_result_with_mcdc_evidence}
 use std.test_runner.test_runner_files.{strip_ansi, read_file_content}
-use std.nogc_sync_mut.io.file_ops.{file_exists, file_write, file_delete}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_write, file_delete, file_size, file_read_regular_no_follow_bounded}
 use std.nogc_sync_mut.io.process_ops.{process_bounded_timed_out, process_run_bounded}
 use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.common.traceability.case_events.{collect_trace_case_events, collect_trace_event_documents, decode_trace_case_events}
 use std.io_runtime.{getpid, host_os}
 use std.sffi.cli_args.{cli_get_args}
 use std.string_core.{char_code}
@@ -112,6 +113,14 @@ fn extract_compiler_mcdc_obligation_manifest(output: text) -> (text, bool):
             if result != "": result = result + "\n"
             result = result + raw_line
     (result, complete_blocks == 1 and not in_block and result.trim() != "")
+
+fn mcdc_obligation_manifest_absent(output: text) -> bool:
+    """True only when the compiler output carries neither manifest marker."""
+    for raw_line in output.split("\n"):
+        val clean = strip_ansi(raw_line).trim()
+        if clean == MCDC_OBLIGATION_BEGIN or clean == MCDC_OBLIGATION_END:
+            return false
+    true
 
 fn find_simple_new_binary() -> text:
     ""
@@ -495,8 +504,11 @@ fn parse_test_output(output: text) -> (i64, i64, i64, i64):
         # Count individual "... pending" test lines
         elif not summary_family and clean.contains("... pending"):
             total_pending = total_pending + 1
-        # Count skipped (separate from pending)
-        if not summary_family and not trimmed.starts_with("Skipped:") and clean.contains("skipped"):
+        # Count skipped (separate from pending). The child's `SPEC FILE VERDICT:`
+        # line is a key=value record ("failed=1 skipped=0"), not a count line:
+        # the digit glued to `failed=` read as "1 skipped" for every failing spec.
+        val verdict_record = trimmed.starts_with("SPEC FILE VERDICT:")
+        if not summary_family and not verdict_record and not trimmed.starts_with("Skipped:") and clean.contains("skipped"):
             val skip_count2 = extract_number_before(s: clean, keyword: "skipped")
             if skip_count2 > 0:
                 total_skipped = total_skipped + skip_count2
@@ -642,13 +654,18 @@ fn extract_number_before(s: text, keyword: text) -> i64:
 # =========================================================================
 
 fn build_child_args(file_path: text, options: TestOptions) -> [text]:
-    if options.native_backend != "":
-        var native_args = ["test", file_path, "--native-backend=" + options.native_backend,
+    if options.native_backend != "" or options.native_source_roots.len() > 0:
+        val backend = if options.native_backend != "": options.native_backend else: "llvm"
+        var native_args = ["test", file_path, "--native-backend=" + backend,
             "--sequential", "--no-cache", "--no-db", "--no-session-daemon", "--assert-ran"]
+        for root in options.native_source_roots:
+            native_args.push("--native-source")
+            native_args.push(root)
         native_args.push("--timeout")
         native_args.push("{options.timeout}")
         if options.coverage: native_args.push("--coverage")
         if options.keep_artifacts: native_args.push("--keep-artifacts")
+        if options.verbose: native_args.push("--verbose")
         if options.gc_log: native_args.push("--gc-log")
         if options.gc_off: native_args.push("--gc=off")
         return native_args
@@ -727,7 +744,7 @@ fn crash_last_output_suffix(combined: text) -> text:
         return "; last output: {evidence} -- {detail}"
     "; last output: {evidence}"
 
-fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64) -> TestFileResult:
+fn _make_result_from_output_core(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64) -> TestFileResult:
     # Outcome classification -- contract frozen in .spipe/unstable_test_mode/state.md.
     #
     # The signal number DOES reach this layer. `exit_status_to_code`
@@ -953,6 +970,61 @@ fn read_structured_test_evidence(path: text) -> (i64, i64, i64):
         return (0, 0, 0)
     (passed, failed, 1)
 
+# Attach optional framework events after legacy result classification. The
+# event field is evidence-only and never changes existing counts or outcome.
+fn _attach_trace_case_events(result: TestFileResult, stdout: text, stderr: text) -> TestFileResult:
+    var output = result
+    output.trace_case_events_sdn = collect_trace_case_events(stdout + "\n" + stderr)
+    output
+
+fn _validate_trace_case_event_sdn(source: text) -> (text, text):
+    if source == "": return ("", "")
+    val decoded = decode_trace_case_events(source)
+    if decoded.is_err(): return (source, "TRACE-CASE-EVENT-CORRUPT: {decoded.unwrap_err()}")
+    # A valid started-only prefix can result from a crash. Retain it as raw
+    # observation; qualification checks planned-case completeness separately.
+    (source, "")
+
+fn _read_trace_case_event_sidecar(evidence_path: text) -> (text, text, bool):
+    if evidence_path == "": return ("", "", false)
+    val path = evidence_path + ".trace-events.sdnstream"
+    if not file_exists(path): return ("", "", false)
+    val size = file_size(path)
+    if size < 0 or size > 4194304:
+        return ("", "TRACE-CASE-EVENT-CORRUPT: sidecar size is invalid or exceeds 4 MiB; retained at {path}", true)
+    val read = file_read_regular_no_follow_bounded(path, 4194304)
+    match read:
+        case Ok(content):
+            val framed = collect_trace_event_documents(content)
+            val (events, problem) = _validate_trace_case_event_sdn(framed)
+            if problem != "":
+                return (events, "{problem}; retained at {path}", true)
+            file_delete(path)
+            (events, "", true)
+        case Err(_): ("", "TRACE-CASE-EVENT-CORRUPT: sidecar could not be read; retained at {path}", true)
+
+fn _attach_structured_trace_case_events(result: TestFileResult, stdout: text, stderr: text, evidence_path: text) -> TestFileResult:
+    var output = result
+    val (sidecar, sidecar_problem, sidecar_present) = _read_trace_case_event_sidecar(evidence_path)
+    if sidecar_present:
+        output.trace_case_events_sdn = sidecar
+        if sidecar_problem != "":
+            if output.error == "": output.error = sidecar_problem
+            else: output.error = output.error + "; " + sidecar_problem
+        return output
+    val raw = collect_trace_case_events(stdout + "\n" + stderr)
+    val (events, problem) = _validate_trace_case_event_sdn(raw)
+    output.trace_case_events_sdn = events
+    if problem != "":
+        if output.error == "": output.error = problem
+        else: output.error = output.error + "; " + problem
+    output
+
+pub fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64) -> TestFileResult:
+    _attach_trace_case_events(
+        _make_result_from_output_core(file_path, stdout, stderr, exit_code, duration_ms, timeout_secs),
+        stdout, stderr)
+
 # Expectation tally sidecar (`<evidence>.expectations`, written by std.spec as
 # "simple-bdd-expectations-v1\n<n>\n"). -1 = unknown (absent, unreadable or
 # malformed), and unknown is never zero: only an explicit 0 is VACUOUS.
@@ -1005,7 +1077,7 @@ pub fn vacuous_spec_baselined(path: text) -> bool:
             return true
     false
 
-fn make_result_from_structured_evidence(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64, evidence_path: text) -> TestFileResult:
+fn _make_result_from_structured_evidence_core(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64, evidence_path: text) -> TestFileResult:
     if evidence_path == "" or env_get("SIMPLE_TEST_ASSERT_RAN") != "1":
         return make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, timeout_secs)
     # -1 (timeout / spawn failure) and every 128+signo death (incl. a
@@ -1071,6 +1143,11 @@ fn make_result_from_structured_evidence(file_path: text, stdout: text, stderr: t
         TestFileResult(path: file_path, passed: passed, failed: evidence_failed, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: error, timed_out: false, cached: false),
         combined
     )
+
+pub fn make_result_from_structured_evidence(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64, evidence_path: text) -> TestFileResult:
+    _attach_structured_trace_case_events(
+        _make_result_from_structured_evidence_core(file_path, stdout, stderr, exit_code, duration_ms, timeout_secs, evidence_path),
+        stdout, stderr, evidence_path)
 
 # =========================================================================
 # Coverage Wrapper Generation
@@ -1242,7 +1319,7 @@ export COVERAGE_BEGIN, COVERAGE_END, COMPILER_COVERAGE_BEGIN, COMPILER_COVERAGE_
 export _tp_get_temp_dir
 export MCDC_OBLIGATION_BEGIN, MCDC_OBLIGATION_END
 export extract_compiler_coverage_manifest_sdn, strip_compiler_coverage_manifest_blocks
-export extract_compiler_mcdc_obligation_manifest
+export extract_compiler_mcdc_obligation_manifest, mcdc_obligation_manifest_absent
 export find_simple_new_binary, find_runtime_lib_dir, find_simple_binary
 export explicit_simple_binary_from_env, argv0_simple_binary, explicit_binary_before_argv0
 export extract_error_message, parse_test_output, parse_test_omission_evidence

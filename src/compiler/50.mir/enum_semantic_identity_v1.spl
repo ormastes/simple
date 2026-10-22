@@ -1,0 +1,63 @@
+# Declaration identity binds semantic definitions and the actual native
+# registry/slot transport. It is an integrity check, never authentication.
+use std.common.crypto.sha256.{sha256_text}
+use compiler.mir.mir_instruction_graph.{MirModule}
+use compiler.mir.mir_types.{MirTypeDef, MirTypeDefKind}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_json.{serialize_mir_type, serialize_mir_enum_declaration_v1}
+
+fn enum_identity_frame_v1(value: text) -> text:
+    value.len().to_string() + ":" + value
+
+pub fn enum_semantic_type_definition_identity_v1(definition: MirTypeDef) -> text:
+    var fields: [text] = [definition.symbol.id.to_string(), definition.name,
+        if definition.is_export_c: "1" else: "0", definition.export_name]
+    match definition.kind:
+        case MirTypeDefKind.Struct(members):
+            fields.push("Struct")
+            fields.push(members.len().to_string())
+            for member in members:
+                fields.push(member.name)
+                fields.push(serialize_mir_type(member.type_))
+                fields.push(member.offset.to_string())
+                fields.push(if member.has_bits_attr: "1" else: "0")
+                fields.push(member.bits_width.to_string())
+        case MirTypeDefKind.Enum(variants):
+            fields.push("Enum")
+            fields.push(variants.len().to_string())
+            for variant in variants:
+                fields.push(variant.name)
+                fields.push(variant.discriminant.to_string())
+                if val payload = variant.payload:
+                    fields.push("Some")
+                    fields.push(serialize_mir_type(payload))
+                else:
+                    fields.push("None")
+        case MirTypeDefKind.Union(variants):
+            fields.push("Union")
+            fields.push(variants.len().to_string())
+            for variant in variants: fields.push(serialize_mir_type(variant))
+    var framed: [text] = []
+    for field in fields: framed.push(enum_identity_frame_v1(field))
+    "MirEnumTypeDefinition-v1|" + framed.join("")
+
+pub fn enum_semantic_declaration_identity_v1(module: MirModule) -> text:
+    var definitions: [text] = []
+    # @workaround bug=dict_nominal_tuple_binders_any_bootstrap_2026_10_21 recover=0bfa8039acd reason=bootstrap dictionary tuple binders erase declared nominal K/V types
+    for raw_key, raw_definition in module.types:
+        val key: SymbolId = raw_key
+        val definition: MirTypeDef = raw_definition
+        definitions.push(enum_identity_frame_v1(key.id.to_string()) +
+            enum_identity_frame_v1(enum_semantic_type_definition_identity_v1(definition)))
+    definitions.sort()
+    var declarations: [text] = []
+    for record in module.enum_semantic_declarations:
+        declarations.push(serialize_mir_enum_declaration_v1(record))
+    declarations.sort()
+    var fields: [text] = [module.name, definitions.len().to_string()]
+    for definition in definitions: fields.push(definition)
+    fields.push(declarations.len().to_string())
+    for declaration in declarations: fields.push(declaration)
+    var framed: [text] = []
+    for field in fields: framed.push(enum_identity_frame_v1(field))
+    sha256_text("MirEnumDeclarations-v1|" + framed.join(""))

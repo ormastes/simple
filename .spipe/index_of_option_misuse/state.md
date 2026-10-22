@@ -140,8 +140,8 @@ Spec runs (per file, `Results:` line is authoritative):
 | spec | verdict |
 |---|---|
 | test/01_unit/app/lsp_handlers_spec.spl | 8 total, 8 passed, 0 failed |
-| test/unit/lib/nogc_async_mut/ui_test/ui_test_facade_spec.spl | 1 total, 1 passed, 0 failed |
-| test/unit/app/debug/remote/trace32_client_spec.spl | 30 total, 30 passed, 0 failed |
+| test/01_unit/lib/nogc_async_mut/ui_test/ui_test_facade_spec.spl | 1 total, 1 passed, 0 failed |
+| test/01_unit/app/debug/remote/trace32_client_spec.spl | 30 total, 30 passed, 0 failed |
 | test/01_unit/app/mcp_unit/provider_mime_spec.spl | 26 total, 26 passed, 0 failed |
 | test/01_unit/compiler_core/interpreter/interp_resource_tracker_spec.spl | 18 total, 18 passed, 0 failed |
 

@@ -1,6 +1,6 @@
 # @req REQ-SSPEC-UNIT
 """
-# Any rules as opt-in warn-level lints (robustness item 7b)
+# Any rules as robust-profile warnings (robustness item 7b)
 
 Plan: CURRENT_BUG_PREVENTION.md section 7 / table B row 8 ("Any in the
 compiler's own code, silent Any fallback"). Part 7a (written `Any` is distinct
@@ -16,8 +16,8 @@ from the parser fallback) landed as PR #2829; this is 7b.
 - R3 `W-ANY-USE-001/002` (`any_receiver_use`): `for` over an `any` value and a
   method call on an `any` receiver (both known stage-2 failures).
 
-All three families are `allow` in EVERY profile (opt-in: `SIMPLE_ANY_RULES=warn`
-or an explicit simple.sdn family level; `critical` does not imply them).
+All three families warn in robust/critical and remain opt-in in moderate/strict.
+Explicit family levels and SIMPLE_ANY_RULES=off remain available.
 Off means no output AND no walk (`AnyRulesRun.walked == false`; lint starts no
 checker process when its mask is empty).
 """
@@ -34,7 +34,7 @@ use compiler.semantics.lint.written_any_scan.{WrittenAnySite, scan_written_any, 
 use compiler.semantics.lint.hir_frontend_diagnostics.{run_hir_frontend_diagnostics, HirFrontendFinding}
 use compiler.tools.lint.any_rules.{AnyRuleFinding, AnyRulesRun, AnyRulesRelay, any_rules_for_hir, any_rule_path_is_compiler_source, any_rules_mask, any_rules_mask_from_env, any_rules_lint_mask, any_rules_report_lines, any_rules_parse_check_output, any_rules_max_shown, any_rules_env_level, any_rules_report_path}
 use std.io_runtime.{env_get, env_set_process, getpid}
-use compiler.tools.lint._LintMain.config_and_model.{build_default_levels, canonical_lint_rule_profile_descriptors, map_lint_code_to_config_name}
+use compiler.tools.lint._LintMain.config_and_model.{build_default_levels, canonical_lint_rule_profile_descriptors, map_lint_code_to_config_name, LintConfig, LintLevel, any_rule_relay_level}
 
 val compiler_path = "src/compiler/99.fixture/any_fixture.spl"
 val app_path = "src/app/fixture/any_fixture.spl"
@@ -201,7 +201,7 @@ describe "R3 W-ANY-USE-001/002: `for` over and method call on an any value":
         expect(with_code(run, "W-ANY-USE-001").len()).to_equal(0)
 
 describe "opt-in switch":
-    it "registers three families that no profile turns on":
+    it "warns for all three families in robust/critical only":
         val levels = build_default_levels()
         expect(levels["written_any_decl"]).to_equal("allow")
         expect(levels["any_fallback_use"]).to_equal("allow")
@@ -212,8 +212,8 @@ describe "opt-in switch":
                 seen = seen + 1
                 expect(d.moderate_level).to_equal("allow")
                 expect(d.strict_level).to_equal("allow")
-                expect(d.robust_level).to_equal("allow")
-                expect(d.critical_level).to_equal("allow")
+                expect(d.robust_level).to_equal("warn")
+                expect(d.critical_level).to_equal("warn")
         expect(seen).to_equal(3)
         expect(map_lint_code_to_config_name("W-ANY-DECL-001")).to_equal("written_any_decl")
         expect(map_lint_code_to_config_name("W-HIR-INFER-003")).to_equal("any_fallback_use")
@@ -256,12 +256,9 @@ describe "opt-in switch":
         expect(check_mask).to_equal("")
         expect(partial_mask).to_equal("fr")
 
-    it "default lint of a critical-profile compiler file starts no checker and reports nothing":
-        # Regression (review 2026-10-11): `critical` used to imply the families,
-        # which made every plain compiler-file lint start a `check` child.
-        # The lint gate feeds `any_rules_lint_mask` the per-family `keep` bits;
-        # under critical with no opt-in they are all false -> empty mask ->
-        # no process, hence no W-ANY-* and no W-ANY-NOTRUN either.
+    it "critical-profile defaults enable the checker while environment overrides still work":
+        # Profile defaults enable all three keep bits; direct check still
+        # requires its environment mask, supplied by the lint transport.
         val before = env_get("SIMPLE_ANY_RULES")
         env_set_process("SIMPLE_ANY_RULES", "")
         var critical_on = 0
@@ -269,11 +266,15 @@ describe "opt-in switch":
             if d.name == "written_any_decl" or d.name == "any_fallback_use" or d.name == "any_receiver_use":
                 if d.critical_level != "allow" or d.robust_level != "allow":
                     critical_on = critical_on + 1
-        val default_mask = any_rules_lint_mask("src/compiler/10.frontend/core/collection_feedback.spl", decl_src + receiver_src, false, false, false)
+        val default_mask = any_rules_lint_mask("src/compiler/10.frontend/core/collection_feedback.spl", decl_src + receiver_src, true, true, true)
         val default_level = any_rules_env_level()
         val default_check = any_rules_mask_from_env()
         env_set_process("SIMPLE_ANY_RULES", "warn")
-        val opted_mask = any_rules_lint_mask(compiler_path, decl_src, false, false, false)
+        val opted_cfg = LintConfig.from_sdn_string("lints:\n  profile: strict\n")
+        val opted_decl = any_rule_relay_level(opted_cfg, "written_any_decl", false, LintLevel.Allow, any_rules_env_level())
+        val opted_fallback = any_rule_relay_level(opted_cfg, "any_fallback_use", false, LintLevel.Allow, any_rules_env_level())
+        val opted_receiver = any_rule_relay_level(opted_cfg, "any_receiver_use", false, LintLevel.Allow, any_rules_env_level())
+        val opted_mask = any_rules_lint_mask(compiler_path, decl_src, opted_decl != LintLevel.Allow, opted_fallback != LintLevel.Allow, opted_receiver != LintLevel.Allow)
         val opted_level = any_rules_env_level()
         val opted_check = any_rules_mask_from_env()
         val opted_outside = any_rules_lint_mask(app_path, decl_src, false, false, false)
@@ -282,8 +283,8 @@ describe "opt-in switch":
         env_set_process("SIMPLE_ANY_RULES", "random")
         val junk_check = any_rules_mask_from_env()
         env_set_process("SIMPLE_ANY_RULES", before)
-        expect(critical_on).to_equal(0)
-        expect(default_mask).to_equal("")
+        expect(critical_on).to_equal(3)
+        expect(default_mask).to_equal("dfr")
         expect(default_level).to_equal("")
         expect(default_check).to_equal("")
         expect(opted_mask).to_equal("dfr")
@@ -349,3 +350,55 @@ describe "opt-in switch":
         expect(printed.len()).to_equal(any_rules_max_shown() + 2)
         expect(printed[any_rules_max_shown()]).to_contain("7 more finding(s) not shown")
         expect(printed[any_rules_max_shown() + 1]).to_contain("findings=57")
+
+describe "Any relay severity precedence":
+    it "environment deny escalates robust profile warnings":
+        val cfg = LintConfig.from_sdn_string("lints:\n  profile: robust\n  warning_phase: false\n")
+        for name in ["written_any_decl", "any_fallback_use", "any_receiver_use"]:
+            expect(cfg.get_level(name)).to_equal(LintLevel.Warn)
+            expect(any_rule_relay_level(cfg, name, true, cfg.get_level(name), "deny")).to_equal(LintLevel.Deny)
+
+    it "explicit family warnings retain priority over environment deny":
+        val cfg = LintConfig.from_sdn_string("lints:\n  profile: robust\n  written_any_decl: warn\n  warning_phase: false\n")
+        expect(any_rule_relay_level(cfg, "written_any_decl", true, cfg.get_level("written_any_decl"), "deny")).to_equal(LintLevel.Warn)
+
+    it "explicit allow stays disabled under warn and deny while other families run":
+        val before = env_get("SIMPLE_ANY_RULES")
+        val cfg = LintConfig.from_sdn_string("lints:\n  profile: robust\n  written_any_decl: allow\n  warning_phase: false\n")
+        for env_level in ["warn", "deny"]:
+            env_set_process("SIMPLE_ANY_RULES", env_level)
+            val decl_level = any_rule_relay_level(cfg, "written_any_decl", false, LintLevel.Allow, env_level)
+            val fallback_level = any_rule_relay_level(cfg, "any_fallback_use", true, cfg.get_level("any_fallback_use"), env_level)
+            val receiver_level = any_rule_relay_level(cfg, "any_receiver_use", true, cfg.get_level("any_receiver_use"), env_level)
+            val mask = any_rules_lint_mask(compiler_path, decl_src + receiver_src, decl_level != LintLevel.Allow, fallback_level != LintLevel.Allow, receiver_level != LintLevel.Allow)
+            val run = run_mask(compiler_path, decl_src + receiver_src, mask)
+            val relay = any_rules_parse_check_output(any_rules_report_lines(compiler_path, mask, run.findings).join("\n") + "\n")
+            expect(decl_level).to_equal(LintLevel.Allow)
+            expect(mask).to_equal("fr")
+            expect(relay.checked).to_equal(true)
+            expect(relay.findings.len()).to_be_greater_than(0)
+            for finding in relay.findings:
+                expect(finding.code == "W-ANY-DECL-001").to_equal(false)
+            val expected = if env_level == "deny": LintLevel.Deny else: LintLevel.Warn
+            expect(receiver_level).to_equal(expected)
+        env_set_process("SIMPLE_ANY_RULES", before)
+
+    it "explicit deny cannot be lowered by environment warn unless warning phase is enabled":
+        var cfg = LintConfig.from_sdn_string("lints:\n  profile: robust\n  any_receiver_use: deny\n  warning_phase: false\n")
+        expect(any_rule_relay_level(cfg, "any_receiver_use", true, cfg.get_level("any_receiver_use"), "warn")).to_equal(LintLevel.Deny)
+        cfg.set_warning_phase(true)
+        expect(any_rule_relay_level(cfg, "any_receiver_use", true, cfg.get_level("any_receiver_use"), "deny")).to_equal(LintLevel.Warn)
+
+    it "warning phase downgrades environment deny and legacy profiles retain defaults":
+        for profile in ["reliable", "mission-critical", "mission_critical"]:
+            val cfg = LintConfig.from_sdn_string("lints:\n  profile: {profile}\n  warning_phase: true\n")
+            for name in ["written_any_decl", "any_fallback_use", "any_receiver_use"]:
+                expect(cfg.get_level(name)).to_equal(LintLevel.Warn)
+                expect(any_rule_relay_level(cfg, name, true, cfg.get_level(name), "deny")).to_equal(LintLevel.Warn)
+
+    it "missing and failed child reports differ from a checked clean report":
+        expect(any_rules_parse_check_output("").checked).to_equal(false)
+        expect(any_rules_parse_check_output("error: check child failed\n").checked).to_equal(false)
+        val clean = any_rules_parse_check_output(any_rules_report_lines(compiler_path, "dfr", []).join("\n") + "\n")
+        expect(clean.checked).to_equal(true)
+        expect(clean.findings.len()).to_equal(0)

@@ -1,0 +1,55 @@
+# Focused native acceptance calls the imported production owner, not a mirror.
+use app.compiler_entrypoint.source_manifest_membership.{compiler_source_manifest_membership_v1, compiler_source_manifest_ordered_v1}
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryEntryV1}
+
+fn native_merge_entry(path: text, digest: text, size: i64) -> CompileSourceInventoryEntryV1:
+    CompileSourceInventoryEntryV1(path, digest, digest, digest, digest, digest, size)
+
+fn main() -> i64:
+    var entries: [CompileSourceInventoryEntryV1] = []
+    var rows: [text] = []
+    var index = 0
+    while index < 1024:
+        entries.push(native_merge_entry("src/p{10000 + index}.spl", "d", index))
+        if index < 32:
+            val selected = index * 31
+            rows.push("src/p{10000 + selected}.spl|sha256_d|{selected}")
+        index = index + 1
+    rows.push("src/p11023.spl|sha256_d|1023")
+    if not compiler_source_manifest_ordered_v1(entries, rows): return 10
+    # Sparse canonical batch, including first/last identities.
+    if not compiler_source_manifest_membership_v1(entries, rows): return 11
+    rows[16] = "src/p10496.spl|sha256_changed|496"
+    if compiler_source_manifest_membership_v1(entries, rows): return 12
+    rows[16] = "src/p10496.spl|sha256_d|497"
+    if compiler_source_manifest_membership_v1(entries, rows): return 13
+    rows[16] = "src/p10496a.spl|sha256_d|496"
+    if compiler_source_manifest_membership_v1(entries, rows): return 14
+    rows[16] = "src/p10496.spl|sha256_d|496"
+    rows[0] = "src/p09999.spl|sha256_d|0"
+    if compiler_source_manifest_membership_v1(entries, rows): return 15
+    rows[0] = "src/p10000.spl|sha256_d|0"
+    rows[32] = "src/p11024.spl|sha256_d|1024"
+    if compiler_source_manifest_membership_v1(entries, rows): return 16
+    rows[32] = "src/p11023.spl|sha256_d|1023"
+    rows[16] = rows[15]
+    if not compiler_source_manifest_membership_v1(entries, rows): return 17
+    rows[16] = "src/p10465.spl|sha256_changed|465"
+    if compiler_source_manifest_membership_v1(entries, rows): return 18
+    rows[16] = "src/p10496.spl|sha256_d|496"
+    val first = rows[0]
+    rows[0] = rows[32]
+    rows[32] = first
+    if compiler_source_manifest_ordered_v1(entries, rows): return 24
+    if not compiler_source_manifest_membership_v1(entries, rows): return 19
+    entries.push(native_merge_entry("src/p10000.spl", "other", 0))
+    rows[32] = "src/p10000.spl|sha256_other|0"
+    if not compiler_source_manifest_membership_v1(entries, rows): return 20
+    entries.push(native_merge_entry("src/a|b.spl", "pipe", 7))
+    rows[0] = "src/a|b.spl|sha256_pipe|7"
+    if not compiler_source_manifest_membership_v1(entries, rows): return 21
+    rows[0] = "malformed"
+    if compiler_source_manifest_membership_v1(entries, rows): return 22
+    if entries[496].content_digest != "d" or entries[496].byte_count != 496: return 23
+    print "source-manifest-ordered-merge: 15 criteria PASS"
+    0

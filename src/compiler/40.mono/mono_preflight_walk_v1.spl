@@ -1,0 +1,159 @@
+# Bounded semantic preflight, not a codec or specialization implementation.
+# Field/variant walk is mechanically adapted from all 97 hc_enc_* owners in
+# compiler/20.hir/generated/hir_codec.spl; no decoder or encoded output is used.
+# Frozen input SHA256: e6ddcf4358668819c508742ceb120372cabd3cb03b961a6584a80d0ca6780e05
+# The 97 mono_pf_* names preserve the encoder suffix exactly. Every visited
+# field, enum arm and optional branch corresponds to that source. Wire writes
+# become resource reservations, array lengths reserve before loops, dictionary
+# snapshots reserve a concrete typed count first, sorting is unnecessary here.
+# Reconcile this mirror when the exported codec/schema versions change; the
+# public entries refuse differing actual versions/rules before visiting HIR.
+# Unknown enum variants fail closed. No canonical-codec availability is claimed.
+#
+# Allocation-free dictionary cardinality uses the existing typed provider:
+# _MirLoweringExpr/method_calls_literals.spl routes HirTypeKind.Dict .len()
+# to rt_dict_len; runtime_native.c reads the same registered dictionary length
+# used by rt_dict_keys. The pure-Simple core_array provider uses dict_len_value
+# for the same pair. These concrete receiver types prevent erased rt_len.
+# Snapshot equality detects inconsistency; it is not a substitute for the
+# provider's count/keys contract, and native qualification remains UNRUN.
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_types.{HirModule, HirType}
+use compiler.hir.hir_operators.{HirBinOp, HirUnaryOp, HirAssignOp}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.dynamic_identity.closure.{Closure}
+use compiler.blocks.value.{BlockValue}
+use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind}
+use compiler.common.attributes.{FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata, VhdlClockedMetadata, VhdlGenericMetadata, VhdlReturnFieldMetadata, VhdlResetPolarity, VhdlResetSynchrony, OptimizationReq, OptimizationReqLevel, OptimizationBackend}
+use compiler.frontend.parser_types_expr.{AsmTargetSpec, AsmConstraintKind, AsmLocation, Type, TypeKind, Expr}
+
+use compiler.mono.mono_invocation_policy_v1.{MonoInvocationBudgetV1}
+use compiler.hir.hir_codec.{HIR_CODEC_VERSION, HIR_CANONICAL_CODEC_VERSION,
+    HIR_CANONICAL_CODEC_RULES_V1}
+use compiler.frontend.core.flat_pool_codec.{FLAT_POOL_CODEC_VERSION}
+
+
+pub struct MonoPreflightFactsV1:
+    node_count: i64
+    maximum_depth: i64
+    copy_units: i64
+
+
+pub class MonoPreflightWalkV1:
+    budget: MonoInvocationBudgetV1
+    start_depth: i64
+    var node_count: i64 = 0
+    var maximum_depth: i64 = 0
+    var copy_units: i64 = 0
+
+    fn active_v1() -> bool:
+        self.budget.failure == ""
+
+    me reject(why: text):
+        self.budget.fail_v1("E-MONO-SHAPE: " + why)
+
+    me enter_v1() -> bool:
+        if not self.budget.enter_v1(): return false
+        self.node_count = self.node_count + 1
+        self.copy_units = self.copy_units + 1
+        val depth = self.budget.hir_depth - self.start_depth
+        if depth > self.maximum_depth: self.maximum_depth = depth
+        true
+
+    me leave_v1():
+        self.budget.leave_v1()
+
+    me charge_v1(units: i64) -> bool:
+        if not self.budget.charge_v1(units): return false
+        self.copy_units = self.copy_units + units
+        true
+
+    me scalar_v1() -> bool:
+        self.charge_v1(1)
+
+    me text_v1(value: text) -> bool:
+        # Native text length is a byte count. No text copy or escape precedes
+        # this admission; nil is a distinct scalar presence, like the codec.
+        if not self.charge_v1(1): return false
+        if value == nil: return true
+        val count = value.len()
+        if count < 0:
+            self.reject("invalid text length")
+            return false
+        self.charge_v1(count)
+
+    me array_v1(count: i64) -> bool:
+        # Subtraction guards before addition also cover arbitrary malformed
+        # public count values without overflowing an allocation reservation.
+        if not self.charge_v1(1): return false
+        self.charge_v1(count)
+
+    me snapshot_v1(count: i64) -> bool:
+        if count < 0:
+            self.reject("invalid typed dictionary count")
+            return false
+        # One slot per key and an array header, before .keys(). The entries
+        # themselves are charged on traversal; no copy uses an unmeasured key.
+        self.array_v1(count)
+
+    me snapshot_equal_v1(expected: i64, actual: i64) -> bool:
+        if expected != actual:
+            self.reject("typed dictionary count/key snapshot disagreement")
+            return false
+        self.active_v1()
+
+    fn finish_v1() -> Result<MonoPreflightFactsV1, text>:
+        if self.budget.failure != "": return Err(self.budget.failure)
+        Ok(MonoPreflightFactsV1(node_count: self.node_count,
+            maximum_depth: self.maximum_depth, copy_units: self.copy_units))
+
+
+# Concrete typed cardinality providers; no key snapshot is allocated here.
+pub fn mono_pf_count_dict_i64_hirsymbol_v1(entries: Dict<i64, HirSymbol>) -> i64:
+    entries.len()
+
+pub fn mono_pf_count_dict_i64_scope_v1(entries: Dict<i64, Scope>) -> i64:
+    entries.len()
+
+pub fn mono_pf_count_dict_i64_text_v1(entries: Dict<i64, text>) -> i64:
+    entries.len()
+
+pub fn mono_pf_count_dict_symbolid_hirbitfield_v1(entries: Dict<SymbolId, HirBitfield>) -> i64:
+    entries.len()
+
+pub fn mono_pf_count_dict_symbolid_hirclass_v1(entries: Dict<SymbolId, HirClass>) -> i64:
+    entries.len()
+
+pub fn mono_pf_count_dict_symbolid_hirconst_v1(entries: Dict<SymbolId, HirConst>) -> i64:
+    entries.len()
+
+pub fn mono_pf_count_dict_symbolid_hirenum_v1(entries: Dict<SymbolId, HirEnum>) -> i64:
+    entries.len()
+
+pub fn mono_pf_count_dict_symbolid_hirfunction_v1(entries: Dict<SymbolId, HirFunction>) -> i64:
+    entries.len()
+
+pub fn mono_pf_count_dict_symbolid_hirstruct_v1(entries: Dict<SymbolId, HirStruct>) -> i64:
+    entries.len()
+
+pub fn mono_pf_count_dict_symbolid_hirtrait_v1(entries: Dict<SymbolId, HirTrait>) -> i64:
+    entries.len()
+
+pub fn mono_pf_count_dict_text_bool_v1(entries: Dict<text, bool>) -> i64:
+    entries.len()
+
+pub fn mono_pf_count_dict_text_hirtype_v1(entries: Dict<text, HirType>) -> i64:
+    entries.len()
+
+pub fn mono_pf_count_dict_text_i64_v1(entries: Dict<text, i64>) -> i64:
+    entries.len()
+
+pub fn mono_pf_count_dict_text_symbolid_v1(entries: Dict<text, SymbolId>) -> i64:
+    entries.len()
+
+pub fn mono_pf_count_dict_text_text_v1(entries: Dict<text, text>) -> i64:
+    entries.len()
+

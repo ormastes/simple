@@ -1,7 +1,7 @@
 use std.common.binary_io.{f64_to_bits}
 use std.common.math.ieee754_bits.{math_f64_round_to_f32_bits, math_f32_widen_bits}
 # Part 1 of src/compiler/70.backend/backend/mir_to_llvm.spl
-use compiler.backend.backend.mir_to_llvm.*
+use compiler.backend.mir_to_llvm.*
 # MIR to LLVM IR Translation
 #
 # MirToLlvm class that translates MIR to LLVM IR.
@@ -25,9 +25,9 @@ use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_funct
 # These implementation helpers belong to the SSA transform owner. The public
 # facade also exports them; its separate native-resolution regression remains
 # covered by mir_opt_facade_ssa_owner_spec.spl.
-use compiler.mir_opt.mir_opt.var_reassign_ssa.{ssa_var_transform_blocks, ssa_alloca_transform_blocks}
+use compiler.mir_opt.var_reassign_ssa.{ssa_var_transform_blocks, ssa_alloca_transform_blocks}
 use compiler.backend.backend_api.*
-use compiler.backend.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
+use compiler.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
 use compiler.backend.llvm_type_mapper.LlvmTypeMapper
 use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integer_type, is_signed_int_type, is_float_type,
     llvm_ir_builder_build, llvm_ir_builder_handle,
@@ -60,18 +60,21 @@ fn llvm_float_lexeme_constant(value: text, llvm_type: text) -> text:
         shift = shift - 4
     literal
 
+# Non-public statics are `hidden`, not `internal`: a top-level `val`/`var`
+# without `pub` is still importable (`use m.{NAME}`), and LLVM importers
+# reference the defining module's storage symbol directly (`external global`),
+# so an `internal` definition left every such import undefined at link
+# (g_..._TEST_OUTPUT_CAPTURE_BYTES, g_compiler_frontend_core__AstExpr_nodes__*,
+# Windows Stage 2 test-runner build, 2026-10-16). Storage names are
+# module-qualified, so `hidden` cannot collide, and it is still not exported
+# through the final shared-object boundary.
 fn llvm_static_linkage(visibility: Visibility) -> text:
     match visibility:
         case Visibility.Public: ""
-        case Visibility.Private: "internal "
-        # Scoped symbols remain linkable across closure objects, but are not
-        # exported through the final shared-object boundary.
-        case Visibility.Peer | Visibility.Up | Visibility.Internal | Visibility.Package: "hidden "
+        case _: "hidden "
 
 fn bootstrap_llvm_static_linkage(visibility_tag: i64) -> text:
-    if visibility_tag == 0: return ""
-    if visibility_tag == 5: return "internal "
-    "hidden "
+    if visibility_tag == 0: "" else: "hidden "
 
 @always_inline
 fn _sffi_string_builder_len(handle: i64) -> i64:
@@ -465,6 +468,8 @@ impl MirTextCodegen for MirToLlvm:
                     # constructor owner yet. Static startup boxing remains a
                     # separate unresolved path.
                     match init_const.value:
+                        case Int(word): g_init = self.translate_integer_constant_operand(word, g_ty)
+                        case Zero: g_init = if g_ty == "ptr": "null" else: self.translate_const_value(init_const.value)
                         case FloatLexeme(decimal): g_init = llvm_float_lexeme_constant(decimal, g_ty)
                         case _: g_init = self.translate_const_value(init_const.value)
                     # A Str initializer renders as a `getelementptr` PTR
@@ -531,7 +536,26 @@ impl MirTextCodegen for MirToLlvm:
                 # the signature; lower the body once in the emission loop.
                 val body = MirBody.from_function(fn_)
                 val fn_name = self.llvm_function_symbol_name(fn_.name)
-                val body_return_ty = body.bootstrap_return_type()
+                var body_return_ty = body.bootstrap_return_type()
+                # Untyped fns lower to Unit here while their bodies still
+                # return values (crc32_finalize/crc32_chunked/crc32_verify in
+                # lib.nogc_sync_mut.compression.gzip.crc, params untyped):
+                # the Ret terminators then hit "unsupported LLVM value
+                # conversion <t> to void" and the whole module ICEs. The seed
+                # infers an untyped fn's return from its body; mirror that
+                # minimally -- a Unit-declared body whose Ret terminators
+                # return a local operand becomes word-returning (the canonical
+                # erased/int width). Const-only returns (ret_kind 3) stay
+                # Unit: `return 0` in a genuinely void fn must not change its
+                # ABI, and the crc family always has a local value return too.
+                if body_return_ty.kind == MirTypeKind.Unit:
+                    var blk_i = 0
+                    while blk_i < body.blocks.len():
+                        val ret_kind = body.blocks[blk_i].bootstrap_ret_kind()
+                        if ret_kind == 1 or ret_kind == 2:
+                            body_return_ty = MirType.i64()
+                            blk_i = body.blocks.len()
+                        blk_i = blk_i + 1
                 val ret_ty = self.llvm_type_text(body_return_ty)
                 self.remember_function_return_type(fn_.name, ret_ty)
                 self.remember_function_return_type(fn_name, ret_ty)
@@ -645,7 +669,9 @@ impl MirTextCodegen for MirToLlvm:
             name: name,
             blocks: fn_.blocks,
             locals: fn_.locals,
-            arg_count: bootstrap_mir_function_param_count_at(index)
+            arg_count: bootstrap_mir_function_param_count_at(index),
+            nogc_strict: fn_.nogc_strict,
+            short_call_contracts: fn_.short_call_contracts
         )
         val return_type = bootstrap_llvm_static_type_text(bootstrap_mir_function_return_type_tag_at(index), self.native_int_type)
         self.select_bootstrap_return_abi(return_type, bootstrap_mir_function_return_unsigned_at(index))
@@ -692,7 +718,7 @@ impl MirTextCodegen for MirToLlvm:
             # sign-extends the param instead of zero-extending it.
             self.unsigned_locals[local_id] = self.is_unsigned_mir_kind(local.type_.kind)
             match local.type_.kind:
-                case MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, _) | MirTypeKind.FuncPtr(_) | MirTypeKind.Function(_, _) | MirTypeKind.Opaque(_):
+                case MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, _) | MirTypeKind.FuncPtr(_) | MirTypeKind.Opaque(_):
                     self.ptr_locals[local_id] = true
                 case MirTypeKind.Struct(_) | MirTypeKind.Enum(_) | MirTypeKind.Tuple(_) | MirTypeKind.Array(_, _) | MirTypeKind.Slice(_) | MirTypeKind.Union(_):
                     self.ptr_locals[local_id] = true
@@ -744,7 +770,26 @@ impl MirTextCodegen for MirToLlvm:
             self.bootstrap_return_abi_unsigned = false
             self.bootstrap_return_abi_active = false
         else:
-            val body_return_ty = body.bootstrap_return_type()
+            var body_return_ty = body.bootstrap_return_type()
+            # Untyped fns lower to Unit while their bodies still return
+            # values (crc32_finalize/crc32_chunked/crc32_verify in
+            # lib.nogc_sync_mut.compression.gzip.crc, params untyped): the
+            # Ret terminators then hit "unsupported LLVM value conversion
+            # <t> to void" and the whole module ICEs. The seed infers an
+            # untyped fn's return from its body; mirror that minimally -- a
+            # Unit-declared body whose Ret terminators return a LOCAL
+            # operand becomes word-returning (canonical erased/int width).
+            # Const-only returns (ret_kind 3) stay Unit: `return 0` in a
+            # genuinely void fn must not change its ABI, and the crc family
+            # always also has a local value return.
+            if body_return_ty.kind == MirTypeKind.Unit:
+                var infer_blk_i = 0
+                while infer_blk_i < body.blocks.len():
+                    val infer_ret_kind = body.blocks[infer_blk_i].bootstrap_ret_kind()
+                    if infer_ret_kind == 1 or infer_ret_kind == 2:
+                        body_return_ty = MirType.i64()
+                        infer_blk_i = body.blocks.len()
+                    infer_blk_i = infer_blk_i + 1
             ret_ty = self.llvm_type_text(body_return_ty)
             ret_unsigned = self.is_unsigned_mir_kind(body_return_ty.kind)
         self.set_function_return_type(ret_ty)
@@ -899,14 +944,14 @@ impl MirTextCodegen for MirToLlvm:
     me first_unemitted_call_destination(body: MirBody) -> i64:
         """Return the first MIR Call destination without an emitted LLVM SSA
         definition, or -1 when every value-producing Call was emitted."""
-        val call_disc = _sffi_enum_discriminant(MirInstKind.Call(nil, mir_operand_const_int(0), []))
+        val call_disc = _sffi_enum_discriminant(MirInstKind.Call(None, mir_operand_const_int(0), []))
         var block_i = 0
         while block_i < body.blocks.len():
             val instructions = body.blocks[block_i].instructions
             var instruction_i = 0
             while instruction_i < instructions.len():
                 val inst = instructions[instruction_i]
-                if _sffi_enum_discriminant(inst.kind) == call_disc:
+                if _sffi_enum_discriminant<MirInstKind>(inst.kind) == call_disc:
                     # Typed accessor, not raw payload/tuple decoding -- see
                     # MirInst.bootstrap_call_dest_local_id. -1 covers both a
                     # void Call and a non-Call, so nothing to account for.
@@ -956,9 +1001,9 @@ impl MirTextCodegen for MirToLlvm:
             print "[mir-to-llvm] instruction:const-discriminant index={index}"
         if _sffi_enum_discriminant(inst_kind) == const_disc:
             val payload = _sffi_enum_payload(inst_kind)
-            val dest: LocalId = _sffi_tuple_get(payload, 0)
-            val value: MirConstValue = _sffi_tuple_get(payload, 1)
-            val ty: MirType = _sffi_tuple_get(payload, 2)
+            val dest: LocalId = _sffi_tuple_get<LocalId>(payload, 0)
+            val value: MirConstValue = _sffi_tuple_get<MirConstValue>(payload, 1)
+            val ty: MirType = _sffi_tuple_get<MirType>(payload, 2)
             self.translate_const(dest, value, ty)
             # Fast paths must perform the SAME trailing bookkeeping the
             # fall-through dispatch does. Skipping this call is exactly how the
@@ -1007,9 +1052,9 @@ impl MirTextCodegen for MirToLlvm:
             MirInstKind.Aggregate(LocalId(id: 0), AggregateKind.Array(MirType.i64()), []))
         if _sffi_enum_discriminant(inst_kind) == aggregate_disc:
             val agg_payload = _sffi_enum_payload(inst_kind)
-            val agg_dest: LocalId = _sffi_tuple_get(agg_payload, 0)
-            val agg_kind: AggregateKind = _sffi_tuple_get(agg_payload, 1)
-            val agg_operands: [MirOperand] = _sffi_tuple_get(agg_payload, 2)
+            val agg_dest: LocalId = _sffi_tuple_get<LocalId>(agg_payload, 0)
+            val agg_kind: AggregateKind = _sffi_tuple_get<AggregateKind>(agg_payload, 1)
+            val agg_operands: [MirOperand] = _sffi_tuple_get<[MirOperand]>(agg_payload, 2)
             if mir_trace_enabled():
                 eprint("MIRB-AGG fastpath-fired dest={agg_dest.id} operands={agg_operands.len()}\n")
             # Call the uniquely-named impl, NOT the trait name: the trait
@@ -1026,8 +1071,8 @@ impl MirTextCodegen for MirToLlvm:
             print "[mir-to-llvm] instruction:copy-discriminant index={index}"
         if _sffi_enum_discriminant(inst_kind) == copy_disc:
             val payload = _sffi_enum_payload(inst_kind)
-            val dest: LocalId = _sffi_tuple_get(payload, 0)
-            val src: LocalId = _sffi_tuple_get(payload, 1)
+            val dest: LocalId = _sffi_tuple_get<LocalId>(payload, 0)
+            val src: LocalId = _sffi_tuple_get<LocalId>(payload, 1)
             self.translate_copy_move(dest, src, false)
             # Same invariant as the Const fast path above: mirror the trailing
             # bookkeeping of the fall-through dispatch before returning.
@@ -1096,7 +1141,7 @@ impl MirTextCodegen for MirToLlvm:
         # MIR inventory, which would defeat the emission receipt in
         # `translate_call_at` and make both this panic and
         # `first_unemitted_call_destination` vacuous.
-        val call_disc = _sffi_enum_discriminant(MirInstKind.Call(nil, mir_operand_const_int(0), []))
+        val call_disc = _sffi_enum_discriminant(MirInstKind.Call(None, mir_operand_const_int(0), []))
         if _sffi_enum_discriminant(inst_kind) == call_disc:
             if bootstrap_debug:
                 print "[mir-to-llvm] instruction:call-discriminant index={index}"
@@ -1373,6 +1418,15 @@ impl MirTextCodegen for MirToLlvm:
 
     me emit_value_type_conversion(value: text, src_ty: text, dst_ty: text, src_unsigned: bool) -> text:
         """Emit a verified scalar conversion for value_as_type callers."""
+        if src_ty == "void" or src_ty == "unit":
+            # A void tail expression (e.g. `exit(...)` as the last statement of
+            # a unit function) materialized as the function's i64 return ABI
+            # word carries no value; 0 is its only sound encoding. Without this
+            # arm the fallthrough recorded 'unsupported LLVM value conversion
+            # from void to i64' and poisoned the whole module (measured in
+            # lib.nogc_sync_mut.test_runner.runner_lifecycle.cleanup_and_exit,
+            # 2026-10-15; see site-19 addendum).
+            return self.ret_value_for_type(dst_ty, "0")
         if src_ty == "i1" and dst_ty == "ptr":
             # LLVM cannot bitcast i1 to ptr. Preserve the boolean through the
             # target's native integer width before converting to a pointer.
@@ -1965,7 +2019,18 @@ impl MirTextCodegen for MirToLlvm:
 
         match value:
             case Int(v):
-                self.builder.emit("  {dest_name} = add {llvm_ty} {v}, 0  ; const int")
+                if llvm_ty == "ptr":
+                    # Aggregate/reference locals carry runtime words in LLVM
+                    # pointers. Preserve target-word bits, including nil 3;
+                    # integer arithmetic is never valid on an LLVM ptr.
+                    self.mark_ptr_local(dest_id)
+                    val nit = self.native_int()
+                    val word = self.pointer_constant_word(v)
+                    self.builder.emit("  {dest_name} = inttoptr {nit} {word} to ptr  ; const word")
+                elif is_integer_type(llvm_ty) or llvm_ty == "i1":
+                    self.builder.emit("  {dest_name} = add {llvm_ty} {v}, 0  ; const int")
+                else:
+                    self.codegen_error("E-BACKEND-LLVM-CONST-TYPE: integer constant cannot define {llvm_ty}; use an explicit MIR Cast for numeric conversion")
             case FloatLexeme(v):
                 val fv = llvm_float_lexeme_constant(v, llvm_ty)
                 if llvm_ty == "float":
@@ -2002,7 +2067,6 @@ impl MirTextCodegen for MirToLlvm:
                 # stage1_lexer_hir_fatals_eprint_and_generic_len_helper_2026-08-22.
                 val is_fn_ref = match ty.kind:
                     case FuncPtr(_): true
-                    case Function(_, _): true
                     case _: false
                 if is_fn_ref:
                     val fn_operand = MirOperand(kind: MirOperandKind.Const(value, ty))
@@ -2578,7 +2642,7 @@ impl MirTextCodegen for MirToLlvm:
             case MirTypeKind.F32: "float"
             case MirTypeKind.Bool: "i1"
             case MirTypeKind.Unit | MirTypeKind.Never: "void"
-            case MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, _) | MirTypeKind.FuncPtr(_) | MirTypeKind.Function(_, _) | MirTypeKind.Opaque(_): "ptr"
+            case MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, _) | MirTypeKind.FuncPtr(_) | MirTypeKind.Opaque(_): "ptr"
             case MirTypeKind.Struct(_) | MirTypeKind.Enum(_) | MirTypeKind.Tuple(_) | MirTypeKind.Array(_, _) | MirTypeKind.Dict(_, _) | MirTypeKind.Slice(_) | MirTypeKind.Union(_): "ptr"
             case MirTypeKind.Promise(_) | MirTypeKind.Generator(_, _) | MirTypeKind.ActorType(_): "ptr"
             case _: self.native_int_type
@@ -2600,15 +2664,6 @@ impl MirTextCodegen for MirToLlvm:
                                 self.unknown_func_decls[resolved] = true
                                 "@{resolved}"
                             case _: self.translate_const_operand_at(operands, index)
-                    case Function(_, ret):
-                        match const_val:
-                            case Str(name):
-                                val resolved = self.llvm_function_symbol_name(name)
-                                val return_types: [MirType] = [ret]
-                                self.remember_function_return_type(resolved, self.llvm_type_text_at(return_types, 0))
-                                self.unknown_func_decls[resolved] = true
-                                "@{resolved}"
-                            case _: self.translate_const_operand_at(operands, index)
                     case _: self.translate_const_operand_at(operands, index)
 
     me translate_const_operand_at(operands: [MirOperand], index: i64) -> text:
@@ -2616,7 +2671,7 @@ impl MirTextCodegen for MirToLlvm:
         match operand.kind:
             case Const(value, const_ty):
                 match value:
-                    case Int(v): "{v}"
+                    case Int(v): self.translate_integer_constant_operand(v, self.valid_llvm_type(self.llvm_type_text(const_ty)))
                     case FloatLexeme(v): llvm_float_lexeme_constant(v, self.llvm_type_text(const_ty))
                     case Float(v): "{v}"
                     case Bool(v): if v: "1" else: "0"
@@ -2629,7 +2684,7 @@ impl MirTextCodegen for MirToLlvm:
                             val str_len = escaped_string_byte_len(v) + 1
                             val nit = self.native_int()
                             "getelementptr inbounds ([{str_len} x i8], ptr {global_name}, {nit} 0, {nit} 0)"
-                    case Zero: "0"
+                    case Zero: if self.llvm_type_text(const_ty) == "ptr": "null" else: "0"
                     case Array(elements): "zeroinitializer  ; array ({elements.len()} elements)"
                     case Tuple(elements): "zeroinitializer  ; tuple ({elements.len()} elements)"
                     case Struct(_): "zeroinitializer  ; struct"
@@ -2665,6 +2720,12 @@ impl MirTextCodegen for MirToLlvm:
                 val local_id = self.local_id_value(local)
                 self.local_value_text(local_id)
             case Const(const_val, const_ty):
+                match const_val:
+                    case Int(word):
+                        return self.translate_integer_constant_operand(word, self.valid_llvm_type(self.llvm_type_text(const_ty)))
+                    case Zero:
+                        if self.llvm_type_text(const_ty) == "ptr": return "null"
+                    case _: ()
                 # For function references, return @name directly. An
                 # ordinary named call (this path) must resolve to a
                 # colliding LOCAL definition's mangled symbol, not the bare
@@ -2681,15 +2742,6 @@ impl MirTextCodegen for MirToLlvm:
                                 self.unknown_func_decls[resolved] = true
                                 "@{resolved}"
                             case _: self.translate_const_value(const_val)
-                    case Function(_, ret):
-                        match const_val:
-                            case Str(name):
-                                val resolved = self.llvm_function_symbol_name(name)
-                                if ret != nil:
-                                    self.remember_function_return_type(resolved, self.llvm_type_text(ret))
-                                self.unknown_func_decls[resolved] = true
-                                "@{resolved}"
-                            case _: self.translate_const_value(const_val)
                     case Opaque(name):
                         match const_val:
                             case Str(value):
@@ -2701,6 +2753,26 @@ impl MirTextCodegen for MirToLlvm:
                             case _: self.translate_const_value(const_val)
                     case _:
                         self.translate_const_value(const_val)
+
+    me pointer_constant_word(word: i64) -> i64:
+        # MIR stores i64 literals even when targeting 32-bit pointer words.
+        # Normalize to their signed low32 spelling instead of handing LLVM
+        # an out-of-width native integer literal or changing the runtime tag.
+        if self.native_int() == "i32":
+            val low = word & 0xFFFFFFFF
+            return if low >= 0x80000000: low - 0x100000000 else: low
+        word
+
+    me translate_integer_constant_operand(word: i64, llvm_ty: text) -> text:
+        # Typed operands/globals need an LLVM constant expression, while
+        # translate_const defines an SSA value with an inttoptr instruction.
+        if llvm_ty == "ptr":
+            val nit = self.native_int()
+            val native_word = self.pointer_constant_word(word)
+            return "inttoptr ({nit} {native_word} to ptr)"
+        if is_integer_type(llvm_ty) or llvm_ty == "i1": return "{word}"
+        self.codegen_error("E-BACKEND-LLVM-CONST-TYPE: integer constant cannot initialize {llvm_ty}; use an explicit MIR Cast for numeric conversion")
+        "0"
 
     me translate_const_value(value: MirConstValue) -> text:
         """Translate an untyped LLVM constant.
@@ -2781,6 +2853,8 @@ impl MirTextCodegen for MirToLlvm:
             self.native_int()
 
     me lookup_function_return_type(func_name: text) -> text:
+        if func_name == "rt_dict_set" or func_name == "@rt_dict_set" or func_name == "rt_dict_contains" or func_name == "@rt_dict_contains":
+            return "i8"
         # ponytail: flattened (no nested match-as-expression) -- a nested
         # `match X.get(y):` inside an outer match arm was observed to silently
         # skip its `case Some(...)` body under the bootstrap seed's codegen

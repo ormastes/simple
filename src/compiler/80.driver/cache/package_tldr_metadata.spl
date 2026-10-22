@@ -2,6 +2,7 @@ use compiler.common.cache.canonical_identity.{
     canonical_identity_sort_texts, canonical_identity_text_lt
 }
 use std.common.crypto.sha256.{sha256_text}
+use std.common.crypto.blake3.{blake3_text}
 use compiler.driver.cache.cache_text_join.{cache_text_join_v1}
 
 val PACKAGE_TLDR_SCHEMA_V1: i64 = 1
@@ -267,11 +268,21 @@ fn package_tldr_header_validate_v1(header: PackageTldrHeaderV1) -> text:
         return "metadata-scc-member-missing"
     "ok"
 
+# Archive keys are BLAKE3-256 in pure Simple. A false hit here is a silent
+# miscompile, so check the official empty-input vector once per process; if
+# the hash is broken, every key is "" and the caller recomputes.
+var _package_tldr_blake3_ok: i64 = -1
+
+fn package_tldr_blake3_ok_v1() -> bool:
+    if _package_tldr_blake3_ok < 0:
+        _package_tldr_blake3_ok = if blake3_text("") == "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262": 1 else: 0
+    _package_tldr_blake3_ok == 1
+
 fn package_tldr_interface_key_v1(header: PackageTldrHeaderV1) -> text:
-    if package_tldr_header_validate_v1(header) != "ok":
+    if package_tldr_header_validate_v1(header) != "ok" or not package_tldr_blake3_ok_v1():
         return ""
     val variant = config_variant_digest_v1(header.variant)
-    var encoded = "simple/package-interface-archive/v1"
+    var encoded = "simple/package-interface-archive/v2"
     for field in [
             header.producer_digest, header.package_identity,
             header.module_identity, variant, header.smf_digest,
@@ -280,24 +291,24 @@ fn package_tldr_interface_key_v1(header: PackageTldrHeaderV1) -> text:
             header.provider_digest, header.generated_source_digest,
             header.reverse_projection_digest]:
         encoded = encoded + package_tldr_frame_v1(field)
-    sha256_text(encoded)
+    blake3_text(encoded)
 
 fn package_tldr_action_key_v1(
     header: PackageTldrHeaderV1, dependency_interface_keys: [text]
 ) -> text:
-    if package_tldr_header_validate_v1(header) != "ok":
+    if package_tldr_header_validate_v1(header) != "ok" or not package_tldr_blake3_ok_v1():
         return ""
     val dependencies = package_tldr_list_v1(dependency_interface_keys)
     if dependencies == "":
         return ""
-    var encoded = "simple/package-action-archive/v1"
+    var encoded = "simple/package-action-archive/v2"
     for field in [
             header.producer_digest, header.package_identity,
             header.module_identity, config_variant_digest_v1(header.variant),
             header.source_digest, header.source_witness_digest,
             header.generated_source_digest, dependencies]:
         encoded = encoded + package_tldr_frame_v1(field)
-    sha256_text(encoded)
+    blake3_text(encoded)
 
 fn package_tldr_admit_v1(
     header: PackageTldrHeaderV1?, expected_variant: ConfigVariantKeyV1,

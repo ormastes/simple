@@ -1,0 +1,112 @@
+use std.spec
+use std.io_runtime.{file_write, file_delete, dir_remove}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use compiler.common.mir_target_context.{MirTargetContext}
+use compiler.tools.verify.result_abi_raw_collector.*
+
+fn raw_test_paths(path: text) -> ResultAbiRawPathsV1:
+    ResultAbiRawPathsV1(source_artifact: path, compiler_artifact: path,
+        runtime_artifact: path, probe_artifact: path, registration_source: path)
+
+fn raw_test_target() -> MirTargetContext:
+    MirTargetContext(arch: "x86_64", os: "linux", abi: "gnu", backend: "llvm", version: 1)
+
+describe "C7 unauthenticated Result file measurements (REQ-C7-RESULT-MEASURE)":
+    it "measures actual bytes and records all five roles without granting authority":
+        val dir = secure_temp_dir(get_temp_dir(), "result-raw").unwrap()
+        val path = dir + "/bytes"
+        val wrote = file_write(path, "abc")
+        val measured = result_abi_collect_raw_v1(raw_test_paths(path), raw_test_target(), 17, -9)
+        # Cleanup precedes assertions; supplied artifact files are never removed.
+        val removed = file_delete(path)
+        val removed_dir = dir_remove(dir, false)
+        expect(wrote and removed and removed_dir).to_equal(true)
+        val receipt = measured.unwrap()
+        expect(receipt.measurements.len()).to_equal(5)
+        for item in receipt.measurements:
+            expect(item.sha256).to_equal("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+            expect(item.path).to_equal(path)
+        expect(receipt.measurements[0].role).to_equal("source")
+        expect(receipt.measurements[4].role).to_equal("registration")
+        expect(receipt.authentication).to_equal("UNAUTHENTICATED")
+        expect(receipt.checker).to_equal("NOT_CHECKED")
+        expect(receipt.loaded_code_binding).to_equal("OPEN")
+        expect(receipt.target_execution_binding).to_equal("OPEN")
+        expect(receipt.refinement).to_equal("OPEN")
+        expect(receipt.requested_target.arch).to_equal("x86_64")
+        expect(receipt.capture.observations[1].target.payload_bits).to_equal(-9)
+
+    it "measures a Unicode filename and refuses appended NUL in every role":
+        val dir = secure_temp_dir(get_temp_dir(), "result-unicode").unwrap()
+        val path = dir + "/café-한-😀"
+        val wrote = file_write(path, "abc")
+        val measured = result_abi_collect_raw_v1(raw_test_paths(path), raw_test_target(), 17, -9)
+        var refusals: [text] = []
+        for index in [0, 1, 2, 3, 4]:
+            var paths = raw_test_paths(path)
+            val bad = path + "\0suffix"
+            if index == 0: paths.source_artifact = bad
+            if index == 1: paths.compiler_artifact = bad
+            if index == 2: paths.runtime_artifact = bad
+            if index == 3: paths.probe_artifact = bad
+            if index == 4: paths.registration_source = bad
+            match result_abi_collect_raw_v1(paths, raw_test_target(), 0, 0):
+                case Err(detail): refusals.push(detail)
+                case Ok(_): refusals.push("unexpected accepted NUL path")
+        val removed = file_delete(path)
+        val removed_dir = dir_remove(dir, false)
+        expect(wrote and removed and removed_dir).to_equal(true)
+        val receipt = measured.unwrap()
+        expect(receipt.measurements.len()).to_equal(5)
+        for item in receipt.measurements:
+            expect(item.path).to_equal(path)
+            expect(item.sha256).to_equal("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        expect(refusals.len()).to_equal(5)
+        for detail in refusals:
+            expect(detail).to_start_with("FV2-E-RESULT-RAW-PATH:")
+
+    it "prevalidates every empty or NUL path before touching even the first missing file":
+        for index in [0, 1, 2, 3, 4]:
+            for bad in ["", "prefix\0suffix"]:
+                var paths = raw_test_paths("/unavailable/result-raw-path")
+                if index == 0: paths.source_artifact = bad
+                if index == 1: paths.compiler_artifact = bad
+                if index == 2: paths.runtime_artifact = bad
+                if index == 3: paths.probe_artifact = bad
+                if index == 4: paths.registration_source = bad
+                expect(result_abi_measure_paths_v1(paths).unwrap_err()).to_contain(
+                    "FV2-E-RESULT-RAW-PATH")
+                expect(result_abi_collect_raw_v1(paths, raw_test_target(), 0, 0).unwrap_err()).to_contain(
+                    "FV2-E-RESULT-RAW-PATH")
+
+    it "rejects absent providers or files and noncanonical digest text":
+        expect(result_abi_measure_paths_v1(raw_test_paths(
+            "/unavailable/result-raw-path")).unwrap_err()).to_contain("HASH")
+        for digest in ["", "ABC", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg"]:
+            expect(result_abi_raw_digest_valid_v1(digest)).to_equal(false)
+
+    it "detects actual file replacement across two measurements without accepting drift":
+        val dir = secure_temp_dir(get_temp_dir(), "result-drift").unwrap()
+        val path = dir + "/bytes"
+        val first_write = file_write(path, "abc")
+        val before = result_abi_measure_paths_v1(raw_test_paths(path))
+        val second_write = file_write(path, "different")
+        val after = result_abi_measure_paths_v1(raw_test_paths(path))
+        val removed = file_delete(path)
+        val removed_dir = dir_remove(dir, false)
+        expect(first_write and second_write and removed and removed_dir).to_equal(true)
+        expect(result_abi_measurements_compare_v1(before.unwrap(), after.unwrap())).to_contain(
+            "FV2-E-RESULT-RAW-DRIFT")
+        expect(result_abi_measurements_compare_v1(before.unwrap(), before.unwrap())).to_equal("")
+
+    it "refuses malformed reordered or relabeled measurement rows":
+        val digest = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        expect(result_abi_measurements_compare_v1([], [])).to_contain("MEASUREMENTS")
+        var rows: [ResultAbiRawFileV1] = []
+        for role in ["source", "compiler", "runtime", "probe", "registration"]:
+            rows.push(ResultAbiRawFileV1(role: role, path: "/fixture", sha256: digest))
+        var changed = [rows[0], rows[1], rows[2], rows[3], rows[4]]
+        changed[4] = ResultAbiRawFileV1(role: "runtime", path: "/fixture", sha256: digest)
+        expect(result_abi_measurements_compare_v1(rows, changed)).to_contain("MEASUREMENTS")

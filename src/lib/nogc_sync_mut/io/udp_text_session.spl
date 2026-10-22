@@ -1,0 +1,75 @@
+"""One strict text message per datagram over the existing IPv4 UdpSocket.
+
+Each packet has independent BOM/decoder state. Decode failures discard only
+that datagram; they never carry bytes into the next packet. Only bind creates sessions; caller-owned raw sockets cannot be adopted.
+Ordinary class references share the close state. Affine ownership, cloning and
+concurrent use are not statically controlled.
+"""
+use std.nogc_sync_mut.io.udp.{UdpSocket}
+use std.nogc_sync_mut.io.text_session.{TextSessionCodec}
+use std.nogc_sync_mut.io.external_text_io.{TextIoError, io_external_text, io_internal_text}
+use std.nogc_sync_mut.io.network_text_helpers.{network_text_encode, network_text_limit, network_read_format, network_write_format}
+
+pub class UdpTextSession:
+    _socket: UdpSocket
+    _codec: TextSessionCodec
+    _closed: bool
+    _write_failure: TextIoError?
+
+    pub static fn bind(address: text, codec: TextSessionCodec, read_timeout_ms: i64) -> Result<UdpTextSession, TextIoError>:
+        """Bind this owner's socket without exposing a raw socket alias."""
+        codec.validate()?
+        if read_timeout_ms <= 0: return Err(TextIoError.Io("UDP read timeout must be positive"))
+        var socket = match UdpSocket.bind(address):
+            case Ok(value): value
+            case Err(error): return Err(TextIoError.Transport(error))
+        match socket.set_read_timeout(Some(read_timeout_ms)):
+            case Err(error):
+                val closed = socket.close()
+                return Err(TextIoError.Transport(error))
+            case Ok(_): ()
+        Ok(UdpTextSession(_socket: socket, _codec: codec, _closed: false, _write_failure: nil))
+
+    pub fn local_addr() -> Result<text, TextIoError>:
+        if self._closed: return Err(TextIoError.Io("UDP text session is closed"))
+        match self._socket.local_addr():
+            case Ok(value): Ok(value)
+            case Err(error): Err(TextIoError.Transport(error))
+
+    pub fn recv_text() -> Result<(text, text), TextIoError>:
+        if self._closed: return Err(TextIoError.Io("UDP text session is closed"))
+        # This transport's provider is AF_INET and cannot deliver jumbograms.
+        # Always admit a complete IPv4 packet before checking the configured
+        # limit: recvfrom exposes no truncation flag for a smaller buffer.
+        val packet = match self._socket.recv_from(65535):
+            case Ok(value): value
+            case Err(error): return Err(TextIoError.Transport(error))
+        if packet.0.len() > self._codec.input_byte_limit():
+            return Err(network_text_limit("UDP datagram exceeds session input byte limit; datagram discarded"))
+        val external = io_external_text(packet.0, network_read_format(self._codec))?
+        val value = io_internal_text(external)?
+        Ok((value, packet.1))
+
+    pub me fn send_text(value: text, address: text) -> Result<(), TextIoError>:
+        if val error = self._write_failure: return Err(error)
+        if self._closed: return Err(TextIoError.Io("UDP text session is closed"))
+        val configured = self._codec.output_byte_limit()
+        # Native AF_INET payload ceiling. UDP messages must never be split.
+        val limit = if configured > 65507: 65507 else: configured
+        val bytes = network_text_encode(value, network_write_format(self._codec), limit)?
+        val sent = match self._socket.send_to(bytes, address):
+            case Ok(count): count
+            case Err(error): return Err(TextIoError.Transport(error))
+        if sent != bytes.len():
+            val failure = TextIoError.Io("UDP provider reported a partial datagram; session write side is unusable")
+            self._write_failure = Some(failure)
+            return Err(failure)
+        Ok(())
+
+    pub me fn close() -> Result<(), TextIoError>:
+        self._closed = true
+        match self._socket.close():
+            case Ok(_): Ok(())
+            case Err(error): Err(TextIoError.Transport(error))
+
+export UdpTextSession

@@ -1,0 +1,65 @@
+# Fixed-argument entrypoint for one isolated distributed-build transport.
+# The parent owns admission and commits; this child only publishes a claim.
+use app.io.mod.{get_args, file_read_regular_no_follow_bounded_bytes}
+use app.build.scheduler.parallel_transport_child_run_v1.{
+    run_parallel_transport_child_v1}
+use app.build.scheduler.parallel_transport_wire_v1.{
+    PARALLEL_TRANSPORT_WIRE_MAX_BYTES_V1}
+use app.build.scheduler.planner.{scheduler_action_digest_valid_v1}
+
+struct ParallelTransportChildArgsV1:
+    valid: bool
+    handoff_path: text
+    handoff_digest: text
+
+fn _child_main_path_valid_v1(path: text) -> bool:
+    if not path.starts_with("/") or path.len() < 2 or
+       path.len() > 4096 or path.ends_with("/") or
+       path.contains("//") or path.contains("\0"):
+        return false
+    val parts = path.split("/")
+    var i: i64 = 1
+    while i < parts.len():
+        if parts[i] == "" or parts[i] == "." or parts[i] == "..":
+            return false
+        i = i + 1
+    true
+
+fn parse_parallel_transport_child_args_v1(args: [text]) ->
+        ParallelTransportChildArgsV1:
+    var remaining = args
+    if remaining.len() > 0 and
+       (remaining[0].ends_with("parallel_transport_child_main.spl") or
+        remaining[0].ends_with("simple-parallel-transport-child") or
+        remaining[0].ends_with("parallel_transport_child_main.exe") or
+        remaining[0].ends_with("simple-parallel-transport-child.exe")):
+        remaining = remaining[1:]
+    if remaining.len() > 0 and remaining[0] == "--":
+        remaining = remaining[1:]
+    if remaining.len() != 4 or remaining[0] != "--handoff" or
+       remaining[2] != "--digest" or
+       not _child_main_path_valid_v1(remaining[1]) or
+       not scheduler_action_digest_valid_v1(remaining[3]):
+        return ParallelTransportChildArgsV1(false, "", "")
+    ParallelTransportChildArgsV1(true, remaining[1], remaining[3])
+
+fn main() -> i64:
+    val command = parse_parallel_transport_child_args_v1(get_args())
+    if not command.valid:
+        print("parallel-transport-child: INCOMPLETE reason=arguments-invalid")
+        return 2
+    val read = file_read_regular_no_follow_bounded_bytes(
+        command.handoff_path, PARALLEL_TRANSPORT_WIRE_MAX_BYTES_V1)
+    if read.is_err():
+        print("parallel-transport-child: INCOMPLETE reason=handoff-unavailable")
+        return 2
+    val result = run_parallel_transport_child_v1(read.unwrap(),
+        command.handoff_digest)
+    if not result.fetched:
+        print("parallel-transport-child: INCOMPLETE reason={result.reason}")
+        return 1
+    print("parallel-transport-child: FETCHED")
+    0
+
+export ParallelTransportChildArgsV1
+export parse_parallel_transport_child_args_v1

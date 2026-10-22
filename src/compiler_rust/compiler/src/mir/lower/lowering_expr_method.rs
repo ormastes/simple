@@ -2252,11 +2252,11 @@ impl<'a> MirLowerer<'a> {
         };
 
         let declared_trait_owner = match &receiver.kind {
-            crate::hir::HirExprKind::Local(index) => self
-                .local_type_name_hints
-                .get(index)
-                .filter(|name| self.trait_infos.is_some_and(|infos| infos.contains_key(name.as_str())))
-                .cloned(),
+            crate::hir::HirExprKind::Local(index) => self.local_trait_dispatch.get(index)
+                .map(|dispatch| dispatch.owner.clone())
+                .or_else(|| self.local_type_name_hints.get(index)
+                    .filter(|name| self.trait_infos.is_some_and(|infos| infos.contains_key(name.as_str())))
+                    .cloned()),
             _ => None,
         };
 
@@ -2342,7 +2342,19 @@ impl<'a> MirLowerer<'a> {
                 // concrete classes that merely share a method name with a trait
                 // get static dispatch instead of a bogus vtable load.
                 let recv_type_name: Option<&str> = func_name.rsplit_once('.').map(|(ty, _)| ty);
-                let trait_lookup = self.find_trait_for_method_on_receiver(method, recv_type_name, args.len());
+                let declared_dispatch = match &receiver.kind {
+                    crate::hir::HirExprKind::Local(index) => self.local_trait_dispatch.get(index),
+                    _ => None,
+                };
+                let trait_lookup = if let Some(dispatch) = declared_dispatch {
+                    let info = &dispatch.info;
+                    // This signature was captured from the exact declaration
+                    // owner, not re-resolved through a colliding bare name.
+                    info.get_method(method).filter(|sig| sig.param_types.len() == args.len())
+                        .map(|sig| (sig.vtable_slot, sig.param_types.clone(), sig.return_type))
+                } else {
+                    self.find_trait_for_method_on_receiver(method, recv_type_name, args.len())
+                };
                 // Duck-typed trait (no `impl Trait for ...` anywhere in the
                 // unit, e.g. game2d's `App`/`GameBackend`): there is no vtable
                 // to dispatch through, so the old lowering emitted the

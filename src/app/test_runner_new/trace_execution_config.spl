@@ -1,0 +1,88 @@
+# Pure mapping from the authoritative runner options into a trace snapshot.
+# @req REQ-TRC-012 REQ-TRC-013 REQ-TRC-018
+use std.test_runner.test_runner_types.{TestExecutionMode, TestOptions, TestLevel}
+use std.common.traceability.execution_config.{TraceExecutionConfiguration}
+use std.common.traceability.execution_config_codec.{trace_execution_configuration_id}
+
+pub struct TraceExecutionConfigCapture:
+    configuration: TraceExecutionConfiguration
+    configuration_id: text
+
+fn _trace_mode_name(mode: TestExecutionMode) -> text:
+    match mode:
+        case TestExecutionMode.Interpreter: "interpreter"
+        case TestExecutionMode.Smf: "smf"
+        case TestExecutionMode.Native: "native"
+        case TestExecutionMode.Compile: "compile"
+        case TestExecutionMode.Composite(spec): "composite:" + spec
+
+fn _trace_cache_policy() -> text:
+    # Result-cache replay and discovery-cache behavior are not both bound by
+    # TestOptions. Preserve that uncertainty instead of inferring a default.
+    "unresolved"
+
+fn _trace_unresolved_fields(options: TestOptions) -> [text]:
+    var fields = [
+        "effective_timeout_per_file",
+        "slow_file_timeout_adjustment",
+        "spec_timeout_header_directive",
+        "worker_environment",
+        "feature_gate_disposition",
+        "effective_cache_policy"
+    ]
+    if options.native_backend == "":
+        fields.push("native_backend_default_resolution")
+    if options.parallel and not options.sequential and options.max_workers <= 0:
+        fields.push("effective_worker_count")
+    fields
+
+fn _trace_unsupported_fields(options: TestOptions) -> [text]:
+    var fields: [text] = []
+    if _trace_mode_name(options.mode).starts_with("composite:"):
+        fields.push("composite_execution_mode")
+    if options.tag != "": fields.push("tag_filter")
+    if options.level != TestLevel.All: fields.push("test_level_filter")
+    if options.only_skipped: fields.push("only_skipped_filter")
+    if options.safe_mode: fields.push("safe_mode")
+    if options.fuzz_mode: fields.push("fuzz_mode")
+    if options.chaos_mode: fields.push("chaos_mode")
+    if options.deploy_mode: fields.push("deploy_mode")
+    if options.security_mode: fields.push("security_mode")
+    if options.execution_mode != "": fields.push("alternate_execution_mode")
+    if options.container_sequential: fields.push("container_sequential")
+    if options.unstable_mode: fields.push("unstable_mode")
+    fields
+
+pub fn capture_trace_execution_configuration(
+    options: TestOptions,
+    selected_paths: [text],
+    lane_id: text,
+    shard_id: text,
+    shard_index: i64,
+    shard_count: i64
+) -> Result<TraceExecutionConfigCapture, text>:
+    if selected_paths.len() == 0:
+        return Err("trace configuration capture requires selected paths")
+    val parallel = options.parallel and not options.sequential
+    val workers = if parallel and options.max_workers > 0: options.max_workers else: if parallel: 0 else: 1
+    val config = TraceExecutionConfiguration(
+        execution_mode: _trace_mode_name(options.mode),
+        backend: if options.native_backend == "": "default" else: options.native_backend,
+        lane_id: lane_id,
+        timeout_secs: options.timeout,
+        timeout_binding: "per_file_unresolved",
+        slow_policy: if options.only_slow: "only_slow" else: "include_slow",
+        seed: options.seed,
+        seed_set: options.seed_set,
+        fail_fast: options.fail_fast,
+        cache_policy: _trace_cache_policy(),
+        parallel: parallel,
+        worker_count: workers,
+        shard_id: shard_id,
+        shard_index: shard_index,
+        shard_count: shard_count,
+        shard_membership: selected_paths,
+        unresolved_fields: _trace_unresolved_fields(options),
+        unsupported_fields: _trace_unsupported_fields(options))
+    val config_id = trace_execution_configuration_id(config)?
+    Ok(TraceExecutionConfigCapture(configuration: config, configuration_id: config_id))

@@ -1,0 +1,9 @@
+# Lean declaration mapping — domain research
+
+2026-10-18. Primary references: [Lean structures](https://lean-lang.org/theorem_proving_in_lean4/Structures-and-Records/), [inductive types](https://docs.lean-lang.org/theorem_proving_in_lean4/Inductive-Types/), and [namespaces](https://lean-lang.org/doc/reference/latest/Namespaces-and-Sections/).
+
+Lean structures generate constructors/projections, and inductive constructors occupy the type namespace. Therefore nominal type names must be qualified consistently, generated member names must not collide, and dependencies must be declared before use outside a mutual declaration. The design uses the existing structure/inductive emitters, an isolated type namespace, quoted source-name components, and root-qualified references. It rejects recursive nominal graphs until a mutually inductive representation is implemented and checked.
+
+A Lean semantic structure is not evidence of target byte layout. MIR field offsets and explicit enum discriminants are retained as typed metadata; no theorem equating them to native storage is synthesized. Exact-width primitive mappings remain the existing mapper's responsibility. Lean acceptance of the generated syntax, imported library availability, and representation refinement are separate unexecuted gates.
+
+Revision 2 evidence (independent review C2-DECL-01): official installed Lean 4.30 `Lean/Elab/MutualInductive.lean` invokes `mkCtorIdx` and `mkCtorElim`; `Lean/Meta/Constructions/CtorIdx.lean` names the auxiliary `T.ctorIdx`, while `CtorElim.lean` generates `T.ctorElimType` and `T.ctorElim` for multi-constructor types. The member admission list now includes these three evidenced generated names. The counterexamples have two variants because the eliminator generation is conditional on constructor count. This is source evidence, not a Lean execution result.

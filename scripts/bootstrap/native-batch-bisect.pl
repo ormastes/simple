@@ -5,6 +5,7 @@ use FindBin;
 use lib "$FindBin::Bin/lib";
 use BootstrapProductSelection qw(product_selection);
 use NativeBatchQueue qw(queue_request queue_record baseline_copy);
+use NativeAdapterEvidence qw(previous_build_evidence);
 use JSON::PP;
 use Digest::SHA qw(sha256_hex);
 use File::Path qw(make_path);
@@ -44,9 +45,14 @@ if($command eq 'init') {
     $authority->{schema} eq 'simple-reviewed-native-authority-v1' && $authority->{backend} eq $backend &&
         $authority->{result_sha256} eq sha256_hex(bytes($green)) && length($authority->{reviewed_by}//'') &&
         $authority->{compiler_sha256}=~/\A[0-9a-f]{64}\z/ &&
+        ($authority->{runtime_capsule_sha256}//'')=~/\A[0-9a-f]{64}\z/ &&
         sha256_hex(bytes($authority->{review_evidence})) eq $authority->{review_evidence_sha256} &&
         native_hash($authority->{compiler_path}) eq $authority->{compiler_sha256}
         or die "reviewed initial native authority mismatch\n";
+    # Stable reviewed lane identity must match the initial build, not just
+    # adjacent receipt labels. Old states without runtime authority are rejected.
+    previous_build_evidence($green,$source,$authority->{compiler_sha256},
+        $backend,$authority->{runtime_capsule_sha256});
     for my $variant(qw(positive negative)) {
         native_hash($authority->{variants}{$variant}{binary_path}) eq $authority->{variants}{$variant}{binary_sha256} &&
         $authority->{variants}{$variant}{binary_sha256} eq $g->{variants}{$variant}{binary_sha256}
@@ -84,10 +90,13 @@ sub validate_pass {
     my($s,$request,$o)=@_;
     my $proof=$o->{verified_result}//die "missing verified native result\n";require_absolute($proof);
     my $g=read_json($proof);my $m=read_json(dirname($proof).'/manifest.json');
-    my $build=fields(dirname($proof).'/build.env');
-    $build->{backend} eq $s->{backend} && $build->{compiler_sha256} eq $s->{native_authority}{compiler_sha256} &&
-        $build->{workspace} eq $s->{source} && $build->{manifest_sha256} eq $g->{manifest_sha256}
-        or die "native backend/producer binding differs\n";
+    # This trial grants union acceptance only for the exact pinned lane.
+    # The shared validator binds result fields to strict, hash-bound build
+    # evidence as well as independently reviewed producer/runtime identity.
+    ($s->{native_authority}{runtime_capsule_sha256}//'')=~/\A[0-9a-f]{64}\z/
+        or die "reviewed runtime authority missing; state migration required\n";
+    previous_build_evidence($proof,$s->{source},$s->{native_authority}{compiler_sha256},
+        $s->{backend},$s->{native_authority}{runtime_capsule_sha256});
     for my $variant(qw(positive negative)) {
         native_hash(dirname($proof)."/$variant.native") eq $g->{variants}{$variant}{binary_sha256}
             or die "native artifact differs from verified result\n";

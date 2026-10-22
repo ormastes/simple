@@ -1,0 +1,216 @@
+#!/bin/sh
+# check-freebsd-riscv64-bootstrap-qemu.shs — FreeBSD 14.4 riscv64 bootstrap lane.
+#
+#   sh scripts/check/check-freebsd-riscv64-bootstrap-qemu.shs --preflight  # host tools only
+#   sh scripts/check/check-freebsd-riscv64-bootstrap-qemu.shs --smoke      # boot + SSH + uname
+#   sh scripts/check/check-freebsd-riscv64-bootstrap-qemu.shs --phase0     # + cross seed runs in guest
+#   sh scripts/check/check-freebsd-riscv64-bootstrap-qemu.shs --phase1     # + stage1 native-build in guest
+#
+# Why a separate lane from check-freebsd-bootstrap-qemu.shs (amd64/arm64):
+#   * FreeBSD publishes no BASIC-CLOUDINIT image for riscv64, so the guest is
+#     provisioned over the serial console (expect) instead of cloud-init.
+#   * pkg.FreeBSD.org carries only base_* repos for riscv64 (no rust, no
+#     llvm23), so the Rust seed is cross-built on the host for
+#     riscv64gc-unknown-freebsd (tier 3: nightly -Zbuild-std) against the
+#     release base.txz sysroot. C uses the guest's base clang/lld.
+#   * Boot is OpenSBI fw_jump -> U-Boot (smode) -> FreeBSD loader, the same
+#     real-firmware chain as check-linux-riscv64-bootstrap-qemu.shs.
+# The seed is cross-built BEFORE the guest boots: a 15 GB host running a
+# guest and a seed build together was OOM-killed, corrupting the guest UFS.
+#
+# Env: QEMU_MEM (8G) QEMU_CPUS (4) QEMU_PORT (2224) FREEBSD_RV64_WORK
+#      (~/.simple/freebsd-riscv64) STAGE1_TIMEOUT (86400 s) STAGE1_FILE_TIMEOUT
+#      (7200 s per file) CARGO_JOBS (3).
+# Host packages (Ubuntu): qemu-system-misc qemu-utils opensbi u-boot-qemu
+#      expect openssh-client clang lld llvm; rustup nightly + rust-src.
+set -eu
+
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+MODE="${1:---smoke}"
+VER=14.4
+QEMU_MEM="${QEMU_MEM:-8G}"
+QEMU_CPUS="${QEMU_CPUS:-4}"
+QEMU_PORT="${QEMU_PORT:-2224}"
+WORK="${FREEBSD_RV64_WORK:-${HOME}/.simple/freebsd-riscv64}"
+STAGE1_TIMEOUT="${STAGE1_TIMEOUT:-86400}"
+# The seed default per-file timeout (300 s) is sized for native hosts; under
+# riscv64 TCG 10.frontend/core/__init__.spl alone exceeded it and the seed then
+# refused every remaining file.
+STAGE1_FILE_TIMEOUT="${STAGE1_FILE_TIMEOUT:-7200}"
+CARGO_JOBS="${CARGO_JOBS:-3}"
+OPENSBI="${QEMU_OPENSBI:-/usr/lib/riscv64-linux-gnu/opensbi/generic/fw_jump.bin}"
+UBOOT="${QEMU_UBOOT:-/usr/lib/u-boot/qemu-riscv64_smode/uboot.elf}"
+IMAGE="${SIMPLE_BIG_STORAGE_ROOT:-${HOME}/.simple}/qemu/images/freebsd/FreeBSD-${VER}-RELEASE-riscv-riscv64-ufs.qcow2"
+SYSROOT="$WORK/sysroot-${VER}"
+TARGET=riscv64gc-unknown-freebsd
+CLANG_TARGET="riscv64-unknown-freebsd${VER}"
+SEED_DIR="$WORK/target/$TARGET/bootstrap"
+SSH_KEY="${QEMU_SSH_PRIVATE_KEY:-${HOME}/.ssh/id_ed25519}"
+SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR -o ConnectTimeout=20 -i $SSH_KEY"
+
+pass() { printf '  PASS  %s\n' "$*"; }
+fail() { printf '  FAIL  %s\n' "$*" >&2; printf 'FAIL — %s\n' "$*"; exit 1; }
+guest() { ssh $SSH_OPTS -p "$QEMU_PORT" root@127.0.0.1 "$@"; }
+hash_file() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    else shasum -a 256 "$1" | awk '{print $1}'; fi
+}
+
+case "$MODE" in
+    --preflight|--smoke|--phase0|--phase1) ;;
+    *) echo "usage: $0 --preflight|--smoke|--phase0|--phase1" >&2; exit 2 ;;
+esac
+
+# ── Preflight ─────────────────────────────────────────────────────────────
+printf '[1] Preflight\n'
+for t in qemu-system-riscv64 qemu-img expect ssh scp ssh-keygen curl xz tar clang ld.lld cargo rustup; do
+    command -v "$t" >/dev/null 2>&1 || fail "host tool missing: $t"
+done
+[ -f "$OPENSBI" ] || fail "missing OpenSBI $OPENSBI (apt install opensbi)"
+[ -f "$UBOOT" ] || fail "missing U-Boot $UBOOT (apt install u-boot-qemu)"
+TOOLCHAIN="$(sed -n 's/^channel = "\(.*\)"/\1/p' "$ROOT_DIR/src/compiler_rust/rust-toolchain.toml")"
+RUST_SRC="$(cd "$ROOT_DIR/src/compiler_rust" && rustc --print sysroot)/lib/rustlib/src/rust/library"
+[ -f "$RUST_SRC/Cargo.lock" ] || fail "rust-src missing for the pinned $TOOLCHAIN toolchain (rustup component add rust-src)"
+pass "host tools, OpenSBI, U-Boot, rust-src"
+[ "$MODE" = --preflight ] && { printf 'PASS — preflight\n'; exit 0; }
+
+mkdir -p "$WORK"
+[ -f "$SSH_KEY" ] || ssh-keygen -q -t ed25519 -N '' -f "$SSH_KEY"
+
+# ── Media + sysroot ───────────────────────────────────────────────────────
+printf '[2] Media\n'
+[ -f "$IMAGE" ] || sh "$ROOT_DIR/scripts/qemu/fetch-freebsd-media.shs" --fetch riscv64
+sh "$ROOT_DIR/scripts/qemu/simple-freebsd-media.shs" --check --path "$IMAGE" | grep -qx 'freebsd_media_status=pass' ||
+    fail "admitted riscv64 image required: $IMAGE"
+pass "admitted image $IMAGE"
+
+if [ "$MODE" != --smoke ] && [ ! -f "$SYSROOT/usr/lib/crt1.o" ]; then
+    base="https://download.freebsd.org/releases/riscv/riscv64/${VER}-RELEASE"
+    curl -fsSL --retry 3 -o "$WORK/MANIFEST" "$base/MANIFEST" || fail "MANIFEST download failed"
+    curl -fL --retry 3 -o "$WORK/base.txz" "$base/base.txz" || fail "base.txz download failed"
+    want="$(awk '$1 == "base.txz" {print $2}' "$WORK/MANIFEST")"
+    [ -n "$want" ] && [ "$(hash_file "$WORK/base.txz")" = "$want" ] || fail "base.txz sha256 does not match MANIFEST"
+    rm -rf "$SYSROOT" && mkdir -p "$SYSROOT"
+    tar -xf "$WORK/base.txz" -C "$SYSROOT" ./usr/include ./usr/lib ./lib 2>/dev/null || true
+    rm -rf "$SYSROOT/usr/lib/debug" "$WORK/base.txz"
+    [ -f "$SYSROOT/usr/lib/crt1.o" ] || fail "sysroot extraction incomplete"
+fi
+
+# ── Cross seed (host, before the guest boots) ─────────────────────────────
+if [ "$MODE" != --smoke ]; then
+    printf '[3] Cross-build Rust seed for %s\n' "$TARGET"
+    # The repo replaces crates-io with ./vendor, which lacks std's own deps;
+    # merge std's vendored deps into a side directory for -Zbuild-std.
+    STD_VENDOR="$WORK/std-vendor"; MERGED="$WORK/merged-vendor"
+    if [ ! -d "$STD_VENDOR" ]; then
+        rm -rf "$STD_VENDOR.part"
+        (cd "$RUST_SRC" && cargo "+$TOOLCHAIN" vendor -q --versioned-dirs "$STD_VENDOR.part" >/dev/null) ||
+            fail "cargo vendor of std dependencies failed"
+        mv "$STD_VENDOR.part" "$STD_VENDOR"
+    fi
+    rm -rf "$MERGED" && mkdir -p "$MERGED"
+    for d in "$ROOT_DIR"/src/compiler_rust/vendor/* "$STD_VENDOR"/*; do
+        [ -e "$MERGED/$(basename "$d")" ] || ln -s "$d" "$MERGED/$(basename "$d")"
+    done
+    flags="--target=$CLANG_TARGET --sysroot=$SYSROOT"
+    for pkg in "-p simple-driver" "-p simple-native-all --features driver-compat"; do
+        # shellcheck disable=SC2086
+        (cd "$ROOT_DIR/src/compiler_rust" &&
+            CARGO_TARGET_DIR="$WORK/target" \
+            CARGO_TARGET_RISCV64GC_UNKNOWN_FREEBSD_LINKER=clang \
+            CARGO_TARGET_RISCV64GC_UNKNOWN_FREEBSD_RUSTFLAGS="-C link-arg=--target=$CLANG_TARGET -C link-arg=--sysroot=$SYSROOT -C link-arg=-fuse-ld=lld" \
+            CC_riscv64gc_unknown_freebsd=clang CXX_riscv64gc_unknown_freebsd=clang++ \
+            CFLAGS_riscv64gc_unknown_freebsd="$flags -Wno-error=implicit-function-declaration" \
+            CXXFLAGS_riscv64gc_unknown_freebsd="$flags" \
+            cargo build --config "source.vendored-sources.directory=\"$MERGED\"" \
+                -Zbuild-std=std,panic_abort --profile bootstrap $pkg --target "$TARGET" -j "$CARGO_JOBS") ||
+            fail "cross-build failed: $pkg"
+    done
+    [ -x "$SEED_DIR/simple" ] && [ -f "$SEED_DIR/libsimple_native_all.a" ] || fail "seed artifacts missing in $SEED_DIR"
+    pass "seed + libsimple_native_all.a"
+fi
+
+# ── Boot + console provisioning ───────────────────────────────────────────
+printf '[4] Boot (OpenSBI -> U-Boot -> FreeBSD) and provision SSH\n'
+OVERLAY="$WORK/run.overlay.qcow2"; CONSOLE="$WORK/console.log"; EXP="$WORK/provision.exp"
+rm -f "$OVERLAY" "$CONSOLE"
+qemu-img create -q -f qcow2 -b "$IMAGE" -F qcow2 "$OVERLAY" 40G || fail "overlay creation failed"
+cat > "$EXP" <<'EOF'
+set timeout 3600
+set pub [exec cat $env(PUB)]
+log_file -noappend $env(CONSOLE)
+spawn qemu-system-riscv64 -machine virt -cpu rv64 -smp $env(QEMU_CPUS) -m $env(QEMU_MEM) -nographic \
+  -bios $env(OPENSBI) -kernel $env(UBOOT) \
+  -drive file=$env(OVERLAY),format=qcow2,if=none,id=hd0 -device virtio-blk-device,drive=hd0 \
+  -netdev user,id=net0,hostfwd=tcp::$env(QEMU_PORT)-:22 -device virtio-net-device,netdev=net0
+expect "login:"
+send "root\r"
+expect "# "
+# One short command per prompt: a single long line is mangled by the console.
+foreach cmd [list \
+  "sysrc sshd_enable=YES" \
+  "mkdir -p /root/.ssh" \
+  "echo '$pub' > /root/.ssh/authorized_keys" \
+  "chmod 700 /root/.ssh; chmod 600 /root/.ssh/authorized_keys" \
+  "echo 'PermitRootLogin prohibit-password' >> /etc/ssh/sshd_config" \
+  "service sshd restart" \
+  "echo PROV''ISION_OK" ] {
+  send "$cmd\r"
+  expect "# "
+}
+set timeout -1
+expect eof
+EOF
+PUB="$SSH_KEY.pub" CONSOLE="$CONSOLE" OVERLAY="$OVERLAY" OPENSBI="$OPENSBI" UBOOT="$UBOOT" \
+    QEMU_CPUS="$QEMU_CPUS" QEMU_MEM="$QEMU_MEM" QEMU_PORT="$QEMU_PORT" \
+    setsid expect "$EXP" >"$WORK/expect.out" 2>&1 </dev/null &
+EXPECT_PID=$!
+cleanup() { guest 'shutdown -p now' >/dev/null 2>&1 || true; sleep 20; kill "$EXPECT_PID" 2>/dev/null || true; }
+trap cleanup EXIT
+waited=0
+until tr -d '\r' <"$CONSOLE" 2>/dev/null | grep -q '^PROVISION_OK'; do
+    kill -0 "$EXPECT_PID" 2>/dev/null || fail "guest exited during provisioning (see $CONSOLE)"
+    [ "$waited" -lt 3600 ] || fail "provisioning timed out (see $CONSOLE)"
+    sleep 15; waited=$((waited + 15))
+done
+UNAME="$(guest 'uname -mrs')" || fail "SSH into guest failed"
+case "$UNAME" in *"FreeBSD ${VER}-RELEASE"*riscv*) ;; *) fail "unexpected guest: $UNAME" ;; esac
+pass "guest: $UNAME"
+[ "$MODE" = --smoke ] && { printf 'PASS — FreeBSD %s riscv64 boot + SSH\n' "$VER"; exit 0; }
+
+# ── Phase 0: seed runs in guest ───────────────────────────────────────────
+printf '[5] Phase 0: sync sources + seed, seed --version in guest\n'
+SRC_TAR="$WORK/src.tar"
+(cd "$ROOT_DIR" && tar -cf "$SRC_TAR" --exclude=src/compiler_rust src config VERSION release) || fail "source tar failed"
+guest 'mkdir -p /root/simple && tar -xf - -C /root/simple' <"$SRC_TAR" || fail "source sync failed"
+rm -f "$SRC_TAR"
+guest 'mkdir -p /root/simple/src/compiler_rust/target/bootstrap'
+# The seed links -lzstd (link_config.rs freebsd()). amd64 gets it from pkg;
+# riscv64 has no ports packages, but base ships the same ABI as libprivatezstd.
+guest 'test -f /usr/lib/libprivatezstd.a && mkdir -p /usr/local/lib && ln -sf /usr/lib/libprivatezstd.a /usr/local/lib/libzstd.a' ||
+    fail "cannot provide libzstd in guest"
+scp -q $SSH_OPTS -P "$QEMU_PORT" "$SEED_DIR/simple" "$SEED_DIR/libsimple_native_all.a" \
+    root@127.0.0.1:/root/simple/src/compiler_rust/target/bootstrap/ || fail "seed copy failed"
+SEED_VERSION="$(guest 'cd /root/simple && ./src/compiler_rust/target/bootstrap/simple --version 2>/dev/null')" ||
+    fail "seed does not run in guest"
+case "$SEED_VERSION" in *"Simple Language v"*) ;; *) fail "seed --version printed no version: $SEED_VERSION" ;; esac
+SEED_VERSION="$(printf '%s\n' "$SEED_VERSION" | grep 'Simple Language v')"
+pass "seed in guest: $SEED_VERSION"
+[ "$MODE" = --phase0 ] && { printf 'PASS — phase0: Rust seed runs on FreeBSD %s riscv64\n' "$VER"; exit 0; }
+
+# ── Phase 1: stage1 native-build in guest (release.yml recipe) ────────────
+printf '[6] Phase 1: stage1 native-build of bootstrap_main.spl (timeout %ss)\n' "$STAGE1_TIMEOUT"
+set +e
+guest "cd /root/simple && mkdir -p build/bootstrap/stage1 && timeout $STAGE1_TIMEOUT env RUST_LOG=error SIMPLE_BOOTSTRAP=1 \
+SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=0 \
+./src/compiler_rust/target/bootstrap/simple native-build --source src/compositions/kernel_llvm_cranelift --source src --entry-closure \
+--entry src/app/cli/bootstrap_main.spl --mode dynload --threads $QEMU_CPUS --timeout $STAGE1_FILE_TIMEOUT \
+--output build/bootstrap/stage1/simple" >"$WORK/stage1.log" 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 0 ] || fail "stage1 native-build exit $rc (log: $WORK/stage1.log)"
+STAGE1_VERSION="$(guest 'cd /root/simple && ./build/bootstrap/stage1/simple --version 2>/dev/null')" ||
+    fail "stage1 binary does not run (log: $WORK/stage1.log)"
+case "$STAGE1_VERSION" in *[0-9].[0-9]*) ;; *) fail "stage1 --version printed no version: $STAGE1_VERSION" ;; esac
+pass "stage1: $STAGE1_VERSION"
+printf 'PASS — phase1: stage1 built and runs on FreeBSD %s riscv64\n' "$VER"

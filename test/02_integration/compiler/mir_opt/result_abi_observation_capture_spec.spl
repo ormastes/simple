@@ -1,0 +1,86 @@
+use std.spec
+use compiler.hir.hir_types.{SymbolTable}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir_opt.result_abi_observation_capture.*
+use compiler.mir_opt.result_abi_translation_validation.*
+use std.nogc_sync_mut.sffi.enum_wire.{enum_wire_result_i64_capture_v1}
+
+fn capture_test_registration() -> MirLowering:
+    var lowering = MirLowering.new(SymbolTable.new())
+    lowering.register_builtin_enum_seeds()
+    lowering
+
+describe "C7 raw Result observation capture (REQ-C7-RESULT-RAW)":
+    it "obtains expectation from actual canonical registration independently of values":
+        val expected = result_abi_expectation_from_lowering_v1(capture_test_registration()).unwrap()
+        expect(expected.enum_runtime_id).to_equal(0)
+        expect(expected.ok_tag).to_equal(0)
+        expect(expected.err_tag).to_equal(1)
+
+    it "captures both typed outcomes with exact signed payload bits":
+        for bits in [0, -1, -9223372036854775807 - 1, 9223372036854775807]:
+            val captured = result_abi_builtin_i64_capture_v1(bits, bits).unwrap()
+            expect(captured.observations.len()).to_equal(2)
+            expect(captured.observations[0].target.payload_bits).to_equal(bits)
+            expect(captured.observations[1].target.payload_bits).to_equal(bits)
+            expect(captured.observations[0].target.discriminant).to_equal(0)
+            expect(captured.observations[1].target.discriminant).to_equal(1)
+            expect(result_abi_raw_compare_v1(captured.expected, bits, bits,
+                captured.observations)).to_equal("")
+
+    it "refuses wrong owner and unsupported tags without exposing payloads":
+        expect(enum_wire_result_i64_capture_v1(1, 0, 1, 17, -9).unwrap_err()).to_equal(
+            "FV2-E-RESULT-RAW-OWNER: typed Result owner mismatch")
+        for tags in [(1, 0), (0, 2), (-1, 1), (0, 4294967296)]:
+            expect(enum_wire_result_i64_capture_v1(0, tags.0, tags.1, 17, -9).unwrap_err()).to_equal(
+                "FV2-E-RESULT-RAW-SCHEMA: canonical Ok/Err metadata required")
+
+    it "rejects missing malformed extra and shadowed canonical registration":
+        expect(result_abi_expectation_from_lowering_v1(
+            MirLowering.new(SymbolTable.new())).is_err()).to_equal(true)
+        var extra = capture_test_registration()
+        extra.enum_variant_index_q["Result"] = ["Ok", "Err", "Later"]
+        expect(result_abi_expectation_from_lowering_v1(extra).is_err()).to_equal(true)
+        var tags = capture_test_registration()
+        tags.enum_variant_discriminants["Result"] = [0, 2]
+        expect(result_abi_expectation_from_lowering_v1(tags).is_err()).to_equal(true)
+        var shadow = capture_test_registration()
+        shadow.enum_runtime_id_index_q["Result"] = 23
+        expect(result_abi_expectation_from_lowering_v1(shadow).is_err()).to_equal(true)
+
+    it "detects each corruption in actual captured projections for both outcomes":
+        val captured = result_abi_builtin_i64_capture_v1(17, -9).unwrap()
+        for index in [0, 1]:
+            val original = captured.observations[index]
+            for field in [0, 1, 2]:
+                val changed = ResultTaggedHandleProjectionV1(
+                    enum_runtime_id: if field == 0: 7 else: original.target.enum_runtime_id,
+                    discriminant: if field == 1: 2 else: original.target.discriminant,
+                    payload_bits: if field == 2: 99 else: original.target.payload_bits)
+                var rows = [captured.observations[0], captured.observations[1]]
+                rows[index] = ResultAbiObservationV1(source: original.source, target: changed)
+                val diagnostic = result_abi_raw_compare_v1(captured.expected, 17, -9, rows)
+                val expected = if field == 0: "OWNER" elif field == 1: "TAG" else: "PAYLOAD"
+                expect(diagnostic).to_contain("FV2-E-RESULT-RAW-" + expected)
+
+    it "rejects missing swapped or rewritten source outcomes independently of targets":
+        val captured = result_abi_builtin_i64_capture_v1(17, -9).unwrap()
+        expect(result_abi_raw_compare_v1(captured.expected, 17, -9,
+            [captured.observations[0]])).to_contain("COVERAGE")
+        expect(result_abi_raw_compare_v1(captured.expected, 17, -9,
+            [captured.observations[1], captured.observations[0]])).to_contain("SOURCE")
+        val rewritten = ResultAbiObservationV1(
+            source: ResultSemanticOutcomeV1.Normal(99), target: captured.observations[0].target)
+        expect(result_abi_raw_compare_v1(captured.expected, 17, -9,
+            [rewritten, captured.observations[1]])).to_contain("SOURCE")
+
+    it "does not turn actual raw observations into a qualified certificate":
+        val captured = result_abi_builtin_i64_capture_v1(17, -9).unwrap()
+        # Empty authority is intentional; no invented theorem/audit labels.
+        val qualified = validate_result_abi_translation_v1(
+            captured.expected.enum_runtime_id, "unqualified-measurement",
+            captured.observations, "", "", false)
+        expect(qualified.accepted).to_equal(false)
+        expect(qualified.diagnostic).to_contain("FV2-E-RESULT-ABI-AUDIT")
+        expect(qualified.certificate).to_be_nil()

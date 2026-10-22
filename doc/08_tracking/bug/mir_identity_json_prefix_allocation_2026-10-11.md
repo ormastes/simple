@@ -1,0 +1,7 @@
+# MIR identity JSON growing-prefix allocation
+
+C34 runner source `20a932` / producer `f00dbc9c` passed all 218 HIR and MIR modules, then exceeded the 6,835,937 KiB tree cap at 6,888,400 KiB. No native object was produced. The log stops after native_compile progress but before the unconditional NATIVE codegen announcement, so the last reported module is a planned first module, not a proven backend dispatch. Source and runtime postguards passed; actual runner tests remain 0.
+
+The intervening witness/frozen-capsule loops call native_capsule_mir_identity_v1, which serializes every MIR function. serialize_mir_function rebuilt the full JSON prefix for each local/block; serialize_mir_block repeated that pattern for instructions. These loops allocate a quadratic total of copied prefix bytes. Replace only these two assembly paths with ordered fragments and one join each, preserving field order, whitespace, escaping, nested serializer behavior and identity bytes. Identity scratch lifetime is a separate memory-owner investigation.
+
+Regression coverage calls the real serializers for empty functions, escaped names/labels, named/unnamed locals, block ordering and terminators, plus 32 blocks containing 2048 instructions. The same fixture provides a standalone native entry whose failures return 11/12/13. Runtime and RSS qualification are pending; this source-proven allocation defect is not yet established as the whole cap failure cause.

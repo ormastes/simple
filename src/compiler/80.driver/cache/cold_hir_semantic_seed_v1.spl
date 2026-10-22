@@ -5,7 +5,10 @@
 # occurs in this owner.
 
 use compiler.hir.hir_types.{HirModule}
-use compiler.hir.abi_interface.{hir_abi_interface_encoded_v1}
+# Cycle-83: the codec-hosted twin. abi_interface's own hir_abi_interface_parts_v1
+# draw faults in the shard-stage2 binary (dict-walk codegen defect); the codec
+# unit's walk pool is proven clean. Output is byte-identical.
+use compiler.hir.hir_codec.{hir_codec_abi_interface_encoded_v1}
 use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
 use std.scv.compile_source_inventory_core.{
     CompileSourceInventoryV1, CompileSourceInventoryEntryV1,
@@ -15,6 +18,8 @@ use std.scv.compile_source_inventory_core.{
     compile_source_inventory_find_v1
 }
 use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.cold_hir_source_inventory_admission_v1.{
+    cold_hir_source_inventory_admit_v1, cold_hir_source_inventory_row_v1}
 
 struct ColdHirSemanticSeedV1:
     module_identity: text
@@ -97,7 +102,7 @@ fn _cold_hir_receipt_from_entry_v1(
             source.content_digest != source_digest or
             source.byte_count != source_byte_count:
         return Err("cold-hir-source-content-mismatch")
-    val abi = hir_abi_interface_encoded_v1(module)
+    val abi = hir_codec_abi_interface_encoded_v1(module)
     if abi.is_err():
         return Err("cold-hir-abi-unresolved:{abi.unwrap_err()}:module={module_identity}:source={source_identity}")
     var imports: [text] = []
@@ -249,66 +254,31 @@ fn cold_hir_typed_receipts_from_lowered_sources_v1(
     source_byte_counts: [i64],
     source_module_names: [text], hir_modules: Dict<text, HirModule>
 ) -> Result<[ColdHirTypedReceiptV1], text>:
-    if source_paths.len() != source_digests.len() or
-            source_paths.len() != source_byte_counts.len() or
-            source_paths.len() != source_module_names.len():
-        return Err("cold-hir-source-owner-alignment")
-    val inventory_digest = compile_source_inventory_digest_v1(inventory)
-    if inventory_digest == "" or inventory_digest != expected_source_inventory_digest:
-        return Err("cold-hir-inventory-mismatch")
     # The structured CURRENT generation and the selected snapshot rows have
     # different canonical encodings. Admit both, then bind every snapshot row
     # to the typed source inventory before using its digest in package receipts.
-    if sha256_text(snapshot_inventory) != expected_snapshot_inventory_digest:
-        return Err("cold-hir-snapshot-inventory-mismatch")
-    val normalized_root = source_root.replace("\\", "/")
-    if normalized_root == "" or normalized_root.ends_with("/"):
-        return Err("cold-hir-source-root-invalid")
-    var source_indices: Dict<text, i64> = {}
-    var inventory_index = 0
-    while inventory_index < inventory.entries.len():
-        source_indices[inventory.entries[inventory_index].source_identity] = inventory_index
-        inventory_index = inventory_index + 1
-    var snapshot_sources: Dict<text, bool> = {}
-    val snapshot_rows = if snapshot_inventory == "": [] else: snapshot_inventory.split("\n")
-    for row in snapshot_rows:
-        val fields = row.split("|")
-        if fields.len() != 3:
-            return Err("cold-hir-snapshot-row-invalid")
-        val identity = fields[0]
-        if not compile_source_inventory_path_valid_v1(identity) or
-                snapshot_sources.has(identity) or not source_indices.has(identity):
-            return Err("cold-hir-snapshot-source-invalid")
-        val entry = inventory.entries[source_indices[identity]]
-        if fields[1] != "sha256_{entry.content_digest}" or
-                fields[2] != "{entry.byte_count}":
-            return Err("cold-hir-snapshot-source-content-mismatch")
-        snapshot_sources[identity] = true
+    val admission = cold_hir_source_inventory_admit_v1(source_root,
+        expected_source_inventory_digest, inventory, snapshot_inventory,
+        expected_snapshot_inventory_digest, source_paths.len(), source_digests.len(),
+        source_byte_counts.len(), source_module_names.len())?
     var receipts: [ColdHirTypedReceiptV1] = []
     var receipt_errors: [text] = []
     var produced: Dict<text, bool> = {}
     var source_index = 0
     while source_index < source_paths.len():
-        val path = source_paths[source_index].replace("\\", "/")
-        if not path.starts_with(normalized_root + "/"):
-            return Err("cold-hir-module-source-mismatch")
-        val identity = path.substring(normalized_root.len() + 1, path.len())
-        if not compile_source_inventory_path_valid_v1(identity):
-            return Err("cold-hir-source-identity-invalid")
-        if not source_indices.has(identity) or not snapshot_sources.has(identity):
-            return Err("cold-hir-source-absent")
-        val entry = inventory.entries[source_indices[identity]]
         val source_digest = source_digests[source_index]
         val source_byte_count = source_byte_counts[source_index]
-        if entry.content_digest != source_digest or
-                entry.byte_count != source_byte_count:
-            return Err("cold-hir-source-content-mismatch")
+        val row = cold_hir_source_inventory_row_v1(admission, inventory, source_index,
+            source_paths[source_index], source_digest, source_byte_count,
+            source_module_names[source_index])?
+        val identity = row.source_identity
+        val entry = row.inventory_entry
         if not produced.has(identity):
             val module_name = source_module_names[source_index]
             if not hir_modules.has(module_name):
                 return Err("cold-hir-lowered-module-missing:{module_name}")
             match cold_hir_typed_receipt_from_admitted_digest_v1(
-                    hir_modules[module_name], module_name, normalized_root, identity,
+                    hir_modules[module_name], module_name, admission.normalized_root, identity,
                     source_digest, source_byte_count, expected_snapshot_inventory_digest, entry):
                 case Err(reason):
                     if not reason.starts_with("cold-hir-abi-unresolved:"):

@@ -1,0 +1,60 @@
+# @tag: unit, engine2d, vulkan, final_output
+# @req REQ-2D-003 NFR-2D-004
+
+use std.spec.*
+use common.ui.draw_ir.{DRAW_IR_BACKEND_GPU, DRAW_IR_SCHEMA_VERSION}
+use common.renderdoc.physical_vulkan_2d_qualification.{
+    CONTROLLED_RECT_FIXTURE_PATH, CONTROLLED_RECT_FIXTURE_SHA256,
+    PreparedRenderScene}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dDrawIrAdvResult}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.final_output_capture.{
+    Engine2dStrictVulkanCapturedFrame,
+    engine2d_strict_vulkan_final_capture}
+use std.gc_async_mut.gpu.engine2d.physical_capture_artifact.{
+    engine2d_controlled_rectangle_artifact}
+
+fn controlled_scene() -> PreparedRenderScene:
+    PreparedRenderScene(
+        fixture_id: "controlled-opaque-rect-v1",
+        source_path: CONTROLLED_RECT_FIXTURE_PATH,
+        source_sha256: CONTROLLED_RECT_FIXTURE_SHA256,
+        scene_scope: "controlled-rectangle-only",
+        render_degraded: false, degrade_reason: "")
+
+fn constructed_readback() -> Engine2dDrawIrAdvResult:
+    Engine2dDrawIrAdvResult(
+        schema: DRAW_IR_SCHEMA_VERSION, unit_id: "constructed-frame",
+        selected_backend: DRAW_IR_BACKEND_GPU, fallback_required: false,
+        fallback_reason: "", rendered_command_count: 2,
+        skipped_command_count: 0,
+        pixels: [0xff010203u32; 256],
+        readback_source: "device_readback", backend_handle: 7,
+        device_identity: 8, readback_checksum: 16909566,
+        device_submit_count: 1, device_fence_count: 1,
+        submission_generation: 4, frame_width: 16, frame_height: 16)
+
+describe "Engine2D controlled rectangle artifact adapter":
+    it "rejects a constructed physical claim backed by a CPU owner":
+        # @req REQ-2D-003 NFR-2D-004
+        var owner = Engine2D.create_with_backend(16, 16, "cpu")
+        val scene = controlled_scene()
+        match engine2d_strict_vulkan_final_capture(
+            constructed_readback(), scene.fixture_id,
+            scene.source_sha256, "frame-1"):
+            Err(_): assert(false)
+            Ok(pixels):
+                val fake = Engine2dStrictVulkanCapturedFrame(
+                    engine: owner, capture: pixels,
+                    device_name: "claimed GPU", device_type: "discrete",
+                    driver_identity: "claimed driver",
+                    device_uuid: "11111111111111111111111111111111",
+                    driver_uuid: "22222222222222222222222222222222",
+                    device_identity: 8, backend_handle: 7,
+                    submission_generation: 4, submit_count: 1,
+                    fence_count: 1, readback_source: "device_readback")
+                match engine2d_controlled_rectangle_artifact(fake, scene):
+                    Ok(_): assert(false)
+                    Err(reason): expect(reason).to_contain(
+                        "physical Vulkan capture owner incomplete")
+        owner.shutdown()

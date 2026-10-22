@@ -20,7 +20,7 @@ four modules was swept across `src/**`, `test/**`, `scripts/**` and `config/**`.
 | `src/os/services/fat32/fat32_write.spl` | intra-island (imports `fat32`, `fat32_write_helpers`) | deleted |
 | `src/os/services/fat32/fat32_filesystem_ops.spl` | intra-island (imports `fat32`, `fat32_write`, `fat32_write_helpers`) | deleted |
 | `test/01_unit/os/services/fat32/fat32_spec.spl` | tracked spec, sole external importer | deleted |
-| `test/unit/os/services/fat32/fat32_spec.spl` | tracked mirror of the same | deleted |
+| `test/01_unit/os/services/fat32/fat32_spec.spl` | tracked mirror of the same | deleted |
 | `test/01_unit/os/services/fat32/.spipe_matchers_fat32_spec.spl` | untracked generated wrapper of the above | deleted |
 | `test/03_system/.spipe_matchers_storage_fat32_{positional_cursor,statfs_truncate}_spec.spl` | untracked, **stale** | deleted (see 1c) |
 | guard + no-regression specs | `source.contains(...)` text assertions, **not** imports | kept, still valid |
@@ -201,7 +201,7 @@ still needs full QEMU + board FS validation.
 | `src/os/services/fat32/fat32_write_helpers.spl` | −92 |
 | **src subtotal** | **−2,122** |
 | `test/01_unit/os/services/fat32/fat32_spec.spl` | −53 |
-| `test/unit/os/services/fat32/fat32_spec.spl` | −53 |
+| `test/01_unit/os/services/fat32/fat32_spec.spl` | −53 |
 | `test/{01_unit,unit}/os/services/fat32/fat32/summary.txt` (spec output artifacts) | −12 |
 | guard rewrite ×2 | −22 / +22 |
 | **NET DELETED (tracked, `git diff --stat`: 22 insertions / 2,254 deletions)** | **−2,232** |
@@ -232,7 +232,7 @@ listed in `.spipe/fs_stack_collapse/state.md` §6 Step 3 as a docs-only follow-u
 Deleted (`src/os/services/fat32/`): `fat32.spl`, `fat32_write.spl`,
 `fat32_filesystem_ops.spl`, `fat32_write_helpers.spl`.
 Deleted (specs): `test/01_unit/os/services/fat32/fat32_spec.spl`,
-`test/unit/os/services/fat32/fat32_spec.spl`, plus 3 untracked generated wrappers.
+`test/01_unit/os/services/fat32/fat32_spec.spl`, plus 3 untracked generated wrappers.
 Edited: `test/01_unit/os/services/vfs/vfs_pure_fat_production_guard_spec.spl`,
 `test/unit/os/services/vfs/vfs_pure_fat_production_guard_spec.spl`,
 `doc/08_tracking/os/production_status.sdn` (`vfs:` note line).

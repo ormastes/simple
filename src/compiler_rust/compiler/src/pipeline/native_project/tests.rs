@@ -993,6 +993,7 @@ fn native_project_extra_provider_resolves_symbol_and_suppresses_stub() {
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
         trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
+        trait_method_names: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -2817,6 +2818,10 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
         build_core_c_runtime_library(temp.path()).expect("core-c runtime archive should build")
     });
     let core_c_symbols = archive_defined_symbols(&core_c).expect("core-c runtime symbols should be readable");
+    assert!(
+        core_c_symbols.contains("simple_pow"),
+        "core-c runtime archive must include the existing __simple_pow signed-i64 owner"
+    );
     let missing = simple_common::CORE_REQUIRED_RUNTIME_SYMBOLS
         .iter()
         .filter(|symbol| !core_c_symbols.contains(symbol.trim_start_matches('_')))
@@ -2845,6 +2850,17 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
         .output()
         .expect("nm must inspect the core-c runtime archive");
     assert!(nm.status.success(), "nm failed to inspect the core-c runtime archive");
+    let pow_owners = String::from_utf8_lossy(&nm.stdout)
+        .lines()
+        .filter(|line| {
+            line.split_whitespace().last().map(|symbol| symbol.trim_start_matches('_'))
+                == Some("simple_pow")
+        })
+        .count();
+    assert_eq!(
+        pow_owners, 1,
+        "core-c runtime archive must have exactly one __simple_pow owner"
+    );
     let cpu_count_owners = String::from_utf8_lossy(&nm.stdout)
         .lines()
         .filter(|line| line.split_whitespace().last() == Some("spl_thread_cpu_count"))
@@ -4883,7 +4899,7 @@ fn test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi() {
     let temp = tempfile::tempdir().unwrap();
     let core = build_core_c_runtime_library(&temp.path().join("core")).unwrap();
     let capsule =
-        super::tools::build_bootstrap_mutex_runtime_capsule_archive(&core, &temp.path().join("mutex-capsule")).unwrap();
+        super::tools::build_bootstrap_mutex_runtime_capsule_archive(&core, &temp.path().join("mutex-capsule"), None).unwrap();
     let (defined, undefined) = super::tools::archive_global_symbols(&capsule).unwrap();
     let expected = [
         "spl_mutex_create",
@@ -6818,6 +6834,7 @@ int main(void) { app_call(); return 0; }
         all_mangled: std::sync::Arc::new(all_mangled),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
         trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
+        trait_method_names: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -6933,6 +6950,7 @@ void __module_init_security_registry(void) {
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
         trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
+        trait_method_names: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -7112,6 +7130,39 @@ fn test_mingw_crt_symbols_follow_output_target_not_build_host() {
 }
 
 #[test]
+fn test_msvc_win32_and_ucrt_imports_are_never_stub_candidates() {
+    let target = simple_common::target::Target::parse("x86_64-pc-windows-msvc").unwrap();
+    for symbol in [
+        "AcquireSRWLockExclusive",
+        "BCryptOpenAlgorithmProvider",
+        "D3D11CreateDevice",
+        "InitializeProcThreadAttributeList",
+        "K32GetProcessMemoryInfo",
+        "Sleep",
+        "TerminateProcess",
+        "_fstat64i32",
+        "_time64",
+        "ferror",
+        "signal",
+        "wcslen",
+        "__chkstk",
+        "_fltused",
+        "_stat64i32",
+        "_errno",
+        "_get_osfhandle",
+        "_wfopen",
+        "ldexp",
+        "TransmitFile",
+    ] {
+        assert!(
+            super::tools::is_system_symbol_for_target(symbol, target),
+            "{symbol} must resolve from kernel32/bcrypt/psapi/d3d11/ucrt, never generated stubs"
+        );
+    }
+    assert!(!super::tools::is_system_symbol_for_target("app__main", target));
+}
+
+#[test]
 fn test_inline_asm_symbols_are_never_weak_stub_candidates() {
     assert!(super::stubs::is_inline_asm_symbol("__simple_asm_Hf5014a9fdb029e11"));
     assert!(super::stubs::is_inline_asm_symbol("___simple_asm_Hf5014a9fdb029e11"));
@@ -7177,6 +7228,7 @@ int main(int argc, char** argv) {
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
         trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
+        trait_method_names: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -7315,6 +7367,7 @@ int main(void) {
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
         trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
+        trait_method_names: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -7388,6 +7441,7 @@ int main(void) {
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
         trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
+        trait_method_names: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -7455,6 +7509,7 @@ int main(void) { return (int)run_check(); }
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
         trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
+        trait_method_names: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -8239,6 +8294,7 @@ fn test_freestanding_weak_boot_alias_uses_strong_simple_suffix_match() {
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
         trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
+        trait_method_names: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -8449,13 +8505,12 @@ fn test_compile_failure_preserves_completed_objects_for_retry() {
                 .count();
             assert_eq!(completed, 1, "successful object was discarded with failed batch");
 
-            // The object cache key folds the cross-module layout fingerprint
-            // (mod.rs: "a CORRECTNESS input to the cache key", not a dependency
-            // model). A retry that FIXES failing.spl adds `failing_probe` to the
-            // world, so good.o legitimately misses -- reuse is not promised
-            // there. What the policy does promise: the preserved object is
-            // reused when the world it was compiled against is reproduced
-            // (failing.spl gone), and a no-change rebuild reuses every object.
+            // The object cache key folds each module's cross-module interface
+            // SLICE (mod.rs `InterfaceSliceIndex`): good.o depends only on the
+            // rows its own source names, so whether failing.spl is fixed or
+            // removed cannot touch it. What the policy promises: the preserved
+            // object is reused when its own inputs are reproduced, and a
+            // no-change rebuild reuses every object.
             fs::remove_file(&failing).unwrap();
             let result = NativeProjectBuilder::new(temp.path().to_path_buf(), archive.clone())
                 .config(config())
@@ -9125,6 +9180,7 @@ fn empty_import_map_result() -> imports::ImportMapResult {
         all_mangled: std::collections::HashMap::new(),
         re_exports: std::collections::HashMap::new(),
         trait_impls: std::collections::HashMap::new(),
+        trait_method_names: std::collections::HashSet::new(),
         vtable_type_owners: std::collections::HashSet::new(),
         vtable_symbols: std::collections::HashMap::new(),
         struct_defs: std::collections::HashMap::new(),
@@ -9138,6 +9194,7 @@ fn empty_import_map_result() -> imports::ImportMapResult {
         fn_arities: std::collections::HashMap::new(),
         fn_return_types: std::collections::HashMap::new(),
         method_param_defaults: std::collections::HashMap::new(),
+        interface_param_defaults: std::collections::HashMap::new(),
     }
 }
 
@@ -9234,12 +9291,14 @@ fn test_global_build_fingerprint_manifest_roundtrip_and_reason() {
         Some("compiler producer changed")
     );
 
+    // `layout` is recorded for diagnostics but is neither a full-rebuild reason
+    // nor part of the object key: interface changes are keyed per module
+    // (`InterfaceSliceIndex`), so a layout-only difference must not claim a
+    // full rebuild and must not perturb `combined()`.
     let mut layout_changed = base;
     layout_changed.layout = 0x9999_9999_9999_9999;
-    assert_eq!(
-        layout_changed.changed_reason(&base),
-        Some("cross-module type layout / signatures changed")
-    );
+    assert_eq!(layout_changed.changed_reason(&base), None);
+    assert_eq!(layout_changed.combined(), base.combined());
 
     let mut ls_changed = base;
     ls_changed.linker_script = 0xABCD_ABCD_ABCD_ABCD;
@@ -9248,9 +9307,10 @@ fn test_global_build_fingerprint_manifest_roundtrip_and_reason() {
 
 /// STALENESS REGRESSION GUARD (the critical test): with the safe-incremental
 /// path on, a leaf body change reuses untouched modules (incrementality works),
-/// but a CROSS-MODULE struct-layout change in module A invalidates the entire
-/// per-module cache so module B — whose object bytes depend on A's field
-/// offsets via `populate_global_struct_defs` — is never stale-reused.
+/// but a CROSS-MODULE struct-layout change in module A rebuilds module B —
+/// whose object bytes depend on A's field offsets via
+/// `populate_global_struct_defs` — so B is never stale-reused.
+/// (Granularity beyond two modules is pinned in `object_cache_slice_tests`.)
 ///
 /// Red/green: with the legacy content-only key (`incremental_hardening=false`)
 /// the struct-change build would leave module B cached (`cached >= 1`) and ship a
@@ -9329,14 +9389,15 @@ fn test_incremental_hardening_invalidates_on_cross_module_struct_change() {
     );
 
     // Build 3: CROSS-MODULE struct-layout change in A (insert a field before
-    // `tag`, shifting B's read offset). The global build fingerprint changes, so
-    // the entire per-module cache is invalidated and B is rebuilt -- never a
-    // stale reuse. This is the assertion the legacy content-only key fails.
+    // `tag`, shifting B's read offset). B's interface slice covers
+    // `SharedLayout` and the field name `tag`, so B is rebuilt -- never a stale
+    // reuse. With only A and B in the closure that is a full miss. This is the
+    // assertion the legacy content-only key fails.
     write_a(true);
     let r3 = build();
     assert_eq!(
         r3.cached, 0,
-        "a cross-module struct-layout change must invalidate the whole cache (no stale reuse); got cached={}",
+        "a cross-module struct-layout change must rebuild the dependent (no stale reuse); got cached={}",
         r3.cached
     );
 }
@@ -9384,6 +9445,7 @@ fn test_linker_fails_closed_on_undefined_runtime_symbol() {
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
         trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
+        trait_method_names: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),

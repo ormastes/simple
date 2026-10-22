@@ -46,7 +46,7 @@ use compiler.hir.hir_lowering.module_surface.{
     module_surfaces_by_name_from_parts
 }
 use compiler.hir.hir_lowering.module_surface_registry_index.{
-    module_surface_route_arrays_aligned
+    module_surface_route_arrays_aligned, module_surfaces_validate_index_alignment
 }
 
 extern fn rt_heap_array_capacity_bytes() -> i64
@@ -54,6 +54,46 @@ extern fn rt_hash_text(content: text) -> i64
 extern fn rt_path_absolute(path: text) -> text
 
 describe "module surface aligned scalar index":
+    it "validates thousands of aliases without changing discovery order":
+        var names: [text] = []
+        var indices: [i64] = []
+        var index: Dict<text, i64> = {}
+        var position = 0
+        while position < 4096:
+            val name = "alias_{position}"
+            names.push(name)
+            indices.push(position % 2)
+            index[name] = position % 2
+            position = position + 1
+        val surfaces = [ModuleSurface.empty("first"), ModuleSurface.empty("second")]
+        expect(module_surfaces_validate_index_alignment(surfaces, index, names, indices).is_ok()).to_equal(true)
+        expect(names[0]).to_equal("alias_0")
+        expect(names[4095]).to_equal("alias_4095")
+        expect(indices[4095]).to_equal(1)
+        expect(index["alias_4095"]).to_equal(1)
+
+    it "preserves alignment error precedence and exact reasons":
+        val surfaces = [ModuleSurface.empty("first"), ModuleSurface.empty("second")]
+        val lengths = module_surfaces_validate_index_alignment(surfaces, {}, ["a"], [])
+        expect(lengths.unwrap_err()).to_equal("module surface name/index arrays have different lengths")
+        val representation = module_surfaces_validate_index_alignment(surfaces, {}, ["a"], [-1])
+        expect(representation.unwrap_err()).to_equal("module surface name/index representation is inconsistent")
+        val duplicate = module_surfaces_validate_index_alignment(surfaces, {"a": 0, "b": 1}, ["a", "a"], [0, 1])
+        expect(duplicate.unwrap_err()).to_equal("duplicate ordered module surface name: a")
+        val range_before_duplicate = module_surfaces_validate_index_alignment(surfaces, {"a": 0, "b": 1}, ["a", "a"], [0, 2])
+        expect(range_before_duplicate.unwrap_err()).to_equal("module surface index out of range for a")
+        val conflict_before_later_duplicate = module_surfaces_validate_index_alignment(surfaces, {"a": 1, "b": 1}, ["a", "a"], [0, 0])
+        expect(conflict_before_later_duplicate.unwrap_err()).to_equal("module surface name maps to conflicting indices: a")
+        val missing = module_surfaces_validate_index_alignment(surfaces, {"a": 0}, ["missing"], [0])
+        expect(missing.unwrap_err()).to_equal("module surface ordered name missing from compatibility index: missing")
+
+    it "accepts empty names and same-target aliases but rejects repeated names":
+        val surfaces = [ModuleSurface.empty("owner")]
+        expect(module_surfaces_validate_index_alignment(surfaces, {"": 0, "alias": 0}, ["", "alias"], [0, 0]).is_ok()).to_equal(true)
+        val repeated_empty = module_surfaces_validate_index_alignment(surfaces, {"": 0, "alias": 0}, ["", ""], [0, 0])
+        expect(repeated_empty.unwrap_err()).to_equal("duplicate ordered module surface name: ")
+        expect(module_surfaces_validate_index_alignment([], {}, [], []).is_ok()).to_equal(true)
+
     # @manual scenario evidence
     it "preserves discovery order and deduplicates a same-target alias":
         # @req REQ-SSPEC-COMPILER

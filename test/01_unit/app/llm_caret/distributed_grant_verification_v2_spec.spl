@@ -1,0 +1,70 @@
+# DBC-005/006/019/020: private authority values, exact signatures and approval.
+use std.spec.{describe, it, expect}
+use std.common.contracts.distributed_control_v2.*
+use std.common.contracts.distributed_authority_v2.*
+use app.llm_caret.workbench.distributed_grant_verification_v2.*
+
+use test.fixtures.app.llm_caret.distributed_authority_verification_fixture_v2.*
+
+describe "issuer and human approval signature binding":
+    it "accepts distinct keys signing independently specified canonical messages":
+        expect(verification_error(verification_fixture())).to_equal("")
+
+    it "rejects forged issuer and approval signatures":
+        var fixture = verification_fixture()
+        var signed = fixture.signed
+        var signature = signed.signature
+        signature[0] = signature[0] ^ 1u8
+        signed.signature = signature
+        fixture.signed = signed
+        expect(verification_error(fixture)).to_equal("ISSUER_SIGNATURE_INVALID")
+        fixture = verification_fixture()
+        var approval = fixture.approval
+        var approval_signature = approval.signature
+        approval_signature[0] = approval_signature[0] ^ 1u8
+        approval.signature = approval_signature
+        fixture.approval = approval
+        expect(verification_error(fixture)).to_equal("APPROVAL_SIGNATURE_INVALID")
+
+    it "rejects replay under a changed operation ID or payload":
+        var fixture = verification_fixture()
+        var request = fixture.request
+        request.id = "operation_2"
+        fixture.request = request
+        expect(verification_error(fixture)).to_equal("APPROVAL_PAYLOAD_MISMATCH")
+        request.id = "operation_1"
+        request.payload_digest = "c".repeat(64)
+        fixture.request = request
+        expect(verification_error(fixture)).to_equal("APPROVAL_PAYLOAD_MISMATCH")
+
+    it "rejects revoked or rotated authority keys":
+        var fixture = verification_fixture()
+        var issuer = fixture.issuer
+        issuer.revoked = true
+        fixture.issuer = issuer
+        expect(verification_error(fixture)).to_equal("AUTHORITY_KEY_REVOKED")
+        issuer.revoked = false
+        issuer.revision = 2
+        fixture.issuer = issuer
+        expect(verification_error(fixture)).to_equal("AUTHORITY_KEY_MISMATCH")
+
+    it "rejects a shared issuer/approver key and broader signed grant budget":
+        var fixture = verification_fixture()
+        var approver = fixture.approver
+        approver.public_key = fixture.issuer.public_key
+        fixture.approver = approver
+        expect(verification_error(fixture)).to_equal("AUTHORITY_ROLES_NOT_SEPARATE")
+        fixture = verification_fixture()
+        var signed = fixture.signed
+        var grant = signed.grant
+        grant.maximum_memory_bytes = 4096
+        signed.grant = grant
+        fixture.signed = signed
+        expect(verification_error(fixture)).to_equal("AUTHORITY_BUDGET_DENIED")
+
+    it "rejects expired approval even while the grant remains live":
+        var fixture = verification_fixture()
+        var approval = fixture.approval
+        approval.expires_at = 99
+        fixture.approval = approval
+        expect(verification_error(fixture)).to_equal("APPROVAL_EXPIRED")

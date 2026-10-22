@@ -11,7 +11,7 @@
 use std.nogc_sync_mut.io.env_ops.{env_set, env_get}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
-use std.nogc_sync_mut.io.file_ops.{file_write, file_read, file_exists}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_read, file_exists, file_atomic_write}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 use std.io_runtime.{get_args}
 
@@ -26,9 +26,11 @@ use std.test_runner.test_manifest.{MANIFEST_PATH, manifest_load, manifest_save, 
 use std.test_runner.test_manifest_scanner.{manifest_full_scan}
 use std.test_runner.test_runner_execute.{run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_compile, run_test_file_safe_mode}
 use std.test_runner.test_executor_lanes.{run_test_file_composite}
-use std.test_runner.test_runner_output.{combined_test_run_json, print_result, print_summary}
+use std.test_runner.test_runner_output.{combined_test_run_sdn, print_result, print_summary}
 use std.test_runner.test_runner_config.{report_free_mem, mode_to_str, propagate_env_vars, get_cli_args, get_flag_value, handle_run_management, has_run_management_flag}
 use app.test_runner_new.cover_admission.{cover_admitted_files, cover_append_failures}
+use app.test_runner_new.sdn_worker_args.{parse_private_sdn_worker_args}
+use app.test_runner_new.sdn_wrapper.{run_test_sdn_wrapper}
 use app.test_daemon.session_scheduler.{schedule_session_tests, schedule_summary, schedule_flatten, schedule_session_file_paths, schedule_local_file_paths}
 # MEMORY DEBUG: groups 3-9 commented out to isolate memory usage
 # GROUP 3: Container
@@ -38,6 +40,8 @@ use std.test_runner.test_runner_coverage.{setup_coverage, collect_coverage, prin
 # GROUP 4: Database & feature tracking -- recorded by the test-db lane child
 # (test_db_lane_main.spl) so the database modules stay out of this closure.
 use std.nogc_sync_mut.test_runner.test_db_record.{test_db_run_record_from_result, test_db_run_record_encode}
+use std.nogc_sync_mut.test_runner.test_db_trace_record.{TestDbTraceFile, TestDbTraceRecord, test_db_trace_record_encode}
+use std.nogc_sync_mut.test_runner.trace_transport.{validate_requested_trace_transport}
 use std.nogc_sync_mut.test_runner.test_executor_parsing.{find_simple_binary}
 # use test_db_types.*
 # use std.database.feature.{FeatureDatabase, load_feature_database, create_feature_database, FeatureStatus}
@@ -54,7 +58,7 @@ use std.test_runner.test_runner_modes.{run_spl_doctest_mode}
 # Change-detection cache for incremental test runs
 use app.test_incremental_state_shared.{IncrementalTestState, incremental_test_state_new, incremental_test_state_load}
 # GROUP 6: Self-protection imports
-use std.test_runner.checkpoint.{checkpoint_load, checkpoint_exists, checkpoint_skip_completed, checkpoint_save, checkpoint_delete}
+use std.test_runner.checkpoint.{checkpoint_load, checkpoint_exists, checkpoint_skip_completed, checkpoint_save, checkpoint_delete, checkpoint_resume_banner, make_empty_checkpoint}
 use std.test_runner.system_monitor.{system_exceeds_threshold, ensure_kill_monitor_running, is_linux}
 use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
 use std.test_runner.shutdown.{shutdown_graceful}
@@ -86,25 +90,62 @@ use app.test_daemon.session_types.{TestSessionMeta, meta_needs_session, meta_to_
 
 val TEST_DB_LANE_ENTRY = "src/app/test_runner_new/test_db_lane_main.spl"
 
-fn record_test_run_via_db_lane(result: TestRunResult, run_start: i64, run_end: i64):
-    """Record the run in the test database and regenerate test_result.md in a
-    child interpreter (test_db_lane_main.spl). A failure is reported with the
-    child's named reason; it never fails the test run itself."""
+fn trace_events_requested(result: TestRunResult) -> bool:
+    if (env_get("SIMPLE_TRACE_CASE_EVENTS") ?? "") == "1":
+        return true
+    for file_result in result.files:
+        if not file_result.cached and file_result.trace_case_events_sdn != "":
+            return true
+    false
+
+fn record_test_run_via_db_lane(result: TestRunResult, run_start: i64, run_end: i64) -> Result<(), text>:
+    """Persist summary and optional SDN trace transport in the DB child."""
+    val trace_requested = trace_events_requested(result)
+    var trace_validation_error = ""
+    if trace_requested:
+        match validate_requested_trace_transport(result.files):
+            case Ok(_): pass
+            case Err(reason): trace_validation_error = reason
     val record_dir = "build/test_runner"
     dir_create_all(record_dir)
     val record_path = "{record_dir}/test_db_record_{run_start}.txt"
+    val trace_path = "{record_path}.trace.sdn"
+    var trace_rows: [TestDbTraceFile] = []
+    for file_result in result.files:
+        if not file_result.cached and file_result.trace_case_events_sdn != "":
+            trace_rows.push(TestDbTraceFile(path: file_result.path, events_sdn: file_result.trace_case_events_sdn))
+    var child_args: [text] = ["run", TEST_DB_LANE_ENTRY, "--record={record_path}"]
+    if trace_rows.len() > 0:
+        file_remove(trace_path)
+        # Always pass the expected path when events exist. A codec/write failure
+        # then becomes an explicit child-lane error after summary persistence.
+        child_args.push("--trace-record={trace_path}")
+        match test_db_trace_record_encode(TestDbTraceRecord(files: trace_rows)):
+            case Ok(encoded):
+                if not file_atomic_write(trace_path, encoded):
+                    print "Warning: could not write trace event transport {trace_path}"
+            case Err(reason):
+                print "Warning: could not encode trace event transport: {reason}"
     if not file_write(record_path, test_db_run_record_encode(test_db_run_record_from_result(result, run_start, run_end))):
         print "Warning: test database not updated: could not write {record_path}"
-        return
-    val (stdout, stderr, code) = process_run_bounded(find_simple_binary(), ["run", TEST_DB_LANE_ENTRY, "--record={record_path}"], 600000, TEST_OUTPUT_CAPTURE_BYTES)
+        file_remove(trace_path)
+        if trace_requested:
+            return Err("trace and summary records could not be written")
+        return Ok(())
+    val (stdout, stderr, code) = process_run_bounded(find_simple_binary(), child_args, 600000, TEST_OUTPUT_CAPTURE_BYTES)
     file_remove(record_path)
+    file_remove(trace_path)
     if code != 0:
-        print "Warning: test database not updated (test-db lane exit {code})"
+        print "Warning: test-db lane reported an error (exit {code})"
         if stdout.trim() != "":
             print stdout.trim()
         if stderr.trim() != "":
             print stderr.trim()
-
+        if trace_requested:
+            return Err("test-db lane failed to persist requested trace observations (exit {code})")
+    if trace_validation_error != "":
+        return Err(trace_validation_error)
+    Ok(())
 pub fn generate_spipe_docs_for_results(results: [TestFileResult], options: TestOptions, binary: text = "bin/simple") -> i64:
     if options.format != "doc" or options.list or options.list_ignored:
         return 0
@@ -136,6 +177,7 @@ pub fn generate_spipe_docs_for_results(results: [TestFileResult], options: TestO
             print stderr
         return 3
     0
+
 
 # Discover test files across EVERY requested target, not just the first.
 #
@@ -233,12 +275,11 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         updated_options.fail_fast = false
     print ""
 
-    # MEMORY DEBUG: checkpoint disabled (GROUP 6)
-    # Load checkpoint if resuming
-    # var ckpt_loaded = false
+    # Progress carried over from a --resume checkpoint (loaded below).
     var ckpt_passed = 0
     var ckpt_failed = 0
     var ckpt_skipped = 0
+    var ckpt_completed: [text] = []
 
     # Handle --manifest-status: show manifest info and exit
     if updated_options.manifest_status:
@@ -316,24 +357,40 @@ fn run_tests(options: TestOptions) -> TestRunResult:
                 return cover_append_failures(summarize_test_results([]), missing_covers)
             print "Continuing admitted files (--unstable); coverage admission failures remain failed."
 
-    # MEMORY DEBUG: checkpoint filtering disabled (GROUP 6)
     var files = cover_admitted_files(all_files, missing_covers)
-    # if options.resume and checkpoint_exists():
-    #     val ckpt = checkpoint_load()
-    #     ckpt_loaded = true
-    #     ckpt_passed = ckpt.total_passed
-    #     ckpt_failed = ckpt.total_failed
-    #     ckpt_skipped = ckpt.total_skipped
-    #     files = checkpoint_skip_completed(all_files, ckpt)
-    #     print "Resuming from checkpoint (reason: {ckpt.shutdown_reason})"
-    #     print "Previous progress: {ckpt_passed} passed, {ckpt_failed} failed, {ckpt_skipped} skipped"
-    #     print ""
+    # --resume was a silent no-op from 2026-07-25 ("MEMORY DEBUG ... GROUP 6"
+    # isolation) until 2026-10-19: the flag parsed, the checkpoint module was
+    # imported and checkpoint_save ran every 50 files, but the filter below was
+    # commented out, so a resumed run re-executed everything and the summary
+    # dropped the previous progress. The memory reason no longer holds (the
+    # module is live in this same function), so the filter is back, and never
+    # silent: a missing checkpoint is reported.
+    if options.resume:
+        val ckpt_found = checkpoint_exists()
+        val ckpt = if ckpt_found: checkpoint_load() else: make_empty_checkpoint()
+        print checkpoint_resume_banner(ckpt_found, ckpt)
+        print ""
+        if ckpt_found:
+            ckpt_passed = ckpt.total_passed
+            ckpt_failed = ckpt.total_failed
+            ckpt_skipped = ckpt.total_skipped
+            ckpt_completed = ckpt.completed_files
+            files = checkpoint_skip_completed(files, ckpt)
+            if files.len() == 0:
+                print "Resume: every selected file is already in the checkpoint; nothing left to run."
+                print "Final figures are the checkpoint's: {ckpt_passed} passed, {ckpt_failed} failed, {ckpt_skipped} skipped (nothing executed in this invocation)."
+                checkpoint_delete()
+                return TestRunResult(files: [], total_passed: ckpt_passed, total_failed: ckpt_failed, total_skipped: ckpt_skipped, total_pending: 0, total_timed_out: 0, total_duration_ms: 0, total_setup_ms: 0, total_cached: 0, carried_from_checkpoint: true)
 
     if files.len() == 0:
         if missing_covers.len() > 0:
             return cover_append_failures(summarize_test_results([]), missing_covers)
         print "No test files found in {options.path}"
         return TestRunResult(files: [], total_passed: 0, total_failed: 0, total_skipped: 0, total_pending: 0, total_timed_out: 0, total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
+
+    # Freeze the admitted file set. The daemon retains its existing option
+    # semantics; direct worker dispatch captures its effective options below.
+    val admitted_paths = files
 
     if options.coverage:
         setup_coverage()
@@ -360,11 +417,11 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         val daemon_ok = test_daemon_ensure_responsive(daemon_config)
         if daemon_ok:
             if show_session_debug:
-                print "  [session] Routing {files.len()} test(s) through daemon"
-            val daemon_results = run_tests_via_daemon(files, updated_options, daemon_config)
+                print "  [session] Routing {admitted_paths.len()} test(s) through daemon"
+            val daemon_results = run_tests_via_daemon(admitted_paths, updated_options, daemon_config)
             for dr in daemon_results:
                 print_result(dr, updated_options.format)
-            return cover_append_failures(reconcile_discovered_vs_executed(files, summarize_test_results(daemon_results), false), missing_covers)
+            return cover_append_failures(reconcile_discovered_vs_executed(admitted_paths, summarize_test_results(daemon_results), false), missing_covers)
         else:
             # Daemon could not start/respond (e.g. stale pidfile, light_daemon
             # IPC mismatch). Fall back to direct execution instead of failing the
@@ -372,41 +429,46 @@ fn run_tests(options: TestOptions) -> TestRunResult:
             # governor. Mirrors test_runner_client.spl's "running directly".
             print "WARNING: test daemon unavailable; running directly [fallback]"
 
-    # Sequential flag overrides parallel
-    if updated_options.sequential:
-        updated_options.parallel = false
-
     # Windows async capture uses the pure-Simple owned JobObject facade.
     # Preserve explicit parallel/worker requests; admission failures remain
     # failed test rows rather than a silent switch to sequential execution.
 
+    # Sequential flag overrides parallel for direct dispatch, as before.
+    if updated_options.sequential:
+        updated_options.parallel = false
+    # All direct execution lanes consume this same immutable run-level pair.
+    # Per-file timeout, cache, and feature-gate decisions are still worker
+    # behavior and are not represented as frozen trace evidence.
+    val execution_paths = admitted_paths
+    val execution_options = updated_options
+
     # Parallel execution with resource governor
-    if updated_options.parallel:
+    if execution_options.parallel:
         if not is_linux():
             print "WARNING: --parallel is experimental on non-Linux platforms. Attempting with graceful fallback."
         val parallel_result = run_tests_parallel_mode(
-            files,
-            updated_options,
+            execution_paths,
+            execution_options,
             ckpt_passed: ckpt_passed,
             ckpt_failed: ckpt_failed,
             ckpt_skipped: ckpt_skipped
         )
-        return cover_append_failures(reconcile_discovered_vs_executed(files, parallel_result, false), missing_covers)
+        return cover_append_failures(reconcile_discovered_vs_executed(execution_paths, parallel_result, false), missing_covers)
 
     report_free_mem("BEFORE_TEST_LOOP")
-    val mode_name = mode_to_str(updated_options.mode)
+    val mode_name = mode_to_str(execution_options.mode)
     var fork_label = ""
-    if updated_options.fork_mode:
+    if execution_options.fork_mode:
         fork_label = ", fork"
-    print "Running {files.len()} test file(s) [mode: {mode_name}{fork_label}]..."
-    if updated_options.seed_set:
-        print "Seed: {updated_options.seed}"
-    if updated_options.self_protect:
-        val free_cpu = 100.0 - updated_options.cpu_threshold
-        val free_mem = 100.0 - updated_options.mem_threshold
+    print "Running {execution_paths.len()} test file(s) [mode: {mode_name}{fork_label}]..."
+    if execution_options.seed_set:
+        print "Seed: {execution_options.seed}"
+    if execution_options.self_protect:
+        val free_cpu = 100.0 - execution_options.cpu_threshold
+        val free_mem = 100.0 - execution_options.mem_threshold
         print "Self-protection enabled (stops when free CPU < {free_cpu}% AND free RAM < {free_mem}%)"
-    if updated_options.max_mem_gb > 0 and not updated_options.no_limits:
-        print "  Max memory per test: {updated_options.max_mem_gb}GB"
+    if execution_options.max_mem_gb > 0 and not execution_options.no_limits:
+        print "  Max memory per test: {execution_options.max_mem_gb}GB"
 
     # Load change-detection cache (skip if --clean)
     val cache_path = ".simple/test-result-cache.sdn"
@@ -438,11 +500,13 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     var total_duration_ms = 0
     var total_setup_ms = session_setup_ms
     var total_cached = 0
-    var completed_files: [text] = []
+    # Seeded from the checkpoint on --resume so a periodic save mid-resume does
+    # not drop the files the previous run already completed.
+    var completed_files: [text] = ckpt_completed
     var tests_run = 0
     var stopped_early = false
 
-    for file_path in files:
+    for file_path in execution_paths:
         # Only check system thresholds every 20 tests (avoids 100ms CPU sleep per check)
         # `tests_run > 0` is load-bearing, not a micro-optimisation. Without it
         # the very first iteration checks, and a violation there shuts the run
@@ -488,7 +552,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
                     timed_out: false,
                     cached: true
                 )
-                print_result(cached_result, updated_options.format)
+                print_result(cached_result, execution_options.format)
                 total_passed = total_passed + cached_result.passed
                 total_failed = total_failed + cached_result.failed
                 total_skipped = total_skipped + cached_result.skipped
@@ -500,8 +564,8 @@ fn run_tests(options: TestOptions) -> TestRunResult:
                 continue
 
         # Run test (or report it feature-gated without running it)
-        val result = if gate.off.len() > 0: feature_gated_result(file_path, gate.off) else: run_single_test(file_path, updated_options)
-        print_result(result, updated_options.format)
+        val result = if gate.off.len() > 0: feature_gated_result(file_path, gate.off) else: run_single_test(file_path, execution_options)
+        print_result(result, execution_options.format)
 
         # Record result in cache (system specs skip the cache entirely so
         # a stale interpreter-mode load never replays as a silent 0ms pass)
@@ -520,7 +584,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         completed_files.push(file_path)
         tests_run = tests_run + 1
 
-        if updated_options.fail_fast and (result.failed > 0 or result.timed_out):
+        if execution_options.fail_fast and (result.failed > 0 or result.timed_out):
             print ""
             print "Stopping early (--fail-fast)"
             stopped_early = true
@@ -533,9 +597,9 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     if total_cached > 0:
         print "Skipped {total_cached} unchanged test(s) (cached)"
 
-    # MEMORY DEBUG: checkpoint cleanup disabled (GROUP 6)
-    # if options.resume and checkpoint_exists():
-    #     checkpoint_delete()
+    # The resumed run reached its end: the checkpoint it consumed is spent.
+    if options.resume and checkpoint_exists():
+        checkpoint_delete()
 
     val sequential_result = TestRunResult(
         files: results,
@@ -1280,40 +1344,21 @@ fn summarize_test_results(results: [TestFileResult]) -> TestRunResult:
 # =========================================================================
 
 fn run_test_cli() -> i64:
-    report_free_mem("START")
-    # Start resource safeguard before any test discovery or execution.
-    ensure_kill_monitor_running()
-    val all_args = get_cli_args()
-    var args: [text] = []
-    var json_worker = false
-    var i = if all_args.len() > 0 and all_args[0] == "test": 1 else: 0
-    var marker = -1
-    var scan = 0
-    while scan < all_args.len():
-        if all_args[scan] == "--test-json-worker":
-            marker = scan
-            break
-        scan = scan + 1
-    if marker >= 0:
-        if env_get("SIMPLE_TEST_JSON_WORKER_AUTH") != "1":
-            print "ERROR: unauthorized private test JSON worker marker"
+    val parsed = match parse_private_sdn_worker_args(get_cli_args(), env_get("SIMPLE_TEST_SDN_WORKER_AUTH") == "1"):
+        case Ok(value): value
+        case Err(reason):
+            eprint "ERROR: {reason}"
             return 2
-        env_set("SIMPLE_TEST_JSON_WORKER_AUTH", "")
-        json_worker = true
-        i = marker + 1
-    while i < all_args.len():
-        # Public JSON mode: `--json` (or `--format json`) on the DIRECT
-        # dispatch path (seed `simple test`, which skips the _CliMain
-        # json_wrapper subprocess). Reuses the worker-mode emission and print
-        # suppression; only the private --test-json-worker marker needs auth.
-        if all_args[i] == "--json":
-            json_worker = true
-        else:
-            if all_args[i] == "--format" and i + 1 < all_args.len() and all_args[i + 1] == "json":
-                json_worker = true
-            args.push(all_args[i])
-        i = i + 1
-
+    if parsed.public_sdn_requested:
+        return run_test_sdn_wrapper(parsed.forwarded_args) as i64
+    val args = parsed.forwarded_args
+    val sdn_worker = parsed.worker
+    val sdn_result_path = parsed.result_path
+    if sdn_worker:
+        env_set("SIMPLE_TEST_SDN_WORKER_AUTH", "")
+    report_free_mem("START")
+    # Argument rejection precedes resource safeguards and test side effects.
+    ensure_kill_monitor_running()
     # Handle run management commands (status/stop/etc.)
     if has_run_management_flag(args):
         return handle_run_management(args)
@@ -1360,13 +1405,32 @@ fn run_test_cli() -> i64:
         print "  run_spec_tests: {config.run_spec_tests}"
         print "  run_sdoctests: {config.run_sdoctests}"
         print "  run_spl_doctests: {config.run_spl_doctests}"
-        if json_worker:
-            print combined_test_run_json(false, false, spec_result, false, spl_doctest_result, false, sdoctest_result)
+        if sdn_worker:
+            match combined_test_run_sdn(false, false, spec_result, false, spl_doctest_result, false, sdoctest_result):
+                case Ok(document):
+                    if not file_atomic_write(sdn_result_path, document):
+                        eprint "ERROR: cannot atomically write worker SDN output"
+                        return 3
+                case Err(reason):
+                    eprint "ERROR: cannot encode worker SDN failure: {reason}"
+                    return 3
         return 1
 
     propagate_env_vars(options)
 
+    # Deliberate fail-closed gate: the current runner does not execute the
+    # frozen source bytes or bind all worker options to the preparation receipt.
+    # Do not run candidates in trace mode until that complete input contract is
+    # connected. A post-run warning cannot recover observations never persisted.
+    if run_spec and not options.list and (env_get("SIMPLE_TRACE_CASE_EVENTS") ?? "") == "1":
+        if options.no_db:
+            eprint "ERROR: trace event mode requires database persistence; remove --no-db"
+        else:
+            eprint "ERROR: trace event mode is not admitted: frozen source bytes and effective execution options are not yet bound to preparation"
+        return 2
+
     var exit_code = 0
+    var trace_infra_failed = false
 
     # Run spec tests with self-protection enabled in run_tests()
     if run_spec:
@@ -1380,9 +1444,18 @@ fn run_test_cli() -> i64:
 
         val result_files = spec_result.files
         report_free_mem("AFTER_RUN_{result_files.len()}_files")
+        if not options.list and options.no_db and trace_events_requested(spec_result):
+            print "ERROR: trace event mode requested but database persistence is disabled"
+            trace_infra_failed = true
+        if not options.list and not options.no_db and (result_files.len() > 0 or trace_events_requested(spec_result)):
+            match record_test_run_via_db_lane(spec_result, run_start, run_end):
+                case Ok(_): pass
+                case Err(reason):
+                    print "ERROR: trace event persistence is incomplete: {reason}"
+                    trace_infra_failed = true
         if generate_spipe_docs_for_results(result_files, options, find_simple_binary()) != 0:
-            return 3
-        if not json_worker:
+            if exit_code == 0: exit_code = 3
+        if not sdn_worker:
             emit_spec_file_verdicts(result_files)
             print_summary(spec_result, options.format)
             # In-development counts ride on the ordinary summary surface,
@@ -1393,7 +1466,7 @@ fn run_test_cli() -> i64:
 
         if options.coverage:
             val coverage = collect_coverage()
-            if not json_worker:
+            if not sdn_worker:
                 print_coverage_summary(coverage)
             generate_coverage_reports(coverage)
             print_coverage_delta(coverage)
@@ -1405,10 +1478,6 @@ fn run_test_cli() -> i64:
                 coverage_test_files.push(result_file.path)
             if not options.no_cover_check and not check_cover_annotation_thresholds(coverage, coverage_test_files):
                 exit_code = 1
-
-        # Persist test results to database and regenerate test_result.md
-        if result_files.len() > 0 and not options.list and not options.no_db:
-            record_test_run_via_db_lane(spec_result, run_start, run_end)
 
         # Name every spec that produced no verdict. Absence of a result must
         # never read as success, and an unnamed non-zero exit is nearly as hard
@@ -1452,8 +1521,11 @@ fn run_test_cli() -> i64:
         if not sdoctest_result.is_ok():
             exit_code = 1
 
-    if json_worker:
-        print combined_test_run_json(
+    if trace_infra_failed and exit_code == 0:
+        exit_code = 1
+
+    if sdn_worker:
+        match combined_test_run_sdn(
             exit_code == 0,
             run_spec,
             spec_result,
@@ -1461,7 +1533,14 @@ fn run_test_cli() -> i64:
             spl_doctest_result,
             run_sdoc,
             sdoctest_result
-        )
+        ):
+            case Ok(document):
+                if not file_atomic_write(sdn_result_path, document):
+                    eprint "ERROR: cannot atomically write worker SDN output"
+                    if exit_code == 0: exit_code = 3
+            case Err(reason):
+                eprint "ERROR: cannot encode worker SDN output: {reason}"
+                if exit_code == 0: exit_code = 3
 
     exit_code
 

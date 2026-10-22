@@ -171,7 +171,7 @@ impl<'a> MirLowerer<'a> {
         let expr_ty = expr.ty;
 
         match &expr.kind {
-            HirExprKind::Integer(n) => self.lower_integer_expr(*n),
+            HirExprKind::Integer(n) => self.lower_typed_integer_expr(*n, expr_ty),
             HirExprKind::Float(f) => self.lower_float_expr(*f),
             HirExprKind::Bool(b) => self.lower_bool_expr(*b),
             HirExprKind::String(s) => self.lower_string_expr(s.clone()),

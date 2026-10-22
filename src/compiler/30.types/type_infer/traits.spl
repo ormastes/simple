@@ -12,191 +12,181 @@
 
 use compiler.hir.hir.*
 use compiler.frontend.core.lexer.*
+use compiler.common.diagnostics.span.Span
 use compiler.traits.traits.*
+use compiler.traits.trait_impl.{ImplBlock}
 use type_infer_types.*
-use compiler.types.type_infer_types.{HmInferContext, TypeInferError}
-use compiler.hir.hir_types.{HirModule, HirType}  # explicit: a glob is not an import-origin for surface projection
+use compiler.types.type_infer_types.{HmInferContext, TypeInferError, FunctionBoundContext, FunctionBoundsMap, FunctionTypeParametersMap}
+use compiler.types.type_infer.context.*
+use compiler.hir.hir_owner_name.hir_symbol_owner_module
+use compiler.hir.hir_types.{HirModule, HirType, HirSymbol, SymbolId, SymbolKind}  # explicit: a glob is not an import-origin for surface projection
+
+# Every assumption and concrete obligation uses this same nominal authority.
+fn hm_bound_symbol(context: FunctionBoundContext, id: SymbolId, kind: SymbolKind, label: text, span: Span) -> Result<HirSymbol, TypeInferError>:
+    val row = context.symbols.get_symbol_raw(id.id)
+    if row == nil:
+        return Err(TypeInferError.Other("function bound has missing {label} symbol", span))
+    val symbol: HirSymbol = row.unwrap()
+    if symbol.id.id != id.id:
+        return Err(TypeInferError.Other("function bound {label} symbol identity mismatch", span))
+    val correct_kind = symbol.kind == kind or (kind == SymbolKind.Function and symbol.kind == SymbolKind.Method)
+    if not correct_kind:
+        return Err(TypeInferError.Other("function bound does not name a {label} symbol", span))
+    if val declared_owner = symbol.defining_module:
+        if declared_owner != "" and hir_symbol_owner_module(declared_owner) != context.module_name:
+            return Err(TypeInferError.Other("function bound {label} owner mismatch", span))
+    Ok(symbol)
+
+fn hm_bound_symbols(context: FunctionBoundContext, bound: HirTraitBound, span: Span) -> Result<(HirSymbol, HirSymbol), TypeInferError>:
+    val parameter = match hm_bound_symbol(context, bound.type_param, SymbolKind.TypeParam, "type parameter", span):
+        case Ok(symbol): symbol
+        case Err(error): return Err(error)
+    match bound.trait_.kind:
+        case Named(id, arguments):
+            if arguments.len() > 0:
+                return Err(TypeInferError.Other("parameterized trait bounds require argument-aware solver admission", span))
+            match hm_bound_symbol(context, id, SymbolKind.Trait, "trait", span):
+                case Ok(symbol): Ok((parameter, symbol))
+                case Err(error): Err(error)
+        case _: Err(TypeInferError.Other("function bound has missing trait symbol", span))
+
+fn hm_validate_function_bound_metadata(context: FunctionBoundContext, module: HirModule) -> Result<(), TypeInferError>:
+    for function in module.functions.values():
+        match hm_bound_symbol(context, function.symbol, SymbolKind.Function, "function", function.span):
+            case Err(error): return Err(error)
+            case _: ()
+        var ids: Dict<i64, bool> = {}
+        var names: Dict<text, bool> = {}
+        for parameter in function.type_params:
+            val symbol = match hm_bound_symbol(context, parameter.symbol, SymbolKind.TypeParam, "type parameter", parameter.span):
+                case Ok(value): value
+                case Err(error): return Err(error)
+            if symbol.name != parameter.name:
+                return Err(TypeInferError.Other("function bound type parameter name mismatch", parameter.span))
+            if ids.has(parameter.symbol.id) or names.has(parameter.name):
+                return Err(TypeInferError.Other("generic declaration has duplicate binder identity", parameter.span))
+            ids[parameter.symbol.id] = true
+            names[parameter.name] = true
+            for bound_type in parameter.bounds:
+                val bound = HirTraitBound(type_param: parameter.symbol, trait_: bound_type, span: parameter.span)
+                match hm_bound_symbols(context, bound, parameter.span):
+                    case Err(error): return Err(error)
+                    case _: ()
+    Ok(())
 
 impl HmInferContext:
     # =========================================================================
     # Trait Collection (Phase B.1)
     # =========================================================================
 
-    me collect_traits_from_module(module: HirModule):
-        """Collect all traits from a HIR module into the trait solver.
-
-        Iterates through module.traits and registers each trait definition.
-        """
-        for hir_trait in module.traits.values():
-            val trait_def = self.convert_hir_trait_to_def(hir_trait)
-            self.trait_solver.add_trait(trait_def)
-
-    me collect_impls_from_module(module: HirModule):
-        """Collect all impl blocks from a HIR module into the trait solver.
-
-        Iterates through module.impls and registers each impl block.
-        """
-        for hir_impl in module.impls:
-            val impl_block = self.convert_hir_impl_to_block(hir_impl)
-            self.trait_solver.add_impl(impl_block)
-
     me collect_function_bounds_from_module(module: HirModule):
-        """Collect trait bounds from all functions in a module.
+        """Retain declaration order and symbols for one module's bound API.
 
-        Stores trait bounds indexed by function symbol ID for obligation
-        generation during function calls.
+        Called before inference so direct calls retain declaration authority.
+        A context cannot merge unrelated module-local SymbolId spaces.
         """
-        for hir_fn in module.functions.values():
-
-            # Collect all trait bounds from type parameters
+        val owner = hir_symbol_owner_module(module.name)
+        if owner == "":
+            self.error(TypeInferError.Other("function bounds require a module owner", Span.empty()))
+            return
+        if val previous = self.function_bound_context:
+            if previous.module_name != owner:
+                self.error(TypeInferError.Other("function bound module owner mismatch", Span.empty()))
+                return
+        var collected: FunctionBoundsMap = {}
+        var parameters: FunctionTypeParametersMap = {}
+        var signatures: Dict<i64, HmGenericSignature> = {}
+        for dk_12 in module.functions.keys():
+            # ANY-transport hazard sweep round 3: annotated rebind.
+            val hir_fn: HirFunction = module.functions[dk_12]
+            var ordered: [SymbolId] = []
             var all_bounds: [HirTraitBound] = []
-
-            # Bounds from type parameters (T: Trait in fn foo<T: Trait>)
             for tp in hir_fn.type_params:
+                ordered = ordered.push(tp.symbol)
                 for bound_type in tp.bounds:
-                    # Convert bound type to HirTraitBound
-                    match bound_type.kind:
-                        case Named(trait_symbol, _):
-                            val bound = HirTraitBound(
-                                type_param: tp.symbol,
-                                trait_: bound_type,
-                                span: tp.span
-                            )
-                            all_bounds = all_bounds.push(bound)
-                        case _: pass
-
-            # Store bounds indexed by function symbol
+                    all_bounds = all_bounds.push(HirTraitBound(
+                        type_param: tp.symbol, trait_: bound_type, span: tp.span))
+            parameters[hir_fn.symbol.id] = ordered
+            signatures[hir_fn.symbol.id] = HmGenericSignature(
+                parameters: hir_fn.type_params,
+                type_: HirType(kind: HirTypeKind.Function(hir_fn.params.map(_.type_), hir_fn.return_type, hir_fn.effects), span: hir_fn.span))
             if not all_bounds.is_empty():
-                self.function_bounds[hir_fn.symbol.id] = all_bounds
-
-    fn convert_hir_trait_to_def(hir_trait: HirTrait) -> SolverTraitDef:
-        """Convert HirTrait to SolverTraitDef for the trait solver.
-
-        Extracts method signatures from HirFunctions.
-        """
-        var methods: [MethodSignature] = []
-        for hir_fn in hir_trait.methods:
-            val sig = MethodSignature(
-                name: hir_fn.name,
-                params: hir_fn.params.map(_.type_),
-                return_type: hir_fn.return_type,
-                effects: hir_fn.effects,
-                span: hir_fn.span
-            )
-            methods = methods.push(sig)
-
-        # Extract supertrait symbols
-        var supertraits: [HirSymbol] = []
-        for st_type in hir_trait.supertraits:
-            # Extract symbol from Named type
-            match st_type.kind:
-                case Named(symbol, _):
-                    supertraits = supertraits.push(symbol)
-                case _: pass  # Skip non-named supertraits for now
-
-        # Extract type parameter symbols
-        var type_params: [HirSymbol] = []
-        for tp in hir_trait.type_params:
-            type_params = type_params.push(tp.symbol)
-
-        SolverTraitDef(
-            name: hir_trait.symbol,
-            methods: methods,
-            defaults: hir_trait.defaults,
-            supertraits: supertraits,
-            type_params: type_params,
-            span: hir_trait.span
-        )
-
-    fn convert_hir_impl_to_block(hir_impl: HirImpl) -> ImplBlock:
-        """Convert HirImpl to ImplBlock for the trait solver.
-
-        Resolves method implementations from symbol IDs.
-        """
-        # Extract trait symbol from trait type
-        # For inherent impls (no trait), use a special marker symbol
-        val trait_name = if hir_impl.trait_.?:
-            # `HirImpl.trait_` is declared `HirType` (non-optional), but is
-            # treated as nilable at construction sites with no trait (same
-            # DESUGARED-with-has_trait_-style pattern as `Impl.trait_`).
-            # Bind the unwrapped value to its declared type explicitly:
-            # `.unwrap()`'s bare result was inferred as an untyped receiver.
-            val trait_type: HirType = hir_impl.trait_.unwrap()
-            match trait_type.kind:
-                case Named(symbol, _): symbol
-                case _: SymbolId(id: -1)
-        else:
-            SymbolId(id: -1)
-
-        # Extract type parameter symbols
-        var type_params: [HirSymbol] = []
-        for tp in hir_impl.type_params:
-            type_params = type_params.push(tp.symbol)
-
-        # Note: Method implementations would be looked up from module.functions
-        # For now, create empty impl block (methods resolved during obligation solving)
-        ImplBlock(
-            trait_name: trait_name,
-            for_type: hir_impl.type_,
-            type_params: type_params,
-            where_clause: hir_impl.where_clause,
-            methods: [],
-            span: hir_impl.span
-        )
+                collected[hir_fn.symbol.id] = all_bounds
+        val context = FunctionBoundContext(
+            module_name: owner, symbols: module.symbols.module_snapshot(),
+            parameters: parameters, signatures: signatures)
+        # Validate before publishing metadata usable by symbolic assumptions.
+        match hm_validate_function_bound_metadata(context, module):
+            case Err(error):
+                self.error(error)
+                return
+            case _: ()
+        # Replace both maps together: recollection cannot retain removed bounds.
+        self.function_bounds = collected
+        self.function_bound_context = Some(context)
 
     # =========================================================================
     # Obligation Generation (Phase B.2)
     # =========================================================================
 
     me generate_obligation_for_bound(ty: HirType, bound: HirTraitBound, span: Span):
-        """Generate an obligation from a trait bound.
-
-        When we have a type `T` and a bound `T: Trait`, create an obligation
-        that must be proven by finding an impl block.
-        """
-        # Extract trait symbol from bound
-        val trait_symbol = match bound.trait_.kind:
-            case Named(symbol, _): Some(symbol)
-            case _: nil
-
-        if trait_symbol.?:
-            val cause = ObligationCause.SolverTraitBound(bound.type_param)
-            self.trait_solver.add_obligation(ty, trait_symbol.unwrap(), cause, span)
+        """Resolve actual declaration symbols before invoking the existing solver."""
+        if self.function_bound_context == nil:
+            self.error(TypeInferError.Other("function bound has missing declaration context", span))
+            return
+        val context: FunctionBoundContext = self.function_bound_context.unwrap()
+        match hm_bound_symbols(context, bound, span):
+            case Err(error): self.error(error)
+            case Ok(symbols):
+                self.trait_solver.add_obligation(ty, symbols.1,
+                    ObligationCause.SolverTraitBound(symbols.0), span)
 
     me generate_obligations_for_function_call(func_symbol: SymbolId, type_args: [HirType], span: Span):
-        """Generate obligations from a function call with trait-bounded type parameters.
+        """Instantiate bounds using the declaration's complete binder order.
 
-        When calling `fn foo<T: Display>(x: T)` with T=i64, we need to prove `i64: Display`.
-
-        Algorithm:
-        1. Look up function's trait bounds from function_bounds
-        2. For each bound `TypeParam: Trait`:
-           - Find the concrete type that TypeParam is instantiated with
-           - Generate obligation: concrete_type must implement Trait
+        Uncollected/unbounded functions retain the existing no-bound behavior;
+        connecting declaration collection to every active call is a separate gate.
         """
-        # Look up trait bounds for this function
-        if not self.function_bounds[func_symbol.id].?:
-            return  # No trait bounds on this function
-
-        val bounds = self.function_bounds[func_symbol.id]
-
-        # For each trait bound, generate an obligation
+        if not self.function_bounds.has(func_symbol.id): return
+        if self.function_bound_context == nil:
+            self.error(TypeInferError.Other("function bound has missing declaration context", span))
+            return
+        val context: FunctionBoundContext = self.function_bound_context.unwrap()
+        if not context.parameters.has(func_symbol.id):
+            self.error(TypeInferError.Other("function bound has missing ordered type parameters", span))
+            return
+        val parameters: [SymbolId] = context.parameters[func_symbol.id]
+        if parameters.len() != type_args.len():
+            self.error(TypeInferError.Other("function bound type argument count does not match declaration", span))
+            return
+        val bounds: [HirTraitBound] = self.function_bounds[func_symbol.id]
         for bound in bounds:
-            # Find which type parameter this bound refers to
-            # Map type parameters to type arguments by matching param names
-            # Look up the type_param index from the function's generic parameters
-            self.generate_obligation_for_bound_with_args(bound, type_args, span)
+            self.generate_obligation_for_bound_with_args(bound, type_args, span, parameters)
 
-    me generate_obligation_for_bound_with_args(bound: HirTraitBound, type_args: [HirType], span: Span):
-        """Generate obligation for a bound given concrete type arguments.
+    me generate_obligation_for_bound_with_args(bound: HirTraitBound, type_args: [HirType], span: Span, type_params: [SymbolId] = []):
+        """Match the actual binder SymbolId; never guess argument zero.
 
-        Maps the type parameter in the bound to its concrete type from type_args,
-        then creates an obligation.
+        Legacy direct callers without declaration order receive an HM error.
         """
-        # Map bound.type_param to the corresponding type_arg by index
-        # Use first type arg as the concrete type (type_param SymbolId not directly indexable)
-        if not type_args.is_empty():
-            self.generate_obligation_for_bound(type_args[0], bound, span)
+        if type_params.len() == 0:
+            self.error(TypeInferError.Other("function bound has missing ordered type parameters", span))
+            return
+        if type_params.len() != type_args.len():
+            self.error(TypeInferError.Other("function bound type argument count does not match declaration", span))
+            return
+        var found = -1
+        var index = 0
+        for parameter in type_params:
+            if parameter.id == bound.type_param.id:
+                if found >= 0:
+                    self.error(TypeInferError.Other("function bound has ambiguous type parameter position", span))
+                    return
+                found = index
+            index = index + 1
+        if found < 0:
+            self.error(TypeInferError.Other("function bound type parameter is absent from declaration", span))
+            return
+        self.generate_obligation_for_bound(type_args[found], bound, span)
 
     me generate_obligation_for_method_call(receiver_ty: HirType, method_name: text, span: Span):
         """Generate obligations for a method call.
@@ -211,7 +201,7 @@ impl HmInferContext:
         val defining_trait = self.trait_solver.find_trait_for_method(method_name)
         if defining_trait.?:
             val trait_sym = defining_trait.unwrap()
-            val cause = ObligationCause.MethodCall(method_name)
+            val cause = ObligationCause.MethodCall(trait_sym, method_name)
             self.trait_solver.add_obligation(receiver_ty, trait_sym, cause, span)
             return
 
@@ -252,11 +242,10 @@ impl HmInferContext:
                         case Unsatisfied(obligation):
                             val type_err = TypeInferError.TraitNotImplemented(
                                 ty: obligation.type_,
-                                trait_name: obligation.trait_.id.to_text(),
+                                trait_name: obligation.trait_.name,
                                 span: obligation.span
                             )
                             self.errors = self.errors.push(type_err)
                         case _:
-                            # Other trait errors
-                            pass
+                            self.error(TypeInferError.Other(trait_err.message(), trait_err.span()))
                 Err(trait_errors)

@@ -1,0 +1,177 @@
+# Packages caller-supplied native app/XPC entrypoints. This does not generate
+# xpc_main, a client connection, workload ownership, or sandbox proof.
+use app.io.mod.{file_is_regular_no_follow, file_create_exclusive,
+    secure_temp_dir, dir_create_all, process_run_bounded}
+
+pub struct MacXpcBundleRequest:
+    host_executable: text
+    service_executable: text
+    host_identifier: text
+    service_identifier: text
+    signing_identity: text
+
+pub struct MacXpcBundleArtifact:
+    staging_directory: text
+    app_path: text
+    service_path: text
+
+pub struct MacXpcBundleCommand:
+    program: text
+    arguments: [text]
+
+fn mac_xpc_identifier_valid(value: text) -> bool:
+    if value.len() < 3 or value.len() > 200 or not value.contains("."):
+        return false
+    if value.starts_with(".") or value.ends_with(".") or value.contains(".."):
+        return false
+    for index in 0..value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 65 and code <= 90) or (code >= 97 and code <= 122) or (code >= 48 and code <= 57) or code == 45 or code == 46):
+            return false
+    true
+
+fn mac_xpc_source_path_valid(value: text) -> bool:
+    if not value.starts_with("/") or value.len() > 4096 or value.ends_with("/"):
+        return false
+    for index in 0..value.len():
+        val code = value.char_code_at(index)
+        if code < 32 or code == 127: return false
+    true
+
+pub fn validate_macos_xpc_bundle(request: MacXpcBundleRequest) -> Result<bool, text>:
+    """Reject ambiguous identities and unsafe source arguments before staging."""
+    if not mac_xpc_source_path_valid(request.host_executable) or not mac_xpc_source_path_valid(request.service_executable):
+        return Err("XPC bundle inputs must be absolute native executable paths without control characters")
+    if not mac_xpc_identifier_valid(request.host_identifier) or not mac_xpc_identifier_valid(request.service_identifier):
+        return Err("XPC bundle identifiers must contain safe reverse-DNS components")
+    if request.host_identifier == request.service_identifier:
+        return Err("App and XPC service require distinct bundle identifiers")
+    # Explicit '-' enables local ad-hoc development signing. This is not a
+    # distribution identity or proof that this host will launch the sandbox.
+    if request.signing_identity == "-":
+        return Ok(true)
+    # Explicit certificate SHA-1 avoids ambiguous name selection.
+    # The keychain and codesign determine whether it is usable.
+    if request.signing_identity.len() != 40:
+        return Err("Signing identity must be '-' for local development or a 40-digit certificate SHA-1")
+    for index in 0..40:
+        val code = request.signing_identity.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 65 and code <= 70) or (code >= 97 and code <= 102)):
+            return Err("Signing identity must contain only hexadecimal digits")
+    Ok(true)
+
+fn mac_xpc_plist(body: text) -> text:
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n{body}</dict></plist>\n"
+
+pub fn macos_xpc_bundle_info(request: MacXpcBundleRequest, service: bool) -> Result<text, text>:
+    """Render validated bundle metadata; service executable must call xpc_main."""
+    validate_macos_xpc_bundle(request)?
+    var identifier = request.host_identifier
+    var executable = "SimpleHost"
+    var package_type = "APPL"
+    var extra = "<key>LSUIElement</key><true/>\n"
+    if service:
+        identifier = request.service_identifier
+        executable = "SimpleWorker"
+        package_type = "XPC!"
+        extra = "<key>XPCService</key><dict><key>ServiceType</key><string>Application</string><key>RunLoopType</key><string>dispatch_main</string></dict>\n"
+    Ok(mac_xpc_plist("<key>CFBundleIdentifier</key><string>{identifier}</string>\n<key>CFBundleExecutable</key><string>{executable}</string>\n<key>CFBundlePackageType</key><string>{package_type}</string>\n<key>CFBundleVersion</key><string>1</string>\n<key>CFBundleShortVersionString</key><string>1.0</string>\n<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>\n{extra}"))
+
+pub fn macos_xpc_bundle_entitlements(service: bool) -> text:
+    """Give the service an independent sandbox without inherited capabilities."""
+    if service:
+        return mac_xpc_plist("<key>com.apple.security.app-sandbox</key><true/>\n")
+    mac_xpc_plist("")
+
+pub fn macos_xpc_signing_commands(request: MacXpcBundleRequest, staging: text) -> Result<[MacXpcBundleCommand], text>:
+    """Sign and verify the nested service before sealing and verifying the app."""
+    validate_macos_xpc_bundle(request)?
+    if not mac_xpc_source_path_valid(staging):
+        return Err("Staging directory must be absolute")
+    val app = "{staging}/SimpleHost.app"
+    val service = "{app}/Contents/XPCServices/SimpleWorker.xpc"
+    val identity = request.signing_identity
+    Ok([
+        MacXpcBundleCommand(program: "/usr/bin/codesign", arguments: ["--force", "--sign", identity, "--options", "runtime", "--entitlements", "{staging}/service.entitlements.plist", service]),
+        MacXpcBundleCommand(program: "/usr/bin/codesign", arguments: ["--verify", "--strict", service]),
+        MacXpcBundleCommand(program: "/usr/bin/codesign", arguments: ["--force", "--sign", identity, "--options", "runtime", "--entitlements", "{staging}/host.entitlements.plist", app]),
+        MacXpcBundleCommand(program: "/usr/bin/codesign", arguments: ["--verify", "--deep", "--strict", app])
+    ])
+
+fn mac_xpc_run(program: text, arguments: [text]) -> Result<text, text>:
+    val (stdout, stderr, status) = process_run_bounded(program, arguments, 30000, 1048576)
+    if status != 0:
+        return Err("XPC bundle command failed: {program}, status={status}: {stderr}")
+    Ok(stdout)
+
+fn mac_xpc_write(path: text, contents: text) -> Result<bool, text>:
+    if not file_create_exclusive(path, contents):
+        return Err("Could not exclusively create XPC bundle file: {path}")
+    mac_xpc_run("/usr/bin/plutil", ["-lint", path])?
+    Ok(true)
+
+pub fn macos_xpc_mach_headers_executable(headers: text) -> bool:
+    """Require EXECUTE in each otool Mach header filetype field, ignoring paths."""
+    var count: i64 = 0
+    for line in headers.split("\n"):
+        var fields: [text] = []
+        val normalized = line.replace("\t", " ")
+        for field in normalized.split(" "):
+            if field != "": fields.push(field)
+        if fields.len() == 0: continue
+        if fields[0] == "MH_MAGIC" or fields[0] == "MH_MAGIC_64" or fields[0] == "MH_CIGAM" or fields[0] == "MH_CIGAM_64":
+            if fields.len() < 8: return false
+            if fields[4] != "EXECUTE": return false
+            count = count + 1
+    count > 0
+
+fn mac_xpc_check_executable(path: text) -> Result<bool, text>:
+    if not file_is_regular_no_follow(path):
+        return Err("XPC bundle executable must be a regular non-symlink file: {path}")
+    val headers = mac_xpc_run("/usr/bin/otool", ["-hv", path])?
+    if not macos_xpc_mach_headers_executable(headers):
+        return Err("XPC bundle input must be a Mach-O executable: {path}")
+    Ok(true)
+
+fn mac_xpc_materialize(request: MacXpcBundleRequest, staging: text) -> Result<MacXpcBundleArtifact, text>:
+    val app = "{staging}/SimpleHost.app"
+    val service = "{app}/Contents/XPCServices/SimpleWorker.xpc"
+    for directory in ["{app}/Contents/MacOS", "{service}/Contents/MacOS"]:
+        if not dir_create_all(directory):
+            return Err("Could not create XPC bundle directory: {directory}")
+    val host_target = "{app}/Contents/MacOS/SimpleHost"
+    val service_target = "{service}/Contents/MacOS/SimpleWorker"
+    mac_xpc_run("/bin/cp", [request.host_executable, host_target])?
+    mac_xpc_run("/bin/cp", [request.service_executable, service_target])?
+    mac_xpc_run("/bin/chmod", ["755", host_target, service_target])?
+    # Validate the copied bytes too, before signing; source files may change.
+    mac_xpc_check_executable(host_target)?
+    mac_xpc_check_executable(service_target)?
+    mac_xpc_write("{app}/Contents/Info.plist", macos_xpc_bundle_info(request, false)?)?
+    mac_xpc_write("{service}/Contents/Info.plist", macos_xpc_bundle_info(request, true)?)?
+    mac_xpc_write("{staging}/host.entitlements.plist", macos_xpc_bundle_entitlements(false))?
+    mac_xpc_write("{staging}/service.entitlements.plist", macos_xpc_bundle_entitlements(true))?
+    val commands = macos_xpc_signing_commands(request, staging)?
+    for command in commands:
+        mac_xpc_run(command.program, command.arguments)?
+    Ok(MacXpcBundleArtifact(staging_directory: staging, app_path: app, service_path: service))
+
+pub fn generate_macos_xpc_bundle(request: MacXpcBundleRequest) -> Result<MacXpcBundleArtifact, text>:
+    """Create a private, signed app/XPC bundle from supplied native entrypoints.
+
+    Never replaces a destination or executes inputs. Returns the private stage
+    on success; errors retain its path for inspection. No automatic recursive
+    cleanup, launch, installation, notarization, or sandbox evidence is implied.
+    """
+    validate_macos_xpc_bundle(request)?
+    val platform = mac_xpc_run("/usr/bin/uname", ["-s"])?
+    if platform.trim() != "Darwin":
+        return Err("XPC bundle generation requires macOS")
+    mac_xpc_check_executable(request.host_executable)?
+    mac_xpc_check_executable(request.service_executable)?
+    # Fixed trusted parent, fresh mode-0700 directory allocated by the facade.
+    # No caller-selected destination is opened or removed.
+    val staging = secure_temp_dir("/private/tmp", "simple-xpc-bundle-")?
+    match mac_xpc_materialize(request, staging):
+        case Ok(artifact): Ok(artifact)
+        case Err(message): Err("{message}; retained private staging directory: {staging}")

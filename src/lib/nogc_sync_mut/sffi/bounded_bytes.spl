@@ -1,0 +1,48 @@
+"""Scoped raw-byte allocations for synchronous foreign calls.
+
+The caller owns each returned pointer, frees it exactly once, and never sends
+it across an execution domain. No text value represents a binary payload.
+"""
+
+# bytes_from_raw comes from the zero-import leaf sffi/raw_bytes.spl, never from
+# std.nogc_sync_mut.sffi.host: that module's 110 host rt_* externs (rt_tls13_*,
+# rt_db_*, rt_renderdoc_*, ...) would enter every closure reaching this file --
+# including the core-C bootstrap compiler via io/external_file.spl -- and stay
+# undefined at link.
+use std.nogc_sync_mut.sffi.raw_bytes.{bytes_from_raw}
+
+pub val FOREIGN_BYTES_LIMIT: i64 = 1048576
+
+@unsafe(reason: "scoped byte allocation ABI", capabilities: [ffi, raw_ptr])
+extern fn rt_alloc(size: i64) -> i64
+@unsafe(reason: "scoped byte allocation ABI", capabilities: [ffi, raw_ptr])
+extern fn rt_free(pointer: i64)
+@unsafe(reason: "scoped byte store ABI", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_write_u8(pointer: i64, offset: i64, value: i64)
+
+@unsafe(reason: "returns a caller-owned allocation; free with foreign_bytes_release", capabilities: [ffi, raw_ptr])
+fn foreign_bytes_allocate(length: i64) -> i64:
+    if length <= 0 or length > FOREIGN_BYTES_LIMIT: return 0
+    unsafe(capabilities: [ffi, raw_ptr]): rt_alloc(length)
+
+@unsafe(reason: "copies bytes into a fresh caller-owned allocation", capabilities: [ffi, raw_ptr])
+fn foreign_bytes_copy_in(bytes: [u8]) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        val pointer = foreign_bytes_allocate(bytes.len())
+        if pointer == 0: return 0
+        for i in 0..bytes.len():
+            rt_ptr_write_u8(pointer, i, bytes[i].to_i64())
+        pointer
+
+@unsafe(reason: "caller proves pointer has at least length readable bytes", capabilities: [ffi, raw_ptr])
+fn foreign_bytes_copy_out(pointer: i64, length: i64) -> [u8]:
+    if length <= 0 or length > FOREIGN_BYTES_LIMIT or pointer == 0: return []
+    bytes_from_raw(pointer, length)
+
+@unsafe(reason: "releases one owned allocation and invalidates its address", capabilities: [ffi, raw_ptr])
+fn foreign_bytes_release(pointer: i64):
+    if pointer != 0:
+        unsafe(capabilities: [ffi, raw_ptr]): rt_free(pointer)
+
+export FOREIGN_BYTES_LIMIT, foreign_bytes_allocate, foreign_bytes_copy_in
+export foreign_bytes_copy_out, foreign_bytes_release

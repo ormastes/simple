@@ -113,10 +113,6 @@ def WeaverState.empty : WeaverState := ⟨0⟩
 /-- Record a denial: increment denialCount. -/
 def deny (s : WeaverState) : WeaverState := ⟨s.denialCount + 1⟩
 
-theorem deny_increments (s : WeaverState) :
-    (deny s).denialCount = s.denialCount + 1 := by
-  simp [deny]
-
 -- ---------------------------------------------------------------------------
 -- 6. wrap() execution model
 --

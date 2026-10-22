@@ -1,0 +1,108 @@
+"""Actual MIR calls consume checked contracts and seeded parameter origins."""
+
+use compiler.borrow.borrow_check.mod.{BorrowCheckResult, create_borrow_checker}
+use compiler.mir.mir_instruction_graph.{MirBody, MirBlock, MirInst}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_instruction_support.{BlockId, MirTerminator, MirOperand, MirOperandKind, MirBorrowKind, MirPlace, MirProjection, mir_operand_copy, mir_operand_const_int}
+use compiler.mir.mir_types.{LocalId, MirType, MirTypeKind, MirConstValue, MirLocal, LocalKind}
+use std.nogc_sync_mut.io_runtime.{exit}
+
+fn call_guard(condition: bool, message: text):
+    if not condition:
+        print "FAIL: {message}"
+        exit(1)
+
+fn short_parameter(id: i64, mutable: bool, boundary: i64) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: nil, type_: MirType(kind: MirTypeKind.Ref(MirType.i64(), mutable)), kind: LocalKind.Arg(id), is_ghost: false,
+        short_borrow: true, short_mutable: mutable, short_boundary: boundary)
+
+fn scalar_local(id: i64) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: nil, type_: MirType.i64(), kind: LocalKind.Temp, is_ghost: false)
+
+fn short_call_accepts(arguments: [MirOperand], modes: [text], parameters: [MirLocal], known: bool = true, strict: bool = true, prefix: [MirInst] = [], reference_result: bool = false, terminating: bool = false, result_aliases_first: bool = false) -> bool:
+    var contracts: Dict<text, [text]> = {}
+    if known: contracts["checked-target"] = modes
+    val callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("checked-target"), MirType.i64()))
+    val result = LocalId(id: if result_aliases_first: 0 else: 20)
+    val instruction = MirInst(kind: MirInstKind.Call(Some(result), callee, arguments), span: nil)
+    var instructions: [MirInst] = []
+    for preceding in prefix:
+        instructions = instructions.push(preceding)
+    var blocks: [MirBlock] = []
+    if terminating:
+        blocks = blocks.push(MirBlock(id: BlockId(id: 17), label: nil, instructions: instructions,
+            terminator: MirTerminator.CallTerminator(Some(result), callee, arguments, BlockId(id: 18), None, None, None)))
+        blocks = blocks.push(MirBlock(id: BlockId(id: 18), label: nil, instructions: [], terminator: MirTerminator.Ret(Some(mir_operand_copy(result)))))
+    else:
+        instructions = instructions.push(instruction)
+        blocks = blocks.push(MirBlock(id: BlockId(id: 17), label: nil, instructions: instructions, terminator: MirTerminator.Ret(Some(mir_operand_copy(result)))))
+    var locals: [MirLocal] = []
+    var argument_count = 0
+    for parameter in parameters:
+        locals = locals.push(parameter)
+        match parameter.kind:
+            case LocalKind.Arg(_): argument_count = argument_count + 1
+            case _: pass
+    val result_type = if reference_result: MirType(kind: MirTypeKind.Ref(MirType.i64(), false)) else: MirType.i64()
+    if not result_aliases_first:
+        locals = locals.push(MirLocal(id: result, name: nil, type_: result_type, kind: LocalKind.Temp, is_ghost: false))
+    val body = MirBody(name: "short-call-probe", blocks: blocks, locals: locals, arg_count: argument_count, return_ty: result_type,
+        nogc_strict: strict, short_call_contracts: contracts)
+    var checker = create_borrow_checker()
+    match checker.check_function(body, 17):
+        case BorrowCheckResult.Ok: true
+        case BorrowCheckResult.Errors(errors):
+            for error in errors: print "short-call diagnostic: {error.message}"
+            false
+
+fn main() -> i64:
+    val first = mir_operand_copy(LocalId(id: 0))
+    val second = mir_operand_copy(LocalId(id: 1))
+    call_guard(short_call_accepts([first, first], ["read-short", "read-short"], [short_parameter(0, false, 41)]),
+        "shared aliases were rejected at an actual call")
+    call_guard(not short_call_accepts([first, first], ["read-short", "mutate-short"], [short_parameter(0, true, 41)]),
+        "read and mutable slots aliased in one actual call")
+    call_guard(not short_call_accepts([first, first], ["mutate-short", "mutate-short"], [short_parameter(0, true, 41)]),
+        "two mutable slots aliased in one actual call")
+    call_guard(not short_call_accepts([first], ["mutate-short"], [short_parameter(0, false, 41)]),
+        "a shared origin was promoted to a mutable call argument")
+    call_guard(short_call_accepts([first], ["mutate-short"], [short_parameter(0, true, 41)]),
+        "valid exclusive forwarding lost its original boundary")
+    call_guard(not short_call_accepts([first, second], ["read-short", "read-short"], [short_parameter(0, false, 41), short_parameter(1, false, 42)]),
+        "an actual call widened incompatible original boundaries")
+    call_guard(not short_call_accepts([first], ["read-short"], [short_parameter(0, false, -1)]),
+        "an unknown parameter origin became a fresh owner")
+    call_guard(not short_call_accepts([first], [], [short_parameter(0, false, 41)], false),
+        "a borrowed argument crossed an unknown call contract")
+    call_guard(not short_call_accepts([first], ["consume"], [short_parameter(0, false, 41)]),
+        "a borrowed argument crossed a consuming call slot")
+    call_guard(not short_call_accepts([first], ["read-short", "mutate-short"], [short_parameter(0, false, 41)]),
+        "a mismatched contract arity blessed its borrowed prefix")
+    call_guard(short_call_accepts([mir_operand_const_int(7), first], ["consume", "read-short"], [short_parameter(0, false, 41)]),
+        "skipping a constant shifted the following borrowed argument contract")
+    call_guard(not short_call_accepts([mir_operand_const_int(7), first], ["read-short", "consume"], [short_parameter(0, false, 41)]),
+        "skipping a constant shifted a consuming argument into a short slot")
+
+    val fresh_reference_type = MirType(kind: MirTypeKind.Ref(MirType.i64(), true))
+    val fresh_first = MirLocal(id: LocalId(id: 0), name: nil, type_: fresh_reference_type, kind: LocalKind.Temp, is_ghost: false)
+    val fresh_second = MirLocal(id: LocalId(id: 1), name: nil, type_: fresh_reference_type, kind: LocalKind.Temp, is_ghost: false)
+    val fresh_refs = [
+        MirInst(kind: MirInstKind.Ref(LocalId(id: 0), MirBorrowKind.Mutable, MirPlace(local: LocalId(id: 5), projection: [MirProjection.Field(0)])), span: nil),
+        MirInst(kind: MirInstKind.Ref(LocalId(id: 1), MirBorrowKind.Mutable, MirPlace(local: LocalId(id: 5), projection: [MirProjection.Field(1)])), span: nil)
+    ]
+    val fresh_owner = MirLocal(id: LocalId(id: 5), name: nil, type_: MirType(kind: MirTypeKind.Tuple([MirType.i64(), MirType.i64()])), kind: LocalKind.Arg(0), is_ghost: false)
+    call_guard(short_call_accepts([first, second], ["mutate-short", "mutate-short"], [fresh_first, fresh_second, fresh_owner], true, true, fresh_refs),
+        "independent fresh field loans acquired incompatible creation-point boundaries")
+
+    call_guard(not short_call_accepts([first, second], ["read-short", "read-short"], [short_parameter(0, false, 41), scalar_local(1)], true, true, [], true),
+        "the final scalar call argument erased an earlier returned loan")
+    call_guard(not short_call_accepts([first, second], ["read-short", "read-short"], [short_parameter(0, false, 41), scalar_local(1)], true, true, [], true, true),
+        "the final scalar terminator argument erased an earlier returned loan")
+    call_guard(not short_call_accepts([first, second], ["read-short", "read-short"], [short_parameter(0, false, 41), scalar_local(1)], true, true, [], true, false, true),
+        "a call result overwrote the input alias before preserving its loan")
+    call_guard(short_call_accepts([mir_operand_const_int(7)], [], [], false, false),
+        "a legacy scalar call required an irrelevant borrowing contract")
+    call_guard(short_call_accepts([first], [], [scalar_local(0)], false, false),
+        "a legacy scalar local call required an irrelevant borrowing contract")
+    print "nogc-mir-call-loans: checked calls, alias conflicts, original boundaries and legacy scalar controls passed"
+    0

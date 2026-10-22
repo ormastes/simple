@@ -1,0 +1,94 @@
+# Parent cleanup retries never alter the committed build outcome. The owner
+# lock protects journal inspection but is released across pinned SSH.
+use app.build.scheduler.owner.{scheduler_owner_open_v1,
+    scheduler_owner_close_v1}
+use app.build.scheduler.distributed_attempt.{DistributedBuildNodeV1,
+    DistributedBuildAttemptV1, distributed_build_node_consistent_v1}
+use app.build.scheduler.parent_request_spool.{
+    recover_completed_parent_build_request_v1}
+use app.build.scheduler.parent_cleanup_pending.{
+    recover_parent_cleanup_pending_v1, parent_cleanup_acked_v1,
+    mark_parent_cleanup_acked_v1}
+use app.build.scheduler.dispatch_wire.{encode_build_dispatch_v1}
+use app.build.scheduler.trusted_worker_invocation.{
+    acknowledge_build_worker_cleanup_ssh_v1}
+
+struct ParentBuildCleanupV1:
+    acknowledged: bool
+    reason: text
+
+fn _parent_cleanup_block_v1(reason: text) -> ParentBuildCleanupV1:
+    ParentBuildCleanupV1(false, reason)
+
+fn completed_build_with_pending_cleanup_v1(
+        result: DistributedBuildAttemptV1,
+        cleanup_reason: text) -> DistributedBuildAttemptV1:
+    """Report cleanup debt without changing the committed build outcome."""
+    val detail = "cleanup-pending: " + cleanup_reason
+    val reason = if result.reason == "": detail
+        else: result.reason + ";" + detail
+    DistributedBuildAttemptV1(result.completed, result.published,
+        result.failure_recorded, result.reconciliation_required,
+        reason, result.accepted)
+
+fn cleanup_completed_parent_remote_attempt_v1(owner_root: text,
+        attempt_id: text, node: DistributedBuildNodeV1) -> ParentBuildCleanupV1:
+    """Send ACK only for the exact result already committed in the journal."""
+    if not distributed_build_node_consistent_v1(node):
+        return _parent_cleanup_block_v1("transport-node-mismatch")
+    val owner = scheduler_owner_open_v1(owner_root)
+    if owner.error != "": return _parent_cleanup_block_v1("owner: " + owner.error)
+    val pending = recover_parent_cleanup_pending_v1(owner, attempt_id)
+    if not pending.ready:
+        val closed = scheduler_owner_close_v1(owner)
+        return _parent_cleanup_block_v1(if closed: pending.reason
+            else: "owner-close-failed")
+    if parent_cleanup_acked_v1(owner, attempt_id):
+        if not scheduler_owner_close_v1(owner):
+            return _parent_cleanup_block_v1("owner-close-failed")
+        return ParentBuildCleanupV1(true, "")
+    val recovered = recover_completed_parent_build_request_v1(owner, attempt_id)
+    if not recovered.recovered or recovered.request == nil or
+       recovered.request_digest != pending.request_digest or
+       recovered.request.unwrap().attempt.worker_id != node.ssh.node.worker_id:
+        val closed = scheduler_owner_close_v1(owner)
+        return _parent_cleanup_block_v1(if closed: "completed-request-mismatch"
+            else: "owner-close-failed")
+    val request = recovered.request.unwrap()
+    val dispatch = encode_build_dispatch_v1(request.action, request.attempt,
+        request.fence, request.cpu_tokens, request.fd_tokens)
+    if dispatch == "":
+        val closed = scheduler_owner_close_v1(owner)
+        return _parent_cleanup_block_v1(if closed: "dispatch-invalid"
+            else: "owner-close-failed")
+    if not scheduler_owner_close_v1(owner):
+        return _parent_cleanup_block_v1("owner-close-before-ssh")
+    val reply = acknowledge_build_worker_cleanup_ssh_v1(node.ssh,
+        dispatch, pending.request_digest, pending.result_digest)
+    if not reply.acknowledged:
+        return _parent_cleanup_block_v1("worker: " + reply.reason)
+    val reopened = scheduler_owner_open_v1(owner_root)
+    if reopened.error != "":
+        return _parent_cleanup_block_v1("owner-reopen: " + reopened.error)
+    val stored = mark_parent_cleanup_acked_v1(reopened, attempt_id,
+        pending.request_digest, pending.result_digest)
+    val closed = scheduler_owner_close_v1(reopened)
+    if not stored or not closed:
+        return _parent_cleanup_block_v1("ack-marker-not-durable")
+    ParentBuildCleanupV1(true, "")
+
+fn report_completed_parent_cleanup_v1(owner_root: text, attempt_id: text,
+        node: DistributedBuildNodeV1,
+        result: DistributedBuildAttemptV1) -> DistributedBuildAttemptV1:
+    """Keep the published build outcome while exposing pending cleanup."""
+    if not result.completed or
+       (not result.published and not result.failure_recorded):
+        return result
+    val cleanup = cleanup_completed_parent_remote_attempt_v1(owner_root,
+        attempt_id, node)
+    if cleanup.acknowledged: return result
+    completed_build_with_pending_cleanup_v1(result, cleanup.reason)
+
+export ParentBuildCleanupV1, cleanup_completed_parent_remote_attempt_v1
+export report_completed_parent_cleanup_v1
+export completed_build_with_pending_cleanup_v1

@@ -130,6 +130,30 @@ describe "builtin method table sweep":
     it "text: len/starts_with/ends_with/contains/split/join/trim/upper/lower/replace/substring/index_of/char_at":
         sweep_expect_clean(text_src)
 
+    it "substring and slice recover text type from a mutable field binding":
+        sweep_expect_clean("class CapturedText:\n    stdout: text\n" +
+            "fn cut(observed: CapturedText) -> text:\n" +
+            "    var stdout = observed.stdout\n" +
+            "    stdout = stdout.substring(0, 2)\n" +
+            "    stdout.slice(1)\n")
+
+    it "substring does not reinterpret an array receiver as text":
+        val messages = sweep_messages("fn invalid(xs: [i64]) -> text:\n    xs.substring(0, 1)\n")
+        var unresolved = false
+        for message in messages:
+            if message.contains("unresolved method call: substring"):
+                unresolved = true
+        expect(unresolved).to_equal(true)
+
+    it "function ports preserve record return fields for text slicing":
+        sweep_expect_clean("class CapturedText:\n    status: i64\n    stdout: text\n" +
+            "struct TextPort:\n    marker: i64\n    execute_fn: fn() -> CapturedText\n" +
+            "fn cut_port(port: TextPort) -> text:\n" +
+            "    val observed = port.execute_fn()\n" +
+            "    var stdout = observed.stdout\n" +
+            "    stdout = stdout.substring(0, 2)\n" +
+            "    stdout.slice(1)\n")
+
     it "array: push/pop/contains/first/last/slice/map/filter/join/is_empty":
         sweep_expect_clean(array_src)
 

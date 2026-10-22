@@ -40,8 +40,8 @@ impl ModuleSurfaceBuilder:
                 if kept_result.is_err():
                     return Err(kept_result.unwrap_err())
                 val kept_origins: ModuleSurfaceExportOriginIndex = kept_result.unwrap()
-                prune_surface.export_origin_index = kept_origins
                 prune_surface.export_origins = kept_origins.origins
+                prune_surface.export_origin_index = kept_origins
                 self.surfaces[prune_index] = prune_surface
             prune_index = prune_index + 1
         var owner_by_package_name: Dict<text, i64> = {}
@@ -53,7 +53,7 @@ impl ModuleSurfaceBuilder:
         var owner_terminal_source_by_package_name: Dict<text, text> = {}
         var owner_surface_index = 0
         while owner_surface_index < self.surfaces.len():
-            val owner_surface = self.surfaces[owner_surface_index]
+            val owner_surface: ModuleSurface = self.surfaces[owner_surface_index]
             val owner_package = module_surface_package_name(owner_surface)
             # Keep category order and collision handling unchanged, but visit
             # each key array directly. Building one cumulative array retained
@@ -267,7 +267,7 @@ impl ModuleSurfaceBuilder:
 
             var exported_owner_index = 0
             while exported_owner_index < self.surfaces.len():
-                val exported_owner = self.surfaces[exported_owner_index]
+                val exported_owner: ModuleSurface = self.surfaces[exported_owner_index]
                 val exported_owner_name = exported_owner.canonical_name
                 # A package __init__ is the facade being resolved, not one of
                 # its child owners. Indexing its inferred exports beside the
@@ -422,7 +422,7 @@ impl ModuleSurfaceBuilder:
                     val terminal_index = module_surface_index_by_name(
                         name_index, origin.owner_module)
                     if terminal_index >= 0 and terminal_index < self.surfaces.len():
-                        val terminal_surface = self.surfaces[terminal_index]
+                        val terminal_surface: ModuleSurface = self.surfaces[terminal_index]
                         val authority = module_surface_declaration_authority_lookup_building(
                             terminal_surface.declaration_authority_index,
                             origin.source_name)
@@ -490,7 +490,7 @@ pub(package) fn module_surface_explicit_import_origin(
         val item_end = facade.import_item_offsets[import_index + 1]
         var item_index = facade.import_item_offsets[import_index]
         if owner_index >= 0 and owner_index < surfaces.len():
-            val owner = surfaces[owner_index]
+            val owner: ModuleSurface = surfaces[owner_index]
             while owner.canonical_path != facade.canonical_path and
                   item_index < item_end and
                   item_index < facade.import_item_names.len():
@@ -545,14 +545,16 @@ pub(package) fn module_surface_explicit_import_origin(
     # A wildcard import is encoded with no ImportItems. Resolve all matching
     # wildcard owners and deduplicate them by terminal declaration identity;
     # two distinct terminals remain a real ambiguity.
-    for import_decl in facade.imports:
+    for raw_import_decl in facade.imports:
+        # ANY-transport hazard sweep round 3: annotated rebind.
+        val import_decl: ParserImport = raw_import_decl
         if import_decl.items.len() != 0:
             continue
         val owner_index = module_surface_index_by_name(
             name_index, import_decl.module)
         if owner_index < 0 or owner_index >= surfaces.len():
             continue
-        val owner = surfaces[owner_index]
+        val owner: ModuleSurface = surfaces[owner_index]
         if owner.canonical_path == facade.canonical_path:
             continue
         var candidate_found = false
@@ -598,25 +600,30 @@ pub(package) fn module_surface_has_explicit_import_route(
 ) -> bool:
     # A named item is unconditionally explicit, including while its owner is
     # pending. It must retain precedence over every wildcard route.
-    for import_decl in facade.imports:
+    for raw_import_decl in facade.imports:
+        # ANY-transport hazard sweep round 3: annotated rebind.
+        val import_decl: ParserImport = raw_import_decl
         if module_surface_import_owner_is_physical_self(
             surfaces, name_index, facade, import_decl.module):
             continue
-        for item in import_decl.items:
+        for raw_item in import_decl.items:
+            val item: ImportItem = raw_item
             val imported_local = if item.has_alias: item.alias else: item.name
             if imported_local == source_name or imported_local == local_name:
                 return true
     # An unrelated wildcard must not block valid sibling inference. Treat it
     # as a matching route only when the owner already declares/resolves the
     # name or syntactically promises that exported spelling for a later pass.
-    for import_decl in facade.imports:
+    for raw_import_decl in facade.imports:
+        # ANY-transport hazard sweep round 3: annotated rebind.
+        val import_decl: ParserImport = raw_import_decl
         if import_decl.items.len() != 0:
             continue
         val owner_index = module_surface_index_by_name(
             name_index, import_decl.module)
         if owner_index < 0 or owner_index >= surfaces.len():
             continue
-        val owner = surfaces[owner_index]
+        val owner: ModuleSurface = surfaces[owner_index]
         if owner.canonical_path == facade.canonical_path:
             continue
         if module_surface_declares_item(owner, source_name) or
@@ -778,7 +785,7 @@ pub(package) fn module_surface_unique_sibling_origin(
             "ambiguous facade export: module={facade.module_name} item={source_name} package={facade_package}")
     if matching_index < 0 or matching_index >= surfaces.len():
         return module_surface_origin_missing()
-    val owner = surfaces[matching_index]
+    val owner: ModuleSurface = surfaces[matching_index]
     val terminal_source_name = if owner_source_by_package_name.contains_key(owner_key):
         owner_source_by_package_name[owner_key]
     else:

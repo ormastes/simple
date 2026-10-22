@@ -4328,6 +4328,14 @@ pub fn rt_vulkan_selected_device_driver_identity_hash_fn(_args: &[Value]) -> Res
     })))
 }
 
+// Interpreter Vulkan uses its own dlopen state rather than the native
+// simple-runtime STATE.device owner. It cannot attest that native Engine2D
+// framebuffer generation, so the typed Simple facade must reject this lane.
+pub fn rt_vulkan_selected_device_identity_v1_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let _expected_token = arg_i64(args, 0, "rt_vulkan_selected_device_identity_v1", 1)?;
+    Ok(Value::text(String::new()))
+}
+
 fn vulkan_device_type_name(kind: u32) -> &'static str {
     match kind {
         1 => "integrated",

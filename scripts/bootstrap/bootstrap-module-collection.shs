@@ -2,7 +2,24 @@
 # Diagnostic object compilation. Caller owns source inventory and admission;
 # this scheduler never substitutes a producer or promotes diagnostic output.
 
+bootstrap_module_documentation_only() {
+  # Deliberately narrower than a facade classifier: import/export/type/string
+  # syntax needs real frontend/closure validation. Only ordinary blank lines
+  # and full-line comments can prove there is no object-producing syntax.
+  # Unreadable, symlinked, missing, or unusual input stays on the compile path.
+  [ "$#" -eq 1 ] && [ -f "$1" ] && [ ! -L "$1" ] && [ -r "$1" ] || return 1
+  LC_ALL=C awk '
+    /^[[:space:]]*$/ { next }
+    /^[[:space:]]*#/ { next }
+    { exit 1 }
+  ' "$1"
+}
+
 bootstrap_module_object_valid() {
+  if [ -n "${MODULE_PROGRESS_TARGET:-}" ]; then
+    python3 "$MODULE_PROGRESS_HELPER" object "$1" "$MODULE_PROGRESS_TARGET"
+    return $?
+  fi
   # Check the output kind independently of the compiler's status or suffix.
   # ELF ET_REL, COFF (no PE optional header), and Mach-O MH_OBJECT are the
   # supported host object containers. This is not a full object-file verifier.
@@ -67,6 +84,24 @@ run_module_compile_inventory() (
       mc_blocked=1
       printf 'task=module_compile_%s|entry=%s|result=BLOCKED|status=prerequisite-unavailable|log=%s\n' "$mc_count" "$mc_entry" "$mc_block_log" >"$mc_dir/row"
       mc_failed=1 mc_stopped=1
+    elif bootstrap_module_documentation_only "$mc_entry"; then
+      mc_source_sha=$(hash_stream <"$mc_entry") || return 2
+      mc_doc_result=UNSUPPORTED mc_doc_status=documentation-only-no-code
+      if ! "$mc_validate" >>"$mc_dir/prerequisite.log" 2>&1; then
+        mc_doc_result=BLOCKED mc_doc_status=authority-changed
+      else
+        mc_source_after=$(hash_stream <"$mc_entry") || return 2
+        if [ "$mc_source_sha" != "$mc_source_after" ] ||
+            ! bootstrap_module_documentation_only "$mc_entry"; then
+          mc_doc_result=BLOCKED mc_doc_status=source-changed
+        fi
+      fi
+      # No object operation was executed. Retain aggregate failure until the
+      # admission policy explicitly provides empty-input rejection coverage.
+      printf 'task=module_compile_%s|entry=%s|result=%s|status=%s|source_sha256=%s|producer_sha256=%s|artifact=-|log=%s|mode=diagnostic-relocatable-object\n' \
+        "$mc_count" "$mc_entry" "$mc_doc_result" "$mc_doc_status" \
+        "$mc_source_sha" "${snapshot_sha:-unavailable}" "$mc_dir/prerequisite.log" >"$mc_dir/row"
+      mc_failed=1 mc_stopped=1
     else
       mc_key=$(printf '%s\n' "$mc_entry" | hash_stream) || return 2
       mc_cache="$mc_cache_root/$mc_key"
@@ -102,6 +137,12 @@ run_module_compile_inventory() (
       for mc_job in $mc_jobs; do
         wait "${mc_job%:*}" || { mc_failed=1; mc_stopped=1; }
       done
+      if [ -n "${MODULE_PROGRESS_STATE:-}" ]; then
+        MODULE_COMPILE_VALIDATE_FULL=1 "$mc_validate" >"$mc_attempt/checkpoint-authority.log" 2>&1 || return 2
+        for mc_job in $mc_jobs; do
+          python3 "$MODULE_PROGRESS_HELPER" publish "$MODULE_PROGRESS_STATE" "$MODULE_PROGRESS_CONTEXT" "$MODULE_PROGRESS_TARGET" "$mc_attempt/${mc_job#*:}/row" || return 2
+        done
+      fi
       mc_jobs= mc_batch=0
       # An owner stop raised while a batch ran must prevent its next entry.
       if mc_abort_requested; then break; fi
@@ -110,6 +151,12 @@ run_module_compile_inventory() (
   for mc_job in $mc_jobs; do
     wait "${mc_job%:*}" || mc_failed=1
   done
+  if [ -n "${MODULE_PROGRESS_STATE:-}" ] && [ -n "$mc_jobs" ]; then
+    MODULE_COMPILE_VALIDATE_FULL=1 "$mc_validate" >"$mc_attempt/checkpoint-authority.log" 2>&1 || return 2
+    for mc_job in $mc_jobs; do
+      python3 "$MODULE_PROGRESS_HELPER" publish "$MODULE_PROGRESS_STATE" "$MODULE_PROGRESS_CONTEXT" "$MODULE_PROGRESS_TARGET" "$mc_attempt/${mc_job#*:}/row" || return 2
+    done
+  fi
   # The last batch may be shorter than mc_workers; it has no in-loop join.
   mc_abort_requested || :
   if [ "$mc_count" -eq 0 ] && [ "$mc_abort_rc" -ne 0 ]; then return "$mc_abort_rc"; fi

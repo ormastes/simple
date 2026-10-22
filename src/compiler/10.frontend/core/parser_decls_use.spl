@@ -18,8 +18,10 @@ use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN, TOK_LBRACKET, TOK_RBRACKET}
 use compiler.core.tokens.{TOK_LBRACE, TOK_RBRACE}
 use compiler.core.tokens.{TOK_COLON, TOK_COMMA, TOK_DOT, TOK_DOTDOT, TOK_DOTDOTDOT}
 use compiler.core.tokens.{TOK_INDENT, TOK_DEDENT, TOK_EOF}
+use compiler.core.tokens.{TOK_NEWLINE, TOK_SEMICOLON}
 use compiler.core.parser_decls.{parse_type_params, parse_type_param_constraint_list, parser_skip_mut_if_present}
 use compiler.core.parser_decls.{parser_expect_param_name}
+use compiler.core.parser_decls.{parser_parse_member_attribute}
 use compiler.core.parser_decls.{file_generic_constraints, file_generic_constraint_modes}
 use compiler.frontend.core.parser_expr.{parse_expr}
 use compiler.core.tokens.{TOK_KW_GENERIC, TOK_KW_LIMITS, TOK_KW_CANDIDATES}
@@ -28,11 +30,14 @@ use compiler.core.types.{TYPE_VOID, TYPE_NAMED_BASE, named_type_find, named_type
 use compiler.core.types.{TYPE_ANY, named_generic_instance_register}
 use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, parser_parse_type_with_union}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_parse_type}
+use compiler.core.parser.{par_fixed_array_elem, par_fixed_array_size}
+use compiler.core.parser.{parser_legacy_let_decl_ahead, parser_consume_legacy_let_prefix}
 use compiler.core.parser.{par_prof_enabled}
 use compiler.frontend.core.lexer.{lex_token_start_get}
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.frontend.core.parser_stmts.{parse_block}
-use compiler.core.ast.{expr_int_lit}
+use compiler.frontend.core.parser_stmts.{fixed_array_no_init_default_expr}
+use compiler.core.ast.{expr_int_lit, expr_nil_lit}
 use compiler.core.ast.{decl_use_import, decl_set_lazy, decl_export_names}
 use compiler.core.ast.{decl_get_imports, decl_get_name, module_add_decl}
 use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding}
@@ -135,10 +140,26 @@ fn _export_record_reexport_surface(reexport_decl: i64) -> i64:
     (`export use M.*`) carries no item list, so retain its source module as
     `M.*`. HIR's glob-facade expansion already understands that encoding and
     can then register the complete defining surface, including dependencies of
-    enum payloads materialized through the facade."""
+    enum payloads materialized through the facade.
+
+    Braced items are QUALIFIED with the source module (`export use M.{a, b}`
+    records `M.a`, `M.b`): recorded bare, the export route carries no target
+    module (module_lowering only derives a route target from a dotted
+    source), so find_reexport_source has nowhere to chase and every named
+    import through such a facade fails with "module M has no exported item
+    a" — surfaced by the full-CLI tool build on dormant spec modules
+    (compiler.mir_opt.optimization_passes / optimizer_manifest, 2026-10-15).
+    The dotted spelling is the one `export module.Name` already uses."""
     val reexported_items = decl_get_imports(reexport_decl)
     if reexported_items.len() > 0:
-        module_add_decl(decl_export_names(reexported_items, 0))
+        val reexport_source_module = decl_get_name(reexport_decl)
+        if reexport_source_module != "":
+            var qualified_items: [text] = []
+            for reexported_item in reexported_items:
+                qualified_items.push(reexport_source_module + "." + reexported_item)
+            module_add_decl(decl_export_names(qualified_items, 0))
+        else:
+            module_add_decl(decl_export_names(reexported_items, 0))
     else:
         val reexported_module = decl_get_name(reexport_decl)
         if reexported_module != "":
@@ -299,7 +320,10 @@ fn parse_export_decl() -> i64:
         return _export_record_reexport_surface(decl_use_import(from_module, names, 0))
     decl_export_names(names, 0)
 
+use compiler.frontend.core.representation_declarations_v1.{representation_reject_pending_v1, representation_method_begin_v1, representation_declaration_header_v1, representation_declaration_end_v1}
+
 fn parse_val_decl() -> i64:
+    representation_reject_pending_v1()
     val decl_start = lex_token_start_get()
     val decl_line = par_line_get()
     val decl_col = par_col_get()
@@ -352,6 +376,7 @@ fn parse_val_decl() -> i64:
     decl_val_binding(name, type_tag, init, decl_span)
 
 fn parse_lazy_val_decl() -> i64:
+    representation_reject_pending_v1()
     val decl_start = lex_token_start_get()
     val decl_line = par_line_get()
     val decl_col = par_col_get()
@@ -378,15 +403,27 @@ fn parse_lazy_val_decl() -> i64:
     decl_lazy_val_binding(name, type_tag, init, decl_span)
 
 fn parse_var_decl() -> i64:
+    representation_reject_pending_v1()
     val decl_start = lex_token_start_get()
     val decl_line = par_line_get()
     val decl_col = par_col_get()
+    # Legacy `let [mut]` prefix at module level (seed parity, same as
+    # parse_var_decl_stmt): `let mut g_gpu_accel_supported: bool = false` in
+    # src/os/drivers/gpu/gpu_accel.spl. `let` lexes as a plain identifier,
+    # so the declaration reading is gated on parser_legacy_let_decl_ahead().
+    var legacy_let = false
+    if par_kind_get() == TOK_IDENT and par_text_get() == "let" and parser_legacy_let_decl_ahead():
+        legacy_let = true
     parser_advance()
+    if legacy_let:
+        parser_consume_legacy_let_prefix()
     val name = par_text_get()
     parser_expect(6)
 
     var annotation_continuation = false
     var type_tag = 0
+    var fixed_array_elem = 0
+    var fixed_array_size = -1
     if par_kind_get() == 161:
         parser_advance()
         if par_kind_get() == 180:
@@ -394,6 +431,32 @@ fn parse_var_decl() -> i64:
             parser_expect(TOK_INDENT)
             annotation_continuation = true
         type_tag = parser_parse_type_with_union()
+        fixed_array_elem = par_fixed_array_elem
+        fixed_array_size = par_fixed_array_size
+
+    # Fixed-size array without initializer: `var g: [T; N]` at module level
+    # (46+ sites in src/os/sosix, e.g. share.spl's `var sosix_dataset_active:
+    # [bool; 64]`). The seed accepts this and lowers it to a zero-filled
+    # global (hir/lower/module_lowering/module_pass.rs turns an
+    # initializer-less `var name: [T; N]` into `vec![0; n]`); mirror that by
+    # synthesizing `= [zero; N]` from the par_fixed_array_* side-channel
+    # captured above. Only trigger on an actual declaration-end token so a
+    # genuinely malformed `=`-less declaration followed by garbage still
+    # falls through to the ordinary parser_expect(100) error below. Named
+    # bindings use the existing local nil-until-assignment meaning, preserving
+    # their annotation for downstream resolution. Other categories require `=`.
+    if type_tag != 0 and not annotation_continuation:
+        val at_decl_end = par_kind_get() == TOK_NEWLINE or par_kind_get() == TOK_SEMICOLON or par_kind_get() == TOK_DEDENT or par_kind_get() == TOK_EOF
+        if at_decl_end:
+            if type_tag >= TYPE_NAMED_BASE:
+                # Eligibility precedes allocation: nil may be expression 0.
+                val named_init = expr_nil_lit(0)
+                val noinit_span = flat_span_new(decl_start, lex_token_start_get(), decl_line, decl_col)
+                return decl_var_binding(name, type_tag, named_init, noinit_span)
+            val arr_init = fixed_array_no_init_default_expr(type_tag, fixed_array_elem, fixed_array_size)
+            if arr_init != 0:
+                val noinit_span = flat_span_new(decl_start, lex_token_start_get(), decl_line, decl_col)
+                return decl_var_binding(name, type_tag, arr_init, noinit_span)
 
     parser_expect(100)
     val init = parse_expr()
@@ -409,6 +472,7 @@ fn parse_class_body_method(struct_name: text, is_static: bool, is_me: bool) -> i
     parse_class_body_method_typed(struct_name, is_static, is_me, -1)
 
 fn parse_class_body_method_typed(struct_name: text, is_static: bool, is_me: bool, self_type_override: i64) -> i64:
+    val representation_owner = representation_method_begin_v1()
     var _pp = parse_prof_now()
     # Advance past leading keyword (static fn / fn / me)
     if is_static:
@@ -501,6 +565,7 @@ fn parse_class_body_method_typed(struct_name: text, is_static: bool, is_me: bool
         ret_type = parser_parse_type()
 
     # Signature-only methods (trait declarations) have no `:` body.
+    representation_declaration_header_v1(representation_owner)
     _pp = parse_prof_mark("method:signature", _pp)
     var body: [i64] = []
     if par_kind_get() == 161:
@@ -586,6 +651,7 @@ fn parse_class_body_method_typed(struct_name: text, is_static: bool, is_me: bool
     val mid = decl_fn(mangled_name, param_names, param_types, ret_type, body, static_flag, type_params, 0)
     decl_set_param_defaults(mid, param_defaults)
     decl_set_param_muts(mid, param_muts)
+    representation_declaration_end_v1(representation_owner, mid, method_name)
     _pp = parse_prof_mark("method:declreg", _pp)
     return mid
 
@@ -793,6 +859,18 @@ fn parse_impl_decl() -> i64:
             val mm_id = parse_class_body_method_typed(target_name, false, true, target_type)
             if mm_id >= 0:
                 method_ids.push(mm_id)
+        elif par_kind_get() == 171:
+            # Member-position `@unsafe(reason: ..., capabilities: [...])` and
+            # friends before an impl method. The class-body loop has the same
+            # arm (fn_struct_decls.spl); without it the `@` fell through to
+            # "skip unknown tokens", the named argument colon then died as
+            # 'unexpected token in expression', and impls such as
+            # src/os/services/netstack/_NetstackService/ipc_handlers.spl
+            # could not parse. Impl methods go through the same
+            # parse_class_body_method_typed, so the PENDING_UNSAFE_* metadata
+            # records exactly as it does for class bodies.
+            if parser_parse_member_attribute():
+                continue
         else:
             # Skip unknown tokens in impl body gracefully
             parser_advance()

@@ -1,0 +1,90 @@
+# Incremental byte-snapshot check for a protected signed-build caller.
+# This verifies only the exact bytes fed by that caller. Artifact retrieval,
+# immutable handoff of those bytes to consumers, live signature verification,
+# gate authentication, and the GitHub workflow remain separate obligations.
+# In particular, a verified digest does not make a mutable path safe to reopen.
+use std.common.crypto.sha256.{
+    Sha256StreamV1, sha256_stream_v1_new, sha256_stream_v1_update,
+    sha256_stream_v1_finish_hex
+}
+
+val SIGNED_BUILD_ARTIFACT_MAX_BYTES_V2: i64 = 2305843009213693951
+val SIGNED_BUILD_ARTIFACT_MAX_CHUNK_BYTES_V2: i64 = 65536
+
+struct SignedBuildArtifactDecisionV2:
+    decision: text
+    reason: text
+    digest: text
+    length: i64
+
+class SignedBuildArtifactStreamV2:
+    var sha: Sha256StreamV1
+    max_bytes: i64
+    var received_length: i64
+    var finished: bool
+    var failure: text
+
+fn signed_build_artifact_stream_new_v2(max_bytes: i64) -> Result<SignedBuildArtifactStreamV2, text>:
+    """Create a bounded SHA-256 accumulator; the caller owns byte retrieval."""
+    if max_bytes <= 0 or max_bytes > SIGNED_BUILD_ARTIFACT_MAX_BYTES_V2:
+        return Err("invalid-artifact-limit")
+    Ok(SignedBuildArtifactStreamV2(sha: sha256_stream_v1_new(),
+        max_bytes: max_bytes, received_length: 0,
+        finished: false, failure: ""))
+
+fn signed_build_artifact_stream_update_v2(
+    mut stream: SignedBuildArtifactStreamV2, chunk: [u8]
+) -> Result<(), text>:
+    """Feed exact caller-owned bytes in chunks of at most 64 KiB."""
+    if stream.finished: return Err("artifact-stream-finished")
+    if stream.failure != "": return Err(stream.failure)
+    if chunk.len() == 0:
+        stream.failure = "empty-artifact-chunk"
+        return Err(stream.failure)
+    if chunk.len() > SIGNED_BUILD_ARTIFACT_MAX_CHUNK_BYTES_V2:
+        stream.failure = "artifact-chunk-too-large"
+        return Err(stream.failure)
+    if stream.received_length < 0 or stream.received_length > stream.max_bytes or
+            chunk.len() > stream.max_bytes - stream.received_length:
+        stream.failure = "artifact-size-limit-exceeded"
+        return Err(stream.failure)
+    if not sha256_stream_v1_update(stream.sha, chunk):
+        stream.failure = "artifact-hash-rejected"
+        return Err(stream.failure)
+    stream.received_length = stream.received_length + chunk.len()
+    Ok(())
+
+fn signed_build_artifact_stream_finish_v2(
+    mut stream: SignedBuildArtifactStreamV2,
+    expected_length: i64, expected_digest: text
+) -> SignedBuildArtifactDecisionV2:
+    """Compare the computed digest and byte count with protected expectations."""
+    if stream.finished:
+        return SignedBuildArtifactDecisionV2("FULL_BUILD",
+            "artifact-stream-finished", "", stream.received_length)
+    stream.finished = true
+    if stream.failure != "":
+        return SignedBuildArtifactDecisionV2("FULL_BUILD",
+            stream.failure, "", stream.received_length)
+    if expected_length <= 0 or expected_length > stream.max_bytes or
+            expected_digest == "":
+        return SignedBuildArtifactDecisionV2("FULL_BUILD",
+            "invalid-artifact-expectation", "", stream.received_length)
+    if stream.received_length != expected_length:
+        return SignedBuildArtifactDecisionV2("FULL_BUILD",
+            "artifact-size-mismatch", "", stream.received_length)
+    val finished = sha256_stream_v1_finish_hex(stream.sha)
+    if finished == nil:
+        return SignedBuildArtifactDecisionV2("FULL_BUILD",
+            "artifact-hash-rejected", "", stream.received_length)
+    val digest = finished.unwrap()
+    if digest != expected_digest:
+        return SignedBuildArtifactDecisionV2("FULL_BUILD",
+            "artifact-digest-mismatch", digest, stream.received_length)
+    SignedBuildArtifactDecisionV2("VERIFIED", "", digest,
+        stream.received_length)
+
+export SIGNED_BUILD_ARTIFACT_MAX_BYTES_V2, SIGNED_BUILD_ARTIFACT_MAX_CHUNK_BYTES_V2
+export SignedBuildArtifactStreamV2, SignedBuildArtifactDecisionV2
+export signed_build_artifact_stream_new_v2, signed_build_artifact_stream_update_v2
+export signed_build_artifact_stream_finish_v2

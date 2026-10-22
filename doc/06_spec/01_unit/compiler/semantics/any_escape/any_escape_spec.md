@@ -1,5 +1,8 @@
 # Critical-profile `Any` escape analysis
 
+2026-10-21 manual correction: revised converter scenario AUTHORED / UNRUN.
+This manual was updated directly; current qualified docgen execution is UNRUN.
+
 > `AnyEscapeChecker` enforces plan §8.1: in the `critical` profile the erased top
 
 | Tests | Active | Skipped | Pending |
@@ -40,8 +43,9 @@ checker reads `HirTypeKind.Any` off resolved `HirType` values.
 ## Primary Workflow
 
 `E-MC-ANY-001` fires where an `Any` originates outside a granted region.
-`E-MC-ANY-002` fires where an erased value escapes one. Neither fires on code
-that has no `Any`, nor on the sanctioned §8.6 checked-conversion boundary.
+`E-MC-ANY-002` fires where an erased value escapes one. Concrete code remains
+clean. A familiar converter name and concrete result grant no authority. A
+canonical checked-conversion declaration/contract producer remains open.
 
 ## Key Concepts
 
@@ -57,9 +61,9 @@ that has no `Any`, nor on the sanctioned §8.6 checked-conversion boundary.
 
 ## Evidence and Provenance
 
-Fixtures are executable inputs, not prose. The negative cases (`clean`,
-`checked_downcast_ok`) are load-bearing: without them a checker that flagged
-everything would pass the positive cases.
+The concrete `clean` fixture prevents blanket diagnostics. The historical
+`checked_downcast_ok` fixture requires a finding because its local converter
+returns 0 without checking the input.
 
 ## Recovery and Troubleshooting
 
@@ -69,9 +73,9 @@ an `unsafe` region annotated `@unsafe(capabilities: [type_erasure])`.
 
 ## Compatibility and Limitations
 
-The `type_erasure` GRANT is supplied through `AnyEscapeProfile` because HIR does
-not yet carry unsafe capabilities — see
-doc/08_tracking/bug/unsafe_capabilities_not_carried_into_hir_2026-08-21.md.
+Declaration grants are supplied through `AnyEscapeProfile`; lexical block grants
+are carried on `HirBlock.unsafe_caps`. Canonical checked-converter authorization
+is still open. Current qualified execution of the revision is UNRUN.
 
 ## Scenarios
 
@@ -158,27 +162,26 @@ expect(found.len()).to_equal(0)
 
 </details>
 
-#### is silent when a checked conversion's concrete result leaves the region
+#### rejects a local checked_downcast lookalike that does not check its input
 
-- is silent when a checked conversion's concrete result leaves the region
-- lower a fixture whose region converts before the value leaves
-- neither the origin nor the call is reported
-   - Expected: found.len() equals `0`
+- Lower the local converter whose body returns a constant.
+- Report one `E-MC-ANY-002/escape_call_arg` despite the concrete result.
+- Preserve the granted-region control: no `outside_unsafe` origin diagnostic.
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source is folded for reproduction; current qualified execution UNRUN.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-COMPILER
-step("is silent when a checked conversion's concrete result leaves the region")
-step("lower a fixture whose region converts before the value leaves")
+step("lower the local converter whose body returns a constant")
 val found = check_fixture("checked_downcast_ok", ["checked_downcast", "decode"])
-step("neither the origin nor the call is reported")
-expect(found.len()).to_equal(0)
+step("report the erased argument despite the concrete result")
+expect(count_of(found, "E-MC-ANY-002/escape_call_arg")).to_equal(1)
+expect(count_of(found, "E-MC-ANY-001/outside_unsafe")).to_equal(0)
 ```
 
 </details>

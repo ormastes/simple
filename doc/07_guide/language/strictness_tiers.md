@@ -44,7 +44,7 @@ primitive_api = "deny"   # explicit per-lint override still wins over the tier
 simple lint src/foo.spl --profile=reliable   # CLI override
 ```
 
-```simple
+```simple:skip
 @lint_profile(reliable)   # file-header attribute (top of file, before defs)
 
 # NOTE: distinct from @profile(critical), the R9 must-use annotation.

@@ -14,7 +14,7 @@ This provides concise syntax for unpacking data structures.
 
 ## Syntax
 
-```simple
+```simple:skip
 # Tuple destructuring
 val (x, y) = get_point()
 val (first, second, ...rest) = items

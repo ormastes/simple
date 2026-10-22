@@ -618,6 +618,26 @@ fn resolve_from_stdlib_fallbacks(
 /// through a nested import was already tagged by that deeper flatten pass
 /// (nested loads run before this outer strip), so we must not overwrite it.
 fn tag_node_function_owners(node: &mut Node, owner: &str) {
+    // Empty declarations still need identity: methods cannot carry their owner.
+    let declaration = match &mut *node {
+        Node::Struct(definition) => Some((&mut definition.attributes, definition.span)),
+        // Classes and enums need it too: a methodless declaration has no
+        // other carrier, and HIR lowering resolves same-named struct/class
+        // layouts per owner, including enum payload types
+        // (`hir/lower/module_lowering/flatten_struct_owner.rs`).
+        Node::Class(definition) => Some((&mut definition.attributes, definition.span)),
+        Node::Enum(definition) => Some((&mut definition.attributes, definition.span)),
+        Node::Impl(definition) => Some((&mut definition.attributes, definition.span)),
+        _ => None,
+    };
+    if let Some((attributes, span)) = declaration {
+        if !attributes.iter().any(|a| a.name.starts_with(FLATTEN_MODULE_OWNER_ATTR_PREFIX)) {
+            attributes.push(simple_parser::ast::Attribute {
+                span, name: format!("{FLATTEN_MODULE_OWNER_ATTR_PREFIX}{owner}"),
+                value: None, args: None, named_args: None,
+            });
+        }
+    }
     let methods = match node {
         Node::Function(function) => {
             tag_function_module_owner(function, owner);

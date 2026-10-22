@@ -1,0 +1,64 @@
+# Completed loop trip counts are sent to the shared process capture owner only
+# after the callback completes successfully. This module does not serialize or
+# write .sprof data.
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{AdaptiveTextSet}
+use std.nogc_sync_mut.sffi.collection_capture.{collection_capture_note_loop, collection_capture_note_size}
+
+enum AdaptiveSetLoopStep:
+    Continue
+    Break
+
+struct AdaptiveSetLoopObservation:
+    site_id: text
+    target_profile_id: text
+    trips: i64
+
+fn adaptive_set_for_each_observed(
+    source: AdaptiveTextSet,
+    body: fn(text) -> Result<AdaptiveSetLoopStep, text>
+) -> Result<AdaptiveSetLoopObservation, text>:
+    """Visit a complete sorted snapshot and report completed body entries.
+
+    Each callback entry counts once, including the entry that returns Break.
+    Err returns no completed observation; callback side effects are not rolled
+    back. Empty input completes with a measured trip count of zero. Identity is
+    copied from the source. Capture failure is reported by the capture owner's
+    finish operation and does not change this operation's result.
+    """
+    val site_id = source.site_id
+    val target_profile_id = source.target_profile_id
+    if site_id == "" or target_profile_id == "":
+        return Err("observed loop requires source site and target identities")
+    val snapshot = source.snapshot_values()
+    if source.size < 0 or snapshot.len() != source.size:
+        return Err("observed loop source snapshot is incomplete")
+    # Every representation promises a sorted, unique snapshot. Cardinality
+    # alone must not admit duplicated or malformed backing storage.
+    var index = 1
+    while index < snapshot.len():
+        if snapshot[index - 1] >= snapshot[index]:
+            return Err("observed loop source snapshot is not a sorted set")
+        index = index + 1
+    # Capture may have begun after construction; establish this snapshot's
+    # measured cardinality instead of accepting a newly materialized site's
+    # default zero as the collection size.
+    collection_capture_note_size(site_id, target_profile_id, snapshot.len())
+    var trips: i64 = 0
+    for key in snapshot:
+        if trips == 9223372036854775807:
+            return Err("observed loop trip count overflow")
+        trips = trips + 1
+        match body(key):
+            case Ok(AdaptiveSetLoopStep.Continue): pass
+            case Ok(AdaptiveSetLoopStep.Break): break
+            case Err(reason): return Err(reason)
+    # snapshot_values records the site before this event; the loop metric must
+    # not create a site by itself, including for an empty source.
+    collection_capture_note_loop(site_id, target_profile_id, trips)
+    Ok(AdaptiveSetLoopObservation(
+        site_id: site_id,
+        target_profile_id: target_profile_id,
+        trips: trips
+    ))
+
+export AdaptiveSetLoopStep, AdaptiveSetLoopObservation, adaptive_set_for_each_observed

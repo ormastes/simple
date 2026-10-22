@@ -19,6 +19,9 @@ struct ReverseReferenceSourceAliasV1:
 
 # Only additions made by the current module are reachable from this root.
 # Phase containers are updated after the module allocation scope has ended.
+# Every mutation through `_reverse_reference_module_batch_v1.unwrap()` (and the
+# index) is stored back with `Some(...)`: the seed interpreter yields a copy once
+# the driver pipeline is loaded. Natively it is redundant (one carrier per store).
 class ReverseReferenceModuleBatchV1:
     token: i64
     generation: i64
@@ -79,10 +82,14 @@ fn reverse_reference_module_seal_v1(token: i64) -> bool:
             not _reverse_reference_owner_active_v1 or batch.sealed or not batch.valid:
         return false
     batch.sealed = true
+    # Store the mutated batch back: where `unwrap()` yields a copy (the seed
+    # interpreter), the seal would otherwise be lost and publish would refuse.
+    _reverse_reference_module_batch_v1 = Some(batch)
     # The global Option carrier itself was created in the module scope too.
     val owned = transient_promote(_reverse_reference_module_batch_v1)
     if not owned:
         batch.valid = false
+        _reverse_reference_module_batch_v1 = Some(batch)
     _reverse_reference_module_index_v1 = nil
     owned
 
@@ -131,6 +138,7 @@ fn reverse_reference_module_accepts_registration_v1() -> bool:
     val batch = _reverse_reference_module_batch_v1.unwrap()
     if batch.sealed:
         batch.valid = false
+        _reverse_reference_module_batch_v1 = Some(batch)
         return false
     batch.valid
 
@@ -155,6 +163,8 @@ fn reverse_reference_owner_register_source_alias_v1(identity: text, source: text
         pending_sources.push(source)
         index.aliases[identity] = pending_sources
         batch.aliases.push(ReverseReferenceSourceAliasV1(identity, source))
+        _reverse_reference_module_index_v1 = Some(index)
+        _reverse_reference_module_batch_v1 = Some(batch)
         return
     var sources: [text] = if _reverse_reference_source_aliases_v1.contains_key(identity):
         _reverse_reference_source_aliases_v1[identity]
@@ -208,6 +218,7 @@ fn reverse_reference_owner_mark_known_v1(family: text):
         if not _reverse_reference_known_families_v1.contains(family) and
                 not batch.known_families.contains(family):
             batch.known_families.push(family)
+            _reverse_reference_module_batch_v1 = Some(batch)
         return
     if not _reverse_reference_known_families_v1.contains(family):
         _reverse_reference_known_families_v1 =
@@ -225,6 +236,7 @@ fn reverse_reference_owner_mark_incomplete_v1(family: text):
         val batch = _reverse_reference_module_batch_v1.unwrap()
         if not batch.incomplete_families.contains(family):
             batch.incomplete_families.push(family)
+            _reverse_reference_module_batch_v1 = Some(batch)
         return
     if not _reverse_reference_incomplete_families_v1.contains(family):
         _reverse_reference_incomplete_families_v1.push(family)
@@ -265,6 +277,7 @@ fn reverse_reference_owner_register_v1(family: text, subject: text,
                     existing.evidence_digest == digest:
                 return
         batch.facts.push(fact)
+        _reverse_reference_module_batch_v1 = Some(batch)
         return
     _reverse_reference_owner_facts_v1 = _reverse_reference_owner_facts_v1.push(fact)
 

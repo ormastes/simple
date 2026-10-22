@@ -1,0 +1,212 @@
+# @manual: primary
+# @req REQ-NOINIT-NAMED-NIL-PARITY
+# Focused named-module syntax parity under the existing nil-until-assignment
+# contract. Aggregate/callable array acceptance remains in the retained red spec.
+# Runtime status: UNRUN; queue through the root Phase3 qualified-engine owner.
+
+use std.spec
+use std.spec.step
+use compiler.core.parser.{parse_module_silent_checked}
+use compiler.core.ast.{module_decl_count_get, module_decl_at, decl_get_name, decl_get_ret_type, decl_get_body}
+use compiler.core.ast_expr.{expr_get_tag, EXPR_NIL_LIT}
+use compiler.core.types.{TYPE_NAMED_BASE, named_type_name}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.{HirConst}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.provider_globals.{mir_global_storage_name}
+
+struct NoinitNamedParityState:
+    value: i64
+
+var noinit_named_parity_state: NoinitNamedParityState
+var explicit_nil_named_parity_state: NoinitNamedParityState = nil
+
+fn noinit_named_parity_assign(value: i64):
+    noinit_named_parity_state = NoinitNamedParityState(value: value)
+
+fn noinit_named_parity_read() -> i64:
+    noinit_named_parity_state.value
+
+fn explicit_nil_named_parity_assign(value: i64):
+    explicit_nil_named_parity_state = NoinitNamedParityState(value: value)
+
+fn explicit_nil_named_parity_read() -> i64:
+    explicit_nil_named_parity_state.value
+
+fn named_parity_find_decl(name: text) -> i64:
+    var i = 0
+    while i < module_decl_count_get():
+        val decl = module_decl_at(i)
+        if decl_get_name(decl) == name:
+            return decl
+        i = i + 1
+    -1
+
+fn named_parity_source() -> text:
+    "struct ExactNamedParity:\n    value: i64\nvar implicit_slot: ExactNamedParity\nvar explicit_slot: ExactNamedParity = nil\n"
+
+fn named_parity_expect_ast(source: text, expected_name: text):
+    expect(parse_module_silent_checked(source, "named_nil_equivalence.spl")).to_equal(false)
+    val implicit_decl = named_parity_find_decl("implicit_slot")
+    val explicit_decl = named_parity_find_decl("explicit_slot")
+    expect(implicit_decl).to_be_greater_than(-1)
+    expect(explicit_decl).to_be_greater_than(-1)
+    if implicit_decl >= 0 and explicit_decl >= 0:
+        val implicit_type = decl_get_ret_type(implicit_decl)
+        expect(implicit_type).to_be_greater_than(TYPE_NAMED_BASE - 1)
+        expect(decl_get_ret_type(explicit_decl)).to_equal(implicit_type)
+        expect(named_type_name(implicit_type - TYPE_NAMED_BASE)).to_equal(expected_name)
+        val implicit_body = decl_get_body(implicit_decl)
+        val explicit_body = decl_get_body(explicit_decl)
+        expect(implicit_body.len()).to_equal(1)
+        expect(explicit_body.len()).to_equal(1)
+        if implicit_body.len() == 1 and explicit_body.len() == 1:
+            expect(expr_get_tag(implicit_body[0])).to_equal(EXPR_NIL_LIT)
+            expect(expr_get_tag(explicit_body[0])).to_equal(EXPR_NIL_LIT)
+
+describe "bare named module globals preserve explicit nil semantics":
+    it "begins nil and retains assignments across helper calls like explicit nil":
+        step("Observe the existing nil default before assigning either named slot")
+        expect(noinit_named_parity_state == nil).to_equal(true)
+        expect(explicit_nil_named_parity_state == nil).to_equal(true)
+        step("Assign distinct values and read persistent provider storage")
+        noinit_named_parity_assign(17)
+        explicit_nil_named_parity_assign(29)
+        expect(noinit_named_parity_read()).to_equal(17)
+        expect(explicit_nil_named_parity_read()).to_equal(29)
+        step("Replace each slot and verify subsequent reads observe the replacement")
+        noinit_named_parity_assign(43)
+        explicit_nil_named_parity_assign(61)
+        expect(noinit_named_parity_read()).to_equal(43)
+        expect(explicit_nil_named_parity_read()).to_equal(61)
+
+    it "keeps the exact named annotation and nil initializer in the production AST":
+        step("Parse the bare and explicit nil declarations in the same module")
+        named_parity_expect_ast(named_parity_source(), "ExactNamedParity")
+
+    it "retains forward unknown and any annotations exactly like explicit nil":
+        step("Leave named resolution to the existing downstream type owner")
+        named_parity_expect_ast("var implicit_slot: ForwardNamedParity\nvar explicit_slot: ForwardNamedParity = nil\nstruct ForwardNamedParity:\n    value: i64\n", "ForwardNamedParity")
+        named_parity_expect_ast("var implicit_slot: UnknownNamedParity\nvar explicit_slot: UnknownNamedParity = nil\n", "UnknownNamedParity")
+        named_parity_expect_ast("var implicit_slot: any\nvar explicit_slot: any = nil\n", "Any")
+
+    it "preserves downstream resolution and error parity for forward unknown and any names":
+        step("Lower both spellings through the existing full frontend and HIR provider")
+        val templates = ["var slot: ForwardHirNamedParityINIT\nstruct ForwardHirNamedParity:\n    value: i64\nfn assign_and_read() -> i64:\n    slot = ForwardHirNamedParity(value: 7)\n    slot.value\n", "var slot: UnknownHirNamedParityINIT\nfn read_slot() -> UnknownHirNamedParity:\n    slot\n", "var slot: anyINIT\nfn read_slot() -> any:\n    slot\n"]
+        for template in templates:
+            val implicit_source = template.replace("INIT", "")
+            val explicit_source = template.replace("INIT", " = nil")
+            val implicit_parsed = parse_full_frontend(implicit_source, "named_nil_hir_parity.spl", "named_nil_hir_parity", Logger(level: 0))
+            var implicit_lowering = HirLowering.with_filename("named_nil_hir_parity.spl")
+            val implicit_hir = implicit_lowering.lower_module(implicit_parsed)
+            val implicit_constant_count = implicit_hir.constants.len()
+            var implicit_errors: [text] = []
+            for error in implicit_lowering.errors:
+                implicit_errors.push(error.message)
+            val explicit_parsed = parse_full_frontend(explicit_source, "named_nil_hir_parity.spl", "named_nil_hir_parity", Logger(level: 0))
+            var explicit_lowering = HirLowering.with_filename("named_nil_hir_parity.spl")
+            val explicit_hir = explicit_lowering.lower_module(explicit_parsed)
+            var explicit_errors: [text] = []
+            for error in explicit_lowering.errors:
+                explicit_errors.push(error.message)
+            expect(implicit_errors).to_equal(explicit_errors)
+            expect(implicit_constant_count).to_equal(explicit_hir.constants.len())
+
+    it "admits a bare named declaration at EOF and a semicolon boundary":
+        step("Parse the two actual declaration-end token forms")
+        val prefix = "struct BoundaryNamedParity:\n    value: i64\n"
+        expect(parse_module_silent_checked(prefix + "var eof_slot: BoundaryNamedParity", "named_nil_eof.spl")).to_equal(false)
+        expect(parse_module_silent_checked(prefix + "var semi_slot: BoundaryNamedParity;\n", "named_nil_semicolon.spl")).to_equal(false)
+
+    it "accepts a nil initializer allocated in expression arena slot zero":
+        step("Keep allocation index zero distinct from unsupported type admission")
+        expect(parse_module_silent_checked("var implicit_slot: FirstExprNamedParity\n", "named_nil_first_expr.spl")).to_equal(false)
+        val declaration = named_parity_find_decl("implicit_slot")
+        expect(declaration).to_be_greater_than(-1)
+        if declaration >= 0:
+            val body = decl_get_body(declaration)
+            expect(body.len()).to_equal(1)
+            if body.len() == 1:
+                expect(body[0]).to_equal(0)
+                expect(expr_get_tag(body[0])).to_equal(EXPR_NIL_LIT)
+
+    it "retains one owner-qualified global and matching initializer assign and read operands":
+        step("Lower both source spellings through the actual frontend HIR and MIR providers")
+        for initializer in ["", " = nil"]:
+            val source = "struct MirNamedParity:\n    value: i64\nvar slot: MirNamedParity{initializer}\nfn assign():\n    slot = MirNamedParity(value: 37)\nfn read() -> i64:\n    slot.value\n"
+            val parsed = parse_full_frontend(source, "named_nil_mir_parity.spl", "named_nil_mir_parity", Logger(level: 0))
+            var hir_lowering = HirLowering.with_filename("named_nil_mir_parity.spl")
+            val hir = hir_lowering.lower_module(parsed)
+            expect(hir_lowering.errors.len()).to_equal(0)
+            var slot_symbol = -1
+            for raw_constant in hir.constants.values():
+                val constant: HirConst = raw_constant
+                if constant.name == "slot":
+                    slot_symbol = constant.symbol.id
+            expect(slot_symbol).to_be_greater_than(-1)
+            var lowering = MirLowering.new(hir.symbols)
+            val mir = lowering.lower_module(hir)
+            expect(lowering.errors.len()).to_equal(0)
+            val expected_storage_name = mir_global_storage_name(hir.name, "slot")
+            var slot_statics = 0
+            for static_ in mir.statics.values():
+                if static_.symbol.id == slot_symbol:
+                    slot_statics = slot_statics + 1
+                    expect(static_.name).to_equal(expected_storage_name)
+                    expect(static_.is_mutable).to_equal(true)
+            expect(slot_statics).to_equal(1)
+            expect(lowering.global_statics_by_id.contains(slot_symbol)).to_equal(true)
+            if lowering.global_statics_by_id.contains(slot_symbol):
+                expect(lowering.global_statics_by_id[slot_symbol].name).to_equal(expected_storage_name)
+            var initializer_stores = 0
+            var assignment_stores = 0
+            var reader_loads = 0
+            for function in mir.functions.values():
+                var nil_locals: [i64] = []
+                for block in function.blocks:
+                    for instruction in block.instructions:
+                        match instruction.kind:
+                            case MirInstKind.Const(destination, MirConstValue.Int(3), _):
+                                nil_locals.push(destination.id)
+                            case MirInstKind.StoreGlobal(target, value):
+                                if target.id == slot_symbol:
+                                    if function.name == "assign":
+                                        assignment_stores = assignment_stores + 1
+                                    elif function.name.starts_with("__module_init_") and function.name.ends_with("_dynamic"):
+                                        initializer_stores = initializer_stores + 1
+                                        match value.kind:
+                                            case MirOperandKind.Copy(local):
+                                                expect(nil_locals.contains(local.id)).to_equal(true)
+                                            case _: fail("nil initializer must store the actual lowered nil operand")
+                            case MirInstKind.LoadGlobal(_, target):
+                                if function.name == "read" and target.id == slot_symbol:
+                                    reader_loads = reader_loads + 1
+                            case _: ()
+            expect(initializer_stores).to_equal(1)
+            expect(assignment_stores).to_equal(1)
+            expect(reader_loads).to_equal(1)
+
+    it "retains the missing-assignment error when a named annotation has trailing garbage":
+        step("Reject a malformed named declaration rather than silently defaulting")
+        val source = "struct MalformedNamedParity:\n    value: i64\nvar bad_slot: MalformedNamedParity stray\n"
+        expect(parse_module_silent_checked(source, "named_nil_garbage.spl")).to_equal(true)
+
+    it "keeps named and callable fixed arrays outside this named-scalar repair":
+        step("Retain errors for unresolved typed array storage contracts")
+        val prefix = "struct ArrayNamedParity:\n    value: i64\n"
+        expect(parse_module_silent_checked(prefix + "var entries: [ArrayNamedParity; 256]\n", "named_nil_struct_array_hold.spl")).to_equal(true)
+        expect(parse_module_silent_checked(prefix + "var handlers: [fn(ArrayNamedParity); 256]\n", "named_nil_callable_array_hold.spl")).to_equal(true)
+
+    it "preserves scalar fixed-array default admission":
+        step("Parse the existing bool fixed-array default")
+        expect(parse_module_silent_checked("var bits: [bool; 256]\n", "named_nil_scalar_array_control.spl")).to_equal(false)
+
+    it "keeps an explicit record constructor as an ordinary initializer":
+        step("Parse the existing materialized-record spelling")
+        val source = "struct ExplicitNamedParity:\n    value: i64\nvar slot: ExplicitNamedParity = ExplicitNamedParity(value: 5)\n"
+        expect(parse_module_silent_checked(source, "named_nil_explicit_record_control.spl")).to_equal(false)

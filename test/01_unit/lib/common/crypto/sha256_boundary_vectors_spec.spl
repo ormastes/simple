@@ -1,0 +1,155 @@
+"""SHA-256 FIPS 180-4 boundary vectors across every entry point.
+
+Messages are bytes `i % 251` (i = 0..n-1) at the padding boundaries
+0/1/3/55/56/63/64/65/111/112/119/120/127/128/129/200; expected digests
+from CPython hashlib (OpenSSL). Every public path must agree: the i64 byte
+API, the u8 hex APIs (accelerated, pure, zeroizing), the scalar path and the
+streaming owner under every chunk split. Also pins the stream's
+reject-after-finish and length-overflow guards.
+"""
+# @req REQ-SSPEC-LIB
+
+use std.spec.*
+use std.common.crypto.sha256.{
+    sha256_bytes, sha256_text, sha256_u8_hex, sha256_u8_fast_hex,
+    sha256_u8_hex_zeroizing, sha256_bytes_scalar, sha256_stream_v1_new,
+    sha256_runtime_fallback_used
+}
+use std.common.crypto.types.{bytes_to_hex}
+
+fn pattern_u8(n: i64) -> [u8]:
+    var out: [u8] = [0u8; n]
+    var i = 0
+    while i < n:
+        out[i] = (i % 251).to_u8()
+        i = i + 1
+    out
+
+fn pattern_i64(n: i64) -> [i64]:
+    var out: [i64] = [0; n]
+    var i = 0
+    while i < n:
+        out[i] = i % 251
+        i = i + 1
+    out
+
+fn stream_split(data: [u8], chunk: i64) -> text:
+    var s = sha256_stream_v1_new()
+    var off = 0
+    while off < data.len():
+        val remaining = data.len() - off
+        val n = if remaining < chunk: remaining else: chunk
+        var part: [u8] = [0u8; n]
+        var i = 0
+        while i < n:
+            part[i] = data[off + i]
+            i = i + 1
+        expect(s.update(part)).to_be(true)
+        off = off + n
+    s.finish_hex().unwrap()
+
+fn stream_bytewise(data: [u8]) -> text:
+    var s = sha256_stream_v1_new()
+    for b in data:
+        expect(s.update_byte(b)).to_be(true)
+    s.finish_hex().unwrap()
+
+val LENGTHS: [i64] = [0, 1, 3, 55, 56, 63, 64, 65, 111, 112, 119, 120, 127, 128, 129, 200]
+val DIGESTS: [text] = [
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+    "ae4b3280e56e2faf83f414a6e3dabe9d5fbe18976544c05fed121accb85b53fc",
+    "463eb28e72f82e0a96c0a4cc53690c571281131f672aa229e0d45ae59b598b59",
+    "da2ae4d6b36748f2a318f23e7ab1dfdf45acdc9d049bd80e59de82a60895f562",
+    "29af2686fd53374a36b0846694cc342177e428d1647515f078784d69cdb9e488",
+    "fdeab9acf3710362bd2658cdc9a29e8f9c757fcf9811603a8c447cd1d9151108",
+    "4bfd2c8b6f1eec7a2afeb48b934ee4b2694182027e6d0fc075074f2fabb31781",
+    "60780e9451bdc43cf4530ffc95cbb0c4eb24dae2c39f55f334d679e076c08065",
+    "09373f127d34e61dbbaa8bc4499c87074f2ddb10e1b465f506d7d70a15011979",
+    "da18797ed7c3a777f0847f429724a2d8cd5138e6ed2895c3fa1a6d39d18f7ec6",
+    "f52b23db1fbb6ded89ef42a23ce0c8922c45f25c50b568a93bf1c075420bbb7c",
+    "92ca0fa6651ee2f97b884b7246a562fa71250fedefe5ebf270d31c546bfea976",
+    "471fb943aa23c511f6f72f8d1652d9c880cfa392ad80503120547703e56a2be5",
+    "5099c6a56203f9687f7d33f4bfdf576d31dc91f6b695ecea38b2770c87631135",
+    "1901da1c9f699b48f6b2636e65cbf73abf99d0441ef67f5c540a42f7051dec6f"
+]
+
+describe "SHA-256 boundary vectors":
+    it "matches every boundary length through the byte and hex APIs":
+        var k = 0
+        while k < LENGTHS.len():
+            val n = LENGTHS[k]
+            val want = DIGESTS[k]
+            expect(bytes_to_hex(sha256_bytes(pattern_i64(n)))).to_equal(want)
+            expect(sha256_u8_hex(pattern_u8(n))).to_equal(want)
+            expect(sha256_u8_fast_hex(pattern_u8(n))).to_equal(want)
+            # Zeroizing fails closed (nil) where the volatile wipe cannot be
+            # verified -- the interpreter cannot address boxed arrays
+            # (rt_array_data_ptr == 0); when it answers it must be right.
+            val z = sha256_u8_hex_zeroizing(pattern_u8(n))
+            if z.is_some():
+                expect(z.unwrap()).to_equal(want)
+            expect(bytes_to_hex(sha256_bytes_scalar(pattern_i64(n)))).to_equal(want)
+            k = k + 1
+
+    it "matches the FIPS 180-4 text vectors":
+        expect(sha256_text("")).to_equal("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        expect(sha256_text("abc")).to_equal("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        expect(sha256_text("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")).to_equal("248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1")
+        expect(sha256_runtime_fallback_used()).to_be(false)
+
+    it "streams identically for every chunk split of small inputs":
+        for n in [0, 1, 55, 56, 63, 64, 65, 129]:
+            val data = pattern_u8(n)
+            val want = sha256_u8_hex(data)
+            for chunk in [1, 2, 3, 7, 63, 64, 65, 200]:
+                expect(stream_split(data, chunk)).to_equal(want)
+            expect(stream_bytewise(data)).to_equal(want)
+
+    it "mixes byte and block updates":
+        val data = pattern_u8(200)
+        var s = sha256_stream_v1_new()
+        var i = 0
+        while i < 10:
+            expect(s.update_byte(data[i])).to_be(true)
+            i = i + 1
+        var rest: [u8] = [0u8; 190]
+        var j = 0
+        while j < 190:
+            rest[j] = data[10 + j]
+            j = j + 1
+        expect(s.update(rest)).to_be(true)
+        expect(s.finish_hex().unwrap()).to_equal(sha256_u8_hex(data))
+
+describe "SHA-256 stream guards":
+    it "rejects updates and a second finish after finishing":
+        var s = sha256_stream_v1_new()
+        expect(s.update(pattern_u8(3))).to_be(true)
+        expect(s.finish_hex().unwrap()).to_equal(sha256_u8_hex(pattern_u8(3)))
+        expect(s.update(pattern_u8(1))).to_be(false)
+        expect(s.update_byte(1u8)).to_be(false)
+        expect(s.finish_hex().is_some()).to_be(false)
+
+    it "rejects input that would overflow the 2^64-bit message length":
+        var s = sha256_stream_v1_new()
+        s.total_bytes = 0x1fffffffffffffffu64
+        expect(s.update(pattern_u8(1))).to_be(false)
+        expect(s.update_byte(1u8)).to_be(false)
+        s.total_bytes = 0x1ffffffffffffffeu64
+        expect(s.update(pattern_u8(2))).to_be(false)
+        s.total_bytes = 0x2000000000000000u64
+        expect(s.update(pattern_u8(0))).to_be(false)
+        expect(s.finish_hex().is_some()).to_be(false)
+
+    it "zeroizes and then refuses reuse until reset":
+        var s = sha256_stream_v1_new()
+        expect(s.update(pattern_u8(70))).to_be(true)
+        # true only when the volatile wipe was verified (native); the
+        # logical state is cleared and reuse refused either way.
+        val _verified = s.zeroize()
+        expect(s.state).to_equal([0; 8])
+        expect(s.block_len).to_equal(0)
+        expect(s.update(pattern_u8(1))).to_be(false)
+        s.reset()
+        expect(s.update(pattern_u8(3))).to_be(true)
+        expect(s.finish_hex().unwrap()).to_equal(sha256_u8_hex(pattern_u8(3)))

@@ -1,0 +1,93 @@
+# Explicit function-field calls must preserve dynamic dispatch and return ABI.
+struct CallbackResult:
+    status: i64
+    stdout: text
+    stderr: text
+
+struct CallbackPort:
+    available_fn: fn() -> bool
+    owner_fn: fn(i64) -> i64
+    execute_fn: fn(i64) -> CallbackResult
+    join_fn: fn(i64) -> CallbackArenaJoin
+    effect_fn: fn(i64) -> CallbackArenaJoin
+
+struct CallbackArenaJoin:
+    completed: bool
+    outcome_word: i64
+    trace_word: i64
+    error_word: i64
+
+var calls: i64 = 0
+
+fn available() -> bool:
+    calls = calls + 1
+    true
+
+fn unavailable() -> bool:
+    calls = calls + 1
+    false
+
+fn owner_a(value: i64) -> i64:
+    calls = calls + 1
+    value + 7
+
+fn owner_b(value: i64) -> i64:
+    calls = calls + 1
+    value + 19
+
+fn execute(value: i64) -> CallbackResult:
+    calls = calls + 1
+    CallbackResult(status: value, stdout: "output", stderr: "errors")
+
+# @workaround bug=runner_callback_field_owner_2026_10_11 reason=retain callback aggregate owner in the native regression fixture
+fn callback_result_owner(value: CallbackResult) -> CallbackResult:
+    value
+
+fn arena_join(value: i64) -> CallbackArenaJoin:
+    calls = calls + 1
+    CallbackArenaJoin(completed: true, outcome_word: value, trace_word: value + 3, error_word: value + 7)
+
+# @workaround bug=runner_callback_field_owner_2026_10_11 reason=retain callback aggregate owner in the native regression fixture
+fn callback_arena_join_owner(value: CallbackArenaJoin) -> CallbackArenaJoin:
+    value
+
+fn check_port(port: CallbackPort, expected_owner: i64, expected_available: bool) -> i64:
+    val actual_available = (port.available_fn)()
+    if actual_available != expected_available:
+        return 1
+    if (port.owner_fn)(3) != expected_owner:
+        return 2
+    val observed: CallbackResult = callback_result_owner((port.execute_fn)(expected_owner))
+    if observed.status != expected_owner:
+        return 3
+    var stdout = observed.stdout
+    var stderr = observed.stderr
+    stdout = stdout.substring(0, 3)
+    stderr = stderr.substring(0, 3)
+    if stdout != "out" or stderr != "err":
+        return 4
+    val joined = callback_arena_join_owner((port.join_fn)(expected_owner))
+    if not joined.completed or joined.outcome_word != expected_owner or joined.trace_word != expected_owner + 3 or joined.error_word != expected_owner + 7:
+        return 5
+    val effect = callback_arena_join_owner((port.effect_fn)(expected_owner + 50))
+    if not effect.completed or effect.outcome_word != expected_owner + 50 or effect.trace_word != expected_owner + 53 or effect.error_word != expected_owner + 57:
+        return 6
+    0
+
+fn main() -> i64:
+    val ports = [
+        CallbackPort(available_fn: available, owner_fn: owner_a, execute_fn: execute, join_fn: arena_join, effect_fn: arena_join),
+        CallbackPort(available_fn: unavailable, owner_fn: owner_b, execute_fn: execute, join_fn: arena_join, effect_fn: arena_join)
+    ]
+    var index = 0
+    for port in ports:
+        val expected_owner = if index == 0: 10 else: 22
+        val expected_available = index == 0
+        val result = check_port(port, expected_owner, expected_available)
+        if result != 0:
+            return 10 + result
+        index = index + 1
+    if calls != 10:
+        return 20
+    print "callback-field-explicit-call: pass"
+    0

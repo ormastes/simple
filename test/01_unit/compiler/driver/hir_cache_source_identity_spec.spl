@@ -1,6 +1,9 @@
 use std.spec.*
 use std.nogc_sync_mut.io_runtime.{file_read_nullable}
 use compiler.driver.driver_hir_cache.{hir_cache_key}
+use app.io.file_ops.{path_absolute}
+use app.io.time_ops.{time_now_unix_micros}
+use std.io_runtime.{dir_create_all, file_write}
 
 val LEFT = "test/fixtures/compiler/hir_cache_source_identity/left.spl"
 val RIGHT = "test/fixtures/compiler/hir_cache_source_identity/right.spl"
@@ -26,3 +29,19 @@ describe "HIR cache physical source identity":
 
     it "refuses absent source bytes":
         expect(hir_cache_key(LEFT + ".absent", "same-frozen-closure", false)).to_equal("")
+
+    it "shares one key across the sharded snapshot and direct checkout spellings":
+        # Sharded HIR workers read an absolute SCV snapshot path, the direct
+        # route a checkout path; the same repo-relative file is one owner.
+        val stamp = time_now_unix_micros().to_string()
+        val snapshot = path_absolute("build/native_probe/hir-key-snapshot-" + stamp).replace("\\", "/")
+        val checkout = "build/native_probe/hir-key-checkout-" + stamp
+        for root in [snapshot, checkout]:
+            expect(dir_create_all(root + "/src/lib/probe")).to_be(true)
+            expect(file_write(root + "/src/lib/probe/same.spl", "pub fn same() -> i64: 1\n")).to_be(true)
+            expect(file_write(root + "/src/lib/probe/other.spl", "pub fn same() -> i64: 1\n")).to_be(true)
+        val sharded = hir_cache_key(snapshot + "/src/lib/probe/same.spl", "same-frozen-closure", false)
+        val direct = hir_cache_key(checkout + "/src/lib/probe/same.spl", "same-frozen-closure", false)
+        expect(sharded.len()).to_equal(64)
+        expect(direct).to_equal(sharded)
+        expect(hir_cache_key(checkout + "/src/lib/probe/other.spl", "same-frozen-closure", false) == sharded).to_equal(false)

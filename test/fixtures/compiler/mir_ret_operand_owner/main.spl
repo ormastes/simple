@@ -1,0 +1,42 @@
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirConstValue, LocalId}
+use compiler.mir.mir_instruction_support.{MirOperand, MirOperandKind, MirTerminator, BlockId}
+use compiler.mir.mir_instruction_graph.{MirBlock, MirInst}
+
+fn block(terminator: MirTerminator) -> MirBlock:
+    val instructions: [MirInst] = []
+    MirBlock(id: BlockId(id: 5), label: nil, instructions: instructions, terminator: terminator)
+
+fn expect_projection(subject: MirBlock, kind: i64, local: i64, constant: i64, scalar: text) -> bool:
+    subject.bootstrap_ret_kind() == kind and subject.bootstrap_ret_local_id() == local and subject.bootstrap_ret_const_kind() == constant and subject.bootstrap_ret_const_scalar_text() == scalar
+
+fn check_constant(value: MirConstValue, type_: MirType, kind: i64, scalar: text) -> bool:
+    val operand = MirOperand(kind: MirOperandKind.Const(value, type_))
+    val subject = block(MirTerminator.Ret(Some(operand)))
+    expect_projection(subject, 3, -1, kind, scalar)
+
+fn main() -> i64:
+    if not expect_projection(block(MirTerminator.Unreachable), -1, -1, 0, "0"): return 11
+    if not expect_projection(block(MirTerminator.Ret(nil)), 0, -1, 0, "0"): return 12
+    val copied = MirOperand(kind: MirOperandKind.Copy(LocalId(id: 17)))
+    if not expect_projection(block(MirTerminator.Ret(Some(copied))), 1, 17, 0, "0"): return 13
+    val moved = MirOperand(kind: MirOperandKind.Move(LocalId(id: 23)))
+    if not expect_projection(block(MirTerminator.Ret(Some(moved))), 2, 23, 0, "0"): return 14
+    if not check_constant(MirConstValue.Int(-7), MirType.i64(), 1, "-7"): return 21
+    if not check_constant(MirConstValue.FloatLexeme("1.2500"), MirType.f64(), 2, "1.2500"): return 22
+    if not check_constant(MirConstValue.Float(1.5), MirType.f64(), 2, "1.5"): return 23
+    if not check_constant(MirConstValue.Bool(true), MirType.bool(), 3, "1"): return 24
+    if not check_constant(MirConstValue.Bool(false), MirType.bool(), 3, "0"): return 25
+    val text_type = MirType(kind: MirTypeKind.Opaque("str"))
+    if not check_constant(MirConstValue.Str("payload"), text_type, 4, "payload"): return 26
+    if not check_constant(MirConstValue.Zero, MirType.i64(), 5, "0"): return 27
+    val elements: [MirConstValue] = [MirConstValue.Int(7)]
+    val array_type = MirType(kind: MirTypeKind.Array(MirType.i64(), 1))
+    if not check_constant(MirConstValue.Array(elements), array_type, 6, "zeroinitializer"): return 28
+    val tuple_types: [MirType] = [MirType.i64()]
+    val tuple_type = MirType(kind: MirTypeKind.Tuple(tuple_types))
+    if not check_constant(MirConstValue.Tuple(elements), tuple_type, 7, "zeroinitializer"): return 29
+    val fields: Dict<text, MirConstValue> = {"field": MirConstValue.Int(7)}
+    val struct_type = MirType(kind: MirTypeKind.Opaque("fixture_record"))
+    if not check_constant(MirConstValue.Struct(fields), struct_type, 8, "zeroinitializer"): return 30
+    print "mir-ret-operand-owner: pass"
+    0

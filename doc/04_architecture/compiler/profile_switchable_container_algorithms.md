@@ -1,5 +1,26 @@
 # Profile-based switchable container algorithms
 
+## Completion contract supplement (2026-10-03)
+
+This supplement refines the remaining work; it does not mark earlier unexecuted source changes as verified. See [local source audit](../../01_research/local/profile_switchable_container_algorithms_2026-10-03.md) and [primary-source research](../../01_research/domain/profile_switchable_container_algorithms_2026-10-03.md).
+
+The logical IR already exists in `35.semantics/perf/collection_plan.spl`, with resolved unary extraction and analysis. The missing boundary is the proof-carrying connection from those logical nodes to the separate physical selector in `60.mir_opt/mir_opt/collection_plan_selection.spl`, followed by executable lowering. The two modules define distinct `CollectionPlanFacts` records; adapters must name the owning module explicitly and never confuse logical unknowns with physical permission.
+
+The compiler owns four ordered stages: typed recognition, semantic eligibility, physical cost selection, and lowering. Recognition uses resolved symbols and instantiated key/value types. Eligibility requires analysis evidence for effects, duplicates, order, aliases, escape, mutation epoch, target support and P0 correctness. Cost consumes prepared profiles only after eligibility. Lowering consumes the selected plan plus its proof receipt and preserves Original when any required fact is unknown. A runtime adaptive constructor rewrite is not completion of this compiler path.
+
+| Acceptance | Requirement | Concrete release evidence |
+|---|---|---|
+| PSC-AC-001 | REQ-PSC-001 | Compile/run two independently attributed instances; changing one attribute changes only its representation. Cover locals, fields, factories and nested owners; reject invalid attributes/types. |
+| PSC-AC-002 | REQ-PSC-002 | Differential operation traces across all representations and every directed transition: insert/replace/remove/miss/length/clear/snapshot, duplicate keys and nil payloads; unsupported equality/order fails clearly. |
+| PSC-AC-003 | REQ-PSC-003 | Captured site/target counters match a known workload exactly; each applicable P6 metric is emitted, unknown is distinct from zero, and site identity survives attribute-only changes. |
+| PSC-AC-004 | REQ-PSC-004 | Two-run capture/replay selects from the admitted distribution; corrupt/duplicate/stale workload/module/dependency/target input fails without damaging an existing file. Hot lookups perform no file access. |
+| PSC-AC-005 | REQ-PSC-005 | Typed tests and executed programs prove illegal/effectful/order-sensitive/mutated candidates retain Original; critical policy rejects unbounded choices; memory limits reject candidates independently of profile preference. |
+| PSC-AC-006 | REQ-PSC-006 | CLI explanation matches the executed site's selected representation and includes evidence, all rejected alternatives, guards, memory and fallback. |
+| PSC-AC-007 | REQ-PSC-007 | Supported generic set/map key/value matrix executes; resolved typed operations reach actual lowering; nested/hash/merge join fixtures preserve duplicate multiplicity and order after P0 proof. |
+| PSC-AC-008 | REQ-PSC-008 | Admitted interpreter/native and required differential engines execute the same acceptance corpus; geometric workloads check required operation bounds. Latency, allocation and maximum RSS measurement is best effort per the user's 2026-10-03 selection; no mandatory numeric resource thresholds apply. |
+
+Each row requires test result and artifact provenance tied to the tested source revision and runner. A partially covered row remains incomplete. Existing requirements and NFRs remain authoritative; this matrix is not a reduction of the selected scope.
+
 **Status:** implementation in progress. [Requirements](../../02_requirements/feature/profile_switchable_container_algorithms.md). [Research](../../01_research/compiler/collection_planner/collection_plan_ir_2026-07-31.md).
 
 ## Ownership and flow
@@ -42,3 +63,15 @@ Profile publication uses the shared atomic file-write facade after admission, in
 
 
 No compiler-selected index or join plan may land before the research P0 gates: array-map symbol resolution, closure ABI, predicate `any`/`all`, native `Dict` insertion, and cross-backend collection tests. Profile hints only rank candidates whose semantic and target guards have already passed. Critical/adversarial policy excludes an unbounded hash-only worst case and selects a bounded ordered or direct-index representation when its proof applies.
+
+### Explicit target admission supplement, 2026-10-03
+
+The first literal-membership consumer requires `MirTargetContext.collection_target_admitted`
+as well as a supported architecture/OS/ABI/backend tuple. Admission is default-false
+and derives from exact recognized target forms before legacy host fallback. Host
+requests preserve the backend context and its ABI/admission; a valid explicit
+request is admitted independently of a malformed ambient target. Policy and
+budget transport cannot promote target admission. Both Original and consumed
+receipts report `target.admitted`. Other target forms retain Original in this
+consumer rather than borrowing host proofs. Source repair and regression cases
+exist; executable verification remains pending a qualified runtime.

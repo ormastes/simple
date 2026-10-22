@@ -1,0 +1,58 @@
+# @tag:in-development
+# REQ-TRC-008/009/010: exact object framing, supporting AC-TRC-010/011/015.
+# Unit tests of the production decoder; live snapshot/provider tests remain separate.
+use std.spec
+use std.common.text_bytes.{text_to_utf8_bytes}
+use app.traceability.snapshot.git_batch.{decode_trace_git_batch}
+
+val blob_a = "1111111111111111111111111111111111111111"
+val blob_b = "2222222222222222222222222222222222222222"
+
+fn batch_error(wire: text, ids: [text], limit: i64) -> text:
+    match decode_trace_git_batch(text_to_utf8_bytes(wire), ids, limit, 4096):
+        case Ok(_): "unexpected success"
+        case Err(reason): reason
+
+describe "Git textual object batch framing":
+    it "preserves embedded newlines and the next object's identity":
+        val wire = "{blob_a} blob 4\na\nb\n\n{blob_b} blob 0\n\n"
+        match decode_trace_git_batch(text_to_utf8_bytes(wire), [blob_a, blob_b], 128, 4096):
+            case Ok(blobs):
+                expect(blobs.len()).to_equal(2)
+                expect(blobs[0].content).to_equal("a\nb\n")
+                expect(blobs[0].byte_size).to_equal(4)
+                expect(blobs[1].oid).to_equal(blob_b)
+                expect(blobs[1].content).to_equal("")
+            case Err(reason): fail(reason)
+
+    it "counts UTF-8 bytes without slicing a multibyte codepoint":
+        val wire = "{blob_a} blob 3\n한\n"
+        match decode_trace_git_batch(text_to_utf8_bytes(wire), [blob_a], 128, 4096):
+            case Ok(blobs):
+                expect(blobs[0].content).to_equal("한")
+                expect(blobs[0].byte_size).to_equal(3)
+            case Err(reason): fail(reason)
+
+    it "rejects reordered objects even when their framing is valid":
+        expect(batch_error("{blob_b} blob 0\n\n", [blob_a], 128)).to_contain("identity or type mismatch")
+
+    it "rejects missing, non-blob, and incomplete objects":
+        expect(batch_error("{blob_a} missing\n", [blob_a], 128)).to_contain("missing or malformed")
+        expect(batch_error("{blob_a} tree 0\n\n", [blob_a], 128)).to_contain("type mismatch")
+        expect(batch_error("{blob_a} blob 3\na\n", [blob_a], 128)).to_contain("truncated blob")
+
+    it "rejects malformed size and oversized numeric input before overflow":
+        expect(batch_error("{blob_a} blob -1\n\n", [blob_a], 128)).to_contain("invalid object size")
+        expect(batch_error("{blob_a} blob 999999999999999999999\n\n", [blob_a], 128)).to_contain("byte budget exhausted")
+
+    it "requires exact frame termination and complete stream consumption":
+        expect(batch_error("{blob_a} blob 1\naX", [blob_a], 128)).to_contain("frame terminator")
+        expect(batch_error("{blob_a} blob 0\n\nextra", [blob_a], 128)).to_contain("trailing batch output")
+
+    it "rejects malformed UTF-8 rather than changing source bytes":
+        var data = text_to_utf8_bytes("{blob_a} blob 1\n")
+        data.push(255 as u8)
+        data.push(10 as u8)
+        match decode_trace_git_batch(data, [blob_a], 128, 4096):
+            case Ok(_): fail("invalid UTF-8 was accepted")
+            case Err(reason): expect(reason.len()).to_be_greater_than(0)

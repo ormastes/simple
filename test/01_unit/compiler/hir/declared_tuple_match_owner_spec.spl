@@ -1,0 +1,57 @@
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering._Expressions.expression_components.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.function_lowering.*
+
+describe "Tuple match subjects retain each declared enum owner":
+    it "lowers heterogeneous and nested tuple matches despite colliding variants":
+        val source = "enum Numeric:\n    Int(i64)\n    Float(i64)\nenum Textual:\n    Float(text)\n    Int(text)\nfn pick(left: Numeric, right: Textual) -> i64:\n    match (left, right):\n        case (Int(n), Int(label)):\n            if label == \"right\": n else: -2\n        case (Float(n), Float(label)):\n            if label == \"fraction\": n else: -3\n        case _: -1\nfn nested(left: Numeric, right: Textual) -> i64:\n    match ((left, right), left):\n        case ((Int(a), Int(label)), Int(b)):\n            if label == \"nested\": a + b else: -2\n        case _: -1\n"
+        val parsed = parse_full_frontend(source, "tuple_owners", "tuple_owners", Logger(level: 0))
+        var hir = HirLowering.with_filename("tuple_owners")
+        val module_ = hir.lower_module(parsed)
+        expect(hir.errors.len()).to_equal(0)
+        var lowering = MirLowering.new(module_.symbols)
+        lowering.use_explicit_semantic_policy()
+        val mir = lowering.lower_module(module_)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(mir.functions.len()).to_be_greater_than(0)
+
+    it "does not invent a tuple type when any slot lacks a concrete declaration":
+        var hir = HirLowering.new()
+        val known = hir.symbols.define("known", SymbolKind.Variable,
+            Some(HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())),
+            Span.empty(), Visibility.Private, false, nil)
+        val unknown = hir.symbols.define("unknown", SymbolKind.Variable, nil,
+            Span.empty(), Visibility.Private, false, nil)
+        val left = HirExpr(kind: HirExprKind.Var(known), has_type_: false, type_: nil, span: Span.empty())
+        val right = HirExpr(kind: HirExprKind.Var(unknown), has_type_: false, type_: nil, span: Span.empty())
+        val tuple = HirExpr(kind: HirExprKind.TupleLit([left, right]), has_type_: false, type_: nil, span: Span.empty())
+        expect(hir.declared_match_subject_type(tuple)).to_be_nil()
+
+    it "preserves an existing tuple annotation without replacing its slot types":
+        var hir = HirLowering.new()
+        val declared = HirType(kind: HirTypeKind.Tuple([
+            HirType(kind: HirTypeKind.Bool, span: Span.empty()),
+            HirType(kind: HirTypeKind.Str, span: Span.empty())]), span: Span.empty())
+        val subject = HirExpr(kind: HirExprKind.TupleLit([]), has_type_: true, type_: declared, span: Span.empty())
+        if val actual = hir.declared_match_subject_type(subject):
+            match actual.kind:
+                case HirTypeKind.Tuple(slots):
+                    expect(slots.len()).to_equal(2)
+                    match slots[0].kind:
+                        case HirTypeKind.Bool: pass
+                        case _: assert(false)
+                    match slots[1].kind:
+                        case HirTypeKind.Str: pass
+                        case _: assert(false)
+                case _: assert(false)
+        else: assert(false)

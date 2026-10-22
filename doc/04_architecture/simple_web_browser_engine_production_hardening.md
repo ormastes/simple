@@ -659,7 +659,7 @@ enter through separate calls. Finally `_apply_css_animations` calls
 Retain the existing parser, selector matcher, and one cascade owner. Replace
 only the lossy handoffs with these records:
 
-```simple
+```simple:skip
 enum CssCascadeOrigin:
     UserAgent
     User

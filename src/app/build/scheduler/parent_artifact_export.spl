@@ -1,0 +1,496 @@
+# Export one accepted binary file from the parent CAS to a trusted local
+# build directory. The destination root is owned by the caller; this module
+# validates leaf names but does not authorize an arbitrary filesystem root.
+# A protected policy supplies executable installation mode; worker file mode
+# is not claimed by this API.
+use app.io.mod.{file_read_regular_no_follow_bounded,
+    file_read_regular_no_follow_bounded_bytes, file_write_bytes,
+    file_exists, file_is_regular_no_follow, file_fsync, directory_fsync,
+    file_rename, secure_temp_dir, dir_remove_all, is_dir, file_lock,
+    file_unlock}
+use app.build.scheduler.owner.{scheduler_owner_open_v1,
+    scheduler_owner_close_v1}
+use app.build.scheduler.ledger.{SchedulerLedgerV1, SchedulerAttemptV1,
+    scheduler_ledger_valid_v1}
+use app.build.scheduler.dependency_admission.{
+    validate_retained_dependency_manifest_v1}
+use app.build.scheduler.worker_output.{BUILD_OUTPUT_MANIFEST_MAX_BYTES_V1}
+use app.build.scheduler.parent_retention.{BUILD_PARENT_MAX_BINARY_OUTPUT_BYTES_V1}
+use compiler.common.build_contract.{AcceptedResult, BuildDependencyRef}
+use compiler.driver.cache.cas_store.{cas_blob_path}
+use compiler.driver.cache.binary_object_cas.{binary_object_magic_kind}
+use app.build.scheduler.retained_binary_cas.{retained_binary_cas_read_v1}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use app.build.scheduler.parent_artifact_export_policy.{
+    ParentArtifactExportPolicyRowV1, parent_export_target_supported_v1}
+use std.nogc_sync_mut.package_sffi.{set_permissions}
+use std.nogc_sync_mut.sffi.fs.{file_mode}
+use std.io_runtime.{platform_name}
+
+struct ParentArtifactExportPlanV1:
+    valid: bool
+    reason: text
+    output_digest: text
+    output_bytes: i64
+    accepted_attempt_id: text
+
+struct ParentArtifactExportV1:
+    published: bool
+    durable: bool
+    reason: text
+    output_digest: text
+    destination: text
+
+fn _export_plan_reject_v1(reason: text) -> ParentArtifactExportPlanV1:
+    ParentArtifactExportPlanV1(false, reason, "", 0, "")
+
+fn _export_reject_v1(reason: text) -> ParentArtifactExportV1:
+    ParentArtifactExportV1(false, false, reason, "", "")
+
+fn _export_root_v1(value: text) -> bool:
+    value.starts_with("/") and value.len() > 1 and value.len() <= 4096 and
+        not value.ends_with("/") and not value.contains("//") and
+        not value.contains("\\") and not value.contains("\n") and
+        not value.contains("\r") and not value.contains("\x00") and
+        not value.split("/").contains(".") and
+        not value.split("/").contains("..")
+
+fn _export_leaf_v1(value: text, maximum: i64) -> bool:
+    value != "" and value != "." and value != ".." and
+        value != ".simple-build-export.lock" and value.len() <= maximum and
+        not value.contains("/") and not value.contains("\\") and
+        not value.contains("|") and not value.contains("\n") and
+        not value.contains("\r") and not value.contains("\t") and
+        not value.contains("\x00")
+
+fn _export_object_leaf_v1(value: text, maximum: i64) -> bool:
+    _export_leaf_v1(value, maximum) and
+        (value.ends_with(".o") or value.ends_with(".obj"))
+
+fn _export_kind_leaf_v1(value: text, kind: text, maximum: i64) -> bool:
+    if kind == "object": return _export_object_leaf_v1(value, maximum)
+    if kind == "archive":
+        return _export_leaf_v1(value, maximum) and
+            (value.ends_with(".a") or value.ends_with(".lib"))
+    if kind == "executable": return _export_leaf_v1(value, maximum)
+    false
+
+fn _export_header_u16_v1(bytes: [u8], offset: i64, little: bool) -> i64:
+    val first = bytes[offset].to_i64()
+    val second = bytes[offset + 1].to_i64()
+    if little: first + second * 256 else: first * 256 + second
+
+fn _export_header_u32_v1(bytes: [u8], offset: i64, little: bool) -> i64:
+    val a = bytes[offset].to_i64()
+    val b = bytes[offset + 1].to_i64()
+    val c = bytes[offset + 2].to_i64()
+    val d = bytes[offset + 3].to_i64()
+    if little:
+        return a + b * 256 + c * 65536 + d * 16777216
+    a * 16777216 + b * 65536 + c * 256 + d
+
+fn _export_header_u64_bounded_v1(bytes: [u8], offset: i64,
+        little: bool) -> i64:
+    if little:
+        if _export_header_u32_v1(bytes, offset + 4, little) != 0:
+            return -1
+        return _export_header_u32_v1(bytes, offset, little)
+    if _export_header_u32_v1(bytes, offset, little) != 0:
+        return -1
+    _export_header_u32_v1(bytes, offset + 4, little)
+
+fn _export_linux_elf_v1(bytes: [u8], target: text) -> bool:
+    # Deliberately bounded ELF64 profile: all addresses/offsets fit u32.
+    # Metadata admission does not establish that untrusted code is safe to run.
+    var machine: i64 = 0
+    var interpreter = ""
+    if target == "x86_64-unknown-linux-gnu":
+        machine = 62
+        interpreter = "/lib64/ld-linux-x86-64.so.2"
+    elif target == "aarch64-unknown-linux-gnu":
+        machine = 183
+        interpreter = "/lib/ld-linux-aarch64.so.1"
+    else:
+        return false
+    if bytes.len() < 64: return false
+    if (bytes[4].to_i64() != 2 or bytes[5].to_i64() != 1 or
+        bytes[6].to_i64() != 1 or
+        (bytes[7].to_i64() != 0 and bytes[7].to_i64() != 3) or
+        bytes[8].to_i64() != 0 or
+        _export_header_u16_v1(bytes, 18, true) != machine or
+        _export_header_u32_v1(bytes, 20, true) != 1 or
+        _export_header_u32_v1(bytes, 48, true) != 0 or
+        _export_header_u16_v1(bytes, 52, true) != 64 or
+        _export_header_u16_v1(bytes, 54, true) != 56):
+        return false
+    var ident_index: i64 = 9
+    while ident_index < 16:
+        if bytes[ident_index].to_i64() != 0: return false
+        ident_index = ident_index + 1
+    val shoff = _export_header_u64_bounded_v1(bytes, 40, true)
+    val shsize = _export_header_u16_v1(bytes, 58, true)
+    val shcount = _export_header_u16_v1(bytes, 60, true)
+    val shstrings = _export_header_u16_v1(bytes, 62, true)
+    if shoff == 0:
+        if shcount != 0 or shstrings != 0: return false
+    else:
+        if (shoff < 64 or shoff > bytes.len() or shsize != 64 or
+            shcount <= 0 or shcount > 4096 or shstrings >= shcount or
+            shcount * 64 > bytes.len() - shoff):
+            return false
+        var section_index: i64 = 0
+        while section_index < shcount:
+            val section = shoff + section_index * 64
+            val section_type = _export_header_u32_v1(bytes, section + 4, true)
+            val offset = _export_header_u64_bounded_v1(bytes, section + 24, true)
+            val size = _export_header_u64_bounded_v1(bytes, section + 32, true)
+            if offset < 0 or size < 0: return false
+            if section_type != 8 and (offset > bytes.len() or size > bytes.len() - offset):
+                return false
+            section_index = section_index + 1
+    val kind = _export_header_u16_v1(bytes, 16, true)
+    if kind != 2 and kind != 3: return false
+    val entry_address = _export_header_u64_bounded_v1(bytes, 24, true)
+    val phoff = _export_header_u64_bounded_v1(bytes, 32, true)
+    val count = _export_header_u16_v1(bytes, 56, true)
+    if (entry_address <= 0 or phoff < 64 or phoff > bytes.len() or
+        count <= 0 or count > 1024 or count * 56 > bytes.len() - phoff):
+        return false
+    var entry_seen = false
+    var interpreter_seen = false
+    var dynamic_offset: i64 = -1
+    var dynamic_size: i64 = 0
+    var dynamic_address: i64 = 0
+    var prior_load_end: i64 = -1
+    var i: i64 = 0
+    while i < count:
+        val header = phoff + i * 56
+        val segment = _export_header_u32_v1(bytes, header, true)
+        val flags = _export_header_u32_v1(bytes, header + 4, true)
+        val offset = _export_header_u64_bounded_v1(bytes, header + 8, true)
+        val address = _export_header_u64_bounded_v1(bytes, header + 16, true)
+        val filesz = _export_header_u64_bounded_v1(bytes, header + 32, true)
+        val memsz = _export_header_u64_bounded_v1(bytes, header + 40, true)
+        val alignment = _export_header_u64_bounded_v1(bytes, header + 48, true)
+        if (offset < 0 or address < 0 or filesz < 0 or memsz < 0 or
+            alignment < 0 or offset > bytes.len() or
+            filesz > bytes.len() - offset):
+            return false
+        if segment == 1:
+            if (filesz > memsz or address < prior_load_end or
+                memsz > 4294967295 - address):
+                return false
+            prior_load_end = address + memsz
+            if alignment > 1:
+                var power = alignment
+                while power > 1:
+                    if power % 2 != 0: return false
+                    power = power / 2
+                if address % alignment != offset % alignment: return false
+            if (flags % 2 == 1 and entry_address >= address and
+                entry_address - address < filesz):
+                entry_seen = true
+        elif segment == 3:
+            if interpreter_seen or filesz != interpreter.len() + 1:
+                return false
+            var j: i64 = 0
+            val expected = interpreter.bytes()
+            while j < expected.len():
+                if bytes[offset + j] != expected[j]: return false
+                j = j + 1
+            if bytes[offset + filesz - 1].to_i64() != 0: return false
+            interpreter_seen = true
+        elif segment == 2:
+            if (dynamic_offset >= 0 or filesz < 16 or filesz % 16 != 0 or
+                filesz > 65536 or filesz > memsz):
+                return false
+            dynamic_offset = offset
+            dynamic_size = filesz
+            dynamic_address = address
+        i = i + 1
+    if not entry_seen: return false
+    var pie_seen = false
+    if dynamic_offset >= 0:
+        var mapped = false
+        i = 0
+        while i < count:
+            val header = phoff + i * 56
+            if _export_header_u32_v1(bytes, header, true) == 1:
+                val offset = _export_header_u64_bounded_v1(bytes, header + 8, true)
+                val address = _export_header_u64_bounded_v1(bytes, header + 16, true)
+                val filesz = _export_header_u64_bounded_v1(bytes, header + 32, true)
+                if (dynamic_offset >= offset and dynamic_offset - offset <= filesz and
+                    dynamic_size <= filesz - (dynamic_offset - offset) and
+                    dynamic_address == address + dynamic_offset - offset):
+                    mapped = true
+            i = i + 1
+        if not mapped: return false
+        var terminated = false
+        var flags_seen = false
+        i = 0
+        while i < dynamic_size:
+            val tag = _export_header_u64_bounded_v1(bytes, dynamic_offset + i, true)
+            val value = _export_header_u64_bounded_v1(bytes, dynamic_offset + i + 8, true)
+            if tag < 0 or value < 0: return false
+            if terminated:
+                if tag != 0 or value != 0: return false
+            elif tag == 0:
+                if value != 0: return false
+                terminated = true
+            elif tag == 14:
+                return false  # DT_SONAME belongs to a shared-library profile.
+            elif tag == 0x6FFFFFFB:
+                if flags_seen: return false
+                flags_seen = true
+                pie_seen = (value / 0x08000000) % 2 == 1
+            i = i + 16
+        if not terminated: return false
+    if kind == 3:
+        return interpreter_seen and dynamic_offset >= 0 and pie_seen
+    if interpreter_seen and dynamic_offset < 0: return false
+    not pie_seen
+
+fn parent_export_executable_image_v1(bytes: [u8], target: text) -> bool:
+    """Admit a target-bound ELF executable profile or Mach-O MH_EXECUTE."""
+    if not parent_export_target_supported_v1(target): return false
+    val magic = binary_object_magic_kind(bytes)
+    if magic == "elf": return _export_linux_elf_v1(bytes, target)
+    if magic == "macho":
+        if bytes.len() < 32: return false
+        var cpu: i64 = 0
+        if target == "x86_64-apple-darwin": cpu = 0x01000007
+        elif target == "aarch64-apple-darwin": cpu = 0x0100000C
+        else: return false
+        if _export_header_u32_v1(bytes, 4, true) != cpu: return false
+        val first = bytes[0].to_i64()
+        val little = first == 0xCF or first == 0xCE
+        val is64 = first == 0xCF or bytes[3].to_i64() == 0xCF
+        if not little or not is64: return false
+        val header_size: i64 = if is64: 32 else: 28
+        if bytes.len() < header_size or
+           _export_header_u32_v1(bytes, 12, little) != 2:
+            return false
+        val count = _export_header_u32_v1(bytes, 16, little)
+        val command_bytes = _export_header_u32_v1(bytes, 20, little)
+        if count <= 0 or count > 1024 or command_bytes < 8 or
+           command_bytes > bytes.len() - header_size:
+            return false
+        var offset = header_size
+        var segment_seen = false
+        var i: i64 = 0
+        while i < count:
+            if offset + 8 > header_size + command_bytes: return false
+            val command = _export_header_u32_v1(bytes, offset, little)
+            val size = _export_header_u32_v1(bytes, offset + 4, little)
+            if size < 8 or size > header_size + command_bytes - offset:
+                return false
+            if command == 1:
+                if size < 56: return false
+                val file_offset = _export_header_u32_v1(bytes,
+                    offset + 32, little)
+                val file_size = _export_header_u32_v1(bytes,
+                    offset + 36, little)
+                if file_offset > bytes.len() or
+                   file_size > bytes.len() - file_offset:
+                    return false
+                if file_size > 0: segment_seen = true
+            if command == 0x19:
+                if size < 72: return false
+                val file_offset = _export_header_u64_bounded_v1(bytes,
+                    offset + 40, little)
+                val file_size = _export_header_u64_bounded_v1(bytes,
+                    offset + 48, little)
+                if file_offset < 0 or file_size < 0 or
+                   file_offset > bytes.len() or
+                   file_size > bytes.len() - file_offset:
+                    return false
+                if file_size > 0: segment_seen = true
+            offset = offset + size
+            i = i + 1
+        return segment_seen and offset == header_size + command_bytes
+    false
+
+fn _export_accepted_v1(ledger: SchedulerLedgerV1,
+        action_digest: text) -> AcceptedResult?:
+    for accepted in ledger.accepted:
+        if accepted.action_digest == action_digest:
+            return accepted
+    nil
+
+fn _export_attempt_v1(ledger: SchedulerLedgerV1,
+        accepted: AcceptedResult) -> SchedulerAttemptV1?:
+    for attempt in ledger.attempts:
+        if attempt.action_digest == accepted.action_digest and
+           attempt.attempt_id == accepted.accepted_attempt_id and
+           not attempt.active:
+            return attempt
+    nil
+
+fn _plan_parent_artifact_export_v1(ledger: SchedulerLedgerV1,
+        manifest_wire: text, action_digest: text,
+        output_name: text, kind: text) -> ParentArtifactExportPlanV1:
+    """Structural selection only; a caller must load the authoritative owner."""
+    if not scheduler_ledger_valid_v1(ledger) or
+       not _export_kind_leaf_v1(output_name, kind, 1024):
+        return _export_plan_reject_v1("selection-invalid")
+    val accepted = _export_accepted_v1(ledger, action_digest)
+    if accepted == nil:
+        return _export_plan_reject_v1("action-not-accepted")
+    val attempt = _export_attempt_v1(ledger, accepted.unwrap())
+    if attempt == nil:
+        return _export_plan_reject_v1("accepted-attempt-missing")
+    if manifest_wire.len() == 0 or
+       manifest_wire.len() > BUILD_OUTPUT_MANIFEST_MAX_BYTES_V1:
+        return _export_plan_reject_v1("manifest-unavailable")
+    var digest = ""
+    var size: i64 = 0
+    for line in manifest_wire.split("\n"):
+        val fields = line.split("|")
+        if fields.len() == 3 and fields[0] == output_name:
+            if digest != "": return _export_plan_reject_v1("output-duplicate")
+            digest = fields[2]
+            size = fields[1].to_i64() ?? -1
+    if digest == "":
+        return _export_plan_reject_v1("output-not-declared")
+    val claim = BuildDependencyRef(action_digest, output_name, digest)
+    val checked = validate_retained_dependency_manifest_v1(manifest_wire,
+        accepted.unwrap(), attempt.unwrap(), claim)
+    if not checked.valid:
+        return _export_plan_reject_v1(checked.reason)
+    if size <= 0 or size > BUILD_PARENT_MAX_BINARY_OUTPUT_BYTES_V1:
+        return _export_plan_reject_v1("output-size-unsupported")
+    ParentArtifactExportPlanV1(true, "", digest, size,
+        accepted.unwrap().accepted_attempt_id)
+
+fn plan_parent_artifact_export_v1(ledger: SchedulerLedgerV1,
+        manifest_wire: text, action_digest: text,
+        output_name: text) -> ParentArtifactExportPlanV1:
+    _plan_parent_artifact_export_v1(ledger, manifest_wire, action_digest,
+        output_name, "object")
+
+fn _write_parent_artifact_export_v1(bytes: [u8], digest: text,
+        destination_root: text, destination_leaf: text,
+        mode: i64) -> ParentArtifactExportV1:
+    val destination = destination_root + "/" + destination_leaf
+    if file_exists(destination) and not file_is_regular_no_follow(destination):
+        return _export_reject_v1("destination-not-regular")
+    val stage = match secure_temp_dir(destination_root, "simple-build-export-"):
+        case Ok(path): path
+        case Err(_): return _export_reject_v1("stage-unavailable")
+    val staged = stage + "/artifact"
+    if not file_write_bytes(staged, bytes):
+        dir_remove_all(stage)
+        return _export_reject_v1("stage-write-failed")
+    val read = file_read_regular_no_follow_bounded_bytes(staged,
+        BUILD_PARENT_MAX_BINARY_OUTPUT_BYTES_V1)
+    if read.is_err():
+        dir_remove_all(stage)
+        return _export_reject_v1("stage-verification-failed")
+    val staged_bytes = read.unwrap()
+    if staged_bytes.len() != bytes.len() or
+       sha256_u8_hex(staged_bytes) != digest:
+        dir_remove_all(stage)
+        return _export_reject_v1("stage-verification-failed")
+    if mode > 0 and (not set_permissions(staged, mode.to_i32()) or
+       file_mode(staged) != mode):
+        dir_remove_all(stage)
+        return _export_reject_v1("stage-mode-unavailable")
+    if not file_fsync(staged):
+        dir_remove_all(stage)
+        return _export_reject_v1("stage-sync-failed")
+    if not file_rename(staged, destination):
+        dir_remove_all(stage)
+        return _export_reject_v1("destination-rename-failed")
+    val durable = directory_fsync(destination_root)
+    val cleaned = dir_remove_all(stage)
+    if not durable:
+        return ParentArtifactExportV1(true, false,
+            "publication-durability-uncertain", digest, destination)
+    if not cleaned:
+        return ParentArtifactExportV1(true, true,
+            "stage-cleanup-pending", digest, destination)
+    ParentArtifactExportV1(true, true, "", digest, destination)
+
+fn _export_accepted_build_artifact_v1(owner_root: text, cas_root: text,
+        action_digest: text, output_name: text,
+        destination_root: text, destination_leaf: text,
+        kind: text, mode: i64, target: text) -> ParentArtifactExportV1:
+    """Export accepted bytes; mode 0 preserves legacy object behavior."""
+    if not _export_root_v1(owner_root) or not _export_root_v1(cas_root) or
+       not _export_root_v1(destination_root) or
+       not _export_kind_leaf_v1(output_name, kind, 1024) or
+       not _export_kind_leaf_v1(destination_leaf, kind, 255) or
+       not is_dir(destination_root):
+        return _export_reject_v1("path-invalid")
+    if mode != 0 and mode != 0o644 and mode != 0o755:
+        return _export_reject_v1("mode-invalid")
+    if mode > 0 and not ["linux", "macos", "freebsd"].contains(platform_name()):
+        return _export_reject_v1("mode-provider-unsupported")
+    val owner = scheduler_owner_open_v1(owner_root)
+    if owner.error != "" or owner.state.error != "":
+        return _export_reject_v1("owner-unavailable")
+    val ledger = owner.state.ledger
+    if not scheduler_owner_close_v1(owner):
+        return _export_reject_v1("owner-release-failed")
+    val accepted = _export_accepted_v1(ledger, action_digest)
+    if accepted == nil:
+        return _export_reject_v1("action-not-accepted")
+    val manifest_path = cas_blob_path(cas_root,
+        accepted.unwrap().output_manifest_digest)
+    if manifest_path == "": return _export_reject_v1("manifest-path-invalid")
+    val manifest = file_read_regular_no_follow_bounded(manifest_path,
+        BUILD_OUTPUT_MANIFEST_MAX_BYTES_V1)
+    if manifest.is_err(): return _export_reject_v1("manifest-unavailable")
+    val plan = _plan_parent_artifact_export_v1(ledger, manifest.unwrap(),
+        action_digest, output_name, kind)
+    if not plan.valid: return _export_reject_v1(plan.reason)
+    val bytes = retained_binary_cas_read_v1(cas_root, output_name,
+        plan.output_digest,
+        BUILD_PARENT_MAX_BINARY_OUTPUT_BYTES_V1)
+    if bytes == nil:
+        return _export_reject_v1("output-object-unavailable")
+    val verified_bytes = bytes.unwrap()
+    if verified_bytes.len() != plan.output_bytes:
+        return _export_reject_v1("output-object-unavailable")
+    if kind == "executable" and
+       not parent_export_executable_image_v1(verified_bytes, target):
+        return _export_reject_v1("executable-format-unsupported")
+    val lock = file_lock(destination_root + "/.simple-build-export.lock", 1)
+    if lock < 0: return _export_reject_v1("destination-lock-unavailable")
+    val result = _write_parent_artifact_export_v1(verified_bytes,
+        plan.output_digest, destination_root, destination_leaf, mode)
+    if not file_unlock(lock):
+        return ParentArtifactExportV1(result.published, result.durable,
+            "destination-lock-release-failed: " + result.reason,
+            result.output_digest, result.destination)
+    result
+
+fn export_accepted_build_object_v1(owner_root: text, cas_root: text,
+        action_digest: text, output_name: text,
+        destination_root: text, destination_leaf: text) -> ParentArtifactExportV1:
+    """Legacy V3 object export; no executable mode is claimed."""
+    _export_accepted_build_artifact_v1(owner_root, cas_root, action_digest,
+        output_name, destination_root, destination_leaf, "object", 0, "")
+
+fn export_accepted_build_policy_row_v1(owner_root: text, cas_root: text,
+        destination_root: text,
+        row: ParentArtifactExportPolicyRowV1) -> ParentArtifactExportV1:
+    """Install one protected policy row; never execute the resulting file."""
+    if (row.kind == "object" and row.mode != 0o644) or
+       (row.kind == "archive" and row.mode != 0o644) or
+       (row.kind == "executable" and row.mode != 0o755) or
+       (row.kind != "object" and row.kind != "archive" and
+        row.kind != "executable"):
+        return _export_reject_v1("policy-kind-or-mode-unsupported")
+    if (row.kind == "executable" and
+        not parent_export_target_supported_v1(row.target_triple)) or
+       (row.kind != "executable" and row.target_triple != ""):
+        return _export_reject_v1("policy-target-unsupported")
+    _export_accepted_build_artifact_v1(owner_root, cas_root,
+        row.action_digest, row.output_name, destination_root,
+        row.destination_leaf, row.kind, row.mode, row.target_triple)
+
+export ParentArtifactExportPlanV1, ParentArtifactExportV1
+export plan_parent_artifact_export_v1, export_accepted_build_object_v1
+export export_accepted_build_policy_row_v1
+export parent_export_executable_image_v1

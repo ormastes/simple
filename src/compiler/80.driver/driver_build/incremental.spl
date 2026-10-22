@@ -576,7 +576,15 @@ fn native_build_cache_scope_key(
         "compiler-bound-optimizer"
     else:
         "receipt:{optimizer_kernel_receipt_hash}"
-    "lane={lane};backend={backend_text};cpu={cpu_text};features={feature_text};opt={optimization};compiler={compiler_identity};provider={provider_identity};optimizer={optimizer_identity}"
+    val serial_scope = "lane={lane};backend={backend_text};cpu={cpu_text};features={feature_text};opt={optimization};compiler={compiler_identity};provider={provider_identity};optimizer={optimizer_identity}"
+    # An independent lowering owns its complete canonical-ID map. Keep these
+    # object witnesses apart from legacy serial allocation histories, and pin
+    # the complete frozen declarations and semantic context. Scheduling and
+    # queue coordinates never authorize object reuse.
+    if (sosix_env_get_nullable("SIMPLE_MIR_SELECTIVE") ?? "") == "1":
+        val context = sosix_env_get_nullable("SIMPLE_MIR_SELECTIVE_OBJECT_CONTEXT") ?? ""
+        return serial_scope + ";mir-selective-object-owner-v1=" + context
+    serial_scope
 
 fn incremental_mkdir_p(path: text) -> bool:
     dir_create_all(path)
@@ -710,6 +718,16 @@ fn incremental_reverse_reference_generation_identity_v1(
     val root_generation = sha256_text(generation_facts.join(""))
     (sha256_text("build-cache-state:{root_generation}"), root_generation)
 
+# Native hash failures may return a flat nil despite the extern's text type.
+# Check length before byte access: nil has runtime text length -1, not 0.
+pub fn incremental_fingerprint_digest_valid_v1(digest: text) -> bool:
+    if digest.len() != 64: return false
+    for index in 0..64:
+        val byte = digest.byte_at(index) as i64
+        if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102)):
+            return false
+    true
+
 struct FileFingerprint:
     """Content hash + metadata for a source file."""
     path: text
@@ -728,7 +746,7 @@ impl FileFingerprint:
         # a runtime admits those bytes as text. rt_hash_text is a decimal
         # machine-word hash and cannot authenticate a native capsule receipt.
         val hash = rt_file_hash_sha256(path)
-        if hash == "":
+        if not incremental_fingerprint_digest_valid_v1(hash):
             return nil
         val size = incremental_file_size(path)
         val mtime = 0
@@ -806,6 +824,8 @@ impl DependencyEntry:
                 if val fresh_fingerprint = fresh:
                     if cached.is_stale(fresh_fingerprint):
                         return true
+                else:
+                    return true
         false
 
 # ============================================================================
@@ -1011,7 +1031,9 @@ impl BuildCache:
                 if val entries_value_raw = entries_val:
                     val entries_value: SdnValue = entries_value_raw
                     val arr = entries_value.as_array()
-                    if val entries_array = arr:
+                    # @workaround bug=native_optional_array_pattern_binder_i64_2026_10_21 reason=preserve_declared_sdn_array_element_type_until_pattern_binder_lowering_is_rebuilt
+                    if val entries_array_raw = arr:
+                        val entries_array: [SdnValue] = entries_array_raw
                         for item_raw in entries_array:
                             val item: SdnValue = item_raw
                             val src = item.get("source")
@@ -1064,7 +1086,8 @@ impl BuildCache:
                             if val deps_value_raw = deps_val:
                                 val deps_value: SdnValue = deps_value_raw
                                 val deps_arr = deps_value.as_array()
-                                if val dep_items = deps_arr:
+                                if val dep_items_raw = deps_arr:
+                                    val dep_items: [SdnValue] = dep_items_raw
                                     for d_raw in dep_items:
                                         val d: SdnValue = d_raw
                                         val ds = d.as_str()
@@ -1077,7 +1100,8 @@ impl BuildCache:
                             if val outs_value_raw = outs_val:
                                 val outs_value: SdnValue = outs_value_raw
                                 val outs_arr = outs_value.as_array()
-                                if val out_items = outs_arr:
+                                if val out_items_raw = outs_arr:
+                                    val out_items: [SdnValue] = out_items_raw
                                     for o_raw in out_items:
                                         val o: SdnValue = o_raw
                                         val os = o.as_str()
@@ -1200,6 +1224,12 @@ impl BuildCache:
             if val fingerprint = fresh:
                 fresh_fingerprint = fingerprint
             else:
+                # An unavailable hash cannot certify an unchanged source.
+                if self.fingerprints.has(path):
+                    val kind = if incremental_file_exists(path): ChangeKind.Modified else: ChangeKind.Deleted
+                    changes = changes.add(path, kind)
+                else:
+                    changes = changes.add(path, ChangeKind.Added)
                 continue
             if not self.fingerprints.has(path):
                 changes = changes.add(path, ChangeKind.Added)

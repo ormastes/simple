@@ -1,0 +1,165 @@
+# Invocation-owned bindings; no global inference state or synthetic symbols.
+use compiler.hir.hir_types.{HirType, HirTypeKind, HirSymbol, Effect, EffectKind, SymbolTable, SymbolKind}
+use compiler.traits.trait_impl.{ImplBlock}
+
+class TraitImplBindingsV1:
+    names: Dict<text, i64>
+    declared: Dict<i64, bool>
+    values: Dict<i64, HirType>
+    symbols: SymbolTable?
+    exact: bool = false
+
+    me bind(id: i64, actual: HirType) -> bool:
+        if self.values.has(id):
+            val exact = TraitImplBindingsV1(names: {}, declared: self.declared, values: {}, symbols: self.symbols, exact: true)
+            return exact.match_type(self.values[id], actual)
+        self.values[id] = actual
+        true
+
+    me match_list(pattern: [HirType], actual: [HirType]) -> bool:
+        if (pattern == nil) != (actual == nil): return false
+        if pattern == nil: return true
+        if pattern.len() != actual.len(): return false
+        var index = 0
+        while index < pattern.len():
+            if not self.match_type(pattern[index], actual[index]): return false
+            index = index + 1
+        true
+
+    me match_effects(pattern: [Effect], actual: [Effect]) -> bool:
+        if (pattern == nil) != (actual == nil): return false
+        if pattern == nil: return true
+        if pattern.len() != actual.len(): return false
+        var index = 0
+        while index < pattern.len():
+            val left: Effect = pattern[index]
+            val right: Effect = actual[index]
+            if left == nil or right == nil: return false
+            match left.kind:
+                case EffectKind.Throws(payload):
+                    match right.kind:
+                        case EffectKind.Throws(concrete):
+                            if not self.match_type(payload, concrete): return false
+                        case _: return false
+                case EffectKind.Pure | EffectKind.IO | EffectKind.Async | EffectKind.Mutates | EffectKind.Allocates | EffectKind.Custom(_):
+                    if left.kind != right.kind: return false
+                case _: return false
+            index = index + 1
+        true
+
+    me match_type(pattern: HirType, actual: HirType) -> bool:
+        if pattern == nil or actual == nil: return false
+        # A concrete proof cannot be established by a wildcard/inference value.
+        match actual.kind:
+            case HirTypeKind.TypeParam(_, _) | HirTypeKind.Infer(_, _) | HirTypeKind.Any | HirTypeKind.Error | HirTypeKind.Projection(_, _): return false
+            case HirTypeKind.Named(symbol, _):
+                if self.declared.has(symbol.id): return false
+                if self.symbols == nil: return false
+                val row = self.symbols.unwrap().get_symbol_raw(symbol.id)
+                if row == nil: return false
+                val nominal = row.unwrap()
+                if nominal.id.id != symbol.id: return false
+                match nominal.kind:
+                    case SymbolKind.Struct | SymbolKind.Class | SymbolKind.Enum: ()
+                    case _: return false
+            case _: ()
+        match pattern.kind:
+            case HirTypeKind.TypeParam(name, _):
+                if not self.names.has(name): return false
+                return self.bind(self.names[name], actual)
+            case HirTypeKind.Named(owner, arguments):
+                if self.declared.has(owner.id):
+                    if arguments.len() != 0: return false
+                    return self.bind(owner.id, actual)
+                match actual.kind:
+                    case HirTypeKind.Named(other, concrete):
+                        return owner.id == other.id and self.match_list(arguments, concrete)
+                    case _: return false
+            case HirTypeKind.Tuple(items):
+                match actual.kind:
+                    case HirTypeKind.Tuple(concrete): return self.match_list(items, concrete)
+                    case _: return false
+            case HirTypeKind.Union(items):
+                match actual.kind:
+                    case HirTypeKind.Union(concrete): return self.match_list(items, concrete)
+                    case _: return false
+            case HirTypeKind.Array(element, size):
+                match actual.kind:
+                    case HirTypeKind.Array(concrete, actual_size):
+                        if self.exact and size != actual_size: return false
+                        if size != nil and actual_size != nil and size != actual_size: return false
+                        return self.match_type(element, concrete)
+                    case _: return false
+            case HirTypeKind.Function(params, result, effects):
+                match actual.kind:
+                    case HirTypeKind.Function(actual_params, actual_result, actual_effects):
+                        return self.match_list(params, actual_params) and self.match_type(result, actual_result) and self.match_effects(effects, actual_effects)
+                    case _: return false
+            case HirTypeKind.Slice(element):
+                match actual.kind:
+                    case HirTypeKind.Slice(concrete): return self.match_type(element, concrete)
+                    case _: return false
+            case HirTypeKind.Optional(element):
+                match actual.kind:
+                    case HirTypeKind.Optional(concrete): return self.match_type(element, concrete)
+                    case _: return false
+            case HirTypeKind.Isolated(element):
+                match actual.kind:
+                    case HirTypeKind.Isolated(concrete): return self.match_type(element, concrete)
+                    case _: return false
+            case HirTypeKind.Unique(element):
+                match actual.kind:
+                    case HirTypeKind.Unique(concrete): return self.match_type(element, concrete)
+                    case _: return false
+            case HirTypeKind.Shared(element):
+                match actual.kind:
+                    case HirTypeKind.Shared(concrete): return self.match_type(element, concrete)
+                    case _: return false
+            case HirTypeKind.Weak(element):
+                match actual.kind:
+                    case HirTypeKind.Weak(concrete): return self.match_type(element, concrete)
+                    case _: return false
+            case HirTypeKind.Ref(element, mutable):
+                match actual.kind:
+                    case HirTypeKind.Ref(concrete, actual_mutable): return mutable == actual_mutable and self.match_type(element, concrete)
+                    case _: return false
+            case HirTypeKind.Ptr(element, mutable):
+                match actual.kind:
+                    case HirTypeKind.Ptr(concrete, actual_mutable): return mutable == actual_mutable and self.match_type(element, concrete)
+                    case _: return false
+            case HirTypeKind.Dict(left, right):
+                match actual.kind:
+                    case HirTypeKind.Dict(actual_left, actual_right): return self.match_type(left, actual_left) and self.match_type(right, actual_right)
+                    case _: return false
+            case HirTypeKind.Result(left, right):
+                match actual.kind:
+                    case HirTypeKind.Result(actual_left, actual_right): return self.match_type(left, actual_left) and self.match_type(right, actual_right)
+                    case _: return false
+            case HirTypeKind.Tensor(element, dims, device):
+                match actual.kind:
+                    case HirTypeKind.Tensor(concrete, actual_dims, actual_device): return dims == actual_dims and device == actual_device and self.match_type(element, concrete)
+                    case _: return false
+            case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char | HirTypeKind.Str | HirTypeKind.Unit | HirTypeKind.Never | HirTypeKind.DynTrait(_) | HirTypeKind.Layer(_, _):
+                pattern.kind == actual.kind
+            case _: false
+
+# Bind only the selected impl's declared parameter rows. TypeParam spelling is
+# legacy name authority within this unique binder set; Named uses exact IDs.
+pub fn trait_impl_bindings_v1(impl_block: ImplBlock, actual: HirType, symbols: SymbolTable?) -> Dict<i64, HirType>?:
+    val state = TraitImplBindingsV1(names: {}, declared: {}, values: {}, symbols: symbols)
+    for parameter in impl_block.type_params:
+        if state.declared.has(parameter.id.id) or state.names.has(parameter.name): return nil
+        state.declared[parameter.id.id] = true
+        state.names[parameter.name] = parameter.id.id
+    for bound in impl_block.where_clause:
+        var owned = false
+        for parameter in impl_block.type_params:
+            if parameter.id.id == bound.type_param.id.id and parameter.name == bound.type_param.name and parameter.defining_module == bound.type_param.defining_module:
+                owned = true
+        if not owned: return nil
+    if not state.match_type(impl_block.for_type, actual): return nil
+    # Matching a whole binder must also reject nested unresolved components.
+    for key in state.values.keys():
+        val exact = TraitImplBindingsV1(names: {}, declared: state.declared, values: {}, symbols: symbols, exact: true)
+        if not exact.match_type(state.values[key], state.values[key]): return nil
+    Some(state.values)

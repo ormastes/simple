@@ -1,0 +1,117 @@
+"""Synthetic policy counterexamples, not evidence of native tree control."""
+use std.spec.*
+use app.build.scheduler.parallel_transport_supervisor_policy_v1.{
+    parallel_transport_supervisor_capabilities_v1, parallel_transport_frozen_accept_v1
+}
+use std.nogc_sync_mut.io.process_observation_v4.{ProcessObservationCapabilitiesV4}
+use std.common.process.observation_v4.{
+    ProcessObservationReceiptV4, ProcessObservationWireV4,
+    ProcessObservationStreamStateV4, ProcessObservationFailureReasonV4,
+    ProcessObservationStatusV4, ProcessObservationClockKindV4, POV4_VALID_TREE_CONTROL,
+    decode_process_observation_v4
+}
+
+fn supervisor_caps(bits: i64) -> ProcessObservationCapabilitiesV4:
+    ProcessObservationCapabilitiesV4(available: true, capability_bits: bits,
+        max_live_tickets: 2, max_capture_bytes: 4096,
+        max_caller_wait_ns: 1000000, runtime_error: 0)
+
+fn supervisor_receipt() -> ProcessObservationReceiptV4:
+    var binding: [u8] = []
+    for index in 0..32:
+        binding.push(index as u8)
+    val words: [i64] = [4, 2, 64, 2, 1, 2, 3, 4, 7, 255, 0, 0, 0, 3, 0, 42, 0, 0, 0,
+        10, 11, 12, 13, 14, 15, 20, 20, 30, 0, 0, 0, 0, 1, 1, 1, 1,
+        3, 4, 7, 0, 2, 100, 1, 0, 0, 1, 1, 1, 1, 2, 0, 2, 2, 2,
+        2, 0, 1, 1, 1, 1, 2, 1, 32, 0]
+    decode_process_observation_v4(ProcessObservationWireV4(words: words,
+        stdout: [111u8, 107u8], stderr: [33u8], binding: binding)).unwrap()
+
+describe "parent transport supervisor V1 policy":
+    it "rejects the current leader-only provider and unknown capability extensions":
+        expect(parallel_transport_supervisor_capabilities_v1(supervisor_caps(511), 4096, 2)).to_equal(false)
+        expect(parallel_transport_supervisor_capabilities_v1(supervisor_caps(2047), 4096, 2)).to_equal(false)
+        expect(parallel_transport_supervisor_capabilities_v1(supervisor_caps(1023), 4096, 2)).to_equal(false)
+        expect(parallel_transport_supervisor_capabilities_v1(supervisor_caps(255), 4096, 2)).to_equal(false)
+        expect(parallel_transport_supervisor_capabilities_v1(supervisor_caps(667), 4096, 2)).to_equal(true)
+        expect(parallel_transport_supervisor_capabilities_v1(supervisor_caps(127), 4096, 2)).to_equal(false)
+
+    it "bounds aggregate capture and concurrent tickets before spawn":
+        expect(parallel_transport_supervisor_capabilities_v1(supervisor_caps(667), 4097, 2)).to_equal(false)
+        expect(parallel_transport_supervisor_capabilities_v1(supervisor_caps(667), 4096, 3)).to_equal(false)
+        expect(parallel_transport_supervisor_capabilities_v1(supervisor_caps(667), 0, 2)).to_equal(false)
+        expect(parallel_transport_supervisor_capabilities_v1(supervisor_caps(667), 1, 0)).to_equal(false)
+        var failed = supervisor_caps(667)
+        failed.runtime_error = 5
+        expect(parallel_transport_supervisor_capabilities_v1(failed, 1, 1)).to_equal(false)
+        var unavailable = supervisor_caps(667)
+        unavailable.available = false
+        expect(parallel_transport_supervisor_capabilities_v1(unavailable, 1, 1)).to_equal(false)
+        var no_wait = supervisor_caps(667)
+        no_wait.max_caller_wait_ns = 0
+        expect(parallel_transport_supervisor_capabilities_v1(no_wait, 1, 1)).to_equal(false)
+
+    it "accepts exact synthetic tree completion only before the parent deadline":
+        expect(parallel_transport_frozen_accept_v1(supervisor_receipt(), 99, 100)).to_equal(true)
+        expect(parallel_transport_frozen_accept_v1(supervisor_receipt(), 100, 100)).to_equal(false)
+        expect(parallel_transport_frozen_accept_v1(supervisor_receipt(), 101, 100)).to_equal(false)
+        expect(parallel_transport_frozen_accept_v1(supervisor_receipt(), -1, 100)).to_equal(false)
+        expect(parallel_transport_frozen_accept_v1(supervisor_receipt(), 0, 0)).to_equal(false)
+
+    it "rejects leader reaping without exact descendant control and emptiness":
+        var no_control = supervisor_receipt()
+        no_control.packet.tree_control_available = false
+        expect(parallel_transport_frozen_accept_v1(no_control, 1, 100)).to_equal(false)
+        var no_validity = supervisor_receipt()
+        no_validity.packet.validity_bits = no_validity.packet.validity_bits & ~POV4_VALID_TREE_CONTROL
+        expect(parallel_transport_frozen_accept_v1(no_validity, 1, 100)).to_equal(false)
+        var not_empty = supervisor_receipt()
+        not_empty.packet.tree_empty = false
+        not_empty.packet.tree_empty_ns = -1
+        expect(parallel_transport_frozen_accept_v1(not_empty, 1, 100)).to_equal(false)
+        var unreaped = supervisor_receipt()
+        unreaped.packet.leader_reaped = false
+        expect(parallel_transport_frozen_accept_v1(unreaped, 1, 100)).to_equal(false)
+
+    it "rejects both pipes when EOF or exact capture is missing":
+        var open_stdout = supervisor_receipt()
+        open_stdout.packet.stdout.state = ProcessObservationStreamStateV4.Open
+        expect(parallel_transport_frozen_accept_v1(open_stdout, 1, 100)).to_equal(false)
+        var stderr_error = supervisor_receipt()
+        stderr_error.packet.stderr.state = ProcessObservationStreamStateV4.ReadError
+        stderr_error.packet.stderr.errno_value = 5
+        expect(parallel_transport_frozen_accept_v1(stderr_error, 1, 100)).to_equal(false)
+        var truncated = supervisor_receipt()
+        truncated.packet.stdout.seen_bytes = 3
+        expect(parallel_transport_frozen_accept_v1(truncated, 1, 100)).to_equal(false)
+        var missing_payload = supervisor_receipt()
+        missing_payload.stderr = []
+        expect(parallel_transport_frozen_accept_v1(missing_payload, 1, 100)).to_equal(false)
+
+    it "rejects malformed bindings and unfrozen receipts":
+        var unbound = supervisor_receipt()
+        unbound.binding_digest = []
+        expect(parallel_transport_frozen_accept_v1(unbound, 1, 100)).to_equal(false)
+        var running = supervisor_receipt()
+        running.packet.status = ProcessObservationStatusV4.Running
+        expect(parallel_transport_frozen_accept_v1(running, 1, 100)).to_equal(false)
+        var different_clock = supervisor_receipt()
+        different_clock.packet.clock_kind = ProcessObservationClockKindV4.Boottime
+        expect(parallel_transport_frozen_accept_v1(different_clock, 1, 100)).to_equal(false)
+
+    it "rejects kill timeout error and completion at the execution deadline":
+        var killed = supervisor_receipt()
+        killed.packet.kill_attempted = true
+        expect(parallel_transport_frozen_accept_v1(killed, 1, 100)).to_equal(false)
+        var terminated = supervisor_receipt()
+        terminated.packet.term_sent = true
+        expect(parallel_transport_frozen_accept_v1(terminated, 1, 100)).to_equal(false)
+        var timed_out = supervisor_receipt()
+        timed_out.packet.failure_reason = ProcessObservationFailureReasonV4.ExecutionDeadline
+        expect(parallel_transport_frozen_accept_v1(timed_out, 1, 100)).to_equal(false)
+        var failed = supervisor_receipt()
+        failed.packet.exit_code = 1
+        expect(parallel_transport_frozen_accept_v1(failed, 1, 100)).to_equal(false)
+        var late_tree = supervisor_receipt()
+        late_tree.packet.tree_empty_ns = 20
+        expect(parallel_transport_frozen_accept_v1(late_tree, 1, 100)).to_equal(false)

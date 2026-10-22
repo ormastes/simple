@@ -313,13 +313,13 @@ push and the required GitHub check in **< 1 min**, so a PR can land that fast.
 Measured over 67 real pushes before the change, a push took median 171 s and
 p75 ~16 min with no per-gate timing anywhere in the logs. The dispatcher now
 prints `push-must-check: gate <id> exit=<rc> <n>s` per row, and the push tier
-was cut to nine diff-scoped, cached, committed-content rows: conflict-tree,
-tree-size, conflict-markers, sdn-crc32-sealed, rust-duplicate-reexport
+was cut to ten diff-scoped, cached, committed-content rows: conflict-tree,
+tree-size, conflict-markers, text-encoding (UTF-8 + no CR in touched .spl/.sdn/.shs/.sdl), sdn-crc32-sealed, rust-duplicate-reexport
 (touched .rs only), no-stale-snapshot-rewind, range-shs-hygiene (touched .shs
 parse + new guard wired), runtime-api-regression, rt-dual-implementation (delta
 vs base, content-keyed census cache). The required status context
 "Code Idiom & Structural Ratchet Gates" is now carried by the `fast-gates` job
-in `required-gates.yml` (its own one-job workflow since 2026-09-27; `repo-hygiene.yml` no longer runs per PR), which runs all 9 against the PR's base..head with a
+in `required-gates.yml` (its own one-job workflow since 2026-09-27; `repo-hygiene.yml` no longer runs per PR), which runs all 10 against the PR's base..head with a
 sparse checkout. `no-stale-snapshot-rewind` is included: it is BLOCKING at push
 and the push tier is bypassable, so a class with no automatic lane would be
 unenforced. It consults up to 40 first-parent ancestors as contributors, so that

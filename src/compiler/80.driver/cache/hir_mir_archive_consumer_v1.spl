@@ -1,0 +1,446 @@
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.hir.generated.hir_codec.{hc_enc_symbol_table, hc_dec_symbol_table}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+# Complete final mono archives -> actual declaration repository -> scoped MIR.
+# Driver activation and logical-source publication remain separate authorities.
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_hir_archive_production_controller_v1.{driver_hir_archive_production_try_repository_in_owned_scope_v1}
+use compiler.driver.driver_source_loading.{_driver_physical_source_key}
+use compiler.driver.cache.hir_mono_final_repository_v1.{MonoArchiveFinalRepositoryV1,
+    mono_archive_final_repository_matches_v1, mono_archive_load_final_module_in_owned_scope_v1,
+    mono_archive_final_specialization_selections_in_owned_scope_v1}
+use compiler.driver.cache.hir_owned_artifact_cache_v1.{hir_owned_artifact_context_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_promote_diagnostic_owner_v1,
+    hir_cache_clear_last_warnings, hir_cache_last_warnings}
+use compiler.hir.hir_types.{HirModule, SymbolTable}
+use compiler.mir.hir_declaration_summary_v1.*
+use compiler.mir.hir_declaration_types_v1.{MirHirParamDeclarationV1, MirHirFunctionDeclarationV1,
+    MirHirFieldDeclarationV1, MirHirNominalDeclarationV1, MirHirVariantDeclarationV1,
+    MirHirEnumDeclarationV1, MirHirTraitDeclarationV1, MirHirGlobalDeclarationV1,
+    MirHirDeclarationSourceV1, MirHirModuleDeclarationsV1, MirHirDeclarationRepositoryV1,
+    MirHirCallableDefaultsV1}
+use compiler.mir.mir_lowering_types.{MirLowering, MirError}
+use compiler.mir.mir_instructions.{MirModule, MirFunction}
+use compiler.mir.mir_data.{bootstrap_fn_registries_promote,
+    bootstrap_fn_param_defaults_detach_for_archive_v1}
+use compiler.mir._MirLowering.bootstrap_globals.{bootstrap_mir_registries_promote}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.declaration_providers_v1.*
+use compiler.mir._MirLowering.archive_borrowed_module_v1.*
+use compiler.mir._MirLowering.transient_owner.*
+use compiler.common.cache.reverse_reference_facts.{reverse_reference_module_begin_v1,
+    reverse_reference_module_seal_v1, reverse_reference_module_publish_v1,
+    reverse_reference_module_abort_v1}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
+
+# Only the real controller can distinguish untouched phase1 from attempted,
+# revoked or incomplete production. An Err never authorizes retained fallback.
+fn mir_archive_try_production_repository_v1(driver: CompilerDriver) -> Result<MonoArchiveFinalRepositoryV1?, text>:
+    if transient_array_scope_state_v1() != 0 or hir_cache_last_warnings().len() != 0:
+        return Err("MIR production lookup requires an unoccupied owned boundary")
+    if not transient_scope_begin(): return Err("MIR production lookup scope unavailable")
+    val result = driver_hir_archive_production_try_repository_in_owned_scope_v1(driver)
+    val paused = transient_scope_pause()
+    var owned = false
+    if paused:
+        # @workaround bug=a174_transient_promote_inference_2026_10_16 recover=03d33d497ac6d1408683493f74ff9db434e4cfa3 reason=preserve-declared-optional-result-owner-at-generic-promotion
+        owned = transient_promote<Result<MonoArchiveFinalRepositoryV1?, text>>(result) and hir_cache_promote_diagnostic_owner_v1()
+        hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not owned or not ended:
+        return Err("MIR production lookup ownership failed")
+    result
+
+# Only the actual complete projection producer below publishes this private
+# body-free custody record. Caller-supplied carriers/digests cannot install it.
+struct MirArchiveDeclarationPublicationV1:
+    final_authority: text
+    final_serial: i64
+    declaration_authority: text
+
+var _mir_declaration_publications_ready_v1: bool = false
+var _mir_declaration_publications_v1: Dict<i64, MirArchiveDeclarationPublicationV1> = {}
+
+fn mir_archive_declaration_publication_matches_v1(driver: CompilerDriver,
+        final_repository: MonoArchiveFinalRepositoryV1,
+        declarations: MirHirDeclarationRepositoryV1) -> bool:
+    val word = driver.identity_id
+    if word == 0 or not _mir_declaration_publications_ready_v1 or
+            not _mir_declaration_publications_v1.has(word): return false
+    val publication = _mir_declaration_publications_v1[word]
+    publication.final_authority == final_repository.authority and
+        publication.final_serial == final_repository.serial and
+        publication.declaration_authority == declarations.authority
+
+fn mir_archive_declaration_publication_revoke_v1(driver: CompilerDriver):
+    val word = driver.identity_id
+    if _mir_declaration_publications_ready_v1 and _mir_declaration_publications_v1.has(word):
+        _mir_declaration_publications_v1.remove(word)
+
+# Failure output contains only real diagnostic rows; it cannot retain HIR.
+# The lowering owner is unusable after a scope failure and must be discarded.
+struct MirArchiveLoweringFailureV1:
+    message: text
+    errors: [MirError]
+    advisories: [MirError]
+    arena_aborted: bool
+
+fn mir_archive_failure_v1(mut lowering: MirLowering, message: text) -> MirArchiveLoweringFailureV1:
+    # Fresh carriers traverse new rows even when the cumulative diagnostic
+    # arrays predate this scratch scope. Preserve their actual ordered rows.
+    var errors: [MirError] = []
+    var advisories: [MirError] = []
+    for row in lowering.errors: errors.push(row)
+    for row in lowering.mir_advisories: advisories.push(row)
+    MirArchiveLoweringFailureV1(message: message, errors: errors,
+        advisories: advisories, arena_aborted: true)
+
+# Seals encode complete declaration roots. Their temporary writers, sorted
+# key arrays and digests belong to scratch, never the resident compilation.
+# The final matcher is the lifecycle-free immutable admission checker.
+fn mir_archive_admission_matches_in_scratch_v1(driver: CompilerDriver,
+        final_repository: MonoArchiveFinalRepositoryV1,
+        declarations: MirHirDeclarationRepositoryV1? = nil) -> bool:
+    if transient_array_scope_state_v1() != 0 or hir_cache_last_warnings().len() != 0: return false
+    if not transient_scope_begin(): return false
+    var valid = mono_archive_final_repository_matches_v1(driver, final_repository)
+    if val repository = declarations:
+        valid = valid and mir_archive_declaration_publication_matches_v1(driver, final_repository, repository) and
+            repository.final_repository_authority == final_repository.authority and
+            repository.ordered_modules == final_repository.ordered_inventory and
+            mir_hir_declaration_repository_valid_v1(repository)
+        if valid:
+            val actual_context = hir_owned_artifact_context_v1()
+            valid = repository.artifact_context.directory == actual_context.directory and
+                repository.artifact_context.producer_header == actual_context.producer_header and
+                repository.artifact_context.enabled == actual_context.enabled
+        if valid:
+            for name in repository.ordered_modules:
+                if not final_repository.modules.has(name):
+                    valid = false
+                    break
+                val module: MirHirModuleDeclarationsV1 = repository.modules[name]
+                val descriptor = final_repository.modules[name]
+                if module.source_binding == nil or module.final_archive_key != descriptor.archive_key or
+                        module.final_body_digest != descriptor.body_digest or
+                        module.name != descriptor.input_archive.input.module_name or
+                        module.path != descriptor.input_archive.input.source_path:
+                    valid = false
+                    break
+                val source: MirHirDeclarationSourceV1 = module.source_binding.unwrap()
+                var matches = 0
+                for row in final_repository.physical_inventory.logical_rows:
+                    if row.logical_name != name: continue
+                    if source.logical_key == name and source.physical_path == row.physical_path and
+                            source.source_digest == row.source_digest and source.source_bytes == row.source_bytes and
+                            source.input_archive_key == row.archive_key and module.name == row.module_owner and
+                            _driver_physical_source_key(module.path) == row.physical_path:
+                        matches = matches + 1
+                if matches != 1:
+                    valid = false
+                    break
+    val paused = transient_scope_pause()
+    val ended = transient_scope_end()
+    valid and paused and ended
+
+fn mir_archive_declaration_repository_v1(driver: CompilerDriver, final_repository: MonoArchiveFinalRepositoryV1) -> Result<MirHirDeclarationRepositoryV1, text>:
+    if transient_array_scope_state_v1() != 0:
+        return Err("MIR declaration producer requires an unoccupied boundary")
+    mir_archive_declaration_publication_revoke_v1(driver)
+    # Factory selects the real initialized cache owner before any scratch scope.
+    val context = hir_owned_artifact_context_v1()
+    if not context.enabled: return Err("MIR declaration artifact cache is unavailable")
+    if not mir_archive_admission_matches_in_scratch_v1(driver, final_repository):
+        return Err("MIR declaration producer requires complete final mono admission")
+    var declarations: Dict<text, MirHirModuleDeclarationsV1> = {}
+    for name in final_repository.ordered_inventory:
+        if not transient_scope_begin(): return Err("MIR declaration projection scope is unavailable")
+        val loaded = mono_archive_load_final_module_in_owned_scope_v1(driver, final_repository, name)
+        var projected: Result<MirHirModuleDeclarationsV1, text> = Err("MIR final archive could not be read")
+        if loaded.is_ok():
+            val module: HirModule = loaded.unwrap()
+            val descriptor = final_repository.modules[name]
+            var source: MirHirDeclarationSourceV1? = nil
+            for row in final_repository.physical_inventory.logical_rows:
+                if row.logical_name == name:
+                    source = Some(MirHirDeclarationSourceV1(logical_key: name,
+                        physical_path: row.physical_path, source_digest: row.source_digest,
+                        source_bytes: row.source_bytes, input_archive_key: row.archive_key))
+            if source == nil:
+                projected = Err("MIR final logical source inventory row missing")
+            else:
+                projected = mir_hir_project_module_in_owned_scope_v1(context, module,
+                    final_repository.authority, descriptor.archive_key, descriptor.body_digest, source)
+        else: projected = Err(loaded.unwrap_err())
+        val paused = transient_scope_pause()
+        var result_owned = false
+        var diagnostics_owned = false
+        if paused:
+            # No decoded HirModule is in the promoted result's schema.
+            result_owned = transient_promote(projected)
+            diagnostics_owned = hir_cache_promote_diagnostic_owner_v1()
+            hir_cache_clear_last_warnings()
+        val ended = transient_scope_end()
+        if not paused or not result_owned or not diagnostics_owned or not ended:
+            return Err("MIR declaration projection ownership failed")
+        if projected.is_err(): return Err(projected.unwrap_err())
+        declarations[name] = projected.unwrap()
+    var repository = MirHirDeclarationRepositoryV1(artifact_context: context,
+        final_repository_authority: final_repository.authority,
+        ordered_modules: final_repository.ordered_inventory, modules: declarations, authority: "")
+    if not transient_scope_begin(): return Err("MIR declaration seal scope is unavailable")
+    repository.authority = mir_hir_declaration_repository_digest_v1(repository)
+    val valid = mir_hir_declaration_repository_valid_v1(repository)
+    val paused = transient_scope_pause()
+    var owned = false
+    if paused and valid: owned = transient_promote(repository)
+    val ended = transient_scope_end()
+    if not valid or not paused or not owned or not ended:
+        return Err("MIR declaration repository integrity failed")
+    if not _mir_declaration_publications_ready_v1:
+        _mir_declaration_publications_v1 = {}
+        _mir_declaration_publications_ready_v1 = true
+    val word = driver.identity_id
+    if word == 0: return Err("MIR declaration producer has no actual driver identity")
+    _mir_declaration_publications_v1[word] = MirArchiveDeclarationPublicationV1(
+        final_authority: final_repository.authority, final_serial: final_repository.serial,
+        declaration_authority: repository.authority)
+    Ok(repository)
+
+# Prescans may allocate relocated provider rows. Never lend a sealed
+# declaration's SymbolTable class to that mutable lowering scratch owner.
+fn mir_archive_seed_symbols_v1(driver: CompilerDriver,
+        final_repository: MonoArchiveFinalRepositoryV1,
+        declarations: MirHirDeclarationRepositoryV1, name: text) -> Result<SymbolTable, text>:
+    if not mir_archive_admission_matches_in_scratch_v1(driver, final_repository, Some(declarations)) or
+            not declarations.modules.has(name):
+        return Err("MIR symbol scratch has no actual declaration publication")
+    if not transient_scope_begin(): return Err("MIR symbol scratch scope unavailable")
+    var writer = HirCodecWriter.create()
+    hc_enc_symbol_table(writer, declarations.modules[name].symbols)
+    var result: Result<SymbolTable, text> = Err("MIR declaration symbol encoding refused")
+    if writer.ok:
+        val blob = writer.finish()
+        var reader = FlatPoolReader.new(blob)
+        val symbols: SymbolTable = hc_dec_symbol_table(reader)
+        var check = HirCodecWriter.create()
+        hc_enc_symbol_table(check, symbols)
+        if reader.ok and reader.pos == reader.lines.len() - 1 and reader.lines[reader.pos] == "" and
+                check.ok and check.finish() == blob:
+            result = Ok(symbols)
+        else:
+            result = Err("MIR declaration symbol scratch stable bytes refused")
+    val paused = transient_scope_pause()
+    var owned = false
+    if paused: owned = transient_promote(result)
+    val ended = transient_scope_end()
+    if not paused or not owned or not ended: return Err("MIR symbol scratch ownership failed")
+    result
+
+# MirLowering is a value struct. Explicit mut retains the incoming owner instead
+# of function_lowering's defensive ordinary-struct parameter copy; both scalar
+# state and dictionary replacements must reach the caller.
+fn mir_archive_prepare_declarations_v1(driver: CompilerDriver, mut lowering: MirLowering,
+        final_repository: MonoArchiveFinalRepositoryV1,
+        declarations: MirHirDeclarationRepositoryV1) -> Result<bool, text>:
+    if not mir_archive_admission_matches_in_scratch_v1(driver, final_repository, Some(declarations)):
+        return Err("MIR declaration consumer final-stage authority mismatch")
+    if declarations.ordered_modules != final_repository.ordered_inventory or
+            lowering.trait_impl_provider_modules.len() != 0 or lowering.ambient_bootstrap_enabled():
+        return Err("MIR final archive consumer requires the complete native provider route")
+    lowering.declaration_repository = Some(declarations)
+    bootstrap_fn_param_defaults_detach_for_archive_v1()
+    lowering.declaration_parameter_defaults = {}
+    lowering.declaration_parameter_defaults_ambiguous = {}
+    # The original cross-module declaration prescan remains a phase barrier.
+    for name in final_repository.declaration_order:
+        val module: MirHirModuleDeclarationsV1 = declarations.modules[name]
+        val final_descriptor = final_repository.modules[name]
+        if module.final_archive_key != final_descriptor.archive_key or
+                module.final_body_digest != final_descriptor.body_digest or
+                module.path != final_descriptor.input_archive.input.source_path:
+            return Err("MIR declaration source/final archive mismatch")
+        if not transient_scope_begin(): return Err("MIR declaration prescan scope is unavailable")
+        lowering.prescan_module_declarations_v1(module)
+        val paused = transient_scope_pause()
+        var owned = false
+        if paused:
+            owned = lowering.promote_transient_owner()
+            owned = bootstrap_fn_registries_promote() and owned
+            owned = bootstrap_mir_registries_promote() and owned
+        val ended = transient_scope_end()
+        if not paused or not owned or not ended:
+            return Err("MIR declaration prescan ownership failed")
+    for name in declarations.ordered_modules:
+        if final_repository.declaration_order.contains(name): continue
+        if not transient_scope_begin(): return Err("MIR callable variant prescan scope is unavailable")
+        lowering.prescan_declaration_callables_v1(declarations.modules[name])
+        val paused = transient_scope_pause()
+        var owned = false
+        if paused:
+            owned = lowering.promote_transient_owner()
+            owned = bootstrap_fn_registries_promote() and owned
+            owned = bootstrap_mir_registries_promote() and owned
+        val ended = transient_scope_end()
+        if not paused or not owned or not ended:
+            return Err("MIR callable variant prescan ownership failed")
+    Ok(true)
+
+fn mir_archive_secondary_keys_v1(driver: CompilerDriver,
+        final_repository: MonoArchiveFinalRepositoryV1,
+        declarations: MirHirDeclarationRepositoryV1, primary_name: text) -> Result<[text], text>:
+    var secondary: [text] = []
+    if final_repository.schedule_kind != "normal-native-physical-v1": return Ok(secondary)
+    val primary = declarations.modules[primary_name]
+    for name in final_repository.ordered_inventory:
+        if name == primary_name: continue
+        if not transient_scope_begin(): return Err("MIR specialization schedule scope unavailable")
+        var inspected: Result<bool, text> = Ok(false)
+        val declaration = declarations.modules[name]
+        if mir_hir_declarations_same_physical_source_v1(primary, declaration):
+            val publications = mono_archive_final_specialization_selections_in_owned_scope_v1(driver,
+                final_repository, name)
+            if publications.is_err():
+                inspected = Err(publications.unwrap_err())
+            else:
+                var needed = false
+                for publication in publications.unwrap():
+                    var present = false
+                    for function in primary.functions:
+                        if function.symbol.id == publication.target_symbol and
+                                function.name == publication.target_name and
+                                function.complete_function_digest == publication.output_function_digest:
+                            present = true
+                    if not present: needed = true
+                inspected = Ok(needed)
+        val paused = transient_scope_pause()
+        var owned = false
+        if paused:
+            owned = transient_promote(inspected) and hir_cache_promote_diagnostic_owner_v1()
+            hir_cache_clear_last_warnings()
+        val ended = transient_scope_end()
+        if not paused or not owned or not ended: return Err("MIR specialization schedule ownership failed")
+        if inspected.is_err(): return Err(inspected.unwrap_err())
+        if inspected.unwrap(): secondary.push(name)
+    Ok(secondary)
+
+# Select only actual specialization publications omitted by the first physical
+# emission. Ordinary alias bodies retain first-winner behavior even if their
+# complete digests differ. The final issuer, not a name pattern, supplies origin.
+fn mir_archive_lower_selected_body_in_owned_scope_v1(driver: CompilerDriver,
+        mut lowering: MirLowering, final_repository: MonoArchiveFinalRepositoryV1,
+        declarations: MirHirDeclarationRepositoryV1, module: HirModule, name: text,
+        is_entry_module: bool, primary_name: text,
+        primary_output: MirModule?, primary_symbols: SymbolTable?, symbol_baseline_key: text,
+        primary_trait_thunks: [MirFunction]) -> Result<MirModule, text>:
+    if primary_output == nil:
+        if primary_name != "": return Err("MIR primary key has no emitted storage")
+        return lowering.lower_archive_module_in_owned_scope_v1(module, is_entry_module, name)
+    if final_repository.schedule_kind != "normal-native-physical-v1" or primary_name == "" or
+            not declarations.modules.has(primary_name):
+        return Err("MIR secondary specialization has no normal physical schedule owner")
+    val publications = mono_archive_final_specialization_selections_in_owned_scope_v1(driver,
+        final_repository, name)?
+    val declaration = declarations.modules[name]
+    val primary_declaration = declarations.modules[primary_name]
+    val primary: MirModule = primary_output.unwrap()
+    var selected: [MirArchiveFunctionEmissionV1] = []
+    for publication in publications:
+        var matches = 0
+        for function in declaration.functions:
+            if function.symbol.id == publication.target_symbol and function.name == publication.target_name and
+                    function.complete_function_digest == publication.output_function_digest:
+                matches = matches + 1
+                var present_in_primary = false
+                for own_function in primary_declaration.functions:
+                    if own_function.symbol.id == function.symbol.id:
+                        if own_function.name != function.name or
+                                own_function.complete_function_digest != function.complete_function_digest:
+                            return Err("MIR specialization collides with first emitted function identity")
+                        present_in_primary = true
+                if primary.functions.has(function.symbol):
+                    if not present_in_primary:
+                        return Err("MIR specialization collides with emitted generated function")
+                elif present_in_primary:
+                    return Err("MIR primary specialization declaration has no emitted definition")
+                else:
+                    selected.push(MirArchiveFunctionEmissionV1(symbol: function.symbol.id,
+                        name: function.name, complete_function_digest: function.complete_function_digest))
+        if matches != 1: return Err("MIR specialization publication differs from final complete function")
+    lowering.lower_archive_module_in_owned_scope_v1(module, is_entry_module, name,
+        Some(selected), primary_name, primary_output, primary_symbols, symbol_baseline_key, primary_trait_thunks)
+
+fn mir_archive_lower_final_module_v1(driver: CompilerDriver, mut lowering: MirLowering,
+        final_repository: MonoArchiveFinalRepositoryV1,
+        declarations: MirHirDeclarationRepositoryV1, name: text,
+        is_entry_module: bool, primary_name: text = "",
+        primary_output: MirModule? = nil, primary_symbols: SymbolTable? = nil,
+        symbol_baseline_key: text = "", primary_trait_thunks: [MirFunction] = []) -> Result<MirModule, MirArchiveLoweringFailureV1>:
+    if not mir_archive_admission_matches_in_scratch_v1(driver, final_repository, Some(declarations)) or
+            not declarations.modules.has(name) or lowering.declaration_repository == nil:
+        return Err(mir_archive_failure_v1(lowering, "MIR final module consumer lacks complete admitted declarations"))
+    val installed: MirHirDeclarationRepositoryV1 = lowering.declaration_repository.unwrap()
+    if installed.authority != declarations.authority or
+            lowering.trait_impl_provider_modules.len() != 0 or lowering.ambient_bootstrap_enabled():
+        return Err(mir_archive_failure_v1(lowering, "MIR final module consumer provider owner differs"))
+    if lowering.finally_stack.len() != 0 or lowering.lambda_bindings.len() != 0 or lowering.lambda_capture_snapshot.len() != 0:
+        return Err(mir_archive_failure_v1(lowering, "MIR final module callable or finally scratch owner is occupied"))
+    if not transient_scope_begin(): return Err(mir_archive_failure_v1(lowering, "MIR final module scope is unavailable"))
+    val reverse_token = reverse_reference_module_begin_v1()
+    if reverse_token < 0:
+        val ended = transient_scope_end()
+        return Err(mir_archive_failure_v1(lowering, "MIR final module reverse-reference owner is unavailable"))
+    val loaded = mono_archive_load_final_module_in_owned_scope_v1(driver, final_repository, name)
+    if loaded.is_err():
+        # Own a cache diagnostic before reclaiming its temporary source graph.
+        val failure = mir_archive_failure_v1(lowering, loaded.unwrap_err())
+        val paused = transient_scope_pause()
+        var owned = false
+        if paused:
+            owned = transient_promote(failure) and hir_cache_promote_diagnostic_owner_v1()
+            hir_cache_clear_last_warnings()
+        val aborted = reverse_reference_module_abort_v1(reverse_token)
+        val ended = transient_scope_end()
+        if not paused or not owned or not aborted or not ended:
+            panic("MIR final archive read ownership failed")
+        return Err(failure)
+    val module: HirModule = loaded.unwrap()
+    val lowered = mir_archive_lower_selected_body_in_owned_scope_v1(driver, lowering,
+        final_repository, declarations, module, name, is_entry_module, primary_name, primary_output, primary_symbols, symbol_baseline_key, primary_trait_thunks)
+    if lowered.is_err():
+        val failure = mir_archive_failure_v1(lowering, lowered.unwrap_err())
+        val paused = transient_scope_pause()
+        var owned = false
+        if paused:
+            owned = transient_promote(failure) and hir_cache_promote_diagnostic_owner_v1()
+            hir_cache_clear_last_warnings()
+        val aborted = reverse_reference_module_abort_v1(reverse_token)
+        val ended = transient_scope_end()
+        if not paused or not owned or not aborted or not ended:
+            panic("MIR borrowed module failure ownership failed")
+        return Err(failure)
+    val output: MirModule = lowered.unwrap()
+    val failure = mir_archive_failure_v1(lowering, "MIR final module ownership failed; discard lowering owner")
+    val paused = transient_scope_pause()
+    var failure_owned = false
+    var owned = false
+    if paused:
+        owned = transient_promote(output)
+        owned = lowering.promote_transient_owner() and owned
+        owned = bootstrap_mir_registries_promote() and owned
+        owned = bootstrap_fn_registries_promote() and owned
+        owned = hir_cache_promote_diagnostic_owner_v1() and owned
+        hir_cache_clear_last_warnings()
+        owned = reverse_reference_module_seal_v1(reverse_token) and owned
+        if not owned: failure_owned = transient_promote(failure)
+    val ended = transient_scope_end()
+    if not paused or not owned or not ended:
+        val aborted = reverse_reference_module_abort_v1(reverse_token)
+        if not failure_owned: panic("MIR failed diagnostic ownership unavailable")
+        return Err(failure)
+    if not reverse_reference_module_publish_v1(reverse_token):
+        val aborted = reverse_reference_module_abort_v1(reverse_token)
+        return Err(mir_archive_failure_v1(lowering, "MIR final module reverse-reference publication failed"))
+    Ok(output)

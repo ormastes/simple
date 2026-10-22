@@ -1,0 +1,430 @@
+# Actual weave -> streaming semantic route -> cold -> quiet -> fresh mono facts.
+# This issued current-stage owner is not final/report-policy/MIR admission.
+use compiler.mono.mono_archive_nominal_v2.{MonoArchiveNominalDeclV2}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.cache.driver_hir_archive_weave_boundary_v1.*
+use compiler.driver.cache.driver_hir_archive_semantic_prerequisite_v1.*
+use compiler.driver.cache.driver_hir_archive_cold_boundary_v1.*
+use compiler.driver.cache.driver_cold_hir_source_capture_plan_v1.{DriverColdHirSourceCapturePlanV1}
+use compiler.driver.smf.package_image_v1.{package_section_kind_name_v1}
+use compiler.driver.smf.runtime_std_hir_emission_types_v1.{RuntimeStdHirModuleEmissionV1}
+use compiler.driver.cache.driver_hir_post_validation_policy_v1.{DriverHirPostValidationPolicyOwnerV1, driver_hir_post_validation_policy_load_in_owned_scope_v1}
+use compiler.driver.cache.driver_hir_archive_weave_encoding_v1.{driver_hir_weave_config_binding_in_owned_scope_v1}
+use compiler.mono.mono_archive_registration_v1.*
+use compiler.mono.mono_archive_current_body_v1.*
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.semantics.resolve.{resolve_methods_quiet, resolve_methods_module_owner}
+use compiler.common.cache_contract.hir_owned_artifact_cache_v1.{hir_owned_artifact_store_blob_v1, hir_owned_artifact_load_blob_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_last_warnings, hir_cache_clear_last_warnings,
+    hir_cache_promote_diagnostic_owner_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+
+struct DriverHirArchiveCurrentBoundaryV1:
+    semantic: DriverHirArchiveSemanticPrerequisiteV1
+    policy: DriverHirPostValidationPolicyOwnerV1
+    config_binding: text
+    context_digest: text
+    registration: MonoArchiveCurrentRegistrationOwnerV1
+    logical_order: [text]
+    declaration_order: [text]
+    expected_inventory: Dict<text, text>
+    artifact_key: text
+    artifact_digest: text
+    cold_digest: text
+    cold_plan: DriverColdHirSourceCapturePlanV1
+    quiet: bool
+    serial: i64
+
+struct DriverHirArchiveCurrentPinV1:
+    driver_identity: i64
+    artifact_digest: text
+    serial: i64
+    context_binding: text
+
+struct DriverHirArchiveCurrentShardV1:
+    receipt: MonoArchiveCurrentRegistrationReceiptV1
+    quiet_errors: i64
+
+var _driver_current_pins_ready_v1: bool = false
+var _driver_current_pins_v1: Dict<text, DriverHirArchiveCurrentPinV1> = {}
+var _driver_current_serial_v1: i64 = 0
+
+fn driver_current_initialize_v1() -> bool:
+    if transient_array_scope_state_v1() != 0 or hir_cache_last_warnings().len() != 0: return false
+    if not _driver_current_pins_ready_v1:
+        _driver_current_pins_v1 = {}
+        _driver_current_pins_ready_v1 = true
+    true
+
+fn driver_current_close_v1(paused: bool, owned: bool):
+    val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    if paused: hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not owned or not cache_owned or not ended: panic("current boundary ownership failed")
+
+fn driver_current_context_in_owned_scope_v1(driver: CompilerDriver) -> text:
+    if transient_array_scope_state_v1() != 1: return ""
+    val ctx = driver.ctx
+    val count = ctx.source_paths_owner.len()
+    if count == 0 or ctx.source_module_names_owner.len() != count or ctx.source_identities_owner.len() != count or
+            ctx.source_authored_paths_owner.len() != count or ctx.source_byte_lengths_owner.len() != count: return ""
+    var writer = HirCodecWriter.create()
+    writer.put_i64(count)
+    writer.put_i64(driver.streaming_entry_source_index_owner)
+    if val Some(schedule) = driver.hir_archive_schedule:
+        writer.put_text(schedule.source_binding)
+        writer.put_text(schedule.schedule_digest)
+        writer.put_text(schedule.closure_digest)
+        writer.put_i64(schedule.entry_source_index)
+        writer.put_i64(schedule.surface_generation)
+        writer.put_bool(schedule.shard_mode)
+    else: return ""
+    var index = 0
+    while index < count:
+        writer.put_text(ctx.source_paths_owner[index])
+        writer.put_text(ctx.source_module_names_owner[index])
+        writer.put_text(ctx.source_identities_owner[index])
+        writer.put_text(ctx.source_authored_paths_owner[index])
+        writer.put_i64(ctx.source_byte_lengths_owner[index])
+        index = index + 1
+    if not writer.ok: return ""
+    sha256_text("driver-current-phase1-context-v1\n" + writer.finish())
+
+# Only the actual cold factory's returned value enters this helper. All bytes
+# below are scalar file/ABI/section receipts, never an executable HIR graph.
+fn driver_current_cold_digest_in_owned_scope_v1(cold: DriverHirArchiveColdCaptureV1) -> text:
+    var writer = HirCodecWriter.create()
+    writer.put_text(cold.boundary_key)
+    writer.put_text(cold.boundary_digest)
+    writer.put_text(cold.source_binding)
+    writer.put_text(cold.schedule_digest)
+    writer.put_text(cold.policy_key)
+    writer.put_text(cold.config_binding)
+    val plan = cold.source_plan
+    writer.put_bool(plan.enabled)
+    writer.put_bool(plan.full_inventory)
+    writer.put_text(plan.source_root)
+    writer.put_text(plan.source_inventory_digest)
+    writer.put_text(plan.snapshot_inventory_digest)
+    writer.put_i64(plan.inventory_generation)
+    writer.put_i64(plan.source_count)
+    writer.put_i64(cold.receipts.len())
+    for receipt in cold.receipts:
+        val seed = receipt.seed
+        writer.put_text(seed.module_identity)
+        writer.put_text(seed.source_identity)
+        writer.put_text(seed.source_digest)
+        writer.put_text(seed.inventory_digest)
+        writer.put_text(seed.abi_digest)
+        writer.put_i64(seed.direct_imports.len())
+        for name in seed.direct_imports: writer.put_text(name)
+        writer.put_text(sha256_text(receipt.abi_payload))
+        writer.put_text(sha256_text(receipt.interface_content))
+    writer.put_i64(cold.emissions.len())
+    for key in cold.emissions.keys().sort():
+        val emission: RuntimeStdHirModuleEmissionV1 = cold.emissions[key]
+        writer.put_text(key)
+        writer.put_text(emission.module_identity)
+        writer.put_text(emission.source_identity)
+        writer.put_text(emission.source_digest)
+        writer.put_text(emission.private_root)
+        writer.put_text(emission.artifact_identity)
+        for file in [emission.export_file, emission.initializer_file, emission.provider_file, emission.generated_source_file]:
+            writer.put_text(file.path)
+            writer.put_text(file.digest)
+            writer.put_i64(file.byte_count)
+        writer.put_i64(emission.semantic_payloads.len())
+        for payload in emission.semantic_payloads:
+            writer.put_text(package_section_kind_name_v1(payload.kind))
+            writer.put_text(payload.member_name)
+            writer.put_text(sha256_text(payload.content))
+        writer.put_i64(emission.semantic_sections.len())
+        for section in emission.semantic_sections:
+            writer.put_text(package_section_kind_name_v1(section.kind))
+            writer.put_text(section.member_name)
+            writer.put_text(section.path)
+            writer.put_text(section.digest)
+            writer.put_i64(section.byte_count)
+        if val witness = emission.native_emit_witness:
+            writer.put_bool(true)
+            writer.put_text(witness.source_identity)
+            writer.put_text(witness.source_digest)
+            writer.put_text(witness.module_identity)
+            writer.put_text(witness.target_triple)
+            writer.put_text(witness.backend)
+            writer.put_text(witness.hir_semantic_digest)
+            writer.put_i64(witness.active_function_count)
+            writer.put_i64(witness.active_data_count)
+            writer.put_i64(witness.active_runtime_init_count)
+            writer.put_text(witness.witness_digest)
+        else: writer.put_bool(false)
+    if not writer.ok: return ""
+    sha256_text("driver-current-actual-cold-v1\n" + writer.finish())
+
+fn driver_current_cold_context_matches_in_owned_scope_v1(driver: CompilerDriver,
+        owner: DriverHirArchiveCurrentBoundaryV1) -> bool:
+    # Disabled cold capture leaves prior ctx fields untouched in the retained
+    # route. Enabled capture must keep the actual published receipt roots.
+    if not owner.cold_plan.enabled: return true
+    val current = DriverHirArchiveColdCaptureV1(source_plan: owner.cold_plan,
+        boundary_key: owner.semantic.boundary_key, boundary_digest: owner.semantic.boundary_digest,
+        source_binding: owner.semantic.source_binding, schedule_digest: owner.semantic.schedule_digest,
+        policy_key: owner.semantic.policy_key, config_binding: owner.semantic.config_binding,
+        receipts: driver.ctx.cold_hir_typed_receipts,
+        emissions: if owner.cold_plan.full_inventory: driver.ctx.runtime_std_hir_emissions else: {})
+    driver_current_cold_digest_in_owned_scope_v1(current) == owner.cold_digest
+
+fn driver_current_capture_shard_in_owned_scope_v1(use: DriverHirArchiveWeaveBoundaryUseV1,
+        registration: MonoArchiveCurrentRegistrationOwnerV1, name: text,
+        cold_digest: text, quiet: bool) -> Result<DriverHirArchiveCurrentShardV1, text>:
+    val woven = driver_hir_archive_weave_boundary_load_in_owned_scope_v1(use, name)?
+    val original = use.logical_frames[name].original_parent
+    var current = woven.module
+    var errors = 0
+    if quiet:
+        val (resolved, diagnostics) = resolve_methods_quiet(current)
+        # Cycle-130: owner-published module (the tuple slot corrupts).
+        current = resolve_methods_module_owner.?
+        errors = diagnostics.len()
+    # The boundary includes the actual cold result before this complete quiet
+    # output. It never broadens the original lower-stage or weave-stage reader.
+    val boundary = sha256_text("driver-current-parent-v1\n" + use.boundary_digest + "\n" + cold_digest)
+    val key = sha256_text("driver-current-parent-key-v1\n" + use.boundary_key + "\n" + boundary)
+    val stored = mono_archive_current_body_store_in_owned_scope_v1(use.cache, original,
+        key, boundary, current, woven.warnings)?
+    val receipt = mono_archive_collect_logical_current_registration_in_owned_scope_v1(
+        registration, current, name, stored, woven.warnings)?
+    Ok(DriverHirArchiveCurrentShardV1(receipt: receipt, quiet_errors: errors))
+
+fn driver_current_bytes_in_owned_scope_v1(owner: DriverHirArchiveCurrentBoundaryV1) -> text:
+    if transient_array_scope_state_v1() != 1 or owner.serial < 1 or not owner.registration.registration.sealed:
+        return ""
+    val registration = owner.registration
+    val digest = mono_archive_registration_owner_digest_v1(registration.registration)
+    if digest == "" or registration.registration.state.epoch != 0 or
+            registration.registration.state.queue.len() != 0 or
+            registration.bodies.len() != owner.logical_order.len() or
+            owner.expected_inventory.len() != owner.logical_order.len(): return ""
+    var writer = HirCodecWriter.create()
+    writer.put_text("driver-hir-current-issued-v1")
+    writer.put_i64(owner.serial)
+    writer.put_text(owner.semantic.artifact_key)
+    writer.put_text(owner.semantic.artifact_digest)
+    writer.put_text(owner.policy.artifact_key)
+    writer.put_text(owner.policy.artifact_digest)
+    writer.put_text(owner.config_binding)
+    writer.put_text(owner.context_digest)
+    writer.put_text(owner.cold_digest)
+    writer.put_bool(owner.cold_plan.enabled)
+    writer.put_bool(owner.cold_plan.full_inventory)
+    writer.put_text(owner.cold_plan.source_root)
+    writer.put_text(owner.cold_plan.source_inventory_digest)
+    writer.put_text(owner.cold_plan.snapshot_inventory_digest)
+    writer.put_i64(owner.cold_plan.inventory_generation)
+    writer.put_i64(owner.cold_plan.source_count)
+    writer.put_bool(owner.quiet)
+    writer.put_text(digest)
+    writer.put_text(registration.published_digest)
+    writer.put_text(registration.sealed_digest)
+    writer.put_text(registration.cache.directory)
+    writer.put_text(registration.cache.producer_header)
+    writer.put_bool(registration.cache.enabled)
+    writer.put_i64(owner.logical_order.len())
+    var seen: Dict<text, bool> = {}
+    for name in owner.logical_order:
+        if seen.has(name) or not registration.bodies.has(name) or not owner.expected_inventory.has(name): return ""
+        seen[name] = true
+        val body: MonoArchiveCurrentBodyV1 = registration.bodies[name]
+        val body_digest = mono_archive_current_body_digest_v1(body)
+        if body_digest == "" or owner.expected_inventory[name] != body.original_parent.input.source_path: return ""
+        writer.put_text(name)
+        writer.put_text(owner.expected_inventory[name])
+        writer.put_text(body_digest)
+    writer.put_i64(owner.declaration_order.len())
+    for name in owner.declaration_order: writer.put_text(name)
+    if not writer.ok: return ""
+    writer.finish()
+
+# Immutable pre-mono context portion. The actual final consumer changes the
+# mutable registration state, while source/policy/cold custody remains pinned.
+fn driver_current_context_binding_in_owned_scope_v1(owner: DriverHirArchiveCurrentBoundaryV1) -> text:
+    if transient_array_scope_state_v1() != 1: return ""
+    var writer = HirCodecWriter.create()
+    writer.put_text(owner.semantic.artifact_key)
+    writer.put_text(owner.semantic.artifact_digest)
+    writer.put_text(owner.policy.artifact_key)
+    writer.put_text(owner.policy.artifact_digest)
+    writer.put_text(owner.config_binding)
+    writer.put_text(owner.context_digest)
+    writer.put_text(owner.cold_digest)
+    writer.put_bool(owner.cold_plan.enabled)
+    writer.put_bool(owner.cold_plan.full_inventory)
+    writer.put_text(owner.cold_plan.source_root)
+    writer.put_text(owner.cold_plan.source_inventory_digest)
+    writer.put_text(owner.cold_plan.snapshot_inventory_digest)
+    writer.put_i64(owner.cold_plan.inventory_generation)
+    writer.put_i64(owner.cold_plan.source_count)
+    writer.put_bool(owner.quiet)
+    writer.put_i64(owner.serial)
+    writer.put_text(owner.registration.cache.directory)
+    writer.put_text(owner.registration.cache.producer_header)
+    writer.put_bool(owner.registration.cache.enabled)
+    if not writer.ok: return ""
+    sha256_text("driver-current-context-binding-v1\n" + writer.finish())
+
+pub fn driver_hir_archive_current_boundary_capture_v1(driver: CompilerDriver,
+        boundary: DriverHirArchiveWeaveBoundaryV1) -> Result<DriverHirArchiveCurrentBoundaryV1, [text]>:
+    if not driver_current_initialize_v1(): return Err(["current capture requires closed lease"])
+    # No caller-supplied cold result, current bodies, semantic receipt, or facts.
+    # The actual issuer already refuses fatal/skipped reports. Validate that
+    # private transcript explicitly before consuming its successful gate stage.
+    if not transient_scope_begin(): return Err(["current registered-report lease unavailable"])
+    val registered = driver_hir_archive_weave_boundary_registered_report_in_owned_scope_v1(boundary)
+    var gate_errors: [text] = []
+    if registered.is_err():
+        gate_errors = [registered.unwrap_err()]
+    else:
+        gate_errors = registered.unwrap().errors
+        if registered.unwrap().gates_skipped and gate_errors.len() == 0:
+            gate_errors = ["current registered gate stage was skipped"]
+    val gate_paused = transient_scope_pause()
+    val gate_owned = if gate_paused: transient_promote(gate_errors) else: false
+    driver_current_close_v1(gate_paused, gate_owned)
+    if gate_errors.len() != 0: return Err(gate_errors)
+    # Cold owns source-plan/SCV/generation error precedence before its genuine
+    # woven/semantic admission. Preserve those diagnostics before another replay.
+    val cold_result = driver_hir_archive_cold_capture_v1(driver, boundary)
+    if cold_result.is_err(): return Err(cold_result.unwrap_err().diagnostics)
+    val cold = cold_result.unwrap()
+    val semantic_result = driver_hir_archive_semantic_prerequisite_capture_v1(driver, boundary)
+    if semantic_result.is_err(): return Err([semantic_result.unwrap_err()])
+    val semantic = semantic_result.unwrap()
+    val accepted = driver_hir_archive_semantic_prerequisite_use_v1(driver, boundary, semantic)
+    if accepted.is_err(): return Err([accepted.unwrap_err()])
+    val use = accepted.unwrap().weave_use
+    if not transient_scope_begin(): return Err(["current cold-policy lease unavailable"])
+    val cold_digest = driver_current_cold_digest_in_owned_scope_v1(cold)
+    val policy = driver_hir_post_validation_policy_load_in_owned_scope_v1(boundary.policy)
+    val quiet = policy.is_ok() and policy.unwrap().quiet_mode == "1"
+    val context_digest = driver_current_context_in_owned_scope_v1(driver)
+    val policy_ok = policy.is_ok() and cold_digest != "" and context_digest != ""
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(cold_digest) and transient_promote(context_digest) else: false
+    driver_current_close_v1(paused, owned)
+    if not policy_ok: return Err(["current actual cold or selected quiet policy refused"])
+    val created = mono_archive_logical_current_registration_create_v1()
+    if created.is_err(): return Err([created.unwrap_err()])
+    val registration = created.unwrap()
+    var inventory: Dict<text, text> = {}
+    for name in use.logical_order:
+        if not transient_scope_begin(): return Err(["current body lease unavailable"])
+        val shard = driver_current_capture_shard_in_owned_scope_v1(use, registration, name, cold_digest, quiet)
+        val shard_paused = transient_scope_pause()
+        val shard_owned = if shard_paused: transient_promote(shard) else: false
+        driver_current_close_v1(shard_paused, shard_owned)
+        if shard.is_err(): return Err([shard.unwrap_err()])
+        val result = shard.unwrap()
+        if quiet and result.quiet_errors > 0:
+            eprint("[resolve-methods-quiet] INVARIANT BREAK: {result.quiet_errors} error(s) recorded in quiet mode for module {name}")
+        val published = mono_archive_publish_current_registration_v1(registration, result.receipt)
+        if published.is_err(): return Err([published.unwrap_err()])
+        inventory[name] = result.receipt.current_body.original_parent.input.source_path
+    if quiet: print "[resolve-methods-quiet] SIMPLE_RESOLVE_METHODS=1: {use.logical_order.len()} module(s) re-resolved"
+    val sealed = mono_archive_current_registration_seal_v1(registration, inventory, use.logical_order)
+    if sealed.is_err(): return Err([sealed.unwrap_err()])
+    # Full actual source/policy/claim/gate/weave replay before issuing the
+    # current-body pin. Cold publication itself has its own all-success barrier.
+    val final_use = driver_hir_archive_semantic_prerequisite_use_v1(driver, boundary, semantic)
+    if final_use.is_err(): return Err([final_use.unwrap_err()])
+    if final_use.unwrap().weave_use.boundary_digest != use.boundary_digest or
+            final_use.unwrap().weave_use.logical_order != use.logical_order or
+            final_use.unwrap().weave_use.declaration_order != use.declaration_order:
+        return Err(["current actual parent schedule changed"])
+    _driver_current_serial_v1 = _driver_current_serial_v1 + 1
+    var owner = DriverHirArchiveCurrentBoundaryV1(semantic: semantic, policy: boundary.policy,
+        config_binding: use.config_binding, context_digest: context_digest, registration: registration,
+        logical_order: use.logical_order, declaration_order: use.declaration_order,
+        expected_inventory: inventory, artifact_key: "", artifact_digest: "",
+        cold_digest: cold_digest, cold_plan: cold.source_plan, quiet: quiet, serial: _driver_current_serial_v1)
+    if not transient_scope_begin(): return Err(["current issuance lease unavailable"])
+    val bytes = driver_current_bytes_in_owned_scope_v1(owner)
+    val digest = if bytes != "": sha256_text(bytes) else: ""
+    val key = sha256_text("driver-current-issued-key-v1\n" + digest)
+    val context_binding = driver_current_context_binding_in_owned_scope_v1(owner)
+    val stored = digest != "" and driver_current_context_in_owned_scope_v1(driver) == context_digest and
+        driver_current_cold_context_matches_in_owned_scope_v1(driver, owner) and
+        hir_owned_artifact_store_blob_v1(use.cache, key, bytes).is_ok()
+    val pin_paused = transient_scope_pause()
+    # @workaround bug=a174_transient_promote_inference_2026_10_16 recover=03d33d497ac6d1408683493f74ff9db434e4cfa3 reason=retain-explicit-text-owner-at-generic-promotion
+    val pin_owned = if pin_paused: transient_promote<text>(key) and transient_promote<text>(digest) and transient_promote<text>(context_binding) else: false
+    driver_current_close_v1(pin_paused, pin_owned)
+    if not stored: return Err(["current complete issuance refused"])
+    owner.artifact_key = key
+    owner.artifact_digest = digest
+    if driver.identity_id == 0: return Err(["current complete issuance refused: unassigned driver identity"])
+    _driver_current_pins_v1["{driver.identity_id}:" + key] = DriverHirArchiveCurrentPinV1(driver.identity_id, digest, owner.serial, context_binding)
+    Ok(owner)
+
+# Actual issued parent custody after mono consumption. This deliberately does
+# not admit changed registration/body descriptors; final issuance binds those
+# from its real execution separately. No public parent constructor qualifies.
+pub fn driver_hir_archive_current_context_matches_in_owned_scope_v1(driver: CompilerDriver,
+        owner: DriverHirArchiveCurrentBoundaryV1) -> Result<bool, text>:
+    if transient_array_scope_state_v1() != 1 or not _driver_current_pins_ready_v1:
+        return Err("current context requires issued borrowed pin")
+    val lookup = "{driver.identity_id}:" + owner.artifact_key
+    if not _driver_current_pins_v1.has(lookup): return Err("current context has no actual issuance")
+    val pin: DriverHirArchiveCurrentPinV1 = _driver_current_pins_v1[lookup]
+    val semantic = driver_hir_archive_semantic_prerequisite_matches_in_owned_scope_v1(driver, owner.semantic)?
+    val config = driver_hir_weave_config_binding_in_owned_scope_v1(driver.ctx, owner.policy)?
+    if not semantic or pin.driver_identity != (driver.identity_id) or pin.serial != owner.serial or
+            pin.artifact_digest != owner.artifact_digest or pin.context_binding == "" or
+            pin.context_binding != driver_current_context_binding_in_owned_scope_v1(owner) or
+            config != owner.config_binding or driver_current_context_in_owned_scope_v1(driver) != owner.context_digest or
+            not driver_current_cold_context_matches_in_owned_scope_v1(driver, owner):
+        return Err("current issued source, policy or cold context changed")
+    val issued = hir_owned_artifact_load_blob_v1(owner.registration.cache, owner.artifact_key)?
+    if sha256_text(issued) != pin.artifact_digest: return Err("current immutable issuance changed")
+    Ok(true)
+
+pub fn driver_hir_archive_current_boundary_matches_in_owned_scope_v1(driver: CompilerDriver,
+        owner: DriverHirArchiveCurrentBoundaryV1) -> Result<bool, text>:
+    if transient_array_scope_state_v1() != 1 or not _driver_current_pins_ready_v1:
+        return Err("current owner requires issued borrowed pin")
+    val lookup = "{driver.identity_id}:" + owner.artifact_key
+    if not _driver_current_pins_v1.has(lookup): return Err("current owner was not issued by actual driver factory")
+    val pin: DriverHirArchiveCurrentPinV1 = _driver_current_pins_v1[lookup]
+    val semantic = driver_hir_archive_semantic_prerequisite_matches_in_owned_scope_v1(driver, owner.semantic)?
+    val config = driver_hir_weave_config_binding_in_owned_scope_v1(driver.ctx, owner.policy)?
+    val bytes = driver_current_bytes_in_owned_scope_v1(owner)
+    if pin.driver_identity != (driver.identity_id) or pin.serial != owner.serial or bytes == "" or
+            config != owner.config_binding or driver_current_context_in_owned_scope_v1(driver) != owner.context_digest or
+            not driver_current_cold_context_matches_in_owned_scope_v1(driver, owner) or
+            pin.artifact_digest != owner.artifact_digest or sha256_text(bytes) != pin.artifact_digest or
+            owner.artifact_key != sha256_text("driver-current-issued-key-v1\n" + pin.artifact_digest):
+        return Err("current issued complete facts, bodies, order or policy changed")
+    if hir_owned_artifact_load_blob_v1(owner.registration.cache, owner.artifact_key)? != bytes:
+        return Err("current issued immutable bytes changed")
+    Ok(true)
+
+# Driver teardown: drop every issuance this driver identity holds. Ids are never
+# reused, so without this the dict grows per driver in long-lived processes.
+pub fn driver_hir_archive_current_boundary_revoke_driver_v1(driver: CompilerDriver) -> bool:
+    if transient_array_scope_state_v1() != 0: return false
+    if not _driver_current_pins_ready_v1: return true
+    val word = driver.identity_id
+    for key in _driver_current_pins_v1.keys():
+        if _driver_current_pins_v1[key].driver_identity == word: _driver_current_pins_v1.remove(key)
+    true
+
+pub fn driver_hir_archive_current_boundary_pin_count_v1() -> i64:
+    if not _driver_current_pins_ready_v1: return 0
+    _driver_current_pins_v1.len()
+
+export DriverHirArchiveCurrentBoundaryV1, driver_hir_archive_current_boundary_capture_v1
+export driver_hir_archive_current_boundary_revoke_driver_v1, driver_hir_archive_current_boundary_pin_count_v1
+export driver_hir_archive_current_boundary_matches_in_owned_scope_v1
+export driver_hir_archive_current_context_matches_in_owned_scope_v1

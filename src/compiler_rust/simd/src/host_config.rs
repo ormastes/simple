@@ -71,6 +71,14 @@ struct CachedConfig {
 struct HostCpuConfigCache {
     cached: Option<CachedConfig>,
     resolutions: usize,
+    // Cached SIMPLE_SIMD_TIER override for the current epoch. A std::env::var
+    // per call is an O(environ) __findenv_locked scan, and active_simd_tier()
+    // feeds every numeric/byte kernel dispatch; the phase-compiler-tests row
+    // measured the identical collections-path scan as 338/409 sample frames,
+    // crawling a shard worker to ~1 s of work per 10 min (2026-10-18).
+    // Loaded once per epoch, re-read on clear_host_cpu_config_cache().
+    tier_override_loaded: bool,
+    tier_override: Option<SimdTier>,
 }
 
 /// Cheap on-disk staleness marker: (mtime, length). Detected via `fs::metadata`
@@ -133,6 +141,8 @@ fn config_cache() -> &'static Mutex<HostCpuConfigCache> {
         Mutex::new(HostCpuConfigCache {
             cached: None,
             resolutions: 0,
+            tier_override_loaded: false,
+            tier_override: None,
         })
     })
 }
@@ -142,6 +152,8 @@ pub fn clear_host_cpu_config_cache() {
     let mut cache = config_cache().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     cache.cached = None;
     cache.resolutions = 0;
+    cache.tier_override_loaded = false;
+    cache.tier_override = None;
 }
 
 #[doc(hidden)]
@@ -158,10 +170,21 @@ pub fn host_cpu_config_resolution_count_for_tests() -> usize {
 }
 
 pub fn active_simd_tier() -> SimdTier {
-    if let Ok(value) = std::env::var("SIMPLE_SIMD_TIER") {
-        if let Ok(tier) = value.parse::<SimdTier>() {
-            return tier;
+    // Read the SIMPLE_SIMD_TIER launch-time knob once per epoch (see the
+    // cache struct comment): the raw env read costs an O(environ) scan per
+    // call and this function sits on every kernel dispatch path.
+    let override_tier = {
+        let mut cache = config_cache().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !cache.tier_override_loaded {
+            cache.tier_override_loaded = true;
+            cache.tier_override = std::env::var("SIMPLE_SIMD_TIER")
+                .ok()
+                .and_then(|value| value.parse::<SimdTier>().ok());
         }
+        cache.tier_override
+    };
+    if let Some(tier) = override_tier {
+        return tier;
     }
 
     host_cpu_config()

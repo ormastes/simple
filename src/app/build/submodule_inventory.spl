@@ -1,0 +1,244 @@
+# Structural selected-submodule inventory. The caller must read gitlinks from
+# the parent tree, declarations from that tree's .gitmodules, and clean remote
+# reachability/canary observations. This module performs no Git or network I/O.
+# STRUCTURAL_ONLY never authorizes a protected build or a submodule fetch.
+
+struct SelectedGitlinkV1:
+    path: text
+    pin: text
+
+struct SubmoduleDeclarationV1:
+    path: text
+    url: text
+
+struct SubmodulePolicyV1:
+    path: text
+    pin: text
+    url: text
+    role: text
+    required: bool
+    provenance: text
+    canary: text
+    approved_branch: text
+
+struct PinReachabilityV1:
+    path: text
+    pin: text
+    url: text
+    provenance: text
+    canary: text
+    clean_remote_fetch: bool
+    pin_reachable: bool
+    canary_verified: bool
+    branch_ref: text
+    branch_tip: text
+    branch_ancestor_verified: bool
+
+struct SubmoduleExceptionV1:
+    path: text
+    pin: text
+    scope: text
+    reason: text
+
+struct SelectedSubmoduleV1:
+    path: text
+    pin: text
+    url: text
+    role: text
+    required: bool
+    provenance: text
+    canary: text
+    fetch_by_default: bool
+    approved_branch: text
+
+struct SubmoduleInventoryV1:
+    status: text
+    reason: text
+    selected: [SelectedSubmoduleV1]
+
+fn _submodule_reject_v1(reason: text) -> SubmoduleInventoryV1:
+    SubmoduleInventoryV1("REJECT", reason, [])
+
+fn _submodule_pin_v1(value: text) -> bool:
+    if value.len() != 40 and value.len() != 64:
+        return false
+    var i = 0
+    while i < value.len():
+        val ch = value[i:i + 1]
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+        i = i + 1
+    true
+
+fn _submodule_field_v1(value: text) -> bool:
+    value != "" and value == value.trim() and not value.contains("\n") and
+        not value.contains("\r") and not value.contains("|")
+
+fn _submodule_path_v1(path: text) -> bool:
+    if not _submodule_field_v1(path) or path.starts_with("/") or
+            path.starts_with("./") or path.contains("//") or
+            path.contains("\\"):
+        return false
+    val parts = path.split("/")
+    var i = 0
+    while i < parts.len():
+        if parts[i] == "" or parts[i] == "." or parts[i] == "..":
+            return false
+        i = i + 1
+    true
+
+fn submodule_branch_ref_valid_v1(value: text) -> bool:
+    """Accept only canonical, explicit branch refs for selected pin ancestry."""
+    if not value.starts_with("refs/heads/") or value.len() > 255 or
+       value.contains("..") or value.contains("//") or
+       value.ends_with("/") or value.ends_with("."):
+        return false
+    val name = value[11:value.len()]
+    if name == "" or name.starts_with("."):
+        return false
+    for ch in name.chars():
+        if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or
+           (ch >= "0" and ch <= "9") or ch == "/" or ch == "-" or
+           ch == "_" or ch == ".":
+            continue
+        return false
+    for part in name.split("/"):
+        if part == "" or part.starts_with(".") or part.ends_with(".lock"):
+            return false
+    true
+
+fn selected_submodule_inventory_v1(
+    gitlinks: [SelectedGitlinkV1], declarations: [SubmoduleDeclarationV1],
+    policies: [SubmodulePolicyV1], observations: [PinReachabilityV1],
+    exceptions: [SubmoduleExceptionV1]
+) -> SubmoduleInventoryV1:
+    """Validate a parent-tree-selected inventory without claiming remote proof.
+
+    The caller must independently authenticate the parent tree and obtain
+    clean remote fetch evidence. Optional entries are never fetched by default.
+    An exception is valid only for its exact selected pin and declared scope.
+    """
+    var selected: [SelectedSubmoduleV1] = []
+    var i = 0
+    while i < gitlinks.len():
+        val link = gitlinks[i]
+        if not _submodule_path_v1(link.path) or not _submodule_pin_v1(link.pin):
+            return _submodule_reject_v1("invalid-gitlink")
+        var j = 0
+        while j < i:
+            if gitlinks[j].path == link.path:
+                return _submodule_reject_v1("duplicate-gitlink")
+            j = j + 1
+
+        var declaration_count = 0
+        var declared_url = ""
+        j = 0
+        while j < declarations.len():
+            if declarations[j].path == link.path:
+                declaration_count = declaration_count + 1
+                declared_url = declarations[j].url
+            j = j + 1
+        if declaration_count != 1 or not _submodule_field_v1(declared_url):
+            return _submodule_reject_v1("missing-or-duplicate-declaration")
+
+        var policy_count = 0
+        var policy = SubmodulePolicyV1("", "", "", "", false, "", "", "")
+        j = 0
+        while j < policies.len():
+            if policies[j].path == link.path:
+                policy_count = policy_count + 1
+                policy = policies[j]
+            j = j + 1
+        if policy_count != 1:
+            return _submodule_reject_v1("missing-or-duplicate-policy")
+        if policy.pin != link.pin:
+            return _submodule_reject_v1("policy-pin-mismatch")
+        if policy.url != declared_url or not _submodule_field_v1(policy.url):
+            return _submodule_reject_v1("policy-url-mismatch")
+        if not _submodule_field_v1(policy.role) or
+                not _submodule_field_v1(policy.provenance) or
+                not _submodule_field_v1(policy.canary) or
+                not submodule_branch_ref_valid_v1(policy.approved_branch):
+            return _submodule_reject_v1("incomplete-policy")
+
+        var observation_count = 0
+        var observation = PinReachabilityV1("", "", "", "", "", false,
+            false, false, "", "", false)
+        j = 0
+        while j < observations.len():
+            if observations[j].path == link.path:
+                observation_count = observation_count + 1
+                observation = observations[j]
+            j = j + 1
+        if observation_count != 1:
+            return _submodule_reject_v1("missing-or-duplicate-reachability")
+        if observation.pin != link.pin or observation.url != declared_url or
+                observation.provenance != policy.provenance or
+                observation.canary != policy.canary or
+                not observation.clean_remote_fetch or
+                not observation.pin_reachable or
+                not observation.canary_verified or
+                observation.branch_ref != policy.approved_branch or
+                not _submodule_pin_v1(observation.branch_tip) or
+                observation.branch_tip.len() != link.pin.len() or
+                not observation.branch_ancestor_verified:
+            return _submodule_reject_v1("pin-reachability-unverified")
+
+        selected.push(SelectedSubmoduleV1(
+            link.path, link.pin, declared_url, policy.role, policy.required,
+            policy.provenance, policy.canary, policy.required,
+            policy.approved_branch
+        ))
+        i = i + 1
+
+    # Policy and evidence for a dormant .gitmodules declaration must not be
+    # silently treated as a selected dependency.
+    i = 0
+    while i < policies.len():
+        var found = false
+        var j = 0
+        while j < gitlinks.len():
+            if policies[i].path == gitlinks[j].path:
+                found = true
+            j = j + 1
+        if not found:
+            return _submodule_reject_v1("policy-for-unselected-path")
+        i = i + 1
+    i = 0
+    while i < observations.len():
+        var found = false
+        var j = 0
+        while j < gitlinks.len():
+            if observations[i].path == gitlinks[j].path:
+                found = true
+            j = j + 1
+        if not found:
+            return _submodule_reject_v1("reachability-for-unselected-path")
+        i = i + 1
+    i = 0
+    while i < exceptions.len():
+        val exception = exceptions[i]
+        if not _submodule_field_v1(exception.scope) or
+                not _submodule_field_v1(exception.reason):
+            return _submodule_reject_v1("invalid-exception")
+        var matching = 0
+        var j = 0
+        while j < gitlinks.len():
+            if exception.path == gitlinks[j].path and exception.pin == gitlinks[j].pin:
+                matching = matching + 1
+            j = j + 1
+        if matching != 1:
+            return _submodule_reject_v1("stale-or-unselected-exception")
+        j = 0
+        while j < i:
+            if exceptions[j].path == exception.path and
+                    exceptions[j].scope == exception.scope:
+                return _submodule_reject_v1("duplicate-exception-scope")
+            j = j + 1
+        i = i + 1
+    SubmoduleInventoryV1("STRUCTURAL_ONLY", "remote-proof-requires-trusted-git-adapter", selected)
+
+export SelectedGitlinkV1, SubmoduleDeclarationV1, SubmodulePolicyV1
+export submodule_branch_ref_valid_v1
+export PinReachabilityV1, SubmoduleExceptionV1, SelectedSubmoduleV1
+export SubmoduleInventoryV1, selected_submodule_inventory_v1

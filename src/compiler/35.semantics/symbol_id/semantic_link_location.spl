@@ -1,0 +1,91 @@
+# REQ-MC-008: bounded interval selection over copied parsed source facts.
+use compiler.semantics.symbol_id.semantic_link.{SemanticLinkErrorV1, SemanticLinkFailureV1, semantic_link_error_v1}
+use compiler.semantics.symbol_id.semantic_link_source.{SemanticLinkDocumentV1, semantic_link_read_revision_v1, semantic_link_document_uri_v1, open_semantic_link_document_v1}
+
+pub fn semantic_links_from_lines_v1(snapshot: SemanticLinkDocumentV1, revision: text, ranges: [(i64, i64)], package_qualified: bool) -> Result<[text], SemanticLinkErrorV1>:
+    """Read a revision once, index line bounds once, select a bounded batch.
+
+    Exact declaration start wins, then the smallest enclosing parsed interval.
+    Equal best candidates refuse. An enclosing function supplies the available
+    owner for anonymous body expressions. No repository discovery or reparse.
+    """
+    if revision != snapshot.revision:
+        return Err(semantic_link_error_v1(SemanticLinkFailureV1.RevisionChanged, "snapshot revision differs"))
+    if ranges.len() > 4096:
+        return Err(semantic_link_error_v1(SemanticLinkFailureV1.CapacityExceeded, "interval batch exceeds 4096 entries"))
+    # Caller-owned arrays/indexes/spans carry no authority. Reparse the actual
+    # revision once, then retain these fresh facts only inside this call.
+    val document = open_semantic_link_document_v1(snapshot.package, snapshot.module_path, snapshot.file, revision)?
+    val source = semantic_link_read_revision_v1(document.file, revision)?
+    var starts: [i64] = []
+    var ends: [i64] = []
+    var start = -1
+    var end = -1
+    for offset in 0..source.len():
+        val ch = source.slice(offset, offset + 1)
+        if ch == "\n":
+            starts.push(start)
+            ends.push(end)
+            start = -1
+            end = -1
+        elif ch != " " and ch != "\t" and ch != "\r":
+            if start < 0:
+                start = offset
+            end = offset + 1
+    if not source.ends_with("\n") and source.len() > 0:
+        starts.push(start)
+        ends.push(end)
+    # Carry nearest nonblank bounds, permitting blank lines around a range.
+    var next = -1
+    var previous = -1
+    var position = starts.len()
+    while position > 0:
+        position = position - 1
+        if starts[position] >= 0:
+            next = starts[position]
+        else:
+            starts[position] = next
+    for row in 0..ends.len():
+        if ends[row] >= 0:
+            previous = ends[row]
+        else:
+            ends[row] = previous
+    var uris: [text] = []
+    for range in ranges:
+        val first = range.0
+        val last = range.1
+        if first < 1 or last < first or last > starts.len():
+            return Err(semantic_link_error_v1(SemanticLinkFailureV1.InvalidSpan, "line range is outside source"))
+        val first_byte = starts[first - 1]
+        val last_byte = ends[last - 1]
+        if first_byte < 0 or last_byte <= first_byte:
+            return Err(semantic_link_error_v1(SemanticLinkFailureV1.InvalidSpan, "range contains no source token"))
+        var best = -1
+        var best_rank = 2
+        var best_width = source.len() + 1
+        var ambiguous = false
+        for row in 0..document.declarations.len():
+            val declaration = document.declarations[row]
+            if declaration.start <= first_byte and declaration.end >= last_byte:
+                val rank = if declaration.line == first: 0 else: 1
+                val width = declaration.end - declaration.start
+                if rank < best_rank or (rank == best_rank and width < best_width):
+                    best = row
+                    best_rank = rank
+                    best_width = width
+                    ambiguous = false
+                elif rank == best_rank and width == best_width and best >= 0:
+                    ambiguous = true
+        if ambiguous:
+            return Err(semantic_link_error_v1(SemanticLinkFailureV1.AmbiguousTarget, "line range has equally ranked parsed declarations"))
+        if best < 0:
+            return Err(semantic_link_error_v1(SemanticLinkFailureV1.UnresolvedTarget, "no parsed declaration encloses the complete range"))
+        uris.push(semantic_link_document_uri_v1(document, best, package_qualified)?)
+    # Producer already rejected duplicate IDs and fingerprint collisions.
+    # Revalidate once at publication, never per-link IO.
+    semantic_link_read_revision_v1(document.file, revision)?
+    Ok(uris)
+
+pub fn semantic_link_from_line_v1(document: SemanticLinkDocumentV1, revision: text, first_line: i64, last_line: i64, package_qualified: bool) -> Result<text, SemanticLinkErrorV1>:
+    val uris = semantic_links_from_lines_v1(document, revision, [(first_line, last_line)], package_qualified)?
+    Ok(uris[0])

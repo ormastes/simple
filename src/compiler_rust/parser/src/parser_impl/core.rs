@@ -750,7 +750,33 @@ impl<'a> Parser<'a> {
                     self.parse_var() // parse as var
                 }
             }
-            TokenKind::Unit => self.parse_unit(),
+            // `unit`/`newunit` declarations are always `unit <Name> ...`; a
+            // statement like `unit = x`, `unit += 1`, `unit.f = x` or
+            // `unit[i] = x` is an assignment to a variable named `unit`
+            // (expression position already reads it via
+            // `parse_keyword_identifier("unit")`).
+            TokenKind::Unit => {
+                if matches!(
+                    self.peek_next().kind,
+                    TokenKind::Assign
+                        | TokenKind::PlusAssign
+                        | TokenKind::MinusAssign
+                        | TokenKind::StarAssign
+                        | TokenKind::SlashAssign
+                        | TokenKind::PercentAssign
+                        | TokenKind::TildeAssign
+                        | TokenKind::TildePlusAssign
+                        | TokenKind::TildeMinusAssign
+                        | TokenKind::TildeStarAssign
+                        | TokenKind::TildeSlashAssign
+                        | TokenKind::Dot
+                        | TokenKind::LBracket
+                ) {
+                    self.parse_expression_or_assignment()
+                } else {
+                    self.parse_unit()
+                }
+            }
             TokenKind::HandlePool => self.parse_handle_pool(),
             TokenKind::Extern => self.parse_extern(),
             TokenKind::Macro => self.parse_macro_def(),
@@ -884,10 +910,18 @@ impl<'a> Parser<'a> {
                 // Check if this is a context statement (context expr:) or function call (context(...)) or BDD DSL (context "string":)
                 let next = self.peek_next();
 
-                // If next token is assignment, variable name, string literal (BDD), or paren (call)
+                // Comparison operators continue the identifier expression,
+                // including an implicit function tail such as `context != ""`.
+                // A DSL receiver still begins after `context` (e.g. `active:`).
                 if matches!(
                     &next.kind,
-                    TokenKind::Assign
+                    TokenKind::Eq
+                        | TokenKind::NotEq
+                        | TokenKind::Lt
+                        | TokenKind::Gt
+                        | TokenKind::LtEq
+                        | TokenKind::GtEq
+                        | TokenKind::Assign
                         | TokenKind::PlusAssign
                         | TokenKind::MinusAssign
                         | TokenKind::StarAssign

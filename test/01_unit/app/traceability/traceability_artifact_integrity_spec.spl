@@ -1,0 +1,55 @@
+# @tag:in-development
+# @req REQ-TRC-018
+use std.spec.*
+use std.common.crypto.sha256.{sha256_u8_hex}
+use test.system.app.traceability.feature.acceptance_helpers.{TrcRunArtifacts, trc_validate_artifact_integrity}
+
+fn _artifact_manifest_digest(source: text) -> text:
+    "sha256:" + sha256_u8_hex(source.bytes())
+
+fn _artifact_fixture(sdn: text, markdown: text) -> TrcRunArtifacts:
+    TrcRunArtifacts(
+        sdn: sdn,
+        markdown: markdown,
+        sdn_manifest_sha256: _artifact_manifest_digest(sdn),
+        markdown_manifest_sha256: _artifact_manifest_digest(markdown))
+
+describe "Traceability retained artifact integrity validation":
+    it "accepts exact hashes of the retained SDN and Markdown bytes":
+        val artifacts = _artifact_fixture("schema: simple.trace/v1\n", "# Trace result\n")
+        match trc_validate_artifact_integrity(artifacts):
+            case Ok(()): expect(artifacts.sdn_manifest_sha256).to_equal(_artifact_manifest_digest(artifacts.sdn))
+            case Err(reason): fail("matching retained artifacts were rejected: {reason}")
+
+    it "rejects changed retained bytes against the original manifest":
+        val original = _artifact_fixture("schema: simple.trace/v1\n", "# Trace result\n")
+        val changed = TrcRunArtifacts(
+            sdn: "schema: simple.trace/v1\n",
+            markdown: "# Tampered result\n",
+            sdn_manifest_sha256: original.sdn_manifest_sha256,
+            markdown_manifest_sha256: original.markdown_manifest_sha256)
+        match trc_validate_artifact_integrity(changed):
+            case Ok(()): fail("changed Markdown bytes matched the retained manifest")
+            case Err(reason): expect(reason).to_contain("Markdown bytes")
+
+    it "rejects a manifest digest that does not match the retained bytes":
+        val original = _artifact_fixture("schema: simple.trace/v1\n", "# Trace result\n")
+        val mismatched = TrcRunArtifacts(
+            sdn: original.sdn,
+            markdown: original.markdown,
+            sdn_manifest_sha256: "sha256:" + "0".repeat(64),
+            markdown_manifest_sha256: original.markdown_manifest_sha256)
+        match trc_validate_artifact_integrity(mismatched):
+            case Ok(()): fail("mismatched SDN digest was accepted")
+            case Err(reason): expect(reason).to_contain("SDN bytes")
+
+    it "rejects artifacts before hashing when an artifact exceeds the byte bound":
+        val oversized = "x".repeat(1_048_577)
+        val artifacts = TrcRunArtifacts(
+            sdn: oversized,
+            markdown: "# Trace result\n",
+            sdn_manifest_sha256: "sha256:" + "0".repeat(64),
+            markdown_manifest_sha256: _artifact_manifest_digest("# Trace result\n"))
+        match trc_validate_artifact_integrity(artifacts):
+            case Ok(()): fail("oversized artifact was hashed")
+            case Err(reason): expect(reason).to_contain("1 MiB")

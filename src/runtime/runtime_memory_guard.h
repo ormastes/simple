@@ -1,3 +1,4 @@
+#include "runtime_alloc_observer.h"
 /*
  * Sampled guard-page allocator (plan M2, native-C mirror).
  *
@@ -117,6 +118,7 @@ static void* rt_mem_guard_alloc_sampled(size_t size) {
     void* base = mmap(NULL, map_len, PROT_READ | PROT_WRITE,
                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (base == MAP_FAILED) return NULL;
+    rt_alloc_observer_success_v1();
 
     uint8_t* page_base = (uint8_t*)base;
     uint8_t* trailing_page = page_base + RT_MEM_GUARD_PAGE_SIZE * (1 + data_pages);

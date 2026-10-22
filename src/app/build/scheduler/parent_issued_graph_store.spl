@@ -1,0 +1,91 @@
+# Separate content-addressed namespace for administrator-issued graph records.
+use app.io.mod.{file_read_regular_no_follow_bounded, file_create_exclusive,
+    file_fsync, directory_fsync, secure_temp_dir, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{file_publish_noreplace}
+use app.build.scheduler.parent_issued_plan_store.{ParentIssuedPlanPublishV1,
+    issued_store_root_valid_v1}
+use app.build.scheduler.parent_issued_graph_wire.{ParentIssuedGraphWireV1,
+    PARENT_ISSUED_GRAPH_MAX_BYTES_V1, parse_parent_issued_graph_wire_v1}
+use app.build.scheduler.planner.{scheduler_action_digest_valid_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+struct ParentIssuedGraphLoadV1:
+    valid: bool
+    reason: text
+    record_digest: text
+    record: ParentIssuedGraphWireV1?
+
+fn _issued_graph_path_v1(root: text, digest: text) -> text:
+    root + "/graph-plans/" + digest + ".wire"
+
+fn _issued_graph_load_reject_v1(reason: text) -> ParentIssuedGraphLoadV1:
+    ParentIssuedGraphLoadV1(false, reason, "", nil)
+
+fn load_issued_parent_graph_v1(trusted_root: text,
+        record_digest: text) -> ParentIssuedGraphLoadV1:
+    if not issued_store_root_valid_v1(trusted_root) or
+       not scheduler_action_digest_valid_v1(record_digest):
+        return _issued_graph_load_reject_v1("issued-graph-lookup-invalid")
+    val read = file_read_regular_no_follow_bounded(
+        _issued_graph_path_v1(trusted_root, record_digest),
+        PARENT_ISSUED_GRAPH_MAX_BYTES_V1)
+    if read.is_err() or sha256_text(read.unwrap()) != record_digest:
+        return _issued_graph_load_reject_v1("issued-graph-record-mismatch")
+    val parsed = parse_parent_issued_graph_wire_v1(read.unwrap())
+    if not parsed.valid:
+        return _issued_graph_load_reject_v1(parsed.reason)
+    ParentIssuedGraphLoadV1(true, "", record_digest, parsed)
+
+fn _issued_graph_existing_v1(trusted_root: text,
+        digest: text) -> ParentIssuedPlanPublishV1:
+    val path = _issued_graph_path_v1(trusted_root, digest)
+    val directory = trusted_root + "/graph-plans"
+    val synced = file_fsync(path) and directory_fsync(directory)
+    val retained = load_issued_parent_graph_v1(trusted_root, digest)
+    if not retained.valid:
+        return ParentIssuedPlanPublishV1(false, false,
+            "issued-graph-existing-invalid", digest)
+    ParentIssuedPlanPublishV1(true, synced,
+        if synced: "issued-graph-already-present" else:
+            "issued-graph-durability-uncertain", digest)
+
+fn publish_issued_parent_graph_v1(trusted_root: text,
+        wire: text) -> ParentIssuedPlanPublishV1:
+    """Publish one approved graph record without replacing any prior record."""
+    val parsed = parse_parent_issued_graph_wire_v1(wire)
+    if not issued_store_root_valid_v1(trusted_root) or not parsed.valid:
+        return ParentIssuedPlanPublishV1(false, false,
+            "issued-graph-publication-invalid", "")
+    val digest = sha256_text(wire)
+    val existing = load_issued_parent_graph_v1(trusted_root, digest)
+    if existing.valid:
+        return _issued_graph_existing_v1(trusted_root, digest)
+    val directory = trusted_root + "/graph-plans"
+    val temporary = secure_temp_dir(directory, "graph-plan-")
+    if temporary.is_err():
+        return ParentIssuedPlanPublishV1(false, false,
+            "issued-graph-stage-unavailable", digest)
+    val stage = temporary.unwrap()
+    val staged_file = stage + "/record.wire"
+    if not file_create_exclusive(staged_file, wire) or
+       not file_fsync(staged_file):
+        dir_remove_all(stage)
+        return ParentIssuedPlanPublishV1(false, false,
+            "issued-graph-stage-write-failed", digest)
+    val destination = _issued_graph_path_v1(trusted_root, digest)
+    val published = file_publish_noreplace(staged_file, destination)
+    if published.is_err():
+        dir_remove_all(stage)
+        return ParentIssuedPlanPublishV1(false, false,
+            "issued-graph-publish-failed", digest)
+    if not published.unwrap():
+        dir_remove_all(stage)
+        return _issued_graph_existing_v1(trusted_root, digest)
+    val durable = directory_fsync(directory)
+    dir_remove_all(stage)
+    ParentIssuedPlanPublishV1(true, durable,
+        if durable: "issued-graph-published" else:
+            "issued-graph-durability-uncertain", digest)
+
+export ParentIssuedGraphLoadV1
+export load_issued_parent_graph_v1, publish_issued_parent_graph_v1

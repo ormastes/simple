@@ -8,6 +8,7 @@ use compiler.hir.hir_types.{SymbolTable}
 use compiler.frontend.core.lexer.*
 use compiler.traits.trait_def.{SolverTraitDef, SolverTraitBound, AssocTypeDef, MethodSignature}
 use compiler.traits.trait_impl.{ImplBlock}
+use compiler.traits.trait_impl_bindings_v1.{trait_impl_bindings_v1}
 use compiler.common.cache.reverse_reference_facts.{
     reverse_reference_owner_mark_incomplete_v1,
     reverse_reference_register_trait_candidate_v1
@@ -182,6 +183,10 @@ class TraitSolver:
     # Cache of solved obligations: (type, trait) -> success
     cache: Dict<(HirType, HirSymbol), bool>
 
+    # Only pending proofs, never optimistic successes; reset after each call.
+    active: Dict<(HirType, HirSymbol), bool> = {}
+    active_count: i64 = 0
+
     # Current obligations to solve
     obligations: [Obligation]
 
@@ -225,6 +230,9 @@ impl TraitSolver:
         Collects all method names (both required and default) into
         trait_methods for efficient lookup during method resolution.
         """
+        # Trait replacement can change supertrait requirements for any cached
+        # obligation, including obligations on traits which depend on this one.
+        self.cache = {}
         self.traits[trait_def.name] = trait_def
 
         var assoc_resolver = self.assoc_resolver
@@ -246,6 +254,9 @@ impl TraitSolver:
         Indexes by both trait name and target type for efficient lookup.
         Also registers with the associated type resolver.
         """
+        # A new impl can satisfy a cached miss or make a cached success
+        # ambiguous. Dependent supertrait decisions must also be recomputed.
+        self.cache = {}
         val trait_name = impl_block.trait_name
         val type_identity = trait_reverse_type_identity_v1(
             impl_block.for_type, self.reverse_symbols)
@@ -327,7 +338,19 @@ impl TraitSolver:
             Err(errors)
 
     me solve_obligation(obligation: Obligation) -> Result<(), TraitError>:
-        """Solve a single obligation."""
+        """Prove the full conditional closure before reporting success."""
+        val key = (obligation.type_, obligation.trait_)
+        if self.active.has(key) and self.active[key]:
+            return Err(TraitError.CyclicBound(obligation.trait_, obligation.span))
+        self.active[key] = true
+        self.active_count = self.active_count + 1
+        val result = self.solve_obligation_inner_v1(obligation)
+        self.active[key] = false
+        self.active_count = self.active_count - 1
+        if self.active_count == 0: self.active = {}
+        result
+
+    me solve_obligation_inner_v1(obligation: Obligation) -> Result<(), TraitError>:
         val ty = obligation.type_
         val trait_ = obligation.trait_
 
@@ -340,39 +363,55 @@ impl TraitSolver:
                 else:
                     return Err(TraitError.Unsatisfied(obligation))
 
-        # Search for impl
-        match self.find_impl(ty, trait_):
+        # Retain every matching declaration for a useful ambiguity diagnostic.
+        # Do not choose by registration order or cache ambiguity as a boolean:
+        # that would erase the candidates on the next solve.
+        var candidates: [ImplBlock] = []
+        var bindings: Dict<i64, HirType> = {}
+        if self.impls[trait_].?:
+            for impl_block in self.impls[trait_]:
+                if val matched = trait_impl_bindings_v1(impl_block, ty, self.reverse_symbols):
+                    candidates = candidates.push(impl_block)
+                    bindings = matched
+        if candidates.len() > 1:
+            return Err(TraitError.Ambiguous(ty, trait_, candidates))
+        val selected: ImplBlock? = if candidates.len() == 1: Some(candidates[0]) else: nil
+        match selected:
             case Some(impl_block):
                 # Check where clauses recursively
                 for bound in impl_block.where_clause:
-                    match self.solve_trait_bound(bound, obligation.span):
+                    match self.solve_instantiated_trait_bound_v1(bound, bindings, obligation):
                         case Err(e):
-                            self.cache[cache_key] = false
+                            match e:
+                                case TraitError.Ambiguous(_, _, _) | TraitError.CyclicBound(_, _): return Err(e)
+                                case _:
+                                    if not obligation.has_assoc_constraints(): self.cache[cache_key] = false
                             return Err(e)
                         case _: pass
 
                 # Check supertrait obligations
                 match self.check_supertraits(ty, trait_, obligation.span):
                     case Err(e):
-                        self.cache[cache_key] = false
+                        match e:
+                            case TraitError.Ambiguous(_, _, _) | TraitError.CyclicBound(_, _): return Err(e)
+                            case _:
+                                if not obligation.has_assoc_constraints(): self.cache[cache_key] = false
                         return Err(e)
                     case _: pass
 
-                # Check associated type constraints
+                # Associated predicates never populate the unconstrained cache.
                 if obligation.has_assoc_constraints():
                     match self.check_assoc_type_constraints(obligation, impl_block):
-                        case Err(e):
-                            self.cache[cache_key] = false
-                            return Err(e)
+                        case Err(e): return Err(e)
                         case _: pass
 
                 # Success - cache it
-                self.cache[cache_key] = true
+                if not obligation.has_assoc_constraints(): self.cache[cache_key] = true
                 Ok(())
 
             case nil:
                 # No impl found - cache failure
-                self.cache[cache_key] = false
+                if not obligation.has_assoc_constraints(): self.cache[cache_key] = false
                 Err(TraitError.Unsatisfied(obligation))
 
     fn find_impl(ty: HirType, trait_: HirSymbol) -> ImplBlock?:
@@ -387,17 +426,19 @@ impl TraitSolver:
 
         nil
 
+    me solve_instantiated_trait_bound_v1(bound: SolverTraitBound, bindings: Dict<i64, HirType>, parent: Obligation) -> Result<(), TraitError>:
+        if not bindings.has(bound.type_param.id.id):
+            return Err(TraitError.Unsatisfied(parent))
+        val child = Obligation.create(bindings[bound.type_param.id.id], bound.trait_name,
+            ObligationCause.SolverTraitBound(bound.type_param), parent.span)
+        self.solve_obligation(child)
+
     me solve_trait_bound(bound: SolverTraitBound, span: Span) -> Result<(), TraitError>:
-        """Solve a trait bound from a where clause."""
-        val ty = HirType(
-            kind: HirTypeKind.TypeParam(bound.type_param, []),
-            span: bound.span
-        )
-
-        val cause = ObligationCause.SolverTraitBound(bound.type_param)
-        self.add_obligation(ty, bound.trait_name, cause, span)
-
-        Ok(())
+        # Legacy direct API has no matched impl or argument assignment. It must
+        # never enqueue an unproved bound and report success.
+        val unresolved = HirType(kind: HirTypeKind.TypeParam(bound.type_param.name, []), span: bound.span)
+        Err(TraitError.Unsatisfied(Obligation.create(unresolved, bound.trait_name,
+            ObligationCause.SolverTraitBound(bound.type_param), span)))
 
     me check_supertraits(ty: HirType, trait_: HirSymbol, span: Span) -> Result<(), TraitError>:
         """Check that type implements all supertraits of the given trait."""
@@ -457,10 +498,6 @@ impl TraitSolver:
                 impl_block.get_assoc_type_impl(assoc_name)
             case nil:
                 nil
-
-    fn get_assoc_resolver() -> AssocTypeResolver:
-        """Get the associated type resolver for external use."""
-        self.assoc_resolver
 
     fn normalize_type(ty: HirType) -> HirType:
         """Normalize a type by resolving all associated type projections."""
