@@ -1,6 +1,6 @@
 # Parser proof captured before transient AST reclamation. No MIR/backend imports:
 # the phase-2 parser must not acquire the native codegen dependency closure.
-use compiler.hir.hir_lowering.module_surface_declarations.{ModuleSurfaceParserOwner}
+use compiler.hir.hir_lowering.module_surface_declarations.{ModuleSurfaceParserOwner, module_surface_owner_value}
 use compiler.hir.hir_lowering.module_surface.{module_surface_canonical_path}
 use compiler.frontend.parser_types.{ParserModule}
 use compiler.frontend.parser_types_expr.{parser_type_kind_named_name, parser_type_kind_named_args}
@@ -8,19 +8,20 @@ use compiler.common.driver_core_types.{SourceFile}
 use std.common.crypto.sha256.{sha256_text}
 
 pub fn driver_native_parser_impls_are_enum_templates_v1(owner: ModuleSurfaceParserOwner) -> bool:
+    val value: ParserModule = module_surface_owner_value(owner)
     # This is only a declaration-side candidate. Full HIR bodies still lower
     # and remain in the canonical cache/archive. Native admission separately
     # requires EMPTY FINAL MIR, after monomorphization and error checks.
     # A requested specialization therefore needs its ordinary real object.
-    for impl_ in owner.value.impls:
+    for impl_ in value.impls:
         if impl_.has_trait_ or impl_.assoc_types.len() != 0 or impl_.where_clause.len() != 0:
             return false
         if impl_.type_params.len() == 0:
             return false
         val name = parser_type_kind_named_name(impl_.type_.kind)
-        if name == "" or not owner.value.enums.has(name):
+        if name == "" or not value.enums.has(name):
             return false
-        val definition = owner.value.enums[name]
+        val definition = value.enums[name]
         val args = parser_type_kind_named_args(impl_.type_.kind)
         if definition.type_params.len() == 0 or args.len() != 0 or
                 definition.type_params.len() != impl_.type_params.len():
@@ -46,6 +47,7 @@ pub fn driver_native_parser_impls_are_enum_templates_v1(owner: ModuleSurfacePars
     true
 
 pub fn driver_native_parser_is_declaration_only(owner: ModuleSurfaceParserOwner) -> bool:
+    val value: ParserModule = module_surface_owner_value(owner)
     # Extern-only declaration modules (e.g. std.nogc_sync_mut.env.types: only
     # `extern fn rt_env_*` + export) legitimately lower to a MIR module with
     # zero functions — the externs resolve at link time. Treat them like the
@@ -54,8 +56,8 @@ pub fn driver_native_parser_is_declaration_only(owner: ModuleSurfaceParserOwner)
     # HIR had bodies, so an empty MIR is a real lowering bug and must stay
     # loud (bug bootstrap_stage2_empty_mir_bodies_2026-07-05).
     var only_extern_functions = true
-    for fn_name in owner.value.functions.keys():
-        val parsed_fn = owner.value.functions[fn_name]
+    for fn_name in value.functions.keys():
+        val parsed_fn = value.functions[fn_name]
         if not parsed_fn.is_extern:
             only_extern_functions = false
     # `export use backend.{...}` facades produce an ParserImport record but NO
@@ -67,22 +69,23 @@ pub fn driver_native_parser_is_declaration_only(owner: ModuleSurfaceParserOwner)
     # intentionally empty and can still be reached through a facade. Parser
     # presence and the body/data guards remain mandatory, so missing lowering
     # output for a real definition is never silently accepted.
-    (owner.value.domain_blocks.len() == 0 and
-        only_extern_functions and owner.value.classes.len() == 0 and owner.value.actors.len() == 0 and
+    (value.domain_blocks.len() == 0 and
+        only_extern_functions and value.classes.len() == 0 and value.actors.len() == 0 and
         driver_native_parser_impls_are_enum_templates_v1(owner) and
-        owner.value.constants.len() == 0 and owner.value.static_asserts.len() == 0 and
-        owner.value.aop_advices.len() == 0 and owner.value.di_bindings.len() == 0 and
-        owner.value.arch_rules.len() == 0 and owner.value.mock_decls.len() == 0)
+        value.constants.len() == 0 and value.static_asserts.len() == 0 and
+        value.aop_advices.len() == 0 and value.di_bindings.len() == 0 and
+        value.arch_rules.len() == 0 and value.mock_decls.len() == 0)
 
 
 # Persist a stricter fact than the legacy retained-parser compatibility path:
 # trait default method bodies require independent emission authority and must
 # not become trusted merely because both parser and MIR bodies disappeared.
 pub fn driver_native_parser_can_persist_objectless(owner: ModuleSurfaceParserOwner) -> bool:
+    val value: ParserModule = module_surface_owner_value(owner)
     if not driver_native_parser_is_declaration_only(owner):
         return false
-    for trait_name in owner.value.traits.keys():
-        for method in owner.value.traits[trait_name].methods:
+    for trait_name in value.traits.keys():
+        for method in value.traits[trait_name].methods:
             if not method.body.stmts.is_empty():
                 return false
     # Struct defaults are HirField metadata, evaluated by constructor lowering
