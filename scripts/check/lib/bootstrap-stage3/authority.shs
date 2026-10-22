@@ -2205,8 +2205,50 @@ bootstrap_stage3_resolve_llvm_build_authority() (
     [ "$bootstrap_stage3_llvm_config_sha256" = \
         "$(bootstrap_stage3_hash_file \
             "$bootstrap_stage3_llvm_config_canonical")" ] || return 1
-    case "$(uname -s 2>/dev/null || echo unknown)" in
+    case "$(uname -s 2>/dev/null || echo unknown):${SIMPLE_WINDOWS_ABI:-gnu}" in
+        MSYS*:gnu|MINGW*:gnu|CYGWIN*:gnu)
+            # Default MinGW UCRT lane: MSYS2 CLANG64's LLVM is a shared build.
+            # Rust bindings link its import library (lib/libLLVM.dll.a) and
+            # load bin/libLLVM-<major>.dll. Only llvm-backend lanes reach
+            # here; Cranelift lanes return llvm-build-status=disabled above.
+            [ "$bootstrap_stage3_llvm_version" = 23.1.1 ] || {
+                echo "llvm authority: Windows bootstrap requires LLVM 23.1.1, found ${bootstrap_stage3_llvm_version}" >&2
+                return 1
+            }
+            bootstrap_stage3_llvm_c_import=$(
+                bootstrap_stage3_canonical_file \
+                    "$bootstrap_stage3_llvm_prefix/lib/libLLVM.dll.a"
+            ) || {
+                echo "llvm authority: CLANG64 LLVM is missing lib/libLLVM.dll.a under ${bootstrap_stage3_llvm_prefix}" >&2
+                return 1
+            }
+            bootstrap_stage3_llvm_c_runtime=$(
+                bootstrap_stage3_canonical_file \
+                    "$bootstrap_stage3_llvm_prefix/bin/libLLVM-$bootstrap_stage3_llvm_major.dll"
+            ) || {
+                echo "llvm authority: CLANG64 LLVM is missing bin/libLLVM-${bootstrap_stage3_llvm_major}.dll under ${bootstrap_stage3_llvm_prefix}" >&2
+                return 1
+            }
+            printf 'llvm-build-status=enabled\nllvm-version=%s\nllvm-major=%s\n' \
+                "$bootstrap_stage3_llvm_version" \
+                "$bootstrap_stage3_llvm_major"
+            printf 'llvm-prefix=%s\nllvm-link-kind=dynamic-c-api\n' \
+                "$bootstrap_stage3_llvm_prefix"
+            printf 'llvm-config-path=%s\nllvm-config-sha256=%s\n' \
+                "$bootstrap_stage3_llvm_config_canonical" \
+                "$bootstrap_stage3_llvm_config_sha256"
+            printf 'llvm-c-import-lib-path=%s\nllvm-c-import-lib-sha256=%s\n' \
+                "$bootstrap_stage3_llvm_c_import" \
+                "$(bootstrap_stage3_hash_file \
+                    "$bootstrap_stage3_llvm_c_import")"
+            printf 'llvm-c-runtime-dll-path=%s\nllvm-c-runtime-dll-sha256=%s\n' \
+                "$bootstrap_stage3_llvm_c_runtime" \
+                "$(bootstrap_stage3_hash_file \
+                    "$bootstrap_stage3_llvm_c_runtime")"
+            return 0
+            ;;
         MSYS*|MINGW*|CYGWIN*)
+            # Explicit SIMPLE_WINDOWS_ABI=msvc lane.
             # The official LLVM 23 Windows archive is a static LLVM build, so
             # llvm-config advertises its build-tree static dependency closure.
             # That closure is not the installed C API contract: it may contain
@@ -4272,7 +4314,9 @@ bootstrap_stage3_stage_windows_llvm_import() (
         exit 0
     fi
     # The current Windows producer authority is the official x64 LLVM 23.1.1
-    # dynamic-C-API package. Other architectures require their own admission.
+    # dynamic-C-API package (explicit msvc lane). Other architectures, and
+    # the CLANG64 gnu lane's libLLVM.dll.a, require their own admission; the
+    # gnu lane's Cranelift bootstrap does not reach this function.
     [ "$llvm_target" = x86_64-pc-windows-msvc ] || exit 1
     for llvm_key in llvm-build-status llvm-link-kind llvm-c-import-lib-path llvm-c-import-lib-sha256; do
         [ "$(printf '%s\n' "$llvm_authority" | awk -F= -v key="$llvm_key" '$1 == key { n++ } END { print n+0 }')" = 1 ] || exit 1
