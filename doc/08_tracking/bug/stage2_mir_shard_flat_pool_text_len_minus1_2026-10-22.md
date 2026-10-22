@@ -274,3 +274,43 @@ store encode (which ParserModule field, decoded from which pool row);
 (2) stat `cache/default/frontend` at store time in both processes;
 (3) if (a): bind the decode scope owner across the store; if (b): fix the
 decode field offset.
+
+## Update 5 (2026-10-22, later) — store-path reading corrected; file/dir race exonerated; capture-blob + emission-record suspects
+
+Two corrections to Update 4's model, from reading frontend_parse_cache.spl
+and frontend.spl:
+
+1. **The stored blob is NOT a re-encode of the decoded module.** The parse
+   path encodes DURING the fresh parse: `flat_pool_capture_arm()` before
+   `parse_and_build_module_scoped(...)`, `flat_pool_capture_take()` after;
+   `frontend_parse_cache_store(key, captured_blob)` just writes those bytes
+   (frontend.spl:166-171, frontend_parse_cache.spl:174-190). So the panicking
+   flat-pool encode is whichever encode runs at that point in the worker —
+   and the log places the panic at the START of the worker's hir phase
+   (right after `[bootstrap-error-count] point=entry`), i.e. NOT the parse
+   capture. Prime suspect: the **HIR emission-record publication**
+   (`RuntimeStdMirModuleEmissionV1`, driver_pipeline_lowering.spl:540-604
+   family) whose first text field (module/source identity) is invalid in the
+   worker's scope.
+2. **The `frontend` file/dir race is exonerated.** All preserved repro trees
+   (`/tmp/p2g3`, `/tmp/p2gate2`, `/tmp/p2g4`) show `cache/default/frontend/`
+   as a consistent DIRECTORY holding the `.fpc` file, queues, and BLOCKED
+   markers. `dir_create_all` returned true in the failure message; the write
+   itself failed (`file_write_exact`, io_runtime.spl:278 — one-shot write via
+   `file_write_bytes`). With pid-unique tmp + rename, a same-key concurrent
+   store from the driver process (sharing violation on tmp create, or
+   file_write_bytes' internal policy) is the remaining explanation for the
+   store-failed line — a cache-efficiency defect, not the crash.
+
+### Next probes
+
+1. Print the emission-record text fields (module_identity, source_identity)
+   at publish time in the mir worker — which one is invalid and where it was
+   built (driver-side receipt? worker-side re-parse? queue-file read?).
+2. If driver-side: the receipt/emission texts cross into the worker via the
+   mir-queue ledger files — check the decode of those rows (same aggregate
+   decode family as the .fpc suspicion).
+3. The store-failed line: `file_write_bytes` status for the pid-unique tmp
+   under concurrent same-key stores (driver + worker share one cache dir by
+   design — "shard workers of step 4 run in parallel processes over one
+   cache dir", frontend_parse_cache.spl:170-172).
