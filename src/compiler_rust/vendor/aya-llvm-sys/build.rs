@@ -691,22 +691,23 @@ fn is_llvm_debug(llvm_config_path: &Path) -> bool {
 }
 
 const REQUIRED_LLVM_VERSION: &str = "23.1.1";
-// Native Linux and FreeBSD llvm23 packages ship 23.1.2. Mirrors
-// `_llvm23_version_admitted` in scripts/setup/platform-detect.shs: admitted
-// only when the build HOST is Linux or FreeBSD (in a build script
-// `cfg!(target_os)` is the host), so a cross-target build cannot grant it.
-const POSIX_ADMITTED_LLVM_VERSION: &str = "23.1.2";
+// Mirrors `_llvm23_version_admitted` in scripts/setup/platform-detect.shs:
+// the MAJOR version is strict (23); any other 23.x.y builds with a warning.
+const REQUIRED_LLVM_MAJOR: &str = "23";
 
 fn require_pinned_llvm_version(llvm_config_path: &Path) {
     let actual = llvm_config(llvm_config_path, ["--version"]);
     let actual = actual.trim();
-    let admitted = actual == REQUIRED_LLVM_VERSION
-        || (cfg!(any(target_os = "linux", target_os = "freebsd"))
-            && actual == POSIX_ADMITTED_LLVM_VERSION);
+    let major = actual.split('.').next().unwrap_or("");
     assert!(
-        admitted,
-        "aya-llvm-sys is pinned to LLVM {REQUIRED_LLVM_VERSION} (native Linux/FreeBSD host: {POSIX_ADMITTED_LLVM_VERSION}); llvm-config reported {actual}"
+        major == REQUIRED_LLVM_MAJOR,
+        "aya-llvm-sys requires LLVM {REQUIRED_LLVM_MAJOR}.x (reference {REQUIRED_LLVM_VERSION}); llvm-config reported {actual}"
     );
+    if actual != REQUIRED_LLVM_VERSION {
+        println!(
+            "cargo:warning=LLVM {actual} admitted by major {REQUIRED_LLVM_MAJOR} (reference {REQUIRED_LLVM_VERSION})"
+        );
+    }
 }
 
 fn link_windows_llvm_c(llvm_config_path: &Path) {
