@@ -114,9 +114,21 @@ case $target in freebsd-*) linker_env="CARGO_TARGET_${upper}_LINKER=$linker" ;; 
 runtime=src/compiler_rust/target/$rust/bootstrap
 
 out_dir=build/cross/$target
-mkdir -p "$out_dir"
+mkdir -p "$out_dir/bin"
 seed_env=
 [ "$compiler" = "$seed" ] && seed_env=SIMPLE_NATIVE_BUILD_RUST=1
+
+# The native-build's own C steps (runtime capsule `-r` closure, generated
+# C) honor $CC with no notion of the target CPU, so hand them a clang that
+# targets it; the host /usr/bin/ld rejects RISC-V objects otherwise.
+clang_triple=${triple%%-unknown-*}-${triple#*-unknown-}
+case $target in linux-*) clang_triple=${triple%%-unknown-*}-linux-gnu ;; esac
+sysroot_arg=
+case $target in freebsd-*) sysroot_arg="--sysroot=$sysroot" ;; esac
+printf '#!/bin/sh\nexec clang --target=%s %s "$@"\n' "$clang_triple" "$sysroot_arg" > "$out_dir/bin/cc"
+chmod +x "$out_dir/bin/cc"
+CC=$(pwd)/$out_dir/bin/cc
+export CC
 
 cross_build() { # <entry> <output>
   rm -f "$2"
