@@ -126,3 +126,30 @@ collections.rs merge correctly retains both promote exemptions.
 Next: either compile a -g (line-info) candidate for an exact fault line, or
 move per-helper env-gated traces into _surface_fold/_surface_mix_text/
 _surface_function to name the corrupting field.
+
+## Update: DEFINITIVE root cause — class-with-large-struct-field read returns garbage
+
+Trace chain (all committed): `module_surface_from_owner` entry prints with a
+valid owner reference (`owner_nil=false`); `val module_local: ParserModule =
+owner.value` then reads `module_local.name.len() == -1` and
+`module_local.functions.len() == -1` — the struct FIELD of the class
+`ModuleSurfaceParserOwner` (`value: ParserModule`, a 15+ field struct stored
+inline) reads back garbage in the self-hosted candidate. The callee
+(`module_surface_semantic_projection`) consequently SIGSEGVs in its prologue
+before executing any body statement (an unconditional entry eprint never
+printed; the crash PC lands in the callee's symbol region — a nearest-symbol
+artifact). Local binds at BOTH the call site and the wrapper constructor
+(`static fn new(value: ParserModule)`) do NOT rescue it — the corruption is
+the class field store/read itself for large inline struct fields.
+
+This is the same by-value/aggregate-transport family as the NLL
+`live_aliases` array-argument corruption (fixed by module-scope free-function
+conversion) and the poll/future generic-enum-pattern case (fixed by local
+bind — shallower shape).
+
+Source-level workaround candidate (not yet attempted): flatten
+`ModuleSurfaceParserOwner` to handle-sized fields (`name: text`,
+`functions: Dict<...>`, … one slot per ParserModule limb, all 8-byte
+handles/texts) and reconstruct the ParserModule at the use site — avoiding
+any large inline-struct class field. The proper repair is in the compiler's
+class-field layout/copy for large inline structs.
