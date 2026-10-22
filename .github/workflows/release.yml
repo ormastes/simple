@@ -67,9 +67,11 @@ jobs:
           # Linux platforms
           - os: ubuntu-latest
             platform: linux-x86_64
-          - os: ubuntu-latest
+          # Native arm64 runner: builds the phase-1 compiler on the target
+          # instead of a cross seed that cannot satisfy release.
+          - os: ubuntu-24.04-arm
             platform: linux-aarch64
-            cross_compile: true
+            experimental: true
           - os: ubuntu-latest
             platform: linux-riscv64
             cross_compile: true
@@ -100,7 +102,7 @@ jobs:
     # blocking); FreeBSD is blocked; aarch64/riscv64 are experimental; and the
     # cross/freebsd legs build bootstrap-only seeds that refuse release by
     # design. Keep those rows visible without letting them hold the release.
-    continue-on-error: ${{ matrix.cross_compile == true || contains(matrix.platform, 'freebsd') || startsWith(matrix.os, 'macos') }}
+    continue-on-error: ${{ matrix.cross_compile == true || matrix.experimental == true || contains(matrix.platform, 'freebsd') || startsWith(matrix.os, 'macos') }}
     # Windows x86_64 C toolchain authority (same pin as windows-build.yml):
     # src/compiler_rust/lib/build.rs refuses cl.exe for the MSVC target.
     env:
@@ -112,8 +114,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Rust toolchain (macOS/Windows)
-        if: runner.os == 'macOS' || runner.os == 'Windows'
+      - name: Setup Rust toolchain (macOS/Windows/Linux arm64)
+        if: runner.os == 'macOS' || runner.os == 'Windows' || matrix.platform == 'linux-aarch64'
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Cache Rust build artifacts (macOS/Windows)
@@ -309,8 +311,8 @@ jobs:
 
       # native-build's core-C archive step requires unsuffixed clang/LLVM tools
       # (llvm-ar); hosted ubuntu runners lack them (same install as build-binaries.yml).
-      - name: Install build tools (Linux x86_64)
-        if: runner.os == 'Linux' && matrix.platform == 'linux-x86_64'
+      - name: Install build tools (Linux x86_64/arm64)
+        if: runner.os == 'Linux' && (matrix.platform == 'linux-x86_64' || matrix.platform == 'linux-aarch64')
         shell: bash
         run: |
           if command -v clang >/dev/null && command -v llvm-ar >/dev/null && command -v ld.lld >/dev/null && command -v llvm-nm >/dev/null && pkg-config --exists libunwind; then
@@ -323,15 +325,15 @@ jobs:
 
       - name: Build next phase with configured previous compiler (config/bootstrap.sdn)
         id: prevc_linux
-        if: runner.os == 'Linux' && matrix.platform == 'linux-x86_64'
+        if: runner.os == 'Linux' && (matrix.platform == 'linux-x86_64' || matrix.platform == 'linux-aarch64')
         continue-on-error: true
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: sh scripts/bootstrap/build-next-phase-ci.shs "${{ matrix.platform }}" 4
 
-      - name: Build native Linux x86_64 binary via bootstrap-only Rust seed
-        if: runner.os == 'Linux' && matrix.platform == 'linux-x86_64' && steps.prevc_linux.outputs.built != 'true'
+      - name: Build native Linux x86_64/arm64 binary via bootstrap-only Rust seed
+        if: runner.os == 'Linux' && (matrix.platform == 'linux-x86_64' || matrix.platform == 'linux-aarch64') && steps.prevc_linux.outputs.built != 'true'
         shell: bash
         run: |
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -685,6 +687,12 @@ jobs:
               ls -lh "$NATIVE_BIN"
             else
               echo "✗ native-build failed or binary broken; bootstrap-only Rust seed cannot satisfy release"
+              if [ -f "$NATIVE_BIN" ]; then
+                # Name the cause: stderr of the failing --version (a hit stub
+                # prints its own symbol name) and the stub list from the link.
+                "./$NATIVE_BIN" --version; echo "--version exit=$?"
+                cat "$NATIVE_BIN.stubbed_symbols.txt" 2>/dev/null | head -120
+              fi
               echo "NEW_RUNTIME_BUILT=false" >> $GITHUB_ENV
               exit 1
             fi
