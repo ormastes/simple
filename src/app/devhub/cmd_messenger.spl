@@ -1,0 +1,315 @@
+# devhub messenger — CLI verbs (first slice): `targets`, `doctor --target T`.
+#
+# Plan: simple_devhub_sqlite_sqlcipher_messenger_master_plan_2026-10-21.md
+# §11.1 (CLI grammar: `devhub messenger targets`, `devhub messenger doctor
+# --target T`), §11.2 (exit codes and structured error states: 0 success,
+# 2 usage/config, 3 permission denied, 4 unsupported capability), §11.1
+# redaction rule (no keys, tokens, absolute paths, or secret refs in output).
+#
+# Every result carries the structured fields target/action/status/warnings;
+# `--json` emits one JSON record per line (stable machine output), the
+# default human view prints a table plus a trailing `result {...}` record.
+#
+# LAZY CLOSURE: this module is imported by main.spl's dispatch, but nothing
+# here runs at import time — no env reads, no filesystem, no registry
+# mutation. All I/O happens inside handle_messenger after the `messenger`
+# verb is matched. The pure builders below are the offline-testable surface
+# (the gh-compat lesson: translation/policy pure, I/O thin).
+
+use app.devhub.messenger.config.{
+    MessengerConfig, MessengerTarget, load_messenger_config,
+    resolve_messenger_target
+}
+use app.devhub.messenger.policy.{
+    target_is_read_only, target_read_capabilities, check_send, messenger_body_digest,
+    SendConfirmReceipt
+}
+use app.devhub.messenger.plugin_access.{
+    messenger_load_adapter, port_call_send, MESSENGER_PORT_CAPABILITY_UNAVAILABLE
+}
+use app.devhub.messenger.schema_profile.{schema_profile_fingerprint}
+use app.devhub.flags.{_extract_flag, _has_flag}
+use app.io.mod.{file_exists}
+
+
+fn _lb() -> text:
+    # A brace pair inside a double-quoted Simple string is interpolation and
+    # }} collapses silently, so literal JSON braces are composed, not typed
+    # (house rule: gh_compat._lb/_rb, adapter_bitbucket._bb_lbrace).
+    "{"
+
+
+fn _rb() -> text:
+    "}"
+
+
+fn _json_escape(value: text) -> text:
+    value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r")
+
+
+fn _json_str_list(values: [text]) -> text:
+    var out = "["
+    var i = 0
+    while i < values.len():
+        if i > 0:
+            out = out + ","
+        out = out + "\"{_json_escape(values[i])}\""
+        i = i + 1
+    out + "]"
+
+
+fn _bool_json(value: bool) -> text:
+    if value:
+        return "true"
+    "false"
+
+
+# ----------------------------------------------------------------------------
+# Pure record builders (specs drive these)
+# ----------------------------------------------------------------------------
+
+fn _target_warnings(target: MessengerTarget) -> [text]:
+    var warnings: [text] = []
+    if target_is_read_only(target):
+        warnings = warnings + ["read-only source: send and all source writes are structurally denied"]
+    warnings
+
+
+fn messenger_targets_json(config: MessengerConfig) -> text:
+    """One JSON record per declared target, redacted per §11.1: names,
+    provider kinds and policy posture only — never db paths, endpoints, or
+    secret/credential refs. An empty registry is a valid result with a
+    warning."""
+    if config.targets.len() == 0:
+        return "{\"target\":\"\",\"action\":\"targets\",\"status\":\"ok\",\"count\":0,\"warnings\":[\"no messenger targets declared\"]}"
+    var out = ""
+    for target in config.targets:
+        val warnings = _target_warnings(target)
+        out = out + _lb() + "\"target\":\"{_json_escape(target.name)}\"," +
+            "\"action\":\"targets\",\"status\":\"ok\"," +
+            "\"read_provider\":\"{target.read_provider}\"," +
+            "\"send_provider\":\"{target.send_provider}\"," +
+            "\"read_only\":{_bool_json(target_is_read_only(target))}," +
+            "\"send_enabled\":{_bool_json(target.send_enabled)}," +
+            "\"cache_mode\":\"{target.cache_mode}\"," +
+            "\"source_kind\":\"{target.source_kind}\"," +
+            "\"warnings\":{_json_str_list(warnings)}" + _rb() + "\n"
+    out
+
+
+fn messenger_doctor_json(target: MessengerTarget, source: text, extra_warnings: [text]) -> text:
+    """Diagnostics record for one resolved target (§11.1 doctor row: format /
+    adapter status, capability truth, schema fingerprint, read-only proof,
+    decoder state; never keys or paths). extra_warnings carries IO-derived,
+    nonsecret findings from the caller (e.g. source file absent)."""
+    val read_only = target_is_read_only(target)
+    val capabilities = target_read_capabilities(target)
+    var warnings: [text] = []
+    for w in _target_warnings(target):
+        warnings = warnings + [w]
+    for w in extra_warnings:
+        warnings = warnings + [w]
+
+    # Adapter truth: what would actually serve a read right now.
+    var adapter_status = "unknown"
+    var adapter_detail = ""
+    val adapter = messenger_load_adapter(target.read_provider)
+    if adapter == nil:
+        adapter_status = "unregistered"
+        adapter_detail = "no adapter available for read_provider '{target.read_provider}'"
+        warnings = warnings + ["no adapter registered for read_provider '{target.read_provider}'"]
+    else:
+        val port = adapter.?
+        if port.unavailable_reason != "":
+            adapter_status = MESSENGER_PORT_CAPABILITY_UNAVAILABLE
+            adapter_detail = port.unavailable_reason
+            warnings = warnings + ["read adapter not integrated: {port.unavailable_reason}"]
+        else:
+            adapter_status = "ready"
+
+    var schema_fp = ""
+    if target.schema != nil:
+        val profile = target.schema.?
+        schema_fp = schema_profile_fingerprint(profile)
+
+    _lb() + "\"target\":\"{_json_escape(target.name)}\"," +
+        "\"action\":\"doctor\",\"status\":\"ok\"," +
+        "\"resolved_from\":\"{_json_escape(source)}\"," +
+        "\"read_provider\":\"{target.read_provider}\"," +
+        "\"read_only\":{_bool_json(read_only)}," +
+        "\"capabilities\":{_json_str_list(capabilities)}," +
+        "\"adapter_status\":\"{adapter_status}\"," +
+        "\"adapter_detail\":\"{_json_escape(adapter_detail)}\"," +
+        "\"schema_fingerprint\":\"{schema_fp}\"," +
+        "\"policy\":" + _lb() +
+        "\"expose_message_body_to_agents\":{_bool_json(target.policy.expose_message_body_to_agents)}," +
+        "\"allow_remote_send\":{_bool_json(target.policy.allow_remote_send)}," +
+        "\"allow_export\":{_bool_json(target.policy.allow_export)}," +
+        "\"allow_mark_read\":{_bool_json(target.policy.allow_mark_read)}," +
+        "\"allow_live_presence\":{_bool_json(target.policy.allow_live_presence)}," +
+        "\"allow_cache_plaintext\":{_bool_json(target.policy.allow_cache_plaintext)}," +
+        "\"send_enabled\":{_bool_json(target.send_enabled)}," +
+        "\"max_read_batch\":{target.policy.max_read_batch}" + _rb() + "," +
+        "\"warnings\":{_json_str_list(warnings)}" + _rb()
+
+
+fn messenger_error_json(action: text, code: i64, message: text) -> text:
+    """Structured error record (§11.2): machine code + human message, no
+    secrets. code is the exit code (2/3/4)."""
+    _lb() + "\"target\":\"\",\"action\":\"{action}\",\"status\":\"error\",\"code\":{code}," +
+        "\"error\":\"{_json_escape(message)}\",\"warnings\":[]" + _rb()
+
+
+# ----------------------------------------------------------------------------
+# Verb handlers
+# ----------------------------------------------------------------------------
+
+fn _usage() -> text:
+    "devhub messenger — read-only messenger access\n" +
+    "Usage: devhub messenger <verb> [flags]\n" +
+    "Verbs (first slice):\n" +
+    "  targets               list declared messenger targets (redacted)\n" +
+    "  doctor --target T     nonsecret diagnostics for one target\n" +
+    "  send --target T --room R --text ... --confirm   policy-gated send probe (stub port)\n" +
+    "Flags:\n" +
+    "  --target NAME         target selector (highest precedence rung)\n" +
+    "  --json                one JSON record per line\n" +
+    "Config: ~/.config/devhub/messenger.sdn"
+
+
+fn handle_messenger(args: [text]) -> i64:
+    """Dispatch messenger verbs. Exit codes per §11.2: 0 ok, 2 usage/config.
+    doctor never claims capability it does not have: an unintegrated adapter
+    is reported in warnings with exit 0 — diagnostics produced truthfully."""
+    if args.len() == 0 or _has_flag(args, "--help") or args[0] == "help":
+        print _usage()
+        return 0
+    val json_mode = _has_flag(args, "--json")
+    val verb = args[0]
+    if verb == "targets":
+        return _cmd_targets(json_mode)
+    if verb == "doctor":
+        return _cmd_doctor(args, json_mode)
+    if verb == "send":
+        # Explicitly gated preview of the send path: policy verdict first,
+        # then the stub port. No send ever executes in this lane.
+        return _cmd_send_probe(args, json_mode)
+    print messenger_error_json("messenger", 2, "unknown messenger verb '{verb}'")
+    print _usage()
+    2
+
+
+fn _cmd_targets(json_mode: bool) -> i64:
+    val parsed = load_messenger_config()
+    if not parsed.ok:
+        val msg = _problems_text(parsed.problems)
+        if json_mode:
+            print messenger_error_json("targets", 2, msg)
+        else:
+            print "error: {msg}"
+        return 2
+    val payload = messenger_targets_json(parsed.config)
+    if json_mode:
+        print payload
+    else:
+        _print_targets_human(parsed.config)
+        print "result " + _lb() + "\"action\":\"targets\",\"status\":\"ok\",\"count\":{parsed.config.targets.len()},\"warnings\":[]" + _rb()
+    0
+
+
+fn _print_targets_human(config: MessengerConfig):
+    print "messenger targets ({config.targets.len()} declared)"
+    for target in config.targets:
+        val ro = if target_is_read_only(target): "read-only" else: "read"
+        print "  {target.name}  read={target.read_provider}  send={target.send_provider}  {ro}  cache={target.cache_mode}"
+
+
+fn _cmd_doctor(args: [text], json_mode: bool) -> i64:
+    val resolved = resolve_messenger_target(args)
+    if resolved.0 == nil:
+        if json_mode:
+            print messenger_error_json("doctor", 2, resolved.2)
+        else:
+            print "error: {resolved.2}"
+        return 2
+    val target = resolved.0.?
+    # Nonsecret IO finding: is the declared source file present? (bool only —
+    # the path itself stays out of the record, §11.2)
+    var extra: [text] = []
+    if target.db != nil:
+        val db = target.db.?
+        if db.path == "":
+            extra = extra + ["db path is empty"]
+        else:
+            if not file_exists(db.path):
+                extra = extra + ["declared source database is not present (authorized snapshot may be missing)"]
+    val payload = messenger_doctor_json(target, resolved.1, extra)
+    if json_mode:
+        print payload
+    else:
+        _print_doctor_human(target, resolved.1)
+        print "result {payload}"
+    0
+
+
+fn _print_doctor_human(target: MessengerTarget, source: text):
+    print "doctor: target '{target.name}' (resolved from {source})"
+    print "  read_provider: {target.read_provider}"
+    print "  read_only: {_bool_json(target_is_read_only(target))}"
+    if target.schema != nil:
+        val profile = target.schema.?
+        print "  schema fingerprint: {schema_profile_fingerprint(profile)}"
+    print "  (machine record below)"
+
+
+fn _cmd_send_probe(args: [text], json_mode: bool) -> i64:
+    """Send is OUT OF SCOPE for this lane; this probe exists so the policy
+    gate is exercised end-to-end and the stub answers honestly. A denied
+    send is PermissionDenied (3); a policy-passing send reaches the stub
+    port and gets CapabilityUnavailable (4)."""
+    val resolved = resolve_messenger_target(args)
+    if resolved.0 == nil:
+        if json_mode:
+            print messenger_error_json("send", 2, resolved.2)
+        else:
+            print "error: {resolved.2}"
+        return 2
+    val target = resolved.0.?
+    val room = _extract_flag(args, "--room", "")
+    val body = _extract_flag(args, "--text", "")
+    var confirm: SendConfirmReceipt? = nil
+    if _has_flag(args, "--confirm") and room != "":
+        confirm = SendConfirmReceipt.create(
+            receipt_id: "local-confirm", target: target.name, room: room,
+            body_digest: messenger_body_digest(body), confirmed_by: "cli-user")
+    val verdict = check_send(target, room, confirm)
+    if not verdict.permitted:
+        if json_mode:
+            print messenger_error_json("send", verdict.exit_code, verdict.reason)
+        else:
+            print "error: {verdict.reason}"
+        return verdict.exit_code
+    val adapter = messenger_load_adapter(target.read_provider)
+    if adapter == nil:
+        if json_mode:
+            print messenger_error_json("send", 4, "no adapter for send")
+        else:
+            print "error: no adapter for send"
+        return 4
+    val result = port_call_send(adapter.?, target)
+    if json_mode:
+        print _lb() + "\"target\":\"{_json_escape(target.name)}\"," +
+            "\"action\":\"send\",\"status\":\"{result.status}\",\"code\":{result.exit_code}," +
+            "\"error\":\"{_json_escape(result.error)}\",\"warnings\":[]" + _rb()
+    else:
+        print "send: {result.status}: {result.error}"
+    result.exit_code
+
+
+fn _problems_text(problems: [text]) -> text:
+    var out = ""
+    for p in problems:
+        if out != "":
+            out = out + "; "
+        out = out + p
+    out
