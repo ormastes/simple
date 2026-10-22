@@ -67,9 +67,11 @@ jobs:
           # Linux platforms
           - os: ubuntu-latest
             platform: linux-x86_64
-          - os: ubuntu-latest
+          # Native arm64 runner: builds the phase-1 compiler on the target
+          # instead of a cross seed that cannot satisfy release.
+          - os: ubuntu-24.04-arm
             platform: linux-aarch64
-            cross_compile: true
+            experimental: true
           - os: ubuntu-latest
             platform: linux-riscv64
             cross_compile: true
@@ -81,8 +83,6 @@ jobs:
             platform: darwin-x86_64
 
           # FreeBSD (uses Linux binary via Linuxulator)
-          - os: ubuntu-latest
-            platform: freebsd-x86_64
           - os: ubuntu-latest
             platform: freebsd-x86
             cross_compile: true
@@ -100,7 +100,7 @@ jobs:
     # blocking); FreeBSD is blocked; aarch64/riscv64 are experimental; and the
     # cross/freebsd legs build bootstrap-only seeds that refuse release by
     # design. Keep those rows visible without letting them hold the release.
-    continue-on-error: ${{ matrix.cross_compile == true || contains(matrix.platform, 'freebsd') || startsWith(matrix.os, 'macos') }}
+    continue-on-error: ${{ matrix.cross_compile == true || matrix.experimental == true || contains(matrix.platform, 'freebsd') || startsWith(matrix.os, 'macos') }}
     # Windows x86_64 C toolchain authority (same pin as windows-build.yml):
     # src/compiler_rust/lib/build.rs refuses cl.exe for the MSVC target.
     env:
@@ -112,8 +112,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Rust toolchain (macOS/Windows)
-        if: runner.os == 'macOS' || runner.os == 'Windows'
+      - name: Setup Rust toolchain (macOS/Windows/Linux arm64)
+        if: runner.os == 'macOS' || runner.os == 'Windows' || matrix.platform == 'linux-aarch64'
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Cache Rust build artifacts (macOS/Windows)
@@ -309,8 +309,8 @@ jobs:
 
       # native-build's core-C archive step requires unsuffixed clang/LLVM tools
       # (llvm-ar); hosted ubuntu runners lack them (same install as build-binaries.yml).
-      - name: Install build tools (Linux x86_64)
-        if: runner.os == 'Linux' && matrix.platform == 'linux-x86_64'
+      - name: Install build tools (Linux x86_64/arm64)
+        if: runner.os == 'Linux' && (matrix.platform == 'linux-x86_64' || matrix.platform == 'linux-aarch64')
         shell: bash
         run: |
           if command -v clang >/dev/null && command -v llvm-ar >/dev/null && command -v ld.lld >/dev/null && command -v llvm-nm >/dev/null && pkg-config --exists libunwind; then
@@ -323,15 +323,15 @@ jobs:
 
       - name: Build next phase with configured previous compiler (config/bootstrap.sdn)
         id: prevc_linux
-        if: runner.os == 'Linux' && matrix.platform == 'linux-x86_64'
+        if: runner.os == 'Linux' && (matrix.platform == 'linux-x86_64' || matrix.platform == 'linux-aarch64')
         continue-on-error: true
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: sh scripts/bootstrap/build-next-phase-ci.shs "${{ matrix.platform }}" 4
 
-      - name: Build native Linux x86_64 binary via bootstrap-only Rust seed
-        if: runner.os == 'Linux' && matrix.platform == 'linux-x86_64' && steps.prevc_linux.outputs.built != 'true'
+      - name: Build native Linux x86_64/arm64 binary via bootstrap-only Rust seed
+        if: runner.os == 'Linux' && (matrix.platform == 'linux-x86_64' || matrix.platform == 'linux-aarch64') && steps.prevc_linux.outputs.built != 'true'
         shell: bash
         run: |
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -685,6 +685,12 @@ jobs:
               ls -lh "$NATIVE_BIN"
             else
               echo "✗ native-build failed or binary broken; bootstrap-only Rust seed cannot satisfy release"
+              if [ -f "$NATIVE_BIN" ]; then
+                # Name the cause: stderr of the failing --version (a hit stub
+                # prints its own symbol name) and the stub list from the link.
+                "./$NATIVE_BIN" --version || echo "--version exit=$?"
+                cat "$NATIVE_BIN.stubbed_symbols.txt" 2>/dev/null | head -120
+              fi
               echo "NEW_RUNTIME_BUILT=false" >> $GITHUB_ENV
               exit 1
             fi
@@ -1663,16 +1669,92 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
+  # Native FreeBSD x86_64 phase 1: the cross row could only produce a Rust
+  # seed, which never satisfies release. Build seed -> pure-Simple stage1
+  # inside a FreeBSD VM and package it like the matrix rows (artifact name
+  # bootstrap-freebsd-x86_64, so rc-drop picks it up).
+  freebsd-phase1:
+    name: Build Bootstrap Package (FreeBSD x86_64, native VM)
+    needs: check-version
+    if: needs.check-version.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build phase-1 compiler in FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          mem: 12288
+          prepare: |
+            pkg install -y bash curl git gmake pkgconf zstd llvm
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
+          run: |
+            set -eu
+            . "$HOME/.cargo/env"
+            cd src/compiler_rust
+            CARGO_BUILD_JOBS=2 cargo build --profile bootstrap -p simple-driver
+            CARGO_BUILD_JOBS=2 cargo build --profile bootstrap -p simple-native-all --features driver-compat
+            cd ../..
+            mkdir -p build/bootstrap/stage1
+            RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=0 \
+              src/compiler_rust/target/bootstrap/simple native-build \
+              --source src/compositions/kernel_llvm_cranelift --source src \
+              --entry-closure --entry src/app/cli/bootstrap_main.spl \
+              --mode dynload --threads 2 --timeout 3600 \
+              --output build/bootstrap/stage1/simple 2>&1 | tail -40 || true
+            ./build/bootstrap/stage1/simple --version
+            # Sanity: the phase-1 compiler must build and run a hello world.
+            mkdir -p build/sanity
+            printf 'fn main():\n    print "freebsd-phase1-ok"\n' > build/sanity/hello.spl
+            ./build/bootstrap/stage1/simple native-build build/sanity/hello.spl -o build/sanity/hello
+            ./build/sanity/hello | grep -q freebsd-phase1-ok
+            echo "FreeBSD phase-1 compiler verified"
+      - name: Package FreeBSD phase-1 compiler
+        shell: bash
+        env:
+          VERSION: ${{ needs.check-version.outputs.version }}
+        run: |
+          PLATFORM=freebsd-x86_64
+          PKG_DIR="simple-bootstrap-${VERSION}-${PLATFORM}"
+          mkdir -p "${PKG_DIR}/bin"
+          cp build/bootstrap/stage1/simple "${PKG_DIR}/bin/simple-runtime"
+          chmod +x "${PKG_DIR}/bin/simple-runtime"
+          printf '%s\n' '#!/bin/sh' 'SCRIPT_DIR=$(dirname -- "$0")' 'export SIMPLE_ASSET_ROOT="$SCRIPT_DIR/.."' 'exec "$SCRIPT_DIR/simple-runtime" "$@"' > "${PKG_DIR}/bin/simple"
+          chmod +x "${PKG_DIR}/bin/simple"
+          echo 1 > "${PKG_DIR}/PHASE"
+          rm -rf src/compiler_rust/target   # VM build output; never packaged
+          cp -r lib src examples "${PKG_DIR}/" 2>/dev/null || true
+          cp README.md LICENSE THIRD_PARTY_NOTICES.md "${PKG_DIR}/" 2>/dev/null || true
+          cp -r assets "${PKG_DIR}/"
+          # Same development-only pruning as the matrix packaging step.
+          rm -rf "${PKG_DIR}/src/app/vscode_extension/node_modules" \
+            "${PKG_DIR}/src/app/vscode_extension/.vscode-test" \
+            "${PKG_DIR}/src/compiler_rust/target" "${PKG_DIR}/build"
+          bash scripts/check_release_payload.shs --dir "${PKG_DIR}"
+          tar czf "${PKG_DIR}.spk" "${PKG_DIR}"
+          bash scripts/check_release_payload.shs --tar "${PKG_DIR}.spk"
+          sha256sum "${PKG_DIR}.spk" > "${PKG_DIR}.spk.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-freebsd-x86_64
+          path: |
+            simple-bootstrap-*.spk
+            simple-bootstrap-*.spk.sha256
+          retention-days: 90
+
   # RC drop: publishes every platform package that DID build, without waiting
   # for the whole matrix, so a phase-1 binary is downloadable as soon as one
-  # platform produces it. Re-running adds or replaces assets (--clobber).
-  # The tag is `rc-<VERSION>`, deliberately not `v*`: version tags are
-  # owner-create-only and immutable (spipe-vcs-v3-version-tag-*), while an RC
-  # drop must be refreshable as more platforms and higher phases land.
+  # platform produces it. Each dispatch publishes the NEXT numbered prerelease
+  # (rc-<base>-rc.1, rc.2, ...); it is never the final release. The tag is
+  # deliberately not `v*`: version tags are owner-create-only and immutable
+  # (spipe-vcs-v3-version-tag-*).
   rc-drop:
     name: Publish RC Drop (available platforms)
-    needs: [check-version, build-bootstrap]
-    if: always() && github.event_name == 'workflow_dispatch' && needs.check-version.outputs.changed == 'true'
+    needs: [check-version, build-bootstrap, freebsd-phase1]
+    # Only release lines publish RCs; a dispatch on a topic branch validates builds only.
+    if: always() && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/release/') && needs.check-version.outputs.changed == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -1693,26 +1775,28 @@ jobs:
             echo "✗ No platform produced a package; nothing to publish" >&2
             exit 1
           fi
-          TAG="rc-${VERSION}"
+          # Each run is the next numbered RC of the base version: rc.1, rc.2, ...
+          BASE="${VERSION%%-*}"
+          LAST=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName --jq '.[].tagName' \
+            | sed -n "s/^rc-${BASE//./\\.}-rc\\.\\([0-9][0-9]*\\)$/\\1/p" | sort -n | tail -1)
+          RC_NUM=$(( ${LAST:-0} + 1 ))
+          RC_VERSION="${BASE}-rc.${RC_NUM}"
+          TAG="rc-${RC_VERSION}"
           {
-            echo "Release-candidate drop for ${VERSION} from \`${GITHUB_REF_NAME}\` @ ${GITHUB_SHA}."
+            echo "Simple ${RC_VERSION} — prerelease candidate rc${RC_NUM}, not a final release."
             echo
-            echo "Platforms included in this drop:"
+            echo "Built from \`${GITHUB_REF_NAME}\` @ ${GITHUB_SHA} (run ${GITHUB_RUN_ID})."
+            echo
+            echo "Platforms in this RC:"
             for f in release/*.spk; do
               phase=$(tar -xzf "$f" -O --wildcards '*/PHASE' 2>/dev/null | head -1)
               echo "- $(basename "$f") — bootstrap phase ${phase:-1}"
             done
             echo
-            echo "A platform missing here did not build in run ${GITHUB_RUN_ID}; a later run adds it."
+            echo "A platform missing here did not build in this run; the next RC adds it."
           } > notes.md
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            # `release edit` never moves the tag; point it at this run's commit.
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" -f sha="$GITHUB_SHA" -F force=true >/dev/null
-            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file notes.md --prerelease
-          else
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-              --title "Simple ${VERSION} (RC drop)" --notes-file notes.md --prerelease
-          fi
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Simple ${RC_VERSION} (rc${RC_NUM})" --notes-file notes.md --prerelease
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber release/*
 
   publish-ghcr:
