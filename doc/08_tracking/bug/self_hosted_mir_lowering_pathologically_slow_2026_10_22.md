@@ -72,3 +72,8 @@ first/largest driver modules) still needs a profile.
    Follow-up: whichever condition refuses the bootstrap_main dynload lane still
    needs a real fix (or an admitted narrower carve-out) — see the lane log for
    the recorded reason.
+4. First instrumentation attempt printed the refusal reason with a bare
+   `print`, but the shard worker exits right after sealing the ledger FAILURE
+   and the buffered line was lost (all surviving worker lines are eprint or
+   explicitly flushed). The refusal print now ends with `stdout_flush()` —
+   anything a shard worker prints on a path that exits non-zero must flush.
