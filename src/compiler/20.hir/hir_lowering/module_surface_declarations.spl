@@ -196,7 +196,7 @@ fn module_surface_export_origin_hints(
     Ok(true)
 
 pub class ModuleSurfaceParserOwner:
-    value: ParserModule
+    value: ParserModule?   # optional: the class field slot stays pointer-sized; a large inline struct field read returns garbage in the self-hosted candidate (stage2_sanity_module_path_naming_probe_segv_2026_10_22)
 
     static fn new(value: ParserModule) -> ModuleSurfaceParserOwner:
         # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=by_value_struct_ctor_arg_corrupts_field
@@ -205,7 +205,7 @@ pub class ModuleSurfaceParserOwner:
         # owner.value later return garbage: name.len() == -1). An explicit
         # typed local bind before construction lowers cleanly.
         val bound: ParserModule = value
-        ModuleSurfaceParserOwner(value: bound)
+        ModuleSurfaceParserOwner(value: Some(bound))
 
 pub fn module_surface_from_owner(
     owner: ModuleSurfaceParserOwner, source: SourceFile, source_index: i64
@@ -219,25 +219,25 @@ pub fn module_surface_from_owner(
     # (unconditional entry eprint never printed; crash PC in the callee's
     # symbol region). Binding to an explicitly typed local first — the same
     # pattern that fixed the poll/future generic-enum case — lowers cleanly.
-    val module_local: ParserModule = owner.value
+    val module_local: ParserModule = owner.value.unwrap()
     val semantic_hex = module_surface_semantic_projection(module_local)
     val semantic_cacheable = semantic_hex.len() == 64
     var callables: Dict<text, ModuleSurfaceCallable> = {}
     var callable_names: [text] = []
-    for name in owner.value.functions.keys():
-        val callable = if owner.value.function_headers.contains_key(name):
-            val fn_header: ParserFunctionHeader = owner.value.function_headers[name]
+    for name in module_local.functions.keys():
+        val callable = if module_local.function_headers.contains_key(name):
+            val fn_header: ParserFunctionHeader = module_local.function_headers[name]
             module_surface_callable_from_header(fn_header)
         else:
             # Compatibility for parser producers without the compact header
             # index.
-            module_surface_callable_from_function(owner.value.functions[name])
+            module_surface_callable_from_function(module_local.functions[name])
         callables[name] = callable
         callable_names = callable_names.push(name)
 
     var composites: Dict<text, ModuleSurfaceComposite> = {}
-    for name in owner.value.classes.keys():
-        val class_: ParserClass = owner.value.classes[name]
+    for name in module_local.classes.keys():
+        val class_: ParserClass = module_local.classes[name]
         var fields: [ModuleSurfaceField] = []
         for raw_field in class_.fields:
             # ANY-transport hazard sweep round 3: annotated rebind.
@@ -250,8 +250,8 @@ pub fn module_surface_from_owner(
                 visibility: field.visibility,
                 declaring_module: source.module_name))
         composites[name] = ModuleSurfaceComposite(name: class_.name, kind: "class", type_params: class_.type_params, fields: fields, visibility: class_.visibility, is_public: class_.is_public, span: class_.span)
-    for name in owner.value.actors.keys():
-        val actor: ActorDef = owner.value.actors[name]
+    for name in module_local.actors.keys():
+        val actor: ActorDef = module_local.actors[name]
         var fields: [ModuleSurfaceField] = []
         for raw_field in actor.fields:
             val field: ParserField = raw_field
@@ -263,8 +263,8 @@ pub fn module_surface_from_owner(
                 visibility: field.visibility,
                 declaring_module: source.module_name))
         composites[name] = ModuleSurfaceComposite(name: actor.name, kind: "actor", type_params: actor.type_params, fields: fields, visibility: actor.visibility, is_public: actor.is_public, span: actor.span)
-    for name in owner.value.structs.keys():
-        val struct_: ParserStruct = owner.value.structs[name]
+    for name in module_local.structs.keys():
+        val struct_: ParserStruct = module_local.structs[name]
         var fields: [ModuleSurfaceField] = []
         for raw_field in struct_.fields:
             val field: ParserField = raw_field
@@ -278,21 +278,21 @@ pub fn module_surface_from_owner(
         composites[name] = ModuleSurfaceComposite(name: struct_.name, kind: "struct", type_params: struct_.type_params, fields: fields, visibility: struct_.visibility, is_public: struct_.is_public, span: struct_.span)
 
     var enums: Dict<text, ModuleSurfaceEnum> = {}
-    for name in owner.value.enums.keys():
-        val enum_: ParserEnum = owner.value.enums[name]
+    for name in module_local.enums.keys():
+        val enum_: ParserEnum = module_local.enums[name]
         enums[name] = ModuleSurfaceEnum(name: enum_.name, type_params: enum_.type_params, variants: enum_.variants, visibility: enum_.visibility, is_public: enum_.is_public, span: enum_.span)
 
     var traits: Dict<text, ModuleSurfaceTrait> = {}
-    for name in owner.value.traits.keys():
-        traits[name] = module_surface_trait_from_trait(owner.value.traits[name])
+    for name in module_local.traits.keys():
+        traits[name] = module_surface_trait_from_trait(module_local.traits[name])
 
     var impls: [ModuleSurfaceImpl] = []
-    for impl_ in owner.value.impls:
+    for impl_ in module_local.impls:
         impls = impls.push(module_surface_impl_from_impl(impl_))
 
     var type_aliases: Dict<text, ModuleSurfaceTypeAlias> = {}
-    for name in owner.value.type_aliases.keys():
-        val alias: ParserTypeAlias = owner.value.type_aliases[name]
+    for name in module_local.type_aliases.keys():
+        val alias: ParserTypeAlias = module_local.type_aliases[name]
         type_aliases[name] = ModuleSurfaceTypeAlias(
             name: alias.name,
             type_params: alias.type_params,
@@ -303,8 +303,8 @@ pub fn module_surface_from_owner(
         )
 
     var constants: Dict<text, ModuleSurfaceConst> = {}
-    for name in owner.value.constants.keys():
-        val constant: ParserConst = owner.value.constants[name]
+    for name in module_local.constants.keys():
+        val constant: ParserConst = module_local.constants[name]
         constants[name] = ModuleSurfaceConst(
             name: constant.name,
             has_type_: constant.has_type_,
@@ -409,7 +409,7 @@ pub fn module_surface_from_owner(
     var import_item_names: [text] = []
     var import_item_aliases: [text] = []
     var import_item_has_alias: [bool] = []
-    for raw_import_decl in owner.value.imports:
+    for raw_import_decl in module_local.imports:
         val import_decl: ParserImport = raw_import_decl
         # (loop body continues below; import_item rebound inside)
         for raw_import_item in import_decl.items:
@@ -439,11 +439,11 @@ pub fn module_surface_from_owner(
         semantic_hash2: module_surface_semantic_hex_limb(semantic_hex, 2),
         semantic_hash3: module_surface_semantic_hex_limb(semantic_hex, 3),
         semantic_cacheable: semantic_cacheable,
-        nogc_strict: owner.value.nogc_strict,
-        imports: owner.value.imports,
-        exports: owner.value.exports,
-        friends: owner.value.friends.copy(),
-        internal_exports: owner.value.internal_exports.copy(),
+        nogc_strict: module_local.nogc_strict,
+        imports: module_local.imports,
+        exports: module_local.exports,
+        friends: module_local.friends.copy(),
+        internal_exports: module_local.internal_exports.copy(),
         import_target_indices: [],
         import_target_names: [],
         import_resolution_traces: [],
