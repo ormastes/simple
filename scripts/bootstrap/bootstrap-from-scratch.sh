@@ -2874,7 +2874,7 @@ if [ "${backend}" = "llvm-lib" ] || [ "${backend}" = "llvm" ]; then
       fi
     fi
   else
-    echo "error: admitted LLVM 23.1.1 (native Linux/FreeBSD: 23.1.2) not found (shared platform detection: scripts/setup/platform-detect.shs, versions: ${LLVM_VERSIONS:-23})" >&2
+    echo "error: admitted LLVM 23 (any 23.x.y) not found (shared platform detection: scripts/setup/platform-detect.shs, versions: ${LLVM_VERSIONS:-23})" >&2
     echo "error: install LLVM or select --backend=cranelift explicitly" >&2
     exit 1
   fi
@@ -3101,7 +3101,7 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     }
     if [ -n "${rust_llvm_version}" ] &&
        ! _llvm23_version_admitted "${rust_llvm_version}"; then
-      echo "error: Rust LLVM authority has unadmitted LLVM 23.1 version ${rust_llvm_version}" >&2
+      echo "error: Rust LLVM authority has unadmitted LLVM version ${rust_llvm_version} (major 23 required)" >&2
       exit 1
     fi
     if [ "${os}" = windows ] &&
@@ -3114,8 +3114,8 @@ if [ "${full_bootstrap}" -eq 1 ]; then
         echo "error: Windows Rust LLVM authority lacks physical clang-cl: ${rust_llvm_clang_cl_path}" >&2
         exit 1
       }
-      [ "${rust_llvm_clang_cl_version}" = 23.1.1 ] || {
-        echo "error: Windows Rust LLVM authority must bind clang-cl 23.1.1, got ${rust_llvm_clang_cl_version:-unknown}" >&2
+      _llvm23_version_admitted "${rust_llvm_clang_cl_version:-unknown}" || {
+        echo "error: Windows Rust LLVM authority must bind clang-cl 23.x, got ${rust_llvm_clang_cl_version:-unknown}" >&2
         exit 1
       }
       # Keep the C ABI owner in the same immutable LLVM 23.1.1 package as
