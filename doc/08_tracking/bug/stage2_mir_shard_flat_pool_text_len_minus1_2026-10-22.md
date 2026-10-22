@@ -196,3 +196,44 @@ provenance.
   io::Error string (one-line Rust change; rebuild candidate ~35 min) —
   the errno will likely be ERROR_PATH_NOT_FOUND from a component that is
   a FILE or an invalid handle path, naming the exact bad path component.
+
+## Update 3 (2026-10-22, later still) — localized: seed by-value transport of the 30-limb ParserModule, pre-`new()` hops unbound
+
+The NOGC datapoint localizes the corruption precisely:
+
+- `nogc_strict` is set ONLY by the `@no_gc(strict)` marker
+  (`module_assembly.spl:955-958`, `var module_nogc_strict = false` at :364).
+  p2_add.spl and its SCV snapshot carry NO marker, so a correct parse yields
+  `false` on both sides of the NOGC check
+  (driver_hir_pipeline_support.spl:341: `matched and actual.nogc_strict != strict`
+  fires only if the SURFACE's `nogc_strict` reads non-false — garbage).
+- The surface's `nogc_strict` is copied field-by-field in
+  `ModuleSurfaceParserOwner.new` (module_surface_declarations.spl:269), the
+  struct 205ea9e92a1 flattened to handle-sized limbs because its
+  `owner.value.name.len() == -1` — THE SAME -1 SIGNATURE AS THIS BUG.
+- 65d9f2afadc added the typed local-bind INSIDE `new()` (ctor's own
+  param→field copy), fixing that ONE hop. But the module still crosses
+  THREE earlier by-value hops in the same call chain, none bound:
+
+  ```
+  me add_parsed(module: ParserModule, ...)                (module_surface_registry.spl:180)
+    → me add_parsed_canonical(module, ...)                (:184)
+      → fn module_surface_from_module(module, ...)        (module_surface_declarations.spl:611)
+        → ModuleSurfaceParserOwner.new(module)            (fixed internally, 65d9f2afadc)
+  ```
+
+  If ANY earlier hop corrupts the 30-limb aggregate, `new()` binds and
+  stores garbage: `name.len() == -1` (the flat-pool invalid text) and a
+  non-zero `nogc_strict` (the NOGC-POLICY-001 mismatch) are two reads of
+  the same corrupt owner — one mechanism explains both symptoms.
+
+### Next action for the fixer
+
+Per the established workaround family (65d9f2afadc, c62893c28fc): typed
+local-bind `ParserModule` at the ENTRY of `add_parsed` (and/or convert the
+chain to pass the owner, not the raw module), then verify with the 9s repro
+(probe chain in Update 1) — expect the flat-pool panic AND the NOGC refusal
+to clear together, and the hir-cache stores to start succeeding (the
+io-write may be a third read of the same corrupt owner: the store key/path
+folds a module field). The proper repair remains the seed's aggregate
+by-value transport (see 205ea9e92a1 commit message).
