@@ -1,0 +1,67 @@
+use app.build.scheduler.parent_reconciliation.{
+    reconcile_unstarted_parent_attempt_v1}
+use app.build.scheduler.parent_request_spool.{persist_parent_build_intent_v1}
+use app.build.scheduler.owner.{scheduler_owner_open_v1,
+    scheduler_owner_admit_v1, scheduler_owner_close_v1}
+use app.build.scheduler.planner.{SchedulerActionV1}
+use app.build.scheduler.ledger.{SchedulerCapacityV1}
+use app.io.mod.{getpid, time_now_unix_micros}
+use compiler.common.build_contract.{BuildInputRef, SnapshotManifest,
+    ToolchainManifest, InputManifest, ActionSpec, action_spec_digest_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn _reconcile_test_action_v1() -> SchedulerActionV1:
+    val snapshot = sha256_text("legacy snapshot")
+    val spec = ActionSpec(1, "compile",
+        SnapshotManifest(1, snapshot, sha256_text("source"),
+            sha256_text("submodules")),
+        ToolchainManifest(1, sha256_text("compiler"), sha256_text("behavior"),
+            sha256_text("abi"), sha256_text("runtime"),
+            sha256_text("sysroot"), "x86_64-unknown-linux-gnu"),
+        InputManifest(1, snapshot,
+            [BuildInputRef("src/answer.c", sha256_text("source bytes"))],
+            [], [], [], [], [], sha256_text("context"), true, false),
+        ["cc", "-c"], "src", sha256_text("sandbox"),
+        ["answer.o"], sha256_text("resources"))
+    SchedulerActionV1(action_spec_digest_v1(spec), spec,
+        [], 0, 0, 1, 4096, 8)
+
+describe "legacy attempt recovery guard":
+    it "keeps capacity reserved when an old attempt lacks the spool protocol intent":
+        val root = "build/test/legacy-reconcile-" + getpid().to_text() +
+            "-" + time_now_unix_micros().to_text()
+        val action = _reconcile_test_action_v1()
+        val owner = scheduler_owner_open_v1(root)
+        expect(owner.error).to_equal("")
+        val admitted = scheduler_owner_admit_v1(owner, [action],
+            action.action_digest, "try-legacy", "node-a",
+            SchedulerCapacityV1(2, 8192, 0, 16), 0)
+        expect(admitted.dispatch).to_be(true)
+        expect(scheduler_owner_close_v1(owner)).to_be(true)
+        val replay = scheduler_owner_open_v1(root)
+        val result = reconcile_unstarted_parent_attempt_v1(replay,
+            "try-legacy")
+        expect(result.revoked).to_be(false)
+        expect(result.reason).to_equal("spool-protocol-unproven")
+        expect(replay.state.ledger.attempts[0].active).to_be(true)
+        expect(scheduler_owner_close_v1(replay)).to_be(true)
+
+    it "revokes only when an exact intent predates admission":
+        val root = "build/test/intent-reconcile-" + getpid().to_text() +
+            "-" + time_now_unix_micros().to_text()
+        val action = _reconcile_test_action_v1()
+        val owner = scheduler_owner_open_v1(root)
+        expect(owner.error).to_equal("")
+        expect(persist_parent_build_intent_v1(owner, action.action_digest,
+            "try-intent", "node-a").persisted).to_be(true)
+        val admitted = scheduler_owner_admit_v1(owner, [action],
+            action.action_digest, "try-intent", "node-a",
+            SchedulerCapacityV1(2, 8192, 0, 16), 0)
+        expect(admitted.dispatch).to_be(true)
+        expect(scheduler_owner_close_v1(owner)).to_be(true)
+        val replay = scheduler_owner_open_v1(root)
+        val result = reconcile_unstarted_parent_attempt_v1(replay,
+            "try-intent")
+        expect(result.revoked).to_be(true)
+        expect(replay.state.ledger.attempts[0].active).to_be(false)
+        expect(scheduler_owner_close_v1(replay)).to_be(true)

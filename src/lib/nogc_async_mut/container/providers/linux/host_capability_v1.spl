@@ -1,0 +1,58 @@
+# Linux host capability adapter for the existing OCI provider. The provider
+# owns the live probe and lifecycle state; this leaf copies only its evidence.
+use std.common.contracts.container.host_capability_v1.{
+    ContainerHostCapabilityV1, CONTAINER_CLIENT_PRIVILEGE_USER_V1,
+    CONTAINER_CLIENT_PRIVILEGE_UNAVAILABLE_V1, CONTAINER_ISOLATION_NATIVE_V1}
+use std.common.contracts.container.runtime_v1.{
+    RuntimeProbeV1, RuntimeProviderV1, RUNTIME_PRIVILEGE_ROOTLESS}
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.{
+    LinuxOciRuntimeProviderV1, OCI_ENGINE_PODMAN}
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
+
+fn _linux_rootless_unavailable(reason: text) -> ContainerHostCapabilityV1:
+    ContainerHostCapabilityV1(host_os: "linux", guest_os: "linux",
+        provider_id: "linux-oci-v1:podman",
+        isolation_class: CONTAINER_ISOLATION_NATIVE_V1,
+        client_privilege: CONTAINER_CLIENT_PRIVILEGE_UNAVAILABLE_V1,
+        admin_setup: true, launch_capable: false, reason: reason)
+
+# Pure translation for the provider's observed probe. `live_source` must be
+# false for scripted tests: their probe reports launch capability by design.
+pub fn linux_rootless_capability_from_probe_v1(probe: RuntimeProbeV1,
+        live_source: bool, caller_uid: text) -> ContainerHostCapabilityV1:
+    if not live_source:
+        return _linux_rootless_unavailable("linux-oci-live-probe-unavailable")
+    if probe.provider != "linux-oci-v1" or probe.engine != OCI_ENGINE_PODMAN:
+        return _linux_rootless_unavailable("linux-rootless-podman-required")
+    if not probe.engine_present or not probe.healthy or
+            not probe.launch_capable or probe.privilege != RUNTIME_PRIVILEGE_ROOTLESS:
+        return _linux_rootless_unavailable(
+            if probe.reason != "" then probe.reason else "linux-rootless-launch-unavailable")
+    val parsed_uid = caller_uid.to_i64() ?? -1
+    if parsed_uid <= 0 or parsed_uid.to_text() != caller_uid:
+        return _linux_rootless_unavailable("linux-rootless-user-unavailable")
+    ContainerHostCapabilityV1(host_os: "linux", guest_os: "linux",
+        provider_id: "linux-oci-v1:podman",
+        isolation_class: CONTAINER_ISOLATION_NATIVE_V1,
+        client_privilege: CONTAINER_CLIENT_PRIVILEGE_USER_V1,
+        admin_setup: true, launch_capable: true, reason: probe.reason)
+
+# Live discovery only. This is a capability snapshot, not an authorization to
+# skip the provider's create/start checks or a successful workload receipt.
+pub fn linux_rootless_host_capability_v1(
+        provider: LinuxOciRuntimeProviderV1) -> ContainerHostCapabilityV1:
+    if provider.platform != "linux" or provider.engine != OCI_ENGINE_PODMAN:
+        return _linux_rootless_unavailable("linux-rootless-podman-required")
+    if provider.scripted or not provider.live_enabled:
+        return _linux_rootless_unavailable("linux-oci-live-probe-unavailable")
+    if provider.state_dir == "" or provider.state_dir.contains("..") or
+            provider.state_dir.contains("\n") or provider.state_dir.contains("\r"):
+        return _linux_rootless_unavailable("linux-oci-state-directory-invalid")
+    val probe = provider.probe()
+    if not probe.launch_capable:
+        return linux_rootless_capability_from_probe_v1(probe, true, "")
+    val uid_result = process_run_timeout("id", ["-u"], provider.timeout_ms)
+    val uid = if uid_result.2.to_i64() == 0 then uid_result.0.trim() else ""
+    linux_rootless_capability_from_probe_v1(probe, true, uid)
+
+export linux_rootless_capability_from_probe_v1, linux_rootless_host_capability_v1

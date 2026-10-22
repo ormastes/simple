@@ -1,0 +1,154 @@
+# Deterministic operation-count acceptance for the tiered-JIT source index.
+# This is deliberately not a wall-clock benchmark: the private value result is
+# the oracle for eligibility, one-pass work, and the fixed comparison ceiling.
+
+use std.spec.*
+use compiler.interp.execution.tiered_jit.{
+    FunctionProfile, JitTier, TieredJitConfig,
+    jit_var_optimization_facts_none,
+    _jit_hotspot_backend_plugin_fact_build
+}
+
+fn hotspot_config() -> TieredJitConfig:
+    TieredJitConfig(tier1_threshold: 8, tier2_threshold: 128, debug_mode: false)
+
+fn plugin_fact_build_for_source(source: text, typed_mir: bool, safe_deopt: bool):
+    val profile = FunctionProfile(
+        name: "scan_counter_fixture",
+        call_count: 256,
+        tier: JitTier.Interpreted,
+        compile_time_ms: 0.0,
+        source: source,
+        typed_mir: typed_mir,
+        safe_deopt: safe_deopt,
+        hotspot_specialized_source: "",
+        hotspot_semantic_proof: false,
+        var_facts: jit_var_optimization_facts_none()
+    )
+    _jit_hotspot_backend_plugin_fact_build(profile, hotspot_config(), "cranelift")
+
+fn expect_zero_source_scan(counters):
+    expect(counters.source_byte_snapshots).to_equal(0)
+    expect(counters.source_passes).to_equal(0)
+    expect(counters.source_bytes_visited).to_equal(0)
+    expect(counters.needle_attempts).to_equal(0)
+    expect(counters.needle_byte_comparisons).to_equal(0)
+
+fn expect_one_source_scan(counters, source: text):
+    expect(counters.source_byte_snapshots).to_equal(1)
+    expect(counters.source_passes).to_equal(1)
+    expect(counters.source_bytes_visited).to_equal(source.bytes().len())
+    expect(counters.needle_byte_comparisons).to_be_less_than(96 * source.bytes().len() + 1)
+
+fn repeated_source(source: text, count: i64) -> text:
+    var result = ""
+    var i: i64 = 0
+    while i < count:
+        result = result + source
+        i = i + 1
+    result
+
+fn sixty_four_literal_source() -> text:
+    var result = ""
+    var i: i64 = 0
+    while i < 64:
+        result = result + "# literal_{i}: while [x] += 1 return -1 λ\u0000\n"
+        i = i + 1
+    result
+
+describe "Tiered JIT source fact scan counters [importance=critical; importance_weight=3]":
+    it "does no source work when typed MIR is false [importance=critical; importance_weight=3]":
+        step("Build eligible and ineligible hotspot profiles from the same source")
+        val source = "while i < n: i += 1; return i"
+
+        step("Inspect source-scan counters from the private fact-build seam")
+        val build = plugin_fact_build_for_source(source, false, true)
+
+        step("Prove ineligible profiles take the zero-scan path")
+        expect_zero_source_scan(build.counters)
+
+    it "does no source work when safe deopt is false [importance=critical; importance_weight=3]":
+        step("Build an ineligible profile with a non-empty lexical source")
+        val source = "while i < n: i += 1; return i"
+
+        step("Inspect source-scan counters from the private fact-build seam")
+        val build = plugin_fact_build_for_source(source, true, false)
+
+        step("Prove unsafe deoptimization takes the zero-scan path")
+        expect_zero_source_scan(build.counters)
+
+    it "records one empty eligible pass without byte visits [importance=high; importance_weight=2]":
+        step("Build an eligible empty hotspot profile")
+        val source = ""
+
+        step("Inspect source-scan counters from the private fact-build seam")
+        val build = plugin_fact_build_for_source(source, true, true)
+
+        step("Prove the eligible empty source has one snapshot and no visits")
+        expect_one_source_scan(build.counters, source)
+        expect(build.counters.source_bytes_visited).to_equal(0)
+        expect(build.counters.needle_attempts).to_equal(0)
+        expect(build.counters.needle_byte_comparisons).to_equal(0)
+
+    it "visits exactly the eligible source bytes once [importance=critical; importance_weight=3]":
+        step("Build an eligible non-empty hotspot profile")
+        val source = "fn scan(buf: [u8], n: i64) -> i64: var i = 0; while i < n: if buf[i] == 10: return i; i += 1; return -1"
+
+        step("Inspect source-scan counters from the private fact-build seam")
+        val build = plugin_fact_build_for_source(source, true, true)
+
+        step("Prove source work scales with bytes rather than predicate count")
+        expect_one_source_scan(build.counters, source)
+        expect(build.counters.source_bytes_visited).to_equal(source.bytes().len())
+        expect(build.counters.needle_byte_comparisons).to_be_less_than(96 * source.bytes().len() + 1)
+
+    it "scales byte visits exactly when a source is repeated four times [importance=high; importance_weight=2]":
+        step("Build eligible and repeated hotspot profiles from one base source")
+        val base_source = "fn loop(buf: [i64], n: i64) -> i64: var i = 0; while i < n: buf[i] = buf[i] + 1; i += 1; return buf[0]"
+        val repeated = repeated_source(base_source, 4)
+        val base = plugin_fact_build_for_source(base_source, true, true)
+        val long = plugin_fact_build_for_source(repeated, true, true)
+
+        step("Inspect source-scan counters from both private fact-build results")
+        expect_one_source_scan(base.counters, base_source)
+        expect_one_source_scan(long.counters, repeated)
+
+        step("Prove byte visits scale four times while facts remain semantically stable")
+        expect(long.counters.source_bytes_visited).to_equal(4 * base.counters.source_bytes_visited)
+        expect(long.facts).to_equal(base.facts)
+
+    it "keeps the 64-literal scan under the fixed comparison bound [importance=critical; importance_weight=3]":
+        step("Build a source containing 64 repeated raw literal families")
+        val source = sixty_four_literal_source()
+        val build = plugin_fact_build_for_source(source, true, true)
+
+        step("Inspect source-scan counters from the private fact-build seam")
+        expect_one_source_scan(build.counters, source)
+
+        step("Prove the fixed 96-comparison-per-byte safety bound")
+        expect(source.bytes().len()).to_be_greater_than(64)
+        expect(build.counters.needle_byte_comparisons).to_be_less_than(96 * build.counters.source_bytes_visited + 1)
+        expect(build.counters.source_bytes_visited).to_equal(source.bytes().len())
+
+    it "keeps operation counts exact across a 500-plan fixture [importance=critical; importance_weight=3]":
+        step("Build 500 eligible plans from one canonical hotspot fixture")
+        val source = "fn plan(buf: [u8], n: i64) -> i64: var i = 0; while i < n: if buf[i] == 10: return i; i += 1; return -1"
+        var total_snapshots: i64 = 0
+        var total_passes: i64 = 0
+        var total_bytes: i64 = 0
+        var total_comparisons: i64 = 0
+        var i: i64 = 0
+        while i < 500:
+            val build = plugin_fact_build_for_source(source, true, true)
+            total_snapshots = total_snapshots + build.counters.source_byte_snapshots
+            total_passes = total_passes + build.counters.source_passes
+            total_bytes = total_bytes + build.counters.source_bytes_visited
+            total_comparisons = total_comparisons + build.counters.needle_byte_comparisons
+            i = i + 1
+
+        step("Compare the 500-plan operation totals with the retained per-plan contract")
+        val source_bytes = source.bytes().len()
+        expect(total_snapshots).to_equal(500)
+        expect(total_passes).to_equal(500)
+        expect(total_bytes).to_equal(500 * source_bytes)
+        expect(total_comparisons).to_be_less_than(96 * total_bytes + 1)

@@ -20,8 +20,6 @@ const { spawn } = require('child_process');
 const path = require('path');
 const {
     commonInputEnvelope,
-    darwinHiddenInsetMode,
-    darwinTopInsetScript,
     renderEnvelopeMetadata,
     renderEnvelopeScript
 } = require('./bridge_envelopes.js');
@@ -39,8 +37,7 @@ function handleSimpleMessageLine(line, win = mainWindow) {
                 .then(() => win.webContents.executeJavaScript(electronWmInitScript()));
             if (process.env.SIMPLE_ELECTRON_PROOF_PATH) {
                 Promise.resolve(rendered)
-                    .then(() => win.webContents.executeJavaScript(electronLiveSmokeProofScript()))
-                    .then(envelope => attachElectronLiveSmokeScreenshot(win, envelope))
+                    .then(() => win.webContents.executeJavaScript('window.__SIMPLE_WEB_RENDER_ENVELOPE__'))
                     .then(envelope => {
                         fs.writeFileSync(process.env.SIMPLE_ELECTRON_PROOF_PATH, JSON.stringify(envelope));
                         if (app) {
@@ -67,11 +64,6 @@ function handleSimpleMessageLine(line, win = mainWindow) {
                 message: msg.message || ''
             });
             return { handled: true, kind: 'dialog' };
-        } else if (msg.type === 'fileDialog' && win) {
-            runFileDialog(win, msg.dialogType || 'open', msg.filters || '')
-                .then(result => sendToSimple({ type: 'fileDialogResult', canceled: result.canceled, paths: result.canceled ? '' : result.paths }))
-                .catch(err => sendToSimple({ type: 'fileDialogResult', canceled: true, paths: '', error: String(err && err.message ? err.message : err) }));
-            return { handled: true, kind: 'fileDialog' };
         } else if (msg.type === 'notification') {
             new Notification({ title: msg.title, body: msg.body }).show();
             return { handled: true, kind: 'notification' };
@@ -143,10 +135,7 @@ function bitmapEvidence(bitmap) {
 }
 
 function attachElectronLiveSmokeScreenshot(win, envelope) {
-    // Default mirrors check-electron-live-smoke.shs: screenshot lives next to
-    // the proof as <proof>.png when no explicit path is provided.
-    const screenshotPath = process.env.SIMPLE_ELECTRON_SCREENSHOT_PATH
-        || (process.env.SIMPLE_ELECTRON_PROOF_PATH ? process.env.SIMPLE_ELECTRON_PROOF_PATH + '.png' : '');
+    const screenshotPath = process.env.SIMPLE_ELECTRON_SCREENSHOT_PATH || '';
     if (!screenshotPath || !win || !win.webContents) {
         return Promise.resolve(Object.assign({}, envelope, {
             screenshot_path: '',
@@ -158,14 +147,6 @@ function attachElectronLiveSmokeScreenshot(win, envelope) {
         const png = image.toPNG();
         const bitmap = image.toBitmap();
         const size = image.getSize();
-        // capturePage returns physical pixels; on HiDPI/Retina displays the
-        // bitmap is scaleFactor x the logical content size. Report the measured
-        // factor so validators can scale expectations instead of failing on
-        // dimensions (Linux/xvfb measures exactly 1).
-        const contentSize = typeof win.getContentSize === 'function' ? win.getContentSize() : [0, 0];
-        const scaleFactor = Array.isArray(contentSize) && contentSize[0] > 0
-            ? size.width / contentSize[0]
-            : 1;
         const pixels = bitmapEvidence(bitmap);
         fs.mkdirSync(path.dirname(resolvedScreenshotPath), { recursive: true });
         fs.writeFileSync(resolvedScreenshotPath, png);
@@ -173,7 +154,6 @@ function attachElectronLiveSmokeScreenshot(win, envelope) {
             screenshot_path: resolvedScreenshotPath,
             screenshot_width: size.width,
             screenshot_height: size.height,
-            screenshot_scale_factor: scaleFactor,
             screenshot_png_size_bytes: png.length,
             screenshot_bitmap_byte_count: bitmap.length,
             screenshot_pixel_checksum: pixels.checksum,
@@ -295,138 +275,13 @@ function initialShellHtml() {
     );
 }
 
-function electronLiveSmokeProofScript() {
-    return `
-        new Promise(function(resolve) {
-            try {
-            var envelope = window.__SIMPLE_WEB_RENDER_ENVELOPE__ || {};
-            var appEl = document.getElementById('app');
-            var performanceNowAvailable = !!(window.performance && typeof window.performance.now === 'function');
-            var start = performanceNowAvailable ? window.performance.now() : 0;
-            var animationFrameAvailable = typeof window.requestAnimationFrame === 'function';
-            var frameCount = 0;
-            var eventProbeType = 'simple-electron-live-smoke-event';
-            var eventProbeDetail = 'live-smoke-input';
-            var eventDispatchAvailable = typeof document.addEventListener === 'function' && typeof document.dispatchEvent === 'function' && (typeof window.CustomEvent === 'function' || typeof document.createEvent === 'function');
-            var eventDispatchCount = 0;
-            var eventDispatchObservedType = '';
-            var eventDispatchObservedDetail = '';
-            var eventDispatchError = '';
-            var eventDispatchStartMs = null;
-            function eventProbeHandler(event) {
-                eventDispatchCount += 1;
-                eventDispatchObservedType = event.type || '';
-                eventDispatchObservedDetail = event.detail && event.detail.kind ? String(event.detail.kind) : '';
-            }
-            try {
-                document.addEventListener(eventProbeType, eventProbeHandler);
-                if (eventDispatchAvailable) {
-                    var eventProbe = null;
-                    if (typeof window.CustomEvent === 'function') {
-                        eventProbe = new CustomEvent(eventProbeType, {
-                            detail: { kind: eventProbeDetail }
-                        });
-                    } else {
-                        eventProbe = document.createEvent('CustomEvent');
-                        eventProbe.initCustomEvent(eventProbeType, false, false, { kind: eventProbeDetail });
-                    }
-                    eventDispatchStartMs = performanceNowAvailable ? window.performance.now() : null;
-                    document.dispatchEvent(eventProbe);
-                }
-            } catch (eventProbeErr) {
-                eventDispatchError = String(eventProbeErr && eventProbeErr.message ? eventProbeErr.message : eventProbeErr);
-            } finally {
-                document.removeEventListener(eventProbeType, eventProbeHandler);
-            }
-            var styleProbe = document.createElement('style');
-            styleProbe.textContent = '@keyframes simple-electron-live-smoke-pulse { from { opacity: 0.2; } to { opacity: 0.9; } } .simple-electron-live-smoke-animation { animation: simple-electron-live-smoke-pulse 80ms linear 2; }';
-            document.head.appendChild(styleProbe);
-            var animationProbe = document.createElement('div');
-            animationProbe.className = 'simple-electron-live-smoke-animation';
-            animationProbe.style.cssText = 'position:fixed;left:-1000px;top:-1000px;width:8px;height:8px;';
-            document.body.appendChild(animationProbe);
-            function finish() {
-                try {
-                var style = window.getComputedStyle(animationProbe);
-                var text = appEl ? (appEl.textContent || '') : '';
-                var userAgent = (window.navigator && window.navigator.userAgent) || '';
-                var runtimeVersions = window.simpleElectron && typeof window.simpleElectron.runtimeVersions === 'function'
-                    ? window.simpleElectron.runtimeVersions()
-                    : {};
-                var eventDispatchToPaintMs = performanceNowAvailable && eventDispatchStartMs !== null
-                    ? Math.max(0, window.performance.now() - eventDispatchStartMs)
-                    : null;
-                var proof = Object.assign({}, envelope, {
-                    proof_source: 'src/app/ui.electron/bridge.js:electronLiveSmokeProofScript',
-                    browser_engine: new RegExp('Chrome/|Chromium/').test(userAgent) ? 'chromium' : '',
-                    electron_user_agent: userAgent,
-                    electron_process_version: runtimeVersions.electron || '',
-                    chrome_process_version: runtimeVersions.chrome || '',
-                    app_element_present: !!appEl,
-                    body_text_length: text.length,
-                    body_text_sample: text.slice(0, 120),
-                    performance_now_available: performanceNowAvailable,
-                    performance_now_delta_ms: performanceNowAvailable ? Math.max(0, window.performance.now() - start) : null,
-                    animation_frame_available: animationFrameAvailable,
-                    animation_frame_count: frameCount,
-                    css_animation_probe: style.animationName === 'simple-electron-live-smoke-pulse',
-                    event_dispatch_available: eventDispatchAvailable,
-                    event_dispatch_count: eventDispatchCount,
-                    event_dispatch_type: eventDispatchObservedType,
-                    event_dispatch_detail: eventDispatchObservedDetail,
-                    event_dispatch_error: eventDispatchError,
-                    event_dispatch_to_paint_ms: eventDispatchToPaintMs,
-                    blur_or_tolerance_used: false
-                });
-                animationProbe.remove();
-                styleProbe.remove();
-                resolve(proof);
-                } catch (finishErr) {
-                    resolve({
-                        error: String(finishErr && finishErr.message ? finishErr.message : finishErr),
-                        stack: finishErr && finishErr.stack ? String(finishErr.stack) : ''
-                    });
-                }
-            }
-            if (animationFrameAvailable) {
-                requestAnimationFrame(function() {
-                    frameCount += 1;
-                    requestAnimationFrame(function() {
-                        frameCount += 1;
-                        finish();
-                    });
-                });
-            } else {
-                finish();
-            }
-            } catch (proofErr) {
-                resolve({
-                    error: String(proofErr && proofErr.message ? proofErr.message : proofErr),
-                    stack: proofErr && proofErr.stack ? String(proofErr.stack) : ''
-                });
-            }
-        })
-    `;
-}
-
 function electronWmInitScript() {
-    // macOS `hiddenInset` keeps the native traffic-light cluster visible at the
-    // host window's top-left (~x 0..92, y 0..32 in viewport coords) while each
-    // WM window also renders its own lights in its titlebar — the two sets paint
-    // over each other when a WM window sits under the native cluster. Hide the
-    // WM-rendered lights for the overlapping window instead (native lights keep
-    // host close/min/max; WM lights keep working on all non-overlapping windows).
-    const hideWmTrafficOnNativeOverlap = darwinHiddenInsetMode();
     return `
-        var SIMPLE_ELECTRON_HIDE_WM_TRAFFIC_OVERLAP = ${hideWmTrafficOnNativeOverlap ? 'true' : 'false'};
         (function() {
             if (!document.getElementById('simple-electron-wm-style')) {
                 var style = document.createElement('style');
                 style.id = 'simple-electron-wm-style';
                 style.textContent = '#wm-desktop{position:fixed;inset:0;overflow:hidden;isolation:isolate}#wm-desktop .wm-window{position:absolute;display:flex;flex-direction:column;overflow:hidden}#wm-desktop .wm-body{flex:1;min-height:0;overflow:auto}#wm-desktop .wm-titlebar{display:flex;align-items:center;gap:8px;height:46px;padding:0 18px;background:linear-gradient(180deg,rgba(255,255,255,.12),rgba(255,255,255,.04));border-bottom:1px solid rgba(255,255,255,.12);user-select:none;cursor:grab}#wm-desktop .wm-titlebar:active{cursor:grabbing}#wm-desktop .wm-title{font:600 13px/1 var(--ui-font-label,system-ui,sans-serif);color:var(--ui-text,#e5e7eb);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#wm-desktop .wm-titlebar-widgets{display:flex;align-items:center;gap:6px;margin-left:auto}#wm-desktop .wm-titlebar-widgets [data-simple-titlebar-widget]{min-height:24px}';
-                if (SIMPLE_ELECTRON_HIDE_WM_TRAFFIC_OVERLAP) {
-                    style.textContent += '#wm-desktop{top:28px}';
-                }
                 document.head.appendChild(style);
             }
             var desktop = document.getElementById('wm-desktop');
@@ -436,11 +291,8 @@ function electronWmInitScript() {
                 document.body.appendChild(desktop);
             }
             if (!window.__SIMPLE_ELECTRON_WM__) {
-                ${darwinTopInsetScript()}
                 window.__SIMPLE_ELECTRON_WM__ = {
                     windows: {},
-                    _themeRootAttrs: '',
-                    _themeRootAttrNames: [],
                     z: 20,
                     drag: null,
                     dragEventsBound: false,
@@ -578,7 +430,6 @@ function electronWmInitScript() {
                         titlebar.addEventListener('pointerup', function(ev) {
                             try { titlebar.releasePointerCapture(ev.pointerId); } catch (_) {}
                             self.finishDrag(ev, ev.pointerId, false);
-                            self.syncTrafficOverlap(id);
                         });
                         titlebar.addEventListener('pointercancel', function(ev) {
                             self.cancelDrag(ev.pointerId, false);
@@ -592,21 +443,7 @@ function electronWmInitScript() {
                         });
                         titlebar.addEventListener('mouseup', function(ev) {
                             self.finishDrag(ev, 'mouse', true);
-                            self.syncTrafficOverlap(id);
                         });
-                    },
-                    syncTrafficOverlap: function(id) {
-                        var existing = this.windows[id];
-                        if (!existing || !existing.titlebar) return;
-                        var lights = existing.titlebar.querySelector('.wm-traffic-lights');
-                        if (!lights) return;
-                        if (!SIMPLE_ELECTRON_HIDE_WM_TRAFFIC_OVERLAP) {
-                            lights.style.display = '';
-                            return;
-                        }
-                        var r = existing.win.getBoundingClientRect();
-                        var overlapsNativeLights = r.left < 92 && r.top < 32 && (r.left + r.width) > 0 && (r.top + r.height) > 0;
-                        lights.style.display = overlapsNativeLights ? 'none' : '';
                     },
                     focus: function(id) {
                         var existing = this.windows[id];
@@ -684,55 +521,6 @@ function electronWmInitScript() {
                             self.sendWindowInput(id, self.elementId(target), target.isContentEditable ? target.textContent : target.value);
                         });
                     },
-                    _applyThemeRootAttrs: function(rootAttrs) {
-                        if (this._themeRootAttrs === rootAttrs) return;
-
-                        var root = document.documentElement;
-                        if (!root) return;
-
-                        if (this._themeRootAttrNames && this._themeRootAttrNames.length) {
-                            for (var i = 0; i < this._themeRootAttrNames.length; i++) {
-                                root.removeAttribute(this._themeRootAttrNames[i]);
-                            }
-                        }
-
-                        var nextNames = [];
-                        if (rootAttrs) {
-                            var probe = document.createElement('span');
-                            probe.innerHTML = '<span ' + rootAttrs + '></span>';
-                            var source = probe.firstElementChild;
-                            if (source) {
-                                Array.from(source.attributes).forEach(function(attr) {
-                                    root.setAttribute(attr.name, attr.value);
-                                    nextNames.push(attr.name);
-                                });
-                            }
-                        }
-                        this._themeRootAttrs = rootAttrs;
-                        this._themeRootAttrNames = nextNames;
-                    },
-                    _applyElectronWindowEnvelope: function(msg, body) {
-                        if (!msg || !body) return;
-                        var css = String(msg.css || '').trim();
-
-                        if (Object.prototype.hasOwnProperty.call(msg, 'root_attrs')) {
-                            this._applyThemeRootAttrs(String(msg.root_attrs || '').trim());
-                        }
-
-                        var styleEl = body.querySelector('style[data-simple-window-css]');
-                        if (css) {
-                            if (!styleEl) {
-                                styleEl = document.createElement('style');
-                                styleEl.setAttribute('data-simple-window-css', '1');
-                                body.prepend(styleEl);
-                            }
-                            if (styleEl.textContent !== css) {
-                                styleEl.textContent = css;
-                            }
-                        } else if (styleEl) {
-                            styleEl.remove();
-                        }
-                    },
                     receiveElectronMessage: function(msg) {
                         if (!msg || !msg.type) return;
                         if (msg.type === 'openWindow') {
@@ -771,17 +559,14 @@ function electronWmInitScript() {
                                 this.bindDrag(id, win, titlebar);
                                 this.bindWindowEvents(id, win, body);
                                 this._applyElectronWindowEnvelope(msg, body);
-                                this.syncTrafficOverlap(id);
                             } else {
                                 existing.body.innerHTML = msg.html || '';
                                 existing.title.textContent = msg.title || id;
-                                this._applyElectronWindowEnvelope(msg, existing.body);
                             }
                             this.mountTitlebarWidgets(existing);
                             this.focus(id);
                         } else if (msg.type === 'renderWindow' && this.windows[msg.windowId]) {
                             this.windows[msg.windowId].body.innerHTML = msg.html || '';
-                            this._applyElectronWindowEnvelope(msg, this.windows[msg.windowId].body);
                             this.mountTitlebarWidgets(this.windows[msg.windowId]);
                         } else if (msg.type === 'closeWindow' && this.windows[msg.windowId]) {
                             this.windows[msg.windowId].win.remove();
@@ -811,33 +596,8 @@ function maybeWriteMdiProof(win) {
     }
     mdiProofInputFrames = [];
     win.webContents.executeJavaScript(`
-            (async function() {
+            (function() {
                 var wm = window.__SIMPLE_ELECTRON_WM__;
-                var performanceNowAvailable = !!(window.performance && typeof window.performance.now === 'function');
-                var performanceStart = performanceNowAvailable ? window.performance.now() : 0;
-                var inputToPaintStart = 0;
-                var inputToPaintMs = 0;
-                var animationFrameAvailable = typeof window.requestAnimationFrame === 'function';
-                var animationFrameCount = 0;
-                var styleProbe = document.createElement('style');
-                styleProbe.textContent = '@keyframes simple-electron-mdi-proof-pulse { from { opacity: 0.2; } to { opacity: 0.9; } } .simple-electron-mdi-proof-animation { animation: simple-electron-mdi-proof-pulse 120ms linear 2; }';
-                document.head.appendChild(styleProbe);
-                var animationProbe = document.createElement('div');
-                animationProbe.className = 'simple-electron-mdi-proof-animation';
-                animationProbe.style.cssText = 'position:fixed;left:-1000px;top:-1000px;width:8px;height:8px;';
-                document.body.appendChild(animationProbe);
-                if (animationFrameAvailable) {
-                    await new Promise(function(resolve) {
-                        requestAnimationFrame(function() {
-                            animationFrameCount += 1;
-                            requestAnimationFrame(function() {
-                                animationFrameCount += 1;
-                                resolve();
-                            });
-                        });
-                    });
-                }
-                var animationProbeStyle = window.getComputedStyle(animationProbe);
                 var dragMoved = false;
                 var bodyClickRouted = false;
                 var bodyInputRouted = false;
@@ -845,7 +605,6 @@ function maybeWriteMdiProof(win) {
                 var trafficMinimizeRouted = false;
                 var trafficMaximizeRouted = false;
                 var trafficCloseRouted = false;
-                var eventSequence = [];
                 var appActionControlFound = false;
                 var appInputControlFound = false;
                 var dragBefore = null;
@@ -865,7 +624,6 @@ function maybeWriteMdiProof(win) {
                     return rect.width >= 20 && rect.height >= 10 && style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
                 });
                 if (wm && wm.windows && wm.windows.terminal) {
-                    inputToPaintStart = performanceNowAvailable ? window.performance.now() : 0;
                     var terminal = wm.windows.terminal.win;
                     var body = wm.windows.terminal.body;
                     var titlebar = terminal.querySelector('.wm-titlebar');
@@ -884,9 +642,6 @@ function maybeWriteMdiProof(win) {
                         dragAfter = { left: parseInt(terminal.style.left || '0', 10) || 0, top: parseInt(terminal.style.top || '0', 10) || 0 };
                         dragMoved = dragAfter.left > dragBefore.left && dragAfter.top > dragBefore.top;
                     }
-                    if (dragMoved) {
-                        eventSequence.push('window_drag:move');
-                    }
                     if (body) {
                         var appButton = body.querySelector('[data-action]');
                         appActionControlFound = !!appButton;
@@ -898,9 +653,6 @@ function maybeWriteMdiProof(win) {
                             }
                             appButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
                             bodyClickRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'action' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.action === actionName);
-                            if (bodyClickRouted) {
-                                eventSequence.push('app_action:body_click');
-                            }
                         }
 
                         var appInput = body.querySelector('input[data-target-id]:not([data-simple-titlebar-widget]), textarea[data-target-id]:not([data-simple-titlebar-widget]), select[data-target-id]:not([data-simple-titlebar-widget]), [contenteditable][data-target-id]:not([data-simple-titlebar-widget])');
@@ -914,15 +666,9 @@ function maybeWriteMdiProof(win) {
                             }
                             appInput.dispatchEvent(new Event('input', { bubbles: true }));
                             bodyInputRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'input' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.targetId === targetId && wm.lastEvent.value === 'ok');
-                            if (bodyInputRouted) {
-                                eventSequence.push('app_input:body_input');
-                            }
                         }
                         body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
                         bodyKeyRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'key' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.key === 'Enter');
-                        if (bodyKeyRouted) {
-                            eventSequence.push('app_key:body_key');
-                        }
                     }
                     var minimizeButton = terminal.querySelector('.wm-traffic-lights [data-action="minimize"]');
                     var maximizeButton = terminal.querySelector('.wm-traffic-lights [data-action="maximize"]');
@@ -952,14 +698,6 @@ function maybeWriteMdiProof(win) {
                         trafficCloseRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'action' && wm.lastEvent.windowId === 'bridge-proof-close' && wm.lastEvent.action === 'close' && !wm.windows['bridge-proof-close']);
                     }
                 }
-                if (inputToPaintStart > 0 && animationFrameAvailable) {
-                    await new Promise(function(resolve) {
-                        requestAnimationFrame(function() {
-                            requestAnimationFrame(resolve);
-                        });
-                    });
-                }
-                inputToPaintMs = performanceNowAvailable && inputToPaintStart > 0 ? Math.max(0, window.performance.now() - inputToPaintStart) : 0;
                 return {
             count: window.__SIMPLE_ELECTRON_WM__ ? Object.keys(window.__SIMPLE_ELECTRON_WM__.windows || {}).length : 0,
             text: document.body.innerText,
@@ -974,7 +712,6 @@ function maybeWriteMdiProof(win) {
             bodyClickRouted: bodyClickRouted,
             bodyInputRouted: bodyInputRouted,
             bodyKeyRouted: bodyKeyRouted,
-            eventSequence: eventSequence,
             trafficMinimizeRouted: trafficMinimizeRouted,
             trafficMaximizeRouted: trafficMaximizeRouted,
             trafficCloseRouted: trafficCloseRouted,
@@ -984,13 +721,7 @@ function maybeWriteMdiProof(win) {
             taskbarLabelsVisible: taskbarLabelsVisible,
             dragBefore: dragBefore,
             dragAfter: dragAfter,
-            htmlRenderable: document.body.innerHTML.indexOf('simple-app-window') >= 0 && document.body.innerHTML.indexOf('<pre class="simple-app-pre">') >= 0,
-            performanceNowAvailable: performanceNowAvailable,
-            performanceNowDeltaMs: performanceNowAvailable ? Math.max(0, window.performance.now() - performanceStart) : null,
-            inputToPaintMs: inputToPaintMs,
-            animationFrameAvailable: animationFrameAvailable,
-            animationFrameCount: animationFrameCount,
-            cssAnimationProbe: animationProbeStyle.animationName === 'simple-electron-mdi-proof-pulse'
+            htmlRenderable: document.body.innerHTML.indexOf('simple-app-window') >= 0 && document.body.innerHTML.indexOf('<pre class="simple-app-pre">') >= 0
             };
         })();
     `).then(proof => {
@@ -1055,7 +786,6 @@ if (app) app.whenReady().then(() => {
             : undefined,
         backgroundColor: '#0b0d10',
         webPreferences: {
-            sandbox: true,
             nodeIntegration: false,
             contextIsolation: true,
             preload: path.join(__dirname, 'preload.js')
@@ -1156,7 +886,6 @@ if (app) app.on('window-all-closed', () => {
 
 module.exports = {
     commonInputEnvelope,
-    electronLiveSmokeProofScript,
     electronWmInitScript,
     handleSimpleMessageLine,
     parseCliArgs,

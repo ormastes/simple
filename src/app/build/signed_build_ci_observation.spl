@@ -1,0 +1,107 @@
+# The protected CI controller collects these values from GitHub's current PR
+# event, a pinned local integration candidate and base-owned policy. This
+# pure check cannot authenticate where its caller obtained them.
+use app.build.gate_receipt.{GateReceipt, gate_receipt_digest_v1}
+use app.build.signed_build_admission.{SignedBuildExpectationV2,
+    SignedBuildAdmissionV1, signed_build_repository_valid_v2}
+use app.build.signed_build_controller.{verify_protected_signed_build_candidate_v2}
+use app.build.signed_build_signature_provider.{SignedBuildSshProviderConfigV2}
+use app.build.signed_build_verifier.{SignedBuildFileDecisionV2}
+use std.common.crypto.sha256.{sha256_text}
+
+struct SignedBuildCiObservationV1:
+    repository_full_name: text
+    pull_request_number: i64
+    base_revision: text
+    head_revision: text
+    github_merge_tree: text
+    local_candidate_tree: text
+    protected_policy_digest: text
+    checker_digest: text
+    submodule_closure_digest: text
+    protected_manifest_digest: text
+
+struct SignedBuildCiObservationResultV1:
+    verified: bool
+    reason: text
+
+fn _ci_hex_v1(value: text, lengths: [i64]) -> bool:
+    if not lengths.contains(value.len()): return false
+    for ch in value.chars():
+        if not ((ch >= "0" and ch <= "9") or
+                (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+fn validate_signed_build_ci_observation_v1(
+        observed: SignedBuildCiObservationV1,
+        expected: SignedBuildExpectationV2,
+        gate_receipt: GateReceipt,
+        protected_manifest_text: text,
+        protected_manifest_digest: text
+        ) -> SignedBuildCiObservationResultV1:
+    """Require independently observed current identities before signed reuse."""
+    if not signed_build_repository_valid_v2(observed.repository_full_name) or
+       observed.pull_request_number <= 0 or
+       not _ci_hex_v1(observed.base_revision, [40, 64]) or
+       not _ci_hex_v1(observed.head_revision, [40, 64]) or
+       not _ci_hex_v1(observed.github_merge_tree, [40, 64]) or
+       not _ci_hex_v1(observed.local_candidate_tree, [40, 64]) or
+       not _ci_hex_v1(observed.protected_policy_digest, [64]) or
+       not _ci_hex_v1(observed.checker_digest, [64]) or
+       not _ci_hex_v1(observed.submodule_closure_digest, [64]) or
+       not _ci_hex_v1(observed.protected_manifest_digest, [64]):
+        return SignedBuildCiObservationResultV1(false,
+            "current-ci-observation-invalid")
+    if observed.repository_full_name != expected.repository_full_name or
+       observed.pull_request_number != expected.pull_request_number or
+       observed.base_revision != expected.build.base_revision or
+       observed.head_revision != expected.build.head_revision:
+        return SignedBuildCiObservationResultV1(false,
+            "current-pr-identity-changed")
+    if observed.github_merge_tree != observed.local_candidate_tree or
+       observed.local_candidate_tree != expected.build.candidate_tree:
+        return SignedBuildCiObservationResultV1(false,
+            "integration-candidate-changed")
+    if observed.protected_policy_digest !=
+            expected.build.protected_policy_digest or
+       observed.checker_digest != expected.build.checker_digest or
+       observed.submodule_closure_digest !=
+            expected.build.submodule_closure_digest:
+        return SignedBuildCiObservationResultV1(false,
+            "protected-build-identity-changed")
+    if observed.protected_manifest_digest != protected_manifest_digest or
+       protected_manifest_text.len() == 0 or
+       protected_manifest_text.len() > 1048576 or
+       sha256_text(protected_manifest_text) != protected_manifest_digest:
+        return SignedBuildCiObservationResultV1(false,
+            "protected-manifest-changed")
+    val gate_digest = gate_receipt_digest_v1(gate_receipt)
+    if gate_digest == "" or
+       gate_digest != expected.build.mandatory_gate_receipt_digest:
+        return SignedBuildCiObservationResultV1(false,
+            "current-gate-observation-changed")
+    SignedBuildCiObservationResultV1(true, "current-ci-observation-bound")
+
+fn verify_observed_signed_build_ci_candidate_v1(
+        observed: SignedBuildCiObservationV1,
+        receipt_wire: text, signature_text: text,
+        gate_receipt: GateReceipt, expected: SignedBuildExpectationV2,
+        protected_manifest_text: text, protected_manifest_digest: text,
+        protected_issuer: text, ssh: SignedBuildSshProviderConfigV2,
+        downloaded_path: text, private_artifact_parent: text,
+        artifact_limit: i64) -> SignedBuildFileDecisionV2:
+    """Fall back to the ordinary build on any current observation mismatch."""
+    val current = validate_signed_build_ci_observation_v1(observed, expected,
+        gate_receipt, protected_manifest_text, protected_manifest_digest)
+    if not current.verified:
+        return SignedBuildFileDecisionV2(SignedBuildAdmissionV1(
+            "FULL_BUILD", "ci-observation: " + current.reason), "", "")
+    verify_protected_signed_build_candidate_v2(receipt_wire,
+        signature_text, gate_receipt, expected, protected_manifest_text,
+        protected_manifest_digest, protected_issuer, ssh,
+        downloaded_path, private_artifact_parent, artifact_limit)
+
+export SignedBuildCiObservationV1, SignedBuildCiObservationResultV1
+export validate_signed_build_ci_observation_v1
+export verify_observed_signed_build_ci_candidate_v1

@@ -1,0 +1,66 @@
+# Parent-owned, private handoff file for the fixed-argument transport child.
+# Keep this root until the child and every local writer have stopped.
+use app.build.scheduler.parallel_transport_handoff_builder_v1.{
+    PreparedParallelTransportHandoffV1}
+use app.build.scheduler.parallel_transport_wire_v1.{
+    encode_parallel_transport_handoff_v1,
+    parse_parallel_transport_handoff_v1,
+    PARALLEL_TRANSPORT_WIRE_MAX_BYTES_V1}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use app.io.mod.{secure_temp_dir, file_write_bytes, file_fsync,
+    directory_fsync, file_read_regular_no_follow_bounded_bytes,
+    dir_remove_all}
+
+struct StagedParallelTransportHandoffV1:
+    ready: bool
+    reason: text
+    root: text
+    handoff_path: text
+    digest: text
+
+fn _handoff_stage_fail_v1(reason: text, root: text) ->
+        StagedParallelTransportHandoffV1:
+    if root == "":
+        return StagedParallelTransportHandoffV1(false, reason, "", "", "")
+    if dir_remove_all(root):
+        return StagedParallelTransportHandoffV1(false, reason, "", "", "")
+    StagedParallelTransportHandoffV1(false,
+        reason + ";stage-cleanup-failed", root, "", "")
+
+fn stage_parallel_transport_handoff_v1(
+        built: PreparedParallelTransportHandoffV1,
+        approved_state_dir: text) ->
+        StagedParallelTransportHandoffV1:
+    """Persist exact approved bytes before launch; retain root through collect."""
+    if not built.valid or built.handoff == nil or built.wire.len() == 0 or
+       built.wire.len() > PARALLEL_TRANSPORT_WIRE_MAX_BYTES_V1 or
+       built.digest != sha256_u8_hex(built.wire):
+        return _handoff_stage_fail_v1("handoff-invalid", "")
+    val canonical = encode_parallel_transport_handoff_v1(
+        built.handoff.unwrap())
+    val parsed = parse_parallel_transport_handoff_v1(built.wire)
+    if canonical != built.wire or not parsed.valid or
+       parsed.approved_node == nil:
+        return _handoff_stage_fail_v1("handoff-noncanonical", "")
+    val private_parent = parsed.approved_node.unwrap().local_state_dir
+    if private_parent != approved_state_dir:
+        return _handoff_stage_fail_v1("handoff-state-root-mismatch", "")
+    val created = secure_temp_dir(private_parent, "parallel-handoff")
+    if created.is_err():
+        return _handoff_stage_fail_v1("handoff-stage-unavailable", "")
+    val root = created.unwrap()
+    val handoff_path = root + "/handoff.wire"
+    if not file_write_bytes(handoff_path, built.wire) or
+       not file_fsync(handoff_path) or
+       not directory_fsync(root) or
+       not directory_fsync(private_parent):
+        return _handoff_stage_fail_v1("handoff-stage-write", root)
+    val pinned = file_read_regular_no_follow_bounded_bytes(handoff_path,
+        PARALLEL_TRANSPORT_WIRE_MAX_BYTES_V1)
+    if pinned.is_err() or pinned.unwrap() != built.wire:
+        return _handoff_stage_fail_v1("handoff-stage-mismatch", root)
+    StagedParallelTransportHandoffV1(true, "", root, handoff_path,
+        built.digest)
+
+export StagedParallelTransportHandoffV1
+export stage_parallel_transport_handoff_v1

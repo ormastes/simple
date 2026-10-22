@@ -1,0 +1,76 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use app.build.scheduler.parent_issued_graph_wire.{
+    encode_parent_issued_graph_wire_v1, parse_parent_issued_graph_wire_v1}
+use app.build.scheduler.parent_issued_graph_store.{
+    load_issued_parent_graph_v1, publish_issued_parent_graph_v1}
+use app.build.scheduler.parent_issued_graph_main.{
+    parse_parent_issued_graph_args_v1}
+use app.io.mod.{cwd, getpid, time_now_unix_micros, dir_create_all,
+    dir_remove_all, file_write_bytes}
+
+val ISSUED_GRAPH_PLAN_DIGEST = sha256_text("approved-complete-graph")
+val ISSUED_GRAPH_MANIFEST_DIGEST = sha256_text("complete-graph-manifest")
+
+fn _issued_graph_wire_v1() -> text:
+    encode_parent_issued_graph_wire_v1(ISSUED_GRAPH_PLAN_DIGEST,
+        "/trusted/graph.manifest", ISSUED_GRAPH_MANIFEST_DIGEST,
+        ["/trusted/worker-a.conf", "/trusted/worker-b.conf"])
+
+describe "canonical administrator complete-graph launch record":
+    it "round trips ordered exact pins and rejects noncanonical edits":
+        val wire = _issued_graph_wire_v1()
+        val parsed = parse_parent_issued_graph_wire_v1(wire)
+        expect(parsed.valid).to_be(true)
+        expect(parsed.plan_digest).to_equal(ISSUED_GRAPH_PLAN_DIGEST)
+        expect(parsed.manifest_digest)
+            .to_equal(ISSUED_GRAPH_MANIFEST_DIGEST)
+        expect(parsed.manifest_path).to_equal("/trusted/graph.manifest")
+        expect(parsed.config_paths).to_equal([
+            "/trusted/worker-a.conf", "/trusted/worker-b.conf"])
+        expect(parse_parent_issued_graph_wire_v1(wire.replace(
+            "config-count=2", "config-count=02")).valid).to_be(false)
+        expect(parse_parent_issued_graph_wire_v1(wire.replace(
+            "/trusted/worker-b.conf", "/trusted/worker-a.conf"))
+            .valid).to_be(false)
+        expect(parse_parent_issued_graph_wire_v1(wire +
+            "config=/trusted/worker-c.conf\n").valid).to_be(false)
+        expect(parse_parent_issued_graph_wire_v1(wire.replace(
+            "/trusted/graph.manifest", "/trusted/../graph.manifest"))
+            .valid).to_be(false)
+
+    it "publishes separately and rejects a corrupted retained record":
+        val root = cwd() + "/build/test/issued-graph-" +
+            getpid().to_text() + "-" + time_now_unix_micros().to_text()
+        expect(dir_create_all(root + "/graph-plans")).to_be(true)
+        val wire = _issued_graph_wire_v1()
+        val first = publish_issued_parent_graph_v1(root, wire)
+        expect(first.published).to_be(true)
+        expect(first.durable).to_be(true)
+        expect(first.record_digest).to_equal(sha256_text(wire))
+        expect(load_issued_parent_graph_v1(root, first.record_digest)
+            .valid).to_be(true)
+        val again = publish_issued_parent_graph_v1(root, wire)
+        expect(again.published).to_be(true)
+        expect(again.durable).to_be(true)
+        val path = root + "/graph-plans/" + first.record_digest + ".wire"
+        expect(file_write_bytes(path, (wire + "changed\n").bytes()))
+            .to_be(true)
+        expect(load_issued_parent_graph_v1(root, first.record_digest)
+            .valid).to_be(false)
+        expect(publish_issued_parent_graph_v1(root, wire)
+            .published).to_be(false)
+        expect(dir_remove_all(root)).to_be(true)
+
+    it "accepts only one installed record selector":
+        val parsed = parse_parent_issued_graph_args_v1([
+            "/trusted/bin/simple_dist_build_issued_graph_parent",
+            "--issued-plan", ISSUED_GRAPH_PLAN_DIGEST])
+        expect(parsed.valid).to_be(true)
+        expect(parsed.record_digest).to_equal(ISSUED_GRAPH_PLAN_DIGEST)
+        expect(parse_parent_issued_graph_args_v1([
+            "--graph-digest", ISSUED_GRAPH_MANIFEST_DIGEST])
+            .valid).to_be(false)
+        expect(parse_parent_issued_graph_args_v1([
+            "--issued-plan", ISSUED_GRAPH_PLAN_DIGEST,
+            "--config", "/trusted/worker.conf"]).valid).to_be(false)

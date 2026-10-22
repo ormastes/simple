@@ -1,0 +1,96 @@
+use app.build.scheduler.dispatch_wire.{encode_build_dispatch_v1,
+    parse_build_dispatch_v1, encode_build_result_v1, parse_build_result_v1}
+use compiler.common.build_contract.{BuildInputRef, SnapshotManifest,
+    ToolchainManifest, InputManifest, ActionSpec, AttemptSpec,
+    ActionResultCandidate, action_spec_digest_v1, input_manifest_digest_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.spec.step
+
+fn _wire_action() -> ActionSpec:
+    val snapshot = sha256_text("snapshot")
+    ActionSpec(1, "compile",
+        SnapshotManifest(1, snapshot, sha256_text("source"), sha256_text("submodules")),
+        ToolchainManifest(1, sha256_text("executable"), sha256_text("behavior"),
+            sha256_text("abi"), sha256_text("runtime"), sha256_text("sysroot"),
+            "aarch64-apple-darwin"),
+        InputManifest(1, snapshot,
+            [BuildInputRef("src/main.spl", sha256_text("source bytes"))],
+            [], [], [], [], [], sha256_text("context"), true, false),
+        ["simple", "build"], "src", sha256_text("sandbox"),
+        ["build/main"], sha256_text("resources"))
+
+describe "bounded build dispatch metadata wire":
+    it "roundtrips canonical action and attempt identities with limits":
+        step("Encode and inspect parent dispatch")
+        val action = _wire_action()
+        val digest = action_spec_digest_v1(action)
+        val attempt = AttemptSpec(1, digest, "try-1", "node-1", 0, 3, 4096)
+        val wire = encode_build_dispatch_v1(action, attempt, 7, 2, 8)
+        expect(wire.starts_with("simple-build-dispatch-v1\n")).to_be(true)
+        expect(wire.len() < 4096).to_be(true)
+        if val parsed = parse_build_dispatch_v1(wire):
+            expect(parsed.action_digest).to_equal(digest)
+            expect(parsed.input_manifest_digest).to_equal(input_manifest_digest_v1(action.inputs))
+            expect(parsed.snapshot_digest).to_equal(action.snapshot.snapshot_digest)
+            expect(parsed.tool_executable_digest).to_equal(action.toolchain.executable_digest)
+            expect(parsed.attempt_id).to_equal("try-1")
+            expect(parsed.worker_id).to_equal("node-1")
+            expect(parsed.fence).to_equal(7)
+            expect(parsed.cpu_tokens).to_equal(2)
+            expect(parsed.memory_budget_bytes).to_equal(4096)
+            expect(parsed.fd_tokens).to_equal(8)
+        else:
+            expect(false).to_be(true)
+
+    it "rejects stale action binding and noncanonical or corrupt dispatch fields":
+        val action = _wire_action()
+        val digest = action_spec_digest_v1(action)
+        val stale = AttemptSpec(1, sha256_text("old action"), "try-1", "node-1", 0, 3, 4096)
+        expect(encode_build_dispatch_v1(action, stale, 7, 2, 8)).to_equal("")
+        val current = AttemptSpec(1, digest, "try-1", "node-1", 0, 3, 4096)
+        val wire = encode_build_dispatch_v1(action, current, 7, 2, 8)
+        expect(parse_build_dispatch_v1(wire.replace("fence=7\n", "fence=07\n"))).to_be_nil()
+        expect(parse_build_dispatch_v1(wire.replace("fence=7\n", "fence=-1\n"))).to_be_nil()
+        expect(parse_build_dispatch_v1(wire.replace("worker=node-1\n", "worker=node-1\nworker=node-2\n"))).to_be_nil()
+        expect(parse_build_dispatch_v1(wire.replace("inputs=", "other="))).to_be_nil()
+        expect(parse_build_dispatch_v1(wire.replace("cpu=2\nmemory=4096\n", "memory=4096\ncpu=2\n"))).to_be_nil()
+        expect(parse_build_dispatch_v1(wire + "unknown=1\n")).to_be_nil()
+        expect(parse_build_dispatch_v1(wire[0:wire.len() - 1])).to_be_nil()
+        expect(parse_build_dispatch_v1(wire + "x" * 4096)).to_be_nil()
+
+    it "roundtrips candidate claims and rejects status or stale identity forms":
+        step("Parse node candidate before parent validation")
+        val digest = action_spec_digest_v1(_wire_action())
+        val candidate = ActionResultCandidate(1, digest, "try-1", "node-1",
+            sha256_text("manifest bytes"), sha256_text("diagnostic bytes"), true)
+        val wire = encode_build_result_v1(candidate, 7)
+        expect(wire.starts_with("simple-build-result-candidate-v1\n")).to_be(true)
+        if val parsed = parse_build_result_v1(wire):
+            expect(parsed.candidate.action_digest).to_equal(digest)
+            expect(parsed.candidate.output_manifest_digest).to_equal(candidate.output_manifest_digest)
+            expect(parsed.candidate.diagnostic_digest).to_equal(candidate.diagnostic_digest)
+            expect(parsed.candidate.success).to_be(true)
+            expect(parsed.fence).to_equal(7)
+        else:
+            expect(false).to_be(true)
+        expect(parse_build_result_v1(wire.replace("outcome=success", "outcome=PASS"))).to_be_nil()
+        expect(parse_build_result_v1(wire.replace("fence=7", "fence=0"))).to_be_nil()
+        expect(parse_build_result_v1(wire.replace("worker=node-1", "worker=node/1"))).to_be_nil()
+        expect(parse_build_result_v1(wire.replace("output-manifest=", "manifest="))).to_be_nil()
+        expect(parse_build_result_v1(wire + "status=PASS\n")).to_be_nil()
+        val failed = ActionResultCandidate(1, digest, "try-1", "node-1",
+            sha256_text("empty manifest"), sha256_text("failure diagnostics"), false)
+        if val parsed_failure = parse_build_result_v1(encode_build_result_v1(failed, 7)):
+            expect(parsed_failure.candidate.success).to_be(false)
+        else:
+            expect(false).to_be(true)
+        val failed_without_output = ActionResultCandidate(1, digest, "try-1", "node-1",
+            "", sha256_text("failure before output"), false)
+        val failure_wire = encode_build_result_v1(failed_without_output, 7)
+        if val parsed_failure = parse_build_result_v1(failure_wire):
+            expect(parsed_failure.candidate.success).to_be(false)
+            expect(parsed_failure.candidate.output_manifest_digest).to_equal("")
+        else:
+            expect(false).to_be(true)
+        expect(parse_build_result_v1(failure_wire.replace("outcome=failure",
+            "outcome=success"))).to_be_nil()

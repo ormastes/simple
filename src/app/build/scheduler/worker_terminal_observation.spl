@@ -1,0 +1,97 @@
+# The provider's restart recovery cannot reconstruct the original compiler
+# exit code. This record is written immediately after a successful wait, and
+# is required before a restarted worker publishes any result.
+use app.io.mod.{file_exists, file_create_exclusive, file_fsync,
+    directory_fsync, file_read_regular_no_follow_bounded}
+use app.build.scheduler.planner.{scheduler_action_digest_valid_v1}
+use app.build.scheduler.worker_attempt_binding.{worker_attempt_token_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+struct BuildWorkerTerminalObservationV1:
+    recorded: bool
+    reason: text
+    exit_code: i64
+
+fn _terminal_block_v1(reason: text) -> BuildWorkerTerminalObservationV1:
+    BuildWorkerTerminalObservationV1(false, reason, -1)
+
+fn _terminal_path_v1(state_dir: text, attempt_id: text) -> text:
+    state_dir + "/worker-attempt-" + attempt_id + ".terminal"
+
+fn _terminal_wire_v1(request_digest: text, binding_digest: text,
+        attempt_id: text, fence: i64, exit_code: i64) -> text:
+    "simple-worker-terminal-v1\nrequest=" + request_digest +
+        "\nbinding=" + binding_digest + "\nattempt=" + attempt_id +
+        "\nfence=" + fence.to_text() + "\nexit=" + exit_code.to_text() + "\n"
+
+fn worker_terminal_observation_digest_v1(request_digest: text,
+        binding_digest: text, attempt_id: text, fence: i64,
+        exit_code: i64) -> text:
+    """Digest the exact marker that must have been synced before publication."""
+    if not scheduler_action_digest_valid_v1(request_digest) or
+       not scheduler_action_digest_valid_v1(binding_digest) or
+       not worker_attempt_token_v1(attempt_id) or
+       fence <= 0 or fence > 1000000000 or
+       exit_code < 0 or exit_code > 255:
+        return ""
+    sha256_text(_terminal_wire_v1(request_digest, binding_digest,
+        attempt_id, fence, exit_code))
+
+fn persist_worker_terminal_observation_v1(state_dir: text,
+        request_digest: text, binding_digest: text,
+        attempt_id: text, fence: i64,
+        exit_code: i64) -> BuildWorkerTerminalObservationV1:
+    """Persist the exact known exit code before any result-side file write."""
+    if not scheduler_action_digest_valid_v1(request_digest) or
+       not scheduler_action_digest_valid_v1(binding_digest) or
+       not worker_attempt_token_v1(attempt_id) or
+       fence <= 0 or fence > 1000000000 or
+       exit_code < 0 or exit_code > 255:
+        return _terminal_block_v1("terminal-identity-invalid")
+    val path = _terminal_path_v1(state_dir, attempt_id)
+    val wire = _terminal_wire_v1(request_digest, binding_digest,
+        attempt_id, fence, exit_code)
+    if file_exists(path):
+        val prior = file_read_regular_no_follow_bounded(path, 512)
+        if prior.is_err() or prior.unwrap() != wire:
+            return _terminal_block_v1("terminal-observation-collision")
+    elif not file_create_exclusive(path, wire):
+        return _terminal_block_v1("terminal-observation-write-failed")
+    if not file_fsync(path) or not directory_fsync(state_dir):
+        return _terminal_block_v1("terminal-observation-not-durable")
+    BuildWorkerTerminalObservationV1(true, "", exit_code)
+
+fn recover_worker_terminal_observation_v1(state_dir: text,
+        request_digest: text, binding_digest: text,
+        attempt_id: text, fence: i64) -> BuildWorkerTerminalObservationV1:
+    """Recover only a canonical observation for the complete launch binding."""
+    if not scheduler_action_digest_valid_v1(request_digest) or
+       not scheduler_action_digest_valid_v1(binding_digest) or
+       not worker_attempt_token_v1(attempt_id) or
+       fence <= 0 or fence > 1000000000:
+        return _terminal_block_v1("terminal-identity-invalid")
+    val path = _terminal_path_v1(state_dir, attempt_id)
+    if not file_exists(path):
+        return _terminal_block_v1("terminal-observation-unavailable")
+    val read = file_read_regular_no_follow_bounded(path, 512)
+    if read.is_err(): return _terminal_block_v1("terminal-observation-unreadable")
+    val lines = read.unwrap().split("\n")
+    if lines.len() != 7 or lines[0] != "simple-worker-terminal-v1" or
+       lines[1] != "request=" + request_digest or
+       lines[2] != "binding=" + binding_digest or
+       lines[3] != "attempt=" + attempt_id or
+       lines[4] != "fence=" + fence.to_text() or
+       not lines[5].starts_with("exit=") or lines[6] != "":
+        return _terminal_block_v1("terminal-observation-mismatch")
+    val code_text = lines[5][5:]
+    val code = code_text.to_i64() ?? -1
+    if code < 0 or code > 255 or code.to_text() != code_text or
+       read.unwrap() != _terminal_wire_v1(request_digest, binding_digest,
+           attempt_id, fence, code):
+        return _terminal_block_v1("terminal-exit-invalid")
+    BuildWorkerTerminalObservationV1(true, "", code)
+
+export BuildWorkerTerminalObservationV1
+export persist_worker_terminal_observation_v1
+export recover_worker_terminal_observation_v1
+export worker_terminal_observation_digest_v1

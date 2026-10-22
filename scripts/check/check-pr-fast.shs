@@ -58,7 +58,8 @@
 #   PASS  — <n> changed file(s) checked, ...                          exit 0
 #   FAIL  — <reason>                                                  exit 1
 #   ERROR — nothing was checked (<reason>)                            exit 2
-# A range with changed files but zero examples executed is ERROR, never PASS.
+# A range with changed Simple files but zero examples executed is ERROR, never
+# PASS. A docs-only range has its own committed-range whitespace check.
 #
 # Usage:
 #   sh scripts/check/check-pr-fast.shs [--range BASE..HEAD] [options]
@@ -484,6 +485,33 @@ main() {
     NDELETED=$(awk 'END {print NR+0}' "$W/deleted")
     [ "$NCHANGED" -gt 0 ] || error_verdict "range $RANGE changes no file (deleted: $NDELETED)"
 
+    # A docs-only PR has no Simple examples to run. Admit only named Markdown
+    # paths after checking the committed range; all other non-Simple changes
+    # still require a separate check and cannot claim this receipt.
+    grep '\.spl$' "$W/changed" > "$W/changed_spl"
+    _spl_scan_rc=$?
+    [ "$_spl_scan_rc" -le 1 ] || error_verdict "cannot classify changed Simple paths (grep exit $_spl_scan_rc)"
+    if [ ! -s "$W/changed_spl" ]; then
+        [ "$NDELETED" -eq 0 ] || error_verdict "range $RANGE deletes $NDELETED file(s) and changes no .spl file"
+        grep -vE '^(README\.md|doc/[A-Za-z0-9_./-]+\.md)$' "$W/changed" > "$W/non_docs"
+        _docs_filter_rc=$?
+        [ "$_docs_filter_rc" -le 1 ] || error_verdict "cannot classify docs-only paths (grep exit $_docs_filter_rc)"
+        if [ -s "$W/non_docs" ]; then
+            error_verdict "range $RANGE changes no .spl file and includes unsupported path(s): $(tr '\n' ' ' < "$W/non_docs")"
+        fi
+        git -C "$ROOT" diff --check "$BASE_SHA" "$HEAD_SHA" -- > "$W/docs_check" 2>&1
+        _docs_rc=$?
+        [ "$_docs_rc" -eq 0 ] || fail_verdict "docs-only committed-range whitespace check failed: $(head -n 1 "$W/docs_check")"
+        ELAPSED=$(($(now_s) - START))
+        [ "$ELAPSED" -le "$BUDGET" ] || fail_verdict "docs-only check exceeded the ${BUDGET}s budget"
+        PRFAST_MODE=docs-only
+        SUFFIX=""
+        [ -z "$SIGN_KEY" ] || sign_receipt
+        printf 'PASS — %s docs-only changed file(s) checked by git diff --check in %ss of %ss%s\n' \
+            "$NCHANGED" "$ELAPSED" "$BUDGET" "$SUFFIX"
+        exit 0
+    fi
+
     git -C "$ROOT" ls-tree -r --name-only "$HEAD_SHA" -- test/01_unit test/03_system > "$W/tree_all"
     _lt_rc=$?
     [ "$_lt_rc" -eq 0 ] || error_verdict "git ls-tree failed (exit $_lt_rc)"
@@ -577,7 +605,7 @@ main() {
     fi
     [ "$ELAPSED" -le "$BUDGET" ] || add_reason "wall time ${ELAPSED}s exceeds the ${BUDGET}s budget"
 
-    _mode=syntax-only; [ "$SEMANTIC" = 1 ] && _mode=semantic
+    _mode=${PRFAST_MODE:-syntax-only}; [ "$SEMANTIC" = 1 ] && [ "$_mode" != docs-only ] && _mode=semantic
     printf 'pr-fast: %s spec(s) run, %s example(s) executed, compile=%s, %ss of %ss\n' \
         "$NRAN" "$NEXEC" "$_mode" "$ELAPSED" "$BUDGET"
 
@@ -660,7 +688,7 @@ sign_receipt() {
     # routinely a symlink another agent redeploys mid-session, so hashing here,
     # after the run, could describe a different binary than the one that
     # actually produced these results.
-    _mode=syntax-only; [ "$SEMANTIC" = 1 ] && _mode=semantic
+    _mode=${PRFAST_MODE:-syntax-only}; [ "$SEMANTIC" = 1 ] && [ "$_mode" != docs-only ] && _mode=semantic
     _binsize=$BIN_SIZE_START
     _binsha=$BIN_SHA_START
     [ -n "$_binsize" ] && [ -n "$_binsha" ] ||
@@ -755,10 +783,10 @@ verify_receipt() {
     # binary, which is exactly the overclaim this exists to close.
     _v_session_raw=$(awk -F': ' '$1 == "session_id" {print $2; exit}' "$W/receipt")
     _v_session=""
-    printf '%s' "$_v_session_raw" | grep -qE '^prfast\.v1\.(syntax-only|semantic)\.[0-9]+\.[0-9]+\.[0-9a-f]{64}$' &&
+    printf '%s' "$_v_session_raw" | grep -qE '^prfast\.v1\.(syntax-only|semantic|docs-only)\.[0-9]+\.[0-9]+\.[0-9a-f]{64}$' &&
         _v_session="$_v_session_raw"
     [ -n "$_v_session" ] ||
-        fail_verdict "receipt for $V_HEAD carries no valid session_id binary-identity binding (expected prfast.v1.<syntax-only|semantic>.<budget>.<binsize>.<sha256>; got \"$_v_session_raw\")"
+        fail_verdict "receipt for $V_HEAD carries no valid session_id binary-identity binding (expected prfast.v1.<syntax-only|semantic|docs-only>.<budget>.<binsize>.<sha256>; got \"$_v_session_raw\")"
     printf 'pr-fast-verify: binding %s\n' "$_v_session"
 
     # ENFORCEMENT, not just disclosure (review follow-up finding #1): until
@@ -869,7 +897,9 @@ EOF
     scenario "S2 failing unit spec FAILs"         1 "FAIL" "spec(s) failed: test/01_unit/lib/common/foo_spec.spl" 60 "printf '# edit\n' >> src/lib/common/foo.spl && printf '# FAILME\n' >> test/01_unit/lib/common/foo_spec.spl"
     scenario "S3 no resolvable test FAILs"        1 "FAIL" "src/lib/common/bar.spl(no unit spec)" 60 "printf '# edit\n' >> src/lib/common/bar.spl"
     scenario "S4 empty range ERRORs"              2 "ERROR — nothing was checked" "changes no file" 60 ""
-    scenario "S5 docs-only range ERRORs"          2 "ERROR — nothing was checked" "no .spl" 60 "printf 'more\n' >> README.md"
+    scenario "S5 docs-only range PASSes"          0 "PASS" "docs-only" 60 "printf 'more\n' >> README.md"
+    scenario "S5a docs-only whitespace FAILs"     1 "FAIL" "whitespace check failed" 60 "printf 'trailing  \n' >> README.md"
+    scenario "S5b unsupported-only range ERRORs" 2 "ERROR — nothing was checked" "unsupported path" 60 "printf '# change\n' > fixture.shs"
     scenario "S6 compile error FAILs"             1 "FAIL" "compile failed" 60 "printf 'SYNTAX_ERROR\n' >> src/lib/common/foo.spl"
     scenario "S7 budget overrun FAILs"            1 "FAIL" "budget exceeded" 3 "printf '# edit\n' >> src/lib/common/foo.spl && printf '# SLEEPME\n' >> test/01_unit/lib/common/foo_spec.spl"
     scenario "S8 missing binary ERRORs"           2 "ERROR — nothing was checked" "simple binary" 60 "printf '# edit\n' >> src/lib/common/foo.spl" "$T/no-such-simple"

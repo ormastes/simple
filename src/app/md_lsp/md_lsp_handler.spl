@@ -14,31 +14,24 @@ fn _q() -> text:
     "\""
 
 fn _md_lsp_json_escape(s: text) -> text:
-    # Escape by flushing whole SPANS between special characters, never
-    # single bytes: the interpreter's strings are Rust Strings, so a
-    # mid-codepoint 1-byte slice materializes as U+FFFD there (native keeps
-    # raw bytes) and per-byte accumulation corrupted every multi-byte
-    # document. The specials are all ASCII, so spans are whole codepoints.
     var result = ""
     var i = 0
-    var run_start = 0
     while i < s.len():
-        val ch = s[i:i + 1]
-        if ch == "\"" or ch == "\\" or ch == "\n" or ch == "\r" or ch == "\t":
-            result = result + s[run_start:i]
-            if ch == "\"":
-                result = result + "\\\""
-            elif ch == "\\":
-                result = result + "\\\\"
-            elif ch == "\n":
-                result = result + "\\n"
-            elif ch == "\r":
-                result = result + "\\r"
-            else:
-                result = result + "\\t"
-            run_start = i + 1
+        val ch = s.char_at(i)
+        if ch == "\"":
+            result = result + "\\\""
+        elif ch == "\\":
+            result = result + "\\\\"
+        elif ch == "\n":
+            result = result + "\\n"
+        elif ch == "\r":
+            result = result + "\\r"
+        elif ch == "\t":
+            result = result + "\\t"
+        else:
+            result = result + ch
         i = i + 1
-    result + s[run_start:i]
+    result
 
 fn _js(value: text) -> text:
     _q() + _md_lsp_json_escape(value) + _q()
@@ -52,7 +45,7 @@ fn _jp(key: text, value: text) -> text:
 # ---------------------------------------------------------------------------
 
 fn _mh_char_at(s: text, i: i64) -> text:
-    s[i:i + 1]
+    s.char_at(i)
 
 fn _mh_is_ws(ch: text) -> bool:
     ch == " " or ch == "\n" or ch == "\r" or ch == "\t"
@@ -83,17 +76,13 @@ fn _lsp_extract_number(json: text, start: i64) -> i64:
 fn _lsp_extract_string(json: text, start: i64) -> text:
     if start >= json.len() or _mh_char_at(json, start) != "\"":
         return ""
-    # Span-append between escapes (see the escape helper above: per-byte
-    # appends corrupt multi-byte values under the interpreter).
     var result = ""
     var i = start + 1
-    var run_start = i
     while i < json.len():
         val ch = _mh_char_at(json, i)
         if ch == "\"":
-            return result + json[run_start:i]
+            return result
         if ch == "\\":
-            result = result + json[run_start:i]
             i = i + 1
             if i < json.len():
                 val next = _mh_char_at(json, i)
@@ -105,9 +94,10 @@ fn _lsp_extract_string(json: text, start: i64) -> text:
                     result = result + "\t"
                 else:
                     result = result + next
-            run_start = i + 1
+        else:
+            result = result + ch
         i = i + 1
-    result + json[run_start:i]
+    result
 
 fn _lsp_extract_balanced(json: text, start: i64, open_ch: text) -> text:
     val close_ch = if open_ch == "{" then "}" else "]"
@@ -141,15 +131,15 @@ fn _lsp_extract_value(json: text, start: i64) -> text:
         return _lsp_extract_balanced(json, start, ch)
     if ch == "\"":
         return "\"" + _lsp_extract_string(json, start) + "\""
-    # Whole-SPAN scalar extraction (same interpreter per-byte U+FFFD
-    # hazard as the string cases above).
+    var result = ""
     var i = start
     while i < json.len():
         val c = _mh_char_at(json, i)
         if c == "," or c == "}" or c == "]":
-            return json[start:i].trim()
+            return result.trim()
+        result = result + c
         i = i + 1
-    json[start:i].trim()
+    result.trim()
 
 fn lsp_uri_to_path(uri: text) -> text:
     if uri.starts_with("file://"):
@@ -337,17 +327,17 @@ fn md_lsp_hover(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
         # Heading line: report level
         var level = 0
         var i = 0
-        while i < line.len() and line[i:i + 1] == "#":
+        while i < line.len() and line.char_at(i) == "#":
             level = level + 1
             i = i + 1
         hover_text = "Heading level " + str(level)
     elif line.contains("]("):
         # Link: extract URL from [text](url)
-        val paren_idx = line.index_of("](")
+        val paren_idx = line.index_of("](") ?? -1
         if paren_idx >= 0:
             var url_start = paren_idx + 2
             var url_end = url_start
-            while url_end < line.len() and line[url_end:url_end + 1] != ")":
+            while url_end < line.len() and line.char_at(url_end) != ")":
                 url_end = url_end + 1
             hover_text = line.substring(url_start, url_end)
 
@@ -373,13 +363,13 @@ fn md_lsp_definition(params_json: text, req_id: i64, workspace: MdWorkspace) -> 
     if not line.contains("](#"):
         return _md_lsp_ok_response(req_id, "null")
 
-    val hash_pos = line.index_of("](#")
+    val hash_pos = line.index_of("](#") ?? -1
     if hash_pos < 0:
         return _md_lsp_ok_response(req_id, "null")
 
     var anchor_start = hash_pos + 3
     var anchor_end = anchor_start
-    while anchor_end < line.len() and line[anchor_end:anchor_end + 1] != ")":
+    while anchor_end < line.len() and line.char_at(anchor_end) != ")":
         anchor_end = anchor_end + 1
     val anchor = line.substring(anchor_start, anchor_end)
 
@@ -392,9 +382,9 @@ fn md_lsp_definition(params_json: text, req_id: i64, workspace: MdWorkspace) -> 
         val l = doc_lines.get(j)
         if l.starts_with("#"):
             var k = 0
-            while k < l.len() and l[k:k + 1] == "#":
+            while k < l.len() and l.char_at(k) == "#":
                 k = k + 1
-            while k < l.len() and l[k:k + 1] == " ":
+            while k < l.len() and l.char_at(k) == " ":
                 k = k + 1
             val heading_text = l.substring(k, l.len())
             if markdown_slugify(heading_text) == anchor:
@@ -428,9 +418,9 @@ fn md_lsp_document_symbol(params_json: text, req_id: i64, workspace: MdWorkspace
         val l = doc_lines.get(j)
         if l.starts_with("#"):
             var k = 0
-            while k < l.len() and l[k:k + 1] == "#":
+            while k < l.len() and l.char_at(k) == "#":
                 k = k + 1
-            while k < l.len() and l[k:k + 1] == " ":
+            while k < l.len() and l.char_at(k) == " ":
                 k = k + 1
             val heading_text = l.substring(k, l.len())
             val start_pos = "{" + _jp("line", str(j)) + "," + _jp("character", "0") + "}"
@@ -512,9 +502,9 @@ fn _md_lsp_quickfix_line(line: text) -> text:
     val trimmed = line.trim()
     if trimmed.starts_with("#"):
         var level = 0
-        while level < trimmed.len() and trimmed[level:level + 1] == "#":
+        while level < trimmed.len() and trimmed.char_at(level) == "#":
             level = level + 1
-        if level < trimmed.len() and trimmed[level:level + 1] != " ":
+        if level < trimmed.len() and trimmed.char_at(level) != " ":
             return trimmed.slice(0, level) + " " + trimmed.slice(level, trimmed.len())
     if line.contains("[]()"):
         return line.replace("[]()", "[text](url)")
