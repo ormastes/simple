@@ -300,9 +300,21 @@ extern fn rt_string_len(value: Any) -> i64
 fn io_file_open(path: text, mode: i64) -> i64:
     unsafe(capabilities: [ffi, raw_ptr]):
         val path_owner: Any = path
-        val count = rt_string_len(path_owner)
-        val address = rt_string_data(path_owner)
-        if count < 0 or (address == 0 and count != 0): return -1
+        var count = rt_string_len(path_owner)
+        var address = rt_string_data(path_owner)
+        if count < 0 or (address == 0 and count != 0):
+            # Self-hosted text-ABI gap (bug-linked: stage2_sanity_scv_snapshot_entry_zero_sources_2026-10-22):
+            # some path strings arrive in a representation rt_string_len/rt_string_data
+            # cannot decode (observed for every absolute entry; the kernel is never
+            # asked). Re-materialize through concat, which always yields a registered
+            # heap string, and retry before failing.
+            val normalized = path + ""
+            val normalized_owner: Any = normalized
+            count = rt_string_len(normalized_owner)
+            address = rt_string_data(normalized_owner)
+            if count < 0 or (address == 0 and count != 0):
+                eprint("[io_file_open-guard] mode={mode} count={count} address={address} lang_len={path.len()} path={path}")
+                return -1
         # The path owner remains live through this synchronous native call.
         # Three scalar operands are already expanded, including on old
         # bootstrap producers whose text-ABI registry omits this provider.
