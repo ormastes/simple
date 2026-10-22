@@ -431,10 +431,11 @@ impl CompilerDriver:
         stdout_flush()
         kept > 0
 
-    fn native_staged_codegen_eligible_v1() -> bool:
-        """Staging is admitted only where aot_compile is known to end in the
-        per-module compile_to_native lane with nothing re-reading the whole
-        MIR set afterwards. Every other dispatch keeps the unstaged order."""
+    fn native_staged_codegen_eligible_reason_v1() -> text:
+        """Human-readable refusal reason; empty when eligible. Staging is
+        admitted only where aot_compile is known to end in the per-module
+        compile_to_native lane with nothing re-reading the whole MIR set
+        afterwards. Every other dispatch keeps the unstaged order."""
         val backend_name = self.ctx.options.backend
         if backend_name == "c" or backend_name == "cpp" or backend_name == "ccodegen" or
                 backend_name == "cuda" or backend_name == "ptx" or
@@ -442,30 +443,37 @@ impl CompilerDriver:
                 backend_name == "opencl-spirv" or backend_name == "cl" or
                 backend_name == "vulkan" or backend_name == "spirv" or
                 backend_name == "vhdl" or backend_name == "wasm" or backend_name == "wasm32":
-            return false
+            return "non-native backend {backend_name}"
         if (env_get_opt("SIMPLE_BOOTSTRAP_DIRECT_IR") ?? "") == "1":
-            return false
+            return "SIMPLE_BOOTSTRAP_DIRECT_IR=1"
         # Bootstrap-flat skips the MIR pass chain and may dispatch to the
         # fixed-entry context compiler, which reads the entry MIR itself.
         if (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1" and
                 (env_get_opt("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
-            return false
+            return "bootstrap-flat lane (SIMPLE_BOOTSTRAP=1 without STAGE4)"
         # SMF / self-contained / both re-iterate ctx.mir_modules after codegen.
         val format = self.ctx.options.output_format
         if driver_output_format_is_smf(format) or driver_output_format_is_self_contained(format) or
                 driver_output_format_is_both(format):
-            return false
+            return "output format re-reads MIR set"
         if (env_get_opt("SIMPLE_PACKAGE_INDEX_FULL_INVENTORY") ?? "") == "1" or
                 self.ctx.runtime_std_full_inventory_selection != nil:
-            return false
+            return "full inventory selection active"
         # Demand routes reuse archived MIR and publish SCC ownership per run.
         if self.ctx.demand_compile_execution != nil or self.ctx.demand_dirty_modules.len() > 0:
-            return false
+            return "demand compile lane"
         if native_group_request_path_v1() != "":
-            return false
+            return "native group request lane"
         match native_output_intent_decode_v1(env_get_opt("SIMPLE_NATIVE_BUILD_EMIT_OBJECT") ?? ""):
-            case Ok(intent): intent != NativeOutputIntentV1.EntryObject
-            case Err(_): false
+            case Ok(intent):
+                if intent == NativeOutputIntentV1.EntryObject:
+                    return "entry-object emit lane"
+            case Err(_):
+                return "invalid SIMPLE_NATIVE_BUILD_EMIT_OBJECT"
+        ""
+
+    fn native_staged_codegen_eligible_v1() -> bool:
+        self.native_staged_codegen_eligible_reason_v1() == ""
 
     me native_staged_codegen_flush_v1(lowering_failed: bool) -> bool:
         """Run the MIR modules currently held in ctx.mir_modules (one full
@@ -527,14 +535,20 @@ impl CompilerDriver:
         """Shards publish per-module objects only; lanes whose final step needs
         more than object paths (cold-HIR object persistence, collection
         receipts) or that wipe the shared cache scope stay unsharded."""
-        val lane_eligible = if driver_mir_selective_enabled_v1():
+        val selective = driver_mir_selective_enabled_v1()
+        val lane_ok = if selective:
             driver_mir_selective_explicit_native_eligible_v1(self)
         else:
             self.native_staged_codegen_eligible_v1()
-        lane_eligible and
-            self.ctx.cold_hir_typed_receipts.len() == 0 and
-            self.ctx.options.collection_memory_budget_bytes < 0 and
-            (env_get_opt("SIMPLE_NATIVE_BUILD_CLEAN") ?? "") != "1"
+        val receipts_clear = self.ctx.cold_hir_typed_receipts.len() == 0
+        val no_budget = self.ctx.options.collection_memory_budget_bytes < 0
+        val not_clean = (env_get_opt("SIMPLE_NATIVE_BUILD_CLEAN") ?? "") != "1"
+        val eligible = lane_ok and receipts_clear and no_budget and not_clean
+        if not eligible:
+            val lane_reason = if selective: "selective-explicit-native"
+                else: self.native_staged_codegen_eligible_reason_v1()
+            print "[mir-shard] eligibility refused lane_ok={lane_ok} lane_reason='{lane_reason}' selective={selective} receipts={self.ctx.cold_hir_typed_receipts.len()} budget_bytes={self.ctx.options.collection_memory_budget_bytes} clean_lane={not not_clean}"
+        eligible
 
     me aot_compile_mir_shard_v1() -> CompileResult:
         """MIR shard worker: lower only the modules this worker claims, run
