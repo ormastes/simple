@@ -1735,33 +1735,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install riscv64 cross toolchain and qemu-user
         run: |
-          # The riscv64 std must belong to the toolchain rust-toolchain.toml pins.
-          (cd src/compiler_rust && rustup target add riscv64gc-unknown-linux-gnu)
           sudo apt-get update
           sudo apt-get install -y clang lld llvm libunwind-dev gcc-riscv64-linux-gnu g++-riscv64-linux-gnu qemu-user-static
-      - name: Build host seed and riscv64 runtime archive
-        working-directory: src/compiler_rust
-        run: |
-          cargo build --profile bootstrap -p simple-driver
-          cargo build --profile bootstrap -p simple-native-all --features driver-compat --target riscv64gc-unknown-linux-gnu
-      - name: Cross-build riscv64 phase-1 compiler
-        run: |
-          mkdir -p build/bootstrap/stage1
-          RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=0 \
-            src/compiler_rust/target/bootstrap/simple native-build \
-            --target riscv64-unknown-linux-gnu \
-            --runtime-path src/compiler_rust/target/riscv64gc-unknown-linux-gnu/bootstrap \
-            --source src/compositions/kernel_llvm_cranelift --source src \
-            --entry-closure --entry src/app/cli/bootstrap_main.spl \
-            --mode dynload --threads 4 \
-            --output build/bootstrap/stage1/simple 2>&1 | tail -60 || true
-          file build/bootstrap/stage1/simple
-      - name: Sanity under qemu-user
-        run: |
-          export QEMU_LD_PREFIX=/usr/riscv64-linux-gnu
-          qemu-riscv64-static build/bootstrap/stage1/simple --version
+      - name: Cross-build riscv64 compiler + qemu-user sanity
+        run: sh scripts/bootstrap/cross-arch-bootstrap.shs --target linux-riscv64 --qemu-sanity
       - name: Package Linux riscv64 phase-1 compiler
-        run: sh scripts/release/package-phase1-spk.shs "${{ needs.check-version.outputs.version }}" linux-riscv64 build/bootstrap/stage1/simple 1
+        run: sh scripts/release/package-phase1-spk.shs "${{ needs.check-version.outputs.version }}" linux-riscv64 build/cross/linux-riscv64/simple "$(cat build/cross/linux-riscv64/PHASE)"
       - uses: actions/upload-artifact@v4
         with:
           name: bootstrap-linux-riscv64
