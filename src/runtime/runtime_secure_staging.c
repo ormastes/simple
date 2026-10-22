@@ -49,6 +49,14 @@ int rt_dir_is_real_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
         (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
         (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
 }
+
+/* Same narrow-provider gap for the thread id: runtime_thread.c owns it in the
+ * full C runtime, and runtime_bootstrap_linux_provider.c on hosted Unix. With
+ * neither in the Windows seed, the stage1 link stubbed it and `--version`
+ * aborted (release run 39723083883). */
+int64_t spl_thread_current_id(void) {
+    return (int64_t)GetCurrentThreadId();
+}
 #endif
 
 int rt_file_create_excl(const char* path_ptr, int64_t path_len,

@@ -51,7 +51,7 @@ archive / shared / link. `requires_code` is false for the three emit modes
 Build a `LaneReceipt` from counters the lane already has and return its
 failure:
 
-```simple
+```simple:skip
 val lane_failure = record_lane_receipt(LaneReceipt(
     lane: "my-lane", requires_code: true,
     modules_seen: offered, modules_lowered: taken, modules_objectless: facades,

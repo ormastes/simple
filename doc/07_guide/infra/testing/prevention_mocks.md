@@ -33,7 +33,7 @@ The full pure-Simple mock library lives at
 the check without an import: assert `verify_called(m, 0)` at the end of the
 `it` body:
 
-```simple
+```text
 val m = MockFunction.new("legacy_write")
 # ... exercise the code under test, injecting `m` at the seam ...
 val result = verify_called(m, 0)

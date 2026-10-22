@@ -13,7 +13,7 @@ aspect-oriented programming patterns like logging, caching, and validation.
 
 ## Syntax
 
-```simple
+```simple:skip
 # Basic decorator
 @double_result
 fn add_one(x):

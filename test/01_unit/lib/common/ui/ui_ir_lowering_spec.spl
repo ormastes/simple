@@ -1,0 +1,131 @@
+"""
+## Purpose and audience
+Purpose: Prove that the shared UI IR lowerer preserves admitted Draw IR geometry and rejects unsupported input atomically.
+Audience: UI producer and Vulkan executor maintainers.
+"""
+# @req: REQ-2D-002
+# @cover src/lib/common/ui/ui_ir.spl 80%
+# @tag: unit, ui, draw_ir, ui_ir, fractional
+
+use std.spec
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_GPU, draw_ir_batch, draw_ir_composition,
+    draw_ir_embedding_config, draw_ir_fractional_geometry, draw_ir_fractional_rect,
+    draw_ir_path_command, draw_ir_point, draw_ir_rect, draw_ir_rect_bounds,
+    draw_ir_rect_clipped, draw_ir_text,
+    DrawIrBatch, DrawIrCommand, DrawIrComposition
+}
+use common.ui.ui_ir.{
+    UI_IR_COMMAND_RECT, UI_IR_COMMAND_TEXT, draw_ir_to_ui_ir
+}
+
+fn _ui_ir_test_batch(commands: [DrawIrCommand]) -> DrawIrBatch:
+    draw_ir_batch("main", DRAW_IR_BACKEND_GPU,
+        draw_ir_embedding_config("surface", "root", 0, 0, 800, 600, 0, 1000, false),
+        commands)
+
+fn _ui_ir_test_composition(commands: [DrawIrCommand]) -> DrawIrComposition:
+    draw_ir_composition("scene", "revision-1", DRAW_IR_BACKEND_GPU,
+        [_ui_ir_test_batch(commands)])
+
+describe "Draw IR to UI IR lowering":
+    it "preserves fractional rect coordinates instead of legacy zero fields":
+        val source = draw_ir_fractional_rect("box", 3.25, 5.5, 10.75, 7.125, 0xff336699u32)
+        val result = draw_ir_to_ui_ir(_ui_ir_test_composition([source]))
+        expect(result.accepted).to_equal(true)
+        expect(result.commands.len()).to_equal(1)
+        expect(result.commands[0].kind).to_equal(UI_IR_COMMAND_RECT)
+        expect(result.commands[0].x).to_equal(3.25)
+        expect(result.commands[0].y).to_equal(5.5)
+        expect(result.commands[0].width).to_equal(10.75)
+        expect(result.commands[0].height).to_equal(7.125)
+        expect(result.commands[0].color).to_equal(0xff336699u32)
+
+    it "flattens integer rect and text commands with batch offsets":
+        val first = _ui_ir_test_batch([draw_ir_rect("box", 2, 3, 10, 20, 0xff0000ffu32)])
+        val second = _ui_ir_test_batch([draw_ir_text("label", 4, 5, "Go", 0xffffffffu32)])
+        val source = draw_ir_composition("scene", "revision-2", DRAW_IR_BACKEND_GPU,
+            [first, second])
+        val result = draw_ir_to_ui_ir(source)
+        expect(result.accepted).to_equal(true)
+        expect(result.batches.len()).to_equal(2)
+        expect(result.commands.len()).to_equal(2)
+        expect(result.batches[0].command_start).to_equal(0)
+        expect(result.batches[1].command_start).to_equal(1)
+        expect(result.commands[0].x).to_equal(2.0)
+        expect(result.commands[0].width).to_equal(10.0)
+        expect(result.commands[1].kind).to_equal(UI_IR_COMMAND_TEXT)
+        expect(result.commands[1].text_value).to_equal("Go")
+        expect(result.commands[1].batch_index).to_equal(1)
+
+    it "rejects a later unsupported command without exposing earlier work":
+        val path = draw_ir_path_command("curve", [draw_ir_point(1, 2)], [], "")
+        val result = draw_ir_to_ui_ir(_ui_ir_test_composition([
+            draw_ir_rect("box", 1, 2, 3, 4, 0xff0000ffu32), path
+        ]))
+        expect(result.accepted).to_equal(false)
+        expect(result.rejected_batch_index).to_equal(0)
+        expect(result.rejected_command_index).to_equal(1)
+        expect(result.commands.len()).to_equal(0)
+        expect(result.batches.len()).to_equal(0)
+
+    it "rejects invalid fractional bounds with command location":
+        val result = draw_ir_to_ui_ir(_ui_ir_test_composition([
+            draw_ir_fractional_rect("bad", 1.5, 2.5, -3.0, 4.0, 0xff0000ffu32)
+        ]))
+        expect(result.accepted).to_equal(false)
+        expect(result.rejection_reason).to_equal("invalid command geometry")
+        expect(result.rejected_command_index).to_equal(0)
+        expect(result.commands.len()).to_equal(0)
+
+    it "rejects an old composition schema until it is migrated":
+        var source = _ui_ir_test_composition([draw_ir_rect("box", 1, 2, 3, 4, 0xff0000ffu32)])
+        source.schema = "simple-draw-ir-v2"
+        val result = draw_ir_to_ui_ir(source)
+        expect(result.accepted).to_equal(false)
+        expect(result.rejection_reason).to_equal("unsupported composition schema")
+        expect(result.rejected_batch_index).to_equal(-1)
+
+    it "rejects a malformed batch before lowering its commands":
+        var batch = _ui_ir_test_batch([draw_ir_rect("box", 1, 2, 3, 4, 0xff0000ffu32)])
+        batch.schema = "unexpected"
+        val source = draw_ir_composition("scene", "revision-3", DRAW_IR_BACKEND_GPU, [batch])
+        val result = draw_ir_to_ui_ir(source)
+        expect(result.accepted).to_equal(false)
+        expect(result.rejection_reason).to_equal("unsupported batch schema")
+        expect(result.rejected_batch_index).to_equal(0)
+
+    it "rejects fractional geometry on text until its semantics are specified":
+        var text_command = draw_ir_text("label", 4, 5, "Go", 0xffffffffu32)
+        text_command.fractional_geometry = draw_ir_fractional_geometry(4.5, 5.25, 0.0, 0.0)
+        val result = draw_ir_to_ui_ir(_ui_ir_test_composition([text_command]))
+        expect(result.accepted).to_equal(false)
+        expect(result.rejection_reason).to_equal("fractional text geometry is unsupported")
+
+    it "rejects hidden image payload on an otherwise supported rect":
+        var rect = draw_ir_rect("box", 1, 2, 3, 4, 0xff0000ffu32)
+        rect.image_uri = "asset://unexpected"
+        val result = draw_ir_to_ui_ir(_ui_ir_test_composition([rect]))
+        expect(result.accepted).to_equal(false)
+        expect(result.rejection_reason).to_equal("unsupported command payload")
+
+    it "preserves a rectangular clip including zero-width empty coverage":
+        # @req REQ-2D-005
+        val clipped = draw_ir_rect_clipped("box", -2, -3, 20, 20,
+            0xff0000ffu32, draw_ir_rect_bounds(4, 5, 0, 8))
+        val result = draw_ir_to_ui_ir(_ui_ir_test_composition([clipped]))
+        expect(result.accepted).to_equal(true)
+        expect(result.commands[0].clip_rect.present).to_equal(true)
+        expect(result.commands[0].clip_rect.x).to_equal(4)
+        expect(result.commands[0].clip_rect.width).to_equal(0)
+
+    it "rejects a negative rectangular clip dimension atomically":
+        # @req REQ-2D-005
+        val clipped = draw_ir_rect_clipped("box", 1, 2, 3, 4,
+            0xff0000ffu32, draw_ir_rect_bounds(0, 0, -1, 2))
+        val result = draw_ir_to_ui_ir(_ui_ir_test_composition([
+            draw_ir_rect("first", 0, 0, 1, 1, 0xff0000ffu32), clipped]))
+        expect(result.accepted).to_equal(false)
+        expect(result.rejection_reason).to_equal("invalid rectangular clip")
+        expect(result.rejected_command_index).to_equal(1)
+        expect(result.commands.len()).to_equal(0)

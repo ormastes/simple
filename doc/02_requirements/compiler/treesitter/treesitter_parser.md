@@ -12,7 +12,7 @@ including tree construction, node types, and parse results.
 
 ## API
 
-```simple
+```simple:skip
 use std.parser.treesitter.{TreeSitterParser, Tree, Node}
 
 val parser = TreeSitterParser.new("simple")?

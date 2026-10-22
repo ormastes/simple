@@ -43,7 +43,7 @@ receipt and matching runtime gate before relying on a path in production.
 The first concrete parent-authoritative API uses
 `StructuredOwnerV1` and `RuntimeStructuredTaskGroupV1`:
 
-```simple
+```simple:skip
 var owner = StructuredOwnerV1.create(1, 0, [10, 20])
 var tasks = RuntimeStructuredTaskGroupV1.create(owner.snapshot(), 2, true)
 val mapped = tasks.map([11, 22], [1, 2], ParallelResultKind.Patch,

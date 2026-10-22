@@ -1,0 +1,76 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use app.build.gate_receipt.{GATE_RECEIPT_SCHEMA_V1,
+    GateObservation, GateReceipt, gate_receipt_digest_v1}
+use app.build.signed_build_admission.{SignedBuildExpectationV1,
+    SignedBuildExpectationV2}
+use app.build.signed_build_ci_observation.{SignedBuildCiObservationV1,
+    validate_signed_build_ci_observation_v1,
+    verify_observed_signed_build_ci_candidate_v1}
+use app.build.signed_build_signature_provider.{SignedBuildSshProviderConfigV2}
+
+val CI_BASE = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val CI_HEAD = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+val CI_TREE = "cccccccccccccccccccccccccccccccccccccccc"
+val CI_POLICY = sha256_text("protected-policy")
+val CI_CHECKER = sha256_text("base-checker")
+val CI_SUBMODULES = sha256_text("selected-gitlinks")
+val CI_MANIFEST = "must_check_gates |id, tier, push_blocking, mode, command, ci_job, inputs, description|\n" +
+    "    compile, bootstrap, true, receipt, \"build\", -, -, \"compiler\"\n"
+
+fn _ci_gate_receipt_v1() -> GateReceipt:
+    GateReceipt(GATE_RECEIPT_SCHEMA_V1, CI_BASE, CI_HEAD, CI_TREE,
+        CI_POLICY, CI_CHECKER, CI_SUBMODULES, "protected-ci", ["compile"],
+        [GateObservation("compile", "PASS", sha256_text("gate-run"), "")])
+
+fn _ci_expected_v1(gate: GateReceipt) -> SignedBuildExpectationV2:
+    SignedBuildExpectationV2("simple-lang/simple", 42,
+        SignedBuildExpectationV1(CI_BASE, CI_HEAD, CI_TREE,
+            "", "", "", "", "", "", CI_SUBMODULES,
+            CI_POLICY, CI_CHECKER, gate_receipt_digest_v1(gate),
+            "", "", "", ""))
+
+fn _ci_observed_v1(merge_tree: text, checker: text) -> SignedBuildCiObservationV1:
+    SignedBuildCiObservationV1("simple-lang/simple", 42,
+        CI_BASE, CI_HEAD, merge_tree, CI_TREE, CI_POLICY, checker,
+        CI_SUBMODULES, sha256_text(CI_MANIFEST))
+
+describe "current protected CI observation before signed build reuse":
+    it "binds the observed PR merge tree, protected policy and current gates":
+        val gate = _ci_gate_receipt_v1()
+        val result = validate_signed_build_ci_observation_v1(
+            _ci_observed_v1(CI_TREE, CI_CHECKER), _ci_expected_v1(gate), gate,
+            CI_MANIFEST, sha256_text(CI_MANIFEST))
+        expect(result.verified).to_be(true)
+        expect(result.reason).to_equal("current-ci-observation-bound")
+
+    it "rejects a changed merge candidate before trusting a signed receipt":
+        val gate = _ci_gate_receipt_v1()
+        val result = verify_observed_signed_build_ci_candidate_v1(
+            _ci_observed_v1("dddddddddddddddddddddddddddddddddddddddd",
+                CI_CHECKER),
+            "invalid signed receipt", "invalid signature", gate,
+            _ci_expected_v1(gate), CI_MANIFEST, sha256_text(CI_MANIFEST),
+            "protected-ci",
+            SignedBuildSshProviderConfigV2("", "", "", "", "", "", "", ""),
+            "/missing/download", "/missing/private", 1024)
+        expect(result.admission.decision).to_equal("FULL_BUILD")
+        expect(result.admission.reason)
+            .to_equal("ci-observation: integration-candidate-changed")
+        expect(result.artifact_path).to_equal("")
+
+    it "rejects changed protected identity and manifest bytes":
+        val gate = _ci_gate_receipt_v1()
+        val changed_checker = validate_signed_build_ci_observation_v1(
+            _ci_observed_v1(CI_TREE, sha256_text("candidate-checker")),
+            _ci_expected_v1(gate), gate, CI_MANIFEST,
+            sha256_text(CI_MANIFEST))
+        expect(changed_checker.verified).to_be(false)
+        expect(changed_checker.reason)
+            .to_equal("protected-build-identity-changed")
+        val changed_manifest = validate_signed_build_ci_observation_v1(
+            _ci_observed_v1(CI_TREE, CI_CHECKER), _ci_expected_v1(gate), gate,
+            CI_MANIFEST + "# candidate change\n", sha256_text(CI_MANIFEST))
+        expect(changed_manifest.verified).to_be(false)
+        expect(changed_manifest.reason)
+            .to_equal("protected-manifest-changed")

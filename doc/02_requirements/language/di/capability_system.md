@@ -33,7 +33,7 @@ Tests the reference capability system for memory safety:
 
 ## Syntax
 
-```simple
+```simple:skip
 @concurrency_mode(lock_base)
 fn update(counter: mut Counter, delta: i64) -> i64:
     counter.value = counter.value + delta

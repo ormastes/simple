@@ -2856,6 +2856,22 @@ fn free_transient_heap(value: RuntimeValue) {
 /// Keep transient heap objects reachable from a retained graph when the scope ends.
 #[no_mangle]
 pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
+    // Rust twin of the C fix 3d407765f1e (runtime_native.c
+    // rt_transient_heap_promote): a registered heap object that is NOT owned
+    // by the current transient scope is already persistent, so promotion is
+    // a no-op success, not a failure. Without this, the stage-2 candidate's
+    // retained parse promotes the process-immortal parse-metadata arrays
+    // (UNSAFE_ANNOTATIONS / ENUM_ATTRIBUTES / ENUM_OPEN_REGIONS) and aborts
+    // the whole parse with "transient retained parser ownership failed"
+    // (0xC0000409 fail-fast). Implemented against the Rust heap registry:
+    // the C immortal registry is not linkable from this crate
+    // (runtime_native.c is not compiled into the Rust runtime).
+    if value.is_heap() {
+        let root_ptr = value.as_heap_ptr();
+        if super::heap::is_registered_heap_ptr(root_ptr) {
+            return true;
+        }
+    }
     let mut root_words = std::ptr::null();
     let mut root_ptr = 0usize;
     let root_raw = unsafe { rt_transient_raw_words(value.0 as i64, &mut root_words, &mut root_ptr) >= 0 };

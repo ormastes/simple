@@ -57,6 +57,8 @@ Total async-related test files: **38+**
 The `async_spec.spl` passes because **ALL tests are marked `skip_it`**:
 
 ```simple
+use std.spec.{describe, it, skip_it}
+
 describe "Async functions":
     skip_it "defines async functions":
         # async fn fetch_data() -> i64
@@ -133,7 +135,7 @@ Generates:
 
 Example transformation:
 
-```simple
+```text
 # Input:
 async fn fetch() -> Future<text>:
     val x = await get_data()
@@ -258,7 +260,7 @@ Implement:
 
 Create minimal test:
 
-```simple
+```text
 # test/01_unit/compiler_core_legacy/future_type_spec.spl
 describe "Future type integration":
     it "recognizes Future<i64> type tag":
@@ -275,13 +277,13 @@ describe "Future type integration":
 Target: `test/03_system/feature/async_features_spec.spl`
 
 Change first test from:
-```simple
+```text
 skip_it "creates and awaits basic future":
     check(true)
 ```
 
 To:
-```simple
+```text
 it "creates and awaits basic future":
     async fn simple() -> Future<i64>:
         42

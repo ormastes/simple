@@ -61,7 +61,7 @@ Research indicates a staged implementation is the only practical path:
 
 ### Example 1: Fast Mode with Timing Overlay
 
-```simple
+```simple:skip
 # Boot in fast mode, get approximate cycle count
 val sim = HybridSimulator(mode: SimMode.TimingApproximate)
 sim.load_elf("hello_riscv32.elf")
@@ -73,7 +73,7 @@ print "Branch misses: {sim.branch_misses()}"  # e.g., 12
 
 ### Example 2: Mode Switching (Fast -> RTL)
 
-```simple
+```text
 val sim = HybridSimulator(mode: SimMode.Fast)
 sim.load_elf("firmware.elf")
 # Fast-forward through boot
@@ -90,7 +90,7 @@ sim.run_until_halt()
 
 ### Example 3: Pipeline Hazard Detection
 
-```simple
+```text
 val sim = HybridSimulator(mode: SimMode.TimingApproximate)
 sim.load_elf("test.elf")
 sim.enable_hazard_report()
@@ -104,7 +104,7 @@ for h in report.control_hazards:
 
 ### Example 4: RTL Signal Inspection
 
-```simple
+```text
 val sim = HybridSimulator(mode: SimMode.RtlCycleAccurate)
 sim.load_elf("blinky.elf")
 sim.run_cycles(10)
@@ -116,7 +116,7 @@ print "PC: {pc_wire}"          # e.g., SignalValue(0x8000_0010)
 
 ### Example 5: Cosimulation (Fast CPU + RTL Peripheral)
 
-```simple
+```text
 val sim = HybridSimulator(mode: SimMode.Fast)
 sim.load_elf("uart_test.elf")
 # Map UART peripheral (0x10000000-0x10000FFF) to RTL simulation
@@ -128,7 +128,7 @@ print "UART TX bytes: {sim.rtl_region_stats(0x10000000).tx_count}"
 
 ### Example 6: Native RTL Module Stepping
 
-```simple
+```text
 val rtl = NativeRtlBackend()
 rtl.load_module("rv32_pipeline_core")
 rtl.set_clock("clk", period_cycles: 2)

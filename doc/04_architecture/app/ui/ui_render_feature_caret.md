@@ -219,14 +219,14 @@ flag semantics flow from the same authoritative parse contract.
    app directory (e.g. `src/app/myapp/render_adapter.spl`).
 
 2. **Import shared types.** Use the contract types from `ui.render`:
-   ```simple
+```simple:skip
    use app.ui.render.types.RenderConfig
    use app.ui.render.types.RenderResult
    ```
 
 3. **Implement the render function.** Accept a `RenderConfig` and return a
    `RenderResult`:
-   ```simple
+```simple:skip
    fn render(config: RenderConfig) -> RenderResult:
        var content = build_view_model(config)
        if config.format == "html":

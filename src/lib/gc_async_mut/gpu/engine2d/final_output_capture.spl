@@ -1,0 +1,176 @@
+# Convert one strict, linked Vulkan Engine2D readback into the canonical
+# final-output capture domain. A constructed result is not physical-device
+# proof; the owner-bound entrypoint below queries the selected physical device.
+
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dDrawIrAdvResult,
+    Engine2dDrawIrAdvSubmitResult,
+    engine2d_draw_ir_adv_strict_vulkan_readback}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
+    vulkan_sffi_selected_device_identity_v1,
+    vulkan_sffi_selected_device_type,
+    vulkan_sffi_selected_device_driver_identity}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_GPU, DRAW_IR_SCHEMA_VERSION,
+    DRAW_IR_SCHEMA_VERSION_V4}
+use common.renderdoc.final_output_pixels.{FinalOutputCapture,
+    FinalOutputMetadata, final_output_validate}
+
+# This is the owner-bound N2 evidence. UUIDs are outside the generic pixel
+# metadata so an unattested FinalOutputCapture alone cannot claim that its
+# pixels came from a particular physical device.
+pub struct Engine2dStrictVulkanCapturedFrame:
+    engine: Engine2D
+    capture: FinalOutputCapture
+    device_name: text
+    device_type: text
+    driver_identity: text
+    device_uuid: text
+    driver_uuid: text
+    device_identity: i64
+    backend_handle: i64
+    submission_generation: i64
+    submit_count: i64
+    fence_count: i64
+    readback_source: text
+
+pub fn engine2d_strict_vulkan_capture_completed_submission(
+    submission: Engine2dDrawIrAdvSubmitResult,
+    fixture_id: text, fixture_digest: text, frame_id: text
+) -> Result<Engine2dStrictVulkanCapturedFrame, text>:
+    """Read back and identify the selected physical device on one live owner."""
+    var owner = submission.engine
+    if (owner.backend_name() != "vulkan" or submission.fallback_required or
+        not submission.completion_known or submission.backend_handle <= 0 or
+        submission.device_identity <= 0 or
+        submission.submission_generation <= 0):
+        return Err("Engine2D strict Vulkan owner receipt incomplete")
+    val generation_before = owner.vulkan_submission_generation()
+    if generation_before != submission.submission_generation:
+        return Err("Engine2D strict Vulkan submission generation stale")
+    val expected_handle = submission.backend_handle
+    val expected_device = submission.device_identity
+    val result = engine2d_draw_ir_adv_strict_vulkan_readback(submission)
+    if (result.fallback_required or result.readback_source != "device_readback" or
+        result.backend_handle != expected_handle or
+        result.device_identity != expected_device or
+        result.submission_generation != generation_before or
+        result.device_submit_count <= 0 or result.device_fence_count <= 0):
+        return Err("Engine2D strict Vulkan readback owner mismatch")
+    var frame_index_before: i64 = -1
+    var fence_count_before: i64 = -1
+    var submit_count_before: i64 = -1
+    if val Some(frame) = owner.latest_vulkan_frame_receipt():
+        if (not frame.completion_known or frame.cpu_fallback_used or
+            frame.backend_handle != expected_handle or
+            frame.device_identity != expected_device or
+            frame.device_fence_count != generation_before or
+            frame.device_submit_count < result.device_submit_count or
+            frame.device_fence_count < result.device_fence_count):
+            return Err("Engine2D strict Vulkan frame owner incomplete")
+        frame_index_before = frame.frame_index
+        fence_count_before = frame.device_fence_count
+        submit_count_before = frame.device_submit_count
+    else:
+        return Err("Engine2D strict Vulkan frame receipt absent")
+    # This label is only an additional sanity check: same-model devices can
+    # share it. The native UUID query below binds the exact receipt token
+    # while STATE.device is locked.
+    val owner_driver = owner.vulkan_driver_identity()
+    val owner_name = owner.vulkan_device_name()
+    val owner_type = owner.vulkan_device_type()
+    if (owner_name == "" or
+        not (owner_type == "discrete" or owner_type == "integrated")):
+        return Err("Engine2D physical Vulkan owner unavailable")
+    if vulkan_sffi_selected_device_type() != owner_type:
+        return Err("Engine2D selected Vulkan device type changed")
+    if (owner_driver == "" or
+        vulkan_sffi_selected_device_driver_identity() != owner_driver):
+        return Err("Engine2D selected Vulkan device changed")
+    val identity = vulkan_sffi_selected_device_identity_v1(expected_device)?
+    if owner.vulkan_submission_generation() != generation_before:
+        return Err("Engine2D strict Vulkan submission generation changed")
+    if vulkan_sffi_selected_device_driver_identity() != owner_driver:
+        return Err("Engine2D selected Vulkan device changed")
+    if vulkan_sffi_selected_device_type() != owner_type:
+        return Err("Engine2D selected Vulkan device type changed")
+    if (owner.vulkan_device_identity() != expected_device or
+        owner.vulkan_device_name() != owner_name or
+        owner.vulkan_device_type() != owner_type):
+        return Err("Engine2D physical Vulkan owner changed")
+    if val Some(frame) = owner.latest_vulkan_frame_receipt():
+        if (not frame.completion_known or frame.cpu_fallback_used or
+            frame.backend_handle != expected_handle or
+            frame.device_identity != expected_device or
+            frame.device_fence_count != fence_count_before or
+            frame.device_submit_count != submit_count_before or
+            frame.frame_index != frame_index_before):
+            return Err("Engine2D strict Vulkan frame owner changed")
+    else:
+        return Err("Engine2D strict Vulkan frame receipt absent")
+    val submit_count = result.device_submit_count
+    val fence_count = result.device_fence_count
+    val readback_source = result.readback_source
+    val capture = engine2d_strict_vulkan_final_capture(
+        result, fixture_id, fixture_digest, frame_id)?
+    Ok(Engine2dStrictVulkanCapturedFrame(
+        engine: owner, capture: capture,
+        device_name: owner_name, device_type: owner_type,
+        driver_identity: owner_driver,
+        device_uuid: identity.device_uuid, driver_uuid: identity.driver_uuid,
+        device_identity: expected_device, backend_handle: expected_handle,
+        submission_generation: generation_before,
+        submit_count: submit_count, fence_count: fence_count,
+        readback_source: readback_source))
+
+pub fn engine2d_strict_vulkan_final_capture(result: Engine2dDrawIrAdvResult,
+    fixture_id: text, fixture_digest: text,
+    frame_id: text) -> Result<FinalOutputCapture, text>:
+    val width = result.frame_width
+    val height = result.frame_height
+    if (result.schema != DRAW_IR_SCHEMA_VERSION and
+        result.schema != DRAW_IR_SCHEMA_VERSION_V4) or
+        result.selected_backend != DRAW_IR_BACKEND_GPU or result.fallback_required or
+        result.fallback_reason != "" or
+        result.readback_source != "device_readback" or
+        result.backend_handle <= 0 or result.device_identity <= 0 or
+        result.device_submit_count <= 0 or result.device_fence_count <= 0 or
+        result.submission_generation <= 0 or
+        result.rendered_command_count <= 0 or result.skipped_command_count != 0:
+        return Err("Engine2D strict Vulkan readback receipt incomplete")
+    if width <= 0 or height <= 0 or width > 16384 or height > 16384 or
+        width.to_i64() * height.to_i64() > 16777216:
+        return Err("Engine2D frame extent invalid")
+    if result.pixels.len().to_i64() != width.to_i64() * height.to_i64():
+        return Err("Engine2D readback length mismatch")
+    var checksum: i64 = 0
+    var rgba: [i64] = []
+    for packed in result.pixels:
+        if ((packed >> 24) & 0xffu32) != 0xffu32:
+            return Err("Engine2D opaque readback contains transparency")
+        checksum = (checksum + packed.to_i64()) % 2147483647
+        rgba.push(((packed >> 16) & 0xffu32).to_i64())
+        rgba.push(((packed >> 8) & 0xffu32).to_i64())
+        rgba.push((packed & 0xffu32).to_i64())
+        rgba.push(((packed >> 24) & 0xffu32).to_i64())
+    if checksum != result.readback_checksum:
+        return Err("Engine2D readback checksum mismatch")
+    val token = "{result.device_identity}:{result.submission_generation}"
+    val capture = FinalOutputCapture(
+        metadata: FinalOutputMetadata(
+            fixture_id: fixture_id, fixture_digest: fixture_digest,
+            frame_id: frame_id,
+            resource_id: "engine2d-vulkan-framebuffer-{result.backend_handle}",
+            selected_resource_count: 1, mip_level: 0, array_layer: 0,
+            submission_token: token, completion_token: token,
+            frame_complete: true, readback_complete: true,
+            device_status: "ready", width: width.to_i64(),
+            height: height.to_i64(), stride: width.to_i64() * 4,
+            pixel_format: "R8G8B8A8_UNORM", alpha_mode: "opaque",
+            color_space: "srgb", color_primaries: "srgb",
+            transfer_function: "srgb", origin: "top-left",
+            crop_x: 0, crop_y: 0,
+            crop_width: width.to_i64(), crop_height: height.to_i64()),
+        pixel_bytes: rgba)
+    match final_output_validate(capture):
+        case Err(err): Err("Engine2D final capture invalid: " + err.code)
+        case Ok(_): Ok(capture)

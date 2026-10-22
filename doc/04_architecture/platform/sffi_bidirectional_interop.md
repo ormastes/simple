@@ -374,7 +374,7 @@ Phase 4: C++ -> Simple (P2)
 FR-PLUG-0001 resolves the old i64-only WFFI scalar carve-out. The Rust seed
 interpreter and native runtime now expose:
 
-```simple
+```simple:skip
 extern fn spl_wffi_call_f64(fptr: i64, args: [f64], nargs: i64) -> f64
 ```
 

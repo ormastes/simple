@@ -17,6 +17,8 @@ Tests assert statement support including:
 ## Syntax
 
 ```simple
+val x = 10
+
 # Basic assert
 expect(x > 0).to_equal(true)
 

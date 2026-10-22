@@ -177,7 +177,7 @@ The canonical implementation is
 `std.nogc_sync_mut.text_layout.font_renderer.FontRenderer`, re-exported through
 the other ownership variants. It now exposes:
 
-```simple
+```simple:skip
 val batch = renderer.prepare_text(content, color, font_size)
 ```
 
@@ -375,7 +375,7 @@ WGSL. `emit_vulkan_font_atlas_composite_source()` separately returns the
 canonical Vulkan GLSL 450 source for GLSL-to-SPIR-V compilation; Vulkan is not
 a `PortableComputeTarget`, and source emission is not compilation or execution.
 
-```simple
+```simple:skip
 use compiler.backend.gpu_portable_compute.{PortableComputeTarget, emit_portable_font_atlas_composite_kernel}
 
 val artifact = emit_portable_font_atlas_composite_kernel(PortableComputeTarget.Cuda)

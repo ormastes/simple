@@ -9,6 +9,14 @@
 
 This plan implements features from `doc/llm_friendly.md` to make Simple optimized for LLM-assisted development. The features are grouped into phases based on priority and dependencies.
 
+Context headers stay plain and deterministic, which is what makes them diff-friendly:
+
+```sdoctest
+>>> val name = "app.service"
+>>> "Context for {name}"
+Context for app.service
+```
+
 ## Phase 1: Language Core - Contract System (HIGH PRIORITY)
 
 ### Feature: Contract Blocks (requires/ensures/invariant)
@@ -16,7 +24,7 @@ This plan implements features from `doc/llm_friendly.md` to make Simple optimize
 **Importance:** ⭐⭐⭐ Critical for LLM safety and intent specification
 
 **Syntax:**
-```simple
+```text
 fn divide(a: i64, b: i64) -> i64:
     requires:
         b != 0              # Precondition checked at call site
@@ -96,7 +104,7 @@ class BankAccount:
 **Importance:** ⭐⭐⭐ Critical for preventing forbidden effects
 
 **Syntax:**
-```simple
+```text
 # Module declares required capabilities
 module app.domain requires[pure]:
     # Only pure functions allowed - no I/O, network, filesystem
@@ -276,7 +284,7 @@ simple context app.service --format=json > context.json
 Result type for error handling.
 
 **Definition:**
-```simple
+```text
 enum Result[T, E]:
     Ok(value: T)
     Err(error: E)
@@ -343,7 +351,7 @@ HTTP client interface.
 **Importance:** ⭐⭐ Catches edge cases LLMs miss
 
 **Property-Based Testing:**
-```simple
+```text
 use std.testing.property.*
 
 @property_test
@@ -358,7 +366,7 @@ fn test_reverse_reverse(input: List[i64]):
 ```
 
 **Golden/Snapshot Tests:**
-```simple
+```text
 use std.testing.snapshot.*
 
 @snapshot_test

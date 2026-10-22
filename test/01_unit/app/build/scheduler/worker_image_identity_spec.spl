@@ -1,0 +1,29 @@
+use app.build.scheduler.worker_execute.{build_worker_sandbox_digest_v1,
+    parse_local_build_worker_config_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+describe "worker image identity in action sandbox":
+    it "rejects an image change that leaves the action sandbox digest unchanged":
+        val tool = sha256_text("approved compiler")
+        val image_a = "example/compiler@sha256:" + sha256_text("image a")
+        val image_b = "example/compiler@sha256:" + sha256_text("image b")
+        val sandbox = build_worker_sandbox_digest_v1(image_a,
+            "podman", "/usr/bin/clang")
+        expect(sandbox.len()).to_equal(64)
+        expect(build_worker_sandbox_digest_v1(image_b,
+            "podman", "/usr/bin/clang") == sandbox).to_be(false)
+        val wire = "simple-local-build-worker-v1\n" +
+            "worker=node-a\ninbox=/srv/build/inbox\nstate=/srv/build/state\n" +
+            "engine=podman\nimage=" + image_a + "\n" +
+            "compiler-entry=/usr/bin/clang\n" +
+            "tool-executable=" + tool + "\ntool-behavior=" + tool + "\n" +
+            "provider-abi=" + tool + "\nruntime=" + tool + "\n" +
+            "sysroot=" + tool + "\ntarget=x86_64-unknown-linux-gnu\n" +
+            "sandbox=" + sandbox + "\nresource-policy=" + tool + "\n" +
+            "cpu=2\nmemory=1048576\ntimeout-ms=30000\npids=64\n" +
+            "provider-generation=1\n"
+        expect(parse_local_build_worker_config_v1(wire).?).to_be(true)
+        expect(parse_local_build_worker_config_v1(
+            wire.replace(image_a, image_b))).to_be_nil()
+        expect(parse_local_build_worker_config_v1(
+            wire.replace("engine=podman", "engine=docker"))).to_be_nil()

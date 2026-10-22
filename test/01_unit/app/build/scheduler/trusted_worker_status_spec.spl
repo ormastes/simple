@@ -1,0 +1,53 @@
+use app.build.scheduler.trusted_ssh.{TrustedSshNodeV1}
+use app.build.scheduler.trusted_worker_invocation.{TrustedWorkerCommandV1,
+    plan_build_worker_status_ssh_v1}
+use app.build.scheduler.dispatch_wire.{encode_build_dispatch_v1}
+use app.io.mod.{cwd, dir_create_all, file_atomic_write, file_hash_sha256,
+    getpid, time_now_unix_micros}
+use compiler.common.build_contract.{BuildInputRef, SnapshotManifest,
+    ToolchainManifest, InputManifest, ActionSpec, AttemptSpec,
+    action_spec_digest_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+describe "read-only worker status invocation":
+    it "adds only the fixed status flag before the bound attempt arguments":
+        val root = cwd() + "/build/test/worker-status-" +
+            getpid().to_text() + "-" + time_now_unix_micros().to_text()
+        expect(dir_create_all(root)).to_be(true)
+        val ssh = root + "/ssh"
+        val hosts = root + "/known_hosts"
+        val key = root + "/identity"
+        expect(file_atomic_write(ssh, "test executable\n")).to_be(true)
+        expect(file_atomic_write(hosts,
+            "node-a ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeTestOnly\n"))
+            .to_be(true)
+        expect(file_atomic_write(key, "test key\n")).to_be(true)
+        val node = TrustedSshNodeV1("node-a", "127.0.0.1", "builder", 2222,
+            ssh, file_hash_sha256(ssh), hosts, file_hash_sha256(hosts),
+            key, file_hash_sha256(key))
+        val snapshot = sha256_text("status snapshot")
+        val action = ActionSpec(1, "compile",
+            SnapshotManifest(1, snapshot, sha256_text("source"),
+                sha256_text("submodules")),
+            ToolchainManifest(1, sha256_text("compiler"), sha256_text("behavior"),
+                sha256_text("abi"), sha256_text("runtime"),
+                sha256_text("sysroot"), "x86_64-unknown-linux-gnu"),
+            InputManifest(1, snapshot,
+                [BuildInputRef("src/answer.c", sha256_text("source bytes"))],
+                [], [], [], [], [], sha256_text("context"), true, false),
+            ["cc", "-c"], "src", sha256_text("sandbox"),
+            ["answer.o"], sha256_text("resources"))
+        val digest = action_spec_digest_v1(action)
+        val dispatch = encode_build_dispatch_v1(action,
+            AttemptSpec(1, digest, "try-1", "node-a", 0, 0, 4096),
+            7, 1, 8)
+        val request_digest = sha256_text("complete request")
+        val config = TrustedWorkerCommandV1(node,
+            "/usr/local/libexec/simple-build-worker", 30000)
+        val planned = plan_build_worker_status_ssh_v1(config,
+            dispatch, request_digest)
+        expect(planned.valid).to_be(true)
+        expect(planned.args[planned.args.len() - 5:]).to_equal([
+            "--status", "--attempt", "try-1", "--request-digest", request_digest])
+        expect(plan_build_worker_status_ssh_v1(config,
+            dispatch, "bad").valid).to_be(false)

@@ -3,8 +3,8 @@
 # Reuses the REAL Simple web server pipeline
 # (std.nogc_sync_mut.http_server): parse_request_line (parser.spl) parses the
 # request line and path_is_safe (router.spl) is the traversal check. This
-# module adds ONLY the three-route decision the boot server needs (GET /,
-# GET /health, and GET /files/<name>); it does not reimplement request-line parsing or the
+# module adds ONLY the two-route decision the boot server needs (GET / and
+# GET /files/<name>); it does not reimplement request-line parsing or the
 # path-traversal check.
 #
 # It is pure (no rt_net_* externs, no VFS): the transport
@@ -17,8 +17,7 @@ use std.nogc_sync_mut.http_server.parser.{parse_request_line}
 use std.nogc_sync_mut.http_server.router.{path_is_safe}
 
 enum HttpRouteKind:
-    Status        # GET /             -> root HTML
-    Health        # GET /health       -> status JSON
+    Status        # GET /            -> status JSON
     File          # GET /files/<name> -> serve a file from the mounted root
     BadRequest    # malformed request line -> 400
     NotFound      # unknown route / unsafe path / missing file -> 404
@@ -48,8 +47,8 @@ pub fn http_classify_request(request: text) -> HttpRoute:
     """Classify a raw HTTP request into a route decision.
 
     Fails closed: any malformed/oversized-without-terminator request line
-    (missing method/path, version other than HTTP/1.0 or HTTP/1.1,
-    non-absolute path) yields BadRequest; anything not GET /, GET /health, or
+    (missing method/path, non-HTTP/1.x version, non-absolute path) yields
+    BadRequest; anything not GET /, GET /health, or
     GET /files/<safe-single-segment> yields
     NotFound.
     """
@@ -57,21 +56,12 @@ pub fn http_classify_request(request: text) -> HttpRoute:
     val line = if line_end >= 0: request.slice(0, line_end) else: request
     val parsed = parse_request_line(line)
     val method = parsed.0
-    val target = parsed.1
+    val path = parsed.1
     val version = parsed.2
-    if ((version != "HTTP/1.0" and version != "HTTP/1.1") or
-        target.len() == 0 or not target.starts_with("/")):
-        return HttpRoute(kind: HttpRouteKind.BadRequest, file_path: "")
-    # Route on the origin-form path only. Query data is not part of a VFS
-    # filename and must not change the identity of fixed endpoints.
-    val query_at = target.find("?")
-    val path = if query_at >= 0: target.slice(0, query_at) else: target
-    if path.len() == 0:
+    if not version.starts_with("HTTP/1.") or path.len() == 0 or not path.starts_with("/"):
         return HttpRoute(kind: HttpRouteKind.BadRequest, file_path: "")
     if method != "GET":
         return HttpRoute(kind: HttpRouteKind.NotFound, file_path: "")
-    if path == "/health":
-        return HttpRoute(kind: HttpRouteKind.Health, file_path: "")
     if path == "/":
         return HttpRoute(kind: HttpRouteKind.Status, file_path: "")
     if path.starts_with("/files/"):

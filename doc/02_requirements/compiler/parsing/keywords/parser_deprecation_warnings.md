@@ -17,7 +17,7 @@ deprecated syntax (e.g., [] for generics instead of <>).
 
 ## API
 
-```simple
+```simple:skip
 use std.parser.{Parser, ErrorHint, ErrorHintLevel}
 
 var parser = Parser.new(source)

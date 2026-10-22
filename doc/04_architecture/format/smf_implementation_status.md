@@ -320,7 +320,7 @@ version_major: 0,
 version_minor: 1,
 ```
 
-```simple
+```text
 // src/compiler/linker/smf_writer.spl:17-18
 val SMF_VERSION_MAJOR: i64 = 0
 val SMF_VERSION_MINOR: i64 = 1

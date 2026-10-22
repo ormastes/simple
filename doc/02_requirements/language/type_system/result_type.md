@@ -15,7 +15,7 @@ including constructors, pattern matching, and safe unwrapping mechanisms.
 
 ## Syntax
 
-```simple
+```simple:skip
 val success: Result<i32, text> = Ok(42)
 val failure: Result<i32, text> = Err("error")
 

@@ -1,0 +1,152 @@
+use std.spec.{describe, it, expect, step, fail}
+use common.renderdoc.final_output_pixels.{
+    FinalOutputMetadata, FinalOutputCapture, FinalOutputTolerance,
+    final_output_validate, final_output_canonical_rgba, compare_final_output_pixels
+}
+use app.ui.renderdoc_diff.events.{rdoc_events_parse}
+use app.ui.renderdoc_diff.align.{rdoc_diff}
+
+fn _metadata() -> FinalOutputMetadata:
+    FinalOutputMetadata(
+        fixture_id: "controlled-primitives",
+        fixture_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        frame_id: "frame-1", resource_id: "color-7", selected_resource_count: 1,
+        mip_level: 0, array_layer: 0, submission_token: "submit-9",
+        completion_token: "submit-9", frame_complete: true, readback_complete: true,
+        device_status: "ready", width: 2, height: 1, stride: 8,
+        pixel_format: "R8G8B8A8_UNORM", alpha_mode: "straight", color_space: "srgb",
+        color_primaries: "srgb", transfer_function: "srgb",
+        origin: "top-left", crop_x: 0, crop_y: 0, crop_width: 2, crop_height: 1)
+
+fn _capture(metadata: FinalOutputMetadata, bytes: [i64]) -> FinalOutputCapture:
+    FinalOutputCapture(metadata: metadata, pixel_bytes: bytes)
+
+fn _exact() -> FinalOutputTolerance:
+    FinalOutputTolerance(fixture_id: "controlled-primitives",
+        verified_source_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        max_channel_delta: 0, max_excess_pixels: 0)
+
+fn _event(digest: text) -> text:
+    "{\"schema\":\"renderdoc-events/v1\",\"capture\":\"diagnostic.rdc\",\"events\":[" +
+        "{\"eventId\":1,\"name\":\"draw\",\"type\":\"draw\",\"pipeline\":\"graphics\"," +
+        "\"targets\":[{\"id\":1,\"width\":2,\"height\":1,\"format\":\"R8G8B8A8_UNORM\"}]," +
+        "\"outputSha256\":\"" + digest + "\"}]}"
+
+describe "Completed final output pixel comparison":
+    it "compares canonical pixels independently of event diagnostics":
+        # @req REQ-2D-003 REQ-2D-004 NFR-2D-003
+        step("Compare two completed final resource readbacks")
+        val left = _capture(_metadata(), [1, 2, 3, 255, 4, 5, 6, 255])
+        var right_meta = _metadata()
+        right_meta.resource_id = "other-backend-target"
+        right_meta.submission_token = "different-command-stream"
+        right_meta.completion_token = "different-command-stream"
+        val same_pixels = _capture(right_meta, [1, 2, 3, 255, 4, 5, 6, 255])
+        val different_pixels = _capture(right_meta, [1, 2, 3, 255, 4, 5, 7, 255])
+        val event_a = rdoc_events_parse(_event("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+        val event_b = rdoc_events_parse(_event("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"))
+        expect(rdoc_diff(event_a, event_b).divergent).to_equal(1)
+        expect(compare_final_output_pixels(left, same_pixels, _exact()).status).to_equal("pass")
+        expect(rdoc_diff(event_a, event_a).divergent).to_equal(0)
+        val mismatch = compare_final_output_pixels(left, different_pixels, _exact())
+        expect(mismatch.status).to_equal("pixel-mismatch")
+        expect(mismatch.differing_pixels).to_equal(1)
+        expect(mismatch.canonical_byte_length).to_equal(8)
+        var compute_meta = _metadata()
+        compute_meta.resource_id = "compute-final-image"
+        expect(compare_final_output_pixels(left, _capture(compute_meta, [1, 2, 3, 255, 4, 5, 6, 255]), _exact()).status).to_equal("pass")
+
+    it "decodes BGRA, bottom-left origin, stride padding and crop to RGBA":
+        # @req REQ-2D-003 NFR-2D-004
+        step("Decode selected crop from a completed padded readback")
+        var meta = _metadata()
+        meta.width = 2
+        meta.height = 2
+        meta.stride = 12
+        meta.pixel_format = "B8G8R8A8_UNORM"
+        meta.origin = "bottom-left"
+        meta.crop_x = 1
+        meta.crop_y = 0
+        meta.crop_width = 1
+        meta.crop_height = 2
+        val capture = _capture(meta, [3, 2, 1, 255, 6, 5, 4, 255, 0, 0, 0, 0,
+            9, 8, 7, 255, 12, 11, 10, 255, 0, 0, 0, 0])
+        match final_output_canonical_rgba(capture):
+            case Ok(rgba): expect(rgba).to_equal([10, 11, 12, 255, 4, 5, 6, 255])
+            case Err(err): fail("Expected canonical pixels, got {err.code}")
+
+    it "rejects ambiguous, incomplete and absent-device captures distinctly":
+        # @req REQ-2D-003 NFR-2D-004
+        step("Check final target and completion admission")
+        val pixels = [1, 2, 3, 255, 4, 5, 6, 255]
+        val baseline = _capture(_metadata(), pixels)
+        var ambiguous = _metadata()
+        ambiguous.selected_resource_count = 2
+        expect(compare_final_output_pixels(baseline, _capture(ambiguous, pixels), _exact()).status).to_equal("right-ambiguous-target")
+        var missing = _metadata()
+        missing.selected_resource_count = 0
+        expect(compare_final_output_pixels(baseline, _capture(missing, pixels), _exact()).status).to_equal("right-ambiguous-target")
+        var incomplete = _metadata()
+        incomplete.completion_token = "submit-8"
+        expect(compare_final_output_pixels(baseline, _capture(incomplete, pixels), _exact()).status).to_equal("right-incomplete-frame")
+        var absent = _metadata()
+        absent.device_status = "absent"
+        expect(compare_final_output_pixels(baseline, _capture(absent, pixels), _exact()).status).to_equal("right-blocked-environment")
+
+    it "validates exact raw length, crop, bytes and conversion domain before comparison":
+        # @req REQ-2D-003 NFR-2D-004
+        step("Reject malformed capture metadata")
+        val pixels = [1, 2, 3, 255, 4, 5, 6, 255]
+        val baseline = _capture(_metadata(), pixels)
+        expect(compare_final_output_pixels(baseline, _capture(_metadata(), [1, 2, 3, 255]), _exact()).status).to_equal("right-capture-error")
+        var crop = _metadata()
+        crop.crop_x = 2
+        expect(compare_final_output_pixels(baseline, _capture(crop, pixels), _exact()).field).to_equal("crop")
+        expect(compare_final_output_pixels(baseline, _capture(_metadata(), [1, 2, 3, 256, 4, 5, 6, 255]), _exact()).field).to_equal("pixel_bytes")
+        var unsupported = _metadata()
+        unsupported.color_space = "display-p3"
+        expect(compare_final_output_pixels(baseline, _capture(unsupported, pixels), _exact()).status).to_equal("right-unsupported-conversion")
+        var unsupported_transfer = _metadata()
+        unsupported_transfer.transfer_function = "linear"
+        expect(compare_final_output_pixels(baseline, _capture(unsupported_transfer, pixels), _exact()).status).to_equal("right-unsupported-conversion")
+        var unpinned = _metadata()
+        unpinned.fixture_digest = ""
+        expect(compare_final_output_pixels(baseline, _capture(unpinned, pixels), _exact()).field).to_equal("fixture_digest")
+        match final_output_validate(_capture(_metadata(), pixels)):
+            case Ok(_): ()
+            case Err(err): fail("Expected valid capture, got {err.code}")
+
+    it "rejects an opaque RGBA claim when raw alpha contains transparency":
+        # @req REQ-2D-003 NFR-2D-004
+        val baseline = _capture(_metadata(), [1, 2, 3, 255, 4, 5, 6, 255])
+        var opaque = _metadata()
+        opaque.alpha_mode = "opaque"
+        val inconsistent = _capture(opaque, [1, 2, 3, 0, 4, 5, 6, 255])
+        val result = compare_final_output_pixels(baseline, inconsistent, _exact())
+        expect(result.status).to_equal("right-capture-error")
+        expect(result.field).to_equal("pixel_bytes")
+        match final_output_validate(_capture(opaque,
+            [1, 2, 3, 255, 4, 5, 6, 255])):
+            case Ok(_): ()
+            case Err(err): fail("Expected opaque pixels, got {err.code}")
+
+    it "requires a named fixture for declared tolerance and counts exact differences":
+        # @req NFR-2D-003 NFR-2D-004
+        step("Apply only fixture-declared pixel tolerance")
+        val left = _capture(_metadata(), [1, 2, 3, 255, 4, 5, 6, 255])
+        val right = _capture(_metadata(), [1, 2, 4, 255, 4, 5, 8, 255])
+        val undeclared = FinalOutputTolerance(fixture_id: "",
+            verified_source_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            max_channel_delta: 1, max_excess_pixels: 1)
+        expect(compare_final_output_pixels(left, right, undeclared).status).to_equal("invalid-tolerance")
+        val wrong_source = FinalOutputTolerance(fixture_id: "controlled-primitives",
+            verified_source_digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            max_channel_delta: 1, max_excess_pixels: 1)
+        expect(compare_final_output_pixels(left, right, wrong_source).status).to_equal("unverified-fixture")
+        val declared = FinalOutputTolerance(fixture_id: "controlled-primitives",
+            verified_source_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            max_channel_delta: 1, max_excess_pixels: 1)
+        val result = compare_final_output_pixels(left, right, declared)
+        expect(result.status).to_equal("pass")
+        expect(result.differing_pixels).to_equal(2)
+        expect(result.excess_pixels).to_equal(1)

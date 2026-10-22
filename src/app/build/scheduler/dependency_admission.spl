@@ -1,0 +1,146 @@
+# Parent-side provenance gate for dependency outputs. The consumer's digest is
+# a claim; it must match the accepted producer's retained manifest and object.
+use app.io.mod.{file_read_regular_no_follow_bounded}
+use app.build.scheduler.ledger.{SchedulerLedgerV1, SchedulerAttemptV1}
+use app.build.scheduler.planner.{scheduler_action_digest_valid_v1}
+use app.build.scheduler.worker_output.{BUILD_OUTPUT_MANIFEST_MAX_BYTES_V1,
+    BUILD_OUTPUT_MAX_FILES_V1, BUILD_OUTPUT_MAX_TOTAL_BYTES_V1}
+use compiler.common.build_contract.{ActionSpec, BuildDependencyRef,
+    AcceptedResult}
+use compiler.driver.cache.cas_store.{cas_blob_path}
+use app.build.scheduler.retained_binary_cas.{retained_binary_cas_verify_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+struct DependencyAdmissionV1:
+    valid: bool
+    reason: text
+
+fn _dependency_reject_v1(reason: text) -> DependencyAdmissionV1:
+    DependencyAdmissionV1(false, reason)
+
+fn _dependency_number_v1(value: text, maximum: i64) -> i64:
+    if value == "" or value.len() > 16: return -1
+    for c in value.chars():
+        if c < "0" or c > "9": return -1
+    val number = value.to_i64() ?? -1
+    if number < 1 or number > maximum or number.to_text() != value:
+        return -1
+    number
+
+fn _dependency_output_path_v1(value: text) -> bool:
+    value != "" and value.len() <= 1024 and
+        not value.contains("/") and not value.contains("\\") and
+        not value.contains("|") and not value.contains("\n") and
+        not value.contains("\r") and not value.contains("\t") and
+        not value.contains("\x00")
+
+fn _dependency_root_v1(value: text) -> bool:
+    value.starts_with("/") and value.len() > 1 and value.len() <= 4096 and
+        not value.ends_with("/") and not value.contains("//") and
+        not value.contains("\n") and not value.contains("\r") and
+        not value.split("/").contains(".") and
+        not value.split("/").contains("..")
+
+fn _dependency_accepted_v1(ledger: SchedulerLedgerV1,
+        digest: text) -> AcceptedResult?:
+    for accepted in ledger.accepted:
+        if accepted.action_digest == digest:
+            return accepted
+    nil
+
+fn _dependency_attempt_v1(ledger: SchedulerLedgerV1,
+        accepted: AcceptedResult) -> SchedulerAttemptV1?:
+    for attempt in ledger.attempts:
+        if attempt.action_digest == accepted.action_digest and
+           attempt.attempt_id == accepted.accepted_attempt_id and
+           not attempt.active:
+            return attempt
+    nil
+
+fn validate_retained_dependency_manifest_v1(wire: text,
+        accepted: AcceptedResult, attempt: SchedulerAttemptV1,
+        dependency: BuildDependencyRef) -> DependencyAdmissionV1:
+    """Validate the complete retained manifest before selecting one output."""
+    if wire.len() == 0 or wire.len() > BUILD_OUTPUT_MANIFEST_MAX_BYTES_V1 or
+       not wire.ends_with("\n") or wire.contains("\r") or
+       sha256_text(wire) != accepted.output_manifest_digest or
+       dependency.action_digest != accepted.action_digest or
+       attempt.action_digest != accepted.action_digest or
+       attempt.attempt_id != accepted.accepted_attempt_id or attempt.active:
+        return _dependency_reject_v1("producer-manifest-identity-mismatch")
+    val lines = wire.split("\n")
+    if lines.len() < 9 or lines[0] != "simple-build-output-manifest-v1" or
+       lines[1] != "action=" + accepted.action_digest or
+       lines[2] != "attempt=" + accepted.accepted_attempt_id or
+       lines[3] != "worker=" + attempt.worker_id or
+       lines[4] != "fence=" + attempt.fence.to_text() or
+       not lines[5].starts_with("diagnostics=") or
+       not scheduler_action_digest_valid_v1(lines[5][12:]) or
+       not lines[6].starts_with("count="):
+        return _dependency_reject_v1("producer-manifest-header-invalid")
+    val count = _dependency_number_v1(lines[6][6:], BUILD_OUTPUT_MAX_FILES_V1)
+    if count < 1 or lines.len() != count + 8 or lines[lines.len() - 1] != "":
+        return _dependency_reject_v1("producer-manifest-count-invalid")
+    var prior = ""
+    var total: i64 = 0
+    var matched = false
+    var i: i64 = 0
+    while i < count:
+        val fields = lines[i + 7].split("|")
+        if fields.len() != 3 or not _dependency_output_path_v1(fields[0]) or
+           (prior != "" and fields[0] <= prior) or
+           not scheduler_action_digest_valid_v1(fields[2]):
+            return _dependency_reject_v1("producer-manifest-row-invalid")
+        val size = _dependency_number_v1(fields[1],
+            BUILD_OUTPUT_MAX_TOTAL_BYTES_V1 - total)
+        if size < 1:
+            return _dependency_reject_v1("producer-manifest-size-invalid")
+        total = total + size
+        prior = fields[0]
+        if fields[0] == dependency.output_path:
+            if fields[2] != dependency.content_digest:
+                return _dependency_reject_v1("producer-output-digest-mismatch")
+            matched = true
+        i = i + 1
+    if not matched:
+        return _dependency_reject_v1("producer-output-path-missing")
+    DependencyAdmissionV1(true, "")
+
+fn validate_dependency_provenance_v1(action: ActionSpec,
+        ledger: SchedulerLedgerV1, cas_root: text) -> DependencyAdmissionV1:
+    """Require accepted producer outputs and verified CAS bytes before dispatch."""
+    if action.inputs.dependency_outputs.len() == 0:
+        return DependencyAdmissionV1(true, "")
+    if not _dependency_root_v1(cas_root):
+        return _dependency_reject_v1("retained-cas-root-invalid")
+    for dependency in action.inputs.dependency_outputs:
+        if not scheduler_action_digest_valid_v1(dependency.action_digest) or
+           not scheduler_action_digest_valid_v1(dependency.content_digest) or
+           not _dependency_output_path_v1(dependency.output_path):
+            return _dependency_reject_v1("dependency-claim-invalid")
+        val accepted = _dependency_accepted_v1(ledger,
+            dependency.action_digest)
+        if accepted == nil:
+            return _dependency_reject_v1("producer-not-accepted")
+        val producer = accepted.unwrap()
+        val attempt = _dependency_attempt_v1(ledger, producer)
+        if attempt == nil:
+            return _dependency_reject_v1("accepted-producer-attempt-missing")
+        val path = cas_blob_path(cas_root, producer.output_manifest_digest)
+        if path == "":
+            return _dependency_reject_v1("producer-manifest-path-invalid")
+        val read = file_read_regular_no_follow_bounded(path,
+            BUILD_OUTPUT_MANIFEST_MAX_BYTES_V1)
+        if read.is_err():
+            return _dependency_reject_v1("producer-manifest-unavailable")
+        val checked = validate_retained_dependency_manifest_v1(
+            read.unwrap(), producer, attempt.unwrap(), dependency)
+        if not checked.valid:
+            return checked
+        if not retained_binary_cas_verify_v1(cas_root,
+                dependency.output_path, dependency.content_digest):
+            return _dependency_reject_v1("producer-output-object-unavailable")
+    DependencyAdmissionV1(true, "")
+
+export DependencyAdmissionV1, validate_retained_dependency_manifest_v1
+export validate_dependency_provenance_v1

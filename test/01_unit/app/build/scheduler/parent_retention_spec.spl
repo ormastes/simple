@@ -1,0 +1,66 @@
+use app.build.scheduler.parent_retention.{retain_verified_build_result_v1}
+use app.build.scheduler.trusted_result_download.{BuildResultFetchV1}
+use app.build.scheduler.worker_request.{BuildWorkerRequestV1}
+use app.build.scheduler.worker_output.{observe_build_outputs_v1}
+use app.build.scheduler.dispatch_wire.{encode_build_result_v1}
+use app.io.mod.{cwd, dir_create_all, file_atomic_write, file_write_bytes,
+    getpid, time_now_unix_micros}
+use compiler.common.build_contract.{BuildInputRef, SnapshotManifest,
+    ToolchainManifest, InputManifest, ActionSpec, AttemptSpec,
+    ActionResultCandidate, action_spec_digest_v1}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+
+fn _retention_request_v1() -> BuildWorkerRequestV1:
+    val snapshot = sha256_text("retention snapshot")
+    val action = ActionSpec(1, "compile",
+        SnapshotManifest(1, snapshot, sha256_text("source"),
+            sha256_text("submodules")),
+        ToolchainManifest(1, sha256_text("compiler"), sha256_text("behavior"),
+            sha256_text("abi"), sha256_text("runtime"),
+            sha256_text("sysroot"), "x86_64-unknown-linux-gnu"),
+        InputManifest(1, snapshot,
+            [BuildInputRef("src/answer.c", sha256_text("source bytes"))],
+            [], [], [], [], [], sha256_text("context"), true, false),
+        ["cc", "-c"], "src", sha256_text("sandbox"),
+        ["answer.o"], sha256_text("resources"))
+    val attempt = AttemptSpec(1, action_spec_digest_v1(action),
+        "try-1", "node-a", 0, 0, 4096)
+    BuildWorkerRequestV1(action, attempt, 7, 1, 8)
+
+describe "parent binary result retention":
+    it "retains only the exact manifest bytes from the stopped attempt":
+        val root = cwd() + "/build/test/parent-retention-" +
+            getpid().to_text() + "-" + time_now_unix_micros().to_text()
+        val outputs = root + "/outputs"
+        val cas = root + "/cas"
+        expect(dir_create_all(outputs)).to_be(true)
+        expect(dir_create_all(cas)).to_be(true)
+        val object = [0x7F.to_u8(), 0x45.to_u8(), 0x4C.to_u8(),
+            0x46.to_u8(), 0xFF.to_u8(), 0x80.to_u8(),
+            0x00.to_u8(), 0xC0.to_u8()]
+        expect(file_write_bytes(outputs + "/answer.o", object)).to_be(true)
+        val diagnostics = "stdout\n\nstderr\n"
+        val request = _retention_request_v1()
+        val observed = observe_build_outputs_v1(request.action,
+            request.attempt, request.fence, outputs, diagnostics)
+        expect(observed.valid).to_be(true)
+        expect(file_atomic_write(outputs + "/manifest.wire",
+            observed.manifest_wire)).to_be(true)
+        expect(file_atomic_write(outputs + "/diagnostics", diagnostics)).to_be(true)
+        val candidate = ActionResultCandidate(1, request.attempt.action_digest,
+            request.attempt.attempt_id, request.attempt.worker_id,
+            observed.manifest_digest, observed.diagnostic_digest, true)
+        val result = encode_build_result_v1(candidate, request.fence)
+        val fetched = BuildResultFetchV1(true, true, "", root, outputs,
+            observed.manifest_digest, result)
+        val retained = retain_verified_build_result_v1(request, fetched, cas)
+        expect(retained.retained).to_be(true)
+        expect(retained.output_manifest_digest).to_equal(observed.manifest_digest)
+        expect(retained.output_digests[0]).to_equal(sha256_u8_hex(object))
+        expect(retained.manifest_blob_digest).to_equal(observed.manifest_digest)
+        expect(retained.diagnostic_blob_digest).to_equal(observed.diagnostic_digest)
+        expect(file_write_bytes(outputs + "/answer.o", [0x7F.to_u8(),
+            0x45.to_u8(), 0x4C.to_u8(), 0x46.to_u8(), 0x01.to_u8()]))
+            .to_be(true)
+        expect(retain_verified_build_result_v1(request, fetched, cas).retained)
+            .to_be(false)

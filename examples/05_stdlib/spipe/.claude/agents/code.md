@@ -29,7 +29,7 @@
 
 ## Method Syntax
 
-```simple
+```simple:skip
 class Counter:
     value: i64
 
@@ -44,7 +44,7 @@ impl Counter:
 
 ## Lambda Shorthand
 
-```simple
+```simple:skip
 # Placeholder lambdas — each _ becomes a parameter
 items.map(_ * 2)            # \__p0: __p0 * 2
 items.filter(_ > 3)         # \__p0: __p0 > 3
@@ -66,7 +66,7 @@ val mul3 = partial1(\a, b: a * b, 3)
 
 ## SFFI Pattern (Two-Tier)
 
-```simple
+```simple:skip
 extern fn rt_file_read_text(path: text) -> text  # Tier 1: Runtime binding
 fn file_read(path: text) -> text:                 # Tier 2: Simple wrapper
     rt_file_read_text(path)

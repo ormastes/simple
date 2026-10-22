@@ -1,0 +1,37 @@
+use std.spec.*
+use app.build.scheduler.worker_failure_proof.{
+    encode_build_worker_failure_proof_v1,
+    parse_build_worker_failure_proof_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+describe "terminal failure proof version gate":
+    it "binds one nonzero exit to request binding fence and result bytes":
+        val request = sha256_text("request")
+        val binding = sha256_text("permanent native binding")
+        val result = sha256_text("exact failed result wire")
+        val wire = encode_build_worker_failure_proof_v1(request, binding,
+            "try-1", 7, 137, result)
+        expect(wire.starts_with("simple-build-failure-proof-v1\n"))
+            .to_be(true)
+        if val parsed = parse_build_worker_failure_proof_v1(wire):
+            expect(parsed.request_digest).to_equal(request)
+            expect(parsed.binding_digest).to_equal(binding)
+            expect(parsed.attempt_id).to_equal("try-1")
+            expect(parsed.fence).to_equal(7)
+            expect(parsed.exit_code).to_equal(137)
+            expect(parsed.result_digest).to_equal(result)
+        else:
+            assert(false)
+        expect(parse_build_worker_failure_proof_v1(
+            wire.replace("exit=137\n", "exit=0137\n"))).to_be_nil()
+        expect(parse_build_worker_failure_proof_v1(
+            wire.replace("fence=7\n", "fence=8\n"))).to_be_nil()
+        expect(parse_build_worker_failure_proof_v1(
+            wire.replace("terminal=", "term=..."))).to_be_nil()
+        expect(parse_build_worker_failure_proof_v1(
+            wire.replace("result=" + result,
+                "result=not-a-digest"))).to_be_nil()
+        expect(encode_build_worker_failure_proof_v1(request, binding,
+            "try-1", 7, 0, result)).to_equal("")
+        expect(encode_build_worker_failure_proof_v1(request, binding,
+            "try-1", 7, 256, result)).to_equal("")

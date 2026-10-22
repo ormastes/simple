@@ -1,0 +1,92 @@
+"""
+## Purpose and audience
+This unit spec pins the BODY background color of the Simple Web renderer's
+heuristic surface against fixtures whose color values appear nowhere in
+`src/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer.spl`.
+Audience: reviewers checking that the background resolver is a real CSS path
+and not a memorized answer table keyed on fixture strings.
+
+## Operator workflow
+Run this file with the Simple test runner from the repository root
+(`simple run test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_background_cascade_spec.spl`).
+Every scenario feeds HTML through `simple_web_html_background_color`, the same
+entry the pixel path uses to fill the page.
+
+## Compatibility and limitations
+The sibling `simple_web_renderer_spec.spl` uses `rebeccapurple`, `#0f8`,
+`hsl(120, 100%, 25%)`, `#456789` and `#345678`; a table keyed on those strings
+once satisfied it. None of those values appear here, deliberately: reintroducing
+such a table makes every scenario below go wrong, because an unseen color has no
+row. This is the sabotage check for that regression.
+
+## Verification guidance and troubleshooting
+A failure prints the expected and actual ARGB word. Replay the fixture through
+`simple_web_html_background_color` and check the declaration cascade
+(`_decl_value_last`), the color token scan (`_value_first_color`), and the
+composite over the UA default white page (`_composite_over_white`).
+
+**Lifecycle architecture:** doc/04_architecture/ui/simple_gui_stack.md
+**Lifecycle design:** doc/05_design/ui/gpu_web_scene_contracts.md
+
+## Syntax
+The spec uses `std.spec` scenarios and the built-in matcher vocabulary.
+"""
+# @manual_section: simple web renderer
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{simple_web_html_background_color}
+
+fn _body(style: text) -> text:
+    "<html><body style='" + style + "'>unseen fixture</body></html>"
+
+describe "SimpleWebBackgroundCascade":
+
+    it "parses a named color the module never mentions":
+        # @req: REQ-BROWSERE-SimpleWebRenderer-001
+        step("Verify: darkolivegreen resolves through the CSS color parser")
+        expect(simple_web_html_background_color(_body("background-color: darkolivegreen"))).to_equal(0xFF556B2Fu32)
+
+    it "parses an hsl() triple the module never mentions":
+        # @req: REQ-BROWSERE-SimpleWebRenderer-001
+        step("Verify: hsl(200, 50%, 40%) resolves through the CSS color parser")
+        expect(simple_web_html_background_color(_body("background-color: hsl(200, 50%, 40%)"))).to_equal(0xFF337799u32)
+
+    it "parses an rgb() triple the module never mentions":
+        # @req: REQ-BROWSERE-SimpleWebRenderer-001
+        step("Verify: rgb(17, 34, 51) resolves through the CSS color parser")
+        expect(simple_web_html_background_color(_body("background-color: rgb(17, 34, 51)"))).to_equal(0xFF112233u32)
+
+    it "lets the later declaration win for an unseen color pair":
+        # @req: REQ-BROWSERE-SimpleWebRenderer-001
+        step("Verify: background shorthand after background-color wins")
+        expect(simple_web_html_background_color(_body("background-color: teal; background: #4b0"))).to_equal(0xFF44BB00u32)
+
+    it "lets the later background-color win for an unseen color pair":
+        # @req: REQ-BROWSERE-SimpleWebRenderer-001
+        step("Verify: background-color after background shorthand wins")
+        expect(simple_web_html_background_color(_body("background: #4b0; background-color: teal"))).to_equal(0xFF008080u32)
+
+    it "resolves currentColor from an unseen text color":
+        # @req: REQ-BROWSERE-SimpleWebRenderer-001
+        step("Verify: currentColor reads the color declaration, not a table row")
+        expect(simple_web_html_background_color(_body("background-color: currentColor; color: crimson"))).to_equal(0xFFDC143Cu32)
+
+    it "skips url() and position tokens in an unseen shorthand":
+        # @req: REQ-BROWSERE-SimpleWebRenderer-001
+        step("Verify: the first real color token of the shorthand wins")
+        expect(simple_web_html_background_color(_body("background: url(banner.webp) center/cover darkolivegreen"))).to_equal(0xFF556B2Fu32)
+
+    it "composites an unseen translucent color over the UA white page":
+        # @req: REQ-BROWSERE-SimpleWebRenderer-001
+        step("Verify: #2040608c composites over white instead of painting opaque")
+        expect(simple_web_html_background_color(_body("background-color: #2040608c"))).to_equal(0xFF8596A8u32)
+
+    it "falls back to the UA white page for an unseen keyword with no color":
+        # @req: REQ-BROWSERE-SimpleWebRenderer-001
+        step("Verify: background: none leaves the page white")
+        expect(simple_web_html_background_color(_body("background: none repeat-y"))).to_equal(0xFFFFFFFFu32)
+
+    it "composites an unseen rgba() alpha from the author value, not the byte":
+        # @req: REQ-BROWSERE-SimpleWebRenderer-001
+        step("Verify: rgba(10, 20, 30, 0.25) composites over white in float")
+        expect(simple_web_html_background_color(_body("background-color: rgba(10, 20, 30, 0.25)"))).to_equal(0xFFC2C4C7u32)

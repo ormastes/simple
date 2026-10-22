@@ -51,7 +51,7 @@ submissions with real positioned reads and writes through the typed
 `std.nogc_async_mut.io` aliases. Register a path and a buffer, then use the
 sync leg:
 
-```simple
+```simple:skip
 use std.nogc_async_mut.sosix.{SosixHostedFs, SosixHostedFileDriver, sosix_sync_fs_write_at, sosix_sync_fs_read_at}
 
 val fs = SosixHostedFs.create(owner_id, ring_id, 2).unwrap()

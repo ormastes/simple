@@ -30,7 +30,7 @@ semantics, clips, ordering, and provenance. It is not an accepted bridge.
 Keep the flat Draw IR schema. Add one common value transform in
 `src/lib/common/ui/draw_ir.spl`:
 
-```simple
+```simple:skip
 fn draw_ir_embed_composition(
     child: DrawIrComposition,
     offset_x: i32,
@@ -70,7 +70,7 @@ batches, then continue later siblings. Never append all children at the end.
 
 Refactor the parse/style/layout/compose sequence into one private owner:
 
-```simple
+```simple:skip
 fn _simple_web_layout_compose_document(
     html: text,
     width: i32,

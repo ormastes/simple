@@ -1,0 +1,41 @@
+use app.build.scheduler.worker_execute.{LocalBuildWorkerConfigV1,
+    cancel_unstarted_build_worker_v1}
+use app.io.mod.{cwd, dir_create_all, file_atomic_write, file_exists,
+    file_read, getpid, time_now_unix_micros}
+use compiler.common.build_contract.{ToolchainManifest}
+use std.common.crypto.sha256.{sha256_text}
+
+fn _cancel_config_v1(root: text) -> LocalBuildWorkerConfigV1:
+    LocalBuildWorkerConfigV1("node-a", root, root, "docker", "image",
+        "/usr/bin/cc", ToolchainManifest(1, sha256_text("cc"),
+            sha256_text("behavior"), sha256_text("abi"),
+            sha256_text("runtime"), sha256_text("sysroot"),
+            "x86_64-unknown-linux-gnu"), sha256_text("sandbox"),
+        sha256_text("policy"), 1, 4096, 30000, 64, 1)
+
+describe "worker cancellation tombstone":
+    it "syncs a request-bound tombstone before acknowledging cancellation":
+        val root = cwd() + "/build/test/worker-cancel-" +
+            getpid().to_text() + "-" + time_now_unix_micros().to_text()
+        expect(dir_create_all(root)).to_be(true)
+        val request = sha256_text("request")
+        val result = cancel_unstarted_build_worker_v1(
+            _cancel_config_v1(root), "try-1", request, 7)
+        expect(result.cancelled).to_be(true)
+        expect(result.acknowledgement).to_equal(
+            "simple-build-cancelled-v1|try-1|" + request + "|7\n")
+        expect(file_read(root + "/worker-attempt-try-1.cancel")).to_equal(
+            "simple-build-cancel-v1\nworker=node-a\nattempt=try-1\nrequest=" +
+            request + "\nfence=7\n")
+
+    it "keeps a started or uncertain worker bound instead of releasing it":
+        val root = cwd() + "/build/test/worker-cancel-bound-" +
+            getpid().to_text() + "-" + time_now_unix_micros().to_text()
+        expect(dir_create_all(root)).to_be(true)
+        expect(file_atomic_write(root + "/worker-attempt-try-1.binding",
+            "uncertain container\n")).to_be(true)
+        val result = cancel_unstarted_build_worker_v1(
+            _cancel_config_v1(root), "try-1", sha256_text("request"), 7)
+        expect(result.cancelled).to_be(false)
+        expect(result.reason).to_equal("attempt-started-or-unknown")
+        expect(file_exists(root + "/worker-attempt-try-1.cancel")).to_be(false)

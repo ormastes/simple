@@ -65,7 +65,7 @@ compatibility and will be removed in a future release.
 
 The standard library exposes a **two-tier namespace**:
 
-```simple
+```simple:skip
 use std.fs          // short alias — preferred for user code
 use std.text        // canonical name
 

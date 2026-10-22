@@ -1,0 +1,299 @@
+# One parent attempt with short journal leases. Network and worker execution
+# carry immutable request data; only a freshly opened owner may commit results.
+use app.build.scheduler.planner.{SchedulerActionV1}
+use app.build.scheduler.ledger.{SchedulerCapacityV1,
+    scheduler_current_fence_v1, scheduler_next_retry_number_v1}
+use app.build.scheduler.owner.{SchedulerOwnerV1, scheduler_owner_open_v1,
+    scheduler_owner_close_v1}
+use app.build.scheduler.distributed_attempt.{DistributedBuildNodeV1,
+    DistributedBuildAttemptV1, PreparedDistributedBuildAttemptV1,
+    prepare_distributed_build_attempt_v1, commit_fetched_distributed_reply_v1}
+use app.build.scheduler.prepared_upload.{transfer_prepared_build_request_v1,
+    release_prepared_build_request_v1}
+use app.build.scheduler.parent_request_spool.{recover_parent_build_request_v1}
+use app.build.scheduler.trusted_worker_invocation.{
+    query_build_worker_capability_ssh_v1, invoke_build_worker_ssh_v1,
+    status_build_worker_ssh_v1}
+use app.build.scheduler.trusted_result_download.{fetch_build_result_sftp_v1,
+    fetch_build_failure_sftp_v1, BuildResultFetchV1}
+use app.build.scheduler.remote_worker_preflight.{preflight_remote_build_job_v1}
+use app.build.scheduler.parent_cleanup_service.{report_completed_parent_cleanup_v1}
+use app.build.scheduler.worker_request.{BuildWorkerRequestV1,
+    encode_build_worker_request_v1}
+use app.build.scheduler.dispatch_wire.{encode_build_dispatch_v1}
+use app.build.scheduler.trusted_ssh.{TrustedSshNodeV1}
+use compiler.common.build_contract.{AttemptSpec, AcceptedResult,
+    NodeCapabilities, action_spec_digest_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
+
+struct ParallelRemoteTransportV1:
+    ready: bool
+    result: DistributedBuildAttemptV1
+    fetched: BuildResultFetchV1?
+
+fn _parallel_block_v1(reason: text,
+        reconcile: bool) -> DistributedBuildAttemptV1:
+    DistributedBuildAttemptV1(false, false, false, reconcile, reason,
+        AcceptedResult(1, "", "", "", ""))
+
+fn _parallel_close_v1(owner: SchedulerOwnerV1,
+        result: DistributedBuildAttemptV1) -> DistributedBuildAttemptV1:
+    if scheduler_owner_close_v1(owner): return result
+    val reason = if result.reason == "": "owner-close-failed"
+        else: result.reason + ";owner-close-failed"
+    DistributedBuildAttemptV1(result.completed, result.published,
+        result.failure_recorded, true, reason, result.accepted)
+
+fn _parallel_cleanup_note_v1(result: DistributedBuildAttemptV1,
+        cleaned: bool, root: text) -> DistributedBuildAttemptV1:
+    if cleaned: return result
+    val detail = "prepared-cleanup-failed:" + root
+    val reason = if result.reason == "": detail
+        else: result.reason + ";" + detail
+    DistributedBuildAttemptV1(result.completed, result.published,
+        result.failure_recorded, true,
+        reason, result.accepted)
+
+fn _parallel_same_ssh_v1(left: TrustedSshNodeV1,
+        right: TrustedSshNodeV1) -> bool:
+    left.worker_id == right.worker_id and left.host == right.host and
+    left.user == right.user and left.port == right.port and
+    left.ssh_executable == right.ssh_executable and
+    left.ssh_digest == right.ssh_digest and
+    left.known_hosts_path == right.known_hosts_path and
+    left.known_hosts_digest == right.known_hosts_digest and
+    left.identity_path == right.identity_path and
+    left.identity_digest == right.identity_digest
+
+fn _parallel_approved_node_v1(approved: DistributedBuildNodeV1,
+        current: DistributedBuildNodeV1) -> bool:
+    _parallel_same_ssh_v1(approved.ssh.node, current.ssh.node) and
+    _parallel_same_ssh_v1(approved.sftp.node, current.sftp.node) and
+    approved.ssh.remote_executable == current.ssh.remote_executable and
+    approved.ssh.timeout_ms == current.ssh.timeout_ms and
+    approved.sftp.sftp_executable == current.sftp.sftp_executable and
+    approved.sftp.sftp_digest == current.sftp.sftp_digest and
+    approved.sftp.remote_inbox_root == current.sftp.remote_inbox_root and
+    approved.source_root == current.source_root and
+    approved.local_state_dir == current.local_state_dir and
+    approved.retained_cas_root == current.retained_cas_root
+
+fn parallel_prepared_envelope_valid_v1(
+        snapshot: PreparedDistributedBuildAttemptV1,
+        node: DistributedBuildNodeV1) -> bool:
+    """Pure check of approved transport and all request identity values."""
+    if not snapshot.ready or snapshot.prepared == nil or
+       snapshot.request == nil or snapshot.approved_node == nil:
+        return false
+    if not _parallel_approved_node_v1(snapshot.approved_node.unwrap(), node):
+        return false
+    val prepared = snapshot.prepared.unwrap()
+    val request = snapshot.request.unwrap()
+    val wire = encode_build_worker_request_v1(request)
+    if not prepared.ready or not prepared.plan.valid or wire == "" or
+       request.attempt.worker_id != node.ssh.node.worker_id or
+       request.attempt.worker_id != node.sftp.node.worker_id or
+       request.attempt.attempt_id == "" or
+       request.attempt.action_digest != action_spec_digest_v1(request.action) or
+       snapshot.request_digest != sha256_text(wire) or
+       prepared.plan.request_digest != snapshot.request_digest or
+       prepared.plan.request_wire != wire:
+        return false
+    val dispatch = encode_build_dispatch_v1(request.action, request.attempt,
+        request.fence, request.cpu_tokens, request.fd_tokens)
+    dispatch != "" and snapshot.dispatch_wire == dispatch
+
+fn commit_parallel_fetched_result_v1(owner_root: text,
+        attempt_id: text, request: BuildWorkerRequestV1,
+        request_digest: text, node: DistributedBuildNodeV1,
+        fetched: BuildResultFetchV1) -> DistributedBuildAttemptV1:
+    """Replay the current journal before accepting a downloaded candidate."""
+    val fresh = scheduler_owner_open_v1(owner_root)
+    if fresh.error != "":
+        return _parallel_block_v1("owner-reopen: " + fresh.error, true)
+    val recovered = recover_parent_build_request_v1(fresh, attempt_id)
+    if not recovered.recovered or recovered.request == nil or
+       recovered.request_digest != request_digest or
+       encode_build_worker_request_v1(recovered.request.unwrap()) !=
+           encode_build_worker_request_v1(request) or
+       recovered.request.unwrap().attempt.worker_id != node.ssh.node.worker_id:
+        return _parallel_close_v1(fresh,
+            _parallel_block_v1("request-changed-or-no-longer-current", true))
+    val committed = commit_fetched_distributed_reply_v1(fresh, node,
+        recovered.request.unwrap(), fetched)
+    val closed = _parallel_close_v1(fresh, committed)
+    report_completed_parent_cleanup_v1(owner_root, attempt_id, node, closed)
+
+fn prepare_parallel_remote_build_attempt_v1(owner_root: text,
+        actions: [SchedulerActionV1], action_digest: text,
+        attempt_id: text, retry_number: i64, node: DistributedBuildNodeV1,
+        capabilities: NodeCapabilities, protected_trust_domain: text,
+        capacity: SchedulerCapacityV1,
+        now_tick: i64) -> PreparedDistributedBuildAttemptV1:
+    """Serial parent phase: journal and spool, then release the owner lock.
+
+    A ready result owns a temporary prepared upload root. The parent retains
+    that root, passes the envelope to transport once, then releases its own
+    retained snapshot after transport returns.
+    """
+    var selected: SchedulerActionV1? = nil
+    for action in actions:
+        if action.action_digest == action_digest:
+            selected = action
+    if selected == nil:
+        return PreparedDistributedBuildAttemptV1(false,
+            _parallel_block_v1("action-not-found", false), nil, nil,
+            "", "", nil)
+    val action = selected.unwrap()
+    if action_spec_digest_v1(action.spec) != action_digest or
+       attempt_id == "" or retry_number < 0 or retry_number > 1000000:
+        return PreparedDistributedBuildAttemptV1(false,
+            _parallel_block_v1("action-or-retry-invalid", false),
+            nil, nil, "", "", nil)
+    val nonce = random_hex(32) ?? ""
+    val report = query_build_worker_capability_ssh_v1(node.ssh, nonce)
+    if not report.received or report.capability == nil:
+        return PreparedDistributedBuildAttemptV1(false,
+            _parallel_block_v1("capability: " + report.reason, false),
+            nil, nil, "", "", nil)
+
+    val owner = scheduler_owner_open_v1(owner_root)
+    if owner.error != "":
+        return PreparedDistributedBuildAttemptV1(false,
+            _parallel_block_v1("owner: " + owner.error, true),
+            nil, nil, "", "", nil)
+    if retry_number != scheduler_next_retry_number_v1(owner.state.ledger,
+            action_digest):
+        return PreparedDistributedBuildAttemptV1(false,
+            _parallel_close_v1(owner,
+                _parallel_block_v1("retry-number-stale", false)),
+            nil, nil, "", "", nil)
+    val fence = scheduler_current_fence_v1(owner.state.ledger,
+        action_digest) + 1
+    val attempt = AttemptSpec(1, action_digest, attempt_id,
+        node.ssh.node.worker_id, retry_number, action.priority,
+        action.memory_bytes)
+    val bound = preflight_remote_build_job_v1(action.spec, attempt,
+        capabilities, protected_trust_domain, node,
+        report.capability.unwrap(), fence, action.cpu_tokens,
+        action.fd_tokens)
+    if not bound.valid:
+        return PreparedDistributedBuildAttemptV1(false,
+            _parallel_close_v1(owner,
+                _parallel_block_v1("capability: " + bound.reason, false)),
+            nil, nil, "", "", nil)
+    val snapshot = prepare_distributed_build_attempt_v1(owner, actions,
+        action_digest, attempt_id, retry_number, node, capacity, now_tick)
+    if not snapshot.ready or snapshot.prepared == nil or snapshot.request == nil:
+        return PreparedDistributedBuildAttemptV1(false,
+            _parallel_close_v1(owner, snapshot.result),
+            snapshot.prepared, nil, "", "", nil)
+    val prepared = snapshot.prepared.unwrap()
+    if not scheduler_owner_close_v1(owner):
+        val cleaned = release_prepared_build_request_v1(prepared)
+        val result = _parallel_cleanup_note_v1(
+            _parallel_block_v1("owner-close-before-upload", true),
+            cleaned, prepared.root)
+        if not cleaned:
+            return PreparedDistributedBuildAttemptV1(false, result,
+                Some(prepared), nil, "", "", nil)
+        return PreparedDistributedBuildAttemptV1(false, result,
+            nil, nil, "", "", nil)
+    snapshot
+
+fn _parallel_transport_block_v1(reason: text) -> ParallelRemoteTransportV1:
+    ParallelRemoteTransportV1(false, _parallel_block_v1(reason, true),
+        nil)
+
+fn _parallel_reject_snapshot_v1(reason: text) -> ParallelRemoteTransportV1:
+    # This envelope is untrusted. Its root may name unrelated local data.
+    ParallelRemoteTransportV1(false, _parallel_block_v1(reason, true),
+        nil)
+
+fn transport_parallel_remote_build_attempt_v1(
+        snapshot: PreparedDistributedBuildAttemptV1,
+        node: DistributedBuildNodeV1) -> ParallelRemoteTransportV1:
+    """Child phase: upload, execute and fetch; never delete local parent paths."""
+    if not snapshot.ready or snapshot.prepared == nil or
+       snapshot.request == nil:
+        return _parallel_reject_snapshot_v1("prepared-attempt-invalid")
+    if not parallel_prepared_envelope_valid_v1(snapshot, node):
+        return _parallel_reject_snapshot_v1("prepared-envelope-invalid")
+    val prepared = snapshot.prepared.unwrap()
+    val request = snapshot.request.unwrap()
+
+    val uploaded = transfer_prepared_build_request_v1(node.sftp, prepared)
+    if not uploaded.ready or uploaded.request_digest != snapshot.request_digest:
+        val reason = if not uploaded.ready: "upload: " + uploaded.reason
+            else: "upload-request-mismatch"
+        return _parallel_transport_block_v1(reason)
+    val reply = invoke_build_worker_ssh_v1(node.ssh, snapshot.dispatch_wire,
+        uploaded.request_digest)
+    if not reply.received or reply.result == nil:
+        return _parallel_transport_block_v1("worker: " + reply.reason)
+    if not reply.result.unwrap().candidate.success:
+        val status = status_build_worker_ssh_v1(node.ssh,
+            snapshot.dispatch_wire, uploaded.request_digest)
+        if not status.received or status.result_wire != reply.result_wire:
+            return _parallel_transport_block_v1("failure-status-unconfirmed")
+    val fetched = if reply.result.unwrap().candidate.success:
+        fetch_build_result_sftp_v1(node.sftp, request,
+            node.local_state_dir, reply.result_wire)
+    else:
+        fetch_build_failure_sftp_v1(node.sftp, request,
+            node.local_state_dir, reply.result_wire)
+    if not fetched.verified:
+        return _parallel_transport_block_v1("fetch: " + fetched.reason)
+
+    ParallelRemoteTransportV1(true, _parallel_block_v1("", false),
+        fetched)
+
+fn commit_parallel_remote_build_attempt_v1(owner_root: text,
+        attempt_id: text, snapshot: PreparedDistributedBuildAttemptV1,
+        node: DistributedBuildNodeV1,
+        transport: ParallelRemoteTransportV1) -> DistributedBuildAttemptV1:
+    """Serial parent phase: replay the owner and commit a verified fetch."""
+    if not transport.ready:
+        return transport.result
+    if not parallel_prepared_envelope_valid_v1(snapshot, node) or
+       transport.fetched == nil or
+       snapshot.request.unwrap().attempt.attempt_id != attempt_id:
+        return _parallel_block_v1("transport-result-invalid", true)
+    commit_parallel_fetched_result_v1(owner_root,
+        attempt_id, snapshot.request.unwrap(), snapshot.request_digest,
+        node, transport.fetched.unwrap())
+
+fn run_parallel_remote_build_attempt_v1(owner_root: text,
+        actions: [SchedulerActionV1], action_digest: text,
+        attempt_id: text, retry_number: i64, node: DistributedBuildNodeV1,
+        capabilities: NodeCapabilities, protected_trust_domain: text,
+        capacity: SchedulerCapacityV1,
+        now_tick: i64) -> DistributedBuildAttemptV1:
+    """Run the three phases sequentially for existing callers."""
+    val snapshot = prepare_parallel_remote_build_attempt_v1(owner_root,
+        actions, action_digest, attempt_id, retry_number, node,
+        capabilities, protected_trust_domain, capacity, now_tick)
+    if not snapshot.ready:
+        return snapshot.result
+    if snapshot.prepared == nil:
+        return _parallel_block_v1("prepared-attempt-invalid", true)
+    # Retain the locally produced root before the transport receives a copy.
+    # An invalid envelope never authorizes transport to delete any path.
+    val local_prepared = snapshot.prepared.unwrap()
+    val transport = transport_parallel_remote_build_attempt_v1(snapshot, node)
+    val cleaned = release_prepared_build_request_v1(local_prepared)
+    if not transport.ready:
+        return _parallel_cleanup_note_v1(transport.result, cleaned,
+            local_prepared.root)
+    val committed = commit_parallel_remote_build_attempt_v1(owner_root,
+        attempt_id, snapshot, node, transport)
+    _parallel_cleanup_note_v1(committed, cleaned, local_prepared.root)
+
+export ParallelRemoteTransportV1
+export parallel_prepared_envelope_valid_v1
+export prepare_parallel_remote_build_attempt_v1
+export transport_parallel_remote_build_attempt_v1
+export commit_parallel_remote_build_attempt_v1
+export run_parallel_remote_build_attempt_v1
+export commit_parallel_fetched_result_v1

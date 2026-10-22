@@ -1,0 +1,346 @@
+# One synchronous parent attempt across one trusted Linux worker. The owner
+# journals admission before transport and is the only publication authority.
+# On uncertain transport or storage failure the attempt stays active for
+# explicit remote reconciliation; capacity is never silently reused.
+use app.build.scheduler.planner.{SchedulerActionV1}
+use app.build.scheduler.ledger.{SchedulerCapacityV1,
+    scheduler_current_fence_v1, scheduler_worker_busy_v1}
+use app.build.scheduler.owner.{SchedulerOwnerV1}
+use app.build.scheduler.broker.{FencedCandidateV1}
+use app.build.scheduler.trusted_ssh.{TrustedSshNodeV1}
+use app.build.scheduler.trusted_sftp.{TrustedSftpConfigV1}
+use app.build.scheduler.prepared_upload.{prepare_build_request_upload_v1,
+    transfer_prepared_build_request_v1,
+    release_prepared_build_request_v1, PreparedBuildUploadV1}
+use app.build.scheduler.trusted_worker_invocation.{TrustedWorkerCommandV1,
+    BuildWorkerReplyV1, invoke_build_worker_ssh_v1,
+    validate_build_worker_reply_v1,
+    status_build_worker_ssh_v1, cancel_unstarted_build_worker_ssh_v1}
+use app.build.scheduler.trusted_result_download.{fetch_build_result_sftp_v1,
+    fetch_build_failure_sftp_v1, BuildResultFetchV1}
+use app.build.scheduler.parent_retention.{retain_verified_build_result_v1,
+    retain_verified_build_failure_v1}
+use app.build.scheduler.dependency_admission.{
+    validate_dependency_provenance_v1}
+use app.build.scheduler.worker_request.{BuildWorkerRequestV1,
+    encode_build_worker_request_v1}
+use app.build.scheduler.parent_request_spool.{
+    persist_parent_build_intent_v1, persist_parent_build_request_v1,
+    recover_parent_build_request_v1}
+use app.build.scheduler.parent_cleanup_pending.{
+    persist_parent_cleanup_pending_v1}
+use app.build.scheduler.dispatch_wire.{encode_build_dispatch_v1}
+use compiler.common.build_contract.{AttemptSpec, AcceptedResult,
+    action_spec_digest_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+struct DistributedBuildNodeV1:
+    ssh: TrustedWorkerCommandV1
+    sftp: TrustedSftpConfigV1
+    source_root: text
+    local_state_dir: text
+    retained_cas_root: text
+
+struct DistributedBuildAttemptV1:
+    completed: bool
+    published: bool
+    failure_recorded: bool
+    reconciliation_required: bool
+    reason: text
+    accepted: AcceptedResult
+
+struct PreparedDistributedBuildAttemptV1:
+    ready: bool
+    result: DistributedBuildAttemptV1
+    prepared: PreparedBuildUploadV1?
+    request: BuildWorkerRequestV1?
+    dispatch_wire: text
+    request_digest: text
+    approved_node: DistributedBuildNodeV1?
+
+fn _distributed_empty_accepted_v1() -> AcceptedResult:
+    AcceptedResult(1, "", "", "", "")
+
+fn _distributed_block_v1(reason: text, reconcile: bool) -> DistributedBuildAttemptV1:
+    DistributedBuildAttemptV1(false, false, false, reconcile,
+        reason, _distributed_empty_accepted_v1())
+
+fn _distributed_prepare_block_v1(result: DistributedBuildAttemptV1) ->
+        PreparedDistributedBuildAttemptV1:
+    PreparedDistributedBuildAttemptV1(false, result, nil, nil, "", "", nil)
+
+fn _distributed_cleanup_note_v1(result: DistributedBuildAttemptV1,
+        cleaned: bool, root: text) -> DistributedBuildAttemptV1:
+    if cleaned: return result
+    val detail = "prepared-cleanup-failed:" + root
+    val reason = if result.reason == "": detail
+        else: result.reason + ";" + detail
+    DistributedBuildAttemptV1(result.completed, result.published,
+        result.failure_recorded, true, reason, result.accepted)
+
+fn _distributed_prepare_release_v1(result: DistributedBuildAttemptV1,
+        prepared: PreparedBuildUploadV1, cleaned: bool) ->
+        PreparedDistributedBuildAttemptV1:
+    val noted = _distributed_cleanup_note_v1(result, cleaned, prepared.root)
+    if not cleaned:
+        return PreparedDistributedBuildAttemptV1(false, noted,
+            Some(prepared), nil, "", "", nil)
+    _distributed_prepare_block_v1(noted)
+
+fn _distributed_same_node_v1(a: TrustedSshNodeV1,
+        b: TrustedSshNodeV1) -> bool:
+    a.worker_id == b.worker_id and a.host == b.host and a.user == b.user and
+        a.port == b.port and a.ssh_executable == b.ssh_executable and
+        a.ssh_digest == b.ssh_digest and
+        a.known_hosts_path == b.known_hosts_path and
+        a.known_hosts_digest == b.known_hosts_digest and
+        a.identity_path == b.identity_path and
+        a.identity_digest == b.identity_digest
+
+fn distributed_build_node_consistent_v1(node: DistributedBuildNodeV1) -> bool:
+    _distributed_same_node_v1(node.ssh.node, node.sftp.node)
+
+fn _distributed_abort_before_upload_v1(owner: SchedulerOwnerV1,
+        attempt_id: text, prepared: PreparedBuildUploadV1,
+        reason: text) -> PreparedDistributedBuildAttemptV1:
+    """Release a current admission only while this driver has sent no bytes."""
+    val cleaned = release_prepared_build_request_v1(prepared)
+    val revoked = owner.revoke(attempt_id)
+    if not revoked.acknowledged:
+        return _distributed_prepare_release_v1(_distributed_block_v1(
+            reason + ";revoke:" + revoked.error, true), prepared, cleaned)
+    _distributed_prepare_release_v1(_distributed_block_v1(reason, false),
+        prepared, cleaned)
+
+fn commit_fetched_distributed_reply_v1(owner: SchedulerOwnerV1,
+        node: DistributedBuildNodeV1, request: BuildWorkerRequestV1,
+        fetched: BuildResultFetchV1) -> DistributedBuildAttemptV1:
+    """Retain verified bytes and commit only through the current owner ledger."""
+    val dispatch = encode_build_dispatch_v1(request.action, request.attempt,
+        request.fence, request.cpu_tokens, request.fd_tokens)
+    val reply = validate_build_worker_reply_v1(dispatch, fetched.result_wire)
+    if not fetched.verified or not reply.received or reply.result == nil:
+        return _distributed_block_v1("candidate-invalid", true)
+    val candidate = reply.result.unwrap().candidate
+    if not candidate.success:
+        if fetched.success or candidate.output_manifest_digest != "":
+            return _distributed_block_v1("failure-candidate-invalid", true)
+        val retained_failure = retain_verified_build_failure_v1(request,
+            fetched, node.retained_cas_root)
+        if not retained_failure.retained:
+            return _distributed_block_v1(
+                "retain-failure: " + retained_failure.reason, true)
+        val cleanup_failure = persist_parent_cleanup_pending_v1(owner,
+            request, fetched.result_wire)
+        if not cleanup_failure.ready:
+            return _distributed_block_v1(
+                "cleanup-intent: " + cleanup_failure.reason, true)
+        val failed = owner.fail(candidate, request.fence,
+            "action-failure-unclassified")
+        if not failed.acknowledged:
+            return _distributed_block_v1("failure: " + failed.error, true)
+        return DistributedBuildAttemptV1(true, false, true, false,
+            "action-failure-unclassified", _distributed_empty_accepted_v1())
+    if not fetched.success:
+        return _distributed_block_v1("fetch-success-mismatch", true)
+    val retained = retain_verified_build_result_v1(request, fetched,
+        node.retained_cas_root)
+    if not retained.retained:
+        return _distributed_block_v1("retain: " + retained.reason, true)
+    val cleanup = persist_parent_cleanup_pending_v1(owner, request,
+        fetched.result_wire)
+    if not cleanup.ready:
+        return _distributed_block_v1("cleanup-intent: " + cleanup.reason,
+            true)
+    val published = owner.publish(FencedCandidateV1(candidate, request.fence),
+        retained.output_manifest_digest)
+    if not published.acknowledged:
+        return _distributed_block_v1("publish: " + published.error, true)
+    DistributedBuildAttemptV1(true, true, false, false, "",
+        published.accepted)
+
+fn _finish_distributed_reply_v1(owner: SchedulerOwnerV1,
+        node: DistributedBuildNodeV1, request: BuildWorkerRequestV1,
+        reply: BuildWorkerReplyV1) -> DistributedBuildAttemptV1:
+    if not reply.received or reply.result == nil:
+        return _distributed_block_v1("worker: " + reply.reason, true)
+    if not reply.result.unwrap().candidate.success:
+        # Require an exact status replay as well as the separately fetched
+        # versioned proof; an older V1-only worker has no failure proof.
+        val status = status_build_worker_ssh_v1(node.ssh,
+            encode_build_dispatch_v1(request.action, request.attempt,
+                request.fence, request.cpu_tokens, request.fd_tokens),
+            sha256_text(encode_build_worker_request_v1(request)))
+        if not status.received or status.result_wire != reply.result_wire:
+            return _distributed_block_v1("failure-status-unconfirmed", true)
+    val fetched = if reply.result.unwrap().candidate.success:
+        fetch_build_result_sftp_v1(node.sftp, request,
+            node.local_state_dir, reply.result_wire)
+    else:
+        fetch_build_failure_sftp_v1(node.sftp, request,
+            node.local_state_dir, reply.result_wire)
+    if not fetched.verified:
+        return _distributed_block_v1("fetch: " + fetched.reason, true)
+    commit_fetched_distributed_reply_v1(owner, node, request, fetched)
+
+fn prepare_distributed_build_attempt_v1(owner: SchedulerOwnerV1,
+        actions: [SchedulerActionV1], action_digest: text,
+        attempt_id: text, retry_number: i64, node: DistributedBuildNodeV1,
+        capacity: SchedulerCapacityV1,
+        now_tick: i64) -> PreparedDistributedBuildAttemptV1:
+    """Journal admission and spool the complete request under the owner lock."""
+    if not _distributed_same_node_v1(node.ssh.node, node.sftp.node):
+        return _distributed_prepare_block_v1(
+            _distributed_block_v1("transport-node-mismatch", false))
+    var selected: SchedulerActionV1? = nil
+    for action in actions:
+        if action.action_digest == action_digest:
+            selected = action
+    if selected == nil:
+        return _distributed_prepare_block_v1(
+            _distributed_block_v1("action-not-found", false))
+    val action = selected.unwrap()
+    if action_spec_digest_v1(action.spec) != action_digest or
+       retry_number < 0 or retry_number > 1000000:
+        return _distributed_prepare_block_v1(
+            _distributed_block_v1("action-or-retry-invalid", false))
+    if scheduler_worker_busy_v1(owner.state.ledger,
+            node.ssh.node.worker_id):
+        return _distributed_prepare_block_v1(
+            _distributed_block_v1("worker-busy", false))
+    val attempt = AttemptSpec(1, action_digest, attempt_id,
+        node.ssh.node.worker_id, retry_number, action.priority,
+        action.memory_bytes)
+    # The owner holds the root lock. Its next fence is stable while it alone
+    # prepares this request; admission must confirm that same fence below.
+    val predicted_fence = scheduler_current_fence_v1(owner.state.ledger,
+        action_digest) + 1
+    val dependencies = validate_dependency_provenance_v1(action.spec,
+        owner.state.ledger, node.retained_cas_root)
+    if not dependencies.valid:
+        return _distributed_prepare_block_v1(_distributed_block_v1(
+            "dependency: " + dependencies.reason, false))
+    val prepared = prepare_build_request_upload_v1(node.sftp,
+        BuildWorkerRequestV1(action.spec, attempt, predicted_fence,
+            action.cpu_tokens, action.fd_tokens), node.source_root,
+            node.retained_cas_root, node.local_state_dir)
+    if not prepared.ready:
+        if prepared.root != "":
+            return PreparedDistributedBuildAttemptV1(false,
+                _distributed_block_v1(prepared.reason +
+                    ";prepared-cleanup-pending:" + prepared.root, true),
+                Some(prepared), nil, "", "", nil)
+        return _distributed_prepare_block_v1(
+            _distributed_block_v1(prepared.reason, false))
+    val intent = persist_parent_build_intent_v1(owner, action_digest,
+        attempt_id, node.ssh.node.worker_id)
+    if not intent.persisted:
+        val cleaned = release_prepared_build_request_v1(prepared)
+        return _distributed_prepare_release_v1(_distributed_block_v1(
+            "request-intent: " + intent.reason, false), prepared, cleaned)
+    val admitted = owner.admit(actions, action_digest, attempt_id,
+        node.ssh.node.worker_id, capacity, now_tick)
+    if not admitted.dispatch:
+        val cleaned = release_prepared_build_request_v1(prepared)
+        return _distributed_prepare_release_v1(_distributed_block_v1(
+            admitted.error,
+            owner.state.error != "" or admitted.state.error != ""),
+            prepared, cleaned)
+    if admitted.fence != predicted_fence:
+        return _distributed_abort_before_upload_v1(owner, attempt_id,
+            prepared, "admitted-fence-mismatch")
+    val request = BuildWorkerRequestV1(action.spec, attempt, admitted.fence,
+        action.cpu_tokens, action.fd_tokens)
+    val dispatch_wire = encode_build_dispatch_v1(action.spec, attempt,
+        admitted.fence, action.cpu_tokens, action.fd_tokens)
+    if dispatch_wire == "":
+        return _distributed_abort_before_upload_v1(owner, attempt_id,
+            prepared, "dispatch-after-admission-invalid")
+    val spooled = persist_parent_build_request_v1(owner, request)
+    if not spooled.persisted:
+        return _distributed_abort_before_upload_v1(owner, attempt_id,
+            prepared, "request-spool: " + spooled.reason)
+    if spooled.request_digest != prepared.plan.request_digest:
+        return _distributed_abort_before_upload_v1(owner, attempt_id,
+            prepared, "prepared-request-mismatch")
+    PreparedDistributedBuildAttemptV1(true,
+        _distributed_block_v1("prepared", false), prepared, request,
+        dispatch_wire, spooled.request_digest, node)
+
+fn run_distributed_build_attempt_v1(owner: SchedulerOwnerV1,
+        actions: [SchedulerActionV1], action_digest: text,
+        attempt_id: text, retry_number: i64, node: DistributedBuildNodeV1,
+        capacity: SchedulerCapacityV1, now_tick: i64) -> DistributedBuildAttemptV1:
+    """Run one admitted attempt while the caller holds its owner lock."""
+    val snapshot = prepare_distributed_build_attempt_v1(owner, actions,
+        action_digest, attempt_id, retry_number, node, capacity, now_tick)
+    if not snapshot.ready or snapshot.prepared == nil or snapshot.request == nil:
+        return snapshot.result
+    val prepared = snapshot.prepared.unwrap()
+    val request = snapshot.request.unwrap()
+    val uploaded = transfer_prepared_build_request_v1(node.sftp, prepared)
+    val released = release_prepared_build_request_v1(prepared)
+    if not uploaded.ready:
+        return _distributed_cleanup_note_v1(
+            _distributed_block_v1("upload: " + uploaded.reason, true),
+            released, prepared.root)
+    if uploaded.request_digest != snapshot.request_digest:
+        return _distributed_cleanup_note_v1(
+            _distributed_block_v1("upload-request-mismatch", true),
+            released, prepared.root)
+    val reply = invoke_build_worker_ssh_v1(node.ssh, snapshot.dispatch_wire,
+        uploaded.request_digest)
+    val finished = _finish_distributed_reply_v1(owner, node, request, reply)
+    _distributed_cleanup_note_v1(finished, released, prepared.root)
+
+fn resume_completed_distributed_attempt_v1(owner: SchedulerOwnerV1,
+        attempt_id: text, node: DistributedBuildNodeV1) -> DistributedBuildAttemptV1:
+    """Recover a finished worker result without launching the action again."""
+    if not _distributed_same_node_v1(node.ssh.node, node.sftp.node):
+        return _distributed_block_v1("transport-node-mismatch", true)
+    val recovered = recover_parent_build_request_v1(owner, attempt_id)
+    if not recovered.recovered or recovered.request == nil:
+        return _distributed_block_v1("request-recovery: " + recovered.reason, true)
+    val request = recovered.request.unwrap()
+    if request.attempt.worker_id != node.ssh.node.worker_id:
+        return _distributed_block_v1("worker-mismatch", true)
+    val dispatch_wire = encode_build_dispatch_v1(request.action, request.attempt,
+        request.fence, request.cpu_tokens, request.fd_tokens)
+    if dispatch_wire == "":
+        return _distributed_block_v1("dispatch-recovery-invalid", true)
+    val reply = status_build_worker_ssh_v1(node.ssh, dispatch_wire,
+        recovered.request_digest)
+    _finish_distributed_reply_v1(owner, node, request, reply)
+
+fn cancel_unstarted_distributed_attempt_v1(owner: SchedulerOwnerV1,
+        attempt_id: text, node: DistributedBuildNodeV1) -> DistributedBuildAttemptV1:
+    """Release a spooled fence only after the worker durably forbids launch."""
+    if not _distributed_same_node_v1(node.ssh.node, node.sftp.node):
+        return _distributed_block_v1("transport-node-mismatch", true)
+    val recovered = recover_parent_build_request_v1(owner, attempt_id)
+    if not recovered.recovered or recovered.request == nil:
+        return _distributed_block_v1("request-recovery: " + recovered.reason, true)
+    val request = recovered.request.unwrap()
+    if request.attempt.worker_id != node.ssh.node.worker_id:
+        return _distributed_block_v1("worker-mismatch", true)
+    val dispatch_wire = encode_build_dispatch_v1(request.action, request.attempt,
+        request.fence, request.cpu_tokens, request.fd_tokens)
+    if dispatch_wire == "":
+        return _distributed_block_v1("dispatch-recovery-invalid", true)
+    val cancelled = cancel_unstarted_build_worker_ssh_v1(node.ssh,
+        dispatch_wire, recovered.request_digest)
+    if not cancelled.acknowledged:
+        return _distributed_block_v1("worker-cancel: " + cancelled.reason, true)
+    val revoked = owner.revoke(attempt_id)
+    if not revoked.acknowledged:
+        return _distributed_block_v1("revoke: " + revoked.error, true)
+    DistributedBuildAttemptV1(true, false, false, false,
+        "cancelled-before-start", _distributed_empty_accepted_v1())
+
+export DistributedBuildNodeV1, DistributedBuildAttemptV1
+export distributed_build_node_consistent_v1
+export PreparedDistributedBuildAttemptV1, prepare_distributed_build_attempt_v1
+export commit_fetched_distributed_reply_v1
+export run_distributed_build_attempt_v1
+export resume_completed_distributed_attempt_v1
+export cancel_unstarted_distributed_attempt_v1

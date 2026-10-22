@@ -1,0 +1,217 @@
+# @req: REQ-MSG-002, REQ-MSG-003 (guest dispatcher; live VM still required)
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1}
+use std.common.contracts.container.guest_v1.{GuestContainerAttemptV1}
+use os.services.container.container_manager.{ContainerWorld}
+use os.services.container.container_runtime.{ContainerRuntime}
+use os.services.container.macos_simpleos_guest_dispatch_v1.{
+    MacSimpleOsGuestDispatcherV1, MACOS_SIMPLEOS_GUEST_MAX_WORKLOAD_BYTES_V1}
+use os.services.workload.workload_manifest.{
+    WorkloadIdentitySpec, ImageSpec, AuthorityRequest, IsolationSpec,
+    ResourceBudget, LifecyclePolicy, ObservabilityPolicy, WorkloadManifest,
+    CompiledExecutionPolicy, compile_workload_manifest}
+use os.kernel.loader.spawn_recipes.{
+    SPAWN_RECIPE_APP_LAUNCHER, spawn_recipe_grants,
+    spawn_recipe_seed_parent_caps}
+use os.kernel.loader.workload_image_hash.{workload_image_blake3_hash}
+use os.kernel.security.execution_context.{kernel_call_context_from_task}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.types.task_types.{TaskPriority, TaskId}
+use os.kernel.arch.arch_context.{Architecture}
+
+val IMAGE_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val POLICY_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+fn _u16(out: [u8], x: i64) -> [u8]:
+    var bytes = out
+    bytes.push((x & 255).to_u8())
+    bytes.push(((x >> 8) & 255).to_u8())
+    bytes
+
+fn _u32(out: [u8], x: i64) -> [u8]:
+    var bytes = out
+    bytes = _u16(bytes, x & 65535)
+    bytes = _u16(bytes, (x >> 16) & 65535)
+    bytes
+
+fn _u64(out: [u8], x: i64) -> [u8]:
+    var bytes = _u32(out, x & 0xFFFFFFFF)
+    bytes = _u32(bytes, (x >> 32) & 0xFFFFFFFF)
+    bytes
+
+fn _minimal_x86_64_elf() -> [u8]:
+    var bytes: [u8] = [0x7F.to_u8(), 0x45.to_u8(), 0x4C.to_u8(),
+        0x46.to_u8(), 2.to_u8(), 1.to_u8(), 1.to_u8()]
+    while bytes.len() < 16:
+        bytes.push(0.to_u8())
+    bytes = _u16(bytes, 2)
+    bytes = _u16(bytes, 62)
+    bytes = _u32(bytes, 1)
+    bytes = _u64(bytes, 0x400000)
+    bytes = _u64(bytes, 64)
+    bytes = _u64(bytes, 0)
+    bytes = _u32(bytes, 0)
+    bytes = _u16(bytes, 64)
+    bytes = _u16(bytes, 56)
+    bytes = _u16(bytes, 1)
+    bytes = _u16(bytes, 0)
+    bytes = _u16(bytes, 0)
+    bytes = _u16(bytes, 0)
+    bytes = _u32(bytes, 1)
+    bytes = _u32(bytes, 5)
+    bytes = _u64(bytes, 0x80)
+    bytes = _u64(bytes, 0x400000)
+    bytes = _u64(bytes, 0x400000)
+    bytes = _u64(bytes, 4)
+    bytes = _u64(bytes, 4)
+    bytes = _u64(bytes, 0x1000)
+    while bytes.len() < 0x80:
+        bytes.push(0.to_u8())
+    bytes.push(0xC3.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes
+
+fn _attempt(bytes: [u8]) -> GuestContainerAttemptV1:
+    GuestContainerAttemptV1(
+        host_os: "macos", guest_os: "simpleos", runtime_class: "virtual-machine",
+        identity: RuntimeIdentityV1(pod_uid: "worker", attempt: 1,
+            provider_generation: 7, operation_id: "op-1",
+            engine: "simpleos-managed-container-v1", native_id: "",
+            node_boot_id: "boot-1"), guest_boot_id: "boot-1",
+        guest_image_sha256: IMAGE_SHA, workload_sha256: sha256_u8_hex(bytes),
+        policy_sha256: POLICY_SHA, nonce: "nonce-1")
+
+fn _policy(bytes: [u8]) -> CompiledExecutionPolicy:
+    val digest = workload_image_blake3_hash(bytes)
+    val manifest = WorkloadManifest(
+        identity: WorkloadIdentitySpec(principal_id: "container:worker",
+            tenant_id: "system", image_hash: digest, signer: "test",
+            parent_principal: "pid1", expires_at_ms: 1u64),
+        image: ImageSpec(executable_path: "/sys/apps/live-worker",
+            content_hash: digest, signer: "test"),
+        authority: AuthorityRequest(grants: spawn_recipe_grants(
+            SPAWN_RECIPE_APP_LAUNCHER)),
+        isolation: IsolationSpec(filesystem_view: "/container/worker",
+            process_view: "private", ipc_view: "private", network_view: "none",
+            syscall_allowlist: [4u64]),
+        resources: ResourceBudget(cpu_weight: 1u64, memory_pages: 1u64,
+            process_limit: 2u64, io_weight: 1u64, network_bytes: 0u64,
+            wall_time_ms: 1u64),
+        lifecycle: LifecyclePolicy(restart_policy: "never", max_restarts: 0u64,
+            watchdog_timeout_ms: 0u64),
+        observability: ObservabilityPolicy(audit_required: false,
+            log_retention_ms: 0u64))
+    val compiled = compile_workload_manifest(manifest)
+    expect(compiled.is_ok()).to_be(true)
+    compiled.unwrap()
+
+fn _dispatcher_with_policy_digest(attempt: GuestContainerAttemptV1,
+        bytes: [u8], local_policy_sha256: text) -> MacSimpleOsGuestDispatcherV1:
+    var world = ContainerWorld.new()
+    val index = world.sys_create("worker", "/container/worker", [101u64],
+        workload_image_blake3_hash(bytes), 100u64, 64u64, 10u64, 4u64, [], false)
+    expect(index).to_be_greater_than(-1)
+    MacSimpleOsGuestDispatcherV1.new(attempt, "boot-1", IMAGE_SHA,
+        local_policy_sha256, _policy(bytes), Architecture.X86_64,
+        ContainerRuntime.new(world), index)
+
+fn _dispatcher(attempt: GuestContainerAttemptV1,
+        bytes: [u8]) -> MacSimpleOsGuestDispatcherV1:
+    _dispatcher_with_policy_digest(attempt, bytes, POLICY_SHA)
+
+fn _scheduler() -> Scheduler:
+    var scheduler = Scheduler.new()
+    scheduler.create_task(0x1000, TaskPriority.High,
+        spawn_recipe_seed_parent_caps(SPAWN_RECIPE_APP_LAUNCHER, 0u64))
+    scheduler.schedule()
+    scheduler
+
+describe "macOS SimpleOS guest dispatcher":
+    it "publishes only the matching scheduler-observed task exit":
+        val bytes = _minimal_x86_64_elf()
+        var dispatch = _dispatcher(_attempt(bytes), bytes)
+        val scheduler = _scheduler()
+        val parent = scheduler.get_task(scheduler.get_current())
+        expect(parent != nil).to_be(true)
+        val context = kernel_call_context_from_task(parent.unwrap())
+        val started = dispatch.start(context, bytes,
+            Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+        expect(started.status).to_equal("ok")
+        expect(started.observation != nil).to_be(true)
+        val running = started.observation.unwrap()
+        val pid = running.native_task_id.to_i64() ?? -1
+        expect(pid).to_be_greater_than(0)
+        expect(started.scheduler.get_task(TaskId(id: pid as u64)) != nil).to_be(true)
+        expect(running.nonce).to_equal("nonce-1")
+        val waiting = dispatch.observe_exit(started.scheduler, IpcManager.new())
+        expect(waiting.status).to_equal("blocked")
+        expect(waiting.observation).to_be_nil()
+        var exited_scheduler = waiting.scheduler
+        exited_scheduler.exit_task_by_id(TaskId(id: pid as u64), 23)
+        val exited = dispatch.observe_exit(exited_scheduler, waiting.ipc)
+        expect(exited.status).to_equal("ok")
+        expect(exited.observation != nil).to_be(true)
+        val observed = exited.observation.unwrap()
+        expect(observed.native_task_id).to_equal(running.native_task_id)
+        expect(observed.nonce).to_equal(running.nonce)
+        expect(observed.kernel_exit_observed).to_be(true)
+        expect(observed.exit_code).to_equal(23)
+        expect(dispatch.observe_exit(exited.scheduler, exited.ipc).status).to_equal("blocked")
+
+    it "rejects mismatched boot and missing nonce before launch":
+        val bytes = _minimal_x86_64_elf()
+        var stale = _attempt(bytes)
+        stale.guest_boot_id = "old-boot"
+        var dispatch = _dispatcher(stale, bytes)
+        val scheduler = _scheduler()
+        val parent = scheduler.get_task(scheduler.get_current())
+        expect(parent != nil).to_be(true)
+        val context = kernel_call_context_from_task(parent.unwrap())
+        val rejected = dispatch.start(context, bytes,
+            Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+        expect(rejected.reason).to_equal("guest-binding-invalid")
+        expect(rejected.observation).to_be_nil()
+        val repeated = dispatch.start(context, bytes,
+            Architecture.X86_64, [], [], TaskPriority.Normal, rejected.scheduler)
+        expect(repeated.reason).to_equal("attempt-already-consumed")
+        var missing_nonce = _attempt(bytes)
+        missing_nonce.nonce = ""
+        var nonce_dispatch = _dispatcher(missing_nonce, bytes)
+        val denied = nonce_dispatch.start(context, bytes,
+            Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+        expect(denied.reason).to_equal("guest-binding-invalid")
+
+    it "rejects workload, image, policy, and architecture drift without a task":
+        val bytes = _minimal_x86_64_elf()
+        val scheduler = _scheduler()
+        val parent = scheduler.get_task(scheduler.get_current())
+        expect(parent != nil).to_be(true)
+        val context = kernel_call_context_from_task(parent.unwrap())
+        var wrong_workload = _attempt(bytes)
+        wrong_workload.workload_sha256 = POLICY_SHA
+        var workload_dispatch = _dispatcher(wrong_workload, bytes)
+        val workload = workload_dispatch.start(context, bytes,
+            Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+        expect(workload.reason).to_equal("workload-digest-mismatch")
+        expect(workload.observation).to_be_nil()
+        var wrong_image = _attempt(bytes)
+        wrong_image.guest_image_sha256 = POLICY_SHA
+        var image_dispatch = _dispatcher(wrong_image, bytes)
+        val image = image_dispatch.start(context, bytes,
+            Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+        expect(image.reason).to_equal("guest-measurement-mismatch")
+        var policy_dispatch = _dispatcher_with_policy_digest(
+            _attempt(bytes), bytes, IMAGE_SHA)
+        val policy = policy_dispatch.start(context, bytes,
+            Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+        expect(policy.reason).to_equal("guest-measurement-mismatch")
+        expect(policy.observation).to_be_nil()
+        var arch_dispatch = _dispatcher(_attempt(bytes), bytes)
+        val arch = arch_dispatch.start(context, bytes,
+            Architecture.Arm64, [], [], TaskPriority.Normal, scheduler)
+        expect(arch.reason).to_equal("guest-architecture-mismatch")
+        expect(MACOS_SIMPLEOS_GUEST_MAX_WORKLOAD_BYTES_V1).to_be_greater_than(bytes.len())

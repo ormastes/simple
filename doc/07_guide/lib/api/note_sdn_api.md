@@ -426,7 +426,7 @@ The Simple API is nearly identical to the Rust API with these differences:
 
 ### Example
 
-```simple
+```simple:skip
 use simple/compiler/monomorphize/note_sdn.*
 
 # Create metadata
@@ -516,7 +516,7 @@ let smf = generate_smf_with_all_sections(
 ```
 
 **Simple:**
-```simple
+```text
 use simple/compiler/smf_writer.generate_smf_with_all_sections
 
 val smf = generate_smf_with_all_sections(

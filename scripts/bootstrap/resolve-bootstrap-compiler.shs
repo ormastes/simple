@@ -1,0 +1,118 @@
+#!/bin/sh
+# Pick the compiler that builds the next bootstrap phase.
+#
+#   sh scripts/bootstrap/resolve-bootstrap-compiler.shs --platform <p> [--config <sdn>]
+#      [--lane-dir build/bootstrap] [--work-dir <dir>]
+#
+# Selection (config/bootstrap.sdn `compiler:`, env SIMPLE_BOOTSTRAP_COMPILER wins):
+#   auto     local stage4 > stage3 > stage2 > stage1 of the lane, then the release binary,
+#            else none (caller falls back to the Rust seed)
+#   local    local phases only;  release  release binary only;  seed  none
+#   <path>   that binary
+# Every candidate must native-build AND run a hello world before it is chosen:
+# `--version` alone is not enough (a FreeBSD stage1 answered it and still could
+# not stage a compile). Prints "<path> <phase>" on stdout, exit 0; exit 1 when
+# no candidate qualified (use the seed); exit 2 on usage errors.
+set -u
+
+platform=
+config=config/bootstrap.sdn
+lane_dir=build/bootstrap
+work_dir=${TMPDIR:-/tmp}/simple-bootstrap-compiler
+while [ $# -gt 0 ]; do
+  case $1 in
+    --platform) platform=${2:-}; shift 2 ;;
+    --config) config=${2:-}; shift 2 ;;
+    --lane-dir) lane_dir=${2:-}; shift 2 ;;
+    --work-dir) work_dir=${2:-}; shift 2 ;;
+    *) printf 'resolve-bootstrap-compiler: unknown argument %s\n' "$1" >&2; exit 2 ;;
+  esac
+done
+[ -n "$platform" ] || { printf 'resolve-bootstrap-compiler: --platform is required\n' >&2; exit 2; }
+
+sdn_value() {
+  [ -f "$config" ] || return 0
+  awk -v key="$1" '
+    /^[[:space:]]*#/ { next }
+    { line=$0; sub(/[[:space:]]*#.*/, "", line)
+      if (line ~ "^[[:space:]]*" key "[[:space:]]*:") {
+        sub(/^[[:space:]]*[^:]+:[[:space:]]*/, "", line); sub(/[[:space:]]*$/, "", line)
+        print line; exit } }' "$config"
+}
+
+mode=${SIMPLE_BOOTSTRAP_COMPILER:-$(sdn_value compiler)}
+mode=${mode:-auto}
+release=$(sdn_value compiler_release)
+release=${release:-latest}
+exe=
+case $platform in windows-*) exe=.exe ;; esac
+
+mkdir -p "$work_dir" || exit 2
+
+# A candidate qualifies when it compiles and runs a hello world.
+qualifies() {
+  cand=$1
+  [ -f "$cand" ] || return 1
+  "$cand" --version >/dev/null 2>&1 || return 1
+  probe=$work_dir/probe
+  rm -rf "$probe" && mkdir -p "$probe" || return 1
+  printf 'fn main():\n    print "bootstrap-compiler-probe"\n' > "$probe/hello.spl"
+  "$cand" native-build "$probe/hello.spl" -o "$probe/hello$exe" >"$probe/build.log" 2>&1 || {
+    printf 'resolve-bootstrap-compiler: %s failed the hello build:\n' "$cand" >&2
+    tail -5 "$probe/build.log" >&2
+    return 1
+  }
+  "$probe/hello$exe" 2>/dev/null | grep -q bootstrap-compiler-probe
+}
+
+try_local() {
+  for phase in 4 3 2 1; do
+    cand=$lane_dir/stage$phase/simple$exe
+    if qualifies "$cand"; then
+      printf '%s %s\n' "$cand" "$phase"
+      return 0
+    fi
+  done
+  return 1
+}
+
+try_release() {
+  command -v gh >/dev/null 2>&1 || { printf 'resolve-bootstrap-compiler: gh not found; no release binary\n' >&2; return 1; }
+  if [ "$release" = latest ]; then
+    tags=$(gh release list --limit 30 --json tagName --jq '.[].tagName' 2>/dev/null | grep -E '^(rc-|v)')
+  else
+    tags=$release
+  fi
+  for tag in $tags; do
+    dl=$work_dir/release-$tag
+    rm -rf "$dl" && mkdir -p "$dl" || return 1
+    gh release download "$tag" --pattern "simple-bootstrap-*-$platform.spk" -D "$dl" >/dev/null 2>&1 || continue
+    spk=$(ls "$dl"/*.spk 2>/dev/null | head -1)
+    [ -n "$spk" ] && tar -xzf "$spk" -C "$dl" || continue
+    cand=$(find "$dl" -path '*/bin/simple-runtime' -o -path '*/bin/simple.exe' | head -1)
+    [ -n "$cand" ] || continue
+    chmod +x "$cand"
+    # The package launcher (bin/simple) sets this before exec; the payload
+    # needs it to find the bundled stdlib.
+    SIMPLE_ASSET_ROOT=$(cd "$(dirname "$cand")/.." && pwd)
+    export SIMPLE_ASSET_ROOT
+    phase=$(cat "$(dirname "$cand")/../PHASE" 2>/dev/null || echo 1)
+    if qualifies "$cand"; then
+      printf 'resolve-bootstrap-compiler: using %s from release %s (phase %s)\n' "$cand" "$tag" "$phase" >&2
+      printf '%s %s\n' "$cand" "$phase"
+      return 0
+    fi
+  done
+  return 1
+}
+
+case $mode in
+  seed) exit 1 ;;
+  auto) try_local || try_release ;;
+  local) try_local ;;
+  release) try_release ;;
+  *)
+    if qualifies "$mode"; then printf '%s %s\n' "$mode" "${SIMPLE_BOOTSTRAP_COMPILER_PHASE:-1}"
+    else printf 'resolve-bootstrap-compiler: configured compiler %s did not qualify\n' "$mode" >&2; exit 1
+    fi ;;
+esac

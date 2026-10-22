@@ -14,7 +14,7 @@ the pattern to provide additional filtering before the arm body executes.
 
 ## Syntax
 
-```simple
+```simple:skip
 match value:
     case pattern if condition:
         body

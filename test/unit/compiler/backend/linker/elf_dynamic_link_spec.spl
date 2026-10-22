@@ -1,0 +1,206 @@
+# Internal ELF linker: dynamic link against glibc — lane A7 slice 2 step 3
+#
+# Links the host's glibc startup objects (crt1.o / Scrt1.o, crti.o, crtn.o)
+# plus test/fixtures/linker/elf/hello_libc_a64.o (puts + exit, recipe in
+# RECIPE.md) against the host libc.so.6 into a dynamic ET_EXEC and a dynamic
+# PIE: PT_PHDR + PT_INTERP, DT_NEEDED libc.so.6, .dynsym/.dynstr/.hash,
+# ld.lld-layout aarch64 PLT + .got.plt with JUMP_SLOT relocations, and
+# R_AARCH64_RELATIVE for the PIE's GOT slot. Both outputs print and exit 42 on
+# the aarch64 host (evidence in the lane report).
+#
+# Host requirement: aarch64 Linux with glibc in /usr/lib/aarch64-linux-gnu
+# (the same files crt_discovery finds for production links).
+#
+# @cover src/compiler/70.backend/linker/elf/elf_static_link.spl
+# @cover src/compiler/70.backend/linker/elf/synthetic_sections.spl
+# @cover src/compiler/70.backend/linker/elf/shared_object.spl
+
+use compiler.backend.linker.elf.elf_static_link.{
+    elf_link, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE
+}
+use compiler.backend.linker.elf.shared_object.{elf_parse_shared}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use std.io_runtime.{file_read_bytes}
+use std.string_core.{char_from_code}
+
+val FIX: text = "test/fixtures/linker/elf"
+val GLIBC: text = "/usr/lib/aarch64-linux-gnu"
+val INTERP: text = "/lib/ld-linux-aarch64.so.1"
+val PT_INTERP: i64 = 3
+val PT_PHDR: i64 = 6
+
+fn load_path(path: text) -> [i64]:
+    val raw = file_read_bytes(path)
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn rd16(b: [i64], o: i64) -> i64:
+    (b[o] & 0xff) | ((b[o + 1] & 0xff) << 8)
+
+fn rd32(b: [i64], o: i64) -> i64:
+    rd16(b, o) | (rd16(b, o + 2) << 16)
+
+fn rd64(b: [i64], o: i64) -> i64:
+    rd32(b, o) | (rd32(b, o + 4) << 32)
+
+fn cstr(b: [i64], o: i64) -> text:
+    var s = ""
+    var i = o
+    while b[i] != 0:
+        s = s + char_from_code(b[i])
+        i = i + 1
+    s
+
+fn shdr_by_name(b: [i64], name: text) -> i64:
+    val shoff = rd64(b, 0x28)
+    val shnum = rd16(b, 0x3c)
+    val stroff = rd64(b, shoff + rd16(b, 0x3e) * 64 + 24)
+    var i: i64 = 0
+    while i < shnum:
+        val h = shoff + i * 64
+        if cstr(b, stroff + rd32(b, h)) == name:
+            return h
+        i = i + 1
+    -1
+
+fn sec_addr(b: [i64], name: text) -> i64:
+    rd64(b, shdr_by_name(b, name) + 16)
+
+fn sec_off(b: [i64], name: text) -> i64:
+    rd64(b, shdr_by_name(b, name) + 24)
+
+fn sec_size(b: [i64], name: text) -> i64:
+    rd64(b, shdr_by_name(b, name) + 32)
+
+fn phdr_find(b: [i64], p_type: i64) -> i64:
+    var i: i64 = 0
+    while i < rd16(b, 56):
+        if rd32(b, rd64(b, 32) + i * 56) == p_type:
+            return i
+        i = i + 1
+    -1
+
+# d_val of the first matching tag in .dynamic, or -1.
+fn dyn_tag(b: [i64], tag: i64) -> i64:
+    var o = sec_off(b, ".dynamic")
+    val end = o + sec_size(b, ".dynamic")
+    while o < end:
+        if rd64(b, o) == tag:
+            return rd64(b, o + 8)
+        o = o + 16
+    -1
+
+# Names of the .dynsym entries (index order, skipping the null symbol).
+fn dynsym_names(b: [i64]) -> [text]:
+    val so = sec_off(b, ".dynsym")
+    val n = sec_size(b, ".dynsym") / 24
+    val str = sec_off(b, ".dynstr")
+    var out: [text] = []
+    var i: i64 = 1
+    while i < n:
+        out = out.push(cstr(b, str + rd32(b, so + i * 24)))
+        i = i + 1
+    out
+
+fn link_libc(crt1: text, mode: i64, target: RelocArch) -> Result<[i64], text>:
+    val objs = [load_path("{GLIBC}/{crt1}"), load_path("{GLIBC}/crti.o"),
+        load_path("{FIX}/hello_libc_a64.o"), load_path("{GLIBC}/crtn.o")]
+    elf_link(ElfLinkRequest(objects: objs, archives: [], shared: [file_read_bytes("{GLIBC}/libc.so.6")],
+        entry: "_start", target: target, mode: mode, interp: INTERP))
+
+fn link_or_empty(crt1: text, mode: i64) -> [i64]:
+    val r = link_libc(crt1, mode, RelocArch.AArch64)
+    if r.is_err():
+        print "link error: {r.unwrap_err()}"
+        return []
+    r.unwrap()
+
+describe "elf_parse_shared - host libc.so.6":
+    it "reads DT_SONAME and default-version function exports from a stripped DSO":
+        val r = elf_parse_shared(file_read_bytes("{GLIBC}/libc.so.6"))
+        expect(r.is_ok()).to_equal(true)
+        val lib = r.unwrap()
+        expect(lib.soname).to_equal("libc.so.6")
+        expect(lib.machine).to_equal(183)
+        expect(lib.exports.has("puts")).to_equal(true)
+        expect(lib.exports["puts"]).to_equal(2)
+        expect(lib.exports.has("__libc_start_main")).to_equal(true)
+
+describe "elf_link - dynamic ET_EXEC against libc.so.6":
+    it "has PT_PHDR, PT_INTERP naming ld-linux and DT_NEEDED libc.so.6":
+        val b = link_or_empty("crt1.o", ELF_LINK_DYNAMIC_EXEC)
+        expect(b.len() > 64).to_equal(true)
+        expect(rd16(b, 16)).to_equal(2)
+        expect(phdr_find(b, PT_PHDR)).to_equal(0)
+        val ip = rd64(b, 32) + phdr_find(b, PT_INTERP) * 56
+        expect(cstr(b, rd64(b, ip + 8))).to_equal(INTERP)
+        expect(cstr(b, sec_off(b, ".dynstr") + dyn_tag(b, 1))).to_equal("libc.so.6")
+
+    it "imports puts/exit/abort/__libc_start_main through .dynsym and one JUMP_SLOT each":
+        val b = link_or_empty("crt1.o", ELF_LINK_DYNAMIC_EXEC)
+        val names = dynsym_names(b)
+        expect(names.len()).to_equal(4)
+        expect(names.contains("puts")).to_equal(true)
+        expect(names.contains("exit")).to_equal(true)
+        expect(names.contains("abort")).to_equal(true)
+        expect(names.contains("__libc_start_main")).to_equal(true)
+        expect(sec_size(b, ".rela.plt")).to_equal(4 * 24)
+        expect(dyn_tag(b, 2)).to_equal(4 * 24)
+        expect(dyn_tag(b, 3)).to_equal(sec_addr(b, ".got.plt"))
+        val ro = sec_off(b, ".rela.plt")
+        var i: i64 = 0
+        while i < 4:
+            expect(rd64(b, ro + i * 24 + 8) & 0xffffffff).to_equal(1026)
+            i = i + 1
+
+    it "each PLT stub loads its own .got.plt slot, which starts out pointing at PLT0":
+        val b = link_or_empty("crt1.o", ELF_LINK_DYNAMIC_EXEC)
+        val plt_v = sec_addr(b, ".plt")
+        val plt_o = sec_off(b, ".plt")
+        val gp_v = sec_addr(b, ".got.plt")
+        val gp_o = sec_off(b, ".got.plt")
+        val ro = sec_off(b, ".rela.plt")
+        var i: i64 = 0
+        while i < 4:
+            val at = 32 + i * 16
+            val adrp = rd32(b, plt_o + at)
+            val pages = ((adrp >> 29) & 3) | (((adrp >> 5) & 0x7ffff) << 2)
+            val pc = plt_v + at
+            val lo = ((rd32(b, plt_o + at + 4) >> 10) & 0xfff) * 8
+            val slot = (pc - (pc & 0xfff)) + pages * 4096 + lo
+            expect(slot).to_equal(gp_v + 24 + i * 8)
+            expect(rd64(b, ro + i * 24)).to_equal(slot)
+            expect(rd64(b, gp_o + 24 + i * 8)).to_equal(plt_v)
+            i = i + 1
+
+describe "elf_link - dynamic PIE against libc.so.6":
+    it "is ET_DYN with DT_FLAGS_1 PIE and one R_AARCH64_RELATIVE for main's GOT slot":
+        val b = link_or_empty("Scrt1.o", ELF_LINK_DYNAMIC_PIE)
+        expect(rd16(b, 16)).to_equal(3)
+        expect(dyn_tag(b, 0x6ffffffb)).to_equal(0x08000000)
+        expect(dyn_tag(b, 0x6ffffff9)).to_equal(1)
+        val rd = sec_off(b, ".rela.dyn")
+        expect(rd64(b, rd + 8)).to_equal(1027)
+        expect(rd64(b, rd)).to_equal(sec_addr(b, ".got"))
+        # the addend is the link-time address main (in .text) was given
+        expect(rd64(b, rd + 16) >= sec_addr(b, ".text")).to_equal(true)
+        expect(rd64(b, sec_off(b, ".got"))).to_equal(rd64(b, rd + 16))
+
+describe "elf_link - dynamic link errors":
+    it "x86_64 dynamic linking is a named UnsupportedFeature":
+        val r = link_libc("crt1.o", ELF_LINK_DYNAMIC_EXEC, RelocArch.X86_64)
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("UnsupportedFeature")).to_equal(true)
+
+    it "without libc.so.6 the imports are undefined symbols":
+        val objs = [load_path("{GLIBC}/crt1.o"), load_path("{GLIBC}/crti.o"),
+            load_path("{FIX}/hello_libc_a64.o"), load_path("{GLIBC}/crtn.o")]
+        val r = elf_link(ElfLinkRequest(objects: objs, archives: [], shared: [], entry: "_start",
+            target: RelocArch.AArch64, mode: ELF_LINK_DYNAMIC_EXEC, interp: INTERP))
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("undefined symbol")).to_equal(true)
+        expect(r.unwrap_err().contains("puts")).to_equal(true)

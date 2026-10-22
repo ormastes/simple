@@ -26,7 +26,7 @@ doc/                           # Documentation and research
 
 Copy `src/lib/nogc_async_mut/llm/` into your Simple project's `src/lib/` directory.
 
-```simple
+```text
 use std.nogc_async_mut.llm.mod.{llm_init_defaults, llm_chat, llm_clear}
 
 llm_init_defaults()

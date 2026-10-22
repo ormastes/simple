@@ -1,0 +1,149 @@
+# Durable evidence audit for a provisioned two-node complete graph. This
+# module never constructs approvals or infers remote success from CLI output.
+use app.io.mod.{file_read_regular_no_follow_bounded}
+use app.build.scheduler.parent_graph_request.{ParentGraphRequestV1}
+use app.build.scheduler.owner.{SchedulerOwnerV1,
+    scheduler_owner_open_v1, scheduler_owner_close_v1}
+use app.build.scheduler.ledger.{SchedulerLedgerV1, SchedulerAttemptV1,
+    scheduler_ledger_valid_v1}
+use app.build.scheduler.planner.{scheduler_action_digest_valid_v1}
+use app.build.scheduler.dependency_admission.{validate_dependency_provenance_v1,
+    validate_retained_dependency_manifest_v1}
+use app.build.scheduler.parent_cleanup_pending.{parent_cleanup_acked_v1}
+use app.build.scheduler.retained_binary_cas.{retained_binary_cas_verify_v1}
+use app.build.scheduler.worker_output.{BUILD_OUTPUT_MANIFEST_MAX_BYTES_V1}
+use compiler.common.build_contract.{AcceptedResult, BuildDependencyRef}
+use compiler.driver.cache.cas_store.{cas_blob_path}
+
+struct TwoNodeQualificationV1:
+    status: text
+    reason: text
+    producer_attempt: text
+    consumer_attempt: text
+    durable_attempt_count: i64
+    durable_accepted_count: i64
+
+fn _two_node_blocked_v1(reason: text) -> TwoNodeQualificationV1:
+    TwoNodeQualificationV1("BLOCKED", reason, "", "", 0, 0)
+
+fn _two_node_accepted_v1(ledger: SchedulerLedgerV1,
+        action_digest: text) -> AcceptedResult?:
+    for row in ledger.accepted:
+        if row.action_digest == action_digest: return row
+    nil
+
+fn _two_node_attempt_v1(ledger: SchedulerLedgerV1,
+        accepted: AcceptedResult) -> SchedulerAttemptV1?:
+    for row in ledger.attempts:
+        if row.action_digest == accepted.action_digest and
+           row.attempt_id == accepted.accepted_attempt_id and
+           not row.active:
+            return row
+    nil
+
+fn _audit_two_node_owner_v1(owner: SchedulerOwnerV1,
+        graph: ParentGraphRequestV1, cas_root: text,
+        producer_digest: text, consumer_digest: text,
+        producer_worker: text, consumer_worker: text,
+        producer_output: text, producer_output_digest: text,
+        consumer_output: text, consumer_output_digest: text
+        ) -> TwoNodeQualificationV1:
+    val ledger = owner.state.ledger
+    if not graph.valid or graph.actions.len() != 2 or
+       not scheduler_ledger_valid_v1(ledger) or
+       not scheduler_action_digest_valid_v1(producer_digest) or
+       not scheduler_action_digest_valid_v1(consumer_digest) or
+       producer_digest == consumer_digest or
+       not scheduler_action_digest_valid_v1(producer_output_digest) or
+       not scheduler_action_digest_valid_v1(consumer_output_digest) or
+       producer_worker == "" or consumer_worker == "" or
+       producer_worker == consumer_worker:
+        return _two_node_blocked_v1("graph-or-expected-identity-invalid")
+    var producer_index: i64 = -1
+    var consumer_index: i64 = -1
+    var i: i64 = 0
+    while i < graph.actions.len():
+        if graph.actions[i].action_digest == producer_digest:
+            producer_index = i
+        if graph.actions[i].action_digest == consumer_digest:
+            consumer_index = i
+        i = i + 1
+    if producer_index < 0 or consumer_index < 0:
+        return _two_node_blocked_v1("expected-actions-not-in-graph")
+    val producer = graph.actions[producer_index]
+    val consumer = graph.actions[consumer_index]
+    if not producer.spec.output_paths.contains(producer_output) or
+       not consumer.spec.output_paths.contains(consumer_output):
+        return _two_node_blocked_v1("expected-outputs-not-declared")
+    var dependency_found = false
+    for dependency in consumer.spec.inputs.dependency_outputs:
+        if dependency.action_digest == producer_digest and
+           dependency.output_path == producer_output and
+           dependency.content_digest == producer_output_digest:
+            dependency_found = true
+    if not dependency_found:
+        return _two_node_blocked_v1("consumer-producer-byte-binding-missing")
+    val producer_accepted = _two_node_accepted_v1(ledger, producer_digest)
+    val consumer_accepted = _two_node_accepted_v1(ledger, consumer_digest)
+    if producer_accepted == nil or consumer_accepted == nil:
+        return _two_node_blocked_v1("two-node-acceptance-incomplete")
+    val producer_attempt = _two_node_attempt_v1(ledger,
+        producer_accepted.unwrap())
+    val consumer_attempt = _two_node_attempt_v1(ledger,
+        consumer_accepted.unwrap())
+    if producer_attempt == nil or consumer_attempt == nil:
+        return _two_node_blocked_v1("accepted-attempt-unavailable")
+    if producer_attempt.unwrap().worker_id != producer_worker or
+       consumer_attempt.unwrap().worker_id != consumer_worker:
+        return _two_node_blocked_v1("two-distinct-workers-not-observed")
+    val dependency = validate_dependency_provenance_v1(consumer.spec,
+        ledger, cas_root)
+    if not dependency.valid:
+        return _two_node_blocked_v1("retained-producer-invalid: " +
+            dependency.reason)
+    val manifest_path = cas_blob_path(cas_root,
+        consumer_accepted.unwrap().output_manifest_digest)
+    if manifest_path == "":
+        return _two_node_blocked_v1("consumer-manifest-path-invalid")
+    val read = file_read_regular_no_follow_bounded(manifest_path,
+        BUILD_OUTPUT_MANIFEST_MAX_BYTES_V1)
+    if read.is_err():
+        return _two_node_blocked_v1("consumer-manifest-unavailable")
+    val claimed_output = BuildDependencyRef(consumer_digest,
+        consumer_output, consumer_output_digest)
+    val manifest = validate_retained_dependency_manifest_v1(read.unwrap(),
+        consumer_accepted.unwrap(), consumer_attempt.unwrap(),
+        claimed_output)
+    if not manifest.valid or not retained_binary_cas_verify_v1(cas_root,
+            consumer_output, consumer_output_digest):
+        return _two_node_blocked_v1("consumer-output-not-retained")
+    if not parent_cleanup_acked_v1(owner,
+            producer_accepted.unwrap().accepted_attempt_id) or
+       not parent_cleanup_acked_v1(owner,
+            consumer_accepted.unwrap().accepted_attempt_id):
+        return _two_node_blocked_v1("cleanup-ack-incomplete")
+    TwoNodeQualificationV1("AUDIT_READY", "durable-two-node-graph",
+        producer_accepted.unwrap().accepted_attempt_id,
+        consumer_accepted.unwrap().accepted_attempt_id,
+        ledger.attempts.len(), ledger.accepted.len())
+
+fn audit_two_node_graph_v1(owner_root: text,
+        graph: ParentGraphRequestV1, cas_root: text,
+        producer_digest: text, consumer_digest: text,
+        producer_worker: text, consumer_worker: text,
+        producer_output: text, producer_output_digest: text,
+        consumer_output: text, consumer_output_digest: text
+        ) -> TwoNodeQualificationV1:
+    """Replay protected owner state and verify retained bytes plus cleanup."""
+    val owner = scheduler_owner_open_v1(owner_root)
+    if owner.error != "" or owner.state.error != "":
+        return _two_node_blocked_v1("owner-unavailable")
+    val result = _audit_two_node_owner_v1(owner, graph, cas_root,
+        producer_digest, consumer_digest, producer_worker,
+        consumer_worker, producer_output, producer_output_digest,
+        consumer_output, consumer_output_digest)
+    if not scheduler_owner_close_v1(owner):
+        return _two_node_blocked_v1("owner-release-failed")
+    result
+
+export TwoNodeQualificationV1, audit_two_node_graph_v1

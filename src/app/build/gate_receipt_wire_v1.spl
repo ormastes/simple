@@ -1,0 +1,171 @@
+"""Bounded, provenance-only NBAV wire for an untrusted gate receipt."""
+
+use app.build.gate_receipt.{GATE_RECEIPT_SCHEMA_V1, GateObservation, GateReceipt}
+use std.nogc_sync_mut.composition.native_build_argv_v1.{
+    native_build_argv_encode_v1, native_build_argv_decode_bounded_v1
+}
+
+val GATE_RECEIPT_WIRE_ID_V1 = "simple-gate-receipt-wire-v1"
+val GATE_RECEIPT_WIRE_MAX_BYTES_V1 = 65536
+val GATE_RECEIPT_WIRE_MAX_ROWS_V1 = 128
+val GATE_RECEIPT_WIRE_MAX_ITEMS_V1 = 651
+
+fn _gate_wire_value_valid_v1(value: text, max_bytes: i64) -> bool:
+    value.bytes().len() <= max_bytes and not value.contains("\0")
+
+fn _gate_wire_add_v1(items: [text], key: text, value: text,
+        max_bytes: i64) -> [text]:
+    var out = items
+    if not _gate_wire_value_valid_v1(value, max_bytes):
+        return []
+    out.push(key + "=" + value)
+    out
+
+fn _gate_wire_field_v1(item: text, key: text,
+        max_bytes: i64) -> Option<text>:
+    val prefix = key + "="
+    if not item.starts_with(prefix):
+        return nil
+    val value = item[prefix.len():]
+    if not _gate_wire_value_valid_v1(value, max_bytes):
+        return nil
+    Some(value)
+
+fn _gate_wire_count_v1(value: text) -> Option<i64>:
+    val count = value.to_i64() ?? -1
+    if count < 0 or count > GATE_RECEIPT_WIRE_MAX_ROWS_V1 or
+            count.to_text() != value:
+        return nil
+    Some(count)
+
+fn encode_gate_receipt_wire_v1(receipt: GateReceipt) -> [u8]:
+    """Encode receipt data without granting the submitted observations authority."""
+    if receipt.schema != GATE_RECEIPT_SCHEMA_V1 or
+            receipt.expected_mandatory_ids.len() > GATE_RECEIPT_WIRE_MAX_ROWS_V1 or
+            receipt.observed.len() > GATE_RECEIPT_WIRE_MAX_ROWS_V1:
+        return []
+    val keys = ["wire", "schema", "base_revision", "head_revision",
+        "candidate_tree", "protected_policy_digest",
+        "checker_implementation_digest", "submodule_closure_digest", "issuer"]
+    val values = [GATE_RECEIPT_WIRE_ID_V1, receipt.schema,
+        receipt.base_revision, receipt.head_revision, receipt.candidate_tree,
+        receipt.protected_policy_digest, receipt.checker_implementation_digest,
+        receipt.submodule_closure_digest, receipt.issuer]
+    var items: [text] = []
+    var index = 0
+    while index < keys.len():
+        val limit = if index == 8: 128 else: 512
+        items = _gate_wire_add_v1(items, keys[index], values[index], limit)
+        if items.len() != index + 1:
+            return []
+        index = index + 1
+    items.push("mandatory_count=" + receipt.expected_mandatory_ids.len().to_text())
+    index = 0
+    while index < receipt.expected_mandatory_ids.len():
+        val before = items.len()
+        items = _gate_wire_add_v1(items, "mandatory." + index.to_text(),
+            receipt.expected_mandatory_ids[index], 128)
+        if items.len() != before + 1:
+            return []
+        index = index + 1
+    items.push("observed_count=" + receipt.observed.len().to_text())
+    index = 0
+    while index < receipt.observed.len():
+        val row = receipt.observed[index]
+        val prefix = "observed." + index.to_text() + "."
+        val before = items.len()
+        items = _gate_wire_add_v1(items, prefix + "id", row.id, 128)
+        if items.len() != before + 1: return []
+        items = _gate_wire_add_v1(items, prefix + "status", row.status, 512)
+        if items.len() != before + 2: return []
+        items = _gate_wire_add_v1(items, prefix + "evidence_digest",
+            row.evidence_digest, 512)
+        if items.len() != before + 3: return []
+        items = _gate_wire_add_v1(items, prefix + "reason", row.reason, 1024)
+        if items.len() != before + 4: return []
+        index = index + 1
+    val encoded = native_build_argv_encode_v1(items)
+    if encoded.len() > GATE_RECEIPT_WIRE_MAX_BYTES_V1:
+        return []
+    encoded
+
+fn parse_gate_receipt_wire_v1(bytes: [u8]) -> Option<GateReceipt>:
+    """Reject malformed, oversized, noncanonical or reordered receipt data."""
+    if bytes.len() > GATE_RECEIPT_WIRE_MAX_BYTES_V1:
+        return nil
+    val decoded = native_build_argv_decode_bounded_v1(bytes,
+        GATE_RECEIPT_WIRE_MAX_ITEMS_V1, GATE_RECEIPT_WIRE_MAX_BYTES_V1)
+    if not decoded.ok or decoded.arguments.len() < 11:
+        return nil
+    val items = decoded.arguments
+    val keys = ["wire", "schema", "base_revision", "head_revision",
+        "candidate_tree", "protected_policy_digest",
+        "checker_implementation_digest", "submodule_closure_digest", "issuer"]
+    var values: [text] = []
+    var index = 0
+    while index < keys.len():
+        val limit = if index == 8: 128 else: 512
+        match _gate_wire_field_v1(items[index], keys[index], limit):
+            case Some(value): values.push(value)
+            case nil: return nil
+        index = index + 1
+    if values[0] != GATE_RECEIPT_WIRE_ID_V1 or
+            values[1] != GATE_RECEIPT_SCHEMA_V1:
+        return nil
+    val mandatory_count_text = match _gate_wire_field_v1(items[9],
+            "mandatory_count", 3):
+        case Some(value): value
+        case nil: return nil
+    val mandatory_count = match _gate_wire_count_v1(mandatory_count_text):
+        case Some(value): value
+        case nil: return nil
+    val observed_count_position = 10 + mandatory_count
+    if items.len() <= observed_count_position:
+        return nil
+    val observed_count_text = match _gate_wire_field_v1(
+            items[observed_count_position], "observed_count", 3):
+        case Some(value): value
+        case nil: return nil
+    val observed_count = match _gate_wire_count_v1(observed_count_text):
+        case Some(value): value
+        case nil: return nil
+    if items.len() != observed_count_position + 1 + observed_count * 4:
+        return nil
+    var mandatory_ids: [text] = []
+    index = 0
+    while index < mandatory_count:
+        match _gate_wire_field_v1(items[10 + index],
+                "mandatory." + index.to_text(), 128):
+            case Some(value): mandatory_ids.push(value)
+            case nil: return nil
+        index = index + 1
+    var rows: [GateObservation] = []
+    index = 0
+    while index < observed_count:
+        val position = observed_count_position + 1 + index * 4
+        val prefix = "observed." + index.to_text() + "."
+        val id = match _gate_wire_field_v1(items[position], prefix + "id", 128):
+            case Some(value): value
+            case nil: return nil
+        val status = match _gate_wire_field_v1(items[position + 1],
+                prefix + "status", 512):
+            case Some(value): value
+            case nil: return nil
+        val evidence = match _gate_wire_field_v1(items[position + 2],
+                prefix + "evidence_digest", 512):
+            case Some(value): value
+            case nil: return nil
+        val reason = match _gate_wire_field_v1(items[position + 3],
+                prefix + "reason", 1024):
+            case Some(value): value
+            case nil: return nil
+        rows.push(GateObservation(id, status, evidence, reason))
+        index = index + 1
+    val receipt = GateReceipt(values[1], values[2], values[3], values[4],
+        values[5], values[6], values[7], values[8], mandatory_ids, rows)
+    if encode_gate_receipt_wire_v1(receipt) != bytes:
+        return nil
+    Some(receipt)
+
+export GATE_RECEIPT_WIRE_ID_V1, GATE_RECEIPT_WIRE_MAX_BYTES_V1
+export encode_gate_receipt_wire_v1, parse_gate_receipt_wire_v1

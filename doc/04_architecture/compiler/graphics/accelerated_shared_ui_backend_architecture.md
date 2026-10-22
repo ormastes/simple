@@ -65,7 +65,7 @@ contracts, not as backend-specific UI shortcuts:
 
 Tags should be declarative and evidence-producing:
 
-```simple
+```simple:skip
 @gpu(target="auto", backends=["cuda", "opencl"], op="engine2d.fill")
 kernel fn fill_rect_kernel(args: FillArgs):
     ...

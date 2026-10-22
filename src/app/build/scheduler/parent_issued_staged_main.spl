@@ -1,0 +1,55 @@
+# Restricted installed entrypoint. Raw graph/template/config arguments are not
+# accepted here; only a record in the compiled administrator root can launch.
+use app.io.mod.{get_args}
+use std.sffi.platform.{platform_name_raw}
+use app.build.scheduler.parent_issued_plan_store.{
+    load_issued_parent_plan_v1}
+use app.build.scheduler.parent_issued_root.{PARENT_ISSUED_ROOT_V1}
+use app.build.scheduler.parent_staged_link_cli.{
+    run_parent_staged_link_cli_v1}
+use app.build.scheduler.planner.{scheduler_action_digest_valid_v1}
+
+struct ParentIssuedStagedArgsV1:
+    valid: bool
+    record_digest: text
+
+fn parse_parent_issued_staged_args_v1(args: [text]) -> ParentIssuedStagedArgsV1:
+    var remaining = args
+    if remaining.len() > 0 and
+       (remaining[0].ends_with("parent_issued_staged_main.spl") or
+        remaining[0].ends_with("simple_dist_build_issued_parent")):
+        remaining = remaining[1:]
+    if remaining.len() > 0 and remaining[0] == "--":
+        remaining = remaining[1:]
+    if remaining.len() != 2 or remaining[0] != "--issued-plan" or
+       not scheduler_action_digest_valid_v1(remaining[1]):
+        return ParentIssuedStagedArgsV1(false, "")
+    ParentIssuedStagedArgsV1(true, remaining[1])
+
+fn main() -> i64:
+    # The in-process primitive is required here. Environment or shell-based OS
+    # detection can be forged or can default to Linux after a probe failure.
+    val platform = platform_name_raw()
+    if platform != "linux" and platform != "macos":
+        print("issued-parent: BLOCKED reason=host-unsupported")
+        return 2
+    val command = parse_parent_issued_staged_args_v1(get_args())
+    if not command.valid:
+        print("issued-parent: BLOCKED reason=expected-issued-plan-digest-only")
+        return 2
+    val loaded = load_issued_parent_plan_v1(PARENT_ISSUED_ROOT_V1,
+        command.record_digest)
+    if not loaded.valid or loaded.record == nil:
+        print("issued-parent: BLOCKED reason=record-unavailable-or-invalid")
+        return 1
+    val record = loaded.record.unwrap()
+    var staged_args: [text] = ["--staged-plan-digest", record.plan_digest,
+        "--template", record.template_path,
+        "--template-digest", record.template_digest]
+    for path in record.config_paths:
+        staged_args.push("--config")
+        staged_args.push(path)
+    run_parent_staged_link_cli_v1(staged_args)
+
+export ParentIssuedStagedArgsV1
+export parse_parent_issued_staged_args_v1

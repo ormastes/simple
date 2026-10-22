@@ -37,6 +37,7 @@
 #include <time.h>
 #include <sys/time.h>
 #include <sys/wait.h>
+#include <spawn.h>
 #include <signal.h>
 #include <dirent.h>
 #include <errno.h>
@@ -49,6 +50,7 @@
 #include <sys/stat.h>
 #if defined(__APPLE__)
 #include <libproc.h>
+#include <crt_externs.h>
 #endif
 
 /* ----------------------------------------------------------------
@@ -570,7 +572,23 @@ SPL_RUNTIME_NATIVE_TWIN int64_t rt_time_now_unix_micros(void) {
  * ---------------------------------------------------------------- */
 
 int64_t rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_count) {
-    if (!cmd) return -1;
+    if (!cmd || !*cmd || arg_count < 0 ||
+            (arg_count > 0 && !args)) return -1;
+
+#if defined(__APPLE__)
+    /* Prepare argv in the parent. A multithreaded macOS runtime must not do
+     * malloc/execvp work in a forked child before exec. */
+    if (arg_count > 32768) return -1;
+    for (int64_t i = 0; i < arg_count; i++) if (!args[i]) return -1;
+    char** argv = (char**)calloc((size_t)arg_count + 2, sizeof(char*));
+    if (!argv) return -1;
+    argv[0] = (char*)cmd;
+    for (int64_t i = 0; i < arg_count; i++) argv[i + 1] = (char*)args[i];
+    pid_t pid = -1;
+    int error = posix_spawnp(&pid, cmd, NULL, NULL, argv, *_NSGetEnviron());
+    free(argv);
+    return error == 0 ? (int64_t)pid : -1;
+#else
 
     pid_t pid = fork();
     if (pid < 0) {
@@ -595,6 +613,7 @@ int64_t rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_c
 
     /* Parent process */
     return (int64_t)pid;
+#endif
 }
 
 static void rt_guarded_stop_group(pid_t worker, bool worker_live) {

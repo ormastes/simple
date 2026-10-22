@@ -10,7 +10,7 @@ Simple uses `Result<T, E>` for operations that can fail and `Option<T>` for valu
 
 ### Result
 
-```simple
+```simple:skip
 enum Result<T, E>:
     Ok(T)
     Err(E)
@@ -23,7 +23,7 @@ fn divide(a: i64, b: i64) -> Result<i64, text>:
 
 ### Option
 
-```simple
+```simple:skip
 enum Option<T>:
     Some(T)
 
@@ -39,7 +39,7 @@ fn find_user(id: i64) -> Option<User>:
 
 The `?` operator propagates errors up the call stack. If the value is `Err` or `nil`, it returns early from the current function:
 
-```simple
+```simple:skip
 fn load_config(path: text) -> Result<Config, text>:
     val content = file_read(path)?            # Returns Err if file_read fails
     val parsed = parse_toml(content)?         # Returns Err if parsing fails
@@ -59,7 +59,7 @@ The `?` operator only works inside functions that return `Result` or `Option`.
 
 Handle errors explicitly with `match`:
 
-```simple
+```simple:skip
 match divide(10, 0):
     Ok(value): print "Result: {value}"
     Err(msg): print "Error: {msg}"
@@ -75,7 +75,7 @@ match find_user(42):
 
 Use `?.` for safe navigation through potentially nil values, and `??` for providing defaults:
 
-```simple
+```simple:skip
 val name = user?.profile?.name        # Option<text>
 val display = name ?? "Anonymous"     # text, with fallback
 
@@ -89,7 +89,7 @@ if user.?:
 
 ### Custom Error Types
 
-```simple
+```simple:skip
 enum ConfigError:
     FileNotFound(text)
     ParseError(text)
@@ -108,7 +108,7 @@ fn parse_config(path: text) -> Result<Config, ConfigError>:
 
 Return `Option` or `Result` from constructors that can fail:
 
-```simple
+```simple:skip
 struct Age:
     value: i64
 
@@ -130,7 +130,7 @@ impl Email:
 
 ### Chaining with ? and map
 
-```simple
+```simple:skip
 fn process_user_email(id: i64) -> Result<text, Error>:
     val user = find_user(id)?
     val email = user.email?

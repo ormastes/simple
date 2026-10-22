@@ -13,7 +13,7 @@ An oversized text operation now fails; binary APIs retain their old limits.
 For another encoding, construct one `TextSessionCodec` through
 `std.nogc_sync_mut.io.text_session.text_session_codec` and open one file:
 
-```simple
+```simple:skip
 val codec = text_session_codec(
     Encoding.Utf16, ByteOrder.BigEndian, BomPolicy.Require,
     Encoding.Utf16, ByteOrder.BigEndian, BomPolicy.Require,

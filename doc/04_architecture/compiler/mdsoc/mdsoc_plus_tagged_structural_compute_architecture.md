@@ -256,7 +256,7 @@ Every parser, compiler, linker, DOM, CSS, layout, and paint entity needs two ide
 
 ### 4.1 Hot reference
 
-```simple
+```simple:skip
 struct EntityRef:
     object_slot: u32
     local_index: u32
@@ -273,7 +273,7 @@ Properties:
 
 ### 4.2 Durable entity key
 
-```simple
+```simple:skip
 struct EntityKey:
     artifact: ArtifactId
     schema: EntitySchemaId
@@ -286,7 +286,7 @@ struct EntityKey:
 given a definition; both are ratified here so producers cannot disagree on
 width or field order:
 
-```simple
+```simple:skip
 struct Hash128:
     hi: u64
     lo: u64
@@ -308,7 +308,7 @@ to that width so an out-of-range value cannot silently widen a record.
 
 A durable source-level declaration may also include a semantic key:
 
-```simple
+```simple:skip
 struct SemanticEntityKey:
     language: LanguageId
     qualified_name: StringId
@@ -320,7 +320,7 @@ This permits cross-revision matching without assuming that old node indexes rema
 
 ### 4.3 Source anchor
 
-```simple
+```simple:skip
 struct SourceAnchor:
     file: ArtifactId
     byte_start: u32
@@ -333,7 +333,7 @@ For Simple, the two contexts are normally the same. For Clang, both macro spelli
 
 ### 4.4 Snapshot and revision
 
-```simple
+```simple:skip
 struct SnapshotId:
     root_artifact: ArtifactId
     epoch: u64
@@ -365,7 +365,7 @@ A mutation always targets one immutable `SnapshotId` and produces another. A sta
 
 ### 5.2 Tag schema
 
-```simple
+```simple:skip
 struct TagKey:
     namespace: StringId
     name: StringId
@@ -380,7 +380,7 @@ struct TagSchema:
     keys: [TagKey]
 ```
 
-```simple
+```simple:skip
 enum TagValueType:
     Marker
     Bool
@@ -453,7 +453,7 @@ There is no per-node dictionary and no general heap allocation during matching.
 
 ### 5.4 API
 
-```simple
+```simple:skip
 interface TagReadPort:
     fn has(entity: EntityRef, key: TagKeyId) -> bool
     fn get(entity: EntityRef, key: TagKeyId) -> TagValue?
@@ -472,7 +472,7 @@ interface TagWritePort:
 ratified as a discriminated payload — `value_type` selects which field carries
 the value, and the other fields are unused for that variant:
 
-```simple
+```simple:skip
 struct TagValue:
     value_type: TagValueType
     num: u64
@@ -528,7 +528,7 @@ security.*     trust domain, taint, capability, validation state
 
 The parser and compiler should not emit every optional tag unconditionally. `TagDemand` is calculated from enabled consumers:
 
-```simple
+```simple:skip
 struct TagDemand:
     required_keys: TagKeySet
     required_indexes: TagIndexSet
@@ -558,7 +558,7 @@ A single `source_node` pointer or line number is insufficient.
 
 ### 6.2 Mapping edge
 
-```simple
+```simple:skip
 struct MappingEdge:
     from: EntityRef
     to: EntityRef
@@ -568,7 +568,7 @@ struct MappingEdge:
     weight_milli: u16
 ```
 
-```simple
+```simple:skip
 enum MappingKind:
     ParsedFrom
     ExpandedFrom
@@ -662,7 +662,7 @@ node's* provenance — and provenance that is wrong-but-plausible is exactly wha
 
 ### 6.4 Mapping API
 
-```simple
+```simple:skip
 interface MappingReadPort:
     fn forward(entity: EntityRef, kind_mask: MappingKindSet) -> EntitySetView
     fn reverse(entity: EntityRef, kind_mask: MappingKindSet) -> EntitySetView
@@ -723,7 +723,7 @@ would fix a view representation the other three methods must then match.
 
 Every transformation declares one policy:
 
-```simple
+```simple:skip
 enum OriginPolicy:
     PreserveOneToOne
     Split
@@ -754,7 +754,7 @@ They should **not** share one user syntax. Each domain compiles its syntax into 
 
 ### 7.2 Dialects
 
-```simple
+```simple:skip
 enum QueryDialect:
     Syntax
     Semantic
@@ -769,7 +769,7 @@ enum QueryDialect:
 
 ### 7.3 Core operations
 
-```simple
+```simple:skip
 enum QueryOpKind:
     SeedAll
     SeedKind
@@ -807,7 +807,7 @@ layout:    formatting-context, containing-block, fragment-owner, dependency
 
 ### 7.4 Program representation
 
-```simple
+```simple:skip
 struct QueryProgram:
     dialect: QueryDialect
     schema_version: u32
@@ -822,7 +822,7 @@ The GPU representation is an SoA bytecode, not a graph of heap objects.
 
 ### 7.5 Execution API
 
-```simple
+```simple:skip
 struct QueryRequest:
     snapshot: SnapshotId
     program: QueryProgramRef
@@ -921,7 +921,7 @@ No plugin receives unrestricted mutable access to the authoritative snapshot.
 
 ### 8.2 Mutation operation
 
-```simple
+```simple:skip
 struct MutationOp:
     kind: MutationKind
     target: EntityKey
@@ -934,7 +934,7 @@ struct MutationOp:
     effect: EffectSummary
 ```
 
-```simple
+```simple:skip
 enum MutationKind:
     AddTag
     RemoveTag
@@ -966,7 +966,7 @@ enum MutationKind:
 
 ### 8.3 Effect summary
 
-```simple
+```simple:skip
 struct EffectSummary:
     reads: EntityKindSet
     writes: EntityKindSet
@@ -996,7 +996,7 @@ Mutations are ordered by:
 
 Conflict policies:
 
-```simple
+```simple:skip
 enum ConflictPolicy:
     Reject
     HighestPriorityWins
@@ -1009,7 +1009,7 @@ AOP advice ordering uses its established priority semantics but emits a normaliz
 
 ### 8.5 Receipt
 
-```simple
+```simple:skip
 struct MutationReceipt:
     input_snapshot: SnapshotId
     output_snapshot: SnapshotId
@@ -1056,7 +1056,7 @@ a v2 field change, not a reinterpretation of the v1 bytes.
 
 ### 8.6 Mutation engine API
 
-```simple
+```simple:skip
 interface MutationPlanningPort:
     fn plan(rule: MutationRuleRef, matches: QueryResult) -> MutationPlanRef
     fn merge(plans: [MutationPlanRef], policy: ConflictPolicy) -> MutationPlanRef
@@ -1093,7 +1093,7 @@ The existing requirement that `proceed()` be called exactly once becomes a mutat
 
 Optimization points can be authored or generated:
 
-```simple
+```simple:skip
 @opt_point("serialization.hot_loop")
 fn encode(...):
     ...
@@ -1153,7 +1153,7 @@ This same loop supports:
 
 ### 9.1 Dirty mask
 
-```simple
+```simple:skip
 flags DirtyMask:
     Source
     Token
@@ -1229,7 +1229,7 @@ therefore safe to do now and must land **before** anything serialises a
 
 ### 9.2 Change event
 
-```simple
+```simple:skip
 struct ChangeEvent:
     subject: EntityKey
     kind: ChangeKind
@@ -1241,7 +1241,7 @@ struct ChangeEvent:
 
 ### 9.3 Dependency edges
 
-```simple
+```simple:skip
 struct DependencyEdge:
     producer: EntityRef
     consumer: EntityRef
@@ -1260,7 +1260,7 @@ Examples:
 
 ### 9.4 API
 
-```simple
+```simple:skip
 interface InvalidationPort:
     fn record_dependencies(edges: DependencyEdgeBatch)
     fn derive(change: ChangeBatch, snapshot: SnapshotId) -> InvalidationSetRef
@@ -1313,7 +1313,7 @@ media/environment reads
 
 The invalidation engine uses these to produce candidate nodes. Computed-style comparison then classifies the actual consequence:
 
-```simple
+```simple:skip
 enum StyleDifference:
     NoChange
     InheritedOnly
@@ -1354,7 +1354,7 @@ ParseRuntime
 
 ### 10.2 Dialect interface
 
-```simple
+```simple:skip
 interface ParseDialect:
     fn dialect_id() -> ParseDialectId
     fn lex_program() -> LexProgramRef
@@ -1368,7 +1368,7 @@ interface ParseDialect:
 
 ### 10.3 Request and result
 
-```simple
+```simple:skip
 struct ParseRequest:
     source: ArtifactRef
     prior_snapshot: SnapshotId?
@@ -1394,7 +1394,7 @@ struct ParseResult:
 
 ### 10.4 Semantic-action sink
 
-```simple
+```simple:skip
 interface ParseActionSink:
     fn reserve_nodes(count: u32) -> NodeRange
     fn emit_node(kind: NodeKindId, span: SourceSpan,
@@ -1503,7 +1503,7 @@ Each MDSOC transform maps both the primary entity view and demanded sidecars.
 
 ### 11.1 Extended feature ports
 
-```simple
+```simple:skip
 struct ParsingOutputPort:
     ast: AstView
     tags: TagShardRef
@@ -1563,7 +1563,7 @@ backend_to_linker       symbol/section/output mappings
 2. Replace line-pattern source matching with QueryIR.
 3. Extend pass contracts:
 
-```simple
+```simple:skip
 struct OptimizationPassContract:
     input_schema: EntitySchemaId
     output_schema: EntitySchemaId
@@ -1640,7 +1640,7 @@ simple-clang-profile
 
 Raw Clang pointers are translation-unit-local and non-persistent. Export:
 
-```simple
+```simple:skip
 struct ClangEntityIdentity:
     tu_artifact: ArtifactId
     ast_kind: u32
@@ -1730,7 +1730,7 @@ Clang still performs unsupported preprocessor/Sema/template operations and serve
 
 ### 12.6 Version and compatibility policy
 
-```simple
+```simple:skip
 struct ClangAdapterCapability:
     clang_major: u16
     ast_export_schema: u16
@@ -1781,7 +1781,7 @@ it — the unexplained degradation §21.4 forbids.
 
 Replace the long-term object-heavy representation with canonical arenas:
 
-```simple
+```simple:skip
 struct DomArena:
     kind: [DomNodeKind]
     parent: [i32]
@@ -1804,7 +1804,7 @@ struct DomAttributeArena:
 
 ### 13.2 CSS rule IR
 
-```simple
+```simple:skip
 struct CssRuleArena:
     kind: [CssRuleKind]
     selector_program: [QueryProgramRef]
@@ -1826,7 +1826,7 @@ struct CssDeclarationArena:
 
 Do not keep one giant independently allocated mutable `Style` object per node. Use:
 
-```simple
+```simple:skip
 struct ComputedStyleTable:
     records: ObjectRef<StyleRecordArena>
     node_style_id: [StyleId]
@@ -1899,7 +1899,7 @@ DOM node -> generated pseudo/layout entities
 
 ### 14.4 DOM mutation transaction
 
-```simple
+```simple:skip
 struct DomMutationBatch:
     document: SnapshotId
     operations: ObjectRef<DomMutationArena>
@@ -1932,7 +1932,7 @@ UTF/token classification
 
 ### 15.2 CSS mutation classes
 
-```simple
+```simple:skip
 enum CssChangeKind:
     AddRule
     DeleteRule
@@ -1978,7 +1978,7 @@ component/template definitions
 
 `WebResourceLinkProfile` specializes the shared resolve framework and emits:
 
-```simple
+```simple:skip
 struct StyleLinkResult:
     resolved_rules: CssRuleArenaRef
     custom_property_graph: DependencyGraphRef
@@ -2025,7 +2025,7 @@ CPU owns HTML tree commit, script, event ordering, and difficult selectors. SIMD
 
 ### 17.1 Input and output
 
-```simple
+```simple:skip
 struct LayoutInputSnapshot:
     dom: DomSnapshotRef
     styles: ComputedStyleSnapshotRef
@@ -2048,7 +2048,7 @@ struct LayoutSnapshot:
 
 The layout planner partitions the document by formatting-context and containment boundaries:
 
-```simple
+```simple:skip
 struct LayoutIsland:
     root: EntityRef
     profile: LayoutProfileId
@@ -2074,7 +2074,7 @@ Inline formatting may be a subgraph because line breaking and text shaping have 
 
 ### 17.3 Layout profiles
 
-```simple
+```simple:skip
 interface SpatialLayoutProfile:
     fn profile_id() -> LayoutProfileId
     fn discover_islands(input: LayoutInputSnapshot) -> LayoutIslandArenaRef
@@ -2135,7 +2135,7 @@ DOM/style changes mark only affected islands. Examples:
 
 Text shaping is a separate port:
 
-```simple
+```simple:skip
 interface TextMeasurePort:
     fn shape(requests: TextShapeRequestArenaRef,
              execution: StageExecutionProfile) -> TextShapeResultArenaRef
@@ -2151,7 +2151,7 @@ Do not approximate complex-script shaping merely to keep layout on GPU. GPU layo
 
 ### 18.1 Shared concepts
 
-```simple
+```simple:skip
 struct DefinitionRecord:
     key: ResolveKey
     owner: EntityRef
@@ -2171,7 +2171,7 @@ struct ResolutionRecord:
     reason: ResolutionReason
 ```
 
-```simple
+```simple:skip
 interface ResolveProfile:
     fn collect(snapshot: SnapshotId) -> ResolveInputRef
     fn group_key(record: ResolveRecord) -> ResolveKey
@@ -2264,7 +2264,7 @@ Native ELF/Mach-O/PE remains delegated to established native linkers until a mea
 
 ## 20. Residency tiers
 
-```simple
+```simple:skip
 enum ResidencyTier:
     DeviceLocal
     DeviceShared
@@ -2298,7 +2298,7 @@ It does not manage each node separately.
 
 ### 20.2 Placement request
 
-```simple
+```simple:skip
 struct PlacementRequest:
     object: ObjectRef<AnyObject>
     access: AccessPattern
@@ -2317,7 +2317,7 @@ struct PlacementRequest:
 
 ### 20.3 Placement plan
 
-```simple
+```simple:skip
 struct PlacementPlan:
     reservations: ObjectRef<ReservationArena>
     transfers: ObjectRef<TransferArena>
@@ -2330,7 +2330,7 @@ struct PlacementPlan:
 
 ### 20.4 Backend interface
 
-```simple
+```simple:skip
 interface PlacementBackend:
     fn probe() -> PlacementCapabilities
     fn plan(requests: PlacementRequestArenaRef,
@@ -2344,7 +2344,7 @@ interface PlacementBackend:
 
 ### 20.5 Lease-bound resident view
 
-```simple
+```simple:skip
 struct ResidentView<T>:
     device_address: u64
     length: u64
@@ -2423,7 +2423,7 @@ It must not scale linearly with total source bytes, AST nodes, DOM nodes, object
 
 ## 21. Execution profile
 
-```simple
+```simple:skip
 enum ExecutionMode:
     CpuReference
     HybridVectorGpu
@@ -2485,7 +2485,7 @@ produce a compile error, it produces a field that type-checks, carries plausible
 zeros, and silently answers "what was this stage allowed to do?" with a record
 that cannot express the question.
 
-```simple
+```simple:skip
 interface StageBackend<Request, Result>:
     fn capabilities() -> StageCapabilities
     fn estimate(request: Request,
@@ -2500,7 +2500,7 @@ interface StageBackend<Request, Result>:
 
 ### 21.2 Cost estimate
 
-```simple
+```simple:skip
 struct CostEstimate:
     cpu_work: u64
     simd_work: u64
@@ -2564,7 +2564,7 @@ the registry rather than hardcoding a second table here.
 
 ### 21.3 Stage receipt
 
-```simple
+```simple:skip
 struct StageReceipt:
     stage: StageId
     backend: BackendId
@@ -2749,7 +2749,7 @@ These selection dimensions belong in capability manifests, dependency injection,
 
 ## 23. New MDSOC+ ports
 
-```simple
+```simple:skip
 interface TagIndexPort
 interface OriginMappingPort
 interface QueryExecutionPort
@@ -3371,7 +3371,7 @@ SpatialLayoutProfile
 
 Source:
 
-```simple
+```simple:skip
 on pc{ execution(* service.*(..)) & attr(transactional) }
 use trace_transaction before priority 100
 ```
