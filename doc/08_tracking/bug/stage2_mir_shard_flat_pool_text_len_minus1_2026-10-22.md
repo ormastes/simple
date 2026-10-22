@@ -151,3 +151,48 @@ provenance.
 3. If (1) confirms a policy deny: fix the allowlist (or route hir-cache
    under the admitted cache root), then re-run the 9s repro to see whether
    the invalid-text panic disappears with the recovery path.
+
+## Update 2 (2026-10-22, later) — probes 1-3 results: io-write mechanism narrowed, cache-off differential
+
+### Probe results
+
+1. **Security capability gate: EXONERATED as the write blocker.** The sandbox
+   capability check (`rt_security_sandbox_capability_allowed`,
+   security_runtime.rs:370) only denies when a sandbox lowering with a
+   capability list is ACTIVE; no compiler/lib source declares a sandbox
+   lowering that ships in the candidate (only a baremetal RISC-V PMP test
+   spec and PayPal "sandbox" booleans match the keywords). Weaver-inserted
+   `rt_security_enter_sandbox` only wraps declared `HirSecurityGate`s, and
+   none gate the hir-cache path. Moreover the SAME RUN successfully writes
+   frontend-parse-cache (`.fpc`), ledger `BLOCKED`/`*.claim` files, and
+   queue dirs — so candidate file writes generally WORK; only the hir-cache
+   store fails.
+2. **Path length: EXONERATED.** Repro with `HOME=/c/h` (total store path
+   ~130 chars) still fails io-write identically. The long stage2-home lane
+   paths exceed MAX_PATH and are a secondary hazard worth fixing, but not
+   this failure.
+3. **`SIMPLE_HIR_CACHE=0` differential: the failure MOVES, it doesn't
+   clear.** With the cache disabled the flat-pool panic count drops 2→1
+   and the build instead fails at:
+   ```
+   [ERROR] NOGC-POLICY-001: .../p2_add.spl: cached HIR ownership policy disagrees with its declaring source
+   ```
+   (driver_hir_pipeline_support.spl:341: freshly-lowered HIR module's
+   `nogc_strict` disagrees with the surface registry's `nogc_strict` for
+   the same canonical path, or two surfaces for that path conflict.) So
+   the candidate carries an ownership-policy metadata inconsistency that
+   different gate paths surface differently: cache-on → store fails →
+   hir-recovery → invalid-text panic; cache-off → NOGC policy refusal.
+
+### Current model
+
+- The invalid-text panic and the io-write are probably BOTH symptoms of the
+  same metadata inconsistency (recovery path encodes a half-constructed
+  artifact; the store itself may fail because its encoded header/path folds
+  a scope/ownership value that isn't valid in the storing context).
+- Next probes: (a) print `nogc_strict` (surface vs HIR module) for p2_add
+  in both the passing pre-regression tree and this one — the delta names
+  the regression commit; (b) patch `rt_file_write_text` to surface the
+  io::Error string (one-line Rust change; rebuild candidate ~35 min) —
+  the errno will likely be ERROR_PATH_NOT_FOUND from a component that is
+  a FILE or an invalid handle path, naming the exact bad path component.
