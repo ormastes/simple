@@ -1,0 +1,46 @@
+#!/bin/sh
+# Release CI: build the next phase with the compiler config/bootstrap.sdn selects
+# (resolve-bootstrap-compiler.shs), so a release builds on the newest proven
+# local or released binary instead of the Rust seed when one qualifies.
+#
+#   sh scripts/bootstrap/build-next-phase-ci.shs <platform> <threads>
+#
+# Exit 0 with NEW_RUNTIME_* / BUILT_PHASE in $GITHUB_ENV and built=true in
+# $GITHUB_OUTPUT on success; exit 1 when no compiler qualified or the build
+# failed (the workflow then runs its Rust-seed step).
+set -u
+platform=${1:?platform}
+threads=${2:-4}
+exe=
+case $platform in windows-*) exe=.exe ;; esac
+
+picked=$(sh scripts/bootstrap/resolve-bootstrap-compiler.shs --platform "$platform") || {
+  echo "No previous compiler qualified; using the Rust seed"
+  exit 1
+}
+compiler=${picked% *}
+phase=${picked##* }
+next=$((phase + 1))
+# Phase 3 is the fixpoint: a phase-3 compiler rebuilding itself stays phase 3.
+[ "$next" -le 3 ] || next=3
+out=build/bootstrap/stage$next/simple$exe
+mkdir -p "build/bootstrap/stage$next"
+echo "Building phase $next with $compiler (phase $phase)"
+RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_PARSE_SHARDING=0 \
+  "$compiler" native-build \
+  --source src/compositions/kernel_llvm_cranelift --source src \
+  --entry-closure --entry src/app/cli/bootstrap_main.spl \
+  --mode dynload --threads "$threads" --output "$out"
+rc=$?
+if [ "$rc" -ne 0 ] || ! "./$out" --version; then
+  echo "Phase $next build with $compiler failed (rc=$rc); falling back to the Rust seed"
+  exit 1
+fi
+{
+  echo "NEW_RUNTIME_BUILT=true"
+  echo "NEW_RUNTIME_PATH=$(pwd)/$out"
+  echo "HAVE_BOOTSTRAP=true"
+  echo "BUILT_PHASE=$next"
+} >> "${GITHUB_ENV:-/dev/null}"
+echo "built=true" >> "${GITHUB_OUTPUT:-/dev/null}"
+echo "Phase $next binary: $out"

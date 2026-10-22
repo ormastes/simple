@@ -321,8 +321,17 @@ jobs:
           fi
           command -v llvm-ar
 
-      - name: Build native Linux x86_64 binary via bootstrap-only Rust seed
+      - name: Build next phase with configured previous compiler (config/bootstrap.sdn)
+        id: prevc_linux
         if: runner.os == 'Linux' && matrix.platform == 'linux-x86_64'
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh scripts/bootstrap/build-next-phase-ci.shs "${{ matrix.platform }}" 4
+
+      - name: Build native Linux x86_64 binary via bootstrap-only Rust seed
+        if: runner.os == 'Linux' && matrix.platform == 'linux-x86_64' && steps.prevc_linux.outputs.built != 'true'
         shell: bash
         run: |
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -387,8 +396,17 @@ jobs:
           echo "PATH=${LLVM_PREFIX}/bin:${PATH}" >> $GITHUB_ENV
           ls -la "${LLVM_PREFIX}/lib/"libLLVM*.dylib | head -5
 
-      - name: Build native macOS binary via bootstrap-only Rust seed
+      - name: Build next phase with configured previous compiler (config/bootstrap.sdn)
+        id: prevc_macos
         if: runner.os == 'macOS'
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh scripts/bootstrap/build-next-phase-ci.shs "${{ matrix.platform }}" 4
+
+      - name: Build native macOS binary via bootstrap-only Rust seed
+        if: runner.os == 'macOS' && steps.prevc_macos.outputs.built != 'true'
         shell: bash
         run: |
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -478,6 +496,7 @@ jobs:
             "./$STAGE2" --version && "./$STAGE2" -c "print 42"
             echo "✓ LLVM lib stage2 verified — updating binary"
             echo "NEW_RUNTIME_PATH=$(pwd)/$STAGE2" >> $GITHUB_ENV
+            echo "BUILT_PHASE=2" >> $GITHUB_ENV
             file "$STAGE2"
             ls -lh "$STAGE2"
           else
@@ -582,8 +601,17 @@ jobs:
           # (run 39357315407). Pin the MSVC flavor for this row only.
           "SIMPLE_LINKER_FLAVOR=msvc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+      - name: Build next phase with configured previous compiler (config/bootstrap.sdn)
+        id: prevc_windows
+        if: matrix.platform == 'windows-x86_64'
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh scripts/bootstrap/build-next-phase-ci.shs "${{ matrix.platform }}" 2
+
       - name: Build native Windows binary via bootstrap-only Rust seed
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && steps.prevc_windows.outputs.built != 'true'
         shell: bash
         run: |
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -852,6 +880,9 @@ jobs:
             chmod +x "${PKG_DIR}/bin/simple"
           fi
           echo "✓ Copied binary: $(basename $BINARY_TO_PACKAGE) → bin/${BIN_NAME}"
+          # Bootstrap phase of the packaged compiler (seed-built = 1). A later
+          # release run reads it to build the next phase from this binary.
+          echo "${BUILT_PHASE:-1}" > "${PKG_DIR}/PHASE"
 
           # Build and package native MCP entrypoints for host-native jobs.
           # npm launchers prefer these binaries so installed packages do not
@@ -932,6 +963,12 @@ jobs:
                 RUNNER_SEED="src/compiler_rust/target/bootstrap/simple.exe"
               else
                 RUNNER_SEED="src/compiler_rust/target/bootstrap/simple"
+              fi
+              if [ ! -x "$RUNNER_SEED" ]; then
+                # The stage1 seed step is skipped when a previous compiler
+                # built this phase (prevc_*); the runner fallback still needs it.
+                (cd src/compiler_rust && cargo build --profile bootstrap -p simple-driver \
+                  && cargo build --profile bootstrap -p simple-native-all --features driver-compat) || true
               fi
               rm -f "$RUNNER_OUT"
               # Same exit-status policy as the stage1 build: judge by the
@@ -1625,6 +1662,58 @@ jobs:
             release/*
         env:
           GH_TOKEN: ${{ github.token }}
+
+  # RC drop: publishes every platform package that DID build, without waiting
+  # for the whole matrix, so a phase-1 binary is downloadable as soon as one
+  # platform produces it. Re-running adds or replaces assets (--clobber).
+  # The tag is `rc-<VERSION>`, deliberately not `v*`: version tags are
+  # owner-create-only and immutable (spipe-vcs-v3-version-tag-*), while an RC
+  # drop must be refreshable as more platforms and higher phases land.
+  rc-drop:
+    name: Publish RC Drop (available platforms)
+    needs: [check-version, build-bootstrap]
+    if: always() && github.event_name == 'workflow_dispatch' && needs.check-version.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download available bootstrap packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bootstrap-*
+          path: artifacts
+      - name: Create or update RC drop release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check-version.outputs.version }}
+        run: |
+          mkdir -p release
+          find artifacts \( -name '*.spk' -o -name '*.spk.sha256' \) -exec cp {} release/ \;
+          if ! ls release/*.spk >/dev/null 2>&1; then
+            echo "✗ No platform produced a package; nothing to publish" >&2
+            exit 1
+          fi
+          TAG="rc-${VERSION}"
+          {
+            echo "Release-candidate drop for ${VERSION} from \`${GITHUB_REF_NAME}\` @ ${GITHUB_SHA}."
+            echo
+            echo "Platforms included in this drop:"
+            for f in release/*.spk; do
+              phase=$(tar -xzf "$f" -O --wildcards '*/PHASE' 2>/dev/null | head -1)
+              echo "- $(basename "$f") — bootstrap phase ${phase:-1}"
+            done
+            echo
+            echo "A platform missing here did not build in run ${GITHUB_RUN_ID}; a later run adds it."
+          } > notes.md
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # `release edit` never moves the tag; point it at this run's commit.
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" -f sha="$GITHUB_SHA" -F force=true >/dev/null
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file notes.md --prerelease
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title "Simple ${VERSION} (RC drop)" --notes-file notes.md --prerelease
+          fi
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber release/*
 
   publish-ghcr:
     name: Publish to GHCR
