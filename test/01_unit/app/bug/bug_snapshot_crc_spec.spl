@@ -1,0 +1,137 @@
+# Purpose and audience: executable specification evidence that the canonical
+# bug database snapshot verification is pinned to the sealed BYTE domain.
+# @req REQ-SSPEC-LIB
+#
+# Sealing contract (scripts/check/reseal-sdn-crc32.shs): the `#sdn-crc32:<n>`
+# header equals zlib crc32 of the file's bytes after the header line. The
+# reader must verify that exact domain — never a `text` re-encoding of it
+# (doc/08_tracking/bug/workaround_store_bug_db_crc_text_domain_2026-10-22.md).
+
+use std.spec.{describe, it, expect, step}
+use app.bug.workaround_store.{workaround_bug_snapshot}
+use std.nogc_async_mut.sosix.workaround_host.{workaround_host_publish,
+    workaround_host_mkdir, workaround_host_temp_dir, workaround_host_cwd}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
+
+fn snapshot_fixture_root(tag: text) -> text:
+    expect(workaround_host_mkdir("build/test-artifacts")).to_equal(true)
+    val root = workaround_host_temp_dir("build/test-artifacts", "bug-snapshot-{tag}-").unwrap()
+    expect(workaround_host_mkdir(root + "/doc/08_tracking/bug")).to_equal(true)
+    root
+
+fn _u8_bytes(values: [i64]) -> [u8]:
+    var out: [u8] = []
+    for v in values:
+        out.push(v as u8)
+    out
+
+# 80 raw body bytes: 'bugs |id, title|\n    b1, invalid \xff\xfe byte
+# sequence\n    b2, korean 한국어 text\n' — zlib.crc32 = 3153239212.
+fn _invalid_body_bytes() -> [u8]:
+    _u8_bytes([98, 117, 103, 115, 32, 124, 105, 100, 44, 32, 116, 105, 116, 108, 101, 124, 10,
+        32, 32, 32, 32, 98, 49, 44, 32, 105, 110, 118, 97, 108, 105, 100, 32, 255, 254, 32, 98,
+        121, 116, 101, 32, 115, 101, 113, 117, 101, 110, 99, 101, 10, 32, 32, 32, 32, 98, 50, 44,
+        32, 107, 111, 114, 101, 97, 110, 32, 237, 149, 156, 234, 181, 173, 236, 150, 180, 32,
+        116, 101, 120, 116, 10])
+
+describe "workaround bug snapshot CRC verification (byte domain)":
+    it "verifies and loads the repository's real canonical bug database":
+        step("snapshot the repo root; the refresh error must be nil")
+        # The exact call whose text-domain CRC made every pure-Simple-hosted
+        # compiler build print "workarounds: refresh failed: canonical bug
+        # database CRC mismatch" while the stored CRC equaled zlib.crc32 of
+        # the on-disk bytes.
+        val db = workaround_bug_snapshot(workaround_host_cwd()).unwrap()
+        expect(db.get_bug("stage3_scv_inventory_noncanonical_2026_09_20").?).to_equal(true)
+
+    it "accepts a byte-sealed fixture with non-ASCII content":
+        step("publish a sealed fixture: Korean title, sealed over raw bytes")
+        val root = snapshot_fixture_root("korean")
+        # body = 'bugs |id, status, title|\n    b1, open, "버그 데이터베이스 한국어 본문"\n'
+        # zlib.crc32(body bytes) = 1420785586
+        expect(workaround_host_publish(root + "/doc/08_tracking/bug/bug_db.sdn",
+            "#sdn-crc32:1420785586\n" +
+            "bugs |id, status, title|\n" +
+            "    b1, open, \"버그 데이터베이스 한국어 본문\"\n")).to_equal(true)
+        val db = workaround_bug_snapshot(root).unwrap()
+        expect(db.get_bug("b1").?).to_equal(true)
+
+    it "accepts a fixture sealed over CRLF bytes as-is (no re-encoding)":
+        step("CRLF body whose header was sealed over the CRLF bytes")
+        val root = snapshot_fixture_root("crlf")
+        # body = 'bugs |id, status|\r\n    b1, open\r\n    b2, closed\r\n'
+        # zlib.crc32(CRLF body bytes) = 1119867485 — the byte domain accepts
+        # bytes exactly as sealed; the table parser normalizes CRLF after the
+        # integrity check (workaround_store.spl).
+        expect(workaround_host_publish(root + "/doc/08_tracking/bug/bug_db.sdn",
+            "#sdn-crc32:1119867485\r\n" +
+            "bugs |id, status|\r\n" +
+            "    b1, open\r\n" +
+            "    b2, closed\r\n")).to_equal(true)
+        val db = workaround_bug_snapshot(root).unwrap()
+        expect(db.get_bug("b1").?).to_equal(true)
+        expect(db.get_bug("b2").?).to_equal(true)
+
+    it "rejects a tampered body fail-closed with the CRC mismatch error":
+        step("one character flipped; header unchanged")
+        val root = snapshot_fixture_root("tamper")
+        expect(workaround_host_publish(root + "/doc/08_tracking/bug/bug_db.sdn",
+            "#sdn-crc32:1420785586\n" +
+            "bugs |id, status, title|\n" +
+            "    b1, closed, \"버그 데이터베이스 한국어 본문\"\n")).to_equal(true)
+        val result = workaround_bug_snapshot(root)
+        expect(result.is_err()).to_equal(true)
+        match result:
+            case Err(reason): expect(reason).to_equal("canonical bug database CRC mismatch")
+            case Ok(_): expect(false).to_equal(true)
+
+    it "rejects a header sealed over a different byte domain (LF seal vs CRLF bytes)":
+        step("CRLF working bytes with a header sealed over the LF body — fail closed")
+        val root = snapshot_fixture_root("skew")
+        # Same rows as the CRLF fixture but LF-sealed:
+        # LF body zlib = 2573612586, file bytes carry CRLF. Line-ending smudge
+        # after checkout must NOT verify; refresh the file from the index
+        # instead of resealing.
+        expect(workaround_host_publish(root + "/doc/08_tracking/bug/bug_db.sdn",
+            "#sdn-crc32:2573612586\r\n" +
+            "bugs |id, status|\r\n" +
+            "    b1, open\r\n" +
+            "    b2, closed\r\n")).to_equal(true)
+        expect(workaround_bug_snapshot(root).is_err()).to_equal(true)
+
+    it "refuses any non-empty WAL, checkpoint-only included (strict gate)":
+        # The release branch keeps the strict WAL gate: ANY non-empty WAL
+        # refuses until checkpointed (workaround_store.spl checks
+        # wal.trim() != ""). A committed checkpoint-only WAL is still
+        # non-blank, so it refuses too — the tree ships no bug_db.sdn.wal,
+        # and this gate is dormant on a clean checkout.
+        step("checkpoint-only WAL: non-blank, refuses until checkpointed")
+        val root = snapshot_fixture_root("wal-cp")
+        expect(workaround_host_publish(root + "/doc/08_tracking/bug/bug_db.sdn",
+            "#sdn-crc32:1420785586\n" +
+            "bugs |id, status, title|\n" +
+            "    b1, open, \"버그 데이터베이스 한국어 본문\"\n")).to_equal(true)
+        expect(workaround_host_publish(root + "/doc/08_tracking/bug/bug_db.sdn.wal",
+            "#wal-version:2\n1|Checkpoint||||1781224904646000|3139021156\n")).to_equal(true)
+        val cp_result = workaround_bug_snapshot(root)
+        expect(cp_result.is_err()).to_equal(true)
+        match cp_result:
+            case Err(reason): expect(reason).to_equal("checkpoint the canonical bug database WAL before workaround refresh")
+            case Ok(_): expect(false).to_equal(true)
+        step("pending Insert entry: refuse until checkpointed")
+        expect(workaround_host_publish(root + "/doc/08_tracking/bug/bug_db.sdn.wal",
+            "#wal-version:2\n2|Insert|bugs|b1|x|1781224904646001\n")).to_equal(true)
+        val result = workaround_bug_snapshot(root)
+        expect(result.is_err()).to_equal(true)
+        match result:
+            case Err(reason): expect(reason).to_equal("checkpoint the canonical bug database WAL before workaround refresh")
+            case Ok(_): expect(false).to_equal(true)
+
+    # NOTE: an invalid-UTF-8 tamper scenario was considered and deliberately
+    # omitted — writing raw non-UTF-8 fixture bytes requires
+    # file_write_bytes, whose rt_array_bytes_validate extern is not
+    # registered under the Windows seed test runner (seed extern gap,
+    # same family as doc/08_tracking/bug/
+    # secure_memory_u8_zeroize_unregistered_extern_2026-10-22.md). The
+    # byte-domain tamper invariants above (CRLF-as-sealed, body tamper,
+    # LF-seal/CRLF skew) cover the integrity property portably.
