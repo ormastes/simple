@@ -62,3 +62,14 @@ Fixed by watching the whole tree (`cargo:rerun-if-changed=../../runtime`).
 The wrapper-level seed fingerprint hashes the .c files, so the stamp updated
 while the bytes did not — a two-level cache identity gap worth remembering
 when a runtime-source fix "doesn't take".
+
+## Addendum 2: the operative implementation is the RUST runtime, not the C mirror
+
+The candidate links `rt_transient_heap_promote` from the Rust runtime
+(`src/compiler_rust/runtime/src/value/collections.rs:2858`); the
+`runtime_native.c` copy is the core-c-bootstrap mirror and never runs in the
+sanity candidate. The C-side exemptions (registered-immortal arrays, non-heap
+no-op) remain correct for core-c targets, but the sanity lane needed the same
+non-heap no-op in the Rust gate (`!root_raw && !value.is_heap() -> true`),
+which covers the nil optional and the by-value `Span.empty()` struct copy.
+Unknown heap kinds stay fail-closed on both sides.

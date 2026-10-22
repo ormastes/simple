@@ -2859,7 +2859,21 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
     let mut root_words = std::ptr::null();
     let mut root_ptr = 0usize;
     let root_raw = unsafe { rt_transient_raw_words(value.0 as i64, &mut root_words, &mut root_ptr) >= 0 };
-    if !root_raw && (!value.is_heap() || value.heap_type().is_none()) {
+    if !root_raw && !value.is_heap() {
+        // Scalars, nil optionals and by-value struct copies (e.g. Span.empty()
+        // through the generic T extern) own no transient heap state: there is
+        // no scope-owned tag to retag, so promotion is a no-op success, not a
+        // failure. 2026-10-22: without this, every file with no
+        // @representation block failed
+        // representation_parser_promote_transient_owner_v1 (nil pending
+        // optional + empty span) and the retained parse panicked
+        // "transient retained parser ownership failed" in the stage2 sanity.
+        // Mirrors the C runtime exemption (runtime_native.c
+        // rt_transient_heap_promote). Unknown heap kinds stay fail-closed
+        // below: they may own state this walk cannot understand.
+        return true;
+    }
+    if !root_raw && value.heap_type().is_none() {
         return false;
     }
     TRANSIENT_HEAP_SCOPE.with(|slot| {
