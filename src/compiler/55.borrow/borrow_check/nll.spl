@@ -333,6 +333,23 @@ fn loan_alias_union(left: [LoanAlias], right: [LoanAlias]) -> [LoanAlias]:
             merged = merged.push(alias)
     merged
 
+
+# @workaround bug=nll_live_aliases_method_arg_corruption_2026_10_22 reason=self_receiver_plus_array_arg_method_call_miscompiles_in_native_candidate
+# Free function, not a method: `state = self.live_aliases(state, ...)`
+# corrupted the aliases array argument in transit (state_len=0 at the call
+# site, garbage length at function entry, deterministic SIGSEGV in the stage2
+# sanity borrow_check). Same writeback/argument-shape defect family as
+# cce1cddae19 (mir receiver writeback).
+fn nll_live_aliases(aliases: [LoanAlias], live: [i64]) -> [LoanAlias]:
+    var kept: [LoanAlias] = []
+    for alias in aliases:
+        var keep = true
+        match loan_alias_place(alias).base:
+            case PlaceBase.Local(local): keep = live.contains(local)
+            case _: ()
+        if keep: kept = kept.push(alias)
+    kept
+
 class NLLChecker:
     """Non-Lexical Lifetimes borrow checker.
 
@@ -612,15 +629,6 @@ class NLLChecker:
             has_primary_span: true, primary_span: point, secondary_spans: [],
             has_help: false, help: ""))
 
-    fn live_aliases(aliases: [LoanAlias], live: [i64]) -> [LoanAlias]:
-        var kept: [LoanAlias] = []
-        for alias in aliases:
-            var keep = true
-            match loan_alias_place(alias).base:
-                case PlaceBase.Local(local): keep = live.contains(local)
-                case _: ()
-            if keep: kept = kept.push(alias)
-        kept
 
     me install_loans(point: i64, aliases: [LoanAlias]):
         self.borrow_graph.loan_aliases[point] = aliases
@@ -747,9 +755,9 @@ class NLLChecker:
             cursor = cursor + 1
             var state: [LoanAlias] = incoming[block_id]
             for point in points[block_id]:
-                state = self.live_aliases(state, before[point])
+                state = nll_live_aliases(state, before[point])
                 state = self.transfer_loans(point, state, false)
-                state = self.live_aliases(state, after[point])
+                state = nll_live_aliases(state, after[point])
                 work = work + 1 + state.len()
                 if work > 1000000:
                     self.loan_failure(point, "loan CFG work budget exhausted")
@@ -764,9 +772,9 @@ class NLLChecker:
         for block_id in incoming.keys():
             var state: [LoanAlias] = incoming[block_id]
             for point in points[block_id]:
-                state = self.live_aliases(state, before[point])
+                state = nll_live_aliases(state, before[point])
                 state = self.transfer_loans(point, state, true)
-                state = self.live_aliases(state, after[point])
+                state = nll_live_aliases(state, after[point])
 
     fn get_errors() -> [NLLError]:
         """Get all NLL errors."""
