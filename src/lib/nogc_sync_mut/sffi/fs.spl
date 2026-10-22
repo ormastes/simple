@@ -289,13 +289,42 @@ fn io_file_meta_size(fd: i64) -> i64:
     unsafe(capabilities: [ffi]):
         rt_io_file_meta_size(fd)
 
-@unsafe(reason: "raw runtime ABI for rt_io_file_open; the compiler text-ABI registry expands the text path into (ptr, len) — see text_extern_abi.spl rt_io_file_open rows", capabilities: [ffi])
-extern fn rt_io_file_open(path: text, mode: i64) -> i64
+@unsafe(reason: "two-argument open twins; the three-argument mixed (ptr,len,mode) text extern is mis-passed by the seed-produced candidate (bug: stage2_sanity_scv_snapshot_entry_zero_sources_2026-10-22)", capabilities: [ffi, raw_ptr])
+extern fn rt_io_file_open_read(path_ptr: i64, path_len: i64) -> i64
+@unsafe(reason: "two-argument open twins; see rt_io_file_open_read", capabilities: [ffi, raw_ptr])
+extern fn rt_io_file_open_write(path_ptr: i64, path_len: i64) -> i64
+@unsafe(reason: "two-argument open twins; see rt_io_file_open_read", capabilities: [ffi, raw_ptr])
+extern fn rt_io_file_open_append(path_ptr: i64, path_len: i64) -> i64
+@unsafe(reason: "three-argument open retained only for ReadWrite (mode 2); mis-passed by seed-produced candidates, avoid on that path", capabilities: [ffi, raw_ptr])
+extern fn rt_io_file_open(path_ptr: i64, path_len: i64, mode: i64) -> i64
+@unsafe(reason: "existing text ABI accessor borrows the retained text byte address", capabilities: [ffi, raw_ptr])
+extern fn rt_string_data(value: Any) -> i64
+@unsafe(reason: "existing text ABI accessor returns UTF-8 bytes, not Unicode scalar count", capabilities: [ffi])
+extern fn rt_string_len(value: Any) -> i64
 
 @always_inline
 fn io_file_open(path: text, mode: i64) -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_io_file_open(path, mode)
+    unsafe(capabilities: [ffi, raw_ptr]):
+        # FIX (bug-linked: stage2_sanity_scv_snapshot_entry_zero_sources_2026-10-22):
+        # the seed-produced candidate mis-passes the path_len operand of the
+        # three-argument rt_io_file_open(path, len, mode) extern (len arrives
+        # as -1), while two-argument (ptr, len) text externs (rt_io_file_exists)
+        # expand correctly. Expand the string at runtime through the non-text
+        # rt_string_data/rt_string_len externs and dispatch to the two-argument
+        # open twins.
+        val path_owner: Any = path
+        val count = rt_string_len(path_owner)
+        val address = rt_string_data(path_owner)
+        if count < 0 or (address == 0 and count != 0):
+            return -1
+        if mode == 0:
+            rt_io_file_open_read(address, count)
+        elif mode == 1:
+            rt_io_file_open_write(address, count)
+        elif mode == 3:
+            rt_io_file_open_append(address, count)
+        else:
+            rt_io_file_open(address, count, mode)
 
 @unsafe(reason: "raw runtime ABI for rt_io_file_seek", capabilities: [ffi])
 extern fn rt_io_file_seek(fd: i64, offset: i64, whence: i64) -> i64
