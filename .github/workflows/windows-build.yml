@@ -1,4 +1,4 @@
-name: Windows Build (LLVM 23.1.1 clang-cl)
+name: Windows Build (MinGW UCRT / MSYS2 CLANG64)
 
 on:
   push:
@@ -15,6 +15,8 @@ on:
       - 'test/01_unit/scripts/bootstrap_windows_transcribed_rss_inherit_test.shs'
       - 'scripts/check/check-bootstrap-windows-c-admission.shs'
       - '.github/workflows/windows-build.yml'
+      - 'scripts/setup/platform-detect.shs'
+      - 'src/runtime/**'
   workflow_dispatch:
 
 concurrency:
@@ -24,131 +26,62 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  LLVM_VERSION: 23.1.1
-  LLVM_ARCHIVE_SHA256: c8a12d754b5050c5668b56a5425c806792d46c70f7244b1216046164aa4b6462
-  LLVM_ROOT: ${{ github.workspace }}\.toolchains\llvm-23.1.1
+  # Rust seed pin (src/compiler_rust/rust-toolchain.toml) on the gnullvm host.
+  RUST_HOST: x86_64-pc-windows-gnullvm
 
+# Default Windows build environment: MinGW UCRT via MSYS2 CLANG64 (UCRT +
+# clang + LLD + libunwind/libc++, no GCC). The MSVC configuration stays in-tree
+# (SIMPLE_WINDOWS_ABI=msvc) but CI builds only this GNU configuration. See
+# doc/07_guide/infra/toolchain/windows_mingw_ucrt.md.
 jobs:
   windows-build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - toolchain: msvc
-            rust-target: x86_64-pc-windows-msvc
-            linker-flavor: msvc
-            name: Windows MSVC
     runs-on: windows-latest
-    name: ${{ matrix.name }}
+    name: Windows MinGW UCRT (CLANG64)
+    defaults:
+      run:
+        shell: msys2 {0}
     env:
-      CC_x86_64_pc_windows_msvc: clang-cl
-      CC_x86_64_pc_windows_gnu: clang
+      SIMPLE_WINDOWS_ABI: gnu
+      SIMPLE_LINKER_FLAVOR: gnu
+      CC: clang
+      CC_x86_64_pc_windows_gnullvm: clang
+      AR_x86_64_pc_windows_gnullvm: llvm-ar
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache LLVM 23.1.1
-        id: llvm-cache
-        uses: actions/cache@v4
+      - name: Setup MSYS2 CLANG64
+        uses: msys2/setup-msys2@v2
         with:
-          path: ${{ env.LLVM_ROOT }}
-          key: llvm-${{ runner.os }}-${{ runner.arch }}-${{ env.LLVM_VERSION }}-${{ env.LLVM_ARCHIVE_SHA256 }}
+          msystem: CLANG64
+          update: true
+          path-type: inherit
+          install: >-
+            git
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-lld
+            mingw-w64-clang-x86_64-llvm
+            mingw-w64-clang-x86_64-libc++
+            mingw-w64-clang-x86_64-libunwind
 
-      - name: Install LLVM 23.1.1
-        if: steps.llvm-cache.outputs.cache-hit != 'true'
-        shell: pwsh
+      - name: Verify CLANG64 toolchain
         run: |
-          $ErrorActionPreference = 'Stop'
-          $archiveName = 'clang+llvm-23.1.1-x86_64-pc-windows-msvc.tar.zst'
-          $archive = Join-Path $env:RUNNER_TEMP $archiveName
-          $staging = Join-Path $env:RUNNER_TEMP 'simple-llvm-23.1.1-extract'
-          $uri = 'https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.1/clang%2Bllvm-23.1.1-x86_64-pc-windows-msvc.tar.zst'
-          $ProgressPreference = 'SilentlyContinue'
-          Invoke-WebRequest -Uri $uri -OutFile $archive
-          $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actualHash -ne $env:LLVM_ARCHIVE_SHA256) {
-            throw "LLVM archive SHA-256 mismatch: $actualHash"
-          }
-          New-Item -ItemType Directory -Force -Path $staging | Out-Null
-          & 7z x $archive "-o$staging" -y | Out-Null
-          if ($LASTEXITCODE -ne 0) {
-            throw "failed to decompress LLVM archive: exit $LASTEXITCODE"
-          }
-          $tar = Join-Path $staging 'clang+llvm-23.1.1-x86_64-pc-windows-msvc.tar'
-          & 7z x $tar "-o$staging" -y | Out-Null
-          if ($LASTEXITCODE -ne 0) {
-            throw "failed to extract LLVM archive: exit $LASTEXITCODE"
-          }
-          $sourceRoot = Join-Path $staging 'clang+llvm-23.1.1-x86_64-pc-windows-msvc'
-          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $env:LLVM_ROOT) | Out-Null
-          Move-Item -LiteralPath $sourceRoot -Destination $env:LLVM_ROOT
+          set -eu
+          for tool in clang ld.lld llvm-ar; do
+            command -v "$tool"
+          done
+          clang --version | head -2
+          clang -dumpmachine | grep -qx 'x86_64-w64-windows-gnu'
+          ld.lld --version
 
-      - name: Verify LLVM 23.1.1 authority
-        shell: pwsh
+      - name: Select gnullvm Rust host
         run: |
-          $ErrorActionPreference = 'Stop'
-          $checks = @(
-            @{ Tool = 'clang.exe'; Pattern = 'clang version 23\.1\.1(?:\s|$)' },
-            @{ Tool = 'clang-cl.exe'; Pattern = 'clang version 23\.1\.1(?:\s|$)' },
-            @{ Tool = 'llvm-ar.exe'; Pattern = 'LLVM version 23\.1\.1(?:\s|$)' },
-            @{ Tool = 'lld-link.exe'; Pattern = 'LLD 23\.1\.1(?:\s|$)' }
-          )
-          foreach ($check in $checks) {
-            $tool = Join-Path $env:LLVM_ROOT "bin\$($check.Tool)"
-            if (!(Test-Path -LiteralPath $tool -PathType Leaf)) {
-              throw "missing LLVM 23.1.1 tool: $tool"
-            }
-            $versionLines = @(& $tool --version 2>&1)
-            if ($LASTEXITCODE -ne 0) {
-              throw "$($check.Tool) --version failed: exit $LASTEXITCODE"
-            }
-            $version = $versionLines -join "`n"
-            if ($version -notmatch $check.Pattern) {
-              $summary = ($versionLines | Select-Object -First 3) -join ' | '
-              throw "$($check.Tool) is not LLVM 23.1.1: $summary"
-            }
-            $toolHash = (Get-FileHash -LiteralPath $tool -Algorithm SHA256).Hash.ToLowerInvariant()
-            $summary = ($versionLines | Select-Object -First 3) -join ' | '
-            Write-Host "LLVM_TOOL_ATTESTATION tool=$($check.Tool) sha256=$toolHash version=$summary"
-          }
-          (Join-Path $env:LLVM_ROOT 'bin') | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          "SIMPLE_LLVM_PATH=$env:LLVM_ROOT\bin\LLVM-C.dll" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      # MSVC: set up Visual Studio developer environment
-      - name: Setup MSVC
-        if: matrix.toolchain == 'msvc'
-        uses: ilammy/msvc-dev-cmd@v1
-
-      - name: Verify Windows transcribed RSS and retry receipts
-        if: matrix.toolchain == 'msvc'
-        shell: bash
-        run: |
-          export PATH="$(cygpath -u "$LLVM_ROOT")/bin:$PATH"
-          export CC=clang-cl
-          proof="$(cygpath -u "$RUNNER_TEMP")/bootstrap-rss-contract"
-          mkdir -p "$proof"
-          export SIMPLE_BOOTSTRAP_SESSION_HELPER_CACHE="$(cygpath -u "$RUNNER_TEMP")/bootstrap-rss-session-cache"
-          sh test/01_unit/scripts/bootstrap_rss_retry_test.shs "$proof"
-
-      - name: Preserve Windows RSS contract evidence
-        if: always() && matrix.toolchain == 'msvc'
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-bootstrap-rss-contract
-          path: ${{ runner.temp }}/bootstrap-rss-contract
-          if-no-files-found: warn
-
-      - name: Verify Windows Clang driver
-        shell: bash
-        run: |
-          if [ "${{ matrix.toolchain }}" = msvc ]; then
-            command -v clang-cl
-          else
-            command -v clang
-          fi
-
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          targets: ${{ matrix.rust-target }}
+          set -eu
+          rustup set default-host "$RUST_HOST"
+          cd src/compiler_rust
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal -c rustfmt -c clippy
+          rustc -vV | tee "$RUNNER_TEMP/rustc-vV.txt"
+          grep -qx "host: $RUST_HOST" "$RUNNER_TEMP/rustc-vV.txt"
 
       - name: Cache Cargo
         uses: actions/cache@v4
@@ -157,51 +90,21 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             src/compiler_rust/target
-          key: windows-${{ matrix.toolchain }}-bootstrap-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
+          key: windows-gnullvm-bootstrap-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
           restore-keys: |
-            windows-${{ matrix.toolchain }}-bootstrap-
-
-      # MSVC: hide Git's /usr/bin/link so it doesn't shadow MSVC's link.exe
-      - name: Fix MSVC linker PATH
-        if: matrix.toolchain == 'msvc'
-        shell: bash
-        run: |
-          if [ -f /usr/bin/link ]; then
-            mv /usr/bin/link /usr/bin/link.bak
-          fi
-
-      # The terminal shim rejects ambient cl.exe so CI uses the same Clang C
-      # authority admitted by the Windows bootstrap pipeline.
-      - name: Bind MSVC Clang compiler
-        if: matrix.toolchain == 'msvc'
-        shell: pwsh
-        run: |
-          "CC=$env:LLVM_ROOT\bin\clang-cl.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "CC_x86_64_pc_windows_msvc=$env:LLVM_ROOT\bin\clang-cl.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Verify Windows C admission with native clang-cl
-        if: matrix.toolchain == 'msvc'
-        shell: bash
-        timeout-minutes: 5
-        run: |
-          clang_cl=$(cygpath -u "$CC")
-          sh scripts/check/check-bootstrap-windows-c-admission.shs \
-            "$clang_cl" "$PWD/build/bootstrap/windows-c-admission"
+            windows-gnullvm-bootstrap-
 
       - name: Build Rust seed
         working-directory: src/compiler_rust
-        shell: bash
-        run: cargo build --profile bootstrap -p simple-driver --target ${{ matrix.rust-target }}
+        run: cargo build --profile bootstrap -p simple-driver
 
       - name: Build native_all library
         working-directory: src/compiler_rust
-        shell: bash
-        run: cargo build --profile bootstrap -p simple-native-all --features driver-compat --target ${{ matrix.rust-target }}
+        run: cargo build --profile bootstrap -p simple-native-all --features driver-compat
 
       - name: Verify seed binary
-        shell: bash
         run: |
-          SEED="src/compiler_rust/target/${{ matrix.rust-target }}/bootstrap/simple.exe"
+          SEED="src/compiler_rust/target/bootstrap/simple.exe"
           if [ ! -f "$SEED" ]; then
             echo "::error::Seed binary not found at $SEED"
             exit 1
@@ -209,119 +112,52 @@ jobs:
           echo "Seed binary size: $(wc -c < "$SEED") bytes"
           "$SEED" --version
 
-      - name: Strict full bootstrap
-        id: strict_full_bootstrap
-        shell: bash
-        env:
-          SIMPLE_WINDOWS_ABI: ${{ matrix.linker-flavor }}
-          SIMPLE_LINKER_FLAVOR: ${{ matrix.linker-flavor }}
-          SIMPLE_PROJECT_ROOT: ${{ github.workspace }}
-          SIMPLE_NO_STUB_FALLBACK: "1"
-        run: |
-          bash scripts/bootstrap/bootstrap-windows.sh \
-            --${{ matrix.toolchain }} \
-            --backend=cranelift \
-            --mode=dynload \
-            --full-bootstrap \
-            --stop-after-stage2 \
-            --no-mcp \
-            --verbose \
-            --jobs=2
-          stage2="$PWD/build/bootstrap/stage2/${{ matrix.rust-target }}/simple.exe"
-          test -x "$stage2"
-          bootstrap_receipt="$PWD/build/bootstrap/windows-stage3-planner-admission-v2.env"
-          sh scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs \
-            --target=//bootstrap:stage3 \
-            --reason=verify-landed-compiler-fix \
-            --parent-compiler="$stage2" \
-            --out="$bootstrap_receipt"
-          bash scripts/bootstrap/bootstrap-windows.sh \
-            --${{ matrix.toolchain }} \
-            --bootstrap-receipt="$bootstrap_receipt" \
-            --resume-stage3-from-admitted=build/bootstrap
-
-      - name: Upload strict bootstrap failure logs
-        if: failure() && steps.strict_full_bootstrap.outcome == 'failure'
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-bootstrap-failure-${{ matrix.toolchain }}-${{ github.sha }}
-          path: build/bootstrap/logs/**
-          if-no-files-found: error
-          retention-days: 7
-
-      # Stage 2: compile Simple compiler from source using the seed
+      # Stage 2: compile the pure-Simple compiler from source using the seed
+      # (release.yml calls this binary stage1).
       - name: Stage 2 compile
-        shell: bash
         env:
-          SIMPLE_LINKER_FLAVOR: ${{ matrix.linker-flavor }}
           SIMPLE_BOOTSTRAP: "1"
           SIMPLE_PROJECT_ROOT: ${{ github.workspace }}
-          # Each matrix job starts from a fresh checkout with no SCV compile-event
+          # Each run starts from a fresh checkout with no SCV compile-event
           # cursor.  Admit that one-time initialization explicitly; otherwise the
           # seed fails closed before it can produce the Stage 2 compiler.
           SIMPLE_SCV_INVENTORY_COLD_INIT: "1"
+          SIMPLE_PARSE_SHARDING: "0"
+          RUST_LOG: error
         run: |
-          SEED="src/compiler_rust/target/${{ matrix.rust-target }}/bootstrap/simple.exe"
+          SEED="src/compiler_rust/target/bootstrap/simple.exe"
           mkdir -p build/bootstrap
-          "$SEED" native-build --entry src/app/cli/bootstrap_main.spl \
-            --entry-closure \
+          "$SEED" native-build \
+            --source src/compositions/kernel_llvm_cranelift --source src \
+            --entry-closure --entry src/app/cli/bootstrap_main.spl \
+            --backend cranelift --mode dynload --threads 2 \
             -o build/bootstrap/simple_stage2.exe
 
-      # MinGW is used only as the target linker for this post-bootstrap
-      # PE/COFF relocation test; the seed C compiler remains verified clang-cl.
-      - name: Install MinGW relocation linker
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          install: mingw-w64-x86_64-gcc
+      - name: Verify Stage 2 binary (version + hello world)
+        env:
+          SIMPLE_PROJECT_ROOT: ${{ github.workspace }}
+        run: |
+          set -eu
+          bin=build/bootstrap/simple_stage2.exe
+          "./$bin" --version
+          probe=build/windows-gnu-sanity
+          rm -rf "$probe" && mkdir -p "$probe"
+          printf 'fn main():\n    print "windows-gnu-hello-ok"\n' > "$probe/hello.spl"
+          "./$bin" native-build "$probe/hello.spl" -o "$probe/hello.exe"
+          "$probe/hello.exe" | tee "$probe/run.log"
+          grep -qx 'windows-gnu-hello-ok' "$probe/run.log"
 
       - name: Verify Windows bootstrap global relocations
-        shell: msys2 {0}
         env:
           SIMPLE_BINARY: build/bootstrap/simple_stage2.exe
         run: sh scripts/check/check-bootstrap-windows-global-relocation.shs
-
-      # Stage 2 LLVM: compile Simple compiler using stage1 + LLVM lib backend
-      - name: Stage 2 with LLVM lib backend
-        shell: bash
-        env:
-          SIMPLE_BOOTSTRAP: "1"
-          SIMPLE_PROJECT_ROOT: ${{ github.workspace }}
-        run: |
-          STAGE1="build/bootstrap/simple_stage2.exe"
-          if [ ! -f "$STAGE1" ]; then
-            echo "Skipping LLVM stage2 — no stage1 binary"
-            exit 0
-          fi
-          mkdir -p build/bootstrap
-          "./$STAGE1" native-build \
-            --entry src/app/cli/bootstrap_main.spl \
-            --entry-closure \
-            --backend=llvm-lib \
-            -o build/bootstrap/simple_llvm_stage2.exe \
-            2>&1 || true
-          if [ -f build/bootstrap/simple_llvm_stage2.exe ]; then
-            ./build/bootstrap/simple_llvm_stage2.exe --version
-            echo "LLVM lib stage2 verified"
-          else
-            echo "LLVM lib stage2 not produced (expected during early development)"
-          fi
-
-      - name: Upload LLVM stage2 binary
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: llvm-stage2-${{ matrix.toolchain }}-${{ github.sha }}
-          path: build/bootstrap/simple_llvm_stage2.exe
-          if-no-files-found: ignore
-          retention-days: 7
 
       - name: Upload seed binary
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: seed-${{ matrix.toolchain }}-${{ github.sha }}
-          path: src/compiler_rust/target/${{ matrix.rust-target }}/bootstrap/simple.exe
+          name: seed-gnu-${{ github.sha }}
+          path: src/compiler_rust/target/bootstrap/simple.exe
           if-no-files-found: error
           retention-days: 7
 
@@ -329,7 +165,7 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: stage2-${{ matrix.toolchain }}-${{ github.sha }}
+          name: stage2-gnu-${{ github.sha }}
           path: build/bootstrap/simple_stage2.exe
           if-no-files-found: ignore
           retention-days: 7
