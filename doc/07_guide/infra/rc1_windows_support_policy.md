@@ -1,8 +1,12 @@
 # RC1 Windows support policy
 
-RC1 requires one fully qualified host: `x86_64-pc-windows-msvc`. The selected
-runner is the local Windows host (`self-hosted`), using the admitted LLVM/MSVC
-toolchain. One successful host means its complete required bootstrap and tests
+RC1 requires one fully qualified host: `x86_64-pc-windows-gnu`, the default
+Windows configuration (MinGW UCRT via MSYS2 CLANG64: clang + LLD +
+libunwind/libc++ over UCRT; see
+[toolchain/windows_mingw_ucrt.md](toolchain/windows_mingw_ucrt.md)). The selected
+runner is the local Windows host (`self-hosted`), using the CLANG64 toolchain.
+The MSVC configuration (`x86_64-pc-windows-msvc`) stays buildable in-tree but is
+not an RC target. One successful host means its complete required bootstrap and tests
 pass; it does not mean one backend, one phase, or one smoke test is sufficient.
 
 The authority is [release/support.sdn](../../../release/support.sdn). Its `rc`
@@ -32,7 +36,7 @@ required checks are not PASS.
 Using the qualified self-hosted release runtime, the existing policy query is:
 
 ```text
-simple release support-check --root=. --channel=rc --observed-target=x86_64-pc-windows-msvc --json
+simple release support-check --root=. --channel=rc --observed-target=x86_64-pc-windows-gnu --json
 ```
 
 This checks the declared target coverage and renders a matrix. It does not run
