@@ -52,6 +52,7 @@ use compiler.hir.hir_lowering.items.{
 use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module, hirlowering_for_module_with_diagnostics}
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.hir.hir_lowering.module_surface_declarations.{ModuleSurfaceParserOwner}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.frontend.frontend_target_cfg_receipt_v1.{frontend_cfg_receipt_valid_v1}
 use compiler.frontend.rt_criticality_registry.{rt_criticality_claim_keys}
@@ -255,40 +256,54 @@ fn driver_register_reverse_reference_name_v1(
     reverse_reference_owner_register_source_alias_v1(
         "{emitted_owner}__{name}", source)
 
+# @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=by_value_struct_transport_corrupts
+# Takes the flattened owner (a class: by-reference transport) instead of the
+# 30-limb ParserModule struct by value — the by-value copy read back garbage
+# handles (SIGSEGV in the functions.keys() loop). Same family as
+# ModuleSurfaceParserOwner's inline-struct field defect; element reads use
+# the annotated-rebind hazard-sweep pattern.
 fn driver_register_parser_module_source_aliases_v1(
-        module: ParserModule, source: text):
+        owner: ModuleSurfaceParserOwner, source: text):
+    val module_name: text = owner.name
     reverse_reference_owner_register_source_alias_v1(source, source)
-    reverse_reference_owner_register_source_alias_v1(module.name, source)
-    for name in module.functions.keys():
-        driver_register_reverse_reference_name_v1(module.name, name, source)
-        for attribute in module.functions[name].attributes:
+    reverse_reference_owner_register_source_alias_v1(module_name, source)
+    for name in owner.functions.keys():
+        driver_register_reverse_reference_name_v1(module_name, name, source)
+        val fn_binding: ParserFunction = owner.functions[name]
+        for raw_attribute in fn_binding.attributes:
+            val attribute: Attribute = raw_attribute
             reverse_reference_owner_register_source_alias_v1(
                 attribute.name, source)
-    for name in module.classes.keys():
-        driver_register_reverse_reference_name_v1(module.name, name, source)
-        for method_name in module.classes[name].methods.keys():
+    for name in owner.classes.keys():
+        driver_register_reverse_reference_name_v1(module_name, name, source)
+        val class_binding: ParserClass = owner.classes[name]
+        for method_name in class_binding.methods.keys():
             driver_register_reverse_reference_name_v1(
-                module.name, method_name, source)
-    for name in module.actors.keys():
-        driver_register_reverse_reference_name_v1(module.name, name, source)
-        for method_name in module.actors[name].methods.keys():
+                module_name, method_name, source)
+    for name in owner.actors.keys():
+        driver_register_reverse_reference_name_v1(module_name, name, source)
+        val actor_binding: ActorDef = owner.actors[name]
+        for method_name in actor_binding.methods.keys():
             driver_register_reverse_reference_name_v1(
-                module.name, method_name, source)
-    for name in module.structs.keys():
-        driver_register_reverse_reference_name_v1(module.name, name, source)
-    for name in module.enums.keys():
-        driver_register_reverse_reference_name_v1(module.name, name, source)
-    for name in module.traits.keys():
-        driver_register_reverse_reference_name_v1(module.name, name, source)
-        for method in module.traits[name].methods:
+                module_name, method_name, source)
+    for name in owner.structs.keys():
+        driver_register_reverse_reference_name_v1(module_name, name, source)
+    for name in owner.enums.keys():
+        driver_register_reverse_reference_name_v1(module_name, name, source)
+    for name in owner.traits.keys():
+        driver_register_reverse_reference_name_v1(module_name, name, source)
+        val trait_binding: ParserTrait = owner.traits[name]
+        for raw_method in trait_binding.methods:
+            val method: ParserFunction = raw_method
             driver_register_reverse_reference_name_v1(
-                module.name, method.name, source)
-    for name in module.constants.keys():
-        driver_register_reverse_reference_name_v1(module.name, name, source)
-    for impl_block in module.impls:
+                module_name, method.name, source)
+    for name in owner.constants.keys():
+        driver_register_reverse_reference_name_v1(module_name, name, source)
+    for raw_impl in owner.impls:
+        val impl_block: Impl = raw_impl
         for method_name in impl_block.methods.keys():
             driver_register_reverse_reference_name_v1(
-                module.name, method_name, source)
+                module_name, method_name, source)
 
 fn driver_register_reverse_reference_sources_v1(ctx: CompileContext):
     for source in ctx.sources:
@@ -595,7 +610,8 @@ impl CompilerDriver:
                 return Err("transient parser scope error ownership failed for {source.path}")
             return Err(selected.unwrap_err())
         val module = selected.unwrap()
-        driver_register_parser_module_source_aliases_v1(module, source.path)
+        driver_register_parser_module_source_aliases_v1(
+            ModuleSurfaceParserOwner.new(module), source.path)
         if par_had_error_get():
             return Err(driver_finish_failed_parse_scope(source.path, reverse_token))
         if nscope_trace: eprint("[nscope-hir] parsed path={source.path}")
@@ -803,7 +819,8 @@ impl CompilerDriver:
                 errors.push(parsed.unwrap_err())
             else:
                 val parser_module = parsed.unwrap()
-                driver_register_parser_module_source_aliases_v1(parser_module, source.path)
+                driver_register_parser_module_source_aliases_v1(
+                    ModuleSurfaceParserOwner.new(parser_module), source.path)
                 if par_had_error_get():
                     errors.push(driver_parse_error_message(source.path))
                 else:
