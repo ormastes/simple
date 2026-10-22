@@ -64,3 +64,31 @@ refusing node. Rebuild the stage-2 candidate and read the sanity log.
   (`mir_worker_flatpool_*` bug docs) concerns a different lane.
 - The stage-2 cache required `--invalidate-cache=stage2` after the source
   identity moved (expected; old cache preserved by the script).
+
+## Field-level verdict (2026-10-23, lane A rerun 3)
+
+```
+[rr-publish] publish refused token=1 batch_token=-525297044564342979
+  batch_gen=15726932 owner_gen=1 active=true sealed=false valid=false
+```
+
+The publish node refuses because EVERY scalar limb of the promoted batch
+class reads back garbage across the transient-scope end: `batch_token` and
+`batch_generation` are corrupted i64s and `sealed`/`valid` read false even
+though seal set and stored them back. Module globals read correctly in the
+same process (`active=true owner_gen=1`). The array (handle) limbs are
+unaffected — the same mixed scalar+array inline-class corruption family as
+`stage2_sanity_module_path_naming_probe_segv_2026_10_22` (ParserModule
+flatten), here transported through `transient_promote`.
+
+Note: a rerun under heavy multi-agent load failed differently (frontend
+smoke rc=124 timeout in parse of the single p2_add file) — that mode is
+contention, not this defect.
+
+## Workaround landed
+
+`reverse_reference_facts.spl` mirrors the batch scalars in module globals
+(`_rr_module_batch_{token,generation,sealed,valid}_g_v1`), which survive the
+corruption; seal/publish/accepts_registration now validate against the
+globals. The class and its array flows are unchanged. Proper repair remains
+the runtime class-layout/copy fix for mixed scalar+array classes.
