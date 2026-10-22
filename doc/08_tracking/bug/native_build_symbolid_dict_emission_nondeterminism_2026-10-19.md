@@ -58,6 +58,9 @@ Sites whose iteration order leaks into bytes must order explicitly.
 ## Verification
 
 `src/compiler/bootstrap_admission/` dict-order probe: two stage-2-compiled
-binaries printed different iteration orders before the fix; after the stage-2
-rebuild with this change, planner rebuilds are byte-identical (see PR
-evidence).
+binaries printed different iteration orders before the fix. After rebuilding
+stage 2 with this change (worktree at 4ab52ecd1f0 + cherry-pick, LLVM lane,
+2026-10-22): four planner builds — two with fresh cache dirs, two sharing one
+cache dir — all produced the byte-identical binary
+`f6f25554d0944e3870a3e022f4e0d1464c527f91ec8f60e6e3bb6495549c197d`.
+Before the fix, the same procedure produced four distinct binaries.
