@@ -30,6 +30,7 @@ jobs:
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       count: ${{ steps.plan.outputs.count }}
+      ready: ${{ steps.compiler.outputs.ready }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -52,10 +53,29 @@ jobs:
             pull_request) sh scripts/ci/plan-components.shs "$PR_BASE" "$HEAD" ;;
             *) sh scripts/ci/plan-components.shs "${PUSH_BASE:-0}" "$HEAD" ;;
           esac
+      # Components build only with a compiler resolve-bootstrap-compiler.shs
+      # proves (it must build and run a hello world). Before any RC carries
+      # one there is nothing to build with: the build jobs are reported
+      # SKIPPED with the resolver's reason, never passed.
+      - name: Proven compiler available?
+        id: compiler
+        if: steps.plan.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if picked=$(sh scripts/bootstrap/resolve-bootstrap-compiler.shs --platform linux-x86_64 2>resolve.err); then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            echo "proven compiler: $picked"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            cat resolve.err
+            echo "::warning::No proven linux-x86_64 compiler (local phase or RC) qualified; component builds skipped, not passed."
+            { echo "Component builds SKIPPED: no proven compiler qualified."; echo '```'; tail -20 resolve.err; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   build:
     needs: plan
-    if: needs.plan.outputs.count != '0'
+    if: needs.plan.outputs.count != '0' && needs.plan.outputs.ready == 'true'
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
