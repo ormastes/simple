@@ -397,3 +397,36 @@ owner scope has ended — one bug family, three faces.
 Probe that proves it without a rebuild: watch `reset_all_pools` call sites
 between `flat_pools_restore_all` and the panicking encode in the worker
 (gdb breakpoint or an env-gated counter print on reset).
+
+## Update 8 (2026-10-22, proof) — decode-dangle PROVEN; policy gate is the next blocker
+
+Canonical delegated repro + `SIMPLE_FRONTEND_CACHE=0` (no private cache →
+no decode path; every parse is fresh):
+
+- **ZERO flat-pool panics** (every cache-enabled run had 1-2).
+- The build runs parse/surface/hir/MIR-start cleanly — worker included —
+  and stops at the NEXT gate: `[ERROR] MIR error: MIR final repository
+  policy or emission schedule differs` (lower_archived_to_mir_v1,
+  driver_pipeline_lowering.spl:612-615; archived `bootstrap_mode == "1"`
+  vs the smoke's `SIMPLE_BOOTSTRAP=0`).
+
+Conclusions:
+
+1. The pool-backed decode is the sole source of the invalid-text panic.
+   With no decode, the same binary/worker/flow is clean through MIR.
+2. The stage2 gate therefore has exactly TWO remaining defects, ordered:
+   (a) the decode-dangle (this doc) — crashes with the cache enabled,
+       which is the gate's default;
+   (b) the archived-repository policy mismatch (bootstrap_mode=1 archive
+       vs bootstrap=0 smoke) — the next blocker, visible only once (a) is
+       fixed. Attempt 30 (pre-regression) passed sanity, so the
+       archive/smoke contract held before the regression range — one side
+       changed; bisect from `final_repository.bootstrap_mode` assignment.
+3. The re-encode site for (a) is NOT the module re-store (hit paths don't
+   store): it is an encode of a structure that HOLDS decoded pool-backed
+   texts — prime candidate the HIR emission record
+   (`RuntimeStdMirModuleEmissionV1(module.name, ...)`,
+   runtime_std_mir_emission_v1.spl:105) built at hir entry from the
+   decoded module and serialized later. Fix shapes: promote the decoded
+   module's texts (owned copies at decode or at record construction), or
+   pin the pools across the module's lifetime.
