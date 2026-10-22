@@ -84,8 +84,6 @@ jobs:
 
           # FreeBSD (uses Linux binary via Linuxulator)
           - os: ubuntu-latest
-            platform: freebsd-x86_64
-          - os: ubuntu-latest
             platform: freebsd-x86
             cross_compile: true
 
@@ -1671,6 +1669,75 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
+  # Native FreeBSD x86_64 phase 1: the cross row could only produce a Rust
+  # seed, which never satisfies release. Build seed -> pure-Simple stage1
+  # inside a FreeBSD VM and package it like the matrix rows (artifact name
+  # bootstrap-freebsd-x86_64, so rc-drop picks it up).
+  freebsd-phase1:
+    name: Build Bootstrap Package (FreeBSD x86_64, native VM)
+    needs: check-version
+    if: needs.check-version.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build phase-1 compiler in FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          mem: 12288
+          prepare: |
+            pkg install -y bash curl git gmake pkgconf zstd llvm
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
+          run: |
+            set -eu
+            . "$HOME/.cargo/env"
+            cd src/compiler_rust
+            CARGO_BUILD_JOBS=2 cargo build --profile bootstrap -p simple-driver
+            CARGO_BUILD_JOBS=2 cargo build --profile bootstrap -p simple-native-all --features driver-compat
+            cd ../..
+            mkdir -p build/bootstrap/stage1
+            RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=0 \
+              src/compiler_rust/target/bootstrap/simple native-build \
+              --source src/compositions/kernel_llvm_cranelift --source src \
+              --entry-closure --entry src/app/cli/bootstrap_main.spl \
+              --mode dynload --threads 2 --timeout 3600 \
+              --output build/bootstrap/stage1/simple 2>&1 | tail -40 || true
+            ./build/bootstrap/stage1/simple --version
+            # Sanity: the phase-1 compiler must build and run a hello world.
+            mkdir -p build/sanity
+            printf 'fn main():\n    print "freebsd-phase1-ok"\n' > build/sanity/hello.spl
+            ./build/bootstrap/stage1/simple native-build build/sanity/hello.spl -o build/sanity/hello
+            ./build/sanity/hello | grep -q freebsd-phase1-ok
+            echo "FreeBSD phase-1 compiler verified"
+      - name: Package FreeBSD phase-1 compiler
+        shell: bash
+        env:
+          VERSION: ${{ needs.check-version.outputs.version }}
+        run: |
+          PLATFORM=freebsd-x86_64
+          PKG_DIR="simple-bootstrap-${VERSION}-${PLATFORM}"
+          mkdir -p "${PKG_DIR}/bin"
+          cp build/bootstrap/stage1/simple "${PKG_DIR}/bin/simple-runtime"
+          chmod +x "${PKG_DIR}/bin/simple-runtime"
+          printf '%s\n' '#!/bin/sh' 'SCRIPT_DIR=$(dirname -- "$0")' 'export SIMPLE_ASSET_ROOT="$SCRIPT_DIR/.."' 'exec "$SCRIPT_DIR/simple-runtime" "$@"' > "${PKG_DIR}/bin/simple"
+          chmod +x "${PKG_DIR}/bin/simple"
+          echo 1 > "${PKG_DIR}/PHASE"
+          cp -r lib src examples "${PKG_DIR}/" 2>/dev/null || true
+          cp README.md LICENSE THIRD_PARTY_NOTICES.md "${PKG_DIR}/" 2>/dev/null || true
+          cp -r assets "${PKG_DIR}/"
+          tar czf "${PKG_DIR}.spk" "${PKG_DIR}"
+          bash scripts/check_release_payload.shs --tar "${PKG_DIR}.spk"
+          sha256sum "${PKG_DIR}.spk" > "${PKG_DIR}.spk.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-freebsd-x86_64
+          path: |
+            simple-bootstrap-*.spk
+            simple-bootstrap-*.spk.sha256
+          retention-days: 90
+
   # RC drop: publishes every platform package that DID build, without waiting
   # for the whole matrix, so a phase-1 binary is downloadable as soon as one
   # platform produces it. Each dispatch publishes the NEXT numbered prerelease
@@ -1679,7 +1746,7 @@ jobs:
   # (spipe-vcs-v3-version-tag-*).
   rc-drop:
     name: Publish RC Drop (available platforms)
-    needs: [check-version, build-bootstrap]
+    needs: [check-version, build-bootstrap, freebsd-phase1]
     if: always() && github.event_name == 'workflow_dispatch' && needs.check-version.outputs.changed == 'true'
     runs-on: ubuntu-latest
     permissions:
