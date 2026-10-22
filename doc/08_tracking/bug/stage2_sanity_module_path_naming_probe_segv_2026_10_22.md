@@ -190,3 +190,26 @@ Host note: all evidence above is from the Linux LLVM-23.1.2 lane on a
 process-tree RSS cap there (~5.3 GiB measured, cap 5.59 GiB) and is reported
 as TIMEOUT — that row cannot complete on this host class regardless of this
 crash.
+
+## Update 2026-10-22 (flatten attempt): prescribed flatten also insufficient — transport corruption is upstream of the owner
+
+The prescribed flatten was implemented: ModuleSurfaceParserOwner now carries
+only pointer-sized fields (one text/list/Dict handle per ParserModule limb),
+the class moved to module_surface_types.spl, the projection and the
+objectless-proof consumers read owner fields directly, and no ParserModule is
+extracted from the class. The worker STILL SIGSEGVs with an identical
+backtrace (projection reading owner.impls lands on text bytes), so the
+corruption is already present in the by-value ParserModule argument handed to
+ModuleSurfaceParserOwner.new / add_parsed_canonical — i.e. the large-struct
+by-value ARGUMENT transport corrupts at stage-2 scale, before any class field
+is involved. This matches the NLL live_aliases instance (fixed by moving the
+callee to module scope), but here every hop is already a free function, so the
+remaining suspect is the seed's by-value aggregate argument marshal itself in
+the ~1487-module candidate.
+
+The flatten is retained anyway: it matches the prescribed direction, compiles
+cleanly, and shrinks the corruption surface, but it does NOT fix the crash.
+Effective next step is therefore NOT another caller-side reshape: reproduce a
+large-struct by-value argument in a seed-built binary whose module count
+crosses the failing threshold, or compile the candidate with -g and read the
+exact faulting field offset in the marshal path.
