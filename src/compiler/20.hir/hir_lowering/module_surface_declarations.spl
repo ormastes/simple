@@ -195,49 +195,176 @@ fn module_surface_export_origin_hints(
             owner_file = ""
     Ok(true)
 
+# @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=class_inline_struct_field_corrupts
+# The self-hosted candidate corrupts class fields whose type is a large
+# inline struct: `value: ParserModule` (30 limbs) read back garbage
+# (name.len() == -1) no matter how many typed local binds wrapped the
+# store. Same family as the NLL live_aliases array-argument corruption.
+# The wrapper therefore stores ONE HANDLE-SIZED SLOT PER ParserModule LIMB
+# (texts/Dicts/arrays are all single handles; bools/i64s are scalars) and
+# `module_surface_owner_value` reconstructs the ParserModule at the use
+# site. The proper repair is the compiler's class-field layout/copy for
+# large inline structs.
 pub class ModuleSurfaceParserOwner:
-    value: ParserModule
+    name: text
+    imports: [ParserImport]
+    exports: [Export]
+    domain_blocks: [DomainBlock]
+    functions: Dict<text, ParserFunction>
+    function_headers: Dict<text, ParserFunctionHeader>
+    function_order: [text]
+    classes: Dict<text, ParserClass>
+    actors: Dict<text, ActorDef>
+    actor_order: [text]
+    structs: Dict<text, ParserStruct>
+    enums: Dict<text, ParserEnum>
+    bitfields: Dict<text, Bitfield>
+    traits: Dict<text, ParserTrait>
+    impls: [Impl]
+    type_aliases: Dict<text, ParserTypeAlias>
+    constants: Dict<text, ParserConst>
+    static_asserts: [StaticAssert]
+    aop_advices: [AopAdvice]
+    di_bindings: [DiBinding]
+    arch_rules: [ArchRule]
+    mock_decls: [MockDecl]
+    tagged_layer: text
+    layer_dag_edges: text
+    friends: [text]
+    internal_exports: [text]
+    nogc_strict: bool
+    extend_enums: [ParserExtendEnum]
+    representation_declarations: [RepresentationDeclarationV1]
 
     static fn new(value: ParserModule) -> ModuleSurfaceParserOwner:
-        # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=by_value_struct_ctor_arg_corrupts_field
-        # Passing the large ParserModule struct straight into the constructor
-        # stored a corrupt field copy in the self-hosted candidate (reads of
-        # owner.value later return garbage: name.len() == -1). An explicit
-        # typed local bind before construction lowers cleanly.
-        val bound: ParserModule = value
-        ModuleSurfaceParserOwner(value: bound)
+        # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=by_value_sweep
+        # Annotated rebind per limb: ANY-transport hazard sweep pattern used
+        # throughout this file for parser aggregates crossing call boundaries.
+        val v_name: text = value.name
+        val v_imports: [ParserImport] = value.imports
+        val v_exports: [Export] = value.exports
+        val v_domain_blocks: [DomainBlock] = value.domain_blocks
+        val v_functions: Dict<text, ParserFunction> = value.functions
+        val v_function_headers: Dict<text, ParserFunctionHeader> = value.function_headers
+        val v_function_order: [text] = value.function_order
+        val v_classes: Dict<text, ParserClass> = value.classes
+        val v_actors: Dict<text, ActorDef> = value.actors
+        val v_actor_order: [text] = value.actor_order
+        val v_structs: Dict<text, ParserStruct> = value.structs
+        val v_enums: Dict<text, ParserEnum> = value.enums
+        val v_bitfields: Dict<text, Bitfield> = value.bitfields
+        val v_traits: Dict<text, ParserTrait> = value.traits
+        val v_impls: [Impl] = value.impls
+        val v_type_aliases: Dict<text, ParserTypeAlias> = value.type_aliases
+        val v_constants: Dict<text, ParserConst> = value.constants
+        val v_static_asserts: [StaticAssert] = value.static_asserts
+        val v_aop_advices: [AopAdvice] = value.aop_advices
+        val v_di_bindings: [DiBinding] = value.di_bindings
+        val v_arch_rules: [ArchRule] = value.arch_rules
+        val v_mock_decls: [MockDecl] = value.mock_decls
+        val v_tagged_layer: text = value.tagged_layer
+        val v_layer_dag_edges: text = value.layer_dag_edges
+        val v_friends: [text] = value.friends
+        val v_internal_exports: [text] = value.internal_exports
+        val v_nogc_strict: bool = value.nogc_strict
+        val v_extend_enums: [ParserExtendEnum] = value.extend_enums
+        val v_representation_declarations: [RepresentationDeclarationV1] = value.representation_declarations
+        ModuleSurfaceParserOwner(
+            name: v_name,
+            imports: v_imports,
+            exports: v_exports,
+            domain_blocks: v_domain_blocks,
+            functions: v_functions,
+            function_headers: v_function_headers,
+            function_order: v_function_order,
+            classes: v_classes,
+            actors: v_actors,
+            actor_order: v_actor_order,
+            structs: v_structs,
+            enums: v_enums,
+            bitfields: v_bitfields,
+            traits: v_traits,
+            impls: v_impls,
+            type_aliases: v_type_aliases,
+            constants: v_constants,
+            static_asserts: v_static_asserts,
+            aop_advices: v_aop_advices,
+            di_bindings: v_di_bindings,
+            arch_rules: v_arch_rules,
+            mock_decls: v_mock_decls,
+            tagged_layer: v_tagged_layer,
+            layer_dag_edges: v_layer_dag_edges,
+            friends: v_friends,
+            internal_exports: v_internal_exports,
+            nogc_strict: v_nogc_strict,
+            extend_enums: v_extend_enums,
+            representation_declarations: v_representation_declarations
+        )
+
+pub fn module_surface_owner_value(owner: ModuleSurfaceParserOwner) -> ParserModule:
+    # Reconstruct the ParserModule from the wrapper's handle-sized limbs.
+    # Named construction of a 30-field struct lowers correctly in the
+    # candidate; only the class-inline-struct-field round trip was corrupt.
+    ParserModule(
+        name: owner.name,
+        imports: owner.imports,
+        exports: owner.exports,
+        domain_blocks: owner.domain_blocks,
+        functions: owner.functions,
+        function_headers: owner.function_headers,
+        function_order: owner.function_order,
+        classes: owner.classes,
+        actors: owner.actors,
+        actor_order: owner.actor_order,
+        structs: owner.structs,
+        enums: owner.enums,
+        bitfields: owner.bitfields,
+        traits: owner.traits,
+        impls: owner.impls,
+        type_aliases: owner.type_aliases,
+        constants: owner.constants,
+        static_asserts: owner.static_asserts,
+        aop_advices: owner.aop_advices,
+        di_bindings: owner.di_bindings,
+        arch_rules: owner.arch_rules,
+        mock_decls: owner.mock_decls,
+        tagged_layer: owner.tagged_layer,
+        layer_dag_edges: owner.layer_dag_edges,
+        friends: owner.friends,
+        internal_exports: owner.internal_exports,
+        nogc_strict: owner.nogc_strict,
+        extend_enums: owner.extend_enums,
+        representation_declarations: owner.representation_declarations
+    )
 
 pub fn module_surface_from_owner(
     owner: ModuleSurfaceParserOwner, source: SourceFile, source_index: i64
 ) -> Result<ModuleSurface, text>:
     # Compute while the complete ParserModule owner is alive; only four flat
     # limbs cross into persistent surface storage.
-    # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=by_value_struct_arg_transport_corrupts
-    # Passing owner.value (a 15+ field struct) directly as a by-value argument
-    # corrupted the copy in transit in the self-hosted candidate: the callee
-    # SIGSEGV'd in its prologue before executing a single body statement
-    # (unconditional entry eprint never printed; crash PC in the callee's
-    # symbol region). Binding to an explicitly typed local first — the same
-    # pattern that fixed the poll/future generic-enum case — lowers cleanly.
-    val module_local: ParserModule = owner.value
+    # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=class_inline_struct_field_corrupts
+    # owner.value no longer exists: the class stores one handle-sized slot per
+    # ParserModule limb (see ModuleSurfaceParserOwner) and this reconstruction
+    # is the single sanctioned read path.
+    val module_local: ParserModule = module_surface_owner_value(owner)
     val semantic_hex = module_surface_semantic_projection(module_local)
     val semantic_cacheable = semantic_hex.len() == 64
     var callables: Dict<text, ModuleSurfaceCallable> = {}
     var callable_names: [text] = []
-    for name in owner.value.functions.keys():
-        val callable = if owner.value.function_headers.contains_key(name):
-            val fn_header: ParserFunctionHeader = owner.value.function_headers[name]
+    for name in module_local.functions.keys():
+        val callable = if module_local.function_headers.contains_key(name):
+            val fn_header: ParserFunctionHeader = module_local.function_headers[name]
             module_surface_callable_from_header(fn_header)
         else:
             # Compatibility for parser producers without the compact header
             # index.
-            module_surface_callable_from_function(owner.value.functions[name])
+            module_surface_callable_from_function(module_local.functions[name])
         callables[name] = callable
         callable_names = callable_names.push(name)
 
     var composites: Dict<text, ModuleSurfaceComposite> = {}
-    for name in owner.value.classes.keys():
-        val class_: ParserClass = owner.value.classes[name]
+    for name in module_local.classes.keys():
+        val class_: ParserClass = module_local.classes[name]
         var fields: [ModuleSurfaceField] = []
         for raw_field in class_.fields:
             # ANY-transport hazard sweep round 3: annotated rebind.
@@ -250,8 +377,8 @@ pub fn module_surface_from_owner(
                 visibility: field.visibility,
                 declaring_module: source.module_name))
         composites[name] = ModuleSurfaceComposite(name: class_.name, kind: "class", type_params: class_.type_params, fields: fields, visibility: class_.visibility, is_public: class_.is_public, span: class_.span)
-    for name in owner.value.actors.keys():
-        val actor: ActorDef = owner.value.actors[name]
+    for name in module_local.actors.keys():
+        val actor: ActorDef = module_local.actors[name]
         var fields: [ModuleSurfaceField] = []
         for raw_field in actor.fields:
             val field: ParserField = raw_field
@@ -263,8 +390,8 @@ pub fn module_surface_from_owner(
                 visibility: field.visibility,
                 declaring_module: source.module_name))
         composites[name] = ModuleSurfaceComposite(name: actor.name, kind: "actor", type_params: actor.type_params, fields: fields, visibility: actor.visibility, is_public: actor.is_public, span: actor.span)
-    for name in owner.value.structs.keys():
-        val struct_: ParserStruct = owner.value.structs[name]
+    for name in module_local.structs.keys():
+        val struct_: ParserStruct = module_local.structs[name]
         var fields: [ModuleSurfaceField] = []
         for raw_field in struct_.fields:
             val field: ParserField = raw_field
@@ -278,21 +405,21 @@ pub fn module_surface_from_owner(
         composites[name] = ModuleSurfaceComposite(name: struct_.name, kind: "struct", type_params: struct_.type_params, fields: fields, visibility: struct_.visibility, is_public: struct_.is_public, span: struct_.span)
 
     var enums: Dict<text, ModuleSurfaceEnum> = {}
-    for name in owner.value.enums.keys():
-        val enum_: ParserEnum = owner.value.enums[name]
+    for name in module_local.enums.keys():
+        val enum_: ParserEnum = module_local.enums[name]
         enums[name] = ModuleSurfaceEnum(name: enum_.name, type_params: enum_.type_params, variants: enum_.variants, visibility: enum_.visibility, is_public: enum_.is_public, span: enum_.span)
 
     var traits: Dict<text, ModuleSurfaceTrait> = {}
-    for name in owner.value.traits.keys():
-        traits[name] = module_surface_trait_from_trait(owner.value.traits[name])
+    for name in module_local.traits.keys():
+        traits[name] = module_surface_trait_from_trait(module_local.traits[name])
 
     var impls: [ModuleSurfaceImpl] = []
-    for impl_ in owner.value.impls:
+    for impl_ in module_local.impls:
         impls = impls.push(module_surface_impl_from_impl(impl_))
 
     var type_aliases: Dict<text, ModuleSurfaceTypeAlias> = {}
-    for name in owner.value.type_aliases.keys():
-        val alias: ParserTypeAlias = owner.value.type_aliases[name]
+    for name in module_local.type_aliases.keys():
+        val alias: ParserTypeAlias = module_local.type_aliases[name]
         type_aliases[name] = ModuleSurfaceTypeAlias(
             name: alias.name,
             type_params: alias.type_params,
@@ -303,8 +430,8 @@ pub fn module_surface_from_owner(
         )
 
     var constants: Dict<text, ModuleSurfaceConst> = {}
-    for name in owner.value.constants.keys():
-        val constant: ParserConst = owner.value.constants[name]
+    for name in module_local.constants.keys():
+        val constant: ParserConst = module_local.constants[name]
         constants[name] = ModuleSurfaceConst(
             name: constant.name,
             has_type_: constant.has_type_,
@@ -409,7 +536,7 @@ pub fn module_surface_from_owner(
     var import_item_names: [text] = []
     var import_item_aliases: [text] = []
     var import_item_has_alias: [bool] = []
-    for raw_import_decl in owner.value.imports:
+    for raw_import_decl in module_local.imports:
         val import_decl: ParserImport = raw_import_decl
         # (loop body continues below; import_item rebound inside)
         for raw_import_item in import_decl.items:
@@ -439,11 +566,11 @@ pub fn module_surface_from_owner(
         semantic_hash2: module_surface_semantic_hex_limb(semantic_hex, 2),
         semantic_hash3: module_surface_semantic_hex_limb(semantic_hex, 3),
         semantic_cacheable: semantic_cacheable,
-        nogc_strict: owner.value.nogc_strict,
-        imports: owner.value.imports,
-        exports: owner.value.exports,
-        friends: owner.value.friends.copy(),
-        internal_exports: owner.value.internal_exports.copy(),
+        nogc_strict: module_local.nogc_strict,
+        imports: module_local.imports,
+        exports: module_local.exports,
+        friends: module_local.friends.copy(),
+        internal_exports: module_local.internal_exports.copy(),
         import_target_indices: [],
         import_target_names: [],
         import_resolution_traces: [],
