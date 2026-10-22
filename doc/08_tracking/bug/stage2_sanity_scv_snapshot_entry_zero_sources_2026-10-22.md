@@ -181,3 +181,47 @@ Fix attempts and evidence gathered after the initial filing:
    codegen differs from `RT_VALUE_TAG_HEAP` expectations, so every ABI decoder
    misses and the `>= 0x10000` bare-pointer fallback also fails (negative or
    small tagged value).
+
+## Update 2026-10-22 (third session) — text-extern ABI registry is the prime suspect
+
+Deeper findings; the runtime-C string code checks out by inspection
+(`rt_string_new` tags with `RT_VALUE_TAG_HEAP` (0x1) and registers;
+`rt_core_as_string` decodes tag + registry), so the mis-tagging is not in the
+runtime C constructors. The defect class points at the compiler-side
+text-extern ABI registry instead:
+
+- `src/compiler/50.mir/text_extern_abi.spl` carries the table that decides,
+  per extern name, which `text` operands are expanded to (ptr, len) and which
+  stay single tagged words. Its own comments document the exact hazard class:
+  - line 110-111: **"the existing r17 producer retains its old table until
+    rebuilt; binaries it emits do not qualify this edited registry"** — the
+    Rust seed IS such an old producer, so EVERY candidate it compiles embeds
+    the seed's stale table.
+  - lines 107-109: a missing `rt_io_file_open` row "sent read mode zero as
+    path length" (fixed 2026-10-21) — a call silently receiving the wrong
+    operand shape produces precisely our symptom: open of an empty/garbage
+    path fails before the kernel, read returns nil, zero-source gate fires.
+  - lines 231-241: `rt_file_write_text_at` analog — raw char* delivered where
+    a tagged handle was expected; `rt_core_string_to_cpath` rejects with
+    "tag 0 != heap". Same class, write side, already fixed.
+- `rt_path_absolute` (row at line 146) is exercised by the SCV snapshot
+  admission and its result (`admitted.canonical_path`) is exactly the value
+  the failing entry read consumes. Verify the SEED's embedded table row for
+  `rt_path_absolute` and `rt_io_file_open` against the current source table:
+  a stale/missing row in the seed-produced candidate would make the snapshot
+  canonical path (or the read call) silently malformed while relative
+  (working-tree) entries never route through those externs.
+- Note the `io_file_open` wrapper in `sffi/fs.spl` passes three i64 operands
+  (no `text` at the extern), so the table does NOT govern that wrapper's own
+  expansion — the stale-table suspect applies to the DIRECT externs in the
+  path pipeline (`rt_path_absolute`, `rt_file_exists` siblings, the
+  `rt_dir_*` probes), not to the wrapper.
+
+Next diagnostic step (one Stage-2 rebuild): change the `io_file_open` guard
+diagnostic from `eprint` (proven inert in the core-c candidate) to `print`
+(stdout works — `[BOOTSTRAP-PHASE]` traces prove it) and dump
+`count/address/lang_len/path` at the failure; that distinguishes "guard fired,
+value undecodable" from "open reached with garbage pointer and UCRT rejected
+it before CreateFileW" (the current leading theory: `ucrtbase!_open` fired
+exactly once in a full failing run with `rcx = -1`, consistent with wide
+parameter validation failure and no kernel transition).
