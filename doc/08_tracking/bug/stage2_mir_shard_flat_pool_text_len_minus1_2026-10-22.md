@@ -237,3 +237,40 @@ to clear together, and the hir-cache stores to start succeeding (the
 io-write may be a third read of the same corrupt owner: the store key/path
 folds a module field). The proper repair remains the seed's aggregate
 by-value transport (see 205ea9e92a1 commit message).
+
+## Update 4 (2026-10-22, attempt 37) — binds merged: io-write CLEARED; crash narrowed to the worker's frontend-cache store
+
+Landed the Update-3 binds (PR #4168: typed local binds at add_parsed /
+add_parsed_canonical / module_surface_from_module / add_surface_canonical /
+add_surface_canonical_identity). Lane attempt 37 on the fix tree:
+
+- **hir-cache stores now SUCCEED**: `[hir-cache] stores=1 ... io_failed=0`
+  (was io_failed=1 in every prior attempt). The surface-registry transport
+  binds fixed the store path — one symptom cleared, binds kept.
+- **The flat-pool panic persists, unchanged**: `site=text.value item=0
+  input_length=-1` inside the MIR worker, now precisely localized by the
+  log ordering:
+  1. worker re-parse: `[frontend-cache] hits=1` (module comes from the
+     `.fpc` DECODE, not a fresh parse);
+  2. worker store attempt: `[frontend-cache] store failed: cannot write
+     under <probe-cache>/default/frontend (dir_create_all=true)`;
+  3. flat-pool encoder panic on the store's artifact — the FIRST text pool's
+     first item is an invalid handle.
+  So the panicking encode is the **frontend parse-cache (.fpc) store of the
+  DECODED ParserModule**: the `.fpc` decode path yields a module whose first
+  text field is invalid in the storing scope. Suspects, in order:
+  (a) `.fpc` decode registering text pool items in a scope that ends before
+  the re-store encode (owner/scope bug, same family);
+  (b) `.fpc` decode field mis-read (aggregate decode of the 30-limb struct).
+- **The `dir_create_all=true` failure on a fresh tmp tree is a second,
+  independent defect**: some subsystem lays `frontend` down as a FILE while
+  the store path expects a DIRECTORY (or vice versa) — the driver's queue
+  dirs and `.fpc` files coexist under `cache/default/` in preserved repro
+  trees. A file/dir layout race between driver and worker processes would
+  produce exactly this. Worth its own probe: stat the path at store time.
+
+Next probes: (1) print the first text pool's item-0 provenance in the .fpc
+store encode (which ParserModule field, decoded from which pool row);
+(2) stat `cache/default/frontend` at store time in both processes;
+(3) if (a): bind the decode scope owner across the store; if (b): fix the
+decode field offset.
