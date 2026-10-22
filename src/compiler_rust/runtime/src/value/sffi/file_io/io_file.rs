@@ -42,6 +42,8 @@ use crate::value::RuntimeValue;
 
 #[cfg(unix)]
 use std::os::unix::io::{FromRawFd, IntoRawFd};
+#[cfg(windows)]
+use std::os::windows::io::{FromRawHandle, IntoRawHandle};
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -62,7 +64,21 @@ unsafe fn with_fd<T>(fd: i64, default: T, f: impl FnOnce(&mut File) -> T) -> T {
     out
 }
 
-#[cfg(not(unix))]
+/// Windows twin: the Simple-side fd IS the Win32 HANDLE (`into_raw_handle`
+/// from `rt_io_file_open`), so borrow it as a `File` and leak the ownership
+/// back the same way the Unix branch does.
+#[cfg(windows)]
+unsafe fn with_fd<T>(fd: i64, default: T, f: impl FnOnce(&mut File) -> T) -> T {
+    if fd <= 0 {
+        return default;
+    }
+    let mut file = File::from_raw_handle(fd as *mut std::ffi::c_void);
+    let out = f(&mut file);
+    let _ = file.into_raw_handle();
+    out
+}
+
+#[cfg(not(any(unix, windows)))]
 unsafe fn with_fd<T>(_fd: i64, default: T, _f: impl FnOnce(&mut File) -> T) -> T {
     default
 }
@@ -72,6 +88,33 @@ unsafe fn path_from_raw<'a>(ptr: *const u8, len: u64) -> Option<&'a str> {
         return None;
     }
     std::str::from_utf8(std::slice::from_raw_parts(ptr, len as usize)).ok()
+}
+
+/// Open `path` read-only and return a file descriptor, or `-1` on error.
+///
+/// Two-argument twin of `rt_io_file_open`: the seed-produced candidate
+/// mis-passes the `path_len` operand of THREE-argument mixed (ptr, len, mode)
+/// text externs (observed as path_len = -1 at the Rust ABI boundary,
+/// bug: stage2_sanity_scv_snapshot_entry_zero_sources_2026-10-22), while
+/// two-argument (ptr, len) text externs (rt_io_file_exists) expand correctly.
+/// Mode-0 reads through the FileTextSession path route here.
+#[no_mangle]
+pub unsafe extern "C" fn rt_io_file_open_read(path_ptr: *const u8, path_len: u64) -> i64 {
+    rt_io_file_open(path_ptr, path_len, 0)
+}
+
+/// Open `path` write/create/truncate and return a file descriptor, or `-1`.
+/// Two-argument twin; see `rt_io_file_open_read`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_io_file_open_write(path_ptr: *const u8, path_len: u64) -> i64 {
+    rt_io_file_open(path_ptr, path_len, 1)
+}
+
+/// Open `path` append/create and return a file descriptor, or `-1`.
+/// Two-argument twin; see `rt_io_file_open_read`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_io_file_open_append(path_ptr: *const u8, path_len: u64) -> i64 {
+    rt_io_file_open(path_ptr, path_len, 3)
 }
 
 /// Open `path` and return a file descriptor, or `-1` on error.
@@ -105,7 +148,9 @@ pub unsafe extern "C" fn rt_io_file_open(path_ptr: *const u8, path_len: u64, mod
     match opts.open(path) {
         #[cfg(unix)]
         Ok(file) => file.into_raw_fd() as i64,
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        Ok(file) => file.into_raw_handle() as i64,
+        #[cfg(not(any(unix, windows)))]
         Ok(_) => -1,
         Err(_) => -1,
     }
@@ -249,8 +294,24 @@ pub unsafe extern "C" fn rt_io_file_close(fd: i64) -> bool {
     }
     #[cfg(not(unix))]
     {
-        let _ = fd;
-        false
+        if fd <= 0 {
+            return false;
+        }
+        // Windows twin of the Unix branch: reconstruct the File from the
+        // HANDLE the Simple side carries, surface a write-back error, then
+        // genuinely close via drop.
+        #[cfg(windows)]
+        {
+            let file = File::from_raw_handle(fd as *mut std::ffi::c_void);
+            let ok = file.sync_all().is_ok();
+            drop(file);
+            ok
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = fd;
+            false
+        }
     }
 }
 

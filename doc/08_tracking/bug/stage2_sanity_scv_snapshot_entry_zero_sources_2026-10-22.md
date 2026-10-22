@@ -271,3 +271,36 @@ Next session's fastest path: (a) instrument `rt_file_read_text` (ungated,
 fopen-failure dump) and rerun — one lane cycle; (b) in parallel, verify how
 the stage-2 native build sources `.spl` files (SCV snapshot vs worktree) so
 Simple-level fixes actually reach the candidate.
+
+## Update 2026-10-22 (evening, attempts 20-25): read fixed, parse-phase defect remains
+
+The two-argument open twins (`rt_io_file_open_read/write/append`, C +
+Rust) definitively fixed the read path: `load_sources` now reports
+`done=1 total=1 succeeded=1` for the snapshot entry on every run. The
+failure moved to the parse phase:
+
+```
+transient retained parser ownership failed for .../p2_add.spl
+[hir-shard] owner=0/1@0 status=CRASH exit=-1073740791   (0xC0000409 fail-fast)
+```
+
+This is the defect the parallel lane fixed in the C runtime
+(`3d407765f1e`, registered-immortal no-op in `rt_transient_heap_promote`).
+Attempts 21-25 ported that exemption to the Rust twin
+(`collections.rs:rt_transient_heap_promote`) three ways — exported C
+predicate (unlinkable: `runtime_native.c` is not compilable into the Rust
+runtime crate, build.rs ~line 459), Rust `is_registered_heap_ptr` +
+scope-membership guard, and the exact C mirror (registered heap object ->
+no-op). NONE fired: the crash is byte-identical each time.
+
+Leading hypothesis for the next session: the candidate's parse-metadata
+arrays are C-runtime heap objects (C tag bits; the candidate links BOTH
+runtimes with duplicate symbols and link order decides). The Rust
+`value.is_heap()` checks the RUST tag convention, so it returns false for
+C-created objects, the exemption never matches, the Rust promote walks C
+raw words, and `rt_transient_raw_promote` rejects them. Confirm by
+instrumenting the Rust promote to print `value.0` (hex), `is_heap()`, and
+`is_registered_heap_ptr()` for the failing roots; if they are C-tagged, the
+fix is to classify through the C classifier (`rt_core_transient_classify`
+family, which IS linkable — `rt_transient_raw_words` already is) or to
+un-shadow the promote symbols across the two runtimes.
