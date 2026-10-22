@@ -181,3 +181,30 @@ Fix attempts and evidence gathered after the initial filing:
    codegen differs from `RT_VALUE_TAG_HEAP` expectations, so every ABI decoder
    misses and the `>= 0x10000` bare-pointer fallback also fails (negative or
    small tagged value).
+
+## Update 2026-10-22 (Linux aarch64 lane): fixed by restoring the two-arg text ABI
+
+This lane's evidence chain (below) diagnosed "the value is undecodable by the
+whole ABI family" while retaining the raw three-word `rt_io_file_open` form.
+A parallel experiment on the same defect class reached a different conclusion:
+the SEED-side `rt_io_file_open(path: text, mode: i64)` declaration is expanded
+to the three-word C ABI by the compiler's text-ABI registry
+(`src/compiler/50.mir/text_extern_abi.spl`: split row `[0]`, semantic arity 2),
+and with that two-arg form the seed interpreter reads the exact fixture bytes
+(487/487) and the fresh stage2 candidate's driver collects the entry
+(load_sources succeeds, parse phase reached). The raw
+`(path_ptr, path_len, mode)` declaration from 9bb344bb1cf bypasses that
+expansion and was observed broken on BOTH producers (interpreter: operand-shape
+mismatch, fd=-1 for every path; native candidate: every driver file read empty).
+
+Landed fix: 5eccf04d3f0 restores the two-arg declaration and removes the raw
+ABI block (superseding the concat-retry fallback of 83548ce08dd, whose own
+message concedes it "does not rescue the read"). Companion fixes on the same
+lane: 3d407765f1e (rt_transient_heap_promote class-0 exemption now accepts any
+registered-immortal object — fixes the SIGABRT "transient retained parser
+ownership failed" that surfaced once entry collection worked) and 7265bfe0a11
+(runtime build.rs now watches the whole `../../runtime` tree; runtime_native.c
+had no rerun-if-changed row and edits to it silently never rebuilt).
+If the zero-sources symptom still reproduces after this stack, the next
+suspects are the ones named below; otherwise this doc's OPEN status can move
+to FIXED pending the full sanity PASS receipt.
