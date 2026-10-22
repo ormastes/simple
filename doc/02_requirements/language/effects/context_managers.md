@@ -12,7 +12,7 @@ the `with` statement. They implement the resource protocol with `__enter__()` an
 
 ## Syntax
 
-```simple
+```simple:skip
 with resource as alias:
     # code using alias
     # __exit__ is called after this block

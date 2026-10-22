@@ -18,7 +18,7 @@ already parsed on `struct X with Mixin:` — to the trait-header production.
 - No new token (specifically: not `+`).
 - A pure group adds zero methods of its own.
 
-```simple
+```simple:skip
 trait DebugProfiler with DebugTarget, ProfileTarget:
     pass
 ```

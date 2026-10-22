@@ -64,7 +64,7 @@ returned value. No window, no compositor, no MCP, no timing.
 
 Real example, `test/01_unit/lib/common/ui/pixel_surface_content_frame_spec.spl`:
 
-```simple
+```simple:skip
 # @cover src/lib/common/ui/pixel_surface_content_frame.spl 20%
 use std.spec
 use common.ui.pixel_surface_content_frame.{pixel_surface_content_frame}
@@ -174,7 +174,7 @@ observed in this repo.
 interpreter, reading a **class-typed** element out of a collection returns a
 **copy**, so mutating the binding throws the write away with no error:
 
-```simple
+```simple:skip
 val node = tree.children[i]   # interpreter: node is a COPY
 node.visible = false          # write is LOST; tree.children[i] is unchanged
 ```
@@ -237,7 +237,7 @@ single defective element compared against a healthy one, which read as
 
 Write instead:
 
-```simple
+```simple:skip
 expect(gui_row).to_equal(2)
 expect(tui_row).to_equal(2)
 expect(app_row).to_equal(2)
@@ -264,7 +264,7 @@ This uses only APIs verified to exist in the tree: `describe`/`it`/`expect` from
 `src/lib/common/ui/native_scalar_text.spl`. It is a trimmed form of the real
 `test/01_unit/lib/common/ui/native_scalar_text_spec.spl`.
 
-```simple
+```simple:skip
 # @cover src/lib/common/ui/native_scalar_text.spl 100%
 
 use std.spec.*

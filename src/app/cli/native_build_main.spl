@@ -1022,7 +1022,20 @@ fn native_build_mir_shard_parallel(args: [text]) -> i64:
             (env_get("SIMPLE_PARSE_SHARD") ?? "") != "":
         return 0      # already a shard child; never recurse
     val selective = (env_get("SIMPLE_MIR_SELECTIVE") ?? "") == "1"
-    if (env_get("SIMPLE_MIR_SHARDING") ?? "") != "1" and not selective:
+    # Ad-hoc lanes (hand-driven native-build outside the managed bootstrap
+    # stages) default to MIR sharding: each shard worker lowers its claimed
+    # modules, emits their objects, records terminals and EXITS, returning
+    # its memory to the OS — this both parallelizes per-module object
+    # generation and breaks the single-worker RSS accumulation that pins the
+    # self-hosted MIR phase against the allocation cap for hours
+    # (doc/08_tracking/bug/self_hosted_mir_lowering_pathologically_slow_2026_10_22.md).
+    # Managed bootstrap stages set SIMPLE_BOOTSTRAP=1 and drive the shard
+    # schedule themselves; they keep the historical in-process behavior.
+    # Explicit opt-out: SIMPLE_MIR_SHARDING=0. Explicit opt-in (=1) unchanged.
+    val shard_flag = env_get("SIMPLE_MIR_SHARDING") ?? ""
+    val adhoc_default = shard_flag == "" and
+        (env_get("SIMPLE_BOOTSTRAP") ?? "") != "1" and not selective
+    if shard_flag != "1" and not selective and not adhoc_default:
         return 0
     # Every worker would wipe the shared object scope under --clean.
     if (env_get("SIMPLE_NATIVE_BUILD_CLEAN") ?? "") == "1" or args.contains("--clean"):

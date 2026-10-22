@@ -149,7 +149,7 @@ val config = AuditConfig(
 
 ### Default-Deny Policy
 
-```simple
+```simple:skip
 use common.ui.capability.{Capability}
 use common.ui.capability_policy.{CapabilityPolicy, check_capability, grant, deny}
 
@@ -192,7 +192,7 @@ window:
         - DevTools
 ```
 
-```simple
+```simple:skip
 use common.ui.capability_config.{load_capability_config}
 
 val policy = load_capability_config("window_main.capability.sdn", "main")
@@ -200,7 +200,7 @@ val policy = load_capability_config("window_main.capability.sdn", "main")
 
 ### Session Integration
 
-```simple
+```simple:skip
 use nogc_sync_mut.ui.session.{UISession}
 use common.ui.capability_policy.{CapabilityPolicy, grant}
 
@@ -225,7 +225,7 @@ All middleware plug into the async HTTP server's phase pipeline.
 
 ### Enable All Security Middleware
 
-```simple
+```simple:skip
 use std.http_server.rate_limit.{RateLimitConfig, RateLimitStore, rate_limit_handler}
 use std.http_server.request_validation.{RequestValidationConfig, request_validation_handler}
 use std.http_server.csrf.{CsrfConfig, csrf_handler}
@@ -235,7 +235,7 @@ use std.http_server.security_headers.{SecurityHeadersConfig, security_headers_ha
 
 ### Rate Limiting
 
-```simple
+```simple:skip
 val config = RateLimitConfig(
     requests_per_window: 100,  # Max requests per window
     window_ms: 60000,          # 1 minute window
@@ -247,7 +247,7 @@ val config = RateLimitConfig(
 
 ### CSRF Protection
 
-```simple
+```simple:skip
 val config = CsrfConfig(
     secret_key: "your-server-secret",
     token_header: "X-CSRF-Token",
@@ -261,7 +261,7 @@ val config = CsrfConfig(
 
 ### CORS
 
-```simple
+```simple:skip
 val config = CorsConfig(
     allowed_origins: ["https://app.example.com"],
     allowed_methods: ["GET", "POST", "PUT", "DELETE"],
@@ -275,7 +275,7 @@ val config = CorsConfig(
 
 ### Security Headers
 
-```simple
+```simple:skip
 val config = SecurityHeadersConfig.default()
 # Adds to every response:
 # Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'
@@ -327,7 +327,7 @@ These are primarily woven at compile time — you don't call them manually. Trea
 
 ### Using @requires_auth
 
-```simple
+```simple:skip
 @requires_auth
 fn get_user_profile(request: HttpRequestData) -> PhaseResult:
     # Auth check is normally compile-time woven before this runs
@@ -337,7 +337,7 @@ fn get_user_profile(request: HttpRequestData) -> PhaseResult:
 
 ## Security Context
 
-```simple
+```simple:skip
 use std.security.types.{SecurityContext}
 
 # Anonymous context (no auth)

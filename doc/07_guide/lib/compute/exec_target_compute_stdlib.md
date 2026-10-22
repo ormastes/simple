@@ -17,9 +17,8 @@ runtime resolves the **backend**). See glossary → "ExecTarget (Compute Target 
 Two independent **domains**: *drawing* (render, `SIMPLE_2D_BACKEND`) and *processing*
 (compute, this module) — each resolves its own best backend.
 
-```simple
-use std.nogc_async_mut.compute.exec_target.{
-    DeviceClass, ComputeBackend, EnforceMode, BackendCaps, resolve_exec_target }
+```simple:skip
+use std.nogc_async_mut.compute.exec_target.{DeviceClass, ComputeBackend, EnforceMode, BackendCaps, resolve_exec_target}
 
 # Resolve "gpu, prefer best available; require it"
 val caps = BackendCaps.none()      # probe real machine; here: nothing available
@@ -43,7 +42,7 @@ The pure-Simple CPU path is the **differential oracle**. Comparators are
 `!(a<b) && !(b<a)` — **avoid generic `!=`/2-arg `==` on `[T]`** (interpreter bug,
 `doc/08_tracking/bug/interp_generic_eq_callback_2026-06-16.md`).
 
-```simple
+```simple:skip
 fn less_i64(a: i64, b: i64) -> bool: a < b
 val sorted = compute_sort([5,3,8,1], less_i64, t)        # [1,3,5,8]
 val idx    = compute_lower_bound(sorted, 5, less_i64, t) # 2

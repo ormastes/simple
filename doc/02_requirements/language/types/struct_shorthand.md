@@ -12,6 +12,14 @@ matches. This reduces boilerplate when constructing structs from local variables
 ## Syntax
 
 ```simple
+struct Point:
+    x: i64
+    y: i64
+
+val x = 1
+val y = 2
+val computed_y = 3
+
 # Without shorthand (verbose)
 val point = Point(x: x, y: y)
 

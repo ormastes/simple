@@ -45,14 +45,14 @@ Relies on existing types:
 
 Use `_` to skip a position:
 
-```simple
+```simple:skip
 [x86_64, _, _, llvm >= 15]    # any OS, any ABI, llvm 15+
 [aarch64, linux]               # trailing fields default to _
 ```
 
 ### Arch grouping with `|`
 
-```simple
+```text
 [x86_64 | x86]         # matches either arch
 [riscv32 | riscv64]    # matches either RISC-V variant
 ```
@@ -71,7 +71,7 @@ Use `_` to skip a position:
 
 ### `~=` (proper version) semantics
 
-```simple
+```text
 case [x86_64, _, _, llvm ~= 17]:
     # Compiles on any llvm version
     # If llvm != 17, emits:
@@ -85,7 +85,7 @@ case [x86_64, _, _, llvm ~= 17]:
 
 ### `asm match` — Multi-target dispatch (required form)
 
-```simple
+```text
 fn disable_interrupts():
     asm match:
         case [x86_64]:
@@ -102,7 +102,7 @@ fn disable_interrupts():
 
 ### `asm assert` — Compile-time target guard
 
-```simple
+```text
 fn kernel_main():
     asm assert [x86_64, linux, gnu, llvm >= 15]
     # compile_error if ANY qualifier doesn't match build target
@@ -114,7 +114,7 @@ fn kernel_main():
 
 ### NOT supported — standalone `asm[spec]{}`
 
-```simple
+```text
 # WRONG — this is a compile error
 asm[x86_64]:
     "cli"
@@ -133,7 +133,7 @@ asm match:
 
 ### Exhaustive (has `_` catch-all)
 
-```simple
+```text
 asm match:
     case [x86_64]:
         "mfence"
@@ -148,7 +148,7 @@ valid asm for a fallback implementation.
 
 ### Non-exhaustive (no `_`) — compiler warning
 
-```simple
+```text
 asm match:
     case [x86_64]:
         "mfence"
@@ -168,7 +168,7 @@ If the current build target matches no case, it is a **compile error**.
 
 ### 1. Syscall — arch + os
 
-```simple
+```text
 fn fast_syscall(nr: i64) -> i64:
     asm match:
         case [x86_64, linux]:
@@ -192,7 +192,7 @@ fn fast_syscall(nr: i64) -> i64:
 
 ### 2. ABI-sensitive calling — arch + os + abi
 
-```simple
+```text
 fn call_extern(ptr: Ptr):
     asm match:
         case [x86_64, windows, msvc]:
@@ -207,7 +207,7 @@ fn call_extern(ptr: Ptr):
 
 ### 3. Backend version — SIMD requiring llvm 15+
 
-```simple
+```text
 fn simd_add(a: Ptr, b: Ptr, out: Ptr):
     asm match:
         case [x86_64, _, _, llvm >= 15]:
@@ -225,7 +225,7 @@ fn simd_add(a: Ptr, b: Ptr, out: Ptr):
 
 ### 4. Proper/recommended version with `~=`
 
-```simple
+```text
 fn optimized_copy(dst: Ptr, src: Ptr, len: i64):
     asm match:
         case [x86_64, _, _, llvm ~= 17]:
@@ -249,7 +249,7 @@ fn optimized_copy(dst: Ptr, src: Ptr, len: i64):
 
 ### 5. Arch grouping
 
-```simple
+```text
 fn nop_any():
     asm match:
         case [x86_64 | x86]:
@@ -266,7 +266,7 @@ fn nop_any():
 
 ### 6. Compile-time guard before plain asm
 
-```simple
+```text
 fn kernel_entry():
     asm assert [x86_64, linux, gnu, llvm >= 15]
 

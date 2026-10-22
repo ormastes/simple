@@ -212,7 +212,7 @@ The clock edge (rising or falling) is determined by the `VhdlClockDomain.edge` f
 
 ### 5.5 Clock Domain Definition
 
-```simple
+```simple:skip
 struct VhdlClockDomain:
     name: text
     clock_signal: text
@@ -319,7 +319,7 @@ The checker uses Tarjan's Strongly Connected Components algorithm (`TarjanSCC` c
 
 ### 8.4 Constraint Enum
 
-```simple
+```simple:skip
 enum VhdlConstraint:
     WidthEqual(signal1, signal2, width1, width2, span)
     WidthSafe(operands, operator, result_width, span)

@@ -7,7 +7,7 @@ Research: `doc/01_research/domain/rendering_inside_rendering.md`
 
 ## 2D: offscreen render target
 
-```spl
+```simple:skip
 use std.gpu.engine2d.engine.{Engine2D}
 
 var child = Engine2D.create_offscreen(200, 120)   # CPU backend, transparent
@@ -62,7 +62,7 @@ that window's content rect at `(offset_x, offset_y)`, clipped, offsets
 accumulating for grandchildren (depth cap 3). Invalid child frames fail
 closed (magenta child rect only).
 
-```spl
+```simple:skip
 use common.ui.wm_gui_content_frame.{wm_gui_content_frame_from_pixels}
 
 val child = wm_gui_content_frame_from_pixels(
@@ -83,7 +83,7 @@ Spec/reference: `test/02_integration/rendering/wm_nested_content_frame_spec.spl`
 `Node3.children` holds child nodes whose `center` is RELATIVE to the parent
 (positions compose additively; `size` does not compose). Depth cap 8.
 
-```spl
+```simple:skip
 var scene = Scene3(...)
 scene.embed("chassis", Node3(name: "wheel", center: vec3(-1.0, -0.5, 0.0), ...))
 ```

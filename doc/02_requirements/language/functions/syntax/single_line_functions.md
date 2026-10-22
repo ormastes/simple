@@ -13,7 +13,7 @@ returned.
 
 ## Syntax
 
-```simple
+```simple:skip
 fn name(): implicit_return_expr
 fn name(param: Type) -> ReturnType: expr
 ```

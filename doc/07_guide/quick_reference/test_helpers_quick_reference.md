@@ -3,7 +3,7 @@
 
 ## Import
 
-```simple
+```simple:skip
 import testing  # All helpers available
 ```
 
@@ -18,7 +18,7 @@ import testing  # All helpers available
 | `assert_eq(actual, expected, msg)` | Assert values are equal | `void` (panics if not equal) |
 | `assert_ne(actual, unexpected, msg)` | Assert values are not equal | `void` (panics if equal) |
 
-```simple
+```text
 testing.assert_eq(result, 42, "Should be 42")
 testing.assert_ne(result, 0, "Should not be zero")
 ```
@@ -30,7 +30,7 @@ testing.assert_ne(result, 0, "Should not be zero")
 | `assert_true(condition, msg)` | Assert condition is true | `void` (panics if false) |
 | `assert_false(condition, msg)` | Assert condition is false | `void` (panics if true) |
 
-```simple
+```text
 testing.assert_true(user.is_active(), "User should be active")
 testing.assert_false(user.is_deleted(), "User should not be deleted")
 ```
@@ -42,7 +42,7 @@ testing.assert_false(user.is_deleted(), "User should not be deleted")
 | `assert_some(option, msg)` | Assert Option is Some | `T` (unwrapped value) |
 | `assert_none(option, msg)` | Assert Option is None | `void` (panics if Some) |
 
-```simple
+```text
 val user = testing.assert_some(find_user("id"), "User should exist")
 testing.assert_none(find_user("invalid"), "Should not find user")
 ```
@@ -54,7 +54,7 @@ testing.assert_none(find_user("invalid"), "Should not find user")
 | `assert_ok(result, msg)` | Assert Result is Ok | `T` (unwrapped value) |
 | `assert_err(result, msg)` | Assert Result is Err | `E` (error value) |
 
-```simple
+```text
 val data = testing.assert_ok(load_config(), "Config should load")
 val error = testing.assert_err(invalid_op(), "Should fail")
 ```
@@ -70,7 +70,7 @@ val error = testing.assert_err(invalid_op(), "Should fail")
 | `measure_time(action)` | Measure execution time | `(T, i64)` (result, microseconds) |
 | `assert_fast(action, max_micros, msg)` | Assert completes within time | `T` (result, panics if too slow) |
 
-```simple
+```text
 val (result, elapsed) = testing.measure_time(\: expensive_op())
 print "Took {elapsed} μs"
 
@@ -91,7 +91,7 @@ val result = testing.assert_fast(
 |----------|-------|---------|
 | `create_spy(name)` | Create a spy/mock | `MockFunction` |
 
-```simple
+```text
 val spy = testing.create_spy("save_user")
 spy.record_call(["user123", "Alice"])
 ```
@@ -104,7 +104,7 @@ spy.record_call(["user123", "Alice"])
 | `assert_called_with(mock, args)` | Assert called with args | `void` (panics if not found) |
 | `assert_not_called(mock)` | Assert never called | `void` (panics if called) |
 
-```simple
+```text
 testing.assert_called(save_mock, 3)
 testing.assert_called_with(save_mock, ["user123", "Alice"])
 testing.assert_not_called(delete_mock)
@@ -123,7 +123,7 @@ testing.assert_not_called(delete_mock)
 | `assert_empty(list, msg)` | Assert collection is empty | `void` (panics if not empty) |
 | `assert_len(list, expected, msg)` | Assert collection length | `void` (panics if wrong length) |
 
-```simple
+```text
 testing.assert_contains(users, "Alice", "Should contain Alice")
 testing.assert_not_contains(users, "Bob", "Should not contain Bob")
 testing.assert_empty(errors, "Should have no errors")
@@ -141,7 +141,7 @@ testing.assert_len(results, 5, "Should have 5 results")
 | `with_cleanup(setup, teardown, test)` | Run test with fixture cleanup | `void` |
 | `with_timeout(action, timeout_secs, msg)` | Run with timeout | `T` (result, panics if timeout) |
 
-```simple
+```text
 testing.with_cleanup(
     \: create_temp_file(),      # Setup
     \f: delete_file(f),          # Teardown
@@ -159,7 +159,7 @@ val result = testing.with_timeout(
 
 ## In-Development Tag
 
-```simple
+```text
 # @tag:in-development
 # Tracks: <TODO id / bug record / plan row>     # MANDATORY
 ```
@@ -175,7 +175,7 @@ undiagnosed failure, or an unavailable host (use `skip(name, reason)` /
 
 ### Pattern: Test with Option
 
-```simple
+```text
 val result = find_user("user123")
 val user = testing.assert_some(result, "User should exist")
 testing.assert_eq(user.name, "Alice", "Name should be Alice")
@@ -183,7 +183,7 @@ testing.assert_eq(user.name, "Alice", "Name should be Alice")
 
 ### Pattern: Test with Result
 
-```simple
+```text
 val result = load_config()
 val config = testing.assert_ok(result, "Config should load")
 testing.assert_eq(config.version, "1.0", "Version should be 1.0")
@@ -191,7 +191,7 @@ testing.assert_eq(config.version, "1.0", "Version should be 1.0")
 
 ### Pattern: Test with Mock
 
-```simple
+```text
 val db_mock = testing.create_spy("database")
 val service = UserService(db: db_mock)
 
@@ -203,7 +203,7 @@ testing.assert_called_with(db_mock, ["save", "user123", "Alice"])
 
 ### Pattern: Performance Test
 
-```simple
+```text
 val result = testing.assert_fast(
     \:
         var sum = 0
@@ -219,7 +219,7 @@ testing.assert_eq(result, 499500, "Sum should be correct")
 
 ### Pattern: Test with Cleanup
 
-```simple
+```text
 testing.with_cleanup(
     \:
         val db = Database.connect("test.db")
@@ -243,7 +243,7 @@ testing.with_cleanup(
 
 ### Pattern: Collection Testing
 
-```simple
+```text
 val users = ["Alice", "Bob", "Charlie"]
 
 testing.assert_len(users, 3, "Should have 3 users")
@@ -253,7 +253,7 @@ testing.assert_not_contains(users, "David", "Should not have David")
 
 ### Pattern: Timing Measurement
 
-```simple
+```text
 val (result, elapsed) = testing.measure_time(\:
     sort_large_dataset(data)
 )
@@ -269,7 +269,7 @@ testing.assert_eq(result.len(), data.len(), "All items should be present")
 
 All helpers provide informative error messages:
 
-```simple
+```text
 # assert_eq failure shows:
 # "Custom message: expected 42, got 43"
 
@@ -297,7 +297,7 @@ Timing functions use microseconds (μs):
 | 100 milliseconds | 100,000 μs | `100000` |
 | 1 second | 1,000,000 μs | `1000000` |
 
-```simple
+```text
 testing.assert_fast(\: operation(), 1000, "1ms limit")
 testing.assert_fast(\: operation(), 10000, "10ms limit")
 testing.assert_fast(\: operation(), 100000, "100ms limit")
@@ -330,7 +330,7 @@ testing.assert_fast(\: operation(), 1000000, "1 second limit")
 
 ### Import
 
-```simple
+```text
 use std.ui_test.client.{UITestClient}
 use std.ui_test.types.{ElementInfo, UIStateInfo}
 ```
@@ -342,7 +342,7 @@ use std.ui_test.types.{ElementInfo, UIStateInfo}
 | `UITestClient.connect(host, port)` | Connect to UI server | `Result<UITestClient, text>` |
 | `client.wait_ready(timeout_ms)` | Wait for server ready | `Result<bool, text>` |
 
-```simple
+```text
 val client = UITestClient.connect("127.0.0.1", 9001)?
 client.wait_ready(5000)?
 ```
@@ -356,7 +356,7 @@ client.wait_ready(5000)?
 | `client.drag(from_id, to_id)` | Drag between widgets | `Result<bool, text>` |
 | `client.send_key(key)` | Send keyboard event | `Result<bool, text>` |
 
-```simple
+```text
 client.click("action_btn")?
 client.type_text("search_input", "hello")?
 client.drag("item_1", "target_panel")?
@@ -372,7 +372,7 @@ client.send_key("enter")?
 | `client.get_state()` | Get UI state | `Result<UIStateInfo, text>` |
 | `client.screenshot_html()` | Get HTML snapshot | `Result<text, text>` |
 
-```simple
+```text
 val elem = client.get_element("btn_ok")?
 # elem.id, elem.kind, elem.visible, elem.focused, elem.props
 ```
@@ -386,7 +386,7 @@ val elem = client.get_element("btn_ok")?
 | `client.check_focused(id)` | Check focus state | `Result<bool, text>` |
 | `client.check_exists(id)` | Check element exists | `Result<bool, text>` |
 
-```simple
+```text
 client.check_text("status", "Saved")?
 client.check_visible("sidebar")?
 ```
@@ -398,13 +398,13 @@ client.check_visible("sidebar")?
 | `client.wait_for(id, timeout_ms)` | Wait for element | `Result<bool, text>` |
 | `client.wait_ready(timeout_ms)` | Wait for server | `Result<bool, text>` |
 
-```simple
+```text
 client.wait_for("modal_dialog", 3000)?
 ```
 
 ### Pattern: UI System Test
 
-```simple
+```text
 use app.io.mod.{process_spawn_async, process_kill, thread_sleep}
 
 describe "My UI":
@@ -433,7 +433,7 @@ describe "My UI":
 
 ## Cheat Sheet Summary
 
-```simple
+```text
 import testing
 
 # Assertions

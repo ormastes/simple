@@ -107,7 +107,7 @@ val severity = {
 #### Example: Translating parser.ja.spl
 
 **Before (English)**:
-```simple
+```text
 "E0002": {
     "id": "E0002",
     "title": "Unexpected Token",
@@ -118,7 +118,7 @@ val severity = {
 ```
 
 **After (Japanese)**:
-```simple
+```text
 "E0002": {
     "id": "E0002",
     "title": "予期しないトークン",
@@ -149,7 +149,7 @@ val severity = {
 #### Language-Specific Considerations
 
 **Korean**: Particles (조사) change based on final consonant
-```simple
+```text
 # Simple approach (v1.0)
 "label": "여기에 {expected}이(가) 필요합니다"  # Both forms shown
 
@@ -158,12 +158,12 @@ val severity = {
 ```
 
 **Japanese**: Particles (助詞) are consistent
-```simple
+```text
 "label": "ここに{expected}が必要です"  # が is always used
 ```
 
 **Chinese**: No particles needed
-```simple
+```text
 "label": "这里需要{expected}"  # Direct construction
 ```
 
@@ -272,7 +272,7 @@ Add Japanese translations for Simple compiler error messages.
 ### Korean (한국어)
 
 **Formality**: Use formal polite form (합니다체)
-```simple
+```text
 # ✅ Good
 "message": "토큰이 누락되었습니다"
 
@@ -281,7 +281,7 @@ Add Japanese translations for Simple compiler error messages.
 ```
 
 **Particles**: Use neutral forms in v1.0
-```simple
+```text
 # v1.0: Show both forms
 "label": "여기에 식별자가(이) 필요합니다"
 
@@ -297,7 +297,7 @@ Add Japanese translations for Simple compiler error messages.
 ### Japanese (日本語)
 
 **Formality**: Use です/ます form
-```simple
+```text
 # ✅ Good
 "message": "トークンがありません"
 
@@ -323,7 +323,7 @@ Add Japanese translations for Simple compiler error messages.
 - Traditional: `zh_TW` (Taiwan)
 
 **Formality**: Use standard written Chinese
-```simple
+```text
 # ✅ Good
 "message": "缺少标记"
 
@@ -344,7 +344,7 @@ Add Japanese translations for Simple compiler error messages.
 - Latin America: `es_LA` (tú/ustedes)
 
 **Formality**: Use formal imperative
-```simple
+```text
 # ✅ Good
 "help": "intente agregar `{expected}` antes de este token"
 
@@ -361,7 +361,7 @@ Add Japanese translations for Simple compiler error messages.
 ### French (Français)
 
 **Formality**: Use vous form
-```simple
+```text
 # ✅ Good
 "help": "essayez d'ajouter `{expected}` avant ce token"
 
@@ -378,7 +378,7 @@ Add Japanese translations for Simple compiler error messages.
 ### German (Deutsch)
 
 **Formality**: Use Sie form
-```simple
+```text
 # ✅ Good
 "help": "versuchen Sie, `{expected}` vor diesem Token hinzuzufügen"
 
@@ -399,19 +399,19 @@ Add Japanese translations for Simple compiler error messages.
 ### ❌ Translating Placeholders
 
 **Wrong**:
-```simple
+```text
 "message": "예상: {예상}, 발견: {발견}"  # DON'T translate placeholder names
 ```
 
 **Right**:
-```simple
+```text
 "message": "{expected}을(를) 예상했지만 {found}을(를) 발견했습니다"  # Keep {expected}, {found}
 ```
 
 ### ❌ Changing Error Codes
 
 **Wrong**:
-```simple
+```text
 "E0002": {
     "id": "J0002",  # DON'T change error codes
     ...
@@ -419,7 +419,7 @@ Add Japanese translations for Simple compiler error messages.
 ```
 
 **Right**:
-```simple
+```text
 "E0002": {
     "id": "E0002",  # Keep original
     ...
@@ -429,7 +429,7 @@ Add Japanese translations for Simple compiler error messages.
 ### ❌ Breaking Syntax
 
 **Wrong**:
-```simple
+```text
 val severity = {
     "error": "エラー"  # Missing comma
     "warning": "警告"

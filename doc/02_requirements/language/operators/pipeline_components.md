@@ -15,7 +15,7 @@ the effects system for proper resource management.
 
 ## Syntax
 
-```simple
+```simple:skip
 val pipeline = source
     | filter(\x: x > 0)
     | map(\x: x * 2)

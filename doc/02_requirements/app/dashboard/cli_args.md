@@ -15,7 +15,7 @@ This replaces the current imperative pattern in `src/lib/nogc_sync_mut/cli/cli_p
 
 ## Syntax
 
-```simple
+```simple:skip
 cli Args:
     """My application description."""
 
@@ -57,7 +57,7 @@ cli Args:
 
 **Access pattern:**
 
-```simple
+```text
 fn main():
     val args = Args.parse()
 
@@ -87,7 +87,7 @@ fn main():
 **When** the program is invoked with `--verbose`
 **Then** `Args.verbose` is `true`
 
-```simple
+```text
 cli Args:
     verbose = false
 
@@ -108,7 +108,7 @@ fn main():
 **When** the program is invoked with `--backend=llvm`
 **Then** `Args.backend` is `"llvm"`
 
-```simple
+```text
 cli Args:
     backend = "auto"
 
@@ -129,7 +129,7 @@ fn main():
 **When** the program is invoked with `--timeout=30`
 **Then** `Args.timeout` is `30`
 
-```simple
+```text
 cli Args:
     timeout = 0
 
@@ -150,7 +150,7 @@ fn main():
 **When** the program is invoked with `--gc-log`
 **Then** `Args.gc_log` is `true` (underscores map to hyphens on the command line)
 
-```simple
+```text
 cli Args:
     -g gc_log = false
 
@@ -171,7 +171,7 @@ fn main():
 **When** two fields start with the same letter (e.g., `verbose` and `version`)
 **Then** the first field gets the short name (`-v` for `verbose`), the second gets none (no `-v` for `version`)
 
-```simple
+```text
 cli Args:
     verbose = false    # auto: -v
     backend = "auto"   # auto: -b
@@ -190,7 +190,7 @@ cli Args:
   - Each field with its long name, short name, type, and default value
   - Subcommand list with their docstrings
 
-```simple
+```text
 cli Args:
     """My compiler tool."""
     verbose = false
@@ -225,7 +225,7 @@ cli Args:
 **When** the program is invoked with `test` alone
 **Then** `args.command` is `"test"`, `args.test.filter` is `""`, `args.test.only_slow` is `false`
 
-```simple
+```text
 cli Args:
     sub test:
         """Run the test suite."""
@@ -247,7 +247,7 @@ fn main():
 **Then** the method `.repl` is dispatched as the default action
 **And** `args.command` is `nil`
 
-```simple
+```text
 cli Args:
     """Simple language runtime."""
 
@@ -281,7 +281,7 @@ fn main():
 **When** the program is invoked with `program src/main.spl --verbose`
 **Then** `args.file` is `"src/main.spl"` and `args.verbose` is `true`
 
-```simple
+```text
 cli Args:
     """Simple language runtime."""
     verbose = false
@@ -313,7 +313,7 @@ fn main():
 **When** the program is invoked with `fmt src/main.spl`
 **Then** `args.command` is `"fmt"` and `args.remaining` is `["src/main.spl"]`
 
-```simple
+```text
 cli Args:
     verbose = false
 

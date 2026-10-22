@@ -16,7 +16,7 @@ The Simple language includes a tree-sitter grammar and Node API for incremental 
 
 ### Quick Start
 
-```simple
+```simple:skip
 use std.parser.treesitter_node.{Node, Point, node_byte_range}
 
 val node = Node(handle: node_handle)
@@ -42,13 +42,13 @@ val named = node.is_named()          # bool: semantic (not punctuation)
 ### Data Types
 
 **Node**: Wraps a tree-sitter node handle.
-```simple
+```simple:skip
 struct Node:
     handle: i64  # Opaque FFI handle
 ```
 
 **Point**: Zero-indexed position in source code.
-```simple
+```simple:skip
 struct Point:
     row: i64     # Zero-indexed line number
     column: i64  # Zero-indexed column number
@@ -56,7 +56,7 @@ struct Point:
 
 ### Child Access
 
-```simple
+```simple:skip
 val count = node.child_count()           # Total children (including anonymous)
 val child = node.child(i)               # Node? at index
 val named_count = node.named_child_count()  # Named children only
@@ -65,7 +65,7 @@ val named = node.named_child(i)          # Named child at index
 
 ### Utility Functions
 
-```simple
+```simple:skip
 fn node_is_valid(node: Node?) -> bool    # Not nil and not null handle
 fn node_byte_range(node: Node) -> (i64, i64)  # (start_byte, end_byte)
 fn node_line_range(node: Node) -> (i64, i64)  # (start_line, end_line)
@@ -77,7 +77,7 @@ fn node_line_range(node: Node) -> (i64, i64)  # (start_line, end_line)
 
 ### Walking a Parse Tree
 
-```simple
+```simple:skip
 fn walk_tree(node: Node, depth: i64):
     val indent = " " * (depth * 2)
     print "{indent}{node.kind()}"
@@ -90,7 +90,7 @@ fn walk_tree(node: Node, depth: i64):
 
 ### Finding Node at Position
 
-```simple
+```simple:skip
 fn find_node_at_position(root: Node, target_line: i64, target_col: i64) -> Node?:
     val start = root.start_point()
     val end_pt = root.end_point()
@@ -112,7 +112,7 @@ fn find_node_at_position(root: Node, target_line: i64, target_col: i64) -> Node?
 
 ### Finding Parent of Type
 
-```simple
+```simple:skip
 fn find_parent_of_kind(node: Node, target_kind: text) -> Node?:
     var current = node
     for _ in 0..100:  # Safety limit
@@ -127,7 +127,7 @@ fn find_parent_of_kind(node: Node, target_kind: text) -> Node?:
 
 ### Extracting Source Text
 
-```simple
+```simple:skip
 fn node_text(node: Node, source: text) -> text:
     val range = node_byte_range(node)
     source[range.0:range.1]
@@ -135,7 +135,7 @@ fn node_text(node: Node, source: text) -> text:
 
 ### Collecting Parse Errors
 
-```simple
+```simple:skip
 fn collect_errors(root: Node, source: text) -> [ErrorLocation]:
     var errors = []
     if root.has_error():
@@ -159,14 +159,14 @@ fn collect_errors(root: Node, source: text) -> [ErrorLocation]:
 ## Best Practices
 
 1. **Always check for nil** -- Navigation methods return `Node?`
-   ```simple
+```simple:skip
    val parent = node.parent()
    if parent != nil:
        print parent.kind()
    ```
 
 2. **Use loop limits** -- Prevent infinite loops when walking siblings or ancestors
-   ```simple
+```simple:skip
    for _ in 0..100:  # Safety limit
        val next = current.next_sibling()
        if next == nil: break
@@ -174,20 +174,20 @@ fn collect_errors(root: Node, source: text) -> [ErrorLocation]:
    ```
 
 3. **Cache child count** -- Avoid recomputing in loop conditions
-   ```simple
+```simple:skip
    val count = node.child_count()
    for i in 0..count:
        val child = node.child(i)
    ```
 
 4. **Zero-based indexing** -- Add 1 for display
-   ```simple
+```simple:skip
    val pt = node.start_point()
    print "Line {pt.row + 1}"
    ```
 
 5. **Exclusive end positions** -- `end_byte()` is exclusive
-   ```simple
+```simple:skip
    val length = node.end_byte() - node.start_byte()
    val text = source[node.start_byte():node.end_byte()]
    ```

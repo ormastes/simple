@@ -38,7 +38,7 @@ A concise reference for the canonical public Simple syntax. Legacy or parser-com
 Simple supports compact expression forms that are intended to replace boilerplate,
 not clarity. Prefer them for small, local, single-expression transformations:
 
-```simple
+```simple:skip
 fn double(x: i64) -> i64: x * 2
 items.map(_ * 2)
 items.zip(other).map(_1 + _2)
@@ -131,7 +131,7 @@ Create alternative names for existing types and functions. Useful for:
 
 **Status:** ⚠️ **Parser structure exists, runtime implementation incomplete**
 
-```simple
+```text
 # Syntax (not yet working in runtime):
 fn println = print
 fn each = iter
@@ -143,7 +143,7 @@ fn println(msg):
 
 ### Type Alias
 
-```simple
+```text
 # Simple type alias (using 'type' keyword)
 type Point2D = Point
 type StringList = List<text>
@@ -163,7 +163,7 @@ generic type (`Map<text, i64>.new()`) now parses correctly in interpreter mode
 as of 2026-05-29. The `<…>` is recognised as type arguments, not comparison
 operators, when immediately followed by `.`:
 
-```simple
+```text
 val m = Map<text, i64>.new()         # previously failed to parse
 val s = Set<text>.new()
 val v = Vec<Point>.with_capacity(16)
@@ -173,7 +173,7 @@ val v = Vec<Point>.with_capacity(16)
 
 **Note:** `alias` creates an alternative **name** for an existing class. It is not inheritance. See [Not Part of Simple's Design](#not-part-of-simples-design) for the supported alternatives.
 
-```simple
+```text
 # Class/struct alias (using 'alias' keyword)
 alias Optional = Option
 alias Vec = Vector
@@ -187,7 +187,7 @@ alias IntSet = Set<i64>
 
 ### Deprecation Pattern
 
-```simple
+```text
 # Mark old API as deprecated, provide alias to new one
 @deprecated("Use new_func instead")
 fn old_func = implementation
@@ -205,7 +205,7 @@ fn new_func = old_func  # Non-deprecated alias
 
 ### String Interpolation (Default)
 
-```simple
+```text
 val name = "world"
 val count = 42
 print "Hello, {name}!"              # Hello, world!
@@ -215,7 +215,7 @@ print "Result: {compute()}"         # Expressions allowed
 
 ### Raw Strings (No Interpolation)
 
-```simple
+```text
 # Single quotes = raw string
 val regex = '[a-z]+\d{2,3}'         # No escaping needed
 val path = 'C:\Users\name'          # Backslashes are literal
@@ -231,7 +231,7 @@ val raw_template = r"""C:\temp\{name}"""
 
 ### Typed String Literals
 
-```simple
+```text
 val config = "/etc/config.json"_file
 val server = "192.168.1.1"_ip
 val api = "https://api.example.com"_http
@@ -244,7 +244,7 @@ val pattern = "[a-z]+"_re           # Regex
 The implemented runtime contract uses an inert raw template. Construction does
 not read the environment or inspect the platform:
 
-```simple
+```text
 use std.nogc_sync_mut.env.system_location.{LazyPathTemplate}
 
 var cache = LazyPathTemplate.new(r"{sys:compiler_cache}/objects")
@@ -268,7 +268,7 @@ string would try to parse `sys:user_cache` as a Simple expression.
 
 ### Integer Literals
 
-```simple
+```text
 val decimal = 1_000_000             # Underscores for readability
 val hex = 0xFF5733                  # Hexadecimal
 val binary = 0b1010_0101            # Binary
@@ -277,7 +277,7 @@ val octal = 0o755                   # Octal
 
 ### Float Literals
 
-```simple
+```text
 val pi = 3.14159
 val avogadro = 6.022e23             # Scientific notation
 val tiny = 1.5e-10
@@ -285,7 +285,7 @@ val tiny = 1.5e-10
 
 ### Typed Numbers
 
-```simple
+```text
 val a = 42i32                       # i32
 val b = 100u64                      # u64
 val c = 3.14f32                     # f32
@@ -294,7 +294,7 @@ val d = 2.718f64                    # f64
 
 ### Unit Literals
 
-```simple
+```text
 val distance = 100_km               # Length
 val duration = 2_hr                 # Time
 val weight = 5_kg                   # Mass
@@ -307,7 +307,7 @@ val discount = 20_pct               # Percentage (stored as 0.2)
 
 ### Arrays/Lists
 
-```simple
+```text
 val nums = [1, 2, 3, 4, 5]
 val empty: [i64] = []
 val mixed = [1, "two", 3.0]         # Interpreter mode
@@ -315,20 +315,20 @@ val mixed = [1, "two", 3.0]         # Interpreter mode
 
 ### Dictionaries
 
-```simple
+```text
 val person = {"name": "Alice", "age": 30}
 val scores: {text: i64} = {}
 ```
 
 ### Sets
 
-```simple
+```text
 val unique = {1, 2, 3}
 ```
 
 ### Spread Operator
 
-```simple
+```text
 val a = [1, 2, 3]
 val b = [0, ...a, 4]                # [0, 1, 2, 3, 4]
 
@@ -342,7 +342,7 @@ val d2 = {**d1, "b": 2}             # {"a": 1, "b": 2}
 arrays in interpreter mode as of 2026-05-29. Use short-grammar placeholders or
 explicit lambdas:
 
-```simple
+```text
 val nums = [1, 2, 3, 4, 5]
 nums.map(_ * 2)                     # [2, 4, 6, 8, 10]
 nums.filter(_ > 2)                  # [3, 4, 5]
@@ -358,7 +358,7 @@ nums.enumerate()                    # [(0, 1), (1, 2), ...]
 
 ### Basic Indexing
 
-```simple
+```text
 val lst = [10, 20, 30, 40, 50]
 lst[0]                              # 10 (first)
 lst[2]                              # 30 (third)
@@ -366,14 +366,14 @@ lst[2]                              # 30 (third)
 
 ### Negative Indexing
 
-```simple
+```text
 lst[-1]                             # 50 (last)
 lst[-2]                             # 40 (second to last)
 ```
 
 ### Slicing
 
-```simple
+```text
 lst[1:4]                            # [20, 30, 40] (index 1 to 3)
 lst[:3]                             # [10, 20, 30] (first 3)
 lst[2:]                             # [30, 40, 50] (from index 2)
@@ -382,7 +382,7 @@ lst[:-1]                            # [10, 20, 30, 40] (all but last)
 
 ### Slice with Step
 
-```simple
+```text
 lst[::2]                            # [10, 30, 50] (every other)
 lst[1::2]                           # [20, 40] (odd indices)
 lst[1:5:2]                          # [20, 40] (slice with step)
@@ -391,7 +391,7 @@ lst[::-1]                           # [50, 40, 30, 20, 10] (reversed)
 
 ### String Slicing
 
-```simple
+```text
 val s = "Hello, World!"
 s[0:5]                              # "Hello"
 s[7:]                               # "World!"
@@ -404,7 +404,7 @@ Read or write a contiguous bit range on an integer using `.bits[lo..hi]`,
 where `lo` is the inclusive low bit and `hi` is the exclusive high bit
 (field width is `hi - lo`).
 
-```simple
+```text
 val state = 0xDEADBEEF
 state.bits[24..32]                  # 0xDE  (top byte)
 state.bits[0..8]                    # 0xEF  (low byte)
@@ -451,7 +451,7 @@ Notes:
   duplicates the lvalue 2-3 times, so calls on the lvalue spine would
   re-execute their side effects. Workaround:
 
-  ```simple
+  ```text
   var t = arr[next()]
   t.bits[lo..hi] = v
   arr[idx] = t
@@ -475,7 +475,7 @@ Notes:
 
 ### List Comprehension
 
-```simple
+```text
 # Basic
 val squares = [x * x for x in 0..10]
 
@@ -488,7 +488,7 @@ val result = [x * 2 for x in items if x > 0]
 
 ### Dict Comprehension
 
-```simple
+```text
 # Basic
 val squares = {x: x * x for x in 1..=5}
 # {1: 1, 2: 4, 3: 9, 4: 16, 5: 25}
@@ -506,7 +506,7 @@ val upper = {k.upper(): v for k, v in data}
 
 ### Safe Navigation (`?.`)
 
-```simple
+```text
 # Returns nil if any part is nil
 user?.address?.city
 user?.profile?.settings?.theme
@@ -520,7 +520,7 @@ data?.items?[0]
 
 ### Null Coalescing (`??`)
 
-```simple
+```text
 # Provide default value
 val name = user?.name ?? "Unknown"
 val port = config["port"] ?? 8080
@@ -532,7 +532,7 @@ val city = user?.address?.city ?? "N/A"
 
 ### Combining `?.` and `??`
 
-```simple
+```text
 # Complete nil-safe access with default
 val display = user?.profile?.display_name ?? user?.name ?? "Anonymous"
 ```
@@ -543,7 +543,7 @@ The `.?` operator checks if a value is **present** (not nil AND not empty).
 It returns `T?` — the value itself if present, `nil` if absent. This enables
 pattern binding with `if val`:
 
-```simple
+```text
 # Returns T? (value if present, nil if absent)
 opt.?                         # T?:    pass-through (already optional)
 list.?                        # [T]?:  Some(list) if non-empty, nil if []
@@ -568,7 +568,7 @@ if str.?:                     # truthy if non-nil, non-empty
 
 Named alternatives to `.?` for text, providing readable presence checks:
 
-```simple
+```text
 # Returns text? — value if non-empty, nil if empty
 presence("hello")             # "hello" (text?)
 presence("")                  # nil
@@ -590,7 +590,7 @@ val query = user_input.presence_trimmed ?? "default search"
 
 ### Result with `.?`
 
-```simple
+```text
 # Result.ok returns Option, Result.err returns Option
 result.ok.?                   # T? if Ok (replaces is_ok())
 result.err.?                  # E? if Err (replaces is_err())
@@ -605,7 +605,7 @@ if val value = r.ok.?:
 
 Methods with no arguments can be called without parentheses:
 
-```simple
+```text
 # These are equivalent
 list.first()                  # with parens
 list.first                    # without parens (Ruby-like)
@@ -622,7 +622,7 @@ text.trim.upper.split(",")    # split needs parens (has arg)
 
 ### Combining `.?` with No-Paren
 
-```simple
+```text
 # Extract first element if present
 if val first = list.first.?:
     process(first)
@@ -657,7 +657,7 @@ if val tags = user?.profile?.tags.?:
 
 ### Basic Functions
 
-```simple
+```text
 fn add(a: i64, b: i64) -> i64:
     a + b                           # Implicit return
 
@@ -667,7 +667,7 @@ fn greet(name: text):
 
 ### Multi-Return Tuples
 
-```simple
+```text
 fn div_rem(n: i64, d: i64) -> (quotient: i64, remainder: i64):
     return (quotient: n / d, remainder: n % d)
 
@@ -678,7 +678,7 @@ print r.remainder
 
 Anonymous tuple returns remain valid when the fields are not ambiguous:
 
-```simple
+```text
 fn bounds(x: i64) -> (i64, bool):
     return (x, x == 0)
 ```
@@ -688,7 +688,7 @@ Functions may not return repeated same-type anonymous tuple fields such as
 
 ### Default Parameters
 
-```simple
+```text
 fn connect(host: text, port: i64 = 8080, timeout: i64 = 30):
     # port defaults to 8080, timeout to 30
     ...
@@ -696,14 +696,14 @@ fn connect(host: text, port: i64 = 8080, timeout: i64 = 30):
 
 ### Named Arguments
 
-```simple
+```text
 connect("localhost", port: 3000)
 connect(host: "example.com", timeout: 60, port: 443)
 ```
 
 ### Variadic Parameters
 
-```simple
+```text
 fn sum(numbers...):
     numbers.reduce(0, \a, b: a + b)
 
@@ -712,7 +712,7 @@ sum(1, 2, 3, 4, 5)                  # 15
 
 ### Lambda Syntax
 
-```simple
+```text
 # Short form
 val double = \x: x * 2
 val add = \a, b: a + b
@@ -728,7 +728,7 @@ val process = \x:
 
 ### Trailing Lambda
 
-```simple
+```text
 items.map \x: x * 2
 items.filter \x: x > 0
 items.each \item:
@@ -737,7 +737,7 @@ items.each \item:
 
 ### Placeholder Lambda
 
-```simple
+```text
 # `_` stands for each successive parameter
 items.map(_ * 2)                     # \__p0: __p0 * 2
 items.filter(_ > 3)                  # \__p0: __p0 > 3
@@ -754,7 +754,7 @@ _.items.any(_ > 3)                   # outer: \__p0: __p0.items.any(INNER)
 
 ### Method Reference
 
-```simple
+```text
 # &:method → \__p0: __p0.method()
 words.map(&:len)                     # [2, 5, 3]
 nums.map(&:to_s)                     # ["1", "2", "3"]
@@ -763,7 +763,7 @@ val get_len = &:len                  # store as value
 
 ### Curry and Partial Application
 
-```simple
+```text
 use std.common.functions.{curry2, curry3, partial1, partial2}
 
 val curried_add = curry2(add)        # curry2(f) → \a: \b: f(a, b)
@@ -782,7 +782,7 @@ val inc = partial1(add, 1)           # partial1(f, a) → \b: f(a, b)
 
 Two syntaxes are supported. **Erlang-style `| ->` is preferred** (shorter):
 
-```simple
+```text
 # Preferred: Erlang-style (shorter, cleaner)
 match value:
     | 0 -> "zero"
@@ -798,7 +798,7 @@ match value:
 
 ### Pattern Guards
 
-```simple
+```text
 # Preferred: | -> with guards
 match value:
     | n if n < 0 -> "negative"
@@ -814,7 +814,7 @@ match value:
 
 ### Destructuring Patterns
 
-```simple
+```text
 # Tuple destructuring
 match point:
     case (0, 0):
@@ -836,7 +836,7 @@ match person:
 
 ### Binding Destructuring
 
-```simple
+```text
 val (x, y) = get_point()
 val (first, second, ...rest) = items
 val [a, b, c] = triple
@@ -849,7 +849,7 @@ val {name, age} = person
 
 ### If/Else
 
-```simple
+```text
 if condition:
     do_something()
 else if other_condition:
@@ -863,7 +863,7 @@ val result = if x > 0: "positive" else: "non-positive"
 
 ### Chained Comparisons
 
-```simple
+```text
 # These are equivalent:
 if 0 < x < 10:
     print "in range"
@@ -878,7 +878,7 @@ if 0 <= x <= y <= 100:
 
 ### For Loops
 
-```simple
+```text
 for item in items:
     process(item)
 
@@ -901,7 +901,7 @@ a non-tuple does not have. Write `xs.enumerate()` when you want positions.
 
 ### While Loops
 
-```simple
+```text
 while condition:
     process()
 
@@ -913,7 +913,7 @@ loop:
 
 ### With Statement (Context Managers)
 
-```simple
+```text
 with File.open("data.txt") as f:
     content = f.read()
 # File automatically closed
@@ -931,7 +931,7 @@ with File.open("in.txt") as input, File.create("out.txt") as output:
 
 **Both `()` and `pass` are valid and equivalent** - use whichever is clearer in context:
 
-```simple
+```text
 # Unit value () - expression-oriented style (Rust-like)
 match value:
     Some(x):
@@ -972,7 +972,7 @@ They compile to identical code. Use `()` for expression contexts, `pass` for cla
 
 ### Arithmetic
 
-```simple
+```text
 a + b       # Addition
 a - b       # Subtraction
 a * b       # Multiplication
@@ -983,7 +983,7 @@ a ** b      # Power
 
 ### Comparison
 
-```simple
+```text
 a == b      # Equal
 a != b      # Not equal
 a < b       # Less than
@@ -994,7 +994,7 @@ a >= b      # Greater or equal
 
 ### Logical
 
-```simple
+```text
 a and b     # Logical AND
 a or b      # Logical OR
 not a       # Logical NOT
@@ -1002,7 +1002,7 @@ not a       # Logical NOT
 
 ### Bitwise
 
-```simple
+```text
 a & b       # Bitwise AND
 a | b       # Bitwise OR
 a ^ b       # Bitwise XOR
@@ -1013,7 +1013,7 @@ a >> n      # Right shift
 
 ### Assignment Operators
 
-```simple
+```text
 a += b      # a = a + b
 a -= b      # a = a - b
 a *= b      # a = a * b
@@ -1024,7 +1024,7 @@ a **= b     # a = a ** b
 
 ### Special Operators
 
-```simple
+```text
 # Functional update (reassignment sugar)
 data->normalize()               # data = data.normalize()
 data->filter(min: 0)->sort()    # Chainable
@@ -1045,7 +1045,7 @@ Pipeline operators enable functional programming patterns and neural network com
 
 Pass value to function:
 
-```simple
+```text
 # x |> f is equivalent to f(x)
 val result = 5 |> double |> square |> to_string
 # Same as: to_string(square(double(5)))
@@ -1062,7 +1062,7 @@ val output = data
 Parenthesised placeholder expressions (`_1`, `_2`) are transformed into lambdas
 automatically inside a pipe. Fixed in parser as of 2026-05-29.
 
-```simple
+```text
 # These now parse correctly in interpreter mode:
 val result = 5 |> (_1 * 3)             # 15
 val clamped = values |> (_1.max(0))    # clamp negatives
@@ -1073,7 +1073,7 @@ pairs |> (_1 + _2)                     # binary placeholder
 
 Create new functions by composition:
 
-```simple
+```text
 # f >> g means: λx. g(f(x))
 val pipeline = normalize >> augment >> to_tensor
 val result = pipeline(data)
@@ -1086,7 +1086,7 @@ val same = to_tensor << augment << normalize
 
 Run operations in parallel:
 
-```simple
+```text
 # f // g runs both and returns tuple
 val both = encode_audio // encode_video
 val (audio, video) = both(raw_audio, raw_video)
@@ -1096,7 +1096,7 @@ val (audio, video) = both(raw_audio, raw_video)
 
 Compose neural network layers with **dimension checking**:
 
-```simple
+```text
 # Dimension-checked pipeline
 val model = Linear(784, 256) ~> ReLU() ~> Linear(256, 10)
 # Type: Layer<[batch, 784], [batch, 10]>
@@ -1123,7 +1123,7 @@ and, &&   (logical and)
 
 ### Matrix Multiplication (`@`)
 
-```simple
+```text
 val C = A @ B           # Matrix multiply
 # [M, K] @ [K, N] -> [M, N]
 
@@ -1135,7 +1135,7 @@ val batched = X @ W     # Batched matmul
 
 Element-wise operations with broadcasting:
 
-```simple
+```text
 val result = A .+ B     # Broadcast add
 val scaled = X .* 2.0   # Scalar broadcast
 val powered = M .^ 2    # Element-wise power
@@ -1147,7 +1147,7 @@ val powered = M .^ 2    # Element-wise power
 
 ### Power Operators
 
-```simple
+```text
 # Outside math blocks: use **
 val x = 2 ** 10         # 1024
 
@@ -1157,7 +1157,7 @@ val formula = m{ x^2 + 2*x*y + y^2 }
 
 ### XOR Operator
 
-```simple
+```text
 val result = 5 xor 3    # Bitwise XOR: 6
 ```
 
@@ -1167,7 +1167,7 @@ val result = 5 xor 3    # Bitwise XOR: 6
 
 ### Exclusive Range (`..`)
 
-```simple
+```text
 0..10       # 0, 1, 2, ..., 9 (excludes 10)
 
 for i in 0..5:
@@ -1176,7 +1176,7 @@ for i in 0..5:
 
 ### Inclusive Range (`..=`)
 
-```simple
+```text
 0..=10      # 0, 1, 2, ..., 10 (includes 10)
 
 for i in 1..=5:
@@ -1185,7 +1185,7 @@ for i in 1..=5:
 
 ### Range in Collections
 
-```simple
+```text
 # Create list from range
 val nums = [for i in 1..=10: i]     # [1, 2, ..., 10]
 
@@ -1202,7 +1202,7 @@ if (1..100).contains(x):
 
 Resources like files, sockets, and threads implement the `Resource` trait:
 
-```simple
+```text
 trait Resource:
     fn close()              # Close and release the resource
     fn is_open() -> bool    # Check if still open
@@ -1213,7 +1213,7 @@ trait Resource:
 
 Schedule cleanup to run at scope exit:
 
-```simple
+```text
 val file = File.open("data.txt")?
 defer file.close()           # Runs when scope exits
 # ... use file ...
@@ -1222,7 +1222,7 @@ defer file.close()           # Runs when scope exits
 
 Multiple defers run in LIFO order:
 
-```simple
+```text
 val a = open_a()
 defer close_a()  # Third
 
@@ -1239,7 +1239,7 @@ defer close_c()  # First
 
 Automatic cleanup with context managers:
 
-```simple
+```text
 # File automatically closed when block exits
 with File.open("data.txt") as file:
     val content = file.read()
@@ -1254,7 +1254,7 @@ with File.open("in.txt") as input, File.create("out.txt") as output:
 
 For async resources (network sockets, etc.):
 
-```simple
+```text
 async with await TcpStream.connect_str("127.0.0.1:8080") as stream:
     await stream.write_all(data)?
     val response = await stream.read()?
@@ -1265,7 +1265,7 @@ async with await TcpStream.connect_str("127.0.0.1:8080") as stream:
 
 Check for unclosed resources:
 
-```simple
+```text
 use core.resource_registry.ResourceRegistry
 
 val leaks = ResourceRegistry.check_leaks()
@@ -1277,7 +1277,7 @@ if leaks.len() > 0:
 
 Add automatic tracking to custom resources:
 
-```simple
+```text
 use core.leak_tracked.LeakTracked
 
 struct MyResource with LeakTracked:
@@ -1303,7 +1303,7 @@ via the desugar pass (`src/app/desugar/trait_scanner.spl`, `src/app/desugar/forw
 
 ### Declaring a Trait
 
-```simple
+```text
 trait OrderRepo:
     fn save(order: text)
     fn find(id: text) -> text
@@ -1315,7 +1315,7 @@ skipped -- concrete implementations provide them.
 
 ### Implementing a Trait
 
-```simple
+```text
 impl OrderRepo for sql:
     fn save(order: text): sql_insert(order)
     fn find(id: text) -> text: sql_select(id)
@@ -1330,7 +1330,7 @@ the provided implementations.
 Use `alias Trait = field` inside a class body to forward all abstract methods of the trait to a
 composed field:
 
-```simple
+```text
 class Logger with Printable, Clickable:
     printer: Printer
     handler: Handler
@@ -1354,7 +1354,7 @@ The `with` clause already used on `struct X with Mixin:` is also accepted in a
 **trait** header, expressing a *capability group* — one trait that is the
 literal union of its members' method sets, with no new keyword and no new token:
 
-```simple
+```text
 trait DebugProfiler with DebugTarget, ProfileTarget:
     pass                     # pure group: zero new methods
 ```
@@ -1403,7 +1403,7 @@ Requirement: `doc/02_requirements/language/grammar/trait_with_capability_groups.
 
 The built-in `Resource` trait uses the same syntax:
 
-```simple
+```text
 trait Resource:
     fn close()
     fn is_open() -> bool
@@ -1418,7 +1418,7 @@ Control symbol visibility across packages and layers.
 
 ### Visibility Modifiers
 
-```simple
+```text
 # Public — visible everywhere (default for exported symbols)
 pub fn public_api() -> text: "hello"
 
@@ -1440,7 +1440,7 @@ fn private_impl() -> text: "private"
 
 ### Friend Declarations (in `__init__.spl`)
 
-```simple
+```text
 # Declare which packages can access internal symbols
 friend types
 friend traits
@@ -1474,7 +1474,7 @@ Methods exist on classes and can be called as `receiver.method(args)`. However, 
 
 Until `doc/05_design/compiler_rfc_method_chain_fix.md` lands, write each call as a separate assignment:
 
-```simple
+```text
 # Correct — intermediate var pattern
 var node = WidgetNode(kind: WidgetKind.Panel, layout: LayoutKind.Column)
 node = node.width(320)
@@ -1496,7 +1496,7 @@ See also: `doc/05_design/ui_typed_core_rfc.md` Phase 3 for the full list of flue
 
 Today, enum variants must be fully qualified:
 
-```simple
+```text
 use std.ui.{WidgetKind, LayoutKind, Spacing, SurfaceRole}
 
 val kind = WidgetKind.Panel          # qualified — works today
@@ -1507,7 +1507,7 @@ val role = SurfaceRole.Card          # qualified — works today
 
 **Future — bare enum literals** (pending `doc/05_design/compiler_rfc_bare_enum_literals.md`): once that RFC lands, the compiler will infer the enum type from context and bare names will work:
 
-```simple
+```text
 # Future only — not available yet
 val node = WidgetNode(kind: Panel, layout: Column)
 node = node.padding(theme, Md)

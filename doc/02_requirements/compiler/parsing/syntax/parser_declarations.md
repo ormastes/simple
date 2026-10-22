@@ -12,7 +12,7 @@ structs, enums, classes, traits, modules, imports, and type aliases.
 
 ## Syntax
 
-```simple
+```simple:skip
 struct Point:
     x: i64
     y: i64

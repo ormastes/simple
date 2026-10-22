@@ -19,7 +19,7 @@ This guide covers coding conventions, naming rules, and common mistakes to avoid
 
 Group imports by source, with standard library first:
 
-```simple
+```text
 use std.spec.{describe, it, expect}
 use std.math.{sin, cos}
 
@@ -59,7 +59,7 @@ Use `val` unless mutation is genuinely required.
 
 ### Application Code: Inference Preferred
 
-```simple
+```text
 fn handle_request(req: Request) -> Response:
     val body = req.json()             # Type inferred
     val user = UserService.create(body.get("name"))
@@ -68,7 +68,7 @@ fn handle_request(req: Request) -> Response:
 
 ### Library Code: Explicit Types Required
 
-```simple
+```text
 pub fn get(url: Url, headers: Headers) -> Result<Response, HttpError>:
     val conn: Connection = Connection.new(url.host())
     val request: Request = Request.get(url).with_headers(headers)
@@ -92,7 +92,7 @@ pub fn get(url: Url, headers: Headers) -> Result<Response, HttpError>:
 
 ### Use Domain Types in Public APIs
 
-```simple
+```text
 # Avoid bare primitives in public interfaces
 fn create_user(name: UserName, age: Age, status: UserStatus) -> User
 fn set_timeout(timeout: Duration)
@@ -105,7 +105,7 @@ fn set_timeout(timeout: Duration)
 
 ### Provide Defaults
 
-```simple
+```text
 struct ServerConfig:
     host: text
     port: i64
@@ -132,7 +132,7 @@ impl ServerConfig:
 
 The last expression in a function is its return value:
 
-```simple
+```text
 fn add(a: i64, b: i64) -> i64:
     a + b                             # Implicit return
 
@@ -142,7 +142,7 @@ fn create_user(name: text) -> User:
 
 Use explicit `return` only for early exits:
 
-```simple
+```text
 fn validate(input: text) -> Result<Data, Error>:
     if input.is_empty():
         return Err(Error.empty_input())
@@ -153,7 +153,7 @@ fn validate(input: text) -> Result<Data, Error>:
 
 In methods, `self` is implicit. Do not write it as a parameter:
 
-```simple
+```text
 impl Point:
     fn get_x() -> i64:
         return self.x                 # self is available implicitly
@@ -164,7 +164,7 @@ impl Point:
 
 ### Omit Return Type for Void
 
-```simple
+```text
 fn log_message(msg: text):            # No return type = void
     print msg
 ```
@@ -175,7 +175,7 @@ fn log_message(msg: text):            # No return type = void
 
 Use `Result` types and `?` propagation, not exceptions:
 
-```simple
+```text
 fn parse_config(path: text) -> Result<Config, ConfigError>:
     val content = file_read(path)?
     parse_toml(content)
@@ -189,7 +189,7 @@ fn parse_config(path: text) -> Result<Config, ConfigError>:
 
 All public APIs should include documentation with examples:
 
-```simple
+```text
 ## Calculate the factorial of a non-negative integer.
 #
 # ## Examples
@@ -208,7 +208,7 @@ fn factorial(n: i64) -> i64:
 
 ### Test Organization
 
-```simple
+```text
 describe "UserService":
     context "create_user":
         it "creates user with valid name":
@@ -226,7 +226,7 @@ describe "UserService":
 
 Simple does not support class inheritance (`class Child(Parent)` is not allowed). Use traits, composition, or mixins:
 
-```simple
+```text
 trait Renderable:
     fn render() -> text
 

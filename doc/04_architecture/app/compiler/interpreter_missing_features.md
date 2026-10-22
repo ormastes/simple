@@ -32,7 +32,7 @@ To run **all tests and examples**, the interpreter needs **8 major feature categ
 **Blocks:** JIT compilation for all functions
 
 **Example:** `src/compiler/backend/jit_interpreter.spl:181`
-```simple
+```simple:skip
 # Step 2: Serialize MIR to string
 # NOTE: This is the missing piece - MIR serialization
 # TODO: Implement serialize_mir_to_json(mir_fn) or serialize_mir_to_binary(mir_fn)
@@ -44,7 +44,7 @@ if self.config.mode == JitMode.AlwaysJit:
 
 **What's Needed:**
 
-```simple
+```simple:skip
 # JSON Serialization (easier to debug)
 fn serialize_mir_to_json(mir: MirFunction) -> text:
     """Serialize MIR to JSON for JIT compilation."""
@@ -100,7 +100,7 @@ fn serialize_mir_to_binary(mir: MirFunction) -> [u8]:
 **Blocks:** Bare-metal examples, low-level FFI, SIMD
 
 **Example:** `examples/baremetal/hello_x86.spl:24-28`
-```simple
+```simple:skip
 unsafe:
     # Write character
     *(addr as ptr<u8>) = ch
@@ -111,14 +111,14 @@ unsafe:
 **What's Needed:**
 
 1. **Unsafe Blocks**
-   ```simple
+```simple:skip
    fn vga_put_char(addr: u32, ch: u8):
        unsafe:
            *(addr as ptr<u8>) = ch  # Raw pointer write
    ```
 
 2. **Raw Pointer Operations**
-   ```simple
+```simple:skip
    # Dereference (read)
    val value = *ptr
 
@@ -135,7 +135,7 @@ unsafe:
    ```
 
 3. **Pointer Types**
-   ```simple
+```simple:skip
    val raw_ptr: ptr<u8>           # Raw pointer
    val const_ptr: const ptr<i32>  # Const pointer
    val mut_ptr: mut ptr<u32>      # Mutable pointer
@@ -143,7 +143,7 @@ unsafe:
 
 **Implementation Strategy:**
 
-```simple
+```simple:skip
 # In interpreter backend
 impl InterpreterBackendImpl:
     fn eval_expr(expr: HirExpr, ctx: EvalContext) -> Result<Value, BackendError>:
@@ -177,7 +177,7 @@ impl InterpreterBackendImpl:
 ```
 
 **FFI Support:**
-```simple
+```simple:skip
 # In src/app/io/mod.spl
 extern fn rt_memory_read_u8(addr: i64) -> u8
 extern fn rt_memory_read_u32(addr: i64) -> u32
@@ -198,7 +198,7 @@ extern fn rt_memory_write_u32(addr: i64, value: u32)
 **Blocks:** Bare-metal, SIMD optimizations, crypto
 
 **Example:** `examples/baremetal/hello_x86.spl:48-53`
-```simple
+```simple:skip
 @naked
 fn halt():
     asm:
@@ -212,7 +212,7 @@ fn halt():
 **What's Needed:**
 
 1. **Inline Assembly Execution**
-   ```simple
+```simple:skip
    fn cpu_id() -> (u32, u32, u32, u32):
        var eax: u32 = 0
        var ebx: u32 = 0
@@ -229,7 +229,7 @@ fn halt():
    ```
 
 2. **Register Constraints**
-   ```simple
+```simple:skip
    fn atomic_add(ptr: ptr<u32>, value: u32) -> u32:
        var result: u32
        asm:
@@ -241,7 +241,7 @@ fn halt():
    ```
 
 3. **Memory Barriers**
-   ```simple
+```simple:skip
    fn memory_fence():
        asm:
            "mfence"
@@ -253,7 +253,7 @@ fn halt():
 For **interpreter mode**, inline assembly cannot execute directly. Two options:
 
 **Option A: JIT Required**
-```simple
+```simple:skip
 fn eval_inline_asm(asm_expr: HirInlineAsm, ctx: EvalContext) -> Result<Value, BackendError>:
     # Inline assembly requires JIT compilation
     if not ctx.jit_available():
@@ -267,7 +267,7 @@ fn eval_inline_asm(asm_expr: HirInlineAsm, ctx: EvalContext) -> Result<Value, Ba
 ```
 
 **Option B: Emulation (Limited)**
-```simple
+```simple:skip
 fn eval_inline_asm(asm_expr: HirInlineAsm, ctx: EvalContext) -> Result<Value, BackendError>:
     # Emulate common instructions
     match asm_expr.template:
@@ -295,7 +295,7 @@ fn eval_inline_asm(asm_expr: HirInlineAsm, ctx: EvalContext) -> Result<Value, Ba
 **Blocks:** Async examples, coroutines
 
 **Example:** `examples/async_structure_demo.spl:26-28`
-```simple
+```simple:skip
 print "Note: Full execution requires:"
 print "  - Function field calls (task.poll_fn())"
 print "  - Coroutine suspend/resume"
@@ -304,21 +304,21 @@ print "  - Coroutine suspend/resume"
 **What's Needed:**
 
 1. **Async Functions**
-   ```simple
+```simple:skip
    async fn fetch_data(url: text) -> Result<text, text>:
        val response = await http_get(url)?
        Ok(response.body)
    ```
 
 2. **Await Expression**
-   ```simple
+```simple:skip
    fn main():
        val data = await fetch_data("https://example.com")
        print data
    ```
 
 3. **Coroutine State Machine**
-   ```simple
+```simple:skip
    # Generated state machine
    struct FetchDataState:
        state: i32
@@ -341,7 +341,7 @@ print "  - Coroutine suspend/resume"
 
 **Implementation Strategy:**
 
-```simple
+```simple:skip
 # In interpreter backend
 impl InterpreterBackendImpl:
     fn eval_expr(expr: HirExpr, ctx: EvalContext) -> Result<Value, BackendError>:
@@ -384,7 +384,7 @@ impl InterpreterBackendImpl:
 **Blocks:** External library calls, complex FFI
 
 **Current Limitation:** `src/compiler/backend/jit_interpreter.spl:237-249`
-```simple
+```simple:skip
 # Convert args to i64 array
 # NOTE: This is a simplified implementation
 # TODO: Implement full type conversion for all Simple types
@@ -406,7 +406,7 @@ for arg in args:
 **What's Needed:**
 
 1. **String Marshaling**
-   ```simple
+```simple:skip
    fn marshal_string(s: text) -> (i64, i64):
        """Convert Simple string to (ptr, len) for FFI."""
        val ptr = rt_string_to_ptr(s)
@@ -419,7 +419,7 @@ for arg in args:
    ```
 
 2. **Struct Marshaling**
-   ```simple
+```simple:skip
    struct Point:
        x: f64
        y: f64
@@ -434,7 +434,7 @@ for arg in args:
    ```
 
 3. **Array Marshaling**
-   ```simple
+```simple:skip
    fn marshal_array(arr: [i32]) -> (i64, i64):
        """Convert array to (ptr, len) for FFI."""
        val ptr = rt_array_to_ptr(arr)
@@ -443,7 +443,7 @@ for arg in args:
    ```
 
 4. **Callback Marshaling**
-   ```simple
+```simple:skip
    fn marshal_callback(fn_: Value) -> i64:
        """Convert Simple function to FFI callback."""
        rt_create_callback(fn_)
@@ -451,7 +451,7 @@ for arg in args:
 
 **Implementation:**
 
-```simple
+```simple:skip
 # In JIT interpreter
 fn convert_value_to_ffi(value: Value) -> Result<[i64], BackendError>:
     match value:
@@ -503,7 +503,7 @@ fn convert_ffi_to_value(bytes: [i64], ty: Type) -> Result<Value, BackendError>:
 **Blocks:** GPU patterns, vectorized math
 
 **Example:** `examples/gpu_patterns/gpu_type_inference_demo.spl`
-```simple
+```simple:skip
 fn vector_add_simd(a: [f32; 4], b: [f32; 4]) -> [f32; 4]:
     var result: [f32; 4]
     asm:
@@ -517,20 +517,20 @@ fn vector_add_simd(a: [f32; 4], b: [f32; 4]) -> [f32; 4]:
 **What's Needed:**
 
 1. **SIMD Types**
-   ```simple
+```simple:skip
    val v1: simd<f32, 4>  # 128-bit SIMD vector
    val v2: simd<i32, 8>  # 256-bit SIMD vector
    ```
 
 2. **SIMD Operations**
-   ```simple
+```simple:skip
    val sum = v1 + v2      # Vector addition
    val prod = v1 * v2     # Vector multiplication
    val dot = v1.dot(v2)   # Dot product
    ```
 
 3. **GPU Kernels** (requires JIT)
-   ```simple
+```simple:skip
    @gpu_kernel
    fn vector_add(a: [f32], b: [f32], out: [f32]):
        val idx = gpu_thread_id()
@@ -542,7 +542,7 @@ fn vector_add_simd(a: [f32; 4], b: [f32; 4]) -> [f32; 4]:
 SIMD/GPU **requires JIT or AOT compilation** - cannot run in pure interpreter.
 
 **Fallback Strategy:**
-```simple
+```simple:skip
 fn eval_simd_op(op: HirSIMDOp, ctx: EvalContext) -> Result<Value, BackendError>:
     if not ctx.jit_available():
         # Fallback to scalar emulation
@@ -565,7 +565,7 @@ fn eval_simd_op(op: HirSIMDOp, ctx: EvalContext) -> Result<Value, BackendError>:
 **Blocks:** Parallel file I/O, rayon-style parallelism
 
 **Example:** `examples/file_io/file_staging_parallel.spl`
-```simple
+```simple:skip
 fn process_files_parallel(files: [text]):
     files.par_iter().for_each(\f:
         process_file(f)
@@ -575,20 +575,20 @@ fn process_files_parallel(files: [text]):
 **What's Needed:**
 
 1. **Parallel Iterators**
-   ```simple
+```simple:skip
    val results = data.par_iter()
        .map(\x: compute(x))
        .collect()
    ```
 
 2. **Thread Pool**
-   ```simple
+```simple:skip
    val pool = ThreadPool.new(4)
    pool.spawn(\: heavy_work())
    ```
 
 3. **Parallel Operators**
-   ```simple
+```simple:skip
    val a = [1, 2, 3, 4]
    val b = [5, 6, 7, 8]
    val c = a // b  # Parallel zip
@@ -596,7 +596,7 @@ fn process_files_parallel(files: [text]):
 
 **Implementation:**
 
-```simple
+```simple:skip
 fn eval_parallel_op(op: HirParallelOp, ctx: EvalContext) -> Result<Value, BackendError>:
     match op:
         case ParMap(iter, fn_):
@@ -627,7 +627,7 @@ fn eval_parallel_op(op: HirParallelOp, ctx: EvalContext) -> Result<Value, Backen
 **Blocks:** Embedded, OS kernels
 
 **Example:** `examples/baremetal/blinky_stm32f4.spl`
-```simple
+```simple:skip
 #![no_std]
 #![no_main]
 
@@ -638,19 +638,19 @@ fn panic_handler(info: &PanicInfo) -> !:
 **What's Needed:**
 
 1. **No-Std Mode**
-   ```simple
+```simple:skip
    #![no_std]  # Disable standard library
    ```
 
 2. **Custom Panic Handler**
-   ```simple
+```simple:skip
    fn panic_handler(info: PanicInfo):
        # Custom panic implementation
        halt()
    ```
 
 3. **Custom Allocator**
-   ```simple
+```simple:skip
    @global_allocator
    static ALLOCATOR: BumpAllocator = BumpAllocator.new()
    ```
@@ -728,7 +728,7 @@ simple build --bare-metal hello_x86.spl
 ```
 
 **3. Skip Unsupported Features**
-```simple
+```simple:skip
 #[cfg(not(interpret))]
 fn use_simd():
     # SIMD code here

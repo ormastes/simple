@@ -47,7 +47,7 @@ Gaps are purely system-level and tracked below.
 Every driver and every native lib is a `.spl` module with a manifest
 attribute. The syntax is identical for both:
 
-```spl
+```simple:skip
 @driver(class = DriverClass.Block,
         vendor = 0x8086,
         device = [0x2922, 0x2829],
@@ -77,7 +77,7 @@ module ahci:
 Native libs use `@native_lib(abi = "simple", version = "1.0")` and omit the
 `Driver` impl:
 
-```spl
+```simple:skip
 @native_lib(abi = "simple", version = "1.0")
 module gpu_math:
     @export("C") fn gpu_math_init(): ...
@@ -110,7 +110,7 @@ unit (shared IR, split codegen).
 
 A C driver reaches the kernel only through a Simple shim:
 
-```spl
+```simple:skip
 @driver(class = DriverClass.Block, vendor = 0x1B36, device = [0x000E], version = "1.0")
 module legacy_nvme_shim:
 
