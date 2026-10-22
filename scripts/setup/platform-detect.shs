@@ -36,16 +36,14 @@ case "${PLATFORM_OS}" in
   macos)    PLATFORM_TRIPLE="${PLATFORM_ARCH}-apple-darwin" ;;
   freebsd)  PLATFORM_TRIPLE="${PLATFORM_ARCH}-unknown-freebsd" ;;
   windows)
-    # Single source of truth for the Windows ABI default: msvc, matching
-    # bootstrap-from-scratch.sh's explicit `export SIMPLE_WINDOWS_ABI=msvc`
-    # before it sources this file, and matching the tracked release artifacts
-    # (bin/release/x86_64-pc-windows-msvc/**), which are msvc-built. Git Bash
-    # always sets MSYSTEM=MINGW64 regardless of which ABI the host actually
-    # builds/ships, so keying the default off MSYSTEM (the previous behavior)
-    # picked "gnu" on every ordinary Windows dev box and disagreed with every
-    # other caller. An explicit SIMPLE_WINDOWS_ABI=gnu (or a future --mingw
-    # flag that sets it) is the only way to opt into the gnu ABI.
-    PLATFORM_ABI="${SIMPLE_WINDOWS_ABI:-msvc}"
+    # Single source of truth for the Windows ABI default: gnu = MinGW UCRT as
+    # provided by MSYS2 CLANG64 (UCRT + clang + LLD + libunwind/libc++, no
+    # GCC). See doc/07_guide/infra/toolchain/windows_mingw_ucrt.md. The MSVC
+    # configuration stays in-tree and is selected only explicitly with
+    # SIMPLE_WINDOWS_ABI=msvc. MSYSTEM is deliberately NOT consulted: Git Bash
+    # always reports MINGW64 regardless of the toolchain the host builds with,
+    # so the ABI is an explicit choice with one default.
+    PLATFORM_ABI="${SIMPLE_WINDOWS_ABI:-gnu}"
     case "${PLATFORM_ABI}" in
       gnu|msvc) ;;
       *) echo "error: SIMPLE_WINDOWS_ABI must be gnu or msvc" >&2; return 1 2>/dev/null || exit 1 ;;
@@ -94,7 +92,13 @@ LLVM_PROVIDER_KIND=""
 _llvm_lib_names() {
   case "${PLATFORM_OS}" in
     macos)   echo "libLLVM.dylib libLLVM-$1.dylib" ;;
-    windows) echo "LLVM-C.dll libLLVM.dll" ;;
+    windows)
+      # gnu (CLANG64) ships libLLVM-<major>.dll; msvc (official LLVM) LLVM-C.dll.
+      if [ "${PLATFORM_ABI}" = msvc ]; then
+        echo "LLVM-C.dll libLLVM.dll"
+      else
+        echo "libLLVM-$1.dll libLLVM.dll LLVM-C.dll"
+      fi ;;
     *)       echo "libLLVM-$1.so libLLVM.so.$1 libLLVM.so.1 libLLVM.so" ;;  # linux/freebsd/simpleos
   esac
 }
@@ -120,7 +124,12 @@ _llvm_prefixes() {
     freebsd)
       printf '%s\n' "/usr/local/llvm$1" "/usr/local" ;;
     windows)
-      printf '%s\n' "${LLVM_HOME:-}" "${ProgramFiles:-}/LLVM" "${ProgramW6432:-}/LLVM" "/c/Program Files/LLVM" ;;
+      if [ "${PLATFORM_ABI}" != msvc ]; then
+        # MSYS2 CLANG64 prefix first for the default MinGW UCRT ABI.
+        printf '%s\n' "${LLVM_HOME:-}" "${MINGW_PREFIX:-}" "/clang64" "/c/msys64/clang64" "C:/msys64/clang64"
+      else
+        printf '%s\n' "${LLVM_HOME:-}" "${ProgramFiles:-}/LLVM" "${ProgramW6432:-}/LLVM" "/c/Program Files/LLVM"
+      fi ;;
     *)
       : ;;
   esac
