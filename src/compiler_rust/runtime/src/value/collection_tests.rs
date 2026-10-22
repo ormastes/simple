@@ -2522,6 +2522,35 @@ fn transient_heap_promotion_retains_reachable_cycle_only() {
     super::rt_array_free(kept_b);
 }
 
+#[test]
+fn transient_heap_promotion_keeps_scope_owned_heap_root_and_raw_payload() {
+    // Stage-2 surface_build crash (2026-10-22): a scope-owned heap root
+    // (Result enum) whose payload is a raw struct must survive scope end.
+    extern "C" {
+        fn rt_alloc(size: i64) -> *mut u8;
+        fn rt_free(ptr: *mut u8);
+    }
+
+    assert!(super::rt_transient_array_scope_begin());
+    let field = super::rt_array_new(1);
+    let payload = unsafe { rt_alloc(16) as *mut u64 };
+    assert!(!payload.is_null());
+    unsafe {
+        *payload = field.0;
+        *payload.add(1) = 3;
+    }
+    let root = crate::value::objects::rt_enum_new(1, 0, RuntimeValue((payload as u64) | 1));
+    assert!(super::rt_transient_array_scope_pause());
+    assert!(super::rt_transient_heap_promote(root));
+    assert!(super::rt_transient_array_scope_end());
+
+    assert_eq!(crate::value::objects::rt_enum_discriminant(root), 0);
+    assert_eq!(super::rt_array_len(field), 0);
+    assert_eq!(unsafe { *payload.add(1) }, 3);
+    unsafe { rt_free(payload as *mut u8) };
+    super::rt_array_free(field);
+}
+
 /// `rt_find` is the receiver-polymorphic `find` the type-blind dispatch tables
 /// now emit. Two things have to hold at once and they pull in opposite
 /// directions, which is why they are asserted together:
