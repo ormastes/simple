@@ -314,3 +314,45 @@ and frontend.spl:
    under concurrent same-key stores (driver + worker share one cache dir by
    design — "shard workers of step 4 run in parallel processes over one
    cache dir", frontend_parse_cache.spl:170-172).
+
+## Update 6 (2026-10-22, later still) — unsharded differential: corruption is worker-side; parent is clean
+
+Ran the canonical repro with `SIMPLE_MIR_SHARDING=0` (fresh `/tmp/p2g5`,
+attempt-37 rejected candidate, which carries the merged binds):
+
+- The panic STILL fires (once instead of twice) — a native-build worker
+  process stack-overflows (`worker exited with code -1073740791`) and the
+  flat-pool panic prints from the worker boundary. So the corruption is NOT
+  an artifact of MIR sharding.
+- The PARENT's own pipeline is fully clean: parse OK, surface OK, hir
+  `done=1` with post-lowering/diagnostics/store all `count=0`, then
+  `[hir-shard] done shard=0/1 lowered=0 claimed=1` — the shard CLAIMS p2_add
+  and lowers NOTHING (recurring signature across attempts). Everything the
+  WORKER process touches is corrupt; everything in-process is fine.
+- The worker re-acquires the module via the shared parse cache
+  (`frontend_shared_parse_load_v1` → `build_module_from_flat_pool_blob`) —
+  the parent's private `.fpc` store FAILED in this run, so the worker's hit
+  can only have come from the SHARED store (`frontend_shared_parse_store_v1`,
+  frontend.spl:170) — making the SHARED BLOB DECODE the prime suspect for
+  the invalid first text field.
+- io-write reopened: the SAME attempt-37 binary stores fine in the lane
+  (driver `stores=1 io_failed=0`, long stage2-home path) but fails in the
+  repro (`store failed at write`, short C:\h path). Same binary, different
+  env: the lane sanity sets `SIMPLE_FRONTEND_CACHE=0` (suppresses the
+  frontend store entirely — masking the write failure class) and the
+  route/shard envs (`SIMPLE_HIR_SHARD_OWNER/QUEUE`, ABI/LINKER vars) that
+  feed `native_build_environment_identity`. The hir-store write failure is
+  therefore env/identity-dependent, NOT fixed by the binds per se; the lane
+  masks it. Treat the io-write as still open with a narrower suspect set
+  (environment-identity-derived scope/path).
+
+### Refined next probes
+
+1. Decode a captured shared-parse blob standalone and print the first text
+   pool item's field name + validity (answers the shared-decode suspicion
+   without a rebuild, using the seed or the `.fpc` on disk).
+2. In the worker: print the module name/source identity immediately after
+   `build_module_from_flat_pool_blob` returns (before any use) — if invalid
+   at that point, the decode is proven corrupt.
+3. For the store write: run the repro with `SIMPLE_FRONTEND_CACHE=1`
+   explicitly and diff `hir_cache_dir()`/store path against the lane's.
