@@ -2866,9 +2866,23 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
     // (0xC0000409 fail-fast). Implemented against the Rust heap registry:
     // the C immortal registry is not linkable from this crate
     // (runtime_native.c is not compiled into the Rust runtime).
+    // Only a root the current scope does NOT own may take this exit (the C
+    // twin gates it on rt_core_transient_classify == 0). Every heap object is
+    // registered, scope-owned ones included, so without the ownership check
+    // a scope-owned root (the retained parse Result<ParserModule>) skipped
+    // promotion, was freed at scope end with its raw payload, and stage 2
+    // crashed reading the dangling module in surface_build.
     if value.is_heap() {
         let root_ptr = value.as_heap_ptr();
-        if super::heap::is_registered_heap_ptr(root_ptr) {
+        let scope_owned = TRANSIENT_HEAP_SCOPE.with(|slot| {
+            slot.borrow().as_ref().is_some_and(|scope| {
+                scope
+                    .objects
+                    .iter()
+                    .any(|object| object.is_heap() && object.as_heap_ptr() == root_ptr)
+            })
+        });
+        if !scope_owned && super::heap::is_registered_heap_ptr(root_ptr) {
             return true;
         }
     }
