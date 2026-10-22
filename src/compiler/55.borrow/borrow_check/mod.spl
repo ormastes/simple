@@ -21,7 +21,9 @@ use compiler.borrow.borrow_check.borrow_graph.*
 use compiler.borrow.borrow_check.nll.*
 use compiler.borrow.borrow_check.nll.{NLLError}  # explicit: enum payload owner must name the payload type (hir-payload-origin-unresolved)
 use compiler.mir.mir_data.*
-use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
+use compiler.mir.mir_instruction_support.{MirTerminator, MirOperandKind, MirOperand}
+use compiler.mir.mir_types.{LocalId, BlockId, MirType, MirTypeKind, MirSignature, MirLocal, MirConstValue}  # explicit: a glob is not an import-origin for surface projection
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
 
 # ============================================================================
 # Borrow Check Result
@@ -31,6 +33,63 @@ enum BorrowCheckResult:
     """Result of borrow checking."""
     Ok
     Errors(errors: [NLLError])
+
+# 0: independent scalar value; 1: may retain a loan; 2: layout unknown.
+# Never infer a scalar merely from an absent type or an opaque runtime handle.
+fn mir_type_loan_payload_class(type_: MirType) -> i64:
+    if type_ == nil: return 2
+    match type_.kind:
+        case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64 | MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64:
+            0
+        case MirTypeKind.F32 | MirTypeKind.F64 | MirTypeKind.Bool | MirTypeKind.Char | MirTypeKind.Unit | MirTypeKind.Never:
+            0
+        case MirTypeKind.Vec4f | MirTypeKind.Vec8f | MirTypeKind.Vec4d | MirTypeKind.Vec4i | MirTypeKind.Vec8i | MirTypeKind.Vec16f | MirTypeKind.Vec8d | MirTypeKind.Vec16i | MirTypeKind.Bits(_, _):
+            0
+        case MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, _) | MirTypeKind.FuncPtr(_) | MirTypeKind.Slice(_) | MirTypeKind.Array(_, _) | MirTypeKind.Dict(_, _) | MirTypeKind.Promise(_) | MirTypeKind.Generator(_, _) | MirTypeKind.ActorType(_):
+            1
+        case MirTypeKind.Tuple(elements) | MirTypeKind.Union(elements):
+            var classification = 0
+            for element in elements:
+                val current = mir_type_loan_payload_class(element)
+                if current == 2: return 2
+                if current == 1: classification = 1
+            classification
+        case MirTypeKind.Result(ok, err):
+            val ok_class = mir_type_loan_payload_class(ok)
+            val err_class = mir_type_loan_payload_class(err)
+            if ok_class == 2 or err_class == 2: return 2
+            if ok_class == 1 or err_class == 1: return 1
+            0
+        case MirTypeKind.ScalableVec(element, _):
+            mir_type_loan_payload_class(element)
+        case _:
+            2
+
+# An indirect call is admitted only when its full fixed signature and return
+# type are scalar. This is the narrow signature shape for which arguments and
+# results cannot carry loan payloads.
+fn mir_indirect_signature_is_scalar_v1(signature: MirSignature?, argument_count: i64) -> bool:
+    if val sig = signature:
+        if not sig.params_known or sig.is_variadic or sig.params.len() != argument_count:
+            return false
+        for parameter in sig.params:
+            if mir_type_loan_payload_class(parameter) != 0: return false
+        return mir_type_loan_payload_class(sig.return_type) == 0
+    false
+
+# Preserve text types across the short-call summary dictionary lookup. Attempt
+# 5 disassembly showed the pattern-bound key passed through rt_value_int_wide
+# for contains/get, yielding empty effects (native_short_call_mode_array_text_conversion).
+fn short_call_effects_at(contracts: Dict<text, [text]>, name: text) -> [text]:
+    if contracts.contains_key(name): return contracts[name]
+    []
+
+fn short_call_mode_at(effects: [text], index: i64) -> text:
+    if index < 0 or index >= effects.len(): return ""
+    effects[index]
+
+fn short_call_modes_append(modes: [text], mode: text) -> [text]:
+    modes.push(mode)
 
 
 # ============================================================================
@@ -48,23 +107,48 @@ class BorrowChecker:
     """
     errors: [NLLError]
     checked_functions: [text]
+    local_declarations: Dict<i64, MirLocal>
+    short_call_contracts: Dict<text, [text]>
+    nogc_strict: bool
 
     static fn create() -> BorrowChecker:
         BorrowChecker(
             errors: [],
-            checked_functions: []
+            checked_functions: [],
+            local_declarations: {},
+            short_call_contracts: {},
+            nogc_strict: false
         )
 
-    me check_function(func: MirBody) -> BorrowCheckResult:
+    me check_function(func: MirBody, entry_block_id: i64 = 0) -> BorrowCheckResult:
         """Check a MIR function for borrow violations.
 
         Builds CFG, runs NLL checker, and collects errors.
         """
         # Build CFG from MIR
-        val cfg = self.build_cfg(func)
+        val cfg_error = self.cfg_identity_error(func, entry_block_id)
+        if cfg_error != "":
+            val error = NLLError(message: cfg_error, has_primary_span: false,
+                primary_span: 0, secondary_spans: [], has_help: false, help: "")
+            self.errors = self.errors.push(error)
+            return BorrowCheckResult.Errors([error])
+        val cfg = self.build_cfg(func, entry_block_id)
 
         # Create and run NLL checker
         var nll = NLLChecker.create(cfg)
+        self.short_call_contracts = func.short_call_contracts
+        self.nogc_strict = func.nogc_strict
+
+        # Only declared MIR locals establish destination value semantics.
+        # Missing metadata must not turn an erased reference into a scalar.
+        self.local_declarations = {}
+        for local in func.locals:
+            if self.local_declarations.contains_key(local.id.id):
+                nll.errors = nll.errors.push(NLLError(message: "ownership MIR has duplicate local type declarations", has_primary_span: false, primary_span: 0, secondary_spans: [], has_help: false, help: ""))
+            self.local_declarations[local.id.id] = local
+            if local.short_borrow:
+                val kind = if local.short_mutable: BorrowKind.Mutable else: BorrowKind.Shared
+                nll.record_short_parameter(local.id.id, kind, local.short_boundary)
 
         # Analyze borrows in the function
         self.analyze_mir_borrows(func, nll)
@@ -81,14 +165,41 @@ class BorrowChecker:
                 self.errors = self.errors.push(err)
             return BorrowCheckResult.Errors(errors)
 
-    me build_cfg(func: MirBody) -> ControlFlowGraph:
+    fn cfg_identity_error(func: MirBody, entry_block_id: i64) -> text:
+        """Reject malformed identities before dictionary insertion can hide them."""
+        if entry_block_id < 0:
+            return "ownership MIR CFG has an invalid entry block ID"
+        var ids: Dict<i64, bool> = {}
+        for mir_block in func.blocks:
+            val block_id = mir_block.bootstrap_block_id_value()
+            if block_id < 0:
+                return "ownership MIR CFG has a negative block ID"
+            if ids.contains_key(block_id):
+                return "ownership MIR CFG has a duplicate block ID"
+            ids[block_id] = true
+        if not ids.contains_key(entry_block_id):
+            return "ownership MIR CFG has no entry block"
+        for mir_block in func.blocks:
+            val mir_term: MirTerminator = mir_block.terminator
+            val term = self.convert_terminator(mir_term, mir_block.bootstrap_block_id_value())
+            for successor in self.terminator_successors(term):
+                if not ids.contains_key(successor):
+                    return "ownership MIR CFG edge targets a missing block"
+        ""
+
+    me build_cfg(func: MirBody, entry_block_id: i64 = 0) -> ControlFlowGraph:
         """Build CFG from MIR function."""
         var cfg = ControlFlowGraph.create()
+        # Keep direct build_cfg callers fail-closed too. The main entrypoint
+        # reports the specific validation error before reaching this boundary.
+        if self.cfg_identity_error(func, entry_block_id) != "":
+            cfg.set_entry(-1)
+            return cfg
         var point = 0
 
-        # Create basic blocks
-        var block_id = 0
+        # MIR storage order determines point numbering, never block identity.
         for mir_block in func.blocks:
+            val block_id = mir_block.bootstrap_block_id_value()
             var block = BasicBlock.create(block_id)
 
             # Add statements
@@ -97,17 +208,16 @@ class BorrowChecker:
                 point = point + 1
 
             # Set terminator based on MIR terminator
-            block.terminator = self.convert_terminator(mir_block.terminator, block_id)
+            val mir_term: MirTerminator = mir_block.terminator
+            block.terminator = self.convert_terminator(mir_term, block_id)
             block.terminator_point = point
             point = point + 1
             block.successors = self.terminator_successors(block.terminator)
 
             cfg.add_block(block)
-            block_id = block_id + 1
 
         # Set entry and compute predecessors
-        if block_id > 0:
-            cfg.set_entry(0)
+        cfg.set_entry(entry_block_id)
         cfg.compute_predecessors()
 
         cfg
@@ -141,12 +251,12 @@ class BorrowChecker:
         # return was never converted to `Terminator.Return` in the CFG.
         # See doc/08_tracking/bug/case_bare_ident_is_irrefutable_binding_2026-08-01.md
         match mir_term:
-            case Ret(_):
+            case MirTerminator.Ret(_):
                 Terminator.Return
-            case Goto(target):
+            case MirTerminator.Goto(target):
                 val typed_target: BlockId = target
                 Terminator.Goto(typed_target.id)
-            case Switch(_, targets, default):
+            case MirTerminator.Switch(_, targets, default):
                 var target_ids: [i64] = []
                 for case_ in targets:
                     val typed_case_: SwitchCase = case_
@@ -154,11 +264,11 @@ class BorrowChecker:
                     target_ids = target_ids.push(typed_case_target.id)
                 val typed_default: BlockId = default
                 Terminator.SwitchInt(target_ids, typed_default.id)
-            case If(_, then_br, else_br):
+            case MirTerminator.If(_, then_br, else_br):
                 val typed_then: BlockId = then_br
                 val typed_else: BlockId = else_br
                 Terminator.SwitchInt([typed_then.id], typed_else.id)
-            case CallTerminator(_, _, _, normal, unwind, _, _):
+            case MirTerminator.CallTerminator(_, _, _, normal, unwind, _, _):
                 val typed_normal: BlockId = normal
                 val target = typed_normal.id
                 val unwind_id: i64? = if unwind.?:
@@ -167,9 +277,9 @@ class BorrowChecker:
                 else:
                     nil
                 Terminator.Call(target, unwind_id)
-            case Unreachable:
+            case MirTerminator.Unreachable:
                 Terminator.Unreachable
-            case Abort(_):
+            case MirTerminator.Abort(_):
                 Terminator.Unreachable
             case _:
                 Terminator.Unreachable
@@ -177,10 +287,13 @@ class BorrowChecker:
     me analyze_mir_borrows(func: MirBody, nll: NLLChecker):
         """Analyze borrows in MIR instructions."""
         var point = 0
+        val reachable = nll.cfg.reverse_postorder()
 
         for mir_block in func.blocks:
+            val executes = reachable.contains(mir_block.bootstrap_block_id_value())
             for inst in mir_block.instructions:
-                self.analyze_instruction(inst, nll, point)
+                if executes:
+                    self.analyze_instruction(inst, nll, point)
                 point = point + 1
 
             # The terminator (`Ret`, `If`, `Switch`, `CallTerminator`) can
@@ -192,7 +305,9 @@ class BorrowChecker:
             # instruction's point: reusing it would make a terminator use
             # look concurrent with the last statement instead of strictly
             # after it, which matters for point-ordered liveness/move facts.
-            self.analyze_terminator(mir_block.terminator, nll, point)
+            val mir_term: MirTerminator = mir_block.terminator
+            if executes:
+                self.analyze_terminator(mir_term, nll, point)
             point = point + 1
 
     me analyze_instruction(inst: MirInst, nll: NLLChecker, point: i64):
@@ -218,6 +333,7 @@ class BorrowChecker:
                 nll.record_use(point, Place.local(src_local.id))
                 val dest_local: LocalId = dest
                 nll.record_assign(point, Place.local(dest_local.id))
+                nll.record_loan_copy(point, Place.local(src_local.id), Place.local(dest_local.id))
 
             case Move(dest, src):
                 # Move consumes the source and (re)initializes the destination
@@ -225,6 +341,7 @@ class BorrowChecker:
                 nll.record_move(point, Place.local(src_local.id))
                 val dest_local: LocalId = dest
                 nll.record_assign(point, Place.local(dest_local.id))
+                nll.record_loan_copy(point, Place.local(src_local.id), Place.local(dest_local.id))
 
             case TransferOut(dest, source, _, mode, _, _):
                 if mir_transfer_mode_consumes_source(mode):
@@ -232,6 +349,7 @@ class BorrowChecker:
                 else:
                     nll.record_use(point, Place.local(source.id))
                 nll.record_assign(point, Place.local(dest.id))
+                nll.record_loan_escape(point, Place.local(source.id), "cross-domain transfer")
 
             case TransferIn(dest, _, _, _):
                 nll.record_assign(point, Place.local(dest.id))
@@ -242,6 +360,7 @@ class BorrowChecker:
             case AcquireSnapshot(dest, source):
                 nll.record_use(point, Place.local(source.id))
                 nll.record_assign(point, Place.local(dest.id))
+                nll.record_loan_copy(point, Place.local(source.id), Place.local(dest.id))
 
             case CommitUpdates(dest, base, updates):
                 nll.record_use(point, Place.local(base.id))
@@ -266,15 +385,9 @@ class BorrowChecker:
                 # already-dropped place IS a use-after-move by the same
                 # reasoning a second Move is.
                 # doc/03_plan/language/resource/resource_parallel_agent_plan_2026-08-06.md
-                # (WP-G). Known, accepted over-approximation inherited from
-                # SF1 (borrow_graph.spl): the checker's walk is linear over
-                # `func.blocks` in array order, not CFG-path-sensitive, so
-                # two Drops of the same local on genuinely MUTUALLY EXCLUSIVE
-                # branches (e.g. WP-E's independent per-exit drop edges) can
-                # false-positive as a double-drop. This mirrors the exact,
-                # already-documented limitation WP-F accepted for Move
-                # (iso_transfer_sites_missing_move_return_assign_field_2026-08-06.md)
-                # rather than introducing a new one.
+                # (WP-G). OwnershipFlow evaluates these ordered facts over
+                # real CFG edges, so mutually exclusive drops do not become
+                # an artificial second drop from block storage order.
                 val drop_local: LocalId = local
                 nll.record_move(point, Place.local(drop_local.id))
 
@@ -302,17 +415,177 @@ class BorrowChecker:
                 self.record_operand_use(func, nll, point)
                 for arg in args:
                     self.record_operand_use(arg, nll, point)
+                if self.is_direct_named_call_v1(func):
+                    self.record_short_call_contract(func, args, nll, point)
+                else:
+                    self.record_indirect_call_contract_v1(func, args, nil, nll, point)
                 # A non-unit call (re)initializes its destination, which kills
                 # any moved-out state on that local, exactly as Copy/Const do.
                 if val dest_local = dest:
                     nll.record_assign(point, Place.local(dest_local.id))
+                    # MIR lacks a return-loan summary. Conservatively retain
+                    # argument provenance until typed call summaries reach MIR.
+                    self.record_call_result_loans(args, dest_local, nll, point)
 
-            case Throw(payload, type_tag) | Resume(payload, type_tag):
-                self.record_operand_use(payload, nll, point)
-                self.record_operand_use(type_tag, nll, point)
+            case MirInstKind.BinOp(dest, _, left, right) | MirInstKind.CheckedBinOp(dest, _, left, right):
+                self.record_operand_use(left, nll, point)
+                self.record_operand_use(right, nll, point)
+                nll.record_assign(point, Place.local(dest.id))
+
+            case MirInstKind.UnaryOp(dest, _, operand):
+                self.record_operand_use(operand, nll, point)
+                nll.record_assign(point, Place.local(dest.id))
+
+            case MirInstKind.Cast(dest, operand, _) | MirInstKind.Bitcast(dest, operand, _):
+                self.record_operand_use(operand, nll, point)
+                nll.record_assign(point, Place.local(dest.id))
+                self.record_operand_loan_copy(operand, Place.local(dest.id), nll, point)
+
+            case MirInstKind.Alloc(dest, _):
+                nll.record_assign(point, Place.local(dest.id))
+
+            case MirInstKind.Aggregate(dest, _, operands):
+                # Each field keeps its loan origin: returning the containing
+                # tuple/record must not hide a short borrow inside it.
+                for operand in operands:
+                    self.record_operand_use(operand, nll, point)
+                nll.record_assign(point, Place.local(dest.id))
+                var field = 0
+                for operand in operands:
+                    self.record_operand_loan_copy(operand, place_field(Place.local(dest.id), field), nll, point)
+                    field = field + 1
+
+            case MirInstKind.GetField(dest, base, field):
+                val retains_loans = self.result_retains_loans(dest, nll, point)
+                match base.kind:
+                    case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                        val source = place_field(Place.local(local.id), field)
+                        match base.kind:
+                            case MirOperandKind.Move(_): nll.record_move(point, source)
+                            case _: nll.record_use(point, source)
+                        nll.record_assign(point, Place.local(dest.id))
+                        if retains_loans:
+                            nll.record_loan_copy(point, source, Place.local(dest.id))
+                    case MirOperandKind.Const(_, _):
+                        nll.record_assign(point, Place.local(dest.id))
+
+            case MirInstKind.SetField(base, field, value):
+                self.record_operand_use(value, nll, point)
+                self.record_operand_loan_escape(value, "stored in an aggregate field", nll, point)
+                match base.kind:
+                    case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                        val destination = place_field(Place.local(local.id), field)
+                        nll.record_assign(point, destination)
+                        self.record_operand_loan_copy(value, destination, nll, point)
+                    case _: pass
+
+            case MirInstKind.GetElementPtr(dest, base, indices):
+                self.record_operand_use(base, nll, point)
+                for index in indices:
+                    self.record_operand_use(index, nll, point)
+                nll.record_assign(point, Place.local(dest.id))
+                # The address remains rooted at the original owner even when
+                # the index is symbolic; do not erase provenance via a GEP.
+                self.record_operand_loan_copy(base, Place.local(dest.id), nll, point)
+
+            case MirInstKind.Load(dest, pointer):
+                val retains_loans = self.result_retains_loans(dest, nll, point)
+                self.record_operand_use(pointer, nll, point)
+                nll.record_assign(point, Place.local(dest.id))
+                if retains_loans:
+                    self.record_operand_loan_copy(pointer, Place.local(dest.id), nll, point)
+                    match pointer.kind:
+                        case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                            nll.record_loan_copy(point, place_deref(Place.local(local.id)), Place.local(dest.id))
+                        case _: pass
+
+            case MirInstKind.Store(pointer, value):
+                self.record_operand_use(pointer, nll, point)
+                self.record_operand_use(value, nll, point)
+                self.record_operand_loan_escape(value, "stored through a pointer", nll, point)
+                match pointer.kind:
+                    case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                        val destination = place_deref(Place.local(local.id))
+                        nll.record_assign(point, destination)
+                        self.record_operand_loan_copy(value, destination, nll, point)
+                    case _: pass
+
+            case MirInstKind.LoadGlobal(dest, symbol):
+                val source = place_static_var("mir-global-{symbol.id}")
+                nll.record_use(point, source)
+                nll.record_assign(point, Place.local(dest.id))
+                nll.record_loan_copy(point, source, Place.local(dest.id))
+
+            case MirInstKind.StoreGlobal(symbol, value):
+                self.record_operand_use(value, nll, point)
+                self.record_operand_loan_escape(value, "stored in module global", nll, point)
+                val destination = place_static_var("mir-global-{symbol.id}")
+                nll.record_assign(point, destination)
+                self.record_operand_loan_copy(value, destination, nll, point)
+
+            case MirInstKind.CallIndirect(dest, pointer, args, signature):
+                self.record_operand_use(pointer, nll, point)
+                for argument in args:
+                    self.record_operand_use(argument, nll, point)
+                self.record_indirect_call_contract_v1(pointer, args, Some(signature), nll, point)
+                if val result = dest:
+                    nll.record_assign(point, Place.local(result.id))
+
+            case MirInstKind.Intrinsic(dest, _, args):
+                for argument in args:
+                    self.record_operand_use(argument, nll, point)
+                    self.record_operand_loan_escape(argument, "passed to an intrinsic without a non-retaining contract", nll, point)
+                if val result = dest:
+                    nll.record_assign(point, Place.local(result.id))
+
+            case MirInstKind.Await(dest, promise):
+                self.record_operand_use(promise, nll, point)
+                nll.record_suspend(point, "await suspension")
+                nll.record_assign(point, Place.local(dest.id))
+                self.record_operand_loan_copy(promise, Place.local(dest.id), nll, point)
+
+            case MirInstKind.Yield(value):
+                if val yielded = value:
+                    self.record_operand_use(yielded, nll, point)
+                    self.record_operand_loan_escape(yielded, "yielded out of the short-borrow boundary", nll, point)
+                nll.record_suspend(point, "generator yield suspension")
+
+            case MirInstKind.Spawn(dest, handler, args):
+                self.record_operand_use(handler, nll, point)
+                self.record_operand_loan_escape(handler, "captured by a spawned task", nll, point)
+                for argument in args:
+                    self.record_operand_use(argument, nll, point)
+                    self.record_operand_loan_escape(argument, "sent to a spawned task", nll, point)
+                nll.record_assign(point, Place.local(dest.id))
+
+            case MirInstKind.CreatePromise(dest, body, _):
+                nll.record_use(point, Place.local(body.id))
+                nll.record_loan_escape(point, Place.local(body.id), "retained in a promise body")
+                nll.record_assign(point, Place.local(dest.id))
+
+            case MirInstKind.Send(dest, target, message):
+                self.record_operand_use(target, nll, point)
+                self.record_operand_use(message, nll, point)
+                self.record_operand_loan_escape(message, "sent to an actor mailbox", nll, point)
+                nll.record_assign(point, Place.local(dest.id))
+
+            case MirInstKind.Receive(dest, timeout):
+                if val duration = timeout:
+                    self.record_operand_use(duration, nll, point)
+                nll.record_suspend(point, "mailbox receive may suspend")
+                nll.record_assign(point, Place.local(dest.id))
+
+            case MirInstKind.DebugValue(local, _):
+                nll.record_use(point, Place.local(local.id))
+
+            case MirInstKind.Nop:
+                pass
 
             case _:
-                pass_do_nothing
+                # Unsupported operand-bearing opcodes must not silently erase
+                # move/loan facts. Add an adapter before admitting the opcode.
+                if self.nogc_strict:
+                    nll.errors = nll.errors.push(NLLError(message: "ownership MIR adapter does not support this instruction in a strict module", has_primary_span: true, primary_span: point, secondary_spans: [], has_help: false, help: ""))
 
     me analyze_terminator(term: MirTerminator, nll: NLLChecker, point: i64):
         """Analyze a block terminator for the use/move facts its operands carry.
@@ -326,48 +599,169 @@ class BorrowChecker:
         doc/08_tracking/bug/iso_transfer_sites_missing_move_return_assign_field_2026-08-06.md
         """
         match term:
-            case Ret(value):
+            case MirTerminator.Ret(value):
                 if val v = value:
                     self.record_operand_use(v, nll, point)
+                    self.record_operand_loan_escape(v, "returned out of the short-borrow boundary", nll, point)
                     # The returned operand is the only escape route a `Ref`
                     # temp has; record it so the Return borrow check can tell
                     # an escaping borrow from a body-local one.
                     match v.kind:
-                        case Copy(ret_local):
+                        case MirOperandKind.Copy(ret_local):
                             nll.record_returned_local(ret_local.id)
-                        case Move(ret_local):
+                        case MirOperandKind.Move(ret_local):
                             nll.record_returned_local(ret_local.id)
                         case _:
                             pass_do_nothing("a constant return operand names no local")
 
-            case If(cond, _, _):
+            case MirTerminator.If(cond, _, _):
                 self.record_operand_use(cond, nll, point)
 
-            case Switch(value, _, _):
+            case MirTerminator.Switch(value, _, _):
                 self.record_operand_use(value, nll, point)
 
-            case CallTerminator(dest, func, args, _, _, unwind_payload_dest, unwind_type_tag_dest):
+            case MirTerminator.CallTerminator(dest, func, args, _, unwind, unwind_payload_dest, unwind_type_tag_dest):
                 self.record_operand_use(func, nll, point)
                 for arg in args:
                     self.record_operand_use(arg, nll, point)
-                if val dest_local = dest:
-                    nll.record_assign(point, Place.local(dest_local.id))
-                # The runtime initializes these destinations only on the
-                # exceptional edge, but they are definitions from the NLL
-                # transfer perspective just like the normal destination.
-                if val payload_local = unwind_payload_dest:
-                    nll.record_assign(point, Place.local(payload_local.id))
-                if val tag_local = unwind_type_tag_dest:
-                    nll.record_assign(point, Place.local(tag_local.id))
+                if self.is_direct_named_call_v1(func):
+                    self.record_short_call_contract(func, args, nll, point)
+                else:
+                    self.record_indirect_call_contract_v1(func, args, nil, nll, point)
+                if unwind == nil:
+                    if val dest_local = dest:
+                        nll.record_assign(point, Place.local(dest_local.id))
+                        self.record_call_result_loans(args, dest_local, nll, point)
+                else:
+                    # A terminator event executes on BOTH successor edges.
+                    # Neither normal nor unwind-only outputs can be revived
+                    # here without erasing a move on the other edge. Until
+                    # edge events exist, reject rather than invent a refill.
+                    if self.nogc_strict:
+                        nll.errors = nll.errors.push(NLLError(message: "ownership MIR adapter requires edge-specific call result definitions for unwinding calls", has_primary_span: true, primary_span: point, secondary_spans: [], has_help: false, help: ""))
+                if unwind_payload_dest != nil or unwind_type_tag_dest != nil:
+                    # Exception values can retain arbitrary call inputs.
+                    for arg in args:
+                        self.record_operand_loan_escape(arg, "may escape in an exception payload", nll, point)
 
-            case Goto(_):
+            case MirTerminator.Throw(payload, type_tag) | MirTerminator.Resume(payload, type_tag):
+                self.record_operand_use(payload, nll, point)
+                self.record_operand_use(type_tag, nll, point)
+                self.record_operand_loan_escape(payload, "escaped in an exception payload", nll, point)
+
+            case MirTerminator.Goto(_):
                 pass_do_nothing("unconditional jump names no operand")
 
-            case Unreachable:
+            case MirTerminator.Unreachable:
                 pass_do_nothing("no operand to analyze")
 
-            case Abort(_):
+            case MirTerminator.Abort(_):
                 pass_do_nothing("carries only a diagnostic message, no MIR operand")
+
+    me record_call_result_loans(args: [MirOperand], destination: LocalId, nll: NLLChecker, point: i64):
+        if not self.result_retains_loans(destination, nll, point): return
+        var sources: [Place] = []
+        for argument in args:
+            match argument.kind:
+                case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                    sources = sources.push(Place.local(local.id))
+                case MirOperandKind.Const(_, _): pass
+        # Union all inputs in one definition; successive overwrite-copies
+        # would let a final scalar argument erase an earlier loan origin.
+        nll.record_loan_union(point, sources, Place.local(destination.id))
+
+    me record_short_call_contract(callee: MirOperand, args: [MirOperand], nll: NLLChecker, point: i64):
+        var effects: [text] = []
+        match callee.kind:
+            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                effects = short_call_effects_at(self.short_call_contracts, name)
+            case _: pass
+        # Positional summaries are authoritative only at their checked arity.
+        # A stale row must not bless a prefix of a different call signature.
+        if effects.len() != args.len(): effects = []
+        var places: [Place] = []
+        var modes: [text] = []
+        var index = 0
+        for argument in args:
+            match argument.kind:
+                case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                    places = places.push(Place.local(local.id))
+                    val mode: text = short_call_mode_at(effects, index)
+                    modes = short_call_modes_append(modes, mode)
+                case MirOperandKind.Const(_, _): pass
+            index = index + 1
+        # The NLL solver resolves aliases and live origins at this event. A
+        # source-order active set would conflate branches and loan lifetimes.
+        nll.record_short_call(point, places, modes)
+
+    me is_direct_named_call_v1(callee: MirOperand) -> bool:
+        match callee.kind:
+            case MirOperandKind.Const(MirConstValue.Str(_), _): true
+            case _: false
+
+    me indirect_argument_is_scalar_v1(argument: MirOperand) -> bool:
+        match argument.kind:
+            case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                if not self.local_declarations.contains_key(local.id): return false
+                val declaration: MirLocal = self.local_declarations[local.id]
+                if declaration.short_borrow: return false
+                mir_type_loan_payload_class(declaration.type_) == 0
+            case MirOperandKind.Const(MirConstValue.Str(_), _): false
+            case MirOperandKind.Const(_, type_):
+                mir_type_loan_payload_class(type_) == 0
+
+    me record_indirect_call_contract_v1(callee: MirOperand, args: [MirOperand], signature: MirSignature?, nll: NLLChecker, point: i64):
+        # Scalar ABI metadata must not suppress existing alias checks.
+        self.record_short_call_contract(callee, args, nll, point)
+        var resolved_signature = signature
+        if resolved_signature == nil:
+            match callee.kind:
+                case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                    if self.local_declarations.contains_key(local.id):
+                        val declaration: MirLocal = self.local_declarations[local.id]
+                        match declaration.type_.kind:
+                            case MirTypeKind.FuncPtr(found_signature):
+                                resolved_signature = Some(found_signature)
+                            case _: pass_do_nothing("indirect callee local is not declared as a function pointer")
+                case _: pass_do_nothing("indirect call has no typed local callee")
+
+        var admitted = mir_indirect_signature_is_scalar_v1(resolved_signature, args.len())
+        for argument in args:
+            if not self.indirect_argument_is_scalar_v1(argument): admitted = false
+        if admitted: return
+
+        if self.nogc_strict:
+            nll.errors = nll.errors.push(NLLError(message: "strict indirect call requires an admitted non-retaining invocation contract", has_primary_span: true, primary_span: point, secondary_spans: [], has_help: false, help: ""))
+        # An unadmitted call may retain every input. Record that conservatively
+        # even outside strict mode so an unknown call cannot hide an escape.
+        for argument in args:
+            self.record_operand_loan_escape(argument, "passed to an indirect call without an admitted non-retaining invocation contract", nll, point)
+
+    me result_retains_loans(destination: LocalId, nll: NLLChecker, point: i64) -> bool:
+        if self.local_declarations.contains_key(destination.id):
+            val declaration: MirLocal = self.local_declarations[destination.id]
+            # An explicitly marked short reference can use an erased scalar
+            # ABI representation. Its provenance overrides that scalar shape.
+            if declaration.short_borrow: return true
+            val type_: MirType = declaration.type_
+            val classification = mir_type_loan_payload_class(type_)
+            if classification == 0: return false
+            if classification == 1: return true
+        if self.nogc_strict:
+            nll.errors = nll.errors.push(NLLError(message: "ownership MIR result requires an authoritative reference-bearing or scalar destination type", has_primary_span: true, primary_span: point, secondary_spans: [], has_help: false, help: ""))
+        return true
+
+    me record_operand_loan_copy(op: MirOperand, destination: Place, nll: NLLChecker, point: i64):
+        match op.kind:
+            case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                nll.record_loan_copy(point, Place.local(local.id), destination)
+            case MirOperandKind.Const(_, _): pass
+
+    me record_operand_loan_escape(op: MirOperand, reason: text, nll: NLLChecker, point: i64):
+        match op.kind:
+            case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                nll.record_loan_escape(point, Place.local(local.id), reason)
+            case MirOperandKind.Const(_, _): pass
 
     me record_operand_use(op: MirOperand, nll: NLLChecker, point: i64):
         """Record the use/move fact an operand carries.
@@ -375,11 +769,11 @@ class BorrowChecker:
         Operands are the only place a Call names its inputs. A `Const`
         operand references no place, so it records nothing."""
         match op.kind:
-            case Copy(local):
+            case MirOperandKind.Copy(local):
                 nll.record_use(point, Place.local(local.id))
-            case Move(local):
+            case MirOperandKind.Move(local):
                 nll.record_move(point, Place.local(local.id))
-            case Const(_, _):
+            case MirOperandKind.Const(_, _):
                 pass_do_nothing("a constant operand names no place, so it carries neither a use nor a move fact")
             case _("MirOperandKind has only Copy/Move/Const; a new variant must decide its own use/move fact rather than defaulting to silence"):
                 pass_do_nothing("unreachable today; see the arm rationale above")
@@ -446,7 +840,8 @@ fn check_mir_module(module: MirModule) -> [NLLError]:
     for symbol in module.functions.keys():
         val mir_fn = module.functions[symbol]
         val body = MirBody.from_function(mir_fn)
-        match checker.check_function(body):
+        val entry_block: BlockId = mir_fn.entry_block
+        match checker.check_function(body, entry_block.id):
             case Errors(errors):
                 for err in errors:
                     all_errors = all_errors.push(err)

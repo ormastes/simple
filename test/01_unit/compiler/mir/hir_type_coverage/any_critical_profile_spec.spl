@@ -1,19 +1,97 @@
-use std.io_runtime.{file_read}
+# @req REQ-MC-ANY-001
+# AUTHORED / UNRUN. Run in an isolated qualified pure-Simple spec process.
+# Restore the exact nullable profile before asserting captured results.
+"""
+## Purpose and audience
+Compiler maintainers verify actual Any type lowering and parsed-function wiring.
+The fatal flag, named diagnostic, source span, and driver rejection decision are
+checked independently; no source-text search is an execution oracle.
+"""
 use std.spec.*
+use std.spec.step
+use std.io_runtime.{env_get_nullable, env_set_process}
+use std.nogc_sync_mut.env.variables.env_unset
+use compiler.common.config.Logger
+use compiler.common.diagnostics.span.Span
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.mir.mir_lowering_types.MirLowering
+use compiler.mir.mir_lowering.*
+use compiler.mir.mir_types.MirTypeKind
+use compiler.common.driver_core_types.driver_core_compile_options_default
+use compiler.driver.driver_mir_target.driver_mir_target_context
+use compiler.driver.driver_pipeline_lowering.driver_mir_error_is_fatal_v1
 
-describe "MIR lowering of HirTypeKind.Any under the critical assurance profile":
-    it "raises the fatal named diagnostic E-MIR-TYPE-Any with the source span":
-        val source = file_read("src/compiler/50.mir/_MirLowering/function_lowering.spl")
-        expect(source).to_contain("if mir_type_any_requires_hard_error(any_profile_name):")
-        expect(source).to_contain("self.error_fatal(\"E-MIR-TYPE-Any: `Any` reached MIR lowering")
-        expect(source).to_contain("typed interface\", Some(type_.span))")
+fn any_mir_restore_profile(previous: text?) -> bool:
+    if val value = previous:
+        env_set_process("SIMPLE_SAFETY_PROFILE", value)
+    else:
+        env_unset("SIMPLE_SAFETY_PROFILE")
 
-    it "reads the profile the same way the match-exhaustiveness hard-error decision does":
-        val source = file_read("src/compiler/50.mir/_MirLowering/function_lowering.spl")
-        expect(source).to_contain("val any_profile_name = mir_lower_env_get(\"SIMPLE_SAFETY_PROFILE\") ?? \"\"")
+describe "MIR Any profile enforcement":
+    it "records the actual lower_type fatal decision and exact source span":
+        for profile in ["critical", "mission-critical", "verified", "robust", "strict", "moderate", ""]:
+            step("lower a typed Any with a distinctive source span")
+            val parsed = parse_full_frontend("fn control() -> i64:\n    7\n", "testdata/any_type.spl", "any_type", Logger(level: 0))
+            var hir_lowering = HirLowering.with_filename("testdata/any_type.spl")
+            val hir = hir_lowering.lower_module(parsed)
+            val target = driver_mir_target_context(driver_core_compile_options_default())
+            var lowering = MirLowering.new_for_target(hir.symbols, target)
+            val span = Span.new(21, 24, 3, 9)
+            val previous = env_get_nullable("SIMPLE_SAFETY_PROFILE")
+            val selected = env_set_process("SIMPLE_SAFETY_PROFILE", profile)
+            val lowered = lowering.lower_type(HirType(kind: HirTypeKind.Any, span: span))
+            val restored = any_mir_restore_profile(previous)
+            expect(selected and restored).to_equal(true)
+            expect(env_get_nullable("SIMPLE_SAFETY_PROFILE")).to_equal(previous)
+            expect(hir_lowering.errors.len()).to_equal(0)
+            expect(lowered.kind).to_equal(MirTypeKind.I64)
+            expect(lowering.errors.len()).to_equal(1)
+            val error = lowering.errors[0]
+            val hard = profile == "critical" or profile == "mission-critical" or profile == "verified"
+            expect(error.fatal).to_equal(hard)
+            expect(driver_mir_error_is_fatal_v1(error)).to_equal(hard)
+            expect(error.message).to_start_with("E-MIR-TYPE-Any:")
+            expect(error.span.?).to_equal(true)
+            val actual_span = error.span!
+            expect(actual_span.start).to_equal(21)
+            expect(actual_span.end).to_equal(24)
+            expect(actual_span.line).to_equal(3)
+            expect(actual_span.col).to_equal(9)
 
-    it "treats only AssuranceStrictness.Critical as hard, mirroring match_coverage_requires_hard_error":
-        val source = file_read("src/compiler/50.mir/_MirLowering/function_lowering.spl")
-        expect(source).to_contain("fn mir_type_any_requires_hard_error(strictness_name: text) -> bool:")
-        expect(source).to_contain("val canonical = normalize_profile_name(strictness_name)")
-        expect(source).to_contain("AssuranceStrictness.Critical: true")
+    it "rejects parsed Any parameters in critical and keeps concrete controls clean":
+        for profile in ["critical", "mission-critical", "robust"]:
+            for erased in [true, false]:
+                step("parse and lower a function through the production MIR route")
+                val parameter = if erased: "Any" else: "i64"
+                val source = "fn probe(value: " + parameter + ") -> i64:\n    7\n"
+                val parsed = parse_full_frontend(source, "testdata/any_pipeline.spl", "any_pipeline", Logger(level: 0))
+                var hir_lowering = HirLowering.with_filename("testdata/any_pipeline.spl")
+                val hir = hir_lowering.lower_module(parsed)
+                val target = driver_mir_target_context(driver_core_compile_options_default())
+                var lowering = MirLowering.new_for_target(hir.symbols, target)
+                val previous = env_get_nullable("SIMPLE_SAFETY_PROFILE")
+                val selected = env_set_process("SIMPLE_SAFETY_PROFILE", profile)
+                val mir = lowering.lower_module(hir)
+                val restored = any_mir_restore_profile(previous)
+                expect(selected and restored).to_equal(true)
+                expect(env_get_nullable("SIMPLE_SAFETY_PROFILE")).to_equal(previous)
+                expect(hir_lowering.errors.len()).to_equal(0)
+                var any_errors = 0
+                var fatal_errors = 0
+                for error in lowering.errors:
+                    if error.message.starts_with("E-MIR-TYPE-Any:"):
+                        any_errors = any_errors + 1
+                        expect(error.fatal).to_equal(profile != "robust")
+                        expect(driver_mir_error_is_fatal_v1(error)).to_equal(profile != "robust")
+                        expect(error.span.?).to_equal(true)
+                    if driver_mir_error_is_fatal_v1(error): fatal_errors = fatal_errors + 1
+                if erased:
+                    expect(any_errors).to_be_greater_than(0)
+                    if profile == "robust": expect(fatal_errors).to_equal(0)
+                    else: expect(fatal_errors).to_be_greater_than(0)
+                else:
+                    expect(any_errors).to_equal(0)
+                    expect(lowering.errors.len()).to_equal(0)

@@ -40,3 +40,15 @@ range and result closedness additionally needs supported input (all variables
 bound, no unknown constant). Dict/list, executable Simple and HIR `by_symbol`
 refinement remain unproved. Do not infer key injectivity from display rendering:
 closed `Con("Box<i64>")` and `App("Box", [Con("i64")])` collide.
+
+Executable model keys use `mt_key_type` / `mt_key_types` / `mk_key`, with
+constructor tags and length/arity framing. `mt_render` is diagnostic display
+and is not injective for arbitrary names. The executable candidate has focused
+delimiter and constructor-collision regressions; require an admitted runtime
+test result before accepting it. Model substitution proofs alone do not prove
+key-encoding correctness or exact production/model key-string agreement.
+
+`MonoBoundaryModel` is a further manual default target: a variant never
+displaces a same-named type binding, specialized calls have type-owner
+arguments, and a module published to MIR has no generic call given complete
+mono diagnostics. Source-coded, not yet kernel-built; see plan §12.

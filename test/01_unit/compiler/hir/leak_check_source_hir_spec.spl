@@ -1,0 +1,63 @@
+"""
+Actual-source regression for the six Phase3 leak-check HIR failures.
+AUTHORED_UNEXECUTED. Requires the repaired source tree and qualified runtime.
+Uses real provider source through the driver's import scanner/resolver; no stubs.
+"""
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io_runtime.{file_read_nullable}
+use compiler.driver.driver_source_loading.{_driver_entry_import_module_paths, _driver_entry_import_dirname, _driver_resolve_entry_import, _driver_module_aliases, _driver_module_name_from_path}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.config.{Logger}
+
+fn leak_check_actual_source_surfaces() -> (Dict<text, Module>, ModuleSurfacesByName):
+    val names = ["main", "config", "internal_runner", "external_runner", "reporter", "parser"]
+    var queue: [text] = []
+    for name in names:
+        queue.push("src/compiler/90.tools/leak_check/" + name + ".spl")
+    var seen: Dict<text, bool> = {}
+    var modules: Dict<text, Module> = {}
+    var sources: [SourceFile] = []
+    var cursor = 0
+    while cursor < queue.len():
+        assert cursor < 8192, "Actual provider closure exceeded the regression bound"
+        val path = queue[cursor]
+        cursor = cursor + 1
+        if seen.has(path):
+            continue
+        seen[path] = true
+        val content = file_read_nullable(path) ?? ""
+        assert content.len() > 0, "Missing actual provider source: " + path
+        val aliases = _driver_module_aliases(path, content, _driver_module_name_from_path(path))
+        assert aliases.len() > 0, "No actual source module identity: " + path
+        for source in aliases:
+            if not modules.has(source.module_name):
+                modules[source.module_name] = parse_full_frontend(source.content, source.module_name, source.path, Logger(level: 0))
+                sources.push(source)
+        val imports = _driver_entry_import_module_paths(content)
+        for provider in imports:
+            val resolved = _driver_resolve_entry_import(provider, _driver_entry_import_dirname(path))
+            assert resolved != "", "Unresolved actual source provider: " + provider + " from " + path
+            if not seen.has(resolved):
+                queue.push(resolved)
+    val surfaces = match module_surfaces_from_modules(modules, sources):
+        case Ok(value): value
+        case Err(error):
+            assert false, "Actual provider surface generation failed"
+            ModuleSurfacesByName.empty()
+    (modules, surfaces)
+
+describe "leak-check actual-source HIR provider ownership":
+    it "lowers all six real consumers without HIR errors":
+        val (modules, surfaces) = leak_check_actual_source_surfaces()
+        val names = ["main", "config", "internal_runner", "external_runner", "reporter", "parser"]
+        for name in names:
+            val owner = "compiler.tools.leak_check." + name
+            expect(modules.has(owner)).to_equal(true)
+            var lowering = hirlowering_for_module(owner, surfaces)
+            lowering.lower_module(modules[owner])
+            expect(lowering.errors.len()).to_equal(0)

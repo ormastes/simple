@@ -1,3 +1,5 @@
+use compiler.blocks.unicode_classification_v17.{block_text_is_alphabetic_v17, block_text_is_alphanumeric_v17, block_text_is_whitespace_v17, block_text_is_digit_v17}
+use compiler.blocks.definition.{HoverInfo, SignatureHelp, block_default_lex_v1, block_default_skip_policy_v1, block_default_highlight_v1, block_default_completions_v1, block_default_hover_v1, block_default_signature_help_v1, block_default_validate_v1, block_default_eval_const_v1, block_default_result_type_v1, block_default_outline_kind_v1, block_default_examples_v1}
 # Builtin Data Block Definitions
 #
 # Data-format block types:
@@ -7,7 +9,6 @@
 
 use compiler.blocks.definition.{BlockDefinition}
 use compiler.blocks.value.{BlockValue, SqlQuery, SqlKind, SqlParam, RegexPattern}
-use compiler.blocks.registry.{BlockRegistry}
 use compiler.frontend.block_types.{LexerMode, SyntaxFeatures, PreLexInfo, BlockSkipPolicy, BlockOutlineInfo, BlockToken, BlockTokenKind, TextSpan}
 use compiler.blocks.context.{BlockContext, BlockError}
 use compiler.blocks.definition.{ConstValue}
@@ -15,7 +16,7 @@ use compiler.blocks.definition.{ConstValue}
 # return/param types and constructor calls) but were reachable only
 # through `BlockDefinition`'s own module surface, which the cross-module
 # dependency-materialization walk does not follow. The miss surfaced as
-# `[hir-callable-dep-origin-unresolved] owner=compiler.blocks.blocks.builtin_blocks_data`
+# `[hir-callable-dep-origin-unresolved] owner=compiler.blocks.builtin_blocks_data`
 # and then as hard `unresolved type:`/`unresolved name:` errors against
 # importing modules (Stage 3 log, 2026-08-24).
 use compiler.blocks.definition.{BlockExample, HighlightToken, HighlightKind, Completion, CompletionKind, BlockType}
@@ -25,7 +26,7 @@ use compiler.blocks.builtin_blocks_helpers.{sql_keywords, parse_sql_query, valid
 # SQL Block (sql{})
 # ============================================================================
 
-struct SqlBlockDef(BlockDefinition):
+struct SqlBlockDef:
     r"""SQL query block: write SQL queries.
 
     Features:
@@ -46,6 +47,7 @@ impl SqlBlockDef:
     static fn new() -> SqlBlockDef:
         SqlBlockDef()
 
+impl BlockDefinition for SqlBlockDef:
     fn kind() -> text:
         "sql"
 
@@ -72,17 +74,20 @@ impl SqlBlockDef:
             BlockExample(
                 code: "sql\{ SELECT * FROM users }",
                 description: "Simple select",
-                output: nil
+                has_output: false,
+                output: ""
             ),
             BlockExample(
                 code: "sql\{ SELECT name, age FROM users WHERE id = $1 }",
                 description: "Parameterized query",
-                output: nil
+                has_output: false,
+                output: ""
             ),
             BlockExample(
                 code: "sql\{\n    INSERT INTO users (name, email)\n    VALUES ($1, $2)\n    RETURNING id\n}",
                 description: "Insert with returning",
-                output: nil
+                has_output: false,
+                output: ""
             )
         ]
 
@@ -109,7 +114,7 @@ impl SqlBlockDef:
         var i = 0
         while i < payload.len():
             # Skip whitespace
-            while i < payload.len() and payload[i].is_whitespace():
+            while i < payload.len() and block_text_is_whitespace_v17(payload[i]):
                 i = i + 1
 
             if i >= payload.len():
@@ -133,7 +138,7 @@ impl SqlBlockDef:
             if payload[i] == '$' or payload[i] == ':':
                 val start = i
                 i = i + 1
-                while i < payload.len() and (payload[i].is_alphanumeric() or payload[i] == '_'):
+                while i < payload.len() and (block_text_is_alphanumeric_v17(payload[i]) or payload[i] == '_'):
                     i = i + 1
                 tokens = tokens.push(HighlightToken(
                     start: start,
@@ -143,9 +148,9 @@ impl SqlBlockDef:
                 continue
 
             # Numbers
-            if payload[i].is_digit():
+            if block_text_is_digit_v17(payload[i]):
                 val start = i
-                while i < payload.len() and (payload[i].is_digit() or payload[i] == '.'):
+                while i < payload.len() and (block_text_is_digit_v17(payload[i]) or payload[i] == '.'):
                     i = i + 1
                 tokens = tokens.push(HighlightToken(
                     start: start,
@@ -155,9 +160,9 @@ impl SqlBlockDef:
                 continue
 
             # Words (check for keywords)
-            if payload[i].is_alphabetic():
+            if block_text_is_alphabetic_v17(payload[i]):
                 val start = i
-                while i < payload.len() and (payload[i].is_alphanumeric() or payload[i] == '_'):
+                while i < payload.len() and (block_text_is_alphanumeric_v17(payload[i]) or payload[i] == '_'):
                     i = i + 1
                 val word = payload[start:i].upper()
                 if word in keywords:
@@ -183,19 +188,45 @@ impl SqlBlockDef:
     fn completions(payload: text, cursor: i64) -> [Completion]:
         # Basic SQL completions
         [
-            Completion(label: "SELECT" + "", kind: CompletionKind.Keyword, detail: Some("Query data" + ""), insert_text: Some("SELECT " + ""), documentation: Some("Select columns from a table" + "")),
-            Completion(label: "FROM" + "", kind: CompletionKind.Keyword, detail: Some("Specify table" + ""), insert_text: Some("FROM " + ""), documentation: nil),
-            Completion(label: "WHERE" + "", kind: CompletionKind.Keyword, detail: Some("Filter results" + ""), insert_text: Some("WHERE " + ""), documentation: nil),
-            Completion(label: "INSERT INTO" + "", kind: CompletionKind.Snippet, detail: Some("Insert data" + ""), insert_text: Some("INSERT INTO $\{1:table} ($\{2:columns}) VALUES ($\{3:values})"), documentation: nil),
-            Completion(label: "UPDATE" + "", kind: CompletionKind.Keyword, detail: Some("Update data" + ""), insert_text: Some("UPDATE " + ""), documentation: nil),
-            Completion(label: "DELETE FROM" + "", kind: CompletionKind.Snippet, detail: Some("Delete data" + ""), insert_text: Some("DELETE FROM $\{1:table} WHERE $\{2:condition}"), documentation: nil)
+            Completion(label: "SELECT" + "", kind: CompletionKind.Keyword, has_detail: true, detail: "Query data" + "", has_insert_text: true, insert_text: "SELECT " + "", has_documentation: true, documentation: "Select columns from a table" + ""),
+            Completion(label: "FROM" + "", kind: CompletionKind.Keyword, has_detail: true, detail: "Specify table" + "", has_insert_text: true, insert_text: "FROM " + "", has_documentation: false, documentation: ""),
+            Completion(label: "WHERE" + "", kind: CompletionKind.Keyword, has_detail: true, detail: "Filter results" + "", has_insert_text: true, insert_text: "WHERE " + "", has_documentation: false, documentation: ""),
+            Completion(label: "INSERT INTO" + "", kind: CompletionKind.Snippet, has_detail: true, detail: "Insert data" + "", has_insert_text: true, insert_text: "INSERT INTO $\{1:table} ($\{2:columns}) VALUES ($\{3:values})", has_documentation: false, documentation: ""),
+            Completion(label: "UPDATE" + "", kind: CompletionKind.Keyword, has_detail: true, detail: "Update data" + "", has_insert_text: true, insert_text: "UPDATE " + "", has_documentation: false, documentation: ""),
+            Completion(label: "DELETE FROM" + "", kind: CompletionKind.Snippet, has_detail: true, detail: "Delete data" + "", has_insert_text: true, insert_text: "DELETE FROM $\{1:table} WHERE $\{2:condition}", has_documentation: false, documentation: "")
         ]
+
+
+    # @workaround: baked native producer omits trait default slots; recover=8642b544daf854e3254bd3c3aaaea36a3f16b0f3
+    fn lex(payload: text, pre_lex: PreLexInfo, ctx: BlockContext) -> Result<[BlockToken], BlockError>:
+        block_default_lex_v1(payload, pre_lex, ctx)
+
+    fn treesitter_outline(payload: text, pre_lex: PreLexInfo) -> BlockOutlineInfo:
+        block_default_outline_kind_v1(self.kind())
+
+    fn parse_full(payload: text, pre_lex: PreLexInfo, ctx: BlockContext) -> Result<BlockValue, BlockError>:
+        self.parse_payload(payload, ctx)
+
+    fn skip_policy() -> BlockSkipPolicy:
+        block_default_skip_policy_v1()
+
+    fn hover(payload: text, cursor: i64) -> HoverInfo?:
+        block_default_hover_v1(payload, cursor)
+
+    fn signature_help(payload: text, cursor: i64) -> SignatureHelp?:
+        block_default_signature_help_v1(payload, cursor)
+
+    fn eval_const(value: BlockValue) -> ConstValue?:
+        block_default_eval_const_v1(value)
+
+    fn result_type(value: BlockValue) -> BlockType?:
+        block_default_result_type_v1(value)
 
 # ============================================================================
 # Regex Block (re{})
 # ============================================================================
 
-struct RegexBlockDef(BlockDefinition):
+struct RegexBlockDef:
     r"""Regular expression block: compile regex patterns.
 
     Features:
@@ -215,6 +246,7 @@ impl RegexBlockDef:
     static fn new() -> RegexBlockDef:
         RegexBlockDef()
 
+impl BlockDefinition for RegexBlockDef:
     fn kind() -> text:
         "re"
 
@@ -244,17 +276,20 @@ impl RegexBlockDef:
             BlockExample(
                 code: "re\{ [a-z]+ }",
                 description: "Match lowercase letters",
-                output: nil
+                has_output: false,
+                output: ""
             ),
             BlockExample(
                 code: "re\{ ^\\d\{4}-\\d\{2}-\\d\{2}$ }",
                 description: "Match date format YYYY-MM-DD",
-                output: nil
+                has_output: false,
+                output: ""
             ),
             BlockExample(
                 code: "re\{ (?P<name>\\w+)@(?P<domain>\\w+\\.\\w+) }",
                 description: "Named capture groups",
-                output: nil
+                has_output: false,
+                output: ""
             )
         ]
 
@@ -343,11 +378,37 @@ impl RegexBlockDef:
 
         tokens
 
+
+    # @workaround: baked native producer omits trait default slots; recover=8642b544daf854e3254bd3c3aaaea36a3f16b0f3
+    fn lex(payload: text, pre_lex: PreLexInfo, ctx: BlockContext) -> Result<[BlockToken], BlockError>:
+        block_default_lex_v1(payload, pre_lex, ctx)
+
+    fn treesitter_outline(payload: text, pre_lex: PreLexInfo) -> BlockOutlineInfo:
+        block_default_outline_kind_v1(self.kind())
+
+    fn parse_full(payload: text, pre_lex: PreLexInfo, ctx: BlockContext) -> Result<BlockValue, BlockError>:
+        self.parse_payload(payload, ctx)
+
+    fn skip_policy() -> BlockSkipPolicy:
+        block_default_skip_policy_v1()
+
+    fn completions(payload: text, cursor: i64) -> [Completion]:
+        block_default_completions_v1(payload, cursor)
+
+    fn hover(payload: text, cursor: i64) -> HoverInfo?:
+        block_default_hover_v1(payload, cursor)
+
+    fn signature_help(payload: text, cursor: i64) -> SignatureHelp?:
+        block_default_signature_help_v1(payload, cursor)
+
+    fn validate(value: BlockValue, ctx: BlockContext) -> [BlockError]:
+        block_default_validate_v1(value, ctx)
+
 # ============================================================================
 # JSON Block (json{})
 # ============================================================================
 
-struct JsonBlockDef(BlockDefinition):
+struct JsonBlockDef:
     r"""JSON literal block: embed JSON data.
 
     Features:
@@ -370,6 +431,7 @@ impl JsonBlockDef:
     static fn new() -> JsonBlockDef:
         JsonBlockDef()
 
+impl BlockDefinition for JsonBlockDef:
     fn kind() -> text:
         "json"
 
@@ -399,18 +461,51 @@ impl JsonBlockDef:
             BlockExample(
                 code: "json\{ \{\"key\": \"value\"} }",
                 description: "Object literal",
-                output: nil
+                has_output: false,
+                output: ""
             ),
             BlockExample(
                 code: "json\{ [1, 2, 3] }",
                 description: "Array literal",
-                output: nil
+                has_output: false,
+                output: ""
             )
         ]
 
     fn eval_const(value: BlockValue) -> ConstValue?:
         match value:
             case Json(jv):
-                Some(json_to_const(jv))
+                json_to_const(jv)
             case _:
                 nil
+
+    # @workaround: baked native producer omits trait default slots; recover=8642b544daf854e3254bd3c3aaaea36a3f16b0f3
+    fn lex(payload: text, pre_lex: PreLexInfo, ctx: BlockContext) -> Result<[BlockToken], BlockError>:
+        block_default_lex_v1(payload, pre_lex, ctx)
+
+    fn treesitter_outline(payload: text, pre_lex: PreLexInfo) -> BlockOutlineInfo:
+        block_default_outline_kind_v1(self.kind())
+
+    fn parse_full(payload: text, pre_lex: PreLexInfo, ctx: BlockContext) -> Result<BlockValue, BlockError>:
+        self.parse_payload(payload, ctx)
+
+    fn skip_policy() -> BlockSkipPolicy:
+        block_default_skip_policy_v1()
+
+    fn highlight(payload: text) -> [HighlightToken]:
+        block_default_highlight_v1(payload)
+
+    fn completions(payload: text, cursor: i64) -> [Completion]:
+        block_default_completions_v1(payload, cursor)
+
+    fn hover(payload: text, cursor: i64) -> HoverInfo?:
+        block_default_hover_v1(payload, cursor)
+
+    fn signature_help(payload: text, cursor: i64) -> SignatureHelp?:
+        block_default_signature_help_v1(payload, cursor)
+
+    fn validate(value: BlockValue, ctx: BlockContext) -> [BlockError]:
+        block_default_validate_v1(value, ctx)
+
+    fn result_type(value: BlockValue) -> BlockType?:
+        block_default_result_type_v1(value)

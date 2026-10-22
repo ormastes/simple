@@ -1,3 +1,5 @@
+use compiler.core.parser.{parser_lexical_scope_enter, parser_lexical_scope_leave, parser_lexical_bind_value, parser_lexical_has_new_value}
+use compiler.core.ast.{expr_get_str}
 # Primary parsing: parse_primary_expr (literals, identifiers, keywords).
 use compiler.frontend.core.parser_primary.*
 use compiler.frontend.core._ParserPrimary.asm_match_suffix.{parser_validate_unit_suffix}
@@ -60,6 +62,7 @@ use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_wa
 use compiler.core.parser.{parser_guarded_int_text}
 use compiler.frontend.core._ParserPrimary.unsigned_integer_literals.{parser_unsigned_integer_suffix, parse_unsigned_int_literal_text}
 use compiler.core.parser.{parser_has_errors}
+use compiler.core.parser.{parser_new_paren_sigil_kind}
 use compiler.core.parser.{parser_parse_type}
 
 # Forward declarations for mutual recursion
@@ -119,7 +122,11 @@ fn parser_path_literal_has_interpolation(value: text) -> bool:
 # Shared by the anonymous `fn(...): ...` expression form (below) and the
 # named nested-fn statement desugar (`fn NAME(...): body` -> `val NAME = fn(...): body`,
 # see parser_stmts.spl parse_statement's TOK_KW_FN case).
+use compiler.frontend.core.representation_declarations_v1.{representation_declaration_begin_v1, representation_declaration_header_v1, representation_declaration_end_v1}
+
 fn parse_fn_lambda_after_kw() -> i64:
+    val representation_owner = representation_declaration_begin_v1("nested_callable")
+    parser_lexical_scope_enter()
     # Parse parameter list
     parser_expect(140)
     var fn_param_names: [i64] = []
@@ -154,6 +161,7 @@ fn parse_fn_lambda_after_kw() -> i64:
     # consuming `:` so the following newline/body indentation is not suppressed
     # by paren_depth (parser_anonymous_fn_block_call_arg_2026-08-03).
     lex_enable_forced_indentation()
+    representation_declaration_header_v1(representation_owner)
     # Expect ':' then body
     parser_expect(161)
     # Block body or expression body (same pattern as backslash lambda)
@@ -186,6 +194,8 @@ fn parse_fn_lambda_after_kw() -> i64:
         val fn_body_e = parse_expr()
         fn_lam_stmts.push(fn_body_e)
         lex_disable_forced_indentation()
+    parser_lexical_scope_leave()
+    representation_declaration_end_v1(representation_owner, -1, "")
     expr_lambda(fn_param_names, fn_lam_stmts, 0)
 
 fn unsuffixed_decimal_needs_u64_word(int_text: text) -> bool:
@@ -583,6 +593,10 @@ fn parse_primary_expr() -> i64:
     if par_kind_get() == 211:
         parser_advance()
         val new_next_kind = par_kind_get()
+        # Resolve only proven lexical values before the greedy allocation
+        # operand parse; ordinary postfix and operator precedence then apply.
+        if new_next_kind == TOK_LBRACKET and parser_lexical_has_new_value():
+            return expr_ident("new", 0)
         # `g33_kw_ident_follow` also includes unary-prefix tokens such as
         # `+`, `-`, `*`, and `&`. Those can start the documented generic
         # `new expr` form, so only use G33's unambiguous remainder here.
@@ -591,21 +605,41 @@ fn parse_primary_expr() -> i64:
             return expr_ident("new", 0)
         if new_next_kind == TOK_EOF or new_next_kind == TOK_RBRACE or new_next_kind == TOK_RBRACKET or new_next_kind == TOK_SEMICOLON:
             return expr_ident("new", 0)
-        # alloc_kind: 0 = default, 1 = pool, 2 = explicit allocator
+        # alloc_kind, aligned with the Rust seed's PointerKind for `new`
+        # (doc/05_design/language/misc/memory.md):
+        #   0 = bare `new X` (kind follows the memory mode),
+        #   1 = unique  `new(&) X` / `new& X` / `new() X` (type pool),
+        #   2 = shared  `new(*) X` / `new* X`,
+        #   3 = weak    `new(-) X` / `new- X`,
+        #   4 = handle  `new(+) X` / `new+ X` / `new(allocator) X`.
         var alloc_kind = 0
         var alloc_expr_id = -1
-        # Check for allocator spec: new() or new(allocator)
         if par_kind_get() == 140:
             parser_advance()
-            if par_kind_get() == 141:
-                # new() — type pool
+            val paren_sigil = parser_new_paren_sigil_kind()
+            if paren_sigil >= 0:
+                alloc_kind = paren_sigil
+            elif par_kind_get() == 141:
+                # new() — type pool, a unique owner
                 parser_advance()
                 alloc_kind = 1
             else:
-                # new(allocator_expr) — explicit allocator
+                # new(allocator_expr) — explicit allocator (handle)
                 alloc_expr_id = parse_expr()
                 parser_expect(141)
-                alloc_kind = 2
+                alloc_kind = 4
+        elif new_next_kind == TOK_AMPERSAND:
+            parser_advance()
+            alloc_kind = 1
+        elif new_next_kind == TOK_STAR:
+            parser_advance()
+            alloc_kind = 2
+        elif new_next_kind == TOK_MINUS:
+            parser_advance()
+            alloc_kind = 3
+        elif new_next_kind == TOK_PLUS:
+            parser_advance()
+            alloc_kind = 4
         val inner = parse_expr()
         return expr_new_alloc(alloc_kind, alloc_expr_id, inner, 0)
 
@@ -648,8 +682,10 @@ fn parse_primary_expr() -> i64:
             # seed_parser_arrow_lambda_block_expr_wrapped_return_type_2026-08-23.md
             if par_kind_get() == 168:
                 parser_advance()
+                parser_lexical_scope_enter()
                 var zero_body: [i64] = []
                 zero_body.push(parse_expr())
+                parser_lexical_scope_leave()
                 return expr_lambda([], zero_body, 0)
             return expr_unit(0)
         val inner = parse_expr()
@@ -676,8 +712,12 @@ fn parse_primary_expr() -> i64:
                         tup_all_idents = false
                 if tup_all_idents:
                     parser_advance()
+                    parser_lexical_scope_enter()
+                    for parameter in tup_elems:
+                        parser_lexical_bind_value(expr_get_str(parameter))
                     var multi_body: [i64] = []
                     multi_body.push(parse_expr())
+                    parser_lexical_scope_leave()
                     return expr_lambda(tup_elems, multi_body, 0)
             return expr_tuple(tup_elems, 0)
         parser_expect(141)
@@ -687,8 +727,11 @@ fn parse_primary_expr() -> i64:
                 parser_advance()
                 var one_params: [i64] = []
                 one_params.push(inner)
+                parser_lexical_scope_enter()
+                parser_lexical_bind_value(expr_get_str(inner))
                 var one_body: [i64] = []
                 one_body.push(parse_expr())
+                parser_lexical_scope_leave()
                 return expr_lambda(one_params, one_body, 0)
         return inner
 
@@ -889,8 +932,10 @@ fn parse_primary_expr() -> i64:
                     break
                 parser_advance()
         parser_expect(121)
+        parser_lexical_scope_enter()
         var pipe_stmts: [i64] = []
         pipe_stmts.push(parse_expr())
+        parser_lexical_scope_leave()
         return expr_lambda(pipe_params, pipe_stmts, 0)
 
     # Backslash lambda: \params: expr  or  \params:\n INDENT stmts DEDENT
@@ -899,6 +944,7 @@ fn parse_primary_expr() -> i64:
     #         \x, y: expr     — multiple params (comma-separated idents before :)
     #         \: (newline+indent block) — block body
     if par_kind_get() == 220:
+        parser_lexical_scope_enter()
         parser_advance()
         # Collect parameter names (comma-separated idents) until ':'
         var lam_params: [i64] = []
@@ -968,6 +1014,7 @@ fn parse_primary_expr() -> i64:
             val body_e = parse_expr()
             lam_stmts.push(body_e)
             lex_disable_forced_indentation()
+        parser_lexical_scope_leave()
         return expr_lambda(lam_params, lam_stmts, 0)
 
     if par_kind_get() == 169:

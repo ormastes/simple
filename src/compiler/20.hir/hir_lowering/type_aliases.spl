@@ -3,10 +3,53 @@
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_types.*
 use compiler.frontend.parser_types.{ParserTypeParam}
-use compiler.frontend.parser_types_expr.{Type}
+use compiler.frontend.parser_types_expr.{Type, TypeKind}
 use compiler.common.diagnostics.span.{Span}
 
+# Inspect the declaration template, before substituting caller-owned arguments.
+# A legacy identity alias may forward a checked actual argument safely; a
+# legacy template must not manufacture checked ownership from its own sigils.
+fn alias_template_has_ownership(type_: Type) -> bool:
+    match type_.kind:
+        case TypeKind.Unique(_): return true
+        case TypeKind.Shared(_): return true
+        case TypeKind.Weak(_): return true
+        case TypeKind.Named(_, arguments):
+            for argument in arguments:
+                if alias_template_has_ownership(argument): return true
+        case TypeKind.Tuple(elements):
+            for element in elements:
+                if alias_template_has_ownership(element): return true
+        case TypeKind.Union(elements):
+            for element in elements:
+                if alias_template_has_ownership(element): return true
+        case TypeKind.Function(parameters, result):
+            for parameter in parameters:
+                if alias_template_has_ownership(parameter): return true
+            return alias_template_has_ownership(result)
+        case TypeKind.Array(inner, _): return alias_template_has_ownership(inner)
+        case TypeKind.Optional(inner): return alias_template_has_ownership(inner)
+        case TypeKind.Reference(inner, _): return alias_template_has_ownership(inner)
+        case TypeKind.Pointer(inner, _): return alias_template_has_ownership(inner)
+        case TypeKind.Atomic(inner): return alias_template_has_ownership(inner)
+        case TypeKind.Isolated(inner): return alias_template_has_ownership(inner)
+        case TypeKind.Projection(inner, _): return alias_template_has_ownership(inner)
+        case _: pass
+    false
+
 impl HirLowering:
+    me lower_alias_template_type(target: Type) -> HirType:
+        val owner = self.type_alias_current_owner
+        if self.nogc_strict and owner != "" and owner != self.module_filename and alias_template_has_ownership(target):
+            val owner_index = if self.module_surfaces.index_by_name.contains_key(owner): self.module_surfaces.index_by_name[owner] else: -1
+            if owner_index < 0 or owner_index >= self.module_surfaces.surfaces.len():
+                self.error("NOGC-FOREIGN-001: ownership contract unavailable for imported alias module `{owner}`", target.span)
+                return HirType(kind: HirTypeKind.Error, span: target.span)
+            if not self.module_surfaces.surfaces[owner_index].nogc_strict:
+                self.error("NOGC-FOREIGN-001: unchecked ownership sigil from legacy alias module `{owner}`; use an explicit checked boundary", target.span)
+                return HirType(kind: HirTypeKind.Error, span: target.span)
+        self.lower_type(target)
+
     fn type_alias_position(symbol_id: SymbolId) -> i64:
         if symbol_id.id < 0 or symbol_id.id >= self.type_alias_positions.len():
             return -1
@@ -40,7 +83,7 @@ impl HirLowering:
             if active_id == symbol_id.id:
                 self.error("cyclic type alias `{self.symbols.symbols[symbol_id.id].name}`", span)
                 return HirTypeKind.Error
-        val parameters = self.type_alias_parameters[position]
+        val parameters: [ParserTypeParam] = self.type_alias_parameters[position]
         if arguments.len() > parameters.len():
             self.error("type alias expects {parameters.len()} type arguments, got {arguments.len()}", span)
             return HirTypeKind.Error
@@ -68,11 +111,11 @@ impl HirLowering:
         self.type_alias_active_ids = active_frame.push(symbol_id.id)
         var index = 0
         while index < parameters.len():
-            val argument = if index < arguments.len(): arguments[index] else: self.lower_type(parameters[index].default)
+            val argument = if index < arguments.len(): arguments[index] else: self.lower_alias_template_type(parameters[index].default)
             self.type_alias_argument_names = self.type_alias_argument_names.push(parameters[index].name)
             self.type_alias_argument_types = self.type_alias_argument_types.push(argument)
             index = index + 1
-        val expanded = self.lower_type(self.type_alias_targets[position])
+        val expanded = self.lower_alias_template_type(self.type_alias_targets[position])
         self.type_alias_argument_names = saved_names
         self.type_alias_argument_types = saved_types
         self.type_alias_current_owner = saved_owner

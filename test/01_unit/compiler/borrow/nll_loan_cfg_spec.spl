@@ -1,0 +1,289 @@
+"""REQ-ACBOR-001/002: point liveness and CFG short-loan provenance."""
+use std.spec
+use compiler.borrow.borrow_check.nll.{BasicBlock, ControlFlowGraph, NLLChecker}
+use compiler.borrow.borrow_check.borrow_graph.{Place, BorrowKind, place_field, place_deref}
+
+fn loan_block(id: i64, statements: [i64], terminal: i64, successors: [i64]) -> BasicBlock:
+    var block = BasicBlock.create(id)
+    block.statements = statements
+    block.terminator_point = terminal
+    block.successors = successors
+    block
+
+fn loan_linear() -> ControlFlowGraph:
+    var cfg = ControlFlowGraph.create()
+    cfg.add_block(loan_block(0, [0, 1, 2, 3, 4], 5, []))
+    cfg
+
+describe "NLL CFG short-loan propagation":
+    it "ends an exclusive loan after the reference's last use":
+        var checker = NLLChecker.create(loan_linear())
+        checker.record_borrow(0, Place.local(0), BorrowKind.Mutable, 10)
+        checker.record_use(1, Place.local(10))
+        checker.record_borrow(2, Place.local(0), BorrowKind.Mutable, 11)
+        checker.record_use(3, Place.local(11))
+        expect(checker.check()).to_equal(true)
+
+    it "rejects overlapping exclusive loans with later reference uses":
+        var checker = NLLChecker.create(loan_linear())
+        checker.record_borrow(0, Place.local(0), BorrowKind.Mutable, 10)
+        checker.record_borrow(1, Place.local(0), BorrowKind.Mutable, 11)
+        checker.record_use(2, Place.local(10))
+        checker.record_use(3, Place.local(11))
+        expect(checker.check()).to_equal(false)
+
+    it "keeps reference aliases alive across a loop backedge":
+        var cfg = ControlFlowGraph.create()
+        cfg.add_block(loan_block(0, [0], 1, [1]))
+        cfg.add_block(loan_block(1, [2, 3], 4, [1, 2]))
+        cfg.add_block(loan_block(2, [5], 6, []))
+        var checker = NLLChecker.create(cfg)
+        checker.record_borrow(0, Place.local(0), BorrowKind.Mutable, 10)
+        checker.record_use(2, Place.local(10))
+        checker.record_borrow(3, Place.local(0), BorrowKind.Mutable, 11)
+        expect(checker.check()).to_equal(false)
+
+    it "does not conflate loans created on mutually exclusive branches":
+        var cfg = ControlFlowGraph.create()
+        cfg.add_block(loan_block(0, [], 0, [1, 2]))
+        cfg.add_block(loan_block(1, [1, 2], 3, [3]))
+        cfg.add_block(loan_block(2, [4, 5], 6, [3]))
+        cfg.add_block(loan_block(3, [], 7, []))
+        var checker = NLLChecker.create(cfg)
+        checker.record_borrow(1, Place.local(0), BorrowKind.Mutable, 10)
+        checker.record_use(2, Place.local(10))
+        checker.record_borrow(4, Place.local(0), BorrowKind.Mutable, 11)
+        checker.record_use(5, Place.local(11))
+        expect(checker.check()).to_equal(true)
+
+    it "rejects a returned alias of a short loan":
+        var checker = NLLChecker.create(loan_linear())
+        checker.record_borrow(0, Place.local(0), BorrowKind.Shared, 10)
+        checker.record_assign(1, Place.local(11))
+        checker.record_loan_copy(1, Place.local(10), Place.local(11))
+        checker.record_loan_escape(3, Place.local(11), "return")
+        expect(checker.check()).to_equal(false)
+
+    it "rejects suspension while a reference remains live afterwards":
+        var checker = NLLChecker.create(loan_linear())
+        checker.record_borrow(0, Place.local(0), BorrowKind.Shared, 10)
+        checker.record_suspend(1, "await")
+        checker.record_use(3, Place.local(10))
+        expect(checker.check()).to_equal(false)
+
+    it "permits suspension after the reference's last use":
+        var checker = NLLChecker.create(loan_linear())
+        checker.record_borrow(0, Place.local(0), BorrowKind.Shared, 10)
+        checker.record_use(1, Place.local(10))
+        checker.record_suspend(3, "await")
+        expect(checker.check()).to_equal(true)
+
+    it "preserves provenance through self-copy after assignment recording":
+        var checker = NLLChecker.create(loan_linear())
+        checker.record_borrow(0, Place.local(0), BorrowKind.Shared, 10)
+        checker.record_assign(1, Place.local(10))
+        checker.record_loan_copy(1, Place.local(10), Place.local(10))
+        checker.record_loan_escape(3, Place.local(10), "return")
+        expect(checker.check()).to_equal(false)
+
+    it "preserves a projected loan extracted over its aggregate destination":
+        var checker = NLLChecker.create(loan_linear())
+        checker.record_borrow(0, Place.local(0), BorrowKind.Shared, 10)
+        checker.record_assign(1, Place.local(11))
+        checker.record_loan_copy(1, Place.local(10), place_field(Place.local(11), 0))
+        checker.record_assign(2, Place.local(11))
+        checker.record_loan_copy(2, place_field(Place.local(11), 0), Place.local(11))
+        checker.record_loan_escape(3, Place.local(11), "return")
+        expect(checker.check()).to_equal(false)
+
+    it "rejects replacing an owner while a shared reference remains live":
+        var checker = NLLChecker.create(loan_linear())
+        checker.record_borrow(0, Place.local(0), BorrowKind.Shared, 10)
+        checker.record_assign(1, Place.local(0))
+        checker.record_use(3, Place.local(10))
+        expect(checker.check()).to_equal(false)
+
+    it "ends provenance when a reference local is overwritten":
+        var checker = NLLChecker.create(loan_linear())
+        checker.record_borrow(0, Place.local(0), BorrowKind.Shared, 10)
+        checker.record_assign(1, Place.local(10))
+        checker.record_loan_escape(3, Place.local(10), "return")
+        expect(checker.check()).to_equal(true)
+
+    it "keeps the original owner borrowed while a reborrow is live":
+        var checker = NLLChecker.create(loan_linear())
+        checker.record_borrow(0, Place.local(0), BorrowKind.Mutable, 10)
+        checker.record_borrow(1, Place.local(10), BorrowKind.Shared, 11)
+        checker.record_assign(2, Place.local(0))
+        checker.record_use(3, Place.local(11))
+        expect(checker.check()).to_equal(false)
+
+    it "rejects a repeated loan site while a prior iteration alias is live":
+        var cfg = ControlFlowGraph.create()
+        cfg.add_block(loan_block(0, [0], 1, [1]))
+        cfg.add_block(loan_block(1, [2], 3, [2, 3]))
+        cfg.add_block(loan_block(2, [4], 5, [1]))
+        cfg.add_block(loan_block(3, [6], 7, [1]))
+        var checker = NLLChecker.create(cfg)
+        checker.record_borrow(0, Place.local(1), BorrowKind.Shared, 11)
+        checker.record_borrow(2, Place.local(0), BorrowKind.Mutable, 10)
+        checker.record_assign(4, Place.local(11))
+        checker.record_loan_copy(4, Place.local(10), Place.local(11))
+        checker.record_use(6, Place.local(11))
+        expect(checker.check()).to_equal(false)
+
+    it "rejects returning a short parameter without an explicit Ref instruction":
+        var checker = NLLChecker.create(loan_linear())
+        checker.record_short_parameter(10, BorrowKind.Shared, 40)
+        checker.record_loan_escape(3, Place.local(10), "return")
+        expect(checker.check()).to_equal(false)
+
+    it "forwards an exclusive parameter through a checked exclusive slot":
+        var checker = NLLChecker.create(loan_linear())
+        checker.record_short_parameter(10, BorrowKind.Mutable, 40)
+        checker.record_short_call(1, [Place.local(10)], ["mutate-short"])
+        checker.record_use(3, Place.local(10))
+        expect(checker.check()).to_equal(true)
+
+    it "rejects two exclusive call slots borrowing the same parameter":
+        var checker = NLLChecker.create(loan_linear())
+        checker.record_short_parameter(10, BorrowKind.Mutable, 40)
+        checker.record_short_call(1, [Place.local(10), Place.local(10)],
+            ["mutate-short", "mutate-short"])
+        expect(checker.check()).to_equal(false)
+
+    it "rejects upgrading a shared parameter to an exclusive call slot":
+        var checker = NLLChecker.create(loan_linear())
+        checker.record_short_parameter(10, BorrowKind.Shared, 40)
+        checker.record_short_call(1, [Place.local(10)], ["mutate-short"])
+        expect(checker.check()).to_equal(false)
+
+    it "rejects passing a borrowed parameter through an unknown contract":
+        var checker = NLLChecker.create(loan_linear())
+        checker.record_short_parameter(10, BorrowKind.Shared, 40)
+        checker.record_short_call(1, [Place.local(10)], ["unknown"])
+        expect(checker.check()).to_equal(false)
+
+    it "rejects reentrant owner access while an unrelated reference is live":
+        var checker = NLLChecker.create(loan_linear())
+        checker.record_borrow(0, Place.local(0), BorrowKind.Mutable, 10)
+        checker.record_short_call(1, [Place.local(0)], ["read-short"])
+        checker.record_use(3, Place.local(10))
+        expect(checker.check()).to_equal(false)
+
+    it "preserves a parameter boundary through reborrow forwarding":
+        var checker = NLLChecker.create(loan_linear())
+        checker.record_short_parameter(10, BorrowKind.Mutable, 40)
+        checker.record_borrow(0, Place.local(10), BorrowKind.Shared, 11)
+        checker.record_short_call(1, [Place.local(11)], ["read-short"])
+        expect(checker.check()).to_equal(true)
+
+    it "does not recover exclusivity through a shared reborrow of an exclusive parameter":
+        var checker = NLLChecker.create(loan_linear())
+        checker.record_short_parameter(10, BorrowKind.Mutable, 40)
+        checker.record_borrow(0, Place.local(10), BorrowKind.Shared, 11)
+        checker.record_short_call(1, [Place.local(11)], ["mutate-short"])
+        expect(checker.check()).to_equal(false)
+
+    it "forwards disjoint local loans created at different points together":
+        var checker = NLLChecker.create(loan_linear())
+        checker.record_borrow(0, Place.local(0), BorrowKind.Mutable, 10)
+        checker.record_borrow(1, Place.local(1), BorrowKind.Mutable, 11)
+        checker.record_short_call(2, [Place.local(10), Place.local(11)],
+            ["mutate-short", "mutate-short"])
+        expect(checker.check()).to_equal(true)
+
+    it "forwards disjoint field views without erasing their projections":
+        var checker = NLLChecker.create(loan_linear())
+        checker.record_short_parameter(10, BorrowKind.Mutable, 40)
+        checker.record_borrow(0, place_field(Place.local(10), 0), BorrowKind.Mutable, 11)
+        checker.record_borrow(1, place_field(Place.local(10), 1), BorrowKind.Mutable, 12)
+        checker.record_short_call(2, [Place.local(11), Place.local(12)],
+            ["mutate-short", "mutate-short"])
+        expect(checker.check()).to_equal(true)
+
+    it "retains a parameter origin through an explicit dereferenced reborrow":
+        var checker = NLLChecker.create(loan_linear())
+        checker.record_short_parameter(10, BorrowKind.Mutable, 40)
+        checker.record_borrow(0, place_deref(Place.local(10)), BorrowKind.Shared, 11)
+        checker.record_short_call(1, [Place.local(11)], ["read-short"])
+        expect(checker.check()).to_equal(true)
+
+    it "rejects exclusive parent access while a projected child loan stays live":
+        var checker = NLLChecker.create(loan_linear())
+        checker.record_short_parameter(10, BorrowKind.Mutable, 40)
+        checker.record_borrow(0, place_field(Place.local(10), 0), BorrowKind.Shared, 11)
+        checker.record_short_call(1, [Place.local(10)], ["mutate-short"])
+        checker.record_use(3, Place.local(11))
+        expect(checker.check()).to_equal(false)
+
+    it "unions every call argument origin even when the final argument is scalar":
+        var checker = NLLChecker.create(loan_linear())
+        checker.record_short_parameter(10, BorrowKind.Shared, 40)
+        checker.record_assign(1, Place.local(12))
+        checker.record_loan_union(1, [Place.local(10), Place.local(11)], Place.local(12))
+        checker.record_loan_escape(3, Place.local(12), "return")
+        expect(checker.check()).to_equal(false)
+
+    it "preserves a call result origin when the destination overlaps its argument":
+        var checker = NLLChecker.create(loan_linear())
+        checker.record_short_parameter(10, BorrowKind.Shared, 40)
+        checker.record_assign(1, Place.local(10))
+        checker.record_loan_union(1, [Place.local(10), Place.local(11)], Place.local(10))
+        checker.record_loan_escape(3, Place.local(10), "return")
+        expect(checker.check()).to_equal(false)
+
+    it "preserves a whole-parent alternative joined with a projected child view":
+        var cfg = ControlFlowGraph.create()
+        cfg.add_block(loan_block(0, [], 0, [1, 2]))
+        cfg.add_block(loan_block(1, [1], 2, [3]))
+        cfg.add_block(loan_block(2, [3, 4], 5, [3]))
+        cfg.add_block(loan_block(3, [6], 7, []))
+        var checker = NLLChecker.create(cfg)
+        checker.record_short_parameter(10, BorrowKind.Mutable, 40)
+        checker.record_assign(1, Place.local(13))
+        checker.record_loan_copy(1, Place.local(10), Place.local(13))
+        checker.record_borrow(3, place_field(Place.local(10), 0), BorrowKind.Mutable, 12)
+        checker.record_assign(4, Place.local(13))
+        checker.record_loan_copy(4, Place.local(12), Place.local(13))
+        checker.record_short_call(6, [Place.local(13), place_field(Place.local(10), 1)],
+            ["mutate-short", "mutate-short"])
+        expect(checker.check()).to_equal(false)
+
+    it "protects the originating owner while a projected child is live":
+        var checker = NLLChecker.create(loan_linear())
+        checker.record_borrow(0, Place.local(0), BorrowKind.Mutable, 10)
+        checker.record_borrow(1, place_field(Place.local(10), 0), BorrowKind.Shared, 11)
+        checker.record_assign(2, Place.local(0))
+        checker.record_use(3, Place.local(11))
+        expect(checker.check()).to_equal(false)
+
+    it "preserves inherited origin escape checks after copying a projected view":
+        var checker = NLLChecker.create(loan_linear())
+        checker.record_short_parameter(10, BorrowKind.Mutable, 40)
+        checker.record_borrow(0, place_field(Place.local(10), 0), BorrowKind.Shared, 11)
+        checker.record_assign(1, Place.local(12))
+        checker.record_loan_copy(1, Place.local(11), Place.local(12))
+        checker.record_loan_escape(3, Place.local(12), "return")
+        expect(checker.check()).to_equal(false)
+
+    it "allows a fresh local view and an entry parameter in one checked call":
+        var checker = NLLChecker.create(loan_linear())
+        checker.record_short_parameter(10, BorrowKind.Shared, 40)
+        checker.record_borrow(0, Place.local(0), BorrowKind.Shared, 11)
+        checker.record_short_call(1, [Place.local(10), Place.local(11)],
+            ["read-short", "read-short"])
+        expect(checker.check()).to_equal(true)
+
+    it "allows repeated shared argument views from the same original boundary":
+        var checker = NLLChecker.create(loan_linear())
+        checker.record_short_parameter(10, BorrowKind.Shared, 40)
+        checker.record_short_call(1, [Place.local(10), Place.local(10)],
+            ["read-short", "read-short"])
+        expect(checker.check()).to_equal(true)
+
+    it "rejects an entry short parameter with no scope authority":
+        var checker = NLLChecker.create(loan_linear())
+        checker.record_short_parameter(10, BorrowKind.Shared, -1)
+        checker.record_short_call(1, [Place.local(10)], ["read-short"])
+        expect(checker.check()).to_equal(false)

@@ -1,0 +1,74 @@
+# Exercise production factories and inspect their actual recursive payloads.
+extern fn rt_exit(code: i64)
+use compiler.mir.mir_types.{MirType, MirTypeKind}
+
+fn primitive_tag(value: MirType) -> i64:
+    val concrete: MirTypeKind = value.kind
+    match concrete:
+        case MirTypeKind.I16: 16
+        case MirTypeKind.U32: 32
+        case MirTypeKind.F64: 64
+        case _: -1
+
+fn check_ptr(value: MirType, expected_mutable: bool):
+    val concrete: MirTypeKind = value.kind
+    match concrete:
+        case MirTypeKind.Ptr(inner, mutable):
+            if primitive_tag(inner) != 16 or mutable != expected_mutable: rt_exit(11)
+        case _: rt_exit(12)
+
+fn check_scalable(value: MirType, expected_lanes: i64):
+    val concrete: MirTypeKind = value.kind
+    match concrete:
+        case MirTypeKind.ScalableVec(element, lanes):
+            if primitive_tag(element) != 32 or lanes != expected_lanes: rt_exit(21)
+        case _: rt_exit(22)
+
+fn main() -> i64:
+    val first_kind: MirTypeKind = MirTypeKind.I16
+    val second_kind: MirTypeKind = MirTypeKind.U32
+    val third_kind: MirTypeKind = MirTypeKind.F64
+    val first = MirType(kind: first_kind)
+    val second = MirType(kind: second_kind)
+    val third = MirType(kind: third_kind)
+    check_ptr(MirType.ptr(first, false), false)
+    check_ptr(MirType.ptr(first, true), true)
+    check_scalable(MirType.scalable_vec(second, 1), 1)
+    check_scalable(MirType.scalable_vec(second, 4), 4)
+    val promised = MirType.promise(third)
+    val promise_kind: MirTypeKind = promised.kind
+    match promise_kind:
+        case MirTypeKind.Promise(inner):
+            if primitive_tag(inner) != 64: rt_exit(31)
+        case _: rt_exit(32)
+    val result_type = MirType.result(first, second)
+    val result_kind: MirTypeKind = result_type.kind
+    match result_kind:
+        case MirTypeKind.Result(ok_type, err_type):
+            if primitive_tag(ok_type) != 16 or primitive_tag(err_type) != 32: rt_exit(41)
+        case _: rt_exit(42)
+    val generated = MirType.generator(second, third)
+    val generator_kind: MirTypeKind = generated.kind
+    match generator_kind:
+        case MirTypeKind.Generator(yield_type, return_type):
+            if primitive_tag(yield_type) != 32 or primitive_tag(return_type) != 64: rt_exit(51)
+        case _: rt_exit(52)
+    val actor = MirType.actor_type(first)
+    val actor_kind: MirTypeKind = actor.kind
+    match actor_kind:
+        case MirTypeKind.ActorType(message):
+            if primitive_tag(message) != 16: rt_exit(61)
+        case _: rt_exit(62)
+    # Preserve a composite payload, not only primitive leaf discriminants.
+    val nested = MirType.promise(result_type)
+    val nested_kind: MirTypeKind = nested.kind
+    match nested_kind:
+        case MirTypeKind.Promise(inner):
+            val inner_kind: MirTypeKind = inner.kind
+            match inner_kind:
+                case MirTypeKind.Result(ok_type, err_type):
+                    if primitive_tag(ok_type) != 16 or primitive_tag(err_type) != 32: rt_exit(71)
+                case _: rt_exit(72)
+        case _: rt_exit(73)
+    print "mir_type_recursive_payload_native=PASS factories=6 calls=9"
+    0

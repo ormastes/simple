@@ -1,0 +1,317 @@
+# Per-consumer interface slice of one dependency source, for the native
+# per-module object cache witness.
+#
+# A dependency's whole-interface digest makes every importer rebuild on any
+# interface edit, including an import added for a body. A slice keys the
+# importer only on the declarations it can actually observe:
+#
+#   1. Split the source into top-level declarations. Each keeps its header and
+#      every nested non-body line IN ORDER (struct/class fields, enum variants,
+#      method signatures with defaults). Function and method BODIES are the
+#      only thing dropped, so a field add, reorder or type change, or a
+#      signature/default change, always changes that declaration's digest.
+#   2. Seed with the names the consumer imports from this dependency, then
+#      close over every identifier that appears inside a selected declaration
+#      (field types, return types, `impl`/`extend` targets, `use` bindings).
+#      A plain `use` binding is importable from this module, so a re-pointed
+#      import of a name the consumer reaches changes the slice.
+#   3. Always include what cannot be attributed to a name: glob `use`, enums
+#      (codegen may register enum tables globally), and any top-level form
+#      this extractor does not recognise.
+#
+# Fail-closed rules: an empty item list or a glob import selects the whole
+# interface; an unsliceable fact (no retained declarations) uses the whole
+# interface digest. Extraction can only OVER-capture.
+#
+# Consumer-side body effects (generic instantiation, default methods, inlined
+# defaults, static initialisers) are covered by the consumer's own MIR
+# identity in the witness, not by this slice. Layouts of types owned by a
+# module the consumer does not import are covered by the witness's
+# cross-module layout facts.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.action_key.{interface_digest_of}
+
+struct NativeInterfaceDeclV1:
+    # Names this declaration binds (or, for impl/extend, the types it targets).
+    names: [text]
+    # Every identifier in the captured declaration text.
+    tokens: [text]
+    # sha256 of the ordered captured declaration text.
+    digest: text
+    # Included in every slice (glob use, enum, unrecognised form).
+    always: bool
+
+fn native_slice_indent_v1(line: text) -> i64:
+    var n: i64 = 0
+    while n < line.len() and (line[n:n + 1] == " " or line[n:n + 1] == "\t"):
+        n = n + 1
+    n
+
+# Bracket balance of one line, ignoring string literals and a trailing `#`
+# comment, so `fn f(sep: text = "(")` or `struct S:  # (legacy` cannot glue
+# later declarations onto this header.
+fn native_slice_bracket_delta_v1(line: text) -> i64:
+    var delta: i64 = 0
+    var quote = ""
+    var i: i64 = 0
+    while i < line.len():
+        val c = line[i:i + 1]
+        if quote != "":
+            if c == "\\":
+                i = i + 1
+            elif c == quote:
+                quote = ""
+        elif c == "\"" or c == "'":
+            quote = c
+        elif c == "#":
+            return delta
+        elif c == "(" or c == "[" or c == "{": delta = delta + 1
+        elif c == ")" or c == "]" or c == "}": delta = delta - 1
+        i = i + 1
+    delta
+
+# For each line, whether it STARTS inside a triple-quoted string. Counted on
+# every line (headers, values and bodies alike), so `val USAGE = """` opens a
+# string instead of flipping docstring tracking.
+fn native_slice_string_continuations_v1(lines: [text]) -> [bool]:
+    var inside = false
+    var out: [bool] = []
+    for line in lines:
+        out.push(inside)
+        val quotes = line.split("\"\"\"").len() - 1
+        if quotes % 2 == 1:
+            inside = not inside
+    out
+
+fn native_slice_ident_char_v1(c: text) -> bool:
+    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
+        (c >= "0" and c <= "9") or c == "_"
+
+fn native_slice_identifiers_v1(t: text) -> [text]:
+    var out: [text] = []
+    var cur = ""
+    var i: i64 = 0
+    while i <= t.len():
+        val c = if i < t.len(): t[i:i + 1] else: " "
+        if native_slice_ident_char_v1(c):
+            cur = cur + c
+        else:
+            if cur != "" and not out.contains(cur):
+                out.push(cur)
+            cur = ""
+        i = i + 1
+    out
+
+fn native_slice_strip_modifiers_v1(trimmed: text) -> text:
+    var t = trimmed
+    var changed = true
+    while changed:
+        changed = false
+        if t.starts_with("pub("):
+            val close = t.index_of(")")
+            if close > 0:
+                t = t[close + 1:].trim()
+                changed = true
+        for word in ["pub ", "export ", "async ", "static ", "unsafe ", "extern ", "public ", "priv ", "private "]:
+            if not changed and t.starts_with(word):
+                t = t[word.len():].trim()
+                changed = true
+    t
+
+fn native_slice_is_fn_header_v1(stripped: text) -> bool:
+    stripped.starts_with("fn ") or stripped.starts_with("me ")
+
+fn native_slice_first_ident_after_v1(t: text, keyword: text) -> text:
+    val ids = native_slice_identifiers_v1(t[keyword.len():])
+    if ids.len() == 0: "" else: ids[0]
+
+# Bound names of a `use` header (modifier-stripped, continuation-joined).
+# Returns ["*"] for a glob or an unparseable form.
+fn native_slice_use_names_v1(t: text) -> [text]:
+    val body = t["use ".len():].trim()
+    if body.contains("*"):
+        return ["*"]
+    val open = body.index_of("{")
+    if open >= 0:
+        val close = body.last_index_of("}")
+        if close <= open:
+            return ["*"]
+        var names: [text] = []
+        for raw in body[open + 1:close].split(","):
+            val item = raw.trim()
+            if item == "": continue
+            val as_at = item.index_of(" as ")
+            val bound = if as_at >= 0: item[as_at + 4:].trim() else: item
+            val ids = native_slice_identifiers_v1(bound)
+            if ids.len() != 1:
+                return ["*"]
+            names.push(ids[0])
+        return names
+    val as_at = body.index_of(" as ")
+    val path = if as_at >= 0: body[as_at + 4:].trim() else: body
+    val dot = path.last_index_of(".")
+    val last = if dot >= 0: path[dot + 1:] else: path
+    val ids = native_slice_identifiers_v1(last)
+    if ids.len() != 1: ["*"] else: ids
+
+# (names, always) for a top-level declaration header.
+fn native_slice_header_names_v1(header: text) -> ([text], bool):
+    val t = native_slice_strip_modifiers_v1(header)
+    if t.starts_with("use "):
+        val names = native_slice_use_names_v1(t)
+        if names.contains("*"):
+            return ([], true)
+        return (names, false)
+    if t.starts_with("enum "):
+        return ([native_slice_first_ident_after_v1(t, "enum ")], true)
+    if t.starts_with("impl ") or t.starts_with("impl<") or
+            t.starts_with("extend ") or t.starts_with("extend<"):
+        var targets: [text] = []
+        for id in native_slice_identifiers_v1(t):
+            if id != "impl" and id != "extend" and id != "for":
+                targets.push(id)
+        return (targets, targets.len() == 0)
+    for keyword in ["fn ", "me ", "struct ", "class ", "trait ", "type ", "union ",
+            "bitfield ", "mixin ", "actor ", "val ", "var ", "const ", "macro "]:
+        if t.starts_with(keyword):
+            val name = native_slice_first_ident_after_v1(t, keyword)
+            if name == "":
+                return ([], true)
+            return ([name], false)
+    # Bare export list (`export a, b`) after modifier stripping is just names.
+    if header.trim().starts_with("export "):
+        val names = native_slice_identifiers_v1(t)
+        return (names, names.len() == 0)
+    ([], true)
+
+fn native_slice_finish_decl_v1(header: text, lines: [text]) -> NativeInterfaceDeclV1:
+    val (names, always) = native_slice_header_names_v1(header)
+    val text_block = lines.join("\n")
+    NativeInterfaceDeclV1(names: names, tokens: native_slice_identifiers_v1(text_block),
+        digest: sha256_text(text_block), always: always)
+
+# Top-level declarations of `source`, bodies dropped, nested lines in order.
+fn native_interface_decls_v1(source: text) -> [NativeInterfaceDeclV1]:
+    var decls: [NativeInterfaceDeclV1] = []
+    val lines = source.split("\n")
+    var cur_header = ""
+    var cur_lines: [text] = []
+    var pending_attrs: [text] = []
+    val in_string = native_slice_string_continuations_v1(lines)
+    var i: i64 = 0
+    while i < lines.len():
+        val line = lines[i].trim_end()
+        val t = line.trim()
+        val indent = native_slice_indent_v1(line)
+        # Lines inside a triple-quoted string and top-level docstrings carry
+        # no declaration of their own.
+        if in_string[i] or (indent == 0 and t.starts_with("\"\"\"")):
+            i = i + 1
+            continue
+        if t == "" or t.starts_with("#"):
+            i = i + 1
+            continue
+        # Join bracket continuation lines into one logical header line. A new
+        # top-level line always starts a new declaration.
+        var logical = t
+        var depth = native_slice_bracket_delta_v1(t)
+        var j = i + 1
+        while depth > 0 and j < lines.len() and
+                (in_string[j] or native_slice_indent_v1(lines[j]) > 0 or lines[j].trim() == ""):
+            val cont = lines[j].trim()
+            logical = logical + " " + cont
+            depth = depth + native_slice_bracket_delta_v1(cont)
+            j = j + 1
+        if indent == 0:
+            if t.starts_with("@"):
+                pending_attrs.push(logical)
+                i = j
+                continue
+            if cur_header != "":
+                decls.push(native_slice_finish_decl_v1(cur_header, cur_lines))
+            cur_header = logical
+            cur_lines = pending_attrs
+            pending_attrs = []
+        cur_lines.push("{indent}|{logical}")
+        i = j
+        if native_slice_is_fn_header_v1(native_slice_strip_modifiers_v1(logical)) and logical.ends_with(":"):
+            while i < lines.len():
+                val body = lines[i].trim_end()
+                if not in_string[i] and body.trim() != "" and native_slice_indent_v1(body) <= indent:
+                    break
+                i = i + 1
+    if cur_header != "":
+        decls.push(native_slice_finish_decl_v1(cur_header, cur_lines))
+    for attr in pending_attrs:
+        decls.push(native_slice_finish_decl_v1(attr, [attr]))
+    decls
+
+fn native_interface_whole_digest_v1(decls: [NativeInterfaceDeclV1]) -> text:
+    var parts: [text] = ["simple/native-interface-whole/v1"]
+    for d in decls:
+        parts.push(d.digest)
+    interface_digest_of(parts)
+
+fn native_interface_items_select_whole_v1(imported: [text]) -> bool:
+    if imported.len() == 0:
+        return true
+    for name in imported:
+        if name == "" or name.contains("*"):
+            return true
+    false
+
+# Slice digest of one dependency as seen by a consumer importing `imported`.
+fn native_interface_slice_digest_v1(
+    decls: [NativeInterfaceDeclV1], whole_digest: text, sliceable: bool,
+    imported: [text]
+) -> text:
+    if not sliceable or native_interface_items_select_whole_v1(imported):
+        return whole_digest
+    # Fail closed: an imported name no declaration binds means the extractor
+    # misread this source (or the name arrives some other way), so key on
+    # the whole interface instead of a slice that may miss it.
+    var bound: Dict<text, bool> = {}
+    for d in decls:
+        for n in d.names:
+            bound[n] = true
+    for name in imported:
+        if not bound.contains_key(name):
+            return whole_digest
+    var seeds: Dict<text, bool> = {}
+    for name in imported:
+        seeds[name] = true
+    var selected: [bool] = []
+    for d in decls:
+        selected.push(false)
+    var changed = true
+    while changed:
+        changed = false
+        var k = 0
+        while k < decls.len():
+            if not selected[k]:
+                val d = decls[k]
+                var hit = d.always
+                if not hit:
+                    for n in d.names:
+                        if seeds.contains_key(n):
+                            hit = true
+                if hit:
+                    selected[k] = true
+                    changed = true
+                    for tok in d.tokens:
+                        seeds[tok] = true
+            k = k + 1
+    var parts: [text] = ["simple/native-interface-slice/v1"]
+    for name in imported:
+        parts.push("item:" + name)
+    var m = 0
+    while m < decls.len():
+        if selected[m]:
+            parts.push(decls[m].digest)
+        m = m + 1
+    interface_digest_of(parts)
+
+export NativeInterfaceDeclV1
+export native_interface_decls_v1, native_interface_whole_digest_v1
+export native_interface_slice_digest_v1

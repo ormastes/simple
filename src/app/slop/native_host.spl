@@ -1,0 +1,103 @@
+# Real OS-window host, using the existing sanctioned GUI and Engine2D owners.
+use app.slop.session.{SlopSession}
+use app.slop.native_frame.{slop_native_composition}
+use std.common.traceability.model.{TraceGraph, SnapshotInput}
+use nogc_sync_mut.ui.gui_renderer.{GuiRenderer, GUI_EVT_NONE, GUI_EVT_CLOSE, GUI_EVT_RESIZED,
+    GUI_EVT_KEYBOARD, GUI_EVT_MOUSE_MOVED, GUI_EVT_MOUSE_BUTTON, GUI_EVT_MOUSE_WHEEL}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_composition}
+use nogc_sync_mut.src.time.{sleep_ms}
+use common.ui.widget.{WidgetNode, UIEvent}
+use common.ui.widget_hit.{widget_hit_test, widget_dispatch_scroll}
+use common.ui.key_code.{winit_keycode_to_canon, canon_key_name}
+
+struct SlopNativeResult:
+    frames_presented: i64
+    input_events: i64
+    snapshot_id: text
+
+fn slop_native_pixels(session: SlopSession, width: i32, height: i32) -> Result<[u32], text>:
+    val composition = slop_native_composition(session, width, height)
+    var engine = Engine2D.create_with_backend_fast(width, height, "cpu")
+    engine.clear(4279505940u32)
+    val rendered = engine2d_draw_ir_adv_composition(engine, composition, false)
+    engine.shutdown()
+    if rendered.skipped_command_count != 0 or rendered.pixels.len() != width * height:
+        return Err("Slop native Draw IR execution incomplete")
+    Ok(rendered.pixels)
+
+fn run_slop_native(graph: TraceGraph, snapshot: SnapshotInput?, session_id: text,
+                   initial_width: i32, initial_height: i32) -> Result<SlopNativeResult, text>:
+    if initial_width < 320 or initial_height < 240 or initial_width > 8192 or initial_height > 8192:
+        return Err("Slop viewport must be between 320x240 and 8192x8192")
+    if session_id == "" or graph.subject.snapshot_id == "" or graph.generation_id == "":
+        return Err("Slop requires a unique session and pinned graph generation")
+    if val source_snapshot = snapshot:
+        if source_snapshot.subject.snapshot_id != graph.subject.snapshot_id:
+            return Err("Slop source provider snapshot mismatch")
+    val opened = GuiRenderer.create("auto", initial_width, initial_height, "Slop viewer")
+    if val window = opened:
+        var gui = window
+        var session = SlopSession.new(graph, "slop." + session_id)
+        var width = initial_width
+        var height = initial_height
+        var mouse_x: i32 = 0
+        var mouse_y: i32 = 0
+        var frames: i64 = 0
+        var events: i64 = 0
+        var dirty = true
+        var running = true
+        while running:
+            if dirty:
+                match slop_native_pixels(session, width, height):
+                    case Err(message):
+                        gui.close()
+                        return Err(message)
+                    case Ok(pixels):
+                        if not gui.present_argb_u32(width as i64, height as i64, pixels):
+                            gui.close()
+                            return Err("Slop native presentation failed")
+                frames = frames + 1
+                dirty = false
+            val event = gui.poll_event()
+            if event.kind == GUI_EVT_CLOSE:
+                running = false
+            elif event.kind == GUI_EVT_NONE:
+                sleep_ms(16)
+            elif event.kind == GUI_EVT_MOUSE_MOVED:
+                mouse_x = event.x as i32
+                mouse_y = event.y as i32
+            elif event.kind == GUI_EVT_RESIZED:
+                val next_width = event.x as i32
+                val next_height = event.y as i32
+                if next_width >= 320 and next_height >= 240 and next_width <= 8192 and next_height <= 8192:
+                    width = next_width
+                    height = next_height
+                    dirty = true
+            elif event.kind == GUI_EVT_MOUSE_BUTTON and event.btn == 0 and event.pressed:
+                val hit = widget_hit_test(WidgetNode(id: session.prefix), width, height, mouse_x, mouse_y)
+                if hit.found:
+                    val action = WidgetNode(id: hit.id).get_prop("action")
+                    if action != "":
+                        val result = session.dispatch(UIEvent.Action(action))
+                        session.record_event_result(result)
+                        events = events + 1
+                        dirty = true
+            elif event.kind == GUI_EVT_KEYBOARD and event.pressed:
+                val key = canon_key_name(winit_keycode_to_canon(event.keycode))
+                val result = session.dispatch(UIEvent.KeyPress(key))
+                session.record_event_result(result)
+                events = events + 1
+                dirty = true
+            elif event.kind == GUI_EVT_MOUSE_WHEEL:
+                widget_dispatch_scroll(WidgetNode(id: session.prefix), width, height, mouse_x, mouse_y, 0 - (event.y as i32))
+                dirty = true
+            if dirty and session.selected_id != "" and session.source_pending:
+                if val source_snapshot = snapshot:
+                    session.load_source(source_snapshot, 1, 100)
+                else:
+                    session.source_unavailable("Pinned source provider is not attached to this viewer")
+        gui.close()
+        return Ok(SlopNativeResult(frames_presented: frames, input_events: events,
+            snapshot_id: graph.subject.snapshot_id))
+    Err("Slop native window unavailable: display or sanctioned GUI provider missing")

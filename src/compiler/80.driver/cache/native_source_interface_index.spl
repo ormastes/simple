@@ -1,0 +1,271 @@
+# Compact source facts captured once before the source owner releases bodies.
+# This is a projection of the admitted source list, never an admission owner.
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.driver.cache.action_key.{ActionDep}
+use compiler.driver.cache.native_interface_slice.{
+    NativeInterfaceDeclV1, native_interface_decls_v1,
+    native_interface_whole_digest_v1, native_interface_slice_digest_v1}
+use compiler.driver.cache.native_module_witness_facts.{
+    NativeModuleCacheFactSetV1, native_module_cache_fact_set_invalid_v1}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName}
+use compiler.hir.hir_lowering.module_surface_registry_index.{module_surface_registry_index}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+
+struct NativeSourceInterfaceFactV1:
+    path: text
+    source_digest: text
+    # Whole-interface digest (bodies dropped; fields, variants and their
+    # order kept). Used for glob/whole-module imports and unsliceable facts.
+    interface_digest: text
+    # Retained top-level declarations, so each importer can be keyed on the
+    # slice it observes (native_interface_slice.spl).
+    decls: [NativeInterfaceDeclV1]
+    sliceable: bool
+    valid: bool
+    reason: text
+
+fn native_source_interface_fact_ok_v1(
+    path: text, source_digest: text, content: text
+) -> NativeSourceInterfaceFactV1:
+    val decls = native_interface_decls_v1(content)
+    NativeSourceInterfaceFactV1(path, source_digest,
+        native_interface_whole_digest_v1(decls), decls, true, true, "ok")
+
+# Surfaces address a dependency by its ABSOLUTE canonical path, while the
+# admitted sources keep the path they were loaded under (usually relative).
+# Without this alias every importer's lookup missed and its witness was
+# refused ("ambiguous-dependency-source"), so no importer was ever reused.
+# Two raw spellings of one physical file with different facts stay refused.
+fn native_source_interface_canonical_keys_v1(
+    facts: Dict<text, NativeSourceInterfaceFactV1>, paths: [text]
+) -> Dict<text, NativeSourceInterfaceFactV1>:
+    var out = facts
+    var claimed: Dict<text, text> = {}
+    for path in paths:
+        if path == "": continue
+        val canonical = module_surface_canonical_path(path)
+        if canonical == "" or canonical == path: continue
+        val fact = facts[path]
+        if claimed.contains_key(canonical):
+            val other = facts[claimed[canonical]]
+            if other.source_digest != fact.source_digest or not other.valid or not fact.valid:
+                out[canonical] = NativeSourceInterfaceFactV1(canonical, "", "", [], false, false,
+                    "ambiguous-dependency-source:{canonical}")
+            continue
+        if facts.contains_key(canonical):
+            # A raw entry already spelled canonically: a relative twin must
+            # carry the same bytes, else the physical file is ambiguous.
+            val existing = facts[canonical]
+            if existing.source_digest != fact.source_digest or not existing.valid or not fact.valid:
+                out[canonical] = NativeSourceInterfaceFactV1(canonical, "", "", [], false, false,
+                    "ambiguous-dependency-source:{canonical}")
+            continue
+        claimed[canonical] = path
+        out[canonical] = fact
+    out
+
+struct NativeSourceInterfaceIndexV1:
+    facts: Dict<text, NativeSourceInterfaceFactV1>
+    source_count: i64
+    digest_count: i64
+
+fn native_source_interface_index_lookup_v1(
+    index: NativeSourceInterfaceIndexV1, path: text
+) -> NativeSourceInterfaceFactV1:
+    if not index.facts.has(path):
+        return NativeSourceInterfaceFactV1(path, "", "", [], false, false,
+            "missing-dependency-source")
+    index.facts[path]
+
+fn native_source_interface_index_build_v1(
+    sources: [SourceFile], captured_digests: Dict<text, text>
+) -> NativeSourceInterfaceIndexV1:
+    var representatives: Dict<text, i64> = {}
+    var ambiguous: Dict<text, bool> = {}
+    var paths: [text] = []
+    var source_index = 0
+    # Compare raw content before discarding bodies: differing bytes remain
+    # ambiguous even if their exported interface happens to be identical.
+    for source in sources:
+        val path = if source.authored_path == "": source.path else: source.authored_path
+        if not representatives.has(path):
+            representatives[path] = source_index
+            paths.push(path)
+        elif sources[representatives[path]].content != source.content:
+            ambiguous[path] = true
+        source_index = source_index + 1
+    var facts: Dict<text, NativeSourceInterfaceFactV1> = {}
+    var digest_count = 0
+    for path in paths:
+        val content = sources[representatives[path]].content
+        if path == "" or content == "":
+            facts[path] = NativeSourceInterfaceFactV1(path, "", "", [], false, false,
+                "ambiguous-dependency-source:{path}")
+        elif ambiguous.has(path):
+            # Duplicated authored path with DIFFERING bytes (a snapshot twin,
+            # a wrapped/unwrapped admission pair, or a double admission of the
+            # same logical file). Measured 2026-10-16 on the manual stage3
+            # per-module object sweep: this invalidated the stored witness of
+            # a large share of closure modules (lib.common.crypto.sha256,
+            # lib.scv.delta, lib.nogc_sync_mut.io.process_ops, ...) and, with
+            # the per-run uncacheable ABI identity, pinned "reused 0 modules;
+            # rebuilt N" on every compile -- each per-module compile re-ran
+            # MIR+codegen for its entire closure (~2-5 min; the 1299-module
+            # entry alone parsed 118/1299 files in 767s before its 600s
+            # timeout), making the manual stage3 object sweep days slower.
+            #
+            # The witness must describe what the compile ACTUALLY consumed,
+            # and phase 1 already retains exactly that: the owner-copy loop
+            # keeps ONE content per physical path and captures its sha256 in
+            # the identity owner this digest map projects. Resolve the
+            # duplicate to the copy whose bytes match that retained identity;
+            # the interface digest then binds to the admitted content, which
+            # is precisely the security intent (reuse only when the exact
+            # compiled inputs match). A duplicate where NO copy matches the
+            # retained identity is a genuine admission inconsistency
+            # (tampering or a reclaimed-body capture): stay invalid, now
+            # NAMING the path so the receipt points at the culprit instead of
+            # a generic reason.
+            val retained = if captured_digests.has(path): captured_digests[path] else: ""
+            var resolved_index = -1
+            if retained != "":
+                var scan_i = 0
+                while scan_i < sources.len():
+                    val scan_path = if sources[scan_i].authored_path == "":
+                        sources[scan_i].path
+                    else:
+                        sources[scan_i].authored_path
+                    if scan_path == path and
+                            sha256_text(sources[scan_i].content) == retained:
+                        resolved_index = scan_i
+                        break
+                    scan_i = scan_i + 1
+            if resolved_index < 0:
+                facts[path] = NativeSourceInterfaceFactV1(path, "", "", [], false, false,
+                    "ambiguous-dependency-source:{path}")
+            else:
+                val resolved_content = sources[resolved_index].content
+                val source_digest = if captured_digests.has(path): captured_digests[path] else: sha256_text(resolved_content)
+                facts[path] = native_source_interface_fact_ok_v1(path,
+                    source_digest, resolved_content)
+                digest_count = digest_count + 1
+        else:
+            # The supplied digest map is a projection of the existing phase1
+            # source owner, not a caller-provided metadata admission shortcut.
+            val source_digest = if captured_digests.has(path): captured_digests[path] else: sha256_text(content)
+            facts[path] = native_source_interface_fact_ok_v1(path,
+                source_digest, content)
+            digest_count = digest_count + 1
+    NativeSourceInterfaceIndexV1(native_source_interface_canonical_keys_v1(facts, paths),
+        sources.len(), digest_count)
+
+fn native_source_interface_index_from_sources_v1(
+    sources: [SourceFile]
+) -> NativeSourceInterfaceIndexV1:
+    native_source_interface_index_build_v1(sources, {})
+
+# Caller must pass the actual phase1 owner vectors and their original loaded
+# sources before body eviction. SHA authenticity belongs to that owner; this
+# adapter checks alignment and aliases and never promotes untrusted metadata.
+fn native_source_interface_index_from_sources_with_digests_v1(
+    sources: [SourceFile], source_paths: [text], source_digests: [text]
+) -> Result<NativeSourceInterfaceIndexV1, text>:
+    if sources.len() != source_paths.len() or sources.len() != source_digests.len():
+        return Err("native-source-interface-owner-alignment-invalid")
+    var captured_digests: Dict<text, text> = {}
+    var index = 0
+    for source in sources:
+        if source.path != source_paths[index] or not sha256_lower_hex_valid(source_digests[index]):
+            return Err("native-source-interface-owner-alignment-invalid")
+        val path = if source.authored_path == "": source.path else: source.authored_path
+        if captured_digests.has(path) and captured_digests[path] != source_digests[index]:
+            return Err("native-source-interface-owner-alias-digest-mismatch")
+        captured_digests[path] = source_digests[index]
+        index = index + 1
+    Ok(native_source_interface_index_build_v1(sources, captured_digests))
+
+# Pure projection join only. Caller must invoke the existing admitted header
+# getter and verify original source / typed ABI provenance immediately before
+# this operation. This public DTO helper is never an admission grant.
+fn native_source_interface_index_join_projected_header_v1(
+    index: NativeSourceInterfaceIndexV1, source: SourceFile,
+    original_source_digest: text, typed_interface_digest: text
+) -> Result<NativeSourceInterfaceIndexV1, text>:
+    val path = if source.authored_path == "": source.path else: source.authored_path
+    if path == "" or source.path == "" or
+            not sha256_lower_hex_valid(original_source_digest) or
+            not sha256_lower_hex_valid(typed_interface_digest):
+        return Err("native-source-interface-header-projection-invalid")
+    # A physical original cannot simultaneously be a raw body and a synthetic
+    # header; equal caller hashes do not resolve conflicting source authority.
+    val canonical = module_surface_canonical_path(path)
+    if index.facts.has(path) or (canonical != "" and index.facts.has(canonical)):
+        return Err("native-source-interface-header-physical-collision")
+    var facts = index.facts
+    # A typed header has no retained declarations: importers key on the whole
+    # typed interface digest (unsliceable).
+    val header_fact = NativeSourceInterfaceFactV1(path, original_source_digest,
+        typed_interface_digest, [], false, true, "ok")
+    facts[path] = header_fact
+    if canonical != "" and canonical != path:
+        facts[canonical] = header_fact
+    Ok(NativeSourceInterfaceIndexV1(facts, index.source_count + 1, index.digest_count))
+
+# Build dependency witnesses without reopening or rescanning imported bodies.
+# Resolver/layout/configuration facts still come from their existing owners.
+fn native_direct_dependency_facts_from_index_v1(
+    module_id: text, surfaces: ModuleSurfacesByName,
+    index: NativeSourceInterfaceIndexV1
+) -> NativeModuleCacheFactSetV1:
+    val consumer_index = module_surface_registry_index(surfaces, module_id)
+    if consumer_index < 0 or consumer_index >= surfaces.surfaces.len():
+        return native_module_cache_fact_set_invalid_v1(module_id, "missing-consumer-surface")
+    val consumer = surfaces.surfaces[consumer_index]
+    if consumer.import_target_indices.len() != consumer.imports.len() or
+            consumer.import_target_names.len() != consumer.imports.len():
+        return native_module_cache_fact_set_invalid_v1(module_id, "missing-direct-dependency-routing")
+    # Every import of one target contributes its items; one fact per target.
+    var target_order: [text] = []
+    var target_facts: Dict<text, NativeSourceInterfaceFactV1> = {}
+    var target_items: Dict<text, [text]> = {}
+    var import_index = 0
+    while import_index < consumer.import_target_indices.len():
+        val target_index = consumer.import_target_indices[import_index]
+        if target_index < 0 or target_index >= surfaces.surfaces.len():
+            return native_module_cache_fact_set_invalid_v1(module_id, "unresolved-direct-dependency")
+        val target = surfaces.surfaces[target_index]
+        val target_id = target.preferred_registry_name
+        if target_id == "":
+            return native_module_cache_fact_set_invalid_v1(module_id, "missing-dependency-module-id")
+        val source = native_source_interface_index_lookup_v1(index, target.canonical_path)
+        if not source.valid:
+            # Preserve the original fact producer's rejection contract.
+            return native_module_cache_fact_set_invalid_v1(module_id, "ambiguous-dependency-source")
+        var items: [text] = if target_items.contains_key(target_id): target_items[target_id] else: []
+        val parsed_items = consumer.imports[import_index].items
+        if parsed_items.len() == 0:
+            # Whole-module import: the slice selects the whole interface.
+            items.push("*")
+        for item in parsed_items:
+            items.push(item.name)
+        if not target_facts.contains_key(target_id):
+            target_order.push(target_id)
+            target_facts[target_id] = source
+        target_items[target_id] = items
+        import_index = import_index + 1
+    var dependencies: [ActionDep] = []
+    for target_id in target_order:
+        val fact = target_facts[target_id]
+        dependencies.push(ActionDep(target_id, native_interface_slice_digest_v1(
+            fact.decls, fact.interface_digest, fact.sliceable, target_items[target_id])))
+    NativeModuleCacheFactSetV1(module_id, dependencies, [], [], true, "ok")
+
+export NativeSourceInterfaceFactV1, NativeSourceInterfaceIndexV1
+export native_source_interface_index_from_sources_v1
+export native_source_interface_index_from_sources_with_digests_v1
+export native_source_interface_index_lookup_v1
+export native_direct_dependency_facts_from_index_v1
+
+export native_source_interface_index_join_projected_header_v1

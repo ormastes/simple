@@ -5,7 +5,7 @@
  *
  * `src/lib/nogc_sync_mut/sffi/codegen.spl` declares `extern fn rt_cranelift_*`
  * wrappers around the compiler's Cranelift-backed JIT/AOT codegen path
- * (`compiler.backend.backend.cranelift_codegen_adapter`,
+ * (`compiler.backend.cranelift_codegen_adapter`,
  * `compiler.backend.codegen`). The REAL implementations of every one of these
  * symbols already exist -- in Rust, in
  * `src/compiler_rust/compiler/src/codegen/cranelift_sffi.rs` and

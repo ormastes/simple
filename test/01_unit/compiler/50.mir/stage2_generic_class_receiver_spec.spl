@@ -9,7 +9,7 @@ impl `is_generic_template`, MIR never emits a template, and 40.mono kept
 instance calls untouched.
 
 The parser now keeps `Name<args>` for a name the file imports by an explicit
-`use` item, HIR keeps it only for an imported class or struct, and 40.mono
+`use` item, HIR retains each resolved declaration's arguments, and 40.mono
 registers each instance method of a generic inherent impl as a function
 template over the impl's type parameters (receiver first). A call whose
 receiver is declared as a concrete instantiation -- matched by the class's
@@ -29,7 +29,7 @@ Each example runs HIR -> mono -> MIR in-process on a small fixture.
 | `b.conv(7)`, a method with its own type parameter | E-MONO-034 |
 | `b.inner()` declared by `impl<T> Box<Option<T>>` | E-MONO-034 |
 | `p.swapped()` declared by `impl<A, B> Pair<B, A>` | E-MONO-034 |
-| parameters typed with an imported generic enum / trait | stay `Any` |
+| parameters typed with an imported generic enum / trait | retain named arguments |
 """
 
 # @tag: unit, compiler, mir, mono, stage2
@@ -102,9 +102,13 @@ fn lower_consumer(consumer_source: text) -> text:
     val ext_hir: HirModule = mono["lib.ext"]
     val consumer_hir: HirModule = mono["app.main"]
     var mir_lowering = MirLowering.new(consumer_hir.symbols)
-    mir_lowering.prescan_module_struct_names(dep_hir)
-    mir_lowering.prescan_module_struct_names(ext_hir)
-    mir_lowering.prescan_module_struct_names(consumer_hir)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["dep_hir"] = dep_hir
+    prescan_mods["ext_hir"] = ext_hir
+    prescan_mods["consumer_hir"] = consumer_hir
+    mir_lowering.prescan_module_struct_names(prescan_mods, "dep_hir")
+    mir_lowering.prescan_module_struct_names(prescan_mods, "ext_hir")
+    mir_lowering.prescan_module_struct_names(prescan_mods, "consumer_hir")
     _last_mir = Some(mir_lowering.lower_module(consumer_hir, [dep_hir, ext_hir, consumer_hir]))
     var out = ""
     for d in diags:
@@ -199,24 +203,33 @@ describe "methods mono cannot bind positionally fail closed":
         expect(errs.contains("error: E-MONO")).to_equal(false)
         expect(errs.contains("impl target")).to_equal(true)
 
-describe "only imported classes and structs become generic instances":
-    it "keeps an imported generic enum and trait as Any, and a class as Named":
+describe "imported declarations retain their generic arguments":
+    it "keeps an imported generic enum, trait, and class as Named":
         val errs = lower_consumer("use lib.dep.\{Box, Opt2, Shape\}\n\nfn f(b: Box<i64>, o: Opt2<i64>, s: Shape<i64>) -> i64:\n    1\n")
         print "kinds: [{errs}] {param_kind_name(0)} {param_kind_name(1)} {param_kind_name(2)}"
         expect(param_kind_name(0)).to_equal("named1")
-        expect(param_kind_name(1)).to_equal("any")
-        expect(param_kind_name(2)).to_equal("any")
+        expect(param_kind_name(1)).to_equal("named1")
+        expect(param_kind_name(2)).to_equal("named1")
+        expect(_last_hir_errors.len()).to_equal(0)
 
-# Before the parser kept `Name<args>` for an imported name, such an annotation
-# was erased to `Any` and its ARGUMENTS were never resolved. A file that spells
-# an argument which is not in scope compiled then and must compile now.
-describe "an imported instance annotation that does not resolve stays Any":
-    it "raises no HIR diagnostic for an argument that is not in scope":
+describe "invalid imported instance arguments remain diagnostics":
+    it "reports a class argument that is not in scope":
         val errs = lower_consumer("use lib.dep.\{Box\}\n\nfn f(b: Box<NotInScope>) -> i64:\n    0\n")
         for e in _last_hir_errors:
             print "hir: {e}"
-        expect(_last_hir_errors.len()).to_equal(0)
-        expect(errs.contains("NotInScope")).to_equal(false)
+        expect(_last_hir_errors.len()).to_be_greater_than(0)
+        expect(_last_hir_errors.join("\n")).to_contain("NotInScope")
+        expect(param_kind_name(0)).to_equal("named1")
+
+    it "reports an imported enum argument instead of erasing the whole instance":
+        val _errs = lower_consumer("use lib.dep.\{Opt2\}\n\nfn f(o: Opt2<MissingPayload>) -> i64:\n    0\n")
+        expect(_last_hir_errors.join("\n")).to_contain("MissingPayload")
+        expect(param_kind_name(0)).to_equal("named1")
+
+    it "reports an imported trait argument instead of erasing the whole instance":
+        val _errs = lower_consumer("use lib.dep.\{Shape\}\n\nfn f(s: Shape<MissingOutput>) -> i64:\n    0\n")
+        expect(_last_hir_errors.join("\n")).to_contain("MissingOutput")
+        expect(param_kind_name(0)).to_equal("named1")
 
     it "still reports the same name as a plain annotation":
         val _errs = lower_consumer("use lib.dep.\{Box\}\n\nfn f(b: NotInScope) -> i64:\n    0\n")

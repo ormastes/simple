@@ -1,0 +1,82 @@
+"""Retained scalar lease with synchronous epoch-bound read views.
+
+This library adapter uses weak.spl's owned control block; it introduces no
+second ownership/refcount protocol. Views contain handles, never raw addresses.
+A saved view cannot read after its callback returns, a lease release, or reset.
+The scalar registry is single-threaded and does not provide compiler lifetime
+checking or general object ownership. Callbacks must complete synchronously.
+Use lease_with_view_result for recoverable callback failures. Unrecoverable
+exception/panic unwinding is not cleanup-safe on the current flat frontend.
+"""
+
+use std.nogc_sync_mut.ptr.weak.{WeakRef, WeakLease, weak_upgrade_owned, weak_lease_value, weak_lease_release}
+
+struct LeaseView:
+    view_id: i64
+    epoch: i64
+
+var g_lease_view_tokens: [i64] = []
+var g_lease_view_generations: [i64] = []
+var g_lease_view_epochs: [i64] = []
+var g_lease_view_active: [bool] = []
+
+fn lease_view_position(token_id: i64, generation: i64) -> i64:
+    var index = 0
+    while index < g_lease_view_tokens.len():
+        if g_lease_view_tokens[index] == token_id and g_lease_view_generations[index] == generation:
+            return index
+        index = index + 1
+    -1
+
+fn lease_acquire(ref: WeakRef) -> WeakLease?:
+    weak_upgrade_owned(ref)
+
+fn lease_release(lease: WeakLease) -> bool:
+    # Revocation belongs to the owned weak lease. All aliases of its token
+    # lose access together, including a view currently inside a callback.
+    weak_lease_release(lease)
+
+fn lease_view_read(view: LeaseView) -> i64?:
+    val position = view.view_id
+    if position < 0 or position >= g_lease_view_tokens.len(): return nil
+    if not g_lease_view_active[position]: return nil
+    if g_lease_view_epochs[position] != view.epoch: return nil
+    weak_lease_value(WeakLease(token_id: g_lease_view_tokens[position], generation: g_lease_view_generations[position]))
+
+fn lease_begin_view(lease: WeakLease) -> i64:
+    if weak_lease_value(lease) == nil: return -1
+    var position = lease_view_position(lease.token_id, lease.generation)
+    if position < 0:
+        position = g_lease_view_tokens.len()
+        g_lease_view_tokens.push(lease.token_id)
+        g_lease_view_generations.push(lease.generation)
+        g_lease_view_epochs.push(0)
+        g_lease_view_active.push(false)
+    # Reentrancy cannot widen the active short view or replace its epoch.
+    if g_lease_view_active[position]: return -1
+    if g_lease_view_epochs[position] == 9223372036854775807: return -1
+    g_lease_view_epochs[position] = g_lease_view_epochs[position] + 1
+    g_lease_view_active[position] = true
+    position
+
+fn lease_with_view(lease: WeakLease, action: fn(LeaseView)) -> bool:
+    val position = lease_begin_view(lease)
+    if position < 0: return false
+    action(LeaseView(view_id: position, epoch: g_lease_view_epochs[position]))
+    g_lease_view_active[position] = false
+    weak_lease_value(lease) != nil
+
+# The scalar result cannot carry a view out. Cleanup precedes both Ok and Err
+# propagation, including a callback that uses postfix ? to return Err early.
+fn lease_with_view_result(lease: WeakLease, action: fn(LeaseView) -> Result<i64, text>) -> Result<i64, text>:
+    val position = lease_begin_view(lease)
+    if position < 0:
+        return Err("lease view unavailable: revoked, reentrant, or exhausted")
+    val outcome: Result<i64, text> = action(LeaseView(view_id: position, epoch: g_lease_view_epochs[position]))
+    g_lease_view_active[position] = false
+    match outcome:
+        case Err(message): return Err(message)
+        case _: pass
+    if weak_lease_value(lease) == nil:
+        return Err("lease revoked during callback")
+    outcome

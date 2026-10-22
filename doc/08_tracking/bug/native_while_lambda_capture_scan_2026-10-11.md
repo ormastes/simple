@@ -46,3 +46,10 @@ unit scenarios have not separately run, the original std.spec wrapper remains
 blocked by independent framework issues, and full-group/runtime admission is
 not claimed. The restricted adapter must remain until that separate original
 std.spec positive/negative acceptance succeeds.
+
+## Current merge qualification
+
+The observations above belong to their pinned historical producers and source
+owners. The current release_phase3 merge retains the source repair, but its
+admitted compiler/core/MCP/LSP and full Phase 3 qualification remain pending.
+No historical diagnostic or experimental native fixture is a current merge PASS.

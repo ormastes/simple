@@ -11,9 +11,9 @@ mod mock;
 pub use bdd::{clear_bdd_state, get_ignored_tests, get_test_results};
 pub use core::clear_class_instantiation_state;
 pub(crate) use bdd::{
-    exec_block_value, BDD_AFTER_ALL, BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_EXPECT_FAILED,
+    exec_block_value, finish_bare_expect_statement, finish_bdd_matcher, BDD_AFTER_ALL, BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_EXPECT_FAILED,
     BDD_EXPECT_PROVISIONAL, BDD_EXPECT_SEQ, BDD_FAILURE_MSG, BDD_INDENT, BDD_LAZY_VALUES, BDD_MATCHER_COUNT,
-    BDD_MATCHER_RAN, BDD_PROVISIONAL_MSG, BDD_PROVISIONAL_SEQ, BDD_SHARED_EXAMPLES,
+    BDD_MATCHER_RAN, BDD_INSIDE_IT, BDD_PROVISIONAL_MSG, BDD_PROVISIONAL_SEQ, BDD_SHARED_EXAMPLES,
 };
 pub(crate) use core::{
     bind_args, bind_args_with_injected, bind_args_with_values, bind_args_with_values_named, name_callee,
@@ -269,11 +269,11 @@ fn import_bound_candidate(
         eprintln!(
             "[dupdispatch] probe name={name} current={current} has_table={} entry={:?}",
             b.is_some(),
-            b.as_ref().and_then(|t| t.get(name).cloned())
+            b.as_ref().and_then(|t| t.get(name).map(std::borrow::Cow::into_owned))
         );
     }
     let (mut source_owner, mut source_name) =
-        crate::interpreter::owner_bindings(&current).and_then(|bindings| bindings.get(name).cloned())?;
+        crate::interpreter::owner_bindings(&current).and_then(|bindings| bindings.get(name).map(std::borrow::Cow::into_owned))?;
     // Walk re-export facades to the module that actually DECLARES the
     // function, mirroring the bounded chain walk HIR lowering performs in
     // `collect_flattened_import_aliases`. At each hop, a candidate declared
@@ -298,7 +298,7 @@ fn import_bound_candidate(
         let hop = crate::interpreter::owner_bindings(&source_owner).and_then(|bindings| {
             bindings
                 .get(&source_name)
-                .cloned()
+                .map(std::borrow::Cow::into_owned)
                 .filter(|next| *next.0 != *source_owner || next.1 != source_name)
                 .or_else(|| bindings.get("*").map(|glob| (Arc::clone(&glob.0), source_name.clone())))
         });
@@ -946,7 +946,7 @@ pub(crate) fn evaluate_call(
             // First, check if the receiver is a module dict in env
             if let Some(Value::Dict(module_dict)) = env.get(module_name).cloned() {
                 // Look up function in the module's exports
-                if let Some(func_val) = module_dict.get(field).cloned() {
+                if let Some(func_val) = crate::interpreter::module_dict_get(&module_dict, field) {
                     if let Value::Function { def, captured_env, .. } = func_val {
                         let mut captured_env_clone = Env::clone(&captured_env);
                         return core::exec_function_with_captured_env(
@@ -1688,9 +1688,16 @@ pub(crate) fn evaluate_call(
                     .iter()
                     .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
                     .collect::<Result<Vec<_>, _>>()?;
+                // `as_int` admits every integer carrier (a `u8` from `x as u8`
+                // is `Value::UInt`). Matching only `Value::Int` silently turned
+                // those into code point 0.
                 let code = match evaluated_args.first() {
-                    Some(Value::Int(i)) => *i,
-                    _ => 0,
+                    Some(v) => v.as_int()?,
+                    None => {
+                        return Err(CompileError::semantic(
+                            "text.from_char_code expects one integer code point",
+                        ))
+                    }
                 };
                 let ch = char::from_u32(code as u32).unwrap_or('\0');
                 return Ok(Value::text(ch.to_string()));

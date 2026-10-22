@@ -1,0 +1,53 @@
+# Declared scalar receiver evidence must survive an erased field projection.
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolTable}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_types.{LocalId}
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+
+fn scalar_projection_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn scalar_projection_base() -> HirExpr:
+    HirExpr(kind: HirExprKind.Var(SymbolId(id: 99999)), has_type_: false,
+        type_: scalar_projection_type(HirTypeKind.Unit), span: Span.empty())
+
+fn scalar_projection_kind(found: HirType?) -> text:
+    if val value = found:
+        match value.kind:
+            case HirTypeKind.Str: return "text"
+            case HirTypeKind.Bool: return "bool"
+            case HirTypeKind.Float(bits): return "f{bits}"
+            case _: return "other"
+    "missing"
+
+describe "Scalar field projection preserves declared type":
+    it "retains text, bool, and exact float width without collection identity":
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.struct_value_syms[10] = "Envelope"
+        lowering.struct_field_hir_type["Envelope"] = [
+            scalar_projection_type(HirTypeKind.Str),
+            scalar_projection_type(HirTypeKind.Bool),
+            scalar_projection_type(HirTypeKind.Float(32)),
+            scalar_projection_type(HirTypeKind.Float(64))]
+        for i in 0..4:
+            lowering.remember_field_projection_provenance(scalar_projection_base(), LocalId(id: 10), i, LocalId(id: 11 + i))
+            expect(lowering.local_is_runtime_array(LocalId(id: 11 + i))).to_equal(false)
+            expect(lowering.local_is_runtime_dict(LocalId(id: 11 + i))).to_equal(false)
+        expect(scalar_projection_kind(lowering.find_local_hir_type(11))).to_equal("text")
+        expect(scalar_projection_kind(lowering.find_local_hir_type(12))).to_equal("bool")
+        expect(scalar_projection_kind(lowering.find_local_hir_type(13))).to_equal("f32")
+        expect(scalar_projection_kind(lowering.find_local_hir_type(14))).to_equal("f64")
+
+    it "does not manufacture scalar evidence for unknown or missing fields":
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.struct_value_syms[10] = "Envelope"
+        lowering.struct_field_hir_type["Envelope"] = [scalar_projection_type(HirTypeKind.Error)]
+        lowering.remember_field_projection_provenance(scalar_projection_base(), LocalId(id: 10), 0, LocalId(id: 11))
+        lowering.remember_field_projection_provenance(scalar_projection_base(), LocalId(id: 10), 5, LocalId(id: 12))
+        lowering.remember_field_projection_provenance(scalar_projection_base(), LocalId(id: 99), 0, LocalId(id: 13))
+        expect(scalar_projection_kind(lowering.find_local_hir_type(11))).to_equal("missing")
+        expect(scalar_projection_kind(lowering.find_local_hir_type(12))).to_equal("missing")
+        expect(scalar_projection_kind(lowering.find_local_hir_type(13))).to_equal("missing")

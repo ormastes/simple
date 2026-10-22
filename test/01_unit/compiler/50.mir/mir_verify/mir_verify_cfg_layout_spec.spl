@@ -160,6 +160,41 @@ describe "MIR verify: rule 5 — control flow structure":
         expect(mir_verify_module(mk_module([f])).is_clean()).to_equal(true)
 
 describe "MIR verify: rule 5b/5c — local definitions and dropped conditions":
+    it "defines TransferOut destinations for both runtime classification modes (#3022)":
+        for runtime_classify in [false, true]:
+            val f = mk_fn(830, "fixture.transfer_out", [i64_t()], i64_t(),
+                [arg(0, i64_t()), tmp(1, i64_t())],
+                [block(0, [inst(MirInstKind.TransferOut(
+                    LocalId(id: 1), LocalId(id: 0), MirExecutionDomain.Thread,
+                    MirTransferMode.Copy, MirTransferPayload.InlineCopy, runtime_classify), 2)],
+                    MirTerminator.Ret(Some(copy(1))))])
+            expect(mir_verify_module(mk_module([f])).is_clean()).to_equal(true)
+
+    it "checks TransferOut source declarations for both runtime classification modes (#3022)":
+        for runtime_classify in [false, true]:
+            val f = mk_fn(831, "fixture.transfer_out_missing_source", [], i64_t(),
+                [tmp(1, i64_t())],
+                [block(0, [inst(MirInstKind.TransferOut(
+                    LocalId(id: 1), LocalId(id: 5), MirExecutionDomain.Thread,
+                    MirTransferMode.Copy, MirTransferPayload.InlineCopy, runtime_classify), 2)],
+                    MirTerminator.Ret(Some(copy(1))))])
+            val report = mir_verify_module(mk_module([f]))
+            expect(count_rule(report, "MIRV-005b")).to_equal(1)
+            expect(first_message(report, "MIRV-005b").contains("%5")).to_equal(true)
+            expect(has_rule(report, "MIRV-005e")).to_equal(false)
+
+    it "checks TransferOut destination declarations for both runtime classification modes (#3022)":
+        for runtime_classify in [false, true]:
+            val f = mk_fn(832, "fixture.transfer_out_missing_dest", [i64_t()], i64_t(),
+                [arg(0, i64_t())],
+                [block(0, [inst(MirInstKind.TransferOut(
+                    LocalId(id: 5), LocalId(id: 0), MirExecutionDomain.Thread,
+                    MirTransferMode.Copy, MirTransferPayload.InlineCopy, runtime_classify), 2)],
+                    MirTerminator.Ret(Some(copy(0))))])
+            val report = mir_verify_module(mk_module([f]))
+            expect(count_rule(report, "MIRV-005b")).to_equal(1)
+            expect(first_message(report, "MIRV-005b").contains("definition of local %5")).to_equal(true)
+
     it "flags a read of a local that is not declared in the function as MIRV-005b (warn-first)":
         val f = mk_fn(810, "fixture.undeclared", [], i64_t(), [tmp(0, i64_t())],
             [block(0, [inst(MirInstKind.Copy(LocalId(id: 0), LocalId(id: 5)), 2)], MirTerminator.Ret(Some(copy(0))))])

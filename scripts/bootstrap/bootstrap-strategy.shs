@@ -118,6 +118,20 @@ fi
     echo "bootstrap-scheduler-error: unsupported coordinated mode: $mode" >&2
     exit 78
 }
+# Authorization preflight before any scheduling. With a receipt present this
+# supervisor owns scheduling and launches the engine as a scheduler task, so
+# an engine-side receipt refusal would be recorded as a stage-engine/scheduler
+# failure instead of the canonical policy diagnostic
+# (bootstrap-policy-error: malformed-or-untrusted-planner-admission-v2, exit
+# 64) that check-bootstrap-reason-receipt-guard.shs pins. Resume/stop-after/
+# produce-receipt lanes bypass this supervisor and keep the engine's own
+# preflight, so forwarding the original args plus the engine's read-only
+# --validate-bootstrap-receipt here cannot collide with an early-exec lane.
+receipt_preflight_status=0
+SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED=1 \
+    /bin/sh "$engine" "$@" --validate-bootstrap-receipt ||
+    receipt_preflight_status=$?
+[ "${receipt_preflight_status}" -eq 0 ] || exit "${receipt_preflight_status}"
 bootstrap_scheduler_validate_graph_contract "$graph_contract" || {
     echo 'bootstrap-scheduler-error: bootstrap graph contract is invalid' >&2
     exit 2

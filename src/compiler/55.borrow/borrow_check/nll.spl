@@ -12,7 +12,10 @@
 # - Error reporting: Generate helpful borrow errors
 
 use compiler.borrow.borrow_check.lifetime.*
+use compiler.borrow.borrow_check.nll_short_calls.*
 use compiler.borrow.borrow_check.borrow_graph.*
+use compiler.borrow.borrow_check.borrow_graph.{LoanAlias, Borrow, BorrowSet, Place, PlaceBase, PlaceElem, BorrowKind}
+use compiler.borrow.borrow_check.ownership_flow.{OwnershipFlow, OwnershipEvent, OwnershipFlowError, ownership_write_covers}
 
 # ============================================================================
 # Control Flow Graph
@@ -301,6 +304,52 @@ fn nllerror_move_while_borrowed(place: Place, borrow: Borrow, point: i64) -> NLL
         )
 
 
+enum LoanEvent:
+    Create(loan_id: i64)
+    Copy(source: Place, destination: Place)
+    Assign(destination: Place)
+    Use(place: Place, moving: bool)
+    Escape(source: Place, reason: text)
+    Suspend(reason: text)
+    ShortCall(arguments: [Place], modes: [text])
+    UnionCopy(sources: [Place], destination: Place)
+
+pub fn loan_alias_place(alias: LoanAlias) -> Place:
+    """Read the declared LoanAlias layout across native generic-loop boundaries."""
+    alias.place
+
+fn loan_alias_contains(aliases: [LoanAlias], candidate: LoanAlias) -> bool:
+    for alias in aliases:
+        if alias.loan_id == candidate.loan_id and loan_alias_origin_only(alias) == loan_alias_origin_only(candidate) and place_equals(loan_alias_place(alias), candidate.place):
+            return true
+    false
+
+fn loan_alias_union(left: [LoanAlias], right: [LoanAlias]) -> [LoanAlias]:
+    var merged: [LoanAlias] = []
+    for alias in left:
+        merged = merged.push(alias)
+    for alias in right:
+        if not loan_alias_contains(merged, alias):
+            merged = merged.push(alias)
+    merged
+
+
+# @workaround bug=nll_live_aliases_method_arg_corruption_2026_10_22 reason=self_receiver_plus_array_arg_method_call_miscompiles_in_native_candidate
+# Free function, not a method: `state = self.live_aliases(state, ...)`
+# corrupted the aliases array argument in transit (state_len=0 at the call
+# site, garbage length at function entry, deterministic SIGSEGV in the stage2
+# sanity borrow_check). Same writeback/argument-shape defect family as
+# cce1cddae19 (mir receiver writeback).
+fn nll_live_aliases(aliases: [LoanAlias], live: [i64]) -> [LoanAlias]:
+    var kept: [LoanAlias] = []
+    for alias in aliases:
+        var keep = true
+        match loan_alias_place(alias).base:
+            case PlaceBase.Local(local): keep = live.contains(local)
+            case _: ()
+        if keep: kept = kept.push(alias)
+    kept
+
 class NLLChecker:
     """Non-Lexical Lifetimes borrow checker.
 
@@ -314,6 +363,13 @@ class NLLChecker:
     liveness: LivenessAnalysis
     lifetime_inference: LifetimeInference
     errors: [NLLError]
+    ownership_flow: OwnershipFlow
+    loan_events: Dict<i64, [LoanEvent]>
+    point_uses: Dict<i64, [i64]>
+    point_defs: Dict<i64, [i64]>
+    initial_loans: [LoanAlias]
+    loan_boundaries: Dict<i64, i64>
+    loan_parents: Dict<i64, [LoanParent]>
 
     static fn create(cfg: ControlFlowGraph) -> NLLChecker:
         NLLChecker(
@@ -321,6 +377,9 @@ class NLLChecker:
             borrow_graph: BorrowGraph.create(),
             liveness: LivenessAnalysis.create(cfg),
             lifetime_inference: LifetimeInference.create(),
+            ownership_flow: OwnershipFlow.create(),
+            loan_events: {}, point_uses: {}, point_defs: {},
+            initial_loans: [], loan_boundaries: {}, loan_parents: {},
             errors: []
         )
 
@@ -329,12 +388,33 @@ class NLLChecker:
 
         Returns true if no errors.
         """
-        # Step 1: Compute liveness
-        val liveness_result = self.liveness.compute()
+        # Moves use real edges, including loop backedges. The recorder must not
+        # mutate BorrowGraph.moved_now: that source-order state conflates arms.
+        var points: Dict<i64, [i64]> = {}
+        var successors: Dict<i64, [i64]> = {}
+        for id in self.cfg.blocks.keys():
+            val block = self.cfg.blocks[id]
+            var block_points: [i64] = []
+            for point in block.statements:
+                block_points = block_points.push(point)
+            points[id] = block_points.push(block.terminator_point)
+            successors[id] = block.successors
+        val flow_errors: [OwnershipFlowError] = self.ownership_flow.check(self.cfg.entry, points, successors)
+        for flow_error in flow_errors:
+            val err: OwnershipFlowError = flow_error
+            self.errors = self.errors.push(NLLError(
+                message: err.message,
+                has_primary_span: true,
+                primary_span: err.point,
+                secondary_spans: [],
+                has_help: false,
+                help: ""
+            ))
 
-        # Step 2: Process each block
-        for block_id in self.cfg.reverse_postorder():
-            self.check_block(block_id, liveness_result)
+        # Loans have their own CFG fixpoint and point liveness. Ownership's
+        # maybe-moved lattice is independent of reference provenance.
+        if flow_errors.is_empty():
+            self.solve_loans(points)
 
         # Step 3: Run lifetime inference
         if not self.lifetime_inference.infer():
@@ -461,10 +541,14 @@ class NLLChecker:
         is what `check_terminator`'s `Return` arm needs in order to tell an
         escaping borrow from one that dies inside the function.
         """
+        self.ownership_flow.record(point, OwnershipEvent.Read(place))
+        self.record_live_use(point, place)
+        self.record_live_def(point, Place.local(dest_local))
         val borrow = self.borrow_graph.record_borrow(point, place, kind)
         if borrow.is_none():
             return false
         self.borrow_graph.note_borrow_dest(borrow.unwrap().id, dest_local)
+        self.record_loan_event(point, LoanEvent.Create(borrow.unwrap().id))
         # Add lifetime constraint
         self.lifetime_inference.env.add_outlives(
             borrow.unwrap().lifetime,
@@ -479,11 +563,15 @@ class NLLChecker:
 
     me record_use(point: i64, place: Place):
         """Record use of a place."""
-        self.borrow_graph.record_use(point, place)
+        self.ownership_flow.record(point, OwnershipEvent.Read(place))
+        self.record_live_use(point, place)
+        self.record_loan_event(point, LoanEvent.Use(place, false))
 
     me record_move(point: i64, place: Place):
         """Record move of a place."""
-        self.borrow_graph.record_move(point, place)
+        self.ownership_flow.record(point, OwnershipEvent.Move(place))
+        self.record_live_use(point, place)
+        self.record_loan_event(point, LoanEvent.Use(place, true))
 
     me record_assign(point: i64, place: Place):
         """Record (re)initialization of a place.
@@ -491,7 +579,202 @@ class NLLChecker:
         Kills forward-propagated moved-out state for the place so a
         re-initialized local is usable again (see BorrowGraph.record_assign).
         """
-        self.borrow_graph.record_assign(point, place)
+        self.ownership_flow.record(point, OwnershipEvent.Revive(place))
+        self.record_live_def(point, place)
+        self.record_loan_event(point, LoanEvent.Assign(place))
+
+    me record_loan_event(point: i64, event: LoanEvent):
+        var events: [LoanEvent] = []
+        if self.loan_events.contains_key(point): events = self.loan_events[point]
+        self.loan_events[point] = events.push(event)
+
+    me record_live_use(point: i64, place: Place):
+        match place.base:
+            case PlaceBase.Local(local):
+                var uses: [i64] = self.point_uses[point] ?? []
+                if not uses.contains(local): uses = uses.push(local)
+                self.point_uses[point] = uses
+            case _: ()
+        for projection in place.projections:
+            match projection:
+                case PlaceElem.Index(local):
+                    var uses: [i64] = self.point_uses[point] ?? []
+                    if not uses.contains(local): uses = uses.push(local)
+                    self.point_uses[point] = uses
+                case _: ()
+
+    me record_live_def(point: i64, place: Place):
+        if place.projections.len() != 0: return
+        match place.base:
+            case PlaceBase.Local(local):
+                var defs: [i64] = self.point_defs[point] ?? []
+                if not defs.contains(local): defs = defs.push(local)
+                self.point_defs[point] = defs
+            case _: ()
+
+    me record_loan_copy(point: i64, source: Place, destination: Place):
+        self.record_live_use(point, source)
+        self.record_live_def(point, destination)
+        self.record_loan_event(point, LoanEvent.Copy(source, destination))
+
+    me record_loan_escape(point: i64, source: Place, reason: text):
+        self.record_live_use(point, source)
+        self.record_loan_event(point, LoanEvent.Escape(source, reason))
+
+    me record_suspend(point: i64, reason: text):
+        self.record_loan_event(point, LoanEvent.Suspend(reason))
+
+    me loan_failure(point: i64, message: text):
+        self.errors = self.errors.push(NLLError(message: message,
+            has_primary_span: true, primary_span: point, secondary_spans: [],
+            has_help: false, help: ""))
+
+
+    me install_loans(point: i64, aliases: [LoanAlias]):
+        self.borrow_graph.loan_aliases[point] = aliases
+        var active = BorrowSet.create()
+        for alias in aliases:
+            if self.borrow_graph.loan_definitions.contains_key(alias.loan_id):
+                active.borrows[alias.loan_id] = self.borrow_graph.loan_definitions[alias.loan_id]
+        self.borrow_graph.point_borrows[point] = active
+
+    me transfer_loans(point: i64, input: [LoanAlias], report: bool) -> [LoanAlias]:
+        var state = loan_alias_union([], input)
+        val events: [LoanEvent] = self.loan_events[point] ?? []
+        for event in events:
+            self.install_loans(point, state)
+            match event:
+                case LoanEvent.Create(id):
+                    val created: Borrow = self.borrow_graph.loan_definitions[id]
+                    if report:
+                        var seen: [i64] = []
+                        for alias in state:
+                            val active: Borrow = self.borrow_graph.loan_definitions[alias.loan_id]
+                            if not seen.contains(active.id) and place_conflicts_with(active.place, created.place) and kind_conflicts_with(active.kind, created.kind):
+                                seen = seen.push(active.id)
+                                self.errors = self.errors.push(nllerror_borrow_conflict(created, active))
+                    state = self.create_loan_aliases(point, id, created.place, state)
+                case LoanEvent.Copy(source, destination):
+                    if place_conflicts_with(source, destination):
+                        # The adapter records the write before provenance.
+                        # Overlapping extraction/rebinding still reads the
+                        # source value from before this instruction's write.
+                        var preserved: [LoanAlias] = []
+                        for alias in input:
+                            if place_conflicts_with(loan_alias_place(alias), source): preserved = preserved.push(alias)
+                        state = loan_alias_union(state, preserved)
+                        self.install_loans(point, state)
+                    self.borrow_graph.record_loan_copy(point, source, destination)
+                    state = self.borrow_graph.loan_aliases[point]
+                case LoanEvent.Assign(destination):
+                    if report: self.borrow_graph.record_assign(point, destination)
+                    var kept: [LoanAlias] = []
+                    for alias in state:
+                        if not ownership_write_covers(destination, loan_alias_place(alias)): kept = kept.push(alias)
+                    state = kept
+                case LoanEvent.Use(place, moving):
+                    if report:
+                        var seen: [i64] = []
+                        for alias in state:
+                            val active: Borrow = self.borrow_graph.loan_definitions[alias.loan_id]
+                            if not seen.contains(active.id) and place_conflicts_with(place, active.place):
+                                seen = seen.push(active.id)
+                                if moving:
+                                    self.errors = self.errors.push(nllerror_move_while_borrowed(place, active, point))
+                                elif kind_is_mutable(active.kind):
+                                    self.errors = self.errors.push(nllerror_use_while_borrowed(place, active, point))
+                case LoanEvent.Escape(source, reason):
+                    if report: self.borrow_graph.record_loan_escape(point, source, reason)
+                case LoanEvent.Suspend(reason):
+                    if report: self.borrow_graph.record_suspend(point, reason)
+                case LoanEvent.ShortCall(arguments, modes):
+                    if report: self.check_short_call(point, arguments, modes, state)
+                case LoanEvent.UnionCopy(sources, destination):
+                    state = self.transfer_loan_union(point, sources, destination, state, input)
+        self.install_loans(point, state)
+        state
+
+    me solve_loans(points: Dict<i64, [i64]>):
+        # Backward point liveness over actual successors, with use-before-def
+        # preserved when both occur at one instruction. Fail closed on budget.
+        var before: Dict<i64, [i64]> = {}
+        var after: Dict<i64, [i64]> = {}
+        var changed = true
+        var work = 0
+        val reachable = self.cfg.reverse_postorder()
+        var point_ids: Dict<i64, bool> = {}
+        for block_id in reachable:
+            for point in points[block_id]: point_ids[point] = true
+        for point in self.loan_events.keys():
+            if not point_ids.contains_key(point):
+                # Unreachable events are legal, unmapped ones are malformed.
+                var mapped = false
+                for block_id in points.keys():
+                    if points[block_id].contains(point): mapped = true
+                if not mapped:
+                    self.loan_failure(point, "loan event has no CFG point")
+                    return
+        while changed:
+            changed = false
+            for block_id in reachable:
+                val block = self.cfg.blocks[block_id]
+                var live: [i64] = []
+                for successor in block.successors:
+                    val first = points[successor][0]
+                    val next: [i64] = before[first] ?? []
+                    for local in next:
+                        if not live.contains(local): live = live.push(local)
+                val block_points = points[block_id]
+                var index = block_points.len()
+                while index > 0:
+                    index = index - 1
+                    val point = block_points[index]
+                    after[point] = live
+                    val uses: [i64] = self.point_uses[point] ?? []
+                    val defs: [i64] = self.point_defs[point] ?? []
+                    var previous: [i64] = []
+                    for local in uses: previous = previous.push(local)
+                    for local in live:
+                        if not defs.contains(local) and not previous.contains(local): previous = previous.push(local)
+                    val old: [i64] = before[point] ?? []
+                    if old.len() != previous.len(): changed = true
+                    for local in previous:
+                        if not old.contains(local): changed = true
+                    before[point] = previous
+                    live = previous
+                    work = work + 1 + live.len()
+                    if work > 1000000:
+                        self.loan_failure(point, "loan liveness work budget exhausted")
+                        return
+        var incoming: Dict<i64, [LoanAlias]> = {}
+        incoming[self.cfg.entry] = loan_alias_union([], self.initial_loans)
+        var pending: [i64] = [self.cfg.entry]
+        var cursor = 0
+        while cursor < pending.len():
+            val block_id = pending[cursor]
+            cursor = cursor + 1
+            var state: [LoanAlias] = incoming[block_id]
+            for point in points[block_id]:
+                state = nll_live_aliases(state, before[point])
+                state = self.transfer_loans(point, state, false)
+                state = nll_live_aliases(state, after[point])
+                work = work + 1 + state.len()
+                if work > 1000000:
+                    self.loan_failure(point, "loan CFG work budget exhausted")
+                    return
+            for successor in self.cfg.blocks[block_id].successors:
+                val first = not incoming.contains_key(successor)
+                val old: [LoanAlias] = incoming[successor] ?? []
+                val merged = loan_alias_union(old, state)
+                incoming[successor] = merged
+                if first or old.len() != merged.len(): pending = pending.push(successor)
+        # Replay diagnostics only after all backedges and sibling joins converge.
+        for block_id in incoming.keys():
+            var state: [LoanAlias] = incoming[block_id]
+            for point in points[block_id]:
+                state = nll_live_aliases(state, before[point])
+                state = self.transfer_loans(point, state, true)
+                state = nll_live_aliases(state, after[point])
 
     fn get_errors() -> [NLLError]:
         """Get all NLL errors."""

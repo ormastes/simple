@@ -1,0 +1,100 @@
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.driver_source_file.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{SymbolId, HirModule}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_instruction_graph.{MirFunction}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_instruction_support.{MirOperandKind}
+use compiler.mir.mir_types.{MirConstValue}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+
+class TryRecordArrayFixture:
+    lowering: MirLowering
+    function: MirFunction
+    callable: SymbolId
+
+val try_record_provider = "pub struct Entry:\n    code: i64\n    value: i64\npub struct Bundle:\n    marker: i64\n    rows: [Entry]\npub fn produce(reject: bool) -> Result<Bundle, text>:\n    if reject: return Err(\"record rejected\")\n    Ok(Bundle(marker: 19, rows: [Entry(code: 3, value: 7), Entry(code: 5, value: 11)]))\n"
+val try_record_consumer = "use app.try_record.provider.\{produce, Bundle as ProviderBundle}\nstruct Bundle:\n    rows: i64\n    marker: text\nfn inspect(reject: bool) -> Result<i64, text>:\n    val record: ProviderBundle = produce(reject)?\n    var total = record.marker\n    for row in record.rows:\n        total = total + row.value\n    Ok(total)\n"
+
+val try_record_local_consumer = "use app.try_record.provider.\{Bundle as ProviderBundle, Entry}\nstruct Bundle:\n    rows: i64\n    marker: text\nfn produce_local(reject: bool) -> Result<ProviderBundle, text>:\n    if reject: return Err(\"local record rejected\")\n    Ok(ProviderBundle(marker: 23, rows: [Entry(code: 2, value: 5), Entry(code: 6, value: 13)]))\nfn inspect(reject: bool) -> Result<i64, text>:\n    val record: ProviderBundle = produce_local(reject)?\n    var total = record.marker\n    for row in record.rows:\n        total = total + row.value\n    Ok(total)\n"
+
+fn try_record_array_fixture(provider_source: text, consumer_source: text, callee_name: text = "produce") -> TryRecordArrayFixture:
+    val log = Logger(level: 0)
+    val provider_ast = parse_full_frontend(provider_source, "app/try_record/provider.spl", "app.try_record.provider", log)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/try_record/consumer.spl", "app.try_record.consumer", log)
+    var modules: Dict<text, ParserModule> = {}
+    modules["app.try_record.provider"] = provider_ast
+    val files = [SourceFile(path: "app/try_record/provider.spl", content: provider_source, module_name: "app.try_record.provider")]
+    match module_surfaces_from_modules(modules, files):
+        case Ok(surfaces):
+            var provider_lowering = hirlowering_for_module("app/try_record/provider.spl", surfaces)
+            var consumer_lowering = hirlowering_for_module("app/try_record/consumer.spl", surfaces)
+            val provider = provider_lowering.lower_module(provider_ast)
+            val consumer = consumer_lowering.lower_module(consumer_ast)
+            expect(provider_lowering.errors.len()).to_equal(0)
+            expect(consumer_lowering.errors.len()).to_equal(0)
+            var lowering = MirLowering.new(consumer.symbols)
+            var hir_modules: Dict<text, HirModule> = {}
+            hir_modules["app.try_record.provider"] = provider
+            hir_modules["app.try_record.consumer"] = consumer
+            lowering.prescan_module_struct_names(hir_modules, "app.try_record.provider")
+            lowering.prescan_module_struct_names(hir_modules, "app.try_record.consumer")
+            val mir = lowering.lower_module(consumer, [provider, consumer])
+            for function in mir.functions.values():
+                if function.name == "inspect" or function.name.ends_with(".inspect"):
+                    return TryRecordArrayFixture(lowering: lowering, function: function,
+                        callable: SymbolId(id: consumer.symbols.exact_symbols[callee_name]))
+            fail("parsed consumer did not produce inspect MIR")
+        case Err(reason): fail("parsed provider surfaces failed: " + reason)
+
+fn try_record_call_count(function: MirFunction, name: text) -> i64:
+    var count = 0
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, callee, _):
+                    match callee.kind:
+                        case MirOperandKind.Const(MirConstValue.Str(actual), _):
+                            if actual == name or actual.ends_with("." + name): count = count + 1
+                        case _: ()
+                case _: ()
+    count
+
+describe "REQ-MIR-TRY-RECORD-ARRAY-WA-001: temporary typed Result record bindings":
+    it "should retain imported-call array iteration and Result propagation":
+        step("Parse a typed imported Ok record without changing its ordinary loop")
+        val fixture = try_record_array_fixture(try_record_provider, try_record_consumer)
+        expect(fixture.lowering.errors.len()).to_equal(0)
+        expect(try_record_call_count(fixture.function, "produce")).to_equal(1)
+        expect(try_record_call_count(fixture.function, "rt_array_len")).to_be_greater_than(0)
+        expect(try_record_call_count(fixture.function, "rt_array_get")).to_be_greater_than(0)
+        expect(try_record_call_count(fixture.function, "rt_enum_discriminant")).to_be_greater_than(0)
+        expect(try_record_call_count(fixture.function, "rt_enum_payload")).to_equal(1)
+
+    it "should retain same-module-call array iteration and Result propagation":
+        step("Parse a local producer with an imported declared Ok record")
+        val fixture = try_record_array_fixture(try_record_provider, try_record_local_consumer, "produce_local")
+        expect(fixture.lowering.errors.len()).to_equal(0)
+        expect(try_record_call_count(fixture.function, "produce_local")).to_equal(1)
+        expect(try_record_call_count(fixture.function, "rt_array_len")).to_be_greater_than(0)
+        expect(try_record_call_count(fixture.function, "rt_array_get")).to_be_greater_than(0)
+        expect(try_record_call_count(fixture.function, "rt_enum_discriminant")).to_be_greater_than(0)
+        expect(try_record_call_count(fixture.function, "rt_enum_payload")).to_equal(1)
+
+    it "should reject a typed record whose rows field is an integer":
+        step("Keep the annotated owner but supply a genuinely non-array field")
+        val provider = "pub struct Bundle:\n    marker: i64\n    rows: i64\npub fn produce(reject: bool) -> Result<Bundle, text>:\n    if reject: return Err(\"record rejected\")\n    Ok(Bundle(marker: 19, rows: 7))\n"
+        val consumer = "use app.try_record.provider.\{produce, Bundle as ProviderBundle}\nfn inspect(reject: bool) -> Result<i64, text>:\n    val record: ProviderBundle = produce(reject)?\n    var total = 0\n    for row in record.rows:\n        total = total + row\n    Ok(total)\n"
+        val fixture = try_record_array_fixture(provider, consumer)
+        var rejected = false
+        for error in fixture.lowering.errors:
+            if error.message.contains("for-in over non-array iterables"): rejected = true
+        expect(rejected).to_be(true)
+        expect(try_record_call_count(fixture.function, "rt_array_get")).to_equal(0)

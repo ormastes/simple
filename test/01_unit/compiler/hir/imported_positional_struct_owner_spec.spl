@@ -1,0 +1,58 @@
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering._Expressions.expression_components.*
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.function_lowering.*
+
+describe "Imported positional struct patterns retain declaration ownership":
+    it "lowers imported alias array fields and nested optional struct payloads":
+        val first_source = "struct Record:\n    tag: i64\n    values: [i64]\nstruct SymbolId:\n    id: i64\n"
+        val second_source = "struct Record:\n    values: [i64]\n    tag: i64\n"
+        val consumer_source = "use first.\{Record as FirstRecord, SymbolId\}\nuse second.\{Record as SecondRecord\}\nstruct Record:\n    label: text\nfn first_sum(record: FirstRecord) -> i64:\n    match record:\n        case FirstRecord(tag, values):\n            var total = tag\n            for value in values:\n                total = total + value\n            total\nfn second_sum(record: SecondRecord) -> i64:\n    match record:\n        case SecondRecord(values, tag):\n            var total = tag\n            for value in values:\n                total = total + value\n            total\nfn optional_id(id: SymbolId?) -> i64:\n    match id:\n        case Some(SymbolId(raw)): raw\n        case _: -1\nfn local_label(record: Record) -> text:\n    match record:\n        case Record(label): label\n"
+        val logger = Logger(level: 0)
+        var modules: Dict<text, Module> = {}
+        modules["first"] = parse_full_frontend(first_source, "first", "first", logger)
+        modules["second"] = parse_full_frontend(second_source, "second", "second", logger)
+        val consumer = parse_full_frontend(consumer_source, "consumer", "consumer", logger)
+        modules["consumer"] = consumer
+        val sources = [
+            SourceFile(path: "first.spl", content: first_source, module_name: "first"),
+            SourceFile(path: "second.spl", content: second_source, module_name: "second"),
+            SourceFile(path: "consumer.spl", content: consumer_source, module_name: "consumer")]
+        var surfaces = ModuleSurfacesByName.empty()
+        match module_surfaces_from_modules(modules, sources):
+            case Ok(value): surfaces = value
+            case Err(_): assert(false)
+        var hir = hirlowering_for_module("consumer", surfaces)
+        val module_ = hir.lower_module(consumer)
+        expect(hir.errors.len()).to_equal(0)
+        expect(hir.positional_struct_pattern_field_order("FirstRecord") ?? []).to_equal(["tag", "values"])
+        expect(hir.positional_struct_pattern_field_order("SecondRecord") ?? []).to_equal(["values", "tag"])
+        expect(hir.positional_struct_pattern_field_order("Record") ?? []).to_equal(["label"])
+        var lowering = MirLowering.new(module_.symbols)
+        lowering.use_explicit_semantic_policy()
+        val mir = lowering.lower_module(module_)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(mir.functions.len()).to_be_greater_than(0)
+
+    it "refuses a foreign declaration with only an unrelated bare layout":
+        var hir = HirLowering.with_filename("consumer")
+        hir.symbols.define("Record", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, Some("foreign"))
+        hir.struct_field_order_by_name["Record"] = ["wrong_owner_field"]
+        expect(hir.positional_struct_pattern_field_order("Record")).to_be_nil()
+
+    it "does not reinterpret an enum declaration using a stale struct layout":
+        var hir = HirLowering.with_filename("consumer")
+        hir.symbols.define("Record", SymbolKind.Enum, nil, Span.empty(), Visibility.Public, false, Some("consumer"))
+        hir.struct_field_order_by_name["consumer.Record"] = ["wrong_kind_field"]
+        expect(hir.positional_struct_pattern_field_order("Record")).to_be_nil()

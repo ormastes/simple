@@ -14,13 +14,15 @@ use app.io.file_ops.{path_absolute}
 use std.nogc_sync_mut.fs.host_path.{host_path_native, host_path_native_for,
     host_path_canonical_for, host_is_windows_host}
 use std.common.crypto.sha256.{sha256_text}
-use std.common.text_bytes.{text_to_utf8_bytes}
+use std.common.text_bytes.{utf8_bytes_valid}
+use std.nogc_sync_mut.io.external_text_io.{io_legacy_utf8}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin,
     transient_scope_pause, transient_scope_end, transient_promote}
 use std.nogc_sync_mut.io.file_ops.{file_write_bytes,
+    file_read_regular_no_follow_bounded_bytes,
     secure_temp_dir_raw, file_publish_noreplace_raw}
 use std.nogc_sync_mut.io_runtime.{
-    dir_list, dir_remove, file_rename,
+    dir_list, dir_remove, file_rename, file_copy, file_hash_sha256_or_empty, file_size,
     process_is_running
 }
 use std.nogc_sync_mut.sffi.fs.{file_create_excl}
@@ -68,10 +70,36 @@ fn scv_compile_snapshot_invalid_v1(reason: text) -> ScvCompileSnapshotV1:
         source_drifted: false
     )
 
-fn scv_compile_snapshot_source_kind_v1(path: text) -> bool:
-    path.ends_with(".spl") or path.ends_with("/simple.sdn") or
-        path.ends_with("/plugin.sdn") or path == "simple.sdn" or
-        path == "plugin.sdn"
+# Simple-owned text formats: the set `.gitattributes` forces to LF because the
+# indentation-sensitive parser reads them (`*.spl`, `*.shs`, `*.sdn`). Only
+# these must be UTF-8. Anything else a caller hands the materializer (.bat,
+# .cmd, .sh, .ps1, C sources, fixtures) is snapshotted byte-exact with no
+# UTF-8 validation at all. The admitted inventory itself only ever carries
+# `.spl` and `simple.sdn` (compile_source_inventory_path_valid_v1), so before
+# the byte-read rewrite no non-Simple file was ever refused by the text read.
+fn scv_compile_snapshot_utf8_required_v1(path: text) -> bool:
+    path.ends_with(".spl") or path.ends_with(".shs") or path.ends_with(".sdn")
+
+# Fail-closed in EVERY build profile: a Simple text file that is not valid
+# UTF-8 is refused before it can reach the chunk store or the compiler. This
+# is not redundant with a downstream read — the C runtime's rt_file_read_text
+# hands raw bytes to rt_string_new with no validation (src/runtime/runtime.c),
+# so a release snapshot that skipped this check would let invalid bytes reach
+# the lexer silently on the self-hosted lane. The cost on valid input is one
+# native bulk pass (rt_utf8_validate), cheaper than the SHA-256 computed on
+# the same bytes right after; the per-byte strict decoder runs ONLY when the
+# bulk check refuses, because the bulk check also refuses storage it cannot
+# read as plain bytes (boxed u8 from the seed JIT splice — see
+# std.common.text_bytes.utf8_bytes_valid), and the decoder is the authority
+# there. There is no lenient decoder that could admit an invalid array.
+fn scv_compile_snapshot_utf8_refused_v1(rel: text, bytes: [u8]) -> bool:
+    if not scv_compile_snapshot_utf8_required_v1(rel):
+        return false
+    if utf8_bytes_valid(bytes):
+        return false
+    if val Err(_) = io_legacy_utf8(bytes):
+        return true
+    false
 
 fn scv_compile_snapshot_sorted_unique_v1(values: [text]) -> [text]:
     var sorted = values
@@ -114,8 +142,18 @@ fn scv_compile_snapshot_sift_down_v1(
         values[largest] = temporary
         root = largest
 
-fn scv_compile_snapshot_read_source_v1(path: text) -> text?:
-    val loaded = file_read_regular_no_follow_bounded(
+# Snapshot sources are content-addressed BYTES. No read on this path decodes
+# text: the source read, and every later read (staged chunk, existing chunk,
+# destination readback, drift recheck), is admitted by an exact raw-byte
+# SHA-256 match against the admitted inventory digest plus the byte count.
+# Decoding all five reads dominated the cost: sampled 2026-10-19 on a Windows
+# producer, ~95% of a ~150 ms/file CPU-bound snapshot (5-8 files/s) was the
+# per-byte text decoder plus reclaiming its per-byte allocations at
+# transient-scope end. The only validation left is the one bulk UTF-8 pass on
+# the source read of a Simple text file (scv_compile_snapshot_utf8_refused_v1),
+# which runs in every build profile.
+fn scv_compile_snapshot_read_source_v1(path: text) -> [u8]?:
+    val loaded = file_read_regular_no_follow_bounded_bytes(
         path, SCV_COMPILE_SOURCE_MAX_BYTES_V1)
     if val Err(_) = loaded:
         return nil
@@ -123,7 +161,7 @@ fn scv_compile_snapshot_read_source_v1(path: text) -> text?:
 
 fn scv_compile_snapshot_source_digest_v1(path: text) -> text:
     val content = scv_compile_snapshot_read_source_v1(path)
-    if content == nil: "" else: scv_content_id_for_u8(text_to_utf8_bytes(content!))
+    if content == nil: "" else: scv_content_id_for_u8(content!)
 
 fn scv_compile_snapshot_logical_member_v1(
     root: text, source_roots: [text], source_identity: text
@@ -268,11 +306,13 @@ fn scv_compile_snapshot_open_v1(
         canonical_snapshot + "/SCV_COMPILE_INVENTORY")
     if sha256_text(inventory) != inventory_digest:
         return scv_compile_snapshot_invalid_v1("snapshot-open-inventory-mismatch")
-    val rows = if inventory == "": [] else: inventory.split("\n")
+    # @workaround bug=a174_aggregate_receiver_provenance_2026_10_16 reason=retain-explicit-aggregate-receiver-type
+    val rows: [text] = if inventory == "": [] else: inventory.split("\n")
     if rows.len() != inventory_count:
         return scv_compile_snapshot_invalid_v1("snapshot-open-count-mismatch")
-    for row in rows:
-        val fields = row.split("|")
+    for row_value in rows:
+        val row: text = row_value
+        val fields: [text] = row.split("|")
         if (fields.len() != 3 or not scv_worktree_path_safe(fields[0]) or
                 not fields[1].starts_with("sha256_") or
                 fields[1].len() != 71 or
@@ -323,7 +363,7 @@ fn scv_compile_snapshot_publish_staged_chunk_v1(
     false
 
 fn scv_compile_snapshot_write_chunk_v1(
-    cache_root: text, staging: text, digest: text, content: text
+    cache_root: text, staging: text, digest: text, content: [u8]
 ) -> bool:
     val chunk_dir = "{cache_root}/objects/chunks"
     dir_create(chunk_dir, true)
@@ -334,7 +374,13 @@ fn scv_compile_snapshot_write_chunk_v1(
     # file. A failed exclusive write is cleaned by its enclosing stage owner;
     # it must never expose a final path or delete an unowned collision.
     val staged_path = "{staging}/.scv-chunk-{digest}"
-    if not file_create_excl(staged_path, content):
+    # No byte-payload exclusive create exists: claim the name exclusively,
+    # then fill the owned file. The digest check before publish stays the
+    # authority; a short or failed write never reaches the final path.
+    if not file_create_excl(staged_path, ""):
+        return false
+    if not file_write_bytes(staged_path, content):
+        file_delete(staged_path)
         return false
     scv_compile_snapshot_publish_staged_chunk_v1(staged_path, final_path, digest)
 
@@ -363,15 +409,26 @@ fn scv_compile_snapshot_materialize_source_unscoped_v1(
     val resolved = scv_compile_snapshot_plain_path_v1(path_absolute(host_path_native(path)))
     if not scv_compile_snapshot_physical_source_owned_v1(canonical_root, resolved):
         return ScvCompileMaterializedSourceV1("snapshot-source-outside-owner:{rel}", "", false)
-    val content = scv_compile_snapshot_read_source_v1(path)
+    var content = scv_compile_snapshot_read_source_v1(path)
+    if content == nil and resolved != path:
+        # A tracked symlink (git mode 120000, e.g.
+        # test/cert/tool_qual/meta/deterministic/01_arithmetic.spl ->
+        # ../../positive/01_arithmetic.spl) fails the no-follow read even though
+        # `resolved` (realpath) was just proven to live inside the owning root.
+        # Read that resolved target -- still no-follow, so a link to a link stays
+        # refused -- instead of refusing the whole admission: until 2026-10-20
+        # one such link made every `simple test` on the pure-Simple CLI stop
+        # with `snapshot-read-failed`.
+        content = scv_compile_snapshot_read_source_v1(resolved)
     if content == nil:
         return ScvCompileMaterializedSourceV1("snapshot-read-failed:{rel}", "", false)
-    # Keep the byte-packed conversion required by native SHA and binary writes.
-    val bytes = text_to_utf8_bytes(content!)
+    val bytes: [u8] = content!
+    if scv_compile_snapshot_utf8_refused_v1(rel, bytes):
+        return ScvCompileMaterializedSourceV1("snapshot-source-not-utf8:{rel}", "", false)
     val digest = scv_content_id_for_u8(bytes)
     if digest != "sha256_{entry.content_digest}" or bytes.len() != entry.byte_count:
         return ScvCompileMaterializedSourceV1("snapshot-index-drift:{rel}", "", false)
-    if not scv_compile_snapshot_write_chunk_v1(cache_root, staging, digest, content!):
+    if not scv_compile_snapshot_write_chunk_v1(cache_root, staging, digest, bytes):
         return ScvCompileMaterializedSourceV1("snapshot-chunk-publish-failed:{rel}", "", false)
     val destination = "{staging}/{rel}"
     # Both staging and rel are owned canonical paths. The runtime's recursive
@@ -390,8 +447,7 @@ fn scv_compile_snapshot_materialize_source_unscoped_v1(
     if current == nil:
         drifted = true
     else:
-        val current_text = current!
-        if scv_content_id_for_u8(text_to_utf8_bytes(current_text)) != digest:
+        if scv_content_id_for_u8(current!) != digest:
             drifted = true
     ScvCompileMaterializedSourceV1("ok", "{rel}|{digest}|{bytes.len()}", drifted)
 
@@ -408,6 +464,130 @@ fn scv_compile_snapshot_materialize_source_v1(
         return ScvCompileMaterializedSourceV1("snapshot-scratch-pause-failed", "", false)
     # Promote only this new carrier, never the accumulated inventory array.
     # That keeps promotion work linear in the number of snapshot files.
+    val retained = transient_promote(result)
+    val ended = transient_scope_end()
+    if not retained or not ended:
+        return ScvCompileMaterializedSourceV1("snapshot-scratch-retain-failed", "", false)
+    result
+
+# Revision reuse. Every published revision under this cache root already
+# materialized and verified each file whose inventory row (identity, digest,
+# byte count) it shares with the planned inventory. For those files the new
+# revision copies the verified object at the OS level and re-verifies the copy
+# with a runtime-side hash and size: no source read, no Simple-side byte
+# buffer, no drift recheck. The admitted inventory digest is authoritative (its
+# refresh ran in this same entrypoint, a moment earlier), so the per-file cost
+# is proportional to CHANGED files plus one copy+hash per unchanged file.
+# Before this, any inventory change re-read, re-hashed and re-copied all
+# ~17k sources five times each. Any mismatch falls back to the full path.
+struct ScvCompileSnapshotReuseV1:
+    snapshot_root: text
+    marks: [bool]
+    hits: i64
+
+fn scv_compile_snapshot_reuse_none_v1() -> ScvCompileSnapshotReuseV1:
+    ScvCompileSnapshotReuseV1("", [], 0)
+
+# Both row lists come from identity-ordered inventories; the merge only
+# advances past rows that sort before the planned identity and reuses a row
+# only on exact equality, so an unexpected order costs reuse, never safety.
+fn scv_compile_snapshot_reuse_marks_v1(
+    planned_rows: [text], published_rows: [text]
+) -> [bool]:
+    var marks: [bool] = []
+    var cursor = 0
+    for row in planned_rows:
+        val identity = row.split("|")[0]
+        while (cursor < published_rows.len() and
+                compile_source_inventory_identity_cmp_v1(
+                    published_rows[cursor].split("|")[0], identity) < 0):
+            cursor = cursor + 1
+        marks = marks.push(cursor < published_rows.len() and published_rows[cursor] == row)
+    marks
+
+fn scv_compile_snapshot_reuse_candidate_v1(
+    canonical_root: text, cache_root: text, name: text, planned_rows: [text]
+) -> ScvCompileSnapshotReuseV1:
+    if not name.starts_with("scv-revision-v1-"):
+        return scv_compile_snapshot_reuse_none_v1()
+    val snapshot_root = "{cache_root}/snapshots/{name}"
+    val lines = scv_compile_snapshot_read_text_v1(
+        "{snapshot_root}/SCV_COMPILE_SNAPSHOT").split("\n")
+    if (lines.len() != 6 or not lines[1].starts_with("revision=") or
+            not lines[2].starts_with("commit=") or not lines[3].starts_with("tree=") or
+            not lines[4].starts_with("inventory=")):
+        return scv_compile_snapshot_reuse_none_v1()
+    # open_v1 re-validates provenance, inventory digest, rows and receipt.
+    val opened = scv_compile_snapshot_open_v1(
+        canonical_root, snapshot_root, lines[1].substring(9), lines[2].substring(7),
+        lines[3].substring(5), lines[4].substring(10))
+    if not opened.valid or opened.revision_id != name:
+        return scv_compile_snapshot_reuse_none_v1()
+    val inventory = scv_compile_snapshot_read_text_v1("{snapshot_root}/SCV_COMPILE_INVENTORY")
+    val published_rows: [text] = if inventory == "": [] else: inventory.split("\n")
+    val marks = scv_compile_snapshot_reuse_marks_v1(planned_rows, published_rows)
+    var hits = 0
+    for mark in marks:
+        if mark: hits = hits + 1
+    if hits == 0:
+        return scv_compile_snapshot_reuse_none_v1()
+    ScvCompileSnapshotReuseV1(opened.snapshot_root, marks, hits)
+
+fn scv_compile_snapshot_reuse_select_v1(
+    canonical_root: text, cache_root: text, planned_rows: [text]
+) -> ScvCompileSnapshotReuseV1:
+    val snapshots_root = "{cache_root}/snapshots"
+    if not dir_exists(snapshots_root):
+        return scv_compile_snapshot_reuse_none_v1()
+    var best = scv_compile_snapshot_reuse_none_v1()
+    for name in dir_list(snapshots_root):
+        val candidate = scv_compile_snapshot_reuse_candidate_v1(
+            canonical_root, cache_root, name, planned_rows)
+        if candidate.hits > best.hits:
+            best = candidate
+    best
+
+# A miss is never a failure: the caller takes the full, verified path, which
+# is where a drifted source is refused (snapshot-index-drift).
+fn scv_compile_snapshot_reuse_source_unscoped_v1(
+    canonical_root: text, cache_root: text, staging: text, reuse_root: text,
+    entry: CompileSourceInventoryEntryV1
+) -> ScvCompileMaterializedSourceV1:
+    val rel = entry.source_identity
+    if not scv_worktree_path_safe(rel):
+        return ScvCompileMaterializedSourceV1("snapshot-path-unsafe:{rel}", "", false)
+    val miss = ScvCompileMaterializedSourceV1("snapshot-reuse-miss:{rel}", "", false)
+    # Cheap stat guard in place of the source re-read: a working-copy edit
+    # that changed the length since the inventory refresh takes the full path.
+    if file_size("{canonical_root}/{rel}") != entry.byte_count:
+        return miss
+    val digest = "sha256_{entry.content_digest}"
+    val chunk = "{cache_root}/objects/chunks/{digest}.blob"
+    if (not file_exists(chunk) or file_size(chunk) != entry.byte_count or
+            file_hash_sha256_or_empty(chunk) != entry.content_digest):
+        return miss
+    val destination = "{staging}/{rel}"
+    dir_create(destination[0:destination.rfind("/")], true)
+    if not file_copy("{reuse_root}/{rel}", destination):
+        file_delete(destination)
+        return miss
+    if (file_size(destination) != entry.byte_count or
+            file_hash_sha256_or_empty(destination) != entry.content_digest):
+        file_delete(destination)
+        return miss
+    ScvCompileMaterializedSourceV1("ok", "{rel}|{digest}|{entry.byte_count}", false)
+
+fn scv_compile_snapshot_reuse_source_v1(
+    canonical_root: text, cache_root: text, staging: text, reuse_root: text,
+    entry: CompileSourceInventoryEntryV1
+) -> ScvCompileMaterializedSourceV1:
+    if not transient_scope_begin():
+        return ScvCompileMaterializedSourceV1("snapshot-scratch-begin-failed", "", false)
+    val result = scv_compile_snapshot_reuse_source_unscoped_v1(
+        canonical_root, cache_root, staging, reuse_root, entry)
+    if not transient_scope_pause():
+        transient_scope_end()
+        return ScvCompileMaterializedSourceV1("snapshot-scratch-pause-failed", "", false)
     val retained = transient_promote(result)
     val ended = transient_scope_end()
     if not retained or not ended:
@@ -480,9 +660,21 @@ fn scv_compile_snapshot_acquire_v1(
     var inventory_rows: [text] = []
     var source_drifted = false
     val typed_entries: [CompileSourceInventoryEntryV1] = entries!
+    # planned_rows and typed_entries share the order of entries!, so the reuse
+    # marks index both. A reused row is byte-identical to what the full path
+    # would have produced (same identity, digest and byte count).
+    val reuse = scv_compile_snapshot_reuse_select_v1(
+        canonical_root, owned_cache_root, planned_rows)
+    var entry_index = 0
     for entry in typed_entries:
-        val materialized = scv_compile_snapshot_materialize_source_v1(
-            canonical_root, owned_cache_root, staging, entry)
+        var materialized = ScvCompileMaterializedSourceV1("snapshot-reuse-miss", "", false)
+        if reuse.hits > 0 and reuse.marks[entry_index]:
+            materialized = scv_compile_snapshot_reuse_source_v1(
+                canonical_root, owned_cache_root, staging, reuse.snapshot_root, entry)
+        if materialized.reason != "ok":
+            materialized = scv_compile_snapshot_materialize_source_v1(
+                canonical_root, owned_cache_root, staging, entry)
+        entry_index = entry_index + 1
         if materialized.reason != "ok":
             dir_remove(staging, true)
             return scv_compile_snapshot_invalid_v1(materialized.reason)
@@ -616,3 +808,5 @@ export scv_compile_snapshot_source_candidate_for_v1
 export scv_compile_snapshot_recover_v1
 export scv_compile_snapshot_gc_v1
 export scv_compile_snapshot_cleanup_v1
+export scv_compile_snapshot_reuse_marks_v1
+export scv_compile_snapshot_reuse_source_v1

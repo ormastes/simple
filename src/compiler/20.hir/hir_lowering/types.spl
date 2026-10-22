@@ -1,5 +1,6 @@
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
+use compiler.hir.hir_reference_origins_v1.{HirReferenceOriginSinkV1}
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
 use compiler.frontend.parser_types.{ParserTypeParam}
@@ -9,6 +10,8 @@ use compiler.common.visibility.{effective_visibility}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.frontend.core.types.{custom_primitive_bind_symbol, custom_primitive_is_name}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+use compiler.hir.hir_lowering.module_surface_export_index.{module_surface_declares_item}
+use compiler.hir.hir_lowering.phase_memo_ownership.{HirPhaseMemoRoot, hir_phase_memo_promote_roots}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.io_runtime.{env_get_opt}
 
@@ -78,11 +81,18 @@ class HirLowering:
     type_inference_config: TypeInferenceConfig?
     module_filename: text          # Filename/path for visibility matching and defining_module population
     allow_ambient_bootstrap_policy: bool
+    reference_origins_v1: HirReferenceOriginSinkV1
     # 3a guard-count invariant (match_desugaring.spl build_match_expr): guards
     # accounted for while desugaring the current match, and the resolved
     # E-MIR-MATCH-GUARD level ("" = not resolved yet).
+    # Invocation-local opt-in: keep source arm indices until semantic MIR expansion.
+    preserve_enum_semantic_arms_v1: bool
     match_guards_desugared: i64
     match_guard_level: text
+    # Opt-in no-GC ownership-sigil mode for the module being lowered
+    # (`@no_gc(strict)` / SIMPLE_NOGC_STRICT=1, memory.md). Off: `&T`/`*T`/`-T`
+    # lower to the legacy Ref / Ptr / Infer so default-mode HIR is unchanged.
+    nogc_strict: bool
     # Source-written `Any` policy, set by the driver:
     #   script (interpreter)          -> allowed
     #   compiled, below robust        -> allowed
@@ -584,6 +594,9 @@ struct HirDeclaredPatternEnumSlots:
     field_names: [text]
     field_types: [HirType]
     is_struct: bool
+    # Formal order and nominal declaration authority for generic payloads.
+    type_parameters: [text] = []
+    declaring_owner: SymbolId = SymbolId(id: -1)
 
 struct LoweringError:
     message: text
@@ -653,8 +666,11 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         type_inference_config: nil,
         module_filename: "",
         allow_ambient_bootstrap_policy: true,
+        reference_origins_v1: HirReferenceOriginSinkV1.disabled(),
+        preserve_enum_semantic_arms_v1: false,
         match_guards_desugared: 0,
         match_guard_level: "",
+        nogc_strict: false,
         forbid_written_any: false,
         written_any_unsafe_depth: 0,
         module_resolver: nil,
@@ -904,80 +920,79 @@ impl HirLowering:
             union_owners_ok
 
     me promote_phase_memo_transient_owners() -> bool:
-        # These phase-wide registry and memo families intentionally survive
-        # module boundaries.
-        # Their containers can first grow while a retained-parser HIR scope is
-        # active; promote every Dict and scalar-chain backing array before the
-        # scope ends or the next module reads a dangling phase-wide memo.
-        val package_dep_ok = rt_transient_heap_promote(self.field_package_dep_memo)
-        val package_name_ok = rt_transient_heap_promote(self.surface_package_name_memo)
-        val package_name_keys_ok = rt_transient_heap_promote(self.surface_package_name_memo_keys)
-        val package_name_values_ok = rt_transient_heap_promote(self.surface_package_name_memo_values)
-        val package_name_buckets_ok = rt_transient_heap_promote(self.surface_package_name_memo_hash_buckets)
-        val package_name_next_ok = rt_transient_heap_promote(self.surface_package_name_memo_hash_next)
-        val decl_owners_ok = rt_transient_heap_promote(self.surface_decl_owners)
-        val decl_names_ok = rt_transient_heap_promote(self.surface_decl_pair_names)
-        val decl_surfaces_ok = rt_transient_heap_promote(self.surface_decl_pair_surfaces)
-        val decl_buckets_ok = rt_transient_heap_promote(self.surface_decl_pair_hash_buckets)
-        val decl_next_ok = rt_transient_heap_promote(self.surface_decl_pair_hash_next)
-        val sibling_names_ok = rt_transient_heap_promote(self.package_sibling_names)
-        val sibling_canons_ok = rt_transient_heap_promote(self.package_sibling_canons)
-        val surface_index_ok = rt_transient_heap_promote(self.surface_index_by_name)
-        val explicit_target_ok = rt_transient_heap_promote(self.explicit_dep_target_memo)
-        val explicit_item_ok = rt_transient_heap_promote(self.explicit_dep_item_memo)
-        val explicit_keys_ok = rt_transient_heap_promote(self.explicit_dep_target_memo_keys)
-        val explicit_targets_ok = rt_transient_heap_promote(self.explicit_dep_target_memo_target_values)
-        val explicit_items_ok = rt_transient_heap_promote(self.explicit_dep_target_memo_item_values)
-        val explicit_buckets_ok = rt_transient_heap_promote(self.explicit_dep_target_memo_hash_buckets)
-        val explicit_next_ok = rt_transient_heap_promote(self.explicit_dep_target_memo_hash_next)
-        val payload_miss_ok = rt_transient_heap_promote(self.payload_origin_miss_memo)
-        val payload_keys_ok = rt_transient_heap_promote(self.payload_origin_miss_memo_keys)
-        val payload_buckets_ok = rt_transient_heap_promote(self.payload_origin_miss_memo_hash_buckets)
-        val payload_next_ok = rt_transient_heap_promote(self.payload_origin_miss_memo_hash_next)
-        val impl_built_ok = rt_transient_heap_promote(self.impl_index_built)
-        val impl_positions_ok = rt_transient_heap_promote(self.impl_index_positions)
-        val impl_methods_ok = rt_transient_heap_promote(self.impl_method_name_index)
-        val impl_traits_ok = rt_transient_heap_promote(self.impl_trait_name_index)
-        val name_built_ok = rt_transient_heap_promote(self.name_index_built)
-        val name_positions_ok = rt_transient_heap_promote(self.name_index_positions)
-        val name_keys_ok = rt_transient_heap_promote(self.name_index_keys)
-        val name_values_ok = rt_transient_heap_promote(self.name_index_positions_values)
-        val name_buckets_ok = rt_transient_heap_promote(self.name_index_hash_buckets)
-        val name_next_ok = rt_transient_heap_promote(self.name_index_hash_next)
-        val name_built_keys_ok = rt_transient_heap_promote(self.name_index_built_keys)
-        val name_built_buckets_ok = rt_transient_heap_promote(self.name_index_built_buckets)
-        val name_built_next_ok = rt_transient_heap_promote(self.name_index_built_next)
-        val glob_dict_ok = rt_transient_heap_promote(self.glob_reachable_miss_memo)
-        val glob_keys_ok = rt_transient_heap_promote(self.glob_reachable_miss_memo_keys)
-        val glob_buckets_ok = rt_transient_heap_promote(self.glob_reachable_miss_memo_hash_buckets)
-        val glob_next_ok = rt_transient_heap_promote(self.glob_reachable_miss_memo_hash_next)
-        # Text alias of module_filename (persistent) or the "" literal: nothing
-        # transient to own. "" may be an unregistered literal, so skip it.
+        # Phase memos survive module boundaries. A fresh native promotion walk
+        # visits persistent containers too; walking 49 owners separately repeats
+        # shared key/value graphs after every module. Batch exactly those owners
+        # so the provider's one seen set deduplicates their reachable children.
+        # Do not include the lowerer itself: module-local scratch must still die.
+        val roots: [HirPhaseMemoRoot] = [
+            HirPhaseMemoRoot.IndexMap(self.field_package_dep_memo),
+            HirPhaseMemoRoot.TextMap(self.surface_package_name_memo),
+            HirPhaseMemoRoot.Texts(self.surface_package_name_memo_keys),
+            HirPhaseMemoRoot.Texts(self.surface_package_name_memo_values),
+            HirPhaseMemoRoot.Ints(self.surface_package_name_memo_hash_buckets),
+            HirPhaseMemoRoot.Ints(self.surface_package_name_memo_hash_next),
+            HirPhaseMemoRoot.IndexLists(self.surface_decl_owners),
+            HirPhaseMemoRoot.Texts(self.surface_decl_pair_names),
+            HirPhaseMemoRoot.Ints(self.surface_decl_pair_surfaces),
+            HirPhaseMemoRoot.Ints(self.surface_decl_pair_hash_buckets),
+            HirPhaseMemoRoot.Ints(self.surface_decl_pair_hash_next),
+            HirPhaseMemoRoot.TextLists(self.package_sibling_names),
+            HirPhaseMemoRoot.TextLists(self.package_sibling_canons),
+            HirPhaseMemoRoot.IndexMap(self.surface_index_by_name),
+            HirPhaseMemoRoot.IndexMap(self.explicit_dep_target_memo),
+            HirPhaseMemoRoot.TextMap(self.explicit_dep_item_memo),
+            HirPhaseMemoRoot.Texts(self.explicit_dep_target_memo_keys),
+            HirPhaseMemoRoot.Ints(self.explicit_dep_target_memo_target_values),
+            HirPhaseMemoRoot.Texts(self.explicit_dep_target_memo_item_values),
+            HirPhaseMemoRoot.Ints(self.explicit_dep_target_memo_hash_buckets),
+            HirPhaseMemoRoot.Ints(self.explicit_dep_target_memo_hash_next),
+            HirPhaseMemoRoot.FlagMap(self.payload_origin_miss_memo),
+            HirPhaseMemoRoot.Texts(self.payload_origin_miss_memo_keys),
+            HirPhaseMemoRoot.Ints(self.payload_origin_miss_memo_hash_buckets),
+            HirPhaseMemoRoot.Ints(self.payload_origin_miss_memo_hash_next),
+            HirPhaseMemoRoot.FlagMap(self.impl_index_built),
+            HirPhaseMemoRoot.IndexLists(self.impl_index_positions),
+            HirPhaseMemoRoot.TextLists(self.impl_method_name_index),
+            HirPhaseMemoRoot.TextMap(self.impl_trait_name_index),
+            HirPhaseMemoRoot.FlagMap(self.name_index_built),
+            HirPhaseMemoRoot.IndexMap(self.name_index_positions),
+            HirPhaseMemoRoot.Texts(self.name_index_keys),
+            HirPhaseMemoRoot.Ints(self.name_index_positions_values),
+            HirPhaseMemoRoot.Ints(self.name_index_hash_buckets),
+            HirPhaseMemoRoot.Ints(self.name_index_hash_next),
+            HirPhaseMemoRoot.Texts(self.name_index_built_keys),
+            HirPhaseMemoRoot.Ints(self.name_index_built_buckets),
+            HirPhaseMemoRoot.Ints(self.name_index_built_next),
+            HirPhaseMemoRoot.FlagMap(self.glob_reachable_miss_memo),
+            HirPhaseMemoRoot.Texts(self.glob_reachable_miss_memo_keys),
+            HirPhaseMemoRoot.Ints(self.glob_reachable_miss_memo_hash_buckets),
+            HirPhaseMemoRoot.Ints(self.glob_reachable_miss_memo_hash_next),
+            HirPhaseMemoRoot.IndexMap(self.reexport_root_memo_index),
+            HirPhaseMemoRoot.TextMap(self.reexport_root_memo_item),
+            HirPhaseMemoRoot.Texts(self.reexport_root_memo_keys),
+            HirPhaseMemoRoot.Ints(self.reexport_root_memo_index_values),
+            HirPhaseMemoRoot.Texts(self.reexport_root_memo_item_values),
+            HirPhaseMemoRoot.Ints(self.reexport_root_memo_hash_buckets),
+            HirPhaseMemoRoot.Ints(self.reexport_root_memo_hash_next),
+        ]
+        val memos_ok = hir_phase_memo_promote_roots(roots)
+        # Keep the scalar text guard: the empty literal may be unregistered.
+        # Evaluate this even when the collection batch fails, as before.
         val glob_importer_owner_ok = self.glob_reachable_importer_owner == "" or
             rt_transient_heap_promote(self.glob_reachable_importer_owner)
-        val reexport_index_ok = rt_transient_heap_promote(self.reexport_root_memo_index)
-        val reexport_item_ok = rt_transient_heap_promote(self.reexport_root_memo_item)
-        val reexport_keys_ok = rt_transient_heap_promote(self.reexport_root_memo_keys)
-        val reexport_indices_ok = rt_transient_heap_promote(self.reexport_root_memo_index_values)
-        val reexport_items_ok = rt_transient_heap_promote(self.reexport_root_memo_item_values)
-        val reexport_buckets_ok = rt_transient_heap_promote(self.reexport_root_memo_hash_buckets)
-        val reexport_next_ok = rt_transient_heap_promote(self.reexport_root_memo_hash_next)
-        package_dep_ok and package_name_ok and package_name_keys_ok and
-            package_name_values_ok and package_name_buckets_ok and package_name_next_ok and
-            decl_owners_ok and decl_names_ok and decl_surfaces_ok and decl_buckets_ok and
-            decl_next_ok and sibling_names_ok and sibling_canons_ok and surface_index_ok and
-            explicit_target_ok and explicit_item_ok and explicit_keys_ok and explicit_targets_ok and
-            explicit_items_ok and explicit_buckets_ok and explicit_next_ok and payload_miss_ok and
-            payload_keys_ok and payload_buckets_ok and payload_next_ok and impl_built_ok and
-            impl_positions_ok and impl_methods_ok and impl_traits_ok and name_built_ok and
-            name_positions_ok and name_keys_ok and name_values_ok and name_buckets_ok and
-            name_next_ok and name_built_keys_ok and name_built_buckets_ok and name_built_next_ok and
-            glob_dict_ok and glob_keys_ok and glob_buckets_ok and glob_next_ok and glob_importer_owner_ok and
-            reexport_index_ok and reexport_item_ok and reexport_keys_ok and
-            reexport_indices_ok and reexport_items_ok and reexport_buckets_ok and
-            reexport_next_ok
+        memos_ok and glob_importer_owner_ok
 
     me lower_type(t: Type) -> HirType:
+        # Streaming-surface/unstub modules present nil type annotations at
+        # call sites other than the guarded field prescan (measured: shard
+        # lane SIGSEGV at this entry, nil deref at address 0x0, 2026-10-18,
+        # after the worker's first claim). Fail soft with the explicit Error
+        # placeholder the mono lane already uses (monomorphize_integration
+        # .spl); aggregates are word-boxed, so layout consumers never read
+        # the placeholder's payload. Code-ful lanes never take this arm.
+        if t == nil:
+            return HirType(kind: HirTypeKind.Error, span: Span.empty())
         # Typed rebind before matching. On the stage4 unstub path `t` can arrive
         # ANY-erased when it comes from a struct/class field's `type_` (extracted
         # off an ANY-typed [ParserField]); matching `t.kind` on an ANY receiver
@@ -1011,6 +1026,11 @@ impl HirLowering:
         # each payload in an ISOLATED single-arm guarded match, the idiom proven
         # in expressions.spl / statements.spl.
         val kind_disc_v: i64 = hir_type_kind_disc(lt_kind)
+        # An explicit parser error is not an inference request. Keep it in the
+        # driver's unrecovered diagnostic stream, including through composites.
+        if kind_disc_v == hir_type_kind_disc(TypeKind.Error):
+            self.error("invalid AST type: parser Error", lt.span)
+            return HirType(kind: HirTypeKind.Error, span: lt.span)
         val d_named: i64 = hir_type_kind_disc(TypeKind.Named("", []))
 
         # Extract in the frontend owner module, where HirTypeKind.Named is not
@@ -1032,7 +1052,7 @@ impl HirLowering:
 
         val d_tuple: i64 = hir_type_kind_disc(TypeKind.Tuple([]))
 
-        val d_array: i64 = hir_type_kind_disc(TypeKind.Array(lt, nil))
+        val d_array: i64 = hir_type_kind_disc(TypeKind.Array(lt, None))
         val d_func: i64 = hir_type_kind_disc(TypeKind.Function([], lt))
         val d_opt: i64 = hir_type_kind_disc(TypeKind.Optional(lt))
         val d_ref: i64 = hir_type_kind_disc(TypeKind.Reference(lt, false))
@@ -1040,6 +1060,9 @@ impl HirLowering:
         val d_proj: i64 = hir_type_kind_disc(TypeKind.Projection(lt, ""))
         val d_isolated: i64 = hir_type_kind_disc(TypeKind.Isolated(lt))
         val d_pointer: i64 = hir_type_kind_disc(TypeKind.Pointer(lt, false))
+        val d_unique: i64 = hir_type_kind_disc(TypeKind.Unique(lt))
+        val d_shared: i64 = hir_type_kind_disc(TypeKind.Shared(lt))
+        val d_weak: i64 = hir_type_kind_disc(TypeKind.Weak(lt))
 
         var kind: HirTypeKind = HirTypeKind.Infer(0, 0)
         if kind_disc_v == d_tuple:
@@ -1056,7 +1079,7 @@ impl HirLowering:
                 HirType(kind: self.lower_named_kind(elem_name, [], lt.span), span: lt.span)
             else:
                 self.lower_type(elem)
-            kind = HirTypeKind.Array(lowered_elem, nil)
+            kind = HirTypeKind.Array(lowered_elem, None)
         elif kind_disc_v == d_func:
             var fparams: [Type] = []
             var fret: Type = lt
@@ -1130,8 +1153,19 @@ impl HirLowering:
                 case _:
                     pass
             kind = HirTypeKind.Ptr(self.lower_type(pinner), pmutable)
+        elif kind_disc_v == d_unique or kind_disc_v == d_shared or kind_disc_v == d_weak:
+            # memory.md ownership sigils. Strict mode keeps them distinct;
+            # default mode reproduces the pre-lane HIR exactly: `&T` was
+            # Ref(T, false), `*T` was Ptr(T, false), `-T` fell to Infer.
+            val owned_inner = self.lower_type(parser_type_kind_ownership_inner(lt_kind, lt))
+            if kind_disc_v == d_unique:
+                kind = if self.nogc_strict: HirTypeKind.Unique(owned_inner) else: HirTypeKind.Ref(owned_inner, false)
+            elif kind_disc_v == d_shared:
+                kind = if self.nogc_strict: HirTypeKind.Shared(owned_inner) else: HirTypeKind.Ptr(owned_inner, false)
+            else:
+                kind = if self.nogc_strict: HirTypeKind.Weak(owned_inner) else: HirTypeKind.Infer(0, 0)
         else:
-            # Infer / Atomic / Error and any unrecognized disc.
+            # Infer / Atomic and any unrecognized disc.
             kind = HirTypeKind.Infer(0, 0)
 
         HirType(kind: kind, span: lt.span)
@@ -1139,56 +1173,22 @@ impl HirLowering:
     me lower_named_instance_kind(name: text, args: [Type], span: Span) -> HirTypeKind:
         """`Name<args>` annotation of a user type.
 
-        Until the parser learned to keep `Name<args>` for a name imported by
-        an explicit `use` item, every such annotation reached HIR as `Any`:
-        neither the base nor its ARGUMENTS were ever resolved, so a file
-        could spell one whose base is not resolvable here (a re-export chain
-        this module cannot follow) or whose argument is not in scope, and
-        still compile. Keeping the instance must not turn such a file into
-        an error: when the annotation does not lower cleanly, every
-        diagnostic it raised is withdrawn and it stays `Any`, as before.
-        The builtin generics (`Option`, `Result`, `Dict`) always reached HIR
-        with their arguments and keep their own diagnostics."""
+        Resolve the base and arguments without erasing ownership or hiding
+        invalid arguments. Imported declarations follow the same rule as
+        local declarations; an unresolved surface remains a diagnostic."""
         val errors_before = self.errors.len()
         self.named_instance_kind_or_any(name, self.lower_type_list(args), span, errors_before)
 
     me named_instance_kind_or_any(name: text, hir_args: [HirType], span: Span, errors_before: i64) -> HirTypeKind:
         """`lower_named_kind` for an annotation whose arguments were lowered
         after `errors_before` diagnostics; see `lower_named_instance_kind`."""
-        val kind = self.lower_named_kind(name, hir_args, span)
-        if hir_args.len() == 0 or name == "Option" or name == "Result" or name == "Dict":
-            return kind
-        if self.errors.len() == errors_before:
-            return kind
-        var kept_errors: [LoweringError] = []
-        var kept_messages: [text] = []
-        var kept_recovered: [bool] = []
-        var i = 0
-        while i < errors_before:
-            kept_errors = kept_errors.push(self.errors[i])
-            kept_messages = kept_messages.push(self.diagnostic_messages[i])
-            kept_recovered = kept_recovered.push(self.diagnostic_recovered[i])
-            i = i + 1
-        self.errors = kept_errors
-        self.diagnostic_messages = kept_messages
-        self.diagnostic_recovered = kept_recovered
-        HirTypeKind.Any
+        self.lower_named_kind(name, hir_args, span)
 
     me lower_resolved_named_kind(symbol_id: SymbolId, hir_args: [HirType], span: Span) -> HirTypeKind:
         """Named type whose base resolved to `symbol_id`.
 
-        The parser keeps `Name<args>` for ANY name a file imports by an
-        explicit `use` item -- it cannot know the kind of an imported name.
-        Only an imported class or struct (or an alias, expanded below) is an
-        instantiation whose identity and arguments carry on; an imported
-        trait or enum applied to arguments keeps the erased `Any` it had
-        before that parser rule existed."""
-        if hir_args.len() > 0 and self.type_alias_position(symbol_id) < 0:
-            if val named_info = self.symbols.get_symbol_raw(symbol_id.id):
-                val named_owner = named_info.defining_module ?? ""
-                if named_owner != "" and named_owner != self.module_filename:
-                    if named_info.kind == SymbolKind.Trait or named_info.kind == SymbolKind.Enum:
-                        return HirTypeKind.Any
+        Imported enum and trait instances retain their arguments just like
+        local ones. Type aliases expand through the common named path."""
         self.lower_named_symbol_kind(symbol_id, hir_args, span)
 
     me lower_named_kind(name: text, hir_args: [HirType], span: Span) -> HirTypeKind:
@@ -1321,7 +1321,7 @@ impl HirLowering:
                     self.error("[E-ANY-COMPILE-001] `Any` is not allowed in robust/critical compiled code outside an `unsafe:` / `danger:` block; use a generic `<T>`, a concrete type, or a closed enum", span)
                 HirTypeKind.Any
             case "text" | "str" | "String": HirTypeKind.Str
-            case "list": HirTypeKind.Array(HirType(kind: HirTypeKind.Any, span: span), nil)
+            case "list": HirTypeKind.Array(HirType(kind: HirTypeKind.Any, span: span), None)
             # `fn(T,...) -> R` param annotations reach here as Named("fn")
             # (the flat bridge carries the callable shape as tag TYPE_FN with
             # no first-class fn-type in the bootstrap registry). Callables are
@@ -1497,6 +1497,21 @@ impl HirLowering:
                         if hir_type_env_get("SIMPLE_HIR_UNRESOLVED_TYPE_TRACE") == "1" or
                            hir_type_env_get("SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE") == "1":
                             eprint("[hir-unresolved-type-origin] name={name} lowering_module={self.module_filename} span_file={span.file} span_line={span.line} span_col={span.col}")
+                            # PER-SITE probe (cycle-37 endgame): discriminate
+                            # (a) declaring surface absent from THIS process's
+                            # registry, (b) present but declares-list missing
+                            # the item, (c) present+declaring but lookup
+                            # missed. Authoritative sweep, printed per hit.
+                            var gate_decl_count = 0
+                            var gate_decl_first = ""
+                            var gate_i = 0
+                            while gate_i < self.module_surfaces.surfaces.len():
+                                if module_surface_declares_item(self.module_surfaces.surfaces[gate_i], name):
+                                    gate_decl_count = gate_decl_count + 1
+                                    if gate_decl_first == "":
+                                        gate_decl_first = self.module_surfaces.surfaces[gate_i].module_name
+                                gate_i = gate_i + 1
+                            eprint("[strict-gate] name={name} lowering={self.module_filename} surfaces={self.module_surfaces.surfaces.len()} decl_count={gate_decl_count} decl_first={gate_decl_first}")
                         self.error("unresolved type: {name}", span)
                     HirTypeKind.Error
 
@@ -1511,6 +1526,8 @@ impl HirLowering:
 
         var bounds: [HirType] = []
         for b in tp.bounds:
+            if self.bound_is_undeclared_builtin_trait(b):
+                continue
             bounds = bounds.push(self.lower_type(b))
 
         # Parser/HIR defaults are desugared payloads, not Optional values.
@@ -1527,6 +1544,32 @@ impl HirLowering:
             default: default_,
             span: tp.span
         )
+
+    me bound_is_undeclared_builtin_trait(bound: Type) -> bool:
+        """A bare builtin trait bound (`where K: Ord + Eq`) with no source
+        declaration in scope. The builtin set is the trait solver's own
+        (25.traits/trait_validation.spl create_builtin_traits); those traits
+        have no HIR symbol, so lowering them as a type-position name hard-
+        errored `unresolved type: Eq` once 5b649fb61fe started transporting
+        where bounds. They stay erased (as before that commit); a declared or
+        imported trait of the same name still wins and lowers normally.
+        LIMITATION: an erased bound produces no type_infer obligation
+        (30.types/type_infer/traits.spl collect_function_bounds_from_module),
+        so `where K: Ord` on a non-Ord type is not rejected. Resolving to
+        builtin_trait_symbol(id, name) needs builtin primitive impls the solver
+        does not have yet, and would reject every call without them.
+        doc/08_tracking/bug/eq_ord_where_bound_unresolved_hir_2026_10_19.md
+        doc/08_tracking/bug/builtin_trait_where_bounds_erased_unchecked_2026_10_19.md"""
+        val bound_kind: TypeKind = bound.kind
+        if hir_type_kind_disc(bound_kind) != hir_type_kind_disc(TypeKind.Named("", [])):
+            return false
+        val name: text = parser_type_kind_named_name(bound_kind)
+        if parser_type_kind_named_args(bound_kind).len() != 0:
+            return false
+        match name:
+            case "Clone" | "Copy" | "Debug" | "Default" | "Drop" | "Eq" | "Ord": ()
+            case _: return false
+        not self.symbols.lookup(name).?
 
     me lower_trait_bound(bound: TraitBound) -> HirTraitBound:
         # Lookup the type parameter symbol

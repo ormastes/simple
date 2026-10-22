@@ -38,6 +38,10 @@ logs in as the default `freebsd` cloud user. Env knobs: `QEMU_VM_PATH`,
 bin/simple run src/app/test/freebsd_qemu_setup.spl --download --quick
 ```
 
+FreeBSD riscv64 has its own lane (no cloud-init image, no ports packages):
+`sh scripts/check/check-freebsd-riscv64-bootstrap-qemu.shs --smoke|--phase0|--phase1`
+(serial-console provisioning, host cross-built Rust seed, OpenSBI -> U-Boot, SSH port `2224`).
+
 ## Linux riscv64 QEMU Bootstrap Check
 `sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --smoke` boots an
 Ubuntu riscv64 cloud image (OpenSBI -> U-Boot, 20 vCPU TCG, SSH port `2223`);

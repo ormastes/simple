@@ -43,6 +43,41 @@ pub(crate) fn call_method_on_value(
 ) -> Result<Value, CompileError> {
     let recv_val = recv_val.deref_pointer();
 
+    // Packed `[u8]` in chained position (e.g. `result.unwrap().len()`): answer
+    // the metadata ops without widening, and give every other method the same
+    // boxed `u8` elements the Array arms below handle. Before `[u8]` bindings
+    // became packed this receiver was rare; it errored "method 'len' not found
+    // on value of type array in nested call context".
+    if let Value::ByteArray(bytes) | Value::FrozenByteArray(bytes) = &recv_val {
+        match method {
+            "len" | "length" => return Ok(Value::Int(bytes.len() as i64)),
+            "is_empty" => return Ok(Value::Bool(bytes.is_empty())),
+            _ => {}
+        }
+        let elements: Vec<Value> = bytes
+            .iter()
+            .map(|byte| Value::UInt {
+                value: u64::from(*byte),
+                width: 8,
+            })
+            .collect();
+        let widened = if matches!(recv_val, Value::FrozenByteArray(_)) {
+            Value::frozen_array(elements)
+        } else {
+            Value::array(elements)
+        };
+        return call_method_on_value(
+            widened,
+            method,
+            _args,
+            _env,
+            _functions,
+            _classes,
+            _enums,
+            _impl_methods,
+        );
+    }
+
     // Handle common methods for chained calls
     match &recv_val {
         // String methods

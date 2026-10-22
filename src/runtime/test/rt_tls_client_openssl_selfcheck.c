@@ -1,6 +1,7 @@
 #include "runtime.h"
 
 #include <arpa/inet.h>
+#include <netinet/in.h>
 #include <openssl/ssl.h>
 #include <pthread.h>
 #include <stdint.h>

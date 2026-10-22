@@ -1147,11 +1147,15 @@ impl ExecCore {
         // `test/01_unit/compiler/dup_struct_name/`), which is green while the
         // gate is off and red the moment it is defaulted on.
         //
-        // The real fix is module-qualified struct resolution, which this lane
-        // cannot express: `load_module_with_imports` flattens every import into
-        // one bare-name namespace and `simple_parser::token::Span` carries no
-        // file, so no definition or use site retains module identity. See
-        // doc/08_tracking/bug/lint_dejits_whole_program_span_struct_collision_2026-08-18.md.
+        // 2026-10-19 — the real fix landed: module-qualified struct identity.
+        // The flattener tags every struct/class with its owner, and HIR
+        // lowering gives each colliding same-named declaration an owner-exact
+        // type, resolved per function owner and import binding
+        // (`hir/lower/module_lowering/flatten_struct_owner.rs`), so
+        // attributable same-named structs no longer need the consensus
+        // fallback. The gate stays OFF: the fallback itself is unsound, and
+        // glob-imported names still resolve by bare name.
+        // See doc/08_tracking/bug/lint_dejits_whole_program_span_struct_collision_2026-08-18.md.
         let duplicate_structs = if std::env::var_os("SIMPLE_JIT_DUP_STRUCT_FEED").is_some() {
             simple_compiler::pipeline::module_loader::collect_duplicate_struct_defs(&ast)
         } else {

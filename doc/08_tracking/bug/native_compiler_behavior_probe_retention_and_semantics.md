@@ -1,0 +1,13 @@
+# Native compiler-behavior probe fails semantic lowering and memory admission
+
+Status: OPEN; final authorized repair cycle capped, no native assertions executed.
+
+The actual pure producer `85663ff65685b35a7d5a3389701ae3df41974fc0e8135e4fc0f85ca00f6fcfe2`, with MC/DC enabled and no-stub policy retained, completed parse/HIR and monomorphization for the 413-module compiler-behavior probe. MIR progress last reported 64/413 modules, 50 succeeded and 14 failed units at 847025 ms. The resource supervisor later stopped the process with exit88 at 8,392,880 KiB against its 8,388,608 KiB limit; quiescent1 and no unexpected session PIDs establish cleanup. No executable assertion result exists.
+
+The retained log groups include 36 E-MC-ANY-001 occurrences (Any in safe critical parameter boundaries), 35 E-MC-ANY-002 occurrences (erased values escaping or entering containers), and 68 unresolved-method warnings over 30 method names. Examples include `rt_enum_discriminant`, `rt_transient_heap_promote`, `rt_array_free`, `rt_array_data_ptr`, `configure_mcdc_mode`, `lower_module` and `new_for_target`. Unresolved methods were reported as const-0 placeholders; this is unresolved semantic risk, not executable PASS evidence. Counts are diagnostic occurrences, not unique defects, and are not a one-to-one explanation of the 14 failed units.
+
+The compiler's retained HIR/MIR closure also exceeds the admitted memory budget. Neither a memory-only repair nor silencing type/monomorphism guards would establish correctness: future work must resolve actual boundary/receiver typing, forbid unproved placeholder behavior, and measure retained graph ownership under the same cap. Existing source workarounds and earlier parse-lifetime fixes do not prove full compiler-host qualification.
+
+Evidence under `.simple/storage/build/phase3-mcdc-initializer-export-20261015/`: `mcdc-token-stack-native-probe/compile.log`, `mir-probe-supervisor.env`, and `mcdc-token-stack-native-probe/final-failure-summary.json`. The original inner `result.json` remains RUNNING because its controller was killed by the outer resource owner; it is preserved, not rewritten as a successful or completed inner receipt. The separate terminal assessment binds the original result, log and supervisor hashes.
+
+The small native storage/recording fixture and LLVM planner startup separately passed. Same-lowerer, nested token, initializer-ordering, entry-mode and SSpec assertions remain UNRUN; the full-host matrix and required core/MCP checks are unqualified. All three authorized repair cycles are exhausted. Preserve caches, objects and receipts; no unchanged replay or fourth producer build is authorized by this result.

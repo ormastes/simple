@@ -78,6 +78,8 @@ var count: i64 = 0
 
 ## Ownership Capabilities (`iso`/`mut`)
 
+**Pointer sigils (source: `doc/05_design/language/misc/memory.md`).** `&T` is the owning UNIQUE pointer (single owner, move-only; the no-GC default for a bare `T`), `*T` is the ref-counted SHARED pointer, `-T` is weak; construct with `new*` (shared) and `new&` (unique, as the user states; memory.md writes `new(&)`). Proposal, not in memory.md: unique to shared is explicit (consuming move); shared to unique is forbidden. memory.md defines no borrow sigil and does not define `&mut` (proposal: use `mut T` parameters for short exclusive borrows). Like `iso`/`mut` below, none of this is enforced through `bin/simple` today.
+
 ```simple
 val x: iso i64 = 5   # isolated / move-only capability
 val y: mut i64 = 5   # mutable-borrow capability
@@ -1544,6 +1546,7 @@ See [coding_style.md](../language/coding_style.md) for the current inheritance p
 ## See Also
 
 - [language/syntax.md](../language/syntax.md) - Main syntax guide
+- [Representation boundary manifests](../language/representation_boundary.md) - Exact declaration metadata, scoped MC011 exemption, and explicit unsafe capability bounds (source candidate; runtime unqualified)
 - [language/error_handling.md](../language/error_handling.md) - `Result`, `Option`, and `?`
 - [language/coding_style.md](../language/coding_style.md) - Canonical style rules
 - [../../06_spec/app/compiler/modules/grammar/grammar_reference.md](../../06_spec/app/compiler/modules/grammar/grammar_reference.md) - Grammar registry output

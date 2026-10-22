@@ -64,3 +64,43 @@ Implementation authorities: `src/compiler/70.backend/linker/mold.spl`,
 directory. Existing routing specifications live under
 `test/01_unit/compiler/backend/linker/` in `native_linking_internal_spec.spl` and
 `link_engine_external_spec.spl`.
+
+## Stabilization and default cutover
+
+External mold and LLVM LLD are separate from the mold-like, in-process
+MDSOC++ Simple linker. A self-hosted Simple compiler can still invoke an
+external linker. Record the actual engine, resolved tool path/version, target
+and any compiler-driver fallback; a fallback is not internal execution proof.
+
+Keep external mold/LLD as the supported route while the internal engine is
+being stabilized. A target can cut over only after real, source-bound evidence
+covers its retained linker requirements: executable startup, symbols and
+diagnostics, relocations, archive closure, dead stripping, dynamic dependencies,
+determinism, and compiler plus representative application execution. Also
+retain paired baseline timing, peak-memory and output-size measurements, and
+fast/bounded output parity. Boot targets require their boot evidence.
+
+The existing overall completion predicate is
+`mold_is_pure_simple_linker_complete()` in
+[`mold_compatibility.spl`](../../../src/compiler/70.backend/linker/mold_compatibility.spl).
+It reads `build/linker/mold_completion_receipt.v2` and fails closed for missing
+or malformed evidence. Its ten evidence rows cover Linux x86_64/AArch64,
+Windows x86_64/ARM64, the compiler corpus, fast/bounded digest parity,
+SimpleOS x86_64/ARM64 boot, platform receipts and performance. A correctly
+shaped receipt is not a substitute for the referenced real runs; never
+fabricate receipt rows to enable a completion flag.
+
+A valid completion result does not automatically rewrite discovery or
+admission policy. Change a default through a reviewed target-specific cutover,
+retain the external recovery path, and keep unsupported hosts explicit. A
+passing generator test, ELF-only fixture or external mold/LLD link alone does
+not establish internal-linker stability or Item 4 completion.
+
+Source owners:
+[`mold.spl`](../../../src/compiler/70.backend/linker/mold.spl) for external
+discovery and overrides;
+[`native_linking.spl`](../../../src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl)
+for target dispatch and managed-admission restrictions. Retained scope and
+gates are in the
+[MDSOC++ linker plan](../../03_plan/compiler/linker/mold_mdsocpp_linker_plan_2026-09-18.md)
+and [design](../../05_design/compiler/linker/mold_mdsocpp_linker_design.md).

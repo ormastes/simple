@@ -2,11 +2,13 @@
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_definitions.*
 use compiler.hir.hir_types.*
+use compiler.hir.hir_types.{Effect, EffectKind}
 use compiler.mir.mir_data.*
 use compiler.mir.mir_types.*
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir._MirLowering.provider_metadata.*
+use compiler.mir.nominal_owner_diagnostics.{mir_nominal_profile_take_receipt}
 
 fn result_err_layout_identity(owner: text) -> text:
     var separator = owner.rfind("::")
@@ -47,6 +49,12 @@ fn result_err_field_type_key(type_: HirType, symbols: SymbolTable) -> text:
             val arguments = result_err_field_type_keys(args, symbols)
             if arguments == "": return ""
             "{kind}({identity}){arguments}"
+        case HirTypeKind.Function(params, ret, effects):
+            val parameter_keys = result_err_field_type_keys(params, symbols)
+            val return_key = result_err_field_type_key(ret, symbols)
+            val effect_keys = result_err_function_effect_keys(effects, symbols)
+            if parameter_keys == "" or return_key == "" or effect_keys == "": return ""
+            "function(params={parameter_keys};return={return_key};effects={effect_keys})"
         case HirTypeKind.Optional(inner):
             val key = result_err_field_type_key(inner, symbols)
             if key == "": "" else: "optional({key})"
@@ -76,6 +84,24 @@ fn result_err_field_type_key(type_: HirType, symbols: SymbolTable) -> text:
             if key == "": "" else: "isolated({key})"
         case _: ""
 
+fn result_err_function_effect_keys(effects: [Effect], symbols: SymbolTable) -> text:
+    var keys: [text] = []
+    for effect in effects:
+        val key = match effect.kind:
+            case EffectKind.Pure: "pure"
+            case EffectKind.IO: "io"
+            case EffectKind.Async: "async"
+            case EffectKind.Mutates: "mutates"
+            case EffectKind.Allocates: "allocates"
+            case EffectKind.Custom(name): "custom({name.len()}:{name})"
+            case EffectKind.Throws(type_):
+                val payload_key = result_err_field_type_key(type_, symbols)
+                if payload_key == "": "" else: "throws({payload_key})"
+            case _: ""
+        if key == "": return ""
+        keys = keys.push(key)
+    "[" + keys.join(",") + "]"
+
 fn result_err_field_type_keys(types: [HirType], symbols: SymbolTable) -> text:
     var keys: [text] = []
     for type_ in types:
@@ -86,14 +112,29 @@ fn result_err_field_type_keys(types: [HirType], symbols: SymbolTable) -> text:
 
 impl MirLowering:
     me register_result_err_layout_types(name: text, fields: [HirField], symbols: SymbolTable):
+        var names: [text] = []
+        var types: [HirType] = []
+        for raw_field in fields:
+            val field: HirField = raw_field
+            names.push(field.name)
+            types.push(field.type_)
+        self.register_result_err_layout_types_fields_v1(name, names, types, symbols)
+
+    me register_result_err_layout_types_fields_v1(name: text, names: [text], types: [HirType], symbols: SymbolTable):
+        if names.len() != types.len():
+            self.error_fatal("Result Err declaration field name/type count mismatch", nil)
+            return
         val identity = result_err_layout_identity(name)
         if identity == "": return
         var rows: [text] = []
         var complete = true
-        for field in fields:
-            val key = result_err_field_type_key(field.type_, symbols)
+        var index = 0
+        while index < names.len():
+            val field_type: HirType = types[index]
+            val key = result_err_field_type_key(field_type, symbols)
             if key == "": complete = false
-            rows.push("{field.name.len()}:{field.name}:{key}")
+            rows.push("{names[index].len()}:{names[index]}:{key}")
+            index = index + 1
         val snapshot = if complete: "fields[" + rows.join(";") + "]" else: ""
         if self.result_err_layout_types.contains(identity):
             if self.result_err_layout_types[identity] != snapshot:
@@ -172,10 +213,23 @@ impl MirLowering:
             if declaration.kind == SymbolKind.Struct and self.declared_struct_layout_key(self.composite_layout_key(declaration)) == owner:
                 val type_ = MirType(kind: MirTypeKind.Struct(declaration.id))
                 var builder = self.builder
-                val address = builder.emit_cast(mir_operand_copy(raw), MirType(kind: MirTypeKind.Ptr(type_)))
+                val address = builder.emit_cast(mir_operand_copy(raw), MirType.ptr(type_, false))
                 val value = builder.new_temp(type_)
                 builder.emit_copy(value, address)
                 self.builder = builder
                 return value
+        if mir_nominal_profile_take_receipt():
+            val expected_identity = result_err_layout_identity(owner)
+            eprint("[nominal-owner] result-err-missing local={raw.id} expected={owner} identity={expected_identity}\n")
+            val separator = owner.rfind("::")
+            val leaf = if separator >= 0: owner.substring(separator + 2) else: owner.substring(owner.rfind(".") + 1)
+            var candidate_count = 0
+            for candidate_id in self.symbols.symbols.keys():
+                if candidate_count < 8 and self.symbols.symbol_name_scalar_raw(candidate_id) == leaf:
+                    val candidate_module = self.symbols.symbol_defining_module_scalar_raw(candidate_id)
+                    val candidate_identity = self.symbols.record_owner_identity_scalar_raw(candidate_id)
+                    val candidate_layout = self.declared_struct_layout_key(if candidate_module == "": leaf else: "{candidate_module}::{leaf}")
+                    eprint("[nominal-owner] result-err-candidate symbol={candidate_id} name={leaf} module={candidate_module} identity={candidate_identity} layout={candidate_layout}\n")
+                    candidate_count = candidate_count + 1
         self.error_fatal("Result Err struct has no current declaration for its exact provider", Some(span))
         raw

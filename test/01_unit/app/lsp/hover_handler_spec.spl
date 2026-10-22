@@ -1,4 +1,46 @@
-describe "HoverHandler":
-    it "skipped":
-        val pending_reason = "variable x not found in math block detection"
-        expect(pending_reason.len()).to_be_greater_than(0)
+use std.spec
+use std.nogc_sync_mut.io.file_ops.{file_write, secure_temp_dir}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.common.json.parser.{json_parse}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.types.{json_get_type, json_to_number, json_to_string}
+use std.nogc_sync_mut.lsp.lsp_handlers.{lsp_handle_hover}
+
+fn hover_request_body_v1(path: text, line: i64, column: i64) -> text:
+    "{\"textDocument\":{\"uri\":\"file://{path}\"},\"position\":{\"line\":{line},\"character\":{column}}}"
+
+fn hover_response_result_v1(reply: text, expected_id: f64) -> any:
+    val response = json_parse(reply)
+    expect(response != nil).to_equal(true)
+    expect(json_to_string(json_object_get(response, "jsonrpc"))).to_equal("2.0")
+    val id = json_object_get(response, "id")
+    expect(json_get_type(id)).to_equal("number")
+    expect(json_to_number(id)).to_equal(expected_id)
+    expect(json_object_get(response, "error")).to_be_nil()
+    json_object_get(response, "result")
+
+describe "LSP hover handler":
+    it "returns markdown content derived from the real source declaration":
+        step("Write a real declaration and decode the production hover response")
+        val root = secure_temp_dir("/tmp", "simple-lsp-hover-v1-").unwrap()
+        val path = root + "/fixture.spl"
+        val source = """fn lsp_hover_target_v1(value: i64) -> i64:
+    value
+"""
+        val wrote = file_write(path, source)
+        expect(wrote).to_equal(true)
+        val reply = lsp_handle_hover("2", hover_request_body_v1(path, 0, 5))
+        dir_remove_all(root)
+
+        val result = hover_response_result_v1(reply, 2.0)
+        expect(json_get_type(result)).to_equal("object")
+        val contents = json_object_get(result, "contents")
+        expect(json_get_type(contents)).to_equal("object")
+        expect(json_to_string(json_object_get(contents, "kind"))).to_equal("markdown")
+        val markdown = json_to_string(json_object_get(contents, "value")) ?? ""
+        expect(markdown.contains("lsp_hover_target_v1")).to_equal(true)
+        expect(markdown.contains("Visibility")).to_equal(true)
+        val visibility = json_object_get(result, "simpleVisibility")
+        expect(json_get_type(visibility)).to_equal("object")
+        val display = json_to_string(json_object_get(visibility, "display")) ?? ""
+        expect(display.len()).to_be_greater_than(0)

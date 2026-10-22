@@ -1,0 +1,244 @@
+# Actual applied-execution capture and verification-use. This establishes a
+# replayed report, not final prerequisite/policy/MIR admission.
+use compiler.driver.cache.hir_mono_verification_recipe_codec_v1.*
+use compiler.driver.cache.hir_mono_archive_execution_v1.{MonoArchiveExecutionV1,
+    mono_archive_execution_complete_v1, mono_archive_execution_complete_in_owned_scope_v1}
+use compiler.driver.cache.hir_mono_archive_assembly_v1.{MonoArchiveAssembledModuleV1,
+    mono_archive_module_coverage_v1, mono_archive_assembled_key_v1, mono_archive_shared_symbol_publications_v1}
+use compiler.driver.cache.hir_mono_archive_consumer_v1.{mono_archive_selected_function_v1, mono_archive_repository_input_v1}
+use compiler.mono.mono_archive_body_input_v1.*
+use compiler.driver.cache.hir_mono_replay_selection_v1.{MonoArchiveSelectedFunctionV1,
+    mono_archive_reassemble_body_input_in_owned_scope_v1}
+use compiler.driver.cache.hir_mono_archive_verify_v1.{mono_archive_verify_assembled_modules_v1}
+use compiler.mono.mono_archive_state_v1.{mono_archive_state_digest_v1}
+use compiler.mono.monomorphize_integration.{mono_sym_key}
+use compiler.mono.verify.post_mono_verify.{PostMonoReport}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.driver.cache.hir_owned_artifact_cache_v1.{hir_owned_artifact_context_v1}
+use compiler.common.cache_contract.hir_owned_artifact_cache_v1.{HirOwnedArtifactContextV1,
+    hir_owned_artifact_store_blob_v1, hir_owned_artifact_load_blob_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_last_warnings, hir_cache_store_in_owned_scope,
+    hir_cache_promote_diagnostic_owner_v1, hir_cache_clear_last_warnings}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
+
+# The real driver prerequisite owner must register this captured pin. A public
+# constructor or a replacement owner/key supplied by a caller grants no final
+# admission. The replay consumer accepts no candidate report/body selections.
+struct MonoArchiveVerificationUseV1:
+    cache: HirOwnedArtifactContextV1
+    manifest_key: text
+    manifest_digest: text
+    input_authority: text
+    schedule_digest: text
+    state_digest: text
+    publication_ledger_digest: text
+    epoch: i64
+    ordered_inventory: [text]
+    stage: text
+
+struct MonoArchiveVerificationUseResultV1:
+    capture: MonoArchiveVerificationUseV1
+    modules: Dict<text, MonoArchiveAssembledModuleV1>
+    report: PostMonoReport
+
+fn mono_verification_blob_key_v1(kind: text, digest: text) -> text:
+    sha256_text("mono-verification-use-" + kind + "-v1\n" + digest)
+
+fn mono_verification_close_v1(paused: bool, owned: bool):
+    val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    if paused: hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not owned or not cache_owned or not ended: panic("mono verification-use ownership")
+
+fn mono_verification_capture_in_owned_scope_v1(execution: MonoArchiveExecutionV1,
+        cache: HirOwnedArtifactContextV1) -> Result<MonoArchiveVerificationUseV1, text>:
+    # Validate the actual full ledger again in the capture's own lease, before
+    # any immutable recipe publication. The outer check grants no borrowed lease.
+    if not mono_archive_execution_complete_in_owned_scope_v1(execution):
+        return Err("mono verification capture execution changed")
+    var unresolved: [text] = []
+    for name in execution.admission.state.unresolved_templates.keys(): unresolved = unresolved.push(name)
+    var emitted_index: Dict<text, bool> = {}
+    for item in execution.admission.state.queue:
+        if execution.admission.state.emitted.has(item.mangled_name): emitted_index[item.template_name] = true
+    val pruning_recipe = MonoVerificationGlobalRecipeV1(unresolved_templates: unresolved,
+        emitted_templates: emitted_index.keys(), next_symbol: execution.admission.state.next_symbol,
+        nominal_imports: execution.admission.state.nominal_imports)
+    val global_blob = mono_verification_global_encode_v1(pruning_recipe)
+    if global_blob == "": return Err("mono verification global encoding refused")
+    val global_digest = sha256_text(global_blob)
+    val global_key = mono_verification_blob_key_v1("global", global_digest)
+    if hir_owned_artifact_store_blob_v1(cache, global_key, global_blob).is_err(): return Err("mono verification global publication refused")
+    var rows: [MonoVerificationModuleRowV1] = []
+    var order: [text] = []
+    for root in execution.roots:
+        val name = root.module_name
+        val archive = execution.admission.repository.modules[name]
+        val body_input = mono_archive_repository_input_v1(execution.admission.repository, name)?
+        var roots: [MonoArchiveSelectedFunctionV1] = []
+        for symbol in root.symbols:
+            roots = roots.push(mono_archive_selected_function_v1(execution.root_records[mono_sym_key(name, symbol)]))
+        var specializations: [MonoArchiveSelectedFunctionV1] = []
+        for publication in execution.specialization_records:
+            if publication.module_name == name:
+                specializations = specializations.push(mono_archive_selected_function_v1(publication))
+        val recipe = MonoVerificationModuleRecipeV1(archive: archive, roots: roots,
+            specializations: specializations, coverage_digest: mono_archive_module_coverage_v1(execution, name),
+            body_input: if body_input.current_body != nil: Some(body_input) else: nil,
+            shared_symbols: mono_archive_shared_symbol_publications_v1(execution, body_input)?,
+            symbol_projection: execution.admission.state.facts.symbol_projections[name] ?? "",
+            symbol_patches: execution.admission.state.symbol_patches[name] ?? [])
+        val blob = mono_verification_module_encode_v1(recipe)
+        if blob == "" or recipe.coverage_digest == "": return Err("mono verification module encoding refused")
+        val digest = sha256_text(blob)
+        val key = mono_verification_blob_key_v1("module", digest)
+        if hir_owned_artifact_store_blob_v1(cache, key, blob).is_err(): return Err("mono verification module publication refused")
+        rows = rows.push(MonoVerificationModuleRowV1(module_name: name, recipe_key: key,
+            recipe_digest: digest, input_archive_key: mono_archive_body_input_key_v1(body_input), input_body_digest: mono_archive_body_input_digest_v1(body_input)))
+        order = order.push(name)
+    val state_digest = mono_archive_state_digest_v1(execution.admission.state)
+    if state_digest == "": return Err("mono verification closed state refused")
+    val manifest = MonoVerificationManifestV1(input_authority: execution.admission.repository.authority,
+        schedule_digest: execution.schedule_digest, state_digest: state_digest,
+        publication_ledger_digest: execution.publication_ledger_digest, epoch: execution.expected_epoch,
+        global_key: global_key, global_digest: global_digest, modules: rows)
+    val blob = mono_verification_manifest_encode_v1(manifest)
+    if blob == "": return Err("mono verification manifest encoding refused")
+    val digest = sha256_text(blob)
+    val key = mono_verification_blob_key_v1("manifest", digest)
+    if hir_owned_artifact_store_blob_v1(cache, key, blob).is_err(): return Err("mono verification manifest publication refused")
+    Ok(MonoArchiveVerificationUseV1(cache: cache, manifest_key: key, manifest_digest: digest,
+        input_authority: manifest.input_authority, schedule_digest: manifest.schedule_digest,
+        state_digest: manifest.state_digest, publication_ledger_digest: manifest.publication_ledger_digest,
+        epoch: manifest.epoch, ordered_inventory: order, stage: "mono-applied-verification-use-v1"))
+
+fn mono_archive_verification_use_capture_v1(execution: MonoArchiveExecutionV1) -> Result<MonoArchiveVerificationUseV1, text>:
+    if transient_array_scope_state_v1() != 0 or hir_cache_last_warnings().len() != 0 or
+            not mono_archive_execution_complete_v1(execution) or execution.roots.len() == 0:
+        return Err("mono verification capture requires actual completed execution")
+    # Initialize actual cache/producer owners before entering scratch.
+    val cache = hir_owned_artifact_context_v1()
+    if not cache.enabled or cache.directory == "" or cache.producer_header == "": return Err("mono verification cache unavailable")
+    if not transient_scope_begin(): return Err("mono verification capture scope unavailable")
+    val result = mono_verification_capture_in_owned_scope_v1(execution, cache)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    mono_verification_close_v1(paused, owned)
+    result
+
+fn mono_verification_load_manifest_in_owned_scope_v1(owner: MonoArchiveVerificationUseV1) -> Result<MonoVerificationManifestV1, text>:
+    if transient_array_scope_state_v1() != 1 or owner.stage != "mono-applied-verification-use-v1" or
+            owner.manifest_key != mono_verification_blob_key_v1("manifest", owner.manifest_digest):
+        return Err("mono verification captured manifest owner differs")
+    val blob = hir_owned_artifact_load_blob_v1(owner.cache, owner.manifest_key)?
+    if sha256_text(blob) != owner.manifest_digest: return Err("mono verification captured manifest bytes differ")
+    val manifest = mono_verification_manifest_decode_v1(blob)?
+    if manifest.input_authority != owner.input_authority or manifest.schedule_digest != owner.schedule_digest or
+            manifest.state_digest != owner.state_digest or manifest.publication_ledger_digest != owner.publication_ledger_digest or
+            manifest.epoch != owner.epoch or manifest.modules.len() == 0 or
+            manifest.modules.len() != owner.ordered_inventory.len(): return Err("mono verification captured execution differs")
+    var seen: Dict<text, bool> = {}
+    var index = 0
+    for row in manifest.modules:
+        if row.module_name != owner.ordered_inventory[index] or seen.has(row.module_name) or
+                row.recipe_key != mono_verification_blob_key_v1("module", row.recipe_digest):
+            return Err("mono verification captured order or module differs")
+        seen[row.module_name] = true
+        index = index + 1
+    if manifest.global_key != mono_verification_blob_key_v1("global", manifest.global_digest):
+        return Err("mono verification captured pruning key differs")
+    Ok(manifest)
+
+fn mono_verification_load_recipe_in_owned_scope_v1(owner: MonoArchiveVerificationUseV1,
+        manifest: MonoVerificationManifestV1, name: text) -> Result<MonoVerificationModuleRecipeV1, text>:
+    for row in manifest.modules:
+        if row.module_name != name: continue
+        val blob = hir_owned_artifact_load_blob_v1(owner.cache, row.recipe_key)?
+        if sha256_text(blob) != row.recipe_digest: return Err("mono verification selected recipe bytes differ")
+        val recipe = mono_verification_module_decode_v1(blob)?
+        val body_input = recipe.body_input ?? MonoArchiveBodyInputV1(original_parent: recipe.archive)
+        if mono_archive_body_input_module_name_v1(body_input) != name or mono_archive_body_input_key_v1(body_input) != row.input_archive_key or
+                mono_archive_body_input_digest_v1(body_input) != row.input_body_digest or recipe.coverage_digest.len() != 64:
+            return Err("mono verification selected input differs")
+        return Ok(recipe)
+    Err("mono verification selected module absent")
+
+fn mono_verification_load_global_in_owned_scope_v1(owner: MonoArchiveVerificationUseV1,
+        manifest: MonoVerificationManifestV1) -> Result<MonoVerificationGlobalRecipeV1, text>:
+    val blob = hir_owned_artifact_load_blob_v1(owner.cache, manifest.global_key)?
+    if sha256_text(blob) != manifest.global_digest: return Err("mono verification selected pruning bytes differ")
+    mono_verification_global_decode_v1(blob)
+
+fn mono_archive_verification_use_load_module_in_owned_scope_v1(owner: MonoArchiveVerificationUseV1,
+        name: text) -> Result<HirModule, text>:
+    if transient_array_scope_state_v1() != 1 or hir_cache_last_warnings().len() != 0:
+        return Err("mono verification body requires borrowed unpaused scope")
+    val manifest = mono_verification_load_manifest_in_owned_scope_v1(owner)?
+    val recipe = mono_verification_load_recipe_in_owned_scope_v1(owner, manifest, name)?
+    val pruning_recipe = mono_verification_load_global_in_owned_scope_v1(owner, manifest)?
+    val body_input = recipe.body_input ?? MonoArchiveBodyInputV1(original_parent: recipe.archive)
+    val reassembled = mono_archive_reassemble_body_input_in_owned_scope_v1(body_input, recipe.roots,
+        recipe.specializations, pruning_recipe.unresolved_templates, pruning_recipe.emitted_templates, pruning_recipe.next_symbol,
+        recipe.shared_symbols, recipe.symbol_projection, recipe.symbol_patches, pruning_recipe.nominal_imports)?
+    Ok(reassembled.module)
+
+# Exact applied FIFO origin metadata from the immutable captured recipe.
+# No full body is loaded and no lifecycle is acquired. Final production users
+# must first validate their privately issued repository/read pin.
+fn mono_archive_verification_use_specializations_in_owned_scope_v1(owner: MonoArchiveVerificationUseV1,
+        name: text) -> Result<[MonoArchiveSelectedFunctionV1], text>:
+    if transient_array_scope_state_v1() != 1 or hir_cache_last_warnings().len() != 0:
+        return Err("mono specialization selection requires borrowed unpaused scope")
+    val manifest = mono_verification_load_manifest_in_owned_scope_v1(owner)?
+    val recipe = mono_verification_load_recipe_in_owned_scope_v1(owner, manifest, name)?
+    Ok(recipe.specializations)
+
+fn mono_verification_materialize_in_owned_scope_v1(owner: MonoArchiveVerificationUseV1,
+        name: text) -> Result<MonoArchiveAssembledModuleV1, text>:
+    val manifest = mono_verification_load_manifest_in_owned_scope_v1(owner)?
+    val recipe = mono_verification_load_recipe_in_owned_scope_v1(owner, manifest, name)?
+    val pruning_recipe = mono_verification_load_global_in_owned_scope_v1(owner, manifest)?
+    val body_input = recipe.body_input ?? MonoArchiveBodyInputV1(original_parent: recipe.archive)
+    val loaded = mono_archive_reassemble_body_input_in_owned_scope_v1(body_input, recipe.roots,
+        recipe.specializations, pruning_recipe.unresolved_templates, pruning_recipe.emitted_templates, pruning_recipe.next_symbol,
+        recipe.shared_symbols, recipe.symbol_projection, recipe.symbol_patches, pruning_recipe.nominal_imports)?
+    val module = loaded.module
+    var assembled = MonoArchiveAssembledModuleV1(input_archive: recipe.archive,
+        archive_key: "", body_digest: sha256_text(hir_module_encode(module)),
+        lowering_warnings_digest: mono_archive_body_input_warnings_digest_v1(body_input), coverage_digest: recipe.coverage_digest,
+        closure_state_digest: manifest.state_digest, final_symbol_counter: module.symbols.next_symbol_id,
+        stage: "mono-assembled-unverified-v1", body_input: recipe.body_input)
+    assembled.archive_key = mono_archive_assembled_key_v1(assembled)
+    if assembled.archive_key == "" or not hir_cache_store_in_owned_scope(
+            assembled.archive_key, module, loaded.warnings): return Err("mono verification body publication refused")
+    Ok(assembled)
+
+fn mono_archive_verification_use_v1(owner: MonoArchiveVerificationUseV1) -> Result<MonoArchiveVerificationUseResultV1, text>:
+    if transient_array_scope_state_v1() != 0 or hir_cache_last_warnings().len() != 0:
+        return Err("mono verification use requires closed leases")
+    val cache = hir_owned_artifact_context_v1()
+    if owner.cache.directory != cache.directory or owner.cache.producer_header != cache.producer_header or
+            owner.cache.enabled != cache.enabled: return Err("mono verification current cache owner differs")
+    var modules: Dict<text, MonoArchiveAssembledModuleV1> = {}
+    for name in owner.ordered_inventory:
+        if not transient_scope_begin(): return Err("mono verification body lease unavailable")
+        val result = mono_verification_materialize_in_owned_scope_v1(owner, name)
+        val paused = transient_scope_pause()
+        val owned = if paused: transient_promote(result) else: false
+        mono_verification_close_v1(paused, owned)
+        if result.is_err(): return Err("mono verification actual selected body refused")
+        modules[name] = result.unwrap()
+    # No candidate report or editable cleanliness digest is an input. Complete
+    # reconstructed bodies feed the shared actual index-before-walk verifier.
+    val report = mono_archive_verify_assembled_modules_v1(modules, owner.ordered_inventory)
+    if report.is_err(): return Err("mono verification actual report refused")
+    Ok(MonoArchiveVerificationUseResultV1(capture: owner, modules: modules, report: report.unwrap()))
+
+export MonoArchiveVerificationUseV1, MonoArchiveVerificationUseResultV1
+export mono_archive_verification_use_capture_v1, mono_archive_verification_use_v1
+export mono_archive_verification_use_load_module_in_owned_scope_v1
+export mono_archive_verification_use_specializations_in_owned_scope_v1

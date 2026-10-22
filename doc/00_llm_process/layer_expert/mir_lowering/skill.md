@@ -413,3 +413,90 @@ in MIR to "fix" a dropped write. Escape: `SIMPLE_CAPTURE_WRITE_CHECK=warning|off
   legitimately skips or multiplies a guarded arm adjusts
   `self.match_guards_expected` with a comment.** Guide:
   `doc/07_guide/compiler/robustness/match-guard-invariant.md`.
+
+## 2026-10-19 — JIT array copies are never freed; `array_move.rs` moves instead
+
+- On the seed JIT lane every `rt_array_copy` lives forever: `Drop` is a no-op, nothing
+  emits `rt_array_free`, and arrays have no refcount. A copy inside a loop therefore
+  leaks O(n²). Example: `var o = st.output; ...; st = St(output: o)` used 697 MB at
+  n=65536; with the move it uses 40 MB.
+- `mir/lower/array_move.rs` turns the `Let` place copy into a move when the source is
+  provably uniquely owned and dead. It fails closed. The negative pins live in
+  `mir/lower/tests/array_move_tests.rs`.
+- Trap: struct literals must NOT copy array arguments on this lane, not even a live
+  `var`. With no reclamation, a reused buffer leaks per iteration (39 MB → 2.46 GB),
+  and projections leak through the functional-update idiom `S(data: st.data, ...)`
+  (128 KiB zstd decode 280 MB → 2.0 GB).
+- So the JIT keeps base aliasing at literals (a known bug, DEFERRED). Any argument that
+  is not handed over makes the struct non-unique, and so do `@inject`-constructor types.
+- Bug record: `doc/08_tracking/bug/seed_jit_array_copy_never_freed_2026-10-19.md`.
+||||||| parent of c3b03b5c78c (docs(llm-wiki): mir_lowering note for the array move-vs-copy pass)
+
+
+## 2026-10-19 — array move instead of copy (`mir_array_move.spl`)
+
+`var o = s` / `var o = s.f` of a runtime array normally copies
+(`maybe_copy_array_value`, an `arrcopy_cond` loop). `mir_array_move.spl` (port
+of the seed's `array_move.rs`) proves per function which of those may move the
+handle: `s` a non-param local with one Let, owned (fresh writes, no escaping
+reads, no lambda mention) and dead after the binding (same-list forward scan).
+Struct construction NEVER copies an array arg; a `var` local handed into a
+declared array slot leaves the struct owned only when every such use is dead.
+Fail-closed rules worth knowing before editing: unknown HIR kinds, `yield`,
+`await` poison the function; only constructors that reach
+`lower_struct_construct` (struct, not class; table from
+`array_move_ctor_tables`) are fresh; every non-primitive slot must get a
+private buffer (generic/Any/nested struct slots disqualify). Known, NOT fixed:
+`St(output: o); o.push(4)` is visible through `st.output` (pinned by
+`test/01_unit/compiler/50.mir/array_move_lowering_spec.spl`). Trap: under the
+seed interpreter `Dict<i64,_>.keys()` yields text keys — keep key lists.
+
+## 2026-10-20 — nil only inside `unsafe` in enum payload slots
+
+- `enum_payload_local_compatible` accepts a `nil` literal in a declared `T?`
+  payload slot only when `self.unsafe_depth > 0` (an `unsafe:` / `danger:`
+  block). Outside it the error says `nil outside unsafe ... use None`. A nil
+  into a non-optional slot is rejected inside unsafe too. `@unsafe` on a fn
+  never reaches MIR, so only blocks count.
+- `None` and `nil` differ natively: `None` is `rt_enum_new(OPTION, 1, 0)`,
+  nil is the word 3; `rt_native_eq(None, nil)` is 0. The seed equates them.
+  Builtin `None` in an enum payload slot lowers to the nil word
+  (`emit_enum_payload_nil_word`): typed `T?` slots, and untyped constructions
+  of a non-generic owner (`lower_untyped_enum_payload_expression`). Generic
+  owners (Option/Result/user generics) keep the Option object. A local named
+  `None` is not the builtin. Struct fields and variables have no such
+  lowering yet.
+- A bare `T` value into a `T?` payload slot is REJECTED. Declaring a slot `T?`
+  therefore forces `Some(t)` at producers, the box that SIGSEGVs natively
+  (`statements.spl:580`). Open sites:
+  `doc/08_tracking/bug/enum_payload_nil_into_nonoptional_hir_slots_2026-10-20.md`.
+- Lint `NIL-UNSAFE-001` (`90.tools/lint/rules/nil_outside_unsafe_rule.spl`)
+  flags nil outside unsafe blocks; default level allow (`nil_outside_unsafe`),
+  enable with --warn-all. It skips `== nil`, `!= nil` and `case nil`, since
+  rewriting those as `None` changes the native result.
+
+## 2026-10-20 — `[i64]` word lane (`rt_typed_words_i64_*`), seed MIR + runtime
+
+A statically typed `[i64]` index read / index store / statement `push` / `for` read
+lowers to `rt_typed_words_i64_at/_set/_push` (`MirLowerer::signed_word_lane`, on by
+default, off for baremetal and WASM targets in `native_project/compiler.rs` because
+their C runtimes do not define the lane). Before this every wide store did
+`BoxInt` -> `rt_value_int` -> a `HeapInt` that nothing frees (~48 B/store).
+The runtime packs a tagged array IN PLACE on the first value outside the 61-bit
+inline range (`gc_flags::LAZY_WORDS | U64_PACKED`, same 8-byte buffer); narrow
+programs never change layout. Rules to keep when editing:
+- `get_typed_ptr`/`get_typed_ptr_mut` (and so `as_typed_ptr!`) UNPACK a lazy array;
+  only functions that branch on the packed layout use `get_typed_ptr_packed` /
+  `as_typed_ptr_packed!`. A new array consumer that reads `as_slice()` needs
+  nothing; one that handles packed words must opt out explicitly.
+- The generic inline `rt_array_get/set` in `codegen/instr/calls.rs` send flag
+  `0x10` arrays to the out-of-line runtime call (cold block) instead of reading a
+  raw word as a tagged slot.
+- copy/concat/slice inherit `LAZY_WORDS` so a packed `[i64]` stays signed-ordered.
+- Trap measured here: inlining the typed read/store (3 extra blocks per access)
+  doubled JIT compile time and +90 MB RSS on a crypto-import program, because
+  every `[i64]` access in the closure grew; the out-of-line call is as fast as
+  the old inline get + unbox call. Do not re-inline without re-measuring startup.
+- Known, NOT fixed: sorting a TAGGED array that holds wide (heap-boxed) ints is
+  wrong (`primitive_sort`/array_sort provider ignore the boxes); packed arrays sort
+  correctly. Bug record: `doc/08_tracking/bug/jit_array_store_wide_i64_leak_2026-10-20.md`.

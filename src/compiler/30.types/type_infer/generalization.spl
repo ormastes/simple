@@ -77,7 +77,7 @@ impl HmInferContext:
             case Dict(key, value):
                 self.collect_free_vars(key, vars)
                 self.collect_free_vars(value, vars)
-            case Optional(inner) | Ref(inner, _) | Ptr(inner, _):
+            case Optional(inner) | Ref(inner, _) | Ptr(inner, _) | Unique(inner) | Shared(inner) | Weak(inner):
                 self.collect_free_vars(inner, vars)
             case Result(ok, err):
                 self.collect_free_vars(ok, vars)
@@ -154,7 +154,7 @@ impl HmInferContext:
         # Apply the mapping
         self.instantiate_type(scheme.ty, var_map)
 
-    me instantiate_type(ty: HirType, var_map: Dict<i64, HirType>) -> HirType:
+    me instantiate_type(ty: HirType, var_map: Dict<i64, HirType>, binders: Dict<i64, HirType> = {}, names: Dict<text, HirType> = {}) -> HirType:
         """Apply instantiation mapping to a type."""
         match ty.kind:
             case Infer(id, _):
@@ -162,49 +162,76 @@ impl HmInferContext:
                     var_map[id]
                 else:
                     ty
+            case TypeParam(name, _):
+                if names.has(name): return names[name]
+                ty
             case Function(params, ret, effects):
+                var mapped_effects: [Effect] = []
+                for effect in effects:
+                    val mapped_kind = match effect.kind:
+                        case Throws(thrown): EffectKind.Throws(self.instantiate_type(thrown, var_map, binders, names))
+                        case _: effect.kind
+                    mapped_effects = mapped_effects.push(Effect(kind: mapped_kind, span: effect.span))
                 var new_params: [HirType] = []
                 for p in params:
-                    new_params = new_params.push(self.instantiate_type(p, var_map))
+                    new_params = new_params.push(self.instantiate_type(p, var_map, binders, names))
                 HirType(
-                    kind: HirTypeKind.Function(new_params, self.instantiate_type(ret, var_map), effects),
+                    kind: HirTypeKind.Function(new_params, self.instantiate_type(ret, var_map, binders, names), mapped_effects),
                     span: ty.span
                 )
             case Tuple(elements):
                 var new_elements: [HirType] = []
                 for e in elements:
-                    new_elements = new_elements.push(self.instantiate_type(e, var_map))
+                    new_elements = new_elements.push(self.instantiate_type(e, var_map, binders, names))
                 HirType(kind: HirTypeKind.Tuple(new_elements), span: ty.span)
             case Array(element, size):
-                HirType(kind: HirTypeKind.Array(self.instantiate_type(element, var_map), size), span: ty.span)
+                HirType(kind: HirTypeKind.Array(self.instantiate_type(element, var_map, binders, names), size), span: ty.span)
             case Slice(element):
-                HirType(kind: HirTypeKind.Slice(self.instantiate_type(element, var_map)), span: ty.span)
+                HirType(kind: HirTypeKind.Slice(self.instantiate_type(element, var_map, binders, names)), span: ty.span)
             case Dict(key, value):
                 HirType(
                     kind: HirTypeKind.Dict(
-                        self.instantiate_type(key, var_map),
-                        self.instantiate_type(value, var_map)
+                        self.instantiate_type(key, var_map, binders, names),
+                        self.instantiate_type(value, var_map, binders, names)
                     ),
                     span: ty.span
                 )
             case Optional(inner):
-                HirType(kind: HirTypeKind.Optional(self.instantiate_type(inner, var_map)), span: ty.span)
+                HirType(kind: HirTypeKind.Optional(self.instantiate_type(inner, var_map, binders, names)), span: ty.span)
             case Result(ok, err):
                 HirType(
                     kind: HirTypeKind.Result(
-                        self.instantiate_type(ok, var_map),
-                        self.instantiate_type(err, var_map)
+                        self.instantiate_type(ok, var_map, binders, names),
+                        self.instantiate_type(err, var_map, binders, names)
                     ),
                     span: ty.span
                 )
             case Ref(inner, mutable):
-                HirType(kind: HirTypeKind.Ref(self.instantiate_type(inner, var_map), mutable), span: ty.span)
+                HirType(kind: HirTypeKind.Ref(self.instantiate_type(inner, var_map, binders, names), mutable), span: ty.span)
             case Ptr(inner, mutable):
-                HirType(kind: HirTypeKind.Ptr(self.instantiate_type(inner, var_map), mutable), span: ty.span)
+                HirType(kind: HirTypeKind.Ptr(self.instantiate_type(inner, var_map, binders, names), mutable), span: ty.span)
             case Named(symbol, args):
+                if args.len() == 0 and binders.has(symbol.id): return binders[symbol.id]
                 var new_args: [HirType] = []
                 for a in args:
-                    new_args = new_args.push(self.instantiate_type(a, var_map))
+                    new_args = new_args.push(self.instantiate_type(a, var_map, binders, names))
                 HirType(kind: HirTypeKind.Named(symbol, new_args), span: ty.span)
+            case Isolated(inner):
+                HirType(kind: HirTypeKind.Isolated(self.instantiate_type(inner, var_map, binders, names)), span: ty.span)
+            case Unique(inner):
+                HirType(kind: HirTypeKind.Unique(self.instantiate_type(inner, var_map, binders, names)), span: ty.span)
+            case Shared(inner):
+                HirType(kind: HirTypeKind.Shared(self.instantiate_type(inner, var_map, binders, names)), span: ty.span)
+            case Weak(inner):
+                HirType(kind: HirTypeKind.Weak(self.instantiate_type(inner, var_map, binders, names)), span: ty.span)
+            case Union(members):
+                var mapped: [HirType] = []
+                for member in members:
+                    mapped = mapped.push(self.instantiate_type(member, var_map, binders, names))
+                HirType(kind: HirTypeKind.Union(mapped), span: ty.span)
+            case Projection(base, name):
+                HirType(kind: HirTypeKind.Projection(self.instantiate_type(base, var_map, binders, names), name), span: ty.span)
+            case Tensor(element, dims, device):
+                HirType(kind: HirTypeKind.Tensor(self.instantiate_type(element, var_map, binders, names), dims, device), span: ty.span)
             case _:
                 ty

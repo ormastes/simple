@@ -1,0 +1,108 @@
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId, SymbolTable}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.mir._MirLoweringExpr.builtin_method_extras.*
+
+fn lower_items_source(source: text) -> (i64, text):
+    val module = parse_full_frontend(source, "dict_items.spl", "dict_items.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("dict_items.spl")
+    val hir = hir_lowering.lower_module(module)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    for function in mir.functions.values():
+        if function.name == "check" or function.name.ends_with(".check"):
+            return (hir_lowering.errors.len() + lowering.errors.len(), serialize_mir_function(function))
+    (-1, "")
+
+fn expect_items_snapshot(mir: text):
+    expect(mir.split("\"value\":\"rt_dict_entries\"").len()).to_equal(2)
+    expect(mir.split("\"value\":\"rt_tuple_get\"").len()).to_equal(3)
+    expect(mir).to_contain("tuple_native_body")
+    expect(mir).to_contain("rt_array_push")
+    expect(mir.contains("rt_dict_get")).to_equal(false)
+    expect(mir.contains("rt_panic")).to_equal(false)
+
+describe "native Dict.items lowering", tag: ["only-compiled"]:
+    it "rejects an erased handle with no field type authority":
+        var lowering = MirLowering.new(SymbolTable.new())
+        var builder = lowering.builder
+        builder.begin_function(SymbolId(id: 90), "check", MirSignature(params: [], return_type: MirType.unit(), is_variadic: false), Span.empty())
+        val local = builder.emit_const_int(0)
+        lowering.builder = builder
+        val receiver = HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: nil, span: Span.empty())
+        val result = lowering.builtin_dict_items(receiver, local)
+        var finished = lowering.builder
+        val mir = serialize_mir_function(finished.end_function())
+        expect(lowering.errors.len()).to_be_greater_than(0)
+        expect(mir).to_contain("rt_panic")
+        expect(mir.contains("rt_dict_entries")).to_equal(false)
+
+    it "creates native text and integer pairs with typed array ownership":
+        val (errors, mir) = lower_items_source("fn check(d: Dict<text, i64>):\n    val pairs = d.items()\n    for (key, value) in pairs:\n        print key\n        print value\n")
+        expect(errors).to_equal(0)
+        expect_items_snapshot(mir)
+        expect(mir).to_contain("\"Array\":{\"element\":{\"Tuple\":[{\"Opaque\":\"str\"},\"I64\"]}")
+
+    it "preserves boolean and floating field representations":
+        val (errors, mir) = lower_items_source("fn check(d: Dict<bool, f64>):\n    val pairs = d.items()\n    for (key, value) in pairs:\n        print key\n        print value\n")
+        expect(errors).to_equal(0)
+        expect_items_snapshot(mir)
+        expect(mir).to_contain("\"Tuple\":[\"Bool\",\"F64\"]")
+
+    it "preserves both nominal record field owners":
+        val source = "struct Key:\n    id: i64\n\nstruct Value:\n    first: i64\n    second: i64\n\nfn check(d: Dict<Key, Value>):\n    for (key, value) in d.items():\n        print key.id\n        print value.second\n"
+        val (errors, mir) = lower_items_source(source)
+        expect(errors).to_equal(0)
+        expect_items_snapshot(mir)
+        expect(mir).to_contain("\"Tuple\":[{\"Struct\":")
+        expect(mir).to_contain("\"field\":1")
+
+    it "unwraps a mutable Dict parameter without decoding its handle":
+        val (errors, mir) = lower_items_source("fn check(d: mut Dict<text, i64>):\n    for (key, value) in d.items():\n        print key\n        print value\n")
+        expect(errors).to_equal(0)
+        expect_items_snapshot(mir)
+        expect(mir).to_contain("\"Tuple\":[{\"Opaque\":\"str\"},\"I64\"]")
+
+    it "evaluates a call receiver exactly once":
+        val (errors, mir) = lower_items_source("fn make_dict() -> Dict<i64, i64>:\n    {1: 7}\n\nfn check():\n    val pairs = make_dict().items()\n    print pairs.len()\n")
+        expect(errors).to_equal(0)
+        expect_items_snapshot(mir)
+        expect(mir.split("\"value\":\"make_dict\"").len()).to_equal(2)
+
+    it "rejects arguments rather than silently discarding them":
+        val (errors, mir) = lower_items_source("fn check(d: Dict<i64, i64>):\n    d.items(42)\n")
+        expect(errors).to_be_greater_than(0)
+        expect(mir).to_contain("Dict.items expects no arguments")
+        expect(mir.contains("rt_dict_entries")).to_equal(false)
+
+    it "leaves a non-dictionary custom items method in ordinary dispatch":
+        val (errors, mir) = lower_items_source("class Shelf:\n    count: i64\n    fn items() -> i64:\n        self.count\n\nfn check(shelf: Shelf) -> i64:\n    shelf.items()\n")
+        expect(errors).to_equal(0)
+        expect(mir).to_contain("items")
+        expect(mir.contains("rt_dict_entries")).to_equal(false)
+        expect(mir.contains("rt_panic")).to_equal(false)
+
+    it "retains the same conversion for direct dictionary pair loops":
+        val (errors, mir) = lower_items_source("fn check(d: Dict<text, i64>):\n    for (key, value) in d:\n        print key\n        print value\n")
+        expect(errors).to_equal(0)
+        expect_items_snapshot(mir)
+        expect(mir).to_contain("\"Tuple\":[{\"Opaque\":\"str\"},\"I64\"]")
+
+    it "leaves a static items method in ordinary dispatch":
+        val (errors, mir) = lower_items_source("class Shelf:\n    static fn items() -> i64:\n        17\n\nfn check() -> i64:\n    Shelf.items()\n")
+        expect(errors).to_equal(0)
+        expect(mir).to_contain("items")
+        expect(mir.contains("rt_dict_entries")).to_equal(false)
+        expect(mir.contains("rt_panic")).to_equal(false)
+
+    it "retains a dictionary field declaration when lowering items":
+        val (errors, mir) = lower_items_source("class Registry:\n    values: Dict<text, i64>\n\nfn check(registry: Registry):\n    for (key, value) in registry.values.items():\n        print key\n        print value\n")
+        expect(errors).to_equal(0)
+        expect_items_snapshot(mir)
+        expect(mir).to_contain("\"Tuple\":[{\"Opaque\":\"str\"},\"I64\"]")

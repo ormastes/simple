@@ -1060,11 +1060,14 @@ impl CoreLexer:
             # `{ "` — there is nothing for a string to be an operand OF.
             return false
         val last: text = self.source_chars[end - 1]
-        # Two-character comparison operators: == != <= >=
+        # Two-character operators: == != <= >= and null-coalescing `??`
+        # (its RHS is an operand position: `{x ?? ""}`; seed parity).
         if end - expr_start >= 2:
             val prev: text = self.source_chars[end - 2]
             val two: bool = prev == "=" or prev == "!" or prev == "<" or prev == ">"
             if last == "=" and two:
+                return true
+            if last == "?" and prev == "?":
                 return true
         # Single-character binary / opening operators => an operand must follow.
         if last == "<" or last == ">" or last == "+" or last == "-":
@@ -1780,10 +1783,10 @@ impl CoreLexer:
         if self.indent_stack.len() > 1:
             self.indent_stack.pop()
 
-# @workaround bug=lexer_imported_instance_methods_2026_10_06
 # Keep method dispatch in its declaration module until imported instance-method
 # ownership transport is qualified. Preserve the existing value-copy/writeback
 # contract used by core_lexer_next_token; do not weaken MIR owner validation.
+# @workaround bug=lexer_imported_instance_methods_2026_10_06
 fn core_lexer_char_at_pos(lexer: CoreLexer, pos: i64) -> text:
     lexer.char_at_pos(pos)
 
@@ -1834,3 +1837,55 @@ fn core_lexer_token_end(lexer: CoreLexer) -> i64:
 export core_lexer_last_text_get, core_lexer_last_line_get, core_lexer_last_col_get, core_lexer_last_suffix_get, core_token_env_save_set
 export core_lexer_token_start, core_lexer_token_end
 export core_token_text_intern_reset
+
+# Request-owned primitive token receipt. Keep the mutable CoreLexer method
+# call inside its declaration module: imported instance-method transport is
+# intentionally not qualified by this API. No lexer owner escapes.
+struct CoreReferenceTokenV1:
+    codepoint_start: i64
+    codepoint_end: i64
+    byte_start: i64
+    byte_end: i64
+    line: i64
+    column: i64
+    kind: i64
+    spelling: text
+
+fn core_reference_tokens_v1(source: text, max_tokens: i64) -> Result<[CoreReferenceTokenV1], text>:
+    if max_tokens <= 0:
+        return Err("capacity: nonpositive token budget")
+    var lexer = make_core_lexer(source)
+    var offsets: [i64] = [0]
+    var byte_position = 0
+    for character in lexer.source_chars:
+        byte_position = byte_position + character.len()
+        offsets.push(byte_position)
+    if byte_position != source.len():
+        return Err("invalid_span: original UTF8 coordinate map disagrees with source")
+    var tokens: [CoreReferenceTokenV1] = []
+    var scanned = 0
+    while true:
+        if scanned >= max_tokens:
+            return Err("capacity: original-source token budget exhausted")
+        # Same pending-dedent and scan behavior as the unchanged value facade,
+        # with no whole-lexer parameter/result transport on this token loop.
+        val kind = lexer.next_token()
+        scanned = scanned + 1
+        if kind == 190:
+            if lexer.pos != lexer.source_chars.len():
+                return Err("invalid_span: lexer ended before original source")
+            return Ok(tokens)
+        if kind == 0 or kind == 191:
+            return Err("unsupported_syntax: original-source lexer failure")
+        if kind == 180 or kind == 181 or kind == 182:
+            continue
+        val start = lexer.cur_start
+        val end = lexer.pos
+        if start < 0 or end <= start or end >= offsets.len():
+            return Err("invalid_span: lexer emitted an unmapped token")
+        val spelling = source[offsets[start]:offsets[end]]
+        if spelling == "":
+            return Err("invalid_span: empty original-source token")
+        tokens.push(CoreReferenceTokenV1(codepoint_start: start, codepoint_end: end,
+            byte_start: offsets[start], byte_end: offsets[end], line: lexer.cur_line,
+            column: lexer.cur_col, kind: kind, spelling: spelling))

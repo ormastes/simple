@@ -212,9 +212,49 @@ pub fn rt_sha512_h(args: &[Value]) -> Result<Value, CompileError> {
     })
 }
 
+fn one_shot_digest(name: &str, alg: &'static digest::Algorithm, args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime(format!("{name} expects 1 argument")));
+    }
+    let data = expect_byte_array(name, &args[0])?;
+    Ok(Value::byte_array(digest::digest(alg, &data).as_ref().to_vec()))
+}
+
+/// `rt_sha512_digest(data: [u8]) -> [u8]` — one-shot SHA-512, 64 bytes.
+/// Interpreter twin of the C/Rust runtime `rt_sha512_digest`.
+pub fn rt_sha512_digest(args: &[Value]) -> Result<Value, CompileError> {
+    one_shot_digest("rt_sha512_digest", &digest::SHA512, args)
+}
+
+/// `rt_sha384_digest(data: [u8]) -> [u8]` — one-shot SHA-384, 48 bytes.
+/// Interpreter twin of the C/Rust runtime `rt_sha384_digest`.
+pub fn rt_sha384_digest(args: &[Value]) -> Result<Value, CompileError> {
+    one_shot_digest("rt_sha384_digest", &digest::SHA384, args)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_shot_sha512_and_sha384_abc() {
+        let abc = Value::array(vec![Value::Int(0x61), Value::Int(0x62), Value::Int(0x63)]);
+        let hex = |v: Value| -> String {
+            v.try_array_bytes()
+                .expect("byte array")
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect()
+        };
+        assert_eq!(
+            hex(rt_sha512_digest(&[abc.clone()]).expect("sha512 ok")),
+            "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+        );
+        assert_eq!(
+            hex(rt_sha384_digest(&[abc]).expect("sha384 ok")),
+            "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7"
+        );
+    }
 
     /// FIPS 180-4 Appendix C — "abc" SHA-512 digest.
     #[test]

@@ -18,6 +18,8 @@ use std.gc_async_mut.gpu.browser_engine.shared.error.{BrowserResult, BrowserErro
 use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger, BrowserLogLevel}
 use std.string_core.{char_from_code}
 use std.js.types.pair.{Pair}
+use std.common.compress.deflate.{deflate_decompress_eof}
+use std.nogc_sync_mut.compression.gzip.compress.{gzip_decompress as h1_gzip_members}
 use std.nogc_sync_mut.io.browser_net_runtime.{browser_monotonic_ms}
 
 @unsafe(reason: "raw connected descriptor; negative sentinel conflates timeout and failure", capabilities: [ffi])
@@ -494,6 +496,7 @@ fn build_request_bytes(req: FetchRequest) -> text:
     # Add user-provided headers
     var has_user_agent = false
     var has_accept = false
+    var has_accept_encoding = false
     for raw_header in req.headers.split("\r\n"):
         val header = raw_header.trim()
         val colon = header.index_of(":")
@@ -506,6 +509,8 @@ fn build_request_bytes(req: FetchRequest) -> text:
             has_user_agent = true
         if name_lower == "accept":
             has_accept = true
+        if name_lower == "accept-encoding":
+            has_accept_encoding = true
         result = result + header + "\r\n"
 
     # Add default headers if not already present
@@ -513,6 +518,8 @@ fn build_request_bytes(req: FetchRequest) -> text:
         result = result + "User-Agent: SimpleBrowser/1.0\r\n"
     if not has_accept:
         result = result + "Accept: */*\r\n"
+    if not has_accept_encoding:
+        result = result + "Accept-Encoding: gzip, deflate\r\n"
     result = result + "Connection: close\r\n"
 
     # Add Content-Length for methods with bodies
@@ -631,12 +638,104 @@ fn parse_http_response_bytes(raw: [u8]) -> Result<FetchResponse, BrowserError>:
         raw_headers = raw_headers + header_lines[i] + "\r\n"
         i = i + 1
     val headers = parse_headers(raw_headers)
-    val body = read_response_body_bytes(parts.second, headers)?
+    val framed = read_response_body_bytes(parts.second, headers)?
+    val encoding = find_header(headers, "content-encoding")
+    if encoding == nil:
+        return Ok(FetchResponse(
+            status: status.first,
+            headers: raw_headers,
+            body: framed
+        ))
+    val decoded = h1_decode_content_encoding(framed, "{encoding ?? ""}")?
+    if decoded.changed:
+        return Ok(FetchResponse(
+            status: status.first,
+            headers: h1_strip_representation_headers(raw_headers),
+            body: decoded.body
+        ))
     return Ok(FetchResponse(
         status: status.first,
         headers: raw_headers,
-        body: body
+        body: decoded.body
     ))
+
+# --- Content-Encoding (RFC 9110 section 8.4) ---
+
+struct H1Decoded:
+    body: [u8]
+    changed: bool
+
+fn h1_decode_failure(token: text, why: text) -> Result<H1Decoded, BrowserError>:
+    Err(parse_error("h1: Content-Encoding {token}: {why}"))
+
+fn h1_inflate_zlib_or_raw(data: [u8]) -> [u8]?:
+    # RFC 9110 says deflate is zlib-wrapped (RFC 1950); some servers send raw
+    # RFC 1951. Try zlib first, then raw.
+    if data.len() >= 6:
+        val cmf = data[0] as i64
+        val flg = data[1] as i64
+        if (cmf % 16) == 8 and ((cmf * 256 + flg) % 31) == 0 and (flg / 32) % 2 == 0:
+            match deflate_decompress_eof(data.slice(2, data.len() - 4)):
+                Ok(out):
+                    return Some(out)
+                Err(_):
+                    pass
+    match deflate_decompress_eof(data):
+        Ok(out):
+            return Some(out)
+        Err(_):
+            return nil
+
+fn h1_decode_one_encoding(token: text, data: [u8]) -> Result<[u8], BrowserError>:
+    var out: [u8] = []
+    if token == "gzip" or token == "x-gzip":
+        val g = h1_gzip_members(data)
+        if g == nil:
+            return Err(parse_error("h1: Content-Encoding {token}: corrupt gzip data"))
+        out = g ?? []
+    elif token == "deflate":
+        val d = h1_inflate_zlib_or_raw(data)
+        if d == nil:
+            return Err(parse_error("h1: Content-Encoding {token}: corrupt deflate data"))
+        out = d ?? []
+    else:
+        # ponytail: zstd/br are not advertised. Importing the pure zstd
+        # decoder costs ~29 MB RSS per process (it handles predefined/repeat
+        # tables since #3739); br has no real-output KAT. Add each once that
+        # is fixed (gate plan 2026-10-19 remainder).
+        return Err(parse_error("h1: unsupported Content-Encoding {token}"))
+    # The decoders buffer fully, so the cap is checked after decode.
+    if out.len() > BROWSER_MAX_RESOURCE_BYTES:
+        return Err(parse_error("h1: Content-Encoding {token}: decoded body exceeds 50 MiB limit"))
+    Ok(out)
+
+fn h1_decode_content_encoding(body: [u8], header_value: text) -> Result<H1Decoded, BrowserError>:
+    # Encodings are listed in application order; undo them in reverse.
+    val tokens = header_value.split(",")
+    var cur = body
+    var changed = false
+    var i = tokens.len() - 1
+    while i >= 0:
+        val token = net_ascii_lower(tokens[i].trim())
+        i = i - 1
+        if token == "" or token == "identity":
+            continue
+        cur = h1_decode_one_encoding(token, cur)?
+        changed = true
+    Ok(H1Decoded(body: cur, changed: changed))
+
+fn h1_strip_representation_headers(raw_headers: text) -> text:
+    # After decoding, the encoded-size and encoding headers no longer describe the body.
+    var out = ""
+    for line in raw_headers.split("\r\n"):
+        if line == "":
+            continue
+        val colon = line.index_of(":")
+        val name = if colon > 0: net_ascii_lower(line.slice(0, colon).trim()) else: ""
+        if name == "content-encoding" or name == "content-length":
+            continue
+        out = out + line + "\r\n"
+    out
 
 fn parse_status_line(line: text) -> Result<Pair<i64, text>>:
     # Parse an HTTP/1.1 status line: "HTTP/1.1 200 OK"

@@ -1,0 +1,164 @@
+# @req REQ-GENERIC-IFVAL-PAYLOAD
+# @tag: unit, compiler, mono, generics
+use std.spec
+use compiler.hir.hir_types.*
+use compiler.common.diagnostics.span.Span
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mono.monomorphize_integration.{MonomorphizationPass, hir_type_key}
+
+fn ifval_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn ifval_collect(binding_type: HirType, explicit_type: HirType?) -> HirType:
+    var pass_ = MonomorphizationPass.create()
+    pass_.current_module = "ifval"
+    val source_type = ifval_type(HirTypeKind.Optional(ifval_type(HirTypeKind.Str)))
+    var symbols = SymbolTable.new()
+    val local = symbols.define("payload", SymbolKind.Variable, binding_type, Span.empty(), Visibility.Private, false, nil)
+    pass_.module_symbols["ifval"] = symbols
+    val source = HirExpr(kind: HirExprKind.Var(SymbolId(id: 40)), has_type_: true, type_: source_type, span: Span.empty())
+    val checked = HirExpr(kind: HirExprKind.ExistsCheck(source), has_type_: true, type_: source_type, span: Span.empty())
+    pass_.collect_lets_stmt(HirStmt(kind: HirStmtKind.Let(local, explicit_type, checked), span: Span.empty()))
+    pass_.env[local.id]
+
+fn symbolic_ifval_pass(binding_type: HirType, original_payload: HirType, actual_payload: HirType, has_stamp: bool = true) -> MonomorphizationPass:
+    var pass_ = MonomorphizationPass.create()
+    pass_.current_module = "ifval"
+    var symbols = SymbolTable.new()
+    val local = symbols.define("payload", SymbolKind.Variable, binding_type, Span.empty(), Visibility.Private, false, nil)
+    pass_.module_symbols["ifval"] = symbols
+    val actual = ifval_type(HirTypeKind.Optional(actual_payload))
+    val source = HirExpr(kind: HirExprKind.Var(SymbolId(id: 40)), has_type_: true, type_: actual, span: Span.empty())
+    val original = ifval_type(HirTypeKind.Optional(original_payload))
+    val checked = HirExpr(kind: HirExprKind.ExistsCheck(source), has_type_: has_stamp, type_: original, span: Span.empty())
+    pass_.collect_lets_stmt(HirStmt(kind: HirStmtKind.Let(local, nil, checked), span: Span.empty()))
+    pass_
+
+fn expect_unresolved_symbolic_binding(pass_: MonomorphizationPass):
+    expect(pass_.env.has(0)).to_be(false)
+    var lowering = HirLowering.with_filename("identity.spl")
+    val source = "fn identity<T>(value: T) -> T:\n    value\n"
+    val hir = lowering.lower_module(parse_full_frontend(source, "identity.spl", "identity", Logger(level: 0)))
+    for raw in hir.functions.values():
+        val function: HirFunction = raw
+        pass_.generic_functions["identity"] = function
+        pass_.template_module["identity"] = "ifval"
+    val span = Span.empty()
+    val callee = HirExpr(kind: HirExprKind.NamedVar(SymbolId(id: 80), "identity"), has_type_: false, type_: nil, span: span)
+    val value = HirExpr(kind: HirExprKind.Var(SymbolId(id: 0)), has_type_: false, type_: nil, span: span)
+    val arg = HirCallArg(has_name: false, name: "", value: value, span: span)
+    val rewritten = pass_.rewrite_call(callee, [arg], [])
+    expect(pass_.stats.specializations_created).to_equal(0)
+    expect(pass_.stats.unresolved_generic_calls).to_equal(1)
+    expect(pass_.diagnostics[0]).to_contain("E-MONO-032")
+
+describe "if-val generic inference respects HIR binding provenance":
+    it "resolves a symbolic payload from its original Optional relation":
+        val formal = ifval_type(HirTypeKind.TypeParam("T", []))
+        val actual = ifval_type(HirTypeKind.Str)
+        val pass_ = symbolic_ifval_pass(formal, formal, actual)
+        expect(hir_type_key(pass_.env[0])).to_equal(hir_type_key(actual))
+
+    it "preserves the inner Optional when the payload itself is Optional":
+        val formal = ifval_type(HirTypeKind.Optional(ifval_type(HirTypeKind.TypeParam("T", []))))
+        val actual = ifval_type(HirTypeKind.Optional(ifval_type(HirTypeKind.Str)))
+        val pass_ = symbolic_ifval_pass(formal, formal, actual)
+        expect(hir_type_key(pass_.env[0])).to_equal(hir_type_key(actual))
+
+    it "retains the whole inferred Optional for ordinary symbolic existence values":
+        val formal = ifval_type(HirTypeKind.TypeParam("T", []))
+        val actual = ifval_type(HirTypeKind.Str)
+        val pass_ = symbolic_ifval_pass(ifval_type(HirTypeKind.Optional(formal)), formal, actual)
+        expect(hir_type_key(pass_.env[0])).to_equal(hir_type_key(ifval_type(HirTypeKind.Optional(actual))))
+
+    it "does not equate different formal parameter names as provenance":
+        val formal = ifval_type(HirTypeKind.TypeParam("T", []))
+        val unrelated = ifval_type(HirTypeKind.TypeParam("U", []))
+        expect_unresolved_symbolic_binding(symbolic_ifval_pass(unrelated, formal, ifval_type(HirTypeKind.Str)))
+
+    it "refuses erased and missing original evidence with an unresolved generic diagnostic":
+        val erased = ifval_type(HirTypeKind.Any)
+        val formal = ifval_type(HirTypeKind.TypeParam("T", []))
+        val actual = ifval_type(HirTypeKind.Str)
+        expect_unresolved_symbolic_binding(symbolic_ifval_pass(erased, erased, actual))
+        expect_unresolved_symbolic_binding(symbolic_ifval_pass(formal, formal, actual, false))
+
+    it "does not use effect-bearing function subterms as structural provenance":
+        val string = ifval_type(HirTypeKind.Str)
+        val callable = ifval_type(HirTypeKind.Function([], string, [Effect(kind: EffectKind.IO, span: Span.empty())]))
+        val formal = ifval_type(HirTypeKind.Tuple([ifval_type(HirTypeKind.TypeParam("T", [])), callable]))
+        val actual = ifval_type(HirTypeKind.Tuple([string, callable]))
+        expect_unresolved_symbolic_binding(symbolic_ifval_pass(formal, formal, actual))
+
+    it "rejects effects on only the declared side of the provenance comparison":
+        val string = ifval_type(HirTypeKind.Str)
+        val formal = ifval_type(HirTypeKind.TypeParam("T", []))
+        val pure_callable = ifval_type(HirTypeKind.Function([], string, []))
+        val io_callable = ifval_type(HirTypeKind.Function([], string, [Effect(kind: EffectKind.IO, span: Span.empty())]))
+        val original = ifval_type(HirTypeKind.Tuple([formal, pure_callable]))
+        val declared = ifval_type(HirTypeKind.Tuple([formal, io_callable]))
+        val actual = ifval_type(HirTypeKind.Tuple([string, pure_callable]))
+        expect_unresolved_symbolic_binding(symbolic_ifval_pass(declared, original, actual))
+
+    it "uses the HIR payload binding rather than the optional initializer type":
+        val payload = ifval_type(HirTypeKind.Str)
+        expect(hir_type_key(ifval_collect(payload, nil))).to_equal(hir_type_key(payload))
+
+    it "retains Optional for an ordinary value-position existence check":
+        val optional = ifval_type(HirTypeKind.Optional(ifval_type(HirTypeKind.Str)))
+        expect(hir_type_key(ifval_collect(optional, nil))).to_equal(hir_type_key(optional))
+
+    it "preserves an explicit annotation before inferred symbol evidence":
+        val payload = ifval_type(HirTypeKind.Str)
+        val optional = ifval_type(HirTypeKind.Optional(payload))
+        expect(hir_type_key(ifval_collect(payload, optional))).to_equal(hir_type_key(optional))
+
+    it "specializes real parsed text and integer if-val payload calls at the payload types":
+        val source = "fn identity<T>(value: T) -> T:\n    value\n\n" +
+            "fn text_value(value: text?) -> text:\n    if val payload = value:\n        return identity(payload) + \"b\"\n    \"none\"\n\n" +
+            "fn int_value(value: i64?) -> i64:\n    if val payload = value:\n        return identity(payload) + 2\n    -1\n"
+        var lowering = HirLowering.with_filename("ifval.spl")
+        val hir = lowering.lower_module(parse_full_frontend(source, "ifval.spl", "ifval", Logger(level: 0)))
+        expect(lowering.errors.len()).to_equal(0)
+        var modules: Dict<text, HirModule> = {}
+        modules["ifval"] = hir
+        var pass_ = MonomorphizationPass.create()
+        val result = pass_.run(modules)
+        expect(pass_.diagnostics.len()).to_equal(0)
+        expect(pass_.stats.specializations_created).to_equal(2)
+        expect(pass_.stats.unresolved_generic_calls).to_equal(0)
+        var found_text = false
+        var found_int = false
+        for function in pass_.specialized_functions.values():
+            val specialized: HirFunction = function
+            expect(specialized.params.len()).to_equal(1)
+            match specialized.params[0].type_.kind:
+                case HirTypeKind.Str: found_text = true
+                case HirTypeKind.Int(64, true): found_int = true
+                case _: expect(false).to_be(true)
+        expect(found_text).to_be(true)
+        expect(found_int).to_be(true)
+
+    it "specializes a parsed generic producer's if-val payload as text":
+        val source = "fn identity<T>(value: T) -> T:\n    value\n\n" +
+            "fn producer<T>(value: T) -> T?:\n    Some(value)\n\n" +
+            "fn consume() -> text:\n    if val payload = producer(\"a\"):\n        return identity(payload) + \"b\"\n    \"none\"\n"
+        var lowering = HirLowering.with_filename("producer.spl")
+        val hir = lowering.lower_module(parse_full_frontend(source, "producer.spl", "ifval", Logger(level: 0)))
+        expect(lowering.errors.len()).to_equal(0)
+        var modules: Dict<text, HirModule> = {}
+        modules["ifval"] = hir
+        var pass_ = MonomorphizationPass.create()
+        val result = pass_.run(modules)
+        expect(pass_.diagnostics.len()).to_equal(0)
+        expect(pass_.stats.unresolved_generic_calls).to_equal(0)
+        var found = false
+        for raw in pass_.specialized_functions.values():
+            val function: HirFunction = raw
+            if function.name.starts_with("identity$"):
+                expect(function.return_type.kind == HirTypeKind.Str).to_be(true)
+                found = true
+        expect(found).to_be(true)

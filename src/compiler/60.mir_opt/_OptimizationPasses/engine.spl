@@ -12,9 +12,12 @@
 #
 # Split from optimization_passes.spl to keep module cohesion under the 800-line source limit.
 
-use compiler.mir.mir_instructions.{MirBlock, MirInst, MirInstKind, MirOperand, MirFunction}
+use compiler.mir.mir_instruction_graph.{MirBlock, MirInst, MirFunction}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_instruction_support.{MirOperand}
 use compiler.mir.mir_types.{LocalId, MirConstValue, MirType}
 use compiler.mir.mir_data.*
+use compiler.mir.mir_instruction_support.{MirOperandKind}
 use compiler.mir.mir_instruction_graph.{mir_fold_binop}
 
 
@@ -35,7 +38,6 @@ enum OptimizationLevel:
 impl OptimizationLevel:
     fn to_text() -> text:
         match self:
-            case nil: "none"
             case None_: "none"
             case Debug: "debug"
             case Size: "size"
@@ -178,6 +180,17 @@ impl OptimizationEngine:
             expr_map: {}
         )
 
+    fn result_type(dest: LocalId) -> MirType:
+        """Read the concrete destination type without optional coalescing."""
+        if self.type_map.contains_key(dest.id):
+            val known_type: MirType = self.type_map[dest.id]
+            return known_type
+        MirType.i64()
+
+    fn constant_instruction(dest: LocalId, value: MirConstValue, type_: MirType, span: Span?) -> MirInst:
+        """Keep constant enum and type records explicit across payload lowering."""
+        MirInst(kind: MirInstKind.Const(dest, value, type_), span: span)
+
     # ========================================================================
     # Main Optimization Entry Point
     # ========================================================================
@@ -243,7 +256,7 @@ impl OptimizationEngine:
     me analyze_instruction(inst: MirInst):
         """Analyze single instruction for optimization opportunities."""
         match inst.kind:
-            case Const(dest, value, type_):
+            case MirInstKind.Const(dest, value, type_):
                 # Track constant
                 self.const_map[dest.id] = value
                 self.type_map[dest.id] = type_
@@ -359,11 +372,8 @@ impl OptimizationEngine:
         val folded = self.try_fold_binop(op, left, right)
         if val const_val = folded:
             self.stats.constants_folded = self.stats.constants_folded + 1
-            val type_ = self.type_map[dest.id] ?? MirType.i64()
-            return Some(MirInst(
-                kind: MirInstKind.Const(dest, const_val, type_),
-                span: span
-            ))
+            val type_: MirType = self.result_type(dest)
+            return Some(self.constant_instruction(dest, const_val, type_, span))
 
         # Try algebraic simplifications
         val simplified = self.simplify_binop(dest, op, left, right, span)
@@ -439,20 +449,14 @@ impl OptimizationEngine:
                 if val right_value = right_const:
                     if self.is_zero(right_value):
                         self.stats.zero_eliminations = self.stats.zero_eliminations + 1
-                        val type_ = self.type_map[dest.id] ?? MirType.i64()
-                        return Some(MirInst(
-                            kind: MirInstKind.Const(dest, MirConstValue.Int(0), type_),
-                            span: span
-                        ))
+                        val type_: MirType = self.result_type(dest)
+                        return Some(self.constant_instruction(dest, MirConstValue.Int(0), type_, span))
                 # 0 * x → 0
                 if val left_value = left_const:
                     if self.is_zero(left_value):
                         self.stats.zero_eliminations = self.stats.zero_eliminations + 1
-                        val type_ = self.type_map[dest.id] ?? MirType.i64()
-                        return Some(MirInst(
-                            kind: MirInstKind.Const(dest, MirConstValue.Int(0), type_),
-                            span: span
-                        ))
+                        val type_: MirType = self.result_type(dest)
+                        return Some(self.constant_instruction(dest, MirConstValue.Int(0), type_, span))
 
             # Bitwise identities
             case BitAnd:
@@ -460,11 +464,8 @@ impl OptimizationEngine:
                 if val right_value = right_const:
                     if self.is_zero(right_value):
                         self.stats.zero_eliminations = self.stats.zero_eliminations + 1
-                        val type_ = self.type_map[dest.id] ?? MirType.i64()
-                        return Some(MirInst(
-                            kind: MirInstKind.Const(dest, MirConstValue.Int(0), type_),
-                            span: span
-                        ))
+                        val type_: MirType = self.result_type(dest)
+                        return Some(self.constant_instruction(dest, MirConstValue.Int(0), type_, span))
                 # x & -1 → x (all bits set)
                 if val right_value = right_const:
                     if self.is_all_ones(right_value):
@@ -525,7 +526,7 @@ impl OptimizationEngine:
                 case Mul:
                     # x * power_of_2 → x << log2(n)
                     match right_value:
-                        case Int(n):
+                        case MirConstValue.Int(n):
                             val shift_amt = self.log2_if_power_of_2(n)
                             if val shift_value = shift_amt:
                                 self.stats.strength_reductions = self.stats.strength_reductions + 1
@@ -541,7 +542,7 @@ impl OptimizationEngine:
                 case Div:
                     # x / power_of_2 → x >> log2(n) (for unsigned)
                     match right_value:
-                        case Int(n):
+                        case MirConstValue.Int(n):
                             if n > 0:
                                 val shift_amt = self.log2_if_power_of_2(n)
                                 if val shift_value = shift_amt:
@@ -570,11 +571,8 @@ impl OptimizationEngine:
         val folded = self.try_fold_unaryop(op, operand)
         if val folded_value = folded:
             self.stats.constants_folded = self.stats.constants_folded + 1
-            val type_ = self.type_map[dest.id] ?? MirType.i64()
-            return Some(MirInst(
-                kind: MirInstKind.Const(dest, folded_value, type_),
-                span: span
-            ))
+            val type_: MirType = self.result_type(dest)
+            return Some(self.constant_instruction(dest, folded_value, type_, span))
 
         # Try simplifications
         match op:
@@ -620,7 +618,7 @@ impl OptimizationEngine:
                             kind: MirInstKind.Copy(dest, local),
                             span: span
                         ))
-                    case Const(_, _):
+                    case MirOperandKind.Const(_, _):
                         # An inline constant has no source local. Preserve the
                         # valid Cast instead of fabricating LocalId(0).
                         ()
@@ -673,17 +671,19 @@ impl OptimizationEngine:
         val const_val = self.get_operand_const(operand)
         if val const_value = const_val:
             match const_value:
-                case Int(v):
-                    val result = match op:
-                        case Neg: -v
-                        case Not: if v == 0: 1 else: 0
-                        case BitNot: ~v
+                case MirConstValue.Int(v):
+                    val operand_value: i64 = v
+                    val result: i64 = match op:
+                        case Neg: -operand_value
+                        case Not: if operand_value == 0: 1 else: 0
+                        case BitNot: ~operand_value
                         case _: return nil
                     Some(MirConstValue.Int(result))
 
-                case Float(v):
-                    val result = match op:
-                        case Neg: -v
+                case MirConstValue.Float(v):
+                    val operand_value: f64 = v
+                    val result: f64 = match op:
+                        case Neg: -operand_value
                         case _: return nil
                     Some(MirConstValue.Float(result))
 
@@ -695,8 +695,9 @@ impl OptimizationEngine:
     fn get_operand_const(operand: MirOperand) -> MirConstValue?:
         """Get constant value if operand is constant."""
         match operand.kind:
-            case Const(value, _):
-                Some(value)
+            case MirOperandKind.Const(value, _):
+                val constant_value: MirConstValue = value
+                Some(constant_value)
             case Copy(local) | Move(local):
                 if self.const_map.has(local.id):
                     Some(self.const_map[local.id])
@@ -706,8 +707,9 @@ impl OptimizationEngine:
     fn get_operand_type(operand: MirOperand) -> MirType?:
         """Get type of operand."""
         match operand.kind:
-            case Const(_, type_):
-                Some(type_)
+            case MirOperandKind.Const(_, type_):
+                val constant_type: MirType = type_
+                Some(constant_type)
             case Copy(local) | Move(local):
                 if self.type_map.has(local.id):
                     Some(self.type_map[local.id])
@@ -722,7 +724,7 @@ impl OptimizationEngine:
                     Some(self.def_map[local.id])
                 else:
                     nil
-            case Const(_, _):
+            case MirOperandKind.Const(_, _):
                 nil
 
     fn operand_to_local(operand: MirOperand) -> LocalId:
@@ -730,7 +732,7 @@ impl OptimizationEngine:
         match operand.kind:
             case Copy(local) | Move(local):
                 local
-            case Const(_, _):
+            case MirOperandKind.Const(_, _):
                 # Shouldn't happen - caller should check
                 LocalId(id: 0)
 
@@ -739,7 +741,7 @@ impl OptimizationEngine:
         match operand.kind:
             case Copy(local) | Move(local):
                 self.increment_use(local.id)
-            case Const(_, _):
+            case MirOperandKind.Const(_, _):
                 pass
 
     me increment_use(local_id: i64):
@@ -754,21 +756,21 @@ impl OptimizationEngine:
     fn is_zero(value: MirConstValue) -> bool:
         """Check if constant value is zero."""
         match value:
-            case Int(0): true
-            case Float(f): f == 0.0
+            case MirConstValue.Int(0): true
+            case MirConstValue.Float(f): f == 0.0
             case _: false
 
     fn is_one(value: MirConstValue) -> bool:
         """Check if constant value is one."""
         match value:
-            case Int(1): true
-            case Float(f): f == 1.0
+            case MirConstValue.Int(1): true
+            case MirConstValue.Float(f): f == 1.0
             case _: false
 
     fn is_all_ones(value: MirConstValue) -> bool:
         """Check if all bits are set (-1 for signed)."""
         match value:
-            case Int(n):
+            case MirConstValue.Int(n):
                 n == -1
             case _:
                 false

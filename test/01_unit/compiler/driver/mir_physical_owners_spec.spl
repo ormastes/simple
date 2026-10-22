@@ -1,0 +1,102 @@
+use std.spec.*
+use compiler.driver.driver_mir_physical_owners.{driver_mir_physical_source_indices_v1, driver_mir_feed_is_identity_v1}
+
+val MIR_ALIAS_DIGEST = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val MIR_OTHER_DIGEST = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+describe "MIR birth feed identity requires actual ordered owners":
+    it "preserves a feed matching the complete admitted order":
+        expect(driver_mir_feed_is_identity_v1([0, 1], ["app.a", "app.b"], ["app.a", "app.b"])).to_equal(true)
+
+    it "rejects a reversed feed despite equal counts and identity source indices":
+        expect(driver_mir_feed_is_identity_v1([0, 1], ["app.a", "app.b"], ["app.b", "app.a"])).to_equal(false)
+
+    it "rejects missing and extra actual feed owners":
+        expect(driver_mir_feed_is_identity_v1([0, 1], ["app.a", "app.b"], ["app.a"])).to_equal(false)
+        expect(driver_mir_feed_is_identity_v1([0], ["app.a"], ["app.a", "app.b"])).to_equal(false)
+
+    it "rejects filtered inventories even when retained feed owners match":
+        expect(driver_mir_feed_is_identity_v1([0, 2], ["app.a", "app.alias", "app.b"], ["app.a", "app.b"])).to_equal(false)
+        expect(driver_mir_feed_is_identity_v1([0], ["app.a", "app.alias"], ["app.a"])).to_equal(false)
+
+    it "rejects reordered duplicate and out of bounds indices":
+        expect(driver_mir_feed_is_identity_v1([1, 0], ["app.a", "app.b"], ["app.b", "app.a"])).to_equal(false)
+        expect(driver_mir_feed_is_identity_v1([0, 0], ["app.a", "app.b"], ["app.a", "app.a"])).to_equal(false)
+        expect(driver_mir_feed_is_identity_v1([-1], ["app.a"], ["app.a"])).to_equal(false)
+        expect(driver_mir_feed_is_identity_v1([1], ["app.a"], ["app.a"])).to_equal(false)
+
+    it "uses canonical provider owners while refusing empty or wrong owners":
+        expect(driver_mir_feed_is_identity_v1([0], ["lib.common.provider"], ["std.common.provider"])).to_equal(true)
+        expect(driver_mir_feed_is_identity_v1([0], [""], [""])).to_equal(false)
+        expect(driver_mir_feed_is_identity_v1([0], ["app.a"], [""])).to_equal(false)
+        expect(driver_mir_feed_is_identity_v1([0], ["app.a"], ["app.other"])).to_equal(false)
+
+describe "MIR work owns admitted physical surfaces":
+    it "retains one std/lib provider while preserving another source":
+        val paths = ["src/lib/common/provider.spl", "src/lib/common/provider.spl", "src/app/main.spl"]
+        val identities = [MIR_ALIAS_DIGEST, MIR_ALIAS_DIGEST, MIR_OTHER_DIGEST]
+        val owners = ["lib.common.provider", "std.common.provider", "app.main"]
+        val result = driver_mir_physical_source_indices_v1(paths, identities, owners)
+        expect(result.is_ok()).to_equal(true)
+        val selected = result.unwrap()
+        expect(selected.len()).to_equal(2)
+        expect(selected[0]).to_equal(0)
+        expect(selected[1]).to_equal(2)
+        expect(paths.len()).to_equal(3)
+        expect(identities[1]).to_equal(MIR_ALIAS_DIGEST)
+
+    it "chooses the first admitted row even when the std alias precedes lib":
+        val result = driver_mir_physical_source_indices_v1(
+            ["src/lib/common/provider.spl", "src/lib/common/provider.spl"],
+            [MIR_ALIAS_DIGEST, MIR_ALIAS_DIGEST],
+            ["std.common.provider", "lib.common.provider"])
+        expect(result.is_ok()).to_equal(true)
+        val selected = result.unwrap()
+        expect(selected.len()).to_equal(1)
+        expect(selected[0]).to_equal(0)
+
+    it "rejects changed content under the same owner and physical path":
+        val result = driver_mir_physical_source_indices_v1(
+            ["src/lib/common/provider.spl", "src/lib/common/provider.spl"],
+            [MIR_ALIAS_DIGEST, MIR_OTHER_DIGEST],
+            ["lib.common.provider", "std.common.provider"])
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("ownership conflict")
+
+    it "rejects a second physical declaration with the same canonical owner":
+        val result = driver_mir_physical_source_indices_v1(
+            ["src/lib/common/provider.spl", "other/lib/common/provider.spl"],
+            [MIR_ALIAS_DIGEST, MIR_ALIAS_DIGEST],
+            ["lib.common.provider", "std.common.provider"])
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("ownership conflict")
+
+    it "rejects distinct canonical owners claiming the same physical source":
+        val result = driver_mir_physical_source_indices_v1(
+            ["src/lib/common/provider.spl", "src/lib/common/provider.spl"],
+            [MIR_ALIAS_DIGEST, MIR_ALIAS_DIGEST],
+            ["lib.common.provider", "lib.common.other"])
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("conflicting owners")
+
+    it "does not merge equal basenames from different owners":
+        val result = driver_mir_physical_source_indices_v1(
+            ["src/lib/left/provider.spl", "src/lib/right/provider.spl"],
+            [MIR_ALIAS_DIGEST, MIR_ALIAS_DIGEST],
+            ["lib.left.provider", "lib.right.provider"])
+        expect(result.is_ok()).to_equal(true)
+        val selected = result.unwrap()
+        expect(selected.len()).to_equal(2)
+
+    it "rejects missing content identity and inventory shape mismatch":
+        val missing = driver_mir_physical_source_indices_v1(["provider.spl"], [""], ["provider"])
+        expect(missing.is_err()).to_equal(true)
+        val malformed = driver_mir_physical_source_indices_v1(["provider.spl"], [], ["provider"])
+        expect(malformed.is_err()).to_equal(true)
+
+    it "rejects truncated and non-hex content identities":
+        val truncated = driver_mir_physical_source_indices_v1(["provider.spl"], ["aaaaaaaa"], ["provider"])
+        expect(truncated.is_err()).to_equal(true)
+        val malformed = driver_mir_physical_source_indices_v1(["provider.spl"],
+            ["gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg"], ["provider"])
+        expect(malformed.is_err()).to_equal(true)

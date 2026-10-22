@@ -134,8 +134,8 @@ fn get_field_value(val: &Value, field: &str) -> Result<Value, CompileError> {
             }
         }
         Value::Dict(map) => {
-            if let Some(v) = map.get(field) {
-                Ok(v.clone())
+            if let Some(v) = crate::interpreter::module_dict_get(map, field) {
+                Ok(v)
             } else {
                 let ctx = ErrorContext::new()
                     .with_code(codes::UNDEFINED_FIELD)
@@ -542,7 +542,7 @@ pub(crate) fn evaluate_expr(
                         Value::Nil => false,
                         // Empty collections are not present
                         Value::Array(arr) => !arr.is_empty(),
-                        Value::Dict(dict) => !dict.is_empty(),
+                        Value::Dict(dict) => !dict.is_empty() || crate::interpreter::module_dict_len(dict) != 0,
                         // Empty strings are not present
                         Value::Str(s) => !s.is_empty(),
                         // Objects with class "Set" - check if inner items are empty

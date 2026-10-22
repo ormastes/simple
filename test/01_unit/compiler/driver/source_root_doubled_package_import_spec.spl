@@ -1,0 +1,76 @@
+# @tag: unit, compiler, driver, imports
+"""
+# An explicit source root must not answer a module import with an ancestor facade
+
+`compiler.backend.codegen_types` names `src/compiler/70.backend/backend/codegen_types.spl`
+(the `compiler.backend` -> `70.backend/backend` rewrite owned by the checkout
+resolver). The source-root resolver has no such rewrite. It must report the
+module as missing so the checkout resolver decides, not strip the last segment
+and answer with the package facade `70.backend/__init__.spl`: that binds the
+import spelling to the facade surface, and every named item then fails with
+`module compiler.backend.codegen_types has no exported item ...`.
+
+See doc/08_tracking/bug/source_root_resolver_facade_fallback_2026-10-11.md.
+"""
+
+use std.spec
+use compiler.driver.driver_source_loading.{_driver_resolve_source_root_entry_import_from_v1, _driver_resolve_entry_import}
+use compiler.common.source_root_resolution.{SourceRootResolutionV1}
+
+# Same order as the native closure walker (driver_source_pipeline_loading.spl):
+# a selected source root wins; Missing falls back to the checkout resolver.
+fn resolve_like_closure(module_path: text, roots: [text], dir: text) -> text:
+    match _driver_resolve_source_root_entry_import_from_v1(module_path, roots, dir):
+        case SourceRootResolutionV1.Found(path): path
+        case SourceRootResolutionV1.Missing: _driver_resolve_entry_import(module_path, dir)
+        case SourceRootResolutionV1.Ambiguous(_): "AMBIGUOUS"
+
+fn phase3_resolve(module_path: text) -> text:
+    val roots = ["src/compositions/kernel_llvm_cranelift", "src/compiler", "src/app", "src/lib"]
+    resolve_like_closure(module_path, roots, "src/app/cli")
+
+describe "source roots and doubled package directories":
+    it "resolves compiler.backend.codegen_types to its file, not the backend facade":
+        val path = phase3_resolve("compiler.backend.codegen_types")
+        print "codegen_types -> {path}"
+        expect(path.ends_with("src/compiler/70.backend/backend/codegen_types.spl")).to_equal(true)
+
+    it "resolves compiler.backend.native.mach_inst to its file":
+        val path = phase3_resolve("compiler.backend.native.mach_inst")
+        print "mach_inst -> {path}"
+        expect(path.ends_with("src/compiler/70.backend/backend/native/mach_inst.spl")).to_equal(true)
+
+    it "resolves compiler.mir_opt.mod to mir_opt/mod.spl, not the tier facade":
+        val path = phase3_resolve("compiler.mir_opt.mod")
+        print "mir_opt.mod -> {path}"
+        expect(path.ends_with("src/compiler/60.mir_opt/mir_opt/mod.spl")).to_equal(true)
+
+    # These spellings sat behind the phase-3 `unresolved type` errors
+    # (LlvmTypeMapper, LlvmVersionInfo, GpuBackendKernelPlan,
+    # GpuGenerated2DBackendCompileContract, PortableComputeCompilePlan): the
+    # declaring module was bound to the backend facade, so dependents of its
+    # importers lost the type.
+    it "resolves the doubled spellings behind the unresolved-type errors":
+        for leaf in ["llvm_type_mapper", "llvm_version", "gpu_backend_metadata", "gpu_generated_2d_contract", "gpu_portable_compute"]:
+            val path = phase3_resolve("compiler.backend." + leaf)
+            print "{leaf} -> {path}"
+            expect(path.ends_with("src/compiler/70.backend/backend/" + leaf + ".spl")).to_equal(true)
+
+    it "still strips a named-import suffix when no module owns the full spelling":
+        val path = phase3_resolve("compiler.backend.codegen_types.CodegenOutputKind")
+        print "codegen_types.CodegenOutputKind -> {path}"
+        expect(path.ends_with("src/compiler/70.backend/backend/codegen_types.spl")).to_equal(true)
+
+    it "keeps a composition root ahead of the checkout for a module it owns":
+        val path = phase3_resolve("compiler.driver.bootstrap_k1_selected")
+        expect(path).to_equal("src/compositions/kernel_llvm_cranelift/compiler/driver/bootstrap_k1_selected.spl")
+
+    # `use backend.env.{...}` (70.backend/backend.spl) names no module the roots
+    # or the checkout own. Stripping it to `backend` must not answer with
+    # 70.backend/__init__.spl: that pulled the whole backend facade, and through
+    # it arch_rules.spl, into the phase-3 closure.
+    it "does not answer an unresolvable root-relative import with a package facade":
+        val path = phase3_resolve("backend.env")
+        print "backend.env -> {path}"
+        expect(path.ends_with("__init__.spl")).to_equal(false)
+        expect(path.ends_with("mod.spl")).to_equal(false)

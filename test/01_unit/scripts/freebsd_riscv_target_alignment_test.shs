@@ -1,0 +1,35 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+check_target() (
+    machine=$1 processor=$2 expected=$3 cargo=$4 system=$5
+    uname() {
+        case "$1" in
+            -m) echo "$machine" ;;
+            -p) [ "$processor" != unavailable ] || return 1; echo "$processor" ;;
+            -s) echo "$system" ;;
+            *) return 1 ;;
+        esac
+    }
+    # Whitespace disables tool discovery without mocking host LLVM binaries.
+    LLVM_VERSIONS=' '
+    . "$root/scripts/setup/platform-detect.shs" || exit 1
+    # In a rejection test, successful sourcing itself is the regression.
+    [ "$expected" != rejected ] || exit 0
+    [ "$PLATFORM_TRIPLE" = "$expected" ] || exit 1
+    [ "$PLATFORM_RUST_TRIPLE" = "$cargo" ] || exit 1
+    . "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+    [ "$(bootstrap_stage3_host_platform)" = "$PLATFORM_TRIPLE" ]
+)
+check_target riscv riscv64 riscv64-unknown-freebsd riscv64gc-unknown-freebsd FreeBSD
+check_target riscv64 unavailable riscv64-unknown-freebsd riscv64gc-unknown-freebsd FreeBSD
+check_target amd64 unavailable x86_64-unknown-freebsd x86_64-unknown-freebsd FreeBSD
+check_target arm64 unavailable aarch64-unknown-freebsd aarch64-unknown-freebsd FreeBSD
+check_target x86_64 unavailable x86_64-unknown-linux-gnu x86_64-unknown-linux-gnu Linux
+for processor in riscv32 unknown unavailable; do
+    if check_target riscv "$processor" rejected rejected FreeBSD >/dev/null 2>&1; then
+        echo "FAIL: accepted unsupported processor $processor" >&2
+        exit 1
+    fi
+done
+echo 'freebsd_riscv_target_alignment=pass'

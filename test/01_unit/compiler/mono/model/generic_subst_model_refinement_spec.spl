@@ -39,6 +39,23 @@ fn sp() -> Span:
 fn hir(kind: HirTypeKind) -> HirType:
     HirType(kind: kind, span: sp())
 
+fn model_monomorphization_pass() -> MonomorphizationPass:
+    # The model's synthetic nominal ids must have real declaration owners.
+    # Missing production ownership is an error, not an alternate name key.
+    var symbols = SymbolTable.new()
+    for i in 0..7:
+        symbols.define("padding_{i}", SymbolKind.Variable, nil, sp(), Visibility.Private, false, nil)
+    val box_id = symbols.define("Box", SymbolKind.Struct, nil, sp(), Visibility.Public, false, "model")
+    val pair_id = symbols.define("Pair", SymbolKind.Struct, nil, sp(), Visibility.Public, false, "model")
+    expect(box_id.id).to_equal(7)
+    expect(pair_id.id).to_equal(8)
+    var pass_ = MonomorphizationPass.create()
+    pass_.current_module = "model"
+    pass_.module_symbols["model"] = symbols
+    pass_.named_symbol_names["model#7"] = "Box"
+    pass_.named_symbol_names["model#8"] = "Pair"
+    pass_
+
 fn to_hir_list(ts: [MType]) -> [HirType]:
     var out: [HirType] = []
     for t in ts:
@@ -224,7 +241,7 @@ describe "model vs production: matching":
 describe "model vs production: keys":
     it "hir_type_key and the specialization type_key are injective on closed types":
         val types = mu_closed_types()
-        var pass_ = MonomorphizationPass.create()
+        var pass_ = model_monomorphization_pass()
         var binding_keys: [text] = []
         var spec_keys: [text] = []
         for t in types:
@@ -257,7 +274,7 @@ describe "model vs production: one specialization name per instantiation":
         # Two key-sharing defects were found here by reading, so the display
         # name is checked against structural equality over the whole closed
         # universe: singles, and pairs over the 39 closed depth<=1 types.
-        var pass_ = MonomorphizationPass.create()
+        var pass_ = model_monomorphization_pass()
         var lists: [[MType]] = []
         for t in mu_closed_types():
             val tt: MType = t

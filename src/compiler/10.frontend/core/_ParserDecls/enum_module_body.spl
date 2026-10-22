@@ -41,6 +41,7 @@ use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get,
 use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_warn, parser_warn_print_if_needed}
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.core.parser.{parser_parse_type, parser_parse_type_with_union}
+use compiler.core.parser.{parser_legacy_let_decl_ahead}
 use compiler.core.tokens.{TOK_KW_AS, TOK_KW_CE, TOK_PIPE, TOK_ASSIGN, tok_kind_name}
 use compiler.core.tokens.{TOK_KW_DYN, TOK_KW_EXTEND}
 use compiler.frontend.core._ParserDecls.extend_decls.{parse_extend_enum_decl, parser_reset_extend_enums}
@@ -264,6 +265,7 @@ fn parse_resource_decl(loop_index: i64) -> i64:
     decl_val_binding("_expr_resource_" + int_to_str(loop_index), -1, marker, -1)
 
 fn parse_enum_decl() -> i64:
+    val representation_owner = representation_declaration_begin_v1("enum")
     parser_advance()
     val enum_name = par_text_get()
     parser_expect(6)
@@ -287,6 +289,7 @@ fn parse_enum_decl() -> i64:
     # but declares no return type" the moment the body actually returns one --
     # e.g. `fn make(n: i64) -> MyEnum: return MyEnum.A(n)`.
     val enum_type_id = named_type_register(enum_name, [], [])
+    representation_declaration_header_v1(representation_owner)
 
     parser_expect(161)
     parser_skip_newlines()
@@ -458,6 +461,7 @@ fn parse_enum_decl() -> i64:
     if saw_complete_section or saw_dyn_section:
         parser_record_enum_open_regions(enum_name, saw_complete_section, saw_dyn_section)
     val enum_d = decl_enum_def(enum_name, variant_names, variant_discriminants, variant_payload_types_flat, variant_payload_counts, variant_payload_field_names_flat, 0)
+    representation_declaration_end_v1(representation_owner, enum_d, enum_name)
     # `enum Opt<T>:` -- thread the `<T, ...>` names parsed above onto the flat
     # decl's shared TYPE_PARAMS slot, exactly as parse_struct_decl does for
     # `struct Box<T>` (fn_struct_decls.spl:1098). Without this the list was
@@ -609,6 +613,8 @@ var PENDING_FLATTEN_STRUCT_OUTPUT: i64 = 0
 # parsed decl by name into UNSAFE_ANNOTATIONS. Block-level `@unsafe` is NOT
 # captured here (module-decl loop only) — see the gap note in
 # doc/08_tracking/bug/safety_checker_pass_never_invoked_2026-07-27.md.
+use compiler.frontend.core.representation_declarations_v1.{representation_parse_attribute_v1, representation_declaration_begin_v1, representation_declaration_header_v1, representation_declaration_end_v1, representation_reject_pending_v1, representation_parser_promote_transient_owner_v1}
+
 var PENDING_UNSAFE: i64 = 0
 var PENDING_UNSAFE_REASON: text = ""
 var PENDING_UNSAFE_CAPS: [text] = []
@@ -654,12 +660,19 @@ fn parser_parse_member_attribute() -> bool:
     Refs: doc/08_tracking/bug/caret_suite_native_build_blocked_stage2_windows_2026-09-03.md (B1)"""
     if par_kind_get() != 171:
         return false
+    val representation_start = lex_token_start_get()
+    val representation_line = par_line_get()
+    val representation_col = par_col_get()
     parser_advance()
     if par_kind_get() != 6:
         parser_error("expected attribute name after `@` in class body")
         return true
     val attr_name = par_text_get()
     parser_advance()
+    if attr_name == "representation_boundary":
+        representation_parse_attribute_v1(representation_start, representation_line, representation_col)
+        parser_skip_newlines_and_semicolons()
+        return true
     var attr_reason = ""
     var attr_caps: [text] = []
     if par_kind_get() == 140:
@@ -827,7 +840,8 @@ extern fn rt_transient_heap_promote<T>(value: T) -> bool
 pub fn parser_declaration_metadata_promote_transient_owner() -> bool:
     rt_transient_heap_promote(UNSAFE_ANNOTATIONS) and
         rt_transient_heap_promote(ENUM_ATTRIBUTES) and
-        rt_transient_heap_promote(ENUM_OPEN_REGIONS)
+        rt_transient_heap_promote(ENUM_OPEN_REGIONS) and
+        representation_parser_promote_transient_owner_v1()
 
 fn parser_record_enum_open_regions(enum_name: text, complete_open: bool, dyn_open: bool):
     val c = if complete_open: "1" else: "0"
@@ -888,6 +902,7 @@ fn parse_enum_open_section_body():
         parser_advance()
 
 fn parser_reset_pending_vhdl_decorators():
+    representation_reject_pending_v1()
     PENDING_DECL_ATTRS = []
     PENDING_HARDWARE = 0
     PENDING_CLOCKED_ARGS = []
@@ -940,6 +955,7 @@ fn parse_module_body():
             parser_advance()
             parser_skip_newlines_and_semicolons()
         if par_kind_get() == 190:
+            representation_reject_pending_v1()
             break
         val pm_kind = par_kind_get()
         val pm_line = par_line_get()
@@ -953,6 +969,9 @@ fn parse_module_body():
         if parser_module_trace_enabled():
             eprint("[parser-module] decl:start i={i} kind={par_kind_get()} text={par_text_get()} line={par_line_get()} col={par_col_get()}")
         val parsed_visibility = parse_top_level_visibility()
+        val representation_target = par_kind_get()
+        if not [20, 34, 23, 24, 25, 31, 53, 30, 171].contains(representation_target):
+            representation_reject_pending_v1()
         if parsed_visibility != "private":
             parser_skip_newlines_and_semicolons()
             val visible_decl = parse_module_decl_with_visibility(i, parsed_visibility)
@@ -987,6 +1006,7 @@ fn parse_module_body():
                 module_add_decl(d)
                 parser_reset_pending_vhdl_decorators()
             else:
+                representation_reject_pending_v1()
                 parser_error("expected 'fn' after 'async'")
         elif par_kind_get() == 20:
             val d = parse_fn_decl(0)  # 0 = not async
@@ -1023,6 +1043,7 @@ fn parse_module_body():
                 module_add_decl(static_fn_d)
                 parser_reset_pending_vhdl_decorators()
             else:
+                representation_reject_pending_v1()
                 val static_is_mut = par_kind_get() == 6 and par_text_get() == "mut"
                 if static_is_mut:
                     parser_advance()
@@ -1083,6 +1104,12 @@ fn parse_module_body():
             module_add_decl(d)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 22:
+            val d = parse_var_decl()
+            module_add_decl(d)
+            parser_reset_pending_vhdl_decorators()
+        elif par_kind_get() == TOK_IDENT and par_text_get() == "let" and parser_legacy_let_decl_ahead():
+            # Legacy `let [mut]` module-level binding (seed parity: parse_let
+            # lowers to the same mutable global as `var`).
             val d = parse_var_decl()
             module_add_decl(d)
             parser_reset_pending_vhdl_decorators()
@@ -1211,6 +1238,9 @@ fn parse_module_body():
         elif par_kind_get() == 171:
             # Decorator: @gpu, @gpu_kernel, @simd, @bounds(...), @derive(Eq, Hash, Debug), etc.
             # Also: @allow(...), @inline, @no_gc, @tag:... and other file-level annotations
+            val representation_start = lex_token_start_get()
+            val representation_line = par_line_get()
+            val representation_col = par_col_get()
             parser_advance()
             var decorator_name = ""
             if par_kind_get() == 6:
@@ -1221,6 +1251,10 @@ fn parse_module_body():
                 # Capture its text and consume it so we don't mis-dispatch to AOP parser
                 decorator_name = par_text_get()
                 parser_advance()
+            if decorator_name == "representation_boundary":
+                representation_parse_attribute_v1(representation_start, representation_line, representation_col)
+                parser_skip_newlines_and_semicolons()
+                continue
             # SPipe helper labels use the compact `@step "label"` spelling.
             # The label is source metadata; consume it here so the following
             # declaration remains the next module item.
@@ -1394,6 +1428,16 @@ fn parse_module_body():
                 pass_dn
             elif decorator_name == "flatten_struct_output":
                 PENDING_FLATTEN_STRUCT_OUTPUT = 1
+            elif decorator_name == "no_gc" and attr_raw_args == "strict":
+                # `@no_gc(strict)`: opt-in no-GC ownership-sigil mode for the
+                # whole module (doc/05_design/language/misc/memory.md). Same
+                # inert-marker trick as `@layer(NAME)` below: module_assembly
+                # records it in the resource_registry strict-module set and
+                # drops the marker. Plain `@no_gc` stays an ignored annotation.
+                var nogc_marker_args: [i64] = []
+                val nogc_marker = expr_call(expr_ident("__module_nogc_strict", 0), nogc_marker_args, 0)
+                module_add_decl(decl_val_binding("_expr_nogc_strict_" + int_to_str(i), -1, nogc_marker, -1))
+                parser_reset_pending_vhdl_decorators()
             elif decorator_name == "layer":
                 # `@layer(NAME)` module tag (M1). Unlike @gpu/@derive/etc,
                 # this attribute does not decorate the *next* declaration --

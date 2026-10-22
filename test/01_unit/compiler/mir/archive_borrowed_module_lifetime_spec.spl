@@ -1,0 +1,65 @@
+# Refusal and lifecycle controls use actual frontend HIR and real scope APIs.
+# Positive final admission/execution belongs to the genuine driver fixture.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.archive_borrowed_module_v1.*
+use compiler.mir._MirLowering.module_lowering.*
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end}
+
+fn borrowed_mir_actual_module() -> HirModule:
+    val source = "fn main() -> i64:\n    7\n"
+    val ast = parse_full_frontend(source, "borrowed_mir.spl", "borrowed_mir", Logger(level: 0))
+    var frontend = HirLowering.with_filename("borrowed_mir.spl")
+    val module = frontend.lower_module(ast)
+    expect(frontend.errors.len()).to_equal(0)
+    module
+
+describe "borrowed MIR module refuses without stealing a lifecycle", tag: ["only-compiled"]:
+    it "rejects an inactive scope without mutating the real lowering":
+        val module = borrowed_mir_actual_module()
+        var lowering = MirLowering.new(module.symbols)
+        lowering.use_explicit_semantic_policy()
+        val counter = lowering.symbols.next_symbol_id
+        expect(transient_array_scope_state_v1()).to_equal(0)
+        val result = lowering.lower_archive_module_in_owned_scope_v1(module, true)
+        expect(result.is_err()).to_equal(true)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+        expect(lowering.symbols.next_symbol_id).to_equal(counter)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "rejects missing complete declarations while preserving the active caller scope":
+        val module = borrowed_mir_actual_module()
+        var lowering = MirLowering.new(module.symbols)
+        lowering.use_explicit_semantic_policy()
+        expect(transient_scope_begin()).to_equal(true)
+        val refused = lowering.lower_archive_module_in_owned_scope_v1(module, true).is_err()
+        val state = transient_array_scope_state_v1()
+        val nested = transient_scope_begin()
+        val paused = transient_scope_pause()
+        val ended = transient_scope_end()
+        expect(refused).to_equal(true)
+        expect(state).to_equal(1)
+        expect(nested).to_equal(false)
+        expect(paused).to_equal(true)
+        expect(ended).to_equal(true)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+
+    it "rejects a paused scope and leaves it paused until the caller closes it":
+        val module = borrowed_mir_actual_module()
+        var lowering = MirLowering.new(module.symbols)
+        lowering.use_explicit_semantic_policy()
+        expect(transient_scope_begin()).to_equal(true)
+        expect(transient_scope_pause()).to_equal(true)
+        val refused = lowering.lower_archive_module_in_owned_scope_v1(module, true).is_err()
+        val state = transient_array_scope_state_v1()
+        val ended = transient_scope_end()
+        expect(refused).to_equal(true)
+        expect(state).to_equal(2)
+        expect(ended).to_equal(true)
+        expect(transient_array_scope_state_v1()).to_equal(0)

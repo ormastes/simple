@@ -1,0 +1,98 @@
+# @req REQ-GENERIC-ANNOTATION-OWNER
+# @tag: unit, compiler, mono, generics
+# A generic annotation carries an owner-qualified nominal base. Provider and
+# consumer tables may assign different ids to that same declaration, or the
+# same id to unrelated declarations. Neither accident may decide inference.
+use std.spec
+use compiler.hir.hir_types.*
+use compiler.common.diagnostics.span.Span
+use compiler.mono.monomorphize_integration.{NominalBindingContext, bind_type_params, hir_type_key}
+
+fn annotation_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn annotation_table(owner: text, padding: i64) -> (SymbolTable, SymbolId):
+    var table = SymbolTable.new()
+    for i in 0..padding:
+        table.define("padding_{i}", SymbolKind.Variable, nil, Span.empty(), Visibility.Private, false, nil)
+    val id = table.define("Bag", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, owner)
+    (table, id)
+
+fn annotation_match(pattern_owner: text, argument_owner: text, argument_padding: i64, nested: bool, parameterized: bool = true) -> (bool, Dict<text, HirType>):
+    val (provider, pattern_id) = annotation_table(pattern_owner, 0)
+    val (consumer, argument_id) = annotation_table(argument_owner, argument_padding)
+    val context = NominalBindingContext(pattern_symbols: provider, argument_symbols: consumer, pattern_module: "provider", argument_module: "consumer")
+    var pattern = annotation_type(HirTypeKind.Named(pattern_id, [annotation_type(HirTypeKind.TypeParam("T", []))]))
+    var argument = annotation_type(HirTypeKind.Named(argument_id, [annotation_type(HirTypeKind.Str)]))
+    if not parameterized:
+        pattern = annotation_type(HirTypeKind.Named(pattern_id, []))
+        argument = annotation_type(HirTypeKind.Named(argument_id, []))
+    if nested:
+        pattern = annotation_type(HirTypeKind.Array(pattern, nil))
+        argument = annotation_type(HirTypeKind.Array(argument, nil))
+    var bindings: Dict<text, HirType> = {}
+    val accepted = bind_type_params(pattern, argument, bindings, context)
+    (accepted, bindings)
+
+describe "generic nominal matching respects the declaration owner":
+    it "accepts one declaration imported under a different module-local id":
+        val (accepted, bindings) = annotation_match("lib.bags", "lib.bags", 3, false)
+        expect(accepted).to_be(true)
+        expect(bindings.len()).to_equal(1)
+        expect(hir_type_key(bindings["T"])).to_equal("str")
+
+    it "rejects unrelated same-name declarations whose local ids collide":
+        val (accepted, bindings) = annotation_match("lib.first", "lib.second", 0, false)
+        expect(accepted).to_be(false)
+        expect(bindings.len()).to_equal(0)
+
+    it "threads ownership through an array containing a nominal instance":
+        val (accepted, bindings) = annotation_match("lib.bags", "lib.bags", 5, true)
+        expect(accepted).to_be(true)
+        expect(hir_type_key(bindings["T"])).to_equal("str")
+
+    it "rejects a colliding owner inside the same container shape":
+        val (accepted, bindings) = annotation_match("lib.first", "lib.second", 0, true)
+        expect(accepted).to_be(false)
+        expect(bindings.len()).to_equal(0)
+
+    it "checks ownership for fixed nominal parameters without type arguments":
+        val (accepted, bindings) = annotation_match("lib.first", "lib.second", 0, false, false)
+        expect(accepted).to_be(false)
+        expect(bindings.len()).to_equal(0)
+
+    it "accepts a fixed nominal parameter imported under a different id":
+        val (accepted, bindings) = annotation_match("lib.bags", "lib.bags", 3, false, false)
+        expect(accepted).to_be(true)
+        expect(bindings.len()).to_equal(0)
+
+    it "accepts repeated T witnesses through distinct aliases of one nominal declaration":
+        var caller = SymbolTable.new()
+        val first = caller.define("FirstBag", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, "lib.bags")
+        val second = caller.define("SecondBag", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, "lib.bags")
+        caller.rename_symbol(first, "Bag")
+        caller.rename_symbol(second, "Bag")
+        expect(first.id == second.id).to_be(false)
+        val context = NominalBindingContext(pattern_symbols: SymbolTable.new(), argument_symbols: caller, pattern_module: "provider", argument_module: "consumer")
+        val parameter = annotation_type(HirTypeKind.TypeParam("T", []))
+        val first_type = annotation_type(HirTypeKind.Named(first, []))
+        val second_type = annotation_type(HirTypeKind.Named(second, []))
+        var bindings: Dict<text, HirType> = {}
+        expect(bind_type_params(parameter, first_type, bindings, context)).to_be(true)
+        expect(bind_type_params(parameter, second_type, bindings, context)).to_be(true)
+        expect(bindings.len()).to_equal(1)
+
+    it "uses the same alias identity rule for repeated nested nominal witnesses":
+        var caller = SymbolTable.new()
+        val first = caller.define("FirstBag", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, "lib.bags")
+        val second = caller.define("SecondBag", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, "lib.bags")
+        caller.rename_symbol(first, "Bag")
+        caller.rename_symbol(second, "Bag")
+        val context = NominalBindingContext(pattern_symbols: SymbolTable.new(), argument_symbols: caller, pattern_module: "provider", argument_module: "consumer")
+        val parameter = annotation_type(HirTypeKind.TypeParam("T", []))
+        val first_type = annotation_type(HirTypeKind.Array(annotation_type(HirTypeKind.Named(first, [])), nil))
+        val second_type = annotation_type(HirTypeKind.Array(annotation_type(HirTypeKind.Named(second, [])), nil))
+        var bindings: Dict<text, HirType> = {}
+        expect(bind_type_params(parameter, first_type, bindings, context)).to_be(true)
+        expect(bind_type_params(parameter, second_type, bindings, context)).to_be(true)
+        expect(bindings.len()).to_equal(1)

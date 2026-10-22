@@ -1,0 +1,116 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Bare variant arms over a subject typed only by its lowered local
+
+Phase-3 MIR residue (enum_match cluster, 2026-10-20): `val first = nodes[0];
+match first.kind:` carries no expression type on the native --entry path (no
+type inference), so `enum_match_expr_type` answers nil while field/element
+lowering has already recorded the declared enum type on the lowered subject
+local. `enum_match_subject_type` retained only Result/Optional from that
+local, so every bare payload variant declared by two enums reported "bare
+variant 'X' is ambiguous ... has type unresolved".
+
+- A retained Named type now owns the bare arms when the expression has none,
+  but only when it declares EVERY bare arm variant; otherwise the match fails
+  loudly (the retained owner comes from a bare-struct-name-keyed table).
+- HIR binds a bare unit-variant name shared by two enums over such a subject
+  as a catch-all Binding; MIR re-owns it as the subject owner's unit variant,
+  so later arms stay reachable.
+"""
+
+# @tag: unit, compiler, mir, hir, enum, stage2
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val data_source = "pub enum KindA:\n    Function(n: i64)\n    Other(m: i64)\n    Leaf\n\npub enum KindB:\n    Function(s: text)\n    Other(t: text)\n    Leaf\n    Literal(v: i64)\n\npub struct Node:\n    kind: KindA\n    tag: i64\n"
+
+fn lower_consumer_mir(body: text) -> (MirModule, text):
+    val consumer_source = "use lib.data.*\n\n" + body
+    val log = Logger(level: 0)
+    val data_ast = parse_full_frontend(data_source, "lib/data.spl", "lib.data", log)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.data"] = data_ast
+    val sources = [SourceFile(path: "lib/data.spl", content: data_source, module_name: "lib.data")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var data_lowering = hirlowering_for_module("lib.data", surfaces)
+    var consumer_lowering = hirlowering_for_module("app.main", surfaces)
+    val data_hir = data_lowering.lower_module(data_ast)
+    val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var mir_lowering = MirLowering.new(consumer_hir.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["data_hir"] = data_hir
+    prescan_mods["consumer_hir"] = consumer_hir
+    mir_lowering.prescan_module_struct_names(prescan_mods, "data_hir")
+    mir_lowering.prescan_module_struct_names(prescan_mods, "consumer_hir")
+    val mir = mir_lowering.lower_module(consumer_hir, [data_hir, consumer_hir])
+    var out = ""
+    for e in consumer_lowering.errors:
+        out = out + "hir: " + e.message + "\n"
+    for e in mir_lowering.errors:
+        out = out + "mir: " + e.message + "\n"
+    print "errors: [{out}]"
+    (mir, out)
+
+fn variant_tests_in(mir: MirModule, name: text) -> i64:
+    var found = false
+    var variant_tests = 0
+    for function in mir.functions.values():
+        if function.name == name or function.name.ends_with(".{name}"):
+            found = true
+            for block in function.blocks:
+                if (block.label ?? "").contains("ematch_arm"):
+                    variant_tests = variant_tests + 1
+    expect(found).to_equal(true)
+    variant_tests
+
+describe "bare variant arms over a subject typed only by its lowered local":
+    it "element field subject owns shared payload variants: val first = nodes[0]; match first.kind":
+        val (mir, all) = lower_consumer_mir("fn d(nodes: [Node]) -> i64:\n    val first = nodes[0]\n    match first.kind:\n        case Function(n): n\n        case Other(m): m\n")
+        expect(all).to_equal("")
+        expect(variant_tests_in(mir, "d")).to_equal(2)
+
+    it "a shared unit variant HIR bound as a catch-all is re-owned, later arms stay reachable":
+        # `Leaf` is a unit variant of KindA and KindB; over the untyped
+        # subject HIR binds it. Without re-owning, `case Function(n)` after it
+        # is unreachable and only one variant test (none) would be emitted.
+        val (mir, all) = lower_consumer_mir("fn u(nodes: [Node]) -> i64:\n    val first = nodes[0]\n    match first.kind:\n        case Leaf: 1\n        case Function(n): n\n        case Other(m): m\n")
+        expect(all).to_equal("")
+        expect(variant_tests_in(mir, "u")).to_equal(3)
+
+    it "a bare arm the retained owner does not declare fails loudly, never borrows another enum":
+        # `Literal` exists only in KindB; the retained owner KindA does not
+        # declare it, so the retained owner is rejected instead of the arm
+        # being claimed by the global owner search.
+        val (mir, all) = lower_consumer_mir("fn c(nodes: [Node]) -> i64:\n    val first = nodes[0]\n    match first.kind:\n        case Function(n): n\n        case Literal(v): v\n")
+        expect(all.contains("retained subject owner")).to_equal(true)
+        expect(all.contains("does not declare bare arm variant 'Literal'")).to_equal(true)
+
+    it "an explicitly typed parameter subject still resolves (passes pre-fix too)":
+        val (mir, all) = lower_consumer_mir("fn g(node: Node) -> i64:\n    match node.kind:\n        case Function(n): n\n        case Other(m): m\n")
+        expect(all).to_equal("")
+        expect(variant_tests_in(mir, "g")).to_equal(2)
+
+    it "a mutable binding named like a unit variant stays a binding (never re-owned)":
+        # HIR keeps `case mut Leaf:` a binding even when the name is a
+        # variant; MIR must not turn it into a variant test either, so it is
+        # the catch-all and no variant test is emitted.
+        val (mir, all) = lower_consumer_mir("fn mb(nodes: [Node]) -> i64:\n    val first = nodes[0]\n    match first.kind:\n        case mut Leaf: 1\n")
+        expect(all).to_equal("")
+        expect(variant_tests_in(mir, "mb")).to_equal(0)
+
+    it "a re-owned unit-variant arm whose body names the binding reads the subject, not an unbound local":
+        val (mir, all) = lower_consumer_mir("fn rb(nodes: [Node]) -> i64:\n    val first = nodes[0]\n    match first.kind:\n        case Leaf:\n            if Leaf == KindA.Leaf: 1 else: 2\n        case Function(n): n\n        case Other(m): m\n")
+        expect(all).to_equal("")
+        expect(variant_tests_in(mir, "rb")).to_equal(3)

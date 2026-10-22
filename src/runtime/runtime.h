@@ -409,6 +409,12 @@ int64_t  rt_value_bool(int64_t value);
 int8_t   rt_value_as_bool(int64_t value);
 int8_t   rt_value_truthy(int64_t value);
 int64_t  rt_value_nil(void);
+int8_t   rt_value_is_nil(int64_t value);
+int8_t   rt_value_is_bool(int64_t value);
+int8_t   rt_value_is_int(int64_t value);
+void     rt_alloc_probe_reset_v1(void);
+int64_t  rt_alloc_probe_count_v1(void);
+int64_t  rt_alloc_probe_coverage_v1(void);
 void*    rt_alloc(int64_t size);
 void*    rt_struct_alloc(int64_t size);
 int8_t   rt_struct_receiver_valid(int64_t receiver, int64_t byte_offset, int64_t access_width);
@@ -466,6 +472,8 @@ void     rt_exit(int64_t code);
 void     rt_cli_exit(int64_t code);
 int64_t  rt_heap_registry_count(void);
 int8_t rt_transient_array_scope_begin(void);
+/* Read current scope:0 inactive,1 active/unpaused,2 active/paused. No lease. */
+int64_t rt_transient_array_scope_state_v1(void);
 int8_t rt_transient_array_scope_pause(void);
 int8_t rt_transient_array_scope_end(void);
 /* Graph-operation success for a supported root in an active paused scope,
@@ -473,6 +481,14 @@ int8_t rt_transient_array_scope_end(void);
  * and persistent/aliased text children. Persistent leaf-root acceptance is
  * provider-specific; callers retaining scalar texts use an explicit array. */
 int8_t rt_transient_heap_promote(int64_t value);
+/* Promotion share window over one paused scope: promote calls between begin
+ * and end do not re-walk nodes an earlier call in the window committed. The
+ * caller must not mutate the graph inside the window (no write barrier
+ * exists); it may only promote and release temporary root carriers. begin
+ * returns 0 (no window) without this thread's paused scope; end returns
+ * whether a window was open. Promotion results are identical either way. */
+int8_t rt_transient_heap_promote_share_begin(void);
+int8_t rt_transient_heap_promote_share_end(void);
 /* Raw-allocation owner bridge. runtime_native.c owns the one transient graph
  * registry; an alternate rt_alloc provider must register through this API. */
 int8_t rt_transient_raw_owner_register(void* ptr, uint64_t bytes);
@@ -554,6 +570,7 @@ int64_t  rt_tls_get_protocol_version(int64_t handle);
 int8_t   rt_tls_client_close(int64_t handle);
 int64_t  rt_strcat_tagged(int64_t left, int64_t right);
 int64_t  rt_any_add(int64_t left, int64_t right);
+int64_t  rt_tagged_add(int64_t left, int64_t right);
 int64_t  rt_len(int64_t value);
 int64_t  rt_to_string(int64_t value);
 int64_t  rt_raw_u64_to_string(int64_t raw);
@@ -602,9 +619,16 @@ int64_t   rt_random_bytes_c(uint64_t count);
 double    rt_random_random(void);
 SplArray* rt_bytes_alloc(int64_t len);
 int64_t  rt_tls13_sha256(int64_t data);
+int64_t  rt_sha512_digest(int64_t data);
+int64_t  rt_sha384_digest(int64_t data);
 int64_t  rt_array_len(SplArray* array);
 int64_t  rt_array_len_safe(int64_t value);
 int64_t  rt_array_get(SplArray* array, int64_t idx);
+/* Hosted twins of the arm64 freestanding byte helpers (byte_utils.spl):
+ * unsigned index, out-of-bounds answers 0. Both return i64 per codegen's
+ * RuntimeFuncSpec, never a bare u32 (upper x0 bits would be unspecified). */
+int64_t  rt_arm_array_len_u32(SplArray* array);
+int64_t  rt_arm_array_get_byte_u32(SplArray* array, int64_t idx);
 int64_t  rt_array_get_text(SplArray* array, int64_t idx);
 int64_t  rt_array_last(SplArray* array);
 int8_t   rt_array_set(SplArray* array, int64_t idx, int64_t value);
@@ -727,6 +751,9 @@ int8_t   rt_typed_words_u32_set(SplArray* array, int64_t idx, int64_t value);
 int64_t  rt_typed_words_u64_at(SplArray* array, int64_t idx);
 int8_t   rt_typed_words_u64_push(SplArray* array, int64_t value);
 int8_t   rt_typed_words_u64_set(SplArray* array, int64_t idx, int64_t value);
+int64_t  rt_typed_words_i64_at(SplArray* array, int64_t idx);
+int8_t   rt_typed_words_i64_push(SplArray* array, int64_t value);
+int8_t   rt_typed_words_i64_set(SplArray* array, int64_t idx, int64_t value);
 int64_t  rt_typed_words_u64_raw_data_at(int64_t data_ptr, int64_t idx);
 int8_t   rt_typed_words_u64_store_known_data_at(
     int64_t header_ptr,
@@ -799,12 +826,20 @@ int64_t  rt_enum_payload(int64_t value);
  * handoffs: 1 for a tagged or raw/untagged class reference outside the zero
  * page. This is a FORMATION check, not liveness -- see runtime_native.c. */
 int8_t   rt_heap_ref_wellformed(int64_t value);
+int8_t   rt_heap_ref_registered_c(int64_t value);
+#if defined(SIMPLE_CORE_C_STANDALONE) && SIMPLE_CORE_C_STANDALONE
+/* Standalone Core-C has no Rust union owner for this public ABI. */
+int8_t   rt_heap_ref_registered(int64_t value);
+#endif
 int64_t  rt_closure_new(int64_t func_ptr, int64_t capture_count);
 int64_t  rt_closure_set_capture(int64_t closure, int64_t index, int64_t value);
 int64_t  rt_closure_get_capture(int64_t closure, int64_t index);
 int64_t  rt_closure_func_ptr(int64_t closure);
+int64_t  rt_closure_retain(int64_t closure);
+int64_t  rt_closure_release(int64_t closure);
 int8_t   rt_enum_check_discriminant(int64_t value, int64_t expected);
 int8_t   rt_enum_check_variant(int64_t value, int64_t expected_enum_id, int64_t expected_discriminant);
+int8_t   rt_try_is_absent(int64_t value, int64_t expected_enum_id, int64_t err_discriminant);
 int64_t  rt_hash_text(int64_t value);
 int64_t  rt_index_get(int64_t collection, int64_t idx);
 int8_t   rt_index_set(int64_t collection, int64_t idx, int64_t value);
@@ -821,6 +856,8 @@ int64_t  spl_collection_capture_note_size(int64_t site, int64_t target, int64_t 
 int64_t  spl_collection_capture_note_lookup(int64_t site, int64_t target, int64_t found);
 int64_t  spl_collection_capture_note_materialization(int64_t site, int64_t target);
 int64_t  spl_collection_capture_note_hash_probe(int64_t site, int64_t target, int64_t probes, int64_t collisions);
+int64_t  spl_collection_capture_note_filter(int64_t site, int64_t target, int64_t evaluated, int64_t accepted);
+int64_t  spl_collection_capture_note_loop(int64_t site, int64_t target, int64_t trips);
 int64_t  spl_collection_capture_finish(void);
 int64_t  spl_collection_capture_abort(void);
 int64_t  rt_text_eq_any(int64_t left, int64_t right);
@@ -1175,6 +1212,13 @@ int64_t   rt_process_spawn_async_value(int64_t cmd, SplArray* args);
 int64_t   rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms);
 SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* args,
                                  int64_t timeout_ms, int64_t max_output_bytes);
+/* Strict Windows argv, raw prefix byte arrays, registered tuple; timeout -1.
+ * Each array contains at most max_output_bytes, with no injected markers. */
+int64_t rt_process_run_bounded_bytes(const char* cmd, uint64_t cmd_len, SplArray* args,
+                                    int64_t timeout_ms, int64_t max_output_bytes);
+#if !defined(_WIN32)
+int64_t simple_fork_parent_wait_bounded_bytes(int64_t child_pid, int64_t timeout_ms, uint64_t max_output_bytes);
+#endif
 bool      rt_process_run_owned_bounded(const char* cmd, const char* const* argv,
                                        int64_t timeout_ms, uint64_t max_output_bytes,
                                        char* out, uint64_t out_cap, char* err,
@@ -1375,6 +1419,8 @@ bool        rt_process_write_stdin(int64_t pid, const char* data);
 int64_t     rt_process_write_stdin_some(int64_t pid, const char* data, int64_t data_len, int64_t offset, int64_t max_bytes);
 const char* rt_process_read_stdout(int64_t pid);
 bool        rt_process_is_alive(int64_t pid);
+/* 0=stdout open/deferred, 1=observed EOF, -1=unknown/terminal error. */
+int64_t     rt_process_stdout_state(int64_t pid);
 bool        rt_process_close_piped(int64_t pid);
 int64_t     rt_editor_spawn_simple_dap(void);
 bool        rt_editor_start_simple_dap(int64_t pid);
@@ -1549,8 +1595,12 @@ bool        rt_file_rename(const uint8_t* old_ptr, uint64_t old_len,
                            const uint8_t* new_ptr, uint64_t new_len);
 /* Lower-case hex SHA-256 of the file as a runtime string; nil if unreadable. */
 int64_t     rt_file_hash_sha256(const uint8_t* path_ptr, uint64_t path_len);
-/* Tagged text cmd -> captured stdout as a runtime string; nil on spawn failure. */
+int64_t     rt_xxh3_128_text(int64_t data_value);
+/* Tagged text cmd -> captured stdout, recording this thread's last shell status. */
 int64_t     rt_shell_exec(int64_t cmd_value);
+int64_t     rt_shell_exit_code(void);
+/* Registered (stdout, stderr, status) tuple; does not change scalar-shell status. */
+int64_t     rt_shell_exec_tuple(int64_t cmd_value);
 int         rt_file_move(const uint8_t* src_ptr, uint64_t src_len,
                          const uint8_t* dst_ptr, uint64_t dst_len);
 int64_t     rt_file_size(const uint8_t* path_ptr, uint64_t path_len);

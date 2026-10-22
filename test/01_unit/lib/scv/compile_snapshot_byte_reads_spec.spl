@@ -1,0 +1,199 @@
+# The snapshot materializer admits sources by raw-byte digest, without a text
+# decode. These pin that the byte path keeps the exact bytes and stays
+# fail-closed on any digest or length mismatch.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text, sha256_u8_fast_hex}
+use std.common.text_bytes.{text_to_utf8_bytes}
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryEntryV1}
+use std.scv.compile_snapshot.{scv_compile_snapshot_materialize_source_v1}
+use app.io.mod.{dir_create, file_exists, process_run}
+use app.io.file_ops.{path_absolute}
+use std.nogc_sync_mut.io_runtime.{file_hash_sha256, env_get, env_set, env_remove_process}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
+use std.nogc_sync_mut.sffi.fs.{file_create_excl}
+
+extern fn rt_getpid() -> i64
+
+fn snapshot_bytes_root(label: text) -> text:
+    path_absolute("build/test-artifacts/snapshot-bytes-{rt_getpid()}-{label}").replace("\\", "/")
+
+# The UTF-8 refusal must NOT depend on the build-profile switch
+# (SIMPLE_BUILD_PROFILE, which outranks SIMPLE_DEBUG): a release producer must
+# refuse exactly what a debug one does. Pin the profile for a case and restore
+# whatever the runner had.
+fn snapshot_bytes_profile_set(profile: text) -> text?:
+    val previous = env_get("SIMPLE_BUILD_PROFILE")
+    env_set("SIMPLE_BUILD_PROFILE", profile)
+    previous
+
+fn snapshot_bytes_profile_restore(previous: text?):
+    if previous == nil:
+        env_remove_process("SIMPLE_BUILD_PROFILE")
+    else:
+        env_set("SIMPLE_BUILD_PROFILE", previous!)
+
+fn snapshot_bytes_raw_entry(path: text, raw: [u8]) -> CompileSourceInventoryEntryV1:
+    val digest = sha256_u8_fast_hex(raw)
+    CompileSourceInventoryEntryV1(path, digest, digest, digest, digest, digest, raw.len())
+
+fn snapshot_bytes_raw_fixture(root: text, relative: text, raw: [u8]) -> bool:
+    snapshot_bytes_fixture(root, relative, "") and file_write_bytes(root + "/" + relative, raw)
+
+fn snapshot_bytes_entry(path: text, content: text) -> CompileSourceInventoryEntryV1:
+    val digest = sha256_text(content)
+    CompileSourceInventoryEntryV1(path, digest, digest, digest, digest, digest,
+        text_to_utf8_bytes(content).len())
+
+fn snapshot_bytes_fixture(root: text, relative: text, content: text) -> bool:
+    dir_create(root + "/src/bytes", true) and dir_create(root + "/build/scv", true) and
+        dir_create(root + "/staging", true) and
+        file_write_bytes(root + "/" + relative, text_to_utf8_bytes(content))
+
+describe "SCV snapshot materializes sources by raw-byte digest":
+    it "keeps a leading U+FEFF and multibyte bytes exactly, in the snapshot and the chunk":
+        val root = snapshot_bytes_root("bom")
+        val relative = "src/bytes/bom.spl"
+        val content = "﻿# é — 한글\nfn main():\n    print 1\n"
+        expect(snapshot_bytes_fixture(root, relative, content)).to_equal(true)
+        val result = scv_compile_snapshot_materialize_source_v1(
+            root, root + "/build/scv", root + "/staging", snapshot_bytes_entry(relative, content))
+        expect(result.reason).to_equal("ok")
+        val digest = sha256_text(content)
+        expect(result.row).to_equal("{relative}|sha256_{digest}|{text_to_utf8_bytes(content).len()}")
+        expect(file_hash_sha256(root + "/staging/" + relative)).to_equal(digest)
+        val chunk = root + "/build/scv/objects/chunks/sha256_{digest}.blob"
+        expect(file_exists(chunk)).to_equal(true)
+        expect(file_hash_sha256(chunk)).to_equal(digest)
+
+    it "materializes a tracked symlink through its in-root target":
+        """Regression (2026-10-20): test/cert/tool_qual/meta/deterministic/01_arithmetic.spl
+        is a git symlink (mode 120000) to ../../positive/01_arithmetic.spl; the
+        no-follow read refused it and every `simple test` on the self-hosted CLI
+        stopped with SCV-E-ADMISSION snapshot-read-failed. The owner check admits
+        the realpath target, so the materializer reads that target."""
+        val root = snapshot_bytes_root("symlink")
+        val content = "fn main():\n    print 2\n"
+        expect(snapshot_bytes_fixture(root, "src/bytes/target.spl", content)).to_equal(true)
+        val (_ln_out, _ln_err, ln_code) = process_run("ln", ["-s", "target.spl", root + "/src/bytes/link.spl"])
+        expect(ln_code).to_equal(0)
+        val relative = "src/bytes/link.spl"
+        val result = scv_compile_snapshot_materialize_source_v1(
+            root, root + "/build/scv", root + "/staging", snapshot_bytes_entry(relative, content))
+        expect(result.reason).to_equal("ok")
+        val digest = sha256_text(content)
+        expect(result.row).to_equal("{relative}|sha256_{digest}|{text_to_utf8_bytes(content).len()}")
+        expect(file_hash_sha256(root + "/staging/" + relative)).to_equal(digest)
+
+    it "reuses an existing content-addressed chunk for identical bytes":
+        val root = snapshot_bytes_root("reuse")
+        val content = "# shared chunk\n"
+        expect(snapshot_bytes_fixture(root, "src/bytes/a.spl", content)).to_equal(true)
+        expect(file_write_bytes(root + "/src/bytes/b.spl", text_to_utf8_bytes(content))).to_equal(true)
+        val first = scv_compile_snapshot_materialize_source_v1(
+            root, root + "/build/scv", root + "/staging", snapshot_bytes_entry("src/bytes/a.spl", content))
+        val second = scv_compile_snapshot_materialize_source_v1(
+            root, root + "/build/scv", root + "/staging", snapshot_bytes_entry("src/bytes/b.spl", content))
+        expect(first.reason).to_equal("ok")
+        expect(second.reason).to_equal("ok")
+        expect(file_hash_sha256(root + "/staging/src/bytes/b.spl")).to_equal(sha256_text(content))
+
+    it "refuses bytes that differ from the admitted inventory digest":
+        val root = snapshot_bytes_root("drift")
+        val relative = "src/bytes/drift.spl"
+        expect(snapshot_bytes_fixture(root, relative, "# on disk\n")).to_equal(true)
+        val result = scv_compile_snapshot_materialize_source_v1(
+            root, root + "/build/scv", root + "/staging", snapshot_bytes_entry(relative, "# admitted\n"))
+        expect(result.reason).to_equal("snapshot-index-drift:{relative}")
+        expect(result.row).to_equal("")
+        expect(file_exists(root + "/staging/" + relative)).to_equal(false)
+
+    it "refuses a missing source as a read failure":
+        val root = snapshot_bytes_root("missing")
+        expect(dir_create(root + "/src/bytes", true)).to_equal(true)
+        expect(dir_create(root + "/staging", true)).to_equal(true)
+        val relative = "src/bytes/absent.spl"
+        val result = scv_compile_snapshot_materialize_source_v1(
+            root, root + "/build/scv", root + "/staging", snapshot_bytes_entry(relative, "# absent\n"))
+        expect(result.reason).to_equal("snapshot-read-failed:{relative}")
+
+    it "release profile refuses a non-UTF-8 .spl even when its digest matches":
+        val previous = snapshot_bytes_profile_set("release")
+        val root = snapshot_bytes_root("invalid-utf8-release")
+        val relative = "src/bytes/invalid.spl"
+        val raw: [u8] = [35u8, 32u8, 255u8, 10u8]
+        expect(snapshot_bytes_raw_fixture(root, relative, raw)).to_equal(true)
+        val result = scv_compile_snapshot_materialize_source_v1(
+            root, root + "/build/scv", root + "/staging", snapshot_bytes_raw_entry(relative, raw))
+        snapshot_bytes_profile_restore(previous)
+        expect(result.reason).to_equal("snapshot-source-not-utf8:{relative}")
+        expect(result.row).to_equal("")
+        expect(file_exists(root + "/staging/" + relative)).to_equal(false)
+        expect(file_exists(root + "/build/scv/objects/chunks/sha256_{sha256_u8_fast_hex(raw)}.blob")).to_equal(false)
+
+    it "keeps a BOM and CRLF line endings byte-exact":
+        val previous = snapshot_bytes_profile_set("release")
+        val root = snapshot_bytes_root("crlf")
+        val relative = "src/bytes/crlf.spl"
+        val raw: [u8] = [239u8, 187u8, 191u8, 35u8, 13u8, 10u8, 102u8, 110u8, 13u8, 10u8]
+        expect(snapshot_bytes_raw_fixture(root, relative, raw)).to_equal(true)
+        val result = scv_compile_snapshot_materialize_source_v1(
+            root, root + "/build/scv", root + "/staging", snapshot_bytes_raw_entry(relative, raw))
+        snapshot_bytes_profile_restore(previous)
+        val digest = sha256_u8_fast_hex(raw)
+        expect(result.reason).to_equal("ok")
+        expect(file_hash_sha256(root + "/staging/" + relative)).to_equal(digest)
+        expect(file_hash_sha256(root + "/build/scv/objects/chunks/sha256_{digest}.blob")).to_equal(digest)
+
+    it "debug profile refuses a non-UTF-8 .spl even when its digest matches":
+        val previous = snapshot_bytes_profile_set("debug")
+        val root = snapshot_bytes_root("invalid-utf8-debug")
+        val relative = "src/bytes/invalid.spl"
+        val raw: [u8] = [35u8, 32u8, 255u8, 10u8]
+        expect(snapshot_bytes_raw_fixture(root, relative, raw)).to_equal(true)
+        val result = scv_compile_snapshot_materialize_source_v1(
+            root, root + "/build/scv", root + "/staging", snapshot_bytes_raw_entry(relative, raw))
+        snapshot_bytes_profile_restore(previous)
+        expect(result.reason).to_equal("snapshot-source-not-utf8:{relative}")
+        expect(result.row).to_equal("")
+        expect(file_exists(root + "/staging/" + relative)).to_equal(false)
+        expect(file_exists(root + "/build/scv/objects/chunks/sha256_{sha256_u8_fast_hex(raw)}.blob")).to_equal(false)
+
+    it "snapshots a non-UTF-8 .bat byte-exact; only Simple text formats must be UTF-8":
+        val previous = snapshot_bytes_profile_set("debug")
+        val root = snapshot_bytes_root("invalid-utf8-bat")
+        val relative = "src/bytes/build.bat"
+        val raw: [u8] = [64u8, 101u8, 99u8, 104u8, 111u8, 32u8, 255u8, 254u8, 13u8, 10u8]
+        expect(snapshot_bytes_raw_fixture(root, relative, raw)).to_equal(true)
+        val result = scv_compile_snapshot_materialize_source_v1(
+            root, root + "/build/scv", root + "/staging", snapshot_bytes_raw_entry(relative, raw))
+        snapshot_bytes_profile_restore(previous)
+        val digest = sha256_u8_fast_hex(raw)
+        expect(result.reason).to_equal("ok")
+        expect(file_hash_sha256(root + "/staging/" + relative)).to_equal(digest)
+
+    it "admits valid multibyte UTF-8 in a .spl":
+        val previous = snapshot_bytes_profile_set("debug")
+        val root = snapshot_bytes_root("valid-utf8-debug")
+        val relative = "src/bytes/valid.spl"
+        val content = "﻿# é — 한글\nfn main():\n    print 1\n"
+        expect(snapshot_bytes_fixture(root, relative, content)).to_equal(true)
+        val result = scv_compile_snapshot_materialize_source_v1(
+            root, root + "/build/scv", root + "/staging", snapshot_bytes_entry(relative, content))
+        snapshot_bytes_profile_restore(previous)
+        expect(result.reason).to_equal("ok")
+        expect(file_hash_sha256(root + "/staging/" + relative)).to_equal(sha256_text(content))
+
+    it "never publishes a pre-claimed empty staged chunk as the content object":
+        val root = snapshot_bytes_root("preclaimed")
+        val relative = "src/bytes/claimed.spl"
+        val content = "# claimed before write\n"
+        expect(snapshot_bytes_fixture(root, relative, content)).to_equal(true)
+        val digest = sha256_text(content)
+        # A crash or interleaving between the exclusive claim and the byte
+        # write leaves exactly this: an empty stage under the digest's name.
+        expect(file_create_excl(root + "/staging/.scv-chunk-sha256_{digest}", "")).to_equal(true)
+        val result = scv_compile_snapshot_materialize_source_v1(
+            root, root + "/build/scv", root + "/staging", snapshot_bytes_entry(relative, content))
+        expect(result.reason).to_equal("snapshot-chunk-publish-failed:{relative}")
+        expect(result.row).to_equal("")
+        expect(file_exists(root + "/build/scv/objects/chunks/sha256_{digest}.blob")).to_equal(false)

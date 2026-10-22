@@ -229,6 +229,28 @@ describe "typed CollectionPlan extraction":
         expect(missing.contains("key type")).to_equal(false)
 
 describe "collection analysis discovers maximal regions":
+    # REQ-ENUM-FRAME-OWNER: preserve the popped optional's payload owner.
+    it "visits sibling expression frames once in source order through a transparent wrapper":
+        step("Expand an array wrapper then unwrap each present HIR work frame")
+        val first = cp_call(cp_source(), "map", 40, 3)
+        val second = cp_call(cp_source(), "filter", 41, 4)
+        val wrapper = HirExpr(kind: HirExprKind.ArrayLit([first, second], Some(cp_array_type())),
+            has_type_: true, type_: HirType(kind: HirTypeKind.Array(cp_array_type(), nil), span: cp_span(2)),
+            span: cp_span(2))
+        val result = collect_collection_expr_plans_v1(wrapper, 20, cp_registry())
+        expect(result.blockers.len()).to_equal(0)
+        expect(result.plans.len()).to_equal(2)
+        expect(result.plans[0].nodes[1].operation_symbol_id.unwrap()).to_equal(40)
+        expect(result.plans[1].nodes[1].operation_symbol_id.unwrap()).to_equal(41)
+        expect(result.plans[0].nodes[0].source_expr.unwrap()).to_equal(cp_source())
+        expect(result.plans[1].nodes[0].source_expr.unwrap()).to_equal(cp_source())
+
+    it "drains leaf frames without manufacturing an optional payload or a plan":
+        step("Drain the work stack after visiting a typed leaf")
+        val result = collect_collection_expr_plans_v1(cp_source(), 20, cp_registry())
+        expect(result.plans.len()).to_equal(0)
+        expect(result.blockers.len()).to_equal(0)
+
     it "keeps independent admitted regions on both sides of an opaque call":
         step("Separate inner map from outer filter across a user method")
         val inner = cp_call(cp_source(), "map", 40, 3)

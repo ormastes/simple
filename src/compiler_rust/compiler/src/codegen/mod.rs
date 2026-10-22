@@ -25,6 +25,7 @@ pub mod lean;
 pub mod llvm;
 pub mod parallel;
 pub mod runtime_sffi;
+pub(crate) mod scalar_float_methods;
 pub mod shared;
 pub mod types_util;
 pub mod vtable_c8_debug;

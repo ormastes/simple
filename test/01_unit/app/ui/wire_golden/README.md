@@ -42,7 +42,7 @@ println(out)
 expect(out).to_equal(GOLDEN_MULTI_WIDGET)
 ```
 
-Run with `bin/simple test test/unit/app/ui/wire_golden/wire_golden_spec.spl`,
+Run with `bin/simple test test/01_unit/app/ui/wire_golden/wire_golden_spec.spl`,
 copy the printed JSON into the corresponding `GOLDEN_*` literal, escape
 quotes (`"` → `\"`), then revert the println.
 
@@ -53,7 +53,7 @@ in interpreter mode. Real assertion execution requires compiled mode.
 Until Phase 2 lands typed kinds, run via:
 
 ```
-bin/simple test test/unit/app/ui/wire_golden/wire_golden_spec.spl
+bin/simple test test/01_unit/app/ui/wire_golden/wire_golden_spec.spl
 ```
 
 If `it` block bodies don't actually execute in your environment, the

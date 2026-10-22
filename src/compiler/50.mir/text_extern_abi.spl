@@ -29,6 +29,8 @@
 # -- that is a DIFFERENT convention (ptr-only, NUL-terminated, no length
 # word) and is out of scope for this (ptr, len) fix.
 
+use compiler.mir.mir_types.{MirSignature, MirType, MirTypeKind}
+
 fn text_arg_indices(func_name: text) -> [i64]?:
     match func_name:
         # Linux process-owner C boundary: arrays and scalar limits remain
@@ -85,6 +87,11 @@ fn text_arg_indices(func_name: text) -> [i64]?:
             return Some([0])
         case "rt_file_write_text" | "rt_file_append_text" | "rt_file_copy" | "rt_file_rename" | "rt_file_move" | "rt_file_wrap_smf_dynlib" | "rt_file_extract_smf_dynlib" | "rt_file_create_excl" | "rt_file_copy_create_excl_no_follow" | "rt_file_link_create_excl_no_follow" | "rt_secure_temp_dir" | "rt_file_publish_noreplace":
             return Some([0, 1])
+        # NOT listed: the cycle-170 split setters rt_secure_temp_dir_set_parent
+        # / _set_prefix take ONE boxed text RuntimeValue (runtime_native.c),
+        # the generic single-word crossing, so their ABI does not depend on
+        # any table vintage; _make takes no argument. Twin of calls.rs. See
+        # doc/08_tracking/bug/tracked_seed_cranelift_split_secure_temp_dir_refuses_20261019.md
         # Stage-3 memory-evidence sink (runtime.c rt_mem_snapshot_*), raw
         # (ptr, len) C ABI. Twin of the calls.rs entries.
         case "rt_mem_snapshot_open":
@@ -93,9 +100,16 @@ fn text_arg_indices(func_name: text) -> [i64]?:
             return Some([2, 3, 5])
         # rt_file_open is (path_ptr, path_len, mode: i32) -- descriptor.rs:19.
         # rt_process_run_with_limits: cmd is (ptr, len) -- env_process.rs:1269.
-        case "rt_process_run_with_limits":
+        case "rt_process_run_with_limits" | "rt_process_run_bounded_bytes":
             return Some([0])
         case "rt_file_open":
+            return Some([0])
+        # FileHandle providers consume (path_ptr, path_len[, mode]), matching
+        # calls.rs and runtime_native.c. Missing this row sent read mode zero
+        # as path length in nogc_schema_input_probe_guarded_v2 (2026-10-21).
+        # Source repair only: the existing r17 producer retains its old table
+        # until rebuilt; binaries it emits do not qualify this edited registry.
+        case "rt_io_file_open" | "rt_io_file_exists" | "rt_io_file_delete":
             return Some([0])
         # rt_file_lock is (path_ptr, path_len, timeout_secs) --
         # runtime/src/value/sffi/file_io/file_ops.rs:679, and
@@ -188,6 +202,12 @@ fn text_extern_semantic_arity(func_name: text) -> i64?:
             Some(1)
         case "rt_env_get_i64" | "rt_env_set" | "rt_set_env":
             Some(2)
+        case "rt_file_write_bytes":
+            Some(2)
+        case "rt_io_file_open":
+            Some(2)
+        case "rt_io_file_exists" | "rt_io_file_delete":
+            Some(1)
         case _:
             nil
 
@@ -199,6 +219,15 @@ fn boxed_text_arg_indices(func_name: text) -> [i64]?:
         # Keep byte extents (including NUL) and the TCP address owner intact.
         case "rt_text_to_bytes" | "rt_io_tcp_bind": return Some([0])
         case "rt_io_tcp_write_text": return Some([1])
+        # Atomic writers decode both operands as owned RuntimeValue text.
+        # Without this registration the extern pointer bridge strips their
+        # handles via rt_interp_cstr, so the writer can reject valid paths and
+        # lose the diagnostic it was meant to preserve. The mode stays i32.
+        case "rt_file_atomic_write" | "rt_file_atomic_write_mode": return Some([0, 1])
+        # `rt_file_write_bytes_array` consumes tagged path and byte-array
+        # RuntimeValues. Re-box only the semantic text path; the array handle
+        # is already the provider's expected representation.
+        case "rt_file_write_bytes_array": return Some([0])
         # Tagged-RuntimeValue text ABI (runtime_sffi.rs:2215-2217: "path
         # RuntimeValue, offset, data RuntimeValue"; Rust impl file_ops.rs:1405
         # uses tagged_text_to_str — tagged ONLY, no raw-cstr fallback). The
@@ -210,7 +239,41 @@ fn boxed_text_arg_indices(func_name: text) -> [i64]?:
         # stage-3 planner admission producer. Re-box through rt_string_new so
         # a proper tagged handle arrives regardless of whether the operand is
         # a tagged heap string or a raw string literal.
+        # Atomic publication consumes two tagged text values in both variants.
+        # Raw C-string lowering makes the runtime reject the path/content.
+        case "rt_file_atomic_write" | "rt_file_atomic_write_mode": return Some([0, 1])
         case "rt_file_write_text_at": return Some([0, 2])
         case "rt_file_write_text_at_cached": return Some([1])
         case "rt_file_write_text_at_cached_repeat": return Some([1])
         case _: return nil
+
+fn file_write_bytes_array_alias_target(func_name: text, signature: MirSignature, argument_count: i64) -> text?:
+    """Return the tagged-value provider only for the exact imported facade.
+
+    Callers must obtain this source signature from the separate adapted-extern
+    receipt, never from the raw exact-extern ABI registry. The name, fixed
+    arity, source types, and bool result all remain part of this ABI admission.
+    """
+    if func_name != "rt_file_write_bytes" or argument_count != 2 or
+            signature.is_variadic or signature.params.len() != 2:
+        return nil
+    if signature.return_type.kind != MirTypeKind.Bool:
+        return nil
+    val path_is_text = match signature.params[0].kind:
+        case MirTypeKind.Tuple(elements):
+            if elements.len() != 2:
+                false
+            else:
+                val pointer_is_u8 = match elements[0].kind:
+                    case MirTypeKind.Ptr(inner, false): inner.kind == MirTypeKind.U8
+                    case _: false
+                pointer_is_u8 and elements[1].kind == MirTypeKind.U64
+        case _: false
+    val data_is_u8_array = match signature.params[1].kind:
+        case MirTypeKind.Array(element, size): size == 0 and element.kind == MirTypeKind.U8
+        case _: false
+    if path_is_text and data_is_u8_array:
+        return "rt_file_write_bytes_array"
+    nil
+
+export file_write_bytes_array_alias_target

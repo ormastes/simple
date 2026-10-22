@@ -1,0 +1,251 @@
+# @cover src/compiler/80.driver/managed_parse_group.spl 80%
+# @cover src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl 80%
+# @cover src/compiler/10.frontend/core/cfg_platform.spl 80%
+# @req REQ-IM-007 REQ-IM-008
+# Real parser/cache owner tests; live compiled-worker qualification remains a
+# separate digest-pinned process test owned by parser_qualification_evidence.
+use std.spec.*
+use compiler.driver.managed_parse_group.{ManagedParseGroupOwnerV1, managed_parse_group_install_v1, managed_parse_group_action_owned_v1}
+use compiler.driver.driver_managed_parse_group_main.{managed_parse_group_worker_main_v1}
+use std.common.build_manager.codec.{BuilderWireReaderV1}
+use compiler.driver.driver_build.managed_parse_group_contract.*
+use compiler.driver.driver_build.managed_parse_group_result.*
+use compiler.frontend.flat_ast_bridge.{flat_pool_capture_arm, flat_pool_capture_take, parse_and_build_module_scoped, build_module_from_flat_pool_blob}
+use compiler.core.parser.{parser_has_errors}
+use compiler.frontend.core.cfg_platform.{cfg_detect_os, cfg_detect_arch, cfg_detect_cpu}
+use compiler.frontend.frontend.{parse_full_frontend_target_receipted_v1}
+use compiler.common.config.{Logger}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.env_ops.{cwd, env_get, env_set}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_read_regular_no_follow_bounded, file_exists}
+use std.nogc_sync_mut.io.dir_ops.{dir_create}
+
+fn managed_spec_good() -> text:
+    "fn answer() -> i64:\n    42\n"
+
+fn managed_spec_owner(label: text) -> ManagedParseGroupOwnerV1:
+    val root = cwd().replace("\\", "/") + "/build/managed-parser-spec-" + str(getpid()) + "-" + str(current_time_ms()) + "-" + label
+    expect(file_exists(root)).to_be(false)
+    expect(dir_create(root + "/sources/qualification-parent", true)).to_be(true)
+    val good = managed_spec_good()
+    val bad = "fn broken() -> i64:\n    val = 1\n"
+    expect(file_atomic_write(root + "/sources/qualification-parent/bad1.spl", bad)).to_be(true)
+    expect(file_atomic_write(root + "/sources/qualification-parent/good.spl", good)).to_be(true)
+    expect(file_atomic_write(root + "/sources/qualification-parent/bad2.spl", bad)).to_be(true)
+    var snapshot = ManagedParseSnapshotV1("worker", 1, "a".repeat(64), "", "b".repeat(64),
+        cfg_detect_os(), cfg_detect_arch(), cfg_detect_cpu(), 1048576,
+        [ManagedParseModuleV1("bad1", "package", "qualification-parent/bad1.spl", sha256_text(bad)),
+         ManagedParseModuleV1("good", "package", "qualification-parent/good.spl", sha256_text(good)),
+         ManagedParseModuleV1("bad2", "package", "qualification-parent/bad2.spl", sha256_text(bad))])
+    snapshot.snapshot_digest = managed_parse_snapshot_digest_v1(snapshot)
+    val installed = managed_parse_group_install_v1(root, snapshot)
+    expect(installed.is_ok()).to_be(true)
+    installed.unwrap()
+
+fn managed_spec_action(owner: ManagedParseGroupOwnerV1, id: text) -> ManagedParseActionV1:
+    ManagedParseActionV1(id, "group", owner.snapshot.worker_id, owner.snapshot.generation,
+        "lease-" + id, owner.snapshot.snapshot_digest, owner.snapshot.cache_identity, ["package"], true)
+
+fn managed_spec_check(owner: ManagedParseGroupOwnerV1, result: ManagedParseActionResultV1):
+    expect(managed_parse_action_result_validate_v1(owner.snapshot, result.action, result)).to_equal("")
+    expect(result.modules.len()).to_equal(3)
+    expect(result.modules[0].status).to_equal("ERROR")
+    expect(result.modules[1].status).to_equal("OK")
+    expect(result.modules[2].status).to_equal("ERROR")
+    expect(result.error == "").to_be(false)
+    for index in [0, 2]:
+        expect(result.modules[index].diagnostics.len()).to_be_greater_than(0)
+        expect(result.modules[index].diagnostics[0]).to_contain("E-PARSE")
+        expect(result.modules[index].diagnostics[0]).to_contain("diagnostic-id:")
+        expect(result.modules[index].blob_path).to_equal("")
+        val key = managed_parse_module_cache_key_v1(owner.snapshot, owner.snapshot.modules[index])
+        expect(file_exists(owner.root + "/cache/" + key + ".sdn")).to_be(false)
+
+describe "REQ-IM-007 REQ-IM-008: real managed parser and durable flat artifacts":
+    it "should match the full target frontend for excluded invalid declarations and retained domain blocks":
+        val original = managed_spec_owner("conditional-domain")
+        val excluded_os = if original.snapshot.target_os == "windows": "linux" else: "windows"
+        val source = "@cfg(os = \"" + excluded_os + "\")\nfn excluded() -> i64:\n    val = 1\n" +
+            "@cfg(os = \"" + original.snapshot.target_os + "\")\nfn selected() -> i64:\n    42\n" +
+            "schema" + "{" + " Person " + "}" + "\n"
+        var snapshot = original.snapshot
+        snapshot.modules = [ManagedParseModuleV1("selected", "package", "qualification-parent/selected.spl", sha256_text(source))]
+        snapshot.snapshot_digest = managed_parse_snapshot_digest_v1(snapshot)
+        expect(file_atomic_write(original.root + "/sources/qualification-parent/selected.spl", source)).to_be(true)
+        step("Run the ordinary target frontend and assert independently known selection and domain semantics")
+        flat_pool_capture_arm()
+        val ordinary = parse_full_frontend_target_receipted_v1(source,
+            "qualification-parent/selected.spl", "selected", Logger(0), "selected", sha256_text(source),
+            snapshot.target_arch + "-" + snapshot.target_os).unwrap()
+        expect(parser_has_errors()).to_be(false)
+        expect(ordinary[0].functions.contains_key("selected")).to_be(true)
+        expect(ordinary[0].functions.contains_key("excluded")).to_be(false)
+        expect(ordinary[0].domain_blocks.len()).to_equal(1)
+        expect(ordinary[0].domain_blocks[0].kind).to_equal("schema")
+        expect(ordinary[0].domain_blocks[0].payload).to_equal("Person")
+        val ordinary_blob = flat_pool_capture_take()
+        expect(ordinary_blob == "").to_be(false)
+        step("Require worker cold capture and replacement-owner warm capture to match that full frontend artifact")
+        val owner = managed_parse_group_install_v1(original.root, snapshot).unwrap()
+        val first = managed_parse_group_action_owned_v1(owner, managed_spec_action(owner, "conditional-first"))
+        expect(first.result.modules[0].status).to_equal("OK")
+        expect(first.result.modules[0].blob_digest).to_equal(sha256_text(ordinary_blob))
+        val replacement = managed_parse_group_install_v1(original.root, snapshot).unwrap()
+        val second = managed_parse_group_action_owned_v1(replacement, managed_spec_action(replacement, "conditional-second"))
+        expect(second.result.modules[0].status).to_equal("OK")
+        expect(second.result.modules[0].reused).to_be(true)
+        expect(second.result.modules[0].blob_digest).to_equal(first.result.modules[0].blob_digest)
+
+    it "should refuse warning mode at install without turning a warning into a source error":
+        val owner = managed_spec_owner("warning-admission")
+        val previous = env_get("SIMPLE_CAPTURE_WRITE_CHECK")
+        expect(env_set("SIMPLE_CAPTURE_WRITE_CHECK", "warning")).to_be(true)
+        val refused = managed_parse_group_install_v1(owner.root, owner.snapshot)
+        val changed_policy = managed_parse_group_action_owned_v1(owner, managed_spec_action(owner, "warning-policy"))
+        expect(env_set("SIMPLE_CAPTURE_WRITE_CHECK", previous)).to_be(true)
+        expect(refused.is_err()).to_be(true)
+        expect(changed_policy.result.modules[1].diagnostics[0]).to_contain("E-PARSE-POLICY")
+        expect(changed_policy.result.modules[1].blob_path).to_equal("")
+
+    it "should emit the real installed wire marker and honor only an exact shutdown identity":
+        step("Install the worker entry with an already requested matching shutdown")
+        val owner = managed_spec_owner("entry-stop")
+        expect(file_atomic_write(owner.root + "/install.sdn", managed_parse_snapshot_encode_v1(owner.snapshot))).to_be(true)
+        expect(file_atomic_write(owner.root + "/shutdown.sdn", owner.snapshot.worker_id + "\n" +
+            str(owner.snapshot.generation) + "\n" + owner.snapshot.snapshot_digest + "\n")).to_be(true)
+        expect(managed_parse_group_worker_main_v1(owner.root).unwrap()).to_equal(0)
+        val marker = file_read_regular_no_follow_bounded(owner.root + "/installed.sdn", 4096).unwrap()
+        val reader = BuilderWireReaderV1.create(marker)
+        expect(reader.scalar()).to_equal("SIMPLE-PARSE-INSTALLED-1")
+        expect(reader.scalar()).to_equal(owner.snapshot.worker_id)
+        expect(reader.number(2147483647, false)).to_equal(owner.snapshot.generation)
+        expect(reader.scalar()).to_equal(owner.snapshot.snapshot_digest)
+        expect(reader.number(4096, false)).to_equal(3)
+        expect(reader.number(owner.snapshot.max_source_bytes, false)).to_equal(owner.source_bytes)
+        expect(reader.complete_error()).to_equal("")
+        step("Reject a shutdown for another process generation")
+        expect(file_atomic_write(owner.root + "/shutdown.sdn", "another-worker\n1\nwrong\n")).to_be(true)
+        expect(managed_parse_group_worker_main_v1(owner.root).is_err()).to_be(true)
+
+    it "should reject unsafe mailbox names before opening an action path":
+        val owner = managed_spec_owner("entry-invalid")
+        expect(file_atomic_write(owner.root + "/install.sdn", managed_parse_snapshot_encode_v1(owner.snapshot))).to_be(true)
+        expect(file_atomic_write(owner.root + "/next.sdn", "../other.sdn")).to_be(true)
+        expect(managed_parse_group_worker_main_v1(owner.root).is_err()).to_be(true)
+
+    it "should retain malformed-good-malformed diagnostics and match the ordinary parser's actual AST payload":
+        step("Parse the good logical source through the ordinary bridge and retain its flat payload")
+        flat_pool_capture_arm()
+        val expected_module = parse_and_build_module_scoped(managed_spec_good(), "qualification-parent/good.spl", false)
+        expect(parser_has_errors()).to_be(false)
+        expect(expected_module.functions.contains_key("answer")).to_be(true)
+        val expected = flat_pool_capture_take()
+        expect(expected == "").to_be(false)
+        step("Run one installed owner over malformed, good and malformed modules in order")
+        val owner = managed_spec_owner("parity")
+        val first = managed_parse_group_action_owned_v1(owner, managed_spec_action(owner, "first"))
+        managed_spec_check(owner, first.result)
+        expect(first.result.modules[1].reused).to_be(false)
+        expect(first.result.modules[1].blob_digest).to_equal(sha256_text(expected))
+        val blob = file_read_regular_no_follow_bounded(owner.root + "/" + first.result.modules[1].blob_path, 134217728).unwrap()
+        expect(blob).to_equal(expected)
+        val restored = build_module_from_flat_pool_blob(blob, managed_spec_good(), "qualification-parent/good.spl")
+        expect(restored.unwrap().functions.contains_key("answer")).to_be(true)
+        step("Reinstall from disk and retain both failed diagnostics while reusing only the good module")
+        val replacement = managed_parse_group_install_v1(owner.root, owner.snapshot).unwrap()
+        val repeated = managed_parse_group_action_owned_v1(replacement, managed_spec_action(replacement, "second"))
+        managed_spec_check(replacement, repeated.result)
+        expect(repeated.result.modules[1].reused).to_be(true)
+        expect(repeated.result.modules[1].blob_digest).to_equal(first.result.modules[1].blob_digest)
+        expect(repeated.result.modules[0].diagnostics).to_equal(first.result.modules[0].diagnostics)
+        expect(repeated.result.modules[2].diagnostics).to_equal(first.result.modules[2].diagnostics)
+        val wire = managed_parse_action_result_encode_v1(repeated.result)
+        expect(managed_parse_action_result_decode_v1(wire).unwrap().modules[0].diagnostics).to_equal(first.result.modules[0].diagnostics)
+
+    it "should explicitly reject or reparse invalid cache authority without publishing a false hit":
+        for kind in 0..4:
+            step("Retain a genuine successful artifact, then invalidate one cache identity layer")
+            val owner = managed_spec_owner("cache-" + str(kind))
+            val first = managed_parse_group_action_owned_v1(owner, managed_spec_action(owner, "first"))
+            managed_spec_check(owner, first.result)
+            val key = managed_parse_module_cache_key_v1(owner.snapshot, owner.snapshot.modules[1])
+            val receipt_path = owner.root + "/cache/" + key + ".sdn"
+            if kind == 0:
+                expect(file_atomic_write(owner.root + "/" + first.result.modules[1].blob_path, "corrupt-flat-payload")).to_be(true)
+            elif kind == 1:
+                expect(file_atomic_write(receipt_path, "invalid-receipt")).to_be(true)
+            elif kind == 2:
+                var wrong = first.result.modules[1]
+                wrong.source_digest = "f".repeat(64)
+                expect(file_atomic_write(receipt_path, managed_parse_module_result_encode_v1(wrong))).to_be(true)
+            else:
+                expect(file_atomic_write(owner.root + "/cache/" + key + ".authority", "f".repeat(64))).to_be(true)
+            val repaired = managed_parse_group_action_owned_v1(owner, managed_spec_action(owner, "repair"))
+            managed_spec_check(owner, repaired.result)
+            expect(repaired.result.modules[1].reused).to_be(false)
+            expect(repaired.result.modules[1].blob_digest).to_equal(first.result.modules[1].blob_digest)
+
+    it "should reuse an unchanged module after one source edit changes the request snapshot":
+        step("Warm real module artifacts under the first immutable snapshot")
+        val owner = managed_spec_owner("one-edit")
+        val first = managed_parse_group_action_owned_v1(owner, managed_spec_action(owner, "before"))
+        managed_spec_check(owner, first.result)
+        val good_key = managed_parse_module_cache_key_v1(owner.snapshot, owner.snapshot.modules[1])
+        step("Edit only bad1 into a valid module and admit a new generation and snapshot")
+        val changed_source = "fn repaired() -> i64:\n    7\n"
+        expect(file_atomic_write(owner.root + "/sources/qualification-parent/bad1.spl", changed_source)).to_be(true)
+        var snapshot = owner.snapshot
+        snapshot.generation = 2
+        snapshot.modules[0].source_digest = sha256_text(changed_source)
+        snapshot.snapshot_digest = managed_parse_snapshot_digest_v1(snapshot)
+        expect(snapshot.snapshot_digest == owner.snapshot.snapshot_digest).to_be(false)
+        expect(managed_parse_module_cache_key_v1(snapshot, snapshot.modules[1])).to_equal(good_key)
+        val next = managed_parse_group_install_v1(owner.root, snapshot).unwrap()
+        val result = managed_parse_group_action_owned_v1(next, managed_spec_action(next, "after")).result
+        expect(managed_parse_action_result_validate_v1(snapshot, result.action, result)).to_equal("")
+        expect(result.action.snapshot_digest).to_equal(snapshot.snapshot_digest)
+        expect(result.action.generation).to_equal(2)
+        expect(result.modules[0].status).to_equal("OK")
+        expect(result.modules[0].reused).to_be(false)
+        expect(result.modules[1].reused).to_be(true)
+        expect(result.modules[1].blob_digest).to_equal(first.result.modules[1].blob_digest)
+        expect(result.modules[2].status).to_equal("ERROR")
+        expect(result.modules[2].diagnostics).to_equal(first.result.modules[2].diagnostics)
+        step("Reject the prior action generation despite the unchanged module cache key")
+        expect(managed_parse_group_action_owned_v1(next, managed_spec_action(owner, "stale")).result.modules.len()).to_equal(0)
+
+    it "should hash the exact source bytes before parsing or accepting a cache hit":
+        step("Change the good source after install without changing its admitted digest")
+        val owner = managed_spec_owner("source-change")
+        expect(file_atomic_write(owner.root + "/sources/qualification-parent/good.spl", "fn other():\n    1\n")).to_be(true)
+        val changed = managed_parse_group_action_owned_v1(owner, managed_spec_action(owner, "changed"))
+        expect(changed.result.modules[1].status).to_equal("ERROR")
+        expect(changed.result.modules[1].diagnostics[0]).to_contain("E-PARSE-SOURCE")
+        expect(changed.result.modules[1].blob_path).to_equal("")
+        expect(managed_parse_group_install_v1(owner.root, owner.snapshot).is_err()).to_be(true)
+
+    it "should reject changed target, byte budget, policy or action generation":
+        val owner = managed_spec_owner("policy")
+        step("Refuse a snapshot for a different target and an insufficient aggregate byte budget")
+        var wrong_target = owner.snapshot
+        wrong_target.target_cpu = "different-cpu"
+        wrong_target.snapshot_digest = managed_parse_snapshot_digest_v1(wrong_target)
+        expect(managed_parse_group_install_v1(owner.root, wrong_target).is_err()).to_be(true)
+        var small = owner.snapshot
+        small.max_source_bytes = 1
+        small.snapshot_digest = managed_parse_snapshot_digest_v1(small)
+        expect(managed_parse_group_install_v1(owner.root, small).is_err()).to_be(true)
+        step("Reject a changed installed feature policy without parsing any module")
+        var changed = owner
+        changed.feature_identity = "f".repeat(64)
+        val denied = managed_parse_group_action_owned_v1(changed, managed_spec_action(changed, "policy"))
+        for module in denied.result.modules:
+            expect(module.status).to_equal("ERROR")
+            expect(module.diagnostics[0]).to_contain("E-PARSE-POLICY")
+        var stale = managed_spec_action(owner, "stale")
+        stale.generation = 2
+        val rejected = managed_parse_group_action_owned_v1(owner, stale)
+        expect(rejected.result.error).to_equal("action snapshot mismatch")
+        expect(rejected.result.modules.len()).to_equal(0)

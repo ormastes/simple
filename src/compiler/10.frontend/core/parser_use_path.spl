@@ -1,7 +1,9 @@
 # Shared use-path parser: module and lexical imports retain identical syntax.
 # This owner does not import statement/block parsing, avoiding a dependency cycle.
 use compiler.core.tokens.{tok_kind_name, keyword_lookup, TOK_DOT, TOK_DOTDOT, TOK_DOTDOTDOT, TOK_MINUS, TOK_SLASH, TOK_KW_AS}
-use compiler.core.parser.{par_kind_get, par_text_get, parser_advance, parser_expect, parser_note_use_import}
+use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, parser_advance, parser_expect, parser_note_use_import}
+use compiler.frontend.core.lexer.{lex_token_start_get, lex_token_end_get}
+use compiler.core.types.{flat_span_new}
 use compiler.core.ast.{decl_use_import, decl_set_lazy}
 
 fn use_kw_segment_text(kind: i64) -> text:
@@ -13,24 +15,36 @@ fn use_kw_segment_text(kind: i64) -> text:
     return ""
 
 fn parse_use_decl() -> i64:
+    # Keep original source-character provenance through every return route.
+    # The following token may already be lexed after parser_advance; its end
+    # must never become the import's editable boundary.
+    val import_start = lex_token_start_get()
+    val import_line = par_line_get()
+    val import_column = par_col_get()
+    var import_end = lex_token_end_get()
     parser_advance()
     # Check for 'use lazy' modifier
     var is_lazy = 0
     if par_kind_get() == 194:
         is_lazy = 1
+        import_end = lex_token_end_get()
         parser_advance()
     # Handle relative imports: use .X or use ..X
     var module_path: text = ""
     if par_kind_get() == TOK_DOTDOTDOT:
+        import_end = lex_token_end_get()
         parser_advance()
         module_path = "..."
     elif par_kind_get() == 165:
+        import_end = lex_token_end_get()
         parser_advance()
         module_path = ".."
         if par_kind_get() == 164:
+            import_end = lex_token_end_get()
             parser_advance()
             module_path = "..."
     elif par_kind_get() == 164:
+        import_end = lex_token_end_get()
         parser_advance()
         module_path = "."
 
@@ -40,6 +54,7 @@ fn parse_use_decl() -> i64:
             module_path = module_path + par_text_get()
         else:
             module_path = par_text_get()
+        import_end = lex_token_end_get()
         parser_advance()
     elif use_kw_segment_text(par_kind_get()) != "":
         val kw0: text = use_kw_segment_text(par_kind_get())
@@ -47,6 +62,7 @@ fn parse_use_decl() -> i64:
             module_path = module_path + kw0
         else:
             module_path = kw0
+        import_end = lex_token_end_get()
         parser_advance()
     while true:
         val sep_kind = par_kind_get()
@@ -54,6 +70,7 @@ fn parse_use_decl() -> i64:
         val is_domain_sep: bool = sep_kind == TOK_MINUS or sep_kind == TOK_SLASH
         if not (is_dot_sep or is_domain_sep):
             break
+        import_end = lex_token_end_get()
         parser_advance()
         var sep_text = "."
         if sep_kind == TOK_MINUS:
@@ -68,24 +85,28 @@ fn parse_use_decl() -> i64:
                 break
             # Wildcard import: use X.*
             if par_kind_get() == 62:
+                import_end = lex_token_end_get()
                 parser_advance()
                 parser_note_use_import(module_path, [], true)
-                val wc_result = decl_use_import(module_path, [], 0)
+                val wc_result = decl_use_import(module_path, [], flat_span_new(import_start, import_end, import_line, import_column))
                 if is_lazy == 1:
                     decl_set_lazy(wc_result)
                 return wc_result
         val kw_seg: text = use_kw_segment_text(par_kind_get())
         if kw_seg != "":
             module_path = module_path + sep_text + kw_seg
+            import_end = lex_token_end_get()
             parser_advance()
         else:
             module_path = module_path + sep_text + par_text_get()
+            import_end = lex_token_end_get()
             parser_expect(6)
         # Check for trailing * without dot: use ffi.io*
         if par_kind_get() == 62:
+            import_end = lex_token_end_get()
             parser_advance()
             parser_note_use_import(module_path, [], true)
-            val wc2_result = decl_use_import(module_path, [], 0)
+            val wc2_result = decl_use_import(module_path, [], flat_span_new(import_start, import_end, import_line, import_column))
             if is_lazy == 1:
                 decl_set_lazy(wc2_result)
             return wc2_result
@@ -96,6 +117,7 @@ fn parse_use_decl() -> i64:
     val has_paren: bool = par_kind_get() == 140
     val has_import_list: bool = has_brace or has_paren
     if has_import_list:
+        import_end = lex_token_end_get()
         parser_advance()
         while true:
             val at_c1: bool = par_kind_get() == 143
@@ -111,19 +133,23 @@ fn parse_use_decl() -> i64:
                 var orig_name = par_text_get()
                 if kw_name != "":
                     orig_name = kw_name
+                import_end = lex_token_end_get()
                 parser_advance()
                 # Support aliasing: name as alias
                 val is_as: bool = par_kind_get() == TOK_KW_AS
                 val as_text: bool = true
                 val has_as: bool = is_as and as_text
                 if has_as:
+                    import_end = lex_token_end_get()
                     parser_advance()  # consume "as"
                     val alias_name = par_text_get()
+                    import_end = lex_token_end_get()
                     parser_advance()  # consume alias
                     imported_names.push(orig_name + ":" + alias_name)
                 else:
                     imported_names.push(orig_name)
             if par_kind_get() == 160:
+                import_end = lex_token_end_get()
                 parser_advance()
             elif not is_name_tok:
                 # Termination witness. The loop above is unbounded (it used to
@@ -134,24 +160,28 @@ fn parse_use_decl() -> i64:
                 # everything else -- e.g. `use a.{*}` -- by consuming the
                 # unexpected token as error recovery. Under the old counted
                 # form the same input silently span out the bound instead.
+                import_end = lex_token_end_get()
                 parser_advance()
         # Consume closing ) or }
         val is_rb: bool = par_kind_get() == 143
         val is_rp: bool = par_kind_get() == 141
         val is_close: bool = is_rb or is_rp
         if is_close:
+            import_end = lex_token_end_get()
             parser_advance()
 
     # Support module-level alias: use foo.bar as baz  (no import list)
     if imported_names.len() == 0 and par_kind_get() == TOK_KW_AS:
+        import_end = lex_token_end_get()
         parser_advance()  # consume "as"
         val mod_alias = par_text_get()
+        import_end = lex_token_end_get()
         parser_advance()  # consume alias name
         imported_names.push(module_path + ":" + mod_alias)
         module_path = module_path
 
     parser_note_use_import(module_path, imported_names, false)
-    val use_result = decl_use_import(module_path, imported_names, 0)
+    val use_result = decl_use_import(module_path, imported_names, flat_span_new(import_start, import_end, import_line, import_column))
     if is_lazy == 1:
         decl_set_lazy(use_result)
     use_result

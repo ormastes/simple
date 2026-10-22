@@ -14,6 +14,7 @@ Executed on the interpreter test lane; asserts observable values only and makes 
 
 use std.spipe.*
 use std.fs.{read_file}
+use std.common.text_bytes.{bytes_to_text}
 use lib.common.privilege.id_path.{id_path_intern}
 use lib.common.privilege.principal.{Principal, PrincipalKind}
 use lib.common.privilege.authority_token.{AuthorityToken, AuthorityLevel}
@@ -44,7 +45,7 @@ describe "Win-VFS kernel driver":
                 geometry: Rect(x: 0, y: 0, w: 1, h: 1),
                 buffer_ref: BufferRef(kind: "shm", handle: 0, bytes: 0),
                 acl_id_path: id_path_intern("id.user.public")))
-            val result = drv.readdir("/")
+            val result = drv.readdir_result("/")
             expect result.ok to_equal true
             val names = drv.test_entry_names(result.value)
             expect names to_contain "banking"
@@ -58,7 +59,11 @@ describe "Win-VFS kernel driver":
                 geometry: Rect(x: 0, y: 0, w: 1, h: 1),
                 buffer_ref: BufferRef(kind: "shm", handle: 0, bytes: 0),
                 acl_id_path: id_path_intern("id.user.public")))
-            val result = drv.readdir("/banking/1")
+            drv.test_set_current_token(AuthorityToken.mock(
+                id_path: id_path_intern("id.user.public"),
+                level: AuthorityLevel.Internal,
+                principal: Principal(kind: PrincipalKind.Local, id: "alice")))
+            val result = drv.readdir_result("/banking/1")
             expect result.ok to_equal true
             val names = drv.test_entry_names(result.value)
             expect names to_contain "title"
@@ -75,11 +80,15 @@ describe "Win-VFS kernel driver":
                 geometry: Rect(x: 0, y: 0, w: 1, h: 1),
                 buffer_ref: BufferRef(kind: "shm", handle: 0, bytes: 0),
                 acl_id_path: id_path_intern("id.user.public")))
-            val fd = drv.open("/banking/1/title", FileFlags.read_only())
+            drv.test_set_current_token(AuthorityToken.mock(
+                id_path: id_path_intern("id.user.public"),
+                level: AuthorityLevel.Internal,
+                principal: Principal(kind: PrincipalKind.Local, id: "alice")))
+            val fd = drv.open_result("/banking/1/title", FileFlags.read_only())
             expect fd.ok to_equal true
             val data = drv.read(fd.value, 64)
-            expect data.ok to_equal true
-            val text = data.value.as_text()
+            expect data.is_ok() to_equal true
+            val text = bytes_to_text(data.unwrap())
             expect text to_equal "Acct"
 
     describe "destroy → ENOENT":
@@ -93,7 +102,7 @@ describe "Win-VFS kernel driver":
                 buffer_ref: BufferRef(kind: "shm", handle: 0, bytes: 0),
                 acl_id_path: id_path_intern("id.user.public")))
             drv.test_destroy(1)
-            val fd = drv.open("/banking/1/title", FileFlags.read_only())
+            val fd = drv.open_result("/banking/1/title", FileFlags.read_only())
             expect fd.ok to_equal false
             expect fd.error to_contain "ENOENT"
 
@@ -113,7 +122,20 @@ describe "Win-VFS kernel driver":
                 level: AuthorityLevel.Internal,
                 principal: principal)
             drv.test_set_current_token(token)
-            val fd = drv.open("/banking/1/title", FileFlags.read_only())
+            val fd = drv.open_result("/banking/1/title", FileFlags.read_only())
+            expect fd.ok to_equal false
+            expect fd.error to_contain "EACCES"
+
+        it "strict policy: default id.public token is refused on an id.user.public window":
+            val drv = win_vfs_make_for_test()
+            drv.mount("win", "")
+            drv.test_insert(WindowRecord(
+                wid: 1, generation: 1, app: "banking", title: "Acct",
+                state: WindowState.Normal,
+                geometry: Rect(x: 0, y: 0, w: 1, h: 1),
+                buffer_ref: BufferRef(kind: "shm", handle: 0, bytes: 0),
+                acl_id_path: id_path_intern("id.user.public")))
+            val fd = drv.open_result("/banking/1/title", FileFlags.read_only())
             expect fd.ok to_equal false
             expect fd.error to_contain "EACCES"
 

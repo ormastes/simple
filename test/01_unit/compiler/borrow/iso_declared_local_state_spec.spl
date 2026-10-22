@@ -1,0 +1,62 @@
+# @req REQ-ISO-DECLARED-LOCAL-TRANSFER
+# Real HIR statements exercise the production MIR statement owner.
+use std.spec
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolTable}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirStmt, HirStmtKind}
+use compiler.mir.mir_data.{MirSignature, MirType, MirInstKind}
+use compiler.mir.mir_lowering.{MirLowering}
+
+fn iso_local_span() -> Span:
+    Span(start: 0, end: 0, line: 1, col: 1, file: "iso_declared_local", length: 0)
+
+fn iso_local_lowering() -> MirLowering:
+    var lowering = MirLowering.new(SymbolTable.new())
+    var builder = lowering.builder
+    builder.begin_function(SymbolId(id: 10), "take", MirSignature(params: [], return_type: MirType.i64(), is_variadic: false), iso_local_span())
+    lowering.builder = builder
+    lowering
+
+describe "declared local ISO transfer metadata":
+    it "keeps an explicit iso annotation on a fresh integer and emits a real Move on reuse":
+        val span = iso_local_span()
+        val integer_type = HirType(kind: HirTypeKind.Int(64, true), span: span)
+        val isolated_type = HirType(kind: HirTypeKind.Isolated(integer_type), span: span)
+        val initializer = HirExpr(kind: HirExprKind.IntLit(5, nil), has_type_: true, type_: integer_type, span: span)
+        var lowering = iso_local_lowering()
+        lowering.lower_stmt(HirStmt(kind: HirStmtKind.Let(SymbolId(id: 1), isolated_type, initializer), span: span))
+        val source = lowering.find_local(1)
+        expect(lowering.local_hir_type_isolation_state(source.id)).to_equal(1)
+        val read = HirExpr(kind: HirExprKind.Var(SymbolId(id: 1)), has_type_: true, type_: integer_type, span: span)
+        lowering.lower_stmt(HirStmt(kind: HirStmtKind.Let(SymbolId(id: 2), isolated_type, read), span: span))
+        val destination = lowering.find_local(2)
+        expect(lowering.local_hir_type_isolation_state(destination.id)).to_equal(1)
+        var moves = 0
+        for instruction in lowering.builder.instructions:
+            match instruction.kind:
+                case MirInstKind.Move(dest, src):
+                    if dest.id == destination.id and src.id == source.id:
+                        moves = moves + 1
+                case _: ()
+        expect(moves).to_equal(1)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "retains Copy for a non-iso declared integer binding":
+        val span = iso_local_span()
+        val integer_type = HirType(kind: HirTypeKind.Int(64, true), span: span)
+        val initializer = HirExpr(kind: HirExprKind.IntLit(5, nil), has_type_: true, type_: integer_type, span: span)
+        var lowering = iso_local_lowering()
+        lowering.lower_stmt(HirStmt(kind: HirStmtKind.Let(SymbolId(id: 1), integer_type, initializer), span: span))
+        val source = lowering.find_local(1)
+        val read = HirExpr(kind: HirExprKind.Var(SymbolId(id: 1)), has_type_: true, type_: integer_type, span: span)
+        lowering.lower_stmt(HirStmt(kind: HirStmtKind.Let(SymbolId(id: 2), integer_type, read), span: span))
+        val destination = lowering.find_local(2)
+        var copies = 0
+        for instruction in lowering.builder.instructions:
+            match instruction.kind:
+                case MirInstKind.Copy(dest, src):
+                    if dest.id == destination.id and src.id == source.id:
+                        copies = copies + 1
+                case _: ()
+        expect(copies).to_equal(1)
+        expect(lowering.errors.len()).to_equal(0)

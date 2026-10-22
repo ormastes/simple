@@ -1,0 +1,287 @@
+# EE-01 typed continuation support. Physical graph planning and state joins do
+# not authorize erasing native pattern instructions; semantic replacement uses
+# the independently validated producer plan.
+use compiler.mir.mir_instructions.{MirModule, MirFunction, MirTerminator}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirTypeDefKind, MirLocal}
+use compiler.mir.enum_pattern_totality_v1.{EnumPatternValuePathV1,
+    EnumPatternDecisionTestV1}
+use compiler.backend.backend.backend_types.{BackendKind, CompileError,
+    compileerror_backend_error}
+use plugins.backend_lean.lean_nominal_body.{LeanNominalBodyEmitter,
+    lean_nominal_emitter_for_function_v1}
+use plugins.backend_lean.lean_type_declarations.{LeanTypeContext,
+    lean_context_type_to_lean, lean_type_quote_name}
+
+fn lean_enum_error_v1(code: text, reason: text) -> CompileError:
+    compileerror_backend_error(BackendKind.Lean, code + ": " + reason)
+
+struct LeanEnumCfgV1:
+    indices: Dict<i64, i64>
+    successors: [[i64]]
+    predecessors: [[i64]]
+    topological_order: [i64]
+    remaining: i64
+
+fn lean_enum_cfg_v1(function: MirFunction, allowance: i64
+) -> Result<LeanEnumCfgV1, CompileError>:
+    val count = function.blocks.len()
+    if count == 0 or count > 4096 or allowance <= 0 or allowance > 65536:
+        return Err(lean_enum_error_v1("EE-E-RESOURCE", "invalid graph/work bound"))
+    var remaining = allowance
+    var indices: Dict<i64, i64> = {}
+    var successors: [[i64]] = []
+    var predecessors: [[i64]] = []
+    var indegrees: [i64] = []
+    for index in 0..count:
+        remaining = remaining - 1 - function.blocks[index].instructions.len()
+        if remaining < 0:
+            return Err(lean_enum_error_v1("EE-E-RESOURCE", "physical graph work exhausted"))
+        val identity = function.blocks[index].id.id
+        if identity < 0 or indices.has(identity):
+            return Err(lean_enum_error_v1("EE-E-EDGE", "negative or duplicate block identity"))
+        indices[identity] = index
+        successors.push([])
+        predecessors.push([])
+        indegrees.push(0)
+    if not indices.has(function.entry_block.id):
+        return Err(lean_enum_error_v1("EE-E-EDGE", "missing entry block"))
+    for index in 0..count:
+        var targets: [i64] = []
+        match function.blocks[index].terminator:
+            case Goto(target): targets.push(target.id)
+            case If(_, yes, no):
+                targets.push(yes.id)
+                if no.id != yes.id: targets.push(no.id)
+            case Ret(_): ()
+            # Physical terminal facts do not establish semantic reachability.
+            # The checked decision graph may omit exhaustive-match residual
+            # fallbacks; its retained-node emitter still refuses Abort.
+            case Abort(_): ()
+            case Unreachable: ()
+            case _:
+                return Err(lean_enum_error_v1("EE-E-EDGE",
+                    "unsupported physical graph terminator"))
+        for target in targets:
+            remaining = remaining - 1
+            if remaining < 0:
+                return Err(lean_enum_error_v1("EE-E-RESOURCE", "edge work exhausted"))
+            if not indices.has(target):
+                return Err(lean_enum_error_v1("EE-E-EDGE", "missing successor block"))
+            val next_index = indices[target]
+            var outgoing = successors[index]
+            outgoing.push(next_index)
+            successors[index] = outgoing
+            var incoming = predecessors[next_index]
+            incoming.push(index)
+            predecessors[next_index] = incoming
+            indegrees[next_index] = indegrees[next_index] + 1
+    # Reachability is independent of topological ordering: an acyclic
+    # disconnected block is still not part of the validated function region.
+    var reachable: Dict<i64, bool> = {}
+    var pending = [indices[function.entry_block.id]]
+    reachable[pending[0]] = true
+    var head = 0
+    while head < pending.len():
+        remaining = remaining - 1 - successors[pending[head]].len()
+        if remaining < 0:
+            return Err(lean_enum_error_v1("EE-E-RESOURCE", "reachability work exhausted"))
+        val index = pending[head]
+        head = head + 1
+        for successor in successors[index]:
+            if not reachable.has(successor):
+                reachable[successor] = true
+                pending.push(successor)
+    if pending.len() != count:
+        return Err(lean_enum_error_v1("EE-E-EDGE", "disconnected physical block"))
+    var ready: [i64] = []
+    for index in 0..count:
+        if indegrees[index] == 0: ready.push(index)
+    var order: [i64] = []
+    head = 0
+    while head < ready.len():
+        remaining = remaining - 1 - successors[ready[head]].len()
+        if remaining < 0:
+            return Err(lean_enum_error_v1("EE-E-RESOURCE", "topological work exhausted"))
+        val index = ready[head]
+        head = head + 1
+        order.push(index)
+        for successor in successors[index]:
+            indegrees[successor] = indegrees[successor] - 1
+            if indegrees[successor] == 0: ready.push(successor)
+    if order.len() != count:
+        return Err(lean_enum_error_v1("EE-E-EDGE", "cyclic physical graph"))
+    Ok(LeanEnumCfgV1(indices: indices, successors: successors,
+        predecessors: predecessors, topological_order: order, remaining: remaining))
+
+struct LeanEnumJoinedStateV1:
+    emitter: LeanNominalBodyEmitter
+    parameter_ids: [i64]
+    parameters: text
+    arguments: text
+    remaining: i64
+
+fn lean_enum_join_states_v1(function: MirFunction, context: LeanTypeContext,
+    incoming: [LeanNominalBodyEmitter], allowance: i64
+) -> Result<LeanEnumJoinedStateV1, CompileError>:
+    if incoming.len() == 0:
+        return Err(lean_enum_error_v1("EE-E-AVAILABILITY", "continuation has no incoming state"))
+    var remaining = allowance - function.locals.len()
+    if remaining < 0:
+        return Err(lean_enum_error_v1("EE-E-RESOURCE", "local-state setup work exhausted"))
+    var emitter = lean_nominal_emitter_for_function_v1(function, context)?
+    # Replace the fresh argument maps with fresh join maps. Never alias any
+    # predecessor's mutable maps or reset consumed values to entry state.
+    var assigned: Dict<i64, bool> = {}
+    var live: Dict<i64, bool> = {}
+    var local_ids: [i64] = []
+    for local in function.locals: local_ids.push(local.id.id)
+    local_ids.sort()
+    var parameter_ids: [i64] = []
+    var parameters: [text] = []
+    var arguments: [text] = []
+    for identity in local_ids:
+        var all_live = true
+        var any_assigned = false
+        for state in incoming:
+            remaining = remaining - 1
+            if remaining < 0:
+                return Err(lean_enum_error_v1("EE-E-RESOURCE", "state-join work exhausted"))
+            if state.assigned.has(identity): any_assigned = true
+            if not state.live.has(identity) or not state.live[identity]:
+                all_live = false
+        if any_assigned: assigned[identity] = true
+        if all_live:
+            live[identity] = true
+            parameter_ids.push(identity)
+            val type_ = emitter.types[identity]
+            val lean_type = lean_context_type_to_lean(type_, context)?
+            parameters.push("(_l{identity} : {lean_type})")
+            arguments.push("_l{identity}")
+    emitter.assigned = assigned
+    emitter.live = live
+    emitter.constant_nodes_left = remaining
+    Ok(LeanEnumJoinedStateV1(emitter: emitter, parameter_ids: parameter_ids,
+        parameters: parameters.join(" "), arguments: arguments.join(" "),
+        remaining: remaining))
+
+struct LeanEnumPatternValuesV1:
+    terms: Dict<text, text>
+    types: Dict<text, MirType>
+
+fn lean_enum_path_variable_v1(match_id: i64, key: text) -> text:
+    # Checked path keys contain only the frozen r/e/t separators and integer
+    # identities. This mapping retains all separators without runtime lookup.
+    var suffix = key.replace("$", "r")
+    suffix = suffix.replace(".", "_")
+    suffix = suffix.replace(":", "_")
+    suffix = suffix.replace("-", "n")
+    "ee_m{match_id}_v_{suffix}"
+
+fn lean_enum_values_fork_v1(values: LeanEnumPatternValuesV1
+) -> LeanEnumPatternValuesV1:
+    var terms: Dict<text, text> = {}
+    var types: Dict<text, MirType> = {}
+    for key in values.terms.keys():
+        terms[key] = values.terms[key]
+        types[key] = values.types[key]
+    LeanEnumPatternValuesV1(terms: terms, types: types)
+
+struct LeanEnumConstructorPatternV1:
+    pattern: text
+    values: LeanEnumPatternValuesV1
+    remaining: i64
+
+fn lean_enum_constructor_pattern_v1(module: MirModule, match_id: i64,
+    path: EnumPatternValuePathV1, test: EnumPatternDecisionTestV1,
+    context: LeanTypeContext, incoming: LeanEnumPatternValuesV1, allowance: i64
+) -> Result<LeanEnumConstructorPatternV1, CompileError>:
+    var remaining = allowance - incoming.terms.keys().len()
+    if remaining < 0:
+        return Err(lean_enum_error_v1("EE-E-LIMIT", "pattern environment work exhausted"))
+    var values = lean_enum_values_fork_v1(incoming)
+    var fields: [MirType] = []
+    var name = ""
+    var field_prefix = ""
+    var is_product = false
+    match test:
+        case Constructor(owner, discriminant):
+            match path.type_.kind:
+                case Enum(actual):
+                    if actual.id != owner.id:
+                        return Err(lean_enum_error_v1("EE-E-PATTERN", "decision owner differs"))
+                case _:
+                    return Err(lean_enum_error_v1("EE-E-PATTERN", "constructor decision requires enum"))
+            if not context.definitions.has(owner.id) or not context.names.has(owner.id):
+                return Err(lean_enum_error_v1("EE-E-DECLARATION", "missing decision owner"))
+            val definition = context.definitions[owner.id]
+            if definition.symbol.id != owner.id:
+                return Err(lean_enum_error_v1("EE-E-DECLARATION", "decision owner identity differs"))
+            var found = false
+            match definition.kind:
+                case Enum(variants):
+                    for variant in variants:
+                        remaining = remaining - 1
+                        if remaining < 0:
+                            return Err(lean_enum_error_v1("EE-E-LIMIT", "constructor work exhausted"))
+                        if variant.discriminant == discriminant:
+                            if found:
+                                return Err(lean_enum_error_v1("EE-E-PATTERN", "ambiguous discriminant"))
+                            found = true
+                            name = context.names[owner.id] + "." + lean_type_quote_name(variant.name)
+                case _:
+                    return Err(lean_enum_error_v1("EE-E-DECLARATION", "constructor owner is not enum"))
+            if not found:
+                return Err(lean_enum_error_v1("EE-E-PATTERN", "missing decision discriminant"))
+            var retained = false
+            for facts in module.enum_semantic_declarations:
+                remaining = remaining - 1
+                if remaining < 0:
+                    return Err(lean_enum_error_v1("EE-E-LIMIT", "declaration lookup work exhausted"))
+                if facts.owner.id == owner.id:
+                    for slots in facts.variants:
+                        remaining = remaining - 1 - slots.slot_types.len()
+                        if remaining < 0:
+                            return Err(lean_enum_error_v1("EE-E-LIMIT", "slot lookup work exhausted"))
+                        if slots.discriminant == discriminant:
+                            if retained:
+                                return Err(lean_enum_error_v1("EE-E-DECLARATION", "duplicate slot envelope"))
+                            retained = true
+                            for type_ in slots.slot_types: fields.push(type_)
+            if not retained:
+                return Err(lean_enum_error_v1("EE-E-DECLARATION", "missing source slot envelope"))
+            field_prefix = path.key + ".e{owner.id}:{discriminant}:"
+        case Product:
+            is_product = true
+            match path.type_.kind:
+                case Tuple(elements):
+                    for element in elements: fields.push(element)
+                case _:
+                    return Err(lean_enum_error_v1("EE-E-PATTERN", "product decision requires tuple"))
+            field_prefix = path.key + ".t"
+        case _:
+            return Err(lean_enum_error_v1("EE-E-PATTERN", "expected constructor or product edge"))
+    var terms: [text] = []
+    for index in 0..fields.len():
+        remaining = remaining - 1
+        if remaining < 0:
+            return Err(lean_enum_error_v1("EE-E-LIMIT", "field projection work exhausted"))
+        val key = field_prefix + index.to_string()
+        val variable = lean_enum_path_variable_v1(match_id, key)
+        val _field_type = lean_context_type_to_lean(fields[index], context)?
+        values.terms[key] = variable
+        values.types[key] = fields[index]
+        terms.push(variable)
+    var payload_pattern = "()"
+    if terms.len() == 1:
+        payload_pattern = terms[0]
+    elif terms.len() > 1:
+        payload_pattern = "(" + terms.join(", ") + ")"
+    val pattern = if is_product: payload_pattern
+        elif terms.len() == 0: name
+        else: name + " (" + payload_pattern + ")"
+    Ok(LeanEnumConstructorPatternV1(pattern: pattern, values: values, remaining: remaining))
+
+export lean_enum_error_v1, LeanEnumCfgV1, lean_enum_cfg_v1
+export LeanEnumJoinedStateV1, lean_enum_join_states_v1, LeanEnumPatternValuesV1
+export lean_enum_path_variable_v1, lean_enum_values_fork_v1
+export LeanEnumConstructorPatternV1, lean_enum_constructor_pattern_v1

@@ -118,5 +118,6 @@ int main(void) {
     return 0;
 }
 #else
+#include <stdio.h>
 int main(void) { puts("runtime_linux_group_owner_unavailable_selfcheck: non-Linux"); return 0; }
 #endif

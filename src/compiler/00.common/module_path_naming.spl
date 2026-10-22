@@ -34,6 +34,33 @@ fn _module_path_naming_text_index_of(value: text, needle: text) -> i64:
         start = start + 1
     -1
 
+fn _module_path_naming_tier_inner_twin(stripped_tier: text, final_part: text) -> bool:
+    """True when `NN.<tier>/<tier>/<final_part>.spl` shadows an existing
+    `NN.<tier>/<final_part>.spl` tier-root twin. The resolver probes the tier
+    root first, so the tier-root file owns the collapsed spelling and the
+    inner twin must keep its doubled name. Verified against the tree on
+    2026-10-12 by enumerating every `NN.name/name` tier pair; exactly these
+    twins exist. Keep in sync when adding a tier-root file whose inner twin
+    dir repeats the tier name."""
+    if stripped_tier == "backend":
+        return final_part == "__init__" or final_part == "backend_types"
+    if stripped_tier == "blocks":
+        return final_part == "__init__"
+    if stripped_tier == "mir_opt":
+        return final_part == "__init__"
+    if stripped_tier == "semantics":
+        return final_part == "__init__"
+    if stripped_tier == "mir":
+        return final_part == "__init__"
+    if stripped_tier == "mdsoc":
+        return final_part == "construct_types" or final_part == "types"
+    if stripped_tier == "loader":
+        return final_part == "__init__" or final_part == "compiler_sffi" or
+            final_part == "jit_context" or final_part == "jit_instantiator" or
+            final_part == "object_mapper" or final_part == "smf_cache" or
+            final_part == "smf_mmap_native"
+    false
+
 fn _module_path_naming_strip_numbered_dirs(path: text) -> text:
     """Make resolver-transparent `NN.name` directories transparent here too.
 
@@ -56,10 +83,41 @@ fn _module_path_naming_strip_numbered_dirs(path: text) -> text:
                 break
             prefix_len = prefix_len + 1
         if part_index + 1 < parts.len() and prefix_len >= 1 and prefix_len <= 3 and prefix_len < part_len and part.char_at(prefix_len) == ".":
-            logical_parts.push(part.substring(prefix_len + 1))
+            val stripped_part = part.substring(prefix_len + 1)
+            # `NN.name/name/...` tiers repeat their own name inside the tier
+            # dir (`src/compiler/70.backend/backend/...`, `15.blocks/blocks/...`,
+            # `60.mir_opt/mir_opt/...`). The module resolver maps the single
+            # spelling onto that same tree (`compiler.backend.*`); folding the
+            # redundant inner repeat keeps path-derived keys identical to the
+            # import spellings so the shard/full-inventory registry (path-only
+            # names) and the sequential registry (import-string aliases) agree
+            # (C7 shard doubled-key family, 2026-10-12).
+            #
+            # Exception: a direct child of the inner repeat dir that also
+            # exists at the tier root (`70.backend/backend_types.spl` vs
+            # `70.backend/backend/backend_types.spl`, both `__init__.spl`
+            # pairs). The resolver probes the tier root first, so the
+            # tier-root file owns the collapsed spelling; collapsing the inner
+            # twin too would give two physical files one registry key
+            # ("module surface name maps to conflicting indices"). The inner
+            # twin keeps its doubled name and its doubled import spelling.
+            # Direct child of the inner repeat dir means exactly one part
+            # follows it; deeper paths (e.g. `backend/native/mach_inst`) can
+            # never shadow a tier-root file.
+            val inner_direct_child = part_index + 2 == parts.len() - 1
+            val collapse_inner_repeat = part_index + 2 < parts.len() and
+                parts[part_index + 1] == stripped_part and
+                (not inner_direct_child or
+                 not _module_path_naming_tier_inner_twin(
+                     stripped_part, parts[parts.len() - 1]))
+            if collapse_inner_repeat:
+                part_index = part_index + 2
+            else:
+                part_index = part_index + 1
+            logical_parts.push(stripped_part)
         else:
             logical_parts.push(part)
-        part_index = part_index + 1
+            part_index = part_index + 1
     logical_parts.join("/")
 
 pub fn module_source_relative_path(path: text) -> text:
@@ -86,7 +144,71 @@ pub fn module_source_relative_path(path: text) -> text:
         return mod_path.substring(absolute_examples + 1)
     mod_path
 
+pub fn module_relative_name_from_path(path: text, relative_name: text) -> text:
+    """Resolve a relative import's physical sibling before normalizing tiers.
+    Empty means the caller has no source-file identity (or no relative tail).
+    No filesystem lookup or import-visibility decision is performed here."""
+    if not relative_name.starts_with("."):
+        return ""
+    val source_path = module_source_relative_path(path)
+    if not source_path.ends_with(".spl"):
+        return ""
+    var dots = 0
+    while dots < relative_name.len() and relative_name.char_at(dots) == ".":
+        dots = dots + 1
+    val tail = relative_name.substring(dots)
+    if tail == "":
+        return ""
+    val parts = source_path.split("/")
+    val keep = if parts.len() > dots: parts.len() - dots else: 0
+    var target_parts: [text] = []
+    var index = 0
+    while index < keep:
+        target_parts.push(parts[index])
+        index = index + 1
+    target_parts.push(tail.replace(".", "/") + ".spl")
+    module_logical_name_from_path(target_parts.join("/"))
+
+# Cycle-166 (2026-10-19): MIR profiling of the pathological first-batch
+# modules put module_logical_name_from_path at ~14% of wall time -- it builds
+# its result with PER-CHAR string concat (O(len^2) allocations per call) and
+# MIR lowering re-derives the same module's name thousands of times per
+# module. Pure function of its input, so memoize per process (the compiler
+# phase is single-threaded; shard workers are separate processes).
+#
+# Entries are retained ONLY by `module_logical_name_cache_warm`, never by a
+# plain lookup. HIR lowers every file and MIR every module inside an unpaused
+# transient array scope; a value (and, in code Stage 2 emits, the re-boxed key)
+# computed there is freed when the scope ends, and no promote root reaches this
+# module-level dict. Retaining it left a dangling entry whose later hits
+# returned whatever reused the storage: Stage 2 read build-progress text back
+# as imported-enum owners (`schema=.TestExecutionMode`, ~138 MIR errors; bug
+# stage2_test_runner_imported_enum_owner_text_corrupt_2026_10_19). A plain
+# lookup cannot tell whether a scope is running (the scope-state extern is not
+# backed by the interpreter), so retention is opt-in at a known scope-free
+# point instead: lower_to_mir_with_target_context
+# (80.driver/driver_pipeline_lowering.spl) warms every module name and symbol
+# owner at state 0, before its per-module scopes begin.
+var _module_logical_name_cache: {text: text} = {}
+var _module_logical_name_cache_retaining: bool = false
+
 pub fn module_logical_name_from_path(path: text) -> text:
+    if _module_logical_name_cache.has(path):
+        return _module_logical_name_cache[path]
+    val computed = _module_logical_name_from_path_uncached(path)
+    if _module_logical_name_cache_retaining:
+        _module_logical_name_cache[path] = computed
+    computed
+
+pub fn module_logical_name_cache_warm(path: text):
+    """Derive and RETAIN `path`'s logical name. Caller contract: no transient
+    array scope is running (state 0, or paused), and `path` is persistent;
+    otherwise the retained entry dangles once that scope ends."""
+    _module_logical_name_cache_retaining = true
+    val _retained = module_logical_name_from_path(path)
+    _module_logical_name_cache_retaining = false
+
+fn _module_logical_name_from_path_uncached(path: text) -> text:
     """Derive the dotted logical module name (e.g. `_wallB_mod_a`) from a
     source path (e.g. `src/_wallB_mod_a.spl`). Under `SIMPLE_BOOTSTRAP=1`,
     `HirModule.name`/`ParserModule.name` is the raw parsed PATH, not the

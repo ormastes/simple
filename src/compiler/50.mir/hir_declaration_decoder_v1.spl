@@ -1,0 +1,491 @@
+# Reader for the typed MIR declaration seal (hir_declaration_codec_v1.spl).
+#
+# The codec was write-only: it existed to digest a resident declaration
+# repository. MIR shard export summaries
+# (doc/05_design/compiler/incremental_build/mir_shard_export_summaries.md)
+# persist one module's MirHirModuleDeclarationsV1 with that exact writer, so a
+# shard worker needs the inverse. Every reader mirrors one writer field for
+# field, in the writer's order. The decoder is not trusted on its own: callers
+# (mir_hir_decode_module_declarations_v1 below) re-encode the decoded value
+# and require byte equality with the input, so any field this reader gets
+# wrong is a refusal, never a silently different declaration.
+use compiler.mir.hir_declaration_types_v1.{MirHirParamDeclarationV1, MirHirFunctionDeclarationV1,
+    MirHirFieldDeclarationV1, MirHirNominalDeclarationV1, MirHirVariantDeclarationV1,
+    MirHirEnumDeclarationV1, MirHirTraitDeclarationV1, MirHirGlobalDeclarationV1,
+    MirHirDeclarationSourceV1, MirHirModuleDeclarationsV1}
+use compiler.mir.hir_expression_artifact_v1.{MirHirExpressionArtifactV1}
+use compiler.mir.hir_declaration_codec_v1.{mir_hir_write_module_declarations_v1,
+    mir_hir_module_declaration_digest_v1}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.attributes.{FunctionAttr, ExportAttr}
+use compiler.types.type_layout.{LayoutAttr}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.hir.generated.hir_codec.*
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, flat_pool_unescape}
+
+export mir_hir_decode_module_declarations_v1, mir_hir_encode_module_declarations_v1
+
+# A nil text (the writer's "\N") has no non-nil spelling here; decoding it to
+# "" re-encodes differently, so the byte-equality check refuses it.
+fn mir_hir_read_text_v1(r: FlatPoolReader) -> text:
+    val raw = r.next()
+    if raw == "\\N":
+        return ""
+    flat_pool_unescape(raw)
+
+fn mir_hir_read_bool_v1(r: FlatPoolReader) -> bool:
+    r.next() == "1"
+
+# The writer's present flag: 0 = absent, 1 = present. Anything else is corrupt.
+fn mir_hir_read_present_v1(r: FlatPoolReader) -> bool:
+    val flag = r.next_i64()
+    if flag != 0 and flag != 1:
+        r.ok = false
+    flag == 1
+
+fn mir_hir_read_symbol_v1(r: FlatPoolReader) -> SymbolId?:
+    if mir_hir_read_present_v1(r):
+        return hc_dec_symbol_id(r)
+    nil
+
+fn mir_hir_read_type_v1(r: FlatPoolReader) -> HirType?:
+    if mir_hir_read_present_v1(r):
+        return hc_dec_hir_type(r)
+    nil
+
+fn mir_hir_read_span_v1(r: FlatPoolReader) -> Span?:
+    if mir_hir_read_present_v1(r):
+        return hc_dec_span(r)
+    nil
+
+fn mir_hir_read_visibility_v1(r: FlatPoolReader) -> Visibility?:
+    if mir_hir_read_present_v1(r):
+        return hc_dec_visibility(r)
+    nil
+
+fn mir_hir_read_type_params_v1(r: FlatPoolReader) -> [HirTypeParam]:
+    var out: [HirTypeParam] = []
+    val count = r.next_len()
+    var index = 0
+    while index < count and r.ok:
+        if mir_hir_read_present_v1(r):
+            out.push(hc_dec_hir_type_param(r))
+        else:
+            r.ok = false
+        index = index + 1
+    out
+
+fn mir_hir_read_expression_artifact_v1(r: FlatPoolReader) -> MirHirExpressionArtifactV1:
+    val final_repository_authority = mir_hir_read_text_v1(r)
+    val final_archive_key = mir_hir_read_text_v1(r)
+    val final_body_digest = mir_hir_read_text_v1(r)
+    val module_name = mir_hir_read_text_v1(r)
+    val source_path = mir_hir_read_text_v1(r)
+    val category = mir_hir_read_text_v1(r)
+    val declaration_symbol = r.next_i64()
+    val member_index = r.next_i64()
+    val member_name = mir_hir_read_text_v1(r)
+    val expression_digest = mir_hir_read_text_v1(r)
+    val archive_key = mir_hir_read_text_v1(r)
+    val stage = mir_hir_read_text_v1(r)
+    MirHirExpressionArtifactV1(final_repository_authority: final_repository_authority,
+        final_archive_key: final_archive_key, final_body_digest: final_body_digest,
+        module_name: module_name, source_path: source_path, category: category,
+        declaration_symbol: declaration_symbol, member_index: member_index,
+        member_name: member_name, expression_digest: expression_digest,
+        archive_key: archive_key, stage: stage)
+
+# Optional artifact: outer flag = Some/None, inner flag = non-nil payload. A
+# Some(nil) has no faithful typed spelling, so it is refused.
+fn mir_hir_read_optional_artifact_v1(r: FlatPoolReader) -> MirHirExpressionArtifactV1?:
+    if not mir_hir_read_present_v1(r):
+        return nil
+    if not mir_hir_read_present_v1(r):
+        r.ok = false
+        return nil
+    Some(mir_hir_read_expression_artifact_v1(r))
+
+fn mir_hir_read_param_declaration_v1(r: FlatPoolReader) -> MirHirParamDeclarationV1:
+    val symbol = mir_hir_read_symbol_v1(r)
+    val name = mir_hir_read_text_v1(r)
+    val type_ = mir_hir_read_type_v1(r)
+    val has_default = mir_hir_read_bool_v1(r)
+    val default_artifact = mir_hir_read_optional_artifact_v1(r)
+    val span = mir_hir_read_span_v1(r)
+    val is_mutable = mir_hir_read_bool_v1(r)
+    MirHirParamDeclarationV1(symbol: symbol, name: name, type_: type_, has_default: has_default,
+        default_artifact: default_artifact, span: span, is_mutable: is_mutable)
+
+fn mir_hir_read_function_declaration_v1(r: FlatPoolReader) -> MirHirFunctionDeclarationV1:
+    val complete_function_digest = mir_hir_read_text_v1(r)
+    val symbol = mir_hir_read_symbol_v1(r)
+    val name = mir_hir_read_text_v1(r)
+    val type_params = mir_hir_read_type_params_v1(r)
+    var params: [MirHirParamDeclarationV1] = []
+    val param_count = r.next_len()
+    var param_index = 0
+    while param_index < param_count and r.ok:
+        if mir_hir_read_present_v1(r):
+            params.push(mir_hir_read_param_declaration_v1(r))
+        else:
+            r.ok = false
+        param_index = param_index + 1
+    val return_type = mir_hir_read_type_v1(r)
+    var effects: [Effect] = []
+    val effect_count = r.next_len()
+    var effect_index = 0
+    while effect_index < effect_count and r.ok:
+        if mir_hir_read_present_v1(r):
+            effects.push(hc_dec_effect(r))
+        else:
+            r.ok = false
+        effect_index = effect_index + 1
+    val visibility = mir_hir_read_visibility_v1(r)
+    val is_async = mir_hir_read_bool_v1(r)
+    val is_static = mir_hir_read_bool_v1(r)
+    val is_public = mir_hir_read_bool_v1(r)
+    val is_method = mir_hir_read_bool_v1(r)
+    val is_mutable = mir_hir_read_bool_v1(r)
+    val is_const = mir_hir_read_bool_v1(r)
+    val is_extern = mir_hir_read_bool_v1(r)
+    var func_attr: FunctionAttr? = nil
+    if mir_hir_read_present_v1(r):
+        func_attr = hc_dec_function_attr(r)
+    val has_export_attr = mir_hir_read_bool_v1(r)
+    var export_attr: ExportAttr? = nil
+    if mir_hir_read_present_v1(r):
+        export_attr = hc_dec_export_attr(r)
+    val is_generic_template = mir_hir_read_bool_v1(r)
+    val span = mir_hir_read_span_v1(r)
+    MirHirFunctionDeclarationV1(symbol: symbol, name: name, type_params: type_params,
+        params: params, return_type: return_type, effects: effects, visibility: visibility,
+        is_async: is_async, is_static: is_static, is_public: is_public, is_method: is_method,
+        is_mutable: is_mutable, is_const: is_const, is_extern: is_extern, func_attr: func_attr,
+        has_export_attr: has_export_attr, export_attr: export_attr,
+        is_generic_template: is_generic_template, span: span,
+        complete_function_digest: complete_function_digest)
+
+fn mir_hir_read_field_declaration_v1(r: FlatPoolReader) -> MirHirFieldDeclarationV1:
+    val symbol = mir_hir_read_symbol_v1(r)
+    val name = mir_hir_read_text_v1(r)
+    val type_ = mir_hir_read_type_v1(r)
+    val has_default = mir_hir_read_bool_v1(r)
+    val default_artifact = mir_hir_read_optional_artifact_v1(r)
+    val visibility = mir_hir_read_visibility_v1(r)
+    val is_public = mir_hir_read_bool_v1(r)
+    val is_volatile = mir_hir_read_bool_v1(r)
+    val has_bits_attr = mir_hir_read_bool_v1(r)
+    val bits_width = r.next_i64()
+    val has_fixed_address = mir_hir_read_bool_v1(r)
+    val fixed_address = r.next_i64()
+    val span = mir_hir_read_span_v1(r)
+    MirHirFieldDeclarationV1(symbol: symbol, name: name, type_: type_, has_default: has_default,
+        default_artifact: default_artifact, visibility: visibility, is_public: is_public,
+        is_volatile: is_volatile, has_bits_attr: has_bits_attr, bits_width: bits_width,
+        has_fixed_address: has_fixed_address, fixed_address: fixed_address, span: span)
+
+fn mir_hir_read_fields_v1(r: FlatPoolReader) -> [MirHirFieldDeclarationV1]:
+    var out: [MirHirFieldDeclarationV1] = []
+    val count = r.next_len()
+    var index = 0
+    while index < count and r.ok:
+        if mir_hir_read_present_v1(r):
+            out.push(mir_hir_read_field_declaration_v1(r))
+        else:
+            r.ok = false
+        index = index + 1
+    out
+
+fn mir_hir_read_nominal_declaration_v1(r: FlatPoolReader) -> MirHirNominalDeclarationV1:
+    val layout_digest = mir_hir_read_text_v1(r)
+    val symbol = mir_hir_read_symbol_v1(r)
+    val name = mir_hir_read_text_v1(r)
+    var kind: SymbolKind? = nil
+    if mir_hir_read_present_v1(r):
+        kind = hc_dec_symbol_kind(r)
+    val type_params = mir_hir_read_type_params_v1(r)
+    val fields = mir_hir_read_fields_v1(r)
+    var methods: Dict<text, SymbolId> = {}
+    val method_count = r.next_len()
+    var method_index = 0
+    while method_index < method_count and r.ok:
+        val method_name = mir_hir_read_text_v1(r)
+        if mir_hir_read_present_v1(r):
+            methods[method_name] = hc_dec_symbol_id(r)
+        else:
+            r.ok = false
+        method_index = method_index + 1
+    val has_layout_attr = mir_hir_read_bool_v1(r)
+    var layout_attr: LayoutAttr? = nil
+    if mir_hir_read_present_v1(r):
+        layout_attr = hc_dec_layout_attr(r)
+    val has_export_attr = mir_hir_read_bool_v1(r)
+    var export_attr: ExportAttr? = nil
+    if mir_hir_read_present_v1(r):
+        if mir_hir_read_present_v1(r):
+            export_attr = Some(hc_dec_export_attr(r))
+        else:
+            r.ok = false
+    val visibility = mir_hir_read_visibility_v1(r)
+    val is_public = mir_hir_read_bool_v1(r)
+    val is_generic_template = mir_hir_read_bool_v1(r)
+    val span = mir_hir_read_span_v1(r)
+    MirHirNominalDeclarationV1(symbol: symbol, name: name, kind: kind, type_params: type_params,
+        fields: fields, methods: methods, has_layout_attr: has_layout_attr,
+        layout_attr: layout_attr, layout_digest: layout_digest, has_export_attr: has_export_attr,
+        export_attr: export_attr, visibility: visibility, is_public: is_public,
+        is_generic_template: is_generic_template, span: span)
+
+fn mir_hir_read_variant_declaration_v1(r: FlatPoolReader) -> MirHirVariantDeclarationV1:
+    val symbol = mir_hir_read_symbol_v1(r)
+    val name = mir_hir_read_text_v1(r)
+    val kind = mir_hir_read_text_v1(r)
+    var tuple_types: [HirType] = []
+    val tuple_count = r.next_len()
+    var tuple_index = 0
+    while tuple_index < tuple_count and r.ok:
+        if mir_hir_read_present_v1(r):
+            tuple_types.push(hc_dec_hir_type(r))
+        else:
+            r.ok = false
+        tuple_index = tuple_index + 1
+    val fields = mir_hir_read_fields_v1(r)
+    val has_discriminant = mir_hir_read_bool_v1(r)
+    val discriminant_artifact = mir_hir_read_optional_artifact_v1(r)
+    val span = mir_hir_read_span_v1(r)
+    MirHirVariantDeclarationV1(symbol: symbol, name: name, kind: kind, tuple_types: tuple_types,
+        fields: fields, has_discriminant: has_discriminant,
+        discriminant_artifact: discriminant_artifact, span: span)
+
+fn mir_hir_read_enum_declaration_v1(r: FlatPoolReader) -> MirHirEnumDeclarationV1:
+    val symbol = mir_hir_read_symbol_v1(r)
+    val name = mir_hir_read_text_v1(r)
+    val runtime_name = mir_hir_read_text_v1(r)
+    val type_params = mir_hir_read_type_params_v1(r)
+    var variants: [MirHirVariantDeclarationV1] = []
+    val variant_count = r.next_len()
+    var variant_index = 0
+    while variant_index < variant_count and r.ok:
+        if mir_hir_read_present_v1(r):
+            variants.push(mir_hir_read_variant_declaration_v1(r))
+        else:
+            r.ok = false
+        variant_index = variant_index + 1
+    var attributes: [HirAttribute] = []
+    val attribute_count = r.next_len()
+    var attribute_index = 0
+    while attribute_index < attribute_count and r.ok:
+        if mir_hir_read_present_v1(r):
+            attributes.push(hc_dec_hir_attribute(r))
+        else:
+            r.ok = false
+        attribute_index = attribute_index + 1
+    val complete_open = mir_hir_read_bool_v1(r)
+    val dyn_open = mir_hir_read_bool_v1(r)
+    val visibility = mir_hir_read_visibility_v1(r)
+    val is_public = mir_hir_read_bool_v1(r)
+    val is_generic_template = mir_hir_read_bool_v1(r)
+    val span = mir_hir_read_span_v1(r)
+    MirHirEnumDeclarationV1(symbol: symbol, name: name, runtime_name: runtime_name,
+        type_params: type_params, variants: variants, attributes: attributes,
+        complete_open: complete_open, dyn_open: dyn_open, visibility: visibility,
+        is_public: is_public, is_generic_template: is_generic_template, span: span)
+
+fn mir_hir_read_functions_v1(r: FlatPoolReader) -> [MirHirFunctionDeclarationV1]:
+    var out: [MirHirFunctionDeclarationV1] = []
+    val count = r.next_len()
+    var index = 0
+    while index < count and r.ok:
+        if mir_hir_read_present_v1(r):
+            out.push(mir_hir_read_function_declaration_v1(r))
+        else:
+            r.ok = false
+        index = index + 1
+    out
+
+fn mir_hir_read_trait_declaration_v1(r: FlatPoolReader) -> MirHirTraitDeclarationV1:
+    val symbol = mir_hir_read_symbol_v1(r)
+    val name = mir_hir_read_text_v1(r)
+    val type_params = mir_hir_read_type_params_v1(r)
+    val methods = mir_hir_read_functions_v1(r)
+    val defaults = mir_hir_read_functions_v1(r)
+    var supertraits: [HirType] = []
+    val supertrait_count = r.next_len()
+    var supertrait_index = 0
+    while supertrait_index < supertrait_count and r.ok:
+        if mir_hir_read_present_v1(r):
+            supertraits.push(hc_dec_hir_type(r))
+        else:
+            r.ok = false
+        supertrait_index = supertrait_index + 1
+    var where_clause: [HirTraitBound] = []
+    val bound_count = r.next_len()
+    var bound_index = 0
+    while bound_index < bound_count and r.ok:
+        if mir_hir_read_present_v1(r):
+            where_clause.push(hc_dec_hir_trait_bound(r))
+        else:
+            r.ok = false
+        bound_index = bound_index + 1
+    var assoc_types: [HirAssocTypeDecl] = []
+    val assoc_count = r.next_len()
+    var assoc_index = 0
+    while assoc_index < assoc_count and r.ok:
+        if mir_hir_read_present_v1(r):
+            assoc_types.push(hc_dec_hir_assoc_type_decl(r))
+        else:
+            r.ok = false
+        assoc_index = assoc_index + 1
+    val visibility = mir_hir_read_visibility_v1(r)
+    val is_public = mir_hir_read_bool_v1(r)
+    val is_generic_template = mir_hir_read_bool_v1(r)
+    val span = mir_hir_read_span_v1(r)
+    MirHirTraitDeclarationV1(symbol: symbol, name: name, type_params: type_params,
+        methods: methods, defaults: defaults, supertraits: supertraits,
+        where_clause: where_clause, assoc_types: assoc_types, visibility: visibility,
+        is_public: is_public, is_generic_template: is_generic_template, span: span)
+
+fn mir_hir_read_global_declaration_v1(r: FlatPoolReader) -> MirHirGlobalDeclarationV1:
+    val symbol = mir_hir_read_symbol_v1(r)
+    val name = mir_hir_read_text_v1(r)
+    val type_ = mir_hir_read_type_v1(r)
+    var initializer: MirHirExpressionArtifactV1? = nil
+    if mir_hir_read_present_v1(r):
+        initializer = mir_hir_read_expression_artifact_v1(r)
+    val is_mutable = mir_hir_read_bool_v1(r)
+    val visibility = mir_hir_read_visibility_v1(r)
+    val is_public = mir_hir_read_bool_v1(r)
+    val is_volatile = mir_hir_read_bool_v1(r)
+    val has_fixed_address = mir_hir_read_bool_v1(r)
+    val fixed_address = r.next_i64()
+    val span = mir_hir_read_span_v1(r)
+    MirHirGlobalDeclarationV1(symbol: symbol, name: name, type_: type_, initializer: initializer,
+        is_mutable: is_mutable, visibility: visibility, is_public: is_public,
+        is_volatile: is_volatile, has_fixed_address: has_fixed_address,
+        fixed_address: fixed_address, span: span)
+
+fn mir_hir_read_module_declarations_v1(r: FlatPoolReader) -> MirHirModuleDeclarationsV1:
+    val name = mir_hir_read_text_v1(r)
+    val path = mir_hir_read_text_v1(r)
+    var source_binding: MirHirDeclarationSourceV1? = nil
+    if mir_hir_read_present_v1(r):
+        val logical_key = mir_hir_read_text_v1(r)
+        val physical_path = mir_hir_read_text_v1(r)
+        val source_digest = mir_hir_read_text_v1(r)
+        val source_bytes = r.next_i64()
+        val input_archive_key = mir_hir_read_text_v1(r)
+        source_binding = Some(MirHirDeclarationSourceV1(logical_key: logical_key,
+            physical_path: physical_path, source_digest: source_digest,
+            source_bytes: source_bytes, input_archive_key: input_archive_key))
+    val final_repository_authority = mir_hir_read_text_v1(r)
+    val final_archive_key = mir_hir_read_text_v1(r)
+    val final_body_digest = mir_hir_read_text_v1(r)
+    var symbols: SymbolTable? = nil
+    if mir_hir_read_present_v1(r):
+        symbols = hc_dec_symbol_table(r)
+    val functions = mir_hir_read_functions_v1(r)
+    var structs: [MirHirNominalDeclarationV1] = []
+    val struct_count = r.next_len()
+    var struct_index = 0
+    while struct_index < struct_count and r.ok:
+        if mir_hir_read_present_v1(r):
+            structs.push(mir_hir_read_nominal_declaration_v1(r))
+        else:
+            r.ok = false
+        struct_index = struct_index + 1
+    var classes: [MirHirNominalDeclarationV1] = []
+    val class_count = r.next_len()
+    var class_index = 0
+    while class_index < class_count and r.ok:
+        if mir_hir_read_present_v1(r):
+            classes.push(mir_hir_read_nominal_declaration_v1(r))
+        else:
+            r.ok = false
+        class_index = class_index + 1
+    var enums: [MirHirEnumDeclarationV1] = []
+    val enum_count = r.next_len()
+    var enum_index = 0
+    while enum_index < enum_count and r.ok:
+        if mir_hir_read_present_v1(r):
+            enums.push(mir_hir_read_enum_declaration_v1(r))
+        else:
+            r.ok = false
+        enum_index = enum_index + 1
+    var bitfields: [HirBitfield] = []
+    val bitfield_count = r.next_len()
+    var bitfield_index = 0
+    while bitfield_index < bitfield_count and r.ok:
+        if mir_hir_read_present_v1(r):
+            bitfields.push(hc_dec_hir_bitfield(r))
+        else:
+            r.ok = false
+        bitfield_index = bitfield_index + 1
+    var traits: [MirHirTraitDeclarationV1] = []
+    val trait_count = r.next_len()
+    var trait_index = 0
+    while trait_index < trait_count and r.ok:
+        if mir_hir_read_present_v1(r):
+            traits.push(mir_hir_read_trait_declaration_v1(r))
+        else:
+            r.ok = false
+        trait_index = trait_index + 1
+    var impls: [HirImpl] = []
+    val impl_count = r.next_len()
+    var impl_index = 0
+    while impl_index < impl_count and r.ok:
+        if mir_hir_read_present_v1(r):
+            impls.push(hc_dec_hir_impl(r))
+        else:
+            r.ok = false
+        impl_index = impl_index + 1
+    var globals: [MirHirGlobalDeclarationV1] = []
+    val global_count = r.next_len()
+    var global_index = 0
+    while global_index < global_count and r.ok:
+        if mir_hir_read_present_v1(r):
+            globals.push(mir_hir_read_global_declaration_v1(r))
+        else:
+            r.ok = false
+        global_index = global_index + 1
+    val needs_initialization = mir_hir_read_bool_v1(r)
+    val stage = mir_hir_read_text_v1(r)
+    MirHirModuleDeclarationsV1(name: name, path: path,
+        final_repository_authority: final_repository_authority,
+        final_archive_key: final_archive_key, final_body_digest: final_body_digest,
+        symbols: symbols, functions: functions, structs: structs, classes: classes,
+        enums: enums, bitfields: bitfields, traits: traits, impls: impls, globals: globals,
+        needs_initialization: needs_initialization, declaration_digest: "", stage: stage,
+        source_binding: source_binding)
+
+# The exact sealed bytes of one module's declarations; "" when the writer
+# refuses (a nil/unregistered node), which callers treat as "no summary".
+fn mir_hir_encode_module_declarations_v1(module: MirHirModuleDeclarationsV1) -> text:
+    var writer = HirCodecWriter.create()
+    mir_hir_write_module_declarations_v1(writer, module)
+    if not writer.ok:
+        return ""
+    writer.finish()
+
+# Decode, then prove the decode: the reader must consume the whole blob, the
+# decoded value must re-encode to the identical bytes, and its declaration
+# digest must equal the one the producer recorded. Any miss is an Err.
+fn mir_hir_decode_module_declarations_v1(blob: text,
+        expected_declaration_digest: text) -> Result<MirHirModuleDeclarationsV1, text>:
+    if blob == "" or expected_declaration_digest == "":
+        return Err("MIR declaration summary is empty or has no recorded digest")
+    var reader = FlatPoolReader.new(blob)
+    var module = mir_hir_read_module_declarations_v1(reader)
+    if not reader.ok:
+        return Err("MIR declaration summary is malformed")
+    if not (reader.pos == reader.lines.len() - 1 and reader.lines[reader.pos] == ""):
+        return Err("MIR declaration summary has trailing or truncated records")
+    if mir_hir_encode_module_declarations_v1(module) != blob:
+        return Err("MIR declaration summary does not re-encode to its stored bytes")
+    val digest = mir_hir_module_declaration_digest_v1(module)
+    if digest == "" or digest != expected_declaration_digest:
+        return Err("MIR declaration summary digest mismatch")
+    module.declaration_digest = digest
+    Ok(module)

@@ -23,12 +23,12 @@ fn recovery_symbols(owner_kind: SymbolKind, include_method: bool) -> SymbolTable
     symbols.register_preserved_symbol(recovery_symbol(10, "Box", owner_kind, Some("src/left.spl"), nil))
     symbols.register_preserved_symbol(recovery_symbol(11, "Box", SymbolKind.Struct, Some("src/right.spl"), nil))
     symbols.register_preserved_symbol(recovery_symbol(20, "value", SymbolKind.Parameter, nil, receiver))
-    val signature = recovery_type(HirTypeKind.Function([receiver], recovery_type(HirTypeKind.Int(64, true))))
+    val signature = recovery_type(HirTypeKind.Function([receiver], recovery_type(HirTypeKind.Int(64, true)), []))
     if include_method:
         symbols.register_preserved_symbol(recovery_symbol(30, "left.Box::inspect", SymbolKind.Method, Some("src/left.spl"), signature))
     symbols.register_preserved_symbol(recovery_symbol(31, "right.Box::inspect", SymbolKind.Method, Some("src/right.spl"), signature))
     symbols.register_preserved_symbol(recovery_symbol(32, "right.Other::inspect", SymbolKind.Function, Some("src/right.spl"),
-        recovery_type(HirTypeKind.Function([], recovery_type(HirTypeKind.Int(64, true))))))
+        recovery_type(HirTypeKind.Function([], recovery_type(HirTypeKind.Int(64, true)), []))))
     symbols
 
 fn force_record_recovery(symbols: SymbolTable, method: text) -> (i64, text):
@@ -95,7 +95,7 @@ describe "declared record method recovery with erased receiver ownership":
         var symbols = recovery_symbols(SymbolKind.Struct, false)
         val receiver = recovery_type(HirTypeKind.Named(SymbolId(id: 10), []))
         symbols.register_preserved_symbol(recovery_symbol(33, "left.Box::get", SymbolKind.Method, Some("src/left.spl"),
-            recovery_type(HirTypeKind.Function([receiver], recovery_type(HirTypeKind.Int(64, true))))))
+            recovery_type(HirTypeKind.Function([receiver], recovery_type(HirTypeKind.Int(64, true)), []))))
         val (errors, mir) = force_record_recovery(symbols, "get")
         expect(errors).to_equal(0)
         expect(mir).to_contain("left.Box")
@@ -106,3 +106,77 @@ describe "declared record method recovery with erased receiver ownership":
         val receiver = HirExpr(kind: HirExprKind.Var(SymbolId(id: 10)), has_type_: true,
             type_: recovery_type(HirTypeKind.Named(SymbolId(id: 10), [])), span: Span.empty())
         expect(lowering.declared_record_receiver_owner(receiver)).to_equal(-1)
+
+
+# @req REQ-IM-008 REQ-IM-016
+# Invoke the actual method lowering owner with the empty scalar hints emitted
+# by expr_dispatch, rather than merely testing a symbol lookup projection.
+fn static_recovery_symbols(include_left: bool) -> SymbolTable:
+    var symbols = SymbolTable.new()
+    symbols.register_preserved_symbol(recovery_symbol(10, "Box", SymbolKind.Struct, Some("src/left.spl"), nil))
+    symbols.register_preserved_symbol(recovery_symbol(11, "Box", SymbolKind.Struct, Some("src/right.spl"), nil))
+    symbols.register_preserved_symbol(recovery_symbol(20, "value", SymbolKind.Parameter, nil,
+        recovery_type(HirTypeKind.Named(SymbolId(id: 10), []))))
+    val signature = recovery_type(HirTypeKind.Function([], recovery_type(HirTypeKind.Int(64, true)), []))
+    if include_left:
+        symbols.register_preserved_symbol(recovery_symbol(30, "left.Box::new", SymbolKind.Function, Some("src/left.spl"), signature))
+    symbols.register_preserved_symbol(recovery_symbol(31, "right.Box::new", SymbolKind.Function, Some("src/right.spl"), signature))
+    symbols
+
+fn force_static_recovery(owner_id: i64, include_left: bool, runtime_value: bool) -> (i64, text):
+    var lowering = MirLowering.new(static_recovery_symbols(include_left))
+    var builder = lowering.builder
+    builder.begin_function(SymbolId(id: 90), "static_probe", MirSignature(params: [], return_type: MirType.i64(), is_variadic: false), Span.empty())
+    if runtime_value:
+        val local = builder.new_temp(MirType.i64())
+        builder.emit_const(local, MirConstValue.Int(0), MirType.i64())
+        lowering.bind_local(20, local)
+        lowering.remember_local_hir_type(local.id,
+            recovery_type(HirTypeKind.Named(SymbolId(id: 10), [])), 0, 0)
+    lowering.builder = builder
+    if include_left:
+        lowering.struct_method_syms["static::left.Box::new"] = SymbolId(id: 30)
+    lowering.struct_method_syms["static::right.Box::new"] = SymbolId(id: 31)
+    # Poison a bare spelling: declared owner identity must always win.
+    lowering.struct_method_syms["static::Box::new"] = SymbolId(id: 31)
+    val receiver = HirExpr(kind: HirExprKind.NamedVar(SymbolId(id: owner_id),
+        if runtime_value: "value" else: "Box"), has_type_: false,
+        type_: recovery_type(HirTypeKind.Unit), span: Span.empty())
+    val result = lowering.lower_method_call(receiver, "new", [], MethodResolution.Unresolved, "", -1)
+    var finished = lowering.builder
+    val function = finished.end_function()
+    (lowering.errors.len(), serialize_mir_function(function))
+
+describe "nominal static method receiver recovery":
+    it "selects the actual declaration owner when two owners share the method leaf":
+        # @req REQ-NATIVE-STATIC-OWNER-001
+        step("Recover each nominal type receiver before value lowering")
+        val (left_errors, left_mir) = force_static_recovery(10, true, false)
+        expect(left_errors).to_equal(0)
+        expect(left_mir).to_contain("left.Box")
+        expect(left_mir.contains("right.Box")).to_equal(false)
+        expect(left_mir.contains("rt_panic")).to_equal(false)
+        val (right_errors, right_mir) = force_static_recovery(11, true, false)
+        expect(right_errors).to_equal(0)
+        expect(right_mir).to_contain("right.Box")
+        expect(right_mir.contains("left.Box")).to_equal(false)
+        expect(right_mir.contains("rt_panic")).to_equal(false)
+
+    it "rejects a missing owner method instead of selecting the other owner's unique method":
+        # @req REQ-NATIVE-STATIC-OWNER-002
+        step("Reject a method missing from its actual owner")
+        val (errors, mir) = force_static_recovery(10, false, false)
+        # Exactly the missing-method error, never an additional attempt to
+        # read the nominal type as an undefined runtime variable.
+        expect(errors).to_equal(1)
+        expect(mir).to_contain("rt_panic")
+        expect(mir.contains("right.Box")).to_equal(false)
+
+    it "keeps a runtime value out of static recovery despite its nominal declared type":
+        # @req REQ-NATIVE-STATIC-OWNER-003
+        step("Keep runtime values on the instance path")
+        val (errors, mir) = force_static_recovery(20, true, true)
+        expect(errors).to_be_greater_than(0)
+        expect(mir).to_contain("rt_panic")
+        expect(mir.contains("left.Box")).to_equal(false)
+        expect(mir.contains("right.Box")).to_equal(false)

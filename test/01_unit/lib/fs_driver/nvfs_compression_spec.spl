@@ -1,0 +1,162 @@
+use std.spec
+use std.spec.step
+use os.services.nvfs.core.compression.{compress_extent, decompress_extent}
+use std.common.compress.lz4.{lz4_compress_block, lz4_decompress_block_bounded}
+use std.common.compress.types.{CompressionCodec}
+use std.common.compress.utilities.{compression_options}
+use std.common.compress.zstd.{zstd_compress_frame}
+
+fn _repeating_text(n: i64) -> [u8]:
+    val phrase = "the quick brown fox jumps over the lazy dog. "
+    val pb = phrase.bytes()
+    var out: [u8] = []
+    var i = 0
+    while out.len() < n:
+        out.push(pb[i % pb.len()])
+        i = i + 1
+    out
+
+fn _lcg_bytes(n: i64) -> [u8]:
+    var out: [u8] = []
+    var s: i64 = 12345
+    while out.len() < n:
+        s = (s * 1103515245 + 12345) % 2147483648
+        out.push(((s / 65536) % 256) as u8)
+    out
+
+fn _same(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+describe "nvfs compression":
+    it "LZ4 class shrinks compressible data and round-trips":
+        step("compress 8 KiB repeating text under DB_TEMP (LZ4)")
+        val plain = _repeating_text(8192)
+        val r = compress_extent(plain, 2)
+        expect(r.algo).to_equal(1)
+        expect(r.data.len() < plain.len()).to_equal(true)
+        val d = decompress_extent(r.data, r.compressed_len, plain.len() as u32, r.algo)
+        expect(d.ok).to_equal(true)
+        expect(_same(d.data, plain)).to_equal(true)
+
+    it "incompressible data is stored raw and not expanded":
+        step("compress 4 KiB LCG noise under DB_TEMP (LZ4)")
+        val plain = _lcg_bytes(4096)
+        val r = compress_extent(plain, 2)
+        expect(r.algo).to_equal(0)
+        expect(r.data.len()).to_equal(plain.len())
+        val d = decompress_extent(r.data, r.compressed_len, plain.len() as u32, r.algo)
+        expect(d.ok).to_equal(true)
+        expect(_same(d.data, plain)).to_equal(true)
+
+    it "data written by the legacy tagged-copy stub still decodes":
+        step("hand-build [u32 len LE | raw] under the LZ4 tag")
+        val plain = _repeating_text(300)
+        var legacy: [u8] = []
+        legacy.push((300 % 256) as u8)
+        legacy.push((300 / 256) as u8)
+        legacy.push(0)
+        legacy.push(0)
+        var i = 0
+        while i < plain.len():
+            legacy.push(plain[i])
+            i = i + 1
+        val d = decompress_extent(legacy, legacy.len() as u32, 300, 1)
+        expect(d.ok).to_equal(true)
+        expect(_same(d.data, plain)).to_equal(true)
+
+    it "Zstd3 and Zstd19 round-trip":
+        step("round-trip 2 KiB text under GENERAL_MUTABLE (Zstd3) and tag 3")
+        val plain = _repeating_text(2048)
+        val r = compress_extent(plain, 4)
+        expect(r.algo).to_equal(2)
+        val d = decompress_extent(r.data, r.compressed_len, plain.len() as u32, 2)
+        expect(d.ok).to_equal(true)
+        expect(_same(d.data, plain)).to_equal(true)
+        val d19 = decompress_extent(r.data, r.compressed_len, plain.len() as u32, 3)
+        expect(d19.ok).to_equal(true)
+        expect(_same(d19.data, plain)).to_equal(true)
+
+    it "Zstd3 class shrinks compressible data with a real frame":
+        step("compress 4 KiB text under GENERAL_MUTABLE (Zstd3)")
+        val plain = _repeating_text(4096)
+        val r = compress_extent(plain, 4)
+        expect(r.algo).to_equal(2)
+        expect(r.compressed_len < 1024).to_equal(true)
+        step("decode it back through the Zstd3 tag")
+        val d = decompress_extent(r.data, r.compressed_len, plain.len() as u32, 2)
+        expect(d.ok).to_equal(true)
+        expect(_same(d.data, plain)).to_equal(true)
+
+    it "Zstd3 incompressible data is stored raw and not expanded":
+        step("compress 4 KiB of pseudo-random bytes under Zstd3")
+        val plain = _lcg_bytes(4096)
+        val r = compress_extent(plain, 4)
+        expect(r.algo).to_equal(0)
+        expect(r.compressed_len).to_equal(4096)
+        val d = decompress_extent(r.data, r.compressed_len, plain.len() as u32, r.algo)
+        expect(_same(d.data, plain)).to_equal(true)
+
+    it "a level-19 Zstd extent decodes through the Zstd19 tag":
+        step("hand-build [u32 len LE | level-19 frame] and decode with tag 3")
+        val plain = _repeating_text(4096)
+        val frame = zstd_compress_frame(plain, compression_options(CompressionCodec.zstd, 19))
+        var ext: [u8] = []
+        ext.push(0)
+        ext.push(16)
+        ext.push(0)
+        ext.push(0)
+        var i = 0
+        while i < frame.len():
+            ext.push(frame[i])
+            i = i + 1
+        expect(ext.len() < plain.len()).to_equal(true)
+        val d = decompress_extent(ext, ext.len() as u32, 4096, 3)
+        expect(d.ok).to_equal(true)
+        expect(_same(d.data, plain)).to_equal(true)
+
+    it "legacy tagged-copy Zstd extents still decode under tags 2 and 3":
+        step("hand-build [u32 len LE | raw] and decode under both Zstd tags")
+        val plain = _repeating_text(300)
+        var legacy: [u8] = []
+        legacy.push((300 % 256) as u8)
+        legacy.push((300 / 256) as u8)
+        legacy.push(0)
+        legacy.push(0)
+        var i = 0
+        while i < plain.len():
+            legacy.push(plain[i])
+            i = i + 1
+        val d2 = decompress_extent(legacy, legacy.len() as u32, 300, 2)
+        expect(d2.ok).to_equal(true)
+        expect(_same(d2.data, plain)).to_equal(true)
+        val d3 = decompress_extent(legacy, legacy.len() as u32, 300, 3)
+        expect(d3.ok).to_equal(true)
+        expect(_same(d3.data, plain)).to_equal(true)
+
+    it "a truncated Zstd extent is rejected":
+        step("compress, cut the last bytes, expect ok=false")
+        val plain = _repeating_text(4096)
+        val r = compress_extent(plain, 4)
+        var cut: [u8] = []
+        var i = 0
+        while i < r.data.len() - 3:
+            cut.push(r.data[i])
+            i = i + 1
+        val d = decompress_extent(cut, cut.len() as u32, 4096, 2)
+        expect(d.ok).to_equal(false)
+
+    it "an LZ4 block is rejected before it expands past its bound":
+        step("an LZ4 block is rejected before it expands past its bound")
+        val plain = _repeating_text(4096)
+        val block = lz4_compress_block(plain)
+        expect(lz4_decompress_block_bounded(block, 4095).is_err()).to_equal(true)
+        match lz4_decompress_block_bounded(block, 4096):
+            case Ok(out): expect(_same(out, plain)).to_equal(true)
+            case Err(_): fail("bounded decode rejected a block that fits exactly")

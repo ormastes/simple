@@ -62,6 +62,13 @@ check_parser() {
         ;;
     esac
   done
+  # Required normalizer options absent from the main loop belong to early
+  # dispatch (managed resume). Check their arity without executing that route.
+  cp_early_required=
+  cp_normalized_options=$(awk '/^    --/ {gsub(/\\/, ""); sub(/\).*$/, ""); n=split($0,a,"|"); for(i=1;i<=n;i++){gsub(/ /,"",a[i]); if(a[i] ~ /^--/) print a[i]}}' "$cp_dir/normalize.shs")
+  for o in $cp_normalized_options; do
+    case " $cp_required $cp_optional " in *" $o "*) ;; *) cp_early_required="$cp_early_required $o" ;; esac
+  done
   [ -n "$cp_required$cp_optional" ] || { echo "  $cp_file: no value options derived" >&2; cp_failures=1; return; }
 
   cp_bad() { echo "  $cp_file: $1" >&2; cp_failures=$((cp_failures + 1)); }
@@ -98,11 +105,13 @@ check_parser() {
     [ "$cp_rc" -eq 0 ] || cp_bad "flag $f rejected (exit $cp_rc): $(head -1 "$cp_dir/cur.err")"
   done
   for o in $cp_required; do
-    cp_parse eq "$o=probe-value"
+    cp_value=probe-value
+    [ "$o" != --invalidate-cache ] || cp_value=stage2
+    cp_parse eq "$o=$cp_value"
     cp_checked=$((cp_checked + 1))
     [ "$cp_rc" -eq 0 ] || cp_bad "$o=probe-value rejected (exit $cp_rc)"
     ! cmp -s "$cp_dir/eq.state" "$cp_dir/base.state" || cp_bad "$o=probe-value changed no parser state"
-    cp_parse sp "$o" probe-value
+    cp_parse sp "$o" "$cp_value"
     cp_checked=$((cp_checked + 1))
     [ "$cp_rc" -eq 0 ] || cp_bad "$o probe-value (space form) rejected (exit $cp_rc): $(head -1 "$cp_dir/sp.err")"
     cmp -s "$cp_dir/eq.state" "$cp_dir/sp.state" || cp_bad "$o probe-value parses differently from $o=probe-value"
@@ -113,6 +122,37 @@ check_parser() {
       cp_expect_rejected "$o followed by $cp_first_flag" "$o requires a value"
     fi
   done
+  cp_normalize() {
+    cp_name=$1; shift
+    ( . "$cp_dir/normalize.shs"; printf '%s\n' "$@" ) >"$cp_dir/$cp_name.state" 2>"$cp_dir/$cp_name.err"
+    cp_rc=$?
+  }
+  for o in $cp_early_required; do
+    cp_normalize eq "$o=probe-value"
+    cp_checked=$((cp_checked + 1))
+    [ "$cp_rc" -eq 0 ] || cp_bad "early $o=probe-value rejected"
+    cp_normalize sp "$o" probe-value
+    cp_checked=$((cp_checked + 1))
+    [ "$cp_rc" -eq 0 ] && cmp -s "$cp_dir/eq.state" "$cp_dir/sp.state" || cp_bad "early $o space form differs"
+    cp_normalize cur "$o"
+    cp_expect_rejected "early $o without a value" "$o requires a value"
+    cp_normalize cur "$o" --help
+    cp_expect_rejected "early $o followed by --help" "$o requires a value"
+  done
+  case " $cp_required " in
+    *" --invalidate-cache "*)
+      for scope in stage2 stage3 stage4 stage4b-ui-backend stage50; do
+        cp_parse cur "--invalidate-cache=$scope"
+        cp_checked=$((cp_checked + 1))
+        [ "$cp_rc" -eq 0 ] || cp_bad "valid invalidation scope $scope rejected"
+      done
+      for scope in probe-value stage1 stage4-other ''; do
+        cp_parse cur "--invalidate-cache=$scope"
+        cp_checked=$((cp_checked + 1))
+        [ "$cp_rc" -eq 64 ] && grep -Fq 'requires a build phase scope' "$cp_dir/cur.err" || cp_bad "invalid invalidation scope $scope accepted or wrong diagnostic"
+      done
+      ;;
+  esac
   for o in $cp_optional; do
     cp_parse bare "$o"
     cp_checked=$((cp_checked + 1))
@@ -136,7 +176,7 @@ check_parser() {
   # The help text must advertise exactly the derived value-option shapes.
   help_required=$(sed -n 's/^  \(--[a-z0-9-]*\)=<.*/\1/p' "$cp_dir/usage.txt" | sort -u | tr '\n' ' ')
   help_optional=$(sed -n 's/^  \(--[a-z0-9-]*\)\[=.*/\1/p' "$cp_dir/usage.txt" | sort -u | tr '\n' ' ')
-  derived_required=$(printf '%s\n' $cp_required | sort -u | tr '\n' ' ')
+  derived_required=$(printf '%s\n' $cp_required $cp_early_required | sort -u | tr '\n' ' ')
   derived_optional=$(printf '%s\n' $cp_optional | sort -u | tr '\n' ' ')
   cp_checked=$((cp_checked + 2))
   [ "$help_required" = "$derived_required" ] ||
@@ -156,7 +196,7 @@ fx_argc=$#
 while [ "$fx_argc" -gt 0 ]; do
   fx_arg=$1; shift; fx_argc=$((fx_argc - 1))
   case "$fx_arg" in
-    --jobs)
+    --jobs|--invalidate-cache|--resume-managed-from-admitted)
       fx_missing=1
       if [ "$fx_argc" -gt 0 ]; then case "$1" in -*) ;; *) fx_missing=0 ;; esac; fi
       [ "$fx_missing" -eq 0 ] || { echo "error: $fx_arg requires a value" >&2; exit 2; }
@@ -170,6 +210,8 @@ usage() {
   cat <<'EOF'
 Options:
   --jobs=<n>         Workers
+  --invalidate-cache=<phase> Cache scope
+  --resume-managed-from-admitted=<output> Early managed resume
   --progress[=<path>]
                      Progress log
   --verbose          Verbose
@@ -178,12 +220,18 @@ EOF
 }
 # -- argv-parse begin
 jobs=""
+invalidate_cache_scope=""
 progress_log=off
 verbose=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --jobs=*)
       jobs=${1#*=}
+      ;;
+    --invalidate-cache=*)
+      selected_invalidation_scope=${1#*=}
+      case "$selected_invalidation_scope" in stage2|stage3|stage4|stage4b-ui-backend|stage5[0-9]*) ;; *) echo "error: --invalidate-cache requires a build phase scope" >&2; exit 64 ;; esac
+      invalidate_cache_scope=$selected_invalidation_scope
       ;;
     --progress)
       progress_log=default
@@ -231,9 +279,10 @@ selftest() {
       shift\
       progress_log=$1\
       ;;' "$st/good.sh" >"$st/optional-swallows.sh"
-  sed 's/^    --jobs)$/    --jobs-unlisted)/' "$st/good.sh" >"$st/no-space-form.sh"
+  sed 's/^    --jobs|--invalidate-cache|--resume-managed-from-admitted)$/    --jobs-unlisted|--invalidate-cache|--resume-managed-from-admitted)/' "$st/good.sh" >"$st/no-space-form.sh"
   sed 's/^  --jobs=<n>  /  --jobs <n>  /' "$st/good.sh" >"$st/help-drift.sh"
-  for bad in unknown-exits-0 optional-swallows no-space-form help-drift; do
+  sed 's/stage2|stage3|stage4|stage4b-ui-backend|stage5\[0-9\]\*)/\*)/' "$st/good.sh" >"$st/invalid-scope-accepted.sh"
+  for bad in unknown-exits-0 optional-swallows no-space-form help-drift invalid-scope-accepted; do
     ! cmp -s "$st/good.sh" "$st/$bad.sh" || { echo "selftest: fixture $bad was not mutated" >&2; return 1; }
     check_parser "$st/$bad.sh" "$st/$bad" 2>"$st/$bad.log"
     [ "$cp_failures" -gt 0 ] || {
@@ -248,7 +297,7 @@ if ! selftest; then
   echo "ERROR — nothing was checked (selftest failed: the checker cannot detect the bug class)"
   exit 2
 fi
-[ "${1:-}" = --selftest ] && { echo "PASS — 5 selftest fixture(s) checked (1 conforming, 4 bug-class variants detected)"; exit 0; }
+[ "${1:-}" = --selftest ] && { echo "PASS — 6 selftest fixture(s) checked (1 conforming, 5 bug-class variants detected)"; exit 0; }
 
 [ -f "$driver" ] || { echo "ERROR — nothing was checked (missing $driver)"; exit 2; }
 check_parser "$driver" "$work/real"

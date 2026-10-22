@@ -1,0 +1,59 @@
+# Shared owned child execution for specs and ordinary native snippets.
+# Preserve completion/resource evidence independently of BDD verdict parsing.
+
+use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
+use std.nogc_sync_mut.io.process_ops.{ProcessResult}
+use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, standard_resource_budget, execution_resource_scope_with_budget, run_in_execution_resource_scope, run_in_owned_test_resource_scope}
+use std.nogc_sync_mut.io.process_completion.{ProcessCompletionV1}
+use std.common.perf.execution_metrics.{ResourceUsage, ResourceBudget, DecisionStatus, TerminationCause, decision_status_name}
+
+struct ScopedChildRun:
+    result: ProcessResult
+    usage: ResourceUsage?
+    budget_status: text
+    completion: Option<ProcessCompletionV1> = nil
+
+fn run_scoped_child(resource_class: ExecutionResourceClass, cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64, cpu_ms: i64, max_fds: i64, max_pids: i64, enforce_class_defaults: bool, owned_test: bool = false) -> ScopedChildRun:
+    val defaults = standard_resource_budget(resource_class)
+    val effective_memory = if memory_bytes > 0: memory_bytes elif enforce_class_defaults: defaults.max_tree_charge_bytes else: 0
+    val effective_cpu = if cpu_ms > 0: cpu_ms elif enforce_class_defaults: defaults.max_cpu_ms else: 0
+    val effective_fds = if max_fds > 0: max_fds elif enforce_class_defaults: defaults.max_fds else: 0
+    # The caller has already resolved the process policy. Zero means inherit
+    # the host limit, including when the other class defaults remain enabled.
+    val effective_pids = max_pids
+    val budget = ResourceBudget(
+        max_wall_ms: timeout_ms, max_cpu_ms: effective_cpu,
+        max_tree_charge_bytes: effective_memory, max_direct_child_rss_bytes: effective_memory,
+        max_io_read_bytes: if enforce_class_defaults: defaults.max_io_read_bytes else: 0,
+        max_io_write_bytes: if enforce_class_defaults: defaults.max_io_write_bytes else: 0,
+        max_pids: effective_pids,
+        max_fds: effective_fds)
+    val scope = execution_resource_scope_with_budget(resource_class, budget, TEST_OUTPUT_CAPTURE_BYTES)
+    val scoped = if owned_test: run_in_owned_test_resource_scope(scope, cmd, args) else: run_in_execution_resource_scope(scope, cmd, args)
+    val termination = scoped.process.usage.termination
+    val limit_type = if scoped.process.runtime_error != 0:
+        "infrastructure"
+    elif (termination == TerminationCause.MemoryMax or
+            (scoped.budget_decision.status == DecisionStatus.Failure and scoped.budget_decision.reason.contains("memory"))):
+        "memory"
+    elif (termination == TerminationCause.ProcessLimit or
+            (scoped.budget_decision.status == DecisionStatus.Failure and scoped.budget_decision.reason.contains("process"))):
+        "procs"
+    elif termination == TerminationCause.CpuLimit:
+        "cpu"
+    elif termination == TerminationCause.WallTimeout:
+        "timeout"
+    elif effective_fds > 0 and scoped.process.stderr.lower().contains("too many open files"):
+        "fds"
+    elif scoped.budget_decision.status == DecisionStatus.Failure:
+        "budget"
+    else:
+        ""
+    ScopedChildRun(
+        result: ProcessResult(stdout: scoped.process.stdout, stderr: scoped.process.stderr,
+            exit_code: scoped.process.usage.exit_code, limit_exceeded: limit_type != "", limit_type: limit_type),
+        usage: scoped.process.usage,
+        budget_status: decision_status_name(scoped.budget_decision.status),
+        completion: scoped.process.completion)
+
+export ScopedChildRun, run_scoped_child

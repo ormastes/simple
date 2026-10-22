@@ -558,7 +558,7 @@ pub fn rt_coverage_clear(_args: &[Value]) -> Result<Value, CompileError> {
 /// `coverage_dump_sdn()` (e.g. `spl-coverage dump`, or the test runner's
 /// coverage epilogue) never saw decision/branch data even when decisions
 /// were being recorded into the runtime global by
-/// `record_decision_coverage_sffi` in the same process.
+/// `record_decision_site` in the same process.
 pub fn rt_coverage_dump_sdn(_args: &[Value]) -> Result<Value, CompileError> {
     let mut sdn = String::new();
     if let Some(cov) = crate::coverage::get_global_coverage() {
@@ -640,7 +640,7 @@ fn get_u32_arg(args: &[Value], idx: usize) -> u32 {
 /// (true_count, false_count) recorder and SDN emitter (merged into the final
 /// report by `crate::coverage::dump_runtime_coverage_sdn`); this intrinsic
 /// just never forwarded into it. Mirrors
-/// `interpreter::coverage_helpers::record_decision_coverage_sffi`, which
+/// `interpreter::coverage_helpers::record_decision_site`, which
 /// reaches the same real function directly (not through this dispatch table)
 /// from the AST-walking interpreter's if/while/match handling.
 ///

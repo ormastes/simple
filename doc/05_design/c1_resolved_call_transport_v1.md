@@ -1,0 +1,31 @@
+# C1 source-owned direct-call transport
+
+This increment connects `simple gen-lean source-calls FILE.spl TARGET_TRIPLE` through the existing target-aware frontend and HIR lowerer to real MIR call emission, the existing snapshot finalizer, and deterministic call inventory. It reports `formal_status=NOT_CHECKED`. It neither executes Lean nor supplies expanded/woven/compiler authentication authority.
+
+## Actual production route
+
+`app.gen_lean.main` preserves argv into `compiler.tools.verify.main`; its additive source-calls dispatch invokes `source_calls_command_v1`. That owner validates arity/regular path/explicit target, obtains the actual cfg receipt, rejects unsupported imports/AOP/DI, and lowers HIR with diagnostics. `lower_module_with_resolved_calls_for_target_v1` uses the exact MirTargetContext in `MirLowering.new_for_target`.
+
+A fresh SymbolTable snapshot isolates mutable dictionaries, secondary indexes and outer symbol/scope rows; scope zero and root_scope_symbols intentionally share only the new root dictionary. Immutable HIR types/spans/bodies remain borrowed. No generic Dict clone or shallow-class assignment is used for the mutable environment. Ordinary lowering is not opted in and keeps its original call operands.
+
+After the ordinary body-structure scan (which does not prepare function defaults), a dedicated invocation-owned preparation step checks retained function keys against SymbolIds and resolved function signatures, rejects open templates, and prepares exact lowered declaration signatures plus fresh outer parameter/default rows once. Defaults are indexed by the selected declaration SymbolId, never the process-global name registry. The existing direct-call lowering still selects the actual HIR Var/NamedVar SymbolId. Only that selected symbol reaches the optional emission parameter. Nested/default arguments finish first; immediately before builder.emit the producer records actual owner SymbolId, current block ID and current instruction-array length. The legacy call representation with empty params is normalized only after checking its declared_params/known flags, ordered types, result and argument count against the retained declaration. The manifest validator remains unchanged.
+
+After all module functions/thunks are complete, indirect/throwing boundaries refuse and the existing finalizer checks complete coverage, final function names, exact signatures and bodies. Resolver receipt hashes bind that module snapshot, actual captured identities, source path and every MirTargetContext field. Any error returns Err without a module/manifest result or success CLI inventory. This is structural provenance, not a signed compiler-execution receipt. The separate typed HIR-to-VIR API consumes the same producer and existing resolved VIR constructor; independent transform/policy provenance remains required by that API.
+
+## Retained default ownership (C1-01 correction)
+
+The opt-in emitter bypasses ordinary name-based default padding entirely. Earlier legacy padding routes refuse before consulting a repository or global registry. The actual retained default expression is lowered only for an omitted slot, after supplied arguments have been evaluated once in source order. Earlier supplied/default parameters resolve through fresh SymbolId-to-local frames; later parameters shadow any caller binding until initialized. This preserves declaration scope even when caller locals share names or a same-function nested call reuses parameter IDs. No declaration-repository provenance is fabricated.
+
+Each active frame records the selected declaration SymbolId and currently expanding default index. A repeated active pair refuses cyclic default expansion; fully supplied recursive calls and same-function expansion of a different default remain permitted. At most 128 active frames are allowed. All success/refusal exits after frame publication restore depth and clear that frame's dictionary and identity slots. The producer discards all output on a lowering error. Input HIR expressions/types remain read-only; tests compare existing full HIR codec snapshots, including the symbol table, around success and refusal.
+
+## Resource and compatibility constraints
+
+Sidecars are per invocation, enabled only for the selected route. Preparation is once per module; symbol environment isolation is O(symbols + scopes + indexed names) logical work/storage. Each captured call adds one row. Default preparation retains O(parameters) outer rows per module. Each active expansion has O(callee parameters) fresh bindings; lexical lookup/cycle checking visits at most 128 frames, with no whole-module scan or recursive-body interpretation. Cleared frame slots reuse at most 128 array positions. This cap bounds nesting, not total source size or emitted MIR. There is no process-global capture registry, persistent cache, hot-loop whole-module scan or branch path enumeration. Existing finalizer costs remain: repeated indexed-site/function serialization and linear binding lookups are not claimed to be optimized. No elapsed-time, native allocation, RSS or throughput result exists.
+
+No MIR/HIR wire schema, backend runtime ABI, language grammar, ordinary gen-lean mode, proof/checker/release gate or policy changes. Frozen physical Char changes target other methods; the external Char comparison pins show disjoint semantic hunks, with additive imports requiring normal composition. Current worktree base d9e177de79ac599ecd4b165e39c26d99f037c357; prepared C2 packets are separate and untouched.
+
+## Open scope
+
+Cross-module imported environments, resolver-aware method/indirect/dynamic/foreign calls, open generic specialization production and throwing call terminators are not admitted here. A closed specialization can only participate if its real resolved declaration/signature is retained in this same environment; no display-name parsing or raw foreign SymbolId remap is performed. C1 authenticated producer/transform integration, C2 union/recursive Vector/general aggregate-flow, C6 authenticated replay and C7 physical ABI/production refinement remain OPEN. Source inventory is not formal PASS.
+
+All actual public-API/CLI regression scenarios are authored UNRUN. Source checks and independent review cannot establish compiled correctness or proof acceptance.

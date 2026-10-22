@@ -304,6 +304,49 @@ describe "portable semantic scope authority Slice C":
         expect(public_summary_validate_live_set_v1(typed_request,
             [object_digest], [stale_reverse])).to_be(false)
 
+    it "keeps typed public-summary traversal canonical and ordered":
+        step("Resolve complete body calls")
+        val summary = summary_profile().summary
+        val alpha = SummaryObjectReferenceV2(stable_symbol_id: "pkg.alpha",
+            role: SummaryObjectReferenceRoleV2.ExecutableBody,
+            target: CacheObjectRefV1(kind: "body", schema: 1,
+                object_digest: d("alpha-object")),
+            access_policy_digest: d("alpha-access"),
+            semantic_profile_digest: d("alpha-profile"))
+        val omega = SummaryObjectReferenceV2(stable_symbol_id: "pkg.omega",
+            role: SummaryObjectReferenceRoleV2.ConstBody,
+            target: CacheObjectRefV1(kind: "body", schema: 1,
+                object_digest: d("omega-object")),
+            access_policy_digest: d("omega-access"),
+            semantic_profile_digest: d("omega-profile"))
+        val reverse = SummaryObjectReferenceV2(stable_symbol_id: "pkg.zeta",
+            role: SummaryObjectReferenceRoleV2.ReverseNavigation,
+            target: CacheObjectRefV1(kind: "reverse_reference_shard", schema: 1,
+                object_digest: d("reverse-object")),
+            access_policy_digest: d("reverse-access"),
+            semantic_profile_digest: d("reverse-profile"))
+        val input = [omega, reverse, alpha]
+        val reordered = [alpha, omega, reverse]
+        val payload = public_summary_reference_payload_encode_v2(input)
+        expect(payload).to_equal(public_summary_reference_payload_encode_v2(reordered))
+        val decoded = public_summary_reference_payload_decode_v2(payload)
+        expect(decoded.ok).to_be(true)
+        expect(decoded.references.len()).to_equal(3)
+        expect(decoded.references[0].stable_symbol_id).to_equal("pkg.alpha")
+        expect(decoded.references[1].stable_symbol_id).to_equal("pkg.omega")
+        expect(decoded.references[2].stable_symbol_id).to_equal("pkg.zeta")
+        val producer_digest = public_summary_producer_semantic_digest_v2(summary, input)
+        expect(producer_digest).to_equal(
+            public_summary_producer_semantic_digest_v2(summary, reordered))
+        expect(producer_digest).to_equal(
+            public_summary_producer_semantic_digest_v2(summary, [omega, alpha]))
+        val profile = public_summary_typed_reference_profile_v2(summary, input).unwrap()
+        expect(profile.producer_references.len()).to_equal(2)
+        expect(profile.producer_references[0].stable_symbol_id).to_equal("pkg.alpha")
+        expect(profile.producer_references[1].stable_symbol_id).to_equal("pkg.omega")
+        expect(profile.reverse_navigation_references.len()).to_equal(1)
+        expect(profile.reverse_navigation_references[0].stable_symbol_id).to_equal("pkg.zeta")
+
     it "revalidates prepared bytes and keeps the integrated gateway closed":
         step("Validate the existing prepared-attempt owner")
         val value = fixture()

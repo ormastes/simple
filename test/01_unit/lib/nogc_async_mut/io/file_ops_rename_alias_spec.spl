@@ -1,0 +1,32 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# Regression: the async file_ops facade once re-exported `rename_path as
+# rt_file_rename`. In the interpreter that alias shadowed the runtime extern of
+# the same name, so `rename_path`'s own body (which calls `rt_file_rename`)
+# recursed into itself until the 1000-frame stack limit.
+
+use std.spec.step
+use std.nogc_async_mut.io.file_ops.{rt_file_rename, file_write, file_read_text, file_exists, file_delete}
+use std.nogc_sync_mut.io_runtime.{rename_path}
+
+describe "nogc_async_mut file_ops rename facade":
+    it "renames through the facade's rt_file_rename without recursing":
+        val src = "/tmp/simple_rename_alias_src_{rt_now_tag()}.txt"
+        val dst = src + ".moved"
+        expect(file_write(src, "payload")).to_equal(true)
+        expect(rt_file_rename(src, dst)).to_equal(true)
+        expect(file_exists(src)).to_equal(false)
+        expect(file_read_text(dst)).to_equal("payload")
+        file_delete(dst)
+
+    it "renames through io_runtime.rename_path when the facade is also loaded":
+        val src = "/tmp/simple_rename_alias_rp_{rt_now_tag()}.txt"
+        val dst = src + ".moved"
+        expect(file_write(src, "second")).to_equal(true)
+        expect(rename_path(src, dst)).to_equal(true)
+        expect(file_exists(src)).to_equal(false)
+        expect(file_read_text(dst)).to_equal("second")
+        file_delete(dst)
+
+extern fn rt_getpid() -> i64
+fn rt_now_tag() -> text:
+    "{rt_getpid()}"

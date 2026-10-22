@@ -5,13 +5,18 @@
 
 use compiler.blocks.definition.{BlockDefinition, ConstValue}
 use compiler.blocks.value.{BlockValue}
-use compiler.blocks.context.{BlockContext, BlockError}
-use compiler.blocks.blocks.registry.{register_block, unregister_block, is_block_registered, with_block}
-use compiler.blocks.modes.{Span}
+use compiler.blocks.context.{BlockContext, BlockError, blockerror_parse}
+use compiler.blocks.registry.{register_block, unregister_block, is_block_registered, with_block, get_block}
+use compiler.common.diagnostics.span.{Span}
 
 # ============================================================================
 # Test Helpers
 # ============================================================================
+
+fn _testing_context(payload: text) -> BlockContext:
+    # Public parse helpers retain the same full test context and actual payload
+    # extents as existing validation/helper callers.
+    blockcontext_test(payload)
 
 fn test_parse(
     block_kind: text,
@@ -39,16 +44,16 @@ fn test_parse(
     val block_def = get_block_or_panic(block_kind)
 
     # Create test context
-    val ctx = blockcontext_test(payload)
+    val ctx = _testing_context(payload)
 
     # Parse
-    val result = block_def.parse_payload(payload, ctx)
+    val result: Result<BlockValue, BlockError> = block_def.parse_payload(payload, ctx)
 
     # Check result
     match result:
         case Ok(value):
             if not values_equal(value, expected):
-                panic("Parse result mismatch:\nExpected: {expected.type_name()}\nGot: {value.type_name()}")
+                panic("Parse result mismatch:\nExpected: {value_type_name(expected)}\nGot: {value_type_name(value)}")
         case Err(error):
             panic("Parse failed: {error.message}")
 
@@ -73,9 +78,9 @@ fn test_parse_error(
     ```
     """
     val block_def = get_block_or_panic(block_kind)
-    val ctx = blockcontext_test(payload)
+    val ctx = _testing_context(payload)
 
-    val result = block_def.parse_payload(payload, ctx)
+    val result: Result<BlockValue, BlockError> = block_def.parse_payload(payload, ctx)
 
     match result:
         case Ok(_):
@@ -106,7 +111,7 @@ fn test_validate(
     ```
     """
     val block_def = get_block_or_panic(block_kind)
-    val ctx = BlockContext.test("")
+    val ctx = blockcontext_test("")
 
     val errors = block_def.validate(value, ctx)
 
@@ -171,7 +176,7 @@ fn test_no_const_eval(
 
     val result = block_def.eval_const(value)
 
-    if has_result:
+    if val Some(result_value) = result:
         panic("Expected no const eval, but got: {const_value_to_string(result_value)}")
 
 # ============================================================================
@@ -180,7 +185,7 @@ fn test_no_const_eval(
 
 fn mock_block(
     kind: text,
-    parser: fn(text) -> text
+    parser: fn(text) -> Result<BlockValue, text>
 ) -> BlockDefinition:
     """Create a simple mock block for testing.
 
@@ -203,18 +208,19 @@ fn mock_block(
     )
     ```
     """
-    MockBlockDef(kind: kind, parser: parser)
+    MockBlockDef(_kind: kind, _parser: parser)
 
-struct MockBlockDef(BlockDefinition):
+struct MockBlockDef:
     """Simple mock block for testing."""
 
     _kind: text
-    _parser: fn(text) -> text
+    _parser: fn(text) -> Result<BlockValue, text>
 
+impl BlockDefinition for MockBlockDef:
     fn kind() -> text:
         self._kind
 
-    fn parse_payload(payload: text, ctx: BlockContext) -> text:
+    fn parse_payload(payload: text, ctx: BlockContext) -> Result<BlockValue, BlockError>:
         match (self._parser)(payload):
             case Ok(value): Ok(value)
             case Err(msg): Err(blockerror_parse(msg))
@@ -255,7 +261,7 @@ fn assert_parse_succeeds(block_kind: text, payload: text) -> BlockValue:
         If parsing fails
     """
     val block_def = get_block_or_panic(block_kind)
-    val ctx = blockcontext_test(payload)
+    val ctx = _testing_context(payload)
 
     match block_def.parse_payload(payload, ctx):
         case Ok(value): value
@@ -275,7 +281,7 @@ fn assert_parse_fails(block_kind: text, payload: text) -> BlockError:
         If parsing succeeds
     """
     val block_def = get_block_or_panic(block_kind)
-    val ctx = blockcontext_test(payload)
+    val ctx = _testing_context(payload)
 
     match block_def.parse_payload(payload, ctx):
         case Ok(_): panic("Expected parse to fail, but it succeeded")
@@ -330,7 +336,7 @@ fn assert_validation_passes(block_kind: text, value: BlockValue):
         If validation produces errors
     """
     val block_def = get_block_or_panic(block_kind)
-    val ctx = BlockContext.test("")
+    val ctx = blockcontext_test("")
 
     val errors = block_def.validate(value, ctx)
 
@@ -349,7 +355,7 @@ fn assert_validation_fails(block_kind: text, value: BlockValue):
         If validation passes
     """
     val block_def = get_block_or_panic(block_kind)
-    val ctx = BlockContext.test("")
+    val ctx = blockcontext_test("")
 
     val errors = block_def.validate(value, ctx)
 
@@ -363,8 +369,17 @@ fn assert_validation_fails(block_kind: text, value: BlockValue):
 fn get_block_or_panic(kind: text) -> BlockDefinition:
     """Get block definition or panic if not found."""
     match get_block(kind):
-        case blk: blk
-        case nil: panic("Block '{kind}' is not registered")
+        case Some(blk): blk
+        case None: panic("Block '{kind}' is not registered")
+
+fn blockcontext_test(payload: text) -> BlockContext:
+    val span = Span.new(0, payload.len(), 1, 1)
+    BlockContext(
+        source: payload,
+        block_kind: "test",
+        span: span,
+        payload_span: span
+    )
 
 fn values_equal(a: BlockValue, b: BlockValue) -> bool:
     """Check if two BlockValues are equal with deep comparison.
@@ -499,7 +514,7 @@ fn const_value_to_string(value: ConstValue) -> text:
         case Regex(pattern): "/{pattern}/"
 
 # Import get_block from registry (needed for test helpers)
-use compiler.blocks.blocks.registry.{get_block}
+use compiler.blocks.registry.{get_block}
 
 # ============================================================================
 # BlockTestSuite and BlockTest stubs (real implementations in .smf binary)

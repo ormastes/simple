@@ -1,0 +1,42 @@
+use std.spec.{describe, it, expect}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
+use os.compositor.display_backend.{FbCompositorBackend}
+
+# Framebuffer pixel format: u32 ARGB8888 (0xAARRGGBB), proven by
+# fb_driver.Color.to_u32 = a<<24 | r<<16 | g<<8 | b. In memory (little-endian)
+# that is bytes B,G,R,A (BGRA).
+# Shadow compositing = straight-alpha source-over with an exact /255 divide,
+# rounded to nearest: out = (src*a + dst*(255-a) + 127) / 255, output alpha 0xFF.
+
+fn make(bg: u32) -> FbCompositorBackend:
+    var fb = FramebufferDriver.from_buffer(4u32, 2u32)
+    var be = FbCompositorBackend.new(fb)
+    be.fill_rect(0, 0, 4, 2, bg)
+    be
+
+describe "FbCompositorBackend shadow blend_rect":
+    it "alpha=0 leaves background untouched (white bg stays 255)":
+        var be = make(0xFFFFFFFFu32)
+        be.blend_rect(0, 0, 4, 2, 0x00000000u32, 0u8)
+        expect(be.fb.read_pixel(1u32, 1u32)).to_equal(0xFFFFFFFFu32)
+    it "alpha=0 keeps arbitrary background exactly":
+        var be = make(0xFF102030u32)
+        be.blend_rect(0, 0, 4, 2, 0x00000000u32, 0u8)
+        expect(be.fb.read_pixel(0u32, 0u32)).to_equal(0xFF102030u32)
+    it "alpha=255 replaces background with the shadow colour exactly":
+        var be = make(0xFF000000u32)
+        be.blend_rect(0, 0, 4, 2, 0x00FFFFFFu32, 255u8)
+        expect(be.fb.read_pixel(2u32, 1u32)).to_equal(0xFFFFFFFFu32)
+    it "mid alpha 40 black over 0xFF102030 is rounded exact":
+        var be = make(0xFF102030u32)
+        be.blend_rect(0, 0, 4, 2, 0x00000000u32, 40u8)
+        expect(be.fb.read_pixel(3u32, 0u32)).to_equal(0xFF0D1B28u32)
+    it "mid alpha 128 white over black is 0xFF808080":
+        var be = make(0xFF000000u32)
+        be.blend_rect(0, 0, 4, 2, 0x00FFFFFFu32, 128u8)
+        expect(be.fb.read_pixel(0u32, 1u32)).to_equal(0xFF808080u32)
+    it "clips to the surface and leaves outside pixels alone":
+        var be = make(0xFF102030u32)
+        be.blend_rect(-2, -2, 3, 3, 0x00000000u32, 255u8)
+        expect(be.fb.read_pixel(0u32, 0u32)).to_equal(0xFF000000u32)
+        expect(be.fb.read_pixel(1u32, 0u32)).to_equal(0xFF102030u32)

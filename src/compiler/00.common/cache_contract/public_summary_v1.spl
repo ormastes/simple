@@ -183,7 +183,11 @@ pub fn public_summary_reference_payload_encode_v2(
     val budget = three_payload_contract_budget_v1()
     budget.add_bytes(wire_envelope_len() + 8 + 4)
     budget.add_items(sorted.len())
-    for value in sorted:
+    # @workaround bug=native_cache_contract_mir_lowering_gaps_2026_10_11 reason=preserve typed summary-reference ownership through ordered indexed iteration
+    val sorted_values: [SummaryObjectReferenceV2] = sorted
+    var value_index: i64 = 0
+    while value_index < sorted_values.len():
+        val value = sorted_values[value_index]
         budget.add_text(value.stable_symbol_id, false)
         budget.add_bytes(1)
         budget.add_text(value.target.kind, false)
@@ -191,12 +195,16 @@ pub fn public_summary_reference_payload_encode_v2(
         budget.add_digest(value.target.object_digest)
         budget.add_digest(value.access_policy_digest)
         budget.add_digest(value.semantic_profile_digest)
+        value_index = value_index + 1
     if not budget.ok: return []
     var out: [u8] = []
     out = wire_put_envelope(out, wire_magic("PSR2"), 2)
     out = wire_put_u64(out, 2)
     out = wire_put_u32(out, sorted.len())
-    for value in sorted:
+    # @workaround bug=native_cache_contract_mir_lowering_gaps_2026_10_11 reason=preserve canonical payload field order with indexed typed references
+    value_index = 0
+    while value_index < sorted_values.len():
+        val value = sorted_values[value_index]
         out = three_payload_contract_put_text_v1(out, value.stable_symbol_id)
         out = wire_put_u8(out, _summary_reference_role_tag_v2(value.role))
         out = three_payload_contract_put_text_v1(out, value.target.kind)
@@ -204,6 +212,7 @@ pub fn public_summary_reference_payload_encode_v2(
         out = three_payload_contract_put_digest_v1(out, value.target.object_digest)
         out = three_payload_contract_put_digest_v1(out, value.access_policy_digest)
         out = three_payload_contract_put_digest_v1(out, value.semantic_profile_digest)
+        value_index = value_index + 1
     out
 
 fn _summary_reference_decode_failure_v2(error: text) -> SummaryObjectReferenceDecodeV2:
@@ -273,12 +282,17 @@ pub fn public_summary_producer_semantic_digest_v2(
         summary.source_blob_digest + "\u0000" + summary.compiler_owner_digest +
         "\u0000" + summary.grammar_digest + "\u0000" +
         summary.declaration_graph_digest + "\u0000" + summary.virtual_text_digest
-    for value in sorted:
-        if _summary_reference_is_reverse_v2(value): continue
-        canonical = canonical + "\u0000" + _summary_reference_key_v2(value) +
-            "\u0000" + value.target.kind + "\u0000" + value.target.schema.to_string() +
-            "\u0000" + value.target.object_digest + "\u0000" +
-            value.access_policy_digest + "\u0000" + value.semantic_profile_digest
+    # @workaround bug=native_cache_contract_mir_lowering_gaps_2026_10_11 reason=keep semantic-digest traversal typed and ordered while omitting reverse references
+    val sorted_values: [SummaryObjectReferenceV2] = sorted
+    var value_index: i64 = 0
+    while value_index < sorted_values.len():
+        val value = sorted_values[value_index]
+        if not _summary_reference_is_reverse_v2(value):
+            canonical = canonical + "\u0000" + _summary_reference_key_v2(value) +
+                "\u0000" + value.target.kind + "\u0000" + value.target.schema.to_string() +
+                "\u0000" + value.target.object_digest + "\u0000" +
+                value.access_policy_digest + "\u0000" + value.semantic_profile_digest
+        value_index = value_index + 1
     sha256_text(canonical)
 
 pub fn public_summary_typed_reference_profile_v2(

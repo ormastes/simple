@@ -1,0 +1,106 @@
+# HIR-owned declaration conversion for active HM trait admission.
+# SymbolIds are resolved only in the module being inferred.
+use compiler.common.diagnostics.span.Span
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, HirSymbol, SymbolId, SymbolKind}
+use compiler.hir.hir_definitions.{HirTrait, HirImpl, HirFunction}
+use compiler.traits.trait_def.{SolverTraitDef, MethodSignature, SolverTraitBound, AssocTypeDef}
+use compiler.traits.trait_impl.{ImplBlock, AssocTypeImpl}
+use compiler.types.type_infer_types.{HmInferContext, TypeInferError}
+use compiler.types.type_infer.context.*
+
+fn hm_declaration_symbol(module: HirModule, id: SymbolId, kind: SymbolKind, span: Span) -> Result<HirSymbol, TypeInferError>:
+    if val symbol = module.symbols.get_symbol_raw(id.id):
+        if symbol.kind == kind: return Ok(symbol)
+        return Err(TypeInferError.Other("trait declaration symbol has the wrong kind", span))
+    Err(TypeInferError.Other("trait declaration symbol is missing", span))
+
+fn hm_bare_trait_symbol(module: HirModule, type_: HirType) -> Result<HirSymbol, TypeInferError>:
+    match type_.kind:
+        case Named(id, arguments):
+            if arguments.len() > 0:
+                return Err(TypeInferError.Other("parameterized trait bounds require argument-aware solver admission", type_.span))
+            hm_declaration_symbol(module, id, SymbolKind.Trait, type_.span)
+        case _: Err(TypeInferError.Other("trait bound requires a named trait", type_.span))
+
+impl HmInferContext:
+    me collect_traits_from_module(module: HirModule):
+        for hir_trait in module.traits.values():
+            match self.convert_hir_trait_to_def(hir_trait, module):
+                case Ok(definition): self.trait_solver.add_trait(definition)
+                case Err(error): self.error(error)
+
+    me collect_impls_from_module(module: HirModule):
+        for hir_impl in module.impls:
+            # Inherent impls have no trait obligation or sentinel trait symbol.
+            if not hir_impl.has_trait_: continue
+            match self.convert_hir_impl_to_block(hir_impl, module):
+                case Ok(implementation): self.trait_solver.add_impl(implementation)
+                case Err(error): self.error(error)
+
+    fn convert_hir_trait_to_def(hir_trait: HirTrait, module: HirModule) -> Result<SolverTraitDef, TypeInferError>:
+        val symbol = match hm_declaration_symbol(module, hir_trait.symbol, SymbolKind.Trait, hir_trait.span):
+            case Ok(value): value
+            case Err(error): return Err(error)
+        if hir_trait.where_clause.len() > 0:
+            return Err(TypeInferError.Other("trait declaration where clauses require solver admission", hir_trait.span))
+        var definition = SolverTraitDef.create(symbol, hir_trait.span)
+        for method in hir_trait.methods:
+            definition.methods = definition.methods.push(MethodSignature(
+                name: method.name, params: method.params.map(_.type_),
+                return_type: method.return_type, effects: method.effects, span: method.span))
+        definition.defaults = hir_trait.defaults
+        for parameter in hir_trait.type_params:
+            match hm_declaration_symbol(module, parameter.symbol, SymbolKind.TypeParam, parameter.span):
+                case Ok(value): definition.type_params = definition.type_params.push(value)
+                case Err(error): return Err(error)
+        for supertrait in hir_trait.supertraits:
+            match hm_bare_trait_symbol(module, supertrait):
+                case Ok(value): definition.supertraits = definition.supertraits.push(value)
+                case Err(error): return Err(error)
+        for associated in hir_trait.assoc_types:
+            var converted = AssocTypeDef.create(associated.name)
+            if associated.has_default: converted.default = Some(associated.default)
+            for bound in associated.bounds:
+                match hm_bare_trait_symbol(module, bound):
+                    case Ok(value): converted.bounds = converted.bounds.push(value)
+                    case Err(error): return Err(error)
+            definition.assoc_types[associated.name] = converted
+        Ok(definition)
+
+    fn convert_hir_impl_to_block(hir_impl: HirImpl, module: HirModule) -> Result<ImplBlock, TypeInferError>:
+        if not hir_impl.has_trait_:
+            return Err(TypeInferError.Other("inherent impl has no trait", hir_impl.span))
+        val symbol = match hm_bare_trait_symbol(module, hir_impl.trait_):
+            case Ok(value): value
+            case Err(error): return Err(error)
+        var implementation = ImplBlock.create(symbol, hir_impl.type_, hir_impl.span)
+        for parameter in hir_impl.type_params:
+            val binder = match hm_declaration_symbol(module, parameter.symbol, SymbolKind.TypeParam, parameter.span):
+                case Ok(value): value
+                case Err(error): return Err(error)
+            implementation.type_params = implementation.type_params.push(binder)
+            for bound in parameter.bounds:
+                match hm_bare_trait_symbol(module, bound):
+                    case Ok(trait_symbol):
+                        implementation.where_clause = implementation.where_clause.push(SolverTraitBound.create(binder, trait_symbol, parameter.span))
+                    case Err(error): return Err(error)
+        for bound in hir_impl.where_clause:
+            val binder = match hm_declaration_symbol(module, bound.type_param, SymbolKind.TypeParam, bound.span):
+                case Ok(value): value
+                case Err(error): return Err(error)
+            var declared = false
+            for parameter in implementation.type_params:
+                if parameter.id.id == binder.id.id: declared = true
+            if not declared:
+                return Err(TypeInferError.Other("impl bound parameter is absent from declaration", bound.span))
+            match hm_bare_trait_symbol(module, bound.trait_):
+                case Ok(trait_symbol):
+                    implementation.where_clause = implementation.where_clause.push(SolverTraitBound.create(binder, trait_symbol, bound.span))
+                case Err(error): return Err(error)
+        for method_id in hir_impl.methods.values():
+            if not module.functions.has(method_id):
+                return Err(TypeInferError.Other("impl method declaration is missing", hir_impl.span))
+            implementation.methods = implementation.methods.push(module.functions[method_id])
+        for associated in hir_impl.assoc_type_impls:
+            implementation.assoc_type_impls[associated.name] = AssocTypeImpl.create(associated.name, associated.concrete_type)
+        Ok(implementation)

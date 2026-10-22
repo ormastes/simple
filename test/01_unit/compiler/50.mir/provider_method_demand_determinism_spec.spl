@@ -1,0 +1,99 @@
+# Demand-materialized provider method rows must lower the same MIR as the
+# eager whole-provider relocation (provider_methods_eager = true). SymbolIds
+# are compared modulo numbering: the demand path relocates fewer provider
+# symbols into the consumer table, so ids allocated after the first lazily
+# relocated symbol shift; names, call targets and instruction shapes must not.
+use std.spec
+use compiler.common.config.Logger
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.parser_types.ParserModule
+use compiler.hir.hir_lowering.types.hirlowering_for_module
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.module_surfaces_from_modules
+use compiler.mir.mir.*
+
+val DEMAND_PROVIDER_SRC = "pub struct DemandRecord:\n    value: i64\n\nimpl DemandRecord:\n    fn doubled() -> i64:\n        self.value * 2\n\npub class DemandFactory:\n    base: i64\n\nimpl DemandFactory:\n    fn record() -> DemandRecord:\n        DemandRecord(value: self.base)\n\n    fn records() -> [DemandRecord]:\n        [DemandRecord(value: self.base)]\n\n    fn optional_record() -> DemandRecord?:\n        Some(DemandRecord(value: self.base))\n\n    fn never_called() -> i64:\n        self.base + 7\n"
+val DEMAND_CONSUMER_SRC = "use lib.demand_provider.\{DemandRecord, DemandFactory\}\n\nfn exercise(factory: DemandFactory) -> i64:\n    val record = factory.record()\n    val records = factory.records()\n    val maybe = factory.optional_record()\n    val twice = record.doubled()\n    if val value = maybe:\n        return record.value + records[0].value + value.value + twice\n    0\n"
+
+fn digits_masked(graph: text) -> text:
+    var out: [text] = []
+    var in_digits = false
+    var i = 0
+    while i < graph.len():
+        val ch = graph.substring(i, i + 1)
+        val is_digit = "0123456789".contains(ch)
+        if is_digit:
+            if not in_digits:
+                out.push("#")
+            in_digits = true
+        else:
+            out.push(ch)
+            in_digits = false
+        i = i + 1
+    out.join("")
+
+struct DemandRun:
+    graph: text
+    errors: i64
+    method_keys: [text]
+    return_names: Dict<text, text>
+    symbol_count: i64
+
+fn demand_run(eager: bool) -> DemandRun:
+    val logger = Logger(level: 0)
+    val provider_ast = parse_full_frontend(DEMAND_PROVIDER_SRC, "lib/demand_provider.spl", "lib.demand_provider", logger)
+    var modules: Dict<text, ParserModule> = {}
+    modules["lib.demand_provider"] = provider_ast
+    val sources = [SourceFile(path: "lib/demand_provider.spl", content: DEMAND_PROVIDER_SRC, module_name: "lib.demand_provider")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var provider_lowering = hirlowering_for_module("lib/demand_provider.spl", surfaces)
+    val provider = provider_lowering.lower_module(provider_ast)
+    var consumer_lowering = hirlowering_for_module("app/demand.spl", surfaces)
+    val consumer = consumer_lowering.lower_module(parse_full_frontend(DEMAND_CONSUMER_SRC, "app/demand.spl", "app.demand", logger))
+    val target = driver_mir_target_context(driver_core_compile_options_default())
+    var lowering = MirLowering.new_for_target(consumer.symbols, target)
+    lowering.provider_methods_eager = eager
+    val mir = lowering.lower_module(consumer, [provider], true)
+    var return_names: Dict<text, text> = {}
+    for raw_key in lowering.struct_method_return_names.keys():
+        val key: text = raw_key
+        return_names[key] = lowering.struct_method_return_names[key]
+    DemandRun(graph: serialize_mir_module(mir), errors: lowering.errors.len(),
+        method_keys: lowering.struct_method_syms.keys(), return_names: return_names,
+        symbol_count: lowering.symbols.symbols.len())
+
+describe "provider method demand materialization":
+    it "lowers the same MIR as eager provider relocation, modulo SymbolId numbering":
+        val eager = demand_run(true)
+        val lazy = demand_run(false)
+        expect(eager.errors).to_equal(0)
+        expect(lazy.errors).to_equal(eager.errors)
+        expect(eager.graph).to_contain("DemandFactory.record")
+        expect(eager.graph).to_contain("DemandFactory.optional_record")
+        expect(eager.graph).to_contain("DemandRecord.doubled")
+        expect(digits_masked(lazy.graph)).to_equal(digits_masked(eager.graph))
+
+    it "is deterministic across repeated demand lowerings":
+        val first = demand_run(false)
+        val second = demand_run(false)
+        expect(second.graph).to_equal(first.graph)
+
+    it "installs only rows the eager pass installed, with the same return shapes":
+        val eager = demand_run(true)
+        val lazy = demand_run(false)
+        expect(lazy.method_keys.len()).to_be_greater_than(0)
+        for raw_key in lazy.method_keys:
+            val key: text = raw_key
+            expect(eager.method_keys.contains(key)).to_equal(true)
+        for raw_name_key in lazy.return_names.keys():
+            val name_key: text = raw_name_key
+            expect(eager.return_names.has(name_key)).to_equal(true)
+            expect(lazy.return_names[name_key]).to_equal(eager.return_names[name_key])
+
+    it "relocates fewer provider symbols into the consumer table":
+        val eager = demand_run(true)
+        val lazy = demand_run(false)
+        # never_called is relocated only by the eager pass.
+        expect(lazy.symbol_count).to_be_less_than(eager.symbol_count)

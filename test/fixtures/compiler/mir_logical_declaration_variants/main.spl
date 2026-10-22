@@ -1,0 +1,119 @@
+# Native only; add the genuine final-repository fixture directory as a source
+# root to reuse its actual selected raw-source/weave setup, not a facsimile.
+use support.*
+use compiler.driver.cache.hir_mono_final_repository_v1.*
+use compiler.driver.cache.hir_owned_artifact_cache_v1.{hir_owned_artifact_context_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_clear_last_warnings, hir_cache_promote_diagnostic_owner_v1}
+use compiler.mir.hir_declaration_summary_v1.*
+use compiler.mir.hir_declaration_variant_identity_v1.*
+use compiler.mir._MirLowering.archive_borrowed_module_v1.*
+use compiler.mir._MirLowering.declaration_providers_v1.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_data.{bootstrap_fn_registries_promote}
+use compiler.mir._MirLowering.bootstrap_globals.{bootstrap_mir_registries_promote}
+use compiler.hir.hir_types.{HirModule}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+
+fn close_fixture(paused: bool, owned: bool):
+    val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    if paused: hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not owned or not cache_owned or not ended: panic("logical declaration fixture ownership")
+
+fn project_variant(setup: HirArchiveWeaveFixtureSetupV1, final_: MonoArchiveFinalRepositoryV1,
+        key: text) -> Result<MirHirModuleDeclarationsV1, text>:
+    val context = hir_owned_artifact_context_v1()
+    if not transient_scope_begin(): return Err("variant projection lease unavailable")
+    var result: Result<MirHirModuleDeclarationsV1, text> = Err("actual logical source row absent")
+    val loaded = mono_archive_load_final_module_in_owned_scope_v1(setup.driver, final_, key)
+    if loaded.is_ok():
+        for row in final_.physical_inventory.logical_rows:
+            if row.logical_name != key: continue
+            val source = MirHirDeclarationSourceV1(logical_key: key, physical_path: row.physical_path,
+                source_digest: row.source_digest, source_bytes: row.source_bytes, input_archive_key: row.archive_key)
+            result = mir_hir_project_module_in_owned_scope_v1(context, loaded.unwrap(), final_.authority,
+                final_.modules[key].archive_key, final_.modules[key].body_digest, Some(source))
+    else: result = Err(loaded.unwrap_err())
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    close_fixture(paused, owned)
+    result
+
+fn seal_variants(final_: MonoArchiveFinalRepositoryV1,
+        declarations: Dict<text, MirHirModuleDeclarationsV1>) -> Result<MirHirDeclarationRepositoryV1, text>:
+    var repository = MirHirDeclarationRepositoryV1(artifact_context: hir_owned_artifact_context_v1(),
+        final_repository_authority: final_.authority, ordered_modules: final_.ordered_inventory,
+        modules: declarations, authority: "")
+    if not transient_scope_begin(): return Err("variant seal lease unavailable")
+    repository.authority = mir_hir_declaration_repository_digest_v1(repository)
+    val valid = mir_hir_declaration_repository_valid_v1(repository)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(repository) else: false
+    close_fixture(paused, owned)
+    if not valid: return Err("actual logical variant repository refused")
+    Ok(repository)
+
+fn selected_body_control(setup: HirArchiveWeaveFixtureSetupV1, final_: MonoArchiveFinalRepositoryV1,
+        repository: MirHirDeclarationRepositoryV1, selected: text, wrong: text) -> Result<bool, text>:
+    if not transient_scope_begin(): return Err("selected variant lease unavailable")
+    var result: Result<bool, text> = Err("actual selected variant read refused")
+    val loaded = mono_archive_load_final_module_in_owned_scope_v1(setup.driver, final_, selected)
+    if loaded.is_ok():
+        val module: HirModule = loaded.unwrap()
+        var lowering = MirLowering.new(module.symbols)
+        lowering.declaration_repository = Some(repository)
+        for key in repository.ordered_modules: lowering.prescan_module_declarations_v1(repository.modules[key])
+        # Same physical name/path with another actual selected body must fail
+        # the full body proof before any lowering; then the exact key succeeds.
+        val refused = lowering.lower_archive_module_in_owned_scope_v1(module, true, wrong)
+        val exact = lowering.lower_archive_module_in_owned_scope_v1(module, true, selected)
+        result = Ok(refused.is_err() and exact.is_ok() and lowering.errors.len() == 0)
+    else: result = Err(loaded.unwrap_err())
+    val paused = transient_scope_pause()
+    var owned = if paused: transient_promote(result) else: false
+    if paused:
+        owned = bootstrap_fn_registries_promote() and owned
+        owned = bootstrap_mir_registries_promote() and owned
+    close_fixture(paused, owned)
+    result
+
+fn main() -> i64:
+    val setup_result = hir_archive_weave_fixture_setup_v1(
+        "test/fixtures/compiler/hir_mono_final_repository/generic.spl", "variant.actual", "variant.actual.alias")
+    if setup_result.is_err(): return 1
+    val setup = setup_result.unwrap()
+    val captured = mono_archive_final_repository_capture_v1(setup.driver, setup.boundary, true, false)
+    if captured.is_err(): return 2
+    val final_ = captured.unwrap()
+    if final_.ordered_inventory.len() != 2 or final_.zero_templates: return 3
+    val first = final_.ordered_inventory[0]
+    val last = final_.ordered_inventory[1]
+    val a_result = project_variant(setup, final_, first)
+    val b_result = project_variant(setup, final_, last)
+    if a_result.is_err() or b_result.is_err(): return 4
+    val a = a_result.unwrap()
+    val b = b_result.unwrap()
+    if a.name != b.name or a.path != b.path or
+            mir_hir_declaration_logical_key_v1(a) != first or mir_hir_declaration_logical_key_v1(b) != last: return 5
+    if not mir_hir_declarations_same_physical_source_v1(a, b): return 6
+    if a.final_body_digest == b.final_body_digest or b.functions.len() <= a.functions.len(): return 7
+    val sealed = seal_variants(final_, {first: a, last: b})
+    if sealed.is_err(): return 8
+    val repository = sealed.unwrap()
+    val controlled = selected_body_control(setup, final_, repository, first, last)
+    if controlled.is_err() or not controlled.unwrap(): return 9
+    # Distinct source provenance cannot become an alias through equal names.
+    var conflicting = b
+    var source = conflicting.source_binding.unwrap()
+    source.source_digest = "0" * 64
+    conflicting.source_binding = Some(source)
+    conflicting.declaration_digest = mir_hir_module_declaration_digest_v1(conflicting)
+    if mir_hir_declarations_same_physical_source_v1(a, conflicting): return 10
+    # Changing the selected logical key without resealing is visible.
+    var moved = b
+    var moved_source = moved.source_binding.unwrap()
+    moved_source.logical_key = first
+    moved.source_binding = Some(moved_source)
+    if mir_hir_module_declarations_valid_v1(moved): return 11
+    print "logical declaration variants: 11 guards passed"
+    0

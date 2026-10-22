@@ -176,6 +176,24 @@ on:
       - '.github/workflows/simple-llvm-cross.yml'
       - '.github/workflows/rust-bootstrap-multiplatform.yml'
   workflow_dispatch:
+    inputs:
+      native_lane:
+        description: Native bootstrap lane (all preserves the full platform matrix)
+        type: choice
+        default: all
+        options:
+          - all
+          - linux-llvm
+          - linux-cranelift
+          - windows-cranelift
+      diagnose_windows_symlinks:
+        description: Capture the frozen Windows checkout materializer failure without rebuilding compilers
+        type: boolean
+        default: false
+      defer_portability_verdict:
+        description: Diagnostic Linux LLVM collection; failed portability remains an unadmitted final failure
+        type: boolean
+        default: false
 
 # main must reach a verdict: before 2026-09-28 every main run was cancelled by
 # the next main push (874/1000 runs cancelled, 0 completed on main). With
@@ -193,39 +211,75 @@ env:
 
 # Pin x86_64 build hosts: local ARM64 runners advertise ubuntu-latest.
 jobs:
+  windows_symlink_diagnostic:
+    if: github.event_name == 'workflow_dispatch' && inputs.diagnose_windows_symlinks
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Validate diagnostic selector
+        shell: bash
+        env:
+          DIAGNOSTIC_NATIVE_LANE: ${{ inputs.native_lane }}
+        run: test "$DIAGNOSTIC_NATIVE_LANE" = windows-cranelift
+      - name: Select Windows materializer placeholder checkout
+        shell: bash
+        run: git config --global core.symlinks false
+      - uses: actions/checkout@v4
+        with:
+          ref: 67698a03ae2d3fdbe82a575a91504956b9d8d660
+          persist-credentials: false
+      - name: Capture exact failed checkout identity
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/windows-symlink-diagnostic"
+          python3 - "$RUNNER_TEMP/windows-symlink-diagnostic" <<'PY'
+          import os,pathlib,subprocess,json,hashlib,stat,sys
+          out=pathlib.Path(sys.argv[1]);p=pathlib.Path('.claude/commands/arch.md')
+          def git(*a):
+              r=subprocess.run(['git',*a],capture_output=True);return {'exit':r.returncode,'stdout':r.stdout.decode('utf-8','replace'),'stderr':r.stderr.decode('utf-8','replace')}
+          blob=subprocess.check_output(['git','show','HEAD:.claude/commands/arch.md']);s=p.lstat();raw=p.read_bytes()
+          target=p.parent/blob.decode('utf-8');target_bytes=target.read_bytes() if target.is_file() else None
+          record={'admission':'UNADMITTED','head':git('rev-parse','HEAD'),'mode':git('ls-tree','HEAD','--',str(p)),'blob_size':len(blob),'blob_sha256':hashlib.sha256(blob).hexdigest(),'blob_hex':blob[:80].hex(),'worktree_size':len(raw),'worktree_sha256':hashlib.sha256(raw).hexdigest(),'worktree_hex':raw[:80].hex(),'lstat_mode':s.st_mode,'lstat_size':s.st_size,'islink':p.is_symlink(),'readlink':os.readlink(p) if p.is_symlink() else None,'equals_blob':raw==blob,'equals_target':raw==target_bytes,'config':git('config','--show-origin','--get-regexp','core\.(symlinks|autocrlf|eol)'),'attrs':git('check-attr','-a','--',str(p))}
+          (out/'checkout-receipt.json').write_text(json.dumps(record,indent=2))
+          print('captured_checkout_identity='+record['head']['stdout'].strip())
+          PY
+      - name: Invoke unchanged materializer guard
+        shell: bash
+        run: |
+          out="$RUNNER_TEMP/windows-symlink-diagnostic"
+          bash scripts/setup/materialize-symlinks-windows.shs --undo "$PWD" >"$out/undo.log" 2>&1
+          receipt=$(cygpath -au "$out/materialized.env")
+          set +e
+          bash scripts/setup/materialize-symlinks-windows.shs --strict-missing --receipt "$receipt" "$PWD" >"$out/materializer.log" 2>&1
+          status=$?
+          set -e
+          printf 'exit=%s\nadmission=UNADMITTED\n' "$status" >"$out/result.env"
+          exit "$status"
+      - name: Upload unadmitted checkout diagnostic
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-symlink-diagnostic-UNADMITTED-${{ github.sha }}
+          path: ${{ runner.temp }}/windows-symlink-diagnostic
+          if-no-files-found: error
+          retention-days: 7
+
   # ARM64 self-hosted runners also advertise ubuntu-latest. Pin hosted Linux
   # jobs so x86_64, cross, and VM builds cannot land on those runners.
   # Native builds — compile and test on each platform
   native:
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    if: (github.event_name != 'workflow_dispatch' || !inputs.diagnose_windows_symlinks) && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-24.04
-            name: Linux x86_64
-            backend: llvm
-          - os: ubuntu-24.04
-            name: Linux x86_64
-            backend: cranelift
-          - os: macos-latest
-            name: macOS aarch64
-            backend: llvm
-          - os: macos-latest
-            name: macOS aarch64
-            backend: cranelift
-          - os: macos-15-intel
-            name: macOS x86_64
-            backend: llvm
-          - os: macos-15-intel
-            name: macOS x86_64
-            backend: cranelift
-          - os: windows-latest
-            name: Windows x86_64
-            backend: cranelift
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.native_lane == 'linux-llvm' && '[{"os":"ubuntu-24.04","name":"Linux x86_64","backend":"llvm"}]' || github.event_name == 'workflow_dispatch' && inputs.native_lane == 'linux-cranelift' && '[{"os":"ubuntu-24.04","name":"Linux x86_64","backend":"cranelift"}]' || github.event_name == 'workflow_dispatch' && inputs.native_lane == 'windows-cranelift' && '[{"os":"windows-latest","name":"Windows x86_64","backend":"cranelift"}]' || '[{"os":"ubuntu-24.04","name":"Linux x86_64","backend":"llvm"},{"os":"ubuntu-24.04","name":"Linux x86_64","backend":"cranelift"},{"os":"macos-latest","name":"macOS aarch64","backend":"llvm"},{"os":"macos-latest","name":"macOS aarch64","backend":"cranelift"},{"os":"macos-15-intel","name":"macOS x86_64","backend":"llvm"},{"os":"macos-15-intel","name":"macOS x86_64","backend":"cranelift"},{"os":"windows-latest","name":"Windows x86_64","backend":"cranelift"}]') }}
     runs-on: ${{ matrix.os }}
     name: Native — ${{ matrix.name }} (${{ matrix.backend }})
     steps:
+      - name: Select Windows materializer placeholder checkout
+        if: runner.os == 'Windows'
+        shell: bash
+        run: git config --global core.symlinks false
       - uses: actions/checkout@v4
 
       # Runs before the bootstrap: the seed cannot parse leading-operator
@@ -236,8 +290,21 @@ jobs:
         run: sh scripts/check/check-seed-parse-superset.shs
 
       - name: Validate bootstrap portability contracts
+        id: portability_contract
         if: runner.os == 'Linux' && matrix.backend == 'llvm'
+        continue-on-error: ${{ github.event_name == 'workflow_dispatch' && inputs.native_lane == 'linux-llvm' && inputs.defer_portability_verdict }}
         run: sh scripts/check/check-bootstrap-portability.shs
+
+      - name: Record unadmitted diagnostic collection
+        if: ${{ steps.portability_contract.outcome == 'failure' && github.event_name == 'workflow_dispatch' && inputs.native_lane == 'linux-llvm' && inputs.defer_portability_verdict }}
+        env:
+          DIAGNOSTIC_SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          mkdir -p build/bootstrap
+          printf '%s\n' 'schema=simple-bootstrap-portability-diagnostic-v1' \
+            'tag=WORKAROUND_DEFER_PORTABILITY_VERDICT' 'qualification=UNADMITTED' \
+            'portability_result=FAIL' "source_revision=${DIAGNOSTIC_SOURCE_REVISION}" \
+            > build/bootstrap/portability-diagnostic.env
 
       - name: Validate bootstrap capacity and Windows authority contracts
         if: runner.os == 'Linux' && matrix.backend == 'llvm'
@@ -280,14 +347,41 @@ jobs:
           fi
 
       - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-09-15
 
       - name: Install FreeType (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y clang-18 lld-18 llvm-18-dev libfreetype6-dev libunwind-dev
+        run: sudo apt-get update && sudo apt-get install -y libfreetype6-dev libunwind-dev
 
-      - name: Install Polly (Linux LLVM)
+      - name: Install C tools (Linux Cranelift)
+        if: runner.os == 'Linux' && matrix.backend == 'cranelift'
+        run: sudo apt-get install -y clang-18 lld-18 llvm-18-dev
+
+      - name: Restore immutable Linux LLVM archive
         if: runner.os == 'Linux' && matrix.backend == 'llvm'
-        run: sudo apt-get install -y libpolly-18-dev
+        id: linux_llvm_archive
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/simple-llvm-release/LLVM-23.1.1-Linux-X64.tar.xz
+          key: linux-llvm-sha256-832aeb58d105de1cabc7b982dd2c65de0610f7377df48ae8fc2dd8e97420a15c
+
+      - name: Install exact LLVM authority (Linux LLVM)
+        if: runner.os == 'Linux' && matrix.backend == 'llvm'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIMPLE_LINUX_PHASE23_LLVM_PREFIX: ${{ github.workspace }}/build/toolchains/llvm-23.1.1
+          SIMPLE_LLVM23_ARCHIVE_CACHE: ${{ github.workspace }}/.cache/simple-llvm-release
+        run: |
+          sh scripts/setup/install-linux-phase23-llvm23.shs
+          sh scripts/check/pin-linux-phase23-llvm23.shs
+
+      - name: Save verified Linux LLVM archive
+        if: runner.os == 'Linux' && matrix.backend == 'llvm' && steps.linux_llvm_archive.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/simple-llvm-release/LLVM-23.1.1-Linux-X64.tar.xz
+          key: linux-llvm-sha256-832aeb58d105de1cabc7b982dd2c65de0610f7377df48ae8fc2dd8e97420a15c
 
       - name: Install macOS build dependencies
         if: runner.os == 'macOS'
@@ -722,14 +816,21 @@ jobs:
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: bootstrap-${{ matrix.name }}-${{ matrix.backend }}-${{ github.sha }}
+          name: ${{ steps.portability_contract.outcome == 'failure' && 'unadmitted-' || '' }}bootstrap-${{ matrix.name }}-${{ matrix.backend }}-${{ github.sha }}
           path: |
             build/bootstrap/stage2/**/simple*
             build/bootstrap/stage3/**/simple*
+            build/bootstrap/portability-diagnostic.env
           retention-days: 7
 
+      - name: Enforce portability verdict after diagnostic collection
+        if: ${{ always() && steps.portability_contract.outcome == 'failure' }}
+        run: |
+          echo '::error::Portability contracts failed; collected bootstrap artifacts are UNADMITTED.'
+          exit 1
+
   native-architectures:
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    if: (github.event_name != 'workflow_dispatch' || !inputs.diagnose_windows_symlinks) && ((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && (github.event_name != 'workflow_dispatch' || inputs.native_lane == 'all' || inputs.native_lane == ''))
     name: Pure Simple — ARM32/RV32 LLVM objects + x86_64/AArch64/RISC-V64 dual backend
     runs-on: ubuntu-24.04
     needs: native
@@ -791,7 +892,7 @@ jobs:
 
   # Cross-compilation builds from Linux x86_64
   cross:
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    if: (github.event_name != 'workflow_dispatch' || !inputs.diagnose_windows_symlinks) && ((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && (github.event_name != 'workflow_dispatch' || inputs.native_lane == 'all' || inputs.native_lane == ''))
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -841,7 +942,7 @@ jobs:
 
   # FreeBSD build (VM-based)
   freebsd:
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    if: (github.event_name != 'workflow_dispatch' || !inputs.diagnose_windows_symlinks) && ((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && (github.event_name != 'workflow_dispatch' || inputs.native_lane == 'all' || inputs.native_lane == ''))
     runs-on: ubuntu-24.04
     name: Native — FreeBSD x86_64
     steps:
@@ -885,7 +986,7 @@ jobs:
   # from the Rust seed build above: it exercises the canonical receipt-free
   # Stage 2 trust root and the tracked Stage 3 resume interface in the guest.
   freebsd-selfhost:
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    if: (github.event_name != 'workflow_dispatch' || !inputs.diagnose_windows_symlinks) && ((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && (github.event_name != 'workflow_dispatch' || inputs.native_lane == 'all' || inputs.native_lane == ''))
     runs-on: ubuntu-24.04
     name: Self-host — FreeBSD Stage 3
     timeout-minutes: 180

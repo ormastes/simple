@@ -1,0 +1,282 @@
+# Runtime-symbol owner for COFF native-all links.
+#
+# A Cranelift-capable Windows compiler links the Rust aggregate archive
+# (simple_native_all.lib) beside the C runtime objects. Both lanes define the
+# same rt_* ABI (dual implementation), so the link must pick ONE owner per
+# symbol. Owner `c` is the default: every name the C objects define is ceded
+# by the Rust archive, which then contributes only Rust-only symbols (the
+# Cranelift bridge, rt_native_build, ...).
+#
+# Ceding is a symbol-table rewrite of each Rust member, in place:
+#   * an overlapping EXTERNAL definition becomes an undefined reference to the
+#     same name, so every Rust caller (including the RUNTIME_SYMBOL_ENTRIES
+#     table) binds to the C definition -- the same resolution an ELF link with
+#     the C objects first already gets;
+#   * rustc merges identical bodies into one COMDAT and gives the merged names
+#     aliases at the same offset (rt_thread_id_limited sits in rt_thread_id's
+#     section). lld picks the next defined symbol as that COMDAT's leader, so a
+#     Rust-only alias keeps its own body and is never discarded;
+#   * a COMDAT left with no defined symbol at all would be dropped by lld
+#     while its associative .pdata/.xdata still name it ("invalid reference to
+#     section"), so such a section is demoted to an ordinary section. Its body
+#     stays as dead code; nothing references it.
+# The rewrite never changes a size or an offset, so the ar container, member
+# headers and the import members (windows-sys raw-dylib) are untouched.
+# Precondition: the archive's "/" linker index is NOT rewritten and still
+# lists ceded names. That is sound only because the owner (C) objects are
+# linked as loose eager objects, so a ceded name is always already defined
+# when the archive is searched. A C owner packed in an archive searched after
+# this one would fetch a member that no longer defines the name.
+
+# Read the archive through the existing raw provider; route the derived byte
+# write through the canonical checked tagged-byte facade.
+
+@unsafe(reason: "raw whole-file byte read of a runtime archive", capabilities: [ffi])
+extern fn rt_file_read_bytes(path: text) -> [u8]?
+use std.nogc_sync_mut.sffi.file_bytes.{file_write_bytes_tagged_native}
+
+val COFF_OWNER_MACHINE_AMD64: i64 = 0x8664
+val COFF_OWNER_MACHINE_ARM64: i64 = 0xaa64
+val COFF_OWNER_CLASS_EXTERNAL: i64 = 2
+val COFF_OWNER_CLASS_STATIC: i64 = 3
+val COFF_OWNER_CLASS_WEAK_EXTERNAL: i64 = 105
+val COFF_OWNER_LNK_COMDAT: i64 = 0x1000
+val COFF_OWNER_SELECT_ASSOCIATIVE: i64 = 5
+
+pub struct RuntimeOwnerCedeResultV1:
+    bytes: [u8]
+    undefined: i64
+    members: i64
+    demoted: i64
+    parsed: i64
+
+struct CoffOwnerLayoutV1:
+    ok: bool
+    bigobj: bool
+    symbol_table: i64
+    symbol_count: i64
+    symbol_size: i64
+    string_table: i64
+    section_count: i64
+    section_headers: i64
+
+pub fn runtime_owner_select_v1(explicit: text, env_value: text) -> Result<text, text>:
+    """Resolve the runtime-symbol owner: flag, then SIMPLE_RUNTIME_OWNER, then `c`."""
+    val requested = if explicit != "": explicit else: env_value
+    val owner = if requested == "": "c" else: requested.lower()
+    if owner == "c" or owner == "rust":
+        return Ok(owner)
+    if owner == "simple":
+        return Err("unsupported runtime owner 'simple': no pure-Simple owner set exists for the hosted rt_* symbol classes (runtime_native/thread/process/memory); use --runtime-owner=c or --runtime-owner=rust")
+    Err("unknown runtime owner '{requested}' (expected c, rust or simple)")
+
+fn _owner_u16(data: [u8], offset: i64) -> i64:
+    (data[offset] as i64) | ((data[offset + 1] as i64) << 8)
+
+fn _owner_u32(data: [u8], offset: i64) -> i64:
+    (data[offset] as i64) | ((data[offset + 1] as i64) << 8) |
+        ((data[offset + 2] as i64) << 16) | ((data[offset + 3] as i64) << 24)
+
+fn _owner_bigobj(data: [u8], base: i64, size: i64) -> bool:
+    if size < 56: return false
+    val magic: [i64] = [
+        0xc7, 0xa1, 0xba, 0xd1, 0xee, 0xba, 0xa9, 0x4b,
+        0xaf, 0x20, 0xfa, 0xf6, 0x6a, 0xa4, 0xdc, 0xb8]
+    var i: i64 = 0
+    while i < 16:
+        if data[base + 12 + i] as i64 != magic[i]: return false
+        i = i + 1
+    true
+
+fn _owner_layout(data: [u8], base: i64, size: i64) -> CoffOwnerLayoutV1:
+    """Locate the symbol table of the COFF object at [base, base+size)."""
+    val none = CoffOwnerLayoutV1(ok: false, bigobj: false, symbol_table: 0,
+        symbol_count: 0, symbol_size: 0, string_table: 0, section_count: 0,
+        section_headers: 0)
+    if size < 20: return none
+    val sig1 = _owner_u16(data, base)
+    val sig2 = _owner_u16(data, base + 2)
+    var bigobj = false
+    var machine = sig1
+    if sig1 == 0 and sig2 == 0xffff:
+        # Short import objects share this signature; only bigobj is patched.
+        if not _owner_bigobj(data, base, size): return none
+        bigobj = true
+        machine = _owner_u16(data, base + 6)
+    if machine != COFF_OWNER_MACHINE_AMD64 and machine != COFF_OWNER_MACHINE_ARM64:
+        return none
+    val symbol_table = if bigobj: _owner_u32(data, base + 48) else: _owner_u32(data, base + 8)
+    val symbol_count = if bigobj: _owner_u32(data, base + 52) else: _owner_u32(data, base + 12)
+    val symbol_size: i64 = if bigobj: 20 else: 18
+    val section_count = if bigobj: _owner_u32(data, base + 44) else: _owner_u16(data, base + 2)
+    val section_headers = if bigobj: 56 else: 20 + _owner_u16(data, base + 16)
+    val string_table = symbol_table + symbol_count * symbol_size
+    if symbol_table <= 0 or string_table + 4 > size: return none
+    if section_headers + section_count * 40 > size: return none
+    CoffOwnerLayoutV1(ok: true, bigobj: bigobj, symbol_table: symbol_table,
+        symbol_count: symbol_count, symbol_size: symbol_size,
+        string_table: string_table, section_count: section_count,
+        section_headers: section_headers)
+
+fn _owner_section_number(data: [u8], record: i64, bigobj: bool) -> i64:
+    if bigobj:
+        val raw = _owner_u32(data, record + 12)
+        return if raw >= 2147483648: raw - 4294967296 else: raw
+    val raw = _owner_u16(data, record + 12)
+    if raw >= 32768: raw - 65536 else: raw
+
+fn _owner_name(data: [u8], base: i64, layout: CoffOwnerLayoutV1, record: i64) -> text:
+    var start = record
+    var limit: i64 = 8
+    if _owner_u32(data, record) == 0:
+        start = base + layout.string_table + _owner_u32(data, record + 4)
+        limit = 4096
+    var name = ""
+    var i: i64 = 0
+    while i < limit:
+        val b = data[start + i]
+        if b == 0: return name
+        name = name + text.from_char_code(b)
+        i = i + 1
+    name
+
+fn _owner_weak_default_defined(data: [u8], base: i64, layout: CoffOwnerLayoutV1, record: i64) -> bool:
+    """A weak external's aux record names its default; defined => a definition."""
+    val default_index = _owner_u32(data, record + layout.symbol_size)
+    if default_index < 0 or default_index >= layout.symbol_count: return false
+    val default_record = base + layout.symbol_table + default_index * layout.symbol_size
+    _owner_section_number(data, default_record, layout.bigobj) > 0
+
+fn _owner_object_definitions(data: [u8], base: i64, size: i64, into: {text: bool}) -> {text: bool}:
+    var result = into
+    val layout = _owner_layout(data, base, size)
+    if not layout.ok: return result
+    var i: i64 = 0
+    while i < layout.symbol_count:
+        val record = base + layout.symbol_table + i * layout.symbol_size
+        val class_offset = if layout.bigobj: 18 else: 16
+        val storage = data[record + class_offset] as i64
+        val aux = data[record + class_offset + 1] as i64
+        # A C weak external whose default is DEFINED here (the
+        # `__attribute__((weak))` fallback) is still the C owner's definition:
+        # ceding the Rust copy lets its default bind. A weak REFERENCE (default
+        # undefined or absolute) is not a definition.
+        val strong = storage == COFF_OWNER_CLASS_EXTERNAL and _owner_section_number(data, record, layout.bigobj) > 0
+        val weak_definition = storage == COFF_OWNER_CLASS_WEAK_EXTERNAL and aux > 0 and
+            _owner_weak_default_defined(data, base, layout, record)
+        if strong or weak_definition:
+            result[_owner_name(data, base, layout, record)] = true
+        i = i + 1 + aux
+    result
+
+pub fn runtime_owner_object_definitions_v1(objects: [[u8]]) -> {text: bool}:
+    """External names DEFINED by the owner-lane objects (the C runtime)."""
+    var defined: {text: bool} = {}
+    for object in objects:
+        defined = _owner_object_definitions(object, 0, object.len(), defined)
+    defined
+
+fn _owner_decimal(data: [u8], offset: i64, width: i64) -> i64:
+    var value: i64 = 0
+    var i: i64 = 0
+    while i < width:
+        val b = data[offset + i] as i64
+        if b >= 48 and b <= 57:
+            value = value * 10 + (b - 48)
+        i = i + 1
+    value
+
+fn _owner_is_metadata_member(data: [u8], header: i64) -> bool:
+    # "/" (linker index) and "//" (long names) are ar metadata members.
+    val first = data[header] as i64
+    val second = data[header + 1] as i64
+    first == 47 and (second == 32 or second == 47)
+
+pub fn runtime_owner_cede_archive_file_v1(archive_path: text, owned: {text: bool}) -> Result<RuntimeOwnerCedeResultV1, text>:
+    """Make every `owned` definition in an MSVC archive an undefined reference.
+
+    One buffer is rewritten in place (no per-member copies): Rust archives are
+    tens of megabytes and every edit keeps sizes and offsets unchanged. The
+    buffer is read here rather than taken as a parameter: `var copy = param`
+    of a [u8] produced corrupted bytes under the 2026-10-18 Windows producer."""
+    val magic: [i64] = [33, 60, 97, 114, 99, 104, 62, 10]
+    var bytes: [u8] = unsafe(capabilities: [ffi]): rt_file_read_bytes(archive_path) ?? []
+    if bytes.len() < 8: return Err("runtime owner: cannot read archive {archive_path}")
+    var m: i64 = 0
+    while m < 8:
+        if bytes[m] as i64 != magic[m]: return Err("runtime owner: not an ar archive: {archive_path}")
+        m = m + 1
+    var offset: i64 = 8
+    var undefined: i64 = 0
+    var members: i64 = 0
+    var demoted: i64 = 0
+    var parsed: i64 = 0
+    while offset + 60 <= bytes.len():
+        val size = _owner_decimal(bytes, offset + 48, 10)
+        val base = offset + 60
+        if base + size > bytes.len(): return Err("runtime owner: archive member overruns the archive")
+        val layout = _owner_layout(bytes, base, size)
+        if layout.ok and not _owner_is_metadata_member(bytes, offset):
+            parsed = parsed + 1
+            val class_offset = if layout.bigobj: 18 else: 16
+            var member_undefined: i64 = 0
+            var i: i64 = 0
+            while i < layout.symbol_count:
+                val record = base + layout.symbol_table + i * layout.symbol_size
+                val storage = bytes[record + class_offset] as i64
+                val aux = bytes[record + class_offset + 1] as i64
+                if storage == COFF_OWNER_CLASS_EXTERNAL and _owner_section_number(bytes, record, layout.bigobj) > 0:
+                    if owned.has(_owner_name(bytes, base, layout, record)):
+                        # Value and SectionNumber -> 0: an undefined reference.
+                        var z: i64 = 8
+                        val end = if layout.bigobj: 16 else: 14
+                        while z < end:
+                            bytes[record + z] = 0 as u8
+                            z = z + 1
+                        member_undefined = member_undefined + 1
+                i = i + 1 + aux
+            if member_undefined > 0:
+                members = members + 1
+                undefined = undefined + member_undefined
+                # Which sections are still defined, and which are associative.
+                var remaining: [i64] = []
+                var associative: [bool] = []
+                var k: i64 = 0
+                while k <= layout.section_count:
+                    remaining.push(0)
+                    associative.push(false)
+                    k = k + 1
+                i = 0
+                while i < layout.symbol_count:
+                    val record = base + layout.symbol_table + i * layout.symbol_size
+                    val storage = bytes[record + class_offset] as i64
+                    val aux = bytes[record + class_offset + 1] as i64
+                    val section = _owner_section_number(bytes, record, layout.bigobj)
+                    if section > 0 and section <= layout.section_count:
+                        if storage == COFF_OWNER_CLASS_STATIC and aux > 0 and _owner_u32(bytes, record + 8) == 0:
+                            # Section definition; its aux record carries Selection.
+                            if bytes[record + layout.symbol_size + 14] as i64 == COFF_OWNER_SELECT_ASSOCIATIVE:
+                                associative[section] = true
+                        else:
+                            remaining[section] = remaining[section] + 1
+                    i = i + 1 + aux
+                k = 1
+                while k <= layout.section_count:
+                    val header = base + layout.section_headers + (k - 1) * 40
+                    val characteristics = _owner_u32(bytes, header + 36)
+                    if (characteristics & COFF_OWNER_LNK_COMDAT) != 0 and not associative[k] and remaining[k] == 0:
+                        # Clear LNK_COMDAT (bit 12 lives in byte +37, bit 4).
+                        val flag_byte = bytes[header + 37] as i64
+                        bytes[header + 37] = (flag_byte - 16) as u8
+                        demoted = demoted + 1
+                    k = k + 1
+        offset = base + size + (size % 2)
+    Ok(RuntimeOwnerCedeResultV1(bytes: bytes, undefined: undefined, members: members, demoted: demoted, parsed: parsed))
+
+pub fn runtime_owner_write_bytes_v1(path: text, bytes: [u8]) -> bool:
+    """Write a ceded archive through the checked tagged-byte provider."""
+    file_write_bytes_tagged_native(path, bytes)
+
+export RuntimeOwnerCedeResultV1, runtime_owner_select_v1
+export runtime_owner_object_definitions_v1, runtime_owner_cede_archive_file_v1
+export runtime_owner_write_bytes_v1

@@ -1,0 +1,108 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering: builtin methods and UFCS calls without a method symbol
+
+Flat entry HIR leaves these calls `MethodResolution.Unresolved`, and they used
+to end in "unresolved method call": `text.ptr()`, `tuple.get(N)`,
+`arr.append(x)` / `arr.remove(i)` / `arr.copy()`, `self.free_fn(a)` (UFCS on a
+free function whose first parameter is the receiver's owner, `fn` or `me`),
+and `.unwrap()` on a `d.get(k)` binding.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn lowering_messages(src: text) -> [text]:
+    val file = "testdata/fixture_unresolved_method.spl"
+    val parsed = parse_full_frontend(src, file, "fixture_unresolved_method", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    lowering.lower_module(hir)
+    var messages: [text] = []
+    for e in hir_lowering.errors:
+        messages = messages.push("hir: " + e.message)
+    for e in lowering.errors:
+        messages = messages.push("mir: " + e.message)
+    messages
+
+fn expect_resolved(src: text):
+    val messages = lowering_messages(src)
+    var all = ""
+    for m in messages:
+        all = all + m + "\n"
+    print "diagnostics: [{all}]"
+    expect(messages.len()).to_equal(0)
+
+val text_ptr_src = "fn addr(name: text) -> i64:\n" +
+    "    name.ptr()\n"
+
+val tuple_get_src = "fn pick(t: (i64, i64, text)) -> i64:\n" +
+    "    val a = t.get(0)\n" +
+    "    val b = t.get(1)\n" +
+    "    a + b\n"
+
+val array_methods_src = "fn shrink() -> i64:\n" +
+    "    var arr: [i64] = []\n" +
+    "    arr.append(5)\n" +
+    "    arr.append(6)\n" +
+    "    arr.remove(0)\n" +
+    "    val cp = arr.copy()\n" +
+    "    arr.len() + cp.len()\n"
+
+val ufcs_src = "class Counter:\n" +
+    "    hits: i64\n" +
+    "\n" +
+    "fn counter_peek(self: Counter, n: i64) -> i64:\n" +
+    "    self.hits + n\n" +
+    "\n" +
+    "me counter_bump(self: Counter, n: i64) -> i64:\n" +
+    "    self.hits = self.hits + n\n" +
+    "    self.hits\n" +
+    "\n" +
+    "fn counter_run(self: Counter) -> i64:\n" +
+    "    self.counter_peek(1) + self.counter_bump(2)\n"
+
+val dict_get_unwrap_src = "class Table:\n" +
+    "    rows: Dict<text, [text]>\n" +
+    "\n" +
+    "fn width(t: Table, key: text) -> i64:\n" +
+    "    val direct = t.rows.get(key)\n" +
+    "    if direct.?:\n" +
+    "        val cells = direct.unwrap()\n" +
+    "        return cells.len()\n" +
+    "    -1\n"
+
+describe "MIR lowering: builtin and UFCS methods on Unresolved receivers":
+    it "lowers text.ptr() to the runtime text data address":
+        expect_resolved(text_ptr_src)
+
+    it "lowers tuple.get(N) with a literal index as a tuple index":
+        expect_resolved(tuple_get_src)
+
+    it "lowers array append, remove and copy":
+        expect_resolved(array_methods_src)
+
+    it "lowers self.free_fn(a) as UFCS for fn and me free functions":
+        expect_resolved(ufcs_src)
+
+    it "unwraps a dict get binding as an Option":
+        expect_resolved(dict_get_unwrap_src)
+
+    it "still rejects an unknown method on a text receiver":
+        val messages = lowering_messages("fn bad(name: text) -> i64:\n    name.no_such_method_v1()\n")
+        var named = false
+        for m in messages:
+            if m.contains("unresolved method call: no_such_method_v1"):
+                named = true
+        expect(named).to_equal(true)

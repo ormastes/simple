@@ -1,0 +1,223 @@
+use std.common.traceability.model.*
+use std.common.traceability.evidence_model.*
+use std.common.traceability.evidence.*
+
+struct TraceCaseEvaluation:
+    status: TraceQualificationStatus
+    observation_ids: [text]
+    reasons: [text]
+
+fn trace_case_defined(graph: TraceGraph, obligation: TraceObligation, case_id: text) -> bool:
+    var requirement_found = false
+    var criterion_found = false
+    var case_found = false
+    var kind_found = false
+    for node in graph.nodes:
+        if node.id == obligation.requirement_id and node.kind == TraceNodeKind.Requirement:
+            requirement_found = true
+        if node.id == obligation.criterion_id and node.kind == TraceNodeKind.AcceptanceCriterion:
+            criterion_found = true
+        if node.id == case_id and (node.kind == TraceNodeKind.TestCase or node.kind == TraceNodeKind.ParameterizedCase):
+            case_found = true
+    for definition in graph.test_definitions:
+        if definition.node_id == case_id and definition.kind == obligation.test_kind:
+            kind_found = true
+    if not requirement_found or not criterion_found or not case_found or not kind_found:
+        return false
+    var decomposed = false
+    var linked = false
+    for edge in graph.edges:
+        if (edge.from_id == obligation.requirement_id and edge.to_id == obligation.criterion_id and
+            edge.relation == TraceRelation.DecomposesTo):
+            decomposed = true
+        if edge.to_id == case_id:
+            if (edge.from_id == obligation.criterion_id and
+                (edge.relation == TraceRelation.AcceptedBy or edge.relation == TraceRelation.VerifiedBy)):
+                linked = true
+            if edge.from_id == obligation.requirement_id and edge.relation == TraceRelation.VerifiedBy:
+                linked = true
+    decomposed and linked
+
+fn trace_evaluate_case(case_id: text, obligation: TraceObligation, run: TraceRun, context: AdmissionContext) -> TraceCaseEvaluation:
+    var observations: [TraceObservation] = []
+    val current = trace_text_has(run.planned_case_ids, case_id)
+    if current:
+        for observation in run.observations:
+            if observation.case_id == case_id:
+                observations.push(observation)
+    else:
+        for observation in context.eligible_previous_observations:
+            if observation.case_id == case_id:
+                observations.push(observation)
+    if observations.len() == 0:
+        return TraceCaseEvaluation(TraceQualificationStatus.NotRun, [], [case_id + ": not executed; a linked definition is not evidence"])
+    var reasons: [text] = []
+    var selected = observations[0]
+    var had_failure = false
+    var ids: [text] = []
+    var attempts: [text] = []
+    for observation in observations:
+        if (observation.id == "" or observation.run_id == "" or observation.attempt < 1 or
+            observation.run_id != selected.run_id or trace_text_has(ids, observation.id) or
+            trace_text_has(attempts, observation.attempt.to_string())):
+            return TraceCaseEvaluation(TraceQualificationStatus.Incomplete, [], [case_id + ": ambiguous run or attempt identities"])
+        ids.push(observation.id)
+        attempts.push(observation.attempt.to_string())
+        if current and not trace_observation_admitted(observation, context):
+            return TraceCaseEvaluation(TraceQualificationStatus.Stale, [], [case_id + ": exact observation/artifact/provenance not admitted"])
+        if observation.artifact_ids.len() == 0:
+            return TraceCaseEvaluation(TraceQualificationStatus.Stale, [], [case_id + ": admitted observation has no retained artifact identity"])
+        reasons.push(case_id + " attempt " + observation.attempt.to_string() + ": " + trace_outcome_name(observation.outcome))
+        if (observation.outcome == TraceOutcome.Failed or observation.outcome == TraceOutcome.UnexpectedPass or
+            observation.outcome == TraceOutcome.Cancelled or observation.outcome == TraceOutcome.Crashed or
+            observation.outcome == TraceOutcome.TimedOut):
+            had_failure = true
+        if observation.attempt > selected.attempt:
+            selected = observation
+    if not current:
+        reasons.push("eligible previous evidence from " + selected.run_id + "; not executed in current run")
+    if not selected.executed or selected.outcome == TraceOutcome.Skipped:
+        return TraceCaseEvaluation(TraceQualificationStatus.NotRun, [selected.id], reasons)
+    if (selected.outcome == TraceOutcome.Cancelled or selected.outcome == TraceOutcome.Crashed or
+        selected.outcome == TraceOutcome.TimedOut):
+        return TraceCaseEvaluation(TraceQualificationStatus.Incomplete, [selected.id], reasons)
+    if had_failure and not obligation.allow_retry_pass:
+        reasons.push("retry policy retains prior failure")
+        return TraceCaseEvaluation(TraceQualificationStatus.Failed, [selected.id], reasons)
+    if selected.outcome == TraceOutcome.Passed:
+        return TraceCaseEvaluation(TraceQualificationStatus.Verified, [selected.id], reasons)
+    if selected.outcome == TraceOutcome.ExpectedFailure and obligation.allow_expected_failure:
+        return TraceCaseEvaluation(TraceQualificationStatus.Verified, [selected.id], reasons)
+    TraceCaseEvaluation(TraceQualificationStatus.Failed, [selected.id], reasons)
+
+fn trace_exemption_review(obligation: TraceObligation, context: AdmissionContext) -> text:
+    var count = 0
+    var review = ""
+    for decision in context.reviewed_not_applicable:
+        if decision.obligation_id == obligation.id:
+            count = count + 1
+            if (decision.requirement_id == obligation.requirement_id and
+                decision.criterion_id == obligation.criterion_id and decision.test_kind == obligation.test_kind and
+                decision.subject_id == context.subject_id and decision.input_manifest_id == context.input_manifest_id and
+                decision.configuration_id == context.configuration_id and decision.expectation_id == context.expectation_id and
+                decision.review_id != "" and decision.reason != ""):
+                review = decision.review_id
+    if count != 1:
+        return ""
+    review
+
+pub fn evaluate_obligations(graph: TraceGraph, obligations: [TraceObligation], run: TraceRun, context: AdmissionContext) -> TraceQualification:
+    var results: [TraceObligationResult] = []
+    var structural = 0
+    var executed = 0
+    var required = 0
+    var complete = true
+    val run_problems = trace_run_problems(run)
+    val binding_matches = (trace_run_binding_matches(run, context) and
+        graph.subject.snapshot_id == context.subject_id and graph.input_manifest_id == context.input_manifest_id)
+    var graph_valid = graph.complete
+    for diagnostic in graph.diagnostics:
+        if diagnostic.severity == "error":
+            graph_valid = false
+    # Validate the whole identity set before granting any coverage. A later
+    # duplicate (including an exemption) invalidates the earlier claim too.
+    var obligation_counts: Dict<text, i64> = {}
+    for obligation in obligations:
+        if obligation_counts.contains_key(obligation.id):
+            obligation_counts[obligation.id] = obligation_counts[obligation.id] + 1
+        else:
+            obligation_counts[obligation.id] = 1
+    for obligation in obligations:
+        var status = TraceQualificationStatus.NotRun
+        var selected: [text] = []
+        var reasons: [text] = []
+        var defined = obligation.case_ids.len() > 0
+        var unique_cases: [text] = []
+        for case_id in obligation.case_ids:
+            if trace_text_has(unique_cases, case_id) or not trace_case_defined(graph, obligation, case_id):
+                defined = false
+            unique_cases.push(case_id)
+        if obligation.id == "" or obligation_counts[obligation.id] != 1:
+            required = required + 1
+            complete = false
+            status = TraceQualificationStatus.Incomplete
+            reasons.push("empty or conflicting obligation identity; no coverage or exemption granted")
+        elif obligation.applicability == TraceApplicability.NotApplicable:
+            val review = trace_exemption_review(obligation, context)
+            if review == "" or not graph_valid or not binding_matches:
+                required = required + 1
+                complete = false
+                status = TraceQualificationStatus.Incomplete
+                reasons.push("not-applicable claim lacks one current admitted review for its exact scope")
+            else:
+                status = TraceQualificationStatus.NotApplicable
+                reasons.push("reviewed not applicable: " + review + "; no execution coverage granted")
+        else:
+            required = required + 1
+            if defined:
+                structural = structural + 1
+            if (obligation.applicability == TraceApplicability.Unknown or not defined or not graph_valid):
+                status = TraceQualificationStatus.Incomplete
+                reasons.push("missing/conflicting definition, unknown applicability, or incomplete graph")
+            elif not binding_matches:
+                status = TraceQualificationStatus.Stale
+                reasons.push("snapshot/input/definition/configuration/lane/binary/expectation binding changed")
+            elif run_problems.len() > 0:
+                status = TraceQualificationStatus.Incomplete
+                reasons = run_problems
+            else:
+                var passed = 0
+                var failed = false
+                var stale = false
+                var incomplete = false
+                for case_id in obligation.case_ids:
+                    val result = trace_evaluate_case(case_id, obligation, run, context)
+                    for observation_id in result.observation_ids:
+                        selected.push(observation_id)
+                    for reason in result.reasons:
+                        reasons.push(reason)
+                    if result.status == TraceQualificationStatus.Verified:
+                        passed = passed + 1
+                    if result.status == TraceQualificationStatus.Failed:
+                        failed = true
+                    if result.status == TraceQualificationStatus.Stale:
+                        stale = true
+                    if result.status == TraceQualificationStatus.Incomplete:
+                        incomplete = true
+                if (passed == obligation.case_ids.len() or
+                    (obligation.policy == TraceSatisfactionPolicy.Alternative and passed > 0)):
+                    status = TraceQualificationStatus.Verified
+                    executed = executed + 1
+                elif incomplete:
+                    status = TraceQualificationStatus.Incomplete
+                elif stale:
+                    status = TraceQualificationStatus.Stale
+                elif failed:
+                    status = TraceQualificationStatus.Failed
+                else:
+                    status = TraceQualificationStatus.NotRun
+            if status != TraceQualificationStatus.Verified:
+                complete = false
+        results.push(TraceObligationResult(obligation.id, obligation.requirement_id, obligation.criterion_id,
+            obligation.test_kind, status, selected, reasons))
+    if required == 0 or not graph_valid or not binding_matches or run_problems.len() > 0:
+        complete = false
+    TraceQualification(context.subject_id, run.id, results, structural, required, executed, required, complete)
+
+pub fn trace_qualification_status_name(status: TraceQualificationStatus) -> text:
+    match status:
+        TraceQualificationStatus.Verified: "verified"
+        TraceQualificationStatus.Failed: "failed"
+        TraceQualificationStatus.Incomplete: "incomplete"
+        TraceQualificationStatus.NotRun: "not_run"
+        TraceQualificationStatus.Stale: "stale"
+        TraceQualificationStatus.NotApplicable: "not_applicable"
+
+pub fn trace_test_kind_name(kind: TraceTestKind) -> text:
+    match kind:
+        TraceTestKind.Acceptance: "acceptance"
+        TraceTestKind.Unit: "unit"
+        TraceTestKind.Integration: "integration"
+        TraceTestKind.Component: "component"
+        TraceTestKind.System: "system"
+        TraceTestKind.Performance: "performance"

@@ -103,6 +103,59 @@ static void check_retained_text_array(void) {
     check(rt_string_free(persistent) == 1, "persistent text has final release ownership");
 }
 
+/* One scope that grows the transient raw table past its retained capacity
+ * (2^21 entries) must not make every later scope end scan and clear that
+ * high-water table, and the regrown table must still register, promote and
+ * reclaim raw blocks. 3.2M blocks drive the table to 2^23 entries. */
+static void check_raw_table_release_after_oversized_scope(void) {
+    const int64_t oversized_blocks = 3200000;
+    check(rt_transient_array_scope_begin() == 1, "oversized raw scope begins");
+    int allocated = 1;
+    for (int64_t i = 0; i < oversized_blocks && allocated; i++) {
+        int64_t* block = (int64_t*)rt_alloc((int64_t)sizeof(int64_t));
+        if (!block) {
+            allocated = 0;
+        } else {
+            block[0] = i;
+        }
+    }
+    check(allocated, "oversized scope allocates 3.2M raw blocks");
+    check(rt_transient_array_scope_end() == 1, "oversized raw scope ends and reclaims");
+
+    int small_ok = 1;
+    clock_t start = clock();
+    for (int i = 0; i < 200 && small_ok; i++) {
+        if (!rt_transient_array_scope_begin()) {
+            small_ok = 0;
+            break;
+        }
+        int64_t* block = (int64_t*)rt_alloc((int64_t)sizeof(int64_t));
+        if (!block) {
+            small_ok = 0;
+        } else {
+            block[0] = i;
+        }
+        if (!rt_transient_array_scope_end()) small_ok = 0;
+    }
+    clock_t finish = clock();
+    check(small_ok, "200 one-block scopes run after the oversized scope");
+    double seconds = (start == (clock_t)-1 || finish == (clock_t)-1)
+        ? 1e9 : (double)(finish - start) / (double)CLOCKS_PER_SEC;
+    check(seconds < 0.5,
+          "one-block scope ends do not rescan the oversized raw table");
+
+    check(rt_transient_array_scope_begin() == 1, "post-release raw scope begins");
+    int64_t* kept = (int64_t*)rt_alloc((int64_t)sizeof(int64_t));
+    check(kept != NULL, "post-release raw block allocates");
+    if (kept != NULL) kept[0] = 0x7AB1E;
+    check(rt_transient_array_scope_pause() == 1, "post-release raw scope pauses");
+    check(kept != NULL && rt_transient_heap_promote((int64_t)((uintptr_t)kept | 1)) == 1,
+          "regrown raw table still classifies and promotes a scope-born block");
+    check(rt_transient_array_scope_end() == 1, "post-release raw scope ends");
+    check(kept != NULL && kept[0] == 0x7AB1E, "promoted block survives the regrown scope end");
+    if (kept != NULL) rt_free(kept);
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && strcmp(argv[1], "--retained-text-array-only") == 0) {
         check_retained_text_array();
@@ -364,6 +417,8 @@ int main(int argc, char **argv) {
     check(after_arrays != (clock_t)-1 &&
               after_array_seconds <= after_seconds * 20.0 + 0.10,
           "scope-end cost stays bounded after 20000 persistent arrays");
+
+    check_raw_table_release_after_oversized_scope();
 
     printf("%s (%d failure%s)\n", failures ? "SELFCHECK FAILED" : "SELFCHECK PASSED",
            failures, failures == 1 ? "" : "s");

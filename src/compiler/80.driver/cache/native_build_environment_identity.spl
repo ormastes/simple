@@ -234,6 +234,77 @@ fn native_build_environment_fingerprint_rows_v1(
     NativeBuildEnvironmentFingerprintV1(
         true, sha256_text(native_build_environment_frame_v1(rows)), "ok")
 
+# Final delivery intent does not change an executable/entry module's native
+# codegen. Project only this known field, after validating the complete capture.
+# Every other compiler/tool/provider/config/source field remains conservative.
+fn native_build_module_environment_snapshot_fingerprint_v1(
+    snapshot: [(text, text)]
+) -> NativeBuildEnvironmentFingerprintV1:
+    val complete = native_build_environment_snapshot_fingerprint_v1(snapshot)
+    if not complete.valid: return complete
+    var selective_objects = false
+    for pair in snapshot:
+        if pair.0 == "SIMPLE_MIR_SELECTIVE" and pair.1 == "1":
+            selective_objects = true
+    var projected: [(text, text)] = []
+    for pair in snapshot:
+        # Each selective physical job gets a fresh lowering owner. Its actual
+        # declaration/context witness remains below; the number of admitted
+        # sibling processes cannot change its object identity.
+        if selective_objects and pair.0 == "SIMPLE_NATIVE_BUILD_THREADS":
+            continue
+        if pair.0 == "SIMPLE_NATIVE_BUILD_EMIT_OBJECT" and
+                (pair.1 == "" or pair.1 == "entry"):
+            continue
+        # MIR sharding / staging only choose WHICH process emits a module
+        # (driver_build/native_mir_shard.spl); the per-pid ledger and per-
+        # worker spec would otherwise give every worker and every build a
+        # private object scope. A cached object is still admitted only by
+        # its capsule's MIR identity, so this cannot reuse a different MIR.
+        if pair.0 == "SIMPLE_MIR_SHARDING" or pair.0 == "SIMPLE_MIR_SHARD" or
+                pair.0 == "SIMPLE_MIR_SHARD_QUEUE" or pair.0 == "SIMPLE_MIR_SHARD_OWNER" or
+                pair.0 == "SIMPLE_MIR_SHARD_LINK" or pair.0 == "SIMPLE_MIR_SHARD_WORKER_KB" or
+                pair.0 == "SIMPLE_MIR_SHARD_COUNT" or
+                pair.0 == "SIMPLE_MIR_SHARD_EXPORT_DIR" or
+                pair.0 == "SIMPLE_MIR_SHARD_EXPORT_WRITE" or
+                pair.0 == "SIMPLE_MIR_SHARD_EXPORT_SUMMARIES" or
+                pair.0 == "SIMPLE_MIR_SELECTIVE_PARENT_KIB" or
+                pair.0 == "SIMPLE_MIR_SELECTIVE_WORKER_KIB" or
+                pair.0 == "SIMPLE_MIR_SELECTIVE_EXPORTER_KIB" or
+                pair.0 == "SIMPLE_MIR_SELECTIVE_PHASE_KIB" or
+                pair.0 == "SIMPLE_MIR_SELECTIVE_DISK_BYTES" or
+                pair.0 == "SIMPLE_MIR_SELECTIVE_DISK_RESERVE_BYTES" or
+                pair.0 == "SIMPLE_NATIVE_STAGED_CODEGEN_BATCH" or
+                pair.0 == "SIMPLE_NATIVE_PRELOWER_CACHE":
+            continue
+        # Observability sinks and the external RSS ceiling. The bootstrap
+        # stamps the profile/snapshot paths and run id with its pid, so every
+        # relaunch got a private object scope. Each is read only to choose a
+        # log/evidence destination or gate diagnostic printing
+        # (driver_log_helpers.spl, driver_mem_snapshot.spl, the *_trace_enabled
+        # helpers); the ceiling is consumed by the bootstrap scripts' watchdog
+        # and read by no compiler/runtime source. None reaches a compiler
+        # decision, so object bytes cannot depend on them. The complete
+        # capture above still records them for admission/no-op evidence.
+        if pair.0 == "SIMPLE_COMPILER_PHASE_PROFILE" or
+                pair.0 == "SIMPLE_COMPILER_PHASE_PROFILE_FILE" or
+                pair.0 == "SIMPLE_MEM_SNAPSHOT_FILE" or
+                pair.0 == "SIMPLE_EVIDENCE_RUN_ID" or
+                pair.0 == "SIMPLE_BUILD_PROGRESS_EVENTS" or
+                pair.0 == "SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB":
+            continue
+        projected = projected.push(pair)
+    val module_capture = native_build_environment_snapshot_fingerprint_v1(projected)
+    if not module_capture.valid: return module_capture
+    NativeBuildEnvironmentFingerprintV1(true,
+        sha256_text("simple-native-module-environment-v1\n" + module_capture.digest), "ok")
+
+fn native_build_module_environment_fingerprint_v1() -> NativeBuildEnvironmentFingerprintV1:
+    match env_list_checked():
+        case Err(reason): NativeBuildEnvironmentFingerprintV1(
+            false, "", "module-environment-snapshot-unavailable:" + reason)
+        case Ok(snapshot): native_build_module_environment_snapshot_fingerprint_v1(snapshot)
+
 fn native_build_environment_fingerprint_v1() ->
         NativeBuildEnvironmentFingerprintV1:
     match env_list_checked():
@@ -249,3 +320,6 @@ export native_build_environment_field_known_v1
 export native_build_environment_fingerprint_rows_v1
 export native_build_environment_snapshot_fingerprint_v1
 export native_build_environment_fingerprint_v1
+
+export native_build_module_environment_snapshot_fingerprint_v1
+export native_build_module_environment_fingerprint_v1

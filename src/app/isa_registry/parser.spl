@@ -1,0 +1,313 @@
+use app.isa_registry.model.*
+
+fn problem(code: text, path: text) -> RegistryError:
+    RegistryError(code: code, path: path)
+
+fn check_limits(limits: IsaLimits) -> Result<(), RegistryError>:
+    if (limits.max_source_bytes <= 0 or limits.max_depth <= 0 or
+        limits.max_operations <= 0 or limits.max_text_bytes <= 0 or limits.max_list_items <= 0):
+        return Err(problem("invalid_limits", "limits"))
+    Ok(())
+
+fn check_text(value: text, path: text, empty: bool, limits: IsaLimits) -> Result<(), RegistryError>:
+    if value.len() > limits.max_text_bytes:
+        return Err(problem("text_limit", path))
+    if not empty and value == "":
+        return Err(problem("invalid_text", path))
+    Ok(())
+
+fn check_id(value: text, path: text, limits: IsaLimits) -> Result<(), RegistryError>:
+    check_text(value, path, false, limits)?
+    val alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-"
+    for i in 0..value.len():
+        if not alphabet.contains(value.substring(i, i + 1)):
+            return Err(problem("invalid_text", path))
+    Ok(())
+
+fn check_digest(value: text, path: text, limits: IsaLimits) -> Result<(), RegistryError>:
+    check_text(value, path, false, limits)?
+    if value.len() != 64:
+        return Err(problem("invalid_digest", path))
+    for i in 0..value.len():
+        if not "0123456789abcdef".contains(value.substring(i, i + 1)):
+            return Err(problem("invalid_digest", path))
+    Ok(())
+
+fn check_set(items: [text], path: text, limits: IsaLimits) -> Result<(), RegistryError>:
+    if items.len() > limits.max_list_items:
+        return Err(problem("list_limit", path))
+    var seen: Dict<text, bool> = {}
+    for item in items:
+        check_id(item, path, limits)?
+        if seen.contains_key(item):
+            return Err(problem("duplicate_list_item", path))
+        seen[item] = true
+    Ok(())
+
+# Revalidate caller-constructed values; no mutable/global authority cache.
+pub fn validate_registry(registry: IsaRegistry, authority: IsaAuthority, limits: IsaLimits) -> Result<IsaRegistry, RegistryError>:
+    check_limits(limits)?
+    check_text(authority.isa, "authority.isa", false, limits)?
+    check_text(authority.spec_version, "authority.spec_version", false, limits)?
+    check_digest(authority.snapshot_sha256, "authority.snapshot_sha256", limits)?
+    if authority.operation_ids.len() == 0:
+        return Err(problem("authority_empty", "authority.operation_ids"))
+    if authority.operation_ids.len() > limits.max_operations or registry.operations.len() > limits.max_operations:
+        return Err(problem("operation_limit", "operations"))
+    if limits.max_depth < 2 or (registry.operations.len() > 0 and limits.max_depth < 4):
+        return Err(problem("depth_limit", "operations"))
+    var universe: Dict<text, bool> = {}
+    for id in authority.operation_ids:
+        check_id(id, "authority.operation_ids", limits)?
+        if universe.contains_key(id):
+            return Err(problem("authority_duplicate", "authority.operation_ids"))
+        universe[id] = true
+    check_text(registry.schema, "schema", false, limits)?
+    check_text(registry.isa, "isa", false, limits)?
+    check_text(registry.spec_version, "spec_version", false, limits)?
+    check_digest(registry.source_sha256, "source_sha256", limits)?
+    if registry.schema != "simple.isa.registry.v1":
+        return Err(problem("schema_version", "schema"))
+    if (registry.isa != authority.isa or registry.spec_version != authority.spec_version or
+        registry.source_sha256 != authority.snapshot_sha256):
+        return Err(problem("authority_mismatch", "authority"))
+    var seen: Dict<text, bool> = {}
+    for row in registry.operations:
+        # Bound caller-owned IDs before deriving diagnostic text from them.
+        check_id(row.id, "operations.id", limits)?
+        val path = "operations." + row.id
+        if seen.contains_key(row.id):
+            return Err(problem("duplicate_operation", path))
+        seen[row.id] = true
+        check_text(row.spec_version, path + ".spec_version", false, limits)?
+        check_text(row.semantic_op, path + ".semantic_op", false, limits)?
+        check_text(row.element, path + ".element", false, limits)?
+        check_text(row.shape, path + ".shape", false, limits)?
+        check_text(row.lowering, path + ".lowering", false, limits)?
+        check_text(row.encoder, path + ".encoder", true, limits)?
+        check_text(row.decoder, path + ".decoder", true, limits)?
+        check_text(row.fallback, path + ".fallback", false, limits)?
+        check_text(row.reason, path + ".reason", true, limits)?
+        check_set(row.required_features, path + ".required_features", limits)?
+        check_set(row.verification, path + ".verification", limits)?
+        if row.spec_version != registry.spec_version:
+            return Err(problem("operation_version", path + ".spec_version"))
+        if not ["native", "synthesized", "library", "llvm", "unsupported", "unverified"].contains(row.lowering):
+            return Err(problem("invalid_lowering", path + ".lowering"))
+        if row.fallback != "forbidden":
+            return Err(problem("fallback_forbidden", path + ".fallback"))
+        if (row.lowering == "unsupported" or row.lowering == "unverified") and row.reason == "":
+            return Err(problem("reason_required", path + ".reason"))
+    if seen.len() != universe.len():
+        return Err(problem("universe_mismatch", "operations"))
+    for id in authority.operation_ids:
+        if not seen.contains_key(id):
+            return Err(problem("universe_mismatch", "operations." + id))
+    Ok(registry)
+
+# Closed SDN record reader. This grammar uses parenthesized tagged records,
+# unlike configuration-style mappings; decoding to an untyped map would lose
+# duplicate fields and would accept forms outside the admitted wire contract.
+class RegistryReader:
+    source: text
+    offset: i64
+    limits: IsaLimits
+
+    fn peek() -> text:
+        if self.offset >= self.source.len():
+            return ""
+        self.source.substring(self.offset, self.offset + 1)
+
+    me whitespace():
+        while self.offset < self.source.len() and [" ", "\t", "\r", "\n"].contains(self.peek()):
+            self.offset = self.offset + 1
+
+    me token(expected: text, path: text) -> Result<(), RegistryError>:
+        self.whitespace()
+        if expected.len() > self.source.len() - self.offset:
+            return Err(problem("syntax", path))
+        if self.source.substring(self.offset, self.offset + expected.len()) != expected:
+            return Err(problem("syntax", path))
+        self.offset = self.offset + expected.len()
+        Ok(())
+
+    me field_gap(path: text) -> Result<(), RegistryError>:
+        if self.peek() != ")" and not [" ", "\t", "\r", "\n"].contains(self.peek()):
+            return Err(problem("syntax", path))
+        Ok(())
+
+    me word(path: text) -> Result<text, RegistryError>:
+        self.whitespace()
+        val start = self.offset
+        while self.offset < self.source.len():
+            val ch = self.peek()
+            if not "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_".contains(ch):
+                break
+            if self.offset - start >= self.limits.max_text_bytes:
+                return Err(problem("text_limit", path))
+            self.offset = self.offset + 1
+        if start == self.offset:
+            return Err(problem("syntax", path))
+        Ok(self.source.substring(start, self.offset))
+
+    me string(path: text) -> Result<text, RegistryError>:
+        self.whitespace()
+        if self.peek() != "\"":
+            return Err(problem("field_type", path))
+        self.offset = self.offset + 1
+        var parts: [text] = []
+        var decoded_bytes: i64 = 0
+        while self.offset < self.source.len():
+            var ch = self.peek()
+            self.offset = self.offset + 1
+            if ch == "\"":
+                return Ok(parts.join(""))
+            if ch == "\\":
+                if self.offset >= self.source.len():
+                    return Err(problem("syntax", path))
+                ch = self.peek()
+                self.offset = self.offset + 1
+                match ch:
+                    "n": ch = "\n"
+                    "r": ch = "\r"
+                    "t": ch = "\t"
+                    "\"": ch = "\""
+                    "\\": ch = "\\"
+                    _: return Err(problem("syntax", path))
+            else:
+                if ch.byte_at(0) < 32 or ch.byte_at(0) == 127:
+                    return Err(problem("syntax", path))
+            if ch.len() > self.limits.max_text_bytes - decoded_bytes:
+                return Err(problem("text_limit", path))
+            decoded_bytes = decoded_bytes + ch.len()
+            parts.push(ch)
+        Err(problem("syntax", path))
+
+    me strings(path: text) -> Result<[text], RegistryError>:
+        if self.limits.max_depth < 4:
+            return Err(problem("depth_limit", path))
+        self.whitespace()
+        if self.peek() != "[":
+            return Err(problem("field_type", path))
+        self.offset = self.offset + 1
+        var items: [text] = []
+        self.whitespace()
+        if self.peek() == "]":
+            self.offset = self.offset + 1
+            return Ok(items)
+        while true:
+            if items.len() >= self.limits.max_list_items:
+                return Err(problem("list_limit", path))
+            items.push(self.string(path)?)
+            self.whitespace()
+            if self.peek() == "]":
+                self.offset = self.offset + 1
+                return Ok(items)
+            self.token(",", path)?
+            self.whitespace()
+            if self.peek() == "]":
+                return Err(problem("syntax", path))
+        Err(problem("syntax", path))
+
+    me operation(index: i64) -> Result<IsaOperation, RegistryError>:
+        val path = "operations." + index.to_text()
+        if self.limits.max_depth < 3:
+            return Err(problem("depth_limit", path))
+        self.token("(", path)?
+        if self.word(path)? != "isa_operation":
+            return Err(problem("syntax", path))
+        self.field_gap(path)?
+        var fields: Dict<text, text> = {}
+        var seen: Dict<text, bool> = {}
+        var features: [text] = []
+        var verification: [text] = []
+        val names = ["id", "spec_version", "semantic_op", "element", "shape", "required_features", "lowering", "encoder", "decoder", "fallback", "verification", "reason"]
+        while true:
+            self.whitespace()
+            if self.peek() == ")":
+                self.offset = self.offset + 1
+                break
+            val key = self.word(path)?
+            val field = path + "." + key
+            if not names.contains(key):
+                return Err(problem("unknown_field", field))
+            if seen.contains_key(key):
+                return Err(problem("duplicate_field", field))
+            seen[key] = true
+            self.token(":", field)?
+            if key == "required_features":
+                features = self.strings(field)?
+            elif key == "verification":
+                verification = self.strings(field)?
+            else:
+                fields[key] = self.string(field)?
+            self.field_gap(path)?
+        for key in names:
+            if not seen.contains_key(key):
+                return Err(problem("missing_field", path + "." + key))
+        Ok(IsaOperation(id: fields["id"], spec_version: fields["spec_version"], semantic_op: fields["semantic_op"], element: fields["element"], shape: fields["shape"], required_features: features, lowering: fields["lowering"], encoder: fields["encoder"], decoder: fields["decoder"], fallback: fields["fallback"], verification: verification, reason: fields["reason"]))
+
+    me operations() -> Result<[IsaOperation], RegistryError>:
+        if self.limits.max_depth < 2:
+            return Err(problem("depth_limit", "operations"))
+        self.whitespace()
+        if self.peek() != "[":
+            return Err(problem("field_type", "operations"))
+        self.offset = self.offset + 1
+        var rows: [IsaOperation] = []
+        self.whitespace()
+        if self.peek() == "]":
+            self.offset = self.offset + 1
+            return Ok(rows)
+        while true:
+            if rows.len() >= self.limits.max_operations:
+                return Err(problem("operation_limit", "operations"))
+            rows.push(self.operation(rows.len())?)
+            self.whitespace()
+            if self.peek() == "]":
+                self.offset = self.offset + 1
+                return Ok(rows)
+            self.token(",", "operations")?
+        Err(problem("syntax", "operations"))
+
+    me registry() -> Result<IsaRegistry, RegistryError>:
+        self.token("(", "registry")?
+        if self.word("registry")? != "isa_registry":
+            return Err(problem("syntax", "registry"))
+        self.field_gap("registry")?
+        var fields: Dict<text, text> = {}
+        var seen: Dict<text, bool> = {}
+        var rows: [IsaOperation] = []
+        val names = ["schema", "isa", "spec_version", "source_sha256", "operations"]
+        while true:
+            self.whitespace()
+            if self.peek() == ")":
+                self.offset = self.offset + 1
+                break
+            val key = self.word("registry")?
+            if not names.contains(key):
+                return Err(problem("unknown_field", key))
+            if seen.contains_key(key):
+                return Err(problem("duplicate_field", key))
+            seen[key] = true
+            self.token(":", key)?
+            if key == "operations":
+                rows = self.operations()?
+            else:
+                fields[key] = self.string(key)?
+            self.field_gap("registry")?
+        self.whitespace()
+        if self.offset != self.source.len():
+            return Err(problem("syntax", "registry"))
+        for key in names:
+            if not seen.contains_key(key):
+                return Err(problem("missing_field", key))
+        Ok(IsaRegistry(schema: fields["schema"], isa: fields["isa"], spec_version: fields["spec_version"], source_sha256: fields["source_sha256"], operations: rows))
+
+pub fn parse_registry(source: text, authority: IsaAuthority, limits: IsaLimits) -> Result<IsaRegistry, RegistryError>:
+    check_limits(limits)?
+    if source.len() > limits.max_source_bytes:
+        return Err(problem("source_limit", "registry"))
+    var reader = RegistryReader(source: source, offset: 0, limits: limits)
+    val registry = reader.registry()?
+    validate_registry(registry, authority, limits)

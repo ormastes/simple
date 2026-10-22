@@ -1280,6 +1280,10 @@ mod tests {
             previous: std::env::var("SIMPLE_SIMD_TIER").ok(),
         };
         std::env::set_var("SIMPLE_SIMD_TIER", value);
+        // The override is cached per host-config epoch (a per-call getenv was
+        // an O(environ) scan per kernel dispatch), so changing the env var
+        // requires the epoch reset to take effect.
+        simple_simd::reset_host_cpu_config_cache_for_tests();
         clear_numeric_kernel_provider_cache();
         test()
     }
@@ -1324,7 +1328,12 @@ mod tests {
     fn cached_provider_refreshes_when_active_tier_changes() {
         with_simd_tier_override("x86_64_sse2", || {
             assert_eq!(active_numeric_kernel_tier(), SimdTier::X86_64Sse2);
+            // The env override is cached per host-config epoch (a per-call
+            // getenv here was an O(environ) scan per kernel dispatch), so a
+            // mid-process change takes effect on the next epoch reset.
             std::env::set_var("SIMPLE_SIMD_TIER", "scalar");
+            simple_simd::reset_host_cpu_config_cache_for_tests();
+            clear_numeric_kernel_provider_cache();
             assert_eq!(active_numeric_kernel_tier(), SimdTier::Scalar);
         });
     }

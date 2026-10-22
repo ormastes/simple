@@ -12,6 +12,7 @@ use compiler.frontend.parser_types_expr.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.common.dynamic_identity.closure.{Closure}
+use compiler.common.assurance.representation_manifest_v1.{RepresentationDeclarationV1}
 use compiler.hir.hir_definitions.{HirFunction, HirClass, HirStruct, HirEnum, HirBitfield, HirTrait, HirImpl, HirConst, HirStaticAssert, HirAopAdvice, HirDiBinding, HirArchRule, HirMockDecl}
 use compiler.hir.hir_symbol_table_methods.*
 use std.string_core.{char_code}
@@ -44,11 +45,17 @@ struct HirModule:
     arch_rules: [HirArchRule]
     mock_decls: [HirMockDecl]
     types: [text]
-    # `extend <Enum>:` sections carried from the frontend (design §2). MUST
-    # stay the LAST field -- partial named constructions are filled
-    # POSITIONALLY by the Rust seed -- and carries a default so existing
-    # `HirModule(...)` sites are untouched.
+    # Keep existing field positions stable; append defaulted metadata only.
     extend_enums: [HirExtendEnum] = []
+    representation_declarations: [RepresentationDeclarationV1] = []
+    # Explicit source-module contract, independent of ambient build policy.
+    # Cache admission must reject disagreement with the current module surface.
+    nogc_strict: bool = false
+    # Published only after the production strict-effect gate accepts every
+    # function. Rows are module-local declaration SymbolIds, never name guesses.
+    nogc_param_effects_checked: bool = false
+    nogc_param_effect_symbol_ids: [i64] = []
+    nogc_param_effects: [[text]] = []
 
 struct HirExtendEnum:
     """One `complete:`/`dyn:` section of an `extend <Enum>:` declaration."""
@@ -720,6 +727,26 @@ enum HirTypeKind:
     Tensor(element: HirType, dims: [DimExpr], device: DeviceType?)
     Layer(input: [DimExpr], output: [DimExpr])
 
+    # No-GC ownership sigils (doc/05_design/language/misc/memory.md). Appended
+    # to preserve discriminants. Produced ONLY for modules in the opt-in
+    # strict mode (`@no_gc(strict)` / SIMPLE_NOGC_STRICT=1); default-mode
+    # lowering keeps the legacy Ref / Ptr / Infer, so the bootstrap closure
+    # sees no new kind.
+    Unique(inner: HirType)           # &T  unique owner
+    Shared(inner: HirType)           # *T  shared (Rc) owner
+    Weak(inner: HirType)             # -T  weak observer
+
+fn hir_type_kind_ownership_name(kind: HirTypeKind) -> text:
+    """Ownership/pointer reading of a HIR type, for diagnostics and specs."""
+    match kind:
+        case Unique(_): "unique"
+        case Shared(_): "shared"
+        case Weak(_): "weak"
+        case Ref(_, mutable): if mutable: "ref_mut" else: "ref"
+        case Ptr(_, mutable): if mutable: "ptr_mut" else: "ptr"
+        case Infer(_, _): "infer"
+        case _: ""
+
 fn hir_type_metadata_symbol_free(type_: HirType) -> bool:
     # A global name-keyed cache may transport primitive/composite shapes, but
     # cannot transport a Named/DynTrait ID or inference variable without its
@@ -730,6 +757,8 @@ fn hir_type_metadata_symbol_free(type_: HirType) -> bool:
             for item in items:
                 if not hir_type_metadata_symbol_free(item): return false
         case Array(inner, _) | Slice(inner) | Ref(inner, _) | Ptr(inner, _) | Optional(inner) | Isolated(inner):
+            return hir_type_metadata_symbol_free(inner)
+        case Unique(inner) | Shared(inner) | Weak(inner):
             return hir_type_metadata_symbol_free(inner)
         case Dict(left, right) | Result(left, right):
             return hir_type_metadata_symbol_free(left) and hir_type_metadata_symbol_free(right)
@@ -743,25 +772,26 @@ fn hir_type_metadata_symbol_free(type_: HirType) -> bool:
     true
 
 impl HirType:
+    # @workaround bug=a174_named_enum_payload_owner_2026_10_16 reason=retain-declared-owner-through-positional-payloads
     static fn named(name: text) -> HirType:
         """Build a primitive HirType from its canonical name (i64, u32, f64, bool, unit, usize).
         Used by backends to convert MIR types to HirType for layout computation."""
         val kind = match name:
-            case "i64": HirTypeKind.Int(bits: 64, signed: true)
-            case "i32": HirTypeKind.Int(bits: 32, signed: true)
-            case "i16": HirTypeKind.Int(bits: 16, signed: true)
-            case "i8": HirTypeKind.Int(bits: 8, signed: true)
-            case "u64": HirTypeKind.Int(bits: 64, signed: false)
-            case "u32": HirTypeKind.Int(bits: 32, signed: false)
-            case "u16": HirTypeKind.Int(bits: 16, signed: false)
-            case "u8": HirTypeKind.Int(bits: 8, signed: false)
-            case "usize": HirTypeKind.Int(bits: 64, signed: false)
-            case "isize": HirTypeKind.Int(bits: 64, signed: true)
-            case "f64": HirTypeKind.Float(bits: 64)
-            case "f32": HirTypeKind.Float(bits: 32)
+            case "i64": HirTypeKind.Int(64, true)
+            case "i32": HirTypeKind.Int(32, true)
+            case "i16": HirTypeKind.Int(16, true)
+            case "i8": HirTypeKind.Int(8, true)
+            case "u64": HirTypeKind.Int(64, false)
+            case "u32": HirTypeKind.Int(32, false)
+            case "u16": HirTypeKind.Int(16, false)
+            case "u8": HirTypeKind.Int(8, false)
+            case "usize": HirTypeKind.Int(64, false)
+            case "isize": HirTypeKind.Int(64, true)
+            case "f64": HirTypeKind.Float(64)
+            case "f32": HirTypeKind.Float(32)
             case "bool": HirTypeKind.Bool
             case "unit": HirTypeKind.Unit
-            case _: HirTypeKind.Int(bits: 64, signed: true)
+            case _: HirTypeKind.Int(64, true)
         HirType(kind: kind, span: Span.empty())
 
 # ============================================================================
@@ -791,10 +821,13 @@ impl DimExpr:
         DimExpr(kind: DimExprKind.Literal(value), span: span)
 
     static fn named(name: text, span: Span) -> DimExpr:
-        DimExpr(kind: DimExprKind.Named(name, nil, nil), span: span)
+        DimExpr(kind: DimExprKind.Named(name, None, None), span: span)
 
     static fn named_range(name: text, lo: i64, hi: i64, span: Span) -> DimExpr:
-        DimExpr(kind: DimExprKind.Named(name, Some(lo), Some(hi)), span: span)
+        # Give scalar Option payloads their declared type before the enum call.
+        val lower_bound: i64? = Some(lo)
+        val upper_bound: i64? = Some(hi)
+        DimExpr(kind: DimExprKind.Named(name, lower_bound, upper_bound), span: span)
 
     static fn var(id: i64, span: Span) -> DimExpr:
         DimExpr(kind: DimExprKind.Var(id), span: span)
@@ -922,7 +955,7 @@ fn _hir_optional_container_payload(t: HirType) -> HirType?:
     val ik_disc = rt_enum_discriminant(ik)
     if ik_disc == rt_enum_discriminant(HirTypeKind.Dict(inner_t, inner_t)):
         return inner_t
-    if ik_disc == rt_enum_discriminant(HirTypeKind.Array(inner_t, nil)):
+    if ik_disc == rt_enum_discriminant(HirTypeKind.Array(inner_t, None)):
         return inner_t
     if ik_disc == rt_enum_discriminant(HirTypeKind.Slice(inner_t)):
         return inner_t

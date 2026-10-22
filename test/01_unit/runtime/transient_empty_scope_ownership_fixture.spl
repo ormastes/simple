@@ -1,0 +1,49 @@
+# Real runtime ownership regression; exit codes identify failing contracts.
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+extern fn rt_transient_raw_owner_query(ptr: i64, bytes_out: i64, owned_out: i64) -> bool
+extern fn rt_transient_raw_promote(ptr: i64) -> i32
+extern fn rt_alloc(bytes: u64) -> i64
+extern fn rt_free(ptr: i64)
+extern fn memset(ptr: i64, value: i32, count: u64) -> i64
+extern fn memcmp(left: i64, right: i64, count: u64) -> i32
+
+fn main() -> i64:
+    val reference = rt_alloc(8)
+    if reference == 0: return 1
+    memset(reference, 90, 8)
+    # Explicit free leaves an empty table with a tombstone.
+    if not rt_transient_array_scope_begin(): return 2
+    val erased = rt_alloc(8)
+    if not rt_transient_raw_owner_query(erased, 0, 0): return 3
+    rt_free(erased)
+    if rt_transient_raw_owner_query(erased, 0, 0): return 4
+    if not rt_transient_array_scope_end(): return 5
+    # A paused allocation remains owned by its caller.
+    if not rt_transient_array_scope_begin(): return 6
+    val owned = rt_alloc(8)
+    if not rt_transient_array_scope_pause(): return 7
+    val borrowed = rt_alloc(8)
+    memset(borrowed, 90, 8)
+    if not rt_transient_array_scope_end(): return 8
+    if rt_transient_raw_owner_query(owned, 0, 0): return 9
+    if rt_transient_raw_owner_query(borrowed, 0, 0): return 10
+    if memcmp(borrowed, reference, 8) != 0: return 11
+    rt_free(borrowed)
+    # Promotion preserves bytes while dropping scope ownership.
+    if not rt_transient_array_scope_begin(): return 12
+    val promoted = rt_alloc(8)
+    memset(promoted, 90, 8)
+    if rt_transient_raw_promote(promoted) != 1: return 13
+    if not rt_transient_array_scope_end(): return 14
+    if rt_transient_raw_owner_query(promoted, 0, 0): return 15
+    if memcmp(promoted, reference, 8) != 0: return 16
+    rt_free(promoted)
+    rt_free(reference)
+    if not rt_transient_array_scope_begin(): return 17
+    if rt_transient_array_scope_begin(): return 18
+    if not rt_transient_array_scope_end(): return 19
+    if rt_transient_array_scope_end(): return 20
+    print "PASS tombstone paused promoted scope lifecycle payload"
+    0

@@ -1,0 +1,83 @@
+#!/bin/sh
+# Exercise run_task's real preflight and receipts; the command boundary is a
+# sentinel, never a native compiler or evidence of executable qualification.
+set -eu
+source_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$source_root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+. "$source_root/scripts/bootstrap/phase-c-backend-commands.shs"
+. "$source_root/scripts/bootstrap/lib/product-frontend-policy.shs"
+work=$(mktemp -d "${TMPDIR:-/tmp}/phase-c-preflight.XXXXXX")
+echo "preflight-test-evidence=$work"
+fail() { echo "FAIL: $*" >&2; exit 1; }
+# Extract complete production functions, without executing the verifier's
+# admission/setup program or replacing the preflight code under test.
+awk '/^run_task\(\) \{$/ || /^read_max_rss_kib\(\) \{$/ || /^stage2_row_delegation_env\(\) \{$/ { copy=1 }
+     copy { print }
+     copy && /^\}$/ { copy=0 }' \
+  "$source_root/scripts/bootstrap/bootstrap-phase-verification.shs" >"$work/functions.shs"
+. "$work/functions.shs"
+unset SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB \
+  SIMPLE_SHARD_MEM_CLAMP SIMPLE_PARSE_SHARD_MAX SIMPLE_PARSE_SHARD_WORKER_KB \
+  SIMPLE_HIR_SHARD_WORKER_KB SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB SIMPLE_MEM_SNAPSHOT_FILE \
+  BOOTSTRAP_TREE_RSS_MEMINFO_PATH
+SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce
+# Fix only the requested policy cap. Host RAM is read by the real policy;
+# there is no memory fixture that could relax admission.
+phase=stage2 stage2_test_delegate=0 compiler_snapshot=fixture-compiler
+home="$work/home" tmp="$work/tmp" logs="$work/logs" cache="$work/cache"
+summary="$work/summary.env" runtime_path="$work/runtime"
+pure_tool_cache="$cache/tool" target_c_platform=fixture-host
+mkdir -p "$home" "$tmp" "$logs" "$cache"
+: >"$summary"
+bootstrap_phase_run_command() {
+  printf 'threads=%s budget=%s\n' "$SIMPLE_NATIVE_BUILD_THREADS" \
+    "$SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB" >"$work/invoked"
+  return 73
+}
+run_fixture() {
+  rm -f "$work/invoked"
+  if run_task compiler_cli_build --verification-expect-executable="$work/simple_cli" \
+      "$compiler_snapshot" native-build --entry fixture.spl; then
+    fail unexpected-native-pass
+  fi
+}
+# This cap is admitted for 40 workers (ceiling 13,631,488), but previously
+# failed the second, stale 6,835,937 ceiling check with status 88 and no log.
+pure_tool_threads=40
+SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=7077888
+run_fixture
+[ "$(cat "$work/invoked")" = 'threads=40 budget=7077888' ] || fail admitted-policy-not-transported
+grep -q 'task=compiler_cli_build|result=FAIL|status=73|' "$summary" || fail missing-sentinel-receipt
+grep -q 'verification_frontend_policy=SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=7077888' \
+  "$logs/compiler_cli_build.log" || fail missing-policy-log
+# A cap above the hard ceiling remains inadmissible at eight workers, with
+# its actual reason. (The ceiling floor was widened to 10485760 KiB on
+# 2026-10-13 measured evidence, so the incident's original 8388608 KiB cap is
+# now admissible; use 12 GiB to stay above the new ceiling.)
+pure_tool_threads=8
+SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=12582912
+run_fixture
+[ ! -e "$work/invoked" ] || fail rejected-policy-invoked-command
+grep -q 'task=compiler_cli_build|result=FAIL|status=88|' "$summary" || fail missing-refusal-receipt
+grep -q 'frontend tree RSS policy refused:.*12582912.*exceeds the hard ceiling 10485760.*8 worker' \
+  "$logs/compiler_cli_build.log" || fail missing-refusal-reason
+# Contradictory fanout also reports a product-policy refusal before invocation.
+SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=5859375
+SIMPLE_PARSE_SHARD_MAX=8
+run_fixture
+[ ! -e "$work/invoked" ] || fail contradictory-fanout-invoked-command
+grep -q 'frontend product policy refused: cap_kib=5859375 ceiling_kib=10485760 workers=8' \
+  "$logs/compiler_cli_build.log" || fail missing-product-refusal
+unset SIMPLE_PARSE_SHARD_MAX
+# Direct callers retain the strict default; only a passed, resolved ceiling
+# permits larger caps. A cap above that ceiling and malformed ceilings fail.
+if bootstrap_product_frontend_policy qualified 7077888 enforce >"$work/default"; then
+  fail widened-default
+fi
+for ceiling in 6835937 invalid 0; do
+  if bootstrap_product_frontend_policy qualified 7077888 enforce "$ceiling" >"$work/rejected"; then
+    fail "accepted-ceiling-$ceiling"
+  fi
+  [ ! -s "$work/rejected" ] || fail partial-policy-on-rejection
+done
+printf 'PASS: real Phase C preflight, resolved ceiling transport, status 88 diagnostics, no invocation on refusal, unchanged strict defaults\n'

@@ -881,7 +881,8 @@ impl NativeProjectBuilder {
     fn read_defined_symbol_set(obj: &Path) -> Result<HashSet<String>, String> {
         Ok(Self::read_global_symbol_types(obj)?
             .into_iter()
-            .filter(|(kind, _)| kind != "U")
+            // `w`/`v` are weak UNDEFINED references, not definitions.
+            .filter(|(kind, _)| !matches!(kind.as_str(), "U" | "w" | "v"))
             .map(|(_, name)| name)
             .collect())
     }
@@ -1024,29 +1025,13 @@ impl NativeProjectBuilder {
 
     #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
     fn quote_linker_response_path(path: &Path) -> String {
-        let raw = path.to_string_lossy();
-        debug_assert!(
-            !raw.contains(['\n', '\r']),
-            "response file paths must not contain newlines: {}",
-            path.display()
-        );
-        let escaped = raw.replace('\\', "\\\\").replace('"', "\\\"");
-        format!("\"{escaped}\"")
+        super::archive::quote_posix_response_path(path)
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
     fn write_linker_object_response_file(temp_dir: &Path, object_paths: &[PathBuf]) -> Result<PathBuf, String> {
         let rsp_path = temp_dir.join("spl_objects.rsp");
-        let mut quoted_paths = Vec::with_capacity(object_paths.len());
-        for obj in object_paths {
-            let raw = obj.to_string_lossy();
-            if raw.contains(['\n', '\r']) {
-                return Err(format!("object path contains unsupported newline: {}", obj.display()));
-            }
-            quoted_paths.push(Self::quote_linker_response_path(obj));
-        }
-        let contents = quoted_paths.join("\n");
-        std::fs::write(&rsp_path, format!("{contents}\n")).map_err(|e| format!("write object response file: {e}"))?;
+        super::archive::write_object_response_file(&rsp_path, object_paths, false)?;
         Ok(rsp_path)
     }
 
@@ -1065,14 +1050,54 @@ impl NativeProjectBuilder {
         }
         inputs.extend_from_slice(object_paths);
         inputs.push(alias_stub.to_path_buf());
+        let mut requested: Vec<String> = Self::stage4_live_undefined_symbols(temp_dir, &inputs)?
+            .into_iter()
+            .filter(|symbol| {
+                symbol.starts_with("rt_")
+                    || symbol.starts_with("spl_")
+                    || matches!(
+                        symbol.as_str(),
+                        "panic"
+                            | "stderr_write"
+                            | "stderr_flush"
+                            // Legacy Text.from_char_code import emitted by
+                            // the native backend; core-C owns its exact ABI.
+                            | "text_dot_from_char_code"
+                            | "__simple_runtime_init"
+                            | "__simple_runtime_shutdown"
+                            | "__simple_call_module_inits"
+                    )
+            })
+            .collect();
+        requested.sort();
+        if requested.is_empty() {
+            return Err("Stage4 live entry projection produced no runtime requests".to_string());
+        }
+        Ok(requested)
+    }
+
+    /// Undefined globals left once everything unreachable from `main` /
+    /// `spl_main` is collected. Computed in-process: `-r --gc-sections` is
+    /// honoured only by LLD (mold and ld.bfd accept it and keep every
+    /// section), so a linker-driven projection made the result depend on the
+    /// host's default `ld`. See `live_projection.rs`.
+    #[cfg(target_os = "linux")]
+    fn stage4_live_undefined_symbols(_temp_dir: &Path, inputs: &[PathBuf]) -> Result<HashSet<String>, String> {
+        Ok(super::live_projection::live_undefined_symbols(inputs, &["main", "spl_main"])?
+            .into_iter()
+            .collect())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn stage4_live_undefined_symbols(temp_dir: &Path, inputs: &[PathBuf]) -> Result<HashSet<String>, String> {
         let projection_dir = temp_dir.join("stage4_live");
         std::fs::create_dir_all(&projection_dir)
             .map_err(|err| format!("create Stage4 live projection directory: {err}"))?;
-        let response = Self::write_linker_object_response_file(&projection_dir, &inputs)?;
+        let response = Self::write_linker_object_response_file(&projection_dir, inputs)?;
         let live = temp_dir.join("stage4_live_entry.o");
         let cc = target_c_compiler(effective_target());
         let mut command = std::process::Command::new(&cc);
-        // `-Wl,-r` below is a real linker invocation, so it must honour the
+        // The trial link below is a real linker invocation, so it must honour the
         // same SIMPLE_LINKER preference as the final link — otherwise a run
         // that asked for lld still spawns the default linker here. The caller
         // (`link_objects`) already resolved and validated the value, so this
@@ -1080,14 +1105,6 @@ impl NativeProjectBuilder {
         if let Some(name) = requested_linker_driver_name()? {
             command.arg(format!("-fuse-ld={name}"));
         }
-        #[cfg(target_os = "linux")]
-        command
-            .arg("-nostdlib")
-            .arg("-Wl,-r")
-            .arg("-no-pie")
-            .arg("-Wl,--gc-sections")
-            .arg("-Wl,-u,main")
-            .arg("-Wl,-u,spl_main");
         // ld64 rejects `-r` together with `-dead_strip`, and a non-stripped
         // relocatable projection keeps runtime references from unreachable
         // closure code (kernel port I/O, virtio, baremetal intrinsics) that no
@@ -1112,30 +1129,7 @@ impl NativeProjectBuilder {
                 String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
-        let mut requested: Vec<String> = Self::read_undefined_symbol_set(&live)?
-            .into_iter()
-            .filter(|symbol| {
-                symbol.starts_with("rt_")
-                    || symbol.starts_with("spl_")
-                    || matches!(
-                        symbol.as_str(),
-                        "panic"
-                            | "stderr_write"
-                            | "stderr_flush"
-                            // Legacy Text.from_char_code import emitted by
-                            // the native backend; core-C owns its exact ABI.
-                            | "text_dot_from_char_code"
-                            | "__simple_runtime_init"
-                            | "__simple_runtime_shutdown"
-                            | "__simple_call_module_inits"
-                    )
-            })
-            .collect();
-        requested.sort();
-        if requested.is_empty() {
-            return Err("Stage4 live entry projection produced no runtime requests".to_string());
-        }
-        Ok(requested)
+        Self::read_undefined_symbol_set(&live)
     }
 
     fn cached_global_symbols<'a>(
@@ -1557,6 +1551,7 @@ int main(int argc, char** argv) {
             Some(build_bootstrap_mutex_runtime_capsule_archive(
                 &core,
                 &temp_dir.join("bootstrap_mutex_runtime_capsule"),
+                Some(&selected_runtime.as_ref().expect("selected native-all authority").0),
             )?)
         } else {
             None
@@ -2192,6 +2187,21 @@ int main(int argc, char** argv) {
                                 // private there, and SOSIX path checks must
                                 // use the Rust `[u8]` array representation.
                                 let owned = Self::read_defined_symbol_set(runtime_lib)?;
+                                // Force the actual native-all member before weak
+                                // fallback definitions arrive in the supplement.
+                                // Without these roots, weak copies can satisfy
+                                // references and prevent authoritative extraction.
+                                // Root every native-all-owned symbol the capsule
+                                // retains, not only the requested ones: the
+                                // C-only exports pull members that also carry
+                                // weakened rt_string_*/rt_array_* copies.
+                                let capsule = bootstrap_mutex_runtime.as_ref().expect("checked above");
+                                let mut retained: Vec<String> = Self::read_defined_symbol_set(capsule)?
+                                    .into_iter()
+                                    .filter(|symbol| owned.contains(symbol))
+                                    .collect();
+                                retained.sort();
+                                roots.extend(retained);
                                 for symbol in [
                                     "rt_fd_stat_snapshot_v1",
                                     "rt_array_bytes_validate",
@@ -2446,6 +2456,16 @@ int main(int argc, char** argv) {
                 }
                 if let Some(core_runtime) = host_gpu_core_runtime.as_ref() {
                     provider_paths.push(core_runtime.as_path());
+                }
+                // Cycle-170: the bootstrap mutex core-C capsule carries fresh
+                // C-runtime exports (the rt_secure_temp_dir split pair) that
+                // are absent from the authority archives. Without this scan
+                // the stub generator never sees them in `defined`, fabricates
+                // weak return-3 stubs, and the real definitions never bind
+                // (measured: set_parent returned 3 with the argument
+                // crossing intact).
+                if let Some(mutex_runtime) = bootstrap_mutex_runtime.as_ref() {
+                    provider_paths.push(mutex_runtime.as_path());
                 }
                 provider_paths.extend(extra_link_objects.iter().map(PathBuf::as_path));
                 let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o, &provider_paths, imports)?;
@@ -2812,8 +2832,8 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
                     let mut v = vec![];
                     #[cfg(target_os = "macos")]
                     for p in [
-                        "/opt/homebrew/opt/llvm@18/bin/clang",
                         "/opt/homebrew/opt/llvm/bin/clang",
+                        "/opt/homebrew/opt/llvm@18/bin/clang",
                         "/usr/local/opt/llvm/bin/clang",
                     ] {
                         if std::path::Path::new(p).exists() && !v.contains(&p.to_string()) {
@@ -3526,6 +3546,38 @@ mod linker_tests {
         assert!(undefined.contains("required_missing"));
         assert!(undefined.contains("weak_missing"));
         assert!(!undefined.contains("__module_init_fixture"));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[test]
+    fn defined_symbol_set_excludes_weak_undefined_references() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("weakref.c");
+        let object = dir.path().join("weakref.o");
+        std::fs::write(
+            &source,
+            "extern int weak_missing(void) __attribute__((weak));\n\
+             extern int weak_data_missing __attribute__((weak));\n\
+             int weak_defined(void) __attribute__((weak));\n\
+             int weak_defined(void) { return 1; }\n\
+             int strong_defined(void) { return weak_missing ? weak_missing() : weak_data_missing; }\n",
+        )
+        .unwrap();
+        assert!(std::process::Command::new("cc")
+            .arg("-c")
+            .arg(&source)
+            .arg("-o")
+            .arg(&object)
+            .status()
+            .unwrap()
+            .success());
+        let defined = NativeProjectBuilder::read_defined_symbol_set(&object).unwrap();
+        assert!(defined.contains("strong_defined"));
+        assert!(defined.contains("weak_defined"));
+        // A weak undefined reference (nm `w`/`v`) is not a definition: counting
+        // it made Stage4 request `__pthread_unwind_next` from the C capsule.
+        assert!(!defined.contains("weak_missing"));
+        assert!(!defined.contains("weak_data_missing"));
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]

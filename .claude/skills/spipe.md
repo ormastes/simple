@@ -2699,6 +2699,10 @@ reimplement an existing algorithm:
 - **Algorithms** (reuse, never reimplement) → `src/lib/common/{crypto,compress,
   hash,base64,base_encoding,huffman,rsa,signature,jwt,...}`; verify against
   RFC/NIST known-answer vectors (never self-comparison — see false-green guard).
+  For a codec, also check the ENCODER with an independent decoder (host
+  `gzip -dc`): a same-path compress→inflate round trip hid a stored-block LEN
+  truncated mod 65536 (2026-10-18). BLAKE3/XXH3/gzip map, vectors and seed
+  coverage recipe: `doc/00_llm_process/feature_expert/hash_compress/skill.md`.
 - **Custom-typed algorithm layers** (additive, wrap the primitive cores — never
   rewrite them): `src/lib/common/search/` (types + exact/prefilter/inverted
   index + BM25/TF-IDF + IVF/kNN ANN + roaring, fixed-point not f64),

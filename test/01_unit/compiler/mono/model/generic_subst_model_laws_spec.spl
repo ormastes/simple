@@ -8,10 +8,9 @@ the specialization key. This spec checks its algebraic laws on EVERY element
 of the finite universes of `generic_subst_universe.spl` (sizes are printed and
 asserted, so an empty sweep fails).
 
-This is bounded exhaustive checking, not a proof: nothing is claimed for a
-type outside the universe (deeper nesting, more variables, other
-constructors). The repository's proof lane is Lean 4, which this module does
-not use.
+This is bounded exhaustive checking plus explicit adversarial key examples,
+not a proof for arbitrary terms. The separate Lean proof lane covers model
+substitution laws; it does not discharge executable key-encoding correctness.
 
 | Law | Statement | Universe |
 |-----|-----------|----------|
@@ -295,14 +294,14 @@ describe "generic substitution model: specialization key":
             if mk_key("m", "f", [tt]) != mk_key("m", "f", [tt]):
                 bad = mt_render(tt)
         expect(bad).to_equal("")
-        expect(mk_key("m", "f", [mt_con("i64")])).to_equal("m::f$[i64]")
+        expect(mk_key("m", "f", [mt_con("i64")])).to_equal("m1:mf1:fl1:c3:i64")
 
-    it "K2 the rendering of a type is injective (equal text iff structurally equal)":
+    it "K2 the structural key separates types in the bounded universe":
         val types = mu_closed_types()
         var renders: [text] = []
         for t in types:
             val tt: MType = t
-            renders = renders.push(mt_render(tt))
+            renders = renders.push(mt_key_type(tt))
         var checked = 0
         var equal_pairs = 0
         var bad = ""
@@ -348,3 +347,31 @@ describe "generic substitution model: specialization key":
         # Owner module and template name are part of the identity.
         expect(mk_key("a", "f", [mt_con("i64")]) == mk_key("b", "f", [mt_con("i64")])).to_equal(false)
         expect(mk_key("a", "f", [mt_con("i64")]) == mk_key("a", "g", [mt_con("i64")])).to_equal(false)
+
+    it "K2 constant spellings cannot alias application structure":
+        val literal = mt_con("Box<i64>")
+        val applied = mt_app("Box", [mt_con("i64")])
+        expect(mt_is_closed(literal)).to_equal(true)
+        expect(mt_is_closed(applied)).to_equal(true)
+        expect(mt_render(literal)).to_equal(mt_render(applied))
+        expect(mt_struct_eq(literal, applied)).to_equal(false)
+        expect(mk_key("m", "f", [literal]) == mk_key("m", "f", [applied])).to_equal(false)
+
+    it "K2 argument boundaries and application arity are distinct":
+        val single = mt_app("Pair", [mt_con("i64,bool")])
+        val pair = mt_app("Pair", [mt_con("i64"), mt_con("bool")])
+        expect(mt_render(single)).to_equal(mt_render(pair))
+        expect(mt_key_type(single) == mt_key_type(pair)).to_equal(false)
+        expect(mt_key_types([mt_con("i64,bool")]) == mt_key_types([mt_con("i64"), mt_con("bool")])).to_equal(false)
+        expect(mt_key_type(mt_con("Zero<>")) == mt_key_type(mt_app("Zero", []))).to_equal(false)
+
+    it "K2 owner and function delimiters cannot alias another identity":
+        expect(mk_key("a::b", "c", []) == mk_key("a", "b::c", [])).to_equal(false)
+        expect(mk_key("a", "f$[i64]", []) == mk_key("a", "f", [mt_con("i64")])).to_equal(false)
+        expect(mk_key("", "a", []) == mk_key("a", "", [])).to_equal(false)
+
+    it "K2 tags preserve variable constant and application distinctions":
+        expect(mt_key_type(mt_var("T")) == mt_key_type(mt_con("'T"))).to_equal(false)
+        expect(mt_key_type(mt_con("")) == mt_key_type(mt_app("", []))).to_equal(false)
+        expect(mt_key_type(mt_con("c3:i64")) == mt_key_type(mt_con("i64"))).to_equal(false)
+        expect(mt_key_type(mt_app("名:<>", [mt_con("值,:$")])) == mt_key_type(mt_app("名", [mt_con("<>值,:$")]))).to_equal(false)

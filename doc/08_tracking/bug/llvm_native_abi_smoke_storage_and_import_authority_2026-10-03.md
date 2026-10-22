@@ -78,3 +78,14 @@ No additional compiler repair cycle was started in this slice. The raw owner
 remains explicitly unsafe and unqualified for the broader native smoke. Safe
 ORC provider/session lifetime and scalar invocation remain separate unfinished
 work. This diagnosis does not claim every backend/import mechanism was audited.
+
+## Implementation follow-up, 2026-10-03 resumed coding lane
+
+Imported declaration transport is now implemented for ordinary and flat/nonflat
+bootstrap lowering. The join uses the caller's defining module/physical name,
+the provider's actual extern declaration and structural signature agreement;
+provider SymbolIds are never copied into caller authority. The driver supplies
+existing typed provider modules to nonflat bootstrap explicitly. Separate-module
+selective/aliased and missing/mismatched/ordinary-provider specs are authored,
+including real bootstrap paths, but remain unexecuted. This closes the source
+transport gap pending validation; raw local output storage remains unresolved.

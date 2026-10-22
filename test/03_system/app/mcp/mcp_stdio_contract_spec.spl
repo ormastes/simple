@@ -41,10 +41,10 @@ skipped without approval.
 # tag: system
 
 use std.spec
-use app.io.mod.{process_run, file_write}
+use test.support.compiled_child_authority_v1.{test_compiled_child_run_v1, test_compiled_child_text_v1}
 
-fn simple_binary() -> text:
-    "src/compiler_rust/target/release/simple"
+# Qualification uses the actual receipt-owned native MCP image. The historical
+# seed diagnosis above is retained as context, not a current execution claim.
 
 fn mcp_line(body: text) -> text:
     body + "\n"
@@ -66,14 +66,14 @@ fn is_brace_balanced(json: text) -> bool:
     opens == closes and opens > 0
 
 # Spawn the real MCP stdio server, feed it `messages` over stdin, return
-# stdout. Every invocation is bounded by a shell-level `timeout` so a hang in
+# stdout. Every invocation is bounded by the native process owner so a hang in
 # the server under test cannot hang this spec.
 fn send_mcp(messages: text, timeout_seconds: text) -> text:
-    val tmp = "/tmp/mcp_stdio_contract_input_" + messages.len().to_string() + ".txt"
-    file_write(tmp, messages)
-    val cmd = "cat " + tmp + " | timeout " + timeout_seconds + " " + simple_binary() + " run src/app/mcp/main.spl 2>/dev/null"
-    val (stdout, _stderr, _exit_code) = process_run("/bin/sh", ["-c", cmd])
-    stdout
+    val timeout = timeout_seconds.to_int() ?? 0
+    val result = test_compiled_child_run_v1("mcp_server", ["--stdio"], messages.bytes(), timeout * 1000).unwrap()
+    assert_equal(result.exit_code, 0)
+    assert_equal(result.timed_out, false)
+    test_compiled_child_text_v1(result.stdout)
 
 describe "MCP stdio JSON-RPC contract":
     """

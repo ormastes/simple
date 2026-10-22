@@ -1,0 +1,57 @@
+# Local structural inspection through the same graph pipeline as other views.
+# Policy promotion and admission profiles are separate, unfinished adapters.
+use std.common.traceability.model.*
+use std.common.traceability.sdn_codec.{encode_trace_document}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.sdn.parser.{parse_with_spans_and_issues}
+use app.traceability.snapshot.git_provider.{GitSnapshotRequest, snapshot_git_inputs}
+use app.traceability.extract.snapshot_pipeline.{TraceSnapshotScope, TraceSnapshotBuild, build_snapshot_trace_graph}
+
+pub struct TraceSnapshotPreviewResult:
+    document: text
+    complete: bool
+
+pub struct TraceSnapshotSelection:
+    kind: text
+    selector: text
+
+pub fn parse_trace_snapshot_selection(value: text) -> Result<TraceSnapshotSelection, text>:
+    if value == "index":
+        return Ok(TraceSnapshotSelection(kind: "git_index", selector: "index"))
+    if value.starts_with("git:") and value.len() > 4:
+        return Ok(TraceSnapshotSelection(kind: "git_commit", selector: value[4:]))
+    Err("Use index or git:<revision> for snapshot selection")
+
+pub fn encode_trace_snapshot_preview(build: TraceSnapshotBuild) -> Result<text, text>:
+    val encoded = match encode_trace_document(TraceDocument(schema_name: "simple.trace.graph", schema_version: 1, graph: build.graph)):
+        case Ok(value): value
+        case Err(_): return Err("TRACE-SDN-SCHEMA: graph serialization rejected invalid records")
+    val parsed = parse_with_spans_and_issues(encoded)?
+    if parsed.2.len() > 0: return Err("TRACE-SDN-SCHEMA: graph codec roundtrip produced issues")
+    var roots: [SdnValue] = []
+    for root in build.scope.selected_roots: roots.push(SdnValue.String(root))
+    var scope: Dict<text, SdnValue> = {}
+    scope["selected_roots"] = SdnValue.Array(roots)
+    scope["closure_kind"] = SdnValue.String(build.scope.closure_kind)
+    scope["authority_id"] = SdnValue.String(build.scope.authority_id)
+    var fields: Dict<text, SdnValue> = {}
+    fields["schema"] = SdnValue.String("simple.trace.scoped-preview/v1")
+    fields["admission_eligible"] = SdnValue.Bool(false)
+    fields["qualification"] = SdnValue.String("unverified")
+    fields["scope"] = SdnValue.Dict(scope)
+    fields["document"] = parsed.0
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)))
+
+pub fn inspect_trace_snapshot(repository: text, snapshot_kind: text, selector: text, paths: [text], declarations: [text]) -> Result<TraceSnapshotPreviewResult, text>:
+    if selector == "" or paths.len() == 0:
+        return Err("TRACE-SNAPSHOT-INCOMPLETE: snapshot inspection requires explicit selected paths")
+    val snapshot = snapshot_git_inputs(GitSnapshotRequest(repository: repository, selector: selector, paths: paths,
+        max_entries: 40000, max_blob_bytes: 1048576, max_total_bytes: 2097152, snapshot_kind: snapshot_kind))?
+    val policy = TracePolicy(id: "policy:local-structural-preview", authorities: [], max_nodes: 40000, max_claims: 100000,
+        conventions: [TraceConventionRule(id: "app-unit-v1", source_root: "src/app/", target_root: "test/01_unit/app/",
+            source_suffix: ".spl", target_suffix: "_spec.spl", relation: TraceRelation.Targets, version: "1")])
+    val scope = TraceSnapshotScope(selected_roots: paths, authority_id: "", closure_kind: "selected_scope")
+    val build = build_snapshot_trace_graph(snapshot, policy, declarations, scope)?
+    val encoded = encode_trace_snapshot_preview(build)?
+    Ok(TraceSnapshotPreviewResult(document: encoded, complete: build.graph.complete))

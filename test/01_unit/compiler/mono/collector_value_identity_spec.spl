@@ -1,0 +1,56 @@
+# @req REQ-SSPEC-COMPILER
+# Actual parsed declarations, rekeyed with separately constructed SymbolIds.
+# Native execution is required to qualify the erased aggregate-key regression.
+# Port of f392d4f2499: G1 has no class-static template owner API, so that
+# independent feature is excluded here; generic impl owner coverage is retained.
+use std.spec.*
+use compiler.common.config.Logger
+use compiler.core.parser.parser_has_errors
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mono.monomorphize_integration.MonomorphizationPass
+use compiler.mono.mono_archive_types_v1.MonoTemplateBodyModeV1
+
+fn collector_identity_module(source: text) -> HirModule:
+    val parsed = parse_full_frontend(source, "collector_identity.spl", "collector_identity", Logger(level: 0))
+    expect(parser_has_errors()).to_equal(false)
+    var lowering = HirLowering.with_filename("collector_identity.spl")
+    lowering.use_explicit_semantic_policy()
+    var module = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    val functions: [HirFunction] = module.functions.values()
+    expect(functions.len()).to_be_greater_than(0)
+    var rekeyed: Dict<SymbolId, HirFunction> = {}
+    for function in functions:
+        val typed: HirFunction = function
+        rekeyed[SymbolId(id: typed.symbol.id)] = typed
+    expect(rekeyed.len()).to_equal(functions.len())
+    module.functions = rekeyed
+    module
+
+describe "generic collection retains values independently of aggregate key identity":
+    it "registers a real generic and ordinary function after independent rekeying":
+        val module = collector_identity_module("fn identity<T>(value: T) -> T:\n    value\nfn ordinary() -> i64:\n    9\n")
+        expect(module.functions.len()).to_equal(2)
+        for mode in [MonoTemplateBodyModeV1.Retained, MonoTemplateBodyModeV1.ArchiveRequests]:
+            var pass_ = MonomorphizationPass.create()
+            pass_.template_body_mode = mode
+            pass_.collect_generics(module, "collector_identity")
+            expect(pass_.stats.generic_functions_found).to_equal(1)
+            expect(pass_.template_recipes.has("identity")).to_equal(true)
+            expect(pass_.template_module["identity"]).to_equal("collector_identity")
+            expect(pass_.template_signature_v1("identity").type_params.len()).to_equal(1)
+            expect(pass_.generic_functions.has("identity")).to_equal(mode == MonoTemplateBodyModeV1.Retained)
+            expect(pass_.plain_fn_symbols.len()).to_equal(1)
+            expect(pass_.sym_names.len()).to_equal(2)
+
+    it "preserves owner binders for a real generic impl method":
+        val module = collector_identity_module("class Box<T>:\n    value: T\nimpl Box<T>:\n    fn read() -> T:\n        self.value\n")
+        expect(module.impls.len()).to_equal(1)
+        var pass_ = MonomorphizationPass.create()
+        pass_.collect_generics(module, "collector_identity")
+        expect(pass_.template_recipes.has("Box__read")).to_equal(true)
+        expect(pass_.template_signature_v1("Box__read").type_params.len()).to_equal(1)

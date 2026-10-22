@@ -1,0 +1,295 @@
+"""
+## Purpose and audience
+Purpose: Pin the inferred parameter effects of plan §3.3 (read-short,
+mutate-short, consume, share-explicit) and the rejected ambiguous cases, from
+real source lowered to HIR. Each effect has a positive and a negative case so
+an analysis that answers one effect for everything fails.
+Audience: compiler engineers maintaining ownership semantics.
+"""
+# @req: REQ-COMPILER-LINT-001
+# Contract: src/compiler/35.semantics/param_effects/effects.spl
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.semantics.param_effects.effects.{ParamEffectReport, ParamEffectDiag, param_effect_report_effect, param_effect_summary_encode_v1, param_effect_summary_decode_v1, param_effect_summary_domain_v1}
+use compiler.semantics.param_effects.infer.{infer_param_effects}
+
+val PRELUDE = "class Node:\n    v: i64\n\nclass Holder:\n    head: Node?\n    items: [Node]\n\nclass Box:\n    inner: Node\n\nclass Tree:\n    kid: Node\n\nclass Pair:\n    a: Node\n    b: Node\n\nclass Hook:\n    cb: fn() -> i64\n\nstruct Pt:\n    x: i64\n\n"
+
+fn _report(body: text) -> ParamEffectReport:
+    val src = PRELUDE + body
+    var parsed = parse_full_frontend(src, "testdata/pe.spl", "pe", Logger(level: 0))
+    parsed.nogc_strict = true
+    var hir_lowering = HirLowering.with_filename("testdata/pe.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    infer_param_effects(hir, {}, {})
+
+fn _report_imported(body: text, imported: {text: [text]}) -> ParamEffectReport:
+    val src = PRELUDE + body
+    var parsed = parse_full_frontend(src, "testdata/pe.spl", "pe", Logger(level: 0))
+    parsed.nogc_strict = true
+    var hir_lowering = HirLowering.with_filename("testdata/pe.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    infer_param_effects(hir, {}, imported)
+
+fn _sigil_report(body: text) -> ParamEffectReport:
+    var parsed = parse_full_frontend(PRELUDE + body, "testdata/strict_pe.spl", "strict_pe", Logger(level: 0))
+    parsed.nogc_strict = true
+    var lowering = HirLowering.with_filename("testdata/strict_pe.spl")
+    val hir = lowering.lower_module(parsed)
+    infer_param_effects(hir, {}, {})
+
+fn _codes(r: ParamEffectReport) -> [text]:
+    var out: [text] = []
+    for d in r.diags:
+        out.push(d.code)
+    out
+
+fn _count(r: ParamEffectReport, code: text) -> i64:
+    var n = 0
+    for d in r.diags:
+        if d.code == code: n = n + 1
+    n
+
+fn _has_diag(r: ParamEffectReport, code: text, function: text, param: text) -> bool:
+    for diagnostic in r.diags:
+        if diagnostic.code == code and diagnostic.function == function and diagnostic.param == param:
+            return true
+    false
+
+describe "read-short and mutate-short":
+    it "reads a class parameter briefly":
+        val r = _report("fn rd(n: Node) -> i64:\n    n.v\n")
+        expect(param_effect_report_effect(r, "rd", "n")).to_equal("read-short")
+
+    it "infers mutate-short from a field write and a me-method receiver":
+        val r = _report("fn wr(n: Node):\n    n.v = 1\n\nimpl Node:\n    me bump():\n        self.v = self.v + 1\n")
+        expect(param_effect_report_effect(r, "wr", "n")).to_equal("mutate-short")
+        expect(param_effect_report_effect(r, "bump", "self")).to_equal("mutate-short")
+
+    it "never consumes a scalar parameter, even when returned":
+        val r = _report("fn pv(p: i64, xs: [i64]) -> i64:\n    p\n")
+        expect(param_effect_report_effect(r, "pv", "p")).to_equal("read-short")
+        expect(param_effect_report_effect(r, "pv", "xs")).to_equal("read-short")
+
+describe "explicit owning transfers":
+    it "keeps declared consume through a field store, a push and a constructor":
+        val r = _report("fn st(h: Holder, n: &Node):\n    h.head = Some(n)\n\nfn ps(xs: [Node], n: &Node):\n    xs.push(n)\n\nfn wrap(n: &Node) -> Box:\n    Box(inner: n)\n")
+        expect(param_effect_report_effect(r, "st", "n")).to_equal("consume")
+        expect(param_effect_report_effect(r, "st", "h")).to_equal("mutate-short")
+        expect(param_effect_report_effect(r, "ps", "n")).to_equal("consume")
+        expect(param_effect_report_effect(r, "ps", "xs")).to_equal("mutate-short")
+        expect(param_effect_report_effect(r, "wrap", "n")).to_equal("consume")
+        expect(r.diags.len()).to_equal(0)
+
+    it "returns an explicit owner and rejects returning a short receiver":
+        val r = _report("fn pick(n: &Node) -> &Node:\n    n\n\nimpl Holder:\n    me with_head(n: &Node) -> Holder:\n        self.head = Some(n)\n        self\n")
+        expect(param_effect_report_effect(r, "pick", "n")).to_equal("consume")
+        expect(param_effect_report_effect(r, "with_head", "self")).to_equal("ambiguous")
+        expect(_has_diag(r, "NOGC-BOR-001", "with_head", "self")).to_equal(true)
+
+    it "propagates consume through an in-module call (fixpoint)":
+        val r = _report("fn ps(xs: [Node], n: &Node):\n    xs.push(n)\n\nfn fwd(xs: [Node], n: &Node):\n    ps(xs, n)\n")
+        expect(param_effect_report_effect(r, "fwd", "n")).to_equal("consume")
+        expect(r.diags.len()).to_equal(0)
+
+    it "propagates consume through a cast-wrapped argument":
+        val r = _report("fn ps(xs: [Node], n: &Node):\n    xs.push(n)\n\nfn fwdc(xs: [Node], n: &Node):\n    ps(xs, n as &Node)\n")
+        expect(param_effect_report_effect(r, "fwdc", "n")).to_equal("consume")
+        expect(r.diags.len()).to_equal(0)
+
+    it "uses an imported summary for a method defined outside the module":
+        val r = _report_imported("fn useimp(h: Holder, n: &Node):\n    h.adopt(n)\n", {"adopt": ["mutate-short", "consume"]})
+        expect(param_effect_report_effect(r, "useimp", "n")).to_equal("consume")
+        val r2 = _report_imported("fn useimp(h: Holder, n: Node):\n    h.adopt(n)\n", {"adopt": ["mutate-short", "read-short"]})
+        expect(param_effect_report_effect(r2, "useimp", "n")).to_equal("read-short")
+
+    it "accepts a consume on a returning branch without ambiguity":
+        val r = _report("fn maybe(n: &Node, other: &Node, f: bool) -> &Node:\n    if f:\n        return n\n    other\n")
+        expect(param_effect_report_effect(r, "maybe", "n")).to_equal("consume")
+        expect(r.diags.len()).to_equal(0)
+
+    it "consumes a parameter captured by a spawned task":
+        val r = _report("extern fn spawn(f: fn())\n\nfn run(n: &Node):\n    spawn(\\: note(n.v))\n")
+        expect(param_effect_report_effect(r, "run", "n")).to_equal("consume")
+        expect(_has_diag(r, "NOGC-BOR-001", "run", "n")).to_equal(false)
+
+    it "consumes a parameter held across await or yield":
+        # `async fn` itself does not lower on the seed yet; a plain fn body
+        # with `await` exercises the same suspension rule.
+        val r = _report("fn aw(n: &Node) -> i64:\n    val r = await load(1)\n    r + n.v\n\nfn gen(n: &Node):\n    yield 1\n    note(n.v)\n")
+        expect(param_effect_report_effect(r, "aw", "n")).to_equal("consume")
+        expect(param_effect_report_effect(r, "gen", "n")).to_equal("consume")
+        expect(_has_diag(r, "NOGC-BOR-001", "aw", "n")).to_equal(false)
+        expect(_has_diag(r, "NOGC-BOR-001", "gen", "n")).to_equal(false)
+
+    it "does not consume a parameter only used before the suspension":
+        val r = _report("fn aw2(n: Node) -> i64:\n    val before = n.v\n    val r = await load(before)\n    r + before\n")
+        expect(param_effect_report_effect(r, "aw2", "n")).to_equal("read-short")
+
+describe "rejected ambiguous contracts":
+    it "rejects a use after an unconditional consume (NOGC-AMB-001)":
+        val r = _report("fn bad(h: Holder, n: &Node) -> i64:\n    h.head = Some(n)\n    n.v\n")
+        expect(param_effect_report_effect(r, "bad", "n")).to_equal("consume")
+        expect(_count(r, "NOGC-AMB-001")).to_equal(1)
+
+    it "rejects a use after a conditional consume (NOGC-AMB-001)":
+        val r = _report("fn bad2(h: Holder, n: &Node, f: bool) -> i64:\n    if f:\n        h.head = Some(n)\n    n.v\n")
+        expect(_count(r, "NOGC-AMB-001")).to_equal(1)
+
+    it "rejects a consume inside a loop body (NOGC-AMB-002)":
+        val r = _report("fn lp(xs: [Node], n: &Node):\n    for i in 0..3:\n        xs.push(n)\n")
+        expect(_count(r, "NOGC-AMB-002")).to_equal(1)
+
+    it "rejects capture by a callback with no non-escape contract (NOGC-AMB-003)":
+        val r = _report("fn cb(n: Node):\n    register(\\: n.v)\n")
+        expect(_count(r, "NOGC-AMB-003")).to_equal(1)
+        val ok = _report("fn cb2(n: Node, xs: [i64]) -> [i64]:\n    xs.map(\\x: x + n.v)\n")
+        expect(param_effect_report_effect(ok, "cb2", "n")).to_equal("ambiguous")
+        expect(_has_diag(ok, "NOGC-AMB-003", "cb2", "n")).to_equal(true)
+
+    it "rejects an extern class parameter but not an extern scalar (NOGC-AMB-004)":
+        val r = _report("extern fn ext_take(n: Node) -> i64\nextern fn ext_num(x: i64) -> i64\n")
+        expect(param_effect_report_effect(r, "ext_take", "n")).to_equal("foreign-unknown")
+        expect(param_effect_report_effect(r, "ext_num", "x")).to_equal("read-short")
+        expect(_count(r, "NOGC-AMB-004")).to_equal(1)
+
+describe "caller side (NOGC-OWN-002)":
+    it "flags a class local used after it was stored or moved into a consuming parameter":
+        val r = _report("fn ps(xs: [Node], n: &Node):\n    xs.push(n)\n\nfn caller(h: Holder, xs: [Node]) -> i64:\n    val a = Node(v: 1)\n    h.head = Some(a)\n    val b = Node(v: 2)\n    ps(xs, b)\n    a.v + b.v\n")
+        expect(_count(r, "NOGC-OWN-002")).to_equal(2)
+
+    it "does not flag a local whose transfer is its last use":
+        val r = _report("fn ps(xs: [Node], n: &Node):\n    xs.push(n)\n\nfn caller2(xs: [Node]) -> i64:\n    val b = Node(v: 2)\n    val keep = b.v\n    ps(xs, b)\n    keep\n")
+        expect(_count(r, "NOGC-OWN-002")).to_equal(0)
+
+describe "short receiver builder rejection":
+    it "rejects a builder returning a short receiver before authorizing ownership":
+        val r = _report("impl Holder:\n    me with_head(n: &Node) -> Holder:\n        self.head = Some(n)\n        self\n")
+        expect(param_effect_report_effect(r, "with_head", "self")).to_equal("ambiguous")
+        expect(param_effect_report_effect(r, "with_head", "n")).to_equal("consume")
+        expect(_has_diag(r, "NOGC-BOR-001", "with_head", "self")).to_equal(true)
+
+    it "accepts an explicit owning builder function and its rebound result":
+        val r = _report("fn with_head(h: &Holder, n: &Node) -> &Holder:\n    h.head = Some(n)\n    h\n\nfn use_builder(h: &Holder, n: &Node) -> &Holder:\n    val h2 = with_head(h, n)\n    h2\n")
+        expect(param_effect_report_effect(r, "with_head", "h")).to_equal("consume")
+        expect(param_effect_report_effect(r, "use_builder", "h")).to_equal("consume")
+        expect(r.diags.len()).to_equal(0)
+
+describe "values flowing out indirectly (review FIX 1-3)":
+    it "consumes a parameter returned through an if-expression or a stored lambda":
+        val r = _report("fn ift(a: &Node, other: &Node, c: bool) -> &Node:\n    val r = if c: a else: other\n    r\n\nfn hook(h: Hook, n: &Node):\n    h.cb = \\: n.v\n")
+        expect(param_effect_report_effect(r, "ift", "a")).to_equal("consume")
+        expect(param_effect_report_effect(r, "hook", "n")).to_equal("consume")
+
+    it "consumes a parameter whose class field is moved out, but rejects it for a receiver getter (NOGC-AMB-006)":
+        val r = _report("fn kidp(t: &Tree) -> Node:\n    t.kid\n\nimpl Tree:\n    fn kid_of() -> Node:\n        self.kid\n")
+        expect(param_effect_report_effect(r, "kidp", "t")).to_equal("consume")
+        expect(param_effect_report_effect(r, "kid_of", "self")).to_equal("ambiguous")
+        expect(_count(r, "NOGC-AMB-006")).to_equal(1)
+
+    it "treats a store into a module global as consume, not an alias":
+        val r = _report("var GN = Node(v: 0)\n\nfn setg(n: &Node):\n    GN = n\n")
+        expect(param_effect_report_effect(r, "setg", "n")).to_equal("consume")
+
+    it "rejects a double consume inside one expression (NOGC-AMB-001)":
+        val r = _report("fn dbl(n: &Node) -> Pair:\n    Pair(a: n, b: n)\n")
+        expect(_count(r, "NOGC-AMB-001")).to_equal(1)
+
+    it "rejects storing a plain short parameter (NOGC-BOR-001)":
+        val r = _report("fn keepref(h: Holder, n: Node):\n    h.head = Some(n)\n")
+        expect(param_effect_report_effect(r, "keepref", "n")).to_equal("ambiguous")
+        expect(_has_diag(r, "NOGC-BOR-001", "keepref", "n")).to_equal(true)
+
+describe "strict ownership-sigil effects":
+    it "does not infer a short borrow through missing or unsafe callee metadata":
+        val summaries: [{text: [text]}] = [{}, {"retain": ["foreign-unknown"]}, {"retain": ["read-shrot"]}]
+        for summary in summaries:
+            val r = _report_imported("fn fwd(n: Node):\n    retain(n)\n", summary)
+            expect(param_effect_report_effect(r, "fwd", "n")).to_equal("ambiguous")
+            expect(_count(r, "NOGC-AMB-004")).to_equal(1)
+
+    it "checks receiver effects as well as ordinary argument effects":
+        val summaries: [{text: [text]}] = [{}, {"retain": ["foreign-unknown"]}, {"retain": ["read-shrot"]}, {"retain": ["ambiguous"]}]
+        for summary in summaries:
+            val r = _report_imported("fn fwd(n: Node):\n    n.retain()\n", summary)
+            expect(param_effect_report_effect(r, "fwd", "n")).to_equal("ambiguous")
+        val safe = _report_imported("fn fwd(n: Node):\n    n.inspect()\n", {"inspect": ["read-short"]})
+        expect(param_effect_report_effect(safe, "fwd", "n")).to_equal("read-short")
+
+    it "does not turn a borrowed argument into explicit shared ownership":
+        val r = _report_imported("fn fwd(n: Node):\n    retain(n)\n", {"retain": ["share-explicit"]})
+        expect(param_effect_report_effect(r, "fwd", "n")).to_equal("ambiguous")
+
+    it "recognizes unique owners and explicit shared owners":
+        val r = _sigil_report("fn own(n: &Node) -> i64:\n    n.v\nfn shared(n: *Node) -> i64:\n    0\nfn weak(n: -Node) -> i64:\n    0\n")
+        expect(param_effect_report_effect(r, "own", "n")).to_equal("consume")
+        expect(param_effect_report_effect(r, "shared", "n")).to_equal("share-explicit")
+        expect(param_effect_report_effect(r, "weak", "n")).to_equal("share-explicit")
+
+    it "does not publish returned weak handles as short borrows":
+        val r = _sigil_report("fn retain_weak(n: -Node) -> -Node:\n    n\n")
+        expect(param_effect_report_effect(r, "retain_weak", "n")).to_equal("share-explicit")
+
+    it "seeds forward-call contracts before running the fixpoint":
+        val r = _report("fn forward(n: Node) -> i64:\n    later(n)\nfn later(n: Node) -> i64:\n    n.v\n")
+        expect(param_effect_report_effect(r, "forward", "n")).to_equal("read-short")
+        expect(r.diags.len()).to_equal(0)
+
+    it "does not read a positional contract for a named owner argument":
+        val r = _report_imported("fn fwd(n: Node):\n    retain(other: 1, item: n)\n", {"retain": ["consume", "read-short"]})
+        expect(param_effect_report_effect(r, "fwd", "n")).to_equal("ambiguous")
+
+    it "does not infer a non-retaining foreign contract from a pointer kind":
+        val r = _sigil_report("extern fn ext_unique(n: &Node)\nextern fn ext_shared(n: *Node)\nextern fn ext_weak(n: -Node)\nextern fn ext_borrow(n: &mut Node)\nextern fn ext_scalar(n: i64)\n")
+        for name in ["ext_unique", "ext_shared", "ext_weak", "ext_borrow"]:
+            expect(param_effect_report_effect(r, name, "n")).to_equal("foreign-unknown")
+        expect(param_effect_report_effect(r, "ext_scalar", "n")).to_equal("read-short")
+        expect(_count(r, "NOGC-AMB-004")).to_equal(4)
+
+describe "short parameters never acquire ownership from their bodies":
+    it "rejects a direct short-parameter return":
+        val r = _report("fn escape(n: Node) -> Node:\n    n\n")
+        expect(param_effect_report_effect(r, "escape", "n")).to_equal("ambiguous")
+        expect(_has_diag(r, "NOGC-BOR-001", "escape", "n")).to_equal(true)
+
+    it "rejects a short argument passed to a declared consuming function":
+        val r = _report("fn take(n: &Node):\n    pass\n\nfn forward(n: Node):\n    take(n)\n")
+        expect(param_effect_report_effect(r, "take", "n")).to_equal("consume")
+        expect(param_effect_report_effect(r, "forward", "n")).to_equal("ambiguous")
+        expect(_has_diag(r, "NOGC-BOR-001", "forward", "n")).to_equal(true)
+
+    it "rejects retaining a short parameter in a stored closure":
+        val r = _report("fn hook_short(h: Hook, n: Node):\n    h.cb = \\: n.v\n")
+        expect(param_effect_report_effect(r, "hook_short", "n")).to_equal("ambiguous")
+        expect(_has_diag(r, "NOGC-BOR-001", "hook_short", "n")).to_equal(true)
+
+    it "rejects a short parameter captured by a spawned task":
+        val r = _report("extern fn spawn(f: fn())\n\nfn run_short(n: Node):\n    spawn(\\: note(n.v))\n")
+        expect(param_effect_report_effect(r, "run_short", "n")).to_equal("ambiguous")
+        expect(_has_diag(r, "NOGC-BOR-001", "run_short", "n")).to_equal(true)
+
+    it "rejects short parameters kept across await or yield":
+        val r = _report("fn aw_short(n: Node) -> i64:\n    val r = await load(1)\n    r + n.v\n\nfn gen_short(n: Node):\n    yield 1\n    note(n.v)\n")
+        expect(param_effect_report_effect(r, "aw_short", "n")).to_equal("ambiguous")
+        expect(param_effect_report_effect(r, "gen_short", "n")).to_equal("ambiguous")
+        expect(_has_diag(r, "NOGC-BOR-001", "aw_short", "n")).to_equal(true)
+        expect(_has_diag(r, "NOGC-BOR-001", "gen_short", "n")).to_equal(true)
+
+describe "summary codec":
+    it "rejects invalid effects, duplicate contracts and malformed rows atomically":
+        val header = param_effect_summary_domain_v1() + "\n"
+        for bad in ["f\tread-shrot\n", "f\tconsume\nf\tread-short\n", "f\tconsume\nbroken\n", "f\tconsume,\n", "f\tconsume\n\ng\tread-short\n", "f\tconsume\tg\n"]:
+            expect(param_effect_summary_decode_v1(header + bad).len()).to_equal(0)
+
+    it "round-trips and fails closed on a foreign header":
+        val r = _report("fn ps(xs: [Node], n: &Node):\n    xs.push(n)\n")
+        val enc = param_effect_summary_encode_v1(r)
+        expect(enc.starts_with(param_effect_summary_domain_v1())).to_equal(true)
+        val dec = param_effect_summary_decode_v1(enc)
+        expect(dec["ps"]).to_equal(["mutate-short", "consume"])
+        val bad = param_effect_summary_decode_v1("simple/param-effects/v0\nps\tconsume\n")
+        expect(bad.len()).to_equal(0)

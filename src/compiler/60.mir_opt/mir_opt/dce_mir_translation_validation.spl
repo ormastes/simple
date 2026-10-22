@@ -1,0 +1,194 @@
+# C7 source-backed observation for the closed, non-overflowing i64 fragment.
+# Covered is only a structural translation-validation result, never proof
+# checker authority, a certificate, or a claim about an executed runtime.
+use std.common.crypto.sha256.{sha256_text}
+use compiler.mir.mir_types.{MirTypeKind, MirConstValue, LocalKind}
+use compiler.mir.mir_instruction_graph.{MirFunction}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_instruction_support.{MirOperandKind, MirTerminator, MirBinOp}
+use compiler.mir_opt.dce_translation_validation.{DceTvInstructionV1, DceTvProgramV1, dce_tv_validate}
+
+enum DceMirCoverageV1:
+    Covered
+    NotCovered
+    Rejected
+
+struct DceMirSnapshotV1:
+    program: DceTvProgramV1
+    return_local: i64
+    function_identity: text
+    artifact_hash: text
+
+struct DceMirExtractionV1:
+    snapshot: DceMirSnapshotV1?
+    diagnostic: text
+
+struct DceMirObservationV1:
+    coverage: DceMirCoverageV1
+    before_hash: text
+    after_hash: text
+    diagnostic: text
+
+struct DceMirCheckedRunV1:
+    function: MirFunction
+    observation: DceMirObservationV1
+
+fn _dce_mir_refuse_v1(code: text, detail: text) -> DceMirExtractionV1:
+    DceMirExtractionV1(nil, "FV2-E-DCE-MIR-{code}: {detail}")
+
+fn _dce_mir_frame_v1(value: text) -> text:
+    value.len().to_string() + ":" + value
+
+fn _dce_mir_snapshot_hash_v1(program: DceTvProgramV1, return_local: i64, identity: text) -> text:
+    # Include every public semantic field, including the fixed source mapping.
+    # This detects stale evidence; callers can recompute a hash, so it grants
+    # no authentication or independent proof/checker authority.
+    val artifact = "DceMirSnapshotV1" + _dce_mir_frame_v1(identity) +
+        _dce_mir_frame_v1(return_local.to_string()) + _dce_mir_frame_v1(program.canonical_text())
+    sha256_text(artifact)
+
+fn _dce_mir_register_v1(local: i64, return_local: i64) -> i64:
+    # One involutive bijection, fixed by the source, maps its result to the
+    # theorem's register zero. No addition or renumbering can overflow.
+    if local == return_local: 0
+    elif local == 0: return_local
+    else: local
+
+fn _dce_mir_extract_v1(function: MirFunction, source_return: i64) -> DceMirExtractionV1:
+    val signature = function.signature
+    if (not signature.params_known or not signature.declared_params_known or
+            signature.params.len() != 0 or signature.declared_params.len() != 0 or
+            signature.is_variadic or signature.return_type.kind != MirTypeKind.I64):
+        return _dce_mir_refuse_v1("SIGNATURE", "both authoritative parameter lists must be empty and return exact i64")
+    if (function.symbol.id < 0 or function.is_generic_template or function.generic_params.len() != 0 or
+            function.type_bindings.len() != 0 or function.is_kernel or function.has_vhdl_metadata or
+            function.has_driver_manifest_attr or function.is_naked):
+        return _dce_mir_refuse_v1("FUNCTION", "only a closed ordinary function is covered")
+    if function.blocks.len() != 1:
+        return _dce_mir_refuse_v1("CFG", "exactly one entry block is required")
+    val block = function.blocks[0]
+    if block.id.id < 0 or block.id.id != function.entry_block.id:
+        return _dce_mir_refuse_v1("CFG", "the sole block must be the entry")
+    var return_local = -1
+    match block.terminator:
+        case MirTerminator.Ret(value):
+            if val operand = value:
+                match operand.kind:
+                    case MirOperandKind.Copy(local): return_local = local.id
+                    case _: ()
+        case _: ()
+    if return_local < 0:
+        return _dce_mir_refuse_v1("CFG", "return must copy a defined i64 local")
+    if source_return >= 0 and return_local != source_return:
+        return _dce_mir_refuse_v1("RETURN", "target changed the source return local")
+
+    var declared: Dict<i64, bool> = {}
+    var declarations: [text] = []
+    for local in function.locals:
+        if local.id.id < 0 or declared.has(local.id.id) or local.is_ghost or local.type_.kind != MirTypeKind.I64:
+            return _dce_mir_refuse_v1("LOCAL", "locals must have unique nonnegative IDs and exact non-ghost i64 types")
+        var kind_name = ""
+        match local.kind:
+            case LocalKind.Var: kind_name = "var"
+            case LocalKind.Temp: kind_name = "temp"
+            case LocalKind.Return: kind_name = "return"
+            case _: return _dce_mir_refuse_v1("LOCAL", "argument or unknown local kind is not closed")
+        declared[local.id.id] = true
+        declarations.push("{local.id.id}:{kind_name}:i64")
+    if not declared.has(return_local):
+        return _dce_mir_refuse_v1("SSA", "return local is not declared")
+
+    # Fresh scalar-only records, never an alias to MirFunction.blocks/locals.
+    var instructions: [DceTvInstructionV1] = []
+    var values: Dict<i64, i64> = {}
+    val maximum: i64 = 9223372036854775807
+    val minimum: i64 = -9223372036854775807 - 1
+    for instruction in block.instructions:
+        var destination = -1
+        var value_bits: i64 = 0
+        var projected: DceTvInstructionV1? = nil
+        match instruction.kind:
+            case MirInstKind.Const(dest, value, type_):
+                destination = dest.id
+                if type_.kind != MirTypeKind.I64:
+                    return _dce_mir_refuse_v1("INSTRUCTION", "constant must have exact i64 type")
+                match value:
+                    case MirConstValue.Int(bits): value_bits = bits
+                    case _: return _dce_mir_refuse_v1("INSTRUCTION", "only integer constants are covered")
+                projected = Some(DceTvInstructionV1.Const(_dce_mir_register_v1(destination, return_local), value_bits))
+            case MirInstKind.Copy(dest, from_local):
+                destination = dest.id
+                if not values.has(from_local.id):
+                    return _dce_mir_refuse_v1("SSA", "copy reads an undefined local")
+                value_bits = values[from_local.id]
+                projected = Some(DceTvInstructionV1.Copy(_dce_mir_register_v1(destination, return_local),
+                    _dce_mir_register_v1(from_local.id, return_local)))
+            case MirInstKind.BinOp(dest, op, left, right):
+                if op != MirBinOp.Add:
+                    return _dce_mir_refuse_v1("INSTRUCTION", "only ordinary Add is covered")
+                destination = dest.id
+                var left_id = -1
+                var right_id = -1
+                match left.kind:
+                    case MirOperandKind.Copy(local): left_id = local.id
+                    case _: ()
+                match right.kind:
+                    case MirOperandKind.Copy(local): right_id = local.id
+                    case _: ()
+                if left_id < 0 or right_id < 0 or not values.has(left_id) or not values.has(right_id):
+                    return _dce_mir_refuse_v1("SSA", "Add requires two previously defined Copy operands")
+                val lhs = values[left_id]
+                val rhs = values[right_id]
+                # Both thresholds are representable in their respective sign
+                # branches, including minimum - minimum == 0. Never negate rhs.
+                if rhs > 0:
+                    if lhs > maximum - rhs:
+                        return _dce_mir_refuse_v1("OVERFLOW", "signed Add exceeds i64 maximum")
+                elif rhs < 0:
+                    if lhs < minimum - rhs:
+                        return _dce_mir_refuse_v1("OVERFLOW", "signed Add falls below i64 minimum")
+                value_bits = lhs + rhs
+                projected = Some(DceTvInstructionV1.Add(_dce_mir_register_v1(destination, return_local),
+                    _dce_mir_register_v1(left_id, return_local), _dce_mir_register_v1(right_id, return_local)))
+            case _:
+                return _dce_mir_refuse_v1("INSTRUCTION", "effectful or unsupported instruction is not covered")
+        if destination < 0 or not declared.has(destination) or values.has(destination):
+            return _dce_mir_refuse_v1("SSA", "destination must be declared and assigned exactly once")
+        if val accepted_instruction = projected:
+            instructions.push(accepted_instruction)
+        else:
+            return _dce_mir_refuse_v1("INSTRUCTION", "missing instruction projection")
+        values[destination] = value_bits
+    if not values.has(return_local):
+        return _dce_mir_refuse_v1("SSA", "return local has no definition")
+    val identity = "closed-i64-v1|" + _dce_mir_frame_v1(function.symbol.id.to_string()) +
+        _dce_mir_frame_v1(function.name) + _dce_mir_frame_v1(function.entry_block.id.to_string()) +
+        _dce_mir_frame_v1(declarations.join(";")) + _dce_mir_frame_v1(return_local.to_string())
+    val program = DceTvProgramV1(instructions, 0)
+    val artifact_hash = _dce_mir_snapshot_hash_v1(program, return_local, identity)
+    DceMirExtractionV1(Some(DceMirSnapshotV1(program, return_local, identity, artifact_hash)), "")
+
+fn dce_mir_extract_v1(function: MirFunction) -> DceMirExtractionV1:
+    _dce_mir_extract_v1(function, -1)
+
+fn dce_mir_validate_after_v1(before: DceMirSnapshotV1, after: MirFunction) -> DceMirObservationV1:
+    # A fresh capture is still a public mutable record. Check its current
+    # content and source anchor before looking at any target artifact.
+    if (before.return_local < 0 or before.program.result_register != 0 or
+            before.function_identity == "" or before.program.diagnostic() != ""):
+        return DceMirObservationV1(DceMirCoverageV1.Rejected, "", "",
+            "FV2-E-DCE-MIR-SNAPSHOT: source snapshot content or return mapping does not match its hash")
+    val current_hash = _dce_mir_snapshot_hash_v1(before.program, before.return_local, before.function_identity)
+    if before.artifact_hash != current_hash:
+        return DceMirObservationV1(DceMirCoverageV1.Rejected, "", "",
+            "FV2-E-DCE-MIR-SNAPSHOT: source snapshot content or return mapping does not match its hash")
+    val extraction = _dce_mir_extract_v1(after, before.return_local)
+    if val target = extraction.snapshot:
+        if before.function_identity != target.function_identity:
+            return DceMirObservationV1(DceMirCoverageV1.Rejected, before.artifact_hash, target.artifact_hash,
+                "FV2-E-DCE-MIR-IDENTITY: target changed function or local declarations")
+        if not dce_tv_validate(before.program, target.program):
+            return DceMirObservationV1(DceMirCoverageV1.Rejected, before.artifact_hash, target.artifact_hash,
+                "FV2-E-DCE-MIR-REFINEMENT: target is not the exact one-pass DCE refinement")
+        return DceMirObservationV1(DceMirCoverageV1.Covered, before.artifact_hash, target.artifact_hash, "")
+    DceMirObservationV1(DceMirCoverageV1.Rejected, before.artifact_hash, "", extraction.diagnostic)

@@ -83,7 +83,9 @@ sub names {
 }
 sub source_path {
     my ($path) = @_;
-    $path =~ m{\A(?:src|test)/[A-Za-z0-9_./-]+\z} &&
+    # Braces are literal filename bytes, never a shell expansion or glob.
+    # Keep the restricted src/test alphabet and exact component rejection.
+    $path =~ m{\A(?:src|test)/[A-Za-z0-9_./\{\}-]+\z} &&
         $path !~ m{(?:\A|/)(?:\.{1,2})?(?:/|\z)}
         or die "unsafe SCV source identity\n";
 }

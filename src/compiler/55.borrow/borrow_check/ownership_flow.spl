@@ -1,0 +1,228 @@
+"""Forward maybe-moved facts over the existing MIR CFG.
+
+Record once during typed MIR analysis. Solve before reporting reads: a source
+walk is not an execution path, and loop bodies must observe their backedges.
+Place identities and overlap rules belong to borrow_graph, not this solver.
+"""
+
+use compiler.borrow.borrow_check.borrow_graph.{Place, PlaceElem, place_equals, place_base_equals, place_elem_equals, place_conflicts_with, place_to_text}
+
+pub enum OwnershipEvent:
+    Read(place: Place)
+    Move(place: Place)
+    Revive(place: Place)
+
+pub struct OwnershipFlowError:
+    point: i64
+    message: text
+
+pub fn ownership_contains(places: [Place], candidate: Place) -> bool:
+    for place in places:
+        if place_equals(place, candidate):
+            return true
+    false
+
+pub fn ownership_write_covers(write: Place, moved: Place) -> bool:
+    """A write revives only a definitely covered place, never an ancestor.
+
+    Symbolic index equality is insufficient: the index local may have changed
+    since the move. A whole-local write still revives all of its descendants.
+    """
+    if not place_base_equals(write.base, moved.base):
+        return false
+    if write.projections.len() > moved.projections.len():
+        return false
+    var i = 0
+    while i < write.projections.len():
+        match write.projections[i]:
+            case PlaceElem.Index(_):
+                return false
+            case _:
+                pass
+        if not place_elem_equals(write.projections[i], moved.projections[i]):
+            return false
+        i = i + 1
+    true
+
+pub fn ownership_event_transfer(state: [Place], event: OwnershipEvent) -> [Place]:
+    match event:
+        case OwnershipEvent.Move(operand):
+            # The admitted r17 producer loses this payload's type at generic
+            # array.push (recorded native payload-boxing defect, 2026-10-20).
+            val place: Place = operand
+            if not ownership_contains(state, place):
+                return ownership_append(state, place)
+        case OwnershipEvent.Revive(operand):
+            val place: Place = operand
+            var kept: [Place] = []
+            for moved in state:
+                if not ownership_write_covers(place, moved):
+                    kept = kept.push(moved)
+            return kept
+        case OwnershipEvent.Read(_):
+            pass
+    state
+
+pub fn ownership_append(state: [Place], place: Place) -> [Place]:
+    """Keep the generic insertion argument's declared Place type explicit.
+
+    The admitted producer misboxes direct insertion from a pattern local,
+    including a locally annotated alias. A typed parameter is the existing
+    BorrowGraph recorder boundary used for inserting Places into arrays.
+    """
+    # Native rt_array_push mutates its handle. A transferred state must not
+    # mutate the saved block input (or a state reused by another successor).
+    var copied: [Place] = []
+    for item in state:
+        copied = copied.push(item)
+    copied.push(place)
+
+pub class OwnershipFlow:
+    events: Dict<i64, [OwnershipEvent]>
+
+    static fn create() -> OwnershipFlow:
+        OwnershipFlow(events: {})
+
+    me record(point: i64, event: OwnershipEvent):
+        var at_point: [OwnershipEvent] = []
+        if self.events.contains_key(point):
+            at_point = self.events[point]
+        self.events[point] = at_point.push(event)
+
+    fn check(entry: i64, points: Dict<i64, [i64]>, successors: Dict<i64, [i64]>, work_limit: i64 = 1000000) -> [OwnershipFlowError]:
+        """Union incoming facts, apply ordered gen/kill events, reach a fixpoint.
+
+        Only reachable edges contribute. Report uses against converged input,
+        avoiding speculative diagnostics while inputs are still growing.
+        Budget or malformed-CFG errors are failures, never unchecked success.
+        """
+        if not points.contains_key(entry):
+            return [OwnershipFlowError(point: entry, message: "ownership CFG has no entry block")]
+        var work = 0
+        var point_owners: Dict<i64, i64> = {}
+        for block_id in points.keys():
+            work = work + 1
+            if work > work_limit:
+                return [OwnershipFlowError(point: block_id, message: "ownership CFG work budget exhausted")]
+            val block_points = points[block_id]
+            for point in block_points:
+                work = work + 1
+                if work > work_limit:
+                    return [OwnershipFlowError(point: point, message: "ownership CFG work budget exhausted")]
+                if point_owners.contains_key(point):
+                    return [OwnershipFlowError(point: point, message: "ownership CFG point belongs to multiple positions")]
+                point_owners[point] = block_id
+        for point in self.events.keys():
+            work = work + 1
+            if work > work_limit:
+                return [OwnershipFlowError(point: point, message: "ownership CFG work budget exhausted")]
+            if not point_owners.contains_key(point):
+                return [OwnershipFlowError(point: point, message: "ownership event has no CFG point")]
+        # Validate all CFG edges, including the unreachable slice.
+        for block_id in successors.keys():
+            work = work + 1
+            if work > work_limit:
+                return [OwnershipFlowError(point: block_id, message: "ownership CFG work budget exhausted")]
+            if not points.contains_key(block_id):
+                return [OwnershipFlowError(point: block_id, message: "ownership CFG edge has a missing source block")]
+            for target in successors[block_id]:
+                work = work + 1
+                if work > work_limit:
+                    return [OwnershipFlowError(point: block_id, message: "ownership CFG work budget exhausted")]
+                if not points.contains_key(target):
+                    return [OwnershipFlowError(point: block_id, message: "ownership CFG edge targets a missing block")]
+        var incoming: Dict<i64, [Place]> = {}
+        incoming[entry] = []
+        var pending: [i64] = [entry]
+        var scheduled: Dict<i64, bool> = {}
+        scheduled[entry] = true
+        var reachable: [i64] = [entry]
+        var cursor = 0
+        while cursor < pending.len():
+            val block_id = pending[cursor]
+            cursor = cursor + 1
+            scheduled[block_id] = false
+            var state: [Place] = incoming[block_id]
+            val block_points = points[block_id]
+            work = work + 1 + state.len() + block_points.len()
+            if work > work_limit:
+                return [OwnershipFlowError(point: block_id, message: "ownership CFG work budget exhausted")]
+            for point in block_points:
+                if self.events.contains_key(point):
+                    val events = self.events[point]
+                    for event in events:
+                        work = work + 1 + state.len()
+                        if work > work_limit:
+                            return [OwnershipFlowError(point: point, message: "ownership CFG work budget exhausted")]
+                        state = ownership_event_transfer(state, event)
+            if work > work_limit:
+                return [OwnershipFlowError(point: block_id, message: "ownership CFG work budget exhausted")]
+            if successors.contains_key(block_id):
+                val targets = successors[block_id]
+                for target in targets:
+                    work = work + 1
+                    if work > work_limit:
+                        return [OwnershipFlowError(point: block_id, message: "ownership CFG work budget exhausted")]
+                    if not points.contains_key(target):
+                        return [OwnershipFlowError(point: block_id, message: "ownership CFG edge targets a missing block")]
+                    val first_visit = not incoming.contains_key(target)
+                    var merged: [Place] = []
+                    if not first_visit:
+                        val previous: [Place] = incoming[target]
+                        for moved in previous:
+                            work = work + 1
+                            if work > work_limit:
+                                return [OwnershipFlowError(point: block_id, message: "ownership CFG work budget exhausted")]
+                            merged = merged.push(moved)
+                    var changed = first_visit
+                    for moved in state:
+                        work = work + 1 + merged.len()
+                        if work > work_limit:
+                            return [OwnershipFlowError(point: block_id, message: "ownership CFG work budget exhausted")]
+                        if not ownership_contains(merged, moved):
+                            merged = merged.push(moved)
+                            changed = true
+                    incoming[target] = merged
+                    if first_visit:
+                        reachable = reachable.push(target)
+                    if changed:
+                        var already_scheduled = false
+                        if scheduled.contains_key(target):
+                            already_scheduled = scheduled[target]
+                        if not already_scheduled:
+                            scheduled[target] = true
+                            pending = pending.push(target)
+
+        var errors: [OwnershipFlowError] = []
+        for block_id in reachable:
+            work = work + 1
+            if work > work_limit:
+                return [OwnershipFlowError(point: block_id, message: "ownership CFG work budget exhausted during replay")]
+            var state: [Place] = incoming[block_id]
+            val block_points = points[block_id]
+            for point in block_points:
+                work = work + 1
+                if work > work_limit:
+                    return [OwnershipFlowError(point: point, message: "ownership CFG work budget exhausted during replay")]
+                if self.events.contains_key(point):
+                    val events = self.events[point]
+                    for event in events:
+                        # Reserve transfer scanning and diagnostic comparisons.
+                        work = work + 1 + 2 * state.len()
+                        if work > work_limit:
+                            return [OwnershipFlowError(point: point, message: "ownership CFG work budget exhausted during replay")]
+                        match event:
+                            case OwnershipEvent.Read(place):
+                                for moved in state:
+                                    if place_conflicts_with(place, moved):
+                                        errors = errors.push(OwnershipFlowError(point: point, message: "Use of moved value: {place_to_text(place)}"))
+                                        break
+                            case OwnershipEvent.Move(place):
+                                for moved in state:
+                                    if place_conflicts_with(place, moved):
+                                        errors = errors.push(OwnershipFlowError(point: point, message: "Use of moved value: {place_to_text(place)}"))
+                                        break
+                            case OwnershipEvent.Revive(_):
+                                pass
+                        state = ownership_event_transfer(state, event)
+        errors

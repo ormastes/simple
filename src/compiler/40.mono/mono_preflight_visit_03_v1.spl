@@ -1,0 +1,670 @@
+# Bounded semantic preflight, not a codec or specialization implementation.
+# Field/variant walk is mechanically adapted from all 97 hc_enc_* owners in
+# compiler/20.hir/generated/hir_codec.spl; no decoder or encoded output is used.
+# Frozen input SHA256: e6ddcf4358668819c508742ceb120372cabd3cb03b961a6584a80d0ca6780e05
+# The 97 mono_pf_* names preserve the encoder suffix exactly. Every visited
+# field, enum arm and optional branch corresponds to that source. Wire writes
+# become resource reservations, array lengths reserve before loops, dictionary
+# snapshots reserve a concrete typed count first, sorting is unnecessary here.
+# Reconcile this mirror when the exported codec/schema versions change; the
+# public entries refuse differing actual versions/rules before visiting HIR.
+# Unknown enum variants fail closed. No canonical-codec availability is claimed.
+#
+# Allocation-free dictionary cardinality uses the existing typed provider:
+# _MirLoweringExpr/method_calls_literals.spl routes HirTypeKind.Dict .len()
+# to rt_dict_len; runtime_native.c reads the same registered dictionary length
+# used by rt_dict_keys. The pure-Simple core_array provider uses dict_len_value
+# for the same pair. These concrete receiver types prevent erased rt_len.
+# Snapshot equality detects inconsistency; it is not a substitute for the
+# provider's count/keys contract, and native qualification remains UNRUN.
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_types.{HirModule, HirType}
+use compiler.hir.hir_operators.{HirBinOp, HirUnaryOp, HirAssignOp}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.dynamic_identity.closure.{Closure}
+use compiler.blocks.value.{BlockValue}
+use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind}
+use compiler.common.attributes.{FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata, VhdlClockedMetadata, VhdlGenericMetadata, VhdlReturnFieldMetadata, VhdlResetPolarity, VhdlResetSynchrony, OptimizationReq, OptimizationReqLevel, OptimizationBackend}
+use compiler.frontend.parser_types_expr.{AsmTargetSpec, AsmConstraintKind, AsmLocation, Type, TypeKind, Expr}
+
+use compiler.mono.mono_invocation_policy_v1.{MonoInvocationBudgetV1}
+use compiler.hir.hir_codec.{HIR_CODEC_VERSION, HIR_CANONICAL_CODEC_VERSION,
+    HIR_CANONICAL_CODEC_RULES_V1}
+use compiler.frontend.core.flat_pool_codec.{FLAT_POOL_CODEC_VERSION}
+
+
+use compiler.mono.mono_preflight_walk_v1.*
+
+# Static visitor extension; all recursion remains on one concrete walk.
+impl MonoPreflightWalkV1:
+    me mono_pf_hir_enum_v1(node: HirEnum):
+        if not self.enter_v1(): return
+        defer self.leave_v1()
+        if node == nil:
+            self.reject("nil HirEnum node")
+            return
+        val enc_node_v0: SymbolId = node.symbol
+        if not enc_node_v0.?:
+            if not self.scalar_v1(): return
+        else:
+            if not self.scalar_v1(): return
+            self.mono_pf_symbol_id_v1(enc_node_v0)
+            if not self.active_v1(): return
+        if not self.text_v1(node.name): return
+        if not self.text_v1(node.runtime_name): return
+        if not self.array_v1(if node.type_params == nil: 0 else: node.type_params.len()): return
+        for e1 in (node.type_params ?? []):
+            if not self.active_v1(): return
+            val enc_node_v2: HirTypeParam = e1
+            if not enc_node_v2.?:
+                self.reject("absent required child in hir_enum")
+                return
+            else:
+                if not self.scalar_v1(): return
+                self.mono_pf_hir_type_param_v1(enc_node_v2)
+                if not self.active_v1(): return
+        if not self.array_v1(if node.variants == nil: 0 else: node.variants.len()): return
+        for e3 in (node.variants ?? []):
+            if not self.active_v1(): return
+            val enc_node_v4: HirVariant = e3
+            if not enc_node_v4.?:
+                self.reject("absent required child in hir_enum")
+                return
+            else:
+                if not self.scalar_v1(): return
+                self.mono_pf_hir_variant_v1(enc_node_v4)
+                if not self.active_v1(): return
+        val enc_node_v5: Visibility = node.visibility
+        if enc_node_v5 == nil:
+            if not self.scalar_v1(): return
+        else:
+            if not self.scalar_v1(): return
+            self.mono_pf_visibility_v1(enc_node_v5)
+            if not self.active_v1(): return
+        if not self.scalar_v1(): return
+        if not self.scalar_v1(): return
+        if not self.text_v1(node.doc_comment): return
+        val enc_node_v6: Span = node.span
+        if not enc_node_v6.?:
+            if not self.scalar_v1(): return
+        else:
+            if not self.scalar_v1(): return
+            self.mono_pf_span_v1(enc_node_v6)
+            if not self.active_v1(): return
+        if not self.scalar_v1(): return
+        if not self.scalar_v1(): return
+        if not self.text_v1(node.specialization_of): return
+        if not self.charge_v1(1): return
+        var ks7: [text] = []
+        if node.type_bindings != nil:
+            val count_ks7 = mono_pf_count_dict_text_hirtype_v1(node.type_bindings)
+            if not self.snapshot_v1(count_ks7): return
+            ks7 = node.type_bindings.keys()
+            if not self.snapshot_equal_v1(count_ks7, ks7.len()): return
+        if not self.scalar_v1(): return
+        for dk7 in ks7:
+            if not self.active_v1(): return
+            if not self.text_v1(dk7): return
+            val enc_node_v8: HirType = node.type_bindings[dk7]
+            if not enc_node_v8.?:
+                self.reject("absent required child in hir_enum")
+                return
+            else:
+                if not self.scalar_v1(): return
+                self.mono_pf_hir_type_v1(enc_node_v8)
+                if not self.active_v1(): return
+        if not self.array_v1(if node.attributes == nil: 0 else: node.attributes.len()): return
+        for e9 in (node.attributes ?? []):
+            if not self.active_v1(): return
+            val enc_node_v10: HirAttribute = e9
+            if not enc_node_v10.?:
+                self.reject("absent required child in hir_enum")
+                return
+            else:
+                if not self.scalar_v1(): return
+                self.mono_pf_hir_attribute_v1(enc_node_v10)
+                if not self.active_v1(): return
+        if not self.scalar_v1(): return
+        if not self.scalar_v1(): return
+
+    me mono_pf_hir_enum_payload_v1(node: HirEnumPayload):
+        if not self.enter_v1(): return
+        defer self.leave_v1()
+        if node == nil:
+            self.reject("nil HirEnumPayload node")
+            return
+        match node:
+            case HirEnumPayload.Tuple(b_values):
+                if not self.scalar_v1(): return
+                if not self.array_v1(if b_values == nil: 0 else: b_values.len()): return
+                for e0 in (b_values ?? []):
+                    if not self.active_v1(): return
+                    val enc_node_v1: HirExpr = e0
+                    if not enc_node_v1.?:
+                        self.reject("absent required child in hir_enum_payload")
+                        return
+                    else:
+                        if not self.scalar_v1(): return
+                        self.mono_pf_hir_expr_v1(enc_node_v1)
+                        if not self.active_v1(): return
+            case HirEnumPayload.Struct(b_fields):
+                if not self.scalar_v1(): return
+                if not self.array_v1(if b_fields == nil: 0 else: b_fields.len()): return
+                for (pa2, pb2) in (b_fields ?? []):
+                    if not self.active_v1(): return
+                    if not self.text_v1(pa2): return
+                    val enc_node_v3: HirExpr = pb2
+                    if not enc_node_v3.?:
+                        if not self.scalar_v1(): return
+                    else:
+                        if not self.scalar_v1(): return
+                        self.mono_pf_hir_expr_v1(enc_node_v3)
+                        if not self.active_v1(): return
+            case _: self.reject("unencodable HirEnumPayload enum")
+
+    me mono_pf_hir_expr_v1(node: HirExpr):
+        if not self.enter_v1(): return
+        defer self.leave_v1()
+        if node == nil:
+            self.reject("nil HirExpr node")
+            return
+        if node.kind == nil:
+            self.reject("expression kind is absent")
+            return
+        if node.has_type_ and node.type_ == nil:
+            self.reject("typed expression has no type")
+            return
+        val enc_node_v0: HirExprKind = node.kind
+        if enc_node_v0 == nil:
+            if not self.scalar_v1(): return
+        else:
+            if not self.scalar_v1(): return
+            self.mono_pf_hir_expr_kind_v1(enc_node_v0)
+            if not self.active_v1(): return
+        if not self.scalar_v1(): return
+        val enc_node_v1: HirType = node.type_
+        if not enc_node_v1.?:
+            if not self.scalar_v1(): return
+        else:
+            if not self.scalar_v1(): return
+            self.mono_pf_hir_type_v1(enc_node_v1)
+            if not self.active_v1(): return
+        val enc_node_v2: Span = node.span
+        if not enc_node_v2.?:
+            if not self.scalar_v1(): return
+        else:
+            if not self.scalar_v1(): return
+            self.mono_pf_span_v1(enc_node_v2)
+            if not self.active_v1(): return
+
+    me mono_pf_hir_expr_kind_v1(node: HirExprKind):
+        if not self.enter_v1(): return
+        defer self.leave_v1()
+        if node == nil:
+            self.reject("nil HirExprKind node")
+            return
+        if self.mono_pf_hir_expr_arms_01_v1(node): return
+        if self.mono_pf_hir_expr_arms_02_v1(node): return
+        self.reject("unencodable HirExprKind enum")
+
+    me mono_pf_hir_extend_constructor_v1(node: HirExtendConstructor):
+        if not self.enter_v1(): return
+        defer self.leave_v1()
+        if node == nil:
+            self.reject("nil HirExtendConstructor node")
+            return
+        if not self.text_v1(node.provider): return
+        if not self.text_v1(node.name): return
+        if not self.array_v1(if node.payload_types == nil: 0 else: node.payload_types.len()): return
+        for e0 in (node.payload_types ?? []):
+            if not self.active_v1(): return
+            val enc_node_v1: Type = e0
+            if not enc_node_v1.?:
+                self.reject("absent required child in hir_extend_constructor")
+                return
+            else:
+                if not self.scalar_v1(): return
+                self.mono_pf_type_v1(enc_node_v1)
+                if not self.active_v1(): return
+        val enc_node_v2: Span = node.span
+        if not enc_node_v2.?:
+            if not self.scalar_v1(): return
+        else:
+            if not self.scalar_v1(): return
+            self.mono_pf_span_v1(enc_node_v2)
+            if not self.active_v1(): return
+
+    me mono_pf_hir_extend_enum_v1(node: HirExtendEnum):
+        if not self.enter_v1(): return
+        defer self.leave_v1()
+        if node == nil:
+            self.reject("nil HirExtendEnum node")
+            return
+        if not self.text_v1(node.target): return
+        val enc_node_v0: Closure = node.closure
+        if enc_node_v0 == nil:
+            if not self.scalar_v1(): return
+        else:
+            if not self.scalar_v1(): return
+            self.mono_pf_closure_v1(enc_node_v0)
+            if not self.active_v1(): return
+        if not self.array_v1(if node.constructors == nil: 0 else: node.constructors.len()): return
+        for e1 in (node.constructors ?? []):
+            if not self.active_v1(): return
+            val enc_node_v2: HirExtendConstructor = e1
+            if not enc_node_v2.?:
+                self.reject("absent required child in hir_extend_enum")
+                return
+            else:
+                if not self.scalar_v1(): return
+                self.mono_pf_hir_extend_constructor_v1(enc_node_v2)
+                if not self.active_v1(): return
+        val enc_node_v3: Span = node.span
+        if not enc_node_v3.?:
+            if not self.scalar_v1(): return
+        else:
+            if not self.scalar_v1(): return
+            self.mono_pf_span_v1(enc_node_v3)
+            if not self.active_v1(): return
+
+    me mono_pf_hir_field_v1(node: HirField):
+        if not self.enter_v1(): return
+        defer self.leave_v1()
+        if node == nil:
+            self.reject("nil HirField node")
+            return
+        if node.has_default != (node.default != nil):
+            self.reject("field default flag and payload disagree")
+            return
+        val enc_node_v0: SymbolId = node.symbol
+        if not enc_node_v0.?:
+            if not self.scalar_v1(): return
+        else:
+            if not self.scalar_v1(): return
+            self.mono_pf_symbol_id_v1(enc_node_v0)
+            if not self.active_v1(): return
+        if not self.text_v1(node.name): return
+        val enc_node_v1: HirType = node.type_
+        if not enc_node_v1.?:
+            if not self.scalar_v1(): return
+        else:
+            if not self.scalar_v1(): return
+            self.mono_pf_hir_type_v1(enc_node_v1)
+            if not self.active_v1(): return
+        if not self.scalar_v1(): return
+        val enc_node_v2: HirExpr = node.default
+        if not enc_node_v2.?:
+            if not self.scalar_v1(): return
+        else:
+            if not self.scalar_v1(): return
+            self.mono_pf_hir_expr_v1(enc_node_v2)
+            if not self.active_v1(): return
+        val enc_node_v3: Visibility = node.visibility
+        if enc_node_v3 == nil:
+            if not self.scalar_v1(): return
+        else:
+            if not self.scalar_v1(): return
+            self.mono_pf_visibility_v1(enc_node_v3)
+            if not self.active_v1(): return
+        if not self.scalar_v1(): return
+        if not self.scalar_v1(): return
+        if not self.scalar_v1(): return
+        if not self.scalar_v1(): return
+        if not self.scalar_v1(): return
+        if not self.scalar_v1(): return
+        val enc_node_v4: Span = node.span
+        if not enc_node_v4.?:
+            if not self.scalar_v1(): return
+        else:
+            if not self.scalar_v1(): return
+            self.mono_pf_span_v1(enc_node_v4)
+            if not self.active_v1(): return
+
+    me mono_pf_hir_function_v1(node: HirFunction):
+        if not self.enter_v1(): return
+        defer self.leave_v1()
+        if node == nil:
+            self.reject("nil HirFunction node")
+            return
+        if node.symbol == nil or node.return_type == nil or node.func_attr == nil:
+            self.reject("function symbol, return type or attributes are absent")
+            return
+        if not node.is_extern and node.body == nil:
+            self.reject("retained function body is absent")
+            return
+        if node.has_export_attr and node.export_attr == nil:
+            self.reject("export attribute flag has no payload")
+            return
+        if node.has_driver_manifest_attr and node.driver_manifest_attr == nil:
+            self.reject("driver attribute flag has no payload")
+            return
+        if node.has_vhdl_metadata and node.vhdl_metadata == nil:
+            self.reject("VHDL metadata flag has no payload")
+            return
+        val enc_node_v0: SymbolId = node.symbol
+        if not enc_node_v0.?:
+            if not self.scalar_v1(): return
+        else:
+            if not self.scalar_v1(): return
+            self.mono_pf_symbol_id_v1(enc_node_v0)
+            if not self.active_v1(): return
+        if not self.text_v1(node.name): return
+        if not self.array_v1(if node.type_params == nil: 0 else: node.type_params.len()): return
+        for e1 in (node.type_params ?? []):
+            if not self.active_v1(): return
+            val enc_node_v2: HirTypeParam = e1
+            if not enc_node_v2.?:
+                self.reject("absent required child in hir_function")
+                return
+            else:
+                if not self.scalar_v1(): return
+                self.mono_pf_hir_type_param_v1(enc_node_v2)
+                if not self.active_v1(): return
+        if not self.array_v1(if node.params == nil: 0 else: node.params.len()): return
+        for e3 in (node.params ?? []):
+            if not self.active_v1(): return
+            val enc_node_v4: HirParam = e3
+            if not enc_node_v4.?:
+                self.reject("absent required child in hir_function")
+                return
+            else:
+                if not self.scalar_v1(): return
+                self.mono_pf_hir_param_v1(enc_node_v4)
+                if not self.active_v1(): return
+        val enc_node_v5: HirType = node.return_type
+        if not enc_node_v5.?:
+            if not self.scalar_v1(): return
+        else:
+            if not self.scalar_v1(): return
+            self.mono_pf_hir_type_v1(enc_node_v5)
+            if not self.active_v1(): return
+        val enc_node_v6: HirBlock = node.body
+        if not enc_node_v6.?:
+            if not self.scalar_v1(): return
+        else:
+            if not self.scalar_v1(): return
+            self.mono_pf_hir_block_v1(enc_node_v6)
+            if not self.active_v1(): return
+        if not self.array_v1(if node.effects == nil: 0 else: node.effects.len()): return
+        for e7 in (node.effects ?? []):
+            if not self.active_v1(): return
+            val enc_node_v8: Effect = e7
+            if not enc_node_v8.?:
+                self.reject("absent required child in hir_function")
+                return
+            else:
+                if not self.scalar_v1(): return
+                self.mono_pf_effect_v1(enc_node_v8)
+                if not self.active_v1(): return
+        val enc_node_v9: Visibility = node.visibility
+        if enc_node_v9 == nil:
+            if not self.scalar_v1(): return
+        else:
+            if not self.scalar_v1(): return
+            self.mono_pf_visibility_v1(enc_node_v9)
+            if not self.active_v1(): return
+        if not self.scalar_v1(): return
+        if not self.scalar_v1(): return
+        if not self.scalar_v1(): return
+        if not self.scalar_v1(): return
+        if not self.scalar_v1(): return
+        if not self.scalar_v1(): return
+        if not self.scalar_v1(): return
+        val enc_node_v10: FunctionAttr = node.func_attr
+        if not enc_node_v10.?:
+            if not self.scalar_v1(): return
+        else:
+            if not self.scalar_v1(): return
+            self.mono_pf_function_attr_v1(enc_node_v10)
+            if not self.active_v1(): return
+        if not self.scalar_v1(): return
+        val enc_node_v11: ExportAttr = node.export_attr
+        if not enc_node_v11.?:
+            if not self.scalar_v1(): return
+        else:
+            if not self.scalar_v1(): return
+            self.mono_pf_export_attr_v1(enc_node_v11)
+            if not self.active_v1(): return
+        if not self.scalar_v1(): return
+        val enc_node_v12: DriverManifestAttr = node.driver_manifest_attr
+        if not enc_node_v12.?:
+            if not self.scalar_v1(): return
+        else:
+            if not self.scalar_v1(): return
+            self.mono_pf_driver_manifest_attr_v1(enc_node_v12)
+            if not self.active_v1(): return
+        if not self.scalar_v1(): return
+        if not self.scalar_v1(): return
+        val enc_node_v13: VhdlHardwareMetadata = node.vhdl_metadata
+        if not enc_node_v13.?:
+            if not self.scalar_v1(): return
+        else:
+            if not self.scalar_v1(): return
+            self.mono_pf_vhdl_hardware_metadata_v1(enc_node_v13)
+            if not self.active_v1(): return
+        if not self.scalar_v1(): return
+        if not self.text_v1(node.doc_comment): return
+        val enc_node_v14: Span = node.span
+        if not enc_node_v14.?:
+            if not self.scalar_v1(): return
+        else:
+            if not self.scalar_v1(): return
+            self.mono_pf_span_v1(enc_node_v14)
+            if not self.active_v1(): return
+        if not self.scalar_v1(): return
+        if not self.text_v1(node.gpu_target): return
+        if not self.text_v1(node.gpu_backend_order): return
+        if val o15 = node.verification_contract:
+            if not self.scalar_v1(): return
+            val enc_node_v16: HirContractBlock = o15
+            if not enc_node_v16.?:
+                self.reject("absent required child in hir_function")
+                return
+            else:
+                if not self.scalar_v1(): return
+                self.mono_pf_hir_contract_block_v1(enc_node_v16)
+                if not self.active_v1(): return
+        else:
+            if not self.scalar_v1(): return
+        if not self.scalar_v1(): return
+
+    me mono_pf_hir_if_arm_v1(node: HirIfArm):
+        if not self.enter_v1(): return
+        defer self.leave_v1()
+        if node == nil:
+            self.reject("nil HirIfArm node")
+            return
+        val enc_node_v0: HirExpr = node.cond
+        if not enc_node_v0.?:
+            if not self.scalar_v1(): return
+        else:
+            if not self.scalar_v1(): return
+            self.mono_pf_hir_expr_v1(enc_node_v0)
+            if not self.active_v1(): return
+        val enc_node_v1: HirBlock = node.then_
+        if not enc_node_v1.?:
+            if not self.scalar_v1(): return
+        else:
+            if not self.scalar_v1(): return
+            self.mono_pf_hir_block_v1(enc_node_v1)
+            if not self.active_v1(): return
+        val enc_node_v2: Span = node.span
+        if not enc_node_v2.?:
+            if not self.scalar_v1(): return
+        else:
+            if not self.scalar_v1(): return
+            self.mono_pf_span_v1(enc_node_v2)
+            if not self.active_v1(): return
+
+    me mono_pf_hir_impl_v1(node: HirImpl):
+        if not self.enter_v1(): return
+        defer self.leave_v1()
+        if node == nil:
+            self.reject("nil HirImpl node")
+            return
+        val enc_node_v0: HirType = node.type_
+        if not enc_node_v0.?:
+            if not self.scalar_v1(): return
+        else:
+            if not self.scalar_v1(): return
+            self.mono_pf_hir_type_v1(enc_node_v0)
+            if not self.active_v1(): return
+        if not self.scalar_v1(): return
+        val enc_node_v1: HirType = node.trait_
+        if not enc_node_v1.?:
+            if not self.scalar_v1(): return
+        else:
+            if not self.scalar_v1(): return
+            self.mono_pf_hir_type_v1(enc_node_v1)
+            if not self.active_v1(): return
+        if not self.array_v1(if node.type_params == nil: 0 else: node.type_params.len()): return
+        for e2 in (node.type_params ?? []):
+            if not self.active_v1(): return
+            val enc_node_v3: HirTypeParam = e2
+            if not enc_node_v3.?:
+                self.reject("absent required child in hir_impl")
+                return
+            else:
+                if not self.scalar_v1(): return
+                self.mono_pf_hir_type_param_v1(enc_node_v3)
+                if not self.active_v1(): return
+        if not self.array_v1(if node.where_clause == nil: 0 else: node.where_clause.len()): return
+        for e4 in (node.where_clause ?? []):
+            if not self.active_v1(): return
+            val enc_node_v5: HirTraitBound = e4
+            if not enc_node_v5.?:
+                self.reject("absent required child in hir_impl")
+                return
+            else:
+                if not self.scalar_v1(): return
+                self.mono_pf_hir_trait_bound_v1(enc_node_v5)
+                if not self.active_v1(): return
+        if not self.charge_v1(1): return
+        var ks6: [text] = []
+        if node.methods != nil:
+            val count_ks6 = mono_pf_count_dict_text_symbolid_v1(node.methods)
+            if not self.snapshot_v1(count_ks6): return
+            ks6 = node.methods.keys()
+            if not self.snapshot_equal_v1(count_ks6, ks6.len()): return
+        if not self.scalar_v1(): return
+        for dk6 in ks6:
+            if not self.active_v1(): return
+            if not self.text_v1(dk6): return
+            val enc_node_v7: SymbolId = node.methods[dk6]
+            if not enc_node_v7.?:
+                self.reject("absent required child in hir_impl")
+                return
+            else:
+                if not self.scalar_v1(): return
+                self.mono_pf_symbol_id_v1(enc_node_v7)
+                if not self.active_v1(): return
+        if not self.charge_v1(1): return
+        var ks8: [text] = []
+        if node.method_return_struct_names != nil:
+            val count_ks8 = mono_pf_count_dict_text_text_v1(node.method_return_struct_names)
+            if not self.snapshot_v1(count_ks8): return
+            ks8 = node.method_return_struct_names.keys()
+            if not self.snapshot_equal_v1(count_ks8, ks8.len()): return
+        if not self.scalar_v1(): return
+        for dk8 in ks8:
+            if not self.active_v1(): return
+            if not self.text_v1(dk8): return
+            if not self.text_v1(node.method_return_struct_names[dk8]): return
+        if not self.charge_v1(1): return
+        var ks9: [text] = []
+        if node.method_return_is_array != nil:
+            val count_ks9 = mono_pf_count_dict_text_bool_v1(node.method_return_is_array)
+            if not self.snapshot_v1(count_ks9): return
+            ks9 = node.method_return_is_array.keys()
+            if not self.snapshot_equal_v1(count_ks9, ks9.len()): return
+        if not self.scalar_v1(): return
+        for dk9 in ks9:
+            if not self.active_v1(): return
+            if not self.text_v1(dk9): return
+            if not self.scalar_v1(): return
+        if not self.charge_v1(1): return
+        var ks10: [text] = []
+        if node.method_return_is_optional != nil:
+            val count_ks10 = mono_pf_count_dict_text_bool_v1(node.method_return_is_optional)
+            if not self.snapshot_v1(count_ks10): return
+            ks10 = node.method_return_is_optional.keys()
+            if not self.snapshot_equal_v1(count_ks10, ks10.len()): return
+        if not self.scalar_v1(): return
+        for dk10 in ks10:
+            if not self.active_v1(): return
+            if not self.text_v1(dk10): return
+            if not self.scalar_v1(): return
+        if not self.array_v1(if node.assoc_type_impls == nil: 0 else: node.assoc_type_impls.len()): return
+        for e11 in (node.assoc_type_impls ?? []):
+            if not self.active_v1(): return
+            val enc_node_v12: HirAssocTypeImpl = e11
+            if not enc_node_v12.?:
+                self.reject("absent required child in hir_impl")
+                return
+            else:
+                if not self.scalar_v1(): return
+                self.mono_pf_hir_assoc_type_impl_v1(enc_node_v12)
+                if not self.active_v1(): return
+        val enc_node_v13: Span = node.span
+        if not enc_node_v13.?:
+            if not self.scalar_v1(): return
+        else:
+            if not self.scalar_v1(): return
+            self.mono_pf_span_v1(enc_node_v13)
+            if not self.active_v1(): return
+
+    me mono_pf_hir_import_v1(node: HirImport):
+        if not self.enter_v1(): return
+        defer self.leave_v1()
+        if node == nil:
+            self.reject("nil HirImport node")
+            return
+        if not self.text_v1(node.module_path): return
+        if not self.array_v1(if node.items == nil: 0 else: node.items.len()): return
+        for e0 in (node.items ?? []):
+            if not self.active_v1(): return
+            val enc_node_v1: HirImportItem = e0
+            if not enc_node_v1.?:
+                self.reject("absent required child in hir_import")
+                return
+            else:
+                if not self.scalar_v1(): return
+                self.mono_pf_hir_import_item_v1(enc_node_v1)
+                if not self.active_v1(): return
+        if not self.scalar_v1(): return
+        val enc_node_v2: Span = node.span
+        if not enc_node_v2.?:
+            if not self.scalar_v1(): return
+        else:
+            if not self.scalar_v1(): return
+            self.mono_pf_span_v1(enc_node_v2)
+            if not self.active_v1(): return
+
+    me mono_pf_hir_import_item_v1(node: HirImportItem):
+        if not self.enter_v1(): return
+        defer self.leave_v1()
+        if node == nil:
+            self.reject("nil HirImportItem node")
+            return
+        if not self.text_v1(node.name): return
+        if val o0 = node.alias:
+            if not self.scalar_v1(): return
+            if not self.text_v1(o0): return
+        else:
+            if not self.scalar_v1(): return
+        if val o1 = node.resolved:
+            if not self.scalar_v1(): return
+            val enc_node_v2: SymbolId = o1
+            if not enc_node_v2.?:
+                self.reject("absent required child in hir_import_item")
+                return
+            else:
+                if not self.scalar_v1(): return
+                self.mono_pf_symbol_id_v1(enc_node_v2)
+                if not self.active_v1(): return
+        else:
+            if not self.scalar_v1(): return
+

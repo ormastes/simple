@@ -1,0 +1,45 @@
+# Immutable operation state; the WAL owner commits transitions before side effects.
+use std.common.contracts.distributed_control_codec_v2.distributed_decode_operation_v2
+use std.common.crypto.sha256.sha256_text
+use std.common.build_manager.contracts.builder_digest_valid_v1
+
+struct DistributedOperationStateV2:
+    operation_id: text
+    envelope_digest: text
+    envelope: text
+    state: text
+    outcome_digest: text
+
+fn distributed_operation_initial_v2(envelope: text) -> Result<DistributedOperationStateV2, text>:
+    val request = distributed_decode_operation_v2(envelope)?
+    Ok(DistributedOperationStateV2(request.id, sha256_text(envelope), envelope, "admitted", ""))
+
+fn distributed_operation_transition_v2(prior: DistributedOperationStateV2,
+        next_state: text, outcome_digest: text) -> Result<DistributedOperationStateV2, text>:
+    var allowed = false
+    if prior.state == "admitted":
+        allowed = next_state == "executing" or next_state == "cancelled"
+    elif prior.state == "executing":
+        allowed = next_state == "outcome-unknown" or next_state == "completed" or next_state == "failed" or next_state == "cancelled"
+    elif prior.state == "outcome-unknown":
+        # Only authoritative reconciliation can choose a terminal outcome.
+        allowed = next_state == "completed" or next_state == "failed" or next_state == "cancelled"
+    if not allowed: return Err("OPERATION_TRANSITION_INVALID")
+    val terminal = next_state == "completed" or next_state == "failed" or next_state == "cancelled"
+    if terminal:
+        if not builder_digest_valid_v1(outcome_digest): return Err("OUTCOME_DIGEST_REQUIRED")
+    elif outcome_digest != "":
+        return Err("NONTERMINAL_OUTCOME_INVALID")
+    Ok(DistributedOperationStateV2(prior.operation_id, prior.envelope_digest,
+        prior.envelope, next_state, outcome_digest))
+
+fn distributed_operation_duplicate_v2(prior: DistributedOperationStateV2,
+        envelope: text) -> text:
+    if envelope != prior.envelope or sha256_text(envelope) != prior.envelope_digest:
+        return "OPERATION_PAYLOAD_MISMATCH"
+    if prior.state == "admitted": return "ALREADY_ADMITTED"
+    if prior.state == "executing": return "ALREADY_EXECUTING"
+    if prior.state == "outcome-unknown": return "OUTCOME_UNKNOWN"
+    if prior.state == "completed" or prior.state == "failed" or prior.state == "cancelled":
+        return "RETAINED_OUTCOME"
+    "OPERATION_STATE_INVALID"

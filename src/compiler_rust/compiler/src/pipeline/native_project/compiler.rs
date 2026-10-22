@@ -272,6 +272,19 @@ fn is_simple_name_pattern(pattern: &simple_parser::Pattern) -> bool {
     }
 }
 
+/// `use m.{f as g}` import-binding marker emitted by flattening. It is module
+/// metadata, not a statement: HIR alias resolution
+/// (`Lowerer::collect_flattened_import_aliases`) scans only top-level items, so
+/// burying it in a synthesized `main` left every alias unresolved
+/// (`Undefined("undefined identifier: g")`) whenever the entry had no `fn main`.
+/// Position-independent (it names importer, alias and source), unlike the
+/// global-owner marker, which tags the declaration that follows it and so must
+/// stay where it is.
+fn is_import_binding_marker(node: &Node) -> bool {
+    matches!(node, Node::Const(decl)
+        if decl.name.starts_with(crate::interpreter::FLATTEN_IMPORT_BINDING_MARKER_PREFIX))
+}
+
 fn is_liftable_global_decl(node: &Node) -> bool {
     match node {
         Node::Const(decl) => is_const_global_initializer(&decl.value),
@@ -358,7 +371,11 @@ pub(crate) fn wrap_entry_script_as_main(
             && module_level_decl_name(&item)
                 .map(|name| sibling_reads.contains(&name))
                 .unwrap_or(false);
-        if is_liftable_global_decl(&item) || is_read_by_sibling || (is_freestanding && is_module_level_decl) {
+        if is_liftable_global_decl(&item)
+            || is_read_by_sibling
+            || (is_freestanding && is_module_level_decl)
+            || is_import_binding_marker(&item)
+        {
             lifted.push(item);
         } else if is_script_statement(&item) {
             script_body.push(item);
@@ -800,10 +817,13 @@ pub(crate) fn compile_file_to_object(
     pipeline.rewrite_hir_simd_loops(&mut hir);
 
     // MIR
-    let mut mir = crate::mir::lower_to_mir_with_global_trait_impls(
+    // Freestanding and WASM runtimes do not define the `[i64]` word lane.
+    let signed_word_lane = !target.is_baremetal() && !target.is_wasm();
+    let mut mir = crate::mir::lower_to_mir_with_global_trait_impls_and_word_lane(
         &hir,
         imports.trait_impls.as_ref(),
         target.array_push_returns_header(),
+        signed_word_lane,
     )
     .map_err(|e| format!("{}: mir: {e}", file_path.display()))?;
     qualify_native_struct_layouts(
@@ -2161,6 +2181,44 @@ mod aggregate_layout_tests {
     use super::*;
     use crate::mir::{AggregateFieldCopy, MirFunction, MirInst, MirModule, VReg};
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn shorthand_trait_inventory_preserves_receiver_header_in_copies() {
+        let root = std::path::PathBuf::from("/tmp/shorthand-trait-layout/src");
+        let sources = vec![
+            (root.join("provider.spl"), concat!(
+                "trait Probe:\n    fn read() -> i64\n\n",
+                "struct Value(Probe):\n    first: i64\n    second: i64\n",
+                "    fn read() -> i64:\n        self.second\n"
+            ).to_string()),
+            (root.join("plain.spl"), "struct Value:\n    first: i64\n    second: i64\n".to_string()),
+        ];
+        // Parse independently so a silently skipped malformed fixture cannot pass.
+        for (_, source) in &sources {
+            simple_parser::Parser::new(source).parse().unwrap();
+        }
+        let inventory = super::super::imports::build_import_map(&sources, std::slice::from_ref(&root), &root);
+        assert!(inventory.vtable_type_owners.contains("provider__Value"));
+        assert!(!inventory.vtable_type_owners.contains("plain__Value"));
+        assert_eq!(inventory.vtable_symbols.get("provider__Value").map(String::as_str),
+                   Some("__vtable__provider__Value__for__Probe"));
+        let mut mir = MirModule::new();
+        mir.local_globals.insert("Value".to_string());
+        let mut function = MirFunction::new("read".to_string(), crate::hir::TypeId::I64,
+                                           simple_parser::ast::Visibility::Public);
+        function.blocks[0].instructions.push(MirInst::AggregateCopy {
+            dest: VReg(1), src: VReg(0), byte_size: 16,
+            type_name: Some("Value".to_string()), owner_has_vtable: None, deep_fields: vec![],
+        });
+        mir.functions.push(function);
+        qualify_native_struct_layouts(&mut mir, "provider", &HashMap::new(), &HashMap::new(),
+            &HashSet::new(), &HashMap::new(), &inventory.vtable_type_owners,
+            &inventory.vtable_symbols).unwrap();
+        let MirInst::AggregateCopy { byte_size, owner_has_vtable, .. } =
+            &mir.functions[0].blocks[0].instructions[0] else { panic!("expected copy") };
+        assert_eq!(*byte_size, 16, "user payload size remains two words");
+        assert_eq!(*owner_has_vtable, Some(true), "backend must retain the additional header word");
+    }
 
     fn field(name: &str, nested: Vec<AggregateFieldCopy>) -> AggregateFieldCopy {
         AggregateFieldCopy {

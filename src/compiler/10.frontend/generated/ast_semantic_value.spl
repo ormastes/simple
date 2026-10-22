@@ -3,7 +3,7 @@
 # Span/doc-free SHA-256 stream. O(nodes + scalar bytes), O(depth) stack, O(1) retained state.
 
 use compiler.frontend.parser_types_expr.*
-use compiler.blocks.blocks.value.*
+use compiler.blocks.value.*
 use std.common.binary_io.{f32_to_bits, f64_to_bits}
 use std.common.crypto.sha256.{Sha256StreamV1, sha256_stream_v1_new}
 use std.nogc_sync_mut.io_runtime.{exit}
@@ -23,7 +23,9 @@ fn _ast_semantic_mix_i64(input: AstSemanticHash, value: i64) -> AstSemanticHash:
     while shift < 64:
         state.scratch[shift / 8] = ((value >> shift) & 255) as u8
         shift = shift + 8
-    if not state.stream.update(state.scratch): state.cacheable = false
+    # @workaround bug=native_method_result_overwrites_receiver_slot_2026_10_21 reason=old_producer_field_writeback_uses_bool_result
+    val stream: Sha256StreamV1 = state.stream
+    if not stream.update(state.scratch): state.cacheable = false
     state.units = state.units + 1
     state
 
@@ -54,7 +56,10 @@ fn _ast_semantic_mark_uncacheable(state: AstSemanticHash, reason: text) -> AstSe
 fn ast_semantic_hash_finish(input: AstSemanticHash) -> text:
     var state = input
     if not state.cacheable: return ""
-    state.stream.finish_hex() ?? ""
+    # @workaround bug=seed_coalesce_stateful_operand_twice_2026_10_12 recover=fcc1d91ea1b92992c7ebd7ba50f44379999bab4e reason=seed_coalesce_evaluates_stateful_operand_twice
+    val stream: Sha256StreamV1 = state.stream
+    val digest = stream.finish_hex()
+    digest ?? ""
 
 fn _ast_semantic_unhandled(kind: text, where_: text):
     print "E-AST-SEMANTIC-UNHANDLED: {kind} at {where_}; regenerate encoder"
@@ -85,8 +90,9 @@ fn ast_semantic_encode_expr(node: Expr, initial: AstSemanticHash) -> AstSemantic
                 state = _ast_semantic_mix_tag(state, "nil")
             else:
                 state = _ast_semantic_mix_tag(state, "some")
-                state = _ast_semantic_mix_i64(state, b_StringLit_f1.len())
-                for sv3 in b_StringLit_f1:
+                val semantic_present3: [Interpolation] = b_StringLit_f1!
+                state = _ast_semantic_mix_i64(state, semantic_present3.len())
+                for sv3 in semantic_present3:
                     state = ast_semantic_encode_interpolation(sv3, state)
         case BoolLit(b_BoolLit_f0):
             handled = true
@@ -409,6 +415,11 @@ fn ast_semantic_encode_expr(node: Expr, initial: AstSemanticHash) -> AstSemantic
             handled = true
             state = _ast_semantic_mix_tag(state, "FloatLexeme")
             state = _ast_semantic_mix_scalar_text(state, "text", b_FloatLexeme_f0)
+        case New(b_New_f0, b_New_f1):
+            handled = true
+            state = _ast_semantic_mix_tag(state, "New")
+            state = _ast_semantic_mix_scalar_i64(state, "i64", b_New_f0 as i64)
+            state = ast_semantic_encode_expr(b_New_f1, state)
         case _:
             handled = false
     if not handled:
@@ -639,6 +650,14 @@ fn ast_semantic_encode_type(node: Type, initial: AstSemanticHash) -> AstSemantic
             handled = true
             state = _ast_semantic_mix_tag(state, "Weak")
             state = ast_semantic_encode_type(b_Weak_f0, state)
+        case Unique(b_Unique_f0):
+            handled = true
+            state = _ast_semantic_mix_tag(state, "Unique")
+            state = ast_semantic_encode_type(b_Unique_f0, state)
+        case Shared(b_Shared_f0):
+            handled = true
+            state = _ast_semantic_mix_tag(state, "Shared")
+            state = ast_semantic_encode_type(b_Shared_f0, state)
         case _:
             handled = false
     if not handled:
@@ -1341,8 +1360,9 @@ fn ast_semantic_encode_expr_kind(node: ExprKind, initial: AstSemanticHash) -> As
                 state = _ast_semantic_mix_tag(state, "nil")
             else:
                 state = _ast_semantic_mix_tag(state, "some")
-                state = _ast_semantic_mix_i64(state, b_StringLit_f1.len())
-                for sv3 in b_StringLit_f1:
+                val semantic_present3: [Interpolation] = b_StringLit_f1!
+                state = _ast_semantic_mix_i64(state, semantic_present3.len())
+                for sv3 in semantic_present3:
                     state = ast_semantic_encode_interpolation(sv3, state)
         case BoolLit(b_BoolLit_f0):
             handled = true
@@ -1665,6 +1685,11 @@ fn ast_semantic_encode_expr_kind(node: ExprKind, initial: AstSemanticHash) -> As
             handled = true
             state = _ast_semantic_mix_tag(state, "FloatLexeme")
             state = _ast_semantic_mix_scalar_text(state, "text", b_FloatLexeme_f0)
+        case New(b_New_f0, b_New_f1):
+            handled = true
+            state = _ast_semantic_mix_tag(state, "New")
+            state = _ast_semantic_mix_scalar_i64(state, "i64", b_New_f0 as i64)
+            state = ast_semantic_encode_expr(b_New_f1, state)
         case _:
             handled = false
     if not handled:
@@ -2475,6 +2500,14 @@ fn ast_semantic_encode_type_kind(node: TypeKind, initial: AstSemanticHash) -> As
             handled = true
             state = _ast_semantic_mix_tag(state, "Weak")
             state = ast_semantic_encode_type(b_Weak_f0, state)
+        case Unique(b_Unique_f0):
+            handled = true
+            state = _ast_semantic_mix_tag(state, "Unique")
+            state = ast_semantic_encode_type(b_Unique_f0, state)
+        case Shared(b_Shared_f0):
+            handled = true
+            state = _ast_semantic_mix_tag(state, "Shared")
+            state = ast_semantic_encode_type(b_Shared_f0, state)
         case _:
             handled = false
     if not handled:

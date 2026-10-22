@@ -1,0 +1,501 @@
+# Selective, process-private MIR worker. No source frontend fallback is legal.
+# The producer owns admission; this consumer owns one decoded body at a time.
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_mir_selective_producer_v1.{driver_mir_selective_context_identity_v1}
+use compiler.driver.driver_mir_selective_eligibility_v1.{driver_mir_selective_explicit_native_eligible_v1,
+    driver_mir_selective_bootstrap_owner_v1}
+use compiler.driver.driver_build.native_mir_selective_bundle_v1.{NativeMirSelectiveBundleV1,
+    NativeMirSelectiveRowV1, native_mir_selective_load_bundle_v1,
+    native_mir_selective_load_body_in_owned_scope_v1, native_mir_selective_provider_row_v1}
+use compiler.driver.driver_build.native_mir_shard_export_v1.{native_mir_shard_export_dir_v1}
+use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_spec_v1,
+    native_mir_shard_count_of_v1, native_mir_shard_claim_cap_v1,
+    native_mir_shard_claim_v1, native_mir_shard_lpt_order_v1,
+    NativeMirShardLinkInputsV1, native_mir_shard_link_inputs_v1}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.backend.backend_helpers.{get_effective_backend_name}
+use compiler.driver.driver_pipeline_lowering.{_driver_collect_mir_errors,
+    driver_collect_mir_advisories, driver_mir_has_new_fatal_errors_v1,
+    driver_trait_devirtualization_allowed_v1}
+use compiler.driver.driver_pipeline_lowering.*
+use compiler.driver.driver_mir_error_owner.{driver_trace_module_mir_errors}
+use compiler.driver.driver_hir_cache.{hir_cache_last_warnings,
+    hir_cache_promote_diagnostic_owner_v1, hir_cache_clear_last_warnings}
+use compiler.driver.cache.hir_mir_archive_consumer_v1.{MirArchiveLoweringFailureV1,
+    mir_archive_failure_v1}
+use compiler.hir.hir_types.{SymbolId, SymbolTable}
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.common.module_path_naming.{module_logical_name_cache_warm}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.hir.generated.hir_codec.{hc_enc_symbol_table, hc_dec_symbol_table}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+use compiler.frontend.resource_registry.{resource_registry_selective_mir_safe_v1}
+use compiler.semantics.rt_hal_tag.{rt_hal_selective_mir_safe_v1}
+use compiler.mir.hir_declaration_types_v1.{MirHirDeclarationRepositoryV1,
+    MirHirModuleDeclarationsV1, MirHirFunctionDeclarationV1}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_instructions.{MirModule, MirFunction}
+use compiler.mir.mir_data.{bootstrap_fn_registries_promote,
+    bootstrap_fn_param_defaults_detach_for_archive_v1}
+use compiler.mir._MirLowering.bootstrap_globals.{bootstrap_mir_registries_promote}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.declaration_providers_v1.*
+use compiler.mir._MirLowering.declaration_enum_metadata_v1.*
+use compiler.mir._MirLowering.declaration_inventory_barriers_v1.*
+use compiler.mir._MirLowering.archive_borrowed_module_v1.*
+use compiler.mir._MirLowering.transient_owner.*
+use compiler.common.cache.reverse_reference_facts.{reverse_reference_module_begin_v1,
+    reverse_reference_module_seal_v1, reverse_reference_module_publish_v1,
+    reverse_reference_module_abort_v1}
+use std.io_runtime.{env_get_opt, file_write, file_rename, getpid, time_now_monotonic_ms}
+use std.nogc_sync_mut.io.env_ops.{env_set}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
+
+pub fn driver_mir_selective_enabled_v1() -> bool:
+    (env_get_opt("SIMPLE_MIR_SELECTIVE") ?? "") == "1"
+
+# These owners used to be populated by parse/typecheck. Until their actual
+# transport exists, early workers must refuse rather than silently lose them.
+pub fn driver_mir_selective_worker_unsupported_v1(driver: CompilerDriver) -> text:
+    val backend = get_effective_backend_name(driver.ctx.options.backend, driver.ctx.options.release)
+    if backend != "llvm" and backend != "llvm-lib" and backend != "cranelift":
+        return "selective MIR requires the LLVM or Cranelift native object boundary"
+    if (driver.ctx.config["mcdc_mode"] ?? "off") != "off" or
+            driver.ctx.options.aspect_params.mcdc_mode != 0 or
+            (driver.ctx.options.mcdc_mode_text != "" and driver.ctx.options.mcdc_mode_text != "static-off"):
+        return "selective MIR does not transport MC/DC parse inventory"
+    if driver.ctx.config.contains_key("coverage") or driver.ctx.options.coverage_enabled:
+        return "selective MIR does not transport coverage parse inventory"
+    if not resource_registry_selective_mir_safe_v1():
+        return "selective MIR does not transport parser resource registry state"
+    if not rt_hal_selective_mir_safe_v1():
+        return "selective MIR does not transport RT HAL compilation state"
+    if driver.ctx.runtime_std_full_inventory_selection != nil or
+            driver.ctx.demand_mir_admission != nil or driver.ctx.demand_dirty_modules.len() != 0:
+        return "selective MIR does not transport archive or demand publication state"
+    if driver.ctx.options.collection_memory_budget_bytes >= 0:
+        return "selective MIR does not transport collection publication state"
+    if driver.ctx.storage_binding_module_names.len() != 0 or
+            driver.ctx.storage_view_site_bindings.len() != 0 or
+            driver.ctx.storage_evidence_module_names.len() != 0 or
+            driver.ctx.storage_view_evidence_rows.len() != 0 or driver.ctx.storage_registry_frozen:
+        return "selective MIR does not transport typed storage registry state"
+    ""
+
+# Each process owns exactly one physical native object. Its private canonical
+# IDs never cross the native object boundary, and no second job inherits them.
+pub fn driver_mir_selective_one_job_v1(spec: text, emissions: i64) -> bool:
+    emissions > 0 and native_mir_shard_count_of_v1(spec) == emissions and
+        native_mir_shard_claim_cap_v1(spec, emissions) == 1
+
+pub fn driver_mir_selective_install_object_context_v1(bundle: NativeMirSelectiveBundleV1) -> Result<text, text>:
+    if bundle.manifest_identity.len() != 64: return Err("selective MIR object owner lacks an admitted manifest identity")
+    val identity = sha256_text("mir-selective-object-owner-v2\n" +
+        bundle.manifest_identity + "\n" + bundle.context_identity + "\n" + bundle.declarations.authority)
+    if not env_set("SIMPLE_MIR_SELECTIVE_OBJECT_CONTEXT", identity):
+        return Err("selective MIR object cache owner publication refused")
+    Ok(identity)
+
+fn driver_mir_selective_bundle_bootstrap_free_v1(bundle: NativeMirSelectiveBundleV1) -> bool:
+    for name in bundle.declarations.ordered_modules:
+        val module: MirHirModuleDeclarationsV1 = bundle.declarations.modules[name]
+        if driver_mir_selective_bootstrap_owner_v1(name, module.path) or
+                driver_mir_selective_bootstrap_owner_v1(module.name, module.path): return false
+    true
+
+pub fn driver_mir_selective_admit_link_context_v1(driver: CompilerDriver) -> Result<text, text>:
+    val unsupported = driver_mir_selective_worker_unsupported_v1(driver)
+    if unsupported != "": return Err(unsupported)
+    val context = driver_mir_selective_context_identity_v1(driver)?
+    val bundle = native_mir_selective_load_bundle_v1(native_mir_shard_export_dir_v1(),
+        driver.ctx.native_sources_fingerprint, context)?
+    driver_mir_selective_install_object_context_v1(bundle)
+
+pub fn driver_mir_selective_admit_link_v1(driver: CompilerDriver,
+        queue: text) -> Result<NativeMirShardLinkInputsV1, text>:
+    if not driver_mir_selective_explicit_native_eligible_v1(driver):
+        return Err("selective MIR link requires an explicit non-bootstrap native entry")
+    val unsupported = driver_mir_selective_worker_unsupported_v1(driver)
+    if unsupported != "": return Err(unsupported)
+    val context = driver_mir_selective_context_identity_v1(driver)?
+    val bundle = native_mir_selective_load_bundle_v1(native_mir_shard_export_dir_v1(),
+        driver.ctx.native_sources_fingerprint, context)?
+    if not driver_mir_selective_bundle_bootstrap_free_v1(bundle):
+        return Err("selective MIR bundle contains a bootstrap entry owner")
+    val identity = driver_mir_selective_install_object_context_v1(bundle)?
+    val inputs = native_mir_shard_link_inputs_v1(queue, identity)?
+    var names: [text] = []
+    for index in 0..bundle.rows.len(): names.push(bundle.rows[index].emission_name)
+    if inputs.modules != names: return Err("selective MIR ledger inventory differs from the admitted manifest order")
+    Ok(inputs)
+
+# Use only exact actual mono placements absent from the primary emission.
+# This is the existing archived consumer's collision policy, not a name-based
+# inference that every function in an alias is a specialization.
+pub fn driver_mir_selective_alias_functions_v1(bundle: NativeMirSelectiveBundleV1,
+        primary_name: text, secondary_name: text,
+        emitted_ids: Dict<i64, bool>, certified: Dict<i64, MirArchiveFunctionEmissionV1>) -> Result<[MirArchiveFunctionEmissionV1], text>:
+    if not bundle.specialization_selections.has(secondary_name) or
+            not bundle.declarations.modules.has(primary_name) or
+            not bundle.declarations.modules.has(secondary_name):
+        return Err("selective MIR alias lacks actual mono declaration publication")
+    val declaration: MirHirModuleDeclarationsV1 = bundle.declarations.modules[secondary_name]
+    val own: MirHirModuleDeclarationsV1 = bundle.declarations.modules[primary_name]
+    var selected: [MirArchiveFunctionEmissionV1] = []
+    val publications = bundle.specialization_selections[secondary_name]
+    var publication_index = 0
+    while publication_index < publications.len():
+        val publication: MirArchiveFunctionEmissionV1 = publications[publication_index]
+        var matches = 0
+        for raw_function in declaration.functions:
+            val function: MirHirFunctionDeclarationV1 = raw_function
+            if function.symbol.id != publication.symbol or function.name != publication.name or
+                    function.complete_function_digest != publication.complete_function_digest: continue
+            matches = matches + 1
+            var present_in_primary = false
+            for raw_own in own.functions:
+                val own_function: MirHirFunctionDeclarationV1 = raw_own
+                if own_function.symbol.id != function.symbol.id: continue
+                if own_function.name != function.name or
+                        own_function.complete_function_digest != function.complete_function_digest:
+                    return Err("selective MIR specialization conflicts with first emitted function")
+                present_in_primary = true
+            if emitted_ids.has(function.symbol.id):
+                if not present_in_primary:
+                    if not certified.has(function.symbol.id):
+                        return Err("selective MIR specialization conflicts with emitted generated function")
+                    val prior: MirArchiveFunctionEmissionV1 = certified[function.symbol.id]
+                    if prior.name != publication.name or prior.complete_function_digest != publication.complete_function_digest:
+                        return Err("selective MIR specialization conflicts with an earlier certified alias")
+            elif present_in_primary:
+                return Err("selective MIR primary specialization has no emitted definition")
+            else:
+                selected.push(publication)
+        if matches != 1: return Err("selective MIR specialization differs from final complete function")
+        publication_index = publication_index + 1
+    Ok(selected)
+
+# Receipts measure actual post-claim body decode/lowering, never worker launch
+# time or synthetic sleeps. They are separate from object emission sidecars.
+pub fn driver_mir_selective_interval_v1(queue: text, context: text, name: text,
+        start: i64, status: text) -> bool:
+    val end = time_now_monotonic_ms()
+    if queue == "" or context == "" or name == "" or name.contains("\n") or
+            start <= 0 or end <= 0 or end < start or
+            (status != "lower-ok" and status != "lower-fail"): return false
+    val path = "{queue}/{sha256_text(name)}.mir-interval"
+    val temporary = "{path}.{getpid()}.tmp"
+    val body = "native-mir-selective-interval-v1\n{context}\n{name}\n{getpid()}\n{start}\n{end}\n{status}\n"
+    file_write(temporary, body) and file_rename(temporary, path)
+
+# Decode a separate mutable SymbolTable owner. Lending the declaration table
+# itself would let prescan/generated rows mutate the sealed repository.
+pub fn driver_mir_selective_copy_symbols_v1(symbols: SymbolTable) -> Result<SymbolTable, text>:
+    if transient_array_scope_state_v1() != 0: return Err("selective MIR symbol boundary is occupied")
+    if not transient_scope_begin(): return Err("selective MIR symbol scope unavailable")
+    var writer = HirCodecWriter.create()
+    hc_enc_symbol_table(writer, symbols)
+    var result: Result<SymbolTable, text> = Err("selective MIR symbol encoding refused")
+    if writer.ok:
+        val blob = writer.finish()
+        var reader = FlatPoolReader.new(blob)
+        val copied: SymbolTable = hc_dec_symbol_table(reader)
+        var check = HirCodecWriter.create()
+        hc_enc_symbol_table(check, copied)
+        if reader.ok and reader.pos == reader.lines.len() - 1 and reader.lines[reader.pos] == "" and
+                check.ok and check.finish() == blob:
+            result = Ok(copied)
+    val paused = transient_scope_pause()
+    var owned = false
+    if paused: owned = transient_promote(result)
+    val ended = transient_scope_end()
+    if not paused or not owned or not ended: return Err("selective MIR symbol ownership failed")
+    result
+
+fn driver_mir_selective_close_prescan_v1(mut lowering: MirLowering, phase: text) -> Result<bool, text>:
+    val paused = transient_scope_pause()
+    var owned = false
+    if paused:
+        owned = lowering.promote_transient_owner()
+        owned = bootstrap_fn_registries_promote() and owned
+        owned = bootstrap_mir_registries_promote() and owned
+    val ended = transient_scope_end()
+    if not paused or not owned or not ended: return Err("selective MIR {phase} ownership failed")
+    Ok(true)
+
+pub fn driver_mir_selective_prepare_v1(mut lowering: MirLowering,
+        declarations: MirHirDeclarationRepositoryV1, source_order: [text]) -> Result<bool, text>:
+    if transient_array_scope_state_v1() != 0 or hir_cache_last_warnings().len() != 0:
+        return Err("selective MIR declaration boundary is occupied")
+    if lowering.ambient_bootstrap_enabled() or lowering.trait_impl_provider_modules.len() != 0:
+        return Err("selective MIR requires private declaration providers")
+    lowering.declaration_repository = Some(declarations)
+    bootstrap_fn_param_defaults_detach_for_archive_v1()
+    lowering.declaration_parameter_defaults = {}
+    lowering.declaration_parameter_defaults_ambiguous = {}
+    # Match the ordinary driver's persistent name-cache warmup before scratch.
+    # The names come only from already admitted body-free declaration owners.
+    for name in declarations.ordered_modules:
+        val module: MirHirModuleDeclarationsV1 = declarations.modules[name]
+        module_logical_name_cache_warm(name)
+        module_logical_name_cache_warm(module.name)
+        var raw_id: i64 = 0
+        while raw_id < module.symbols.next_symbol_id:
+            val owner = module.symbols.symbol_defining_module_scalar_raw(raw_id)
+            if owner != "": module_logical_name_cache_warm(owner)
+            raw_id = raw_id + 1
+    # Preserve three distinct serial phase barriers. Provider dict order owns
+    # names/callables; original source order owns enums and composite defaults.
+    for name in declarations.ordered_modules:
+        if not transient_scope_begin(): return Err("selective MIR prescan scope unavailable")
+        lowering.prescan_module_declarations_v1(declarations.modules[name], false)
+        val closed = driver_mir_selective_close_prescan_v1(lowering, "declaration prescan")
+        if closed.is_err(): return Err(closed.unwrap_err())
+    for name in source_order:
+        if not declarations.modules.has(name): return Err("selective MIR source enum inventory owner is absent")
+        if not transient_scope_begin(): return Err("selective MIR enum inventory scope unavailable")
+        lowering.register_declaration_enums_v1(declarations.modules[name])
+        val closed = driver_mir_selective_close_prescan_v1(lowering, "enum inventory")
+        if closed.is_err(): return Err(closed.unwrap_err())
+    for name in source_order:
+        if not declarations.modules.has(name): return Err("selective MIR source composite inventory owner is absent")
+        if not transient_scope_begin(): return Err("selective MIR composite inventory scope unavailable")
+        lowering.register_declaration_composite_inventory_v1(declarations.modules[name])
+        val closed = driver_mir_selective_close_prescan_v1(lowering, "composite inventory")
+        if closed.is_err(): return Err(closed.unwrap_err())
+    Ok(true)
+
+# Only called after a successful ledger claim. Admission/body projection and
+# actual lowering share one scope; no complete HIR escapes that owner.
+pub fn driver_mir_selective_lower_claimed_v1(mut lowering: MirLowering,
+        dir: text, bundle: NativeMirSelectiveBundleV1,
+        row: NativeMirSelectiveRowV1,
+        selected_functions: [MirArchiveFunctionEmissionV1]? = nil,
+        primary_logical_key: text = "", primary_output: MirModule? = nil,
+        primary_symbols: SymbolTable? = nil, symbol_baseline_key: text = "",
+        primary_trait_thunks: [MirFunction] = []) -> Result<MirModule, MirArchiveLoweringFailureV1>:
+    if transient_array_scope_state_v1() != 0 or hir_cache_last_warnings().len() != 0:
+        return Err(mir_archive_failure_v1(lowering, "selective MIR body boundary is occupied"))
+    if not transient_scope_begin(): return Err(mir_archive_failure_v1(lowering, "selective MIR body scope unavailable"))
+    val reverse_token = reverse_reference_module_begin_v1()
+    if reverse_token < 0:
+        val ended = transient_scope_end()
+        return Err(mir_archive_failure_v1(lowering, "selective MIR reverse-reference owner unavailable"))
+    val loaded = native_mir_selective_load_body_in_owned_scope_v1(dir, bundle, row)
+    var lowered: Result<MirModule, text> = Err("selective MIR body admission refused")
+    if loaded.is_ok():
+        # Local definitions override cross-module first-winner defaults at the
+        # same boundary as lower_module's own local composite registration.
+        lowering.install_declaration_local_composite_defaults_v1(bundle.declarations.modules[row.lookup_name])
+        lowered = lowering.lower_archive_module_in_owned_scope_v1(loaded.unwrap(), row.is_entry,
+            row.lookup_name, selected_functions, primary_logical_key, primary_output,
+            primary_symbols, symbol_baseline_key, primary_trait_thunks)
+    else:
+        lowered = Err(loaded.unwrap_err())
+    if lowered.is_err():
+        # The owner is discarded after this failure: a lowering operation may
+        # have replaced scratch roots. Preserve only real diagnostic carriers.
+        val failure = mir_archive_failure_v1(lowering, lowered.unwrap_err())
+        val paused = transient_scope_pause()
+        var owned = false
+        if paused:
+            owned = transient_promote(failure) and hir_cache_promote_diagnostic_owner_v1()
+            hir_cache_clear_last_warnings()
+        val aborted = reverse_reference_module_abort_v1(reverse_token)
+        val ended = transient_scope_end()
+        if not paused or not owned or not aborted or not ended:
+            panic("selective MIR failure diagnostic ownership failed")
+        return Err(failure)
+    val output: MirModule = lowered.unwrap()
+    val failure = mir_archive_failure_v1(lowering, "selective MIR body ownership failed; discard lowering owner")
+    val paused = transient_scope_pause()
+    var owned = false
+    var failure_owned = false
+    if paused:
+        owned = transient_promote(output)
+        owned = lowering.promote_transient_owner() and owned
+        owned = bootstrap_fn_registries_promote() and owned
+        owned = bootstrap_mir_registries_promote() and owned
+        owned = hir_cache_promote_diagnostic_owner_v1() and owned
+        hir_cache_clear_last_warnings()
+        owned = reverse_reference_module_seal_v1(reverse_token) and owned
+        if not owned: failure_owned = transient_promote(failure)
+    val ended = transient_scope_end()
+    if not paused or not owned or not ended:
+        val aborted = reverse_reference_module_abort_v1(reverse_token)
+        if not failure_owned: panic("selective MIR failed diagnostic owner unavailable")
+        return Err(failure)
+    if not reverse_reference_module_publish_v1(reverse_token):
+        val aborted = reverse_reference_module_abort_v1(reverse_token)
+        return Err(mir_archive_failure_v1(lowering, "selective MIR reverse-reference publication failed"))
+    Ok(output)
+
+impl CompilerDriver:
+    me record_selective_mir_interval_v1(queue: text, identity: text, name: text,
+            start: i64, status: text) -> bool:
+        if driver_mir_selective_interval_v1(queue, identity, name, start, status): return true
+        self.ctx.add_error("selective MIR actual lowering interval publication refused: {name}")
+        false
+
+    me lower_selective_to_mir_v1() -> bool:
+        if not driver_mir_selective_explicit_native_eligible_v1(self):
+            self.ctx.add_error("selective MIR requires an explicit non-bootstrap native entry")
+            return false
+        if self.native_staged_codegen.shard_claimed_names.len() != 0 or
+                self.ctx.mir_modules.keys().len() != 0 or self.ctx.hir_modules.keys().len() != 0:
+            self.ctx.add_error("selective MIR requires a fresh process worker without prior body graphs or claims")
+            return false
+        val unsupported = driver_mir_selective_worker_unsupported_v1(self)
+        if unsupported != "":
+            self.ctx.add_error(unsupported)
+            return false
+        if native_mir_shard_count_of_v1(native_mir_shard_spec_v1()) <= 0:
+            self.ctx.add_error("selective MIR requires a valid worker shard specification")
+            return false
+        val context = driver_mir_selective_context_identity_v1(self)
+        if context.is_err():
+            self.ctx.add_error(context.unwrap_err())
+            return false
+        val dir = native_mir_shard_export_dir_v1()
+        val admitted = native_mir_selective_load_bundle_v1(dir,
+            self.ctx.native_sources_fingerprint, context.unwrap())
+        if admitted.is_err():
+            self.ctx.add_error("selective MIR bundle refused: {admitted.unwrap_err()}")
+            return false
+        val bundle: NativeMirSelectiveBundleV1 = admitted.unwrap()
+        if not driver_mir_selective_bundle_bootstrap_free_v1(bundle):
+            self.ctx.add_error("selective MIR bundle contains a bootstrap entry owner")
+            return false
+        if bundle.rows.len() == 0:
+            self.ctx.add_error("selective MIR emission schedule is empty")
+            return false
+        val declarations: MirHirDeclarationRepositoryV1 = bundle.declarations
+        if not driver_mir_selective_one_job_v1(native_mir_shard_spec_v1(), bundle.rows.len()):
+            self.ctx.add_error("selective MIR requires exactly one physical native object per fresh worker process")
+            return false
+        val installed = driver_mir_selective_install_object_context_v1(bundle)
+        if installed.is_err():
+            self.ctx.add_error(installed.unwrap_err())
+            return false
+        val ledger_identity = installed.unwrap()
+        val first: NativeMirSelectiveRowV1 = bundle.rows[0]
+        val seeded = driver_mir_selective_copy_symbols_v1(declarations.modules[first.lookup_name].symbols)
+        if seeded.is_err():
+            self.ctx.add_error(seeded.unwrap_err())
+            return false
+        var lowering = MirLowering.new_for_target(seeded.unwrap(), driver_mir_target_context(self.ctx.options))
+        lowering.use_explicit_semantic_policy()
+        lowering.trait_impl_closure_complete = driver_trait_devirtualization_allowed_v1(true, false, false)
+        val prepared = driver_mir_selective_prepare_v1(lowering, declarations, bundle.source_order)
+        if prepared.is_err():
+            self.ctx.add_error(prepared.unwrap_err())
+            return false
+        var names: [text] = []
+        var weights: [i64] = []
+        for index in 0..bundle.rows.len():
+            val row: NativeMirSelectiveRowV1 = bundle.rows[index]
+            names.push(row.emission_name)
+            weights.push(row.weight)
+        self.native_staged_codegen.scheduled_names = names
+        val queue = self.native_staged_codegen.shard_queue
+        if queue == "" or not hir_shard_recovery_inventory(queue,
+                ledger_identity, names):
+            self.ctx.add_error("selective MIR ledger inventory refused")
+            return false
+        val cap = native_mir_shard_claim_cap_v1(native_mir_shard_spec_v1(), names.len())
+        val walk = native_mir_shard_lpt_order_v1(names, weights)
+        for position in walk:
+            if self.native_staged_codegen.shard_claimed_names.len() >= cap: break
+            val row: NativeMirSelectiveRowV1 = bundle.rows[position]
+            val claim = native_mir_shard_claim_v1(queue, row.emission_name, ledger_identity)
+            if claim < 0:
+                self.ctx.add_error("selective MIR ledger refused claim for {row.emission_name}")
+                return false
+            if claim == 0: continue
+            self.native_staged_codegen.shard_claimed_names =
+                self.native_staged_codegen.shard_claimed_names.push(row.emission_name)
+            val errors_before = lowering.errors.len()
+            val started = time_now_monotonic_ms()
+            if started <= 0:
+                self.ctx.add_error("selective MIR monotonic lowering start clock refused")
+                return false
+            val lowered = driver_mir_selective_lower_claimed_v1(lowering, dir, bundle, row)
+            if lowered.is_err():
+                val failure = lowered.unwrap_err()
+                _driver_collect_mir_errors(self.ctx, failure.errors)
+                driver_collect_mir_advisories(self.ctx, failure.advisories)
+                self.ctx.add_error("selective MIR failed {row.emission_name}: {failure.message}")
+                val _interval = self.record_selective_mir_interval_v1(queue, ledger_identity,
+                    row.emission_name, started, "lower-fail")
+                return false
+            var output: MirModule = lowered.unwrap()
+            var emitted_ids: Dict<i64, bool> = {}
+            var certified: Dict<i64, MirArchiveFunctionEmissionV1> = {}
+            for raw_id in output.functions.keys():
+                val id: SymbolId = raw_id
+                emitted_ids[id.id] = true
+            var symbol_baseline_key = row.lookup_name
+            for secondary_name in row.secondary_names:
+                val selected = driver_mir_selective_alias_functions_v1(bundle,
+                    row.lookup_name, secondary_name, emitted_ids, certified)
+                if selected.is_err():
+                    self.ctx.add_error(selected.unwrap_err())
+                    val _interval = self.record_selective_mir_interval_v1(queue, ledger_identity,
+                        row.emission_name, started, "lower-fail")
+                    return false
+                if selected.unwrap().len() == 0: continue
+                val secondary = native_mir_selective_provider_row_v1(bundle, secondary_name)
+                if secondary.is_err():
+                    self.ctx.add_error(secondary.unwrap_err())
+                    val _interval = self.record_selective_mir_interval_v1(queue, ledger_identity,
+                        row.emission_name, started, "lower-fail")
+                    return false
+                val previous_symbols = lowering.symbols
+                val previous_thunks = lowering.native_trait_thunks
+                val additional = driver_mir_selective_lower_claimed_v1(lowering, dir, bundle,
+                    secondary.unwrap(), Some(selected.unwrap()),
+                    row.lookup_name, Some(output), Some(previous_symbols),
+                    symbol_baseline_key, previous_thunks)
+                if additional.is_err():
+                    val failure = additional.unwrap_err()
+                    _driver_collect_mir_errors(self.ctx, failure.errors)
+                    driver_collect_mir_advisories(self.ctx, failure.advisories)
+                    self.ctx.add_error("selective MIR alias failed {secondary_name}: {failure.message}")
+                    val _interval = self.record_selective_mir_interval_v1(queue, ledger_identity,
+                        row.emission_name, started, "lower-fail")
+                    return false
+                output = additional.unwrap()
+                val exact = selected.unwrap()
+                for exact_index in 0..exact.len():
+                    val function: MirArchiveFunctionEmissionV1 = exact[exact_index]
+                    certified[function.symbol] = function
+                for raw_id in output.functions.keys():
+                    val id: SymbolId = raw_id
+                    emitted_ids[id.id] = true
+                symbol_baseline_key = secondary_name
+            driver_trace_module_mir_errors(row.emission_name, row.path, lowering.errors, errors_before)
+            # Failed MIR never enters codegen. The process has at most one
+            # physical claim; its aliases share only this job's lowering owner.
+            val fatal = driver_mir_has_new_fatal_errors_v1(lowering.errors, errors_before)
+            if not self.record_selective_mir_interval_v1(queue, ledger_identity, row.emission_name,
+                    started, if fatal: "lower-fail" else: "lower-ok"): return false
+            if fatal: continue
+            output.name = row.emission_name
+            self.ctx.mir_modules[row.emission_name] = output
+            if row.emission_name == "app.cli.bootstrap_main":
+                self.ctx.set_bootstrap_entry_mir(row.emission_name, output)
+        _driver_collect_mir_errors(self.ctx, lowering.errors)
+        driver_collect_mir_advisories(self.ctx, lowering.mir_advisories)
+        if self.ctx.error_count_value != 0: return false
+        self.verify_lowered_mir_v1()
+
+export driver_mir_selective_enabled_v1, driver_mir_selective_worker_unsupported_v1,
+    driver_mir_selective_one_job_v1,
+    driver_mir_selective_copy_symbols_v1, driver_mir_selective_prepare_v1,
+    driver_mir_selective_lower_claimed_v1, driver_mir_selective_install_object_context_v1,
+    driver_mir_selective_admit_link_context_v1, driver_mir_selective_alias_functions_v1,
+    driver_mir_selective_interval_v1, driver_mir_selective_admit_link_v1

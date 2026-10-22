@@ -1,0 +1,294 @@
+# Versioned graph interchange through the shared SDN parser and canonical writer.
+# @req REQ-TRC-001 REQ-TRC-007 REQ-TRC-014 REQ-TRC-018
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.parser.{parse_with_spans_and_issues}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.traceability.model.*
+use std.common.traceability.schema.*
+
+fn record(names: [text], values: [SdnValue]) -> SdnValue:
+    var fields: Dict<text, SdnValue> = {}
+    var i = 0
+    while i < names.len():
+        fields[names[i]] = values[i]
+        i = i + 1
+    SdnValue.Dict(fields)
+
+fn strings(names: [text], values: [text]) -> SdnValue:
+    var fields: Dict<text, SdnValue> = {}
+    var i = 0
+    while i < names.len():
+        fields[names[i]] = SdnValue.String(values[i])
+        i = i + 1
+    SdnValue.Dict(fields)
+
+fn checked_record(value: SdnValue, names: [text]) -> Result<Dict<text, SdnValue>, text>:
+    match value:
+        case SdnValue.Dict(fields):
+            if fields.len() != names.len():
+                return Err("unexpected or missing fields in trace record")
+            for name in names:
+                if not fields.contains_key(name):
+                    return Err("missing trace field: " + name)
+            Ok(fields)
+        case _:
+            Err("trace record must be an SDN dictionary")
+
+fn text_field(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("expected text at " + name)
+
+fn array_field(fields: Dict<text, SdnValue>, name: text) -> Result<[SdnValue], text>:
+    match fields[name]:
+        case SdnValue.Array(value):
+            if value.len() > 65536:
+                return Err("trace collection exceeds 65536 records: " + name)
+            Ok(value)
+        case _: Err("expected array at " + name)
+
+fn bool_field(fields: Dict<text, SdnValue>, name: text) -> Result<bool, text>:
+    match fields[name]:
+        case SdnValue.Bool(value): Ok(value)
+        case _: Err("expected boolean at " + name)
+
+fn read_subject(value: SdnValue) -> Result<SnapshotSubject, text>:
+    val f = checked_record(value, ["repository_id", "snapshot_id", "kind", "revision_id", "tree_id", "object_format"])?
+    Ok(SnapshotSubject(repository_id: text_field(f, "repository_id")?, snapshot_id: text_field(f, "snapshot_id")?, kind: text_field(f, "kind")?, revision_id: text_field(f, "revision_id")?, tree_id: text_field(f, "tree_id")?, object_format: text_field(f, "object_format")?))
+
+fn read_node(value: SdnValue) -> Result<TraceNode, text>:
+    val f = checked_record(value, ["id", "kind", "title"])?
+    val kind = parse_node_kind(text_field(f, "kind")?)?
+    Ok(TraceNode(id: text_field(f, "id")?, kind: kind, title: text_field(f, "title")?))
+
+fn read_origin(value: SdnValue) -> Result<TraceOrigin, text>:
+    val f = checked_record(value, ["id", "kind", "owner_path", "locator", "rule_version"])?
+    val kind = parse_origin_kind(text_field(f, "kind")?)?
+    Ok(TraceOrigin(id: text_field(f, "id")?, kind: kind, owner_path: text_field(f, "owner_path")?, locator: text_field(f, "locator")?, rule_version: text_field(f, "rule_version")?))
+
+fn read_definition(value: SdnValue) -> Result<TraceTestDefinition, text>:
+    val f = checked_record(value, ["node_id", "kind", "definition_id", "parameter_digest", "definition_digest"])?
+    val kind = parse_test_kind(text_field(f, "kind")?)?
+    Ok(TraceTestDefinition(node_id: text_field(f, "node_id")?, kind: kind, definition_id: text_field(f, "definition_id")?, parameter_digest: text_field(f, "parameter_digest")?, definition_digest: text_field(f, "definition_digest")?))
+
+fn read_claim(value: SdnValue) -> Result<TraceClaim, text>:
+    val f = checked_record(value, ["id", "from_id", "relation", "to_id", "origin_id", "operation", "rule_id", "scope_id"])?
+    val relation = parse_relation(text_field(f, "relation")?)?
+    val operation = parse_claim_operation(text_field(f, "operation")?)?
+    Ok(TraceClaim(id: text_field(f, "id")?, from_id: text_field(f, "from_id")?, relation: relation, to_id: text_field(f, "to_id")?, origin_id: text_field(f, "origin_id")?, operation: operation, rule_id: text_field(f, "rule_id")?, scope_id: text_field(f, "scope_id")?))
+
+fn read_edge(value: SdnValue) -> Result<TraceEdge, text>:
+    val f = checked_record(value, ["id", "from_id", "relation", "to_id"])?
+    val relation = parse_relation(text_field(f, "relation")?)?
+    Ok(TraceEdge(id: text_field(f, "id")?, from_id: text_field(f, "from_id")?, relation: relation, to_id: text_field(f, "to_id")?))
+
+fn read_binding(value: SdnValue) -> Result<TraceEdgeOrigin, text>:
+    val f = checked_record(value, ["edge_id", "origin_id"])?
+    Ok(TraceEdgeOrigin(edge_id: text_field(f, "edge_id")?, origin_id: text_field(f, "origin_id")?))
+
+fn read_locator(value: SdnValue) -> Result<TraceLocator, text>:
+    val f = checked_record(value, ["entity_id", "path", "locator_kind", "locator", "blob_id"])?
+    Ok(TraceLocator(entity_id: text_field(f, "entity_id")?, path: text_field(f, "path")?, locator_kind: text_field(f, "locator_kind")?, locator: text_field(f, "locator")?, blob_id: text_field(f, "blob_id")?))
+
+fn read_diagnostic(value: SdnValue) -> Result<TraceDiagnostic, text>:
+    val f = checked_record(value, ["code", "subject_id", "rule_id", "entity_id", "origin_id", "message", "severity"])?
+    Ok(TraceDiagnostic(code: text_field(f, "code")?, subject_id: text_field(f, "subject_id")?, rule_id: text_field(f, "rule_id")?, entity_id: text_field(f, "entity_id")?, origin_id: text_field(f, "origin_id")?, message: text_field(f, "message")?, severity: text_field(f, "severity")?))
+
+fn read_graph(value: SdnValue) -> Result<TraceGraph, text>:
+    val f = checked_record(value, ["subject", "input_manifest_id", "nodes", "test_definitions", "claims", "edges", "edge_origins", "origins", "locators", "diagnostics", "generation_id", "complete"])?
+    val subject = read_subject(f["subject"])?
+    var nodes: [TraceNode] = []
+    for row in array_field(f, "nodes")?:
+        nodes.push(read_node(row)?)
+    var definitions: [TraceTestDefinition] = []
+    for row in array_field(f, "test_definitions")?:
+        definitions.push(read_definition(row)?)
+    var claims: [TraceClaim] = []
+    for row in array_field(f, "claims")?:
+        claims.push(read_claim(row)?)
+    var edges: [TraceEdge] = []
+    for row in array_field(f, "edges")?:
+        edges.push(read_edge(row)?)
+    var bindings: [TraceEdgeOrigin] = []
+    for row in array_field(f, "edge_origins")?:
+        bindings.push(read_binding(row)?)
+    var origins: [TraceOrigin] = []
+    for row in array_field(f, "origins")?:
+        origins.push(read_origin(row)?)
+    var locators: [TraceLocator] = []
+    for row in array_field(f, "locators")?:
+        locators.push(read_locator(row)?)
+    var diagnostics: [TraceDiagnostic] = []
+    for row in array_field(f, "diagnostics")?:
+        diagnostics.push(read_diagnostic(row)?)
+    Ok(TraceGraph(subject: subject, input_manifest_id: text_field(f, "input_manifest_id")?, nodes: nodes, test_definitions: definitions, claims: claims, edges: edges, edge_origins: bindings, origins: origins, locators: locators, diagnostics: diagnostics, generation_id: text_field(f, "generation_id")?, complete: bool_field(f, "complete")?))
+
+fn read_document(value: SdnValue) -> Result<TraceDocument, text>:
+    val f = checked_record(value, ["schema", "graph"])?
+    val schema = checked_record(f["schema"], ["name", "version"])?
+    val name = text_field(schema, "name")?
+    if name != "simple.trace.graph":
+        return Err("unsupported trace schema family: " + name)
+    match schema["version"]:
+        case SdnValue.Int(version):
+            if version != 1:
+                return Err("unsupported trace schema version: " + version.to_text())
+        case _:
+            return Err("trace schema version must be an integer")
+    val graph = read_graph(f["graph"])?
+    Ok(TraceDocument(schema_name: name, schema_version: 1, graph: graph))
+
+fn parse_trace_value(source: text) -> Result<SdnValue, [TraceDiagnostic]>:
+    match trace_sdn_preflight(source):
+        case Err(message):
+            return Err([trace_diagnostic("TRACE-SDN-SCHEMA", "unknown", "decode", "", "", message)])
+        case Ok(_): ()
+    match parse_with_spans_and_issues(source):
+        case Err(message):
+            Err([trace_diagnostic("TRACE-SDN-SCHEMA", "unknown", "decode", "", "", message)])
+        case Ok(parsed):
+            var issues: [TraceDiagnostic] = []
+            for issue in parsed.2:
+                issues.push(trace_diagnostic("TRACE-SDN-SCHEMA", "unknown", "decode", issue.path, "", issue.message + " at " + issue.line.to_text() + ":" + issue.col.to_text()))
+            if issues.len() > 0:
+                return Err(issues)
+            Ok(parsed.0)
+
+# Failed parsing is never replaced by an empty graph or a clean result.
+pub fn decode_trace_document(source: text) -> Result<TraceDocument, [TraceDiagnostic]>:
+    val value = parse_trace_value(source)?
+    match read_document(value):
+        case Err(message):
+            Err([trace_diagnostic("TRACE-SDN-SCHEMA", "unknown", "decode", "", "", message)])
+        case Ok(document):
+            val violations = validate_trace_graph(document.graph)
+            if violations.len() > 0:
+                Err(violations)
+            else:
+                Ok(document)
+
+fn read_declarations(value: SdnValue, subject: SnapshotSubject, owner_path: text, blob_id: text) -> Result<TraceFacts, text>:
+    if not trace_path_valid(owner_path) or blob_id == "":
+        return Err("declaration source requires safe frozen owner path and blob identity")
+    val f = checked_record(value, ["schema", "nodes", "test_definitions", "claims", "origins", "locators"])?
+    val schema = checked_record(f["schema"], ["name", "version"])?
+    if text_field(schema, "name")? != "simple.trace.declarations":
+        return Err("unsupported declaration schema family")
+    match schema["version"]:
+        case SdnValue.Int(version):
+            if version != 1:
+                return Err("unsupported declaration schema version")
+        case _:
+            return Err("declaration version must be an integer")
+    var nodes: [TraceNode] = []
+    var node_ids: Dict<text, bool> = {}
+    for row in array_field(f, "nodes")?:
+        val node = read_node(row)?
+        if not trace_id_valid(node.id) or node_ids.contains_key(node.id):
+            return Err("invalid or duplicate declaration node ID")
+        node_ids[node.id] = true
+        nodes.push(node)
+    var definitions: [TraceTestDefinition] = []
+    for row in array_field(f, "test_definitions")?:
+        definitions.push(read_definition(row)?)
+    var origins: [TraceOrigin] = []
+    var origin_ids: Dict<text, bool> = {}
+    for row in array_field(f, "origins")?:
+        val fields = checked_record(row, ["id", "kind", "locator"])?
+        val id = text_field(fields, "id")?
+        val kind = parse_origin_kind(text_field(fields, "kind")?)?
+        if not trace_id_valid(id) or origin_ids.contains_key(id):
+            return Err("invalid or duplicate authored origin identity")
+        if kind != TraceOriginKind.Explicit and kind != TraceOriginKind.Annotation:
+            return Err("declaration cannot assert derived or observed authority")
+        origin_ids[id] = true
+        origins.push(TraceOrigin(id: id, kind: kind, owner_path: owner_path, locator: text_field(fields, "locator")?, rule_version: "trace-declarations-v1"))
+    var claims: [TraceClaim] = []
+    var claim_ids: Dict<text, bool> = {}
+    for row in array_field(f, "claims")?:
+        val claim = read_claim(row)?
+        if not trace_id_valid(claim.id) or claim_ids.contains_key(claim.id) or not origin_ids.contains_key(claim.origin_id):
+            return Err("invalid/duplicate claim or missing local declaration origin")
+        if not trace_id_valid(claim.from_id) or (claim.operation != TraceClaimOperation.Suppress and not trace_id_valid(claim.to_id)):
+            return Err("invalid declaration endpoint identity")
+        claim_ids[claim.id] = true
+        claims.push(claim)
+    var locators: [TraceLocator] = []
+    for row in array_field(f, "locators")?:
+        val fields = checked_record(row, ["entity_id", "path", "locator_kind", "locator"])?
+        val path = text_field(fields, "path")?
+        if not trace_path_valid(path):
+            return Err("declaration locator escapes the repository path policy")
+        val pinned = if path == owner_path: blob_id else: ""
+        locators.push(TraceLocator(entity_id: text_field(fields, "entity_id")?, path: path, locator_kind: text_field(fields, "locator_kind")?, locator: text_field(fields, "locator")?, blob_id: pinned))
+    # The adapter replaces this document-local input identity when composing
+    # the complete snapshot. Cross-file locators must be pinned there too.
+    val manifest = "declarations:" + blob_id
+    Ok(TraceFacts(subject: subject, input_manifest_id: manifest, nodes: nodes, test_definitions: definitions, claims: claims, origins: origins, locators: locators, diagnostics: [], generation_id: manifest, complete: true))
+
+pub fn decode_trace_declarations(source: text, subject: SnapshotSubject, owner_path: text, blob_id: text) -> Result<TraceFacts, [TraceDiagnostic]>:
+    var value = SdnValue.Null
+    match parse_trace_value(source):
+        case Ok(parsed): value = parsed
+        case Err(issues):
+            var pinned: [TraceDiagnostic] = []
+            for issue in issues:
+                pinned.push(trace_diagnostic(issue.code, subject.snapshot_id, "declarations", owner_path, "", issue.message))
+            return Err(pinned)
+    match read_declarations(value, subject, owner_path, blob_id):
+        case Ok(facts): Ok(facts)
+        case Err(message):
+            Err([trace_diagnostic("TRACE-SDN-SCHEMA", subject.snapshot_id, "declarations", owner_path, "", message)])
+
+fn ordered(records: Dict<text, SdnValue>) -> SdnValue:
+    var rows: [SdnValue] = []
+    for key in trace_sorted_ids(records.keys()):
+        rows.push(records[key])
+    SdnValue.Array(rows)
+
+fn write_graph(graph: TraceGraph) -> SdnValue:
+    val subject = graph.subject
+    val encoded_subject = strings(["repository_id", "snapshot_id", "kind", "revision_id", "tree_id", "object_format"], [subject.repository_id, subject.snapshot_id, subject.kind, subject.revision_id, subject.tree_id, subject.object_format])
+    var nodes: Dict<text, SdnValue> = {}
+    for node in graph.nodes:
+        nodes[node.id] = strings(["id", "kind", "title"], [node.id, node_kind_name(node.kind), node.title])
+    var definitions: Dict<text, SdnValue> = {}
+    for definition in graph.test_definitions:
+        definitions[definition.node_id + "|" + test_kind_name(definition.kind)] = strings(["node_id", "kind", "definition_id", "parameter_digest", "definition_digest"], [definition.node_id, test_kind_name(definition.kind), definition.definition_id, definition.parameter_digest, definition.definition_digest])
+    var claims: Dict<text, SdnValue> = {}
+    for claim in graph.claims:
+        claims[claim.id] = strings(["id", "from_id", "relation", "to_id", "origin_id", "operation", "rule_id", "scope_id"], [claim.id, claim.from_id, relation_name(claim.relation), claim.to_id, claim.origin_id, claim_operation_name(claim.operation), claim.rule_id, claim.scope_id])
+    var edges: Dict<text, SdnValue> = {}
+    for edge in graph.edges:
+        edges[edge.id] = strings(["id", "from_id", "relation", "to_id"], [edge.id, edge.from_id, relation_name(edge.relation), edge.to_id])
+    var bindings: Dict<text, SdnValue> = {}
+    for binding in graph.edge_origins:
+        bindings[binding.edge_id + "|" + binding.origin_id] = strings(["edge_id", "origin_id"], [binding.edge_id, binding.origin_id])
+    var origins: Dict<text, SdnValue> = {}
+    for origin in graph.origins:
+        origins[origin.id] = strings(["id", "kind", "owner_path", "locator", "rule_version"], [origin.id, origin_kind_name(origin.kind), origin.owner_path, origin.locator, origin.rule_version])
+    var locators: Dict<text, SdnValue> = {}
+    for locator in graph.locators:
+        val key = locator.entity_id + "|" + locator.path + "|" + locator.locator_kind + "|" + locator.locator
+        locators[key] = strings(["entity_id", "path", "locator_kind", "locator", "blob_id"], [locator.entity_id, locator.path, locator.locator_kind, locator.locator, locator.blob_id])
+    var diagnostics: Dict<text, SdnValue> = {}
+    var ordinal = 0
+    for diagnostic in graph.diagnostics:
+        val row = strings(["code", "subject_id", "rule_id", "entity_id", "origin_id", "message", "severity"], [diagnostic.code, diagnostic.subject_id, diagnostic.rule_id, diagnostic.entity_id, diagnostic.origin_id, diagnostic.message, diagnostic.severity])
+        # Preserve repeated observations rather than silently coalescing rows.
+        diagnostics[sdn_encode_canonical(row) + "|" + ordinal.to_text()] = row
+        ordinal = ordinal + 1
+    record(["subject", "input_manifest_id", "nodes", "test_definitions", "claims", "edges", "edge_origins", "origins", "locators", "diagnostics", "generation_id", "complete"], [encoded_subject, SdnValue.String(graph.input_manifest_id), ordered(nodes), ordered(definitions), ordered(claims), ordered(edges), ordered(bindings), ordered(origins), ordered(locators), ordered(diagnostics), SdnValue.String(graph.generation_id), SdnValue.Bool(graph.complete)])
+
+pub fn encode_trace_document(document: TraceDocument) -> Result<text, [TraceDiagnostic]>:
+    if document.schema_name != "simple.trace.graph" or document.schema_version != 1:
+        return Err([trace_diagnostic("TRACE-SDN-SCHEMA", document.graph.subject.snapshot_id, "encode", "", "", "unsupported graph schema family/version")])
+    val issues = validate_trace_graph(document.graph)
+    if issues.len() > 0:
+        return Err(issues)
+    val schema = record(["name", "version"], [SdnValue.String(document.schema_name), SdnValue.Int(document.schema_version)])
+    val envelope = record(["schema", "graph"], [schema, write_graph(document.graph)])
+    val encoded = sdn_encode_canonical(envelope) + "\n"
+    if encoded.len() > 1048576:
+        return Err([trace_diagnostic("TRACE-SDN-SCHEMA", document.graph.subject.snapshot_id, "encode", "", "", "graph document exceeds 1 MiB; partition before publication")])
+    Ok(encoded)

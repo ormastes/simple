@@ -1,0 +1,53 @@
+# @tag: unit, compiler, mir_opt
+use std.spec
+use compiler.mir.mir_instruction_support.{BlockId, MirOperand, MirTerminator}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_instructions.{MirBlock, MirInst}
+use compiler.mir.mir_types.{LocalId, MirConstValue, MirType}
+use compiler.mir_opt.dce.{DeadCodeElimination}
+use compiler.mir_opt.outline.{get_terminator_successors, get_terminator_uses}
+use compiler.mir_opt.perf_facts.{perf_facts_terminator_successors}
+
+fn exceptional_terminators() -> [MirTerminator]:
+    val payload = MirOperand.copy(LocalId(id: 5))
+    val type_tag = MirOperand.copy(LocalId(id: 6))
+    [
+        MirTerminator.Throw(payload, type_tag),
+        MirTerminator.Resume(payload, type_tag)
+    ]
+
+describe "exceptional MIR terminator optimizer handling":
+    it "keeps Throw and Resume terminal in all successor analyses":
+        val dce = DeadCodeElimination.new()
+        for term in exceptional_terminators():
+            expect(dce.get_successor_blocks(term).len()).to_equal(0)
+            expect(get_terminator_successors(term).len()).to_equal(0)
+            expect(perf_facts_terminator_successors(term).len()).to_equal(0)
+
+    it "preserves payload and type-tag reads during outlining and DCE":
+        val payload_id = LocalId(id: 5)
+        val type_tag_id = LocalId(id: 6)
+        for term in exceptional_terminators():
+            val outline_uses = get_terminator_uses(term)
+            expect(outline_uses.len()).to_equal(2)
+            expect(outline_uses[0].id).to_equal(payload_id.id)
+            expect(outline_uses[1].id).to_equal(type_tag_id.id)
+
+            val block = MirBlock(
+                id: BlockId(id: 0),
+                label: Some("exceptional_exit"),
+                instructions: [
+                    MirInst(
+                        kind: MirInstKind.Const(payload_id, MirConstValue.Int(17), MirType.i64()),
+                        span: nil
+                    ),
+                    MirInst(
+                        kind: MirInstKind.Const(type_tag_id, MirConstValue.Int(23), MirType.i64()),
+                        span: nil
+                    )
+                ],
+                terminator: term
+            )
+            val dce = DeadCodeElimination.new()
+            val optimized = dce.remove_dead_instructions(block)
+            expect(optimized.instructions.len()).to_equal(2)

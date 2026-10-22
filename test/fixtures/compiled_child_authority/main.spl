@@ -1,0 +1,72 @@
+# Native ownership controls. The positive executes the real receipt-owned CLI;
+# every altered receipt is derived from that actual owner, never a fake tool.
+use test.support.compiled_child_authority_v1.*
+use std.nogc_sync_mut.io_runtime.{env_get, env_set, file_read_bytes_result, file_write_bytes}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+fn refuses_changed_env(key: text, value: text) -> bool:
+    val original = env_get(key)
+    if not env_set(key, value): return false
+    val refused = test_compiled_child_authority_v1("compiler_cli").is_err()
+    val restored = env_set(key, original)
+    refused and restored
+
+fn refuses_derived_receipt(bytes: [u8], path: text, execute: bool) -> bool:
+    if not file_write_bytes(path, bytes): return false
+    val original_path = env_get("SIMPLE_TEST_COMMAND_OWNER_RECEIPT")
+    val original_sha = env_get("SIMPLE_TEST_COMMAND_OWNER_RECEIPT_SHA256")
+    if not env_set("SIMPLE_TEST_COMMAND_OWNER_RECEIPT", path): return false
+    if not env_set("SIMPLE_TEST_COMMAND_OWNER_RECEIPT_SHA256", sha256_u8_hex(bytes)):
+        val restored = env_set("SIMPLE_TEST_COMMAND_OWNER_RECEIPT", original_path)
+        return false
+    val refused = if execute:
+        test_compiled_child_run_v1("compiler_cli", ["--version"], [], 10000).is_err()
+    else:
+        test_compiled_child_authority_v1("compiler_cli").is_err()
+    val restored_path = env_set("SIMPLE_TEST_COMMAND_OWNER_RECEIPT", original_path)
+    val restored_sha = env_set("SIMPLE_TEST_COMMAND_OWNER_RECEIPT_SHA256", original_sha)
+    refused and restored_path and restored_sha
+
+fn main() -> i64:
+    val authority = test_compiled_child_authority_v1("compiler_cli")
+    if authority.is_err():
+        print authority.unwrap_err()
+        return 10
+    val actual = authority.unwrap()
+    val positive = test_compiled_child_run_v1("compiler_cli", ["--version"], [], 10000)
+    if positive.is_err():
+        print positive.unwrap_err()
+        return 11
+    val output = positive.unwrap()
+    if output.exit_code != 0 or output.timed_out or not output.terminal or not output.reaped or
+            not output.output_complete or output.stdout.len() == 0: return 12
+    var checks = 1
+    if not refuses_changed_env("SIMPLE_TEST_COMMAND_OWNER_RECEIPT", ""): return 13
+    checks = checks + 1
+    if not refuses_changed_env("SIMPLE_TEST_COMMAND_OWNER_RECEIPT_SHA256", ""): return 14
+    checks = checks + 1
+    val wrong = "0000000000000000000000000000000000000000000000000000000000000000"
+    if actual.receipt_sha256 == wrong or not refuses_changed_env("SIMPLE_TEST_COMMAND_OWNER_RECEIPT_SHA256", wrong): return 15
+    checks = checks + 1
+    if not refuses_changed_env("SIMPLE_TEST_CHILD_EVIDENCE_DIR", "relative/evidence"): return 16
+    checks = checks + 1
+    if not refuses_changed_env("SIMPLE_MCP_TEST_BINARY", actual.executable): return 17
+    checks = checks + 1
+    val raw = file_read_bytes_result(actual.receipt)
+    if raw.is_err(): return 18
+    val text = test_compiled_child_text_v1(raw.unwrap())
+    val directory = secure_temp_dir(actual.evidence_dir, "derived-owner-")
+    if directory.is_err(): return 19
+    val duplicate = text + "schema=simple-bootstrap-command-owners-v3\n"
+    if not refuses_derived_receipt(duplicate.bytes(), directory.unwrap() + "/duplicate.env", false): return 20
+    checks = checks + 1
+    val unsupported = text.replace("schema=simple-bootstrap-command-owners-v3", "schema=simple-bootstrap-command-owners-v9")
+    if unsupported == text or not refuses_derived_receipt(unsupported.bytes(), directory.unwrap() + "/schema.env", false): return 21
+    checks = checks + 1
+    val pin_mismatch = text.replace("compiler_cli_sha256=" + actual.executable_sha256, "compiler_cli_sha256=" + wrong)
+    if pin_mismatch == text or not refuses_derived_receipt(pin_mismatch.bytes(), directory.unwrap() + "/pin.env", true): return 22
+    checks = checks + 1
+    if test_compiled_child_authority_v1("compiler_cli").is_err() or checks != 9: return 23
+    print "compiled child authority: {checks} checks passed"
+    0

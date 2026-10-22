@@ -1,0 +1,204 @@
+# Authentic source/selected-provider setup, real cold factory and real quiet
+# resolution. This fixture establishes current custody, not final/MIR admission.
+use support.*
+use compiler.driver.cache.driver_hir_archive_current_boundary_v1.*
+use compiler.driver.cache.driver_hir_archive_weave_boundary_v1.*
+use compiler.driver.cache.hir_body_typecheck_lease_v1.{hir_body_archive_load_in_owned_scope_v1}
+use compiler.mono.mono_archive_current_body_v1.*
+use compiler.hir.hir_definitions.{HirStruct, HirField, HirFunction, HirExpr, HirExprKind, HirStmtKind}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.semantics.resolve.{resolve_methods_quiet}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_hir_cache.{hir_cache_last_warnings, hir_cache_clear_last_warnings, hir_cache_promote_diagnostic_owner_v1}
+use std.nogc_sync_mut.io.env_ops.{env_get, env_set}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+
+fn close_fixture(paused: bool, owned: bool):
+    val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    if paused: hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not owned or not cache_owned or not ended: panic("current boundary fixture ownership")
+
+fn values(module: HirModule) -> (i64, i64):
+    var width = -1
+    var woven = -1
+    for raw in module.structs.values():
+        val declaration: HirStruct = raw
+        if declaration.name != "View": continue
+        for field in declaration.fields:
+            if field.name != "width" or not field.has_default: continue
+            match field.default.kind:
+                case HirExprKind.IntLit(value, _): width = value
+                case _: pass
+    for raw in module.functions.values():
+        val function: HirFunction = raw
+        if function.name == "submit_view": woven = function.body.stmts.len()
+    (width, woven)
+
+fn observe_in_owned_scope(setup: HirArchiveWeaveFixtureSetupV1,
+        owner: DriverHirArchiveCurrentBoundaryV1) -> Result<bool, text>:
+    val matched = driver_hir_archive_current_boundary_matches_in_owned_scope_v1(setup.driver, owner)?
+    var digest = ""
+    for name in owner.logical_order:
+        val woven = driver_hir_archive_weave_boundary_load_in_owned_scope_v1(setup.boundary.use, name)?
+        val original_digest = sha256_text(hir_module_encode(woven.module))
+        val (resolved, errors) = resolve_methods_quiet(woven.module)
+        val resolved_digest = sha256_text(hir_module_encode(resolved))
+        if errors.len() != 0 or original_digest == resolved_digest:
+            return Err("real quiet source fixture produced no complete operand/type change")
+        val body = owner.registration.bodies[name]
+        val loaded = mono_archive_current_body_load_in_owned_scope_v1(owner.registration.cache, body)?
+        val observed = values(loaded.module)
+        if observed.0 != 37 or observed.1 != 1 or loaded.module.name != setup.archive.input.module_name or
+                loaded.module.path != setup.source.path: return Err("actual current body/default/weave identity differs")
+        if digest != "" and digest != body.current_body_digest: return Err("actual logical aliases changed complete body")
+        val expected_digest = if owner.quiet: resolved_digest else: original_digest
+        if body.current_body_digest != expected_digest or sha256_text(hir_module_encode(loaded.module)) != expected_digest:
+            return Err("current complete body differs from actual retained quiet/original route")
+        digest = body.current_body_digest
+    Ok(true)
+
+fn observe(setup: HirArchiveWeaveFixtureSetupV1, owner: DriverHirArchiveCurrentBoundaryV1) -> Result<bool, text>:
+    if not transient_scope_begin(): return Err("current fixture observation lease unavailable")
+    val result = observe_in_owned_scope(setup, owner)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    close_fixture(paused, owned)
+    result
+
+fn altered_default_in_owned_scope(owner: DriverHirArchiveCurrentBoundaryV1,
+        name: text) -> Result<MonoArchiveCurrentBodyV1, text>:
+    val original = owner.registration.bodies[name]
+    val loaded = mono_archive_current_body_load_in_owned_scope_v1(owner.registration.cache, original)?
+    var module = loaded.module
+    var changed = false
+    for symbol in module.structs.keys():
+        val declaration: HirStruct = module.structs[symbol]
+        if declaration.name != "View": continue
+        var fields: [HirField] = []
+        for field in declaration.fields:
+            if field.name == "width" and field.has_default:
+                fields = fields.push(HirField(..field, default: HirExpr(..field.default,
+                    kind: HirExprKind.IntLit(99, nil))))
+                changed = true
+            else: fields = fields.push(field)
+        module.structs[symbol] = HirStruct(..declaration, fields: fields)
+    if not changed: return Err("real default mutation target absent")
+    mono_archive_current_body_store_in_owned_scope_v1(owner.registration.cache, original.original_parent,
+        original.parent_boundary_key, original.parent_boundary_digest, module, loaded.warnings)
+
+fn run_case(quiet: bool) -> Result<i64, text>:
+    if not env_set("SIMPLE_RESOLVE_METHODS", if quiet: "1" else: "0"): return Err("quiet environment refused")
+    val setup = hir_archive_weave_fixture_setup_v1("test/fixtures/compiler/hir_current_boundary/provider.spl",
+        "current.actual", "current.alias")?
+    val captured = driver_hir_archive_current_boundary_capture_v1(setup.driver, setup.boundary)
+    if captured.is_err(): return Err(captured.unwrap_err().join("\n"))
+    val owner = captured.unwrap()
+    if owner.quiet != quiet or owner.logical_order != ["current.actual", "current.alias"] or
+            owner.declaration_order != ["current.actual"] or owner.registration.registration.epoch != 2 or
+            not owner.registration.registration.sealed: return Err("real current capture/order/facts differs")
+    var checks = 1
+    if driver_hir_archive_current_boundary_matches_in_owned_scope_v1(setup.driver, owner).is_ok():
+        return Err("inactive current borrowed check admitted")
+    checks = checks + 1
+    if observe(setup, owner).is_err(): return Err("actual complete current body observation failed")
+    checks = checks + 1
+    val other = CompilerDriver.create(driver_core_compile_options_default())
+    other.ctx = setup.driver.ctx
+    if not transient_scope_begin(): return Err("current negative lease unavailable")
+    val foreign_refused = driver_hir_archive_current_boundary_matches_in_owned_scope_v1(other, owner).is_err()
+    if not foreign_refused: return Err("copied context issued foreign current pin")
+    checks = checks + 1
+    val serial = owner.serial
+    var replaced_serial = owner
+    replaced_serial.serial = serial + 1
+    if not driver_hir_archive_current_boundary_matches_in_owned_scope_v1(setup.driver, replaced_serial).is_err():
+        return Err("caller changed issued serial")
+    checks = checks + 1
+    var changed_order = owner
+    changed_order.logical_order = ["current.alias", "current.actual"]
+    if not driver_hir_archive_current_boundary_matches_in_owned_scope_v1(setup.driver, changed_order).is_err():
+        return Err("caller reversed current logical order")
+    checks = checks + 1
+    val saved_identity = setup.driver.ctx.source_identities_owner[0]
+    setup.driver.ctx.source_identities_owner[0] = "changed actual phase1 source"
+    val source_refused = driver_hir_archive_current_boundary_matches_in_owned_scope_v1(setup.driver, owner).is_err()
+    setup.driver.ctx.source_identities_owner[0] = saved_identity
+    if not source_refused: return Err("changed phase1 source identity admitted")
+    checks = checks + 1
+    setup.driver.ctx.config["coverage"] = "1"
+    val policy_refused = driver_hir_archive_current_boundary_matches_in_owned_scope_v1(setup.driver, owner).is_err()
+    setup.driver.ctx.config.remove("coverage")
+    if not policy_refused: return Err("changed actual route policy admitted")
+    checks = checks + 1
+    val name = owner.logical_order[0]
+    val saved_body = owner.registration.bodies[name]
+    val forged = altered_default_in_owned_scope(owner, name)?
+    if forged.current_body_digest == saved_body.current_body_digest or
+            forged.original_parent.input.source_content_digest != saved_body.original_parent.input.source_content_digest:
+        return Err("real complete current default mutation was not reached")
+    owner.registration.bodies[name] = forged
+    val body_refused = driver_hir_archive_current_boundary_matches_in_owned_scope_v1(setup.driver, owner).is_err()
+    owner.registration.bodies[name] = saved_body
+    if not body_refused: return Err("public complete default/body store replaced issued current pin")
+    checks = checks + 1
+    val saved_counter = owner.registration.registration.state.next_symbol
+    owner.registration.registration.state.next_symbol = saved_counter + 1
+    val counter_refused = driver_hir_archive_current_boundary_matches_in_owned_scope_v1(setup.driver, owner).is_err()
+    owner.registration.registration.state.next_symbol = saved_counter
+    if not counter_refused: return Err("edited fresh current fact counter admitted")
+    checks = checks + 1
+    if observe_in_owned_scope(setup, owner).is_err(): return Err("restored actual current body did not recover")
+    val active_capture_refused = driver_hir_archive_current_boundary_capture_v1(setup.driver, setup.boundary).is_err()
+    val paused = transient_scope_pause()
+    val paused_match_refused = if paused: driver_hir_archive_current_boundary_matches_in_owned_scope_v1(setup.driver, owner).is_err() else: false
+    val paused_capture_refused = if paused: driver_hir_archive_current_boundary_capture_v1(setup.driver, setup.boundary).is_err() else: false
+    val state_preserved = transient_array_scope_state_v1() == 2
+    close_fixture(paused, true)
+    if not active_capture_refused or not paused_match_refused or not paused_capture_refused or not state_preserved:
+        return Err("current capture or matcher changed foreign lease")
+    checks = checks + 1
+    if not transient_scope_begin(): return Err("current churn lease unavailable")
+    var churn: [text] = []
+    for number in 0..4096: churn = churn.push("actual current boundary churn {number}")
+    val grown = churn.len() == 4096
+    if not transient_scope_end() or not grown: return Err("current churn scope failed")
+    if observe(setup, owner).is_err(): return Err("post-close actual current pin/body failed")
+    checks = checks + 1
+    # A later semantic route failure must not replace the earlier literal cold
+    # source-selection error. This uses the real cold factory, not a fake DTO.
+    val original_full = env_get("SIMPLE_PACKAGE_INDEX_FULL_INVENTORY")
+    val original_selection = setup.driver.ctx.runtime_std_full_inventory_selection
+    setup.driver.ctx.runtime_std_full_inventory_selection = nil
+    setup.driver.ctx.config["coverage"] = "1"
+    if not env_set("SIMPLE_PACKAGE_INDEX_FULL_INVENTORY", "1"): return Err("cold precedence environment refused")
+    val precedence = driver_hir_archive_current_boundary_capture_v1(setup.driver, setup.boundary)
+    val restored = env_set("SIMPLE_PACKAGE_INDEX_FULL_INVENTORY", original_full)
+    setup.driver.ctx.runtime_std_full_inventory_selection = original_selection
+    setup.driver.ctx.config.remove("coverage")
+    if not restored or precedence.is_ok() or precedence.unwrap_err() !=
+            ["full inventory typed HIR selection missing"]:
+        return Err("actual cold source error precedence changed")
+    checks = checks + 1
+    if checks != 13: return Err("current case check count differs")
+    Ok(checks)
+
+fn main() -> i64:
+    val original_quiet = env_get("SIMPLE_RESOLVE_METHODS")
+    val first = run_case(false)
+    if first.is_err():
+        print "current boundary false failed: {first.unwrap_err()}"
+        return 1
+    val second = run_case(true)
+    if second.is_err():
+        print "current boundary true failed: {second.unwrap_err()}"
+        return 2
+    if not env_set("SIMPLE_RESOLVE_METHODS", original_quiet): return 3
+    val checks = first.unwrap() + second.unwrap()
+    if checks != 26 or transient_array_scope_state_v1() != 0 or hir_cache_last_warnings().len() != 0: return 4
+    print "HIR actual current boundary: {checks} checks passed"
+    0

@@ -1,0 +1,95 @@
+# Standalone native lifetime acceptance. No SSpec objects are allocated while
+# a transient scope is active. Each positive guard increments the receipt.
+use compiler.hir.hir_lowering.phase_memo_ownership.{HirPhaseMemoRoot, hir_phase_memo_promote_roots}
+
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+
+fn main() -> i64:
+    var checks = 0
+    val persistent: {text: i64} = {"persistent": 23}
+    val inactive: [HirPhaseMemoRoot] = [HirPhaseMemoRoot.IndexMap(persistent)]
+    if hir_phase_memo_promote_roots(inactive): return 1
+    checks = checks + 1
+    if persistent["persistent"] != 23: return 2
+    checks = checks + 1
+    if not rt_transient_array_scope_begin(): return 3
+    checks = checks + 1
+
+    val retained = "retained_{checks}"
+    var indices: {text: i64} = {"index": 7}
+    var texts: {text: text} = {"text": retained}
+    var int_values: [i64] = [7, 11]
+    val text_values: [text] = [retained, "shared"]
+    var index_lists: {text: [i64]} = {"indices": int_values}
+    val text_lists: {text: [text]} = {"texts": text_values}
+    val flags: {text: bool} = {"flag": true}
+    val first: [HirPhaseMemoRoot] = [
+        HirPhaseMemoRoot.IndexMap(indices), HirPhaseMemoRoot.TextMap(texts),
+        HirPhaseMemoRoot.IndexLists(index_lists), HirPhaseMemoRoot.TextLists(text_lists),
+        HirPhaseMemoRoot.FlagMap(flags), HirPhaseMemoRoot.Texts(text_values),
+        HirPhaseMemoRoot.Ints(int_values), HirPhaseMemoRoot.IndexMap(indices),
+        HirPhaseMemoRoot.Ints(int_values), HirPhaseMemoRoot.Texts(text_values)
+    ]
+    if not rt_transient_array_scope_pause(): return 4
+    checks = checks + 1
+    if not hir_phase_memo_promote_roots(first): return 5
+    checks = checks + 1
+    if not rt_transient_array_scope_end(): return 6
+    checks = checks + 1
+    if indices["index"] != 7: return 7
+    checks = checks + 1
+    if texts["text"] != "retained_3": return 8
+    checks = checks + 1
+    val held_ints: [i64] = index_lists["indices"]
+    if held_ints.len() != 2 or held_ints[1] != 11: return 9
+    checks = checks + 1
+    val held_texts: [text] = text_lists["texts"]
+    if held_texts.len() != 2 or held_texts[0] != "retained_3": return 10
+    checks = checks + 1
+    if not flags["flag"]: return 11
+    checks = checks + 1
+    if text_values[0] != "retained_3" or text_values[1] != "shared": return 12
+    checks = checks + 1
+    if int_values[0] != 7 or int_values[1] != 11: return 13
+    checks = checks + 1
+
+    if not rt_transient_array_scope_begin(): return 14
+    checks = checks + 1
+    for index in 0..64:
+        indices["growth_{index}"] = index + 100
+    int_values = int_values.push(29)
+    index_lists["grown"] = int_values
+    texts["next"] = "scope_{checks}"
+    val second: [HirPhaseMemoRoot] = [
+        HirPhaseMemoRoot.IndexMap(indices), HirPhaseMemoRoot.TextMap(texts),
+        HirPhaseMemoRoot.IndexLists(index_lists), HirPhaseMemoRoot.Ints(int_values),
+        HirPhaseMemoRoot.IndexMap(indices)
+    ]
+    if not rt_transient_array_scope_pause(): return 15
+    checks = checks + 1
+    if not hir_phase_memo_promote_roots(second): return 16
+    checks = checks + 1
+    if not rt_transient_array_scope_end(): return 17
+    checks = checks + 1
+    if indices["index"] != 7: return 18
+    checks = checks + 1
+    if indices["growth_0"] != 100: return 19
+    checks = checks + 1
+    if indices["growth_63"] != 163: return 20
+    checks = checks + 1
+    if texts["text"] != "retained_3" or texts["next"] != "scope_14": return 21
+    checks = checks + 1
+    if int_values.len() != 3 or int_values[2] != 29: return 22
+    checks = checks + 1
+    val grown: [i64] = index_lists["grown"]
+    if grown.len() != 3 or grown[2] != 29: return 23
+    checks = checks + 1
+    val after_end: [HirPhaseMemoRoot] = [HirPhaseMemoRoot.IndexMap(indices)]
+    if hir_phase_memo_promote_roots(after_end): return 24
+    checks = checks + 1
+    if indices["growth_63"] != 163: return 25
+    checks = checks + 1
+    print "phase memo ownership: {checks} checks passed"
+    0

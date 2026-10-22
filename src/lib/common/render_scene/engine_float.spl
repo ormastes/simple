@@ -1,0 +1,255 @@
+# Render Scene Float Effect Engine — f64-based implementation.
+#
+# Uses f64 internally for higher-quality rendering.  All public inputs/outputs
+# remain i32/u32 for API compatibility; conversion happens at the boundary.
+# Suitable for hosted environments with FPU support.
+
+use common.render_scene.engine_trait.{EffectEngine}
+use common.render_scene.scene.{argb, argb_alpha, argb_red, argb_green, argb_blue}
+
+# ============================================================================
+# Float clamp helper
+# ============================================================================
+
+fn clamp_f64(v: f64, lo: f64, hi: f64) -> f64:
+    """Clamp v to [lo, hi] range."""
+    if v < lo: return lo
+    if v > hi: return hi
+    v
+
+fn f64_to_u8(v: f64) -> i32:
+    """Convert f64 to clamped 0-255 integer."""
+    val clamped = clamp_f64(v, 0.0, 255.0)
+    # Round to nearest integer
+    (clamped + 0.5).to_i32()
+
+# ============================================================================
+# f64 math helpers (approximations for sin/cos/exp)
+# ============================================================================
+
+fn f64_abs(v: f64) -> f64:
+    """Absolute value."""
+    if v < 0.0: return 0.0 - v
+    v
+
+fn f64_exp(x: f64) -> f64:
+    """Approximate exp(x) using a minimax polynomial for moderate range.
+    Accurate to ~0.1% for |x| < 4.  Used for Gaussian shadow falloff.
+    """
+    # Clamp to prevent overflow/underflow
+    var v = clamp_f64(x, -10.0, 10.0)
+    # Use the identity: exp(x) = exp(x/2)^2, repeated squaring
+    # First reduce: exp(x) via Taylor around 0 for small |x|
+    # We split: let n = round(x / ln2), r = x - n*ln2
+    # exp(x) = 2^n * exp(r), and exp(r) via polynomial for |r| < 0.5
+    val ln2 = 0.6931471805599453
+    val inv_ln2 = 1.4426950408889634
+    # Round to nearest integer
+    var n_f = v * inv_ln2
+    var n: i32 = 0
+    if n_f >= 0.0:
+        n = (n_f + 0.5).to_i32()
+    else:
+        n = (n_f - 0.5).to_i32()
+    val r = v - n.to_f64() * ln2
+    # Taylor expansion of exp(r) for |r| <= ln2/2 ~ 0.347
+    # exp(r) ~ 1 + r + r^2/2 + r^3/6 + r^4/24 + r^5/120
+    val r2 = r * r
+    val r3 = r2 * r
+    val r4 = r2 * r2
+    val r5 = r4 * r
+    val exp_r = 1.0 + r + r2 / 2.0 + r3 / 6.0 + r4 / 24.0 + r5 / 120.0
+    # Multiply by 2^n
+    var result = exp_r
+    if n > 0:
+        var i: i32 = 0
+        while i < n:
+            result = result * 2.0
+            i = i + 1
+    else:
+        if n < 0:
+            var i: i32 = 0
+            while i < (0 - n):
+                result = result / 2.0
+                i = i + 1
+    result
+
+fn f64_sin(angle_rad: f64) -> f64:
+    """Approximate sin(x) using Taylor series. Input in radians."""
+    val pi = 3.141592653589793
+    val two_pi = 6.283185307179586
+    # Normalize to [-pi, pi]
+    var x = angle_rad
+    # Reduce modulo 2*pi
+    while x > pi:
+        x = x - two_pi
+    while x < (0.0 - pi):
+        x = x + two_pi
+    # Taylor: sin(x) ~ x - x^3/6 + x^5/120 - x^7/5040 + x^9/362880
+    val x2 = x * x
+    val x3 = x2 * x
+    val x5 = x3 * x2
+    val x7 = x5 * x2
+    val x9 = x7 * x2
+    x - x3 / 6.0 + x5 / 120.0 - x7 / 5040.0 + x9 / 362880.0
+
+fn f64_cos(angle_rad: f64) -> f64:
+    """Approximate cos(x) using Taylor series. Input in radians."""
+    val pi_half = 1.5707963267948966
+    f64_sin(angle_rad + pi_half)
+
+# ============================================================================
+# FloatEffectEngine
+# ============================================================================
+
+struct FloatEffectEngine:
+    """Float-precision effect engine using f64 internally.
+
+    Higher quality than IntEffectEngine — uses proper floating-point
+    blending, Gaussian shadow falloff, and exact trigonometric rotation.
+    """
+    _placeholder: i32
+
+fn float_effect_engine() -> FloatEffectEngine:
+    """Create a new FloatEffectEngine."""
+    FloatEffectEngine(_placeholder: 0)
+
+impl EffectEngine for FloatEffectEngine:
+    fn name() -> text:
+        "float"
+
+    fn blend_pixel(src: u32, dst: u32) -> u32:
+        """Alpha-blend src over dst using f64 arithmetic."""
+        val sa_i = argb_alpha(src)
+        if sa_i == 0:
+            return dst
+        if sa_i == 255:
+            return src
+
+        val sa = sa_i.to_f64() / 255.0
+        val sr = argb_red(src).to_f64()
+        val sg = argb_green(src).to_f64()
+        val sb = argb_blue(src).to_f64()
+        val da = argb_alpha(dst).to_f64() / 255.0
+        val dr = argb_red(dst).to_f64()
+        val dg = argb_green(dst).to_f64()
+        val db = argb_blue(dst).to_f64()
+        val inv_sa = 1.0 - sa
+        val out_r = f64_to_u8(sr * sa + dr * inv_sa)
+        val out_g = f64_to_u8(sg * sa + dg * inv_sa)
+        val out_b = f64_to_u8(sb * sa + db * inv_sa)
+        val out_a = f64_to_u8((sa + da * inv_sa) * 255.0)
+        argb(out_a.to_u32(), out_r.to_u32(), out_g.to_u32(), out_b.to_u32())
+
+    fn lerp_channel(a: u32, b: u32, t_num: i32, t_den: i32) -> u32:
+        """Linearly interpolate a single 8-bit channel using f64."""
+        val av = (a & 0xFF).to_f64()
+        val bv = (b & 0xFF).to_f64()
+        if t_den == 0:
+            return a & 0xFF
+        val t = t_num.to_f64() / t_den.to_f64()
+        val result = av + (bv - av) * t
+        f64_to_u8(result).to_u32() & 0xFF
+
+    fn gradient_color(c1: u32, c2: u32, position: i32, total: i32) -> u32:
+        """Compute gradient color at position/total using f64 interpolation."""
+        if total <= 1:
+            return c1
+        val t = position.to_f64() / (total - 1).to_f64()
+        val a1 = argb_alpha(c1).to_f64()
+        val r1 = argb_red(c1).to_f64()
+        val g1 = argb_green(c1).to_f64()
+        val b1 = argb_blue(c1).to_f64()
+        val a2 = argb_alpha(c2).to_f64()
+        val r2 = argb_red(c2).to_f64()
+        val g2 = argb_green(c2).to_f64()
+        val b2 = argb_blue(c2).to_f64()
+        val ga = f64_to_u8(a1 + (a2 - a1) * t)
+        val gr = f64_to_u8(r1 + (r2 - r1) * t)
+        val gg = f64_to_u8(g1 + (g2 - g1) * t)
+        val gb = f64_to_u8(b1 + (b2 - b1) * t)
+        argb(ga.to_u32(), gr.to_u32(), gg.to_u32(), gb.to_u32())
+
+    fn shadow_ring_alpha(base_alpha: i32, ring: i32, ring_count: i32) -> i32:
+        """Compute shadow ring alpha with Gaussian-like falloff.
+        Uses exp(-t*t * 3.0) where t = ring / ring_count.
+        """
+        if ring_count <= 0:
+            return 0
+        val t = ring.to_f64() / ring_count.to_f64()
+        val gaussian = f64_exp(0.0 - t * t * 3.0)
+        val result = base_alpha.to_f64() * gaussian
+        val clamped = clamp_f64(result, 0.0, 255.0)
+        (clamped + 0.5).to_i32()
+
+    fn filter_brightness(r: i32, g: i32, b: i32, amount: i32) -> [i32]:
+        """Adjust brightness using f64. amount is 8.8 fixed-point (256 = 1.0)."""
+        val factor = amount.to_f64() / 256.0
+        val out_r = f64_to_u8(r.to_f64() * factor)
+        val out_g = f64_to_u8(g.to_f64() * factor)
+        val out_b = f64_to_u8(b.to_f64() * factor)
+        [out_r, out_g, out_b]
+
+    fn filter_contrast(channel: i32, amount: i32) -> i32:
+        """Adjust contrast using f64. amount is 8.8 fixed-point (256 = 1.0)."""
+        val factor = amount.to_f64() / 256.0
+        val result = (channel.to_f64() - 128.0) * factor + 128.0
+        f64_to_u8(result)
+
+    fn filter_grayscale(r: i32, g: i32, b: i32, amount: i32) -> [i32]:
+        """Convert to grayscale using exact BT.709 coefficients.
+        amount is 8.8 fixed-point: 256 = full grayscale, 0 = no change.
+        """
+        val lum = 0.2126 * r.to_f64() + 0.7152 * g.to_f64() + 0.0722 * b.to_f64()
+        val blend = amount.to_f64() / 256.0
+        val out_r = f64_to_u8(r.to_f64() + (lum - r.to_f64()) * blend)
+        val out_g = f64_to_u8(g.to_f64() + (lum - g.to_f64()) * blend)
+        val out_b = f64_to_u8(b.to_f64() + (lum - b.to_f64()) * blend)
+        [out_r, out_g, out_b]
+
+    fn filter_hue_rotate(r: i32, g: i32, b: i32, angle_deg: i32) -> [i32]:
+        """Rotate hue by angle_deg degrees using f64 sin/cos and proper 3x3 matrix."""
+        val pi = 3.141592653589793
+        val rad = angle_deg.to_f64() * pi / 180.0
+        val cos_a = f64_cos(rad)
+        val sin_a = f64_sin(rad)
+        val rf = r.to_f64()
+        val gf = g.to_f64()
+        val bf = b.to_f64()
+
+        # Hue rotation matrix (standard formulation):
+        # Row 0: [0.213 + 0.787*cos - 0.213*sin, 0.715 - 0.715*cos - 0.715*sin, 0.072 - 0.072*cos + 0.928*sin]
+        # Row 1: [0.213 - 0.213*cos + 0.143*sin, 0.715 + 0.285*cos + 0.140*sin, 0.072 - 0.072*cos - 0.283*sin]
+        # Row 2: [0.213 - 0.213*cos - 0.787*sin, 0.715 - 0.715*cos + 0.715*sin, 0.072 + 0.928*cos + 0.072*sin]
+        val m00 = 0.213 + 0.787 * cos_a - 0.213 * sin_a
+        val m01 = 0.715 - 0.715 * cos_a - 0.715 * sin_a
+        val m02 = 0.072 - 0.072 * cos_a + 0.928 * sin_a
+        val m10 = 0.213 - 0.213 * cos_a + 0.143 * sin_a
+        val m11 = 0.715 + 0.285 * cos_a + 0.140 * sin_a
+        val m12 = 0.072 - 0.072 * cos_a - 0.283 * sin_a
+        val m20 = 0.213 - 0.213 * cos_a - 0.787 * sin_a
+        val m21 = 0.715 - 0.715 * cos_a + 0.715 * sin_a
+        val m22 = 0.072 + 0.928 * cos_a + 0.072 * sin_a
+
+        val out_r = f64_to_u8(rf * m00 + gf * m01 + bf * m02)
+        val out_g = f64_to_u8(rf * m10 + gf * m11 + bf * m12)
+        val out_b = f64_to_u8(rf * m20 + gf * m21 + bf * m22)
+        [out_r, out_g, out_b]
+
+    fn filter_sepia(r: i32, g: i32, b: i32, amount: i32) -> [i32]:
+        """Apply sepia tone using f64 matrix multiplication.
+        amount is 8.8 fixed-point: 256 = full sepia, 0 = no change.
+        """
+        val rf = r.to_f64()
+        val gf = g.to_f64()
+        val bf = b.to_f64()
+        val blend = amount.to_f64() / 256.0
+        # Sepia matrix
+        val sep_r = clamp_f64(rf * 0.393 + gf * 0.769 + bf * 0.189, 0.0, 255.0)
+        val sep_g = clamp_f64(rf * 0.349 + gf * 0.686 + bf * 0.168, 0.0, 255.0)
+        val sep_b = clamp_f64(rf * 0.272 + gf * 0.534 + bf * 0.131, 0.0, 255.0)
+        # Blend between original and sepia
+        val out_r = f64_to_u8(rf + (sep_r - rf) * blend)
+        val out_g = f64_to_u8(gf + (sep_g - gf) * blend)
+        val out_b = f64_to_u8(bf + (sep_b - bf) * blend)
+        [out_r, out_g, out_b]

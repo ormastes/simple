@@ -10,7 +10,7 @@ use std::sync::Arc;
 use simple_parser::ast::{ClassDef, EnumDef, FunctionDef, Node};
 
 use crate::error::CompileError;
-use crate::value::{Env, Value};
+use crate::value::{Env, ExportTable, Value};
 
 use super::module_cache::{cache_partial_module_exports, normalize_path_key};
 use crate::interpreter::MODULE_ENV_BY_OWNER;
@@ -28,7 +28,7 @@ type ImplMethods = HashMap<String, Vec<Arc<simple_parser::ast::FunctionDef>>>;
 /// Functions are `Arc<FunctionDef>` for cheap sharing between cache and `Value::Function`.
 type ModuleExports = (
     Env,
-    HashMap<String, Value>,
+    ExportTable,
     HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
     HashMap<String, Arc<ClassDef>>,
     Enums,
@@ -59,7 +59,7 @@ pub fn evaluate_module_exports_with_preloaded(
     preloaded_env: Option<&HashMap<String, Value>>,
 ) -> Result<ModuleExports, CompileError> {
     let mut env: Env = Env::new();
-    let mut exports: HashMap<String, Value> = HashMap::new();
+    let mut exports = ExportTable::new();
     let mut local_functions: HashMap<String, Arc<FunctionDef>> = HashMap::new();
     let mut local_classes: HashMap<String, Arc<ClassDef>> = HashMap::new();
     let mut local_enums: Enums = HashMap::new();
@@ -96,7 +96,7 @@ pub fn evaluate_module_exports_with_preloaded(
     // Cache partial exports (type definitions) for circular import resolution
     // This allows other modules that import this one to access types even during circular imports
     if let Some(path) = module_path {
-        cache_partial_module_exports(path, Value::Dict(Arc::new(exports.clone())));
+        cache_partial_module_exports(path, Value::Dict(Arc::new(exports.own_snapshot())));
     }
 
     // Second pass: process imports and assignments to build the environment
@@ -118,26 +118,16 @@ pub fn evaluate_module_exports_with_preloaded(
     // Create filtered environment and export functions.
     // export_functions returns the Arc<FunctionDef> map it builds internally,
     // so the same Arc instances flow into both Value::Function (in exports) and the cache.
-    let filtered_env = create_filtered_env(&env);
-    // Materialize the module's visible-name map ONCE and share the Arc.
-    //
-    // This map is wide: measured on the interpreted native-build worker, the
-    // average module carries ~1170 visible names and the worst offenders carry
-    // >7000 — modules re-export their transitive imports, so a 3.4 KB source
-    // file can own a 5000-entry environment. It used to be materialized TWICE
-    // and both copies retained for the life of the process:
-    //   * `filtered_env.freeze()` is `Arc::new(self.to_map())` — a full copy,
-    //     retained by MODULE_ENV_BY_OWNER;
-    //   * `export_functions` did `Arc::new(filtered_env.clone())` — also a full
-    //     copy, because `filtered_env` is built by `.collect()` so every entry
-    //     lives in the CoW *overlay*, defeating the O(1) Arc-base clone that
-    //     `CowEnv::clone` is designed for. That copy is retained by every
-    //     exported `Value::Function`'s `captured_env`.
-    // Freezing once and handing `export_functions` the Arc lets it build a
-    // `CowEnv` with a shared base instead, so the map exists exactly once.
-    let frozen_env = filtered_env.freeze();
-    let filtered_env_len = filtered_env.len();
-    drop(filtered_env);
+    // Build the module's visible-name table ONCE and share the Arc: it is
+    // retained by MODULE_ENV_BY_OWNER and is the `captured_env` base of
+    // every exported `Value::Function`. It holds the module's own entries
+    // plus its imported tables as shared layers (`LayeredEnv`), so its size
+    // is linear in what the module itself defines. It used to be a flat
+    // copy as wide as the module's transitive import closure (a 4 KB file
+    // retaining a 16,500-entry map), materialized twice before that.
+    // doc/08_tracking/bug/interpreter_use_unpack_reexports_transitive_closure_2026-10-20.md
+    let frozen_env = Arc::new(create_filtered_env(&env));
+    let filtered_env_len = frozen_env.retained_len();
     if let Some(path) = module_path {
         let owner: Arc<str> = Arc::from(normalize_path_key(path).to_string_lossy().as_ref());
         MODULE_ENV_BY_OWNER.with(|cell| {
@@ -150,7 +140,7 @@ pub fn evaluate_module_exports_with_preloaded(
     process_bare_exports(&bare_exports, &env, &mut exports, module_path);
 
     if let Some(path) = module_path {
-        crate::mem_trace::record_env(&path.display().to_string(), filtered_env_len, exports.len());
+        crate::mem_trace::record_env(&path.display().to_string(), filtered_env_len, exports.retained_len());
     }
 
     // Return env, exports, and the local definitions for caching

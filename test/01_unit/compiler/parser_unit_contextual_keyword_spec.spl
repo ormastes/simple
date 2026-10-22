@@ -1,0 +1,76 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+# @cover src/compiler_rust/parser/src/parser_impl/core.rs 0%
+"""
+# `unit` as an ordinary assignable identifier
+
+**Category:** Language / Parser
+**Status:** Regression guard
+
+## Purpose and Audience
+
+The Rust seed lexer maps `unit` and `newunit` to `TokenKind::Unit` (the
+units-of-measure declaration keyword). Expression position already read the
+token back as an identifier, and `var unit = ...` declared one, but a
+STATEMENT starting with `unit` was routed unconditionally to the unit
+declaration parser, so `unit = expr` died with
+`expected identifier, found Assign`. Since
+`src/lib/common/encoding/host_text_boundary_v1.spl:101` reassigns `unit`,
+that broke every import of `std.io_runtime`.
+
+The audience is anyone touching statement dispatch in the Rust seed parser.
+
+## Scope and Preconditions
+
+Plain, compound, member and index assignment to a variable named `unit` at
+statement start, at top level and inside `if`/`while` bodies. Requires a seed
+built with the statement-dispatch fix.
+
+## Primary Workflow
+
+Declare `unit`, reassign it in every statement-start form, and check the values.
+"""
+
+use std.spec.step
+
+use std.spec.*
+
+fn decode_pair(high: i64, low: i64) -> i64:
+    var unit = high
+    if unit >= 0xD800:
+        unit = 0x10000 + ((unit - 0xD800) << 10) + low - 0xDC00
+    while unit > 0x10000 + 0x10000:
+        unit = unit - 1
+    return unit
+
+describe "unit as an ordinary assignable identifier":
+    # @manual scenario evidence
+
+    it "reassigns a variable named unit at statement start":
+        # @req REQ-SSPEC-COMPILER
+        step("reassigns a variable named unit at statement start")
+        var unit = 1
+        unit = unit + 1
+        expect(unit).to_equal(2)  # oracle: 2 — 1 + 1
+
+    it "compound-assigns a variable named unit":
+        # @req REQ-SSPEC-COMPILER
+        step("compound-assigns a variable named unit")
+        var unit = 1
+        unit += 4
+        unit -= 1
+        unit *= 3
+        expect(unit).to_equal(12)  # oracle: 12 — ((1 + 4) - 1) * 3
+
+    it "reassigns unit inside if and while bodies":
+        # @req REQ-SSPEC-COMPILER
+        step("reassigns unit inside if and while bodies (the host_text_boundary_v1 shape)")
+        expect(decode_pair(0xD83D, 0xDE00)).to_equal(0x1F600)  # oracle: U+1F600 from surrogates D83D DE00
+
+    it "index-assigns through a variable named unit":
+        # @req REQ-SSPEC-COMPILER
+        step("index-assigns through a variable named unit")
+        var unit = [1, 2]
+        unit[0] = 7
+        expect(unit[0]).to_equal(7)  # oracle: 7 — the value just stored

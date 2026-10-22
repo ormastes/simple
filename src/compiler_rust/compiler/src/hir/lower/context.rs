@@ -41,6 +41,12 @@ pub(super) struct FunctionContext {
     /// lowering needs this metadata to preserve Result<T, E>.ok / .err.
     /// Slots keep shadowed bindings distinct.
     pub result_projection_types: HashMap<usize, (TypeId, TypeId)>,
+    /// Declared trait identity of the PAYLOAD of an `Option<Trait>` local
+    /// (`reducer: Ident?`), keyed by local slot. Never stored on the optional
+    /// local itself (`reducer.is_some()` must not qualify as `Ident.is_some`);
+    /// only an if-let / match payload binding inherits it as its
+    /// `trait_dispatch_owner`, so the payload call lowers to vtable dispatch.
+    pub optional_trait_payloads: HashMap<usize, crate::hir::HirTraitDispatch>,
 }
 
 impl FunctionContext {
@@ -55,6 +61,7 @@ impl FunctionContext {
             is_me_method: false,
             static_call_type_hints: HashMap::new(),
             result_projection_types: HashMap::new(),
+            optional_trait_payloads: HashMap::new(),
         }
     }
 
@@ -70,6 +77,7 @@ impl FunctionContext {
             is_me_method,
             static_call_type_hints: HashMap::new(),
             result_projection_types: HashMap::new(),
+            optional_trait_payloads: HashMap::new(),
         }
     }
 
@@ -108,6 +116,7 @@ impl FunctionContext {
             name: name.clone(),
             ty,
             type_name_hint,
+            trait_dispatch_owner: None,
             mutability,
             inject,
             is_ghost,

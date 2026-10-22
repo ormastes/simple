@@ -106,3 +106,25 @@ fn packed_byte_equality_is_value_based() {
     assert_eq!(packed, generic);
     assert_ne!(packed, Value::byte_array(vec![0, 127, 254]));
 }
+
+#[test]
+fn byte_array_new_is_capacity_only_and_owns_storage_like_the_runtimes() {
+    // C `rt_byte_array_new` / Rust `rt_byte_array_new`: capacity reservation,
+    // logical length ZERO, non-null data even for capacity 0. `_len` is n bytes.
+    let source = r#"
+extern fn rt_byte_array_new(capacity: i64) -> [u8]
+extern fn rt_byte_array_new_len(len: i64) -> [u8]
+extern fn rt_array_data_ptr(bytes: [u8]) -> i64
+
+fn main() -> i32:
+    val reserved = rt_byte_array_new(8)
+    val empty = rt_byte_array_new(0)
+    val sized = rt_byte_array_new_len(3)
+    var score = 0
+    if reserved.len() == 0: score = score + 1
+    if rt_array_data_ptr(empty) != 0: score = score + 10
+    if sized.len() == 3 and sized[2] == 0u8: score = score + 100
+    return score.to_i32()
+"#;
+    assert_eq!(run_program(source), Ok(111));
+}

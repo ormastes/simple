@@ -1,3 +1,5 @@
+# @cover src/app/linker_gen/parser.spl 80%
+# @cover src/app/linker_gen/main.spl 80%
 """
 # Linker Script Generator
 
@@ -32,9 +34,9 @@ A failure in Memory/Hex parsing or Section Layout/Entry Point/Symbol
 Generation means the real parser/formatter/renderer functions in
 `src/app/linker_gen/parser.spl` or `main.spl` changed. A failure in a
 board-configuration metadata group means a documented convention number was
-edited here without also updating the module docstring. The "formats 1MB as
-0x100000" scenario is intentionally RED — see its `# NOTE:` and
-`doc/08_tracking/bug/linker_gen_format_hex_nonzero_garbage_2026-09-06.md`.
+edited here without also updating the module docstring. Nonzero addresses and
+NOBITS section output have explicit renderer regressions. Execution status is
+recorded separately; source changes alone do not establish a passing run.
 
 ## Implementation Notes
 
@@ -58,19 +60,17 @@ use app.linker_gen.main.{format_hex, generate_linker_script}
 extern fn rt_file_read_text(path: text) -> text
 
 fn build_reference_board() -> BoardConfig:
-    """A minimal-but-real board fixture. Origin 0 avoids the format_hex
-    nonzero-input defect (doc/08_tracking/bug/linker_gen_format_hex_nonzero_garbage_2026-09-06.md)
-    so this fixture stays usable for structural checks independent of that bug."""
+    """A real board fixture with nonzero RAM and a fixed text address."""
     BoardConfig(
         name: "QEMU x86 (i686)",
         arch: "i686",
         target: "i686-unknown-none",
         description: "",
         memory: [
-            MemoryRegion(name: "ram", origin: 0, length: parse_size("16M") ?? 0, permissions: [Permission.Read, Permission.Write, Permission.Execute], description: "")
+            MemoryRegion(name: "ram", origin: 1048576, length: parse_size("16M") ?? 0, permissions: [Permission.Read, Permission.Write, Permission.Execute], description: "")
         ],
         sections: [
-            Section(name: ".text", memory: "ram", address: nil, align: parse_size("4K") ?? 0, input: ["*(.text*)"], section_type: "progbits", size: nil, keep: false),
+            Section(name: ".text", memory: "ram", address: Some(1048576), align: parse_size("4K") ?? 0, input: ["*(.text*)"], section_type: "progbits", size: nil, keep: false),
             Section(name: ".rodata", memory: "ram", address: nil, align: 4, input: ["*(.rodata*)"], section_type: "progbits", size: nil, keep: false),
             Section(name: ".data", memory: "ram", address: nil, align: 4, input: ["*(.data*)"], section_type: "progbits", size: nil, keep: false),
             Section(name: ".bss", memory: "ram", address: nil, align: 4, input: ["*(.bss*)"], section_type: "nobits", size: nil, keep: false),
@@ -202,13 +202,22 @@ describe "Memory Region Formatting":
         it "formats 1MB as 0x100000":
             # @req REQ-LNK-018
             # @capture(bit_table): format_hex(1048576)
-            # NOTE: genuine product defect, not a weakened assertion. format_hex()
-            # in src/app/linker_gen/main.spl:129-140 returns "0x" followed by
-            # blank/garbage characters instead of hex digits for any nonzero input
-            # (format_hex(0) alone is correct via its early-return special case).
-            # Filed: doc/08_tracking/bug/linker_gen_format_hex_nonzero_garbage_2026-09-06.md
             step("Format the 1MB origin as hex with the real formatter")
             expect(format_hex(1048576)).to_equal("0x100000")
+
+        it "formats alphabetic digits and the maximum nonnegative address":
+            # @req REQ-LNK-018
+            step("Format nibble boundaries and the signed 64-bit address limit")
+            expect(format_hex(10)).to_equal("0xA")
+            expect(format_hex(15)).to_equal("0xF")
+            expect(format_hex(16)).to_equal("0x10")
+            expect(format_hex(11259375)).to_equal("0xABCDEF")
+            expect(format_hex(9223372036854775807)).to_equal("0x7FFFFFFFFFFFFFFF")
+
+        it "renders a nonzero memory origin in the full linker script":
+            # @req REQ-LNK-018
+            step("Render the board memory region at the protected-mode RAM origin")
+            expect(render_reference_board()).to_contain("ram (rwx) : ORIGIN = 0x100000, LENGTH = 16M")
 
 describe "Section Layout":
     context "Standard sections":
@@ -216,7 +225,7 @@ describe "Section Layout":
             # @req REQ-LNK-019
             # @capture(protocol_json): generate_linker_script(...) .text section
             step("Render a real linker script and check for the .text section")
-            expect(render_reference_board().contains(".text :")).to_equal(true)
+            expect(render_reference_board()).to_contain(".text 0x100000 :")
 
         it ".rodata section contains read-only data":
             # @req REQ-LNK-020
@@ -234,7 +243,17 @@ describe "Section Layout":
             # @req REQ-LNK-022
             # @capture(protocol_json): generate_linker_script(...) .bss section
             step("Render a real linker script and check for the .bss section")
-            expect(render_reference_board().contains(".bss :")).to_equal(true)
+            expect(render_reference_board()).to_contain(".bss (NOLOAD) :")
+
+        it "keeps an explicit NOBITS address before the NOLOAD qualifier":
+            # @req REQ-LNK-022
+            step("Render a fixed-size NOBITS section at an explicit RAM address")
+            var board = build_reference_board()
+            board.sections = [Section(name: ".stack", memory: "ram", address: Some(2097152), align: 16, input: [], section_type: "nobits", size: Some(4096), keep: false)]
+            val script = generate_linker_script(board)
+            expect(script).to_contain(".stack 0x200000 (NOLOAD) :")
+            expect(script).to_contain(". = . + 4096;")
+            expect(script).to_contain("} > ram")
 
     context "Multiboot section":
         it "multiboot must be within first 8KB":

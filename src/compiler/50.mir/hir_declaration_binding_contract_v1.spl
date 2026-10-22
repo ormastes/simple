@@ -1,0 +1,42 @@
+# Bind body-free callable records to the actual retained declaration table.
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.mir.hir_declaration_types_v1.*
+
+fn mir_hir_callable_record_binding_valid_v1(module: MirHirModuleDeclarationsV1,
+        function: MirHirFunctionDeclarationV1) -> bool:
+    if function.name == "" or not module.symbols.symbols.has(function.symbol.id): return false
+    val definition: HirSymbol = module.symbols.symbols[function.symbol.id]
+    if definition.id.id != function.symbol.id: return false
+    val expected = if function.is_method and not function.is_static: SymbolKind.Method else: SymbolKind.Function
+    if definition.kind != expected: return false
+    # Ordinary and specialized functions retain their actual declaration name.
+    if definition.name == function.name: return true
+    if not function.is_method and not function.is_static: return false
+    # Qualified methods are authorized by an actual owning declaration/member
+    # edge and the existing SymbolTable naming producer, never a leaf suffix.
+    var nominals: [MirHirNominalDeclarationV1] = []
+    for raw in module.structs: nominals.push(raw)
+    for raw in module.classes: nominals.push(raw)
+    for raw in nominals:
+        val nominal: MirHirNominalDeclarationV1 = raw
+        if nominal.methods.has(function.name) and nominal.methods[function.name].id == function.symbol.id:
+            if module.symbols.method_symbol_name(nominal.symbol, function.name) == definition.name: return true
+    for raw in module.traits:
+        val trait_: MirHirTraitDeclarationV1 = raw
+        var records: [MirHirFunctionDeclarationV1] = []
+        for item in trait_.methods: records.push(item)
+        for item in trait_.defaults: records.push(item)
+        for raw_record in records:
+            val record: MirHirFunctionDeclarationV1 = raw_record
+            if record.symbol.id == function.symbol.id and record.name == function.name:
+                if module.symbols.method_symbol_name(trait_.symbol, function.name) == definition.name: return true
+    for raw in module.impls:
+        val impl_: HirImpl = raw
+        if impl_.methods.has(function.name) and impl_.methods[function.name].id == function.symbol.id:
+            match impl_.type_.kind:
+                case HirTypeKind.Named(owner, _):
+                    if module.symbols.method_symbol_name(owner, function.name) == definition.name: return true
+                case _: ()
+    false

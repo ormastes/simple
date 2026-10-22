@@ -7,9 +7,11 @@ use warnings;
 use POSIX qw(setsid setpgid WNOHANG);
 use Time::HiRes qw(sleep alarm clock_gettime CLOCK_MONOTONIC);
 
-# @workaround bug=bootstrap_watchdog_wall_clock_budget_2026_10_11
+# @workaround bug=bootstrap_watchdog_wall_clock_budget_2026_10_11 gh=#3136
 # Elapsed budgets must not follow civil-clock steps; require a monotonic host clock.
 sub monotonic_time { return clock_gettime(CLOCK_MONOTONIC); }
+# Only startup validation may die directly, before any helper/workload exists.
+sub checked_monotonic_startup_time { my $now = monotonic_time(); defined($now) && $now >= 0 or die "CLOCK_MONOTONIC unavailable before workload\n"; return $now; }
 use Cwd qw(abs_path);
 use File::Basename qw(dirname);
 use File::Temp qw(tempdir);
@@ -27,11 +29,12 @@ $SIG{PIPE} = 'IGNORE';
 my %opt = ( 'max-rss-kib' => 5859375, 'interval-ms' => 100,
             'timeout-seconds' => 0, 'term-grace-seconds' => 1, 'session-mode' => 'new',
             'rss-cap-mode' => ($ENV{SIMPLE_BOOTSTRAP_RSS_CAP_MODE} // 'enforce'),
-            'budget-scope' => 'compiler' );
+            'budget-scope' => 'compiler', 'scope-group' => 0,
+            'observation-failure-mode' => 'enforce' );
 my %explicit;
 while (@ARGV && $ARGV[0] ne '--') {
     my $arg = shift @ARGV;
-    $arg =~ /^--(max-rss-kib|interval-ms|timeout-seconds|term-grace-seconds|receipt|session-mode|rss-cap-mode|budget-scope|aggregate-workers|compiler-jobs|cap-source|cap-bound)=(.+)$/
+    $arg =~ /^--(max-rss-kib|interval-ms|timeout-seconds|term-grace-seconds|receipt|session-mode|rss-cap-mode|budget-scope|aggregate-workers|compiler-jobs|compiler-ceiling-kib|cap-source|cap-bound|scope-group|observation-failure-mode|independent-cgroup)=(.+)$/
         or die "rss-guard: invalid option\n";
     my ($key, $value) = ($1, $2);
     $explicit{$key}++ and die "rss-guard: duplicate $key\n";
@@ -40,13 +43,36 @@ while (@ARGV && $ARGV[0] ne '--') {
 @ARGV > 1 && shift(@ARGV) eq '--' or die "rss-guard: missing command\n";
 $opt{'session-mode'} =~ /\A(?:new|inherit)\z/ or die "rss-guard: invalid session mode\n";
 $opt{'rss-cap-mode'} =~ /\A(?:enforce|monitor)\z/ or die "rss-guard: invalid RSS cap mode\n";
+$opt{'scope-group'} =~ /\A[01]\z/ or die "rss-guard: invalid scope-group\n";
+$opt{'observation-failure-mode'} =~ /\A(?:enforce|diagnostic)\z/
+    or die "rss-guard: invalid observation failure mode\n";
 for my $key (qw(max-rss-kib interval-ms timeout-seconds term-grace-seconds)) {
     $opt{$key} =~ /^\d+$/ or die "rss-guard: invalid $key\n";
 }
 # Compiler policy is unchanged. An explicitly admitted parallel test tree has
 # a separate aggregate budget: one parent reserve plus the ordinary compile
 # target per worker. This does not raise any nested compiler guard's limit.
-my $compiler_ceiling_kib = 6835937;
+# Widened 2026-10-13 on positive evidence: stage2 full-CLI artifact builds
+# (AOT emission, threads=4) measured peak_rss_kib=6842388 against the old
+# 6835937 ceiling (watchdog receipts, stage2-compiler-tests campaigns). 8 GiB
+# keeps ~1.2 GiB headroom over the measured peak. Keep in sync with
+# scripts/bootstrap/lib/tree-rss-policy.shs (same constant, same rationale).
+# Second widening 2026-10-13 (cycle 25 receipt: compiler_cli > 8 GiB at
+# 2 threads). Keep in sync with tree-rss-policy.shs.
+# Third widening 2026-10-13 (cycle-31 group-scoped cli peak 10.5 GiB at
+# 73% HIR). Keep in sync with tree-rss-policy.shs.
+# Fourth widening 2026-10-13 (cycle-33 1-thread cli peak 12591996 KiB).
+# Keep in sync with tree-rss-policy.shs.
+# Fifth widening 2026-10-16 (cycle-44 peak 16792808 KiB at 8 compiler jobs;
+# cycle-46 peak 16777468 KiB at 4 jobs -- the plateau is baseline-dominated
+# by the resident compiler daemon + shared LLVM, not per-job, so lowering
+# jobs cannot fit the 16 GiB ceiling). 24 GiB leaves ~7 GiB headroom over
+# the measured plateau. Keep in sync with tree-rss-policy.shs.
+# Sixth widening 2026-10-16: serialized single-build probe (cycle 49) -- one
+# full cli closure build (1500+ SCV modules) exceeded 24 GiB; widening to
+# 48 GiB to measure the true single-build plateau before final evidence-based
+# tightening. Keep in sync with tree-rss-policy.shs.
+my $compiler_ceiling_kib = 50331648;
 my $worker_target_kib = 976562;
 my $budget_ceiling_kib = $compiler_ceiling_kib;
 $opt{'budget-scope'} =~ /\A(?:compiler|aggregate-tests)\z/
@@ -71,17 +97,30 @@ if ($opt{'budget-scope'} eq 'aggregate-tests') {
 # ceiling therefore applies only while the owner declares no worker count.
 # A declared count raises the HARD ceiling to reserve + jobs * per-job
 # ceiling, never above 3/4 of host physical RAM, and not at all when host RAM
-# cannot be read. These constants are deliberately not configurable: the
-# tunable budget lives in scripts/bootstrap/lib/tree-rss-policy.shs (host
-# config tree_rss_*) and must fit under this ceiling.
+# cannot be read. These default constants are not configurable. An explicit
+# --compiler-ceiling-kib is a separate enforced compiler-only admission below:
+# it requires fresh real host total/available evidence and an explicit cap.
+# Ordinary host-config tree_rss_* knobs still fit under the default ceiling.
 my $compiler_jobs = 0;
 my $jobs_reserve_kib = 3145728;
-my $jobs_per_job_ceiling_kib = 262144;
+my $jobs_per_job_ceiling_kib = 1048576;
 my $host_total_kib = 0;
 # Where host_total_kib came from: undeclared (no worker count, never read),
 # proc-meminfo, sysctl, unknown (unreadable: the ceiling does not move) or
 # fixture. The receipt records it so a widened ceiling is always attributable.
 my $host_total_source = 'undeclared';
+my $ceiling_request_kib = 0;
+my $ceiling_previous_kib = $compiler_ceiling_kib;
+my $available_kib = 0;
+my $available_source = 'unknown';
+my $ceiling_admission = 'default';
+sub ceiling_receipt {
+    return "compiler_ceiling_request_kib=$ceiling_request_kib\n" .
+        "compiler_ceiling_previous_kib=$ceiling_previous_kib\n" .
+        "compiler_ceiling_admitted_kib=" . ($ceiling_admission eq 'refused' ? 0 : $budget_ceiling_kib) . "\n" .
+        "compiler_available_kib=$available_kib\ncompiler_available_source=$available_source\n" .
+        "compiler_ceiling_admission=$ceiling_admission\n";
+}
 # Recorded verbatim so a receipt says which policy layer chose the cap.
 for my $key (qw(cap-source cap-bound)) {
     $opt{$key} //= 'unspecified';
@@ -94,6 +133,26 @@ sub read_meminfo_total {
         return $1 if $line =~ /\AMemTotal:\s+([1-9][0-9]{0,17})\s+kB\s*\z/;
     }
     return 0;
+}
+
+# The elevated policy never reads a fixture path. Tests exercise this parser
+# separately; the admission call below supplies only the real host file.
+sub read_headroom_facts {
+    my ($path) = @_;
+    open(my $fh, '<', $path) or return;
+    my (%values, %seen);
+    while (my $line = <$fh>) {
+        next unless $line =~ /\A(MemTotal|MemAvailable|MemFree):/;
+        my $key = $1;
+        return if $seen{$key}++;
+        $line =~ /\A\Q$key\E:\s+([1-9][0-9]{0,14})\s+kB\s*\z/ or return;
+        $values{$key} = $1;
+    }
+    close($fh) or return;
+    my $source = exists($values{MemAvailable}) ? 'MemAvailable' : 'MemFree';
+    return unless $values{MemTotal} && $values{$source} && $values{$source} <= $values{MemTotal};
+    return if exists($values{MemFree}) && $values{MemFree} > $values{MemTotal};
+    return ($values{MemTotal}, $values{$source}, "$source:");
 }
 # SIMPLE_PROCESS_TREE_RSS_MEMINFO_PATH substitutes host RAM and can therefore
 # raise the hard ceiling. It is a TEST hook only: it needs the explicit
@@ -129,12 +188,13 @@ sub host_total_kib {
 # the receipt as well as stderr so a file-reading stage diagnosis can say why.
 sub refuse_policy {
     my ($reason) = @_;
+    $ceiling_admission = 'refused' if $explicit{'compiler-ceiling-kib'};
     if (defined $opt{receipt} && open(my $fh, '>', "$opt{receipt}.tmp.$$")) {
         print {$fh} "status=policy-refused\nexit_status=125\nmax_rss_kib=$opt{'max-rss-kib'}\n" .
             "budget_scope=$opt{'budget-scope'}\nbudget_ceiling_kib=$budget_ceiling_kib\n" .
             "compiler_jobs=$compiler_jobs\nhost_total_kib=$host_total_kib\n" .
             "host_total_source=$host_total_source\n" .
-            "cap_source=$opt{'cap-source'}\ncap_bound=$opt{'cap-bound'}\nrefusal_reason=$reason\n";
+            "cap_source=$opt{'cap-source'}\ncap_bound=$opt{'cap-bound'}\nrefusal_reason=$reason\n" . ceiling_receipt();
         close($fh) && rename("$opt{receipt}.tmp.$$", $opt{receipt});
     }
     print STDERR "rss-guard: $reason\n";
@@ -152,6 +212,33 @@ if ($explicit{'compiler-jobs'}) {
     my $host_max = int($host_total_kib / 4) * 3;
     $scaled = $host_max if $scaled > $host_max;
     $budget_ceiling_kib = $scaled if $scaled > $budget_ceiling_kib;
+}
+$ceiling_previous_kib = $budget_ceiling_kib;
+if ($explicit{'compiler-ceiling-kib'}) {
+    $ceiling_admission = 'refused';
+    $opt{'compiler-ceiling-kib'} =~ /\A[1-9][0-9]{0,14}\z/
+        or refuse_policy('compiler ceiling must be canonical positive decimal (at most 15 digits)');
+    $ceiling_request_kib = $opt{'compiler-ceiling-kib'};
+    $opt{'budget-scope'} eq 'compiler' && $opt{'rss-cap-mode'} eq 'enforce' &&
+        $explicit{'compiler-jobs'} && $compiler_jobs > 0 && $explicit{'max-rss-kib'} &&
+        $opt{'max-rss-kib'} =~ /\A[1-9][0-9]{0,14}\z/
+        or refuse_policy('compiler ceiling requires enforced compiler scope and explicit real jobs and cap');
+    for my $name (qw(BOOTSTRAP_TREE_RSS_MEMINFO_PATH BOOTSTRAP_TREE_RSS_TEST_FIXTURE
+                     SIMPLE_PROCESS_TREE_RSS_MEMINFO_PATH SIMPLE_PROCESS_TREE_RSS_TEST_FIXTURE)) {
+        !exists($ENV{$name}) or refuse_policy('compiler ceiling refuses memory fixture hooks');
+    }
+    my @facts = read_headroom_facts('/proc/meminfo');
+    @facts == 3 or refuse_policy('real host headroom is unavailable or contradictory');
+    ($host_total_kib, $available_kib, $available_source) = @facts;
+    $host_total_source = 'proc-meminfo';
+    my $total_bound = int($host_total_kib / 4) * 3;
+    my $available_bound = int($available_kib / 4) * 3;
+    $ceiling_request_kib > $ceiling_previous_kib &&
+        $ceiling_request_kib <= $total_bound && $ceiling_request_kib <= $available_bound &&
+        $opt{'max-rss-kib'} <= $ceiling_request_kib
+        or refuse_policy("compiler ceiling refused (requested=$ceiling_request_kib previous=$ceiling_previous_kib total_bound=$total_bound available_bound=$available_bound)");
+    $budget_ceiling_kib = $ceiling_request_kib;
+    $ceiling_admission = 'elevated';
 }
 $opt{'max-rss-kib'} > 0 && $opt{'max-rss-kib'} <= $budget_ceiling_kib
     or refuse_policy("cap $opt{'max-rss-kib'} KiB must be between 1 and $budget_ceiling_kib KiB" .
@@ -181,7 +268,7 @@ my %groups;
 my $identity_lost = 0;
 my ($peak, $samples, $child_status, $interrupted);
 $peak = $samples = $interrupted = 0;
-my $started = monotonic_time();
+my $started = checked_monotonic_startup_time();
 my $last = {};
 my $ps_pid = 0;
 my ($previous_sample, $sample_gap_max_ms) = (0, 0);
@@ -191,18 +278,22 @@ my $session_root_confirmed = 0;
 my ($session_admission, $parent_admission_sha) = ('', '');
 my %unexpected_sid;
 my $sample_started_at;
+my (%observation_current, %observation_report);
+my ($observation_phase, $observation_phase_started, $observation_cpu_started);
 # The cadence is a scheduling target, not a deadline for a host-wide process
 # observation. Keep slow but valid samples bounded separately from that target.
-# Up to 30s for emulated hosts: a riscv64 TCG guest with 20 compile threads
-# stalled one /proc sample past 5s after 3729 good ones (peak 894 MiB).
+# Up to 60s for bootstrap owners: a CPU-bound Linux Stage 2 producer completed
+# 4494 valid observations at 1.25 GiB RSS, then one /proc walk was descheduled
+# for 30.78s. The caller remains responsible for explicitly selecting this
+# wider bound; ordinary watchdog users retain the one-second default.
 # FreeBSD's host-wide ps observer can exceed one second under bootstrap load.
 # Match the existing product-builder budget without changing sample cadence,
 # RSS ceilings, or an explicit caller-selected observation budget.
 sub resolve_observation_budget_ms {
     my ($platform, $override) = @_;
     my $budget = $override // ($platform eq 'freebsd' ? 5000 : 1000);
-    $budget =~ /^\d+$/ && $budget >= 1000 && $budget <= 30000
-        or die "rss-guard: observation budget must be between 1000 and 30000 ms\n";
+    $budget =~ /^\d+$/ && $budget >= 1000 && $budget <= 60000
+        or die "rss-guard: observation budget must be between 1000 and 60000 ms\n";
     return $budget;
 }
 my $observation_budget_ms = resolve_observation_budget_ms(
@@ -240,6 +331,103 @@ my $containment_scope = $windows ? 'win32-job-object-no-breakaway' :
     'observed-descendants-and-process-groups';
 my $extra_receipt = '';
 my $session_dir;
+my ($independent_cgroup_identity, $independent_max_bytes);
+my ($independent_checks, $independent_oom_kills) = (0, 0);
+
+# This narrow opt-in accepts only the root-provisioned common parent. A worker
+# leaf alone does not bound the outer supervisor. No configurable filesystem or
+# proof fixture is accepted by production; tests inject into a private copy.
+sub bounded_read {
+    my ($path, $protected) = @_;
+    sysopen(my $fh, $path, O_RDONLY | O_NOFOLLOW) or die "cannot read $path";
+    my @info = stat($fh);
+    @info && (!$protected || ($info[4] == 0 && !($info[2] & 0022)))
+        or die "unprotected cgroup control: $path";
+    my $text = '';
+    while (1) {
+        my $n = sysread($fh, my $chunk, 4096);
+        defined($n) or die "cannot read $path";
+        last unless $n;
+        $text .= $chunk;
+        length($text) <= 262144 or die "oversized proof: $path";
+    }
+    close($fh) or die "cannot close $path";
+    $text =~ s/\s+\z//;
+    return $text;
+}
+
+sub independent_oom_count {
+    my $events = bounded_read("$opt{'independent-cgroup'}/memory.events", 1);
+    my @counts = $events =~ /^oom_kill ([0-9]+)$/mg;
+    @counts == 1 or die "missing cgroup oom_kill counter";
+    return $counts[0] + 0;
+}
+
+sub protected_cgroup_directory {
+    my ($path) = @_;
+    my @info = lstat($path);
+    @info && -d _ && !-l _ && $info[4] == 0 && !($info[2] & 0022)
+        or die "unprotected cgroup directory: $path";
+    return "$info[0]:$info[1]";
+}
+
+sub verify_independent_cgroup {
+    my ($all) = @_;
+    my $path = $opt{'independent-cgroup'} // '';
+    $^O eq 'linux' && $observer_backend eq 'linux-proc' && $> != 0 &&
+        $opt{'rss-cap-mode'} eq 'enforce' && $opt{'timeout-seconds'} > 0
+        or die "diagnostic observations require nonroot Linux /proc, enforced RSS and a timeout";
+    $path =~ m{\A/sys/fs/cgroup/(simple-bootstrap-stage3\.[0-9a-f]{32})\z}
+        or die "diagnostic observations require a private bounded parent cgroup";
+    my $relative = "/$1";
+    my $mounts = bounded_read('/proc/self/mountinfo', 0);
+    $mounts =~ m{^\d+ \d+ \d+:\d+ / /sys/fs/cgroup [^\n]+ - cgroup2 [^\n]+$}m
+        or die "independent guard is not the real cgroup2 root mount";
+    for my $directory ('/sys', '/sys/fs', '/sys/fs/cgroup', $path,
+                       "$path/supervisor", "$path/worker") {
+        protected_cgroup_directory($directory);
+    }
+    my $identity = protected_cgroup_directory($path);
+    !defined($independent_cgroup_identity) || $identity eq $independent_cgroup_identity
+        or die "independent cgroup identity changed";
+    # Moving outside this direct child requires write access to the common
+    # ancestor's cgroup.procs. That root control must not be delegated. Domain
+    # cgroups exclude threaded migration. No workload-owned child directories.
+    bounded_read('/sys/fs/cgroup/cgroup.procs', 1);
+    # cgroup.type exists only on non-root cgroups. The real mount root was
+    # verified above; its protected cgroup.procs is the migration boundary.
+    for my $directory ($path, "$path/supervisor", "$path/worker") {
+        bounded_read("$directory/cgroup.type", 1) eq 'domain'
+            or die "independent containment requires domain cgroups";
+    }
+    bounded_read("$path/cgroup.subtree_control", 1) =~ /(?:\A|\s)memory(?:\s|\z)/
+        or die "independent parent memory controller disabled";
+    bounded_read("$path/memory.oom.group", 1) eq '1'
+        or die "independent parent requires OOM group enforcement";
+    my $maximum = bounded_read("$path/memory.max", 1);
+    $maximum =~ /\A[1-9][0-9]{0,14}\z/ && $maximum <= $opt{'max-rss-kib'} * 1024
+        or die "independent parent limit is absent or exceeds RSS policy";
+    !defined($independent_max_bytes) || $maximum == $independent_max_bytes
+        or die "independent parent limit changed";
+    my $credentials = bounded_read('/proc/self/status', 0);
+    for my $kind ('CapEff', 'CapPrm') {
+        $credentials =~ /^\Q$kind\E:\s+0+$/m
+            or die "diagnostic supervisor must have no retained capabilities";
+    }
+    my @pids = ($$);
+    push @pids, members($all) if $all;
+    for my $pid (@pids) {
+        my $membership = bounded_read("/proc/$pid/cgroup", 0);
+        $membership =~ /\A0::\Q$relative\E\/(?:supervisor|worker)\z/
+            or die "process $pid is outside the independent parent";
+    }
+    $independent_oom_kills = independent_oom_count();
+    $independent_checks || !$independent_oom_kills
+        or die "independent parent already has OOM kills";
+    $independent_cgroup_identity = $identity;
+    $independent_max_bytes = $maximum;
+    ++$independent_checks;
+}
 
 sub verify_observer {
     my @path = lstat($observer_path);
@@ -897,20 +1085,83 @@ sub parse_proc_stat_record {
 # records the measurement gap without converting telemetry into cancellation.
 # Broken/incomplete observations still fail at their original validation sites.
 sub record_sample_duration {
-    my ($duration_ms, $failure) = @_;
+    my ($duration_ms, $failure, $all) = @_;
     $sample_duration_max_ms = $duration_ms if $duration_ms > $sample_duration_max_ms;
     ++$sample_overruns if $duration_ms > $opt{'interval-ms'};
     if ($duration_ms > $observation_budget_ms) {
         ++$sample_budget_exceeded;
-        die $failure unless $opt{'rss-cap-mode'} eq 'monitor';
+        if ($opt{'observation-failure-mode'} eq 'diagnostic') {
+            $all or die "diagnostic waiver requires a complete process snapshot";
+            verify_independent_cgroup($all);
+            warn "rss-guard: $failure; bounded diagnostic measurement incomplete, workload continues\n"
+                if $sample_budget_exceeded == 1;
+            return;
+        }
+        die "$failure: one sample took ${duration_ms} ms, budget ${observation_budget_ms} ms. "
+            . "The /proc walk was descheduled (a cgroup memory.high reclaim throttle or CPU starvation); "
+            . "raise the cgroup MemoryHigh (Stage 3: SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB) or SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS (at most 60000)\n"
+            unless $opt{'rss-cap-mode'} eq 'monitor';
         warn "rss-guard: $failure; monitor measurement incomplete, workload continues\n"
             if $sample_budget_exceeded == 1;
     }
 }
 
+sub observation_phase {
+    my ($next, $completed) = @_;
+    return unless defined $observation_phase;
+    my $now = monotonic_time();
+    $observation_current{"${observation_phase}_ms"} += ($now - $observation_phase_started) * 1000;
+    $observation_current{phases_completed} .= "$observation_phase," if $completed // 1;
+    $observation_phase_started = $now;
+    $observation_phase = $next;
+}
+
+sub observation_receipt {
+    return "observation_diagnostics=unavailable\n" unless %observation_report;
+    return "observation_diagnostics=linux-proc-v1\n" . join('', map {
+        "observation_$_=$observation_report{$_}\n"
+    } sort keys %observation_report);
+}
+
+sub observation_cpu_time {
+    my ($user, $system) = times;
+    return undef unless defined($user) && defined($system) && $user >= 0 && $system >= 0;
+    return $user + $system;
+}
+
 sub snapshot {
     my ($metadata_only) = @_;
     $sample_started_at = monotonic_time();
+    return snapshot_body($metadata_only) unless $observer_backend eq 'linux-proc';
+    %observation_current = (proc_ms => 0, membership_ms => 0, helper_ms => 0,
+        sessions_ms => 0, budget_check_ms => 0, phases_completed => '',
+        process_count => 0, process_count_complete => 0, selected_count => 'unavailable',
+        retained_group_count => scalar(keys %groups));
+    $observation_phase = 'proc';
+    $observation_phase_started = $sample_started_at;
+    $observation_cpu_started = observation_cpu_time();
+    my $all = eval { snapshot_body($metadata_only) };
+    my $failure = $@;
+    my $last_phase = $observation_phase;
+    observation_phase('complete', $all ? 1 : 0);
+    my $cpu = observation_cpu_time();
+    $observation_current{cpu_ms} = defined($cpu) && defined($observation_cpu_started) &&
+        $cpu >= $observation_cpu_started ? ($cpu - $observation_cpu_started) * 1000 : 'unavailable';
+    $observation_current{elapsed_ms} = ($observation_phase_started - $sample_started_at) * 1000;
+    $observation_current{complete} = $all ? 1 : 0;
+    $observation_current{last_phase} = $last_phase;
+    # Freeze the first failure before cleanup invokes further snapshots.
+    if ((!%observation_report || $observation_report{complete}) &&
+        (!$all || $observation_current{elapsed_ms} > ($observation_report{elapsed_ms} // -1))) {
+        %observation_report = %observation_current;
+    }
+    undef $observation_phase;
+    die $failure unless $all;
+    return $all;
+}
+
+sub snapshot_body {
+    my ($metadata_only) = @_;
     return reaper_snapshot() if $freebsd;
     if ($^O eq 'darwin') {
         my $all = eval { native_snapshot($metadata_only) };
@@ -941,8 +1192,10 @@ sub snapshot {
             my $record = parse_proc_stat_record($pid, $line, $proc_page_kib);
             next unless defined($record);  # fully dead task after stat was opened
             $all{$pid} = $record;
+            ++$observation_current{process_count};
         }
         closedir($proc);
+        $observation_current{process_count_complete} = 1;
         %all or die "empty /proc listing";
         return finish_snapshot(\%all);
     }
@@ -973,16 +1226,20 @@ sub snapshot {
 sub finish_snapshot {
     my ($all) = @_;
     ++$samples;
+    observation_phase('membership');
     if ($leader && defined($session_helper) && !$helper_failed &&
         ($session_root_confirmed || (exists($all->{$leader}) && $all->{$leader}{group} == $leader))) {
         my @live = members($all);
+        $observation_current{selected_count} = scalar(@live) if defined $observation_phase;
         my $remaining = $observation_budget_ms / 1000 - (monotonic_time() - $sample_started_at);
         # /proc already carries each PID's session (stat field 6): spawning the
         # getsid helper per sample is what cost ~1s per sample under TCG.
         # The helper's integrity is still verified every sample: swapping the
         # session-exec binary mid-run must fail closed on either backend.
         my $sids = $observer_backend eq 'linux-proc' ?
-            do { verify_session_helper();
+            do { observation_phase('helper');
+                 verify_session_helper();
+                 observation_phase('sessions');
                  +{ map { ++$session_checks; ($_ => $all->{$_}{session}) } @live } } :
             observe_sessions($remaining, @live);
         $session_root_confirmed = 1 if ($sids->{$leader} || 0) == $session_id;
@@ -990,14 +1247,39 @@ sub finish_snapshot {
             $unexpected_sid{$id} = $sids->{$id} if $sids->{$id} && $sids->{$id} != $session_id;
         }
     }
+    observation_phase('budget_check');
     my $duration_ms = (monotonic_time() - $sample_started_at) * 1000;
-    record_sample_duration($duration_ms, "process observation exceeded observation budget");
+    record_sample_duration($duration_ms, "process observation exceeded observation budget", $all);
     return $all;
 }
 
 sub members {
     my ($all) = @_;
     return grep { !$all->{$_}{zombie} } keys %$all if $freebsd;
+    # Per-task group scoping (SIMPLE_PROCESS_TREE_RSS_SCOPE_GROUP=1 via
+    # run-process-group-timeout.shs --scope-group=1): a serialized artifact
+    # build shares the campaign session with co-resident sibling builds
+    # (tool_build_concurrency=2), and whole-session/descendant accounting
+    # counted their trees into THIS build's cap -- the cycle-27 ratchet
+    # (mcp_build receipt peak=cap+476 KiB with a 2.07 GiB own tree; lsp_build
+    # killed at 64 s the same way). Scoped to the leader's process group, the
+    # watchdog measures and kills only the build it guards; forked children
+    # share the leader's group, so group equality covers the whole build. The
+    # top-level campaign watchdog never sets this flag and keeps whole-tree
+    # accounting, so total-tree containment (and the session-escape check) is
+    # unchanged. See doc/08_tracking/bug/session_escape_check_flags_nested_
+    # tool_builds_2026-10-13.md for why the new-session alternative was
+    # abandoned.
+    if ($opt{'scope-group'}) {
+        my %selected;
+        my $scope = exists $all->{$leader} ? $all->{$leader}{group} : -1;
+        for my $pid (keys %$all) {
+            $selected{$pid} = 1 if $pid == $leader || $all->{$pid}{group} == $scope;
+        }
+        delete $selected{$$};
+        for my $pid (keys %selected) { $known{$pid} = $all->{$pid}{identity}; }
+        return grep { !$all->{$_}{zombie} } keys %selected;
+    }
     for my $group (keys %groups) {
         my @current = grep { $all->{$_}{group} == $group } keys %$all;
         my $anchor = exists($all->{$group}) &&
@@ -1112,13 +1394,19 @@ sub receipt {
         "budget_scope=$opt{'budget-scope'}\nbudget_ceiling_kib=$budget_ceiling_kib\n" .
         "aggregate_workers=" . ($opt{'aggregate-workers'} // 0) . "\n" .
         "compiler_jobs=$compiler_jobs\nhost_total_kib=$host_total_kib\n" .
-        "host_total_source=$host_total_source\n" .
+        "host_total_source=$host_total_source\n" . ceiling_receipt() .
         "cap_source=$opt{'cap-source'}\ncap_bound=$opt{'cap-bound'}\n" .
         "interval_ms=$opt{'interval-ms'}\nsample_gap_max_ms=$sample_gap_max_ms\n" .
         "observation_budget_ms=$observation_budget_ms\n" .
         "sample_duration_max_ms=$sample_duration_max_ms\nsample_overruns=$sample_overruns\n" .
         "sample_budget_exceeded=$sample_budget_exceeded\nmeasurement_budget_complete=" .
         ($sample_budget_exceeded ? 0 : 1) . "\n" .
+        "observation_failure_mode=$opt{'observation-failure-mode'}\n" .
+        "independent_cgroup=" . ($opt{'independent-cgroup'} // '') . "\n" .
+        "independent_cgroup_checks=$independent_checks\n" .
+        "independent_memory_max_bytes=" . ($independent_max_bytes // 'unavailable') . "\n" .
+        "independent_oom_kills=$independent_oom_kills\n" .
+        observation_receipt() .
         "observer_backend=$observer_backend\nobserver_path=" . ($observer_path // '') . "\n" .
         "observer_sha256=" . ($observer_sha // '') . "\n" .
         "observer_source_sha256=" . ($observer_source_sha // '') . "\n" .
@@ -1132,6 +1420,7 @@ sub receipt {
         "rss_limit_kib=" . ($opt{'rss-cap-mode'} eq 'enforce' ? $opt{'max-rss-kib'} : 'unlimited') . "\n" .
         "session_id=$session_id\nsession_checks=$session_checks\n" .
         "session_mode=$opt{'session-mode'}\nsession_admission=$session_admission\n" .
+        "scope_group=$opt{'scope-group'}\n" .
         "parent_session_admission_sha256=$parent_admission_sha\n" .
         "ordinary_compile_rss_target_bytes=1000000000\n" .
         "session_helper=" . ($session_helper // '') . "\n" .
@@ -1149,6 +1438,15 @@ sub receipt {
 }
 
 # Workload startup boundary (identity unit tests exercise functions above it).
+if ($opt{'observation-failure-mode'} eq 'diagnostic') {
+    if (!eval { verify_independent_cgroup(); 1 }) {
+        my $failure = $@;
+        $failure =~ s/\s+/ /g;
+        refuse_policy($failure);
+    }
+} elsif ($explicit{'independent-cgroup'}) {
+    refuse_policy('independent cgroup requires explicit diagnostic observation mode');
+}
 if (!eval { install_session_helper(); install_observer(); 1 }) {
     alarm 0;
     stop_observer();
@@ -1227,6 +1525,7 @@ while (1) {
         ($status, $code) = ($helper_failed ? 'session-helper-invalid' : 'rss-measurement-failed', 89); last;
     }
     $last = $all;
+    if ($independent_oom_kills) { ($status, $code) = ('independent-memory-oom', 137); last }
     if (%unexpected_sid) { ($status, $code) = ('bootstrap-session-escaped', 90); last }
     my @live = members($all);
     my $rss = 0; $rss += $all->{$_}{rss} for @live;
@@ -1299,5 +1598,11 @@ if ($status eq 'complete' && defined $child_status) {
 }
 $quiet = 0 unless defined $child_status;
 if (!$quiet && $code != 89) { ($status, $code) = ('rss-containment-unverified', 89) }
+if ($opt{'observation-failure-mode'} eq 'diagnostic') {
+    my $checked = eval { $independent_oom_kills = independent_oom_count(); 1 };
+    if (!$checked) { ($status, $code) = ('independent-guard-unverified', 89) }
+    elsif ($independent_oom_kills && !$code) { ($status, $code) = ('independent-memory-oom', 137) }
+    elsif ($status eq 'complete' && $sample_budget_exceeded) { $status = 'diagnostic-incomplete' }
+}
 receipt($status, $code, $quiet);
 exit $code;

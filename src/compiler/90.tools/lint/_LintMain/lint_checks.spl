@@ -19,6 +19,9 @@ use compiler.tools.fix.rules.registry.{check_all_rules}
 use compiler.tools.fix.rules.impl_.lint_primitive_api.{check_primitive_api}
 use compiler.tools.fix.rules.impl_.lint_script_language.{check_simple_script_required}
 use lazy nogc_sync_mut.ui.theme_package.{validate_default_theme_package}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.common.module_path_naming.{module_logical_name_from_path}
+use compiler.tools.lint.representation_lint_context_v1.{representation_lint_params_v1}
 use compiler.semantics.lint.raw_rt_access.{check_raw_rt_access_with_allowlist, raw_rt_lexical_code_lines, raw_rt_wrapper_replacement}
 use compiler.semantics.lint.dynamic_capability_acquire.{check_dynamic_capability_acquire}
 use std.critical.capability_manifest.{load_critical_mode_config}
@@ -101,7 +104,7 @@ impl Linter:
             "Declaration type could not be determined (callee returns an unresolved type) and the binding is used as receiver/iterable/index/field base — annotate"))
         lints.push(LintDiag.new("W-HIR-INFER-002", LintLevel.Warn, LintCategory.Correctness,
             "Untyped empty `[]`/`{}` declaration used as a receiver — annotate the element type"))
-        # Any rules (item 7b): 90.tools/lint/any_rules.spl. Off in every profile;
+        # Any rules (item 7b): warn in robust/critical; off in moderate/strict.
         # opt-in via SIMPLE_ANY_RULES=warn or an explicit simple.sdn family level.
         lints.push(LintDiag.new("W-ANY-DECL-001", LintLevel.Warn, LintCategory.Correctness,
             "Written `Any` in a compiler declaration (param, return, field, local) — use a concrete type"))
@@ -289,6 +292,10 @@ impl Linter:
         self.results = []
 
         val file_config = resolve_lint_config(self.config, path, content)
+        for issue in file_config.suppression_issues:
+            val level = lint_suppression_issue_level(file_config)
+            val diagnostic = LintDiag.new("LINTALLOW001", level, LintCategory.Correctness, issue.message)
+            self.results.push(LintRunResult.new(path, issue.line, issue.column, diagnostic))
 
         # Run simple pattern-based lints
         val lines = content.split("\n")
@@ -308,7 +315,7 @@ impl Linter:
         self.check_llvm_backend_type_safety(path, content)
         self.check_raw_rt_access_spl(path, content)
         self.check_dynamic_capability_acquire_spl(path, content)
-        self.check_static_lint_rules(path, content)
+        self.check_static_lint_rules(file_config, path, content)
         self.check_wm_lane_boundary(file_config, path, content)
         self.check_gpu_2d_perf(file_config, path, content)
 
@@ -452,9 +459,18 @@ impl Linter:
                         lint = lint.with_easy_fix(fix)
             self.results.push(LintRunResult.new(path, finding.line_num, finding.column, lint))
 
-    me check_static_lint_rules(path: String, content: String):
+    me check_static_lint_rules(file_config: LintConfig, path: String, content: String):
+        var strictness = AssuranceStrictness.Moderate
+        if val profile = file_config.profile:
+            match profile:
+                case LintProfile.Critical: strictness = AssuranceStrictness.Critical
+                case LintProfile.Robust: strictness = AssuranceStrictness.Robust
+                case LintProfile.Strict: strictness = AssuranceStrictness.Strict
+                case _: pass
+        val params = representation_lint_params_v1(file_config.representation_project,
+            module_logical_name_from_path(path), strictness, path, content)
         val run = run_static_lint_rule_table(
-            LintParamsV1.defaults(), LintUnit(path, content), static_lint_rule_table())
+            params, LintUnit(path, content), static_lint_rule_table())
         for failure in run.errors:
             val lint = LintDiag.new(failure, LintLevel.Deny, LintCategory.Correctness,
                 "Static lint-rule registration was rejected")

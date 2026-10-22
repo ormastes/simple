@@ -1,0 +1,34 @@
+# Exercises the actual pure MCP storage resolver's `.map(_.roots)` call.
+# No environment, filesystem or process authority is read by the resolver.
+# EXPECT stdout: result-map-storage-roots: assertions=4
+use std.common.storage_roots.{StorageRootError}
+use std.nogc_sync_mut.storage_roots.model.{StoragePlatform, StorageRootOverrides, StorageRootEnvironmentSnapshot, StorageRootResolverInput}
+use std.nogc_sync_mut.storage_roots.resolver.{resolve_storage_roots}
+
+# Same leaf name as the provider record, with an incompatible layout.
+# The resolver result must retain its provider owner across this importer.
+struct StorageRoots:
+    wrong_scope: i64
+
+fn resolver_input(user_root: text) -> StorageRootResolverInput:
+    StorageRootResolverInput(
+        platform: StoragePlatform.Linux,
+        cli: StorageRootOverrides(user_root: Some(user_root), worktree_root: Some("/workspace/cache")),
+        environment: StorageRootEnvironmentSnapshot(user_root: nil, worktree_root: nil, home: Some("/home/test"), xdg_cache_home: nil, local_app_data: nil),
+        canonical_worktree: "/workspace/project",
+        worktree_metadata: "result-map-regression",
+    )
+
+fn main():
+    val decoy = StorageRoots(wrong_scope: 99)
+    assert decoy.wrong_scope == 99
+    val roots = resolve_storage_roots(resolver_input("/home/test/cache")).unwrap()
+    assert roots.user_root.value == "/home/test/cache"
+    assert roots.worktree_root.value == "/workspace/cache"
+    val failure = resolve_storage_roots(resolver_input(""))
+    var matched_empty = false
+    match failure:
+        case Err(StorageRootError.EmptyExplicitRoot): matched_empty = true
+        case _: ()
+    assert matched_empty
+    print "result-map-storage-roots: assertions=4"

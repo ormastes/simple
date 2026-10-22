@@ -1,5 +1,5 @@
 # Part 2 of src/compiler/70.backend/backend/mir_to_llvm.spl
-use compiler.backend.backend.mir_to_llvm.*
+use compiler.backend.mir_to_llvm.*
 # MIR to LLVM IR Translation
 #
 # MirToLlvm class that translates MIR to LLVM IR.
@@ -9,7 +9,7 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_instruction_support.{GpuBarrierScope}
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
 use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at}
-use compiler.backend.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
+use compiler.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
 use compiler.backend.llvm_type_mapper.LlvmTypeMapper
 use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integer_type, is_signed_int_type, is_float_type,
     llvm_ir_builder_build}
@@ -83,9 +83,18 @@ impl MirToLlvm:
         val dest_name = self.get_local(dest_id)
         val base_val = self.translate_operand(base)
         val base_ptr = self.value_as_type(base_val, self.get_operand_type(base), "ptr")
+        val nit = self.native_int()
         var index_vals: [text] = []
         for idx in indices:
-            index_vals = index_vals.push(self.translate_operand(idx))
+            # Convert every index to the native int width: a pointer-typed
+            # index (e.g. a text key lowering a dict/array element access)
+            # must emit ptrtoint, not appear raw as an i64 operand — llc
+            # rejects `getelementptr ptr, ptr %base, i64 %ptr_index`
+            # ("defined with type 'ptr' but expected 'i64'"). Surfaced by
+            # lib.nogc_sync_mut.test_runner.test_runner_mcdc_formal_context
+            # `cache[program]` in the full-CLI tool build (2026-10-15).
+            val raw_idx = self.translate_operand(idx)
+            index_vals = index_vals.push(self.value_as_type(raw_idx, self.get_operand_type(idx), nit))
         val base_ty = self.valid_llvm_type(self.get_operand_type(base))
         self.mark_ptr_local(dest_id)
         self.builder.emit_gep(dest_name, base_ty, base_ptr, index_vals)
@@ -136,7 +145,10 @@ impl MirToLlvm:
                 self.builder.emit("  {dest_name} = call ptr @rt_array_new(i64 {operands.len()})")
                 for i in 0..operands.len():
                     val raw_elem = self.translate_operand(operands[i])
-                    val elem_value = self.value_as_type(raw_elem, self.get_operand_type(operands[i]), "i64")
+                    # Cycle-154: verbatim element word (no value_types re-tag;
+                    # the tainted value_as_type reinterpreted the single-stmt
+                    # body's Stmt element, the 0xfd569c fault's exact value).
+                    val elem_value = self.store_field_bits_verbatim(raw_elem, self.get_operand_type(operands[i]), "i64")
                     self.builder.emit("  call i8 @rt_array_push(ptr {dest_name}, i64 {elem_value})")
                 return
             case Struct(_):
@@ -168,7 +180,8 @@ impl MirToLlvm:
                 self.builder.emit("  {agg} = call ptr @rt_alloc(i64 {n * word_bytes})")
                 for i in 0..n:
                     val raw = self.translate_operand(operands[i])
-                    val v = self.store_field_bits(raw, self.get_operand_type(operands[i]), nit)
+                    # Cycle-151: verbatim word store (no value_types re-tag).
+                    val v = self.store_field_bits_verbatim(raw, self.get_operand_type(operands[i]), nit)
                     val fp = self.builder.fresh_local()
                     self.builder.emit("  {fp} = getelementptr inbounds {nit}, ptr {agg}, i32 {i}")
                     self.builder.emit_store(nit, v, fp)
@@ -212,7 +225,7 @@ impl MirToLlvm:
                 self.builder.emit("  {tup_agg} = call ptr @rt_alloc(i64 {tup_n * tup_word_bytes})")
                 for i in 0..tup_n:
                     val tup_raw = self.translate_operand(operands[i])
-                    val tup_v = self.store_field_bits(tup_raw, self.get_operand_type(operands[i]), tup_nit)
+                    val tup_v = self.store_field_bits_verbatim(tup_raw, self.get_operand_type(operands[i]), tup_nit)
                     val tup_fp = self.builder.fresh_local()
                     self.builder.emit("  {tup_fp} = getelementptr inbounds {tup_nit}, ptr {tup_agg}, i32 {i}")
                     self.builder.emit_store(tup_nit, tup_v, tup_fp)
@@ -232,6 +245,12 @@ impl MirToLlvm:
         for i in 0..operands.len():
             val raw_elem_val = self.translate_operand(operands[i])
             val elem_ty = self.valid_llvm_type(self.get_operand_type(operands[i]))
+            # Cycle-154 NOTE: a verbatim store here (raw SSA word straight into
+            # the typed slot) REGRESSED variant H -- the raw word's SSA type
+            # can be narrower than the slot (i32/i1), and the typed store then
+            # mismatches. The generic path's value_as_type is load-bearing for
+            # WIDTH coercion; its value_types hazard does not bite here because
+            # the slot type comes from the operand's own MIR type. Kept typed.
             val elem_val = self.value_as_type(raw_elem_val, self.get_operand_type(operands[i]), elem_ty)
             val elem_ptr = self.builder.fresh_local()
             self.builder.emit("  {elem_ptr} = getelementptr inbounds {agg_ty}, ptr {agg_ptr}, i32 0, i32 {i}")
@@ -316,7 +335,11 @@ impl MirToLlvm:
         val base_val = self.untag_aggregate_base_ptr(set_base_as_ptr)
         val raw_value_val = self.translate_operand(value)
         val nit = self.native_int()
-        val value_val = self.store_field_bits(raw_value_val, self.get_operand_type(value), nit)
+        # Cycle-154: verbatim store (no value_types re-tag; same defect
+        # class as the Struct arm -- a bool/small word written through a
+        # ptr-marked value_types entry gets reinterpreted and corrupts the
+        # field or its neighbor).
+        val value_val = self.store_field_bits_verbatim(raw_value_val, self.get_operand_type(value), nit)
         val field_ptr = self.builder.fresh_local()
         self.builder.emit("  {field_ptr} = getelementptr inbounds {nit}, ptr {base_val}, i32 {field}")
         self.builder.emit_store(nit, value_val, field_ptr)
@@ -359,6 +382,31 @@ impl MirToLlvm:
         if ty == "float":
             return "i32"
         ty
+
+    me store_field_bits_verbatim(raw_val: text, operand_ty: text, nit: text) -> text:
+        """Cycle-151 VERBATIM word store for aggregate materialization.
+        store_field_bits consults the STICKY value_types map, which can
+        re-tag a non-pointer word as "ptr" (every struct/array/dict local
+        is ptr-marked) -- value_as_type then emits a getelementptr/ptr
+        reinterpretation that MANGLES the word (the cycle-148/150
+        prologue-copy corruption: one word of the 24+ word struct copy
+        becomes a computed address). This variant stores the operand's
+        bits without sticky re-tagging: native-width operands store as-is; pointer
+        operands go through ptrtoint (bit-preserving). No value_types
+        lookup, no tag conditional."""
+        val src_ty = self.valid_llvm_type(operand_ty)
+        if is_integer_type(src_ty):
+            if src_ty == nit:
+                return raw_val
+            # Physical field storage is one native word, even for narrow SSA.
+            # Use the existing signed-extension/truncation policy directly;
+            # value_as_type would consult the sticky map this path avoids.
+            return self.emit_value_type_conversion(raw_val, src_ty, nit, false)
+        if src_ty == "ptr":
+            val as_int = self.builder.fresh_local()
+            self.builder.emit("  {as_int} = ptrtoint ptr {raw_val} to {nit}")
+            return as_int
+        self.store_field_bits(raw_val, operand_ty, nit)
 
     me store_field_bits(raw_val: text, operand_ty: text, nit: text) -> text:
         """Convert an operand's translated value into the native-int WORD

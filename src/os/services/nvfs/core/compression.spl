@@ -4,18 +4,36 @@
 # Ordering: plaintext → compress → (encrypt) → on-disk.
 # ARC stores decompressed blocks (§V3-2.5).
 #
-# LZ4 implementation note:
-#   A production LZ4 block-format encoder is a follow-up (see FR-NVFS-N7a-002).
-#   For N7a, algo=1 (LZ4) uses a tagged-copy frame:
-#     [u32 decompressed_len LE | raw bytes copy]
-#   This satisfies the round-trip acceptance criterion while the real LZ4
-#   block compressor is implemented as a separate milestone.
-#   Compression ratio SLOs (throughput ≥ 80%, size ≤ 45%) require FR-NVFS-N7a-002.
+# LZ4 (algo=1) layout:
+#     [u32 decompressed_len LE | LZ4 block (std.common.compress.lz4)]
+#   The encoder only keeps this form when it is strictly smaller than the
+#   input; otherwise the extent is stored raw with algo=0 (§V3-2.3).
+#   Legacy N7a stub data ([u32 len | verbatim copy], always len+4 bytes) stays
+#   readable: a real LZ4 extent is always shorter than decompressed_len, a
+#   legacy one is exactly decompressed_len + 4, so the sizes never collide.
 #
-# Zstd is similarly stubbed with the same tagged-copy frame.
-# Incompressible fallback (§V3-2.3) is deferred to FR-NVFS-N7a-002 (real encoder needed).
+# Zstd3/Zstd19 (algo=2/3) layout:
+#     [u32 decompressed_len LE | Zstandard frame (std.common.compress.zstd)]
+#   Same strictly-smaller-or-raw fallback and the same legacy size
+#   disambiguation as LZ4: a real frame extent is shorter than decompressed_len,
+#   a legacy tagged-copy one is exactly decompressed_len + 4.
+#
+# Forward-incompatibility (one way only): new readers decode old extents, but an
+# OLD reader (tagged-copy stub, before the real Zstd encoder) given a NEW real
+# frame extent checks only the u32 length prefix, then returns the frame bytes
+# verbatim with ok=true: silent corruption, not an error. Nothing on disk tells
+# the two encodings apart for an old reader. The pmap entry has only the
+# compress_algo tag (same tags 2/3 for both forms). Superblock.version and
+# feature_bits exist, but no reader checks them, so setting them would not
+# protect an old reader. NVFS is in-memory only (N1, no persisted volumes), so
+# no such mixed volume exists yet. Before NVFS persists data, gate this with a
+# superblock feature bit that readers must check.
 
 use std.fs_driver.error.{FsError}
+use std.common.compress.lz4.{lz4_compress_block, lz4_decompress_block_bounded}
+use std.common.compress.types.{CompressionCodec}
+use std.common.compress.utilities.{compression_options}
+use std.common.compress.zstd.{zstd_compress_frame, zstd_decompress_frame}
 
 # ---------------------------------------------------------------------------
 # CompressAlgo enum (§V3-5.3)
@@ -25,8 +43,8 @@ enum CompressAlgo:
     """Compression algorithm tag stored in v3 pmap entry compress_algo byte.
 
     None   = 0 — No compression; v2 default.
-    LZ4    = 1 — LZ4 frame; ~3 GB/s compress, ~5 GB/s decompress (production stub for N7a).
-    Zstd3  = 2 — Zstd level 3; ~500 MB/s compress (production stub for N7a).
+    LZ4    = 1 — LZ4 block with u32 length header (real encoder; legacy tagged-copy still decodes).
+    Zstd3  = 2 — Zstd level 3 (real pure-Simple encoder; legacy tagged-copy still decodes).
     Zstd19 = 3 — Zstd level 19; archival-only; not for hot paths.
     """
     None
@@ -136,60 +154,88 @@ fn _get_u32_le_c(buf: [u8], off: i64) -> u32:
     result
 
 # ---------------------------------------------------------------------------
-# _lz4_compress_stub — tagged-copy frame (N7a placeholder)
+# LZ4/Zstd extents and the legacy tagged-copy frame
 #
-# Frame layout: [4 bytes: decompressed_len LE | raw bytes]
-# Total: len + 4 bytes.  Always "compressible" by this stub — the incompressible
-# guard in compress_extent fires first if the stub output is >= 90% of input.
+# LZ4:         [4 bytes: decompressed_len LE | LZ4 block], kept only when
+#              strictly smaller than the input (else stored raw, algo 0).
+# Tagged copy: [4 bytes: decompressed_len LE | raw bytes] = len + 4 bytes;
+#              legacy N7a LZ4/Zstd extents (still decodable).
 # ---------------------------------------------------------------------------
 
-fn _lz4_compress_stub(plaintext: [u8]) -> [u8]:
-    """N7a LZ4 stub: emits a tagged-copy frame (decompressed_len header + raw copy).
-
-    TODO FR-NVFS-N7a-002: replace with a real LZ4 block-format encoder.
-    """
+fn _lz4_compress(plaintext: [u8]) -> [u8]:
+    """Real LZ4: [u32 decompressed_len LE | LZ4 block]."""
     val dlen = plaintext.len() as u32
+    val block = lz4_compress_block(plaintext)
     var out: [u8] = []
-    # 4-byte LE length header
     out.push((dlen & 0xFF) as u8)
     out.push(((dlen / 256) & 0xFF) as u8)
     out.push(((dlen / 65536) & 0xFF) as u8)
     out.push(((dlen / 16777216) & 0xFF) as u8)
-    # raw bytes
     var i = 0
-    while i < plaintext.len():
-        out.push(plaintext[i])
+    while i < block.len():
+        out.push(block[i])
         i = i + 1
     out
 
-fn _lz4_decompress_stub(compressed: [u8], decompressed_len: u32) -> DecompressResult:
-    """N7a LZ4 stub: decode the tagged-copy frame."""
+fn _copy_payload(compressed: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i = 4
+    while i < compressed.len():
+        out.push(compressed[i])
+        i = i + 1
+    out
+
+fn _lz4_decompress(compressed: [u8], decompressed_len: u32) -> DecompressResult:
+    """Decode a real LZ4 extent, or a legacy tagged-copy one (len + 4 bytes)."""
     if compressed.len() < 4:
         return DecompressResult(ok: false, data: [])
     val stored_len = _get_u32_le_c(compressed, 0)
     if stored_len != decompressed_len:
         return DecompressResult(ok: false, data: [])
-    val payload_len = compressed.len() as i64 - 4
-    if payload_len < 0:
-        return DecompressResult(ok: false, data: [])
+    val payload = _copy_payload(compressed)
+    if compressed.len() as i64 == decompressed_len as i64 + 4:
+        # Legacy N7a stub: verbatim copy.
+        return DecompressResult(ok: true, data: payload)
+    match lz4_decompress_block_bounded(payload, decompressed_len as i64):
+        case Ok(out):
+            if out.len() as i64 != decompressed_len as i64:
+                return DecompressResult(ok: false, data: [])
+            DecompressResult(ok: true, data: out)
+        case Err(_):
+            DecompressResult(ok: false, data: [])
+
+fn _zstd_compress(plaintext: [u8], level: i64) -> [u8]:
+    """Real Zstd: [u32 decompressed_len LE | Zstandard frame]."""
+    val dlen = plaintext.len() as u32
+    val frame = zstd_compress_frame(plaintext, compression_options(CompressionCodec.zstd, level))
     var out: [u8] = []
-    var i: i64 = 4
-    while i < compressed.len() as i64:
-        out.push(compressed[i])
+    out.push((dlen & 0xFF) as u8)
+    out.push(((dlen / 256) & 0xFF) as u8)
+    out.push(((dlen / 65536) & 0xFF) as u8)
+    out.push(((dlen / 16777216) & 0xFF) as u8)
+    var i = 0
+    while i < frame.len():
+        out.push(frame[i])
         i = i + 1
-    DecompressResult(ok: true, data: out)
+    out
 
-# Zstd stubs reuse the same tagged-copy frame as LZ4 for N7a.
-fn _zstd_compress_stub(plaintext: [u8]) -> [u8]:
-    """N7a Zstd stub: same tagged-copy frame as LZ4 stub.
-
-    TODO FR-NVFS-N7a-003: replace with a real Zstd level-3 encoder.
-    """
-    _lz4_compress_stub(plaintext)
-
-fn _zstd_decompress_stub(compressed: [u8], decompressed_len: u32) -> DecompressResult:
-    """N7a Zstd stub: decode the tagged-copy frame."""
-    _lz4_decompress_stub(compressed, decompressed_len)
+fn _zstd_decompress(compressed: [u8], decompressed_len: u32) -> DecompressResult:
+    """Decode a real Zstd extent, or a legacy tagged-copy one (len + 4 bytes)."""
+    if compressed.len() < 4:
+        return DecompressResult(ok: false, data: [])
+    if _get_u32_le_c(compressed, 0) != decompressed_len:
+        return DecompressResult(ok: false, data: [])
+    val payload = _copy_payload(compressed)
+    if compressed.len() as i64 == decompressed_len as i64 + 4:
+        # Legacy N7a stub: verbatim copy.
+        return DecompressResult(ok: true, data: payload)
+    match zstd_decompress_frame(payload):
+        case Ok(out):
+            if out.len() as i64 != decompressed_len as i64:
+                return DecompressResult(ok: false, data: [])
+            DecompressResult(ok: true, data: out)
+        case Err(_):
+            DecompressResult(ok: false, data: [])
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -202,8 +248,8 @@ fn compress_extent(plaintext: [u8], class_tag: i32) -> CompressResult:
 
     Returns a CompressResult:
       - algo=0 when class policy is None (META_DURABLE, DB_WAL, MODEL_IMMUTABLE).
-      - algo=1/2 with compressed data when compression fires.
-        Note: incompressible fallback (§V3-2.3) is deferred to FR-NVFS-N7a-002.
+      - algo=1/2/3 with compressed data when compression fires.
+        LZ4/Zstd fall back to algo=0 (raw) when it does not shrink the data.
 
     The compressed_len field always equals data.len().
     """
@@ -216,15 +262,18 @@ fn compress_extent(plaintext: [u8], class_tag: i32) -> CompressResult:
     # Apply compression
     var cdata: [u8] = []
     if algo_tag == 1:
-        cdata = _lz4_compress_stub(plaintext)
+        cdata = _lz4_compress(plaintext)
+    # Real Zstd frames for tags 2/3: old tagged-copy readers misread these as
+    # verbatim data (see the forward-incompatibility note at the top of this file).
     if algo_tag == 2:
-        cdata = _zstd_compress_stub(plaintext)
+        cdata = _zstd_compress(plaintext, 3)
     if algo_tag == 3:
-        cdata = _zstd_compress_stub(plaintext)
+        cdata = _zstd_compress(plaintext, 19)
 
-    # TODO FR-NVFS-N7a-002: re-enable incompressible fallback (compressed >= 90% of raw)
-    # once real LZ4/Zstd encoders land.  The tagged-copy stub always emits N+4 bytes,
-    # so the 90% guard would unconditionally fire and defeat class-policy compression.
+    # Incompressible fallback (§V3-2.3): keep the encoded form only if it is
+    # strictly smaller than the input.
+    if cdata.len() >= plaintext.len():
+        return CompressResult(algo: 0, data: plaintext, compressed_len: plaintext.len() as u32)
 
     CompressResult(
         algo:           algo_tag,
@@ -252,11 +301,11 @@ fn decompress_extent(compressed: [u8], compressed_len: u32, decompressed_len: u3
         return DecompressResult(ok: false, data: [])
 
     if algo == 1:
-        return _lz4_decompress_stub(compressed, decompressed_len)
+        return _lz4_decompress(compressed, decompressed_len)
     if algo == 2:
-        return _zstd_decompress_stub(compressed, decompressed_len)
+        return _zstd_decompress(compressed, decompressed_len)
     if algo == 3:
-        return _zstd_decompress_stub(compressed, decompressed_len)
+        return _zstd_decompress(compressed, decompressed_len)
 
     # Unknown algo tag.
     DecompressResult(ok: false, data: [])

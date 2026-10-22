@@ -1,0 +1,59 @@
+"""SOSIX secure staging directory: the `sosix_secure_temp_dir_*` facades.
+
+The facades call the runtime_native.c split crossing (interpreter twins in the
+seed), so these examples pin the runtime contract through the SOSIX surface:
+a fresh 0700 directory per make, distinct paths across makes, and an
+empty/nil refusal (never a fabricated path) when the parent cannot hold it.
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.sosix.secure_temp_dir.{
+    sosix_secure_temp_dir_set_parent, sosix_secure_temp_dir_set_prefix,
+    sosix_secure_temp_dir_make}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.io.dir_ops.{is_dir, dir_remove_all}
+use std.nogc_sync_mut.sffi.fs.{file_mode}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+
+fn sosix_make(parent: text, prefix: text) -> text:
+    # Heap texts: a literal crosses the text ABI as (NULL, len).
+    if sosix_secure_temp_dir_set_parent(parent + "") != 1:
+        return ""
+    if sosix_secure_temp_dir_set_prefix(prefix + "") != 1:
+        return ""
+    val made = sosix_secure_temp_dir_make()
+    if made.len() <= 0:
+        return ""
+    made
+
+describe "sosix_secure_temp_dir":
+    it "makes a fresh private 0700 directory under the parent":
+        val parent = get_temp_dir()
+        val path = sosix_make(parent, "sosix-std-")
+        expect(path.len() > 0).to_be(true)
+        expect(path.starts_with(parent)).to_be(true)
+        expect(path.contains("sosix-std-")).to_be(true)
+        expect(is_dir(path)).to_be(true)
+        expect(file_mode(path) % 512).to_equal(448)
+        dir_remove_all(path)
+
+    it "creates a distinct fresh directory on every make":
+        val parent = get_temp_dir()
+        val first = sosix_make(parent, "sosix-excl-")
+        val second = sosix_make(parent, "sosix-excl-")
+        expect(first.len() > 0).to_be(true)
+        expect(second.len() > 0).to_be(true)
+        expect(first == second).to_be(false)
+        dir_remove_all(first)
+        dir_remove_all(second)
+
+    it "refuses a parent that does not exist":
+        val made = sosix_make(get_temp_dir() + "/sosix-no-such-parent-dir/x", "p-")
+        expect(made.len()).to_equal(0)
+
+    it "stays the backing of file_ops.secure_temp_dir":
+        val made = secure_temp_dir(get_temp_dir(), "sosix-fileops-")
+        expect(made.is_ok()).to_be(true)
+        val path = made.unwrap()
+        expect(file_mode(path) % 512).to_equal(448)
+        dir_remove_all(path)

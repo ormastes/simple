@@ -1,0 +1,95 @@
+# @manual: show
+# @req: EE-01, REQ-MC-007, C2
+# Authored command scenarios: UNRUN. Requires the qualified self-hosted
+# ./bin/simple and its normal SIMPLE_LIB setup in the checkout under test.
+# No substitute executable, mocked process, seed, or copied dispatcher.
+use std.spec.{describe, it, expect}
+use std.spec.step
+use app.io.process_ops.{process_run_timeout}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_create_exclusive,
+    file_is_regular_no_follow}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.io_runtime.{dir_exists}
+use std.common.crypto.sha256.{sha256_text}
+
+fn ee_cli_enum_source() -> text:
+    "enum Flag:\n    Off\n    On\nfn select(value: Flag) -> i32:\n    match value:\n        case Flag.Off: 11\n        case Flag.On: 22\n"
+
+fn ee_run_source_model_cli(source: text, target: text) -> Result<(text, text, i64), text>:
+    val scope = secure_temp_dir(".", "ee-model-cli-")?
+    val path = scope + "/enum input.spl"
+    if not file_create_exclusive(path, source) or not file_is_regular_no_follow(path):
+        val removed = dir_remove_all(scope)
+        return Err("EE-TEST-FILE: exclusive regular-file setup failed; cleanup=" + removed.to_string())
+    # Exercise the public CLI command registry, gen_lean/main.spl dispatcher,
+    # its real bounded delegation, and source_model_v1.spl worker main.
+    # argv preserves the space in the source filename without shell quoting.
+    val (out, err, code) = process_run_timeout("./bin/simple",
+        ["gen-lean", "source-model", path, target], 45000)
+    val removed = dir_remove_all(scope)
+    if not removed or dir_exists(scope):
+        return Err("EE-TEST-CLEANUP: command temporary scope remains")
+    Ok((out, err, code as i64))
+
+fn ee_assert_no_partial_model(output: text):
+    expect(output.contains("formal_status=NOT_CHECKED")).to_equal(false)
+    expect(output.contains("formal_status=PASS")).to_equal(false)
+    expect(output.contains("BitVec.ofInt")).to_equal(false)
+    expect(output.contains("namespace Simple.")).to_equal(false)
+    expect(output.contains("«Flag».«Off»")).to_equal(false)
+
+describe "gen-lean source-model actual command":
+    it "delegates a real enum source file and preserves successful exit and artifact output":
+        step("Run the public command through the actual dispatcher and worker using a private file")
+        val source = ee_cli_enum_source()
+        val (out, err, code) = ee_run_source_model_cli(source,
+            "x86_64-unknown-linux-gnu").unwrap()
+        step("Inspect the process result after the temporary directory has been removed")
+        expect(code).to_equal(0)
+        expect(err).to_equal("")
+        expect(out).to_start_with("-- formal_status=NOT_CHECKED\n")
+        expect(out).to_contain("-- source_hash=" + sha256_text(source) + "\n")
+        expect(out).to_contain("-- target=x86_64-unknown-linux-gnu\n")
+        expect(out).to_contain("-- cfg_preprocessed_hash=")
+        expect(out).to_contain("-- cfg_decision_hash=")
+        expect(out).to_contain("«Flag».«Off»")
+        expect(out).to_contain("«Flag».«On»")
+        expect(out).to_contain("(BitVec.ofInt 32 11)")
+        expect(out).to_contain("(BitVec.ofInt 32 22)")
+        expect(out.contains("rt_enum_discriminant")).to_equal(false)
+        expect(out.contains("rt_enum_payload")).to_equal(false)
+        expect(out.contains("formal_status=PASS")).to_equal(false)
+
+    it "forwards each explicit target to the real frontend without host substitution":
+        step("Execute the dispatcher for two explicit targets against conditional source")
+        val source = "@cfg(\"target_arch\", \"x86_64\")\nfn selected() -> i32:\n    31\n@cfg(\"target_arch\", \"aarch64\")\nfn selected() -> i32:\n    47\n"
+        val (xout, xerr, xcode) = ee_run_source_model_cli(source,
+            "x86_64-unknown-linux-gnu").unwrap()
+        val (aout, aerr, acode) = ee_run_source_model_cli(source,
+            "aarch64-unknown-linux-gnu").unwrap()
+        expect(xcode).to_equal(0)
+        expect(acode).to_equal(0)
+        expect(xerr).to_equal("")
+        expect(aerr).to_equal("")
+        expect(xout).to_start_with("-- formal_status=NOT_CHECKED\n")
+        expect(aout).to_start_with("-- formal_status=NOT_CHECKED\n")
+        expect(xout).to_contain("-- target=x86_64-unknown-linux-gnu\n")
+        expect(aout).to_contain("-- target=aarch64-unknown-linux-gnu\n")
+        expect(xout).to_contain("(BitVec.ofInt 32 31)")
+        expect(xout.contains("(BitVec.ofInt 32 47)")).to_equal(false)
+        expect(aout).to_contain("(BitVec.ofInt 32 47)")
+        expect(aout.contains("(BitVec.ofInt 32 31)")).to_equal(false)
+
+    it "propagates worker failure without publishing a partial artifact on either stream":
+        step("Delegate a valid enum function followed by an unsupported floating-point function")
+        val source = ee_cli_enum_source() +
+            "\nfn z_unsupported(value: f64) -> f64:\n    value\n"
+        val (out, err, code) = ee_run_source_model_cli(source,
+            "x86_64-unknown-linux-gnu").unwrap()
+        expect(code).to_equal(1)
+        # The maintained dispatcher prints forwarded worker stderr to stdout.
+        # Assert the observable existing channel rather than invent a transport.
+        expect(out).to_contain("SOURCE-MODEL-E-EXPORT")
+        expect(err).to_equal("")
+        ee_assert_no_partial_model(out)
+        ee_assert_no_partial_model(err)

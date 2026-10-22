@@ -1,0 +1,198 @@
+# Genuine weave-stage owner. A registered pin is issued only after actual
+# source/driver/gate/ordered-weave execution, and every closed read-use replays
+# that execution. Borrowed body reads check private immutable pins without
+# opening another scope or trusting a caller's report/digest construction.
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.cache.driver_hir_archive_weave_boundary_types_v1.{
+    DriverHirArchiveWeaveBoundaryV1, DriverHirArchiveWeaveBoundaryUseV1}
+use compiler.driver.cache.driver_hir_archive_weave_replay_v1.{DriverHirArchiveWeaveReplayV1,
+    driver_hir_archive_weave_replay_v1, DriverHirArchiveWeaveFailureV1,
+    driver_hir_archive_weave_replay_with_failure_v1, driver_hir_archive_weave_failure_message_v1}
+use compiler.driver.cache.driver_hir_archive_weave_encoding_v1.{driver_hir_weave_use_bytes_v1,
+    driver_hir_weave_boundary_bytes_v1}
+use compiler.driver.cache.driver_hir_post_validation_policy_v1.{
+    DriverHirPostValidationPolicyOwnerV1, driver_hir_policy_live_capabilities_match_in_owned_scope_v1}
+use compiler.driver.cache.driver_hir_post_validation_gate_facts_v1.{DriverHirPostValidationGateReportV1}
+use compiler.driver.cache.driver_cold_hir_weave_body_v1.{DriverColdHirWeaveBodyLoadV1,
+    driver_cold_hir_weave_body_load_in_owned_scope_v1}
+use compiler.common.cache_contract.hir_owned_artifact_cache_v1.{hir_owned_artifact_store_blob_v1,
+    hir_owned_artifact_load_blob_v1}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
+
+var _driver_weave_pins_ready_v1: bool = false
+var _driver_weave_owner_pins_v1: Dict<text, text> = {}
+var _driver_weave_use_pins_v1: Dict<text, text> = {}
+var _driver_weave_context_pins_v1: Dict<text, text> = {}
+
+struct DriverHirArchiveWeavePublicationV1:
+    owner: DriverHirArchiveWeaveBoundaryV1
+    use_digest: text
+    context_key: text
+
+fn driver_hir_weave_initialize_pins_v1() -> bool:
+    if transient_array_scope_state_v1() != 0: return false
+    if not _driver_weave_pins_ready_v1:
+        # These replacements belong to the real process owner. Never allocate
+        # a lazy persistent registry from a consumer's borrowed body scope.
+        _driver_weave_owner_pins_v1 = {}
+        _driver_weave_use_pins_v1 = {}
+        _driver_weave_context_pins_v1 = {}
+        _driver_weave_pins_ready_v1 = true
+    true
+
+fn driver_hir_weave_publish_borrowed_v1(replay: DriverHirArchiveWeaveReplayV1
+) -> Result<DriverHirArchiveWeavePublicationV1, text>:
+    if transient_array_scope_state_v1() != 1 or replay.report.errors.len() != 0 or replay.report.gates_skipped:
+        return Err("weave owner requires actual successful complete execution")
+    val inputs = replay.inputs
+    var accepted_use = DriverHirArchiveWeaveBoundaryUseV1(cache: inputs.policy.cache,
+        boundary_key: "", boundary_digest: "", source_binding: inputs.journal.source_binding,
+        schedule_digest: inputs.schedule.schedule_digest, policy_key: inputs.policy.artifact_key,
+        config_binding: inputs.config_binding, physical_inventory: inputs.inventory,
+        declaration_order: inputs.layout_keys,
+        logical_order: inputs.journal.logical_order, logical_frames: replay.logical_frames,
+        physical_module_keys: inputs.inventory.ordered_modules, physical_frames: replay.physical_frames)
+    var owner = DriverHirArchiveWeaveBoundaryV1(use: accepted_use, policy: inputs.policy,
+        gate_report: replay.report, gate_parent_key: replay.parent.key,
+        gate_parent_digest: replay.parent.digest, woven_count: replay.woven_count)
+    val bytes = driver_hir_weave_boundary_bytes_v1(owner)
+    if bytes == "": return Err("weave complete owner encoding refused")
+    val digest = sha256_text(bytes)
+    val key = sha256_text("driver-hir-weave-registered-owner-artifact-v1\n" + digest + "\n" + accepted_use.cache.producer_header)
+    accepted_use.boundary_key = key
+    accepted_use.boundary_digest = digest
+    owner.use = accepted_use
+    val stored = hir_owned_artifact_store_blob_v1(accepted_use.cache, key, bytes)?
+    if not stored: return Err("weave completed owner publication refused")
+    var writer = HirCodecWriter.create()
+    writer.put_text(inputs.journal.last_key)
+    writer.put_text(inputs.journal.source_binding)
+    writer.put_text(inputs.schedule.schedule_digest)
+    writer.put_text(inputs.policy.artifact_key)
+    writer.put_text(inputs.config_binding)
+    writer.put_text(accepted_use.cache.directory)
+    writer.put_text(accepted_use.cache.producer_header)
+    val context_key = sha256_text("driver-hir-weave-real-context-v1\n" + writer.finish())
+    Ok(DriverHirArchiveWeavePublicationV1(owner: owner,
+        use_digest: sha256_text(driver_hir_weave_use_bytes_v1(accepted_use)), context_key: context_key))
+
+fn driver_hir_weave_publish_v1(replay: DriverHirArchiveWeaveReplayV1
+) -> Result<DriverHirArchiveWeavePublicationV1, text>:
+    if not transient_scope_begin(): return Err("weave owner publication lease unavailable")
+    val result = driver_hir_weave_publish_borrowed_v1(replay)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    val ended = transient_scope_end()
+    if not paused or not owned or not ended: panic("weave owner publication ownership failed")
+    result
+
+fn driver_hir_weave_original_manifest_v1(policy: DriverHirPostValidationPolicyOwnerV1) -> Result<bool, text>:
+    if not transient_scope_begin(): return Err("weave original manifest lease unavailable")
+    val result = driver_hir_policy_live_capabilities_match_in_owned_scope_v1(policy)
+    val paused = transient_scope_pause()
+    # @workaround bug=a174_transient_promote_inference_2026_10_16 recover=03d33d497ac6d1408683493f74ff9db434e4cfa3 reason=preserve-declared-result-owner-at-generic-promotion
+    val owned = if paused: transient_promote<Result<bool, text>>(result) else: false
+    val ended = transient_scope_end()
+    if not paused or not owned or not ended: panic("weave original manifest ownership failed")
+    result
+
+fn driver_hir_weave_validate_use_borrowed_v1(use: DriverHirArchiveWeaveBoundaryUseV1) -> Result<bool, text>:
+    if transient_array_scope_state_v1() != 1 or not _driver_weave_pins_ready_v1 or
+            not _driver_weave_owner_pins_v1.has(use.boundary_key) or
+            not _driver_weave_use_pins_v1.has(use.boundary_key) or
+            _driver_weave_owner_pins_v1[use.boundary_key] != use.boundary_digest:
+        return Err("weave use lacks actual registered producer pin")
+    val use_bytes = driver_hir_weave_use_bytes_v1(use)
+    if use_bytes == "" or _driver_weave_use_pins_v1[use.boundary_key] != sha256_text(use_bytes):
+        return Err("weave registered complete use metadata changed")
+    val bytes = hir_owned_artifact_load_blob_v1(use.cache, use.boundary_key)?
+    if sha256_text(bytes) != use.boundary_digest: return Err("weave registered owner bytes changed")
+    Ok(true)
+
+fn driver_hir_weave_validate_owner_borrowed_v1(owner: DriverHirArchiveWeaveBoundaryV1) -> Result<bool, text>:
+    val verified = driver_hir_weave_validate_use_borrowed_v1(owner.use)?
+    val bytes = hir_owned_artifact_load_blob_v1(owner.use.cache, owner.use.boundary_key)?
+    if driver_hir_weave_boundary_bytes_v1(owner) != bytes:
+        return Err("weave actual owner transcript or parent changed")
+    Ok(true)
+
+fn driver_hir_weave_validate_owner_v1(owner: DriverHirArchiveWeaveBoundaryV1) -> Result<bool, text>:
+    if not transient_scope_begin(): return Err("weave owner verification lease unavailable")
+    val result = driver_hir_weave_validate_owner_borrowed_v1(owner)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    val ended = transient_scope_end()
+    if not paused or not owned or not ended: panic("weave owner verification ownership failed")
+    result
+
+pub fn driver_hir_archive_weave_boundary_capture_with_failure_v1(driver: CompilerDriver
+) -> Result<DriverHirArchiveWeaveBoundaryV1, DriverHirArchiveWeaveFailureV1>:
+    if not driver_hir_weave_initialize_pins_v1(): return Err(DriverHirArchiveWeaveFailureV1.Unpublished("weave capture foreign lease occupied"))
+    if val Some(policy) = driver.hir_archive_post_validation_policy:
+        val manifest = match driver_hir_weave_original_manifest_v1(policy):
+            Ok(value): value
+            Err(message): return Err(DriverHirArchiveWeaveFailureV1.Unpublished(message))
+        val replay = driver_hir_archive_weave_replay_with_failure_v1(driver, true, true)?
+        val produced = match driver_hir_weave_publish_v1(replay):
+            Ok(value): value
+            Err(message): return Err(DriverHirArchiveWeaveFailureV1.Unpublished(message))
+        val key = produced.owner.use.boundary_key
+        if _driver_weave_context_pins_v1.has(produced.context_key) and
+                _driver_weave_context_pins_v1[produced.context_key] != key:
+            return Err(DriverHirArchiveWeaveFailureV1.Unpublished("weave actual context published conflicting complete execution"))
+        # All installed children are already retained compact result roots.
+        _driver_weave_owner_pins_v1[key] = produced.owner.use.boundary_digest
+        _driver_weave_use_pins_v1[key] = produced.use_digest
+        _driver_weave_context_pins_v1[produced.context_key] = key
+        Ok(produced.owner)
+    else: Err(DriverHirArchiveWeaveFailureV1.Unpublished("weave actual pre-consumption policy owner missing"))
+
+pub fn driver_hir_archive_weave_boundary_capture_v1(driver: CompilerDriver
+) -> Result<DriverHirArchiveWeaveBoundaryV1, text>:
+    match driver_hir_archive_weave_boundary_capture_with_failure_v1(driver):
+        Ok(value): Ok(value)
+        Err(failure): Err(driver_hir_archive_weave_failure_message_v1(failure))
+
+pub fn driver_hir_archive_weave_boundary_use_v1(driver: CompilerDriver,
+        owner: DriverHirArchiveWeaveBoundaryV1) -> Result<DriverHirArchiveWeaveBoundaryUseV1, text>:
+    if transient_array_scope_state_v1() != 0: return Err("weave closed replay foreign lease occupied")
+    val verified = driver_hir_weave_validate_owner_v1(owner)?
+    # Recollect source claims, all scalar graphs, gates and live advice from
+    # genuine driver parents. No caller report/candidate cleanliness is used.
+    val replay = driver_hir_archive_weave_replay_v1(driver, false)?
+    val actual = driver_hir_weave_publish_v1(replay)?
+    if actual.owner.use.boundary_key != owner.use.boundary_key or
+            actual.owner.use.boundary_digest != owner.use.boundary_digest or
+            actual.use_digest != _driver_weave_use_pins_v1[owner.use.boundary_key] or
+            not _driver_weave_context_pins_v1.has(actual.context_key) or
+            _driver_weave_context_pins_v1[actual.context_key] != owner.use.boundary_key:
+        return Err("weave fresh actual execution differs from registered result")
+    Ok(actual.owner.use)
+
+pub fn driver_hir_archive_weave_boundary_load_in_owned_scope_v1(
+        use: DriverHirArchiveWeaveBoundaryUseV1, module_key: text
+) -> Result<DriverColdHirWeaveBodyLoadV1, text>:
+    val verified = driver_hir_weave_validate_use_borrowed_v1(use)?
+    if not use.logical_frames.has(module_key): return Err("weave registered logical body absent")
+    driver_cold_hir_weave_body_load_in_owned_scope_v1(use.cache, use.logical_frames[module_key])
+
+# Metadata-only predecessor check for the closed cold/current controller.
+# No source replay, semantic routing or body read occurs here, so checking the
+# actual registered gate report does not reorder cold source-plan failures.
+# The caller owns scope1 and must retain the returned DTO if it escapes.
+pub fn driver_hir_archive_weave_boundary_registered_report_in_owned_scope_v1(
+        owner: DriverHirArchiveWeaveBoundaryV1
+) -> Result<DriverHirPostValidationGateReportV1, text>:
+    val verified = driver_hir_weave_validate_owner_borrowed_v1(owner)?
+    Ok(owner.gate_report)
+
+export DriverHirArchiveWeaveBoundaryV1, DriverHirArchiveWeaveBoundaryUseV1
+export driver_hir_archive_weave_boundary_capture_v1, driver_hir_archive_weave_boundary_use_v1
+export driver_hir_archive_weave_boundary_load_in_owned_scope_v1
+export driver_hir_archive_weave_boundary_registered_report_in_owned_scope_v1
+export DriverHirArchiveWeaveFailureV1, driver_hir_archive_weave_failure_message_v1
+export driver_hir_archive_weave_boundary_capture_with_failure_v1

@@ -1,0 +1,66 @@
+# Compiled group worker entry. The broker owns process lifetime; this entry
+# consumes one serialized mailbox and never launches another process.
+use compiler.driver.managed_parse_group.{managed_parse_group_install_v1, managed_parse_group_action_owned_v1}
+use compiler.driver.driver_build.managed_parse_group_contract.{managed_parse_snapshot_decode_v1, managed_parse_action_decode_v1, managed_parse_action_validate_v1, managed_parse_action_basename_v1}
+use compiler.driver.driver_build.managed_parse_group_result.{managed_parse_action_result_encode_v1, managed_parse_action_result_validate_v1}
+use std.nogc_sync_mut.io_runtime.{get_args}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_atomic_write, file_exists}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms, sleep_ms}
+use std.common.build_manager.codec.{builder_wire_line_v1}
+
+fn managed_parse_group_worker_main_v1(root: text) -> Result<i64, text>:
+    val payload = file_read_regular_no_follow_bounded(root + "/install.sdn", 16777216)?
+    val snapshot = managed_parse_snapshot_decode_v1(payload)?
+    var owner = managed_parse_group_install_v1(root, snapshot)?
+    # The runner reads installed.sdn through BuilderWireReaderV1; scalar text
+    # records below are emitted by its canonical escaped-line helper.
+    val installed = managed_parse_group_installed_v1(snapshot.worker_id, snapshot.generation,
+        snapshot.snapshot_digest, snapshot.modules.len(), owner.source_bytes)
+    if not file_atomic_write(root + "/installed.sdn", installed): return Err("cannot publish parser installation")
+    val deadline = current_time_ms() + 604800000
+    var last = ""
+    while current_time_ms() < deadline:
+        if file_exists(root + "/shutdown.sdn"):
+            val shutdown = file_read_regular_no_follow_bounded(root + "/shutdown.sdn", 4096)?
+            val expected = snapshot.worker_id + "\n" + str(snapshot.generation) + "\n" + snapshot.snapshot_digest + "\n"
+            if shutdown != expected: return Err("shutdown identity mismatch")
+            return Ok(0)
+        if file_exists(root + "/next.sdn"):
+            val name = file_read_regular_no_follow_bounded(root + "/next.sdn", 128)?.trim()
+            if name != last:
+                if name.len() != 68 or not name.ends_with(".sdn"): return Err("invalid action mailbox name")
+                for index in 0..64:
+                    if not "0123456789abcdef".contains(name.substring(index, index + 1)): return Err("invalid action mailbox digest")
+                val request = file_read_regular_no_follow_bounded(root + "/requests/" + name, 65536)?
+                val action = managed_parse_action_decode_v1(request)?
+                if managed_parse_action_basename_v1(action) != name: return Err("action mailbox digest mismatch")
+                val invalid = managed_parse_action_validate_v1(snapshot, action)
+                if invalid != "": return Err(invalid)
+                val transfer = managed_parse_group_action_owned_v1(owner, action)
+                val result_invalid = managed_parse_action_result_validate_v1(snapshot, action, transfer.result)
+                if result_invalid != "": return Err(result_invalid)
+                val encoded = managed_parse_action_result_encode_v1(transfer.result)
+                if encoded == "" or not file_atomic_write(root + "/receipts/" + name, encoded):
+                    return Err("cannot publish parser action result")
+                owner = transfer.owner
+                last = name
+        sleep_ms(20)
+    Err("parser worker exceeded bounded lifetime")
+
+fn managed_parse_group_installed_v1(worker: text, generation: i64, snapshot: text, modules: i64, source_bytes: i64) -> text:
+    "SIMPLE-PARSE-INSTALLED-1\n" + builder_wire_line_v1(worker) + builder_wire_line_v1(str(generation)) +
+        builder_wire_line_v1(snapshot) + builder_wire_line_v1(str(modules)) + builder_wire_line_v1(str(source_bytes))
+
+fn main() -> i64:
+    val args = get_args()
+    var root = ""
+    for index in 0..args.len():
+        if args[index] == "--group-root" and index + 1 < args.len(): root = args[index + 1]
+    if root == "": return 2
+    match managed_parse_group_worker_main_v1(root):
+        Ok(code): code
+        Err(reason):
+            print "managed parser worker failed: " + reason
+            1
+
+export managed_parse_group_worker_main_v1

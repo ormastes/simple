@@ -1,0 +1,102 @@
+# Actual walker inputs for independent mechanical gate fault controls.
+# These helpers confer no source, transformed-body, or final MIR admission.
+use compiler.driver.cache.driver_hir_archive_weave_facts_v1.{DriverHirArchiveWeaveFactsV1}
+use compiler.driver.cache.driver_hir_post_validation_gate_facts_v1.*
+use compiler.driver.cache.driver_hir_post_validation_policy_v1.{DriverHirPostValidationPolicyLoadV1, DriverHirPostValidationPolicyOwnerV1, driver_hir_post_validation_policy_load_in_owned_scope_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_promote_diagnostic_owner_v1, hir_cache_clear_last_warnings}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.semantics.value_struct_layout.*
+use compiler.semantics.layer_eq_checker.{LayerEqType}
+use compiler.semantics.layer_eq_validation.*
+use compiler.semantics.effect_validation.*
+use compiler.semantics.rt_criticality_validation.*
+use compiler.semantics.rt_criticality.*
+use compiler.semantics.aspect_validation.*
+use compiler.semantics.join_point_model.*
+use std.env.{env_get}
+
+fn gate_parse_module(path: text, key: text) -> Result<HirModule, text>:
+    val source = SourceFile.load(path)?
+    val parsed = parse_full_frontend(source.content, path, key, Logger(level: 0))
+    var frontend = HirLowering.with_filename(path)
+    val module = frontend.lower_parser_module_unstub(parsed, false)
+    if frontend.errors.len() != 0: return Err("fixture actual HIR lowering failed")
+    Ok(module)
+
+fn gate_live_policy() -> DriverHirPostValidationPolicyLoadV1:
+    DriverHirPostValidationPolicyLoadV1(layer: layer_eq_contract_claims_v1(),
+        effects: effect_contract_claims_v1(), rt: rt_critical_contract_claims_v1(),
+        aspects: aspect_contract_claims_v1(), capabilities: rt_bound_manifest_capabilities(),
+        layout_cycle_mode: env_get("SIMPLE_VALUE_STRUCT_LAYOUT_CYCLE"),
+        quiet_mode: env_get("SIMPLE_RESOLVE_METHODS"), implicit_rt_error: rt_implicit_profile_is_error())
+
+fn gate_complete_report(module: HirModule, policy: DriverHirPostValidationPolicyLoadV1) -> DriverHirPostValidationGateReportV1:
+    val ids = [module.path, module.name]
+    val index = {module.path: true, module.name: true}
+    val by_name = layer_eq_index_structs({module.name: module})
+    val required = layer_eq_required_claim_declaration_names_v1(ids, by_name.keys(), policy.layer)
+    var layers: [LayerEqType] = []
+    for name in required: layers.push(layer_eq_struct_declaration_v1(by_name[name]))
+    val sizes = effect_struct_sizes_for_module_v1(module)
+    val names = effect_fn_names_for_module_v1(module)
+    var effects: [EffectFunctionFactsV1] = []
+    for func in module.functions.values(): effects.push(effect_function_facts_v1(func, sizes, names))
+    val declarations = rt_module_function_declarations_v1(module.name, module)
+    val rt_names = rt_unambiguous_declaration_names_v1(declarations)
+    var rt: [RtCriticalFunctionFactsV1] = []
+    for func in module.functions.values(): rt.push(rt_function_facts_v1(module.name, module, func, rt_names))
+    driver_hir_post_validation_gate_facts_v1([module.name],
+        [value_struct_layout_declarations_v1(module.name, module.path, module.structs, module.symbols)],
+        ids, index, by_name.keys(), layers, effects, rt,
+        forward_join_points_for_module_v1(module, 1), policy, [], 1, false)
+
+# Deliberately supplied census fault keys come from real collected providers.
+# No declaration/body is fabricated, and the supplied fault is not admission.
+fn gate_collected_report(facts: DriverHirArchiveWeaveFactsV1, order: [text],
+        policy: DriverHirPostValidationPolicyLoadV1, dropped: [text], total: i64
+) -> DriverHirPostValidationGateReportV1:
+    var layouts: [ValueStructLayoutModuleV1] = []
+    var ids: [text] = []
+    var layers: [LayerEqType] = []
+    var effects: [EffectFunctionFactsV1] = []
+    var rt: [RtCriticalFunctionFactsV1] = []
+    var forwards: [JoinPoint] = []
+    for key in order:
+        val declaration = facts.declarations[key].row
+        val body = facts.bodies[key]
+        if layouts.len() == 0: layouts.push(declaration.value_layout)
+        for id in declaration.module_identities:
+            if not ids.contains(id): ids.push(id)
+        for layer in body.layer_layouts: layers.push(layer)
+        for effect in body.effect_functions: effects.push(effect)
+        for row in body.rt_functions: rt.push(row)
+        for point in body.forwards: forwards.push(point)
+    driver_hir_post_validation_gate_facts_v1([order[0]], layouts, ids, facts.identities,
+        facts.layer_winners.keys(), layers, effects, rt, forwards, policy, dropped, total, false)
+
+fn gate_fault_borrowed(owner: DriverHirPostValidationPolicyOwnerV1,
+        facts: DriverHirArchiveWeaveFactsV1, order: [text], dropped: [text]
+) -> Result<DriverHirPostValidationGateReportV1, text>:
+    val policy = driver_hir_post_validation_policy_load_in_owned_scope_v1(owner)?
+    Ok(gate_collected_report(facts, order, policy, dropped, order.len()))
+
+fn gate_fault_report(owner: DriverHirPostValidationPolicyOwnerV1,
+        facts: DriverHirArchiveWeaveFactsV1, order: [text], dropped: [text]
+) -> Result<DriverHirPostValidationGateReportV1, text>:
+    if not transient_scope_begin(): return Err("fixture census observation lease refused")
+    val result = gate_fault_borrowed(owner, facts, order, dropped)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    val memo = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    hir_cache_clear_last_warnings()
+    val ended = transient_scope_end()
+    if not paused or not owned or not memo or not ended: panic("fixture census observation ownership")
+    result
+
+export gate_parse_module, gate_live_policy, gate_complete_report, gate_fault_report

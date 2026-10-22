@@ -9,9 +9,10 @@ use super::bdd::{BDD_AFTER_ALL, BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEF
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
     evaluate_expr, exec_assignment, exec_augmented_assignment, exec_with, get_type_name, pattern_matches,
-    record_decision_coverage_here, BLOCK_SCOPED_ENUMS, CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME, EXTERN_FUNCTIONS,
-    GLOBAL_ENUMS, IMMUTABLE_VARS, MACRO_DEFINITION_ORDER, MIXINS, MODULE_GLOBALS, MODULE_GLOBAL_BINDINGS_BY_OWNER,
-    MODULE_GLOBALS_BY_OWNER, CURRENT_EXEC_MODULE, TRAIT_IMPLS, TRAITS, USER_MACROS, visit_pattern_binding_names,
+    eval_decision_cond, record_decision_site, sub_elif, SUB_GUARD, SUB_STMT, BLOCK_SCOPED_ENUMS, CONST_NAMES,
+    CONTEXT_OBJECT, CONTEXT_VAR_NAME, EXTERN_FUNCTIONS, GLOBAL_ENUMS, IMMUTABLE_VARS, MACRO_DEFINITION_ORDER, MIXINS,
+    MODULE_GLOBALS, MODULE_GLOBAL_BINDINGS_BY_OWNER, MODULE_GLOBALS_BY_OWNER, CURRENT_EXEC_MODULE, TRAIT_IMPLS, TRAITS,
+    USER_MACROS, visit_pattern_binding_names,
 };
 use crate::interpreter_unit::{register_standalone_unit_locals, register_unit_family_locals};
 use crate::value::*;
@@ -47,7 +48,7 @@ fn module_global_target(name: &str, env: &Env) -> Option<ModuleGlobalTarget> {
     crate::interpreter::owner_bindings(&owner).and_then(|bindings| {
         bindings
             .get(name)
-            .cloned()
+            .map(std::borrow::Cow::into_owned)
             .map(|(owner, name)| ModuleGlobalTarget::Owned { owner, name })
     })
 }
@@ -177,7 +178,10 @@ fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
             Ok(entries)
         }
         Value::Dict(map) => {
-            // Iterate over dict returns (key, value) tuples
+            // Iterate over dict returns (key, value) tuples; a layered module
+            // value iterates its whole visible surface.
+            let flat = crate::interpreter::module_dict_flat(map);
+            let map = flat.as_ref().unwrap_or(map);
             let entries: Vec<Value> = crate::value::dict_entries_sorted(map)
                 .into_iter()
                 .map(|(k, v)| Value::Tuple(vec![Value::text(k.clone()), v.clone()]))
@@ -228,31 +232,52 @@ fn evaluate_block_while_condition(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<WhileConditionDecision, CompileError> {
-    let value = evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?;
+    let (line, column) = (while_stmt.span.line, while_stmt.span.column);
     let Some(pattern) = &while_stmt.let_pattern else {
-        return Ok(if is_condition_present(&while_stmt.condition, &value) {
+        let value = eval_decision_cond(
+            &while_stmt.condition,
+            line,
+            column,
+            SUB_STMT,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )?;
+        let run = is_condition_present(&while_stmt.condition, &value);
+        record_decision_site(line, column, SUB_STMT, run);
+        return Ok(if run {
             WhileConditionDecision::Run
         } else {
             WhileConditionDecision::Stop
         });
     };
+    let value = evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?;
 
-    match optional_let_binding(pattern, &value) {
-        LetBind::Skip => Ok(WhileConditionDecision::Stop),
+    let decision: WhileConditionDecision = match optional_let_binding(pattern, &value) {
+        LetBind::Skip => WhileConditionDecision::Stop,
         LetBind::Bind(name, inner) => {
             let mut bindings = HashMap::with_capacity(1);
             bindings.insert(name, inner);
-            Ok(WhileConditionDecision::RunWithBindings(bindings))
+            WhileConditionDecision::RunWithBindings(bindings)
         }
         LetBind::NotApplicable => {
             let mut bindings = HashMap::new();
             if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
-                Ok(WhileConditionDecision::RunWithBindings(bindings))
+                WhileConditionDecision::RunWithBindings(bindings)
             } else {
-                Ok(WhileConditionDecision::Stop)
+                WhileConditionDecision::Stop
             }
         }
-    }
+    };
+    record_decision_site(
+        line,
+        column,
+        SUB_STMT,
+        !matches!(decision, WhileConditionDecision::Stop),
+    );
+    Ok(decision)
 }
 
 /// Execute a `while` in a BDD/lambda block. Pattern names are block-local for
@@ -423,6 +448,7 @@ pub(super) fn exec_block_closure_into(
                     visit_pattern_binding_names(&let_stmt.pattern, &mut |name| local_env.mark_local(name.to_owned()));
                     // Use bind_pattern_value to handle all pattern types including tuples
                     let is_mutable = let_stmt.mutability.is_mutable();
+                    let val = crate::interpreter::coerce_to_declared_type(val, declared_let_type(let_stmt));
                     bind_pattern_value(&let_stmt.pattern, val, is_mutable, &mut local_env);
                 }
                 last_value = Value::Nil;
@@ -605,6 +631,7 @@ pub(super) fn exec_block_closure_into(
                             // closure `if val get_value = …` returned `<fn:get_value>`.
                             local_env.mark_local(name.clone());
                             local_env.insert(name, inner);
+                            record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, true);
                             last_value = exec_block_closure_mut(
                                 &if_stmt.then_block.statements,
                                 &mut local_env,
@@ -622,6 +649,7 @@ pub(super) fn exec_block_closure_into(
                                 for (name, val) in bindings {
                                     local_env.insert(name, val);
                                 }
+                                record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, true);
                                 last_value = exec_block_closure_mut(
                                     &if_stmt.then_block.statements,
                                     &mut local_env,
@@ -634,9 +662,15 @@ pub(super) fn exec_block_closure_into(
                             }
                         }
                     }
+                    if !handled {
+                        record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, false);
+                    }
                 } else if {
-                    let cond_val = evaluate_expr(
+                    let cond_val = eval_decision_cond(
                         &if_stmt.condition,
+                        if_stmt.span.line,
+                        if_stmt.span.column,
+                        SUB_STMT,
                         &mut local_env,
                         functions,
                         classes,
@@ -652,7 +686,7 @@ pub(super) fn exec_block_closure_into(
                     // `exec_if` — so branch decisions inside a function body
                     // previously recorded NOTHING. See
                     // doc/08_tracking/bug/coverage_tooling_does_not_instrument_spl_2026-08-07.md.
-                    record_decision_coverage_here(if_stmt.span.line, if_stmt.span.column, decision_result);
+                    record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, decision_result);
                     decision_result
                 } {
                     last_value = exec_block_closure_mut(
@@ -680,6 +714,12 @@ pub(super) fn exec_block_closure_into(
                                     // closure `if val get_value = …` returned `<fn:get_value>`.
                                     local_env.mark_local(name.clone());
                                     local_env.insert(name, inner);
+                                    record_decision_site(
+                                        if_stmt.span.line,
+                                        if_stmt.span.column,
+                                        sub_elif(elif_idx),
+                                        true,
+                                    );
                                     last_value = exec_block_closure_mut(
                                         &block.statements,
                                         &mut local_env,
@@ -698,6 +738,12 @@ pub(super) fn exec_block_closure_into(
                                         for (name, val) in bindings {
                                             local_env.insert(name, val);
                                         }
+                                        record_decision_site(
+                                            if_stmt.span.line,
+                                            if_stmt.span.column,
+                                            sub_elif(elif_idx),
+                                            true,
+                                        );
                                         last_value = exec_block_closure_mut(
                                             &block.statements,
                                             &mut local_env,
@@ -711,16 +757,26 @@ pub(super) fn exec_block_closure_into(
                                     }
                                 }
                             }
+                            record_decision_site(if_stmt.span.line, if_stmt.span.column, sub_elif(elif_idx), false);
                         } else if {
-                            let elif_val =
-                                evaluate_expr(cond, &mut local_env, functions, classes, enums, impl_methods)?;
+                            let elif_val = eval_decision_cond(
+                                cond,
+                                if_stmt.span.line,
+                                if_stmt.span.column,
+                                sub_elif(elif_idx),
+                                &mut local_env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?;
                             let elif_decision = is_condition_present(cond, &elif_val);
                             // COVERAGE: mirror `interpreter_control::exec_if`'s elif
-                            // handling (offset the line by `elif_idx` so each elif
-                            // gets a distinct decision id, same scheme as there).
-                            record_decision_coverage_here(
-                                if_stmt.span.line + elif_idx,
+                            // site (parent `if` span + `sub_elif(elif_idx)`).
+                            record_decision_site(
+                                if_stmt.span.line,
                                 if_stmt.span.column,
+                                sub_elif(elif_idx),
                                 elif_decision,
                             );
                             elif_decision
@@ -822,9 +878,20 @@ pub(super) fn exec_block_closure_into(
                             for (name, value) in &bindings {
                                 guard_env.insert(name.clone(), value.clone());
                             }
-                            let guard_val =
-                                evaluate_expr(guard, &mut guard_env, functions, classes, enums, impl_methods)?;
-                            if !is_condition_present(guard, &guard_val) {
+                            let guard_val = eval_decision_cond(
+                                guard,
+                                arm.span.line,
+                                arm.span.column,
+                                SUB_GUARD,
+                                &mut guard_env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?;
+                            let guard_result = is_condition_present(guard, &guard_val);
+                            record_decision_site(arm.span.line, arm.span.column, SUB_GUARD, guard_result);
+                            if !guard_result {
                                 continue;
                             }
                         }
@@ -1200,13 +1267,13 @@ pub(super) fn exec_block_closure_into(
                             for item_target in items {
                                 match item_target {
                                     ImportTarget::Single(name) => {
-                                        if let Some(v) = exports.get(name) {
-                                            bind_one(name, v);
+                                        if let Some(v) = crate::interpreter::module_dict_get(exports, name) {
+                                            bind_one(name, &v);
                                         }
                                     }
                                     ImportTarget::Aliased { name, alias } => {
-                                        if let Some(v) = exports.get(name) {
-                                            bind_one(alias, v);
+                                        if let Some(v) = crate::interpreter::module_dict_get(exports, name) {
+                                            bind_one(alias, &v);
                                         }
                                     }
                                     // Nested groups are not supported at module
@@ -1216,17 +1283,17 @@ pub(super) fn exec_block_closure_into(
                             }
                         }
                         ImportTarget::Glob => {
-                            for (name, value) in exports.iter() {
+                            crate::interpreter::module_dict_for_each_visible(exports, |name, value| {
                                 // Never glob-import `main`: it would be picked up
                                 // by the entry-point fallback and run instead of
                                 // the script's own main. Same guard as module
                                 // scope. A NAMED import of `main` is an explicit
                                 // opt-in and is not filtered.
                                 if matches!(value, Value::Function { .. }) && name == "main" {
-                                    continue;
+                                    return;
                                 }
                                 bind_one(name, value);
-                            }
+                            });
                         }
                         ImportTarget::Single(_) | ImportTarget::Aliased { .. } => {}
                     }
@@ -1472,6 +1539,7 @@ fn exec_block_closure_mut_inner(
                     // Mark the names local first; see the `exec_block_closure_into` twin.
                     visit_pattern_binding_names(&let_stmt.pattern, &mut |name| local_env.mark_local(name.to_owned()));
                     let is_mutable = let_stmt.mutability.is_mutable();
+                    let val = crate::interpreter::coerce_to_declared_type(val, declared_let_type(let_stmt));
                     bind_pattern_value(&let_stmt.pattern, val, is_mutable, local_env);
                 }
                 last_value = Value::Nil;
@@ -1529,6 +1597,7 @@ fn exec_block_closure_mut_inner(
                             // closure `if val get_value = …` returned `<fn:get_value>`.
                             local_env.mark_local(name.clone());
                             local_env.insert(name, inner);
+                            record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, true);
                             last_value = exec_block_closure_mut(
                                 &if_stmt.then_block.statements,
                                 local_env,
@@ -1546,6 +1615,7 @@ fn exec_block_closure_mut_inner(
                                 for (name, val) in bindings {
                                     local_env.insert(name, val);
                                 }
+                                record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, true);
                                 last_value = exec_block_closure_mut(
                                     &if_stmt.then_block.statements,
                                     local_env,
@@ -1558,16 +1628,28 @@ fn exec_block_closure_mut_inner(
                             }
                         }
                     }
+                    if !handled {
+                        record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, false);
+                    }
                 } else if {
-                    let cond_val =
-                        evaluate_expr(&if_stmt.condition, local_env, functions, classes, enums, impl_methods)?;
+                    let cond_val = eval_decision_cond(
+                        &if_stmt.condition,
+                        if_stmt.span.line,
+                        if_stmt.span.column,
+                        SUB_STMT,
+                        local_env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?;
                     // `is_condition_present` (not plain `.truthy()`): see its
                     // doc comment in `interpreter_control.rs`.
                     let decision_result = is_condition_present(&if_stmt.condition, &cond_val);
                     // COVERAGE: mirror `interpreter_control::exec_if`. This is the
                     // `exec_block_closure_into` twin of the `exec_block_closure_mut`
                     // `Node::If` handling above — same previously-missing wiring.
-                    record_decision_coverage_here(if_stmt.span.line, if_stmt.span.column, decision_result);
+                    record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, decision_result);
                     decision_result
                 } {
                     last_value = exec_block_closure_mut(
@@ -1595,6 +1677,12 @@ fn exec_block_closure_mut_inner(
                                     // closure `if val get_value = …` returned `<fn:get_value>`.
                                     local_env.mark_local(name.clone());
                                     local_env.insert(name, inner);
+                                    record_decision_site(
+                                        if_stmt.span.line,
+                                        if_stmt.span.column,
+                                        sub_elif(elif_idx),
+                                        true,
+                                    );
                                     last_value = exec_block_closure_mut(
                                         &block.statements,
                                         local_env,
@@ -1613,6 +1701,12 @@ fn exec_block_closure_mut_inner(
                                         for (name, val) in bindings {
                                             local_env.insert(name, val);
                                         }
+                                        record_decision_site(
+                                            if_stmt.span.line,
+                                            if_stmt.span.column,
+                                            sub_elif(elif_idx),
+                                            true,
+                                        );
                                         last_value = exec_block_closure_mut(
                                             &block.statements,
                                             local_env,
@@ -1626,12 +1720,24 @@ fn exec_block_closure_mut_inner(
                                     }
                                 }
                             }
+                            record_decision_site(if_stmt.span.line, if_stmt.span.column, sub_elif(elif_idx), false);
                         } else if {
-                            let elif_val = evaluate_expr(cond, local_env, functions, classes, enums, impl_methods)?;
-                            let elif_decision = is_condition_present(cond, &elif_val);
-                            record_decision_coverage_here(
-                                if_stmt.span.line + elif_idx,
+                            let elif_val = eval_decision_cond(
+                                cond,
+                                if_stmt.span.line,
                                 if_stmt.span.column,
+                                sub_elif(elif_idx),
+                                local_env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?;
+                            let elif_decision = is_condition_present(cond, &elif_val);
+                            record_decision_site(
+                                if_stmt.span.line,
+                                if_stmt.span.column,
+                                sub_elif(elif_idx),
                                 elif_decision,
                             );
                             elif_decision
@@ -1711,9 +1817,20 @@ fn exec_block_closure_mut_inner(
                             for (name, value) in &bindings {
                                 guard_env.insert(name.clone(), value.clone());
                             }
-                            let guard_val =
-                                evaluate_expr(guard, &mut guard_env, functions, classes, enums, impl_methods)?;
-                            if !is_condition_present(guard, &guard_val) {
+                            let guard_val = eval_decision_cond(
+                                guard,
+                                arm.span.line,
+                                arm.span.column,
+                                SUB_GUARD,
+                                &mut guard_env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?;
+                            let guard_result = is_condition_present(guard, &guard_val);
+                            record_decision_site(arm.span.line, arm.span.column, SUB_GUARD, guard_result);
+                            if !guard_result {
                                 continue;
                             }
                         }
@@ -2338,5 +2455,15 @@ mod tests {
     fn true_bare_assert_passes_block_closure() {
         let result = run_probe("fn probe():\n    assert 1 == 1\n    42\n").expect("true assert must pass");
         assert_eq!(result.as_int().expect("int"), 42);
+    }
+}
+
+/// The declared type of a `val`/`var`: its annotation, or the type in a typed
+/// pattern (`val x: T = ...`).
+fn declared_let_type(let_stmt: &simple_parser::ast::LetStmt) -> Option<&simple_parser::ast::Type> {
+    match (&let_stmt.ty, &let_stmt.pattern) {
+        (Some(ty), _) => Some(ty),
+        (None, simple_parser::ast::Pattern::Typed { ty, .. }) => Some(ty),
+        _ => None,
     }
 }

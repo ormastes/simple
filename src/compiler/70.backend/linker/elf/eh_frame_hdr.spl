@@ -10,11 +10,11 @@ struct ElfEhFrameEntry:
     pc: i64
     fde: i64
 
-fn _eh_u32(b: [i64], off: i64) -> Result<i64, text>:
+fn _eh_u32(b: [u8], off: i64) -> Result<i64, text>:
     if off < 0 or off + 4 > b.len():
         return Err("truncated .eh_frame word at {off}")
-    Ok((b[off] & 0xff) | ((b[off + 1] & 0xff) << 8) |
-        ((b[off + 2] & 0xff) << 16) | ((b[off + 3] & 0xff) << 24))
+    Ok(((b[off] as i64) & 0xff) | (((b[off + 1] as i64) & 0xff) << 8) |
+        (((b[off + 2] as i64) & 0xff) << 16) | (((b[off + 3] as i64) & 0xff) << 24))
 
 fn _eh_s32(v: i64) -> i64:
     if v >= 0x80000000:
@@ -24,18 +24,18 @@ fn _eh_s32(v: i64) -> i64:
 fn _eh_s32_fits(v: i64) -> bool:
     v >= -0x80000000 and v <= 0x7fffffff
 
-fn _eh_uleb_end(b: [i64], off: i64) -> Result<i64, text>:
+fn _eh_uleb_end(b: [u8], off: i64) -> Result<i64, text>:
     var i = off
     var n: i64 = 0
     while i < b.len() and n < 10:
-        val byte = b[i]
+        val byte = b[i] as i64
         i = i + 1
         if byte & 0x80 == 0:
             return Ok(i)
         n = n + 1
     Err("invalid LEB128 in .eh_frame")
 
-fn _eh_cie_encoding(b: [i64], cie: i64) -> Result<i64, text>:
+fn _eh_cie_encoding(b: [u8], cie: i64) -> Result<i64, text>:
     val length = _eh_u32(b, cie)?
     val end = cie + 4 + length
     if length < 12 or end > b.len() or _eh_u32(b, cie + 4)? != 0:
@@ -45,7 +45,7 @@ fn _eh_cie_encoding(b: [i64], cie: i64) -> Result<i64, text>:
     var p = cie + 9
     var augmentation = ""
     while p < end and b[p] != 0:
-        augmentation = augmentation + char_from_code(b[p])
+        augmentation = augmentation + char_from_code(b[p] as i64)
         p = p + 1
     if p >= end:
         return Err("unterminated CIE augmentation at .eh_frame+{cie}")
@@ -57,12 +57,12 @@ fn _eh_cie_encoding(b: [i64], cie: i64) -> Result<i64, text>:
         return Err("UnsupportedFeature: .eh_frame CIE augmentation '{augmentation}'")
     if p >= end or b[p] != 1 or p + 1 >= end:
         return Err("invalid zR augmentation data at .eh_frame+{cie}")
-    val encoding = b[p + 1]
+    val encoding = b[p + 1] as i64
     if encoding != 0x1b:
         return Err("UnsupportedFeature: .eh_frame FDE encoding {encoding}; expected pcrel sdata4")
     Ok(encoding)
 
-fn elf_eh_frame_fde_count(b: [i64]) -> Result<i64, text>:
+fn elf_eh_frame_fde_count(b: [u8]) -> Result<i64, text>:
     var count: i64 = 0
     var off: i64 = 0
     while off + 4 <= b.len():
@@ -82,6 +82,7 @@ fn elf_eh_frame_fde_count(b: [i64]) -> Result<i64, text>:
     Ok(count)
 
 fn _eh_insert_sorted(entries: [ElfEhFrameEntry], value: ElfEhFrameEntry) -> [ElfEhFrameEntry]:
+    # Out-of-order insert; the in-order append is done by the caller in place.
     var pos = entries.len()
     while pos > 0 and entries[pos - 1].pc > value.pc:
         pos = pos - 1
@@ -96,8 +97,9 @@ fn _eh_insert_sorted(entries: [ElfEhFrameEntry], value: ElfEhFrameEntry) -> [Elf
         out = out.push(value)
     out
 
-fn elf_build_eh_frame_hdr(b: [i64], eh_addr: i64, hdr_addr: i64) -> Result<[i64], text>:
+fn elf_build_eh_frame_hdr(b: [u8], eh_addr: i64, hdr_addr: i64) -> Result<[i64], text>:
     var entries: [ElfEhFrameEntry] = []
+    var checked_cies: {i64: bool} = {}
     var off: i64 = 0
     while off + 4 <= b.len():
         val length = _eh_u32(b, off)?
@@ -109,10 +111,18 @@ fn elf_build_eh_frame_hdr(b: [i64], eh_addr: i64, hdr_addr: i64) -> Result<[i64]
         val id = _eh_u32(b, off + 4)?
         if id != 0:
             val cie = off + 4 - id
-            _eh_cie_encoding(b, cie)?
+            if not checked_cies.has(cie):
+                _eh_cie_encoding(b, cie)?
+                checked_cies[cie] = true
             val field = off + 8
             val pc = eh_addr + field + _eh_s32(_eh_u32(b, field)?)
-            entries = _eh_insert_sorted(entries, ElfEhFrameEntry(pc: pc, fde: eh_addr + off))
+            val entry = ElfEhFrameEntry(pc: pc, fde: eh_addr + off)
+            # FDEs follow output order, so they almost always arrive sorted:
+            # append in place and only rebuild for an out-of-order entry.
+            if entries.len() == 0 or entries[entries.len() - 1].pc <= pc:
+                entries.push(entry)
+            else:
+                entries = _eh_insert_sorted(entries, entry)
         off = off + 4 + length
     var out: [i64] = [1, 0x1b, 0x03, 0x3b]
     val eh_delta = eh_addr - (hdr_addr + 4)

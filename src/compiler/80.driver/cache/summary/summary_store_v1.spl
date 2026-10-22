@@ -113,10 +113,23 @@ fn _canonical_bytes_v1(row: DbRow) -> [u8]:
     if encoded == nil: return []
     _unhex_bytes_v1(encoded?)
 
-fn _rendered_bytes_v1(row: DbRow) -> [u8]:
-    val rendered = row.get_text("rendered_bytes")
-    if rendered == nil: return []
-    text_to_bytes(rendered?)
+fn _rendered_text_v1(row: DbRow) -> text:
+    row.get_text("rendered_bytes") ?? ""
+
+# Callers validate byte bounds before entering. Keep bytes_to_text at the page
+# boundary so partial UTF-8 sequences retain the existing conversion policy.
+# Published rendering is owned text (join plus newline), so byte_at uses its
+# cached byte length. Raw C-string fallback can scan strlen for every byte.
+fn _rendered_byte_range_v1(rendered: text, start: i64, end: i64) -> [u8]:
+    if start == 0 and end == rendered.len(): return text_to_bytes(rendered)
+    # Preserve the native packed-byte representation while growing the range.
+    # An empty array literal may use eight-byte tagged slots even for [u8].
+    var bytes = text_to_bytes("")
+    var index = start
+    while index < end:
+        bytes.push(rendered.byte_at(index) as u8)
+        index = index + 1
+    bytes
 
 fn _path_semantics_v1(value: i64) -> PathSemanticsV1:
     if value == 2: PathSemanticsV1.CaseFoldedNfc else: PathSemanticsV1.CaseSensitiveNfc
@@ -308,7 +321,7 @@ impl VirtualSourceStoreV1 for VirtualSourceStoreAdapterV1:
         val logical = LogicalSourcePathV1(repository_namespace_digest: value.get_text("repository")?, module_relative_utf8: path,
             path_semantics: _path_semantics_v1(value.get_int("path_semantics")?))
         Ok(SummaryLookupV1(present: true, value: Some(VirtualSourceStatV1(uri: virtual_uri, snapshot_id: snapshot,
-            logical_path: logical, kind: VirtualSourceKindV1.PublicSummary, rendered_size: _rendered_bytes_v1(value).len(),
+            logical_path: logical, kind: VirtualSourceKindV1.PublicSummary, rendered_size: _rendered_text_v1(value).len(),
             content_digest: value.get_text("content_digest")?, provenance: value.get_text("provenance")?, visibility: SummaryVisibilityV1.PublicOnly))))
 
     fn read(auth: SummaryAuthV1, snapshot: text, virtual_uri: text, offset: i64, max_bytes: i64) -> Result<SummaryLookupV1<VirtualSourceReadV1>, SummaryErrorV1>:
@@ -322,12 +335,13 @@ impl VirtualSourceStoreV1 for VirtualSourceStoreAdapterV1:
         val row = self.store.row(snapshot, auth.root_digest, path)?
         if row == nil: return Ok(SummaryLookupV1(present: false, value: nil))
         val value = row?
-        val bytes = _rendered_bytes_v1(value)
-        if offset > bytes.len(): return Err(_summary_error_v1(SummaryErrorCodeV1.SummaryBoundsExceeded, "summary read offset rejected"))
-        val end = min(bytes.len(), offset + max_bytes)
-        val complete = end == bytes.len()
+        val rendered = _rendered_text_v1(value)
+        val rendered_size = rendered.len()
+        if offset > rendered_size: return Err(_summary_error_v1(SummaryErrorCodeV1.SummaryBoundsExceeded, "summary read offset rejected"))
+        val end = offset + min(rendered_size - offset, max_bytes)
+        val complete = end == rendered_size
         Ok(SummaryLookupV1(present: true, value: Some(VirtualSourceReadV1(uri: virtual_uri, snapshot_id: snapshot,
-            offset: offset, bytes: bytes[offset..end], next_offset: if complete: nil else: Some(end), complete: complete,
+            offset: offset, bytes: _rendered_byte_range_v1(rendered, offset, end), next_offset: if complete: nil else: Some(end), complete: complete,
             content_digest: value.get_text("content_digest")?, provenance: value.get_text("provenance")?))))
 
     fn page(auth: SummaryAuthV1, snapshot: text, virtual_uri: text, continuation: text?, max_bytes: i64, max_entries: i64) -> Result<SummaryLookupV1<SummaryPageV1>, SummaryErrorV1>:
@@ -343,11 +357,12 @@ impl VirtualSourceStoreV1 for VirtualSourceStoreAdapterV1:
         val row = self.store.row(snapshot, auth.root_digest, path)?
         if row == nil: return Ok(SummaryLookupV1(present: false, value: nil))
         val value = row?
-        val bytes = _rendered_bytes_v1(value)
-        if cursor > bytes.len(): return Err(_summary_error_v1(SummaryErrorCodeV1.SummaryTokenInvalid, "summary page cursor rejected"))
-        val end = min(bytes.len(), cursor + max_bytes)
-        val rendered = bytes_to_text(bytes[cursor..end])
-        val complete = end == bytes.len()
+        val full_text = _rendered_text_v1(value)
+        val rendered_size = full_text.len()
+        if cursor > rendered_size: return Err(_summary_error_v1(SummaryErrorCodeV1.SummaryTokenInvalid, "summary page cursor rejected"))
+        val end = cursor + min(rendered_size - cursor, max_bytes)
+        val rendered = bytes_to_text(_rendered_byte_range_v1(full_text, cursor, end))
+        val complete = end == rendered_size
         val next = if complete: nil else: Some(_token_v1(auth, snapshot, path, end, max_bytes, max_entries))
         val logical = LogicalSourcePathV1(repository_namespace_digest: value.get_text("repository")?, module_relative_utf8: path,
             path_semantics: _path_semantics_v1(value.get_int("path_semantics")?))

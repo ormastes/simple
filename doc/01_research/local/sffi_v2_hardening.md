@@ -36,7 +36,7 @@ It does not replace or overwrite the combined research.
 | Missing extern fabricated by native link | `test/01_unit/compiler/linker/extern_unimplemented_weak_stub_fabrication_spec.spl` and its four fixture families |
 | Plain `[u8]` versus `Option<[u8]>` transport | `test/01_unit/compiler/sffi_byte_array_return_not_option_spec.spl` |
 | Cross-engine `[u8]` defect class | `test/01_unit/compiler/sffi_byte_array_return_class_spec.spl` |
-| Unsafe capability vocabulary | `test/unit/compiler/common/assurance/unsafe_capabilities_spec.spl` |
+| Unsafe capability vocabulary | `test/01_unit/compiler/common/assurance/unsafe_capabilities_spec.spl` |
 | Resource ownership surface | `test/01_unit/compiler/resource/resource_sffi_pilot_spec.spl` |
 
 Adjacent coverage includes backend null/layout/signature specs, hosted extern

@@ -1,0 +1,225 @@
+# @tag:in-development
+# Purpose: resolution behavior with real production resolver inputs.
+# @req REQ-TRC-004 REQ-TRC-005 REQ-TRC-006 REQ-TRC-019
+# design: doc/05_design/simple_traceability_sdn_slop.md
+# Lifecycle: doc/01_research/local/simple_traceability_sdn_slop.md doc/03_plan/sys_test/simple_traceability_sdn_slop.md doc/04_architecture/simple_traceability_sdn_slop.md
+import std.spec
+use std.spec.step
+use std.common.traceability.model.*
+use std.common.traceability.resolve.*
+
+fn resolution_facts() -> TraceFacts:
+    val subject = SnapshotSubject(repository_id: "simple", snapshot_id: "snapshot:resolver", kind: "git_tree", revision_id: "commit:r", tree_id: "tree:r", object_format: "sha256")
+    val nodes = [TraceNode(id: "source:foo", kind: TraceNodeKind.SourceFile, title: "Foo"), TraceNode(id: "test:foo", kind: TraceNodeKind.TestSuite, title: "Foo spec"), TraceNode(id: "test:shared", kind: TraceNodeKind.TestSuite, title: "Shared spec")]
+    val locators = [TraceLocator(entity_id: "source:foo", path: "src/app/foo.spl", locator_kind: "file", locator: "", blob_id: "blob:foo"), TraceLocator(entity_id: "test:foo", path: "test/01_unit/app/foo_spec.spl", locator_kind: "file", locator: "", blob_id: "blob:spec"), TraceLocator(entity_id: "test:shared", path: "test/support/shared_spec.spl", locator_kind: "file", locator: "", blob_id: "blob:shared")]
+    TraceFacts(subject: subject, input_manifest_id: "inputs:r", nodes: nodes, test_definitions: [], claims: [], origins: [], locators: locators, diagnostics: [], generation_id: "generation:r", complete: true)
+
+fn resolution_rule() -> TraceConventionRule:
+    TraceConventionRule(id: "app-unit-v1", source_root: "src/app/", target_root: "test/01_unit/app/", source_suffix: ".spl", target_suffix: "_spec.spl", relation: TraceRelation.Targets, version: "1")
+
+fn resolution_policy() -> TracePolicy:
+    TracePolicy(id: "policy:r", conventions: [resolution_rule()], authorities: [], max_nodes: 100, max_claims: 100)
+
+fn resolution_origin() -> TraceOrigin:
+    TraceOrigin(id: "origin:shared", kind: TraceOriginKind.Explicit, owner_path: "doc/trace/shared.trace.sdn", locator: "claims:1", rule_version: "trace-declarations-v1")
+
+fn override_authority() -> TraceAuthority:
+    TraceAuthority(origin_id: "origin:shared", relation: TraceRelation.Targets, scope_id: "source:foo", owner_path: "doc/trace/shared.trace.sdn", allow_override: true, review_id: "review:42", reason: "Shared tooling test owns this target", expires_snapshot_id: "snapshot:resolver")
+
+fn has_resolution_code(graph: TraceGraph, code: text) -> bool:
+    for diagnostic in graph.diagnostics:
+        if diagnostic.code == code:
+            return true
+    false
+
+describe "Attributable conventional and explicit trace resolution":
+    # @manual scenario evidence
+    it "derives a unit path association without authored relationship rows":
+        # @req REQ-TRC-004
+        # @ac AC-TRC-003
+        step("Resolve source and conventional unit spec locators")
+        val graph = resolve_trace_graph(resolution_facts(), resolution_policy())
+        expect(graph.complete).to_equal(true)
+        expect(graph.edges.len()).to_equal(1)
+        expect(graph.edges[0].from_id).to_equal("test:foo")
+        expect(graph.edges[0].to_id).to_equal("source:foo")
+        expect(graph.edges[0].relation).to_equal(TraceRelation.Targets)
+        expect(graph.origins[0].kind).to_equal(TraceOriginKind.Convention)
+
+    it "rejects a second mapping candidate instead of selecting the first":
+        # @req REQ-TRC-006
+        # @ac AC-TRC-005
+        step("Add a second identity for the conventional target path")
+        var facts = resolution_facts()
+        var locations = facts.locators
+        locations.push(TraceLocator(entity_id: "test:shared", path: "test/01_unit/app/foo_spec.spl", locator_kind: "file", locator: "", blob_id: "blob:other"))
+        facts.locators = locations
+        val graph = resolve_trace_graph(facts, resolution_policy())
+        expect(graph.complete).to_equal(false)
+        expect(graph.edges.len()).to_equal(0)
+        expect(has_resolution_code(graph, "TRACE-AMBIGUOUS-MAPPING")).to_equal(true)
+
+    it "applies a reviewed replacement only to its named rule and source scope":
+        # @req REQ-TRC-005 REQ-TRC-019
+        # @ac AC-TRC-006
+        step("Declare and authorize the irregular shared-test replacement")
+        var facts = resolution_facts()
+        facts.origins = [resolution_origin()]
+        facts.claims = [TraceClaim(id: "claim:replace", from_id: "test:shared", relation: TraceRelation.Targets, to_id: "source:foo", origin_id: "origin:shared", operation: TraceClaimOperation.Replace, rule_id: "app-unit-v1", scope_id: "source:foo")]
+        var policy = resolution_policy()
+        policy.authorities = [override_authority()]
+        val graph = resolve_trace_graph(facts, policy)
+        expect(graph.complete).to_equal(true)
+        expect(graph.edges.len()).to_equal(1)
+        expect(graph.edges[0].from_id).to_equal("test:shared")
+        expect(graph.edge_origins[0].origin_id).to_equal("origin:shared")
+
+    it "fails stale replacement and expired authority without hiding conventional edges":
+        # @req REQ-TRC-006 REQ-TRC-019
+        # @ac AC-TRC-006
+        step("Remove the referenced rule while retaining the override declaration")
+        var facts = resolution_facts()
+        facts.origins = [resolution_origin()]
+        facts.claims = [TraceClaim(id: "claim:replace", from_id: "test:shared", relation: TraceRelation.Targets, to_id: "source:foo", origin_id: "origin:shared", operation: TraceClaimOperation.Replace, rule_id: "old-rule", scope_id: "source:foo")]
+        var policy = resolution_policy()
+        policy.authorities = [override_authority()]
+        val graph = resolve_trace_graph(facts, policy)
+        expect(has_resolution_code(graph, "TRACE-STALE-OVERRIDE")).to_equal(true)
+        expect(graph.complete).to_equal(false)
+        expect(graph.edges[0].from_id).to_equal("test:foo")
+        var expired = override_authority()
+        expired.expires_snapshot_id = "snapshot:old"
+        policy.authorities = [expired]
+        val stale = resolve_trace_graph(facts, policy)
+        expect(has_resolution_code(stale, "TRACE-AUTHORITY-CONFLICT")).to_equal(true)
+
+    it "retains explicit corroborating origins without duplicate edges":
+        # @req REQ-TRC-005 REQ-TRC-016
+        # @ac AC-TRC-004
+        step("Add an explicit claim that agrees with the structural mapping")
+        var facts = resolution_facts()
+        facts.origins = [resolution_origin()]
+        facts.claims = [TraceClaim(id: "claim:corroborates", from_id: "test:foo", relation: TraceRelation.Targets, to_id: "source:foo", origin_id: "origin:shared", operation: TraceClaimOperation.Add, rule_id: "", scope_id: "source:foo")]
+        var policy = resolution_policy()
+        policy.authorities = [override_authority()]
+        val graph = resolve_trace_graph(facts, policy)
+        expect(graph.complete).to_equal(true)
+        expect(graph.edges.len()).to_equal(1)
+        expect(graph.edge_origins.len()).to_equal(2)
+
+    it "rejects unauthored authority and missing endpoints as non-green":
+        # @req REQ-TRC-005 REQ-TRC-007
+        # @ac AC-TRC-008
+        step("Resolve the same claim before and after registering its authority")
+        var facts = resolution_facts()
+        facts.origins = [resolution_origin()]
+        facts.claims = [TraceClaim(id: "claim:missing", from_id: "test:missing", relation: TraceRelation.Targets, to_id: "source:foo", origin_id: "origin:shared", operation: TraceClaimOperation.Add, rule_id: "", scope_id: "source:foo")]
+        var policy = resolution_policy()
+        val unowned = resolve_trace_graph(facts, policy)
+        expect(has_resolution_code(unowned, "TRACE-AUTHORITY-CONFLICT")).to_equal(true)
+        policy.authorities = [override_authority()]
+        val missing = resolve_trace_graph(facts, policy)
+        expect(has_resolution_code(missing, "TRACE-MISSING-ENDPOINT")).to_equal(true)
+        expect(missing.complete).to_equal(false)
+
+    it "retains reviewed suppression provenance without inventing verification":
+        # @req REQ-TRC-019
+        step("Suppress one conventional expectation under exact reviewed authority")
+        var facts = resolution_facts()
+        facts.origins = [resolution_origin()]
+        facts.claims = [TraceClaim(id: "claim:suppress", from_id: "source:foo", relation: TraceRelation.Targets, to_id: "", origin_id: "origin:shared", operation: TraceClaimOperation.Suppress, rule_id: "app-unit-v1", scope_id: "source:foo")]
+        var policy = resolution_policy()
+        policy.authorities = [override_authority()]
+        val graph = resolve_trace_graph(facts, policy)
+        expect(graph.complete).to_equal(true)
+        expect(graph.edges.len()).to_equal(0)
+        expect(graph.claims[0].operation).to_equal(TraceClaimOperation.Suppress)
+
+    it "rejects competing overrides rather than choosing their input order":
+        # @req REQ-TRC-006
+        step("Declare replace and suppress for the same mapping scope")
+        var facts = resolution_facts()
+        facts.origins = [resolution_origin()]
+        facts.claims = [TraceClaim(id: "claim:a", from_id: "test:shared", relation: TraceRelation.Targets, to_id: "source:foo", origin_id: "origin:shared", operation: TraceClaimOperation.Replace, rule_id: "app-unit-v1", scope_id: "source:foo"), TraceClaim(id: "claim:b", from_id: "source:foo", relation: TraceRelation.Targets, to_id: "", origin_id: "origin:shared", operation: TraceClaimOperation.Suppress, rule_id: "app-unit-v1", scope_id: "source:foo")]
+        var policy = resolution_policy()
+        policy.authorities = [override_authority()]
+        val graph = resolve_trace_graph(facts, policy)
+        expect(graph.complete).to_equal(false)
+        expect(has_resolution_code(graph, "TRACE-AUTHORITY-CONFLICT")).to_equal(true)
+        expect(graph.edges[0].from_id).to_equal("test:foo")
+
+    it "rejects duplicate identity and policy budget overflow before resolution":
+        # @req REQ-TRC-006 REQ-TRC-010
+        # @ac AC-TRC-009 AC-TRC-015
+        step("Supply a duplicate identity and then an undersized scope budget")
+        var facts = resolution_facts()
+        facts.nodes = [facts.nodes[0], facts.nodes[0]]
+        val duplicate = resolve_trace_graph(facts, resolution_policy())
+        expect(duplicate.edges.len()).to_equal(0)
+        expect(has_resolution_code(duplicate, "TRACE-DUPLICATE-ID")).to_equal(true)
+        var policy = resolution_policy()
+        policy.max_nodes = 1
+        val bounded = resolve_trace_graph(resolution_facts(), policy)
+        expect(bounded.complete).to_equal(false)
+        expect(bounded.edges.len()).to_equal(0)
+
+    it "rejects authored convention impersonation":
+        # @req REQ-TRC-006 REQ-TRC-011
+        step("Label an authored source as convention without a derived rule")
+        var facts = resolution_facts()
+        var origin = resolution_origin()
+        origin.kind = TraceOriginKind.Convention
+        facts.origins = [origin]
+        val graph = resolve_trace_graph(facts, resolution_policy())
+        expect(graph.complete).to_equal(false)
+        expect(graph.edges.len()).to_equal(0)
+        expect(has_resolution_code(graph, "TRACE-AUTHORITY-CONFLICT")).to_equal(true)
+
+    it "uses one shared test identity for two explicit implementation targets":
+        # @req REQ-TRC-005 REQ-TRC-016
+        # @ac AC-TRC-004
+        step("Declare two targets without cloning the shared test node")
+        var facts = resolution_facts()
+        var nodes = facts.nodes
+        nodes.push(TraceNode(id: "source:bar", kind: TraceNodeKind.SourceFile, title: "Bar"))
+        facts.nodes = nodes
+        facts.origins = [resolution_origin()]
+        facts.claims = [TraceClaim(id: "claim:foo", from_id: "test:shared", relation: TraceRelation.Targets, to_id: "source:foo", origin_id: "origin:shared", operation: TraceClaimOperation.Add, rule_id: "", scope_id: "source:foo"), TraceClaim(id: "claim:bar", from_id: "test:shared", relation: TraceRelation.Targets, to_id: "source:bar", origin_id: "origin:shared", operation: TraceClaimOperation.Add, rule_id: "", scope_id: "source:foo")]
+        var policy = resolution_policy()
+        policy.conventions = []
+        policy.authorities = [override_authority()]
+        val graph = resolve_trace_graph(facts, policy)
+        expect(graph.complete).to_equal(true)
+        expect(graph.edges.len()).to_equal(2)
+        expect(graph.nodes.len()).to_equal(4)
+        expect(graph.edges[0].from_id).to_equal("test:shared")
+        expect(graph.edges[1].from_id).to_equal("test:shared")
+
+    it "rejects alias cycles without rejecting legitimate dependency cycles":
+        # @req REQ-TRC-006
+        step("Create an identity cycle and inspect the explicit refusal")
+        var facts = resolution_facts()
+        facts.nodes = [TraceNode(id: "source:a", kind: TraceNodeKind.Symbol, title: "A"), TraceNode(id: "source:b", kind: TraceNodeKind.Symbol, title: "B")]
+        facts.locators = []
+        facts.origins = [resolution_origin()]
+        facts.claims = [TraceClaim(id: "claim:a", from_id: "source:a", relation: TraceRelation.Aliases, to_id: "source:b", origin_id: "origin:shared", operation: TraceClaimOperation.Add, rule_id: "", scope_id: ""), TraceClaim(id: "claim:b", from_id: "source:b", relation: TraceRelation.Aliases, to_id: "source:a", origin_id: "origin:shared", operation: TraceClaimOperation.Add, rule_id: "", scope_id: "")]
+        var authority = override_authority()
+        authority.relation = TraceRelation.Aliases
+        authority.scope_id = ""
+        var policy = resolution_policy()
+        policy.conventions = []
+        policy.authorities = [authority]
+        val aliases = resolve_trace_graph(facts, policy)
+        expect(aliases.complete).to_equal(false)
+        expect(has_resolution_code(aliases, "TRACE-FORBIDDEN-CYCLE")).to_equal(true)
+        step("Use the same topology for allowed dependency relations")
+        var first = facts.claims[0]
+        var second = facts.claims[1]
+        first.relation = TraceRelation.DependsOn
+        second.relation = TraceRelation.DependsOn
+        facts.claims = [first, second]
+        authority.relation = TraceRelation.DependsOn
+        policy.authorities = [authority]
+        val dependencies = resolve_trace_graph(facts, policy)
+        expect(dependencies.complete).to_equal(true)
+        expect(dependencies.edges.len()).to_equal(2)

@@ -289,7 +289,7 @@ fn io_file_meta_size(fd: i64) -> i64:
     unsafe(capabilities: [ffi]):
         rt_io_file_meta_size(fd)
 
-@unsafe(reason: "raw runtime ABI for rt_io_file_open", capabilities: [ffi])
+@unsafe(reason: "raw runtime ABI for rt_io_file_open; the compiler text-ABI registry expands the text path into (ptr, len) — see text_extern_abi.spl rt_io_file_open rows", capabilities: [ffi])
 extern fn rt_io_file_open(path: text, mode: i64) -> i64
 
 @always_inline
@@ -305,13 +305,81 @@ fn io_file_seek(fd: i64, offset: i64, whence: i64) -> i64:
     unsafe(capabilities: [ffi]):
         rt_io_file_seek(fd, offset, whence)
 
-@unsafe(reason: "raw runtime ABI for rt_io_file_write_all", capabilities: [ffi])
-extern fn rt_io_file_write_all(fd: i64, data: [u8]) -> bool
+# Native descriptor byte writers consume THREE machine words. An array
+# handle is not a borrowed byte address and has no implicit slice expansion.
+@unsafe(reason: "native descriptor write ABI is fd, byte pointer, byte length; caller retains storage until synchronous return", capabilities: [ffi, raw_ptr])
+extern fn rt_io_file_write(fd: i64, data_ptr: i64, data_len: i64) -> i64
+@unsafe(reason: "native descriptor write-all ABI is fd, byte pointer, byte length; caller retains storage until synchronous return", capabilities: [ffi, raw_ptr])
+extern fn rt_io_file_write_all(fd: i64, data_ptr: i64, data_len: i64) -> bool
+# Existing bytes-basis accessors reject generic word-array backing. The
+# static type [u8] alone does not establish a contiguous native byte span.
+@unsafe(reason: "native bytes-basis discriminator returns logical byte count or -1 for nonpacked backing", capabilities: [ffi])
+extern fn rt_array_bytes_basis_len(data: [u8]) -> i64
+@unsafe(reason: "native bytes-basis address is zero for nonpacked or unavailable storage", capabilities: [ffi, raw_ptr])
+extern fn rt_array_bytes_basis_ptr(data: [u8]) -> i64
+@unsafe(reason: "checked packed-byte append ABI accepts an array handle and a validated machine-word byte; returns zero on failure", capabilities: [ffi])
+extern fn rt_typed_bytes_u8_push(data: [u8], value: i64) -> i8
+use std.common.text_bytes.{text_byte_buffer}
 
-@always_inline
+fn _io_file_write_packed(data: [u8]) -> [u8]?:
+    val count = data.len()
+    if count < 0: return nil
+    val basis = unsafe(capabilities: [ffi]):
+        rt_array_bytes_basis_len(data)
+    if basis == count: return Some(data)
+    # A packed basis whose count disagrees is malformed, not a generic array.
+    if basis >= 0: return nil
+    val packed: [u8] = match text_byte_buffer(count):
+        case Ok(buffer): buffer
+        case Err(_): return nil
+    for byte in data:
+        val value = byte as i64
+        if value < 0 or value > 255: return nil
+        # Generic push currently lowers this u8 argument as i8 -> ptr in the
+        # native compiler (schema-input-guarded-build.log). Use the existing
+        # checked byte-storage operation with its exact i64-value ABI instead;
+        # allocation failure must reject the write, never truncate silently.
+        val appended = unsafe(capabilities: [ffi]):
+            rt_typed_bytes_u8_push(packed, value)
+        if appended == 0: return nil
+    val copied = unsafe(capabilities: [ffi]):
+        rt_array_bytes_basis_len(packed)
+    if copied != count: return nil
+    Some(packed)
+
+fn io_file_write(fd: i64, data: [u8]) -> i64:
+    # Preserve one-write/partial-count semantics. Do not replace with write_all.
+    if fd < 0 or fd > 2147483647: return -1
+    val count = data.len()
+    if count == 0:
+        unsafe(capabilities: [ffi, raw_ptr]):
+            return rt_io_file_write(fd, 0, 0)
+    val retained = match _io_file_write_packed(data):
+        case Some(buffer): buffer
+        case nil: return -1
+    unsafe(capabilities: [ffi, raw_ptr]):
+        val address = rt_array_bytes_basis_ptr(retained)
+        if address == 0: return -1
+        # Retain the selected packed owner until this synchronous call returns.
+        # Neither branch resizes, releases or publishes the borrowed storage.
+        rt_io_file_write(fd, address, count)
+
 fn io_file_write_all(fd: i64, data: [u8]) -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_io_file_write_all(fd, data)
+    if fd < 0 or fd > 2147483647: return false
+    val count = data.len()
+    if count == 0:
+        # Keep empty spans on the provider's original no-syscall path.
+        unsafe(capabilities: [ffi, raw_ptr]):
+            return rt_io_file_write_all(fd, 0, 0)
+    val retained = match _io_file_write_packed(data):
+        case Some(buffer): buffer
+        case nil: return false
+    unsafe(capabilities: [ffi, raw_ptr]):
+        val address = rt_array_bytes_basis_ptr(retained)
+        if address == 0: return false
+        rt_io_file_write_all(fd, address, count)
+
+export io_file_write, io_file_write_all
 
 @unsafe(reason: "raw runtime ABI for rt_path_basename", capabilities: [ffi])
 extern fn rt_path_basename(path: text) -> text

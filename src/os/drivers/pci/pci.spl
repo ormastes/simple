@@ -13,6 +13,11 @@ use os.kernel.boot.mmio_hardware.{mmio_read32, mmio_write32}
 val PCI_CONFIG_ADDR: u16 = 0xCF8
 val PCI_CONFIG_DATA: u16 = 0xCFC
 
+@cfg(arm64)
+fn _pci_ecam_base() -> u64: 0x4010000000u64
+@cfg(riscv64)
+fn _pci_ecam_base() -> u64: 0x30000000u64
+
 # ============================================================================
 # PCI Device Identifier
 # ============================================================================
@@ -68,6 +73,23 @@ fn pci_write_config(bus: u8, device: u8, func: u8, offset: u8, value: u32):
     val addr = pci_config_addr(bus, device, func, offset)
     x86_port_outl(PCI_CONFIG_ADDR, addr)
     x86_port_outl(PCI_CONFIG_DATA, value)
+
+# LEGACY DIRECT-ECAM STUB — READ BEFORE USING.
+# `_pci_ecam_base` is referenced by the @cfg(arm64)/@cfg(riscv64)
+# pci_write_config shims below but was NEVER declared anywhere in the tree
+# (verified across git history back to the x86 port-io refactor): the legacy
+# direct-ECAM write path was sketched against a helper nobody wrote, and the
+# matching arm64/riscv64 read path does not exist at all (pci_read_config is
+# x86 port-IO only). The supported route for non-x86 PCI is the provider
+# model: os.drivers.pci.pci_provider.PciHostDescriptor with ecam_base from
+# the platform DTB (see os.kernel.arch.riscv64.starfive.pcie_host). Returning
+# 0 keeps this never-wired module compiling under the strict stage2 resolver
+# without inventing a hardware constant; the SimpleOS PCI owner must either
+# wire this through the provider descriptor or delete the legacy shims.
+# Declared without @cfg: the shims below are the only callers, both
+# cfg-gated; an unused private helper on x86 is inert.
+fn _pci_ecam_base() -> u64:
+    0u64
 
 @cfg(arm64)
 fn pci_write_config(bus: u8, device: u8, func: u8, offset: u8, value: u32):

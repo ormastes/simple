@@ -121,6 +121,14 @@ SIMPLE_COVERAGE=1 bin/simple test <path> --no-cache --no-cover-check --timeout 1
   top-level `if` recorded a real decision before the fix and after, but only
   after the fix did `coverage_dump_sdn()` (called from Simple) surface a
   `decisions` section for it.
+- **Superseded 2026-10-19:** the decision probe API is now
+  `coverage_helpers::record_decision_site` / `eval_decision_cond` (conditions
+  of `and`/`or` trees), wired into every if/elif/while/match-guard/if-expression
+  path including `block_execution.rs`; `interpreter/coverage_sites.rs`
+  registers every site at module load so unvisited sites are in the
+  denominator. The `record_decision_coverage_sffi` notes below are history.
+  Semantics: `doc/07_guide/infra/testing/coverage.md` "Decision and condition
+  semantics"; gate: `scripts/check/check-hash-algos-coverage.shs`.
 - **Real, deeper, NOT fixed here — separate gap, needs its own fix:**
   `record_decision_coverage_sffi` is called only from
   `interpreter_control.rs`'s `exec_if` / `exec_while` / `exec_match_core`

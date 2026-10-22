@@ -1,0 +1,83 @@
+use compiler.mono.monomorphize.tracker.{instantiationtracker_new, instantiationtracker_finalize}
+use compiler.mono.monomorphize.note_sdn.{NoteSdnMetadata, BuildMetadata, DependencyEdge, DependencyKind, PossibleInstantiationEntry}
+use compiler.mono.monomorphize.cycle_detector.{detect_cycles, topological_sort, would_create_cycle}
+
+fn main() -> i64:
+    var tracker = instantiationtracker_new("input.spl", "input.o")
+    # Absent build metadata stays absent after an independent snapshot.
+    val empty = instantiationtracker_finalize(tracker)
+    match empty.build_metadata:
+        case Some(_): return 51
+        case nil: ()
+    if empty.dependencies.len() != 0 or empty.circular_errors.len() != 0: return 52
+    tracker.tracked_names["A"] = true
+    tracker.tracked_names["B"] = true
+    tracker.pending_deps = [
+        ("A", "B", DependencyKind.FieldType),
+        ("B", "A", DependencyKind.FieldType),
+        ("Untracked", "A", DependencyKind.FieldType)]
+    tracker.metadata.add_possible(PossibleInstantiationEntry(
+        template_name: "List", type_args: "i64", mangled_name: "List$i64",
+        required_by: "input.spl", can_defer: true))
+    tracker.metadata.build_metadata = Some(BuildMetadata(
+        target: "aarch64", cpu: "generic", optimization: "None",
+        features: ["feature-original"], linker_flags: ["flag-original"],
+        compiler_version: "fixture", build_timestamp: "fixed"))
+    var result = instantiationtracker_finalize(tracker)
+    if result.dependencies.len() != 2: return 11
+    if result.circular_errors.len() != 1 or result.circular_warnings.len() != 0: return 12
+    if result.circular_errors[0].error_code != "E0420": return 13
+    if result.possible.len() != 1 or result.possible[0].mangled_name != "List$i64": return 14
+    if tracker.metadata.dependencies.len() != 0 or tracker.metadata.circular_errors.len() != 0: return 15
+    if tracker.pending_deps.len() != 3: return 16
+    val again = instantiationtracker_finalize(tracker)
+    if again.dependencies.len() != 2 or again.circular_errors.len() != 1: return 17
+
+    # Record and nested-array mutations must not reach the original tracker.
+    var possible = result.possible[0]
+    possible.required_by = "changed"
+    result.possible[0] = possible
+    if tracker.metadata.possible[0].required_by != "input.spl": return 21
+    # Use the same #3016 workaround for optional record bindings in the fixture.
+    # @workaround bug=native_optional_struct_pointer_nil_2026_10_11 reason=explicit optional record arms retain snapshot assertions without invalid pointer nil
+    match result.build_metadata:
+        case Some(build):
+            if build.target != "aarch64" or build.cpu != "generic": return 53
+            if build.optimization != "None" or build.compiler_version != "fixture": return 54
+            if build.build_timestamp != "fixed": return 55
+            var changed = build
+            changed.features[0] = "feature-changed"
+            changed.linker_flags[0] = "flag-changed"
+            result.build_metadata = Some(changed)
+        case nil: return 22
+    # @workaround bug=native_optional_struct_pointer_nil_2026_10_11 reason=explicit optional record arms retain snapshot assertions without invalid pointer nil
+    match tracker.metadata.build_metadata:
+        case Some(original):
+            if original.features[0] != "feature-original" or original.linker_flags[0] != "flag-original": return 23
+        case nil: return 24
+
+    var soft = NoteSdnMetadata.new()
+    soft.add_dependency(DependencyEdge(from_inst: "Option$Node", to_inst: "Node", dep_kind: DependencyKind.InnerType))
+    soft.add_dependency(DependencyEdge(from_inst: "Node", to_inst: "Option$Node", dep_kind: DependencyKind.FieldType))
+    val soft_cycles = detect_cycles(soft)
+    if soft_cycles.errors.len() != 0 or soft_cycles.warnings.len() != 1: return 31
+    if soft_cycles.warnings[0].severity != "warning": return 32
+    if topological_sort(soft).?: return 33
+
+    var dag = NoteSdnMetadata.new()
+    dag.add_dependency(DependencyEdge(from_inst: "A", to_inst: "B", dep_kind: DependencyKind.FieldType))
+    dag.add_dependency(DependencyEdge(from_inst: "B", to_inst: "C", dep_kind: DependencyKind.FieldType))
+    if detect_cycles(dag).all_cycles.len() != 0: return 41
+    if val order = topological_sort(dag):
+        if order.len() != 3: return 42
+        if order[0] != "A" or order[1] != "B" or order[2] != "C": return 43
+    else:
+        return 44
+    if val cycle = would_create_cycle(dag, "C", "A"):
+        if cycle.len() != 3 or cycle[0] != "A" or cycle[2] != "C": return 45
+    else:
+        return 46
+    if would_create_cycle(dag, "C", "Missing").?: return 47
+    if dag.dependencies.len() != 2: return 48
+    print "tracker-finalize-snapshot: pass"
+    0

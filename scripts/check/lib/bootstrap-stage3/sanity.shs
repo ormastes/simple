@@ -615,6 +615,14 @@ bootstrap_stage3_verify_composed_snapshot() (
 
 bootstrap_stage3_verify_composed_sanity_input_tuple() (
     [ "$#" = 5 ] || return 1
+    if [ "$(bootstrap_stage3_manifest_value schema "$1")" = simple-bootstrap-sanity-version-composition-v1 ]; then
+        for bvc_binding in "source_snapshot_sha256:$2" "runtime_snapshot_sha256:$3" "tool_snapshot_sha256:$4"; do
+            bvc_key=${bvc_binding%%:*} bvc_file=${bvc_binding#*:}
+            [ "$(bootstrap_stage3_manifest_value "$bvc_key" "$1")" = "$(bootstrap_stage3_hash_file "$bvc_file")" ] || return 1
+        done
+        [ "$(bootstrap_stage3_manifest_value build_args_sha256 "$1")" = "$5" ] || return 1
+        return 0
+    fi
     [ "$(bootstrap_stage3_manifest_value schema "$1")" = simple-bootstrap-sanity-components-v1 ] || return 0
     bootstrap_stage3_verify_composed_snapshot source "$2" "$1" || return 1
     bootstrap_stage3_verify_composed_snapshot runtime "$3" "$1" || return 1
@@ -1509,6 +1517,9 @@ bootstrap_stage3_verify_sanity_evidence_receipt() (
     bootstrap_stage3_sanity_regular_authority "$bcc_file" || return 1
     bcc_schema=$(bootstrap_stage3_manifest_value schema "$bcc_file") || return 1
     case "$bcc_schema" in
+        simple-bootstrap-sanity-version-composition-v1)
+            bootstrap_stage3_verify_version_only_composition_v1 "$@"
+            ;;
         simple-bootstrap-sanity-components-v1)
             _bootstrap_stage3_verify_sanity_evidence_receipt_legacy "$@"
             ;;
@@ -1550,4 +1561,54 @@ bootstrap_stage3_write_sanity_control_composition() (
         --write-composed "$(cygpath -aw "$bcc_output")" >/dev/null || return 1
     bootstrap_stage3_verify_sanity_evidence_receipt \
         "$bcc_output" "$bcc_display" "$bcc_parent" "$bcc_candidate" "$bcc_root"
+)
+
+# This explicitly separate tool envelope never rewrites original build inputs.
+# Its reviewed closed profile authenticates historical completed components.
+bootstrap_stage3_verify_version_only_composition_v1() (
+    [ "$#" = 5 ] || return 1
+    bvc_composition=$1 bvc_display=$2 bvc_parent=$3 bvc_candidate=$4 bvc_root=$5
+    bootstrap_stage3_sanity_regular_authority "$bvc_composition" || return 1
+    if [ -n "${BOOTSTRAP_STAGE3_CHECKPOINT_BRIDGE_MANIFEST:-}" ]; then
+        [ -n "${BOOTSTRAP_STAGE3_CHECKPOINT_BRIDGE_MANIFEST_SHA256:-}" ] || return 1
+        bvc_bridge="$bvc_root/.simple/storage/build/phase3-producer-refresh-linkfix/remaining-admission-owner/checkpoint-bridge-20261015"
+        bootstrap_stage3_sanity_safe_regular "$bvc_bridge/verify-checkpoint.py" || return 1
+        [ "$(bootstrap_stage3_hash_file "$bvc_bridge/verify-checkpoint.py")" = b3b747dd14a6d46796d8edb756ed45a897440cc7d6bced5d19a7acf6ef1bf67d ] || return 1
+        bvc_python=/usr/bin/python3.12
+        bootstrap_stage3_sanity_safe_regular "$bvc_python" || return 1
+        [ "$(bootstrap_stage3_hash_file "$bvc_python")" = 1401f5c1ddd9e8f9d77622113a8d04b5f7ef57c0e3f40dd29db248a5aa91622e ] || return 1
+        bvc_live=$(mktemp -d "${TMPDIR:-/tmp}/checkpoint-bridge-live.XXXXXX") || return 1
+        trap 'rm -rf "$bvc_live"' EXIT INT TERM HUP
+        bootstrap_stage3_source_snapshot_once "$bvc_live/source" "$bvc_root" || return 1
+        bootstrap_stage3_git_state "$bvc_root" "$bvc_live/git" || return 1
+        bvc_runtime_authority="$bvc_root/.simple/storage/build/phase3-producer-refresh-linkfix/stage3/aarch64-unknown-linux-gnu/stage2-runtime-authority"
+        bootstrap_stage3_directory_snapshot "$bvc_live/runtime" "$bvc_runtime_authority" || return 1
+        bootstrap_stage3_tool_authority_snapshot "$bvc_live/tools" "$PATH" "$bvc_root" || return 1
+        "$bvc_python" -I -S -B "$bvc_bridge/verify-checkpoint.py" \
+          --profile "$bvc_bridge/profile.json" --manifest "$BOOTSTRAP_STAGE3_CHECKPOINT_BRIDGE_MANIFEST" \
+          --manifest-sha "$BOOTSTRAP_STAGE3_CHECKPOINT_BRIDGE_MANIFEST_SHA256" \
+          --root "$bvc_root" --candidate "$bvc_candidate" --composition "$bvc_composition" \
+          --source "$bvc_live/source" --git "$bvc_live/git" --runtime "$bvc_live/runtime" --tools "$bvc_live/tools"
+        exit $?
+    fi
+    bvc_profile=$(bootstrap_stage3_manifest_value profile_path "$bvc_composition") || return 1
+    bvc_owner=$(bootstrap_stage3_manifest_value owner_manifest_path "$bvc_composition") || return 1
+    bvc_owner_sha=$(bootstrap_stage3_manifest_value owner_manifest_sha256 "$bvc_composition") || return 1
+    bvc_helper="$bvc_root/scripts/check/lib/bootstrap-stage3/sanity-version-composition.py"
+    bootstrap_stage3_sanity_safe_regular "$bvc_helper" || return 1
+    # A real fresh capture brackets each publication/consumption. It is not a
+    # receipt-selected old snapshot masquerading as current source state.
+    bvc_live=$(mktemp -d "${TMPDIR:-/tmp}/version-composition-live.XXXXXX") || return 1
+    trap 'rm -rf "$bvc_live"' EXIT INT TERM HUP
+    bootstrap_stage3_source_snapshot_once "$bvc_live/source" "$bvc_root" || return 1
+    bootstrap_stage3_git_state "$bvc_root" "$bvc_live/git" || return 1
+    bvc_runtime_authority="$bvc_root/.simple/storage/build/phase3-producer-refresh-linkfix/stage3/aarch64-unknown-linux-gnu/stage2-runtime-authority"
+    bootstrap_stage3_directory_snapshot "$bvc_live/runtime" "$bvc_runtime_authority" || return 1
+    bootstrap_stage3_tool_authority_snapshot "$bvc_live/tools" "$PATH" "$bvc_root" || return 1
+    bvc_python=/usr/bin/python3.12
+    bootstrap_stage3_sanity_safe_regular "$bvc_python" || return 1
+    [ "$(bootstrap_stage3_hash_file "$bvc_python")" = 1401f5c1ddd9e8f9d77622113a8d04b5f7ef57c0e3f40dd29db248a5aa91622e ] || return 1
+    "$bvc_python" -I -S -B "$bvc_helper" verify --profile "$bvc_profile" --candidate "$bvc_candidate" --root "$bvc_root" \
+        --source "$bvc_live/source" --git "$bvc_live/git" --runtime "$bvc_live/runtime" --tools "$bvc_live/tools" \
+        --owner-manifest "$bvc_owner" --owner-sha "$bvc_owner_sha" --composition "$bvc_composition"
 )

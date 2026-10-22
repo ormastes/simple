@@ -43,6 +43,11 @@ struct MirLocal:
     type_: MirType
     kind: LocalKind
     is_ghost: bool
+    # Short parameter provenance; these are not owning pointer kinds.
+    # -1 is unknown and must not authorize forwarding or an escape.
+    short_borrow: bool = false
+    short_mutable: bool = false
+    short_boundary: i64 = -1
 
 # ============================================================================
 # Function Signature
@@ -56,6 +61,13 @@ struct MirSignature:
     # True only when fixed arity is retained from an authoritative declaration.
     # Legacy empty parameter lists otherwise mean unknown, not zero arguments.
     params_known: bool = false
+    # Callee-DECLARED parameter types for a direct call whose `params` stay
+    # empty (non-extern callees keep the legacy unknown list so the LLVM
+    # lane keeps its `(...)` declare). Filled from the callee symbol or the
+    # cross-module prescan registry, never from the caller's operands; the
+    # Cranelift import signature is built from it.
+    declared_params: [MirType] = []
+    declared_params_known: bool = false
 
 fn mir_signature_params(sig: MirSignature) -> [MirType]:
     """Return signature parameters through a typed accessor."""
@@ -223,26 +235,32 @@ impl MirType:
         MirType(kind: MirTypeKind.Bits(width, true))
 
     static fn ptr(pointee: MirType, mutable: bool) -> MirType:
-        MirType(kind: MirTypeKind.Ptr(pointee, mutable))
+        val concrete_kind: MirTypeKind = MirTypeKind.Ptr(pointee, mutable)
+        MirType(kind: concrete_kind)
 
     static fn result(ok_type: MirType, err_type: MirType) -> MirType:
-        MirType(kind: MirTypeKind.Result(ok_type, err_type))
+        val concrete_kind: MirTypeKind = MirTypeKind.Result(ok_type, err_type)
+        MirType(kind: concrete_kind)
 
     static fn promise(inner: MirType) -> MirType:
         """Create Promise<T> type for async computations."""
-        MirType(kind: MirTypeKind.Promise(inner))
+        val concrete_kind: MirTypeKind = MirTypeKind.Promise(inner)
+        MirType(kind: concrete_kind)
 
     static fn generator(yield_ty: MirType, return_ty: MirType) -> MirType:
         """Create Generator<Y, R> type for generators."""
-        MirType(kind: MirTypeKind.Generator(yield_ty, return_ty))
+        val concrete_kind: MirTypeKind = MirTypeKind.Generator(yield_ty, return_ty)
+        MirType(kind: concrete_kind)
 
     static fn actor_type(message_ty: MirType) -> MirType:
         """Create ActorType<M> type for actors."""
-        MirType(kind: MirTypeKind.ActorType(message_ty))
+        val concrete_kind: MirTypeKind = MirTypeKind.ActorType(message_ty)
+        MirType(kind: concrete_kind)
 
     static fn scalable_vec(element: MirType, min_lanes: i64) -> MirType:
         """Create ScalableVec type mirroring LLVM <vscale x N x ty>."""
-        MirType(kind: MirTypeKind.ScalableVec(element: element, min_lanes: min_lanes))
+        val concrete_kind: MirTypeKind = MirTypeKind.ScalableVec(element: element, min_lanes: min_lanes)
+        MirType(kind: concrete_kind)
 
     fn primitive_size() -> i64?:
         """Get size for primitive types, nil for composite types."""
@@ -336,11 +354,16 @@ fn mir_type_is_text(t: MirType) -> bool:
 
     Written without a nested enum pattern binding on purpose -- the pointee is
     matched in a second, separate `match` so the pattern stays one level deep."""
-    match t.kind:
-        case Ptr(inner, _):
-            match inner.kind:
-                case I8: true
-                case _: false
+    val kind: MirTypeKind = t.kind
+    var pointee: MirType = nil
+    match kind:
+        case MirTypeKind.Ptr(inner, _):
+            pointee = inner
+        case _:
+            return false
+    val pointee_kind: MirTypeKind = pointee.kind
+    match pointee_kind:
+        case MirTypeKind.I8: true
         case _: false
 
 # ============================================================================
@@ -357,65 +380,69 @@ fn mir_type_probe_text(t: MirType) -> text:
     Deliberately shallow (one nesting level) so it is cheap and cannot recurse
     on a cyclic type. Only used behind an env-gated trace flag, never on a hot
     path. Retained per the log-retention policy."""
-    if t == nil:
-        return "nil"
-    match t.kind:
-        case I8: "I8"
-        case I16: "I16"
-        case I32: "I32"
-        case I64: "I64"
-        case U8: "U8"
-        case U16: "U16"
-        case U32: "U32"
-        case U64: "U64"
-        case F32: "F32"
-        case F64: "F64"
-        case Bool: "Bool"
-        case Char: "Char"
-        case Unit: "Unit"
-        case Vec4f: "Vec4f"
-        case Vec8f: "Vec8f"
-        case Vec4d: "Vec4d"
-        case Vec4i: "Vec4i"
-        case Vec8i: "Vec8i"
-        case Vec16f: "Vec16f"
-        case Vec8d: "Vec8d"
-        case Vec16i: "Vec16i"
-        case Ptr(_, _): "Ptr"
-        case Ref(_, _): "Ref"
-        case FuncPtr(_): "FuncPtr"
-        case Array(elem, size): "Array(" + mir_type_probe_shallow(elem) + "," + size.to_text() + ")"
-        case Dict(k, v): "Dict(" + mir_type_probe_shallow(k) + "," + mir_type_probe_shallow(v) + ")"
-        case Slice(elem): "Slice(" + mir_type_probe_shallow(elem) + ")"
-        case Tuple(_): "Tuple"
-        case Struct(sym): "Struct(" + sym.id.to_text() + ")"
-        case Enum(sym): "Enum(" + sym.id.to_text() + ")"
-        case Result(_, _): "Result"
-        case Bits(w, _): "Bits(" + w.to_text() + ")"
-        case Union(_): "Union"
-        case Never: "Never"
-        case Opaque(name): "Opaque(" + name + ")"
-        case _: "other"
+    if t.?:
+        val kind: MirTypeKind = t.kind
+        match kind:
+            case MirTypeKind.I8: "I8"
+            case MirTypeKind.I16: "I16"
+            case MirTypeKind.I32: "I32"
+            case MirTypeKind.I64: "I64"
+            case MirTypeKind.U8: "U8"
+            case MirTypeKind.U16: "U16"
+            case MirTypeKind.U32: "U32"
+            case MirTypeKind.U64: "U64"
+            case MirTypeKind.F32: "F32"
+            case MirTypeKind.F64: "F64"
+            case MirTypeKind.Bool: "Bool"
+            case MirTypeKind.Char: "Char"
+            case MirTypeKind.Unit: "Unit"
+            case MirTypeKind.Vec4f: "Vec4f"
+            case MirTypeKind.Vec8f: "Vec8f"
+            case MirTypeKind.Vec4d: "Vec4d"
+            case MirTypeKind.Vec4i: "Vec4i"
+            case MirTypeKind.Vec8i: "Vec8i"
+            case MirTypeKind.Vec16f: "Vec16f"
+            case MirTypeKind.Vec8d: "Vec8d"
+            case MirTypeKind.Vec16i: "Vec16i"
+            case MirTypeKind.Ptr(_, _): "Ptr"
+            case MirTypeKind.Ref(_, _): "Ref"
+            case MirTypeKind.FuncPtr(_): "FuncPtr"
+            case MirTypeKind.Array(elem, size): "Array(" + mir_type_probe_shallow(elem) + "," + size.to_text() + ")"
+            case MirTypeKind.Dict(k, v): "Dict(" + mir_type_probe_shallow(k) + "," + mir_type_probe_shallow(v) + ")"
+            case MirTypeKind.Slice(elem): "Slice(" + mir_type_probe_shallow(elem) + ")"
+            case MirTypeKind.Tuple(_): "Tuple"
+            case MirTypeKind.Struct(sym): "Struct(" + sym.id.to_text() + ")"
+            case MirTypeKind.Enum(sym): "Enum(" + sym.id.to_text() + ")"
+            case MirTypeKind.Result(_, _): "Result"
+            case MirTypeKind.Bits(w, _): "Bits(" + w.to_text() + ")"
+            case MirTypeKind.Union(_): "Union"
+            case MirTypeKind.Never: "Never"
+            case MirTypeKind.Opaque(name): "Opaque(" + name + ")"
+            case _: "other"
+    else:
+        "nil"
 
 
 fn mir_type_probe_shallow(t: MirType) -> text:
     """Leaf-only name used by `mir_type_probe_text` so nesting stays 1 deep."""
-    if t == nil:
-        return "nil"
-    match t.kind:
-        case I32: "I32"
-        case I64: "I64"
-        case U64: "U64"
-        case Bool: "Bool"
-        case Ptr(_, _): "Ptr"
-        case Array(_, _): "Array"
-        case Dict(_, _): "Dict"
-        case Slice(_): "Slice"
-        case Tuple(_): "Tuple"
-        case Struct(sym): "Struct(" + sym.id.to_text() + ")"
-        case Enum(sym): "Enum(" + sym.id.to_text() + ")"
-        case Opaque(name): "Opaque(" + name + ")"
-        case _: "other"
+    if t.?:
+        val kind: MirTypeKind = t.kind
+        match kind:
+            case MirTypeKind.I32: "I32"
+            case MirTypeKind.I64: "I64"
+            case MirTypeKind.U64: "U64"
+            case MirTypeKind.Bool: "Bool"
+            case MirTypeKind.Ptr(_, _): "Ptr"
+            case MirTypeKind.Array(_, _): "Array"
+            case MirTypeKind.Dict(_, _): "Dict"
+            case MirTypeKind.Slice(_): "Slice"
+            case MirTypeKind.Tuple(_): "Tuple"
+            case MirTypeKind.Struct(sym): "Struct(" + sym.id.to_text() + ")"
+            case MirTypeKind.Enum(sym): "Enum(" + sym.id.to_text() + ")"
+            case MirTypeKind.Opaque(name): "Opaque(" + name + ")"
+            case _: "other"
+    else:
+        "nil"
 
 # ============================================================================
 # Exports

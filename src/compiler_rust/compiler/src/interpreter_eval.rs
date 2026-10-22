@@ -104,9 +104,9 @@ fn record_flattened_import_binding(marker: &str) {
             }
         });
         if let Some(source_bindings) = crate::interpreter::owner_bindings(&source_owner) {
-            for (name, binding) in source_bindings.iter() {
-                entries.insert(name.clone(), binding.clone());
-            }
+            source_bindings.for_each_resolved(|name, binding| {
+                entries.insert(name.clone(), binding);
+            });
         }
         // ALSO record the glob edge itself under the "*" key. The expansion
         // above only sees the source module's GLOBALS and already-recorded
@@ -119,7 +119,7 @@ fn record_flattened_import_binding(marker: &str) {
         entries.insert("*".to_owned(), (Arc::clone(&source_owner), "*".to_owned()));
     } else {
         let binding = crate::interpreter::owner_bindings(&source_owner)
-            .and_then(|source_bindings| source_bindings.get(source_name).cloned())
+            .and_then(|source_bindings| source_bindings.get(source_name).map(std::borrow::Cow::into_owned))
             .unwrap_or_else(|| (Arc::clone(&source_owner), source_name.to_owned()));
         entries.insert(local_name.to_owned(), binding);
     }
@@ -463,6 +463,11 @@ impl ModuleItems<'_> {
 
 fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileError> {
     let items = module_items.as_slice();
+    if crate::interpreter::is_coverage_enabled() {
+        // Coverage denominator: every decision/condition site of the entry
+        // module (and of every import flattened into it), visited or not.
+        crate::interpreter::register_module_sites(items, Some("<entry>"));
+    }
     if std::env::var_os("SIMPLE_TRY_PROBE").is_some() {
         let dump = format!("{:?}", items);
         eprintln!(
@@ -1637,8 +1642,8 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                                             ImportTarget::Single(name) => name.clone(),
                                             ImportTarget::Aliased { name, alias } => {
                                                 // Import with alias: {Item as alias}
-                                                if let Some(export_value) = exports.get(name) {
-                                                    if let Value::Function { def, .. } = export_value {
+                                                if let Some(export_value) = crate::interpreter::module_dict_get(exports, name) {
+                                                    if let Value::Function { def, .. } = &export_value {
                                                         functions.insert(alias.clone(), Arc::clone(def));
                                                     }
                                                     env.insert(alias.clone(), export_value.clone());
@@ -1651,8 +1656,8 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                                             }
                                             _ => continue, // Nested groups not supported
                                         };
-                                        if let Some(export_value) = exports.get(&item_name) {
-                                            if let Value::Function { def, .. } = export_value {
+                                        if let Some(export_value) = crate::interpreter::module_dict_get(exports, &item_name) {
+                                            if let Value::Function { def, .. } = &export_value {
                                                 functions.insert(item_name.clone(), Arc::clone(def));
                                             }
                                             env.insert(item_name.clone(), export_value.clone());
@@ -1668,7 +1673,13 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                                 // Glob import: use module.*
                                 // Add all exports to env
                                 if let Value::Dict(exports) = &value {
-                                    for (name, export_value) in exports.iter() {
+                                    // The module's whole visible surface (its export
+                                    // dict holds only its own entries; see ModuleTable).
+                                    let mut visible: Vec<(String, Value)> = Vec::new();
+                                    crate::interpreter::module_dict_for_each_visible(exports, |name, export_value| {
+                                        visible.push((name.clone(), export_value.clone()));
+                                    });
+                                    for (name, export_value) in visible.iter() {
                                         // Don't add a glob-imported "main" function to
                                         // `functions`, `env`, or `MODULE_GLOBALS` at all --
                                         // it would leak into the `entry_main`/`main_to_run`

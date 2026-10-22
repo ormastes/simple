@@ -1,0 +1,126 @@
+# Purpose and audience: compiler engineers who own HIR diagnostics and the
+# tools (bootstrap gates, LSP, check scripts) that consume them.
+# @req REQ-SSPEC-COMPILER
+# @tag:in-development
+# Tracks: doc/08_tracking/bug/hir_unresolved_name_diagnostic_unclassified_2026-10-20.md
+"""
+# An unresolved-name diagnostic is classified and points at the use site
+
+The phase-4 `src/os` HIR failure list (67 errors, 2026-10-20) could only be
+triaged by grepping message text: every unresolved name is pushed through
+`HirLowering.error`, which stamps `LoweringErrorKind.Other`, although the
+enum already has `UnresolvedName`. The catalogue in
+`src/compiler/00.common/error_explanations.spl` has `E1001 Undefined
+Variable` and `E1002 Undefined Function`, but nothing in HIR attaches them.
+Two of the 67 rows also pointed at `:1:1` / `:0:0` instead of the use
+(`ssh_session_kex.spl: unresolved name: _bytes_to_hex at ...:1:1`,
+`ssh_session_channel.spl: unresolved name: rt_bytes_u8_at at :0:0`).
+Reproduced with the phase-2 producer: a name used only inside a text
+interpolation on line 2 is reported at `:1:1`.
+
+This spec states the contract a gate needs:
+
+- an unresolved value name and an unresolved type are both classified
+  `LoweringErrorKind.UnresolvedName`, not `Other`;
+- the message names the symbol;
+- the position names the line of the use, including inside an
+  interpolation;
+- importing a name the provider does not declare is reported at the import
+  even when the name is never used. Several of the 67 rows were imports of
+  names whose provider had been deleted (`use
+  os.compositor.text_render.{draw_text_shadow}`); they surfaced only because
+  each was also called. Producer8 compiles `use p.{gone}` with no use of
+  `gone` without any diagnostic.
+
+It is in-development: it fails until HIR classifies the diagnostic, carries
+the interpolation fragment span, and checks import lists against the
+provider surface.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:hir
+# @tag:diagnostics
+
+use std.spec.{describe, it, expect, step}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.core.parser.{parser_has_errors}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{HirLowering, LoweringError, LoweringErrorKind, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+
+fn diag_errors(source: text) -> [LoweringError]:
+    val parsed = parse_full_frontend(source, "diag_fixture.spl", "diag_fixture", Logger(level: 0))
+    expect(parser_has_errors()).to_equal(false)
+    var lowering = HirLowering.with_filename("diag_fixture.spl")
+    lowering.lower_module(parsed)
+    lowering.errors
+
+fn diag_closure_errors(names: [text], sources: [text]) -> text:
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    var files: [SourceFile] = []
+    var i = 0
+    while i < names.len():
+        val path = names[i].replace(".", "/") + ".spl"
+        modules[names[i]] = parse_full_frontend(sources[i], path, names[i], log)
+        files.push(SourceFile(path: path, content: sources[i], module_name: names[i]))
+        i = i + 1
+    val surfaces_result = module_surfaces_from_modules(modules, files)
+    if surfaces_result.is_err():
+        return "surface build failed: " + surfaces_result.unwrap_err()
+    val surfaces = surfaces_result.unwrap()
+    var out = ""
+    for name in names:
+        var lowering = hirlowering_for_module(name, surfaces)
+        lowering.lower_module(modules[name])
+        for e in lowering.errors:
+            out = out + name + ": " + e.message + "\n"
+    out
+
+fn diag_is_unresolved_kind(e: LoweringError) -> bool:
+    match e.kind:
+        case LoweringErrorKind.UnresolvedName: true
+        case _: false
+
+fn diag_find(errors: [LoweringError], needle: text) -> [LoweringError]:
+    var found: [LoweringError] = []
+    for e in errors:
+        if e.message.contains(needle):
+            found.push(e)
+    found
+
+describe "unresolved-name diagnostic contract":
+    it "classifies an undefined function call as UnresolvedName":
+        step("pci_bdf_bus shape")
+        val errors = diag_errors("fn bdf_of(dev: i64) -> i64:\n    pci_bdf_bus(dev)\n")
+        val hits = diag_find(errors, "unresolved name: pci_bdf_bus")
+        expect(hits.len()).to_equal(1)
+        expect(diag_is_unresolved_kind(hits[0])).to_equal(true)
+        expect(hits[0].span.line).to_equal(2)
+
+    it "classifies an undefined type as UnresolvedName":
+        step("SurfaceDesc shape")
+        val errors = diag_errors("fn present(s: SurfaceDesc) -> i64:\n    0\n")
+        val hits = diag_find(errors, "unresolved type: SurfaceDesc")
+        expect(hits.len()).to_equal(1)
+        expect(diag_is_unresolved_kind(hits[0])).to_equal(true)
+
+    it "points an interpolated unresolved name at its own line, not 1:1":
+        step("_bytes_to_hex shape: the only use is inside \"...{...}...\" on line 2")
+        val errors = diag_errors("fn hex_of(x: i64) -> text:\n    \"v=\{undef_in_interp(x)\}\"\n")
+        val hits = diag_find(errors, "unresolved name: undef_in_interp")
+        expect(hits.len()).to_equal(1)
+        expect(hits[0].message).to_contain("diag_fixture.spl:2:")
+        expect(hits[0].span.line).to_equal(2)
+
+    it "reports an import of a name the provider does not declare, even when it is unused":
+        step("Today `use p.{gone}` with no use of `gone` lowers clean; only a use site fails")
+        val provider = "pub fn kept() -> i64:\n    1\n"
+        val consumer = "use lib.diag_prov.\{draw_text_shadow\}\n\nfn main() -> i64:\n    0\n"
+        val errors = diag_closure_errors(["lib.diag_prov", "app.diag_main"], [provider, consumer])
+        expect(errors).to_contain("app.diag_main:")
+        expect(errors).to_contain("draw_text_shadow")

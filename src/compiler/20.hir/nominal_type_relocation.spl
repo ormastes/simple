@@ -1,0 +1,216 @@
+# Relocate nominal type identities across HIR module-local symbol tables.
+# This transports declared ownership; it does not infer types or erase errors.
+use compiler.hir.hir_types.*
+use compiler.hir.hir_symbol_table_methods.{_hir_symbol_owner_module}
+use compiler.hir.hir_kind_carrier.{symbol_kind_discriminant, symbol_kind_has_carrier_owner}
+
+# SymbolKind has only unit variants; compare validated tags across declaration
+# views without treating the opaque enum carrier as an integer or a record.
+fn nominal_symbol_kinds_equal(left: SymbolKind, right: SymbolKind) -> bool:
+    if not symbol_kind_has_carrier_owner(left) or not symbol_kind_has_carrier_owner(right):
+        return false
+    val left_tag = symbol_kind_discriminant(left)
+    val right_tag = symbol_kind_discriminant(right)
+    left_tag >= 0 and right_tag >= 0 and left_tag == right_tag
+
+struct HirTypeRelocation:
+    types: [HirType]
+    symbols: SymbolTable
+    valid: bool
+    error: text
+
+class HirNominalTypeRelocator:
+    source: SymbolTable
+    target: SymbolTable
+    source_module: text
+    target_module: text
+    error: text
+    relocated: Dict<i64, SymbolId>
+    validated_kinds: Dict<text, SymbolKind>
+
+    fn owner(symbol: HirSymbol) -> text:
+        val stored = symbol.defining_module ?? ""
+        _hir_symbol_owner_module(if stored != "": stored else: self.source_module)
+
+    fn target_owner(symbol: HirSymbol) -> text:
+        val stored = symbol.defining_module ?? ""
+        _hir_symbol_owner_module(if stored != "": stored else: self.target_module)
+
+    fn existing_id(id: SymbolId, declaration: HirSymbol) -> i64:
+        val owner = self.owner(declaration)
+        val qualified = self.target.lookup_qualified_type_raw(owner, declaration.name)
+        if qualified >= 0: return qualified
+        # The exact declaration may already be in this table without a
+        # qualified index (notably a local Struct). Reuse only full identity;
+        # equality of the numeric ids alone conveys no ownership.
+        if self.target.symbols.has(id.id):
+            val candidate = self.target.get_symbol_raw(id.id)
+            if candidate != nil and candidate.name == declaration.name and nominal_symbol_kinds_equal(candidate.kind, declaration.kind) and self.target_owner(candidate) == owner:
+                return id.id
+        -1
+
+    me validate_symbol(id: SymbolId) -> bool:
+        if not self.source.symbols.has(id.id):
+            self.error = "nominal source symbol {id.id} is absent"
+            return false
+        val declaration = self.source.get_symbol_raw(id.id)
+        if declaration == nil:
+            self.error = "nominal source symbol {id.id} has no declaration"
+            return false
+        if declaration.id.id != id.id:
+            self.error = "nominal source row has a mismatched symbol id"
+            return false
+        if not symbol_kind_has_carrier_owner(declaration.kind):
+            self.error = "nominal source symbol {id.id} has a foreign or invalid kind carrier"
+            return false
+        match declaration.kind:
+            case SymbolKind.Struct | SymbolKind.Class | SymbolKind.Enum | SymbolKind.Trait: ()
+            case _:
+                self.error = "nominal source symbol {id.id} is not a type declaration"
+                return false
+        val owner = self.owner(declaration)
+        if owner == "" or declaration.name == "":
+            self.error = "nominal source symbol {id.id} has no canonical owner/name"
+            return false
+        val identity = "{owner.len()}:{owner}{declaration.name.len()}:{declaration.name}"
+        if self.validated_kinds.has(identity):
+            val previous_kind: SymbolKind = self.validated_kinds[identity]
+            if not nominal_symbol_kinds_equal(previous_kind, declaration.kind):
+                self.error = "nominal source declarations disagree for {owner}.{declaration.name}"
+                return false
+        val target_id = self.existing_id(id, declaration)
+        if target_id >= 0:
+            val existing = self.target.get_symbol_raw(target_id)
+            if existing == nil or not nominal_symbol_kinds_equal(existing.kind, declaration.kind):
+                self.error = "nominal target declaration differs for {owner}.{declaration.name}"
+                return false
+            val existing_owner = self.target_owner(existing)
+            if existing.id.id != target_id or existing_owner != owner or existing.name != declaration.name:
+                self.error = "nominal target binding has wrong identity for {owner}.{declaration.name}"
+                return false
+        self.validated_kinds[identity] = declaration.kind
+        true
+
+    me validate_types(types: [HirType]) -> bool:
+        for raw_type_ in types:
+            # ANY-transport hazard sweep round 3: annotated rebind.
+            val type_: HirType = raw_type_
+            if not self.validate_type(type_): return false
+        true
+
+    me validate_effects(effects: [Effect]) -> bool:
+        if effects == nil: return true
+        for raw in effects:
+            val effect: Effect = raw
+            if effect == nil or effect.kind == nil:
+                self.error = "nominal transport has an absent effect node/kind"
+                return false
+            match effect.kind:
+                case EffectKind.Throws(type_):
+                    if not self.validate_type(type_): return false
+                case _: ()
+        true
+
+    me validate_type(type_: HirType) -> bool:
+        if type_ == nil or type_.kind == nil:
+            self.error = "nominal transport has an absent type/kind"
+            return false
+        match type_.kind:
+            case HirTypeKind.Named(id, args): self.validate_symbol(id) and self.validate_types(args)
+            case HirTypeKind.DynTrait(id): self.validate_symbol(id)
+            case HirTypeKind.Tuple(items) | HirTypeKind.Union(items): self.validate_types(items)
+            case HirTypeKind.Array(inner, _) | HirTypeKind.Slice(inner) | HirTypeKind.Ref(inner, _) | HirTypeKind.Ptr(inner, _) | HirTypeKind.Optional(inner) | HirTypeKind.Isolated(inner) | HirTypeKind.Projection(inner, _) | HirTypeKind.Tensor(inner, _, _): self.validate_type(inner)
+            case HirTypeKind.Unique(inner) | HirTypeKind.Shared(inner) | HirTypeKind.Weak(inner): self.validate_type(inner)
+            case HirTypeKind.Dict(a, b) | HirTypeKind.Result(a, b): self.validate_type(a) and self.validate_type(b)
+            case HirTypeKind.TypeParam(_, bounds): self.validate_types(bounds)
+            case HirTypeKind.Function(params, ret, effects): self.validate_types(params) and self.validate_type(ret) and self.validate_effects(effects)
+            case _: true
+
+    me relocate_symbol(id: SymbolId) -> SymbolId:
+        if self.relocated.has(id.id): return self.relocated[id.id]
+        val declaration = self.source.get_symbol_raw(id.id)
+        val owner = self.owner(declaration)
+        val target_id = self.existing_id(id, declaration)
+        if target_id >= 0:
+            val existing = SymbolId(id: target_id)
+            self.relocated[id.id] = existing
+            return existing
+        # define_with_binding still deduplicates non-class lexical spellings
+        # even with bind_lexical=false. Allocate a genuinely fresh row instead;
+        # neither a consumer alias nor a qualified-looking variable is reusable.
+        var raw_id = self.target.next_symbol_id
+        while self.target.symbols.has(raw_id) or self.target.structural_union_owners.has(raw_id):
+            raw_id = raw_id + 1
+        val allocated = SymbolId(id: raw_id)
+        val copied = HirSymbol(id: allocated, name: declaration.name, kind: declaration.kind,
+            type_: nil, scope: self.target.current_scope, span: declaration.span,
+            visibility: declaration.visibility, is_public: declaration.is_public,
+            is_mutable: declaration.is_mutable, defining_module: Some(owner),
+            builtin_method_tag: declaration.builtin_method_tag)
+        self.target.symbols[raw_id] = copied
+        self.target.next_symbol_id = raw_id + 1
+        self.target.bind_qualified_type(owner, declaration.name, allocated)
+        self.relocated[id.id] = allocated
+        allocated
+
+    me relocate_types(types: [HirType]) -> [HirType]:
+        var result: [HirType] = []
+        for raw_type_ in types:
+            val type_: HirType = raw_type_
+            result = result.push(self.relocate_type(type_))
+        result
+
+    me relocate_effects(effects: [Effect]) -> [Effect]:
+        if effects == nil: return effects
+        var relocated: [Effect] = []
+        for raw in effects:
+            val effect: Effect = raw
+            var rewritten = effect
+            match effect.kind:
+                case EffectKind.Throws(type_):
+                    rewritten.kind = EffectKind.Throws(self.relocate_type(type_))
+                case _: ()
+            relocated = relocated.push(rewritten)
+        relocated
+
+    me relocate_type(type_: HirType) -> HirType:
+        val kind = match type_.kind:
+            case HirTypeKind.Named(id, args): HirTypeKind.Named(self.relocate_symbol(id), self.relocate_types(args))
+            case HirTypeKind.DynTrait(id): HirTypeKind.DynTrait(self.relocate_symbol(id))
+            case HirTypeKind.Tuple(items): HirTypeKind.Tuple(self.relocate_types(items))
+            case HirTypeKind.Union(items): HirTypeKind.Union(self.relocate_types(items))
+            case HirTypeKind.Array(inner, size): HirTypeKind.Array(self.relocate_type(inner), size)
+            case HirTypeKind.Slice(inner): HirTypeKind.Slice(self.relocate_type(inner))
+            case HirTypeKind.Ref(inner, mutable): HirTypeKind.Ref(self.relocate_type(inner), mutable)
+            case HirTypeKind.Ptr(inner, mutable): HirTypeKind.Ptr(self.relocate_type(inner), mutable)
+            case HirTypeKind.Optional(inner): HirTypeKind.Optional(self.relocate_type(inner))
+            case HirTypeKind.Isolated(inner): HirTypeKind.Isolated(self.relocate_type(inner))
+            case HirTypeKind.Unique(inner): HirTypeKind.Unique(self.relocate_type(inner))
+            case HirTypeKind.Shared(inner): HirTypeKind.Shared(self.relocate_type(inner))
+            case HirTypeKind.Weak(inner): HirTypeKind.Weak(self.relocate_type(inner))
+            case HirTypeKind.Projection(inner, name): HirTypeKind.Projection(self.relocate_type(inner), name)
+            case HirTypeKind.Tensor(inner, dims, device): HirTypeKind.Tensor(self.relocate_type(inner), dims, device)
+            case HirTypeKind.Dict(a, b): HirTypeKind.Dict(self.relocate_type(a), self.relocate_type(b))
+            case HirTypeKind.Result(a, b): HirTypeKind.Result(self.relocate_type(a), self.relocate_type(b))
+            case HirTypeKind.TypeParam(name, bounds): HirTypeKind.TypeParam(name, self.relocate_types(bounds))
+            case HirTypeKind.Function(params, ret, effects): HirTypeKind.Function(self.relocate_types(params), self.relocate_type(ret), self.relocate_effects(effects))
+            case _: type_.kind
+        HirType(kind: kind, span: type_.span)
+
+fn hir_relocate_types(types: [HirType], source_symbols: SymbolTable, source_module: text,
+                      target_symbols: SymbolTable, target_module: text) -> HirTypeRelocation:
+    """Relocate a batch into the target table by declared module and name.
+
+    Validate every source identity before adding target declarations. Preserve
+    span, array size, mutability, function effects and tensor metadata. A failed
+    result never authorizes its original (source-owned) types in the target.
+    Callers own symbol-counter reservation and must retain the returned table.
+    """
+    if _hir_symbol_owner_module(source_module) == "" or _hir_symbol_owner_module(target_module) == "":
+        return HirTypeRelocation(types: [], symbols: target_symbols, valid: false, error: "type relocation requires both module owners")
+    var state = HirNominalTypeRelocator(source: source_symbols, target: target_symbols,
+        source_module: source_module, target_module: target_module, error: "", relocated: {}, validated_kinds: {})
+    if not state.validate_types(types):
+        return HirTypeRelocation(types: [], symbols: target_symbols, valid: false, error: state.error)
+    val relocated = state.relocate_types(types)
+    HirTypeRelocation(types: relocated, symbols: state.target, valid: true, error: "")

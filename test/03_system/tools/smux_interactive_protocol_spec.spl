@@ -1,0 +1,82 @@
+# @cover src/os/apps/smux/api.spl 80%
+# @cover src/os/apps/smux/interactive_protocol.spl 80%
+"""Production API and explicit-target RPC scenarios for standalone clients.
+TEST_BLOCKED: authored; execute with the rebuilt qualified runner, then docgen.
+"""
+# @manual: primary
+# @req REQ-SMUX-INTERACTIVE-004
+# @req REQ-SMUX-INTERACTIVE-002
+# @req REQ-SMUX-INTERACTIVE-003
+use std.spec.{describe, it, expect, step}
+use os.apps.smux.api.{smux_reset_for_test, smux_create_session, smux_list_windows,
+    smux_list_panes, smux_new_window, smux_active_window, smux_focused_pane,
+    smux_select_layout, smux_capture_frame, smux_metrics, smux_window_layout}
+use os.apps.smux.interactive_protocol.{smux_interactive_dispatch}
+
+fn interactive_service() -> [text]:
+    smux_reset_for_test()
+    val session = smux_create_session("interactive")
+    val window = smux_list_windows(session.id)[0]
+    val pane = smux_list_panes(session.id, window.id)[0]
+    expect(smux_select_layout(session.id, window.id, "even-horizontal", 20, 6).is_ok()).to_equal(true)
+    return [session.id, window.id, pane.id]
+
+describe "explicit-target interactive production protocol":
+    it "captures one coherent frame with one service capture increment":
+        step("capture a valid real service window through its API and protocol")
+        val ids = interactive_service()
+        val count = smux_metrics().capture_count
+        val frame = smux_capture_frame(ids[0], ids[1], ids[2])
+        expect(frame.is_ok()).to_equal(true)
+        expect(frame.unwrap()).to_start_with("SMUX-FRAME/1 20 6\n")
+        expect(smux_metrics().capture_count).to_equal(count + 1)
+        val wire = smux_interactive_dispatch("frame interactive " + ids[1] + " " + ids[2])
+        expect(wire).to_start_with("SMUX-FRAME/1 20 6\n")
+
+    it "rejects foreign windows and cursor panes before snapshot side effects":
+        step("validate every member of the explicit session window pane address")
+        val ids = interactive_service()
+        val other = smux_create_session("other")
+        val other_window = smux_list_windows(other.id)[0]
+        val other_pane = smux_list_panes(other.id, other_window.id)[0]
+        val count = smux_metrics().capture_count
+        expect(smux_capture_frame(ids[0], other_window.id).is_err()).to_equal(true)
+        expect(smux_capture_frame(ids[0], ids[1], other_pane.id).is_err()).to_equal(true)
+        expect(smux_metrics().capture_count).to_equal(count)
+        expect(smux_interactive_dispatch("frame interactive " + other_window.id)).to_start_with("smux: unknown window:")
+
+    it "keeps local window selection independent of session-global focus":
+        step("address a second window explicitly without selecting it globally")
+        val ids = interactive_service()
+        val second = smux_new_window(ids[0], "second")
+        val global_window = smux_active_window(ids[0]).unwrap().id
+        val global_pane = smux_focused_pane(ids[0], ids[1]).unwrap().id
+        val reply = smux_interactive_dispatch("client-panes interactive " + second.id)
+        expect(reply).to_contain(smux_list_panes(ids[0], second.id)[0].id)
+        expect(smux_interactive_dispatch("client-layout interactive " + second.id + " tiled 30 7")).to_equal("smux: layout tiled")
+        expect(smux_interactive_dispatch("frame interactive " + second.id)).to_start_with("SMUX-FRAME/1 30 7\n")
+        expect(smux_active_window(ids[0]).unwrap().id).to_equal(global_window)
+        expect(smux_focused_pane(ids[0], ids[1]).unwrap().id).to_equal(global_pane)
+
+    it "validates input history layout and split contracts without claiming delivery":
+        step("refuse malformed complete input and absent live children")
+        val ids = interactive_service()
+        val address = "interactive " + ids[1] + " " + ids[2]
+        expect(smux_interactive_dispatch("input " + address + " 61")).to_contain("pane has no child")
+        expect(smux_interactive_dispatch("input " + address + " eda080")).to_contain("not complete UTF-8")
+        expect(smux_interactive_dispatch("client-history " + address + " 0")).to_contain("between 1 and 2000")
+        expect(smux_interactive_dispatch("client-history " + address + " 10")).to_start_with("smux: history[")
+        expect(smux_interactive_dispatch("client-layout interactive " + ids[1] + " tiled 513 7")).to_contain("canvas exceeds")
+        expect(smux_interactive_dispatch("client-split " + address + " invalid")).to_start_with("smux: split failed:")
+        expect(smux_list_panes(ids[0], ids[1]).len()).to_equal(1)
+        expect(smux_interactive_dispatch("ordinary-other-command")).to_equal("")
+
+    it "retains the named layout when a fresh client resizes its current view":
+        step("reattach to an existing named layout without resetting it to tiled")
+        val ids = interactive_service()
+        expect(smux_interactive_dispatch("client-layout interactive " + ids[1] + " current 31 9")).to_equal("smux: layout even-horizontal")
+        expect(smux_window_layout(ids[0], ids[1]).unwrap()).to_equal("even-horizontal")
+        val manual = smux_new_window(ids[0], "manual")
+        expect(smux_window_layout(ids[0], manual.id).unwrap()).to_equal("manual")
+        expect(smux_interactive_dispatch("client-layout interactive " + manual.id + " current 31 9")).to_equal("smux: layout tiled")
+        expect(smux_window_layout(ids[0], ids[1]).unwrap()).to_equal("even-horizontal")

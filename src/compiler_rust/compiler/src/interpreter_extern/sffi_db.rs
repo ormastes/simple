@@ -103,6 +103,9 @@ struct SqlTable {
 #[derive(Clone, Debug, Default)]
 struct SqlDatabase {
     tables: HashMap<String, SqlTable>,
+    /// Index name (lowercased) -> owning table. Indexes are metadata only:
+    /// this emulation scans linearly, so they exist for name/DDL semantics.
+    indexes: HashMap<String, String>,
 }
 
 #[derive(Clone, Debug)]
@@ -261,6 +264,8 @@ fn sqlite_load_file(path: &str) -> Option<SqlDatabase> {
                     unique_cols: Vec::new(),
                 },
             );
+        } else if parts[0] == "index" && parts.len() >= 3 {
+            db.indexes.insert(sqlite_unescape(parts[1]), sqlite_unescape(parts[2]));
         } else if parts[0] == "row" && parts.len() >= 4 {
             let name = sqlite_unescape(parts[1]);
             let value_count = parts[2].parse::<usize>().unwrap_or(0);
@@ -314,6 +319,15 @@ fn sqlite_store_file(path: &str, db: &SqlDatabase) {
         if !parent.as_os_str().is_empty() {
             let _ = fs::create_dir_all(parent);
         }
+    }
+    let mut index_names: Vec<&String> = db.indexes.keys().collect();
+    index_names.sort();
+    for name in index_names {
+        out.push_str(&format!(
+            "index\t{}\t{}\n",
+            sqlite_escape(name),
+            sqlite_escape(&db.indexes[name])
+        ));
     }
     let _ = fs::write(path, out);
 }
@@ -891,11 +905,17 @@ fn arg_float(args: &[Value], idx: usize, fn_name: &str) -> Result<f64, CompileEr
         .as_float()
 }
 
+/// Handles are `slot index + SQLITE_HANDLE_BASE`. Small integers are reserved:
+/// 0 is failure and 3 is the runtime's tagged nil, which the Simple-side
+/// `sqlite_handle_valid` rejects, so a dense 1-based scheme made the third
+/// live connection or statement look failed.
+const SQLITE_HANDLE_BASE: i64 = 16;
+
 fn sqlite_handle_to_index(handle: i64) -> Option<usize> {
-    if handle <= 0 {
+    if handle < SQLITE_HANDLE_BASE {
         None
     } else {
-        Some((handle - 1) as usize)
+        Some((handle - SQLITE_HANDLE_BASE) as usize)
     }
 }
 
@@ -904,11 +924,11 @@ fn sqlite_alloc_conn(conn: SqlConn) -> i64 {
     for (idx, slot) in conns.iter_mut().enumerate() {
         if slot.is_none() {
             *slot = Some(conn);
-            return (idx + 1) as i64;
+            return idx as i64 + SQLITE_HANDLE_BASE;
         }
     }
     conns.push(Some(conn));
-    conns.len() as i64
+    conns.len() as i64 - 1 + SQLITE_HANDLE_BASE
 }
 
 fn sqlite_alloc_stmt(stmt: SqlStmt) -> i64 {
@@ -916,11 +936,11 @@ fn sqlite_alloc_stmt(stmt: SqlStmt) -> i64 {
     for (idx, slot) in stmts.iter_mut().enumerate() {
         if slot.is_none() {
             *slot = Some(stmt);
-            return (idx + 1) as i64;
+            return idx as i64 + SQLITE_HANDLE_BASE;
         }
     }
     stmts.push(Some(stmt));
-    stmts.len() as i64
+    stmts.len() as i64 - 1 + SQLITE_HANDLE_BASE
 }
 
 fn sqlite_set_error(conn: &mut SqlConn, message: impl Into<String>) -> i64 {
@@ -971,6 +991,85 @@ fn sqlite_parse_create(sql: &str) -> Option<(String, Vec<String>, Vec<String>)> 
         columns.push(name);
     }
     Some((table, columns, unique_cols))
+}
+
+/// Parsed `CREATE [UNIQUE] INDEX [IF NOT EXISTS] name ON table (col [ASC|DESC], ...)`.
+struct SqlCreateIndex {
+    unique: bool,
+    if_not_exists: bool,
+    name: String,
+    table: String,
+    columns: Vec<String>,
+}
+
+fn sqlite_parse_create_index(sql: &str) -> Option<SqlCreateIndex> {
+    let body = sql.trim().trim_end_matches(';').trim();
+    let mut words = body.split_whitespace().peekable();
+    if !words.next()?.eq_ignore_ascii_case("create") {
+        return None;
+    }
+    let mut unique = false;
+    let mut next = words.next()?;
+    if next.eq_ignore_ascii_case("unique") {
+        unique = true;
+        next = words.next()?;
+    }
+    if !next.eq_ignore_ascii_case("index") {
+        return None;
+    }
+    let mut name = words.next()?;
+    let mut if_not_exists = false;
+    if name.eq_ignore_ascii_case("if") {
+        if !words.next()?.eq_ignore_ascii_case("not") || !words.next()?.eq_ignore_ascii_case("exists") {
+            return None;
+        }
+        if_not_exists = true;
+        name = words.next()?;
+    }
+    if !words.next()?.eq_ignore_ascii_case("on") {
+        return None;
+    }
+    let open = body.find('(')?;
+    let close = body.rfind(')')?;
+    if close < open {
+        return None;
+    }
+    let table_start = body[..open].split_whitespace().last()?;
+    let table = table_start.trim_matches('"').to_string();
+    let mut columns = Vec::new();
+    for part in body[open + 1..close].split(',') {
+        let col = part.split_whitespace().next()?.trim_matches('"').to_string();
+        columns.push(col);
+    }
+    if table.is_empty() || columns.is_empty() {
+        return None;
+    }
+    Some(SqlCreateIndex {
+        unique,
+        if_not_exists,
+        name: name.trim_matches('"').to_string(),
+        table,
+        columns,
+    })
+}
+
+/// Parsed `DROP INDEX [IF EXISTS] name`: (if_exists, name).
+fn sqlite_parse_drop_index(sql: &str) -> Option<(bool, String)> {
+    let body = sql.trim().trim_end_matches(';').trim();
+    let words: Vec<&str> = body.split_whitespace().collect();
+    if words.len() < 3 || !words[0].eq_ignore_ascii_case("drop") || !words[1].eq_ignore_ascii_case("index") {
+        return None;
+    }
+    if words[2].eq_ignore_ascii_case("if") {
+        if words.len() != 5 || !words[3].eq_ignore_ascii_case("exists") {
+            return None;
+        }
+        return Some((true, words[4].trim_matches('"').to_string()));
+    }
+    if words.len() != 3 {
+        return None;
+    }
+    Some((false, words[2].trim_matches('"').to_string()))
 }
 
 fn sqlite_parse_insert(sql: &str) -> Option<(String, Vec<String>)> {
@@ -1048,6 +1147,115 @@ fn sqlite_eq_operands(columns: &[String], row: &[SqlValue], lhs: &str, rhs: &str
     a == b
 }
 
+/// Parse `col [NOT] IN (<subquery>)` -> (col, negate, subquery sql).
+fn sqlite_parse_in_subquery(clause: &str) -> Option<(String, bool, String)> {
+    let lower = clause.to_ascii_lowercase();
+    let (pos, negate, kw_len) = match lower.find(" not in (") {
+        Some(p) => (p, true, " not in (".len()),
+        None => (lower.find(" in (")?, false, " in (".len()),
+    };
+    let col = clause[..pos].trim();
+    let rest = clause[pos + kw_len..].trim_end();
+    let sub = rest.strip_suffix(')')?.trim();
+    if col.is_empty() || col.contains(char::is_whitespace) || !sub.to_ascii_lowercase().starts_with("select ") {
+        return None;
+    }
+    Some((col.trim_matches('"').to_string(), negate, sub.to_string()))
+}
+
+/// Total order matching SQLite: NULL < numeric < non-numeric text. Numeric means
+/// Int, Float, or text that parses as a finite number (literal INSERTs store
+/// text). Compared within a class: numeric as f64, text lexicographically.
+fn sqlite_value_cmp(a: &SqlValue, b: &SqlValue) -> std::cmp::Ordering {
+    fn class(v: &SqlValue) -> (u8, f64) {
+        match v {
+            SqlValue::Null => (0, 0.0),
+            SqlValue::Int(i) => (1, *i as f64),
+            SqlValue::Float(f) if f.is_finite() => (1, *f),
+            SqlValue::Float(_) => (2, 0.0),
+            SqlValue::Text(t) => match t.trim().parse::<f64>() {
+                Ok(f) if f.is_finite() => (1, f),
+                _ => (2, 0.0),
+            },
+        }
+    }
+    // Exact for integers: folding to f64 would tie distinct values above 2^53.
+    if let (SqlValue::Int(x), SqlValue::Int(y)) = (a, b) {
+        return x.cmp(y);
+    }
+    let (ca, na) = class(a);
+    let (cb, nb) = class(b);
+    ca.cmp(&cb).then_with(|| match ca {
+        1 => na.total_cmp(&nb),
+        2 => a.as_text().cmp(&b.as_text()),
+        _ => std::cmp::Ordering::Equal,
+    })
+}
+
+/// Evaluate `SELECT col FROM t [ORDER BY c [ASC|DESC], ...] [LIMIT n]`.
+/// Anything else (WHERE, joins, grouping, bound LIMIT) fails closed.
+fn sqlite_eval_subquery_values(db: &SqlDatabase, sub: &str) -> Result<Vec<SqlValue>, String> {
+    let unsupported = || format!("unsupported subquery (emulation): {sub}");
+    let lower = sub.to_ascii_lowercase();
+    let from_idx = lower.find(" from ").ok_or_else(unsupported)?;
+    let sel_col = sub["select ".len()..from_idx].trim().trim_matches('"').to_string();
+    if sel_col.is_empty() || sel_col.contains(|c: char| c.is_whitespace() || c == ',' || c == '(') {
+        return Err(unsupported());
+    }
+    let tail = sub[from_idx + " from ".len()..].trim_start();
+    let tail_lower = lower[from_idx + " from ".len()..].trim_start();
+    let table_name = tail.split_whitespace().next().ok_or_else(unsupported)?;
+    let mut rest_lower = tail_lower[table_name.len()..].trim().to_string();
+    let mut limit: Option<usize> = None;
+    if let Some(idx) = rest_lower.rfind(" limit ").or_else(|| rest_lower.starts_with("limit ").then_some(0)) {
+        let n = rest_lower[idx..].trim().trim_start_matches("limit").trim();
+        limit = Some(n.parse::<usize>().map_err(|_| unsupported())?);
+        rest_lower.truncate(idx);
+    }
+    let mut order: Vec<(String, bool)> = Vec::new();
+    let rest_lower = rest_lower.trim();
+    if let Some(spec) = rest_lower.strip_prefix("order by ") {
+        for part in spec.split(',') {
+            let mut w = part.split_whitespace();
+            let name = w.next().ok_or_else(unsupported)?.trim_matches('"').to_string();
+            let desc = match w.next() {
+                None | Some("asc") => false,
+                Some("desc") => true,
+                _ => return Err(unsupported()),
+            };
+            if w.next().is_some() {
+                return Err(unsupported());
+            }
+            order.push((name, desc));
+        }
+    } else if !rest_lower.is_empty() {
+        return Err(unsupported());
+    }
+    let table = db.tables.get(table_name).ok_or_else(|| format!("table not found: {table_name}"))?;
+    let col_idx = |name: &str| table.columns.iter().position(|c| c.eq_ignore_ascii_case(name));
+    let sel_idx = col_idx(&sel_col).ok_or_else(|| format!("no such column: {sel_col}"))?;
+    let mut keys = Vec::new();
+    for (name, desc) in &order {
+        keys.push((col_idx(name).ok_or_else(|| format!("no such column: {name}"))?, *desc));
+    }
+    let mut rows: Vec<&Vec<SqlValue>> = table.rows.iter().collect();
+    rows.sort_by(|a, b| {
+        for (i, desc) in &keys {
+            let ord = sqlite_value_cmp(&a[*i], &b[*i]);
+            let ord = if *desc { ord.reverse() } else { ord };
+            if ord != std::cmp::Ordering::Equal {
+                return ord;
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+    Ok(rows
+        .into_iter()
+        .take(limit.unwrap_or(usize::MAX))
+        .map(|r| r[sel_idx].clone())
+        .collect())
+}
+
 fn sqlite_tx_begin(conn: &mut SqlConn) -> i64 {
     if conn.tx_snapshot.is_some() {
         return sqlite_set_error(conn, "cannot start a transaction within a transaction");
@@ -1092,6 +1300,36 @@ fn sqlite_execute_statement(conn: &mut SqlConn, sql: &str) -> i64 {
         conn.changes = 0;
         return 1;
     }
+    if let Some(ci) = sqlite_parse_create_index(sql) {
+        if ci.unique {
+            // Fail closed: UNIQUE index enforcement is not emulated here.
+            return sqlite_set_error(conn, format!("unsupported UNIQUE INDEX (emulation): {sql}"));
+        }
+        let key = ci.name.to_ascii_lowercase();
+        if conn.db.indexes.contains_key(&key) {
+            if ci.if_not_exists {
+                conn.changes = 0;
+                return 1;
+            }
+            return sqlite_set_error(conn, format!("index {} already exists", ci.name));
+        }
+        let Some(table) = conn.db.tables.get(&ci.table) else {
+            return sqlite_set_error(conn, format!("no such table: {}", ci.table));
+        };
+        if let Some(bad) = ci.columns.iter().find(|c| !table.columns.contains(c)) {
+            return sqlite_set_error(conn, format!("no such column: {bad}"));
+        }
+        conn.db.indexes.insert(key, ci.table);
+        conn.changes = 0;
+        return 1;
+    }
+    if let Some((if_exists, name)) = sqlite_parse_drop_index(sql) {
+        if conn.db.indexes.remove(&name.to_ascii_lowercase()).is_none() && !if_exists {
+            return sqlite_set_error(conn, format!("no such index: {name}"));
+        }
+        conn.changes = 0;
+        return 1;
+    }
     let trimmed_lower = lower.trim();
     if trimmed_lower == "begin" || trimmed_lower.starts_with("begin ") {
         return sqlite_tx_begin(conn);
@@ -1113,6 +1351,35 @@ fn sqlite_execute_statement(conn: &mut SqlConn, sql: &str) -> i64 {
             .map(|idx| sql[idx + " where ".len()..].trim().to_string());
         // Only a single `lhs = rhs` equality predicate is supported.
         // Anything else FAILS CLOSED rather than widening the delete.
+        if let Some((col, negate, sub)) = where_clause.as_deref().and_then(sqlite_parse_in_subquery) {
+            let set = match sqlite_eval_subquery_values(&conn.db, &sub) {
+                Ok(v) => v,
+                Err(msg) => return sqlite_set_error(conn, msg),
+            };
+            let Some(table) = conn.db.tables.get_mut(&table_name) else {
+                return sqlite_set_error(conn, format!("table not found: {table_name}"));
+            };
+            let Some(ci) = table.columns.iter().position(|c| c.eq_ignore_ascii_case(&col)) else {
+                return sqlite_set_error(conn, format!("no such column: {col}"));
+            };
+            // SQL three-valued logic: `x NOT IN (..., NULL)` is never true.
+            let null_in_set = set.iter().any(|v| matches!(v, SqlValue::Null));
+            let in_set = |v: &SqlValue| {
+                !matches!(v, SqlValue::Null)
+                    && set.iter().any(|m| !matches!(m, SqlValue::Null) && sqlite_value_cmp(v, m) == std::cmp::Ordering::Equal)
+            };
+            let before = table.rows.len();
+            table.rows.retain(|row| {
+                let matched = if negate {
+                    !null_in_set && !matches!(row[ci], SqlValue::Null) && !in_set(&row[ci])
+                } else {
+                    in_set(&row[ci])
+                };
+                !matched
+            });
+            conn.changes = (before - table.rows.len()) as i64;
+            return 1;
+        }
         let predicate = match &where_clause {
             None => None,
             Some(clause) => match sqlite_parse_eq_predicate(clause) {

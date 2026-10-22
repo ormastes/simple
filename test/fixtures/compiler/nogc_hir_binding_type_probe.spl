@@ -1,0 +1,126 @@
+use compiler.hir.hir_operators.{HirAssignOp}
+"""Native diagnostic for concrete HIR Let types and ownership preservation."""
+
+use std.nogc_sync_mut.io_runtime.{exit}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirStmtKind}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId}
+use compiler.hir.hir_lowering.binding_types.{hir_binding_type_or_infer}
+
+fn nogc_binding_require(condition: bool, message: text):
+    if not condition:
+        print "nogc-hir-binding FAILED: {message}"
+        exit(1)
+
+fn expression(type_: HirType, known: bool) -> HirExpr:
+    HirExpr(kind: HirExprKind.NamedVar(SymbolId(id: 17), "owner"),
+        has_type_: known, type_: type_, span: Span.empty())
+
+fn verify_owner(result: HirType, expected: text):
+    var inner = HirType(kind: HirTypeKind.Error, span: Span.empty())
+    match result.kind:
+        case HirTypeKind.Unique(value):
+            nogc_binding_require(expected == "unique", "unique ownership kind changed")
+            inner = value
+        case HirTypeKind.Shared(value):
+            nogc_binding_require(expected == "shared", "shared ownership kind changed")
+            inner = value
+        case HirTypeKind.Weak(value):
+            nogc_binding_require(expected == "weak", "weak ownership kind changed")
+            inner = value
+        case _:
+            nogc_binding_require(false, "initializer ownership kind disappeared")
+    match inner.kind:
+        case HirTypeKind.Named(owner, args):
+            val symbol: SymbolId = owner
+            nogc_binding_require(symbol.id == 321, "initializer nominal owner identity changed")
+            nogc_binding_require(args.len() == 0, "initializer nominal arguments changed")
+        case _:
+            nogc_binding_require(false, "initializer inner nominal type disappeared")
+
+fn main() -> i64:
+    val span = Span.empty()
+    val owner = HirType(kind: HirTypeKind.Named(SymbolId(id: 321), []), span: span)
+    val unique = HirType(kind: HirTypeKind.Unique(owner), span: span)
+    val shared = HirType(kind: HirTypeKind.Shared(owner), span: span)
+    val weak = HirType(kind: HirTypeKind.Weak(owner), span: span)
+    verify_owner(hir_binding_type_or_infer(expression(unique, true)), "unique")
+    verify_owner(hir_binding_type_or_infer(expression(shared, true)), "shared")
+    verify_owner(hir_binding_type_or_infer(expression(weak, true)), "weak")
+    val optional_unique = HirType(kind: HirTypeKind.Optional(unique), span: span)
+    val optional_source = expression(optional_unique, true)
+    verify_owner(hir_binding_type_or_infer(optional_source, true), "unique")
+    val retained_optional = hir_binding_type_or_infer(optional_source)
+    match retained_optional.kind:
+        case HirTypeKind.Optional(inner):
+            val payload_type: HirType = inner
+            verify_owner(payload_type, "unique")
+        case _:
+            nogc_binding_require(false, "ordinary binding silently unwrapped an optional")
+
+    val nested_optional = HirType(kind: HirTypeKind.Optional(optional_unique), span: span)
+    val projected_nested = hir_binding_type_or_infer(expression(nested_optional, true), true)
+    match projected_nested.kind:
+        case HirTypeKind.Optional(inner):
+            val projected_owner: HirType = inner
+            verify_owner(projected_owner, "unique")
+        case _:
+            nogc_binding_require(false, "optional binding projected more than one layer")
+    val unknown_optional = hir_binding_type_or_infer(expression(nested_optional, false), true)
+    match unknown_optional.kind:
+        case HirTypeKind.Infer(id, level):
+            nogc_binding_require(id == 0 and level == 0, "optional projection trusted an absent attribute")
+        case _:
+            nogc_binding_require(false, "unknown optional acquired a payload type")
+
+    val assignment_source = expression(unique, true)
+    val plain_op: HirAssignOp? = nil
+    val plain_assignment: HirStmtKind = HirStmtKind.Assign(assignment_source, plain_op, assignment_source)
+    match plain_assignment:
+        case HirStmtKind.Assign(_, op, _):
+            nogc_binding_require(op == nil, "plain assignment acquired a compound operator")
+        case _:
+            nogc_binding_require(false, "plain assignment changed its statement kind")
+    val compound_op: HirAssignOp? = Some(HirAssignOp.Add)
+    val compound_assignment: HirStmtKind = HirStmtKind.Assign(assignment_source, compound_op, assignment_source)
+    match compound_assignment:
+        case HirStmtKind.Assign(_, op, _):
+            if val operation = op:
+                match operation:
+                    case HirAssignOp.Add: pass
+                    case _: nogc_binding_require(false, "compound assignment operator changed")
+            else:
+                nogc_binding_require(false, "compound assignment lost its operator")
+        case _:
+            nogc_binding_require(false, "compound assignment changed its statement kind")
+
+    val scalar = HirType(kind: HirTypeKind.Int(32, false), span: span)
+    val scalar_result = hir_binding_type_or_infer(expression(scalar, true))
+    match scalar_result.kind:
+        case HirTypeKind.Int(bits, signed):
+            nogc_binding_require(bits == 32, "inferred scalar width changed")
+            nogc_binding_require(not signed, "inferred scalar signedness changed")
+        case _:
+            nogc_binding_require(false, "typed scalar became unknown")
+
+    val unknown = hir_binding_type_or_infer(expression(unique, false))
+    match unknown.kind:
+        case HirTypeKind.Infer(id, level):
+            nogc_binding_require(id == 0 and level == 0, "unknown initializer lost the existing inference marker")
+        case _:
+            nogc_binding_require(false, "untyped initializer silently acquired ownership")
+
+    val source = expression(unique, true)
+    val binding: HirStmtKind = HirStmtKind.Let(SymbolId(id: 42), hir_binding_type_or_infer(source), source)
+    match binding:
+        case HirStmtKind.Let(symbol, type_, init):
+            val binding_symbol: SymbolId = symbol
+            val binding_type: HirType = type_
+            val initializer: HirExpr = init
+            nogc_binding_require(binding_symbol.id == 42, "binding symbol changed")
+            nogc_binding_require(initializer.has_type_, "binding initializer changed")
+            verify_owner(binding_type, "unique")
+        case _:
+            nogc_binding_require(false, "concrete binding changed its statement kind")
+    print "nogc-hir-binding: owner kinds, nominal identities, scalar payload and inference marker passed"
+    0

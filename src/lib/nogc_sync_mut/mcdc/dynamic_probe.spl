@@ -8,7 +8,8 @@ use std.common.mcdc.model.{McdcEvaluation, McdcMode, McdcPolicy, mcdc_default_po
 use std.nogc_sync_mut.mcdc.dynamic_aspect.{MCDC_ASPECT_ABI_V1, MCDC_ASPECT_SCHEMA_V1, McdcDynamicAspect, mcdc_dynamic_storage_error}
 use std.nogc_sync_mut.mcdc.probe_registry.{MCDC_PROBE_REGISTRY_BYTES_PER_OWNER, McdcProbeRegistry, mcdc_probe_current_owner_id}
 use std.nogc_sync_mut.runtime.thread_local.{rt_thread_local_new, rt_thread_local_get, rt_thread_local_set}
-use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock_gate, mutex_unlock}
+# @workaround bug=p4p2_cross_module_generic_free_fn_not_instantiated_2026-10-20 reason=generic mutex_new/mutex_unlock stay unspecialized cross-module under the phase-2 producer; use the i64 gates
+use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new_gate, mutex_lock_gate, mutex_unlock_gate}
 use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
 use std.nogc_sync_mut.concurrent.thread.{thread_yield}
 
@@ -34,7 +35,7 @@ var _mcdc_dynamic_controller_owner = 0
 # TLS stores registry slot + 1; zero means this worker has not crossed the
 # explicit cold registration/spawn hook.
 var _mcdc_dynamic_tls = rt_thread_local_new()
-var _mcdc_dynamic_install_lock: Mutex = mutex_new(0)
+var _mcdc_dynamic_install_lock: Mutex = mutex_new_gate(0)
 
 pub fn mcdc_dynamic_probe_configure(global_bytes: i64, owner_bytes: i64) -> bool:
     if _mcdc_dynamic_configured:
@@ -135,7 +136,7 @@ pub fn mcdc_dynamic_probe_controller_prepare_owners(owner_ids: [i64]) -> bool:
     if held == nil: return false
     var result = mcdc_dynamic_controller_admit_locked()
     if result: result = mcdc_dynamic_prepare_owners_locked(owner_ids)
-    mutex_unlock(_mcdc_dynamic_install_lock, 0)
+    mutex_unlock_gate(_mcdc_dynamic_install_lock, 0)
     result
 
 fn mcdc_dynamic_publish_prepared_locked() -> bool:
@@ -155,7 +156,7 @@ pub fn mcdc_dynamic_probe_controller_publish_prepared() -> bool:
     if held == nil: return false
     var result = mcdc_dynamic_controller_admit_locked()
     if result: result = mcdc_dynamic_publish_prepared_locked()
-    mutex_unlock(_mcdc_dynamic_install_lock, 0)
+    mutex_unlock_gate(_mcdc_dynamic_install_lock, 0)
     result
 
 # Public controller for an externally loaded/registered aspect catalog. The
@@ -186,7 +187,7 @@ pub fn mcdc_dynamic_probe_controller_select_aspect(
     if result:
         result = mcdc_dynamic_select_aspect_locked(
             catalog, aspect_name, module_name, abi_version, schema_version)
-    mutex_unlock(_mcdc_dynamic_install_lock, 0)
+    mutex_unlock_gate(_mcdc_dynamic_install_lock, 0)
     result
 
 pub fn mcdc_dynamic_probe_controller_load_current_owner(
@@ -198,7 +199,7 @@ pub fn mcdc_dynamic_probe_controller_load_current_owner(
     val held = mutex_lock_gate(_mcdc_dynamic_install_lock)
     if held == nil: return false
     if not mcdc_dynamic_controller_admit_locked():
-        mutex_unlock(_mcdc_dynamic_install_lock, 0)
+        mutex_unlock_gate(_mcdc_dynamic_install_lock, 0)
         return false
     if _mcdc_dynamic_registry.count != 0:
         if (catalog != _mcdc_dynamic_catalog or
@@ -206,18 +207,18 @@ pub fn mcdc_dynamic_probe_controller_load_current_owner(
                 module_name != _mcdc_dynamic_module_name or
                 abi_version != _mcdc_dynamic_abi or
                 schema_version != _mcdc_dynamic_schema):
-            mutex_unlock(_mcdc_dynamic_install_lock, 0)
+            mutex_unlock_gate(_mcdc_dynamic_install_lock, 0)
             return false
     else:
         if not mcdc_dynamic_select_aspect_locked(
                 catalog, aspect_name, module_name, abi_version, schema_version):
-            mutex_unlock(_mcdc_dynamic_install_lock, 0)
+            mutex_unlock_gate(_mcdc_dynamic_install_lock, 0)
             return false
     val owner_id = mcdc_probe_current_owner_id()
     var result = mcdc_dynamic_prepare_owner(owner_id)
     if result: result = mcdc_dynamic_publish_prepared_locked()
     if result: result = mcdc_dynamic_bind_owner_slot(owner_id)
-    mutex_unlock(_mcdc_dynamic_install_lock, 0)
+    mutex_unlock_gate(_mcdc_dynamic_install_lock, 0)
     result
 
 # Builtin production controller used by an instrumented main. It performs the
@@ -227,15 +228,15 @@ pub fn mcdc_dynamic_probe_controller_load_builtin_current_owner() -> bool:
     val held = mutex_lock_gate(_mcdc_dynamic_install_lock)
     if held == nil: return false
     if not mcdc_dynamic_controller_admit_locked():
-        mutex_unlock(_mcdc_dynamic_install_lock, 0)
+        mutex_unlock_gate(_mcdc_dynamic_install_lock, 0)
         return false
     if _mcdc_dynamic_catalog < 0:
         val catalog = catalog_new()
         if not catalog_register_aspect(catalog, _MCDC_DYNAMIC_ASPECT, "builtin:mcdc"):
-            mutex_unlock(_mcdc_dynamic_install_lock, 0)
+            mutex_unlock_gate(_mcdc_dynamic_install_lock, 0)
             return false
         if not readiness_declare(_MCDC_DYNAMIC_MODULE, READINESS_FULL, 1, 1):
-            mutex_unlock(_mcdc_dynamic_install_lock, 0)
+            mutex_unlock_gate(_mcdc_dynamic_install_lock, 0)
             return false
         _mcdc_dynamic_catalog = catalog
         _mcdc_dynamic_aspect_name = _MCDC_DYNAMIC_ASPECT
@@ -246,7 +247,7 @@ pub fn mcdc_dynamic_probe_controller_load_builtin_current_owner() -> bool:
     var result = mcdc_dynamic_prepare_owner(owner_id)
     if result: result = mcdc_dynamic_publish_prepared_locked()
     if result: result = mcdc_dynamic_bind_owner_slot(owner_id)
-    mutex_unlock(_mcdc_dynamic_install_lock, 0)
+    mutex_unlock_gate(_mcdc_dynamic_install_lock, 0)
     result
 
 # Explicit adapter hook for thread/task spawn boundaries. The coordinator must
@@ -264,7 +265,7 @@ pub fn mcdc_dynamic_probe_controller_unload_current_owner() -> bool:
     val held = mutex_lock_gate(_mcdc_dynamic_install_lock)
     if held == nil: return false
     if not mcdc_dynamic_controller_admit_locked():
-        mutex_unlock(_mcdc_dynamic_install_lock, 0)
+        mutex_unlock_gate(_mcdc_dynamic_install_lock, 0)
         return false
     _mcdc_dynamic_epoch.store(0, MemoryOrdering.Release)
     _mcdc_dynamic_published = false
@@ -273,14 +274,14 @@ pub fn mcdc_dynamic_probe_controller_unload_current_owner() -> bool:
         thread_yield()
         pin_wait = pin_wait + 1
     if not _mcdc_dynamic_registry.all_reader_pins_zero():
-        mutex_unlock(_mcdc_dynamic_install_lock, 0)
+        mutex_unlock_gate(_mcdc_dynamic_install_lock, 0)
         return false
     val owner_id = mcdc_probe_current_owner_id()
     if not mcdc_dynamic_unpublish_locked(owner_id):
-        mutex_unlock(_mcdc_dynamic_install_lock, 0)
+        mutex_unlock_gate(_mcdc_dynamic_install_lock, 0)
         return false
     rt_thread_local_set(_mcdc_dynamic_tls, 0)
-    mutex_unlock(_mcdc_dynamic_install_lock, 0)
+    mutex_unlock_gate(_mcdc_dynamic_install_lock, 0)
     true
 
 # External controller path for a process-wide aspect withdrawal. The gate is
@@ -291,10 +292,10 @@ pub fn mcdc_dynamic_probe_controller_unload_all() -> bool:
     val held = mutex_lock_gate(_mcdc_dynamic_install_lock)
     if held == nil: return false
     if not mcdc_dynamic_controller_admit_locked():
-        mutex_unlock(_mcdc_dynamic_install_lock, 0)
+        mutex_unlock_gate(_mcdc_dynamic_install_lock, 0)
         return false
     if _mcdc_dynamic_registry.count == 0:
-        mutex_unlock(_mcdc_dynamic_install_lock, 0)
+        mutex_unlock_gate(_mcdc_dynamic_install_lock, 0)
         return false
     _mcdc_dynamic_epoch.store(0, MemoryOrdering.Release)
     _mcdc_dynamic_published = false
@@ -303,24 +304,24 @@ pub fn mcdc_dynamic_probe_controller_unload_all() -> bool:
         thread_yield()
         pin_wait = pin_wait + 1
     if not _mcdc_dynamic_registry.all_reader_pins_zero():
-        mutex_unlock(_mcdc_dynamic_install_lock, 0)
+        mutex_unlock_gate(_mcdc_dynamic_install_lock, 0)
         return false
     if not _mcdc_dynamic_registry.all_quiescent():
-        mutex_unlock(_mcdc_dynamic_install_lock, 0)
+        mutex_unlock_gate(_mcdc_dynamic_install_lock, 0)
         return false
     if not catalog_unload_aspect(_mcdc_dynamic_catalog, _mcdc_dynamic_aspect_name):
-        mutex_unlock(_mcdc_dynamic_install_lock, 0)
+        mutex_unlock_gate(_mcdc_dynamic_install_lock, 0)
         return false
     val next_barrier = _mcdc_dynamic_barrier + 1
     val owners = _mcdc_dynamic_registry.sorted_owner_ids()
     for owner_id in owners:
         if val aspect = _mcdc_dynamic_registry.find(owner_id):
             if not aspect.withdraw_after_catalog_unload(owner_id, next_barrier):
-                mutex_unlock(_mcdc_dynamic_install_lock, 0)
+                mutex_unlock_gate(_mcdc_dynamic_install_lock, 0)
                 return false
     for owner_id in owners:
         if not _mcdc_dynamic_registry.remove(owner_id):
-            mutex_unlock(_mcdc_dynamic_install_lock, 0)
+            mutex_unlock_gate(_mcdc_dynamic_install_lock, 0)
             return false
     _mcdc_dynamic_barrier = next_barrier
     _mcdc_dynamic_registry_sealed = false
@@ -329,7 +330,7 @@ pub fn mcdc_dynamic_probe_controller_unload_all() -> bool:
         _mcdc_dynamic_binding_generation = 1
     else:
         _mcdc_dynamic_binding_generation = _mcdc_dynamic_binding_generation + 1
-    mutex_unlock(_mcdc_dynamic_install_lock, 0)
+    mutex_unlock_gate(_mcdc_dynamic_install_lock, 0)
     true
 
 fn mcdc_dynamic_unpublish_locked(owner_id: i64) -> bool:
@@ -367,7 +368,7 @@ pub fn mcdc_dynamic_probe_unpublish(owner_id: i64) -> bool:
     if held == nil: return false
     var result = mcdc_dynamic_controller_admit_locked()
     if result: result = mcdc_dynamic_unpublish_locked(owner_id)
-    mutex_unlock(_mcdc_dynamic_install_lock, 0)
+    mutex_unlock_gate(_mcdc_dynamic_install_lock, 0)
     result
 
 fn mcdc_dynamic_local_slot() -> i64:
@@ -381,6 +382,9 @@ fn mcdc_dynamic_local_aspect() -> McdcDynamicAspect?:
     _mcdc_dynamic_registry.aspect_at(mcdc_dynamic_local_slot())
 
 pub fn mcdc_dynamic_probe_begin(decision_id: i64) -> i64:
+    # Instrumented dependencies can enter a probe while module globals are
+    # still being constructed. The atomic publication handle is not ready yet.
+    if not _mcdc_dynamic_configured: return 0
     val epoch = _mcdc_dynamic_epoch.load(MemoryOrdering.Acquire)
     if epoch == 0: return 0
     val slot = mcdc_dynamic_local_slot()

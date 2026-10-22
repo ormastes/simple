@@ -1,7 +1,131 @@
 # LLM Repository Wiki
 
+## Simple linker: external mold/LLD and internal Simple engine
+
+The self-hosted Simple compiler can use external mold or LLVM LLD; that does
+not make the linker itself pure Simple. The mold-like MDSOC++ Simple linker
+is a separate internal engine, selected through supported internal routes.
+Keep the admitted external/platform route until internal correctness,
+compiler/application execution, resource and host evidence justify a reviewed
+target-specific cutover. ELF success does not certify Windows PE or macOS
+Mach-O. Record the actual engine; external fallback is not internal proof.
+
+Read [linker selection and cutover](../07_guide/compiler/linker_selection.md)
+before choosing defaults or claiming completion. Managed native admission
+currently requires its admitted external hosted linker. The overall
+`mold_is_pure_simple_linker_complete()` receipt gate does not automatically
+change defaults or replace real execution evidence.
+
+## Bootstrap failure collection
+
+For one-thread crash diagnosis, host CUDA policy, RAM cache-parent staging and
+owned-process finality, use [native staging and terminal evidence](../07_guide/tooling/bootstrap_native_staging.md).
+A compile last-line/exit/object-size observation is not an SSpec verdict. Preserve
+actual test counts, stopped bug records, campaign Phase 3 priority and the full
+CLI command-owner gate; authored fixtures remain unexecuted until observed.
+
+For cache-preserving failed-file retries, independent MIR/object collection,
+tagged workarounds and complete-object manual linking, use
+[cached object continuation](../07_guide/tooling/bootstrap_failure_collection.md#cached-object-continuation-and-early-linking).
+Successful compile observation reads only the final log line, result code and
+object size. Host access in product code uses SoSix aliases/facades; see the
+[POSIX/host interface index](../07_guide/app/llm/simpleos_posix_host_interface_index.md).
+These are workflow requirements, not evidence that a build or platform passed.
+
+Full bootstrap has parallel branches after each usable compiler: Phase 1 whole
+tests precede Phase 2 construction; Phase 2 sanity opens its six subsystem
+test binaries, Phase 3 build and early Phase 4 from Phase 2. Phase 3 sanity
+opens whole tools/library tests and Phase 4 from Phase 3. Run whole tests on
+both Phase 4 cohorts and preserve their distinct producer identities. See the
+[execution graph](../07_guide/tooling/bootstrap_failure_collection.md#full-bootstrap-execution-graph).
+This specifies the required workflow, not a claim of completed script wiring
+or passing builds. After three unresolved repair cycles, update the bug
+database and use a scoped linked workaround where valid; continue independent
+cached work and revisit the original bug on the later rebuild.
+
+Current RC1 scope: one fully successful host is sufficient, with Windows as
+the qualifying host. Complete Windows bootstrap, required tests and local
+deployment before remote synchronization and release publication. Linux,
+macOS and BSD remain explicitly unverified until RC2. See the
+[RC1 completion scope](../07_guide/tooling/bootstrap_failure_collection.md#windows-rc1-completion-scope).
+
+Bootstrap failure collection means finishing all independently runnable modules,
+builds and tests after errors, then assigning independent root causes to parallel
+repair agents. The exact compiler must compile Hello World and execute its output
+successfully before the next provisional phase; full verification may continue
+alongside it. User-authorized time/memory/policy exceptions use separate monitored
+DIAGNOSTIC attempts, retain failed receipts, and never manufacture admission or
+test PASS. Restore normal gates before promotion. Follow the
+[shared collection policy](../07_guide/tooling/bootstrap_failure_collection.md) for terminal statuses, budgets,
+cache preservation, and bug evidence. This is agent workflow guidance; it does
+not change runner behavior.
+
+Maintained project routes: [build collection](../07_guide/tooling/bootstrap_failure_collection.md),
+[parallel handoff](../07_guide/app/llm/bootstrap_parallel_handoff.md), and
+[LLVM debugging](../07_guide/app/llm/llm_bootstrap_llvm_debugging.md).
+Agent entrypoints: [debug](../../.agents/skills/debug/SKILL.md),
+[long-build](../../.agents/skills/long-build/SKILL.md), and
+[bootstrap](../../.agents/skills/bootstrap/SKILL.md). Reusable SPipe procedures
+belong to the resolved common package's `skills/` and `wiki/` indexes; machine
+build status and private receipts remain in the project/runtime owner.
+
+## SPipe home routing
+
+Reusable core lives at `{home}/.spipe` (`SPIPE_HOME`); private/local knowledge lives
+at `{home}/spipe` (`SPIPE_WORKSPACE`). `{home}/spipe/common` links to core and project
+`.spipe/common` routes through it. Keep private wiki, credentials, mounts, and
+runtime state out of core. Preserve existing reversed layouts and pinned legacy
+submodules until explicit migration; never overwrite an occupied route.
+See `doc/07_guide/app/llm/spipe_local_knowledge_setup.md` for setup and ownership.
+
 Short, canonical term resolution for coding agents. Read this index when a user
 names a repository capability whose implementation owner is ambiguous.
+
+## Configured variants and aggregate repairs
+
+Read [configured variants and aggregate validation](../07_guide/compiler/configured_variants_and_aggregate_validation.md)
+before changing library-owner selection or array/tuple behavior. Stable
+interfaces retain configured implementation selection and importer-family
+semantics; fallback order is not authority to overwrite them. Rust/Pure-Simple
+parity remains active work. A newer source repair does not upgrade an older
+producer's evidence. Require actual engine/provider/cache bindings and test
+values/counts. The authored robust-array/tuple plan remains unidentified;
+existing research options are not its approved scope.
+
+## Bug-linked workarounds
+
+Required for every temporary build/test workaround: a source `@workaround`
+tag with canonical bug ID, an authoritative bug DB record, and the actual
+workaround commit SHA/link. Record intended-code recovery reference, original
+failure, producer/source, reproducing/prevention tests and background fix owner.
+Create the bug record first when unknown. If the qualified DB tool is unavailable,
+record a dated bug report and explicitly leave DB reconciliation pending. Keep
+the bug open until an applied underlying fix is verified; link its commit and
+the narrow workaround-removal commit. Fetching a fix alone is insufficient.
+
+
+The accepted workflow is
+[bug-linked workarounds](../07_guide/tooling/bug_linked_workarounds.md);
+implementation remains pending runtime qualification. Temporary source blocks
+carry an immediately preceding `# @workaround bug=<canonical-id>` comment
+(`//` also supported), optionally `recover=<7..64hex>` and `reason=<text>`.
+The bug database owns status; `.simple/workarounds.sdn` is a derived link index.
+Ordinary `simple check-dbs bugs [--bug=<canonical-id>]` reads that index only.
+Use explicit `simple check-dbs --fullscan bugs` for tracked-source reconciliation
+when coverage is missing or HEAD changes. The parent build alone updates
+changed/untracked plus previously linked paths in one transaction; workers
+never write the index. Failed validation retains the previous valid snapshot
+without claiming a successful refresh.
+
+Fix the owning bug, inspect all related links, compare optional recovery
+references, then narrowly restore intended blocks and run the smallest valid
+build. A recovery hash never authorizes checkout/reset. Preserve cache producer,
+entry, dependency, ABI, and option identities; defer the one final clean gate
+to the required boundary. For Windows/Linux bootstrap repairs, run dependent
+Phase 3/4 diagnostics once the exact compiler passes the Hello compile/run
+gate, concurrently with qualification using isolated outputs/caches. Retain exact producer evidence;
+admission and lineage still gate qualification and promotion. Do not turn this
+process note into a test, docgen, bootstrap, or release PASS.
 
 ## SPipe perf optimization rule
 
@@ -16,6 +140,102 @@ cannot establish overall improvement. See
 `.codex/skills/optimize/SKILL.md`. SPipe's pure
 `perf_joint_compare_v1` helper checks the normalized sum and independent
 budgets from matched paired samples; release cohort floors still apply.
+
+## Kernel plugin = core extension (same concept)
+
+- **Synonymy (project-owner terminology, recorded 2026-09-24):** "kernel
+  plugin" and "core extension" are the same architectural concept in this repo
+  and are used interchangeably — a minimal core/kernel plus loadable
+  plugin/extension modules. "Kernel" ≈ "core", "plugin" ≈ "extension".
+- **Kernel lane:** the kernel-plugin fabric — ABI v1 header
+  `include/simple_kernel_plugin_v1.h` (`SIMPLE_KPF_ABI_V1`, entry
+  `simple_kpf_plugin_entry_v1`), `sdk/kernel_plugin/`, schema generators
+  `src/tool/kernel_plugin_schema/`, plans under `doc/03_plan/kernel_plugin/`.
+  Migration is gated by the "Kernel-Plugin Migration Gates" CI jobs.
+- **Rendering/UI lane:** the same core+extension split is expressed as
+  composition kernel + selected providers + feature packs — see the
+  `ui_slim_kernel_plugin` feature expert
+  (`doc/00_llm_process/feature_expert/ui_slim_kernel_plugin/skill.md`). When a
+  rendering/UI doc says "core extension" it means this kernel-plugin concept.
+- **Exception — literal name collision:** inside `src/app/vscode_extension/`
+  only, the string "core extension" refers to Microsoft's VS Code extension
+  `ms-vscode.wasm-wasi-core` (`src/app/vscode_extension/src/wasm/wasmLspBridge.ts`)
+  — an unrelated external dependency.
+- **Agent lookup rule:** searching only "core extension" misses 266+ "kernel
+  plugin" doc occurrences across 67 files; always search both spellings, and
+  reserve the literal reading for `src/app/vscode_extension/`.
+
+## Rendering showcases (canonical subtree)
+
+- **Owner/lane:** `examples/06_io/ui/rendering/` — ten canonical entries:
+  `rendering_{tui,gui,wm}_{core,full}.spl` (brief/core vs full/extended tiers)
+  and `rendering_{2d,web}_{core,extended}.spl`, plus the cross-lane
+  `rendering_items.ui.sdn` (all-rendering-item list), `rendering_switch.spl`
+  (UI-base switch TUI|GUI|web), `doc.md` (run table), `rendering_fixture.png`.
+  Shared cores: `examples/ui/rendering_{2d,web}_{core,extended}/`; TUI host:
+  `src/app/ui_showcase/hosts/host_tui.spl`.
+- **Architecture:** host-agnostic core + `common.ui.screen_host.ScreenHost`
+  trait seam for interactive showcases; `.ui.sdn` data for the shared item
+  list (served by TUI/GUI loaders and the web-server GUI). Grammar verdict:
+  parameterized imports do NOT exist (`parse_use_decl` has no argument
+  production) — trait hosts + sdn + env config are the sanctioned sharing
+  mechanisms (research: `doc/01_research/local/rendering_showcases.md` §2).
+- **Backend config:** `SIMPLE_2D_BACKEND=cpu|cpu_simd|vulkan|metal`, default
+  **vulkan** on lanes that construct an Engine2D backend (2d core/extended,
+  web core/extended) — exact admission: an unavailable backend is
+  `showcase status=blocked`, never a silent fallback. On gui/wm the knob is
+  advisory: headless captures rasterize on CPU / compositor pixel buffer by
+  design.
+- **Web-server GUI:** `rendering_webserver.spl` serves the item list via the
+  pure-Simple server (`std.nogc_sync_mut.http_server`, bounded serve,
+  self-exits after one GET) — the working REQ-001 path (verified over a real
+  socket). `bin/simple ui web <sdn> --port 8080` remains the CLI form but is
+  BLOCKED by `doc/08_tracking/bug/ui_web_seed_exits_before_bind_2026-09-24.md`;
+  `rendering_switch.spl` `web` branch spawns the entry directly (POSIX `env`
+  spawn) with a real GET probe.
+- **Verification:** spec `test/03_system/ui_showcase/rendering_showcases_spec.spl`
+  (structural, 8 steps); runtime gates `scripts/check/check-rendering-showcase-closure.shs`
+  (NFR-001) and `check-rendering-showcase-captures.shs` (NFR-002). Honest-fail
+  lines: `showcase status=blocked <reason>` / `showcase status=pass <path>`;
+  13 of 43 WidgetKinds carry `(no tui)` markers — never render them silently.
+- **Agent lookup rule:** for "showcase" requests, use the canonical subtree
+  above, not the legacy flat demos (`widget_showcase*_gui.spl` era); tier
+  split is file-based (extended imports core), never a `SHOWCASE_TIER` env.
+
+## SPipe surfaces (which "spipe" do you mean?)
+
+- **SPipe project MCP** (release/spec-evidence workflow): the submodule
+  `.spipe/spipe` @ ceb214d is the REAL tree (stage-1 Simple migration:
+  `src/spipe_cli/main.spl`, `src/spipe_mcp/main.spl`). The `.mcp.json`
+  "spipe" entry serves the **stale vendored copy**
+  `examples/05_stdlib/spipe/mcp/server.js` (node, zero-dep; 15 tools:
+  info/experts/read_doc/fine-tune guides/release plans/folder-reverse-references).
+  Fix bugs in the SUBMODULE (pushed to the Spipe repo), never in the vendored
+  copy. `spipe doctor .` expects 7 host links under `.spipe/` (spipe_project,
+  doc, domain_expert, template, spipe_docs, project_expert/spipe,
+  tool_expert/spipe_submodule); `doc/00_llm_process/{spipe,tool_expert,...}`
+  are symlinks into the submodule.
+- **Host `spipe_mcp` parser MCP** (different thing!): `src/app/spipe_mcp`,
+  wrapper `bin/spipe_mcp_server`, API `std.nogc_sync_mut.spipe.tree_context`
+  — tree-context parsing/storage of CLI output. Guide:
+  `doc/07_guide/infra/spipe_mcp.md`. Not the release workflow.
+- **SPipe knowledge compiler:** see the next section.
+- **CLI:** node-based (`node examples/05_stdlib/spipe/cli/spipe.js`, ~40
+  commands). There is NO `bin/simple spipe` subcommand.
+- **Token/context reduction:** does NOT exist in SPipe (verified 2026-09-24;
+  every "token" hit is auth/parser/pagination). The owner is
+  `plugins/llm_caret_messaging` (`chat_get_context`, `context_bundle_id`).
+  Closest SPipe mechanisms: bounded `spipe_read_doc`, pre-digested
+  `spipe_experts`, FTS search index, 6000-token manifest cap.
+- **Known issues (2026-09-24):** tool errors return `id: null` (clients see
+  hangs; fix in flight); `folder_reverse_references` leaks raw ENOENT;
+  setup-links script must run from `.spipe/spipe/scripts/` — running the
+  vendored copy links `doc/llm_process/*` instead of the config-declared
+  `doc/00_llm_process`.
+- **Agent lookup rule:** "spipe mcp" bug/fix → submodule `.spipe/spipe`;
+  "spipe parser/tree context" → host `src/app/spipe_mcp`; "spipe release
+  gates" → the release validators below; "context/token bundle" →
+  llm_caret_messaging.
 
 ## SPipe Knowledge Compiler
 
@@ -362,6 +582,18 @@ locking, retries, or an extra provider call.
 - **Detail:** `.claude/skills/spipe.md` §"Sabotage discipline" / §"Census
   discipline".
 
+## PR CI: where the required checks live
+
+- The ruleset-required context "Code Idiom & Structural Ratchet Gates" is the
+  `fast-gates` job in `.github/workflows/required-gates.yml` (workflow "Required
+  Gates", moved out of `repo-hygiene.yml` on 2026-09-27). "SPipe Self Review
+  Admission" is `review-admission.yml`. Nothing else runs on a PR by default.
+- Every other PR workflow triggers only on `pull_request: types: [labeled]` and
+  runs only when the label is `ci:full`; all heavy lanes still run on push to
+  `main`. `push:` triggers are `main`-only (plus `cache-branch-ci`, var-gated).
+- Detail and trade-offs: `doc/07_guide/infra/vcs/pr_landing_timing_race.md`
+  § "PR-path CI is required checks only"; landing loop: `.claude/rules/vcs.md`.
+
 ## Maintenance
 
 Add a compact entry here when repeated ambiguity causes an agent to choose the
@@ -435,6 +667,14 @@ wrong repository subsystem. Link detailed guides instead of duplicating them.
 - **Scope:** native FreeBSD x86_64 bootstrap inside QEMU (`check-freebsd-bootstrap-qemu.shs --full`)
   through Stage 3 PASS, then Stage 4 full CLI and FreeBSD spec runs.
 - **Timeouts:** ssh cap >= bootstrap budget (#1121); Stage 2 per-file cap 1800s under TCG (#1122).
+
+## Linux riscv64 QEMU bootstrap lane
+
+- **Expert note:** `doc/00_llm_process/feature_expert/linux_riscv64_qemu_bootstrap/skill.md`.
+- **Scope:** native riscv64 Linux guest (Ubuntu cloud image, OpenSBI -> U-Boot, 20 vCPU TCG)
+  via `check-linux-riscv64-bootstrap-qemu.shs`; trust-root Stage 2 with `--backend=cranelift`.
+- **Triple:** cargo needs `riscv64gc-unknown-linux-gnu` (`PLATFORM_RUST_TRIPLE`), Simple keeps `riscv64-unknown-linux-gnu`.
+
 ## Robust lifecycle persistence
 
 - **Canonical owner:** `std.lifecycle_persistence`, implemented under
@@ -853,6 +1093,76 @@ convergence and DDC remain explicit release/trust targets. Canonical guide:
 
 ## Protected GitHub PR handoff
 
+### Creating LLM owns landing (user instruction, 2026-09-29)
+
+The LLM that creates a PR must self-review it, fix the problems it finds, run
+required checks, and land its own PR unless an unresolved conflict prevents
+it. Do not hand a self-authored PR back to the user merely because author
+GitHub approval is unavailable. Missing admission or failed checks are work
+for the creating LLM to diagnose and resolve, not grounds to request that a
+human perform the merge. Keep ownership across turns and report any actual
+unresolved conflict with its concrete evidence. Completion means the merge
+is confirmed, not that a branch or PR was merely created.
+
+Use the supported admission route and normal protected merge. This ownership
+rule does not make fabricated review evidence or a protection bypass valid.
+
+
+### Admission route mismatch observed 2026-09-29
+
+The user can authorize self-review and landing, and SPipe exposes admission
+APIs. The current obstacle is a mismatch between those APIs' required trust
+contract and the deployed Simple workflow—not missing user authorization.
+The installed `spipe:dev` skill and live `spipe_self_review_guide` require a
+configured broker with authenticated v2 policy and exact review receipts;
+they explicitly prohibit the legacy `self_attestation`-only route. The repo
+configuration still reports the signed broker unconfigured/unimplemented.
+
+The older handoff instructions below recommend that legacy route and editing
+PR bodies to trigger a check. **They are conflicting historical guidance, not
+an authorized workaround for the current skill.** Do not fabricate receipts or
+change a PR solely to obtain skipped admission. First run the canonical guide,
+inspect current configuration, and resolve the skill/workflow/wiki/broker
+mismatch through the authorized process while retaining landing ownership. A completed code review is not itself admission;
+missing bootstrap evidence remains a separate blocker.
+
+See the [dated evidence, agent mistakes, and recovery procedure](../08_tracking/bug/spipe_admission_skill_workflow_mismatch_2026-09-29.md).
+The Caret wiki service was unavailable, so this update uses the repository's
+canonical wiki. No common/private scope or protection setting was changed.
+
+### Historical procedure (2026-09-27; see conflict notice above)
+
+**A pending PR is not waiting for review — diagnose before waiting (2026-09-27).**
+`spipe-vcs-v3-main` sets `required_approving_review_count: 0`, and every PR
+here is self-authored, so no provider approval will ever arrive and none is
+needed. When a PR sits `BLOCKED`, read the cause instead of waiting:
+`gh api repos/ormastes/simple/rulesets/21573643 --jq '.rules[]|select(.type=="pull_request").parameters.required_approving_review_count'`,
+`gh pr view <n> --json reviewDecision,statusCheckRollup` — a required context
+`QUEUED` means runner starvation (cancel
+in-progress runs whose PR is already merged or closed), a missing `SPipe Self Review Admission` means do the
+self review: a **higher model than the authoring session** (Fable/Opus, effort
+`high`+) reviews the exact head, posts it as `gh pr review --comment`, and on
+zero P0/P1 dispatches the admission. Never park a self-authored PR "awaiting
+review".
+
+**Resolve your own PR — the author lands it; nobody else will.** PR approval is
+impossible here (every PR is self-authored as `ormastes`; `gh pr review
+--approve` always fails) and not required (count 0). So the agent that opened a
+PR owns it until it is merged or closed:
+1. Review the exact head at high effort with a higher model than the author
+   (`claude -p --model claude-fable-5-1 "review PR #<n> ..."`); fix every P0/P1
+   on the branch; post the review with `gh pr review <n> --comment`.
+2. Draft -> `gh pr ready <n>`. Superseded/duplicate -> `gh pr close <n>
+   --comment "superseded by #<m>"`.
+3. Bring the branch up to date with `origin/main` (merge, keep both sides).
+4. Fire the admission check: `gh pr edit <n> --body-file <f>` with a body that
+   really differs (identical body = no event = no check-run).
+5. Poll `gh pr view <n> --json mergeable,mergeStateStatus` every 20 s; merge
+   with `gh pr merge <n> --merge --delete-branch` once `MERGEABLE` and
+   `CLEAN|UNSTABLE`; on "base advanced" repeat 3-5.
+6. Verify with `git ls-remote origin main`. Never end a session with your PR
+   parked "awaiting review".
+
 Search aliases: `self approve`, `approve PR`, and `author cannot approve` all
 mean: run `spipe self-review-guide` (or
 `node .spipe/spipe/cli/spipe.js self-review-guide`). GitHub forbids author
@@ -905,6 +1215,15 @@ is `tools/claude-plugin/repo-and-pull-req/skills/gh_pull_req_review/SKILL.md`.
   `0ea0:2211` exposes storage/HID only and must be rejected.
 - If OpenOCD reports the FTDI device absent, stop. Do not substitute CN22 CPLD
   service JTAG, guess CPU TAP wiring, or loop software resets.
+
+## Existing Simple native test binaries
+
+For compiled test executables like GoogleTest, use Simple's existing native
+runner, not a newly introduced foreign framework. Start with the
+[native test binary workflow](../07_guide/infra/testing/native_test_binary_workflow.md):
+explicit LLVM/Cranelift AOT commands, retained executables, source-list versus
+binary-owned counts, and the six-product compiler/interpreter/loader matrix.
+Research and repair existing aggregate/list entrypoints before replacing them.
 
 ## Protected release drive machinery (rc1, 2026-10-11)
 

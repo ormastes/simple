@@ -6,6 +6,10 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
 use compiler.mir.mir_types.{MirType}
 use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
+use compiler.common.diagnostics.span.{Span}
+use compiler.mir.mir_enum_semantic_types.{MirEnumPatternKindV1, MirEnumPatternNodeV1,
+    MirEnumSiteKindV1, MirEnumSiteV1, MirEnumArmSemanticV1, MirEnumMatchSemanticV1,
+    MirEnumVariantSlotsV1, MirEnumDeclarationIdentityV1}
 
 fn symbol_id_value(symbol: SymbolId) -> i64:
     symbol.id
@@ -564,30 +568,30 @@ fn serialize_mir_inst_kind(inst: MirInstKind) -> text:
 
 fn serialize_mir_block(block: MirBlock) -> text:
     """Serialize block to JSON."""
+    # Large basic blocks must not retain every growing instruction prefix.
     match block:
         case MirBlock(id, label, instructions, terminator):
-            var json = "{"
-            json = "{json}\"id\":{block_id_value(id)},"
+            var parts: [text] = ["{"]
+            parts = parts.push("\"id\":{block_id_value(id)},")
 
             if val block_label = label:
-                json = "{json}\"label\":\"{escape_json_string(block_label)}\","
+                parts = parts.push("\"label\":\"{escape_json_string(block_label)}\",")
             else:
-                json = "{json}\"label\":null,"
+                parts = parts.push("\"label\":null,")
 
             # Instructions
-            json = "{json}\"instructions\":["
-            var firstInst = true
+            parts = parts.push("\"instructions\":[")
+            # Join once: repeated prefix interpolation retains quadratic bytes.
+            var instruction_parts: [text] = []
             for inst in instructions:
-                if not firstInst:
-                    json = "{json},"
-                json = "{json}{serialize_mir_inst_kind(inst.kind)}"
-                firstInst = false
-            json = "{json}],"
+                instruction_parts.push(serialize_mir_inst_kind(inst.kind))
+            parts = parts.push(instruction_parts.join(","))
+            parts = parts.push("],")
 
             # Terminator
-            json = "{json}\"terminator\":{serialize_mir_terminator(terminator)}"
-            json = "{json}}"
-            json
+            parts = parts.push("\"terminator\":{serialize_mir_terminator(terminator)}")
+            parts = parts.push("}")
+            parts.join("")
 
 # ============================================================================
 # Signature Serialization
@@ -629,7 +633,7 @@ fn serialize_mir_signature(sig: MirSignature) -> text:
 fn serialize_mir_local(local: MirLocal) -> text:
     """Serialize local variable to JSON."""
     match local:
-        case MirLocal(id, name, type_, kind, is_ghost):
+        case MirLocal(id, name, type_, kind, is_ghost, short_borrow, short_mutable, short_boundary):
             var json = "{"
             json = "{json}\"id\":{local_id_value(id)},"
 
@@ -648,6 +652,13 @@ fn serialize_mir_local(local: MirLocal) -> text:
                 case Return: "\"Return\""
 
             json = "{json}\"kind\":{kindJson}"
+            # Preserve legacy bytes for locals without short provenance, but
+            # include all three fields whenever a short contract is present.
+            # Unknown boundary (-1) is serialized rather than invented.
+            if short_borrow or short_mutable or short_boundary != -1:
+                json = "{json},\"short_borrow\":{short_borrow},"
+                json = "{json}\"short_mutable\":{short_mutable},"
+                json = "{json}\"short_boundary\":{short_boundary}"
             json = "{json}}"
             json
 
@@ -656,39 +667,128 @@ fn serialize_mir_local(local: MirLocal) -> text:
 # ============================================================================
 
 fn serialize_mir_function(func: MirFunction) -> text:
-    """Serialize MIR function to JSON."""
-    var json = "{"
-    json = "{json}\"symbol\":{symbol_id_value(func.symbol)},"
-    json = "{json}\"name\":\"{escape_json_string(func.name)}\","
-    json = "{json}\"signature\":{serialize_mir_signature(func.signature)},"
+    """Serialize canonical MIR, including versioned nonempty enum metadata."""
+    serialize_mir_function_canonical_v1(func, true)
+
+fn serialize_mir_function_subject_v1(func: MirFunction) -> text:
+    """The existing canonical function subject, excluding only enum metadata."""
+    serialize_mir_function_canonical_v1(func, false)
+
+fn serialize_mir_function_canonical_v1(func: MirFunction, include_enum_metadata: bool) -> text:
+    # MIR capsule identities call this repeatedly. Retain each fragment once
+    # instead of copying all previous locals/blocks for every appended item.
+    var parts: [text] = ["{"]
+    parts = parts.push("\"symbol\":{symbol_id_value(func.symbol)},")
+    parts = parts.push("\"name\":\"{escape_json_string(func.name)}\",")
+    parts = parts.push("\"signature\":{serialize_mir_signature(func.signature)},")
 
     # Locals
-    json = "{json}\"locals\":["
-    var firstLocal = true
+    parts = parts.push("\"locals\":[")
+    var local_parts: [text] = []
     for local in func.locals:
-        if not firstLocal:
-            json = "{json},"
-        json = "{json}{serialize_mir_local(local)}"
-        firstLocal = false
-    json = "{json}],"
+        local_parts.push(serialize_mir_local(local))
+    parts = parts.push(local_parts.join(","))
+    parts = parts.push("],")
 
     # Blocks
-    json = "{json}\"blocks\":["
-    var firstBlock = true
+    parts = parts.push("\"blocks\":[")
+    var block_parts: [text] = []
     for block in func.blocks:
-        if not firstBlock:
-            json = "{json},"
-        json = "{json}{serialize_mir_block(block)}"
-        firstBlock = false
-    json = "{json}],"
+        block_parts.push(serialize_mir_block(block))
+    parts = parts.push(block_parts.join(","))
+    parts = parts.push("],")
 
-    json = "{json}\"entry_block\":{block_id_value(func.entry_block)}"
-    json = "{json}}"
-    json
+    parts = parts.push("\"entry_block\":{block_id_value(func.entry_block)}")
+    if include_enum_metadata and func.enum_matches.len() > 0:
+        # @workaround bug=seed_list_comprehension_join_and_empty_native_2026_10_21 recover=400bd5d1983 reason=preserve nonempty array values and a known join receiver
+        var matches: [text] = []
+        for record in func.enum_matches:
+            matches.push(serialize_mir_enum_match_v1(record))
+        parts.push(",\"enum_matches\":{\"schema\":\"MirEnumMatches-v1\",\"matches\":[")
+        parts.push(matches.join(","))
+        parts.push("]}")
+    parts = parts.push("}")
+    parts.join("")
 
-# ============================================================================
-# Utility Functions
-# ============================================================================
+fn serialize_mir_enum_span_v1(span: Span) -> text:
+    "{\"start\":{span.start},\"end\":{span.end},\"line\":{span.line},\"col\":{span.col},\"file\":\"{escape_json_string(span.file)}\",\"length\":{span.length}}"
+
+fn serialize_mir_enum_indexes_v1(indexes: [i64]) -> text:
+    # @workaround bug=seed_list_comprehension_join_and_empty_native_2026_10_21 recover=400bd5d1983 reason=preserve nonempty array values and a known join receiver
+    var parts: [text] = []
+    for index in indexes:
+        parts.push("{index}")
+    "[" + parts.join(",") + "]"
+
+fn serialize_mir_enum_pattern_v1(node: MirEnumPatternNodeV1) -> text:
+    val kind = match node.kind:
+        case MirEnumPatternKindV1.Wildcard: "\"Wildcard\""
+        case MirEnumPatternKindV1.Bind(symbol, local): "{\"Bind\":{\"source_symbol\":{symbol.id},\"destination_local\":{local.id}}}"
+        case MirEnumPatternKindV1.Variant(owner, discriminant, children): "{\"Variant\":{\"owner_symbol\":{owner.id},\"discriminant\":{discriminant},\"children\":{serialize_mir_enum_indexes_v1(children)}}}"
+        case MirEnumPatternKindV1.Tuple(children): "{\"Tuple\":{serialize_mir_enum_indexes_v1(children)}}"
+        case MirEnumPatternKindV1.Literal(value, exact_type): "{\"Literal\":{\"value\":{serialize_const_value(value)},\"exact_type\":{serialize_mir_type(exact_type)}}}"
+        case MirEnumPatternKindV1.Or(alternatives): "{\"Or\":{serialize_mir_enum_indexes_v1(alternatives)}}"
+    "{\"kind\":{kind},\"expected_type\":{serialize_mir_type(node.expected_type)},\"source_span\":{serialize_mir_enum_span_v1(node.source_span)}}"
+
+fn serialize_mir_enum_site_v1(site: MirEnumSiteV1) -> text:
+    val kind = match site.kind:
+        case MirEnumSiteKindV1.Discriminant: "Discriminant"
+        case MirEnumSiteKindV1.VariantIdentityCheck: "VariantIdentityCheck"
+        case MirEnumSiteKindV1.Payload: "Payload"
+        case MirEnumSiteKindV1.PayloadSlot: "PayloadSlot"
+        case MirEnumSiteKindV1.PayloadDecode: "PayloadDecode"
+        case MirEnumSiteKindV1.Guard: "Guard"
+        case MirEnumSiteKindV1.ArmResult: "ArmResult"
+        case MirEnumSiteKindV1.PatternInstruction: "PatternInstruction"
+        case MirEnumSiteKindV1.PatternTerminator: "PatternTerminator"
+    "{\"kind\":\"{kind}\",\"block_id\":{site.block_id.id},\"instruction_index\":{site.instruction_index},\"exact_instruction_identity\":\"{escape_json_string(site.exact_instruction_identity)}\",\"semantic_input_type\":{serialize_mir_type(site.semantic_input_type)},\"semantic_output_type\":{serialize_mir_type(site.semantic_output_type)},\"related_pattern_node\":{site.related_pattern_node}}"
+
+fn serialize_mir_enum_arm_v1(arm: MirEnumArmSemanticV1) -> text:
+    var guard_entry = "null"
+    if val entry = arm.guard_entry: guard_entry = "{entry.id}"
+    var guard_result = "null"
+    if val result = arm.guard_result: guard_result = serialize_operand(result)
+    # @workaround bug=seed_list_comprehension_join_and_empty_native_2026_10_21 recover=400bd5d1983 reason=native comprehension must preserve exit block identities
+    var exits: [i64] = []
+    for block in arm.body_exit_blocks:
+        exits.push(block.id)
+    "{\"source_arm_id\":{arm.source_arm_id},\"expanded_alternative_index\":{arm.expanded_alternative_index},\"pattern_root\":{arm.pattern_root},\"pattern_entry_block\":{arm.pattern_entry_block.id},\"pattern_entry_instruction_index\":{arm.pattern_entry_instruction_index},\"guard_entry\":{guard_entry},\"guard_entry_instruction_index\":{arm.guard_entry_instruction_index},\"guard_result\":{guard_result},\"body_entry\":{arm.body_entry.id},\"body_entry_instruction_index\":{arm.body_entry_instruction_index},\"body_exit_blocks\":{serialize_mir_enum_indexes_v1(exits)},\"pattern_failure_entry\":{arm.pattern_failure_entry.id},\"guard_failure_entry\":{arm.guard_failure_entry.id},\"source_span\":{serialize_mir_enum_span_v1(arm.source_span)}}"
+
+fn serialize_mir_enum_match_v1(record: MirEnumMatchSemanticV1) -> text:
+    # Stable field/vector order is part of the v1 canonical transport.
+    # @workaround bug=seed_list_comprehension_join_and_empty_native_2026_10_21 recover=400bd5d1983 reason=preserve nonempty enum metadata and known join receivers
+    var patterns: [text] = []
+    for node in record.pattern_nodes:
+        patterns.push(serialize_mir_enum_pattern_v1(node))
+    var arms: [text] = []
+    for arm in record.arms:
+        arms.push(serialize_mir_enum_arm_v1(arm))
+    var sites: [text] = []
+    for site in record.sites:
+        sites.push(serialize_mir_enum_site_v1(site))
+    var parts: [text] = ["{\"schema\":\"{escape_json_string(record.schema)}\",\"match_id\":{record.match_id},\"enum_owner\":{record.enum_owner.id},"]
+    parts.push("\"scrutinee_operand\":{serialize_operand(record.scrutinee_operand)},\"scrutinee_semantic_type\":{serialize_mir_type(record.scrutinee_semantic_type)},")
+    parts.push("\"entry_block\":{record.entry_block.id},\"entry_instruction_index\":{record.entry_instruction_index},\"result_local\":{record.result_local.id},\"merge_block\":{record.merge_block.id},")
+    parts.push("\"pattern_nodes\":[" + patterns.join(",") + "],\"arms\":[" + arms.join(",") + "],\"sites\":[" + sites.join(",") + "],")
+    parts.push("\"source_span\":{serialize_mir_enum_span_v1(record.source_span)},\"declaration_identity\":\"{escape_json_string(record.declaration_identity)}\",\"subject_identity\":\"{escape_json_string(record.subject_identity)}\"}")
+    parts.join("")
+
+fn serialize_mir_enum_variant_slots_v1(variant: MirEnumVariantSlotsV1) -> text:
+    # @workaround bug=seed_list_comprehension_join_and_empty_native_2026_10_21 recover=400bd5d1983 reason=preserve variant slots and known join receivers
+    var types: [text] = []
+    for type_ in variant.slot_types:
+        types.push(serialize_mir_type(type_))
+    var names: [text] = []
+    for name in variant.slot_names:
+        names.push("\"" + escape_json_string(name) + "\"")
+    "{\"discriminant\":{variant.discriminant},\"source_variant\":{variant.source_variant.id},\"slot_types\":[" + types.join(",") + "],\"slot_names\":[" + names.join(",") + "]}"
+
+fn serialize_mir_enum_declaration_v1(record: MirEnumDeclarationIdentityV1) -> text:
+    # @workaround bug=seed_list_comprehension_join_and_empty_native_2026_10_21 recover=400bd5d1983 reason=preserve declarations and a known join receiver
+    var variants: [text] = []
+    for variant in record.variants:
+        variants.push(serialize_mir_enum_variant_slots_v1(variant))
+    "{\"schema\":\"MirEnumDeclarationIdentity-v1\",\"owner\":{record.owner.id},\"source_owner\":{record.source_owner.id},\"runtime_name\":\"{escape_json_string(record.runtime_name)}\",\"runtime_identity\":{record.runtime_identity},\"variants\":[" + variants.join(",") + "]}"
 
 fn escape_json_string(s: text) -> text:
     """Escape string for JSON."""
@@ -696,8 +796,7 @@ fn escape_json_string(s: text) -> text:
     # interpolation copied the full prefix for every input unit, making long
     # MIR names and diagnostic payloads quadratic in output bytes.
     var parts: [text] = []
-    for i in 0..s.len():
-        val c = s[i:i+1]
+    for c in s.chars():
         if c == "\"":
             parts.push("\\\"")
         else:
@@ -713,7 +812,12 @@ fn escape_json_string(s: text) -> text:
                         if c == "\t":
                             parts.push("\\t")
                         else:
-                            parts.push(c)
+                            val code = c.ord()
+                            if code >= 0 and code < 32:
+                                val hex = "0123456789abcdef"
+                                parts.push("\\u00" + hex[code / 16:code / 16 + 1] + hex[code % 16:code % 16 + 1])
+                            else:
+                                parts.push(c)
     parts.join("")
 
 # ============================================================================

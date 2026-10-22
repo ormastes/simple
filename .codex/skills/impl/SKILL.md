@@ -10,6 +10,13 @@ description: "Codex implementation skill. 15-phase workflow from research throug
 
 ## Tools
 
+For native linking, follow `doc/07_guide/compiler/linker_selection.md`:
+external mold/LLD and the mold-like internal Simple linker are separate engines.
+Keep the admitted target/platform route until real internal correctness,
+compiler/application and performance evidence supports a reviewed cutover.
+Record actual engine/fallback; never count an external link as internal proof.
+Managed native admission still requires its admitted external hosted linker.
+
 - **Simple MCP** — query codebase structure, module graph
 - **Simple LSP MCP** — symbol lookup, type checking, go-to-definition
 - **Context7 MCP** — external library documentation

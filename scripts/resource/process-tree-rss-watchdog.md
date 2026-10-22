@@ -1,5 +1,107 @@
 # Sampled bootstrap RSS guard
 
+## Bounded latency diagnostics (explicit opt-in)
+
+`--observation-failure-mode=diagnostic --independent-cgroup=PARENT` permits a
+**completed, validated Linux `/proc` observation** to exceed its duration budget.
+The default remains `enforce`. Malformed or incomplete observations, helper
+integrity failures and admission failures remain fatal. The completed sample
+still feeds RSS enforcement and session-escape detection, and the main loop
+still checks its elapsed timeout before accepting child completion. Thus a
+completed child observed after the timeout returns 124 under the existing rule.
+This option does not change a running watchdog: arguments/environment are read
+at startup and HUP cancels the workload.
+
+The option requires enforced RSS, a positive timeout, an unprivileged supervisor
+without effective/permitted capabilities, and a root-provisioned finite common
+parent of **both** supervisor and worker. To provision that topology on a future
+invocation, the existing `stage3-cgroupfs.py root-run --bound-supervisor` option
+sets `memory.max` to the same `--maximum` MiB on the fresh private parent,
+enables parent `memory.oom.group=1`, verifies both before spawning, and retains
+the existing worker limit. The privileged cleanup owner remains outside.
+Existing root-run callers retain their worker-only topology unless they select
+the new flag. Both outer and inner watchdogs must explicitly select diagnostic
+mode and the same parent path; the worker path alone is refused. The parent is
+`dirname "$SIMPLE_BOOTSTRAP_STAGE3_CGROUPFS_WORKER"`; the environment name is
+only a path hint, never admission evidence.
+
+Admission verifies the real cgroup2 root mount, root-controlled directories,
+domain types, enabled memory controller, protected finite parent cap no larger
+than the configured RSS cap, and group OOM policy. The root's `cgroup.procs`
+must remain protected: cgroup-v2 migration outside this direct child requires
+write access to that common ancestor, which the dropped workload lacks. Both
+fixed leaf directories are protected from workload-created subgroups. Each
+waiver repeats these checks, verifies the parent device/inode and limit remain
+unchanged, and checks the supervisor and selected live members are in the two
+bounded leaves. Unknown membership fails closed. Checks use bounded in-process
+reads; they add no shell-outs or whole-tree scans. This is the existing
+cooperative unprivileged launch contract, not protection against a user
+deliberately invoking privileged software to escape it.
+
+On an otherwise ordinary completion with at least one timing waiver, the receipt
+says `status=diagnostic-incomplete`, `measurement_budget_complete=0` and retains
+the real child exit/signal code, measured peak and observation durations.
+`observation_complete=1` means the sample's data were validated; it does **not**
+repair the timing failure. Cap, session, timeout and integrity failures retain
+their failure statuses. `observation_failure_mode`, `independent_cgroup`,
+`independent_cgroup_checks`, `independent_memory_max_bytes` and
+`independent_oom_kills` make the opt-in/proof explicit. The watchdog still reports
+`hard_memory_limit=0`; the independent cgroup is the kernel limit. No diagnostic
+receipt is phase completion or measurement PASS evidence.
+
+The root provisioner retains the child's raw wait result separately and reads
+the parent's hierarchical `memory.events` OOM-kill counter after cleanup. A
+positive delta converts a zero leader result to 137; existing nonzero results
+remain unsuccessful. Missing/decreasing counters fail closed. This covers a
+leader-zero/member-OOM race. The surviving diagnostic watchdog also checks the
+parent OOM counter before its final receipt.
+
+`sh test/01_unit/scripts/process_tree_rss_bounded_diagnostic_test.shs` exercises
+production refusals, proof policy fixtures and real short shell children under
+a private fault-injected copy, including cap, escape, timeout, partial reads,
+proof mutation, child nonzero/signal and OOM result handling. These fixtures do
+not themselves qualify privileged provisioning or real kernel OOM behavior.
+Separate root-owned cycles have since passed containment/cleanup and the real
+leader-zero/member-OOM case. The final nested cycle also passed: both watchdogs
+preserved child exit 7, enforced RSS and verified cleanup while reporting
+`diagnostic-incomplete` and incomplete measurement timing. All three kernel
+criteria cumulatively passed within the three-cycle cap; earlier failures
+remain retained. See the
+[dated evidence and root-interface correction](../../doc/08_tracking/bug/watchdog_observation_latency_cancels_bounded_build_2026_10_19.md).
+
+## Linux observation diagnostics
+
+Linux `/proc` receipts add `observation_diagnostics=linux-proc-v1` and retain
+the slowest completed observation, or the **first failed observation**, which
+cleanup samples cannot replace. `observation_complete=0` identifies failure;
+`observation_last_phase` names the phase active at that boundary. Other backends
+and runs without an observation report `observation_diagnostics=unavailable`.
+
+`observation_{proc,membership,helper,sessions,budget_check}_ms` are monotonic
+elapsed durations for the retained sample. `observation_phases_completed` lists
+completed phases in order; zero time in an unlisted phase means unobserved,
+not a measured zero. `observation_elapsed_ms` is their sum. The original
+`observation_budget_ms` remains the enforcement limit, with its existing policy.
+`proc` includes enumeration, reads and parsing; `membership` includes selecting
+live members; `helper` includes existing pinned helper integrity verification;
+`sessions` validates session membership; `budget_check` checks elapsed policy.
+
+`observation_cpu_ms` is the supervisor's user plus system CPU delta from Perl
+`times`, excluding child CPU, at the host's accounting tick resolution. Zero
+can mean less than one tick; unavailable readings use `unavailable`. Elapsed
+minus CPU does not distinguish descheduling from blocked I/O or prove a cause.
+`observation_process_count` counts accepted host `/proc` records; its
+`observation_process_count_complete` flag distinguishes partial scans.
+`observation_selected_count` counts existing live membership results, or is
+`unavailable` when selection did not run. `observation_retained_group_count`
+counts tracked groups at sample entry. No extra scans, shell-outs, or hashes
+are performed by this telemetry. These fields do not themselves relax policy;
+the separately admitted bounded latency option above controls timing waivers.
+
+Run `sh test/01_unit/scripts/process_tree_rss_diagnostics_test.shs` for private
+fixture delays, partial failure, CPU accounting, first-failure retention and
+real workload cleanup. No compiler/bootstrap workload is involved.
+
 `perl scripts/resource/process-tree-rss-watchdog.pl --max-rss-kib=5859375
 --interval-ms=100 --timeout-seconds=660 --receipt=/absolute/run.rss.env
 -- COMMAND ARGS...` supervises one command on macOS/Linux. The production
@@ -204,10 +306,10 @@ See [the bounded protocol](freebsd-reaper-protocol.md). The focused regression
 harness requires FreeBSD and a real original-pane test command; missing that
 test is reported `NOT_RUN`, never a complete qualification PASS.
 
-Sampling failure, malformed output, or a sample exceeding its observation
-budget causes exit 89. The default is five seconds on FreeBSD and one second
+Sampling failure, malformed output, or (under the default enforced observation
+policy) a sample exceeding its observation budget causes exit 89. The default is five seconds on FreeBSD and one second
 elsewhere. `SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS` explicitly selects a
-budget from 1000 through 30000 milliseconds on every platform; invalid values
+budget from 1000 through 60000 milliseconds on every platform; invalid values
 fail closed. This changes the allowed observation duration, not the RSS cap
 or 100 ms target cadence. Scheduling uses the remaining
 interval budget, rather than adding a full sleep after measurement. Scheduler

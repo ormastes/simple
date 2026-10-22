@@ -153,11 +153,19 @@ fn post_mono_specialization_manifest(modules: Dict<text, HirModule>) -> [text]:
     var rows: [text] = []
     if modules == nil:
         return rows
-    for key in modules.keys():
+    # Cycle-90 playbook form: materialized keys + guard-first double access
+    # (the generated-codec extraction shape; single-access draws are defective).
+    val module_keys: [text] = modules.keys()
+    for key in module_keys:
+        if modules[key] == nil:
+            continue
         val m: HirModule = modules[key]
         if m == nil:
             continue
-        for fkey in m.functions.keys():
+        val row_function_keys: [SymbolId] = m.functions.keys()
+        for fkey in row_function_keys:
+            if m.functions[fkey] == nil:
+                continue
             val f: HirFunction = m.functions[fkey]
             val fname: text = f.name ?? ""
             if fname.contains("$"):
@@ -245,40 +253,53 @@ class PostMonoVerifier:
         var seen_keys: Dict<text, text> = {}
         if modules == nil:
             return
-        for key in modules.keys():
+        val closure_module_keys: [text] = modules.keys()
+        for key in closure_module_keys:
+            if modules[key] == nil:
+                continue
             val m: HirModule = modules[key]
             if m == nil:
                 continue
-            val mname: text = m.name ?? ""
-            for fkey in m.functions.keys():
-                val f: HirFunction = m.functions[fkey]
-                val fname: text = f.name ?? ""
-                val fs: SymbolId = f.symbol
-                if self.is_template(f.type_params, f.is_generic_template):
-                    # A generic CLASS's method is `is_generic_template` under
-                    # its bare method name (`ready`, `pending`, `get`); keying
-                    # it here made a cross-module call to a non-generic FREE
-                    # function of the same name an E-MONO-036 (real instance:
-                    # std.nogc_async_mut.async_embedded `ready`/`pending`).
-                    # Method templates are reached through a receiver, never
-                    # through a bare callee symbol, so they are not candidates.
-                    if not f.is_method:
-                        self.template_keys["{mname}.{fname}"] = true
-                    continue
-                if not fname.contains("$"):
-                    continue
-                # A specialization lives in its template's module, so the
-                # `$` prefix names a template of THIS module (pruned or not).
-                self.template_keys["{mname}.{fname.split("$")[0]}"] = true
-                if seen_keys.has(fname):
-                    self.symbol = "{mname}.{fname}"
-                    self.chain = "first emitted in {seen_keys[fname]}"
-                    self.r.duplicate_specialization_key = self.r.duplicate_specialization_key + 1
-                    self.record_coded("E-MONO-037", "duplicate specialization key",
-                        "specialization key `{fname}` is emitted more than once (first in {seen_keys[fname]}, again in {mname})")
-                else:
-                    seen_keys[fname] = mname
-                self.spec_ids[fs.id] = fname
+            seen_keys = self.index_module(m, seen_keys)
+
+    me index_module(m: HirModule, prior_seen: Dict<text, text>) -> Dict<text, text>:
+        # The retained and leased paths share this exact closure-index body.
+        var seen_keys = prior_seen
+        if m == nil: return seen_keys
+        val mname: text = m.name ?? ""
+        val index_function_keys: [SymbolId] = m.functions.keys()
+        for fkey in index_function_keys:
+            if m.functions[fkey] == nil:
+                continue
+            val f: HirFunction = m.functions[fkey]
+            val fname: text = f.name ?? ""
+            val fs: SymbolId = f.symbol
+            if self.is_template(f.type_params, f.is_generic_template):
+                # A generic CLASS's method is `is_generic_template` under
+                # its bare method name (`ready`, `pending`, `get`); keying
+                # it here made a cross-module call to a non-generic FREE
+                # function of the same name an E-MONO-036 (real instance:
+                # std.nogc_async_mut.async_embedded `ready`/`pending`).
+                # Method templates are reached through a receiver, never
+                # through a bare callee symbol, so they are not candidates.
+                if not f.is_method:
+                    self.template_keys["{mname}.{fname}"] = true
+                continue
+            if not fname.contains("$"):
+                continue
+            # A specialization lives in its template's module, so the
+            # `$` prefix names a template of THIS module (pruned or not).
+            self.template_keys["{mname}.{fname.split("$")[0]}"] = true
+            if seen_keys.has(fname):
+                self.symbol = "{mname}.{fname}"
+                self.chain = "first emitted in {seen_keys[fname]}"
+                self.r.duplicate_specialization_key = self.r.duplicate_specialization_key + 1
+                self.record_coded("E-MONO-037", "duplicate specialization key",
+                    "specialization key `{fname}` is emitted more than once (first in {seen_keys[fname]}, again in {mname})")
+            else:
+                seen_keys[fname] = mname
+            self.spec_ids[fs.id] = fname
+        seen_keys
 
     me table_symbol_name(sid: i64) -> text?:
         """Name the module symbol table binds to `sid`, if any."""
@@ -288,6 +309,8 @@ class PostMonoVerifier:
         if table == nil:
             return nil
         if not table.has(sid):
+            return nil
+        if table[sid] == nil:
             return nil
         val hs: HirSymbol = table[sid]
         if hs == nil:
@@ -301,6 +324,8 @@ class PostMonoVerifier:
         if table == nil:
             return false
         if not table.has(sid):
+            return false
+        if table[sid] == nil:
             return false
         val hs: HirSymbol = table[sid]
         if hs == nil:
@@ -359,6 +384,8 @@ class PostMonoVerifier:
                     return
                 var owner: text = self.cur_module
                 val table: Dict<i64, HirSymbol> = self.cur_symbols.symbols
+                if table[sid] == nil:
+                    return
                 val hs: HirSymbol = table[sid]
                 if val dm = hs.defining_module:
                     val dmt: text = dm
@@ -630,6 +657,18 @@ class PostMonoVerifier:
             case HirExprKind.Continue(_): pass_do_nothing("control transfer")
             case HirExprKind.Throw(value): self.walk_expr(value)
             case HirExprKind.Try(e): self.walk_expr(e)
+            case HirExprKind.TryCatch(body, clauses, finally_):
+                self.walk_block(body)
+                for clause in clauses:
+                    val catch_clause: HirCatchClause = clause
+                    if catch_clause.has_pattern:
+                        self.walk_pattern(catch_clause.pattern)
+                    if catch_clause.has_type_:
+                        self.walk_type_kind(catch_clause.type_.kind)
+                    self.walk_block(catch_clause.body)
+                if finally_ != nil:
+                    val finally_block: HirBlock = finally_
+                    self.walk_block(finally_block)
             case HirExprKind.Await(e): self.walk_expr(e)
             case HirExprKind.Yield(value): self.walk_opt_expr(value)
             case HirExprKind.StructLit(type_, fields):
@@ -927,13 +966,18 @@ class PostMonoVerifier:
         self.cur_module = mname ?? ""
         self.cur_symbols = module.symbols
         self.cur_fn_ids = {}
-        for key in module.functions.keys():
+        val verify_function_keys: [SymbolId] = module.functions.keys()
+        for key in verify_function_keys:
+            if module.functions[key] == nil:
+                continue
             val tf: HirFunction = module.functions[key]
             val tsym: SymbolId = tf.symbol
             self.cur_fn_ids[tsym.id] = true
             if self.is_template(tf.type_params, tf.is_generic_template):
                 self.template_syms[tsym.id] = tf.name
-        for key in module.functions.keys():
+        for key in verify_function_keys:
+            if module.functions[key] == nil:
+                continue
             val f: HirFunction = module.functions[key]
             self.enter(mname, f.name)
             if self.is_template(f.type_params, f.is_generic_template):
@@ -946,7 +990,10 @@ class PostMonoVerifier:
             if f.return_type != nil:
                 self.walk_type_kind(f.return_type.kind)
             self.walk_block(f.body)
-        for key in module.structs.keys():
+        val verify_struct_keys: [SymbolId] = module.structs.keys()
+        for key in verify_struct_keys:
+            if module.structs[key] == nil:
+                continue
             val s: HirStruct = module.structs[key]
             self.enter(mname, s.name)
             if self.is_template(s.type_params, s.is_generic_template):
@@ -958,7 +1005,10 @@ class PostMonoVerifier:
                 val ft: HirField = fld
                 if ft.type_ != nil:
                     self.walk_type_kind(ft.type_.kind)
-        for key in module.classes.keys():
+        val verify_class_keys: [SymbolId] = module.classes.keys()
+        for key in verify_class_keys:
+            if module.classes[key] == nil:
+                continue
             val c: HirClass = module.classes[key]
             self.enter(mname, c.name)
             if self.is_template(c.type_params, c.is_generic_template):
@@ -970,7 +1020,10 @@ class PostMonoVerifier:
                 val ft2: HirField = fld
                 if ft2.type_ != nil:
                     self.walk_type_kind(ft2.type_.kind)
-        for key in module.enums.keys():
+        val verify_enum_keys: [SymbolId] = module.enums.keys()
+        for key in verify_enum_keys:
+            if module.enums[key] == nil:
+                continue
             val e: HirEnum = module.enums[key]
             self.enter(mname, e.name)
             if self.is_template(e.type_params, e.is_generic_template):
@@ -999,7 +1052,10 @@ fn post_mono_verify_modules(modules: Dict<text, HirModule>) -> PostMonoReport:
     if modules == nil:
         return v.r
     v.index_closure(modules)
-    for key in modules.keys():
+    val entry_module_keys: [text] = modules.keys()
+    for key in entry_module_keys:
+        if modules[key] == nil:
+            continue
         val m: HirModule = modules[key]
         v.verify_module(m)
     v.r

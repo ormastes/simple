@@ -40,3 +40,38 @@ the real file-based cache key API. It also checks stable repeat keys, entry
 role separation and missing-source rejection. These tests are written but
 unexecuted until a functioning pure-Simple runner is available. Compiler
 construction and the normal runner replay remain required.
+
+## 2026-10-12: recurrence in the retained Phase 2 producer
+
+The independent adapter attempt in
+`build/native_probe/phase2-adapter-f2-20261012-sol` reproduced this bug with
+producer SHA256
+`f2ce31b4e4dea1ea6ca3e8726cd411144914c24ffcf58722021f38c4b6393dec`.
+All 14,614 frozen source files and the runtime/producer bytes matched before
+and after. It failed in 104.6139684 seconds, exit 1, final Job active 0,
+peak process-tree RSS 4,243,300 KiB; no adapter executable was generated.
+
+The retained audit found 53 HIR owners, one mismatched owner, and no empty
+module names. Identical sync/async `env/mod.spl` source bytes, SHA256
+`83bea209d4c2355aa67b8b445355043fb5225d68e9e64d9bc606d4c7cab84c8f`,
+shared key
+`d9dc6c32ca2c6be1b08ee2748d57f07b5b0425898547342652652c0817385fb4`.
+That cached payload encoded the async module path while the sync task's
+terminal row reported PASS. The strict cold-HIR receipt gate correctly
+rejected the mismatch. A cache terminal PASS is not owner-qualified evidence.
+The driver's printed entry-zero paths describe another owner and cannot
+establish the failing owner's identity.
+
+Source fix `349abf4239e5980718cba3b91ae6878b56471366` is already present in
+the current shared source. The retained producer's source counterpart still
+uses the old key without physical source identity. This is an unapplied-to-
+producer repair, not proof that the new source fix regressed. Do not create
+a duplicate source patch or weaken receipt validation. A successor producer
+must embed the existing fix; its phase-bound cache must retain the new
+producer identity. Any temporary persistence-disabled diagnostic is limited
+to this proven collision and does not qualify default caching or the new key.
+
+Evidence: `RESULT.json`, `HIR_OWNER_AUDIT.json`, `FINDING.md`, and
+`attempt/receipt.env` under the adapter packet. The original full test products
+remain 0/6 qualified with zero original cases executed. The new cache-key
+SSpec remains unrun; these offline diagnostics do not replace it.

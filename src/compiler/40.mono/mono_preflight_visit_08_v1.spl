@@ -1,0 +1,655 @@
+# Bounded semantic preflight, not a codec or specialization implementation.
+# Field/variant walk is mechanically adapted from all 97 hc_enc_* owners in
+# compiler/20.hir/generated/hir_codec.spl; no decoder or encoded output is used.
+# Frozen input SHA256: e6ddcf4358668819c508742ceb120372cabd3cb03b961a6584a80d0ca6780e05
+# The 97 mono_pf_* names preserve the encoder suffix exactly. Every visited
+# field, enum arm and optional branch corresponds to that source. Wire writes
+# become resource reservations, array lengths reserve before loops, dictionary
+# snapshots reserve a concrete typed count first, sorting is unnecessary here.
+# Reconcile this mirror when the exported codec/schema versions change; the
+# public entries refuse differing actual versions/rules before visiting HIR.
+# Unknown enum variants fail closed. No canonical-codec availability is claimed.
+#
+# Allocation-free dictionary cardinality uses the existing typed provider:
+# _MirLoweringExpr/method_calls_literals.spl routes HirTypeKind.Dict .len()
+# to rt_dict_len; runtime_native.c reads the same registered dictionary length
+# used by rt_dict_keys. The pure-Simple core_array provider uses dict_len_value
+# for the same pair. These concrete receiver types prevent erased rt_len.
+# Snapshot equality detects inconsistency; it is not a substitute for the
+# provider's count/keys contract, and native qualification remains UNRUN.
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_types.{HirModule, HirType}
+use compiler.hir.hir_operators.{HirBinOp, HirUnaryOp, HirAssignOp}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.dynamic_identity.closure.{Closure}
+use compiler.blocks.value.{BlockValue}
+use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind}
+use compiler.common.attributes.{FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata, VhdlClockedMetadata, VhdlGenericMetadata, VhdlReturnFieldMetadata, VhdlResetPolarity, VhdlResetSynchrony, OptimizationReq, OptimizationReqLevel, OptimizationBackend}
+use compiler.frontend.parser_types_expr.{AsmTargetSpec, AsmConstraintKind, AsmLocation, Type, TypeKind, Expr}
+
+use compiler.mono.mono_invocation_policy_v1.{MonoInvocationBudgetV1}
+use compiler.hir.hir_codec.{HIR_CODEC_VERSION, HIR_CANONICAL_CODEC_VERSION,
+    HIR_CANONICAL_CODEC_RULES_V1}
+use compiler.frontend.core.flat_pool_codec.{FLAT_POOL_CODEC_VERSION}
+
+
+use compiler.mono.mono_preflight_walk_v1.*
+
+# Static visitor extension; all recursion remains on one concrete walk.
+impl MonoPreflightWalkV1:
+    me mono_pf_vhdl_reset_polarity_v1(node: VhdlResetPolarity):
+        if not self.enter_v1(): return
+        defer self.leave_v1()
+        if node == nil:
+            self.reject("nil VhdlResetPolarity node")
+            return
+        match node:
+            case VhdlResetPolarity.ActiveLow:
+                if not self.scalar_v1(): return
+            case VhdlResetPolarity.ActiveHigh:
+                if not self.scalar_v1(): return
+            case _: self.reject("unencodable VhdlResetPolarity enum")
+
+    me mono_pf_vhdl_reset_synchrony_v1(node: VhdlResetSynchrony):
+        if not self.enter_v1(): return
+        defer self.leave_v1()
+        if node == nil:
+            self.reject("nil VhdlResetSynchrony node")
+            return
+        match node:
+            case VhdlResetSynchrony.Async:
+                if not self.scalar_v1(): return
+            case VhdlResetSynchrony.Sync:
+                if not self.scalar_v1(): return
+            case VhdlResetSynchrony.None_:
+                if not self.scalar_v1(): return
+            case _: self.reject("unencodable VhdlResetSynchrony enum")
+
+    me mono_pf_vhdl_return_field_metadata_v1(node: VhdlReturnFieldMetadata):
+        if not self.enter_v1(): return
+        defer self.leave_v1()
+        if node == nil:
+            self.reject("nil VhdlReturnFieldMetadata node")
+            return
+        if not self.text_v1(node.label): return
+        if not self.text_v1(node.type_text): return
+
+    me mono_pf_visibility_v1(node: Visibility):
+        if not self.enter_v1(): return
+        defer self.leave_v1()
+        if node == nil:
+            self.reject("nil Visibility node")
+            return
+        match node:
+            case Visibility.Public:
+                if not self.scalar_v1(): return
+            case Visibility.Peer:
+                if not self.scalar_v1(): return
+            case Visibility.Up:
+                if not self.scalar_v1(): return
+            case Visibility.Internal:
+                if not self.scalar_v1(): return
+            case Visibility.Package:
+                if not self.scalar_v1(): return
+            case Visibility.Private:
+                if not self.scalar_v1(): return
+            case _: self.reject("unencodable Visibility enum")
+
+    me mono_pf_hir_expr_arms_01_v1(node: HirExprKind) -> bool:
+        match node:
+            case HirExprKind.IntLit(b_value, b_suffix):
+                if not self.scalar_v1(): return true
+                if not self.scalar_v1(): return true
+                if val o0 = b_suffix:
+                    if not self.scalar_v1(): return true
+                    if not self.text_v1(o0): return true
+                else:
+                    if not self.scalar_v1(): return true
+                return true
+            case HirExprKind.FloatLit(b_value, b_suffix):
+                if not self.scalar_v1(): return true
+                if not self.scalar_v1(): return true
+                if val o1 = b_suffix:
+                    if not self.scalar_v1(): return true
+                    if not self.text_v1(o1): return true
+                else:
+                    if not self.scalar_v1(): return true
+                return true
+            case HirExprKind.StringLit(b_value, b_interpolations):
+                if not self.scalar_v1(): return true
+                if not self.text_v1(b_value): return true
+                if val o2 = b_interpolations:
+                    if not self.scalar_v1(): return true
+                    if not self.array_v1(if o2 == nil: 0 else: o2.len()): return true
+                    for e3 in (o2 ?? []):
+                        if not self.active_v1(): return true
+                        val enc_node_v4: HirInterpolation = e3
+                        if not enc_node_v4.?:
+                            self.reject("absent required child in hir_expr_kind")
+                            return true
+                        else:
+                            if not self.scalar_v1(): return true
+                            self.mono_pf_hir_interpolation_v1(enc_node_v4)
+                            if not self.active_v1(): return true
+                else:
+                    if not self.scalar_v1(): return true
+                return true
+            case HirExprKind.BoolLit(b_value):
+                if not self.scalar_v1(): return true
+                if not self.scalar_v1(): return true
+                return true
+            case HirExprKind.CharLit(b_value):
+                if not self.scalar_v1(): return true
+                if not self.scalar_v1(): return true
+                return true
+            case HirExprKind.UnitLit:
+                if not self.scalar_v1(): return true
+                return true
+            case HirExprKind.NilLit:
+                if not self.scalar_v1(): return true
+                return true
+            case HirExprKind.ArrayLit(b_elements, b_type_):
+                if not self.scalar_v1(): return true
+                if not self.array_v1(if b_elements == nil: 0 else: b_elements.len()): return true
+                for e5 in (b_elements ?? []):
+                    if not self.active_v1(): return true
+                    val enc_node_v6: HirExpr = e5
+                    if not enc_node_v6.?:
+                        self.reject("absent required child in hir_expr_kind")
+                        return true
+                    else:
+                        if not self.scalar_v1(): return true
+                        self.mono_pf_hir_expr_v1(enc_node_v6)
+                        if not self.active_v1(): return true
+                if val o7 = b_type_:
+                    if not self.scalar_v1(): return true
+                    val enc_node_v8: HirType = o7
+                    if not enc_node_v8.?:
+                        self.reject("absent required child in hir_expr_kind")
+                        return true
+                    else:
+                        if not self.scalar_v1(): return true
+                        self.mono_pf_hir_type_v1(enc_node_v8)
+                        if not self.active_v1(): return true
+                else:
+                    if not self.scalar_v1(): return true
+                return true
+            case HirExprKind.ArrayRepeat(b_value, b_count, b_elem_type):
+                if not self.scalar_v1(): return true
+                val enc_node_v9: HirExpr = b_value
+                if not enc_node_v9.?:
+                    self.reject("absent required child in hir_expr_kind")
+                    return true
+                else:
+                    if not self.scalar_v1(): return true
+                    self.mono_pf_hir_expr_v1(enc_node_v9)
+                    if not self.active_v1(): return true
+                val enc_node_v10: HirExpr = b_count
+                if not enc_node_v10.?:
+                    self.reject("absent required child in hir_expr_kind")
+                    return true
+                else:
+                    if not self.scalar_v1(): return true
+                    self.mono_pf_hir_expr_v1(enc_node_v10)
+                    if not self.active_v1(): return true
+                if val o11 = b_elem_type:
+                    if not self.scalar_v1(): return true
+                    val enc_node_v12: HirType = o11
+                    if not enc_node_v12.?:
+                        self.reject("absent required child in hir_expr_kind")
+                        return true
+                    else:
+                        if not self.scalar_v1(): return true
+                        self.mono_pf_hir_type_v1(enc_node_v12)
+                        if not self.active_v1(): return true
+                else:
+                    if not self.scalar_v1(): return true
+                return true
+            case HirExprKind.TupleLit(b_elements):
+                if not self.scalar_v1(): return true
+                if not self.array_v1(if b_elements == nil: 0 else: b_elements.len()): return true
+                for e13 in (b_elements ?? []):
+                    if not self.active_v1(): return true
+                    val enc_node_v14: HirExpr = e13
+                    if not enc_node_v14.?:
+                        self.reject("absent required child in hir_expr_kind")
+                        return true
+                    else:
+                        if not self.scalar_v1(): return true
+                        self.mono_pf_hir_expr_v1(enc_node_v14)
+                        if not self.active_v1(): return true
+                return true
+            case HirExprKind.DictLit(b_entries, b_key_type, b_value_type):
+                if not self.scalar_v1(): return true
+                if not self.array_v1(if b_entries == nil: 0 else: b_entries.len()): return true
+                for (pa15, pb15) in (b_entries ?? []):
+                    if not self.active_v1(): return true
+                    val enc_node_v16: HirExpr = pa15
+                    if not enc_node_v16.?:
+                        if not self.scalar_v1(): return true
+                    else:
+                        if not self.scalar_v1(): return true
+                        self.mono_pf_hir_expr_v1(enc_node_v16)
+                        if not self.active_v1(): return true
+                    val enc_node_v17: HirExpr = pb15
+                    if not enc_node_v17.?:
+                        if not self.scalar_v1(): return true
+                    else:
+                        if not self.scalar_v1(): return true
+                        self.mono_pf_hir_expr_v1(enc_node_v17)
+                        if not self.active_v1(): return true
+                val enc_node_v18: HirType = b_key_type
+                if not enc_node_v18.?:
+                    self.reject("absent required child in hir_expr_kind")
+                    return true
+                else:
+                    if not self.scalar_v1(): return true
+                    self.mono_pf_hir_type_v1(enc_node_v18)
+                    if not self.active_v1(): return true
+                if val o19 = b_value_type:
+                    if not self.scalar_v1(): return true
+                    val enc_node_v20: HirType = o19
+                    if not enc_node_v20.?:
+                        self.reject("absent required child in hir_expr_kind")
+                        return true
+                    else:
+                        if not self.scalar_v1(): return true
+                        self.mono_pf_hir_type_v1(enc_node_v20)
+                        if not self.active_v1(): return true
+                else:
+                    if not self.scalar_v1(): return true
+                return true
+            case HirExprKind.SetLit(b_elements, b_elem_type):
+                if not self.scalar_v1(): return true
+                if not self.array_v1(if b_elements == nil: 0 else: b_elements.len()): return true
+                for e21 in (b_elements ?? []):
+                    if not self.active_v1(): return true
+                    val enc_node_v22: HirExpr = e21
+                    if not enc_node_v22.?:
+                        self.reject("absent required child in hir_expr_kind")
+                        return true
+                    else:
+                        if not self.scalar_v1(): return true
+                        self.mono_pf_hir_expr_v1(enc_node_v22)
+                        if not self.active_v1(): return true
+                if val o23 = b_elem_type:
+                    if not self.scalar_v1(): return true
+                    val enc_node_v24: HirType = o23
+                    if not enc_node_v24.?:
+                        self.reject("absent required child in hir_expr_kind")
+                        return true
+                    else:
+                        if not self.scalar_v1(): return true
+                        self.mono_pf_hir_type_v1(enc_node_v24)
+                        if not self.active_v1(): return true
+                else:
+                    if not self.scalar_v1(): return true
+                return true
+            case HirExprKind.Var(b_symbol):
+                if not self.scalar_v1(): return true
+                val enc_node_v25: SymbolId = b_symbol
+                if not enc_node_v25.?:
+                    self.reject("absent required child in hir_expr_kind")
+                    return true
+                else:
+                    if not self.scalar_v1(): return true
+                    self.mono_pf_symbol_id_v1(enc_node_v25)
+                    if not self.active_v1(): return true
+                return true
+            case HirExprKind.NamedVar(b_symbol, b_name):
+                if not self.scalar_v1(): return true
+                val enc_node_v26: SymbolId = b_symbol
+                if not enc_node_v26.?:
+                    self.reject("absent required child in hir_expr_kind")
+                    return true
+                else:
+                    if not self.scalar_v1(): return true
+                    self.mono_pf_symbol_id_v1(enc_node_v26)
+                    if not self.active_v1(): return true
+                if not self.text_v1(b_name): return true
+                return true
+            case HirExprKind.Field(b_base, b_field, b_resolved):
+                if not self.scalar_v1(): return true
+                val enc_node_v27: HirExpr = b_base
+                if not enc_node_v27.?:
+                    self.reject("absent required child in hir_expr_kind")
+                    return true
+                else:
+                    if not self.scalar_v1(): return true
+                    self.mono_pf_hir_expr_v1(enc_node_v27)
+                    if not self.active_v1(): return true
+                if not self.text_v1(b_field): return true
+                if val o28 = b_resolved:
+                    if not self.scalar_v1(): return true
+                    val enc_node_v29: SymbolId = o28
+                    if not enc_node_v29.?:
+                        self.reject("absent required child in hir_expr_kind")
+                        return true
+                    else:
+                        if not self.scalar_v1(): return true
+                        self.mono_pf_symbol_id_v1(enc_node_v29)
+                        if not self.active_v1(): return true
+                else:
+                    if not self.scalar_v1(): return true
+                return true
+            case HirExprKind.Index(b_base, b_index):
+                if not self.scalar_v1(): return true
+                val enc_node_v30: HirExpr = b_base
+                if not enc_node_v30.?:
+                    self.reject("absent required child in hir_expr_kind")
+                    return true
+                else:
+                    if not self.scalar_v1(): return true
+                    self.mono_pf_hir_expr_v1(enc_node_v30)
+                    if not self.active_v1(): return true
+                val enc_node_v31: HirExpr = b_index
+                if not enc_node_v31.?:
+                    self.reject("absent required child in hir_expr_kind")
+                    return true
+                else:
+                    if not self.scalar_v1(): return true
+                    self.mono_pf_hir_expr_v1(enc_node_v31)
+                    if not self.active_v1(): return true
+                return true
+            case HirExprKind.TupleIndex(b_base, b_index):
+                if not self.scalar_v1(): return true
+                val enc_node_v32: HirExpr = b_base
+                if not enc_node_v32.?:
+                    self.reject("absent required child in hir_expr_kind")
+                    return true
+                else:
+                    if not self.scalar_v1(): return true
+                    self.mono_pf_hir_expr_v1(enc_node_v32)
+                    if not self.active_v1(): return true
+                if not self.scalar_v1(): return true
+                return true
+            case HirExprKind.OptionalChain(b_base, b_field):
+                if not self.scalar_v1(): return true
+                val enc_node_v33: HirExpr = b_base
+                if not enc_node_v33.?:
+                    self.reject("absent required child in hir_expr_kind")
+                    return true
+                else:
+                    if not self.scalar_v1(): return true
+                    self.mono_pf_hir_expr_v1(enc_node_v33)
+                    if not self.active_v1(): return true
+                if not self.text_v1(b_field): return true
+                return true
+            case HirExprKind.NullCoalesce(b_left, b_right):
+                if not self.scalar_v1(): return true
+                val enc_node_v34: HirExpr = b_left
+                if not enc_node_v34.?:
+                    self.reject("absent required child in hir_expr_kind")
+                    return true
+                else:
+                    if not self.scalar_v1(): return true
+                    self.mono_pf_hir_expr_v1(enc_node_v34)
+                    if not self.active_v1(): return true
+                val enc_node_v35: HirExpr = b_right
+                if not enc_node_v35.?:
+                    self.reject("absent required child in hir_expr_kind")
+                    return true
+                else:
+                    if not self.scalar_v1(): return true
+                    self.mono_pf_hir_expr_v1(enc_node_v35)
+                    if not self.active_v1(): return true
+                return true
+            case HirExprKind.ExistsCheck(b_base):
+                if not self.scalar_v1(): return true
+                val enc_node_v36: HirExpr = b_base
+                if not enc_node_v36.?:
+                    self.reject("absent required child in hir_expr_kind")
+                    return true
+                else:
+                    if not self.scalar_v1(): return true
+                    self.mono_pf_hir_expr_v1(enc_node_v36)
+                    if not self.active_v1(): return true
+                return true
+            case HirExprKind.Unwrap(b_base):
+                if not self.scalar_v1(): return true
+                val enc_node_v37: HirExpr = b_base
+                if not enc_node_v37.?:
+                    self.reject("absent required child in hir_expr_kind")
+                    return true
+                else:
+                    if not self.scalar_v1(): return true
+                    self.mono_pf_hir_expr_v1(enc_node_v37)
+                    if not self.active_v1(): return true
+                return true
+            case HirExprKind.Binary(b_op, b_left, b_right):
+                if not self.scalar_v1(): return true
+                val enc_node_v38: HirBinOp = b_op
+                if enc_node_v38 == nil:
+                    if not self.scalar_v1(): return true
+                else:
+                    if not self.scalar_v1(): return true
+                    self.mono_pf_hir_bin_op_v1(enc_node_v38)
+                    if not self.active_v1(): return true
+                val enc_node_v39: HirExpr = b_left
+                if not enc_node_v39.?:
+                    self.reject("absent required child in hir_expr_kind")
+                    return true
+                else:
+                    if not self.scalar_v1(): return true
+                    self.mono_pf_hir_expr_v1(enc_node_v39)
+                    if not self.active_v1(): return true
+                val enc_node_v40: HirExpr = b_right
+                if not enc_node_v40.?:
+                    self.reject("absent required child in hir_expr_kind")
+                    return true
+                else:
+                    if not self.scalar_v1(): return true
+                    self.mono_pf_hir_expr_v1(enc_node_v40)
+                    if not self.active_v1(): return true
+                return true
+            case HirExprKind.Unary(b_op, b_operand):
+                if not self.scalar_v1(): return true
+                val enc_node_v41: HirUnaryOp = b_op
+                if enc_node_v41 == nil:
+                    if not self.scalar_v1(): return true
+                else:
+                    if not self.scalar_v1(): return true
+                    self.mono_pf_hir_unary_op_v1(enc_node_v41)
+                    if not self.active_v1(): return true
+                val enc_node_v42: HirExpr = b_operand
+                if not enc_node_v42.?:
+                    self.reject("absent required child in hir_expr_kind")
+                    return true
+                else:
+                    if not self.scalar_v1(): return true
+                    self.mono_pf_hir_expr_v1(enc_node_v42)
+                    if not self.active_v1(): return true
+                return true
+            case HirExprKind.Call(b_callee, b_args, b_type_args):
+                if not self.scalar_v1(): return true
+                val enc_node_v43: HirExpr = b_callee
+                if not enc_node_v43.?:
+                    self.reject("absent required child in hir_expr_kind")
+                    return true
+                else:
+                    if not self.scalar_v1(): return true
+                    self.mono_pf_hir_expr_v1(enc_node_v43)
+                    if not self.active_v1(): return true
+                if not self.array_v1(if b_args == nil: 0 else: b_args.len()): return true
+                for e44 in (b_args ?? []):
+                    if not self.active_v1(): return true
+                    val enc_node_v45: HirCallArg = e44
+                    if not enc_node_v45.?:
+                        self.reject("absent required child in hir_expr_kind")
+                        return true
+                    else:
+                        if not self.scalar_v1(): return true
+                        self.mono_pf_hir_call_arg_v1(enc_node_v45)
+                        if not self.active_v1(): return true
+                if not self.array_v1(if b_type_args == nil: 0 else: b_type_args.len()): return true
+                for e46 in (b_type_args ?? []):
+                    if not self.active_v1(): return true
+                    val enc_node_v47: HirType = e46
+                    if not enc_node_v47.?:
+                        self.reject("absent required child in hir_expr_kind")
+                        return true
+                    else:
+                        if not self.scalar_v1(): return true
+                        self.mono_pf_hir_type_v1(enc_node_v47)
+                        if not self.active_v1(): return true
+                return true
+            case HirExprKind.MethodCall(b_receiver, b_method, b_args, b_resolution):
+                if not self.scalar_v1(): return true
+                val enc_node_v48: HirExpr = b_receiver
+                if not enc_node_v48.?:
+                    self.reject("absent required child in hir_expr_kind")
+                    return true
+                else:
+                    if not self.scalar_v1(): return true
+                    self.mono_pf_hir_expr_v1(enc_node_v48)
+                    if not self.active_v1(): return true
+                if not self.text_v1(b_method): return true
+                if not self.array_v1(if b_args == nil: 0 else: b_args.len()): return true
+                for e49 in (b_args ?? []):
+                    if not self.active_v1(): return true
+                    val enc_node_v50: HirCallArg = e49
+                    if not enc_node_v50.?:
+                        self.reject("absent required child in hir_expr_kind")
+                        return true
+                    else:
+                        if not self.scalar_v1(): return true
+                        self.mono_pf_hir_call_arg_v1(enc_node_v50)
+                        if not self.active_v1(): return true
+                val enc_node_v51: MethodResolution = b_resolution
+                if enc_node_v51 == nil:
+                    if not self.scalar_v1(): return true
+                else:
+                    if not self.scalar_v1(): return true
+                    self.mono_pf_method_resolution_v1(enc_node_v51)
+                    if not self.active_v1(): return true
+                return true
+            case HirExprKind.StaticCall(b_type_, b_method, b_args, b_resolution):
+                if not self.scalar_v1(): return true
+                val enc_node_v52: HirType = b_type_
+                if not enc_node_v52.?:
+                    self.reject("absent required child in hir_expr_kind")
+                    return true
+                else:
+                    if not self.scalar_v1(): return true
+                    self.mono_pf_hir_type_v1(enc_node_v52)
+                    if not self.active_v1(): return true
+                if not self.text_v1(b_method): return true
+                if not self.array_v1(if b_args == nil: 0 else: b_args.len()): return true
+                for e53 in (b_args ?? []):
+                    if not self.active_v1(): return true
+                    val enc_node_v54: HirCallArg = e53
+                    if not enc_node_v54.?:
+                        self.reject("absent required child in hir_expr_kind")
+                        return true
+                    else:
+                        if not self.scalar_v1(): return true
+                        self.mono_pf_hir_call_arg_v1(enc_node_v54)
+                        if not self.active_v1(): return true
+                val enc_node_v55: MethodResolution = b_resolution
+                if enc_node_v55 == nil:
+                    if not self.scalar_v1(): return true
+                else:
+                    if not self.scalar_v1(): return true
+                    self.mono_pf_method_resolution_v1(enc_node_v55)
+                    if not self.active_v1(): return true
+                return true
+            case HirExprKind.If(b_cond, b_then_, b_else_):
+                if not self.scalar_v1(): return true
+                val enc_node_v56: HirExpr = b_cond
+                if not enc_node_v56.?:
+                    self.reject("absent required child in hir_expr_kind")
+                    return true
+                else:
+                    if not self.scalar_v1(): return true
+                    self.mono_pf_hir_expr_v1(enc_node_v56)
+                    if not self.active_v1(): return true
+                val enc_node_v57: HirBlock = b_then_
+                if not enc_node_v57.?:
+                    self.reject("absent required child in hir_expr_kind")
+                    return true
+                else:
+                    if not self.scalar_v1(): return true
+                    self.mono_pf_hir_block_v1(enc_node_v57)
+                    if not self.active_v1(): return true
+                if val o58 = b_else_:
+                    if not self.scalar_v1(): return true
+                    val enc_node_v59: HirBlock = o58
+                    if not enc_node_v59.?:
+                        self.reject("absent required child in hir_expr_kind")
+                        return true
+                    else:
+                        if not self.scalar_v1(): return true
+                        self.mono_pf_hir_block_v1(enc_node_v59)
+                        if not self.active_v1(): return true
+                else:
+                    if not self.scalar_v1(): return true
+                return true
+            case HirExprKind.IfChain(b_arms, b_else_):
+                if not self.scalar_v1(): return true
+                if not self.array_v1(if b_arms == nil: 0 else: b_arms.len()): return true
+                for e60 in (b_arms ?? []):
+                    if not self.active_v1(): return true
+                    val enc_node_v61: HirIfArm = e60
+                    if not enc_node_v61.?:
+                        self.reject("absent required child in hir_expr_kind")
+                        return true
+                    else:
+                        if not self.scalar_v1(): return true
+                        self.mono_pf_hir_if_arm_v1(enc_node_v61)
+                        if not self.active_v1(): return true
+                if val o62 = b_else_:
+                    if not self.scalar_v1(): return true
+                    val enc_node_v63: HirBlock = o62
+                    if not enc_node_v63.?:
+                        self.reject("absent required child in hir_expr_kind")
+                        return true
+                    else:
+                        if not self.scalar_v1(): return true
+                        self.mono_pf_hir_block_v1(enc_node_v63)
+                        if not self.active_v1(): return true
+                else:
+                    if not self.scalar_v1(): return true
+                return true
+            case HirExprKind.MatchCase(b_scrutinee, b_arms):
+                if not self.scalar_v1(): return true
+                val enc_node_v64: HirExpr = b_scrutinee
+                if not enc_node_v64.?:
+                    self.reject("absent required child in hir_expr_kind")
+                    return true
+                else:
+                    if not self.scalar_v1(): return true
+                    self.mono_pf_hir_expr_v1(enc_node_v64)
+                    if not self.active_v1(): return true
+                if not self.array_v1(if b_arms == nil: 0 else: b_arms.len()): return true
+                for e65 in (b_arms ?? []):
+                    if not self.active_v1(): return true
+                    val enc_node_v66: HirMatchArm = e65
+                    if not enc_node_v66.?:
+                        self.reject("absent required child in hir_expr_kind")
+                        return true
+                    else:
+                        if not self.scalar_v1(): return true
+                        self.mono_pf_hir_match_arm_v1(enc_node_v66)
+                        if not self.active_v1(): return true
+                return true
+            case HirExprKind.Loop(b_body, b_label):
+                if not self.scalar_v1(): return true
+                val enc_node_v67: HirBlock = b_body
+                if not enc_node_v67.?:
+                    self.reject("absent required child in hir_expr_kind")
+                    return true
+                else:
+                    if not self.scalar_v1(): return true
+                    self.mono_pf_hir_block_v1(enc_node_v67)
+                    if not self.active_v1(): return true
+                if val o68 = b_label:
+                    if not self.scalar_v1(): return true
+                    if not self.text_v1(o68): return true
+                else:
+                    if not self.scalar_v1(): return true
+                return true
+            case _: return false
+

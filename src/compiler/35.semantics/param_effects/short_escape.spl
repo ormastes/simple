@@ -1,0 +1,431 @@
+"""Conservative short-borrow capture and expression-suspension checking.
+
+Symbol identities carry provenance through locals and aggregates. Evaluation
+walks all children, including those after an already-tainted child; boolean
+short-circuiting in the checker must never skip a suspension or capture.
+"""
+
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_definitions.{HirExpr, HirFunction, HirBlock, HirCallArg, HirPattern, HirParam}
+use compiler.hir.hir_types.{HirTypeKind, MethodResolution, CollectionBuiltinOperation}
+use compiler.hir.ownership_types.{hir_type_is_short_candidate}
+
+fn short_result_borrowed(expr: HirExpr, borrowed: bool) -> bool:
+    if not borrowed: return false
+    if expr.has_type_:
+        match expr.type_.kind:
+            case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char | HirTypeKind.Unit | HirTypeKind.Never: return false
+            case _: pass
+    true
+
+class ShortEscapeWalk:
+    aliases: {i64: bool}
+    messages: [text]
+    suspended: bool
+    reads: i64
+    checked_callbacks: {i64: [i64]}
+    checked_regions: {i64: {i64: [i64]}}
+    fresh_region: bool
+    capture_roots: {i64: bool}
+    capture_reads: i64
+    local_ids: {i64: bool}
+
+    me reject(message: text):
+        for previous in self.messages:
+            if previous == message: return
+        self.messages.push(message)
+
+    me symbol(id: i64) -> bool:
+        val aliases = self.aliases
+        if not aliases.contains_key(id): return false
+        if not aliases[id]: return false
+        self.reads = self.reads + 1
+        val roots = self.capture_roots
+        if roots.contains_key(id): self.capture_reads = self.capture_reads + 1
+        if self.suspended:
+            self.reject("short borrow is used after a suspension")
+        true
+
+    me optional(value: HirExpr?, held: bool) -> bool:
+        match value:
+            case Some(expr): return self.expr(expr, held, false)
+            case nil: return false
+
+    me block(block: HirBlock, held: bool) -> bool:
+        for statement in block.stmts:
+            match statement.kind:
+                case Let(symbol, _, init):
+                    val borrowed = self.expr(init, held, false)
+                    self.local_ids[symbol.id] = true
+                    # Monotone aliases are deliberate: a branch-local overwrite
+                    # cannot erase another path's short-borrow provenance.
+                    if borrowed: self.aliases[symbol.id] = true
+                case Assign(target, _, value):
+                    val target_borrow = self.expr(target, held, false)
+                    val borrowed = self.expr(value, held or target_borrow, false)
+                    match target.kind:
+                        case Var(symbol) | NamedVar(symbol, _):
+                            val locals = self.local_ids
+                            if borrowed and self.fresh_region and not locals.contains_key(symbol.id):
+                                self.reject("fresh callback short view is assigned outside its local region")
+                            if borrowed: self.aliases[symbol.id] = true
+                        case _:
+                            if borrowed and self.fresh_region:
+                                self.reject("fresh callback short view is stored outside its local region")
+                case Expr(expr): self.expr(expr, held, false)
+                case Block(inner): self.block(inner, held)
+                case AsmAssert(_): pass
+        if block.has: return self.expr(block.value, held, false)
+        false
+
+    me list(values: [HirExpr], held: bool) -> bool:
+        var borrowed = false
+        for value in values:
+            val next = self.expr(value, held or borrowed, false)
+            borrowed = borrowed or next
+        borrowed
+
+    me args(values: [HirCallArg], held: bool, synchronous: bool) -> bool:
+        var borrowed = false
+        for value in values:
+            val next = self.expr(value.value, held or borrowed, synchronous)
+            borrowed = borrowed or next
+        borrowed
+
+    me checked_args(values: [HirCallArg], held: bool, callee_id: i64) -> bool:
+        val callbacks = self.checked_callbacks
+        var slots: [i64] = []
+        # Unnormalized named arguments have no trustworthy positional index.
+        var positional = true
+        for value in values:
+            if value.has_name: positional = false
+        if positional and callee_id >= 0 and callbacks.contains_key(callee_id):
+            slots = callbacks[callee_id]
+        var borrowed = false
+        var index = 0
+        for value in values:
+            var synchronous = false
+            for slot in slots:
+                if slot == index: synchronous = true
+            var fresh_params: [i64] = []
+            val regions = self.checked_regions
+            if synchronous and regions.contains_key(callee_id):
+                val callback_regions: {i64: [i64]} = regions[callee_id]
+                if callback_regions.contains_key(index): fresh_params = callback_regions[index]
+            val next = self.expr(value.value, held or borrowed, synchronous, fresh_params)
+            if next and self.fresh_region:
+                self.reject("fresh callback short view is passed outside its checked region")
+            borrowed = borrowed or next
+            index = index + 1
+        borrowed
+
+    me loop_body(body: HirBlock, held: bool) -> bool:
+        val reads_before = self.reads
+        val suspended_before = self.suspended
+        val borrowed = self.block(body, held)
+        if not suspended_before and self.suspended and self.reads > reads_before:
+            self.reject("short borrow may cross a loop suspension backedge")
+        borrowed
+
+    me expr(expr: HirExpr, held: bool, synchronous: bool, fresh_params: [i64] = []) -> bool:
+        val borrowed = self.inner(expr, held, synchronous, fresh_params)
+        short_result_borrowed(expr, borrowed)
+
+    me bind_pattern(pattern: HirPattern):
+        match pattern.kind:
+            case HirPatternKind.Binding(symbol, _): self.aliases[symbol.id] = true
+            case HirPatternKind.Tuple(patterns) | HirPatternKind.Or(patterns):
+                for inner in patterns: self.bind_pattern(inner)
+            case HirPatternKind.Array(patterns, rest):
+                for inner in patterns: self.bind_pattern(inner)
+                match rest:
+                    case Some(symbol): self.aliases[symbol.id] = true
+                    case nil: pass
+            case HirPatternKind.Struct(_, fields):
+                for (_, inner) in fields: self.bind_pattern(inner)
+            case HirPatternKind.Enum(_, _, payload):
+                match payload:
+                    case Some(value):
+                        match value:
+                            case HirPatternPayload.Tuple(patterns):
+                                for inner in patterns: self.bind_pattern(inner)
+                            case HirPatternPayload.Struct(fields):
+                                for (_, inner) in fields: self.bind_pattern(inner)
+                    case nil: pass
+            case HirPatternKind.Wildcard | HirPatternKind.Literal(_) | HirPatternKind.Range(_, _, _): pass
+            case _:
+                self.reject("unlowered pattern cannot prove short-borrow alias identities")
+
+    me inner(expr: HirExpr, held: bool, synchronous: bool, fresh_params: [i64]) -> bool:
+        match expr.kind:
+            case Var(symbol) | NamedVar(symbol, _): return self.symbol(symbol.id)
+            case Field(base, _, _) | TupleIndex(base, _) | OptionalChain(base, _):
+                val borrowed = self.expr(base, held, false)
+                return short_result_borrowed(expr, borrowed)
+            case Index(base, index):
+                val left = self.expr(base, held, false)
+                val right = self.expr(index, held or left, false)
+                return left or right
+            case Binary(_, left, right) | NullCoalesce(left, right):
+                val first = self.expr(left, held, false)
+                val second = self.expr(right, held or first, false)
+                return first or second
+            case Unary(_, value) | Unwrap(value) | ExistsCheck(value) | Try(value):
+                return self.expr(value, held, false)
+            case Cast(value, _) | As(value, _) | ConvertCall(value, _) | TypeTest(value, _):
+                return self.expr(value, held, false)
+            case Await(value):
+                val borrowed = self.expr(value, held, false)
+                if held or borrowed: self.reject("short borrow is retained across await")
+                self.suspended = true
+                return borrowed
+            case Yield(value):
+                val borrowed = self.optional(value, held)
+                if held or borrowed: self.reject("short borrow is retained across yield")
+                self.suspended = true
+                return borrowed
+            case Lambda(params, body, captures):
+                if synchronous:
+                    var parameter_index = 0
+                    for parameter in params:
+                        if hir_type_is_short_candidate(parameter.type_):
+                            var proven = false
+                            for index in fresh_params:
+                                if index == parameter_index: proven = true
+                            if not proven:
+                                self.reject("synchronous callback short parameter lacks an invocation-region proof")
+                        parameter_index = parameter_index + 1
+                var captured = false
+                val aliases = self.aliases
+                for symbol in captures:
+                    if aliases.contains_key(symbol.id):
+                        if aliases[symbol.id]: captured = true
+                # Independently walk the body: capture lists can be absent on
+                # recovery HIR, and nested closures must not inherit a parent's
+                # synchronous callback privilege.
+                var nested_aliases: {i64: bool} = {}
+                var nested_locals: {i64: bool} = {}
+                val outer_locals = self.local_ids
+                for parameter in params:
+                    if parameter.symbol.id < 0 or nested_locals.contains_key(parameter.symbol.id) or aliases.contains_key(parameter.symbol.id) or outer_locals.contains_key(parameter.symbol.id):
+                        self.reject("callback parameter identity is invalid, duplicated, or aliases an outer short view")
+                    nested_locals[parameter.symbol.id] = true
+                for id in aliases.keys(): nested_aliases[id] = aliases[id]
+                for index in fresh_params:
+                    if index < 0 or index >= params.len():
+                        self.reject("fresh callback parameter proof does not match its lambda")
+                    else:
+                        val parameter: HirParam = params[index]
+                        if not hir_type_is_short_candidate(parameter.type_):
+                            self.reject("fresh callback proof requires an actual plain short parameter")
+                        else:
+                            nested_aliases[parameter.symbol.id] = true
+                # Fresh views begin at this invocation. An unrelated earlier
+                # suspension does not age a view that did not exist yet.
+                val inherited_suspension = self.suspended and (fresh_params.len() == 0 or aliases.len() > 0)
+                var nested = ShortEscapeWalk(nested_aliases, [], inherited_suspension, 0,
+                    self.checked_callbacks, self.checked_regions, self.fresh_region or fresh_params.len() > 0, aliases, 0, nested_locals)
+                val result = nested.expr(body, false, false)
+                captured = captured or nested.capture_reads > 0
+                for message in nested.messages: self.reject(message)
+                if captured and not synchronous:
+                    self.reject("short borrow is captured by a retained or unqualified closure")
+                if captured and self.suspended:
+                    self.reject("short borrow is captured after a suspension")
+                if (captured or fresh_params.len() > 0) and nested.suspended:
+                    self.reject("capturing callback retains a short borrow across its suspension")
+                # Even synchronous callbacks cannot return borrowed values into
+                # the collection produced by map/filter.
+                if synchronous and result:
+                    self.reject("synchronous callback returns a short borrow into its caller")
+                return result
+            case Call(callee, arguments, _):
+                val target = self.expr(callee, held, false)
+                var callee_id = -1
+                match callee.kind:
+                    case Var(symbol) | NamedVar(symbol, _): callee_id = symbol.id
+                    case _: pass
+                return self.checked_args(arguments, held or target, callee_id)
+            case MethodCall(receiver, _, arguments, resolution):
+                val borrowed = self.expr(receiver, held, false)
+                var qualified = false
+                match resolution:
+                    case MethodResolution.BuiltinCollection(operation):
+                        match operation:
+                            case CollectionBuiltinOperation.ArrayMap | CollectionBuiltinOperation.ArrayFilter: qualified = true
+                            case _: pass
+                    case _: pass
+                val values = self.args(arguments, held or borrowed, qualified)
+                if self.fresh_region and (borrowed or values) and not qualified:
+                    self.reject("fresh callback short view reaches an unproved method")
+                return borrowed or values
+            case StaticCall(_, _, arguments, resolution):
+                var callee_id = -1
+                match resolution:
+                    case MethodResolution.StaticMethod(_, symbol) | MethodResolution.FreeFunction(symbol): callee_id = symbol.id
+                    case _: pass
+                return self.checked_args(arguments, held, callee_id)
+            case ArrayLit(values, _) | TupleLit(values) | SetLit(values, _):
+                return self.list(values, held)
+            case ArrayRepeat(value, count, _):
+                val first = self.expr(value, held, false)
+                val second = self.expr(count, held or first, false)
+                return first or second
+            case DictLit(entries, _, _):
+                var borrowed = false
+                for (key, value) in entries:
+                    val key_borrow = self.expr(key, held or borrowed, false)
+                    val value_borrow = self.expr(value, held or borrowed or key_borrow, false)
+                    borrowed = borrowed or key_borrow or value_borrow
+                return borrowed
+            case StructLit(_, fields):
+                var borrowed = false
+                for (_, value) in fields:
+                    val next = self.expr(value, held or borrowed, false)
+                    borrowed = borrowed or next
+                return borrowed
+            case EnumLit(_, _, payload):
+                match payload:
+                    case Some(values):
+                        match values:
+                            case Tuple(items): return self.list(items, held)
+                            case Struct(fields):
+                                var borrowed = false
+                                for (_, value) in fields:
+                                    val next = self.expr(value, held or borrowed, false)
+                                    borrowed = borrowed or next
+                                return borrowed
+                    case nil: return false
+            case Block(body) | UnsafeBlock(body) | LossBlock(body) | NogradBlock(body):
+                return self.block(body, held)
+            case If(condition, then_, else_):
+                self.expr(condition, held, false)
+                val first = self.block(then_, held)
+                var second = false
+                match else_:
+                    case Some(body): second = self.block(body, held)
+                    case nil: pass
+                return first or second
+            case IfChain(arms, else_):
+                var borrowed = false
+                for arm in arms:
+                    self.expr(arm.cond, held, false)
+                    val next = self.block(arm.then_, held)
+                    borrowed = borrowed or next
+                match else_:
+                    case Some(body):
+                        val next = self.block(body, held)
+                        borrowed = borrowed or next
+                    case nil: pass
+                return borrowed
+            case MatchCase(subject, arms):
+                val subject_borrow = self.expr(subject, held, false)
+                var borrowed = false
+                for arm in arms:
+                    if subject_borrow: self.bind_pattern(arm.pattern)
+                    if arm.has_guard: self.expr(arm.guard, held or subject_borrow, false)
+                    val next = self.block(arm.body, held or subject_borrow)
+                    borrowed = borrowed or next
+                return borrowed
+            case Loop(body, _): return self.loop_body(body, held)
+            case While(condition, body, _):
+                val reads_before = self.reads
+                val suspended_before = self.suspended
+                val first = self.expr(condition, held, false)
+                val second = self.loop_body(body, held or first)
+                if not suspended_before and self.suspended and self.reads > reads_before:
+                    self.reject("short borrow may cross a while-condition suspension backedge")
+                return first or second
+            case For(symbol, iterator, body, _):
+                val first = self.expr(iterator, held, false)
+                if first: self.aliases[symbol.id] = true
+                val second = self.loop_body(body, held or first)
+                return first or second
+            case With(items, body):
+                var borrowed = false
+                for item in items:
+                    val next = self.expr(item.context_expr, held or borrowed, false)
+                    if next and item.has_target: self.aliases[item.target.id] = true
+                    borrowed = borrowed or next
+                return self.block(body, held or borrowed)
+            case HostGpuLane(_, _, marker, body):
+                val reads_before = self.reads
+                val first = self.expr(marker, held, false)
+                val second = self.block(body, held or first)
+                if first or second or self.reads > reads_before:
+                    self.reject("short borrow crosses a GPU execution domain")
+                return first or second
+            case Return(value) | Break(_, value):
+                val borrowed = self.optional(value, held)
+                if borrowed:
+                    self.reject("short borrow escapes through a control-transfer value")
+                return borrowed
+            case Throw(value):
+                val borrowed = self.expr(value, held, false)
+                if borrowed and self.fresh_region:
+                    self.reject("fresh callback short view escapes through a thrown value")
+                return borrowed
+            case Range(start, end, _, step):
+                val first = self.optional(start, held)
+                val second = self.optional(end, held or first)
+                val third = self.optional(step, held or first or second)
+                return first or second or third
+            case Comprehension(kind, value, clauses):
+                val reads_before = self.reads
+                val suspended_before = self.suspended
+                var borrowed = false
+                for clause in clauses:
+                    match clause.kind:
+                        case For(symbol, iterator):
+                            val next = self.expr(iterator, held or borrowed, false)
+                            if next: self.aliases[symbol.id] = true
+                            borrowed = borrowed or next
+                        case If(condition):
+                            val next = self.expr(condition, held or borrowed, false)
+                            borrowed = borrowed or next
+                val result = self.expr(value, held or borrowed, false)
+                match kind:
+                    case HirComprehensionKind.Generator:
+                        if self.reads > reads_before:
+                            self.reject("short borrow is captured by a deferred generator")
+                    case _: pass
+                if not suspended_before and self.suspended and self.reads > reads_before:
+                    self.reject("short borrow may cross a comprehension suspension backedge")
+                return borrowed or result
+            case TryCatch(body, clauses, finally_):
+                var borrowed = self.block(body, held)
+                for clause in clauses:
+                    val next = self.block(clause.body, held)
+                    borrowed = borrowed or next
+                match finally_:
+                    case Some(final_body):
+                        val next = self.block(final_body, held)
+                        borrowed = borrowed or next
+                    case nil: pass
+                return borrowed
+            case StringLit(_, interpolations):
+                match interpolations:
+                    case Some(values):
+                        for value in values: self.expr(value.expr, held, false)
+                    case nil: pass
+                return false
+            case IntLit(_, _) | FloatLit(_, _) | FloatLexeme(_, _) | BoolLit(_) | CharLit(_) | UnitLit | NilLit | Continue(_):
+                return false
+            case CustomBlock(_, _) | InlineAsm(_) | InlineAsmMatch(_) | Error:
+                if self.aliases.len() > 0:
+                    self.reject("opaque HIR cannot prove short-borrow nonescape")
+                return false
+        false
+
+pub fn short_escape_messages(function: HirFunction, short_params: {i64: bool}, checked_callbacks: {i64: [i64]} = {}, checked_regions: {i64: {i64: [i64]}} = {}) -> [text]:
+    var aliases: {i64: bool} = {}
+    for id in short_params.keys():
+        if short_params[id]: aliases[id] = true
+    if aliases.len() == 0 and checked_regions.len() == 0 and checked_callbacks.len() == 0: return []
+    var locals: {i64: bool} = {}
+    for parameter in function.params: locals[parameter.symbol.id] = true
+    var walk = ShortEscapeWalk(aliases, [], false, 0, checked_callbacks, checked_regions, false, {}, 0, locals)
+    if function.is_async and aliases.len() > 0:
+        walk.reject("async function retains short-borrow parameters in its future")
+    walk.block(function.body, false)
+    walk.messages

@@ -1,0 +1,292 @@
+# REQ-MC-009; D0; research 7.1–7.2. Synthetic fixture only. Execution: UNRUN.
+use std.spec.*
+use app.isa_registry.model.*
+use app.isa_registry.parser.{parse_registry, validate_registry}
+use app.isa_registry.generator.{coverage_table, verification_obligations}
+
+fn fixture_limits() -> IsaLimits:
+    IsaLimits(max_source_bytes: 1048576, max_depth: 64, max_operations: 4096, max_text_bytes: 4096, max_list_items: 64)
+
+fn fixture_authority(ids: [text]) -> IsaAuthority:
+    IsaAuthority(isa: "fixture", spec_version: "fixture-v1", snapshot_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", operation_ids: ids)
+
+fn operation_source(id: text, lowering: text, reason: text, verification: text) -> text:
+    "(isa_operation id: \"" + id + "\" spec_version: \"fixture-v1\" semantic_op: \"vector.add\" element: \"f32\" shape: \"fixed-16\" required_features: [\"fixture-feature\"] lowering: \"" + lowering + "\" encoder: \"\" decoder: \"\" fallback: \"forbidden\" verification: " + verification + " reason: \"" + reason + "\")"
+
+fn registry_source(rows: text) -> text:
+    "(isa_registry schema: \"simple.isa.registry.v1\" isa: \"fixture\" spec_version: \"fixture-v1\" source_sha256: \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" operations: [" + rows + "])"
+
+fn check_parse_error(source: text, authority: IsaAuthority, limits: IsaLimits, code: text):
+    match parse_registry(source, authority, limits):
+        Ok(_): fail("invalid registry was accepted: " + code)
+        Err(error): expect(error.code).to_equal(code)
+
+fn check_coverage(source: text, authority: IsaAuthority, expected: text):
+    match parse_registry(source, authority, fixture_limits()):
+        Err(error): fail("valid registry refused: " + error.code)
+        Ok(registry):
+            match coverage_table(registry, authority, fixture_limits()):
+                Err(error): fail("coverage refused: " + error.code)
+                Ok(output): expect(output).to_equal(expected)
+
+fn check_obligations(source: text, authority: IsaAuthority):
+    match parse_registry(source, authority, fixture_limits()):
+        Err(error): fail("valid registry refused: " + error.code)
+        Ok(registry):
+            match verification_obligations(registry, authority, fixture_limits()):
+                Err(error): fail("obligations refused: " + error.code)
+                Ok(items):
+                    expect(items.len()).to_equal(2)
+                    if items.len() != 2:
+                        fail("wrong obligation count")
+                    expect(items[0].operation_id).to_equal("fixture.a")
+                    expect(items[0].evidence_kind).to_equal("byte-golden")
+                    expect(items[1].operation_id).to_equal("fixture.a")
+                    expect(items[1].evidence_kind).to_equal("decode-roundtrip")
+
+describe "REQ-MC-009: pinned ISA registry declarations":
+    it "preserves research fields without manufacturing encoder evidence":
+        step("Load the pinned fixture authority")
+        val authority = fixture_authority(["fixture.a"])
+        step("Parse the registry")
+        match parse_registry(registry_source(operation_source("fixture.a", "native", "", "[\"byte-golden\"]")), authority, fixture_limits()):
+            Err(error): fail("fixture refused: " + error.code)
+            Ok(registry):
+                expect(registry.schema).to_equal("simple.isa.registry.v1")
+                expect(registry.isa).to_equal("fixture")
+                expect(registry.operations.len()).to_equal(1)
+                if registry.operations.len() != 1:
+                    fail("wrong row count")
+                val row = registry.operations[0]
+                expect(row.id).to_equal("fixture.a")
+                expect(row.spec_version).to_equal("fixture-v1")
+                expect(row.semantic_op).to_equal("vector.add")
+                expect(row.element).to_equal("f32")
+                expect(row.shape).to_equal("fixed-16")
+                expect(row.required_features).to_equal(["fixture-feature"])
+                expect(row.lowering).to_equal("native")
+                expect(row.encoder).to_equal("")
+                expect(row.decoder).to_equal("")
+                expect(row.fallback).to_equal("forbidden")
+                expect(row.verification).to_equal(["byte-golden"])
+                expect(row.reason).to_equal("")
+
+    it "retains all six declared states in generated coverage":
+        step("Inspect declared coverage")
+        for state in ["native", "synthesized", "library", "llvm", "unsupported", "unverified"]:
+            val source = registry_source(operation_source("fixture.a", state, "declared-only", "[]"))
+            check_coverage(source, fixture_authority(["fixture.a"]), "operation_id\tlowering\treason\tverification\nfixture.a\t" + state + "\tdeclared-only\t\n")
+
+    it "generates identical coverage for reordered source authority and evidence":
+        step("Inspect declared coverage")
+        val a = operation_source("fixture.a", "native", "", "[\"decode-roundtrip\", \"byte-golden\"]")
+        val reordered_a = operation_source("fixture.a", "native", "", "[\"byte-golden\", \"decode-roundtrip\"]")
+        val b = operation_source("fixture.b", "unsupported", "not-implemented", "[]")
+        val expected = "operation_id\tlowering\treason\tverification\nfixture.a\tnative\t\tbyte-golden,decode-roundtrip\nfixture.b\tunsupported\tnot-implemented\t\n"
+        check_coverage(registry_source(b + "," + a), fixture_authority(["fixture.b", "fixture.a"]), expected)
+        check_coverage(registry_source(reordered_a + "," + b), fixture_authority(["fixture.a", "fixture.b"]), expected)
+        step("Inspect required verification obligations")
+        check_obligations(registry_source(b + "," + a), fixture_authority(["fixture.a", "fixture.b"]))
+
+    it "rejects unknown schema":
+        step("Reject invalid registry input")
+        check_parse_error(registry_source(operation_source("fixture.a", "native", "", "[]")).replace("simple.isa.registry.v1", "simple.isa.registry.v2"), fixture_authority(["fixture.a"]), fixture_limits(), "schema_version")
+
+    it "rejects unknown envelope field":
+        step("Reject invalid registry input")
+        check_parse_error(registry_source(operation_source("fixture.a", "native", "", "[]")).replace("schema:", "extra: \"x\" schema:"), fixture_authority(["fixture.a"]), fixture_limits(), "unknown_field")
+
+    it "rejects duplicate envelope field":
+        step("Reject invalid registry input")
+        check_parse_error(registry_source(operation_source("fixture.a", "native", "", "[]")).replace("schema:", "isa: \"fixture\" schema:"), fixture_authority(["fixture.a"]), fixture_limits(), "duplicate_field")
+
+    it "rejects missing envelope field":
+        step("Reject invalid registry input")
+        check_parse_error(registry_source(operation_source("fixture.a", "native", "", "[]")).replace("isa: \"fixture\" ", ""), fixture_authority(["fixture.a"]), fixture_limits(), "missing_field")
+
+    it "rejects wrong field type":
+        step("Reject invalid registry input")
+        check_parse_error(registry_source(operation_source("fixture.a", "native", "", "[]")).replace("isa: \"fixture\"", "isa: []"), fixture_authority(["fixture.a"]), fixture_limits(), "field_type")
+
+    it "rejects unknown lowering":
+        step("Reject invalid registry input")
+        check_parse_error(registry_source(operation_source("fixture.a", "native", "", "[]")).replace("lowering: \"native\"", "lowering: \"scalar\""), fixture_authority(["fixture.a"]), fixture_limits(), "invalid_lowering")
+
+    it "rejects implicit fallback":
+        step("Reject invalid registry input")
+        check_parse_error(registry_source(operation_source("fixture.a", "native", "", "[]")).replace("forbidden", "scalar"), fixture_authority(["fixture.a"]), fixture_limits(), "fallback_forbidden")
+
+    it "rejects unsupported without reason":
+        step("Reject invalid registry input")
+        check_parse_error(registry_source(operation_source("fixture.a", "native", "", "[]")).replace("native", "unsupported"), fixture_authority(["fixture.a"]), fixture_limits(), "reason_required")
+
+    it "rejects unverified without reason":
+        step("Reject invalid registry input")
+        check_parse_error(registry_source(operation_source("fixture.a", "native", "", "[]")).replace("native", "unverified"), fixture_authority(["fixture.a"]), fixture_limits(), "reason_required")
+
+    it "rejects operation revision mismatch":
+        step("Reject invalid registry input")
+        check_parse_error(registry_source(operation_source("fixture.a", "native", "", "[]")).replace("spec_version: \"fixture-v1\" semantic_op", "spec_version: \"other\" semantic_op"), fixture_authority(["fixture.a"]), fixture_limits(), "operation_version")
+
+    it "rejects unknown operation field":
+        step("Reject invalid registry input")
+        check_parse_error(registry_source(operation_source("fixture.a", "native", "", "[]")).replace("semantic_op:", "extension: \"x\" semantic_op:"), fixture_authority(["fixture.a"]), fixture_limits(), "unknown_field")
+
+    it "rejects duplicate operation field":
+        step("Reject invalid registry input")
+        check_parse_error(registry_source(operation_source("fixture.a", "native", "", "[]")).replace("semantic_op:", "id: \"fixture.a\" semantic_op:"), fixture_authority(["fixture.a"]), fixture_limits(), "duplicate_field")
+
+    it "rejects duplicate verification":
+        step("Reject invalid registry input")
+        check_parse_error(registry_source(operation_source("fixture.a", "native", "", "[]")).replace("verification: []", "verification: [\"golden\", \"golden\"]"), fixture_authority(["fixture.a"]), fixture_limits(), "duplicate_list_item")
+
+    it "rejects duplicate feature":
+        step("Reject invalid registry input")
+        check_parse_error(registry_source(operation_source("fixture.a", "native", "", "[]")).replace("[\"fixture-feature\"]", "[\"fixture-feature\", \"fixture-feature\"]"), fixture_authority(["fixture.a"]), fixture_limits(), "duplicate_list_item")
+
+    it "rejects trailing input":
+        step("Reject invalid registry input")
+        check_parse_error(registry_source(operation_source("fixture.a", "native", "", "[]")) + " junk", fixture_authority(["fixture.a"]), fixture_limits(), "syntax")
+
+    it "rejects invalid digest":
+        step("Reject invalid registry input")
+        check_parse_error(registry_source(operation_source("fixture.a", "native", "", "[]")).replace("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bad"), fixture_authority(["fixture.a"]), fixture_limits(), "invalid_digest")
+
+    it "rejects different snapshot":
+        step("Reject invalid registry input")
+        check_parse_error(registry_source(operation_source("fixture.a", "native", "", "[]")).replace("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), fixture_authority(["fixture.a"]), fixture_limits(), "authority_mismatch")
+
+    it "rejects different ISA":
+        step("Reject invalid registry input")
+        check_parse_error(registry_source(operation_source("fixture.a", "native", "", "[]")).replace("isa: \"fixture\"", "isa: \"other\""), fixture_authority(["fixture.a"]), fixture_limits(), "authority_mismatch")
+
+    it "rejects equal count wrong universe":
+        step("Reject invalid registry input")
+        check_parse_error(registry_source(operation_source("fixture.a", "native", "", "[]")).replace("fixture.a", "fixture.b"), fixture_authority(["fixture.a"]), fixture_limits(), "universe_mismatch")
+
+    it "rejects empty operation ID":
+        step("Reject invalid registry input")
+        check_parse_error(registry_source(operation_source("fixture.a", "native", "", "[]")).replace("id: \"fixture.a\"", "id: \"\""), fixture_authority(["fixture.a"]), fixture_limits(), "invalid_text")
+
+    it "rejects missing extra duplicate and unknown authority membership":
+        step("Reject invalid registry input")
+        val row = operation_source("fixture.a", "native", "", "[]")
+        check_parse_error(registry_source(row), fixture_authority(["fixture.a", "fixture.b"]), fixture_limits(), "universe_mismatch")
+        check_parse_error(registry_source(row + "," + operation_source("fixture.b", "llvm", "", "[]")), fixture_authority(["fixture.a"]), fixture_limits(), "universe_mismatch")
+        check_parse_error(registry_source(row + "," + row), fixture_authority(["fixture.a"]), fixture_limits(), "duplicate_operation")
+        check_parse_error(registry_source(row), fixture_authority([]), fixture_limits(), "authority_empty")
+        check_parse_error(registry_source(row), fixture_authority(["fixture.a", "fixture.a"]), fixture_limits(), "authority_duplicate")
+
+    it "enforces source capacity at the exact byte boundary":
+        step("Reject invalid registry input")
+        val source = registry_source(operation_source("fixture.a", "native", "", "[]"))
+        var limits = fixture_limits()
+        limits.max_source_bytes = source.len()
+        match parse_registry(source, fixture_authority(["fixture.a"]), limits):
+            Err(error): fail("exact capacity refused: " + error.code)
+            Ok(registry): expect(registry.operations.len()).to_equal(1)
+        limits.max_source_bytes = source.len() - 1
+        check_parse_error(source, fixture_authority(["fixture.a"]), limits, "source_limit")
+
+    it "enforces depth row list text and invalid policy limits":
+        step("Reject invalid registry input")
+        val source = registry_source(operation_source("fixture.a", "native", "", "[]"))
+        var depth = fixture_limits()
+        depth.max_depth = 3
+        check_parse_error(source, fixture_authority(["fixture.a"]), depth, "depth_limit")
+        var rows = fixture_limits()
+        rows.max_operations = 1
+        check_parse_error(source, fixture_authority(["fixture.a", "fixture.b"]), rows, "operation_limit")
+        var lists = fixture_limits()
+        lists.max_list_items = 1
+        check_parse_error(source.replace("verification: []", "verification: [\"a\", \"b\"]"), fixture_authority(["fixture.a"]), lists, "list_limit")
+        var texts = fixture_limits()
+        texts.max_text_bytes = 63
+        check_parse_error(source, fixture_authority(["fixture.a"]), texts, "text_limit")
+        var invalid = fixture_limits()
+        invalid.max_depth = 0
+        check_parse_error(source, fixture_authority(["fixture.a"]), invalid, "invalid_limits")
+
+    it "revalidates mutated typed registry in every generator":
+        step("Parse the registry")
+        val authority = fixture_authority(["fixture.a"])
+        match parse_registry(registry_source(operation_source("fixture.a", "native", "", "[]")), authority, fixture_limits()):
+            Err(error): fail("valid fixture refused: " + error.code)
+            Ok(parsed):
+                var registry = parsed
+                registry.source_sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                step("Reject invalid registry input")
+                match validate_registry(registry, authority, fixture_limits()):
+                    Ok(_): fail("typed validation bypassed authority")
+                    Err(error): expect(error.code).to_equal("authority_mismatch")
+                match coverage_table(registry, authority, fixture_limits()):
+                    Ok(_): fail("coverage bypassed authority")
+                    Err(error): expect(error.code).to_equal("authority_mismatch")
+                match verification_obligations(registry, authority, fixture_limits()):
+                    Ok(_): fail("obligations bypassed authority")
+                    Err(error): expect(error.code).to_equal("authority_mismatch")
+
+    it "keeps unsupported obligations visible without reporting verified execution":
+        step("Inspect required verification obligations")
+        val source = registry_source(operation_source("fixture.a", "unsupported", "not-implemented", "[\"decode-roundtrip\", \"byte-golden\"]"))
+        check_obligations(source, fixture_authority(["fixture.a"]))
+
+    it "escapes display controls in reasons without changing row boundaries":
+        step("Inspect declared coverage")
+        val source = registry_source(operation_source("fixture.a", "unsupported", "line1\\nline2\\tmore", "[]"))
+        check_coverage(source, fixture_authority(["fixture.a"]), "operation_id\tlowering\treason\tverification\nfixture.a\tunsupported\tline1\\nline2\\tmore\t\n")
+
+    it "refuses malformed escapes controls and record separators":
+        step("Reject invalid registry input")
+        val base = registry_source(operation_source("fixture.a", "native", "", "[]"))
+        check_parse_error(base.replace("reason: \"\"", "reason: \"bad\\q\""), fixture_authority(["fixture.a"]), fixture_limits(), "syntax")
+        check_parse_error(base.replace("reason: \"\"", "reason: \"bad\nline\""), fixture_authority(["fixture.a"]), fixture_limits(), "syntax")
+        check_parse_error(base.replace("\" spec_version:", "\"spec_version:"), fixture_authority(["fixture.a"]), fixture_limits(), "syntax")
+        check_parse_error(base.replace("[\"fixture-feature\"]", "[\"fixture-feature\",]"), fixture_authority(["fixture.a"]), fixture_limits(), "syntax")
+        check_parse_error(base.replace(")])", "),])"), fixture_authority(["fixture.a"]), fixture_limits(), "syntax")
+        check_parse_error(base.replace("verification: []", "verification: [\"a\" \"b\"]"), fixture_authority(["fixture.a"]), fixture_limits(), "syntax")
+
+    it "accepts exact depth text and list capacities without truncation":
+        step("Parse the registry")
+        val source = registry_source(operation_source("fixture.a", "native", "", "[\"byte-golden\"]"))
+        var limits = fixture_limits()
+        limits.max_depth = 4
+        limits.max_text_bytes = 64
+        limits.max_list_items = 1
+        limits.max_operations = 1
+        match parse_registry(source, fixture_authority(["fixture.a"]), limits):
+            Err(error): fail("exact structural capacities refused: " + error.code)
+            Ok(registry):
+                expect(registry.source_sha256.len()).to_equal(64)
+                expect(registry.operations.len()).to_equal(1)
+                if registry.operations.len() != 1:
+                    fail("exact capacity lost a row")
+                expect(registry.operations[0].verification).to_equal(["byte-golden"])
+
+    it "rejects typed lowering duplicate row and oversize ID mutations":
+        step("Reject invalid registry input")
+        val authority = fixture_authority(["fixture.a"])
+        match parse_registry(registry_source(operation_source("fixture.a", "native", "", "[]")), authority, fixture_limits()):
+            Err(error): fail("valid fixture refused: " + error.code)
+            Ok(parsed):
+                if parsed.operations.len() != 1:
+                    fail("wrong fixture row count")
+                var bad_row = parsed.operations[0]
+                bad_row.lowering = "invented"
+                var bad = parsed
+                bad.operations = [bad_row]
+                match validate_registry(bad, authority, fixture_limits()):
+                    Ok(_): fail("typed invalid lowering accepted")
+                    Err(error): expect(error.code).to_equal("invalid_lowering")
+                bad.operations = [parsed.operations[0], parsed.operations[0]]
+                match validate_registry(bad, authority, fixture_limits()):
+                    Ok(_): fail("typed duplicate row accepted")
+                    Err(error): expect(error.code).to_equal("duplicate_operation")
+                bad_row = parsed.operations[0]
+                bad_row.id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                bad.operations = [bad_row]
+                var limits = fixture_limits()
+                limits.max_text_bytes = 64
+                match validate_registry(bad, authority, limits):
+                    Ok(_): fail("typed overcapacity ID accepted")
+                    Err(error): expect(error.code).to_equal("text_limit")

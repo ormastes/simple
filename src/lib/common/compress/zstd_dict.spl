@@ -184,6 +184,8 @@ fn _zstd_decompress_frame_for_tier_with_dictionary(input: [u8], tier: Compressio
         var frame_out = dictionary_state.content_prefix
         var repeat_offsets = dictionary_state.repeat_offsets
         var sequence_table_history = dictionary_state.sequence_history
+        # Repeat_Mode needs a prior table: from a dictionary or an earlier block of this frame.
+        var sequence_history_established = frame_header.dictionary_id != nil
         var huffman_table_state: ZstdHufTableState? = dictionary_state.huffman
         var done = false
         while not done:
@@ -234,6 +236,9 @@ fn _zstd_decompress_frame_for_tier_with_dictionary(input: [u8], tier: Compressio
                         case Ok(decoded): decoded
                         case Err(reason): return Err(reason)
                     pos = pos + modes.bytes_used
+                    if not sequence_history_established and (modes.literals_length_mode == 3 or modes.offsets_mode == 3 or modes.match_length_mode == 3):
+                        return Err(CompressionError.CorruptStream("zstd repeat mode without a previous fse table"))
+                    sequence_history_established = true
                     val tables_res = _zstd_parse_sequence_tables(input, pos, block_end, modes, sequence_table_history)
                     val (tables, next_sequence_table_history) = match tables_res:
                         case Ok(decoded): decoded

@@ -3,8 +3,26 @@ use std.nogc_sync_mut.env.platform.{get_temp_dir}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write, file_delete}
 use std.common.crypto.sha256.{sha256_text}
 use compiler.driver.driver_build.native_entry_closure_receipt.*
+use app.cli.native_build_closure_roots.{native_build_closure_roots_v1}
 
 describe "immutable entry closure receipt IO":
+    it "publishes and validates a receipt from absolute producer roots":
+        val roots = native_build_closure_roots_v1("/owned/checkout", "/owned/snapshot",
+            ["/owned/checkout/src/app", "/owned/checkout/src/lib"]).unwrap()
+        val binding = NativeEntryClosureBindingV1("revision", "commit", "tree",
+            sha256_text("inventory"), "src/app/main.spl", roots,
+            sha256_text("policy"), sha256_text("producer"))
+        val digest = native_entry_closure_binding_digest_v1(binding).unwrap()
+        val selection = NativeEntryClosureSelectionV1(digest, [binding.entry],
+            [sha256_text("entry")], [5])
+        val root = secure_temp_dir(get_temp_dir(), "closure-root-format-").unwrap()
+        val path = root + "/selection.v1"
+        val published = native_entry_closure_publish_records_v1(path, selection).unwrap()
+        val opened = native_entry_closure_open_records_v1(path, published).unwrap()
+        expect(native_entry_closure_validate_selection_v1(binding, opened,
+            selection.identities, selection.digests, selection.byte_counts).is_ok()).to_equal(true)
+        expect(file_delete(path)).to_equal(true)
+
     it "publishes once and rejects replaced or truncated physical receipts":
         val root = secure_temp_dir(get_temp_dir(), "closure-receipt-").unwrap()
         val path = root + "/selection.v1"

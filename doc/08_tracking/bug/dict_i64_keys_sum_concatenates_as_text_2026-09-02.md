@@ -111,3 +111,44 @@ Related specs:
 - `test/01_unit/compiler/50.mir/struct_collection_field_construction_contract_spec.spl`
 - `test/01_unit/compiler/50.mir/mir_lowering_global_maps_initialized_spec.spl`
 
+
+## Re-confirmed 2026-10-19 — still OPEN on release_phase3 `2f7439a9ceb`
+
+Seed built from `2f7439a9ceb` (`~/.cargo-target-shmove/release/simple`,
+sha256 `f4625a6e8cb3d2cdef6af21f38710bcf2275fe8b852db30b559bdfdc7378e102`).
+Interpreter only; the JIT is correct.
+
+```
+struct Holder:
+    counts: Dict<i64, i64>
+
+fn main():
+    var d: Dict<i64, i64> = {}
+    d[5] = 1
+    for k in d.keys():
+        print "local keys: k+1={k + 1} k==5={k == 5} get={d.get(k) ?? -1}"
+    var h = Holder(counts: {})
+    h.counts[7] = 2
+    for k in h.counts.keys():
+        print "field keys: k==7={k == 7} get={h.counts.get(k) ?? -1}"
+        print "k>=0={k >= 0}"
+```
+
+| mode | output |
+|---|---|
+| `SIMPLE_EXECUTION_MODE=interpret` | `k+1=51 k==5=false get=1`, `k==7=false get=2`, then `error: semantic: type mismatch: comparing string with integer` |
+| `SIMPLE_EXECUTION_MODE=jit` | `k+1=6 k==5=true get=1`, `k==7=true get=2`, `k>=0=true` |
+
+`get(k)` still hits because lookup re-canonicalizes the text key; `==`, `+`
+and ordered compares see a `text`.
+
+**Likely culprit:** `src/compiler_rust/compiler/src/value_impl.rs:330-334`,
+`Value::dict_entry_key_for_iteration` — when the stored value is not wrapped in
+the original-key entry marker it rebuilds the key as
+`Value::text(string_key)`, discarding the `i64` type. Called from the `"keys"`
+arm at `src/compiler_rust/compiler/src/interpreter_method/collections.rs:1500`.
+
+Consumer workaround (correct with or without a fix): the self-hosted
+array-move analysis (`src/compiler/50.mir/array_move/mir_array_move.spl`, `ArrayMoveScan`
+`ctor_arg_syms` / `ctor_dep_targets`) keeps insertion-ordered key lists
+instead of iterating `Dict<i64, _>.keys()`.

@@ -1,0 +1,216 @@
+# Actual retained logical-alias parity. Mechanical current transforms here do
+# not grant source custody, prerequisite, final-policy, or MIR admission.
+use support.*
+use provider.{outer}
+use compiler.mono.mono_archive_registration_v1.*
+use compiler.mono.mono_archive_current_body_v1.*
+use compiler.mono.mono_archive_body_input_v1.*
+use compiler.mono.monomorphize_integration.{MonomorphizationPass}
+use compiler.driver.cache.hir_body_typecheck_lease_v1.{HirBodyArchiveV1, hir_body_archive_load_in_owned_scope_v1}
+use compiler.driver.cache.hir_mono_archive_consumer_v1.*
+use compiler.driver.cache.hir_mono_archive_execution_v1.*
+use compiler.driver.cache.driver_hir_archive_mono_execute_v1.*
+use compiler.driver.cache.hir_mono_verification_use_v1.*
+use compiler.driver.cache.hir_mono_archive_verify_v1.{mono_archive_post_mono_report_digest_v1}
+use compiler.mono.verify.post_mono_verify.{post_mono_verify_modules}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.{HirFunction, HirExpr, HirExprKind}
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.driver.driver_hir_cache.{hir_cache_clear_last_warnings, hir_cache_promote_diagnostic_owner_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+
+struct LogicalObservation:
+    digests: [text]
+    physical_names: [text]
+    report_digest: text
+    statistics: [i64]
+    diagnostics: [text]
+    warnings: [text]
+    aliases_ok: bool
+
+fn close_fixture(paused: bool, owned: bool):
+    val cache_owned = if paused: hir_cache_promote_diagnostic_owner_v1() else: false
+    if paused: hir_cache_clear_last_warnings()
+    if not transient_scope_end() or not paused or not owned or not cache_owned: panic("logical mono fixture ownership")
+
+fn capture_logical(owner: MonoArchiveCurrentRegistrationOwnerV1, archive: HirBodyArchiveV1,
+        name: text, body: MonoArchiveCurrentBodyV1?) -> Result<MonoArchiveCurrentRegistrationReceiptV1, text>:
+    if not transient_scope_begin(): return Err("logical capture scope unavailable")
+    var result: Result<MonoArchiveCurrentRegistrationReceiptV1, text> = Err("logical current body unavailable")
+    if val current = body:
+        val decoded = mono_archive_current_body_load_in_owned_scope_v1(owner.cache, current)
+        if decoded.is_ok():
+            result = mono_archive_collect_logical_current_registration_in_owned_scope_v1(owner,
+                decoded.unwrap().module, name, current, decoded.unwrap().warnings)
+    else:
+        val decoded = hir_body_archive_load_in_owned_scope_v1(archive, archive.input)
+        if decoded.is_ok():
+            var module = decoded.unwrap()
+            if name == "alias.first":
+                var function = fixture_function(module, "outer")
+                function.body.stmts = []
+                function.body.has = true
+                function.body.value = HirExpr(kind: HirExprKind.IntLit(99, nil), has_type_: true, type_: integer_type(), span: function.span)
+                module.functions[function.symbol] = function
+            val stored = mono_archive_current_body_store_in_owned_scope_v1(owner.cache, archive,
+                sha256_text("logical mechanical boundary"), sha256_text("logical mechanical policy"), module, ["ordered current warning"])
+            if stored.is_ok():
+                result = mono_archive_collect_logical_current_registration_in_owned_scope_v1(owner, module, name, stored.unwrap(), ["ordered current warning"])
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    close_fixture(paused, owned)
+    result
+
+fn observe(repository: MonoArchiveRepositoryV1, order: [text], replay: MonoArchiveVerificationUseV1?) -> Result<LogicalObservation, text>:
+    if not transient_scope_begin(): return Err("logical observation scope unavailable")
+    var result: Result<LogicalObservation, text> = Err("logical observation input unavailable")
+    var modules: Dict<text, HirModule> = {}
+    var valid = true
+    for name in order:
+        if val captured = replay:
+            val loaded = mono_archive_verification_use_load_module_in_owned_scope_v1(captured, name)
+            if loaded.is_ok(): modules[name] = loaded.unwrap() else: valid = false
+        else:
+            # Actual retained aliases share the same complete module/SymbolTable
+            # handle. Decode once for the canonical first alias, reuse for last.
+            if name == "alias.last":
+                modules[name] = modules["alias.first"]
+            else:
+                val input = mono_archive_repository_input_v1(repository, name)
+                if input.is_err():
+                    valid = false
+                else:
+                    val loaded = mono_archive_body_input_load_in_owned_scope_v1(input.unwrap())
+                    if loaded.is_ok(): modules[name] = loaded.unwrap().module else: valid = false
+    if valid:
+        val worker = MonomorphizationPass.create()
+        val output = if replay == nil: worker.process_modules(modules) else: modules
+        var digests: [text] = []
+        var names: [text] = []
+        for name in order:
+            val module: HirModule = output[name]
+            digests = digests.push(sha256_text(hir_module_encode(module)))
+            names = names.push(module.name)
+        val first: HirModule = output["alias.first"]
+        val last: HirModule = output["alias.last"]
+        var first_bodies = 0
+        var last_bodies = 0
+        var shared_rows = 0
+        for raw in first.functions.values():
+            val function: HirFunction = raw
+            if function.name.starts_with("outer$"): first_bodies = first_bodies + 1
+        for raw in last.functions.values():
+            val function: HirFunction = raw
+            if function.name.starts_with("outer$"):
+                last_bodies = last_bodies + 1
+                if first.symbols.get_symbol(Some(function.symbol)) != nil: shared_rows = shared_rows + 1
+        result = Ok(LogicalObservation(digests: digests, physical_names: names,
+            report_digest: mono_archive_post_mono_report_digest_v1(post_mono_verify_modules(output)),
+            statistics: [worker.stats.generic_functions_found, worker.stats.generic_structs_found,
+                worker.stats.generic_classes_found, worker.stats.call_sites_found,
+                worker.stats.specializations_created, worker.stats.unresolved_generic_calls],
+            diagnostics: worker.diagnostics, warnings: worker.warnings,
+            aliases_ok: first_bodies == 0 and last_bodies == 2 and shared_rows == 2 and
+                first.symbols.next_symbol_id == last.symbols.next_symbol_id))
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(result) else: false
+    close_fixture(paused, owned)
+    result
+
+fn main() -> i64:
+    if outer<i64>(7) != 43: return 1
+    var checks = 1
+    val provider = lower_fixture("provider.spl", "logical.provider")
+    val root = root_for(lower_fixture("root.spl", "logical.root"), "outer", true, true)
+    val provider_archive = archive_fixture(provider)
+    val root_archive = archive_fixture(root)
+    val created = mono_archive_logical_current_registration_create_v1()
+    if created.is_err() or provider_archive.is_err() or root_archive.is_err(): return 2
+    val owner = created.unwrap()
+    val order = ["entry.logical", "alias.first", "alias.last"]
+    if provider.name == "alias.first" or provider.name == "alias.last" or root.name == "entry.logical": return 3
+    checks = checks + 1
+    val root_capture = capture_logical(owner, root_archive.unwrap(), order[0], nil)
+    if root_capture.is_err() or mono_archive_publish_current_registration_v1(owner, root_capture.unwrap()).is_err(): return 4
+    checks = checks + 1
+    val first = capture_logical(owner, provider_archive.unwrap(), order[1], nil)
+    if first.is_err() or mono_archive_publish_current_registration_v1(owner, first.unwrap()).is_err(): return 5
+    checks = checks + 1
+    val last = capture_logical(owner, provider_archive.unwrap(), order[2], Some(first.unwrap().current_body))
+    if last.is_err() or mono_archive_publish_current_registration_v1(owner, last.unwrap()).is_err(): return 6
+    checks = checks + 1
+    if owner.registration.epoch != 3 or owner.bodies[order[1]].current_artifact_key != owner.bodies[order[2]].current_artifact_key: return 7
+    checks = checks + 1
+    var inventory: Dict<text, text> = {}
+    inventory[order[0]] = root.path
+    inventory[order[1]] = provider.path
+    inventory[order[2]] = provider.path
+    val duplicate = capture_logical(owner, provider_archive.unwrap(), order[2], Some(first.unwrap().current_body))
+    if not duplicate.is_err() or owner.registration.epoch != 3: return 26
+    checks = checks + 1
+    if not mono_archive_current_registration_seal_v1(owner, inventory, [order[0], order[2], order[1]]).is_err() or owner.registration.sealed: return 8
+    checks = checks + 1
+    if mono_archive_current_registration_seal_v1(owner, inventory, order).is_err(): return 9
+    checks = checks + 1
+    if not mono_archive_execution_create_v1(owner.registration, inventory, order).is_err(): return 27
+    checks = checks + 1
+    owner.registration.logical_mode = false
+    val changed_mode_refused = mono_archive_current_execution_create_v1(owner, inventory, order).is_err()
+    owner.registration.logical_mode = true
+    if not changed_mode_refused or owner.registration.state.epoch != 0: return 28
+    checks = checks + 1
+    val execution = mono_archive_current_execution_create_v1(owner, inventory, order)
+    if execution.is_err(): return 10
+    var missing = execution.unwrap().admission
+    missing.repository.current_bodies = {}
+    if not mono_archive_rewrite_root_v1(missing, order[0], execution.unwrap().roots[0].symbols[0]).is_err() or execution.unwrap().expected_epoch != 0: return 29
+    checks = checks + 1
+    val retained = observe(execution.unwrap().admission.repository, order, nil)
+    if retained.is_err() or not retained.unwrap().aliases_ok: return 11
+    checks = checks + 1
+    while not mono_archive_roots_complete_v1(execution.unwrap()):
+        if mono_archive_execute_next_root_v1(execution.unwrap()).is_err(): return 12
+    while execution.unwrap().admission.state.cursor < execution.unwrap().admission.state.queue.len():
+        if mono_archive_execute_next_specialization_v1(execution.unwrap()).is_err(): return 13
+    if not mono_archive_execution_complete_v1(execution.unwrap()) or execution.unwrap().specialization_records.len() != 2: return 14
+    checks = checks + 1
+    for publication in execution.unwrap().specialization_records:
+        if publication.module_name != order[2]: return 15
+    checks = checks + 1
+    val statistics = driver_hir_archive_mono_stats_v1(execution.unwrap())
+    if [statistics.generic_functions_found, statistics.generic_structs_found, statistics.generic_classes_found,
+            statistics.call_sites_found, statistics.specializations_created, statistics.unresolved_generic_calls] != retained.unwrap().statistics: return 16
+    checks = checks + 1
+    if execution.unwrap().diagnostics != retained.unwrap().diagnostics or execution.unwrap().warnings != retained.unwrap().warnings: return 17
+    checks = checks + 1
+    val captured = mono_archive_verification_use_capture_v1(execution.unwrap())
+    if captured.is_err() or captured.unwrap().ordered_inventory != order: return 18
+    checks = checks + 1
+    val replay = observe(execution.unwrap().admission.repository, order, Some(captured.unwrap()))
+    if replay.is_err() or not replay.unwrap().aliases_ok or replay.unwrap().digests != retained.unwrap().digests or
+            replay.unwrap().physical_names != retained.unwrap().physical_names or replay.unwrap().report_digest != retained.unwrap().report_digest: return 19
+    checks = checks + 1
+    val verified = mono_archive_verification_use_v1(captured.unwrap())
+    if verified.is_err() or verified.unwrap().modules.len() != 3 or
+            mono_archive_post_mono_report_digest_v1(verified.unwrap().report) != retained.unwrap().report_digest: return 20
+    checks = checks + 1
+    if not transient_scope_begin(): return 21
+    var growth: [text] = []
+    for number in 0..4096: growth = growth.push("logical replay churn {number}")
+    val grown = growth.len() == 4096
+    if not transient_scope_end() or not grown: return 22
+    val again = observe(execution.unwrap().admission.repository, order, Some(captured.unwrap()))
+    if again.is_err() or again.unwrap().digests != retained.unwrap().digests or not again.unwrap().aliases_ok: return 23
+    checks = checks + 1
+    if not mono_archive_verification_use_load_module_in_owned_scope_v1(captured.unwrap(), order[0]).is_err(): return 24
+    checks = checks + 1
+    if not transient_scope_begin(): return 30
+    val occupied_refused = mono_archive_verification_use_v1(captured.unwrap()).is_err()
+    val paused = transient_scope_pause()
+    val paused_refused = if paused: mono_archive_verification_use_load_module_in_owned_scope_v1(captured.unwrap(), order[1]).is_err() else: false
+    if not transient_scope_end() or not occupied_refused or not paused_refused: return 31
+    checks = checks + 1
+    if checks != 23: return 25
+    print "HIR logical mono consumer: {checks} checks passed"
+    0

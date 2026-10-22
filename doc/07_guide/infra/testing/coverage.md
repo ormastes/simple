@@ -90,12 +90,52 @@ fn validate(age: i32, score: i32) -> bool:
     else:
         return false
 
-# Full condition coverage requires all combinations:
+# Condition coverage needs each operand both true and false:
 validate(20, 60)    # age: true,  score: true
 validate(20, 40)    # age: true,  score: false
-validate(15, 60)    # age: false, score: true
-validate(15, 40)    # age: false, score: false
+validate(15, 60)    # age: false  (score short-circuited, not evaluated)
 ```
+
+### Decision and condition semantics
+
+What the interpreter (`SIMPLE_EXECUTION_MODE=interpreter`, Rust seed)
+counts, and what `scripts/check/check-hash-algos-coverage.shs` gates on:
+
+| Site | Decision key | Conditions |
+|------|--------------|------------|
+| `if` / `while` (also `if val` / `while val`) | its statement span | leaves of an `and`/`or` condition |
+| `elif` #i (also `elif val`) | parent `if` span + i | leaves of its condition |
+| match-arm guard `case P if g:` | the arm span | leaves of `g` |
+| if-expression `if c: a else: b` | enclosing function span + hash of `c` | leaves of `c` |
+| standalone `and`/`or` (`return a and b`) | enclosing function span + hash of the expression | its leaves |
+
+- A decision is covered when it evaluated both true and false; a condition
+  (an atomic operand of an `and`/`or` tree, numbered in pre-order) likewise.
+  `not` is transparent: `not x` has the same covered status as `x`.
+- Short-circuited operands are not evaluated and record nothing.
+- An unguarded `match` arm is not a decision.
+- **Denominator.** Every site of every loaded file is registered with zero
+  counts when the module loads (`interpreter/coverage_sites.rs`), so an
+  uncalled function, an unreached `elif` or an unexecuted if-expression is
+  reported uncovered instead of missing.
+- The shape-specialised `while`/`for` fast paths are skipped while coverage is
+  on (they run the body natively and would bypass every probe inside it).
+- Anchoring an expression-level site on its function means two textually
+  identical if-expression conditions (or `and`/`or` expressions) in one
+  function share one site. The SDN `line` of such a site is its statement's
+  line; an `elif` reports the line before its block.
+- Lambdas inherit their caller's file and anchor (as they always have for
+  line coverage), so a lambda body run by a Simple-implemented higher-order
+  function in another module is attributed to that caller.
+
+Run a spec with `bin/simple run <spec>` to collect its coverage.
+`bin/simple test --coverage` additionally requires the child to publish a
+Phase-7 coverage APK activation receipt
+(`src/app/test_runner_new/test_runner_single.spl` `_phase7_child_receipt_valid`),
+which only the self-hosted full CLI writes
+(`src/app/cli/_CliMain/main_and_help.spl` `activate_required_child_coverage_apk`);
+the Rust seed has no APK loader, so under the seed `test --coverage` fails with
+"did not publish a valid child APK activation receipt" by contract.
 
 ---
 

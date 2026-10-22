@@ -13,6 +13,12 @@ every planned path, and kernel/drivers must be `mdsoc_only`.
 
 ## Entry Criteria
 
+Native linking follows `doc/07_guide/compiler/linker_selection.md`: external
+mold/LLD and the mold-like internal Simple linker are distinct. Preserve the
+admitted platform route, report the actual engine/fallback, and require real
+target-specific correctness and performance evidence before a reviewed internal
+default cutover. Managed native admission requires its external hosted linker.
+
 - State file exists with `phase: spec` marked complete
 - Failing spec files listed under `spec_files:` in state
 - Architecture design from Phase 3 available in state

@@ -4,8 +4,8 @@
 
 use std.nogc_async_mut.debug.coordinator.{VarInfo, FrameInfo, LocationInfo}
 use std.nogc_sync_mut.dap.adapter.mod.{DebugAdapter, AdapterCapabilities, AdapterConfig}
-use std.nogc_sync_mut.debug.remote.protocol.gdb_mi.GdbMiClient
-use std.nogc_sync_mut.debug.remote.types.DebugConfig
+use app.debug.remote.protocol.gdb_mi.GdbMiClient
+use std.nogc_sync_mut.debug.remote.types.{DebugConfig, Architecture}
 
 # GDB MI adapter implementing DebugAdapter trait
 class GdbMiAdapter:
@@ -18,12 +18,27 @@ impl GdbMiAdapter:
     # Create adapter from config
     static fn connect(config: AdapterConfig) -> Result<GdbMiAdapter, text>:
         # Convert AdapterConfig to DebugConfig for GdbMiClient
+        val target = match config.architecture:
+            "arm": Architecture.Arm32
+            "arm32": Architecture.Arm32
+            "arm64": Architecture.Arm64
+            "riscv32": Architecture.RiscV32
+            "riscv64": Architecture.RiscV64
+            "x86": Architecture.X86
+            "x86_64": Architecture.X86_64
+            "avr": Architecture.Avr
+            "i8086": Architecture.I8086
+            "wasm32": Architecture.Wasm32
+            "xtensa": Architecture.Xtensa
+            _: return Err("unsupported GDB architecture: {config.architecture}")
+        # The pipe client owns fixed startup/result deadlines; DebugConfig
+        # has no timeout_ms field. Do not imply the adapter timeout is used.
         val debug_config = DebugConfig(
             host: config.host,
             port: config.port,
             program: config.program,
-            architecture: config.architecture,
-            timeout_ms: config.timeout_ms
+            target: target,
+            options: {}
         )
 
         # Connect to GDB
@@ -142,12 +157,7 @@ impl GdbMiAdapter:
     # --- Breakpoints ---
 
     fn set_breakpoint(file: text, line: i32) -> Result<i32, text>:
-        match self.client:
-            Some(client):
-                val location = "{file}:{line}"
-                client.set_breakpoint(location)
-            nil:
-                Err("GDB client not connected")
+        self.set_breakpoint_rich(file, line, nil, nil, nil)
 
     fn set_breakpoint_at_addr(addr: i64) -> Result<i32, text>:
         match self.client:
@@ -262,10 +272,23 @@ impl GdbMiAdapter:
             nil:
                 Err("GDB client not connected")
 
-    # Rich breakpoint — delegates to basic set_breakpoint (condition support can be added later)
+    # Conditions use the pipe client's rich MI path. Hit conditions and
+    # logpoints remain unsupported here; no hit-expression to ignore-count
+    # conversion is implied by passing -1.
     fn set_breakpoint_rich(file: text, line: i32, condition: Option<text>,
                            hit_condition: Option<text>, log_message: Option<text>) -> Result<i32, text>:
-        self.set_breakpoint(file, line)
+        match self.client:
+            Some(client):
+                val location = "{file}:{line}"
+                val result = client.set_breakpoint_full(location, condition ?? "", -1)
+                # Retain the owning client's token/cache state on both
+                # success and error before exposing the legacy numeric id.
+                self.client = Some(client)
+                match result:
+                    Ok(bp): Ok(bp.id)
+                    Err(e): Err(e)
+            nil:
+                Err("GDB client not connected")
 
     fn list_children(var_ref: text) -> Result<[VarInfo], text>:
         Err("nested variable expansion not supported")

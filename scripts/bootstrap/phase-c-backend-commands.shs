@@ -20,15 +20,24 @@ bootstrap_phase_c_validate_backend_receipt() {
     [ "$(manifest_value verification_backend "$pcb_receipt")" = "$pcb_backend" ]
 }
 
-# Apply the product frontend share before the process-tree owner starts. Its
-# watchdog keeps this narrower share while enforcing the full command cap.
-# Code generation still receives the caller's --threads value.
+# Apply the product frontend share before the process-tree owner starts. On a
+# fanout host the share is the resolved command cap (priced per declared job by
+# tree-rss-policy.shs); its watchdog resolves the same cap from the same
+# --threads, so the exported budget and the enforced cap agree. Code generation
+# still receives the caller's --threads value.
 bootstrap_phase_c_apply_frontend_policy() {
   . "$source_root/scripts/bootstrap/lib/tree-rss-policy.shs" || return 1
   . "$source_root/scripts/bootstrap/lib/product-frontend-policy.shs" || return 1
   bootstrap_tree_rss_resolve "$pure_tool_threads" "$source_root" || return 1
+  # Thread the resolved job-scaled ceiling through: the frontend environment
+  # validates cap <= ceiling, and without the resolved value it falls back to
+  # the static 8 GiB ceiling -- which refuses every cap above 8 GiB (the
+  # elevated-admission range this phase needs for real full-CLI builds,
+  # ~2.4 GiB per worker). Absent this, the tool builds exited 88 in ~1s with
+  # no log (frontend policy failure inside the row wrapper).
   pcb_frontend_rows=$(bootstrap_product_frontend_policy qualified \
-    "$bootstrap_tree_rss_cap_kib" "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}") || return 1
+    "$bootstrap_tree_rss_cap_kib" "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
+    "$bootstrap_tree_rss_ceiling_kib") || return 1
   while IFS= read -r pcb_frontend_setting; do
     export "$pcb_frontend_setting" || return 1
     printf 'verification_frontend_policy=%s\n' "$pcb_frontend_setting"

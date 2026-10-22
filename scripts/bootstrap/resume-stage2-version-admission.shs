@@ -1,0 +1,218 @@
+#!/bin/sh
+# A reviewed remaining-control owner; it never recompiles the candidate or
+# reruns already-passing frontend/unsupported/candidate-version controls.
+set -eu
+if [ "${1:-}" = --derive-metadata ]; then
+    [ "$#" -eq 2 ] || exit 64
+    BOOTSTRAP_STAGE3_FACADE_PATH=$2/scripts/check/lib/bootstrap-stage3-provenance.shs
+    export BOOTSTRAP_STAGE3_FACADE_PATH
+    . "$BOOTSTRAP_STAGE3_FACADE_PATH"
+    bootstrap_stage3_canonical_version "$2"
+    exit $?
+fi
+[ "$#" -eq 7 ] && [ "$1" = --collect ] || {
+    echo 'usage: resume-stage2-version-admission.shs --collect ROOT OUTPUT PROFILE REVIEWED_OWNER_MANIFEST OWNER_SHA NEW_RUN_DIRECTORY' >&2
+    exit 64
+}
+root=$2 output=$3 profile=$4 owner_manifest=$5 owner_sha=$6 run=$7
+case "$root:$output:$profile:$owner_manifest:$run" in *'
+'*) exit 64 ;; esac
+for directory in "$root" "$output"; do
+    [ -d "$directory" ] && [ ! -L "$directory" ] &&
+        [ "$(CDPATH= cd -- "$directory" && pwd -P)" = "$directory" ] || exit 64
+done
+[ ! -e "$run" ] && [ ! -L "$run" ] || exit 64
+mkdir "$run"
+chmod 700 "$run"
+BOOTSTRAP_STAGE3_FACADE_PATH=$root/scripts/check/lib/bootstrap-stage3-provenance.shs
+BOOTSTRAP_STAGE3_VERSION_ROOT=$root
+export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+stage=$output/stage3/aarch64-unknown-linux-gnu
+candidate=$output/stage2/aarch64-unknown-linux-gnu/simple.rejected
+helper=$root/scripts/check/lib/bootstrap-stage3/sanity-version-composition.py
+python=/usr/bin/python3.12
+[ -f "$python" ] && [ ! -L "$python" ] || exit 1
+[ "$(bootstrap_stage3_hash_file "$python")" = 1401f5c1ddd9e8f9d77622113a8d04b5f7ef57c0e3f40dd29db248a5aa91622e ] || exit 1
+composition=$run/remaining-sanity.env
+version=$composition.version.env
+metadata_log=$composition.metadata.log
+cd "$root"
+SIMPLE_ABI_POLICY=v1
+export SIMPLE_ABI_POLICY
+# Parent establishes the actual compiler tree budget and outer process owner.
+# Independent metadata/capability children use canonical bounded log ownership.
+capture() {
+    base=$1
+    bootstrap_stage3_source_snapshot_once "$base.source" "$root"
+    bootstrap_stage3_git_state "$root" "$base.git"
+    bootstrap_stage3_directory_snapshot "$base.runtime" "$stage/stage2-runtime-authority"
+    bootstrap_stage3_tool_authority_snapshot "$base.tools" "$PATH" "$root"
+}
+audit() {
+    base=$1
+    "$python" -I -S -B "$helper" audit --profile "$profile" --candidate "$candidate" --root "$root" \
+        --source "$base.source" --git "$base.git" --runtime "$base.runtime" --tools "$base.tools" \
+        --owner-manifest "$owner_manifest" --owner-sha "$owner_sha"
+}
+capture "$run/before"
+audit "$run/before"
+candidate_before=$(bootstrap_stage3_hash_file "$candidate")
+# Pin the collector's output parent by descriptor; exclusive publication
+# refuses collisions and collects the real child group before receipt output.
+exec 9<"$run"
+control_status=0
+perl "$root/scripts/bootstrap/run-process-group-bounded-log.pl" \
+    "--output-parent=/proc/$$/fd/9" "--log-leaf=${metadata_log##*/}" \
+    "--receipt-leaf=${metadata_log##*/}.bounded.env" --max-bytes=65536 \
+    --timeout-seconds=30 --term-grace-seconds=1 -- \
+    sh "$root/scripts/bootstrap/resume-stage2-version-admission.shs" --derive-metadata "$root" || control_status=$?
+candidate_after=$(bootstrap_stage3_hash_file "$candidate")
+capture "$run/after"
+audit "$run/after"
+[ "$control_status" -eq 0 ] && [ "$candidate_before" = "$candidate_after" ] || exit 1
+actual_version=$(cat "$metadata_log")
+prior_version=$(bootstrap_stage3_manifest_value version_output "$stage/stage2-sanity.env")
+[ "$prior_version" = "simple-bootstrap $actual_version" ] || exit 1
+{
+    echo schema=simple-bootstrap-version-remaining-control-v1
+    echo "canonical_version=$actual_version"
+    echo version_match_status=0
+    echo "candidate_sha256_before=$candidate_before"
+    echo "candidate_sha256_after=$candidate_after"
+    echo retained_version_status=0
+    echo "retained_version_output=$prior_version"
+    echo "prior_sanity_sha256=$(bootstrap_stage3_hash_file "$stage/stage2-sanity.env")"
+    echo "metadata_control_raw_status=$control_status"
+    echo "metadata_sha256=$(bootstrap_stage3_hash_file "$root/release/version.sdn")"
+    echo "owner_manifest_sha256=$owner_sha"
+    echo "collector_sha256=$(bootstrap_stage3_hash_file "$root/scripts/bootstrap/run-process-group-bounded-log.pl")"
+    echo "controller_sha256=$(bootstrap_stage3_hash_file "$root/scripts/bootstrap/resume-stage2-version-admission.shs")"
+    echo "metadata_control_log_path=$metadata_log"
+    echo "metadata_control_log_sha256=$(bootstrap_stage3_hash_file "$metadata_log")"
+    echo "metadata_control_receipt_path=$metadata_log.bounded.env"
+    echo "metadata_control_receipt_sha256=$(bootstrap_stage3_hash_file "$metadata_log.bounded.env")"
+} > "$version"
+chmod 400 "$version"
+{
+    echo schema=simple-bootstrap-sanity-version-composition-v1
+    echo profile=cranelift-aarch64-core-c-rc1-version-only-v1
+    echo status=pass
+    echo "profile_path=$profile"
+    echo "profile_sha256=44f1c7bf2a12ccebd3b8aa237cbc46ad729d1007c1ae7477ec9bbe57db54aac6"
+    echo "candidate_sha256=$candidate_after"
+    echo "prior_sanity_sha256=$(bootstrap_stage3_hash_file "$stage/stage2-sanity.env")"
+    echo source_snapshot_sha256=2c3e319a242a533da6e8de2b0f46e6870c4150a58de7350586387d9d2f83cbc2
+    echo runtime_snapshot_sha256=95f041379c366f517c83b4bed1c2e9464606783a0dbaa512276031157a3dd4ac
+    echo tool_snapshot_sha256=71250636f137fc555306c6156106f53840c9a09d6c8e67bf7dcf6c5afbd97374
+    echo build_args_sha256=4ac9e4f5854c8867aeddf6b029926950ae1887b91940c7b2148a483f5c51bd5a
+    echo retained_checks=4
+    echo remaining_checks=1
+    echo checks_run=5
+    echo "owner_manifest_path=$owner_manifest"
+    echo "owner_manifest_sha256=$owner_sha"
+    echo "version_component_path=$version"
+    echo "version_component_sha256=$(bootstrap_stage3_hash_file "$version")"
+    for boundary in before after; do
+        echo "envelope_${boundary}_base=$run/$boundary"
+        for role in source git runtime tools; do
+            echo "envelope_${boundary}_${role}_sha256=$(bootstrap_stage3_hash_file "$run/$boundary.$role")"
+        done
+    done
+} > "$composition"
+chmod 400 "$composition"
+bootstrap_stage3_verify_sanity_evidence_receipt "$composition" "$composition" "$run" "$candidate" "$root"
+
+# Receiver is a genuinely pending independent criterion. It uses a new private
+# runtime-object cache and retains bounded process/log/terminal evidence.
+mkdir "$run/receiver-cache"
+receiver_log=$run/receiver.log
+receiver_status=0
+SIMPLE_RT_OBJ_CACHE_DIR=$run/receiver-cache \
+perl "$root/scripts/bootstrap/run-process-group-bounded-log.pl" \
+    "--output-parent=/proc/$$/fd/9" --log-leaf=receiver.log \
+    --receipt-leaf=receiver.log.bounded.env --max-bytes=4194304 \
+    --timeout-seconds=180 --term-grace-seconds=1 -- \
+    env SIMPLE_BOOTSTRAP=1 SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+    sh "$root/scripts/check/check-bootstrap-stage2-struct-receiver.shs" \
+    "$candidate" "$stage/stage2-runtime-authority" aarch64-unknown-linux-gnu cranelift || receiver_status=$?
+capture "$run/after-receiver"
+audit "$run/after-receiver"
+[ "$receiver_status" -eq 0 ] || exit "$receiver_status"
+for field in schema status reason raw_status log_leaf log_sha256 combined_stream artifact_limit timeout_seconds max_bytes; do
+    actual=$(bootstrap_stage3_manifest_value "$field" "$receiver_log.bounded.env") || exit 1
+    case "$field" in
+      schema) expected=simple-bounded-process-log-v1 ;; status) expected=complete ;;
+      reason) expected=child-exit ;; raw_status) expected=0 ;; log_leaf) expected=receiver.log ;;
+      log_sha256) expected=$(bootstrap_stage3_hash_file "$receiver_log") ;;
+      combined_stream) expected=stdout-stderr ;; artifact_limit) expected=none ;;
+      timeout_seconds) expected=180 ;; max_bytes) expected=4194304 ;;
+    esac
+    [ "$actual" = "$expected" ] || exit 1
+done
+case "$(bootstrap_stage3_manifest_value process_group "$receiver_log.bounded.env")" in setsid|setpgid) ;; *) exit 1 ;; esac
+{
+    echo schema=simple-bootstrap-stage2-receiver-evidence-v1
+    echo status=pass
+    echo probe_exit=0
+    echo "candidate_sha256_before=$candidate_before"
+    echo "candidate_sha256_after=$(bootstrap_stage3_hash_file "$candidate")"
+    echo "runtime_snapshot_sha256=$(bootstrap_stage3_hash_file "$stage/runtime-admitted.txt")"
+    echo "probe_log=$receiver_log"
+    echo "probe_log_sha256=$(bootstrap_stage3_hash_file "$receiver_log")"
+} > "$run/receiver.env"
+bootstrap_stage3_verify_receiver_evidence_receipt "$run/receiver.env" "$run/receiver.env" \
+    "$candidate" "$candidate" "$stage/runtime-admitted.txt" "$stage/runtime-admitted.txt" "$receiver_log" "$receiver_log"
+
+# Canonical publisher consumes original build inputs plus explicit new owner
+# composition. Do not rename/rewrite the failed candidate or failed receipt.
+admitted_dir=$stage/stage2-admitted
+[ ! -e "$admitted_dir" ] && [ ! -L "$admitted_dir" ] || exit 1
+mkdir "$admitted_dir"
+cp -p "$candidate" "$admitted_dir/simple"
+chmod 500 "$admitted_dir/simple"
+bootstrap_stage3_write_stage2_admission_receipt "$admitted_dir/admission.env" "$admitted_dir/admission.env" \
+    "$admitted_dir/simple" "$admitted_dir/simple" "$stage/source-inputs-before.txt" "$stage/source-inputs-before.txt" \
+    "$stage/runtime-admitted.txt" "$stage/runtime-admitted.txt" "$stage/stage2-runtime-authority" "$stage/stage2-runtime-authority" \
+    "$stage/tool-authority-before.txt" "$stage/tool-authority-before.txt" \
+    4ac9e4f5854c8867aeddf6b029926950ae1887b91940c7b2148a483f5c51bd5a \
+    "$composition" "$composition" "$run" "$run/receiver.env" "$run/receiver.env" \
+    "$receiver_log" "$receiver_log" "$root"
+sh "$root/scripts/bootstrap/phase2-runtime-binding.shs" publish "$admitted_dir/simple" \
+    "$stage/stage2-runtime-authority" "$output/phase2-runtime-capsules"
+parent=$output/stage2/aarch64-unknown-linux-gnu
+cp -p "$admitted_dir/simple" "$parent/simple"
+chmod 500 "$parent/simple"
+sh "$root/scripts/bootstrap/publish-stage2-parent-receipts.shs" "$admitted_dir/simple" \
+    "$admitted_dir/admission.env" "$stage/source-inputs-before.txt" "$stage/runtime-admitted.txt" \
+    "$stage/tool-authority-before.txt" "$parent/stage2-sanity.receipt" "$parent/stage2-provenance.receipt" \
+    explicit-full-bootstrap-stage2-trust-root
+chmod 500 "$admitted_dir"
+echo 'remaining-admission: provisional Stage2 parent published; mandatory compiler matrix begins'
+tests=$output/stage2-compiler-tests/aarch64-unknown-linux-gnu
+mkdir -p "$tests"
+matrix_status=0
+BOOTSTRAP_VERIFY_TEST_WORKERS=1 BOOTSTRAP_VERIFY_BUILD_THREADS=1 \
+sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" --phase=stage2 --backend=cranelift \
+    "--compiler=$admitted_dir/simple" "--compiler-sha256=$candidate_after" --strategy=normal --profile=slim \
+    --hash-policy=canonical "--work-root=$tests/verification" "--cache-root=$tests/cache" \
+    "--source-root=$root" --timeout-seconds=3600 > "$run/matrix.log" 2>&1 || matrix_status=$?
+if [ "$matrix_status" -eq 0 ]; then
+    [ -f "$tests/verification/summary.env" ] || matrix_status=95
+fi
+if [ "$matrix_status" -eq 0 ]; then
+    sh "$root/scripts/bootstrap/lib/verify-stage2-compiler-tests.shs" --publish \
+        "$output" aarch64-unknown-linux-gnu "$admitted_dir/simple" "$candidate_after" "$root" \
+        "$tests/verification/summary.env" "$run/matrix.log" || matrix_status=95
+fi
+if [ "$matrix_status" -ne 0 ]; then
+    {
+        echo schema=simple-bootstrap-stage2-compiler-tests-v1
+        echo status=rejected
+        echo "raw_status=$matrix_status"
+        echo "candidate_sha256=$candidate_after"
+        echo "log_path=$run/matrix.log"
+    } > "$run/matrix-rejected.env"
+fi
+echo "remaining-admission: mandatory compiler matrix raw_status=$matrix_status; no Stage3 promotion on failure"
+exit "$matrix_status"

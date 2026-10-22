@@ -40,3 +40,41 @@ describe "AsyncUdpSocket loopback":
         expect(from.contains("127.0.0.1")).to_equal(true)
         sender.close()
         receiver.close()
+
+# --- Merged from the legacy mirror copy (unit:lib/nogc_async_mut/io/async_udp_spec.spl), test dedup phase B: tests this copy lacked.
+
+describe "AsyncUdpSocket connected mode (merged from legacy copy)":
+    it "connects to a peer and reports open":
+        # @req REQ-SSPEC-LIB
+        step("bind both ends and connect one to the other")
+        val peer = AsyncUdpSocket.bind("127.0.0.1:0").unwrap()
+        val client = AsyncUdpSocket.bind("127.0.0.1:0").unwrap()
+        expect(client.connect(peer.local_addr().unwrap()).is_ok()).to_equal(true)
+        expect(client.is_open()).to_equal(true)
+        client.close()
+        peer.close()
+
+    it "delivers a send to the connected peer with exact bytes":
+        # @req REQ-SSPEC-LIB
+        step("send three bytes, receive all three")
+        val peer = AsyncUdpSocket.bind("127.0.0.1:0").unwrap()
+        val client = AsyncUdpSocket.bind("127.0.0.1:0").unwrap()
+        client.connect(peer.local_addr().unwrap())
+        # oracle: ASCII "ok!" = [111, 107, 33]
+        match client.send([111, 107, 33]).poll():
+            case Poll.Ready(Ok(n)): expect(n).to_equal(3)
+            case _: expect(false).to_equal(true)
+        var data = match peer.recv_from(16).poll():
+            case Poll.Ready(Ok(pair)): pair[0]
+            case _: panic("recv failed")
+        expect(data.len()).to_equal(3)
+        expect(data[2]).to_equal(33)
+        client.close()
+        peer.close()
+
+    it "close flips is_open to false":
+        # @req REQ-SSPEC-LIB
+        step("bind, close, observe state")
+        val sock = AsyncUdpSocket.bind("127.0.0.1:0").unwrap()
+        sock.close()
+        expect(sock.is_open()).to_equal(false)

@@ -1,4 +1,5 @@
 # @req REQ-SSPEC-COMPILER
+# @req REQ-GENERIC-ANNOTATION-FIELD
 # @tag: unit, compiler, mir, mono, generics
 #
 # A type-parameter field (`struct W<T>: v: T`) is typed by the INSTANCE it is
@@ -13,11 +14,9 @@
 #   silently: the pre-fix compiler refused `r.v + r.v` ("operator overload
 #   for struct T"), the fix emitted an integer add of two field words.
 #
-# KNOWN FRONTEND GAP (design note, hole H-ANNOT): the arguments of a
-# same-module generic type ANNOTATION are dropped before HIR -- `r: W<text>`,
-# `-> W<text>` and a field `w: W<text>` all arrive as bare `W`. A value that
-# reaches a field read only through such an annotation has no known instance,
-# so the last group pins the REFUSAL for those routes, not a guess.
+# H-ANNOT regression: same-module generic annotations must retain arguments
+# on parameters, returns, locals and fields. Only genuinely argumentless
+# receivers remain unknown instances.
 #
 # Each example runs HIR -> 40.mono -> 50.mir -> MirToLlvm in-process.
 use std.spec
@@ -29,7 +28,7 @@ use compiler.hir.hir_types.{HirModule}
 use compiler.mir.mir.*
 use compiler.common.driver_core_types.{driver_core_compile_options_default}
 use compiler.driver.driver_mir_target.{driver_mir_target_context}
-use compiler.backend.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.mir_to_llvm.{MirToLlvm}
 use compiler.backend.backend.backend_types.{CodegenTarget}
 use compiler.mono.monomorphize_integration.{run_monomorphization_with_diagnostics}
 
@@ -118,9 +117,8 @@ fn refused(s: Shaped, fn_name: text) -> bool:
 
 describe "type-param field: the instance record does not leak across functions":
     it "annotated parameters are not typed by text instances an earlier function built":
-        # `p0`/`p1` are unknown instances (see KNOWN FRONTEND GAP above). The
-        # leak made them read the stale `W<text>` record of `build` and
-        # CONCATENATE; they must be refused instead.
+        # The leak made these integer parameters reuse build's text instance
+        # record. Their own annotations must determine integer arithmetic.
         val s = shape(
             "fn build() -> i64:\n" +
             "    val a = W(v: \"a\")\n" +
@@ -136,7 +134,7 @@ describe "type-param field: the instance record does not leak across functions":
             "\n" +
             "fn main() -> i64:\n" +
             "    build() + zzz_rd(W(v: 1), W(v: 2))\n")
-        expect(refused(s, "zzz_rd")).to_equal(true)
+        expect(verdict(s, "zzz_rd")).to_equal("add")
 
     it "an instance built in the next function is typed by that function alone":
         val s = shape(
@@ -194,12 +192,12 @@ describe "type-param field: routes on which the instance is known":
             "    q.v + q.v\n")
         expect(verdict(s, "probe")).to_equal("concat")
 
-describe "type-param field: an unknown instance is refused, never guessed":
+describe "type-param field: annotated instances survive every source route":
     it "parameter annotated W<text>":
         val s = shape(
             "fn probe(r: W<text>) -> text:\n" +
             "    r.v + r.v\n")
-        expect(refused(s, "probe")).to_equal(true)
+        expect(verdict(s, "probe")).to_equal("concat")
 
     it "result of a call returning W<text>":
         val s = shape(
@@ -209,20 +207,20 @@ describe "type-param field: an unknown instance is refused, never guessed":
             "fn probe() -> text:\n" +
             "    val r = mk()\n" +
             "    r.v + r.v\n")
-        expect(refused(s, "probe")).to_equal(true)
+        expect(verdict(s, "probe")).to_equal("concat")
 
     it "typed let bound to a parameter":
         val s = shape(
             "fn probe(p: W<text>) -> text:\n" +
             "    val q: W<text> = p\n" +
             "    q.v + q.v\n")
-        expect(refused(s, "probe")).to_equal(true)
+        expect(verdict(s, "probe")).to_equal("concat")
 
     it "field of a non-generic struct declared w: W<text>":
         val s = shape(
             "fn probe(h: Holder) -> text:\n" +
             "    h.w.v + h.w.v\n")
-        expect(refused(s, "probe")).to_equal(true)
+        expect(verdict(s, "probe")).to_equal("concat")
 
     it "parameter declared without type arguments":
         val s = shape(

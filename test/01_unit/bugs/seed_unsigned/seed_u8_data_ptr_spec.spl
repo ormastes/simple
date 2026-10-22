@@ -1,0 +1,42 @@
+# Regression coverage for rt_array_data_ptr on live [u8] arrays: a non-empty
+# array must never answer 0 (0 means empty-and-boxed or not a byte array).
+# See doc/08_tracking/bug/seed_u64_signed_compare_and_u8_data_ptr_2026-10-19.md.
+
+use std.spec
+
+extern fn rt_array_data_ptr(array: [u8]) -> i64
+extern fn rt_ptr_read_u8(ptr: i64, offset: i64) -> i64
+
+fn _push_le16(out: [u8], v: u32) -> [u8]:
+    var o = out
+    o = o.push((v & 0xFF).to_u8())
+    o = o.push(((v >> 8) & 0xFF).to_u8())
+    o
+
+fn _encode() -> Result<[u8], text>:
+    var out: [u8] = []
+    out = _push_le16(out, 0x0201u32)
+    out = out.push(3u8)
+    Ok(out)
+
+describe "rt_array_data_ptr on [u8]":
+    it "answers a readable pointer for a builder-style payload":
+        var payload: [u8] = []
+        match _encode():
+            Ok(bytes): payload = bytes
+            Err(error): expect(error).to_equal("")
+        val ptr = rt_array_data_ptr(payload)
+        expect(ptr != 0).to_equal(true)
+        expect(rt_ptr_read_u8(ptr, 0)).to_equal(1)
+        expect(rt_ptr_read_u8(ptr, 2)).to_equal(3)
+
+    it "answers a readable pointer for in-place push and literals":
+        var pushed: [u8] = []
+        pushed.push(7u8)
+        expect(rt_ptr_read_u8(rt_array_data_ptr(pushed), 0)).to_equal(7)
+        val literal: [u8] = [9u8, 8u8]
+        expect(rt_ptr_read_u8(rt_array_data_ptr(literal), 1)).to_equal(8)
+
+    it "answers non-zero for an empty packed array":
+        val empty: [u8] = []
+        expect(rt_array_data_ptr(empty) != 0).to_equal(true)

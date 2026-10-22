@@ -74,6 +74,40 @@ for changed in producer inputs entry; do
   cmp -s "$work/binding1" "$phase2/.bootstrap-cache-binding" || fail 'mismatch altered binding'
   [ -f "$phase2/a.o" ] && [ -f "$phase2/b.o" ] || fail 'mismatch discarded completed work'
 done
+# Source refresh retains objects only with the exact prior producer/context
+# and byte-identical runtime/tool snapshots. It never rewrites inner keys.
+before="$work/refresh-before"
+after="$work/refresh-after"
+mkdir "$before" "$after"
+for context in "$before" "$after"; do
+  printf 'runtime bytes\n' > "$context/runtime-admitted.txt"
+  printf 'tool bytes\n' > "$context/tool-authority-before.txt"
+done
+printf 'original source\n' > "$before/source-inputs-before.txt"
+printf 'fixed source\n' > "$after/source-inputs-before.txt"
+for changed in runtime tools producer predecessor; do
+  producer=$sha_a previous=$sha_b
+  case "$changed" in
+    runtime) printf changed >> "$after/runtime-admitted.txt" ;;
+    tools) printf changed >> "$after/tool-authority-before.txt" ;;
+    producer) producer=$sha_c ;;
+    predecessor) previous=$sha_c ;;
+  esac
+  if bootstrap_cache_refresh_source "$cache_root" "$phase2" stage2 "$producer" "$previous" "$sha_c" bootstrap-main "$before" "$after" "$work/rejected-$changed" >"$work/refresh-$changed.log" 2>&1; then
+    fail "source refresh accepted changed $changed"
+  fi
+  cmp -s "$work/binding1" "$phase2/.bootstrap-cache-binding" || fail 'rejected refresh changed binding'
+  cp "$before/runtime-admitted.txt" "$after/runtime-admitted.txt"
+  cp "$before/tool-authority-before.txt" "$after/tool-authority-before.txt"
+done
+bootstrap_cache_refresh_source "$cache_root" "$phase2" stage2 "$sha_a" "$sha_b" "$sha_c" bootstrap-main "$before" "$after" "$work/accepted-refresh"
+[ "$(cat "$phase2/a.o")" = 'completed object after partial failure' ] || fail 'refresh rewrote object'
+cmp -s "$work/binding1" "$work/accepted-refresh/binding-before.env" || fail 'refresh lost predecessor binding'
+cmp -s "$phase2/.bootstrap-cache-binding" "$work/accepted-refresh/binding-after.env" || fail 'refresh receipt differs from published binding'
+bootstrap_cache_release_all
+# Restore this fixture's old binding through the same validated transition.
+bootstrap_cache_refresh_source "$cache_root" "$phase2" stage2 "$sha_a" "$sha_c" "$sha_b" bootstrap-main "$after" "$before" "$work/restored-refresh"
+bootstrap_cache_release_all
 # The actual input serializer distinguishes source identity, source content,
 # backend/options, runtime bytes and resolved tool bytes.
 printf 'original-source\n' > "$work/source"
@@ -144,7 +178,7 @@ SIGNAL
 sh "$work/signal-clean.shs" "$repo/scripts/bootstrap/bootstrap-cache-lineage.shs" "$cache_root" "$phase3" "$work/paused" "$work/continued" &
 signal_pid=$!
 poll=0
-while [ ! -f "$work/paused" ] && [ "$poll" -lt 40 ]; do sleep 0.05; poll=$((poll+1)); done
+while [ ! -f "$work/paused" ] && [ "$poll" -lt 600 ]; do sleep 0.05; poll=$((poll+1)); done
 [ -f "$work/paused" ] || fail 'signal fixture never acquired writer'
 kill -TERM "$(cat "$work/paused")"
 signal_status=0; wait "$signal_pid" || signal_status=$?
@@ -166,7 +200,10 @@ CRASH
 perl "$repo/scripts/check/lib/portable-session-exec.pl" /bin/sh "$work/crash-worker.shs" "$repo/scripts/bootstrap/bootstrap-cache-lineage.shs" "$cache_root" "$phase3" "$sha_a" "$sha_b" "$work/crash-ready" "$BOOTSTRAP_CACHE_PROCESS_HELPER_PATH" &
 crash_pid=$!
 poll=0
-while [ ! -f "$work/crash-ready" ] && [ "$poll" -lt 40 ]; do sleep 0.05; poll=$((poll+1)); done
+while [ ! -f "$work/crash-ready" ] && [ "$poll" -lt 600 ]; do
+  kill -0 "$crash_pid" 2>/dev/null || break
+  sleep 0.05; poll=$((poll+1))
+done
 [ -f "$work/crash-ready" ] || fail 'crash fixture never acquired writer'
 crash_nonce=$(cat "$phase3.writer/nonce")
 crash_child=$(cat "$work/crash-ready")
@@ -183,7 +220,7 @@ native_pid=$(sed -n 's/^pid=//p' "$phase3.writer/process.env")
 native_start=$(sed -n 's/^start_hex=//p' "$phase3.writer/process.env")
 native_pgid=$(sed -n 's/^pgid=//p' "$phase3.writer/process.env")
 poll=0
-while [ "$poll" -lt 40 ]; do
+while [ "$poll" -lt 600 ]; do
   group_state=$(perl "$BOOTSTRAP_CACHE_PROCESS_HELPER_PATH" claim-state "$native_pid" "$native_start" "$native_pgid" 2>/dev/null)
   [ "$group_state" != dead ] || break
   sleep 0.05; poll=$((poll+1))

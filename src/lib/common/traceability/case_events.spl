@@ -1,0 +1,105 @@
+# Actual framework events are transport, not trusted qualification receipts.
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.sdn.parser.{parse_with_spans_and_issues}
+
+pub struct TraceCaseEvent:
+    case_name: text
+    phase: text
+    outcome: text
+
+pub fn encode_trace_case_event(event: TraceCaseEvent) -> text:
+    var fields: Dict<text, SdnValue> = {}
+    fields["schema"] = SdnValue.String("simple.trace.case-event/v1")
+    fields["case_name"] = SdnValue.String(event.case_name)
+    fields["phase"] = SdnValue.String(event.phase)
+    fields["outcome"] = SdnValue.String(event.outcome)
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+# Canonical SDN payload is single-line even when case names contain newlines.
+# An incomplete/truncated payload remains unparsable, never silently omitted.
+pub fn collect_trace_case_events(output: text) -> text:
+    var records: [text] = []
+    val marker = "SIMPLE_TRACE_CASE_EVENT "
+    for line in output.split("\n"):
+        if line.starts_with(marker):
+            records.push(line.substring(marker.len(), line.len()).trim())
+    if records.len() == 0:
+        return ""
+    "[" + records.join(", ") + "]"
+
+# Sidecar framing: one complete canonical SDN dictionary document per LF.
+# A final partial document is included so the decoder rejects it explicitly.
+pub fn collect_trace_event_documents(source: text) -> text:
+    var documents: [text] = []
+    for line in source.split("\n"):
+        if line.trim() != "":
+            documents.push(line.trim())
+    if documents.len() == 0:
+        return ""
+    "[" + documents.join(", ") + "]"
+
+fn event_text(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    if not fields.contains_key(name):
+        return Err("missing case-event field: " + name)
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("case-event field must be text: " + name)
+
+pub fn decode_trace_case_events(source: text) -> Result<[TraceCaseEvent], text>:
+    if source == "" or source.len() > 4194304:
+        return Err("case-event evidence absent or exceeds 4 MiB")
+    val parsed = parse_with_spans_and_issues(source)?
+    if parsed.2.len() > 0:
+        return Err("invalid or duplicate case-event fields")
+    val values = match parsed.0:
+        case SdnValue.Array(items): items
+        case _: return Err("case-event transport must be an SDN array")
+    if values.len() > 65536:
+        return Err("case-event transport exceeds 65536 events")
+    var events: [TraceCaseEvent] = []
+    for value in values:
+        val fields = match value:
+            case SdnValue.Dict(items): items
+            case _: return Err("case-event must be a dictionary")
+        if fields.len() != 4 or event_text(fields, "schema")? != "simple.trace.case-event/v1":
+            return Err("unsupported case-event schema")
+        val name = event_text(fields, "case_name")?
+        val phase = event_text(fields, "phase")?
+        val outcome = event_text(fields, "outcome")?
+        if name == "":
+            return Err("case-event name is empty")
+        if phase == "started":
+            if outcome != "not_finished":
+                return Err("started event cannot claim an outcome")
+        elif phase == "finished":
+            if outcome != "passed" and outcome != "failed" and outcome != "pending":
+                return Err("unknown case outcome")
+        else:
+            return Err("unknown case-event phase")
+        events.push(TraceCaseEvent(name, phase, outcome))
+    Ok(events)
+
+pub fn trace_case_events_completed(events: [TraceCaseEvent]) -> Result<[TraceCaseEvent], text>:
+    var started: [text] = []
+    var finished: [TraceCaseEvent] = []
+    for event in events:
+        if event.phase == "started":
+            for prior in started:
+                if prior == event.case_name:
+                    return Err("duplicate case identity in event stream: " + event.case_name)
+            started.push(event.case_name)
+        else:
+            var found = false
+            for name in started:
+                if name == event.case_name:
+                    found = true
+            if not found:
+                return Err("case finished without a start event: " + event.case_name)
+            for prior in finished:
+                if prior.case_name == event.case_name:
+                    return Err("case has multiple terminal events: " + event.case_name)
+            finished.push(event)
+    if started.len() == 0 or started.len() != finished.len():
+        return Err("case-event stream is empty or interrupted")
+    Ok(finished)

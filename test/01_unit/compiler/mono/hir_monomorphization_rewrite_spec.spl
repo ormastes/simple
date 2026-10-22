@@ -283,6 +283,132 @@ fn context_pass() -> MonomorphizationPass:
     pass_.sym_names["context#1"] = "context_failure"
     pass_
 
+fn lambda_local_pass() -> MonomorphizationPass:
+    var pass_ = MonomorphizationPass.create()
+    val modules = make_modules()
+    val module: HirModule = modules["mono_rewrite_test"]
+    val identity: HirFunction = module.functions[SymbolId(id: 1)]
+    pass_.current_module = "lambda_locals"
+    pass_.generic_functions["identity"] = identity
+    pass_.template_module["identity"] = "lambda_locals"
+    pass_.sym_names["lambda_locals#1"] = "identity"
+    pass_
+
+fn lambda_identity_call(id: i64) -> HirExpr:
+    val arg = HirCallArg(has_name: false, name: "", value: mk_expr(HirExprKind.Var(SymbolId(id: id))), span: mk_span())
+    mk_expr(HirExprKind.Call(mk_expr(HirExprKind.Var(SymbolId(id: 1))), [arg], []))
+
+fn lambda_with_local(id: i64, type_: HirType, initial: HirExpr) -> HirExpr:
+    val local = HirStmt(kind: HirStmtKind.Let(SymbolId(id: id), type_, initial), span: mk_span())
+    var body = mk_block([local])
+    body.has = true
+    body.value = lambda_identity_call(id)
+    mk_expr(HirExprKind.Lambda([], mk_expr(HirExprKind.Block(body)), []))
+
+describe "lambda locals use their lexical inference environment":
+    it "collects a typed local inside a lambda passed as a call argument":
+        var pass_ = lambda_local_pass()
+        val integer = mk_type(HirTypeKind.Int(64, true))
+        val closure = lambda_with_local(70, integer, mk_expr(HirExprKind.IntLit(7, nil)))
+        val arg = HirCallArg(has_name: false, name: "", value: closure, span: mk_span())
+        val call = mk_expr(HirExprKind.Call(mk_expr(HirExprKind.NamedVar(SymbolId(id: 90), "consume")), [arg], []))
+        pass_.collect_lets_expr(call)
+        expect(pass_.env.has(70)).to_equal(false)
+        val rewritten = pass_.rewrite_expr(call)
+        expect(pass_.stats.specializations_created).to_equal(1)
+        expect(pass_.stats.unresolved_generic_calls).to_equal(0)
+        expect(pass_.diagnostics.len()).to_equal(0)
+        expect(pass_.specialized_functions.has("identity$i64")).to_equal(true)
+        expect(pass_.env.has(70)).to_equal(false)
+
+    it "keeps sibling parameter and local bindings separate and restores captured evidence":
+        var pass_ = lambda_local_pass()
+        val integer = mk_type(HirTypeKind.Int(64, true))
+        val string = mk_type(HirTypeKind.Str)
+        pass_.env[60] = string
+        pass_.current_return_type = integer
+        val first_param = HirParam(symbol: SymbolId(id: 61), name: "value", type_: integer, has_default: false, default: nil, span: mk_span(), is_mutable: false)
+        val second_param = HirParam(symbol: SymbolId(id: 62), name: "value", type_: string, has_default: false, default: nil, span: mk_span(), is_mutable: false)
+        val first = mk_expr(HirExprKind.Lambda([first_param], lambda_identity_call(61), []))
+        val second = mk_expr(HirExprKind.Lambda([second_param], lambda_identity_call(62), []))
+        val captured = mk_expr(HirExprKind.Lambda([], lambda_identity_call(60), [SymbolId(id: 60)]))
+        val closures = mk_expr(HirExprKind.TupleLit([first, second, captured]))
+        pass_.collect_lets_expr(closures)
+        expect(pass_.env.len()).to_equal(1)
+        val rewritten = pass_.rewrite_expr(closures)
+        expect(pass_.stats.call_sites_found).to_equal(3)
+        expect(pass_.stats.specializations_created).to_equal(2)
+        expect(pass_.stats.unresolved_generic_calls).to_equal(0)
+        expect(pass_.env.len()).to_equal(1)
+        expect(hir_type_key(pass_.env[60])).to_equal(hir_type_key(string))
+        expect(hir_type_key(pass_.current_return_type.unwrap())).to_equal("i64")
+
+    it "collects nested lambda locals under return and array wrappers without leaking them":
+        var pass_ = lambda_local_pass()
+        val integer = mk_type(HirTypeKind.Int(64, true))
+        val inner = lambda_with_local(72, integer, mk_expr(HirExprKind.IntLit(9, nil)))
+        val returned = mk_expr(HirExprKind.Return(mk_expr(HirExprKind.ArrayLit([inner], nil))))
+        val outer = mk_expr(HirExprKind.Lambda([], returned, []))
+        val rewritten = pass_.rewrite_expr(outer)
+        expect(pass_.stats.specializations_created).to_equal(1)
+        expect(pass_.stats.unresolved_generic_calls).to_equal(0)
+        expect(pass_.env.len()).to_equal(0)
+        expect(pass_.current_return_type).to_be_nil()
+
+    it "collects a lambda local under a method argument":
+        var pass_ = lambda_local_pass()
+        val integer = mk_type(HirTypeKind.Int(64, true))
+        val closure = lambda_with_local(75, integer, mk_expr(HirExprKind.IntLit(8, nil)))
+        val arg = HirCallArg(has_name: false, name: "", value: closure, span: mk_span())
+        val method = mk_expr(HirExprKind.MethodCall(mk_expr(HirExprKind.Var(SymbolId(id: 95))), "consume", [arg], MethodResolution.Unresolved))
+        pass_.collect_lets_expr(method)
+        val rewritten = pass_.rewrite_expr(method)
+        expect(pass_.stats.specializations_created).to_equal(1)
+        expect(pass_.stats.unresolved_generic_calls).to_equal(0)
+        expect(pass_.env.len()).to_equal(0)
+
+    it "does not infer an untyped sibling parameter from a typed sibling":
+        var pass_ = lambda_local_pass()
+        val integer = mk_type(HirTypeKind.Int(64, true))
+        val first_param = HirParam(symbol: SymbolId(id: 81), name: "value", type_: integer, has_default: false, default: nil, span: mk_span(), is_mutable: false)
+        val unknown_param = HirParam(symbol: SymbolId(id: 82), name: "value", type_: mk_type(HirTypeKind.Any), has_default: false, default: nil, span: mk_span(), is_mutable: false)
+        val first = mk_expr(HirExprKind.Lambda([first_param], lambda_identity_call(81), []))
+        val unknown = mk_expr(HirExprKind.Lambda([unknown_param], lambda_identity_call(82), []))
+        val rewritten = pass_.rewrite_expr(mk_expr(HirExprKind.TupleLit([first, unknown])))
+        expect(pass_.stats.specializations_created).to_equal(1)
+        expect(pass_.stats.unresolved_generic_calls).to_equal(1)
+        expect(pass_.diagnostics[0]).to_contain("E-MONO-032")
+        expect(pass_.env.len()).to_equal(0)
+
+    it "preserves sparse numeric captured keys through the private environment copy":
+        var pass_ = lambda_local_pass()
+        val integer = mk_type(HirTypeKind.Int(64, true))
+        val string = mk_type(HirTypeKind.Str)
+        val high = 1125899906842701
+        pass_.env[0] = string
+        pass_.env[high] = integer
+        val closure = mk_expr(HirExprKind.Lambda([], lambda_identity_call(high), [SymbolId(id: high)]))
+        val rewritten = pass_.rewrite_expr(closure)
+        expect(pass_.stats.specializations_created).to_equal(1)
+        expect(pass_.stats.unresolved_generic_calls).to_equal(0)
+        expect(pass_.specialized_functions.has("identity$i64")).to_equal(true)
+        expect(pass_.env.len()).to_equal(2)
+        expect(hir_type_key(pass_.env[0])).to_equal(hir_type_key(string))
+        expect(hir_type_key(pass_.env[high])).to_equal("i64")
+
+    it "collects block locals nested in operator operands before rewriting generic uses":
+        var pass_ = lambda_local_pass()
+        val integer = mk_type(HirTypeKind.Int(64, true))
+        val local = HirStmt(kind: HirStmtKind.Let(SymbolId(id: 83), integer, mk_expr(HirExprKind.IntLit(4, nil))), span: mk_span())
+        var operand = mk_block([local])
+        operand.has = true
+        operand.value = lambda_identity_call(83)
+        val expression = mk_expr(HirExprKind.Binary(HirBinOp.Add, mk_expr(HirExprKind.Block(operand)), mk_expr(HirExprKind.IntLit(1, nil))))
+        pass_.collect_lets_expr(expression)
+        val rewritten = pass_.rewrite_expr(expression)
+        expect(pass_.stats.specializations_created).to_equal(1)
+        expect(pass_.stats.unresolved_generic_calls).to_equal(0)
+
 describe "contextual generic inference preserves checked types":
     it "binds return-only generics to scalar and array contexts independently":
         val pass_ = MonomorphizationPass.create()

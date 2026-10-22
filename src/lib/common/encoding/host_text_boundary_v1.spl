@@ -1,0 +1,198 @@
+# Explicit length-delimited host text boundary. No guessing, BOM stripping,
+# replacement, global mode, cache, or provider side effects.
+use std.common.encoding.unicode_scalar.{unicode_scalar_valid}
+use std.common.text_bytes.{text_byte_buffer, utf8_bytes_valid}
+
+pub struct HostTextCodecErrorV1:
+    code: text
+    byte_offset: i64
+    reason: text
+
+fn host_codec_error_v1(code: text, byte_offset: i64, reason: text) -> HostTextCodecErrorV1:
+    HostTextCodecErrorV1(code: code, byte_offset: byte_offset, reason: reason)
+
+fn host_encoding_supported_v1(encoding: text) -> bool:
+    encoding == "utf-8" or encoding == "utf-16le" or encoding == "utf-16be"
+
+pub struct HostTextByteSpanV1:
+    prefix: [u8]
+    bytes: [u8]
+    start: i64
+    end: i64
+
+struct HostTextCodecOutputV1:
+    legacy: [i64]
+    bytes: [u8]
+
+# Caller must validate the span and provide an index in [start,end).
+pub fn host_text_span_byte_v1(span: HostTextByteSpanV1, index: i64) -> u8:
+    if index < span.prefix.len(): return span.prefix[index]
+    span.bytes[index - span.prefix.len()]
+
+fn host_input_byte_v1(legacy: [i64], span: HostTextByteSpanV1, legacy_mode: bool, index: i64) -> i64:
+    if legacy_mode: return legacy[index]
+    host_text_span_byte_v1(span, index) as i64
+
+fn host_transcode_core_v1(bytes: [i64], span: HostTextByteSpanV1, legacy_mode: bool, encoding: text, destination: text, validate_only: bool) -> Result<HostTextCodecOutputV1, HostTextCodecErrorV1>:
+    # Reject metadata before examining payload (including an empty payload).
+    if not host_encoding_supported_v1(encoding) or not host_encoding_supported_v1(destination): return Err(host_codec_error_v1("unsupported_encoding", -1, "unsupported host encoding"))
+    var begin = 0
+    var finish = bytes.len()
+    if not legacy_mode:
+        if span.prefix.len() > 3 or span.start < 0 or span.end < span.start or span.end > span.prefix.len() + span.bytes.len():
+            return Err(host_codec_error_v1("invalid_span", -1, "invalid host byte span"))
+        begin = span.start
+        finish = span.end
+    for index in begin..finish:
+        val byte = host_input_byte_v1(bytes, span, legacy_mode, index)
+        if byte < 0 or byte > 255: return Err(host_codec_error_v1("invalid_byte", index, "invalid byte"))
+    # Preserve whole-container invalid-byte precedence; then transcode once.
+    # One output array, scalar locals only. Each call consumes complete input.
+    var output: [i64] = []
+    var byte_output: [u8] = []
+    if not legacy_mode and not validate_only:
+        val selected_length = finish - begin
+        # Three output bytes per input byte bounds every supported conversion.
+        # The buffer facade reserves the existing 40-byte runtime array header.
+        if selected_length > 3074457345618258589:
+            return Err(host_codec_error_v1("capacity_overflow", -1, "host text output capacity overflow"))
+        match text_byte_buffer(selected_length * 3):
+            Ok(buffer): byte_output = buffer
+            Err(problem): return Err(host_codec_error_v1("buffer_allocation", -1, "host text output buffer allocation failed"))
+    var offset = begin
+    while offset < finish:
+        var scalar = 0
+        if encoding == "utf-8":
+            val lead = host_input_byte_v1(bytes, span, legacy_mode, offset)
+            var width = 1
+            if lead >= 0xC2 and lead <= 0xDF: width = 2
+            elif lead >= 0xE0 and lead <= 0xEF: width = 3
+            elif lead >= 0xF0 and lead <= 0xF4: width = 4
+            elif lead >= 0x80: return Err(host_codec_error_v1("invalid_utf8", offset, "invalid UTF-8 lead"))
+            scalar = lead
+            if width == 2: scalar = lead & 0x1F
+            elif width == 3: scalar = lead & 0x0F
+            elif width == 4: scalar = lead & 0x07
+            for index in 0..width:
+                val position = offset + index
+                if position >= finish: return Err(host_codec_error_v1("truncated_input", position, "truncated UTF-8"))
+                val byte = host_input_byte_v1(bytes, span, legacy_mode, position)
+                if index > 0:
+                    if byte < 0x80 or byte > 0xBF: return Err(host_codec_error_v1("invalid_utf8", position, "invalid UTF-8 continuation"))
+                    if index == 1:
+                        if (lead == 0xE0 and byte < 0xA0) or (lead == 0xF0 and byte < 0x90): return Err(host_codec_error_v1("invalid_utf8", position, "overlong UTF-8 scalar"))
+                        if lead == 0xED and byte >= 0xA0: return Err(host_codec_error_v1("invalid_utf8", position, "UTF-8 surrogate scalar"))
+                        if lead == 0xF4 and byte > 0x8F: return Err(host_codec_error_v1("invalid_utf8", position, "UTF-8 scalar out of range"))
+                    scalar = (scalar << 6) | (byte & 0x3F)
+            if not unicode_scalar_valid(scalar):
+                return Err(host_codec_error_v1("internal_invariant", offset, "strict scalar decoder rejected validated UTF-8"))
+            offset = offset + width
+        else:
+            if finish - offset < 2: return Err(host_codec_error_v1("truncated_input", finish, "truncated UTF-16 unit"))
+            var code_unit = host_input_byte_v1(bytes, span, legacy_mode, offset) | (host_input_byte_v1(bytes, span, legacy_mode, offset + 1) << 8)
+            if encoding == "utf-16be": code_unit = (host_input_byte_v1(bytes, span, legacy_mode, offset) << 8) | host_input_byte_v1(bytes, span, legacy_mode, offset + 1)
+            offset = offset + 2
+            if code_unit >= 0xDC00 and code_unit <= 0xDFFF: return Err(host_codec_error_v1("invalid_utf16", offset - 2, "unpaired low surrogate"))
+            if code_unit >= 0xD800 and code_unit <= 0xDBFF:
+                if finish - offset < 2: return Err(host_codec_error_v1("truncated_input", finish, "truncated surrogate pair"))
+                var low = host_input_byte_v1(bytes, span, legacy_mode, offset) | (host_input_byte_v1(bytes, span, legacy_mode, offset + 1) << 8)
+                if encoding == "utf-16be": low = (host_input_byte_v1(bytes, span, legacy_mode, offset) << 8) | host_input_byte_v1(bytes, span, legacy_mode, offset + 1)
+                if low < 0xDC00 or low > 0xDFFF: return Err(host_codec_error_v1("invalid_utf16", offset - 2, "unpaired high surrogate"))
+                code_unit = 0x10000 + ((code_unit - 0xD800) << 10) + low - 0xDC00
+                offset = offset + 2
+            scalar = code_unit
+        if not unicode_scalar_valid(scalar):
+            return Err(host_codec_error_v1("internal_invariant", -1, "strict scalar encoder rejected validated scalar"))
+        if validate_only: continue
+        if destination == "utf-8":
+            if scalar < 0x80:
+                if legacy_mode: output.push(scalar)
+                else: byte_output.push((scalar) as u8)
+            elif scalar < 0x800:
+                if legacy_mode: output.push(0xC0 | (scalar >> 6))
+                else: byte_output.push((0xC0 | (scalar >> 6)) as u8)
+                if legacy_mode: output.push(0x80 | (scalar & 0x3F))
+                else: byte_output.push((0x80 | (scalar & 0x3F)) as u8)
+            elif scalar < 0x10000:
+                if legacy_mode: output.push(0xE0 | (scalar >> 12))
+                else: byte_output.push((0xE0 | (scalar >> 12)) as u8)
+                if legacy_mode: output.push(0x80 | ((scalar >> 6) & 0x3F))
+                else: byte_output.push((0x80 | ((scalar >> 6) & 0x3F)) as u8)
+                if legacy_mode: output.push(0x80 | (scalar & 0x3F))
+                else: byte_output.push((0x80 | (scalar & 0x3F)) as u8)
+            else:
+                if legacy_mode: output.push(0xF0 | (scalar >> 18))
+                else: byte_output.push((0xF0 | (scalar >> 18)) as u8)
+                if legacy_mode: output.push(0x80 | ((scalar >> 12) & 0x3F))
+                else: byte_output.push((0x80 | ((scalar >> 12) & 0x3F)) as u8)
+                if legacy_mode: output.push(0x80 | ((scalar >> 6) & 0x3F))
+                else: byte_output.push((0x80 | ((scalar >> 6) & 0x3F)) as u8)
+                if legacy_mode: output.push(0x80 | (scalar & 0x3F))
+                else: byte_output.push((0x80 | (scalar & 0x3F)) as u8)
+        else:
+            var first = scalar
+            var second = -1
+            if scalar >= 0x10000:
+                val adjusted = scalar - 0x10000
+                first = 0xD800 + (adjusted >> 10)
+                second = 0xDC00 + (adjusted & 0x3FF)
+            if destination == "utf-16le":
+                if legacy_mode: output.push(first & 255)
+                else: byte_output.push((first & 255) as u8)
+                if legacy_mode: output.push(first >> 8)
+                else: byte_output.push((first >> 8) as u8)
+                if second >= 0:
+                    if legacy_mode: output.push(second & 255)
+                    else: byte_output.push((second & 255) as u8)
+                    if legacy_mode: output.push(second >> 8)
+                    else: byte_output.push((second >> 8) as u8)
+            else:
+                if legacy_mode: output.push(first >> 8)
+                else: byte_output.push((first >> 8) as u8)
+                if legacy_mode: output.push(first & 255)
+                else: byte_output.push((first & 255) as u8)
+                if second >= 0:
+                    if legacy_mode: output.push(second >> 8)
+                    else: byte_output.push((second >> 8) as u8)
+                    if legacy_mode: output.push(second & 255)
+                    else: byte_output.push((second & 255) as u8)
+    Ok(HostTextCodecOutputV1(legacy: output, bytes: byte_output))
+
+pub fn host_text_to_utf8_v1(bytes: [i64], source_encoding: text) -> Result<[i64], HostTextCodecErrorV1>:
+    """Strict complete-input ingress; embedded NUL and BOM remain content."""
+    val span = HostTextByteSpanV1(prefix: [], bytes: [], start: 0, end: 0)
+    val output = host_transcode_core_v1(bytes, span, true, source_encoding, "utf-8", false)?
+    Ok(output.legacy)
+
+pub fn utf8_to_host_text_v1(bytes: [i64], destination_encoding: text) -> Result<[i64], HostTextCodecErrorV1>:
+    """Strict complete-input egress; destination is explicit, never guessed."""
+    val span = HostTextByteSpanV1(prefix: [], bytes: [], start: 0, end: 0)
+    val output = host_transcode_core_v1(bytes, span, true, "utf-8", destination_encoding, false)?
+    Ok(output.legacy)
+
+pub fn host_binary_identity_v1(bytes: [i64]) -> [i64]:
+    """Raw payload bypass: no text validation, conversion, or normalization."""
+    bytes
+
+# Canonical byte APIs preserve byte values without full-array widening.
+pub fn host_validate_text_span_v1(span: HostTextByteSpanV1, encoding: text) -> Result<(), HostTextCodecErrorV1>:
+    # Bulk accept for a whole unprefixed UTF-8 array: the runtime validator has
+    # the scalar loop's exact accept set. Any rejection re-runs the loop below,
+    # so every error keeps its code, byte offset and precedence.
+    if encoding == "utf-8" and span.prefix.len() == 0 and span.start == 0 and span.end == span.bytes.len():
+        if utf8_bytes_valid(span.bytes): return Ok(())
+    val output = host_transcode_core_v1([], span, false, encoding, "utf-8", true)?
+    Ok(())
+
+pub fn host_text_span_to_utf8_v1(span: HostTextByteSpanV1, encoding: text) -> Result<[u8], HostTextCodecErrorV1>:
+    val output = host_transcode_core_v1([], span, false, encoding, "utf-8", false)?
+    Ok(output.bytes)
+
+pub fn host_text_bytes_to_utf8_v1(bytes: [u8], encoding: text) -> Result<[u8], HostTextCodecErrorV1>:
+    val span = HostTextByteSpanV1(prefix: [], bytes: bytes, start: 0, end: bytes.len())
+    host_text_span_to_utf8_v1(span, encoding)
+
+pub fn utf8_bytes_to_host_text_v1(bytes: [u8], encoding: text) -> Result<[u8], HostTextCodecErrorV1>:
+    val span = HostTextByteSpanV1(prefix: [], bytes: bytes, start: 0, end: bytes.len())
+    val output = host_transcode_core_v1([], span, false, "utf-8", encoding, false)?
+    Ok(output.bytes)

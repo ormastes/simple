@@ -11,7 +11,7 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering._Items.lowering_helpers.{PlatformAttrFields, platform_attr_fields_for}
 
 impl HirLowering:
-    me lower_param(p: Param) -> HirParam:
+    me lower_param(p: Param, inferred_callable: HirType? = nil, declared_receiver: HirType? = nil) -> HirParam:
         # An unannotated fn parameter (`fn format_table_row(cells, widths, ...)`,
         # std.common.format_utils) is dynamic in the seed/interpreter. Lowering
         # it to Infer left an inference variable nothing resolves, and MIR
@@ -29,13 +29,27 @@ impl HirLowering:
         # An untyped param WITH a default (`fn f(x = 5)`) takes the default's
         # type, as in the seed; `any` only when that cannot be settled.
         var type_ = HirType(kind: HirTypeKind.Any, span: p.span)
-        if p.has_type_ or p.name == "self" or p.name == "me":
+        if p.has_type_:
+            type_ = self.lower_type(p.type_)
+        elif val receiver_type = declared_receiver:
+            # Supplied only for the first unannotated receiver of its owning
+            # nonstatic method. Never manufacture a type for an unknown owner.
+            match receiver_type.kind:
+                case HirTypeKind.Infer(_, _) | HirTypeKind.Error:
+                    self.error("unresolved declared method receiver owner", p.span)
+                    type_ = HirType(kind: HirTypeKind.Error, span: p.span)
+                case _: type_ = receiver_type
+        elif p.name == "self" or p.name == "me":
             type_ = self.lower_type(p.type_)
         elif p.has_default:
             val default_type = self.lowered_const_value_type(default_, p.span)
             match default_type.kind:
                 case HirTypeKind.Infer(_, _): ()
                 case _: type_ = default_type
+        if not p.has_type_ and not p.has_default:
+            if not declared_receiver.is_some():
+                if val callable_type = inferred_callable:
+                    type_ = callable_type
         val symbol = self.symbols.define(p.name, SymbolKind.Parameter, Some(type_), p.span, Visibility.Private, false, nil)
 
         HirParam(

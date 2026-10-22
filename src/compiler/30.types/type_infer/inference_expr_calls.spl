@@ -7,12 +7,22 @@
 use compiler.hir.hir.*
 use compiler.frontend.core.lexer.*
 use type_infer_types.*
-use compiler.types.type_infer_types.{HmInferContext}
+use compiler.types.type_infer_types.{HmInferContext, HmPendingBoundCall}
+use compiler.types.type_infer.generic_calls.*
 
 impl HmInferContext:
     me infer_function_call(callee: HirExpr, args: [HirCallArg], type_args: [HirType], span: Span) -> Result<HirType, TypeInferError>:
         match self.synthesize_expr(callee):
-            case Ok(callee_ty):
+            case Ok(synthesized_callee):
+                val direct_symbol = self.direct_function_symbol(callee)
+                var callee_ty = synthesized_callee
+                var inferred_arguments: [HirType] = []
+                if val function_symbol = direct_symbol:
+                    match self.instantiate_declared_call(function_symbol, type_args, span):
+                        case Ok(instance):
+                            callee_ty = instance.0
+                            inferred_arguments = instance.1
+                        case Err(error): return Err(error)
                 val resolved_callee = self.resolve(callee_ty)
                 val callee_effects = match resolved_callee.kind:
                     case Function(_, _, effects): effects
@@ -25,7 +35,8 @@ impl HmInferContext:
                     case _: nil
                 var arg_types: [HirType] = []
                 var i = 0
-                for arg in args:
+                for raw_arg in args:
+                    val arg: HirCallArg = raw_arg
                     val arg_result = if expected_params.? and i < expected_params.unwrap().len():
                         val expected_param = expected_params.unwrap()[i]
                         self.infer_expr(arg.value, InferMode.Check(expected_param))
@@ -44,10 +55,10 @@ impl HmInferContext:
                 match self.unify(callee_ty, expected_fn_ty):
                     case Err(e): Err(e)
                     case _:
-                        match callee.kind:
-                            case Var(func_symbol):
-                                self.generate_obligations_for_function_call(func_symbol, type_args, span)
-                            case _: pass
+                        if val function_symbol = direct_symbol:
+                            self.pending_bound_calls = self.pending_bound_calls.push(HmPendingBoundCall(
+                                function: function_symbol, arguments: inferred_arguments,
+                                caller: self.current_function_symbol, span: span))
                         Ok(self.resolve(ret_ty))
             case Err(e): Err(e)
 

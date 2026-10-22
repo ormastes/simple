@@ -39,6 +39,8 @@ extern fn rt_stderr_write(s: text)
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 @unsafe(reason: "raw bounded process capture; exit_code -1 is the failure sentinel and output is contract-bounded", capabilities: [ffi])
 extern fn rt_process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64)
+@unsafe(reason: "raw bounded process bytes are admitted by the caller's explicit text codec", capabilities: [ffi])
+extern fn rt_process_run_bounded_bytes(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> ([u8], [u8], i64)
 
 # Owned-process V3 opaque bridge declarations.  The runtime owns the adapter
 # table and the underlying RtOwnedProcessTokenV2; the only authority visible
@@ -296,7 +298,9 @@ pub class OwnedProcessLease:
         val words = _owned_v3_words(raw, OWNED_PROCESS_V3_RESULT_WORDS, "result")?
         Ok(_owned_v3_result_from_words(words))
 
-    me fn collect() -> Result<OwnedProcessResult, text>:
+    # Public owner acknowledgement: callers retain the lease and must collect
+    # a reaped process before releasing its native record.
+    pub me fn collect() -> Result<OwnedProcessResult, text>:
         val handle = _owned_v3_live_handle(self)?
         val raw = unsafe(capabilities: [ffi]): rt_process_owned_v3_collect_value(handle)
         val words = _owned_v3_words(raw, OWNED_PROCESS_V3_RESULT_WORDS, "collect")?
@@ -306,7 +310,9 @@ pub class OwnedProcessLease:
             self.released = true
         Ok(result)
 
-    me fn release() -> Result<bool, text>:
+    # Explicitly release a terminal lease. Running leases remain owned and
+    # cannot be released until collection has reaped the child.
+    pub me fn release() -> Result<bool, text>:
         if self.released:
             return Ok(true)
         val handle = _owned_v3_live_handle(self)?
@@ -823,6 +829,8 @@ extern fn rt_process_write_stdin_some(pid: i64, data: text, data_len: i64, offse
 extern fn rt_process_read_stdout(pid: i64) -> text
 @unsafe(reason: "raw piped-child liveness status; false sentinel means stopped, absent, or runtime failure", capabilities: [ffi])
 extern fn rt_process_is_alive(pid: i64) -> bool
+@unsafe(reason: "raw stdout stream state; distinguishes open, observed EOF, and terminal failure", capabilities: [ffi])
+extern fn rt_process_stdout_state(pid: i64) -> i64
 @unsafe(reason: "raw piped-child close status; false sentinel means absent or cleanup failure", capabilities: [ffi])
 extern fn rt_process_close_piped(pid: i64) -> bool
 
@@ -853,20 +861,19 @@ pub fn process_spawn_pinned_piped(executable_handle: i64, args: [text]) -> i64:
     unsafe(capabilities: [ffi]):
         rt_process_spawn_pinned_piped(executable_handle, args)
 
-# Result-carrying stdout drain, composed in pure Simple from the real
-# rt_process_read_stdout (non-blocking drain, "" sentinel = no new data
-# right now) and rt_process_is_alive primitives already backing
-# process_read_stdout/process_is_piped_alive below: Ok(Some(chunk)) for new
-# output, Ok(nil) when the child is still alive with nothing new yet, and
-# Err("process_stdout_eof") once the child is gone — the caller
-# (host_join_exact) reads that Err as "drain finished, parse the join".
+# Stdout drain state is independent of child liveness: 0=open/deferred,
+# 1=observed EOF with buffered tail delivered, -1=terminal read error/unknown.
+# Exited children retain their stdout owner until drain completion or close.
 pub fn process_read_stdout_result(pid: i64) -> Result<text?, text>:
     val chunk = process_read_stdout(pid)
     if chunk.len() > 0:
         return Ok(Some(chunk))
-    if process_is_piped_alive(pid):
-        return Ok(nil)
-    Err("process_stdout_eof")
+    val state = _process_stdout_state_raw(pid)
+    if state == 1:
+        return Err("process_stdout_eof")
+    if state < 0:
+        return Err("process_stdout_read_failed")
+    Ok(nil)
 
 use std.nogc_sync_mut.io.file_ops.{file_read_text}
 use std.io_runtime.{file_delete}
@@ -965,6 +972,10 @@ fn _process_write_stdin_some_raw(pid: i64, data: text, data_len: i64, offset: i6
 fn _process_read_stdout_raw(pid: i64) -> text:
     unsafe(capabilities: [ffi]):
         rt_process_read_stdout(pid)
+
+fn _process_stdout_state_raw(pid: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_process_stdout_state(pid)
 
 fn _process_is_alive_raw(pid: i64) -> bool:
     unsafe(capabilities: [ffi]):
@@ -1419,6 +1430,38 @@ pub fn process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_
     val (stdout, stderr, exit_code) = _process_run_bounded_raw(resolved_cmd, args, timeout_ms, max_output_bytes)
     proc_slot_release()
     (stdout, stderr, exit_code)
+
+pub fn process_run_bounded_bytes(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> ([u8], [u8], i64):
+    proc_slot_acquire()
+    val result = unsafe(capabilities: [ffi]):
+        rt_process_run_bounded_bytes(host_path_native(cmd), args, timeout_ms, max_output_bytes)
+    proc_slot_release()
+    result
+
+pub fn process_windows_executable(cmd: text) -> text?:
+    if not host_is_windows_host() or cmd == "": return nil
+    if cmd.contains("/") or cmd.contains("\\") or cmd.contains(":"):
+        if file_exists(cmd): return Some(cmd)
+        for suffix in _windows_path_exts():
+            if file_exists(cmd + suffix): return Some(cmd + suffix)
+        return nil
+    var names: [text] = []
+    var has_extension = false
+    for suffix in _windows_path_exts():
+        if cmd.lower().ends_with(suffix.lower()): has_extension = true
+    if has_extension: names.push(cmd)
+    else:
+        for suffix in _windows_path_exts(): names.push(cmd + suffix)
+    var dirs: [text] = ["."]
+    val path = env_get("PATH") ?? ""
+    for raw in path.split(";"):
+        val dir = raw.trim().replace("\"", "")
+        if dir != "": dirs.push(dir)
+    for dir in dirs:
+        for name in names:
+            val candidate = "{dir}\\{name}"
+            if file_exists(candidate): return Some(candidate)
+    nil
 
 # --------------------------------------------------------------------------
 # Timeout-vs-kill discrimination for process_run_bounded results.
