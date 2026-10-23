@@ -22,6 +22,9 @@ use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl}
 use compiler.frontend.core.flat_pool_codec.*
 use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_get_i64_process, env_set, env_remove_process}
 
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
+extern fn rt_array_free<T>(array: [T])
+
 @always_inline
 fn _env_get(key: text) -> text?:
     env_get_nullable(key)
@@ -1574,6 +1577,71 @@ fn ast_decl_env_mirror_clear():
 var lexer_state_core_pos_slot: [text] = ["0"]
 var lexer_state_core_line_slot: [text] = ["1"]
 
+
+# @workaround bug=stage2_mir_shard_flat_pool_text_len_minus1_2026_10_22 reason=decl_pools_dangle_across_transient_scope
+# The decl pools are the flat-AST module graph the bridge, desugar and
+# the cache capture read after the per-file transient scope ends; unlike
+# the type pools (type_pools_promote_hir_owners) they were never
+# promoted, so scope teardown reclaims a grown backing and later reads
+# see rt_string_len == -1 (flat_pool_builder_push) or SIGSEGV (desugar).
+fn _decl_pool_promote_i64(root: [[i64]]) -> bool:
+    val promoted = rt_transient_heap_promote(root)
+    rt_array_free(root)
+    promoted
+
+fn _decl_pool_promote_text(root: [[text]]) -> bool:
+    val promoted = rt_transient_heap_promote(root)
+    rt_array_free(root)
+    promoted
+
+pub fn decl_pools_promote_transient_owners() -> bool:
+    var promoted = true
+    promoted = _decl_pool_promote_i64([ast_decl_mirror_high_slot]) and promoted
+    promoted = _decl_pool_promote_i64([ast_module_decl_mirror_high_slot]) and promoted
+    promoted = _decl_pool_promote_i64([ast_decl_count_slot]) and promoted
+    promoted = _decl_pool_promote_i64([ast_module_decl_count_slot]) and promoted
+    promoted = _decl_pool_promote_i64([decl_tag]) and promoted
+    promoted = _decl_pool_promote_i64([decl_span]) and promoted
+    promoted = _decl_pool_promote_i64([decl_ret_type]) and promoted
+    promoted = _decl_pool_promote_i64([decl_is_async]) and promoted
+    promoted = _decl_pool_promote_i64([decl_is_comptime]) and promoted
+    promoted = _decl_pool_promote_i64([decl_is_lazy]) and promoted
+    promoted = _decl_pool_promote_i64([decl_is_gpu_kernel]) and promoted
+    promoted = _decl_pool_promote_i64([decl_rt_hal_flags]) and promoted
+    promoted = _decl_pool_promote_i64([decl_is_simd]) and promoted
+    promoted = _decl_pool_promote_i64([decl_is_packed]) and promoted
+    promoted = _decl_pool_promote_i64([decl_is_trait]) and promoted
+    promoted = _decl_pool_promote_i64([decl_is_hardware]) and promoted
+    promoted = _decl_pool_promote_i64([decl_flatten_struct_output]) and promoted
+    promoted = _decl_pool_promote_i64([decl_unroll_factor]) and promoted
+    promoted = _decl_pool_promote_i64([decl_pipeline_ii]) and promoted
+    promoted = _decl_pool_promote_i64([decl_memory_banks]) and promoted
+    promoted = _decl_pool_promote_i64([decl_is_value_type]) and promoted
+    promoted = _decl_pool_promote_i64([decl_empty_i64]) and promoted
+    promoted = _decl_pool_promote_i64([arm_pattern]) and promoted
+    promoted = _decl_pool_promote_i64([arm_guard]) and promoted
+    promoted = _decl_pool_promote_i64([elif_cond]) and promoted
+    promoted = _decl_pool_promote_i64([module_decls]) and promoted
+    promoted = _decl_pool_promote_i64([module_decl_slots]) and promoted
+    promoted = _decl_pool_promote_text([decl_name]) and promoted
+    promoted = _decl_pool_promote_text([decl_body_stmts_flat]) and promoted
+    promoted = _decl_pool_promote_text([decl_visibility]) and promoted
+    promoted = _decl_pool_promote_text([decl_asm_placement]) and promoted
+    promoted = _decl_pool_promote_text([decl_gpu_target_text]) and promoted
+    promoted = _decl_pool_promote_text([decl_gpu_target_arg_name_text]) and promoted
+    promoted = _decl_pool_promote_text([decl_gpu_backends_text]) and promoted
+    promoted = _decl_pool_promote_text([decl_impl_trait]) and promoted
+    promoted = _decl_pool_promote_text([decl_param_mut_text]) and promoted
+    promoted = _decl_pool_promote_text([decl_param_default_text]) and promoted
+    promoted = _decl_pool_promote_text([decl_empty_text]) and promoted
+    promoted = _decl_pool_promote_text([arm_body_flat]) and promoted
+    promoted = _decl_pool_promote_text([arm_binding]) and promoted
+    promoted = _decl_pool_promote_text([arm_rationale]) and promoted
+    promoted = _decl_pool_promote_text([module_path_slot]) and promoted
+    promoted = _decl_pool_promote_text([lexer_state_core_pos_slot]) and promoted
+    promoted = _decl_pool_promote_text([lexer_state_core_line_slot]) and promoted
+    promoted
+
 # --- flat-AST pool codec: flat_decl ------------------------------
 #
 # Dump/restore for this file's 55 pools, in a FIXED SORTED ORDER that
@@ -1800,3 +1868,4 @@ pub fn flat_decl_pools_consistent() -> bool:
     if decl_param_mut_text.len() != count: return false
     if decl_param_default_text.len() != count: return false
     true
+export decl_pools_promote_transient_owners
