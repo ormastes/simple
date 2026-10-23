@@ -337,3 +337,105 @@ reused memory (the "ASCII text in a ParserModule field" symptom above). With
 #4151 the riscv64 lane gets past surface_build and stops at the next tripwire,
 "transient HIR scope end failed" (addendum above).
 
+
+## Located 2026-10-23: SIGSEGV is in the HIR codec encoder, via the cache store
+
+Next step 1 above is done. The crash is **not** the
+`self.method(array_arg, ...)` argument-corruption family this record
+hypothesised, so steps 2 and 3 as written do not apply to it.
+
+### Fast reproduction — ~110 ms, no bootstrap
+
+```sh
+R=.simple/storage/build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple.rejected
+env -u SIMPLE_BOOTSTRAP CAP_MEM_MAX=4G sh scripts/resource/run_capped.shs \
+  "$R" native-build --runtime-bundle core-c-bootstrap --entry-closure \
+  --entry src/compiler/bootstrap_admission/stage2_module_path_naming.spl -o /tmp/probe
+# worker terminated with signal 11, during phase=hir
+```
+
+### gdb recipe (the two things that make it work)
+
+```sh
+# 1. capture the worker argv -- -s must be LARGE or the base64 policy arg is
+#    truncated and the worker answers `invalid-internal-argument:corrupt`
+strace -f -qq -s 60000 -e trace=execve -o /tmp/st.log "$R" native-build ...
+# 2. SIMPLE_NATIVE_BUILD_WORKER=1 is REQUIRED: without it the bootstrap CLI
+#    answers `unknown command 'run'` (bootstrap_main.spl:629 gates the
+#    internal `run` entry on that marker).
+env -u SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_WORKER=1 \
+  gdb -q -batch -ex run -ex 'bt 40' --args <argv from step 1>
+```
+
+### Backtrace — 35 frames, bottoming out at `main`
+
+```
+#0  compiler.hir.generated.hir_codec.hc_enc_hir_expr_kind   <-- SIGSEGV
+#1  hc_enc_hir_expr
+#2  hc_enc_hir_block
+#3  hc_enc_hir_if_arm
+#4  hc_enc_hir_expr_kind
+...  expr -> stmt_kind -> stmt -> block -> expr_kind recursion
+#19 hc_enc_hir_function
+#20 hc_enc_hir_module
+#21 compiler.hir.hir_codec.hir_module_encode
+#22 compiler.hir.hir_codec.hir_module_decode_stable
+#23 compiler.driver.driver_hir_cache.hir_cache_store_in_owned_scope
+#24 compiler.driver.driver_hir_cache.hir_cache_store
+...
+#33 spl_main
+#34 main
+```
+
+**It is not stack exhaustion.** The whole stack is 35 frames and terminates
+normally at `main`; the recursion visible in frames 0-20 is just the HIR tree
+walk. This is a bad-pointer dereference inside `hc_enc_hir_expr_kind`.
+
+### Mechanism
+
+`hir_cache_store` encodes the module, then verifies round-trip stability
+(`hir_codec.spl:555`):
+
+```simple
+fn hir_module_decode_stable(blob: text) -> HirModule?:
+    val decoded = hir_module_decode(blob)
+    if decoded == nil:
+        return nil
+    if hir_module_encode(decoded.unwrap()) != blob:   # <-- crashes here
+        return nil
+    decoded
+```
+
+`hir_module_decode` returns a **non-nil** `HirModule` that is not safely
+encodable, so the stability check segfaults instead of answering `nil`. The
+defect is therefore incomplete decode validation: `decode` admits a blob that
+produces a structurally invalid expr-kind payload. Note the shape of the
+failure — `decode_stable` exists precisely to catch an unstable round trip, and
+it cannot, because re-encoding the bad tree crashes before the comparison.
+
+Owner note: `src/compiler/20.hir/generated/hir_codec.spl` is GENERATED (8,807
+lines); the fix belongs in the generator and/or in `decode`'s validation, not
+in hand edits to that file.
+
+### Ruled out, with evidence
+
+- **Not the method-call argument family.** The backtrace never enters the
+  fixture's own code; it crashes in the codec during cache store, after HIR
+  lowering has already completed clean (`[bootstrap-error-count] ...
+  point=post-lowering count=0`, `point=post-diagnostics count=0`).
+- **`SIMPLE_HIR_CACHE=0` is NOT a usable workaround.** With the shard argument
+  present the worker then fails closed with `HIR cache identity unavailable for
+  shard`; without sharding the SIGSEGV simply moves. The shard lane requires
+  cache identity, so the cache cannot be switched off to get past this.
+- **The reverse-reference batch is healthy here.** A probe in `publish` on the
+  same run reports `field_token=1 mirror_token=1 field_gen=1 field_sealed=true
+  field_valid=true`, so the batch-promotion defect fixed in #4202 is not
+  implicated in this crash.
+
+### Revised next steps
+
+1. Find which `HirExprKind` variant `decode` admits with an invalid payload —
+   encode/decode the fixture's module in isolation and bisect by variant.
+2. Make `hir_module_decode` reject it (fail closed) so `decode_stable` answers
+   `nil` instead of crashing; that alone restores a clean cache miss.
+3. Then fix the generator so the variant round-trips.
