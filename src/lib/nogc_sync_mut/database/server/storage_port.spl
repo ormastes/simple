@@ -1,0 +1,418 @@
+# DatabaseStoragePortV1 — versioned storage port: native primary, SQLite /
+# SQLCipher 4 second backends (integration lane, master plan D01).
+#
+# D01 (recorded policy): the native SDN format stays the PRIMARY store; the
+# on-disk SQLite v3 format and its SQLCipher 4 variant are SECOND backends,
+# selected EXPLICITLY by format name at open time — never by content
+# sniffing, never silently. Import/export between native and SQLite formats
+# is an explicit bridge operation (a full read through this port), not a
+# transparent fallback. The port therefore dispatches on a caller-supplied
+# format string and fails closed (UnsupportedFormat) on anything unknown.
+#
+# Backends
+#   native      std.database.core SdnDatabase (the embedded store; primary)
+#   sqlite3     plaintext pager backend (std.database.sqlite_format)
+#   sqlcipher4  cipher-c page codec backend (codec/sqlcipher4_page through
+#               the codec registry): per-page HMAC verified BEFORE any
+#               plaintext is released; keys derived via cipher-b key
+#               sessions from a SecretRef (codec/secret_ref) — never a
+#               passphrase argument.
+#
+# Shape: like PageCodecV1, the port is a typed function record + registry.
+# `database_storage_port_v1()` returns the standard port with all three
+# backends admitted. Backend admission is fail-closed (interface version
+# must match the port's; duplicate backend_id is latest-wins with a
+# recorded diagnostic).
+#
+# READ-ONLY BY CONSTRUCTION for the file backends: open decodes a pinned
+# whole-file snapshot; there is no write path on this port at all — the
+# pager/codec encode fns are deliberately not surfaced here. Writes stay on
+# the native store's own APIs.
+#
+# Security notes for the sqlcipher4 backend:
+#   * The codec session is opened from the page-1 file salt, every page is
+#     authenticated-then-decrypted, and the session is closed (key material
+#     zeroized) before open() returns. The view retains only the plaintext
+#     snapshot, which close_view zeroizes.
+#   * A SecretRef is required; a raw passphrase string is not admissible
+#     (MissingSecret names the defect without echoing input).
+
+use std.database.core.{SdnDatabase}
+use std.database.sql.types.{DbRow}
+use std.io_runtime.{file_read_bytes_result}
+use nogc_sync_mut.database.codec.sqlcipher4.{
+    Sqlcipher4Error, sqlcipher4_profile, SQLCIPHER4_PAGE_SIZE
+}
+use nogc_sync_mut.database.codec.sqlcipher4_manifest.{
+    SQLCIPHER4_INTERFACE_VERSION
+}
+use nogc_sync_mut.database.codec.codec_registry.{
+    CodecRegistry, codec_registry_sqlcipher4_entry
+}
+use nogc_sync_mut.database.codec.sqlcipher4_page.{
+    sqlcipher4_page_factory, sqlcipher4_page1_salt,
+    SQLCIPHER4_PAGE_BODY_BYTES, SQLCIPHER4_PAGE1_SALT_BYTES
+}
+use std.nogc_sync_mut.database.sqlite_format.reader.{
+    sqlite_format_read_table_bytes
+}
+use std.nogc_sync_mut.database.sqlite_format.header.{sqlite_header_parse}
+use std.nogc_sync_mut.database.sqlite_format.types.{
+    SqliteError, SqliteFileInfo, sqlite_format_magic
+}
+
+val STORAGE_PORT_INTERFACE_VERSION: i64 = 1
+
+# Formats this port admits (explicit selection only, D01).
+val STORAGE_FORMAT_NATIVE: text = "native"
+val STORAGE_FORMAT_SQLITE3: text = "sqlite3"
+val STORAGE_FORMAT_SQLCIPHER4: text = "sqlcipher4"
+
+# The codec id the sqlcipher4 backend resolves from the codec registry
+# (matches the manifest codec_id and SQLCIPHER4_PAGE_CODEC_ID).
+val SQLCIPHER4_PAGE_FORMAT_ID: text = "sqlcipher4"
+
+# ============================================================================
+# Typed error taxonomy
+# ============================================================================
+
+enum StoragePortError:
+    """Fail-closed storage-port errors. `code()` is the stable, log-safe
+    string form; details must never carry secret material."""
+    InvalidFormat(detail: text)
+    UnsupportedFormat(detail: text)
+    MissingSecret(detail: text)
+    AuthenticationFailed(detail: text)
+    CorruptSource(detail: text)
+    Io(detail: text)
+
+impl StoragePortError:
+    fn code() -> text:
+        match self:
+            StoragePortError.InvalidFormat(_):
+                "STORAGE_PORT_INVALID_FORMAT"
+            StoragePortError.UnsupportedFormat(_):
+                "STORAGE_PORT_UNSUPPORTED_FORMAT"
+            StoragePortError.MissingSecret(_):
+                "STORAGE_PORT_MISSING_SECRET"
+            StoragePortError.AuthenticationFailed(_):
+                "STORAGE_PORT_AUTHENTICATION_FAILED"
+            StoragePortError.CorruptSource(_):
+                "STORAGE_PORT_CORRUPT_SOURCE"
+            StoragePortError.Io(_):
+                "STORAGE_PORT_IO"
+
+    fn message() -> text:
+        match self:
+            StoragePortError.InvalidFormat(detail):
+                "invalid format: {detail}"
+            StoragePortError.UnsupportedFormat(detail):
+                "unsupported format: {detail}"
+            StoragePortError.MissingSecret(detail):
+                "missing secret: {detail}"
+            StoragePortError.AuthenticationFailed(detail):
+                "authentication failed: {detail}"
+            StoragePortError.CorruptSource(detail):
+                "corrupt source: {detail}"
+            StoragePortError.Io(detail):
+                "io failure: {detail}"
+
+fn _codec_error(err: Sqlcipher4Error) -> StoragePortError:
+    match err:
+        Sqlcipher4Error.AuthenticationFailed(d):
+            StoragePortError.AuthenticationFailed(detail: d)
+        Sqlcipher4Error.MissingSecret(d):
+            StoragePortError.MissingSecret(detail: d)
+        Sqlcipher4Error.IoFailure(d):
+            StoragePortError.Io(detail: d)
+        other:
+            StoragePortError.CorruptSource(detail: "codec rejected the source")
+
+fn _sqlite_error(err: SqliteError) -> StoragePortError:
+    match err:
+        SqliteError.Io(message):
+            StoragePortError.Io(detail: message)
+        other:
+            StoragePortError.CorruptSource(detail: "sqlite structure check failed")
+
+# ============================================================================
+# Products
+# ============================================================================
+
+struct StorageReadView:
+    """Pinned, decoded plaintext snapshot of one SQLite/SQLCipher database
+    file. `image` is the whole-file byte snapshot the pager reads; it is
+    sensitive (plaintext) and zeroized by close_view. No key material is
+    retained — the codec session is closed before open() returns."""
+    format: text
+    source_path: text
+    image: [u8]
+    page_size: i64
+    page_count: i64
+    reserved_bytes: i64
+    text_encoding: i64
+
+enum StorageOpenResult:
+    """What opening a backend produced: the native embedded store, or a
+    pinned read view of a SQLite-family file."""
+    NativeStore(store: SdnDatabase)
+    SqliteView(view: StorageReadView)
+
+# ============================================================================
+# Backend record and standard backends
+# ============================================================================
+
+struct StorageBackendV1:
+    """One storage backend: explicit format name -> open function.
+
+    open_fn(path, secret_ref_uri): the secret argument is ALWAYS a
+    SecretRef URI ("" when the format takes no secret); a raw passphrase is
+    not admissible on any backend."""
+    backend_id: text
+    format_name: text
+    interface_version: i64
+    open_fn: fn(text, text) -> Result<StorageOpenResult, StoragePortError>
+
+fn _reject_secret(secret_ref_uri: text, format_name: text) -> StoragePortError?:
+    if secret_ref_uri != "":
+        return Some(StoragePortError.InvalidFormat(detail: "format '{format_name}' takes no secret (a SecretRef is only admissible for format sqlcipher4)"))
+    nil
+
+# Native backend: the primary embedded store. No secret, no snapshot.
+fn storage_backend_native_open(path: text, secret_ref_uri: text) -> Result<StorageOpenResult, StoragePortError>:
+    match _reject_secret(secret_ref_uri, STORAGE_FORMAT_NATIVE):
+        Some(e):
+            return Err(e)
+        nil:
+            pass
+    val store = SdnDatabase.load(path)
+    if store == nil:
+        return Err(StoragePortError.Io(detail: "cannot load native database '{path}'"))
+    Ok(StorageOpenResult.NativeStore(store: store.?))
+
+fn _bytes_read(path: text) -> Result<[u8], StoragePortError>:
+    match file_read_bytes_result(path):
+        Ok(b):
+            Ok(b)
+        Err(_):
+            Err(StoragePortError.Io(detail: "cannot read '{path}'"))
+
+fn _view_from_image(format_name: text, path: text, image: [u8]) -> Result<StorageReadView, StoragePortError>:
+    match sqlite_header_parse(image):
+        Ok(info):
+            Ok(StorageReadView(
+                format: format_name,
+                source_path: path,
+                image: image,
+                page_size: info.page_size,
+                page_count: info.page_count,
+                reserved_bytes: info.reserved_bytes,
+                text_encoding: info.text_encoding))
+        Err(e):
+            Err(_sqlite_error(e))
+
+# Plaintext SQLite backend: pin the file bytes, validate the header.
+fn storage_backend_sqlite3_open(path: text, secret_ref_uri: text) -> Result<StorageOpenResult, StoragePortError>:
+    match _reject_secret(secret_ref_uri, STORAGE_FORMAT_SQLITE3):
+        Some(e):
+            return Err(e)
+        nil:
+            pass
+    val image = _bytes_read(path)?
+    match _view_from_image(STORAGE_FORMAT_SQLITE3, path, image):
+        case Err(e):
+            Err(e)
+        case Ok(view):
+            Ok(StorageOpenResult.SqliteView(view: view))
+
+# SQLCipher 4 backend (locked profile sqlcipher4_4k_sha512): authenticate
+# and decrypt every page through the codec registry, then validate the
+# reconstructed plaintext header. The codec session (derived keys) is
+# closed — key material zeroized — before this function returns.
+fn storage_backend_sqlcipher4_open(path: text, secret_ref_uri: text) -> Result<StorageOpenResult, StoragePortError>:
+    if secret_ref_uri == "":
+        return Err(StoragePortError.MissingSecret(detail: "format 'sqlcipher4' requires a SecretRef (secret://...)"))
+    val file_bytes = _bytes_read(path)?
+    if file_bytes.len() < SQLCIPHER4_PAGE_SIZE or file_bytes.len() % SQLCIPHER4_PAGE_SIZE != 0:
+        return Err(StoragePortError.CorruptSource(detail: "file is not a whole number of {SQLCIPHER4_PAGE_SIZE}-byte pages"))
+    var registry = CodecRegistry.new()
+    match registry.register_profile(sqlcipher4_profile(), SQLCIPHER4_INTERFACE_VERSION):
+        case Err(e):
+            return Err(_codec_error(e))
+        case Ok(_):
+            pass
+    match registry.register_codec(codec_registry_sqlcipher4_entry(sqlcipher4_page_factory, 1)):
+        case Err(e):
+            return Err(_codec_error(e))
+        case Ok(_):
+            pass
+    val codec = match registry.resolve(SQLCIPHER4_PAGE_FORMAT_ID):
+        case Err(e):
+            return Err(_codec_error(e))
+        case Ok(c):
+            c
+
+    # Page-1 salt keys the KDF; it is plaintext on disk by profile design.
+    var page1: [u8] = []
+    var i = 0
+    while i < SQLCIPHER4_PAGE_SIZE:
+        page1.push(file_bytes[i])
+        i = i + 1
+    val salt = match sqlcipher4_page1_salt(page1):
+        case Err(e):
+            return Err(_codec_error(e))
+        case Ok(s):
+            s
+    val session = match codec.open_key_fn(secret_ref_uri, salt):
+        case Err(e):
+            return Err(_codec_error(e))
+        case Ok(s):
+            s
+
+    # Authenticate-then-decrypt each page; assemble the plaintext image:
+    # decoded 4016-byte virtual body per page, page 1 carrying the SQLite
+    # magic virtually over [0,16), the 80-byte reserve zero-filled.
+    val magic = sqlite_format_magic()
+    var image: [u8] = []
+    val page_count = file_bytes.len() / SQLCIPHER4_PAGE_SIZE
+    var pg = 1
+    while pg <= page_count:
+        var encoded: [u8] = []
+        var off = (pg - 1) * SQLCIPHER4_PAGE_SIZE
+        while off < pg * SQLCIPHER4_PAGE_SIZE:
+            encoded.push(file_bytes[off])
+            off = off + 1
+        val decoded = match codec.decode_page_fn(pg, encoded, session):
+            case Err(e):
+                val mapped = _codec_error(e)
+                val _closed = codec.close_fn(session)
+                return Err(mapped)
+            case Ok(d):
+                d
+        if decoded.len() != SQLCIPHER4_PAGE_BODY_BYTES:
+            val _closed = codec.close_fn(session)
+            return Err(StoragePortError.CorruptSource(detail: "codec returned a wrong-size page body"))
+        var b = 0
+        while b < SQLCIPHER4_PAGE_BODY_BYTES:
+            if pg == 1 and b < SQLCIPHER4_PAGE1_SALT_BYTES:
+                image.push(magic[b])
+            else:
+                image.push(decoded[b])
+            b = b + 1
+        b = 0
+        while b < SQLCIPHER4_PAGE_SIZE - SQLCIPHER4_PAGE_BODY_BYTES:
+            image.push(0u8)
+            b = b + 1
+        pg = pg + 1
+    val _closed = codec.close_fn(session)
+
+    match _view_from_image(STORAGE_FORMAT_SQLCIPHER4, path, image):
+        case Err(e):
+            Err(e)
+        case Ok(view):
+            Ok(StorageOpenResult.SqliteView(view: view))
+
+# ============================================================================
+# The port
+# ============================================================================
+
+class DatabaseStoragePortV1:
+    """Versioned storage port (interface v1): explicit-format open over an
+    admitted backend set. Admission is fail-closed; selection is explicit;
+    unknown formats are loud rejections, never silent fallbacks (D01)."""
+    interface_version: i64
+    backends: [StorageBackendV1]
+    diagnostics: [text]
+
+    static fn new() -> DatabaseStoragePortV1:
+        DatabaseStoragePortV1(
+            interface_version: STORAGE_PORT_INTERFACE_VERSION,
+            backends: [],
+            diagnostics: [])
+
+    me register_backend(backend: StorageBackendV1) -> Result<(), StoragePortError>:
+        """Admit one backend. Fail-closed: an interface version other than
+        the port's is rejected; a duplicate backend_id replaces the previous
+        entry (latest-wins) with a recorded diagnostic."""
+        if backend.interface_version != self.interface_version:
+            return Err(StoragePortError.InvalidFormat(detail: "backend '{backend.backend_id}' interface_version {backend.interface_version} does not match port interface version {self.interface_version}"))
+        var i = 0
+        while i < self.backends.len():
+            if self.backends[i].backend_id == backend.backend_id:
+                self.diagnostics.push("backend '{backend.backend_id}' re-registered; previous entry replaced (latest-wins)")
+                self.backends[i] = backend
+                return Ok(())
+            i = i + 1
+        self.backends.push(backend)
+        Ok(())
+
+    fn backend_for_format(format_name: text) -> StorageBackendV1?:
+        """Explicit registry -> backend selection by format name."""
+        for backend in self.backends:
+            if backend.format_name == format_name:
+                return Some(backend)
+        nil
+
+    fn known_formats() -> [text]:
+        var out: [text] = []
+        for backend in self.backends:
+            out.push(backend.format_name)
+        out
+
+    me open(path: text, format_name: text, secret_ref_uri: text) -> Result<StorageOpenResult, StoragePortError>:
+        """Open `path` explicitly as `format_name`. This is the server's
+        format= open path: format selection is the caller's declaration,
+        never inferred from content."""
+        match self.backend_for_format(format_name):
+            case Some(backend):
+                (backend.open_fn)(path, secret_ref_uri)
+            case nil:
+                val known = self.known_formats().join(",")
+                Err(StoragePortError.UnsupportedFormat(detail: "no backend admitted for format '{format_name}' (known: {known})"))
+
+    fn read_table(view: StorageReadView, table_name: text) -> Result<[DbRow], StoragePortError>:
+        """One typed table read through the pinned snapshot. Read-only; the
+        underlying pager/b-tree never mutates the image."""
+        match sqlite_format_read_table_bytes(view.image, table_name):
+            Ok(rows):
+                Ok(rows)
+            Err(e):
+                Err(_sqlite_error(e))
+
+    fn close_view(view: StorageReadView) -> bool:
+        """Release a view: zeroize the plaintext snapshot in place."""
+        var i = 0
+        val n = view.image.len()
+        while i < n:
+            view.image[i] = 0u8
+            i = i + 1
+        true
+
+    fn list_diagnostics() -> [text]:
+        self.diagnostics
+
+# The standard port: native primary, then the two SQLite-family backends.
+fn database_storage_port_v1() -> DatabaseStoragePortV1:
+    var port = DatabaseStoragePortV1.new()
+    val _r1 = port.register_backend(StorageBackendV1(
+        backend_id: "storage.native",
+        format_name: STORAGE_FORMAT_NATIVE,
+        interface_version: STORAGE_PORT_INTERFACE_VERSION,
+        open_fn: storage_backend_native_open))
+    val _r2 = port.register_backend(StorageBackendV1(
+        backend_id: "storage.sqlite3",
+        format_name: STORAGE_FORMAT_SQLITE3,
+        interface_version: STORAGE_PORT_INTERFACE_VERSION,
+        open_fn: storage_backend_sqlite3_open))
+    val _r3 = port.register_backend(StorageBackendV1(
+        backend_id: "storage.sqlcipher4",
+        format_name: STORAGE_FORMAT_SQLCIPHER4,
+        interface_version: STORAGE_PORT_INTERFACE_VERSION,
+        open_fn: storage_backend_sqlcipher4_open))
+    port
+
+export STORAGE_PORT_INTERFACE_VERSION
+export STORAGE_FORMAT_NATIVE, STORAGE_FORMAT_SQLITE3, STORAGE_FORMAT_SQLCIPHER4
+export StoragePortError, StorageReadView, StorageOpenResult, StorageBackendV1
+export storage_backend_native_open, storage_backend_sqlite3_open, storage_backend_sqlcipher4_open
+export DatabaseStoragePortV1, database_storage_port_v1
