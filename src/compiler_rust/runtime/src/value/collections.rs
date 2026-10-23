@@ -2883,7 +2883,17 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
             })
         });
         if !scope_owned && super::heap::is_registered_heap_ptr(root_ptr) {
-            return true;
+            // An unowned root can still hold scope-owned children: allocations
+            // made while the scope is paused are never tracked, so e.g. a
+            // fresh `Some(batch)` built in reverse_reference_module_seal_v1
+            // wraps a batch whose arrays the scope owns. Walk it whenever a
+            // paused scope exists and the root has walkable children;
+            // otherwise it is persistent and opaque, a valid no-op.
+            let paused_scope = TRANSIENT_HEAP_SCOPE
+                .with(|slot| slot.borrow().as_ref().is_some_and(|scope| scope.paused));
+            if !paused_scope || value.heap_type().is_none() {
+                return true;
+            }
         }
     }
     let mut root_words = std::ptr::null();

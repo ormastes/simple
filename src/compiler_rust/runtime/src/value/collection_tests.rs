@@ -2551,6 +2551,25 @@ fn transient_heap_promotion_keeps_scope_owned_heap_root_and_raw_payload() {
     super::rt_array_free(field);
 }
 
+#[test]
+fn transient_heap_promotion_walks_unowned_root_with_owned_children() {
+    // Stage-2 reverse_reference_module_publish_v1 SEGV (2026-10-23): the
+    // seal re-wraps the batch in a fresh `Some(..)` while the scope is paused
+    // (untracked, so not scope-owned); its payload array IS scope-owned and
+    // must survive scope end.
+    assert!(super::rt_transient_array_scope_begin());
+    let owned_child = super::rt_array_new(1);
+    assert!(super::rt_array_push(owned_child, RuntimeValue::from_int(7)));
+    assert!(super::rt_transient_array_scope_pause());
+    let unowned_root = crate::value::objects::rt_enum_new(1, 0, owned_child);
+    assert!(super::rt_transient_heap_promote(unowned_root));
+    assert!(super::rt_transient_array_scope_end());
+
+    assert_eq!(crate::value::objects::rt_enum_discriminant(unowned_root), 0);
+    assert_eq!(super::rt_array_len(owned_child), 1);
+    super::rt_array_free(owned_child);
+}
+
 /// `rt_find` is the receiver-polymorphic `find` the type-blind dispatch tables
 /// now emit. Two things have to hold at once and they pull in opposite
 /// directions, which is why they are asserted together:
