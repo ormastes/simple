@@ -1,7 +1,14 @@
-# Backend emits `cmovcc (mem),reg`, so a nil/presence guard dereferences on the path it was meant to protect
+# Struct copy-in accepts a hash-shaped word as a heap pointer and dereferences it
 
-- **Date:** 2026-10-23
-- **Status:** OPEN — backend/codegen defect
+- **Date:** 2026-10-23 (title and attribution corrected 2026-10-24)
+- **Status:** OPEN — defect is in OUR codegen, in
+  `emit_aggregate_block_copy` (`src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs`)
+- **NOT a Cranelift defect.** This record was originally filed as a backend
+  `cmovcc (mem),reg` soundness bug. That was wrong and the retraction is in
+  "CORRECTION 2026-10-24" below; the title and status are corrected here so
+  anyone triaging by header is not misdirected. Cranelift lowers our IR
+  faithfully: the load is unconditional in the IR we emit, `MemFlags::new()` is
+  trapping, and nothing is marked `notrap`.
 - **Severity:** blocks Stage 2 admission on `release/1.0.0`, and therefore any
   full bootstrap. Also explains a family of "the nil guard does not work"
   bugs that have each been investigated separately.
@@ -94,3 +101,79 @@ This record identifies the faulting instruction and explains the family. It does
 NOT establish which backend pass folds the select, nor whether the LLVM backend
 emits the same shape (this host has no LLVM 23, so only cranelift was measured).
 Both are open.
+
+## 2026-10-24: do NOT fix this with an address-range check (attempted, withdrawn)
+
+I attempted the obvious fix — require the untagged word to be a canonical
+user-space address — and **withdrew it** (PR closed unmerged) because review
+showed it would be actively harmful. Recording it so it is not retried.
+
+```rust
+// attempted, WRONG:
+let addr_limit   = iconst(I64, 1i64 << 48);
+let src_in_range = icmp(UnsignedLessThan, src_ptr, addr_limit);
+let src_is_valid = band(band(src_is_heap, src_nonnull), src_in_range);
+```
+
+It does stop the crash (measured: `status=CRASH exit=-139` -> `CRASH count=0`),
+but **this same codegen path builds SimpleOS**, via
+`--backend cranelift --target x86_64-unknown-none` from `scripts/os/*.shs`. The
+kernel links higher-half (`src/os/kernel/arch/x86_64/linker.ld:32`,
+`0xFFFFFFFF80000000`; aarch64 at `0xffff8000…`) and its freestanding `rt_alloc`
+is a bump allocator over a `static char _heap[]` in `.bss`, so **every kernel
+heap pointer is >= 2^48**. The range check marks all of them invalid, and the
+pre-existing line
+
+```rust
+select(src_is_valid, tagged_new_ptr, src_tagged)   // ~:752
+```
+
+then returns the **original handle**. So in kernel code `var b = a; b.x = 1`
+would mutate `a`: value semantics silently lost across the whole kernel, with no
+crash and no diagnostic. Strictly worse than the SIGSEGV, because the SIGSEGV is
+loud.
+
+A residual hole defeats any range heuristic anyway: the inline-box word is
+`hash << 32`, which is below 2^48 whenever `hash < 2^16`, so one unlucky variant
+name would still dereference — permanently, with nothing pointing here.
+
+### Also corrected: the invalid path does not zero-fill the result
+
+An earlier note of mine said refusing the pointer "yields an ALL-ZERO struct".
+It does not. The zero-filled block written at ~:716-718 is **never returned** —
+:752 hands back the original handle and the fresh allocation is leaked. So the
+`E-HIR-VISIT-UNHANDLED: HirTypeKind variant <unknown>` observed after the
+attempted fix is a consumer tripping over a passed-through garbage handle, not a
+fail-closed guard. I mis-read the control flow of the function I was patching.
+
+### The direction that should work
+
+An exact predicate already exists and is used by the field accessors on these
+same objects: `rt_struct_receiver_valid` (`src/runtime/runtime_native.c:7538`,
+`runtime_memory.c:540`), a registry lookup over `rt_struct_allocs`. It is
+target-agnostic, rejects a hash-shaped word, accepts kernel-half pointers, and
+**traps with a message** instead of silently selecting — which also matches the
+repo's own precedent for this class (`codegen/instr/fields.rs:21-27` does
+`brif` -> `rt_eprintln_str` -> `trap`).
+
+As it stands, copy-in uses a weaker and *different* predicate than
+`compile_field_get`/`field_set` on the same object, so a struct can pass copy-in
+and then trap on its first field read.
+
+Two things to settle first, neither verified here:
+
+1. are `rt_alloc`-made blocks registered in `rt_struct_allocs`?
+   `runtime_native.c:7510` appears to register only the guarded path;
+2. is a runtime call acceptable in the copy-in prologue, and if not, what is the
+   cost argument against it?
+
+### One premise still unlocated
+
+The `hash(variant) << 32 | 1` shape is quoted from `codec_gen.spl:537`'s comment
+and from this record — both written from the same crash. No inline-enum encoder
+of that shape was found in the Rust runtime (`rt_enum_new` heap-allocates via
+`rt_alloc`), in the Cranelift codegen, or in `src/compiler/**/*.spl`. The
+measured `0xf198715900000000` is consistent with it but also with other
+upper-word-only shapes. **Locating the actual producer is the prerequisite for
+any calibrated fix** — that is now the top open question, ahead of the guard
+itself.
