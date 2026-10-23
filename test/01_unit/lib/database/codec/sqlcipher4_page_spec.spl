@@ -31,6 +31,8 @@ Purpose: Verify the SQLCipher 4 page codec (geometry + CBC + per-page HMAC).
 Audience: codec maintainers and the sibling crypto-primitive lanes.
 """
 
+# @timeout_secs 2400 (interpreted-mode AES suites are slow; the directive is an
+# honest runtime record, not a relaxed gate)
 # @req: REQ-CIPHER-PAGE-001 — stable requirement identity for this spec.
 
 use std.spec.*
@@ -54,6 +56,7 @@ use nogc_sync_mut.database.codec.sqlcipher4_page.{
     sqlcipher4_page_factory
 }
 use std.common.crypto.hmac.{hmac_sha512_bytes}
+use std.nogc_sync_mut.io.env_ops.{env_set}
 
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 
@@ -158,10 +161,18 @@ fn _encode_page7() -> [u8]:
         case Err(e):
             fail("page 7 encode failed: {e}")
 
-# Flip one byte of a [u8] page in place.
+# Return a copy of `page` with one byte flipped. (In-place mutation is
+# unreliable on this build: arrays bound through call/match boundaries can
+# arrive frozen, and a silent no-op flip would make every tamper vector
+# below pass vacuously. A locally push-built copy is always writable.)
 fn _flip(page: [u8], idx: i64) -> [u8]:
-    page[idx] = ((rt_bytes_u8_at(page, idx) & 0xFF) ^ 0x01).to_u8()
-    page
+    var out: [u8] = []
+    var i = 0
+    while i < page.len():
+        out.push(page[i])
+        i = i + 1
+    out[idx] = ((rt_bytes_u8_at(out, idx) & 0xFF) ^ 0x01).to_u8()
+    out
 
 # Independent HMAC input assembly (mirrors the codec contract, built here so
 # a wrong HMAC extent in the codec fails this spec).
@@ -286,8 +297,7 @@ describe "SQLCipher 4 page codec — HMAC authentication binding":
     it "rejects a flipped ciphertext byte with AuthenticationFailed and no plaintext":
         step("Verify: ciphertext tamper -> AuthenticationFailed, no plaintext")
         val page = _encode_page7()
-        _flip(page, 100)
-        match sqlcipher4_decode_page(7, page, _aes_key(), _hmac_key()):
+        match sqlcipher4_decode_page(7, _flip(page, 100), _aes_key(), _hmac_key()):
             case Ok(_):
                 fail("tampered ciphertext must not release plaintext")
             case Err(Sqlcipher4Error.AuthenticationFailed(_)):
@@ -298,8 +308,7 @@ describe "SQLCipher 4 page codec — HMAC authentication binding":
     it "rejects a flipped IV byte with AuthenticationFailed and no plaintext":
         step("Verify: IV tamper -> AuthenticationFailed, no plaintext")
         val page = _encode_page7()
-        _flip(page, SQLCIPHER4_IV_OFFSET + 3)
-        match sqlcipher4_decode_page(7, page, _aes_key(), _hmac_key()):
+        match sqlcipher4_decode_page(7, _flip(page, SQLCIPHER4_IV_OFFSET + 3), _aes_key(), _hmac_key()):
             case Ok(_):
                 fail("tampered IV must not release plaintext")
             case Err(Sqlcipher4Error.AuthenticationFailed(_)):
@@ -310,8 +319,7 @@ describe "SQLCipher 4 page codec — HMAC authentication binding":
     it "rejects a flipped stored-HMAC byte with AuthenticationFailed and no plaintext":
         step("Verify: HMAC tamper -> AuthenticationFailed, no plaintext")
         val page = _encode_page7()
-        _flip(page, SQLCIPHER4_HMAC_OFFSET + 20)
-        match sqlcipher4_decode_page(7, page, _aes_key(), _hmac_key()):
+        match sqlcipher4_decode_page(7, _flip(page, SQLCIPHER4_HMAC_OFFSET + 20), _aes_key(), _hmac_key()):
             case Ok(_):
                 fail("tampered HMAC must not release plaintext")
             case Err(Sqlcipher4Error.AuthenticationFailed(_)):
@@ -332,8 +340,7 @@ describe "SQLCipher 4 page codec — HMAC authentication binding":
 
     it "does not reveal whether the key or the data was wrong":
         step("Verify: AuthenticationFailed text is identical for wrong key vs tampered data")
-        val tampered = _encode_page7()
-        _flip(tampered, 100)
+        val tampered = _flip(_encode_page7(), 100)
         val wrong_key_page = _encode_page7()
         var msg_tamper = ""
         var msg_wrongkey = ""
@@ -578,7 +585,8 @@ describe "SQLCipher 4 page codec — PageCodecV1 registry integration":
                 fail("codec resolve failed: {e}")
 
     it "encodes and decodes a full session through the PageCodecV1 record fns":
-        step("Verify: open_key -> encode(rng IV) -> decode round-trip via record fns")
+        step("Verify: open_key(secret://ref) -> encode(rng IV) -> decode round-trip via record fns")
+        val _env1 = env_set("SIMPLE_SECRET_CIPHER_C_INTEGRATION", "cipher-c-integration-passphrase")
         var registry = _registered_registry()
         match registry.register_codec(codec_registry_sqlcipher4_entry(sqlcipher4_page_factory, 1)):
             case Ok(_):
@@ -589,7 +597,7 @@ describe "SQLCipher 4 page codec — PageCodecV1 registry integration":
             case Err(e):
                 fail("codec resolve failed: {e}")
             case Ok(codec):
-                match codec.open_key_fn("cipher-c-integration-passphrase", _salt16()):
+                match codec.open_key_fn("secret://cipher_c/integration", _salt16()):
                     case Err(e):
                         fail("open_key failed: {e}")
                     case Ok(session):
@@ -611,8 +619,7 @@ describe "SQLCipher 4 page codec — PageCodecV1 registry integration":
                                     case Ok(pt):
                                         expect(_to_list(pt, pt.len())).to_equal(_to_list(body, body.len()))
                                 # Tampering still authenticates before decrypt.
-                                _flip(page, 200)
-                                match codec.decode_page_fn(7, page, session):
+                                match codec.decode_page_fn(7, _flip(page, 200), session):
                                     case Ok(_):
                                         fail("tampered page must not release plaintext")
                                     case Err(Sqlcipher4Error.AuthenticationFailed(_)):
@@ -627,6 +634,7 @@ describe "SQLCipher 4 page codec — PageCodecV1 registry integration":
 
     it "draws a fresh IV per encoded page through the record encode path":
         step("Verify: two encodes of the same page consume two different IVs")
+        val _env2 = env_set("SIMPLE_SECRET_CIPHER_C_IV_FRESHNESS", "cipher-c-iv-freshness-passphrase")
         var registry = _registered_registry()
         match registry.register_codec(codec_registry_sqlcipher4_entry(sqlcipher4_page_factory, 1)):
             case Ok(_):
@@ -637,7 +645,7 @@ describe "SQLCipher 4 page codec — PageCodecV1 registry integration":
             case Err(e):
                 fail("codec resolve failed: {e}")
             case Ok(codec):
-                match codec.open_key_fn("cipher-c-iv-freshness-passphrase", _salt16()):
+                match codec.open_key_fn("secret://cipher_c/iv_freshness", _salt16()):
                     case Err(e):
                         fail("open_key failed: {e}")
                     case Ok(session):
