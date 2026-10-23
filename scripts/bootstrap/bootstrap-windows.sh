@@ -2,14 +2,15 @@
 set -euo pipefail
 
 # Windows bootstrap entrypoint for Git Bash/MSYS2. Windows bootstrap uses
-# Clang: clang-cl for the MSVC default and target-qualified clang with llvm-ar
-# for --mingw. Keep each lane bound to its C driver.
+# Clang: target-qualified clang with llvm-ar for the MinGW UCRT default (gnu,
+# repo-managed llvm-mingw) and clang-cl for the opt-in --msvc lane. Keep each
+# lane bound to its C driver.
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../.." && pwd)"
 . "${script_dir}/bootstrap-windows-cl-mode.shs"
 bootstrap_windows_preserve_cl_mode
-abi="${SIMPLE_WINDOWS_ABI:-msvc}"
+abi="${SIMPLE_WINDOWS_ABI:-gnu}"
 forward=()
 
 for arg in "$@"; do
