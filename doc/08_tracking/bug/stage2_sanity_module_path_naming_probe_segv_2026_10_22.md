@@ -259,3 +259,17 @@ the module is re-lowered on the next pass — doubling an already ~65 s
 HIR phase and blowing the smoke's per-probe budget. This is the parallel
 lane's documented io-write/encode-pool defect; see
 stage2_mir_shard_flat_pool_text_len_minus1_2026-10-22.md.
+
+## Update: the ~65 s HIR phase is NOT lowering (2026-10-23)
+
+SIMPLE_HIR_PHASE_PROFILE=1 on the p2_add worker:
+`total=1ms imports=0ms declare=0ms enums=0ms functions=1ms/5` — HIR
+lowering of the 487-byte module takes ONE millisecond. The 30–65 s
+phase=hir dt is entirely post-lowering, inside the store chain
+(hir_cache_store's own scope: encode + hir_module_decode_stable + write)
+plus heap-registry mutex contention that varies 30–65 s with system load
+(the worker sometimes finishes in <40 s under gdb when the host is
+quiet). So the smoke's exit-124 budget pressure is (a) the parallel
+lane's parse-pool blob lifetime (store failures force re-work) and (b)
+contention-sensitive codec/validation cost — both outside the lowering
+path itself.
