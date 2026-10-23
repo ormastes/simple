@@ -838,3 +838,38 @@ flat_pools_dump_for_cache return an owned blob verified by rt_string_len >= 0
 skipping unscoped captures; (3) fix B by binding the dump to the parse that
 populated the pools (skip when this call did not run parse_module_body).
 Repro: the 9 s p2_add repro with SIMPLE_CAPTURE_TRACE=1.
+
+## Annotation 2026-10-23 (lane D, lane 48b): root cause family identified - transient-scope reclaim of live-referenced strings (heisenbug)
+
+With fix A (unscoped capture -> dump_all) plus a blob-built len print, the
+capture trace shows:
+- dump#1 borrowed: blob-built 4582, take 4582 (valid).
+- dump#2 unscoped: blob-built 4582, take 4582 (valid - take=-1 GONE).
+- dump#3 unscoped: sanitize refusal mid-dump -> poisoned -> take 0 (correct).
+
+The take=-1 disappearance is HEISENBUG: the only delta from lane 47c (which
+showed take=-1 with the identical fix A and no read) is the blob-built eprint
+reading _fab_captured_blob.len() between assignment and take. An intervening
+read/allocation changes scope-reclaim timing and keeps the blob alive. The
+blob's bytes are a joined string independent of the pools; its HANDLE dies,
+so a scope reclaim between build and take frees live memory.
+
+Pool values at the refusing gate (lane 48b): the dump begins with six n=5
+pools whose contents match p2_add's own desugared if/and chain
+([0,1,2,3,"4,5,6,9"] = arm/body payload indices), i.e. they ARE this parse's
+pools; the 6th pool's five elements are dead handles whose strings were
+reclaimed between population (parse_module_body) and the dump, in the same
+call. Conclusion: the runtime transient-scope/GC reclaim frees strings that
+remain referenced from live pool arrays (arrays' element slots not honored as
+roots, or scoped arrays reclaimed despite external references). This is the
+runtime class-layout/scope-scanning family; compiler-side copies or read-
+keeping are timing workarounds, not cures.
+
+Owner-lane next actions: (1) runtime: audit transient-scope reclaim root
+scanning for array-element text slots (decl/extend/pending pools) and string
+payload promotion (rt_transient_heap_promote must copy payload, not just the
+header - lane-46 dump_for_cache take=-1 shows header-only promotion);
+(2) compiler mitigation until then: bind the capture dump to its parse (skip
+when this call did not run parse_module_body) to stop dumping reclaimed
+pools; (3) the io-write store failures are lane-env-specific (stage2-home
+sandbox) and lower priority.
