@@ -111,8 +111,35 @@ fn reverse_reference_module_seal_v1(token: i64) -> bool:
     # Store the mutated batch back: where `unwrap()` yields a copy (the seed
     # interpreter), the seal would otherwise be lost and publish would refuse.
     _reverse_reference_module_batch_v1 = Some(batch)
-    # The global Option carrier itself was created in the module scope too.
-    val owned = transient_promote(_reverse_reference_module_batch_v1)
+    # Promote the batch OBJECT and the arrays it owns, not only the Option
+    # carrier. MEASURED on the release/1.0.0 stage-2 candidate (Linux x86_64,
+    # cranelift), reading the class field back inside publish AFTER the parse
+    # scope ended:
+    #   carrier promote only : field_token=929415262  (mirror_token=1)
+    #   this promote set     : field_token=1          (mirror_token=1)
+    # So the carrier promote alone did not keep the batch block alive, and only
+    # its FIRST word was clobbered -- which is why the scalar mirrors added in
+    # d819cb542b9 were enough to get past validation, yet publish then iterated
+    # batch.facts/known_families/incomplete_families/aliases and pushed those
+    # handles into process-lifetime globals, surfacing as ICE phase=mir_lower,
+    # worker exit status -139.
+    #
+    # The exact rt_transient_heap_promote exit that neutered the carrier promote
+    # is NOT established. Review traced that the "already-persistent root is a
+    # no-op" exit needs classify==0, while a registered array/enum classifies 1
+    # and IS walked into its payload; the remaining candidates are the generic-T
+    # extern receiving the Option as a by-value copy, and the Rust twin in
+    # collections.rs, which skips a non-scope-owned root without walking it.
+    # Do not restate a mechanism this comment has not proven.
+    # Bug: doc/08_tracking/bug/stage2_sanity_transient_hir_scope_publish_refused_p2_add_2026-10-23.md
+    val owned_carrier = transient_promote(_reverse_reference_module_batch_v1)
+    val owned_batch = transient_promote(batch)
+    val owned_facts = transient_promote(batch.facts)
+    val owned_known = transient_promote(batch.known_families)
+    val owned_incomplete = transient_promote(batch.incomplete_families)
+    val owned_aliases = transient_promote(batch.aliases)
+    val owned = owned_carrier and owned_batch and owned_facts and owned_known and
+        owned_incomplete and owned_aliases
     if not owned:
         batch.valid = false
         _reverse_reference_module_batch_v1 = Some(batch)
