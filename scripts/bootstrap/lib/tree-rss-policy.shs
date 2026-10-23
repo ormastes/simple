@@ -374,7 +374,7 @@ bootstrap_tree_rss_resolve() {
     fi
     bootstrap_tree_rss_cap_kib=$btr_cap
   fi
-  bootstrap_tree_rss_summary="cap ${bootstrap_tree_rss_cap_kib} KiB (source: ${bootstrap_tree_rss_source}, bound: ${bootstrap_tree_rss_bound}, workers: ${btr_jobs}, hard ceiling: ${bootstrap_tree_rss_ceiling_kib} KiB, host RAM: ${bootstrap_tree_rss_host_total_kib:-unknown} KiB via ${bootstrap_tree_rss_host_total_source}; compiler ceiling admission: ${bootstrap_tree_rss_ceiling_admission}, requested: ${bootstrap_tree_rss_ceiling_request_kib}, previous: ${bootstrap_tree_rss_ceiling_previous_kib}, available: ${bootstrap_tree_rss_available_kib} via ${bootstrap_tree_rss_available_source})"
+  bootstrap_tree_rss_summary="cap ${bootstrap_tree_rss_cap_kib} KiB (source: ${bootstrap_tree_rss_source}, bound: ${bootstrap_tree_rss_bound}, workers: ${btr_jobs}, hard ceiling: ${bootstrap_tree_rss_ceiling_kib} KiB, host RAM: ${bootstrap_tree_rss_host_total_kib:-unknown} KiB via ${bootstrap_tree_rss_host_total_source}; compiler ceiling admission: ${bootstrap_tree_rss_ceiling_admission}, requested: ${bootstrap_tree_rss_ceiling_request_kib}, previous: ${bootstrap_tree_rss_ceiling_previous_kib}, available: $(if [ "${bootstrap_tree_rss_available_source}" = unknown ]; then printf unknown; else printf '%s KiB' "${bootstrap_tree_rss_available_kib}"; fi) via ${bootstrap_tree_rss_available_source})"
 }
 
 # Cap for a phase that wraps whole compiler builds (Stage 2 compiler tests:
@@ -533,6 +533,26 @@ bootstrap_tree_rss__selftest() {
     )
     [ "$btr_st_got" = "${btr_st_pc#*:}" ] || {
       echo "selftest FAIL: phase-cap-${btr_st_pc%%:*}: want ${btr_st_pc#*:} got $btr_st_got" >&2
+      btr_st_fail=1
+    }
+  done
+  # Stage2 native-build at 16 workers uses the same phase pricing: a 128 GB
+  # host gets well above the floor (not the floor as ceiling); a 16 GB host
+  # stays within its host fraction.
+  for btr_st_pc in big:above small:bounded; do
+    btr_st_n=$((btr_st_n + 1))
+    btr_st_got=$(
+      unset SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT SIMPLE_HOST_TREE_RSS_HOST_PCT SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_HOST_CONFIG SIMPLE_HOST_ENV_FILE
+      SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor
+      BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$btr_st_dir/${btr_st_pc%%:*}"
+      BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1
+      BOOTSTRAP_TREE_RSS_PER_JOB_MIB_DEFAULT=96 bootstrap_tree_rss_resolve 16 '' && bootstrap_tree_rss_phase_cap_kib ''
+    )
+    case "${btr_st_pc#*:}" in
+      above) [ "${btr_st_got:-0}" -gt "$BOOTSTRAP_TREE_RSS_FLOOR_KIB" ] && [ "$btr_st_got" -le 50331648 ] ;;
+      *) [ "${btr_st_got:-0}" -ge "$BOOTSTRAP_TREE_RSS_FLOOR_KIB" ] && [ "$btr_st_got" -le 8000000 ] ;;
+    esac || {
+      echo "selftest FAIL: native-build-phase-cap-${btr_st_pc%%:*}: got $btr_st_got" >&2
       btr_st_fail=1
     }
   done

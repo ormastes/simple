@@ -2665,6 +2665,18 @@ bootstrap_native_build_main() {
     bootstrap_abort_reason=tree-rss-cap-refused
     return 2
   }
+  # A native-build wraps whole-compiler RSS (~10 GB measured), so the default
+  # cap is priced by host fraction like the stage2 compiler-tests phase instead
+  # of sitting at the floor (doc/08_tracking/bug/
+  # tree_rss_cap_floor_applied_to_stage2_native_build_2026-10-23.md). Only raised.
+  if [ "${bootstrap_tree_rss_source}" = default ]; then
+    bootstrap_native_phase_cap=$(bootstrap_tree_rss_phase_cap_kib "${repo_root}") || return 2
+    if [ "${bootstrap_native_phase_cap}" -gt "${bootstrap_tree_rss_cap_kib}" ]; then
+      bootstrap_tree_rss_cap_kib=${bootstrap_native_phase_cap}
+      bootstrap_tree_rss_bound=host-fraction
+      bootstrap_tree_rss_summary="${bootstrap_tree_rss_summary}; raised to phase cap ${bootstrap_tree_rss_cap_kib} KiB"
+    fi
+  fi
   echo "  process-tree RSS policy: ${bootstrap_tree_rss_summary}" >&2
   perl "${repo_root}/scripts/resource/process-tree-rss-watchdog.pl" \
     --session-mode="${bootstrap_native_session_mode}" \
