@@ -452,6 +452,23 @@ extern fn rt_string_builder_finish(handle: i64) -> text
 @unsafe(reason: "inspect rejected append input without dereferencing an unvalidated string", capabilities: [ffi])
 extern fn rt_string_len(value: text) -> i64
 
+# Capture-time sanitize mode (armed only around the parse-cache capture dump):
+# a text handle that dangles across a transient scope must refuse the cache
+# store (blob discarded -> treated as a miss), never abort the compiler.
+# Non-capture encodes (roundtrip selfcheck, artifact pools) stay loud.
+var _flat_pool_sanitize_capture: bool = false
+var _flat_pool_capture_poisoned: bool = false
+
+pub fn flat_pool_capture_sanitize_arm_v1():
+    _flat_pool_sanitize_capture = true
+    _flat_pool_capture_poisoned = false
+
+pub fn flat_pool_capture_sanitize_disarm_v1():
+    _flat_pool_sanitize_capture = false
+
+pub fn flat_pool_capture_poisoned_v1() -> bool:
+    _flat_pool_capture_poisoned
+
 fn flat_pool_builder_push(handle: i64, value: text, site: i64, item: i64):
     val appended =
         unsafe(capabilities: [ffi]):
@@ -475,6 +492,11 @@ fn flat_pool_builder_push(handle: i64, value: text, site: i64, item: i64):
             7 => "bool.value"
             8 => "i64_list.count"
             _ => "text_list_list.count"
+        if _flat_pool_sanitize_capture:
+            if not _flat_pool_capture_poisoned:
+                _flat_pool_capture_poisoned = true
+                print("[flat-pool] capture refused: invalid text handle site={site_name} item={item} input_length={input_length}; cache store skipped")
+            return
         panic("flat pool encoder string builder append failed site={site_name} item={item} input_length={input_length} result={appended}")
 
 fn flat_pool_builder_new() -> i64:
