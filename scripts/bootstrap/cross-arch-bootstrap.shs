@@ -48,6 +48,24 @@ threads=${SIMPLE_CROSS_THREADS:-$cpus}
 file_timeout=${SIMPLE_CROSS_FILE_TIMEOUT:-1800}
 test_timeout=${SIMPLE_CROSS_TEST_TIMEOUT:-3600}
 
+# Cargo writes for the cross build NEVER go to the in-repo src/compiler_rust/
+# target when that tree is a sealed bootstrap authority (target/bootstrap is a
+# symlink into bootstrap.generations, mode 500; .cargo-build-lock is then
+# unwritable). Redirect to a cross-local target dir only in that case; a
+# fresh/writable checkout keeps the default layout. Caller-set
+# CARGO_TARGET_DIR always wins.
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+cd "$repo_root"
+if [ -z "${CARGO_TARGET_DIR:-}" ]; then
+  if [ -e src/compiler_rust/target/bootstrap ] && [ ! -w src/compiler_rust/target/bootstrap ]; then
+    CARGO_TARGET_DIR=$repo_root/build/cross/cargo-target
+  else
+    CARGO_TARGET_DIR=$repo_root/src/compiler_rust/target
+  fi
+  export CARGO_TARGET_DIR
+fi
+cargo_target=$CARGO_TARGET_DIR
+
 # platform -> rust triple, simple triple, linker, user-mode emulator arch, sysroot, VM lane
 case $target in
   linux-riscv64)   rust=riscv64gc-unknown-linux-gnu; triple=riscv64-unknown-linux-gnu
@@ -80,7 +98,7 @@ host_platform() {
   printf '%s-%s\n' "$os" "$m"
 }
 
-seed=src/compiler_rust/target/bootstrap/simple
+seed=${SIMPLE_CROSS_SEED:-$cargo_target/bootstrap/simple}
 use_seed() {
   compiler=$seed
   [ -x "$compiler" ] || (cd src/compiler_rust && cargo build --profile bootstrap -p simple-driver)
@@ -111,7 +129,7 @@ case $target in freebsd-*) linker_env="CARGO_TARGET_${upper}_LINKER=$linker" ;; 
 (cd src/compiler_rust && { rustup target add "$rust" >/dev/null 2>&1 || true; } &&
  env $linker_env \
    cargo build --profile bootstrap -p simple-native-all --features driver-compat --target "$rust")
-runtime=src/compiler_rust/target/$rust/bootstrap
+runtime=$cargo_target/$rust/bootstrap
 
 out_dir=build/cross/$target
 mkdir -p "$out_dir/bin"

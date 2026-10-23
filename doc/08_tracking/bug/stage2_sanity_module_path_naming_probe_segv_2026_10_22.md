@@ -195,3 +195,39 @@ module_path_naming sources — no fix exists on either branch. Next step
 for the fixing lane: symbolized backtrace of the MIR-phase fault (cdb was
 unavailable in the 2026-10-23 session; WER produced no dump for the
 msys-spawned child) or per-helper env-gated traces at MIR lowering entry.
+
+
+## Addendum 2026-10-22 (Kimi session, appended; earlier observation, different crash site)
+
+Observed BEFORE the definitive class-large-struct-field root cause above was
+isolated, on a cranelift stage-2 candidate for this same fixture; kept for
+cross-reference because it brackets a SECOND fault moment in the same lane.
+Reproduced with the stage-2 candidate directly
+(`simple.rejected native-build --backend=cranelift --runtime-bundle
+core-c-bootstrap --entry-closure --entry
+src/compiler/bootstrap_admission/stage2_module_path_naming.spl`, `ulimit -c
+unlimited`, core captured). Worker argv confirms it runs
+`src/app/cli/native_build_worker.spl --hir-shard=0/1`; backtrace (gdb,
+bottom-up, all frames in `compiler.hir.generated.hir_codec`):
+
+```
+#0  hc_enc_hir_expr_kind
+#1  hc_enc_hir_expr
+#2  hc_enc_hir_block
+#3  hc_enc_hir_if_arm
+#4..#20 (encode recursion through expr/stmt/block/if_arm/function/module)
+#21 hir_module_encode
+#22 hir_module_decode_stable        <- called from the store selfcheck roundtrip
+#23 driver_hir_cache.hir_cache_store_in_owned_scope
+#24 driver_hir_cache.hir_cache_store
+```
+
+So this worker SEGSEGV'd while ENCODING an HIR expression node (the encode
+recursion descends through an `if_arm` — the fixture's `collapse_inner_repeat`
+boolean chain is the densest if-nesting in the file), reached from the
+hir-cache store selfcheck roundtrip. If the class-field corruption above
+malforms the HIR before this point, the encoder is where the corruption
+becomes a fault — consistent with the definitive root cause rather than a
+separate defect. Implication: any lane that lowers this fixture shape with
+the hir cache enabled dies in `hir_cache_store`; a cache-disabled run only
+survives until the next consumer of the same malformed node.
