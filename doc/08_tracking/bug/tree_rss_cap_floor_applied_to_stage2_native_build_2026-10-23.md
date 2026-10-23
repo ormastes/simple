@@ -43,3 +43,7 @@ available-memory input.
 ## Related
 
 - `doc/08_tracking/bug/tree_rss_floor_kills_stage2_compiler_tests_on_large_hosts_2026-10-15.md`
+
+## Fix
+
+`bootstrap_native_build_main` (`scripts/bootstrap/bootstrap-from-scratch.sh`) now raises a default-sourced cap to `bootstrap_tree_rss_phase_cap_kib` (host fraction clamped to [floor, jobs-scaled ceiling], the 2026-10-15 pricing). It only raises; explicit caps are untouched. At 16 workers with Windows per-job pricing: 128 GB host 5859375 -> 50331648 KiB; 16 GB host 5859375 -> 8000000 KiB (50% of host). The policy log prints `available: unknown` instead of `0` when no availability source was read. Selftest: `native-build-phase-cap-{big,small}` in `scripts/bootstrap/lib/tree-rss-policy.shs`.
