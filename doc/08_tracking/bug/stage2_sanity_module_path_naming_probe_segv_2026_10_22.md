@@ -670,3 +670,22 @@ Two earlier hypotheses were disproven by CI and dropped (PR #4235, closed): firs
 nested optional if-expression that builds `elem_type` as statements (run 39963503260), then
 building the default `HirType` at the use site with the live span (run 39969828508). Both still
 SIGSEGVed at the same PC.
+
+## Update 2026-10-24: after the fold-walker fix, receiver gate fails on env restore (same Some-box class)
+
+With #4237, Stage 2 sanity passes on x86_64 Linux (CI run 39978925070), and the struct receiver
+guard passes. The positional dynload route on this fixture no longer SIGSEGVs, but it fails with
+`error: could not restore native-build cache environment` (`bootstrap_main.spl:455`). I reproduced
+this locally with the receiver-rejected candidate from CI run 39994046780. gdb shows
+`native_build_cache_restore(previous: text?)` receiving a `Some` box (header
+`0x0000001800000007`/`0xf198715900000001`, text pointer at +16). After `if previous == nil:
+return ...`, native Stage 2 passed the box itself to `sosix_env_set`. `sosix_admit_c_string`
+refused it, and `rt_env_set` was never called for the restore. Without an inherited
+`SIMPLE_NATIVE_BUILD_CACHE_DIR` the restore takes the remove branch and succeeds, which is why the
+sanity battery's positional probe passed.
+
+Fix: explicit `if val present = previous:` unwrap in `native_build_cache_restore` and
+`native_build_output_mode_restore`, marked against
+`optional_array_payload_narrowing_native_2026_10_21` (the same narrowing gap, applying to `text?`
+as well as arrays). Other `if x == nil: return` followed by using `x` as `T` sites are likely
+exposed the same way; they have not been audited.
