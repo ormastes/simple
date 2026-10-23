@@ -873,3 +873,22 @@ header - lane-46 dump_for_cache take=-1 shows header-only promotion);
 when this call did not run parse_module_body) to stop dumping reclaimed
 pools; (3) the io-write store failures are lane-env-specific (stage2-home
 sandbox) and lower priority.
+
+## Annotation 2026-10-23 (lane D, lane 49): capture dedup real but incomplete - refusing arm is another site
+
+The per-process capture dedup (frontend_parse_or_restore skips arm/take for an
+already-captured path) landed and is correct, but the stage2 sanity still
+refuses: the crash dump is armed by a DIFFERENT call path. In the crash block
+the frontend cache HITs (worker shared cache), so the worker's refusing dump
+is not the frontend.spl miss path - it is the worker's own first parse+store
+cycle (its store fails with the lane-env io-write defect, so its hir re-parse
+misses again and arms), or the managed_parse_group arm
+(managed_parse_group.spl:146), which the dedup does not cover.
+
+Next cycle: (1) caller-tag both arm sites (flat_pool_capture_arm gains a tag
+argument: frontend-miss | managed-group) and one lane to name the refusing
+armer exactly; (2) extend the per-process dedup to ALL arm sites (keyed by
+path, shared _fab_captured_paths) so a path is captured at most once per
+process no matter which subsystem parses it; (3) the store io-write defect
+(lane-env, stage2-home sandbox) remains the reason the worker re-parses at
+all - fixing it collapses most repeat-capture traffic.
