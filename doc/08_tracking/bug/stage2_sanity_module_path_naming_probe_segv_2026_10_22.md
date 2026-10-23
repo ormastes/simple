@@ -231,3 +231,34 @@ becomes a fault — consistent with the definitive root cause rather than a
 separate defect. Implication: any lane that lowers this fixture shape with
 the hir cache enabled dies in `hir_cache_store`; a cache-disabled run only
 survives until the next consumer of the same malformed node.
+
+## Addendum 2026-10-23 (Kimi session, riscv64 guest lane): same family, failure moved past surface_build into HIR scope end
+
+Cross-test lane (`check-linux-riscv64-bootstrap-qemu.shs --cross-test`, QEMU
+riscv64 TCG guest, 24 vcpu, glibc 2.39) on the rebased release tree
+(`release/1.0.0` head 963358b7f31, which merged the ModuleSurfaceParserOwner
+flatten `d700e18bf00` + parser-alias reroute `7183b3e1f44` +
+typed-bind-before-alias-walk `dd77408774`): the phase-1 cross-built
+self-hosted compiler (`build/cross/linux-riscv64/simple`, 1487 units, 0
+failed) runs fine (`--version` -> `simple-bootstrap 1.0.0-rc.1`, RC=0), but
+`native-build build/sanity/hello.spl` now fails DETERMINISTICALLY (reproduced
+twice, ~21-26 s into the build, before the earlier surface_build SEGV site is
+even reached as a crash — the lane progresses through parse/surface_build/
+surface_alias/export_origins/surface_freeze and dies in phase 3):
+
+```
+[bootstrap-error-count] source_idx=0 point=entry count=0
+[ERROR] phase 3 FAILED
+[ERROR]   transient HIR scope end failed for build/sanity/hello.spl
+error: in-process native-build: transient HIR scope end failed for build/sanity/hello.spl
+```
+
+Interpretation: consistent with the definitive root cause documented above
+(class-with-large-struct-field read returns garbage). The upstream surface/
+parser-owner refactor changed WHERE the malformed state first trips a
+checked path — the HIR transient-scope end now catches the corruption and
+fails gracefully instead of the earlier lane SEGV'ing inside surface_build.
+Same family, different tripwire; the riscv64 guest remains a reliable
+reproducer for whatever lane owns the fix. Not caused by the riscv64
+cross-lane fixes (seed externs / link knob / rootless debs) — those only
+affect producing the ELF and the host-side test runner.
