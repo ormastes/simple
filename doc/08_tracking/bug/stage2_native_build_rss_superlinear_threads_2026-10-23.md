@@ -1,73 +1,73 @@
-# Stage-2 RSS grows without bound once b065988b5a2 lands; not a seed thread-count problem
+# Seed native-build of stage 2 (windows-gnu, LLVM): runaway RSS after the CLANG64 libLLVM-23 switch
 
 - **Date:** 2026-10-23
-- **Status:** open. Root-cause hypothesis is from reading the code; no fix is applied and nothing was rebuilt (shared host).
-- **Area:** Rust runtime transient heap scopes (`rt_transient_heap_promote`) and the stage-2 parser's per-file promotion
+- **Status:** open. The cause is a suspect, not proven. Nothing was rebuilt, because the host is shared.
+- **Process:** the Rust seed, `stage2-runtime-authority/simple.exe native-build`. It is not a Simple-compiled compiler.
 - **Evidence:** `C:/dev/wt-rel3-new/build/rss/jobs40.curve`
 
 ## Symptom
 
-The stage-2 Simple compiler is built for x86_64-pc-windows-gnu: LLVM, `--entry-closure`, `--mode dynload`, falling back to one-binary.
+The seed `native-build` compiles the 1,488-file stage-2 closure for x86_64-pc-windows-gnu. Flags: LLVM, `--entry-closure`, `--mode dynload`, which falls back to one-binary.
 
-| tree | jobs | RSS |
-|---|---|---|
-| `8aaa2501af6` (no `b065988b5a2`) | 16 | peak about 10 GB |
-| `658410feaaf` (has `b065988b5a2`) | 24 | 56 MB, then 1.4 GB, 4.7 GB and 27 GB in about 4 minutes |
-| `658410feaaf` | 40 | 41 GB at 745 s, 61 GB at 778 s, 82 GB at 811 s (about 600 MB/s); killed |
+| seed tree | LLVM | jobs | RSS |
+|---|---|---|---|
+| `8aaa2501af6` | MSVC LLVM 23.1.1 (`LLVM-C.dll`) | 16 | peak about 10 GB |
+| `658410feaaf` | MSYS2 CLANG64 23.1.3 `libLLVM-23.dll` | 24 | 56 MB, then 1.4 GB, 4.7 GB and 27 GB in about 4 minutes |
+| `658410feaaf` | same | 40 | 41 GB at 745 s, 61 GB at 778 s, 82 GB at 811 s (about 600 MB/s); killed |
 
-The 24-job run grows about as fast as the 40-job run. So growth does not follow the thread count; it follows the tree. In the 40-job curve, RSS stays under 300 MB until about 487 s and then grows steeply and steadily. That shape is a cumulative leak. A wider fan-out would instead show a high plateau.
+At 24 jobs RSS grows as fast as at 40. In the 40-job curve, RSS stays under 300 MB until about 490 s and then grows steadily. That shape is a cumulative leak or retention. A wider fan-out would instead show a high plateau.
 
-## Root cause (hypothesis)
+## Ruled out: the `b065988b5a2` transient-promotion change
 
-`b065988b5a2` ("fix(runtime): promote scope-owned heap roots; stage-2 surface_build SEGV") changed the early exit in `rt_transient_heap_promote`. On `release_phase3` the change is at `src/compiler_rust/runtime/src/value/collections.rs:2877-2885`:
+An earlier draft of this record blamed `b065988b5a2`, which changed `rt_transient_heap_promote` (`runtime/src/value/collections.rs:2877-2885`). That cannot cause growth in **this** process:
 
-```rust
-let scope_owned = TRANSIENT_HEAP_SCOPE.with(|slot| { ... scope.objects.iter().any(|o| o.as_heap_ptr() == root_ptr) });
-if !scope_owned && super::heap::is_registered_heap_ptr(root_ptr) { return true; }
-```
+- The seed reaches `rt_transient_heap_promote` only through the interpreter extern `compiler/src/interpreter_extern/memory.rs:442`. `native-build` does not run `.spl` through the interpreter. `compile_file_safe` (`pipeline/native_project/compiler.rs:1100-1200`) borrows only the parsed-source cache from the interpreter module.
+- A transient heap scope is opened only by Simple code at run time, so `TRANSIENT_HEAP_SCOPE` stays empty in the seed.
+- The concern still applies to the **stage-2 binary at run time**. The per-file `parser_promote_transient_owners` (`src/compiler/10.frontend/core/parser.spl:158-166`) now promotes `par_errors`, `par_warnings` and `par_struct_names` on every file. Those arrays are reassigned per file (`parser.spl:342-344`), so each file's promoted copies are orphaned. This is worth a separate check of stage-2 compile RSS. It is not this bug.
 
-Before this change, every registered heap root took the no-op exit. After it, a root that the current scope owns takes the full walk instead. That walk is at `collections.rs:2913-2965`. It does three things:
+## Seed delta between the two trees
 
-- It walks everything reachable from the root, including conservatively scanned raw-struct words.
-- It removes every reached object from `scope.objects` (`scope.objects.retain(...)`).
-- It promotes every reached raw block (`rt_transient_raw_promote`).
+`git diff 8aaa2501af6 658410feaaf --stat -- src/compiler_rust` shows 11 files, +337/-11:
 
-A promoted object is no longer freed when the scope ends, and **nothing ever frees it later**. No demote or release path exists.
+- No change in `native_project/compiler.rs`, `mod.rs`, the parsed-source cache, `module_cache.rs` or the codegen backends.
+- `native_project/linker.rs` and `stubs.rs`: link-line and stub-scan changes for gnu system libraries. These run only at link time, after the compile phase, so they do not explain growth during compilation.
+- `interpreter_extern/memory.rs`: byte-array interpreter twins. Not on the native-build path.
+- `runtime/.../collections.rs`: the promotion change ruled out above.
+- **`vendor/aya-llvm-sys/build.rs` (`40be663df96`)**: on non-MSVC Windows targets, the seed now links `libLLVM-23.dll` from MSYS2 CLANG64 instead of MSVC `LLVM-C.dll`. It is the only change that touches code running during the compile phase. Every worker's whole LLVM pipeline now runs in a different LLVM build (CLANG64 23.1.3), with a different C++ runtime and allocator (libc++ on UCRT malloc, instead of the MSVC CRT heap).
 
-That is the right outcome for the root the original bug needed: the retained parse `Result<ParserModule>`. It is the wrong outcome for the other per-file callers, which now run the full walk on every file:
+## Leading hypothesis
 
-- `src/compiler/10.frontend/core/parser.spl:158-166` (`parser_promote_transient_owners`, called once per parsed file from `src/compiler/80.driver/driver_source_pipeline_parsing.spl:290`) promotes these slots:
-  - `par_errors`, `par_warnings` and `par_struct_names`. They are **reassigned to fresh arrays for every file** (`parser.spl:342-344`, `528`, `586`, `1419-1423`). Each file's arrays are allocated inside that file's scope, so they are scope-owned and are now promoted. The next file's `par_errors = []` then orphans them for good.
-  - `par_kind_slot`, `par_text_slot`, `par_line_slot` and `par_col_slot` (`parser.spl:346-349`). The walk follows every token text these slots hold.
-  - `type_pools_promote_hir_owners()` (`src/compiler/10.frontend/core/types.spl:1624`). It promotes the type-pool globals, and its own comment says the parser resets them inside each per-file scope.
-- More `rt_transient_heap_promote` call sites exist in about 24 `.spl` files, for example `ast_coverage_inventory.spl:59-68` and `aspect_registry.spl:47`. Each one now runs the full walk whenever its root was allocated in the current scope.
+Each worker builds and drops an `inkwell::Context` per file (`compiler.rs` `compile_file_to_object`). The seed itself uses mimalloc (`driver/src/main.rs:69-72`), but LLVM's allocations happen inside `libLLVM-23.dll` and use its own CRT heap.
 
-So each parsed file permanently leaks its diagnostics arrays, its type-pool snapshot, and everything the conservative walk reaches from them. Before the change, all of these were freed at scope end.
+So one of these is the likely cause:
 
-Over the roughly 1,488-file closure, this adds up to tens of GB. More jobs only make the leak faster, which matches the 24-job and 40-job data. A side cost: the new ownership check is a linear scan of `scope.objects` on every promote call. That costs CPU in proportion to scope size, but it does not grow memory.
+- **(a)** Freed memory is not returned under concurrent create/destroy across short-lived threads. Each file gets a fresh `std::thread`. That makes growth follow throughput: 24 and 40 jobs grow at the same rate, which matches.
+- **(b)** The CLANG64 libLLVM build retains or leaks per-context state that the MSVC build freed.
 
-## Minimal fix (proposed, not applied)
+The thread count is not the variable. The 16-thread baseline is from the **old** tree, and no 16-thread run exists on the new tree.
 
-Make promotion apply only to values that escape the scope. Do not promote every registered root that the scope happens to own. The smallest correct change is in the Simple callers; the runtime gate stays as it is, because the `ParserModule` SEGV fix needs it:
+## Experiments to confirm (cheap, run when the host is free)
 
-1. In `parser_promote_transient_owners`, stop promoting the per-file diagnostics: `par_errors`, `par_warnings` and `par_struct_names`. They are reset at the next `parser_init*`, so nothing reads them after the scope ends. If a caller does read them after the scope, that caller should copy out what it needs before the scope ends.
-2. Promote the token slots (`par_*_slot`) only on the first parse in the process, which is what the comment above the function says. Use a `par_slots_promoted: bool` flag. Later files reuse those slots, which are already promoted, and do not re-walk them.
-3. In `type_pools_promote_hir_owners`, promote only when the pool root was reallocated since the last promotion: track the generation or pointer. Do not re-walk and re-promote a fresh per-file copy every time.
+1. Run `658410feaaf` at `--threads 16` with RSS sampling. If it still runs away, thread count is ruled out and the toolchain is confirmed as the variable.
+2. Build the same tree with only `40be663df96` reverted (MSVC `LLVM-C.dll`) and run at 24 jobs. If RSS goes back to about 10 GB, the cause is pinned.
+3. Run with `SIMPLE_NATIVE_FILE_TIMING=1` and correlate the RSS jumps with files. If memory never drops between files, the cause is retention, not peak size.
 
-An alternative on the runtime side is larger: record promoted roots and give them a release path (`rt_transient_heap_unpromote`) for when a global slot is overwritten. Prefer the caller fix.
+## Smallest fix (if experiment 2 confirms)
 
-**Verification to run once the host is free:** run the 24-job stage-2 build with RSS sampling and check that RSS stays at or below the `8aaa2501af6` envelope (about 10 GB at 16 jobs). Then run 40 jobs with `SIMPLE_MEMORY_LIMIT_MB=60000` as a hard stop.
+- **Short term:** for the windows-gnu seed build, link the seed against the MSVC-ABI `LLVM-C.dll` only for the codegen worker path, or go back to the previous LLVM until (3) isolates the cause. As a guardrail, set `SIMPLE_MEMORY_LIMIT_MB=60000` on the bootstrap lane. That turns a host OOM into a clean fail.
+- **Structural:** reuse one LLVM context per rayon worker instead of one fresh `std::thread` plus context per file. That is the spawn in `compile_file_safe`, `compiler.rs:1118-1125`. Thread-local or arena heaps in the DLL CRT then stay bounded by the worker count.
 
-## Seed native-build side (checked and ruled out as the primary cause)
+## Seed threading and admission (checked)
 
-- `src/compiler_rust/compiler/src/pipeline/native_project/compiler.rs:456-545` (`compile_entries_parallel`): this is a rayon `par_iter`. Each file gets a **fresh** worker thread (`compile_file_safe`, `compiler.rs:1100-1200`), so thread-local caches die with each file. The `module_cache.rs:530-545` caches have no bound, but they are per thread and freed when the thread exits. The parsed-source cache is capped at 256 per worker (`module_cache.rs:54`). Object bytes go straight to disk (`compiler.rs:524-525`), so they do not pile up in memory.
-- `ModuleImports` (`mod.rs:545+`) is made of `Arc` fields, and the suffix index is shared once through `Arc` (`compiler.rs:478`). Cloning per worker is cheap, and nothing clones a whole-graph structure per worker.
-- One real hazard remains, though it is not this bug: a timed-out worker cannot be cancelled (`wait_for_compiler_thread`, `compiler.rs:1243-1265`). It keeps its LLVM context alive until it finishes. `NativeCompileAdmission` (`compiler.rs:1080-1098`) only refuses **new** admissions after a timeout. It is a timeout latch, not a memory budget.
+- `compile_entries_parallel` (`compiler.rs:456-545`) runs on a rayon `par_iter`, with a fresh thread per file.
+- Object files are written straight to disk (`compiler.rs:524-525`).
+- `ModuleImports` (`mod.rs:545+`) is made of `Arc` fields, and the suffix index is shared once (`compiler.rs:478`). No whole-graph structure is cloned per worker.
+- A timed-out worker cannot be cancelled (`wait_for_compiler_thread`, `compiler.rs:1243-1265`).
+- `NativeCompileAdmission` (`compiler.rs:1080-1098`) is only a timeout latch. It is not a memory budget.
 
 ## Existing knobs that bound memory today
 
-- `--threads N`, `SIMPLE_BOOTSTRAP_THREADS` and `--low-memory` (forces 1 worker). The default number of LLVM workers is clamped to 4 (`mod.rs:299`, `LLVM_DEFAULT_MAX_THREADS`). None of these is aware of RSS.
-- `SIMPLE_MEMORY_LIMIT_MB` (`compiler/src/watchdog.rs:38-42`, `memory_guard.rs:32`) aborts the process above an RSS cap. It is a kill switch, not admission control.
-- `SIMPLE_MODULE_RSS_WARN_MB` (`memory_guard.rs:38-42`) only warns.
-- `SIMPLE_PARSED_SOURCE_CACHE_MAX` caps the seed's per-worker parse memo.
-- No RSS-aware admission exists. If one is wanted, the place for it is `NativeCompileAdmission::run`: block admission while process RSS is above a `SIMPLE_NATIVE_RSS_BUDGET_MB`. It would not fix the leak above.
+- `--threads N`, `SIMPLE_BOOTSTRAP_THREADS` and `--low-memory` (1 worker). The default for LLVM is clamped to 4 workers (`mod.rs:299`). None of them is aware of RSS.
+- `SIMPLE_MEMORY_LIMIT_MB` (`watchdog.rs:38-42`, `memory_guard.rs:32`) is a hard RSS kill, not admission.
+- `SIMPLE_MODULE_RSS_WARN_MB` only warns. `SIMPLE_PARSED_SOURCE_CACHE_MAX` caps the per-worker parse memo (default 256).
+- No RSS-aware admission exists. If one is wanted, the place is `NativeCompileAdmission::run`: block admission while RSS is above a `SIMPLE_NATIVE_RSS_BUDGET_MB`.
