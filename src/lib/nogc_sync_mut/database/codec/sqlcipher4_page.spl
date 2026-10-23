@@ -1,0 +1,574 @@
+# SQLCipher 4 page codec — page geometry, CBC page encryption, per-page HMAC.
+#
+# Lane cipher-c (page geometry + CBC + per-page HMAC), lane 3 of 4 of the
+# pure-Simple SQLCipher 4 codec. Profile: sqlcipher4_4k_sha512 (master plan
+# 2026-10-21 §4.1–§4.2). Sibling lanes owned at this base and CONSUMED here:
+#   * cipher-a: raw no-padding CBC block chaining
+#     (std.common.aes.modes.aes_cbc_{encrypt,decrypt}_blocks_no_padding)
+#     — this module never chains AES blocks itself and never uses the
+#     PKCS#7-padded std.common.aes.modes application path for pages.
+#   * cipher-b: key sessions and KDF byte ownership
+#     (codec/sqlcipher4_keys.spl; Sqlcipher4KeySession page_key/hmac_key).
+#   * cipher-d: locked profile + Sqlcipher4Error taxonomy (codec/sqlcipher4.spl),
+#     manifest (codec/sqlcipher4_manifest.spl), and the PageCodecV1 registry
+#     (codec/codec_registry.spl). This module's public API returns
+#     Sqlcipher4Error and its factory produces a PageCodecV1 record.
+#
+# On-disk geometry (4096-byte pages, 80 reserved bytes at the page tail):
+#
+#   Page 1:
+#     [0,16)    DB salt, PLAINTEXT (16 bytes)
+#     [16,4016) CBC ciphertext of the page-1 body (4000 bytes, no padding)
+#     [4016,4032) per-page IV (16 bytes)
+#     [4032,4096) HMAC-SHA512 (64 bytes)
+#
+#   Pages >= 2:
+#     [0,4016)    CBC ciphertext of the page body (4016 bytes, no padding)
+#     [4016,4032) per-page IV (16 bytes)
+#     [4032,4096) HMAC-SHA512 (64 bytes)
+#
+# Per-page HMAC input (SQLCipher 4, CIPHER_FLAG_LE_PGNO):
+#     HMAC-SHA512(hmac_key, ciphertext || IV || page_number_le32)
+# where page_number_le32 is the 1-based page number as 4 bytes LITTLE-endian.
+# This is deliberately NOT the big-endian order of SQLite structure fields;
+# the two must never be confused (the page-size field check below IS a
+# big-endian SQLite structure field — that contrast is intentional).
+#
+# CONTRACT WITH CALLERS (raw page API):
+#   - Keys are raw: 32-byte AES-256 page key, 32-byte HMAC-SHA512 key, both
+#     caller-owned. IVs are 16 bytes, fresh and caller-generated per encoded
+#     page (CSPRNG lives in the I/O tier, not here).
+#   - Plaintext input to encode is always the full 4016-byte virtual page
+#     body. For page 1 the first 16 bytes of that body ARE the DB salt; they
+#     are stored plaintext at [0,16) of the encoded page and the remaining
+#     4000 bytes are encrypted.
+#   - Decode returns the full 4016-byte virtual body (page 1: salt at
+#     [0,16) || decrypted 4000-byte body). The salt is additionally exposed
+#     separately via sqlcipher4_page1_salt for callers that key KDF material
+#     off it before assembling the virtual page. For page 1 the caller's
+#     SQLite pager reconstructs the "SQLite format 3\0" magic virtually over
+#     [0,16) (plan §4.2); this layer never sees it.
+#
+# SECURITY PROPERTIES:
+#   - Authenticate-before-decrypt: decode computes the expected per-page HMAC
+#     and compares it in constant time BEFORE any CBC decryption happens. A
+#     mismatch returns AuthenticationFailed and discloses zero plaintext;
+#     the error text never reveals whether the key or the data was wrong.
+#   - Page 1 decode additionally fails closed with CorruptPage when the
+#     decrypted body does not carry the SQLite page-size field 0x10 0x00
+#     (4096, a big-endian SQLite structure field) at its first two bytes —
+#     virtual offsets [16,18). Authentication binds the ciphertext to the
+#     HMAC key, not to the AES key, so a wrong AES key alone (valid HMAC) is
+#     caught here for page 1; pages >= 2 rely on the downstream SQLite-format
+#     decoder/structure checker (plan §4.2 step 4).
+#   - An ENCODED page 1 whose leading bytes look like a plaintext SQLite
+#     header ("SQLite format 3\0") is rejected with UnsupportedPlaintextHeader
+#     before authentication: the standard profile stores the salt there, so
+#     such a page means a plaintext-header variant this profile forbids.
+#   - Scratch holding key material (key copies, chaining inputs, HMAC inputs,
+#     decrypted bodies on the failure path) is zeroized before returning.
+#     The canonical owner std.common.crypto.secure_memory is unusable in the
+#     seed interpreter at this base, so this module uses the same portable
+#     overwrite(+readback-free) idiom as the sibling crypto lanes; see
+#     doc/08_tracking/bug/secure_memory_u8_zeroize_unregistered_extern_2026-10-22.md.
+#     Zeroization covers the owner-reachable heap buffer only; runtime
+#     temporaries (e.g. KDF-engine buffers) are outside Simple reach.
+#
+# PAGECODECV1 INTEGRATION (codec_registry.spl):
+#   sqlcipher4_page_factory builds the PageCodecV1 record for this codec.
+#   The session handle is CodecSessionV1 with secret_material = the opaque
+#   80-byte layout file_salt(16) || page_key(32) || hmac_key(32), produced by
+#   cipher-b's sqlcipher4_key_session_open and interpreted only here.
+#   open_key_fn currently treats its `text` argument as the ALREADY-RESOLVED
+#   passphrase bytes (UTF-8): SecretRef indirection (ref -> bytes without
+#     ever materializing the secret as text) is the adapter lane's job; this
+#     shim is the documented seam and must be replaced by that resolution.
+
+use nogc_sync_mut.database.codec.sqlcipher4.{
+    Sqlcipher4Error, Sqlcipher4Profile, sqlcipher4_profile,
+    SQLCIPHER4_PAGE_SIZE, SQLCIPHER4_IV_BYTES, SQLCIPHER4_HMAC_BYTES,
+    SQLCIPHER4_CIPHER_KEY_BYTES
+}
+use nogc_sync_mut.database.codec.sqlcipher4_manifest.{
+    Sqlcipher4Manifest, sqlcipher4_manifest
+}
+use nogc_sync_mut.database.codec.codec_registry.{
+    CodecSessionV1, PageCodecV1
+}
+use nogc_sync_mut.database.codec.sqlcipher4_keys.{
+    sqlcipher4_key_session_open, Sqlcipher4KeyError, SQLCIPHER4_HMAC_KEY_BYTES
+}
+use std.common.aes.modes.{
+    aes_cbc_encrypt_blocks_no_padding,
+    aes_cbc_decrypt_blocks_no_padding
+}
+use std.common.crypto.hmac.{hmac_sha512_bytes}
+use std.common.crypto.constant_time.{black_box}
+use std.common.text_bytes.{text_to_utf8_bytes}
+
+# ----------------------------------------------------------------------------
+# Lane geometry constants (sqlcipher4_4k_sha512) — fixed offsets, never
+# mutable. Profile-level constants (page size, IV/HMAC widths, key widths)
+# are owned and imported from sqlcipher4.spl / sqlcipher4_keys.spl.
+# ----------------------------------------------------------------------------
+
+# Reserve layout at the page tail: IV then HMAC.
+val SQLCIPHER4_IV_OFFSET: i64 = 4016
+val SQLCIPHER4_HMAC_OFFSET: i64 = 4032
+# Ciphertext extent for pages >= 2 (also the virtual plaintext body size).
+val SQLCIPHER4_PAGE_BODY_BYTES: i64 = 4016
+# Page 1: 16 plaintext salt bytes + 4000 encrypted body bytes.
+val SQLCIPHER4_PAGE1_SALT_BYTES: i64 = 16
+val SQLCIPHER4_PAGE1_CIPHERTEXT_BYTES: i64 = 4000
+# Largest page number representable in the 32-bit LE HMAC binding.
+val SQLCIPHER4_MAX_PAGE_NO: i64 = 4294967295
+# Registry identity of this codec (matches the manifest codec_id).
+val SQLCIPHER4_PAGE_CODEC_ID: text = "sqlcipher4"
+# Opaque CodecSessionV1.secret_material layout: salt || page_key || hmac_key.
+val SQLCIPHER4_SESSION_MATERIAL_BYTES: i64 = 80
+
+# ============================================================================
+# Byte-domain helpers.
+# ============================================================================
+
+# Convert a [u8] buffer to an [i64] byte list (values 0-255).
+fn _u8_to_i64(arr: [u8]) -> [i64]:
+    var out: [i64] = []
+    var i = 0
+    val n = arr.len()
+    while i < n:
+        out.push(arr[i].to_i64() & 0xFF)
+        i = i + 1
+    out
+
+# Convert an [i64] byte list (values 0-255) to a [u8] buffer.
+fn _i64_to_u8(arr: [i64]) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    val n = arr.len()
+    while i < n:
+        out.push((arr[i] & 0xFF).to_u8())
+        i = i + 1
+    out
+
+# Fresh push-built mutable copy of a [u8] buffer. Native-extern and frozen
+# results cannot be wiped in place at this base (documented runtime limit);
+# copies carry the wipeable owner buffer.
+fn _mutable_copy_u8(src: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    val n = src.len()
+    while i < n:
+        out.push(src[i])
+        i = i + 1
+    out
+
+# Zeroize a [u8] buffer in place (overwrite every byte with 0). Portable
+# overwrite idiom; see the module header for why secure_memory is not used.
+fn _zeroize_u8(buf: [u8]) -> bool:
+    var i = 0
+    val n = buf.len()
+    while i < n:
+        buf[i] = 0u8
+        i = i + 1
+    true
+
+# Zeroize an [i64] buffer in place (overwrite every slot with 0).
+fn _zeroize_i64(buf: [i64]) -> bool:
+    var i = 0
+    val n = buf.len()
+    while i < n:
+        buf[i] = 0
+        i = i + 1
+    true
+
+# Append src[0,n) onto dst (both [i64] byte lists).
+fn _append_i64(dst: [i64], src: [i64], n: i64) -> [i64]:
+    var i = 0
+    while i < n:
+        dst.push(src[i] & 0xFF)
+        i = i + 1
+    dst
+
+# 1-based page number as 4 bytes LITTLE-endian (SQLCipher CIPHER_FLAG_LE_PGNO).
+# Explicitly NOT the big-endian order used by SQLite structure fields.
+fn _page_number_le32(page_no: i64) -> [i64]:
+    var out: [i64] = []
+    out.push(page_no & 0xFF)
+    out.push((page_no >> 8) & 0xFF)
+    out.push((page_no >> 16) & 0xFF)
+    out.push((page_no >> 24) & 0xFF)
+    out
+
+# True when page[0,16) equals the plaintext SQLite magic "SQLite format 3\0".
+# A standard-profile encrypted page 1 stores the DB salt there instead, so
+# this pattern means a plaintext SQLite header (or a plaintext-header cipher
+# variant) reached the page codec.
+fn _has_plaintext_sqlite_magic(page: [u8]) -> bool:
+    val magic = [0x53, 0x51, 0x4C, 0x69, 0x74, 0x65, 0x20, 0x66,
+                 0x6F, 0x72, 0x6D, 0x61, 0x74, 0x20, 0x33, 0x00]
+    var i = 0
+    while i < 16:
+        if (page[i].to_i64() & 0xFF) != magic[i]:
+            return false
+        i = i + 1
+    true
+
+# ============================================================================
+# Per-page HMAC and constant-time comparison.
+# ============================================================================
+
+# Compute the SQLCipher 4 per-page HMAC:
+#   HMAC-SHA512(hmac_key, ciphertext || IV || page_number_le32)
+# ciphertext is the encrypted page body extent (4000 bytes for page 1,
+# 4016 bytes for pages >= 2), NOT including the plaintext salt. Returns the
+# 64-byte MAC as an [i64] byte list.
+fn sqlcipher4_page_hmac(ciphertext: [u8], iv16: [u8], page_no: i64, hmac_key32: [u8]) -> [i64]:
+    var input: [i64] = []
+    _append_i64(input, _u8_to_i64(ciphertext), ciphertext.len())
+    _append_i64(input, _u8_to_i64(iv16), iv16.len())
+    _append_i64(input, _page_number_le32(page_no), 4)
+    val mac = hmac_sha512_bytes(_u8_to_i64(hmac_key32), input)
+    _zeroize_i64(input)
+    mac
+
+# Constant-time equality for two byte lists. Returns true only for exact
+# matches (same length, same bytes); never branches on content. The length
+# difference itself is not secret.
+fn sqlcipher4_constant_time_eq(a: [i64], b: [i64]) -> bool:
+    val la = a.len()
+    val lb = b.len()
+    if la != lb:
+        return false
+    var diff = 0
+    var i = 0
+    while i < la:
+        diff = diff | ((a[i] & 0xFF) ^ (b[i] & 0xFF))
+        i = i + 1
+    # The black_box barrier stops the compiler from rewriting the accumulate
+    # loop into an early-exit compare (see std.common.crypto.constant_time).
+    black_box(diff) == 0
+
+# ============================================================================
+# Page layout and shared geometry validation.
+# ============================================================================
+
+# (ciphertext_offset, ciphertext_length) for a 1-based page number.
+fn _ct_extent(page_no: i64) -> (i64, i64):
+    if page_no == 1:
+        (SQLCIPHER4_PAGE1_SALT_BYTES, SQLCIPHER4_PAGE1_CIPHERTEXT_BYTES)
+    else:
+        (0, SQLCIPHER4_PAGE_BODY_BYTES)
+
+# Validate shared encode/decode geometry. Returns the ciphertext extent.
+fn _checked_geometry(page_no: i64, page_size: i64, aes_key32: [u8], hmac_key32: [u8]) -> Result<(i64, i64), Sqlcipher4Error>:
+    if page_no < 1 or page_no > SQLCIPHER4_MAX_PAGE_NO:
+        return Err(Sqlcipher4Error.CorruptPage(detail: "page number {page_no} out of range (1-based, max {SQLCIPHER4_MAX_PAGE_NO})"))
+    if page_size != SQLCIPHER4_PAGE_SIZE:
+        return Err(Sqlcipher4Error.InvalidPageGeometry(detail: "page size {page_size} != profile page size {SQLCIPHER4_PAGE_SIZE}"))
+    if aes_key32.len() != SQLCIPHER4_CIPHER_KEY_BYTES:
+        return Err(Sqlcipher4Error.InvalidPageGeometry(detail: "AES key is {aes_key32.len()} bytes, profile requires {SQLCIPHER4_CIPHER_KEY_BYTES}"))
+    if hmac_key32.len() != SQLCIPHER4_HMAC_KEY_BYTES:
+        return Err(Sqlcipher4Error.InvalidPageGeometry(detail: "HMAC key is {hmac_key32.len()} bytes, profile requires {SQLCIPHER4_HMAC_KEY_BYTES}"))
+    Ok(_ct_extent(page_no))
+
+# ============================================================================
+# Raw page API (caller-supplied keys and IV).
+# ============================================================================
+
+# Encode one 4096-byte page.
+#
+#   page_no:        1-based page number (bound into the HMAC little-endian).
+#   plaintext_page: full 4016-byte virtual page body. For page 1 the first
+#                   16 bytes are the DB salt (stored plaintext); the rest is
+#                   encrypted. Any other 16-byte boundary is rejected.
+#   iv16:           16-byte IV, fresh per encoded page (caller-generated).
+#   aes_key32:      32-byte AES-256 page key.
+#   hmac_key32:     32-byte HMAC-SHA512 key.
+#
+# Returns the full 4096-byte page, or a typed error.
+fn sqlcipher4_encode_page(page_no: i64, plaintext_page: [u8], iv16: [u8], aes_key32: [u8], hmac_key32: [u8]) -> Result<[u8], Sqlcipher4Error>:
+    match _checked_geometry(page_no, SQLCIPHER4_PAGE_SIZE, aes_key32, hmac_key32):
+        case Err(e):
+            return Err(e)
+        case Ok(extent):
+            val ct_off = extent.0
+            val ct_len = extent.1
+            if plaintext_page.len() != SQLCIPHER4_PAGE_BODY_BYTES:
+                return Err(Sqlcipher4Error.InvalidPageGeometry(detail: "plaintext body is {plaintext_page.len()} bytes, profile requires {SQLCIPHER4_PAGE_BODY_BYTES}"))
+            if iv16.len() != SQLCIPHER4_IV_BYTES:
+                return Err(Sqlcipher4Error.InvalidPageGeometry(detail: "IV is {iv16.len()} bytes, profile requires {SQLCIPHER4_IV_BYTES}"))
+            # Page-1 body skips the leading 16 salt bytes; pages >= 2 encrypt
+            # the full 4016-byte body. Both extents are whole 16-byte blocks.
+            var body: [i64] = []
+            var i = ct_off
+            while i < SQLCIPHER4_PAGE_BODY_BYTES:
+                body.push(plaintext_page[i].to_i64() & 0xFF)
+                i = i + 1
+            # Raw no-padding CBC is owned by std.common.aes.modes (cipher-a):
+            # AES-256, exact-length output, no PKCS#7 anywhere near a page.
+            val key_i64 = _u8_to_i64(aes_key32)
+            val iv_i64 = _u8_to_i64(iv16)
+            val ct_result = aes_cbc_encrypt_blocks_no_padding(key_i64, body, iv_i64)
+            _zeroize_i64(key_i64)
+            _zeroize_i64(body)
+            _zeroize_i64(iv_i64)
+            val ct = match ct_result:
+                case Ok(c):
+                    c
+                case Err(_):
+                    return Err(Sqlcipher4Error.CorruptPage(detail: "no-padding CBC rejected a pre-validated page body"))
+            # Assemble the 4096-byte page per profile geometry.
+            var page: [u8] = []
+            var p = 0
+            while p < SQLCIPHER4_PAGE_SIZE:
+                page.push(0u8)
+                p = p + 1
+            if page_no == 1:
+                var s = 0
+                while s < SQLCIPHER4_PAGE1_SALT_BYTES:
+                    page[s] = plaintext_page[s]
+                    s = s + 1
+            var c = 0
+            while c < ct_len:
+                page[ct_off + c] = (ct[c] & 0xFF).to_u8()
+                c = c + 1
+            var v = 0
+            while v < SQLCIPHER4_IV_BYTES:
+                page[SQLCIPHER4_IV_OFFSET + v] = iv16[v]
+                v = v + 1
+            val ct_u8 = _i64_to_u8(ct)
+            val mac = sqlcipher4_page_hmac(ct_u8, iv16, page_no, hmac_key32)
+            _zeroize_i64(ct)
+            var m = 0
+            while m < SQLCIPHER4_HMAC_BYTES:
+                page[SQLCIPHER4_HMAC_OFFSET + m] = (mac[m] & 0xFF).to_u8()
+                m = m + 1
+            _zeroize_i64(mac)
+            Ok(page)
+
+# Decode and authenticate one 4096-byte page.
+#
+# Authenticate-before-decrypt: the expected per-page HMAC is computed and
+# compared in constant time BEFORE any CBC decryption. On mismatch the
+# result is AuthenticationFailed and no plaintext is disclosed; the message
+# never says whether the key or the data was wrong.
+#
+# Returns the full 4016-byte virtual page body (page 1: salt at [0,16) ||
+# decrypted 4000-byte body), or a typed error. See sqlcipher4_page1_salt for
+# salt-only access.
+fn sqlcipher4_decode_page(page_no: i64, page: [u8], aes_key32: [u8], hmac_key32: [u8]) -> Result<[u8], Sqlcipher4Error>:
+    match _checked_geometry(page_no, page.len(), aes_key32, hmac_key32):
+        case Err(e):
+            return Err(e)
+        case Ok(extent):
+            val ct_off = extent.0
+            val ct_len = extent.1
+            # Plaintext-header profiles are a separate versioned profile; the
+            # standard one stores the salt where a plaintext SQLite header's
+            # magic would be. Fail fast before spending an HMAC on it.
+            if page_no == 1 and _has_plaintext_sqlite_magic(page):
+                return Err(Sqlcipher4Error.UnsupportedPlaintextHeader(detail: "page 1 carries a plaintext SQLite header; standard sqlcipher4_4k_sha512 stores the 16-byte salt there"))
+            # Extract ciphertext / IV / stored HMAC from the trailer geometry.
+            var ct: [u8] = []
+            var i = 0
+            while i < ct_len:
+                ct.push(page[ct_off + i])
+                i = i + 1
+            var iv: [u8] = []
+            var v = 0
+            while v < SQLCIPHER4_IV_BYTES:
+                iv.push(page[SQLCIPHER4_IV_OFFSET + v])
+                v = v + 1
+            var stored_mac: [i64] = []
+            var m = 0
+            while m < SQLCIPHER4_HMAC_BYTES:
+                stored_mac.push(page[SQLCIPHER4_HMAC_OFFSET + m].to_i64() & 0xFF)
+                m = m + 1
+            # AUTHENTICATE BEFORE DECRYPT — a mismatch returns here and the
+            # ciphertext is never decrypted.
+            val expected_mac = sqlcipher4_page_hmac(ct, iv, page_no, hmac_key32)
+            val authentic = sqlcipher4_constant_time_eq(expected_mac, stored_mac)
+            _zeroize_i64(expected_mac)
+            if not authentic:
+                _zeroize_u8(ct)
+                _zeroize_u8(iv)
+                return Err(Sqlcipher4Error.AuthenticationFailed(detail: "page {page_no} failed HMAC-SHA512 authentication"))
+            # Only now decrypt (cipher-a no-padding CBC, exact-length output).
+            val key_i64 = _u8_to_i64(aes_key32)
+            val body_result = aes_cbc_decrypt_blocks_no_padding(key_i64, _u8_to_i64(ct), _u8_to_i64(iv))
+            _zeroize_i64(key_i64)
+            _zeroize_u8(ct)
+            _zeroize_u8(iv)
+            val body = match body_result:
+                case Ok(b):
+                    b
+                case Err(_):
+                    return Err(Sqlcipher4Error.CorruptPage(detail: "no-padding CBC rejected a pre-validated page ciphertext"))
+            # Page 1 fail-closed structural guard: the decrypted body must
+            # carry the SQLite page-size field 0x10 0x00 (4096, big-endian
+            # SQLite structure field) at its first two bytes — virtual
+            # offsets [16,18). A wrong AES key passes the HMAC (the MAC
+            # binds the ciphertext to the HMAC key, not the AES key) and is
+            # caught here for page 1.
+            if page_no == 1:
+                if body[0] != 0x10 or body[1] != 0x00:
+                    _zeroize_i64(body)
+                    return Err(Sqlcipher4Error.CorruptPage(detail: "page 1 decrypted body lacks the 4096 page-size field"))
+            # Reassemble the 4016-byte virtual page body.
+            var out: [u8] = []
+            if page_no == 1:
+                var s = 0
+                while s < SQLCIPHER4_PAGE1_SALT_BYTES:
+                    out.push(page[s])
+                    s = s + 1
+            var b = 0
+            val bn = body.len()
+            while b < bn:
+                out.push((body[b] & 0xFF).to_u8())
+                b = b + 1
+            _zeroize_i64(body)
+            Ok(out)
+
+# Extract the 16-byte DB salt from an encoded page 1 without decoding.
+fn sqlcipher4_page1_salt(page: [u8]) -> Result<[u8], Sqlcipher4Error>:
+    if page.len() != SQLCIPHER4_PAGE_SIZE:
+        return Err(Sqlcipher4Error.InvalidPageGeometry(detail: "page is {page.len()} bytes, profile requires {SQLCIPHER4_PAGE_SIZE}"))
+    var salt: [u8] = []
+    var i = 0
+    while i < SQLCIPHER4_PAGE1_SALT_BYTES:
+        salt.push(page[i])
+        i = i + 1
+    Ok(salt)
+
+# ============================================================================
+# PageCodecV1 integration (codec_registry.spl). The registry treats
+# CodecSessionV1 as opaque; the layout below is owned by THIS module.
+# ============================================================================
+
+fn sqlcipher4_page_profile_fn() -> Sqlcipher4Profile:
+    sqlcipher4_profile()
+
+fn sqlcipher4_page_manifest_fn() -> Sqlcipher4Manifest:
+    sqlcipher4_manifest()
+
+# Map the key-session lane's error taxonomy onto the shared one.
+fn _key_session_error(err: Sqlcipher4KeyError) -> Sqlcipher4Error:
+    match err:
+        case Sqlcipher4KeyError.MissingSecret:
+            Sqlcipher4Error.MissingSecret(detail: "empty passphrase for key session")
+        case Sqlcipher4KeyError.UnsupportedKeyType:
+            Sqlcipher4Error.UnsupportedKeyType(detail: "only passphrase key type is supported")
+        case Sqlcipher4KeyError.CipherProfileMismatch(field, expected, requested):
+            Sqlcipher4Error.CipherProfileMismatch(detail: "key session profile field '{field}' is {requested}, locked profile requires {expected}")
+
+# Open a registry session: derive the page/HMAC keys through cipher-b's
+# locked KDF pipeline and pack them into the opaque session material.
+#
+# DOCUMENTED SHIM: `secret_ref` is treated as the ALREADY-RESOLVED passphrase
+# (UTF-8 bytes). SecretRef indirection — resolving a reference to bytes
+# without the secret ever existing as text — is the adapter lane's
+# responsibility (plan §4.2); once that lands it replaces this shim and this
+# function takes the reference instead. The passphrase copy is zeroized
+# before return; the frozen text_to_utf8_bytes original is dropped to GC
+# unwiped (documented runtime limit, same as the key-session lane).
+fn sqlcipher4_page_open_key(secret_ref: text, file_salt: [u8]) -> Result<CodecSessionV1, Sqlcipher4Error>:
+    val pp_frozen = text_to_utf8_bytes(secret_ref)
+    var passphrase = _mutable_copy_u8(pp_frozen)
+    val opened = sqlcipher4_key_session_open(passphrase, file_salt)
+    _zeroize_u8(passphrase)
+    match opened:
+        case Err(e):
+            Err(_key_session_error(e))
+        case Ok(session):
+            var material: [u8] = []
+            var i = 0
+            while i < file_salt.len():
+                material.push(file_salt[i])
+                i = i + 1
+            i = 0
+            while i < session.page_key.len():
+                material.push(session.page_key[i])
+                i = i + 1
+            i = 0
+            while i < session.hmac_key.len():
+                material.push(session.hmac_key[i])
+                i = i + 1
+            # Release the derived key buffers held by the cipher-b session.
+            session.close()
+            Ok(CodecSessionV1(
+                codec_id: SQLCIPHER4_PAGE_CODEC_ID,
+                open: true,
+                secret_material: material))
+
+# Unpack a session's opaque material into wipeable key copies.
+fn _session_keys(session: CodecSessionV1) -> Result<([u8], [u8]), Sqlcipher4Error>:
+    if not session.open:
+        return Err(Sqlcipher4Error.MissingSecret(detail: "codec session is closed"))
+    val material = session.secret_material
+    if material.len() != SQLCIPHER4_SESSION_MATERIAL_BYTES:
+        return Err(Sqlcipher4Error.CorruptPage(detail: "codec session material is {material.len()} bytes, expected {SQLCIPHER4_SESSION_MATERIAL_BYTES}"))
+    var page_key: [u8] = []
+    var hmac_key: [u8] = []
+    var i = 0
+    while i < 32:
+        page_key.push(material[SQLCIPHER4_PAGE1_SALT_BYTES + i])
+        hmac_key.push(material[SQLCIPHER4_PAGE1_SALT_BYTES + 32 + i])
+        i = i + 1
+    Ok((page_key, hmac_key))
+
+fn sqlcipher4_page_decode_with_session(page_no: i64, page: [u8], session: CodecSessionV1) -> Result<[u8], Sqlcipher4Error>:
+    match _session_keys(session):
+        case Err(e):
+            Err(e)
+        case Ok(keys):
+            val result = sqlcipher4_decode_page(page_no, page, keys.0, keys.1)
+            _zeroize_u8(keys.0)
+            _zeroize_u8(keys.1)
+            result
+
+fn sqlcipher4_page_encode_with_session(page_no: i64, plaintext_page: [u8], session: CodecSessionV1, rng: fn(i64) -> [u8]) -> Result<[u8], Sqlcipher4Error>:
+    match _session_keys(session):
+        case Err(e):
+            Err(e)
+        case Ok(keys):
+            # A fresh IV per encoded page is mandatory (plan §4.2: page reuse
+            # without fresh IVs is forbidden); it comes from the caller's rng.
+            val iv16 = rng(SQLCIPHER4_IV_BYTES)
+            if iv16.len() != SQLCIPHER4_IV_BYTES:
+                _zeroize_u8(keys.0)
+                _zeroize_u8(keys.1)
+                return Err(Sqlcipher4Error.CorruptPage(detail: "rng returned {iv16.len()} bytes, profile requires a {SQLCIPHER4_IV_BYTES}-byte IV"))
+            val result = sqlcipher4_encode_page(page_no, plaintext_page, iv16, keys.0, keys.1)
+            _zeroize_u8(keys.0)
+            _zeroize_u8(keys.1)
+            result
+
+# Release a session: zeroize the opaque material buffer in place (the list
+# buffer is shared with the caller's copy, so the wipe is effective even
+# though the struct value itself is by-value). The caller must discard its
+# handle; decode/encode on a zeroed session fails closed at authentication.
+fn sqlcipher4_page_close(session: CodecSessionV1) -> Result<(), Sqlcipher4Error>:
+    _zeroize_u8(session.secret_material)
+    Ok(())
+
+# Build the PageCodecV1 record for the pure-Simple SQLCipher 4 page codec.
+fn sqlcipher4_page_factory(codec_id: text) -> PageCodecV1:
+    PageCodecV1(
+        codec_id: codec_id,
+        profile_fn: sqlcipher4_page_profile_fn,
+        manifest_fn: sqlcipher4_page_manifest_fn,
+        open_key_fn: sqlcipher4_page_open_key,
+        decode_page_fn: sqlcipher4_page_decode_with_session,
+        encode_page_fn: sqlcipher4_page_encode_with_session,
+        close_fn: sqlcipher4_page_close)
+
+export SQLCIPHER4_IV_OFFSET, SQLCIPHER4_HMAC_OFFSET
+export SQLCIPHER4_PAGE_BODY_BYTES, SQLCIPHER4_PAGE1_SALT_BYTES
+export SQLCIPHER4_SESSION_MATERIAL_BYTES, SQLCIPHER4_PAGE_CODEC_ID
+export sqlcipher4_encode_page, sqlcipher4_decode_page, sqlcipher4_page1_salt
+export sqlcipher4_page_hmac, sqlcipher4_constant_time_eq
+export sqlcipher4_page_factory
+export sqlcipher4_page_profile_fn, sqlcipher4_page_manifest_fn
+export sqlcipher4_page_open_key, sqlcipher4_page_close
+export sqlcipher4_page_encode_with_session, sqlcipher4_page_decode_with_session
