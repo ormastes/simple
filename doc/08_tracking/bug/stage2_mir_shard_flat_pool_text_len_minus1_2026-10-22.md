@@ -1002,3 +1002,27 @@ is preserved on origin for the owner: it fixes a real cross-scope ownership
 defect per code reading, but it is not the stage2 gate cure. All compiler-side
 hypotheses (14 PRs) and the two reclaim hypotheses are now tested and refuted
 or fixed; the blocker needs heap-level diagnosis.
+
+## Annotation 2026-10-24 (lane D, empirical narrowing): candidate codegen defect, differential seed-vs-candidate
+
+Build-free findings this cycle:
+- The stored frontend-cache blob is VALID: the would-be-refusing pool (6th text pool
+  of the tail, ordinal established in lanes 45/48b) is 5 EMPTY strings in the blob
+  (/tmp/p2blob repro, blob lines 43-48); neighboring content pools are intact.
+- The reader path is source-clean end to end: FlatPoolReader.next returns empty
+  lines as ""; flat_pool_unescape("") returns ""; dec_text/dec_text_into push
+  through clear+push with no uninitialized slots.
+- The seed (bin/simple.exe) runs the exact split probe
+  ("5\n\n\n\n\n".split("\n") + per-field len) CORRECTLY - all empty fields len=0.
+  So rt_string_split / rt_string_new(0) in runtime_native.c are correct.
+- The stage2 CANDIDATE cannot compile the same probe: full probe AVs
+  (0xC0000005); the minimal "a\n\nb".split("\n") probe fails HIR aggregation.
+  The seed and the candidate diverge on this exact construct class.
+
+Conclusion: the -1 pool elements on the decode-hit path are the candidate's
+miscompiled read of valid blob data - a stage2 candidate CODEGEN defect in the
+text-split / text-array / empty-field handling family, not heap corruption and
+not a runtime C bug. The seed-vs-candidate differential probe
+(build/scratch/splitprobe.spl pattern, run via any bootstrap_admission fixture
+temporarily) reproduces it in ~25 s. This is owner-lane codegen debugging with
+a now-minimal reproducer; the fixture was restored clean after probing.
