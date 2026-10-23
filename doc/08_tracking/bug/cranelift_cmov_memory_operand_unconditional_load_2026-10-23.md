@@ -461,3 +461,173 @@ is what the `SIMPLE_AGGREGATE_COPY_DIAG` probe is for; `codec_gen.spl`'s note
 says the scalar case was "already hit once and fixed by inlining" and that the
 node/opaque case was "left unmitigated" until the statement form, so a third
 category is the place to look.
+
+## MEASURED 2026-10-24: it IS a heap `RuntimeEnum`, carrying `Some(NULL)`
+
+Everything above this line was reasoning from a single address. This section is
+a direct measurement of the faulting object under gdb, and it settles the
+question the section above said could not be settled.
+
+### Reproduction — ~200 ms, and it dumps core
+
+```sh
+R=.simple/storage/build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple.rejected
+M=src/compiler/bootstrap_admission/stage2_module_path_naming.spl
+CAP_MEM_MAX=4G sh scripts/resource/run_capped.shs "$R" native-build "$M" -o /tmp/out
+# rc=139, "the monitored command dumped core"
+```
+
+Under gdb the worker flag is required, or the run forks and the trap is missed:
+
+```sh
+SIMPLE_NATIVE_BUILD_WORKER=1 gdb -q -batch -ex run -ex 'bt 30' \
+  -ex 'info registers r8 r10 r11 r14 rax' --args "$R" native-build "$M" -o /tmp/out
+```
+
+### Backtrace
+
+```
+#0  compiler.hir.generated.hir_visitor.walk_hir_type
+#1  compiler.hir.generated.hir_visitor.walk_hir_expr
+#2  compiler.hir.generated.hir_visitor.walk_hir_stmt
+#3  compiler.hir.generated.hir_visitor.walk_hir_block
+#4  compiler.semantics.representation_boundary.unsafe_observations.representation_observe_function_v1
+#5  ...representation_missing_manifest_observations_v1
+#6  compiler.driver.hir_semantic_consumer_v1.collect_module_representation_receipt_v1
+#7  compiler.driver.driver_hir_pipeline_passes.run_representation_manifest_pass
+#8  ...lower_and_check_retained
+```
+
+### The faulting instruction is the copy-in prologue
+
+```
+767e49:  mov    %rax,%r10          ; r10 = new_ptr
+767e4c:  cmovne %r8,%r10           ; load_ptr = select(src_is_valid, src_ptr, new_ptr)
+767e55:  cmovne (%r10),%r11        ; <-- SIGSEGV; load fused into cmov
+767e59:  mov    %r11,(%rax)
+767e61:  cmovne 0x8(%r10),%rdi
+767e66:  mov    %rdi,0x8(%rax)
+```
+
+`r8 = r10 = 0xf198715900000000`. Exactly **two** words are stored (`(%rax)`,
+`0x8(%rax)`), so the descriptor being applied has `byte_size` 16 — and
+`struct HirType` has exactly two fields, `kind` and `span`
+(`hir_types.spl:662`). So frame #0 is `walk_hir_type` copying its incoming
+`HirType` parameter, and frame #1 reached it through the generated
+`if node.has_type_: acc = walk_hir_type<C>(node.type_, acc, f)`.
+
+### The object, dumped
+
+At frame #1, `r12 = 0xf198715900000001` (the tagged word) and `r13` is a tagged
+pointer. Dumping `($r13 & ~7)`:
+
+```
+0x3426720:  0x0000001800000007   <- HeapHeader: object_type=7 (Enum), size=0x18 = 24
+0x3426728:  0xf198715900000001   <- enum_id=1 (OPTION_ENUM_ID) | discriminant=0xf1987159 << 32
+0x3426730:  0x0000000000000000   <- payload = NULL
+```
+
+That is a live, well-formed 24-byte `RuntimeEnum`
+(`runtime/src/value/objects.rs:76`): header, `enum_id`/`discriminant`, payload.
+
+**Two conclusions follow, and both correct text above:**
+
+1. **The `RuntimeEnum` reading is confirmed; the inline-`Some`-box reading is
+   not what happened here.** The section above says the observed address is
+   consistent with either and proves neither — true of the address alone, but
+   the header settles it. `codec_gen.spl`'s attribution ("boxed as an inline
+   `Some` enum word") is correct about a mechanism that exists, but it is not
+   the mechanism of *this* fault.
+2. **The Option is `Some(NULL)`** — marked present with a nil payload. That is
+   itself malformed and is a second defect, independent of the copy.
+
+### Why the copy faults, in full
+
+An `Option<HirType>` object is in a slot whose descriptor says bare `HirType`:
+
+| step | effect |
+|---|---|
+| parent copy reads the slot | gets the tagged `RuntimeEnum` pointer — a genuine handle, passes every validity test legitimately |
+| recursive copy applies `HirType`'s descriptor | copies **2** words from a **3**-word enum: word 0 (the header) and word 1 (`enum_id\|discriminant`) |
+| `HirType`'s deep field is `span: Span` at index **1** | re-reads copied word 1 = `0xf198715900000001` |
+| low 3 bits are `1` because `OPTION_ENUM_ID == RT_VALUE_TAG_HEAP == 1` | treated as a `Span` handle |
+| recursive copy | `src_ptr = 0xf198715900000000`, unmapped -> **SIGSEGV** |
+
+So the fault needs no wild pointer and no corrupt memory. Every object involved
+is well formed. It needs only an `Option` in a struct-typed slot, plus the
+`enum_id`/tag collision.
+
+### Hypotheses tested and DISPROVED this round
+
+Recording these so nobody repeats them:
+
+- **`case Some(v)` binds the box instead of the payload.** Disproved. A probe
+  (`Option<struct>` destructured, payload passed to a by-value struct parameter
+  with a nested struct at field index 1) prints `PROBE OK payload-bound`,
+  result correct. Caveat: tested under JIT; the native path additionally runs
+  `qualify_native_struct_layouts`, so this does not clear the native path.
+- **The Dict bracket-read in `run_representation_manifest_pass`**
+  (`var module: HirModule = hir_modules[name]`). Disproved: the read lowers to
+  `rt_dict_get` -> bare `i64` -> `decode_runtime_value`
+  (`mir_lowering_stmts.spl:2382`). No `Option` is constructed, so there is no
+  box to leak. (`Dict.get()` returning `T?` is a different surface.)
+- **`type_: span_from` at `synth_enum.spl:77`.** Not a confusion: `span_from` is
+  declared `HirType` at `:61`.
+- **A raw-NULL dereference.** Briefly suspected from `rsi = 0x30`, which is
+  **not** the faulting operand — the operand is `(%r10)`. `rt_heap_ref_wellformed`
+  (`>= 4096`) would reject a raw NULL but passes `0xf198715900000000`, so it is
+  still inert for this fault.
+
+### The probe landed in PR #4244 is INERT in the bootstrap lane
+
+Stated plainly because it is a defect in that change. `SIMPLE_AGGREGATE_COPY_DIAG`
+never reached the process doing codegen, so the branch was never emitted:
+
+```
+strings <seed>            | grep -c 'aggregate-copy diagnostic'  -> 1
+strings <stage2 candidate>| grep -c 'aggregate-copy diagnostic'  -> 0
+```
+
+The Stage 2 lane admits a **closed set of exactly three** diagnostic env names —
+`SIMPLE_MEM_SNAPSHOT_FILE`, `SIMPLE_EVIDENCE_RUN_ID`, `SIMPLE_M4_WORK_RECEIPT`
+(`scripts/check/lib/bootstrap-stage3/authority.shs:619`) — whose sibling comment
+reads *"Never inherit diagnostics from ambient env."* So the exclusion is by
+design, not a bug in the script. The probe still works on a direct
+`native-build` invocation outside the script; to make it usable inside the
+bootstrap it must be added to that allowlist (and to `build_env_sha256`), which
+is an owner decision. The gdb measurement above obtained the same fact
+(`type_name` = `HirType`) without it, by word count.
+
+### Stage 2 status
+
+`p2_add.spl` now **passes** — the probe that blocked this lane for days. The
+failure moved to `stage2_module_path_naming.spl`:
+
+```
+[hir-cache-store] refused reason=unstable ...; entry not stored
+[hir-blob-refused] RT-E-HIR-BLOB-DECODE: module blob 0 could not be decoded;
+    validating the in-memory module instead (codec-class refusal is non-fatal;
+    the build proceeds UNCACHED)
+[WARN] any-escape pass: 0 diagnostic(s)
+error: native-build worker terminated with signal 11 before producing a binary;
+    NOT a compile failure.
+candidate_frontend_smoke: stage2-module-path-naming-build failed (raw rc=117)
+VERDICT — ABORTED: stage=stage2 exit=1 signal=none reason=stage2
+```
+
+Note the ordering: the codec refusal is handled **gracefully** and the build
+proceeds uncached; the SEGV happens afterwards, in the representation pass over
+the **freshly lowered** module. So the codec is not the producer here.
+
+### Next step
+
+Find which fresh-lowering site stores a `Some(...)` into a non-optional
+`HirType` slot while setting `has_type_ = true`. There are 59 `has_type_: true`
+construction sites under `src/compiler/`; the HIR-phase ones (`10.frontend`,
+`35.semantics`, `40.mono`) are reachable here, the `50.mir` ones are not.
+`attach_inferred_type` (`src/compiler/35.semantics/resolve_lookup_helpers.spl:28`)
+is the strongest candidate — it is the one site that takes an inferred
+`HirType?` and writes it into `type_` with `has_type_: true`, and the observed
+discriminant is literally `hash("Some")`. It is **not** confirmed: the
+payload-binding probe above passed under JIT, so if this site is the producer
+the divergence is native-only.
