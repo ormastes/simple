@@ -8,7 +8,8 @@
 # <out-dir>  this rung's handoff: <out-dir>/<platform>-p<N>/{simple[.exe],PHASE}
 #
 # Native lanes climb with build-next-phase-ci.shs, which picks the compiler per
-# config/bootstrap.sdn (the handed-over local stage first, then the newest RC).
+# config/bootstrap.sdn (the handed-over local stage first, then the newest RC),
+# else build phase 1 with the Rust seed.
 # linux-riscv64 has no hosted runner: it is cross-built by the linux-x86_64
 # handoff of the previous rung (phase k host -> phase k+1 target), sanity
 # checked under qemu-user. Phases cap at 4. Writes phase=<N> and
@@ -119,7 +120,22 @@ if [ "$have" -gt 0 ]; then
   cp "$have_dir/simple$exe" "build/bootstrap/stage$have/simple$exe"
   chmod +x "build/bootstrap/stage$have/simple$exe"
 fi
-SIMPLE_BOOTSTRAP_COMPILER=auto sh scripts/bootstrap/build-next-phase-ci.shs "$platform" "$threads"
+if ! SIMPLE_BOOTSTRAP_COMPILER=auto sh scripts/bootstrap/build-next-phase-ci.shs "$platform" "$threads"; then
+  # Nothing to climb from: phase 1 comes from the Rust seed (as release.yml).
+  [ "$have" -eq 0 ] || { echo "phase-ladder: phase $((have + 1)) build failed" >&2; exit 1; }
+  echo "phase-ladder: no qualified compiler; building phase 1 with the Rust seed"
+  unset_dyld=
+  case $platform in darwin-*) unset_dyld="-u DYLD_LIBRARY_PATH" ;; esac
+  (cd src/compiler_rust &&
+    env $unset_dyld cargo build --profile bootstrap -p simple-driver &&
+    env $unset_dyld cargo build --profile bootstrap -p simple-native-all --features driver-compat)
+  mkdir -p build/bootstrap/stage1
+  RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=0 \
+    "src/compiler_rust/target/bootstrap/simple$exe" native-build \
+    --source src/compositions/kernel_llvm_cranelift --source src \
+    --entry-closure --entry src/app/cli/bootstrap_main.spl \
+    --mode dynload --threads "$threads" --output "build/bootstrap/stage1/simple$exe"
+fi
 next=0
 for p in 4 3 2 1; do
   [ -f "build/bootstrap/stage$p/simple$exe" ] && { next=$p; break; }
