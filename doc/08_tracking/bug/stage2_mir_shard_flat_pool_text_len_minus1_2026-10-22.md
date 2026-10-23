@@ -542,3 +542,101 @@ So the panic fires inside `flat_pool_builder_push` itself (encode side),
 consistent with the "texts freed between decode and hir-entry encode"
 mechanism above. The driver-side log ends at `phase=hir current=...p2_add`
 with no diagnostic text — the aborting frame is in the delegated child.
+
+## Annotation 2026-10-23 (lane A, macOS): env-knob discrimination + pool instrumentation
+
+Owning lane quiet >6h; lane A took over the discrimination per the crash
+cycle cap. Repro (10 s, no rebuild needed):
+
+```
+CAND=$PWD/.simple/storage/build/bootstrap/stage2/aarch64-apple-darwin/simple.rejected
+env SIMPLE_BINARY=$CAND SIMPLE_BIN=$CAND SIMPLE_HIR_SHARDING=0 SIMPLE_LIB=$PWD/src \
+  SIMPLE_BOOTSTRAP= "$CAND" native-build --entry src/compiler/bootstrap_admission/p2_add.spl \
+  --runtime-bundle core-c-bootstrap --entry-closure --mode one-binary -o /tmp/p2_add_probe
+```
+
+Results on candidate ab07dfa3-era (with rr-publish workaround):
+- `SIMPLE_FRONTEND_CACHE=0` (no decode): NO crash — clean, later,
+  unrelated failure (`MIR final repository policy or emission schedule
+  differs`, exit 1). So the crash REQUIRES the parse-cache decode path.
+- Cache on + `SIMPLE_FRONTEND_DELEGATED=0`: still SIGABRT, same locus
+  (`rt_panic <- flat_pool_builder_push`, byProc=simple.rejected). So the
+  panic is in the candidate's own encode, delegation-independent.
+- Conclusion: the dangling-text window is the decode-hit rebuild
+  (`build_module_from_flat_pool_blob`) and the hir-entry encode.
+
+Instrumented (SIMPLE_POOLDBG=1, env-gated): a reset counter print inside
+`reset_all_pools` plus a pool-state probe (`flat_pool_debug_state_v1`) at
+decode-built, in compiler.core.types. Sequence discrimination: a reset
+line between `decode-built` and the push panic => second-reset theory
+(module_assembly decode entry); no reset => scope-teardown reclaim theory.
+
+## Annotation 2026-10-23 (lane A, macOS) — DISCRIMINATED: silently-lossy child-side restore
+
+Instrumentation (SIMPLE_POOLDBG=1, landed 02766366496) trace on the 10 s
+repro, candidate = stage2 rejected binary built from 02766366496:
+
+```
+[pooldbg] reset_all_pools n=1                      <- decode-entry reset
+[pooldbg] decode-built resets=1 tok_text=0 sym_names=0 spans=78
+[build] phase=hir ... current=compiler.bootstrap_admission.p2_add
+[pooldbg] reset_all_pools n=2                      <- HIR-entry re-parse reset
+```
+
+Facts established:
+1. The stored blob DOES contain the token texts (`grep -c print` on the
+   .fpc under build/bootstrap/native_cache/default/frontend = 4 hits,
+   4939 bytes). Capture side is complete.
+2. The blob is FRESH — written by this same candidate moments earlier
+   (frontend cache was wiped first), so no producer/version skew.
+3. `build_module_from_flat_pool_blob` returned Some (restore reported
+   TRUE) yet `tok_pool_text.len()==0` and `sym_names.len()==0` right
+   after `flat_ast_to_module`, while `span_pool_start.len()==78`.
+   This is exactly the "successfully-restored empty parse" shape this
+   codec's contract forbids — the text/symbol pool sections restore into
+   nothing readable, in the delegated child.
+4. Parent-side roundtrip selfcheck (other lane's trace) reports
+   reset=true ok=true stable=true — so in the PARENT the same restore
+   population works; the loss is specific to the child context.
+5. The reset at HIR entry (n=2) is the driver's legitimate re-parse; it
+   is not the dangling cause. With cache off (no decode) the build does
+   not crash (it fails later at an unrelated MIR repository policy
+   check), confirming the corruption enters via the decode path.
+
+Prime suspect: binding duplication in the dynload candidate's delegated
+child — the section restore for the parser-state pools (tok_pool_text,
+sym_names) writes one copy of the process-global pool arrays while
+`flat_ast_to_module` reads another (same baked-vs-loaded family as the
+shard-worker stale-code finding, c53a65fe). Spans survive because the
+decl-pool section resolves to the same binding on both sides.
+
+Discriminating next probe (one candidate build): print
+`tok_pool_text.len()` at the end of `flat_parser_state_restore` (and
+which section restore owns it) plus the module's first text len inside
+`flat_ast_to_module`; a write/read split confirms the duplication and
+names the sections. Lane A stops here (cycle cap); cure is either a
+restore-path binding fix or the runtime class-layout repair.
+
+## Correction 2026-10-23 (lane A follow-up): probe was on the wrong pools
+
+Two corrections to the binding-duplication suspicion above:
+1. `reset_all_pools n=2` at HIR entry is the legitimate streaming
+   re-parse: it comes from `parse_and_build_module_with_scope_owner`
+   (module_assembly.spl:1511), the HIR phase's per-module surface
+   re-parse. It is followed by a fresh parse that repopulates pools.
+2. `tok_pool_text`/`sym_names` are lexer/parser scratch; a
+   decode-restored module legitimately has them empty (the module graph's
+   texts live in the decl/expr pool text sections, which my probe did not
+   watch). So tok_text=0 at decode-built is expected, NOT evidence of a
+   lossy restore, and the binding-duplication theory is weakened.
+
+Sharper facts for the next probe: the panicking pool is the MIR ARTIFACT
+text pool (encode side, site=text.value item=0), a different pool set from
+the frontend scratch pools. Target probes: (a) decl/expr pool text lens at
+decode-built vs after the HIR re-parse reset (n=2) — if the artifact's
+texts are taken from the decode module rather than the re-parsed module,
+the n=2 reset + no-rebridge is the dangler after all; (b) the cache-off
+companion failure `MIR final repository policy or emission schedule
+differs` (exit 1, no crash) points at the artifact EMISSION SCHEDULE being
+computed and validated across the parent/child boundary — check whether
+the schedule carries process-local text handles.
