@@ -91,7 +91,7 @@ LLVM_PROVIDER_KIND=""
 _llvm_lib_names() {
   case "${PLATFORM_OS}" in
     macos)   echo "libLLVM.dylib libLLVM-$1.dylib" ;;
-    windows) echo "LLVM-C.dll libLLVM.dll" ;;
+    windows) if [ "${PLATFORM_ABI}" = gnu ]; then echo "libLLVM-$1.dll"; else echo "LLVM-C.dll libLLVM.dll"; fi ;;
     *)       echo "libLLVM-$1.so libLLVM.so.$1 libLLVM.so.1 libLLVM.so" ;;  # linux/freebsd/simpleos
   esac
 }
@@ -127,6 +127,8 @@ _llvm_prefixes() {
     freebsd)
       printf '%s\n' "/usr/local/llvm$1" "/usr/local" ;;
     windows)
+      # gnu lane: MSYS2 CLANG64 LLVM (MinGW ABI, all targets) before LLVM_HOME.
+      if [ "${PLATFORM_ABI}" = gnu ]; then printf '%s\n' "${MSYS2_ROOT:-/c/msys64}/clang64"; fi
       printf '%s\n' "${LLVM_HOME:-}"
       _simple_toolchain_prefixes "llvm-msvc-$1.*" "clang+llvm-$1.*-x86_64-pc-windows-msvc"
       printf '%s\n' "${ProgramFiles:-}/LLVM" "${ProgramW6432:-}/LLVM" "/c/Program Files/LLVM" ;;
@@ -189,6 +191,11 @@ _llvm_try_prefix() {
       $2.*) ;;
       *) return 1 ;;
     esac
+  fi
+  # gnu lane links the MinGW import lib; llvm-mingw ships only the DLL (and
+  # lacks BPF/RISCV/WebAssembly), MSVC prefixes have neither.
+  if [ "${PLATFORM_OS}:${PLATFORM_ABI}" = windows:gnu ]; then
+    [ -f "$1/lib/libLLVM-$2.dll.a" ] || return 1
   fi
   for _ld in $(_llvm_libdirs); do
     for _name in $(_llvm_lib_names "$2"); do

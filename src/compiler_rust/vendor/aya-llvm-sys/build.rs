@@ -731,8 +731,18 @@ fn link_windows_llvm_c(llvm_config_path: &Path) {
         "llvm-config escaped LLVM_SYS_231_PREFIX"
     );
 
-    let import_lib = prefix.join("lib").join("LLVM-C.lib");
-    let runtime_dll = prefix.join("bin").join("LLVM-C.dll");
+    // MinGW (gnu/gnullvm) targets use a MinGW-ABI LLVM such as MSYS2 CLANG64,
+    // whose complete C API is libLLVM-<major>.dll + libLLVM-<major>.dll.a.
+    let (import_lib, runtime_dll, lib_name) = if target_env_is("msvc") {
+        (prefix.join("lib").join("LLVM-C.lib"), prefix.join("bin").join("LLVM-C.dll"), "LLVM-C".to_string())
+    } else {
+        let name = format!("LLVM-{REQUIRED_LLVM_MAJOR}");
+        (
+            prefix.join("lib").join(format!("lib{name}.dll.a")),
+            prefix.join("bin").join(format!("lib{name}.dll")),
+            name,
+        )
+    };
     assert!(
         import_lib.is_file(),
         "missing LLVM 23 C API import library: {}",
@@ -745,7 +755,7 @@ fn link_windows_llvm_c(llvm_config_path: &Path) {
     );
 
     println!("cargo:rustc-link-search=native={}", prefix.join("lib").display());
-    println!("cargo:rustc-link-lib=dylib=LLVM-C");
+    println!("cargo:rustc-link-lib=dylib={lib_name}");
     println!("cargo:link_kind=dynamic-c-api");
     println!("cargo:runtime_dll={}", runtime_dll.display());
 }

@@ -2450,6 +2450,17 @@ int main(int argc, char** argv) {
                 }
             }
         }
+        // MinGW (gnu) lane: same dynamic LLVM-C dependency, satisfied by the
+        // MinGW-ABI import lib of MSYS2 CLANG64's libLLVM-23.dll, which
+        // platform-detect.shs exports as LLVM_SYS_231_PREFIX on that lane.
+        #[cfg(target_os = "windows")]
+        let gnu_llvm_import_lib = std::env::var_os("LLVM_SYS_231_PREFIX")
+            .map(|prefix| PathBuf::from(prefix).join("lib").join("libLLVM-23.dll.a"))
+            .filter(|lib| !is_msvc && has_native_all && lib.is_file());
+        #[cfg(target_os = "windows")]
+        if let Some(import_lib) = gnu_llvm_import_lib.as_ref() {
+            cmd.arg(import_lib);
+        }
         #[cfg(target_os = "macos")]
         if macos_runtime_host_support_required(selected_runtime.is_some(), host_gpu_lane, exact_stage4) {
             add_macos_runtime_host_support(&mut cmd);
@@ -2512,6 +2523,8 @@ int main(int argc, char** argv) {
                 provider_paths.push(runtime.as_path());
             }
             provider_paths.extend(extra_link_objects.iter().map(PathBuf::as_path));
+            // LLVM-C comes from the import lib; never fabricate trap stubs for it.
+            provider_paths.extend(gnu_llvm_import_lib.as_deref());
             let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o, &provider_paths, &imports)?;
             cmd.arg(external_tool_path(&stubs_o));
         }
