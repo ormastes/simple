@@ -439,3 +439,79 @@ in hand edits to that file.
 2. Make `hir_module_decode` reject it (fail closed) so `decode_stable` answers
    `nil` instead of crashing; that alone restores a clean cache miss.
 3. Then fix the generator so the variant round-trips.
+
+## 2026-10-23: the nil-scalar-reject fix does NOT close this bug (measured)
+
+`68bb9e04ed5` ("fix(codec): restore generator parity; fail closed on nil in
+non-optional scalar slots") landed the hypothesis that this SIGSEGV comes from
+`hir_module_decode` admitting a blob that stores the wire nil sentinel in a
+non-optional scalar slot (e.g. `IntLit.value: i64`), so that re-encoding the
+decoded node faults. Its commit message states **"Stage 2 re-run still
+pending."**
+
+**That re-run has now been done, and the SIGSEGV is unchanged.** The same change
+(non-optional `i64`/`bool` rejecting the nil sentinel, 161 emitted reject sites
+in the variant measured here; the landed commit has 231 including `text`) was
+built into a Stage 2 candidate and the sanity battery still fails identically:
+
+```
+candidate_frontend_smoke: stage2-module-path-naming-build failed
+[hir-shard] owner=0/1@0 status=CRASH exit=-139
+```
+
+gdb against that candidate gives the same stack as before the change:
+
+```
+#0  compiler.hir.generated.hir_codec.hc_enc_hir_expr_kind   <-- SIGSEGV
+...
+#21 compiler.hir.hir_codec.hir_module_encode
+#22 compiler.hir.hir_codec.hir_module_decode_stable
+#23 compiler.driver.driver_hir_cache.hir_cache_store_in_owned_scope
+#24 compiler.driver.driver_hir_cache.hir_cache_store
+```
+
+So the nil sentinel is **not** the source of the unreadable payload. The
+fail-closed change remains defensible as hardening — a non-optional slot should
+never decode to nil — but **this bug must not be closed on it**, and the
+decoder's nil-sentinel handling is no longer a live lead.
+
+### Hypotheses now disproved, with their disproofs
+
+| hypothesis | disproof |
+|---|---|
+| method-call argument corruption (`self.m(array, …)`), this record's original next-step 2 | the backtrace never enters the fixture's code; HIR lowering completes clean (`post-lowering count=0`, `post-diagnostics count=0`) |
+| `SIMPLE_HIR_CACHE=0` as a workaround | with the shard argument the worker fails closed with `HIR cache identity unavailable for shard`; without sharding the SIGSEGV moves rather than disappearing |
+| nil sentinel in a non-optional scalar slot (`68bb9e04ed5`) | built into a Stage 2 candidate; SIGSEGV unchanged, same route and same frame |
+
+### What the open question actually is
+
+`hir_module_encode` succeeds on the live module (the store gets a non-empty
+blob), and fails on the module that `hir_module_decode` returns from that same
+blob. The encoder's own node guards (`nil` / `rt_heap_ref_wellformed` /
+`rt_heap_ref_registered`) all pass, and the fault is in
+`hc_enc_hir_expr_kind`'s own frame — so a payload slot of a node that looks
+well-formed and registered is unreadable. The remaining question is what leaves
+a slot in that state when the node came from `decode` rather than from lowering.
+
+### Two facts about the regeneration that neither commit records
+
+- **A third wire-format change.** `HirStmtKind.Assign.op` is declared
+  `HirAssignOp?` (`hir_definitions.spl:801`) but the pre-regeneration output
+  encoded it as a non-optional node. Regeneration adds the optional layer, so
+  every compound assignment's bytes move. Encoder and decoder agree, so this is
+  not corruption, but a reader diffing v9 against v10 blobs needs it.
+- **Four codec round-trip examples already fail** on `release/1.0.0`, unrelated
+  to any of this: `hir_codec_integer_three_spec` (executed=7 passed=5 failed=2)
+  and `hir_codec_optional_node_bare_spec` (executed=3 passed=1 failed=2), with
+  byte-identical counts against origin's v9 codec. Worth their own record.
+
+### `push-hir-codec-complete` passes now, and should stay advisory
+
+With generator parity restored the pre-existing gate passes:
+`PASS — 97 declaration(s) covered, generated codec fresh`. It should NOT be
+promoted to blocking: it resolves `SIMPLE_BIN="${SIMPLE_BIN:-$ROOT/bin/simple}"`
+and exits 2 without one (`ERROR — nothing was checked`), which
+`.claude/rules/vcs.md:246-251` records as exactly why `push-dual-run-shadow` is
+advisory — a blocking row would refuse every push from a binary-less host. Its
+real gap is that it appears in no `.github/workflows/` file, so it has no CI
+lane either; that is what let generator parity drift unnoticed.
