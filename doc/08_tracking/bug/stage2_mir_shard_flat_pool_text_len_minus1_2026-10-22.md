@@ -756,3 +756,46 @@ Repro (9 s, deterministic, candidate preserved at
 .simple/storage/build/bootstrap/stage2/x86_64-pc-windows-msvc/simple.exe.rejected):
 the standard p2_add native-build repro with SIMPLE_POOLDBG=1; full trace with
 per-element lens preserved at the lane's stage2-sanity frontend-failure log.
+
+## Annotation 2026-10-23 (lane D, lane 45 probe candidate @ c85b6b5de55 + probes): refusing pool located to dump_all's tail; unified mechanism hypothesis
+
+Probe candidate (pooldbg VALUE prints + storedbg) repro discriminated further:
+
+- The crash dump is `flat_pools_dump_all`'s TAIL: the refusing pool is one of
+  the last text pools of the whole dump (extend/pending section), immediately
+  after the final parser_state pool (the n=2 LOG001 warning pool, which is a
+  useful landmark). On the hit path its 5 elements are all dead (-1); the
+  pools dumped before it are clean. On the miss path the same-ordinal pool is
+  n=5 all-empty.
+- The n=5 size on BOTH paths for tail pools that p2_add (no enums, no
+  @unsafe, no extends) would leave EMPTY strongly suggests these pools carry
+  STALE content from a previously-parsed module in the same worker, not from
+  p2_add's own parse.
+
+Unified mechanism hypothesis (fits every observation including the lane-44
+monomorphize-phase second crash):
+1. `_fab_capture_pools` (module_assembly.spl:1388) is armed only by
+   frontend.spl:162 and managed_parse_group.spl:146; flat_pool_capture_take
+   disarms. SOME path leaves it armed across a later
+   parse_and_build_module_with_scope_owner, whose capture dump
+   (module_assembly.spl:1584-1609) then dumps pools that do not belong to the
+   module just parsed.
+2. On the decode-hit path the hir-phase re-parse reaches the dump with pools
+   still holding decode-restored elements whose strings died at the hir-entry
+   reset/scope boundary -> all-(-1) -> sanitize refusal -> poisoned capture
+   -> downstream 0xC0000005 AV.
+3. The io-write store failures are a SEPARATE defect (storedbg probe queued):
+   cache-ON-only, candidate-internal, dir_create_all succeeds, manual writes
+   to the same dir succeed; failure is inside file_write_exact (codec,
+   encode, or tagged-native write - the probe splits these).
+
+Next probe (one candidate): trace events for arm/take/dump with caller tags
+(print at flat_pool_capture_arm/take and at the module_assembly.spl:1584 dump
+gate: "armed-by" module path + which parse_and_build entry
+scoped|borrowed|reference_checked + cache hit/miss). That names the arming
+path and settles whether the dump belongs to the parsed module. The proper
+cure then is one of: (a) bind the capture to the parse that produced it (dump
+only pools the just-finished parse populated; skip dump when this call did
+not run parse_module_body), or (b) extend the promote coverage to the
+identified tail pools. (a) is preferred: re-caching a cache-hit module is
+wasted work even when the pools are valid.
