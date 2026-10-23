@@ -1043,3 +1043,15 @@ probe correctly. The defect is the candidate-compiled DECODE read of blob
 empty-field slots producing -1 handles - module-independent, hit-path-only.
 Minimal repro: build any bootstrap_admission entry twice with the delegated
 env; the second (cache-hit) build refuses at site=text.value item=0.
+
+## Addendum 2026-10-24 (lane D): seed-AOT differential blocked by pre-existing seed defects
+
+Attempted to complete the JIT-vs-AOT differential seed-side by seed-native-building
+the split probe: blocked twice by pre-existing seed issues, not this bug -
+(1) the seed's own native-build entry jit-fails on "Cannot infer field type:
+struct 'TextSpan' field 'end'" in src/app/cli/native_build_main.spl (JIT
+fallback to interpreter), then (2) SCV-E-ADMISSION derived-composition-identity-
+mismatch on the ad-hoc entry. So the seed-JIT-correct / candidate-AOT-broken
+differential stands but cannot be cheaply closed seed-side; the owner can
+complete it after the TextSpan/SCV seed nits, or debug the candidate-AOT
+decode read directly (candidate + the minimal warm-cache-hit repro above).
