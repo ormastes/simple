@@ -633,3 +633,37 @@ confusion or a reused slot). It is reached after HIR succeeded (`any-escape
 pass: 0 diagnostic(s)` printed, then the `enum_contract` phase label). This is
 a different site from the codec-encoder bind above. Re-test it on a candidate
 that carries #4232 before treating it as a separate defect.
+
+## Update 2026-10-23 (x86_64 Linux, after #4217 codec fail-closed + #4230 link fix): `[]` literal
+
+CI run 39952380127 (release/1.0.0 @ `a5aa33bc618`, linux-cranelift): the codec now refuses the
+bad blob cleanly (`RT-E-HIR-BLOB-DECODE ... non-fatal, build proceeds UNCACHED`), and the
+probe SIGSEGVs later instead:
+
+```
+#0 compiler.hir.generated.hir_visitor.walk_hir_type
+#1 walk_hir_expr            (ArrayLit arm: walk elements, then walk_hir_type(b_type_))
+#2 walk_hir_stmt / #3 walk_hir_block
+#4 representation_boundary.unsafe_observations.representation_observe_function_v1
+#7 driver_hir_pipeline_passes.run_representation_manifest_pass
+```
+
+Bisected with the CI's rejected Stage 2 binary (fixture -> 2 lines):
+
+```simple
+fn main():
+    var out: [text] = []
+```
+
+Every EMPTY array literal crashes it (`val`/`var`, typed or not, `fn f() -> [text]: []`);
+non-empty literals do not. Only the empty path stores `get_empty_array_default()`, a
+`HirType` (kind + inline `Span` with a `text`) returned by value from a `match` in a `me`
+helper; inside `walk_hir_type` that object's field load yields garbage
+(`0xf198715900000000`). Same aggregate-transport family as the class-field case above.
+
+- First attempt (#4235, first revision) rewrote the surrounding nested optional
+  if-expression as statements. CI run 39963503260 still SIGSEGVed identically; the
+  if-expression was NOT the cause and that rewrite was reverted.
+- Workaround now: the helper returns only `HirTypeKind` (`empty_array_default_kind`), and the
+  `HirType` is built at the use site with the live `e.span`, like the Field arm's re-root.
+  Marked `@workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22`.
