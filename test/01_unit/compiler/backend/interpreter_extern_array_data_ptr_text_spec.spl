@@ -1,0 +1,62 @@
+"""
+## Purpose and audience
+The `[u8]` secret-zeroization owner reaches the runtime through the
+`rt_array_data_ptr_text` extern. Both runtimes export that symbol
+(`src/runtime/runtime_native.c`, `src/compiler_rust/runtime/src/value/collections.rs`)
+as a direct alias of `rt_array_data_ptr`, but the seed interpreter's extern
+registry carried only the generic twin. Every `[u8]` caller therefore died with
+`semantic: unknown extern function: rt_array_data_ptr_text` the moment it tried
+to wipe a secret under `bin/simple test`, while the same code worked under JIT
+and native. Audience: whoever changes the interpreter extern registry or the
+secure-memory owner and needs one spec that goes RED if that alias disappears.
+
+## Operator workflow
+bin/simple test test/01_unit/compiler/backend/interpreter_extern_array_data_ptr_text_spec.spl
+
+## Compatibility and limitations
+Covers the packed `[u8]` path only. The `[i64]`, `[u32]` and `[u64]` slot
+owners reach the runtime through the generic `rt_array_data_ptr`, which answers
+0 for a boxed array in the interpreter by design, so those paths are
+deliberately not asserted here.
+
+## Verification guidance and troubleshooting
+A failure reading `unknown extern function: rt_array_data_ptr_text` means the
+interpreter registry lost the alias again. A `verified()` of false with a
+non-zero slot count means the volatile write/readback pair regressed instead.
+"""
+# Lifecycle: doc/04_architecture/compiler/array_value_abi_contract.md
+# @manual_section: interpreter-extern-registry
+
+use std.spec.*
+use std.common.crypto.secure_memory.{secure_zero_u8_slots, secure_zero_u8_range}
+
+describe "interpreter extern registry — rt_array_data_ptr_text":
+
+    it "wipes a poisoned [u8] secret in place and verifies the readback":
+        # @req REQ-INTERP-EXTERN-ARRAYPTRTEXT-001
+        step("Poison a four-byte secret buffer")
+        var secret: [u8] = [0xDEu8, 0xADu8, 0xBEu8, 0xEFu8]
+        step("Ask the secure-memory owner to zero every slot")
+        val report = secure_zero_u8_slots(secret)
+        # @capture(statistics): SecureZeroReport slot/overwritten/residual counts
+        step("Confirm the owner reports a verified wipe of the whole buffer")
+        expect(report.slot_count).to_equal(4u64)              # oracle: the fixture holds four bytes
+        expect(report.overwritten_slots).to_equal(4u64)       # oracle: every fixture byte is in range
+        expect(report.residual_nonzero_slots).to_equal(0u64)  # oracle: a verified wipe leaves no residue
+        expect(report.verified()).to_equal(true)
+        step("Confirm the caller's own buffer is the memory that changed")
+        expect(secret).to_equal([0u8, 0u8, 0u8, 0u8])
+
+    it "refuses an out-of-range byte window instead of writing past the allocation":
+        # @req REQ-INTERP-EXTERN-ARRAYPTRTEXT-002
+        step("Poison a four-byte secret buffer with distinctive bytes")
+        var secret: [u8] = [0x11u8, 0x22u8, 0x33u8, 0x44u8]
+        step("Ask for a window that runs past the end of the allocation")
+        val report = secure_zero_u8_range(secret, 2u64, 9u64)
+        # @capture(statistics): refused-window SecureZeroReport counts
+        step("Confirm the owner refused the wipe rather than reporting success")
+        expect(report.overwritten_slots).to_equal(0u64)       # oracle: a refused window writes nothing
+        expect(report.verified()).to_equal(false)
+        step("Confirm the poisoned bytes survived the refusal untouched")
+        expect(secret[0]).to_equal(0x11u8)                    # oracle: first poisoned byte is preserved
+        expect(secret[3]).to_equal(0x44u8)                    # oracle: last poisoned byte is preserved
