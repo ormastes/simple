@@ -1554,6 +1554,7 @@ static _Thread_local int rt_core_transient_array_scope_paused = 0;
 static _Thread_local uint8_t rt_core_transient_scope_thread_token = 0;
 static _Atomic uintptr_t rt_core_transient_scope_owner = 0;
 static _Thread_local void** rt_core_transient_heap_scope_objects = NULL;
+static _Thread_local uint32_t* rt_core_transient_heap_scope_object_scopes = NULL;
 static _Thread_local size_t rt_core_transient_heap_scope_object_len = 0;
 static _Thread_local size_t rt_core_transient_heap_scope_object_cap = 0;
 typedef struct RtCoreTransientRawAlloc {
@@ -1621,13 +1622,23 @@ static int rt_core_track_transient_immortal(void* ptr) {
             next_cap > SIZE_MAX / sizeof(void*)) {
             return 0;
         }
+        uint32_t* next_scopes = (uint32_t*)rt_observed_realloc_v1(
+            rt_core_transient_heap_scope_object_scopes, next_cap * sizeof(uint32_t));
+        if (!next_scopes) return 0;
         void** next = (void**)rt_observed_realloc_v1(
             rt_core_transient_heap_scope_objects, next_cap * sizeof(void*));
-        if (!next) return 0;
+        if (!next) {
+            rt_core_transient_heap_scope_object_scopes = next_scopes;
+            return 0;
+        }
+        rt_core_transient_heap_scope_object_scopes = next_scopes;
         rt_core_transient_heap_scope_objects = next;
         rt_core_transient_heap_scope_object_cap = next_cap;
     }
-    rt_core_transient_heap_scope_objects[rt_core_transient_heap_scope_object_len++] = ptr;
+    rt_core_transient_heap_scope_objects[rt_core_transient_heap_scope_object_len] = ptr;
+    rt_core_transient_heap_scope_object_scopes[rt_core_transient_heap_scope_object_len] =
+        rt_core_transient_array_scope_id;
+    rt_core_transient_heap_scope_object_len++;
     return 1;
 }
 
@@ -2273,8 +2284,24 @@ static int rt_core_unregister_immortal_ptr(void* ptr) {
 
 static void rt_core_reclaim_transient_immortal(uint32_t scope_id) {
     rt_core_heap_lifecycle_acquire();
+    /* Scope-correct reclaim (doc: stage2_mir_shard_flat_pool_text_len_minus1):
+     * each tracked entry carries the id of the scope that created it. Only
+     * entries owned by the ENDING scope are freed; earlier/later scopes'
+     * entries survive (compacted forward) so a string referenced from live
+     * pool arrays is never freed by another scope's end. Previously the
+     * string branch ignored scope ownership entirely, so any scope end freed
+     * every transient-flagged string in the process - the cross-scope kill
+     * behind the flat-pool encode refusals. */
+    size_t kept = 0;
     for (size_t i = 0; i < rt_core_transient_heap_scope_object_len; i++) {
         void* ptr = rt_core_transient_heap_scope_objects[i];
+        const uint32_t entry_scope = rt_core_transient_heap_scope_object_scopes[i];
+        if (entry_scope != scope_id) {
+            rt_core_transient_heap_scope_objects[kept] = ptr;
+            rt_core_transient_heap_scope_object_scopes[kept] = entry_scope;
+            kept++;
+            continue;
+        }
         if (!rt_core_is_registered_immortal_ptr(ptr)) continue;
         uint32_t kind = rt_core_registered_object_kind(ptr);
         uint32_t* object_scope = NULL;
@@ -2333,10 +2360,14 @@ static void rt_core_reclaim_transient_immortal(uint32_t scope_id) {
         }
         free(ptr);
     }
-    rt_core_transient_heap_scope_object_len = 0;
+    rt_core_transient_heap_scope_object_len = kept;
     /* String-heavy parses can briefly track millions of pointers. Do not pin
-     * that peak-capacity side buffer for the remaining compilation. */
-    if (rt_core_transient_heap_scope_object_cap > 262144) {
+     * that peak-capacity side buffer for the remaining compilation. Only
+     * release it when nothing survives - with per-scope entries living on
+     * across scope ends, a nonempty list still needs the buffer. */
+    if (kept == 0 && rt_core_transient_heap_scope_object_cap > 262144) {
+        free(rt_core_transient_heap_scope_object_scopes);
+        rt_core_transient_heap_scope_object_scopes = NULL;
         free(rt_core_transient_heap_scope_objects);
         rt_core_transient_heap_scope_objects = NULL;
         rt_core_transient_heap_scope_object_cap = 0;
