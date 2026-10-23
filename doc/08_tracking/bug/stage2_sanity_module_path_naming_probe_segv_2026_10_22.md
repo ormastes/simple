@@ -152,4 +152,46 @@ Source-level workaround candidate (not yet attempted): flatten
 `functions: Dict<...>`, … one slot per ParserModule limb, all 8-byte
 handles/texts) and reconstruct the ParserModule at the use site — avoiding
 any large inline-struct class field. The proper repair is in the compiler's
-class-field layout/copy for large inline structs.
+class-field layout/copy for large inline structs. (Landed 2026-10-23 as PR
+#4172 d700e18bf00 — the sanity probe now passes.)
+
+## Update 2026-10-23 (stage-2 sanity PASS; route probe still SEGVs, MIR phase)
+
+With PR #4172 (flatten) + PR #4185 (reverse-reference publish scalar
+mirror) merged on release/1.0.0, the full stage-2 SANITY battery passes:
+`stage2-sanity.env status=pass checks_run=5`, both bootstrap passes, all
+four probes (p2_add, mir_retention, module_path_naming, hello_world)
+raw_status=0. The struct-receiver guard probe also passes (build + run,
+exact stdout). The remaining blocker is the probe's SECOND admission, the
+positional dynload Stage-3 route:
+
+```
+bootstrap_stage2_struct_receiver=PASS
+... line 157: Segmentation fault ... "$stage2_compiler" native-build \
+    --mode dynload ... stage2_module_path_naming.spl
+error: stage2 failed the positional pure-Simple Stage-3 route (status 139)
+```
+
+Crash bracket: after HIR (`phase=hir done=1 succeeded=1`,
+`any-escape pass: 0 diagnostic(s)`) — at MIR-phase entry. Reproduced
+manually against the rejected candidate in ~4 s, DETERMINISTIC and
+ENV-INDEPENDENT (a plain `candidate native-build --mode dynload
+--threads 1 -o out <fixture>` with no probe env SEGVs identically).
+
+Bisection matrix (candidate, cold cache): one-binary+positional PASS;
+dynload+`--entry` flag PASS; dynload+positional p2_add PASS; only
+dynload+positional+THIS fixture SEGVs. Fixture minimization (header
+comment removable; 7 functions): no single function crashes; the pair
+`_module_path_naming_tier_inner_twin` × `_module_path_naming_strip_numbered_dirs`
+SEGVs; `text_index_of` is irrelevant. The interaction site is strip's
+call `tier_inner_twin(stripped_part, parts[parts.len() - 1])`, but the
+sanctioned annotated-rebind workaround (`val last: text = parts[...]` then
+pass `last`) DOES NOT rescue it — the trigger is deeper than the
+array-element-argument family (same conclusion shape as this doc's
+earlier "local binds do NOT rescue" finding for the class field).
+
+The sibling release/1.0 lane carries byte-identical fixture, probe, and
+module_path_naming sources — no fix exists on either branch. Next step
+for the fixing lane: symbolized backtrace of the MIR-phase fault (cdb was
+unavailable in the 2026-10-23 session; WER produced no dump for the
+msys-spawned child) or per-helper env-gated traces at MIR lowering entry.
