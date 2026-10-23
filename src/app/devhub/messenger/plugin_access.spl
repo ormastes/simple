@@ -26,18 +26,20 @@
 #     os.smf.dynsmf when a messenger plugin ships as an external artifact —
 #     the ABI/version fields below are shaped for that).
 #
-# INTEGRATION (sibling lanes):
-#   * sqlite_format pager lane: register a provider_id "messenger.sqlite3_database"
-#     adapter whose list_rooms/list_members/history/fetch_message ops run
-#     fixed SELECT-only templates over a read-only pager handle.
-#   * sqlcipher4 codec lane (CR-B): register "messenger.sqlcipher4_database",
-#     decoding pages with the locked sqlcipher4_4k_sha512 profile and page HMAC
-#     verification before any plaintext is released (§12.2).
-#   Both MUST keep `read_only: true` and MUST NOT expose send/write/rekey/DDL
-#   verbs — the capability closure is the access boundary (§6.8).
+# INTEGRATION (sibling lanes) — LANDED (integration lane,
+# work/sqlcipher-server-devhub-integration): the real read-only DB adapters
+# live in app.devhub/messenger/adapter/{sqlite_reader,sqlcipher_reader}.spl
+# and register through messenger_register_adapter at COMMAND time (never at
+# import time — the registry still starts empty). Their execution drives the
+# std.database.server storage port (explicit format= open path): sqlite3 for
+# the plaintext pager backend, sqlcipher4 for the cipher-c page codec
+# backend (per-page HMAC verified before any plaintext is released, §12.2).
+# Both keep `read_only: true` and expose no send/write/rekey/DDL verbs — the
+# capability closure remains the access boundary (§6.8).
 #
-# Until then, the DB stub adapter is TRUTHFUL: capabilities is [], and every
-# read op returns CapabilityUnavailable("codec-not-integrated") — never a
+# The built-in DB stub remains as the honest answer for an UNREGISTERED
+# database kind: capabilities is [], and every read op returns
+# CapabilityUnavailable("codec-not-integrated") — never a
 # successful-looking placeholder (§6.2).
 
 use app.devhub.messenger.config.{MessengerTarget}
@@ -54,6 +56,10 @@ val MESSENGER_READ_OPS = ["list_rooms", "list_members", "history", "fetch_messag
 val MESSENGER_PORT_OK = "ok"
 val MESSENGER_PORT_PERMISSION_DENIED = "permission_denied"
 val MESSENGER_PORT_CAPABILITY_UNAVAILABLE = "capability_unavailable"
+# §11.2 exit code 2 (usage/config): a read was admitted by policy but the
+# source cannot serve it (missing secret, wrong key, corrupt file, no
+# adapter-side schema). Added by the DB adapter integration lane.
+val MESSENGER_PORT_CONFIG_ERROR = "config_error"
 
 
 class MessengerReadPortV1:
@@ -79,8 +85,8 @@ class MessengerReadPortV1:
 class MessengerPortResult:
     """Uniform typed result for every port operation (§11.2 shape).
 
-    status is one of MESSENGER_PORT_*; exit_code 0 ok / 3 permission /
-    4 unsupported. `payload` carries nonsecret data only."""
+    status is one of MESSENGER_PORT_*; exit_code 0 ok / 2 config /
+    3 permission / 4 unsupported. `payload` carries nonsecret data only."""
     status: text
     exit_code: i64
     payload: text
@@ -94,6 +100,12 @@ class MessengerPortResult:
 
     static fn capability_unavailable(reason: text) -> MessengerPortResult:
         MessengerPortResult(status: MESSENGER_PORT_CAPABILITY_UNAVAILABLE, exit_code: 4, payload: "", error: reason)
+
+    static fn config_error(reason: text) -> MessengerPortResult:
+        """Exit code 2 (§11.2 usage/config): policy admitted the read but
+        the source cannot serve it. The reason is sanitized upstream —
+        never a secret, key material, or absolute path."""
+        MessengerPortResult(status: MESSENGER_PORT_CONFIG_ERROR, exit_code: 2, payload: "", error: reason)
 
 
 # ----------------------------------------------------------------------------
@@ -216,7 +228,8 @@ fn port_call_read(port: MessengerReadPortV1, target: MessengerTarget, op: text, 
       2. capability gate — op must be advertised by the port, else
          CapabilityUnavailable (stub adapters answer with their
          unavailable_reason, e.g. 'codec-not-integrated');
-      3. only then would the adapter execute — the stub has no execution.
+      3. admission ok — execution itself is the adapter module's job (see
+         the note at the return site below).
     """
     if not _in_ops(MESSENGER_READ_OPS, op):
         return MessengerPortResult.capability_unavailable("unsupported read verb '{op}' (want one of list_rooms|list_members|history|fetch_message)")
@@ -231,6 +244,12 @@ fn port_call_read(port: MessengerReadPortV1, target: MessengerTarget, op: text, 
         if port.unavailable_reason != "":
             return MessengerPortResult.capability_unavailable(port.unavailable_reason)
         return MessengerPortResult.capability_unavailable("{op}-unsupported by {port.provider_id}")
+    # Gates passed. For the registered real DB adapters, actual execution
+    # lives in app.devhub.messenger.adapter.*_reader (they re-run these same
+    # gates and return the rendered payload); this gate-level ok("") is the
+    # admission signal for pure-data ports only (API adapters execute in the
+    # API lane). A stub never reaches here — its empty capabilities fail the
+    # gate above.
     MessengerPortResult.ok("")
 
 
