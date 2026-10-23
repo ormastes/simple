@@ -418,6 +418,43 @@ fn link_failure_output(stdout: &[u8], stderr: &[u8]) -> String {
     }
 }
 
+/// Archives for every `-l<name>` on a MinGW link line, plus the libraries the
+/// clang driver adds implicitly (`--unwindlib=libunwind`, mingw CRT). Each is
+/// looked up in the `-L` dirs first, then via the driver's own sysroot search
+/// (`-print-file-name`, i.e. llvm-mingw's x86_64-w64-mingw32/lib).
+#[cfg(target_os = "windows")]
+fn gnu_link_line_libraries(cmd: &std::process::Command, cc: &str) -> Vec<PathBuf> {
+    let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+    let search_dirs: Vec<PathBuf> = args.iter().filter_map(|a| a.strip_prefix("-L")).map(PathBuf::from).collect();
+    let mut names: Vec<&str> = args.iter().filter_map(|a| a.strip_prefix("-l")).collect();
+    names.extend(["unwind", "mingw32", "mingwex", "msvcrt", "kernel32"]);
+    let mut found = Vec::new();
+    for name in names {
+        let candidates = [format!("lib{name}.a"), format!("lib{name}.dll.a")];
+        let in_dirs = search_dirs
+            .iter()
+            .flat_map(|d| candidates.iter().map(move |c| d.join(c)))
+            .find(|p| p.is_file());
+        let path = in_dirs.or_else(|| {
+            candidates.iter().find_map(|c| {
+                let out = std::process::Command::new(cc)
+                    .arg("--target=x86_64-w64-windows-gnu")
+                    .arg(format!("-print-file-name={c}"))
+                    .output()
+                    .ok()?;
+                let p = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+                (p.is_absolute() && p.is_file()).then_some(p)
+            })
+        });
+        if let Some(p) = path {
+            if !found.contains(&p) {
+                found.push(p);
+            }
+        }
+    }
+    found
+}
+
 #[cfg(target_os = "macos")]
 fn verify_macos_llvm_tool(tool: &std::ffi::OsStr, required: &str) -> Result<(), String> {
     let path = Path::new(tool);
@@ -2450,6 +2487,17 @@ int main(int argc, char** argv) {
                 }
             }
         }
+        // MinGW (gnu) lane: same dynamic LLVM-C dependency, satisfied by the
+        // MinGW-ABI import lib of MSYS2 CLANG64's libLLVM-23.dll, which
+        // platform-detect.shs exports as LLVM_SYS_231_PREFIX on that lane.
+        #[cfg(target_os = "windows")]
+        let gnu_llvm_import_lib = std::env::var_os("LLVM_SYS_231_PREFIX")
+            .map(|prefix| PathBuf::from(prefix).join("lib").join("libLLVM-23.dll.a"))
+            .filter(|lib| !is_msvc && has_native_all && lib.is_file());
+        #[cfg(target_os = "windows")]
+        if let Some(import_lib) = gnu_llvm_import_lib.as_ref() {
+            cmd.arg(import_lib);
+        }
         #[cfg(target_os = "macos")]
         if macos_runtime_host_support_required(selected_runtime.is_some(), host_gpu_lane, exact_stage4) {
             add_macos_runtime_host_support(&mut cmd);
@@ -2512,7 +2560,20 @@ int main(int argc, char** argv) {
                 provider_paths.push(runtime.as_path());
             }
             provider_paths.extend(extra_link_objects.iter().map(PathBuf::as_path));
-            let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o, &provider_paths, &imports)?;
+            // LLVM-C comes from the import lib; never fabricate trap stubs for it.
+            provider_paths.extend(gnu_llvm_import_lib.as_deref());
+            // System libraries named by `-l` (plus the driver's implicit
+            // mingw/unwind libs) are real providers: never trap-stub their
+            // imports (WriteFile, sockets, _Unwind_*).
+            let system_libs = gnu_link_line_libraries(&cmd, &cc);
+            let stubs_o = super::stubs::generate_stub_object_with_system_libs(
+                temp_dir,
+                object_paths,
+                &main_o,
+                &provider_paths,
+                &imports,
+                &system_libs,
+            )?;
             cmd.arg(external_tool_path(&stubs_o));
         }
         let strict_no_stub_fallback = std::env::var("SIMPLE_NO_STUB_FALLBACK").as_deref() == Ok("1");
