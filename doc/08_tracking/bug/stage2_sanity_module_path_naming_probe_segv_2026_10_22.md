@@ -262,3 +262,78 @@ Same family, different tripwire; the riscv64 guest remains a reliable
 reproducer for whatever lane owns the fix. Not caused by the riscv64
 cross-lane fixes (seed externs / link knob / rootless debs) — those only
 affect producing the ELF and the host-side test runner.
+
+class-field layout/copy for large inline structs.
+
+## Update 2026-10-22 (later): crash now universal on the convergence head; optional-field dodge insufficient
+
+On 244f807d029 (post release/1.0 convergence merge) the same projection fault
+fires for EVERY probed module, including p2_add and a one-line hello-world —
+not only the path-naming fixture. Symbolized worker backtrace on the current
+candidate:
+
+```
+#0 module_surface_semantic_projection (+~6100; fault: mov 0x8(%rax),%rdi with
+    rax pointing into ASCII text -- a ParserModule field read as a list header
+    lands on text bytes, consistent with a shifted/garbage module copy)
+#1 module_surface_from_owner
+#2 ModuleSurfaceBuilder.add_parsed_canonical
+#3 CompilerDriver.parse_all_impl
+```
+
+Attempted and REJECTED by experiment: making the owner field optional
+(`value: ParserModule?`, keeping the class slot pointer-sized) so no large
+inline struct field remains — the crash persists unchanged at the same site.
+The corruption therefore survives removing the inline-struct class field, so
+the class-field layout read is at most one member of the failing family; the
+by-value arg transport into the projection and/or the enum-payload extraction
+(`unwrap`) of a large struct remain suspect.
+
+Control experiment: the identical owner->from_owner->projection path compiled
+by the Rust seed into a 284-module probe binary runs cleanly
+(`module_surfaces_from_modules` returns OK on a parsed hello-world). The
+failure only appears in the full ~1487-module stage-2 candidate — a
+scale-dependent seed/native-lowering miscompile, not a source-level logic
+error in the surface code.
+
+Host note: all evidence above is from the Linux LLVM-23.1.2 lane on a
+7.6 GiB host; the phase-matrix `compiler_cli_build` separately exceeds the
+process-tree RSS cap there (~5.3 GiB measured, cap 5.59 GiB) and is reported
+as TIMEOUT — that row cannot complete on this host class regardless of this
+crash.
+
+## Update 2026-10-22 (flatten attempt): prescribed flatten also insufficient — transport corruption is upstream of the owner
+
+The prescribed flatten was implemented: ModuleSurfaceParserOwner now carries
+only pointer-sized fields (one text/list/Dict handle per ParserModule limb),
+the class moved to module_surface_types.spl, the projection and the
+objectless-proof consumers read owner fields directly, and no ParserModule is
+extracted from the class. The worker STILL SIGSEGVs with an identical
+backtrace (projection reading owner.impls lands on text bytes), so the
+corruption is already present in the by-value ParserModule argument handed to
+ModuleSurfaceParserOwner.new / add_parsed_canonical — i.e. the large-struct
+by-value ARGUMENT transport corrupts at stage-2 scale, before any class field
+is involved. This matches the NLL live_aliases instance (fixed by moving the
+callee to module scope), but here every hop is already a free function, so the
+remaining suspect is the seed's by-value aggregate argument marshal itself in
+the ~1487-module candidate.
+
+The flatten is retained anyway: it matches the prescribed direction, compiles
+cleanly, and shrinks the corruption surface, but it does NOT fix the crash.
+Effective next step is therefore NOT another caller-side reshape: reproduce a
+large-struct by-value argument in a seed-built binary whose module count
+crosses the failing threshold, or compile the candidate with -g and read the
+exact faulting field offset in the marshal path.
+
+## Note 2026-10-23 (sync of release_phase3 into release/1.0.0)
+
+Both branches carried an independent `ModuleSurfaceParserOwner` flatten
+(release: d700e18bf00 + c458ffe5cbc; release_phase3: 4417cdb92e6 + ab4b33d2404).
+The sync keeps the release version and drops the duplicate. The
+release/1.0.0 line also carries #4151 (f6cec219135): `rt_transient_heap_promote`
+(Rust twin) returned true for ANY registered heap root, so the retained parse
+`Result<ParserModule>` was freed at scope end and `surface_build` read freed,
+reused memory (the "ASCII text in a ParserModule field" symptom above). With
+#4151 the riscv64 lane gets past surface_build and stops at the next tripwire,
+"transient HIR scope end failed" (addendum above).
+

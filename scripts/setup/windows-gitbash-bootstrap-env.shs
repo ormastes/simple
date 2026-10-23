@@ -1,5 +1,7 @@
 #!/bin/sh
-# Windows Git Bash default-lane bootstrap environment.
+# Windows Git Bash bootstrap environment. Default lane: MinGW UCRT (gnu, needs
+# the repo-managed llvm-mingw toolchain, no Visual Studio). The MSVC text below
+# applies only when SIMPLE_WINDOWS_ABI=msvc.
 #
 # Source this BEFORE scripts/bootstrap/bootstrap-from-scratch.sh (or
 # scripts/check/check-bootstrap-preflight.shs) when driving a Windows Git Bash
@@ -32,6 +34,38 @@ _wgbse_dir=$(CDPATH= cd -- "$(dirname -- "$_wgbse_self")" 2>/dev/null && pwd -P)
     echo "windows-gitbash-bootstrap-env: cannot resolve script directory" >&2
     return 1 2>/dev/null || exit 1
 }
+
+# ---- 0. Default lane: MinGW UCRT (gnu) -----------------------------------
+# The default Windows lane is MinGW UCRT via the repo-managed llvm-mingw
+# toolchain; it REQUIRES that toolchain and needs no Visual Studio. MSVC is
+# opt-in (SIMPLE_WINDOWS_ABI=msvc) and takes the sections below. Sourcing
+# platform-detect.shs puts llvm-mingw's bin/ first on PATH (SIMPLE_MINGW_ROOT).
+if [ "${SIMPLE_WINDOWS_ABI:-gnu}" != msvc ]; then
+    SIMPLE_WINDOWS_ABI=gnu; export SIMPLE_WINDOWS_ABI
+    . "$_wgbse_dir/platform-detect.shs" || return 1 2>/dev/null || exit 1
+    if [ -z "${SIMPLE_MINGW_ROOT:-}" ]; then
+        echo "windows-gitbash-bootstrap-env: llvm-mingw UCRT toolchain not found" >&2
+        echo "  (looked under ${SIMPLE_TOOLCHAINS_ROOT}/llvm-mingw-*-ucrt-x86_64; set SIMPLE_MINGW_ROOT)" >&2
+        return 1 2>/dev/null || exit 1
+    fi
+    # clang + lld only; GCC is never used or installed. The seed's Rust std
+    # link needs LLVM's libunwind/compiler-rt (served as libgcc_eh/libgcc by
+    # bootstrap-from-scratch.sh), so require them up front.
+    for _wgbse_req in clang.exe ld.lld.exe llvm-ar.exe; do
+        [ -x "${SIMPLE_MINGW_ROOT}/bin/${_wgbse_req}" ] || {
+            echo "windows-gitbash-bootstrap-env: ${_wgbse_req} missing in ${SIMPLE_MINGW_ROOT}/bin (gnu lane needs llvm-mingw clang + lld)" >&2
+            return 1 2>/dev/null || exit 1
+        }
+    done
+    [ -f "${SIMPLE_MINGW_ROOT}/x86_64-w64-mingw32/lib/libunwind.a" ] || {
+        echo "windows-gitbash-bootstrap-env: llvm-mingw libunwind.a missing (reinstall llvm-mingw UCRT; do not install GCC)" >&2
+        return 1 2>/dev/null || exit 1
+    }
+    command -v vswhere.exe >/dev/null 2>&1 || [ -x "/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" ] ||
+        echo "windows-gitbash-bootstrap-env: note: Visual Studio not found (optional; only the --msvc lane needs it)" >&2
+    unset _wgbse_self _wgbse_dir
+    return 0 2>/dev/null || exit 0
+fi
 
 # ---- 1. LLVM bin/ with a working lld-link -------------------------------
 # Pick the newest /c/dev/install/clang+llvm-*/bin that contains lld-link.exe.
