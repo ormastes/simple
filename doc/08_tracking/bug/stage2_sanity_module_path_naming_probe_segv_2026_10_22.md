@@ -179,3 +179,46 @@ Same session also fixed: `src/compiler_rust/Cargo.lock` had 273 orphaned
 entries after the LLVM-major-23 gate slimmed llvm-sys (110-221,
 stacker/psm, gumdrop, pest, semver 0.11); every `cargo build --locked`
 seed lane failed. Regenerated offline against vendored sources.
+## Update: HIR-phase campaign (same session, release/1.0)
+
+Fix landed order (PR #4162 = 85b31bb4802 + 43921b1dbd3 + 8a447adbdb4):
+
+1. `driver_register_parser_module_source_aliases_v1` took ParserModule BY
+   VALUE → SIGSEGV (garbage Dict handles). Now routed through the flattened
+   `ModuleSurfaceParserOwner`; callers typed-bind Dict values and unwraps.
+2. gdb disassembly at the next crash PROVED seed-emitted mis-dispatch:
+   `ldr x8,[x27,#352]; mov x0,x8; bl EnumContractTable.has` — `.has` on the
+   `HirFieldTypesByName` ALIAS-typed class field resolved to the wrong
+   struct's method (x0 held the Dict header word 0x2000000003). All 10
+   alias-typed dict fields of class HirLowering expanded to literal dict
+   types. Literal-typed fields resolve correctly (ParserModule.enums.has).
+   Proper repair: seed/frontend method resolution on alias-typed receivers.
+3. After those: no crash; sanity passes ALL surface phases; p2_add HIR
+   lowering RUNS but `driver_publish_reverse_reference_parse_scope_v1`
+   fails at the facts step. SIMPLE_NSCOPE_HIR_TRACE=1 sub-step trace:
+   seal OK, scope-end OK, reverse_reference_module_publish_v1 FAILED.
+   Env-gated refusal-reason trace landed to name the guard.
+
+## Update: publish gate root cause DEFINITIVE (2026-10-23)
+
+Traced (`SIMPLE_NSCOPE_HIR_TRACE=1`) through the retained p2_add HIR path:
+seal OK, scope-end OK, `reverse_reference_module_publish_v1` refuses with
+`batch_token=1023114373 gen=1/1 active=true sealed=true valid=true` — every
+guard correct EXCEPT the batch's token limb, which reads back garbage after
+`transient_promote` of the Option carrier + transient scope end. The promoted
+Option keeps referencing the reclaimed transient slot; the token limb is
+clobbered first, and with the token check relaxed the publish body then HANGS
+on the same stale arrays (facts/aliases limbs). Reverted the relaxation —
+clean refusal beats a hang.
+
+Root cause class: the candidate's `transient_promote` of an Option<struct>
+carrier does not survive scope end (same by-value/aggregate-transport family
+as every other 2026-10-22/23 finding). The reverse-reference batch machinery
+cannot be unblocked by source-level guard tweaks; it needs either (a) a
+candidate/seed promote repair, or (b) restructuring the batch out of the
+promoted-Option pattern (module-scope scalar/array limbs promoted
+individually, mirroring the ModuleSurfaceParserOwner flatten).
+
+Gate state: stage2 compile 1487/1487 clean; sanity passes ALL surface phases;
+p2_add HIR lowering RUNS to completion; blocked ONLY at the reverse-reference
+batch publication above.
