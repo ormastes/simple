@@ -12,6 +12,7 @@ use app.bug.workaround_store.{workaround_bug_snapshot}
 use std.nogc_async_mut.sosix.workaround_host.{workaround_host_publish,
     workaround_host_mkdir, workaround_host_temp_dir, workaround_host_cwd}
 use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
+use std.common.text_bytes.{text_to_bytes}
 
 fn snapshot_fixture_root(tag: text) -> text:
     expect(workaround_host_mkdir("build/test-artifacts")).to_equal(true)
@@ -85,6 +86,29 @@ describe "workaround bug snapshot CRC verification (byte domain)":
             case Err(reason): expect(reason).to_equal("canonical bug database CRC mismatch")
             case Ok(_): expect(false).to_equal(true)
 
+    it "rejects a tampered non-UTF-8 body fail-closed over the byte domain":
+        step("invalid-UTF-8 body whose header seal is one below the body crc")
+        val root = snapshot_fixture_root("invalid-utf8-tamper")
+        # _invalid_body_bytes() is 80 raw bytes holding an invalid UTF-8
+        # sequence and Korean text; zlib.crc32(body) = 3153239212 while the
+        # header below is sealed one lower, so byte-domain verification must
+        # fail closed — the reader can neither re-encode nor guess. Writing
+        # raw non-UTF-8 bytes requires file_write_bytes, whose
+        # rt_array_bytes_validate extern is registered in the seed
+        # interpreter again (seed SFFI contract repair).
+        var fixture: [u8] = text_to_bytes("#sdn-crc32:3153239211\n")
+        val body = _invalid_body_bytes()
+        var i: i64 = 0
+        while i < body.len():
+            fixture.push(body[i])
+            i = i + 1
+        expect(file_write_bytes(root + "/doc/08_tracking/bug/bug_db.sdn", fixture)).to_equal(true)
+        val result = workaround_bug_snapshot(root)
+        expect(result.is_err()).to_equal(true)
+        match result:
+            case Err(reason): expect(reason).to_equal("canonical bug database CRC mismatch")
+            case Ok(_): expect(false).to_equal(true)
+
     it "rejects a header sealed over a different byte domain (LF seal vs CRLF bytes)":
         step("CRLF working bytes with a header sealed over the LF body — fail closed")
         val root = snapshot_fixture_root("skew")
@@ -127,11 +151,10 @@ describe "workaround bug snapshot CRC verification (byte domain)":
             case Err(reason): expect(reason).to_equal("checkpoint the canonical bug database WAL before workaround refresh")
             case Ok(_): expect(false).to_equal(true)
 
-    # NOTE: an invalid-UTF-8 tamper scenario was considered and deliberately
-    # omitted — writing raw non-UTF-8 fixture bytes requires
-    # file_write_bytes, whose rt_array_bytes_validate extern is not
-    # registered under the Windows seed test runner (seed extern gap,
-    # same family as doc/08_tracking/bug/
-    # secure_memory_u8_zeroize_unregistered_extern_2026-10-22.md). The
-    # byte-domain tamper invariants above (CRLF-as-sealed, body tamper,
-    # LF-seal/CRLF skew) cover the integrity property portably.
+    # The invalid-UTF-8 tamper scenario above writes raw non-UTF-8 fixture
+    # bytes through file_write_bytes; its rt_array_bytes_validate /
+    # rt_array_bytes_copy_checked externs are registered in the seed
+    # interpreter again (seed SFFI contract repair, same family as
+    # doc/08_tracking/bug/
+    # secure_memory_u8_zeroize_unregistered_extern_2026-10-22.md), so the
+    # byte-domain tamper invariants now cover the non-UTF-8 path portably.

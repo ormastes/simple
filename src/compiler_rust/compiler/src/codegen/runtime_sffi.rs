@@ -873,6 +873,15 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_array_data_ptr", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_ptr_write_bytes_raw", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_data_ptr_text", &[I64], &[I64]),
+    // [u8] validation + checked-copy providers (runtime_native.c:9132 and the
+    // Rust runtime collections.rs). Without these compiler-owned contracts the
+    // generic dynamic-SFFI dispatcher fails closed with "no compiler-owned ABI
+    // contract" before it can resolve the symbol from the runtime library.
+    // The seed interpreter additionally registers Value-aware twins
+    // (interpreter_extern/memory.rs) so packed/boxed arrays never cross the
+    // raw-i64 marshalling boundary.
+    RuntimeFuncSpec::new("rt_array_bytes_validate", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_array_bytes_copy_checked", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_header_ptr", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_set_len_known", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_array_set_len_known_text", &[I64, I64], &[I8]),
