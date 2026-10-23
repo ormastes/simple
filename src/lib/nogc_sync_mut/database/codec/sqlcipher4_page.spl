@@ -79,10 +79,10 @@
 #   The session handle is CodecSessionV1 with secret_material = the opaque
 #   80-byte layout file_salt(16) || page_key(32) || hmac_key(32), produced by
 #   cipher-b's sqlcipher4_key_session_open and interpreted only here.
-#   open_key_fn currently treats its `text` argument as the ALREADY-RESOLVED
-#   passphrase bytes (UTF-8): SecretRef indirection (ref -> bytes without
-#     ever materializing the secret as text) is the adapter lane's job; this
-#     shim is the documented seam and must be replaced by that resolution.
+#   open_key_fn takes a SecretRef (`secret://<name>`, codec/secret_ref.spl)
+#   and resolves it to passphrase bytes inside the call — the shim that
+#   treated the text argument as the already-resolved passphrase was
+#   replaced by that indirection in the integration lane.
 
 use nogc_sync_mut.database.codec.sqlcipher4.{
     Sqlcipher4Error, Sqlcipher4Profile, sqlcipher4_profile,
@@ -104,7 +104,9 @@ use std.common.aes.modes.{
 }
 use std.common.crypto.hmac.{hmac_sha512_bytes}
 use std.common.crypto.constant_time.{black_box}
-use std.common.text_bytes.{text_to_utf8_bytes}
+use nogc_sync_mut.database.codec.secret_ref.{
+    secret_ref_parse, secret_ref_resolve
+}
 
 # ----------------------------------------------------------------------------
 # Lane geometry constants (sqlcipher4_4k_sha512) — fixed offsets, never
@@ -462,19 +464,29 @@ fn _key_session_error(err: Sqlcipher4KeyError) -> Sqlcipher4Error:
         case Sqlcipher4KeyError.CipherProfileMismatch(field, expected, requested):
             Sqlcipher4Error.CipherProfileMismatch(detail: "key session profile field '{field}' is {requested}, locked profile requires {expected}")
 
-# Open a registry session: derive the page/HMAC keys through cipher-b's
-# locked KDF pipeline and pack them into the opaque session material.
+# Open a registry session from a SecretRef: resolve the reference to secret
+# bytes through the integration lane's indirection owner
+# (codec/secret_ref.spl), derive the page/HMAC keys through cipher-b's
+# locked KDF pipeline, and pack them into the opaque session material.
 #
-# DOCUMENTED SHIM: `secret_ref` is treated as the ALREADY-RESOLVED passphrase
-# (UTF-8 bytes). SecretRef indirection — resolving a reference to bytes
-# without the secret ever existing as text — is the adapter lane's
-# responsibility (plan §4.2); once that lands it replaces this shim and this
-# function takes the reference instead. The passphrase copy is zeroized
-# before return; the frozen text_to_utf8_bytes original is dropped to GC
-# unwiped (documented runtime limit, same as the key-session lane).
+# SecretRef CONTRACT (this replaces the documented passphrase shim; the
+# integration lane owns the indirection, plan §4.2): `secret_ref` is a
+# `secret://<name>` reference, NEVER the passphrase itself. The secret value
+# is read from the process environment at open time and exists only as a
+# wipeable byte copy; it is zeroized before this function returns. The
+# frozen text value handed up by the env facade is dropped to GC unwiped
+# (documented runtime limit, same as the key-session lane).
 fn sqlcipher4_page_open_key(secret_ref: text, file_salt: [u8]) -> Result<CodecSessionV1, Sqlcipher4Error>:
-    val pp_frozen = text_to_utf8_bytes(secret_ref)
-    var passphrase = _mutable_copy_u8(pp_frozen)
+    val ref_parsed = match secret_ref_parse(secret_ref):
+        case Err(e):
+            return Err(e)
+        case Ok(r):
+            r
+    var passphrase = match secret_ref_resolve(ref_parsed):
+        case Err(e):
+            return Err(e)
+        case Ok(bytes):
+            bytes
     val opened = sqlcipher4_key_session_open(passphrase, file_salt)
     _zeroize_u8(passphrase)
     match opened:
