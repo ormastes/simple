@@ -248,6 +248,42 @@ export parser_extend_ctor_type_counts, parser_extend_ctor_type_ids
 #
 # Completeness is enforced by scripts/check/check-flat-ast-codec-complete.shs,
 # whose oracle is the per-parse RESET functions. Do not add state here by hand
+
+# @workaround bug=stage2_mir_shard_flat_pool_text_len_minus1_2026_10_22 reason=extend_pending_pools_dangle_across_transient_scope
+# The extend/pending pool globals are encoded by the cache capture and read
+# after the per-file transient scope ends, but were never promoted; scope
+# teardown reclaims a grown backing (rt_string_len == -1 at capture, then
+# SIGSEGV in desugar). ENUM_* and UNSAFE_ANNOTATIONS are promoted by
+# parser_declaration_metadata_promote_transient_owner; these are the rest.
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
+extern fn rt_array_free<T>(array: [T])
+
+fn _pd_pool_promote_i64(root: [[i64]]) -> bool:
+    val promoted = rt_transient_heap_promote(root)
+    rt_array_free(root)
+    promoted
+
+fn _pd_pool_promote_text(root: [[text]]) -> bool:
+    val promoted = rt_transient_heap_promote(root)
+    rt_array_free(root)
+    promoted
+
+pub fn parser_decls_pools_promote_transient_owners() -> bool:
+    var promoted = true
+    promoted = _pd_pool_promote_text([EXTEND_TARGETS]) and promoted
+    promoted = _pd_pool_promote_text([EXTEND_CLOSURES]) and promoted
+    promoted = _pd_pool_promote_i64([EXTEND_CTOR_COUNTS]) and promoted
+    promoted = _pd_pool_promote_text([EXTEND_CTOR_PROVIDERS]) and promoted
+    promoted = _pd_pool_promote_text([EXTEND_CTOR_NAMES]) and promoted
+    promoted = _pd_pool_promote_i64([EXTEND_CTOR_TYPE_COUNTS]) and promoted
+    promoted = _pd_pool_promote_i64([EXTEND_CTOR_TYPE_IDS]) and promoted
+    promoted = _pd_pool_promote_text([PENDING_SFFI_KEYS]) and promoted
+    promoted = _pd_pool_promote_text([PENDING_SFFI_VALUES]) and promoted
+    promoted = _pd_pool_promote_text([PENDING_CLOCKED_ARGS]) and promoted
+    promoted = _pd_pool_promote_i64([PENDING_VHDL_GENERIC_ARGS]) and promoted
+    promoted = _pd_pool_promote_text([PENDING_UNSAFE_CAPS]) and promoted
+    promoted = _pd_pool_promote_text([PENDING_DECL_ATTRS]) and promoted
+    promoted
 # without running it.
 
 pub fn flat_extend_pools_dump() -> text:
@@ -279,3 +315,4 @@ pub fn flat_extend_pools_restore(r: FlatPoolReader) -> bool:
     r.ok
 
 export flat_extend_pools_dump, flat_extend_pools_restore
+export parser_decls_pools_promote_transient_owners
