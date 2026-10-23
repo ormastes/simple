@@ -33,6 +33,7 @@ Two workflows implement the first slice of
 3. Builds phase N+1 with `build-next-phase-ci.shs` (capped at 4).
 4. Requires the new compiler to build and run a hello world. `--version` alone is not enough.
 5. Writes `<out-dir>/<platform>-p<N+1>/{simple,PHASE}` as the next rung's input.
+6. Builds the **essentials** with the new phase: `simple_cli` (`src/app/cli/main.spl`, must answer `--version`), `simple_test_runner` (`src/app/test_runner_new/main.spl`) and `simple_build_runner` (`src/app/buildrunner/main.spl`), into `<handoff>/essentials/` with one line per binary in `essentials/STATUS` (`ok`, `failed`, or `not-built: <reason>`). A failed essential is recorded and its log kept, but does not stop the compiler climbing. Phase-4 essentials carry forward to later rungs. The RC package ships every `ok` essential in `bin/` and keeps `STATUS` as `bin/ESSENTIALS`; the run summary lists each lane's essentials. The riscv64 cross lane records `not-built` for now (it cross-builds only the compiler).
 
 A lane that fails one rung is retried by the next rung from the same input.
 Other lanes keep climbing.

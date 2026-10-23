@@ -439,3 +439,166 @@ in hand edits to that file.
 2. Make `hir_module_decode` reject it (fail closed) so `decode_stable` answers
    `nil` instead of crashing; that alone restores a clean cache miss.
 3. Then fix the generator so the variant round-trips.
+
+## 2026-10-23: the nil-scalar-reject fix does NOT close this bug (measured)
+
+`68bb9e04ed5` ("fix(codec): restore generator parity; fail closed on nil in
+non-optional scalar slots") landed the hypothesis that this SIGSEGV comes from
+`hir_module_decode` admitting a blob that stores the wire nil sentinel in a
+non-optional scalar slot (e.g. `IntLit.value: i64`), so that re-encoding the
+decoded node faults. Its commit message states **"Stage 2 re-run still
+pending."**
+
+**That re-run has now been done, and the SIGSEGV is unchanged.** The same change
+(non-optional `i64`/`bool` rejecting the nil sentinel, 161 emitted reject sites
+in the variant measured here; the landed commit has 231 including `text`) was
+built into a Stage 2 candidate and the sanity battery still fails identically:
+
+```
+candidate_frontend_smoke: stage2-module-path-naming-build failed
+[hir-shard] owner=0/1@0 status=CRASH exit=-139
+```
+
+gdb against that candidate gives the same stack as before the change:
+
+```
+#0  compiler.hir.generated.hir_codec.hc_enc_hir_expr_kind   <-- SIGSEGV
+...
+#21 compiler.hir.hir_codec.hir_module_encode
+#22 compiler.hir.hir_codec.hir_module_decode_stable
+#23 compiler.driver.driver_hir_cache.hir_cache_store_in_owned_scope
+#24 compiler.driver.driver_hir_cache.hir_cache_store
+```
+
+So the nil sentinel is **not** the source of the unreadable payload. The
+fail-closed change remains defensible as hardening — a non-optional slot should
+never decode to nil — but **this bug must not be closed on it**, and the
+decoder's nil-sentinel handling is no longer a live lead.
+
+### Hypotheses now disproved, with their disproofs
+
+| hypothesis | disproof |
+|---|---|
+| method-call argument corruption (`self.m(array, …)`), this record's original next-step 2 | the backtrace never enters the fixture's code; HIR lowering completes clean (`post-lowering count=0`, `post-diagnostics count=0`) |
+| `SIMPLE_HIR_CACHE=0` as a workaround | with the shard argument the worker fails closed with `HIR cache identity unavailable for shard`; without sharding the SIGSEGV moves rather than disappearing |
+| nil sentinel in a non-optional scalar slot (`68bb9e04ed5`) | built into a Stage 2 candidate; SIGSEGV unchanged, same route and same frame |
+
+### What the open question actually is
+
+`hir_module_encode` succeeds on the live module (the store gets a non-empty
+blob), and fails on the module that `hir_module_decode` returns from that same
+blob. The encoder's own node guards (`nil` / `rt_heap_ref_wellformed` /
+`rt_heap_ref_registered`) all pass, and the fault is in
+`hc_enc_hir_expr_kind`'s own frame — so a payload slot of a node that looks
+well-formed and registered is unreadable. The remaining question is what leaves
+a slot in that state when the node came from `decode` rather than from lowering.
+
+### Two facts about the regeneration that neither commit records
+
+- **A third wire-format change.** `HirStmtKind.Assign.op` is declared
+  `HirAssignOp?` (`hir_definitions.spl:801`) but the pre-regeneration output
+  encoded it as a non-optional node. Regeneration adds the optional layer, so
+  every compound assignment's bytes move. Encoder and decoder agree, so this is
+  not corruption, but a reader diffing v9 against v10 blobs needs it.
+- **Four codec round-trip examples already fail** on `release/1.0.0`, unrelated
+  to any of this: `hir_codec_integer_three_spec` (executed=7 passed=5 failed=2)
+  and `hir_codec_optional_node_bare_spec` (executed=3 passed=1 failed=2), with
+  byte-identical counts against origin's v9 codec. Worth their own record.
+
+### `push-hir-codec-complete` passes now, and should stay advisory
+
+With generator parity restored the pre-existing gate passes:
+`PASS — 97 declaration(s) covered, generated codec fresh`. It should NOT be
+promoted to blocking: it resolves `SIMPLE_BIN="${SIMPLE_BIN:-$ROOT/bin/simple}"`
+and exits 2 without one (`ERROR — nothing was checked`), which
+`.claude/rules/vcs.md:246-251` records as exactly why `push-dual-run-shadow` is
+advisory — a blocking row would refuse every push from a binary-less host. Its
+real gap is that it appears in no `.github/workflows/` file, so it has no CI
+lane either; that is what let generator parity drift unnoticed.
+
+## 2026-10-23 (later): the fault address is 0x3 — nil's immediate — at a payload bind
+
+`gdb` on the same candidate, reading the faulting instruction and `si_addr`:
+
+```
+Thread 1 received signal SIGSEGV
+0x000000000070ba43 in compiler.hir.generated.hir_codec.hc_enc_hir_expr_kind ()
+=> 0x70ba43 <...hc_enc_hir_expr_kind+42634>: mov (%r10),%r8
+$1 = (void *) 0x3            # $_siginfo._sifields._sigfault.si_addr
+rax 0x400f8620  rbx 0x0  rcx 0x1  rdx 0x14fb7f90  rsi 0x1  rdi 0x14fb7f90
+```
+
+**`0x3` is nil's immediate representation in this runtime** — the same constant
+`HirCodecWriter.put_i64` warns about: "Staged-native codegen compares the raw
+integer with nil's immediate, which is 3". So the crash is an unguarded
+dereference of a **nil**, not of wild memory.
+
+Two things follow, and they narrow the defect a long way:
+
+1. **The prologue guards passed.** The fault offset is `+42634`, deep inside the
+   `match node:` body, not the entry sequence. So `node == nil`,
+   `rt_heap_ref_wellformed(node)` and `rt_heap_ref_registered(node)` all
+   answered "fine" for the node itself. The nil is in a **payload slot** of the
+   matched variant.
+2. **It is a typed-bind copy-in, which `codec_gen.spl` already documents.** The
+   generator emits, per node-typed payload field
+   (`_emit_enc`, `codec_gen.spl:443-452`):
+
+   ```
+   val enc_node_vN: <T> = <payload>        # bind FIRST
+   if not enc_node_vN.?:   /  == nil:      # guard AFTER
+   ```
+
+   and the comment at `codec_gen.spl:524-530` records the same class already
+   biting once: "that enum word is then deep-copied as a tagged `Span` pointer
+   by the next callee's value-semantics copy-in prologue, faulting on
+   0xf198715900000000 in hc_enc_hir_type". A declared-typed bind from a nil
+   value can fault in the copy-in, i.e. **before** the guard that was meant to
+   catch it runs.
+
+### Why the fix is constrained, and must not be guessed
+
+The guard form is already split by type, on a line carrying a workaround:
+
+```simple
+# @workaround bug=a174_struct_nil_comparison_dispatch_2026_10_16 ...
+val record_presence = s.cat == "opaque" or u.is_struct(s.name)
+...  if record_presence: "if not enc_node_vN.?:"  else: "if enc_node_vN == nil:"
+```
+
+So structs/opaque get the reliable `.?` presence form and **enums get `== nil`**,
+the comparison this repo documents as unreliable against nil's immediate in
+staged-native codegen. `HirExprKind` is an enum, and frame #1 is `hc_enc_hir_expr`
+— consistent with an enum-typed payload reaching a bind that faults.
+
+But the obvious repair (guard the SOURCE expression before binding) is exactly
+what the v21 note at `codec_gen.spl:436-441` says was tried and reverted: "The
+guard-first double read (check, then argument) drew non-nil then ERASED-NIL on
+module.functions, so the required-entry gate refused EVERY module (p2_add:
+stores=0 refused=everything)". So the two obvious directions have each already
+caused a release-blocking failure:
+
+| direction | previous failure |
+|---|---|
+| guard before the bind (double read) | v21: erased-nil, every module refused, `stores=0` |
+| bind then guard (current) | this bug: typed copy-in dereferences nil, SIGSEGV at 0x3 |
+
+A fix therefore needs a form that reads the payload **once** and tests presence
+**without** a typed copy-in — e.g. binding as an optional (`<T>?`) and testing
+that, or a presence probe on the payload slot that does not materialise a typed
+value. Whoever takes it should read both notes first; this is not a one-line
+change, and getting it wrong reproduces one of the two failures above.
+
+### Reproduction of the fault detail
+
+```sh
+# 1. worker argv (large -s or the base64 policy arg truncates)
+strace -f -qq -s 60000 -e trace=execve -o /tmp/st.log \
+  .simple/storage/build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple.rejected \
+  native-build --runtime-bundle core-c-bootstrap --entry-closure \
+  --entry src/compiler/bootstrap_admission/stage2_module_path_naming.spl -o /tmp/p
+# 2. SIMPLE_NATIVE_BUILD_WORKER=1 is required (bootstrap_main.spl:629)
+env -u SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_WORKER=1 gdb -q -batch \
+  -ex run -ex 'x/1i $pc' -ex 'info registers' \
+  -ex 'p $_siginfo._sifields._sigfault.si_addr' --args <argv from step 1>
+```

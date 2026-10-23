@@ -2,9 +2,13 @@
 # Package a bootstrap compiler built outside the release matrix (FreeBSD VM,
 # Linux riscv64 cross) the same way the matrix rows do, minus MCP/test-runner.
 #
-#   sh scripts/release/package-phase1-spk.shs <version> <platform> <binary> [phase]
+#   sh scripts/release/package-phase1-spk.shs <version> <platform> <binary> [phase] [essentials-dir]
+#
+# essentials-dir (optional): the phase ladder's essentials/ handoff; every
+# binary in it whose STATUS line is "ok" ships in bin/, and STATUS is kept as
+# bin/ESSENTIALS so a consumer can see what is missing and why.
 set -eu
-version=$1 platform=$2 binary=$3 phase=${4:-1}
+version=$1 platform=$2 binary=$3 phase=${4:-1} essentials=${5:-}
 pkg="simple-bootstrap-${version}-${platform}"
 rm -rf "$pkg" && mkdir -p "$pkg/bin"
 case $platform in
@@ -16,6 +20,14 @@ printf '%s\n' '#!/bin/sh' 'SCRIPT_DIR=$(dirname -- "$0")' \
   'export SIMPLE_ASSET_ROOT="$SCRIPT_DIR/.."' 'exec "$SCRIPT_DIR/simple-runtime" "$@"' > "$pkg/bin/simple"
 chmod +x "$pkg/bin/simple"
 echo "$phase" > "$pkg/PHASE"
+if [ -n "$essentials" ] && [ -f "$essentials/STATUS" ]; then
+  cp "$essentials/STATUS" "$pkg/bin/ESSENTIALS"
+  sed -n 's/=ok$//p' "$essentials/STATUS" | while read -r name; do
+    for f in "$essentials/$name" "$essentials/$name.exe"; do
+      [ -f "$f" ] && cp "$f" "$pkg/bin/" && chmod +x "$pkg/bin/${f##*/}"
+    done
+  done
+fi
 rm -rf src/compiler_rust/target   # build output; never packaged
 for entry in lib src examples assets README.md LICENSE THIRD_PARTY_NOTICES.md; do
   [ -e "$entry" ] && cp -r "$entry" "$pkg/"
