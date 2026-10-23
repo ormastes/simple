@@ -1,0 +1,87 @@
+# SQLite pager — immutable whole-file snapshot plus a bounded page cache.
+#
+# The pager takes its byte snapshot once at open; that snapshot IS the pinned
+# read view (plan section 3.3 pager requirement): no reader can observe a
+# torn or changing file because the bytes are copied before any page decode.
+# get_page returns value copies from the snapshot, so an evicted cache entry
+# can never dangle (no use-after-eviction by construction). The LRU list is
+# bounded to PAGER_CACHE_CAP pages and all offset math is checked.
+
+use std.nogc_sync_mut.database.sqlite_format.types.{SqliteError}
+
+val PAGER_CACHE_CAP: i64 = 8
+
+class SqlitePager:
+    snapshot: [u8]
+    page_size: i64
+    page_count: i64
+    reserved_bytes: i64
+    cache_ids: [i64]
+    cache_pages: [[u8]]
+
+    static fn open(snapshot: [u8], page_size: i64, page_count: i64, reserved_bytes: i64) -> SqlitePager:
+        SqlitePager( snapshot: snapshot, page_size: page_size, page_count: page_count, reserved_bytes: reserved_bytes, cache_ids: [], cache_pages: [])
+
+    me fn usable_size() -> i64:
+        self.page_size - self.reserved_bytes
+
+    # Byte offset of page `page` (1-based) in the snapshot, checked.
+    me fn page_offset(page: i64) -> Result<i64, SqliteError>:
+        if page < 1 or page > self.page_count:
+            return Err(SqliteError.PageOutOfRange(page: page, page_count: self.page_count))
+        Ok((page - 1) * self.page_size)
+
+    # Bounds check offset..offset+len against page bounds.
+    me fn check_span(offset: i64, length: i64) -> Result<(), SqliteError>:
+        if offset < 0 or length < 0 or offset + length > self.page_size:
+            return Err(SqliteError.OffsetOutOfBounds(offset: offset, length: length))
+        Ok(())
+
+    # Get a value copy of page `page`, through the bounded LRU cache.
+    me fn get_page(page: i64) -> Result<[u8], SqliteError>:
+        val off = self.page_offset(page)?
+        var i: i64 = 0
+        while i < self.cache_ids.len():
+            if self.cache_ids[i] == page:
+                val hit = self.cache_pages[i]
+                # LRU refresh: move to back.
+                self.cache_ids = _remove_at_i64(self.cache_ids, i)
+                self.cache_pages = _remove_at_bytes(self.cache_pages, i)
+                self.cache_ids.push(page)
+                self.cache_pages.push(hit)
+                return Ok(hit)
+            i = i + 1
+
+        val page_bytes = self.snapshot[off : off + self.page_size]
+        if self.cache_ids.len() >= PAGER_CACHE_CAP:
+            self.cache_ids = _remove_at_i64(self.cache_ids, 0)
+            self.cache_pages = _remove_at_bytes(self.cache_pages, 0)
+        self.cache_ids.push(page)
+        self.cache_pages.push(page_bytes)
+        Ok(page_bytes)
+
+    # Big-endian u32 within one page, checked.
+    me fn be_u32(page: i64, offset: i64) -> Result<i64, SqliteError>:
+        self.check_span(offset, 4)?
+        val p = self.get_page(page)?
+        Ok(((p[offset] as i64) << 24) | ((p[offset + 1] as i64) << 16) | ((p[offset + 2] as i64) << 8) | (p[offset + 3] as i64))
+
+# Small typed remove-at helpers (arrays are values; these return new arrays).
+fn _remove_at_i64(arr: [i64], idx: i64) -> [i64]:
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < arr.len():
+        if i != idx:
+            out.push(arr[i])
+        i = i + 1
+    out
+
+fn _remove_at_bytes(arr: [[u8]], idx: i64) -> [[u8]]:
+    var out: [[u8]] = []
+    var i: i64 = 0
+    while i < arr.len():
+        if i != idx:
+            out.push(arr[i])
+        i = i + 1
+    out
+

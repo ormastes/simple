@@ -1361,12 +1361,12 @@ if [ "${target}" = "simpleos-x86_64" ]; then
 fi
 
 # Git Bash exports MSYSTEM and would otherwise select GNU implicitly. The
-# Windows bootstrap default is the clang-cl/MSVC lane; --mingw remains an
-# explicit Clang GNU lane through SIMPLE_WINDOWS_ABI=gnu.
+# Windows bootstrap default is the Clang MinGW UCRT (gnu) lane; MSVC is an
+# explicit opt-in through SIMPLE_WINDOWS_ABI=msvc (--msvc).
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*|Windows*)
     if [ -z "${SIMPLE_WINDOWS_ABI:-}" ]; then
-      SIMPLE_WINDOWS_ABI=msvc
+      SIMPLE_WINDOWS_ABI=gnu
       export SIMPLE_WINDOWS_ABI
     fi
     # Canonical owner prepares once, or validates and reuses a supplied receipt.
@@ -2874,7 +2874,7 @@ if [ "${backend}" = "llvm-lib" ] || [ "${backend}" = "llvm" ]; then
       fi
     fi
   else
-    echo "error: admitted LLVM 23.1.1 (native Linux/FreeBSD: 23.1.2) not found (shared platform detection: scripts/setup/platform-detect.shs, versions: ${LLVM_VERSIONS:-23})" >&2
+    echo "error: admitted LLVM 23 (any 23.x.y) not found (shared platform detection: scripts/setup/platform-detect.shs, versions: ${LLVM_VERSIONS:-23})" >&2
     echo "error: install LLVM or select --backend=cranelift explicitly" >&2
     exit 1
   fi
@@ -2914,6 +2914,27 @@ if [ "${os}" = windows ] && [ "${PLATFORM_ABI}" = gnu ]; then
     echo "error: incomplete Windows GNU Cargo tool authority" >&2
     exit 1
   }
+  # Rust's x86_64-pc-windows-gnu std always asks the linker for -lgcc_eh and
+  # -lgcc. llvm-mingw (clang + lld, compiler-rt + libunwind) has neither and
+  # GCC is never installed, so serve those two names from LLVM runtime: an
+  # empty libgcc.a (compiler-rt builtins come from Rust's compiler_builtins)
+  # and libgcc_eh.a = llvm-mingw's libunwind.a. Link through lld.
+  mingw_unwind_a="$(dirname -- "${mingw_cc}")/../${mingw_target%%-*}-w64-mingw32/lib/libunwind.a"
+  if [ -f "${mingw_unwind_a}" ]; then
+    mingw_shim_dir="${SIMPLE_BOOTSTRAP_BUILD_ROOT:-${output_dir}}/rust-gnu-runtime-shim"
+    mkdir -p "${mingw_shim_dir}" &&
+      rm -f "${mingw_shim_dir}/libgcc.a" "${mingw_shim_dir}/libgcc_eh.a" &&
+      "${mingw_ar}" rc "${mingw_shim_dir}/libgcc.a" &&
+      cp "${mingw_unwind_a}" "${mingw_shim_dir}/libgcc_eh.a" || {
+        echo "error: cannot create LLVM runtime shim in ${mingw_shim_dir}" >&2
+        exit 1
+      }
+    mingw_shim_native=$(cygpath -m "${mingw_shim_dir}" 2>/dev/null || printf '%s' "${mingw_shim_dir}")
+    mingw_rustflags="${mingw_rustflags} -C link-arg=-fuse-ld=lld -L native=${mingw_shim_native}"
+  else
+    echo "error: llvm-mingw libunwind.a not found at ${mingw_unwind_a} (gnu lane needs clang+lld with compiler-rt/libunwind; no GCC)" >&2
+    exit 1
+  fi
   export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}"
   export CC_x86_64_pc_windows_gnu="${mingw_cc}"
   export AR_x86_64_pc_windows_gnu="${mingw_ar}"
@@ -3101,7 +3122,7 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     }
     if [ -n "${rust_llvm_version}" ] &&
        ! _llvm23_version_admitted "${rust_llvm_version}"; then
-      echo "error: Rust LLVM authority has unadmitted LLVM 23.1 version ${rust_llvm_version}" >&2
+      echo "error: Rust LLVM authority has unadmitted LLVM version ${rust_llvm_version} (major 23 required)" >&2
       exit 1
     fi
     if [ "${os}" = windows ] &&
@@ -3114,8 +3135,8 @@ if [ "${full_bootstrap}" -eq 1 ]; then
         echo "error: Windows Rust LLVM authority lacks physical clang-cl: ${rust_llvm_clang_cl_path}" >&2
         exit 1
       }
-      [ "${rust_llvm_clang_cl_version}" = 23.1.1 ] || {
-        echo "error: Windows Rust LLVM authority must bind clang-cl 23.1.1, got ${rust_llvm_clang_cl_version:-unknown}" >&2
+      _llvm23_version_admitted "${rust_llvm_clang_cl_version:-unknown}" || {
+        echo "error: Windows Rust LLVM authority must bind clang-cl 23.x, got ${rust_llvm_clang_cl_version:-unknown}" >&2
         exit 1
       }
       # Keep the C ABI owner in the same immutable LLVM 23.1.1 package as
@@ -3515,6 +3536,8 @@ if [ "${rust_rebuilt}" -eq 1 ] || [ "${compiler_backfill_rebuilt}" -eq 1 ]; then
     [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
     *) echo "error: could not generate Rust authority nonce" >&2; exit 1 ;;
   esac
+  BOOTSTRAP_STAGE3_LLVM_FEATURES="${llvm_features:-}"
+  export BOOTSTRAP_STAGE3_LLVM_FEATURES
   bootstrap_stage3_prepare_seed_generation \
     "${rust_authority_profile_dir}" "${rust_authority_generation_root}" \
     "${seed_inputs_fingerprint}" "simple${exe_suffix}" \

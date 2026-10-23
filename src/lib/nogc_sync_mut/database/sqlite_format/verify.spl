@@ -1,0 +1,31 @@
+# SQLite format verification — header plus structural page sanity.
+#
+# verify re-parses the header and then walks sqlite_schema and every table
+# b-tree root it references (decoding records and overflow chains through the
+# checked readers). Any structurally unusable file fails closed with a typed
+# SqliteError; the result carries the validated header facts.
+
+use std.nogc_sync_mut.database.sqlite_format.types.{SqliteError, SqliteFileInfo}
+use std.nogc_sync_mut.database.sqlite_format.header.{sqlite_header_parse}
+use std.nogc_sync_mut.database.sqlite_format.pager.{SqlitePager}
+use std.nogc_sync_mut.database.sqlite_format.schema.{sqlite_schema_scan, find_table_schema}
+use std.nogc_sync_mut.database.sqlite_format.btree.{table_btree_scan}
+use std.nogc_sync_mut.database.sqlite_format.record.{sqlite_record_decode}
+
+# Structural check over raw file bytes (no path I/O; see sqlite_format_verify
+# for the file-based entry point used by specs).
+fn sqlite_verify_bytes(file_bytes: [u8]) -> Result<SqliteFileInfo, SqliteError>:
+    val info = sqlite_header_parse(file_bytes)?
+    val pager = SqlitePager.open( file_bytes, info.page_size, info.page_count, info.reserved_bytes)
+    val entries = sqlite_schema_scan(pager, info.text_encoding)?
+    for entry in entries:
+        if entry.obj_type == "table":
+            if entry.rootpage < 1:
+                return Err(SqliteError.CorruptPage( message: "table {entry.name} rootpage {entry.rootpage} is not positive"))
+            # Decoding every record validates cell pointers, record headers,
+            # serial types and overflow chains across the whole table.
+            val rows = table_btree_scan(pager, entry.rootpage)?
+            for row in rows:
+                val _ = sqlite_record_decode(row.1, info.text_encoding)?
+    Ok(info)
+

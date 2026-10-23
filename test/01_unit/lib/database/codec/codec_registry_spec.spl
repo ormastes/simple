@@ -1,0 +1,223 @@
+# Page codec registry: profile admission, lazy resolution, latest-wins policy.
+#
+# Executable evidence for master plan §2.2 (PageCodecV1 registration) and
+# §4.5 (typed rejections). Uses a pure stub codec — no cipher code — to prove
+# registry behavior; the real SQLCipher 4 codec wires in through the same
+# CodecRegistryEntry shape at integration time.
+
+use std.spipe.*
+use std.database.codec.sqlcipher4.{
+    Sqlcipher4Error, Sqlcipher4Profile, sqlcipher4_profile, sqlcipher4_error_code
+}
+use std.database.codec.sqlcipher4_manifest.{Sqlcipher4Manifest, sqlcipher4_manifest}
+use std.database.codec.codec_registry.{
+    CodecRegistry, CodecRegistryEntry, CodecSessionV1, PageCodecV1,
+    codec_registry_sqlcipher4_entry
+}
+
+# ============================================================================
+# Stub codec (no cryptography) + invocation counters
+# ============================================================================
+
+var factory_calls: i64 = 0
+var factory_marker: text = ""
+
+fn stub_profile_fn() -> Sqlcipher4Profile:
+    sqlcipher4_profile()
+
+fn stub_manifest_fn() -> Sqlcipher4Manifest:
+    sqlcipher4_manifest()
+
+fn stub_open_key(secret_ref: text, disk_salt: [u8]) -> Result<CodecSessionV1, Sqlcipher4Error>:
+    Ok(CodecSessionV1(codec_id: "sqlcipher4", open: true, secret_material: []))
+
+fn stub_decode(page_number: i64, encrypted_page: [u8], session: CodecSessionV1) -> Result<[u8], Sqlcipher4Error>:
+    Ok(encrypted_page)
+
+fn stub_encode(page_number: i64, plaintext_page: [u8], session: CodecSessionV1, rng: fn(i64) -> [u8]) -> Result<[u8], Sqlcipher4Error>:
+    Ok(plaintext_page)
+
+fn stub_close(session: CodecSessionV1) -> Result<(), Sqlcipher4Error>:
+    Ok(())
+
+fn stub_factory_body(cid: text) -> PageCodecV1:
+    factory_calls = factory_calls + 1
+    PageCodecV1(
+        codec_id: cid,
+        profile_fn: stub_profile_fn,
+        manifest_fn: stub_manifest_fn,
+        open_key_fn: stub_open_key,
+        decode_page_fn: stub_decode,
+        encode_page_fn: stub_encode,
+        close_fn: stub_close
+    )
+
+fn stub_factory_v1(cid: text) -> PageCodecV1:
+    factory_marker = "v1"
+    stub_factory_body(cid)
+
+fn stub_factory_v2(cid: text) -> PageCodecV1:
+    factory_marker = "v2"
+    stub_factory_body(cid)
+
+fn zeros64() -> text:
+    var out = ""
+    var i: i64 = 0
+    while i < 64:
+        out = out + "0"
+        i = i + 1
+    out
+
+fn registered_registry() -> CodecRegistry:
+    var registry = CodecRegistry.new()
+    match registry.register_profile(sqlcipher4_profile(), 1):
+        case Ok(_): registry
+        case Err(_):
+            CodecRegistry.new()
+
+fn err_code(r: Result<PageCodecV1, Sqlcipher4Error>) -> text:
+    match r:
+        case Err(e): sqlcipher4_error_code(e)
+        case Ok(_): "NO_ERROR"
+
+fn entry_unit_code(r: Result<(), Sqlcipher4Error>) -> text:
+    match r:
+        case Err(e): sqlcipher4_error_code(e)
+        case Ok(_): "NO_ERROR"
+
+fn digest_unit_ok(r: Result<text, Sqlcipher4Error>) -> bool:
+    match r:
+        case Ok(_): true
+        case Err(_): false
+
+fn list_has(items: [text], want: text) -> bool:
+    for item in items:
+        if item == want:
+            return true
+    false
+
+# ============================================================================
+# Profile registration
+# ============================================================================
+
+describe "Codec registry profile registration":
+    it "registers the locked profile by digest and is idempotent":
+        var registry = CodecRegistry.new()
+        val d1 = registry.register_profile(sqlcipher4_profile(), 1)
+        val d2 = registry.register_profile(sqlcipher4_profile(), 1)
+        expect(digest_unit_ok(d1)).to_equal(true)
+        expect(digest_unit_ok(d2)).to_equal(true)
+        match d1:
+            case Ok(digest):
+                expect(digest.len()).to_equal(64)
+                expect(registry.profile_registered(digest)).to_equal(true)
+            case Err(_):
+                expect(false).to_equal(true)
+
+    it "rejects a deviating profile with a typed mismatch":
+        var registry = CodecRegistry.new()
+        var mutated = sqlcipher4_profile()
+        mutated.kdf_iter = 64000
+        expect(entry_unit_code(registry.register_profile(mutated, 1))).to_equal("SQLCIPHER4_CIPHER_PROFILE_MISMATCH")
+
+# ============================================================================
+# Codec admission and lazy resolution
+# ============================================================================
+
+describe "Codec registry admission":
+    it "admits a stub codec with a matching profile digest and resolves it":
+        var registry = registered_registry()
+        factory_calls = 0
+        val entry = codec_registry_sqlcipher4_entry(stub_factory_v1, 1)
+        expect(entry_unit_code(registry.register_codec(entry))).to_equal("NO_ERROR")
+        expect(list_has(registry.list_codecs(), "sqlcipher4@1")).to_equal(true)
+        match registry.resolve("sqlcipher4"):
+            case Ok(codec):
+                expect(codec.codec_id).to_equal("sqlcipher4")
+                expect(codec.profile_fn().page_size).to_equal(4096)
+                expect(codec.manifest_fn().profile_digest).to_equal(entry.profile_digest)
+            case Err(_):
+                expect(false).to_equal(true)
+
+    it "is lazy: registration never invokes the factory, resolve does exactly once":
+        var registry = registered_registry()
+        factory_calls = 0
+        val entry = codec_registry_sqlcipher4_entry(stub_factory_v1, 1)
+        expect(entry_unit_code(registry.register_codec(entry))).to_equal("NO_ERROR")
+        expect(factory_calls).to_equal(0)
+        match registry.resolve("sqlcipher4"):
+            case Ok(_): expect(true).to_equal(true)
+            case Err(_): expect(false).to_equal(true)
+        expect(factory_calls).to_equal(1)
+
+    it "rejects a codec whose profile digest is not registered":
+        var registry = registered_registry()
+        factory_calls = 0
+        val rogue = CodecRegistryEntry(
+            codec_id: "sqlcipher4",
+            codec_version: 1,
+            interface_version: 1,
+            profile_digest: zeros64(),
+            factory: stub_factory_v1
+        )
+        expect(entry_unit_code(registry.register_codec(rogue))).to_equal("SQLCIPHER4_CIPHER_PROFILE_MISMATCH")
+        expect(factory_calls).to_equal(0)
+
+    it "rejects an interface version mismatch against the registered profile":
+        var registry = registered_registry()
+        var entry = codec_registry_sqlcipher4_entry(stub_factory_v1, 1)
+        entry.interface_version = 2
+        expect(entry_unit_code(registry.register_codec(entry))).to_equal("SQLCIPHER4_UNSUPPORTED_CIPHER_VERSION")
+
+# ============================================================================
+# Latest-wins and lookup policy
+# ============================================================================
+
+describe "Codec registry lookup policy":
+    it "applies latest-wins on duplicate id+version with a diagnostic":
+        var registry = registered_registry()
+        val first = codec_registry_sqlcipher4_entry(stub_factory_v1, 1)
+        val second = codec_registry_sqlcipher4_entry(stub_factory_v2, 1)
+        expect(entry_unit_code(registry.register_codec(first))).to_equal("NO_ERROR")
+        expect(entry_unit_code(registry.register_codec(second))).to_equal("NO_ERROR")
+        expect(registry.list_diagnostics().len()).to_equal(1)
+        expect(registry.list_codecs().len()).to_equal(1)
+        factory_calls = 0
+        match registry.resolve("sqlcipher4"):
+            case Ok(_): expect(factory_marker).to_equal("v2")
+            case Err(_): expect(false).to_equal(true)
+
+    it "resolves the highest registered version":
+        var registry = registered_registry()
+        expect(entry_unit_code(registry.register_codec(codec_registry_sqlcipher4_entry(stub_factory_v1, 1)))).to_equal("NO_ERROR")
+        expect(entry_unit_code(registry.register_codec(codec_registry_sqlcipher4_entry(stub_factory_v2, 2)))).to_equal("NO_ERROR")
+        expect(registry.latest_version("sqlcipher4").?).to_equal(true)
+        match registry.latest_version("sqlcipher4"):
+            case Some(v): expect(v).to_equal(2)
+            case None: expect(false).to_equal(true)
+        factory_calls = 0
+        match registry.resolve("sqlcipher4"):
+            case Ok(codec):
+                expect(codec.manifest_fn().codec_version).to_equal(1)
+                expect(factory_marker).to_equal("v2")
+            case Err(_):
+                expect(false).to_equal(true)
+
+    it "reports an unknown codec id as a typed not-found":
+        var registry = registered_registry()
+        expect(registry.latest_entry("rot13").?).to_equal(false)
+        expect(err_code(registry.resolve("rot13"))).to_equal("SQLCIPHER4_UNSUPPORTED_CIPHER_VERSION")
+
+    it "keeps admission and resolution typed end to end":
+        var registry = registered_registry()
+        expect(entry_unit_code(registry.register_codec(codec_registry_sqlcipher4_entry(stub_factory_v1, 1)))).to_equal("NO_ERROR")
+        match registry.resolve("sqlcipher4"):
+            case Ok(codec):
+                match codec.open_key_fn("test-secret", []):
+                    case Ok(session):
+                        expect(session.codec_id).to_equal("sqlcipher4")
+                        expect(session.open).to_equal(true)
+                    case Err(_):
+                        expect(false).to_equal(true)
+            case Err(_):
+                expect(false).to_equal(true)

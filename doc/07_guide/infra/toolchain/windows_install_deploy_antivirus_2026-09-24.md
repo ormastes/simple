@@ -358,3 +358,7 @@ filter is attached (section 0).
     same way.
 - Windows release signing in CI is **intended**, not current: no workflow in
   `.github/workflows/` signs a Windows binary as of this date.
+
+## Toolchain rule (Windows)
+
+Never use GCC. Toolchain is clang + lld (mold where the target format supports it: ELF on Linux/FreeBSD/SimpleOS hosts; lld for Windows PE/COFF, since mold has no COFF/PE support; Mach-O uses ld64.lld/system ld). Windows default = GitHub llvm-mingw UCRT (mstorsjo/llvm-mingw, installed under ~/.simple/toolchains/llvm-mingw-*-ucrt-x86_64 by `scripts/setup/bootstrap-prereqs.shs install`); MSVC (clang-cl) is the optional `--msvc` lane. If Rust windows-gnu wants -lgcc/-lgcc_eh, serve them from compiler-rt/libunwind (shim dir, or x86_64-pc-windows-gnullvm) -- never install GCC.

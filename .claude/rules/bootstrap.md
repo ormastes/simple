@@ -394,9 +394,9 @@ scripts/bootstrap/bootstrap-from-scratch.sh --deploy
 #     && mv bin/release/<triple>/simple.new bin/release/<triple>/simple
 # Windows:
 scripts/bootstrap/bootstrap-windows.sh --deploy
-# Windows Git Bash default lane: source the env setup FIRST or cargo fails two
-# ways before Stage 1 -- (1) MSYS2's lld-link shadows the LLVM one and rustc
-# gets 0xc0000135, (2) workspace build scripts die without VCINSTALLDIR/LIB:
+# Windows default lane = llvm-mingw UCRT (gnu): clang + lld, compiler-rt + libunwind, NEVER GCC.
+# Source the env setup FIRST (puts llvm-mingw first on PATH, requires clang/ld.lld/llvm-ar).
+# MSVC (clang-cl) is the optional --msvc lane (needs VCINSTALLDIR/LIB). Never use GCC.
 . scripts/setup/windows-gitbash-bootstrap-env.shs
 # Manual stages:
 cd src/compiler_rust && cargo build --profile bootstrap -p simple-driver -p simple-native-all

@@ -1,0 +1,55 @@
+# SQLite table b-tree traversal.
+#
+# In-order scan of an ordinary rowid table b-tree (page types 0x05 interior /
+# 0x0d leaf; page 1 carries the 100-byte header displacement). Traversal is
+# recursive with a depth bound of the page count: a pointer cycle fails closed
+# with CorruptPage instead of recursing forever. Index b-trees (0x02/0x0a) are
+# a later expanded gate; read_table uses full table scans, which the plan
+# (section 3.1) accepts for read-only access.
+
+use std.nogc_sync_mut.database.sqlite_format.types.{
+    SqliteError, be_u32_at, SQLITE_PAGE_TABLE_INTERIOR, SQLITE_PAGE_TABLE_LEAF
+}
+use std.nogc_sync_mut.database.sqlite_format.pager.{SqlitePager}
+use std.nogc_sync_mut.database.sqlite_format.cell.{
+    cell_base_offset, cell_count, cell_ptr, page_kind,
+    parse_table_leaf_cell, parse_table_interior_cell
+}
+
+# Append (rowid, record payload) pairs of the subtree rooted at page_no to
+# `acc`, in ascending rowid order.
+fn _scan_table_page(pager: SqlitePager, page_no: i64, depth: i64, acc: [(i64, [u8])]) -> Result<[(i64, [u8])], SqliteError>:
+    if depth > pager.page_count:
+        return Err(SqliteError.CorruptPage( message: "table b-tree depth {depth} exceeds page count {pager.page_count} (cycle?)"))
+    val page = pager.get_page(page_no)?
+    val base = cell_base_offset(page_no)
+    val kind = page_kind(page, base, page_no)?
+    var out = acc
+    if kind == SQLITE_PAGE_TABLE_LEAF:
+        val n = cell_count(page, base)
+        var i: i64 = 0
+        while i < n:
+            val ptr = cell_ptr(page, base, 8, i)
+            val cell = parse_table_leaf_cell(pager, page, ptr)?
+            out.push(cell)
+            i = i + 1
+        Ok(out)
+    else:
+        # Interior page: descend each child pointer left to right, then the
+        # right-most pointer; this yields ascending rowid order.
+        val n = cell_count(page, base)
+        pager.check_span(base, 12)?
+        val rightmost = be_u32_at(page, base + 8)
+        var i: i64 = 0
+        while i < n:
+            val ptr = cell_ptr(page, base, 12, i)
+            val cell = parse_table_interior_cell(pager, page, ptr)?
+            out = _scan_table_page(pager, cell.0, depth + 1, out)?
+            i = i + 1
+        _scan_table_page(pager, rightmost, depth + 1, out)
+
+# Full in-order scan of a table b-tree rooted at `root_page`.
+fn table_btree_scan(pager: SqlitePager, root_page: i64) -> Result<[(i64, [u8])], SqliteError>:
+    var empty: [(i64, [u8])] = []
+    _scan_table_page(pager, root_page, 0, empty)
+

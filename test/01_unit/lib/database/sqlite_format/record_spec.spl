@@ -1,0 +1,197 @@
+# SQLite record codec specs (plan section 3.3 item 3).
+# Serial types 0..9, 12+ blob/text lengths, signed big-endian ints, IEEE-754
+# bit patterns, UTF-8/16 text decode, and encode/decode round-trips.
+
+use std.spec
+use std.nogc_sync_mut.database.sqlite_format.record.{
+    sqlite_record_decode, sqlite_record_encode, sqlite_serial_size
+}
+use std.nogc_sync_mut.database.sqlite_format.types.{SqliteError}
+use std.nogc_sync_mut.database.sql.types.{DbValue}
+use std.common.encoding.utf8.{text_from_codepoints}
+
+fn rec_of(vals: [DbValue]) -> [u8]:
+    sqlite_record_encode(vals)
+
+describe "sqlite_format record":
+
+    it "serial sizes match the file format table":  # oracle: fileformat2 serial type -> byte count
+        expect(sqlite_serial_size(0) ?? -1).to_equal(0)
+        expect(sqlite_serial_size(1) ?? -1).to_equal(1)
+        expect(sqlite_serial_size(2) ?? -1).to_equal(2)
+        expect(sqlite_serial_size(3) ?? -1).to_equal(3)
+        expect(sqlite_serial_size(4) ?? -1).to_equal(4)
+        expect(sqlite_serial_size(5) ?? -1).to_equal(6)
+        expect(sqlite_serial_size(6) ?? -1).to_equal(8)
+        expect(sqlite_serial_size(7) ?? -1).to_equal(8)
+        expect(sqlite_serial_size(8) ?? -1).to_equal(0)
+        expect(sqlite_serial_size(9) ?? -1).to_equal(0)
+        expect(sqlite_serial_size(12) ?? -1).to_equal(0)
+        expect(sqlite_serial_size(13) ?? -1).to_equal(0)
+        expect(sqlite_serial_size(14) ?? -1).to_equal(1)
+        expect(sqlite_serial_size(15) ?? -1).to_equal(1)
+        expect(sqlite_serial_size(26) ?? -1).to_equal(7)
+        expect(sqlite_serial_size(27) ?? -1).to_equal(7)
+
+    it "reserved serial types 10 and 11 fail closed":  # oracle: fileformat2 marks 10/11 reserved
+        match sqlite_serial_size(10):
+            Ok(n):
+                expect(n).to_equal(-1)
+            Err(SqliteError.ReservedSerialType(serial: 10)):
+                expect(true).to_equal(true)
+            Err(e):
+                expect(e.message()).to_equal("")
+        match sqlite_serial_size(11):
+            Ok(n):
+                expect(n).to_equal(-1)
+            Err(SqliteError.ReservedSerialType(serial: 11)):
+                expect(true).to_equal(true)
+            Err(e):
+                expect(e.message()).to_equal("")
+
+    it "decodes serial types 0..9 with typed values":  # oracle: hand-built records, one column per serial
+        # header: len 2, serial S -> bytes [2, S]; body per width
+        var s0: [u8] = [2u8, 0u8]
+        match sqlite_record_decode(s0, 1):
+            Ok(v): expect(v).to_equal([DbValue.Null])
+            Err(e): expect(e.message()).to_equal("")
+        var s1: [u8] = [2u8, 1u8, 0xFFu8]
+        match sqlite_record_decode(s1, 1):
+            Ok(v): expect(v).to_equal([DbValue.Integer(value: -1)])
+            Err(e): expect(e.message()).to_equal("")
+        var s2: [u8] = [2u8, 2u8, 0x01u8, 0x00u8]
+        match sqlite_record_decode(s2, 1):
+            Ok(v): expect(v).to_equal([DbValue.Integer(value: 256)])
+            Err(e): expect(e.message()).to_equal("")
+        var s3: [u8] = [2u8, 3u8, 0xFFu8, 0xFFu8, 0xFFu8]
+        match sqlite_record_decode(s3, 1):
+            Ok(v): expect(v).to_equal([DbValue.Integer(value: -1)])
+            Err(e): expect(e.message()).to_equal("")
+        var s4: [u8] = [2u8, 4u8, 0x00u8, 0x01u8, 0x00u8, 0x00u8]
+        match sqlite_record_decode(s4, 1):
+            Ok(v): expect(v).to_equal([DbValue.Integer(value: 65536)])
+            Err(e): expect(e.message()).to_equal("")
+        # serial 5: 6-byte int
+        var s5: [u8] = [2u8, 5u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x2Au8]
+        match sqlite_record_decode(s5, 1):
+            Ok(v): expect(v).to_equal([DbValue.Integer(value: 42)])
+            Err(e): expect(e.message()).to_equal("")
+        # serial 6: 8-byte int, max i64
+        var s6: [u8] = [2u8, 6u8, 0x7Fu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8]
+        match sqlite_record_decode(s6, 1):
+            Ok(v): expect(v).to_equal([DbValue.Integer(value: 9223372036854775807)])
+            Err(e): expect(e.message()).to_equal("")
+        # serial 7: IEEE-754 1.5 = 0x3FF8000000000000
+        var s7: [u8] = [2u8, 7u8, 0x3Fu8, 0xF8u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8]
+        match sqlite_record_decode(s7, 1):
+            Ok(v): expect(v).to_equal([DbValue.Real(value: 1.5)])
+            Err(e): expect(e.message()).to_equal("")
+        # serial 8 and 9: constant ints 0 and 1, no body bytes
+        var s8: [u8] = [2u8, 8u8]
+        match sqlite_record_decode(s8, 1):
+            Ok(v): expect(v).to_equal([DbValue.Integer(value: 0)])
+            Err(e): expect(e.message()).to_equal("")
+        var s9: [u8] = [2u8, 9u8]
+        match sqlite_record_decode(s9, 1):
+            Ok(v): expect(v).to_equal([DbValue.Integer(value: 1)])
+            Err(e): expect(e.message()).to_equal("")
+
+    it "decodes negative integers at every width":  # oracle: two's complement, big-endian
+        var one: [u8] = [2u8, 1u8, 0x80u8]
+        match sqlite_record_decode(one, 1):
+            Ok(v): expect(v).to_equal([DbValue.Integer(value: -128)])
+            Err(e): expect(e.message()).to_equal("")
+        var two: [u8] = [2u8, 2u8, 0x80u8, 0x00u8]
+        match sqlite_record_decode(two, 1):
+            Ok(v): expect(v).to_equal([DbValue.Integer(value: -32768)])
+            Err(e): expect(e.message()).to_equal("")
+        var three: [u8] = [2u8, 3u8, 0x80u8, 0x00u8, 0x00u8]
+        match sqlite_record_decode(three, 1):
+            Ok(v): expect(v).to_equal([DbValue.Integer(value: -8388608)])
+            Err(e): expect(e.message()).to_equal("")
+        var four: [u8] = [2u8, 4u8, 0x80u8, 0x00u8, 0x00u8, 0x00u8]
+        match sqlite_record_decode(four, 1):
+            Ok(v): expect(v).to_equal([DbValue.Integer(value: -2147483648)])
+            Err(e): expect(e.message()).to_equal("")
+        var six: [u8] = [2u8, 6u8, 0x80u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8]
+        match sqlite_record_decode(six, 1):
+            Ok(v): expect(v).to_equal([DbValue.Integer(value: -9223372036854775808)])
+            Err(e): expect(e.message()).to_equal("")
+
+    it "preserves IEEE-754 real bit patterns":  # oracle: 1.5 = 3FF8.., -2.25 = C004.., pi
+        var vals: [DbValue] = []
+        vals.push(DbValue.Real(value: 1.5))
+        vals.push(DbValue.Real(value: -2.25))
+        vals.push(DbValue.Real(value: 3.141592653589793))
+        vals.push(DbValue.Real(value: -0.5))
+        for value in vals:
+            val enc = rec_of([value])
+            expect(enc.len()).to_equal(10)
+            expect(enc[1]).to_equal(7)
+            match sqlite_record_decode(enc, 1):
+                Ok(v): expect(v).to_equal([value])
+                Err(e): expect(e.message()).to_equal("")
+
+    it "decodes UTF-8 text with multibyte characters":  # oracle: "héllo ✓" UTF-8 bytes
+        # serial 13 + 2*10 = 33 for 10-byte text
+        var buf: [u8] = [2u8, 33u8, 0x68u8, 0xC3u8, 0xA9u8, 0x6Cu8, 0x6Cu8, 0x6Fu8, 0x20u8, 0xE2u8, 0x9Cu8, 0x93u8]
+        match sqlite_record_decode(buf, 1):
+            Ok(v): expect(v).to_equal([DbValue.Text(value: "héllo ✓")])
+            Err(e): expect(e.message()).to_equal("")
+
+    it "decodes UTF-16LE and UTF-16BE text":  # oracle: "hi" = 68 69; surrogate pair for U+1F600
+        var le: [u8] = [2u8, 21u8, 0x68u8, 0x00u8, 0x69u8, 0x00u8]
+        match sqlite_record_decode(le, 2):
+            Ok(v): expect(v).to_equal([DbValue.Text(value: "hi")])
+            Err(e): expect(e.message()).to_equal("")
+        var be: [u8] = [2u8, 21u8, 0x00u8, 0x68u8, 0x00u8, 0x69u8]
+        match sqlite_record_decode(be, 3):
+            Ok(v): expect(v).to_equal([DbValue.Text(value: "hi")])
+            Err(e): expect(e.message()).to_equal("")
+        # U+1F600 = surrogate pair D83D DE00
+        var emoji_le: [u8] = [2u8, 21u8, 0x3Du8, 0xD8u8, 0x00u8, 0xDEu8]
+        val emoji = text_from_codepoints([0x1F600])
+        match sqlite_record_decode(emoji_le, 2):
+            Ok(v): expect(v).to_equal([DbValue.Text(value: emoji)])
+            Err(e): expect(e.message()).to_equal("")
+
+    it "decodes blob payloads with 12+ even serials":  # oracle: serial 12+2n, n-byte blob
+        var buf: [u8] = [2u8, 20u8, 0xDEu8, 0xADu8, 0xBEu8, 0xEFu8]
+        match sqlite_record_decode(buf, 1):
+            Ok(v): expect(v).to_equal([DbValue.Blob(value: [0xDEu8, 0xADu8, 0xBEu8, 0xEFu8])])
+            Err(e): expect(e.message()).to_equal("")
+
+    it "round-trips mixed records through encode and decode":  # oracle: same DbValue list out as in
+        var vals: [DbValue] = []
+        vals.push(DbValue.Null)
+        vals.push(DbValue.Integer(value: 0))
+        vals.push(DbValue.Integer(value: 1))
+        vals.push(DbValue.Integer(value: -1))
+        vals.push(DbValue.Integer(value: 9223372036854775807))
+        vals.push(DbValue.Integer(value: 0 - 9223372036854775807 - 1))
+        vals.push(DbValue.Real(value: 1.5))
+        vals.push(DbValue.Text(value: ""))
+        vals.push(DbValue.Text(value: "unicode héllo ✓"))
+        vals.push(DbValue.Blob(value: [0u8, 1u8, 255u8]))
+        val enc = rec_of(vals)
+        match sqlite_record_decode(enc, 1):
+            Ok(v): expect(v).to_equal(vals)
+            Err(e): expect(e.message()).to_equal("")
+
+    it "rejects a record whose body is truncated":  # oracle: serial 6 promises 8 body bytes, only 3 present
+        var buf: [u8] = [2u8, 6u8, 0x01u8, 0x02u8, 0x03u8]
+        match sqlite_record_decode(buf, 1):
+            Ok(v):
+                expect(v.len()).to_equal(-1)
+            Err(SqliteError.MalformedRecord(message: _)):
+                expect(true).to_equal(true)
+            Err(e):
+                expect(e.message()).to_equal("")
+
+    it "canonical integer encoding uses serials 8 and 9 for 0 and 1":  # oracle: SQLite stores 0/1 as serial 8/9 with zero body bytes
+        var zero: [DbValue] = []
+        zero.push(DbValue.Integer(value: 0))
+        expect(rec_of(zero)).to_equal([2u8, 8u8])
+        var one: [DbValue] = []
+        one.push(DbValue.Integer(value: 1))
+        expect(rec_of(one)).to_equal([2u8, 9u8])

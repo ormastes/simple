@@ -20,9 +20,9 @@ set -eu
 #           and exits 0. A failed step (e.g. sudo needs a password this
 #           script cannot supply) is reported and does not abort the rest —
 #           the final re-check honestly reports what is still missing.
-#   install-llvm23 — install and check only LLVM 23.1.1. Unlike the general
-#           minimum-version check, this must refuse a rolling 23.1.2 package:
-#           aya-llvm-sys binds exactly 23.1.1 through LLVM_SYS_231_PREFIX.
+#   install-llvm23 — install and check LLVM 23 (any 23.x.y; owner decision 2026-10-22,
+#           major is strict, minor/patch only warn). Installs the 23.1.1 reference:
+#           aya-llvm-sys binds LLVM 23 through LLVM_SYS_231_PREFIX.
 #   --dry-run — with `install`, print the exact plan (same "installing ..."
 #           lines) WITHOUT executing anything. Changes nothing. Exit code
 #           mirrors what `check` would report, since no state changed.
@@ -113,6 +113,9 @@ LLVM_APT_KEY_FINGERPRINT="6084F3CF814B57C1CF12EFD515CF4D18AF4F7421"
 LLVM_MOLD_PIN_VERSION="2.42.1"
 LLVM_MOLD_PIN_SHA256_X86_64="6ff270c9bf07d2bec5c98aa324eb7c4daf6a1a4d815c05ff1708049616047855"
 LLVM_MOLD_PIN_SHA256_AARCH64="16b025652d3d7456689e6025a77e1903bb2a15e7630877c26cc133f5df95b9c6"
+
+LLVM_MINGW_PIN_VERSION="20260922"
+LLVM_MINGW_PIN_SHA256="e3ad77d117a4bea19a7a3b333341824d79a5a371004a10e25b8504e7b3047666"
 
 LUNARG_VULKAN_SDK_PIN_VERSION="1.4.341.1"
 
@@ -1128,6 +1131,68 @@ do_install_mold() {
     esac
 }
 
+# Windows gnu lane toolchain: GitHub mstorsjo/llvm-mingw (clang + lld, UCRT,
+# compiler-rt + libunwind + libc++; no GCC) extracted into
+# $SIMPLE_TOOLCHAINS_ROOT (default ~/.simple/toolchains), where
+# scripts/setup/platform-detect.shs discovers it. Idempotent: skipped when the
+# install dir already has bin/clang.exe; a cached download is reused only if
+# its SHA-256 matches the pin; the archive is verified BEFORE extraction.
+do_install_llvm_mingw() {
+    dry_run="$1"
+    root="${SIMPLE_TOOLCHAINS_ROOT:-${HOME:-/nonexistent}/.simple/toolchains}"
+    name="llvm-mingw-${LLVM_MINGW_PIN_VERSION}-ucrt-x86_64"
+    if [ -x "$root/$name/bin/clang.exe" ]; then
+        echo "llvm-mingw $LLVM_MINGW_PIN_VERSION already installed at $root/$name — skipping"
+        return 0
+    fi
+    zip="$root/downloads/$name.zip"
+    url="https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_PIN_VERSION}/$name.zip"
+    if [ "$dry_run" = "1" ]; then
+        echo "would run: fetch $url (unless $zip already matches SHA-256 $LLVM_MINGW_PIN_SHA256), verify, extract into $root/$name"
+        return 0
+    fi
+    mkdir -p "$root/downloads" || return 1
+    if [ ! -f "$zip" ] || [ "$(sha256_of "$zip")" != "$LLVM_MINGW_PIN_SHA256" ]; then
+        rm -f "$zip"
+        set +e
+        wget -qO "$zip" "$url"
+        dl_rc=$?
+        set -e
+        if [ "$dl_rc" -ne 0 ]; then
+            rm -f "$zip"
+            echo "warning: could not download $url (exit $dl_rc) — llvm-mingw not installed" >&2
+            return 1
+        fi
+    fi
+    actual_sha256="$(sha256_of "$zip")"
+    if [ "$actual_sha256" != "$LLVM_MINGW_PIN_SHA256" ]; then
+        echo "error: llvm-mingw checksum mismatch for $zip — got $actual_sha256, expected $LLVM_MINGW_PIN_SHA256. REFUSING to extract it." >&2
+        rm -f "$zip"
+        return 1
+    fi
+    echo "checksum verified for llvm-mingw $LLVM_MINGW_PIN_VERSION"
+    stage="$root/.extract-$name.$$"
+    rm -rf "$stage"
+    mkdir -p "$stage" || return 1
+    set +e
+    if command -v unzip >/dev/null 2>&1; then
+        unzip -q "$zip" -d "$stage"
+    else
+        tar -xf "$zip" -C "$stage"
+    fi
+    x_rc=$?
+    set -e
+    if [ "$x_rc" -ne 0 ] || [ ! -x "$stage/$name/bin/clang.exe" ]; then
+        echo "error: could not extract the verified llvm-mingw archive (exit $x_rc)" >&2
+        rm -rf "$stage"
+        return 1
+    fi
+    rm -rf "$root/$name"
+    mv "$stage/$name" "$root/$name" || { rm -rf "$stage"; return 1; }
+    rm -rf "$stage"
+    echo "installed llvm-mingw $LLVM_MINGW_PIN_VERSION into $root/$name"
+}
+
 do_install_jj() {
     dry_run="$1"; fam="$2"
     echo "=== jj (upgrade via cargo now that a modern rustc is available) ==="
@@ -1340,6 +1405,11 @@ run_install() {
     apply_local_bin_path
     detect_timeout_mode
 
+    # Windows default (gnu) lane toolchain; idempotent, independent of the tool rows.
+    if [ "$fam" = "windows" ] && [ "${SIMPLE_WINDOWS_ABI:-gnu}" != "msvc" ]; then
+        do_install_llvm_mingw "$dry_run" || true
+    fi
+
     names="$(platform_tools "$platform")"
     n=0
     missing=0
@@ -1457,7 +1527,7 @@ run_install_llvm23_only() {
         row="$(check_one "$tool" "$fam")"
         split_row "$row"
         case "$ROW_STATUS:$ROW_FOUND" in
-            PRESENT:23.1.1) : ;;
+            PRESENT:23.*) : ;;
             *) missing=1 ;;
         esac
     done
@@ -1471,15 +1541,15 @@ run_install_llvm23_only() {
         printf '%s\n' "$row"
         split_row "$row"
         case "$ROW_STATUS:$ROW_FOUND" in
-            PRESENT:23.1.1) : ;;
+            PRESENT:23.*) : ;;
             *) missing=1 ;;
         esac
     done
     if [ "$missing" -ne 0 ]; then
-        echo "FAIL — exact LLVM 23.1.1 prerequisite(s) remain unavailable"
+        echo "FAIL — LLVM 23 prerequisite(s) remain unavailable"
         return 1
     fi
-    echo "PASS — exact LLVM 23.1.1 prerequisite(s) checked"
+    echo "PASS — LLVM 23 prerequisite(s) checked"
 }
 
 # ---------------------------------------------------------------------------

@@ -151,6 +151,32 @@ simple_msvc_sdk_bin="$simple_msvc_sdk_root/bin/$simple_msvc_sdk_ver/x64"
 # a caller-supplied LLVM_SYS_231_PREFIX so this file's PATH entry and the prefix
 # that script prepends can never name two different LLVM installations.
 simple_msvc_llvm_prefix="${LLVM_SYS_231_PREFIX:-${SIMPLE_LLVM_WIN_ROOT_23:-/c/dev/tool/clang+llvm-23.1.1-x86_64-pc-windows-msvc}}"
+# Portability (2026-10-22): when the caller pinned no prefix and the historical
+# /c/dev/tool default is absent, discover the pinned LLVM 23.1.1 toolchain from
+# the canonical local toolchain store, evidence-bound via toolchain-evidence.env.
+# The Windows C authority is always clang-cl + lld-link from this prefix
+# (clang-only policy: never cl.exe, never link.exe); a host without a usable
+# pinned toolchain fails here instead of silently falling back.
+if [ ! -x "$simple_msvc_llvm_prefix/bin/clang-cl.exe" ]; then
+  for simple_msvc_llvm_candidate in \
+    "${HOME}/.simple/toolchains/llvm-msvc-23.1.1/clang+llvm-23.1.1-x86_64-pc-windows-msvc" \
+    "/c/dev/tool/clang+llvm-23.1.1-x86_64-pc-windows-msvc"; do
+    [ -x "$simple_msvc_llvm_candidate/bin/clang-cl.exe" ] || continue
+    if [ -f "$simple_msvc_llvm_candidate/../toolchain-evidence.env" ]; then
+      grep -q '^release=llvmorg-23\.1\.1$' \
+        "$simple_msvc_llvm_candidate/../toolchain-evidence.env" || continue
+    fi
+    simple_msvc_llvm_prefix="$simple_msvc_llvm_candidate"
+    break
+  done
+fi
+[ -x "$simple_msvc_llvm_prefix/bin/clang-cl.exe" ] || {
+  echo "windows-msvc-bootstrap-env: clang-cl.exe not found; set LLVM_SYS_231_PREFIX" >&2
+  echo "  to a pinned clang+llvm-23.1.1-x86_64-pc-windows-msvc toolchain." >&2
+  return 1 2>/dev/null || exit 1
+}
+LLVM_HOME="$simple_msvc_llvm_prefix"
+export LLVM_HOME
 simple_msvc_llvm_bin="$simple_msvc_llvm_prefix/bin"
 SIMPLE_LLVM_WIN_ROOT_23="$simple_msvc_llvm_prefix"
 

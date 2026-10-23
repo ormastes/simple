@@ -356,7 +356,10 @@ jobs:
 
       - name: Install C tools (Linux Cranelift)
         if: runner.os == 'Linux' && matrix.backend == 'cranelift'
-        run: sudo apt-get install -y clang-18 lld-18 llvm-18-dev
+        run: |
+          sudo apt-get install -y clang-18 lld-18 llvm-18-dev
+          # native-build requires unsuffixed llvm-ar/llvm-nm; llvm-18 only ships suffixed names on PATH.
+          echo /usr/lib/llvm-18/bin >> "${GITHUB_PATH:-/dev/null}"
 
       - name: Restore immutable Linux LLVM archive
         if: runner.os == 'Linux' && matrix.backend == 'llvm'
@@ -386,17 +389,22 @@ jobs:
       - name: Install macOS build dependencies
         if: runner.os == 'macOS'
         run: |
-          brew install coreutils freetype zstd llvm ${{ matrix.backend == 'llvm' && 'llvm@18' || '' }}
+          brew install coreutils freetype zstd llvm
           llvm_objcopy="$(brew --prefix llvm)/bin/llvm-objcopy"
           test -x "$llvm_objcopy"
           "$llvm_objcopy" --version
           echo "RUSTFLAGS=-L native=$(brew --prefix freetype)/lib" >> "$GITHUB_ENV"
           echo "LIBRARY_PATH=$(brew --prefix freetype)/lib:$(brew --prefix zstd)/lib:${LIBRARY_PATH:-}" >> "$GITHUB_ENV"
           echo "CPATH=$(brew --prefix freetype)/include:${CPATH:-}" >> "$GITHUB_ENV"
+          # Homebrew llvm is keg-only; bootstrap preflight runs llvm-config on every backend.
+          echo "LLVM_CONFIG=$(brew --prefix llvm)/bin/llvm-config" >> "$GITHUB_ENV"
+          # The vendored aya-llvm-sys is 231.x (links = "llvm-23") and reads
+          # LLVM_SYS_231_PREFIX; the old llvm@18 on PATH made its build
+          # script find LLVM 18 and stop ("No suitable version of LLVM").
           if [ "${{ matrix.backend }}" = "llvm" ]; then
-            llvm_prefix=$(brew --prefix llvm@18)
+            llvm_prefix=$(brew --prefix llvm)
             echo "$llvm_prefix/bin" >> "$GITHUB_PATH"
-            echo "LLVM_SYS_180_PREFIX=$llvm_prefix" >> "$GITHUB_ENV"
+            echo "LLVM_SYS_231_PREFIX=$llvm_prefix" >> "$GITHUB_ENV"
           fi
 
       - name: Install dependencies (Windows)
@@ -530,6 +538,8 @@ jobs:
             .simple/storage/build/bootstrap/logs/**
             .simple/storage/build/bootstrap/stage3/**/*.log*
             .simple/storage/build/bootstrap/stage3/**/*.transcript
+            build/bootstrap/stage2/*/simple.rejected
+            build/bootstrap/stage3/*/stage2-sanity*.log
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
@@ -916,7 +926,11 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install cross-compilation toolchain
-        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.pkg }}
+        run: |
+          sudo apt-get update && sudo apt-get install -y ${{ matrix.pkg }}
+          # The target std must belong to the rust-toolchain.toml pin; the
+          # action above installed it for the latest nightly only.
+          cd src/compiler_rust && rustup target add ${{ matrix.target }}
 
       - name: Select Clang for Windows GNU bootstrap
         if: matrix.target == 'x86_64-pc-windows-gnu'
