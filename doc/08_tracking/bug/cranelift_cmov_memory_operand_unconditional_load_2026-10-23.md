@@ -1,4 +1,4 @@
-# Struct copy-in accepts a hash-shaped word as a heap pointer and dereferences it
+# Struct copy-in dereferences an inline `Some` box as a heap handle
 
 - **Date:** 2026-10-23 (title and attribution corrected 2026-10-24)
 - **Status:** OPEN — defect is in OUR codegen, in
@@ -263,3 +263,201 @@ SimpleOS links higher-half.
 
 Filed separately with its provenance:
 `doc/08_tracking/bug/seed_field_receiver_guard_neutralized_and_predicate_unlinkable_2026-10-24.md`.
+
+## RESOLVED 2026-10-24: the producer is located, and it is not a hash
+
+Everything above treats `0xf198715900000000` as an unidentified "hash-shaped"
+word and the producer as unknown. **It is identified, exactly, with no
+inference left.** The word is not a hash standing on its own, and it is not a
+wild pointer: it is **interior word 1 of a live, well-formed heap
+`RuntimeEnum`** holding `Option::Some`.
+
+### The arithmetic
+
+`RuntimeEnum` (`src/compiler_rust/runtime/src/value/objects.rs:76`, `#[repr(C)]`):
+
+| word | contents |
+|---|---|
+| 0 | `header: HeapHeader` — `object_type` u8, `gc_flags` u8, `reserved` u16, `size` u32 (`value/heap.rs:57`) |
+| 1 | `enum_id: u32` then `discriminant: u32` |
+| 2 | `payload: RuntimeValue` |
+
+Word 1 little-endian is therefore `enum_id | (discriminant << 32)`. For an
+`Option`:
+
+- `OPTION_ENUM_ID = 1` (`objects.rs:363`)
+- `discriminant = hash_variant_discriminant("Some") = 0xf1987159` (`objects.rs:354`)
+
+```
+word1        = (0xf1987159 << 32) | 1 = 0xF198715900000001
+word1 & ~7   =                         0xF198715900000000   <-- the faulting address
+```
+
+That is the value in `%rsi` at the SIGSEGV, and the same value
+`src/app/compiler_schema/codec_gen.spl:541` already records for
+`hc_enc_hir_type`. Both reduce to the same object.
+
+### `0xf1987159` is confirmed twice in-tree, once executably
+
+- `src/plugins/backend_llvm_lib/llvm_lib_translate_expr.spl:622` —
+  `if _sffi_enum_discriminant<LocalId>(raw_dest) == 0xf1987159:  # hash("Some")`
+- `src/compiler_rust/compiler/src/pipeline/native_project/tests.rs:8075` —
+  `if ((uint32_t)rt_enum_discriminant(some) != 4053299545u) return 96;`
+
+`0xf1987159 == 4053299545`, so the comment and the assertion name the same
+constant. The second is a test, so this is not two copies of one guess.
+
+### What the defect actually is
+
+`emit_aggregate_block_copy` is handed a **heap `RuntimeEnum`** while applying a
+**declared-struct descriptor**. Its `deep_fields` loop reads word 1 of the
+block, tests `word & 7 == 1`, and treats the result as a nested handle.
+
+The collision that turns the type confusion into a fault is numeric and exact:
+
+```
+OPTION_ENUM_ID    = 1
+RT_VALUE_TAG_HEAP = 1
+```
+
+Word 1 of EVERY `Option` object therefore passes the handle test — low bits `1`,
+untagged part nonzero — no matter which variant it holds. The copy then
+dereferences `discriminant << 32`.
+
+### The descriptor is not at fault
+
+`struct_deep_fields` (`src/compiler_rust/compiler/src/mir/lower/lowering_core.rs:1060`)
+emits a field descriptor only when all of these hold: the field type name
+resolves, `type_value_kinds[name] == Some(true)` (declared `struct`), and
+`registry.get(fty)` is a non-empty `HirType::Struct`. An enum-typed field gets
+no descriptor. So the descriptor correctly describes its declared type — the
+**value reaching the slot is the wrong kind of object**. This is a type
+confusion upstream of codegen, not a bad descriptor and not a bad guard.
+
+### Why all three previously attempted fixes were wrong
+
+Each failed for its own reason, and each reason is now explained by the above:
+
+1. **Narrow `src_is_valid`** (PR #4239, withdrawn as P0). Cannot work: the tail
+   of the function returns `src_tagged` unchanged when invalid, so rejecting the
+   word silently aliases instead of copying — `var b = a; b.x = 1` mutates `a`.
+   The `1 << 48` form additionally rejects every SimpleOS higher-half pointer.
+2. **A registry-membership probe.** Cannot work here: AOT lowering allocates
+   Simple structs as raw `rt_alloc` blocks that are never registered
+   (`src/runtime/runtime_native.c:10296` records this and the resulting
+   "unregistered HirModule node", `stores=0 refused=1351`). A registry probe
+   rejects every struct.
+3. **`rt_heap_ref_wellformed`** (the generated-visitor guards, abandoned). Cannot
+   work: it is `(value & ~TAG_MASK) >= 4096`, and `runtime_native.c:10288` states
+   outright that "any large garbage integer passes it". `0xf198715900000000`
+   passes, so those guards were inert, not merely weak.
+
+### Where a fix belongs
+
+Not in `emit_aggregate_block_copy`. The word it dereferences is a correct word
+of a correct object; the error is that an `Option` value is in a slot the
+descriptor says is a struct. Two candidate owners, both upstream:
+
+- **Lowering** — stop an `Option`-typed value from reaching a struct-typed slot
+  (the codec's optional handling is the suspected path: `HirExpr` optional
+  payloads, and `Assign(op: HirAssignOp?)` at `hir_definitions.spl:801`).
+- **Representation** — make `OPTION_ENUM_ID` not collide with
+  `RT_VALUE_TAG_HEAP`. The collision is what converts a detectable type
+  confusion into a silent dereference, and it will keep producing
+  "the nil guard does not work" reports until it is broken.
+
+The second is the smaller change and would make this class of confusion
+*detectable* everywhere at once rather than fixing one path.
+
+### Diagnostic
+
+`emit_aggregate_block_copy` carries an env-gated probe
+(`SIMPLE_AGGREGATE_COPY_DIAG`, codegen-time) that prints the enclosing type name
+before the existing fault. It emits nothing when unset, so every release and
+bootstrap artifact is byte-identical. It is retained to name the enclosing type
+of the next instance of this class without another 50-minute bootstrap.
+
+## CORRECTION 2026-10-24 (same day): this was already documented in-tree
+
+The section above says the producer was "unlocated" and presents the
+`RuntimeEnum` word-1 derivation as new. **Both claims need correcting, and the
+correction matters more than the derivation.**
+
+`src/app/compiler_schema/codec_gen.spl` (the `_emit_dec` node/opaque branch)
+already carries this explanation, with the exact value and the exact slot:
+
+> Bug (selfhost_hir_cache_encode_hir_type_segv_2026-08-22): the if-EXPRESSION
+> form unifies both arms at `T?`, so the taken arm is boxed as an inline `Some`
+> enum word (hash("Some")<<32 | 1). Stored into a NON-optional field --
+> HirType.span is declared `span: Span` -- that enum word is then deep-copied as
+> a tagged `Span` pointer by the next callee's value-semantics copy-in prologue,
+> faulting on 0xf198715900000000 in hc_enc_hir_type.
+
+So the `hash(variant) << 32 | 1` premise recorded elsewhere as "unlocated in any
+producer" was never unlocated. It is stated in a file this lane had already
+edited (PRs #4232, #4233), and reading it first would have saved the whole
+search.
+
+### Two bit-identical mechanisms; the value cannot distinguish them
+
+| mechanism | word |
+|---|---|
+| inline `Some` box (what `codec_gen.spl` asserts) | `hash("Some") << 32 \| 1` |
+| heap `RuntimeEnum` word 1 (the derivation above) | `enum_id \| (discriminant << 32)` = `1 \| (hash("Some") << 32)` |
+
+Both are `0xF198715900000001`, so `%rsi = 0xF198715900000000` is consistent with
+either and **proves neither**. The record above overstated it by presenting the
+second as established. `codec_gen.spl`'s attribution is the better supported of
+the two, because it names a concrete construction site.
+
+### The generator's node/opaque mitigation is already applied
+
+`_emit_dec` emits the statement form, not the if-expression:
+
+```simple
+var f_type_: HirType? = nil
+if r.next_i64() == 1:
+    f_type_ = hc_dec_hir_type(r)
+```
+
+Per that comment the statement form "assigns the bare value without boxing", so
+`f_type_` holds a bare node, and when the field is absent it stays `nil` — whose
+immediate is **3**, giving tag 3, which the copy-in's `tag == 1` test correctly
+rejects. **So the decoder path is mitigated and is not the open hole.** An
+earlier draft of this record claimed the decoder was the root cause because
+`f_type_` is *declared* `HirType?` while `HirExpr.type_`
+(`hir_definitions.spl:561`) is non-optional. The declaration is not the
+representation here; that claim is withdrawn.
+
+### What does survive from the derivation
+
+Four things, none of which the in-tree comment states:
+
+1. **`0xf1987159` is `hash_variant_discriminant("Some")`, confirmed twice and
+   once executably** — `llvm_lib_translate_expr.spl:622` comments it, and
+   `native_project/tests.rs:8075` asserts
+   `rt_enum_discriminant(some) == 4053299545`, the same number. The generator's
+   comment asserts the shape without citing provenance.
+2. **The collision is numeric and total: `OPTION_ENUM_ID == RT_VALUE_TAG_HEAP == 1`**
+   (`objects.rs:363`). This is why an `Option` — inline box *or* heap word 1 —
+   passes `src_is_valid` regardless of variant. It generalises: any enum id
+   whose low 3 bits are 1 collides. Documented nowhere.
+3. **The descriptor is not at fault.** `struct_deep_fields`
+   (`mir/lower/lowering_core.rs:1060`) emits a field descriptor only for a
+   declared `struct` with a non-empty `HirType::Struct` field list, so an
+   enum-typed field gets none. `struct HirType` has `span: Span` at field index
+   **1** (`hir_types.spl:662`), which is why the descriptor reads word 1 — the
+   same slot `runtime_native.c:10288` independently records as a "wild
+   HirSymbol span".
+4. **Why all three attempted fixes failed**, each for its own reason (table
+   above).
+
+### Net
+
+The open hole is NOT the decoder. It is that **some remaining construction site
+still stores an inline `Some` box into a non-optional node field**, and the
+copy-in cannot tell it from a handle because of collision (2). Finding that site
+is what the `SIMPLE_AGGREGATE_COPY_DIAG` probe is for; `codec_gen.spl`'s note
+says the scalar case was "already hit once and fixed by inlining" and that the
+node/opaque case was "left unmitigated" until the statement form, so a third
+category is the place to look.

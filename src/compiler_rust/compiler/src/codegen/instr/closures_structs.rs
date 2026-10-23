@@ -709,6 +709,66 @@ fn emit_aggregate_block_copy<M: Module>(
     let src_is_heap = builder.ins().icmp(IntCC::Equal, src_tag, one);
     let src_nonnull = builder.ins().icmp(IntCC::NotEqual, src_ptr, zero);
     let src_is_valid = builder.ins().band(src_is_heap, src_nonnull);
+    // ---- producer diagnostic, codegen-time env gate -----------------------
+    // The word loop below trusts the heap tag. That is sound for a word whose
+    // tag is NOT 1 (`load_ptr` falls back to `new_ptr`, a live allocation of
+    // exactly `alloc_bytes`), so the SIGSEGV recorded in
+    // doc/08_tracking/bug/cranelift_cmov_memory_operand_unconditional_load_2026-10-23.md
+    // can only come from a word that IS tagged 1 and nonzero while its upper
+    // bits are not an address (measured: 0xf198715900000000). Narrowing
+    // `src_is_valid` to exclude it is NOT a fix and must not be retried: the
+    // tail of this function returns `src_tagged` unchanged when invalid, so a
+    // narrowed predicate turns a crash into a silent alias (`var b = a;
+    // b.x = 1` mutating `a`) — that is why PR #4239 was withdrawn.
+    //
+    // The word is an `Option` representation: `src/app/compiler_schema/codec_gen.spl`
+    // identifies it as an inline `Some` box, `hash("Some") << 32 | 1`, stored
+    // into a NON-optional node field (`HirType.span` is declared `span: Span`).
+    // `0xf1987159` is `hash_variant_discriminant("Some")`, asserted executably
+    // at `pipeline/native_project/tests.rs:8075`.
+    //
+    // What makes it UNDETECTABLE here is a numeric collision: `OPTION_ENUM_ID`
+    // is 1 (`runtime/src/value/objects.rs:363`) and so is `RT_VALUE_TAG_HEAP`,
+    // so an `Option` passes the handle test above regardless of variant -- and
+    // so does any enum whose id has low 3 bits 1. The fix belongs at whichever
+    // construction site still boxes, or in the representation; not here, where
+    // rejecting the word would silently alias (PR #4239, withdrawn P0).
+    //
+    // This probe stays to name the enclosing type of the NEXT instance without
+    // another 50-minute bootstrap: when SIMPLE_AGGREGATE_COPY_DIAG
+    // is set at COMPILE time, emit a pre-load probe that prints the enclosing
+    // type before the existing fault. Unset — every release build, every
+    // bootstrap stage — emits nothing at all, so the default artifact is
+    // byte-identical and this cannot regress a lane.
+    if std::env::var_os("SIMPLE_AGGREGATE_COPY_DIAG").is_some() {
+        let addr_limit = builder.ins().iconst(types::I64, 1i64 << 48);
+        let non_address = builder
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, src_ptr, addr_limit);
+        let report = builder.ins().band(src_is_valid, non_address);
+        let diag_block = builder.create_block();
+        let cont_block = builder.create_block();
+        builder.ins().brif(report, diag_block, &[], cont_block, &[]);
+
+        builder.switch_to_block(diag_block);
+        builder.seal_block(diag_block);
+        let msg = format!(
+            "aggregate-copy diagnostic: source word is tagged heap (low bits 1, nonzero) \
+             but is not a canonical address; enclosing type `{}`, block {} byte(s), {} deep field(s) \
+             — the next load will fault",
+            type_name.unwrap_or("<unnamed>"),
+            byte_size,
+            deep_fields.len()
+        );
+        if let Ok((msg_ptr, msg_len)) = create_string_constant(ctx, builder, &msg) {
+            call_runtime_2_void(ctx, builder, "rt_eprintln_str", msg_ptr, msg_len);
+        }
+        builder.ins().jump(cont_block, &[]);
+
+        builder.switch_to_block(cont_block);
+        builder.seal_block(cont_block);
+    }
+    // ---- end producer diagnostic ------------------------------------------
     let load_ptr = builder.ins().select(src_is_valid, src_ptr, new_ptr);
 
     for w in 0..words {
