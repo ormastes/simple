@@ -56,7 +56,7 @@ use compiler.frontend.aspect_registry.{aspect_registry_declare}
 use compiler.common.dependency.visibility.{Visibility}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io_runtime.{env_get_opt, env_set}
-use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, FLAT_POOL_CODEC_VERSION}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, FLAT_POOL_CODEC_VERSION, flat_pool_capture_sanitize_arm_v1, flat_pool_capture_sanitize_disarm_v1, flat_pool_capture_poisoned_v1}
 use compiler.core.types.{flat_type_pools_dump, flat_type_pools_restore}
 use compiler.core.parser.{flat_parser_state_dump, flat_parser_state_restore}
 use compiler.core.parser_decls.{flat_extend_pools_dump, flat_extend_pools_restore}
@@ -1586,10 +1586,16 @@ fn parse_and_build_module_with_scope_owner(source: text, path: text,
         # A parser-owned or caller-owned scope already contains the temporary
         # encoder objects. Its owner controls promotion and reclamation. Only
         # an unscoped caller opens a serialization-only scope here.
+        flat_pool_capture_sanitize_arm_v1()
         _fab_captured_blob = if transient_scope or borrowed_scope:
             flat_pools_dump_all()
         else:
             flat_pools_dump_for_cache()
+        flat_pool_capture_sanitize_disarm_v1()
+        if flat_pool_capture_poisoned_v1():
+            # A dangling text handle must refuse the store (cache miss on the
+            # next build), never poison the compiler or the cache bytes.
+            _fab_captured_blob = ""
         if fab_cache_boundary_prof_enabled():
             val dump_t1 = _sffi_time_now_unix_micros()
             print("PARSECACHE\tdump_ms={(dump_t1 - dump_t0) / 1000}\tbytes={_fab_captured_blob.len()}\tpath={path}")
