@@ -1,0 +1,122 @@
+# SQLite on-disk format — shared types and error taxonomy.
+#
+# Pure-Simple owner for the plain SQLite v3 file format (no C wrapper, no VFS).
+# Error variants are typed and fail-closed: a reader/writer problem is always a
+# SqliteError value, never a silent nil or a guessed default (plan section 3.3).
+#
+# DB-A reader gate and DB-B writer gate (plan sections 3.1/3.2). WAL overlay,
+# freelist reuse, index b-trees and page balancing are staged later gates.
+
+use std.nogc_sync_mut.database.sql.types.{DbValue, DbRow}
+
+# 16-byte magic at file offset 0: "SQLite format 3" followed by a NUL.
+fn sqlite_format_magic() -> [u8]:
+    [
+        0x53u8, 0x51u8, 0x4Cu8, 0x69u8, 0x74u8, 0x65u8, 0x20u8, 0x66u8,
+        0x6Fu8, 0x72u8, 0x6Du8, 0x61u8, 0x74u8, 0x20u8, 0x33u8, 0x00u8
+    ]
+
+val SQLITE_HEADER_LEN: i64 = 100
+
+# B-tree page kinds (byte 0 of every b-tree page, after the 100-byte header on page 1).
+val SQLITE_PAGE_INDEX_INTERIOR: i64 = 0x02
+val SQLITE_PAGE_TABLE_INTERIOR: i64 = 0x05
+val SQLITE_PAGE_INDEX_LEAF: i64 = 0x0A
+val SQLITE_PAGE_TABLE_LEAF: i64 = 0x0D
+
+# Database text encodings (header bytes 56..60, big-endian u32).
+val SQLITE_ENCODING_UTF8: i64 = 1
+val SQLITE_ENCODING_UTF16LE: i64 = 2
+val SQLITE_ENCODING_UTF16BE: i64 = 3
+
+# ============================================================================
+# SqliteError — typed, fail-closed error taxonomy
+# ============================================================================
+
+enum SqliteError:
+    Io(message: text)
+    BadMagic(found: [u8])
+    UnsupportedPageSize(value: i64)
+    UnsupportedFeature(what: text)
+    TruncatedFile(expected: i64, actual: i64)
+    PageOutOfRange(page: i64, page_count: i64)
+    OffsetOutOfBounds(offset: i64, length: i64)
+    MalformedVarint(offset: i64)
+    ReservedSerialType(serial: i64)
+    UnknownSerialType(serial: i64)
+    MalformedRecord(message: text)
+    UnknownPageType(page: i64, kind: i64)
+    OverflowCycle(page: i64)
+    OverflowLimitExceeded(page: i64, steps: i64)
+    CorruptPage(message: text)
+    SchemaNotFound(table: text)
+    MalformedSchema(message: text)
+    RowWidthMismatch(table: text, expected: i64, actual: i64)
+    InvalidInput(message: text)
+
+impl SqliteError:
+    fn message() -> text:
+        match self:
+            SqliteError.Io(message): "io failure: {message}"
+            SqliteError.BadMagic(found): "bad magic: not a SQLite format 3 file ({found.len()} header bytes read)"
+            SqliteError.UnsupportedPageSize(value): "unsupported page size {value} (need a power of two in 512..65536)"
+            SqliteError.UnsupportedFeature(what): "unsupported what: {what}"
+            SqliteError.TruncatedFile(expected, actual): "truncated file: need {expected} bytes, have {actual}"
+            SqliteError.PageOutOfRange(page, page_count): "page {page} out of range 1..{page_count}"
+            SqliteError.OffsetOutOfBounds(offset, length): "offset {offset} with length {length} outside page bounds"
+            SqliteError.MalformedVarint(offset): "malformed or truncated varint at offset {offset}"
+            SqliteError.ReservedSerialType(serial): "reserved record serial type {serial}"
+            SqliteError.UnknownSerialType(serial): "unknown record serial type {serial}"
+            SqliteError.MalformedRecord(message): "malformed record: {message}"
+            SqliteError.UnknownPageType(page, kind): "page {page} has unknown b-tree page type 0x{kind}"
+            SqliteError.OverflowCycle(page): "overflow page chain cycles at page {page}"
+            SqliteError.OverflowLimitExceeded(page, steps): "overflow chain from page {page} exceeded {steps} steps"
+            SqliteError.CorruptPage(message): "corrupt page: {message}"
+            SqliteError.SchemaNotFound(table): "table not found in sqlite_schema: {table}"
+            SqliteError.MalformedSchema(message): "malformed schema: {message}"
+            SqliteError.RowWidthMismatch(table, expected, actual): "table {table}: row has {actual} values, expected {expected}"
+            SqliteError.InvalidInput(message): "invalid input: {message}"
+
+# ============================================================================
+# SqliteFileInfo — validated header facts (probe/verify result)
+# ============================================================================
+
+struct SqliteFileInfo:
+    page_size: i64
+    page_count: i64
+    reserved_bytes: i64
+    text_encoding: i64
+    schema_cookie: i64
+    file_change_counter: i64
+    read_version: i64
+    write_version: i64
+    schema_format: i64
+    file_bytes: i64
+
+impl SqliteFileInfo:
+    fn usable_size() -> i64:
+        self.page_size - self.reserved_bytes
+
+# ============================================================================
+# Small checked readers (big-endian, explicit byte ops — no host layout reads)
+# ============================================================================
+
+# Checked big-endian u16 read from a byte buffer at an arbitrary offset.
+# The caller must guarantee bounds; page-level callers check first.
+fn be_u16_at(buf: [u8], off: i64) -> i64:
+    ((buf[off] as i64) << 8) | (buf[off + 1] as i64)
+
+# Checked big-endian u32 read; returns the value as i64 (page numbers fit).
+fn be_u32_at(buf: [u8], off: i64) -> i64:
+    ((buf[off] as i64) << 24) |
+    ((buf[off + 1] as i64) << 16) |
+    ((buf[off + 2] as i64) << 8) |
+    (buf[off + 3] as i64)
+
+# Append the big-endian bytes of v (low n bytes) to out, in place.
+fn put_be_bytes(out: [u8], v: i64, n: i64):
+    var i: i64 = n - 1
+    while i >= 0:
+        out.push(((v >> (i * 8)) & 0xFF) as u8)
+        i = i - 1
+

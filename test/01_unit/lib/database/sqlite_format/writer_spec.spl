@@ -1,0 +1,212 @@
+# DB-B writer gate specs (plan sections 3.1/3.3): deterministic whole-image
+# creation that external sqlite3 can open.
+#
+# Oracle strategy: the seed lacks the rt_array_bytes_* externs for
+# file_write_bytes (see doc/08_tracking/bug/ seed gap notes), so the image is
+# exported as a hex dump via text file write (which works), and python
+# sqlite3 rebuilds the binary, runs PRAGMA integrity_check and compares rows.
+# When python is unreachable the oracle prints ORACLE NOT RUN and only the
+# internal structural assertions stand (never a fake oracle pass).
+
+use std.spec
+use std.nogc_sync_mut.database.sqlite_format.wimage.{sqlite_format_create_image, SqliteTableData}
+use std.nogc_sync_mut.database.sqlite_format.{
+    sqlite_format_read_table_bytes, sqlite_verify_bytes
+}
+use std.nogc_sync_mut.database.sqlite_format.types.{SqliteError}
+use std.nogc_sync_mut.database.sql.types.{DbValue, DbRow}
+use std.nogc_sync_mut.fs.{file_write_text}
+use std.io_runtime.{process_run_bounded}
+
+val TMP: text = "C:/Users/user/AppData/Local/Temp/sqls"
+
+fn small_schema() -> text:
+    "CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER, r REAL, s TEXT, b BLOB);"
+
+fn small_rows() -> [DbRow]:
+    var rows: [DbRow] = []
+    var big: [u8] = []
+    var i: i64 = 0
+    while i < 5000:
+        big.push((((i * 7 + 13) % 256) as u8))
+        i = i + 1
+    rows.push(DbRow(columns: ["id","n","r","s","b"], values: [DbValue.Integer(value: 1), DbValue.Integer(value: 42), DbValue.Real(value: 1.5), DbValue.Text(value: "hi"), DbValue.Blob(value: [1u8, 2u8, 3u8])]))
+    var empty: [u8] = []
+    rows.push(DbRow(columns: ["id","n","r","s","b"], values: [DbValue.Integer(value: 2), DbValue.Null, DbValue.Real(value: -2.25), DbValue.Text(value: ""), DbValue.Blob(value: empty)]))
+    rows.push(DbRow(columns: ["id","n","r","s","b"], values: [DbValue.Integer(value: 3), DbValue.Integer(value: -9223372036854775808), DbValue.Real(value: 3.141592653589793), DbValue.Text(value: "héllo ✓"), DbValue.Blob(value: big)]))
+    rows
+
+fn small_tables() -> [SqliteTableData]:
+    [SqliteTableData(name: "t", columns: ["id","n","r","s","b"], rows: small_rows())]
+
+fn to_hex(image: [u8]) -> text:
+    var out = ""
+    val digits = "0123456789abcdef"
+    for b in image:
+        out = out + digits[(b >> 4) as i64]
+        out = out + digits[(b & 0x0F) as i64]
+    out
+
+fn oracle_available() -> bool:
+    val (out, err, code) = process_run_bounded("python", ["-c", "print('PYALIVE')"], 10000, 4096)
+    code == 0 and out.contains("PYALIVE")
+
+fn write_oracle_script() -> bool:
+    val script = "import sys, binascii, sqlite3\n"
+        + "img = binascii.unhexlify(open(sys.argv[1], 'r', encoding='ascii').read().strip())\n"
+        + "open(sys.argv[2], 'wb').write(img)\n"
+        + "con = sqlite3.connect(sys.argv[2])\n"
+        + "ic = con.execute('PRAGMA integrity_check').fetchone()[0]\n"
+        + "assert ic == 'ok', ic\n"
+        + "rows = con.execute('SELECT id, n, r, s, b FROM t ORDER BY id').fetchall()\n"
+        + "expected = [\n"
+        + " (1, 42, 1.5, 'hi', b'\\x01\\x02\\x03'),\n"
+        + " (2, None, -2.25, '', b''),\n"
+        + " (3, -9223372036854775808, 3.141592653589793, 'héllo ✓', bytes((i*7+13)%256 for i in range(5000))),\n"
+        + "]\n"
+        + "got = [(a, b, c, d, bytes(e) if e is not None else None) for (a, b, c, d, e) in rows]\n"
+        + "assert got == expected, got\n"
+        + "print('ORACLE PASS')\n"
+    file_write_text("{TMP}/sqlite_format_oracle.py", script)
+
+fn run_oracle(image: [u8]) -> (text, text, i64):
+    val _ = write_oracle_script()
+    val _ = file_write_text("{TMP}/sqlite_format_image.hex", to_hex(image))
+    process_run_bounded("python", ["{TMP}/sqlite_format_oracle.py", "{TMP}/sqlite_format_image.hex", "{TMP}/sqlite_format_oracle.sqlite"], 60000, 65536)
+
+describe "sqlite_format writer":
+
+    it "creates a structurally valid image that self-reads exactly":  # oracle: internal structural assertions on the emitted bytes
+        match sqlite_format_create_image(small_schema(), small_tables()):
+            Ok(image):
+                expect(image.len() % 4096).to_equal(0)
+                expect(image[0]).to_equal(0x53u8)
+                expect(image[15]).to_equal(0x00u8)
+                expect(image[16]).to_equal(0x10u8)
+                expect(image[17]).to_equal(0x00u8)
+                match sqlite_verify_bytes(image):
+                    Ok(info):
+                        expect(info.page_size).to_equal(4096)
+                    Err(e):
+                        expect(e.message()).to_equal("")
+                match sqlite_format_read_table_bytes(image, "t"):
+                    Ok(rows):
+                        expect(rows.len()).to_equal(3)
+                        expect(rows[0].get_int("n") ?? -1).to_equal(42)
+                        expect(rows[1].get("n") ?? DbValue.Integer(9)).to_equal(DbValue.Null)
+                        expect(rows[2].get_int("n") ?? 0).to_equal(-9223372036854775808)
+                        expect(rows[2].get_text("s") ?? "").to_equal("héllo ✓")
+                        match rows[2].get("b"):
+                            Some(DbValue.Blob(b)):
+                                expect(b.len()).to_equal(5000)
+                                expect(b[0]).to_equal(13u8)
+                                expect(b[4999]).to_equal(190u8)
+                            _:
+                                expect(false).to_equal(true)
+                    Err(e):
+                        expect(e.message()).to_equal("")
+            Err(e):
+                expect(e.message()).to_equal("")
+
+    it "byte output is deterministic for identical inputs":  # oracle: same inputs -> identical image bytes
+        val a = sqlite_format_create_image(small_schema(), small_tables())
+        val b = sqlite_format_create_image(small_schema(), small_tables())
+        match a:
+            Ok(image_a):
+                match b:
+                    Ok(image_b):
+                        expect(image_a.len()).to_equal(image_b.len())
+                        var same = true
+                        var i: i64 = 0
+                        while i < image_a.len():
+                            if image_a[i] != image_b[i]:
+                                same = false
+                            i = i + 1
+                        expect(same).to_equal(true)
+                    Err(e):
+                        expect(e.message()).to_equal("")
+            Err(e):
+                expect(e.message()).to_equal("")
+
+    it "python sqlite3 reopens the image with integrity ok and exact rows":  # oracle: external sqlite3 3.50.4, guarded availability
+        if oracle_available():
+            match sqlite_format_create_image(small_schema(), small_tables()):
+                Ok(image):
+                    val (out, ora_err, code) = run_oracle(image)
+                    expect(code).to_equal(0)
+                    expect(out.contains("ORACLE PASS")).to_equal(true)
+                Err(e):
+                    expect(e.message()).to_equal("")
+        else:
+            print "ORACLE NOT RUN: python unreachable"
+
+    it "builds multi-page b-trees with interior pages for many rows":  # oracle: 300 rows force >= 2 leaves plus an interior root
+        val schema = "CREATE TABLE big (id INTEGER PRIMARY KEY, v TEXT);"
+        var rows: [DbRow] = []
+        var i: i64 = 1
+        while i <= 300:
+            var cols: [text] = []
+            cols.push("id")
+            cols.push("v")
+            var vals: [DbValue] = []
+            vals.push(DbValue.Integer(value: i))
+            vals.push(DbValue.Text(value: "value-{i}"))
+            rows.push(DbRow(columns: cols, values: vals))
+            i = i + 1
+        var tables: [SqliteTableData] = []
+        tables.push(SqliteTableData(name: "big", columns: ["id","v"], rows: rows))
+        match sqlite_format_create_image(schema, tables):
+            Ok(image):
+                expect(image.len() > 8192).to_equal(true)
+                match sqlite_format_read_table_bytes(image, "big"):
+                    Ok(read):
+                        expect(read.len()).to_equal(300)
+                        expect(read[0].get_int("id") ?? -1).to_equal(1)
+                        expect(read[299].get_int("id") ?? -1).to_equal(300)
+                        expect(read[299].get_text("v") ?? "").to_equal("value-300")
+                    Err(e):
+                        expect(e.message()).to_equal("")
+            Err(e):
+                expect(e.message()).to_equal("")
+
+    it "fails closed on unsupported schema features":  # oracle: UNIQUE needs an index b-tree (later gate)
+        match sqlite_format_create_image("CREATE TABLE u (id INTEGER PRIMARY KEY, v TEXT UNIQUE);", []):
+            Ok(image):
+                expect(image.len()).to_equal(-1)
+            Err(SqliteError.UnsupportedFeature(what: _)):
+                expect(true).to_equal(true)
+            Err(e):
+                expect(e.message()).to_equal("")
+
+    it "fails closed on row width mismatch":  # oracle: row has 3 values, table declares 2
+        val schema = "CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER);"
+        var bad: [DbRow] = []
+        bad.push(DbRow(columns: ["id","n","extra"], values: [DbValue.Integer(value: 1), DbValue.Integer(value: 2), DbValue.Integer(value: 3)]))
+        var tables: [SqliteTableData] = []
+        tables.push(SqliteTableData(name: "t", columns: ["id","n","extra"], rows: bad))
+        match sqlite_format_create_image(schema, tables):
+            Ok(image):
+                expect(image.len()).to_equal(-1)
+            Err(SqliteError.RowWidthMismatch(table: "t", expected: 2, actual: 3)):
+                expect(true).to_equal(true)
+            Err(e):
+                expect(e.message()).to_equal("")
+
+    it "auto-assigns rowids when no INTEGER PRIMARY KEY exists":  # oracle: rowids 1..N in insertion order
+        val schema = "CREATE TABLE plain (a TEXT, b INTEGER);"
+        var rows: [DbRow] = []
+        rows.push(DbRow(columns: ["a","b"], values: [DbValue.Text(value: "first"), DbValue.Integer(value: 10)]))
+        rows.push(DbRow(columns: ["a","b"], values: [DbValue.Text(value: "second"), DbValue.Integer(value: 20)]))
+        var tables: [SqliteTableData] = []
+        tables.push(SqliteTableData(name: "plain", columns: ["a","b"], rows: rows))
+        match sqlite_format_create_image(schema, tables):
+            Ok(image):
+                match sqlite_format_read_table_bytes(image, "plain"):
+                    Ok(read):
+                        expect(read.len()).to_equal(2)
+                        expect(read[0].get_text("a") ?? "").to_equal("first")
+                        expect(read[1].get_text("a") ?? "").to_equal("second")
+                    Err(e):
+                        expect(e.message()).to_equal("")
+            Err(e):
+                expect(e.message()).to_equal("")

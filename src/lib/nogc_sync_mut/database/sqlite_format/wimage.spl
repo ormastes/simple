@@ -1,0 +1,729 @@
+# SQLite whole-image writer — DB-B first gate (plan sections 3.1 and 3.3).
+#
+# Emits a brand-new, byte-deterministic SQLite v3 file (4096-byte pages,
+# rollback-journal versions, UTF-8) that external sqlite3 can open:
+#   - ordinary rowid tables, INTEGER PRIMARY KEY rowid aliases,
+#   - multi-level table b-trees (leaf/interior layout, big-endian fields,
+#     cell pointer arrays, no freeblocks/fragmentation by construction),
+#   - records with canonical serial types, overflow page chains,
+#   - a single-leaf sqlite_schema at page 1 (overflow chains allowed).
+#
+# Fail-closed by design: WITHOUT ROWID, AUTOINCREMENT, UNIQUE (column or table
+# level), table-level constraints other than plain columns, CREATE
+# INDEX/VIEW/TRIGGER, multi-page sqlite_schema, and non-INTEGER PRIMARY KEY
+# all produce SqliteError.UnsupportedFeature (or InvalidInput) instead of a
+# silently degraded file. Secondary index b-trees are a later gate.
+
+use std.nogc_sync_mut.database.sqlite_format.types.{
+    SqliteError, sqlite_format_magic,
+    SQLITE_PAGE_TABLE_INTERIOR, SQLITE_PAGE_TABLE_LEAF,
+    SQLITE_ENCODING_UTF8
+}
+use std.nogc_sync_mut.database.sqlite_format.varint.{
+    sqlite_varint_encode, sqlite_varint_len
+}
+use std.nogc_sync_mut.database.sqlite_format.cell.{local_payload_len}
+use std.nogc_sync_mut.database.sqlite_format.record.{
+    sqlite_record_encode
+}
+use std.nogc_sync_mut.database.sqlite_format.schema.{
+    _split_top_level_items, _find_open_paren, _find_close_paren,
+    _read_ident, _skip_noise, _expect_keyword, _is_constraint_keyword,
+    ascii_lower
+}
+use std.nogc_sync_mut.database.sql.types.{DbValue, DbRow}
+
+val WRITER_PAGE_SIZE: i64 = 4096
+val WRITER_SCHEMA_FORMAT: i64 = 4
+val WRITER_SQLITE_VERSION_NUMBER: i64 = 3050004
+
+# Input for one table: its declared columns and the rows to store.
+struct SqliteTableData:
+    name: text
+    columns: [text]
+    rows: [DbRow]
+
+# Internal cell: rowid + encoded record + assigned overflow chain page ids.
+struct _WCell:
+    rid: i64
+    payload: [u8]
+    overflow: [i64]
+
+struct _WLeaf:
+    cells: [_WCell]
+
+struct _WInterior:
+    children: [i64]   # child page ids in ascending key order (all but last)
+    keys: [i64]       # separator key per cell child (max rowid of subtree)
+    rightmost: i64    # right-most child page id
+    id: i64
+    max_key: i64
+
+struct _WTablePages:
+    pages: [[u8]]
+    root: i64
+
+struct _WSchemaPages:
+    page1: [u8]
+    overflow: [[u8]]
+
+# ---------------------------------------------------------------------------
+# Statement-level schema parsing (writer profile: strict)
+# ---------------------------------------------------------------------------
+
+fn _trim_text(s: text) -> text:
+    var a = _skip_noise(s, 0)
+    var b = s.len()
+    while b > a and _is_ws_char(s[b - 1]):
+        b = b - 1
+    s.substring(a, b)
+
+fn _is_ws_char(c: text) -> bool:
+    c == " " or c == "\t" or c == "\n" or c == "\r"
+
+# Split schema SQL into statements at top-level semicolons (quote-aware).
+fn _split_statements(sql: text) -> [text]:
+    var out: [text] = []
+    var start: i64 = 0
+    var i: i64 = 0
+    var depth: i64 = 0
+    var quote = ""
+    var close = ""
+    while i < sql.len():
+        val c = sql[i]
+        if quote != "":
+            if c == close:
+                if close != "]" and i + 1 < sql.len() and sql[i + 1] == close:
+                    i = i + 2
+                    continue
+                quote = ""
+            i = i + 1
+            continue
+        if c == "'" or c == "\"" or c == "`" or c == "[":
+            quote = c
+            close = _quote_close(c)
+        elif c == "(":
+            depth = depth + 1
+        elif c == ")":
+            depth = depth - 1
+        elif c == ";" and depth == 0:
+            out.push(sql.substring(start, i))
+            start = i + 1
+        i = i + 1
+    out.push(sql.substring(start, sql.len()))
+    out
+
+struct _WTableDef:
+    name: text
+    columns: [text]
+    ipk: i64     # INTEGER PRIMARY KEY column index, -1 when none
+    stmt: text
+
+# Conservative whitespace tokenizer (idents and punctuation as tokens).
+fn _words(s: text) -> [text]:
+    var out: [text] = []
+    var i: i64 = 0
+    while i < s.len():
+        val c = s[i]
+        if _is_ws_char(c):
+            i = i + 1
+            continue
+        val id = _read_ident(s, i)
+        if id != nil:
+            out.push(id.0)
+            i = id.1
+            continue
+        out.push(c)
+        i = i + 1
+    out
+
+# True when a column-definition tail declares something the writer gate does
+# not implement (UNIQUE column constraint -> needs an index b-tree).
+fn _column_tail_unsupported(rest: text) -> bool:
+    for w in _words(rest):
+        if ascii_lower(w) == "unique":
+            return true
+    false
+
+# Parse and strictly validate one CREATE TABLE statement.
+fn _parse_create_table(stmt: text) -> Result<_WTableDef, SqliteError>:
+    val kw_create = _expect_keyword(stmt, 0, "create")
+    if kw_create == nil:
+        return Err(SqliteError.UnsupportedFeature( what: "writer gate accepts only CREATE TABLE statements"))
+    val kw_table = _expect_keyword(stmt, kw_create ?? 0, "table")
+    if kw_table == nil:
+        return Err(SqliteError.UnsupportedFeature( what: "CREATE INDEX/VIEW/TRIGGER are not part of the writer gate"))
+    var p = kw_table ?? 0
+    val kw_if = _expect_keyword(stmt, p, "if")
+    if kw_if != nil:
+        val kw_not = _expect_keyword(stmt, kw_if ?? 0, "not")
+        val kw_exists = _expect_keyword(stmt, kw_not ?? 0, "exists")
+        if kw_not == nil or kw_exists == nil:
+            return Err(SqliteError.MalformedSchema(message: "malformed IF NOT EXISTS"))
+        p = kw_exists ?? 0
+    val name_tok = _read_ident(stmt, p)
+    if name_tok == nil:
+        return Err(SqliteError.MalformedSchema(message: "CREATE TABLE: missing table name"))
+    val open = _find_open_paren(stmt, name_tok.1)
+    if open < 0:
+        return Err(SqliteError.MalformedSchema(message: "CREATE TABLE: missing column list"))
+    val close = _find_close_paren(stmt, open)
+    if close < 0:
+        return Err(SqliteError.MalformedSchema(message: "CREATE TABLE: unbalanced parens"))
+
+    val items = _split_top_level_items(stmt.substring(open + 1, close))
+    var columns: [text] = []
+    var ipk: i64 = -1
+    var col_idx: i64 = 0
+    for item in items:
+        val trimmed = _skip_noise(item, 0)
+        if trimmed >= item.len():
+            continue
+        val first = _read_ident(item, trimmed)
+        if first == nil:
+            return Err(SqliteError.MalformedSchema(message: "CREATE TABLE: bad column definition"))
+        if _is_constraint_keyword(first.0):
+            return Err(SqliteError.UnsupportedFeature( what: "table-level constraint '{first.0}' in writer gate"))
+        val rest = item.substring(first.1, item.len())
+        if _column_tail_unsupported(rest):
+            return Err(SqliteError.UnsupportedFeature( what: "column constraint in '{item}' needs an index b-tree (later gate)"))
+        if _tail_is_ipk(rest):
+            if ascii_lower(rest).contains("autoincrement"):
+                return Err(SqliteError.UnsupportedFeature(what: "AUTOINCREMENT"))
+            if ipk >= 0:
+                return Err(SqliteError.InvalidInput(message: "multiple INTEGER PRIMARY KEY columns"))
+            ipk = col_idx
+        columns.push(first.0)
+        col_idx = col_idx + 1
+
+    val tail = ascii_lower(stmt.substring(close + 1, stmt.len()))
+    if tail.contains("without") and tail.contains("rowid"):
+        return Err(SqliteError.UnsupportedFeature(what: "WITHOUT ROWID tables"))
+
+    if columns.len() == 0:
+        return Err(SqliteError.MalformedSchema(message: "CREATE TABLE: no columns"))
+    Ok(_WTableDef(name: name_tok.0, columns: columns, ipk: ipk, stmt: _trim_text(stmt)))
+
+# True when a column tail is exactly `INTEGER PRIMARY KEY ...`.
+fn _tail_is_ipk(rest: text) -> bool:
+    val type_tok = _read_ident(rest, _skip_noise(rest, 0))
+    if type_tok == nil:
+        return false
+    if ascii_lower(type_tok.0) != "integer":
+        return false
+    val kw1 = _read_ident(rest, type_tok.1)
+    if kw1 == nil:
+        return false
+    if ascii_lower(kw1.0) != "primary":
+        return false
+    val kw2 = _read_ident(rest, _skip_noise(rest, kw1.1))
+    kw2 != nil and ascii_lower(kw2.0) == "key"
+
+# ---------------------------------------------------------------------------
+# Row preparation
+# ---------------------------------------------------------------------------
+
+# Build encoded, rowid-sorted cells for one table.
+fn _build_cells(tdef: _WTableDef, data: SqliteTableData) -> Result<[_WCell], SqliteError>:
+    var sort_keys: [i64] = []
+    var payloads: [[u8]] = []
+    var auto_rowid: i64 = 1
+    for rec in data.rows:
+        if rec.values.len() != data.columns.len():
+            return Err(SqliteError.RowWidthMismatch( table: data.name, expected: data.columns.len(), actual: rec.values.len()))
+        var rid_val: i64 = 0
+        if tdef.ipk >= 0:
+            val v = rec.values[tdef.ipk]
+            match v:
+                DbValue.Integer(i): rid_val = i
+                _: return Err(SqliteError.InvalidInput( message: "table {data.name}: INTEGER PRIMARY KEY column holds a non-integer value"))
+        else:
+            rid_val = auto_rowid
+        auto_rowid = auto_rowid + 1
+
+        var record_values: [DbValue] = []
+        var i: i64 = 0
+        for value in rec.values:
+            if i == tdef.ipk:
+                record_values.push(DbValue.Null)
+            else:
+                record_values.push(value)
+            i = i + 1
+        sort_keys.push(rid_val)
+        payloads.push(sqlite_record_encode(record_values))
+
+    # Insertion sort by rowid (stable, deterministic); duplicate rowids fail.
+    var n = sort_keys.len()
+    var i: i64 = 1
+    while i < n:
+        var j = i
+        while j > 0 and sort_keys[j - 1] > sort_keys[j]:
+            val tk = sort_keys[j - 1]
+            sort_keys[j - 1] = sort_keys[j]
+            sort_keys[j] = tk
+            val tp = payloads[j - 1]
+            payloads[j - 1] = payloads[j]
+            payloads[j] = tp
+            j = j - 1
+        i = i + 1
+    var k: i64 = 1
+    while k < n:
+        if sort_keys[k] == sort_keys[k - 1]:
+            return Err(SqliteError.InvalidInput( message: "table {data.name}: duplicate rowid {sort_keys[k]}"))
+        k = k + 1
+
+    var cells: [_WCell] = []
+    var _empty_payload: [u8] = []
+    for t in 0..n:
+        cells.push(_WCell(rid: sort_keys[t], payload: payloads[t], overflow: []))
+    Ok(cells)
+
+# ---------------------------------------------------------------------------
+# Page sizing and packing (usable size = page_size; reserved bytes are 0)
+# ---------------------------------------------------------------------------
+
+fn _vlen(v: i64) -> i64:
+    sqlite_varint_len(v as u64)
+
+# On-page byte size of a table-leaf cell (header + local payload + spill ptr).
+fn _cell_page_size(cell: _WCell, usable: i64) -> i64:
+    val local = local_payload_len(cell.payload.len(), usable, false)
+    val extra = if local < cell.payload.len(): 4 else: 0
+    _vlen(cell.payload.len()) + _vlen(cell.rid) + local + extra
+
+# Number of overflow pages a cell needs.
+fn _overflow_count(cell: _WCell, usable: i64) -> i64:
+    val local = local_payload_len(cell.payload.len(), usable, false)
+    if local >= cell.payload.len():
+        return 0
+    val rest = cell.payload.len() - local
+    val cap = usable - 4
+    (rest + cap - 1) / cap
+
+# Greedy leaf packing; every leaf gets at least one cell when cells exist.
+fn _empty_wcells() -> [_WCell]:
+    var e: [_WCell] = []
+    e
+
+fn _pack_leaves(cells: [_WCell], capacity: i64, usable: i64) -> [_WLeaf]:
+    var leaves: [_WLeaf] = []
+    var cur: [_WCell] = []
+    var used: i64 = 8
+    for cell in cells:
+        val need = _cell_page_size(cell, usable) + 2
+        if cur.len() > 0 and used + need > capacity:
+            leaves.push(_WLeaf(cells: cur))
+            cur = _empty_wcells()
+            used = 8
+        cur.push(cell)
+        used = used + need
+    leaves.push(_WLeaf(cells: cur))
+    leaves
+
+# Interior page count for k children (min cell = 4-byte child + 1-byte key).
+fn _interior_groups(k: i64, usable: i64) -> i64:
+    val max_children = (usable - 12) / 6
+    (k + max_children - 1) / max_children
+
+# Total pages one table occupies (leaves + overflow + interiors; single leaf
+# with no interior when everything fits one page).
+fn _table_page_count(cells: [_WCell], usable: i64) -> i64:
+    val leaves = _pack_leaves(cells, usable, usable)
+    var count = leaves.len()
+    for leaf in leaves:
+        for cell in leaf.cells:
+            count = count + _overflow_count(cell, usable)
+    if leaves.len() == 1:
+        return count
+    var k = leaves.len()
+    while true:
+        val m = _interior_groups(k, usable)
+        count = count + m
+        if m == 1:
+            break
+        k = m
+    count
+
+# ---------------------------------------------------------------------------
+# Page serialization
+# ---------------------------------------------------------------------------
+
+fn _blank_page(page_size: i64) -> [u8]:
+    var page: [u8] = []
+    var i: i64 = 0
+    while i < page_size:
+        page.push(0u8)
+        i = i + 1
+    page
+
+fn _put_u16(page: [u8], off: i64, v: i64):
+    page[off] = ((v >> 8) & 0xFF) as u8
+    page[off + 1] = (v & 0xFF) as u8
+
+fn _put_u32(page: [u8], off: i64, v: i64):
+    page[off] = ((v >> 24) & 0xFF) as u8
+    page[off + 1] = ((v >> 16) & 0xFF) as u8
+    page[off + 2] = ((v >> 8) & 0xFF) as u8
+    page[off + 3] = (v & 0xFF) as u8
+
+# Serialize one table-leaf page (type 0x0d) at the given header displacement.
+fn _serialize_leaf(cells: [_WCell], usable: i64, page_size: i64, base: i64) -> [u8]:
+    val page = _blank_page(page_size)
+    val n = cells.len()
+    var content = page_size
+    var ptrs: [i64] = []
+    for cell in cells:
+        val local = local_payload_len(cell.payload.len(), usable, false)
+        val start = content - (_vlen(cell.payload.len()) + _vlen(cell.rid) + local + (if local < cell.payload.len(): 4 else: 0))
+        var p = start
+        for b in sqlite_varint_encode(cell.payload.len() as u64):
+            page[p] = b
+            p = p + 1
+        for b in sqlite_varint_encode(cell.rid as u64):
+            page[p] = b
+            p = p + 1
+        var i: i64 = 0
+        while i < local:
+            page[p] = cell.payload[i]
+            p = p + 1
+            i = i + 1
+        if local < cell.payload.len():
+            _put_u32(page, p, cell.overflow[0])
+        ptrs.push(start)
+        content = start
+
+    page[base] = SQLITE_PAGE_TABLE_LEAF as u8
+    _put_u16(page, base + 1, 0)
+    _put_u16(page, base + 3, n)
+    _put_u16(page, base + 5, content & 0xFFFF)
+    page[base + 7] = 0u8
+    var i: i64 = 0
+    while i < n:
+        _put_u16(page, base + 8 + 2 * i, ptrs[i])
+        i = i + 1
+    page
+
+# Serialize one overflow page (chain index `idx` of the cell's chain).
+fn _serialize_overflow_page(cell: _WCell, usable: i64, page_size: i64, idx: i64) -> [u8]:
+    val page = _blank_page(page_size)
+    val cap = usable - 4
+    val local = local_payload_len(cell.payload.len(), usable, false)
+    val from = local + idx * cap
+    var take = cell.payload.len() - from
+    if take > cap:
+        take = cap
+    if idx + 1 < cell.overflow.len():
+        _put_u32(page, 0, cell.overflow[idx + 1])
+    else:
+        _put_u32(page, 0, 0)
+    var i: i64 = 0
+    while i < take:
+        page[4 + i] = cell.payload[from + i]
+        i = i + 1
+    page
+
+# Serialize one table-interior page (type 0x05).
+fn _serialize_interior(node: _WInterior, page_size: i64, base: i64) -> [u8]:
+    val page = _blank_page(page_size)
+    val n = node.children.len()
+    var content = page_size
+    var ptrs: [i64] = []
+    var i: i64 = 0
+    while i < n:
+        val key = node.keys[i]
+        val start = content - (4 + _vlen(key))
+        _put_u32(page, start, node.children[i])
+        var p = start + 4
+        for b in sqlite_varint_encode(key as u64):
+            page[p] = b
+            p = p + 1
+        ptrs.push(start)
+        content = start
+        i = i + 1
+
+    page[base] = SQLITE_PAGE_TABLE_INTERIOR as u8
+    _put_u16(page, base + 1, 0)
+    _put_u16(page, base + 3, n)
+    _put_u16(page, base + 5, content & 0xFFFF)
+    page[base + 7] = 0u8
+    _put_u32(page, base + 8, node.rightmost)
+    i = 0
+    while i < n:
+        _put_u16(page, base + 12 + 2 * i, ptrs[i])
+        i = i + 1
+    page
+
+# ---------------------------------------------------------------------------
+# B-tree construction with root-last page numbering inside one range
+# ---------------------------------------------------------------------------
+
+# Build all pages of one table b-tree. Page ids are base..base+count-1 in
+# allocation order (leaves left-to-right, their overflow chains, then
+# interior levels bottom-up; the root is the LAST page).
+fn _build_table_pages(cells: [_WCell], page_size: i64, base: i64) -> Result<_WTablePages, SqliteError>:
+    val usable = page_size
+    var leaves = _pack_leaves(cells, usable, usable)
+
+    var pages: [[u8]] = []
+    var leaf_ids: [i64] = []
+    var alloc_ptr = base
+    for leaf in leaves:
+        leaf_ids.push(alloc_ptr)
+        alloc_ptr = alloc_ptr + 1
+
+    # Assign overflow chain ids (cell order == page order).
+    var leaf_cells: [[_WCell]] = []
+    for leaf in leaves:
+        var cs: [_WCell] = []
+        for cell in leaf.cells:
+            var c = cell
+            val k = _overflow_count(c, usable)
+            if k > 0:
+                var chain: [i64] = []
+                for t in 0..k:
+                    chain.push(alloc_ptr + t)
+                alloc_ptr = alloc_ptr + k
+                c.overflow = chain
+            cs.push(c)
+        leaf_cells.push(cs)
+
+    # Interior levels (only when there is more than one leaf).
+    var levels: [[_WInterior]] = []
+    if leaf_ids.len() > 1:
+        var children = leaf_ids
+        # Keys: max rowid per child (leaves are non-empty except a degenerate
+        # empty table, which never reaches this branch with >1 leaf... guard
+        # anyway with a -1 sentinel that sorts first).
+        var child_keys: [i64] = []
+        for lc in leaf_cells:
+            if lc.len() > 0:
+                child_keys.push(lc[lc.len() - 1].rid)
+            else:
+                child_keys.push(-1)
+        while true:
+            val k = children.len()
+            val m = _interior_groups(k, usable)
+            val per = k / m
+            val rem = k % m
+            var level: [_WInterior] = []
+            var start: i64 = 0
+            for gi in 0..m:
+                val cnt = per + (if gi < rem: 1 else: 0)
+                var node_children: [i64] = []
+                var node_keys: [i64] = []
+                for t in 0..(cnt - 1):
+                    node_children.push(children[start + t])
+                    node_keys.push(child_keys[start + t])
+                val rightmost = children[start + cnt - 1]
+                level.push(_WInterior( children: node_children, keys: node_keys, rightmost: rightmost, id: alloc_ptr + level.len(), max_key: child_keys[start + cnt - 1]))
+                start = start + cnt
+            alloc_ptr = alloc_ptr + m
+            levels.push(level)
+            if m == 1:
+                break
+            var new_children: [i64] = []
+            var new_keys: [i64] = []
+            for node in level:
+                new_children.push(node.id)
+                new_keys.push(node.max_key)
+            children = new_children
+            child_keys = new_keys
+
+    val root = if leaf_ids.len() == 1:
+        leaf_ids[0]
+    else:
+        levels[levels.len() - 1][0].id
+
+    for cs in leaf_cells:
+        pages.push(_serialize_leaf(cs, usable, page_size, 0))
+    for cs in leaf_cells:
+        for cell in cs:
+            var idx: i64 = 0
+            while idx < cell.overflow.len():
+                pages.push(_serialize_overflow_page(cell, usable, page_size, idx))
+                idx = idx + 1
+    for level in levels:
+        for node in level:
+            pages.push(_serialize_interior(node, page_size, 0))
+
+    if pages.len() != alloc_ptr - base:
+        return Err(SqliteError.CorruptPage( message: "table page accounting drifted: {pages.len()} pages for range {base}..{alloc_ptr - 1}"))
+    Ok(_WTablePages(pages: pages, root: root))
+
+# ---------------------------------------------------------------------------
+# sqlite_schema assembly (single leaf at page 1, overflow pages allowed)
+# ---------------------------------------------------------------------------
+
+# Returns (page_1_with_header_space, overflow_pages).
+fn _build_schema_pages(cells: [_WCell], page_size: i64) -> Result<_WSchemaPages, SqliteError>:
+    val usable = page_size
+    val capacity = page_size - 100
+    val leaves = _pack_leaves(cells, capacity, usable)
+    if leaves.len() > 1:
+        return Err(SqliteError.UnsupportedFeature( what: "sqlite_schema spanning multiple b-tree pages"))
+
+    # Assign overflow chains starting at page 2.
+    var cs: [_WCell] = []
+    var alloc_ptr: i64 = 2
+    for cell in leaves[0].cells:
+        var c = cell
+        val k = _overflow_count(c, usable)
+        if k > 0:
+            var chain: [i64] = []
+            for t in 0..k:
+                chain.push(alloc_ptr + t)
+            alloc_ptr = alloc_ptr + k
+            c.overflow = chain
+        cs.push(c)
+
+    val page1 = _serialize_leaf(cs, usable, page_size, 100)
+    var overflow_pages: [[u8]] = []
+    for cell in cs:
+        var idx: i64 = 0
+        while idx < cell.overflow.len():
+            overflow_pages.push(_serialize_overflow_page(cell, usable, page_size, idx))
+            idx = idx + 1
+    Ok(_WSchemaPages(page1: page1, overflow: overflow_pages))
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+
+# Create a whole SQLite v3 image. schema_sql carries the CREATE TABLE
+# statements stored verbatim in sqlite_schema; tables carries the rec data
+# for every declared table. Deterministic: identical inputs -> identical
+# bytes. UTF-8, 4096-byte pages, rollback-journal header versions.
+fn sqlite_format_create_image(schema_sql: text, tables: [SqliteTableData]) -> Result<[u8], SqliteError>:
+    val page_size = WRITER_PAGE_SIZE
+    val usable = page_size
+
+    # 1. Parse + strictly validate the schema statements.
+    var defs: [_WTableDef] = []
+    for stmt in _split_statements(schema_sql):
+        val trimmed = _trim_text(stmt)
+        if trimmed.len() == 0:
+            continue
+        defs.push(_parse_create_table(trimmed)?)
+    if defs.len() != tables.len():
+        return Err(SqliteError.InvalidInput( message: "schema declares {defs.len()} tables but {tables.len()} table data sets were given"))
+
+    # 2. Match data sets to definitions and encode rows.
+    var all_cells: [[_WCell]] = []
+    for tdef in defs:
+        var matched: SqliteTableData? = nil
+        for t in tables:
+            if t.name == tdef.name:
+                matched = Some(t)
+        if matched == nil:
+            return Err(SqliteError.InvalidInput( message: "no rec data given for declared table '{tdef.name}'"))
+        val data = matched
+        if data.columns.len() != tdef.columns.len():
+            return Err(SqliteError.RowWidthMismatch( table: tdef.name, expected: tdef.columns.len(), actual: data.columns.len()))
+        var ci: i64 = 0
+        while ci < tdef.columns.len():
+            if data.columns[ci] != tdef.columns[ci]:
+                return Err(SqliteError.InvalidInput( message: "table '{tdef.name}' column {ci} mismatch: schema '{tdef.columns[ci]}' vs data '{data.columns[ci]}'"))
+            ci = ci + 1
+        all_cells.push(_build_cells(tdef, data)?)
+
+    # 3. Fixed-point layout: schema overflow page count <-> table base pages.
+    var schema_overflow: i64 = 0
+    var bases: [i64] = []
+    var converged = false
+    var _empty_i64_list: [i64] = []
+    var iter: i64 = 0
+    while iter < 5:
+        var base: i64 = 2 + schema_overflow
+        bases = _empty_i64_list
+        for cells in all_cells:
+            bases.push(base)
+            base = base + _table_page_count(cells, usable)
+
+        # Schema cells reference the final table root pages.
+        var schema_cells: [_WCell] = []
+        var di: i64 = 0
+        for tdef in defs:
+            val table_pages = _build_table_pages(all_cells[di], page_size, bases[di])?
+            val rootpage = table_pages.root
+            val record = sqlite_record_encode([ DbValue.Text(value: "table"), DbValue.Text(value: tdef.name), DbValue.Text(value: tdef.name), DbValue.Integer(value: rootpage), DbValue.Text(value: tdef.stmt) ])
+            schema_cells.push(_WCell(rid: di + 1, payload: record, overflow: []))
+            di = di + 1
+
+        val schema = _build_schema_pages(schema_cells, page_size)?
+        val needed = schema.overflow.len()
+        if needed == schema_overflow:
+            converged = true
+            break
+        schema_overflow = needed
+        iter = iter + 1
+    if not converged:
+        return Err(SqliteError.UnsupportedFeature( what: "sqlite_schema layout did not converge"))
+
+    # 4. Final build with the converged layout.
+    var file_pages: [[u8]] = []
+    var schema_cells_final: [_WCell] = []
+    var di: i64 = 0
+    for tdef in defs:
+        val table_pages = _build_table_pages(all_cells[di], page_size, bases[di])?
+        val record = sqlite_record_encode([ DbValue.Text(value: "table"), DbValue.Text(value: tdef.name), DbValue.Text(value: tdef.name), DbValue.Integer(value: table_pages.root), DbValue.Text(value: tdef.stmt) ])
+        schema_cells_final.push(_WCell(rid: di + 1, payload: record, overflow: []))
+        for pg in table_pages.pages:
+            file_pages.push(pg)
+        di = di + 1
+
+    val schema = _build_schema_pages(schema_cells_final, page_size)?
+    if schema.overflow.len() != schema_overflow:
+        return Err(SqliteError.UnsupportedFeature( what: "sqlite_schema layout changed during final build"))
+
+    var image: [u8] = []
+    for b in schema.page1:
+        image.push(b)
+    for page in schema.overflow:
+        for b in page:
+            image.push(b)
+    for page in file_pages:
+        for b in page:
+            image.push(b)
+
+    # 5. Write the 100-byte header into page 1.
+    _write_header(image, image.len() / page_size, page_size)
+    Ok(image)
+
+# Write the SQLite database header into image[0..100].
+fn _write_header(image: [u8], page_count: i64, page_size: i64):
+    # "SQLite format 3" as raw bytes (literal, not text.bytes(): the seed's
+    # rt_array_bytes_* externs are not all linked yet — see
+    # doc/08_tracking/bug/seed_rt_process_run_bounded_rejects_unlimited_output_2026-10-22.md).
+    val magic = sqlite_format_magic()
+    var i: i64 = 0
+    while i < 16:
+        image[i] = magic[i]
+        i = i + 1
+    # Page size: bytes 16..18, big-endian; 65536 is stored as 1.
+    if page_size == 65536:
+        _put_u16(image, 16, 1)
+    else:
+        _put_u16(image, 16, page_size)
+    image[18] = 1u8   # file format write version: legacy (rollback journal)
+    image[19] = 1u8   # file format read version: legacy
+    image[20] = 0u8   # reserved bytes per page
+    image[21] = 64u8  # max embedded payload fraction
+    image[22] = 32u8  # min embedded payload fraction
+    image[23] = 32u8  # leaf payload fraction
+    _put_u32(image, 24, 1)              # file change counter
+    _put_u32(image, 28, page_count)     # database size in pages
+    _put_u32(image, 32, 0)              # first freelist trunk page
+    _put_u32(image, 36, 0)              # total freelist pages
+    _put_u32(image, 40, 1)              # schema cookie
+    _put_u32(image, 44, WRITER_SCHEMA_FORMAT)
+    _put_u32(image, 48, 0)              # default page cache size
+    _put_u32(image, 52, 0)              # largest root b-tree page (auto-vacuum)
+    _put_u32(image, 56, SQLITE_ENCODING_UTF8)
+    _put_u32(image, 60, 0)              # user version
+    _put_u32(image, 64, 0)              # incremental-vacuum mode
+    _put_u32(image, 68, 0)              # application id
+    # 72..92 stay zero (reserved for expansion)
+    _put_u32(image, 92, 1)              # version-valid-for (== change counter)
+    _put_u32(image, 96, WRITER_SQLITE_VERSION_NUMBER)
+
+
