@@ -1,6 +1,7 @@
 # Authoritative reverse-reference facts published by registry and IR owners.
 
 use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.sffi.transient.{transient_promote}
 
 struct ReverseReferenceOwnerFactV1:
@@ -46,6 +47,23 @@ var _reverse_reference_module_next_token_v1: i64 = 0
 var _reverse_reference_module_batch_v1: ReverseReferenceModuleBatchV1? = nil
 var _reverse_reference_module_index_v1: ReverseReferenceModuleIndexV1? = nil
 
+# The self-hosted candidate corrupts the scalar limbs (i64/bool) of the
+# promoted batch class across the transient-scope end — module globals and
+# handle limbs survive; the corrupting transport is transient_promote of a
+# mixed scalar+array inline class (same family as
+# stage2_sanity_module_path_naming_probe_segv_2026_10_22, diagnosed
+# field-by-field on the release/1.0 sibling lane: every scalar limb of the
+# promoted ReverseReferenceModuleBatchV1 read back garbage while
+# `active=true owner_gen=1` read correctly from module globals). These
+# module globals mirror the batch scalars so seal/publish and registration
+# validate against values that survive the transport. The proper repair is
+# the runtime class-layout/copy fix for mixed scalar+array classes.
+# @workaround bug=stage2_sanity_reverse_reference_publish_refused_2026_10_22 reason=scalar_limb_corruption_across_transient_promote
+var _rr_module_batch_token_g_v1: i64 = 0
+var _rr_module_batch_generation_g_v1: i64 = 0
+var _rr_module_batch_sealed_g_v1: bool = false
+var _rr_module_batch_valid_g_v1: bool = true
+
 fn reverse_reference_owner_clear_v1():
     _reverse_reference_owner_facts_v1 = []
     _reverse_reference_known_families_v1 = []
@@ -53,6 +71,10 @@ fn reverse_reference_owner_clear_v1():
     _reverse_reference_source_aliases_v1 = {}
     _reverse_reference_module_batch_v1 = nil
     _reverse_reference_module_index_v1 = nil
+    _rr_module_batch_token_g_v1 = 0
+    _rr_module_batch_generation_g_v1 = 0
+    _rr_module_batch_sealed_g_v1 = false
+    _rr_module_batch_valid_g_v1 = true
 
 # Begin only after the caller has acquired its allocation scope. A refusal
 # leaves the pre-existing owner untouched; zero means the collector is idle.
@@ -68,6 +90,10 @@ fn reverse_reference_module_begin_v1() -> i64:
         sealed: false, valid: true, facts: [], known_families: [],
         incomplete_families: [], aliases: [])
     _reverse_reference_module_index_v1 = ReverseReferenceModuleIndexV1(aliases: {})
+    _rr_module_batch_token_g_v1 = token
+    _rr_module_batch_generation_g_v1 = _reverse_reference_owner_generation_v1
+    _rr_module_batch_sealed_g_v1 = false
+    _rr_module_batch_valid_g_v1 = true
     token
 
 # The caller must pause first. Promoting the module root never walks the
@@ -90,6 +116,12 @@ fn reverse_reference_module_seal_v1(token: i64) -> bool:
     if not owned:
         batch.valid = false
         _reverse_reference_module_batch_v1 = Some(batch)
+        _rr_module_batch_valid_g_v1 = false
+    else:
+        # Mirror the seal in the scalar globals: the candidate corrupts the
+        # promoted class's scalar limbs across the scope end, so publish
+        # validates against these instead of the batch fields.
+        _rr_module_batch_sealed_g_v1 = true
     _reverse_reference_module_index_v1 = nil
     owned
 
@@ -102,6 +134,9 @@ fn reverse_reference_module_abort_v1(token: i64) -> bool:
         return false
     _reverse_reference_module_batch_v1 = nil
     _reverse_reference_module_index_v1 = nil
+    _rr_module_batch_token_g_v1 = 0
+    _rr_module_batch_sealed_g_v1 = false
+    _rr_module_batch_valid_g_v1 = true
     true
 
 # Call after the allocation scope ends. Capture already performed deduplication;
@@ -112,8 +147,11 @@ fn reverse_reference_module_publish_v1(token: i64) -> bool:
     if _reverse_reference_module_batch_v1 == nil:
         return false
     val batch = _reverse_reference_module_batch_v1.unwrap()
-    if batch.token != token or batch.generation != _reverse_reference_owner_generation_v1 or
-            not _reverse_reference_owner_active_v1 or not batch.sealed or not batch.valid:
+    if _rr_module_batch_token_g_v1 != token or
+            _rr_module_batch_generation_g_v1 != _reverse_reference_owner_generation_v1 or
+            not _reverse_reference_owner_active_v1 or not _rr_module_batch_sealed_g_v1 or
+            not _rr_module_batch_valid_g_v1:
+        eprint("[rr-publish] publish refused token={token} g_token={_rr_module_batch_token_g_v1} g_gen={_rr_module_batch_generation_g_v1} owner_gen={_reverse_reference_owner_generation_v1} active={_reverse_reference_owner_active_v1} g_sealed={_rr_module_batch_sealed_g_v1} g_valid={_rr_module_batch_valid_g_v1}\n")
         return false
     for family in batch.known_families:
         _reverse_reference_known_families_v1.push(family)
@@ -135,12 +173,10 @@ fn reverse_reference_module_publish_v1(token: i64) -> bool:
 fn reverse_reference_module_accepts_registration_v1() -> bool:
     if _reverse_reference_module_batch_v1 == nil:
         return true
-    val batch = _reverse_reference_module_batch_v1.unwrap()
-    if batch.sealed:
-        batch.valid = false
-        _reverse_reference_module_batch_v1 = Some(batch)
+    if _rr_module_batch_sealed_g_v1:
+        _rr_module_batch_valid_g_v1 = false
         return false
-    batch.valid
+    _rr_module_batch_valid_g_v1
 
 fn reverse_reference_owner_register_source_alias_v1(identity: text, source: text):
     if not _reverse_reference_owner_active_v1 or identity == "" or source == "":
