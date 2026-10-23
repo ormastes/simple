@@ -683,3 +683,37 @@ either own/promote them inside build_module_from_flat_pool_blob, or
 re-acquire them after the HIR re-parse reset. Encoder-side probes
 (91c2a192363 family) still needed to name the exact dead pool element
 before the binding fix lands.
+
+## Identification 2026-10-23 (lane A): panic pool fingerprinted
+
+enc_pool_head probe (8396828489 / 9b3968dd8a1) trace, repro4:
+
+```
+enc_pool_head n=5  item1='private'      \
+enc_pool_head n=56 item1=''              | same 11-pool tail in BOTH
+enc_pool_head n=56 item1='ok'            | dump passes (parent AND
+enc_pool_head n=10 item1=''             / child each panic once)
+flat pool encoder append failed site=text.value item=1 input_length=-1  (x2)
+enc_pool_head n=5 item1='1' / '' / 'tag_text' / 'private' ...
+```
+
+- The panic pool is a 2-element text pool whose item0 is valid and
+  item1 is the dangling handle (its enc_pool_head was skipped because the
+  head probe itself measured item1 len=-1).
+- Sibling pool contents ('private', 'tag_text', 'ok', 56-element pools)
+  are lexer/parser token pools of runtime-lib sources (tag_text appears in
+  src/lib/nogc_sync_mut/imap/build.spl et al.), placing the fingerprint in
+  the delegated frontend's parse-state region of the dump tail
+  (parser_state/extend/pending sections) — consistent with the
+  delegate-child locus.
+- Both passes encode identical pool tails, then both die on the same
+  element: the dangling handle survives from the decode-era module state
+  into the post-HIR-reparse capture.
+
+Fix shapes recorded for implementation: (A) sanitize-and-refuse-capture —
+validate text handles at capture time and abort the cache store (blob="",
+treated as a miss) instead of rt_panic, preserving the codec's
+"lossy restore must miss, never crash" contract; (B) name-and-fix-owner —
+tag pool vars at the ~40 dump call sites and repair the scope/lifetime
+owner of the identified pool. (A) unblocks stage2 immediately; (B) is the
+proper cure and needs the owner lane's runtime context.
