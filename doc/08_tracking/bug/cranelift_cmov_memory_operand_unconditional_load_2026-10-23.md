@@ -94,3 +94,87 @@ This record identifies the faulting instruction and explains the family. It does
 NOT establish which backend pass folds the select, nor whether the LLVM backend
 emits the same shape (this host has no LLVM 23, so only cranelift was measured).
 Both are open.
+
+## CORRECTION 2026-10-24: this is OUR predicate, not a backend defect
+
+The title and the "Suggested direction" above are **wrong**, and the misdiagnosis
+was mine. Cranelift lowered faithfully what our IR asked for; there is no
+`cmovcc (mem),reg` soundness bug to fix in the backend.
+
+The real site is `emit_aggregate_block_copy` in
+`src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs`, the
+value-semantics struct copy-in prologue. It emits, in this order:
+
+```rust
+let src_ptr  = band(src_tagged, !7);
+let src_tag  = band(src_tagged, 7);
+let src_is_heap  = icmp(Equal, src_tag, one);        // low bits == 1
+let src_nonnull  = icmp(NotEqual, src_ptr, zero);
+let src_is_valid = band(src_is_heap, src_nonnull);
+let load_ptr = select(src_is_valid, src_ptr, new_ptr);   // -> cmovne %r10,%rsi
+for w in 0..words {
+    let word = load(I64, MemFlags::new(), load_ptr, off); // -> cmovne (%rsi),%rdi
+    let word = select(src_is_valid, word, zero);
+    store(word, new_ptr, off);
+}
+```
+
+So the load IS unconditional in our own IR — the two `select`s choose the
+address and then the value, and cranelift merged them into the two `cmov`s seen
+in the disassembly. `MemFlags::new()` is correct (trapping); nothing is marked
+notrap. The backend is not at fault.
+
+**The defect is the validity predicate.** The heap tag (low bits `== 1`) does
+not identify a heap pointer on its own: an INLINE enum box is
+`hash(variant) << 32 | 1`, a shape `src/app/compiler_schema/codec_gen.spl`
+already states verbatim. Its low bits collide with the tag, so `src_is_heap`
+accepts it, `src_ptr` becomes the hash `0xf198715900000000`, and the word load
+dereferences a hash as an address. That is exactly the `r10`/`rsi` pair in the
+register dump above, and exactly the constant that file records for
+`hc_enc_hir_type`.
+
+### Fix applied, and what it does and does not do
+
+Require the untagged word to be a canonical user-space address — one compare,
+no runtime call; a real heap pointer is well below 2^48, a hash-derived word is
+not:
+
+```rust
+let addr_limit  = iconst(I64, 1i64 << 48);
+let src_in_range = icmp(UnsignedLessThan, src_ptr, addr_limit);
+let src_is_valid = band(band(src_is_heap, src_nonnull), src_in_range);
+```
+
+Measured on the stage-2 sanity battery (Linux x86_64, cranelift):
+
+| | result |
+|---|---|
+| before | `status=CRASH exit=-139`, SIGSEGV at `cmovne (%rsi),%rdi` |
+| after | **`CRASH count=0`**, worker exits cleanly with code 1 |
+
+**It does not make Stage 2 pass**, and the reason is informative. When
+`src_is_valid` is false the loop stores `zero` for every word, so refusing the
+bogus pointer yields an **all-zero struct** — a `HirType` whose `kind` is 0.
+The battery now reports:
+
+```
+E-HIR-VISIT-UNHANDLED: HirTypeKind variant <unknown> unhandled at walk_hir_type
+```
+
+i.e. a fail-closed diagnostic where there used to be a segfault. That is the
+correct behaviour for this layer, and it relocates the remaining defect to the
+**producer**: something stores an inline `Some` box into a non-optional
+`HirType` field, so a struct copy is attempted on a value that was never a heap
+struct. `codec_gen.spl` documents that exact hazard for the codec's own decoder
+("the if-EXPRESSION form unifies both arms at `T?`, so the taken arm is boxed as
+an inline `Some` enum word … Stored into a NON-optional field"), and the
+decoder was fixed to assign bare values; some other producer in HIR lowering
+still does it.
+
+### Next step
+
+Find the producer. The question is no longer "why does the copy crash" but
+"which HIR lowering path stores an Option box into a non-optional `HirType`
+field". The `<unknown>` variant report now names the consuming function
+(`walk_hir_type`) on every occurrence, which is a usable starting point that did
+not exist while this crashed.

@@ -708,7 +708,20 @@ fn emit_aggregate_block_copy<M: Module>(
     let src_tag = builder.ins().band(src_tagged, tag_mask);
     let src_is_heap = builder.ins().icmp(IntCC::Equal, src_tag, one);
     let src_nonnull = builder.ins().icmp(IntCC::NotEqual, src_ptr, zero);
-    let src_is_valid = builder.ins().band(src_is_heap, src_nonnull);
+    // The heap tag (low bits == 1) does NOT identify a heap pointer on its own:
+    // an INLINE enum box is `hash(variant) << 32 | 1`, so its low bits collide
+    // with the tag while its upper bits are a hash, not an address. Accepting
+    // one here made the unconditional word load below dereference the hash --
+    // measured as SIGSEGV at `cmovne (%rsi),%rdi` with rsi=0xf198715900000000
+    // in walk_hir_type, and as the same 0xf198715900000000 fault that
+    // src/app/compiler_schema/codec_gen.spl already records for hc_enc_hir_type.
+    // Require the untagged word to be a canonical user-space address: a real
+    // heap pointer is well below 2^48, a hash-derived word is not.
+    // Bug: doc/08_tracking/bug/cranelift_cmov_memory_operand_unconditional_load_2026-10-23.md
+    let addr_limit = builder.ins().iconst(types::I64, 1i64 << 48);
+    let src_in_range = builder.ins().icmp(IntCC::UnsignedLessThan, src_ptr, addr_limit);
+    let src_tag_ok = builder.ins().band(src_is_heap, src_nonnull);
+    let src_is_valid = builder.ins().band(src_tag_ok, src_in_range);
     let load_ptr = builder.ins().select(src_is_valid, src_ptr, new_ptr);
 
     for w in 0..words {
