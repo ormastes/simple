@@ -717,3 +717,42 @@ treated as a miss) instead of rt_panic, preserving the codec's
 tag pool vars at the ~40 dump call sites and repair the scope/lifetime
 owner of the identified pool. (A) unblocks stage2 immediately; (B) is the
 proper cure and needs the owner lane's runtime context.
+
+## Annotation 2026-10-23 (lane D, x86_64-pc-windows-msvc, lane 44 @ 32c50742629): panic -> graceful refusal -> AV; refusing pool unnamed
+
+Lane 44 = first full-jobs gate run over the landed ownership fixes
+(1b8136dd6ce decl-pool promote, b326b1b93f8 extend/pending-pool promote,
+70424d1ec9c scope-memo promote, ff1f69fd931 publish-deadlock fix). Gate red
+(exit 2) but the failure SHAPE CHANGED, which localizes the remaining defect:
+
+- The encoder panic is GONE. flat_pool_builder_push now refuses gracefully:
+  `[flat-pool] capture refused: invalid text handle site=text.value item=0
+  input_length=-1; cache store skipped` (flat_pool_codec.spl:495-499).
+- The invalid text handle at site=text.value item=0 STILL EXISTS, in the same
+  window: decode-hit (frontend-cache hits=1) -> hir-entry re-parse
+  (reset_all_pools n=2 per the pooldbg counter) -> the RE-PARSE's capture dump
+  hits a text pool whose elements are ALL rt_string_len == -1 (probe printed
+  item 0..4 len=-1 for the refusing pool; neighbouring pools in the same dump
+  are the same size n=5 with all-empty or all-valid elements).
+- Consequence chain: refused capture -> mir-shard worker exits ->
+  0xC0000005 access violation (rc 139) in the fallback path. The AV is a
+  SECONDARY defect exposed by the graceful skip (downstream code derefs what
+  the skipped/poisoned capture left behind).
+- Companion store failures persist on the miss path: frontend-cache store
+  "cannot write under <dir> (dir_create_all=true)" and hir-cache
+  "store failed at write ... reason=io-write" even to a private cache dir.
+
+Discrimination value: on the miss path the SAME capture dump is clean (all
+elements valid/empty) — only the decode-hit path produces the all-(-1) pool.
+So the refusing pool is one that (i) flat_pools_restore_all populated at
+decode, (ii) the hir-entry re-parse's reset does NOT clear, (iii) the fresh
+re-parse does NOT repopulate, and (iv) the capture dump encodes. It is NOT one
+of the pools the landed promotes cover. Next probe: print the refusing pool's
+DUMP POSITION (text-pool ordinal within flat_pools_dump_all) — the fixed
+section order names it without runtime introspection; or print pool identity
+at the enc_pool_head site.
+
+Repro (9 s, deterministic, candidate preserved at
+.simple/storage/build/bootstrap/stage2/x86_64-pc-windows-msvc/simple.exe.rejected):
+the standard p2_add native-build repro with SIMPLE_POOLDBG=1; full trace with
+per-element lens preserved at the lane's stage2-sanity frontend-failure log.
