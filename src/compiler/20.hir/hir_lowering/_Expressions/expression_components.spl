@@ -331,6 +331,20 @@ impl HirLowering:
             case _: ()
         false
 
+    me pattern_args_are_own_type_params(arguments: [HirType], names: [text]) -> bool:
+        if arguments.len() != names.len():
+            return false
+        var index = 0
+        while index < arguments.len():
+            val argument: HirType = arguments[index]
+            match argument.kind:
+                case HirTypeKind.TypeParam(name, _):
+                    if name != names[index]:
+                        return false
+                case _: return false
+            index = index + 1
+        true
+
     me pattern_enum_same_owner(left: SymbolId, right: SymbolId) -> bool:
         if left.id == right.id:
             return true
@@ -442,12 +456,25 @@ impl HirLowering:
             if not subject_owner.is_valid() or not self.pattern_enum_same_owner(declaration_slots.declaring_owner, subject_owner):
                 self.error("generic enum pattern requires its declared subject owner", p.span)
                 return nil
-            if subject_arguments.len() != declaration_slots.type_parameters.len() or not declared_pattern_slot_types_are_concrete(subject_arguments):
+            # Inside the generic enum's OWN method (`match self:`), the receiver
+            # type carries no concrete arguments (empty, or the enum's own
+            # rigid type params). The declaration's slot types are already
+            # written in terms of those params, so identity substitution is
+            # exact: use them as-is. See
+            # doc/08_tracking/bug/hir_generic_enum_self_match_2026-10-23.md
+            val in_own_method = self.current_method_self_symbol_id >= 0 and self.pattern_enum_same_owner(SymbolId(id: self.current_method_self_symbol_id), subject_owner)
+            val own_params_only = in_own_method and (subject_arguments.len() == 0 or self.pattern_args_are_own_type_params(subject_arguments, declaration_slots.type_parameters))
+            if own_params_only:
+                var own_arguments: [HirType] = []
+                for parameter_name in declaration_slots.type_parameters:
+                    own_arguments = own_arguments.push(HirType(kind: HirTypeKind.TypeParam(parameter_name, []), span: p.span))
+                subject_arguments = own_arguments
+            elif subject_arguments.len() != declaration_slots.type_parameters.len() or not declared_pattern_slot_types_are_concrete(subject_arguments):
                 self.error("generic enum pattern requires concrete declaration-ordered type arguments", p.span)
                 return nil
-            val tuple_types = substitute_declared_pattern_types(declaration_slots.tuple_types, declaration_slots.type_parameters, subject_arguments)
-            val field_types = substitute_declared_pattern_types(declaration_slots.field_types, declaration_slots.type_parameters, subject_arguments)
-            if not declared_pattern_slot_types_are_concrete(tuple_types) or not declared_pattern_slot_types_are_concrete(field_types):
+            val tuple_types = if own_params_only: declaration_slots.tuple_types else: substitute_declared_pattern_types(declaration_slots.tuple_types, declaration_slots.type_parameters, subject_arguments)
+            val field_types = if own_params_only: declaration_slots.field_types else: substitute_declared_pattern_types(declaration_slots.field_types, declaration_slots.type_parameters, subject_arguments)
+            if not own_params_only and (not declared_pattern_slot_types_are_concrete(tuple_types) or not declared_pattern_slot_types_are_concrete(field_types)):
                 self.error("generic enum pattern payload substitution is unresolved", p.span)
                 return nil
             slots = HirDeclaredPatternEnumSlots(tuple_types: tuple_types, field_names: declaration_slots.field_names, field_types: field_types, is_struct: declaration_slots.is_struct, type_parameters: declaration_slots.type_parameters, declaring_owner: declaration_slots.declaring_owner)
