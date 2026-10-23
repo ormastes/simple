@@ -640,3 +640,46 @@ companion failure `MIR final repository policy or emission schedule
 differs` (exit 1, no crash) points at the artifact EMISSION SCHEDULE being
 computed and validated across the parent/child boundary — check whether
 the schedule carries process-local text handles.
+
+## Annotation 2026-10-23 (lane D, x86_64-pc-windows-msvc): reset-sequence trace CONFIRMS the n=2-reset window
+
+Independent MSVC confirmation with an env-gated `reset_all_pools` counter
+(committed as 92c7630d2fa on work/pool-reset-trace-20261022, base
+01de698b310; lane 38 candidate preserved at
+.simple/storage/build/bootstrap/stage2/x86_64-pc-windows-msvc/simple.exe.rejected).
+Repro: the 9 s p2_add native-build repro with `SIMPLE_POOL_RESET_TRACE=1`
+(SIMPLE_FRONTEND_DELEGATED=1, cache dir fresh; crash deterministic).
+
+Trace, crash run (frontend-cache HIT):
+
+```
+[pool-reset] n=1                      <- decode-entry reset (module_assembly.spl:1430)
+[frontend-cache] hits=1 misses=0      <- decode path taken
+[build] phase=hir current=...p2_add
+[pool-reset] n=2                      <- HIR borrowed-scope re-parse reset (module_assembly.spl:1511)
+flat pool encoder string builder append failed site=text.value item=0 input_length=-1
+```
+
+Companion miss-path run (store-failed -> reparse): n=1 -> parse -> n=2 ->
+HIR SUCCEEDS. So the n=2 reset is present in BOTH paths; only the
+decode-hit path panics. The miss path survives because its module was
+promoted out of the transient scope (rt_transient_heap_promote,
+module_assembly.spl:1612) before the n=2 reset; the decode-hit module
+(build_module_from_flat_pool_blob, no scope, no promote) keeps texts that
+die at the n=2 reset and the MIR artifact encode reads the dead handle.
+
+This confirms correction-note probe target (a) on the second platform:
+the artifact's texts come from the decode module and the HIR-entry
+re-parse reset + no-rebridge is the dangler. The n=2 reset originates
+from the HIR phase's borrowed-scope per-module re-parse
+(driver_hir_pipeline_lowering.spl:606/822 ->
+parse_and_build_module_in_borrowed_scope). rt_string_len == -1 means the
+text slot is not a valid string object at encode time (dead handle), not
+merely an empty string.
+
+Fix-shape consequence: whatever owns the decode-hit module's texts must
+match the miss path's ownership before the module is handed to HIR/MIR —
+either own/promote them inside build_module_from_flat_pool_blob, or
+re-acquire them after the HIR re-parse reset. Encoder-side probes
+(91c2a192363 family) still needed to name the exact dead pool element
+before the binding fix lands.
