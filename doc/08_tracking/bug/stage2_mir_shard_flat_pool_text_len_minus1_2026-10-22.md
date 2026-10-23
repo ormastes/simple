@@ -892,3 +892,16 @@ path, shared _fab_captured_paths) so a path is captured at most once per
 process no matter which subsystem parses it; (3) the store io-write defect
 (lane-env, stage2-home sandbox) remains the reason the worker re-parses at
 all - fixing it collapses most repeat-capture traffic.
+
+## Annotation 2026-10-23 (lane D, lane 50g): dedup verified - exposure reduced 3x, runtime reclaim confirmed as the cure
+
+Lane 50g (all-sites capture dedup, #4229) sanity ran 587 s with ZERO refusals
+through the early phase (previous lanes crashed within ~200 s), then 4
+refusals deep in the sanity. The dedup eliminated the repeat-capture crash
+cycles exactly as designed; the remaining refusals are FIRST captures in
+fresh worker processes (dedup is per-process) hitting the transient-scope
+reclaim heisenbug nondeterministically. This is the expected signature of
+the doc-#4228 diagnosis: compiler-side mitigation reduces exposure; only the
+runtime scope-stamp reclaim / promote-payload fix removes it. The stashed
+caller-tag arm trace (work/release-tip-20261023 stash "caller-tag-trace")
+names any remaining armer in one lane if the owner wants it.
