@@ -2059,6 +2059,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_ptr_write_bytes", memory::rt_ptr_write_bytes);
     insert_simple!("rt_ptr_write_bytes_raw", memory::rt_ptr_write_bytes_raw);
     insert_simple!("rt_array_data_ptr", memory::rt_array_data_ptr);
+    insert_simple!("rt_array_data_ptr_text", memory::rt_array_data_ptr_text);
     insert_simple!("rt_array_bytes_basis_len", memory::rt_array_bytes_basis_len);
     insert_simple!("rt_array_bytes_basis_ptr", memory::rt_array_bytes_basis_ptr);
     insert_simple!("rt_array_bytes_validate", memory::rt_array_bytes_validate);

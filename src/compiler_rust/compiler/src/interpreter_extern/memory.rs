@@ -2020,6 +2020,27 @@ pub fn rt_array_bytes_copy_checked(args: &[Value]) -> Result<Value, CompileError
     Ok(Value::Int(length))
 }
 
+/// Element-agnostic alias of `rt_array_data_ptr` — the interpreter twin of a
+/// symbol BOTH runtimes already export as a direct call to their own
+/// `rt_array_data_ptr`: `src/runtime/runtime_native.c` and
+/// `src/compiler_rust/runtime/src/value/collections.rs`. Only this registry
+/// lacked the twin, so every `[u8]` caller — `src/lib/common/crypto/secure_memory.spl`,
+/// `src/lib/nogc_sync_mut/io/tcp_read_span.spl` and the two gpu SFFI modules —
+/// died with `semantic: unknown extern function: rt_array_data_ptr_text` under
+/// the interpreter (and therefore under `bin/simple test`) while the identical
+/// code worked under JIT and native. The alias carries no separate contract:
+/// see `rt_array_data_ptr`'s doc comment for the packed-vs-boxed return rule,
+/// including that a boxed array answers 0 meaning INVALID, not "empty".
+/// Bug: doc/08_tracking/bug/secure_memory_u8_zeroize_unregistered_extern_2026-10-22.md
+pub fn rt_array_data_ptr_text(args: &[Value]) -> Result<Value, CompileError> {
+    if args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_array_data_ptr_text requires 1 argument (array)",
+        ));
+    }
+    rt_array_data_ptr(args)
+}
+
 /// Hosted `unsafe_addr_of(ref: any) -> u64` — baremetal SimpleOS code (e.g.
 /// `src/os/kernel/fd_io.spl::_vfs_ipc_request`) declares this extern with no
 /// interpreter binding, so any hosted spec that reaches it died with
