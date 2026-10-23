@@ -58,6 +58,23 @@ var _rr_module_batch_token_g_v1: i64 = 0
 var _rr_module_batch_generation_g_v1: i64 = 0
 var _rr_module_batch_sealed_g_v1: bool = false
 var _rr_module_batch_valid_g_v1: bool = true
+# @workaround bug=stage2_sanity_reverse_reference_publish_refused_2026_10_22 reason=array_limbs_dead_after_scope_end
+# The promoted batch's ARRAY limbs do not survive the transient scope end:
+# publish's rt_array_get over batch.facts/... deadlocks in the runtime heap
+# registry mutex (gdb: __aarch64_cas4_acq spin in Mutex<i64>::lock <-
+# is_registered_heap_ptr <- rt_array_get <- reverse_reference_module_publish_v1).
+# Seal promotes each array limb while its handles are still valid (pre-scope-
+# end) and mirrors the persistent handles here; publish merges from these.
+var _rr_module_batch_facts_g_v1: [ReverseReferenceOwnerFactV1] = []
+var _rr_module_batch_known_g_v1: [text] = []
+var _rr_module_batch_incomplete_g_v1: [text] = []
+var _rr_module_batch_aliases_g_v1: [ReverseReferenceSourceAliasV1] = []
+
+fn _rr_reset_batch_mirrors_v1():
+    _rr_module_batch_facts_g_v1 = []
+    _rr_module_batch_known_g_v1 = []
+    _rr_module_batch_incomplete_g_v1 = []
+    _rr_module_batch_aliases_g_v1 = []
 
 fn reverse_reference_owner_clear_v1():
     _reverse_reference_owner_facts_v1 = []
@@ -70,6 +87,7 @@ fn reverse_reference_owner_clear_v1():
     _rr_module_batch_generation_g_v1 = 0
     _rr_module_batch_sealed_g_v1 = false
     _rr_module_batch_valid_g_v1 = true
+    _rr_reset_batch_mirrors_v1()
 
 # Begin only after the caller has acquired its allocation scope. A refusal
 # leaves the pre-existing owner untouched; zero means the collector is idle.
@@ -89,6 +107,7 @@ fn reverse_reference_module_begin_v1() -> i64:
     _rr_module_batch_generation_g_v1 = _reverse_reference_owner_generation_v1
     _rr_module_batch_sealed_g_v1 = false
     _rr_module_batch_valid_g_v1 = true
+    _rr_reset_batch_mirrors_v1()
     token
 
 # The caller must pause first. Promoting the module root never walks the
@@ -117,6 +136,22 @@ fn reverse_reference_module_seal_v1(token: i64) -> bool:
         # class's scalar limbs across the scope end, so publish validates
         # against these instead of the batch fields.
         _rr_module_batch_sealed_g_v1 = true
+        # Promote each ARRAY limb while its handles are still valid (the
+        # scope has not ended yet) and mirror the persistent handles.
+        # Publishing over the promoted batch's own array limbs deadlocks:
+        # rt_array_get on the reclaimed transient slot spins in the runtime
+        # heap registry mutex (gdb-verified 2026-10-23).
+        val facts_owned = transient_promote(batch.facts)
+        val known_owned = transient_promote(batch.known_families)
+        val incomplete_owned = transient_promote(batch.incomplete_families)
+        val aliases_owned = transient_promote(batch.aliases)
+        if facts_owned and known_owned and incomplete_owned and aliases_owned:
+            _rr_module_batch_facts_g_v1 = batch.facts
+            _rr_module_batch_known_g_v1 = batch.known_families
+            _rr_module_batch_incomplete_g_v1 = batch.incomplete_families
+            _rr_module_batch_aliases_g_v1 = batch.aliases
+        else:
+            _rr_module_batch_valid_g_v1 = false
     _reverse_reference_module_index_v1 = nil
     owned
 
@@ -132,6 +167,7 @@ fn reverse_reference_module_abort_v1(token: i64) -> bool:
     _rr_module_batch_token_g_v1 = 0
     _rr_module_batch_sealed_g_v1 = false
     _rr_module_batch_valid_g_v1 = true
+    _rr_reset_batch_mirrors_v1()
     true
 
 # Call after the allocation scope ends. Capture already performed deduplication;
@@ -141,21 +177,20 @@ fn reverse_reference_module_publish_v1(token: i64) -> bool:
         return _reverse_reference_module_batch_v1 == nil
     if _reverse_reference_module_batch_v1 == nil:
         return false
-    val batch = _reverse_reference_module_batch_v1.unwrap()
     if _rr_module_batch_token_g_v1 != token or
             _rr_module_batch_generation_g_v1 != _reverse_reference_owner_generation_v1 or
             not _reverse_reference_owner_active_v1 or not _rr_module_batch_sealed_g_v1 or
             not _rr_module_batch_valid_g_v1:
         eprint("[rr-publish] publish refused token={token} g_token={_rr_module_batch_token_g_v1} g_gen={_rr_module_batch_generation_g_v1} owner_gen={_reverse_reference_owner_generation_v1} active={_reverse_reference_owner_active_v1} g_sealed={_rr_module_batch_sealed_g_v1} g_valid={_rr_module_batch_valid_g_v1}\n")
         return false
-    for family in batch.known_families:
+    for family in _rr_module_batch_known_g_v1:
         _reverse_reference_known_families_v1.push(family)
-    for family in batch.incomplete_families:
+    for family in _rr_module_batch_incomplete_g_v1:
         if not _reverse_reference_incomplete_families_v1.contains(family):
             _reverse_reference_incomplete_families_v1.push(family)
-    for fact in batch.facts:
+    for fact in _rr_module_batch_facts_g_v1:
         _reverse_reference_owner_facts_v1.push(fact)
-    for alias in batch.aliases:
+    for alias in _rr_module_batch_aliases_g_v1:
         var sources: [text] = if _reverse_reference_source_aliases_v1.contains_key(alias.identity):
             _reverse_reference_source_aliases_v1[alias.identity]
         else:
