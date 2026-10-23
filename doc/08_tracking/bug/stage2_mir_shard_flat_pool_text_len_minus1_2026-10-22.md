@@ -616,3 +616,27 @@ which section restore owns it) plus the module's first text len inside
 `flat_ast_to_module`; a write/read split confirms the duplication and
 names the sections. Lane A stops here (cycle cap); cure is either a
 restore-path binding fix or the runtime class-layout repair.
+
+## Correction 2026-10-23 (lane A follow-up): probe was on the wrong pools
+
+Two corrections to the binding-duplication suspicion above:
+1. `reset_all_pools n=2` at HIR entry is the legitimate streaming
+   re-parse: it comes from `parse_and_build_module_with_scope_owner`
+   (module_assembly.spl:1511), the HIR phase's per-module surface
+   re-parse. It is followed by a fresh parse that repopulates pools.
+2. `tok_pool_text`/`sym_names` are lexer/parser scratch; a
+   decode-restored module legitimately has them empty (the module graph's
+   texts live in the decl/expr pool text sections, which my probe did not
+   watch). So tok_text=0 at decode-built is expected, NOT evidence of a
+   lossy restore, and the binding-duplication theory is weakened.
+
+Sharper facts for the next probe: the panicking pool is the MIR ARTIFACT
+text pool (encode side, site=text.value item=0), a different pool set from
+the frontend scratch pools. Target probes: (a) decl/expr pool text lens at
+decode-built vs after the HIR re-parse reset (n=2) — if the artifact's
+texts are taken from the decode module rather than the re-parsed module,
+the n=2 reset + no-rebridge is the dangler after all; (b) the cache-off
+companion failure `MIR final repository policy or emission schedule
+differs` (exit 1, no crash) points at the artifact EMISSION SCHEDULE being
+computed and validated across the parent/child boundary — check whether
+the schedule carries process-local text handles.
