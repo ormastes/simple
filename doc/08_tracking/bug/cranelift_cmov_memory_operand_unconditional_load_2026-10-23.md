@@ -177,3 +177,63 @@ measured `0xf198715900000000` is consistent with it but also with other
 upper-word-only shapes. **Locating the actual producer is the prerequisite for
 any calibrated fix** — that is now the top open question, ahead of the guard
 itself.
+
+## 2026-10-24 (later): the recorded next step is WRONG as written — and this is why
+
+The section above proposed routing copy-in through `rt_struct_receiver_valid`
+and listed "are `rt_alloc`-made blocks registered in `rt_struct_allocs`?" as an
+unverified prerequisite. **It is now verified, and the answer kills that plan in
+its current form.**
+
+```c
+void* rt_struct_alloc(int64_t size) {           // runtime_native.c:7528
+    void* ptr = rt_alloc(size);
+    if (ptr && !rt_struct_alloc_register(ptr, (size_t)size)) { ... }
+    return ptr;
+}
+```
+
+`rt_struct_alloc_register` has exactly **one** call site — that one. `rt_alloc`
+itself registers into a different registry (`rt_core_transient_raw_register`),
+not `rt_struct_allocs`.
+
+And `emit_aggregate_block_copy` allocates with plain `rt_alloc`
+(`closures_structs.rs:588` and `:701`), never `rt_struct_alloc`. So **structs
+produced by the copy-in path are never in the registry**, and
+`rt_struct_receiver_valid` returns 0 for them (it fails closed on a miss).
+
+Dropping that predicate into copy-in as-is would therefore reject legitimate
+copies — the *same* silent-breakage class as the withdrawn `1 << 48` attempt,
+arrived at from the opposite direction. Anyone implementing the previous
+section's advice literally would reintroduce the bug it was written to avoid.
+
+### The actual path, in two parts
+
+1. **Make copy-in register what it allocates**: switch `:588` / `:701` from
+   `rt_alloc` to `rt_struct_alloc` so copied blocks enter `rt_struct_allocs`.
+   This is also a correctness improvement on its own terms, independent of the
+   guard: the field accessors already validate against that registry, so today a
+   copy-in product passes copy-in and can then fail
+   `rt_struct_receiver_valid` on its first field read — the asymmetry already
+   flagged in review.
+2. **Then** replace the tag-only predicate with `rt_struct_receiver_valid`,
+   which is target-agnostic (accepts kernel-half pointers, so it does not
+   repeat the `1 << 48` mistake), rejects a hash-shaped word, and **traps with a
+   message** rather than silently selecting — matching the repo's precedent at
+   `codegen/instr/fields.rs:21-27` (`brif` -> `rt_eprintln_str` -> `trap`).
+
+Order matters: part 2 without part 1 is the failure described above.
+
+### Still unlocated, and still the gating question
+
+The producer of the offending word remains unidentified. Note that the measured
+`0xf198715900000000` is `0xf1987159 << 32` with **zero** low 32 bits, which
+matches an object HEADER layout (`type | size << 32`, cf.
+`codegen/instr/fam_abi_tests.rs:38`) just as well as it matches a variant hash.
+So even the "inline enum box" framing is not established — the word could be a
+header read as a pointer.
+
+Until the producer is found, any guard here is treating a symptom. Suggested
+cheapest next move: an env-gated diagnostic in the copy-in rejection path that
+prints the offending tagged word and the enclosing type name, so one stage-2 run
+names the producer instead of another round of inference.
