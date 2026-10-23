@@ -12,7 +12,7 @@ use compiler.frontend.trace_policy.{
 # ParserModule shape expected by HIR lowering. This is used as the bootstrap-safe
 # frontend path when the newer parser surface is unavailable.
 
-use compiler.core.parser.{parser_has_errors, parser_get_errors, parser_init_with_path, parser_error, parser_error_at}
+use compiler.core.parser.{parser_has_errors, parser_get_errors, parser_init_with_path, parser_error, parser_error_at, parser_promote_transient_owners}
 use compiler.frontend.core.string_interpolation_expand.{expand_string_interpolations_with_placeholder_receipt}
 use compiler.frontend.core.string_interpolation_expand.{si_stats_reset, si_stats_report}
 use compiler.frontend.desugar.placeholder_lambda.{transform_placeholder_call_args_after_interpolation_known_present}
@@ -33,7 +33,7 @@ use compiler.core.ast_stmt.*
 use compiler.core.ast_stmt.{STMT_GPU_LAUNCH, stmt_get_gpu_grid, stmt_get_gpu_block}
 use compiler.core.ast_coverage_inventory.{compiler_coverage_inventory_record_module}
 use compiler.core.capture_write_check.{capture_write_check_module, capture_write_error_line, capture_write_error_col}
-use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL, TYPE_ARRAY_ANY, TYPE_ANY, TYPE_NIL}
+use compiler.core.types.{type_pools_promote_hir_owners, TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL, TYPE_ARRAY_ANY, TYPE_ANY, TYPE_NIL}
 use compiler.core.types.{TYPE_DICT, TYPE_FN, TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL}
 use compiler.core.types.{TYPE_RESULT, TYPE_FUTURE, TYPE_POLL, TYPE_TASK, TYPE_GENERIC_ERASED}
 use compiler.core.types.{TYPE_UNION, TYPE_INTERSECTION, TYPE_REFINEMENT, TYPE_NAMED_BASE, TYPE_UNION_BASE, type_tag_name, int_to_str, reset_all_pools, flat_pool_debug_state_v1}
@@ -1673,6 +1673,23 @@ fn parse_and_build_module_with_scope_owner(source: text, path: text,
             rt_transient_heap_promote(built_module)
         if not module_promoted:
             panic("transient parser graph promotion failed for {path}")
+        # The captured cache blob was joined inside this scope too; without
+        # promotion the scope-end reclaim frees it and the caller's take()
+        # reads a dead handle (take=-1 heisenbug, lane-44..50).
+        if _fab_captured_blob != "":
+            val blob_promoted = unsafe(capabilities: [ffi]):
+                rt_transient_heap_promote(_fab_captured_blob)
+            if not blob_promoted:
+                _fab_captured_blob = ""
+        # Pool-referenced-only strings escape a module-rooted promote plan and
+        # the scope-end reclaim frees them (lane-54 stream=true refusals at
+        # site=text.value item=0). Promote the pool families with the module
+        # while the scope is paused. Failures are logged, not fatal: the
+        # sanitize refusal remains the graceful fallback.
+        if not parser_promote_transient_owners():
+            eprint("[parse-scope] parser/decl/extend/pending pool promote incomplete for {path}\n")
+        if not type_pools_promote_hir_owners():
+            eprint("[parse-scope] type pool promote incomplete for {path}\n")
         # ORDER IS LOAD-BEARING: end the scope before replacing lexer or AST
         # owners. Both cleanup functions allocate fresh process-lifetime arrays;
         # inside the scope those replacements are stamped with its id and then
