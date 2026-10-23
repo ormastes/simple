@@ -25,6 +25,9 @@
 #   SIMPLE_CROSS_USER_EMU      qemu (default) | ria-jit | full command prefix
 #   SIMPLE_RIA_JIT             ria-jit translator binary   (default: ria-jit on PATH)
 #   QEMU_CPUS / QEMU_MEM       passed through to the VM lane for --vm-test
+#   SIMPLE_CROSS_SEED          host compiler binary        (default: the Rust seed)
+#   SIMPLE_CROSS_DEBS_ROOT     rootless-fetched target debs (default: build/cross/<target>-root)
+#   SIMPLE_CROSS_SKIP_DEB_FETCH  set to disable the rootless target-lib fetch
 # ria-jit translates RV64 to x86_64 faster than qemu-user but covers fewer
 # syscalls; an emulator failure is reported as a failure, never a pass.
 # Output: build/cross/<platform>/simple (+ simple_test_runner) and PHASE.
@@ -47,6 +50,24 @@ cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null ||
 threads=${SIMPLE_CROSS_THREADS:-$cpus}
 file_timeout=${SIMPLE_CROSS_FILE_TIMEOUT:-1800}
 test_timeout=${SIMPLE_CROSS_TEST_TIMEOUT:-3600}
+
+# Cargo writes for the cross build NEVER go to the in-repo src/compiler_rust/
+# target when that tree is a sealed bootstrap authority (target/bootstrap is a
+# symlink into bootstrap.generations, mode 500; .cargo-build-lock is then
+# unwritable). Redirect to a cross-local target dir only in that case; a
+# fresh/writable checkout keeps the default layout. Caller-set
+# CARGO_TARGET_DIR always wins.
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+cd "$repo_root"
+if [ -z "${CARGO_TARGET_DIR:-}" ]; then
+  if [ -e src/compiler_rust/target/bootstrap ] && [ ! -w src/compiler_rust/target/bootstrap ]; then
+    CARGO_TARGET_DIR=$repo_root/build/cross/cargo-target
+  else
+    CARGO_TARGET_DIR=$repo_root/src/compiler_rust/target
+  fi
+  export CARGO_TARGET_DIR
+fi
+cargo_target=$CARGO_TARGET_DIR
 
 # platform -> rust triple, simple triple, linker, user-mode emulator arch, sysroot, VM lane
 case $target in
@@ -80,7 +101,7 @@ host_platform() {
   printf '%s-%s\n' "$os" "$m"
 }
 
-seed=src/compiler_rust/target/bootstrap/simple
+seed=${SIMPLE_CROSS_SEED:-$cargo_target/bootstrap/simple}
 use_seed() {
   compiler=$seed
   [ -x "$compiler" ] || (cd src/compiler_rust && cargo build --profile bootstrap -p simple-driver)
@@ -111,7 +132,7 @@ case $target in freebsd-*) linker_env="CARGO_TARGET_${upper}_LINKER=$linker" ;; 
 (cd src/compiler_rust && { rustup target add "$rust" >/dev/null 2>&1 || true; } &&
  env $linker_env \
    cargo build --profile bootstrap -p simple-native-all --features driver-compat --target "$rust")
-runtime=src/compiler_rust/target/$rust/bootstrap
+runtime=$cargo_target/$rust/bootstrap
 
 out_dir=build/cross/$target
 mkdir -p "$out_dir/bin"
@@ -129,6 +150,57 @@ printf '#!/bin/sh\nexec clang --target=%s %s "$@"\n' "$clang_triple" "$sysroot_a
 chmod +x "$out_dir/bin/cc"
 CC=$(pwd)/$out_dir/bin/cc
 export CC
+
+# Target system libraries for the final link. The platform link config asks
+# for -lsqlite3 -lz -lzstd -ltinfo on Linux; a rootless host has no target-arch
+# copies in the cross sysroot (CI installs them with dpkg --add-architecture +
+# sudo). Fetch the target-arch debs rootless into $SIMPLE_CROSS_DEBS_ROOT
+# (default build/cross/<target>-root) and export their usr/lib/<multiarch>
+# dir through SIMPLE_LINK_LIBRARY_PATHS — the cross gcc driver ignores
+# LIBRARY_PATH, so the seed's explicit -L knob is the only rootless injection.
+multiarch= deb_arch=
+case $target in
+  linux-riscv64) multiarch=riscv64-linux-gnu; deb_arch=riscv64 ;;
+  linux-aarch64) multiarch=aarch64-linux-gnu; deb_arch=aarch64 ;;
+esac
+debs_root=${SIMPLE_CROSS_DEBS_ROOT:-build/cross/$target-root}
+if [ -n "$multiarch" ]; then
+  if [ ! -d "$debs_root/usr/lib/$multiarch" ] && [ -z "${SIMPLE_CROSS_SKIP_DEB_FETCH:-}" ]; then
+    echo "cross-arch-bootstrap: fetching $deb_arch system libraries rootless into $debs_root" >&2
+    if command -v apt-get >/dev/null 2>&1 && command -v dpkg-deb >/dev/null 2>&1 && [ -r /etc/os-release ]; then
+      suite=$(. /etc/os-release && printf '%s' "${VERSION_CODENAME:-}")
+      apt_state=$(mktemp -d "${TMPDIR:-/tmp}/simple-cross-apt.XXXXXX")
+      mkdir -p "$apt_state/lists/partial" "$apt_state/cache/archives/partial" "$apt_state/dpkg"
+      : > "$apt_state/dpkg/status"
+      printf 'Types: deb\nURIs: http://ports.ubuntu.com/ubuntu-ports\nSuites: %s %s-updates\nComponents: main universe\nArchitectures: %s\n' \
+        "$suite" "$suite" "$deb_arch" > "$apt_state/ports.sources"
+      if ( apt-get -o Dir="$apt_state" -o Dir::Etc::SourceList="$apt_state/ports.sources" \
+             -o Dir::State::Lists="$apt_state/lists" -o Dir::Cache="$apt_state/cache" \
+             -o APT::Architecture="$deb_arch" update >/dev/null 2>&1 &&
+           cd "$apt_state/cache/archives" &&
+           apt-get -o Dir="$apt_state" -o Dir::Etc::SourceList="$apt_state/ports.sources" \
+             -o Dir::State::Lists="$apt_state/lists" -o Dir::Cache="$apt_state/cache" \
+             -o APT::Architecture="$deb_arch" download \
+             libsqlite3-dev zlib1g-dev libzstd-dev libncurses-dev \
+             libsqlite3-0 zlib1g libzstd1 libtinfo6 >/dev/null 2>&1 ); then
+        mkdir -p "$debs_root"
+        for deb in "$apt_state"/cache/archives/*.deb; do
+          [ -e "$deb" ] && dpkg-deb -x "$deb" "$debs_root/"
+        done
+        echo "cross-arch-bootstrap: debs extracted to $debs_root" >&2
+      else
+        echo "cross-arch-bootstrap: WARNING rootless deb fetch failed; install $deb_arch libs via 'sudo dpkg --add-architecture $deb_arch' + ports sources (see release.yml linux-riscv64-phase1)" >&2
+      fi
+      rm -rf "$apt_state"
+    else
+      echo "cross-arch-bootstrap: WARNING no apt-get/dpkg-deb here; install $deb_arch link libs via ports (see release.yml linux-riscv64-phase1)" >&2
+    fi
+  fi
+  if [ -d "$debs_root/usr/lib/$multiarch" ]; then
+    SIMPLE_LINK_LIBRARY_PATHS=$(pwd)/$debs_root/usr/lib/$multiarch${SIMPLE_LINK_LIBRARY_PATHS:+:$SIMPLE_LINK_LIBRARY_PATHS}
+    export SIMPLE_LINK_LIBRARY_PATHS
+  fi
+fi
 
 cross_build() { # <entry> <output>
   rm -f "$2"
