@@ -1026,3 +1026,20 @@ not a runtime C bug. The seed-vs-candidate differential probe
 (build/scratch/splitprobe.spl pattern, run via any bootstrap_admission fixture
 temporarily) reproduces it in ~25 s. This is owner-lane codegen debugging with
 a now-minimal reproducer; the fixture was restored clean after probing.
+
+## Correction 2026-10-24 (lane D): probe conclusions retracted - refusal is entry- and construct-independent
+
+Control experiments invalidated the previous annotation's codegen claim:
+- The ORIGINAL hello_world.spl AVs under the same non-delegated invocation as
+  the split probes - the probe AVs were the NON-DELEGATED path crashing on ANY
+  entry (a separate second defect), not split miscompilation.
+- With the full delegated env, split probes (with and without empty fields)
+  fail with the SAME capture refused as p2_add - the refusal is entry- and
+  construct-INDEPENDENT. Any admitted entry + delegated env + warm cache
+  (second build = frontend-cache hit) reproduces the -1 refusal.
+What stands from the prior narrowing: the stored blob is valid (empty pools
+intact), the reader path is source-clean, and the seed runs the split-empty
+probe correctly. The defect is the candidate-compiled DECODE read of blob
+empty-field slots producing -1 handles - module-independent, hit-path-only.
+Minimal repro: build any bootstrap_admission entry twice with the delegated
+env; the second (cache-hit) build refuses at site=text.value item=0.
