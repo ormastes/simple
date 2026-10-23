@@ -700,3 +700,67 @@ export ast_semantic_roots, load_ast_semantic_universe, ast_semantic_closure, ast
 export emit_one_ast_semantic_encoder, emit_ast_semantic_file
 export emit_one_walk, emit_fold_kind_name_fns, emit_fold_file, emit_fold_init
 export generate_folds_into, fold_variant_report
+
+# Restored 2026-10-23: these three were dropped from this file by the merge
+# resolutions 545eb542c2b / e5b290e42a0 while main.spl kept importing them, so
+# `main.spl visitors` and `folds` both failed with
+# `error[E1002]: function prepare_fold_inputs not found` and the HIR visitor
+# could not be regenerated at all. Recovered verbatim from 9bb344bb1cf.
+fn fold_inputs_valid(u: DeclUniverse, dialect: Dialect) -> bool:
+    for carrier in dialect.carriers:
+        val kind = carrier[1]
+        if not u.is_enum(kind) or u.decl_of(kind).variants.len() == 0:
+            print "compiler_schema: refusing empty carrier {dialect.key}.{kind}"
+            return false
+    true
+
+fn prepare_fold_inputs(repo_root: text) -> [DeclUniverse]:
+    """Retain every validated dialect before any output family is written."""
+    var inputs: [DeclUniverse] = []
+    for dialect in all_dialects():
+        val universe = load_dialect(repo_root, dialect)
+        if not fold_inputs_valid(universe, dialect): return []
+        inputs.push(universe)
+    val semantic = load_ast_semantic_universe(repo_root)
+    if not fold_inputs_valid(semantic, dialect_ast()): return []
+    inputs.push(semantic)
+    inputs
+
+
+fn generate_folds_prepared(inputs: [DeclUniverse], out_root: text) -> i64:
+    val dialects = all_dialects()
+    if inputs.len() != dialects.len() + 1: return -1
+    var index = 0
+    for dialect in dialects:
+        if not fold_inputs_valid(inputs[index], dialect): return -1
+        index = index + 1
+    val semantic: DeclUniverse = inputs[dialects.len()]
+    if not fold_inputs_valid(semantic, dialect_ast()): return -1
+    var files = 0
+    index = 0
+    for d in dialects:
+        val u: DeclUniverse = inputs[index]
+        index = index + 1
+        val dir = out_root + "/" + d.out_dir
+        dir_create_all(dir)
+        file_write(dir + "/" + d.out_file, emit_fold_file(u, d))
+        if d.key != "hir":
+            file_write(dir + "/ast_semantic_value.spl", emit_ast_semantic_file(semantic))
+            file_write(dir + "/__init__.spl", emit_fold_init(d))
+        files = files + 1
+    files
+
+
+fn fold_variant_report_prepared(inputs: [DeclUniverse]) -> text:
+    val dialects = all_dialects()
+    if inputs.len() != dialects.len() + 1: return "invalid prepared fold inputs"
+    var out = ""
+    var index = 0
+    for d in dialects:
+        val u: DeclUniverse = inputs[index]
+        index = index + 1
+        out = out + d.key + ": " + "{d_carrier_variant_total(u, d)}" + " carrier variant(s), "
+        out = out + "{d_variant_total(u, d)}" + " total variant(s), "
+        out = out + "{d_emit_order(u, d).len()}" + " walk fn(s)\n"
+    out
+
