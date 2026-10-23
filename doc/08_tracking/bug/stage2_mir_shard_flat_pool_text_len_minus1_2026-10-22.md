@@ -933,3 +933,27 @@ decl/expr/stmt/extend/pending pool arrays must be registered as root
 owners), so scope-referenced strings survive until promote/scope-end.
 Repro: the 9 s p2_add repro on any lane-52+ candidate; the refusal fires
 deterministically in the delegated worker regardless of scope mode.
+
+## Annotation 2026-10-24 (lane D, runtime lead): string reclaim ignores scope_id
+
+Reading rt_core_reclaim_transient_immortal (src/runtime/runtime_native.c:2274)
+with the lane-54 evidence (stream=true gates still refuse): the STRING branch
+computes reclaim solely from the object's flags -
+  reclaim_string = (reserved & RT_CORE_STRING_FLAG_TRANSIENT) != 0 &&
+                   (reserved & RT_CORE_STRING_FLAG_SHARED) == 0;
+- and the scope_id check (`*object_scope != scope_id`) applies ONLY to
+arrays/dicts/enums/closures/floats. A string is therefore reclaimed by ANY
+scope end, including a scope that did not create it, whenever its TRANSIENT
+flag is still set (i.e. it was never promoted). Transient scopes cannot nest
+(begin() returns 0 while one is active), so within a single parse no other
+scope end runs - but the worker's dump reads pool strings whose TRANSIENT
+flag survived from an EARLIER scope in the same process (an earlier module's
+parse, or the driver's scope that handed off the decode), and any subsequent
+scope end frees them regardless of ownership.
+
+Owner-lane fix candidates (runtime): (a) stamp strings with their creating
+scope id and check it in the reclaim loop (mirror the array branch); or
+(b) clear RT_CORE_STRING_FLAG_TRANSIENT at allocation time for strings that
+outlive their creating scope via registry transfer. Verify with the 9 s
+p2_add repro: the delegated worker's first frontend-miss dump must stop
+refusing with stream=true gates.
