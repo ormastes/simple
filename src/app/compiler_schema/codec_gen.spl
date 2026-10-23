@@ -431,24 +431,35 @@ fn _emit_enc(u: CodecUniverse, type_text: text, v: text, indent: text, c: EmitCo
     # state instead of crashing on `.kind` of nil.
     if s.cat == "node" or s.cat == "opaque":
         val callee = if s.cat == "node": enc_fn_name(s.name) else: "hc_enc_opaque_" + _codec_snake(s.name)
-        # @workaround bug=a174_struct_nil_comparison_dispatch_2026_10_16 recover=e458621e87670403385147dd4380acb0b925153d reason=old-producer-record-presence-dispatch
-        val record_presence = s.cat == "opaque" or u.is_struct(s.name)
         # v21 (2026-10-18): bind the node ONCE and use that word for both the
         # presence check and the encode call. The guard-first double read
         # (check, then argument) drew non-nil then ERASED-NIL on
         # module.functions, so the required-entry gate refused EVERY module
         # (p2_add: stores=0 refused=everything) even though every entry was
         # present. The single annotated bind is the codec-pool proven class.
+        #
+        # 2026-10-23: bind into an OPTIONAL local. A DECLARED-TYPED bind
+        # materialises a typed value, and a nil payload faulted inside that
+        # copy-in BEFORE the guard below could run -- SIGSEGV dereferencing
+        # nil's immediate 0x3 at hc_enc_hir_expr_kind+42634
+        # (doc/08_tracking/bug/stage2_sanity_module_path_naming_probe_segv_2026_10_22.md).
+        # An optional local accepts nil legitimately, so there is no copy-in to
+        # fault. It also lets `.?` cover ENUMS as well as structs: the arm this
+        # replaces used `== nil` for enums, which compares against nil's
+        # immediate and is unreliable under staged-native codegen (see
+        # HirCodecWriter.put_i64's note on integer 3). Still exactly ONE read of
+        # the payload, so the v21 failure above does not return; the `!` unwrap
+        # happens only on the branch where presence is already proven.
         val bind_k = c.next()
-        var out = indent + "val enc_node_v" + "{bind_k}" + ": " + _strip_default(s.name).trim() + " = " + v + "\n"
-        out = out + (if record_presence: indent + "if not enc_node_v{bind_k}.?:\n" else: indent + "if enc_node_v{bind_k} == nil:\n")
+        var out = indent + "val enc_node_v" + "{bind_k}" + ": " + _strip_default(s.name).trim() + "? = " + v + "\n"
+        out = out + indent + "if not enc_node_v{bind_k}.?:\n"
         if required_node:
             out = out + indent + "    w.reject(\"missing_required_hir_module_function_entry\")\n"
         else:
             out = out + indent + "    w.put_i64(0)\n"
         out = out + indent + "else:\n"
         out = out + indent + "    w.put_i64(1)\n"
-        out = out + indent + "    " + callee + "(w, enc_node_v{bind_k})\n"
+        out = out + indent + "    " + callee + "(w, enc_node_v{bind_k}!)\n"
         return out
     val k = c.next()
     if s.cat == "opt":
