@@ -17,7 +17,7 @@ use compiler.common.source_root_resolution.{SourceRootResolutionV1}
 use compiler.driver.driver_build.native_source_root_handoff.{
     native_source_root_paths_v1, native_source_root_loaded_owner_error_v1}
 use std.common.crypto.sha256.{sha256_text}
-use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.frontend.{parse_full_frontend, parse_full_frontend_stage4_streaming}
 use compiler.driver.driver_source_loading.{
     driver_set_spec_prelude_entry,
     _driver_module_name_from_path,
@@ -173,12 +173,18 @@ impl CompilerDriver:
             return true
         val module_name = _driver_module_name_from_path(path)
         print "[bootstrap_parse] {path} as {module_name}"
-        self.ctx.modules[module_name] = parse_full_frontend(content, path, module_name, self.ctx.logger)
+        # Streamed scope: the parse's pool strings are scope-owned and promoted
+        # with the module at scope end. The plain unscoped entry leaves them in
+        # the ambient scope, which the delegated frontend worker's transient
+        # reclaim frees before the cache dump (lane-52 capture-trace: the
+        # worker's first frontend-miss dump is the one that refuses with dead
+        # pools; the borrowed/streamed captures are clean).
+        self.ctx.modules[module_name] = parse_full_frontend_stage4_streaming(content, path, module_name, self.ctx.logger)
         self.ctx.sources = self.ctx.sources.push(SourceFile(path: path, content: content, module_name: module_name))
         if module_name.starts_with("compiler.10.frontend.core."):
             val core_alias = "compiler.core." + module_name.substring("compiler.10.frontend.core.".len())
             print "[bootstrap_parse] alias {core_alias}"
-            self.ctx.modules[core_alias] = parse_full_frontend(content, path, core_alias, self.ctx.logger)
+            self.ctx.modules[core_alias] = parse_full_frontend_stage4_streaming(content, path, core_alias, self.ctx.logger)
         true
 
     me parse_bootstrap_default_root(root: text) -> bool:
