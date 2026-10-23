@@ -985,3 +985,20 @@ the hottest struct in the runtime). Candidate (b) (per-scope tracked-object
 lists instead of the single global rt_core_transient_heap_scope_objects) is
 the layout-preserving alternative. Both are owner-lane runtime changes; the
 compiler side remains fully contained as of lane 55.
+
+## Annotation 2026-10-24 (lane D, lane 56): scope-correct reclaim REFUTED as the sole cure
+
+Implemented the per-entry scope-stamp reclaim (parallel side-table, compaction,
+layout-preserving - work/scope-correct-reclaim-20261024) and verified in a full
+lane with the rebuilt Rust seed: the refusal is unchanged. The cross-scope
+reclaim-free theory is refuted. Combined with lanes 54-55 (refusals inside a
+single scope, pool promotes succeeding), the dead pool arrays/strings die with
+NO reclaim running - the remaining mechanisms are heap corruption (a buffer
+overwrite in the codec/restore path clobbering the pool array backing or string
+headers) or never-valid slots (i64 tags written into text slots at decode).
+Both require runtime heap debugging (guard instrumentation at the refusal
+site) - owner-lane work with runtime tooling. The scope-correct reclaim branch
+is preserved on origin for the owner: it fixes a real cross-scope ownership
+defect per code reading, but it is not the stage2 gate cure. All compiler-side
+hypotheses (14 PRs) and the two reclaim hypotheses are now tested and refuted
+or fixed; the blocker needs heap-level diagnosis.
