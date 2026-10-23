@@ -1361,12 +1361,12 @@ if [ "${target}" = "simpleos-x86_64" ]; then
 fi
 
 # Git Bash exports MSYSTEM and would otherwise select GNU implicitly. The
-# Windows bootstrap default is the clang-cl/MSVC lane; --mingw remains an
-# explicit Clang GNU lane through SIMPLE_WINDOWS_ABI=gnu.
+# Windows bootstrap default is the Clang MinGW UCRT (gnu) lane; MSVC is an
+# explicit opt-in through SIMPLE_WINDOWS_ABI=msvc (--msvc).
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*|Windows*)
     if [ -z "${SIMPLE_WINDOWS_ABI:-}" ]; then
-      SIMPLE_WINDOWS_ABI=msvc
+      SIMPLE_WINDOWS_ABI=gnu
       export SIMPLE_WINDOWS_ABI
     fi
     # Canonical owner prepares once, or validates and reuses a supplied receipt.
